@@ -988,3 +988,16 @@ fn export_media_embeds_closed_captions_in_h264() {
     let e = s.execute("file.exportMedia", json!({"format": "prores", "path": "cc.mov", "embedCaptions": true, "wait": true})).unwrap_err().to_string();
     assert!(e.contains("H.264 or H.265"), "{e}");
 }
+
+/// #1216: `maxThreads` reaches the export settings from the command parameters (CLI, MCP, control
+/// channel), as a flat parameter or inside `settings`.
+#[test]
+fn max_threads_reaches_the_export_settings() {
+    let session = Session::default();
+    let settings_of = |params: Value| crate::export_tools::settings_from_params(&session, &params, "file.exportMedia").map(|(_, s)| s);
+    assert_eq!(settings_of(json!({"format": "mjpeg", "path": "out.mov", "maxThreads": 2})).unwrap().max_threads, 2);
+    assert_eq!(settings_of(json!({"format": "mjpeg", "path": "out.mov", "settings": {"maxThreads": 3}})).unwrap().max_threads, 3);
+    assert_eq!(settings_of(json!({"format": "mjpeg", "path": "out.mov"})).unwrap().max_threads, 0, "all cores unless asked");
+    assert!(settings_of(json!({"format": "mjpeg", "path": "out.mov", "maxThreads": -1})).is_err(), "a negative count is refused");
+    assert!(settings_of(json!({"format": "mjpeg", "path": "out.mov", "settings": {"maxThread": 2}})).is_err(), "a misspelt setting is refused, not ignored");
+}
