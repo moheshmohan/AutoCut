@@ -53,6 +53,15 @@ impl Digest {
         ticks as f64 / filmcraft_time::TICKS_PER_SECOND as f64
     }
 
+    /// The active sequence's frame size in pixels, when the document says.
+    pub fn frame_size(&self) -> Option<(u64, u64)> {
+        let st = &self.sequence["settings"];
+        match (st["width"].as_u64(), st["height"].as_u64()) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+            _ => None,
+        }
+    }
+
     /// A compact, size-capped rendering of the document for model prompts: sequence shape,
     /// transcript text, no per-effect noise.
     pub fn compact(&self) -> Value {

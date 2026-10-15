@@ -87,27 +87,56 @@ async fn remove_fillers(params: &Value, digest: &Digest, ex: &dyn Executor) -> R
 }
 
 async fn add_captions(params: &Value, digest: &Digest, ex: &dyn Executor) -> Result<Plan, AutoCutError> {
-    let mut p = json!({});
-    if let Some(n) = params["maxChars"].as_u64() {
-        p["maxChars"] = json!(n);
-    }
-    if let Some(l) = params["lines"].as_u64() {
-        p["lines"] = json!(l);
-    }
-    let mut steps = vec![PlannedStep::new("transcript.createCaptions", p, "caption track from the transcript")];
-    // the new track lands at index 0, i.e. C1; style presets are tuned at 1080p
     let style = params["style"].as_str().unwrap_or("default");
+    // the new track lands at index 0, i.e. C1; sizes are 1080-line units of the frame's short
+    // side, so a style reads the same on landscape and portrait sequences
     let styling = match style {
-        "tiktok" => json!({"track": "C1", "size": 84, "anchor": "middle", "align": "center", "outline": 6, "margin": 0.06}),
+        "tiktok" => json!({"track": "C1", "size": TIKTOK_SIZE, "anchor": "middle", "align": "center", "outline": 6, "margin": 0.06}),
         "bold" => json!({"track": "C1", "size": 72, "outline": 8}),
         "clean" => json!({"track": "C1", "background": false, "outline": 4}),
         "default" => json!(null),
         other => return Err(AutoCutError::Invalid(format!("caption style `{other}` is not default, tiktok, bold or clean"))),
     };
+    // Chunking. A caption line longer than one rendered line wraps, so `lines: 2` became four
+    // lines of 84 px text on a portrait frame. Cap characters per line at what fits (the local
+    // classifier echoes the documented 42 / 2 defaults, so a stated number cannot be trusted
+    // to be the user's). TikTok style is one short, punchy line.
+    let size = styling["size"].as_f64().unwrap_or(DEFAULT_CAPTION_SIZE);
+    let mut cap = chars_per_line(size, digest);
+    if style == "tiktok" {
+        cap = cap.min(TIKTOK_MAX_CHARS);
+    }
+    let mut p = json!({"maxChars": params["maxChars"].as_u64().unwrap_or(DEFAULT_MAX_CHARS).clamp(1, cap)});
+    if style == "tiktok" {
+        p["lines"] = json!(1);
+    } else if let Some(l) = params["lines"].as_u64() {
+        p["lines"] = json!(l.clamp(1, 2));
+    }
+    let mut steps = vec![PlannedStep::new("transcript.createCaptions", p, "caption track from the transcript")];
     if !styling.is_null() {
         steps.push(PlannedStep::new("captions.setStyle", styling, format!("the `{style}` caption style")));
     }
     with_transcript(digest, ex, steps).await
+}
+
+/// The caption style's default size (`CaptionStyle::default()`), in 1080-line units.
+const DEFAULT_CAPTION_SIZE: f64 = 54.0;
+/// `transcript.createCaptions`' default characters per line.
+const DEFAULT_MAX_CHARS: u64 = 42;
+/// The TikTok style's size and its longest line.
+const TIKTOK_SIZE: f64 = 84.0;
+const TIKTOK_MAX_CHARS: u64 = 24;
+
+/// How many characters one rendered caption line holds at `size` on the active sequence's
+/// frame without wrapping: the burn-in wraps at 90% of the width, sizes are 1080-line units
+/// of the short side, and the caption face averages under 0.52 em per character (measured
+/// ~0.48 on real captions).
+fn chars_per_line(size: f64, digest: &Digest) -> u64 {
+    let (w, h) = digest.frame_size().unwrap_or((1920, 1080));
+    let short = w.min(h).max(1) as f64;
+    let width_units = 1080.0 * w as f64 / short;
+    let fit = (0.9 * width_units / (0.52 * size.max(1.0))).floor();
+    if fit.is_finite() { fit.clamp(8.0, 120.0) as u64 } else { DEFAULT_MAX_CHARS }
 }
 
 /// `markers.markIn` + `markers.markOut` + `sequence.extract`/`lift` + `markers.clearInOut`.

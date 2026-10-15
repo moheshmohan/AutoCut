@@ -1,7 +1,8 @@
 //! Caption layout and burn-in.
 //!
 //! [`overlay`] lays out the caption showing on a track at a time with the track's
-//! [`CaptionStyle`] (size relative to a 1080-line frame, colour, background box, outline,
+//! [`CaptionStyle`] (size relative to a 1080-line frame — its short side, so portrait frames
+//! size like landscape ones —, colour, background box, outline,
 //! alignment, anchor and margin; WebVTT `line:N%` and `align:` cue settings override the style)
 //! and rasterises it into a small premultiplied linear-light RGBA [`Overlay`] positioned in the
 //! frame. Renderers composite overlays over the finished picture.
@@ -109,7 +110,10 @@ pub fn render_caption(c: &Caption, style: &CaptionStyle, w: usize, h: usize) -> 
     if w == 0 || h == 0 {
         return None;
     }
-    let scale = h as f32 / 1080.0;
+    // sizes are in 1080-line units of the frame's short side: the height of a landscape
+    // frame (as before), the width of a portrait one — scaling a 1080x1920 frame by its
+    // height made TikTok-style captions ~1.8x too big, a wall of text
+    let scale = w.min(h) as f32 / 1080.0;
     let px = (style.size * scale).max(4.0);
     let max_w = w as f32 * 0.9;
     let ts = caption_style(&style.font, px);
@@ -294,6 +298,20 @@ mod tests {
         let mut canvas = vec![0.0f32; 640 * 360 * 4];
         o.composite_onto(&mut canvas, 640, 360);
         assert!(canvas.chunks(4).any(|p| p[0] > 0.9));
+    }
+
+    #[test]
+    fn portrait_frames_size_captions_like_landscape() {
+        // regression: scale followed the frame height, so on 1080x1920 a size-84 caption came
+        // out ~150 px and a 20-character line wrapped into several
+        let st = CaptionStyle { size: 84.0, outline: 6.0, anchor: CaptionAnchor::Middle, ..Default::default() };
+        let land = render_caption(&cap("a company called Ann"), &st, 1920, 1080).unwrap();
+        let port = render_caption(&cap("a company called Ann"), &st, 1080, 1920).unwrap();
+        assert_eq!(land.h, port.h, "same glyph size and line count");
+        // one line: the box is shorter than two line heights
+        assert!((port.h as f32) < 2.0 * 84.0 * st.line_spacing.max(0.8), "wrapped: h {}", port.h);
+        // a square frame sizes like both
+        assert_eq!(render_caption(&cap("a company called Ann"), &st, 1080, 1080).unwrap().h, land.h);
     }
 
     #[test]

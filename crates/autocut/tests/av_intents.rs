@@ -137,8 +137,44 @@ async fn caption_styles_apply_to_the_new_track() {
     let r = run(&ex, "add_captions", json!({"style": "tiktok"})).await;
     let ids: Vec<&str> = r.steps.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(ids, ["transcript.createCaptions", "captions.setStyle"], "{ids:?}");
+    // TikTok-style chunks: one short line (the demo sequence is landscape: the style's cap)
+    assert_eq!(r.steps[0].params, json!({"maxChars": 24, "lines": 1}), "{:?}", r.steps[0]);
     assert_eq!(r.steps[1].params["size"].as_f64(), Some(84.0));
     let styled = ex.execute("captions.list", json!({})).await.unwrap();
     let size = styled["tracks"].as_array().and_then(|t| t.first()).and_then(|t| t["style"]["size"].as_f64()).unwrap_or(0.0);
     assert!((size - 84.0).abs() < 1e-6, "the style landed: {size}");
+}
+
+/// Captions on a portrait sequence are chunked to what one rendered line holds there — even
+/// when the classifier echoes the documented 42-character / 2-line defaults (live: phi4-mini
+/// did, and every caption burned in as four lines of 84 px text).
+#[tokio::test(flavor = "multi_thread")]
+async fn portrait_captions_fit_one_rendered_line() {
+    let ex = demo();
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let item = seq["video"][0]["items"][0]["item"].as_u64().unwrap();
+    ex.execute("file.newSequence", json!({"name": "Vertical", "width": 1080, "height": 1920, "fromItem": item})).await.unwrap();
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    assert_eq!((seq["settings"]["width"].as_u64(), seq["settings"]["height"].as_u64()), (Some(1080), Some(1920)), "the portrait sequence is active");
+    let clip = &seq["video"][0]["items"][0];
+    let tps = |s: f64| (s * filmcraft_time::TICKS_PER_SECOND as f64).round() as i64;
+    let base = clip["sourceIn"].as_f64().unwrap_or(0.0) / filmcraft_time::TICKS_PER_SECOND as f64 + 0.05;
+    let words: Vec<Value> = [(base, "Alpha"), (base + 0.5, "bravo"), (base + 1.0, "charlie.")]
+        .iter()
+        .map(|(t, w)| json!({"text": w, "start": tps(*t), "end": tps(t + 0.45), "speaker": 0}))
+        .collect();
+    ex.execute("transcript.set", json!({"item": item, "transcript": {"language": "en", "speakers": [{"name": "Speaker 1"}], "words": words}})).await.unwrap();
+    // the live failure: tiktok with the echoed defaults → one line of at most ~22 characters
+    let r = run(&ex, "add_captions", json!({"style": "tiktok", "maxChars": 42, "lines": 2})).await;
+    let tiktok = r.steps[0].params["maxChars"].as_u64().unwrap_or(0);
+    assert!((16..=24).contains(&tiktok), "{:?}", r.steps[0]);
+    assert_eq!(r.steps[0].params["lines"], json!(1));
+    // the default style (54) fits ~34 per line on a 1080-wide frame, two lines as asked
+    let r = run(&ex, "add_captions", json!({"maxChars": 42, "lines": 2})).await;
+    let plain = r.steps[0].params["maxChars"].as_u64().unwrap_or(0);
+    assert!((28..=36).contains(&plain), "{:?}", r.steps[0]);
+    assert_eq!(r.steps[0].params["lines"], json!(2));
+    // a shorter ask than the cap is kept
+    let r = run(&ex, "add_captions", json!({"maxChars": 16})).await;
+    assert_eq!(r.steps[0].params["maxChars"], json!(16));
 }
