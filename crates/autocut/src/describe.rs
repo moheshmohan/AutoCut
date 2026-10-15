@@ -21,7 +21,7 @@ fn one_sentence(reply: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let end = trimmed.find(|c: char| c == '.' || c == '!' || c == '?').map(|i| i + 1).unwrap_or(trimmed.len());
+    let end = trimmed.find(['.', '!', '?']).map(|i| i + 1).unwrap_or(trimmed.len());
     let mut s = trimmed[..end].trim().to_string();
     if s.len() > 200 {
         s.truncate(200);
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn first_sentence_of_the_reply() {
         assert_eq!(one_sentence("\nThe image presents a serene sunset. More text follows.").as_deref(), Some("The image presents a serene sunset."));
-        assert_eq!(one_sentence("   ").is_none(), true);
+        assert!(one_sentence("   ").is_none());
         assert!(one_sentence("ok").is_none(), "too short to be a caption");
         let long = one_sentence(&format!("{}.", "word ".repeat(100))).unwrap();
         assert!(long.len() <= 200);

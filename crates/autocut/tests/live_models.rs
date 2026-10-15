@@ -12,7 +12,7 @@ use filmcraft_autocut::describe;
 use filmcraft_autocut::intent;
 use filmcraft_autocut::llm::ChatModel as _;
 use filmcraft_autocut::ollama::Ollama;
-use filmcraft_autocut::{Executor as _, SessionExecutor};
+use filmcraft_autocut::SessionExecutor;
 use filmcraft_engine::Session;
 use serde_json::json;
 
