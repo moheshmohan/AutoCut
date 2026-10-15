@@ -180,6 +180,39 @@ pub struct ControlParams {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct PhotosSearchParams {
+    /// Words matched against filenames, case-insensitively (Google has no free-text search).
+    #[serde(default)]
+    pub query: Option<String>,
+    /// A Google content category: PEOPLE, ANIMALS, FOOD, LANDSCAPES, CITYSCAPES, SELFIES, SPORT, TRAVEL, NIGHT, WEDDINGS, BIRTHDAYS, SCREENSHOTS, …
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Inclusive start date, YYYY-MM-DD.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Exclusive end date, YYYY-MM-DD.
+    #[serde(default)]
+    pub before: Option<String>,
+    /// An album id from googlephotos_browse.
+    #[serde(default)]
+    pub album: Option<String>,
+    /// Stop after this many (default 25).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PhotosAddParams {
+    /// Media item ids from googlephotos_search.
+    pub ids: Vec<String>,
+}
+
+/// Signed-in Google Photos, or the tool-shaped setup error.
+fn gphotos() -> Result<filmcraft_gphotos::GooglePhotos, AutomationError> {
+    filmcraft_gphotos::GooglePhotos::configured().map_err(|e| AutomationError::Other(e.to_string()))
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct AutocutParams {
     /// What to do, in plain words, e.g. "remove the silences and add captions" or "cut 10 to 25 seconds".
     pub prompt: String,
@@ -525,6 +558,86 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Google Photos: browse albums",
+        description = "The user's Google Photos albums (id, title, item count). Pass an album id to googlephotos_search's `album`. One-time setup: run `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn googlephotos_browse(&self) -> Result<CallToolResult, McpError> {
+        let gp = match gphotos() {
+            Ok(gp) => gp,
+            Err(e) => return Ok(fail(e)),
+        };
+        let r = tokio::task::spawn_blocking(move || gp.albums()).await.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        wrap(r.map(Value::Array).map_err(|e| AutomationError::Other(e.to_string())))
+    }
+
+    #[tool(
+        title = "Google Photos: search media",
+        description = "Search the user's Google Photos; returns {id, filename, mimeType, kind (photo|video), created}. Google filters server-side by category/date/album only — the free-text `query` matches filenames locally, so combine a category with filename words. Use the ids with googlephotos_add.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn googlephotos_search(&self, Parameters(p): Parameters<PhotosSearchParams>) -> Result<CallToolResult, McpError> {
+        let gp = match gphotos() {
+            Ok(gp) => gp,
+            Err(e) => return Ok(fail(e)),
+        };
+        let s = filmcraft_gphotos::api::Search {
+            query: p.query,
+            category: p.category,
+            after: p.after,
+            before: p.before,
+            album: p.album,
+            limit: p.limit.unwrap_or(25),
+        };
+        // the search itself is blocking HTTP; keep it off the async threads
+        let r = tokio::task::spawn_blocking(move || gp.search(&s)).await.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        wrap(r.map(Value::Array).map_err(|e| AutomationError::Other(e.to_string())))
+    }
+
+    #[tool(
+        title = "Google Photos: add to the project",
+        description = "Download the named media originals (cached under the app's data dir — instant the second time) and import them into the open project with file.import. Use the ids from googlephotos_search. Videos download whole, so they can take a while.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn googlephotos_add(&self, Parameters(p): Parameters<PhotosAddParams>) -> Result<CallToolResult, McpError> {
+        let gp = match gphotos() {
+            Ok(gp) => gp,
+            Err(e) => return Ok(fail(e)),
+        };
+        if p.ids.is_empty() {
+            return Ok(fail("no media item ids given"));
+        }
+        let (paths, downloaded, errors) = match tokio::task::spawn_blocking(move || -> (Vec<String>, usize, Vec<String>) {
+            let mut paths = Vec::new();
+            let mut downloaded = 0usize;
+            let mut errors = Vec::new();
+            for id in &p.ids {
+                match gp.item(id).and_then(|item| {
+                    let was_cached = filmcraft_gphotos::cache::cached_path(&item).is_some_and(|c| c.is_file());
+                    let path = gp.local_copy(&item)?;
+                    downloaded += usize::from(!was_cached);
+                    Ok(path.to_string_lossy().into_owned())
+                }) {
+                    Ok(path) => paths.push(path),
+                    Err(e) => errors.push(format!("{id}: {e}")),
+                }
+            }
+            (paths, downloaded, errors)
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => return Ok(fail(format!("internal error: {e}"))),
+        };
+        let imported = self.run("file.import", json!({"paths": paths.clone()})).await.ok();
+        let v = json!({
+            "imported": imported, "paths": paths, "downloaded": downloaded,
+            "failed": errors,
+        });
+        Ok(if errors.is_empty() { ok_json(&v) } else { CallToolResult::error(vec![Content::text(v.to_string())]) })
+    }
+
+    #[tool(
         title = "Render a frame",
         description = "Render the active sequence's frame (at `seconds` or the playhead) and return it as PNG.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -699,7 +812,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_browse`/`googlephotos_search`/`googlephotos_add` search the user's Google Photos and import items into the project (after the one-time `filmcraft-cli photos auth`).";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";

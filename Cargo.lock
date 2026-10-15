@@ -1810,6 +1810,7 @@ dependencies = [
  "base64 0.22.1",
  "filmcraft-autocut",
  "filmcraft-engine",
+ "filmcraft-gphotos",
  "filmcraft-time",
  "image",
  "rmcp",
@@ -1871,6 +1872,7 @@ dependencies = [
  "filmcraft-codecs",
  "filmcraft-engine",
  "filmcraft-export",
+ "filmcraft-gphotos",
  "filmcraft-gpu",
  "filmcraft-media",
  "filmcraft-mpegts",
@@ -2083,6 +2085,19 @@ dependencies = [
  "filmcraft-time",
  "pollster 0.4.0",
  "wgpu",
+]
+
+[[package]]
+name = "filmcraft-gphotos"
+version = "0.8.0"
+dependencies = [
+ "filmcraft-engine",
+ "rustls",
+ "rustls-rustcrypto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]

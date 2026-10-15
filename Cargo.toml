@@ -60,6 +60,7 @@ filmcraft-engine = { path = "crates/engine" }
 filmcraft-ui-egui = { path = "crates/ui-egui" }
 filmcraft-automation = { path = "crates/automation" }
 filmcraft-autocut = { path = "crates/autocut" }
+filmcraft-gphotos = { path = "crates/gphotos" }
 filmcraft-platform = { path = "crates/platform" }
 filmcraft-testkit = { path = "crates/testkit" }
 

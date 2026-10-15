@@ -1,0 +1,19 @@
+[package]
+name = "filmcraft-gphotos"
+description = "Google Photos for the editor: OAuth (installed-app flow), Library API browsing/search, and an import cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+filmcraft-engine = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "json"] }
+rustls = { version = "0.23", default-features = false }
+rustls-rustcrypto = { version = "0.0.2-alpha" }
