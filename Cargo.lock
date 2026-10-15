@@ -1793,6 +1793,7 @@ dependencies = [
  "base64 0.22.1",
  "filmcraft-engine",
  "filmcraft-time",
+ "image",
  "rustls",
  "rustls-rustcrypto",
  "serde",

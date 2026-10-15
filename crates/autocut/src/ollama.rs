@@ -44,23 +44,41 @@ impl Ollama {
         serde_json::from_str(&body).map_err(|e| AutoCutError::Llm(format!("Ollama sent invalid JSON: {e}")))
     }
 
+    /// Plain-prose chat (no JSON forcing): small vision models caption reliably in text, while
+    /// `format: json` pushes some of them into hallucinated metadata. Returns the reply text.
+    pub fn chat_text(&self, system: &str, user: &str, images: &[Vec<u8>]) -> Result<String, AutoCutError> {
+        let body = self.chat_body(system, user, images, false);
+        let text = self.post_chat(&body)?;
+        Ok(text)
+    }
+
     fn chat(&self, system: &str, user: &str, images: &[Vec<u8>]) -> Result<Value, AutoCutError> {
+        let body = self.chat_body(system, user, images, true);
+        let content = self.post_chat(&body)?;
+        extract_json(&content).ok_or_else(|| AutoCutError::Llm(format!("Ollama ({}) did not answer JSON: {}", self.model, truncate(&content, 200))))
+    }
+
+    fn chat_body(&self, system: &str, user: &str, images: &[Vec<u8>], json: bool) -> serde_json::Value {
         let mut message = json!({"role": "user", "content": user});
         if !images.is_empty() {
             message["images"] = Value::Array(images.iter().map(|png| Value::String(crate::b64(png))).collect());
         }
-        let body = json!({
+        json!({
             "model": self.model,
             "stream": false,
-            "format": "json",
+            "format": json.then_some("json"),
             "messages": [{"role": "system", "content": system}, message],
             "options": {"temperature": 0.1}
-        });
+        })
+    }
+
+    fn post_chat(&self, body: &serde_json::Value) -> Result<String, AutoCutError> {
         let url = format!("{}/api/chat", self.host);
-        let resp = self.agent.post(&url).send_json(&body).map_err(|e| AutoCutError::Llm(format!("Ollama ({}) failed: {e}", self.model)))?;
+        let resp = self.agent.post(&url).send_json(body).map_err(|e| AutoCutError::Llm(format!("Ollama ({}) failed: {e}", self.model)))?;
         let mut text = String::new();
         resp.into_body().into_reader().take(1 << 24).read_to_string(&mut text).map_err(|e| AutoCutError::Llm(e.to_string()))?;
-        parse_chat(&text).ok_or_else(|| AutoCutError::Llm(format!("Ollama ({}) did not answer JSON: {}", self.model, truncate(&text, 200))))
+        let v: Value = serde_json::from_str(&text).map_err(|e| AutoCutError::Llm(format!("Ollama sent invalid JSON: {e}")))?;
+        Ok(v["message"]["content"].as_str().unwrap_or_default().to_string())
     }
 }
 

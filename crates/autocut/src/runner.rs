@@ -23,15 +23,18 @@ pub enum Mode {
 pub struct Runners {
     pub local: Box<dyn ChatModel>,
     pub supervisor: Option<Box<dyn ChatModel>>,
+    /// The local vision model, for frame descriptions the supervisor sees. `None` = no eyes.
+    pub vlm: Option<Ollama>,
 }
 
 impl Runners {
-    /// The models the [`Config`] names: the local Ollama model, plus the supervisor when a key
+    /// The models the [`Config`] names: the local Ollama models, plus the supervisor when a key
     /// is configured.
     pub fn from_config(cfg: &Config) -> Self {
         Self {
             local: Box::new(Ollama::new(&cfg.ollama_host, &cfg.llm_model, cfg.http_timeout)),
             supervisor: cfg.anthropic_key.as_deref().map(|k| Box::new(crate::anthropic::Anthropic::new(&cfg.supervisor_model, k)) as Box<dyn ChatModel>),
+            vlm: Some(Ollama::new(&cfg.ollama_host, &cfg.vlm_model, cfg.http_timeout)),
         }
     }
 }
@@ -98,7 +101,8 @@ pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &
         }
     } else if cfg.supervisor_available() {
         let sup = runners.supervisor.as_deref().ok_or_else(|| AutoCutError::Llm("no supervisor configured".into()))?;
-        let sup = supervisor::plan(sup, prompt, &digest.compact(), &registry_digest()).await?;
+        let doc = supervisor_document(runners, ex, &digest).await;
+        let sup = supervisor::plan(sup, prompt, &doc, &registry_digest()).await?;
         report.source = "supervisor";
         report.notes.extend(sup.notes);
         steps = sup.steps;
@@ -114,7 +118,8 @@ pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &
         && !steps.is_empty()
         && let Some(sup) = runners.supervisor.as_deref()
     {
-        match supervisor::review(sup, prompt, &digest.compact(), &steps).await {
+        let doc = supervisor_document(runners, ex, &digest).await;
+        match supervisor::review(sup, prompt, &doc, &steps).await {
             Ok(s) => {
                 report.source = "reviewed";
                 steps = s.steps;
@@ -132,6 +137,23 @@ pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &
         run_steps(&steps, ex, &mut report).await;
     }
     Ok(report)
+}
+
+/// The document the supervisor plans from: the compact digest, plus a few captioned frames
+/// when a local vision model is configured and the target can render — visual context for
+/// prompts about what is on screen. Frame captioning failures degrade silently.
+async fn supervisor_document(runners: &Runners, ex: &dyn Executor, digest: &Digest) -> serde_json::Value {
+    let mut doc = digest.compact();
+    if let Some(vlm) = &runners.vlm {
+        let times = crate::describe::sample_times(digest.duration_seconds().min(120.0), 6);
+        if !times.is_empty()
+            && let Ok(frames) = crate::describe::describe_frames(vlm, ex, &times, 448).await
+            && !frames.is_empty()
+        {
+            doc["frames"] = crate::describe::to_json(&frames);
+        }
+    }
+    doc
 }
 
 /// Run the steps in order (stopping at the first failure), filling in the report.
@@ -184,7 +206,7 @@ mod tests {
     }
 
     fn classified(intent: &str, params: serde_json::Value) -> Runners {
-        Runners { local: Box::new(FixedModel::new(vec![json!({"intent": intent, "confidence": 0.95, "params": params})])), supervisor: None }
+        Runners { local: Box::new(FixedModel::new(vec![json!({"intent": intent, "confidence": 0.95, "params": params})])), supervisor: None, vlm: None }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -221,6 +243,7 @@ mod tests {
             supervisor: Some(Box::new(FixedModel::new(vec![
                 json!({"steps": [{"id": "sequence.addEditAllTracks", "params": {"seconds": 2.0}, "why": "test"}], "notes": []}),
             ]))),
+            vlm: None,
         };
         let mut c = cfg(Policy::ComplexOnly);
         c.anthropic_key = Some("test-key".into());
@@ -236,6 +259,7 @@ mod tests {
         let sup = Runners {
             local: Box::new(FixedModel::new(vec![json!({"intent": "add_captions", "confidence": 0.2})])),
             supervisor: Some(Box::new(FixedModel::new(vec![json!({"steps": [], "notes": ["no audio to caption"]})]))),
+            vlm: None,
         };
         let mut c = cfg(Policy::ComplexOnly);
         c.anthropic_key = Some("test-key".into());

@@ -15,6 +15,7 @@
 
 pub mod anthropic;
 pub mod config;
+pub mod describe;
 pub mod digest;
 pub mod highlight;
 pub mod intent;
@@ -38,10 +39,20 @@ use serde_json::Value;
 pub trait Executor: Send + Sync {
     /// Run one engine command by id; the future resolves to its result value.
     fn execute(&self, id: &str, params: Value) -> ExecFuture;
+
+    /// The program frame at `seconds` as PNG bytes (longest side ≤ `max_side`); backends that
+    /// cannot render (a bridge without the UI tools) return `None`, and visual features
+    /// degrade instead of failing.
+    fn render(&self, _seconds: f64, _max_side: u32) -> RenderFuture {
+        Box::pin(async move { None })
+    }
 }
 
 /// The future [`Executor::execute`] returns.
 pub type ExecFuture = Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>;
+
+/// The future [`Executor::render`] returns.
+pub type RenderFuture = Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send + 'static>>;
 
 /// [`Executor`] over a shared headless session (the same one the MCP server and the CLI use).
 #[derive(Clone)]
@@ -68,6 +79,34 @@ impl Executor for SessionExecutor {
             .map_err(|e| format!("internal error: {e}"))?
         })
     }
+
+    fn render(&self, seconds: f64, max_side: u32) -> RenderFuture {
+        let s = self.0.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let g = s.lock().unwrap_or_else(PoisonError::into_inner);
+                let (w, h) = g.active_sequence().map(|q| (q.settings.width, q.settings.height))?;
+                let scale = (max_side as f32 / w.max(h).max(1) as f32).min(1.0);
+                let img = g.try_render_program_at(scale, filmcraft_time::Tick::from_seconds_f64(seconds)).ok()?;
+                png(img.w as u32, img.h as u32, img.over_black_rgba8(), max_side)
+            })
+            .await
+            .ok()
+            .flatten()
+        })
+    }
+}
+
+/// Encode RGBA8 as PNG, downscaled so the longest side is at most `max_side`.
+fn png(w: u32, h: u32, rgba: Vec<u8>, max_side: u32) -> Option<Vec<u8>> {
+    let mut img = image::RgbaImage::from_raw(w, h, rgba)?;
+    if max_side > 0 && w.max(h) > max_side {
+        let s = max_side as f32 / w.max(h) as f32;
+        img = image::imageops::resize(&img, ((w as f32 * s) as u32).max(1), ((h as f32 * s) as u32).max(1), image::imageops::FilterType::Triangle);
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(out.into_inner())
 }
 
 /// One planned engine command: what to run and why (the `why` is shown in dry runs and reports).
@@ -198,6 +237,17 @@ mod tests {
         assert_eq!(extract_json(r#"the plan is {"a":"with } brace","b":3} hope it helps"#), Some(json!({"a": "with } brace", "b": 3})));
         assert_eq!(extract_json("no json here"), None);
         assert_eq!(extract_json(r#"{"unclosed": 1"#), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_executor_renders_png_frames() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", serde_json::json!({})).unwrap();
+        let ex = SessionExecutor::from(s);
+        let png = ex.render(1.0, 320).await;
+        let png = png.expect("the demo project renders");
+        assert!(png.starts_with(b"\x89PNG"), "PNG magic");
+        assert!(png.len() > 1_000, "a real frame, {} bytes", png.len());
     }
 
     #[tokio::test]

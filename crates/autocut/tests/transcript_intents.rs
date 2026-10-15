@@ -44,7 +44,7 @@ async fn duration(ex: &SessionExecutor) -> f64 {
 }
 
 fn classified(intent: &str, params: Value) -> Runners {
-    Runners { local: Box::new(FixedModel::new(vec![json!({"intent": intent, "confidence": 0.95, "params": params})])), supervisor: None }
+    Runners { local: Box::new(FixedModel::new(vec![json!({"intent": intent, "confidence": 0.95, "params": params})])), supervisor: None, vlm: None }
 }
 
 fn cfg() -> Config {
