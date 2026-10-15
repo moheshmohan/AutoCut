@@ -36,7 +36,7 @@ pub async fn plan(intent: &str, params: &Value, digest: &Digest, ex: &dyn Execut
 }
 
 /// Whether the sequence already has stitched transcript words.
-fn has_words(digest: &Digest) -> bool {
+pub(crate) fn has_words(digest: &Digest) -> bool {
     digest.transcript.as_ref().and_then(|t| t["words"].as_array()).is_some_and(|w| !w.is_empty())
 }
 

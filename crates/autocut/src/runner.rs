@@ -107,14 +107,12 @@ pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &
             }
             Plan::GenerateThen { generate, params } => {
                 // transcript-dependent planning (highlight reel): transcribe, re-read, plan again
-                if opts.mode == Mode::Execute {
-                    run_steps(std::slice::from_ref(&generate), ex, &mut report).await;
-                } else {
+                if opts.mode != Mode::Execute {
                     report.steps = vec![generate];
                     report.notes.push("dry run stops before the transcript exists; run it to see the full plan".into());
                     return Ok(report);
                 }
-                let digest = Digest::read(ex).await?;
+                let digest = transcribe(&generate, ex, &mut report).await?;
                 match planner::plan("highlight_reel", &params, &digest, ex).await? {
                     Plan::Steps { steps: s, notes } => {
                         steps = s;
@@ -156,6 +154,49 @@ pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &
         run_steps(&steps, ex, &mut report).await;
     }
     Ok(report)
+}
+
+/// How long to wait for a transcription that outlived the app's reply limit.
+const TRANSCRIBE_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// How often to look for its words meanwhile.
+const TRANSCRIBE_POLL: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 10 } else { 3000 });
+
+/// Run `generate` (`transcript.generate`) and return the re-read document with its words.
+/// Over the bridge a long transcription outlasts the app's 60 s reply limit: the call answers
+/// "timeout" while the app keeps transcribing, so a timeout means "wait for the words" — not
+/// a failure, and not something to plan around before the words exist. Other errors stop.
+async fn transcribe(generate: &PlannedStep, ex: &dyn Executor, report: &mut Report) -> Result<Digest, AutoCutError> {
+    let started = std::time::Instant::now();
+    match ex.execute(&generate.id, generate.params.clone()).await {
+        Ok(_) => {}
+        Err(e) if is_reply_timeout(&e) => loop {
+            tokio::time::sleep(TRANSCRIBE_POLL).await;
+            // the app may still be busy: a failed read is another poll, not an error
+            if let Ok(d) = Digest::read(ex).await
+                && planner::has_words(&d)
+            {
+                report
+                    .notes
+                    .push(format!("transcription outlasted the app's reply limit; waited for it to finish ({:.0}s in all)", started.elapsed().as_secs_f64()));
+                return Ok(d);
+            }
+            if started.elapsed() >= TRANSCRIBE_WAIT {
+                return Err(AutoCutError::Transcript(format!(
+                    "transcription was still running after {} minutes; run the prompt again once the app shows a transcript",
+                    TRANSCRIBE_WAIT.as_secs() / 60
+                )));
+            }
+        },
+        Err(e) => return Err(AutoCutError::Transcript(format!("transcription failed: {e}"))),
+    }
+    Digest::read(ex).await
+}
+
+/// Whether an executor error is a reply timeout (the app is still working), as the bridge
+/// reports them: `app: timeout` (the control server's limit) or `bridge: timeout`.
+fn is_reply_timeout(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    e.contains("timeout") || e.contains("timed out")
 }
 
 /// Run the steps in order (stopping at the first failure), filling in the report.
@@ -275,5 +316,85 @@ mod tests {
     fn edit_commands_are_counted_for_undo() {
         assert!(is_edit("sequence.extract"));
         assert!(!is_edit("sequence.inspect"));
+    }
+
+    /// Plays the app over the bridge: `transcript.generate` answers "app: timeout" (the control
+    /// server's reply limit) while transcription goes on; the words appear a few polls later.
+    #[derive(Clone)]
+    struct SlowTranscriber {
+        inner: SessionExecutor,
+        polls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        words_after: u32,
+        generate_error: &'static str,
+        transcript: serde_json::Value,
+    }
+    impl Executor for SlowTranscriber {
+        fn execute(&self, id: &str, params: serde_json::Value) -> crate::ExecFuture {
+            let me = self.clone();
+            let id = id.to_string();
+            Box::pin(async move {
+                match id.as_str() {
+                    // this build has no Whisper; the fake app does
+                    "command.list" if params["filter"] == json!("transcript.generate") => Ok(json!([{"id": "transcript.generate", "enabled": true}])),
+                    "transcript.generate" => Err(me.generate_error.to_string()),
+                    "transcript.inspect" => {
+                        let n = me.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        if n == me.words_after {
+                            me.inner.execute("transcript.set", me.transcript.clone()).await?;
+                        }
+                        me.inner.execute(&id, params).await
+                    }
+                    _ => me.inner.execute(&id, params).await,
+                }
+            })
+        }
+    }
+
+    async fn slow_transcriber(generate_error: &'static str) -> SlowTranscriber {
+        let inner = demo();
+        let seq = inner.execute("sequence.inspect", json!({})).await.unwrap();
+        let clip = &seq["video"][0]["items"][0];
+        let item = clip["item"].as_u64().unwrap();
+        let base = clip["sourceIn"].as_f64().unwrap_or(0.0) / filmcraft_time::TICKS_PER_SECOND as f64;
+        let tps = |s: f64| (s * filmcraft_time::TICKS_PER_SECOND as f64).round() as i64;
+        // two sentences, far enough apart that a 1 s highlight keeps one and cuts the rest
+        let words: Vec<serde_json::Value> = [(0.1, "Hello"), (0.5, "there."), (2.5, "Second"), (2.9, "sentence.")]
+            .iter()
+            .map(|(t, w)| json!({"text": w, "start": tps(base + t), "end": tps(base + t + 0.35), "speaker": 0}))
+            .collect();
+        let transcript = json!({"item": item, "transcript": {"language": "en", "speakers": [{"name": "Speaker 1"}], "words": words}});
+        SlowTranscriber { inner, polls: Default::default(), words_after: 4, generate_error, transcript }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_transcription_timeout_waits_for_the_words() {
+        // regression: the app's reply timeout was reported as "`transcript.generate` failed:
+        // app: timeout; stopping" and planning raced the still-running transcription
+        let ex = slow_transcriber("app: timeout").await;
+        let r = run_with(&classified("highlight_reel", json!({"targetSeconds": 1})), "highlight reel", &ex, &cfg(), Options::execute()).await.unwrap();
+        assert!(!r.notes.iter().any(|n| n.contains("stopping")), "{:?}", r.notes);
+        assert!(r.notes.iter().any(|n| n.contains("waited for it to finish")), "{:?}", r.notes);
+        assert!(ex.polls.load(std::sync::atomic::Ordering::SeqCst) >= 4, "it polled until the words came");
+        assert!(!r.steps.is_empty() && r.steps.iter().all(|s| s.id == "transcript.extract"), "{:?}", r.steps);
+        assert!(r.results.as_ref().is_some_and(|res| res.iter().all(|x| x.ok)), "{:?}", r.results);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_transcription_error_stops_with_the_reason() {
+        let ex = slow_transcriber("app: the whisper model could not be loaded").await;
+        let before = duration(&ex.inner).await;
+        let err = run_with(&classified("highlight_reel", json!({})), "highlight reel", &ex, &cfg(), Options::execute()).await.unwrap_err();
+        assert!(err.to_string().contains("could not be loaded"), "{err}");
+        assert_eq!(duration(&ex.inner).await, before, "nothing was cut");
+    }
+
+    #[test]
+    fn reply_timeouts_are_recognized() {
+        for t in ["app: timeout", "bridge: timeout", "request timed out", "Timeout"] {
+            assert!(is_reply_timeout(t), "{t}");
+        }
+        for f in ["app: no such command", "transcription failed", ""] {
+            assert!(!is_reply_timeout(f), "{f}");
+        }
     }
 }

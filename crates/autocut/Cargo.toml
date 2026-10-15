@@ -17,7 +17,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "time"] }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "json"] }
 rustls = { version = "0.23", default-features = false }
 rustls-rustcrypto = { version = "0.0.2-alpha" }
