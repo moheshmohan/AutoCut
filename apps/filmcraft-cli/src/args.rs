@@ -23,6 +23,7 @@ const VALUED: &[&str] = &[
     "--max-items",
     "--timeout",
     "--session",
+    "--auto",
 ];
 
 #[derive(Debug, Default)]

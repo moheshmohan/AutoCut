@@ -107,12 +107,16 @@ SUBCOMMANDS
                                 AUTOCUT_CONFIDENCE_THRESHOLD
   photos auth                    sign in to Google Photos (browser consent, one time; needs
                                  client_secret.json from Google Cloud — see crates/gphotos/README.md)
-  photos pick [--max-items n] [--timeout secs] [--session id] [--no-browser]
+  photos pick [--auto query] [--max-items n] [--timeout secs] [--session id] [--no-browser]
                                  open the Google Photos picker in the browser, wait (default
                                  600 s, at most 3600) for your selection, download it into the
                                  cache and import it; --demo/--project/--bridge choose the
                                  target. A timed-out wait prints the session id: --session
-                                 resumes it. (Google offers no search: you choose in the picker.)
+                                 resumes it. With --auto <query>, a local vision agent
+                                 (Qwen2.5-VL via Ollama) drives the picker itself: it types
+                                 the query into the picker's search, selects matching videos
+                                 and presses Done (needs `ollama pull qwen2.5vl:7b`, Screen
+                                 Recording and Accessibility for this terminal).
   photos cached [--json]         list the Google Photos originals already downloaded
   photos add <mediaItemId>...    import already-downloaded items again (ids from `photos cached`)
   bench-decode <media> [--frames N]
@@ -349,21 +353,43 @@ async fn cli() {
                     let parse_num = |k: &str| -> Option<u64> {
                         a.opt(k).map(|v| v.parse::<u64>().unwrap_or_else(|_| usage(format!("photos pick: {k} wants a whole number, not `{v}`"))))
                     };
+                    let auto = a.opt("--auto").map(str::to_string);
+                    if auto.is_some() && a.flag("--no-browser") {
+                        usage("photos pick: --auto drives the picker in a browser itself; drop --no-browser");
+                    }
                     let opts = filmcraft_gphotos::PickOptions {
                         max_items: parse_num("--max-items").map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
-                        wait: std::time::Duration::from_secs(parse_num("--timeout").unwrap_or(600)),
+                        wait: std::time::Duration::from_secs(parse_num("--timeout").unwrap_or(if auto.is_some() { 900 } else { 600 })),
                         resume: a.opt("--session").map(str::to_string),
                         open_browser: !a.flag("--no-browser"),
                     };
                     // the import target first, so a bad --project/--bridge fails before the user picks
                     let mut b = Backend::open(&a);
                     // blocking HTTP and sleeps: keep them off the async runtime
-                    let outcome = tokio::task::spawn_blocking(move || gp.pick(&opts, &mut |line| diag(format_args!("{line}"))))
-                        .await
-                        .unwrap_or_else(|e| fail(format!("photos pick: {e}")))
-                        .unwrap_or_else(|e| fail(format!("photos pick: {e}")));
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        let prepared = gp.prepare(&opts, &mut |line| diag(format_args!("{line}")))?;
+                        // with --auto, a local vision agent (Qwen2.5-VL via Ollama) drives the
+                        // picker: it types the query, clicks matching video tiles, presses Done
+                        let agent = auto.map(|q| filmcraft_screenagent::agent::spawn(q, opts.max_items.unwrap_or(6)));
+                        let outcome = gp.complete(prepared, opts.wait, &mut |line| diag(format_args!("{line}")));
+                        // the pick outcome is authoritative; the agent's own budget bounds it
+                        outcome.map(|o| (o, agent))
+                    })
+                    .await
+                    .unwrap_or_else(|e| fail(format!("photos pick: {e}")))
+                    .unwrap_or_else(|e| fail(format!("photos pick: {e}")));
+                    let (outcome, agent) = outcome;
                     let picked = match outcome {
-                        filmcraft_gphotos::PickOutcome::Done(p) => p,
+                        filmcraft_gphotos::PickOutcome::Done(p) => {
+                            if let Some(h) = agent {
+                                match h.join() {
+                                    Ok(Ok(s)) => diag(format_args!("photos pick: autopick: {}", s.note)),
+                                    Ok(Err(e)) => diag(format_args!("photos pick: the autopick agent reported: {e}")),
+                                    Err(_) => diag(format_args!("photos pick: the autopick agent thread died")),
+                                }
+                            }
+                            p
+                        }
                         filmcraft_gphotos::PickOutcome::Pending(s) => {
                             outln!("{}", json!({"status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time}));
                             fail(format!("photos pick: no selection yet; finish in the browser, then run `photos pick --session {}`", s.id));

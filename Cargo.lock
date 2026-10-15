@@ -1811,6 +1811,7 @@ dependencies = [
  "filmcraft-autocut",
  "filmcraft-engine",
  "filmcraft-gphotos",
+ "filmcraft-screenagent",
  "filmcraft-time",
  "image",
  "rmcp",
@@ -1881,6 +1882,7 @@ dependencies = [
  "filmcraft-platform",
  "filmcraft-project",
  "filmcraft-render",
+ "filmcraft-screenagent",
  "filmcraft-testkit",
  "filmcraft-time",
  "serde_json",
@@ -2325,6 +2327,20 @@ dependencies = [
  "filmcraft-color",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "filmcraft-screenagent"
+version = "0.8.0"
+dependencies = [
+ "base64 0.22.1",
+ "image",
+ "rustls",
+ "rustls-rustcrypto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]

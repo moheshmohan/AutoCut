@@ -251,7 +251,10 @@ filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-r
 - **Cloud media**: pick photos and videos in the Google Photos picker and import them, from
   the CLI (`filmcraft-cli photos pick`) and over MCP (`googlephotos_pick`) — see
   [crates/gphotos](crates/gphotos/README.md) for the one-time Google Cloud setup and what
-  Google's Picker API can and cannot do.
+  Google's Picker API can and cannot do. With `--auto "query"` (CLI) or `query` (MCP), a
+  local vision agent drives the picker itself — it types the query into the picker's own
+  search, selects matching videos and presses Done ([crates/screenagent](crates/screenagent/README.md);
+  Qwen2.5-VL via Ollama).
 
 <br>
 

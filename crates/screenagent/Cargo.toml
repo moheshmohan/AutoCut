@@ -1,0 +1,20 @@
+[package]
+name = "filmcraft-screenagent"
+description = "Eyes and hands for the agent: screenshot a browser window, ground UI elements with a local vision model, and drive them — used to automate the Google Photos picker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "json"] }
+rustls = { version = "0.23", default-features = false }
+rustls-rustcrypto = { version = "0.0.2-alpha" }

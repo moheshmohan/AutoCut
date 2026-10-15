@@ -192,6 +192,15 @@ pub struct PhotosPickParams {
     /// opening a new picker.
     #[serde(default)]
     pub session: Option<String>,
+    /// When set, a local vision agent drives the picker itself: it types this query into the
+    /// picker's search field, selects matching video tiles (up to max_items or 6), and
+    /// presses Done — no human needed. Requires the Ollama grounding model
+    /// (AUTOCUT_SCREEN_MODEL, default qwen2.5vl:7b — `ollama pull qwen2.5vl:7b`) and Screen
+    /// Recording + Accessibility for the process running this server. The agent is
+    /// best-effort: its report comes back as `autopick` in the result, and the pick itself
+    /// is still authoritative.
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -555,7 +564,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Google Photos: pick and import",
-        description = "Open the Google Photos picker in the user's browser, wait for them to choose photos/videos and press Done, download the picks (cached under the app's data dir) and import them into the open project with file.import. Google offers apps no search or browsing of the library (retired 2025-03-31): the user chooses in the picker, so tell them what to pick. If the wait runs out the result is `status: pending` with a `session` and `pickerUri`; call again with that `session` to keep waiting (with short client tool timeouts, start with wait_seconds 0, then resume). Videos download whole, so they can take a while. One-time setup: `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
+        description = "Open the Google Photos picker in the user's browser, wait for a selection and press Done, download the picks (cached under the app's data dir) and import them into the open project with file.import. Google offers apps no server-side search of the library (retired 2025-03-31): the choice happens in the picker. Either the user chooses (tell them what to pick), or — pass `query` — a local vision agent (Qwen2.5-VL via Ollama) drives the picker itself: it types the query into the picker's own search, selects matching video tiles and presses Done; needs `ollama pull qwen2.5vl:7b` plus Screen Recording and Accessibility for this process, and its report comes back as `autopick`. If the wait runs out the result is `status: pending` with a `session` and `pickerUri`; call again with that `session` to keep waiting (with short client tool timeouts, start with wait_seconds 0, then resume). Videos download whole, so they can take a while. One-time setup: `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
     async fn googlephotos_pick(&self, Parameters(p): Parameters<PhotosPickParams>) -> Result<CallToolResult, McpError> {
@@ -565,22 +574,41 @@ impl FilmcraftMcp {
         };
         let opts = filmcraft_gphotos::PickOptions {
             max_items: p.max_items,
-            wait: std::time::Duration::from_secs(p.wait_seconds.unwrap_or(300)),
+            wait: std::time::Duration::from_secs(p.wait_seconds.unwrap_or(if p.query.is_some() { 900 } else { 300 })),
             resume: p.session.filter(|s| !s.trim().is_empty()),
             open_browser: true,
         };
+        let query = p.query.filter(|q| !q.trim().is_empty());
+        let max_for_agent = p.max_items.unwrap_or(6);
         // blocking HTTP and sleeps: keep them off the async threads
-        let outcome = match tokio::task::spawn_blocking(move || gp.pick(&opts, &mut |_| {})).await {
+        let outcome = match tokio::task::spawn_blocking(move || {
+            let prepared = gp.prepare(&opts, &mut |_| {})?;
+            let agent = query.map(|q| filmcraft_screenagent::agent::spawn(q, max_for_agent));
+            gp.complete(prepared, opts.wait, &mut |_| {}).map(|o| (o, agent))
+        })
+        .await
+        {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => return Ok(fail(e)),
             Err(e) => return Ok(fail(format!("internal error: {e}"))),
         };
+        let (outcome, agent) = outcome;
+        let mut autopick: Value = Value::Null;
         let picked = match outcome {
-            filmcraft_gphotos::PickOutcome::Done(picked) => picked,
+            filmcraft_gphotos::PickOutcome::Done(picked) => {
+                if let Some(h) = agent {
+                    autopick = match h.join() {
+                        Ok(Ok(s)) => serde_json::to_value(&s).unwrap_or(Value::Null),
+                        Ok(Err(e)) => json!({"error": e}),
+                        Err(_) => json!({"error": "the autopick agent thread died"}),
+                    };
+                }
+                picked
+            }
             filmcraft_gphotos::PickOutcome::Pending(s) => {
                 return Ok(ok_json(&json!({
                     "status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time,
-                    "next": "the user has not pressed Done in Google Photos yet; give them pickerUri if the browser did not open, then call googlephotos_pick again with this session",
+                    "next": "no selection is confirmed yet; give the user pickerUri if the browser did not open, then call googlephotos_pick again with this session",
                 })));
             }
         };
@@ -605,6 +633,7 @@ impl FilmcraftMcp {
         let v = json!({
             "status": "done", "items": items, "downloaded": picked.fetched.len().saturating_sub(cached), "cached": cached,
             "failed": picked.failed, "imported": imported.as_ref().ok(), "importError": imported.as_ref().err().map(|e| e.to_string()),
+            "autopick": autopick,
         });
         Ok(if ok { ok_json(&v) } else { CallToolResult::error(vec![Content::text(v.to_string())]) })
     }
@@ -828,7 +857,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker for the user to choose items (Google allows no search), then downloads and imports them; `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`).";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done; `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`).";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -1000,6 +1029,19 @@ mod tests {
         async fn call(&mut self, id: u64, name: &str, arguments: Value) -> Value {
             self.ask(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}})).await
         }
+    }
+
+    /// `googlephotos_pick` exposes the optional autopick `query`; its schema stays offline-checkable.
+    #[test]
+    fn googlephotos_pick_schema_has_query() {
+        let m = FilmcraftMcp::headless(Session::default());
+        let Some(tool) = m.tool_router.get("googlephotos_pick") else { panic!("tool missing") };
+        let schema = Value::Object((*tool.input_schema).clone());
+        let Some(props) = schema["properties"].as_object() else { panic!("schema: {schema}") };
+        assert!(props.contains_key("query"), "properties: {props:?}");
+        assert!(props.contains_key("session"));
+        assert!(props.contains_key("max_items"));
+        assert!(schema["required"].as_array().is_none_or(|r| r.is_empty()), "{schema}");
     }
 
     /// #499: `media_import` takes `paths` (a required array), and forwards `bin` / `image_sequence` to `file.import`.

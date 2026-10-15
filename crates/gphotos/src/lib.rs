@@ -96,6 +96,14 @@ pub enum PickOutcome {
     Pending(PickingSession),
 }
 
+/// A picking session that is open (and, with `open_browser`, already on screen) — the
+/// intermission between [`GooglePhotos::prepare`] and [`GooglePhotos::complete`] where a
+/// caller may drive the picker UI itself.
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    pub session: PickingSession,
+}
+
 impl GooglePhotos {
     /// Load credentials and tokens from the data dir, refreshing the access token if needed.
     pub fn configured() -> Result<Self, GPhotosError> {
@@ -129,6 +137,14 @@ impl GooglePhotos {
     /// cache, and delete the session. `progress` gets one human-readable line per step (the
     /// CLI prints them to stderr; stdout may be a protocol stream, so this never prints).
     pub fn pick(&self, opts: &PickOptions, progress: &mut dyn FnMut(&str)) -> Result<PickOutcome, GPhotosError> {
+        let prepared = self.prepare(opts, progress)?;
+        self.complete(prepared, opts.wait, progress)
+    }
+
+    /// Step one of [`Self::pick`]: open (or resume) a picking session and surface the picker
+    /// link. Split out so a caller can interpose — e.g. let a screen agent drive the picker
+    /// UI between this and [`Self::complete`] — while `pick` remains the one-call form.
+    pub fn prepare(&self, opts: &PickOptions, progress: &mut dyn FnMut(&str)) -> Result<Prepared, GPhotosError> {
         let session = match &opts.resume {
             Some(id) => {
                 let s = self.session(id)?;
@@ -148,8 +164,14 @@ impl GooglePhotos {
                 s
             }
         };
-        let id = session.id.clone();
-        let session = match self.wait_for_selection(session, opts.wait.min(MAX_WAIT)) {
+        Ok(Prepared { session })
+    }
+
+    /// Step two of [`Self::pick`]: wait for the selection within `wait`, download every
+    /// picked item into the cache, and delete the session.
+    pub fn complete(&self, prepared: Prepared, wait: Duration, progress: &mut dyn FnMut(&str)) -> Result<PickOutcome, GPhotosError> {
+        let id = prepared.session.id.clone();
+        let session = match self.wait_for_selection(prepared.session, wait.min(MAX_WAIT)) {
             Ok(Waited::Ready(s)) => s,
             Ok(Waited::OutOfTime(s)) => return Ok(PickOutcome::Pending(s)),
             Ok(Waited::Expired) => {

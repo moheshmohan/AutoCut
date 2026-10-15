@@ -43,6 +43,10 @@ filmcraft-cli photos pick --max-items 5 --timeout 300   # cap the selection and 
 filmcraft-cli photos pick --session <id>                # keep waiting on a timed-out session
 filmcraft-cli photos cached                             # what earlier picks downloaded
 filmcraft-cli photos add <id>… --bridge 127.0.0.1:9876  # import cached items again, no picker
+
+# hands-free: a local vision agent (Qwen2.5-VL via Ollama) drives the picker itself —
+# it types the query into the picker's search, selects matching videos, presses Done
+filmcraft-cli photos pick --auto "beach sunset videos" --max-items 5 --bridge 127.0.0.1:9876
 ```
 
 `photos pick` opens the picker in your default browser (`--no-browser` just prints the link),
@@ -52,8 +56,9 @@ for every other command. Progress goes to stderr; the result JSON (`items`, `dow
 `cached`, `failed`) to stdout.
 
 Over MCP (`filmcraft-cli mcp --demo` / `--bridge`): `googlephotos_pick` (same flow,
-`max_items`, `wait_seconds` default 300, `session` to resume), `googlephotos_cached` and
-`googlephotos_add` (re-import cached items). An agent tells the user what to choose:
+`max_items`, `wait_seconds` default 300, `session` to resume, and `query` for the
+hands-free autopick agent below), `googlephotos_cached` and `googlephotos_add` (re-import
+cached items). Without `query`, an agent tells the user what to choose:
 
 > "add the beach sunset videos from my Google Photos to the project" → the agent says "pick
 > the beach sunset clips in the Google Photos tab that just opened" → `googlephotos_pick
