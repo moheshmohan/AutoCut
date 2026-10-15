@@ -69,8 +69,16 @@ impl ChatModel for Ollama {
         format!("ollama:{}", self.model)
     }
 
-    fn complete_json(&self, system: &str, user: &str, images: &[Vec<u8>]) -> Result<Value, AutoCutError> {
-        self.chat(system, user, images)
+    fn complete_json(&self, system: &str, user: &str, images: &[Vec<u8>]) -> crate::llm::JsonFuture {
+        // blocking HTTP on a blocking thread; Ollama is cheap to clone
+        let me = self.clone();
+        let (system, user, images) = (system.to_string(), user.to_string(), images.to_vec());
+        Box::pin(async move {
+            match tokio::task::spawn_blocking(move || me.chat(&system, &user, &images)).await {
+                Ok(r) => r,
+                Err(e) => Err(AutoCutError::Llm(format!("internal error: {e}"))),
+            }
+        })
     }
 }
 

@@ -48,7 +48,7 @@ pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &
         Report { prompt: prompt.to_string(), intent: None, confidence: None, source: "local", steps: Vec::new(), results: None, undo: None, notes: Vec::new() };
 
     // 1. classify locally; fall back to the supervisor when the local model can't (or is down)
-    let classification = match intent::classify(runners.local.as_ref(), prompt) {
+    let classification = match intent::classify(runners.local.as_ref(), prompt).await {
         Ok(c) => Some(c),
         Err(e) if runners.supervisor.is_some() && cfg.policy != Policy::Never => {
             report.notes.push(format!("the local model couldn't classify ({e}); asking the supervisor"));
@@ -98,7 +98,7 @@ pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &
         }
     } else if cfg.supervisor_available() {
         let sup = runners.supervisor.as_deref().ok_or_else(|| AutoCutError::Llm("no supervisor configured".into()))?;
-        let sup = supervisor::plan(sup, prompt, &digest.compact(), &registry_digest())?;
+        let sup = supervisor::plan(sup, prompt, &digest.compact(), &registry_digest()).await?;
         report.source = "supervisor";
         report.notes.extend(sup.notes);
         steps = sup.steps;
@@ -114,7 +114,7 @@ pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &
         && !steps.is_empty()
         && let Some(sup) = runners.supervisor.as_deref()
     {
-        match supervisor::review(sup, prompt, &digest.compact(), &steps) {
+        match supervisor::review(sup, prompt, &digest.compact(), &steps).await {
             Ok(s) => {
                 report.source = "reviewed";
                 steps = s.steps;

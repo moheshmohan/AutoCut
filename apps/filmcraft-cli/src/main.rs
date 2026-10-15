@@ -94,6 +94,14 @@ SUBCOMMANDS
   probe <media> [--image-sequence]
                                 media info as JSON, with MXF / Ogg / BWF details; with
                                 --image-sequence <media> is the first numbered still of a sequence
+  autocut '<prompt>' [--dry-run]
+                                plan (and run) a natural-language edit with AutoCut: a local
+                                model (Ollama) classifies the prompt, deterministic planners turn
+                                routine intents into engine commands, and complex prompts go to
+                                the cloud supervisor (ANTHROPIC_API_KEY). --dry-run shows the
+                                validated steps without running them. Config: AUTOCUT_LLM_MODEL,
+                                AUTOCUT_VLM_MODEL, AUTOCUT_OLLAMA_HOST, AUTOCUT_POLICY
+                                (never|complex-only|always-review)
   bench-decode <media> [--frames N]
   mcp                           MCP server on stdio (headless, or --bridge to the live app)
   help                          this text
@@ -305,6 +313,49 @@ async fn cli() {
             let f = src.video_frame(filmcraft_media::FrameRequest::full(rate.tick_of(n / 2))).unwrap_or_else(|e| fail(e));
             let (w, h, _) = f.to_linear_f32_decimated(2);
             outln!("½-res linear conversion {w}x{h}: {:.1} ms", t1.elapsed().as_secs_f64() * 1000.0);
+        }
+        "autocut" => {
+            let prompt = a.positionals.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+            if prompt.is_empty() {
+                usage("autocut '<prompt>' [--dry-run]");
+            }
+            let mode = if a.flag("--dry-run") { filmcraft_autocut::runner::Mode::PlanOnly } else { filmcraft_autocut::runner::Mode::Execute };
+            let cfg = filmcraft_autocut::config::Config::from_env();
+            let mut b = Backend::open(&a);
+            let report = match &mut b {
+                Backend::Local(s) => {
+                    // AutoCut plans through an Executor; lend it the session and take it back for --save
+                    let session = std::mem::replace(s, Box::default());
+                    let ex = filmcraft_autocut::SessionExecutor::from(*session);
+                    let r = filmcraft_autocut::runner::run(&prompt, &ex, &cfg, mode).await;
+                    if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
+                        *s = Box::new(inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner));
+                    }
+                    r
+                }
+                Backend::Bridge(_) => {
+                    // a second connection for the planner; the app serves 16, and the original
+                    // stays with `b` for --save
+                    let addr = a.opt("--bridge").unwrap_or_default();
+                    let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
+                    let ex = filmcraft_automation::AutocutExecutor::bridge(client);
+                    filmcraft_autocut::runner::run(&prompt, &ex, &cfg, mode).await
+                }
+            };
+            match report {
+                Ok(r) => {
+                    for n in &r.notes {
+                        diag(format_args!("autocut: {n}"));
+                    }
+                    if let Some(undo) = r.undo {
+                        diag(format_args!("autocut: {undo} undoable edit(s); `exec edit.undo` reverts them"));
+                    }
+                    let v = serde_json::to_value(&r).unwrap_or_default();
+                    print(&a, &v);
+                }
+                Err(e) => fail(format!("autocut: {e}")),
+            }
+            b.finish(&a).await;
         }
         "commands" | "describe" => {
             let mut b = Backend::open(&a);

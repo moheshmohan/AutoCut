@@ -162,7 +162,7 @@ async fn highlight_reel(params: &Value, digest: &Digest, ex: &dyn Executor) -> R
         ensure_can_transcribe(ex).await?;
         return Ok(Plan::GenerateThen { generate: PlannedStep::new("transcript.generate", json!({}), "transcribe the audio first"), params: params.clone() });
     };
-    let target = params["targetSeconds"].as_f64().unwrap_or(60.0).clamp(5.0, 3600.0);
+    let target = params["targetSeconds"].as_f64().unwrap_or(60.0).clamp(1.0, 3600.0);
     let topic = params["topic"].as_str().map(str::to_string);
     let (keep, removals, notes) = highlight::plan(&words, target, topic.as_deref());
     if removals.is_empty() {

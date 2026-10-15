@@ -62,8 +62,8 @@ Intents and their params:
 Times are seconds from the start of the video. Classify, don't plan: pick the single best intent.";
 
 /// Classify `prompt` with the local model.
-pub fn classify(model: &dyn ChatModel, prompt: &str) -> Result<Classification, AutoCutError> {
-    let v = model.complete_json(SYSTEM, prompt, &[])?;
+pub async fn classify(model: &dyn ChatModel, prompt: &str) -> Result<Classification, AutoCutError> {
+    let v = model.complete_json(SYSTEM, prompt, &[]).await?;
     // tolerate a model that double-encodes the object as a string inside its JSON answer
     let parsed: Classification = serde_json::from_value(v.clone()).or_else(|_| {
         extract_json(&v.to_string())
@@ -79,16 +79,16 @@ mod tests {
     use crate::llm::FixedModel;
     use serde_json::json;
 
-    #[test]
-    fn parses_and_normalizes() {
+    #[tokio::test]
+    async fn parses_and_normalizes() {
         let m = FixedModel::new(vec![json!({"intent": "cut_range", "confidence": 1.4, "params": {"start": 10, "end": 20}, "rationale": "cut the intro"})]);
-        let c = classify(&m, "cut out the intro from 10 to 20 seconds").unwrap();
+        let c = classify(&m, "cut out the intro from 10 to 20 seconds").await.unwrap();
         assert_eq!(c.intent, "cut_range");
         assert_eq!(c.confidence, 1.0);
         assert_eq!(c.params["start"], 10);
 
         let m = FixedModel::new(vec![json!({"intent": "make_me_a_movie", "params": null})]);
-        let c = classify(&m, "xyz").unwrap();
+        let c = classify(&m, "xyz").await.unwrap();
         assert_eq!((c.intent.as_str(), c.confidence), ("custom", 0.0));
         assert!(c.params.is_object());
     }

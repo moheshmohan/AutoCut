@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::Engine as _;
+use filmcraft_autocut::Executor as _;
 use filmcraft_engine::Session;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -178,6 +179,25 @@ pub struct ControlParams {
     pub params: Option<Value>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct AutocutParams {
+    /// What to do, in plain words, e.g. "remove the silences and add captions" or "make a 60-second highlight reel about the launch".
+    pub prompt: String,
+    /// Plan only; nothing executes (autocut_plan only, default false).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+}
+
+/// Shared body of the AutoCut tools: run the pipeline and return the report as JSON.
+async fn autocut_report(ex: &AutocutExecutor, prompt: &str, mode: filmcraft_autocut::runner::Mode) -> Result<Value, AutomationError> {
+    let cfg = filmcraft_autocut::config::Config::from_env();
+    let runners = filmcraft_autocut::runner::Runners::from_config(&cfg);
+    filmcraft_autocut::runner::run_with(&runners, prompt, ex, &cfg, mode)
+        .await
+        .map_err(|e| AutomationError::Other(e.to_string()))
+        .and_then(|r| serde_json::to_value(&r).map_err(|e| AutomationError::Other(e.to_string())))
+}
+
 fn ok_json(v: &Value) -> CallToolResult {
     CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(v).unwrap_or_default())])
 }
@@ -194,12 +214,55 @@ fn wrap(r: Result<Value, AutomationError>) -> Result<CallToolResult, McpError> {
     })
 }
 
+/// `Executor` over either MCP backend: the same dispatch `FilmcraftMcp::run` uses, as a
+/// standalone handle AutoCut can plan against.
+#[derive(Clone)]
+pub struct AutocutExecutor(Arc<Backend>);
+
+impl AutocutExecutor {
+    /// A bridge-mode executor over a (cloned) [`BridgeClient`], for callers that already have
+    /// one (the CLI's `--bridge` backend).
+    pub fn bridge(client: BridgeClient) -> Self {
+        Self(Arc::new(Backend::Bridge(Arc::new(client))))
+    }
+}
+
+impl filmcraft_autocut::Executor for AutocutExecutor {
+    fn execute(&self, id: &str, params: Value) -> filmcraft_autocut::ExecFuture {
+        match &*self.0 {
+            Backend::Headless(s) => {
+                let s = s.clone();
+                let id = id.to_string();
+                Box::pin(async move {
+                    tokio::task::spawn_blocking(move || {
+                        // A command that panicked earlier poisoned the lock; the session is still usable.
+                        let mut g = s.lock().unwrap_or_else(PoisonError::into_inner);
+                        g.execute(&id, params).map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| format!("internal error: {e}"))?
+                })
+            }
+            Backend::Bridge(b) => {
+                let b = b.clone();
+                let id = id.to_string();
+                Box::pin(async move { b.execute(&id, params).await.map_err(|e| e.to_string()) })
+            }
+        }
+    }
+}
+
 impl FilmcraftMcp {
     pub fn headless(session: Session) -> Self {
         Self { backend: Arc::new(Backend::Headless(Arc::new(Mutex::new(session)))), tool_router: Self::tool_router() }
     }
     pub fn bridge(addr: &str) -> Result<Self, AutomationError> {
         Ok(Self { backend: Arc::new(Backend::Bridge(Arc::new(BridgeClient::new(addr)?))), tool_router: Self::tool_router() })
+    }
+
+    /// An [`AutocutExecutor`] handle onto this server's backend.
+    pub fn executor(&self) -> AutocutExecutor {
+        AutocutExecutor(self.backend.clone())
     }
 
     pub async fn serve_stdio(self) -> Result<(), AutomationError> {
@@ -261,20 +324,7 @@ impl FilmcraftMcp {
 
     /// Run an engine command on whichever backend.
     pub async fn run(&self, id: &str, params: Value) -> Result<Value, AutomationError> {
-        match &*self.backend {
-            Backend::Headless(s) => {
-                let s = s.clone();
-                let id = id.to_string();
-                tokio::task::spawn_blocking(move || {
-                    // A command that panicked earlier poisoned the lock; the session is still usable.
-                    let mut g = s.lock().unwrap_or_else(PoisonError::into_inner);
-                    g.execute(&id, params).map_err(AutomationError::from)
-                })
-                .await
-                .map_err(join_error)?
-            }
-            Backend::Bridge(b) => b.execute(id, params).await,
-        }
+        self.executor().execute(id, params).await.map_err(AutomationError::Other)
     }
 
     /// The project tree plus the active sequence (null when there is none).
@@ -407,6 +457,25 @@ impl FilmcraftMcp {
     )]
     async fn media_import(&self, Parameters(p): Parameters<MediaImportParams>) -> Result<CallToolResult, McpError> {
         wrap(self.run("file.import", media_import_params(p)).await)
+    }
+
+    #[tool(
+        title = "AutoCut: plan an edit",
+        description = "Turn a plain-language prompt (\"remove the silences\", \"cut 0:10 to 0:25\", \"make a highlight reel about the launch\") into a validated batch of engine commands. Local models classify and plan; complex prompts escalate to the configured cloud supervisor. Dry run: nothing executes.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn autocut_plan(&self, Parameters(p): Parameters<AutocutParams>) -> Result<CallToolResult, McpError> {
+        wrap(autocut_report(&self.executor(), &p.prompt, filmcraft_autocut::runner::Mode::PlanOnly).await)
+    }
+
+    #[tool(
+        title = "AutoCut: edit",
+        description = "Turn a plain-language prompt into engine commands and run them (each an ordinary undoable edit; `edit.undo` reverts). Same planning as autocut_plan, then execution. Configure models with AUTOCUT_* environment variables.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn autocut_edit(&self, Parameters(p): Parameters<AutocutParams>) -> Result<CallToolResult, McpError> {
+        let mode = if p.dry_run.unwrap_or(false) { filmcraft_autocut::runner::Mode::PlanOnly } else { filmcraft_autocut::runner::Mode::Execute };
+        wrap(autocut_report(&self.executor(), &p.prompt, mode).await)
     }
 
     #[tool(
@@ -584,7 +653,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`).";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; they use local models (Ollama) and escalate to the configured cloud supervisor when needed.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -793,7 +862,18 @@ mod tests {
             }
         }
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        for want in ["command_list", "command_run", "command_batch", "doc_inspect", "render_preview", "project_inspect", "render_frame", "ui_click"] {
+        for want in [
+            "command_list",
+            "command_run",
+            "command_batch",
+            "doc_inspect",
+            "render_preview",
+            "project_inspect",
+            "render_frame",
+            "ui_click",
+            "autocut_plan",
+            "autocut_edit",
+        ] {
             assert!(names.contains(&want), "{want} not listed");
         }
         let ro = |n: &str| tools.iter().find(|t| t["name"] == n).map(|t| t["annotations"]["readOnlyHint"].clone());

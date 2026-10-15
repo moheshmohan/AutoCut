@@ -30,29 +30,29 @@ transcript.removeFillers, transcript.createCaptions, transcript.extract, transcr
 - If the request cannot be done with the catalog, say so in `notes` with empty `steps`.";
 
 /// Ask the supervisor to plan a prompt the local planner couldn't.
-pub fn plan(model: &dyn ChatModel, prompt: &str, doc: &Value, registry: &str) -> Result<Supervision, AutoCutError> {
+pub async fn plan(model: &dyn ChatModel, prompt: &str, doc: &Value, registry: &str) -> Result<Supervision, AutoCutError> {
     let user = format!("COMMAND CATALOG (the only commands you may use):\n{registry}\n\nCURRENT DOCUMENT:\n{doc}\n\nUSER REQUEST:\n{prompt}");
-    ask(model, &user)
+    ask(model, &user).await
 }
 
 /// Ask the supervisor to review (and if needed fix) a locally planned batch.
-pub fn review(model: &dyn ChatModel, prompt: &str, doc: &Value, steps: &[PlannedStep]) -> Result<Supervision, AutoCutError> {
+pub async fn review(model: &dyn ChatModel, prompt: &str, doc: &Value, steps: &[PlannedStep]) -> Result<Supervision, AutoCutError> {
     let plan: Vec<Value> = steps.iter().map(|s| json!({"id": s.id, "params": s.params, "why": s.why})).collect();
     let user = format!(
         "CURRENT DOCUMENT:\n{doc}\n\nUSER REQUEST:\n{prompt}\n\nPROPOSED STEPS:\n{}\n\nReview these steps. If they accomplish the request, return them unchanged. If not, return corrected steps.",
         Value::Array(plan)
     );
-    ask(model, &user)
+    ask(model, &user).await
 }
 
 /// One exchange plus, when validation fails, one repair round naming the problems.
-fn ask(model: &dyn ChatModel, user: &str) -> Result<Supervision, AutoCutError> {
-    let first = model.complete_json(SYSTEM, user, &[]).map_err(|e| AutoCutError::Llm(format!("supervisor ({}): {e}", model.id())))?;
+async fn ask(model: &dyn ChatModel, user: &str) -> Result<Supervision, AutoCutError> {
+    let first = model.complete_json(SYSTEM, user, &[]).await.map_err(|e| AutoCutError::Llm(format!("supervisor ({}): {e}", model.id())))?;
     let mut parsed = parse(first);
     let mut errs = problems(&parsed);
     if !errs.is_empty() {
         let repair = format!("{user}\n\nYour previous answer was invalid:\n{}\n\nAnswer again with a corrected JSON object.", errs.join("\n"));
-        let second = model.complete_json(SYSTEM, &repair, &[]).map_err(|e| AutoCutError::Llm(format!("supervisor repair ({}): {e}", model.id())))?;
+        let second = model.complete_json(SYSTEM, &repair, &[]).await.map_err(|e| AutoCutError::Llm(format!("supervisor repair ({}): {e}", model.id())))?;
         parsed = parse(second);
         errs = problems(&parsed);
     }
@@ -121,40 +121,40 @@ mod tests {
         json!({"steps": [{"id": "transcript.removePauses", "params": {"minSeconds": 0.6}, "why": "tight pauses"}], "notes": ["ok"]})
     }
 
-    #[test]
-    fn parses_and_accepts_a_valid_plan() {
+    #[tokio::test]
+    async fn parses_and_accepts_a_valid_plan() {
         let m = FixedModel::new(vec![good()]);
-        let s = plan(&m, "tighten it", &json!({}), "catalog").unwrap();
+        let s = plan(&m, "tighten it", &json!({}), "catalog").await.unwrap();
         assert_eq!(s.steps.len(), 1);
         assert_eq!(s.steps[0].id, "transcript.removePauses");
         assert_eq!(s.notes, ["ok"]);
     }
 
-    #[test]
-    fn repairs_once_then_fails() {
+    #[tokio::test]
+    async fn repairs_once_then_fails() {
         let bad = json!({"steps": [{"id": "not.a.command", "params": {}, "why": ""}]});
         let m = FixedModel::new(vec![bad, good()]);
-        let s = plan(&m, "tighten it", &json!({}), "catalog").unwrap();
+        let s = plan(&m, "tighten it", &json!({}), "catalog").await.unwrap();
         assert_eq!(s.steps[0].id, "transcript.removePauses");
         assert_eq!(m.asked.lock().unwrap().len(), 2, "exactly one repair round");
 
         let worse = FixedModel::new(vec![json!({"steps": [{"id": "still.not", "params": {}}]}), json!({"steps": [{"id": "again.no", "params": {}}]})]);
-        let e = plan(&worse, "x", &json!({}), "catalog").unwrap_err();
+        let e = plan(&worse, "x", &json!({}), "catalog").await.unwrap_err();
         assert!(e.to_string().contains("does not validate"), "{e}");
     }
 
-    #[test]
-    fn empty_steps_with_notes_means_cant() {
+    #[tokio::test]
+    async fn empty_steps_with_notes_means_cant() {
         let m = FixedModel::new(vec![json!({"steps": [], "notes": ["no such effect in the catalog"]})]);
-        let s = plan(&m, "remove the background", &json!({}), "catalog").unwrap();
+        let s = plan(&m, "remove the background", &json!({}), "catalog").await.unwrap();
         assert!(s.steps.is_empty());
         assert_eq!(s.notes.len(), 1);
     }
 
-    #[test]
-    fn bare_array_is_tolerated() {
+    #[tokio::test]
+    async fn bare_array_is_tolerated() {
         let m = FixedModel::new(vec![json!([{"id": "sequence.extract", "params": {}}])]);
-        let s = plan(&m, "x", &json!({}), "catalog").unwrap();
+        let s = plan(&m, "x", &json!({}), "catalog").await.unwrap();
         assert_eq!(s.steps[0].id, "sequence.extract");
     }
 

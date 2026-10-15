@@ -30,7 +30,21 @@ impl ChatModel for Anthropic {
         format!("anthropic:{}", self.model)
     }
 
-    fn complete_json(&self, system: &str, user: &str, _images: &[Vec<u8>]) -> Result<Value, AutoCutError> {
+    fn complete_json(&self, system: &str, user: &str, _images: &[Vec<u8>]) -> crate::llm::JsonFuture {
+        // blocking HTTP on a blocking thread; the client is cheap to clone
+        let me = self.clone();
+        let (system, user) = (system.to_string(), user.to_string());
+        Box::pin(async move {
+            match tokio::task::spawn_blocking(move || me.send(&system, &user)).await {
+                Ok(r) => r,
+                Err(e) => Err(AutoCutError::Llm(format!("internal error: {e}"))),
+            }
+        })
+    }
+}
+
+impl Anthropic {
+    fn send(&self, system: &str, user: &str) -> Result<Value, AutoCutError> {
         let body = json!({
             "model": self.model,
             "max_tokens": self.max_tokens,

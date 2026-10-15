@@ -1807,6 +1807,7 @@ name = "filmcraft-automation"
 version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
+ "filmcraft-autocut",
  "filmcraft-engine",
  "filmcraft-time",
  "image",
@@ -1864,6 +1865,7 @@ version = "0.8.0"
 name = "filmcraft-cli"
 version = "0.8.0"
 dependencies = [
+ "filmcraft-autocut",
  "filmcraft-automation",
  "filmcraft-codecs",
  "filmcraft-engine",
