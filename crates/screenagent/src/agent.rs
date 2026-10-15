@@ -120,8 +120,9 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
     actor.sleep(600);
     let mut cap = actor.capture()?;
 
-    // 1. search, when asked
-    if let Some(q) = plan.query.as_deref().filter(|q| !q.trim().is_empty()) {
+    // 1. search — for videos always, so Google's own filter leaves only videos in the grid
+    if let Some(q) = picker::search_text(plan.query.as_deref(), plan.videos_only) {
+        let q = q.as_str();
         if spend(&mut summary, plan)? || deadline() {
             return Err(budget(&summary));
         }
@@ -387,7 +388,7 @@ mod tests {
         // no tiles anywhere → the loop scrolls, stalls, breaks, and returns with nothing
         let s = drive(&mut a, &g, &plan, &mut |_| {}).unwrap();
         assert!(s.searched);
-        assert_eq!(a.typed, vec!["beach".to_string()]);
+        assert_eq!(a.typed, vec!["beach videos".to_string()]); // Google filters the grid to videos
         assert!(a.returns == 1);
         assert_eq!(s.selected, 0);
         assert!(!s.done_pressed);

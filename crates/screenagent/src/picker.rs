@@ -8,6 +8,22 @@ use crate::ground::Element;
 /// API retired.
 pub const SEARCH_FIELD: &str = "the search field at the top of the picker (an input box, may contain a magnifier icon or placeholder text like 'Search')";
 
+/// What to type into the picker's search. When only videos are wanted the search asks for
+/// them ("<query> videos", or just "videos"): Google's search then filters the grid to
+/// videos, so a tile grounded one position off is still a video. A 7B model on a dense mixed
+/// grid boxed about one video in five a tile too far right — onto a photo — in live tests.
+/// `None`: nothing to search (photos allowed and no query).
+pub fn search_text(query: Option<&str>, videos_only: bool) -> Option<String> {
+    let q = query.map(str::trim).unwrap_or("");
+    if !videos_only {
+        return (!q.is_empty()).then(|| q.to_string());
+    }
+    if q.is_empty() {
+        return Some("videos".into());
+    }
+    Some(if q.to_lowercase().contains("video") { q.to_string() } else { format!("{q} videos") })
+}
+
 /// The confirm button, in the order to try.
 pub const CONFIRM_LABELS: [&str; 4] =
     ["the Done button (top right, blue/enabled when items are selected)", "the Add button", "the Insert button", "the Confirm button"];
@@ -133,6 +149,20 @@ mod tests {
         for no in ["beach", "2024", "13: no", ":", "12-04", "search", "1h02"] {
             assert!(!label_has_duration(no), "{no}");
         }
+    }
+
+    #[test]
+    fn video_searches_ask_google_for_videos() {
+        assert_eq!(search_text(Some("beach sunset"), true).as_deref(), Some("beach sunset videos"));
+        assert_eq!(search_text(Some("  dog  "), true).as_deref(), Some("dog videos"));
+        assert_eq!(search_text(Some("Birthday Videos"), true).as_deref(), Some("Birthday Videos")); // already asks
+        assert_eq!(search_text(Some("my video diary"), true).as_deref(), Some("my video diary"));
+        assert_eq!(search_text(None, true).as_deref(), Some("videos")); // no query: still filter
+        assert_eq!(search_text(Some("   "), true).as_deref(), Some("videos"));
+        // photos allowed: the query as given, or no search at all
+        assert_eq!(search_text(Some("beach"), false).as_deref(), Some("beach"));
+        assert_eq!(search_text(Some(" "), false), None);
+        assert_eq!(search_text(None, false), None);
     }
 
     #[test]

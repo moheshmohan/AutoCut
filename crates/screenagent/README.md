@@ -97,10 +97,13 @@ No model weights are committed to this repository or shipped with any binary.
 ## Honest limits
 
 - The agent is only as good as its eyes: on dense mixed grids a 7B model sometimes boxes
-  a tile one position off, so a photo can be picked for a video (live: about 1 in 5).
-  Searching for "videos" (or "… videos") leaves only videos in the grid and sidesteps it.
-  Every click is verified by pixel-diff and bounded by budget, so a miss costs a retry,
-  not a runaway. It never clicks outside the picker window.
+  a tile one position off (live: about 1 in 5), which on a mixed grid would pick a photo.
+  So when videos are wanted the agent always searches for them — `beach sunset` is typed as
+  `beach sunset videos`, no query as `videos` — and Google's search leaves only videos in
+  the grid (verified live: "handheld console videos", "dubai skyline videos"). Every click
+  is verified by pixel-diff and bounded by budget, so a miss costs a retry, not a runaway.
+  It never clicks outside the picker window.
+- Each run leaves its finished picker tab ("Done!") open in the browser.
 - It moves the real pointer while it works; leave the mouse alone for the minute or two
   it runs.
 - It drives whatever app is frontmost after the picker opens — the caller opens the picker
