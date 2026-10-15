@@ -65,10 +65,9 @@ async fn ensure_can_transcribe(ex: &dyn Executor) -> Result<(), AutoCutError> {
 }
 
 async fn remove_silence(params: &Value, digest: &Digest, ex: &dyn Executor) -> Result<Plan, AutoCutError> {
-    let mut p = json!({});
-    if let Some(min) = params["minSeconds"].as_f64() {
-        p["minSeconds"] = json!(min);
-    }
+    // an explicit threshold: the engine's own default (1.0s) lets half-second dead air through,
+    // which is not what "remove the silences" means to a viewer
+    let mut p = json!({"minSeconds": params["minSeconds"].as_f64().unwrap_or(0.5)});
     if let Some(keep) = params["keepSeconds"].as_f64() {
         p["keepSeconds"] = json!(keep);
     }
