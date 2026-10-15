@@ -19,6 +19,11 @@ HERE="$ROOT/packaging/macos"
 
 ARCH=universal
 SKIP_BUILD=0
+# Product branding: FilmCraft by default; AutoCut builds override via env (the NOTICE reserves
+# the FilmCraft marks, so distributed AutoCut artifacts must not carry them).
+APP_NAME="${AUTOCUT_APP_NAME:-FilmCraft}"
+BUNDLE_ID="${AUTOCUT_BUNDLE_ID:-ai.storyteller.filmcraft}"
+APP_ICON="${AUTOCUT_APP_ICON:-$ROOT/assets/app-icon/filmcraft.icns}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --arch) ARCH="$2"; shift 2 ;;
@@ -39,8 +44,9 @@ export MACOSX_DEPLOYMENT_TARGET=11.0
 IDENTITY="${MACOS_SIGN_IDENTITY:--}"
 SHORT_VERSION="${VERSION%%-*}"
 WORK="$CARGO_TARGET_DIR/macos-package"
-APP="$WORK/FilmCraft.app"
-DMG="$DIST/filmcraft-$VERSION-macos-$ARCH.dmg"
+APP="$WORK/$APP_NAME.app"
+ARTIFACT="$(printf '%s' "$APP_NAME" | tr '[:upper:]' '[:lower:]')"
+DMG="$DIST/$ARTIFACT-$VERSION-macos-$ARCH.dmg"
 CLI_ZIP="$DIST/filmcraft-cli-$VERSION-macos-$ARCH.zip"
 
 NOTARIZE=0
@@ -101,10 +107,11 @@ notarize() {
 echo "==> assembling $APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # Executable and icon carry the display name (CFBundleExecutable / CFBundleIconFile).
-cp "$WORK/bin/filmcraft" "$APP/Contents/MacOS/FilmCraft"
-cp "$ROOT/assets/app-icon/filmcraft.icns" "$APP/Contents/Resources/FilmCraft.icns"
+cp "$WORK/bin/filmcraft" "$APP/Contents/MacOS/$APP_NAME"
+cp "$APP_ICON" "$APP/Contents/Resources/$APP_NAME.icns"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" \
   -e "s/@BUILD_SHA@/${FILMCRAFT_BUILD_SHA:-unknown}/g" \
+  -e "s/@APP_NAME@/$APP_NAME/g" -e "s/@BUNDLE_ID@/$BUNDLE_ID/g" \
   "$HERE/Info.plist.in" >"$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
@@ -113,13 +120,13 @@ copy_font_licences "$APP/Contents/Resources"
 
 # Sign inside-out: nested code first, then the bundle itself (no --deep on the final signature).
 # Today the only nested code is the main executable; frameworks/helpers would be signed here too.
-sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP/Contents/MacOS/FilmCraft"
+sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP/Contents/MacOS/$APP_NAME"
 sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP"
 codesign --verify --strict --deep --verbose=2 "$APP"
 
 if [ "$NOTARIZE" = 1 ]; then
-  ditto -c -k --keepParent "$APP" "$WORK/FilmCraft-notarize.zip"
-  notarize "$WORK/FilmCraft-notarize.zip"
+  ditto -c -k --keepParent "$APP" "$WORK/$APP_NAME-notarize.zip"
+  notarize "$WORK/$APP_NAME-notarize.zip"
   xcrun stapler staple "$APP"
   xcrun stapler validate "$APP"
   spctl --assess --type execute -vvv "$APP"
@@ -129,7 +136,7 @@ fi
 echo "==> building $DMG"
 STAGE="$WORK/dmg"
 mkdir -p "$STAGE"
-ditto "$APP" "$STAGE/FilmCraft.app"
+ditto "$APP" "$STAGE/$APP_NAME.app"
 ln -s /Applications "$STAGE/Applications"
 # Finder window layout: background, icon size and positions (packaging/macos/dmg/README.md).
 mkdir -p "$STAGE/.background"
@@ -139,7 +146,7 @@ rm -f "$DMG" "$WORK/raw.dmg"
 # makehybrid + convert builds the image without attaching a device, unlike `create -srcfolder`,
 # which is flaky on CI runners ("Resource busy") and hangs in sandboxed sessions.
 # The volume name has no version: .DS_Store finds the background through an alias that includes it.
-hdiutil makehybrid -hfs -hfs-volume-name "FilmCraft" -hfs-openfolder "$STAGE" -o "$WORK/raw.dmg" "$STAGE"
+hdiutil makehybrid -hfs -hfs-volume-name "$APP_NAME" -hfs-openfolder "$STAGE" -o "$WORK/raw.dmg" "$STAGE"
 hdiutil convert "$WORK/raw.dmg" -format UDZO -imagekey zlib-level=9 -o "$DMG"
 rm -f "$WORK/raw.dmg"
 sign "$DMG"

@@ -57,6 +57,7 @@
   <a href="#formats-and-codecs">Formats</a> ·
   <a href="#export">Export</a> ·
   <a href="#interchange">Interchange</a> ·
+  <a href="#autocut-prompt-driven-editing">AutoCut</a> ·
   <a href="#built-for-agents">Agents</a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#downloads">Downloads</a> ·
@@ -218,6 +219,32 @@ Move timelines between FilmCraft and every other editor:
 - **OMF 2.0:** the audio-post handoff: the audio tracks with crossfades and gain, sample-accurate, with the audio encapsulated or alongside.
 
 Import merges the document's bins, media and sequences into your project as one undoable step, and links each media file it finds on disk.
+
+<br>
+
+## AutoCut: prompt-driven editing
+
+This fork (**AutoCut**) adds local-first automated editing on top of the FilmCraft engine
+([`crates/autocut`](crates/autocut/README.md)). Ask in plain language and it plans and runs
+ordinary engine commands — every edit lands in History and undoes like a person's:
+
+```sh
+filmcraft-cli --demo autocut "cut the first 3 seconds"        # plan + run
+filmcraft-cli --project edit.fcproj autocut "remove the silences and add captions"
+filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-run
+```
+
+- **Local models do the routine work**: a small LLM (Ollama, e.g. `phi4-mini`) classifies the
+  prompt, deterministic planners turn routine intents into validated commands
+  (`transcript.removePauses`, `sequence.extract`, `transcript.createCaptions`, …), the built-in
+  Whisper transcribes, and a small vision model (e.g. moondream) captions sampled frames.
+- **A cloud supervisor takes the rest**: prompts the local planner can't handle go to Claude
+  (Anthropic API) with the document digest, the captioned frames and the real command catalog;
+  its plan must validate against the registry before anything runs
+  (`AUTOCUT_POLICY`: `never` | `complex-only` | `always-review`).
+- **Everywhere the engine is**: `filmcraft-cli autocut`, and the `autocut_plan` / `autocut_edit`
+  MCP tools — so Claude Desktop can drive editing in the live Mac app (`filmcraft --control
+  9876` + `filmcraft-cli mcp --bridge 127.0.0.1:9876`).
 
 <br>
 
