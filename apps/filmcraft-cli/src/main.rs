@@ -325,11 +325,11 @@ async fn cli() {
             let report = match &mut b {
                 Backend::Local(s) => {
                     // AutoCut plans through an Executor; lend it the session and take it back for --save
-                    let session = std::mem::replace(s, Box::default());
+                    let session = std::mem::take(s);
                     let ex = filmcraft_autocut::SessionExecutor::from(*session);
                     let r = filmcraft_autocut::runner::run(&prompt, &ex, &cfg, mode).await;
                     if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
-                        *s = Box::new(inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner));
+                        **s = inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
                     }
                     r
                 }
