@@ -1,0 +1,25 @@
+[package]
+name = "filmcraft-autocut"
+description = "AutoCut: prompt-driven automated editing. A local LLM classifies the request, deterministic planners turn it into engine commands, and a cloud supervisor (Anthropic) handles the rest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+filmcraft-engine = { workspace = true }
+filmcraft-time = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+base64 = "0.22"
+tokio = { version = "1", features = ["rt"] }
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "json"] }
+rustls = { version = "0.23", default-features = false }
+rustls-rustcrypto = { version = "0.0.2-alpha" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
