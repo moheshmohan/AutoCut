@@ -10,7 +10,8 @@ pub struct Config {
     pub ollama_host: String,
     /// Ollama model used to classify prompts (`AUTOCUT_LLM_MODEL`).
     pub llm_model: String,
-    /// Ollama vision model for frame descriptions (`AUTOCUT_VLM_MODEL`).
+    /// Ollama vision model for frame descriptions (`AUTOCUT_VLM_MODEL`); moondream is small
+    /// and captions reliably, heavier VLMs work too.
     pub vlm_model: String,
     /// Local classifications below this confidence hand off to the supervisor (0..=1,
     /// `AUTOCUT_CONFIDENCE_THRESHOLD`).
@@ -24,7 +25,7 @@ impl Default for Config {
         Self {
             ollama_host: "http://127.0.0.1:11434".into(),
             llm_model: "phi4-mini".into(),
-            vlm_model: "qwen2.5vl:7b".into(),
+            vlm_model: "moondream".into(),
             confidence_threshold: 0.6,
             http_timeout: Duration::from_secs(180),
         }

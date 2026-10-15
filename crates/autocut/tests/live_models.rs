@@ -34,8 +34,12 @@ async fn classifier_understands_prompts() {
         ("remove all the silences please", "remove_silence"),
         ("add subtitles to the whole thing", "add_captions"),
         ("cut everything between 5 and 12 seconds", "cut_range"),
-        ("make it a vertical tiktok", "custom"),
+        ("make it a vertical tiktok", "export_video"),
         ("make it cinematic with sparkles wherever someone smiles", "custom"),
+        ("clean up the audio, it sounds noisy", "enhance_voice"),
+        ("export this for tiktok", "export_video"),
+        ("add a voice over saying welcome to my channel", "add_voice_over"),
+        ("smooth slow motion at half speed", "slow_motion"),
     ] {
         let c = intent::classify(&m, prompt).await.unwrap_or_else(|e| panic!("{prompt}: {e}"));
         assert_eq!(c.intent, want, "{prompt} -> {c:?}");

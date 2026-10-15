@@ -235,9 +235,12 @@ filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-r
 ```
 
 - **Local models do the routine work**: a small LLM (Ollama, e.g. `phi4-mini`) classifies the
-  prompt, deterministic planners turn routine intents into validated commands
-  (`transcript.removePauses`, `sequence.extract`, `transcript.createCaptions`, …), the built-in
-  Whisper transcribes, and a small vision model (e.g. moondream) captions sampled frames.
+  prompt, deterministic planners turn routine intents into validated commands — auto captions
+  (with TikTok/bold/clean styles), voice enhancement (Essential Sound presets + loudness
+  matching), auto voice-over (built-in speech synthesis, Kokoro neural voices optional),
+  easy exports (YouTube/TikTok/Reels/ProRes/GIF/audio destinations), smooth slow motion with
+  optical-flow interpolation, silence/filler removal, highlight reels. The built-in Whisper
+  transcribes, and a small vision model (moondream) captions sampled frames.
 - **The supervisor is the MCP client**: prompts the local planner can't handle come back with
   `needsSupervisor` plus the document digest (and captioned frames on request) — Claude, driving
   the editor over MCP, then plans the edit itself with `command_list` / `command_run`, the same

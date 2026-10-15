@@ -27,6 +27,10 @@ pub async fn plan(intent: &str, params: &Value, digest: &Digest, ex: &dyn Execut
         "cut_range" => cut_range(params, digest),
         "keep_range" => keep_range(params, digest),
         "highlight_reel" => highlight_reel(params, digest, ex).await,
+        "enhance_voice" => enhance_voice(params, digest),
+        "add_voice_over" => add_voice_over(params, digest, ex).await,
+        "export_video" => export_video(params, digest),
+        "slow_motion" => slow_motion(params, digest),
         other => Err(AutoCutError::Invalid(format!("`{other}` is not a locally planned intent"))),
     }
 }
@@ -90,7 +94,20 @@ async fn add_captions(params: &Value, digest: &Digest, ex: &dyn Executor) -> Res
     if let Some(l) = params["lines"].as_u64() {
         p["lines"] = json!(l);
     }
-    with_transcript(digest, ex, vec![PlannedStep::new("transcript.createCaptions", p, "caption track from the transcript")]).await
+    let mut steps = vec![PlannedStep::new("transcript.createCaptions", p, "caption track from the transcript")];
+    // the new track lands at index 0, i.e. C1; style presets are tuned at 1080p
+    let style = params["style"].as_str().unwrap_or("default");
+    let styling = match style {
+        "tiktok" => json!({"track": "C1", "size": 84, "anchor": "middle", "align": "center", "outline": 6, "margin": 0.06}),
+        "bold" => json!({"track": "C1", "size": 72, "outline": 8}),
+        "clean" => json!({"track": "C1", "background": false, "outline": 4}),
+        "default" => json!(null),
+        other => return Err(AutoCutError::Invalid(format!("caption style `{other}` is not default, tiktok, bold or clean"))),
+    };
+    if !styling.is_null() {
+        steps.push(PlannedStep::new("captions.setStyle", styling, format!("the `{style}` caption style")));
+    }
+    with_transcript(digest, ex, steps).await
 }
 
 /// `markers.markIn` + `markers.markOut` + `sequence.extract`/`lift` + `markers.clearInOut`.
@@ -178,4 +195,139 @@ async fn highlight_reel(params: &Value, digest: &Digest, ex: &dyn Executor) -> R
     let mut out = vec![format!("kept {keep} stretch(es) totalling about {target:.0}s of speech; cutting everything else in {n} cut(s)")];
     out.extend(notes);
     Ok(Plan::Steps { steps, notes: out })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Voice, narration, export and speed intents
+
+/// Clip ids on a track kind ("audio" / "video") from the digest.
+fn track_clips(digest: &Digest, kind: &str) -> Vec<u64> {
+    digest.sequence[kind].as_array().into_iter().flatten().filter_map(|t| t["items"].as_array()).flatten().filter_map(|c| c["clip"].as_u64()).collect()
+}
+
+/// `enhance_voice`: treat every audio clip as dialogue, apply an Essential Sound preset,
+/// optionally tune repair amounts, and loudness-match (BS.1770) to the dialogue target.
+fn enhance_voice(params: &Value, digest: &Digest) -> Result<Plan, AutoCutError> {
+    let clips = track_clips(digest, "audio");
+    if clips.is_empty() {
+        return Err(AutoCutError::Invalid("this sequence has no audio clips to enhance".into()));
+    }
+    let preset = match params["preset"].as_str().unwrap_or("clean") {
+        "balanced" => "Balanced Voice",
+        "podcast" => "Podcast Voice",
+        "radio" => "Radio Announcer",
+        "hall" => "Voice in a Hall",
+        _ => "Clean Up Noisy Dialogue",
+    };
+    let mut steps = vec![
+        PlannedStep::new("essentialSound.setType", json!({"clips": clips, "type": "dialogue"}), "treat the audio as dialogue"),
+        PlannedStep::new("essentialSound.applyPreset", json!({"clips": clips, "preset": preset}), format!("the `{preset}` Essential Sound preset")),
+    ];
+    for (key, param) in [("repair.noise.amount", "noise"), ("repair.deess.amount", "deess"), ("repair.reverb.amount", "dereverb")] {
+        if let Some(v) = params[param].as_f64() {
+            steps.push(PlannedStep::new("essentialSound.set", json!({"clips": clips, "key": key, "value": v}), format!("{param} = {v}")));
+        }
+    }
+    let mut notes = Vec::new();
+    if params["loudness"].as_bool().unwrap_or(true) {
+        steps.push(PlannedStep::new("essentialSound.autoMatch", json!({"clips": clips}), "match integrated loudness to the dialogue target (−23 LUFS)"));
+    }
+    if params["duckMusic"].as_bool().unwrap_or(false) {
+        steps.push(PlannedStep::new("essentialSound.generateDucking", json!({"clips": clips}), "duck the music under the voice"));
+    }
+    if preset == "Clean Up Noisy Dialogue" {
+        notes.push("the preset removes noise and hum; pass noise/deess amounts to tune, or preset: balanced|podcast|radio for another character".into());
+    }
+    Ok(Plan::Steps { steps, notes })
+}
+
+/// `add_voice_over`: synthesize narration onto the timeline. `fit` stretches the delivery
+/// (pace 0.5..2) to cover the whole sequence — the preview run measures the natural length.
+async fn add_voice_over(params: &Value, digest: &Digest, ex: &dyn Executor) -> Result<Plan, AutoCutError> {
+    let Some(text) = params["text"].as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+        return Err(AutoCutError::Invalid("this intent needs `text` to speak".into()));
+    };
+    let mut p = json!({"text": text, "time": 0});
+    if let Some(v) = params["voice"].as_str() {
+        p["voice"] = json!(v);
+    }
+    let mut notes = vec!["natural voices (Kokoro) need the `neural-voices` build and a one-time download; the built-in voice always works".to_string()];
+    if params["fit"].as_bool().unwrap_or(false) {
+        let target = digest.duration_seconds();
+        if target <= 0.0 {
+            return Err(AutoCutError::Invalid("cannot fit narration: the sequence duration is unknown".into()));
+        }
+        // measure the natural delivery, then pick the pace that covers the sequence
+        let preview = ex.execute("tts.preview", json!({"text": text})).await.map_err(AutoCutError::Executor)?;
+        let spoken = preview["seconds"].as_f64().unwrap_or(0.0);
+        if spoken > 0.0 {
+            let pace = (spoken / target).clamp(0.5, 2.0);
+            p["pace"] = json!(pace);
+            if (pace - 0.5).abs() < 1e-9 || (pace - 2.0).abs() < 1e-9 {
+                notes.push(format!("the speech is {spoken:.0}s against a {target:.0}s sequence; pace clamped to {pace}"));
+            }
+        }
+    }
+    Ok(Plan::Steps { steps: vec![PlannedStep::new("tts.create", p, "synthesize the narration onto the timeline")], notes })
+}
+
+/// `export_video`: destination words map to the engine's built-in export presets.
+fn export_video(params: &Value, _digest: &Digest) -> Result<Plan, AutoCutError> {
+    let dest = params["destination"].as_str().unwrap_or("youtube");
+    let (preset, ext) = match dest {
+        "youtube" => ("YouTube 1080p Full HD", "mp4"),
+        "youtube4k" | "youtube-4k" => ("YouTube 2160p 4K Ultra HD", "mp4"),
+        "tiktok" | "reels" | "shorts" | "vertical" => ("Social Vertical 1080×1920", "mp4"),
+        "vimeo" => ("Vimeo 1080p Full HD", "mp4"),
+        "prores" | "master" => ("Apple ProRes 422 HQ", "mov"),
+        "gif" => ("Animated GIF 640×360", "gif"),
+        "audio" | "wav" => ("Waveform Audio 48 kHz 24-bit", "wav"),
+        "aac" | "mp3" => ("AAC Audio 48 kHz 320 kbps", "m4a"),
+        other => {
+            return Err(AutoCutError::Invalid(format!(
+                "unknown destination `{other}`; try youtube, youtube4k, tiktok, reels, vertical, vimeo, prores, gif, audio or aac"
+            )));
+        }
+    };
+    let path = params["path"].as_str().map(str::to_string).unwrap_or_else(|| format!("autocut-{dest}.{ext}"));
+    let mut p = json!({"path": path, "preset": preset, "wait": true});
+    if params["burnCaptions"].as_bool().unwrap_or(false) {
+        p["burnCaptions"] = json!(true);
+    }
+    if let Some(s) = params["scale"].as_f64() {
+        p["scale"] = json!(s);
+    }
+    let steps = vec![PlannedStep::new("file.exportMedia", p, format!("export with the `{preset}` preset"))];
+    Ok(Plan::Steps { steps, notes: vec![format!("writing {path}; long exports report progress over MCP")] })
+}
+
+/// `slow_motion`: retime clips with motion-compensated interpolation — `opticalFlow` (the
+/// default) is the CapCut-style smooth slow motion, on the engine's own Lucas-Kanade flow.
+fn slow_motion(params: &Value, digest: &Digest) -> Result<Plan, AutoCutError> {
+    let factor = params["factor"].as_f64().unwrap_or(0.5).clamp(0.1, 10.0);
+    let interp = params["interpolation"].as_str().unwrap_or("opticalFlow");
+    if !matches!(interp, "opticalFlow" | "frameBlending" | "frameSampling") {
+        return Err(AutoCutError::Invalid(format!("interpolation `{interp}` is not opticalFlow, frameBlending or frameSampling")));
+    }
+    let clips = params["clips"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_u64).collect::<Vec<u64>>())
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| track_clips(digest, "video"));
+    if clips.is_empty() {
+        return Err(AutoCutError::Invalid("this sequence has no video clips to retime".into()));
+    }
+    // rippling makes room: a slowed clip grows, pushing later clips right instead of being
+    // trimmed to its old slot (Premiere's Speed/Duration with "Ripple Edit" checked)
+    let ripple = params["ripple"].as_bool().unwrap_or(true);
+    let steps = vec![PlannedStep::new(
+        "clip.speedDuration",
+        json!({"clips": clips, "speed": factor * 100.0, "ripple": ripple, "interpolation": interp}),
+        if interp == "opticalFlow" {
+            format!("{:.0}% speed with optical-flow interpolation (motion-compensated new frames)", factor * 100.0)
+        } else {
+            format!("{:.0}% speed with {interp}", factor * 100.0)
+        },
+    )];
+    Ok(Plan::Steps { steps, notes: Vec::new() })
 }

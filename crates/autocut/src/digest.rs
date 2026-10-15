@@ -7,8 +7,21 @@ use crate::Executor;
 
 /// Command families AutoCut (and its supervisor) may run — the allowlist every planned step is
 /// checked against. Playback, prefs and UI stay out: AutoCut edits media, not the app.
-pub const ALLOWED_FAMILIES: &[&str] =
-    &["file.", "sequence.", "timeline.", "source.", "markers.", "playhead.", "edit.", "transcript.", "captions.", "clip.", "effects."];
+pub const ALLOWED_FAMILIES: &[&str] = &[
+    "file.",
+    "sequence.",
+    "timeline.",
+    "source.",
+    "markers.",
+    "playhead.",
+    "edit.",
+    "transcript.",
+    "captions.",
+    "clip.",
+    "effects.",
+    "essentialSound.",
+    "tts.",
+];
 
 /// Whether a command id is in an allowed family.
 pub fn allowed(id: &str) -> bool {
@@ -106,6 +119,8 @@ mod tests {
     #[test]
     fn families_allowlist() {
         assert!(allowed("timeline.razor"));
+        assert!(allowed("essentialSound.autoMatch"));
+        assert!(allowed("tts.create"));
         assert!(!allowed("app.quit"));
         assert!(!allowed("prefs.set"));
     }

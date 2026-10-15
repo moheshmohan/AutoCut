@@ -41,6 +41,10 @@ prompt ──► classify (local LLM, Ollama, JSON mode)
 | `cut_range` | `markers.markIn/markOut` → `sequence.extract`/`lift` → `markers.clearInOut` |
 | `keep_range` | tail-then-head `sequence.extract` (order keeps times valid) |
 | `highlight_reel` | `transcript.extract` on the complement of the best stretches, last-first |
+| `enhance_voice` | `essentialSound.setType` + preset (Clean Up Noisy Dialogue / Podcast Voice / …) + repair amounts + `autoMatch` loudness (+ `generateDucking`) |
+| `add_voice_over` | `tts.create` (built-in voice; Kokoro neural voices behind `neural-voices`); `fit` previews and paces the delivery to cover the sequence |
+| `export_video` | `file.exportMedia` with the destination's built-in preset: youtube, youtube4k, tiktok/reels/vertical (9:16), vimeo, prores, gif, audio, aac |
+| `slow_motion` | `clip.speedDuration` with `interpolation: opticalFlow` — motion-compensated new frames (CapCut-style smooth slow-mo, the engine's own Lucas-Kanade flow), rippling to make room |
 | `custom` | nobody: the report comes back with `needsSupervisor` |
 
 Highlight scoring (`highlight.rs`) is classical: sentence/pause segmentation, topic-keyword and
@@ -52,10 +56,13 @@ salience scoring, duration shaping — no model needed to pick the cuts.
 |---|---|---|
 | `AUTOCUT_OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama endpoint |
 | `AUTOCUT_LLM_MODEL` | `phi4-mini` | classifier / planner model |
-| `AUTOCUT_VLM_MODEL` | `qwen2.5vl:7b` | frame-captioning model (moondream works well) |
+| `AUTOCUT_VLM_MODEL` | `moondream` | frame-captioning model (any Ollama vision model) |
 | `AUTOCUT_CONFIDENCE_THRESHOLD` | `0.6` | below this, hand off to the supervisor (the caller) |
 
 ## Surfaces
+
+Caption styles: `add_captions` takes `style: tiktok | bold | clean | default` and follows
+`transcript.createCaptions` with `captions.setStyle`.
 
 - **CLI:** `filmcraft-cli autocut '<prompt>' [--dry-run] [--frames]` (headless `--demo`/`--project`,
   or `--bridge` to edit in the running app). A hand-off exits 1 with the report on stdout.

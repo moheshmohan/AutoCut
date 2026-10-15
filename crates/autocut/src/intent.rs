@@ -8,7 +8,19 @@ use crate::{AutoCutError, extract_json};
 
 /// Every intent the local planner can execute without help. `custom` means "not one of these"
 /// and is what triggers supervisor escalation.
-pub const INTENTS: &[&str] = &["remove_silence", "remove_fillers", "add_captions", "cut_range", "keep_range", "highlight_reel", "custom"];
+pub const INTENTS: &[&str] = &[
+    "remove_silence",
+    "remove_fillers",
+    "add_captions",
+    "cut_range",
+    "keep_range",
+    "highlight_reel",
+    "enhance_voice",
+    "add_voice_over",
+    "export_video",
+    "slow_motion",
+    "custom",
+];
 
 /// What the classifier returned for a prompt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,10 +65,14 @@ You classify video-editing requests for a non-linear video editor. Answer with O
 Intents and their params:
 - remove_silence: cut silent/paused parts. params: {\"minSeconds\"?: number (pause length to cut, default 0.5), \"keepSeconds\"?: number (pause length to keep, default 0.2)}
 - remove_fillers: cut filler words (um, uh, like, you know). params: {\"fillers\"?: string[] (defaults apply when omitted)}
-- add_captions: captions/subtitles from the spoken words. params: {\"maxChars\"?: int (per caption, default 42), \"lines\"?: 1|2 (default 2)}
+- add_captions: captions/subtitles from the spoken words. params: {\"maxChars\"?: int (per caption, default 42), \"lines\"?: 1|2 (default 2), \"style\"?: \"default\"|\"tiktok\"|\"bold\"|\"clean\"}
 - cut_range: remove a time range. params: {\"start\": seconds number, \"end\": seconds number, \"mode\"?: \"extract\" (close the gap, default) | \"lift\" (leave a gap)}
 - keep_range: keep ONLY a time range. params: {\"start\": seconds, \"end\": seconds}
 - highlight_reel: keep the most interesting spoken moments, roughly targetSeconds long. params: {\"targetSeconds\"?: number (default 60), \"topic\"?: string (what 'interesting' means here)}
+- enhance_voice: clean up / improve spoken audio (noise, hum, de-ess, loudness). params: {\"preset\"?: \"clean\"|\"balanced\"|\"podcast\"|\"radio\"|\"hall\", \"noise\"?: 0-10, \"deess\"?: 0-10, \"duckMusic\"?: bool}
+- add_voice_over: synthesize a narration track from a script. params: {\"text\": string (the script), \"voice\"?: string, \"fit\"?: bool (stretch delivery to cover the video)}
+- export_video: render/export the sequence to a file. params: {\"destination\": \"youtube\"|\"youtube4k\"|\"tiktok\"|\"reels\"|\"vertical\"|\"vimeo\"|\"prores\"|\"gif\"|\"audio\"|\"aac\", \"path\"?: string (only when the user named a file), \"burnCaptions\"?: bool, \"scale\"?: number}
+- slow_motion: change playback speed (smooth by default). params: {\"factor\": number (0.5 = half speed), \"interpolation\"?: \"opticalFlow\" (default, smooth) |\"frameBlending\"|\"frameSampling\"}
 - custom: anything else.
 
 Pick a specific intent ONLY when the request clearly and completely matches it. Use `custom` when
