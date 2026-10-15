@@ -1,6 +1,6 @@
 [package]
 name = "filmcraft-gphotos"
-description = "Google Photos for the editor: OAuth (installed-app flow), Library API browsing/search, and an import cache"
+description = "Google Photos for the editor: OAuth (installed-app flow), the Photos Picker API, and an import cache"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

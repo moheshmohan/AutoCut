@@ -107,13 +107,14 @@ SUBCOMMANDS
                                 AUTOCUT_CONFIDENCE_THRESHOLD
   photos auth                    sign in to Google Photos (browser consent, one time; needs
                                  client_secret.json from Google Cloud — see crates/gphotos/README.md)
-  photos albums                  list Google Photos albums (id, title, item count)
-  photos search [text] [--category c] [--after YYYY-MM-DD] [--before YYYY-MM-DD]
-                 [--album id] [--limit n] [--json]
-                                search Google Photos: Google filters by category/date/album,
-                                 the text matches filenames
-  photos add <mediaItemId>...    download the media originals (cached) and import them into
-                                 the project; --demo/--project/--bridge choose the target
+  photos pick [--max-items n] [--timeout secs] [--session id] [--no-browser]
+                                 open the Google Photos picker in the browser, wait (default
+                                 600 s, at most 3600) for your selection, download it into the
+                                 cache and import it; --demo/--project/--bridge choose the
+                                 target. A timed-out wait prints the session id: --session
+                                 resumes it. (Google offers no search: you choose in the picker.)
+  photos cached [--json]         list the Google Photos originals already downloaded
+  photos add <mediaItemId>...    import already-downloaded items again (ids from `photos cached`)
   bench-decode <media> [--frames N]
   mcp                           MCP server on stdio (headless, or --bridge to the live app)
   help                          this text
@@ -327,7 +328,7 @@ async fn cli() {
             outln!("½-res linear conversion {w}x{h}: {:.1} ms", t1.elapsed().as_secs_f64() * 1000.0);
         }
         "photos" => {
-            let what = a.pos(1).unwrap_or_else(|| usage("photos auth | albums | search [text] | add <id>..."));
+            let what = a.pos(1).unwrap_or_else(|| usage("photos auth | pick | cached | add <id>..."));
             match what {
                 "auth" => {
                     let dir = filmcraft_gphotos::data_dir();
@@ -343,81 +344,104 @@ async fn cli() {
                         }
                     }
                 }
-                "albums" => {
+                "pick" => {
                     let gp = filmcraft_gphotos::GooglePhotos::configured().unwrap_or_else(|e| fail(format!("photos: {e}")));
-                    match gp.albums() {
-                        Ok(list) => {
-                            if a.flag("--json") {
-                                print(&a, &serde_json::Value::Array(list));
-                            } else {
-                                for al in &list {
-                                    outln!(
-                                        "{:<38} {:>6} items  {}",
-                                        al["id"].as_str().unwrap_or(""),
-                                        al["items"].as_str().unwrap_or("?"),
-                                        al["title"].as_str().unwrap_or("")
-                                    );
-                                }
-                            }
+                    let parse_num = |k: &str| -> Option<u64> {
+                        a.opt(k).map(|v| v.parse::<u64>().unwrap_or_else(|_| usage(format!("photos pick: {k} wants a whole number, not `{v}`"))))
+                    };
+                    let opts = filmcraft_gphotos::PickOptions {
+                        max_items: parse_num("--max-items").map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+                        wait: std::time::Duration::from_secs(parse_num("--timeout").unwrap_or(600)),
+                        resume: a.opt("--session").map(str::to_string),
+                        open_browser: !a.flag("--no-browser"),
+                    };
+                    // the import target first, so a bad --project/--bridge fails before the user picks
+                    let mut b = Backend::open(&a);
+                    // blocking HTTP and sleeps: keep them off the async runtime
+                    let outcome = tokio::task::spawn_blocking(move || gp.pick(&opts, &mut |line| diag(format_args!("{line}"))))
+                        .await
+                        .unwrap_or_else(|e| fail(format!("photos pick: {e}")))
+                        .unwrap_or_else(|e| fail(format!("photos pick: {e}")));
+                    let picked = match outcome {
+                        filmcraft_gphotos::PickOutcome::Done(p) => p,
+                        filmcraft_gphotos::PickOutcome::Pending(s) => {
+                            outln!("{}", json!({"status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time}));
+                            fail(format!("photos pick: no selection yet; finish in the browser, then run `photos pick --session {}`", s.id));
                         }
-                        Err(e) => fail(format!("photos albums: {e}")),
+                    };
+                    for f in &picked.failed {
+                        diag(format_args!("photos pick: {f}"));
+                    }
+                    if picked.fetched.is_empty() {
+                        fail(if picked.failed.is_empty() { "photos pick: nothing was picked" } else { "photos pick: nothing could be downloaded" });
+                    }
+                    let paths: Vec<String> = picked.fetched.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
+                    let cached = picked.fetched.iter().filter(|f| f.was_cached).count();
+                    let items: Vec<Value> = picked
+                        .fetched
+                        .iter()
+                        .map(|f| {
+                            let mut v = f.item.summary();
+                            if let Some(o) = v.as_object_mut() {
+                                o.insert("path".into(), json!(f.path.to_string_lossy()));
+                            }
+                            v
+                        })
+                        .collect();
+                    match b.exec("file.import", json!({"paths": paths})).await {
+                        Ok(v) => {
+                            outln!(
+                                "{}",
+                                json!({
+                                    "imported": v, "items": items, "downloaded": picked.fetched.len().saturating_sub(cached), "cached": cached,
+                                    "failed": picked.failed,
+                                })
+                            );
+                            b.finish(&a).await;
+                        }
+                        Err(e) => fail(format!("photos pick: import: {e}")),
+                    }
+                    if !picked.failed.is_empty() {
+                        std::process::exit(1);
                     }
                 }
-                "search" => {
-                    let gp = filmcraft_gphotos::GooglePhotos::configured().unwrap_or_else(|e| fail(format!("photos: {e}")));
-                    let s = filmcraft_gphotos::api::Search {
-                        query: a.positionals.get(2..).map(|p| p.join(" ")).filter(|q| !q.is_empty()),
-                        category: a.opt("--category").map(str::to_string),
-                        after: a.opt("--after").map(str::to_string),
-                        before: a.opt("--before").map(str::to_string),
-                        album: a.opt("--album").map(str::to_string),
-                        limit: a.opt("--limit").and_then(|v| v.parse().ok()).unwrap_or(25),
-                    };
-                    match gp.search(&s) {
-                        Ok(list) => {
-                            if a.flag("--json") {
-                                print(&a, &serde_json::Value::Array(list));
-                            } else {
-                                for m in &list {
-                                    outln!(
-                                        "{:<16} {:<7} {}  {}",
-                                        m["id"].as_str().unwrap_or(""),
-                                        m["kind"].as_str().unwrap_or("?"),
-                                        m["created"].as_str().unwrap_or("").get(..10).unwrap_or(""),
-                                        m["filename"].as_str().unwrap_or("")
-                                    );
-                                }
-                                outln!("{} result(s); `photos add <id>…` imports them", list.len());
-                            }
+                "cached" => {
+                    let list = filmcraft_gphotos::cache::list();
+                    if a.flag("--json") {
+                        print(&a, &Value::Array(list));
+                    } else {
+                        for c in &list {
+                            let mib = c["bytes"].as_u64().unwrap_or(0) as f64 / (1024.0 * 1024.0);
+                            outln!("{:<48} {mib:>9.1} MiB  {}", c["id"].as_str().unwrap_or(""), c["filename"].as_str().unwrap_or(""));
                         }
-                        Err(e) => fail(format!("photos search: {e}")),
+                        outln!("{} cached item(s); `photos add <id>…` imports them again", list.len());
                     }
                 }
                 "add" => {
                     let ids: Vec<String> = a.positionals.get(2..).unwrap_or_default().to_vec();
                     if ids.is_empty() {
-                        usage("photos add <mediaItemId>...  (ids from `photos search`)");
+                        usage("photos add <mediaItemId>...  (ids from `photos cached`; new items come from `photos pick`)");
                     }
-                    let gp = filmcraft_gphotos::GooglePhotos::configured().unwrap_or_else(|e| fail(format!("photos: {e}")));
                     let mut paths = Vec::new();
-                    let mut downloaded = 0usize;
                     for id in &ids {
-                        let item = gp.item(id).unwrap_or_else(|e| fail(format!("photos add {id}: {e}")));
-                        let was_cached = filmcraft_gphotos::cache::cached_path(&item).is_some_and(|p| p.is_file());
-                        let path = gp.local_copy(&item).unwrap_or_else(|e| fail(format!("photos add {id}: {e}")));
-                        downloaded += usize::from(!was_cached);
-                        paths.push(path.to_string_lossy().into_owned());
+                        match filmcraft_gphotos::cache::find(id) {
+                            Some(p) => paths.push(p.to_string_lossy().into_owned()),
+                            None => fail(format!("photos add {id}: not downloaded yet — Google only shares items picked in the picker; run `photos pick`")),
+                        }
                     }
                     let mut b = Backend::open(&a);
                     match b.exec("file.import", json!({"paths": paths})).await {
                         Ok(v) => {
-                            outln!("{}", json!({"imported": v, "downloaded": downloaded, "cached": ids.len() - downloaded}));
+                            outln!("{}", json!({"imported": v, "cached": ids.len()}));
                             b.finish(&a).await;
                         }
                         Err(e) => fail(format!("photos add: import: {e}")),
                     }
                 }
-                other => usage(format!("photos: unknown `{other}` (auth | albums | search | add)")),
+                "albums" | "search" => usage(format!(
+                    "photos {what}: Google retired library browsing and search for apps on 2025-03-31; use `photos pick` to choose items in Google Photos"
+                )),
+                other => usage(format!("photos: unknown `{other}` (auth | pick | cached | add)")),
             }
         }
         "autocut" => {

@@ -248,10 +248,10 @@ filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-r
 - **Everywhere the engine is**: `filmcraft-cli autocut`, and the `autocut_plan` / `autocut_edit`
   MCP tools — so Claude Desktop can drive editing in the live Mac app (`filmcraft --control
   9876` + `filmcraft-cli mcp --bridge 127.0.0.1:9876`).
-- **Cloud media**: browse, search and import your Google Photos from the CLI
-  (`filmcraft-cli photos …`) and over MCP (`googlephotos_browse` / `googlephotos_search` /
-  `googlephotos_add`) — see [crates/gphotos](crates/gphotos/README.md) for the one-time
-  Google Cloud setup.
+- **Cloud media**: pick photos and videos in the Google Photos picker and import them, from
+  the CLI (`filmcraft-cli photos pick`) and over MCP (`googlephotos_pick`) — see
+  [crates/gphotos](crates/gphotos/README.md) for the one-time Google Cloud setup and what
+  Google's Picker API can and cannot do.
 
 <br>
 

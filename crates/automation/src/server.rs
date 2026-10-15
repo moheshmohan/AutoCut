@@ -180,32 +180,28 @@ pub struct ControlParams {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct PhotosSearchParams {
-    /// Words matched against filenames, case-insensitively (Google has no free-text search).
+pub struct PhotosPickParams {
+    /// At most this many items selectable in the picker (1–2000; default 2000).
     #[serde(default)]
-    pub query: Option<String>,
-    /// A Google content category: PEOPLE, ANIMALS, FOOD, LANDSCAPES, CITYSCAPES, SELFIES, SPORT, TRAVEL, NIGHT, WEDDINGS, BIRTHDAYS, SCREENSHOTS, …
+    pub max_items: Option<u32>,
+    /// Seconds to wait for the user to press Done (default 300, at most 3600). 0 opens the
+    /// picker and returns at once with a pending session to resume.
     #[serde(default)]
-    pub category: Option<String>,
-    /// Inclusive start date, YYYY-MM-DD.
+    pub wait_seconds: Option<u64>,
+    /// Resume this pending session (from an earlier `status: pending` result) instead of
+    /// opening a new picker.
     #[serde(default)]
-    pub after: Option<String>,
-    /// Exclusive end date, YYYY-MM-DD.
-    #[serde(default)]
-    pub before: Option<String>,
-    /// An album id from googlephotos_browse.
-    #[serde(default)]
-    pub album: Option<String>,
-    /// Stop after this many (default 25).
-    #[serde(default)]
-    pub limit: Option<usize>,
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PhotosAddParams {
-    /// Media item ids from googlephotos_search.
+    /// Media item ids of already-downloaded items (from googlephotos_pick or googlephotos_cached).
     pub ids: Vec<String>,
 }
+
+/// The most ids one googlephotos_add call takes.
+const MAX_ADD_IDS: usize = 2000;
 
 /// Signed-in Google Photos, or the tool-shaped setup error.
 fn gphotos() -> Result<filmcraft_gphotos::GooglePhotos, AutomationError> {
@@ -558,83 +554,103 @@ impl FilmcraftMcp {
     }
 
     #[tool(
-        title = "Google Photos: browse albums",
-        description = "The user's Google Photos albums (id, title, item count). Pass an album id to googlephotos_search's `album`. One-time setup: run `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+        title = "Google Photos: pick and import",
+        description = "Open the Google Photos picker in the user's browser, wait for them to choose photos/videos and press Done, download the picks (cached under the app's data dir) and import them into the open project with file.import. Google offers apps no search or browsing of the library (retired 2025-03-31): the user chooses in the picker, so tell them what to pick. If the wait runs out the result is `status: pending` with a `session` and `pickerUri`; call again with that `session` to keep waiting (with short client tool timeouts, start with wait_seconds 0, then resume). Videos download whole, so they can take a while. One-time setup: `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
-    async fn googlephotos_browse(&self) -> Result<CallToolResult, McpError> {
+    async fn googlephotos_pick(&self, Parameters(p): Parameters<PhotosPickParams>) -> Result<CallToolResult, McpError> {
         let gp = match gphotos() {
             Ok(gp) => gp,
             Err(e) => return Ok(fail(e)),
         };
-        let r = tokio::task::spawn_blocking(move || gp.albums()).await.map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        wrap(r.map(Value::Array).map_err(|e| AutomationError::Other(e.to_string())))
+        let opts = filmcraft_gphotos::PickOptions {
+            max_items: p.max_items,
+            wait: std::time::Duration::from_secs(p.wait_seconds.unwrap_or(300)),
+            resume: p.session.filter(|s| !s.trim().is_empty()),
+            open_browser: true,
+        };
+        // blocking HTTP and sleeps: keep them off the async threads
+        let outcome = match tokio::task::spawn_blocking(move || gp.pick(&opts, &mut |_| {})).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => return Ok(fail(e)),
+            Err(e) => return Ok(fail(format!("internal error: {e}"))),
+        };
+        let picked = match outcome {
+            filmcraft_gphotos::PickOutcome::Done(picked) => picked,
+            filmcraft_gphotos::PickOutcome::Pending(s) => {
+                return Ok(ok_json(&json!({
+                    "status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time,
+                    "next": "the user has not pressed Done in Google Photos yet; give them pickerUri if the browser did not open, then call googlephotos_pick again with this session",
+                })));
+            }
+        };
+        if picked.fetched.is_empty() {
+            return Ok(fail(json!({"status": "done", "error": "nothing was picked or nothing could be downloaded", "failed": picked.failed})));
+        }
+        let paths: Vec<String> = picked.fetched.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
+        let cached = picked.fetched.iter().filter(|f| f.was_cached).count();
+        let items: Vec<Value> = picked
+            .fetched
+            .iter()
+            .map(|f| {
+                let mut v = f.item.summary();
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("path".into(), json!(f.path.to_string_lossy()));
+                }
+                v
+            })
+            .collect();
+        let imported = self.run("file.import", json!({"paths": paths})).await;
+        let ok = imported.is_ok() && picked.failed.is_empty();
+        let v = json!({
+            "status": "done", "items": items, "downloaded": picked.fetched.len().saturating_sub(cached), "cached": cached,
+            "failed": picked.failed, "imported": imported.as_ref().ok(), "importError": imported.as_ref().err().map(|e| e.to_string()),
+        });
+        Ok(if ok { ok_json(&v) } else { CallToolResult::error(vec![Content::text(v.to_string())]) })
     }
 
     #[tool(
-        title = "Google Photos: search media",
-        description = "Search the user's Google Photos; returns {id, filename, mimeType, kind (photo|video), created}. Google filters server-side by category/date/album only — the free-text `query` matches filenames locally, so combine a category with filename words. Use the ids with googlephotos_add.",
-        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+        title = "Google Photos: list downloaded items",
+        description = "The Google Photos originals already downloaded by earlier picks: {id, filename, bytes, path}. Pass ids to googlephotos_add to import them again without the picker.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
-    async fn googlephotos_search(&self, Parameters(p): Parameters<PhotosSearchParams>) -> Result<CallToolResult, McpError> {
-        let gp = match gphotos() {
-            Ok(gp) => gp,
-            Err(e) => return Ok(fail(e)),
-        };
-        let s = filmcraft_gphotos::api::Search {
-            query: p.query,
-            category: p.category,
-            after: p.after,
-            before: p.before,
-            album: p.album,
-            limit: p.limit.unwrap_or(25),
-        };
-        // the search itself is blocking HTTP; keep it off the async threads
-        let r = tokio::task::spawn_blocking(move || gp.search(&s)).await.map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        wrap(r.map(Value::Array).map_err(|e| AutomationError::Other(e.to_string())))
+    async fn googlephotos_cached(&self) -> Result<CallToolResult, McpError> {
+        let list = tokio::task::spawn_blocking(filmcraft_gphotos::cache::list).await.unwrap_or_default();
+        Ok(ok_json(&Value::Array(list)))
     }
 
     #[tool(
-        title = "Google Photos: add to the project",
-        description = "Download the named media originals (cached under the app's data dir — instant the second time) and import them into the open project with file.import. Use the ids from googlephotos_search. Videos download whole, so they can take a while.",
-        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+        title = "Google Photos: import downloaded items",
+        description = "Import already-downloaded Google Photos items (ids from googlephotos_pick or googlephotos_cached) into the open project with file.import. Items never picked are not reachable: Google shares only what the user picks, so use googlephotos_pick for new ones.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn googlephotos_add(&self, Parameters(p): Parameters<PhotosAddParams>) -> Result<CallToolResult, McpError> {
-        let gp = match gphotos() {
-            Ok(gp) => gp,
-            Err(e) => return Ok(fail(e)),
-        };
         if p.ids.is_empty() {
             return Ok(fail("no media item ids given"));
         }
-        let (paths, downloaded, errors) = match tokio::task::spawn_blocking(move || -> (Vec<String>, usize, Vec<String>) {
+        if p.ids.len() > MAX_ADD_IDS {
+            return Ok(fail(format!("at most {MAX_ADD_IDS} ids per call")));
+        }
+        let (paths, missing) = match tokio::task::spawn_blocking(move || {
             let mut paths = Vec::new();
-            let mut downloaded = 0usize;
-            let mut errors = Vec::new();
-            for id in &p.ids {
-                match gp.item(id).and_then(|item| {
-                    let was_cached = filmcraft_gphotos::cache::cached_path(&item).is_some_and(|c| c.is_file());
-                    let path = gp.local_copy(&item)?;
-                    downloaded += usize::from(!was_cached);
-                    Ok(path.to_string_lossy().into_owned())
-                }) {
-                    Ok(path) => paths.push(path),
-                    Err(e) => errors.push(format!("{id}: {e}")),
+            let mut missing = Vec::new();
+            for id in p.ids {
+                match filmcraft_gphotos::cache::find(&id) {
+                    Some(path) => paths.push(path.to_string_lossy().into_owned()),
+                    None => missing.push(id),
                 }
             }
-            (paths, downloaded, errors)
+            (paths, missing)
         })
         .await
         {
             Ok(v) => v,
             Err(e) => return Ok(fail(format!("internal error: {e}"))),
         };
-        let imported = self.run("file.import", json!({"paths": paths.clone()})).await.ok();
-        let v = json!({
-            "imported": imported, "paths": paths, "downloaded": downloaded,
-            "failed": errors,
-        });
-        Ok(if errors.is_empty() { ok_json(&v) } else { CallToolResult::error(vec![Content::text(v.to_string())]) })
+        if !missing.is_empty() {
+            return Ok(fail(json!({"error": "not downloaded yet; pick these with googlephotos_pick", "missing": missing})));
+        }
+        wrap(self.run("file.import", json!({"paths": paths})).await.map(|imported| json!({"imported": imported, "paths": paths})))
     }
 
     #[tool(
@@ -812,7 +828,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_browse`/`googlephotos_search`/`googlephotos_add` search the user's Google Photos and import items into the project (after the one-time `filmcraft-cli photos auth`).";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker for the user to choose items (Google allows no search), then downloads and imports them; `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`).";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";

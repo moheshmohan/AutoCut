@@ -20,6 +20,9 @@ const VALUED: &[&str] = &[
     "--data-dir",
     "--settings",
     "--gpu-rendering",
+    "--max-items",
+    "--timeout",
+    "--session",
 ];
 
 #[derive(Debug, Default)]
