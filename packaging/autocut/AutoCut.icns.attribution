@@ -1,0 +1,8 @@
+asset:        AutoCut.icns
+title:        AutoCut placeholder app icon (macOS icon set, 16-1024 px)
+author:       AutoCut contributors
+source:       original work, drawn programmatically by crates/autocut/examples/make_icon.rs (indigo rounded square with a white diagonal "cut" band); contains no FilmCraft or Adobe marks
+license:      MIT OR Apache-2.0
+license-file: LICENSE-MIT, LICENSE-APACHE
+added:        2026-10-15 with the AutoCut packaging (commit b5dfc869); sidecar 2026-10-16 by Claude (agent)
+notes:        A branding placeholder, to be replaced with real art before distribution. Regenerate with `cargo run -p filmcraft-autocut --example make_icon -- <dir>`, then `iconutil -c icns` on the iconset. Used by packaging/macos/package.sh via AUTOCUT_APP_ICON.

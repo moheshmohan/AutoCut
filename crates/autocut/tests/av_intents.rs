@@ -91,9 +91,20 @@ async fn export_video_writes_the_file() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tiktok_export_targets_the_vertical_preset() {
     let ex = demo();
-    let r = run(&ex, "export_video", json!({"destination": "tiktok"})).await;
-    assert_eq!(r.steps[0].params["preset"], json!("Social Vertical 1080×1920"), "{:?}", r.steps[0]);
+    // plan only: executing this used to render the demo to a relative `autocut-tiktok.mp4`,
+    // i.e. into this crate's directory (where a 40 MB render got committed)
+    let r = run_with(&classified("export_video", json!({"destination": "tiktok"})), "export for tiktok", &ex, &Config::default(), Options::plan_only())
+        .await
+        .expect("the plan succeeds");
     assert_eq!(r.steps[0].id, "file.exportMedia");
+    assert_eq!(r.steps[0].params["preset"], json!("Social Vertical 1080×1920"), "{:?}", r.steps[0]);
+    // no file named: the user's AutoCut folder, named after the sequence and destination
+    let path = r.steps[0].params["path"].as_str().unwrap_or("");
+    let folder = if cfg!(target_os = "macos") { "~/Movies/AutoCut/" } else { "~/Videos/AutoCut/" };
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let name = seq["name"].as_str().unwrap_or("");
+    assert_eq!(path, format!("{folder}{name} - tiktok.mp4"), "{path}");
+    assert!(r.results.is_none(), "nothing ran");
 }
 
 #[tokio::test(flavor = "multi_thread")]

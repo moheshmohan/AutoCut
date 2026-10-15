@@ -301,7 +301,7 @@ async fn add_voice_over(params: &Value, digest: &Digest, ex: &dyn Executor) -> R
 }
 
 /// `export_video`: destination words map to the engine's built-in export presets.
-fn export_video(params: &Value, _digest: &Digest) -> Result<Plan, AutoCutError> {
+fn export_video(params: &Value, digest: &Digest) -> Result<Plan, AutoCutError> {
     let dest = params["destination"].as_str().unwrap_or("youtube");
     let (preset, ext) = match dest {
         "youtube" => ("YouTube 1080p Full HD", "mp4"),
@@ -318,7 +318,7 @@ fn export_video(params: &Value, _digest: &Digest) -> Result<Plan, AutoCutError> 
             )));
         }
     };
-    let path = params["path"].as_str().map(str::to_string).unwrap_or_else(|| format!("autocut-{dest}.{ext}"));
+    let path = params["path"].as_str().filter(|p| !p.trim().is_empty()).map(str::to_string).unwrap_or_else(|| default_export_path(digest, dest, ext));
     let mut p = json!({"path": path, "preset": preset, "wait": true});
     if params["burnCaptions"].as_bool().unwrap_or(false) {
         p["burnCaptions"] = json!(true);
@@ -328,6 +328,20 @@ fn export_video(params: &Value, _digest: &Digest) -> Result<Plan, AutoCutError> 
     }
     let steps = vec![PlannedStep::new("file.exportMedia", p, format!("export with the `{preset}` preset"))];
     Ok(Plan::Steps { steps, notes: vec![format!("writing {path}; long exports report progress over MCP")] })
+}
+
+/// Where an export goes when the prompt named no file: the user's AutoCut folder (the engine
+/// expands `~` and creates it), named after the sequence and the destination. Never a bare
+/// relative name — that lands in whatever directory the app, the CLI or a test runs in (a
+/// 40 MB render once landed in this crate that way).
+fn default_export_path(digest: &Digest, dest: &str, ext: &str) -> String {
+    let folder = if cfg!(target_os = "macos") { "~/Movies/AutoCut" } else { "~/Videos/AutoCut" };
+    let raw = digest.sequence["name"].as_str().unwrap_or("");
+    let safe: String =
+        raw.chars().map(|c| if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).take(80).collect();
+    let name = safe.trim().trim_matches('.').trim();
+    let name = if name.is_empty() { "Sequence" } else { name };
+    format!("{folder}/{name} - {dest}.{ext}")
 }
 
 /// `slow_motion`: retime clips with motion-compensated interpolation — `opticalFlow` (the

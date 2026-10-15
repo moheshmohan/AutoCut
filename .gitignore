@@ -6,3 +6,10 @@ plan/
 .DS_Store
 .claude/worktrees/
 __pycache__/
+
+# rendered media never belongs in the repo (fixtures go to target/fixtures/)
+*.mp4
+*.mov
+*.m4v
+*.mkv
+*.webm
