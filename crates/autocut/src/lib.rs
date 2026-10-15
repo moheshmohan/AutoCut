@@ -2,18 +2,18 @@
 //!
 //! The pipeline ([`runner`]): a local small LLM ([`ollama`]) classifies the user's prompt into an
 //! [`intent::Intent`] with parameters; deterministic [`planner`] handlers turn routine intents into
-//! batches of ordinary engine commands (`transcript.removePauses`, `sequence.extract`, …); anything
-//! complex, or low-confidence, escalates to the cloud supervisor ([`anthropic`], Claude), whose
-//! output is [`validate`]d against the real command registry before anything runs. Every step
-//! executes through the [`Executor`] trait, so the same code drives a headless `Session`, the CLI
-//! and the live app over the MCP bridge.
+//! batches of ordinary engine commands (`transcript.removePauses`, `sequence.extract`, …), each
+//! [`validate`]d against the real command registry before anything runs. Anything complex or
+//! low-confidence is handed back to the caller marked `needs_supervisor`, with the document
+//! context — the supervisor is whoever is driving the editor over MCP (e.g. Claude), which plans
+//! the edit itself with the engine's own tools. Every step executes through the [`Executor`]
+//! trait, so the same code drives a headless `Session`, the CLI and the live app over the bridge.
 //!
 //! Nothing here calls the engine directly: all reads and writes are commands, so AutoCut edits are
 //! ordinary undoable operations like a human's.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
-pub mod anthropic;
 pub mod config;
 pub mod describe;
 pub mod digest;
@@ -23,7 +23,6 @@ pub mod llm;
 pub mod ollama;
 pub mod planner;
 pub mod runner;
-pub mod supervisor;
 pub mod validate;
 
 use std::future::Future;
@@ -158,8 +157,16 @@ pub struct Report {
     /// Local classifier confidence, when classified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
-    /// Who wrote the steps: the local planner, the cloud supervisor, or local reviewed by cloud.
+    /// Who wrote the steps: `local` (AutoCut) or `supervisor` (handed to the MCP caller).
     pub source: &'static str,
+    /// True when the prompt was beyond the routine catalog: the caller — the agent driving the
+    /// editor over MCP — should plan this edit itself with the engine's tools; `document` carries
+    /// the context it needs.
+    #[serde(rename = "needsSupervisor", default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_supervisor: bool,
+    /// The compact document digest (plus captioned frames when requested), on hand-off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<serde_json::Value>,
     pub steps: Vec<PlannedStep>,
     /// Set when the run was executed (not a dry run): each step's outcome.
     #[serde(skip_serializing_if = "Option::is_none")]

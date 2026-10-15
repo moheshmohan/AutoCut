@@ -238,10 +238,10 @@ filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-r
   prompt, deterministic planners turn routine intents into validated commands
   (`transcript.removePauses`, `sequence.extract`, `transcript.createCaptions`, …), the built-in
   Whisper transcribes, and a small vision model (e.g. moondream) captions sampled frames.
-- **A cloud supervisor takes the rest**: prompts the local planner can't handle go to Claude
-  (Anthropic API) with the document digest, the captioned frames and the real command catalog;
-  its plan must validate against the registry before anything runs
-  (`AUTOCUT_POLICY`: `never` | `complex-only` | `always-review`).
+- **The supervisor is the MCP client**: prompts the local planner can't handle come back with
+  `needsSupervisor` plus the document digest (and captioned frames on request) — Claude, driving
+  the editor over MCP, then plans the edit itself with `command_list` / `command_run`, the same
+  tools its UI uses. No API keys, no cloud dependency in the editor.
 - **Everywhere the engine is**: `filmcraft-cli autocut`, and the `autocut_plan` / `autocut_edit`
   MCP tools — so Claude Desktop can drive editing in the live Mac app (`filmcraft --control
   9876` + `filmcraft-cli mcp --bridge 127.0.0.1:9876`).

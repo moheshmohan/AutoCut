@@ -3,7 +3,7 @@
 
 use filmcraft_autocut::config::Config;
 use filmcraft_autocut::llm::FixedModel;
-use filmcraft_autocut::runner::{Mode, Runners, run_with};
+use filmcraft_autocut::runner::{Runners, run_with};
 use filmcraft_autocut::{Executor as _, SessionExecutor};
 use filmcraft_engine::Session;
 use filmcraft_time::TICKS_PER_SECOND;
@@ -44,7 +44,7 @@ async fn duration(ex: &SessionExecutor) -> f64 {
 }
 
 fn classified(intent: &str, params: Value) -> Runners {
-    Runners { local: Box::new(FixedModel::new(vec![json!({"intent": intent, "confidence": 0.95, "params": params})])), supervisor: None, vlm: None }
+    Runners { local: Box::new(FixedModel::new(vec![json!({"intent": intent, "confidence": 0.95, "params": params})])), vlm: None }
 }
 
 fn cfg() -> Config {
@@ -55,7 +55,8 @@ fn cfg() -> Config {
 async fn remove_silence_cuts_the_pause() {
     let ex = demo_with_transcript();
     let before = duration(&ex).await;
-    let r = run_with(&classified("remove_silence", json!({})), "remove the silences", &ex, &cfg(), Mode::Execute).await.unwrap();
+    let r =
+        run_with(&classified("remove_silence", json!({})), "remove the silences", &ex, &cfg(), filmcraft_autocut::runner::Options::execute()).await.unwrap();
     assert_eq!(r.steps.len(), 1, "{r:?}");
     assert_eq!(r.steps[0].id, "transcript.removePauses");
     let removed = r.results.as_ref().unwrap()[0].result.as_ref().unwrap()["removed"].as_u64().unwrap_or(0);
@@ -68,7 +69,7 @@ async fn remove_silence_cuts_the_pause() {
 #[tokio::test(flavor = "multi_thread")]
 async fn remove_fillers_cuts_the_filler_words() {
     let ex = demo_with_transcript();
-    let r = run_with(&classified("remove_fillers", json!({})), "remove the ums", &ex, &cfg(), Mode::Execute).await.unwrap();
+    let r = run_with(&classified("remove_fillers", json!({})), "remove the ums", &ex, &cfg(), filmcraft_autocut::runner::Options::execute()).await.unwrap();
     assert_eq!(r.steps[0].id, "transcript.removeFillers");
     // the crafted transcript has no fillers, so the engine reports nothing removed
     let removed = r.results.as_ref().unwrap()[0].result.as_ref().unwrap()["removed"].as_u64().unwrap_or(0);
@@ -78,7 +79,7 @@ async fn remove_fillers_cuts_the_filler_words() {
 #[tokio::test(flavor = "multi_thread")]
 async fn add_captions_creates_a_caption_track() {
     let ex = demo_with_transcript();
-    let r = run_with(&classified("add_captions", json!({})), "add captions", &ex, &cfg(), Mode::Execute).await.unwrap();
+    let r = run_with(&classified("add_captions", json!({})), "add captions", &ex, &cfg(), filmcraft_autocut::runner::Options::execute()).await.unwrap();
     assert_eq!(r.steps[0].id, "transcript.createCaptions");
     let result = r.results.as_ref().unwrap()[0].result.as_ref().cloned().unwrap_or_default();
     assert!(result["captions"].as_u64().unwrap_or(0) >= 1, "caption blocks created: {result}");
@@ -89,7 +90,10 @@ async fn add_captions_creates_a_caption_track() {
 async fn highlight_reel_keeps_the_best_segment() {
     let ex = demo_with_transcript();
     // ~2.7s of speech in two sentences; a 1-second target keeps one and cuts the other
-    let r = run_with(&classified("highlight_reel", json!({"targetSeconds": 1.0})), "highlight reel", &ex, &cfg(), Mode::Execute).await.unwrap();
+    let r =
+        run_with(&classified("highlight_reel", json!({"targetSeconds": 1.0})), "highlight reel", &ex, &cfg(), filmcraft_autocut::runner::Options::execute())
+            .await
+            .unwrap();
     assert!(r.steps.iter().all(|s| s.id == "transcript.extract"), "{r:?}");
     let results = r.results.as_ref().unwrap();
     assert!(!results.is_empty() && results[0].ok, "the extract ran: {r:?}");

@@ -57,9 +57,13 @@ Intents and their params:
 - cut_range: remove a time range. params: {\"start\": seconds number, \"end\": seconds number, \"mode\"?: \"extract\" (close the gap, default) | \"lift\" (leave a gap)}
 - keep_range: keep ONLY a time range. params: {\"start\": seconds, \"end\": seconds}
 - highlight_reel: keep the most interesting spoken moments, roughly targetSeconds long. params: {\"targetSeconds\"?: number (default 60), \"topic\"?: string (what 'interesting' means here)}
-- custom: anything else, multi-step requests, or anything unclear.
+- custom: anything else.
 
-Times are seconds from the start of the video. Classify, don't plan: pick the single best intent.";
+Pick a specific intent ONLY when the request clearly and completely matches it. Use `custom` when
+the request asks for effects, styling or a look (e.g. 'cinematic', 'sparkles', color grading),
+combines several edits, mentions subjects on screen rather than speech or time ranges, needs
+reordering or new material, or is at all ambiguous — `custom` is always safe. Times are seconds
+from the start of the video. Classify, don't plan: pick the single best intent.";
 
 /// Classify `prompt` with the local model.
 pub async fn classify(model: &dyn ChatModel, prompt: &str) -> Result<Classification, AutoCutError> {

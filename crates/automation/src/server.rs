@@ -181,18 +181,22 @@ pub struct ControlParams {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct AutocutParams {
-    /// What to do, in plain words, e.g. "remove the silences and add captions" or "make a 60-second highlight reel about the launch".
+    /// What to do, in plain words, e.g. "remove the silences and add captions" or "cut 10 to 25 seconds".
     pub prompt: String,
-    /// Plan only; nothing executes (autocut_plan only, default false).
+    /// Caption sampled frames with the local vision model and include them in the returned
+    /// document when the prompt is handed to you (default false; slower).
+    #[serde(default)]
+    pub frames: Option<bool>,
+    /// Plan only; nothing executes (autocut_edit only, default false).
     #[serde(default)]
     pub dry_run: Option<bool>,
 }
 
 /// Shared body of the AutoCut tools: run the pipeline and return the report as JSON.
-async fn autocut_report(ex: &AutocutExecutor, prompt: &str, mode: filmcraft_autocut::runner::Mode) -> Result<Value, AutomationError> {
+async fn autocut_report(ex: &AutocutExecutor, prompt: &str, opts: filmcraft_autocut::runner::Options) -> Result<Value, AutomationError> {
     let cfg = filmcraft_autocut::config::Config::from_env();
     let runners = filmcraft_autocut::runner::Runners::from_config(&cfg);
-    filmcraft_autocut::runner::run_with(&runners, prompt, ex, &cfg, mode)
+    filmcraft_autocut::runner::run_with(&runners, prompt, ex, &cfg, opts)
         .await
         .map_err(|e| AutomationError::Other(e.to_string()))
         .and_then(|r| serde_json::to_value(&r).map_err(|e| AutomationError::Other(e.to_string())))
@@ -250,6 +254,41 @@ impl filmcraft_autocut::Executor for AutocutExecutor {
             }
         }
     }
+
+    fn render(&self, seconds: f64, max_side: u32) -> filmcraft_autocut::RenderFuture {
+        match &*self.0 {
+            Backend::Headless(s) => {
+                let s = s.clone();
+                Box::pin(async move {
+                    tokio::task::spawn_blocking(move || {
+                        let g = s.lock().unwrap_or_else(PoisonError::into_inner);
+                        let (w, h) = g.active_sequence().map(|q| (q.settings.width, q.settings.height))?;
+                        let scale = (max_side as f32 / w.max(h).max(1) as f32).min(1.0);
+                        let img = g.try_render_program_at(scale, filmcraft_time::Tick::from_seconds_f64(seconds)).ok()?;
+                        render_png(img.w as u32, img.h as u32, img.over_black_rgba8(), max_side)
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                })
+            }
+            // the live app renders through its UI; engine.execute can't reach the compositor,
+            // so bridge mode plans without eyes for now
+            Backend::Bridge(_) => Box::pin(async move { None }),
+        }
+    }
+}
+
+/// Same encoding as `filmcraft_autocut`'s `SessionExecutor::render`: RGBA8 → downscaled PNG.
+fn render_png(w: u32, h: u32, rgba: Vec<u8>, max_side: u32) -> Option<Vec<u8>> {
+    let mut img = image::RgbaImage::from_raw(w, h, rgba)?;
+    if max_side > 0 && w.max(h) > max_side {
+        let s = max_side as f32 / w.max(h) as f32;
+        img = image::imageops::resize(&img, ((w as f32 * s) as u32).max(1), ((h as f32 * s) as u32).max(1), image::imageops::FilterType::Triangle);
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(out.into_inner())
 }
 
 impl FilmcraftMcp {
@@ -461,21 +500,28 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "AutoCut: plan an edit",
-        description = "Turn a plain-language prompt (\"remove the silences\", \"cut 0:10 to 0:25\", \"make a highlight reel about the launch\") into a validated batch of engine commands. Local models classify and plan; complex prompts escalate to the configured cloud supervisor. Dry run: nothing executes.",
+        description = "Turn a plain-language prompt (\"remove the silences\", \"cut 0:10 to 0:25\") into a validated batch of engine commands (dry run: nothing executes). Local models classify and plan routine edits. When the report has needsSupervisor, the prompt is beyond the routine catalog and YOU are the supervisor: plan the edit yourself with command_list / command_run / command_batch (render_preview to check) using the returned document; pass frames: true to also get vision captions of sampled frames.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
     async fn autocut_plan(&self, Parameters(p): Parameters<AutocutParams>) -> Result<CallToolResult, McpError> {
-        wrap(autocut_report(&self.executor(), &p.prompt, filmcraft_autocut::runner::Mode::PlanOnly).await)
+        wrap(
+            autocut_report(
+                &self.executor(),
+                &p.prompt,
+                filmcraft_autocut::runner::Options { mode: filmcraft_autocut::runner::Mode::PlanOnly, frames: p.frames.unwrap_or(false) },
+            )
+            .await,
+        )
     }
 
     #[tool(
         title = "AutoCut: edit",
-        description = "Turn a plain-language prompt into engine commands and run them (each an ordinary undoable edit; `edit.undo` reverts). Same planning as autocut_plan, then execution. Configure models with AUTOCUT_* environment variables.",
+        description = "Turn a plain-language prompt into engine commands and run them (each an ordinary undoable edit; `edit.undo` reverts). For prompts beyond the routine catalog the report comes back with needsSupervisor and nothing runs: plan it yourself with command_list / command_run / command_batch as in autocut_plan. Configure models with AUTOCUT_* environment variables.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
     async fn autocut_edit(&self, Parameters(p): Parameters<AutocutParams>) -> Result<CallToolResult, McpError> {
         let mode = if p.dry_run.unwrap_or(false) { filmcraft_autocut::runner::Mode::PlanOnly } else { filmcraft_autocut::runner::Mode::Execute };
-        wrap(autocut_report(&self.executor(), &p.prompt, mode).await)
+        wrap(autocut_report(&self.executor(), &p.prompt, filmcraft_autocut::runner::Options { mode, frames: p.frames.unwrap_or(false) }).await)
     }
 
     #[tool(
@@ -653,7 +699,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; they use local models (Ollama) and escalate to the configured cloud supervisor when needed.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";

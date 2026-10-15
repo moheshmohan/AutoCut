@@ -3,8 +3,6 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use filmcraft_engine::commands::command_specs;
-
 use crate::Executor;
 
 /// Command families AutoCut (and its supervisor) may run — the allowlist every planned step is
@@ -78,13 +76,6 @@ fn frame_rate(seq: &Value) -> Option<(i64, i64)> {
     Some((r["numerator"].as_i64()?, r["denominator"].as_i64()?))
 }
 
-/// The command catalog the supervisor may choose from: id, params doc and label for every allowed
-/// command, as a JSON string (compact enough for one prompt).
-pub fn registry_digest() -> String {
-    let list: Vec<Value> = command_specs().iter().filter(|s| allowed(s.id)).map(|s| json!({"id": s.id, "params": s.params, "label": s.label})).collect();
-    Value::Array(list).to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,15 +101,6 @@ mod tests {
     async fn no_sequence_is_a_clear_error() {
         let ex = SessionExecutor::from(Session::default());
         assert!(matches!(Digest::read(&ex).await, Err(crate::AutoCutError::NoSequence)));
-    }
-
-    #[test]
-    fn registry_lists_only_allowed_commands() {
-        let v: Value = serde_json::from_str(&registry_digest()).unwrap();
-        let ids: Vec<&str> = v.as_array().unwrap().iter().filter_map(|c| c["id"].as_str()).collect();
-        assert!(ids.contains(&"transcript.removePauses"), "{}", ids.len());
-        assert!(ids.contains(&"sequence.extract"));
-        assert!(!ids.iter().any(|id| id.starts_with("prefs.") || id.starts_with("state.")));
     }
 
     #[test]

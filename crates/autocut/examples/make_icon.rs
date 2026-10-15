@@ -17,7 +17,9 @@ fn main() {
         // 16, 16@2x(=32), 32, 32@2x(=64), 128, 128@2x(=256), 256, 256@2x(=512), 512, 512@2x(=1024)
         img.save(dir.join(&name)).expect("save size");
     }
-    for (half, dbl) in [(16u32, "icon_16x16@2x.png"), (32, "icon_32x32@2x.png"), (128, "icon_128x128@2x.png"), (256, "icon_256x256@2x.png"), (512, "icon_512x512@2x.png")] {
+    for (half, dbl) in
+        [(16u32, "icon_16x16@2x.png"), (32, "icon_32x32@2x.png"), (128, "icon_128x128@2x.png"), (256, "icon_256x256@2x.png"), (512, "icon_512x512@2x.png")]
+    {
         let img = image::imageops::resize(&master, half * 2, half * 2, image::imageops::FilterType::Lanczos3);
         img.save(dir.join(dbl)).expect("save @2x");
     }

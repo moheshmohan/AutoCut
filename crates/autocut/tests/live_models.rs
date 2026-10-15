@@ -1,17 +1,14 @@
-//! Live-model checks, opt-in (they need Ollama running and models pulled; the supervisor check
-//! also needs ANTHROPIC_API_KEY and spends a little credit). Run:
+//! Live-model checks, opt-in (they need Ollama running and models pulled). Run:
 //!
 //! ```sh
 //! AUTOCUT_LIVE=1 cargo test -p filmcraft-autocut --test live_models -- --nocapture
 //! # optional: AUTOCUT_LLM_MODEL=phi4-mini AUTOCUT_VLM_MODEL=moondream
-//! # optional: AUTOCUT_SUPERVISOR_LIVE=1 with ANTHROPIC_API_KEY set
 //! ```
 
 use filmcraft_autocut::SessionExecutor;
 use filmcraft_autocut::config::Config;
 use filmcraft_autocut::describe;
 use filmcraft_autocut::intent;
-use filmcraft_autocut::llm::ChatModel as _;
 use filmcraft_autocut::ollama::Ollama;
 use filmcraft_engine::Session;
 use serde_json::json;
@@ -38,6 +35,7 @@ async fn classifier_understands_prompts() {
         ("add subtitles to the whole thing", "add_captions"),
         ("cut everything between 5 and 12 seconds", "cut_range"),
         ("make it a vertical tiktok", "custom"),
+        ("make it cinematic with sparkles wherever someone smiles", "custom"),
     ] {
         let c = intent::classify(&m, prompt).await.unwrap_or_else(|e| panic!("{prompt}: {e}"));
         assert_eq!(c.intent, want, "{prompt} -> {c:?}");
@@ -59,13 +57,23 @@ async fn vlm_describes_a_frame() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn supervisor_plans_a_complex_prompt() {
-    if std::env::var("AUTOCUT_SUPERVISOR_LIVE").ok().as_deref() != Some("1") {
+async fn complex_prompt_hands_off_with_the_document() {
+    if !live() {
         return;
     }
+    // no API: the supervisor is the MCP caller; the report comes back with the context
     let cfg = Config::from_env();
-    let Some(key) = cfg.anthropic_key.clone() else { panic!("ANTHROPIC_API_KEY not set") };
-    let sup = filmcraft_autocut::anthropic::Anthropic::new(&cfg.supervisor_model, &key);
-    let v = sup.complete_json("Answer with {\"ok\": true} as JSON.", "Say ok.", &[]).await.unwrap();
-    assert_eq!(v["ok"], json!(true), "the supervisor answers: {v}");
+    let ex = demo();
+    let runners = filmcraft_autocut::runner::Runners::from_config(&cfg);
+    let r = filmcraft_autocut::runner::run_with(
+        &runners,
+        "add sparkle effects wherever someone smiles, make it cinematic",
+        &ex,
+        &cfg,
+        filmcraft_autocut::runner::Options::plan_only(),
+    )
+    .await
+    .unwrap();
+    assert!(r.needs_supervisor, "{r:?}");
+    assert!(r.document.is_some(), "{r:?}");
 }

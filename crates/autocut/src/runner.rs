@@ -1,12 +1,12 @@
-//! The AutoCut loop: classify, plan, supervise, execute, report.
+//! The AutoCut loop: classify, plan, execute, report — and hand off to the supervisor (the
+//! MCP client driving the editor) when a prompt is beyond the routine catalog.
 
-use crate::config::{Config, Policy};
-use crate::digest::{Digest, registry_digest};
-use crate::intent::{self, Classification};
+use crate::config::Config;
+use crate::digest::Digest;
+use crate::intent;
 use crate::llm::ChatModel;
 use crate::ollama::Ollama;
 use crate::planner::{self, Plan};
-use crate::supervisor;
 use crate::validate;
 use crate::{AutoCutError, Executor, PlannedStep, Report, StepResult};
 
@@ -19,21 +19,42 @@ pub enum Mode {
     Execute,
 }
 
-/// The models this run uses; injectable so tests (and the supervisor-only mode) can script them.
+/// Per-request options.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    pub mode: Mode,
+    /// Caption sampled frames with the local vision model and attach them to the document on a
+    /// supervisor hand-off (slower; the supervisor gets eyes).
+    pub frames: bool,
+}
+
+impl Options {
+    pub fn plan_only() -> Self {
+        Self { mode: Mode::PlanOnly, frames: false }
+    }
+    pub fn execute() -> Self {
+        Self { mode: Mode::Execute, frames: false }
+    }
+}
+
+impl From<Mode> for Options {
+    fn from(mode: Mode) -> Self {
+        Self { mode, frames: false }
+    }
+}
+
+/// The models this run uses; injectable so tests can script them.
 pub struct Runners {
     pub local: Box<dyn ChatModel>,
-    pub supervisor: Option<Box<dyn ChatModel>>,
     /// The local vision model, for frame descriptions the supervisor sees. `None` = no eyes.
     pub vlm: Option<Ollama>,
 }
 
 impl Runners {
-    /// The models the [`Config`] names: the local Ollama models, plus the supervisor when a key
-    /// is configured.
+    /// The models the [`Config`] names.
     pub fn from_config(cfg: &Config) -> Self {
         Self {
             local: Box::new(Ollama::new(&cfg.ollama_host, &cfg.llm_model, cfg.http_timeout)),
-            supervisor: cfg.anthropic_key.as_deref().map(|k| Box::new(crate::anthropic::Anthropic::new(&cfg.supervisor_model, k)) as Box<dyn ChatModel>),
             vlm: Some(Ollama::new(&cfg.ollama_host, &cfg.vlm_model, cfg.http_timeout)),
         }
     }
@@ -41,48 +62,52 @@ impl Runners {
 
 /// Run one prompt against the target behind `ex`, with the configured models.
 pub async fn run(prompt: &str, ex: &dyn Executor, cfg: &Config, mode: Mode) -> Result<Report, AutoCutError> {
-    run_with(&Runners::from_config(cfg), prompt, ex, cfg, mode).await
+    run_with(&Runners::from_config(cfg), prompt, ex, cfg, mode.into()).await
 }
 
 /// [`run`] with explicit models (tests, scripting).
-pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &Config, mode: Mode) -> Result<Report, AutoCutError> {
+pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &Config, opts: Options) -> Result<Report, AutoCutError> {
     let digest = Digest::read(ex).await?;
-    let mut report =
-        Report { prompt: prompt.to_string(), intent: None, confidence: None, source: "local", steps: Vec::new(), results: None, undo: None, notes: Vec::new() };
+    let mut report = Report {
+        prompt: prompt.to_string(),
+        intent: None,
+        confidence: None,
+        source: "local",
+        needs_supervisor: false,
+        document: None,
+        steps: Vec::new(),
+        results: None,
+        undo: None,
+        notes: Vec::new(),
+    };
 
-    // 1. classify locally; fall back to the supervisor when the local model can't (or is down)
+    // 1. classify locally; when the local model is unreachable, the caller (an MCP agent) can
+    //    still plan the edit itself with the engine's tools, so say exactly that
     let classification = match intent::classify(runners.local.as_ref(), prompt).await {
-        Ok(c) => Some(c),
-        Err(e) if runners.supervisor.is_some() && cfg.policy != Policy::Never => {
-            report.notes.push(format!("the local model couldn't classify ({e}); asking the supervisor"));
-            None
-        }
+        Ok(c) => c,
         Err(e) => {
             return Err(AutoCutError::Llm(format!(
-                "{e}. Start Ollama (`ollama serve`) and pull the model (`ollama pull {}`), or set ANTHROPIC_API_KEY to let Claude take over",
+                "{e}. Start Ollama (`ollama serve`) and pull the model (`ollama pull {}`) — or, when an agent is driving the editor, let it plan this edit itself with command_list / command_run",
                 cfg.llm_model
             )));
         }
     };
 
-    let use_local = classification.as_ref().is_some_and(|c| c.intent != "custom" && c.confidence >= cfg.confidence_threshold);
-    if let Some(c) = &classification {
-        report.intent = Some(c.intent.clone());
-        report.confidence = Some(c.confidence);
-    }
+    let use_local = classification.intent != "custom" && classification.confidence >= cfg.confidence_threshold;
+    report.intent = Some(classification.intent.clone());
+    report.confidence = Some(classification.confidence);
 
-    // 2. plan
-    let mut steps: Vec<PlannedStep>;
+    // 2. plan — or hand off
+    let steps: Vec<PlannedStep>;
     if use_local {
-        let c = classification.unwrap_or_else(Classification::custom);
-        match planner::plan(&c.intent, &c.params, &digest, ex).await? {
+        match planner::plan(&classification.intent, &classification.params, &digest, ex).await? {
             Plan::Steps { steps: s, notes } => {
                 steps = s;
                 report.notes.extend(notes);
             }
             Plan::GenerateThen { generate, params } => {
                 // transcript-dependent planning (highlight reel): transcribe, re-read, plan again
-                if mode == Mode::Execute {
+                if opts.mode == Mode::Execute {
                     run_steps(std::slice::from_ref(&generate), ex, &mut report).await;
                 } else {
                     report.steps = vec![generate];
@@ -99,61 +124,38 @@ pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &
                 }
             }
         }
-    } else if cfg.supervisor_available() {
-        let sup = runners.supervisor.as_deref().ok_or_else(|| AutoCutError::Llm("no supervisor configured".into()))?;
-        let doc = supervisor_document(runners, ex, &digest).await;
-        let sup = supervisor::plan(sup, prompt, &doc, &registry_digest()).await?;
-        report.source = "supervisor";
-        report.notes.extend(sup.notes);
-        steps = sup.steps;
     } else {
-        return Err(AutoCutError::Llm(
-            "no planner could take this prompt: the local model didn't recognize it and no supervisor is configured (set ANTHROPIC_API_KEY)".into(),
-        ));
-    }
-
-    // 3. review pass
-    if cfg.policy == Policy::AlwaysReview
-        && report.source == "local"
-        && !steps.is_empty()
-        && let Some(sup) = runners.supervisor.as_deref()
-    {
-        let doc = supervisor_document(runners, ex, &digest).await;
-        match supervisor::review(sup, prompt, &doc, &steps).await {
-            Ok(s) => {
-                report.source = "reviewed";
-                steps = s.steps;
-                report.notes.extend(s.notes);
+        // the supervisor is whoever is on the other side: return the context it needs to plan
+        // the edit itself with the engine's tools
+        report.source = "supervisor";
+        report.needs_supervisor = true;
+        report.steps = Vec::new();
+        report.notes.push(
+            "this prompt is beyond AutoCut's routine catalog; the caller should plan it with the engine's commands (command_list / command_run / command_batch, render_preview to check)".into(),
+        );
+        let mut doc = digest.compact();
+        if opts.frames
+            && let Some(vlm) = &runners.vlm
+        {
+            let times = crate::describe::sample_times(digest.duration_seconds().min(120.0), 6);
+            if let Ok(frames) = crate::describe::describe_frames(vlm, ex, &times, 448).await
+                && !frames.is_empty()
+            {
+                doc["frames"] = crate::describe::to_json(&frames);
             }
-            Err(e) => report.notes.push(format!("the supervisor review failed and was skipped: {e}")),
         }
+        report.document = Some(doc);
+        return Ok(report);
     }
 
     validate::validate(&steps).map_err(AutoCutError::Invalid)?;
     report.steps = steps.clone();
 
-    // 4. execute
-    if mode == Mode::Execute {
+    // 3. execute
+    if opts.mode == Mode::Execute {
         run_steps(&steps, ex, &mut report).await;
     }
     Ok(report)
-}
-
-/// The document the supervisor plans from: the compact digest, plus a few captioned frames
-/// when a local vision model is configured and the target can render — visual context for
-/// prompts about what is on screen. Frame captioning failures degrade silently.
-async fn supervisor_document(runners: &Runners, ex: &dyn Executor, digest: &Digest) -> serde_json::Value {
-    let mut doc = digest.compact();
-    if let Some(vlm) = &runners.vlm {
-        let times = crate::describe::sample_times(digest.duration_seconds().min(120.0), 6);
-        if !times.is_empty()
-            && let Ok(frames) = crate::describe::describe_frames(vlm, ex, &times, 448).await
-            && !frames.is_empty()
-        {
-            doc["frames"] = crate::describe::to_json(&frames);
-        }
-    }
-    doc
 }
 
 /// Run the steps in order (stopping at the first failure), filling in the report.
@@ -201,77 +203,72 @@ mod tests {
         ticks / filmcraft_time::TICKS_PER_SECOND as f64
     }
 
-    fn cfg(policy: Policy) -> Config {
-        Config { policy, confidence_threshold: 0.6, ..Config::default() }
+    fn cfg() -> Config {
+        Config::default()
     }
 
     fn classified(intent: &str, params: serde_json::Value) -> Runners {
-        Runners { local: Box::new(FixedModel::new(vec![json!({"intent": intent, "confidence": 0.95, "params": params})])), supervisor: None, vlm: None }
+        Runners { local: Box::new(FixedModel::new(vec![json!({"intent": intent, "confidence": 0.95, "params": params})])), vlm: None }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cut_range_cuts_headless() {
         let ex = demo();
         let before = duration(&ex).await;
-        let r = run_with(&classified("cut_range", json!({"start": 0.0, "end": 2.0})), "cut the first 2 seconds", &ex, &cfg(Policy::Never), Mode::Execute)
-            .await
-            .unwrap();
+        let r =
+            run_with(&classified("cut_range", json!({"start": 0.0, "end": 2.0})), "cut the first 2 seconds", &ex, &cfg(), Options::execute()).await.unwrap();
         let cut = before - duration(&ex).await;
         assert!((cut - 2.0).abs() < 0.2, "cut {cut}s, expected ~2s");
         assert!(r.undo.unwrap_or(0) >= 1, "{r:?}");
         assert!(r.steps.iter().any(|s| s.id == "sequence.extract"));
+        assert!(!r.needs_supervisor);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dry_run_changes_nothing() {
         let ex = demo();
         let before = duration(&ex).await;
-        run_with(&classified("cut_range", json!({"start": 0.0, "end": 2.0})), "cut", &ex, &cfg(Policy::Never), Mode::PlanOnly).await.unwrap();
+        run_with(&classified("cut_range", json!({"start": 0.0, "end": 2.0})), "cut", &ex, &cfg(), Options::plan_only()).await.unwrap();
         assert_eq!(before, duration(&ex).await);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn custom_escalates_or_fails_cleanly() {
+    async fn complex_prompts_hand_off_to_the_caller() {
         let ex = demo();
-        // no supervisor, custom intent: clear error
-        let e = run_with(&classified("custom", json!({})), "teleport the clip to mars", &ex, &cfg(Policy::Never), Mode::PlanOnly).await.unwrap_err();
-        assert!(e.to_string().contains("no planner"), "{e}");
-
-        // with a scripted supervisor, its plan runs
-        let sup = Runners {
-            local: Box::new(FixedModel::new(vec![json!({"intent": "custom", "confidence": 0.1})])),
-            supervisor: Some(Box::new(FixedModel::new(vec![
-                json!({"steps": [{"id": "sequence.addEditAllTracks", "params": {"seconds": 2.0}, "why": "test"}], "notes": []}),
-            ]))),
-            vlm: None,
-        };
-        let mut c = cfg(Policy::ComplexOnly);
-        c.anthropic_key = Some("test-key".into());
-        let r = run_with(&sup, "do something odd", &ex, &c, Mode::Execute).await.unwrap();
+        let r = run_with(&classified("custom", json!({})), "teleport the clip to mars", &ex, &cfg(), Options::plan_only()).await.unwrap();
+        assert!(r.needs_supervisor);
         assert_eq!(r.source, "supervisor");
-        assert_eq!(r.steps[0].id, "sequence.addEditAllTracks");
-        assert!(r.results.as_ref().is_some_and(|v| v[0].ok), "{r:?}");
+        assert!(r.steps.is_empty());
+        let doc = r.document.clone().expect("the context to plan with");
+        assert!(doc["sequence"]["durationSeconds"].as_f64().unwrap_or(0.0) > 0.0, "{doc}");
+        assert!(r.notes.iter().any(|n| n.contains("command_run")), "{r:?}");
+        assert!(r.results.is_none(), "nothing ran");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn low_confidence_escalates() {
+    async fn low_confidence_hands_off_too() {
         let ex = demo();
-        let sup = Runners {
-            local: Box::new(FixedModel::new(vec![json!({"intent": "add_captions", "confidence": 0.2})])),
-            supervisor: Some(Box::new(FixedModel::new(vec![json!({"steps": [], "notes": ["no audio to caption"]})]))),
-            vlm: None,
-        };
-        let mut c = cfg(Policy::ComplexOnly);
-        c.anthropic_key = Some("test-key".into());
-        let r = run_with(&sup, "caption?", &ex, &c, Mode::PlanOnly).await.unwrap();
-        assert_eq!(r.source, "supervisor");
+        let r = Runners { local: Box::new(FixedModel::new(vec![json!({"intent": "add_captions", "confidence": 0.2})])), vlm: None };
+        let out = run_with(&r, "caption?", &ex, &cfg(), Options::plan_only()).await.unwrap();
+        assert!(out.needs_supervisor, "{out:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn no_sequence_fails_clearly() {
         let ex = SessionExecutor::from(Session::default());
-        let e = run_with(&classified("cut_range", json!({"start": 0.0, "end": 1.0})), "x", &ex, &cfg(Policy::Never), Mode::PlanOnly).await.unwrap_err();
+        let e = run_with(&classified("cut_range", json!({"start": 0.0, "end": 1.0})), "x", &ex, &cfg(), Options::plan_only()).await.unwrap_err();
         assert!(matches!(e, AutoCutError::NoSequence), "{e}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unreachable_local_model_names_the_way_out() {
+        let ex = demo();
+        let mut c = cfg();
+        c.ollama_host = "http://127.0.0.1:1".into();
+        c.http_timeout = std::time::Duration::from_secs(2);
+        let e = run("anything", &ex, &c, Mode::PlanOnly).await.unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("ollama serve") && msg.contains("command_run"), "{msg}");
     }
 
     #[test]

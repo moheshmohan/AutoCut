@@ -94,14 +94,17 @@ SUBCOMMANDS
   probe <media> [--image-sequence]
                                 media info as JSON, with MXF / Ogg / BWF details; with
                                 --image-sequence <media> is the first numbered still of a sequence
-  autocut '<prompt>' [--dry-run]
+  autocut '<prompt>' [--dry-run] [--frames]
                                 plan (and run) a natural-language edit with AutoCut: a local
-                                model (Ollama) classifies the prompt, deterministic planners turn
-                                routine intents into engine commands, and complex prompts go to
-                                the cloud supervisor (ANTHROPIC_API_KEY). --dry-run shows the
-                                validated steps without running them. Config: AUTOCUT_LLM_MODEL,
-                                AUTOCUT_VLM_MODEL, AUTOCUT_OLLAMA_HOST, AUTOCUT_POLICY
-                                (never|complex-only|always-review)
+                                model (Ollama) classifies the prompt and deterministic planners
+                                turn routine intents into engine commands. Prompts beyond the
+                                routine catalog come back with needsSupervisor (nothing runs):
+                                run those through an MCP client, which plans them with the
+                                engine's own commands. --dry-run shows the validated steps
+                                without running them; --frames adds captioned frames to the
+                                handed-off document. Config: AUTOCUT_LLM_MODEL,
+                                AUTOCUT_VLM_MODEL, AUTOCUT_OLLAMA_HOST,
+                                AUTOCUT_CONFIDENCE_THRESHOLD
   bench-decode <media> [--frames N]
   mcp                           MCP server on stdio (headless, or --bridge to the live app)
   help                          this text
@@ -317,9 +320,12 @@ async fn cli() {
         "autocut" => {
             let prompt = a.positionals.get(1..).map(|p| p.join(" ")).unwrap_or_default();
             if prompt.is_empty() {
-                usage("autocut '<prompt>' [--dry-run]");
+                usage("autocut '<prompt>' [--dry-run] [--frames]");
             }
-            let mode = if a.flag("--dry-run") { filmcraft_autocut::runner::Mode::PlanOnly } else { filmcraft_autocut::runner::Mode::Execute };
+            let opts = filmcraft_autocut::runner::Options {
+                mode: if a.flag("--dry-run") { filmcraft_autocut::runner::Mode::PlanOnly } else { filmcraft_autocut::runner::Mode::Execute },
+                frames: a.flag("--frames"),
+            };
             let cfg = filmcraft_autocut::config::Config::from_env();
             let mut b = Backend::open(&a);
             let report = match &mut b {
@@ -327,7 +333,7 @@ async fn cli() {
                     // AutoCut plans through an Executor; lend it the session and take it back for --save
                     let session = std::mem::take(s);
                     let ex = filmcraft_autocut::SessionExecutor::from(*session);
-                    let r = filmcraft_autocut::runner::run(&prompt, &ex, &cfg, mode).await;
+                    let r = filmcraft_autocut::runner::run_with(&filmcraft_autocut::runner::Runners::from_config(&cfg), &prompt, &ex, &cfg, opts).await;
                     if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
                         **s = inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
                     }
@@ -339,7 +345,7 @@ async fn cli() {
                     let addr = a.opt("--bridge").unwrap_or_default();
                     let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
                     let ex = filmcraft_automation::AutocutExecutor::bridge(client);
-                    filmcraft_autocut::runner::run(&prompt, &ex, &cfg, mode).await
+                    filmcraft_autocut::runner::run_with(&filmcraft_autocut::runner::Runners::from_config(&cfg), &prompt, &ex, &cfg, opts).await
                 }
             };
             match report {
@@ -352,6 +358,11 @@ async fn cli() {
                     }
                     let v = serde_json::to_value(&r).unwrap_or_default();
                     print(&a, &v);
+                    if r.needs_supervisor {
+                        // the report (with the document) is on stdout; a caller that can plan —
+                        // an agent over MCP — takes it from here
+                        fail("autocut: this prompt needs the supervisor; run it through an MCP client (filmcraft-cli mcp) or rephrase as a routine edit");
+                    }
                 }
                 Err(e) => fail(format!("autocut: {e}")),
             }
