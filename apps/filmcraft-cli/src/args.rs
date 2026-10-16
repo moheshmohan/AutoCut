@@ -39,6 +39,7 @@ const VALUED: &[&str] = &[
     "--title",
     "--report",
     "--description",
+    "--album",
     "--music",
     "--target-minutes",
 ];

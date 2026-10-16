@@ -97,7 +97,7 @@ SUBCOMMANDS
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
          [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
-         [--export out.mp4 [--upload]] [--qa | --no-qa]
+         [--export out.mp4 [--upload [--album <title>]]] [--qa | --no-qa]
                                 a narrated 16:9 showcase of every clip the analysis found, oldest
                                 first: title, a counter, name/date lower thirds that slide and
                                 fade in and out, a slow push-in on every shot, year cards,
@@ -131,7 +131,9 @@ SUBCOMMANDS
                                 well-known one first, under the title in large outlined
                                 capitals; composed in a \"<title> — Thumbnail\" sequence kept
                                 in the project), and --upload then sends the export to
-                                your Google Photos library (as `photos upload`). Spoken lines are
+                                your Google Photos library (as `photos upload`; --album puts it
+                                into that album, made when missing, to add the next round's
+                                material to by hand). Spoken lines are
                                 cached in the data directory, so a rebuild synthesizes only the
                                 lines that changed. QA (on with --export, --qa without one, --no-qa
                                 to skip) checks the built show: gaps and overlaps between shots and
@@ -161,16 +163,32 @@ SUBCOMMANDS
                                 handed-off document. Config: AUTOCUT_LLM_MODEL,
                                 AUTOCUT_VLM_MODEL, AUTOCUT_OLLAMA_HOST,
                                 AUTOCUT_CONFIDENCE_THRESHOLD
-  photos auth [--upload]         sign in to Google Photos (browser consent, one time; needs
+  photos auth [--upload | --albums]
+                                 sign in to Google Photos (browser consent, one time; needs
                                  client_secret.json from Google Cloud — see crates/gphotos/README.md);
                                  --upload also asks to add to your library (for `photos upload`),
-                                 keeping what you granted before
-  photos upload <file> [--description D]
+                                 --albums that and to see the albums FilmCraft makes (for the
+                                 album commands), keeping what you granted before
+  photos upload <file> [--description D] [--album <title|id>]
                                  upload a file (an export: MP4/MOV/… video up to 10 GB, or a
                                  photo up to 200 MB) to your Google Photos library, resumably in
                                  8 MiB chunks; progress on stderr, the new media item (id, link)
-                                 as JSON. Needs `photos auth --upload` once and the Photos Library
-                                 API enabled in your Google Cloud project
+                                 as JSON. --album puts it into that album too: the one FilmCraft
+                                 made with exactly that title (or that id), created when missing.
+                                 Needs `photos auth --upload` once (`--albums` for --album) and
+                                 the Photos Library API enabled in your Google Cloud project
+  photos album create <title> [--description D]
+                                 make an album in your Google Photos library (titles up to 500
+                                 characters; --description becomes a note at its top) and print
+                                 its id and link; an album FilmCraft made earlier with exactly
+                                 that title is reused, never duplicated. Add your own photos and
+                                 videos to it in Google Photos, then `photos pick --album <title>`
+  photos album add <title|id> <mediaItemId>...
+                                 add media items FilmCraft uploaded (ids from `photos upload`) to
+                                 one of its albums, 50 per request (Google adds only items an app
+                                 uploaded, and only into albums it made)
+  photos albums [--json]         the albums FilmCraft made: title, item count, link (Google shows
+                                 apps no other albums, and not the items you add to them by hand)
   photos pick [--auto query [--all]] [--since YYYY-MM-DD] [--max-items n] [--timeout secs] [--session id] [--no-browser]
                                  open the Google Photos picker in the browser, wait (default
                                  600 s, at most 3600) for your selection, download it into the
@@ -365,14 +383,36 @@ fn absolute(path: &str) -> String {
     std::path::absolute(path).ok().and_then(|p| p.into_os_string().into_string().ok()).unwrap_or_else(|| path.to_string())
 }
 
-/// Upload `path` to the user's Google Photos library (`photos upload`, `showcase --upload`):
+/// `--album <title|id>`: absent, or a usable title (a usage error otherwise).
+fn album_opt(a: &Args, cmd: &str) -> Option<String> {
+    if !a.flag("--album") {
+        return None;
+    }
+    let Some(t) = a.opt("--album").map(str::trim).filter(|t| !t.is_empty()) else {
+        usage(format!("{cmd}: --album wants an album title (or id)"));
+    };
+    if let Err(e) = filmcraft_gphotos::albums::clean_title(t) {
+        usage(format!("{cmd}: --album: {e}"));
+    }
+    Some(t.to_string())
+}
+
+/// Whether the saved Google Photos sign-in can do what is asked, from disk (no network): uploads,
+/// or uploads into albums.
+fn photos_readiness(album: bool) -> Result<(), String> {
+    let dir = filmcraft_gphotos::data_dir();
+    if album { filmcraft_gphotos::album_readiness(&dir) } else { filmcraft_gphotos::upload_readiness(&dir) }
+}
+
+/// Upload `path` to the user's Google Photos library (`photos upload`, `showcase --upload`),
+/// into `album` too when given (FilmCraft's album of that title or id, created when missing):
 /// progress on stderr (stdout may be a protocol stream), the new media item as JSON.
-async fn upload_to_photos(path: String, description: Option<String>) -> Result<Value, String> {
+async fn upload_to_photos(path: String, description: Option<String>, album: Option<String>) -> Result<Value, String> {
     tokio::task::spawn_blocking(move || {
-        // the sign-in and its upload permission from disk first: no token refresh just to refuse
-        filmcraft_gphotos::upload_readiness(&filmcraft_gphotos::data_dir())?;
+        // the sign-in and its permissions from disk first: no token refresh just to refuse
+        photos_readiness(album.is_some())?;
         let gp = filmcraft_gphotos::GooglePhotos::configured().map_err(|e| e.to_string())?;
-        let opts = filmcraft_gphotos::upload::UploadOptions { description, ..Default::default() };
+        let opts = filmcraft_gphotos::upload::UploadOptions { description, album, ..Default::default() };
         let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
         // a line per status change, and at most two a second while the bytes go
         let mut last: Option<(u64, String, std::time::Instant)> = None;
@@ -380,12 +420,30 @@ async fn upload_to_photos(path: String, description: Option<String>) -> Result<V
             let pct = sent.saturating_mul(100).checked_div(total).unwrap_or(0);
             let show = last.as_ref().is_none_or(|(p, s, at)| s != status || (*p != pct && (pct == 100 || at.elapsed().as_millis() >= 500)));
             if show {
-                diag(format_args!("photos upload: {pct:>3}% ({:.1} of {:.1} MiB) {status}", mib(sent), mib(total)));
+                if total == 0 {
+                    diag(format_args!("photos upload: {status}"));
+                } else {
+                    diag(format_args!("photos upload: {pct:>3}% ({:.1} of {:.1} MiB) {status}", mib(sent), mib(total)));
+                }
                 last = Some((pct, status.to_string(), std::time::Instant::now()));
             }
             true
         };
         gp.upload(std::path::Path::new(&path), &opts, &mut progress).map(|u| u.to_json()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("internal error: {e}"))?
+}
+
+/// Run album calls (`photos album …`, `photos albums`) off the async runtime, once the saved
+/// sign-in is known to have the album permissions.
+async fn with_albums<T: Send + 'static>(
+    f: impl FnOnce(&filmcraft_gphotos::albums::Albums<'_>) -> Result<T, filmcraft_gphotos::GPhotosError> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(move || {
+        photos_readiness(true)?;
+        let gp = filmcraft_gphotos::GooglePhotos::configured().map_err(|e| e.to_string())?;
+        gp.albums(f).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("internal error: {e}"))?
@@ -443,17 +501,30 @@ async fn cli() {
             outln!("½-res linear conversion {w}x{h}: {:.1} ms", t1.elapsed().as_secs_f64() * 1000.0);
         }
         "photos" => {
-            let what = a.pos(1).unwrap_or_else(|| usage("photos auth | pick | upload <file> | cached | add <id>..."));
+            let what = a.pos(1).unwrap_or_else(|| usage("photos auth | pick | upload <file> | album create|add | albums | cached | add <id>..."));
             match what {
                 "auth" => {
                     let dir = filmcraft_gphotos::data_dir();
-                    // --upload: also the permission to add to the library (incremental consent)
-                    let access = if a.flag("--upload") { filmcraft_gphotos::auth::Access::PickAndUpload } else { filmcraft_gphotos::auth::Access::Pick };
+                    // --upload: also the permission to add to the library; --albums: that and
+                    // reading back the albums FilmCraft made (incremental consent)
+                    let access = if a.flag("--albums") {
+                        filmcraft_gphotos::auth::Access::PickUploadAndAlbums
+                    } else if a.flag("--upload") {
+                        filmcraft_gphotos::auth::Access::PickAndUpload
+                    } else {
+                        filmcraft_gphotos::auth::Access::Pick
+                    };
                     match filmcraft_gphotos::auth::ClientSecret::load(&dir) {
                         Ok(secret) => match filmcraft_gphotos::auth::consent(&secret, &dir, access) {
                             Ok(t) => outln!(
                                 "signed in to Google Photos ({}); tokens in {}",
-                                if t.grants(filmcraft_gphotos::auth::UPLOAD_SCOPE) { "pick and upload" } else { "pick" },
+                                if t.check_albums().is_ok() {
+                                    "pick, upload and albums"
+                                } else if t.grants(filmcraft_gphotos::auth::UPLOAD_SCOPE) {
+                                    "pick and upload"
+                                } else {
+                                    "pick"
+                                },
                                 dir.join("tokens.json").to_string_lossy()
                             ),
                             Err(e) => fail(format!("photos auth: {e}")),
@@ -586,14 +657,72 @@ async fn cli() {
                     }
                 }
                 "upload" => {
-                    let path = a.pos(2).unwrap_or_else(|| usage("photos upload <file> [--description D]"));
+                    let path = a.pos(2).unwrap_or_else(|| usage("photos upload <file> [--description D] [--album <title|id>]"));
                     if a.positionals.len() > 3 {
                         usage("photos upload: one file at a time");
                     }
                     let description = a.opt("--description").map(str::to_string);
-                    match upload_to_photos(absolute(path), description).await {
+                    let album = album_opt(&a, "photos upload");
+                    match upload_to_photos(absolute(path), description, album).await {
                         Ok(v) => print(&a, &v),
                         Err(e) => fail(format!("photos upload: {e}")),
+                    }
+                }
+                "album" => match a.pos(2) {
+                    Some("create") => {
+                        let title = a.positionals.get(3..).map(|p| p.join(" ")).unwrap_or_default();
+                        if title.trim().is_empty() {
+                            usage("photos album create <title> [--description D]");
+                        }
+                        let title = filmcraft_gphotos::albums::clean_title(&title).unwrap_or_else(|e| usage(format!("photos album create: {e}")));
+                        let description = a.opt("--description").map(str::to_string);
+                        if let Err(e) = filmcraft_gphotos::albums::check_note(description.as_deref()) {
+                            usage(format!("photos album create: {e}"));
+                        }
+                        match with_albums(move |al| al.ensure(&title, description.as_deref())).await {
+                            Ok(e) => {
+                                if let Some(why) = &e.note_error {
+                                    diag(format_args!("photos album create: the album is made, but its description was not added: {why}"));
+                                }
+                                print(&a, &e.to_json());
+                            }
+                            Err(e) => fail(format!("photos album create: {e}")),
+                        }
+                    }
+                    Some("add") => {
+                        let (Some(album), Some(ids)) = (a.pos(3), a.positionals.get(4..).filter(|ids| !ids.is_empty())) else {
+                            usage("photos album add <title|id> <mediaItemId>...  (ids from `photos upload`; Google adds only items FilmCraft uploaded)")
+                        };
+                        let (album, ids) = (album.to_string(), ids.to_vec());
+                        if let Err(e) = filmcraft_gphotos::albums::check_item_ids(&ids) {
+                            usage(format!("photos album add: {e}"));
+                        }
+                        match with_albums(move |al| al.add(&album, &ids)).await {
+                            Ok(added) => print(&a, &added.to_json()),
+                            Err(e) => fail(format!("photos album add: {e}")),
+                        }
+                    }
+                    Some(other) => usage(format!("photos album: unknown `{other}` (create <title> | add <title|id> <mediaItemId>...)")),
+                    None => usage("photos album create <title> [--description D] | photos album add <title|id> <mediaItemId>..."),
+                },
+                "albums" => {
+                    if a.positionals.len() > 2 {
+                        usage("photos albums [--json]");
+                    }
+                    match with_albums(|al| al.list()).await {
+                        Ok(listed) if a.flag("--json") => print(&a, &listed.to_json()),
+                        Ok(listed) => {
+                            for al in &listed.albums {
+                                let count = al.media_items.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+                                outln!("{:<40} {count:>6} item(s)  {}", al.title, al.product_url.as_deref().unwrap_or(&al.id));
+                            }
+                            outln!(
+                                "{} album(s) made by FilmCraft{}; Google shows apps no other albums (pick from those with `photos pick --album <title>`)",
+                                listed.albums.len(),
+                                if listed.complete { "" } else { " (more than could be listed)" }
+                            );
+                        }
+                        Err(e) => fail(format!("photos albums: {e}")),
                     }
                 }
                 "cached" => {
@@ -629,10 +758,10 @@ async fn cli() {
                         Err(e) => fail(format!("photos add: import: {e}")),
                     }
                 }
-                "albums" | "search" => usage(format!(
-                    "photos {what}: Google retired library browsing and search for apps on 2025-03-31; use `photos pick` to choose items in Google Photos"
-                )),
-                other => usage(format!("photos: unknown `{other}` (auth | pick | upload | cached | add)")),
+                "search" => usage(
+                    "photos search: Google retired library browsing and search for apps on 2025-03-31; use `photos pick` (or `photos pick --auto <query>`) to choose items in Google Photos",
+                ),
+                other => usage(format!("photos: unknown `{other}` (auth | pick | upload | album | albums | cached | add)")),
             }
         }
         "showcase" => {
@@ -683,11 +812,17 @@ async fn cli() {
             // --upload: the export goes to Google Photos once built; a missing sign-in or
             // consent fails now, not after the build
             let upload = a.flag("--upload") && !a.flag("--plan");
+            // --album: the upload also goes into that album (FilmCraft's, created when missing),
+            // where the next iteration's material can be added by hand
+            let album = album_opt(&a, "showcase");
+            if album.is_some() && !a.flag("--upload") {
+                usage("showcase: --album names the album the upload goes into; add --upload (and --export out.mp4)");
+            }
             if upload {
                 if opts.export.is_none() {
                     usage("showcase: --upload sends the export to Google Photos; add --export out.mp4");
                 }
-                if let Err(e) = filmcraft_gphotos::upload_readiness(&filmcraft_gphotos::data_dir()) {
+                if let Err(e) = photos_readiness(album.is_some()) {
                     fail(format!("showcase: --upload: {e}"));
                 }
             }
@@ -830,7 +965,7 @@ async fn cli() {
                     if upload && let Some(requested) = &opts.export {
                         let file = built.export.as_ref().and_then(|r| written_paths(r, requested).into_iter().next()).unwrap_or_else(|| requested.clone());
                         let description = a.opt("--description").map(str::to_string).or_else(|| Some(opts.title.clone()).filter(|t| !t.trim().is_empty()));
-                        match upload_to_photos(absolute(&file), description).await {
+                        match upload_to_photos(absolute(&file), description, album.clone()).await {
                             Ok(v) => out["upload"] = v,
                             Err(e) => {
                                 out["uploadError"] = json!(e);

@@ -58,6 +58,71 @@ fn photos_upload_without_a_sign_in_names_the_fix() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Album commands without the album permissions (a data dir of the test's own) fail before
+/// anything is sent, naming `photos auth --albums`; malformed ones are usage errors.
+#[test]
+fn photos_albums_without_consent_name_the_fix() {
+    let dir = std::env::temp_dir().join(format!("filmcraft-cli-albums-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let data = dir.join("data");
+    std::fs::create_dir_all(data.join("google-photos")).unwrap();
+    let clip = dir.join("clip.mp4");
+    std::fs::write(&clip, b"not really a movie").unwrap();
+    let clip = clip.to_string_lossy().to_string();
+    let run =
+        |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(args).env("FILMCRAFT_DATA_DIR", &data).output().expect("spawn filmcraft-cli");
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).to_string();
+
+    // usage errors: exit 2, nothing read
+    let too_long = "t ".repeat(400);
+    for args in [
+        vec!["photos", "album"],
+        vec!["photos", "album", "frobnicate"],
+        vec!["photos", "album", "create"],
+        vec!["photos", "album", "create", "  "],
+        vec!["photos", "album", "create", &too_long],
+        vec!["photos", "album", "add", "Robots"],
+        vec!["photos", "album", "add", "Robots", "not an id"],
+        vec!["photos", "albums", "extra"],
+        vec!["photos", "upload", &clip, "--album"],
+        vec!["photos", "upload", &clip, "--album", "  "],
+        vec!["photos", "search", "robots"],
+    ] {
+        let o = run(&args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", err(&o));
+    }
+    // not connected
+    for args in [vec!["photos", "albums"], vec!["photos", "album", "create", "Robot", "showcase"], vec!["photos", "album", "add", "Robots", "AF1QipItem"]] {
+        let o = run(&args);
+        assert_eq!(o.status.code(), Some(1), "{args:?}: {}", err(&o));
+        assert!(err(&o).contains("not connected") && err(&o).contains("photos auth --albums"), "{args:?}: {}", err(&o));
+    }
+    // signed in for uploads only: albums (and uploads into them) need `--albums`
+    std::fs::write(data.join("google-photos/client_secret.json"), r#"{"installed":{"client_id":"id","client_secret":"s"}}"#).unwrap();
+    let upload_only = r#"{"access_token":"a","refresh_token":"r","expires_at":1,"scope":"https://www.googleapis.com/auth/photospicker.mediaitems.readonly https://www.googleapis.com/auth/photoslibrary.appendonly"}"#;
+    std::fs::write(data.join("google-photos/tokens.json"), upload_only).unwrap();
+    for args in [vec!["photos", "albums", "--json"], vec!["photos", "album", "create", "Robots"], vec!["photos", "upload", &clip, "--album", "Robots"]] {
+        let o = run(&args);
+        assert_eq!(o.status.code(), Some(1), "{args:?}: {}", err(&o));
+        assert!(err(&o).contains("consent") && err(&o).contains("photos auth --albums"), "{args:?}: {}", err(&o));
+    }
+    // the engine commands say the same, as their reason for being disabled
+    let o = run(&["exec", "photos.albums"]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("photos auth --albums"), "{}", err(&o));
+    // showcase --album goes with --upload
+    let report = dir.join("report.json");
+    std::fs::write(&report, r#"{"subject":"robot","clips":[]}"#).unwrap();
+    let report = report.to_string_lossy().to_string();
+    let out = dir.join("out.mp4").to_string_lossy().to_string();
+    assert_eq!(run(&["showcase", "--report", &report, "--export", &out, "--album", "Robots"]).status.code(), Some(2));
+    let o = run(&["showcase", "--report", &report, "--export", &out, "--upload", "--album", "Robots"]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("photos auth --albums"), "{}", err(&o));
+    assert!(!dir.join("out.mp4").exists(), "nothing was built");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn help_and_usage_errors() {
     let h = cli(&["help"]);
