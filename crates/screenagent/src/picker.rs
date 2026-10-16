@@ -221,6 +221,105 @@ pub fn enumeration_failed(elements: &[Element], w: u32, h: u32) -> bool {
     counts.values().any(|&n| n >= 4 && n.saturating_mul(2) > elements.len())
 }
 
+/// The `find` ask for Chrome's "Leave site?" dialog (the picker holds its selection in a
+/// beforeunload handler, so closing or navigating its tab asks first).
+pub const LEAVE_BUTTON: &str =
+    "the 'Leave' button of the browser's 'Leave site?' dialog (it asks whether to leave the page; its two buttons are 'Leave' and 'Cancel')";
+
+/// Whether a grounded element is the Leave button [`LEAVE_BUTTON`] asked for: labelled
+/// "Leave" (nothing else — never Cancel, Stay or a page element the model offered instead)
+/// and button-sized, never a thumbnail-sized box.
+pub fn is_leave_button(e: &Element, w: u32, h: u32) -> bool {
+    let screen = u64::from(w) * u64::from(h);
+    let label = normalize_title(&e.label);
+    matches!(label.as_str(), "leave" | "leave button") && e.area() > 0 && e.area().saturating_mul(40) < screen
+}
+
+/// The inventory ask for the date groups of a search result: Google's picker heads each day's
+/// items with its date and a round check button that selects that whole day.
+pub const DAY_CHECKS: &str = "Locate the round check button just left of each date heading (a date such as 'Thu, Oct 13, 2022' or 'October 13, 2022' written above a group of photos). Give one box per date heading, around its round check button, and use the date heading's text exactly as written as the label. If the check button is already filled in (the day is selected), use the kind \"checked\". Do not include the check marks on individual photos.";
+
+const MONTH_NAMES: [&str; 12] = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+
+/// The month (1–12) a word names: its full name, or its first three letters ("oct", "Sept").
+fn month_of(word: &str) -> Option<u32> {
+    let w = word.to_lowercase();
+    if w.chars().count() < 3 {
+        return None;
+    }
+    MONTH_NAMES.iter().position(|m| m.starts_with(w.as_str())).and_then(|i| u32::try_from(i + 1).ok())
+}
+
+/// The words of `s`: letters and digits, lower case.
+fn words(s: &str) -> Vec<String> {
+    normalize_title(s).split(' ').filter(|w| !w.is_empty()).map(str::to_string).collect()
+}
+
+/// Whether a search asks for a date ("videos October 13 2022", "Oct 2022", "videos 2019"): it
+/// names a month or a year. Such results come grouped by day, and the day groups' check
+/// buttons select them whole.
+pub fn is_date_search(q: &str) -> bool {
+    words(q).iter().any(|w| month_of(w).is_some() || is_year(w))
+}
+
+fn is_year(w: &str) -> bool {
+    w.len() == 4 && w.parse::<u32>().is_ok_and(|y| (1900..=2100).contains(&y))
+}
+
+/// The day a date heading names, as a key that stays the same however the heading is boxed or
+/// abbreviated: `"2022-10-13"`, or `"10-13"` when it shows no year (Google leaves the current
+/// year out), or `"2022-10"` for a month heading. `None` when the label names no month.
+pub fn date_key(label: &str) -> Option<String> {
+    let ws = words(label);
+    let month = ws.iter().find_map(|w| month_of(w))?;
+    let year = ws.iter().find(|w| is_year(w)).cloned();
+    let day = ws.iter().filter_map(|w| w.parse::<u32>().ok()).find(|d| (1..=31).contains(d));
+    Some(match (year, day) {
+        (Some(y), Some(d)) => format!("{y}-{month:02}-{d:02}"),
+        (None, Some(d)) => format!("{month:02}-{d:02}"),
+        (Some(y), None) => format!("{y}-{month:02}"),
+        (None, None) => return None,
+    })
+}
+
+/// Whether a grounded day check is already filled in (the day is selected).
+pub fn is_checked(e: &Element) -> bool {
+    let k = e.kind.to_lowercase();
+    (k.contains("checked") && !k.contains("unchecked")) || k.contains("selected")
+}
+
+/// The date-group checks worth clicking in a `w`×`h` capture, in reading order: labelled with
+/// a date ([`date_key`]: the key that keeps one day from being clicked twice — a second click
+/// clears it), heading-sized (never a thumbnail), one per date.
+pub fn day_checks(elements: &[Element], w: u32, h: u32) -> Vec<Element> {
+    let screen = u64::from(w) * u64::from(h);
+    let band = (h / 16).max(1);
+    let mut found: Vec<Element> = elements
+        .iter()
+        .filter(|e| date_key(&e.label).is_some())
+        .filter(|e| e.area() > 0 && e.area().saturating_mul(60) < screen && e.y2.saturating_sub(e.y1).saturating_mul(14) <= h)
+        .cloned()
+        .collect();
+    found.sort_by_key(|e| (e.y1 / band, e.x1));
+    let mut keys: Vec<String> = Vec::new();
+    found.retain(|e| match date_key(&e.label) {
+        Some(k) if !keys.contains(&k) => {
+            keys.push(k);
+            true
+        }
+        _ => false,
+    });
+    found
+}
+
+/// Where to click a day check: the centre of a squarish box (the button itself), or the left
+/// end of a wide one (the model boxed the heading too; the button sits left of the date).
+pub fn check_point(e: &Element) -> (u32, u32) {
+    let (w, h) = (e.x2.saturating_sub(e.x1), e.y2.saturating_sub(e.y1));
+    let (cx, cy) = e.center();
+    if w > h.saturating_mul(2) { (e.x1.saturating_add(h / 2), cy) } else { (cx, cy) }
+}
+
 /// Where to click a grounded tile: its left third (at most [`MAX_CLICK_INSET`] in),
 /// vertically centred.
 pub fn click_point(e: &Element) -> (u32, u32) {
@@ -413,6 +512,58 @@ mod tests {
         assert!(same_tile(&a, &el("0:07", "", 12, 38, 52, 82), false), "boxed a little differently");
         assert!(!same_tile(&a, &el("0:12", "", 60, 40, 100, 80), false), "the next tile");
         assert!(!same_tile(&a, &a, true), "after scrolling, the same spot is another tile");
+    }
+
+    #[test]
+    fn only_a_leave_labelled_button_is_the_leave_button() {
+        assert!(is_leave_button(&el("Leave", "button", 700, 400, 760, 430), 1344, 784));
+        assert!(is_leave_button(&el(" leave ", "", 700, 400, 760, 430), 1344, 784));
+        assert!(is_leave_button(&el("Leave button", "", 700, 400, 760, 430), 1344, 784));
+        // anything else is refused: the other button, the dialog's title, page elements
+        for label in ["Cancel", "Stay", "Leave site?", "Leave page", "Done", "", "Don't leave"] {
+            assert!(!is_leave_button(&el(label, "button", 700, 400, 760, 430), 1344, 784), "{label:?}");
+        }
+        // a thumbnail-sized box, or an empty one, is never clicked as a button
+        assert!(!is_leave_button(&el("Leave", "", 100, 100, 400, 400), 1344, 784));
+        assert!(!is_leave_button(&el("Leave", "", 5, 5, 5, 5), 1344, 784));
+    }
+
+    #[test]
+    fn date_searches_and_date_headings_are_recognized() {
+        for yes in ["videos October 13 2022", "Oct 2022", "videos 2019", "sept 3", "VIDEOS DECEMBER 2017"] {
+            assert!(is_date_search(yes), "{yes}");
+        }
+        for no in ["robots", "beach sunset videos", "videos", "1:30", "123456", "ma"] {
+            assert!(!is_date_search(no), "{no}");
+        }
+        assert_eq!(date_key("Thu, Oct 13, 2022").as_deref(), Some("2022-10-13"));
+        assert_eq!(date_key("October 13, 2022").as_deref(), Some("2022-10-13"), "the same day however it is written");
+        assert_eq!(date_key("Sun, Sep 4").as_deref(), Some("09-04"), "no year shown");
+        assert_eq!(date_key("December 2017").as_deref(), Some("2017-12"));
+        for no in ["2022", "photo", "", "0:30", "Thu 13", "October"] {
+            assert_eq!(date_key(no), None, "{no:?}");
+        }
+    }
+
+    #[test]
+    fn day_checks_are_dated_heading_sized_and_one_per_day() {
+        let els = vec![
+            el("Wed, Oct 12, 2022", "check", 20, 300, 44, 324), // second row
+            el("Thu, Oct 13, 2022", "check", 20, 100, 44, 124), // first row
+            el("October 13, 2022", "check", 22, 102, 46, 126),  // the model repeating the first
+            el("0:30", "", 60, 130, 200, 260),                  // a tile: no date
+            el("Fri, Oct 14, 2022", "", 0, 0, 900, 700),        // a whole-grid box
+            el("Search", "", 300, 10, 700, 40),                 // no date
+        ];
+        let checks = day_checks(&els, 1344, 784);
+        assert_eq!(checks.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["Thu, Oct 13, 2022", "Wed, Oct 12, 2022"]);
+        assert!(!is_checked(&checks[0]));
+        assert!(is_checked(&el("x", "checked", 0, 0, 1, 1)) && is_checked(&el("x", "Selected", 0, 0, 1, 1)));
+        assert!(!is_checked(&el("x", "unchecked", 0, 0, 1, 1)));
+        // a square box is clicked in its centre; a wide one (the heading boxed too) at its left end
+        assert_eq!(check_point(&el("", "", 20, 100, 44, 124)), (32, 112));
+        assert_eq!(check_point(&el("", "", 20, 100, 320, 124)), (32, 112));
+        assert_eq!(check_point(&el("", "", 9, 9, 9, 9)), (9, 9));
     }
 
     #[test]

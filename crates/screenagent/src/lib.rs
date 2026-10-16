@@ -12,7 +12,10 @@
 //! - [`ground`]: the vision model call — `inventory` lists elements, `find` locates one.
 //! - [`verify`]: pixel-diff of two captures, so the agent knows a click landed.
 //! - [`picker`]: the Google Photos picker's visual semantics (duration badges, Done).
-//! - [`agent`]: the budgeted see–decide–act loop that selects media and presses Done.
+//! - [`agent`]: the budgeted see–decide–act loop that selects media and presses Done — over
+//!   one search or many in one picking session — and closes the picker tab it drove.
+//! - [`tabs`]: the picker's browser tabs — reuse one for the next session, close them, answer
+//!   "Leave site?", and `photos tidy`.
 //!
 //! Everything is ordinary subprocesses and HTTP: no `unsafe` (the workspace forbids it),
 //! no browser embedding, and no model weights in the repo — the model is served by the
@@ -25,6 +28,7 @@ pub mod agent;
 pub mod capture;
 pub mod ground;
 pub mod picker;
+pub mod tabs;
 pub mod verify;
 
 use std::time::Duration;

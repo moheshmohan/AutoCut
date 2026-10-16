@@ -29,10 +29,43 @@ pub trait Act {
     fn scroll(&mut self, lines: i32) -> Result<(), ScreenError>;
     fn sleep(&mut self, ms: u64);
     fn capture(&mut self) -> Result<Capture, ScreenError>;
+    /// Empty the focused text field: up to `chars` characters deleted on each side of the
+    /// caret (Backspace, then Forward Delete) — keys that do nothing outside a text field,
+    /// unlike Cmd+A, which in a photo grid could select everything.
+    fn clear_text(&mut self, _chars: usize) -> Result<(), ScreenError> {
+        Err(ScreenError::Unsupported("clearing a text field".into()))
+    }
+    /// The address of the front window's active tab, when the app is a browser that tells
+    /// (`None`: unknown — and an unknown tab is never closed).
+    fn front_url(&mut self) -> Result<Option<String>, ScreenError> {
+        Ok(None)
+    }
+    /// Close the front window's active tab (Cmd+W).
+    fn close_tab(&mut self) -> Result<(), ScreenError> {
+        Err(ScreenError::Unsupported("closing a tab".into()))
+    }
 }
 
 /// The most wheel lines one scroll may post.
 const MAX_SCROLL_LINES: i32 = 60;
+/// The most characters [`Act::clear_text`] deletes each way.
+const MAX_CLEAR: usize = 300;
+
+/// Browsers whose AppleScript dictionary names the active tab `active tab` (Chromium's).
+const CHROMIUM_BROWSERS: [&str; 8] =
+    ["Google Chrome", "Google Chrome Beta", "Google Chrome Canary", "Chromium", "Brave Browser", "Microsoft Edge", "Vivaldi", "Arc"];
+
+/// The AppleScript that reads the front tab's address in browser `app` (escaped already), or
+/// `None` for an app that has no such dictionary.
+fn front_url_script(app: &str) -> Option<String> {
+    if CHROMIUM_BROWSERS.contains(&app) {
+        Some(format!("tell application \"{app}\" to get URL of active tab of front window"))
+    } else if app == "Safari" || app == "Safari Technology Preview" {
+        Some(format!("tell application \"{app}\" to get URL of current tab of front window"))
+    } else {
+        None
+    }
+}
 
 /// macOS hands: `osascript` + `System Events` scoped to one application process.
 pub struct MacActor {
@@ -131,6 +164,27 @@ impl Act for MacActor {
 
     fn capture(&mut self) -> Result<Capture, ScreenError> {
         capture::capture_window(self.shell.as_ref(), &self.app)
+    }
+
+    fn clear_text(&mut self, chars: usize) -> Result<(), ScreenError> {
+        let n = chars.min(MAX_CLEAR);
+        if n == 0 {
+            return Ok(());
+        }
+        // 51 = Delete (backspace), 117 = Forward Delete
+        self.script(&format!("repeat {n} times\nkey code 51\nend repeat\nrepeat {n} times\nkey code 117\nend repeat")).map(|_| ())
+    }
+
+    fn front_url(&mut self) -> Result<Option<String>, ScreenError> {
+        let app = capture::escape_applescript(&self.app)?;
+        let Some(script) = front_url_script(&app) else { return Ok(None) };
+        let out = self.shell.run("osascript", &["-e", &script])?;
+        let url = out.trim();
+        Ok((!url.is_empty() && url != "missing value").then(|| url.to_string()))
+    }
+
+    fn close_tab(&mut self) -> Result<(), ScreenError> {
+        self.script("keystroke \"w\" using command down").map(|_| ())
     }
 }
 
@@ -252,6 +306,51 @@ mod tests {
         assert!(s.contains("CGEventCreateScrollWheelEvent2(null, 1, 1, -18, 0, 0)"), "{s}"); // down
         assert!(s.contains("CGEventCreateScrollWheelEvent2(null, 1, 1, 2, 0, 0)"), "{s}"); // up
         assert!(s.contains(&format!("CGEventCreateScrollWheelEvent2(null, 1, 1, {MAX_SCROLL_LINES}, 0, 0)")), "{s}"); // clamped
+    }
+
+    #[test]
+    fn tabs_close_with_cmd_w_and_fields_clear_without_select_all() {
+        let (shared, sh) = FakeShell::new(false);
+        let mut actor = MacActor::new("Google Chrome", Box::new(sh));
+        actor.close_tab().unwrap();
+        actor.clear_text(12).unwrap();
+        actor.clear_text(usize::MAX).unwrap();
+        actor.clear_text(0).unwrap();
+        let s = recorded(&shared);
+        assert!(s.contains("keystroke \"w\" using command down"), "{s}");
+        assert!(s.contains("repeat 12 times\nkey code 51\nend repeat\nrepeat 12 times\nkey code 117"), "{s}");
+        assert!(s.contains(&format!("repeat {MAX_CLEAR} times")), "bounded: {s}");
+        assert!(!s.contains("keystroke \"a\" using command down"), "never Cmd+A: {s}");
+        assert_eq!(s.matches("key code 51").count(), 2, "nothing to clear sends nothing");
+    }
+
+    #[test]
+    fn the_front_tab_address_is_read_only_from_browsers_that_tell() {
+        /// Answers every script with an address.
+        struct Addr(Arc<Mutex<Vec<String>>>, &'static str);
+        impl Shell for Addr {
+            fn run(&self, _program: &str, args: &[&str]) -> Result<String, ScreenError> {
+                self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(args.last().copied().unwrap_or_default().into());
+                Ok(self.1.into())
+            }
+        }
+        let shared = Arc::new(Mutex::new(vec![]));
+        let picker = "https://photos.google.com/picker/abc\n";
+        let mut chrome = MacActor::new("Google Chrome", Box::new(Addr(Arc::clone(&shared), picker)));
+        assert_eq!(chrome.front_url().unwrap().as_deref(), Some("https://photos.google.com/picker/abc"));
+        let mut safari = MacActor::new("Safari", Box::new(Addr(Arc::clone(&shared), picker)));
+        assert!(safari.front_url().unwrap().is_some());
+        let s = recorded(&shared);
+        assert!(s.contains("tell application \"Google Chrome\" to get URL of active tab of front window"), "{s}");
+        assert!(s.contains("tell application \"Safari\" to get URL of current tab of front window"), "{s}");
+        // a browser without the dictionary: unknown, and nothing is asked
+        let shared = Arc::new(Mutex::new(vec![]));
+        let mut firefox = MacActor::new("firefox", Box::new(Addr(Arc::clone(&shared), picker)));
+        assert_eq!(firefox.front_url().unwrap(), None);
+        assert!(recorded(&shared).is_empty());
+        // an empty answer, or `missing value` (no window), is unknown too
+        let (_, sh) = FakeShell::new(false);
+        assert_eq!(MacActor::new("Google Chrome", Box::new(sh)).front_url().unwrap(), None);
     }
 
     #[test]
