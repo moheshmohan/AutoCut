@@ -104,7 +104,11 @@ fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration>
             .ok_or_else(|| bad(cmd, format!("unknown delivery `{v}` ({})", Delivery::ALL.iter().map(|d| d.id()).collect::<Vec<_>>().join(", "))))?,
         None => base.map(|b| b.delivery).unwrap_or_default(),
     };
-    let n = Narration { text, language: language.to_string(), voice, pitch, pace, delivery, speech_duration: Tick::ZERO };
+    let take = match p.get("take") {
+        Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(|| bad(cmd, "`take` must be a whole number"))?,
+        None => base.map_or(0, |b| b.take),
+    };
+    let n = Narration { text, language: language.to_string(), voice, pitch, pace, delivery, take, speech_duration: Tick::ZERO };
     n.check().map_err(|e| bad(cmd, e))?;
     Ok(n)
 }
@@ -115,7 +119,7 @@ pub type SynthCache = Arc<Mutex<Vec<(String, Arc<tts::Audio>)>>>;
 const CACHE_ENTRIES: usize = 6;
 
 fn cache_key(n: &Narration) -> String {
-    format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", n.voice, n.pitch.id(), n.pace.to_bits(), n.delivery.id(), n.text)
+    format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", n.voice, n.pitch.id(), n.pace.to_bits(), n.delivery.id(), n.take, n.text)
 }
 
 fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
@@ -136,7 +140,7 @@ fn render(n: &Narration, models_dir: Option<&std::path::Path>) -> std::result::R
 
 /// How `n` is spoken.
 fn params(n: &Narration) -> tts::Params {
-    tts::Params { semitones: n.pitch.semitones(), pace: n.pace, style: n.delivery.style() }
+    tts::Params { semitones: n.pitch.semitones(), pace: n.pace, style: n.delivery.style(), take: n.take }
 }
 
 /// The disk cache's key for `n` (None: the voice has no stable identity, e.g. a cloned voice
@@ -576,7 +580,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.create",
             "New Narration",
-            r#"{"text":str,"voice":str?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
+            r#"{"text":str,"voice":str?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
             has_seq,
             create,
             true,
@@ -584,7 +588,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.edit",
             "Edit Narration",
-            r#"{"clip":id?,"text":str?,"voice":str?,"pitch":str?,"pace":f64?,"delivery":str?,"dir":str?}"#,
+            r#"{"clip":id?,"text":str?,"voice":str?,"pitch":str?,"pace":f64?,"delivery":str?,"take":0..99?,"dir":str?}"#,
             has_narration_clip,
             edit,
             true,

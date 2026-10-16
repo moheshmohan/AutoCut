@@ -870,6 +870,8 @@ mod natural {
 
     /// Silence between utterances, ms.
     const UTTERANCE_GAP_MS: u64 = 250;
+    /// Seeds between takes (more than any script's utterances).
+    const TAKE_SEEDS: u64 = 7919;
     /// Prompts kept built (encoding a sample takes seconds).
     const PROMPTS: usize = 4;
 
@@ -986,7 +988,9 @@ mod natural {
                             out.resize(out.len().saturating_add(gap), 0.0);
                         }
                         let said = format!("{style}{u}");
-                        let a = self.model.speak(&said, Some(&self.prompt), &Settings { seed: s.seed.wrapping_add(i as u64), ..s }, &mut |_, _| true)?;
+                        // each take reads afresh: its own run of seeds
+                        let seed = s.seed.wrapping_add(u64::from(params.take).wrapping_mul(TAKE_SEEDS)).wrapping_add(i as u64);
+                        let a = self.model.speak(&said, Some(&self.prompt), &Settings { seed, ..s }, &mut |_, _| true)?;
                         out.extend_from_slice(trim_silence(&a, rate));
                         spoke = true;
                     }

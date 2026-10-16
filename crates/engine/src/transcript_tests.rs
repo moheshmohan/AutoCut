@@ -54,6 +54,12 @@ fn generate_inspect_search_and_rename() {
     assert_eq!(r["paragraphs"].as_array().unwrap().len(), 2, "speaker change splits paragraphs: {}", r["paragraphs"]);
     assert_eq!(r["speakers"], json!(["Speaker 1", "Speaker 2"]));
 
+    // one item's own words, in its media time; an item without a transcript is an error
+    let own = s.execute("transcript.inspect", json!({"item": item.0})).unwrap();
+    assert_eq!(own["text"], "Hello um world. Second speaker here.");
+    assert_eq!(own["words"][0]["start"].as_i64().unwrap(), s.project.transcripts[&item].words[0].start.0, "media time");
+    assert!(s.execute("transcript.inspect", json!({"item": 999_999})).unwrap_err().to_string().contains("no transcript"));
+
     let r = s.execute("transcript.search", json!({"query": "second spea"})).unwrap();
     assert_eq!(r["matches"], json!([{"from": 3, "to": 4, "start": r["matches"][0]["start"], "end": r["matches"][0]["end"]}]));
 

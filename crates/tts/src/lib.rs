@@ -78,11 +78,14 @@ pub struct Params {
     /// How to speak, in plain words ("warm, friendly, smiling"), for voices that take a spoken
     /// style (the natural cloned voices); the others ignore it.
     pub style: Option<&'static str>,
+    /// Which reading (0 the first): voices that vary between readings (the natural cloned
+    /// voices) read the same script afresh for each take; the others ignore it.
+    pub take: u32,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Params { semitones: 0.0, pace: 1.0, style: None }
+        Params { semitones: 0.0, pace: 1.0, style: None, take: 0 }
     }
 }
 

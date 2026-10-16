@@ -67,6 +67,14 @@ fn delivery_is_kept_inherited_and_checked() {
     assert!(e.contains("unknown delivery") && e.contains("dramatic"), "{e}");
     assert!(s.execute("tts.edit", json!({"clip": id, "delivery": 3})).is_err());
     assert_eq!(*s.project, before);
+    // another take of the same line is kept, inherited, and bounded
+    s.execute("tts.edit", json!({"clip": id, "take": 2})).unwrap();
+    assert_eq!(s.project.narrations.get(&clip(&s, id).item).unwrap().take, 2);
+    s.execute("tts.edit", json!({"clip": id, "pace": 1.1})).unwrap();
+    assert_eq!(s.project.narrations.get(&clip(&s, id).item).unwrap().take, 2);
+    for bad in [json!(200), json!(-1), json!("one")] {
+        assert!(s.execute("tts.edit", json!({"clip": id, "take": bad})).is_err(), "{bad}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

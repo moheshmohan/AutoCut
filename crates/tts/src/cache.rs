@@ -179,6 +179,10 @@ impl DiskCache {
             h.update((style.len() as u64).to_le_bytes());
             h.update(style.as_bytes());
         }
+        if params.take != 0 {
+            h.update(b"take");
+            h.update(params.take.to_le_bytes());
+        }
         hex(&h.finalize())
     }
 
@@ -422,6 +426,7 @@ mod tests {
         let warm = DiskCache::key("x", "ab", &Params { style: Some("warm"), ..p });
         assert_ne!(a, warm);
         assert_ne!(warm, DiskCache::key("x", "ab", &Params { style: Some("calm"), ..p }));
+        assert_ne!(a, DiskCache::key("x", "ab", &Params { take: 1, ..p }), "another take is another reading");
     }
 
     #[test]

@@ -128,7 +128,8 @@ impl Delivery {
             Delivery::Plain => None,
             Delivery::Conversational => Some("natural, conversational, relaxed, like talking to a friend"),
             Delivery::Warm => Some("warm, friendly, smiling, natural storytelling"),
-            Delivery::Excited => Some("excited, energetic, upbeat, natural storytelling"),
+            // not "excited, energetic": that overacted (a higher, strained voice)
+            Delivery::Excited => Some("enthusiastic, cheerful, natural storytelling"),
             Delivery::Amazed => Some("amazed, impressed, lively, natural storytelling"),
             Delivery::Curious => Some("curious, playful, light, natural storytelling"),
             Delivery::Calm => Some("calm, gentle, reflective, unhurried"),
@@ -154,6 +155,10 @@ pub struct Narration {
     /// The feeling it was spoken with (projects from before have none: plain).
     #[serde(default, skip_serializing_if = "is_plain")]
     pub delivery: Delivery,
+    /// Which reading of the same script (0 the first): voices that vary between readings
+    /// (the natural cloned voices) read it afresh for another take; at most [`MAX_TAKE`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub take: u32,
     /// Length of the speech in the generated file. The file can be longer: when an edit made the
     /// speech shorter than its clip, the file is padded with silence to the clip's length.
     pub speech_duration: Tick,
@@ -163,6 +168,13 @@ fn is_plain(d: &Delivery) -> bool {
     *d == Delivery::Plain
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Highest take number.
+pub const MAX_TAKE: u32 = 99;
+
 impl Narration {
     /// Check values read from a project file or a command.
     pub fn check(&self) -> Result<(), String> {
@@ -171,6 +183,9 @@ impl Narration {
         }
         if !(MIN_PACE..=MAX_PACE).contains(&self.pace) {
             return Err(format!("pace must be between {MIN_PACE} and {MAX_PACE}"));
+        }
+        if self.take > MAX_TAKE {
+            return Err(format!("take must be at most {MAX_TAKE}"));
         }
         if self.speech_duration < Tick::ZERO {
             return Err("negative speech duration".into());
@@ -191,6 +206,7 @@ mod tests {
             pitch: VocalPitch::High,
             pace: 1.25,
             delivery: Delivery::Warm,
+            take: 2,
             speech_duration: Tick::from_seconds_f64(2.5),
         }
     }

@@ -229,6 +229,17 @@ fn word_json(i: usize, w: &SeqWord) -> Value {
 }
 
 fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
+    // one item's own transcript, in its media time
+    if let Some(item) = u64_p(p, "item") {
+        let t = s
+            .project
+            .transcripts
+            .get(&ItemId(item))
+            .ok_or_else(|| bad("transcript.inspect", format!("item {item} has no transcript (transcript.generate)")))?;
+        let text = t.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        let words: Vec<Value> = t.words.iter().map(|w| json!({"text": w.text, "start": w.start.0, "end": w.end.0})).collect();
+        return Ok(json!({"item": item, "language": t.language, "source": t.source, "text": text, "words": words}));
+    }
     let words = sequence_words(s);
     let gap = Tick::from_seconds_f64(f64_p(p, "paragraphGapSeconds").unwrap_or(1.5));
     let paras: Vec<Value> = tx::paragraphs(&words, gap)
@@ -454,7 +465,7 @@ pub fn commands() -> Vec<CommandSpec> {
             true,
         ),
         spec("transcript.delete", "Delete Transcript", &["Sequence", "Transcript"], r#"{"items":[id]?}"#, has_transcripts, delete, true),
-        spec("transcript.inspect", "Inspect Transcript", &[], r#"{"paragraphGapSeconds":f?}"#, always, inspect, false),
+        spec("transcript.inspect", "Inspect Transcript", &[], r#"{"item":id?,"paragraphGapSeconds":f?}"#, always, inspect, false),
         spec("transcript.search", "Search Transcript", &[], r#"{"query":str}"#, always, search, false),
         spec("transcript.models", "List Speech Models", &[], "{}", always, models, false),
         spec("transcript.downloadModel", "Download Speech Model", &[], r#"{"model":"whisper-base"?}"#, can_download, download_model, true),
