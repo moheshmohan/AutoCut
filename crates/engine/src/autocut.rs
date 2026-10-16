@@ -4,10 +4,10 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `autocut.analyze` | job: which clips show `subject` (of `items`, filmed `since` a date), what it is, when; the report is kept in the session |
+//! | `autocut.analyze` | job: which clips show `subject` (or what a `prompt` asks for; of `items`, or of the Google Photos `album`, filmed `since` a date), what it is, when; the report is kept in the session |
 //! | `autocut.showcasePlan` | job: group the report's clips into entries (or take reviewed `entries`) and write the voice-over; the plan is kept |
 //! | `autocut.makeShowcase` | job: both, one after the other (Sequence ▸ Make a Showcase…, and AutoCut prompts like "make a video of every robot since 2020") |
-//! | `autocut.showcaseBuild` | job: build the plan (the kept one, or `plan`) into a new sequence; `export` it (YouTube 1080p, chapters and a QA report beside it) and `upload` the export to Google Photos |
+//! | `autocut.showcaseBuild` | job: build the plan (the kept one, or `plan`) into a new sequence; `export` it (YouTube 1080p, chapters and a QA report beside it) and `upload` the export to Google Photos (into `uploadAlbum` too) |
 //! | `autocut.showcaseInspect` | the kept report (a summary, or all of it with `report: true`), plan and last build, and the latest job |
 //! | `autocut.showcaseSet` | keep a `report` or `plan` from elsewhere (or `reportPath` / `planPath`: the CLI's `analyze --out` and `showcase --script-out` files); `null` clears one |
 //!
@@ -15,6 +15,12 @@
 //! each entry is the CLI plan's entry (`number`, `label`, `kind`, `description`, `unix`, `shots`)
 //! plus the review's `include` (default true) and `mergePrevious` (default false), and
 //! `script.lines` follows `entries` one to one (excluded and merged-in entries' lines unused).
+//!
+//! With `album` (a Google Photos album's exact title) an analysis takes its clips from that
+//! album: the host picks all of it, imports it (`file.import` with `reuse`: what the project
+//! already holds is not imported twice) and analyses exactly those clips — the album is the
+//! seed the user curates in Google Photos. Hosts that cannot pick albums say so
+//! ([`AutoCutHost::albums_ready`]) before a job starts.
 //!
 //! The engine only runs the jobs and keeps what they make. The work — vision and script models,
 //! grouping, the build — lives in `filmcraft-autocut`, a layer above, which the host (desktop
@@ -44,6 +50,8 @@ use crate::{EngineError, Result, Session};
 
 /// What the job commands say without a host.
 const NOT_HERE: &str = "AutoCut showcases are not available in this app";
+/// What a job with `album` says when the host cannot pick Google Photos albums.
+pub const NO_ALBUMS: &str = "picking a Google Photos album is not available in this app";
 /// Longest subject ("robot", "vintage car").
 pub const MAX_SUBJECT_CHARS: usize = 80;
 /// Longest title, subtitle, voice id or mood.
@@ -107,6 +115,11 @@ pub trait AutoCutHost: Send + Sync {
     /// be cheap: no network.
     fn ready(&self) -> std::result::Result<(), String> {
         Ok(())
+    }
+    /// Whether a job can pick a Google Photos `album` now (signed in, …); `Err` says why not.
+    /// Cheap, no network: a job with `album` is refused before it starts when this fails.
+    fn albums_ready(&self) -> std::result::Result<(), String> {
+        Err(NO_ALBUMS.into())
     }
     /// Do `task` (blocking, on the job's thread), editing only through `port`. Put a line in
     /// `progress.status` (and counts in `done` / `total`) as it goes; stop with an error once
@@ -284,7 +297,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.analyze",
             "Find Every Clip of a Subject",
             &[],
-            r#"{"subject":str,"items":[id]?,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"frames":1..8=6,"screen":0..8=0,"compare":u32=150,"wait":bool=false}"#,
+            r#"{"subject":str?,"prompt":str?,"items":[id]?,"album":str?,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"frames":1..8=6,"screen":0..8=0,"compare":u32=150,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Analyze, p),
         ),
         job(
@@ -298,12 +311,16 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.makeShowcase",
             "Make a Showcase…",
             &["Sequence"],
-            r#"{"subject":str?,"prompt":str?,"items":[id]?,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"title":str?,"voice":str?,"mood":str?,"frames":1..8=6,"screen":0..8=0,"compare":u32=150,"wait":bool=false}"#,
+            r#"{"subject":str?,"prompt":str?,"items":[id]?,"album":str?,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"title":str?,"voice":str?,"mood":str?,"frames":1..8=6,"screen":0..8=0,"compare":u32=150,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Make, p),
         ),
-        job("autocut.showcaseBuild", "Build Showcase", &[], r#"{"plan":Plan?,"export":str?,"upload":bool=false,"qa":bool?,"wait":bool=false}"#, |s, p| {
-            start(s, TaskKind::Build, p)
-        }),
+        job(
+            "autocut.showcaseBuild",
+            "Build Showcase",
+            &[],
+            r#"{"plan":Plan?,"export":str?,"upload":bool=false,"uploadAlbum":str?,"qa":bool?,"wait":bool=false}"#,
+            |s, p| start(s, TaskKind::Build, p),
+        ),
         CommandSpec {
             id: "autocut.showcaseInspect",
             label: "Inspect Showcase",
@@ -399,16 +416,22 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
     if matches!(kind, TaskKind::Analyze | TaskKind::Make) {
         let subject = text_p(cmd, p, "subject", MAX_SUBJECT_CHARS)?;
         let prompt = text_p(cmd, p, "prompt", MAX_TEXT_CHARS)?;
-        if subject.is_none() && (kind == TaskKind::Analyze || prompt.is_none()) {
-            let what = if kind == TaskKind::Make {
-                "`subject` (what to look for, e.g. \"robot\") or a `prompt`"
-            } else {
-                "`subject`: what to look for, e.g. \"robot\""
-            };
-            return Err(bad(cmd, format!("need {what}")));
+        if subject.is_none() && prompt.is_none() {
+            return Err(bad(cmd, "need `subject` (what to look for, e.g. \"robot\") or a `prompt` (\"a video of every robot since 2020\")"));
         }
         put(&mut out, "subject", subject.map(Value::String));
         put(&mut out, "prompt", prompt.map(Value::String));
+        if let Some(album) = text_p(cmd, p, "album", crate::photos::MAX_ALBUM_TITLE_CHARS)? {
+            if album.chars().any(char::is_control) {
+                return Err(bad(cmd, "`album` must be an album title on one line"));
+            }
+            if p.get("items").is_some_and(|v| !v.is_null()) {
+                return Err(bad(cmd, "`album` decides which clips are analysed: leave out `items`"));
+            }
+            put(&mut out, "album", Some(Value::String(album)));
+        } else if p.get("album").is_some_and(Value::is_string) {
+            return Err(bad(cmd, "`album` is empty: give the Google Photos album's title"));
+        }
         if let Some(items) = p.get("items").filter(|v| !v.is_null()) {
             let list = items.as_array().ok_or_else(|| bad(cmd, "`items` must be a list of media item ids"))?;
             if list.len() > MAX_ITEMS {
@@ -458,8 +481,13 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
         if upload && export.is_none() {
             return Err(bad(cmd, "`upload` sends the export to Google Photos: give an `export` path too"));
         }
+        let upload_album = text_p(cmd, p, "uploadAlbum", crate::photos::MAX_ALBUM_TITLE_CHARS)?;
+        if upload_album.is_some() && !upload {
+            return Err(bad(cmd, "`uploadAlbum` names the album the upload goes into: set `upload` too"));
+        }
         put(&mut out, "export", export.map(Value::String));
         put(&mut out, "upload", Some(json!(upload)));
+        put(&mut out, "uploadAlbum", upload_album.map(Value::String));
         if let Some(q) = p.get("qa").filter(|v| !v.is_null()) {
             put(&mut out, "qa", Some(json!(q.as_bool().ok_or_else(|| bad(cmd, "`qa` must be true or false"))?)));
         }
@@ -524,10 +552,18 @@ fn start(s: &mut Session, kind: TaskKind, p: &Value) -> Result<Value> {
         TaskKind::Build if plan.is_none() && params.get("plan").is_none() => {
             return Err(bad(cmd, "nothing to build yet: write a plan first (autocut.showcasePlan), or pass a `plan`"));
         }
-        TaskKind::Build if params["upload"] == json!(true) => crate::photos::can_upload(s).map_err(|e| bad(cmd, format!("upload: {e}")))?,
+        TaskKind::Build if params["upload"] == json!(true) => {
+            crate::photos::can_upload(s).map_err(|e| bad(cmd, format!("upload: {e}")))?;
+            if params.get("uploadAlbum").is_some() {
+                crate::photos::can_use_albums(s).map_err(|e| bad(cmd, format!("uploadAlbum: {e}")))?;
+            }
+        }
         _ => {}
     }
-    let subject = params["subject"].as_str().unwrap_or("subject").to_string();
+    if params.get("album").is_some() {
+        host.albums_ready().map_err(|e| bad(cmd, format!("album: {e}")))?;
+    }
+    let subject = params["subject"].as_str().unwrap_or("clip the prompt asks for").to_string();
     let wait = bool_p(p, "wait").unwrap_or(false);
     let job = crate::narration::new_job(s, kind.label(&subject));
     *lock(&job.progress.status) = "Starting…".into();

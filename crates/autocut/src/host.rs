@@ -11,6 +11,11 @@
 //! waiting and its job polled, and a narration line (`tts.create`) is synthesized first as a
 //! background job (`tts.render`), so placing it takes the cached audio.
 //!
+//! With `album`, an analysis takes its clips from a Google Photos album ([`crate::album`]): the
+//! host's [`AlbumSource`] picks all of it (after the subject is known, so a prompt that cannot
+//! be read fails before anything is picked), the files are imported over the port (reusing
+//! what the project already holds), and only those clips are analysed.
+//!
 //! A reviewed plan ([`PlanDoc`]) is the CLI's `plan.json` (`entries` and `script`) plus the
 //! review: per entry `include` and `mergePrevious` ([`ReviewEntry`]), and the title, voice and
 //! mood. [`resolve`] turns the review into what the build shows.
@@ -28,6 +33,7 @@ use filmcraft_engine::export::Progress;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::album::{self, AlbumPick, AlbumSource};
 use crate::analyze::{self, ClipFacts};
 use crate::config::Config;
 use crate::llm::{ChatModel, JsonFuture};
@@ -406,11 +412,19 @@ enum Source {
 /// Runs the engine's showcase jobs with this crate ([`AutoCutHost`]).
 pub struct ShowcaseHost {
     source: Source,
+    /// Picks Google Photos albums for jobs given `album` (none: such jobs are refused).
+    albums: Option<Arc<dyn AlbumSource>>,
 }
 
 /// The host the app, the CLI and the MCP server install: Ollama models from the environment.
 pub fn engine_host() -> Arc<dyn AutoCutHost> {
     Arc::new(ShowcaseHost::from_config(Config::from_env()))
+}
+
+/// [`engine_host`] whose jobs can also take their clips from a Google Photos `album`, picked by
+/// `albums` (`filmcraft_automation::photos::album_source()` in the app, the CLI and the MCP server).
+pub fn engine_host_with_albums(albums: Arc<dyn AlbumSource>) -> Arc<dyn AutoCutHost> {
+    Arc::new(ShowcaseHost::from_config(Config::from_env()).with_album_source(albums))
 }
 
 /// What a job's models are, once looked up.
@@ -421,12 +435,18 @@ struct Resolved {
 
 impl ShowcaseHost {
     pub fn from_config(cfg: Config) -> Self {
-        Self { source: Source::Config(cfg) }
+        Self { source: Source::Config(cfg), albums: None }
     }
 
     /// A host with these models (tests, scripting).
     pub fn with_models(models: Models) -> Self {
-        Self { source: Source::Fixed(models) }
+        Self { source: Source::Fixed(models), albums: None }
+    }
+
+    /// This host, picking Google Photos albums with `albums` for jobs given `album`.
+    pub fn with_album_source(mut self, albums: Arc<dyn AlbumSource>) -> Self {
+        self.albums = Some(albums);
+        self
     }
 
     /// The models job `kind` needs: the vision model must be there to analyse (Ollama is asked
@@ -473,7 +493,24 @@ impl ShowcaseHost {
             TaskKind::Analyze | TaskKind::Make => {
                 let vision = models.analysis.as_ref().map(guard).ok_or_else(|| AutoCutError::Llm("no vision model".into()))?;
                 let request = request_of(p, &script_model).await?;
-                let (report, summary) = analyze_clips(&vision, ex, &request, p, progress).await?;
+                // an album seeds the clips: picked and imported once the subject is known
+                let mut p = p.clone();
+                let seed = match p["album"].as_str() {
+                    Some(title) => Some(self.album_seed(title, &request, ex, progress).await?),
+                    None => None,
+                };
+                if let Some(seed) = &seed {
+                    p["items"] = json!(seed.imported.items);
+                }
+                let p = &p;
+                let (mut report, mut summary) = analyze_clips(&vision, ex, &request, p, progress).await?;
+                if let Some(seed) = &seed {
+                    report["album"] = json!(seed.title);
+                    summary["album"] = seed.to_json();
+                }
+                if let Some(title) = &request.title {
+                    summary["title"] = json!(title);
+                }
                 if task.kind == TaskKind::Analyze {
                     let status = format!("Found {} clip(s) showing a {}", summary["showing"], request.subject);
                     return Ok(json!({"report": report, "summary": summary, "status": status}));
@@ -499,7 +536,72 @@ impl ShowcaseHost {
     }
 }
 
+impl ShowcaseHost {
+    /// Pick album `title` with the host's [`AlbumSource`] (videos only, none created before the
+    /// request's `since`) and import it over the port, reusing what the project already holds.
+    async fn album_seed(&self, title: &str, req: &Request, ex: &PortExecutor, progress: &Arc<Progress>) -> Result<Seed, AutoCutError> {
+        let source = self.albums.clone().ok_or_else(|| AutoCutError::Other(filmcraft_engine::autocut::NO_ALBUMS.into()))?;
+        let pick = AlbumPick { title: title.to_string(), videos_only: true, since: req.since.as_ref().map(|(_, t)| album::day_of(*t)) };
+        note(progress, &format!("picking the Google Photos album \"{title}\""));
+        let prog = progress.clone();
+        let fetched = tokio::task::spawn_blocking(move || source.pick(&pick, &mut |l| note(&prog, l), &|| prog.cancel.load(Ordering::Relaxed)))
+            .await
+            .map_err(|e| AutoCutError::Other(format!("internal error: {e}")))?
+            .map_err(AutoCutError::Other)?;
+        if progress.cancel.load(Ordering::Relaxed) {
+            return Err(AutoCutError::Other("cancelled".into()));
+        }
+        if fetched.paths.is_empty() {
+            let why = if !fetched.failed.is_empty() {
+                format!(": none of its {} video(s) could be downloaded ({})", fetched.failed.len(), fetched.failed.join("; "))
+            } else if !fetched.skipped.is_empty() {
+                format!(" ({} item(s) left out: photos, or created before the date asked for)", fetched.skipped.len())
+            } else {
+                String::new()
+            };
+            return Err(AutoCutError::Other(format!("the album \"{title}\" has no video to make a showcase from{why}")));
+        }
+        note(progress, &format!("importing {} clip(s) from \"{title}\"", fetched.paths.len()));
+        let imported = album::import(ex, &fetched.paths).await?;
+        if imported.items.is_empty() {
+            return Err(AutoCutError::Other(format!("nothing from the album \"{title}\" could be imported: {}", imported.errors.join("; "))));
+        }
+        Ok(Seed { title: title.to_string(), fetched, imported })
+    }
+}
+
+/// An album picked and imported for an analysis.
+struct Seed {
+    title: String,
+    fetched: album::AlbumFetched,
+    imported: album::Imported,
+}
+
+impl Seed {
+    /// What the job's summary says of it.
+    fn to_json(&self) -> Value {
+        let (f, i) = (&self.fetched, &self.imported);
+        json!({
+            "title": self.title,
+            "picked": f.paths.len(),
+            "downloaded": f.downloaded,
+            "cached": f.cached,
+            "items": i.items,
+            "imported": i.items.len().saturating_sub(i.reused.len()),
+            "reused": i.reused.len(),
+            "failed": f.failed,
+            "skipped": f.skipped.len(),
+            "importErrors": i.errors,
+            "note": f.note,
+        })
+    }
+}
+
 impl AutoCutHost for ShowcaseHost {
+    fn albums_ready(&self) -> Result<(), String> {
+        self.albums.as_ref().ok_or_else(|| filmcraft_engine::autocut::NO_ALBUMS.to_string())?.ready()
+    }
+
     fn run(&self, task: Task, port: &CommandPort, progress: &Arc<Progress>) -> Result<Value, String> {
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().map_err(|e| format!("could not start the job: {e}"))?;
         let ex = PortExecutor { port: port.clone(), progress: progress.clone() };
@@ -726,7 +828,11 @@ async fn build_plan(
     if p["upload"].as_bool() == Some(true)
         && let Some(path) = &written
     {
-        match ex.execute("photos.upload", json!({"path": path, "description": opts.title})).await {
+        let mut up = json!({"path": path, "description": opts.title});
+        if let Some(a) = p["uploadAlbum"].as_str() {
+            up["album"] = json!(a);
+        }
+        match ex.execute("photos.upload", up).await {
             Ok(r) => out["uploadJob"] = r["job"].clone(),
             Err(e) => out["uploadError"] = json!(e),
         }

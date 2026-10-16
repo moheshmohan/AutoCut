@@ -18,6 +18,8 @@ struct Fake {
     hang: bool,
     panic: bool,
     not_ready: Option<String>,
+    /// It can pick Google Photos albums.
+    albums: bool,
     tasks: Mutex<Vec<(TaskKind, Value)>>,
     /// The session answered a request while the job ran.
     answered: AtomicBool,
@@ -26,6 +28,10 @@ struct Fake {
 impl AutoCutHost for Fake {
     fn ready(&self) -> std::result::Result<(), String> {
         self.not_ready.clone().map_or(Ok(()), Err)
+    }
+
+    fn albums_ready(&self) -> std::result::Result<(), String> {
+        if self.albums { Ok(()) } else { Err(crate::autocut::NO_ALBUMS.into()) }
     }
 
     fn run(&self, task: Task, port: &CommandPort, progress: &Arc<filmcraft_export::Progress>) -> std::result::Result<Value, String> {
@@ -244,8 +250,16 @@ fn hostile_parameters_are_refused_before_a_job_starts() {
         ("autocut.analyze", json!({"subject": "robot", "frames": 2.5})),
         ("autocut.analyze", json!({"subject": "robot", "compare": 1e12})),
         ("autocut.analyze", json!([1, 2])),
+        ("autocut.analyze", json!({"prompt": "  "})),
+        ("autocut.analyze", json!({"subject": "robot", "album": ""})),
+        ("autocut.analyze", json!({"subject": "robot", "album": "  "})),
+        ("autocut.analyze", json!({"subject": "robot", "album": 7})),
+        ("autocut.analyze", json!({"subject": "robot", "album": "Robots\nand more"})),
+        ("autocut.analyze", json!({"subject": "robot", "album": "a".repeat(crate::photos::MAX_ALBUM_TITLE_CHARS + 1)})),
+        ("autocut.analyze", json!({"subject": "robot", "album": "Robots", "items": [5]})),
         ("autocut.makeShowcase", json!({"title": "no subject"})),
         ("autocut.makeShowcase", json!({"prompt": ""})),
+        ("autocut.makeShowcase", json!({"album": "Robots"})),
         ("autocut.makeShowcase", json!({"subject": "robot", "title": "t".repeat(crate::autocut::MAX_TEXT_CHARS + 1)})),
         ("autocut.makeShowcase", json!({"subject": "robot", "voice": ["clone:me"]})),
         ("autocut.showcasePlan", json!({"entries": "all"})),
@@ -259,6 +273,8 @@ fn hostile_parameters_are_refused_before_a_job_starts() {
         ("autocut.showcaseBuild", json!({"plan": {"entries": []}, "upload": true})),
         ("autocut.showcaseBuild", json!({"plan": {"entries": []}, "export": 3})),
         ("autocut.showcaseBuild", json!({"plan": {"entries": []}, "qa": "yes"})),
+        ("autocut.showcaseBuild", json!({"plan": {"entries": []}, "export": "/tmp/x.mp4", "uploadAlbum": "Robots"})),
+        ("autocut.showcaseBuild", json!({"plan": {"entries": []}, "export": "/tmp/x.mp4", "upload": true, "uploadAlbum": 3})),
     ];
     for (id, p) in cases {
         assert!(s.execute(id, p.clone()).is_err(), "{id} {p} should be refused");
@@ -268,6 +284,30 @@ fn hostile_parameters_are_refused_before_a_job_starts() {
     // an upload needs the Google Photos uploader before anything is built
     let e = s.execute("autocut.showcaseBuild", json!({"plan": {"entries": []}, "export": "/tmp/x.mp4", "upload": true})).unwrap_err().to_string();
     assert!(e.contains("upload") && e.contains("not available"), "{e}");
+    // an album needs a host that can pick albums, before anything starts
+    let e = s.execute("autocut.analyze", json!({"subject": "robot", "album": "Robots"})).unwrap_err().to_string();
+    assert!(e.contains("album") && e.contains("not available"), "{e}");
+    assert!(s.jobs.is_empty());
+}
+
+/// `album`: the analysis's clips come from a Google Photos album the host picks; the host gets
+/// the title (trimmed), with a subject or a prompt, and no `items`.
+#[test]
+fn an_album_seeds_the_analysis() {
+    let (mut s, fake) = session(Fake { albums: true, ..Fake::default() });
+    s.execute("autocut.analyze", json!({"prompt": "every robot since 2020", "album": "  Robot showcase ", "wait": true})).unwrap();
+    s.execute("autocut.makeShowcase", json!({"subject": "robot", "album": "Robot showcase", "since": "2021", "wait": true})).unwrap();
+    let tasks = fake.tasks.lock().unwrap().clone();
+    assert_eq!(tasks.len(), 2);
+    let (kind, p) = &tasks[0];
+    assert_eq!(*kind, TaskKind::Analyze);
+    assert_eq!(
+        (p["album"].as_str(), p["prompt"].as_str(), p.get("subject"), p.get("items")),
+        (Some("Robot showcase"), Some("every robot since 2020"), None, None),
+        "{p}"
+    );
+    let (kind, p) = &tasks[1];
+    assert_eq!((*kind, p["album"].as_str(), p["sinceUnix"].as_i64()), (TaskKind::Make, Some("Robot showcase"), Some(1_609_459_200)), "{p}");
 }
 
 #[test]
