@@ -104,15 +104,17 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      title over it, a riser into an impact;
    - **per entry**: the narration (any voice — `clone:<name>` included), then a few seconds of
      the robot's own picture and sound before the next; shots cut where the analysis saw the
-     robot (fitted, over a blurred and dimmed copy when the clip is portrait; slowed only when
-     the words would outrun the footage), each shot's sound faded in and crossfaded; a
+     robot (a portrait or 4:3 clip fills the 16:9 frame, cropped on the robot's centre from the
+     analysis with a slow 6 % tilt across it, so a tall robot is seen whole and the video never
+     looks vertical; `--no-fill` shows it whole over a blurred, dimmed copy instead; slowed only
+     when the words would outrun the footage), each shot's sound faded in and crossfaded; a
      name/date lower third; a dramatic transition from a rotating set (cross zoom, whip, flash,
      push, glitch, light leak, zoom blur; dip to black at a new year) with a whoosh; the year
      as a title card with an impact;
    - **polish**: every shot pushes in slowly — Motion scale keyframes from as fitted to 1.5 %
      larger a second (6 % at most), eased out of the first and into the last, in media time
-     so a slowed shot keeps the whole move; the blurred copy behind a portrait shot stays
-     still. Lower thirds slide in from the left (3 % of the width, 0.4 s, decelerating) while
+     so a slowed shot keeps the whole move; a filled shot's tilt is Motion position keyframes
+     eased the same way (with `--no-fill`, the blurred copy behind it stays still). Lower thirds slide in from the left (3 % of the width, 0.4 s, decelerating) while
      fading in (0.25 s), and leave the same way (Motion position and Opacity keyframes on the
      graphic clip). `--stabilize` (`Options::stabilize`) puts Warp Stabilizer
      (`warp_stabilizer`: smooth motion, position/scale/rotation, crop and auto-scale) on every

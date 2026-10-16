@@ -8,8 +8,8 @@
 //!    sentences per entry, an outro — with the analysis' facts only; any line it does not
 //!    deliver gets a plain template line, so the edit never depends on the model behaving.
 //! 3. [`build`]: a new sequence (1920×1080 by default) — intro title, then per entry: narration
-//!    (any voice, cloned voices included), shots around each clip's best moment (portrait clips
-//!    over a blurred, dimmed copy of themselves), a name/date lower third, a transition from a
+//!    (any voice, cloned voices included), shots around each clip's best moment (portrait and 4:3
+//!    clips filling the frame around their robot), a name/date lower third, a transition from a
 //!    rotating set of dramatic ones with a whoosh, the year as a title card with an impact
 //!    whenever it changes; the counter (`graphics.counter`) across the whole show; the music —
 //!    a generated bed (`audio.generate`) or the user's track ([`Options::music`], fitted to the
@@ -79,6 +79,10 @@ pub struct Options {
     /// its robot is in view) or shorter after its words. Never padded with footage where the
     /// robot is out of view, nor with held frames; [`Built::seconds`] says what it came to.
     pub target_minutes: Option<f64>,
+    /// Clips whose shape is not the frame's (portrait phone video, 4:3) fill the frame, cropped
+    /// around the subject with a slow tilt across it, as a 16:9 video should look; `false`: they
+    /// sit whole over a blurred, dimmed copy of themselves.
+    pub fill_frame: bool,
 }
 
 impl Default for Options {
@@ -99,6 +103,7 @@ impl Default for Options {
             stabilize: false,
             match_color: false,
             target_minutes: None,
+            fill_frame: true,
         }
     }
 }
@@ -776,6 +781,10 @@ struct Tracks {
     aspect: f64,
     /// Warp Stabilizer on the shots ([`Options::stabilize`]).
     stabilize: bool,
+    /// Odd-shaped clips fill the frame ([`Options::fill_frame`]).
+    fill: bool,
+    /// The frame's size, sequence pixels.
+    frame: (f64, f64),
     bg: String,
     fg: String,
     /// Main titles and lower thirds.
@@ -895,12 +904,75 @@ async fn push_in(ex: &dyn Executor, clip: u64, scale: f64, t0: f64, t1: f64, fps
     Ok(())
 }
 
-/// Place `item`'s `[src, src + dur)` at `t` (both ends on frames): foreground fitted on V2 (with
-/// its sound on A1, which [`mix_down`] levels) with a slow push-in ([`push_in`]) and — when the
-/// show is stabilized ([`Options::stabilize`]) and `stabilize` — Warp Stabilizer; for a clip
-/// whose shape is not the frame's, a blurred, dimmed copy filling V1 behind it, which stays
-/// still.
-async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64, dur: f64, stabilize: bool) -> Result<Placed, AutoCutError> {
+/// How far a filled shot's crop travels across its subject, as a share of the picture.
+const REFRAME_TILT: f64 = 0.06;
+
+/// Where a filled shot sits, start and end: the Motion position (sequence pixels) that puts the
+/// subject's centre `focus` (0..1 of the clip, x right, y down) mid-frame, as far as the picture
+/// still covers the `frame`, moving up to [`REFRAME_TILT`] along the axis the fill crops (a tilt
+/// down a portrait clip, so a tall robot is seen whole over the shot). The picture of a clip of
+/// shape `aspect` (width over height) filling the frame is as wide as the frame (a narrower
+/// clip) or as tall (a wider one). `None` for sizes that make no sense.
+fn reframe_path(aspect: f64, frame: (f64, f64), focus: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+    let ok = |v: f64| v.is_finite() && v > 0.0;
+    let (fw, fh) = frame;
+    if !(ok(aspect) && ok(fw) && ok(fh)) {
+        return None;
+    }
+    let shown = if aspect < fw / fh { (fw, fw / aspect) } else { (fh * aspect, fh) };
+    // the share of the picture the frame shows on each axis, and where its centre may go
+    let vis = [(fw / shown.0).min(1.0), (fh / shown.1).min(1.0)];
+    let clamp = |axis: usize, x: f64| {
+        let (lo, hi) = (vis[axis] / 2.0, 1.0 - vis[axis] / 2.0);
+        if x.is_finite() { x.clamp(lo, hi) } else { 0.5 }
+    };
+    let centre = [clamp(0, focus[0]), clamp(1, focus[1])];
+    let axis = if vis[1] <= vis[0] { 1 } else { 0 };
+    let d = REFRAME_TILT.min((1.0 - vis[axis]) / 2.0).max(0.0);
+    let (mut from, mut to) = (centre, centre);
+    from[axis] = clamp(axis, centre[axis] - d);
+    to[axis] = clamp(axis, centre[axis] + d);
+    // the picture's point `f` at the frame's middle: the picture moves the other way
+    let pos = |f: [f64; 2]| [fw / 2.0 + (0.5 - f[0]) * shown.0, fh / 2.0 + (0.5 - f[1]) * shown.1];
+    Some((pos(from), pos(to)))
+}
+
+/// Keyframe a filled shot's position along [`reframe_path`] from `t0` to `t1`, eased like the
+/// push-in.
+#[allow(clippy::too_many_arguments)]
+async fn reframe(ex: &dyn Executor, clip: u64, aspect: f64, frame: (f64, f64), focus: [f64; 2], t0: f64, t1: f64, fps: f64) -> Result<(), AutoCutError> {
+    let last = on_frame(t1 - 1.0 / fps, fps);
+    let Some((from, to)) = reframe_path(aspect, frame, focus) else { return Ok(()) };
+    if last <= t0 {
+        return Ok(());
+    }
+    for (at, p) in [(t0, from), (last, to)] {
+        run(ex, "effects.setParam", json!({"clip": clip, "effect": "motion", "param": "position", "value": p, "time": ticks(at), "keyframe": true})).await?;
+    }
+    for (at, ease) in [(t0, "easeOut"), (last, "easeIn")] {
+        run(ex, "effects.setInterpolation", json!({"clip": clip, "effect": "motion", "param": "position", "time": ticks(at), "interpolation": ease})).await?;
+    }
+    Ok(())
+}
+
+/// Place `item`'s `[src, src + dur)` at `t` (both ends on frames): foreground on V2 (with its
+/// sound on A1, which [`mix_down`] levels) with a slow push-in ([`push_in`]) and — when the
+/// show is stabilized ([`Options::stabilize`]) and `stabilize` — Warp Stabilizer. A clip whose
+/// shape is not the frame's fills it ([`Options::fill_frame`]), its crop on the subject's
+/// centre `focus` (0..1 of the clip; the middle without one) and tilting across it
+/// ([`reframe`]); otherwise it is fitted whole over a blurred, dimmed copy filling V1 behind
+/// it, which stays still.
+#[allow(clippy::too_many_arguments)]
+async fn place_shot(
+    ex: &dyn Executor,
+    tr: &Tracks,
+    item: u64,
+    t: f64,
+    src: f64,
+    dur: f64,
+    stabilize: bool,
+    focus: Option<[f64; 2]>,
+) -> Result<Placed, AutoCutError> {
     let frame_aspect = tr.aspect;
     let t = on_frame(t, tr.fps);
     let end = on_frame(t + dur, tr.fps).max(t + 1.0 / tr.fps);
@@ -914,18 +986,25 @@ async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64,
     let ids: Vec<u64> = r["clips"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
     let fg = *ids.first().ok_or_else(|| AutoCutError::Executor("timeline.place placed nothing".into()))?;
     let audio = ids.get(1).copied();
-    let fit = run(ex, "clip.fitToFrame", json!({"clips": [fg]})).await?;
+    let size = media_size(ex, item).await;
+    let aspect = size.map(|(w, h)| w / h.max(1.0)).unwrap_or(frame_aspect);
+    let odd = (aspect - frame_aspect).abs() > 0.05;
+    let fill = odd && tr.fill && size.is_some_and(|(w, h)| w > 0.0 && h > 0.0);
+    let fit = run(ex, if fill { "clip.fillFrame" } else { "clip.fitToFrame" }, json!({"clips": [fg]})).await?;
     let scale = fit["clips"].as_array().and_then(|a| a.iter().find(|c| c["clip"].as_u64() == Some(fg))).and_then(|c| c["scale"].as_f64());
     if let Some(scale) = scale {
-        // cosmetic, like the transitions: a shot without its push-in is still right
+        // cosmetic, like the transitions: a shot without its push-in (or its reframing) is
+        // still right
         push_in(ex, fg, scale, t, end, tr.fps).await.ok();
+        if fill {
+            reframe(ex, fg, aspect, tr.frame, focus.unwrap_or(Moment::middle()), t, end, tr.fps).await.ok();
+        }
     }
     if stabilize && tr.stabilize {
         run(ex, "effects.apply", json!({"clips": [fg], "effect": "warp_stabilizer"})).await?;
     }
-    let aspect = media_size(ex, item).await.map(|(w, h)| w / h.max(1.0)).unwrap_or(frame_aspect);
     let mut bg = None;
-    if (aspect - frame_aspect).abs() > 0.05 {
+    if odd && !fill {
         let r =
             run(ex, "timeline.place", json!({"item": item, "track": tr.bg, "time": ticks(t), "sourceIn": ticks(src), "duration": ticks(dur), "audio": false}))
                 .await?;
@@ -1644,6 +1723,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         fps: opts.fps.clamp(1.0, 240.0),
         aspect: w / h.max(1.0),
         stabilize: opts.stabilize,
+        fill: opts.fill_frame,
+        frame: (w, h),
         bg: "V1".into(),
         fg: "V2".into(),
         titles_index: 2,
@@ -1703,7 +1784,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let next_cut = beats.as_ref().and_then(|b| b.nearest(at + cut, at + cut * 0.5, at + cut * 1.5)).unwrap_or(at + cut);
         let len = if i + 1 >= picks.len() { intro_len - at } else { (next_cut - at).min(intro_len - at) };
         let len = len.min((s.clip_seconds - 0.4).max(0.5));
-        let shot = place_shot(ex, &tr, s.item, at, s.window_start(len), len, true).await?;
+        let shot = place_shot(ex, &tr, s.item, at, s.window_start(len), len, true, s.largest.map(|m| m.center)).await?;
         fade_in(ex, shot.audio).await;
         mix.sounds.extend(shot.audio);
         at = shot.end;
@@ -1799,7 +1880,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 Some(end) if i + 1 == n_wins && slow >= 0.999 => (end - at).max(0.5).min(reach.max(0.5)),
                 _ => *len,
             };
-            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, len, true).await?;
+            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, len, true, s.largest.map(|m| m.center)).await?;
             mix.sounds.extend(audio);
             let mut shot_end = end;
             if slow < 0.999 {
@@ -1890,7 +1971,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let outro_len = (outro_voice_at - t + outro_spoken + 1.5).max(5.0);
     if let Some(h0) = entries.last().and_then(|e| e.shots.first()) {
         let len = outro_len.min((h0.clip_seconds - 0.4).max(1.0));
-        let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, false).await?;
+        let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, false, h0.largest.map(|m| m.center)).await?;
         mix.sounds.extend(audio);
         fade_in(ex, audio).await;
         if let Some(a) = audio {
@@ -2090,6 +2171,9 @@ async fn compose_thumbnail(
         fps,
         aspect: w / h,
         stabilize: false,
+        // the whole picture over its blurred copy: the title goes where the robot is not
+        fill: false,
+        frame: (w, h),
         bg: "V1".into(),
         fg: "V2".into(),
         titles_index: 2,
@@ -2102,7 +2186,7 @@ async fn compose_thumbnail(
         hits: "A1".into(),
     };
     // the frame: a second of the shot from the moment, its first frame the one exported
-    place_shot(ex, &tr, shot.item, 0.0, moment.seconds, 1.0, false).await?;
+    place_shot(ex, &tr, shot.item, 0.0, moment.seconds, 1.0, false, Some(moment.center)).await?;
     // the title, as large as two lines across the frame allow, in the half of the picture the
     // robot is not in (low unless it stands low), the count in the opposite corner
     let lines = thumbnail_lines(&opts.title);
@@ -2623,6 +2707,38 @@ mod tests {
         assert!(b.times.windows(2).all(|w| (w[1] - w[0] - 0.5).abs() < 1e-6), "an even beat across the joint");
         assert!(remixed_beats(&track, &json!({"pieces": [{"src": "x"}]})).is_none());
         assert!(remixed_beats(&track, &json!({})).is_none());
+    }
+
+    #[test]
+    fn odd_shaped_shots_fill_the_frame_around_their_subject() {
+        let frame = (1920.0, 1080.0);
+        let covers = |aspect: f64, p: [f64; 2]| {
+            let shown = if aspect < frame.0 / frame.1 { (frame.0, frame.0 / aspect) } else { (frame.1 * aspect, frame.1) };
+            let eps = 1e-6;
+            p[0] - shown.0 / 2.0 <= eps && p[0] + shown.0 / 2.0 >= frame.0 - eps && p[1] - shown.1 / 2.0 <= eps && p[1] + shown.1 / 2.0 >= frame.1 - eps
+        };
+        // a portrait phone clip, robot in its upper third: a tilt down across it, frame covered
+        let portrait = 1080.0 / 1920.0;
+        let (a, b) = reframe_path(portrait, frame, [0.5, 0.3]).unwrap();
+        assert_eq!((a[0], b[0]), (960.0, 960.0), "no pan across a portrait clip");
+        assert!(a[1] > b[1], "the picture moves up: the view tilts down ({a:?} → {b:?})");
+        let shown_h = 1920.0 / portrait;
+        assert!(((540.0 - a[1]) / shown_h + 0.5 - 0.24).abs() < 1e-9, "starts a tilt-width above the robot");
+        assert!(covers(portrait, a) && covers(portrait, b));
+        // a robot at the very top: held at the edge, never showing past the picture
+        for f in [[0.5, 0.0], [0.5, 1.0], [0.0, 0.5], [1.0, 1.0], [f64::NAN, 0.4]] {
+            let (a, b) = reframe_path(portrait, frame, f).unwrap();
+            assert!(covers(portrait, a) && covers(portrait, b), "{f:?}: {a:?} {b:?}");
+        }
+        // 4:3 crops a little top and bottom; a wide clip pans
+        let (a, b) = reframe_path(4.0 / 3.0, frame, [0.5, 0.5]).unwrap();
+        assert!(covers(4.0 / 3.0, a) && covers(4.0 / 3.0, b) && a[1] != b[1]);
+        let (a, b) = reframe_path(21.0 / 9.0, frame, [0.8, 0.5]).unwrap();
+        assert!(covers(21.0 / 9.0, a) && covers(21.0 / 9.0, b) && a[0] != b[0] && a[1] == 540.0);
+        // the frame's own shape: no move; nonsense: nothing
+        assert_eq!(reframe_path(16.0 / 9.0, frame, [0.2, 0.2]), Some(([960.0, 540.0], [960.0, 540.0])));
+        assert_eq!(reframe_path(f64::NAN, frame, [0.5, 0.5]), None);
+        assert_eq!(reframe_path(0.5, (0.0, 1080.0), [0.5, 0.5]), None);
     }
 
     #[test]

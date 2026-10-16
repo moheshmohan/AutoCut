@@ -121,10 +121,12 @@ SUBCOMMANDS
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
          [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
-         [--export out.mp4 [--upload [--upload-album <title>]]] [--qa | --no-qa]
+         [--no-fill] [--export out.mp4 [--upload [--upload-album <title>]]] [--qa | --no-qa]
                                 a narrated 16:9 showcase of every clip the analysis found, oldest
                                 first: title, a counter, name/date lower thirds that slide and
-                                fade in and out, a slow push-in on every shot, year cards,
+                                fade in and out, a slow push-in on every shot (portrait and 4:3
+                                clips fill the frame, cropped on their robot with a slow tilt
+                                across it; --no-fill shows them whole over a blurred copy), year cards,
                                 dramatic transitions with whooshes, a generated music bed ducked
                                 under the voice (cloned voices too), an outro; montage cuts and
                                 entries land on the music's beat (the bed's --bpm grid, or with
@@ -961,6 +963,7 @@ async fn cli() {
             }
             opts.stabilize = a.flag("--stabilize");
             opts.match_color = a.flag("--match-color");
+            opts.fill_frame = !a.flag("--no-fill");
             if let Some(m) = a.opt("--target-minutes") {
                 match m.parse::<f64>() {
                     Ok(v) if v.is_finite() && v > 0.0 && v <= 24.0 * 60.0 => opts.target_minutes = Some(v),

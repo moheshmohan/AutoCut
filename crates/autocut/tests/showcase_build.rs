@@ -497,3 +497,56 @@ async fn the_voice_says_respellings_and_the_subtitles_show_the_text() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The share of a rendered frame's border pixels that are near black or flat grey: what
+/// pillarboxing or a blurred, dimmed copy leaves at the sides.
+fn dark_border_share(png: &[u8]) -> f64 {
+    let img = image::load_from_memory(png).expect("a PNG").to_rgb8();
+    let (w, h) = img.dimensions();
+    let mut dark = 0u32;
+    let mut n = 0u32;
+    for y in (0..h).step_by(4) {
+        for x in [0, 1, 2, w - 3, w - 2, w - 1] {
+            let p = img.get_pixel(x, y).0;
+            n += 1;
+            if p.iter().map(|v| u32::from(*v)).sum::<u32>() < 3 * 24 {
+                dark += 1;
+            }
+        }
+    }
+    f64::from(dark) / f64::from(n.max(1))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clips_of_another_shape_fill_the_frame_around_their_robot() {
+    // a square frame makes the demo's 16:9 clips "another shape" (as portrait phone clips are
+    // in a 16:9 show): they fill it, each keyframed along a pan across its robot, with no
+    // blurred copy behind
+    let ex = demo();
+    let opts = Options { title: "Robots".into(), width: 480, height: 480, ..Options::default() };
+    let built = showcase::build(&ex, &opts, &three(), &short_script(), &mut |_| {}).await.expect("the showcase builds");
+    assert!(built.notes.is_empty(), "{:?}", built.notes);
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let v2 = seq["video"][1]["items"].as_array().cloned().unwrap();
+    assert!(v2.len() >= 6, "{}", v2.len());
+    for c in &v2 {
+        assert_eq!(keyframes(c, "motion", "position"), 2, "a pan across the robot: {c}");
+        assert_eq!(keyframes(c, "motion", "scale"), 2, "and the push-in: {c}");
+    }
+    assert!(seq["video"][0]["items"].as_array().is_none_or(|a| a.is_empty()), "no blurred copies: {}", seq["video"][0]);
+    let tps = 254_016_000_000f64;
+    let mid = |c: &serde_json::Value| (c["start"].as_f64().unwrap() + c["end"].as_f64().unwrap()) / 2.0 / tps;
+    let png = ex.render(mid(&v2[3]), 480).await.unwrap();
+    assert!(dark_border_share(&png) < 0.5, "the picture reaches the frame's edges");
+
+    // asked for the old look: the whole clip over its blurred copy, which stays still
+    let ex = demo();
+    let opts = Options { title: "Robots".into(), width: 480, height: 480, fill_frame: false, ..Options::default() };
+    showcase::build(&ex, &opts, &three(), &short_script(), &mut |_| {}).await.expect("the showcase builds");
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let v1 = seq["video"][0]["items"].as_array().cloned().unwrap_or_default();
+    assert!(!v1.is_empty() && v1.iter().all(|c| has_effect(c, "gaussian_blur")), "{v1:?}");
+    for c in seq["video"][1]["items"].as_array().cloned().unwrap() {
+        assert_eq!(keyframes(&c, "motion", "position"), 0, "{c}");
+    }
+}
