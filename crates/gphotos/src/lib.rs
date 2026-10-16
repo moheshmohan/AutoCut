@@ -414,6 +414,18 @@ pub fn upload_readiness(dir: &Path) -> Result<(), String> {
     tokens.check_upload().map_err(|e| e.to_string())
 }
 
+/// Whether a pick can start, from what is on disk in `dir` (no network): the OAuth client and a
+/// sign-in with the picker's permission. `Err` says what to do.
+pub fn pick_readiness(dir: &Path) -> Result<(), String> {
+    if !dir.join("client_secret.json").is_file() {
+        return Err(format!(
+            "Google Photos is not connected: save your OAuth client as {} (see crates/gphotos/README.md), then run `filmcraft-cli photos auth`",
+            dir.join("client_secret.json").display()
+        ));
+    }
+    auth::Tokens::load(dir).map(drop).map_err(|e| format!("Google Photos is not connected: {e}"))
+}
+
 /// Whether album commands can run, from what is on disk in `dir` (no network): the OAuth
 /// client, a sign-in, and the album permissions. `Err` says what to do.
 pub fn album_readiness(dir: &Path) -> Result<(), String> {
@@ -737,6 +749,21 @@ mod tests {
         let http = Scripted::new(Vec::new());
         assert!(matches!(gp.upload_with(&http, &file, &opts, &mut |_, _, _| false), Err(GPhotosError::Cancelled)));
         assert_eq!(http.0.lock().unwrap().1, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pick_readiness_comes_from_the_disk() {
+        let dir = temp("pick-ready");
+        let e = pick_readiness(&dir).unwrap_err();
+        assert!(e.contains("not connected") && e.contains("client_secret.json") && e.contains("photos auth"), "{e}");
+        std::fs::write(dir.join("client_secret.json"), r#"{"installed":{"client_id":"id","client_secret":"s"}}"#).unwrap();
+        let e = pick_readiness(&dir).unwrap_err();
+        assert!(e.contains("not connected") && e.contains("photos auth"), "{e}");
+        std::fs::write(dir.join("tokens.json"), "{not json").unwrap();
+        assert!(pick_readiness(&dir).unwrap_err().contains("not connected"));
+        auth::Tokens { access_token: "a".into(), refresh_token: Some("r".into()), expires_at: 1, scope: auth::SCOPE.into() }.save(&dir).unwrap();
+        assert_eq!(pick_readiness(&dir), Ok(()), "the picker needs no more than its own permission");
         std::fs::remove_dir_all(&dir).ok();
     }
 

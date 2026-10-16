@@ -585,8 +585,7 @@ async fn cli() {
                     // the import target first, so a bad --project/--bridge fails before the user picks
                     let mut b = Backend::open(&a);
                     // blocking HTTP and sleeps: keep them off the async runtime
-                    let outcome = tokio::task::spawn_blocking(move || {
-                        let prepared = gp.prepare(&opts, &mut |line| diag(format_args!("{line}")))?;
+                    let driven = tokio::task::spawn_blocking(move || {
                         // with --auto, a local vision agent (Qwen2.5-VL via Ollama) drives the
                         // picker: it types the query, clicks matching video tiles, presses Done;
                         // with --album it opens that album and selects all of it instead
@@ -599,53 +598,28 @@ async fn cli() {
                                 videos_only: true,
                             }),
                             (None, Some(title)) => Some(filmcraft_screenagent::agent::Request {
-                                query: String::new(),
                                 max_items: opts.max_items.unwrap_or(filmcraft_gphotos::api::MAX_PICK),
-                                select_all: true,
-                                album: Some(title),
-                                videos_only,
+                                ..filmcraft_automation::photos::album_request(&title, videos_only)
                             }),
                             (None, None) => None,
                         };
-                        let mut agent = request.map(filmcraft_screenagent::agent::spawn);
-                        // the pick outcome is authoritative; the agent's own budget bounds it.
-                        // Once the agent is done without pressing Done (its search matched
-                        // nothing, or it failed), nothing more will be picked: stop waiting.
-                        let mut report: Option<Result<filmcraft_screenagent::agent::Summary, String>> = None;
-                        let mut finished: Option<std::time::Instant> = None;
-                        let mut give_up = || {
-                            if report.is_none() && agent.as_ref().is_some_and(|h| h.is_finished()) {
-                                report = agent.take().map(|h| h.join().unwrap_or_else(|_| Err("the agent thread died".into())));
-                                finished = Some(std::time::Instant::now());
-                            }
-                            match (&report, finished) {
-                                (Some(Ok(s)), Some(t)) => s.stop_waiting(t.elapsed()),
-                                (Some(Err(_)), _) => true,
-                                _ => false,
-                            }
-                        };
-                        let outcome = gp.complete_unless(prepared, opts.wait, &mut give_up, &mut |line| diag(format_args!("{line}")));
-                        // an agent still running when the pick ends (Done pressed by hand) is joined
-                        let report = report.or_else(|| agent.map(|h| h.join().unwrap_or_else(|_| Err("the agent thread died".into()))));
-                        outcome.map(|o| (o, report))
+                        filmcraft_automation::photos::pick_driven(&gp, &opts, request, &mut |line| diag(format_args!("{line}")), &|| false)
                     })
                     .await
                     .unwrap_or_else(|e| fail(format!("photos pick: {e}")))
                     .unwrap_or_else(|e| fail(format!("photos pick: {e}")));
-                    let (outcome, report) = outcome;
-                    match &report {
+                    match &driven.agent {
                         Some(Ok(s)) => diag(format_args!("photos pick: autopick: {}", s.note)),
                         Some(Err(e)) => diag(format_args!("photos pick: the autopick agent reported: {e}")),
                         None => {}
                     }
-                    let picked = match outcome {
+                    let nothing_to_pick = driven.nothing_to_pick();
+                    let picked = match driven.outcome {
                         filmcraft_gphotos::PickOutcome::Done(p) => p,
-                        filmcraft_gphotos::PickOutcome::Pending(_) if report.as_ref().is_some_and(|r| r.as_ref().is_ok_and(|s| !s.done_pressed)) => {
-                            match &album_title {
-                                Some(t) => fail(format!("photos pick: the album `{t}` had nothing to pick")),
-                                None => fail("photos pick: the search matched nothing to pick"),
-                            }
-                        }
+                        filmcraft_gphotos::PickOutcome::Pending(_) if nothing_to_pick => match &album_title {
+                            Some(t) => fail(format!("photos pick: the album `{t}` had nothing to pick")),
+                            None => fail("photos pick: the search matched nothing to pick"),
+                        },
                         filmcraft_gphotos::PickOutcome::Pending(s) => {
                             outln!("{}", json!({"status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time}));
                             fail(format!("photos pick: no selection yet; finish in the browser, then run `photos pick --session {}`", s.id));

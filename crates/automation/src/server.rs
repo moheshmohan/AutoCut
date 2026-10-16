@@ -856,39 +856,35 @@ impl FilmcraftMcp {
                 videos_only: true,
             }),
             (None, Some(title)) => Some(filmcraft_screenagent::agent::Request {
-                query: String::new(),
                 max_items: p.max_items.unwrap_or(filmcraft_gphotos::api::MAX_PICK),
-                select_all: true,
-                album: Some(title),
-                videos_only,
+                ..crate::photos::album_request(&title, videos_only)
             }),
             (None, None) => None,
         };
-        // blocking HTTP and sleeps: keep them off the async threads
-        let outcome = match tokio::task::spawn_blocking(move || {
-            let prepared = gp.prepare(&opts, &mut |_| {})?;
-            let agent = request.map(filmcraft_screenagent::agent::spawn);
-            gp.complete(prepared, opts.wait, &mut |_| {}).map(|o| (o, agent))
-        })
-        .await
-        {
-            Ok(Ok(o)) => o,
+        // blocking HTTP, sleeps and the agent: keep them off the async threads. The wait ends
+        // early when the agent finishes without pressing Done
+        let driven = match tokio::task::spawn_blocking(move || crate::photos::pick_driven(&gp, &opts, request, &mut |_| {}, &|| false)).await {
+            Ok(Ok(d)) => d,
             Ok(Err(e)) => return Ok(fail(e)),
             Err(e) => return Ok(fail(format!("internal error: {e}"))),
         };
-        let (outcome, agent) = outcome;
-        let mut autopick: Value = Value::Null;
-        let picked = match outcome {
-            filmcraft_gphotos::PickOutcome::Done(picked) => {
-                if let Some(h) = agent {
-                    autopick = match h.join() {
-                        Ok(Ok(s)) => serde_json::to_value(&s).unwrap_or(Value::Null),
-                        Ok(Err(e)) => json!({"error": e}),
-                        Err(_) => json!({"error": "the autopick agent thread died"}),
-                    };
-                }
-                picked
-            }
+        let autopick: Value = match &driven.agent {
+            Some(Ok(s)) => serde_json::to_value(s).unwrap_or(Value::Null),
+            Some(Err(e)) => json!({"error": e}),
+            None => Value::Null,
+        };
+        if driven.nothing_to_pick() {
+            let session = match &driven.outcome {
+                filmcraft_gphotos::PickOutcome::Pending(s) => Some(s.id.clone()),
+                filmcraft_gphotos::PickOutcome::Done(_) => None,
+            };
+            return Ok(fail(json!({
+                "status": "done", "error": "the agent found nothing to pick (no matching album or search result), so nothing was selected",
+                "autopick": autopick, "session": session,
+            })));
+        }
+        let picked = match driven.outcome {
+            filmcraft_gphotos::PickOutcome::Done(picked) => picked,
             filmcraft_gphotos::PickOutcome::Pending(s) => {
                 return Ok(ok_json(&json!({
                     "status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time,
