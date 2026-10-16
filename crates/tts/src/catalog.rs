@@ -98,6 +98,136 @@ pub fn clone_missing_bytes(models_dir: &Path) -> u64 {
     CLONE_FILES.iter().filter(|f| !std::fs::metadata(d.join(f.name)).is_ok_and(|m| m.len() == f.size)).map(|f| f.size).sum()
 }
 
+/// A VoxCPM release for natural voice cloning (feature `voxcpm`): the model speaks in the
+/// cloned voice directly, accent and rhythm included. Pinned and checked like the voices
+/// (verified 2026-10-16 against the Hugging Face API and `shasum -a 256`). Code and weights are
+/// Apache-2.0 (OpenBMB, "free for commercial use"); nothing NC/ND.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoxcpmPackage {
+    /// Model id in profiles and commands, and the package's directory name.
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub license: &'static str,
+    pub source: &'static str,
+    pub files: &'static [ModelFile],
+}
+
+pub const VOXCPM_LICENSE: &str = "Apache-2.0 (VoxCPM by OpenBMB)";
+
+macro_rules! voxcpm_file {
+    ($repo:literal, $rev:literal, $name:literal, $sha:literal, $size:expr) => {
+        ModelFile { name: $name, url: concat!("https://huggingface.co/openbmb/", $repo, "/resolve/", $rev, "/", $name), sha256: $sha, size: $size }
+    };
+}
+
+/// The VoxCPM releases, fastest first.
+pub static VOXCPM: &[VoxcpmPackage] = &[
+    VoxcpmPackage {
+        id: "voxcpm-1.5",
+        name: "Natural cloning, faster (VoxCPM1.5)",
+        description: "0.8 B parameters, 44.1 kHz. Continues the voice sample, so it needs the sample's exact transcript.",
+        license: VOXCPM_LICENSE,
+        source: "https://huggingface.co/openbmb/VoxCPM1.5",
+        files: &[
+            voxcpm_file!(
+                "VoxCPM1.5",
+                "8cdc403854cda0e3af12252d27da038fda5982ac",
+                "config.json",
+                "2459071497a422bf25fb0f47ff8bd30181dbf62ef7903b293bcff59a615eda26",
+                2831
+            ),
+            voxcpm_file!(
+                "VoxCPM1.5",
+                "8cdc403854cda0e3af12252d27da038fda5982ac",
+                "tokenizer.json",
+                "63443666e076f48a575030d4861e5bdbf64b71632b48e75d4e867c46dd980aa5",
+                3_676_778
+            ),
+            voxcpm_file!(
+                "VoxCPM1.5",
+                "8cdc403854cda0e3af12252d27da038fda5982ac",
+                "audiovae.pth",
+                "8160987a7f10acd4c49b72a9a3e974c0b5c1c786538cd4bcaac5f2df388c0f14",
+                346_023_712
+            ),
+            voxcpm_file!(
+                "VoxCPM1.5",
+                "8cdc403854cda0e3af12252d27da038fda5982ac",
+                "model.safetensors",
+                "7e97ee2cd2ca891662f7da368921df08368a616410afe67461253e4dcd3823cc",
+                1_603_516_600
+            ),
+        ],
+    },
+    VoxcpmPackage {
+        id: "voxcpm-2",
+        name: "Natural cloning, best quality (VoxCPM2)",
+        description: "2.3 B parameters, 48 kHz, 30 languages. Clones from the voice sample alone; slower, about 5 GB of memory on a GPU (10 GB on the CPU).",
+        license: VOXCPM_LICENSE,
+        source: "https://huggingface.co/openbmb/VoxCPM2",
+        files: &[
+            voxcpm_file!(
+                "VoxCPM2",
+                "32279effe8c19989596f05d353d1447f51d9e915",
+                "config.json",
+                "405f0dcd92f7feba6011ed4eac5c8d4f74cba9712f07fd5cfa3063bbdd95402c",
+                4336
+            ),
+            voxcpm_file!(
+                "VoxCPM2",
+                "32279effe8c19989596f05d353d1447f51d9e915",
+                "tokenizer.json",
+                "f8984687e4a92a3503d521396d454b7d68e9fdaab2a0288eb3536c7c1aa4bc20",
+                3_676_772
+            ),
+            voxcpm_file!(
+                "VoxCPM2",
+                "32279effe8c19989596f05d353d1447f51d9e915",
+                "audiovae.pth",
+                "94b5d51e107e0507d4acc976cfdadb64edd6fd06d1f751dadbf2fd1594274bf1",
+                376_951_122
+            ),
+            voxcpm_file!(
+                "VoxCPM2",
+                "32279effe8c19989596f05d353d1447f51d9e915",
+                "model.safetensors",
+                "f7f964cfa9da23653baec6e6f7750719977ad944ed9f95fe52fe3a620506891d",
+                4_580_080_592
+            ),
+        ],
+    },
+];
+
+/// The VoxCPM release new natural clones use unless another is chosen.
+pub const DEFAULT_VOXCPM: &str = "voxcpm-1.5";
+
+pub fn voxcpm(id: &str) -> Option<&'static VoxcpmPackage> {
+    VOXCPM.iter().find(|p| p.id == id)
+}
+
+pub fn voxcpm_dir(models_dir: &Path, p: &VoxcpmPackage) -> PathBuf {
+    models_dir.join(p.id)
+}
+
+/// Every file of the release present with its pinned size.
+pub fn voxcpm_installed(models_dir: &Path, p: &VoxcpmPackage) -> bool {
+    let d = voxcpm_dir(models_dir, p);
+    p.files.iter().all(|f| std::fs::metadata(d.join(f.name)).is_ok_and(|m| m.len() == f.size))
+}
+
+/// Bytes of the release still to download.
+pub fn voxcpm_missing_bytes(models_dir: &Path, p: &VoxcpmPackage) -> u64 {
+    let d = voxcpm_dir(models_dir, p);
+    p.files.iter().filter(|f| !std::fs::metadata(d.join(f.name)).is_ok_and(|m| m.len() == f.size)).map(|f| f.size).sum()
+}
+
+/// Total download size of a release.
+pub fn voxcpm_size(p: &VoxcpmPackage) -> u64 {
+    p.files.iter().map(|f| f.size).sum()
+}
+
 /// A neural voice: catalogue entry and its voice-pack file.
 #[derive(Clone, Copy, Debug)]
 pub struct NeuralVoice {
@@ -185,8 +315,30 @@ mod tests {
             assert_eq!(find(v.info.id).map(|x| x.file), Some(v.file));
         }
         assert!(size() > 330_000_000 && size() < 340_000_000, "{}", size());
+        // the VoxCPM releases: the files the loader reads, pinned to a revision, Apache-2.0
+        assert!(voxcpm(DEFAULT_VOXCPM).is_some());
+        for p in VOXCPM {
+            let mut names: Vec<&str> = p.files.iter().map(|f| f.name).collect();
+            names.sort_unstable();
+            assert_eq!(names, vec!["audiovae.pth", "config.json", "model.safetensors", "tokenizer.json"], "{}", p.id);
+            for f in p.files {
+                assert_eq!(f.sha256.len(), 64, "{}", f.name);
+                assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+                assert!(f.url.starts_with("https://huggingface.co/openbmb/") && f.url.contains("/resolve/") && f.url.ends_with(f.name), "{}", f.url);
+                let rev = f.url.split("/resolve/").nth(1).and_then(|r| r.split('/').next()).unwrap_or("");
+                assert_eq!(rev.len(), 40, "pinned to a commit: {}", f.url);
+            }
+            assert!(p.license.starts_with("Apache-2.0") && !p.license.contains("NC"));
+            assert_eq!(voxcpm(p.id).map(|x| x.id), Some(p.id));
+        }
+        assert!(voxcpm_size(voxcpm("voxcpm-1.5").unwrap()) > 1_900_000_000);
+        assert!(voxcpm_size(voxcpm("voxcpm-2").unwrap()) > 4_900_000_000);
         let dir = std::env::temp_dir().join(format!("filmcraft-tts-cat-{}", std::process::id()));
         assert!(!installed(&dir));
         assert_eq!(missing_bytes(&dir), size());
+        for p in VOXCPM {
+            assert!(!voxcpm_installed(&dir, p));
+            assert_eq!(voxcpm_missing_bytes(&dir, p), voxcpm_size(p));
+        }
     }
 }

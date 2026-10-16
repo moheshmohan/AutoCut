@@ -63,7 +63,34 @@ pub fn voice_identity(id: &str, models_dir: Option<&Path>) -> Option<String> {
 
 #[cfg(feature = "kokoro")]
 fn clone_identity(id: &str, models_dir: &Path) -> Option<String> {
-    let p = crate::clone::load_profile(&crate::clone::voices_dir(models_dir), id).ok()?;
+    let voices = crate::clone::voices_dir(models_dir);
+    let p = crate::clone::load_profile(&voices, id).ok()?;
+    if let Some(n) = &p.natural {
+        // a natural clone speaks from its voice sample: the sample's bytes, its transcript and the
+        // generation settings decide the samples
+        let pkg = catalog::voxcpm(&n.model)?;
+        let path = voices.join(&n.clip);
+        if std::fs::metadata(&path).ok()?.len() > crate::wav::MAX_BYTES {
+            return None;
+        }
+        let mut h = Sha256::new();
+        h.update(std::fs::read(&path).ok()?);
+        h.update([0]);
+        h.update(n.transcript.as_bytes());
+        return Some(format!(
+            "{}|clone v{}|created {}|{}|{:?}|cfg {}|steps {}|denoise {}|sample {}|{}",
+            p.id,
+            p.version,
+            p.created,
+            n.model,
+            n.mode,
+            n.cfg.to_bits(),
+            n.timesteps,
+            n.denoise_db.to_bits(),
+            hex(&h.finalize()),
+            pins(pkg.files)
+        ));
+    }
     let mut h = Sha256::new();
     for v in p.source_colour.iter().chain(&p.target_colour) {
         h.update(v.to_le_bytes());

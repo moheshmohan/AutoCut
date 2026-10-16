@@ -107,7 +107,7 @@ impl Audio {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Gender {
     Female,
@@ -171,7 +171,7 @@ pub fn voice_in(id: &str, models_dir: Option<&std::path::Path>) -> Result<Box<dy
         #[cfg(feature = "kokoro")]
         {
             let dir = models_dir.ok_or(TtsError::NotInstalled)?;
-            return clone::load(id, dir).map(|v| Box::new(v) as Box<dyn Voice>);
+            return clone::load(id, dir);
         }
         #[cfg(not(feature = "kokoro"))]
         {

@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let models = std::path::Path::new(models);
     let out = args.get(3).map(std::path::PathBuf::from);
     let text = "Number seven: a four legged robot dog that walked right up to me at the expo. It could climb stairs, and it even danced.";
-    let cv = clone::load(id, models)?;
+    let cv = clone::load_openvoice(id, models)?;
     let p = cv.profile().clone();
     let conv = Converter::load(&catalog::clone_package_dir(models))?;
     let base = filmcraft_tts::neural::load(&p.base_voice, models)?;

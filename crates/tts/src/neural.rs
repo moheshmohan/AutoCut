@@ -117,7 +117,7 @@ impl Voice for NeuralVoice {
 }
 
 /// Shift pitch by `semitones` keeping the length (latency compensated).
-fn pitch_shift(mut x: Vec<f32>, semitones: f64, rate: u32) -> Vec<f32> {
+pub(crate) fn pitch_shift(mut x: Vec<f32>, semitones: f64, rate: u32) -> Vec<f32> {
     let mut ps = filmcraft_audio_dsp::effects::PitchShifter::new(rate as f32, 1);
     ps.set_param("semitones", semitones as f32);
     ps.reset();
