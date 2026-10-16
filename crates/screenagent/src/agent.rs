@@ -52,6 +52,18 @@ pub struct Summary {
     pub note: String,
 }
 
+/// How long a pick keeps waiting for Google to report the selection after the agent pressed Done.
+pub const DONE_GRACE: Duration = Duration::from_secs(120);
+
+impl Summary {
+    /// Whether waiting for the picker's selection is pointless, the agent having finished
+    /// `since` ago: it never pressed Done (the search matched nothing, or nothing could be
+    /// selected), or it did and Google still has not reported a selection after [`DONE_GRACE`].
+    pub fn stop_waiting(&self, since: Duration) -> bool {
+        !self.done_pressed || since >= DONE_GRACE
+    }
+}
+
 /// Consecutive captures that all look the same before the agent gives up.
 const MAX_STALLED: u32 = 3;
 /// One tile click needs this long to land before re-capturing.
@@ -688,6 +700,31 @@ mod tests {
         assert!(err.to_string().contains("refusing to select every item"), "{err}");
         assert!(act.clicks.is_empty() && act.shift_clicks.is_empty(), "nothing was clicked: {:?}", act.clicks);
         assert_eq!(lines.iter().filter(|l| l.contains("waiting for the picker")).count(), SEARCH_TRIES - 1, "{lines:?}");
+    }
+
+    #[test]
+    fn a_search_that_matches_nothing_stops_the_wait_at_once() {
+        // the live failure: "Dubai Police robot videos" had no results, the agent found no tiles,
+        // and the pick waited out its whole timeout for a selection that could never come
+        struct NoResults;
+        impl Ground for NoResults {
+            fn inventory(&self, _png: &[u8], _task: &str) -> Result<Vec<Element>, ScreenError> {
+                Ok(vec![])
+            }
+            fn find(&self, _png: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
+                Ok((target == crate::picker::SEARCH_FIELD).then(|| Element { label: "Search".into(), kind: String::new(), x1: 40, y1: 0, x2: 160, y2: 8 }))
+            }
+        }
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40), cap_of(50)]);
+        let plan = Plan { select_all: true, query: Some("Dubai Police robot".into()), ..Plan::default() };
+        let s = drive(&mut act, &NoResults, &plan, &mut |_| {}).unwrap();
+        assert!(!s.done_pressed && s.selected == 0, "{s:?}");
+        assert!(act.shift_clicks.is_empty());
+        assert!(s.stop_waiting(Duration::ZERO), "nothing will be picked: stop now");
+        // Done pressed: Google gets a moment to report the selection, not forever
+        let done = Summary { done_pressed: true, selected: 3, ..Summary::default() };
+        assert!(!done.stop_waiting(Duration::from_secs(5)));
+        assert!(done.stop_waiting(DONE_GRACE));
     }
 
     #[test]

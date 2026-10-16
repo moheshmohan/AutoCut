@@ -209,8 +209,22 @@ impl GooglePhotos {
     /// Step two of [`Self::pick`]: wait for the selection within `wait`, download every
     /// picked item into the cache, and delete the session.
     pub fn complete(&self, prepared: Prepared, wait: Duration, progress: &mut dyn FnMut(&str)) -> Result<PickOutcome, GPhotosError> {
+        self.complete_unless(prepared, wait, &mut || false, progress)
+    }
+
+    /// [`Self::complete`], but the wait for the selection ends as soon as `give_up()` says so
+    /// (asked after every poll while nothing is picked) — e.g. the screen agent driving the
+    /// picker finished without pressing Done. The session is then [`PickOutcome::Pending`],
+    /// still open for the user to finish by hand, instead of waiting out `wait`.
+    pub fn complete_unless(
+        &self,
+        prepared: Prepared,
+        wait: Duration,
+        give_up: &mut dyn FnMut() -> bool,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<PickOutcome, GPhotosError> {
         let id = prepared.session.id.clone();
-        let session = match self.wait_for_selection(prepared.session, wait.min(MAX_WAIT)) {
+        let session = match self.wait_for_selection(prepared.session, wait.min(MAX_WAIT), give_up) {
             Ok(Waited::Ready(s)) => s,
             Ok(Waited::OutOfTime(s)) => return Ok(PickOutcome::Pending(s)),
             Ok(Waited::Expired) => {
@@ -230,8 +244,8 @@ impl GooglePhotos {
     }
 
     /// Poll `sessions.get` as Google advises until the user is done, Google gives up, or
-    /// `budget` runs out.
-    fn wait_for_selection(&self, mut session: PickingSession, budget: Duration) -> Result<Waited, GPhotosError> {
+    /// `budget` runs out, or `give_up()` while nothing is picked.
+    fn wait_for_selection(&self, mut session: PickingSession, budget: Duration, give_up: &mut dyn FnMut() -> bool) -> Result<Waited, GPhotosError> {
         let start = Instant::now();
         let mut failures = 0u32;
         for _ in 0..MAX_POLLS {
@@ -239,6 +253,7 @@ impl GooglePhotos {
                 Poll::Ready => return Ok(Waited::Ready(session)),
                 Poll::Expired => return Ok(Waited::Expired),
                 Poll::OutOfTime => return Ok(Waited::OutOfTime(session)),
+                Poll::Wait(_) if give_up() => return Ok(Waited::OutOfTime(session)),
                 Poll::Wait(d) => std::thread::sleep(d),
             }
             match self.session(&session.id) {
