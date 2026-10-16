@@ -227,6 +227,11 @@ pub struct PhotosUploadParams {
     /// Shown under the item in Google Photos (at most 1000 characters).
     #[serde(default)]
     pub description: Option<String>,
+    /// Also put the item into this album (a title, or an album id): the album FilmCraft made
+    /// with exactly that title, created when there is none. The user can then add more to it
+    /// by hand in Google Photos. Needs `filmcraft-cli photos auth --albums` once.
+    #[serde(default)]
+    pub album: Option<String>,
 }
 
 /// `photos.upload` params for a `googlephotos_upload` call (a long job: progress and cancel).
@@ -234,6 +239,9 @@ fn photos_upload_params(p: PhotosUploadParams) -> Value {
     let mut params = json!({"path": p.path, "wait": true});
     if let Some(d) = p.description {
         params["description"] = json!(d);
+    }
+    if let Some(a) = p.album {
+        params["album"] = json!(a);
     }
     params
 }
@@ -919,7 +927,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Google Photos: upload a file",
-        description = "Upload a local file — typically a finished export (`file.exportMedia`) — to the user's Google Photos library, resumably in 8 MiB chunks, and return the new media item (mediaItemId, productUrl). Runs as the `photos.upload` engine job: progress is reported as MCP progress notifications (bytes) and cancelling the request stops the upload (the local file is never touched). Videos up to 10 GB, photos up to 200 MB. Needs the user's one-time consent to add to their library (`filmcraft-cli photos auth --upload`) and the Photos Library API enabled in their Google Cloud project; without them the error says what to run.",
+        description = "Upload a local file — typically a finished export (`file.exportMedia`) — to the user's Google Photos library, resumably in 8 MiB chunks, and return the new media item (mediaItemId, productUrl). With `album` (a title or id) the item also goes into that album: the one FilmCraft made with exactly that title, created when missing, so the user can add more to it by hand for the next iteration (read those back with googlephotos_pick `album`). Runs as the `photos.upload` engine job: progress is reported as MCP progress notifications (bytes) and cancelling the request stops the upload (the local file is never touched). Videos up to 10 GB, photos up to 200 MB. Needs the user's one-time consent to add to their library (`filmcraft-cli photos auth --upload`; `--albums` for albums) and the Photos Library API enabled in their Google Cloud project; without them the error says what to run. Albums are also engine commands: `photos.createAlbum`, `photos.albums`, `photos.addToAlbum` (command_run).",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
     async fn googlephotos_upload(
@@ -1160,7 +1168,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done; `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject (plan: true also plans), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done; `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject (plan: true also plans), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -1348,19 +1356,21 @@ mod tests {
         assert!(schema["required"].as_array().is_none_or(|r| r.is_empty()), "{schema}");
     }
 
-    /// `googlephotos_upload` takes a required `path` and an optional `description`, and runs
-    /// `photos.upload` as a long job (progress, cancel).
+    /// `googlephotos_upload` takes a required `path` and an optional `description` and `album`,
+    /// and runs `photos.upload` as a long job (progress, cancel).
     #[test]
     fn googlephotos_upload_schema_and_params() {
         let m = FilmcraftMcp::headless(Session::default());
         let Some(tool) = m.tool_router.get("googlephotos_upload") else { panic!("tool missing") };
         let schema = Value::Object((*tool.input_schema).clone());
         let Some(props) = schema["properties"].as_object() else { panic!("schema: {schema}") };
-        assert_eq!(props.keys().map(String::as_str).collect::<Vec<_>>(), ["description", "path"], "{schema}");
+        assert_eq!(props.keys().map(String::as_str).collect::<Vec<_>>(), ["album", "description", "path"], "{schema}");
         assert_eq!(schema["properties"]["path"]["type"], "string", "{schema}");
         assert_eq!(schema["required"], json!(["path"]), "{schema}");
         let p: PhotosUploadParams = serde_json::from_value(json!({"path": "/x/out.mp4", "description": "Robots"})).unwrap();
         assert_eq!(photos_upload_params(p), json!({"path": "/x/out.mp4", "description": "Robots", "wait": true}));
+        let p: PhotosUploadParams = serde_json::from_value(json!({"path": "/x/out.mp4", "album": "Robot showcase"})).unwrap();
+        assert_eq!(photos_upload_params(p), json!({"path": "/x/out.mp4", "album": "Robot showcase", "wait": true}));
         let p: PhotosUploadParams = serde_json::from_value(json!({"path": "/x/out.mp4"})).unwrap();
         assert_eq!(photos_upload_params(p), json!({"path": "/x/out.mp4", "wait": true}));
         assert!(serde_json::from_value::<PhotosUploadParams>(json!({"description": "no path"})).is_err());
@@ -1390,8 +1400,8 @@ mod tests {
         let r = c.call(1, "googlephotos_upload", json!({"path": path})).await;
         assert_eq!(r["result"]["isError"], true, "{r}");
         assert!(r.to_string().contains("not available"), "{r}");
-        let r = c.call(2, "googlephotos_upload", json!({"path": path, "album": "x"})).await;
-        assert!(r["error"]["message"].as_str().unwrap().contains("unknown argument \"album\""), "{r}");
+        let r = c.call(2, "googlephotos_upload", json!({"path": path, "folder": "x"})).await;
+        assert!(r["error"]["message"].as_str().unwrap().contains("unknown argument \"folder\""), "{r}");
 
         let mut s = Session::default();
         s.photos = Some(std::sync::Arc::new(Fake));
@@ -1404,6 +1414,10 @@ mod tests {
         assert_eq!((v["result"]["bytes"].as_u64(), v["path"].as_str()), (Some(10), Some(path.as_str())), "{v}");
         let r = c.call(4, "googlephotos_upload", json!({"path": "/no/such/export.mp4"})).await;
         assert_eq!(r["result"]["isError"], true, "{r}");
+        // an album needs an uploader that does albums: the reason, not a crash
+        let r = c.call(5, "googlephotos_upload", json!({"path": path, "album": "Robots"})).await;
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        assert!(r.to_string().contains("albums are not available"), "{r}");
         assert!(file.exists(), "the uploaded file is left alone");
         std::fs::remove_file(&file).ok();
     }

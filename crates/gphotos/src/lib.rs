@@ -403,10 +403,11 @@ pub fn album_readiness(dir: &Path) -> Result<(), String> {
 /// How long [`EngineUploader::ready`] trusts its last look at the disk (it runs while drawing).
 const READY_TTL: Duration = Duration::from_secs(2);
 
-/// The engine's `photos.upload` uploader over the data dir's sign-in.
+/// The engine's `photos.*` uploader over the data dir's sign-in.
 pub struct EngineUploader {
     dir: PathBuf,
     ready: Mutex<Option<(Instant, Result<(), String>)>>,
+    albums_ready: Mutex<Option<(Instant, Result<(), String>)>>,
 }
 
 /// The uploader hosts install as `Session::photos`.
@@ -416,21 +417,49 @@ pub fn engine_uploader() -> Arc<dyn filmcraft_engine::photos::PhotosUploader> {
 
 impl EngineUploader {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, ready: Mutex::new(None) }
+        Self { dir, ready: Mutex::new(None), albums_ready: Mutex::new(None) }
     }
+
+    /// An upload (into `album` when given) reporting into `progress`.
+    fn upload_into(
+        &self,
+        path: &str,
+        description: Option<&str>,
+        album: Option<&str>,
+        progress: &filmcraft_engine::export::Progress,
+    ) -> Result<serde_json::Value, String> {
+        use std::sync::atomic::Ordering;
+        let gp = GooglePhotos::configured().map_err(|e| e.to_string())?;
+        let opts = upload::UploadOptions { description: description.map(str::to_string), album: album.map(str::to_string), ..Default::default() };
+        let mut report = |sent: u64, total: u64, status: &str| {
+            // the album lookup reports no size yet: keep the file's size from the command
+            if total > 0 {
+                progress.total.store(total, Ordering::Relaxed);
+                progress.done.store(sent, Ordering::Relaxed);
+            }
+            *progress.status.lock().unwrap_or_else(PoisonError::into_inner) = status.to_string();
+            !progress.cancel.load(Ordering::Relaxed)
+        };
+        gp.upload(Path::new(path), &opts, &mut report).map(|u| u.to_json()).map_err(|e| e.to_string())
+    }
+}
+
+/// A readiness answer cached for [`READY_TTL`] (it is asked while drawing).
+fn cached_readiness(slot: &Mutex<Option<(Instant, Result<(), String>)>>, check: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let mut cached = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((at, r)) = &*cached
+        && at.elapsed() < READY_TTL
+    {
+        return r.clone();
+    }
+    let r = check();
+    *cached = Some((Instant::now(), r.clone()));
+    r
 }
 
 impl filmcraft_engine::photos::PhotosUploader for EngineUploader {
     fn ready(&self) -> Result<(), String> {
-        let mut cached = self.ready.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((at, r)) = &*cached
-            && at.elapsed() < READY_TTL
-        {
-            return r.clone();
-        }
-        let r = upload_readiness(&self.dir);
-        *cached = Some((Instant::now(), r.clone()));
-        r
+        cached_readiness(&self.ready, || upload_readiness(&self.dir))
     }
 
     fn accepts(&self, path: &str) -> Result<(), String> {
@@ -438,16 +467,36 @@ impl filmcraft_engine::photos::PhotosUploader for EngineUploader {
     }
 
     fn upload(&self, path: &str, description: Option<&str>, progress: &filmcraft_engine::export::Progress) -> Result<serde_json::Value, String> {
-        use std::sync::atomic::Ordering;
+        self.upload_into(path, description, None, progress)
+    }
+
+    fn albums_ready(&self) -> Result<(), String> {
+        cached_readiness(&self.albums_ready, || album_readiness(&self.dir))
+    }
+
+    fn upload_to_album(
+        &self,
+        path: &str,
+        description: Option<&str>,
+        album: &str,
+        progress: &filmcraft_engine::export::Progress,
+    ) -> Result<serde_json::Value, String> {
+        self.upload_into(path, description, Some(album), progress)
+    }
+
+    fn create_album(&self, title: &str, description: Option<&str>) -> Result<serde_json::Value, String> {
         let gp = GooglePhotos::configured().map_err(|e| e.to_string())?;
-        let opts = upload::UploadOptions { description: description.map(str::to_string), ..Default::default() };
-        let mut report = |sent: u64, total: u64, status: &str| {
-            progress.total.store(total, Ordering::Relaxed);
-            progress.done.store(sent, Ordering::Relaxed);
-            *progress.status.lock().unwrap_or_else(PoisonError::into_inner) = status.to_string();
-            !progress.cancel.load(Ordering::Relaxed)
-        };
-        gp.upload(Path::new(path), &opts, &mut report).map(|u| u.to_json()).map_err(|e| e.to_string())
+        gp.albums(|a| a.ensure(title, description)).map(|e| e.to_json()).map_err(|e| e.to_string())
+    }
+
+    fn albums(&self) -> Result<serde_json::Value, String> {
+        let gp = GooglePhotos::configured().map_err(|e| e.to_string())?;
+        gp.albums(|a| a.list()).map(|l| l.to_json()).map_err(|e| e.to_string())
+    }
+
+    fn add_to_album(&self, album: &str, media_item_ids: &[String]) -> Result<serde_json::Value, String> {
+        let gp = GooglePhotos::configured().map_err(|e| e.to_string())?;
+        gp.albums(|a| a.add(album, media_item_ids)).map(|a| a.to_json()).map_err(|e| e.to_string())
     }
 }
 
@@ -644,8 +693,13 @@ mod tests {
         let e = album_readiness(&dir).unwrap_err();
         assert!(e.contains("consent") && e.contains("photos auth --albums"), "{e}");
         assert_eq!(upload_readiness(&dir), Ok(()), "uploads alone still work");
+        use filmcraft_engine::photos::PhotosUploader as _;
+        let up = EngineUploader::new(dir.clone());
+        assert!(up.albums_ready().unwrap_err().contains("--albums"));
+        assert_eq!(up.ready(), Ok(()));
         t(&format!("{} {} {}", auth::SCOPE, auth::UPLOAD_SCOPE, auth::ALBUM_SCOPE)).save(&dir).unwrap();
         assert_eq!(album_readiness(&dir), Ok(()));
+        assert_eq!(EngineUploader::new(dir.clone()).albums_ready(), Ok(()));
         std::fs::remove_dir_all(&dir).ok();
     }
 

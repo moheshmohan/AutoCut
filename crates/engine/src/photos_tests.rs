@@ -22,11 +22,39 @@ fn tmp_file(name: &str, bytes: usize) -> String {
 #[derive(Default)]
 struct Fake {
     not_ready: Option<String>,
+    /// The album permissions are missing: this is why.
+    albums_not_ready: Option<String>,
     hang: bool,
     calls: Mutex<Vec<(String, Option<String>)>>,
+    /// Album calls: `(what, args)`.
+    album_calls: Mutex<Vec<(String, Value)>>,
 }
 
 impl PhotosUploader for Fake {
+    fn albums_ready(&self) -> std::result::Result<(), String> {
+        self.albums_not_ready.clone().map_or(Ok(()), Err)
+    }
+    fn upload_to_album(&self, path: &str, description: Option<&str>, album: &str, progress: &filmcraft_export::Progress) -> std::result::Result<Value, String> {
+        self.album_calls.lock().unwrap().push(("upload".into(), json!({"path": path, "album": album})));
+        let mut item = self.upload(path, description, progress)?;
+        item["album"] = json!({"id": "AF1QipAlbum", "title": album});
+        Ok(item)
+    }
+    fn create_album(&self, title: &str, description: Option<&str>) -> std::result::Result<Value, String> {
+        self.album_calls.lock().unwrap().push(("create".into(), json!({"title": title, "description": description})));
+        Ok(json!({"id": "AF1QipAlbum", "title": title, "created": true}))
+    }
+    fn albums(&self) -> std::result::Result<Value, String> {
+        self.album_calls.lock().unwrap().push(("list".into(), Value::Null));
+        Ok(json!({"albums": [{"id": "AF1QipAlbum", "title": "Robots"}], "complete": true}))
+    }
+    fn add_to_album(&self, album: &str, ids: &[String]) -> std::result::Result<Value, String> {
+        self.album_calls.lock().unwrap().push(("add".into(), json!({"album": album, "ids": ids})));
+        if album == "Missing" {
+            return Err("FilmCraft has made no album `Missing`".into());
+        }
+        Ok(json!({"added": ids.len()}))
+    }
     fn ready(&self) -> std::result::Result<(), String> {
         self.not_ready.clone().map_or(Ok(()), Err)
     }
@@ -190,4 +218,123 @@ fn last_export_is_the_newest_finished_export_on_disk() {
     // a deleted export is not offered
     std::fs::remove_file(&newer).unwrap();
     assert_eq!(crate::photos::last_export(&s).as_deref(), Some(older.as_str()));
+}
+
+fn enabled(s: &mut Session, id: &str) -> Value {
+    let listed = s.execute("command.list", json!({})).unwrap();
+    listed.as_array().unwrap().iter().find(|c| c["id"] == id).cloned().unwrap()["enabled"].clone()
+}
+
+const ALBUM_COMMANDS: [&str; 3] = ["photos.createAlbum", "photos.albums", "photos.addToAlbum"];
+
+#[test]
+fn album_commands_are_disabled_with_their_reason() {
+    // no uploader at all
+    let mut s = Session::default();
+    for id in ALBUM_COMMANDS {
+        let e = s.execute(id, json!({"title": "Robots", "album": "Robots", "mediaItemIds": ["a"]})).unwrap_err().to_string();
+        assert!(e.contains("albums are not available"), "{id}: {e}");
+        assert_eq!(enabled(&mut s, id), false, "{id}");
+    }
+    // an uploader that does no albums (the trait's defaults)
+    struct UploadsOnly;
+    impl PhotosUploader for UploadsOnly {
+        fn ready(&self) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn upload(&self, _: &str, _: Option<&str>, _: &filmcraft_export::Progress) -> std::result::Result<Value, String> {
+            Ok(json!({}))
+        }
+    }
+    let mut s = Session { photos: Some(Arc::new(UploadsOnly)), ..Default::default() };
+    assert!(s.execute("photos.albums", json!({})).unwrap_err().to_string().contains("not available"));
+    let path = tmp_file("no-albums.mp4", 10);
+    let e = s.execute("photos.upload", json!({"path": path, "album": "Robots"})).unwrap_err().to_string();
+    assert!(e.contains("albums are not available"), "{e}");
+    assert!(s.jobs.is_empty());
+    // signed in without the album permissions: the reason names the fix
+    let why = "Google Photos needs your consent before FilmCraft can make albums: run `filmcraft-cli photos auth --albums`";
+    let (mut s, fake) = session(Fake { albums_not_ready: Some(why.into()), ..Default::default() });
+    for id in ALBUM_COMMANDS {
+        let e = s.execute(id, json!({"title": "Robots", "album": "Robots", "mediaItemIds": ["a"]})).unwrap_err().to_string();
+        assert!(e.contains("photos auth --albums"), "{id}: {e}");
+        assert_eq!(enabled(&mut s, id), false, "{id}");
+    }
+    // uploads without an album still work; with one they say what to run
+    assert_eq!(enabled(&mut s, "photos.upload"), true);
+    let e = s.execute("photos.upload", json!({"path": path, "album": "Robots"})).unwrap_err().to_string();
+    assert!(e.contains("photos auth --albums"), "{e}");
+    assert!(s.jobs.is_empty() && fake.album_calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn albums_are_created_listed_and_added_to() {
+    let (mut s, fake) = session(Fake::default());
+    for id in ALBUM_COMMANDS {
+        assert_eq!(enabled(&mut s, id), true, "{id}");
+    }
+    let r = s.execute("photos.createAlbum", json!({"title": "  Robot showcase ", "description": " Every robot "})).unwrap();
+    assert_eq!((r["id"].as_str(), r["title"].as_str()), (Some("AF1QipAlbum"), Some("Robot showcase")), "{r}");
+    let r = s.execute("photos.albums", json!({})).unwrap();
+    assert_eq!(r["albums"][0]["title"], "Robots");
+    let r = s.execute("photos.addToAlbum", json!({"album": "Robots", "mediaItemIds": [" AF1Qip-a ", "AF1Qip-b"]})).unwrap();
+    assert_eq!(r["added"], 2);
+    let e = s.execute("photos.addToAlbum", json!({"album": "Missing", "mediaItemIds": ["AF1Qip-a"]})).unwrap_err().to_string();
+    assert!(e.contains("no album `Missing`"), "{e}");
+    let calls = fake.album_calls.lock().unwrap().clone();
+    assert_eq!(calls[0], ("create".to_string(), json!({"title": "Robot showcase", "description": "Every robot"})));
+    assert_eq!(calls[1].0, "list");
+    assert_eq!(calls[2], ("add".to_string(), json!({"album": "Robots", "ids": ["AF1Qip-a", "AF1Qip-b"]})));
+    // none of them is an undoable edit or a job
+    assert!(s.jobs.is_empty());
+}
+
+#[test]
+fn uploads_go_into_an_album_as_a_job() {
+    let path = tmp_file("into-album.mp4", 2048);
+    let (mut s, fake) = session(Fake::default());
+    let r = s.execute("photos.upload", json!({"path": path, "album": " Robot showcase ", "description": "Robots", "wait": true})).unwrap();
+    assert_eq!(r["upload"]["album"]["title"], "Robot showcase", "{r}");
+    assert_eq!(fake.album_calls.lock().unwrap().as_slice(), [("upload".to_string(), json!({"path": path, "album": "Robot showcase"}))]);
+    let j = job_entry(&mut s, r["job"].as_u64().unwrap());
+    assert!(j["label"].as_str().unwrap().contains("album Robot showcase"), "{j}");
+    // a blank album is no album
+    let r = s.execute("photos.upload", json!({"path": path, "album": "  ", "wait": true})).unwrap();
+    assert!(r["upload"].get("album").is_none(), "{r}");
+    assert_eq!(fake.album_calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn hostile_album_parameters_call_nothing() {
+    let (mut s, fake) = session(Fake::default());
+    let ok = tmp_file("hostile-album.mp4", 10);
+    let long_title = "t".repeat(crate::photos::MAX_ALBUM_TITLE_CHARS + 1);
+    let long_note = "n".repeat(crate::photos::MAX_DESCRIPTION_CHARS + 1);
+    let too_many: Vec<String> = (0..crate::photos::MAX_ALBUM_ITEMS + 1).map(|i| format!("id{i}")).collect();
+    for (id, p, want) in [
+        ("photos.createAlbum", json!({}), "need `title`"),
+        ("photos.createAlbum", json!({"title": " "}), "need `title`"),
+        ("photos.createAlbum", json!({"title": null}), "need `title`"),
+        ("photos.createAlbum", json!({"title": 5}), "must be a string"),
+        ("photos.createAlbum", json!({"title": ["Robots"]}), "must be a string"),
+        ("photos.createAlbum", json!({"title": long_title}), "at most 500"),
+        ("photos.createAlbum", json!({"title": "Robots", "description": long_note}), "at most 1000"),
+        ("photos.createAlbum", json!({"title": "Robots", "description": false}), "must be a string"),
+        ("photos.addToAlbum", json!({"mediaItemIds": ["a"]}), "need `album`"),
+        ("photos.addToAlbum", json!({"album": "Robots"}), "need `mediaItemIds`"),
+        ("photos.addToAlbum", json!({"album": "Robots", "mediaItemIds": []}), "is empty"),
+        ("photos.addToAlbum", json!({"album": "Robots", "mediaItemIds": "a"}), "must be a list"),
+        ("photos.addToAlbum", json!({"album": "Robots", "mediaItemIds": [1, 2]}), "must be a media item id"),
+        ("photos.addToAlbum", json!({"album": "Robots", "mediaItemIds": ["a", ""]}), "must be a media item id"),
+        ("photos.addToAlbum", json!({"album": "Robots", "mediaItemIds": ["x".repeat(513)]}), "must be a media item id"),
+        ("photos.addToAlbum", json!({"album": "Robots", "mediaItemIds": too_many}), "at most 20000"),
+        ("photos.addToAlbum", json!({"album": {"id": 1}, "mediaItemIds": ["a"]}), "must be a string"),
+        ("photos.upload", json!({"path": ok, "album": 7}), "must be a string"),
+        ("photos.upload", json!({"path": ok, "album": long_title}), "at most 500"),
+    ] {
+        let e = s.execute(id, p.clone()).unwrap_err().to_string();
+        assert!(e.contains(want), "{id} {p}: {e}");
+    }
+    assert!(fake.album_calls.lock().unwrap().is_empty() && fake.calls.lock().unwrap().is_empty());
+    assert!(s.jobs.is_empty());
 }
