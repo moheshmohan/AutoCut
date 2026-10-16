@@ -296,33 +296,23 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
         }
     }
 
-    // 3. confirm
+    // 3. confirm, and check the picker took it
     if summary.selected > 0 && !summary.done_pressed {
-        if spend(&mut summary, plan)? {
-            return Err(budget(&summary));
-        }
-        let mut pressed = false;
+        let mut button = None;
         for label in picker::CONFIRM_LABELS {
             if deadline() {
                 return Err(budget(&summary));
             }
-            match grounder.find(&cap.png, label) {
-                Ok(Some(btn)) => {
-                    let (px, py) = btn.center();
-                    progress("screenagent: pressing the confirm button");
-                    actor.click_png(&cap, px, py)?;
-                    pressed = true;
-                    break;
-                }
-                Ok(None) => {}
-                Err(e) => return Err(e),
+            if let Some(btn) = grounder.find(&cap.png, label)? {
+                button = Some((label, btn));
+                break;
             }
         }
-        if !pressed {
+        let Some((label, btn)) = button else {
             return Err(ScreenError::Stalled("could not find the confirm (Done) button".into()));
-        }
+        };
+        confirm(actor, grounder, plan, &mut summary, &mut cap, label, btn, started, progress)?;
         summary.done_pressed = true;
-        actor.sleep(1200);
     }
 
     if summary.note.is_empty() {
@@ -330,6 +320,55 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
     }
     progress(&format!("screenagent: {}", summary.note));
     Ok(summary)
+}
+
+/// How long the picker gets to act on Done before the agent looks whether it did.
+const DONE_SETTLE_MS: u64 = 1800;
+/// Presses of Done after the first, when the picker did not take it.
+const DONE_RETRIES: u32 = 2;
+
+/// Press the confirm button `btn` (found by `label`) and check the picker took it: after
+/// [`DONE_SETTLE_MS`] the window is gone (the autoclose page closed it), or the button is, or
+/// the "N selected" counter is (the picker left its grid; its finished page says "Done!", which
+/// could pass for the button, but never "N selected"). While both are still there the press did
+/// not take — the button not yet enabled after a range click, the header still animating — and
+/// it is pressed again, at most [`DONE_RETRIES`] more times, each from the budget.
+#[allow(clippy::too_many_arguments)]
+fn confirm<A: Act, G: Ground>(
+    actor: &mut A,
+    grounder: &G,
+    plan: &Plan,
+    summary: &mut Summary,
+    cap: &mut crate::capture::Capture,
+    label: &str,
+    mut btn: crate::ground::Element,
+    started: Instant,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(), ScreenError> {
+    for press in 0..=DONE_RETRIES {
+        if spend(summary, plan)? || started.elapsed() >= plan.timeout {
+            return Err(budget(summary));
+        }
+        progress(if press == 0 { "screenagent: pressing the confirm button" } else { "screenagent: the picker did not take Done; pressing it again" });
+        let (px, py) = btn.center();
+        actor.click_png(cap, px, py)?;
+        actor.sleep(DONE_SETTLE_MS);
+        *cap = match actor.capture() {
+            Ok(c) => c,
+            // the window vanishing is the autoclose page doing its thing: taken
+            Err(_) => return Ok(()),
+        };
+        let Some(still) = grounder.find(&cap.png, label)? else { return Ok(()) };
+        let counter = grounder.inventory(&cap.png, picker::SELECTED_COUNTER)?;
+        if !counter.iter().any(|e| picker::selected_count(&e.label).is_some()) {
+            return Ok(());
+        }
+        btn = still;
+    }
+    Err(ScreenError::Stalled(format!(
+        "the picker did not accept Done: pressed {} times and it still shows the selection with its Done button",
+        DONE_RETRIES + 1
+    )))
 }
 
 /// An album view (or an opened album) needs this long to render.
@@ -847,10 +886,16 @@ mod tests {
 
     #[test]
     fn select_all_clicks_first_scrolls_to_the_end_and_shift_clicks_last() {
-        struct Grid;
+        /// Counts the counter reads: the range's, then (once Done took) none — the picker left
+        /// its grid.
+        struct Grid(std::cell::Cell<u32>);
         impl Ground for Grid {
             fn inventory(&self, _png: &[u8], task: &str) -> Result<Vec<Element>, ScreenError> {
                 if task == crate::picker::SELECTED_COUNTER {
+                    self.0.set(self.0.get() + 1);
+                    if self.0.get() > 1 {
+                        return Ok(vec![]);
+                    }
                     return Ok(vec![Element { label: "37 selected".into(), kind: String::new(), x1: 5, y1: 2, x2: 60, y2: 12 }]);
                 }
                 let tile = |l: &str, x1: u32, y1: u32| Element { label: l.into(), kind: String::new(), x1, y1, x2: x1 + 40, y2: y1 + 40 };
@@ -870,7 +915,8 @@ mod tests {
         act.after_shift = Some(cap_of(30));
         let plan = Plan { select_all: true, ..Plan::default() };
         let mut lines: Vec<String> = vec![];
-        let s = drive(&mut act, &Grid, &plan, &mut |l| lines.push(l.into())).unwrap();
+        let grid = Grid(Default::default());
+        let s = drive(&mut act, &grid, &plan, &mut |l| lines.push(l.into())).unwrap();
         let tile = |x1: u32, y1: u32| Element { label: String::new(), kind: String::new(), x1, y1, x2: x1 + 40, y2: y1 + 40 };
         // the search field, then the first tile
         assert_eq!(act.clicks.get(1), Some(&crate::picker::click_point(&tile(10, 10))), "the first tile: {:?}", act.clicks);
@@ -878,6 +924,9 @@ mod tests {
         assert!(act.scrolls > 0, "it scrolled to the end");
         assert_eq!(s.selected, 37, "the header count: {s:?}");
         assert!(s.done_pressed);
+        // search field, first tile, Done once (it took: the counter was gone after it)
+        assert_eq!(act.clicks.len(), 3, "{:?}", act.clicks);
+        assert_eq!(grid.0.get(), 2, "the range's count, then the check after Done");
         assert!(lines.iter().any(|l| l.contains("range click")), "{lines:?}");
     }
 
@@ -961,6 +1010,10 @@ mod tests {
                 return Ok(vec![Element { label: self.heading.into(), kind: "heading".into(), x1: 5, y1: 20, x2: 120, y2: 32 }]);
             }
             if task == crate::picker::SELECTED_COUNTER {
+                // the range's count; once Done took, the picker has left its grid
+                if self.asked(task) > 1 {
+                    return Ok(vec![]);
+                }
                 return Ok(vec![Element { label: "12 selected".into(), kind: String::new(), x1: 5, y1: 2, x2: 60, y2: 12 }]);
             }
             let tile = |l: &str, x1: u32, y1: u32| Element { label: l.into(), kind: String::new(), x1, y1, x2: x1 + 40, y2: y1 + 40 };
@@ -1124,6 +1177,102 @@ mod tests {
         let p = plan_for(Request { query: String::new(), max_items: 0, select_all: false, album: Some("Robots".into()), videos_only: false });
         assert_eq!((p.query, p.select_all, p.videos_only, p.album.as_deref()), (None, true, false, Some("Robots")));
         assert!(p.max_actions >= Plan::default().max_actions);
+    }
+
+    /// One video tile, a Done button that is always found, and a "1 selected" header that stays
+    /// up for the first `stuck` checks after Done (the press did not take), then is gone.
+    struct StickyDone {
+        stuck: usize,
+        counter_reads: std::cell::Cell<usize>,
+    }
+    impl Ground for StickyDone {
+        fn inventory(&self, _png: &[u8], task: &str) -> Result<Vec<Element>, ScreenError> {
+            if task == crate::picker::SELECTED_COUNTER {
+                self.counter_reads.set(self.counter_reads.get() + 1);
+                return Ok(if self.counter_reads.get() <= self.stuck {
+                    vec![Element { label: "1 selected".into(), kind: String::new(), x1: 5, y1: 2, x2: 60, y2: 12 }]
+                } else {
+                    vec![]
+                });
+            }
+            Ok(vec![tile("0:30", 10)])
+        }
+        fn find(&self, _png: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
+            Ok(target.contains("Done").then(|| Element { label: "Done".into(), kind: "button".into(), x1: 180, y1: 0, x2: 199, y2: 20 }))
+        }
+    }
+
+    const DONE_AT: (u32, u32) = (189, 10);
+
+    #[test]
+    fn a_done_press_that_did_not_take_is_pressed_again() {
+        // the live failure: "pressed Done", yet Google never got a selection — the picker still
+        // showed its grid, its counter and its Done button
+        let g = StickyDone { stuck: 1, counter_reads: Default::default() };
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40), cap_of(50)]);
+        let mut lines: Vec<String> = vec![];
+        let s = drive(&mut act, &g, &Plan { max_items: 1, ..Plan::default() }, &mut |l| lines.push(l.into())).unwrap();
+        assert!(s.done_pressed && s.selected == 1, "{s:?}");
+        assert_eq!(act.clicks[1..], [DONE_AT, DONE_AT], "pressed twice: {:?}", act.clicks);
+        assert_eq!(g.counter_reads.get(), 2);
+        assert!(lines.iter().any(|l| l.contains("did not take Done; pressing it again")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_picker_that_never_takes_done_is_an_error_not_a_loop() {
+        let g = StickyDone { stuck: usize::MAX, counter_reads: Default::default() };
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40), cap_of(50)]);
+        let err = drive(&mut act, &g, &Plan { max_items: 1, ..Plan::default() }, &mut |_| {}).unwrap_err().to_string();
+        assert!(err.contains("did not accept Done"), "{err}");
+        assert_eq!(act.clicks.len() as u32, 1 + 1 + DONE_RETRIES, "the tile, then Done {} times: {:?}", 1 + DONE_RETRIES, act.clicks);
+        // and the retries come out of the action budget
+        let g = StickyDone { stuck: usize::MAX, counter_reads: Default::default() };
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40), cap_of(50)]);
+        let tight = Plan { max_items: 1, max_actions: 3, ..Plan::default() };
+        let err = drive(&mut act, &g, &tight, &mut |_| {}).unwrap_err().to_string();
+        assert!(err.contains("budget"), "{err}");
+        assert!(act.clicks.len() <= 3, "{:?}", act.clicks);
+    }
+
+    #[test]
+    fn done_is_taken_when_the_window_closes_or_the_button_goes() {
+        // the autoclose page closing the window right after Done
+        let g = StickyDone { stuck: usize::MAX, counter_reads: Default::default() };
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40)]);
+        act.fail_capture_at = Some(2); // the re-capture after the Done click
+        let s = drive(&mut act, &g, &Plan { max_items: 1, ..Plan::default() }, &mut |_| {}).unwrap();
+        assert!(s.done_pressed);
+        assert_eq!(act.clicks[1..], [DONE_AT]);
+        assert_eq!(g.counter_reads.get(), 0, "nothing left to read");
+        // the Done button gone (the finished page): taken, without reading a counter
+        let g = FakeGrounder {
+            inventory: vec![tile("0:30", 10)],
+            finds: vec![(
+                crate::picker::CONFIRM_LABELS[0].to_string(),
+                Some(Element { label: "Done".into(), kind: "button".into(), x1: 180, y1: 0, x2: 199, y2: 20 }),
+            )],
+        };
+        struct GoneAfterPress(FakeGrounder, std::cell::Cell<u32>);
+        impl Ground for GoneAfterPress {
+            fn inventory(&self, png: &[u8], task: &str) -> Result<Vec<Element>, ScreenError> {
+                assert_ne!(task, crate::picker::SELECTED_COUNTER, "no counter read once Done is gone");
+                self.0.inventory(png, task)
+            }
+            fn find(&self, png: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
+                if target.contains("Done") {
+                    self.1.set(self.1.get() + 1);
+                    if self.1.get() > 1 {
+                        return Ok(None);
+                    }
+                }
+                self.0.find(png, target)
+            }
+        }
+        let g = GoneAfterPress(g, Default::default());
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40)]);
+        let s = drive(&mut act, &g, &Plan { max_items: 1, ..Plan::default() }, &mut |_| {}).unwrap();
+        assert!(s.done_pressed);
+        assert_eq!(act.clicks[1..], [DONE_AT]);
     }
 
     #[test]
