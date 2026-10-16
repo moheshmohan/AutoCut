@@ -123,6 +123,91 @@ async fn narration_never_overlaps_and_short_footage_is_slowed_to_fit() {
     assert!(mixer.to_string().contains("hard_limiter"), "{mixer}");
 }
 
+/// The three demo "robots" of the first test.
+fn three() -> Vec<showcase::Entry> {
+    let facts = vec![
+        fact(5, "Pepper humanoid robot", 1_600_000_000, 18.0),
+        fact(6, "Boston Dynamics Spot", 1_665_741_668, 16.0),
+        fact(7, "red toy robot", 1_665_841_668, 14.0),
+    ];
+    showcase::group(&facts, "robot", 0.3)
+}
+
+fn short_script() -> Script {
+    Script {
+        intro: "Every robot I have filmed, in order.".into(),
+        lines: vec!["One.".into(), "Two.".into(), "Three.".into()],
+        outro: "Thanks for watching.".into(),
+        ..Script::default()
+    }
+}
+
+/// Seconds from `t` to the nearest multiple of `beat` after `offset`.
+fn off_grid(t: f64, beat: f64, offset: f64) -> f64 {
+    let x = (t - offset) / beat;
+    (x - x.round()).abs() * beat
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cuts_land_on_the_beat_of_the_generated_bed() {
+    let ex = demo();
+    let opts = Options { title: "Robots".into(), bpm: 120.0, width: 640, height: 360, ..Options::default() };
+    let built = showcase::build(&ex, &opts, &three(), &short_script(), &mut |_| {}).await.expect("the showcase builds");
+    let m = built.music.clone().expect("music");
+    assert_eq!((m.source.as_str(), m.fit.as_str(), m.bpm), ("generated", "generated", Some(120.0)));
+    assert!(m.cuts >= 6 && m.cuts_on_beat == m.cuts, "{m:?}");
+    // every entry starts (its transition, its year card) within a frame of the 0.5 s grid
+    for e in &built.layout {
+        assert!(off_grid(e.start, 0.5, 0.0) <= 1.0 / 30.0 + 1e-6, "entry {} at {}", e.number, e.start);
+        assert!(e.shots.iter().all(|s| s.end > s.start));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_music_file_is_fitted_to_the_show_and_cut_on_its_beat() {
+    let dir = std::env::temp_dir().join(format!("filmcraft-music-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (seconds, fit) in [(12.0, "remixed"), (90.0, "trimmed")] {
+        let ex = demo();
+        // the user's track: 128 bpm music written to a file (not placed)
+        let g = ex
+            .execute("audio.generate", json!({"kind": "music", "duration": seconds, "bpm": 128, "seed": 11, "place": false, "dir": dir.to_string_lossy()}))
+            .await
+            .unwrap();
+        let path = g["path"].as_str().unwrap().to_string();
+        let opts =
+            Options { title: "Robots".into(), music: Some(path.clone()), voice: Some("basic-male".into()), width: 640, height: 360, ..Options::default() };
+        let mut lines = Vec::new();
+        let built = showcase::build(&ex, &opts, &three(), &short_script(), &mut |l| lines.push(l.to_string())).await.expect("the showcase builds");
+        assert!(built.notes.is_empty(), "{:?}", built.notes);
+        let m = built.music.clone().expect("music");
+        assert_eq!((m.source.as_str(), m.fit.as_str()), (path.as_str(), fit), "{lines:?}");
+        assert!(m.bpm.is_some_and(|b| (b - 128.0).abs() < 2.0), "{m:?}");
+        assert!(m.cuts >= 6 && m.cuts_on_beat == m.cuts, "{m:?} {lines:?}");
+        // the track under the whole show on A3, nothing generated, faded out, levelled as music
+        let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+        let a3 = seq["audio"][2]["items"].as_array().cloned().unwrap_or_default();
+        let file = std::path::Path::new(&path).file_name().unwrap().to_string_lossy().into_owned();
+        assert!(!a3.is_empty() && a3.iter().all(|c| c["name"].as_str() == Some(file.as_str())), "only the track, nothing generated: {a3:?}");
+        let end = a3.iter().filter_map(|c| c["end"].as_i64()).max().unwrap() as f64 / 254_016_000_000.0;
+        assert!(end >= built.seconds && end <= built.seconds + 1.0, "music ends at {end}, the show at {}", built.seconds);
+        let es = ex.execute("essentialSound.inspect", json!({"clips": a3.iter().filter_map(|c| c["clip"].as_u64()).collect::<Vec<_>>()})).await.unwrap();
+        assert!(es.to_string().to_lowercase().contains("music"), "{es}");
+        // entries start on its beat: at 128 bpm, within a frame of its grid
+        let beats = ex.execute("media.beats", json!({"item": a3[0]["item"]})).await.unwrap();
+        let first = beats["beats"][0].as_f64().unwrap();
+        for e in &built.layout {
+            assert!(off_grid(e.start, 60.0 / 128.0, first) <= 1.0 / 30.0 + 0.015, "entry {} at {} (first beat {first})", e.number, e.start);
+        }
+    }
+    // a file that is not there: a clear error, nothing half-built
+    let ex = demo();
+    let opts = Options { music: Some(dir.join("missing.wav").to_string_lossy().into_owned()), ..Options::default() };
+    let err = showcase::build(&ex, &opts, &three(), &short_script(), &mut |_| {}).await.unwrap_err().to_string();
+    assert!(err.contains("missing.wav"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_voice_says_respellings_and_the_subtitles_show_the_text() {
     let ex = demo();

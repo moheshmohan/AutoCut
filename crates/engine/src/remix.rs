@@ -8,6 +8,7 @@
 //! | `clip.remix.properties` | Clip ▸ Remix ▸ Remix Properties… | without parameters returns the settings; with `duration`/`seconds`/`frame`/`timecode`, `segments`, `variations` re-plans |
 //! | `clip.remix.revert` | Clip ▸ Remix ▸ Revert Remix | restores the clip as it was before the remix |
 //! | `clip.remix` | — | agents: enable (if needed) and remix `clip` (default: the selected audio clip) to a target |
+//! | `media.beats` | — | agents: the tempo and beat times of an audio item (the same analysis), to cut picture on the beat |
 //!
 //! The remix keeps the clip's start and source In, plays the intro from the beginning and ends on
 //! the source's end; only the duration changes. The clip's linked partners are not changed. When
@@ -239,6 +240,40 @@ fn revert(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(report(s, c, None))
 }
 
+/// Longest stretch of an item `media.beats` analyses, seconds (the analysis holds the whole
+/// stretch in memory, and its beat similarity grows with the square of the beats).
+pub const MAX_BEATS_SECONDS: f64 = 20.0 * 60.0;
+
+/// `media.beats`: the tempo and beats of `item`'s sound over `[sourceIn, sourceIn + duration)`
+/// (default: from the start, the whole item up to [`MAX_BEATS_SECONDS`]): `bpm`, `period`
+/// (seconds per beat) and `beats`, the attack of each beat in seconds of the media.
+fn beats(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "media.beats";
+    let item = crate::commands::item_p(p, "item").ok_or_else(|| bad(CMD, "need `item`"))?;
+    let it = s.project.item(item).ok_or_else(|| bad(CMD, "no such item"))?;
+    if !matches!(it.kind, filmcraft_project::ItemKind::Media(_)) || !it.has_audio() {
+        return Err(bad(CMD, "the item has no audio media"));
+    }
+    let length = it.duration();
+    let from = Tick(p.get("sourceIn").and_then(Value::as_i64).unwrap_or(0).clamp(0, length.0.max(0)));
+    let most = Tick::from_seconds_f64(MAX_BEATS_SECONDS);
+    let dur = Tick(p.get("duration").and_then(Value::as_i64).unwrap_or(i64::MAX).clamp(0, (length - from).0.max(0)).min(most.0));
+    if dur.0 <= 0 {
+        return Err(bad(CMD, "nothing to analyse in that range"));
+    }
+    let a = analysis(s, item, from, dur)?;
+    let sr = i64::from(a.sample_rate.max(1));
+    let lead = dsp::beat_lead(a.sample_rate);
+    let at = |smp: i64| (from + Tick::from_units(smp.saturating_add(lead), sr)).seconds();
+    Ok(json!({
+        "item": item.0,
+        "bpm": a.bpm,
+        "period": a.period / sr as f64,
+        "beats": a.beats.iter().map(|b| at(*b)).collect::<Vec<_>>(),
+        "seconds": dur.seconds(),
+    }))
+}
+
 /// Remix state of every remixed clip in the active sequence (for agents and the UI).
 pub fn remixed_clips(s: &Session) -> HashMap<ClipId, Remix> {
     let mut out = HashMap::new();
@@ -296,6 +331,16 @@ pub fn commands() -> Vec<CommandSpec> {
             enabled: has_seq,
             run: |s, p| remix(s, p, "clip.remix", "Remix"),
             journal: true,
+        },
+        CommandSpec {
+            id: "media.beats",
+            label: "Beats of Media",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"item":id,"sourceIn":ticks?,"duration":ticks?}"#,
+            enabled: crate::commands::always,
+            run: beats,
+            journal: false,
         },
     ]
 }

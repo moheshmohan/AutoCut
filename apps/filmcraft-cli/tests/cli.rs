@@ -230,10 +230,30 @@ fn showcase_qa_and_the_narration_cache() {
     assert!(v["qa"]["checks"].as_array().unwrap().iter().any(|c| c["name"] == "subject" && c["status"] == "skipped"), "{}", v["qa"]);
     assert!(v["qa"]["loudness"]["integratedLufs"].is_number());
     assert!(err.contains("showcase: QA: 0 error(s)"), "{err}");
-    // the same build again: every line from the cache, and no QA when asked not to
-    let (v, _) = run(&["--no-qa"]);
+    // the same build again: every line from the cache, and no QA when asked not to; over the
+    // user's own music this time (a 12 s track, remixed to the show's length)
+    let g = cli(&[
+        "--data-dir",
+        data.to_str().unwrap(),
+        "exec",
+        "audio.generate",
+        &serde_json::json!({"kind": "music", "duration": 12, "bpm": 120, "place": false, "dir": dir}).to_string(),
+    ]);
+    let track = json_out(&g)["path"].as_str().unwrap().to_string();
+    let (v, err) = run(&["--no-qa", "--music", &track]);
     assert_eq!(v["narration_cached"], 4, "{v}");
     assert!(v.get("qa").is_none());
+    assert_eq!(v["music"]["fit"], "remixed", "{}\n{err}", v["music"]);
+    assert!(v["music"]["source"].as_str().is_some_and(|s| s.ends_with(".wav") && std::path::Path::new(s).is_absolute()), "{}", v["music"]);
+    assert!(err.contains("cutting on its beat"), "{err}");
+    // a music file that is not there fails before anything is built
+    let missing = dir.join("missing.mp3");
+    let o = Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
+        .args(["--demo", "showcase", "--report", report.to_str().unwrap(), "--script-in", script.to_str().unwrap(), "--music", missing.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("missing.mp3"), "{}", String::from_utf8_lossy(&o.stderr));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

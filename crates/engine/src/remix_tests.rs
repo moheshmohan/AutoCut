@@ -147,6 +147,41 @@ fn mixed_audio_is_the_source_pieces() {
 }
 
 #[test]
+fn media_beats_gives_the_tempo_and_beat_times_of_an_item() {
+    let (m, truth) = {
+        let (m, beats) = dsp::test_music(SR, 120.0, 16, 3);
+        (m, beats.iter().map(|b| *b as f64 / SR as f64).collect::<Vec<f64>>())
+    };
+    let (mut s, c) = session(&m, None);
+    let item = item(&s, c).item;
+    let r = s.execute("media.beats", json!({"item": item.0})).unwrap();
+    assert!((r["bpm"].as_f64().unwrap() - 120.0).abs() < 1.0, "{r}");
+    assert!((r["period"].as_f64().unwrap() - 0.5).abs() < 0.01, "{r}");
+    let beats: Vec<f64> = r["beats"].as_array().unwrap().iter().filter_map(Value::as_f64).collect();
+    assert!(beats.len() >= 56, "most of the 64 beats: {}", beats.len());
+    // every detected beat is a real one (the attack, within 25 ms), in order
+    for b in &beats {
+        assert!(truth.iter().any(|t| (t - b).abs() < 0.025), "beat at {b} is not one of the music's");
+    }
+    assert!(beats.windows(2).all(|w| w[0] < w[1]));
+    assert!((r["seconds"].as_f64().unwrap() - 32.0).abs() < 0.05, "{r}");
+    // a range: beats in seconds of the media, inside it
+    let r = s.execute("media.beats", json!({"item": item.0, "sourceIn": Tick::from_seconds_f64(8.0).0, "duration": Tick::from_seconds_f64(16.0).0})).unwrap();
+    let ranged: Vec<f64> = r["beats"].as_array().unwrap().iter().filter_map(Value::as_f64).collect();
+    assert!(!ranged.is_empty() && ranged.iter().all(|b| (8.0..24.0).contains(b)), "{ranged:?}");
+    assert!(ranged.iter().all(|b| truth.iter().any(|t| (t - b).abs() < 0.025)), "{ranged:?}");
+    // hostile parameters: errors, never a panic
+    assert!(s.execute("media.beats", json!({})).is_err());
+    assert!(s.execute("media.beats", json!({"item": 999_999})).is_err());
+    let seq = s.state.active_sequence.unwrap();
+    assert!(s.execute("media.beats", json!({"item": seq.0})).is_err(), "a sequence is not audio media");
+    assert!(s.execute("media.beats", json!({"item": item.0, "sourceIn": i64::MAX})).is_err(), "nothing past the end");
+    assert!(s.execute("media.beats", json!({"item": item.0, "duration": 0})).is_err());
+    assert!(s.execute("media.beats", json!({"item": item.0, "sourceIn": -5, "duration": i64::MAX})).is_ok());
+    assert!(s.execute("media.beats", json!({"item": item.0, "sourceIn": Tick::from_seconds_f64(31.0).0})).is_err(), "a second has too few beats");
+}
+
+#[test]
 fn overlaps_are_refused_and_noise_cannot_be_remixed() {
     let (m, _) = music();
     let (mut s, c) = session(&m, Some(40.0));

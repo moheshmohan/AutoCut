@@ -230,3 +230,34 @@ async fn a_narrated_showcase_keeps_the_voice_on_top() {
     assert!(r.of("mix", Severity::Warning).iter().all(|f| !f.message.contains("true peak")), "{:?}", r.findings);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_showcase_on_the_users_music_has_no_errors() {
+    let ex = demo();
+    let dir = tmp("music");
+    // a track shorter than the show (remixed to length), loud: it is levelled and ducked
+    let g = run(&ex, "audio.generate", json!({"kind": "music", "duration": 14, "bpm": 110, "seed": 5, "intensity": 1.0, "place": false, "dir": dir})).await;
+    let facts = vec![
+        fact(5, "Pepper humanoid robot", 1_600_000_000, 18.0),
+        fact(6, "Boston Dynamics Spot", 1_665_741_668, 16.0),
+        fact(7, "red toy robot", 1_665_841_668, 14.0),
+    ];
+    let entries = showcase::group(&facts, "robot", 0.3);
+    let script = Script {
+        intro: "Hello and welcome, this is every robot I have met.".into(),
+        lines: vec!["A friendly humanoid at a shop.".into(), "Spot walked right up to me.".into(), "A small red toy robot from a market stall.".into()],
+        outro: "Bye for now, see you soon at the next one.".into(),
+        ..Script::default()
+    };
+    let music = g["path"].as_str().map(str::to_string);
+    let opts = Options { title: "Robots".into(), voice: Some("basic-male".into()), music, width: 640, height: 360, ..Options::default() };
+    let built = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
+    assert_eq!(built.music.as_ref().map(|m| m.fit.as_str()), Some("remixed"), "{:?}", built.music);
+    let q = qa::Options { frame_side: 160, work_dir: Some(dir.clone().into()), ..qa::Options::for_showcase(&opts, &built) };
+    let r = qa::check(&ex, &q, None, &mut |_| {}).await;
+    println!("{}\n{:?}", r.summary(), r.loudness);
+    assert_eq!(r.errors, 0, "{:#?}", r.findings);
+    let l = r.loudness.as_ref().unwrap();
+    assert!(l.voice_margin_db.is_some_and(|m| m >= 4.0), "{l:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

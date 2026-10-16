@@ -11,8 +11,10 @@
 //!    (any voice, cloned voices included), shots around each clip's best moment (portrait clips
 //!    over a blurred, dimmed copy of themselves), a name/date lower third, a transition from a
 //!    rotating set of dramatic ones with a whoosh, the year as a title card with an impact
-//!    whenever it changes; the counter (`graphics.counter`) across the whole show; a generated
-//!    music bed (`audio.generate`) ducked under the narration; an outro card; subtitles of the
+//!    whenever it changes; the counter (`graphics.counter`) across the whole show; the music —
+//!    a generated bed (`audio.generate`) or the user's track ([`Options::music`], fitted to the
+//!    show's length) — ducked under the narration, the cuts on its beat ([`Beats`]); an outro
+//!    card; subtitles of the
 //!    narration ([`crate::subtitles`]) on a caption track. Then (optionally) an export with the
 //!    YouTube preset, and the subtitles beside it as `.srt` and `.vtt`.
 //!
@@ -64,6 +66,9 @@ pub struct Options {
     pub min_coverage: f64,
     /// Export here when done (YouTube 1080p preset).
     pub export: Option<String>,
+    /// A music file to play under the show instead of a generated bed: fitted to the show's
+    /// length, levelled and ducked like the bed, and the cuts land on its beats.
+    pub music: Option<String>,
 }
 
 impl Default for Options {
@@ -80,6 +85,7 @@ impl Default for Options {
             fps: 30.0,
             min_coverage: 0.3,
             export: None,
+            music: None,
         }
     }
 }
@@ -550,6 +556,8 @@ pub struct Built {
     pub subtitles: Vec<Cue>,
     /// The subtitle files written next to the export (`<out>.srt`, `<out>.vtt`).
     pub subtitle_files: Vec<String>,
+    /// The music under the show, and how many cuts landed on its beat.
+    pub music: Option<Music>,
 }
 
 /// An entry as built: its span on the timeline and its shots, seconds.
@@ -681,7 +689,7 @@ const FALLBACK_SOUND_DB: f64 = -14.0;
 /// Mix the show: set each clip's audio type, match its loudness to its role's target, duck the
 /// shots' sound and the music under the voice, and put a limiter on the mix so nothing clips.
 /// Steps that fail are noted, never fatal: the edit is still usable unmixed.
-async fn mix_down(ex: &dyn Executor, mix: &Mix, narrations: &[u64], music: Option<u64>, notes: &mut Vec<String>) {
+async fn mix_down(ex: &dyn Executor, mix: &Mix, narrations: &[u64], music: &[u64], notes: &mut Vec<String>) {
     let mut step = async |id: &str, p: Value| {
         if let Err(e) = run(ex, id, p).await {
             notes.push(format!("mix: {e}"));
@@ -703,12 +711,12 @@ async fn mix_down(ex: &dyn Executor, mix: &Mix, narrations: &[u64], music: Optio
         step("essentialSound.setType", json!({"clips": mix.effects, "type": "sfx"})).await;
         step("essentialSound.autoMatch", json!({"clips": mix.effects, "target": EFFECTS_LUFS})).await;
     }
-    if let Some(m) = music {
-        step("essentialSound.applyPreset", json!({"clips": [m], "preset": "Duck Under Dialogue", "type": "music"})).await;
-        step("essentialSound.autoMatch", json!({"clips": [m], "target": MUSIC_LUFS})).await;
+    if !music.is_empty() {
+        step("essentialSound.applyPreset", json!({"clips": music, "preset": "Duck Under Dialogue", "type": "music"})).await;
+        step("essentialSound.autoMatch", json!({"clips": music, "target": MUSIC_LUFS})).await;
     }
     if !narrations.is_empty() {
-        let ducked: Vec<u64> = mix.sounds.iter().copied().chain(music).collect();
+        let ducked: Vec<u64> = mix.sounds.iter().chain(music).copied().collect();
         step("essentialSound.generateDucking", json!({"clips": ducked})).await;
     }
     if step("mixer.addInsert", json!({"strip": "Mix", "effect": "hard_limiter"})).await {
@@ -855,6 +863,28 @@ fn shot_count(seconds: f64) -> usize {
 /// a clip when one is too short. The windows can add up to less than `seconds` when the subject
 /// is rarely in view; [`whole_windows`] is the fallback that always fills the time.
 pub fn windows(e: &Entry, seconds: f64) -> Vec<(Shot, f64, f64)> {
+    in_view_windows(e, seconds).into_iter().map(|w| (w.shot, w.start, w.len)).collect()
+}
+
+/// Windows that fill `seconds` whatever is in view: each shot's share in one window, placed
+/// where the subject shows most ([`Shot::window_start`]).
+pub fn whole_windows(e: &Entry, seconds: f64) -> Vec<(Shot, f64, f64)> {
+    filling_windows(e, seconds).into_iter().map(|w| (w.shot, w.start, w.len)).collect()
+}
+
+/// A window cut from a shot: from `start` for `len` seconds of its clip, and how long it could
+/// run from `start` without leaving its stretch of the subject in view (or, for a window that
+/// fills its time whatever is in view, the clip).
+#[derive(Clone, Debug)]
+struct Window {
+    shot: Shot,
+    start: f64,
+    len: f64,
+    reach: f64,
+}
+
+/// [`windows`], with each window's reach.
+fn in_view_windows(e: &Entry, seconds: f64) -> Vec<Window> {
     let shots: Vec<&Shot> = e.shots.iter().take(shot_count(seconds)).collect();
     let each = seconds / shots.len().max(1) as f64;
     let mut out = Vec::new();
@@ -862,7 +892,7 @@ pub fn windows(e: &Entry, seconds: f64) -> Vec<(Shot, f64, f64)> {
         let mut spans: Vec<(f64, f64)> = s.spans().into_iter().filter(|(a, b)| b - a >= MIN_WINDOW.min(each)).collect();
         // the longest stretches first, the one holding the best moment first among equals
         spans.sort_by(|x, y| (y.1 - y.0).total_cmp(&(x.1 - x.0)).then_with(|| (s.best < x.0 || s.best > x.1).cmp(&(s.best < y.0 || s.best > y.1))));
-        let mut picked: Vec<(f64, f64)> = Vec::new();
+        let mut picked: Vec<(f64, f64, f64)> = Vec::new();
         let mut left = each;
         for (a, b) in spans {
             if left < MIN_WINDOW * 0.5 {
@@ -870,18 +900,17 @@ pub fn windows(e: &Entry, seconds: f64) -> Vec<(Shot, f64, f64)> {
             }
             let len = left.min(b - a);
             let start = (s.best - len * 0.4).clamp(a, (b - len).max(a));
-            picked.push((start, len));
+            picked.push((start, len, (b - start).max(len)));
             left -= len;
         }
         picked.sort_by(|x, y| x.0.total_cmp(&y.0));
-        out.extend(picked.into_iter().map(|(start, len)| (s.clone(), start, len)));
+        out.extend(picked.into_iter().map(|(start, len, reach)| Window { shot: s.clone(), start, len, reach }));
     }
     out
 }
 
-/// Windows that fill `seconds` whatever is in view: each shot's share in one window, placed
-/// where the subject shows most ([`Shot::window_start`]).
-pub fn whole_windows(e: &Entry, seconds: f64) -> Vec<(Shot, f64, f64)> {
+/// [`whole_windows`], with each window's reach (to the clip's end, less a margin).
+fn filling_windows(e: &Entry, seconds: f64) -> Vec<Window> {
     let shots: Vec<&Shot> = e.shots.iter().take(shot_count(seconds)).collect();
     let each = seconds / shots.len().max(1) as f64;
     shots
@@ -889,9 +918,104 @@ pub fn whole_windows(e: &Entry, seconds: f64) -> Vec<(Shot, f64, f64)> {
         .map(|s| {
             let usable = (s.clip_seconds - 0.4).max(0.5);
             let len = each.min(usable);
-            (s.clone(), s.window_start(len), len)
+            let start = s.window_start(len);
+            Window { shot: s.clone(), start, len, reach: (s.clip_seconds - 0.2 - start).max(len) }
         })
         .collect()
+}
+
+/// The beats of the music under the show, in seconds of the timeline: the ones measured in the
+/// track ([`Beats::measured`]), continued at its tempo before the first and past the last (a
+/// looped or extended track keeps its beat); or the steady grid of a generated bed from 0.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Beats {
+    times: Vec<f64>,
+    period: f64,
+}
+
+/// Most measured beats kept (a long hostile report could hold any number).
+const MAX_BEATS: usize = 100_000;
+
+impl Beats {
+    /// A steady grid from 0 at `bpm` (40..200 beats a minute, as `audio.generate` plays it).
+    pub fn grid(bpm: f64) -> Self {
+        let bpm = if bpm.is_finite() { bpm.clamp(40.0, 200.0) } else { 96.0 };
+        Self { times: vec![0.0], period: 60.0 / bpm }
+    }
+
+    /// Measured beat `times` (seconds of the timeline) at about `period` seconds a beat; `None`
+    /// when there are none or the tempo makes no sense (outside 20..300 beats a minute).
+    pub fn measured(times: &[f64], period: f64) -> Option<Self> {
+        if !period.is_finite() || !(0.2..=3.0).contains(&period) {
+            return None;
+        }
+        let mut t: Vec<f64> = times.iter().copied().filter(|x| x.is_finite() && *x >= 0.0).take(MAX_BEATS).collect();
+        t.sort_by(f64::total_cmp);
+        t.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        (!t.is_empty()).then_some(Self { times: t, period })
+    }
+
+    /// Seconds per beat.
+    pub fn period(&self) -> f64 {
+        self.period
+    }
+
+    /// Beat `k` of the endless sequence: the measured ones at `0..n`, the tempo's grid around them.
+    fn at(&self, k: i64) -> Option<f64> {
+        let n = i64::try_from(self.times.len()).ok()?;
+        let (first, last) = (*self.times.first()?, *self.times.last()?);
+        let t = if k < 0 {
+            first + k as f64 * self.period
+        } else if k >= n {
+            last + (k - n + 1) as f64 * self.period
+        } else {
+            *self.times.get(usize::try_from(k).ok()?)?
+        };
+        (t.is_finite() && t >= 0.0).then_some(t)
+    }
+
+    /// The index of the last beat at or before `x` (it may be before 0 s, and so not exist).
+    fn index_before(&self, x: f64) -> Option<i64> {
+        let n = self.times.len();
+        let (first, last) = (*self.times.first()?, *self.times.last()?);
+        let k = if x < first {
+            ((x - first) / self.period).floor()
+        } else if x >= last {
+            (n - 1) as f64 + ((x - last) / self.period).floor()
+        } else {
+            self.times.partition_point(|b| *b <= x) as f64 - 1.0
+        };
+        (k.is_finite() && k.abs() < 1e12).then_some(k as i64)
+    }
+
+    /// The beat nearest `t` among those in `[lo, hi]`, if any.
+    pub fn nearest(&self, t: f64, lo: f64, hi: f64) -> Option<f64> {
+        if !(t.is_finite() && lo.is_finite() && hi.is_finite()) || hi < lo {
+            return None;
+        }
+        let k = self.index_before(t)?;
+        let mut best: Option<f64> = None;
+        // the beats around `t`, then (when none of them is in range) the first one from `lo`
+        let around = (k - 1..=k + 2).filter_map(|i| self.at(i));
+        let from_lo = self.index_before(lo).and_then(|i| (i..=i + 1).filter_map(|i| self.at(i)).find(|b| *b >= lo));
+        for b in around.chain(from_lo) {
+            if b >= lo && b <= hi && best.is_none_or(|x| (b - t).abs() < (x - t).abs()) {
+                best = Some(b);
+            }
+        }
+        best
+    }
+
+    /// The first beat at or after `t`.
+    pub fn next(&self, t: f64) -> Option<f64> {
+        let k = self.index_before(t)?;
+        (k..=k + 2).filter_map(|i| self.at(i)).find(|b| *b >= t - 1e-9)
+    }
+
+    /// How far `t` is from the nearest beat, seconds.
+    pub fn distance(&self, t: f64) -> f64 {
+        self.nearest(t, t - self.period * 2.0, t + self.period * 2.0).map_or(f64::INFINITY, |b| (b - t).abs())
+    }
 }
 
 /// Most shots in the intro montage.
@@ -908,6 +1032,220 @@ pub fn montage(entries: &[Entry], n: usize) -> Vec<Shot> {
     let mut picks: Vec<usize> = (0..n).map(|i| if n == 1 { 0 } else { i * (len - 1) / (n - 1) }).collect();
     picks.dedup();
     picks.into_iter().filter_map(|i| entries.get(i).and_then(|e| e.shots.first()).cloned()).collect()
+}
+
+/// Furthest a cut moves to land on a beat, seconds (and never more than half a beat).
+const BEAT_SNAP: f64 = 0.4;
+
+/// Where an entry starting at `t` ends on a beat: its windows `wins` (played at `slow` speed)
+/// end at the nearest beat within [`BEAT_SNAP`] — the last window a little shorter (never the
+/// entry under `min_len` seconds, which carries its words, nor the window under half a
+/// second) or a little longer, only as far as its reach (the robot stays in view). The last
+/// window is changed to match; `None` (nothing changed) when no beat is that close.
+fn snap_end(wins: &mut [Window], t: f64, slow: f64, min_len: f64, beats: &Beats) -> Option<f64> {
+    let slow = if slow.is_finite() { slow.clamp(0.5, 1.0) } else { 1.0 };
+    let footage: f64 = wins.iter().map(|w| w.len).sum();
+    let last = wins.last_mut()?;
+    let end = t + footage / slow;
+    let tol = BEAT_SNAP.min(beats.period() * 0.5);
+    let shorter = ((last.len - 0.5).max(0.0) / slow).min(end - (t + min_len)).max(0.0).min(tol);
+    let longer = ((last.reach - last.len).max(0.0) / slow).min(tol);
+    let b = beats.nearest(end, end - shorter, end + longer)?;
+    last.len = (last.len + (b - end) * slow).max(0.0);
+    Some(b)
+}
+
+/// The user's music track (`Options::music`), imported: its item, and its length and beats when
+/// the analysis found them (`media.beats`, seconds of the track).
+struct MusicFile {
+    item: u64,
+    path: String,
+    seconds: Option<f64>,
+    bpm: Option<f64>,
+    /// Beats measured in the track, which starts at 0 on the timeline.
+    beats: Option<Beats>,
+}
+
+/// Import `path` and measure its beats. A track without a beat the analysis can follow is still
+/// used (noted), its cuts then not on its beat; a file that does not import is an error.
+async fn import_music(ex: &dyn Executor, path: &str, notes: &mut Vec<String>) -> Result<MusicFile, AutoCutError> {
+    let r = run(ex, "file.import", json!({"paths": [path]})).await?;
+    let item = r["items"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).ok_or_else(|| {
+        let why = r["errors"].as_array().and_then(|a| a.first()).map_or_else(|| "nothing imported".to_string(), Value::to_string);
+        AutoCutError::Invalid(format!("music: {path}: {why}"))
+    })?;
+    let mut m = MusicFile { item, path: path.to_string(), seconds: None, bpm: None, beats: None };
+    match run(ex, "media.beats", json!({"item": item})).await {
+        Ok(b) => {
+            m.seconds = b["seconds"].as_f64().filter(|s| s.is_finite() && *s > 0.0);
+            m.bpm = b["bpm"].as_f64().filter(|x| x.is_finite());
+            let times: Vec<f64> = b["beats"].as_array().map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+            m.beats = Beats::measured(&times, b["period"].as_f64().unwrap_or(f64::NAN));
+        }
+        Err(e) => notes.push(format!("music: {path}: {e}; the cuts are not on its beat")),
+    }
+    Ok(m)
+}
+
+/// The music under the show, as built.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Music {
+    /// `"generated"`, or the file it came from.
+    pub source: String,
+    /// Its tempo (as generated, or as measured), when known.
+    pub bpm: Option<f64>,
+    /// How it fits the show's length: `"generated"`, `"trimmed"` (faded out where the show
+    /// ends), `"remixed"` (`clip.remix`: cut at musically similar beats to the length), `"looped"`
+    /// (played again from the start) or `"as is"` (its length could not be read).
+    pub fit: String,
+    /// Cuts (montage cuts, entry and outro starts) within a frame of one of its beats, of all.
+    pub cuts_on_beat: usize,
+    pub cuts: usize,
+}
+
+impl Music {
+    /// With the count of `cuts` (seconds) within a frame of a beat of the music as it plays.
+    fn with_cuts(self, cuts: &[f64], played: Option<&Beats>, fps: f64) -> Self {
+        let near = 1.0 / fps.clamp(1.0, 240.0) + 0.012;
+        let on = played.map_or(0, |b| cuts.iter().filter(|c| b.distance(**c) <= near).count());
+        Self { cuts: cuts.len(), cuts_on_beat: on, ..self }
+    }
+}
+
+/// Most copies of a short track looped under a long show.
+const MAX_LOOPS: usize = 500;
+
+/// The length of clip `clip` on the music track, seconds (read back from the sequence).
+async fn clip_seconds(ex: &dyn Executor, tr: &Tracks, clip: u64) -> Option<f64> {
+    let seq = ex.execute("sequence.inspect", json!({})).await.ok()?;
+    let index = tr.music.trim_start_matches(['A', 'a']).parse::<usize>().ok()?.checked_sub(1)?;
+    let items = seq["audio"].get(index)?["items"].as_array()?;
+    let c = items.iter().find(|c| c["clip"].as_u64() == Some(clip))?;
+    c["duration"].as_f64().map(|d| d / TPS)
+}
+
+/// Lay the user's track under the whole show (`target` seconds) on the music track from 0: cut
+/// to length when it is longer (faded out by the caller), remixed to length at its beats when it
+/// is shorter (`clip.remix`), else looped. Returns the clips, how it was fitted, and its beats
+/// as they now play.
+async fn place_music(
+    ex: &dyn Executor,
+    tr: &Tracks,
+    m: &MusicFile,
+    target: f64,
+    notes: &mut Vec<String>,
+) -> Result<(Vec<u64>, &'static str, Option<Beats>), AutoCutError> {
+    let place = async |time: f64, duration: Option<f64>| -> Result<u64, AutoCutError> {
+        let mut p = json!({"item": m.item, "track": tr.music, "time": ticks(time), "sourceIn": 0});
+        if let Some(d) = duration {
+            p["duration"] = json!(ticks(d));
+        }
+        let r = run(ex, "timeline.place", p).await?;
+        r["clips"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).ok_or_else(|| AutoCutError::Executor("timeline.place placed no music".into()))
+    };
+    let length = match m.seconds {
+        Some(s) if s >= target => return Ok((vec![place(0.0, Some(target)).await?], "trimmed", m.beats.clone())),
+        Some(s) => Some(s),
+        None => None,
+    };
+    let first = place(0.0, None).await?;
+    let length = match length {
+        Some(s) => s,
+        None => match clip_seconds(ex, tr, first).await {
+            Some(s) if s > 0.0 => s,
+            _ => return Ok((vec![first], "as is", None)),
+        },
+    };
+    if length >= target {
+        // (a track whose beats were not found, longer than the show)
+        let delta = ticks(target) - ticks(length);
+        if let Err(e) = run(ex, "timeline.trim", json!({"clip": first, "edge": "out", "mode": "regular", "delta": delta})).await {
+            notes.push(format!("music: {e}"));
+        }
+        return Ok((vec![first], "trimmed", m.beats.clone()));
+    }
+    // shorter than the show: longer at its own beats, cut where the music is most alike (the
+    // planner can find no joints for some lengths with few of them: then with more, freer ones)
+    if m.beats.is_some() {
+        let mut why = String::new();
+        for (segments, variations) in [(50, 50), (100, 50), (100, 100), (0, 100)] {
+            match run(ex, "clip.remix", json!({"clip": first, "seconds": target, "segments": segments, "variations": variations})).await {
+                Ok(r) => {
+                    let beats = m.beats.as_ref().and_then(|b| remixed_beats(b, &r));
+                    return Ok((vec![first], "remixed", beats));
+                }
+                Err(e) => why = e.to_string(),
+            }
+        }
+        notes.push(format!("music: cannot remix it to length ({why}); looping it on its beat"));
+    }
+    // else played again from the start until the show ends, each time on the beat
+    let starts = loop_starts(length, target, m.beats.as_ref(), tr.fps);
+    let mut clips = vec![first];
+    let mut times: Vec<f64> = Vec::new();
+    for (k, s) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).copied().unwrap_or(target.min(s + length));
+        if k == 0 {
+            if end < length - 0.5 / tr.fps {
+                // the first copy (placed whole) is cut where the second starts
+                if let Err(e) = run(ex, "timeline.trim", json!({"clip": first, "edge": "out", "mode": "regular", "delta": ticks(end) - ticks(length)})).await {
+                    notes.push(format!("music: {e}"));
+                }
+            }
+        } else {
+            let c = place(*s, Some(end - s)).await?;
+            run(ex, "sequence.applyAudioTransition", json!({"clip": c, "edge": "in", "effect": "constant_power", "frames": AUDIO_FADE_FRAMES})).await.ok();
+            clips.push(c);
+        }
+        if let Some(b) = &m.beats {
+            times.extend(b.times.iter().map(|x| x + s).filter(|x| *x < end));
+        }
+    }
+    let beats = m.beats.as_ref().and_then(|b| Beats::measured(&times, b.period()));
+    Ok((clips, "looped", beats))
+}
+
+/// Where each copy of a `length`-second track starts when it is looped under a `target`-second
+/// show: each next copy starts so that its first beat lands on the track's beat grid (`beats`,
+/// measured from the track's start, going on at its tempo past the last) at or just before the
+/// end of the copy before, which is cut there — so the beat never stumbles at a seam; without
+/// beats, end to end. All on frames of `fps`; at most [`MAX_LOOPS`] copies.
+fn loop_starts(length: f64, target: f64, beats: Option<&Beats>, fps: f64) -> Vec<f64> {
+    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    let floor = |x: f64| (x * fps + 1e-6).floor() / fps;
+    let mut starts = vec![0.0];
+    if !(length.is_finite() && length > 1.0 && target.is_finite()) {
+        return starts;
+    }
+    let first_beat = beats.and_then(|b| b.times.first().copied());
+    while let Some(&s) = starts.last() {
+        let natural = s + length;
+        if natural >= target - 0.05 || starts.len() >= MAX_LOOPS {
+            break;
+        }
+        let on_beat = match (beats, first_beat) {
+            (Some(b), Some(b0)) => b.nearest(natural + b0, natural + b0 - b.period(), natural + b0).map(|g| floor(g - b0)),
+            _ => None,
+        };
+        starts.push(on_beat.filter(|n| *n > s + 1.0 && *n <= natural).unwrap_or_else(|| floor(natural)));
+    }
+    starts
+}
+
+/// The beats of a track as `clip.remix` plays it (its report `r`): each piece of the remix
+/// (`src` and `len` in ticks of the track) plays the track's beats in it, one after the other.
+fn remixed_beats(track: &Beats, r: &Value) -> Option<Beats> {
+    let mut out = Vec::new();
+    let mut at = 0.0;
+    for p in r["pieces"].as_array()? {
+        let (src, len) = (p["src"].as_f64()? / TPS, p["len"].as_f64()? / TPS);
+        if !(src.is_finite() && len.is_finite() && len > 0.0) {
+            return None;
+        }
+        out.extend(track.times.iter().filter(|b| **b >= src && **b < src + len).map(|b| at + b - src));
+        at += len;
+    }
+    Beats::measured(&out, track.period())
 }
 
 /// After the words for an entry, its own picture and sound run on this long before the next one.
@@ -948,14 +1286,37 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let mut fg_firsts: Vec<(u64, Option<u64>)> = Vec::new();
     let title_props = json!({"font_style": "Bold", "align": "center", "stroke": true, "stroke_width": 6, "shadow": true});
 
+    // ---- the music's beats, which the cuts land on: the user's track (imported now, its beats
+    // measured) or the generated bed's steady grid
+    let track = match &opts.music {
+        Some(path) => Some(import_music(ex, path, &mut built.notes).await?),
+        None => None,
+    };
+    let beats = match &track {
+        Some(m) => m.beats.clone(),
+        None => Some(Beats::grid(opts.bpm)),
+    };
+    if let Some(m) = &track {
+        match &m.beats {
+            Some(b) => progress(&format!("music: {} at {:.0} bpm; cutting on its beat", m.path, 60.0 / b.period())),
+            None => progress(&format!("music: {} (no beat found: cuts are not on its beat)", m.path)),
+        }
+    }
+    // cut points: the montage's, the entries' and the outro's (how many land on a beat)
+    let mut cuts: Vec<f64> = Vec::new();
+
     // ---- intro: a cold open — a montage of robots from across the years cut on the beat,
     // the title over it, a riser into an impact
     let intro_voice_at = 2.2;
     let intro_spoken = narrate(ex, &tr, voice, &script.spoken("intro", &script.intro), &script.intro, intro_voice_at, &mut narrations).await?;
     // the voice track's next free moment: a line never starts over the last one
     let mut voice_free_at = intro_voice_at + intro_spoken;
-    let intro_len = on_frame((intro_voice_at + intro_spoken + 0.8).max(6.0), tr.fps);
-    let cut = 2.0 * 60.0 / opts.bpm.clamp(60.0, 180.0);
+    let intro_needs = (intro_voice_at + intro_spoken + 0.8).max(6.0);
+    // the intro ends on the first beat after it has said its words
+    let intro_len = on_frame(beats.as_ref().and_then(|b| b.next(intro_needs)).filter(|x| *x < intro_needs + 2.0).unwrap_or(intro_needs), tr.fps);
+    // the montage cuts every two beats (four when the beat is quick)
+    let beat = beats.as_ref().map_or(60.0 / opts.bpm.clamp(60.0, 180.0), Beats::period);
+    let cut = if beat * 2.0 >= 0.6 { 2.0 * beat } else { 4.0 * beat };
     let picks = montage(entries, ((intro_len / cut).floor() as usize).clamp(1, MAX_MONTAGE));
     let mut at = 0.0;
     // the picks in turn, the last one to the end of the intro; a clip too short for its turn
@@ -963,17 +1324,23 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let mut i = 0;
     while at < intro_len - 0.5 / tr.fps && i < MAX_MONTAGE * 4 {
         let Some(s) = picks.get(i % picks.len().max(1)) else { break };
-        let len = if i + 1 >= picks.len() { intro_len - at } else { cut.min(intro_len - at) };
+        let next_cut = beats.as_ref().and_then(|b| b.nearest(at + cut, at + cut * 0.5, at + cut * 1.5)).unwrap_or(at + cut);
+        let len = if i + 1 >= picks.len() { intro_len - at } else { (next_cut - at).min(intro_len - at) };
         let len = len.min((s.clip_seconds - 0.4).max(0.5));
         let shot = place_shot(ex, &tr, s.item, at, s.window_start(len), len, frame_aspect).await?;
         fade_in(ex, shot.audio).await;
         mix.sounds.extend(shot.audio);
         at = shot.end;
+        if at < intro_len - 0.5 / tr.fps {
+            cuts.push(at);
+        }
         i += 1;
     }
-    sfx(ex, "riser", 1.8, 0.0, &tr.hits, 0.7, &mut mix).await?;
-    sfx(ex, "impact", 3.0, 1.8, &tr.hits, 0.8, &mut mix).await?;
-    title(ex, tr.titles_index, tr.fps, &opts.title, 1.8, intro_len - 1.8, 110.0, (w / 2.0, h * 0.46), title_props.clone()).await?;
+    // the title lands with an impact on a beat, a riser into it
+    let hit = beats.as_ref().and_then(|b| b.nearest(1.8, 1.3, 2.4)).map_or(1.8, |x| on_frame(x, tr.fps));
+    sfx(ex, "riser", hit.min(1.8), (hit - 1.8).max(0.0), &tr.hits, 0.7, &mut mix).await?;
+    sfx(ex, "impact", 3.0, hit, &tr.hits, 0.8, &mut mix).await?;
+    title(ex, tr.titles_index, tr.fps, &opts.title, hit, intro_len - hit, 110.0, (w / 2.0, h * 0.46), title_props.clone()).await?;
     let subtitle = opts.subtitle.clone().unwrap_or_else(|| years(entries));
     if !subtitle.is_empty() {
         title(
@@ -981,8 +1348,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             tr.over_index,
             tr.fps,
             &subtitle,
-            2.3,
-            intro_len - 2.3,
+            hit + 0.5,
+            intro_len - hit - 0.5,
             54.0,
             (w / 2.0, h * 0.46 + 95.0),
             json!({"font_style": "Bold", "align": "center", "fill_color": "#ffcc00", "shadow": true}),
@@ -1011,19 +1378,28 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let must = voice_at - t + spoken + 0.7;
         // the robot in view; when that is too little to carry the words even at half speed,
         // the clips as they are
-        let mut wins = windows(e, needed);
-        if wins.iter().map(|(_, _, l)| *l).sum::<f64>() / 0.5 < must {
-            wins = whole_windows(e, needed);
+        let mut wins = in_view_windows(e, needed);
+        if wins.iter().map(|w| w.len).sum::<f64>() / 0.5 < must {
+            wins = filling_windows(e, needed);
         }
-        let footage: f64 = wins.iter().map(|(_, _, l)| *l).sum();
+        let footage: f64 = wins.iter().map(|w| w.len).sum();
         // footage too short for the words: slow the shots to cover them, never below half speed
         // (an entry with words to spare just ends sooner)
         let slow = if footage + 0.05 < must { (footage / must).clamp(0.5, 1.0) } else { 1.0 };
+        // the entry ends on a beat (so the next one, its transition and year card start on one)
+        let beat_end = beats.as_ref().and_then(|b| snap_end(&mut wins, t, slow, must.max(2.0), b)).map(|x| on_frame(x, tr.fps));
+        cuts.push(t);
         let mut at = t;
         let mut firsts = None;
         let mut shots = Vec::new();
-        for (i, (s, src, len)) in wins.iter().enumerate() {
-            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, *len, frame_aspect).await?;
+        let n_wins = wins.len();
+        for (i, Window { shot: s, start: src, len, reach }) in wins.iter().enumerate() {
+            // the last shot ends on the beat's own frame, whatever rounding came before
+            let len = match beat_end {
+                Some(end) if i + 1 == n_wins && slow >= 0.999 => (end - at).max(0.5).min(reach.max(0.5)),
+                _ => *len,
+            };
+            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, len, frame_aspect).await?;
             mix.sounds.extend(audio);
             let mut shot_end = end;
             if slow < 0.999 {
@@ -1142,25 +1518,39 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     )
     .await?;
 
-    // ---- music under everything, ducked under the voice, faded out
-    let m = run(
-        ex,
-        "audio.generate",
-        json!({"kind": "music", "duration": total + 0.5, "mood": opts.mood, "bpm": opts.bpm, "time": 0, "track": tr.music, "intensity": 0.75}),
-    )
-    .await?;
-    let music = m["clip"].as_u64();
-    if let Some(music) = music {
-        run(ex, "sequence.applyAudioTransition", json!({"clip": music, "edge": "out", "effect": "constant_power", "frames": (opts.fps * 3.0) as i64}))
+    // ---- music under everything, ducked under the voice, faded out: the user's track fitted to
+    // the show, or a generated bed
+    cuts.push(t);
+    let (music, info) = match &track {
+        Some(m) => {
+            let (clips, fit, played) = place_music(ex, &tr, m, total + 0.5, &mut built.notes).await?;
+            (clips, Music { source: m.path.clone(), bpm: m.bpm, fit: fit.into(), ..Music::default() }.with_cuts(&cuts, played.as_ref(), tr.fps))
+        }
+        None => {
+            let m = run(
+                ex,
+                "audio.generate",
+                json!({"kind": "music", "duration": total + 0.5, "mood": opts.mood, "bpm": opts.bpm, "time": 0, "track": tr.music, "intensity": 0.75}),
+            )
+            .await?;
+            let grid = Beats::grid(opts.bpm);
+            let info = Music { source: "generated".into(), bpm: Some(60.0 / grid.period()), fit: "generated".into(), ..Music::default() };
+            (m["clip"].as_u64().into_iter().collect::<Vec<u64>>(), info.with_cuts(&cuts, Some(&grid), tr.fps))
+        }
+    };
+    if let Some(last) = music.last() {
+        run(ex, "sequence.applyAudioTransition", json!({"clip": last, "edge": "out", "effect": "constant_power", "frames": (opts.fps * 3.0) as i64}))
             .await
             .ok();
     }
+    progress(&format!("music: {} ({}); {} of {} cuts on the beat", info.source, info.fit, info.cuts_on_beat, info.cuts));
+    built.music = Some(info);
     if !narrations.clips.is_empty() {
         progress(&format!("{} narration lines, {} from the narration cache", narrations.clips.len(), narrations.cached));
     }
     // ---- the mix
     progress("mixing");
-    mix_down(ex, &mix, &narrations.clips, music, &mut built.notes).await;
+    mix_down(ex, &mix, &narrations.clips, &music, &mut built.notes).await;
     built.narration_lines = narrations.clips.len();
     built.narration_cached = narrations.cached;
     // ---- subtitles: what the narration says, as written, on a caption track
@@ -1466,6 +1856,99 @@ mod tests {
         let v = serde_json::to_value(&old).unwrap();
         assert!(v.get("pronounce").is_none() && v.get("say").is_none(), "{v}");
         assert!(serde_json::to_value(&s).unwrap()["pronounce"]["Zaku II"] == "Zaku Two");
+    }
+
+    #[test]
+    fn beats_come_from_the_grid_or_the_track_and_go_on_at_its_tempo() {
+        let g = Beats::grid(120.0);
+        assert_eq!(g.period(), 0.5);
+        assert_eq!(g.nearest(7.1, 6.0, 8.0), Some(7.0));
+        assert_eq!(g.nearest(7.3, 6.0, 8.0), Some(7.5));
+        assert_eq!(g.nearest(7.3, 7.35, 9.0), Some(7.5));
+        assert_eq!(g.nearest(7.3, 6.0, 7.2), Some(7.0));
+        assert_eq!(g.nearest(7.3, 7.31, 7.4), None, "no beat in range");
+        assert_eq!(g.next(6.01), Some(6.5));
+        assert_eq!(g.next(6.0), Some(6.0));
+        assert!(g.distance(3.26) - 0.24 < 1e-9);
+        assert_eq!(Beats::grid(f64::NAN).period(), 60.0 / 96.0);
+        assert_eq!(Beats::grid(1000.0).period(), 60.0 / 200.0, "as audio.generate clamps it");
+        // a measured track: its own beats (slightly uneven), then its tempo before and after
+        let m = Beats::measured(&[1.02, 1.5, 2.01, 2.49, 3.0, f64::NAN, -1.0, 2.01], 0.5).unwrap();
+        assert_eq!(m.nearest(1.9, 1.0, 3.0), Some(2.01));
+        assert_eq!(m.nearest(0.6, 0.0, 1.0), Some(0.52), "before the first: back at its tempo");
+        assert!((m.nearest(10.2, 9.0, 11.0).unwrap() - 10.0).abs() < 1e-9, "after the last: on at its tempo");
+        assert_eq!(m.next(2.2), Some(2.49));
+        assert!(m.nearest(0.0, -1.0, 0.3).is_some_and(|b| (b - 0.02).abs() < 1e-9), "no beat before 0 s");
+        // nonsense tempos and no beats at all: none
+        for p in [0.0, f64::NAN, -0.5, 10.0] {
+            assert!(Beats::measured(&[1.0], p).is_none(), "{p}");
+        }
+        assert!(Beats::measured(&[f64::NAN], 0.5).is_none());
+        assert!(g.nearest(f64::INFINITY, 0.0, 1.0).is_none() && g.nearest(1.0, 2.0, 1.0).is_none());
+        assert!(g.next(1e300).is_none());
+    }
+
+    #[test]
+    fn an_entry_ends_on_the_nearest_beat_it_can_reach() {
+        let shot = Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 5.0, seen: vec![], unseen: vec![] };
+        let w = |len: f64, reach: f64| Window { shot: shot.clone(), start: 2.0, len, reach };
+        let g = Beats::grid(120.0);
+        // 10 + 7.3 s: the beat at 17.5 is in reach
+        let mut wins = vec![w(4.0, 4.0), w(3.3, 6.0)];
+        assert_eq!(snap_end(&mut wins, 10.0, 1.0, 5.0, &g), Some(17.5));
+        assert!((wins[1].len - 3.5).abs() < 1e-9);
+        // the robot leaves the view at once: shorter, to the beat before
+        let mut wins = vec![w(4.0, 4.0), w(3.2, 3.2)];
+        assert_eq!(snap_end(&mut wins, 10.0, 1.0, 5.0, &g), Some(17.0));
+        assert!((wins[1].len - 3.0).abs() < 1e-9);
+        // neither: the words need the whole entry, and the robot leaves the view
+        let mut wins = vec![w(4.0, 4.0), w(3.2, 3.2)];
+        assert_eq!(snap_end(&mut wins, 10.0, 1.0, 7.25, &g), None);
+        assert!((wins[1].len - 3.2).abs() < 1e-9, "unchanged");
+        // never further than half a beat
+        let mut wins = vec![w(4.0, 4.0), w(3.5, 6.0)];
+        assert_eq!(snap_end(&mut wins, 10.0, 1.0, 5.0, &Beats::grid(60.0)), None, "half a second from either beat");
+        // a slowed entry (half speed): the window changes half as much as the end
+        let mut wins = vec![w(3.6, 6.0)];
+        assert_eq!(snap_end(&mut wins, 10.0, 0.5, 7.0, &g), Some(17.0));
+        assert!((wins[0].len - 3.5).abs() < 1e-9);
+        assert!(snap_end(&mut [], 10.0, 1.0, 5.0, &g).is_none());
+    }
+
+    #[test]
+    fn a_looped_track_keeps_its_beat_across_the_seams() {
+        // 0.51 s a beat from 0.37 s: 20 s of track is not a whole number of beats
+        let times: Vec<f64> = (0..39).map(|k| 0.37 + 0.51 * k as f64).collect();
+        let b = Beats::measured(&times, 0.51).unwrap();
+        let starts = loop_starts(20.0, 50.0, Some(&b), 30.0);
+        assert_eq!(starts.len(), 3, "{starts:?}");
+        for w in starts.windows(2) {
+            let seam = w[1];
+            assert!(seam <= w[0] + 20.0 && seam > w[0] + 19.0, "cut a little short, never longer: {starts:?}");
+            // the next copy's first beat falls on the grid (within a frame)
+            assert!(b.distance(seam + 0.37) <= 1.0 / 30.0 + 1e-9, "{seam}: {}", b.distance(seam + 0.37));
+            assert!(((seam * 30.0) - (seam * 30.0).round()).abs() < 1e-6, "on a frame");
+        }
+        // without beats: end to end; a track as long as the show: once; nonsense: once
+        assert_eq!(loop_starts(20.0, 50.0, None, 30.0), vec![0.0, 20.0, 40.0]);
+        assert_eq!(loop_starts(20.0, 20.0, Some(&b), 30.0), vec![0.0]);
+        assert_eq!(loop_starts(f64::NAN, 50.0, None, 30.0), vec![0.0]);
+        assert_eq!(loop_starts(0.5, 50.0, None, 30.0), vec![0.0]);
+        assert_eq!(loop_starts(2.0, 1e9, None, 30.0).len(), MAX_LOOPS);
+    }
+
+    #[test]
+    fn a_remix_plays_the_beats_of_its_pieces() {
+        let track = Beats::measured(&(0..40).map(|k| 0.25 + 0.5 * k as f64).collect::<Vec<_>>(), 0.5).unwrap();
+        let tick = |s: f64| (s * TPS) as i64;
+        // the first 8 s, then from 4 s to the end (20 s): 24 s of music
+        let r = json!({"pieces": [{"src": 0, "len": tick(8.0)}, {"src": tick(4.0), "len": tick(16.0)}]});
+        let b = remixed_beats(&track, &r).unwrap();
+        assert_eq!(b.times.len(), 16 + 32);
+        assert!((b.times[16] - 8.25).abs() < 1e-9, "{:?}", &b.times[14..18]);
+        assert!(b.times.windows(2).all(|w| (w[1] - w[0] - 0.5).abs() < 1e-6), "an even beat across the joint");
+        assert!(remixed_beats(&track, &json!({"pieces": [{"src": "x"}]})).is_none());
+        assert!(remixed_beats(&track, &json!({})).is_none());
     }
 
     #[test]

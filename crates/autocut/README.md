@@ -110,8 +110,21 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      push, glitch, light leak, zoom blur; dip to black at a new year) with a whoosh; the year
      as a title card with an impact;
    - `graphics.counter` across all entries; an outro with the total over the latest robot;
+   - **the music and its beat**: a generated bed (`audio.generate` at `--bpm`), or with
+     `--music` (`Options::music`) the user's own track: imported, its tempo and beats measured
+     by the engine (`media.beats`, the beat tracker of `filmcraft_audio_dsp::remix`), then
+     laid from 0 under the whole show — cut to length and faded out when it is longer,
+     remixed longer at its own beats (`clip.remix`, joints where the music is most alike) when
+     it is shorter, else looped. The cuts land on the beat: the montage cuts every two beats
+     (four when it is quick), the intro ends on the first beat after its words, the title's
+     impact hits a beat, and each entry ends on the nearest beat within 0.4 s (half a beat at
+     most) — its last shot a little shorter (never under what its narration needs) or a
+     little longer only while the robot stays in view — so the next entry, its transition
+     and year card start on one; the last shot is placed to the beat's own frame. `music` in
+     the output says how the track was fitted and how many cuts are within a frame of a beat
+     as it finally plays (computed from the remix's pieces when remixed);
    - **the mix**: the voice matched to -16 LUFS (dialogue), the shots' sound (ambience, -27)
-     and a generated music bed (`audio.generate`, -24) ducked under it, effects at -23, and a
+     and the music (-24, generated or the user's) ducked under it, effects at -23, and a
      hard limiter at -1 dBFS on the mix;
    - **subtitles** (`subtitles.rs`): each narration line as written, split into cues of at most
      two 42-character lines, 1–7 s each, at sentence ends first and then clauses (a small

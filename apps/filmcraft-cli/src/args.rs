@@ -39,6 +39,7 @@ const VALUED: &[&str] = &[
     "--title",
     "--report",
     "--description",
+    "--music",
 ];
 
 #[derive(Debug, Default)]
