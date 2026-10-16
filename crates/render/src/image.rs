@@ -239,12 +239,12 @@ impl Image {
     /// Opaque version over black (for monitors).
     pub fn over_black_rgba8(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.w * self.h * 4];
+        // `linear_to_srgb_u8` per sample, with its table looked up once per frame (every exported frame comes through here)
+        let table = filmcraft_color::linear_to_srgb_u8_table();
+        let encode = |v: f32| table[((v.clamp(0.0, 1.0) * 4095.0 + 0.5) as usize).min(4095)];
         out.par_chunks_mut(self.w * 4).zip(self.px.par_chunks(self.w * 4)).for_each(|(o, s)| {
             for (o, s) in o.as_chunks_mut::<4>().0.iter_mut().zip(s.as_chunks::<4>().0) {
-                o[0] = filmcraft_color::linear_to_srgb_u8(s[0]);
-                o[1] = filmcraft_color::linear_to_srgb_u8(s[1]);
-                o[2] = filmcraft_color::linear_to_srgb_u8(s[2]);
-                o[3] = 255;
+                *o = [encode(s[0]), encode(s[1]), encode(s[2]), 255];
             }
         });
         out
