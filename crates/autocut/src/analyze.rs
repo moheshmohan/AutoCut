@@ -531,6 +531,13 @@ const KNOWN_NAMES: &[&str] = &[
     "walker",
 ];
 
+/// Whether a label names a well-known robot or maker: a capitalised word of it is one of
+/// [`KNOWN_NAMES`] ("Boston Dynamics Spot", "Pepper humanoid robot"; not "red toy robot").
+pub fn famous(label: &str) -> bool {
+    let (raw, tokens) = label_tokens(label);
+    raw.iter().zip(&tokens).any(|(w, lw)| capitalised(w) && KNOWN_NAMES.contains(&lw.as_str()))
+}
+
 /// Keep a model's label only if every capitalised word in it is a known name; otherwise say
 /// what it is plainly: "{kind} {subject}" ("quadruped robot"). With no text read: see
 /// [`sanitize_label_with`].

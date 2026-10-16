@@ -744,6 +744,7 @@ mod tests {
             best: seconds / 2.0,
             seen: (0..seen).map(|i| i as f64).collect(),
             unseen: (0..unseen).map(|i| i as f64 + 0.5).collect(),
+            ..Shot::default()
         }
     }
 

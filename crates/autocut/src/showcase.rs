@@ -98,7 +98,7 @@ impl Default for Options {
 }
 
 /// One clip shown in an entry.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Shot {
     pub item: u64,
     pub name: String,
@@ -110,11 +110,32 @@ pub struct Shot {
     /// …and that do not: windows are cut where it is in view.
     #[serde(default)]
     pub unseen: Vec<f64>,
+    /// The sampled moment where the subject is largest — the thumbnail's pick; absent in plans
+    /// from before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub largest: Option<Moment>,
+}
+
+/// A sampled moment of a clip that shows the subject: seconds into the clip, the share of the
+/// frame its box covers, and the box's centre (0..1 of the frame, x right, y down).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Moment {
+    pub seconds: f64,
+    pub area: f64,
+    #[serde(default = "Moment::middle")]
+    pub center: [f64; 2],
+}
+
+impl Moment {
+    fn middle() -> [f64; 2] {
+        [0.5, 0.5]
+    }
 }
 
 impl Shot {
     fn of(f: &ClipFacts) -> Self {
         let (seen, unseen): (Vec<&crate::analyze::FrameFact>, Vec<&crate::analyze::FrameFact>) = f.frames.iter().partition(|x| x.present);
+        let largest = seen.iter().filter(|x| x.seconds.is_finite() && x.area.is_finite() && x.area > 0.0).max_by(|a, b| a.area.total_cmp(&b.area));
         Self {
             item: f.item,
             name: f.name.clone(),
@@ -122,6 +143,11 @@ impl Shot {
             best: f.best,
             seen: seen.iter().map(|x| x.seconds).collect(),
             unseen: unseen.iter().map(|x| x.seconds).collect(),
+            largest: largest.map(|x| Moment {
+                seconds: x.seconds,
+                area: x.area.min(1.0),
+                center: x.center.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.5 }),
+            }),
         }
     }
 
@@ -565,6 +591,8 @@ pub struct Built {
     pub subtitle_files: Vec<String>,
     /// The music under the show, and how many cuts landed on its beat.
     pub music: Option<Music>,
+    /// The YouTube thumbnail written next to the export (`<out>.thumbnail.jpg`).
+    pub thumbnail: Option<String>,
 }
 
 /// An entry as built: its span on the timeline and its shots, seconds.
@@ -1682,8 +1710,138 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 }
             }
         }
+        // and the thumbnail
+        progress("thumbnail");
+        let file = std::path::Path::new(path).with_extension("thumbnail.jpg").to_string_lossy().into_owned();
+        match thumbnail(ex, opts, entries, built.sequence, &file).await {
+            Ok(_) => built.thumbnail = Some(file),
+            Err(e) => built.notes.push(format!("thumbnail: {e}")),
+        }
     }
     Ok(built)
+}
+
+/// Thumbnail size: YouTube's (16:9, at most 2 MB).
+pub const THUMBNAIL_SIZE: (u32, u32) = (1280, 720);
+
+/// The thumbnail's frame: across every entry's shots, the sampled moment where the subject is
+/// largest ([`Shot::largest`]), a well-known robot ([`crate::analyze::famous`]) counting
+/// double and any other named one a third more; `(shot, the moment, entry number)`, the
+/// moment's time inside the clip. A shot from a plan without `largest` counts at its best
+/// moment, in the middle of the frame, as a modest size.
+pub fn thumbnail_frame(entries: &[Entry], subject: &str) -> Option<(Shot, Moment, usize)> {
+    let mut pick: Option<(f64, &Shot, Moment, usize)> = None;
+    for e in entries {
+        let weight = if crate::analyze::famous(&e.label) {
+            2.0
+        } else if generic(&e.label, subject) {
+            1.0
+        } else {
+            1.3
+        };
+        for s in &e.shots {
+            let m = s.largest.unwrap_or(Moment { seconds: s.best, area: 0.15, center: Moment::middle() });
+            if !(m.seconds.is_finite() && m.area.is_finite()) {
+                continue;
+            }
+            let score = m.area.clamp(0.0, 1.0) * weight;
+            if pick.is_none_or(|p| score > p.0) {
+                pick = Some((score, s, Moment { seconds: m.seconds.max(0.0).min((s.clip_seconds - 0.1).max(0.0)), ..m }, e.number));
+            }
+        }
+    }
+    pick.map(|(_, s, m, n)| (s.clone(), m, n))
+}
+
+/// The title on at most two balanced lines, in capitals (as thumbnails shout).
+fn thumbnail_lines(title: &str) -> Vec<String> {
+    let words: Vec<String> = title.split_whitespace().map(str::to_uppercase).collect();
+    let all = words.join(" ");
+    if all.chars().count() <= 14 || words.len() < 2 {
+        return vec![all];
+    }
+    let total = all.chars().count();
+    let mut best = (usize::MAX, 1);
+    let mut a = 0;
+    for k in 1..words.len() {
+        a += words.get(k - 1).map_or(0, |w| w.chars().count()) + usize::from(k > 1);
+        let longer = a.max(total.saturating_sub(a + 1));
+        if longer < best.0 {
+            best = (longer, k);
+        }
+    }
+    let (first, second) = words.split_at(best.1.min(words.len()));
+    vec![first.join(" "), second.join(" ")]
+}
+
+/// Write the YouTube thumbnail to `path` (JPEG, or PNG for a `.png` path), 1280×720: the
+/// [`thumbnail_frame`] filling the picture (a portrait one over its blurred copy), the show's
+/// title over it in large outlined capitals and the count in a corner — composed in a sequence
+/// of its own ("<title> — Thumbnail", left in the project to adjust and export again) and
+/// exported with `file.exportFrame`. The show's sequence `show` is the active one again
+/// afterwards, whatever happened.
+pub async fn thumbnail(ex: &dyn Executor, opts: &Options, entries: &[Entry], show: Option<u64>, path: &str) -> Result<Value, AutoCutError> {
+    let (shot, moment, _) = thumbnail_frame(entries, &opts.subject).ok_or_else(|| AutoCutError::Invalid("no shot to make a thumbnail from".into()))?;
+    let (w, h) = THUMBNAIL_SIZE;
+    let fps = opts.fps.clamp(1.0, 240.0);
+    let r = run(ex, "file.newSequence", json!({"name": format!("{} — Thumbnail", opts.title), "width": w, "height": h, "fps": fps, "video": 4, "audio": 1}))
+        .await?;
+    let thumb = r["sequence"].as_u64();
+    let made = compose_thumbnail(ex, opts, entries.len(), &shot, moment, thumb, path).await;
+    if let Some(t) = thumb {
+        run(ex, "sequence.close", json!({"item": t})).await.ok();
+    }
+    if let Some(s) = show {
+        run(ex, "sequence.open", json!({"item": s})).await?;
+    }
+    made
+}
+
+async fn compose_thumbnail(
+    ex: &dyn Executor,
+    opts: &Options,
+    count: usize,
+    shot: &Shot,
+    moment: Moment,
+    thumb: Option<u64>,
+    path: &str,
+) -> Result<Value, AutoCutError> {
+    let thumb = thumb.ok_or_else(|| AutoCutError::Executor("file.newSequence made no sequence".into()))?;
+    let (w, h) = (f64::from(THUMBNAIL_SIZE.0), f64::from(THUMBNAIL_SIZE.1));
+    let fps = opts.fps.clamp(1.0, 240.0);
+    let tr = Tracks {
+        fps,
+        aspect: w / h,
+        stabilize: false,
+        bg: "V1".into(),
+        fg: "V2".into(),
+        titles_index: 2,
+        over_index: 3,
+        counter_index: 3,
+        clip_audio: "A1".into(),
+        voice: "A1".into(),
+        music: "A1".into(),
+        sfx: "A1".into(),
+        hits: "A1".into(),
+    };
+    // the frame: a second of the shot from the moment, its first frame the one exported
+    place_shot(ex, &tr, shot.item, 0.0, moment.seconds, 1.0, false).await?;
+    // the title, as large as two lines across the frame allow, in the half of the picture the
+    // robot is not in (low unless it stands low), the count in the opposite corner
+    let lines = thumbnail_lines(&opts.title);
+    let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(1).max(1) as f64;
+    let size = (w * 0.92 / (0.68 * longest)).clamp(56.0, 140.0);
+    let n = lines.len() as f64;
+    let low = moment.center.get(1).is_none_or(|y| *y < 0.58);
+    let first_baseline = if low { h - 60.0 - (n - 1.0) * size * 1.05 } else { 50.0 + size * 0.75 };
+    let props =
+        json!({"font_style": "Bold", "align": "center", "fill_color": "#ffffff", "stroke": true, "stroke_width": (size / 11.0).round(), "shadow": true});
+    title(ex, tr.titles_index, fps, &lines.join("\n"), 0.0, 1.0, size, (w / 2.0, first_baseline), props).await?;
+    let tag = format!("{count} {}S", opts.subject.to_uppercase());
+    let tag_props = json!({"font_style": "Bold", "align": "left", "fill_color": "#ffcc00", "stroke": true, "stroke_width": 6, "shadow": true});
+    title(ex, tr.over_index, fps, &tag, 0.0, 1.0, 64.0, (48.0, if low { 100.0 } else { h - 48.0 }), tag_props).await?;
+    let format = if path.to_ascii_lowercase().ends_with(".png") { "png" } else { "jpeg" };
+    run(ex, "file.exportFrame", json!({"sequence": thumb, "time": 0, "path": path, "format": format})).await
 }
 
 #[cfg(test)]
@@ -1808,8 +1966,8 @@ mod tests {
             description: String::new(),
             unix: None,
             shots: vec![
-                Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 19.5, seen: vec![], unseen: vec![] },
-                Shot { item: 2, name: "b".into(), clip_seconds: 3.0, best: 1.0, seen: vec![], unseen: vec![] },
+                Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 19.5, seen: vec![], unseen: vec![], largest: None },
+                Shot { item: 2, name: "b".into(), clip_seconds: 3.0, best: 1.0, seen: vec![], unseen: vec![], largest: None },
             ],
         };
         let w = whole_windows(&e, 8.0);
@@ -1825,7 +1983,7 @@ mod tests {
     #[test]
     fn stretches_in_view_come_from_the_samples() {
         // statues at 2.0 s and 7.8 s of a 15.5 s clip, not at 4.9, 10.7 and 13.6
-        let s = Shot { item: 47, name: "s".into(), clip_seconds: 15.5, best: 7.8, seen: vec![2.0, 7.8], unseen: vec![4.9, 10.7, 13.6] };
+        let s = Shot { item: 47, name: "s".into(), clip_seconds: 15.5, best: 7.8, seen: vec![2.0, 7.8], unseen: vec![4.9, 10.7, 13.6], largest: None };
         let spans = s.spans();
         assert_eq!(spans.len(), 2, "{spans:?}");
         assert!((spans[0].0 - 0.2).abs() < 1e-9 && (spans[0].1 - 3.45).abs() < 1e-9, "{spans:?}");
@@ -1857,6 +2015,7 @@ mod tests {
             best: 22.0,
             seen: vec![21.0, 24.0, 27.0, 30.0, 33.0, 36.0, 39.0],
             unseen: vec![3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 42.0, 45.0],
+            largest: None,
         };
         let a = s.window_start(8.0);
         assert!(a >= 19.0 && a + 8.0 <= 41.0, "{a}");
@@ -2002,7 +2161,7 @@ mod tests {
 
     #[test]
     fn an_entry_ends_on_the_nearest_beat_it_can_reach() {
-        let shot = Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 5.0, seen: vec![], unseen: vec![] };
+        let shot = Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 5.0, seen: vec![], unseen: vec![], largest: None };
         let w = |len: f64, reach: f64| Window { shot: shot.clone(), start: 2.0, len, reach };
         let g = Beats::grid(120.0);
         // 10 + 7.3 s: the beat at 17.5 is in reach
@@ -2025,6 +2184,52 @@ mod tests {
         assert_eq!(snap_end(&mut wins, 10.0, 0.5, 7.0, &g), Some(17.0));
         assert!((wins[0].len - 3.5).abs() < 1e-9);
         assert!(snap_end(&mut [], 10.0, 1.0, 5.0, &g).is_none());
+    }
+
+    #[test]
+    fn the_thumbnail_shows_the_largest_robot_a_famous_one_first() {
+        let day = 1_600_000_000;
+        let with_area = |item: u64, label: &str, unix: i64, area: f64| ClipFacts {
+            frames: vec![
+                FrameFact { seconds: 3.0, present: true, area: area / 2.0, center: [0.5, 0.5] },
+                FrameFact { seconds: 9.0, present: true, area, center: [0.5, 0.5] },
+                FrameFact { seconds: 12.0, present: false, area: 0.9, center: [0.5, 0.5] },
+            ],
+            ..fact(item, label, "humanoid", unix, 1.0)
+        };
+        let facts = vec![
+            with_area(1, "red toy robot", day, 0.45),
+            with_area(2, "Boston Dynamics Spot", day + 86_400, 0.3),
+            with_area(3, "Zork cleaning robot", day + 86_400 * 2, 0.35),
+        ];
+        let entries = group(&facts, "robot", 0.3);
+        assert_eq!(entries[0].shots[0].largest, Some(Moment { seconds: 9.0, area: 0.45, center: [0.5, 0.5] }), "the largest moment that shows it");
+        // Spot (0.3, famous: 0.6) over the bigger toy robot (0.45) and the named one (0.35 × 1.3)
+        let (shot, at, n) = thumbnail_frame(&entries, "robot").unwrap();
+        assert_eq!((shot.item, at.seconds, n), (2, 9.0, 2));
+        // a much larger plain one wins after all
+        let facts = vec![with_area(1, "red toy robot", day, 0.8), with_area(2, "Boston Dynamics Spot", day + 86_400, 0.3)];
+        assert_eq!(thumbnail_frame(&group(&facts, "robot", 0.3), "robot").map(|p| p.0.item), Some(1));
+        // a plan from before `largest`: the best moment; hostile values are skipped
+        let mut old = group(&facts, "robot", 0.3);
+        for e in &mut old {
+            for s in &mut e.shots {
+                s.largest = None;
+            }
+        }
+        assert_eq!(thumbnail_frame(&old, "robot").map(|p| (p.0.item, p.1.seconds)), Some((2, 6.0)), "Spot's best moment");
+        old[1].shots[0].largest = Some(Moment { seconds: f64::NAN, area: 0.9, center: [0.5, 0.5] });
+        assert_eq!(thumbnail_frame(&old, "robot").map(|p| p.0.item), Some(1));
+        assert!(thumbnail_frame(&[], "robot").is_none());
+        assert!(crate::analyze::famous("Pepper humanoid robot") && !crate::analyze::famous("red toy robot") && !crate::analyze::famous("figure skating robot"));
+    }
+
+    #[test]
+    fn thumbnail_titles_go_on_two_balanced_lines() {
+        assert_eq!(thumbnail_lines("Robots"), vec!["ROBOTS"]);
+        assert_eq!(thumbnail_lines("Every Robot I've Met"), vec!["EVERY ROBOT", "I'VE MET"]);
+        assert_eq!(thumbnail_lines("  "), vec![""]);
+        assert_eq!(thumbnail_lines(&"x".repeat(40)).len(), 1, "one long word stays whole");
     }
 
     #[test]

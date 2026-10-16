@@ -147,8 +147,18 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      clip (a cue too short to read stays up into the pause after it, never into the next line);
      on a `Subtitles` caption track of the sequence (shown in the app, not burned in);
    - optionally the YouTube 1080p export, with `<out>.chapters.txt` (intro, each year, outro —
-     YouTube's rules: from 0:00, at least three, none under 10 s) for the description, and the
-     subtitles as `<out>.srt` and `<out>.vtt` (`captions.export`) to upload with it.
+     YouTube's rules: from 0:00, at least three, none under 10 s) for the description, the
+     subtitles as `<out>.srt` and `<out>.vtt` (`captions.export`) to upload with it, and a
+     **thumbnail**, `<out>.thumbnail.jpg` (1280×720): the sampled moment where a robot is
+     largest in the analysis (`Shot::largest`; a well-known robot or maker —
+     `analyze::famous`, the `KNOWN_NAMES` list — counts double, any other named one a third
+     more), filling the picture (a portrait shot over its blurred copy), with the title in
+     large white capitals outlined in black (on two balanced lines when long) in the half of
+     the picture the robot is not in (low, unless the analysis saw it low in the frame) and
+     the count ("45 ROBOTS") in yellow in the opposite corner. It is composed in a sequence of its own, "<title> —
+     Thumbnail", left in the project to adjust and export again, and written by
+     `file.exportFrame` (`showcase::thumbnail` does it on its own); the show's sequence is
+     active again afterwards.
 
    **Spoken vs shown.** Text-to-speech misreads names that are spelled for the eye ("Zaku II",
    "NodeMCU", "Go1", "DP World"); respelling them in the script fixes the voice but puts "Zaku

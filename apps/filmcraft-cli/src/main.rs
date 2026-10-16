@@ -121,7 +121,11 @@ SUBCOMMANDS
                                 with --export, YouTube chapters go to <out>.chapters.txt and the
                                 narration's subtitles to <out>.srt and <out>.vtt (at most 2 lines
                                 of 42 characters, 1-7 s a cue; also on the sequence's Subtitles
-                                caption track), and --upload then sends the export to
+                                caption track), a 1280x720 YouTube thumbnail to
+                                <out>.thumbnail.jpg (the frame where a robot is largest, a
+                                well-known one first, under the title in large outlined
+                                capitals; composed in a \"<title> — Thumbnail\" sequence kept
+                                in the project), and --upload then sends the export to
                                 your Google Photos library (as `photos upload`). Spoken lines are
                                 cached in the data directory, so a rebuild synthesizes only the
                                 lines that changed. QA (on with --export, --qa without one, --no-qa
@@ -767,6 +771,9 @@ async fn cli() {
                     }
                     for file in &built.subtitle_files {
                         diag(format_args!("showcase: subtitles in {file}"));
+                    }
+                    if let Some(file) = &built.thumbnail {
+                        diag(format_args!("showcase: thumbnail in {file}"));
                     }
                     let mut out = serde_json::to_value(&built).unwrap_or_default();
                     out["youtubeChapters"] = json!(chapters);

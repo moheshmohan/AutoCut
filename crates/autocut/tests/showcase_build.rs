@@ -279,6 +279,63 @@ async fn shots_push_in_and_lower_thirds_slide_in_and_out() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_thumbnail_is_composed_and_exported_through_the_engine() {
+    let ex = demo();
+    let opts = Options { title: "Every Robot I've Met".into(), width: 640, height: 360, ..Options::default() };
+    let entries = three();
+    let built = showcase::build(&ex, &opts, &entries, &short_script(), &mut |_| {}).await.expect("the showcase builds");
+    let dir = std::env::temp_dir().join(format!("filmcraft-thumbnail-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Pepper and Spot are famous, the toy robot is not; as large as Spot, Pepper comes first
+    assert_eq!(showcase::thumbnail_frame(&entries, "robot").map(|p| p.2), Some(1));
+    let png = dir.join("robots.thumbnail.png");
+    let r = showcase::thumbnail(&ex, &opts, &entries, built.sequence, &png.to_string_lossy()).await.expect("a thumbnail");
+    assert_eq!((r["width"].as_u64(), r["height"].as_u64()), (Some(1280), Some(720)), "{r}");
+    // white (the title's capitals) and black (their outline) pixels in rows `ys` of a PNG
+    let title_pixels = |png: &std::path::Path, ys: std::ops::Range<u32>| {
+        let img = image::open(png).unwrap().to_rgb8();
+        assert_eq!(img.dimensions(), (1280, 720));
+        let (mut white, mut black) = (0, 0);
+        for y in ys {
+            for x in 100..1180 {
+                let p = img.get_pixel(x, y);
+                let l = 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64;
+                white += usize::from(l > 235.0);
+                black += usize::from(l < 20.0);
+            }
+        }
+        (white, black)
+    };
+    // the robot in the middle: the title low in the picture
+    let (white, black) = title_pixels(&png, 420..700);
+    assert!(white > 15_000 && black > 5_000, "white {white}, black {black}");
+    assert!(title_pixels(&png, 30..300).0 < 2_000, "nothing white at the top");
+    // a robot low in the frame: the title goes to the top
+    let mut low = entries.clone();
+    for e in &mut low {
+        for s in &mut e.shots {
+            if let Some(m) = s.largest.as_mut() {
+                m.center = [0.5, 0.8];
+            }
+        }
+    }
+    showcase::thumbnail(&ex, &opts, &low, built.sequence, &png.to_string_lossy()).await.expect("a thumbnail");
+    assert!(title_pixels(&png, 30..300).0 > 15_000 && title_pixels(&png, 420..700).0 < 2_000);
+    // a JPEG for YouTube (well under its 2 MB)
+    let jpg = dir.join("robots.thumbnail.jpg");
+    showcase::thumbnail(&ex, &opts, &entries, built.sequence, &jpg.to_string_lossy()).await.expect("a thumbnail");
+    let bytes = std::fs::read(&jpg).unwrap();
+    assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]) && bytes.len() > 20_000 && bytes.len() < 2_000_000, "{}", bytes.len());
+    // the show is the active sequence again, and its thumbnail sequence is in the project
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    assert_eq!(seq["name"], "Every Robot I've Met");
+    assert_eq!(seq["id"].as_u64(), built.sequence);
+    let project = ex.execute("project.inspect", json!({})).await.unwrap();
+    assert!(project.to_string().contains("Every Robot I've Met — Thumbnail"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn stabilize_and_colour_match_when_asked() {
     let ex = demo();
     // one robot filmed twice the same day (one entry, two clips), then another
