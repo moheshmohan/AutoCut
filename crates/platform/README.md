@@ -138,7 +138,8 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
 `register()` puts in front of the built-in encoders (`filmcraft_export::register_encoder`).
 
 - **Opt-in per export:** `ExportSettings::hardware_encoding` (`Off` | `Auto`; Export ▸ Video ▸
-  Hardware Encoding, `"hardwareEncoding": "off|auto"` in `file.exportMedia`), off by default. The built-in encoder's
+  Hardware Encoding, `"hardwareEncoding": "off|auto"` in `file.exportMedia`), off by default and on
+  in the single-pass Web & Social presets (High Quality, YouTube, Social Vertical). The built-in encoder's
   output is byte-identical on every machine; a hardware encoder's depends on the machine.
 - **What it takes:** H.264 in MP4 / MOV, 8-bit SDR, even picture sizes up to 8192, Baseline / Main /
   High (the level is chosen by the OS), constant or one-pass variable bitrate with the settings'

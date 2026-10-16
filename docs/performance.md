@@ -344,6 +344,70 @@ the encoder's hand-off). Only NVENC, whose encode is light on the CPU, comes clo
 encoder waits for the renderer), as expected. 1080p exports use 70-160 MB more (the second batch of 16
 frames); 4K exports use less than before because the batch is smaller (8 for SDR, 2 for HDR instead of 16).
 
+Part of that competition was not for cores but for the pool's queue: work handed to a rayon pool from
+outside its workers is only taken once they run out of their own, so the encoding thread's conversion and
+audio mix waited for most of the batch being rendered. Exports now render on a pool of their own (next
+section).
+
+## Results (a phone-footage showcase export, before → after)
+
+AutoCut's Robot Showcase: 5:18 at 1920×1080 30 fps, exported with the YouTube 1080p preset. 56 shots
+on V2 from Google Photos downloads (1080p H.264 from Android and older iPhones; iPhone HDR video served
+as VP9 profile 3, 10-bit 4:4:4 HLG BT.2020, often at 60 fps), each portrait shot also on V1 filled,
+blurred (Gaussian 60) at 45 % opacity, titles, names, years and a counter on V3-V5, 43 transitions,
+speed-changed shots with frame blending; 56 shot sounds with ducking, 25 narrations, music, SFX and a
+limiter on the Mix bus. 14-core Apple M-series Mac, 2026-10-16, release `filmcraft-cli run` of
+`file.exportMedia` between two `perf.stats` on a copy of the project, alternating before and after,
+load average 12-18 (the user's report, 9-24 fps, was the same export in the app on a busier machine).
+
+| Range | before | after | CPU before → after |
+|---|---|---|---|
+| 0-40 s (montage, blurred portrait fills, transitions) | 29.9 s, 40 fps | **7.9 s, 151 fps** | 318 → 75 s |
+| 196.9-236.9 s (VP9 HLG, frame blending, a blurred fill) | 55.6 s, 22 fps | **16.1 s, 75 fps** | 603 → 156 s |
+| whole show (9549 frames) | 264.3 s, 36 fps | **73.2 s, 130 fps** | 2688 → 622 s |
+
+What the time went to before (0-40 s, `export.stages` and `sample`): the built-in H.264 encoder (85 s of
+encode time, the export encode-bound at 12 fps under load), the encoding thread's conversion and audio
+mix starved by the render (above), 14 decoders started for every new clip, then on the render side the
+blurred fills (39 % of the CPU in box passes and transposes), the Y'CbCr → linear conversion (27 %) and,
+in HLG sections, `powf` in the HDR input transform (62 %). The fixes, in order, with the gain each
+measured (CPU time, which the machine's load barely changes):
+
+1. **Exports render on a pool of their own** (`export: render frames on a pool of the export's own`):
+   audio 12-14 s → 1.5 s and conversion 17 → 8-10 s on 0-40 s with hardware encoding.
+2. **The single-pass Web & Social presets ask for the hardware encoder** (YouTube, High Quality, Social
+   Vertical; the built-in encoder where there is none or it declines): 0-40 s 99 → 49.5 s at load 45.
+   Against a ProRes 4444 XQ render: built-in 45.30 dB mean PSNR, VideoToolbox 45.39 dB.
+3. **A large Gaussian Blur works on a reduced picture** (σ ≥ 6 working pixels, at most 8× smaller;
+   only a lone blur, no masks): one-thread CPU of a blurred portrait pair 106 → 41 ms per frame;
+   51.6 dB against the full-size blur on a test card, 52-60 dB on showcase frames.
+4. **HDR input without `powf`** (quarter-root gain tables, multiplying table lookups, table-normalised
+   16-bit samples): HLG frame 124 → 70 ms (one thread), frames within one code value.
+5. **Callers asking for a new source at once share it** (`engine: frames asking for a new source at
+   once share one`): decoded samples 3600-4200 → 1819, seeks 72-98 → 18, decode time 24.5 → 2.9 s.
+6. **Full-size Y'CbCr converts a row at a time**, bit-exact: camera frame 14.5 → 6.7 ms (one thread).
+7. **Graphic clips mix only their rectangle**, bit-exact: whole show CPU 808 → 766 s.
+8. **Scaled placement samples a row at a time**, **the hardware encoders' RGB → Y'CbCr reuses its
+   buffers**, **the 8-bit output conversion looks its table up once**: all bit-exact, a few % each.
+9. **The HDR pixel stage runs a block of pixels a stage at a time**, bit-exact: 29 → 12 ms per frame
+   for the stage; HLG frame 65 → 35.5 ms (one thread); whole show CPU 716 → 629 s.
+
+Rendered frames before/after: identical where nothing is blurred or HDR, 77-78 dB (at most one code
+value) on HLG frames, 52-60 dB on frames with a blurred fill.
+
+Benchmarks kept (ignored by default): `cargo test --release -p filmcraft-render --test perf --
+--ignored --nocapture` (frames of such a show on the CPU compositor, wall and one-thread CPU per
+frame) and, on macOS, `cargo test --release -p filmcraft-platform --test export_perf -- --ignored
+--nocapture` (8 s of it through the whole export: 53.6 fps before, 150 fps after with VideoToolbox, 81
+fps with the built-in encoder).
+
+Not done: the HLG sections are now the slowest (75 fps; software VP9 profile 3 decoding is serial per
+source, 2 samples per frame at 60 fps, and a batch's frames wait for it: decoding the next batch ahead
+would overlap it, but needs the GOP cache's per-source budget, 64 frames of 12 MB, raised to hold two
+batches); transitions with many taps (zoom blur, motion blur) are now the largest CPU cost of the
+frames they cover; GPU rendering (Auto) did not change the export's speed in a quick check and stays
+off by default.
+
 ## Results (HW3: VideoToolbox hardware H.265 (HEVC) encoding, against hardware H.264)
 
 Apple M1 (8 cores, 16 GB), 2026-10-07, single runs on an otherwise idle machine, release build. Both
