@@ -470,7 +470,7 @@ pub(crate) fn item_layer_ex(
     let motion = motion_matrix(seq, item, src_size, source_par(project, item.item), mt);
     // How many output pixels one source pixel covers → request a reduced frame when possible.
     let lin = ((motion.a * motion.a + motion.b * motion.b).sqrt()).max((motion.c * motion.c + motion.d * motion.d).sqrt());
-    let want = (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32;
+    let want = effects_scale(item, mt, (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32, opts);
     let pi = project.item(item.item)?;
     if matches!(pi.kind, ItemKind::Graphic { .. }) && !(item.has_opacity_masks() || opts.effects && item.has_standard_effects()) {
         // vectors straight to the output: no resampling, crisp at any Motion scale
@@ -679,6 +679,38 @@ pub fn interpolation_blend(item: &TrackItem, t: Tick, src_rate: filmcraft_time::
     Some((src_rate.tick_of(f + 1), frac.clamp(0.0, 1.0) as f32))
 }
 
+/// The blur (Gaussian σ in working-image pixels) a clip whose only effect is a Gaussian Blur keeps
+/// at least, see [`effects_scale`].
+pub const BLUR_WORKING_SIGMA: f64 = 6.0;
+
+/// The working scale of a clip's effects: `want` (how many output pixels one source pixel covers,
+/// at most 1) lowered for a clip whose only standard effect is a large Gaussian Blur, so the blur
+/// still spans [`BLUR_WORKING_SIGMA`] working pixels. A blurred background (a portrait shot behind
+/// itself, filled and blurred) used to decode, blur and place a 1080×1920 picture to show detail
+/// the blur takes out anyway: three box passes per axis and two transposes over 2 Mpixels per
+/// frame, the largest cost of such an export. At a fifth of the size (σ 30 → 6, decoded at a
+/// quarter) the picture is the same to the eye: 51.6 dB PSNR against the full-size blur on a test
+/// card of fine checkers and hard edges, 48 dB at the largest reduction (`blur_tests`); the box
+/// decimation and the bilinear placement add a fraction of a pixel to the blur. Only a blur over both dimensions and without
+/// a mask qualifies, with no other enabled standard effect and no opacity mask (those depend on
+/// the working size), and the scale is lowered at most eightfold.
+pub(crate) fn effects_scale(item: &TrackItem, mt: Tick, want: f32, opts: RenderOptions) -> f32 {
+    if !opts.effects || item.has_opacity_masks() {
+        return want;
+    }
+    let mut fx = item.effects.iter().filter(|e| e.enabled && e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e));
+    let (Some(blur), None) = (fx.next(), fx.next()) else { return want };
+    if !matches!(blur.effect.as_str(), "gaussian_blur" | "gaussian_blur_legacy") || !blur.masks.is_empty() || effects::choice(blur, "dimensions") != 0 {
+        return want;
+    }
+    // σ in source pixels (`gpufx`: blurriness × px_scale / 2)
+    let sigma = blur.f64_at("blurriness", mt) * 0.5;
+    if !(sigma.is_finite() && sigma > BLUR_WORKING_SIGMA) {
+        return want;
+    }
+    want.min((BLUR_WORKING_SIGMA / sigma).max(1.0 / 8.0) as f32)
+}
+
 /// Largest power-of-two box decimation that keeps at least `target_w` pixels of width.
 pub(crate) fn decimation(have_w: f32, target_w: f32) -> usize {
     let mut n = 1usize;
@@ -746,3 +778,7 @@ mod region_tests;
 #[cfg(test)]
 #[path = "par_tests.rs"]
 mod par_tests;
+
+#[cfg(test)]
+#[path = "blur_tests.rs"]
+mod blur_tests;
