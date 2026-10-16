@@ -12,6 +12,10 @@
 //!   at the top), over the same transport; `photos auth --albums` grants what they need.
 //! - [`GooglePhotos::pick`]: the whole flow — open a session, send the user to the picker,
 //!   wait (bounded) for their selection, download it, delete the session.
+//!   [`GooglePhotos::prepare_with`] lets a caller show the picker its own way (the picker tab
+//!   a browser already has open, instead of a new one).
+//! - [`sweep`]: the date searches that sweep a stretch of a big library month by month (or day
+//!   by day), for picks that type many searches into one session.
 //! - [`GooglePhotos::upload`] and [`engine_uploader`]: upload a file (into an album, too); the
 //!   latter is what hosts install as the engine's `photos.*` uploader.
 //!
@@ -32,6 +36,7 @@ pub mod albums;
 pub mod api;
 pub mod auth;
 pub mod cache;
+pub mod sweep;
 pub mod upload;
 
 use std::path::{Path, PathBuf};
@@ -213,6 +218,19 @@ impl GooglePhotos {
     /// link. Split out so a caller can interpose — e.g. let a screen agent drive the picker
     /// UI between this and [`Self::complete`] — while `pick` remains the one-call form.
     pub fn prepare(&self, opts: &PickOptions, progress: &mut dyn FnMut(&str)) -> Result<Prepared, GPhotosError> {
+        self.prepare_with(opts, &mut |uri| open_in_browser(uri).then(|| "in your browser".to_string()), progress)
+    }
+
+    /// [`Self::prepare`], with `open` showing a new session's picker link instead of a new tab of
+    /// the default browser — e.g. in the picker tab a browser already has open. It answers how
+    /// it showed it ("in your open picker tab"), or `None` when it could not (the link is then
+    /// printed for the user to open).
+    pub fn prepare_with(
+        &self,
+        opts: &PickOptions,
+        open: &mut dyn FnMut(&str) -> Option<String>,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<Prepared, GPhotosError> {
         let session = match &opts.resume {
             Some(id) => {
                 let s = self.session(id)?;
@@ -224,10 +242,9 @@ impl GooglePhotos {
             None => {
                 let s = self.create_session(opts.max_items)?;
                 let uri = s.autoclose_uri();
-                if opts.open_browser && open_in_browser(&uri) {
-                    progress(&format!("opened Google Photos in your browser — choose photos/videos and press Done ({uri})"));
-                } else {
-                    progress(&format!("open this link, choose photos/videos and press Done: {uri}"));
+                match opts.open_browser.then(|| open(&uri)).flatten() {
+                    Some(how) => progress(&format!("opened Google Photos {how} — choose photos/videos and press Done ({uri})")),
+                    None => progress(&format!("open this link, choose photos/videos and press Done: {uri}")),
                 }
                 s
             }
