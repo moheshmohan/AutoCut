@@ -194,6 +194,49 @@ fn export_wav_waits_for_job() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `showcase --qa` (no export): the built show is checked and the report is in the output; the
+/// narration cache in `--data-dir` serves the second build; `--no-qa` skips the check. Offline:
+/// the script is given and the model host is a closed local port.
+#[test]
+fn showcase_qa_and_the_narration_cache() {
+    let dir = std::env::temp_dir().join(format!("fc-cli-showcase-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = |item: u64, label: &str, unix: i64| {
+        serde_json::json!({"item": item, "name": format!("{item}.mp4"), "seconds": 14.0, "created": null, "unix": unix, "present": true, "coverage": 1.0,
+            "label": label, "kind": "humanoid", "description": label, "best": 7.0, "frames": [{"seconds": 7.0, "present": true, "area": 0.4, "center": [0.5, 0.5]}]})
+    };
+    let report = dir.join("report.json");
+    std::fs::write(
+        &report,
+        serde_json::json!({"subject": "robot", "clips": [clip(5, "Pepper humanoid robot", 1_600_000_000), clip(6, "red toy robot", 1_665_841_668)]})
+            .to_string(),
+    )
+    .unwrap();
+    let script = dir.join("script.json");
+    std::fs::write(&script, r#"{"intro": "Every robot, in order.", "lines": ["The first one.", "The second one."], "outro": "Thanks for watching."}"#).unwrap();
+    let data = dir.join("data");
+    let run = |extra: &[&str]| {
+        let mut args = vec!["--demo", "--compact", "--data-dir", data.to_str().unwrap(), "showcase", "--report", report.to_str().unwrap()];
+        args.extend(["--script-in", script.to_str().unwrap(), "--voice", "basic-male"]);
+        args.extend(extra);
+        let o = Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(&args).env("AUTOCUT_OLLAMA_HOST", "http://127.0.0.1:9").output().unwrap();
+        (json_out(&o), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+    let (v, err) = run(&["--qa"]);
+    assert_eq!(v["narration_lines"], 4, "{v}");
+    assert_eq!(v["narration_cached"], 0);
+    assert_eq!(v["qa"]["errors"], 0, "{}", v["qa"]);
+    assert!(v["qa"]["checks"].as_array().unwrap().iter().any(|c| c["name"] == "subject" && c["status"] == "skipped"), "{}", v["qa"]);
+    assert!(v["qa"]["loudness"]["integratedLufs"].is_number());
+    assert!(err.contains("showcase: QA: 0 error(s)"), "{err}");
+    // the same build again: every line from the cache, and no QA when asked not to
+    let (v, _) = run(&["--no-qa"]);
+    assert_eq!(v["narration_cached"], 4, "{v}");
+    assert!(v.get("qa").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `export --preset`: a built-in preset by name (dash or en dash), a custom range, a user preset
 /// from `--data-dir`, `--list-presets`, `--queue`, and a clean failure for an unknown preset.
 #[test]

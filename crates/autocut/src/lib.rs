@@ -24,6 +24,7 @@ pub mod intent;
 pub mod llm;
 pub mod ollama;
 pub mod planner;
+pub mod qa;
 pub mod runner;
 pub mod showcase;
 pub mod validate;

@@ -466,10 +466,33 @@ pub struct Built {
     pub seconds: f64,
     pub entries: usize,
     pub narration_lines: usize,
+    /// Narration lines taken from the narration cache (not synthesized again).
+    pub narration_cached: usize,
     /// Where each part starts: the intro, each year, the outro.
     pub chapters: Vec<Chapter>,
     pub notes: Vec<String>,
     pub export: Option<Value>,
+    /// Where each entry and its shots landed on the timeline (what [`crate::qa`] checks).
+    pub layout: Vec<PlacedEntry>,
+}
+
+/// An entry as built: its span on the timeline and its shots, seconds.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlacedEntry {
+    pub number: usize,
+    pub label: String,
+    pub start: f64,
+    pub end: f64,
+    pub shots: Vec<PlacedShot>,
+}
+
+/// A shot as built: its picture clip (on V2) and media item, and where it plays.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlacedShot {
+    pub clip: u64,
+    pub item: u64,
+    pub start: f64,
+    pub end: f64,
 }
 
 /// A chapter of the video.
@@ -680,12 +703,23 @@ async fn title(ex: &dyn Executor, track: usize, fps: f64, text: &str, t: f64, du
     Ok(clip)
 }
 
+/// The narration clips placed, and how many lines came from the narration cache (nothing was
+/// synthesized for them: a rebuild re-reads only the lines that changed).
+#[derive(Default)]
+struct Narrations {
+    clips: Vec<u64>,
+    cached: usize,
+}
+
 /// Narrate `text` at `t` on the voice track; its length in seconds (0 without a voice).
-async fn narrate(ex: &dyn Executor, tr: &Tracks, voice: Option<&str>, text: &str, t: f64, narrations: &mut Vec<u64>) -> Result<f64, AutoCutError> {
+async fn narrate(ex: &dyn Executor, tr: &Tracks, voice: Option<&str>, text: &str, t: f64, narrations: &mut Narrations) -> Result<f64, AutoCutError> {
     let Some(voice) = voice else { return Ok(0.0) };
     let r = run(ex, "tts.create", json!({"text": text, "voice": voice, "time": ticks(t), "track": tr.voice})).await?;
     if let Some(c) = r["clip"].as_u64() {
-        narrations.push(c);
+        narrations.clips.push(c);
+    }
+    if r["cached"].as_bool() == Some(true) {
+        narrations.cached += 1;
     }
     Ok(r["duration"].as_f64().map(|d| d / TPS).unwrap_or(0.0))
 }
@@ -798,7 +832,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let (w, h) = (f64::from(opts.width), f64::from(opts.height));
     let frame_aspect = w / h.max(1.0);
     let voice = opts.voice.as_deref();
-    let mut narrations: Vec<u64> = Vec::new();
+    let mut narrations = Narrations::default();
     let mut mix = Mix::default();
     let mut fg_firsts: Vec<(u64, Option<u64>)> = Vec::new();
     let title_props = json!({"font_style": "Bold", "align": "center", "stroke": true, "stroke_width": 6, "shadow": true});
@@ -876,6 +910,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let slow = if footage + 0.05 < must { (footage / must).clamp(0.5, 1.0) } else { 1.0 };
         let mut at = t;
         let mut firsts = None;
+        let mut shots = Vec::new();
         for (i, (s, src, len)) in wins.iter().enumerate() {
             let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, *len, frame_aspect).await?;
             mix.sounds.extend(audio);
@@ -898,10 +933,12 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 // between shots (or stretches of one clip) of an entry: a quick dissolve
                 run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "in", "effect": "cross_dissolve", "frames": 8})).await.ok();
             }
+            shots.push(PlacedShot { clip: fg, item: s.item, start: on_frame(at, tr.fps), end: shot_end });
             // a slowed shot can end between frames: the next starts on the following frame
             at = (shot_end * tr.fps - 1e-6).ceil() / tr.fps;
         }
         let entry_end = on_frame(at.max(t + 2.0), tr.fps);
+        built.layout.push(PlacedEntry { number: e.number, label: e.label.clone(), start: t, end: entry_end, shots });
         if let Some((fg, bg)) = firsts {
             fg_firsts.push((fg, bg));
             // (the first entry follows the intro montage)
@@ -1007,10 +1044,14 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             .await
             .ok();
     }
+    if !narrations.clips.is_empty() {
+        progress(&format!("{} narration lines, {} from the narration cache", narrations.clips.len(), narrations.cached));
+    }
     // ---- the mix
     progress("mixing");
-    mix_down(ex, &mix, &narrations, music, &mut built.notes).await;
-    built.narration_lines = narrations.len();
+    mix_down(ex, &mix, &narrations.clips, music, &mut built.notes).await;
+    built.narration_lines = narrations.clips.len();
+    built.narration_cached = narrations.cached;
     if let Some(path) = &opts.export {
         progress("exporting (YouTube 1080p)");
         built.export = Some(run(ex, "file.exportMedia", json!({"path": path, "preset": "YouTube 1080p Full HD", "wait": true})).await?);

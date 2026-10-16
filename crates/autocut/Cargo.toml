@@ -12,6 +12,9 @@ workspace = true
 [dependencies]
 filmcraft-engine = { workspace = true }
 filmcraft-time = { workspace = true }
+# showcase QA: reading the exported mix and metering it
+filmcraft-media = { workspace = true }
+filmcraft-audio-dsp = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

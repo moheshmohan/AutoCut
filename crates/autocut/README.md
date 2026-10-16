@@ -54,7 +54,7 @@ Transcription over the bridge can outlast the app's 60 s reply limit: a reply ti
 `transcript.generate` means "still transcribing", and the runner polls for the words (up to 30
 minutes) instead of planning without them.
 
-## Showcases: analyse, then build
+## Showcases: analyse, build, check
 
 A showcase is "every robot I have filmed, in order": many clips, one narrated, counted video.
 
@@ -115,12 +115,33 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    - optionally the YouTube 1080p export, with `<out>.chapters.txt` (intro, each year, outro —
      YouTube's rules: from 0:00, at least three, none under 10 s) for the description.
 
+   Narration goes through `tts.create`, which looks in the engine's narration cache
+   (`<data dir>/narration-cache`, see `crates/tts/README.md`) before synthesizing: a rebuild with
+   the same voice reads only the lines that changed (`narration_cached` in the output counts
+   the rest) — with a cloned voice at about 2.6× real time that is minutes per rebuild.
+3. **`qa`** (`qa.rs`): the built show is checked by machine — the defects a review by hand found
+   in a real build. On by default with `--export` (`--qa` without one, `--no-qa` to skip); the
+   findings (time, severity, entry, clip, message) go to `<out>.qa.json`, a contact sheet (one
+   rendered frame per entry under its number; the band red for an entry with an error, amber
+   for a warning) to `<out>.qa.png`, and both under `qa` in the output.
+
+   | check | finds |
+   |---|---|
+   | `joins` (`sequence.inspect`) | on V2 (the shots): gaps of a frame or more, gaps holding a frame start (that frame is black), overlaps — errors; clips that do not quite touch (a slowed shot ending between frames) — warnings; on A1 (the shots' sound): neighbours that do not touch, so the fade-in meets silence instead of a crossfade — warnings; time with no clip on any video track — errors (a picture ending before the sound: info) |
+   | `black` (`Executor::render`) | frames whose picture is black or nearly (92 % of the frame darker than 5 % luma, so the counter or a lower third over black still counts), sampled every 2 s, at each shot's first frame and at the first frame after it, outside dip-to-black transitions — errors |
+   | `mix` (`file.exportMedia` to a temporary 32-bit float WAV, metered with `filmcraft-audio-dsp`'s BS.1770 `LoudnessMeter`) | integrated loudness outside −16…−14 LUFS (±0.5 LU) — warning; true peak above −1 dBTP — warning; above 0 dBTP or any sample at full scale — error (clipping, with the time of the first); the median short-term loudness (3 s windows wholly inside narration clips on A2 vs wholly between them; 400 ms windows when lines or pauses are too short) — the voice less than 4 dB louder: warning, not louder at all: error |
+   | `subject` (`AUTOCUT_ANALYSIS_MODEL`) | the middle frame of every shot, rendered and grounded with the analysis' prompt (`analyze::ground_prompt`) — a shot where the subject is not found: warning; without a reachable model the check is recorded as skipped (model unavailable) |
+
+   QA never edits the project and never fails the build: a check that cannot run (no frames
+   from a bridge without the UI tools, an export that fails) is recorded as skipped.
+
 ```
 filmcraft-cli analyze robot --project p.fcproj --out robots.json
 filmcraft-cli showcase --report robots.json --title "Every Robot I've Met" --voice clone:me \
     --plan --script-out plan.json            # review the entries and the script…
 filmcraft-cli showcase --report robots.json --script-in plan.json --voice clone:me \
     --project p.fcproj --save --export ~/Movies/AutoCut/robots.mp4
+                                             # …and robots.qa.json / robots.qa.png beside it
 ```
 
 A reviewed plan may hold `entries` alone (drop, merge or relabel robots, fix a shot's `best`
@@ -151,6 +172,12 @@ Caption styles: `add_captions` takes `style: tiktok | bold | clean | default` an
 ## Tests
 
 `cargo test -p filmcraft-autocut` is fully offline: scripted models (`llm::FixedModel`), the demo
-project headlessly, crafted transcripts through `transcript.set`. Live checks
+project headlessly, crafted transcripts through `transcript.set`. Showcase QA
+(`tests/showcase_qa.rs`): a deliberately broken sequence on the demo media (a half-second gap,
+a black slate, a tone pushed 30 dB over full scale between two narration lines) gets each
+finding (the gap, the hole on every track, black in the gap and on the slate, clipping, the
+voice quieter than between its lines); clean showcases, with and without narration, get no
+errors (and the voice at least 4 dB on top); a scripted grounding model flags exactly the shot
+it does not find the subject in. Live checks
 (`tests/live_models.rs`) are opt-in: `AUTOCUT_LIVE=1` (the classifier, the VLM, and a complex
 prompt handing off with its document).

@@ -285,7 +285,12 @@ pub fn frame_fact(seconds: f64, reply: &Value, fw: f64, fh: f64) -> FrameFact {
     FrameFact { seconds, present: area >= MIN_AREA, area, center: [(x1 + x2) / 2.0, (y1 + y2) / 2.0] }
 }
 
-fn ground_prompt(subject: &str) -> String {
+/// The system prompt grounding requests are sent with.
+pub const GROUND_SYSTEM: &str = "You locate objects in photos for a video editor.";
+
+/// The user prompt that asks a grounding model where the `subject` is (a box, or not present);
+/// read the reply with [`frame_fact`]. Also used by [`crate::qa`] on rendered frames.
+pub fn ground_prompt(subject: &str) -> String {
     format!(
         "Is there a {subject} in this image? Answer with JSON only: {{\"present\": true|false, \"bbox_2d\": [x1, y1, x2, y2] of the most prominent {subject} in absolute pixels, or null}}. People, statues, costumes and armour of fictional characters (e.g. Iron Man suits), toys shaped like people and machines that are not a {subject} do not count."
     )
@@ -591,7 +596,7 @@ async fn analyze_clip(
         let Some(png) = r["pngBase64"].as_str().and_then(crate::b64_decode) else { continue };
         let (w, h) = (r["width"].as_u64().unwrap_or(1) as u32, r["height"].as_u64().unwrap_or(1) as u32);
         let (fw, fh) = model_frame(w, h);
-        let reply = model.complete_json("You locate objects in photos for a video editor.", &ground_prompt(subject), std::slice::from_ref(&png)).await;
+        let reply = model.complete_json(GROUND_SYSTEM, &ground_prompt(subject), std::slice::from_ref(&png)).await;
         let f = match reply {
             Ok(v) => frame_fact(t, &v, fw, fh),
             Err(e) => {

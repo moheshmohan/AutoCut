@@ -1792,7 +1792,9 @@ name = "filmcraft-autocut"
 version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
+ "filmcraft-audio-dsp",
  "filmcraft-engine",
+ "filmcraft-media",
  "filmcraft-time",
  "image",
  "rustls",

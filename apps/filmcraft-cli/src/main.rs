@@ -96,7 +96,7 @@ SUBCOMMANDS
                                 --image-sequence <media> is the first numbered still of a sequence
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
          [--bpm 100] [--min-coverage 0.3] [--script-in s.json] [--script-out s.json] [--plan]
-         [--export out.mp4 [--upload]]
+         [--export out.mp4 [--upload]] [--qa | --no-qa]
                                 a narrated 16:9 showcase of every clip the analysis found, oldest
                                 first: title, a counter, name/date lower thirds, year cards,
                                 dramatic transitions with whooshes, a generated music bed ducked
@@ -105,7 +105,15 @@ SUBCOMMANDS
                                 --script-in takes a reviewed plan (entries and script, or entries
                                 alone for the model to write); with --export, YouTube chapters
                                 go to <out>.chapters.txt, and --upload then sends the export to
-                                your Google Photos library (as `photos upload`)
+                                your Google Photos library (as `photos upload`). Spoken lines are
+                                cached in the data directory, so a rebuild synthesizes only the
+                                lines that changed. QA (on with --export, --qa without one, --no-qa
+                                to skip) checks the built show: gaps and overlaps between shots and
+                                sounds, black frames outside dips, loudness (-16..-14 LUFS), true
+                                peak (<= -1 dBTP), the voice >= 4 dB above what plays between its
+                                lines and, when AUTOCUT_ANALYSIS_MODEL answers, the subject in
+                                every shot; findings in <out>.qa.json and a numbered contact
+                                sheet in <out>.qa.png (and under `qa` in the output)
   analyze '<subject>' [--items 1,2] [--frames N] [--relabel earlier.json] [--compare 150]
          [--out report.json]
                                 which video items show <subject> (e.g. robot): a local vision model
@@ -257,6 +265,18 @@ impl Backend {
 fn print(a: &Args, v: &Value) {
     let s = if a.flag("--compact") { serde_json::to_string(v) } else { serde_json::to_string_pretty(v) };
     outln!("{}", s.unwrap_or_default());
+}
+
+/// QA of a built showcase (`showcase --qa`, on with `--export`): `model` grounds the subject.
+async fn showcase_qa(
+    ex: &dyn filmcraft_autocut::Executor,
+    opts: &filmcraft_autocut::showcase::Options,
+    built: &filmcraft_autocut::showcase::Built,
+    model: Option<&filmcraft_autocut::ollama::Ollama>,
+    progress: &mut dyn FnMut(&str),
+) -> filmcraft_autocut::qa::QaReport {
+    let q = filmcraft_autocut::qa::Options::for_showcase(opts, built);
+    filmcraft_autocut::qa::check(ex, &q, model.map(|m| m as &dyn filmcraft_autocut::llm::ChatModel), progress).await
 }
 
 /// Export format from the output file's extension.
@@ -658,23 +678,45 @@ async fn cli() {
                 print(&a, &plan);
                 return;
             }
+            // QA of the built show: on with an export, `--qa` without one, `--no-qa` never
+            let qa_on = !a.flag("--no-qa") && (a.flag("--qa") || opts.export.is_some());
+            let qa_model = if qa_on {
+                let m = filmcraft_autocut::ollama::Ollama::new(&cfg.ollama_host, &cfg.analysis_model, cfg.http_timeout);
+                if m.available().unwrap_or(false) {
+                    Some(m)
+                } else {
+                    diag(format_args!("showcase: QA: {} is not reachable; the subject check is skipped", cfg.analysis_model));
+                    None
+                }
+            } else {
+                None
+            };
             let mut b = Backend::open(&a);
             let mut progress = |l: &str| diag(format_args!("showcase: {l}"));
-            let result = match &mut b {
+            let (result, qa) = match &mut b {
                 Backend::Local(s) => {
                     let session = std::mem::take(s);
                     let ex = filmcraft_autocut::SessionExecutor::from(*session);
                     let r = filmcraft_autocut::showcase::build(&ex, &opts, &entries, &script, &mut progress).await;
+                    let qa = match &r {
+                        Ok(built) if qa_on => Some(showcase_qa(&ex, &opts, built, qa_model.as_ref(), &mut progress).await),
+                        _ => None,
+                    };
                     if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
                         **s = inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
                     }
-                    r
+                    (r, qa)
                 }
                 Backend::Bridge(_) => {
                     let addr = a.opt("--bridge").unwrap_or_default();
                     let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
                     let ex = filmcraft_automation::AutocutExecutor::bridge(client);
-                    filmcraft_autocut::showcase::build(&ex, &opts, &entries, &script, &mut progress).await
+                    let r = filmcraft_autocut::showcase::build(&ex, &opts, &entries, &script, &mut progress).await;
+                    let qa = match &r {
+                        Ok(built) if qa_on => Some(showcase_qa(&ex, &opts, built, qa_model.as_ref(), &mut progress).await),
+                        _ => None,
+                    };
+                    (r, qa)
                 }
             };
             match result {
@@ -695,6 +737,25 @@ async fn cli() {
                     }
                     let mut out = serde_json::to_value(&built).unwrap_or_default();
                     out["youtubeChapters"] = json!(chapters);
+                    if let Some(mut report) = qa {
+                        diag(format_args!("showcase: QA: {}", report.summary()));
+                        for f in report.findings.iter().filter(|f| f.severity >= filmcraft_autocut::qa::Severity::Warning).take(40) {
+                            diag(format_args!("showcase: QA {:?} at {:.2}s ({}): {}", f.severity, f.seconds, f.check, f.message));
+                        }
+                        // the report and the contact sheet next to the export
+                        if let Some(path) = &opts.export {
+                            match filmcraft_autocut::qa::write_next_to(&mut report, std::path::Path::new(path)) {
+                                Ok((j, png)) => {
+                                    diag(format_args!("showcase: QA report in {}", j.display()));
+                                    if let Some(p) = png {
+                                        diag(format_args!("showcase: contact sheet in {}", p.display()));
+                                    }
+                                }
+                                Err(e) => diag(format_args!("showcase: QA: {e}")),
+                            }
+                        }
+                        out["qa"] = serde_json::to_value(&report).unwrap_or_default();
+                    }
                     // --upload: the finished export to Google Photos, titled like the video
                     let mut upload_failed = None;
                     if upload && let Some(requested) = &opts.export {
