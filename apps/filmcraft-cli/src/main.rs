@@ -216,19 +216,36 @@ SUBCOMMANDS
                                  uploaded, and only into albums it made)
   photos albums [--json]         the albums FilmCraft made: title, item count, link (Google shows
                                  apps no other albums, and not the items you add to them by hand)
-  photos pick [--auto query [--all] | --album <title> [--videos-only]] [--since YYYY-MM-DD]
-              [--max-items n] [--timeout secs] [--session id] [--no-browser]
+  photos pick [--auto query]... [--queries file] [--sweep FROM..TO [--month-days D-D]] [--all]
+              [--album <title> [--videos-only]] [--since YYYY-MM-DD] [--max-items n]
+              [--timeout secs] [--session id] [--no-browser]
                                  open the Google Photos picker in the browser, wait (default
                                  600 s, at most 3600) for your selection, download it into the
                                  cache and import it (a file the project already holds is
                                  reused, not imported twice); --demo/--project/--bridge choose
                                  the target. A timed-out wait prints the session id: --session
-                                 resumes it. With --auto <query>, a local vision agent
-                                 (Qwen2.5-VL via Ollama) drives the picker itself: it types
-                                 the query into the picker's search, selects matching videos
-                                 and presses Done (needs `ollama pull qwen2.5vl:7b`, Screen
-                                 Recording and Accessibility for this terminal). --all selects
-                                 every search result (first tile, then Shift+click the last);
+                                 resumes it. The picker opens in the picker tab Chrome already
+                                 has open when there is one (macOS), not in yet another tab.
+                                 With --auto <query>, a local vision agent (Qwen2.5-VL via
+                                 Ollama) drives the picker itself: it types the query into the
+                                 picker's search, selects matching videos and presses Done
+                                 (needs `ollama pull qwen2.5vl:7b`, Screen Recording and
+                                 Accessibility for this terminal), then closes the picker tab
+                                 (answering Chrome's \"Leave site?\" with Leave); a session it
+                                 gave up on is deleted. --all selects every search result (a
+                                 date search by the picker's date groups, else first tile, then
+                                 Shift+click the last). Many searches — --auto repeated,
+                                 --queries <file> (one per line, # comments), or --sweep
+                                 2017-10..2025-12 (one \"videos <Month> <Year>\" search per
+                                 month; --month-days 10-21 makes it one per day of those days
+                                 in each month; a sweep implies --all) — go into ONE picking
+                                 session and ONE tab: the agent clears the search box and types
+                                 each in turn, the selection grows, Done is pressed once and
+                                 everything downloads in one batch. A search with no results is
+                                 skipped. Each session takes up to 20 searches and --max-items
+                                 items (default and most 2000); searches that would pass it go
+                                 to the next session, and those still left are written to
+                                 <data dir>/google-photos/left-searches.txt for a next run.
                                  --since skips items created before that date (not downloaded).
                                  With --album <title> the same agent picks a whole album
                                  instead — the seed you curate in Google Photos: it opens the
@@ -237,6 +254,9 @@ SUBCOMMANDS
                                  matching album selects nothing. --videos-only keeps only its
                                  videos. Items you add to an album by hand are reachable only
                                  this way (Google shows apps only what they uploaded)
+  photos tidy                    close every Google Photos picker tab left open in Chrome (and
+                                 nothing else), answering \"Leave site?\" with Leave when the
+                                 grounding model is in Ollama to see it (macOS)
   photos cached [--json]         list the Google Photos originals already downloaded
   photos add <mediaItemId>...    import already-downloaded items again (ids from `photos cached`)
   bench-decode <media> [--frames N]
@@ -422,6 +442,87 @@ fn absolute(path: &str) -> String {
 
 /// `flag <title|id>` (`--album`, `--upload-album`): absent, or a usable album title (a usage
 /// error otherwise).
+/// A finished pick, with what its sessions reported when it took many searches.
+struct Picks {
+    picked: filmcraft_gphotos::Picked,
+    /// `sessions`, `left`, `stopped` of a many-search pick (empty for one session).
+    report: Value,
+    /// A many-search pick stopped early.
+    stopped: bool,
+}
+
+/// The files of a pick to import, what to print of each item (no short-lived download link),
+/// and how many came from the cache.
+fn picked_json(picked: &filmcraft_gphotos::Picked) -> (Vec<String>, Vec<Value>, usize) {
+    let paths = picked.fetched.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
+    let items = picked
+        .fetched
+        .iter()
+        .map(|f| {
+            let mut v = f.item.summary();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("path".into(), json!(f.path.to_string_lossy()));
+            }
+            v
+        })
+        .collect();
+    (paths, items, picked.fetched.iter().filter(|f| f.was_cached).count())
+}
+
+/// The longest `--queries` file read.
+const MAX_QUERIES_FILE: u64 = 1 << 20;
+
+/// The searches of `photos pick`: every `--auto` in order, then the lines of `--queries <file>`
+/// (blank lines and `#` comments skipped), then the months of `--sweep` (or with
+/// `--month-days` their days) — cleaned: no blanks, no repeats in any case.
+fn pick_searches_from(a: &Args) -> Result<Vec<String>, String> {
+    let mut qs: Vec<String> = a.all("--auto").into_iter().map(str::to_string).collect();
+    if let Some(path) = a.opt("--queries") {
+        qs.extend(read_queries(path)?);
+    }
+    match (a.opt("--sweep"), a.opt("--month-days")) {
+        (Some(spec), days) => {
+            let (from, to) = filmcraft_gphotos::sweep::parse_months(spec).map_err(|e| format!("--sweep: {e}"))?;
+            let days = days.map(filmcraft_gphotos::sweep::parse_days).transpose().map_err(|e| format!("--month-days: {e}"))?;
+            qs.extend(filmcraft_gphotos::sweep::queries(from, to, days).map_err(|e| format!("--sweep: {e}"))?);
+        }
+        (None, Some(_)) => return Err("--month-days goes with --sweep".into()),
+        (None, None) => {}
+    }
+    if qs.len() > filmcraft_gphotos::sweep::MAX_QUERIES {
+        return Err(format!("{} searches is more than one run takes ({}); split them", qs.len(), filmcraft_gphotos::sweep::MAX_QUERIES));
+    }
+    Ok(filmcraft_screenagent::agent::clean_queries(qs))
+}
+
+/// One search per line of `path`; blank lines and `#` comments are skipped.
+fn read_queries(path: &str) -> Result<Vec<String>, String> {
+    let size = std::fs::metadata(path).map_err(|e| format!("--queries {path}: {e}"))?.len();
+    if size > MAX_QUERIES_FILE {
+        return Err(format!("--queries {path}: {size} bytes is more than a list of searches ({MAX_QUERIES_FILE} at most)"));
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| format!("--queries {path}: {e}"))?;
+    Ok(text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_string).collect())
+}
+
+/// `photos tidy`: close the Google Photos picker tabs left open in Chrome, answering "Leave
+/// site?" with Leave when the grounding model is there to see it.
+#[cfg(target_os = "macos")]
+fn tidy_picker_tabs() -> Result<filmcraft_screenagent::tabs::Tidied, String> {
+    let eyes = filmcraft_screenagent::ground::QwenGrounder::from_config(&filmcraft_screenagent::Config::from_env());
+    let have_eyes = eyes.model_available().unwrap_or(false);
+    let mut hands = filmcraft_screenagent::act::MacActor::new(filmcraft_screenagent::tabs::CHROME, Box::new(filmcraft_screenagent::capture::OsShell));
+    let mut pause = |ms: u64| std::thread::sleep(std::time::Duration::from_millis(ms.min(10_000)));
+    let leave = have_eyes.then_some(&eyes as &dyn filmcraft_screenagent::ground::Ground);
+    filmcraft_screenagent::tabs::tidy(&filmcraft_screenagent::capture::OsShell, &mut hands, leave, &mut pause, &mut |l| diag(format_args!("{l}")))
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tidy_picker_tabs() -> Result<filmcraft_screenagent::tabs::Tidied, String> {
+    Err("closing picker tabs works with Chrome on macOS; close Google Photos picker tabs in your browser".into())
+}
+
 fn album_opt(a: &Args, cmd: &str, flag: &str) -> Option<String> {
     if !a.flag(flag) {
         return None;
@@ -667,7 +768,7 @@ async fn cli() {
             outln!("½-res linear conversion {w}x{h}: {:.1} ms", t1.elapsed().as_secs_f64() * 1000.0);
         }
         "photos" => {
-            let what = a.pos(1).unwrap_or_else(|| usage("photos auth | pick | upload <file> | album create|add | albums | cached | add <id>..."));
+            let what = a.pos(1).unwrap_or_else(|| usage("photos auth | pick | tidy | upload <file> | album create|add | albums | cached | add <id>..."));
             match what {
                 "auth" => {
                     let dir = filmcraft_gphotos::data_dir();
@@ -706,86 +807,158 @@ async fn cli() {
                     let parse_num = |k: &str| -> Option<u64> {
                         a.opt(k).map(|v| v.parse::<u64>().unwrap_or_else(|_| usage(format!("photos pick: {k} wants a whole number, not `{v}`"))))
                     };
-                    let auto = a.opt("--auto").map(str::to_string);
+                    // --auto (repeatable), --queries <file>, --sweep: the searches the agent types,
+                    // many of them into one picking session and one tab
+                    let searches = pick_searches_from(&a).unwrap_or_else(|e| usage(format!("photos pick: {e}")));
+                    let searching = a.flag("--auto") || a.opt("--queries").is_some() || a.opt("--sweep").is_some();
+                    let sweep = a.opt("--sweep").is_some();
                     // --album: the agent opens that album in the picker and picks all of it
                     let album = album_opt(&a, "photos pick", "--album");
-                    if auto.is_some() && album.is_some() {
-                        usage("photos pick: --auto searches, --album picks a whole album; use one of them");
+                    if searching && album.is_some() {
+                        usage("photos pick: --auto/--queries/--sweep search, --album picks a whole album; use one of them");
                     }
-                    if (auto.is_some() || album.is_some()) && a.flag("--no-browser") {
-                        usage("photos pick: --auto and --album drive the picker in a browser themselves; drop --no-browser");
+                    if (searching || album.is_some()) && a.flag("--no-browser") {
+                        usage("photos pick: --auto, --queries, --sweep and --album drive the picker in a browser themselves; drop --no-browser");
                     }
-                    let select_all = a.flag("--all");
-                    if select_all && auto.is_none() && album.is_none() {
+                    // a sweep takes every result of each month (or day)
+                    let select_all = a.flag("--all") || sweep;
+                    if a.flag("--all") && !searching && album.is_none() {
                         usage("photos pick: --all is for the --auto agent (by hand, Shift+click the last tile)");
                     }
                     let videos_only = a.flag("--videos-only");
                     if videos_only && album.is_none() {
                         usage("photos pick: --videos-only is for --album (--auto always picks videos)");
                     }
-                    let agent_drives = auto.is_some() || album.is_some();
+                    let many = searches.len() > 1 || sweep;
+                    if many && a.opt("--session").is_some() {
+                        usage("photos pick: --session resumes one pick; it does not go with many searches");
+                    }
+                    if searching && searches.is_empty() && (a.opt("--queries").is_some() || sweep) {
+                        usage("photos pick: no searches to run (the --queries file is empty?)");
+                    }
+                    let agent_drives = searching || album.is_some();
                     let since = a.opt("--since").map(str::to_string);
                     if let Some(d) = since.as_deref().filter(|d| !filmcraft_gphotos::is_day(d)) {
                         usage(format!("photos pick: --since wants a date like 2020-01-01, not `{d}`"));
                     }
+                    let max_items = parse_num("--max-items").map(|n| u32::try_from(n).unwrap_or(u32::MAX));
                     let opts = filmcraft_gphotos::PickOptions {
-                        max_items: parse_num("--max-items").map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+                        max_items,
                         wait: std::time::Duration::from_secs(parse_num("--timeout").unwrap_or(if agent_drives { 900 } else { 600 })),
                         resume: a.opt("--session").map(str::to_string),
                         open_browser: !a.flag("--no-browser"),
                         since,
                         videos_only,
                     };
+                    // what --max-items means to the agent: the session's item cap when it selects
+                    // every result, else how many tiles it clicks
+                    let agent_items = max_items.unwrap_or(if select_all { filmcraft_gphotos::api::MAX_PICK } else { 6 });
                     let album_title = album.clone();
                     // the arguments are fine: now the sign-in
                     let gp = filmcraft_gphotos::GooglePhotos::configured().unwrap_or_else(|e| fail(format!("photos: {e}")));
                     // the import target first, so a bad --project/--bridge fails before the user picks
                     let mut b = Backend::open(&a);
-                    // blocking HTTP and sleeps: keep them off the async runtime
-                    let driven = tokio::task::spawn_blocking(move || {
-                        // with --auto, a local vision agent (Qwen2.5-VL via Ollama) drives the
-                        // picker: it types the query, clicks matching video tiles, presses Done;
-                        // with --album it opens that album and selects all of it instead
-                        let request = match (auto, album) {
-                            (Some(query), _) => Some(filmcraft_screenagent::agent::Request {
-                                queries: vec![query],
-                                max_items: opts.max_items.unwrap_or(6),
-                                select_all,
-                                album: None,
-                                videos_only: true,
-                            }),
-                            (None, Some(title)) => Some(filmcraft_screenagent::agent::Request {
-                                max_items: opts.max_items.unwrap_or(filmcraft_gphotos::api::MAX_PICK),
-                                ..filmcraft_automation::photos::album_request(&title, videos_only)
-                            }),
-                            (None, None) => None,
+                    let picked = if many {
+                        let req = filmcraft_automation::photos::Searches {
+                            queries: searches,
+                            select_all,
+                            max_items: agent_items,
+                            per_session: filmcraft_automation::photos::PER_SESSION,
                         };
-                        filmcraft_automation::photos::pick_driven(&gp, &opts, request, &mut |line| diag(format_args!("{line}")), &|| false)
-                    })
-                    .await
-                    .unwrap_or_else(|e| fail(format!("photos pick: {e}")))
-                    .unwrap_or_else(|e| fail(format!("photos pick: {e}")));
-                    match &driven.agent {
-                        Some(Ok(s)) => diag(format_args!("photos pick: autopick: {}", s.note)),
-                        Some(Err(e)) => diag(format_args!("photos pick: the autopick agent reported: {e}")),
-                        None => {}
-                    }
-                    let nothing_to_pick = driven.nothing_to_pick();
-                    let picked = match driven.outcome {
-                        filmcraft_gphotos::PickOutcome::Done(p) => p,
-                        filmcraft_gphotos::PickOutcome::Pending(_) if nothing_to_pick => match &album_title {
-                            Some(t) => fail(format!("photos pick: the album `{t}` had nothing to pick")),
-                            None => fail("photos pick: the search matched nothing to pick"),
-                        },
-                        filmcraft_gphotos::PickOutcome::Pending(s) => {
-                            outln!("{}", json!({"status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time}));
-                            fail(format!("photos pick: no selection yet; finish in the browser, then run `photos pick --session {}`", s.id));
+                        diag(format_args!(
+                            "photos pick: {} search(es), up to {} per picking session and {} item(s) per session",
+                            req.queries.len(),
+                            req.per_session,
+                            req.max_items
+                        ));
+                        let swept = tokio::task::spawn_blocking(move || {
+                            filmcraft_automation::photos::pick_searches(&gp, &opts, &req, &mut |line| diag(format_args!("{line}")), &|| false)
+                        })
+                        .await
+                        .unwrap_or_else(|e| fail(format!("photos pick: {e}")));
+                        for (k, s) in swept.sessions.iter().enumerate() {
+                            diag(format_args!(
+                                "photos pick: session {}: {}{}",
+                                k + 1,
+                                if s.note.is_empty() { "no report" } else { s.note.as_str() },
+                                s.error.as_deref().map(|e| format!(" ({e})")).unwrap_or_default()
+                            ));
                         }
+                        if let Some(why) = &swept.stopped {
+                            diag(format_args!("photos pick: stopped early: {why}"));
+                        }
+                        if !swept.left.is_empty() {
+                            let file = filmcraft_gphotos::data_dir().join("left-searches.txt");
+                            let text: String = swept.left.iter().map(|q| format!("{q}\n")).collect();
+                            match std::fs::create_dir_all(filmcraft_gphotos::data_dir()).and_then(|()| std::fs::write(&file, text)) {
+                                Ok(()) => diag(format_args!(
+                                    "photos pick: {} search(es) left for a next run (listed in {}): filmcraft-cli photos pick --queries '{}' --all",
+                                    swept.left.len(),
+                                    file.to_string_lossy(),
+                                    file.to_string_lossy()
+                                )),
+                                Err(e) => {
+                                    diag(format_args!("photos pick: {} search(es) left for a next run: {} ({e})", swept.left.len(), swept.left.join(" · ")))
+                                }
+                            }
+                        }
+                        let report = json!({"sessions": swept.sessions, "left": swept.left, "stopped": swept.stopped});
+                        Picks { picked: swept.picked, report, stopped: swept.stopped.is_some() }
+                    } else {
+                        // blocking HTTP and sleeps: keep them off the async runtime
+                        let driven = tokio::task::spawn_blocking(move || {
+                            // with --auto, a local vision agent (Qwen2.5-VL via Ollama) drives the
+                            // picker: it types the query, clicks matching video tiles, presses Done;
+                            // with --album it opens that album and selects all of it instead
+                            let request = match (searching, album) {
+                                (true, _) => Some(filmcraft_screenagent::agent::Request {
+                                    queries: searches,
+                                    max_items: agent_items,
+                                    select_all,
+                                    album: None,
+                                    videos_only: true,
+                                }),
+                                (false, Some(title)) => Some(filmcraft_screenagent::agent::Request {
+                                    max_items: opts.max_items.unwrap_or(filmcraft_gphotos::api::MAX_PICK),
+                                    ..filmcraft_automation::photos::album_request(&title, videos_only)
+                                }),
+                                (false, None) => None,
+                            };
+                            filmcraft_automation::photos::pick_driven(&gp, &opts, request, &mut |line| diag(format_args!("{line}")), &|| false)
+                        })
+                        .await
+                        .unwrap_or_else(|e| fail(format!("photos pick: {e}")))
+                        .unwrap_or_else(|e| fail(format!("photos pick: {e}")));
+                        match &driven.agent {
+                            Some(Ok(s)) => diag(format_args!("photos pick: autopick: {}", s.note)),
+                            Some(Err(e)) => diag(format_args!("photos pick: the autopick agent reported: {e}")),
+                            None => {}
+                        }
+                        let nothing_to_pick = driven.nothing_to_pick();
+                        let picked = match driven.outcome {
+                            filmcraft_gphotos::PickOutcome::Done(p) => p,
+                            filmcraft_gphotos::PickOutcome::Pending(_) if nothing_to_pick => match &album_title {
+                                Some(t) => fail(format!("photos pick: the album `{t}` had nothing to pick")),
+                                None => fail("photos pick: the search matched nothing to pick"),
+                            },
+                            filmcraft_gphotos::PickOutcome::Pending(_) if driven.abandoned => fail(
+                                "photos pick: the agent did not finish the pick in time; its picking session was deleted and its tab closed (run it again)",
+                            ),
+                            filmcraft_gphotos::PickOutcome::Pending(s) => {
+                                outln!("{}", json!({"status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time}));
+                                fail(format!("photos pick: no selection yet; finish in the browser, then run `photos pick --session {}`", s.id));
+                            }
+                        };
+                        Picks { picked, report: json!({}), stopped: false }
                     };
+                    let Picks { picked, report, stopped } = picked;
                     for f in &picked.failed {
                         diag(format_args!("photos pick: {f}"));
                     }
                     if picked.fetched.is_empty() {
+                        if report.as_object().is_some_and(|o| !o.is_empty()) {
+                            outln!("{report}");
+                        }
                         fail(if !picked.failed.is_empty() {
                             "photos pick: nothing could be downloaded"
                         } else if !picked.skipped.is_empty() {
@@ -794,34 +967,42 @@ async fn cli() {
                             "photos pick: nothing was picked"
                         });
                     }
-                    let paths: Vec<String> = picked.fetched.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
-                    let cached = picked.fetched.iter().filter(|f| f.was_cached).count();
-                    let items: Vec<Value> = picked
-                        .fetched
-                        .iter()
-                        .map(|f| {
-                            let mut v = f.item.summary();
-                            if let Some(o) = v.as_object_mut() {
-                                o.insert("path".into(), json!(f.path.to_string_lossy()));
-                            }
-                            v
-                        })
-                        .collect();
+                    let (paths, items, cached) = picked_json(&picked);
                     match b.exec("file.import", json!({"paths": paths, "reuse": true})).await {
                         Ok(v) => {
-                            outln!(
-                                "{}",
-                                json!({
-                                    "imported": v, "items": items, "downloaded": picked.fetched.len().saturating_sub(cached), "cached": cached,
-                                    "failed": picked.failed, "skipped": picked.skipped,
-                                })
-                            );
+                            let mut out = json!({
+                                "imported": v, "items": items, "downloaded": picked.fetched.len().saturating_sub(cached), "cached": cached,
+                                "failed": picked.failed, "skipped": picked.skipped,
+                            });
+                            if let (Some(o), Some(r)) = (out.as_object_mut(), report.as_object()) {
+                                o.extend(r.clone());
+                            }
+                            outln!("{out}");
                             b.finish(&a).await;
                         }
                         Err(e) => fail(format!("photos pick: import: {e}")),
                     }
-                    if !picked.failed.is_empty() {
+                    if !picked.failed.is_empty() || stopped {
                         std::process::exit(1);
+                    }
+                }
+                "tidy" => {
+                    if a.positionals.len() > 2 {
+                        usage("photos tidy (closes the Google Photos picker tabs left open in Chrome)");
+                    }
+                    let tidied = tokio::task::spawn_blocking(tidy_picker_tabs).await.unwrap_or_else(|e| fail(format!("photos tidy: {e}")));
+                    match tidied {
+                        Ok(t) => {
+                            for n in &t.notes {
+                                diag(format_args!("photos tidy: {n}"));
+                            }
+                            diag(format_args!("photos tidy: closed {} of {} picker tab(s)", t.closed, t.found));
+                            print(&a, &json!(t));
+                            if !t.left.is_empty() {
+                                std::process::exit(1);
+                            }
+                        }
+                        Err(e) => fail(format!("photos tidy: {e}")),
                     }
                 }
                 "upload" => {
@@ -929,7 +1110,7 @@ async fn cli() {
                 "search" => usage(
                     "photos search: Google retired library browsing and search for apps on 2025-03-31; use `photos pick` (or `photos pick --auto <query>`) to choose items in Google Photos",
                 ),
-                other => usage(format!("photos: unknown `{other}` (auth | pick | upload | album | albums | cached | add)")),
+                other => usage(format!("photos: unknown `{other}` (auth | pick | tidy | upload | album | albums | cached | add)")),
             }
         }
         "showcase" => {
@@ -1628,6 +1809,51 @@ mod album_tests {
         let e = super::album_analysis(&mut b, json!({"album": "Nothing", "subject": "robot", "wait": false})).await.unwrap_err();
         assert!(e.contains("has no video"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::{Args, pick_searches_from};
+
+    fn args(v: &[&str]) -> Args {
+        Args::parse(v.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn searches_come_from_every_auto_the_queries_file_and_the_sweep() {
+        let dir = std::env::temp_dir().join(format!("filmcraft-cli-queries-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("searches.txt");
+        std::fs::write(&file, "# robots I filmed\nvideos Dubai robots\n\n  ROBOTS  \nvideos Tokyo 2019\n").unwrap();
+        let f = file.to_string_lossy().into_owned();
+        let a = args(&["photos", "pick", "--auto", "robots", "--auto", "drones", "--queries", &f, "--sweep", "2022-11..2023-01"]);
+        assert_eq!(
+            pick_searches_from(&a).unwrap(),
+            ["robots", "drones", "videos Dubai robots", "videos Tokyo 2019", "videos November 2022", "videos December 2022", "videos January 2023"],
+            "in order, comments and blanks skipped, repeats once"
+        );
+        // days of each month
+        let a = args(&["photos", "pick", "--sweep", "2022-10", "--month-days", "13-14"]);
+        assert_eq!(pick_searches_from(&a).unwrap(), ["videos October 13 2022", "videos October 14 2022"]);
+        // mistakes are said, not guessed at
+        for (bad, says) in [
+            (vec!["photos", "pick", "--month-days", "1-5"], "goes with --sweep"),
+            (vec!["photos", "pick", "--sweep", "2025..2017"], "--sweep"),
+            (vec!["photos", "pick", "--sweep", "2022", "--month-days", "40"], "--month-days"),
+            (vec!["photos", "pick", "--queries", "/no/such/file.txt"], "--queries"),
+            (vec!["photos", "pick", "--sweep", "1900..2100", "--month-days", "1-31"], "--sweep"),
+        ] {
+            let e = pick_searches_from(&args(&bad)).unwrap_err();
+            assert!(e.contains(says), "{bad:?}: {e}");
+        }
+        // a huge file is refused before it is read
+        let big = dir.join("big.txt");
+        std::fs::write(&big, "x\n".repeat(600_000)).unwrap();
+        assert!(pick_searches_from(&args(&["photos", "pick", "--queries", &big.to_string_lossy()])).unwrap_err().contains("bytes"));
+        // nothing asked: nothing to search
+        assert!(pick_searches_from(&args(&["photos", "pick"])).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

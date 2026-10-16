@@ -47,6 +47,9 @@ const VALUED: &[&str] = &[
     "--subject",
     "--upload-album",
     "--report-out",
+    "--queries",
+    "--sweep",
+    "--month-days",
 ];
 
 #[derive(Debug, Default)]
@@ -82,6 +85,11 @@ impl Args {
 
     pub fn opt(&self, k: &str) -> Option<&str> {
         self.opts.iter().rev().find(|(n, _)| n == k).and_then(|(_, v)| v.as_deref())
+    }
+
+    /// Every value given to a repeatable option, in order (`--auto a --auto b`).
+    pub fn all(&self, k: &str) -> Vec<&str> {
+        self.opts.iter().filter(|(n, _)| n == k).filter_map(|(_, v)| v.as_deref()).collect()
     }
 
     pub fn flag(&self, k: &str) -> bool {
@@ -190,6 +198,19 @@ mod tests {
         assert_eq!(args("mcp --automation-read-root X").unknown_opt(&allowed), Some("--automation-read-root"));
         assert_eq!(args("mcp --bridge=a --typo=1").unknown_opt(&allowed), Some("--typo"));
         assert_eq!(args("mcp --project p --bridge a").unknown_opt(&allowed), None);
+    }
+
+    #[test]
+    fn repeatable_options_keep_every_value_in_order() {
+        let a = Args::parse(["photos", "pick", "--auto", "robots", "--all", "--auto=drones 2022", "--auto", "cats"].map(str::to_string));
+        assert_eq!(a.all("--auto"), ["robots", "drones 2022", "cats"]);
+        assert_eq!(a.opt("--auto"), Some("cats"), "a single read still takes the last");
+        assert!(a.all("--sweep").is_empty());
+        // a valued option at the very end has no value: nothing to list
+        assert!(args("photos pick --auto").all("--auto").is_empty());
+        let b = args("photos pick --sweep 2017-10..2025-12 --month-days 10-21 --queries list.txt");
+        assert_eq!((b.opt("--sweep"), b.opt("--month-days"), b.opt("--queries")), (Some("2017-10..2025-12"), Some("10-21"), Some("list.txt")));
+        assert_eq!(b.positionals, ["photos", "pick"]);
     }
 
     #[test]
