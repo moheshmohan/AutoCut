@@ -1497,19 +1497,31 @@ pub fn breathe_for(stretches: &[Stretch], seconds: f64) -> f64 {
     (lo + hi) / 2.0
 }
 
-/// The lead before each entry's words: longer where a new chapter (event or year) starts, as
-/// its card comes first.
-fn leads(entries: &[Entry]) -> Vec<f64> {
-    let mut last: Option<String> = None;
+/// Where a chapter starts and its card: at an entry whose event differs from the one before
+/// ("GITEX Global 2022, Dubai"), or, for an entry with no event, where the year changes — so a
+/// robot met days after an expo, the same year, opens no "2022" card of its own.
+pub fn chapter_cards(entries: &[Entry]) -> Vec<Option<String>> {
+    let (mut last_event, mut last_year): (Option<String>, Option<i64>) = (None, None);
     entries
         .iter()
         .map(|e| {
-            let section = e.section();
-            let new_section = section.is_some() && section != last;
-            last = section.or(last.take());
-            if new_section { CARD_LEAD } else { 0.5 }
+            let event = e.event.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+            let year = e.unix.map(|u| ymd(u).0);
+            let card = match &event {
+                Some(ev) if Some(ev) != last_event.as_ref() => Some(ev.clone()),
+                Some(_) => None,
+                None => year.filter(|y| Some(*y) != last_year).map(|y| y.to_string()),
+            };
+            last_event = event;
+            last_year = year.or(last_year);
+            card
         })
         .collect()
+}
+
+/// The lead before each entry's words: longer where a chapter starts, as its card comes first.
+fn leads(entries: &[Entry]) -> Vec<f64> {
+    chapter_cards(entries).iter().map(|c| if c.is_some() { CARD_LEAD } else { 0.5 }).collect()
 }
 
 /// How long a chapter card shows before the entry's words, seconds.
@@ -1635,7 +1647,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     built.chapters.push(Chapter { seconds: 0.0, title: "Intro".into() });
     let mut t = intro_len;
     let mut counter_times = Vec::new();
-    let mut last_section: Option<String> = None;
+    let cards = chapter_cards(entries);
     // a target length: each entry's share of it, planned from its words and its robot in view
     let target = opts.target_minutes.filter(|m| m.is_finite() && *m > 0.0).map(|m| (m * 60.0).min(24.0 * 3600.0));
     let words = |text: &str| if voice.is_some() { text.split_whitespace().count() as f64 / WORDS_PER_SECOND } else { 0.0 };
@@ -1652,9 +1664,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
 
     // ---- the entries
     for (k, e) in entries.iter().enumerate() {
-        let section = e.section();
-        let new_year = section.is_some() && section != last_section;
-        last_section = section.clone().or(last_section.take());
+        let section = cards.get(k).cloned().flatten();
+        let new_year = section.is_some();
         let lead = if new_year { CARD_LEAD } else { 0.5 };
         let line = script.lines.get(k).cloned().unwrap_or_else(|| template_line(e));
         let voice_at = (t + lead).max(voice_free_at + 0.15);
@@ -2258,8 +2269,10 @@ mod tests {
         a.facts = vec!["Made by Boston Dynamics".into(), " ".into()];
         let b = Entry { number: 2, label: "Pepper".into(), unix: Some(day + 600), event: Some("GITEX Global 2022, Dubai".into()), ..Entry::default() };
         let c = Entry { number: 3, label: "Go1".into(), unix: Some(day + 86_400 * 7), ..Entry::default() };
-        // one card for the event, one for the year after it
-        assert_eq!(leads(&[a.clone(), b.clone(), c.clone()]), vec![CARD_LEAD, 0.5, CARD_LEAD]);
+        // one card for the event; a robot met days later the same year opens none
+        assert_eq!(leads(&[a.clone(), b.clone(), c.clone()]), vec![CARD_LEAD, 0.5, 0.5]);
+        let d = Entry { number: 4, label: "Arm".into(), unix: Some(day + 86_400 * 400), ..Entry::default() };
+        assert_eq!(chapter_cards(&[c.clone(), a.clone(), d]), vec![Some("2022".into()), Some("GITEX Global 2022, Dubai".into()), Some("2023".into())]);
         assert_eq!(c.section().as_deref(), Some("2022"));
         assert_eq!(card("2022"), ("2022".to_string(), 160.0));
         assert_eq!(card("GITEX Global 2022, Dubai"), ("GITEX GLOBAL 2022\nDUBAI".to_string(), 96.0));
