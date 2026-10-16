@@ -42,6 +42,11 @@ const VALUED: &[&str] = &[
     "--album",
     "--music",
     "--target-minutes",
+    "--screen",
+    "--prompt",
+    "--subject",
+    "--upload-album",
+    "--report-out",
 ];
 
 #[derive(Debug, Default)]

@@ -128,6 +128,69 @@ fn photos_albums_without_consent_name_the_fix() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `showcase --album`: usage errors (exit 2) before anything is read; without a sign-in it says
+/// so before opening anything; signed in, the analysis job checks its vision model before the
+/// album is picked (no Ollama here: nothing is picked, no browser opens). Offline: a data dir of
+/// the test's own, and an Ollama address nothing answers on.
+#[test]
+fn showcase_from_an_album_checks_before_it_picks() {
+    let dir = std::env::temp_dir().join(format!("filmcraft-cli-showcase-album-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let data = dir.join("data");
+    std::fs::create_dir_all(data.join("google-photos")).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
+            .args(args)
+            .env("FILMCRAFT_DATA_DIR", &data)
+            .env("AUTOCUT_OLLAMA_HOST", "http://127.0.0.1:9")
+            .output()
+            .expect("spawn filmcraft-cli")
+    };
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).to_string();
+    let report = dir.join("report.json");
+    std::fs::write(&report, r#"{"subject":"robot","clips":[]}"#).unwrap();
+    let report = report.to_string_lossy().to_string();
+    let out = dir.join("out.mp4").to_string_lossy().to_string();
+
+    for args in [
+        vec!["showcase"],
+        vec!["showcase", "--album"],
+        vec!["showcase", "--album", "  "],
+        // the album to read, or a report: not both (--upload-album names the upload's album)
+        vec!["showcase", "--album", "Robots", "--report", &report],
+        vec!["showcase", "--album", "Robots", "--report", &report, "--export", &out, "--upload", "--upload-album", "Showcases"],
+        // what the video is of
+        vec!["showcase", "--album", "Robots"],
+        vec!["showcase", "--album", "Robots", "--prompt", " "],
+        vec!["showcase", "--album", "Robots", "--prompt", "a video of every robot", "--with-photos"],
+        vec!["showcase", "--album", "Robots", "--subject", "robot", "--since", "last year"],
+        vec!["showcase", "--album", "Robots", "--subject", "robot", "--frames", "many"],
+        vec!["showcase", "--album", "Robots", "--subject", "robot", "--upload-album", "Showcases"],
+        vec!["showcase", "--album", "Robots", "--subject", "robot", "--upload"],
+        // a report already says what it found
+        vec!["showcase", "--report", &report, "--prompt", "a video of every robot"],
+        vec!["showcase", "--report", &report, "--export", &out, "--upload-album", "Showcases"],
+    ] {
+        let o = run(&args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", err(&o));
+    }
+    // not connected: said before a project or a model is touched
+    let o = run(&["--demo", "showcase", "--album", "Robot showcase", "--prompt", "a video of every robot since 2020"]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("not connected") && err(&o).contains("photos auth"), "{}", err(&o));
+    // signed in for the picker: the job starts, and stops at the missing vision model before
+    // anything is picked
+    std::fs::write(data.join("google-photos/client_secret.json"), r#"{"installed":{"client_id":"id","client_secret":"s"}}"#).unwrap();
+    let picker = r#"{"access_token":"a","refresh_token":"r","expires_at":1,"scope":"https://www.googleapis.com/auth/photospicker.mediaitems.readonly"}"#;
+    std::fs::write(data.join("google-photos/tokens.json"), picker).unwrap();
+    let o = run(&["--demo", "showcase", "--album", "Robot showcase", "--subject", "robot", "--export", &out]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("vision model") && err(&o).contains("ollama pull"), "{}", err(&o));
+    assert!(!err(&o).contains("picking the Google Photos album"), "nothing was picked: {}", err(&o));
+    assert!(!dir.join("out.mp4").exists(), "nothing was built");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn help_and_usage_errors() {
     let h = cli(&["help"]);

@@ -94,10 +94,34 @@ SUBCOMMANDS
   probe <media> [--image-sequence]
                                 media info as JSON, with MXF / Ogg / BWF details; with
                                 --image-sequence <media> is the first numbered still of a sequence
+  showcase --album '<Google Photos album>' --prompt '<the video to make>' | --subject S
+         [--since YYYY[-MM[-DD]]] [--frames N] [--screen N] [--compare N] [--report-out r.json]
+         [any option of `showcase --report` below] [--project p.fcproj --save]
+                                the whole video from one Google Photos album — the seed you fill
+                                in Google Photos — in one command: the local screen agent opens
+                                the album with that exact title in Google's picker and selects
+                                all of it (Google lets apps read only albums they made, so the
+                                picker is the way in: `photos auth` once, `ollama pull
+                                qwen2.5vl:7b`, Screen Recording and Accessibility for this
+                                terminal), its videos are downloaded (cached) and imported — a
+                                file the project already holds is reused, not imported twice —
+                                the subject (and a date and a title, when it names them) is read
+                                from --prompt (built-in rules, else AUTOCUT_LLM_MODEL), only the
+                                album's clips are analysed (as `analyze`; --report-out keeps the
+                                report for a later `showcase --report`), and the show is built,
+                                checked, exported and uploaded exactly as with --report (the
+                                title: --title, the prompt's, else \"Every <Subject> I've
+                                Filmed\"). The album's photos are skipped (not downloaded): a
+                                showcase is built from video clips. --since leaves out items
+                                created and clips filmed before it. Runs as the
+                                `autocut.analyze` job (`album`), so --bridge makes it in the
+                                running app. E.g. showcase --album \"Robot showcase\" --prompt
+                                \"a video of every robot since 2020\" --voice clone:me --export
+                                ~/Movies/robots.mp4 --upload --project robots.fcproj --save
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
          [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
-         [--export out.mp4 [--upload [--album <title>]]] [--qa | --no-qa]
+         [--export out.mp4 [--upload [--upload-album <title>]]] [--qa | --no-qa]
                                 a narrated 16:9 showcase of every clip the analysis found, oldest
                                 first: title, a counter, name/date lower thirds that slide and
                                 fade in and out, a slow push-in on every shot, year cards,
@@ -131,9 +155,10 @@ SUBCOMMANDS
                                 well-known one first, under the title in large outlined
                                 capitals; composed in a \"<title> — Thumbnail\" sequence kept
                                 in the project), and --upload then sends the export to
-                                your Google Photos library (as `photos upload`; --album puts it
-                                into that album, made when missing, to add the next round's
-                                material to by hand). Spoken lines are
+                                your Google Photos library (as `photos upload`; --upload-album
+                                puts it into that album, made when missing, to add the next
+                                round's material to by hand; with --report, --album still says
+                                the same). Spoken lines are
                                 cached in the data directory, so a rebuild synthesizes only the
                                 lines that changed. QA (on with --export, --qa without one, --no-qa
                                 to skip) checks the built show: gaps and overlaps between shots and
@@ -393,18 +418,142 @@ fn absolute(path: &str) -> String {
     std::path::absolute(path).ok().and_then(|p| p.into_os_string().into_string().ok()).unwrap_or_else(|| path.to_string())
 }
 
-/// `--album <title|id>`: absent, or a usable title (a usage error otherwise).
-fn album_opt(a: &Args, cmd: &str) -> Option<String> {
-    if !a.flag("--album") {
+/// `flag <title|id>` (`--album`, `--upload-album`): absent, or a usable album title (a usage
+/// error otherwise).
+fn album_opt(a: &Args, cmd: &str, flag: &str) -> Option<String> {
+    if !a.flag(flag) {
         return None;
     }
-    let Some(t) = a.opt("--album").map(str::trim).filter(|t| !t.is_empty()) else {
-        usage(format!("{cmd}: --album wants an album title (or id)"));
+    let Some(t) = a.opt(flag).map(str::trim).filter(|t| !t.is_empty()) else {
+        usage(format!("{cmd}: {flag} wants an album title (or id)"));
     };
     if let Err(e) = filmcraft_gphotos::albums::clean_title(t) {
-        usage(format!("{cmd}: --album: {e}"));
+        usage(format!("{cmd}: {flag}: {e}"));
     }
     Some(t.to_string())
+}
+
+/// Where `showcase` takes its clips from.
+enum ShowcaseSource {
+    /// An earlier analysis (`--report`, as `analyze --out` writes it).
+    Report(String),
+    /// A Google Photos album (`--album`): the `autocut.analyze` job's parameters.
+    Album { title: String, params: Value },
+}
+
+/// `showcase`'s source of clips and the album its upload goes into, from its arguments. Every
+/// usage error (exit 2) is here, before a sign-in, a model or a file is touched.
+fn showcase_source(a: &Args) -> (ShowcaseSource, Option<String>) {
+    let report = a.opt("--report").map(str::to_string);
+    if a.flag("--report") && report.is_none() {
+        usage("showcase: --report wants the analysis file (analyze --out)");
+    }
+    // with --report and --upload, `--album` is the album the upload goes into: its spelling
+    // before --upload-album, kept working (--album now reads an album's clips instead)
+    let legacy = report.is_some() && a.flag("--album") && a.flag("--upload") && !a.flag("--upload-album");
+    let upload_album = album_opt(a, "showcase", if legacy { "--album" } else { "--upload-album" });
+    if legacy {
+        diag(format_args!(
+            "showcase: --album with --report names the album the upload goes into; say --upload-album (--album <title> now reads the clips from a Google Photos album)"
+        ));
+    }
+    if upload_album.is_some() && !a.flag("--upload") {
+        usage("showcase: --upload-album names the album the upload goes into; add --upload (and --export out.mp4)");
+    }
+    let album = if legacy { None } else { album_opt(a, "showcase", "--album") };
+    match (report, album) {
+        (Some(_), Some(_)) => usage(
+            "showcase: --album reads the clips from a Google Photos album, --report from an earlier analysis; give one of them (--upload-album names the album the upload goes into)",
+        ),
+        (None, None) => {
+            usage("showcase --report analysis.json | --album '<Google Photos album>' --prompt '<the video>' [--title T] [--voice clone:name] [--plan] …")
+        }
+        (Some(r), None) => {
+            for k in ["--prompt", "--subject", "--since", "--frames", "--screen", "--compare", "--report-out", "--with-photos"] {
+                if a.flag(k) {
+                    usage(format!("showcase: {k} goes with --album (a --report already says what it found)"));
+                }
+            }
+            (ShowcaseSource::Report(r), upload_album)
+        }
+        (None, Some(title)) => {
+            let text = |k: &str| -> Option<String> {
+                if !a.flag(k) {
+                    return None;
+                }
+                match a.opt(k).map(str::trim).filter(|t| !t.is_empty()) {
+                    Some(t) => Some(t.to_string()),
+                    None => usage(format!("showcase: {k} wants a value")),
+                }
+            };
+            let (subject, prompt, since) = (text("--subject"), text("--prompt"), text("--since"));
+            if subject.is_none() && prompt.is_none() {
+                usage("showcase --album: say what the video is of: --prompt 'a video of every robot since 2020', or --subject robot");
+            }
+            if a.flag("--with-photos") {
+                usage("showcase --album: a showcase is built from video clips, so the album's photos are skipped (not downloaded); there is no --with-photos");
+            }
+            let mut params = json!({"album": title, "wait": false});
+            if let Some(t) = subject {
+                params["subject"] = json!(t);
+            }
+            if let Some(t) = prompt {
+                params["prompt"] = json!(t);
+            }
+            if let Some(d) = since {
+                if let Err(e) = filmcraft_engine::autocut::parse_since(&json!(d)) {
+                    usage(format!("showcase: --since: {e}"));
+                }
+                params["since"] = json!(d);
+            }
+            for (k, key) in [("--frames", "frames"), ("--screen", "screen"), ("--compare", "compare")] {
+                if let Some(v) = text(k) {
+                    let n: u64 = v.parse().unwrap_or_else(|_| usage(format!("showcase: {k} wants a whole number, not `{v}`")));
+                    params[key] = json!(n);
+                }
+            }
+            (ShowcaseSource::Album { title, params }, upload_album)
+        }
+    }
+}
+
+/// `showcase --album`: the engine's `autocut.analyze` job with `album`, on `b` — the whole
+/// album picked through Google's picker (the screen agent selects it), its videos imported
+/// without duplicating what the project holds, the subject read from `--prompt`, only those
+/// clips analysed — with its progress on stderr. The report it kept, and its summary.
+async fn album_analysis(b: &mut Backend, params: Value) -> Result<(Value, Value), String> {
+    let start = b.exec("autocut.analyze", params).await?;
+    let job = start["job"].as_u64().ok_or_else(|| format!("autocut.analyze started no job: {start}"))?;
+    let mut last = String::new();
+    let entry = loop {
+        if let Backend::Local(s) = b {
+            // nothing else runs the job's commands in this process: run them as the app's UI does
+            s.pump_port(std::time::Duration::from_millis(50));
+        }
+        let jobs = b.exec("jobs.list", json!({})).await?;
+        let j = jobs.as_array().and_then(|l| l.iter().find(|j| j["id"].as_u64() == Some(job))).cloned().ok_or_else(|| format!("job {job} is gone"))?;
+        // (a failed job's status is its error, which the caller reports)
+        let failed = j["result"]["error"].is_string();
+        let status = j["status"].as_str().unwrap_or_default();
+        if !failed && !status.is_empty() && status != last {
+            diag(format_args!("showcase: {status}"));
+            status.clone_into(&mut last);
+        }
+        if j["finished"].as_bool() == Some(true) {
+            break j;
+        }
+        let pause = if matches!(b, Backend::Local(_)) { 10 } else { 250 };
+        tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
+    };
+    if let Some(e) = entry["result"]["error"].as_str() {
+        return Err(e.to_string());
+    }
+    let kept = b.exec("autocut.showcaseInspect", json!({"report": true})).await?;
+    let report = kept["report"].clone();
+    if !report["clips"].is_array() {
+        return Err("the analysis kept no report".into());
+    }
+    Ok((report, entry["showcase"]["summary"].clone()))
 }
 
 /// Whether the saved Google Photos sign-in can do what is asked, from disk (no network): uploads,
@@ -552,7 +701,7 @@ async fn cli() {
                     };
                     let auto = a.opt("--auto").map(str::to_string);
                     // --album: the agent opens that album in the picker and picks all of it
-                    let album = album_opt(&a, "photos pick");
+                    let album = album_opt(&a, "photos pick", "--album");
                     if auto.is_some() && album.is_some() {
                         usage("photos pick: --auto searches, --album picks a whole album; use one of them");
                     }
@@ -674,7 +823,7 @@ async fn cli() {
                         usage("photos upload: one file at a time");
                     }
                     let description = a.opt("--description").map(str::to_string);
-                    let album = album_opt(&a, "photos upload");
+                    let album = album_opt(&a, "photos upload", "--album");
                     match upload_to_photos(absolute(path), description, album).await {
                         Ok(v) => print(&a, &v),
                         Err(e) => fail(format!("photos upload: {e}")),
@@ -777,19 +926,11 @@ async fn cli() {
             }
         }
         "showcase" => {
-            // a narrated, counted showcase of every clip an analysis found (analyze --out)
-            let report = a.opt("--report").unwrap_or_else(|| usage("showcase --report analysis.json [--title T] [--voice clone:name] [--plan] …"));
-            let bytes = std::fs::read(report).unwrap_or_else(|e| fail(format!("showcase: {report}: {e}")));
-            let v: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| fail(format!("showcase: {report}: {e}")));
-            let mut facts: Vec<filmcraft_autocut::analyze::ClipFacts> = serde_json::from_value(v.get("clips").cloned().unwrap_or(Value::Null))
-                .unwrap_or_else(|e| fail(format!("showcase: {report}: not an analysis report ({e})")));
+            // a narrated, counted showcase of every clip an analysis found (`--report`, from
+            // analyze --out), or of a Google Photos album's clips (`--album`: picked, imported
+            // and analysed first); every usage error comes before anything is read
+            let (source, album) = showcase_source(&a);
             let mut opts = filmcraft_autocut::showcase::Options::default();
-            if let Some(subject) = v.get("subject").and_then(Value::as_str) {
-                opts.subject = subject.to_string();
-            }
-            for f in &mut facts {
-                f.label = filmcraft_autocut::analyze::sanitize_label_with(&f.label, &f.kind, &opts.subject, &f.text);
-            }
             if let Some(t) = a.opt("--title") {
                 opts.title = t.to_string();
             }
@@ -822,14 +963,10 @@ async fn cli() {
                 }
             }
             // --upload: the export goes to Google Photos once built; a missing sign-in or
-            // consent fails now, not after the build
+            // consent fails now, not after the build. --upload-album: the upload also goes into
+            // that album (FilmCraft's, created when missing), where the next iteration's
+            // material can be added by hand
             let upload = a.flag("--upload") && !a.flag("--plan");
-            // --album: the upload also goes into that album (FilmCraft's, created when missing),
-            // where the next iteration's material can be added by hand
-            let album = album_opt(&a, "showcase");
-            if album.is_some() && !a.flag("--upload") {
-                usage("showcase: --album names the album the upload goes into; add --upload (and --export out.mp4)");
-            }
             if upload {
                 if opts.export.is_none() {
                     usage("showcase: --upload sends the export to Google Photos; add --export out.mp4");
@@ -837,6 +974,60 @@ async fn cli() {
                 if let Err(e) = photos_readiness(album.is_some()) {
                     fail(format!("showcase: --upload: {e}"));
                 }
+            }
+            // the clips: the report, or the album picked, imported and analysed in the project
+            // the show is then built in
+            let mut backend: Option<Backend> = None;
+            let mut album_summary = Value::Null;
+            let (v, from) = match source {
+                ShowcaseSource::Report(report) => {
+                    let bytes = std::fs::read(&report).unwrap_or_else(|e| fail(format!("showcase: {report}: {e}")));
+                    let v: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| fail(format!("showcase: {report}: {e}")));
+                    (v, report)
+                }
+                ShowcaseSource::Album { title, params } => {
+                    // the picker's sign-in from disk first (the app has its own over --bridge)
+                    if a.opt("--bridge").is_none()
+                        && let Err(e) = filmcraft_automation::photos::pick_readiness()
+                    {
+                        fail(format!("showcase: --album: {e}"));
+                    }
+                    let mut b = Backend::open(&a);
+                    diag(format_args!("showcase: making the video from the Google Photos album \"{title}\""));
+                    let (report, summary) = album_analysis(&mut b, params).await.unwrap_or_else(|e| fail(format!("showcase: {e}")));
+                    let al = &summary["album"];
+                    diag(format_args!(
+                        "showcase: album \"{title}\": {} clip(s) ({} downloaded, {} from the cache; {} imported, {} already in the project)",
+                        al["picked"], al["downloaded"], al["cached"], al["imported"], al["reused"]
+                    ));
+                    for f in al["failed"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                        diag(format_args!("showcase: album: {f}"));
+                    }
+                    if al["skipped"].as_u64().is_some_and(|n| n > 0) {
+                        diag(format_args!("showcase: album: {} item(s) skipped (photos, or created before --since)", al["skipped"]));
+                    }
+                    if let Some(out) = a.opt("--report-out") {
+                        std::fs::write(out, serde_json::to_string_pretty(&report).unwrap_or_default())
+                            .unwrap_or_else(|e| fail(format!("showcase: {out}: {e}")));
+                        diag(format_args!("showcase: wrote {out} (`showcase --report {out}` builds again without picking)"));
+                    }
+                    // the title: --title, else the prompt's, else "Every <Subject> I've Filmed"
+                    if a.opt("--title").is_none() {
+                        let subject = report["subject"].as_str().unwrap_or("robot");
+                        opts.title = summary["title"].as_str().map_or_else(|| filmcraft_autocut::host::default_title(subject), str::to_string);
+                    }
+                    album_summary = summary["album"].clone();
+                    backend = Some(b);
+                    (report, format!("the album \"{title}\""))
+                }
+            };
+            let mut facts: Vec<filmcraft_autocut::analyze::ClipFacts> = serde_json::from_value(v.get("clips").cloned().unwrap_or(Value::Null))
+                .unwrap_or_else(|e| fail(format!("showcase: {from}: not an analysis report ({e})")));
+            if let Some(subject) = v.get("subject").and_then(Value::as_str) {
+                opts.subject = subject.to_string();
+            }
+            for f in &mut facts {
+                f.label = filmcraft_autocut::analyze::sanitize_label_with(&f.label, &f.kind, &opts.subject, &f.text);
             }
             let mut entries = filmcraft_autocut::showcase::group(&facts, &opts.subject, opts.min_coverage);
             let cfg = filmcraft_autocut::config::Config::from_env();
@@ -886,6 +1077,10 @@ async fn cli() {
             }
             if a.flag("--plan") {
                 print(&a, &plan);
+                // the album's clips are in the project now: --save keeps them
+                if let Some(mut b) = backend {
+                    b.finish(&a).await;
+                }
                 return;
             }
             // QA of the built show: on with an export, `--qa` without one, `--no-qa` never
@@ -901,7 +1096,7 @@ async fn cli() {
             } else {
                 None
             };
-            let mut b = Backend::open(&a);
+            let mut b = backend.unwrap_or_else(|| Backend::open(&a));
             let mut progress = |l: &str| diag(format_args!("showcase: {l}"));
             let (result, qa) = match &mut b {
                 Backend::Local(s) => {
@@ -953,6 +1148,9 @@ async fn cli() {
                     }
                     let mut out = serde_json::to_value(&built).unwrap_or_default();
                     out["youtubeChapters"] = json!(chapters);
+                    if !album_summary.is_null() {
+                        out["album"] = album_summary;
+                    }
                     if let Some(mut report) = qa {
                         diag(format_args!("showcase: QA: {}", report.summary()));
                         for f in report.findings.iter().filter(|f| f.severity >= filmcraft_autocut::qa::Severity::Warning).take(40) {
@@ -1381,6 +1579,47 @@ fn set_custom_bounds(p: &mut Value, start: Option<&str>, end: Option<&str>) {
     }
     if let Some(s1) = end {
         p["endSeconds"] = parse_value(s1);
+    }
+}
+
+#[cfg(test)]
+mod album_tests {
+    use std::sync::Arc;
+
+    use filmcraft_autocut::album::FixedAlbum;
+    use filmcraft_autocut::host::{Models, ShowcaseHost};
+    use serde_json::json;
+
+    /// `showcase --album`'s analysis runs the engine job in the CLI's own session, running the
+    /// job's commands itself (nothing else does in this process): the album is picked (a
+    /// `FixedAlbum` here), its clip imported, and only that clip analysed — not the demo
+    /// project's six; a job that cannot start, or fails, is an error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn album_analysis_runs_the_job_in_the_cli_session() {
+        let dir = std::env::temp_dir().join(format!("filmcraft-cli-album-analysis-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("robot.mov").to_string_lossy().into_owned();
+        let mut s = filmcraft_engine::Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        // a real clip of the demo footage, from our own encoder
+        let export =
+            json!({"path": clip, "format": "prores", "range": "custom", "startSeconds": 0, "endSeconds": 0.5, "scale": 0.125, "audio": false, "wait": true});
+        s.execute("file.exportMedia", export).unwrap();
+        let album = Arc::new(FixedAlbum::new(vec![clip]));
+        s.autocut.host = Some(Arc::new(ShowcaseHost::with_models(Models::scripted()).with_album_source(album.clone())));
+        let mut b = super::Backend::Local(Box::new(s));
+        let (report, summary) = super::album_analysis(&mut b, json!({"album": "Robot showcase", "subject": "robot", "wait": false})).await.unwrap();
+        assert_eq!(report["clips"].as_array().map(Vec::len), Some(1), "{report}");
+        assert_eq!((report["subject"].as_str(), summary["album"]["picked"].as_u64()), (Some("robot"), Some(1)), "{summary}");
+        assert_eq!(album.asked().len(), 1);
+        // refused before a job starts (no subject), and a failed job (an empty album)
+        assert!(super::album_analysis(&mut b, json!({"album": "Robot showcase", "wait": false})).await.unwrap_err().contains("subject"));
+        let super::Backend::Local(s) = &mut b else { panic!("local") };
+        s.autocut.host = Some(Arc::new(ShowcaseHost::with_models(Models::scripted()).with_album_source(Arc::new(FixedAlbum::new(vec![])))));
+        let e = super::album_analysis(&mut b, json!({"album": "Nothing", "subject": "robot", "wait": false})).await.unwrap_err();
+        assert!(e.contains("has no video"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
