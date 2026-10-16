@@ -76,18 +76,32 @@ filmcraft-cli photos pick --auto "beach sunset videos" --max-items 5 --bridge 12
 # a whole album as the seed: the agent opens the album titled "Robot showcase" in the picker
 # and selects all of it (--videos-only keeps its videos)
 filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9876
+
+# many searches, ONE picking session and ONE tab: each typed in turn, every result selected
+# (the selection accumulates), Done once, one download batch
+filmcraft-cli photos pick --auto "videos Dubai robots" --auto "videos Tokyo robots" --all
+filmcraft-cli photos pick --queries searches.txt --all          # one search per line, # comments
+
+# a whole history in a handful of sessions: one "videos <Month> <Year>" search per month
+# (--month-days 10-21: one per day of those days in each month instead); implies --all
+filmcraft-cli photos pick --sweep 2017-10..2025-12 --bridge 127.0.0.1:9876
+
+# close the picker tabs earlier runs left in Chrome (and nothing else)
+filmcraft-cli photos tidy
 ```
 
-`photos pick` opens the picker in your default browser (`--no-browser` just prints the link),
-waits for you to press **Done** — 600 s by default, `--timeout` up to 3600 — then downloads
+`photos pick` opens the picker in your default browser — or, on macOS, in the picker tab Chrome
+already has open, pointed at the new session, so picks do not pile up tabs (`--no-browser` just
+prints the link) — waits for you to press **Done** — 600 s by default, `--timeout` up to 3600 — then downloads
 each item and runs `file.import` with `reuse`: a file the project already holds (picked
 before) is reused, not imported twice. `--demo`/`--project`/`--bridge` choose where it imports,
 as for every other command. Progress goes to stderr; the result JSON (`items`, `downloaded`,
 `cached`, `failed`) to stdout.
 
 Over MCP (`filmcraft-cli mcp --demo` / `--bridge`): `googlephotos_pick` (same flow,
-`max_items`, `wait_seconds` default 300, `session` to resume, `query` for the
-hands-free autopick agent below, or `album` (+ `videos_only`) to pick a whole album),
+`max_items`, `wait_seconds` default 300, `session` to resume, `query` — or `queries`, many
+searches in one session, with `all` — for the hands-free autopick agent below, or `album`
+(+ `videos_only`) to pick a whole album),
 `googlephotos_cached` and `googlephotos_add` (re-import cached items). Without `query` or
 `album`, an agent tells the user what to choose:
 
@@ -218,15 +232,57 @@ albums "are not shown directly" — users search for an album's title. So the sc
 downloading (it is listed in `skipped`). `--album` and `--auto` are exclusive. Selecting every
 item only ever happens inside a search result or an opened album, never the whole library.
 
+### Big libraries: many searches, few sessions, few tabs
+
+Google gives apps no listing of a library, only its picker, whose search understands dates.
+So a large library is pulled with searches — a list (`--auto` repeated, `--queries <file>`) or
+a sweep of date searches (`--sweep FROM..TO`, built by [`sweep`](src/sweep.rs): `2017-10..2025-12`,
+`2019..2021`, `2022`, `2022-10`; `--month-days 10-21` for days) — and the agent types them into
+**one** picking session in **one** tab:
+
+- it clears the search box and types each search in turn; the picker keeps the selection
+  while the search changes, and the header's "N selected" must grow (a search whose count
+  falls cleared some earlier selections: it and the searches before it are retried);
+- every result is selected (`--all`, implied by a sweep): a date search by the picker's date
+  groups — the round check left of each date heading selects that day — else by the range
+  gesture; a search with no results is skipped;
+- the session's item cap is `--max-items` (default and most 2000, Google's limit); before each
+  search the agent checks the room left (guessing the next search's size from the biggest so
+  far) and its budget, and leaves the rest for the next session;
+- Done is pressed once and the selection downloads in one batch.
+
+Sessions take up to 20 searches each; what one session left (or failed once) goes first into
+the next, until nothing is left or a session gets nowhere. Searches still left at the end are
+written to `<data dir>/google-photos/left-searches.txt` with the command to run them
+(`photos pick --queries <that file> --all`). Everything downloads into the cache, so a search
+picked twice downloads nothing twice.
+
+### Tabs
+
+- The agent closes the picker tab it drove when it finishes — after Done (the picker's finished
+  page), or when it gives up — only after checking the front tab's address is the picker
+  (`photos.google.com/picker…` or `photos.google.com/integration/picker…`). When Chrome asks
+  "Leave site?" (the picker holds its selection), the agent grounds the dialog's Leave button
+  and clicks it — nothing else.
+- A session the agent gave up on is deleted (`sessions.delete`), not left to linger.
+- A new session is shown in the picker tab Chrome already has open (AppleScript `set URL`),
+  not in a new tab; other browsers and systems get `open`/`xdg-open`.
+- `photos tidy` closes every picker tab in Chrome — those tabs only, by window, tab id *and*
+  address — answering "Leave site?" the same way (when the grounding model is in Ollama).
+
+The first time, macOS asks once whether your terminal may control Google Chrome (Automation):
+allow it, or the tabs are left as they are (and `photos tidy` cannot list them).
+
 ## How a pick works
 
 1. `POST photospicker.googleapis.com/v1/sessions` (optionally `pickingConfig.maxItemCount`).
-2. Open the session's `pickerUri` + `/autoclose` in the browser, so Google Photos closes its
-   tab when the user is done.
+2. Open the session's `pickerUri` + `/autoclose` — in Chrome's open picker tab when there is
+   one, else a new browser tab — so Google Photos closes its tab when the user is done (an
+   agent closes it itself).
 3. Poll `GET /v1/sessions/{id}` at Google's `pollingConfig.pollInterval` (clamped to 1–30 s)
    until `mediaItemsSet`, Google's `timeoutIn` runs out, or our own wait does. Our own timeout
-   leaves the session open so it can be resumed; Google's ends the pick (and the session is
-   deleted).
+   leaves the session open so it can be resumed — unless an agent drove it: then it is
+   abandoned and deleted; Google's ends the pick (and the session is deleted).
 4. `GET /v1/mediaItems?sessionId=…` (every page, at most 2000 items).
 5. Download each `baseUrl` with the `Authorization: Bearer` header — `=d` for photos (the
    original with Exif minus location), `=dv` for videos — streamed to a `.part` file, then
@@ -297,9 +353,15 @@ large or of a type Google Photos does not take, an expired upload session.
 - `albums.rs` — the albums FilmCraft makes: create (idempotent by title; a lost creation
   answer is followed by a fresh listing, never a duplicate), paged listing with caps, find by
   title or id, batched adds, a note at the top, readable errors; ids are URL-safe or refused.
-- `lib.rs` — `GooglePhotos::pick` and `GooglePhotos::upload`, the engine uploader hosts
-  install for `photos.upload` (`engine_uploader`, readiness read from disk without network),
-  and the browser opener (https links only).
+- `lib.rs` — `GooglePhotos::pick` (and `prepare_with`, for a caller that shows the picker its
+  own way) and `GooglePhotos::upload`, the engine uploader hosts install for `photos.upload`
+  (`engine_uploader`, readiness read from disk without network), and the browser opener (https
+  links only).
+- `sweep.rs` — the date searches of a sweep: month and day searches over a range, ranges
+  parsed and bounded.
+
+The tab handling lives in `filmcraft-screenagent` (`tabs.rs`) and the many-session loop in
+`filmcraft-automation` (`photos.rs`), which drives this crate's sessions.
 
 `cargo test -p filmcraft-gphotos` is fully offline: session, polling-interval and media item
 JSON parsing (including hostile and truncated input), the polling rule, token store and scope
@@ -309,7 +371,8 @@ after dropped or half-kept chunks and lost final answers, retry caps, cancellati
 session URLs, granularities, offsets and tokens, `batchCreate` answers, error mapping), and
 the album calls against a fake library (request bodies and URLs, paging, repeated page tokens,
 the 2000-album cap, idempotent and lost-answer creation, batches of 50, consent and
-app-created-only errors, hostile pages: huge, missing fields, wrong types, non-JSON).
+app-created-only errors, hostile pages: huge, missing fields, wrong types, non-JSON), and the
+sweep's searches (ranges, leap years, days a month lacks, the size bound).
 
 Real calls are opt-in — they change your library:
 

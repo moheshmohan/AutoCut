@@ -78,6 +78,17 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    sidecars, or the file's own metadata). `--relabel earlier.json` reads the text and describes
    again from the earlier report's best moments, without locating again.
 
+   **Analysed once** (`analysis_cache.rs`): each clip's result is kept in
+   `<data dir>/autocut/analysis-cache/`, keyed by what the file is — its Google Photos media id
+   (the picker's sidecar, or the download-cache folder it sits in), else its size and the
+   engine's fingerprint of its first and last MiB, so a moved or renamed file is the same clip —
+   plus the subject, the vision model, `--frames`/`--screen` and a version bumped with the
+   analysis. Going over a library again re-analyses nothing it has seen (`cached` in the output
+   and the job summary counts the clips that came from the cache); `--fresh` (`fresh: true` for
+   the jobs and `showcase_analyze`) analyses every clip again. Only an analysis in which every
+   frame was read and every model call answered is kept; entries are written atomically, capped
+   (20 000, the oldest go first), and a damaged one is ignored.
+
    Last, an **identity pass** (`identity.rs`) tells which clips show the same robot, since labels
    alone miscount: one robot filmed on three days of an expo gets three different generic labels.
    Candidate pairs — the same kind, filmed within 14 days, not already sharing a specific label —
@@ -258,7 +269,8 @@ In order:
    never imported twice — run the command again after adding clips to the album and only the new
    ones come in.
 5. **Only the album is analysed**, as `analyze` does (`--frames`, `--screen`, `--compare`;
-   `--report-out r.json` keeps the report), never the rest of the project.
+   `--report-out r.json` keeps the report), never the rest of the project — and a clip analysed
+   by an earlier run comes from the analysis cache (`--fresh` analyses again).
 6. **Then exactly what `showcase --report` does**: entries, voice-over, build, QA, subtitles,
    thumbnail, chapters, export and upload. The title is `--title`, else the prompt's, else
    "Every <Subject> I've Filmed"; `--plan` stops before the build (with `--save` the imported
