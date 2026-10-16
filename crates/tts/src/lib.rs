@@ -75,11 +75,14 @@ pub struct Params {
     pub semitones: f64,
     /// Speaking rate, [`MIN_PACE`]–[`MAX_PACE`] (1 = normal).
     pub pace: f64,
+    /// How to speak, in plain words ("warm, friendly, smiling"), for voices that take a spoken
+    /// style (the natural cloned voices); the others ignore it.
+    pub style: Option<&'static str>,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Params { semitones: 0.0, pace: 1.0 }
+        Params { semitones: 0.0, pace: 1.0, style: None }
     }
 }
 

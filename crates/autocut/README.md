@@ -178,6 +178,15 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    a part its own spoken version by `"intro"`, `"outro"` or entry number (`{"3": "…"}`). The
    voice reads the spoken text; subtitles (and everything on screen) show the script as written.
 
+   **How each line is said.** The script model writes the lines to be spoken — first person,
+   contractions, the when and where worked into a sentence rather than a bare "September 2020,
+   at home:" opener — and picks a delivery per line (`conversational`, `warm`, `excited`,
+   `amazed`, `curious`, `calm`). A plan's script keeps them in `delivery`, by `"intro"`,
+   `"outro"` or entry number (`{"intro": "excited", "7": "amazed"}`), renumbered with their
+   entries on review like `say`; a reviewed plan may also choose `dramatic` or `plain`. A part
+   without one is spoken `excited` (the intro) or `warm`. The natural cloned voices follow the
+   delivery (see `crates/tts/README.md`); other voices read plainly.
+
    Narration goes through `tts.create`, which looks in the engine's narration cache
    (`<data dir>/narration-cache`, see `crates/tts/README.md`) before synthesizing: a rebuild with
    the same voice reads only the lines that changed (`narration_cached` in the output counts

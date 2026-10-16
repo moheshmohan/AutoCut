@@ -173,6 +173,12 @@ impl DiskCache {
         }
         h.update(params.semitones.to_bits().to_le_bytes());
         h.update(params.pace.to_bits().to_le_bytes());
+        // only a styled reading adds to the key, so the plain ones keep their entries
+        if let Some(style) = params.style {
+            h.update(b"style");
+            h.update((style.len() as u64).to_le_bytes());
+            h.update(style.as_bytes());
+        }
         hex(&h.finalize())
     }
 
@@ -412,6 +418,10 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert_ne!(a, DiskCache::key("xa", "b", &p), "length-prefixed parts");
         assert_ne!(a, DiskCache::key("x", "ab", &Params { pace: 1.0 + f64::EPSILON, ..p }));
+        // a style is part of the key; two styles differ
+        let warm = DiskCache::key("x", "ab", &Params { style: Some("warm"), ..p });
+        assert_ne!(a, warm);
+        assert_ne!(warm, DiskCache::key("x", "ab", &Params { style: Some("calm"), ..p }));
     }
 
     #[test]

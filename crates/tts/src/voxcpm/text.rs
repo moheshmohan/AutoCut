@@ -30,6 +30,20 @@ pub enum Piece {
     Pause(u32),
 }
 
+/// Longest style description handed to the model, in characters.
+pub const MAX_STYLE_CHARS: usize = 120;
+
+/// VoxCPM2's spoken-style control: a description of how to speak in parentheses directly in
+/// front of the utterance ("(warm, friendly)Hello."). Only letters, digits, spaces and light
+/// punctuation are kept (a bracket would end the description early), at most
+/// [`MAX_STYLE_CHARS`]; empty when nothing usable is left.
+pub fn style_prefix(style: &str) -> String {
+    let kept: String = style.chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | ',' | '-' | '\'' | '.')).take(MAX_STYLE_CHARS).collect();
+    let words = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    let words = words.trim_matches([',', '.', '-', ' ']);
+    if words.chars().any(char::is_alphanumeric) { format!("({words})") } else { String::new() }
+}
+
 /// Normalise one stretch of speech into sentences.
 pub fn sentences(text: &str) -> Result<Vec<String>, TtsError> {
     let tokens = filmcraft_tts_text::normalize(text, Lang::EnUs).map_err(|e| TtsError::Invalid(e.to_string()))?;
@@ -156,6 +170,16 @@ pub fn pieces(text: &str) -> Result<Vec<Piece>, TtsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn style_prefixes_are_clean_and_bounded() {
+        assert_eq!(style_prefix("warm, friendly, smiling"), "(warm, friendly, smiling)");
+        // brackets would close the description early; whitespace collapses
+        assert_eq!(style_prefix("  excited)  (shout [laughing] "), "(excited shout laughing)");
+        assert_eq!(style_prefix("()[]{}"), "");
+        assert_eq!(style_prefix(""), "");
+        assert!(style_prefix(&"calm ".repeat(1000)).chars().count() <= MAX_STYLE_CHARS + 2);
+    }
 
     fn say(text: &str) -> Vec<String> {
         pieces(text)

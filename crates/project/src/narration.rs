@@ -67,6 +67,76 @@ impl VocalPitch {
     }
 }
 
+/// Text to Speech ▸ Advanced ▸ Delivery: the feeling a voice speaks with. Voices that take a
+/// spoken style (the natural cloned voices) are given [`Delivery::style`]; the others read the
+/// script as they always do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Delivery {
+    /// The voice's own reading.
+    #[default]
+    Plain,
+    Conversational,
+    Warm,
+    Excited,
+    Amazed,
+    Curious,
+    Calm,
+    Dramatic,
+}
+
+impl Delivery {
+    pub const ALL: [Delivery; 8] =
+        [Delivery::Plain, Delivery::Conversational, Delivery::Warm, Delivery::Excited, Delivery::Amazed, Delivery::Curious, Delivery::Calm, Delivery::Dramatic];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Delivery::Plain => "Plain",
+            Delivery::Conversational => "Conversational",
+            Delivery::Warm => "Warm",
+            Delivery::Excited => "Excited",
+            Delivery::Amazed => "Amazed",
+            Delivery::Curious => "Curious",
+            Delivery::Calm => "Calm",
+            Delivery::Dramatic => "Dramatic",
+        }
+    }
+
+    /// The command / serde id (`plain`, `conversational`, `warm`, …).
+    pub fn id(self) -> &'static str {
+        match self {
+            Delivery::Plain => "plain",
+            Delivery::Conversational => "conversational",
+            Delivery::Warm => "warm",
+            Delivery::Excited => "excited",
+            Delivery::Amazed => "amazed",
+            Delivery::Curious => "curious",
+            Delivery::Calm => "calm",
+            Delivery::Dramatic => "dramatic",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Option<Delivery> {
+        let n = s.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|d| d.id() == n)
+    }
+
+    /// How the voice is asked to speak (a short style description in plain words); `None`
+    /// for [`Delivery::Plain`].
+    pub fn style(self) -> Option<&'static str> {
+        match self {
+            Delivery::Plain => None,
+            Delivery::Conversational => Some("natural, conversational, relaxed, like talking to a friend"),
+            Delivery::Warm => Some("warm, friendly, smiling, natural storytelling"),
+            Delivery::Excited => Some("excited, energetic, upbeat, natural storytelling"),
+            Delivery::Amazed => Some("amazed, impressed, lively, natural storytelling"),
+            Delivery::Curious => Some("curious, playful, light, natural storytelling"),
+            Delivery::Calm => Some("calm, gentle, reflective, unhurried"),
+            Delivery::Dramatic => Some("dramatic, deep, suspenseful, cinematic trailer voice"),
+        }
+    }
+}
+
 /// The script and voice settings a narration was generated from.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,9 +151,16 @@ pub struct Narration {
     pub pitch: VocalPitch,
     /// Speaking rate, [`MIN_PACE`]–[`MAX_PACE`].
     pub pace: f64,
+    /// The feeling it was spoken with (projects from before have none: plain).
+    #[serde(default, skip_serializing_if = "is_plain")]
+    pub delivery: Delivery,
     /// Length of the speech in the generated file. The file can be longer: when an edit made the
     /// speech shorter than its clip, the file is padded with silence to the clip's length.
     pub speech_duration: Tick,
+}
+
+fn is_plain(d: &Delivery) -> bool {
+    *d == Delivery::Plain
 }
 
 impl Narration {
@@ -113,6 +190,7 @@ mod tests {
             voice: "basic-female".into(),
             pitch: VocalPitch::High,
             pace: 1.25,
+            delivery: Delivery::Warm,
             speech_duration: Tick::from_seconds_f64(2.5),
         }
     }
@@ -123,6 +201,24 @@ mod tests {
         let s = serde_json::to_string(&n).unwrap();
         assert!(s.contains("\"pitch\":\"high\""), "{s}");
         assert_eq!(serde_json::from_str::<Narration>(&s).unwrap(), n);
+    }
+
+    #[test]
+    fn deliveries_round_trip_and_old_projects_read_plain() {
+        for d in Delivery::ALL {
+            assert_eq!(Delivery::from_id(d.id()), Some(d));
+            assert_eq!(d.style().is_none(), d == Delivery::Plain);
+        }
+        assert_eq!(Delivery::from_id(" Excited "), Some(Delivery::Excited));
+        assert_eq!(Delivery::from_id("angry"), None);
+        let s = serde_json::to_string(&sample()).unwrap();
+        assert!(s.contains("\"delivery\":\"warm\""), "{s}");
+        // a narration from before deliveries: plain, and none written back
+        let mut old: serde_json::Value = serde_json::from_str(&s).unwrap();
+        old.as_object_mut().unwrap().remove("delivery");
+        let n: Narration = serde_json::from_value(old).unwrap();
+        assert_eq!(n.delivery, Delivery::Plain);
+        assert!(!serde_json::to_string(&n).unwrap().contains("delivery"));
     }
 
     #[test]

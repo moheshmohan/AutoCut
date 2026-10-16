@@ -42,6 +42,32 @@ fn voices_lists_the_built_in_voices() {
     assert_eq!(r["languages"][0]["id"], "en-US");
     assert_eq!(r["pitches"].as_array().unwrap().len(), 5);
     assert_eq!(r["pauseMarker"], "[pause 1s]");
+    let deliveries: Vec<&str> = r["deliveries"].as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap()).collect();
+    assert_eq!(deliveries.first(), Some(&"plain"));
+    assert!(deliveries.contains(&"excited") && deliveries.contains(&"warm"), "{deliveries:?}");
+}
+
+#[test]
+fn delivery_is_kept_inherited_and_checked() {
+    let mut s = demo();
+    let dir = tmp("delivery");
+    let r = s.execute("tts.create", json!({"text": "Look at this one!", "voice": "basic-male", "delivery": "excited", "time": 0, "dir": dir})).unwrap();
+    let id = r["clip"].as_u64().unwrap();
+    let n = s.project.narrations.get(&clip(&s, id).item).unwrap();
+    assert_eq!(n.delivery, filmcraft_project::Delivery::Excited);
+    // an edit that does not name it keeps it; inspect shows it
+    s.execute("tts.edit", json!({"clip": id, "pace": 0.9})).unwrap();
+    let i = s.execute("tts.inspect", json!({"clip": id})).unwrap();
+    assert_eq!(i["narration"]["delivery"], "excited");
+    s.execute("tts.edit", json!({"clip": id, "delivery": "calm"})).unwrap();
+    assert_eq!(s.project.narrations.get(&clip(&s, id).item).unwrap().delivery, filmcraft_project::Delivery::Calm);
+    // unknown or mistyped: an error naming the choices, nothing changes
+    let before = (*s.project).clone();
+    let e = s.execute("tts.edit", json!({"clip": id, "delivery": "furious"})).unwrap_err().to_string();
+    assert!(e.contains("unknown delivery") && e.contains("dramatic"), "{e}");
+    assert!(s.execute("tts.edit", json!({"clip": id, "delivery": 3})).is_err());
+    assert_eq!(*s.project, before);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

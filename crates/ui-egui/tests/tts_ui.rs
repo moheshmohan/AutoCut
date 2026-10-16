@@ -148,7 +148,19 @@ fn write_add_click_to_edit_and_save_in_place() {
     // the panel opens beside Properties, leaving the Program monitor visible
     assert!(!d.ids("program.").is_empty(), "Program monitor still shown");
     let ids = d.ids("tts.");
-    for id in ["tts.language", "tts.voice", "tts.hearVoice", "tts.advanced", "tts.pitch", "tts.pace", "tts.text", "tts.addPause", "tts.preview", "tts.save"] {
+    for id in [
+        "tts.language",
+        "tts.voice",
+        "tts.hearVoice",
+        "tts.advanced",
+        "tts.pitch",
+        "tts.delivery",
+        "tts.pace",
+        "tts.text",
+        "tts.addPause",
+        "tts.preview",
+        "tts.save",
+    ] {
         assert!(ids.iter().any(|i| i == id), "missing {id} in {ids:?}");
     }
     // type a script and add a pause
@@ -224,6 +236,34 @@ fn settings_controls_and_hear_this_voice() {
     assert!(!d.ids("tts.").iter().any(|i| i == "tts.pitch"));
     d.click("tts.advanced");
     assert!(d.ids("tts.").iter().any(|i| i == "tts.pitch"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delivery_is_saved_with_the_narration_and_loads_back() {
+    let dir = scratch("delivery");
+    let mut d = Driver::demo(&dir);
+    d.exec("window.panel.TextToSpeech", json!({}));
+    d.frames(3);
+    assert!(d.ids("tts.").iter().any(|i| i == "tts.delivery"));
+    assert_eq!(d.draft()["delivery"], "plain");
+    d.ok("ui.set", json!({"tts": {"delivery": "excited"}}));
+    d.frames(2);
+    d.click("tts.text");
+    d.type_text("Look at this one!");
+    d.exec("playhead.set", json!({"seconds": 1.0}));
+    d.click("tts.save");
+    d.settle();
+    let clips = d.narration_clips();
+    assert_eq!(clips.len(), 1);
+    let n = d.exec("tts.inspect", json!({"clip": clips[0]}));
+    assert_eq!(n["narration"]["delivery"], "excited", "{n}");
+    // a fresh draft keeps the delivery, like the voice and pitch
+    d.click("tts.new");
+    d.frames(2);
+    assert_eq!(d.draft()["delivery"], "excited");
+    // a basic voice reads plainly, and the panel says so
+    assert!(d.ui().to_string().contains("excited"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -40,7 +40,7 @@ pub use keyframe::{Interpolation, Keyframe, Param, ParamValue};
 pub use mask::{Mask, MaskMode, MaskPath, MaskVertex, TrackMethod};
 pub use mixer::{AutomationMode, InputMap, MixerStrip, TrackSend};
 pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSource};
-pub use narration::{Narration, VocalPitch};
+pub use narration::{Delivery, Narration, VocalPitch};
 pub use transcript::{Speaker, Transcript, Word};
 
 macro_rules! id_type {

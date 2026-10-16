@@ -1,4 +1,4 @@
-//! Text to Speech panel: write what the narrator says, pick a language, voice, vocal pitch and pace,
+//! Text to Speech panel: write what the narrator says, pick a language, voice, vocal pitch, delivery and pace,
 //! hear it, and save it as a narration clip. Selecting a narration clip on the timeline loads its
 //! script and settings here (and brings the panel forward), and Save regenerates it in place.
 //! Every action is a `tts.*` command, so the panel, MCP and the control channel share one path.
@@ -9,7 +9,7 @@
 //! licence); it runs as a job with progress and Cancel.
 //!
 //! Automation ids: `tts.language`, `tts.voice`, `tts.hearVoice`, `tts.advanced` (twirl),
-//! `tts.pitch`, `tts.pace`, `tts.text`, `tts.addPause`, `tts.preview`, `tts.save`, `tts.new`,
+//! `tts.pitch`, `tts.delivery`, `tts.pace`, `tts.text`, `tts.addPause`, `tts.preview`, `tts.save`, `tts.new`,
 //! `tts.download`, `tts.download.confirm`, `tts.download.cancel`, `tts.cloneOpen` (twirl),
 //! `tts.cloneEngine`, `tts.cloneModel`, `tts.cloneName`, `tts.cloneConsent`, `tts.clone`,
 //! `tts.cloneDownload.confirm`, `tts.cloneDownload.cancel`.
@@ -22,9 +22,13 @@
 //! included; VoxCPM1.5 faster, VoxCPM2 best quality) or *Fast* (OpenVoice: a Kokoro voice
 //! re-voiced, timbre only) — and the chosen model's one-time download, confirmed in the panel
 //! with its size, source and licence, with progress and Cancel.
+//!
+//! **Delivery** (Advanced) is the feeling a line is spoken with — warm, excited, amazed, curious,
+//! calm, dramatic, conversational, or plain. The natural cloned voices are asked for it; the
+//! other voices read plainly, and the menu says so.
 
 use egui::{Align2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
-use filmcraft_project::{ClipId, VocalPitch};
+use filmcraft_project::{ClipId, Delivery, VocalPitch};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -43,6 +47,7 @@ pub struct TtsDraft {
     pub language: String,
     pub voice: String,
     pub pitch: VocalPitch,
+    pub delivery: Delivery,
     pub pace: f64,
     pub advanced_open: bool,
     /// The narration clip and item the draft was loaded from (None: a new narration).
@@ -87,6 +92,7 @@ impl Default for TtsDraft {
             language: "en-US".into(),
             voice: if natural_installed() { "kokoro-heart".into() } else { filmcraft_tts::default_voice_id().into() },
             pitch: VocalPitch::Default,
+            delivery: Delivery::Plain,
             pace: 1.0,
             advanced_open: true,
             loaded_from: None,
@@ -106,7 +112,7 @@ impl Default for TtsDraft {
 
 impl TtsDraft {
     fn params(&self) -> serde_json::Value {
-        json!({"text": self.text, "voice": self.voice, "pitch": self.pitch.id(), "pace": self.pace})
+        json!({"text": self.text, "voice": self.voice, "pitch": self.pitch.id(), "delivery": self.delivery.id(), "pace": self.pace})
     }
 }
 
@@ -227,6 +233,7 @@ pub fn follow_selection(app: &mut FilmcraftApp) {
                 d.language = n.language;
                 d.voice = n.voice;
                 d.pitch = n.pitch;
+                d.delivery = n.delivery;
                 d.pace = n.pace;
                 d.loaded_from = Some((clip.0, item));
                 if first_time {
@@ -536,7 +543,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.painter().text(pos2(r.min.x + 22.0, r.center().y), Align2::LEFT_CENTER, "Hear this voice", Tokens::semibold(12.0), col);
         auto.add("tts.hearVoice", visible(ui, r), "Hear this voice");
         if resp.clicked() && voice_ready && !busy {
-            actions.push(Action::Run("tts.preview", json!({"sample": true, "voice": d.voice, "pitch": d.pitch.id(), "pace": d.pace}), true));
+            actions.push(Action::Run(
+                "tts.preview",
+                json!({"sample": true, "voice": d.voice, "pitch": d.pitch.id(), "delivery": d.delivery.id(), "pace": d.pace}),
+                true,
+            ));
         }
         ui.add_space(8.0);
         let (hr, open) = crate::widgets::section_header(ui, egui::Id::new("tts-advanced"), "Advanced", d.advanced_open, &t, true);
@@ -544,15 +555,41 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         d.advanced_open = open;
         if open {
             ui.add_space(4.0);
-            label(ui, &t, "Vocal pitch");
-            let cb = egui::ComboBox::from_id_salt("tts-pitch").selected_text(d.pitch.label()).width(w).show_ui(ui, |ui| {
-                for p in VocalPitch::ALL {
-                    if ui.selectable_label(d.pitch == p, p.label()).clicked() {
-                        d.pitch = p;
-                    }
-                }
+            // pitch and delivery side by side, so the script box keeps its place
+            let half = ((w - 8.0) / 2.0).max(60.0);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(half);
+                    label(ui, &t, "Vocal pitch");
+                    let cb = egui::ComboBox::from_id_salt("tts-pitch").selected_text(d.pitch.label()).width(half).show_ui(ui, |ui| {
+                        for p in VocalPitch::ALL {
+                            if ui.selectable_label(d.pitch == p, p.label()).clicked() {
+                                d.pitch = p;
+                            }
+                        }
+                    });
+                    auto.add("tts.pitch", visible(ui, cb.response.rect), "Vocal pitch");
+                });
+                ui.vertical(|ui| {
+                    ui.set_width(half);
+                    label(ui, &t, "Delivery");
+                    let plain_only = !takes_delivery(&cloned_list, &d.voice);
+                    let cb = egui::ComboBox::from_id_salt("tts-delivery").selected_text(d.delivery.label()).width(half).show_ui(ui, |ui| {
+                        for v in Delivery::ALL {
+                            if ui.selectable_label(d.delivery == v, v.label()).clicked() {
+                                d.delivery = v;
+                            }
+                        }
+                    });
+                    let hint = if plain_only {
+                        "This voice reads plainly: natural cloned voices speak with a delivery"
+                    } else {
+                        "How the line is spoken: warm, excited, amazed…"
+                    };
+                    let r = cb.response.on_hover_text(hint);
+                    auto.add("tts.delivery", visible(ui, r.rect), "Delivery");
+                });
             });
-            auto.add("tts.pitch", visible(ui, cb.response.rect), "Vocal pitch");
             ui.add_space(10.0);
             label(ui, &t, "Pace");
             ui.spacing_mut().slider_width = w - 56.0;
@@ -619,10 +656,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     for a in actions {
         match a {
             Action::New => {
-                let keep = (app.ui.tts.language.clone(), app.ui.tts.voice.clone(), app.ui.tts.pitch, app.ui.tts.pace);
+                let keep = (app.ui.tts.language.clone(), app.ui.tts.voice.clone(), app.ui.tts.pitch, app.ui.tts.pace, app.ui.tts.delivery);
                 app.session.state.selection.clear();
                 let dl = app.ui.tts.download_job;
-                app.ui.tts = TtsDraft { language: keep.0, voice: keep.1, pitch: keep.2, pace: keep.3, download_job: dl, ..Default::default() };
+                app.ui.tts =
+                    TtsDraft { language: keep.0, voice: keep.1, pitch: keep.2, pace: keep.3, delivery: keep.4, download_job: dl, ..Default::default() };
             }
             Action::Run(cmd, p, play) => start(app, cmd, p, play),
             Action::Download => {
@@ -698,6 +736,11 @@ fn clone_summary(v: &serde_json::Value) -> String {
 /// The part of `r` the scroll area shows (what a click can reach).
 fn visible(ui: &egui::Ui, r: Rect) -> Rect {
     r.intersect(ui.clip_rect())
+}
+
+/// `voice` speaks with a delivery: a natural (VoxCPM) cloned voice of `cloned` (`tts.clonedVoices`).
+fn takes_delivery(cloned: &serde_json::Value, voice: &str) -> bool {
+    cloned.as_array().is_some_and(|a| a.iter().any(|v| v["id"] == voice && v["engine"] == "voxcpm"))
 }
 
 fn label(ui: &mut egui::Ui, t: &Tokens, text: &str) {

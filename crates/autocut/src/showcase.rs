@@ -26,6 +26,7 @@
 
 use std::collections::BTreeMap;
 
+use filmcraft_engine::project::Delivery;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -273,9 +274,27 @@ pub struct Script {
     /// `"outro"` or an entry's number (`"3"`). Subtitles still show the part as written.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub say: BTreeMap<String, String>,
+    /// How each part is spoken — a narration delivery (`conversational`, `warm`, `excited`,
+    /// `amazed`, `curious`, `calm`, `dramatic`, `plain`) — by `"intro"`, `"outro"` or an entry's
+    /// number. A part without one (or with an unknown one) is spoken [`Script::delivery_of`]'s
+    /// default. Voices that cannot take a delivery read every part plainly.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub delivery: BTreeMap<String, String>,
 }
 
+/// How the intro is spoken when the script does not say.
+pub const INTRO_DELIVERY: Delivery = Delivery::Excited;
+/// How every other part is spoken when the script does not say.
+pub const DEFAULT_DELIVERY: Delivery = Delivery::Warm;
+/// The deliveries the script model may choose from (plain and dramatic are left to people).
+const SCRIPT_DELIVERIES: [Delivery; 6] = [Delivery::Conversational, Delivery::Warm, Delivery::Excited, Delivery::Amazed, Delivery::Curious, Delivery::Calm];
+
 impl Script {
+    /// How the part under `key` (`"intro"`, `"outro"` or an entry's number) is spoken.
+    pub fn delivery_of(&self, key: &str) -> Delivery {
+        self.delivery.get(key).and_then(|d| Delivery::from_id(d)).unwrap_or(if key == "intro" { INTRO_DELIVERY } else { DEFAULT_DELIVERY })
+    }
+
     /// What the voice says for `text`, a part of the script shown as written under `key`
     /// (`"intro"`, `"outro"` or an entry's number): its [`Script::say`] when it has one, then
     /// the show's respellings.
@@ -459,10 +478,12 @@ pub fn display_label(label: &str) -> String {
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
-fn template_line(e: &Entry) -> String {
+/// A line for an entry the script has none for, said as a sentence: "In October 2022, I met
+/// the red robot."
+pub(crate) fn template_line(e: &Entry) -> String {
     let when = month_year(e.unix);
     let what = e.label.trim();
-    if when.is_empty() { format!("Next up: the {what}.") } else { format!("{when}: the {what}.") }
+    if when.is_empty() { format!("Next up, I met the {what}.") } else { format!("In {when}, I met the {what}.") }
 }
 
 /// Clean one model sentence: one line, no quotes or numbering, at most ~40 words.
@@ -531,7 +552,7 @@ fn item_listing(n: usize, e: &Entry) -> String {
 /// one long answer for a whole show can run past the request timeout.
 const SCRIPT_BATCH: usize = 6;
 
-const SCRIPT_SYSTEM: &str = "You write short, natural voice-over lines for a YouTube video. The narrator is the person who filmed the clips, speaking in the first person, warm and a little excited. Use only the facts given; never invent names, brands, places or numbers, and never invent experiences or impressions the facts do not state (trying it, talking to it, how it sounded, what it felt like). Say \"next\" or \"then\", never \"lastly\" or \"finally\", except for the last item of the video. Answer with JSON only.";
+const SCRIPT_SYSTEM: &str = "You write short, natural voice-over lines for a YouTube video, to be spoken aloud. The narrator is the person who filmed the clips, telling a friend about them in the first person: relaxed, warm and genuinely excited, with contractions (I'd, it's, that's) and sentences of different lengths. Never open a line with a bare date or place followed by a colon or a full stop (\"September 2020, at home: my first robot.\"): work the when and where into a sentence (\"Back in September 2020, I built my first robot at home.\"), and do not start two lines the same way. Use only the facts given; never invent names, brands, places or numbers, and never invent experiences or impressions the facts do not state (trying it, talking to it, how it sounded, what it felt like). Say \"next\" or \"then\", never \"lastly\" or \"finally\", except for the last item of the video. Answer with JSON only.";
 
 /// The voice-over for `entries`, written by `model` from the analysis facts: the intro and
 /// outro in one request, then the entries' lines a few at a time. Any line the model does not
@@ -559,6 +580,7 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
         Err(e) => progress(&format!("the script model did not write the intro ({e}); using a plain one")),
     }
     let mut written: Vec<Option<String>> = vec![None; entries.len()];
+    let mut delivery: BTreeMap<String, String> = BTreeMap::new();
     for (b, batch) in entries.chunks(SCRIPT_BATCH).enumerate() {
         let listing: String = batch.iter().enumerate().map(|(i, e)| item_listing(i + 1, e)).collect::<Vec<_>>().join("\n");
         let with_facts = batch.iter().any(|e| !e.facts.is_empty());
@@ -567,15 +589,23 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
         } else {
             "Each is one or two short spoken sentences (at most 25 words) that say when it was and what it is or does, as I would tell a friend; do not start with the item's heading."
         };
+        let moods: Vec<&str> = SCRIPT_DELIVERIES.iter().map(|d| d.id()).collect();
         let user = format!(
-            "{video}\n\nWrite \"lines\": exactly {} entries, one per item below in the same order. {ask}\n\nItems:\n{listing}\n\nJSON: {{\"lines\": [\"...\"]}}",
-            batch.len()
+            "{video}\n\nWrite \"lines\": exactly {} entries, one per item below in the same order. {ask} Also write \"deliveries\": for each line, how I say it, one of {} (amazed for something impressive, curious for something odd, calm for something quiet).\n\nItems:\n{listing}\n\nJSON: {{\"lines\": [\"...\"], \"deliveries\": [\"...\"]}}",
+            batch.len(),
+            moods.join(", ")
         );
         match model.complete_json(SCRIPT_SYSTEM, &user, &[]).await {
             Ok(v) => {
                 let lines = v.get("lines").and_then(Value::as_array).cloned().unwrap_or_default();
+                let said = v.get("deliveries").and_then(Value::as_array).cloned().unwrap_or_default();
                 for (i, e) in batch.iter().enumerate() {
                     let line = lines.get(i).and_then(Value::as_str).map(tidy).map(|l| strip_heading(&l, e)).filter(|l| l.split_whitespace().count() >= 3);
+                    // only a delivery the model may choose, and only for a line it wrote
+                    let mood = said.get(i).and_then(Value::as_str).and_then(Delivery::from_id).filter(|d| SCRIPT_DELIVERIES.contains(d));
+                    if let (Some(_), Some(d)) = (&line, mood) {
+                        delivery.insert(e.number.to_string(), d.id().to_string());
+                    }
                     if let Some(slot) = written.get_mut(b * SCRIPT_BATCH + i) {
                         *slot = line;
                     }
@@ -608,7 +638,7 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
     if outro.split_whitespace().count() < 4 {
         outro = format!("That's {} {}s so far. Thanks for watching, and see you at the next one.", entries.len(), opts.subject);
     }
-    Script { intro, lines, outro, templated, ..Script::default() }
+    Script { intro, lines, outro, templated, delivery, ..Script::default() }
 }
 
 /// "2020 – 2026" for the entries' years.
@@ -1004,11 +1034,12 @@ async fn narrate(
     voice: Option<&str>,
     say: &str,
     shown: &str,
+    delivery: Delivery,
     t: f64,
     narrations: &mut Narrations,
 ) -> Result<f64, AutoCutError> {
     let Some(voice) = voice else { return Ok(0.0) };
-    let r = run(ex, "tts.create", json!({"text": say, "voice": voice, "time": ticks(t), "track": tr.voice})).await?;
+    let r = run(ex, "tts.create", json!({"text": say, "voice": voice, "delivery": delivery.id(), "time": ticks(t), "track": tr.voice})).await?;
     if let Some(c) = r["clip"].as_u64() {
         narrations.clips.push(c);
     }
@@ -1622,7 +1653,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // ---- intro: a cold open — a montage of robots from across the years cut on the beat,
     // the title over it, a riser into an impact
     let intro_voice_at = 2.2;
-    let intro_spoken = narrate(ex, &tr, voice, &script.spoken("intro", &script.intro), &script.intro, intro_voice_at, &mut narrations).await?;
+    let intro_spoken =
+        narrate(ex, &tr, voice, &script.spoken("intro", &script.intro), &script.intro, script.delivery_of("intro"), intro_voice_at, &mut narrations).await?;
     // the voice track's next free moment: a line never starts over the last one
     let mut voice_free_at = intro_voice_at + intro_spoken;
     let intro_needs = (intro_voice_at + intro_spoken + 0.8).max(6.0);
@@ -1695,7 +1727,9 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let lead = if new_year { CARD_LEAD } else { 0.5 };
         let line = script.lines.get(k).cloned().unwrap_or_else(|| template_line(e));
         let voice_at = (t + lead).max(voice_free_at + 0.15);
-        let spoken = narrate(ex, &tr, voice, &script.spoken(&e.number.to_string(), &line), &line, voice_at, &mut narrations).await?;
+        let spoken =
+            narrate(ex, &tr, voice, &script.spoken(&e.number.to_string(), &line), &line, script.delivery_of(&e.number.to_string()), voice_at, &mut narrations)
+                .await?;
         if spoken > 0.0 {
             voice_free_at = voice_at + spoken;
         }
@@ -1821,7 +1855,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // ---- outro: the total, over a blurred shot of the latest one, with the closing words
     built.chapters.push(Chapter { seconds: t, title: "Outro".into() });
     let outro_voice_at = (t + 0.8).max(voice_free_at + 0.15);
-    let outro_spoken = narrate(ex, &tr, voice, &script.spoken("outro", &script.outro), &script.outro, outro_voice_at, &mut narrations).await?;
+    let outro_spoken =
+        narrate(ex, &tr, voice, &script.spoken("outro", &script.outro), &script.outro, script.delivery_of("outro"), outro_voice_at, &mut narrations).await?;
     let outro_len = (outro_voice_at - t + outro_spoken + 1.5).max(5.0);
     if let Some(h0) = entries.last().and_then(|e| e.shots.first()) {
         let len = outro_len.min((h0.clip_seconds - 0.4).max(1.0));
@@ -2574,7 +2609,7 @@ mod tests {
         let s = write_script(&model, &Options::default(), &entries, &mut |_| {}).await;
         assert_eq!(s.lines.len(), 2);
         assert!(s.lines[0].contains("Spot"));
-        assert_eq!(s.lines[1], "November 2023: the Pepper humanoid robot.");
+        assert_eq!(s.lines[1], "In November 2023, I met the Pepper humanoid robot.");
         assert_eq!(s.templated, 1);
         assert!(s.intro.contains("every robot"), "{}", s.intro);
         assert!(s.outro.contains("thanks"));
@@ -2602,5 +2637,35 @@ mod tests {
         assert_eq!(s.lines[0], "I saw this one at home.", "the copied heading is not read out");
         assert_eq!(s.lines[6], "It waved at me from across the room.");
         assert_eq!(s.templated, 1, "a too-short line gets a template");
+    }
+
+    #[tokio::test]
+    async fn the_script_model_picks_how_each_line_is_said() {
+        let day = 1_599_600_000;
+        let facts: Vec<ClipFacts> = (0..4).map(|i| fact(i, &format!("robot model {i}"), "humanoid", day + 86_400 * 30 * i as i64, 1.0)).collect();
+        let entries = group(&facts, "robot", 0.3);
+        let model = crate::llm::FixedModel::new(vec![
+            json!({"intro": "Welcome to every robot I have ever filmed.", "outro": "Thanks for watching all of these robots!"}),
+            json!({"lines": ["It waved at me from across the room.", "This one could paint with real brushes.", "x", "It stood very still by the door."],
+                   "deliveries": ["amazed", "dramatic", "excited", "nonsense"]}),
+        ]);
+        let s = write_script(&model, &Options::default(), &entries, &mut |_| {}).await;
+        let asked = model.asked.lock().unwrap();
+        assert!(asked[1].1.contains("\"deliveries\"") && asked[1].1.contains("curious"), "{}", asked[1].1);
+        assert!(asked[1].0.contains("bare date"), "the system prompt asks for spoken sentences");
+        // a delivery the model may choose, for a line it wrote; the rest are the defaults
+        assert_eq!(s.delivery.get("1").map(String::as_str), Some("amazed"));
+        assert_eq!(s.delivery.get("2"), None, "dramatic is left to people");
+        assert_eq!(s.delivery.get("3"), None, "the line was templated");
+        assert_eq!(s.delivery.get("4"), None, "unknown");
+        assert_eq!(s.delivery_of("1"), Delivery::Amazed);
+        assert_eq!((s.delivery_of("2"), s.delivery_of("intro"), s.delivery_of("outro")), (DEFAULT_DELIVERY, INTRO_DELIVERY, DEFAULT_DELIVERY));
+        // a reviewed plan may say anything a person can choose, and an unknown one is the default
+        let plan =
+            Script { delivery: [("2".to_string(), "dramatic".to_string()), ("3".to_string(), "loud".to_string())].into_iter().collect(), ..Script::default() };
+        assert_eq!((plan.delivery_of("2"), plan.delivery_of("3")), (Delivery::Dramatic, DEFAULT_DELIVERY));
+        let v = serde_json::to_value(&plan).unwrap();
+        assert_eq!(v["delivery"]["2"], "dramatic");
+        assert!(serde_json::to_value(Script::default()).unwrap().get("delivery").is_none(), "none written when there are none");
     }
 }

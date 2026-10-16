@@ -866,7 +866,7 @@ pub fn gender(p: &Profile) -> Gender {
 #[cfg(feature = "voxcpm")]
 mod natural {
     use super::*;
-    use crate::voxcpm::{Prompt, Settings, VoxCpm, text};
+    use crate::voxcpm::{Prompt, Settings, Variant, VoxCpm, text};
 
     /// Silence between utterances, ms.
     const UTTERANCE_GAP_MS: u64 = 250;
@@ -973,6 +973,9 @@ mod natural {
             let max = (crate::MAX_SECONDS * f64::from(rate)) as usize;
             let s = Settings { cfg: self.natural.cfg, timesteps: self.natural.timesteps, ..Settings::default() };
             let gap = (UTTERANCE_GAP_MS * u64::from(rate) / 1000) as usize;
+            // a spoken style goes in front of every utterance; VoxCPM2 follows it only after a
+            // reference-only prompt (a continuation prompt sets the delivery itself)
+            let style = params.style.filter(|_| self.model.variant() == Variant::V2 && !self.prompt.continues()).map(text::style_prefix).unwrap_or_default();
             let mut out: Vec<f32> = Vec::new();
             let mut spoke = false;
             for (i, piece) in text::pieces(script)?.into_iter().enumerate() {
@@ -982,7 +985,8 @@ mod natural {
                         if spoke {
                             out.resize(out.len().saturating_add(gap), 0.0);
                         }
-                        let a = self.model.speak(&u, Some(&self.prompt), &Settings { seed: s.seed.wrapping_add(i as u64), ..s }, &mut |_, _| true)?;
+                        let said = format!("{style}{u}");
+                        let a = self.model.speak(&said, Some(&self.prompt), &Settings { seed: s.seed.wrapping_add(i as u64), ..s }, &mut |_, _| true)?;
                         out.extend_from_slice(trim_silence(&a, rate));
                         spoke = true;
                     }

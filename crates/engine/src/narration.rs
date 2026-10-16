@@ -2,7 +2,7 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `tts.voices` | languages, voices, vocal pitches, pace limits and the pause marker |
+//! | `tts.voices` | languages, voices, vocal pitches, deliveries, pace limits and the pause marker |
 //! | `tts.preview` | synthesize without changing the project (`sample: true` speaks the voice's sample sentence); the host plays [`Session::tts_preview`]; `path` also writes a WAV |
 //! | `tts.create` | synthesize (or take from the caches: `cached`), write `Narration <n>.wav`, import it and place it at the playhead (one undo step) |
 //! | `tts.edit` | change a narration clip's script or voice settings and regenerate it in place (one undo step) |
@@ -28,16 +28,20 @@
 //! **Caches.** Synthesis is looked up first in memory ([`Session::tts_cache`], the last few) and
 //! then on disk ([`Session::tts_disk`], `<data dir>/narration-cache`, see
 //! [`filmcraft_tts::cache`]): keyed by the script, the voice's identity (for a cloned voice its
-//! profile too), pitch and pace, capped at 2 GB, least recently used out first. A rebuild that
+//! profile too), pitch, pace and delivery, capped at 2 GB, least recently used out first. A rebuild that
 //! reads the same lines with the same voice synthesizes nothing; `tts.create` and `tts.render`
 //! report `cached`. Native frontends turn the disk cache on; a damaged or unwritable cache only
 //! means the voice speaks again.
+//!
+//! **Delivery** (`plain`, `conversational`, `warm`, `excited`, `amazed`, `curious`, `calm`,
+//! `dramatic`) is the feeling a line is spoken with: the natural cloned voices (VoxCPM2) are
+//! asked for it in words; the other voices read the script as they always do.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 
-use filmcraft_project::{ClipId, ItemId, ItemKind, MediaRef, Narration, TrackId, TrackKind, VocalPitch};
+use filmcraft_project::{ClipId, Delivery, ItemId, ItemKind, MediaRef, Narration, TrackId, TrackKind, VocalPitch};
 use filmcraft_time::{Tick, TimeRange};
 use filmcraft_tts as tts;
 
@@ -71,7 +75,7 @@ fn has_narration_clip(s: &Session) -> std::result::Result<(), String> {
 /// Script and settings from params, on top of `base`.
 fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration> {
     // a setting of the wrong type is an error, never silently replaced by a default
-    for key in ["text", "voice", "pitch"] {
+    for key in ["text", "voice", "pitch", "delivery"] {
         if p.get(key).is_some_and(|v| !v.is_string()) {
             return Err(bad(cmd, format!("`{key}` must be a string")));
         }
@@ -95,7 +99,12 @@ fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration>
         Some(v) => v.as_f64().ok_or_else(|| bad(cmd, "`pace` must be a number"))?,
         None => base.map_or(1.0, |b| b.pace),
     };
-    let n = Narration { text, language: language.to_string(), voice, pitch, pace, speech_duration: Tick::ZERO };
+    let delivery = match str_p(p, "delivery") {
+        Some(v) => Delivery::from_id(v)
+            .ok_or_else(|| bad(cmd, format!("unknown delivery `{v}` ({})", Delivery::ALL.iter().map(|d| d.id()).collect::<Vec<_>>().join(", "))))?,
+        None => base.map(|b| b.delivery).unwrap_or_default(),
+    };
+    let n = Narration { text, language: language.to_string(), voice, pitch, pace, delivery, speech_duration: Tick::ZERO };
     n.check().map_err(|e| bad(cmd, e))?;
     Ok(n)
 }
@@ -106,7 +115,7 @@ pub type SynthCache = Arc<Mutex<Vec<(String, Arc<tts::Audio>)>>>;
 const CACHE_ENTRIES: usize = 6;
 
 fn cache_key(n: &Narration) -> String {
-    format!("{}\u{1f}{}\u{1f}{}\u{1f}{}", n.voice, n.pitch.id(), n.pace.to_bits(), n.text)
+    format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", n.voice, n.pitch.id(), n.pace.to_bits(), n.delivery.id(), n.text)
 }
 
 fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
@@ -122,14 +131,19 @@ fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
 /// Synthesize `n` (no cache).
 fn render(n: &Narration, models_dir: Option<&std::path::Path>) -> std::result::Result<tts::Audio, tts::TtsError> {
     let voice = tts::voice_in(&n.voice, models_dir)?;
-    voice.synthesize(&n.text, &tts::Params { semitones: n.pitch.semitones(), pace: n.pace })
+    voice.synthesize(&n.text, &params(n))
+}
+
+/// How `n` is spoken.
+fn params(n: &Narration) -> tts::Params {
+    tts::Params { semitones: n.pitch.semitones(), pace: n.pace, style: n.delivery.style() }
 }
 
 /// The disk cache's key for `n` (None: the voice has no stable identity, e.g. a cloned voice
 /// whose profile cannot be read; it is then not cached).
 fn disk_key(n: &Narration, models_dir: Option<&std::path::Path>) -> Option<String> {
     let identity = tts::cache::voice_identity(&n.voice, models_dir)?;
-    Some(tts::cache::DiskCache::key(&identity, &n.text, &tts::Params { semitones: n.pitch.semitones(), pace: n.pace }))
+    Some(tts::cache::DiskCache::key(&identity, &n.text, &params(n)))
 }
 
 /// `n` from the memory cache, else the disk cache (then also kept in memory).
@@ -189,6 +203,7 @@ fn voices(_s: &mut Session, _p: &Value) -> Result<Value> {
         "cloned": crate::voice_clone::cloned_json(),
         "defaultVoice": tts::default_voice_id(),
         "pitches": VocalPitch::ALL.iter().map(|p| json!({"id": p.id(), "label": p.label(), "semitones": p.semitones()})).collect::<Vec<_>>(),
+        "deliveries": Delivery::ALL.iter().map(|d| json!({"id": d.id(), "label": d.label(), "style": d.style()})).collect::<Vec<_>>(),
         "pace": {"min": tts::MIN_PACE, "max": tts::MAX_PACE, "default": 1.0},
         "pauseMarker": tts::script::PAUSE_MARKER,
         "maxTextBytes": tts::MAX_TEXT_BYTES,
@@ -553,7 +568,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.preview",
             "Preview Narration",
-            r#"{"text":str?,"voice":str?,"pitch":"default"?,"pace":f64?,"sample":bool?,"clip":id?,"path":str?}"#,
+            r#"{"text":str?,"voice":str?,"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"?,"sample":bool?,"clip":id?,"path":str?}"#,
             always,
             preview,
             false,
@@ -561,17 +576,24 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.create",
             "New Narration",
-            r#"{"text":str,"voice":str?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
+            r#"{"text":str,"voice":str?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
             has_seq,
             create,
             true,
         ),
-        spec("tts.edit", "Edit Narration", r#"{"clip":id?,"text":str?,"voice":str?,"pitch":str?,"pace":f64?,"dir":str?}"#, has_narration_clip, edit, true),
+        spec(
+            "tts.edit",
+            "Edit Narration",
+            r#"{"clip":id?,"text":str?,"voice":str?,"pitch":str?,"pace":f64?,"delivery":str?,"dir":str?}"#,
+            has_narration_clip,
+            edit,
+            true,
+        ),
         spec("tts.inspect", "Inspect Narration", r#"{"clip":id?,"item":id?}"#, always, inspect, false),
         spec(
             "tts.render",
             "Synthesize Narration",
-            r#"{"text":str?,"voice":str?,"pitch":str?,"pace":f64?,"sample":bool?,"clip":id?,"wait":bool?}"#,
+            r#"{"text":str?,"voice":str?,"pitch":str?,"pace":f64?,"delivery":str?,"sample":bool?,"clip":id?,"wait":bool?}"#,
             always,
             render_job,
             false,

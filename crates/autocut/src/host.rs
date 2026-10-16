@@ -115,11 +115,9 @@ pub fn default_title(subject: &str) -> String {
     format!("Every {} I've Filmed", words.join(" "))
 }
 
-/// A line for an entry the script has none for: "October 2022: the red robot."
+/// A line for an entry the script has none for.
 fn plain_line(e: &Entry) -> String {
-    let when = showcase::month_year(e.unix);
-    let what = e.label.trim();
-    if when.is_empty() { format!("Next up: the {what}.") } else { format!("{when}: the {what}.") }
+    showcase::template_line(e)
 }
 
 /// About how many seconds a shot shows the subject: its length times the share of its sampled
@@ -222,7 +220,15 @@ impl PlanDoc {
                 say.insert((k + 1).to_string(), v.clone());
             }
         }
-        Ok((opts, entries, Script { intro, lines, outro, templated: script.templated, pronounce: script.pronounce.clone(), say }))
+        // deliveries follow their entry the same way
+        let mut delivery: std::collections::BTreeMap<String, String> =
+            script.delivery.iter().filter(|(k, _)| k.as_str() == "intro" || k.as_str() == "outro").map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (k, &h) in heads.iter().enumerate() {
+            if let Some(v) = script.delivery.get(&(h + 1).to_string()) {
+                delivery.insert((k + 1).to_string(), v.clone());
+            }
+        }
+        Ok((opts, entries, Script { intro, lines, outro, templated: script.templated, pronounce: script.pronounce.clone(), say, delivery }))
     }
 }
 
@@ -783,7 +789,8 @@ mod tests {
                 serde_json::to_value(entry(3, "DP World Promobot", vec![shot(3, 10.0, 1, 0)])).unwrap(),
             ],
             "script": {"intro": "Hi.", "lines": ["I built a Zaku II.", "Someone.", "A Promobot."], "outro": "Bye.",
-                       "pronounce": {"Zaku II": "Zaku Two"}, "say": {"intro": "Hello!", "1": "I built it.", "3": "A Promobot from D P World."}},
+                       "pronounce": {"Zaku II": "Zaku Two"}, "say": {"intro": "Hello!", "1": "I built it.", "3": "A Promobot from D P World."},
+                       "delivery": {"intro": "excited", "2": "calm", "3": "amazed"}},
         }))
         .unwrap();
         let mut v = serde_json::to_value(&plan).unwrap();
@@ -795,6 +802,9 @@ mod tests {
         // the third entry is now the second: its spoken version moves with it
         let say: Vec<(&str, &str)> = script.say.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         assert_eq!(say, vec![("1", "I built it."), ("2", "A Promobot from D P World."), ("intro", "Hello!")]);
+        // and so does its delivery; the one of the entry left out goes with it
+        let delivery: Vec<(&str, &str)> = script.delivery.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(delivery, vec![("2", "amazed"), ("intro", "excited")]);
     }
 
     #[test]
@@ -810,7 +820,7 @@ mod tests {
         assert_eq!((opts.title.as_str(), opts.subject.as_str(), opts.voice.as_deref()), ("Every Robot I've Filmed", "robot", None));
         assert_eq!(entries.len(), 2);
         // an empty line and outro get plain ones
-        assert_eq!(script.lines, vec!["One.".to_string(), "October 2022: the Spot.".to_string()]);
+        assert_eq!(script.lines, vec!["One.".to_string(), "In October 2022, I met the Spot.".to_string()]);
         assert!(script.outro.contains("2 robots"), "{}", script.outro);
         // the review's fields round-trip
         let mut v = serde_json::to_value(&plan).unwrap();
@@ -821,7 +831,7 @@ mod tests {
         v["fps"] = json!(1e9);
         let plan: PlanDoc = serde_json::from_value(v).unwrap();
         let (opts, entries, script) = plan.resolve().unwrap();
-        assert_eq!((entries.len(), entries[0].label.as_str(), script.lines[0].as_str()), (1, "Spot", "October 2022: the Spot."));
+        assert_eq!((entries.len(), entries[0].label.as_str(), script.lines[0].as_str()), (1, "Spot", "In October 2022, I met the Spot."));
         assert_eq!((opts.voice.as_deref(), opts.width, opts.height, opts.fps), (Some("clone:me"), 7680, 64, 120.0), "hostile sizes are clamped");
         // nothing included: an error, not an empty show
         let none = PlanDoc { entries: plan.entries.iter().map(|e| ReviewEntry { include: false, ..e.clone() }).collect(), ..PlanDoc::default() };

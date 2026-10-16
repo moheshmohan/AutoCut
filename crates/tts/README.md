@@ -81,6 +81,17 @@ clip behaviour: `crates/engine/src/narration.rs`.
   (5–10 s), which needs its exact transcript (Whisper or given) and gets 18 dB of noise
   reduction. `clone:<name>` dispatches on the profile's engine; version 1 profiles load
   unchanged; the narration cache keys a natural clone on its sample's bytes and settings.
+- **Delivery** (`Params::style`): how a line is spoken, as a few plain words ("warm, friendly,
+  smiling, natural storytelling"). The engine maps the narration's delivery (`plain`,
+  `conversational`, `warm`, `excited`, `amazed`, `curious`, `calm`, `dramatic`;
+  `filmcraft_project::Delivery`) to these words. VoxCPM2 takes them as its spoken-style control —
+  the description in parentheses directly in front of each utterance
+  (`voxcpm::text::style_prefix`, brackets stripped, at most 120 characters) — and only after a
+  reference-only prompt, as the reference implementation does (a continuation prompt dictates
+  the delivery itself). Other voices ignore it. A styled reading has its own cache key; the plain
+  ones keep theirs. Measured on a 9 s intro line with the default natural clone, the pitch range
+  (10th–90th percentile) goes from 3.0 semitones plain to 5.4 *excited* (the speaker's own
+  recording: 4.4), and Whisper reads the same words: the style is followed, not spoken.
 - `wav`: WAV reading (16/24/32-bit PCM, float, any channels; hostile files are errors) and
   writing for voice samples.
 
@@ -92,8 +103,8 @@ clip behaviour: `crates/engine/src/narration.rs`.
   `tts.edit` and `tts.preview`.
   - Key: SHA-256 of the cache format version, the voice's identity (`voice_identity`: its id and
     the pinned model files it speaks with; for a cloned voice also its profile's id, version,
-    creation time, base voice and a hash of its tone colours), the pitch and pace (exact bits) and
-    the script. A re-made cloned voice, a new model revision or a format bump never hits old
+    creation time, base voice and a hash of its tone colours), the pitch and pace (exact bits), the
+    delivery's style words when there are any, and the script. A re-made cloned voice, a new model revision or a format bump never hits old
     entries; they age out.
   - Entry: `<key>.fcnc`, a 28-byte header (magic, version, rate, sample count, FNV-1a checksum)
     and the samples as `f32`, bit-exact. Written to a temporary file and renamed into place.
