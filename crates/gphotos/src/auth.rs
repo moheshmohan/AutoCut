@@ -21,6 +21,15 @@ pub const SCOPE: &str = "https://www.googleapis.com/auth/photospicker.mediaitems
 pub const UPLOAD_SCOPE: &str = "https://www.googleapis.com/auth/photoslibrary.appendonly";
 /// What to tell a user whose sign-in lacks [`UPLOAD_SCOPE`].
 pub const UPLOAD_CONSENT: &str = "Google Photos needs your consent before FilmCraft can add files to your library: run `filmcraft-cli photos auth --upload` and leave the \"add to your Google Photos library\" permission ticked";
+/// Read back the albums (and media items) this app created — `albums.list`, `albums.get` and
+/// `mediaItems.search` take nothing else since 2025-03-31. Creating albums and adding to them
+/// is [`UPLOAD_SCOPE`]'s; this one lets FilmCraft find an album it made earlier (by title),
+/// so album commands are idempotent. Requested only by `photos auth --albums`, with the upload
+/// scope (Google: "intended to be requested together with the photoslibrary.appendonly scope").
+pub const ALBUM_SCOPE: &str = "https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata";
+/// What to tell a user whose sign-in lacks [`ALBUM_SCOPE`] or [`UPLOAD_SCOPE`] for an album
+/// command.
+pub const ALBUMS_CONSENT: &str = "Google Photos needs your consent before FilmCraft can make albums and find the ones it made: run `filmcraft-cli photos auth --albums` and leave both Google Photos permissions (add to your library; view what FilmCraft added) ticked";
 /// The loopback redirect. Desktop OAuth clients accept loopback redirects on any port, so the
 /// Google Cloud console needs no redirect entry.
 pub const REDIRECT_URI: &str = "http://127.0.0.1:8417";
@@ -125,14 +134,23 @@ impl Tokens {
     pub fn check_upload(&self) -> Result<(), GPhotosError> {
         if self.grants(UPLOAD_SCOPE) { Ok(()) } else { Err(GPhotosError::Consent(UPLOAD_CONSENT.into())) }
     }
+
+    /// The album permissions ([`UPLOAD_SCOPE`] to create and add, [`ALBUM_SCOPE`] to find what
+    /// FilmCraft made), or the consent error naming the command that grants them.
+    pub fn check_albums(&self) -> Result<(), GPhotosError> {
+        if self.grants(UPLOAD_SCOPE) && self.grants(ALBUM_SCOPE) { Ok(()) } else { Err(GPhotosError::Consent(ALBUMS_CONSENT.into())) }
+    }
 }
 
-/// What a consent asks Google for: the picker alone, or the picker plus uploads.
+/// What a consent asks Google for: the picker alone, the picker plus uploads, or both plus the
+/// albums FilmCraft makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Access {
     #[default]
     Pick,
     PickAndUpload,
+    /// `photos auth --albums`: uploads, and reading back the albums (and items) this app made.
+    PickUploadAndAlbums,
 }
 
 impl Access {
@@ -140,6 +158,7 @@ impl Access {
         match self {
             Access::Pick => &[SCOPE],
             Access::PickAndUpload => &[SCOPE, UPLOAD_SCOPE],
+            Access::PickUploadAndAlbums => &[SCOPE, UPLOAD_SCOPE, ALBUM_SCOPE],
         }
     }
 
@@ -275,6 +294,12 @@ fn check_granted(tokens: &Tokens, access: Access) -> Result<(), GPhotosError> {
     if access == Access::PickAndUpload && !tokens.grants(UPLOAD_SCOPE) {
         return Err(GPhotosError::Auth(
             "Google did not grant the permission to add to your Google Photos library; run `filmcraft-cli photos auth --upload` again and leave it ticked"
+                .into(),
+        ));
+    }
+    if access == Access::PickUploadAndAlbums && !(tokens.grants(UPLOAD_SCOPE) && tokens.grants(ALBUM_SCOPE)) {
+        return Err(GPhotosError::Auth(
+            "Google did not grant both album permissions (add to your library; view what FilmCraft added); run `filmcraft-cli photos auth --albums` again and leave them ticked"
                 .into(),
         ));
     }
@@ -526,5 +551,30 @@ mod tests {
         let both =
             parse_token_response(&format!(r#"{{"access_token":"ya29","expires_in":3599,"refresh_token":"r","scope":"{UPLOAD_SCOPE} {SCOPE}"}}"#)).unwrap();
         assert!(both.check_upload().is_ok() && both.grants(SCOPE));
+    }
+
+    /// Albums need the upload scope (create, add) and the app-created read scope (find what
+    /// FilmCraft made); `--albums` asks for both on top of the picker, incrementally.
+    #[test]
+    fn album_permission_is_checked_and_asked_for_only_with_albums() {
+        let t = |scope: &str| Tokens { access_token: "a".into(), refresh_token: Some("r".into()), expires_at: u64::MAX, scope: scope.into() };
+        for lacking in [SCOPE.to_string(), format!("{SCOPE} {UPLOAD_SCOPE}"), format!("{SCOPE} {ALBUM_SCOPE}")] {
+            let e = t(&lacking).check_albums().unwrap_err();
+            assert!(matches!(e, GPhotosError::Consent(_)) && e.to_string().contains("filmcraft-cli photos auth --albums"), "{lacking}: {e}");
+        }
+        let all = t(&format!("{SCOPE} {UPLOAD_SCOPE} {ALBUM_SCOPE}"));
+        assert!(all.check_albums().is_ok() && all.check_upload().is_ok());
+        assert!(check_granted(&all, Access::PickUploadAndAlbums).is_ok());
+        let e = check_granted(&t(&format!("{SCOPE} {UPLOAD_SCOPE}")), Access::PickUploadAndAlbums).unwrap_err();
+        assert!(e.to_string().contains("--albums"), "{e}");
+        let url = Access::PickUploadAndAlbums.consent_url("id", "st");
+        assert!(url.contains(&format!("scope={}%20{}%20{}&", urlencode(SCOPE), urlencode(UPLOAD_SCOPE), urlencode(ALBUM_SCOPE))), "{url}");
+        assert!(url.contains("include_granted_scopes=true"), "{url}");
+        // the other consents never ask for it
+        for a in [Access::Pick, Access::PickAndUpload] {
+            assert!(!a.consent_url("id", "st").contains("appcreateddata"), "{a:?}");
+        }
+        // and it is never one of the retired library-wide scopes
+        assert!(!ALBUM_SCOPE.ends_with("photoslibrary.readonly") && !ALBUM_SCOPE.ends_with("photoslibrary"));
     }
 }

@@ -8,14 +8,18 @@
 //! - [`cache`]: downloads originals into a local cache so an item is fetched only once.
 //! - [`upload`]: the Library API's resumable upload and `mediaItems:batchCreate`, behind a
 //!   [`upload::Transport`] the tests fake.
+//! - [`albums`]: albums this app creates (create, list, find by title, add its uploads, a note
+//!   at the top), over the same transport; `photos auth --albums` grants what they need.
 //! - [`GooglePhotos::pick`]: the whole flow — open a session, send the user to the picker,
 //!   wait (bounded) for their selection, download it, delete the session.
-//! - [`GooglePhotos::upload`] and [`engine_uploader`]: upload a file; the latter is what hosts
-//!   install as the engine's `photos.upload` uploader.
+//! - [`GooglePhotos::upload`] and [`engine_uploader`]: upload a file (into an album, too); the
+//!   latter is what hosts install as the engine's `photos.*` uploader.
 //!
 //! Google retired the Library API's library-wide read scopes on 2025-03-31, so there is no
-//! server-side search or album browsing any more: the user chooses in the picker. App uploads
-//! still work with the append-only scope.
+//! server-side search or browsing of the user's library any more: the user chooses in the
+//! picker. App uploads still work with the append-only scope, and an app may read back only the
+//! albums and items it created itself (so items a user adds by hand to an album FilmCraft made
+//! are reachable only through the picker).
 //!
 //! Setup (one time): create a Google Cloud project, enable the Photos Picker API (and, to upload,
 //! the Photos Library API), add an OAuth *Desktop* client, keep yourself as a Testing user, and
@@ -24,6 +28,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+pub mod albums;
 pub mod api;
 pub mod auth;
 pub mod cache;
@@ -303,9 +308,17 @@ impl GooglePhotos {
         self.tokens.lock().unwrap_or_else(PoisonError::into_inner).grants(auth::UPLOAD_SCOPE)
     }
 
+    /// Whether the saved sign-in includes the album permissions (`photos auth --albums`).
+    pub fn can_use_albums(&self) -> bool {
+        self.tokens.lock().unwrap_or_else(PoisonError::into_inner).check_albums().is_ok()
+    }
+
     /// Upload `path` into the user's library (see [`upload`]). Without the upload permission
     /// this is a [`GPhotosError::Consent`] naming `filmcraft-cli photos auth --upload`; nothing
-    /// is sent. `progress(sent, total, status)` returning `false` cancels.
+    /// is sent. With [`upload::UploadOptions::album`] (a title or an id) the item goes into that
+    /// album too: an album FilmCraft made earlier with that exact title, else a new one (that
+    /// needs `photos auth --albums`; it is resolved before any byte is sent).
+    /// `progress(sent, total, status)` returning `false` cancels.
     pub fn upload(
         &self,
         path: &Path,
@@ -324,7 +337,40 @@ impl GooglePhotos {
         progress: &mut dyn FnMut(u64, u64, &str) -> bool,
     ) -> Result<upload::Uploaded, GPhotosError> {
         self.tokens.lock().unwrap_or_else(PoisonError::into_inner).check_upload()?;
-        upload::upload_file(http, &|| self.access_token(), path, opts, progress)
+        let bearer = || self.access_token();
+        let Some(album) = opts.album.as_deref().map(str::trim).filter(|a| !a.is_empty()) else {
+            let plain = upload::UploadOptions { album: None, ..opts.clone() };
+            return upload::upload_file(http, &bearer, path, &plain, progress);
+        };
+        // the file first: a file Google would refuse must not leave a new empty album behind
+        upload::check_file(path)?;
+        upload::check_description(opts.description.as_deref())?;
+        self.tokens.lock().unwrap_or_else(PoisonError::into_inner).check_albums()?;
+        if !progress(0, 0, "Finding the Google Photos album") {
+            return Err(GPhotosError::Cancelled);
+        }
+        let mut calls = albums::Albums::new(http, &bearer);
+        calls.backoff = opts.backoff;
+        let ensured = calls.ensure(album, None)?;
+        let into = upload::UploadOptions { album: Some(ensured.album.id.clone()), ..opts.clone() };
+        let mut up = upload::upload_file(http, &bearer, path, &into, progress)?;
+        up.album = Some(ensured.album);
+        up.album_created = ensured.created;
+        Ok(up)
+    }
+
+    /// Run `f` with the album calls over `http`, once the sign-in is known to have the album
+    /// permissions ([`GPhotosError::Consent`] naming `photos auth --albums` otherwise; nothing
+    /// is sent).
+    pub fn albums_with<T>(&self, http: &dyn upload::Transport, f: impl FnOnce(&albums::Albums<'_>) -> Result<T, GPhotosError>) -> Result<T, GPhotosError> {
+        self.tokens.lock().unwrap_or_else(PoisonError::into_inner).check_albums()?;
+        let bearer = || self.access_token();
+        f(&albums::Albums::new(http, &bearer))
+    }
+
+    /// [`Self::albums_with`] over the real transport.
+    pub fn albums<T>(&self, f: impl FnOnce(&albums::Albums<'_>) -> Result<T, GPhotosError>) -> Result<T, GPhotosError> {
+        self.albums_with(&upload::UreqTransport::with_timeout(albums::TIMEOUT), f)
     }
 }
 
@@ -339,6 +385,19 @@ pub fn upload_readiness(dir: &Path) -> Result<(), String> {
     }
     let tokens = auth::Tokens::load(dir).map_err(|_| "Google Photos is not connected: run `filmcraft-cli photos auth --upload`".to_string())?;
     tokens.check_upload().map_err(|e| e.to_string())
+}
+
+/// Whether album commands can run, from what is on disk in `dir` (no network): the OAuth
+/// client, a sign-in, and the album permissions. `Err` says what to do.
+pub fn album_readiness(dir: &Path) -> Result<(), String> {
+    if !dir.join("client_secret.json").is_file() {
+        return Err(format!(
+            "Google Photos is not connected: save your OAuth client as {} (see crates/gphotos/README.md), then run `filmcraft-cli photos auth --albums`",
+            dir.join("client_secret.json").display()
+        ));
+    }
+    let tokens = auth::Tokens::load(dir).map_err(|_| "Google Photos is not connected: run `filmcraft-cli photos auth --albums`".to_string())?;
+    tokens.check_albums().map_err(|e| e.to_string())
 }
 
 /// How long [`EngineUploader::ready`] trusts its last look at the disk (it runs while drawing).
@@ -449,6 +508,8 @@ pub enum GPhotosError {
     Consent(String),
     #[error("upload: {0}")]
     Upload(String),
+    #[error("album: {0}")]
+    Album(String),
     /// The caller stopped it.
     #[error("cancelled")]
     Cancelled,
@@ -496,15 +557,96 @@ mod tests {
         assert!(o.wait <= MAX_WAIT && o.open_browser && o.resume.is_none());
     }
 
-    /// Answers in order; every request is counted.
-    struct Scripted(Mutex<(Vec<upload::Response>, usize)>);
+    /// Answers in order; every request is counted (and its method, URL and body kept).
+    struct Scripted(Mutex<(Vec<upload::Response>, usize)>, Mutex<Vec<(upload::Method, String, String)>>);
+
+    impl Scripted {
+        fn new(answers: Vec<upload::Response>) -> Self {
+            Self(Mutex::new((answers, 0)), Mutex::new(Vec::new()))
+        }
+    }
 
     impl upload::Transport for Scripted {
-        fn send(&self, _: &upload::Request<'_>) -> Result<upload::Response, String> {
+        fn send(&self, req: &upload::Request<'_>) -> Result<upload::Response, String> {
+            self.1.lock().unwrap().push((req.method, req.url.to_string(), String::from_utf8_lossy(req.body).into_owned()));
             let mut s = self.0.lock().unwrap();
             s.1 += 1;
             if s.0.is_empty() { Err("no more answers".into()) } else { Ok(s.0.remove(0)) }
         }
+    }
+
+    fn answer(body: &str) -> upload::Response {
+        upload::Response { status: 200, headers: vec![], body: body.into() }
+    }
+
+    #[test]
+    fn uploading_into_an_album_finds_or_creates_it_first() {
+        let dir = temp("album");
+        let file = dir.join("showcase.mp4");
+        std::fs::write(&file, b"0123456789").unwrap();
+        let opts = upload::UploadOptions { backoff: Duration::ZERO, album: Some("Robot showcase".into()), ..Default::default() };
+        // upload permission only: the album needs `--albums`, and nothing is sent
+        let http = Scripted::new(Vec::new());
+        let gp = signed_in(&format!("{} {}", auth::SCOPE, auth::UPLOAD_SCOPE));
+        assert!(!gp.can_use_albums());
+        let e = gp.upload_with(&http, &file, &opts, &mut |_, _, _| true).unwrap_err();
+        assert!(matches!(e, GPhotosError::Consent(_)) && e.to_string().contains("photos auth --albums"), "{e}");
+        assert_eq!(http.0.lock().unwrap().1, 0);
+        // a file Google refuses: no album is made for it
+        let wav = dir.join("mix.wav");
+        std::fs::write(&wav, b"RIFF").unwrap();
+        let gp = signed_in(&format!("{} {} {}", auth::SCOPE, auth::UPLOAD_SCOPE, auth::ALBUM_SCOPE));
+        assert!(gp.can_use_albums());
+        assert!(gp.upload_with(&http, &wav, &opts, &mut |_, _, _| true).is_err());
+        assert_eq!(http.0.lock().unwrap().1, 0);
+        // the album is listed (none), created, then the upload goes into it
+        let album = r#"{"id":"AF1QipAlbum00000000000000000000000000000000000000001","title":"Robot showcase","productUrl":"https://photos.google.com/lr/album/x","isWriteable":true}"#;
+        let session = "https://photoslibrary.googleapis.com/v1/uploads?upload_id=x";
+        let http = Scripted::new(vec![
+            answer("{}"),
+            answer(album),
+            upload::Response { status: 200, headers: vec![("X-Goog-Upload-URL".into(), session.into())], body: String::new() },
+            answer("tok"),
+            answer(r#"{"newMediaItemResults":[{"status":{"message":"Success"},"mediaItem":{"id":"M1"}}]}"#),
+        ]);
+        let mut statuses = Vec::new();
+        let up = gp
+            .upload_with(&http, &file, &opts, &mut |_, _, s| {
+                statuses.push(s.to_string());
+                true
+            })
+            .unwrap();
+        let seen = http.1.lock().unwrap().clone();
+        assert_eq!(seen.len(), 5);
+        assert_eq!((seen[0].0, seen[0].1.as_str()), (upload::Method::Get, "https://photoslibrary.googleapis.com/v1/albums?pageSize=50"));
+        assert_eq!((seen[1].0, seen[1].1.as_str()), (upload::Method::Post, albums::ALBUMS_URL));
+        let batch: serde_json::Value = serde_json::from_str(&seen[4].2).unwrap();
+        assert_eq!(batch["albumId"], "AF1QipAlbum00000000000000000000000000000000000000001");
+        assert!(up.album_created);
+        let a = up.album.as_ref().unwrap();
+        assert_eq!((a.title.as_str(), a.product_url.as_deref()), ("Robot showcase", Some("https://photos.google.com/lr/album/x")));
+        assert_eq!(up.to_json()["albumCreated"], true);
+        assert!(statuses.first().is_some_and(|s| s.contains("album")), "{statuses:?}");
+        // cancelled while finding the album: nothing sent
+        let http = Scripted::new(Vec::new());
+        assert!(matches!(gp.upload_with(&http, &file, &opts, &mut |_, _, _| false), Err(GPhotosError::Cancelled)));
+        assert_eq!(http.0.lock().unwrap().1, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn album_readiness_comes_from_the_disk() {
+        let dir = temp("album-ready");
+        assert!(album_readiness(&dir).unwrap_err().contains("photos auth --albums"));
+        std::fs::write(dir.join("client_secret.json"), r#"{"installed":{"client_id":"id","client_secret":"s"}}"#).unwrap();
+        let t = |scope: &str| auth::Tokens { access_token: "a".into(), refresh_token: Some("r".into()), expires_at: 1, scope: scope.into() };
+        t(&format!("{} {}", auth::SCOPE, auth::UPLOAD_SCOPE)).save(&dir).unwrap();
+        let e = album_readiness(&dir).unwrap_err();
+        assert!(e.contains("consent") && e.contains("photos auth --albums"), "{e}");
+        assert_eq!(upload_readiness(&dir), Ok(()), "uploads alone still work");
+        t(&format!("{} {} {}", auth::SCOPE, auth::UPLOAD_SCOPE, auth::ALBUM_SCOPE)).save(&dir).unwrap();
+        assert_eq!(album_readiness(&dir), Ok(()));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn signed_in(scope: &str) -> GooglePhotos {
@@ -530,7 +672,7 @@ mod tests {
         std::fs::write(&file, b"0123456789").unwrap();
         let opts = upload::UploadOptions { backoff: Duration::ZERO, ..Default::default() };
         // a picker-only sign-in: the consent error, and nothing goes out
-        let http = Scripted(Mutex::new((Vec::new(), 0)));
+        let http = Scripted::new(Vec::new());
         let gp = signed_in(auth::SCOPE);
         assert!(!gp.can_upload());
         let e = gp.upload_with(&http, &file, &opts, &mut |_, _, _| true).unwrap_err();
@@ -549,7 +691,7 @@ mod tests {
                 body: r#"{"newMediaItemResults":[{"status":{"message":"Success"},"mediaItem":{"id":"M1"}}]}"#.into(),
             },
         ];
-        let http = Scripted(Mutex::new((answers, 0)));
+        let http = Scripted::new(answers);
         let up = gp.upload_with(&http, &file, &opts, &mut |_, _, _| true).unwrap();
         assert_eq!((up.media_item_id.as_str(), up.bytes, up.product_url), ("M1", 10, None));
         assert_eq!(http.0.lock().unwrap().1, 3);

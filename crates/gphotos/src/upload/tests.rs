@@ -192,7 +192,7 @@ fn data(n: usize) -> Vec<u8> {
 }
 
 fn opts(chunk: u64) -> UploadOptions {
-    UploadOptions { description: Some("Robots".into()), file_name: None, chunk, max_retries: 3, backoff: Duration::ZERO }
+    UploadOptions { description: Some("Robots".into()), file_name: None, chunk, max_retries: 3, backoff: Duration::ZERO, album: None }
 }
 
 fn bearer() -> Result<String, GPhotosError> {
@@ -244,6 +244,8 @@ fn uploads_in_chunks_and_creates_the_item() {
             bytes: 10,
             description: Some("Robots".into()),
             resumed: 0,
+            album: None,
+            album_created: false,
         }
     );
     assert_eq!(up.to_json()["mediaItemId"], "AF1Qip-new");
@@ -559,6 +561,36 @@ fn files_are_checked_before_anything_is_sent() {
     let body: Value = serde_json::from_str(&g.seen().last().unwrap().body).unwrap();
     assert_eq!(body["newMediaItems"][0]["simpleMediaItem"]["fileName"], "fine.MP4");
     assert!(body["newMediaItems"][0].get("description").is_none(), "{body}");
+}
+
+#[test]
+fn an_album_id_goes_into_batch_create() {
+    let path = file("into-album.mp4", &data(10));
+    let g = FakeGoogle::new(Some("4"));
+    let album = "AF1QipAlbum000000000000000000000000000000000001";
+    let up = run(&g, &path, &UploadOptions { album: Some(format!(" {album} ")), ..opts(8) }).0.unwrap();
+    let body: Value = serde_json::from_str(&g.seen().last().unwrap().body).unwrap();
+    assert_eq!(body["albumId"], album, "{body}");
+    assert_eq!(body["newMediaItems"][0]["simpleMediaItem"]["uploadToken"], TOKEN);
+    assert_eq!(up.album.as_ref().map(|a| a.id.as_str()), Some(album));
+    assert!(!up.album_created);
+    assert_eq!(up.to_json()["album"]["id"], album);
+    // without one: no albumId at all
+    let g = FakeGoogle::new(Some("4"));
+    let up = run(&g, &path, &opts(8)).0.unwrap();
+    let body: Value = serde_json::from_str(&g.seen().last().unwrap().body).unwrap();
+    assert!(body.get("albumId").is_none(), "{body}");
+    assert!(up.album.is_none() && up.to_json()["album"].is_null());
+    // a hostile album id never reaches Google (it would end up in the request)
+    for bad in ["a b", "x\"}],\"evil\":{\"", "../albums", ""] {
+        let g = FakeGoogle::new(Some("4"));
+        assert!(run(&g, &path, &UploadOptions { album: Some(bad.into()), ..opts(8) }).0.is_err(), "{bad:?}");
+        assert!(g.seen().is_empty(), "{bad:?}");
+    }
+    assert_eq!(
+        batch_create_body("t", "f.mp4", None, Some("A1")),
+        json!({"newMediaItems":[{"simpleMediaItem":{"uploadToken":"t","fileName":"f.mp4"}}],"albumId":"A1"})
+    );
 }
 
 #[test]

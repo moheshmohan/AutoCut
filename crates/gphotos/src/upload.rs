@@ -12,7 +12,8 @@
 //!    one chunk is in memory), each at its `X-Goog-Upload-Offset`, the last one with
 //!    `upload, finalize`: its body is the upload token. After a dropped chunk the upload asks
 //!    where Google got to (`X-Goog-Upload-Command: query`) and resumes from there.
-//! 3. `POST /v1/mediaItems:batchCreate` turns the token into a media item.
+//! 3. `POST /v1/mediaItems:batchCreate` turns the token into a media item (and, with an
+//!    `albumId`, adds it to that album: one this app created, see [`crate::albums`]).
 //!
 //! Every request goes through [`Transport`], so the tests drive the whole protocol with a fake.
 //! Server answers are hostile input: the session URL must be an https Google API host (it gets
@@ -68,9 +69,18 @@ const MAX_HEADERS: usize = 256;
 // transport
 // ---------------------------------------------------------------------------------------------
 
-/// One `POST` of the upload protocol (every request it makes is a POST).
+/// An HTTP method of the Library API calls (the upload protocol only POSTs; listing albums GETs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Method {
+    Get,
+    #[default]
+    Post,
+}
+
+/// One Library API request: an upload protocol step (always a POST) or an album call.
 #[derive(Debug, Clone)]
 pub struct Request<'a> {
+    pub method: Method,
     pub url: &'a str,
     pub headers: Vec<(&'static str, String)>,
     pub body: &'a [u8],
@@ -114,13 +124,32 @@ impl Default for UreqTransport {
     }
 }
 
+impl UreqTransport {
+    /// A transport with another limit per request (album calls are small).
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self { agent: crate::api::agent_with_timeout(timeout) }
+    }
+}
+
 impl Transport for UreqTransport {
     fn send(&self, req: &Request<'_>) -> Result<Response, String> {
-        let mut b = self.agent.post(req.url);
-        for (k, v) in &req.headers {
-            b = b.header(*k, v.as_str());
-        }
-        let resp = b.send(req.body).map_err(|e| e.to_string())?;
+        let sent = match req.method {
+            Method::Post => {
+                let mut b = self.agent.post(req.url);
+                for (k, v) in &req.headers {
+                    b = b.header(*k, v.as_str());
+                }
+                b.send(req.body)
+            }
+            Method::Get => {
+                let mut b = self.agent.get(req.url);
+                for (k, v) in &req.headers {
+                    b = b.header(*k, v.as_str());
+                }
+                b.call()
+            }
+        };
+        let resp = sent.map_err(|e| e.to_string())?;
         let status = resp.status().as_u16();
         let headers = resp.headers().iter().take(MAX_HEADERS).filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string()))).collect();
         let mut body = Vec::new();
@@ -255,11 +284,15 @@ pub struct UploadOptions {
     pub max_retries: u32,
     /// The first wait before a retry, doubled each time (at most 32 s).
     pub backoff: Duration,
+    /// Put the new item into this album as well (`batchCreate`'s `albumId`). Google takes only
+    /// an album this app created. [`crate::GooglePhotos::upload`] takes a title or an id here
+    /// and resolves it (creating the album when missing); [`upload_file`] wants the id.
+    pub album: Option<String>,
 }
 
 impl Default for UploadOptions {
     fn default() -> Self {
-        Self { description: None, file_name: None, chunk: CHUNK, max_retries: MAX_RETRIES, backoff: Duration::from_secs(1) }
+        Self { description: None, file_name: None, chunk: CHUNK, max_retries: MAX_RETRIES, backoff: Duration::from_secs(1), album: None }
     }
 }
 
@@ -275,6 +308,10 @@ pub struct Uploaded {
     pub description: Option<String>,
     /// How many times the upload resumed after a dropped chunk.
     pub resumed: u32,
+    /// The album it went into as well ([`UploadOptions::album`]), when one was asked for.
+    pub album: Option<crate::albums::Album>,
+    /// That album was created for this upload (it did not exist yet).
+    pub album_created: bool,
 }
 
 impl Uploaded {
@@ -282,6 +319,7 @@ impl Uploaded {
         json!({
             "mediaItemId": self.media_item_id, "productUrl": self.product_url, "fileName": self.file_name,
             "mimeType": self.mime_type, "bytes": self.bytes, "description": self.description, "resumed": self.resumed,
+            "album": self.album.as_ref().map(crate::albums::Album::to_json), "albumCreated": self.album_created,
         })
     }
 }
@@ -299,6 +337,7 @@ pub fn upload_file(
 ) -> Result<Uploaded, GPhotosError> {
     let media = check_file(path)?;
     let description = check_description(opts.description.as_deref())?;
+    let album = opts.album.as_deref().map(crate::albums::check_id).transpose()?;
     let file_name = opts.file_name.as_deref().and_then(clean_name).unwrap_or_else(|| media.file_name.clone());
     let total = media.bytes;
     if !progress(0, total, "Starting the upload") {
@@ -308,10 +347,11 @@ pub fn upload_file(
     let mut retry = Retry::new(opts);
     let session = start(http, bearer, &media, &mut retry, progress)?;
     let sent = send_bytes(http, bearer, &mut file, total, &session, opts.chunk, &mut retry, progress)?;
-    if !progress(total, total, "Adding it to your Google Photos library") {
+    let adding = if album.is_some() { "Adding it to your Google Photos library and the album" } else { "Adding it to your Google Photos library" };
+    if !progress(total, total, adding) {
         return Err(GPhotosError::Cancelled);
     }
-    let item = batch_create(http, bearer, &sent.token, &file_name, description.as_deref(), &mut retry, total, progress)?;
+    let item = batch_create(http, bearer, &sent.token, &file_name, description.as_deref(), album.as_deref(), &mut retry, total, progress)?;
     Ok(Uploaded {
         media_item_id: item.id,
         product_url: item.product_url,
@@ -320,6 +360,8 @@ pub fn upload_file(
         bytes: total,
         description,
         resumed: sent.resumed,
+        album: album.map(crate::albums::Album::with_id),
+        album_created: false,
     })
 }
 
@@ -340,6 +382,7 @@ fn start(
 ) -> Result<UploadSession, GPhotosError> {
     loop {
         let req = Request {
+            method: Method::Post,
             url: UPLOADS_URL,
             headers: vec![
                 ("Authorization", format!("Bearer {}", bearer()?)),
@@ -440,6 +483,7 @@ fn send_bytes(
             .map_err(|e| GPhotosError::Upload(format!("reading the file at byte {offset}: {e} (did it change during the upload?)")))?;
         let last = offset.saturating_add(len) >= total;
         let req = Request {
+            method: Method::Post,
             url: &session.url,
             headers: vec![
                 ("Authorization", format!("Bearer {}", bearer()?)),
@@ -494,6 +538,7 @@ fn query(
 ) -> Result<Received, GPhotosError> {
     loop {
         let req = Request {
+            method: Method::Post,
             url: &session.url,
             headers: vec![("Authorization", format!("Bearer {}", bearer()?)), ("X-Goog-Upload-Command", "query".into())],
             body: &[],
@@ -554,13 +599,15 @@ fn batch_create(
     token: &str,
     file_name: &str,
     description: Option<&str>,
+    album: Option<&str>,
     retry: &mut Retry,
     total: u64,
     progress: &mut dyn FnMut(u64, u64, &str) -> bool,
 ) -> Result<CreatedItem, GPhotosError> {
-    let body = batch_create_body(token, file_name, description).to_string();
+    let body = batch_create_body(token, file_name, description, album).to_string();
     loop {
         let req = Request {
+            method: Method::Post,
             url: BATCH_CREATE_URL,
             headers: vec![("Authorization", format!("Bearer {}", bearer()?)), ("Content-Type", "application/json".into())],
             body: body.as_bytes(),
@@ -573,13 +620,18 @@ fn batch_create(
     }
 }
 
-/// The `batchCreate` request body.
-pub fn batch_create_body(token: &str, file_name: &str, description: Option<&str>) -> Value {
+/// The `batchCreate` request body; with `album`, the item also goes into that (app-created)
+/// album, at its end.
+pub fn batch_create_body(token: &str, file_name: &str, description: Option<&str>, album: Option<&str>) -> Value {
     let mut item = json!({"simpleMediaItem": {"uploadToken": token, "fileName": file_name}});
     if let Some(d) = description {
         item["description"] = json!(d);
     }
-    json!({"newMediaItems": [item]})
+    let mut body = json!({"newMediaItems": [item]});
+    if let Some(a) = album {
+        body["albumId"] = json!(a);
+    }
+    body
 }
 
 #[derive(Debug, Default, Deserialize)]
