@@ -5,7 +5,7 @@
 use filmcraft_time::FrameRate;
 use serde::{Deserialize, Serialize};
 
-use crate::settings::{AudioCodec, AudioSettings, BitrateMode, MxfVideoCodec, Scaling};
+use crate::settings::{AudioCodec, AudioSettings, BitrateMode, HardwareEncoding, MxfVideoCodec, Scaling};
 use crate::{ExportSettings, Format};
 
 /// A named set of export settings (`path` and `range` are left empty).
@@ -44,6 +44,15 @@ fn h264(size: Option<(u32, u32)>, kbps: u32, max_kbps: u32) -> ExportSettings {
         audio: AudioSettings { codec: AudioCodec::Aac, sample_rate: Some(48_000), channels: 2, bitrate_kbps: 320, bits: 16, ..Default::default() },
         ..Default::default()
     }
+}
+
+/// [`h264`] for delivery to a web site: the system's hardware encoder when it has one and takes the
+/// settings ([`HardwareEncoding::Auto`]), the built-in encoder otherwise. The file is uploaded and
+/// re-encoded by the site, so being the same byte for byte on every machine matters less than
+/// the time: the built-in encoder is the slowest stage of a 1080p export (about 17 frames a
+/// second on an M1), the hardware one encodes 200.
+fn web_h264(size: (u32, u32), kbps: u32, max_kbps: u32) -> ExportSettings {
+    ExportSettings { hardware_encoding: HardwareEncoding::Auto, ..h264(Some(size), kbps, max_kbps) }
 }
 
 fn adaptive(bpp: f32) -> ExportSettings {
@@ -96,15 +105,15 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
     let ms = "Match Source";
     let web = "Web & Social";
     let bc = "Broadcast";
-    let vertical = ExportSettings { scaling: Scaling::ScaleToFill, ..h264(Some((1080, 1920)), 12_000, 16_000) };
+    let vertical = ExportSettings { scaling: Scaling::ScaleToFill, ..web_h264((1080, 1920), 12_000, 16_000) };
     vec![
         p(DEFAULT_PRESET, ms, "H.264 at the sequence's frame size and rate; bitrate adapts to the frame size (0.2 bits per pixel)", adaptive(0.2)),
         p("Match Source – Adaptive Medium Bitrate", ms, "H.264 at the sequence's frame size and rate; 0.1 bits per pixel", adaptive(0.1)),
         p("Match Source – Adaptive Low Bitrate", ms, "H.264 at the sequence's frame size and rate; 0.05 bits per pixel", adaptive(0.05)),
-        p("High Quality 1080p HD", web, "H.264 1920×1080, VBR 1 pass, 20 Mbps target, AAC 320 kbps", h264(Some((1920, 1080)), 20_000, 24_000)),
-        p("High Quality 2160p 4K", web, "H.264 3840×2160, VBR 1 pass, 60 Mbps target, AAC 320 kbps", h264(Some((3840, 2160)), 60_000, 72_000)),
-        p("YouTube 1080p Full HD", web, "H.264 1920×1080 for video sharing sites, VBR 1 pass, 16 Mbps", h264(Some((1920, 1080)), 16_000, 20_000)),
-        p("YouTube 2160p 4K Ultra HD", web, "H.264 3840×2160 for video sharing sites, VBR 1 pass, 45 Mbps", h264(Some((3840, 2160)), 45_000, 54_000)),
+        p("High Quality 1080p HD", web, "H.264 1920×1080, VBR 1 pass, 20 Mbps target, AAC 320 kbps", web_h264((1920, 1080), 20_000, 24_000)),
+        p("High Quality 2160p 4K", web, "H.264 3840×2160, VBR 1 pass, 60 Mbps target, AAC 320 kbps", web_h264((3840, 2160), 60_000, 72_000)),
+        p("YouTube 1080p Full HD", web, "H.264 1920×1080 for video sharing sites, VBR 1 pass, 16 Mbps", web_h264((1920, 1080), 16_000, 20_000)),
+        p("YouTube 2160p 4K Ultra HD", web, "H.264 3840×2160 for video sharing sites, VBR 1 pass, 45 Mbps", web_h264((3840, 2160), 45_000, 54_000)),
         p(
             "Vimeo 1080p Full HD",
             web,

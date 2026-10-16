@@ -882,6 +882,35 @@ fn builtin_presets_are_valid_and_unique() {
     assert_eq!(back.settings.adaptive_bitrate, Some(0.2));
 }
 
+/// The single-pass Web & Social delivery presets use the hardware H.264 encoder where there is one;
+/// the defaults, Match Source, two-pass and every mastering format keep the built-in encoder, whose
+/// files are the same on every machine.
+#[test]
+fn web_delivery_presets_use_the_hardware_encoder_when_there_is_one() {
+    let hardware: Vec<String> = builtin_presets().into_iter().filter(|p| p.settings.hardware_encoding == HardwareEncoding::Auto).map(|p| p.name).collect();
+    assert_eq!(hardware, ["High Quality 1080p HD", "High Quality 2160p 4K", "YouTube 1080p Full HD", "YouTube 2160p 4K Ultra HD", "Social Vertical 1080×1920"]);
+    for p in builtin_presets().into_iter().filter(|p| p.settings.hardware_encoding == HardwareEncoding::Auto) {
+        assert_eq!((p.category.as_str(), p.settings.format, p.settings.bitrate_mode), ("Web & Social", Format::H264, BitrateMode::Vbr1Pass), "{}", p.name);
+    }
+    assert_eq!(ExportSettings::default().hardware_encoding, HardwareEncoding::Off);
+    assert_eq!(presets::find_builtin(presets::DEFAULT_PRESET).unwrap().settings.hardware_encoding, HardwareEncoding::Off);
+    // without a registered hardware encoder (as here) the preset exports with the built-in one
+    let dir = Scratch::new("web-preset");
+    let (p, seq, m) = crate::tests::project();
+    let mut s = presets::find_builtin("YouTube 1080p Full HD").unwrap().settings;
+    s.path = dir.path("youtube.mp4");
+    s.frame_size = Some((320, 180));
+    s.range = Some(TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(6)));
+    let before = hw_encode_stats().frames;
+    let r = export(&p, seq, &s, &m, &Progress::default()).unwrap();
+    assert_eq!(r.frames, 6);
+    assert_eq!(hw_encode_stats().frames, before, "no hardware encoder is registered in this crate's tests");
+    let bytes = std::fs::read(&s.path).unwrap();
+    let file = filmcraft_isobmff::open(bytes.as_slice()).unwrap();
+    let vt = file.track_of_kind(filmcraft_isobmff::TrackKind::Video).unwrap();
+    assert_eq!(file.tracks[vt].samples.len(), 6);
+}
+
 /// #108: the default 320 kbps is more than AAC can carry in stereo at 22.05 kHz (6 bits per sample
 /// and channel). The export failed with "bitrate out of range"; it is now capped to the limit.
 #[test]

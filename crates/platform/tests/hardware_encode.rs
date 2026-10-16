@@ -277,6 +277,38 @@ fn what_hardware_does_not_take_still_exports_with_the_built_in_encoder() {
     }
 }
 
+/// The YouTube preset (one of the Web & Social delivery presets that ask for hardware encoding)
+/// encodes on VideoToolbox where there is one, and exports with the built-in encoder, with nothing
+/// to do for the user, whenever the hardware path declines.
+#[test]
+fn the_youtube_preset_encodes_on_the_hardware_and_falls_back_cleanly() {
+    filmcraft_platform::register();
+    let preset = filmcraft_export::presets::find_builtin("YouTube 1080p Full HD").expect("the YouTube preset").settings;
+    assert_eq!(preset.hardware_encoding, HardwareEncoding::Auto);
+    let (frames, (p, seq, m)) = (30, project(30));
+    let settings = |name: &str| ExportSettings { path: tmp(name), frame_size: Some((W, H)), include_audio: false, ..preset.clone() };
+    // the configuration the preset hands the hardware path is one it takes
+    let mut resolved = settings("probe.mp4");
+    resolved.keyframe_distance = Some(60);
+    assert!(config_for(W, H, FPS, &resolved).is_ok(), "{:?}", config_for(W, H, FPS, &resolved).err());
+    let hardware_here = hardware(&resolved, W, H).is_some();
+    let s = settings("youtube.mp4");
+    let before = hw_encode_stats();
+    export(&p, seq, &s, &m, &Progress::default()).expect("export");
+    let (samples, pictures, _) = inspect(&s.path);
+    assert_eq!((samples, pictures), (frames, frames), "every frame is in the file and decodes");
+    if hardware_here {
+        assert!(hw_encode_stats().frames >= before.frames + frames as u64, "the preset encoded on the hardware");
+    }
+    // a picture the hardware path does not take (non-square pixels): the built-in encoder, silently
+    let s = ExportSettings { pixel_aspect: Some((4, 3)), ..settings("youtube-declined.mp4") };
+    let before = hw_encode_stats();
+    export(&p, seq, &s, &m, &Progress::default()).expect("export after the hardware path declined");
+    assert!(hw_encode_stats().declined > before.declined, "the hardware path declined");
+    let (samples, pictures, _) = inspect(&s.path);
+    assert_eq!((samples, pictures), (frames, frames));
+}
+
 /// Run `f` and require that it neither panics nor hangs the test.
 fn calm<R>(what: &str, f: impl FnOnce() -> R) -> R {
     std::panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| panic!("{what} panicked"))
