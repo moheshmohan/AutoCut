@@ -748,7 +748,7 @@ async fn cli() {
                         // with --album it opens that album and selects all of it instead
                         let request = match (auto, album) {
                             (Some(query), _) => Some(filmcraft_screenagent::agent::Request {
-                                query,
+                                queries: vec![query],
                                 max_items: opts.max_items.unwrap_or(6),
                                 select_all,
                                 album: None,

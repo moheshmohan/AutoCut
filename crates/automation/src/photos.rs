@@ -41,7 +41,7 @@ impl Driven {
 
 /// The agent request that picks the whole album `title` (all of it, up to Google's limit).
 pub fn album_request(title: &str, videos_only: bool) -> Request {
-    Request { query: String::new(), max_items: filmcraft_gphotos::api::MAX_PICK, select_all: true, album: Some(title.to_string()), videos_only }
+    Request { queries: Vec::new(), max_items: filmcraft_gphotos::api::MAX_PICK, select_all: true, album: Some(title.to_string()), videos_only }
 }
 
 fn join(h: JoinHandle<Result<Summary, String>>) -> Result<Summary, String> {
@@ -166,7 +166,7 @@ mod tests {
     fn an_album_request_selects_all_of_it() {
         let r = album_request("Robot showcase", true);
         assert_eq!((r.album.as_deref(), r.select_all, r.videos_only, r.max_items), (Some("Robot showcase"), true, true, filmcraft_gphotos::api::MAX_PICK));
-        assert!(r.query.is_empty());
+        assert!(r.queries.is_empty());
     }
 
     #[test]

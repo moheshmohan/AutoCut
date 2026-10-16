@@ -875,7 +875,7 @@ impl FilmcraftMcp {
         };
         let request = match (query, album) {
             (Some(query), _) => Some(filmcraft_screenagent::agent::Request {
-                query,
+                queries: vec![query],
                 max_items: p.max_items.unwrap_or(6),
                 select_all: p.all.unwrap_or(false),
                 album: None,
