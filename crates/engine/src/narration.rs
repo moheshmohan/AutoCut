@@ -4,10 +4,10 @@
 //! |---|---|
 //! | `tts.voices` | languages, voices, vocal pitches, pace limits and the pause marker |
 //! | `tts.preview` | synthesize without changing the project (`sample: true` speaks the voice's sample sentence); the host plays [`Session::tts_preview`]; `path` also writes a WAV |
-//! | `tts.create` | synthesize, write `Narration <n>.wav`, import it and place it at the playhead (one undo step) |
+//! | `tts.create` | synthesize (or take from the caches: `cached`), write `Narration <n>.wav`, import it and place it at the playhead (one undo step) |
 //! | `tts.edit` | change a narration clip's script or voice settings and regenerate it in place (one undo step) |
 //! | `tts.inspect` | the narration settings of a clip or item |
-//! | `tts.render` | synthesize in a background job into the cache, so the UI's create / edit / preview return at once |
+//! | `tts.render` | synthesize in a background job into the caches (memory, disk), so the UI's create / edit / preview return at once; already cached: no job |
 //! | `tts.downloadVoices` | download the natural voices (Kokoro-82M, 9 US English voices, CMUdict; 336 MB, SHA-256 checked) as a background job |
 //!
 //! **Where a new narration goes.** At `time` (default: the playhead) on `track` if given (it must
@@ -24,6 +24,14 @@
 //! Files are named `Narration <n>.wav` (mono 32-bit float at the voice's rate, 24 kHz) and saved
 //! where voice-over recordings go (Scratch Disks ▸ Captured, else next to the project, else
 //! `Narrations` in the data or temporary directory); an edit writes next to the previous file.
+//!
+//! **Caches.** Synthesis is looked up first in memory ([`Session::tts_cache`], the last few) and
+//! then on disk ([`Session::tts_disk`], `<data dir>/narration-cache`, see
+//! [`filmcraft_tts::cache`]): keyed by the script, the voice's identity (for a cloned voice its
+//! profile too), pitch and pace, capped at 2 GB, least recently used out first. A rebuild that
+//! reads the same lines with the same voice synthesizes nothing; `tts.create` and `tts.render`
+//! report `cached`. Native frontends turn the disk cache on; a damaged or unwritable cache only
+//! means the voice speaks again.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -116,14 +124,37 @@ fn render(n: &Narration, models_dir: Option<&std::path::Path>) -> std::result::R
     voice.synthesize(&n.text, &tts::Params { semitones: n.pitch.semitones(), pace: n.pace })
 }
 
-fn synthesize(s: &Session, cmd: &str, n: &Narration) -> Result<Arc<tts::Audio>> {
+/// The disk cache's key for `n` (None: the voice has no stable identity, e.g. a cloned voice
+/// whose profile cannot be read; it is then not cached).
+fn disk_key(n: &Narration, models_dir: Option<&std::path::Path>) -> Option<String> {
+    let identity = tts::cache::voice_identity(&n.voice, models_dir)?;
+    Some(tts::cache::DiskCache::key(&identity, &n.text, &tts::Params { semitones: n.pitch.semitones(), pace: n.pace }))
+}
+
+/// `n` from the memory cache, else the disk cache (then also kept in memory).
+fn cached(s: &Session, n: &Narration, models_dir: Option<&std::path::Path>) -> Option<Arc<tts::Audio>> {
     let key = cache_key(n);
     if let Some(a) = s.tts_cache.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(k, _)| *k == key).map(|(_, a)| a.clone()) {
-        return Ok(a);
+        return Some(a);
     }
-    let a = Arc::new(render(n, crate::transcript::models_dir().as_deref()).map_err(|e| tts_err(cmd, e))?);
+    let disk = s.tts_disk.as_ref()?;
+    let a = Arc::new(disk.get(&disk_key(n, models_dir)?)?);
     cache_put(&s.tts_cache, key, a.clone());
-    Ok(a)
+    Some(a)
+}
+
+/// The audio of `n` and whether it came from a cache (nothing was synthesized).
+fn synthesize(s: &Session, cmd: &str, n: &Narration) -> Result<(Arc<tts::Audio>, bool)> {
+    let models = crate::transcript::models_dir();
+    if let Some(a) = cached(s, n, models.as_deref()) {
+        return Ok((a, true));
+    }
+    let a = Arc::new(render(n, models.as_deref()).map_err(|e| tts_err(cmd, e))?);
+    if let (Some(disk), Some(k)) = (&s.tts_disk, disk_key(n, models.as_deref())) {
+        disk.put(&k, &a);
+    }
+    cache_put(&s.tts_cache, cache_key(n), a.clone());
+    Ok((a, false))
 }
 
 fn cache_put(c: &SynthCache, key: String, a: Arc<tts::Audio>) {
@@ -172,7 +203,7 @@ fn preview(s: &mut Session, p: &Value) -> Result<Value> {
         q["text"] = json!(tts::SAMPLE_SENTENCE);
     }
     let n = settings(cmd, &q, base.as_ref())?;
-    let audio = synthesize(s, cmd, &n)?;
+    let (audio, _) = synthesize(s, cmd, &n)?;
     let seconds = audio.seconds();
     let samples = audio.samples.len();
     let rate = audio.sample_rate;
@@ -238,7 +269,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     if at < Tick::ZERO {
         return Err(bad(cmd, "the start time cannot be negative"));
     }
-    let audio = synthesize(s, cmd, &n)?;
+    let (audio, from_cache) = synthesize(s, cmd, &n)?;
     let rate = audio.sample_rate.max(1);
     let dur = Tick::from_units(audio.samples.len() as i64, i64::from(rate));
     n.speech_duration = dur;
@@ -284,6 +315,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
             "speechDuration": dur.0,
             "path": path,
             "sampleRate": rate,
+            "cached": from_cache,
         }))
     })();
     crate::clip_ops::collapse_history(s, n0, "New Narration");
@@ -324,7 +356,7 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
     let (old_item, clip_dur, speed) = (it.item, it.duration, it.speed);
     let base = s.project.narrations.get(&old_item).cloned().ok_or_else(|| bad(cmd, "the clip is not a narration"))?;
     let mut n = settings(cmd, p, Some(&base))?;
-    let audio = synthesize(s, cmd, &n)?;
+    let (audio, _) = synthesize(s, cmd, &n)?;
     let rate = audio.sample_rate.max(1);
     let speech = audio.samples.len();
     n.speech_duration = Tick::from_units(speech as i64, i64::from(rate));
@@ -421,8 +453,9 @@ pub(crate) fn finish(prog: &filmcraft_export::Progress, res: &JobResult, r: std:
     *res.lock().unwrap_or_else(PoisonError::into_inner) = Some(r);
 }
 
-/// Synthesize in the background into the cache, so `tts.create` / `tts.edit` / `tts.preview` with
-/// the same settings return at once.
+/// Synthesize in the background into the caches (memory, and disk when on), so `tts.create` /
+/// `tts.edit` / `tts.preview` with the same settings return at once. Already cached (in memory or
+/// on disk): no job, `cached: true`.
 fn render_job(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "tts.render";
     let base = target_clip(s, p).and_then(|c| s.active_sequence()?.find_item(c).map(|(_, it)| it.item)).and_then(|i| s.project.narrations.get(&i).cloned());
@@ -431,19 +464,25 @@ fn render_job(s: &mut Session, p: &Value) -> Result<Value> {
         q["text"] = json!(tts::SAMPLE_SENTENCE);
     }
     let n = settings(cmd, &q, base.as_ref())?;
-    let key = cache_key(&n);
-    if s.tts_cache.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|(k, _)| *k == key) {
+    let models = crate::transcript::models_dir();
+    // memory, then disk: an entry on disk is a quick read, not a job
+    if cached(s, &n, models.as_deref()).is_some() {
         return Ok(json!({"job": null, "cached": true}));
     }
+    let key = cache_key(&n);
+    let disk = s.tts_disk.clone().zip(disk_key(&n, models.as_deref()));
     let job = new_job(s, "Synthesizing narration".into());
     let (prog, res, cache) = (job.progress.clone(), job.result.clone(), s.tts_cache.clone());
     let wait = p.get("wait").and_then(Value::as_bool).unwrap_or(false);
     let id = spawn(s, job, wait, "filmcraft-tts", move || {
         let t0 = web_time::Instant::now();
         *prog.status.lock().unwrap_or_else(PoisonError::into_inner) = "Synthesizing…".into();
-        let r = match render(&n, crate::transcript::models_dir().as_deref()) {
+        let r = match render(&n, models.as_deref()) {
             Ok(a) => {
                 let secs = a.seconds();
+                if let Some((dc, k)) = &disk {
+                    dc.put(k, &a);
+                }
                 cache_put(&cache, key, Arc::new(a));
                 Ok(format!("{secs:.1} s of speech"))
             }

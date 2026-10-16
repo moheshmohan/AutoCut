@@ -423,6 +423,9 @@ pub struct Session {
     pub tts_preview: Option<Arc<filmcraft_tts::Audio>>,
     /// Synthesized narrations (`tts.render` fills it from a background job).
     pub tts_cache: narration::SynthCache,
+    /// Synthesized narrations on disk, across sessions (`<data dir>/narration-cache`); None = off.
+    /// Native frontends turn it on ([`Session::use_narration_cache`]).
+    pub tts_disk: Option<filmcraft_tts::cache::DiskCache>,
     /// Dynamic (J/K/L) trimming and trim-mode loop playback in progress.
     pub trim_play: trim::TrimPlayback,
     /// Keyboard shortcuts (active bindings, presets; `shortcuts.*` commands).
@@ -539,6 +542,7 @@ impl Session {
             voiceover: Default::default(),
             tts_preview: None,
             tts_cache: Default::default(),
+            tts_disk: None,
             trim_play: Default::default(),
             shortcuts: shortcuts::Shortcuts::new(),
             offline: Default::default(),
@@ -599,11 +603,18 @@ impl Session {
         self.shortcuts.set_dir(&cfg.data_dir);
         self.presets.set_dir(&cfg.data_dir);
         self.export_presets.set_dir(&cfg.data_dir);
+        self.use_narration_cache(&cfg.data_dir);
         self.prefs_path = Some(prefs_path);
         self.apply_media_cache();
         self.persistence = Some(autosave::Persistence::start(&cfg, self.prefs.auto_save.clone())?);
         self.sync_persistence();
         Ok(())
+    }
+
+    /// Keep synthesized narrations in `<data_dir>/narration-cache` (2 GB, least recently used
+    /// out first), so `tts.create` / `tts.render` read a script once across sessions.
+    pub fn use_narration_cache(&mut self, data_dir: &std::path::Path) {
+        self.tts_disk = Some(filmcraft_tts::cache::DiskCache::in_data_dir(data_dir));
     }
 
     /// Clean shutdown: flush and stop the worker. Unsaved changes stay in the journal (offered on

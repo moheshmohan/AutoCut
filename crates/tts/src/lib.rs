@@ -6,9 +6,12 @@
 //! - [`formant`]: the built-in voices, an original source–filter formant synthesizer. They need
 //!   no download and work everywhere (also in the web build); they sound robotic. The neural voices
 //!   (Kokoro-82M, downloaded on first use) are added behind a feature in a later milestone.
+//! - [`cache`]: synthesized narrations kept on disk (keyed by script, voice identity, pitch and
+//!   pace), so a script is read by a voice once across sessions.
 //!
 //! Everything is deterministic: the same script and settings give the same samples.
 
+pub mod cache;
 pub mod catalog;
 #[cfg(feature = "kokoro")]
 pub mod clone;

@@ -423,3 +423,80 @@ fn unique_wav_path_gives_up_instead_of_looping_forever() {
     }
     assert!(crate::voiceover::unique_wav_path(&s, "/nonexistent-dir", "Narration").is_err());
 }
+
+/// The demo with the narration disk cache in `dir`.
+fn with_disk(dir: &str) -> Session {
+    let mut s = demo();
+    s.tts_disk = Some(filmcraft_tts::cache::DiskCache::new(dir, filmcraft_tts::cache::DEFAULT_CAP_BYTES));
+    s
+}
+
+#[test]
+fn the_disk_cache_serves_later_sessions_without_synthesizing() {
+    let dir = tmp("disk");
+    let out = tmp("disk-out");
+    let p = json!({"text": "Read me once.", "voice": "basic-male", "pace": 1.1, "wait": true});
+    // the first session synthesizes (a job) and keeps the speech on disk
+    let mut first = with_disk(&dir);
+    let r = first.execute("tts.render", p.clone()).unwrap();
+    assert!(r["job"].as_u64().is_some(), "{r}");
+    let made = first.tts_cache.lock().unwrap().last().unwrap().1.clone();
+    assert_eq!(first.tts_disk.as_ref().unwrap().usage().0, 1);
+    // a later session (empty memory cache) synthesizes nothing: no job, the same samples
+    let mut later = with_disk(&dir);
+    assert!(later.tts_cache.lock().unwrap().is_empty());
+    let r = later.execute("tts.render", p.clone()).unwrap();
+    assert_eq!((r["job"].clone(), r["cached"].clone()), (serde_json::Value::Null, json!(true)), "{r}");
+    assert!(later.jobs.is_empty());
+    let c = later.execute("tts.create", json!({"text": "Read me once.", "voice": "basic-male", "pace": 1.1, "time": 0, "dir": out})).unwrap();
+    assert_eq!(c["cached"], true);
+    assert_eq!(wav_samples(c["path"].as_str().unwrap()), made.samples, "bit-exact from disk");
+    // tts.create straight from disk in a third session, without tts.render first
+    let mut third = with_disk(&dir);
+    let c = third.execute("tts.create", json!({"text": "Read me once.", "voice": "basic-male", "pace": 1.1, "time": 0, "dir": out})).unwrap();
+    assert_eq!(c["cached"], true);
+    // another pace, voice or pitch misses (a job each)
+    for q in [
+        json!({"text": "Read me once.", "voice": "basic-male", "pace": 1.2, "wait": true}),
+        json!({"text": "Read me once.", "voice": "basic-female", "pace": 1.1, "wait": true}),
+        json!({"text": "Read me once.", "voice": "basic-male", "pace": 1.1, "pitch": "high", "wait": true}),
+    ] {
+        let r = later.execute("tts.render", q.clone()).unwrap();
+        assert!(r["job"].as_u64().is_some(), "{q} should miss: {r}");
+    }
+    assert_eq!(later.tts_disk.as_ref().unwrap().usage().0, 4);
+    // without a disk cache (the default) every new session synthesizes
+    let mut plain = demo();
+    assert!(plain.tts_disk.is_none());
+    assert!(plain.execute("tts.render", p.clone()).unwrap()["job"].as_u64().is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn a_damaged_disk_cache_entry_is_synthesized_again() {
+    let dir = tmp("disk-damaged");
+    let out = tmp("disk-damaged-out");
+    let text = "Corrupt me.";
+    let mut s = with_disk(&dir);
+    let c = s.execute("tts.create", json!({"text": text, "time": 0, "dir": out})).unwrap();
+    assert_eq!(c["cached"], false);
+    let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    std::fs::write(&entries[0], b"FCNC garbage").unwrap();
+    // a new session: the damaged entry is ignored (and replaced), the narration still made
+    let mut s = with_disk(&dir);
+    let c = s.execute("tts.create", json!({"text": text, "time": 0, "dir": out})).unwrap();
+    assert_eq!(c["cached"], false);
+    assert!(c["duration"].as_i64().unwrap() > 0);
+    let mut s = with_disk(&dir);
+    assert_eq!(s.execute("tts.create", json!({"text": text, "time": 0, "dir": out})).unwrap()["cached"], true, "the entry was rewritten");
+    // an unusable cache directory (under a file) never fails a narration
+    let blocked = tmp("disk-blocked");
+    std::fs::write(&blocked, b"x").unwrap();
+    let mut s = with_disk(&format!("{blocked}/cache"));
+    assert_eq!(s.execute("tts.create", json!({"text": text, "time": 0, "dir": out})).unwrap()["cached"], false);
+    let _ = std::fs::remove_file(&blocked);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&out);
+}

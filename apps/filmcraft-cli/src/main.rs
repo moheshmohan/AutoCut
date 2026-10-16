@@ -210,9 +210,11 @@ impl Backend {
             return Backend::Bridge(BridgeClient::new(addr).unwrap_or_else(|e| usage(e)));
         }
         let mut s = Session::default();
-        // user export presets (and other per-user libraries) from the data directory
+        // user export presets (and other per-user libraries) from the data directory, and the
+        // narration cache there (a rebuilt showcase re-reads no line it has read before)
         if let Some(dir) = a.opt("--data-dir").map(std::path::PathBuf::from).or_else(filmcraft_engine::autosave::default_data_dir) {
             s.export_presets.set_dir(&dir);
+            s.use_narration_cache(&dir);
         }
         // `photos.upload` (also over MCP): the Google Photos sign-in of `photos auth --upload`
         s.photos = Some(filmcraft_gphotos::engine_uploader());

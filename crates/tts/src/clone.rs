@@ -419,6 +419,35 @@ mod tests {
     }
 
     #[test]
+    fn the_cache_identity_follows_the_profile() {
+        let root = tmp("identity");
+        let models = root.join("models");
+        let voices = voices_dir(&models);
+        let p = profile();
+        save(&voices, &p).unwrap();
+        let id = |m: &Path| crate::cache::voice_identity("clone:my-voice", Some(m));
+        let a = id(&models).unwrap();
+        assert!(a.starts_with("clone:my-voice|clone v1|created 1|base kokoro-michael|colour "), "{a}");
+        // the voice made again (another time, colour or base voice): another identity, so speech
+        // cached for the old one is never served for it
+        for changed in [
+            Profile { created: 2, ..p.clone() },
+            Profile { target_colour: vec![0.3; COLOUR], ..p.clone() },
+            Profile { base_voice: "kokoro-puck".into(), ..p.clone() },
+        ] {
+            save(&voices, &changed).unwrap();
+            assert_ne!(id(&models).unwrap(), a, "{changed:?}");
+        }
+        save(&voices, &p).unwrap();
+        assert_eq!(id(&models).unwrap(), a, "the same profile, the same identity");
+        // a profile that does not load is not cached
+        std::fs::write(voices.join("my-voice.json"), b"{").unwrap();
+        assert_eq!(id(&models), None);
+        assert_eq!(crate::cache::voice_identity("clone:missing", Some(&models)), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn speech_only_drops_silence() {
         let rate = 16_000u32;
         // 1 s silence, 1 s tone, 1 s silence, 1 s tone

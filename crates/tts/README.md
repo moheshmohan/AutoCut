@@ -41,8 +41,26 @@ clip behaviour: `crates/engine/src/narration.rs`.
 - `catalog` also pins the cloning package: OpenVoice V2 `converter/config.json` and
   `checkpoint.pth` (131 MB, MIT, MyShell), downloaded by `tts.downloadCloneModel`.
 
+- `cache`: the **narration cache** — synthesized speech kept on disk so a script is read by a
+  voice once, across sessions and rebuilds (a cloned voice runs at about 2.6× real time: a
+  25-line show is minutes per rebuild otherwise). The engine keeps it in
+  `<data dir>/narration-cache` (native frontends turn it on; `Session::use_narration_cache`) and
+  looks there after its in-memory cache, before synthesizing, for `tts.create`, `tts.render`,
+  `tts.edit` and `tts.preview`.
+  - Key: SHA-256 of the cache format version, the voice's identity (`voice_identity`: its id and
+    the pinned model files it speaks with; for a cloned voice also its profile's id, version,
+    creation time, base voice and a hash of its tone colours), the pitch and pace (exact bits) and
+    the script. A re-made cloned voice, a new model revision or a format bump never hits old
+    entries; they age out.
+  - Entry: `<key>.fcnc`, a 28-byte header (magic, version, rate, sample count, FNV-1a checksum)
+    and the samples as `f32`, bit-exact. Written to a temporary file and renamed into place.
+  - Capped at 2 GB: after each write the least recently used entries (modification time,
+    refreshed on every hit) are removed until the rest fits; stale temporary files go too.
+  - An unreadable, truncated or corrupt entry is removed and counts as a miss; a cache that
+    cannot be written only means the voice speaks again. The cache never fails a synthesis.
+
 Everything is deterministic (the vocoder's noise is seeded). Without features the crate depends
-only on `serde` and `thiserror` (and checks for wasm).
+only on `serde`, `thiserror` and `sha2` (and checks for wasm).
 
 ## Measured quality and speed (M7.12, 2026-10-08)
 
@@ -84,7 +102,12 @@ builds), e.g. 186 s of speech in 84 s; model load 0.5 s. Reproduce with the `nar
 markers produce exactly the requested number of zero samples, pace 2× / 0.5× gives 0.5× / 2× the
 length (±5 % / ±10 %), measured pitch (autocorrelation) of the female voice is ≥ 1.5× the male, and
 +6 semitones raises it by √2 (±0.12); empty, emoji-only, non-Latin, pause-only and over-long scripts
-are refused before rendering; hostile scripts never panic.
+are refused before rendering; hostile scripts never panic. The narration cache: a second reading
+of the same script and settings synthesizes nothing (a counting voice) and is bit-exact; another
+pace, pitch, voice or script misses; damaged entries (empty, truncated, flipped bits, NaN samples,
+absurd sizes, wrong magic, trailing bytes) are removed and synthesized again; the cap evicts the
+least recently used; an unwritable cache never fails a synthesis; a cloned voice's identity
+changes when its profile is made again (feature `kokoro`).
 
 Model-dependent tests run when `FILMCRAFT_KOKORO_DIR` names a downloaded package directory
 (determinism, whole frames, pace changes length, refusals); the loaders have hostile-input tests
