@@ -79,12 +79,18 @@ pub struct DecodeTable {
     pub lo: f32,
     pub hi: f32,
     pub values: Vec<f32>,
+    /// Table steps per unit of input, (samples − 1) / (hi − lo): a lookup multiplies instead of
+    /// dividing (several lookups per pixel of every colour-managed frame).
+    step: f32,
 }
 
 impl DecodeTable {
+    /// `n` samples of `f` over `[lo, hi]` (at least two).
     pub fn new(lo: f32, hi: f32, n: usize, f: impl Fn(f64) -> f64) -> Self {
+        let n = n.max(2);
         let values = (0..n).map(|i| f(lo as f64 + (hi - lo) as f64 * i as f64 / (n - 1) as f64) as f32).collect();
-        DecodeTable { lo, hi, values }
+        let step = if hi > lo { (n - 1) as f32 / (hi - lo) } else { 0.0 };
+        DecodeTable { lo, hi, values, step }
     }
     /// The decode table for a colour space's curve.
     pub fn for_curve(curve: Curve, range: Range) -> Self {
@@ -95,11 +101,16 @@ impl DecodeTable {
     }
     #[inline]
     pub fn lookup(&self, v: f32) -> f32 {
-        let n = self.values.len() - 1;
-        let p = ((v - self.lo) / (self.hi - self.lo)).clamp(0.0, 1.0) * n as f32;
-        let i = (p as usize).min(n - 1);
+        let last = self.values.len().saturating_sub(1);
+        // (NaN clamps to NaN, which converts to index 0)
+        let p = ((v - self.lo) * self.step).clamp(0.0, last as f32);
+        let i = (p as usize).min(last.saturating_sub(1));
         let f = p - i as f32;
-        self.values[i] + (self.values[i + 1] - self.values[i]) * f
+        match (self.values.get(i), self.values.get(i + 1)) {
+            (Some(a), Some(b)) => a + (b - a) * f,
+            (Some(a), None) => *a,
+            _ => 0.0,
+        }
     }
 }
 
@@ -124,24 +135,38 @@ pub fn bt2390_eetf(nits: f64, src_peak: f64, dst_peak: f64) -> f64 {
     pq_eotf((e2 * smax) as f32) as f64 * 10_000.0
 }
 
+/// x^(1/4) for x ≥ 0 (0 for anything else): the axis the per-pixel gain tables below are sampled
+/// on. Two square roots cost a fraction of the `powf` calls they replace (the PQ curve's two, the
+/// HLG OOTF's one), which were most of the time an HDR frame took to convert; and like the PQ
+/// curve the axis gives the shadows most of the samples.
+#[inline]
+fn quarter_root(x: f32) -> f32 {
+    if x > 0.0 { x.sqrt().sqrt() } else { 0.0 }
+}
+
+/// Samples of the per-pixel gain tables (linear interpolation in between).
+const GAIN_SAMPLES: usize = 4096;
+
 /// Tone-mapping operator in working units: BT.2390 on max(R,G,B), applied as a ratio.
 #[derive(Clone, Debug)]
 pub struct ToneMap {
     pub src_peak_nits: f64,
     pub dst_peak_nits: f64,
-    /// max(R,G,B) (working units) → scale factor, sampled in the PQ domain.
+    /// max(R,G,B) as a fraction of the source peak → scale factor, sampled on [`quarter_root`] of
+    /// that fraction.
     table: DecodeTable,
+    /// 1 / the source peak in working units.
+    inv_peak: f32,
 }
 
 impl ToneMap {
     pub fn new(src_peak_nits: f64, dst_peak_nits: f64) -> Self {
-        let (s, d) = (src_peak_nits, dst_peak_nits);
-        // sample on a PQ-encoded axis so the shadows get enough resolution
-        let table = DecodeTable::new(0.0, 1.0, 4096, |e| {
-            let nits = pq_eotf(e as f32) as f64 * 10_000.0;
+        let (s, d) = (src_peak_nits.max(1e-3), dst_peak_nits);
+        let table = DecodeTable::new(0.0, 1.0, GAIN_SAMPLES, |u| {
+            let nits = u.powi(4) * s;
             if nits <= 1e-6 { 1.0 } else { bt2390_eetf(nits, s, d) / nits }
         });
-        ToneMap { src_peak_nits, dst_peak_nits, table }
+        ToneMap { src_peak_nits, dst_peak_nits, table, inv_peak: (REFERENCE_WHITE_NITS / s) as f32 }
     }
     #[inline]
     pub fn apply(&self, c: [f32; 3]) -> [f32; 3] {
@@ -154,7 +179,7 @@ impl ToneMap {
             // above the source peak: clip to the target peak
             (self.dst_peak_nits / REFERENCE_WHITE_NITS) as f32 / m
         } else {
-            self.table.lookup(pq_inverse_eotf(nits / 10_000.0))
+            self.table.lookup(quarter_root(m * self.inv_peak))
         };
         [c[0] * k, c[1] * k, c[2] * k]
     }
@@ -193,6 +218,9 @@ pub struct InputTransform {
     identity_matrix: bool,
     /// HLG OOTF luma weights (BT.2020) and the scale to working units.
     hlg: Option<([f32; 3], f32)>,
+    /// The HLG OOTF's gain (scale × Ys^(γ−1)) sampled on [`quarter_root`] of the scene luminance
+    /// Ys (0..1), when `hlg` is set.
+    hlg_gain: Option<DecodeTable>,
     tone: Option<ToneMap>,
     compress: bool,
     /// Display-referred wide-gamut media (BT.2020 / P3 / HDR): desaturate into the working gamut
@@ -224,7 +252,18 @@ impl InputTransform {
         let compress = wider && src.is_log();
         let l = wg.luma();
         let desaturate = (wider && !src.is_log()).then(|| [l[0] as f32, l[1] as f32, l[2] as f32]);
-        InputTransform { source: src, table: DecodeTable::for_curve(curve, range), matrix: to_f32(&m), identity_matrix, hlg, tone, compress, desaturate }
+        let hlg_gain = hlg.map(|(_, k)| DecodeTable::new(0.0, 1.0, GAIN_SAMPLES, |u| k as f64 * u.powi(4).powf(HLG_GAMMA - 1.0)));
+        InputTransform {
+            source: src,
+            table: DecodeTable::for_curve(curve, range),
+            matrix: to_f32(&m),
+            identity_matrix,
+            hlg,
+            hlg_gain,
+            tone,
+            compress,
+            desaturate,
+        }
     }
 
     /// Whether anything happens after the per-channel table.
@@ -237,7 +276,11 @@ impl InputTransform {
     pub fn apply(&self, mut c: [f32; 3]) -> [f32; 3] {
         if let Some((l, k)) = self.hlg {
             let ys = (l[0] * c[0] + l[1] * c[1] + l[2] * c[2]).max(0.0);
-            let g = k * ys.powf((HLG_GAMMA - 1.0) as f32);
+            // scene light is 0..1 (the decode table clamps it); brighter input from a caller gets the curve
+            let g = match &self.hlg_gain {
+                Some(t) if ys <= 1.0 => t.lookup(quarter_root(ys)),
+                _ => k * ys.powf((HLG_GAMMA - 1.0) as f32),
+            };
             c = c.map(|v| v * g);
         }
         if !self.identity_matrix {
@@ -477,6 +520,53 @@ mod tests {
         assert!((peak[0] - 1.0).abs() < 0.01, "{peak:?}");
         let dark = tm.apply([0.05; 3]);
         assert!((dark[0] - 0.05).abs() < 1e-3);
+    }
+
+    /// The tables that replaced `powf` per pixel (the BT.2390 ratio on the PQ curve, the HLG OOTF's
+    /// gain) follow the curves they sample to well under what an 8- or 10-bit picture can show.
+    #[test]
+    fn per_pixel_gain_tables_follow_their_curves() {
+        for (s, d) in [(1000.0, 203.0), (4000.0, 203.0), (10_000.0, 100.0), (203.5, 203.0)] {
+            let tm = ToneMap::new(s, d);
+            for i in 1..4000 {
+                let m = i as f64 / 4000.0 * s / REFERENCE_WHITE_NITS;
+                let exact = bt2390_eetf(m * REFERENCE_WHITE_NITS, s, d) / (m * REFERENCE_WHITE_NITS);
+                let got = tm.apply([m as f32, 0.0, 0.0])[0] as f64 / m;
+                assert!((got - exact).abs() <= 1e-3 * exact, "{s} → {d} cd/m², max {m}: {got} vs {exact}");
+            }
+            // black stays black; hostile values do not panic
+            assert_eq!(tm.apply([0.0; 3]), [0.0; 3]);
+            let _ = tm.apply([f32::INFINITY, f32::NAN, -1.0]);
+        }
+        // in an HLG working space the pixel stage is the OOTF alone: scale × Ys^0.2 per channel
+        let t = InputTransform::new(ColorSpace::Rec2100Hlg, Range::Full, &hdr(WorkingSpace::Rec2100Hlg), None);
+        let k = (HDR_PEAK_NITS / REFERENCE_WHITE_NITS) as f32;
+        for i in 0..=10_000 {
+            let v = (i as f32 / 10_000.0).powi(3);
+            let exact = v * k * v.powf(0.2);
+            let got = t.apply([v; 3])[0];
+            assert!((got - exact).abs() <= 1e-3 * exact + 1e-7, "Ys {v}: {got} vs {exact}");
+        }
+        // brighter than the signal can carry (a caller's own values): the curve itself
+        let over = t.apply([2.0; 3])[0];
+        assert!((over - 2.0 * k * 2.0f32.powf(0.2)).abs() < 1e-4, "{over}");
+    }
+
+    #[test]
+    fn decode_tables_are_safe_with_any_size_and_input() {
+        for n in [0, 1, 2, 3, 4096] {
+            let t = DecodeTable::new(0.0, 1.0, n, |v| v * 2.0);
+            assert!(t.values.len() >= 2);
+            for v in [-1.0, 0.0, 0.25, 1.0, 7.0, f32::INFINITY, f32::NEG_INFINITY] {
+                let got = t.lookup(v);
+                assert!((got - (v.clamp(0.0, 1.0) * 2.0)).abs() < 1e-5, "{n} samples, {v}: {got}");
+            }
+            // NaN in, no panic
+            let _ = t.lookup(f32::NAN);
+        }
+        // an empty range reads its first sample
+        let flat = DecodeTable::new(0.5, 0.5, 16, |_| 3.0);
+        assert_eq!(flat.lookup(0.9), 3.0);
     }
 
     #[test]

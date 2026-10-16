@@ -166,6 +166,12 @@ impl Image {
             for x in 0..w {
                 let p = &mut row[x * 4..x * 4 + 4];
                 let a = p[3];
+                if a == 1.0 {
+                    // opaque (most pictures): straight is premultiplied, no division needed
+                    let c = f([p[0], p[1], p[2]], x, y);
+                    p[..3].copy_from_slice(&c);
+                    continue;
+                }
                 if a <= 1e-6 {
                     continue;
                 }

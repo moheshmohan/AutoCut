@@ -11,7 +11,7 @@ pub mod pool;
 
 use std::sync::Arc;
 
-use filmcraft_color::{ColorInfo, DecodeTable, Matrix, Range, linear_to_srgb_u8, normalize_c, normalize_y, srgb_u8_to_linear_table, to_linear, ycbcr_to_rgb};
+use filmcraft_color::{ColorInfo, DecodeTable, Matrix, Range, linear_to_srgb_u8, normalize_c, normalize_y, srgb_u8_to_linear_table, to_linear};
 use filmcraft_time::Tick;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -438,8 +438,18 @@ impl VideoFrame {
             PixelData::Yuv16 { planes, chroma, bits, alpha } => {
                 let (sx, sy) = chroma.shifts();
                 let cw = w.div_ceil(1 << sx);
-                let bits = *bits;
+                let bits = (*bits).clamp(8, 16);
                 let amax = ((1u32 << bits) - 1) as f32;
+                // Code value → normalised Y' / Cb, Cr, one table each (as for 8-bit): no division and
+                // no range test per sample. Codes above `bits` (a damaged picture) read the last entry.
+                let codes = 1usize << bits;
+                let ytab: Vec<f32> = (0..codes as u32).map(|v| normalize_y(v, bits, info.range)).collect();
+                let ctab: Vec<f32> = (0..codes as u32).map(|v| normalize_c(v, bits, info.range)).collect();
+                let code = |t: &[f32], v: u16| t.get(usize::from(v)).or(t.last()).copied().unwrap_or(0.0);
+                let (kr, kb) = info.matrix.kr_kb();
+                let kg = 1.0 - kr - kb;
+                let (cr_r, cb_b) = (2.0 * (1.0 - kr), 2.0 * (1.0 - kb));
+                let (cr_g, cb_g) = (cr_r * kr / kg, cb_b * kb / kg);
                 out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
                     let oy = r.y + ry;
                     for rx in 0..r.w {
@@ -451,10 +461,10 @@ impl VideoFrame {
                             for dx in 0..n {
                                 let x = (ox * n + dx).min(w - 1);
                                 let cx = x >> sx;
-                                let yy = normalize_y(planes[0][y * w + x] as u32, bits, info.range);
-                                let u = normalize_c(planes[1][cy * cw + cx] as u32, bits, info.range);
-                                let v = normalize_c(planes[2][cy * cw + cx] as u32, bits, info.range);
-                                let rgb = ycbcr_to_rgb(yy, u, v, info.matrix);
+                                let yy = code(&ytab, planes[0][y * w + x]);
+                                let u = code(&ctab, planes[1][cy * cw + cx]);
+                                let v = code(&ctab, planes[2][cy * cw + cx]);
+                                let rgb = [yy + cr_r * v, yy - cr_g * v - cb_g * u, yy + cb_b * u];
                                 let a = alpha.as_ref().map_or(1.0, |al| al[y * w + x] as f32 / amax);
                                 acc[0] += q(rgb[0]) * a;
                                 acc[1] += q(rgb[1]) * a;
