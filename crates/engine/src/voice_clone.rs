@@ -547,4 +547,70 @@ mod tests {
         assert!(matches!(r["defaultEngine"].as_str(), Some("voxcpm" | "openvoice")));
         assert!(s.execute("tts.deleteClonedVoice", json!({})).is_err());
     }
+
+    /// End to end with real models (gated): VoxCPM speaks a test sentence, zero-shot and — with
+    /// `FILMCRAFT_VOXCPM_PROMPT` (a WAV of the speaker; `FILMCRAFT_VOXCPM_PROMPT_TEXT` its exact
+    /// transcript, needed by VoxCPM1.5) — in a cloned voice; Whisper must hear the sentence
+    /// (WER ≤ 20 %), and the clone's OpenVoice tone colour must be close to the speaker's
+    /// (cosine ≥ 0.6, with `FILMCRAFT_OPENVOICE_DIR`).
+    ///
+    /// `FILMCRAFT_VOXCPM_DIR=<release> FILMCRAFT_WHISPER_DIR=<whisper-small> cargo test --release -p
+    /// filmcraft-engine --features neural-voices,whisper live_natural_clone -- --nocapture`
+    #[cfg(all(feature = "neural-voices", feature = "whisper"))]
+    #[test]
+    fn live_natural_clone_is_intelligible_and_similar() {
+        use filmcraft_speech::Transcriber;
+        use filmcraft_tts::voxcpm::{Settings, VoxCpm, text};
+        let (Some(vox), Some(wh)) = (std::env::var_os("FILMCRAFT_VOXCPM_DIR"), std::env::var_os("FILMCRAFT_WHISPER_DIR")) else {
+            eprintln!("skipped (FILMCRAFT_VOXCPM_DIR or FILMCRAFT_WHISPER_DIR unset)");
+            return;
+        };
+        let m = VoxCpm::load(std::path::Path::new(&vox)).unwrap();
+        let wh = std::path::PathBuf::from(wh);
+        let id = wh.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let whisper = filmcraft_speech::whisper::Whisper::load(&wh, &id).unwrap();
+        let sentence = "In October 2022 I met Spot, the yellow robot dog from Boston Dynamics, walking through the crowd at GITEX in Dubai.";
+        let speak = |prompt: Option<&filmcraft_tts::voxcpm::Prompt>| -> Vec<f32> {
+            let mut out = Vec::new();
+            for p in text::pieces(sentence).unwrap() {
+                if let text::Piece::Say(u) = p {
+                    out.extend(m.speak(&u, prompt, &Settings::default(), &mut |_, _| true).unwrap());
+                }
+            }
+            out
+        };
+        let hear = |x: &[f32]| -> f64 {
+            let x16 = filmcraft_audio_dsp::resample::resample_sinc(x, m.output_rate(), 16_000);
+            let opts = filmcraft_speech::Options { language: Some("en".into()), diarize: false, ..Default::default() };
+            let heard = whisper.transcribe(&x16, &opts, &mut |_, _| true).unwrap().text();
+            let wer = filmcraft_speech::word_error_rate(sentence, &heard);
+            eprintln!("heard ({:.0} % WER): {heard}", wer * 100.0);
+            wer
+        };
+        let t0 = web_time::Instant::now();
+        let zero = speak(None);
+        eprintln!("zero-shot: {:.1} s of audio in {:.1?}", zero.len() as f64 / f64::from(m.output_rate()), t0.elapsed());
+        assert!(hear(&zero) <= 0.2);
+        let Some(wav) = std::env::var_os("FILMCRAFT_VOXCPM_PROMPT") else { return };
+        let (x, rate) = filmcraft_tts::wav::read(std::path::Path::new(&wav)).unwrap();
+        let transcript = std::env::var("FILMCRAFT_VOXCPM_PROMPT_TEXT").ok().map(|t| text::sentences(&t).unwrap().join(" "));
+        let xr = filmcraft_audio_dsp::resample::resample_sinc(&x, rate, m.encode_rate());
+        let prompt = m.prompt(&xr, transcript.as_deref()).unwrap();
+        let t0 = web_time::Instant::now();
+        let cloned = speak(Some(&prompt));
+        eprintln!("cloned: {:.1} s of audio in {:.1?}", cloned.len() as f64 / f64::from(m.output_rate()), t0.elapsed());
+        assert!(hear(&cloned) <= 0.2);
+        let Some(ov) = std::env::var_os("FILMCRAFT_OPENVOICE_DIR") else { return };
+        let conv = filmcraft_tts::openvoice::Converter::load(std::path::Path::new(&ov)).unwrap();
+        let colour = |x: &[f32], r: u32| {
+            conv.tone_colour(&filmcraft_audio_dsp::resample::resample_sinc(&filmcraft_tts::clone::speech_only(x, r), r, filmcraft_tts::openvoice::RATE))
+                .unwrap()
+        };
+        let (a, b) = (colour(&cloned, m.output_rate()), colour(&x, rate));
+        let dot: f64 = a.iter().zip(&b).map(|(p, q)| f64::from(*p) * f64::from(*q)).sum();
+        let norm = |v: &[f32]| v.iter().map(|p| f64::from(*p) * f64::from(*p)).sum::<f64>().sqrt();
+        let cos = dot / (norm(&a) * norm(&b)).max(1e-12);
+        eprintln!("tone-colour similarity to the speaker: {cos:.3}");
+        assert!(cos >= 0.6, "{cos}");
+    }
 }
