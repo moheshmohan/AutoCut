@@ -95,7 +95,7 @@ SUBCOMMANDS
                                 media info as JSON, with MXF / Ogg / BWF details; with
                                 --image-sequence <media> is the first numbered still of a sequence
   showcase --album '<Google Photos album>' --prompt '<the video to make>' | --subject S
-         [--since YYYY[-MM[-DD]]] [--frames N] [--screen N] [--compare N] [--report-out r.json]
+         [--since YYYY[-MM[-DD]]] [--frames N] [--screen N] [--compare N] [--report-out r.json] [--fresh]
          [any option of `showcase --report` below] [--project p.fcproj --save]
                                 the whole video from one Google Photos album — the seed you fill
                                 in Google Photos — in one command: the local screen agent opens
@@ -170,7 +170,7 @@ SUBCOMMANDS
                                 every shot; findings in <out>.qa.json and a numbered contact
                                 sheet in <out>.qa.png (and under `qa` in the output)
   analyze '<subject>' [--items 1,2] [--frames N] [--screen N] [--relabel earlier.json] [--compare 150]
-         [--out report.json]
+         [--out report.json] [--fresh]
                                 which video items show <subject> (e.g. robot): a local vision model
                                 (AUTOCUT_ANALYSIS_MODEL, default qwen2.5vl:7b) locates it in sampled
                                 frames, reads the text on and around it, and names it; with capture
@@ -178,7 +178,12 @@ SUBCOMMANDS
                                 and an identity per robot (clips of the same one, compared side by
                                 side: at most --compare pairs, 0 = by name only), as JSON;
                                 --screen N looks at N spread-out frames of a clip first and
-                                skips the rest when none shows it (fast over many clips)
+                                skips the rest when none shows it (fast over many clips). Each
+                                clip's analysis is kept in <data dir>/autocut/analysis-cache, by
+                                the file (its Google Photos id, else its size and content), the
+                                subject, the model and --frames/--screen: a clip analysed before
+                                is not analysed again (`cached` counts them); --fresh analyses
+                                every clip again (also for showcase --album)
   autocut '<prompt>' [--dry-run] [--frames]
                                 plan (and run) a natural-language edit with AutoCut: a local
                                 model (Ollama) classifies the prompt and deterministic planners
@@ -577,7 +582,7 @@ fn showcase_source(a: &Args) -> (ShowcaseSource, Option<String>) {
             usage("showcase --report analysis.json | --album '<Google Photos album>' --prompt '<the video>' [--title T] [--voice clone:name] [--plan] …")
         }
         (Some(r), None) => {
-            for k in ["--prompt", "--subject", "--since", "--frames", "--screen", "--compare", "--report-out", "--with-photos"] {
+            for k in ["--prompt", "--subject", "--since", "--frames", "--screen", "--compare", "--report-out", "--with-photos", "--fresh"] {
                 if a.flag(k) {
                     usage(format!("showcase: {k} goes with --album (a --report already says what it found)"));
                 }
@@ -619,6 +624,10 @@ fn showcase_source(a: &Args) -> (ShowcaseSource, Option<String>) {
                     let n: u64 = v.parse().unwrap_or_else(|_| usage(format!("showcase: {k} wants a whole number, not `{v}`")));
                     params[key] = json!(n);
                 }
+            }
+            // analyse again the clips the analysis cache knows
+            if a.flag("--fresh") {
+                params["fresh"] = json!(true);
             }
             (ShowcaseSource::Album { title, params }, upload_album)
         }
@@ -1385,7 +1394,7 @@ async fn cli() {
             // which clips show <subject>, what it is, when, and its best moment
             let subject = a.positionals.get(1..).map(|p| p.join(" ")).unwrap_or_default();
             if subject.trim().is_empty() {
-                usage("analyze '<subject>' [--items 1,2,3] [--frames N] [--screen N] [--out report.json]");
+                usage("analyze '<subject>' [--items 1,2,3] [--frames N] [--screen N] [--out report.json] [--fresh]");
             }
             let items: Option<Vec<u64>> = a.opt("--items").map(|v| {
                 v.split(',')
@@ -1415,6 +1424,14 @@ async fn cli() {
                 ));
             }
             let mut b = Backend::open(&a);
+            // clips analysed before (same file, subject, model and settings) come from the
+            // analysis cache in the data directory; --fresh analyses them again
+            let cache = a
+                .opt("--data-dir")
+                .map(std::path::PathBuf::from)
+                .or_else(filmcraft_engine::autosave::default_data_dir)
+                .map_or_else(filmcraft_autocut::analysis_cache::AnalysisCache::off, |d| filmcraft_autocut::analysis_cache::AnalysisCache::in_data_dir(&d))
+                .fresh(a.flag("--fresh"));
             let mut progress = |l: &str| diag(format_args!("analyze: {l}"));
             // --relabel report.json: read the text and describe again from the report's best
             // moments, no locating
@@ -1428,7 +1445,8 @@ async fn cli() {
                 Backend::Local(s) => {
                     let session = std::mem::take(s);
                     let ex = filmcraft_autocut::SessionExecutor::from(*session);
-                    let r = filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, screen, earlier, compare, &mut progress).await;
+                    let r =
+                        filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, screen, earlier, compare, &cache, &mut progress).await;
                     if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
                         **s = inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
                     }
@@ -1438,12 +1456,12 @@ async fn cli() {
                     let addr = a.opt("--bridge").unwrap_or_default();
                     let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
                     let ex = filmcraft_automation::AutocutExecutor::bridge(client);
-                    filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, screen, earlier, compare, &mut progress).await
+                    filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, screen, earlier, compare, &cache, &mut progress).await
                 }
             };
             match result {
                 Ok(facts) => {
-                    let v = json!({"subject": subject, "model": cfg.analysis_model, "clips": facts});
+                    let v = json!({"subject": subject, "model": cfg.analysis_model, "clips": facts, "cached": cache.hits()});
                     if let Some(out) = a.opt("--out") {
                         let text = serde_json::to_string_pretty(&v).unwrap_or_default();
                         std::fs::write(out, text).unwrap_or_else(|e| fail(format!("analyze: {out}: {e}")));

@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::album::{self, AlbumPick, AlbumSource};
+use crate::analysis_cache::AnalysisCache;
 use crate::analyze::{self, ClipFacts};
 use crate::config::Config;
 use crate::llm::{ChatModel, JsonFuture};
@@ -414,6 +415,9 @@ pub struct ShowcaseHost {
     source: Source,
     /// Picks Google Photos albums for jobs given `album` (none: such jobs are refused).
     albums: Option<Arc<dyn AlbumSource>>,
+    /// Where clip analyses are kept, so a clip is analysed once (none: not kept). A job's
+    /// `fresh: true` analyses again.
+    analysis_cache: Option<std::path::PathBuf>,
 }
 
 /// The host the app, the CLI and the MCP server install: Ollama models from the environment.
@@ -435,12 +439,27 @@ struct Resolved {
 
 impl ShowcaseHost {
     pub fn from_config(cfg: Config) -> Self {
-        Self { source: Source::Config(cfg), albums: None }
+        let analysis_cache = filmcraft_engine::autosave::default_data_dir().map(|d| d.join("autocut").join("analysis-cache"));
+        Self { source: Source::Config(cfg), albums: None, analysis_cache }
     }
 
     /// A host with these models (tests, scripting).
     pub fn with_models(models: Models) -> Self {
-        Self { source: Source::Fixed(models), albums: None }
+        Self { source: Source::Fixed(models), albums: None, analysis_cache: None }
+    }
+
+    /// This host, keeping clip analyses in `dir` (none: not kept).
+    pub fn with_analysis_cache(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        self.analysis_cache = dir;
+        self
+    }
+
+    /// The analysis cache for a job: the host's, bypassed by `fresh: true`.
+    fn analysis_cache(&self, p: &Value) -> AnalysisCache {
+        match &self.analysis_cache {
+            Some(dir) => AnalysisCache::at(dir.clone()).fresh(p["fresh"].as_bool().unwrap_or(false)),
+            None => AnalysisCache::off(),
+        }
     }
 
     /// This host, picking Google Photos albums with `albums` for jobs given `album`.
@@ -503,7 +522,7 @@ impl ShowcaseHost {
                     p["items"] = json!(seed.imported.items);
                 }
                 let p = &p;
-                let (mut report, mut summary) = analyze_clips(&vision, ex, &request, p, progress).await?;
+                let (mut report, mut summary) = analyze_clips(&vision, ex, &request, p, &self.analysis_cache(p), progress).await?;
                 if let Some(seed) = &seed {
                     report["album"] = json!(seed.title);
                     summary["album"] = seed.to_json();
@@ -686,7 +705,14 @@ async fn filmed_since(ex: &dyn Executor, items: Option<&[u64]>, since: i64) -> R
 
 /// Analyse the clips for the request's subject: the report (as `analyze --out` writes it) and a
 /// summary.
-async fn analyze_clips(model: &dyn ChatModel, ex: &PortExecutor, req: &Request, p: &Value, progress: &Arc<Progress>) -> Result<(Value, Value), AutoCutError> {
+async fn analyze_clips(
+    model: &dyn ChatModel,
+    ex: &PortExecutor,
+    req: &Request,
+    p: &Value,
+    cache: &AnalysisCache,
+    progress: &Arc<Progress>,
+) -> Result<(Value, Value), AutoCutError> {
     let mut items: Option<Vec<u64>> = p["items"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect());
     let mut undated = 0;
     if let Some((text, t)) = &req.since {
@@ -705,10 +731,12 @@ async fn analyze_clips(model: &dyn ChatModel, ex: &PortExecutor, req: &Request, 
     let frames = p["frames"].as_u64().map_or(6, |n| n.clamp(1, analyze::MAX_FRAMES as u64) as usize);
     let compare = p["compare"].as_u64().map_or(crate::identity::MAX_COMPARISONS, |n| n as usize);
     let screen = p["screen"].as_u64().map_or(0, |n| n.min(analyze::MAX_FRAMES as u64) as usize);
-    let facts: Vec<ClipFacts> = analyze::run(model, ex, &req.subject, items.as_deref(), frames, screen, None, compare, &mut |l| note(progress, l)).await?;
+    let facts: Vec<ClipFacts> =
+        analyze::run(model, ex, &req.subject, items.as_deref(), frames, screen, None, compare, cache, &mut |l| note(progress, l)).await?;
     let showing = facts.iter().filter(|f| f.present).count();
     let mut report = json!({"subject": req.subject, "model": model.id(), "clips": facts});
-    let mut summary = json!({"subject": req.subject, "clips": facts.len(), "showing": showing});
+    // clips analysed before (the analysis cache) were not looked at again
+    let mut summary = json!({"subject": req.subject, "clips": facts.len(), "showing": showing, "cached": cache.hits()});
     if let Some((text, _)) = &req.since {
         report["since"] = text.clone();
         summary["since"] = text.clone();

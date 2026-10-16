@@ -311,6 +311,17 @@ fn an_album_seeds_the_analysis() {
 }
 
 #[test]
+fn fresh_reaches_the_host_only_when_asked() {
+    let (mut s, fake) = session(Fake::default());
+    s.execute("autocut.analyze", json!({"subject": "robot", "fresh": true, "wait": true})).unwrap();
+    s.execute("autocut.makeShowcase", json!({"subject": "robot", "fresh": false, "wait": true})).unwrap();
+    s.execute("autocut.analyze", json!({"subject": "robot", "fresh": "yes", "wait": true})).unwrap();
+    let tasks = fake.tasks.lock().unwrap().clone();
+    let fresh: Vec<Option<&Value>> = tasks.iter().map(|(_, p)| p.get("fresh")).collect();
+    assert_eq!(fresh, [Some(&json!(true)), None, None], "only a true `fresh` is passed on");
+}
+
+#[test]
 fn since_reads_years_months_and_days() {
     use crate::autocut::parse_since;
     assert_eq!(parse_since(&json!("2020")), Ok(1_577_836_800));

@@ -18,6 +18,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::analysis_cache::{self, AnalysisCache};
 use crate::llm::ChatModel;
 use crate::{AutoCutError, Executor};
 
@@ -417,9 +418,10 @@ fn read_note(read: &FrameText) -> String {
     format!("; on it: {}", read.on_subject.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(", "))
 }
 
-/// Analyse afresh, or (with `earlier`) only read and describe again from an earlier analysis;
-/// then tell which clips show the same robot ([`crate::identity::identify`], at most `compare`
-/// model comparisons; 0 joins by name only).
+/// Analyse afresh — taking every clip seen before from `cache` ([`AnalysisCache`]) — or (with
+/// `earlier`) only read and describe again from an earlier analysis; then tell which clips show
+/// the same robot ([`crate::identity::identify`], at most `compare` model comparisons; 0 joins by
+/// name only).
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     model: &dyn ChatModel,
@@ -430,6 +432,7 @@ pub async fn run(
     screen: usize,
     earlier: Option<Vec<ClipFacts>>,
     compare: usize,
+    cache: &AnalysisCache,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Vec<ClipFacts>, AutoCutError> {
     let mut facts = match earlier {
@@ -437,7 +440,7 @@ pub async fn run(
             relabel(model, ex, subject, &mut facts, progress).await?;
             facts
         }
-        None => analyze(model, ex, subject, items, frames_max, screen, progress).await?,
+        None => analyze(model, ex, subject, items, frames_max, screen, cache, progress).await?,
     };
     crate::identity::identify(model, ex, subject.trim(), &mut facts, compare, progress).await;
     Ok(facts)
@@ -594,7 +597,9 @@ pub fn sanitize_label_with(label: &str, kind: &str, subject: &str, read: &FrameT
     label.to_string()
 }
 
-/// One clip: frames → grounding → text → description.
+/// One clip: frames → grounding → text → description. The flag says every frame was read and
+/// every model call answered — only such an analysis is kept in the cache (one made while the
+/// model was down would say "not there" forever).
 #[allow(clippy::too_many_arguments)]
 async fn analyze_clip(
     model: &dyn ChatModel,
@@ -606,7 +611,8 @@ async fn analyze_clip(
     frames_max: usize,
     screen: usize,
     progress: &mut dyn FnMut(&str),
-) -> Result<ClipFacts, AutoCutError> {
+) -> Result<(ClipFacts, bool), AutoCutError> {
+    let mut clean = true;
     let mut frames: Vec<FrameFact> = Vec::new();
     let mut pngs: Vec<(f64, f64, Vec<u8>)> = Vec::new(); // (area, seconds, png)
     let (order, screened) = screening_order(&sample_times(seconds, frames_max), screen);
@@ -619,10 +625,14 @@ async fn analyze_clip(
             Ok(r) => r,
             Err(e) => {
                 progress(&format!("  frame {t:.1}s of {name}: {e}"));
+                clean = false;
                 continue;
             }
         };
-        let Some(png) = r["pngBase64"].as_str().and_then(crate::b64_decode) else { continue };
+        let Some(png) = r["pngBase64"].as_str().and_then(crate::b64_decode) else {
+            clean = false;
+            continue;
+        };
         let (w, h) = (r["width"].as_u64().unwrap_or(1) as u32, r["height"].as_u64().unwrap_or(1) as u32);
         let (fw, fh) = model_frame(w, h);
         let reply = model.complete_json(GROUND_SYSTEM, &ground_prompt(subject), std::slice::from_ref(&png)).await;
@@ -630,6 +640,7 @@ async fn analyze_clip(
             Ok(v) => frame_fact(t, &v, fw, fh),
             Err(e) => {
                 progress(&format!("  {name} @ {t:.1}s: the model did not answer ({e})"));
+                clean = false;
                 FrameFact { seconds: t, present: false, area: 0.0, center: [0.5, 0.5] }
             }
         };
@@ -660,7 +671,10 @@ async fn analyze_clip(
     };
     if facts.present {
         // the text it carries and that is around it, then a description that can use it
-        facts.text = read_clip_text(model, ex, subject, &facts, progress).await.unwrap_or_default();
+        match read_clip_text(model, ex, subject, &facts, progress).await {
+            Some(read) => facts.text = read,
+            None => clean = false,
+        }
         // describe from the (up to) three frames where it is largest, in time order
         pngs.sort_by(|a, b| b.0.total_cmp(&a.0));
         pngs.truncate(3);
@@ -669,9 +683,27 @@ async fn analyze_clip(
         if let Err(e) = describe(model, subject, &imgs, &mut facts).await {
             progress(&format!("  {name}: no description ({e})"));
             facts.label = sanitize_label("", &facts.kind, subject);
+            clean = false;
         }
     }
-    Ok(facts)
+    Ok((facts, clean))
+}
+
+/// The cache identity of each file-backed item (`media.status`): its Google Photos id or content
+/// identity, read from the file ([`analysis_cache::media_identity`]), else the identity the engine
+/// recorded when it imported the file. Empty when the target cannot say (an older app).
+async fn identities(ex: &dyn Executor) -> std::collections::HashMap<u64, String> {
+    let Ok(status) = ex.execute("media.status", json!({})).await else { return Default::default() };
+    status
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let item = m["item"].as_u64()?;
+            let from_file = m["path"].as_str().and_then(|p| analysis_cache::media_identity(std::path::Path::new(p)));
+            Some((item, from_file.or_else(|| analysis_cache::reported_identity(&m["identity"]))?))
+        })
+        .collect()
 }
 
 /// The media items of a project document (`project.inspect`): `(item, name, seconds)` for
@@ -702,7 +734,10 @@ pub fn video_items(project: &Value) -> Vec<(u64, String, f64)> {
 }
 
 /// Analyse `items` (or every video item) for `subject`, oldest first. `progress` gets a line per
-/// clip. A clip that cannot be read is skipped with a note, never fatal.
+/// clip. A clip that cannot be read is skipped with a note, never fatal. A clip whose file was
+/// analysed before — for this subject, with this model and these settings — is taken from
+/// `cache` instead ([`AnalysisCache::hits`] counts them); a clip analysed now is kept in it.
+#[allow(clippy::too_many_arguments)]
 pub async fn analyze(
     model: &dyn ChatModel,
     ex: &dyn Executor,
@@ -710,6 +745,7 @@ pub async fn analyze(
     items: Option<&[u64]>,
     frames_max: usize,
     screen: usize,
+    cache: &AnalysisCache,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Vec<ClipFacts>, AutoCutError> {
     let subject = subject.trim();
@@ -730,16 +766,35 @@ pub async fn analyze(
             .unwrap_or((None, None))
     };
     let n = clips.len();
+    let frames_max = frames_max.clamp(1, MAX_FRAMES);
+    let known = if cache.enabled() { identities(ex).await } else { Default::default() };
+    let model_id = model.id();
     let mut out = Vec::with_capacity(n);
+    let mut cached = 0usize;
     for (k, (item, name, secs)) in clips.into_iter().enumerate() {
-        let mut f = analyze_clip(model, ex, subject, item, &name, secs, frames_max.clamp(1, MAX_FRAMES), screen, progress).await?;
+        let key = known.get(&item).map(|id| AnalysisCache::key(id, subject, &model_id, frames_max, screen));
+        let (mut f, from_cache) = match key.as_deref().and_then(|k| cache.get(k)) {
+            Some(kept) => (ClipFacts { item, name: name.clone(), identity: None, ..kept }, true),
+            None => {
+                let (f, clean) = analyze_clip(model, ex, subject, item, &name, secs, frames_max, screen, progress).await?;
+                if let Some(key) = key.as_deref().filter(|_| clean) {
+                    cache.put(key, &f);
+                }
+                (f, false)
+            }
+        };
         (f.created, f.unix) = date_of(item);
+        cached += usize::from(from_cache);
         progress(&format!(
-            "[{}/{n}] {name}: {}",
+            "[{}/{n}] {name}: {}{}",
             k + 1,
-            if f.present { format!("{} ({:.0}% of frames){}", f.label, f.coverage * 100.0, read_note(&f.text)) } else { format!("no {subject}") }
+            if f.present { format!("{} ({:.0}% of frames){}", f.label, f.coverage * 100.0, read_note(&f.text)) } else { format!("no {subject}") },
+            if from_cache { " (analysed before)" } else { "" }
         ));
         out.push(f);
+    }
+    if cached > 0 {
+        progress(&format!("{cached} of {n} clip(s) were analysed before and came from the analysis cache"));
     }
     out.sort_by_key(|f| (f.unix.unwrap_or(i64::MAX), f.item));
     Ok(out)
@@ -780,11 +835,13 @@ pub(crate) mod testing {
         pub clips: Vec<(u64, f64, i64)>,
         /// Every `media.frame` asked for: `(item, seconds, maxSide)`.
         pub frames: Mutex<Vec<(u64, f64, u64)>>,
+        /// The file behind an item, for `media.status` (none: it reports no files).
+        pub files: Vec<(u64, std::path::PathBuf)>,
     }
 
     impl FakeEx {
         pub fn new(clips: Vec<(u64, f64, i64)>) -> Self {
-            Self { clips, frames: Mutex::new(Vec::new()) }
+            Self { clips, frames: Mutex::new(Vec::new()), files: Vec::new() }
         }
     }
 
@@ -796,6 +853,9 @@ pub(crate) mod testing {
                     json!({"root": {"children": self.clips.iter().map(|(i, s, _)| json!({"item": i, "name": format!("c{i}.mp4"), "type": "Movie", "duration": s * tps})).collect::<Vec<_>>()}}),
                 ),
                 "media.captureDate" => Ok(json!({"items": self.clips.iter().map(|(i, _, u)| json!({"item": i, "unix": u})).collect::<Vec<_>>()})),
+                "media.status" => {
+                    Ok(json!(self.files.iter().map(|(i, f)| json!({"item": i, "path": f.to_string_lossy(), "status": "online"})).collect::<Vec<_>>()))
+                }
                 "media.frame" => {
                     let item = p["item"].as_u64().unwrap_or(0);
                     self.frames.lock().unwrap().push((item, p["seconds"].as_f64().unwrap_or(-1.0), p["maxSide"].as_u64().unwrap_or(0)));
@@ -970,7 +1030,7 @@ mod tests {
             json!({"label": "Swiss-Mile ARDET", "kind": "wheeled", "description": "A red wheeled-legged robot at the ETH Zürich booth."}),
         ]);
         let model = FixedModel::new(answers);
-        let facts = analyze(&model, &ex, "robot", None, 2, 0, &mut |_| {}).await.unwrap();
+        let facts = analyze(&model, &ex, "robot", None, 2, 0, &AnalysisCache::off(), &mut |_| {}).await.unwrap();
         let f = &facts[0];
         assert!(f.present);
         assert_eq!(f.text, read(&["ARDET", "Swiss-Mile"], &["ETH zürich RSL", "QUOKKA"]));
@@ -996,12 +1056,121 @@ mod tests {
         answers.extend([nothing.clone(), json!({"present": true, "bbox_2d": [0, 0, 400, 400]}), nothing.clone(), nothing.clone(), nothing.clone(), nothing]);
         answers.extend([json!({"on_subject": [], "nearby": []}), json!({"label": "white robot", "kind": "humanoid", "description": "A white robot."})]);
         let model = FixedModel::new(answers);
-        let facts = analyze(&model, &ex, "robot", None, 6, 3, &mut |_| {}).await.unwrap();
+        let facts = analyze(&model, &ex, "robot", None, 6, 3, &AnalysisCache::off(), &mut |_| {}).await.unwrap();
         assert!(!facts[0].present && facts[0].frames.len() == 3, "three looks, then skipped: {:?}", facts[0].frames);
         assert!(facts[1].present);
         assert_eq!(facts[1].frames.len(), 6, "a clip that shows it is looked at fully");
         assert!(facts[1].frames.windows(2).all(|w| w[0].seconds < w[1].seconds), "frames in time order");
         assert!((facts[1].coverage - 1.0 / 6.0).abs() < 1e-9);
+    }
+
+    /// The answers for two 10 s clips analysed with two frames each: the first shows a robot (two
+    /// frames located, two read, one description), the second does not.
+    fn robot_then_nothing() -> Vec<Value> {
+        let mut answers = grounded();
+        answers.extend([
+            json!({"on_subject": ["ARDET"], "nearby": []}),
+            json!({"on_subject": [], "nearby": []}),
+            json!({"label": "ARDET robot", "kind": "wheeled", "description": "A red wheeled robot."}),
+            json!({"present": false}),
+            json!({"present": false}),
+        ]);
+        answers
+    }
+
+    fn media_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("autocut-analyze-cache-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn a_clip_seen_before_is_not_analysed_again() {
+        let dir = media_dir("seen");
+        let (a, b) = (dir.join("a.mp4"), dir.join("b.mp4"));
+        std::fs::write(&a, b"robot clip bytes").unwrap();
+        std::fs::write(&b, b"other clip bytes").unwrap();
+        let mut ex = testing::FakeEx::new(vec![(1, 10.0, 1_700_000_000), (2, 10.0, 1_700_000_100)]);
+        ex.files = vec![(1, a.clone()), (2, b.clone())];
+        let data = dir.join("data");
+        let model = FixedModel::new(robot_then_nothing());
+        let cache = AnalysisCache::in_data_dir(&data);
+        let first = analyze(&model, &ex, "robot", None, 2, 0, &cache, &mut |_| {}).await.unwrap();
+        assert_eq!((cache.stored(), cache.hits()), (2, 0));
+        assert!(first[0].present && !first[1].present);
+        // again, over the same library: nothing is asked of the model
+        let mute = FixedModel::new(vec![]);
+        let again = AnalysisCache::in_data_dir(&data);
+        let mut lines: Vec<String> = vec![];
+        let second = analyze(&mute, &ex, "robot", None, 2, 0, &again, &mut |l| lines.push(l.to_string())).await.unwrap();
+        assert!(mute.asked.lock().unwrap().is_empty(), "the model was not asked");
+        assert_eq!(again.hits(), 2);
+        // the same facts, from the cache (JSON keeps floats to within an ulp)
+        assert_eq!(second.len(), first.len());
+        for (s, f) in second.iter().zip(&first) {
+            assert_eq!(
+                (s.item, &s.name, s.present, &s.label, &s.kind, &s.text, s.best, s.unix),
+                (f.item, &f.name, f.present, &f.label, &f.kind, &f.text, f.best, f.unix)
+            );
+            assert_eq!(s.frames.len(), f.frames.len());
+            for (a, b) in s.frames.iter().zip(&f.frames) {
+                assert!(a.present == b.present && (a.area - b.area).abs() < 1e-12 && (a.center[1] - b.center[1]).abs() < 1e-12, "{a:?} {b:?}");
+            }
+        }
+        assert!(lines.iter().any(|l| l.contains("2 of 2 clip(s) were analysed before")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("(analysed before)")), "{lines:?}");
+        // the same file imported again elsewhere, as another item: still known, with its new place
+        let moved = dir.join("moved.mp4");
+        std::fs::copy(&a, &moved).unwrap();
+        let mut ex2 = testing::FakeEx::new(vec![(9, 10.0, 1_600_000_000)]);
+        ex2.files = vec![(9, moved)];
+        let got = analyze(&mute, &ex2, "robot", None, 2, 0, &AnalysisCache::in_data_dir(&data), &mut |_| {}).await.unwrap();
+        assert_eq!((got[0].item, got[0].name.as_str(), got[0].label.as_str(), got[0].unix), (9, "c9.mp4", "ARDET robot", Some(1_600_000_000)));
+        // other settings are another analysis: asked again
+        let other = AnalysisCache::in_data_dir(&data);
+        let model = FixedModel::new(robot_then_nothing());
+        analyze(&model, &ex, "robot", None, 2, 3, &other, &mut |_| {}).await.unwrap();
+        assert_eq!(other.hits(), 0, "screening changes the analysis");
+        // --fresh: every clip analysed again, and kept
+        let fresh = AnalysisCache::in_data_dir(&data).fresh(true);
+        let model = FixedModel::new(robot_then_nothing());
+        analyze(&model, &ex, "robot", None, 2, 0, &fresh, &mut |_| {}).await.unwrap();
+        assert_eq!((fresh.hits(), fresh.stored()), (0, 2));
+        assert_eq!(model.asked.lock().unwrap().len(), 7, "both clips analysed again");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_analysis_the_model_did_not_answer_is_not_kept() {
+        let dir = media_dir("unanswered");
+        let a = dir.join("a.mp4");
+        std::fs::write(&a, b"robot clip bytes").unwrap();
+        let mut ex = testing::FakeEx::new(vec![(1, 10.0, 1_700_000_000)]);
+        ex.files = vec![(1, a)];
+        let data = dir.join("data");
+        // Ollama down: the clip reads as "no robot" — and must not stay that way
+        let cache = AnalysisCache::in_data_dir(&data);
+        let facts = analyze(&FixedModel::new(vec![]), &ex, "robot", None, 2, 0, &cache, &mut |_| {}).await.unwrap();
+        assert!(!facts[0].present);
+        assert_eq!(cache.stored(), 0);
+        // with the model back, it is analysed (and kept)
+        let cache = AnalysisCache::in_data_dir(&data);
+        let mut answers = grounded();
+        answers.extend([
+            json!({"on_subject": [], "nearby": []}),
+            json!({"on_subject": [], "nearby": []}),
+            json!({"label": "robot", "kind": "other", "description": "A robot."}),
+        ]);
+        let facts = analyze(&FixedModel::new(answers), &ex, "robot", None, 2, 0, &cache, &mut |_| {}).await.unwrap();
+        assert!(facts[0].present);
+        assert_eq!((cache.hits(), cache.stored()), (0, 1));
+        // a target that cannot say which file an item is: analysed, nothing kept
+        let blind = testing::FakeEx::new(vec![(1, 10.0, 1_700_000_000)]);
+        let cache = AnalysisCache::in_data_dir(&data);
+        analyze(&FixedModel::new(robot_then_nothing()), &blind, "robot", None, 2, 0, &cache, &mut |_| {}).await.unwrap();
+        assert_eq!((cache.hits(), cache.stored()), (0, 0));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
@@ -1014,7 +1183,7 @@ mod tests {
             json!({"label": "Quokka robot", "kind": "wheeled", "description": "A white robot beside a kiosk."}),
         ]);
         let model = FixedModel::new(answers);
-        let facts = analyze(&model, &ex, "robot", None, 2, 0, &mut |_| {}).await.unwrap();
+        let facts = analyze(&model, &ex, "robot", None, 2, 0, &AnalysisCache::off(), &mut |_| {}).await.unwrap();
         assert_eq!(facts[0].label, "wheeled robot");
         assert_eq!(facts[0].text, read(&[], &["QUOKKA"]));
     }
@@ -1078,10 +1247,10 @@ mod tests {
             })
             .collect();
         let model = FixedModel::new(vec![json!({"same": true, "confidence": 0.95})]);
-        let facts = run(&model, &ex, "robot", None, 2, 0, Some(earlier.clone()), 10, &mut |_| {}).await.unwrap();
+        let facts = run(&model, &ex, "robot", None, 2, 0, Some(earlier.clone()), 10, &AnalysisCache::off(), &mut |_| {}).await.unwrap();
         assert_eq!(facts.iter().map(|f| f.identity).collect::<Vec<_>>(), vec![Some(1), Some(1)]);
         // no comparisons: each its own robot
-        let facts = run(&FixedModel::new(vec![]), &ex, "robot", None, 2, 0, Some(earlier), 0, &mut |_| {}).await.unwrap();
+        let facts = run(&FixedModel::new(vec![]), &ex, "robot", None, 2, 0, Some(earlier), 0, &AnalysisCache::off(), &mut |_| {}).await.unwrap();
         assert_eq!(facts.iter().map(|f| f.identity).collect::<Vec<_>>(), vec![Some(1), Some(2)]);
     }
 

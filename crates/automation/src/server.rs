@@ -301,6 +301,11 @@ pub struct ShowcaseAnalyzeParams {
     /// by name only).
     #[serde(default)]
     pub compare: Option<u32>,
+    /// Analyse every clip again. By default a clip analysed before — the same file (its Google
+    /// Photos id, or its size and content), subject, model and frames/screen — comes from the
+    /// analysis cache in the data directory (`cached` in the summary counts them).
+    #[serde(default)]
+    pub fresh: Option<bool>,
     /// Also group the clips into entries and write the voice-over (`autocut.makeShowcase`),
     /// default false: the result then holds the plan to review.
     #[serde(default)]
@@ -331,6 +336,7 @@ fn showcase_analyze_params(p: ShowcaseAnalyzeParams) -> (&'static str, Value) {
     put("frames", p.frames.map(|n| json!(n)));
     put("screen", p.screen.map(|n| json!(n)));
     put("compare", p.compare.map(|n| json!(n)));
+    put("fresh", p.fresh.filter(|f| *f).map(Value::Bool));
     if make {
         put("title", p.title.map(Value::String));
         put("voice", p.voice.map(Value::String));
@@ -1638,7 +1644,7 @@ mod tests {
     #[test]
     fn showcase_tool_schemas_and_params() {
         let s = schema("showcase_analyze");
-        assert_eq!(props(&s), ["album", "compare", "frames", "items", "plan", "prompt", "screen", "since", "subject", "title", "voice"], "{s}");
+        assert_eq!(props(&s), ["album", "compare", "frames", "fresh", "items", "plan", "prompt", "screen", "since", "subject", "title", "voice"], "{s}");
         assert!(s["required"].as_array().is_none_or(|r| r.is_empty()), "a subject or a prompt: {s}");
         let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "since": "2020", "items": [5, 6]})).unwrap();
         assert_eq!(showcase_analyze_params(p), ("autocut.analyze", json!({"subject": "robot", "since": "2020", "items": [5, 6], "wait": true})));
@@ -1650,6 +1656,10 @@ mod tests {
         // a Google Photos album as the seed, with the video asked for in words
         let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"prompt": "every robot since 2020", "album": "Robot showcase", "subject": " "})).unwrap();
         assert_eq!(showcase_analyze_params(p), ("autocut.analyze", json!({"prompt": "every robot since 2020", "album": "Robot showcase", "wait": true})));
+        let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "fresh": true})).unwrap();
+        assert_eq!(showcase_analyze_params(p).1, json!({"subject": "robot", "fresh": true, "wait": true}));
+        let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "fresh": false})).unwrap();
+        assert!(showcase_analyze_params(p).1.get("fresh").is_none());
 
         let s = schema("showcase_plan");
         assert_eq!(props(&s), ["entries", "min_coverage", "mood", "subtitle", "title", "voice"], "{s}");
