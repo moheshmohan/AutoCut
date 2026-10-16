@@ -4,6 +4,7 @@
 use std::sync::mpsc::{Sender, channel};
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use filmcraft_engine::Session;
 use filmcraft_ui_egui::FilmcraftApp;
 use filmcraft_ui_egui::control::ControlRequest;
@@ -12,6 +13,8 @@ use serde_json::{Value, json};
 struct Driver {
     harness: Harness<'static, FilmcraftApp>,
     tx: Sender<ControlRequest>,
+    /// `FILMCRAFT_UI_SNAPSHOT_DIR`: where [`Driver::snapshot`] writes PNGs (rendered with wgpu).
+    snapshots: Option<std::path::PathBuf>,
 }
 
 impl Driver {
@@ -21,8 +24,13 @@ impl Driver {
         session.execute("file.projectSettings.scratchDisks", json!({"captured": scratch})).expect("scratch disk");
         let (tx, rx) = channel();
         let app = FilmcraftApp::new(session).with_control(rx);
-        let harness = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000).build_eframe(move |_cc| app);
-        let mut d = Driver { harness, tx };
+        let snapshots = std::env::var_os("FILMCRAFT_UI_SNAPSHOT_DIR").map(std::path::PathBuf::from);
+        let mut b = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000);
+        if snapshots.is_some() {
+            b = b.wgpu();
+        }
+        let harness = b.build_eframe(move |_cc| app);
+        let mut d = Driver { harness, tx, snapshots };
         d.frames(4);
         // the built-in voice: these tests are about the panel, and a natural voice (when this
         // build has it and the machine has downloaded it) synthesizes too slowly for them
@@ -90,6 +98,18 @@ impl Driver {
             self.frames(1);
         }
         panic!("synthesis never finished");
+    }
+
+    fn snapshot(&mut self, name: &str) {
+        let Some(dir) = self.snapshots.clone() else { return };
+        self.frames(2);
+        match self.harness.render() {
+            Ok(img) => {
+                std::fs::create_dir_all(&dir).unwrap();
+                img.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+            Err(e) => eprintln!("snapshot {name} skipped: {e}"),
+        }
     }
 
     fn ids(&mut self, prefix: &str) -> Vec<String> {
@@ -204,5 +224,45 @@ fn settings_controls_and_hear_this_voice() {
     assert!(!d.ids("tts.").iter().any(|i| i == "tts.pitch"));
     d.click("tts.advanced");
     assert!(d.ids("tts.").iter().any(|i| i == "tts.pitch"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Clone a voice: the engine and model choices, and the model's download confirmation (size,
+/// source, licence) before anything is fetched.
+#[test]
+fn clone_section_offers_engines_models_and_confirms_downloads() {
+    let dir = scratch("clone");
+    let mut d = Driver::demo(&dir);
+    d.exec("window.panel.TextToSpeech", json!({}));
+    d.frames(3);
+    assert!(!d.ids("tts.").iter().any(|i| i == "tts.cloneEngine"), "folded away at first");
+    d.click("tts.cloneOpen");
+    assert_eq!(d.draft()["cloneOpen"], true);
+    let ids = d.ids("tts.");
+    for id in ["tts.cloneEngine", "tts.cloneModel", "tts.cloneName", "tts.cloneConsent", "tts.clone"] {
+        assert!(ids.iter().any(|i| i == id), "{id} in {ids:?}");
+    }
+    assert_eq!(d.draft()["cloneEngine"], "voxcpm", "natural cloning by default");
+    d.snapshot("tts-clone-natural");
+    // the timbre-only engine has no model choice
+    d.ok("ui.set", json!({"tts": {"cloneEngine": "openvoice"}}));
+    d.frames(3);
+    assert!(!d.ids("tts.").iter().any(|i| i == "tts.cloneModel"));
+    d.ok("ui.set", json!({"tts": {"cloneEngine": "voxcpm", "cloneModel": "voxcpm-2"}}));
+    d.frames(3);
+    let models = d.exec("tts.clonedVoices", json!({}))["models"].clone();
+    let installed = models.as_array().unwrap().iter().any(|m| m["id"] == "voxcpm-2" && m["installed"] == true);
+    if !installed {
+        // not downloaded: the button asks first, with the size, source and licence
+        d.click("tts.clone");
+        assert_eq!(d.draft()["cloneConfirm"], true);
+        assert!(d.ids("tts.").iter().any(|i| i == "tts.cloneDownload.confirm"));
+        assert!(d.harness.query_by_label_contains("huggingface.co/openbmb/VoxCPM2").is_some(), "the source is shown");
+        assert!(d.harness.query_by_label_contains("Apache-2.0").is_some(), "the licence is shown");
+        assert!(d.harness.query_by_label_contains("GB, once").is_some(), "the size is shown");
+        d.snapshot("tts-clone-confirm");
+        // nothing is downloaded until confirmed
+        assert!(d.draft()["cloneJob"].is_null());
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
