@@ -308,3 +308,39 @@ fn a_panic_while_rendering_ahead_is_an_error() {
         assert!(matches!(r, Err(ExportError::Encode(_))), "{:?}", r.map(|_| ()));
     });
 }
+
+/// Remembers the name of every thread that asked for a source.
+struct Watched<'a> {
+    inner: &'a SourceMap,
+    threads: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl SourceProvider for Watched<'_> {
+    fn source(&self, item: ItemId) -> Option<SharedSource> {
+        let name = std::thread::current().name().unwrap_or("").to_string();
+        self.threads.lock().unwrap().insert(name);
+        self.inner.source(item)
+    }
+}
+
+#[test]
+fn frames_render_on_a_pool_of_the_exports_own() {
+    // the encoding side's parallel work (colour conversion, audio mix) goes to the caller's pool;
+    // frames rendered there too would keep its workers from it
+    let settings = |name: &str| ExportSettings { format: Format::Mjpeg, path: tmp(name), include_audio: false, ..Default::default() };
+    let (reference, _) = export_overlapped(3, 4, false, &settings("own-pool-ref.mov"));
+    let (p, seq, m) = project();
+    let watched = Watched { inner: &m, threads: Default::default() };
+    let s = settings("own-pool.mov");
+    pool(3).install(|| {
+        let prog = Progress::default();
+        let mut ex = Exporter::new(p, seq, &s, &prog).unwrap();
+        ex.set_batch(4);
+        while !matches!(ex.step(&watched, &prog).unwrap(), Step::Done(_)) {}
+        assert!(ex.overlapped_steps() > 0);
+    });
+    let threads = watched.threads.into_inner().unwrap();
+    assert!(!threads.is_empty());
+    assert!(threads.iter().all(|t| t.starts_with("filmcraft-export-render-")), "frames rendered on {threads:?}");
+    assert!(std::fs::read(&s.path).unwrap() == reference, "the render pool changed the file");
+}

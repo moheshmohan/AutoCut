@@ -58,6 +58,17 @@
 //! * **Timers.** `Render` and `Encode` are wall times of work that now runs at the same time, so
 //!   their sum may exceed the export's wall time; `Wait` is the time the encoding side then spent
 //!   waiting for the render (large: render-bound; near zero: encode-bound).
+//! * **A pool of its own for the render** ([`Exporter::render_pool`]). The encoding side is parallel too: the
+//!   RGB → Y'CbCr conversion, the built-in H.264 encoder's analysis, the audio mixer (one task per
+//!   track) and the AAC quantiser all run on rayon's global pool. Rendered there as well, a batch
+//!   of frames (every frame splitting into row tasks) kept every worker busy, and work handed to the
+//!   pool from outside (the encoding thread is not one of its workers) is only taken once the
+//!   workers run out of their own: each conversion and each audio mix waited for most of the
+//!   batch, so the overlap gained little (a 1080p30 showcase export, hardware H.264: convert 34 ms a
+//!   frame, the audio 24 s for 40 s of sound). Each export now renders its frames on a pool of its
+//!   own with as many threads (started with the first batch, gone with the exporter), which leaves
+//!   the caller's pool to the encoding side; the operating system shares the cores between the two.
+//!   The file does not change: where a frame is drawn does not change its pixels.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -101,6 +112,34 @@ pub(crate) fn overlap_batch(batch: i64, frame_bytes: u64, budget: u64) -> i64 {
     let want = u64::try_from(batch.max(1)).unwrap_or(1);
     let fit = (budget / 2) / frame_bytes.max(1);
     i64::try_from(fit.min(want)).unwrap_or(1).max(1)
+}
+
+/// A thread pool for one export's frames (see "A pool of its own for the render" in the module
+/// docs): as many threads as the pool the export is called from (rayon's global pool, or the one
+/// a caller installed). `None` where no thread can be started (wasm, or the system refused):
+/// frames then render on the caller's pool, as before.
+fn build_render_pool() -> Option<Arc<rayon::ThreadPool>> {
+    if cfg!(target_arch = "wasm32") {
+        return None;
+    }
+    rayon::ThreadPoolBuilder::new().num_threads(rayon::current_num_threads()).thread_name(|i| format!("filmcraft-export-render-{i}")).build().ok().map(Arc::new)
+}
+
+/// Run `f` (a frame render) on `pool`, or right here when there is none.
+fn on_render_pool<R: Send>(pool: Option<&rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
+    match pool {
+        Some(pool) => pool.install(f),
+        None => f(),
+    }
+}
+
+/// [`rayon::in_place_scope`] whose spawned tasks run on `pool` (on the caller's pool when there is
+/// none); `op` itself runs on the calling thread.
+fn render_scope<'scope, R>(pool: Option<&rayon::ThreadPool>, op: impl FnOnce(&rayon::Scope<'scope>) -> R) -> R {
+    match pool {
+        Some(pool) => pool.in_place_scope(op),
+        None => rayon::in_place_scope(op),
+    }
 }
 
 /// A batch rendered while the previous one was being encoded.
@@ -161,6 +200,8 @@ pub struct Exporter {
     budget: u64,
     /// The batch starting at `next`, already rendered.
     ahead: Option<Ahead>,
+    /// Where frames render, built by the first batch ([`Exporter::render_pool`]).
+    render_pool: Option<Option<Arc<rayon::ThreadPool>>>,
     /// Steps that rendered a batch alongside the encoding of the previous one.
     overlapped_steps: u64,
     brand: Brand,
@@ -273,6 +314,7 @@ impl Exporter {
             overlap: true,
             budget: IN_FLIGHT_BUDGET,
             ahead: None,
+            render_pool: None,
             overlapped_steps: 0,
             brand,
             venc,
@@ -332,6 +374,11 @@ impl Exporter {
     /// Frames rendered ahead of the encoder now (memory held by the overlap).
     pub fn frames_ahead(&self) -> usize {
         self.ahead.as_ref().map_or(0, |a| a.frames.len())
+    }
+
+    /// The pool this export renders its frames on (built on first use; `None`: the caller's pool).
+    fn render_pool(&mut self) -> Option<Arc<rayon::ThreadPool>> {
+        self.render_pool.get_or_insert_with(build_render_pool).clone()
     }
 
     /// Frames in the next batch, bounded before Rayon can steal nested frame tasks.
@@ -531,8 +578,9 @@ impl Exporter {
             Some(a) if a.first == self.next => (a.first, a.frames),
             _ => {
                 let (f, end) = (self.next, self.next.saturating_add(self.batch_len()).min(self.f1));
+                let render_pool = self.render_pool();
                 let pipe = &self.pipe;
-                match timed(Stage::Render, || render_batch(pipe, f, end, sources)) {
+                match timed(Stage::Render, || on_render_pool(render_pool.as_deref(), || render_batch(pipe, f, end, sources))) {
                     Some(frames) => (f, frames),
                     None => return Ok(Step::Pending),
                 }
@@ -556,9 +604,11 @@ impl Exporter {
             };
         };
         let pipe = self.pipe.clone();
+        let render_pool = self.render_pool();
         let mut slot: Option<std::thread::Result<Option<Vec<Frame>>>> = None;
         let mut encode_done: Option<web_time::Instant> = None;
-        let encoded = rayon::in_place_scope(|s| {
+        // the render goes to its own pool, the encoding side's parallel work to the global one
+        let encoded = render_scope(render_pool.as_deref(), |s| {
             s.spawn(|_| {
                 slot = Some(catch_unwind(AssertUnwindSafe(|| timed(Stage::Render, || render_batch(&pipe, a, b, sources)))));
             });
