@@ -29,6 +29,8 @@ pub const ALLOWED_FAMILIES: &[&str] = &[
     // a limiter on the mix bus (the showcase's mastering)
     "mixer.addInsert",
     "mixer.setInsert",
+    // "make a video of every robot since 2020": the showcase job, which plans and waits for review
+    "autocut.makeShowcase",
 ];
 
 /// Whether a command id is in an allowed family.

@@ -1,0 +1,322 @@
+//! Tests of [`crate::autocut`]: the showcase jobs run the host's work on a thread that edits only
+//! through the command port (run by whoever owns the session: a `wait: true` call, or
+//! [`Session::pump_port`] as the UI does each frame), keep the report, plan and build in the
+//! session, report their outcome in `jobs.list`, run one at a time, stop on `jobs.cancel`, survive
+//! a panicking host, and refuse hostile parameters before any job starts.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use super::*;
+use crate::autocut::{AutoCutHost, CommandPort, Task, TaskKind};
+use serde_json::{Value, json};
+
+/// A host that does a little of each job through the port, or waits to be cancelled, or panics.
+#[derive(Default)]
+struct Fake {
+    hang: bool,
+    panic: bool,
+    not_ready: Option<String>,
+    tasks: Mutex<Vec<(TaskKind, Value)>>,
+    /// The session answered a request while the job ran.
+    answered: AtomicBool,
+}
+
+impl AutoCutHost for Fake {
+    fn ready(&self) -> std::result::Result<(), String> {
+        self.not_ready.clone().map_or(Ok(()), Err)
+    }
+
+    fn run(&self, task: Task, port: &CommandPort, progress: &Arc<filmcraft_export::Progress>) -> std::result::Result<Value, String> {
+        self.tasks.lock().unwrap().push((task.kind, task.params.clone()));
+        if self.panic {
+            panic!("a bug in the host");
+        }
+        if self.hang {
+            for _ in 0..2000 {
+                // a request at a time, as a real job: it stops once cancelled
+                port.call("project.inspect", json!({}))?;
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            return Err("never cancelled".into());
+        }
+        *progress.status.lock().unwrap() = format!("working on {:?}", task.kind);
+        match task.kind {
+            TaskKind::Analyze | TaskKind::Make => {
+                let project = port.call("project.inspect", json!({}))?;
+                self.answered.store(project.is_object(), Ordering::Relaxed);
+                let subject = task.params["subject"].as_str().unwrap_or("thing");
+                let report = json!({"subject": subject, "clips": [{"item": 5, "present": true}, {"item": 6, "present": false}]});
+                let mut out = json!({"report": report, "summary": {"clips": 2}, "status": "Found 1 clip"});
+                if task.kind == TaskKind::Make {
+                    out["plan"] = json!({"subject": subject, "entries": [{"number": 1, "label": "red robot"}], "script": {"intro": "Hi.", "lines": ["One."], "outro": "Bye."}});
+                }
+                Ok(out)
+            }
+            TaskKind::Plan => {
+                let n = task.report.as_ref().and_then(|r| r["clips"].as_array().map(Vec::len)).unwrap_or(0);
+                Ok(
+                    json!({"plan": {"title": task.params["title"], "entries": vec![json!({"label": "x"}); n], "script": {"intro": "", "lines": [], "outro": ""}}}),
+                )
+            }
+            TaskKind::Build => {
+                let plan = task.params.get("plan").cloned().or(task.plan).unwrap_or_default();
+                let r = port.call("file.newSequence", json!({"name": plan["title"].as_str().unwrap_or("Showcase"), "width": 640, "height": 360, "fps": 30}))?;
+                port.call("graphics.newText", json!({"text": "ROBOTS", "seconds": 2.0, "time": 0}))?;
+                let frame = port.render(1.0, 64);
+                Ok(json!({"built": {"sequence": r["sequence"], "frame": frame.map(|(w, h, px)| json!([w, h, px.len()]))}, "status": "Built"}))
+            }
+        }
+    }
+}
+
+fn session(fake: Fake) -> (Session, Arc<Fake>) {
+    let mut s = Session::default();
+    s.execute("file.openDemoProject", json!({})).unwrap();
+    let fake = Arc::new(fake);
+    s.autocut.host = Some(fake.clone());
+    (s, fake)
+}
+
+fn job_entry(s: &mut Session, id: u64) -> Value {
+    let jobs = s.execute("jobs.list", json!({})).unwrap();
+    jobs.as_array().unwrap().iter().find(|j| j["id"] == id).cloned().unwrap_or_default()
+}
+
+/// Pump the port as the UI does each frame until job `id` finishes.
+fn pump_until_done(s: &mut Session, id: u64) -> Value {
+    let t0 = std::time::Instant::now();
+    loop {
+        s.pump_port(Duration::from_millis(8));
+        let j = job_entry(s, id);
+        if j["finished"] == true {
+            return j;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "the job never finished: {j}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn without_a_host_the_jobs_are_disabled() {
+    let mut s = Session::default();
+    for id in ["autocut.analyze", "autocut.showcasePlan", "autocut.makeShowcase", "autocut.showcaseBuild"] {
+        let e = s.execute(id, json!({"subject": "robot"})).unwrap_err().to_string();
+        assert!(e.contains("not available"), "{id}: {e}");
+    }
+    // reading and setting the kept plan works anywhere
+    assert_eq!(s.execute("autocut.showcaseInspect", json!({})).unwrap()["available"], false);
+    let (mut s, _) = session(Fake { not_ready: Some("Ollama is not running".into()), ..Fake::default() });
+    let e = s.execute("autocut.analyze", json!({"subject": "robot"})).unwrap_err().to_string();
+    assert!(e.contains("Ollama is not running"), "{e}");
+}
+
+#[test]
+fn analyze_with_wait_runs_through_the_port_and_keeps_the_report() {
+    let (mut s, fake) = session(Fake::default());
+    let r = s.execute("autocut.analyze", json!({"subject": "  robot ", "since": "2020-06", "items": [5, 6], "frames": 4, "wait": true})).unwrap();
+    assert!(fake.answered.load(Ordering::Relaxed), "the job's project.inspect was answered by the session");
+    let (kind, params) = fake.tasks.lock().unwrap()[0].clone();
+    assert_eq!(kind, TaskKind::Analyze);
+    // checked and normalized for the host: the subject trimmed, the date as Unix seconds
+    assert_eq!(params["subject"], "robot");
+    assert_eq!(params["sinceUnix"], 1_590_969_600, "2020-06-01T00:00:00Z: {params}");
+    assert_eq!((params["items"].clone(), params["frames"].clone()), (json!([5, 6]), json!(4)));
+    // the answer and jobs.list carry the outcome without the whole report
+    assert_eq!(r["showcase"]["summary"], json!({"clips": 2}), "{r}");
+    assert!(r["showcase"].get("report").is_none(), "{r}");
+    let job = r["job"].as_u64().unwrap();
+    let j = job_entry(&mut s, job);
+    assert_eq!((j["finished"].clone(), j["status"].clone()), (json!(true), json!("Found 1 clip")), "{j}");
+    assert_eq!(j["showcase"]["summary"]["clips"], 2, "{j}");
+    // the session keeps the report: a summary by default, all of it on request
+    let i = s.execute("autocut.showcaseInspect", json!({})).unwrap();
+    assert_eq!(i["report"], json!({"subject": "robot", "since": null, "clips": 2, "showing": 1}), "{i}");
+    assert_eq!((i["reportRevision"].as_u64(), i["plan"].clone()), (Some(1), Value::Null));
+    assert_eq!(i["job"]["command"], "autocut.analyze", "{i}");
+    let whole = s.execute("autocut.showcaseInspect", json!({"report": true})).unwrap();
+    assert_eq!(whole["report"]["clips"][0]["item"], 5);
+}
+
+#[test]
+fn plan_needs_a_report_and_build_needs_a_plan() {
+    let (mut s, _) = session(Fake::default());
+    let e = s.execute("autocut.showcasePlan", json!({"title": "Robots"})).unwrap_err().to_string();
+    assert!(e.contains("autocut.analyze"), "{e}");
+    let e = s.execute("autocut.showcaseBuild", json!({})).unwrap_err().to_string();
+    assert!(e.contains("autocut.showcasePlan"), "{e}");
+    s.execute("autocut.analyze", json!({"subject": "robot", "wait": true})).unwrap();
+    s.execute("autocut.showcasePlan", json!({"title": "Robots", "wait": true})).unwrap();
+    let i = s.execute("autocut.showcaseInspect", json!({})).unwrap();
+    assert_eq!((i["plan"]["title"].as_str(), i["plan"]["entries"].as_array().map(Vec::len)), (Some("Robots"), Some(2)), "{i}");
+    assert_eq!(i["planRevision"], 1);
+    // reviewed entries are enough without a report
+    let (mut s, fake) = session(Fake::default());
+    s.execute("autocut.showcasePlan", json!({"entries": [{"label": "a", "include": false}], "minCoverage": 0.5, "wait": true})).unwrap();
+    let (_, params) = fake.tasks.lock().unwrap()[0].clone();
+    assert_eq!((params["entries"][0]["include"].clone(), params["minCoverage"].clone()), (json!(false), json!(0.5)));
+}
+
+#[test]
+fn make_keeps_both_report_and_plan() {
+    let (mut s, _) = session(Fake::default());
+    let r = s.execute("autocut.makeShowcase", json!({"prompt": "make a video of every robot since 2020", "wait": true})).unwrap();
+    assert_eq!(r["showcase"]["plan"]["entries"][0]["label"], "red robot", "{r}");
+    let i = s.execute("autocut.showcaseInspect", json!({})).unwrap();
+    assert_eq!((i["reportRevision"].as_u64(), i["planRevision"].as_u64()), (Some(1), Some(1)), "{i}");
+}
+
+/// The UI's way: start without waiting, then run the job's commands frame by frame. The build's
+/// edits are ordinary commands (in History), and the frame it asked for rendered.
+#[test]
+fn a_build_pumped_like_the_ui_edits_through_commands() {
+    let (mut s, _) = session(Fake::default());
+    let undo_before = s.history.undo.len();
+    let plan = json!({"title": "Every Robot", "entries": [{"label": "red robot"}], "script": {"intro": "", "lines": [""], "outro": ""}});
+    let r = s.execute("autocut.showcaseBuild", json!({"plan": plan})).unwrap();
+    let id = r["job"].as_u64().unwrap();
+    assert!(r.get("result").is_none(), "no waiting: {r}");
+    assert!(crate::autocut::running(&s).is_some(), "the job waits for the session to run its commands");
+    let j = pump_until_done(&mut s, id);
+    assert_eq!(j["result"]["error"], Value::Null, "{j}");
+    assert!(crate::autocut::running(&s).is_none());
+    let seq = s.active_sequence().unwrap();
+    assert_eq!((seq.settings.width, seq.settings.height), (640, 360), "the new sequence is open");
+    assert!(s.history.undo.len() > undo_before, "the build's edits are undoable");
+    let built = j["showcase"]["built"].clone();
+    assert_eq!(built["frame"][0], 64, "a 64-px frame of the new sequence: {built}");
+    assert_eq!(s.execute("autocut.showcaseInspect", json!({})).unwrap()["built"], built);
+}
+
+#[test]
+fn one_showcase_job_at_a_time_and_cancel_stops_it() {
+    let (mut s, _) = session(Fake { hang: true, ..Fake::default() });
+    let id = s.execute("autocut.analyze", json!({"subject": "robot"})).unwrap()["job"].as_u64().unwrap();
+    s.pump_port(Duration::from_millis(20));
+    let e = s.execute("autocut.makeShowcase", json!({"subject": "robot"})).unwrap_err().to_string();
+    assert!(e.contains("already running") && e.contains(&format!("job {id}")), "{e}");
+    let e = s.execute("autocut.showcaseSet", json!({"plan": null})).unwrap_err().to_string();
+    assert!(e.contains("running"), "{e}");
+    s.execute("jobs.cancel", json!({"job": id})).unwrap();
+    let j = pump_until_done(&mut s, id);
+    assert_eq!(j["result"]["error"], "cancelled", "{j}");
+    assert!(crate::autocut::running(&s).is_none());
+    let i = s.execute("autocut.showcaseInspect", json!({})).unwrap();
+    assert_eq!(i["report"], Value::Null, "a cancelled analysis keeps nothing: {i}");
+    // and the next job may start
+    assert!(s.execute("autocut.analyze", json!({"subject": "robot"})).is_ok());
+}
+
+/// A bug in the host becomes the job's error; the session and later jobs carry on.
+#[test]
+fn a_panicking_host_fails_its_job_only() {
+    let (mut s, _) = session(Fake { panic: true, ..Fake::default() });
+    let e = s.execute("autocut.analyze", json!({"subject": "robot", "wait": true})).unwrap_err().to_string();
+    assert!(e.contains("internal error"), "{e}");
+    assert!(crate::autocut::running(&s).is_none());
+    assert!(s.execute("sequence.inspect", json!({})).is_ok());
+}
+
+#[test]
+fn hostile_parameters_are_refused_before_a_job_starts() {
+    let (mut s, fake) = session(Fake::default());
+    let long = "x".repeat(crate::autocut::MAX_SUBJECT_CHARS + 1);
+    let cases = [
+        ("autocut.analyze", json!({})),
+        ("autocut.analyze", json!({"subject": ""})),
+        ("autocut.analyze", json!({"subject": 7})),
+        ("autocut.analyze", json!({"subject": long})),
+        ("autocut.analyze", json!({"subject": "robot", "items": "all"})),
+        ("autocut.analyze", json!({"subject": "robot", "items": []})),
+        ("autocut.analyze", json!({"subject": "robot", "items": [-1]})),
+        ("autocut.analyze", json!({"subject": "robot", "items": [1.5]})),
+        ("autocut.analyze", json!({"subject": "robot", "items": vec![1; crate::autocut::MAX_ITEMS + 1]})),
+        ("autocut.analyze", json!({"subject": "robot", "since": "last year"})),
+        ("autocut.analyze", json!({"subject": "robot", "since": "2020-13"})),
+        ("autocut.analyze", json!({"subject": "robot", "since": "20-01-01"})),
+        ("autocut.analyze", json!({"subject": "robot", "since": "2020-01-01-01"})),
+        ("autocut.analyze", json!({"subject": "robot", "since": 99999})),
+        ("autocut.analyze", json!({"subject": "robot", "since": {"y": 2020}})),
+        ("autocut.analyze", json!({"subject": "robot", "frames": 0})),
+        ("autocut.analyze", json!({"subject": "robot", "frames": 9})),
+        ("autocut.analyze", json!({"subject": "robot", "frames": -2})),
+        ("autocut.analyze", json!({"subject": "robot", "frames": 2.5})),
+        ("autocut.analyze", json!({"subject": "robot", "compare": 1e12})),
+        ("autocut.analyze", json!([1, 2])),
+        ("autocut.makeShowcase", json!({"title": "no subject"})),
+        ("autocut.makeShowcase", json!({"prompt": ""})),
+        ("autocut.makeShowcase", json!({"subject": "robot", "title": "t".repeat(crate::autocut::MAX_TEXT_CHARS + 1)})),
+        ("autocut.makeShowcase", json!({"subject": "robot", "voice": ["clone:me"]})),
+        ("autocut.showcasePlan", json!({"entries": "all"})),
+        ("autocut.showcasePlan", json!({"entries": [1, 2]})),
+        ("autocut.showcasePlan", json!({"entries": vec![json!({}); crate::autocut::MAX_ENTRIES + 1]})),
+        ("autocut.showcasePlan", json!({"entries": [], "minCoverage": 2})),
+        ("autocut.showcasePlan", json!({"entries": [], "minCoverage": "most"})),
+        ("autocut.showcaseBuild", json!({"plan": "robots.json"})),
+        ("autocut.showcaseBuild", json!({"plan": {"script": {}}})),
+        ("autocut.showcaseBuild", json!({"plan": {"entries": [], "script": "Hi."}})),
+        ("autocut.showcaseBuild", json!({"plan": {"entries": []}, "upload": true})),
+        ("autocut.showcaseBuild", json!({"plan": {"entries": []}, "export": 3})),
+        ("autocut.showcaseBuild", json!({"plan": {"entries": []}, "qa": "yes"})),
+    ];
+    for (id, p) in cases {
+        assert!(s.execute(id, p.clone()).is_err(), "{id} {p} should be refused");
+    }
+    assert!(fake.tasks.lock().unwrap().is_empty(), "no job started");
+    assert!(s.jobs.is_empty());
+    // an upload needs the Google Photos uploader before anything is built
+    let e = s.execute("autocut.showcaseBuild", json!({"plan": {"entries": []}, "export": "/tmp/x.mp4", "upload": true})).unwrap_err().to_string();
+    assert!(e.contains("upload") && e.contains("not available"), "{e}");
+}
+
+#[test]
+fn since_reads_years_months_and_days() {
+    use crate::autocut::parse_since;
+    assert_eq!(parse_since(&json!("2020")), Ok(1_577_836_800));
+    assert_eq!(parse_since(&json!(2020)), Ok(1_577_836_800));
+    assert_eq!(parse_since(&json!(" 2020-06 ")), Ok(1_590_969_600));
+    assert_eq!(parse_since(&json!("2020-06-15")), Ok(1_592_179_200));
+    for bad in [json!("1800"), json!("2020-00"), json!("2020-01-32"), json!("2020/01"), json!(""), json!(null), json!(2020.5), json!("２０２０")] {
+        assert!(parse_since(&bad).is_err(), "{bad}");
+    }
+}
+
+/// The CLI's files load as the kept report and plan; `null` clears; bad shapes are refused.
+#[test]
+fn set_loads_cli_files_and_clears() {
+    let (mut s, _) = session(Fake::default());
+    let dir = std::env::temp_dir().join(format!("filmcraft-showcase-set-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let report = dir.join("robots.json");
+    let plan = dir.join("plan.json");
+    std::fs::write(&report, json!({"subject": "robot", "clips": [{"item": 5, "present": true}]}).to_string()).unwrap();
+    std::fs::write(&plan, json!({"entries": [{"label": "red robot"}], "script": {"intro": "a", "lines": ["b"], "outro": "c"}}).to_string()).unwrap();
+    let r = s.execute("autocut.showcaseSet", json!({"reportPath": report.to_string_lossy(), "planPath": plan.to_string_lossy()})).unwrap();
+    assert_eq!((r["report"]["showing"].as_u64(), r["plan"].as_bool()), (Some(1), Some(true)), "{r}");
+    let i = s.execute("autocut.showcaseInspect", json!({})).unwrap();
+    assert_eq!(i["plan"]["entries"][0]["label"], "red robot");
+    s.execute("autocut.showcaseSet", json!({"plan": null})).unwrap();
+    assert_eq!(s.execute("autocut.showcaseInspect", json!({})).unwrap()["plan"], Value::Null);
+    std::fs::write(dir.join("junk.json"), b"not json").unwrap();
+    for bad in [
+        json!({}),
+        json!({"report": {"subject": "robot"}}),
+        json!({"plan": {"script": {}}}),
+        json!({"planPath": dir.join("junk.json").to_string_lossy()}),
+        json!({"reportPath": dir.join("missing.json").to_string_lossy()}),
+    ] {
+        assert!(s.execute("autocut.showcaseSet", bad.clone()).is_err(), "{bad}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A job whose session is gone gets an error, not a hang.
+#[test]
+fn a_port_without_its_session_fails() {
+    let s = Session::default();
+    let port = s.autocut.port.handle(None);
+    drop(s);
+    assert_eq!(port.call("project.inspect", json!({})).unwrap_err(), "the session closed");
+    assert!(port.render(0.0, 64).is_none());
+}

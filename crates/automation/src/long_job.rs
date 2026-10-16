@@ -1,5 +1,6 @@
 //! Long exports over MCP (docs/agents.md § Long exports): `file.exportMedia` (and the other
-//! [`LONG_COMMANDS`]: voice cloning, model downloads and Google Photos uploads) with `wait: true` runs as a background engine job; the server reports its progress as MCP
+//! [`LONG_COMMANDS`]: voice cloning, model downloads, Google Photos uploads and AutoCut showcase
+//! jobs) with `wait: true` runs as a background engine job; the server reports its progress as MCP
 //! `notifications/progress` (when the request carried a `progressToken`) and stops it on
 //! `notifications/cancelled`, deleting an export's partial output (an upload's file is the
 //! user's and is never touched). The session lock is only held for short polls, so other
@@ -16,11 +17,21 @@ use serde_json::{Value, json};
 use crate::server::FilmcraftMcp;
 
 /// Engine commands that block until their job is done when called with `wait: true`.
-pub const LONG_COMMANDS: &[&str] = &["file.exportMedia", "tts.cloneVoice", "tts.downloadVoices", "tts.downloadCloneModel", "photos.upload"];
+pub const LONG_COMMANDS: &[&str] = &[
+    "file.exportMedia",
+    "tts.cloneVoice",
+    "tts.downloadVoices",
+    "tts.downloadCloneModel",
+    "photos.upload",
+    "autocut.analyze",
+    "autocut.showcasePlan",
+    "autocut.makeShowcase",
+    "autocut.showcaseBuild",
+];
 
 /// The parts of a finished job's `jobs.list` entry a long call's answer carries besides
-/// `result`: an export's offline media, an upload's new media item.
-pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload"];
+/// `result`: an export's offline media, an upload's new media item, what a showcase job made.
+pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload", "showcase"];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);

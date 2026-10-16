@@ -31,6 +31,7 @@ pub async fn plan(intent: &str, params: &Value, digest: &Digest, ex: &dyn Execut
         "add_voice_over" => add_voice_over(params, digest, ex).await,
         "export_video" => export_video(params, digest),
         "slow_motion" => slow_motion(params, digest),
+        "showcase" => showcase(params),
         other => Err(AutoCutError::Invalid(format!("`{other}` is not a locally planned intent"))),
     }
 }
@@ -376,4 +377,28 @@ fn slow_motion(params: &Value, digest: &Digest) -> Result<Plan, AutoCutError> {
         },
     )];
     Ok(Plan::Steps { steps, notes: Vec::new() })
+}
+
+/// "Make a video of every robot since 2020": the showcase job (`autocut.makeShowcase`) finds the
+/// clips and writes the plan in the background; nothing is built until the plan is reviewed.
+fn showcase(params: &Value) -> Result<Plan, AutoCutError> {
+    let subject = params["subject"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AutoCutError::Invalid("say what the showcase is of, e.g. \"make a video of every robot since 2020\"".into()))?;
+    // a job: in the app it runs in the background (the bridge polls it) and opens the Showcase
+    // panel; headless, the call waits for it
+    let mut p = json!({"subject": subject, "wait": true});
+    if let Some(since) = params.get("since").filter(|v| v.is_string() || v.is_u64()) {
+        p["since"] = since.clone();
+    }
+    if let Some(title) = params["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+        p["title"] = json!(title);
+    }
+    let steps = vec![PlannedStep::new("autocut.makeShowcase", p, format!("find every {subject} and write the showcase's entries and voice-over"))];
+    let notes = vec![
+        "nothing is built yet: review the entries and the voice-over (the step's `showcase.plan`, the Showcase panel in the app, or autocut.showcaseInspect), then build it with autocut.showcaseBuild".into(),
+    ];
+    Ok(Plan::Steps { steps, notes })
 }

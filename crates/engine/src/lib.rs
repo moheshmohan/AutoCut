@@ -12,6 +12,7 @@
 
 pub mod aaf_omf;
 pub mod audio_generate;
+pub mod autocut;
 pub mod autosave;
 pub mod captions;
 pub mod clip_ops;
@@ -454,6 +455,9 @@ pub struct Session {
     pub photos: Option<Arc<dyn photos::PhotosUploader>>,
     /// Upload job → its new media item, filled when the job finishes (`upload` in `jobs.list`).
     pub photo_uploads: std::collections::HashMap<u64, photos::UploadOutcome>,
+    /// AutoCut showcases (`autocut.*`): the host that runs their jobs (None = not available),
+    /// the command port the jobs edit through, and what they made.
+    pub autocut: autocut::AutoCut,
     /// The Events panel log: failed commands, job results, auto-save errors, messages.
     pub log: panels::EventLog,
     /// Media Browser navigation (directory, back / forward history, selected files).
@@ -556,6 +560,7 @@ impl Session {
             transcriber: None,
             photos: None,
             photo_uploads: Default::default(),
+            autocut: Default::default(),
             log: Default::default(),
             browser: Default::default(),
             exec_depth: 0,
@@ -650,8 +655,11 @@ impl Session {
     }
 
     /// Apply worker notifications (call regularly, e.g. once per UI frame). Also applies the
-    /// results of finished proxy / ingest jobs.
+    /// results of finished proxy / ingest jobs, and runs the commands showcase jobs sent over the
+    /// command port ([`Session::pump_port`]).
     pub fn poll_persistence(&mut self) {
+        // what background jobs (AutoCut showcases) asked the session to run
+        self.pump_port(std::time::Duration::from_millis(8));
         proxies::poll(self);
         masks::poll(self);
         scene_detect::poll(self);
@@ -1249,6 +1257,8 @@ mod audio_effects_tests;
 mod audio_generate_tests;
 #[cfg(test)]
 mod audio_placement_tests;
+#[cfg(test)]
+mod autocut_tests;
 #[cfg(test)]
 mod autosave_tests;
 #[cfg(test)]

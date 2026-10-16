@@ -55,10 +55,45 @@ impl ChatModel for FixedModel {
     }
 }
 
+/// What a [`FnModel`] answers with: `(system, user, images)` → the reply.
+pub type Answer = dyn Fn(&str, &str, &[Vec<u8>]) -> Result<Value, AutoCutError> + Send + Sync;
+
+/// A model that answers through a function of what it is asked — for tests and fakes where the
+/// order of requests is not fixed (a clip analysis asks to locate, read, describe and compare in
+/// an order that depends on the media).
+pub struct FnModel {
+    pub name: String,
+    answer: Box<Answer>,
+}
+
+impl FnModel {
+    pub fn new(name: &str, answer: impl Fn(&str, &str, &[Vec<u8>]) -> Result<Value, AutoCutError> + Send + Sync + 'static) -> Self {
+        Self { name: name.to_string(), answer: Box::new(answer) }
+    }
+}
+
+impl ChatModel for FnModel {
+    fn id(&self) -> String {
+        self.name.clone()
+    }
+
+    fn complete_json(&self, system: &str, user: &str, images: &[Vec<u8>]) -> JsonFuture {
+        let answer = (self.answer)(system, user, images);
+        Box::pin(async move { answer })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn fn_model_answers_by_prompt() {
+        let m = FnModel::new("fake", |system, user, images| Ok(json!({"system": system, "user": user, "images": images.len()})));
+        assert_eq!(m.id(), "fake");
+        assert_eq!(m.complete_json("s", "u", &[vec![1]]).await.unwrap(), json!({"system": "s", "user": "u", "images": 1}));
+    }
 
     #[tokio::test]
     async fn fixed_model_scripts_then_errors() {

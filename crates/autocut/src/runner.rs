@@ -67,7 +67,12 @@ pub async fn run(prompt: &str, ex: &dyn Executor, cfg: &Config, mode: Mode) -> R
 
 /// [`run`] with explicit models (tests, scripting).
 pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &Config, opts: Options) -> Result<Report, AutoCutError> {
-    let digest = Digest::read(ex).await?;
+    // a showcase is a new video: it needs clips, not an open sequence
+    let digest = match Digest::read(ex).await {
+        Ok(d) => Some(d),
+        Err(AutoCutError::NoSequence) => None,
+        Err(e) => return Err(e),
+    };
     let mut report = Report {
         prompt: prompt.to_string(),
         intent: None,
@@ -81,16 +86,25 @@ pub async fn run_with(runners: &Runners, prompt: &str, ex: &dyn Executor, cfg: &
         notes: Vec::new(),
     };
 
-    // 1. classify locally; when the local model is unreachable, the caller (an MCP agent) can
-    //    still plan the edit itself with the engine's tools, so say exactly that
-    let classification = match intent::classify(runners.local.as_ref(), prompt).await {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(AutoCutError::Llm(format!(
-                "{e}. Start Ollama (`ollama serve`) and pull the model (`ollama pull {}`) — or, when an agent is driving the editor, let it plan this edit itself with command_list / command_run",
-                cfg.llm_model
-            )));
-        }
+    // 1. classify locally ("make a video of every robot since 2020" without a model); when the
+    //    local model is unreachable, the caller (an MCP agent) can still plan the edit itself with
+    //    the engine's tools, so say exactly that
+    let classification = match intent::showcase_request(prompt) {
+        Some(c) => c,
+        None => match intent::classify(runners.local.as_ref(), prompt).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(AutoCutError::Llm(format!(
+                    "{e}. Start Ollama (`ollama serve`) and pull the model (`ollama pull {}`) — or, when an agent is driving the editor, let it plan this edit itself with command_list / command_run",
+                    cfg.llm_model
+                )));
+            }
+        },
+    };
+    let digest = match digest {
+        Some(d) => d,
+        None if classification.intent == "showcase" => Digest { project: serde_json::Value::Null, sequence: serde_json::Value::Null, transcript: None },
+        None => return Err(AutoCutError::NoSequence),
     };
 
     let use_local = classification.intent != "custom" && classification.confidence >= cfg.confidence_threshold;

@@ -216,6 +216,9 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         session.voiceover.input = Some(Box::new(audio_in::CpalIn::new(&session.prefs.audio_hardware.device_class)));
         // Export ▸ Upload to Google Photos, over the sign-in of `filmcraft-cli photos auth --upload`
         session.photos = Some(filmcraft_gphotos::engine_uploader());
+        // Sequence ▸ Make a Showcase… and the Showcase panel: AutoCut's showcase jobs, with the
+        // Ollama models of the AUTOCUT_* environment
+        session.autocut.host = Some(filmcraft_autocut::host::engine_host());
         let (project, media) = args::project_and_media(&files);
         if let Some(p) = project {
             if let Err(e) = session.execute("file.open", json!({"path": p})) {

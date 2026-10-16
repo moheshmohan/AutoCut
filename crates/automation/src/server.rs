@@ -238,6 +238,134 @@ fn photos_upload_params(p: PhotosUploadParams) -> Value {
     params
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ShowcaseAnalyzeParams {
+    /// What to look for in every clip, singular: "robot", "vintage car".
+    pub subject: String,
+    /// Only these media items (ids from project_inspect); default: every video item.
+    #[serde(default)]
+    pub items: Option<Vec<u64>>,
+    /// Only clips filmed on or after this date: "2020", "2020-06" or "2020-06-15" (clips without a
+    /// capture date are left out).
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Frames sampled per clip, 1–8 (default 6).
+    #[serde(default)]
+    pub frames: Option<u32>,
+    /// Most side-by-side comparisons for telling the same robot across clips (default 150; 0:
+    /// by name only).
+    #[serde(default)]
+    pub compare: Option<u32>,
+    /// Also group the clips into entries and write the voice-over (`autocut.makeShowcase`),
+    /// default false: the result then holds the plan to review.
+    #[serde(default)]
+    pub plan: Option<bool>,
+    /// With `plan`: the video's title (default "Every <Subject> I've Filmed").
+    #[serde(default)]
+    pub title: Option<String>,
+    /// With `plan`: the narration voice (`clone:<name>` for a cloned one; "" none).
+    #[serde(default)]
+    pub voice: Option<String>,
+}
+
+/// `autocut.analyze` (or, with `plan`, `autocut.makeShowcase`) and its params, as a long job.
+fn showcase_analyze_params(p: ShowcaseAnalyzeParams) -> (&'static str, Value) {
+    let make = p.plan.unwrap_or(false);
+    let mut params = json!({"subject": p.subject, "wait": true});
+    let mut put = |k: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            params[k] = v;
+        }
+    };
+    put("items", p.items.map(|i| json!(i)));
+    put("since", p.since.map(Value::String));
+    put("frames", p.frames.map(|n| json!(n)));
+    put("compare", p.compare.map(|n| json!(n)));
+    if make {
+        put("title", p.title.map(Value::String));
+        put("voice", p.voice.map(Value::String));
+    }
+    (if make { "autocut.makeShowcase" } else { "autocut.analyze" }, params)
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ShowcasePlanParams {
+    /// The video's title (default: the plan's, else "Every <Subject> I've Filmed").
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Under the title on the opening card (default: the years the entries span).
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    /// Narration voice: a built-in id, or `clone:<name>` for a cloned voice; "" no narration.
+    #[serde(default)]
+    pub voice: Option<String>,
+    /// The music bed's mood: epic, tense, uplifting or calm.
+    #[serde(default)]
+    pub mood: Option<String>,
+    /// Clips showing the subject in less of their frames are left out (0–1, default 0.3).
+    #[serde(default)]
+    pub min_coverage: Option<f64>,
+    /// Reviewed entries (a plan's `entries`, each with `include` and `mergePrevious`): the voice-over
+    /// is written for exactly these. Default: the kept analysis, grouped afresh.
+    #[serde(default)]
+    pub entries: Option<Vec<Value>>,
+}
+
+fn showcase_plan_params(p: ShowcasePlanParams) -> Value {
+    let mut params = json!({"wait": true});
+    for (k, v) in [("title", p.title), ("subtitle", p.subtitle), ("voice", p.voice), ("mood", p.mood)] {
+        if let Some(v) = v {
+            params[k] = json!(v);
+        }
+    }
+    if let Some(c) = p.min_coverage {
+        params["minCoverage"] = json!(c);
+    }
+    if let Some(e) = p.entries {
+        params["entries"] = json!(e);
+    }
+    params
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ShowcaseBuildParams {
+    /// The plan to build (as showcase_plan returns it, edited); default: the kept plan.
+    #[serde(default)]
+    pub plan: Option<Value>,
+    /// Export the built showcase here (YouTube 1080p; chapters and a QA report beside it).
+    #[serde(default)]
+    pub export: Option<String>,
+    /// Then upload the export to the user's Google Photos library (its own job; needs `export`
+    /// and `filmcraft-cli photos auth --upload` once).
+    #[serde(default)]
+    pub upload: Option<bool>,
+    /// Check the built show (gaps, black frames, the mix, the subject in every shot); default:
+    /// with an export.
+    #[serde(default)]
+    pub qa: Option<bool>,
+}
+
+fn showcase_build_params(p: ShowcaseBuildParams) -> Value {
+    let mut params = json!({"wait": true, "upload": p.upload.unwrap_or(false)});
+    if let Some(plan) = p.plan {
+        params["plan"] = plan;
+    }
+    if let Some(e) = p.export {
+        params["export"] = json!(e);
+    }
+    if let Some(q) = p.qa {
+        params["qa"] = json!(q);
+    }
+    params
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ShowcaseInspectParams {
+    /// The whole analysis report (every clip's facts) instead of its summary.
+    #[serde(default)]
+    pub report: Option<bool>,
+}
+
 /// Signed-in Google Photos, or the tool-shaped setup error.
 fn gphotos() -> Result<filmcraft_gphotos::GooglePhotos, AutomationError> {
     filmcraft_gphotos::GooglePhotos::configured().map_err(|e| AutomationError::Other(e.to_string()))
@@ -298,6 +426,9 @@ impl AutocutExecutor {
 impl filmcraft_autocut::Executor for AutocutExecutor {
     fn execute(&self, id: &str, params: Value) -> filmcraft_autocut::ExecFuture {
         match &*self.0 {
+            Backend::Headless(s) if id.starts_with("autocut.") && crate::long_job::is_long(id, &params) => {
+                Box::pin(long_headless(s.clone(), id.to_string(), params))
+            }
             Backend::Headless(s) => {
                 let s = s.clone();
                 let id = id.to_string();
@@ -355,9 +486,75 @@ fn render_png(w: u32, h: u32, rgba: Vec<u8>, max_side: u32) -> Option<Vec<u8>> {
     Some(out.into_inner())
 }
 
+/// Run what background jobs (AutoCut showcases) send a headless session over its command port,
+/// as the app's UI does once per frame: a thread woken by the port that holds the session lock
+/// only for a burst of requests, so the server answers other calls while a job runs. It ends
+/// with the session (whose waker holds `woken`'s sender).
+fn pump_port(session: std::sync::Weak<Mutex<Session>>, woken: std::sync::mpsc::Receiver<()>) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let pump = move || loop {
+        match woken.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        let Some(s) = session.upgrade() else { return };
+        s.lock().unwrap_or_else(PoisonError::into_inner).pump_port(std::time::Duration::from_millis(50));
+    };
+    // a failed spawn leaves `wait: true` calls working (they run the port themselves)
+    let _ = std::thread::Builder::new().name("filmcraft-mcp-port".into()).spawn(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(pump));
+    });
+}
+
+/// A long showcase command (`wait: true`) on the headless session, started without waiting and
+/// its job polled, as the bridge does: the session lock is free meanwhile, so the port's pump
+/// thread can run the job's commands. The answer is the engine's `wait: true` answer.
+async fn long_headless(s: Arc<Mutex<Session>>, id: String, mut params: Value) -> Result<Value, String> {
+    let exec = |id: String, params: Value| {
+        let s = s.clone();
+        async move {
+            tokio::task::spawn_blocking(move || s.lock().unwrap_or_else(PoisonError::into_inner).execute(&id, params).map_err(|e| e.to_string()))
+                .await
+                .map_err(|e| format!("internal error: {e}"))?
+        }
+    };
+    if let Some(p) = params.as_object_mut() {
+        p.insert("wait".into(), json!(false));
+    }
+    let mut start = exec(id.clone(), params).await?;
+    let Some(job) = start.get("job").and_then(Value::as_u64) else { return Ok(start) };
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let jobs = exec("jobs.list".into(), json!({})).await?;
+        let Some(j) = jobs.as_array().and_then(|a| a.iter().find(|j| j["id"].as_u64() == Some(job))).cloned() else {
+            return Err(format!("`{id}`: job {job} is gone"));
+        };
+        if j["finished"].as_bool() == Some(true) {
+            if let Some(e) = j["result"]["error"].as_str() {
+                return Err(format!("`{id}` failed: {e}"));
+            }
+            if let Some(o) = start.as_object_mut() {
+                o.insert("result".into(), j["result"].clone());
+                for k in crate::long_job::JOB_EXTRAS {
+                    if let Some(v) = j.get(*k) {
+                        o.insert((*k).into(), v.clone());
+                    }
+                }
+            }
+            return Ok(start);
+        }
+    }
+}
+
 impl FilmcraftMcp {
-    pub fn headless(session: Session) -> Self {
-        Self { backend: Arc::new(Backend::Headless(Arc::new(Mutex::new(session)))), tool_router: Self::tool_router() }
+    pub fn headless(mut session: Session) -> Self {
+        let (wake, woken) = std::sync::mpsc::channel::<()>();
+        session.set_port_waker(Arc::new(move || {
+            let _ = wake.send(());
+        }));
+        let shared = Arc::new(Mutex::new(session));
+        pump_port(Arc::downgrade(&shared), woken);
+        Self { backend: Arc::new(Backend::Headless(shared)), tool_router: Self::tool_router() }
     }
     pub fn bridge(addr: &str) -> Result<Self, AutomationError> {
         Ok(Self { backend: Arc::new(Backend::Bridge(Arc::new(BridgeClient::new(addr)?))), tool_router: Self::tool_router() })
@@ -732,6 +929,58 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Showcase: find every clip of a subject",
+        description = "Step 1 of a showcase (\"every robot I've filmed, in order\": a counted, narrated video). A local vision model (Ollama, AUTOCUT_ANALYSIS_MODEL) looks at every video clip (or `items`, filmed `since` a date) for `subject`, names and describes what it finds, reads capture dates and tells which clips show the same one. Runs as the `autocut.analyze` engine job (progress notifications, cancellable); the report is kept in the session (showcase_inspect). With plan: true it goes on to step 2 (`autocut.makeShowcase`) and returns the plan. In the app the Showcase panel shows the job and the plan.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn showcase_analyze(
+        &self,
+        Parameters(p): Parameters<ShowcaseAnalyzeParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.subject.trim().is_empty() {
+            return Ok(fail("`subject` is empty: say what to look for, e.g. \"robot\""));
+        }
+        let (id, params) = showcase_analyze_params(p);
+        Ok(self.run_long(id, params, &context).await)
+    }
+
+    #[tool(
+        title = "Showcase: plan the entries and the voice-over",
+        description = "Step 2 of a showcase: group the analysed clips into entries (one per robot, oldest first, up to three shots each) and have the local script model write the voice-over — or, given reviewed `entries` (drop one with include: false, fold one into the one before with mergePrevious: true, fix a label or description), write it for exactly those. Runs as the `autocut.showcasePlan` engine job; returns the plan ({title, voice, mood, entries, script: {intro, lines, outro}}, lines one per entry). Review it with the user before building: wrong subjects, labels, pronunciations.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn showcase_plan(
+        &self,
+        Parameters(p): Parameters<ShowcasePlanParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(self.run_long("autocut.showcasePlan", showcase_plan_params(p), &context).await)
+    }
+
+    #[tool(
+        title = "Showcase: build (and export)",
+        description = "Step 3 of a showcase: build the plan (the kept one, or `plan` as edited) into a new 16:9 sequence — cold open, each entry with its narration, shots where the subject is in view, a lower third, transitions, the year cards, an on-screen counter, music ducked under the voice — all as ordinary undoable engine commands. With `export`, export it (YouTube 1080p) with chapters and a QA report beside it; with `upload`, then send the export to Google Photos. Runs as the `autocut.showcaseBuild` engine job (progress, cancellable).",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn showcase_build(
+        &self,
+        Parameters(p): Parameters<ShowcaseBuildParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(self.run_long("autocut.showcaseBuild", showcase_build_params(p), &context).await)
+    }
+
+    #[tool(
+        title = "Showcase: inspect",
+        description = "What the session keeps of the showcase: the analysis report (a summary, or every clip with report: true), the plan, the last build, and the latest showcase job (running or done).",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn showcase_inspect(&self, Parameters(p): Parameters<ShowcaseInspectParams>) -> Result<CallToolResult, McpError> {
+        wrap(self.run("autocut.showcaseInspect", json!({"report": p.report.unwrap_or(false)})).await)
+    }
+
+    #[tool(
         title = "Render a frame",
         description = "Render the active sequence's frame (at `seconds` or the playhead) and return it as PNG.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -906,7 +1155,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done; `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once).";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done; `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject (plan: true also plans), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -1217,6 +1466,138 @@ mod tests {
         std::fs::remove_file(&file).ok();
     }
 
+    /// The schema of a tool, offline.
+    fn schema(tool: &str) -> Value {
+        let m = FilmcraftMcp::headless(Session::default());
+        let Some(t) = m.tool_router.get(tool) else { panic!("{tool} missing") };
+        Value::Object((*t.input_schema).clone())
+    }
+
+    fn props(schema: &Value) -> Vec<String> {
+        let mut p: Vec<String> = schema["properties"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+        p.sort();
+        p
+    }
+
+    /// The showcase tools' arguments and the engine jobs they run (as long jobs: progress, cancel).
+    #[test]
+    fn showcase_tool_schemas_and_params() {
+        let s = schema("showcase_analyze");
+        assert_eq!(props(&s), ["compare", "frames", "items", "plan", "since", "subject", "title", "voice"], "{s}");
+        assert_eq!(s["required"], json!(["subject"]), "{s}");
+        assert_eq!(s["properties"]["subject"]["type"], "string", "{s}");
+        let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "since": "2020", "items": [5, 6]})).unwrap();
+        assert_eq!(showcase_analyze_params(p), ("autocut.analyze", json!({"subject": "robot", "since": "2020", "items": [5, 6], "wait": true})));
+        let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "plan": true, "title": "Robots", "voice": ""})).unwrap();
+        assert_eq!(showcase_analyze_params(p), ("autocut.makeShowcase", json!({"subject": "robot", "title": "Robots", "voice": "", "wait": true})));
+        // title and voice only matter with a plan
+        let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "title": "Robots"})).unwrap();
+        assert!(showcase_analyze_params(p).1.get("title").is_none());
+        assert!(serde_json::from_value::<ShowcaseAnalyzeParams>(json!({"since": "2020"})).is_err());
+
+        let s = schema("showcase_plan");
+        assert_eq!(props(&s), ["entries", "min_coverage", "mood", "subtitle", "title", "voice"], "{s}");
+        assert!(s["required"].as_array().is_none_or(|r| r.is_empty()), "{s}");
+        let p: ShowcasePlanParams = serde_json::from_value(json!({"title": "T", "min_coverage": 0.5, "entries": [{"label": "x"}]})).unwrap();
+        assert_eq!(showcase_plan_params(p), json!({"title": "T", "minCoverage": 0.5, "entries": [{"label": "x"}], "wait": true}));
+
+        let s = schema("showcase_build");
+        assert_eq!(props(&s), ["export", "plan", "qa", "upload"], "{s}");
+        let p: ShowcaseBuildParams = serde_json::from_value(json!({"export": "/x/robots.mp4", "upload": true})).unwrap();
+        assert_eq!(showcase_build_params(p), json!({"export": "/x/robots.mp4", "upload": true, "wait": true}));
+        assert_eq!(showcase_build_params(ShowcaseBuildParams::default()), json!({"upload": false, "wait": true}));
+
+        assert_eq!(props(&schema("showcase_inspect")), ["report"]);
+        for id in ["autocut.analyze", "autocut.showcasePlan", "autocut.makeShowcase", "autocut.showcaseBuild"] {
+            assert!(crate::long_job::is_long(id, &json!({"wait": true})), "{id}");
+        }
+        assert!(crate::long_job::JOB_EXTRAS.contains(&"showcase"));
+    }
+
+    /// A demo session that runs showcase jobs with scripted models.
+    fn showcase_demo() -> Session {
+        let mut s = demo();
+        let host = filmcraft_autocut::host::ShowcaseHost::with_models(filmcraft_autocut::host::Models::scripted());
+        s.autocut.host = Some(std::sync::Arc::new(host));
+        s
+    }
+
+    fn tool_json(r: &Value) -> Value {
+        let text = r["result"]["content"][0]["text"].as_str().unwrap_or_default();
+        serde_json::from_str(text).unwrap_or_else(|_| panic!("{r}"))
+    }
+
+    /// Analyse, plan, review and build over MCP: the jobs run in the background (the port's pump
+    /// thread runs their commands) while the server reports progress and keeps answering.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn showcase_tools_analyze_plan_and_build() {
+        let mut c = Client::start(showcase_demo());
+        c.init().await;
+        let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"showcase_analyze","arguments":{"subject":"robot","plan":true,"title":"Robots","voice":""},"_meta":{"progressToken":"sc"}}});
+        c.send(&call.to_string()).await;
+        let (mut notes, mut pinged, mut pong) = (0, false, false);
+        let r = loop {
+            let m = c.next().await;
+            if m["method"] == "notifications/progress" {
+                notes += 1;
+                if !pinged {
+                    pinged = true;
+                    c.send(&json!({"jsonrpc": "2.0", "id": 99, "method": "ping"}).to_string()).await;
+                }
+            } else if m["id"] == 99 {
+                pong = true;
+            } else if m["id"] == 1 {
+                break m;
+            }
+        };
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let v = tool_json(&r);
+        let plan = v["showcase"]["plan"].clone();
+        assert_eq!(plan["entries"].as_array().map(Vec::len), Some(6), "{v}");
+        assert!(notes >= 1, "progress was reported");
+        if pinged && !pong {
+            pong = c.next().await["id"] == 99;
+        }
+        assert!(!pinged || pong, "the server answered while the job ran");
+
+        let r = c.call(2, "showcase_inspect", json!({})).await;
+        let v = tool_json(&r);
+        assert_eq!((v["report"]["showing"].as_u64(), v["planRevision"].as_u64()), (Some(6), Some(1)), "{v}");
+
+        // review: keep two robots, write the words for them
+        let mut entries = plan["entries"].as_array().cloned().unwrap();
+        for e in entries.iter_mut().skip(2) {
+            e["include"] = json!(false);
+        }
+        let r = c.call(3, "showcase_plan", json!({"entries": entries})).await;
+        let v = tool_json(&r);
+        let mut plan = v["showcase"]["plan"].clone();
+        assert_eq!(plan["title"], "Robots", "{v}");
+        plan["width"] = json!(320);
+        plan["height"] = json!(180);
+        let r = c.call(4, "showcase_build", json!({"plan": plan})).await;
+        let v = tool_json(&r);
+        assert_eq!(v["showcase"]["built"]["entries"], 2, "{v}");
+        let r = c.call(5, "showcase_analyze", json!({"subject": " "})).await;
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        let r = c.call(6, "showcase_build", json!({"plan": {"entries": []}})).await;
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        assert!(r.to_string().contains("no entry is included"), "{r}");
+    }
+
+    /// The AutoCut prompt "make a video of every robot" starts the showcase job over MCP too,
+    /// and its plan comes back in the report.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_showcase_prompt_over_mcp() {
+        let m = FilmcraftMcp::headless(showcase_demo());
+        let r = m.autocut_edit(Parameters(AutocutParams { prompt: "make a video of every robot".into(), frames: None, dry_run: None })).await.unwrap();
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let text = serde_json::to_value(&r.content).unwrap()[0]["text"].as_str().unwrap_or_default().to_string();
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["intent"], "showcase", "{v}");
+        assert_eq!(v["results"][0]["result"]["showcase"]["plan"]["entries"].as_array().map(Vec::len), Some(6), "{v}");
+    }
+
     /// #499: `media_import` takes `paths` (a required array), and forwards `bin` / `image_sequence` to `file.import`.
     #[test]
     fn media_import_schema_and_params() {
@@ -1263,6 +1644,10 @@ mod tests {
             "ui_click",
             "autocut_plan",
             "autocut_edit",
+            "showcase_analyze",
+            "showcase_plan",
+            "showcase_build",
+            "showcase_inspect",
         ] {
             assert!(names.contains(&want), "{want} not listed");
         }
