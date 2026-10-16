@@ -3597,3 +3597,11 @@
 	Shows the version, community links and credits in a FilmCraft window.	在 FilmCraft 窗口中显示版本、社区链接和致谢。
 	Couldn't open your web browser	无法打开网页浏览器
 	Open this address in your browser yourself:	请自行在浏览器中打开此地址：
+	Last export: {file}	上次导出：{file}
+	Upload to Google Photos	上传到 Google 相册
+	Uploading {file} to Google Photos	正在将 {file} 上传到 Google 相册
+	Uploading… {pct}%	正在上传… {pct}%
+	Upload failed: {e}	上传失败：{e}
+	Uploaded to Google Photos	已上传到 Google 相册
+	Open in Google Photos	在 Google 相册中打开
+	Uploading to Google Photos	正在上传到 Google 相册

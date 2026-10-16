@@ -255,6 +255,11 @@ filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-r
   local vision agent drives the picker itself — it types the query into the picker's own
   search, selects matching videos and presses Done ([crates/screenagent](crates/screenagent/README.md);
   Qwen2.5-VL via Ollama).
+- **Back to Google Photos**: upload a finished export to your library — Export mode's
+  **Upload to Google Photos**, `filmcraft-cli photos upload <file>`, `showcase … --export
+  out.mp4 --upload`, the `photos.upload` command and the `googlephotos_upload` MCP tool
+  (resumable 8 MiB chunks, progress, cancel). It needs the Photos Library API enabled and a
+  one-time `filmcraft-cli photos auth --upload`; picker-only sign-ins are never asked for it.
 
 <br>
 

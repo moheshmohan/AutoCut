@@ -1,8 +1,9 @@
 //! Long exports over MCP (docs/agents.md § Long exports): `file.exportMedia` (and the other
-//! [`LONG_COMMANDS`]: voice cloning and model downloads) with `wait: true` runs as a background engine job; the server reports its progress as MCP
+//! [`LONG_COMMANDS`]: voice cloning, model downloads and Google Photos uploads) with `wait: true` runs as a background engine job; the server reports its progress as MCP
 //! `notifications/progress` (when the request carried a `progressToken`) and stops it on
-//! `notifications/cancelled`, deleting the partial output. The session lock is only held for
-//! short polls, so other requests are answered while the export runs.
+//! `notifications/cancelled`, deleting an export's partial output (an upload's file is the
+//! user's and is never touched). The session lock is only held for short polls, so other
+//! requests are answered while the job runs.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -14,8 +15,12 @@ use serde_json::{Value, json};
 
 use crate::server::FilmcraftMcp;
 
-/// Engine commands that block until a render is written when called with `wait: true`.
-pub const LONG_COMMANDS: &[&str] = &["file.exportMedia", "tts.cloneVoice", "tts.downloadVoices", "tts.downloadCloneModel"];
+/// Engine commands that block until their job is done when called with `wait: true`.
+pub const LONG_COMMANDS: &[&str] = &["file.exportMedia", "tts.cloneVoice", "tts.downloadVoices", "tts.downloadCloneModel", "photos.upload"];
+
+/// The parts of a finished job's `jobs.list` entry a long call's answer carries besides
+/// `result`: an export's offline media, an upload's new media item.
+pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload"];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);
@@ -72,7 +77,7 @@ impl FilmcraftMcp {
                 rep.report(done, total, j["status"].as_str().unwrap_or_default()).await;
             }
             if finished {
-                let offline = state.as_ref().and_then(|j| j.get("offlineMedia").cloned());
+                let extras: Vec<(&str, Value)> = JOB_EXTRAS.iter().filter_map(|k| Some((*k, state.as_ref()?.get(*k)?.clone()))).collect();
                 let result = state.map(|j| j["result"].clone()).unwrap_or(Value::Null);
                 if let Some(e) = result.get("error").and_then(Value::as_str) {
                     let what = if id == "file.exportMedia" { "export".to_string() } else { format!("`{id}`") };
@@ -81,8 +86,8 @@ impl FilmcraftMcp {
                 let mut out = start;
                 if let Some(o) = out.as_object_mut() {
                     o.insert("result".into(), result);
-                    if let Some(off) = offline {
-                        o.insert("offlineMedia".into(), off);
+                    for (k, v) in extras {
+                        o.insert(k.into(), v);
                     }
                 }
                 return CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&out).unwrap_or_default())]);
@@ -92,7 +97,8 @@ impl FilmcraftMcp {
                 _ = tokio::time::sleep(POLL) => {}
             }
         }
-        // Cancelled: stop the encode at the next batch, wait for the worker, delete the partial file.
+        // Cancelled: stop the job at its next batch / chunk and wait for the worker. Only an
+        // export's partial file is deleted: the `path` of an upload is the user's own file.
         let _ = self.run("jobs.cancel", json!({"job": job})).await;
         for _ in 0..600 {
             if self.job_state(job).await.is_none_or(|j| j["finished"].as_bool() == Some(true)) {
@@ -100,7 +106,9 @@ impl FilmcraftMcp {
             }
             tokio::time::sleep(POLL).await;
         }
-        remove_partial(&path, started);
+        if id == "file.exportMedia" {
+            remove_partial(&path, started);
+        }
         CallToolResult::error(vec![Content::text("cancelled")])
     }
 

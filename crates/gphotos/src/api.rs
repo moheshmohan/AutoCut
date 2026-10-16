@@ -346,6 +346,11 @@ pub fn api_error(status: u16, text: &str) -> String {
 /// The shared HTTP agent (pure-Rust TLS), as the other crates configure ureq. HTTP errors come
 /// back as responses so Google's error text reaches the user.
 pub fn http_agent() -> ureq::Agent {
+    agent_with_timeout(Duration::from_secs(300))
+}
+
+/// [`http_agent`] with another limit per request (an upload sends megabytes in one).
+pub fn agent_with_timeout(timeout: Duration) -> ureq::Agent {
     let provider = std::sync::Arc::new(rustls_rustcrypto::provider());
     ureq::Agent::config_builder()
         .tls_config(
@@ -358,7 +363,7 @@ pub fn http_agent() -> ureq::Agent {
         .http_status_as_error(false)
         .https_only(true)
         .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_global(Some(Duration::from_secs(300)))
+        .timeout_global(Some(timeout))
         .build()
         .into()
 }

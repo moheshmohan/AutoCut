@@ -42,8 +42,8 @@ impl BridgeClient {
     /// `wait: true`, see [`crate::long_job::LONG_COMMANDS`]) is started as an app job and polled
     /// here until it finishes, so the app keeps repainting (its status bar shows the progress) and
     /// answering other requests, and no request waits on the control server's 60 s reply limit
-    /// (#91, #92). The reply is the same as a blocking export's: `{job, path, result}`, or the
-    /// export's error.
+    /// (#91, #92). The reply is the same as a blocking export's: `{job, path, result}` (plus
+    /// [`crate::long_job::JOB_EXTRAS`]: `offlineMedia`, an upload's `upload`), or the job's error.
     pub async fn execute(&self, id: &str, mut params: Value) -> Result<Value, AutomationError> {
         if !crate::long_job::is_long(id, &params) {
             return self.call("engine.execute", json!({"command": id, "params": params})).await;
@@ -53,24 +53,27 @@ impl BridgeClient {
         }
         let mut start = self.call("engine.execute", json!({"command": id, "params": params})).await?;
         let Some(job) = start.get("job").and_then(Value::as_u64) else { return Ok(start) };
-        let (result, offline) = loop {
+        let done = loop {
             tokio::time::sleep(JOB_POLL).await;
             let jobs = self.call("engine.execute", json!({"command": "jobs.list", "params": {}})).await?;
             let Some(j) = jobs.as_array().and_then(|a| a.iter().find(|j| j["id"].as_u64() == Some(job))).cloned() else {
-                break (Value::Null, None);
+                break Value::Null;
             };
             if j["finished"].as_bool() == Some(true) {
-                break (j["result"].clone(), j.get("offlineMedia").cloned());
+                break j;
             }
         };
+        let result = done.get("result").cloned().unwrap_or(Value::Null);
         if let Some(e) = result.get("error").and_then(Value::as_str) {
             let what = if id == "file.exportMedia" { "export".to_string() } else { format!("`{id}`") };
             return Err(AutomationError::App(format!("{what} failed: {e}")));
         }
         if let Some(o) = start.as_object_mut() {
             o.insert("result".into(), result);
-            if let Some(off) = offline {
-                o.insert("offlineMedia".into(), off);
+            for k in crate::long_job::JOB_EXTRAS {
+                if let Some(v) = done.get(*k) {
+                    o.insert((*k).into(), v.clone());
+                }
             }
         }
         Ok(start)
@@ -139,8 +142,8 @@ mod tests {
         fake_app_with(result, None).await
     }
 
-    /// [`fake_app`] whose finished job also lists `offline` as its `offlineMedia`.
-    async fn fake_app_with(result: Value, offline: Option<Value>) -> (String, Arc<Mutex<Vec<Value>>>) {
+    /// [`fake_app`] whose finished job also lists `extra` (`offlineMedia`, `upload`, …).
+    async fn fake_app_with(result: Value, extra: Option<(&'static str, Value)>) -> (String, Arc<Mutex<Vec<Value>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -154,13 +157,13 @@ mod tests {
                 let req: Value = serde_json::from_str(&line).unwrap();
                 log.lock().await.push(req.clone());
                 let reply = match req["params"]["command"].as_str() {
-                    Some("file.exportMedia") => json!({"job": 7, "path": "/tmp/out.mov"}),
+                    Some("file.exportMedia" | "photos.upload") => json!({"job": 7, "path": "/tmp/out.mov"}),
                     Some("jobs.list") => {
                         polls += 1;
                         let finished = polls >= 3;
                         let mut j = json!({"id": 7, "finished": finished, "result": if finished { result.clone() } else { Value::Null }});
-                        if let Some(o) = offline.clone().filter(|_| finished) {
-                            j["offlineMedia"] = o;
+                        if let Some((k, v)) = extra.clone().filter(|_| finished) {
+                            j[k] = v;
                         }
                         json!([j])
                     }
@@ -193,10 +196,21 @@ mod tests {
     #[tokio::test]
     async fn a_polled_export_reports_its_offline_media() {
         let off = json!([{"item": 8, "status": "missing"}]);
-        let (addr, _) = fake_app_with(json!({"frames": 3}), Some(off.clone())).await;
+        let (addr, _) = fake_app_with(json!({"frames": 3}), Some(("offlineMedia", off.clone()))).await;
         let b = BridgeClient::new(addr).unwrap();
         let r = b.execute("file.exportMedia", json!({"path": "/tmp/out.mov", "wait": true})).await.unwrap();
         assert_eq!(r["offlineMedia"], off, "{r}");
+    }
+
+    /// A Google Photos upload in the app is polled the same way; its media item comes back.
+    #[tokio::test]
+    async fn a_polled_upload_reports_its_media_item() {
+        let item = json!({"mediaItemId": "M1", "productUrl": "https://photos.google.com/lr/photo/M1"});
+        let (addr, seen) = fake_app_with(json!({"bytes": 10}), Some(("upload", item.clone()))).await;
+        let b = BridgeClient::new(addr).unwrap();
+        let r = b.execute("photos.upload", json!({"path": "/tmp/out.mov", "wait": true})).await.unwrap();
+        assert_eq!(r, json!({"job": 7, "path": "/tmp/out.mov", "result": {"bytes": 10}, "upload": item}));
+        assert_eq!(seen.lock().await[0]["params"]["params"]["wait"], json!(false), "the app runs it as a job");
     }
 
     #[tokio::test]

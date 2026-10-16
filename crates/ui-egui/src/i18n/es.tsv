@@ -3622,3 +3622,11 @@
 	Shows the version, community links and credits in a FilmCraft window.	Muestra la versión, los enlaces de la comunidad y los créditos en una ventana de FilmCraft.
 	Couldn't open your web browser	No se pudo abrir el navegador web
 	Open this address in your browser yourself:	Abre esta dirección tú mismo en el navegador:
+	Last export: {file}	Última exportación: {file}
+	Upload to Google Photos	Subir a Google Fotos
+	Uploading {file} to Google Photos	Subiendo {file} a Google Fotos
+	Uploading… {pct}%	Subiendo… {pct}%
+	Upload failed: {e}	No se pudo subir: {e}
+	Uploaded to Google Photos	Subido a Google Fotos
+	Open in Google Photos	Abrir en Google Fotos
+	Uploading to Google Photos	Subiendo a Google Fotos

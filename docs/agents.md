@@ -129,6 +129,14 @@ progress and stop it:
 - Bridge mode works the same way: the export runs as an app job (the app stays responsive and shows
   "Exporting… NN%" in its status bar) and the call returns when it is written, however long it
   takes. `filmcraft-cli --bridge … exec file.exportMedia … wait=true` blocks the same way.
+- The other long commands run the same way with `wait: true`: `tts.cloneVoice`,
+  `tts.downloadVoices`, `tts.downloadCloneModel` and `photos.upload` (a file to the user's Google
+  Photos library; progress in bytes). `googlephotos_upload {path, description?}` is that upload as
+  its own tool; its answer, like the finished job's `jobs.list` entry, carries `upload` (the new
+  media item: `mediaItemId`, `productUrl`, …). Cancelling an upload stops it between chunks and
+  never deletes the file being uploaded. It needs a one-time `filmcraft-cli photos auth --upload`
+  (see [crates/gphotos](../crates/gphotos/README.md)); until then `photos.upload` is disabled and its
+  reason says so.
 
 ## 2. Control channel
 

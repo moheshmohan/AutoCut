@@ -214,6 +214,8 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         }
         // voice-over recording reads the microphone through cpal
         session.voiceover.input = Some(Box::new(audio_in::CpalIn::new(&session.prefs.audio_hardware.device_class)));
+        // Export ▸ Upload to Google Photos, over the sign-in of `filmcraft-cli photos auth --upload`
+        session.photos = Some(filmcraft_gphotos::engine_uploader());
         let (project, media) = args::project_and_media(&files);
         if let Some(p) = project {
             if let Err(e) = session.execute("file.open", json!({"path": p})) {

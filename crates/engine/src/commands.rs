@@ -3432,6 +3432,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::narration::commands());
     v.extend(crate::audio_generate::commands());
     v.extend(crate::voice_clone::commands());
+    v.extend(crate::photos::commands());
     v.extend(crate::media_frame::commands());
     v.extend(crate::media_date::commands());
     v.extend(crate::graphics_counter::commands());

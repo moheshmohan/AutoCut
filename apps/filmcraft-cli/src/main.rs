@@ -96,7 +96,7 @@ SUBCOMMANDS
                                 --image-sequence <media> is the first numbered still of a sequence
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
          [--bpm 100] [--min-coverage 0.3] [--script-in s.json] [--script-out s.json] [--plan]
-         [--export out.mp4]
+         [--export out.mp4 [--upload]]
                                 a narrated 16:9 showcase of every clip the analysis found, oldest
                                 first: title, a counter, name/date lower thirds, year cards,
                                 dramatic transitions with whooshes, a generated music bed ducked
@@ -104,7 +104,8 @@ SUBCOMMANDS
                                 entries and the local model's script without building;
                                 --script-in takes a reviewed plan (entries and script, or entries
                                 alone for the model to write); with --export, YouTube chapters
-                                go to <out>.chapters.txt
+                                go to <out>.chapters.txt, and --upload then sends the export to
+                                your Google Photos library (as `photos upload`)
   analyze '<subject>' [--items 1,2] [--frames N] [--relabel earlier.json] [--compare 150]
          [--out report.json]
                                 which video items show <subject> (e.g. robot): a local vision model
@@ -124,8 +125,16 @@ SUBCOMMANDS
                                 handed-off document. Config: AUTOCUT_LLM_MODEL,
                                 AUTOCUT_VLM_MODEL, AUTOCUT_OLLAMA_HOST,
                                 AUTOCUT_CONFIDENCE_THRESHOLD
-  photos auth                    sign in to Google Photos (browser consent, one time; needs
-                                 client_secret.json from Google Cloud — see crates/gphotos/README.md)
+  photos auth [--upload]         sign in to Google Photos (browser consent, one time; needs
+                                 client_secret.json from Google Cloud — see crates/gphotos/README.md);
+                                 --upload also asks to add to your library (for `photos upload`),
+                                 keeping what you granted before
+  photos upload <file> [--description D]
+                                 upload a file (an export: MP4/MOV/… video up to 10 GB, or a
+                                 photo up to 200 MB) to your Google Photos library, resumably in
+                                 8 MiB chunks; progress on stderr, the new media item (id, link)
+                                 as JSON. Needs `photos auth --upload` once and the Photos Library
+                                 API enabled in your Google Cloud project
   photos pick [--auto query [--all]] [--since YYYY-MM-DD] [--max-items n] [--timeout secs] [--session id] [--no-browser]
                                  open the Google Photos picker in the browser, wait (default
                                  600 s, at most 3600) for your selection, download it into the
@@ -205,6 +214,8 @@ impl Backend {
         if let Some(dir) = a.opt("--data-dir").map(std::path::PathBuf::from).or_else(filmcraft_engine::autosave::default_data_dir) {
             s.export_presets.set_dir(&dir);
         }
+        // `photos.upload` (also over MCP): the Google Photos sign-in of `photos auth --upload`
+        s.photos = Some(filmcraft_gphotos::engine_uploader());
         if let Some(p) = a.opt("--project") {
             if let Err(e) = s.execute("file.open", json!({"path": p})) {
                 fail(e);
@@ -301,6 +312,32 @@ fn absolute(path: &str) -> String {
     std::path::absolute(path).ok().and_then(|p| p.into_os_string().into_string().ok()).unwrap_or_else(|| path.to_string())
 }
 
+/// Upload `path` to the user's Google Photos library (`photos upload`, `showcase --upload`):
+/// progress on stderr (stdout may be a protocol stream), the new media item as JSON.
+async fn upload_to_photos(path: String, description: Option<String>) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        // the sign-in and its upload permission from disk first: no token refresh just to refuse
+        filmcraft_gphotos::upload_readiness(&filmcraft_gphotos::data_dir())?;
+        let gp = filmcraft_gphotos::GooglePhotos::configured().map_err(|e| e.to_string())?;
+        let opts = filmcraft_gphotos::upload::UploadOptions { description, ..Default::default() };
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+        // a line per status change, and at most two a second while the bytes go
+        let mut last: Option<(u64, String, std::time::Instant)> = None;
+        let mut progress = |sent: u64, total: u64, status: &str| {
+            let pct = sent.saturating_mul(100).checked_div(total).unwrap_or(0);
+            let show = last.as_ref().is_none_or(|(p, s, at)| s != status || (*p != pct && (pct == 100 || at.elapsed().as_millis() >= 500)));
+            if show {
+                diag(format_args!("photos upload: {pct:>3}% ({:.1} of {:.1} MiB) {status}", mib(sent), mib(total)));
+                last = Some((pct, status.to_string(), std::time::Instant::now()));
+            }
+            true
+        };
+        gp.upload(std::path::Path::new(&path), &opts, &mut progress).map(|u| u.to_json()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("internal error: {e}"))?
+}
+
 #[tokio::main]
 async fn main() {
     cli().await;
@@ -353,13 +390,19 @@ async fn cli() {
             outln!("½-res linear conversion {w}x{h}: {:.1} ms", t1.elapsed().as_secs_f64() * 1000.0);
         }
         "photos" => {
-            let what = a.pos(1).unwrap_or_else(|| usage("photos auth | pick | cached | add <id>..."));
+            let what = a.pos(1).unwrap_or_else(|| usage("photos auth | pick | upload <file> | cached | add <id>..."));
             match what {
                 "auth" => {
                     let dir = filmcraft_gphotos::data_dir();
+                    // --upload: also the permission to add to the library (incremental consent)
+                    let access = if a.flag("--upload") { filmcraft_gphotos::auth::Access::PickAndUpload } else { filmcraft_gphotos::auth::Access::Pick };
                     match filmcraft_gphotos::auth::ClientSecret::load(&dir) {
-                        Ok(secret) => match filmcraft_gphotos::auth::consent(&secret, &dir) {
-                            Ok(_) => outln!("signed in to Google Photos; tokens in {}", dir.join("tokens.json").to_string_lossy()),
+                        Ok(secret) => match filmcraft_gphotos::auth::consent(&secret, &dir, access) {
+                            Ok(t) => outln!(
+                                "signed in to Google Photos ({}); tokens in {}",
+                                if t.grants(filmcraft_gphotos::auth::UPLOAD_SCOPE) { "pick and upload" } else { "pick" },
+                                dir.join("tokens.json").to_string_lossy()
+                            ),
                             Err(e) => fail(format!("photos auth: {e}")),
                         },
                         Err(e) => {
@@ -473,6 +516,17 @@ async fn cli() {
                         std::process::exit(1);
                     }
                 }
+                "upload" => {
+                    let path = a.pos(2).unwrap_or_else(|| usage("photos upload <file> [--description D]"));
+                    if a.positionals.len() > 3 {
+                        usage("photos upload: one file at a time");
+                    }
+                    let description = a.opt("--description").map(str::to_string);
+                    match upload_to_photos(absolute(path), description).await {
+                        Ok(v) => print(&a, &v),
+                        Err(e) => fail(format!("photos upload: {e}")),
+                    }
+                }
                 "cached" => {
                     let list = filmcraft_gphotos::cache::list();
                     if a.flag("--json") {
@@ -509,7 +563,7 @@ async fn cli() {
                 "albums" | "search" => usage(format!(
                     "photos {what}: Google retired library browsing and search for apps on 2025-03-31; use `photos pick` to choose items in Google Photos"
                 )),
-                other => usage(format!("photos: unknown `{other}` (auth | pick | cached | add)")),
+                other => usage(format!("photos: unknown `{other}` (auth | pick | upload | cached | add)")),
             }
         }
         "showcase" => {
@@ -541,6 +595,17 @@ async fn cli() {
                 opts.min_coverage = c.parse().unwrap_or_else(|_| usage(format!("showcase: --min-coverage wants 0..1, not `{c}`")));
             }
             opts.export = a.opt("--export").map(str::to_string);
+            // --upload: the export goes to Google Photos once built; a missing sign-in or
+            // consent fails now, not after the build
+            let upload = a.flag("--upload") && !a.flag("--plan");
+            if upload {
+                if opts.export.is_none() {
+                    usage("showcase: --upload sends the export to Google Photos; add --export out.mp4");
+                }
+                if let Err(e) = filmcraft_gphotos::upload_readiness(&filmcraft_gphotos::data_dir()) {
+                    fail(format!("showcase: --upload: {e}"));
+                }
+            }
             let mut entries = filmcraft_autocut::showcase::group(&facts, &opts.subject, opts.min_coverage);
             let cfg = filmcraft_autocut::config::Config::from_env();
             // a reviewed plan (`--script-in`): its (edited) entries replace the grouping, and its
@@ -628,8 +693,24 @@ async fn cli() {
                     }
                     let mut out = serde_json::to_value(&built).unwrap_or_default();
                     out["youtubeChapters"] = json!(chapters);
+                    // --upload: the finished export to Google Photos, titled like the video
+                    let mut upload_failed = None;
+                    if upload && let Some(requested) = &opts.export {
+                        let file = built.export.as_ref().and_then(|r| written_paths(r, requested).into_iter().next()).unwrap_or_else(|| requested.clone());
+                        let description = a.opt("--description").map(str::to_string).or_else(|| Some(opts.title.clone()).filter(|t| !t.trim().is_empty()));
+                        match upload_to_photos(absolute(&file), description).await {
+                            Ok(v) => out["upload"] = v,
+                            Err(e) => {
+                                out["uploadError"] = json!(e);
+                                upload_failed = Some(e);
+                            }
+                        }
+                    }
                     print(&a, &out);
                     b.finish(&a).await;
+                    if let Some(e) = upload_failed {
+                        fail(format!("showcase: the video is built, but the upload failed: {e}"));
+                    }
                 }
                 Err(e) => fail(format!("showcase: {e}")),
             }

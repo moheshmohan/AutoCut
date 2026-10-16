@@ -611,12 +611,16 @@ impl ExportQueue {
     }
 }
 
-/// A `jobs.list` entry: [`crate::Job::to_json`], plus `offlineMedia` for an export job, so callers
-/// that poll an export (the bridge, MCP long exports) can report it like `file.exportMedia` does.
+/// A `jobs.list` entry: [`crate::Job::to_json`], plus `offlineMedia` for an export job and
+/// `upload` (the new media item) for a Google Photos upload, so callers that poll a job (the
+/// bridge, MCP long jobs) can report it like the blocking command does.
 pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     let mut v = j.to_json();
     if s.export_offline.contains_key(&j.id) {
         v["offlineMedia"] = offline_media_json(s, j.id);
+    }
+    if crate::photos::is_upload(s, j.id) {
+        v["upload"] = crate::photos::upload_json(s, j.id);
     }
     v
 }

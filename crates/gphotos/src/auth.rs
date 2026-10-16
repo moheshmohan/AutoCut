@@ -1,5 +1,7 @@
 //! The OAuth 2.0 installed-app flow: browser consent, loopback redirect, token refresh, and a
-//! permission-restricted token store. Only the Photos Picker's read-only scope is requested.
+//! permission-restricted token store. The Photos Picker's read-only scope is always requested;
+//! the Library API's append-only scope only when the user asks to upload (`photos auth
+//! --upload`), as incremental consent on top of what was granted before.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -14,6 +16,11 @@ use crate::GPhotosError;
 /// The one scope FilmCraft asks for: read the items the user hands over in the Google Photos
 /// picker. (Google retired the Library API's library-wide read scopes on 2025-03-31.)
 pub const SCOPE: &str = "https://www.googleapis.com/auth/photospicker.mediaitems.readonly";
+/// Add media to the user's library (and read back only what this app added): what uploading
+/// exports needs. Requested only by `photos auth --upload`, so picker-only users never see it.
+pub const UPLOAD_SCOPE: &str = "https://www.googleapis.com/auth/photoslibrary.appendonly";
+/// What to tell a user whose sign-in lacks [`UPLOAD_SCOPE`].
+pub const UPLOAD_CONSENT: &str = "Google Photos needs your consent before FilmCraft can add files to your library: run `filmcraft-cli photos auth --upload` and leave the \"add to your Google Photos library\" permission ticked";
 /// The loopback redirect. Desktop OAuth clients accept loopback redirects on any port, so the
 /// Google Cloud console needs no redirect entry.
 pub const REDIRECT_URI: &str = "http://127.0.0.1:8417";
@@ -112,23 +119,52 @@ impl Tokens {
     pub fn grants(&self, scope: &str) -> bool {
         self.scope.split_whitespace().any(|s| s == scope)
     }
+
+    /// The upload permission ([`UPLOAD_SCOPE`]), or the consent error naming the command that
+    /// grants it.
+    pub fn check_upload(&self) -> Result<(), GPhotosError> {
+        if self.grants(UPLOAD_SCOPE) { Ok(()) } else { Err(GPhotosError::Consent(UPLOAD_CONSENT.into())) }
+    }
+}
+
+/// What a consent asks Google for: the picker alone, or the picker plus uploads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Access {
+    #[default]
+    Pick,
+    PickAndUpload,
+}
+
+impl Access {
+    pub fn scopes(self) -> &'static [&'static str] {
+        match self {
+            Access::Pick => &[SCOPE],
+            Access::PickAndUpload => &[SCOPE, UPLOAD_SCOPE],
+        }
+    }
+
+    /// The consent URL: every scope of `self`, offline access (a refresh token), and
+    /// `include_granted_scopes` so the new token keeps what an earlier consent granted.
+    pub fn consent_url(self, client_id: &str, state: &str) -> String {
+        format!(
+            "{AUTH_URL}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&include_granted_scopes=true&prompt=consent&state={state}",
+            urlencode(client_id),
+            urlencode(REDIRECT_URI),
+            urlencode(&self.scopes().join(" ")),
+        )
+    }
 }
 
 pub fn now() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Run the consent flow: open the browser, catch the redirect on the loopback port (for at
-/// most five minutes), exchange the code. Returns the fresh tokens, stored. Progress goes to
-/// stderr: stdout may be a protocol stream.
-pub fn consent(secret: &ClientSecret, dir: &Path) -> Result<Tokens, GPhotosError> {
+/// Run the consent flow for `access`: open the browser, catch the redirect on the loopback port
+/// (for at most five minutes), exchange the code. Returns the fresh tokens, stored. Progress goes
+/// to stderr: stdout may be a protocol stream.
+pub fn consent(secret: &ClientSecret, dir: &Path, access: Access) -> Result<Tokens, GPhotosError> {
     let state = random_state();
-    let url = format!(
-        "{AUTH_URL}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&state={state}",
-        urlencode(&secret.client_id),
-        urlencode(REDIRECT_URI),
-        urlencode(SCOPE),
-    );
+    let url = access.consent_url(&secret.client_id, &state);
     let listener =
         std::net::TcpListener::bind(LISTEN).map_err(|e| GPhotosError::Auth(format!("cannot listen on {REDIRECT_URI} (another auth running?): {e}")))?;
     listener.set_nonblocking(true).map_err(GPhotosError::from)?;
@@ -144,7 +180,7 @@ pub fn consent(secret: &ClientSecret, dir: &Path) -> Result<Tokens, GPhotosError
         match listener.accept() {
             Ok((stream, _)) => match read_redirect(stream, &state)? {
                 Some(code) => {
-                    let tokens = exchange_code(secret, &code)?;
+                    let tokens = exchange_code(secret, &code, access)?;
                     tokens.save(dir)?;
                     return Ok(tokens);
                 }
@@ -217,7 +253,7 @@ fn read_redirect(stream: TcpStream, want_state: &str) -> Result<Option<String>, 
 }
 
 /// Exchange the authorization code for tokens (this is when the refresh token arrives).
-fn exchange_code(secret: &ClientSecret, code: &str) -> Result<Tokens, GPhotosError> {
+fn exchange_code(secret: &ClientSecret, code: &str, access: Access) -> Result<Tokens, GPhotosError> {
     let body = json!({
         "code": code, "client_id": secret.client_id, "client_secret": secret.client_secret,
         "redirect_uri": REDIRECT_URI, "grant_type": "authorization_code",
@@ -226,10 +262,23 @@ fn exchange_code(secret: &ClientSecret, code: &str) -> Result<Tokens, GPhotosErr
     if tokens.refresh_token.is_none() {
         return Err(GPhotosError::Auth("Google returned no refresh token; re-run auth (prompt=consent forces one)".into()));
     }
+    check_granted(&tokens, access)?;
+    Ok(tokens)
+}
+
+/// Every scope `access` asked for made it into the token (consent screens let the user untick
+/// them).
+fn check_granted(tokens: &Tokens, access: Access) -> Result<(), GPhotosError> {
     if !tokens.grants(SCOPE) {
         return Err(GPhotosError::Auth("Google did not grant the Photos Picker permission; run auth again and leave its checkbox ticked".into()));
     }
-    Ok(tokens)
+    if access == Access::PickAndUpload && !tokens.grants(UPLOAD_SCOPE) {
+        return Err(GPhotosError::Auth(
+            "Google did not grant the permission to add to your Google Photos library; run `filmcraft-cli photos auth --upload` again and leave it ticked"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Use the refresh token for a new access token.
@@ -444,5 +493,38 @@ mod tests {
     fn states_differ() {
         assert_ne!(random_state(), random_state());
         assert_eq!(random_state().len(), 32);
+    }
+
+    /// The upload scope is asked for only with `--upload`, as incremental consent that keeps
+    /// what was granted before.
+    #[test]
+    fn consent_urls_ask_for_uploads_only_when_wanted() {
+        let pick = Access::Pick.consent_url("id.apps.googleusercontent.com", "st");
+        assert!(pick.starts_with(AUTH_URL) && pick.contains("include_granted_scopes=true") && pick.contains("access_type=offline"), "{pick}");
+        assert!(pick.contains(&format!("scope={}&", urlencode(SCOPE))), "{pick}");
+        assert!(!pick.contains("photoslibrary"), "picker-only users are never asked for the Library API: {pick}");
+        let up = Access::PickAndUpload.consent_url("id", "st");
+        assert!(up.contains(&format!("scope={}%20{}&", urlencode(SCOPE), urlencode(UPLOAD_SCOPE))), "{up}");
+        assert!(up.contains("include_granted_scopes=true") && up.ends_with("&state=st"), "{up}");
+        assert_eq!(Access::default(), Access::Pick);
+    }
+
+    #[test]
+    fn upload_permission_is_checked() {
+        let t = |scope: &str| Tokens { access_token: "a".into(), refresh_token: Some("r".into()), expires_at: u64::MAX, scope: scope.into() };
+        let picker = t(SCOPE);
+        let e = picker.check_upload().unwrap_err();
+        assert!(matches!(e, GPhotosError::Consent(_)) && e.to_string().contains("filmcraft-cli photos auth --upload"), "{e}");
+        assert!(t(&format!("{SCOPE} {UPLOAD_SCOPE}")).check_upload().is_ok());
+        assert!(t(&format!("{SCOPE} {UPLOAD_SCOPE}x")).check_upload().is_err(), "whole scopes only");
+        // what a consent must have granted
+        assert!(check_granted(&picker, Access::Pick).is_ok());
+        assert!(check_granted(&picker, Access::PickAndUpload).unwrap_err().to_string().contains("--upload"));
+        assert!(check_granted(&t(UPLOAD_SCOPE), Access::PickAndUpload).unwrap_err().to_string().contains("Picker"));
+        assert!(check_granted(&t(&format!("{UPLOAD_SCOPE} {SCOPE}")), Access::PickAndUpload).is_ok());
+        // incremental consent: the token endpoint lists every granted scope
+        let both =
+            parse_token_response(&format!(r#"{{"access_token":"ya29","expires_in":3599,"refresh_token":"r","scope":"{UPLOAD_SCOPE} {SCOPE}"}}"#)).unwrap();
+        assert!(both.check_upload().is_ok() && both.grants(SCOPE));
     }
 }

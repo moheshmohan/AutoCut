@@ -39,6 +39,7 @@ pub mod narration;
 pub mod panels;
 pub mod paste_media;
 pub mod perf;
+pub mod photos;
 pub mod presets;
 pub mod previews;
 pub mod project_manager;
@@ -445,6 +446,11 @@ pub struct Session {
     /// Speech recogniser for `transcript.generate` (None = the Whisper model named by the command,
     /// feature `whisper`). Hosts and tests install one here.
     pub transcriber: Option<Arc<dyn filmcraft_speech::Transcriber>>,
+    /// Uploads to Google Photos for `photos.upload` (None = not available: the command is
+    /// disabled). Hosts install filmcraft-gphotos' uploader here; tests a fake.
+    pub photos: Option<Arc<dyn photos::PhotosUploader>>,
+    /// Upload job → its new media item, filled when the job finishes (`upload` in `jobs.list`).
+    pub photo_uploads: std::collections::HashMap<u64, photos::UploadOutcome>,
     /// The Events panel log: failed commands, job results, auto-save errors, messages.
     pub log: panels::EventLog,
     /// Media Browser navigation (directory, back / forward history, selected files).
@@ -544,6 +550,8 @@ impl Session {
             export_queue: Default::default(),
             stepped: Vec::new(),
             transcriber: None,
+            photos: None,
+            photo_uploads: Default::default(),
             log: Default::default(),
             browser: Default::default(),
             exec_depth: 0,
@@ -1288,6 +1296,8 @@ mod panels_tests;
 mod par_tests;
 #[cfg(test)]
 mod paste_media_tests;
+#[cfg(test)]
+mod photos_tests;
 #[cfg(test)]
 mod place_items_tests;
 #[cfg(test)]

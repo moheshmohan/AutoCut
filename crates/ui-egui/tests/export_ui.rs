@@ -510,3 +510,73 @@ fn sample_size_lists_every_size_and_greys_out_what_the_format_cannot_store() {
     assert_eq!(d.app().ui.export.settings.audio.sample_format(), SampleFormat::Float32);
     d.snapshot("export-sample-size-prores");
 }
+
+/// After an export, Export mode offers Upload to Google Photos for the file: disabled, with the
+/// reason as its label and status line, while Google Photos is not connected; once it is, a click
+/// runs `photos.upload` as a job and the status line ends with a link to the new item.
+#[test]
+fn upload_to_google_photos_after_an_export() {
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+
+    use filmcraft_engine::Job;
+    use filmcraft_engine::photos::PhotosUploader;
+
+    struct Fake {
+        ready: Mutex<Result<(), String>>,
+        uploads: Mutex<Vec<String>>,
+    }
+    impl PhotosUploader for Fake {
+        fn ready(&self) -> Result<(), String> {
+            self.ready.lock().unwrap().clone()
+        }
+        fn upload(&self, path: &str, _: Option<&str>, p: &filmcraft_engine::export::Progress) -> Result<Value, String> {
+            self.uploads.lock().unwrap().push(path.to_string());
+            p.done.store(p.total.load(Ordering::Relaxed), Ordering::Relaxed);
+            Ok(json!({"mediaItemId": "M1", "productUrl": "https://photos.google.com/lr/photo/M1"}))
+        }
+    }
+    let not_connected = "Google Photos is not connected: run `filmcraft-cli photos auth --upload`";
+    let fake = Arc::new(Fake { ready: Mutex::new(Err(not_connected.into())), uploads: Mutex::new(Vec::new()) });
+    let mut d = Driver::new("upload");
+    d.app().session.photos = Some(fake.clone());
+    d.ok("ui.set", json!({"mode": "export"}));
+    d.frames(3);
+    assert!(!d.has("export.uploadGooglePhotos"), "nothing exported yet");
+
+    // a finished export on disk
+    let out = d.path("Showcase.mp4");
+    std::fs::write(&out, b"not really a movie").unwrap();
+    let report = filmcraft_engine::export::Report { path: out.clone(), frames: 1, seconds: 0.1, bytes: 18, render_fps: 10.0, extra_files: Vec::new() };
+    let job = Job { id: 41, label: "Export Showcase.mp4".into(), progress: Default::default(), result: Arc::new(Mutex::new(Some(Ok(report)))) };
+    job.progress.finished.store(true, Ordering::Relaxed);
+    d.app().session.jobs.push(job);
+    d.app().session.export_offline.insert(41, Default::default());
+    d.frames(3);
+
+    let element = |d: &mut Driver, id: &str| d.ok("ui.elements", json!({"prefix": id})).as_array().unwrap().iter().find(|e| e["id"] == json!(id)).cloned();
+    let button = element(&mut d, "export.uploadGooglePhotos").expect("the upload button");
+    assert_eq!((button["enabled"].as_bool(), button["label"].as_str()), (Some(false), Some(not_connected)), "{button}");
+    let status = element(&mut d, "export.upload.status").expect("the reason");
+    assert_eq!(status["label"], not_connected);
+    d.click("export.uploadGooglePhotos");
+    assert!(fake.uploads.lock().unwrap().is_empty(), "a disabled button uploads nothing");
+
+    // connected: the click uploads this export as a job, and the status line follows it
+    *fake.ready.lock().unwrap() = Ok(());
+    d.frames(3);
+    let button = element(&mut d, "export.uploadGooglePhotos").unwrap();
+    assert_eq!((button["enabled"].as_bool(), button["label"].as_str()), (Some(true), Some("Upload to Google Photos")), "{button}");
+    d.click("export.uploadGooglePhotos");
+    let job = d.app().ui.export.upload_job.expect("the upload job");
+    assert_eq!(d.app().ui.export.upload_path, out);
+    d.wait_until("the upload", |d| d.app().session.jobs.iter().any(|j| j.id == job && j.progress.finished.load(Ordering::Relaxed)));
+    d.frames(3);
+    assert_eq!(*fake.uploads.lock().unwrap(), [out.as_str()]);
+    assert_eq!(element(&mut d, "export.upload.status").unwrap()["label"], "Uploaded to Google Photos");
+    assert_eq!(element(&mut d, "export.upload.open").unwrap()["label"], "https://photos.google.com/lr/photo/M1");
+    let listed = d.exec("jobs.list", json!({}));
+    let entry = listed.as_array().unwrap().iter().find(|j| j["id"] == json!(job)).cloned().unwrap();
+    assert_eq!(entry["upload"]["mediaItemId"], "M1", "{entry}");
+    d.snapshot("export-upload-google-photos");
+}

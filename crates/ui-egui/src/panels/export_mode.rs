@@ -1,17 +1,20 @@
 //! Export mode (header "Export"), laid out like Premiere 26: Destinations and the export queue on
 //! the left; the Media File settings in the middle (File Name, Location, Preset, Format, then the
 //! Video, Audio, Multiplexer, Captions, Effects and Metadata sections); the preview, Range,
-//! Scaling, the Summary with the estimated file size, and Send to Queue / Export on the right.
-//! Also the Preset Manager (Preset ▸ More presets…) and the header's Quick Export popup.
+//! Scaling, the Summary with the estimated file size, Upload to Google Photos (once an export has
+//! finished), and Send to Queue / Export on the right. Also the Preset Manager (Preset ▸ More
+//! presets…) and the header's Quick Export popup.
 //!
 //! Every setting lives in [`ExportUi`] (serde, `ui.inspect` / `ui.set {"export": {…}}`) and every
 //! action runs an engine command (`file.exportMedia`, `export.queue.*`, `export.presets.*`,
-//! `export.quick`).
+//! `export.quick`, `photos.upload`).
 //!
 //! Automation ids: `export.fileName`, `export.location`, `export.preset`, `export.preset.more`,
 //! `export.format`, `export.section.<video|audio|multiplexer|captions|effects|metadata>`,
 //! `export.video.*`, `export.audio.*`, `export.effects.*`, `export.metadata.*`, `export.range`,
-//! `export.scaling`, `export.summary`, `export.estimate`, `export.sendToQueue`, `export.button`,
+//! `export.scaling`, `export.summary`, `export.estimate`, `export.uploadGooglePhotos` (its label is
+//! the reason when disabled), `export.upload.status`, `export.upload.open`, `export.sendToQueue`,
+//! `export.button`,
 //! `export.queue.start|stop|clear`, `export.queue.item.<id>` and `….<id>.<up|down|cancel|retry|remove>`;
 //! Preset Manager: `presetManager.search`, `presetManager.favoritesOnly`,
 //! `presetManager.item.<name>`, `presetManager.favorite.<name>`, `presetManager.saveName`,
@@ -59,6 +62,9 @@ pub struct ExportUi {
     pub quick_open: bool,
     pub quick_path: String,
     pub quick_preset: String,
+    /// The Google Photos upload started here (`photos.upload` job) and the export it sends.
+    pub upload_job: Option<u64>,
+    pub upload_path: String,
 }
 
 impl Default for ExportUi {
@@ -78,6 +84,8 @@ impl Default for ExportUi {
             quick_open: false,
             quick_path: String::new(),
             quick_preset: String::new(),
+            upload_job: None,
+            upload_path: String::new(),
         }
     }
 }
@@ -1136,6 +1144,7 @@ fn preview_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq_id:
     child.add_space(4.0);
     let est = child.label(egui::RichText::new(tlf!("Estimated file size: {size}", size = format_bytes(sum.estimated_bytes))).color(t.text_dim));
     reg.add("export.estimate", est.rect, sum.estimated_size.clone());
+    upload_section(app, &mut child);
     // buttons
     let go = Rect::from_min_size(pos2(rect.max.x - 120.0, rect.max.y - 44.0), vec2(104.0, 30.0));
     let queue = Rect::from_min_size(pos2(go.min.x - 132.0, go.min.y), vec2(122.0, 30.0));
@@ -1164,6 +1173,75 @@ fn preview_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq_id:
         match app.session.execute("export.queue.add", p) {
             Ok(_) => app.ui.status = tl!("Added to the export queue").into(),
             Err(e) => app.ui.status = e.to_string(),
+        }
+    }
+}
+
+/// After an export: "Upload to Google Photos" for the file it wrote (`photos.upload`, a job with
+/// progress in the status bar), and a status line for that upload: its progress, the link to the
+/// new item, or the error. Disabled, with the reason as the status line, while Google Photos is
+/// not connected (or not allowed to upload) or Google Photos does not take the file's type.
+fn upload_section(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
+    use std::sync::atomic::Ordering;
+    let t = app.tokens;
+    let Some(path) = filmcraft_engine::photos::last_export(&app.session) else { return };
+    let file = std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| path.clone());
+    // the upload of this export, if one was started here
+    let job = app.ui.export.upload_job.filter(|_| app.ui.export.upload_path == path).and_then(|id| app.session.jobs.iter().find(|j| j.id == id)).cloned();
+    let busy = job.as_ref().is_some_and(|j| !j.progress.finished.load(Ordering::Relaxed));
+    let why_not = filmcraft_engine::photos::can_upload(&app.session).err().or_else(|| app.session.photos.as_ref().and_then(|p| p.accepts(&path).err()));
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new(tlf!("Last export: {file}", file)).color(t.text_dim).size(11.5));
+    let btn = ui.add_enabled(why_not.is_none() && !busy, egui::Button::new(tl!("Upload to Google Photos")));
+    let btn = match &why_not {
+        Some(w) => btn.on_disabled_hover_text(w.as_str()),
+        None => btn,
+    };
+    // with the response: agents see whether it is enabled, and the label says why not
+    app.auto.add_response("export.uploadGooglePhotos", &btn, why_not.as_deref().unwrap_or("Upload to Google Photos"));
+    if btn.clicked() {
+        match app.session.execute("photos.upload", json!({"path": path})) {
+            Ok(v) => {
+                app.ui.export.upload_job = v["job"].as_u64();
+                app.ui.export.upload_path = path.clone();
+                app.ui.status = tlf!("Uploading {file} to Google Photos", file);
+            }
+            Err(e) => app.ui.status = e.to_string(),
+        }
+    }
+    // the status line: this export's upload, else why uploading is not possible
+    let (text, color, link) = match &job {
+        Some(j) if busy => {
+            let f = j.progress.fraction().clamp(0.0, 1.0);
+            let pct = format!("{:.0}", f * 100.0);
+            let left = j.progress.eta().map(super::left_text).unwrap_or_default();
+            ui.add(egui::ProgressBar::new(f).desired_height(6.0));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            (tlf!("Uploading… {pct}%", pct) + &left, t.accent, None)
+        }
+        Some(j) => match j.progress.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+            Some(e) => (tlf!("Upload failed: {e}", e), t.danger, None),
+            None => {
+                let item = filmcraft_engine::photos::upload_json(&app.session, j.id);
+                let url = item["productUrl"].as_str().filter(|u| u.starts_with("https://photos.google.com/")).map(str::to_string);
+                (tl!("Uploaded to Google Photos").to_string(), t.render_green, url)
+            }
+        },
+        None => match &why_not {
+            Some(w) => (w.clone(), t.text_faint, None),
+            None => (String::new(), t.text_dim, None),
+        },
+    };
+    if !text.is_empty() {
+        let r = ui.add(egui::Label::new(egui::RichText::new(&text).size(11.0).color(color)).wrap_mode(egui::TextWrapMode::Wrap));
+        app.auto.add("export.upload.status", r.rect, &text);
+    }
+    if let Some(url) = link {
+        let r = ui.link(tl!("Open in Google Photos"));
+        app.auto.add_response("export.upload.open", &r, &url);
+        if r.clicked() {
+            let ctx = ui.ctx().clone();
+            crate::links::open(app, &ctx, &url);
         }
     }
 }

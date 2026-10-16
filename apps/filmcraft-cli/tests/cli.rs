@@ -14,6 +14,50 @@ fn json_out(o: &Output) -> Value {
     serde_json::from_slice(&o.stdout).expect("JSON on stdout")
 }
 
+/// Uploads without a Google Photos sign-in (a data dir of the test's own, so the user's sign-in
+/// is never read) fail before anything is sent, naming the command that fixes it; usage errors
+/// are usage errors.
+#[test]
+fn photos_upload_without_a_sign_in_names_the_fix() {
+    let dir = std::env::temp_dir().join(format!("filmcraft-cli-upload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let data = dir.join("data");
+    std::fs::create_dir_all(data.join("google-photos")).unwrap();
+    let clip = dir.join("clip.mp4");
+    std::fs::write(&clip, b"not really a movie").unwrap();
+    let clip = clip.to_string_lossy().to_string();
+    let run =
+        |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(args).env("FILMCRAFT_DATA_DIR", &data).output().expect("spawn filmcraft-cli");
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).to_string();
+
+    assert_eq!(run(&["photos", "upload"]).status.code(), Some(2));
+    assert_eq!(run(&["photos", "upload", &clip, &clip]).status.code(), Some(2));
+    let o = run(&["photos", "upload", &clip, "--description", "Robots"]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("not connected") && err(&o).contains("photos auth --upload"), "{}", err(&o));
+    // signed in for the picker only: the upload needs consent
+    std::fs::write(data.join("google-photos/client_secret.json"), r#"{"installed":{"client_id":"id","client_secret":"s"}}"#).unwrap();
+    let picker = r#"{"access_token":"a","refresh_token":"r","expires_at":1,"scope":"https://www.googleapis.com/auth/photospicker.mediaitems.readonly"}"#;
+    std::fs::write(data.join("google-photos/tokens.json"), picker).unwrap();
+    let o = run(&["photos", "upload", &clip]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("consent") && err(&o).contains("photos auth --upload"), "{}", err(&o));
+    // the engine command says the same, as its reason for being disabled
+    let o = run(&["exec", "photos.upload", &format!("path={clip}")]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("photos auth --upload"), "{}", err(&o));
+    // showcase --upload: needs --export, and fails before the build without consent
+    let report = dir.join("report.json");
+    std::fs::write(&report, r#"{"subject":"robot","clips":[]}"#).unwrap();
+    let report = report.to_string_lossy().to_string();
+    assert_eq!(run(&["showcase", "--report", &report, "--upload"]).status.code(), Some(2));
+    let o = run(&["showcase", "--report", &report, "--export", &dir.join("out.mp4").to_string_lossy(), "--upload"]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("--upload") && err(&o).contains("photos auth --upload"), "{}", err(&o));
+    assert!(!dir.join("out.mp4").exists(), "nothing was built");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn help_and_usage_errors() {
     let h = cli(&["help"]);

@@ -1,28 +1,36 @@
-//! Google Photos for the editor: pick cloud media in Google's own picker and import it.
+//! Google Photos for the editor: pick cloud media in Google's own picker and import it, and
+//! upload finished exports to the user's library.
 //!
 //! - [`auth`]: the OAuth 2.0 installed-app flow (browser + loopback redirect) and the token
-//!   store, under `<data dir>/google-photos/`. The one scope is the Photos Picker's read-only
-//!   one.
+//!   store, under `<data dir>/google-photos/`. The Photos Picker's read-only scope always; the
+//!   Library API's append-only scope only after `photos auth --upload` (incremental consent).
 //! - [`api`]: the Photos Picker API client — picking sessions, polling, the picked items.
 //! - [`cache`]: downloads originals into a local cache so an item is fetched only once.
+//! - [`upload`]: the Library API's resumable upload and `mediaItems:batchCreate`, behind a
+//!   [`upload::Transport`] the tests fake.
 //! - [`GooglePhotos::pick`]: the whole flow — open a session, send the user to the picker,
 //!   wait (bounded) for their selection, download it, delete the session.
+//! - [`GooglePhotos::upload`] and [`engine_uploader`]: upload a file; the latter is what hosts
+//!   install as the engine's `photos.upload` uploader.
 //!
 //! Google retired the Library API's library-wide read scopes on 2025-03-31, so there is no
-//! server-side search or album browsing any more: the user chooses in the picker.
+//! server-side search or album browsing any more: the user chooses in the picker. App uploads
+//! still work with the append-only scope.
 //!
-//! Setup (one time): create a Google Cloud project, enable the Photos Picker API, add an OAuth
-//! *Desktop* client, keep yourself as a Testing user, and save the downloaded
-//! `client_secret.json` into `<data dir>/google-photos/`. Then run `filmcraft-cli photos auth`.
-//! See README.md for the step-by-step.
+//! Setup (one time): create a Google Cloud project, enable the Photos Picker API (and, to upload,
+//! the Photos Library API), add an OAuth *Desktop* client, keep yourself as a Testing user, and
+//! save the downloaded `client_secret.json` into `<data dir>/google-photos/`. Then run
+//! `filmcraft-cli photos auth` (`--upload` to allow uploads). See README.md for the step-by-step.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 pub mod api;
 pub mod auth;
 pub mod cache;
+pub mod upload;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use api::{PickedItem, PickingSession, Poll};
@@ -274,6 +282,101 @@ impl GooglePhotos {
     }
 }
 
+impl GooglePhotos {
+    /// Whether the saved sign-in includes the upload permission.
+    pub fn can_upload(&self) -> bool {
+        self.tokens.lock().unwrap_or_else(PoisonError::into_inner).grants(auth::UPLOAD_SCOPE)
+    }
+
+    /// Upload `path` into the user's library (see [`upload`]). Without the upload permission
+    /// this is a [`GPhotosError::Consent`] naming `filmcraft-cli photos auth --upload`; nothing
+    /// is sent. `progress(sent, total, status)` returning `false` cancels.
+    pub fn upload(
+        &self,
+        path: &Path,
+        opts: &upload::UploadOptions,
+        progress: &mut dyn FnMut(u64, u64, &str) -> bool,
+    ) -> Result<upload::Uploaded, GPhotosError> {
+        self.upload_with(&upload::UreqTransport::default(), path, opts, progress)
+    }
+
+    /// [`Self::upload`] over another transport.
+    pub fn upload_with(
+        &self,
+        http: &dyn upload::Transport,
+        path: &Path,
+        opts: &upload::UploadOptions,
+        progress: &mut dyn FnMut(u64, u64, &str) -> bool,
+    ) -> Result<upload::Uploaded, GPhotosError> {
+        self.tokens.lock().unwrap_or_else(PoisonError::into_inner).check_upload()?;
+        upload::upload_file(http, &|| self.access_token(), path, opts, progress)
+    }
+}
+
+/// Whether an upload can start, from what is on disk in `dir` (no network): the OAuth client,
+/// a sign-in, and the upload permission. `Err` says what to do.
+pub fn upload_readiness(dir: &Path) -> Result<(), String> {
+    if !dir.join("client_secret.json").is_file() {
+        return Err(format!(
+            "Google Photos is not connected: save your OAuth client as {} (see crates/gphotos/README.md), then run `filmcraft-cli photos auth --upload`",
+            dir.join("client_secret.json").display()
+        ));
+    }
+    let tokens = auth::Tokens::load(dir).map_err(|_| "Google Photos is not connected: run `filmcraft-cli photos auth --upload`".to_string())?;
+    tokens.check_upload().map_err(|e| e.to_string())
+}
+
+/// How long [`EngineUploader::ready`] trusts its last look at the disk (it runs while drawing).
+const READY_TTL: Duration = Duration::from_secs(2);
+
+/// The engine's `photos.upload` uploader over the data dir's sign-in.
+pub struct EngineUploader {
+    dir: PathBuf,
+    ready: Mutex<Option<(Instant, Result<(), String>)>>,
+}
+
+/// The uploader hosts install as `Session::photos`.
+pub fn engine_uploader() -> Arc<dyn filmcraft_engine::photos::PhotosUploader> {
+    Arc::new(EngineUploader::new(data_dir()))
+}
+
+impl EngineUploader {
+    pub fn new(dir: PathBuf) -> Self {
+        Self { dir, ready: Mutex::new(None) }
+    }
+}
+
+impl filmcraft_engine::photos::PhotosUploader for EngineUploader {
+    fn ready(&self) -> Result<(), String> {
+        let mut cached = self.ready.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, r)) = &*cached
+            && at.elapsed() < READY_TTL
+        {
+            return r.clone();
+        }
+        let r = upload_readiness(&self.dir);
+        *cached = Some((Instant::now(), r.clone()));
+        r
+    }
+
+    fn accepts(&self, path: &str) -> Result<(), String> {
+        upload::media_type(Path::new(path)).map(drop).map_err(|e| e.to_string())
+    }
+
+    fn upload(&self, path: &str, description: Option<&str>, progress: &filmcraft_engine::export::Progress) -> Result<serde_json::Value, String> {
+        use std::sync::atomic::Ordering;
+        let gp = GooglePhotos::configured().map_err(|e| e.to_string())?;
+        let opts = upload::UploadOptions { description: description.map(str::to_string), ..Default::default() };
+        let mut report = |sent: u64, total: u64, status: &str| {
+            progress.total.store(total, Ordering::Relaxed);
+            progress.done.store(sent, Ordering::Relaxed);
+            *progress.status.lock().unwrap_or_else(PoisonError::into_inner) = status.to_string();
+            !progress.cancel.load(Ordering::Relaxed)
+        };
+        gp.upload(Path::new(path), &opts, &mut report).map(|u| u.to_json()).map_err(|e| e.to_string())
+    }
+}
+
 enum Waited {
     Ready(PickingSession),
     Expired,
@@ -326,6 +429,14 @@ pub enum GPhotosError {
     Api(String),
     #[error("download: {0}")]
     Download(String),
+    /// The sign-in lacks a permission; the message names the command that grants it.
+    #[error("{0}")]
+    Consent(String),
+    #[error("upload: {0}")]
+    Upload(String),
+    /// The caller stopped it.
+    #[error("cancelled")]
+    Cancelled,
     #[error("{0}")]
     Io(String),
 }
@@ -368,5 +479,89 @@ mod tests {
     fn default_wait_is_bounded() {
         let o = PickOptions::default();
         assert!(o.wait <= MAX_WAIT && o.open_browser && o.resume.is_none());
+    }
+
+    /// Answers in order; every request is counted.
+    struct Scripted(Mutex<(Vec<upload::Response>, usize)>);
+
+    impl upload::Transport for Scripted {
+        fn send(&self, _: &upload::Request<'_>) -> Result<upload::Response, String> {
+            let mut s = self.0.lock().unwrap();
+            s.1 += 1;
+            if s.0.is_empty() { Err("no more answers".into()) } else { Ok(s.0.remove(0)) }
+        }
+    }
+
+    fn signed_in(scope: &str) -> GooglePhotos {
+        let tokens = auth::Tokens { access_token: "ya29".into(), refresh_token: Some("r".into()), expires_at: u64::MAX, scope: scope.into() };
+        GooglePhotos {
+            secret: auth::ClientSecret { client_id: "id".into(), client_secret: "s".into() },
+            tokens: Arc::new(Mutex::new(tokens)),
+            agent: api::http_agent(),
+        }
+    }
+
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("gphotos-lib-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn uploading_needs_the_upload_permission() {
+        let dir = temp("consent");
+        let file = dir.join("export.mp4");
+        std::fs::write(&file, b"0123456789").unwrap();
+        let opts = upload::UploadOptions { backoff: Duration::ZERO, ..Default::default() };
+        // a picker-only sign-in: the consent error, and nothing goes out
+        let http = Scripted(Mutex::new((Vec::new(), 0)));
+        let gp = signed_in(auth::SCOPE);
+        assert!(!gp.can_upload());
+        let e = gp.upload_with(&http, &file, &opts, &mut |_, _, _| true).unwrap_err();
+        assert!(matches!(e, GPhotosError::Consent(_)) && e.to_string().contains("photos auth --upload"), "{e}");
+        assert_eq!(http.0.lock().unwrap().1, 0);
+        // with it: start, one chunk, the media item
+        let gp = signed_in(&format!("{} {}", auth::SCOPE, auth::UPLOAD_SCOPE));
+        assert!(gp.can_upload());
+        let session = "https://photoslibrary.googleapis.com/v1/uploads?upload_id=x";
+        let answers = vec![
+            upload::Response { status: 200, headers: vec![("X-Goog-Upload-URL".into(), session.into())], body: String::new() },
+            upload::Response { status: 200, headers: vec![], body: "tok".into() },
+            upload::Response {
+                status: 200,
+                headers: vec![],
+                body: r#"{"newMediaItemResults":[{"status":{"message":"Success"},"mediaItem":{"id":"M1"}}]}"#.into(),
+            },
+        ];
+        let http = Scripted(Mutex::new((answers, 0)));
+        let up = gp.upload_with(&http, &file, &opts, &mut |_, _, _| true).unwrap();
+        assert_eq!((up.media_item_id.as_str(), up.bytes, up.product_url), ("M1", 10, None));
+        assert_eq!(http.0.lock().unwrap().1, 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn readiness_comes_from_the_disk() {
+        use filmcraft_engine::photos::PhotosUploader as _;
+        let dir = temp("ready");
+        let e = upload_readiness(&dir).unwrap_err();
+        assert!(e.contains("not connected") && e.contains("client_secret.json"), "{e}");
+        std::fs::write(dir.join("client_secret.json"), r#"{"installed":{"client_id":"id","client_secret":"s"}}"#).unwrap();
+        let e = upload_readiness(&dir).unwrap_err();
+        assert!(e.contains("not connected") && e.contains("photos auth --upload"), "{e}");
+        let t = |scope: &str| auth::Tokens { access_token: "a".into(), refresh_token: Some("r".into()), expires_at: 1, scope: scope.into() };
+        t(auth::SCOPE).save(&dir).unwrap();
+        let e = upload_readiness(&dir).unwrap_err();
+        assert!(e.contains("consent") && e.contains("photos auth --upload"), "{e}");
+        std::fs::write(dir.join("tokens.json"), "{not json").unwrap();
+        assert!(upload_readiness(&dir).unwrap_err().contains("not connected"));
+        t(&format!("{} {}", auth::SCOPE, auth::UPLOAD_SCOPE)).save(&dir).unwrap();
+        assert_eq!(upload_readiness(&dir), Ok(()));
+        let up = EngineUploader::new(dir.clone());
+        assert_eq!(up.ready(), Ok(()));
+        assert!(up.accepts("/x/showcase.mp4").is_ok());
+        assert!(up.accepts("/x/mix.wav").unwrap_err().contains(".wav"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

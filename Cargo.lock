@@ -1729,6 +1729,7 @@ dependencies = [
  "egui",
  "filmcraft-engine",
  "filmcraft-export",
+ "filmcraft-gphotos",
  "filmcraft-gpu",
  "filmcraft-platform",
  "filmcraft-project",
