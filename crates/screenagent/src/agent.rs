@@ -105,6 +105,9 @@ pub enum Outcome {
     NothingNew,
     /// The count reached the session's cap: its results may be cut short.
     AtCap,
+    /// The count fell: its gesture cleared some of what earlier searches selected (it overlapped
+    /// one of them). It, and the searches before it, are worth another try.
+    Cleared,
     /// It could not be searched or selected (the note says why).
     Failed,
 }
@@ -154,9 +157,20 @@ impl Summary {
     }
 
     /// The searches worth another try in a fresh session: those that failed, selected nothing
-    /// new, or reached the cap (their results may be cut short). [`Self::left`] are on top.
+    /// new, reached the cap (their results may be cut short) or cleared earlier selections — and
+    /// then also every search before that one that selected something (some of it may be what was
+    /// cleared). [`Self::left`] are on top.
     pub fn retry(&self) -> Vec<String> {
-        self.searches.iter().filter(|s| matches!(s.outcome, Outcome::Failed | Outcome::NothingNew | Outcome::AtCap)).map(|s| s.query.clone()).collect()
+        let cleared = self.searches.iter().rposition(|s| s.outcome == Outcome::Cleared);
+        self.searches
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| {
+                matches!(s.outcome, Outcome::Failed | Outcome::NothingNew | Outcome::AtCap | Outcome::Cleared)
+                    || (s.outcome == Outcome::Selected && cleared.is_some_and(|c| *i < c))
+            })
+            .map(|(_, s)| s.query.clone())
+            .collect()
     }
 }
 
@@ -537,7 +551,7 @@ fn outcome_of(before: Option<u32>, after: Option<u32>, cap_items: u32) -> (Outco
         None if before.is_some() => (Outcome::Failed, "the header showed no count after it".into()),
         None => (Outcome::NothingNew, "nothing was selected".into()),
         Some(a) if a < b => {
-            (Outcome::Failed, format!("the count fell from {b} to {a}: this search overlapped an earlier one, and selecting it again cleared some"))
+            (Outcome::Cleared, format!("the count fell from {b} to {a}: this search overlapped an earlier one, and selecting it again cleared some"))
         }
         Some(a) if a == b => (Outcome::NothingNew, String::new()),
         Some(a) if a >= cap_items => (Outcome::AtCap, format!("the session's {cap_items}-item maximum was reached; its results may be cut short")),
@@ -705,7 +719,7 @@ fn search_many<A: Act, G: Ground>(
         with(Outcome::Selected) + with(Outcome::AtCap),
         with(Outcome::NoResults),
         with(Outcome::NothingNew),
-        with(Outcome::Failed),
+        with(Outcome::Failed) + with(Outcome::Cleared),
         if summary.left.is_empty() { String::new() } else { format!(", {} left for a next session", summary.left.len()) },
         summary.selected
     );
@@ -718,6 +732,7 @@ fn outcome_line(o: Outcome, selected: Option<u32>, note: &str) -> String {
         Outcome::NoResults => "no results, skipped",
         Outcome::NothingNew => "nothing new selected",
         Outcome::AtCap => "selected up to the session's maximum",
+        Outcome::Cleared => "cleared some earlier selections",
         Outcome::Failed => "failed",
     };
     let count = selected.map(|n| format!(" ({n} selected so far)")).unwrap_or_default();
@@ -2320,9 +2335,10 @@ mod tests {
         let w = world();
         let eyes = Eyes::new(&w, &["8 selected", "8 selected", "6 selected"]);
         let s = drive(&mut Hands(Rc::clone(&w)), &eyes, &many(&["a", "b", "c"], MAX_PICK), &mut |_| {}).unwrap();
-        assert_eq!(outcomes(&s), [(Outcome::Selected, Some(8)), (Outcome::NothingNew, Some(8)), (Outcome::Failed, Some(6))]);
+        assert_eq!(outcomes(&s), [(Outcome::Selected, Some(8)), (Outcome::NothingNew, Some(8)), (Outcome::Cleared, Some(6))]);
         assert!(s.searches[2].note.contains("fell from 8 to 6"), "{:?}", s.searches[2]);
-        assert_eq!(s.retry(), ["b", "c"]);
+        // c cleared some of what came before it: a (which selected) is worth another try too
+        assert_eq!(s.retry(), ["a", "b", "c"]);
         assert!(s.done_pressed && s.selected == 6, "what is selected is still confirmed: {s:?}");
     }
 
