@@ -103,6 +103,10 @@ impl Image {
         let axis_aligned = m.b == 0.0 && m.c == 0.0;
         out.px.par_chunks_mut(w * 4).enumerate().skip(y0).take(y1.saturating_sub(y0)).for_each(|(y, row)| {
             let py = y as f64 + 0.5;
+            if axis_aligned {
+                self.scaled_row(row, x0..x1, py, &inv);
+                return;
+            }
             for x in x0..x1 {
                 let px = x as f64 + 0.5;
                 let (u, v) =
@@ -115,6 +119,48 @@ impl Image {
             }
         });
         out
+    }
+
+    /// One row of [`Self::transformed`] for a transform without rotation or shear (Motion's scale and
+    /// position, what every placed clip has): the source rows and the vertical weight are the same
+    /// for the whole row, so they are found once instead of per pixel. The arithmetic is
+    /// [`Self::sample_bilinear`]'s, so the pixels are the same to the bit.
+    fn scaled_row(&self, row: &mut [f32], xs: std::ops::Range<usize>, py: f64, inv: &Affine) {
+        let v = inv.d * py + inv.f;
+        if v < -1.0 || v > self.h as f64 + 1.0 {
+            return;
+        }
+        let fy = v as f32 - 0.5;
+        let y0 = fy.floor();
+        let ty = fy - y0;
+        let y0 = y0 as isize;
+        // a source row, or none (transparent) above or below the picture
+        let src_row = |y: isize| (y >= 0 && y < self.h as isize).then(|| self.px.get(y as usize * self.w * 4..(y as usize + 1) * self.w * 4)).flatten();
+        let (top, bottom) = (src_row(y0), src_row(y0 + 1));
+        let tap = |r: Option<&[f32]>, x: isize| -> [f32; 4] {
+            match r {
+                Some(r) if x >= 0 && (x as usize) < self.w => r.get(x as usize * 4..x as usize * 4 + 4).map_or([0.0; 4], |p| [p[0], p[1], p[2], p[3]]),
+                _ => [0.0; 4],
+            }
+        };
+        for x in xs {
+            let px = x as f64 + 0.5;
+            let u = inv.a * px + inv.e;
+            if u < -1.0 || u > self.w as f64 + 1.0 {
+                continue;
+            }
+            let fx = u as f32 - 0.5;
+            let x0 = fx.floor();
+            let tx = fx - x0;
+            let x0 = x0 as isize;
+            let (a, b, c, d) = (tap(top, x0), tap(top, x0 + 1), tap(bottom, x0), tap(bottom, x0 + 1));
+            let Some(o) = row.get_mut(x * 4..x * 4 + 4) else { continue };
+            for k in 0..4 {
+                let t = a[k] + (b[k] - a[k]) * tx;
+                let b2 = c[k] + (d[k] - c[k]) * tx;
+                o[k] = t + (b2 - t) * ty;
+            }
+        }
     }
 
     /// Half-size box downsample.
@@ -202,5 +248,55 @@ impl Image {
             }
         });
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`Image::transformed`] as it was, every pixel through [`Image::sample_bilinear`].
+    fn transformed_per_pixel(img: &Image, w: usize, h: usize, m: &Affine) -> Image {
+        let inv = m.inverse().unwrap();
+        let mut out = Image::new(w, h);
+        let b = m.bounds(&filmcraft_geom::Rect::new(0.0, 0.0, img.w as f64, img.h as f64));
+        let ys = (b.y.floor().max(0.0) as usize).min(h)..(b.bottom().ceil().max(0.0) as usize).min(h);
+        let xs = (b.x.floor().max(0.0) as usize).min(w)..(b.right().ceil().max(0.0) as usize).min(w);
+        for y in ys {
+            for x in xs.clone() {
+                let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+                let (u, v) = (inv.a * px + inv.c * py + inv.e, inv.b * px + inv.d * py + inv.f);
+                if u < -1.0 || v < -1.0 || u > img.w as f64 + 1.0 || v > img.h as f64 + 1.0 {
+                    continue;
+                }
+                let s = img.sample_bilinear(u as f32, v as f32);
+                out.px[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&s);
+            }
+        }
+        out
+    }
+
+    /// Placing a picture with Motion's scale and position (no rotation) samples whole rows at a
+    /// time now; every pixel is what the per-pixel sampling gave, to the bit, enlarged or reduced,
+    /// mirrored, moved by fractions of a pixel and partly or wholly off the frame.
+    #[test]
+    fn scaled_placement_samples_the_same_bits() {
+        let (sw, sh) = (37usize, 23usize);
+        let img = Image { w: sw, h: sh, px: (0..sw * sh * 4).map(|i| ((i * 7919) % 1000) as f32 / 997.0).collect() };
+        let cases = [
+            Affine::IDENTITY,
+            Affine::scale(1.7777, 1.7777),
+            Affine::scale(0.5625, 0.5625).then_apply(&Affine::translate(3.25, -2.5)),
+            Affine::scale(2.0, 3.0).then_apply(&Affine::translate(-10.3, 4.7)),
+            Affine::scale(-1.0, 1.0).then_apply(&Affine::translate(37.0, 0.0)),
+            Affine::scale(1.0, -0.8).then_apply(&Affine::translate(0.5, 30.0)),
+            Affine::translate(-40.0, 0.0),
+            Affine::translate(0.0, 500.0),
+        ];
+        for m in cases {
+            let want = transformed_per_pixel(&img, 64, 40, &m);
+            let got = img.transformed(64, 40, &m);
+            assert!(got.px.iter().zip(&want.px).all(|(a, b)| a.to_bits() == b.to_bits()), "{m:?}");
+        }
     }
 }
