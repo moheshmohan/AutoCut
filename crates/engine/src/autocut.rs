@@ -284,7 +284,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.analyze",
             "Find Every Clip of a Subject",
             &[],
-            r#"{"subject":str,"items":[id]?,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"frames":1..8=6,"compare":u32=150,"wait":bool=false}"#,
+            r#"{"subject":str,"items":[id]?,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"frames":1..8=6,"screen":0..8=0,"compare":u32=150,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Analyze, p),
         ),
         job(
@@ -298,7 +298,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.makeShowcase",
             "Make a Showcase…",
             &["Sequence"],
-            r#"{"subject":str?,"prompt":str?,"items":[id]?,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"title":str?,"voice":str?,"mood":str?,"frames":1..8=6,"compare":u32=150,"wait":bool=false}"#,
+            r#"{"subject":str?,"prompt":str?,"items":[id]?,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"title":str?,"voice":str?,"mood":str?,"frames":1..8=6,"screen":0..8=0,"compare":u32=150,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Make, p),
         ),
         job("autocut.showcaseBuild", "Build Showcase", &[], r#"{"plan":Plan?,"export":str?,"upload":bool=false,"qa":bool?,"wait":bool=false}"#, |s, p| {
@@ -426,6 +426,7 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
             put(&mut out, "sinceUnix", Some(json!(t)));
         }
         put(&mut out, "frames", count_p(cmd, p, "frames", 1, 8)?.map(|n| json!(n)));
+        put(&mut out, "screen", count_p(cmd, p, "screen", 0, 8)?.map(|n| json!(n)));
         put(&mut out, "compare", count_p(cmd, p, "compare", 0, MAX_COMPARE)?.map(|n| json!(n)));
     }
     if kind == TaskKind::Plan {

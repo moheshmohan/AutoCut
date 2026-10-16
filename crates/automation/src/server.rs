@@ -252,6 +252,10 @@ pub struct ShowcaseAnalyzeParams {
     /// Frames sampled per clip, 1–8 (default 6).
     #[serde(default)]
     pub frames: Option<u32>,
+    /// Look at this many spread-out frames of a clip first and skip the rest when none shows the
+    /// subject — much faster over many clips that mostly do not (default 0: off).
+    #[serde(default)]
+    pub screen: Option<u32>,
     /// Most side-by-side comparisons for telling the same robot across clips (default 150; 0:
     /// by name only).
     #[serde(default)]
@@ -280,6 +284,7 @@ fn showcase_analyze_params(p: ShowcaseAnalyzeParams) -> (&'static str, Value) {
     put("items", p.items.map(|i| json!(i)));
     put("since", p.since.map(Value::String));
     put("frames", p.frames.map(|n| json!(n)));
+    put("screen", p.screen.map(|n| json!(n)));
     put("compare", p.compare.map(|n| json!(n)));
     if make {
         put("title", p.title.map(Value::String));
@@ -1483,7 +1488,7 @@ mod tests {
     #[test]
     fn showcase_tool_schemas_and_params() {
         let s = schema("showcase_analyze");
-        assert_eq!(props(&s), ["compare", "frames", "items", "plan", "since", "subject", "title", "voice"], "{s}");
+        assert_eq!(props(&s), ["compare", "frames", "items", "plan", "screen", "since", "subject", "title", "voice"], "{s}");
         assert_eq!(s["required"], json!(["subject"]), "{s}");
         assert_eq!(s["properties"]["subject"]["type"], "string", "{s}");
         let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "since": "2020", "items": [5, 6]})).unwrap();

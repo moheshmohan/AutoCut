@@ -23,6 +23,21 @@ use crate::{AutoCutError, Executor};
 
 /// Frames sampled per clip, at most.
 pub const MAX_FRAMES: usize = 8;
+
+/// The order a clip's sample times are looked at when screening with `screen` frames: `screen`
+/// of them spread across the clip first, then the rest. With `screen` 0, or at least as many as
+/// there are times, the plain order.
+fn screening_order(times: &[f64], screen: usize) -> (Vec<f64>, usize) {
+    let n = times.len();
+    if screen == 0 || screen >= n {
+        return (times.to_vec(), n);
+    }
+    let mut first: Vec<usize> = (0..screen).map(|i| (((i as f64 + 0.5) * n as f64 / screen as f64) - 0.5).round() as usize).map(|k| k.min(n - 1)).collect();
+    first.dedup();
+    let rest = (0..n).filter(|k| !first.contains(k));
+    let order: Vec<f64> = first.iter().copied().chain(rest).filter_map(|k| times.get(k).copied()).collect();
+    (order, first.len())
+}
 /// Seconds between samples on short clips.
 const SAMPLE_EVERY: f64 = 3.0;
 /// A subject box smaller than this share of the frame is not "showing" it.
@@ -412,6 +427,7 @@ pub async fn run(
     subject: &str,
     items: Option<&[u64]>,
     frames_max: usize,
+    screen: usize,
     earlier: Option<Vec<ClipFacts>>,
     compare: usize,
     progress: &mut dyn FnMut(&str),
@@ -421,7 +437,7 @@ pub async fn run(
             relabel(model, ex, subject, &mut facts, progress).await?;
             facts
         }
-        None => analyze(model, ex, subject, items, frames_max, progress).await?,
+        None => analyze(model, ex, subject, items, frames_max, screen, progress).await?,
     };
     crate::identity::identify(model, ex, subject.trim(), &mut facts, compare, progress).await;
     Ok(facts)
@@ -588,11 +604,17 @@ async fn analyze_clip(
     name: &str,
     seconds: f64,
     frames_max: usize,
+    screen: usize,
     progress: &mut dyn FnMut(&str),
 ) -> Result<ClipFacts, AutoCutError> {
-    let mut frames = Vec::new();
+    let mut frames: Vec<FrameFact> = Vec::new();
     let mut pngs: Vec<(f64, f64, Vec<u8>)> = Vec::new(); // (area, seconds, png)
-    for t in sample_times(seconds, frames_max) {
+    let (order, screened) = screening_order(&sample_times(seconds, frames_max), screen);
+    for (k, t) in order.into_iter().enumerate() {
+        // screening: the spread-out first frames show nothing, so the rest are not looked at
+        if k == screened && !frames.iter().any(|f| f.present) {
+            break;
+        }
         let r = match ex.execute("media.frame", json!({"item": item, "seconds": t, "maxSide": 640})).await {
             Ok(r) => r,
             Err(e) => {
@@ -616,6 +638,7 @@ async fn analyze_clip(
         }
         frames.push(f);
     }
+    frames.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
     let shown = frames.iter().filter(|f| f.present).count();
     let coverage = if frames.is_empty() { 0.0 } else { shown as f64 / frames.len() as f64 };
     let best = frames.iter().filter(|f| f.present).max_by(|a, b| a.area.total_cmp(&b.area)).map(|f| f.seconds).unwrap_or(seconds / 2.0);
@@ -686,6 +709,7 @@ pub async fn analyze(
     subject: &str,
     items: Option<&[u64]>,
     frames_max: usize,
+    screen: usize,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Vec<ClipFacts>, AutoCutError> {
     let subject = subject.trim();
@@ -708,7 +732,7 @@ pub async fn analyze(
     let n = clips.len();
     let mut out = Vec::with_capacity(n);
     for (k, (item, name, secs)) in clips.into_iter().enumerate() {
-        let mut f = analyze_clip(model, ex, subject, item, &name, secs, frames_max.clamp(1, MAX_FRAMES), progress).await?;
+        let mut f = analyze_clip(model, ex, subject, item, &name, secs, frames_max.clamp(1, MAX_FRAMES), screen, progress).await?;
         (f.created, f.unix) = date_of(item);
         progress(&format!(
             "[{}/{n}] {name}: {}",
@@ -722,6 +746,27 @@ pub async fn analyze(
 }
 
 /// A stand-in for the engine in tests: a project of clips whose frames are small PNGs.
+#[cfg(test)]
+mod screening_tests {
+    use super::*;
+
+    #[test]
+    fn screening_looks_at_spread_frames_first() {
+        let times: Vec<f64> = (0..6).map(|k| k as f64).collect();
+        let (order, first) = screening_order(&times, 3);
+        assert_eq!(first, 3);
+        assert_eq!(&order[..3], &[1.0, 3.0, 5.0], "spread across the clip");
+        let mut all = order.clone();
+        all.sort_by(f64::total_cmp);
+        assert_eq!(all, times, "every time, once");
+        // off, or more than there are: the plain order
+        assert_eq!(screening_order(&times, 0), (times.clone(), 6));
+        assert_eq!(screening_order(&times, 9), (times.clone(), 6));
+        assert_eq!(screening_order(&[], 3), (vec![], 0));
+        assert_eq!(screening_order(&[2.0], 3), (vec![2.0], 1));
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use std::sync::Mutex;
@@ -925,7 +970,7 @@ mod tests {
             json!({"label": "Swiss-Mile ARDET", "kind": "wheeled", "description": "A red wheeled-legged robot at the ETH Zürich booth."}),
         ]);
         let model = FixedModel::new(answers);
-        let facts = analyze(&model, &ex, "robot", None, 2, &mut |_| {}).await.unwrap();
+        let facts = analyze(&model, &ex, "robot", None, 2, 0, &mut |_| {}).await.unwrap();
         let f = &facts[0];
         assert!(f.present);
         assert_eq!(f.text, read(&["ARDET", "Swiss-Mile"], &["ETH zürich RSL", "QUOKKA"]));
@@ -942,6 +987,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn screening_skips_a_clip_whose_spread_frames_show_nothing() {
+        // 30 s: six sample times; screening with three
+        let ex = testing::FakeEx::new(vec![(1, 30.0, 1_700_000_000), (2, 30.0, 1_700_000_100)]);
+        let nothing = json!({"present": false});
+        let mut answers = vec![nothing.clone(), nothing.clone(), nothing.clone()];
+        // the second clip: the robot in the second screened frame, then the other three looked at
+        answers.extend([nothing.clone(), json!({"present": true, "bbox_2d": [0, 0, 400, 400]}), nothing.clone(), nothing.clone(), nothing.clone(), nothing]);
+        answers.extend([json!({"on_subject": [], "nearby": []}), json!({"label": "white robot", "kind": "humanoid", "description": "A white robot."})]);
+        let model = FixedModel::new(answers);
+        let facts = analyze(&model, &ex, "robot", None, 6, 3, &mut |_| {}).await.unwrap();
+        assert!(!facts[0].present && facts[0].frames.len() == 3, "three looks, then skipped: {:?}", facts[0].frames);
+        assert!(facts[1].present);
+        assert_eq!(facts[1].frames.len(), 6, "a clip that shows it is looked at fully");
+        assert!(facts[1].frames.windows(2).all(|w| w[0].seconds < w[1].seconds), "frames in time order");
+        assert!((facts[1].coverage - 1.0 / 6.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
     async fn without_text_a_guessed_name_is_still_dropped() {
         let ex = testing::FakeEx::new(vec![(1, 10.0, 1_700_000_000)]);
         let mut answers = grounded();
@@ -951,7 +1014,7 @@ mod tests {
             json!({"label": "Quokka robot", "kind": "wheeled", "description": "A white robot beside a kiosk."}),
         ]);
         let model = FixedModel::new(answers);
-        let facts = analyze(&model, &ex, "robot", None, 2, &mut |_| {}).await.unwrap();
+        let facts = analyze(&model, &ex, "robot", None, 2, 0, &mut |_| {}).await.unwrap();
         assert_eq!(facts[0].label, "wheeled robot");
         assert_eq!(facts[0].text, read(&[], &["QUOKKA"]));
     }
@@ -1015,10 +1078,10 @@ mod tests {
             })
             .collect();
         let model = FixedModel::new(vec![json!({"same": true, "confidence": 0.95})]);
-        let facts = run(&model, &ex, "robot", None, 2, Some(earlier.clone()), 10, &mut |_| {}).await.unwrap();
+        let facts = run(&model, &ex, "robot", None, 2, 0, Some(earlier.clone()), 10, &mut |_| {}).await.unwrap();
         assert_eq!(facts.iter().map(|f| f.identity).collect::<Vec<_>>(), vec![Some(1), Some(1)]);
         // no comparisons: each its own robot
-        let facts = run(&FixedModel::new(vec![]), &ex, "robot", None, 2, Some(earlier), 0, &mut |_| {}).await.unwrap();
+        let facts = run(&FixedModel::new(vec![]), &ex, "robot", None, 2, 0, Some(earlier), 0, &mut |_| {}).await.unwrap();
         assert_eq!(facts.iter().map(|f| f.identity).collect::<Vec<_>>(), vec![Some(1), Some(2)]);
     }
 

@@ -140,14 +140,16 @@ SUBCOMMANDS
                                 lines and, when AUTOCUT_ANALYSIS_MODEL answers, the subject in
                                 every shot; findings in <out>.qa.json and a numbered contact
                                 sheet in <out>.qa.png (and under `qa` in the output)
-  analyze '<subject>' [--items 1,2] [--frames N] [--relabel earlier.json] [--compare 150]
+  analyze '<subject>' [--items 1,2] [--frames N] [--screen N] [--relabel earlier.json] [--compare 150]
          [--out report.json]
                                 which video items show <subject> (e.g. robot): a local vision model
                                 (AUTOCUT_ANALYSIS_MODEL, default qwen2.5vl:7b) locates it in sampled
                                 frames, reads the text on and around it, and names it; with capture
                                 dates (media.captureDate), the best moment per clip, oldest first,
                                 and an identity per robot (clips of the same one, compared side by
-                                side: at most --compare pairs, 0 = by name only), as JSON
+                                side: at most --compare pairs, 0 = by name only), as JSON;
+                                --screen N looks at N spread-out frames of a clip first and
+                                skips the rest when none shows it (fast over many clips)
   autocut '<prompt>' [--dry-run] [--frames]
                                 plan (and run) a natural-language edit with AutoCut: a local
                                 model (Ollama) classifies the prompt and deterministic planners
@@ -849,7 +851,7 @@ async fn cli() {
             // which clips show <subject>, what it is, when, and its best moment
             let subject = a.positionals.get(1..).map(|p| p.join(" ")).unwrap_or_default();
             if subject.trim().is_empty() {
-                usage("analyze '<subject>' [--items 1,2,3] [--frames N] [--out report.json]");
+                usage("analyze '<subject>' [--items 1,2,3] [--frames N] [--screen N] [--out report.json]");
             }
             let items: Option<Vec<u64>> = a.opt("--items").map(|v| {
                 v.split(',')
@@ -859,6 +861,12 @@ async fn cli() {
             });
             let frames =
                 a.opt("--frames").map(|v| v.parse::<usize>().unwrap_or_else(|_| usage(format!("analyze: --frames wants a number, not `{v}`")))).unwrap_or(6);
+            // --screen N: look at N spread-out frames first and skip the clip when none shows the
+            // subject (fast over many clips that mostly do not; 0 = off)
+            let screen = a
+                .opt("--screen")
+                .map(|v| v.parse::<usize>().unwrap_or_else(|_| usage(format!("analyze: --screen wants a number of frames, not `{v}`"))))
+                .unwrap_or(0);
             // side-by-side comparisons for telling the same robot across clips (0: by name only)
             let compare = a
                 .opt("--compare")
@@ -886,7 +894,7 @@ async fn cli() {
                 Backend::Local(s) => {
                     let session = std::mem::take(s);
                     let ex = filmcraft_autocut::SessionExecutor::from(*session);
-                    let r = filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, earlier, compare, &mut progress).await;
+                    let r = filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, screen, earlier, compare, &mut progress).await;
                     if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
                         **s = inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
                     }
@@ -896,7 +904,7 @@ async fn cli() {
                     let addr = a.opt("--bridge").unwrap_or_default();
                     let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
                     let ex = filmcraft_automation::AutocutExecutor::bridge(client);
-                    filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, earlier, compare, &mut progress).await
+                    filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, screen, earlier, compare, &mut progress).await
                 }
             };
             match result {

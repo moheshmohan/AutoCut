@@ -602,7 +602,8 @@ async fn analyze_clips(model: &dyn ChatModel, ex: &PortExecutor, req: &Request, 
     note(progress, &format!("looking for a {} in {}", req.subject, if items.is_some() { "the clips" } else { "every clip" }));
     let frames = p["frames"].as_u64().map_or(6, |n| n.clamp(1, analyze::MAX_FRAMES as u64) as usize);
     let compare = p["compare"].as_u64().map_or(crate::identity::MAX_COMPARISONS, |n| n as usize);
-    let facts: Vec<ClipFacts> = analyze::run(model, ex, &req.subject, items.as_deref(), frames, None, compare, &mut |l| note(progress, l)).await?;
+    let screen = p["screen"].as_u64().map_or(0, |n| n.min(analyze::MAX_FRAMES as u64) as usize);
+    let facts: Vec<ClipFacts> = analyze::run(model, ex, &req.subject, items.as_deref(), frames, screen, None, compare, &mut |l| note(progress, l)).await?;
     let showing = facts.iter().filter(|f| f.present).count();
     let mut report = json!({"subject": req.subject, "model": model.id(), "clips": facts});
     let mut summary = json!({"subject": req.subject, "clips": facts.len(), "showing": showing});
