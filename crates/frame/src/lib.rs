@@ -315,6 +315,12 @@ impl VideoFrame {
     /// Convert the rectangle `r` (inside the decimated picture) into `out`, which must hold exactly
     /// `r.w * r.h * 4` floats; every one of them is written.
     fn convert_region(&self, n: usize, decode: Option<&DecodeTable>, r: Region, out: &mut [f32]) {
+        self.convert_region_with(n, decode, r, out, true);
+    }
+
+    /// [`Self::convert_region`], taking [`Self::convert_full`] for full-size Y'CbCr when `fast`
+    /// (tests compare the two).
+    fn convert_region_with(&self, n: usize, decode: Option<&DecodeTable>, r: Region, out: &mut [f32], fast: bool) {
         let (w, h) = (self.width as usize, self.height as usize);
         if r.w == 0 || r.h == 0 || out.len() != r.w * r.h * 4 {
             return;
@@ -343,6 +349,17 @@ impl VideoFrame {
             Some(t) => t.lookup(v),
             None => lin[(v.clamp(0.0, 1.0) * 4095.0 + 0.5) as usize],
         };
+        if n == 1 && fast {
+            // one sample per pixel (exports, full-resolution playback): the fast path below; the
+            // curve is chosen once per frame instead of per sample
+            let done = match decode {
+                Some(t) => self.convert_full(r, out, |v| t.lookup(v)),
+                None => self.convert_full(r, out, |v| lin.get((v.clamp(0.0, 1.0) * 4095.0 + 0.5) as usize).copied().unwrap_or(0.0)),
+            };
+            if done {
+                return;
+            }
+        }
         let inv = 1.0 / (n * n) as f32;
         match &self.data {
             PixelData::RgbaF32(d) => {
@@ -478,6 +495,90 @@ impl VideoFrame {
                     }
                 });
             }
+        }
+    }
+
+    /// [`Self::convert_region`] without decimation (n = 1) for Y'CbCr pictures, with `q` the curve
+    /// (code value → linear). A row at a time straight through the planes, with the general loop's
+    /// tables, matrix and arithmetic, so every pixel is the same to the bit; the general loop's
+    /// walk over an n×n block per sample, its bounds checks and its choice of curve per sample made
+    /// this the largest cost of an export of camera footage (14 ms of a core per 1080p frame, 39 %
+    /// of a showcase export's CPU). A picture with less data than its size says converts as
+    /// transparent where it lacks it. `false` for other pixel data, which the general loop converts.
+    fn convert_full(&self, r: Region, out: &mut [f32], q: impl Fn(f32) -> f32 + Sync) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let info = self.color;
+        let (kr, kb) = info.matrix.kr_kb();
+        let kg = 1.0 - kr - kb;
+        let (cr_r, cb_b) = (2.0 * (1.0 - kr), 2.0 * (1.0 - kb));
+        let (cr_g, cb_g) = (cr_r * kr / kg, cb_b * kb / kg);
+        // premultiplied linear RGBA of one pixel: the general loop's sum over a block of one sample
+        let pixel = |o: &mut [f32; 4], yy: f32, u: f32, v: f32, a: f32| {
+            *o = [0.0 + q(yy + cr_r * v) * a, 0.0 + q(yy - cr_g * v - cb_g * u) * a, 0.0 + q(yy + cb_b * u) * a, 0.0 + a];
+        };
+        match &self.data {
+            PixelData::Yuv8 { planes, chroma, alpha } => {
+                let (sx, sy) = chroma.shifts();
+                let cw = w.div_ceil(1 << sx);
+                let ytab: [f32; 256] = std::array::from_fn(|v| normalize_y(v as u32, 8, info.range));
+                let ctab: [f32; 256] = std::array::from_fn(|v| normalize_c(v as u32, 8, info.range));
+                out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
+                    let y = (r.y + ry).min(h - 1);
+                    let cy = y >> sy;
+                    let (Some(yr), Some(ur), Some(vr)) =
+                        (planes[0].get(y * w..(y + 1) * w), planes[1].get(cy * cw..(cy + 1) * cw), planes[2].get(cy * cw..(cy + 1) * cw))
+                    else {
+                        row.fill(0.0);
+                        return;
+                    };
+                    let ar = alpha.as_ref().map(|a| a.get(y * w..(y + 1) * w).unwrap_or(&[]));
+                    for (rx, o) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                        let x = (r.x + rx).min(w - 1);
+                        let cx = x >> sx;
+                        let (Some(&yv), Some(&uv), Some(&vv)) = (yr.get(x), ur.get(cx), vr.get(cx)) else {
+                            *o = [0.0; 4];
+                            continue;
+                        };
+                        let a = ar.map_or(1.0, |al| al.get(x).map_or(0.0, |&v| v as f32 / 255.0));
+                        pixel(o, ytab[usize::from(yv)], ctab[usize::from(uv)], ctab[usize::from(vv)], a);
+                    }
+                });
+                true
+            }
+            PixelData::Yuv16 { planes, chroma, bits, alpha } => {
+                let (sx, sy) = chroma.shifts();
+                let cw = w.div_ceil(1 << sx);
+                let bits = (*bits).clamp(8, 16);
+                let amax = ((1u32 << bits) - 1) as f32;
+                let codes = 1u32 << bits;
+                let ytab: Vec<f32> = (0..codes).map(|v| normalize_y(v, bits, info.range)).collect();
+                let ctab: Vec<f32> = (0..codes).map(|v| normalize_c(v, bits, info.range)).collect();
+                // codes above `bits` (a damaged picture) read the last entry, as in the general loop
+                let code = |t: &[f32], v: u16| t.get(usize::from(v)).or(t.last()).copied().unwrap_or(0.0);
+                out.par_chunks_mut(r.w * 4).enumerate().for_each(|(ry, row)| {
+                    let y = (r.y + ry).min(h - 1);
+                    let cy = y >> sy;
+                    let (Some(yr), Some(ur), Some(vr)) =
+                        (planes[0].get(y * w..(y + 1) * w), planes[1].get(cy * cw..(cy + 1) * cw), planes[2].get(cy * cw..(cy + 1) * cw))
+                    else {
+                        row.fill(0.0);
+                        return;
+                    };
+                    let ar = alpha.as_ref().map(|a| a.get(y * w..(y + 1) * w).unwrap_or(&[]));
+                    for (rx, o) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                        let x = (r.x + rx).min(w - 1);
+                        let cx = x >> sx;
+                        let (Some(&yv), Some(&uv), Some(&vv)) = (yr.get(x), ur.get(cx), vr.get(cx)) else {
+                            *o = [0.0; 4];
+                            continue;
+                        };
+                        let a = ar.map_or(1.0, |al| al.get(x).map_or(0.0, |&v| v as f32 / amax));
+                        pixel(o, code(&ytab, yv), code(&ctab, uv), code(&ctab, vv), a);
+                    }
+                });
+                true
+            }
+            PixelData::Rgba8(_) | PixelData::RgbaF32(_) => false,
         }
     }
 
@@ -1063,5 +1164,76 @@ mod tests {
             ..VideoFrame::rgba8(8, 8, vec![0; 256])
         };
         assert_eq!(short.alpha_region(1), None);
+    }
+
+    /// A Y'CbCr picture with every code value somewhere (`w`×`h`, `bits` 8 or more).
+    fn busy_yuv(w: usize, h: usize, chroma: Chroma, bits: u32, alpha: bool, color: ColorInfo) -> VideoFrame {
+        let (sx, sy) = chroma.shifts();
+        let (cw, ch) = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
+        let max = (1u32 << bits) - 1;
+        let val = |i: usize, k: u32| ((i as u32).wrapping_mul(2_654_435_761).wrapping_add(k) >> 7) % (max + 1);
+        let data = if bits == 8 {
+            let plane = |n: usize, k: u32| Arc::new((0..n).map(|i| val(i, k) as u8).collect::<Vec<u8>>());
+            PixelData::Yuv8 { planes: [plane(w * h, 0), plane(cw * ch, 1), plane(cw * ch, 2)], chroma, alpha: alpha.then(|| plane(w * h, 3)) }
+        } else {
+            let plane = |n: usize, k: u32| Arc::new((0..n).map(|i| val(i, k) as u16).collect::<Vec<u16>>());
+            PixelData::Yuv16 { planes: [plane(w * h, 0), plane(cw * ch, 1), plane(cw * ch, 2)], chroma, bits, alpha: alpha.then(|| plane(w * h, 3)) }
+        };
+        VideoFrame { width: w as u32, height: h as u32, data, color, par: (1, 1), pts: Default::default() }
+    }
+
+    /// The full-size fast path gives the general loop's pixels to the bit, for every chroma layout,
+    /// bit depth, alpha or none, range, matrix and curve (the frame's own or a decode table), whole
+    /// pictures and regions.
+    #[test]
+    fn full_size_conversion_matches_the_general_loop() {
+        let hlg = ColorInfo {
+            matrix: filmcraft_color::Matrix::Bt2020Ncl,
+            transfer: filmcraft_color::Transfer::Hlg,
+            primaries: filmcraft_color::Primaries::Bt2020,
+            range: Range::Limited,
+        };
+        let full = ColorInfo { range: Range::Full, ..ColorInfo::REC709 };
+        let table = DecodeTable::new(0.0, 1.0, 4096, |v| v * v * 3.0);
+        for chroma in [Chroma::C420, Chroma::C422, Chroma::C444] {
+            for bits in [8, 10, 12] {
+                for alpha in [false, true] {
+                    for color in [ColorInfo::REC709, full, hlg] {
+                        let f = busy_yuv(37, 23, chroma, bits, alpha, color);
+                        for decode in [None, Some(&table)] {
+                            for r in [Region { x: 0, y: 0, w: 37, h: 23 }, Region { x: 5, y: 3, w: 11, h: 17 }] {
+                                let mut fast = vec![f32::NAN; r.w * r.h * 4];
+                                let mut general = vec![f32::NAN; r.w * r.h * 4];
+                                f.convert_region_with(1, decode, r, &mut fast, true);
+                                f.convert_region_with(1, decode, r, &mut general, false);
+                                let same = fast.iter().zip(&general).all(|(a, b)| a.to_bits() == b.to_bits());
+                                assert!(same, "{chroma:?} {bits}-bit alpha {alpha} {color:?} table {} {r:?}", decode.is_some());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A picture whose planes hold less than its size says converts without a panic (the missing
+    /// part transparent), whatever path converts it.
+    #[test]
+    fn short_planes_convert_without_a_panic() {
+        let mut f = busy_yuv(16, 8, Chroma::C420, 8, true, ColorInfo::REC709);
+        if let PixelData::Yuv8 { planes, alpha, .. } = &mut f.data {
+            planes[1] = Arc::new(vec![128; 5]);
+            *alpha = Some(Arc::new(vec![255; 20]));
+        }
+        let (_, _, px) = f.to_linear_f32_decimated(1);
+        assert_eq!(px.len(), 16 * 8 * 4);
+        assert!(px.iter().all(|v| v.is_finite()));
+        let mut g = busy_yuv(16, 8, Chroma::C444, 10, false, ColorInfo::REC709);
+        if let PixelData::Yuv16 { planes, .. } = &mut g.data {
+            planes[0] = Arc::new(vec![1023; 3]);
+            planes[2] = Arc::new(vec![u16::MAX; 16 * 8]);
+        }
+        let (_, _, px) = g.to_linear_f32_decimated(1);
+        assert!(px.iter().all(|v| v.is_finite()));
     }
 }
