@@ -488,6 +488,9 @@ pub struct UiState {
     /// Generate Audio panel: the sound effect or music bed being made.
     #[serde(default)]
     pub generate_audio: crate::panels::generate_audio::GenerateAudioDraft,
+    /// Showcase panel: the AutoCut showcase under review (subject, entries, script, export).
+    #[serde(default)]
+    pub showcase: crate::panels::showcase::ShowcaseDraft,
     /// Export mode: settings, preset, destination, range, the Preset Manager and Quick Export.
     #[serde(default)]
     pub export: crate::panels::export_mode::ExportUi,
@@ -987,6 +990,7 @@ impl Default for UiState {
             essential_sound_tab: "Edit".into(),
             tts: Default::default(),
             generate_audio: Default::default(),
+            showcase: Default::default(),
             export: Default::default(),
             text_tab: captions_tab(),
             caption_search: String::new(),

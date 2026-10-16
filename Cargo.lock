@@ -2425,6 +2425,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "filmcraft-audio-dsp",
+ "filmcraft-autocut",
  "filmcraft-codecs",
  "filmcraft-color",
  "filmcraft-edit",

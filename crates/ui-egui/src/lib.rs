@@ -859,6 +859,11 @@ impl FilmcraftApp {
                     .into_iter()
                     .find(|k| self.ui.dock.contains(*k))
                     .unwrap_or(PanelKind::Program),
+                // beside the Text panel (transcripts, captions), else the side panels
+                PanelKind::Showcase => [PanelKind::Text, PanelKind::Properties, PanelKind::EssentialGraphics, PanelKind::EssentialSound]
+                    .into_iter()
+                    .find(|k| self.ui.dock.contains(*k))
+                    .unwrap_or(PanelKind::Program),
                 PanelKind::LumetriColor | PanelKind::EssentialGraphics | PanelKind::EssentialSound | PanelKind::Properties => PanelKind::Program,
                 PanelKind::Source
                 | PanelKind::EffectControls
@@ -1771,6 +1776,8 @@ impl FilmcraftApp {
         self.scrub_audio(&ctx);
         // Text to Speech: a selected narration clip loads into the panel
         panels::tts::follow_selection(self);
+        // Showcase: jobs' commands wake the UI, a new plan loads, a new job shows the panel
+        panels::showcase::poll(self, &ctx);
         if self.ui.tts.pending.is_some() || self.ui.tts.download_job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }

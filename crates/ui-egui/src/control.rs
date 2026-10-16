@@ -13,6 +13,8 @@
 //! - `ui.set {tts: {voice, pitch, pace, text…}}`: patch the Text to Speech panel draft
 //! - `ui.set {generateAudio: {kind, seconds, intensity, mood, key, bpm, seed}}`: patch the Generate
 //!   Audio panel
+//! - `ui.set {showcase: {subject, since, title, voice, mood, intro, outro, entries, exportPath, …}}`:
+//!   patch the Showcase panel's draft (`entries` a list, or `{"<index>": {include, label, line, …}}`)
 //! - `ui.click {id | x,y, button?, count?, modifiers?}` / `ui.move {x,y}` / `ui.scroll {x,y,dx,dy}`
 //! - `ui.drag {from:{id|x,y}, to:{id|x,y}, steps?, modifiers?}`: synthetic press-move-release
 //! - `ui.key {key, command?, shift?, alt?, ctrl?}` / `ui.type {text}`
@@ -143,6 +145,12 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
                     Ok(d) => app.ui.generate_audio = d,
                     Err(e) => return err(format!("bad `generateAudio`: {e}")),
                 }
+            }
+            // Showcase panel draft (subject, title, voice, entries…), merged likewise
+            if let Some(patch) = p.get("showcase")
+                && let Err(e) = crate::panels::showcase::patch(app, patch)
+            {
+                return err(e);
             }
             if let Some(t) = s("tool") {
                 match Tool::from_name(t) {
@@ -482,7 +490,7 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
 }
 
 /// Merge `patch` into `v` (objects recursively; other values replace).
-fn merge(v: &mut Value, patch: &Value) {
+pub(crate) fn merge(v: &mut Value, patch: &Value) {
     match (v, patch) {
         (Value::Object(o), Value::Object(p)) => {
             for (k, pv) in p {

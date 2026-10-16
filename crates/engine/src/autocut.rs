@@ -483,8 +483,10 @@ fn check_plan(cmd: &str, plan: &Value) -> Result<()> {
     if !plan.is_object() {
         return Err(bad(cmd, "`plan` must be an object with `entries` and `script`"));
     }
-    entries_p(cmd, plan.get("entries").unwrap_or(&Value::Null))
-        .map_err(|_| bad(cmd, format!("`plan` needs `entries`: a list of at most {MAX_ENTRIES} entries")))?;
+    match plan.get("entries") {
+        Some(e @ Value::Array(_)) => entries_p(cmd, e)?,
+        _ => return Err(bad(cmd, format!("`plan` needs `entries`: a list of at most {MAX_ENTRIES} entries"))),
+    };
     match plan.get("script") {
         None | Some(Value::Null) | Some(Value::Object(_)) => Ok(()),
         Some(_) => Err(bad(cmd, "the plan's `script` must be an object: {intro, lines, outro}")),

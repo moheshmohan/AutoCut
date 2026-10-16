@@ -41,10 +41,11 @@ pub enum PanelKind {
     ReferenceMonitor,
     Timecode,
     ProjectNotes,
+    Showcase,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 29] = [
+    pub const ALL: [PanelKind; 30] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -74,6 +75,7 @@ impl PanelKind {
         PanelKind::ReferenceMonitor,
         PanelKind::Timecode,
         PanelKind::ProjectNotes,
+        PanelKind::Showcase,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -106,6 +108,7 @@ impl PanelKind {
             PanelKind::ReferenceMonitor => "Reference Monitor",
             PanelKind::Timecode => "Timecode",
             PanelKind::ProjectNotes => "Project Notes",
+            PanelKind::Showcase => "Showcase",
         }
     }
     pub fn id(self) -> String {

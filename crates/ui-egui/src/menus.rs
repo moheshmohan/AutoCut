@@ -448,6 +448,11 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
             filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
             return crate::panels::interchange_export::open(app, ctx, id);
         }
+        // Sequence ▸ Make a Showcase… opens the Showcase panel's Analyze form; with a subject (or a
+        // prompt) the job starts directly.
+        "autocut.makeShowcase" if params.get("subject").is_none() && params.get("prompt").is_none() => {
+            return crate::panels::showcase::open(app);
+        }
         // File ▸ Export ▸ Media… opens the Export mode, like ⌘M (#382); with a path it exports directly.
         "file.exportMedia" if params.get("path").is_none() => {
             filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;

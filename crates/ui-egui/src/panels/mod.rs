@@ -42,6 +42,7 @@ pub mod scopes;
 pub mod sequence_settings;
 pub mod settings;
 pub mod shortcuts_dialog;
+pub mod showcase;
 pub mod text;
 pub mod timecode;
 pub mod timeline;
@@ -105,6 +106,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::EssentialSound => essential_sound::show(app, ui, rect),
         PanelKind::TextToSpeech => tts::show(app, ui, rect),
         PanelKind::GenerateAudio => generate_audio::show(app, ui, rect),
+        PanelKind::Showcase => showcase::show(app, ui, rect),
         PanelKind::ProjectNotes => notes::show(app, ui, rect),
         other => crate::dock::placeholder(ui, rect, &app.tokens, &tlf!("{panel} — coming in a later milestone", panel = crate::i18n::t(other.title()))),
     }
