@@ -132,17 +132,21 @@ refused before a byte is sent.
 
 An album is how a video and its next iteration meet: FilmCraft uploads the cut into an album,
 you add the material for the next round to that album by hand in Google Photos, and the next
-build reads the whole album back through the picker.
+build reads the whole album back through the picker — `showcase --album "<title>" --prompt "…"`
+makes the video straight from an album in one command ([crates/autocut: Album as the
+seed](../autocut/README.md#album-as-the-seed)).
 
 ```sh
 filmcraft-cli photos auth --albums                                   # once
 filmcraft-cli photos album create "Robot showcase" --description "Every robot, 2020–2026"
 filmcraft-cli photos upload out/showcase.mp4 --album "Robot showcase" # into it (made if missing)
-filmcraft-cli showcase --report robots.json --export out/showcase.mp4 --upload --album "Robot showcase"
+filmcraft-cli showcase --report robots.json --export out/showcase.mp4 --upload --upload-album "Robot showcase"
 filmcraft-cli photos album add "Robot showcase" <mediaItemId>…       # earlier uploads
 filmcraft-cli photos albums                                          # what FilmCraft made
 # … add photos and videos to the album in Google Photos …
 filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9876   # the next round's seed
+filmcraft-cli showcase --album "Robot material" --prompt "every robot since 2020" \
+    --export out/showcase.mp4 --upload --upload-album "Robot showcase"     # …or the whole video from it
 ```
 
 - **`photos album create <title> [--description D]`** prints the album as JSON (`id`, `title`,
@@ -151,7 +155,7 @@ filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9876   # t
   white space one space — and at most 500 characters; longer is an error, never cut). The
   description becomes a text note at the top of a new album (`albums.addEnrichment`); it is not
   added again to an existing one.
-- **`photos upload <file> --album <title|id>`** (and `showcase … --upload --album T`) resolves the
+- **`photos upload <file> --album <title|id>`** (and `showcase … --upload --upload-album T`) resolves the
   album first — before any byte is sent — and creates it when missing; `batchCreate` then adds
   the new item to it (`albumId`). An id-like argument (40+ id characters) is only ever looked up,
   never made a title.
@@ -166,7 +170,8 @@ filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9876   # t
   `photos.upload`'s `album`. They are short network calls answered directly (an upload into an
   album is the usual upload job). Without `photos auth --albums` they are disabled, and the
   reason names that command.
-- **MCP:** `googlephotos_upload {…, album}`; `googlephotos_pick {album, videos_only?}`.
+- **MCP:** `googlephotos_upload {…, album}`; `googlephotos_pick {album, videos_only?}`;
+  `showcase_analyze {album, prompt}` (a showcase from the album's clips).
 
 ### What Google allows (Library API since 2025-03-31)
 

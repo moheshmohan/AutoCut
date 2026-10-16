@@ -225,6 +225,59 @@ of an entry's facts into its line, told to use those and nothing else.
 A reviewed plan may hold `entries` alone (drop, merge or relabel robots, fix a shot's `best`
 moment or `seen` times): the model then writes the words for exactly those.
 
+### Album as the seed
+
+Put the clips for a video into one album in Google Photos — and add to it whenever you film
+more — then make the whole video from it with one command:
+
+```sh
+filmcraft-cli photos auth                    # once: see crates/gphotos/README.md
+ollama pull qwen2.5vl:7b                     # analysis, and the agent that drives the picker
+filmcraft-cli showcase --album "Robot showcase" \
+    --prompt "a video of every robot I've filmed since 2020" --voice clone:me \
+    --project ~/Movies/AutoCut/robots.fcproj --save \
+    --export ~/Movies/AutoCut/robots.mp4 --upload --upload-album "Robot showcases"
+```
+
+In order:
+
+1. **Checks.** Usage errors (exit 2), then the Google Photos sign-in (read from disk), the upload
+   permission (with `--upload`) and the vision model — all before anything is picked.
+2. **What the video is of.** The subject — and a date and a title, when the prompt names them —
+   is read from `--prompt`: the built-in rules ("every robot since 2020", "a montage of all my
+   vintage cars"), else the classifier (`AUTOCUT_LLM_MODEL`); `--subject robot` skips that. A
+   prompt nobody can read stops here, before the picker opens.
+3. **The album, picked whole.** Google's picker opens in the browser, and the local screen agent
+   ([crates/screenagent](../screenagent/README.md)) opens the album with exactly that title and
+   selects all of it, then presses Done. Its videos are downloaded into the cache (an item picked
+   before is not downloaded again). Photos are skipped — a showcase is built from video clips, so
+   there is no `--with-photos` — and `--since` skips items created before it.
+4. **Imported once.** `file.import {reuse: true}`: a file the project already holds is reused,
+   never imported twice — run the command again after adding clips to the album and only the new
+   ones come in.
+5. **Only the album is analysed**, as `analyze` does (`--frames`, `--screen`, `--compare`;
+   `--report-out r.json` keeps the report), never the rest of the project.
+6. **Then exactly what `showcase --report` does**: entries, voice-over, build, QA, subtitles,
+   thumbnail, chapters, export and upload. The title is `--title`, else the prompt's, else
+   "Every <Subject> I've Filmed"; `--plan` stops before the build (with `--save` the imported
+   clips are kept). `--album` is the album the clips come from, `--upload-album` the one the
+   export goes into (`showcase --report … --upload --album T`, its older spelling, still
+   works). Upload into the seed album itself and the next run picks the finished video too: the
+   CLI warns.
+
+**Why the picker.** Since 2025-03-31 Google lets an app read back through the Library API only
+the albums and media items it created itself, so the clips a person adds to an album by hand —
+the seed — are reachable only through the Photos Picker, where a person, or the screen agent
+standing in for one, selects them. FilmCraft cannot list an album's contents; the agent finds
+the album in the picker by its exact title (its Albums view, or a search for the title) and
+selects everything. It needs Screen Recording and Accessibility for the terminal or app running
+it.
+
+The same in the app and for agents: `autocut.analyze` / `autocut.makeShowcase` with `album` (and
+`subject` or `prompt`) — the Showcase panel's "From a Google Photos album" field,
+`showcase_analyze {album, prompt}` over MCP — then review and build as usual; with
+`--bridge 127.0.0.1:9876` the CLI runs it in the open app.
+
 ### Showcases in the app
 
 The same pipeline runs inside the app (and for the CLI and MCP agents) as engine jobs, so the
@@ -232,10 +285,10 @@ review happens where the footage is:
 
 | command | job |
 |---|---|
-| `autocut.analyze {subject, items?, since?, frames?, compare?}` | the analysis above; `since` ("2020", "2020-06", "2020-06-15") keeps the clips filmed on or after it (undated ones are left out). The report is kept in the session |
+| `autocut.analyze {subject \| prompt, items? \| album?, since?, frames?, compare?}` | the analysis above; `since` ("2020", "2020-06", "2020-06-15") keeps the clips filmed on or after it (undated ones are left out); `album` takes the clips from that Google Photos album (picked, imported once, only those analysed: [Album as the seed](#album-as-the-seed)). The report is kept in the session |
 | `autocut.showcasePlan {subject?, title?, subtitle?, voice?, mood?, minCoverage?, entries?}` | group the kept report's clips (or take reviewed `entries`) and write the voice-over; the plan is kept |
-| `autocut.makeShowcase {subject \| prompt, since?, items?, title?, voice?, mood?}` | both in one job (Sequence ▸ Make a Showcase…, the `showcase` intent) |
-| `autocut.showcaseBuild {plan?, export?, upload?, qa?}` | build the plan (the kept one, or `plan`); with `export`, the YouTube export, `<out>.chapters.txt` and the QA report beside it; with `upload`, a Google Photos upload job for the export |
+| `autocut.makeShowcase {subject \| prompt, since?, items? \| album?, title?, voice?, mood?}` | both in one job (Sequence ▸ Make a Showcase…, the `showcase` intent) |
+| `autocut.showcaseBuild {plan?, export?, upload?, uploadAlbum?, qa?}` | build the plan (the kept one, or `plan`); with `export`, the YouTube export, `<out>.chapters.txt` and the QA report beside it; with `upload`, a Google Photos upload job for the export (into `uploadAlbum` too) |
 | `autocut.showcaseInspect {report?}` / `autocut.showcaseSet {report?, plan?, reportPath?, planPath?}` | read what is kept / keep a report or plan from elsewhere (the CLI's `analyze --out` and `--script-out` files) |
 
 A plan is the CLI's `plan.json` plus the review: per entry `include` (default true) and
@@ -245,8 +298,8 @@ view kept), and the plan's `title`, `voice` (none: no narration), `mood` (and op
 ([`host::PlanDoc`](src/host.rs), [`host::resolve`](src/host.rs)).
 
 The engine runs the jobs and keeps what they make; this crate is the host the app, the CLI and the
-MCP server install ([`host::engine_host`](src/host.rs), Ollama models from the `AUTOCUT_*`
-environment). A job runs on its own thread and edits only through engine commands sent over the
+MCP server install ([`host::engine_host_with_albums`](src/host.rs), Ollama models from the
+`AUTOCUT_*` environment, and `filmcraft_automation::photos::album_source()` picking albums). A job runs on its own thread and edits only through engine commands sent over the
 session's command port, which the session's owner runs (the UI between frames, a `wait: true` call
 while it waits, the MCP server on a pump thread): every edit is an ordinary, undoable command, and
 the app stays responsive. A long command (`file.exportMedia` with `wait: true`, an upload) is
@@ -282,10 +335,13 @@ Caption styles: `add_captions` takes `style: tiktok | bold | clean | default` an
 
 - **CLI:** `filmcraft-cli autocut '<prompt>' [--dry-run] [--frames]` (headless `--demo`/`--project`,
   or `--bridge` to edit in the running app). A hand-off exits 1 with the report on stdout.
+  Showcases: `analyze` + `showcase --report`, or `showcase --album "<title>" --prompt "…"` from
+  a Google Photos album in one command.
 - **MCP:** the `autocut_plan` (dry run) and `autocut_edit` tools, on both MCP backends
   (`filmcraft-cli mcp --demo` / `--bridge`). When a report has `needsSupervisor`, the calling
   agent plans that edit itself with the command tools — that is the supervision loop. Showcases:
-  `showcase_analyze` (`plan: true` also plans), `showcase_plan`, `showcase_build` (long jobs with
+  `showcase_analyze` (`plan: true` also plans; `prompt` instead of `subject`; `album` for a
+  Google Photos album's clips), `showcase_plan`, `showcase_build` (`upload_album`; long jobs with
   progress and cancellation) and `showcase_inspect`.
 - **App:** the Showcase panel (above); `filmcraft-cli exec autocut.makeShowcase subject=robot
   wait=true` runs the same job headless.
@@ -296,7 +352,11 @@ Caption styles: `add_captions` takes `style: tiktok | bold | clean | default` an
 `llm::FnModel`, and `host::Models::scripted` for whole showcase jobs), the demo project headlessly,
 crafted transcripts through `transcript.set`. Showcase jobs (`tests/showcase_jobs.rs`): make, review
 (leave out, merge, relabel), write the script again, build; export with the QA report and an upload
-job; the prompt starting the job with no model and no open sequence; cancel; bad plans. Showcase QA
+job; the prompt starting the job with no model and no open sequence; cancel; bad plans. An album as
+the seed (`tests/showcase_album.rs`, `album::FixedAlbum` for the picker, real ProRes clips from our
+encoder): only the album's clips are analysed, a clip already in the project is reused and a
+second run imports nothing, a prompt names the subject (rules or classifier, a date reaching the
+picker), an unreadable prompt picks nothing, an empty album and a host without albums say why. Showcase QA
 (`tests/showcase_qa.rs`): a deliberately broken sequence on the demo media (a half-second gap,
 a black slate, a tone pushed 30 dB over full scale between two narration lines) gets each
 finding (the gap, the hole on every track, black in the gap and on the slate, clipping, the

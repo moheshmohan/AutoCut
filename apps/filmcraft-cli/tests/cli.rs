@@ -174,6 +174,10 @@ fn showcase_from_an_album_checks_before_it_picks() {
         let o = run(&args);
         assert_eq!(o.status.code(), Some(2), "{args:?}: {}", err(&o));
     }
+    // the export into the album the clips come from: a warning (the next run would pick it)
+    let o = run(&["showcase", "--album", "Robots", "--subject", "robot", "--export", &out, "--upload", "--upload-album", "Robots"]);
+    assert_eq!(o.status.code(), Some(1), "not signed in: {}", err(&o));
+    assert!(err(&o).contains("warning") && err(&o).contains("picks this video too"), "{}", err(&o));
     // not connected: said before a project or a model is touched
     let o = run(&["--demo", "showcase", "--album", "Robot showcase", "--prompt", "a video of every robot since 2020"]);
     assert_eq!(o.status.code(), Some(1), "{}", err(&o));

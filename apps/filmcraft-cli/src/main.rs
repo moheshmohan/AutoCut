@@ -461,6 +461,11 @@ fn showcase_source(a: &Args) -> (ShowcaseSource, Option<String>) {
         usage("showcase: --upload-album names the album the upload goes into; add --upload (and --export out.mp4)");
     }
     let album = if legacy { None } else { album_opt(a, "showcase", "--album") };
+    if album.is_some() && album == upload_album {
+        diag(format_args!(
+            "showcase: warning: the export goes into the album the clips come from, so the next `showcase --album` picks this video too; give --upload-album another album to keep them apart"
+        ));
+    }
     match (report, album) {
         (Some(_), Some(_)) => usage(
             "showcase: --album reads the clips from a Google Photos album, --report from an earlier analysis; give one of them (--upload-album names the album the upload goes into)",
