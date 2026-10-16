@@ -75,6 +75,10 @@ claude mcp add filmcraft -- filmcraft-cli mcp
 | `ui_type` | bridge | type text into the focused field |
 | `ui_screenshot` | bridge | PNG of the window or one `panel` |
 | `ui_control` | bridge | call any control-channel method directly (`ui.set`, `ui.scroll`, `ui.timeline.locate`, …) |
+| `showcase_analyze` | both | AutoCut showcase, step 1: find every clip that shows a `subject` (of `items`, filmed `since` a date) with the local vision model; `plan: true` goes on to step 2. A long job (`autocut.analyze` / `autocut.makeShowcase`) |
+| `showcase_plan` | both | step 2: group the analysed clips into entries and write the voice-over, or write it for reviewed `entries` (`include`, `mergePrevious`, labels); returns the plan to review with the user (`autocut.showcasePlan`) |
+| `showcase_build` | both | step 3: build the plan (kept, or `plan`) into a new sequence with ordinary engine commands; `export` (YouTube 1080p, chapters and QA report beside it), `upload` to Google Photos, `qa` (`autocut.showcaseBuild`) |
+| `showcase_inspect` | both | what the session keeps: the analysis (a summary, or every clip with `report: true`), the plan, the last build, the latest showcase job |
 
 Typical loop: `project_inspect` / `sequence_inspect` → get ids → `command_run` → `render_frame` or
 `ui_screenshot` → look at the result → `edit.undo` if it's wrong.
@@ -137,6 +141,14 @@ progress and stop it:
   never deletes the file being uploaded. It needs a one-time `filmcraft-cli photos auth --upload`
   (see [crates/gphotos](../crates/gphotos/README.md)); until then `photos.upload` is disabled and its
   reason says so.
+- So do the AutoCut showcase jobs (`autocut.analyze`, `autocut.showcasePlan`, `autocut.makeShowcase`,
+  `autocut.showcaseBuild`; the `showcase_*` tools; progress in clips analysed or entries built). Their
+  answer, like the finished job's `jobs.list` entry, carries `showcase`: what the job made (the
+  analysis' summary, the plan, the build). A job edits only through engine commands, which it sends
+  to the session over its command port: the app runs them between frames, the headless server on a
+  pump thread, so other requests are answered meanwhile and every edit is an ordinary, undoable one.
+  The AutoCut prompt "make a video of every robot since 2020" (`autocut_edit`) starts the same job
+  (see [crates/autocut](../crates/autocut/README.md#showcases-in-the-app)).
 
 ## 2. Control channel
 

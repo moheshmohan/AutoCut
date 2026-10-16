@@ -45,6 +45,7 @@ prompt ──► classify (local LLM, Ollama, JSON mode)
 | `add_voice_over` | `tts.create` (built-in voice; Kokoro neural voices behind `neural-voices`); `fit` previews and paces the delivery to cover the sequence |
 | `export_video` | `file.exportMedia` with the destination's built-in preset: youtube, youtube4k, tiktok/reels/vertical (9:16), vimeo, prores, gif, audio, aac |
 | `slow_motion` | `clip.speedDuration` with `interpolation: opticalFlow` — motion-compensated new frames (CapCut-style smooth slow-mo, the engine's own Lucas-Kanade flow), rippling to make room |
+| `showcase` | `autocut.makeShowcase {subject, since?, wait}` — the showcase job (below): the clips are analysed and the plan written, nothing is built until it is reviewed. Prompts like "make a video of every robot since 2020" or "a montage of all my vintage cars" are recognised without the model (`intent::showcase_request`), and need no open sequence |
 | `custom` | nobody: the report comes back with `needsSupervisor` |
 
 Highlight scoring (`highlight.rs`) is classical: sentence/pause segmentation, topic-keyword and
@@ -147,6 +148,45 @@ filmcraft-cli showcase --report robots.json --script-in plan.json --voice clone:
 A reviewed plan may hold `entries` alone (drop, merge or relabel robots, fix a shot's `best`
 moment or `seen` times): the model then writes the words for exactly those.
 
+### Showcases in the app
+
+The same pipeline runs inside the app (and for the CLI and MCP agents) as engine jobs, so the
+review happens where the footage is:
+
+| command | job |
+|---|---|
+| `autocut.analyze {subject, items?, since?, frames?, compare?}` | the analysis above; `since` ("2020", "2020-06", "2020-06-15") keeps the clips filmed on or after it (undated ones are left out). The report is kept in the session |
+| `autocut.showcasePlan {subject?, title?, subtitle?, voice?, mood?, minCoverage?, entries?}` | group the kept report's clips (or take reviewed `entries`) and write the voice-over; the plan is kept |
+| `autocut.makeShowcase {subject \| prompt, since?, items?, title?, voice?, mood?}` | both in one job (Sequence ▸ Make a Showcase…, the `showcase` intent) |
+| `autocut.showcaseBuild {plan?, export?, upload?, qa?}` | build the plan (the kept one, or `plan`); with `export`, the YouTube export, `<out>.chapters.txt` and the QA report beside it; with `upload`, a Google Photos upload job for the export |
+| `autocut.showcaseInspect {report?}` / `autocut.showcaseSet {report?, plan?, reportPath?, planPath?}` | read what is kept / keep a report or plan from elsewhere (the CLI's `analyze --out` and `--script-out` files) |
+
+A plan is the CLI's `plan.json` plus the review: per entry `include` (default true) and
+`mergePrevious` (its clips are the included entry before it: their shots join, the three longest in
+view kept), and the plan's `title`, `voice` (none: no narration), `mood` (and optional `subtitle`,
+`bpm`, `width`, `height`, `fps`); `script.lines` follows `entries` one to one
+([`host::PlanDoc`](src/host.rs), [`host::resolve`](src/host.rs)).
+
+The engine runs the jobs and keeps what they make; this crate is the host the app, the CLI and the
+MCP server install ([`host::engine_host`](src/host.rs), Ollama models from the `AUTOCUT_*`
+environment). A job runs on its own thread and edits only through engine commands sent over the
+session's command port, which the session's owner runs (the UI between frames, a `wait: true` call
+while it waits, the MCP server on a pump thread): every edit is an ordinary, undoable command, and
+the app stays responsive. A long command (`file.exportMedia` with `wait: true`, an upload) is
+started without waiting and polled, and each narration line is synthesized first as a background
+`tts.render`, so nothing long runs on the UI thread. One showcase job runs at a time; `jobs.cancel`
+stops it (model requests end at once).
+
+**The Showcase panel** (Window ▸ Showcase, beside the Text panel; Sequence ▸ Make a Showcase… opens
+its Analyze form): a subject, a date or a request in words → Analyze; then the entries in date
+order, each with a thumbnail, its label, description and narration line (all editable), a switch to
+leave it out, "Merge with previous", and its shots (each plays in the Source monitor); the title,
+voice (cloned voices listed), mood, intro and outro; Write script (the words again, for the entries
+as reviewed), Build, and Build and export (with the export path, and optionally the upload); the
+running job's progress and Cancel. A job started elsewhere (an agent, the prompt) brings the panel
+forward and its plan loads there. Every widget has an automation id and the draft is UI state
+(`ui.set {showcase: …}`, see [docs/control-protocol.md](../../docs/control-protocol.md)).
+
 ## Configuration (environment)
 
 | Variable | Default | Meaning |
@@ -167,12 +207,19 @@ Caption styles: `add_captions` takes `style: tiktok | bold | clean | default` an
   or `--bridge` to edit in the running app). A hand-off exits 1 with the report on stdout.
 - **MCP:** the `autocut_plan` (dry run) and `autocut_edit` tools, on both MCP backends
   (`filmcraft-cli mcp --demo` / `--bridge`). When a report has `needsSupervisor`, the calling
-  agent plans that edit itself with the command tools — that is the supervision loop.
+  agent plans that edit itself with the command tools — that is the supervision loop. Showcases:
+  `showcase_analyze` (`plan: true` also plans), `showcase_plan`, `showcase_build` (long jobs with
+  progress and cancellation) and `showcase_inspect`.
+- **App:** the Showcase panel (above); `filmcraft-cli exec autocut.makeShowcase subject=robot
+  wait=true` runs the same job headless.
 
 ## Tests
 
-`cargo test -p filmcraft-autocut` is fully offline: scripted models (`llm::FixedModel`), the demo
-project headlessly, crafted transcripts through `transcript.set`. Showcase QA
+`cargo test -p filmcraft-autocut` is fully offline: scripted models (`llm::FixedModel`,
+`llm::FnModel`, and `host::Models::scripted` for whole showcase jobs), the demo project headlessly,
+crafted transcripts through `transcript.set`. Showcase jobs (`tests/showcase_jobs.rs`): make, review
+(leave out, merge, relabel), write the script again, build; export with the QA report and an upload
+job; the prompt starting the job with no model and no open sequence; cancel; bad plans. Showcase QA
 (`tests/showcase_qa.rs`): a deliberately broken sequence on the demo media (a half-second gap,
 a black slate, a tone pushed 30 dB over full scale between two narration lines) gets each
 finding (the gap, the hole on every track, black in the gap and on the slate, clipping, the
