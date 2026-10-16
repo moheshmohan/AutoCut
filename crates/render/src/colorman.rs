@@ -84,7 +84,7 @@ pub fn decode(project: &Project, item: ItemId, frame: &VideoFrame, n: usize, pip
     let (w, h, px) = frame.to_linear_f32_decimated_with(n, if float_src { None } else { Some(&t.table) });
     let mut img = Image { w, h, px };
     if t.has_pixel_stage() {
-        img.map_rgb(|c, _, _| t.apply(c));
+        img.map_rgb_many(|cs| t.apply_many(cs));
     }
     img
 }

@@ -298,6 +298,50 @@ impl InputTransform {
         c
     }
 
+    /// [`Self::apply`] on every colour of `cs`, each with the same result, computed a stage at a
+    /// time over blocks of colours. One colour's stages wait on each other (the OOTF gain feeds
+    /// the matrix, which feeds the tone mapping), so a colour at a time the core mostly waited: an
+    /// HLG BT.2020 frame into Rec. 709 took 26 ms of a core at 1080p, the largest cost of
+    /// exporting such footage. Within a stage the colours are independent and overlap.
+    pub fn apply_many(&self, cs: &mut [[f32; 3]]) {
+        const BLOCK: usize = 64;
+        for block in cs.chunks_mut(BLOCK) {
+            if let Some((l, k)) = self.hlg {
+                let mut gains = [0f32; BLOCK];
+                for (g, c) in gains.iter_mut().zip(block.iter()) {
+                    let ys = (l[0] * c[0] + l[1] * c[1] + l[2] * c[2]).max(0.0);
+                    *g = match &self.hlg_gain {
+                        Some(t) if ys <= 1.0 => t.lookup(quarter_root(ys)),
+                        _ => k * ys.powf((HLG_GAMMA - 1.0) as f32),
+                    };
+                }
+                for (c, g) in block.iter_mut().zip(gains) {
+                    *c = c.map(|v| v * g);
+                }
+            }
+            if !self.identity_matrix {
+                for c in block.iter_mut() {
+                    *c = crate::spaces::apply3(&self.matrix, *c);
+                }
+            }
+            if let Some(t) = &self.tone {
+                for c in block.iter_mut() {
+                    *c = t.apply(*c);
+                }
+            }
+            if self.compress {
+                for c in block.iter_mut() {
+                    *c = gamut_compress(*c);
+                }
+            }
+            if let Some(l) = self.desaturate {
+                for c in block.iter_mut() {
+                    *c = desaturate_into_gamut(*c, l);
+                }
+            }
+        }
+    }
+
     /// Signal → working linear for one RGB triple (table + pixel stage).
     pub fn convert(&self, rgb: [f32; 3]) -> [f32; 3] {
         self.apply(rgb.map(|v| self.table.lookup(v)))
@@ -550,6 +594,37 @@ mod tests {
         // brighter than the signal can carry (a caller's own values): the curve itself
         let over = t.apply([2.0; 3])[0];
         assert!((over - 2.0 * k * 2.0f32.powf(0.2)).abs() < 1e-4, "{over}");
+    }
+
+    /// Colours transformed a block at a time are the colours transformed one at a time, to the
+    /// bit, for every kind of source and pipeline, whatever the length of the run.
+    #[test]
+    fn many_colours_at_once_match_one_at_a_time() {
+        let pipes = [
+            ColorPipeline::REC709,
+            hdr(WorkingSpace::Rec2100Hlg),
+            hdr(WorkingSpace::Rec2100Pq),
+            ColorPipeline { auto_tone_map: false, ..ColorPipeline::REC709 },
+        ];
+        let colours: Vec<[f32; 3]> = (0..1000)
+            .map(|i| {
+                let f = |k: usize| ((i * 7919 + k * 104_729) % 1201) as f32 / 1000.0 - 0.1;
+                [f(0), f(1), f(2)]
+            })
+            .chain([[f32::NAN, 0.5, 0.5], [f32::INFINITY, 0.0, 1.0], [-1.0, -1.0, -1.0], [0.0; 3], [1.0; 3]])
+            .collect();
+        for pipe in pipes {
+            for cs in ColorSpace::ALL {
+                let t = InputTransform::new(cs, Range::Limited, &pipe, Some(4000.0));
+                for len in [0, 1, 63, 64, 65, colours.len()] {
+                    let mut many: Vec<[f32; 3]> = colours.iter().take(len).map(|c| c.map(|v| t.table.lookup(v))).collect();
+                    let one: Vec<[f32; 3]> = many.iter().map(|c| t.apply(*c)).collect();
+                    t.apply_many(&mut many);
+                    let same = many.iter().zip(&one).all(|(a, b)| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits()));
+                    assert!(same, "{cs:?} into {pipe:?}, {len} colours");
+                }
+            }
+        }
     }
 
     #[test]

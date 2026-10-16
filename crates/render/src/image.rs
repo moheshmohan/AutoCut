@@ -229,6 +229,42 @@ impl Image {
         });
     }
 
+    /// [`Self::map_rgb`] for a function that takes the straight colours of many pixels at once (up
+    /// to 64 of a row, in order) and replaces them in place: each pixel gets what `map_rgb` would
+    /// give it with the function applied to its colour alone. Colour transforms whose stages wait
+    /// on each other run several times faster on blocks (`InputTransform::apply_many`).
+    pub fn map_rgb_many(&mut self, f: impl Fn(&mut [[f32; 3]]) + Sync) {
+        const BLOCK: usize = 64;
+        let w = self.w.max(1);
+        self.px.par_chunks_mut(w * 4).for_each(|row| {
+            let mut cs = [[0f32; 3]; BLOCK];
+            for block in row.as_chunks_mut::<4>().0.chunks_mut(BLOCK) {
+                for (c, p) in cs.iter_mut().zip(block.iter()) {
+                    let a = p[3];
+                    *c = if a == 1.0 {
+                        [p[0], p[1], p[2]]
+                    } else if a > 1e-6 {
+                        [p[0] / a, p[1] / a, p[2] / a]
+                    } else {
+                        [0.0; 3]
+                    };
+                }
+                let n = block.len();
+                f(&mut cs[..n]);
+                for (c, p) in cs.iter().zip(block.iter_mut()) {
+                    let a = p[3];
+                    if a == 1.0 {
+                        p[..3].copy_from_slice(c);
+                    } else if a > 1e-6 {
+                        p[0] = c[0] * a;
+                        p[1] = c[1] * a;
+                        p[2] = c[2] * a;
+                    }
+                }
+            }
+        });
+    }
+
     /// Convert to straight sRGB RGBA8.
     pub fn to_rgba8(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.w * self.h * 4];
@@ -274,6 +310,27 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Mapping colours many at a time gives every pixel what mapping it alone gives: opaque,
+    /// partly transparent, nearly and wholly transparent pixels, rows longer and shorter than a
+    /// block.
+    #[test]
+    fn mapping_many_colours_matches_one_at_a_time() {
+        let f = |c: [f32; 3]| [c[0] * 1.5 + c[2], c[1].sqrt(), (c[0] - c[1]) * 0.7];
+        for (w, h) in [(1, 1), (63, 2), (64, 3), (130, 5)] {
+            let alphas = [1.0f32, 0.5, 0.0, 1e-7, 0.25, 1.0, 0.999];
+            let px: Vec<f32> = (0..w * h)
+                .flat_map(|i| {
+                    let a = alphas[i % alphas.len()];
+                    [((i * 37) % 100) as f32 / 100.0 * a, ((i * 59) % 100) as f32 / 100.0 * a, ((i * 83) % 100) as f32 / 100.0 * a, a]
+                })
+                .collect();
+            let (mut one, mut many) = (Image { w, h, px: px.clone() }, Image { w, h, px });
+            one.map_rgb(|c, _, _| f(c));
+            many.map_rgb_many(|cs| cs.iter_mut().for_each(|c| *c = f(*c)));
+            assert!(one.px.iter().zip(&many.px).all(|(a, b)| a.to_bits() == b.to_bits()), "{w}x{h}");
+        }
     }
 
     /// Placing a picture with Motion's scale and position (no rotation) samples whole rows at a
