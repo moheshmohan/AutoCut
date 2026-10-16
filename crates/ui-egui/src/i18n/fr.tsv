@@ -448,6 +448,17 @@
 	Discard	Ignorer
 	Recover	Récupérer
 	Not Now	Pas maintenant
+	The saved project is newer than this auto-save.	Le projet enregistré est plus récent que cet enregistrement automatique.
+	It was saved after the auto-save, by FilmCraft or another program. Recovering would replace it with older changes.	Il a été enregistré après l'enregistrement automatique, par FilmCraft ou un autre programme. La récupération le remplacerait par des modifications plus anciennes.
+	The project file can't be found where it was saved.	Le fichier du projet est introuvable à l'emplacement où il a été enregistré.
+	If it was moved or renamed, open it from its new location and check it before recovering.	S'il a été déplacé ou renommé, ouvrez-le depuis son nouvel emplacement et vérifiez-le avant de récupérer.
+	The saved project could not be checked.	Le projet enregistré n'a pas pu être vérifié.
+	It may have been saved after this auto-save. Open it and check it before recovering.	Il a peut-être été enregistré après cet enregistrement automatique. Ouvrez-le et vérifiez-le avant de récupérer.
+	Auto-save from {snapshot}; project file last saved {saved}.	Enregistrement automatique du {snapshot} ; fichier du projet enregistré pour la dernière fois le {saved}.
+	Open the saved project instead?	Ouvrir plutôt le projet enregistré ?
+	You can still recover the changes from {when} later with File ▸ Recover Unsaved Changes…	Vous pourrez récupérer les modifications du {when} plus tard avec Fichier ▸ Récupérer les modifications non enregistrées…
+	Open Saved Project	Ouvrir le projet enregistré
+	Recover Anyway	Récupérer quand même
 	Are you sure you want to discard your changes to '{file}'?	Voulez-vous vraiment ignorer vos modifications de « {file} » ?
 	Yes	Oui
 	No	Non

@@ -90,6 +90,9 @@ fn crash_recovery_end_to_end() {
     assert_eq!(list[0]["projectPath"], proj.as_str());
     assert_eq!(list[0]["cleanExit"], false);
     assert_eq!(list[0]["savedAt"].as_str().unwrap().len(), 19);
+    // nothing saved over the project since: Recover is the primary choice, as always
+    assert_eq!(list[0]["projectFile"], "unchanged", "{list}");
+    assert_eq!(list[0]["primaryAction"], "recover");
     c.execute("file.recover", json!({})).unwrap();
     assert_eq!(*c.project, edited);
     assert!(c.is_dirty(), "recovered changes are unsaved");
@@ -110,6 +113,185 @@ fn crash_recovery_end_to_end() {
     start(&mut e, &d);
     assert!(e.recovery_candidates().is_empty());
     e.shutdown();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+fn set_mtime(path: &str, t: std::time::SystemTime) {
+    std::fs::File::options().write(true).open(path).unwrap().set_modified(t).unwrap();
+}
+
+/// 2026-10-16: the app was killed with unsaved changes (snapshot 06:55), then the headless CLI
+/// rebuilt and saved the same project (09:50). The next launch offered Recover as the primary
+/// choice, which would have replaced the newer saved project with the older snapshot.
+#[test]
+fn recovery_never_offers_an_auto_save_over_a_newer_saved_project() {
+    let d = temp_dir("recover-newer");
+    let proj = d.join("Robot Showcase.fcproj").to_string_lossy().to_string();
+    let mut a = demo();
+    start(&mut a, &d);
+    a.execute("file.saveAs", json!({"path": proj})).unwrap();
+    a.execute("sequence.addEdit", json!({"seconds": 1.5})).unwrap();
+    let rev = a.revision;
+    wait_for("journal", || journaled(&mut a) == rev);
+    a.persistence.take().unwrap().simulate_crash();
+
+    // Next launch, before anything else touched the file: Recover, as always.
+    let mut c = Session::default();
+    start(&mut c, &d);
+    let list = c.execute("file.recoveryList", json!({})).unwrap();
+    assert_eq!((list[0]["projectFile"].as_str(), list[0]["primaryAction"].as_str()), (Some("unchanged"), Some("recover")), "{list}");
+
+    // Another program (the CLI) opens the saved project, changes it and saves it, with a clock
+    // that is behind: the file looks older than the snapshot, but its contents changed.
+    let mut cli = Session::default();
+    cli.execute("file.open", json!({"path": proj})).unwrap();
+    cli.execute("sequence.addEdit", json!({"seconds": 3.0})).unwrap();
+    cli.execute("file.save", json!({})).unwrap();
+    set_mtime(&proj, std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000));
+    let saved = std::fs::read(&proj).unwrap();
+
+    // The open dialog's list is checked again; so is the next launch's.
+    let list = c.execute("file.recoveryList", json!({})).unwrap();
+    assert_eq!(list[0]["projectFile"], "newer", "{list}");
+    assert_eq!(list[0]["primaryAction"], "openSaved", "{list}");
+    c.shutdown();
+    let mut c = Session::default();
+    start(&mut c, &d);
+    let list = c.execute("file.recoveryList", json!({})).unwrap();
+    assert_eq!(list[0]["projectFile"], "newer", "{list}");
+    assert_ne!(list[0]["primaryAction"], "recover", "{list}");
+    assert!(list[0]["projectModifiedAt"].is_string(), "{list}");
+
+    // Keeping the saved project opens it and keeps the snapshot for later.
+    c.execute("file.open", json!({"path": proj})).unwrap();
+    assert_eq!(*c.project, *cli.project);
+    assert_eq!(c.recovery_candidates().len(), 1, "recovery data is never deleted automatically");
+    assert!(c.is_enabled("file.recover"));
+    c.shutdown();
+
+    // Recover Anyway still works and leaves the file alone until the project is saved.
+    let mut e = Session::default();
+    start(&mut e, &d);
+    let r = e.execute("file.recover", json!({})).unwrap();
+    assert_eq!(r["projectFile"], "newer");
+    assert_eq!(e.path.as_deref(), Some(proj.as_str()));
+    assert_eq!(std::fs::read(&proj).unwrap(), saved, "recovering writes nothing over the file");
+    // A crash now still warns: the recovered changes build on the older file, not the newer one.
+    let rev = e.revision;
+    wait_for("journal", || journaled(&mut e) == rev);
+    e.persistence.take().unwrap().simulate_crash();
+    let mut f = Session::default();
+    start(&mut f, &d);
+    let list = f.execute("file.recoveryList", json!({})).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["projectFile"], "newer", "{list}");
+    f.execute("file.discardRecovery", json!({"all": true})).unwrap();
+    f.shutdown();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// "Auto Save also saves the current project" writes the file from the worker: unsaved changes
+/// made after that build on the new file, so a crash then is not mistaken for a newer save.
+#[test]
+fn auto_saving_the_project_file_moves_the_recovery_base() {
+    let d = temp_dir("recover-base");
+    let proj = d.join("base.fcproj").to_string_lossy().to_string();
+    let mut a = demo();
+    start(&mut a, &d);
+    a.execute("prefs.set", json!({"key": "autoSave.saveCurrentProject", "value": true})).unwrap();
+    a.execute("file.saveAs", json!({"path": proj})).unwrap();
+    a.execute("sequence.addEdit", json!({"seconds": 1.0})).unwrap();
+    a.execute("file.autoSaveNow", json!({})).unwrap();
+    wait_for("project saved", || {
+        a.poll_persistence();
+        !a.is_dirty()
+    });
+    let written = std::fs::read(&proj).unwrap();
+    assert_eq!(a.based_on, Some((proj.clone(), autosave::FileStamp::of_bytes(&written))));
+    a.execute("sequence.addEdit", json!({"seconds": 2.0})).unwrap();
+    let rev = a.revision;
+    wait_for("journal", || journaled(&mut a) == rev);
+    a.persistence.take().unwrap().simulate_crash();
+    let mut b = Session::default();
+    start(&mut b, &d);
+    let list = b.execute("file.recoveryList", json!({})).unwrap();
+    assert_eq!(list[0]["projectFile"], "unchanged", "{list}");
+    assert_eq!(list[0]["primaryAction"], "recover");
+    b.execute("file.discardRecovery", json!({"all": true})).unwrap();
+    b.shutdown();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The project-file check under hostile journals and file systems: never a crash, never Recover
+/// as the primary choice unless the file is known not to hold newer work.
+#[test]
+fn recovery_check_survives_hostile_inputs_and_distrusts_clocks() {
+    use autosave::{FileStamp, JournalMeta, ProjectFileState as S, RecoveryAction as A, check_project_file};
+    let d = temp_dir("recover-hostile");
+    let file = d.join("p.fcproj");
+    let path = file.to_string_lossy().to_string();
+    std::fs::write(&file, b"saved project bytes").unwrap();
+    let now = autosave::unix_now();
+    let meta = |saved_unix: i64, based_on: Option<FileStamp>| JournalMeta { saved_unix, project_path: Some(path.clone()), based_on, ..Default::default() };
+    let check = |m: &JournalMeta| {
+        let (state, _) = check_project_file(m, now);
+        (state, state.primary_action())
+    };
+    let stamp = FileStamp::of_bytes(b"saved project bytes");
+    assert_eq!(FileStamp::of_file(&file).unwrap(), stamp);
+
+    // fingerprints: clock-free either way
+    set_mtime(&path, std::time::SystemTime::now() + std::time::Duration::from_secs(10 * 365 * 86_400));
+    assert_eq!(check(&meta(now, Some(stamp.clone()))), (S::Unchanged, A::Recover), "touched, same bytes");
+    assert_eq!(check(&meta(i64::MAX, Some(stamp.clone()))), (S::Unchanged, A::Recover), "snapshot clock in the future");
+    let other = FileStamp::of_bytes(b"SAVED PROJECT BYTES");
+    assert_eq!(other.bytes, stamp.bytes);
+    assert_eq!(check(&meta(now, Some(other))), (S::Newer, A::OpenSaved), "same size, other bytes");
+    let hostile = FileStamp { bytes: u64::MAX, hash: "not hex \u{1F4A5}".into() };
+    assert_eq!(check(&meta(now, Some(hostile))), (S::Newer, A::OpenSaved));
+    let hostile = FileStamp { bytes: stamp.bytes, hash: String::new() };
+    assert_eq!(check(&meta(now, Some(hostile))), (S::Newer, A::OpenSaved));
+
+    // journals without a fingerprint: the clocks, distrusted when the snapshot's is odd
+    set_mtime(&path, std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000));
+    assert_eq!(check(&meta(2_000_000, None)), (S::Unchanged, A::Recover), "saved before the snapshot");
+    assert_eq!(check(&meta(1_000_000, None)), (S::Unknown, A::OpenSaved), "the same second");
+    assert_eq!(check(&meta(999_999, None)), (S::Newer, A::OpenSaved), "saved after the snapshot");
+    for odd in [0, -1, i64::MIN, now + 3600, i64::MAX] {
+        assert_eq!(check(&meta(odd, None)), (S::Unknown, A::OpenSaved), "snapshot time {odd}");
+    }
+
+    // no file, not a file, no path
+    let gone = JournalMeta { project_path: Some(d.join("moved away.fcproj").to_string_lossy().to_string()), ..meta(now, Some(stamp.clone())) };
+    assert_eq!(check(&gone), (S::Missing, A::Later));
+    let dir = JournalMeta { project_path: Some(d.to_string_lossy().to_string()), ..meta(now, Some(stamp.clone())) };
+    assert_eq!(check(&dir), (S::Unknown, A::OpenSaved));
+    assert!(FileStamp::of_file(&d).is_err());
+    for p in [None, Some(String::new())] {
+        assert_eq!(check(&JournalMeta { project_path: p, ..meta(now, None) }), (S::Untitled, A::Recover));
+    }
+    let nul = JournalMeta { project_path: Some("bad\0path.fcproj".into()), ..meta(now, Some(stamp.clone())) };
+    assert_ne!(check(&nul).1, A::Recover);
+
+    // through the scan: hand-written journals as crashed sessions leave them
+    let journal = |id: &str, meta: serde_json::Value| {
+        let sess = autosave::recovery_root(&d).join(id);
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(sess.join("snapshot.fcproj"), filmcraft_format::encode(&filmcraft_project::Project::default(), false)).unwrap();
+        std::fs::write(sess.join("session.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+    };
+    journal("1-1", json!({"savedUnix": now, "projectPath": d.join("gone.fcproj"), "basedOn": stamp}));
+    journal("1-2", json!({"savedUnix": i64::MAX, "projectPath": path}));
+    journal("1-3", json!({"savedUnix": now, "projectPath": path, "basedOn": {"bytes": -5, "hash": 7}}));
+    let found = autosave::scan_candidates(&d, None);
+    let state = |id: &str| found.iter().find(|c| c.id == id).map(|c| (c.project_file, c.primary_action()));
+    assert_eq!(state("1-1"), Some((S::Missing, A::Later)));
+    assert_eq!(state("1-2"), Some((S::Unknown, A::OpenSaved)));
+    // an unreadable journal still lists its snapshot (#894), without a path: nothing on disk to replace
+    assert_eq!(state("1-3"), Some((S::Untitled, A::Recover)));
+    for id in ["1-1", "1-2", "1-3"] {
+        assert!(autosave::recovery_root(&d).join(id).join("snapshot.fcproj").is_file(), "{id}: checking never deletes");
+    }
     let _ = std::fs::remove_dir_all(&d);
 }
 

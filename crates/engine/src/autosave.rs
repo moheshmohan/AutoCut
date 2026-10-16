@@ -12,12 +12,20 @@
 //! the next launch any session directory whose lock can be taken and that holds a snapshot is a
 //! recovery candidate ("Recover unsaved changes from <time>?").
 //!
+//! **Newer saved project.** The journal also records a fingerprint of the project file as the
+//! session last opened or saved it ([`JournalMeta::based_on`]). Before a candidate is offered, the
+//! file on disk is compared with it ([`check_project_file`]): when the project was saved again after
+//! the snapshot (by FilmCraft or another program, e.g. the headless CLI), recovering would replace
+//! that newer file with older changes, so the prompt warns and keeps the saved project as the
+//! primary choice ([`RecoveryAction`]). The comparison needs no clock; journals without a
+//! fingerprint fall back to the file's modification time. Recovery data is never deleted by this.
+//!
 //! **Threading.** The UI thread only hands the worker an `Arc<Project>` (the immutable snapshot the
 //! engine already keeps for undo) — a pointer copy and a channel send. Serialization and all file
 //! I/O happen on the worker thread, so neither ever stalls the UI.
 
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -528,6 +536,166 @@ pub struct JournalMeta {
     pub bytes: usize,
     /// True when the app was closed normally while changes were unsaved (no crash).
     pub clean_exit: bool,
+    /// The project file at `project_path` as the session last opened or saved it: the base its
+    /// unsaved changes build on. None for a never-saved project and for journals written before
+    /// fingerprints were recorded.
+    pub based_on: Option<FileStamp>,
+}
+
+/// Fingerprint of a project file: its length and a 64-bit FNV-1a hash of its bytes. Comparing
+/// fingerprints tells whether a file changed without trusting any clock.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FileStamp {
+    pub bytes: u64,
+    /// FNV-1a (64-bit) of the contents, as 16 lowercase hex digits.
+    pub hash: String,
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn fnv1a(mut h: u64, bytes: &[u8]) -> u64 {
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
+/// Project files larger than this are not fingerprinted when checked (reported as unverifiable).
+const MAX_STAMP_BYTES: u64 = 1 << 30;
+
+impl FileStamp {
+    pub fn of_bytes(bytes: &[u8]) -> Self {
+        Self { bytes: bytes.len() as u64, hash: format!("{:016x}", fnv1a(FNV_OFFSET, bytes)) }
+    }
+
+    /// Fingerprint of a regular file, read in chunks. Anything but a regular file (a FIFO would
+    /// block, a device never end) and files over [`MAX_STAMP_BYTES`] are errors.
+    pub fn of_file(path: &Path) -> io::Result<Self> {
+        let md = fs::metadata(path)?;
+        if !md.is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
+        }
+        let too_big = || io::Error::new(io::ErrorKind::InvalidData, "too large to fingerprint");
+        if md.len() > MAX_STAMP_BYTES {
+            return Err(too_big());
+        }
+        let mut f = File::open(path)?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let (mut h, mut n) = (FNV_OFFSET, 0u64);
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(k) => {
+                    let Some(chunk) = buf.get(..k) else { return Err(io::Error::other("short read buffer")) };
+                    h = fnv1a(h, chunk);
+                    n = n.saturating_add(k as u64);
+                    // (the file may grow while it is read)
+                    if n > MAX_STAMP_BYTES {
+                        return Err(too_big());
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Self { bytes: n, hash: format!("{h:016x}") })
+    }
+}
+
+/// The project file a candidate would be recovered over, compared with the file its snapshot was
+/// based on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectFileState {
+    /// The snapshot is of a project that was never saved: no file to compare.
+    #[default]
+    Untitled,
+    /// The file is still the one the session opened or last saved (or, for a journal without a
+    /// fingerprint, was last modified before the snapshot): recovering loses nothing on disk.
+    Unchanged,
+    /// The file changed after the session last opened or saved it: it was saved again (by FilmCraft
+    /// or another program) and holds work the snapshot does not have.
+    Newer,
+    /// There is no file at the project path any more (moved, renamed, deleted, drive unmounted).
+    Missing,
+    /// The file could not be checked (unreadable, not a regular file, or a journal without a
+    /// fingerprint whose time can't be trusted).
+    Unknown,
+}
+
+/// The choice the recovery prompt makes primary for a candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecoveryAction {
+    /// Recover the unsaved changes (nothing newer on disk would be replaced).
+    Recover,
+    /// Open the saved project and keep the snapshot for later ("Recover Anyway" stays available).
+    OpenSaved,
+    /// Decide later (the saved project can't be opened from its recorded path).
+    Later,
+}
+
+impl ProjectFileState {
+    /// Only a file known to be unchanged (or no file at all) makes Recover the primary choice;
+    /// everything else keeps what is on disk.
+    pub fn primary_action(self) -> RecoveryAction {
+        match self {
+            Self::Untitled | Self::Unchanged => RecoveryAction::Recover,
+            Self::Newer | Self::Unknown => RecoveryAction::OpenSaved,
+            Self::Missing => RecoveryAction::Later,
+        }
+    }
+}
+
+/// How far ahead of this machine's clock a snapshot time may be before it is distrusted (s).
+const CLOCK_SLACK_SECS: i64 = 300;
+
+/// Compare the file at a journal's project path with the file its snapshot was based on. `now` is
+/// the current unix time. Returns the state and the file's modification time (unix s) when known.
+///
+/// With a fingerprint the answer needs no clock: the file is unchanged only if it is byte for byte
+/// the one the session opened or last saved. Without one (older journals) the file's modification
+/// time is compared with the snapshot time, and a snapshot time that is unset or in the future
+/// gives [`ProjectFileState::Unknown`]. Never fails; anything unexpected is `Unknown`.
+pub fn check_project_file(meta: &JournalMeta, now: i64) -> (ProjectFileState, Option<i64>) {
+    use ProjectFileState::*;
+    let Some(path) = meta.project_path.as_deref().filter(|p| !p.is_empty()) else { return (Untitled, None) };
+    let md = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return (Missing, None),
+        Err(_) => return (Unknown, None),
+    };
+    let modified = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).and_then(|d| i64::try_from(d.as_secs()).ok());
+    if !md.is_file() {
+        return (Unknown, modified);
+    }
+    let state = match &meta.based_on {
+        Some(base) if base.bytes != md.len() => Newer,
+        Some(base) => match FileStamp::of_file(Path::new(path)) {
+            Ok(stamp) if stamp == *base => Unchanged,
+            Ok(_) => Newer,
+            Err(_) => Unknown,
+        },
+        None if meta.saved_unix <= 0 || meta.saved_unix > now.saturating_add(CLOCK_SLACK_SECS) => Unknown,
+        None => match modified {
+            Some(m) if m > meta.saved_unix => Newer,
+            Some(m) if m < meta.saved_unix => Unchanged,
+            // the same second (which came first is unknowable) or no modification time
+            _ => Unknown,
+        },
+    };
+    (state, modified)
+}
+
+/// Size and modification time of a file (None when it can't be read): a cheap "did it change?".
+type FileSig = Option<(u64, Option<std::time::SystemTime>)>;
+
+fn file_sig(path: Option<&str>) -> FileSig {
+    let m = fs::metadata(path?).ok()?;
+    Some((m.len(), m.modified().ok()))
 }
 
 /// Unsaved changes left behind by a session that is no longer running.
@@ -540,6 +708,30 @@ pub struct RecoveryCandidate {
     pub dir: PathBuf,
     #[serde(flatten)]
     pub meta: JournalMeta,
+    /// The project file on disk compared with the one the snapshot is based on.
+    pub project_file: ProjectFileState,
+    /// Modification time of the project file (unix s), when it could be read.
+    pub project_modified_unix: Option<i64>,
+    /// [`FileSig`] of the project file when `project_file` was worked out.
+    #[serde(skip)]
+    checked: Option<FileSig>,
+}
+
+impl RecoveryCandidate {
+    /// (Re)check the project file on disk ([`check_project_file`]). The file is fingerprinted again
+    /// only when its size or modification time changed since the last check.
+    pub fn check_project_file(&mut self, now: i64) {
+        let sig = file_sig(self.meta.project_path.as_deref().filter(|p| !p.is_empty()));
+        if self.checked.as_ref() == Some(&sig) {
+            return;
+        }
+        (self.project_file, self.project_modified_unix) = check_project_file(&self.meta, now);
+        self.checked = Some(sig);
+    }
+
+    pub fn primary_action(&self) -> RecoveryAction {
+        self.project_file.primary_action()
+    }
 }
 
 const SNAPSHOT: &str = "snapshot.fcproj";
@@ -562,10 +754,12 @@ fn lock_is_stale(dir: &Path) -> bool {
     }
 }
 
-/// Find snapshots of sessions that are no longer running. Stale session directories without a
-/// snapshot (nothing unsaved) are removed. `skip` is the caller's own session directory.
+/// Find snapshots of sessions that are no longer running, each with its project file checked
+/// ([`RecoveryCandidate::project_file`]). Stale session directories without a snapshot (nothing
+/// unsaved) are removed. `skip` is the caller's own session directory.
 pub fn scan_candidates(data_dir: &Path, skip: Option<&Path>) -> Vec<RecoveryCandidate> {
     let Ok(rd) = fs::read_dir(recovery_root(data_dir)) else { return Vec::new() };
+    let now = unix_now();
     let mut out = Vec::new();
     for e in rd.filter_map(|e| e.ok()) {
         let dir = e.path();
@@ -581,7 +775,16 @@ pub fn scan_candidates(data_dir: &Path, skip: Option<&Path>) -> Vec<RecoveryCand
         // Keep the snapshot even when session.json is missing or unreadable: the project
         // is still recoverable. Meta fields fall back to defaults.
         let meta = fs::read(dir.join(META)).ok().and_then(|b| serde_json::from_slice::<JournalMeta>(&b).ok()).unwrap_or_default();
-        out.push(RecoveryCandidate { id: e.file_name().to_string_lossy().into_owned(), dir, meta });
+        let mut c = RecoveryCandidate {
+            id: e.file_name().to_string_lossy().into_owned(),
+            dir,
+            meta,
+            project_file: ProjectFileState::Untitled,
+            project_modified_unix: None,
+            checked: None,
+        };
+        c.check_project_file(now);
+        out.push(c);
     }
     out.sort_by(|a, b| b.meta.saved_unix.cmp(&a.meta.saved_unix).then(b.id.cmp(&a.id)));
     out
@@ -621,12 +824,15 @@ pub(crate) struct Sent {
     pub revision: u64,
     pub saved_revision: u64,
     pub path: Option<String>,
+    pub based_on: Option<FileStamp>,
 }
 
 struct Snapshot {
     project: Arc<Project>,
     revision: u64,
     path: Option<String>,
+    /// The file at `path` as the session last opened or saved it ([`JournalMeta::based_on`]).
+    based_on: Option<FileStamp>,
 }
 
 enum Msg {
@@ -662,6 +868,8 @@ pub enum WorkerEvent {
     SavedProject {
         path: String,
         revision: u64,
+        /// Fingerprint of what was written (the new base of later unsaved changes).
+        based_on: FileStamp,
     },
     Error(String),
 }
@@ -747,8 +955,8 @@ impl Persistence {
         })
     }
 
-    pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>) {
-        let _ = self.tx.send(Msg::Dirty(Snapshot { project, revision, path }));
+    pub(crate) fn send_dirty(&self, project: Arc<Project>, revision: u64, path: Option<String>, based_on: Option<FileStamp>) {
+        let _ = self.tx.send(Msg::Dirty(Snapshot { project, revision, path, based_on }));
     }
 
     pub(crate) fn send_clean(&self) {
@@ -840,6 +1048,15 @@ impl Persistence {
         names::display_time(unix, (self.local_offset)(unix))
     }
 
+    /// Check each candidate's project file again (it may have been saved since the scan); cheap
+    /// unless a file changed ([`RecoveryCandidate::check_project_file`]).
+    pub fn refresh_candidates(&mut self) {
+        let now = unix_now();
+        for c in &mut self.candidates {
+            c.check_project_file(now);
+        }
+    }
+
     pub fn candidates_json(&self) -> Value {
         Value::Array(
             self.candidates
@@ -847,6 +1064,8 @@ impl Persistence {
                 .map(|c| {
                     let mut v = serde_json::to_value(c).unwrap_or_default();
                     v["savedAt"] = json!(self.local_time(c.meta.saved_unix));
+                    v["projectModifiedAt"] = json!(c.project_modified_unix.map(|u| self.local_time(u)));
+                    v["primaryAction"] = json!(c.primary_action());
                     v
                 })
                 .collect(),
@@ -972,6 +1191,7 @@ impl Worker {
         meta.revision = s.revision;
         meta.project_name = s.project.name.clone();
         meta.project_path = s.path.clone();
+        meta.based_on = s.based_on.clone();
         meta.bytes = bytes.len();
         // Snapshot first, then the meta that makes it a candidate.
         let r = filmcraft_format::atomic_write(&self.session_dir.join(SNAPSHOT), &bytes)
@@ -1000,24 +1220,26 @@ impl Worker {
 
     fn auto_save(&mut self) -> Result<PathBuf, String> {
         let Some(s) = &self.latest else { return Err("nothing to save".into()) };
-        let scratch = s.project.settings.scratch.auto_save.clone().filter(|d| !d.is_empty());
-        let (dir, name) = match &s.path {
+        // (owned: saving the project below updates `self.latest`)
+        let (project, revision, project_path) = (s.project.clone(), s.revision, s.path.clone());
+        let scratch = project.settings.scratch.auto_save.clone().filter(|d| !d.is_empty());
+        let (dir, name) = match &project_path {
             // Project Settings ▸ Scratch Disks ▸ Project Auto Save
             Some(p) if scratch.is_some() => {
                 let p = Path::new(p);
                 (
                     PathBuf::from(scratch.clone().unwrap_or_default()),
-                    p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| s.project.name.clone()),
+                    p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| project.name.clone()),
                 )
             }
             Some(p) => {
                 let p = Path::new(p);
-                (names::auto_save_dir(p), p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| s.project.name.clone()))
+                (names::auto_save_dir(p), p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| project.name.clone()))
             }
-            None => (self.data_dir.join(names::AUTO_SAVE_DIR), s.project.name.clone()),
+            None => (self.data_dir.join(names::AUTO_SAVE_DIR), project.name.clone()),
         };
         let t0 = Instant::now();
-        let bytes = filmcraft_format::encode(&s.project, false);
+        let bytes = filmcraft_format::encode(&project, false);
         let serialize_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let t1 = Instant::now();
         let unix = unix_now();
@@ -1025,14 +1247,19 @@ impl Worker {
         let write_ms = t1.elapsed().as_secs_f64() * 1000.0;
         match r {
             Ok(path) => {
-                self.autosaved = s.revision;
-                let _ = self.events.send(WorkerEvent::AutoSaved { path: path.clone(), revision: s.revision, unix, serialize_ms, write_ms, bytes: bytes.len() });
+                self.autosaved = revision;
+                let _ = self.events.send(WorkerEvent::AutoSaved { path: path.clone(), revision, unix, serialize_ms, write_ms, bytes: bytes.len() });
                 if self.prefs.save_current_project
-                    && let Some(p) = &s.path
+                    && let Some(p) = &project_path
                 {
                     match filmcraft_format::atomic_write(Path::new(p), &bytes) {
                         Ok(()) => {
-                            let _ = self.events.send(WorkerEvent::SavedProject { path: p.clone(), revision: s.revision });
+                            // later journals of this state build on the file just written
+                            let based_on = FileStamp::of_bytes(&bytes);
+                            if let Some(l) = self.latest.as_mut().filter(|l| l.path.as_deref() == Some(p.as_str())) {
+                                l.based_on = Some(based_on.clone());
+                            }
+                            let _ = self.events.send(WorkerEvent::SavedProject { path: p.clone(), revision, based_on });
                         }
                         Err(e) => self.error(format!("saving {p}: {e}")),
                     }

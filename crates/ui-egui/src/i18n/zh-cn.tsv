@@ -437,6 +437,17 @@
 	Discard	放弃
 	Recover	恢复
 	Not Now	暂不
+	The saved project is newer than this auto-save.	已保存的项目比此自动保存更新。
+	It was saved after the auto-save, by FilmCraft or another program. Recovering would replace it with older changes.	它在自动保存之后由 FilmCraft 或其他程序保存过。恢复会用较旧的更改替换它。
+	The project file can't be found where it was saved.	在保存位置找不到项目文件。
+	If it was moved or renamed, open it from its new location and check it before recovering.	如果它已被移动或重命名，请从新位置打开并检查后再恢复。
+	The saved project could not be checked.	无法检查已保存的项目。
+	It may have been saved after this auto-save. Open it and check it before recovering.	它可能在此自动保存之后被保存过。请打开并检查后再恢复。
+	Auto-save from {snapshot}; project file last saved {saved}.	自动保存于 {snapshot}；项目文件最后保存于 {saved}。
+	Open the saved project instead?	改为打开已保存的项目吗？
+	You can still recover the changes from {when} later with File ▸ Recover Unsaved Changes…	{when} 的更改稍后仍可恢复：文件 ▸ 恢复未保存的更改…
+	Open Saved Project	打开已保存的项目
+	Recover Anyway	仍然恢复
 	Are you sure you want to discard your changes to '{file}'?	确定要放弃对“{file}”的更改吗？
 	Yes	是
 	No	否

@@ -406,6 +406,10 @@ pub struct Session {
     /// Schema version of the file at `path` as found on disk (older = upgraded on load; the first
     /// save over it keeps a backup of the original).
     pub loaded_schema: u32,
+    /// The project file as this session last read or wrote it: (path, fingerprint). The recovery
+    /// journal records it, so a later launch can tell whether the file was saved again (by
+    /// FilmCraft or another program) after the snapshot before offering to recover over it.
+    pub based_on: Option<(String, autosave::FileStamp)>,
     /// Render preview files + render-bar segments (shared with the frontend's frame workers).
     pub previews: Arc<previews::PreviewStore>,
     /// Audio Track Mixer automation pass in progress.
@@ -522,6 +526,7 @@ impl Session {
             prefs_path: None,
             persistence: None,
             loaded_schema: filmcraft_format::SCHEMA_VERSION,
+            based_on: None,
             previews: Arc::new(previews::PreviewStore::temp()),
             mixrec: Default::default(),
             mcrec: Default::default(),
@@ -611,12 +616,14 @@ impl Session {
     pub fn sync_persistence(&mut self) {
         let dirty = self.is_dirty();
         let Some(p) = self.persistence.as_mut() else { return };
-        let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
+        // (a fingerprint of another file than the current one is no base)
+        let based_on = self.based_on.as_ref().filter(|(at, _)| self.path.as_deref() == Some(at.as_str())).map(|(_, stamp)| stamp.clone());
+        let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone(), based_on };
         if p.last_sent.as_ref() == Some(&cur) {
             return;
         }
         if dirty {
-            p.send_dirty(self.project.clone(), self.revision, self.path.clone());
+            p.send_dirty(self.project.clone(), self.revision, self.path.clone(), cur.based_on.clone());
         } else {
             p.send_clean();
         }
@@ -634,10 +641,11 @@ impl Session {
         let Some(p) = self.persistence.as_mut() else { return };
         for ev in p.drain_events() {
             match ev {
-                autosave::WorkerEvent::SavedProject { path, revision }
+                autosave::WorkerEvent::SavedProject { path, revision, based_on }
                     if self.path.as_deref() == Some(path.as_str()) && revision > self.saved_revision && revision <= self.revision =>
                 {
                     self.saved_revision = revision;
+                    self.based_on = Some((path, based_on));
                 }
                 autosave::WorkerEvent::Error(m) => {
                     self.log.push(panels::Level::Error, "autosave", m.clone());

@@ -443,6 +443,17 @@
 	Discard	破棄
 	Recover	復元
 	Not Now	後で
+	The saved project is newer than this auto-save.	保存済みのプロジェクトはこの自動保存より新しくなっています。
+	It was saved after the auto-save, by FilmCraft or another program. Recovering would replace it with older changes.	自動保存の後に、FilmCraft または別のプログラムで保存されました。復元すると、古い変更で置き換えられます。
+	The project file can't be found where it was saved.	保存した場所にプロジェクトファイルが見つかりません。
+	If it was moved or renamed, open it from its new location and check it before recovering.	移動または名前を変更した場合は、新しい場所から開いて確認してから復元してください。
+	The saved project could not be checked.	保存済みのプロジェクトを確認できませんでした。
+	It may have been saved after this auto-save. Open it and check it before recovering.	この自動保存の後に保存された可能性があります。開いて確認してから復元してください。
+	Auto-save from {snapshot}; project file last saved {saved}.	自動保存: {snapshot}、プロジェクトファイルの最終保存: {saved}。
+	Open the saved project instead?	代わりに保存済みのプロジェクトを開きますか？
+	You can still recover the changes from {when} later with File ▸ Recover Unsaved Changes…	{when} の変更は後で復元できます: ファイル ▸ 未保存の変更を復元…
+	Open Saved Project	保存済みのプロジェクトを開く
+	Recover Anyway	それでも復元
 	Are you sure you want to discard your changes to '{file}'?	「{file}」への変更を破棄してもよろしいですか？
 	Yes	はい
 	No	いいえ

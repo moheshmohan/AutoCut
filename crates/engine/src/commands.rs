@@ -1538,7 +1538,10 @@ fn build() -> Vec<CommandSpec> {
             Ok(json!({"discarded": n}))
         }),
         query!("file.recoveryList", "List Recoverable Sessions", "{}", |s, _| {
-            Ok(s.persistence.as_ref().map(|p| p.candidates_json()).unwrap_or_else(|| json!([])))
+            let Some(per) = s.persistence.as_mut() else { return Ok(json!([])) };
+            // the project files may have been saved since the launch
+            per.refresh_candidates();
+            Ok(per.candidates_json())
         }),
         cmd!("file.autoSaveNow", "Auto Save Now", [], None, "{}", always, |s, _| {
             let per = s.persistence.as_ref().ok_or_else(|| EngineError::Other("auto-save is not running in this session".into()))?;
@@ -4348,6 +4351,10 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
         }
     }
     s.services.write_file(path, &bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    // what the project's own file now holds (Save, Save As, or a copy written over it)
+    if adopt || s.path.as_deref() == Some(path) {
+        s.based_on = Some((path.to_string(), crate::autosave::FileStamp::of_bytes(&bytes)));
+    }
     if adopt {
         s.path = Some(path.to_string());
         s.previews_follow_path();
@@ -4395,6 +4402,7 @@ fn open_project(s: &mut Session, path: &str) -> Result<Value> {
     let loaded = filmcraft_format::decode(&bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let (from, migrated) = (loaded.schema_version, loaded.migrated());
     install_project(s, loaded.project, Some(path.to_string()), true);
+    s.based_on = Some((path.to_string(), crate::autosave::FileStamp::of_bytes(&bytes)));
     if let Some(view) = loaded.view.filter(|_| s.prefs.timeline.restore_open_sequences) {
         s.restore_project_view(view);
     }
@@ -4418,10 +4426,13 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
         Some(id) => per.candidates.iter().position(|c| c.id == id).ok_or_else(|| bad("file.recover", format!("no recovery session `{id}`")))?,
         None => 0,
     };
-    let c = per.candidates[idx].clone();
+    let c = per.candidates.get(idx).cloned().ok_or_else(|| bad("file.recover", "there are no unsaved changes to recover"))?;
     let saved_at = per.local_time(c.meta.saved_unix);
     let loaded = crate::autosave::load_candidate(&c).map_err(EngineError::Other)?;
     install_project(s, loaded.project, c.meta.project_path.clone(), false);
+    // The recovered changes still build on the file the crashed session had: a project file saved
+    // since then stays "newer" for this session's journal too, until the project is saved.
+    s.based_on = c.meta.project_path.clone().zip(c.meta.based_on.clone());
     if let Some(seq) = s.state.active_sequence {
         s.events.push(crate::Event::OpenSequence(seq));
     }
@@ -4434,7 +4445,14 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
     }
     crate::autosave::discard_candidate(&c).map_err(|e| EngineError::Other(e.to_string()))?;
     s.toast(format!("Recovered unsaved changes to {} from {saved_at}", c.meta.project_name));
-    Ok(json!({"id": c.id, "name": c.meta.project_name, "path": c.meta.project_path, "savedAt": saved_at, "revision": c.meta.revision}))
+    Ok(json!({
+        "id": c.id,
+        "name": c.meta.project_name,
+        "path": c.meta.project_path,
+        "savedAt": saved_at,
+        "revision": c.meta.revision,
+        "projectFile": c.project_file,
+    }))
 }
 
 /// Where auto-saves of the current project go.

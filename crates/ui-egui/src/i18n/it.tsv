@@ -443,6 +443,17 @@
 	Discard	Scarta
 	Recover	Recupera
 	Not Now	Non ora
+	The saved project is newer than this auto-save.	Il progetto salvato è più recente di questo salvataggio automatico.
+	It was saved after the auto-save, by FilmCraft or another program. Recovering would replace it with older changes.	È stato salvato dopo il salvataggio automatico, da FilmCraft o da un altro programma. Il recupero lo sostituirebbe con modifiche meno recenti.
+	The project file can't be found where it was saved.	Il file del progetto non si trova dove era stato salvato.
+	If it was moved or renamed, open it from its new location and check it before recovering.	Se è stato spostato o rinominato, aprilo dalla nuova posizione e controllalo prima di recuperare.
+	The saved project could not be checked.	Non è stato possibile verificare il progetto salvato.
+	It may have been saved after this auto-save. Open it and check it before recovering.	Potrebbe essere stato salvato dopo questo salvataggio automatico. Aprilo e controllalo prima di recuperare.
+	Auto-save from {snapshot}; project file last saved {saved}.	Salvataggio automatico del {snapshot}; file del progetto salvato l'ultima volta il {saved}.
+	Open the saved project instead?	Aprire invece il progetto salvato?
+	You can still recover the changes from {when} later with File ▸ Recover Unsaved Changes…	Puoi ancora recuperare le modifiche del {when} più tardi con File ▸ Recupera modifiche non salvate…
+	Open Saved Project	Apri progetto salvato
+	Recover Anyway	Recupera comunque
 	Are you sure you want to discard your changes to '{file}'?	Vuoi davvero scartare le modifiche a '{file}'?
 	Yes	Sì
 	No	No

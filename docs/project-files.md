@@ -139,7 +139,8 @@ Premiere's auto-save can lose up to one interval of work. FilmCraft also keeps a
 
 - Whenever the project has unsaved changes, a snapshot is written to
   `<data dir>/Recovery/<started>-<pid>[-<n>]/snapshot.fcproj`, plus `session.json` (time, revision, project
-  name and path). It is written about 1 s after the last edit, or after at most
+  name and path, and `basedOn`: the length and FNV-1a 64 hash of the project file as the session last
+  opened or saved it). It is written about 1 s after the last edit, or after at most
   `recoveryIntervalSeconds` while edits keep coming. Saving the project deletes the snapshot.
 - Each running FilmCraft holds an OS file lock on `<session>/lock`. When the process dies (crash,
   `kill -9`, power loss) the OS releases the lock.
@@ -148,9 +149,24 @@ Premiere's auto-save can lose up to one interval of work. FilmCraft also keeps a
   Recover unsaved changes from 2026-10-01 00:02:09?"*, with the buttons **Recover**, **Not Now** and
   **Discard**. Stale directories without a snapshot are removed. Journals of running sessions are
   never touched.
+- Before asking, FilmCraft checks the project file the snapshot would be recovered over
+  (`projectFile` in `file.recoveryList`, checked again while the prompt is open). If the file is no
+  longer byte for byte the one the session last opened or saved (`newer`: it was saved again after
+  the auto-save, by FilmCraft or another program such as `filmcraft-cli --save`), recovering would
+  replace newer work with older changes. The prompt then warns *"The saved project is newer than this
+  auto-save"* (with both times) and the primary button is **Open Saved Project**, which opens the file
+  and keeps the snapshot; **Recover Anyway** and **Not Now** stay available, and File ▸ Recover
+  Unsaved Changes… asks again later. The comparison uses the recorded fingerprint, so no clock is
+  trusted. Journals written before fingerprints compare the file's modification time with the
+  snapshot time instead; when that can't decide (the same second, or a snapshot time that is unset or
+  in the future) or the file can't be read, the state is `unknown` and the prompt is just as cautious.
+  A file that is gone (`missing`) also warns, with **Not Now** as the primary button. Only
+  `unchanged` (and `untitled`, a never-saved project) keep **Recover** as the primary choice. None of
+  this ever deletes recovery data.
 - Recovering loads the snapshot as an **unsaved** project with its original path, so Save writes
   over the original file. The recovered state goes into the new session's own journal before the old
-  journal is deleted.
+  journal is deleted; it keeps the old `basedOn`, so a project file saved in between still counts
+  as newer if this session dies too.
 - A normal quit with nothing unsaved removes the session directory. Quitting with unsaved changes
   (Quit, Cmd+Q or the window's close button) first asks *"Save changes to 'X' before closing?"*
   with **Cancel**, **Don't Save** and **Save** (Save on a never-saved project opens the Save dialog);
@@ -158,7 +174,9 @@ Premiere's auto-save can lose up to one interval of work. FilmCraft also keeps a
   channel's `app.quit`, the OS ending the session) keeps the snapshot, marked `cleanExit`, and FilmCraft offers it on the next launch ("FilmCraft was
   closed while … had unsaved changes").
 
-Desktop flags: `--recover` recovers the newest candidate without asking. `--no-recover` starts
+Desktop flags: `--recover` recovers the newest candidate without asking, and without the newer-file
+check above (agents should rather start with `--no-recover` and read `primaryAction` from
+`file.recoveryList`). `--no-recover` starts
 without asking; the changes stay available through File ▸ Recover Unsaved Changes…. `--data-dir
 <dir>` (or `FILMCRAFT_DATA_DIR`) moves the data directory. The default is `~/Library/Application
 Support/FilmCraft` on macOS, `%APPDATA%\FilmCraft` on Windows, and `$XDG_DATA_HOME/filmcraft` or
@@ -186,15 +204,16 @@ write (two fsynced files).
 
 | Id | |
 |---|---|
-| `file.recoveryList` | candidates: `id`, `projectName`, `projectPath`, `savedAt`, `revision`, `cleanExit`… |
-| `file.recover {id?}` | recover (newest when no `id`). From the UI, `{}` opens the recovery dialog |
+| `file.recoveryList` | candidates: `id`, `projectName`, `projectPath`, `savedAt`, `revision`, `cleanExit`, `projectFile` (`untitled` / `unchanged` / `newer` / `missing` / `unknown`), `projectModifiedAt`, `primaryAction` (`recover` / `openSaved` / `later`)… |
+| `file.recover {id?}` | recover (newest when no `id`), even over a newer project file (the result's `projectFile` says so; check `primaryAction` first). From the UI, `{}` opens the recovery dialog |
 | `file.discardRecovery {id?, all?}` | delete a candidate's journal |
 | `file.autoSaveNow` | write an auto-save now (if anything is unsaved) |
 | `file.autoSaveStatus` | prefs, folders, last auto-save / journal times, last encode/write ms and bytes |
 | `file.listAutoSaves` | auto-save files of the current project, newest first |
 | `prefs.get {key?}` / `prefs.set {key, value}` or `{values:{…}}` / `prefs.reset {category?}` | settings (below) |
 
-UI automation ids: `recovery.recover`, `recovery.later`, `recovery.discard`, `recovery.item.<n>`;
+UI automation ids: `recovery.recover` (Recover, or Recover Anyway), `recovery.open` (Open Saved
+Project), `recovery.later`, `recovery.discard`, `recovery.item.<n>`, `recovery.warning` (the warning text);
 `revert.yes`, `revert.no` (File ▸ Revert asks first when invoked without params).
 
 ## Settings

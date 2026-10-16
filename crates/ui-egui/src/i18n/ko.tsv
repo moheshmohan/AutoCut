@@ -2443,6 +2443,17 @@
 	Recover	복구
 	Recover Unsaved Changes	저장 안 된 변경 사항 복구
 	Recover unsaved changes from {when}?	{when}의 저장 안 된 변경 사항을 복구할까요?
+	The saved project is newer than this auto-save.	저장된 프로젝트가 이 자동 저장보다 최신입니다.
+	It was saved after the auto-save, by FilmCraft or another program. Recovering would replace it with older changes.	자동 저장 이후에 FilmCraft 또는 다른 프로그램에서 저장되었습니다. 복구하면 이전 변경 사항으로 바뀝니다.
+	The project file can't be found where it was saved.	저장된 위치에서 프로젝트 파일을 찾을 수 없습니다.
+	If it was moved or renamed, open it from its new location and check it before recovering.	이동하거나 이름을 바꿨다면 새 위치에서 열어 확인한 후 복구하세요.
+	The saved project could not be checked.	저장된 프로젝트를 확인할 수 없습니다.
+	It may have been saved after this auto-save. Open it and check it before recovering.	이 자동 저장 이후에 저장되었을 수 있습니다. 열어서 확인한 후 복구하세요.
+	Auto-save from {snapshot}; project file last saved {saved}.	자동 저장: {snapshot}, 프로젝트 파일 마지막 저장: {saved}.
+	Open the saved project instead?	대신 저장된 프로젝트를 열까요?
+	You can still recover the changes from {when} later with File ▸ Recover Unsaved Changes…	{when}의 변경 사항은 나중에 복구할 수 있습니다: 파일 ▸ 저장 안 된 변경 사항 복구…
+	Open Saved Project	저장된 프로젝트 열기
+	Recover Anyway	그래도 복구
 	Recover Unsaved Changes…	저장 안 된 변경 사항 복구…
 	Recovery copy: {dir}	복구 사본: {dir}
 	Rectangle	사각형

@@ -453,6 +453,17 @@
 	Discard	Buang
 	Recover	Pulihkan
 	Not Now	Jangan Sekarang
+	The saved project is newer than this auto-save.	Proyek yang tersimpan lebih baru daripada simpanan otomatis ini.
+	It was saved after the auto-save, by FilmCraft or another program. Recovering would replace it with older changes.	Proyek ini disimpan setelah simpanan otomatis, oleh FilmCraft atau program lain. Memulihkan akan menggantinya dengan perubahan yang lebih lama.
+	The project file can't be found where it was saved.	Berkas proyek tidak ditemukan di lokasi penyimpanannya.
+	If it was moved or renamed, open it from its new location and check it before recovering.	Jika dipindahkan atau diganti namanya, buka dari lokasi barunya dan periksa sebelum memulihkan.
+	The saved project could not be checked.	Proyek yang tersimpan tidak dapat diperiksa.
+	It may have been saved after this auto-save. Open it and check it before recovering.	Proyek ini mungkin disimpan setelah simpanan otomatis ini. Buka dan periksa sebelum memulihkan.
+	Auto-save from {snapshot}; project file last saved {saved}.	Simpanan otomatis dari {snapshot}; berkas proyek terakhir disimpan {saved}.
+	Open the saved project instead?	Buka proyek yang tersimpan saja?
+	You can still recover the changes from {when} later with File ▸ Recover Unsaved Changes…	Anda masih dapat memulihkan perubahan dari {when} nanti melalui Berkas ▸ Pulihkan Perubahan yang Belum Disimpan…
+	Open Saved Project	Buka Proyek Tersimpan
+	Recover Anyway	Tetap Pulihkan
 	Are you sure you want to discard your changes to '{file}'?	Yakin ingin membuang perubahan Anda pada '{file}'?
 	Yes	Ya
 	No	Tidak

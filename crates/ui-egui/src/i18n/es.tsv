@@ -446,6 +446,17 @@
 	Discard	Descartar
 	Recover	Recuperar
 	Not Now	Ahora no
+	The saved project is newer than this auto-save.	El proyecto guardado es más reciente que este guardado automático.
+	It was saved after the auto-save, by FilmCraft or another program. Recovering would replace it with older changes.	Se guardó después del guardado automático, desde FilmCraft u otro programa. Recuperar lo reemplazaría con cambios más antiguos.
+	The project file can't be found where it was saved.	No se encuentra el archivo del proyecto donde se guardó.
+	If it was moved or renamed, open it from its new location and check it before recovering.	Si se movió o se le cambió el nombre, ábrelo desde su nueva ubicación y revísalo antes de recuperar.
+	The saved project could not be checked.	No se pudo comprobar el proyecto guardado.
+	It may have been saved after this auto-save. Open it and check it before recovering.	Puede que se haya guardado después de este guardado automático. Ábrelo y revísalo antes de recuperar.
+	Auto-save from {snapshot}; project file last saved {saved}.	Guardado automático del {snapshot}; archivo del proyecto guardado por última vez el {saved}.
+	Open the saved project instead?	¿Abrir el proyecto guardado en su lugar?
+	You can still recover the changes from {when} later with File ▸ Recover Unsaved Changes…	Puedes recuperar los cambios de {when} más tarde con Archivo ▸ Recuperar cambios no guardados…
+	Open Saved Project	Abrir proyecto guardado
+	Recover Anyway	Recuperar de todos modos
 	Are you sure you want to discard your changes to '{file}'?	¿Seguro que quieres descartar los cambios en '{file}'?
 	Yes	Sí
 	No	No
