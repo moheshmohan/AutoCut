@@ -113,8 +113,22 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    - **the mix**: the voice matched to -16 LUFS (dialogue), the shots' sound (ambience, -27)
      and a generated music bed (`audio.generate`, -24) ducked under it, effects at -23, and a
      hard limiter at -1 dBFS on the mix;
+   - **subtitles** (`subtitles.rs`): each narration line as written, split into cues of at most
+     two 42-character lines, 1–7 s each, at sentence ends first and then clauses (a small
+     dynamic programme over the words), timed in proportion to the characters within the line's
+     clip (a cue too short to read stays up into the pause after it, never into the next line);
+     on a `Subtitles` caption track of the sequence (shown in the app, not burned in);
    - optionally the YouTube 1080p export, with `<out>.chapters.txt` (intro, each year, outro —
-     YouTube's rules: from 0:00, at least three, none under 10 s) for the description.
+     YouTube's rules: from 0:00, at least three, none under 10 s) for the description, and the
+     subtitles as `<out>.srt` and `<out>.vtt` (`captions.export`) to upload with it.
+
+   **Spoken vs shown.** Text-to-speech misreads names that are spelled for the eye ("Zaku II",
+   "NodeMCU", "Go1", "DP World"); respelling them in the script fixes the voice but puts "Zaku
+   Two" in the subtitles. A plan's script keeps the two apart: `pronounce` maps written forms to
+   what the voice says (`{"Zaku II": "Zaku Two", "NodeMCU": "Node M C U", "Go1": "Go One"}`;
+   whole words, case as written, longest first, applied to every spoken part), and `say` gives
+   a part its own spoken version by `"intro"`, `"outro"` or entry number (`{"3": "…"}`). The
+   voice reads the spoken text; subtitles (and everything on screen) show the script as written.
 
    Narration goes through `tts.create`, which looks in the engine's narration cache
    (`<data dir>/narration-cache`, see `crates/tts/README.md`) before synthesizing: a rebuild with
@@ -142,7 +156,8 @@ filmcraft-cli showcase --report robots.json --title "Every Robot I've Met" --voi
     --plan --script-out plan.json            # review the entries and the script…
 filmcraft-cli showcase --report robots.json --script-in plan.json --voice clone:me \
     --project p.fcproj --save --export ~/Movies/AutoCut/robots.mp4
-                                             # …and robots.qa.json / robots.qa.png beside it
+                                             # …and robots.qa.json / robots.qa.png, robots.srt /
+                                             # robots.vtt and robots.chapters.txt beside it
 ```
 
 A reviewed plan may hold `entries` alone (drop, merge or relabel robots, fix a shot's `best`

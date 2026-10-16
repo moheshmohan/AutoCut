@@ -28,6 +28,7 @@ pub mod planner;
 pub mod qa;
 pub mod runner;
 pub mod showcase;
+pub mod subtitles;
 pub mod validate;
 
 use std::future::Future;

@@ -201,7 +201,7 @@ impl PlanDoc {
         if entries.is_empty() {
             return Err(AutoCutError::Invalid("no entry is included: include at least one".into()));
         }
-        let script = self.script.clone().unwrap_or(Script { intro: String::new(), lines: Vec::new(), outro: String::new(), templated: 0 });
+        let script = self.script.clone().unwrap_or_default();
         let lines = entries
             .iter()
             .zip(&heads)
@@ -213,7 +213,16 @@ impl PlanDoc {
         } else {
             script.outro.clone()
         };
-        Ok((opts, entries, Script { intro, lines, outro, templated: script.templated }))
+        // spoken versions follow their entry when others are left out or merged: `say` is keyed
+        // by entry number, and the entries are numbered afresh
+        let mut say: std::collections::BTreeMap<String, String> =
+            script.say.iter().filter(|(k, _)| k.as_str() == "intro" || k.as_str() == "outro").map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (k, &h) in heads.iter().enumerate() {
+            if let Some(v) = script.say.get(&(h + 1).to_string()) {
+                say.insert((k + 1).to_string(), v.clone());
+            }
+        }
+        Ok((opts, entries, Script { intro, lines, outro, templated: script.templated, pronounce: script.pronounce.clone(), say }))
     }
 }
 
@@ -762,6 +771,29 @@ mod tests {
         let lone = vec![ReviewEntry { merge_previous: true, ..ReviewEntry::new(entry(1, "x", vec![shot(1, 1.0, 1, 0)])) }];
         assert_eq!(resolve(&lone).1, vec![0]);
         assert!(resolve(&[]).0.is_empty());
+    }
+
+    #[test]
+    fn spoken_versions_follow_their_entries_through_the_review() {
+        let plan: PlanDoc = serde_json::from_value(json!({
+            "entries": [
+                serde_json::to_value(entry(1, "Zaku II model kit", vec![shot(1, 10.0, 1, 0)])).unwrap(),
+                serde_json::to_value(entry(2, "a person", vec![shot(2, 10.0, 1, 0)])).unwrap(),
+                serde_json::to_value(entry(3, "DP World Promobot", vec![shot(3, 10.0, 1, 0)])).unwrap(),
+            ],
+            "script": {"intro": "Hi.", "lines": ["I built a Zaku II.", "Someone.", "A Promobot."], "outro": "Bye.",
+                       "pronounce": {"Zaku II": "Zaku Two"}, "say": {"intro": "Hello!", "1": "I built it.", "3": "A Promobot from D P World."}},
+        }))
+        .unwrap();
+        let mut v = serde_json::to_value(&plan).unwrap();
+        v["entries"][1]["include"] = json!(false);
+        let plan: PlanDoc = serde_json::from_value(v).unwrap();
+        let (_, entries, script) = plan.resolve().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(script.pronounce.get("Zaku II").map(String::as_str), Some("Zaku Two"));
+        // the third entry is now the second: its spoken version moves with it
+        let say: Vec<(&str, &str)> = script.say.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(say, vec![("1", "I built it."), ("2", "A Promobot from D P World."), ("intro", "Hello!")]);
     }
 
     #[test]

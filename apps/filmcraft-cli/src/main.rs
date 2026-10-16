@@ -103,8 +103,15 @@ SUBCOMMANDS
                                 under the voice (cloned voices too), an outro; --plan prints the
                                 entries and the local model's script without building;
                                 --script-in takes a reviewed plan (entries and script, or entries
-                                alone for the model to write); with --export, YouTube chapters
-                                go to <out>.chapters.txt, and --upload then sends the export to
+                                alone for the model to write); a plan's script may hold
+                                \"pronounce\" ({\"Zaku II\": \"Zaku Two\"}: respellings the voice
+                                reads, whole words) and \"say\" ({\"3\": \"...\", \"outro\": \"...\"}:
+                                what the voice says instead of a part), while subtitles show the
+                                text as written;
+                                with --export, YouTube chapters go to <out>.chapters.txt and the
+                                narration's subtitles to <out>.srt and <out>.vtt (at most 2 lines
+                                of 42 characters, 1-7 s a cue; also on the sequence's Subtitles
+                                caption track), and --upload then sends the export to
                                 your Google Photos library (as `photos upload`). Spoken lines are
                                 cached in the data directory, so a rebuild synthesizes only the
                                 lines that changed. QA (on with --export, --qa without one, --no-qa
@@ -737,6 +744,9 @@ async fn cli() {
                             Ok(()) => diag(format_args!("showcase: chapters in {}", txt.display())),
                             Err(e) => diag(format_args!("showcase: {}: {e}", txt.display())),
                         }
+                    }
+                    for file in &built.subtitle_files {
+                        diag(format_args!("showcase: subtitles in {file}"));
                     }
                     let mut out = serde_json::to_value(&built).unwrap_or_default();
                     out["youtubeChapters"] = json!(chapters);

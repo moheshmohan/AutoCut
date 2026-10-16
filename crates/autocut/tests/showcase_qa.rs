@@ -174,6 +174,7 @@ async fn a_clean_showcase_has_no_errors() {
         lines: vec!["One.".into(), "Two.".into(), "Three.".into()],
         outro: "Thanks for watching.".into(),
         templated: 0,
+        ..Script::default()
     };
     let opts = Options { title: "Robots".into(), width: 640, height: 360, ..Options::default() };
     let built = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
@@ -213,6 +214,7 @@ async fn a_narrated_showcase_keeps_the_voice_on_top() {
         lines: vec![long.into(), long.into(), "A small red toy robot that I found at a market stall.".into()],
         outro: "Bye for now, see you soon at the next one.".into(),
         templated: 0,
+        ..Script::default()
     };
     let opts = Options { title: "Robots".into(), voice: Some("basic-male".into()), width: 640, height: 360, ..Options::default() };
     let built = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");

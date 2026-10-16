@@ -12,17 +12,24 @@
 //!    over a blurred, dimmed copy of themselves), a name/date lower third, a transition from a
 //!    rotating set of dramatic ones with a whoosh, the year as a title card with an impact
 //!    whenever it changes; the counter (`graphics.counter`) across the whole show; a generated
-//!    music bed (`audio.generate`) ducked under the narration; an outro card. Then (optionally)
-//!    an export with the YouTube preset.
+//!    music bed (`audio.generate`) ducked under the narration; an outro card; subtitles of the
+//!    narration ([`crate::subtitles`]) on a caption track. Then (optionally) an export with the
+//!    YouTube preset, and the subtitles beside it as `.srt` and `.vtt`.
+//!
+//! The script is written to be read: the voice says it with the show's respellings
+//! ([`Script::pronounce`], [`Script::say`]), the subtitles show it as written.
 //!
 //! Everything goes through engine commands on the [`Executor`], so the same build drives the
 //! headless CLI and the live app.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::analyze::ClipFacts;
 use crate::llm::ChatModel;
+use crate::subtitles::Cue;
 use crate::{AutoCutError, Executor};
 
 const TPS: f64 = filmcraft_time::TICKS_PER_SECOND as f64;
@@ -187,8 +194,10 @@ pub struct Entry {
     pub shots: Vec<Shot>,
 }
 
-/// The voice-over.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+/// The voice-over, as written to be read: subtitles show it as it is, and the voice reads it
+/// with the show's respellings ([`Script::pronounce`]) or a line's own spoken version
+/// ([`Script::say`]).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Script {
     pub intro: String,
     pub lines: Vec<String>,
@@ -196,6 +205,66 @@ pub struct Script {
     /// Lines the model did not deliver, filled from templates.
     #[serde(default)]
     pub templated: usize,
+    /// How the voice says what the text spells for the eye (`{"Zaku II": "Zaku Two", "NodeMCU":
+    /// "Node M C U"}`): every spoken part has these replaced — whole words, case as written,
+    /// longest first — and nothing shown does.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pronounce: BTreeMap<String, String>,
+    /// What the voice says instead of a part, when a respelling is not enough: by `"intro"`,
+    /// `"outro"` or an entry's number (`"3"`). Subtitles still show the part as written.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub say: BTreeMap<String, String>,
+}
+
+impl Script {
+    /// What the voice says for `text`, a part of the script shown as written under `key`
+    /// (`"intro"`, `"outro"` or an entry's number): its [`Script::say`] when it has one, then
+    /// the show's respellings.
+    pub fn spoken(&self, key: &str, text: &str) -> String {
+        let said = self.say.get(key).map(String::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(text);
+        respell(said, &self.pronounce)
+    }
+}
+
+/// Most respellings applied, and the longest word replaced (a plan is user input).
+const MAX_RESPELLINGS: usize = 2000;
+const MAX_RESPELLED: usize = 200;
+
+/// `text` with every whole-word occurrence of a key of `map` replaced by its value: the longest
+/// key first at each place, case as written, never inside a longer word ("Go1" in "Go1," but not
+/// in "Go10"), and never again in what a replacement wrote.
+pub fn respell(text: &str, map: &BTreeMap<String, String>) -> String {
+    let mut keys: Vec<(&str, &str)> =
+        map.iter().filter(|(k, _)| !k.trim().is_empty() && k.len() <= MAX_RESPELLED).take(MAX_RESPELLINGS).map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    if keys.is_empty() {
+        return text.to_string();
+    }
+    keys.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(b.0)));
+    let word = |c: char| c.is_alphanumeric();
+    let mut out = String::with_capacity(text.len());
+    let mut prev: Option<char> = None;
+    let mut i = 0;
+    while let Some(rest) = text.get(i..) {
+        let Some(c) = rest.chars().next() else { break };
+        let hit = keys.iter().find(|(k, _)| {
+            rest.starts_with(k)
+                && !(k.starts_with(word) && prev.is_some_and(word))
+                && !(k.ends_with(word) && rest.get(k.len()..).and_then(|r| r.chars().next()).is_some_and(word))
+        });
+        match hit {
+            Some((k, v)) => {
+                out.push_str(v);
+                prev = k.chars().next_back();
+                i += k.len();
+            }
+            None => {
+                out.push(c);
+                prev = Some(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
 }
 
 const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -434,7 +503,7 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
     if outro.split_whitespace().count() < 4 {
         outro = format!("That's {} {}s so far. Thanks for watching, and see you at the next one.", entries.len(), opts.subject);
     }
-    Script { intro, lines, outro, templated }
+    Script { intro, lines, outro, templated, ..Script::default() }
 }
 
 /// "2020 – 2026" for the entries' years.
@@ -474,6 +543,13 @@ pub struct Built {
     pub export: Option<Value>,
     /// Where each entry and its shots landed on the timeline (what [`crate::qa`] checks).
     pub layout: Vec<PlacedEntry>,
+    /// Each narration line as placed: when it is spoken and its text as shown (not respelled).
+    pub narration: Vec<Cue>,
+    /// The subtitles ([`crate::subtitles::cues`] of the narration), also on the sequence's
+    /// caption track "Subtitles".
+    pub subtitles: Vec<Cue>,
+    /// The subtitle files written next to the export (`<out>.srt`, `<out>.vtt`).
+    pub subtitle_files: Vec<String>,
 }
 
 /// An entry as built: its span on the timeline and its shots, seconds.
@@ -709,19 +785,54 @@ async fn title(ex: &dyn Executor, track: usize, fps: f64, text: &str, t: f64, du
 struct Narrations {
     clips: Vec<u64>,
     cached: usize,
+    /// Each line placed: when, and its shown text.
+    lines: Vec<Cue>,
 }
 
-/// Narrate `text` at `t` on the voice track; its length in seconds (0 without a voice).
-async fn narrate(ex: &dyn Executor, tr: &Tracks, voice: Option<&str>, text: &str, t: f64, narrations: &mut Narrations) -> Result<f64, AutoCutError> {
+/// Narrate a part of the script at `t` on the voice track — the voice reads `say`, the
+/// subtitles show `shown` — and return its length in seconds (0 without a voice).
+async fn narrate(
+    ex: &dyn Executor,
+    tr: &Tracks,
+    voice: Option<&str>,
+    say: &str,
+    shown: &str,
+    t: f64,
+    narrations: &mut Narrations,
+) -> Result<f64, AutoCutError> {
     let Some(voice) = voice else { return Ok(0.0) };
-    let r = run(ex, "tts.create", json!({"text": text, "voice": voice, "time": ticks(t), "track": tr.voice})).await?;
+    let r = run(ex, "tts.create", json!({"text": say, "voice": voice, "time": ticks(t), "track": tr.voice})).await?;
     if let Some(c) = r["clip"].as_u64() {
         narrations.clips.push(c);
     }
     if r["cached"].as_bool() == Some(true) {
         narrations.cached += 1;
     }
-    Ok(r["duration"].as_f64().map(|d| d / TPS).unwrap_or(0.0))
+    let seconds = r["duration"].as_f64().map(|d| d / TPS).filter(|d| d.is_finite() && *d > 0.0).unwrap_or(0.0);
+    if seconds > 0.0 {
+        narrations.lines.push(Cue { start: t, end: t + seconds, text: shown.to_string() });
+    }
+    Ok(seconds)
+}
+
+/// The subtitles on a new caption track of the sequence ("Subtitles", shown in the app, never
+/// burned into the export), one caption per cue; its id. A step that fails is noted, never
+/// fatal: the video is still right without subtitles.
+async fn caption_track(ex: &dyn Executor, cues: &[Cue], notes: &mut Vec<String>) -> Option<u64> {
+    let track = match run(ex, "captions.newTrack", json!({"format": "Subtitle", "name": "Subtitles", "language": "en"})).await {
+        Ok(r) => r["track"].as_u64()?,
+        Err(e) => {
+            notes.push(format!("subtitles: {e}"));
+            return None;
+        }
+    };
+    for c in cues {
+        let p = json!({"track": track, "text": c.text, "time": ticks(c.start), "durationSeconds": c.end - c.start});
+        if let Err(e) = run(ex, "captions.add", p).await {
+            notes.push(format!("subtitles: at {:.2}s: {e}", c.start));
+        }
+    }
+    Some(track)
 }
 
 /// Shortest window cut from a stretch where the subject is in view, seconds.
@@ -840,7 +951,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // ---- intro: a cold open — a montage of robots from across the years cut on the beat,
     // the title over it, a riser into an impact
     let intro_voice_at = 2.2;
-    let intro_spoken = narrate(ex, &tr, voice, &script.intro, intro_voice_at, &mut narrations).await?;
+    let intro_spoken = narrate(ex, &tr, voice, &script.spoken("intro", &script.intro), &script.intro, intro_voice_at, &mut narrations).await?;
     // the voice track's next free moment: a line never starts over the last one
     let mut voice_free_at = intro_voice_at + intro_spoken;
     let intro_len = on_frame((intro_voice_at + intro_spoken + 0.8).max(6.0), tr.fps);
@@ -891,7 +1002,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let lead = if new_year { 1.4 } else { 0.5 };
         let line = script.lines.get(k).cloned().unwrap_or_else(|| template_line(e));
         let voice_at = (t + lead).max(voice_free_at + 0.15);
-        let spoken = narrate(ex, &tr, voice, &line, voice_at, &mut narrations).await?;
+        let spoken = narrate(ex, &tr, voice, &script.spoken(&e.number.to_string(), &line), &line, voice_at, &mut narrations).await?;
         if spoken > 0.0 {
             voice_free_at = voice_at + spoken;
         }
@@ -987,7 +1098,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // ---- outro: the total, over a blurred shot of the latest one, with the closing words
     built.chapters.push(Chapter { seconds: t, title: "Outro".into() });
     let outro_voice_at = (t + 0.8).max(voice_free_at + 0.15);
-    let outro_spoken = narrate(ex, &tr, voice, &script.outro, outro_voice_at, &mut narrations).await?;
+    let outro_spoken = narrate(ex, &tr, voice, &script.spoken("outro", &script.outro), &script.outro, outro_voice_at, &mut narrations).await?;
     let outro_len = (outro_voice_at - t + outro_spoken + 1.5).max(5.0);
     if let Some(h0) = entries.last().and_then(|e| e.shots.first()) {
         let len = outro_len.min((h0.clip_seconds - 0.4).max(1.0));
@@ -1052,9 +1163,23 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     mix_down(ex, &mix, &narrations.clips, music, &mut built.notes).await;
     built.narration_lines = narrations.clips.len();
     built.narration_cached = narrations.cached;
+    // ---- subtitles: what the narration says, as written, on a caption track
+    built.subtitles = crate::subtitles::cues(&narrations.lines, tr.fps);
+    built.narration = narrations.lines;
+    let captions = if built.subtitles.is_empty() { None } else { caption_track(ex, &built.subtitles, &mut built.notes).await };
     if let Some(path) = &opts.export {
         progress("exporting (YouTube 1080p)");
         built.export = Some(run(ex, "file.exportMedia", json!({"path": path, "preset": "YouTube 1080p Full HD", "wait": true})).await?);
+        // the subtitles next to the export, for YouTube (SubRip) and the web (WebVTT)
+        if let Some(track) = captions {
+            for ext in ["srt", "vtt"] {
+                let file = std::path::Path::new(path).with_extension(ext).to_string_lossy().into_owned();
+                match run(ex, "captions.export", json!({"path": file, "track": track})).await {
+                    Ok(_) => built.subtitle_files.push(file),
+                    Err(e) => built.notes.push(format!("subtitles: {e}")),
+                }
+            }
+        }
     }
     Ok(built)
 }
@@ -1301,6 +1426,46 @@ mod tests {
         // a title ending where the next starts: the same frame
         let (a, b) = (on_frame(2.3 + (7.73 - 2.3), 30.0), on_frame(7.73, 30.0));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn the_voice_reads_respellings_and_the_text_stays_as_written() {
+        let map: BTreeMap<String, String> =
+            [("Zaku II", "Zaku Two"), ("NodeMCU", "Node M C U"), ("Go1", "Go One"), ("DP World", "D P World"), ("OnRobot", "On Robot"), ("Go", "Gee Oh")]
+                .into_iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect();
+        assert_eq!(respell("The Zaku II and a NodeMCU.", &map), "The Zaku Two and a Node M C U.");
+        // whole words only, longest key first, case as written
+        assert_eq!(respell("Go1, Go10 and Go!", &map), "Go One, Go10 and Gee Oh!");
+        assert_eq!(respell("dp world vs DP World's booth", &map), "dp world vs D P World's booth");
+        assert_eq!(respell("OnRobotics by OnRobot", &map), "OnRobotics by On Robot");
+        // a replacement is never replaced again, and text without keys is untouched
+        let echo: BTreeMap<String, String> = [("A".to_string(), "A A".to_string())].into_iter().collect();
+        assert_eq!(respell("A B", &echo), "A A B");
+        assert_eq!(respell("Grüße, Zaku II!", &map), "Grüße, Zaku Two!");
+        assert_eq!(respell("nothing here", &BTreeMap::new()), "nothing here");
+        // hostile keys: empty or blank ones are ignored
+        let odd: BTreeMap<String, String> = [("".to_string(), "x".to_string()), (" ".to_string(), "y".to_string())].into_iter().collect();
+        assert_eq!(respell("a b", &odd), "a b");
+        // `say` replaces a part, and is respelled too; a blank one is ignored
+        let s = Script {
+            intro: "Hi.".into(),
+            lines: vec!["The Zaku II.".into()],
+            outro: "Bye.".into(),
+            pronounce: map,
+            say: [("1".to_string(), "My Zaku II model kit.".to_string()), ("outro".to_string(), "  ".to_string())].into_iter().collect(),
+            ..Script::default()
+        };
+        assert_eq!(s.spoken("1", "The Zaku II."), "My Zaku Two model kit.");
+        assert_eq!(s.spoken("intro", "Hi."), "Hi.");
+        assert_eq!(s.spoken("outro", "Bye."), "Bye.");
+        // a plan from before: no `pronounce`, no `say`; and none written when there are none
+        let old: Script = serde_json::from_value(json!({"intro": "a", "lines": [], "outro": "b"})).unwrap();
+        assert!(old.pronounce.is_empty() && old.say.is_empty());
+        let v = serde_json::to_value(&old).unwrap();
+        assert!(v.get("pronounce").is_none() && v.get("say").is_none(), "{v}");
+        assert!(serde_json::to_value(&s).unwrap()["pronounce"]["Zaku II"] == "Zaku Two");
     }
 
     #[test]

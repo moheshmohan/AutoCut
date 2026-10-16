@@ -47,6 +47,7 @@ async fn builds_a_counted_showcase_on_the_demo_media() {
         lines: vec!["One.".into(), "Two.".into(), "Three.".into()],
         outro: "Thanks for watching.".into(),
         templated: 0,
+        ..Script::default()
     };
     let opts = Options { title: "Robots".into(), ..Options::default() };
     let mut lines = Vec::new();
@@ -87,7 +88,13 @@ async fn narration_never_overlaps_and_short_footage_is_slowed_to_fit() {
     let facts = vec![fact(5, "Pepper humanoid robot", 1_600_000_000, 3.5), fact(6, "Boston Dynamics Spot", 1_600_100_000, 3.5)];
     let entries = showcase::group(&facts, "robot", 0.3);
     let long = "This one walked right up to me in the middle of a very busy hall and then it started to dance for everyone who was watching it.";
-    let script = Script { intro: "Hello and welcome.".into(), lines: vec![long.into(), long.into()], outro: "Bye for now, see you soon.".into(), templated: 0 };
+    let script = Script {
+        intro: "Hello and welcome.".into(),
+        lines: vec![long.into(), long.into()],
+        outro: "Bye for now, see you soon.".into(),
+        templated: 0,
+        ..Script::default()
+    };
     let opts = Options { title: "Robots".into(), voice: Some("basic-male".into()), ..Options::default() };
     let built = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
     assert_eq!(built.narration_lines, 4, "intro, two lines, outro: {built:?}");
@@ -114,4 +121,68 @@ async fn narration_never_overlaps_and_short_footage_is_slowed_to_fit() {
     assert!(es.to_string().contains("dialogue") || es.to_string().contains("Dialogue"), "{es}");
     let mixer = ex.execute("mixer.inspect", json!({})).await.unwrap();
     assert!(mixer.to_string().contains("hard_limiter"), "{mixer}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_voice_says_respellings_and_the_subtitles_show_the_text() {
+    let ex = demo();
+    let facts = vec![fact(5, "Zaku II model kit", 1_600_000_000, 12.0), fact(6, "NodeMCU board", 1_665_741_668, 12.0)];
+    let entries = showcase::group(&facts, "robot", 0.3);
+    let script = Script {
+        intro: "Every robot I have met, in order.".into(),
+        lines: vec![
+            "This is the Zaku II, a model kit I built over three long weekends in March. It still stands on my desk.".into(),
+            "A NodeMCU board drives this little Go1 replica.".into(),
+        ],
+        outro: "Thanks for watching.".into(),
+        pronounce: [("Zaku II", "Zaku Two"), ("NodeMCU", "Node M C U"), ("Go1", "Go One")].into_iter().map(|(a, b)| (a.into(), b.into())).collect(),
+        say: [("outro".to_string(), "Thanks for watching, see you at the next one.".to_string())].into_iter().collect(),
+        ..Script::default()
+    };
+    let opts = Options { title: "Robots".into(), voice: Some("basic-male".into()), width: 640, height: 360, ..Options::default() };
+    let built = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
+    assert!(built.notes.is_empty(), "{:?}", built.notes);
+    // the voice read the respellings and the outro's own spoken version…
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let mut said = Vec::new();
+    for c in seq["audio"][1]["items"].as_array().unwrap() {
+        let n = ex.execute("tts.inspect", json!({"clip": c["clip"]})).await.unwrap();
+        said.push(n["narration"]["text"].as_str().unwrap_or_default().to_string());
+    }
+    assert_eq!(said.len(), 4, "{said:?}");
+    assert!(said[1].contains("Zaku Two") && !said[1].contains("Zaku II"), "{said:?}");
+    assert!(said[2].contains("Node M C U") && said[2].contains("Go One"), "{said:?}");
+    assert_eq!(said[3], "Thanks for watching, see you at the next one.");
+    // …and the subtitles show the text as written, timed inside the narration
+    for c in &built.subtitles {
+        println!("{:7.3} → {:7.3}  {}", c.start, c.end, c.text.replace('\n', " / "));
+    }
+    let shown: String = built.subtitles.iter().map(|c| c.text.replace('\n', " ")).collect::<Vec<_>>().join(" ");
+    assert!(shown.contains("Zaku II,") && shown.contains("NodeMCU") && shown.contains("Go1") && !shown.contains("Zaku Two"), "{shown}");
+    assert!(shown.ends_with("Thanks for watching."), "{shown}");
+    assert_eq!(built.narration.len(), 4);
+    for c in &built.subtitles {
+        assert!(c.text.lines().count() <= 2 && c.text.lines().all(|l| l.chars().count() <= 42), "{c:?}");
+        assert!(c.end - c.start >= 1.0 - 1e-9 && c.end - c.start <= 7.0 + 1e-9, "{c:?}");
+        assert!(built.narration.iter().any(|l| c.start >= l.start - 1.0 / 30.0 && c.start < l.end), "a cue starts while its line is spoken: {c:?}");
+    }
+    for w in built.subtitles.windows(2) {
+        assert!(w[0].end <= w[1].start + 1e-9, "{w:?}");
+    }
+    assert!(built.subtitles.len() > built.narration.len(), "the long line is split: {:#?}", built.subtitles);
+    // on a caption track of the sequence, which exports as SubRip and WebVTT
+    let list = ex.execute("captions.list", json!({})).await.unwrap();
+    let track = &list["tracks"][0];
+    assert_eq!(track["name"], "Subtitles");
+    assert_eq!(track["captions"].as_array().map(Vec::len), Some(built.subtitles.len()));
+    let dir = std::env::temp_dir().join(format!("filmcraft-subtitles-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for ext in ["srt", "vtt"] {
+        let path = dir.join(format!("robots.{ext}"));
+        ex.execute("captions.export", json!({"path": path.to_string_lossy(), "track": track["id"]})).await.unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("Zaku II") && !text.contains("Zaku Two"), "{text}");
+        assert!(if ext == "vtt" { text.starts_with("WEBVTT") } else { text.starts_with('1') }, "{text}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
