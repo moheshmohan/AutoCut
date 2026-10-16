@@ -201,8 +201,16 @@ pub struct PhotosPickParams {
     /// is still authoritative.
     #[serde(default)]
     pub query: Option<String>,
-    /// With `query`: select every search result (the agent clicks the first tile and
-    /// Shift+clicks the last) instead of up to max_items tiles.
+    /// More searches (with or without `query`): the agent types them one after another into
+    /// ONE picking session in ONE browser tab — the selection accumulates — and presses Done
+    /// once; many run in as few sessions as the item cap (max_items, up to 2000) allows, each
+    /// taking up to 20 searches, and searches that did not fit come back as `left` for another
+    /// call. A search with no results is skipped. Date searches ("videos October 2022") are
+    /// selected by the picker's date groups. Use with `all` for whole results.
+    #[serde(default)]
+    pub queries: Option<Vec<String>>,
+    /// With `query`/`queries`: select every search result (the date groups of a date search,
+    /// else the first tile and a Shift+click on the last) instead of up to max_items tiles.
     #[serde(default)]
     pub all: Option<bool>,
     /// Skip picked items created before this date (YYYY-MM-DD); they are not downloaded.
@@ -441,6 +449,27 @@ async fn autocut_report(ex: &AutocutExecutor, prompt: &str, opts: filmcraft_auto
         .await
         .map_err(|e| AutomationError::Other(e.to_string()))
         .and_then(|r| serde_json::to_value(&r).map_err(|e| AutomationError::Other(e.to_string())))
+}
+
+/// The most searches one `googlephotos_pick` call takes.
+const MAX_PICK_QUERIES: usize = 1000;
+
+/// The files of a pick to import, what to report of each item (no short-lived download link),
+/// and how many came from the cache.
+fn picked_items(picked: &filmcraft_gphotos::Picked) -> (Vec<String>, Vec<Value>, usize) {
+    let paths = picked.fetched.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
+    let items = picked
+        .fetched
+        .iter()
+        .map(|f| {
+            let mut v = f.item.summary();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("path".into(), json!(f.path.to_string_lossy()));
+            }
+            v
+        })
+        .collect();
+    (paths, items, picked.fetched.iter().filter(|f| f.was_cached).count())
 }
 
 fn ok_json(v: &Value) -> CallToolResult {
@@ -836,12 +865,17 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Google Photos: pick and import",
-        description = "Open the Google Photos picker in the user's browser, wait for a selection and press Done, download the picks (cached under the app's data dir) and import them into the open project with file.import (a file the project already holds is reused, not imported twice). Google offers apps no server-side search of the library (retired 2025-03-31): the choice happens in the picker. Either the user chooses (tell them what to pick), or — pass `query` — a local vision agent (Qwen2.5-VL via Ollama) drives the picker itself: it types the query into the picker's own search, selects matching video tiles and presses Done; needs `ollama pull qwen2.5vl:7b` plus Screen Recording and Accessibility for this process, and its report comes back as `autopick`. Pass `album` instead to use a whole Google Photos album as the seed (the user curates it in Google Photos): the agent opens the album with that exact title in the picker and selects all of it (`videos_only` keeps only its videos); no matching album selects nothing. Items a user adds to an album are reachable only this way (the Library API shows apps only what they uploaded). If the wait runs out the result is `status: pending` with a `session` and `pickerUri`; call again with that `session` to keep waiting (with short client tool timeouts, start with wait_seconds 0, then resume). Videos download whole, so they can take a while. One-time setup: `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
+        description = "Open the Google Photos picker in the user's browser, wait for a selection and press Done, download the picks (cached under the app's data dir) and import them into the open project with file.import (a file the project already holds is reused, not imported twice). Google offers apps no server-side search of the library (retired 2025-03-31): the choice happens in the picker. Either the user chooses (tell them what to pick), or — pass `query` — a local vision agent (Qwen2.5-VL via Ollama) drives the picker itself: it types the query into the picker's own search, selects matching video tiles and presses Done; needs `ollama pull qwen2.5vl:7b` plus Screen Recording and Accessibility for this process, and its report comes back as `autopick`. Pass `queries` (and `all`) to run many searches — a list, or a sweep of a whole history such as one \"videos <Month> <Year>\" per month — in ONE picking session and ONE browser tab (the selection accumulates across searches; date searches are selected by the picker's date groups; a search with no results is skipped; Done once), in as few sessions as the item cap allows; searches that did not fit come back as `left`. The agent closes the picker tab when it finishes, and a session it gave up on is deleted. Pass `album` instead to use a whole Google Photos album as the seed (the user curates it in Google Photos): the agent opens the album with that exact title in the picker and selects all of it (`videos_only` keeps only its videos); no matching album selects nothing. Items a user adds to an album are reachable only this way (the Library API shows apps only what they uploaded). If the wait runs out the result is `status: pending` with a `session` and `pickerUri`; call again with that `session` to keep waiting (with short client tool timeouts, start with wait_seconds 0, then resume). Videos download whole, so they can take a while. One-time setup: `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
     async fn googlephotos_pick(&self, Parameters(p): Parameters<PhotosPickParams>) -> Result<CallToolResult, McpError> {
-        if p.album.as_deref().is_some_and(|a| !a.trim().is_empty()) && p.query.as_deref().is_some_and(|q| !q.trim().is_empty()) {
-            return Ok(fail("pass `query` (search) or `album` (a whole album), not both"));
+        let searching = p.query.as_deref().is_some_and(|q| !q.trim().is_empty()) || p.queries.as_ref().is_some_and(|q| q.iter().any(|q| !q.trim().is_empty()));
+        if p.album.as_deref().is_some_and(|a| !a.trim().is_empty()) && searching {
+            return Ok(fail("pass `query`/`queries` (searches) or `album` (a whole album), not both"));
+        }
+        let asked = p.query.iter().count().saturating_add(p.queries.as_ref().map_or(0, Vec::len));
+        if asked > MAX_PICK_QUERIES {
+            return Ok(fail(format!("at most {MAX_PICK_QUERIES} searches per call (got {asked}); the rest can go in the next call")));
         }
         let gp = match gphotos() {
             Ok(gp) => gp,
@@ -851,11 +885,8 @@ impl FilmcraftMcp {
         if let Some(d) = since.as_deref().filter(|d| !filmcraft_gphotos::is_day(d)) {
             return Ok(fail(format!("`since` wants a date like 2020-01-01, not `{d}`")));
         }
-        let query = p.query.filter(|q| !q.trim().is_empty());
+        let queries = filmcraft_screenagent::agent::clean_queries(p.query.into_iter().chain(p.queries.unwrap_or_default()).collect());
         let album = p.album.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
-        if query.is_some() && album.is_some() {
-            return Ok(fail("pass `query` (search) or `album` (a whole album), not both"));
-        }
         if let Some(a) = album.as_deref()
             && let Err(e) = filmcraft_gphotos::albums::clean_title(a)
         {
@@ -865,22 +896,51 @@ impl FilmcraftMcp {
         if videos_only && album.is_none() {
             return Ok(fail("`videos_only` goes with `album` (`query` always picks videos)"));
         }
+        let select_all = p.all.unwrap_or(false);
+        let max_items = |default_tiles: u32| p.max_items.unwrap_or(if select_all { filmcraft_gphotos::api::MAX_PICK } else { default_tiles });
+        if queries.len() > 1 {
+            if p.session.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+                return Ok(fail("`session` resumes one pick; it does not go with many `queries`"));
+            }
+            let req = crate::photos::Searches { queries, select_all, max_items: max_items(6), per_session: crate::photos::PER_SESSION };
+            let opts = filmcraft_gphotos::PickOptions {
+                max_items: None,
+                wait: std::time::Duration::from_secs(p.wait_seconds.unwrap_or(900)),
+                resume: None,
+                open_browser: true,
+                since,
+                videos_only: false,
+            };
+            let swept = match tokio::task::spawn_blocking(move || crate::photos::pick_searches(&gp, &opts, &req, &mut |_| {}, &|| false)).await {
+                Ok(s) => s,
+                Err(e) => return Ok(fail(format!("internal error: {e}"))),
+            };
+            let (paths, items, cached) = picked_items(&swept.picked);
+            let imported = if paths.is_empty() {
+                Err(crate::AutomationError::Other("nothing was picked".into()))
+            } else {
+                self.run("file.import", json!({"paths": paths, "reuse": true})).await
+            };
+            let v = json!({
+                "status": "done", "items": items, "downloaded": swept.picked.fetched.len().saturating_sub(cached), "cached": cached,
+                "failed": swept.picked.failed, "skipped": swept.picked.skipped, "imported": imported.as_ref().ok(),
+                "importError": imported.as_ref().err().map(|e| e.to_string()),
+                "sessions": swept.sessions, "left": swept.left, "stopped": swept.stopped,
+                "next": if swept.left.is_empty() { Value::Null } else { json!("call googlephotos_pick again with `queries` = `left` (and the same `all`) for the searches no session got to") },
+            });
+            let ok = imported.is_ok() && swept.picked.failed.is_empty() && swept.stopped.is_none();
+            return Ok(if ok { ok_json(&v) } else { CallToolResult::error(vec![Content::text(v.to_string())]) });
+        }
         let opts = filmcraft_gphotos::PickOptions {
             max_items: p.max_items,
-            wait: std::time::Duration::from_secs(p.wait_seconds.unwrap_or(if query.is_some() || album.is_some() { 900 } else { 300 })),
+            wait: std::time::Duration::from_secs(p.wait_seconds.unwrap_or(if !queries.is_empty() || album.is_some() { 900 } else { 300 })),
             resume: p.session.filter(|s| !s.trim().is_empty()),
             open_browser: true,
             since,
             videos_only,
         };
-        let request = match (query, album) {
-            (Some(query), _) => Some(filmcraft_screenagent::agent::Request {
-                queries: vec![query],
-                max_items: p.max_items.unwrap_or(6),
-                select_all: p.all.unwrap_or(false),
-                album: None,
-                videos_only: true,
-            }),
+        let request = match (queries.first(), album) {
+            (Some(_), _) => Some(filmcraft_screenagent::agent::Request { queries, max_items: max_items(6), select_all, album: None, videos_only: true }),
             (None, Some(title)) => Some(filmcraft_screenagent::agent::Request {
                 max_items: p.max_items.unwrap_or(filmcraft_gphotos::api::MAX_PICK),
                 ..crate::photos::album_request(&title, videos_only)
@@ -900,17 +960,19 @@ impl FilmcraftMcp {
             None => Value::Null,
         };
         if driven.nothing_to_pick() {
-            let session = match &driven.outcome {
-                filmcraft_gphotos::PickOutcome::Pending(s) => Some(s.id.clone()),
-                filmcraft_gphotos::PickOutcome::Done(_) => None,
-            };
             return Ok(fail(json!({
                 "status": "done", "error": "the agent found nothing to pick (no matching album or search result), so nothing was selected",
-                "autopick": autopick, "session": session,
+                "autopick": autopick,
             })));
         }
         let picked = match driven.outcome {
             filmcraft_gphotos::PickOutcome::Done(picked) => picked,
+            filmcraft_gphotos::PickOutcome::Pending(_) if driven.abandoned => {
+                return Ok(fail(json!({
+                    "status": "done", "error": "the agent did not finish the pick in time; its picking session was deleted and its tab closed",
+                    "autopick": autopick,
+                })));
+            }
             filmcraft_gphotos::PickOutcome::Pending(s) => {
                 return Ok(ok_json(&json!({
                     "status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time,
@@ -921,19 +983,7 @@ impl FilmcraftMcp {
         if picked.fetched.is_empty() {
             return Ok(fail(json!({"status": "done", "error": "nothing was picked or nothing could be downloaded", "failed": picked.failed})));
         }
-        let paths: Vec<String> = picked.fetched.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
-        let cached = picked.fetched.iter().filter(|f| f.was_cached).count();
-        let items: Vec<Value> = picked
-            .fetched
-            .iter()
-            .map(|f| {
-                let mut v = f.item.summary();
-                if let Some(o) = v.as_object_mut() {
-                    o.insert("path".into(), json!(f.path.to_string_lossy()));
-                }
-                v
-            })
-            .collect();
+        let (paths, items, cached) = picked_items(&picked);
         let imported = self.run("file.import", json!({"paths": paths, "reuse": true})).await;
         let ok = imported.is_ok() && picked.failed.is_empty();
         let v = json!({
@@ -1232,7 +1282,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done, or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -1418,6 +1468,7 @@ mod tests {
         assert!(props.contains_key("session"));
         assert!(props.contains_key("max_items"));
         assert!(props.contains_key("album") && props.contains_key("videos_only"), "properties: {props:?}");
+        assert_eq!(schema["properties"]["queries"]["type"], json!(["array", "null"]), "{schema}");
         assert!(schema["required"].as_array().is_none_or(|r| r.is_empty()), "{schema}");
     }
 
@@ -1430,6 +1481,15 @@ mod tests {
         let r = c.call(1, "googlephotos_pick", json!({"query": "robots", "album": "Robot showcase"})).await;
         assert_eq!(r["result"]["isError"], true, "{r}");
         assert!(r.to_string().contains("not both"), "{r}");
+        // many searches and an album: the same refusal
+        let r = c.call(2, "googlephotos_pick", json!({"queries": ["videos October 2022", "videos November 2022"], "album": "Robot showcase"})).await;
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        assert!(r.to_string().contains("not both"), "{r}");
+        // too many searches for one call: refused before the sign-in is looked at
+        let many: Vec<String> = (0..=MAX_PICK_QUERIES).map(|i| format!("q{i}")).collect();
+        let r = c.call(3, "googlephotos_pick", json!({"queries": many})).await;
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        assert!(r.to_string().contains("at most"), "{r}");
     }
 
     /// `googlephotos_upload` takes a required `path` and an optional `description` and `album`,

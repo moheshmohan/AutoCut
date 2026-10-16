@@ -3,7 +3,14 @@
 //! one place: the picking session (`filmcraft-gphotos`), the screen agent that selects in
 //! Google's picker (`filmcraft-screenagent`), and a wait for the selection that ends as soon as
 //! the agent is done without pressing Done, instead of waiting out the whole timeout.
+//!
+//! One tab, one session, many searches: a new session is shown in the picker tab Chrome already
+//! has open (macOS) rather than a new tab, the agent types every search of a pick into that one
+//! session and closes the tab when it is done, and a session the agent gave up on is deleted.
+//! Many searches — a list, or a sweep of a whole history — run in as few sessions as the item
+//! cap allows ([`pick_searches`]): what one session could not take goes to the next.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -11,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use filmcraft_autocut::album::{AlbumFetched, AlbumPick, AlbumSource};
 use filmcraft_gphotos::{GPhotosError, GooglePhotos, PickOptions, PickOutcome, Picked};
-use filmcraft_screenagent::agent::{Request, Summary};
+use filmcraft_screenagent::agent::{Request, Searched, Summary};
 
 /// How long an album pick waits for the agent to select the album and press Done.
 pub const ALBUM_WAIT: Duration = Duration::from_secs(900);
@@ -21,6 +28,9 @@ pub const ALBUM_WAIT: Duration = Duration::from_secs(900);
 pub struct Driven {
     pub outcome: PickOutcome,
     pub agent: Option<Result<Summary, String>>,
+    /// The session was abandoned (an agent drove it and nothing was picked) and Google confirmed
+    /// its deletion.
+    pub abandoned: bool,
 }
 
 impl Driven {
@@ -48,11 +58,54 @@ fn join(h: JoinHandle<Result<Summary, String>>) -> Result<Summary, String> {
     h.join().unwrap_or_else(|_| Err("the agent thread died".into()))
 }
 
+/// Show a new session's picker link: in the picker tab Chrome already has open (macOS) — with
+/// `agent` (an agent will drive the picker, so its eyes are there) an older tab's "Leave site?"
+/// is answered with Leave — else in a new tab of the default browser. Says how, or `None`.
+fn open_picker(uri: &str, agent: bool, notes: &mut Vec<String>) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use filmcraft_screenagent::tabs::{self, Reused};
+        let shell = filmcraft_screenagent::capture::OsShell;
+        let mut pause = |ms: u64| std::thread::sleep(Duration::from_millis(ms.min(10_000)));
+        let mut note = |l: &str| notes.push(l.to_string());
+        let reused = if agent {
+            let eyes = filmcraft_screenagent::ground::QwenGrounder::from_config(&filmcraft_screenagent::Config::from_env());
+            let mut hands = filmcraft_screenagent::act::MacActor::new(tabs::CHROME, Box::new(filmcraft_screenagent::capture::OsShell));
+            tabs::reuse_picker_tab(
+                &shell,
+                uri,
+                Some((&mut hands as &mut dyn filmcraft_screenagent::act::Act, &eyes as &dyn filmcraft_screenagent::ground::Ground)),
+                &mut pause,
+                &mut note,
+            )
+        } else {
+            tabs::reuse_picker_tab(&shell, uri, None, &mut pause, &mut note)
+        };
+        match reused {
+            Ok(Reused::Navigated { others }) => {
+                if others > 0 {
+                    notes.push(format!("{others} more Google Photos picker tab(s) are open in Chrome: `filmcraft-cli photos tidy` closes them"));
+                }
+                return Some("in the picker tab already open in Chrome".into());
+            }
+            Ok(Reused::Blocked) => notes
+                .push("the picker tab already open asks \"Leave site?\"; opening a new tab instead (`filmcraft-cli photos tidy` closes picker tabs)".into()),
+            Ok(Reused::NoTab) => {}
+            Err(e) => notes.push(format!("could not reuse the open picker tab ({e}); opening a new tab")),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (agent, notes);
+    filmcraft_gphotos::open_in_browser(uri).then(|| "in your browser".to_string())
+}
+
 /// Open (or resume) a picking session, let the screen agent (`request`; none: the user picks)
 /// drive Google's picker, and wait within `opts.wait` for the selection, then download it. The
-/// wait ends early once the agent finished without pressing Done (nothing will be picked: the
-/// outcome is then `Pending`, the session still open for the user), and when `cancelled()`.
-/// Blocking: HTTP, sleeps and the agent's thread.
+/// wait ends early once the agent finished without pressing Done (nothing will be picked), and
+/// when `cancelled()`. A session an agent drove that ends `Pending` is abandoned — the agent
+/// closed its tab — and deleted; one the user picks by hand stays open to resume. The picker is
+/// shown in the picker tab Chrome already has open when there is one. Blocking: HTTP, sleeps
+/// and the agent's thread.
 pub fn pick_driven(
     gp: &GooglePhotos,
     opts: &PickOptions,
@@ -60,7 +113,12 @@ pub fn pick_driven(
     progress: &mut dyn FnMut(&str),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Driven, GPhotosError> {
-    let prepared = gp.prepare(opts, progress)?;
+    let driven_by_agent = request.is_some();
+    let mut notes: Vec<String> = Vec::new();
+    let prepared = gp.prepare_with(opts, &mut |uri| open_picker(uri, driven_by_agent, &mut notes), progress)?;
+    for n in &notes {
+        progress(n);
+    }
     let mut agent = request.map(filmcraft_screenagent::agent::spawn);
     // the pick outcome is authoritative; the agent's own budget bounds it. Once the agent is
     // done without pressing Done (its search matched nothing, or it failed), nothing more will
@@ -89,7 +147,208 @@ pub fn pick_driven(
         (None, PickOutcome::Done(_)) if !cancelled() => agent.map(join),
         (None, _) => None,
     };
-    Ok(Driven { outcome, agent: report })
+    // a session the agent gave up on (it closed the tab) must not linger
+    let abandoned = match &outcome {
+        PickOutcome::Pending(s) if driven_by_agent => {
+            let deleted = gp.delete_session(&s.id).is_ok();
+            if deleted {
+                progress("deleted the unfinished picking session");
+            }
+            deleted
+        }
+        _ => false,
+    };
+    Ok(Driven { outcome, agent: report, abandoned })
+}
+
+/// Searches per picking session in a [`pick_searches`] (the agent's budget grows with each).
+pub const PER_SESSION: usize = filmcraft_screenagent::agent::MAX_SEARCHES;
+/// Tries of one search over the sessions of a [`pick_searches`].
+const MAX_TRIES: u32 = 2;
+/// The most sessions one [`pick_searches`] opens.
+const MAX_SESSIONS: usize = 200;
+
+/// The searches of a pick, in order, waiting for their sessions; how often each was tried.
+#[derive(Debug, Default)]
+pub struct Queue {
+    todo: VecDeque<String>,
+    tries: HashMap<String, u32>,
+    given_up: Vec<String>,
+}
+
+impl Queue {
+    pub fn new(queries: Vec<String>) -> Self {
+        Self { todo: queries.into(), ..Self::default() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.todo.is_empty()
+    }
+
+    /// The next session's searches: the first `n` (at least one) waiting.
+    pub fn next_batch(&mut self, n: usize) -> Vec<String> {
+        let n = n.clamp(1, self.todo.len().max(1));
+        self.todo.drain(..n.min(self.todo.len())).collect()
+    }
+
+    /// After a session: `left` (not reached) go back first, as they were; `retry` (tried, worth
+    /// another go) follow them, each at most [`MAX_TRIES`] times in all, then given up.
+    pub fn after(&mut self, left: &[String], retry: &[String]) {
+        let mut front: Vec<String> = left.to_vec();
+        for q in retry {
+            let tries = self.tries.entry(q.clone()).or_default();
+            *tries += 1;
+            if *tries >= MAX_TRIES {
+                self.given_up.push(q.clone());
+            } else if !front.contains(q) {
+                front.push(q.clone());
+            }
+        }
+        for q in front.into_iter().rev() {
+            self.todo.push_front(q);
+        }
+    }
+
+    /// Searches still waiting, then those given up on: what a next run should take.
+    pub fn remaining(&self) -> Vec<String> {
+        self.todo.iter().chain(&self.given_up).cloned().collect()
+    }
+}
+
+/// Many searches in as few picking sessions as the item cap allows.
+#[derive(Debug, Clone)]
+pub struct Searches {
+    pub queries: Vec<String>,
+    /// Select every result of each search (else tiles, up to `max_items` in all, one session).
+    pub select_all: bool,
+    /// The item cap of each session (Google's `maxItemCount`, 1–2000) — with `select_all` the
+    /// agent leaves searches for the next session rather than pass it.
+    pub max_items: u32,
+    /// Searches per session (1–[`PER_SESSION`]).
+    pub per_session: usize,
+}
+
+/// One session of a [`pick_searches`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionReport {
+    pub queries: Vec<String>,
+    pub searches: Vec<Searched>,
+    /// The header's count when Done was pressed.
+    pub selected: u32,
+    pub downloaded: usize,
+    pub cached: usize,
+    pub note: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// What a [`pick_searches`] brought.
+#[derive(Debug, Default)]
+pub struct Swept {
+    /// Every session's picks together (an item picked twice is there once).
+    pub picked: Picked,
+    pub sessions: Vec<SessionReport>,
+    /// Searches no session got to, or that failed twice: for a next run.
+    pub left: Vec<String>,
+    /// Why the sweep stopped early, if it did.
+    pub stopped: Option<String>,
+}
+
+/// Run `req.queries` through the picker in sessions of at most `req.per_session` searches, each
+/// driven by the agent ([`pick_driven`]): one tab, one Done and one download batch per session.
+/// What a session leaves (its cap, its budget) and what failed in it (once) go to the next
+/// session; a session whose agent failed outright (no grants, no model), or that got nowhere,
+/// ends the sweep with the rest left over. Without `select_all` only one session runs.
+pub fn pick_searches(gp: &GooglePhotos, opts: &PickOptions, req: &Searches, progress: &mut dyn FnMut(&str), cancelled: &dyn Fn() -> bool) -> Swept {
+    let mut queue = Queue::new(filmcraft_screenagent::agent::clean_queries(req.queries.clone()));
+    let mut out = Swept::default();
+    let per = req.per_session.clamp(1, PER_SESSION);
+    let cap = req.max_items.clamp(1, filmcraft_gphotos::api::MAX_PICK);
+    while !queue.is_empty() {
+        if cancelled() {
+            out.stopped = Some("cancelled".into());
+            break;
+        }
+        if out.sessions.len() >= MAX_SESSIONS {
+            out.stopped = Some(format!("stopped after {MAX_SESSIONS} sessions"));
+            break;
+        }
+        let batch = queue.next_batch(per);
+        let k = out.sessions.len() + 1;
+        progress(&format!("session {k}: {} search(es): {}", batch.len(), batch.join(" · ")));
+        let request = Request { queries: batch.clone(), max_items: cap, select_all: req.select_all, album: None, videos_only: true };
+        let plan_time = filmcraft_screenagent::agent::plan_for(request.clone()).timeout;
+        let wait = opts.wait.max(plan_time + filmcraft_screenagent::agent::DONE_GRACE + Duration::from_secs(60)).min(filmcraft_gphotos::MAX_WAIT);
+        let session_opts = PickOptions { max_items: Some(cap), wait, resume: None, open_browser: true, ..opts.clone() };
+        let mut report = SessionReport { queries: batch.clone(), searches: vec![], selected: 0, downloaded: 0, cached: 0, note: String::new(), error: None };
+        let driven = match pick_driven(gp, &session_opts, Some(request), progress, cancelled) {
+            Ok(d) => d,
+            Err(e) => {
+                report.error = Some(e.to_string());
+                out.sessions.push(report);
+                queue.after(&batch, &[]);
+                out.stopped = Some(format!("session {k}: {e}"));
+                break;
+            }
+        };
+        let summary = match driven.agent {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => {
+                // the agent itself failed (grants, model): every session would
+                report.error = Some(e.clone());
+                out.sessions.push(report);
+                queue.after(&[], &batch);
+                out.stopped = Some(format!("session {k}: the picker agent failed: {e}"));
+                break;
+            }
+            None => {
+                out.sessions.push(report);
+                queue.after(&batch, &[]);
+                out.stopped = Some(format!("session {k}: the agent did not report (cancelled, or out of time)"));
+                break;
+            }
+        };
+        report.searches = summary.searches.clone();
+        report.selected = summary.selected;
+        report.note = summary.note.clone();
+        match driven.outcome {
+            PickOutcome::Done(picked) => {
+                report.cached = picked.fetched.iter().filter(|f| f.was_cached).count();
+                report.downloaded = picked.fetched.len().saturating_sub(report.cached);
+                merge(&mut out.picked, picked);
+                queue.after(&summary.left, &summary.retry());
+            }
+            PickOutcome::Pending(_) => {
+                // nothing came of it: what it selected is worth another go, what it skipped is not
+                let retry: Vec<String> =
+                    summary.searches.iter().filter(|s| s.outcome != filmcraft_screenagent::agent::Outcome::NoResults).map(|s| s.query.clone()).collect();
+                queue.after(&summary.left, &retry);
+            }
+        }
+        let got_somewhere = !summary.searches.is_empty();
+        out.sessions.push(report);
+        if !got_somewhere {
+            out.stopped = Some(format!("session {k} did not get through a single search"));
+            break;
+        }
+        if !req.select_all {
+            break; // tiles up to max_items in all: one session
+        }
+    }
+    out.left = queue.remaining();
+    out
+}
+
+/// Add a session's picks to the sweep's (an item already there is not added twice).
+fn merge(into: &mut Picked, more: Picked) {
+    for f in more.fetched {
+        if !into.fetched.iter().any(|g| g.item.id == f.item.id) {
+            into.fetched.push(f);
+        }
+    }
+    into.skipped.extend(more.skipped);
+    into.failed.extend(more.failed);
+    into.session_deleted = more.session_deleted;
 }
 
 /// Whether picking can start, from what is on disk (no network): the OAuth client and a sign-in.
@@ -137,23 +396,17 @@ impl AlbumSource for PickerAlbums {
         let driven = pick_driven(&gp, &opts, Some(album_request(&title, req.videos_only)), progress, cancelled).map_err(|e| e.to_string())?;
         let note = driven.agent_note();
         if cancelled() {
-            if let PickOutcome::Pending(s) = &driven.outcome {
-                let _ = gp.delete_session(&s.id);
-            }
-            return Err("cancelled".into());
+            return Err("cancelled".into()); // a pending session is deleted already
         }
         let nothing = driven.nothing_to_pick();
         match driven.outcome {
             PickOutcome::Done(picked) => Ok(fetched(picked, note)),
-            PickOutcome::Pending(s) => {
-                let _ = gp.delete_session(&s.id);
-                Err(match (nothing, note) {
-                    (true, Some(n)) => format!("the album \"{title}\" had nothing to pick: {n}"),
-                    (true, None) => format!("the album \"{title}\" had nothing to pick"),
-                    (false, Some(n)) => format!("nothing was picked from the album \"{title}\" in time ({n})"),
-                    (false, None) => format!("nothing was picked from the album \"{title}\" in time"),
-                })
-            }
+            PickOutcome::Pending(_) => Err(match (nothing, note) {
+                (true, Some(n)) => format!("the album \"{title}\" had nothing to pick: {n}"),
+                (true, None) => format!("the album \"{title}\" had nothing to pick"),
+                (false, Some(n)) => format!("nothing was picked from the album \"{title}\" in time ({n})"),
+                (false, None) => format!("nothing was picked from the album \"{title}\" in time"),
+            }),
         }
     }
 }
@@ -180,16 +433,63 @@ mod tests {
             expire_time: None,
         };
         let summary = |done| Summary { done_pressed: done, note: "no album titled Robots".into(), ..Summary::default() };
-        let d = Driven { outcome: PickOutcome::Pending(session.clone()), agent: Some(Ok(summary(false))) };
+        let d = Driven { outcome: PickOutcome::Pending(session.clone()), agent: Some(Ok(summary(false))), abandoned: true };
         assert!(d.nothing_to_pick());
         assert_eq!(d.agent_note().as_deref(), Some("no album titled Robots"));
-        let d = Driven { outcome: PickOutcome::Pending(session.clone()), agent: Some(Ok(summary(true))) };
+        let d = Driven { outcome: PickOutcome::Pending(session.clone()), agent: Some(Ok(summary(true))), abandoned: true };
         assert!(!d.nothing_to_pick(), "Done was pressed: Google may still report the selection");
-        let d = Driven { outcome: PickOutcome::Pending(session), agent: Some(Err("no Screen Recording".into())) };
+        let d = Driven { outcome: PickOutcome::Pending(session), agent: Some(Err("no Screen Recording".into())), abandoned: true };
         assert!(!d.nothing_to_pick());
         assert!(d.agent_note().is_some_and(|n| n.contains("no Screen Recording")));
-        let d = Driven { outcome: PickOutcome::Done(Picked::default()), agent: None };
+        let d = Driven { outcome: PickOutcome::Done(Picked::default()), agent: None, abandoned: false };
         assert!(!d.nothing_to_pick() && d.agent_note().is_none());
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_queue_carries_what_a_session_left_and_gives_up_after_two_tries() {
+        let mut queue = Queue::new(strings(&["a", "b", "c", "d", "e"]));
+        assert_eq!(queue.next_batch(3), strings(&["a", "b", "c"]));
+        // a and b were searched, c was left (the cap); b selected nothing new
+        queue.after(&strings(&["c"]), &strings(&["b"]));
+        assert_eq!(queue.next_batch(3), strings(&["c", "b", "d"]), "left first, then the retry, then the rest");
+        queue.after(&[], &strings(&["b"])); // b's second try: given up
+        assert_eq!(queue.next_batch(9), strings(&["e"]));
+        queue.after(&[], &[]);
+        assert!(queue.is_empty());
+        assert_eq!(queue.remaining(), strings(&["b"]), "given up searches are for a next run");
+        // a batch is never empty while searches wait, nor bigger than asked
+        let mut queue = Queue::new(strings(&["x", "y"]));
+        assert_eq!(queue.next_batch(0), strings(&["x"]));
+        assert_eq!(queue.next_batch(5), strings(&["y"]));
+        assert!(queue.next_batch(5).is_empty());
+        // a session that took nothing hands everything back, in order
+        let mut queue = Queue::new(strings(&["p", "q", "r"]));
+        let batch = queue.next_batch(2);
+        queue.after(&batch, &[]);
+        assert_eq!(queue.remaining(), strings(&["p", "q", "r"]));
+    }
+
+    #[test]
+    fn sessions_merge_their_picks_once_each() {
+        let item = |id: &str| filmcraft_gphotos::api::PickedItem {
+            id: id.into(),
+            filename: format!("{id}.mp4"),
+            mime_type: "video/mp4".into(),
+            kind: filmcraft_gphotos::api::MediaKind::Video,
+            created: String::new(),
+            base_url: String::new(),
+            video_status: None,
+        };
+        let fetched = |id: &str| filmcraft_gphotos::Fetched { item: item(id), path: PathBuf::from(format!("/c/{id}.mp4")), was_cached: false };
+        let mut all = Picked::default();
+        merge(&mut all, Picked { fetched: vec![fetched("a"), fetched("b")], skipped: vec!["x.jpg: not a video".into()], ..Picked::default() });
+        merge(&mut all, Picked { fetched: vec![fetched("b"), fetched("c")], failed: vec!["d.mp4: 404".into()], ..Picked::default() });
+        assert_eq!(all.fetched.iter().map(|f| f.item.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert_eq!((all.skipped.len(), all.failed.len()), (1, 1));
     }
 
     #[test]
