@@ -469,8 +469,21 @@ fn template_line(e: &Entry) -> String {
 fn tidy(s: &str) -> String {
     let s = s.replace(['\n', '\r', '"', '“', '”'], " ");
     let s = s.trim().trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')' || c == '#' || c == '-').trim();
-    s.split_whitespace().take(40).collect::<Vec<_>>().join(" ")
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.len() <= MAX_LINE_WORDS {
+        return words.join(" ");
+    }
+    // too long: end at the last full sentence within the limit, never mid-sentence (a cut line
+    // is read out as it is); only a single over-long sentence is cut at the limit
+    let kept = &words[..MAX_LINE_WORDS];
+    match kept.iter().rposition(|w| w.ends_with(['.', '!', '?'])) {
+        Some(i) => kept[..=i].join(" "),
+        None => kept.join(" "),
+    }
 }
+
+/// Most words one voice-over line keeps.
+const MAX_LINE_WORDS: usize = 45;
 
 /// A model line without the item heading it sometimes copies in front ("March 2020 — Zaku II
 /// model kit: I built…" → "I built…"), which would be read out.
@@ -505,7 +518,7 @@ fn item_listing(n: usize, e: &Entry) -> String {
 /// one long answer for a whole show can run past the request timeout.
 const SCRIPT_BATCH: usize = 6;
 
-const SCRIPT_SYSTEM: &str = "You write short, natural voice-over lines for a YouTube video. The narrator is the person who filmed the clips, speaking in the first person, warm and a little excited. Use only the facts given; never invent names, brands, places or numbers. Answer with JSON only.";
+const SCRIPT_SYSTEM: &str = "You write short, natural voice-over lines for a YouTube video. The narrator is the person who filmed the clips, speaking in the first person, warm and a little excited. Use only the facts given; never invent names, brands, places or numbers, and never invent experiences or impressions the facts do not state (trying it, talking to it, how it sounded, what it felt like). Say \"next\" or \"then\", never \"lastly\" or \"finally\", except for the last item of the video. Answer with JSON only.";
 
 /// The voice-over for `entries`, written by `model` from the analysis facts: the intro and
 /// outro in one request, then the entries' lines a few at a time. Any line the model does not
@@ -2520,7 +2533,12 @@ mod tests {
     #[test]
     fn tidy_cleans_model_lines() {
         assert_eq!(tidy("1. \"Hello there\"\n"), "Hello there");
-        assert_eq!(tidy(&"word ".repeat(100)).split_whitespace().count(), 40);
+        assert_eq!(tidy(&"word ".repeat(100)).split_whitespace().count(), MAX_LINE_WORDS, "one endless sentence is cut at the limit");
+        // too long: it ends at the last full sentence that fits, never mid-sentence
+        let long = format!("One short sentence. Then a second sentence that runs on {}", "and on ".repeat(30));
+        assert_eq!(tidy(&long), "One short sentence.");
+        let two = format!("{} {}", "First part of it here.", "word ".repeat(50));
+        assert_eq!(tidy(&format!("{two} Done.")), "First part of it here.");
     }
 
     #[tokio::test]
