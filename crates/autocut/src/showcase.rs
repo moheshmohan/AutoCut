@@ -1558,23 +1558,30 @@ pub fn breathe_for(stretches: &[Stretch], seconds: f64) -> f64 {
 /// ("GITEX Global 2022, Dubai"), or, for an entry with no event, where the year changes — so a
 /// robot met days after an expo, the same year, opens no "2022" card of its own.
 pub fn chapter_cards(entries: &[Entry]) -> Vec<Option<String>> {
-    let (mut last_event, mut last_year): (Option<String>, Option<i64>) = (None, None);
+    let (mut last_event, mut last_year, mut last_unix): (Option<String>, Option<i64>, Option<i64>) = (None, None, None);
     entries
         .iter()
         .map(|e| {
             let event = e.event.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
             let year = e.unix.map(|u| ymd(u).0);
+            // an entry long after an event's last one starts a chapter of its own, in the same
+            // year too (a robot met days later still belongs to the show)
+            let left_event = last_event.is_some() && matches!((e.unix, last_unix), (Some(u), Some(l)) if u.saturating_sub(l) > EVENT_AFTERGLOW);
             let card = match &event {
                 Some(ev) if Some(ev) != last_event.as_ref() => Some(ev.clone()),
                 Some(_) => None,
-                None => year.filter(|y| Some(*y) != last_year).map(|y| y.to_string()),
+                None => year.filter(|y| Some(*y) != last_year || left_event).map(|y| y.to_string()),
             };
             last_event = event;
             last_year = year.or(last_year);
+            last_unix = e.unix.or(last_unix);
             card
         })
         .collect()
 }
+
+/// After this long (seconds) an entry without an event no longer belongs to the event before it.
+const EVENT_AFTERGLOW: i64 = 30 * 86_400;
 
 /// The lead before each entry's words: longer where a chapter starts, as its card comes first.
 fn leads(entries: &[Entry]) -> Vec<f64> {
@@ -1585,16 +1592,39 @@ fn leads(entries: &[Entry]) -> Vec<f64> {
 const CARD_LEAD: f64 = 1.8;
 
 /// A chapter card's text and size: a year big, an event's name smaller, on up to two lines.
-fn card(section: &str) -> (String, f64) {
+fn card(section: &str, width: f64) -> (String, f64) {
     let s = section.trim();
     if s.chars().count() <= 6 {
         return (s.to_string(), 160.0);
     }
-    // "GITEX Global 2022, Dubai" → "GITEX GLOBAL 2022" over "DUBAI"
+    // "GITEX Global 2022, Dubai" → "GITEX GLOBAL 2022" over "DUBAI"; a part too long for one
+    // line is split in two at the space nearest its middle
     let upper = s.to_uppercase();
-    match upper.split_once(", ") {
-        Some((a, b)) => (format!("{a}\n{b}"), 96.0),
-        None => (upper, 96.0),
+    let parts: Vec<&str> = match upper.split_once(", ") {
+        Some((a, b)) => vec![a, b],
+        None => vec![upper.as_str()],
+    };
+    let lines: Vec<String> = parts.iter().flat_map(|p| balanced(p, CARD_LINE_CHARS)).collect();
+    // and the longest line fits the frame (bold capitals are about 0.62 of the size wide)
+    let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(1).max(1) as f64;
+    let fit = if width.is_finite() && width > 0.0 { width * 0.88 / (0.62 * longest) } else { 96.0 };
+    (lines.join("\n"), fit.clamp(40.0, 96.0))
+}
+
+/// Longest chapter card line before it is split, characters.
+const CARD_LINE_CHARS: usize = 24;
+
+/// `text` as one line, or two split at the space nearest its middle when longer than `max`.
+fn balanced(text: &str, max: usize) -> Vec<String> {
+    let n = text.chars().count();
+    if n <= max {
+        return vec![text.to_string()];
+    }
+    let mid = n / 2;
+    let split = text.char_indices().filter(|(_, c)| *c == ' ').map(|(i, _)| i).min_by_key(|i| text[..*i].chars().count().abs_diff(mid));
+    match split {
+        Some(i) => vec![text[..i].trim().to_string(), text[i..].trim().to_string()],
+        None => vec![text.to_string()],
     }
 }
 /// Fades on each shot's own sound, frames: no clip's sound starts or stops with a click.
@@ -1822,7 +1852,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         }
         if new_year && let Some(sec) = &section {
             built.chapters.push(Chapter { seconds: t, title: sec.clone() });
-            let (text, size) = card(sec);
+            let (text, size) = card(sec, w);
             title(ex, tr.over_index, tr.fps, &text, t, CARD_LEAD, size, (w / 2.0, h * 0.55), title_props.clone()).await?;
             sfx(ex, "impact", 2.0, t, &tr.hits, 0.6, &mut mix).await?;
         }
@@ -2328,11 +2358,24 @@ mod tests {
         let c = Entry { number: 3, label: "Go1".into(), unix: Some(day + 86_400 * 7), ..Entry::default() };
         // one card for the event; a robot met days later the same year opens none
         assert_eq!(leads(&[a.clone(), b.clone(), c.clone()]), vec![CARD_LEAD, 0.5, 0.5]);
+        // months later the same year: a chapter of its own (the live case: Emrill in July
+        // after the Dubai AI Festival in April)
+        let later = Entry { number: 5, label: "Cleaner".into(), unix: Some(day + 86_400 * 60), ..Entry::default() };
+        assert_eq!(chapter_cards(&[a.clone(), later]), vec![Some("GITEX Global 2022, Dubai".into()), Some("2022".into())]);
         let d = Entry { number: 4, label: "Arm".into(), unix: Some(day + 86_400 * 400), ..Entry::default() };
         assert_eq!(chapter_cards(&[c.clone(), a.clone(), d]), vec![Some("2022".into()), Some("GITEX Global 2022, Dubai".into()), Some("2023".into())]);
         assert_eq!(c.section().as_deref(), Some("2022"));
-        assert_eq!(card("2022"), ("2022".to_string(), 160.0));
-        assert_eq!(card("GITEX Global 2022, Dubai"), ("GITEX GLOBAL 2022\nDUBAI".to_string(), 96.0));
+        assert_eq!(card("2022", 1920.0), ("2022".to_string(), 160.0));
+        assert_eq!(card("GITEX Global 2022, Dubai", 1920.0), ("GITEX GLOBAL 2022\nDUBAI".to_string(), 96.0));
+        // the live overflow: a long event name runs off a 1080p frame at 96 px
+        let (text, size) = card("Our Future(s) by Dubai Future Foundation, 2025", 1920.0);
+        assert_eq!(text, "OUR FUTURE(S) BY DUBAI\nFUTURE FOUNDATION\n2025");
+        let longest = text.lines().map(|l| l.chars().count()).max().unwrap() as f64;
+        assert!(longest * 0.62 * size <= 1920.0 * 0.88 + 1e-9, "{size}");
+        // one endless word still gets a size, never below the floor
+        let (_, tiny) = card(&"X".repeat(200), 1920.0);
+        assert!((40.0..=96.0).contains(&tiny));
+        assert_eq!(card("Some long event name here", f64::NAN).1, 96.0);
         // the script request carries where and the (non-empty) facts, and only for that item
         let line = item_listing(1, &a);
         assert!(line.contains("(at GITEX Global 2022, Dubai)") && line.contains("Facts: Made by Boston Dynamics") && !line.contains("|"), "{line}");
