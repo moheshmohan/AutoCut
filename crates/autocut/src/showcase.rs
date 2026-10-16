@@ -500,6 +500,19 @@ fn strip_heading(line: &str, e: &Entry) -> String {
     }
 }
 
+/// The second line of a lower third: where and when ("GITEX Global 2022, Dubai · October"; the
+/// month alone when the event's name already says the year).
+fn lower_third_place(place: Option<&str>, when: &str) -> String {
+    match (place, when.is_empty()) {
+        (Some(p), false) => {
+            let month = when.rsplit_once(' ').filter(|(_, y)| p.contains(y)).map_or(when, |(m, _)| m);
+            format!("{p} · {month}")
+        }
+        (Some(p), true) => p.to_string(),
+        (None, _) => when.to_string(),
+    }
+}
+
 /// One item of the script request: number, date, name, where, what, and its facts.
 fn item_listing(n: usize, e: &Entry) -> String {
     let mut s = format!("{n}. {} — {}", month_year(e.unix), e.label);
@@ -1783,11 +1796,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let when = month_year(e.unix);
         let name = display_label(&e.label);
         let place = e.event.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let second = match (place, when.is_empty()) {
-            (Some(p), false) => format!("{p} · {when}"),
-            (Some(p), true) => p.to_string(),
-            (None, _) => when.clone(),
-        };
+        let second = lower_third_place(place, &when);
         let lower = if second.is_empty() { name } else { format!("{name}\n{second}") };
         let shown_for = (entry_end - t - lead - 0.3).clamp(1.5, 4.5);
         let third = title(
@@ -2296,6 +2305,14 @@ mod tests {
         // old plans without the fields still load
         let old: Entry = serde_json::from_value(json!({"number": 1, "label": "x", "kind": "x", "description": "", "unix": null, "shots": []})).unwrap();
         assert!(old.event.is_none() && old.facts.is_empty());
+    }
+
+    #[test]
+    fn lower_thirds_say_where_and_when_once() {
+        assert_eq!(lower_third_place(Some("GITEX Global 2022, Dubai"), "October 2022"), "GITEX Global 2022, Dubai · October");
+        assert_eq!(lower_third_place(Some("Museum of the Future"), "July 2025"), "Museum of the Future · July 2025");
+        assert_eq!(lower_third_place(None, "July 2025"), "July 2025");
+        assert_eq!(lower_third_place(Some("Expo"), ""), "Expo");
     }
 
     #[test]
