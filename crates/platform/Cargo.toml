@@ -64,3 +64,7 @@ filmcraft-media = { workspace = true }
 filmcraft-frame = { workspace = true }
 filmcraft-project = { workspace = true }
 filmcraft-render = { workspace = true }
+
+# Process CPU clock for the export benchmark (tests/export_perf.rs, macOS).
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "time"] }
