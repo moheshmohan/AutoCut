@@ -113,6 +113,17 @@ impl Weights {
         Ok(Weights { map: fuse_weight_norm(raw)? })
     }
 
+    /// Weights from tensors already in memory (tests build fake models this way).
+    #[cfg(all(test, feature = "voxcpm"))]
+    pub(crate) fn from_map(map: HashMap<String, Tensor>) -> Weights {
+        Weights { map }
+    }
+
+    #[cfg(all(test, feature = "voxcpm"))]
+    pub(crate) fn insert(&mut self, name: &str, t: Tensor) {
+        self.map.insert(name.to_string(), t);
+    }
+
     pub(crate) fn get(&self, name: &str) -> Result<Tensor, TtsError> {
         self.map.get(name).cloned().ok_or_else(|| err(format!("missing weight `{name}`")))
     }

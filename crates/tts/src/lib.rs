@@ -6,6 +6,9 @@
 //! - [`formant`]: the built-in voices, an original source–filter formant synthesizer. They need
 //!   no download and work everywhere (also in the web build); they sound robotic. The neural voices
 //!   (Kokoro-82M, downloaded on first use) are added behind a feature in a later milestone.
+//! - `voxcpm` (feature `voxcpm`): VoxCPM zero-shot voice cloning on candle — speech generated
+//!   directly in a speaker's voice from a few seconds of it.
+//! - [`wav`]: WAV reading and writing for voice samples.
 //! - [`cache`]: synthesized narrations kept on disk (keyed by script, voice identity, pitch and
 //!   pace), so a script is read by a voice once across sessions.
 //!
@@ -23,6 +26,9 @@ pub mod neural;
 #[cfg(feature = "kokoro")]
 pub mod openvoice;
 pub mod script;
+#[cfg(feature = "voxcpm")]
+pub mod voxcpm;
+pub mod wav;
 
 use serde::Serialize;
 
