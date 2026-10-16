@@ -32,7 +32,7 @@
 pub mod config;
 mod local;
 mod minicpm;
-mod model;
+pub(crate) mod model;
 pub mod text;
 pub mod tokenizer;
 mod vae;
@@ -99,10 +99,10 @@ impl Settings {
     }
 }
 
-/// The device inference runs on: Metal on Apple GPUs with the `metal` feature (when one is
-/// there), else the CPU.
+/// The device inference runs on: Metal on macOS (when there is a GPU), else the CPU. The
+/// environment variable `FILMCRAFT_VOXCPM_CPU` forces the CPU.
 pub fn device() -> Device {
-    #[cfg(feature = "metal")]
+    #[cfg(target_os = "macos")]
     {
         if std::env::var_os("FILMCRAFT_VOXCPM_CPU").is_none()
             && let Ok(d) = Device::new_metal(0)

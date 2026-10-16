@@ -46,6 +46,9 @@ pub const MIN_SPEECH_SECONDS: f64 = 3.0;
 pub const MAX_SPEECH_SECONDS: f64 = 120.0;
 /// The natural engine's voice sample: the best continuous stretch of speech this long.
 pub const SAMPLE_SECONDS: (f64, f64) = (10.0, 25.0);
+/// A sample VoxCPM continues is shorter: its transcript must be exact, and every word more is
+/// one more chance for a transcription error the model would then "finish saying".
+pub const CONTINUATION_SECONDS: (f64, f64) = (5.0, 10.0);
 /// Loudness the voice sample is normalised to.
 pub const SAMPLE_LUFS: f64 = -20.0;
 /// Longest transcript kept with a profile.
@@ -390,6 +393,11 @@ pub struct Sample {
 /// and as few long pauses as possible. Long pauses are shortened, the edges trimmed and the
 /// loudness normalised to [`SAMPLE_LUFS`] (peaks kept below −0.5 dBFS).
 pub fn pick_sample(x: &[f32], rate: u32) -> Result<Sample, TtsError> {
+    pick_sample_within(x, rate, SAMPLE_SECONDS)
+}
+
+/// [`pick_sample`] with other length bounds (seconds).
+pub fn pick_sample_within(x: &[f32], rate: u32, bounds: (f64, f64)) -> Result<Sample, TtsError> {
     if rate == 0 {
         return Err(TtsError::Invalid("the reference audio has no sample rate".into()));
     }
@@ -416,16 +424,6 @@ pub fn pick_sample(x: &[f32], rate: u32) -> Result<Sample, TtsError> {
     }
     // cut points: the recording's edges and the middle of every pause of 100 ms or more, each
     // with the excess (beyond 0.7 s) of the pauses before it
-    let min_pause = (0.1 * fps).ceil() as usize;
-    let mut cuts: Vec<(usize, f64)> = vec![(0, 0.0)];
-    let mut excess = 0.0;
-    for (s, len) in runs.iter().take(20_000) {
-        if *len >= min_pause {
-            cuts.push((s + len / 2, excess));
-            excess += (*len as f64 / fps - 0.7).max(0.0);
-        }
-    }
-    cuts.push((n, excess));
     let mut speech_before = Vec::with_capacity(n + 1);
     let mut count = 0usize;
     speech_before.push(0);
@@ -433,27 +431,51 @@ pub fn pick_sample(x: &[f32], rate: u32) -> Result<Sample, TtsError> {
         count += usize::from(*m);
         speech_before.push(count);
     }
-    let (lo, hi) = SAMPLE_SECONDS;
+    let (lo, hi) = bounds;
+    if !(lo.is_finite() && hi.is_finite() && lo > 0.0 && hi >= lo) {
+        return Err(TtsError::Invalid("bad voice sample length bounds".into()));
+    }
     // a short recording: everything between its first and last speech
     let lo = lo.min(speech_total * 0.9);
-    let mut best: Option<(f64, usize, usize)> = None;
-    for (ai, (a, ex_a)) in cuts.iter().enumerate() {
-        for (b, ex_b) in cuts.iter().skip(ai + 1) {
-            let len = (b - a) as f64 / fps;
-            if len > hi {
-                break;
-            }
-            if len < lo {
-                continue;
-            }
-            let speech = (speech_before.get(*b).copied().unwrap_or(0) - speech_before.get(*a).copied().unwrap_or(0)) as f64 / fps;
-            // more speech is better; long pauses inside and lengths past 20 s cost a little
-            let score = speech - 2.0 * (ex_b - ex_a) - 0.5 * (len - 20.0).max(0.0);
-            if best.is_none_or(|(s, _, _)| score > s) {
-                best = Some((score, *a, *b));
+    // cut points: the recording's edges and the middle of every pause of `min_pause` frames or
+    // more, each with the excess (beyond 0.7 s) of the pauses before it
+    let cuts_at = |min_pause: usize| -> Vec<(usize, f64)> {
+        let mut cuts: Vec<(usize, f64)> = vec![(0, 0.0)];
+        let mut excess = 0.0;
+        for (s, len) in runs.iter().take(20_000) {
+            if *len >= min_pause {
+                cuts.push((s + len / 2, excess));
+                excess += (*len as f64 / fps - 0.7).max(0.0);
             }
         }
-    }
+        cuts.push((n, excess));
+        cuts
+    };
+    let best_window = |cuts: &[(usize, f64)]| -> Option<(f64, usize, usize)> {
+        let mut best: Option<(f64, usize, usize)> = None;
+        for (ai, (a, ex_a)) in cuts.iter().enumerate() {
+            for (b, ex_b) in cuts.iter().skip(ai + 1) {
+                let len = (b - a) as f64 / fps;
+                if len > hi {
+                    break;
+                }
+                if len < lo {
+                    continue;
+                }
+                let speech = (speech_before.get(*b).copied().unwrap_or(0) - speech_before.get(*a).copied().unwrap_or(0)) as f64 / fps;
+                // more speech is better; long pauses inside and lengths past 20 s cost a little
+                let score = speech - 2.0 * (ex_b - ex_a) - 0.5 * (len - 20.0).max(0.0);
+                if best.is_none_or(|(s, _, _)| score > s) {
+                    best = Some((score, *a, *b));
+                }
+            }
+        }
+        best
+    };
+    // between pauses of 100 ms or more; else of any length; else (speech without a break as long
+    // as the sample) every half second
+    let grid: Vec<(usize, f64)> = (0..=n).step_by(((0.5 * fps) as usize).max(1)).chain(std::iter::once(n)).map(|f| (f, 0.0)).collect();
+    let best = best_window(&cuts_at((0.1 * fps).ceil() as usize)).or_else(|| best_window(&cuts_at(1))).or_else(|| best_window(&grid));
     let (_, a, b) = best.ok_or_else(|| TtsError::Invalid("no stretch of continuous speech was found in the reference".into()))?;
     // the stretch, with pauses over 0.5 s cut down to 0.5 s and the edges trimmed to 0.15 s
     let keep_pause = (0.25 * fps) as usize;
@@ -688,9 +710,28 @@ pub fn create_natural(
     if !catalog::voxcpm_installed(models_dir, pkg) {
         return Err(TtsError::NotInstalled);
     }
-    let encode_rate = natural_encode_rate(pkg.id);
+    save_natural(&id_part, name, reference, rate, pkg.id, mode, req, source, &voices_dir(models_dir), transcribe, progress)
+}
+
+/// The part of [`create_natural`] after the checks: pick, transcribe and save the sample.
+#[allow(clippy::too_many_arguments)]
+fn save_natural(
+    id_part: &str,
+    name: &str,
+    reference: &[f32],
+    rate: u32,
+    model: &str,
+    mode: PromptMode,
+    req: &NaturalRequest,
+    source: &str,
+    voices: &Path,
+    transcribe: &mut dyn FnMut(&[f32]) -> Result<String, String>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Profile, TtsError> {
+    let encode_rate = natural_encode_rate(model);
     progress("finding the best stretch of speech");
-    let sample = pick_sample(reference, rate)?;
+    let bounds = if mode == PromptMode::Continuation { CONTINUATION_SECONDS } else { SAMPLE_SECONDS };
+    let sample = pick_sample_within(reference, rate, bounds)?;
     let clip = filmcraft_audio_dsp::resample::resample_sinc(&sample.audio, rate, encode_rate);
     let gender = estimate_gender(&sample.audio, rate);
     let transcript = match req.transcript.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
@@ -707,8 +748,7 @@ pub fn create_natural(
         }
         None => String::new(),
     };
-    let voices = voices_dir(models_dir);
-    std::fs::create_dir_all(&voices).map_err(|e| TtsError::Model(format!("{}: {e}", voices.display())))?;
+    std::fs::create_dir_all(voices).map_err(|e| TtsError::Model(format!("{}: {e}", voices.display())))?;
     let clip_name = format!("{id_part}.wav");
     crate::wav::write(&voices.join(&clip_name), &clip, encode_rate)?;
     let profile = Profile {
@@ -721,7 +761,7 @@ pub fn create_natural(
         target_colour: Vec::new(),
         base_similarity: 0.0,
         natural: Some(Natural {
-            model: pkg.id.to_string(),
+            model: model.to_string(),
             clip: clip_name,
             transcript,
             mode,
@@ -738,7 +778,7 @@ pub fn create_natural(
         consent: true,
     };
     profile.check()?;
-    save(&voices, &profile)?;
+    save(voices, &profile)?;
     progress(&format!("saved {:.1} s of speech from {:.1}–{:.1} s", profile.reference_seconds, sample.from, sample.to));
     Ok(profile)
 }
@@ -1015,6 +1055,36 @@ mod natural {
             assert!((zc - 400.0).abs() < 60.0, "{zc}");
             assert_eq!(pace_and_pitch(x.clone(), rate, 1.0, 0.0), x, "identity");
         }
+
+        /// A natural voice on a tiny random VoxCPM: scripts with pauses, pace, determinism.
+        #[test]
+        fn a_natural_voice_speaks_scripts() {
+            for v2 in [false, true] {
+                let d = std::env::temp_dir().join(format!("filmcraft-clone-natural-voice-{}-{v2}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&d);
+                crate::voxcpm::model::tests::fake_release(&d, v2);
+                let m = Arc::new(crate::voxcpm::model::tests::load_fake(&d));
+                let rate = m.encode_rate() as usize;
+                let audio: Vec<f32> = (0..rate * 2).map(|i| (i as f32 * 0.07).sin() * 0.3).collect();
+                let prompt = Arc::new(m.prompt(&audio, if v2 { None } else { Some("hello") }).unwrap());
+                let mut natural = super::super::tests::natural_profile().natural.unwrap();
+                natural.timesteps = 3;
+                let v = NaturalVoice { gender: Gender::Male, natural, model: m.clone(), prompt };
+                let a = v.synthesize("hello world. [pause 500ms] hello", &Params::default()).unwrap();
+                assert_eq!(a.sample_rate, m.output_rate());
+                assert!(a.samples.iter().all(|x| x.is_finite() && x.abs() <= 0.98));
+                // at least the pause and the gap between the utterances
+                assert!(a.seconds() > 0.5 + 0.25, "{}", a.seconds());
+                assert_eq!(v.synthesize("hello world. [pause 500ms] hello", &Params::default()).unwrap(), a, "deterministic");
+                let fast = v.synthesize("hello world. [pause 500ms] hello", &Params { pace: 2.0, ..Default::default() }).unwrap();
+                assert!(fast.seconds() < a.seconds() * 0.7, "{} vs {}", fast.seconds(), a.seconds());
+                assert_eq!(v.synthesize("", &Params::default()), Err(TtsError::Empty));
+                assert_eq!(v.synthesize("[pause 1s]", &Params::default()), Err(TtsError::Empty));
+                assert!(v.synthesize("hi", &Params { pace: 9.0, ..Default::default() }).is_err());
+                assert_eq!(v.info().engine, "clone");
+                let _ = std::fs::remove_dir_all(&d);
+            }
+        }
     }
 }
 
@@ -1286,6 +1356,13 @@ pub(crate) mod tests {
         let s = pick_sample(&x, rate).unwrap();
         let secs = s.audio.len() as f64 / f64::from(rate);
         assert!(secs < 15.0, "{secs} (18.1 s before shortening)");
+        // speech without a pause as long as the sample: cut on a half-second grid
+        let x = bursts(rate, &[(30.0, 0.0)]);
+        let s = pick_sample_within(&x, rate, CONTINUATION_SECONDS).unwrap();
+        let secs = s.audio.len() as f64 / f64::from(rate);
+        assert!((5.0..=10.5).contains(&secs), "{secs}");
+        assert!(pick_sample_within(&x, rate, (f64::NAN, 3.0)).is_err());
+        assert!(pick_sample_within(&x, rate, (10.0, 5.0)).is_err());
     }
 
     #[test]
@@ -1300,6 +1377,48 @@ pub(crate) mod tests {
         assert_eq!(estimate_gender(&voice(220.0), rate as u32), Some(Gender::Female));
         assert_eq!(estimate_gender(&vec![0.0; 16_000], rate as u32), None);
         assert_eq!(estimate_gender(&[], rate as u32), None);
+    }
+
+    #[test]
+    fn natural_samples_are_saved_with_their_transcript() {
+        let rate = 22_050;
+        let mut pattern = vec![(2.0, 0.3); 8];
+        pattern.push((0.5, 2.0));
+        let x = bursts(rate, &pattern);
+        let d = tmp("save-natural");
+        let req = NaturalRequest::default();
+        // reference mode (VoxCPM2): no transcription
+        let asked = std::cell::Cell::new(0);
+        let mut tr = |_: &[f32]| {
+            asked.set(asked.get() + 1);
+            Ok("hello there".to_string())
+        };
+        let p = save_natural("me", "Me", &x, rate, "voxcpm-2", PromptMode::Reference, &req, "test", &d, &mut tr, &mut |_| {}).unwrap();
+        assert_eq!(asked.get(), 0);
+        let n = p.natural.clone().unwrap();
+        assert_eq!((n.model.as_str(), n.mode, n.transcript.as_str(), n.denoise_db), ("voxcpm-2", PromptMode::Reference, "", 0.0));
+        assert_eq!(load_profile(&d, "clone:me").unwrap(), p);
+        let (clip, clip_rate) = crate::wav::read(&d.join("me.wav")).unwrap();
+        assert_eq!(clip_rate, 16_000, "stored at VoxCPM2's encoder rate");
+        assert!((clip.len() as f64 / 16_000.0 - p.reference_seconds).abs() < 0.01);
+        assert!(p.reference_seconds >= 10.0 && p.reference_seconds <= 25.0, "{}", p.reference_seconds);
+        // continuation (VoxCPM1.5): transcribed once, denoised when spoken
+        let p = save_natural("me", "Me", &x, rate, "voxcpm-1.5", PromptMode::Continuation, &req, "test", &d, &mut tr, &mut |_| {}).unwrap();
+        assert!(p.reference_seconds >= 4.0 && p.reference_seconds <= CONTINUATION_SECONDS.1 + 0.5, "a short sample to continue: {}", p.reference_seconds);
+        let n = p.natural.unwrap();
+        assert_eq!((n.transcript.as_str(), n.denoise_db), ("hello there", CONTINUATION_DENOISE_DB));
+        assert_eq!(crate::wav::read(&d.join("me.wav")).unwrap().1, 44_100);
+        // a given transcript is used as is; a failed or empty transcription is an error
+        let given = NaturalRequest { transcript: Some(" exact words ".into()), ..req.clone() };
+        let mut fail = |_: &[f32]| Err("no model".to_string());
+        let p = save_natural("me", "Me", &x, rate, "voxcpm-1.5", PromptMode::Continuation, &given, "", &d, &mut fail, &mut |_| {}).unwrap();
+        assert_eq!(p.natural.unwrap().transcript, "exact words");
+        assert!(save_natural("me", "Me", &x, rate, "voxcpm-1.5", PromptMode::Continuation, &req, "", &d, &mut fail, &mut |_| {}).is_err());
+        let mut nothing = |_: &[f32]| Ok("  ...  ".to_string());
+        assert!(save_natural("me", "Me", &x, rate, "voxcpm-1.5", PromptMode::Continuation, &req, "", &d, &mut nothing, &mut |_| {}).is_err());
+        // silence or a second of speech makes no voice
+        assert!(save_natural("me", "Me", &vec![0.0; rate as usize * 20], rate, "voxcpm-2", PromptMode::Reference, &req, "", &d, &mut tr, &mut |_| {}).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

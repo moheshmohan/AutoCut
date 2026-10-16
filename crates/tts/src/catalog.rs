@@ -127,7 +127,7 @@ pub static VOXCPM: &[VoxcpmPackage] = &[
     VoxcpmPackage {
         id: "voxcpm-1.5",
         name: "Natural cloning, faster (VoxCPM1.5)",
-        description: "0.8 B parameters, 44.1 kHz. Continues the voice sample, so it needs the sample's exact transcript.",
+        description: "0.8 B parameters, 44.1 kHz, about 2.5× faster than VoxCPM2. Continues the voice sample, so it needs a clean recording and the sample's exact transcript: a noisy or mis-transcribed sample derails it into babble.",
         license: VOXCPM_LICENSE,
         source: "https://huggingface.co/openbmb/VoxCPM1.5",
         files: &[
@@ -164,7 +164,7 @@ pub static VOXCPM: &[VoxcpmPackage] = &[
     VoxcpmPackage {
         id: "voxcpm-2",
         name: "Natural cloning, best quality (VoxCPM2)",
-        description: "2.3 B parameters, 48 kHz, 30 languages. Clones from the voice sample alone; slower, about 5 GB of memory on a GPU (10 GB on the CPU).",
+        description: "2.3 B parameters, 48 kHz, 30 languages. Clones from the voice sample alone, so noisy phone recordings and transcription errors do not matter. About 5 GB of memory on a GPU (10 GB on the CPU).",
         license: VOXCPM_LICENSE,
         source: "https://huggingface.co/openbmb/VoxCPM2",
         files: &[
@@ -200,8 +200,11 @@ pub static VOXCPM: &[VoxcpmPackage] = &[
     },
 ];
 
-/// The VoxCPM release new natural clones use unless another is chosen.
-pub const DEFAULT_VOXCPM: &str = "voxcpm-1.5";
+/// The VoxCPM release new natural clones use unless another is chosen: VoxCPM2, whose isolated
+/// reference prompt held up on a real phone recording (Whisper WER 4.8 %, speaker similarity
+/// 0.56 against 0.15 for the timbre-only clone) where VoxCPM1.5's continuation babbled (see the
+/// crate README); it still runs faster than real time on an Apple GPU.
+pub const DEFAULT_VOXCPM: &str = "voxcpm-2";
 
 pub fn voxcpm(id: &str) -> Option<&'static VoxcpmPackage> {
     VOXCPM.iter().find(|p| p.id == id)

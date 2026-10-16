@@ -1,6 +1,6 @@
 [package]
 name = "filmcraft-tts"
-description = "FilmCraft text to speech: the Voice trait, the voice catalogue, script parsing (pause markers), the built-in formant voice and (feature kokoro) Kokoro-82M neural voices on candle"
+description = "FilmCraft text to speech: the Voice trait, the voice catalogue, script parsing (pause markers), the built-in formant voice, (feature kokoro) Kokoro-82M neural voices and OpenVoice cloning on candle, and (feature voxcpm) VoxCPM zero-shot voice cloning on candle"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,10 +14,9 @@ default = []
 # Kokoro-82M neural voices on the CPU via candle (pure Rust). Off by default and in wasm builds.
 kokoro = ["dep:candle-core", "dep:candle-nn", "dep:zip", "dep:serde_json", "dep:filmcraft-tts-text", "dep:filmcraft-audio-dsp"]
 # VoxCPM zero-shot voice cloning on candle (pure Rust; builds on the Kokoro stack's loaders and
-# text front end). Off by default and in wasm builds.
+# text front end). Off by default and in wasm builds. On macOS it runs on the GPU through
+# candle's Metal backend (below), falling back to the CPU without one.
 voxcpm = ["kokoro", "dep:rayon"]
-# Run VoxCPM on Apple GPUs through candle's Metal backend (falls back to the CPU without one).
-metal = ["voxcpm", "candle-core/metal", "candle-nn/metal"]
 
 [dependencies]
 filmcraft-tts-text = { workspace = true, optional = true }
@@ -31,6 +30,12 @@ candle-nn = { version = "0.9", default-features = false, optional = true }
 zip = { version = "7", default-features = false, optional = true }
 serde_json = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
+
+# On macOS candle comes with its Metal backend, which VoxCPM runs on (Kokoro and OpenVoice keep
+# running on the CPU).
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.9", default-features = false, features = ["metal"], optional = true }
+candle-nn = { version = "0.9", default-features = false, features = ["metal"], optional = true }
 
 [[example]]
 name = "kokoro_say"

@@ -404,7 +404,7 @@ pub(crate) mod tests {
     }
 
     /// The fused Metal kernel against the loops (runs only where there is a Metal device).
-    #[cfg(feature = "metal")]
+    #[cfg(target_os = "macos")]
     #[test]
     fn metal_attention_matches_the_loops() {
         let Ok(dev) = Device::new_metal(0) else { return };

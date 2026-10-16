@@ -35,7 +35,8 @@ use serde::Serialize;
 /// Voice ids of cloned voices start with this (`clone:<name>`); see `clone` (feature `kokoro`).
 pub const CLONE_PREFIX: &str = "clone:";
 
-/// Sample rate of every voice's output.
+/// Sample rate of the built-in and Kokoro voices (and timbre-only clones); natural clones speak at
+/// their model's rate (44.1 or 48 kHz): every `Audio` carries its own.
 pub const SAMPLE_RATE: u32 = 24_000;
 /// Longest narration a voice produces, in seconds.
 pub const MAX_SECONDS: f64 = 30.0 * 60.0;
