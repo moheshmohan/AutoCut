@@ -200,6 +200,13 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    without one is spoken `excited` (the intro) or `warm`. The natural cloned voices follow the
    delivery (see `crates/tts/README.md`); other voices read plainly.
 
+   **Every cloned line is heard back.** A cloned voice can garble a line (a VoxCPM reading
+   that is fluent noise). After `tts.create`, the line is transcribed (`transcript.generate`,
+   then `transcript.inspect {item}`) and read again as another take (`take` 1, 2) when less
+   than half of its words come back, the best of three kept; `narration_retakes` counts them,
+   and a line no take says well enough is noted. Without a speech model the check is skipped
+   (noted once).
+
    Narration goes through `tts.create`, which looks in the engine's narration cache
    (`<data dir>/narration-cache`, see `crates/tts/README.md`) before synthesizing: a rebuild with
    the same voice reads only the lines that changed (`narration_cached` in the output counts

@@ -677,6 +677,8 @@ pub struct Built {
     pub narration_lines: usize,
     /// Narration lines taken from the narration cache (not synthesized again).
     pub narration_cached: usize,
+    /// Narration lines read again because the voice did not say them ([`narrate`]).
+    pub narration_retakes: usize,
     /// Where each part starts: the intro, each year, the outro.
     pub chapters: Vec<Chapter>,
     pub notes: Vec<String>,
@@ -1103,6 +1105,41 @@ struct Narrations {
     cached: usize,
     /// Each line placed: when, and its shown text.
     lines: Vec<Cue>,
+    /// Lines read again ([`narrate`]); whether what the voice said can be checked (None: not
+    /// tried yet).
+    retakes: usize,
+    can_check: Option<bool>,
+    notes: Vec<String>,
+}
+
+/// A cloned voice's line is heard back (Whisper) and read again when less than this share of
+/// its words come back — a garbled generation scores near nothing, a good one most of them
+/// (names a recogniser mishears cost a little).
+const HEARD_ENOUGH: f64 = 0.5;
+/// Readings of one line at most (the first and two more takes).
+const MAX_TAKES: u32 = 3;
+
+/// The share of `said`'s words (letters only, three or more) that `heard` contains, a word
+/// counting when the recogniser wrote it or one starting with its first four letters ("Neolix"
+/// for "Neo-licks" does not, "robots" for "robot" does); 1 for a line without such words.
+pub(crate) fn heard_share(said: &str, heard: &str) -> f64 {
+    let words = |t: &str| -> Vec<String> { t.split(|c: char| !c.is_alphabetic()).filter(|w| w.chars().count() >= 3).map(str::to_lowercase).collect() };
+    let said = words(said);
+    if said.is_empty() {
+        return 1.0;
+    }
+    let heard = words(heard);
+    let stem = |w: &str| w.chars().take(4).collect::<String>();
+    let found = said.iter().filter(|w| heard.iter().any(|h| h == *w || (h.chars().count() >= 4 && w.chars().count() >= 4 && stem(h) == stem(w)))).count();
+    found as f64 / said.len() as f64
+}
+
+/// What the voice said in the narration `item`: transcribed, then read back. `None` when it
+/// cannot be heard (no speech model).
+async fn heard(ex: &dyn Executor, item: u64) -> Option<String> {
+    ex.execute("transcript.generate", json!({"items": [item], "language": "en"})).await.ok()?;
+    let r = ex.execute("transcript.inspect", json!({"item": item})).await.ok()?;
+    r["text"].as_str().map(str::to_string)
 }
 
 /// Narrate a part of the script at `t` on the voice track — the voice reads `say`, the
@@ -1118,7 +1155,50 @@ async fn narrate(
     narrations: &mut Narrations,
 ) -> Result<f64, AutoCutError> {
     let Some(voice) = voice else { return Ok(0.0) };
-    let r = run(ex, "tts.create", json!({"text": say, "voice": voice, "delivery": delivery.id(), "time": ticks(t), "track": tr.voice})).await?;
+    let create = async |take: u32| {
+        run(ex, "tts.create", json!({"text": say, "voice": voice, "delivery": delivery.id(), "take": take, "time": ticks(t), "track": tr.voice})).await
+    };
+    let mut r = create(0).await?;
+    // a cloned voice can garble a line: hear it back and read it again when it did not say it
+    // (another take), keeping the best reading
+    if voice.starts_with("clone:") && narrations.can_check != Some(false) {
+        let mut best: Option<(f64, u32)> = None;
+        for take in 0..MAX_TAKES {
+            let Some(item) = r["item"].as_u64() else { break };
+            let Some(text) = heard(ex, item).await else {
+                narrations.can_check = Some(false);
+                narrations.notes.push("narration: lines were not heard back (no speech model): `transcript.downloadModel`".into());
+                break;
+            };
+            narrations.can_check = Some(true);
+            let share = heard_share(say, &text);
+            if share >= HEARD_ENOUGH {
+                break;
+            }
+            if best.is_none_or(|(b, _)| share > b) {
+                best = Some((share, take));
+            }
+            let clip = r["clip"].as_u64();
+            let last = take + 1 >= MAX_TAKES;
+            // the best reading when none was good enough (cached: nothing is read again)
+            let next = if last { best.map_or(take, |(_, k)| k) } else { take + 1 };
+            if last && next == take {
+                narrations.notes.push(format!("narration at {t:.1}s: the voice said {:.0}% of the line in its best take", share * 100.0));
+                break;
+            }
+            if let Some(c) = clip {
+                run(ex, "edit.clear", json!({"clips": [c]})).await?;
+            }
+            r = create(next).await?;
+            narrations.retakes += 1;
+            if last {
+                narrations
+                    .notes
+                    .push(format!("narration at {t:.1}s: the voice said {:.0}% of the line in its best take", best.map_or(0.0, |(b, _)| b) * 100.0));
+                break;
+            }
+        }
+    }
     if let Some(c) = r["clip"].as_u64() {
         narrations.clips.push(c);
     }
@@ -2044,13 +2124,15 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     progress(&format!("music: {} ({}); {} of {} cuts on the beat", info.source, info.fit, info.cuts_on_beat, info.cuts));
     built.music = Some(info);
     if !narrations.clips.is_empty() {
-        progress(&format!("{} narration lines, {} from the narration cache", narrations.clips.len(), narrations.cached));
+        progress(&format!("{} narration lines, {} from the narration cache, {} read again", narrations.clips.len(), narrations.cached, narrations.retakes));
     }
     // ---- the mix
     progress("mixing");
     mix_down(ex, &mix, &narrations.clips, &music, &mut built.notes).await;
     built.narration_lines = narrations.clips.len();
     built.narration_cached = narrations.cached;
+    built.narration_retakes = narrations.retakes;
+    built.notes.append(&mut narrations.notes);
     // ---- subtitles: what the narration says, as written, on a caption track
     built.subtitles = crate::subtitles::cues(&narrations.lines, tr.fps);
     built.narration = narrations.lines;
@@ -2739,6 +2821,97 @@ mod tests {
         assert_eq!(reframe_path(16.0 / 9.0, frame, [0.2, 0.2]), Some(([960.0, 540.0], [960.0, 540.0])));
         assert_eq!(reframe_path(f64::NAN, frame, [0.5, 0.5]), None);
         assert_eq!(reframe_path(0.5, (0.0, 1080.0), [0.5, 0.5]), None);
+    }
+
+    #[test]
+    fn a_garbled_reading_is_told_from_a_good_one() {
+        // tonight's robot 34: sixteen seconds of audio Whisper heard as "and it's arguing"
+        let said = "In August 2025, a Promobot was greeting visitors in the D P World lobby. Promobot robots work in more than forty countries, including at the Dubai Mall and Dubai Police headquarters.";
+        assert!(heard_share(said, "and it's arguing.") < 0.1);
+        // a good reading, misheard names and all
+        let said = "October 2022, and Ghee-tex Global was huge, with more than a hundred and seventy thousand visitors. First up, a robot misting disinfectant as it glided through the crowd.";
+        let heard =
+            "October 2022 and heat-exclobal was huge with more than 170,000 visitors. First up, a robot misting disinfectant as it glided through the crowd.";
+        assert!(heard_share(said, heard) >= 0.7, "{}", heard_share(said, heard));
+        // stems count; nothing to check is fine; hostile text is no problem
+        assert_eq!(heard_share("Robots everywhere", "robot everywhere"), 1.0);
+        assert_eq!(heard_share("42 !!", ""), 1.0);
+        assert_eq!(heard_share("Hello there", ""), 0.0);
+        assert!(heard_share(&"word ".repeat(10_000), "word").is_finite());
+    }
+
+    /// An engine that reads a cloned line badly at first: take 0 is garbled, later takes say it.
+    struct Retakes {
+        calls: std::sync::Mutex<Vec<(String, Value)>>,
+        good_from: u64,
+    }
+
+    impl crate::Executor for Retakes {
+        fn execute(&self, id: &str, p: Value) -> crate::ExecFuture {
+            self.calls.lock().unwrap().push((id.to_string(), p.clone()));
+            let r = match id {
+                "tts.create" => {
+                    let take = p["take"].as_u64().unwrap_or(0);
+                    Ok(json!({"clip": 10 + take, "item": 100 + take, "duration": 5.0 * TPS, "cached": false}))
+                }
+                "transcript.generate" => Ok(json!({"items": []})),
+                "transcript.inspect" => {
+                    let take = p["item"].as_u64().unwrap_or(0) - 100;
+                    Ok(json!({"text": if take >= self.good_from { "Pepper greeted every visitor at the stand." } else { "and it's arguing." }}))
+                }
+                "edit.clear" => Ok(json!({})),
+                other => Err(format!("unexpected {other}")),
+            };
+            Box::pin(async move { r })
+        }
+    }
+
+    fn voice_tracks() -> Tracks {
+        Tracks {
+            fps: 30.0,
+            aspect: 16.0 / 9.0,
+            stabilize: false,
+            fill: true,
+            frame: (1920.0, 1080.0),
+            bg: "V1".into(),
+            fg: "V2".into(),
+            titles_index: 2,
+            over_index: 3,
+            counter_index: 4,
+            clip_audio: "A1".into(),
+            voice: "A2".into(),
+            music: "A3".into(),
+            sfx: "A4".into(),
+            hits: "A5".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_garbled_cloned_line_is_read_again() {
+        let say = "Pepper greeted every visitor at the stand.";
+        let ex = Retakes { calls: Default::default(), good_from: 1 };
+        let mut n = Narrations::default();
+        let secs = narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        assert_eq!(secs, 5.0);
+        assert_eq!((n.clips.clone(), n.retakes), (vec![11], 1), "the second take is kept");
+        let calls = ex.calls.lock().unwrap().clone();
+        let cleared: Vec<&Value> = calls.iter().filter(|(c, _)| c == "edit.clear").map(|(_, p)| p).collect();
+        assert_eq!(cleared, vec![&json!({"clips": [10]})], "the garbled take is cleared");
+        assert_eq!(calls.iter().filter(|(c, p)| c == "tts.create" && p["take"] == 1).count(), 1);
+
+        // never good: three takes, the best kept, and a note
+        let ex = Retakes { calls: Default::default(), good_from: 99 };
+        let mut n = Narrations::default();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        assert_eq!(n.clips.len(), 1);
+        assert!(n.notes.iter().any(|l| l.contains("best take")), "{:?}", n.notes);
+        assert!(ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").count() <= MAX_TAKES as usize + 1);
+
+        // a voice that is not cloned is not heard back
+        let ex = Retakes { calls: Default::default(), good_from: 99 };
+        let mut n = Narrations::default();
+        narrate(&ex, &voice_tracks(), Some("basic-male"), say, say, Delivery::Plain, 0.0, &mut n).await.unwrap();
+        assert!(ex.calls.lock().unwrap().iter().all(|(c, _)| c == "tts.create"));
     }
 
     #[test]
