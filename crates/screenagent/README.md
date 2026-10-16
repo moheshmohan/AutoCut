@@ -50,6 +50,22 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
   scroll for more, press Done. A reply that lumps the grid into one box, or stamps one
   label on many boxes, is asked again once with a stricter prompt. Bounded actions, bounded
   time, bounded patience.
+  - **Select all** (`select_all`): click the first tile, wheel to the end, Shift+click the
+    last. A grid of one is not Shift+clicked (that would toggle the only selection off). The
+    count is the header's "N selected" alone — the ask names no number (an example count was
+    once answered back from an empty header), a bare number is not a count — and a header
+    showing no selection gets the gesture once more from the top, then an error: Done is
+    never pressed with nothing selected. Select-all only ever runs inside a search result or
+    an opened album, never the whole library.
+  - **An album** (`album: Some(title)`): the picker's Albums view when one is grounded (a
+    small "album" element, never a thumbnail-sized box), else the title typed into the
+    picker's search (Google documents no Albums view; users search an album's title); only
+    an element labelled with the title is clicked, the opened screen must be headed by it,
+    then select-all. No match, or two albums with that title, is an error with nothing
+    selected.
+  - **Done is checked**: after the press the agent re-captures; the press took when the
+    window closed, the button is gone, or "N selected" is gone. Otherwise it presses again
+    (at most twice more, from the budget), then reports that the picker did not accept Done.
 - `picker.rs` — the picker's visual semantics (the tile-enumeration prompts, what a video
   tile looks like, where to click one — its left third, since grounded boxes start where
   the tile starts but can run on into the next — and what the confirm button is called),
@@ -62,10 +78,12 @@ requires.
 
 ## Using it
 
-CLI: `filmcraft-cli photos pick --auto "beach sunset videos" --max-items 5 --bridge …`
+CLI: `filmcraft-cli photos pick --auto "beach sunset videos" --max-items 5 --bridge …`, or a
+whole album: `filmcraft-cli photos pick --album "Robot showcase" [--videos-only] --bridge …`
 
-MCP: `googlephotos_pick { query: "beach sunset videos", max_items: 5 }` — the result
-carries an `autopick` report of what the agent did.
+MCP: `googlephotos_pick { query: "beach sunset videos", max_items: 5 }` or
+`googlephotos_pick { album: "Robot showcase" }` — the result carries an `autopick` report of
+what the agent did (`album_opened`, `selected`, `done_pressed`, `note`).
 
 ## One-time prerequisites
 

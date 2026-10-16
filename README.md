@@ -254,12 +254,18 @@ filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-r
   Google's Picker API can and cannot do. With `--auto "query"` (CLI) or `query` (MCP), a
   local vision agent drives the picker itself — it types the query into the picker's own
   search, selects matching videos and presses Done ([crates/screenagent](crates/screenagent/README.md);
-  Qwen2.5-VL via Ollama).
+  Qwen2.5-VL via Ollama). With `--album "<title>"` (CLI) or `album` (MCP) it picks a whole
+  album instead: curate the seed of a video in Google Photos, and the agent opens that album
+  in the picker and selects all of it.
 - **Back to Google Photos**: upload a finished export to your library — Export mode's
   **Upload to Google Photos**, `filmcraft-cli photos upload <file>`, `showcase … --export
   out.mp4 --upload`, the `photos.upload` command and the `googlephotos_upload` MCP tool
   (resumable 8 MiB chunks, progress, cancel). It needs the Photos Library API enabled and a
   one-time `filmcraft-cli photos auth --upload`; picker-only sign-ins are never asked for it.
+  `--album "<title>"` (or `album`) also puts it into an album FilmCraft makes (reused by
+  title), where you add the next iteration's material by hand: `photos album create|add`,
+  `photos albums` and the `photos.createAlbum` / `photos.albums` / `photos.addToAlbum`
+  commands, after `photos auth --albums`.
 
 <br>
 

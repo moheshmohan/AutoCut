@@ -140,7 +140,16 @@ progress and stop it:
   media item: `mediaItemId`, `productUrl`, …). Cancelling an upload stops it between chunks and
   never deletes the file being uploaded. It needs a one-time `filmcraft-cli photos auth --upload`
   (see [crates/gphotos](../crates/gphotos/README.md)); until then `photos.upload` is disabled and its
-  reason says so.
+  reason says so. With `album` (a title or id) the upload also goes into that album — the one
+  FilmCraft made with exactly that title, created when missing — so the user can add the next
+  iteration's material to it by hand. Albums are commands too, short calls that answer directly
+  (not jobs): `photos.createAlbum {title, description?}` (idempotent by title),
+  `photos.albums` (only the albums FilmCraft made: Google shows apps no others) and
+  `photos.addToAlbum {album, mediaItemIds}` (only items FilmCraft uploaded). They need
+  `filmcraft-cli photos auth --albums` once; until then they are disabled with that reason. To
+  read a user-curated album back, use `googlephotos_pick {album: "<title>"}`: the Library API
+  never returns items a user added by hand, so the picker's vision agent opens the album and
+  selects all of it.
 - So do the AutoCut showcase jobs (`autocut.analyze`, `autocut.showcasePlan`, `autocut.makeShowcase`,
   `autocut.showcaseBuild`; the `showcase_*` tools; progress in clips analysed or entries built). Their
   answer, like the finished job's `jobs.list` entry, carries `showcase`: what the job made (the
