@@ -9,6 +9,7 @@
 //! * [`sync`] — offset between two recordings of one event (GCC-PHAT, sample-accurate).
 //! * [`resample`] — streaming, block-invariant rate conversion for playback on a device at another rate.
 //! * [`channels`] — channel layouts, ITU-R BS.775 up/downmix, 5.1 mixdown types, the 5.1 panner.
+//! * [`synth`] — procedural sound effects (whoosh, impact, riser, drone) and cinematic music beds.
 //!
 //! Conventions: audio is **planar f32** (`&mut [&mut [f32]]`, one slice per channel, all the same
 //! length). `process` never allocates; all buffers are sized at construction. Parameters may be
@@ -31,6 +32,7 @@ pub mod remix;
 pub mod resample;
 mod smooth;
 pub mod sync;
+pub mod synth;
 
 pub use effects::{Category, EffectInfo, create_effect, effect_info, effects};
 pub use loudness::{LoudnessMeter, normalize_gain_db};

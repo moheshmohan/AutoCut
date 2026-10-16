@@ -94,9 +94,11 @@ async fn highlight_reel_keeps_the_best_segment() {
         run_with(&classified("highlight_reel", json!({"targetSeconds": 1.0})), "highlight reel", &ex, &cfg(), filmcraft_autocut::runner::Options::execute())
             .await
             .unwrap();
-    assert!(r.steps.iter().all(|s| s.id == "transcript.extract"), "{r:?}");
+    // time cuts (In/Out + extract), then a short transition at every cut
+    assert!(r.steps.iter().any(|s| s.id == "sequence.extract"), "{r:?}");
+    assert_eq!(r.steps.iter().rev().nth(1).map(|s| s.id.as_str()), Some("trim.applyDefaultTransition"), "{r:?}");
     let results = r.results.as_ref().unwrap();
-    assert!(!results.is_empty() && results[0].ok, "the extract ran: {r:?}");
+    assert!(!results.is_empty() && results.iter().all(|x| x.ok), "every step ran: {r:?}");
     let after = ex.execute("transcript.inspect", json!({})).await.unwrap();
     let left = after["words"].as_array().map(Vec::len).unwrap_or(0);
     assert_eq!(left, 3, "the kept sentence's words survive: {left}");

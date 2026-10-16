@@ -73,7 +73,12 @@ fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration>
         None => base.map(|b| b.text.clone()).ok_or_else(|| bad(cmd, "`text` is required"))?,
     };
     let voice = str_p(p, "voice").map(str::to_string).or_else(|| base.map(|b| b.voice.clone())).unwrap_or_else(|| tts::default_voice_id().to_string());
-    let info = tts::voices_in(None).into_iter().find(|v| v.id == voice).ok_or_else(|| bad(cmd, format!("unknown voice `{voice}` (see tts.voices)")))?;
+    let language = if voice.starts_with(tts::CLONE_PREFIX) {
+        // a cloned voice: its profile is checked when it speaks
+        "en-US"
+    } else {
+        tts::voices_in(None).into_iter().find(|v| v.id == voice).ok_or_else(|| bad(cmd, format!("unknown voice `{voice}` (see tts.voices)")))?.language
+    };
     let pitch = match str_p(p, "pitch") {
         Some(v) => VocalPitch::from_id(v).ok_or_else(|| bad(cmd, format!("unknown pitch `{v}` (extraLow, low, default, high, extraHigh)")))?,
         None => base.map(|b| b.pitch).unwrap_or_default(),
@@ -82,7 +87,7 @@ fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration>
         Some(v) => v.as_f64().ok_or_else(|| bad(cmd, "`pace` must be a number"))?,
         None => base.map_or(1.0, |b| b.pace),
     };
-    let n = Narration { text, language: info.language.to_string(), voice, pitch, pace, speech_duration: Tick::ZERO };
+    let n = Narration { text, language: language.to_string(), voice, pitch, pace, speech_duration: Tick::ZERO };
     n.check().map_err(|e| bad(cmd, e))?;
     Ok(n)
 }
@@ -98,7 +103,9 @@ fn cache_key(n: &Narration) -> String {
 
 fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
     match e {
-        tts::TtsError::NotInstalled => bad(cmd, "the natural voices are not downloaded yet: Text to Speech ▸ Download natural voices (tts.downloadVoices)"),
+        tts::TtsError::NotInstalled => {
+            bad(cmd, "the natural voices (or, for a cloned voice, the cloning model) are not downloaded yet: tts.downloadVoices, tts.downloadCloneModel")
+        }
         e => bad(cmd, e.to_string()),
     }
 }
@@ -147,6 +154,7 @@ fn voices(_s: &mut Session, _p: &Value) -> Result<Value> {
         "package": package_json(),
         "languages": tts::LANGUAGES.iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>(),
         "voices": tts::voices_in(dir.as_deref()),
+        "cloned": crate::voice_clone::cloned_json(),
         "defaultVoice": tts::default_voice_id(),
         "pitches": VocalPitch::ALL.iter().map(|p| json!({"id": p.id(), "label": p.label(), "semitones": p.semitones()})).collect::<Vec<_>>(),
         "pace": {"min": tts::MIN_PACE, "max": tts::MAX_PACE, "default": 1.0},
@@ -188,7 +196,7 @@ fn write_and_import(s: &mut Session, p: &Value, samples: &[f32], rate: u32, near
         },
         _ => None,
     });
-    let dir = beside.unwrap_or_else(|| crate::voiceover::media_dir(s, p, "Narrations"));
+    let dir = beside.unwrap_or_else(|| crate::voiceover::generated_dir(s, p, "Narrations"));
     let path = crate::voiceover::unique_wav_path(s, &dir, BASE_NAME)?;
     if !cfg!(target_arch = "wasm32") {
         std::fs::create_dir_all(&dir).map_err(|e| EngineError::Other(format!("{dir}: {e}")))?;
@@ -376,12 +384,12 @@ fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"item": item.0, "clip": clip, "narration": n}))
 }
 
-fn new_job(s: &mut Session, label: String) -> crate::Job {
+pub(crate) fn new_job(s: &mut Session, label: String) -> crate::Job {
     let id = s.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
     crate::Job { id, label, progress: Default::default(), result: Default::default() }
 }
 
-fn spawn(s: &mut Session, job: crate::Job, wait: bool, name: &str, run: impl FnOnce() + Send + 'static) -> Result<u64> {
+pub(crate) fn spawn(s: &mut Session, job: crate::Job, wait: bool, name: &str, run: impl FnOnce() + Send + 'static) -> Result<u64> {
     let id = job.id;
     let run = crate::export_tools::guard_job(job.progress.clone(), job.result.clone(), run);
     s.jobs.push(job);
@@ -393,9 +401,9 @@ fn spawn(s: &mut Session, job: crate::Job, wait: bool, name: &str, run: impl FnO
     Ok(id)
 }
 
-type JobResult = std::sync::Mutex<Option<std::result::Result<filmcraft_export::Report, String>>>;
+pub(crate) type JobResult = std::sync::Mutex<Option<std::result::Result<filmcraft_export::Report, String>>>;
 
-fn finish(prog: &filmcraft_export::Progress, res: &JobResult, r: std::result::Result<String, String>, t0: web_time::Instant) {
+pub(crate) fn finish(prog: &filmcraft_export::Progress, res: &JobResult, r: std::result::Result<String, String>, t0: web_time::Instant) {
     use std::sync::atomic::Ordering;
     let secs = t0.elapsed().as_secs_f64();
     let r = match r {

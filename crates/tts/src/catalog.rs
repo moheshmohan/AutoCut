@@ -60,6 +60,44 @@ pub static FILES: &[ModelFile] = &[
     hf!("am_puck.pt", "voices/am_puck.pt", "dd1d8973f4ce4b7d8ae407c77a435f485dabc052081b80ea75c4f30b84f36223", 523_420),
 ];
 
+/// The voice-cloning package: the OpenVoice V2 tone-colour converter (MIT, MyShell). Pinned and
+/// checked like the voices (verified 2026-10-16 against the Hugging Face API and `shasum -a 256`).
+pub const CLONE_PACKAGE_ID: &str = "openvoice-v2";
+pub const CLONE_PACKAGE_NAME: &str = "Voice cloning (OpenVoice V2 converter)";
+pub const CLONE_LICENSE: &str = "MIT (OpenVoice V2 by MyShell)";
+pub const CLONE_SOURCE: &str = "https://huggingface.co/myshell-ai/OpenVoiceV2";
+
+pub static CLONE_FILES: &[ModelFile] = &[
+    ModelFile {
+        name: "config.json",
+        url: "https://huggingface.co/myshell-ai/OpenVoiceV2/resolve/f36e7edfe1684461a8343844af60babc2efbb727/converter/config.json",
+        sha256: "9dfff60350b8c63f2c664efd92a61b2516efb22671466960f0e5dfebd881fa47",
+        size: 838,
+    },
+    ModelFile {
+        name: "checkpoint.pth",
+        url: "https://huggingface.co/myshell-ai/OpenVoiceV2/resolve/f36e7edfe1684461a8343844af60babc2efbb727/converter/checkpoint.pth",
+        sha256: "9652c27e92b6b2a91632590ac9962ef7ae2b712e5c5b7f4c34ec55ee2b37ab9e",
+        size: 131_320_490,
+    },
+];
+
+pub fn clone_package_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(CLONE_PACKAGE_ID)
+}
+
+/// The converter's files are all present with their pinned sizes.
+pub fn clone_installed(models_dir: &Path) -> bool {
+    let d = clone_package_dir(models_dir);
+    CLONE_FILES.iter().all(|f| std::fs::metadata(d.join(f.name)).is_ok_and(|m| m.len() == f.size))
+}
+
+/// Bytes of the cloning package still to download.
+pub fn clone_missing_bytes(models_dir: &Path) -> u64 {
+    let d = clone_package_dir(models_dir);
+    CLONE_FILES.iter().filter(|f| !std::fs::metadata(d.join(f.name)).is_ok_and(|m| m.len() == f.size)).map(|f| f.size).sum()
+}
+
 /// A neural voice: catalogue entry and its voice-pack file.
 #[derive(Clone, Copy, Debug)]
 pub struct NeuralVoice {

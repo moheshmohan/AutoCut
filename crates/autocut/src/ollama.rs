@@ -8,6 +8,9 @@ use serde_json::{Value, json};
 use crate::llm::ChatModel;
 use crate::{AutoCutError, extract_json};
 
+/// Most tokens one reply may have.
+const MAX_REPLY_TOKENS: u32 = 4096;
+
 /// An Ollama endpoint plus the model to talk to.
 #[derive(Clone)]
 pub struct Ollama {
@@ -67,8 +70,13 @@ impl Ollama {
             "model": self.model,
             "stream": false,
             "format": json.then_some("json"),
+            // a thinking model (qwen3) would reason at length before every answer; models that
+            // do not think ignore this
+            "think": false,
             "messages": [{"role": "system", "content": system}, message],
-            "options": {"temperature": 0.1}
+            // a cap on the reply: a model stuck emitting whitespace in JSON mode stops instead
+            // of running into the request timeout
+            "options": {"temperature": 0.1, "num_predict": MAX_REPLY_TOKENS}
         })
     }
 

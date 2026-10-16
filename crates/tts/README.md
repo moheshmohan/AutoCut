@@ -24,6 +24,23 @@ clip behaviour: `crates/engine/src/narration.rs`.
   model card, CMUdict; 336 MB), every file pinned to a revision and SHA-256. Downloaded by the
   engine (`tts.downloadVoices`) after the user confirms; never bundled or committed.
 
+- `openvoice` (feature `kokoro`): the **OpenVoice V2 tone-colour converter** in pure Rust on
+  candle — a VITS synthesizer without a text encoder: a reference encoder (six 3×3/2 conv2d →
+  GRU → 256-d *tone colour*), a posterior encoder, four mean-only affine couplings conditioned on
+  the colour, and a HiFi-GAN decoder at 22.05 kHz. `tone_colour` reads a speaker's timbre from
+  their speech; `convert` re-voices speech from one colour to another, keeping words, timing and
+  intonation. Implemented from the paper, the MIT reference code, `converter/config.json` and the
+  checkpoint's tensor names (weight norm folded on load, including 2-D convolutions).
+- `clone` (feature `kokoro`): **cloned voices**. A profile (`<data>/voices/<name>.json`) holds the
+  speaker's tone colour, the Kokoro voice it speaks through (by default the one whose colour is
+  closest to the speaker's) and that voice's colour; `clone:<name>` speaks Kokoro's reading
+  re-voiced into the speaker's timbre. Speech is found in the reference by an adaptive energy
+  gate; 3–120 s of it is used. Profiles record consent: `create` refuses without it.
+  `examples/clone_check.rs` measures a clone — on the author's voice the timbre similarity to the
+  speaker rose from 0.50 (base voice) to 0.90 (cloned).
+- `catalog` also pins the cloning package: OpenVoice V2 `converter/config.json` and
+  `checkpoint.pth` (131 MB, MIT, MyShell), downloaded by `tts.downloadCloneModel`.
+
 Everything is deterministic (the vocoder's noise is seeded). Without features the crate depends
 only on `serde` and `thiserror` (and checks for wasm).
 
@@ -56,6 +73,10 @@ builds), e.g. 186 s of speech in 84 s; model load 0.5 s. Reproduce with the `nar
   synthesis as a background job.
 - Kokoro's model card states the weights are Apache-2.0 but the repository has no LICENSE file.
 - Vocal pitch shifts the voice's base pitch (and its formants slightly); pace scales every duration.
+- A cloned voice copies **timbre**, not accent or rhythm: those are still Kokoro's (US English).
+  It is also slower: about 2.6× slower than real time on a laptop CPU (Kokoro, then the
+  converter at 22.05 kHz). A zero-shot model such as Kyutai's Pocket TTS (CC-BY-4.0, gated
+  download) would copy the accent too; it is the natural next step.
 
 ## Tests
 

@@ -23,12 +23,23 @@ pub struct Plan {
     pub max_actions: u32,
     /// Hard wall-clock budget.
     pub timeout: Duration,
+    /// Select every result instead of `max_items` tiles: click the first tile, wheel to the
+    /// end of the grid and Shift+click the last one (the picker's own range selection).
+    pub select_all: bool,
 }
 
 impl Default for Plan {
     fn default() -> Self {
-        Self { query: None, max_items: 6, videos_only: true, max_actions: 40, timeout: Duration::from_secs(300) }
+        Self { query: None, max_items: 6, videos_only: true, max_actions: 40, timeout: Duration::from_secs(300), select_all: false }
     }
+}
+
+/// What a caller asks of [`spawn`].
+#[derive(Debug, Clone, Default)]
+pub struct Request {
+    pub query: String,
+    pub max_items: u32,
+    pub select_all: bool,
 }
 
 /// What the agent did.
@@ -59,7 +70,7 @@ const SAME_SPOT: u32 = 16;
 ///
 /// Needs Screen Recording + Accessibility for the host process and the model in Ollama —
 /// all failures come back as readable strings on the handle.
-pub fn spawn(query: String, max_items: u32) -> std::thread::JoinHandle<Result<Summary, String>> {
+pub fn spawn(req: Request) -> std::thread::JoinHandle<Result<Summary, String>> {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(2500)); // let the picker load
         let shell = crate::capture::OsShell;
@@ -69,7 +80,7 @@ pub fn spawn(query: String, max_items: u32) -> std::thread::JoinHandle<Result<Su
         if !grounder.model_available().map_err(|e| e.to_string())? {
             return Err(format!("the grounding model `{}` is not in Ollama — `ollama pull {}` first", cfg.model, cfg.model));
         }
-        let plan = Plan { query: Some(query), max_items, ..Plan::default() };
+        let plan = Plan { query: Some(req.query), max_items: req.max_items, select_all: req.select_all, ..Plan::default() };
         let mut actor = crate::act::MacActor::new(app, Box::new(shell));
         drive(&mut actor, &grounder, &plan, &mut |l| eprintln!("{l}")).map_err(|e| e.to_string())
     })
@@ -143,9 +154,12 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
         }
     }
 
-    // 2. select tiles
+    // 2. select tiles — every result, or up to max_items
+    if plan.select_all {
+        select_everything(actor, grounder, plan, &mut summary, &mut cap, started, progress)?;
+    }
     let mut tried: Vec<(u32, u32)> = Vec::new();
-    while summary.selected < plan.max_items {
+    while !plan.select_all && summary.selected < plan.max_items {
         if spend(&mut summary, plan)? || deadline() {
             return Err(budget(&summary));
         }
@@ -253,6 +267,97 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
     Ok(summary)
 }
 
+/// Wheel lines per scroll while looking for the end of the grid.
+const END_SCROLL_LINES: i32 = SCROLL_LINES * 3;
+
+/// Select every result with the picker's range gesture: click the first tile, wheel to the end
+/// of the grid (until two scrolls change nothing — the grid loads lazily), Shift+click the
+/// last tile. Two clicks select a whole search result, where tile-by-tile selection misses
+/// the tiles the model does not box. The selected count is read off the picker's header.
+fn select_everything<A: Act, G: Ground>(
+    actor: &mut A,
+    grounder: &G,
+    plan: &Plan,
+    summary: &mut Summary,
+    cap: &mut crate::capture::Capture,
+    started: Instant,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(), ScreenError> {
+    let out_of_time = || started.elapsed() >= plan.timeout;
+    // 1. the first tile, in reading order
+    let mut first = None;
+    for _ in 0..MAX_STALLED {
+        if let Some(t) = visible_tiles(grounder, cap, plan.videos_only, progress)?.into_iter().next() {
+            first = Some(t);
+            break;
+        }
+        if spend(summary, plan)? || out_of_time() {
+            return Err(budget(summary));
+        }
+        actor.scroll(SCROLL_LINES)?;
+        actor.sleep(900);
+        *cap = actor.capture()?;
+    }
+    let Some(first) = first else {
+        summary.note = "no tiles to select".into();
+        return Ok(());
+    };
+    if spend(summary, plan)? {
+        return Err(budget(summary));
+    }
+    let (px, py) = picker::click_point(&first);
+    let before = cap.png.clone();
+    actor.click_png(cap, px, py)?;
+    actor.sleep(CLICK_SETTLE_MS);
+    *cap = actor.capture()?;
+    if !verify::changed(&before, &cap.png)? {
+        return Err(ScreenError::Stalled("clicking the first tile changed nothing (is Accessibility granted to this terminal?)".into()));
+    }
+    summary.selected = 1;
+    progress("screenagent: selected the first result; scrolling to the end of the grid");
+    // 2. to the end of the grid
+    let mut still = 0u32;
+    while still < 2 {
+        if spend(summary, plan)? || out_of_time() {
+            progress("screenagent: out of budget before the end of the grid; selecting up to here");
+            break;
+        }
+        let before = cap.png.clone();
+        actor.scroll(END_SCROLL_LINES)?;
+        actor.sleep(1200);
+        *cap = actor.capture()?;
+        still = if verify::changed(&before, &cap.png)? { 0 } else { still + 1 };
+    }
+    // 3. Shift+click the last tile
+    let tiles = visible_tiles(grounder, cap, plan.videos_only, progress)?;
+    let band = (cap.png_h / 16).max(1);
+    let Some(last) = tiles.iter().max_by_key(|e| (e.y1 / band, e.x1)) else {
+        summary.note = "found no tile at the end of the grid; only the first is selected".into();
+        return Ok(());
+    };
+    if spend(summary, plan)? {
+        return Err(budget(summary));
+    }
+    let (px, py) = picker::click_point(last);
+    let before = cap.png.clone();
+    actor.shift_click_png(cap, px, py)?;
+    actor.sleep(CLICK_SETTLE_MS * 2);
+    *cap = actor.capture()?;
+    if !verify::changed(&before, &cap.png)? {
+        summary.note = "the range click changed nothing; only the first tile is selected".into();
+        return Ok(());
+    }
+    summary.selected = 2;
+    // the header says how many: "37 selected"
+    if let Ok(els) = grounder.inventory(&cap.png, picker::SELECTED_COUNTER)
+        && let Some(n) = els.iter().find_map(|e| picker::selected_count(&e.label))
+    {
+        summary.selected = n.max(2);
+    }
+    progress(&format!("screenagent: selected {} item(s) with a range click", summary.selected));
+    Ok(())
+}
+
 /// Count an action; `Ok(true)` = budget exhausted.
 fn spend(summary: &mut Summary, plan: &Plan) -> Result<bool, ScreenError> {
     summary.actions += 1;
@@ -289,6 +394,9 @@ mod tests {
         caps: Vec<Capture>,
         i: usize,
         clicks: Vec<(u32, u32)>,
+        shift_clicks: Vec<(u32, u32)>,
+        /// What the screen shows after a Shift+click (the range selected).
+        after_shift: Option<Capture>,
         typed: Vec<String>,
         returns: u32,
         scrolls: i32,
@@ -296,7 +404,7 @@ mod tests {
     }
     impl FakeActor {
         fn new(caps: Vec<Capture>) -> Self {
-            Self { caps, i: 0, clicks: vec![], typed: vec![], returns: 0, scrolls: 0, fail_capture_at: None }
+            Self { caps, i: 0, clicks: vec![], shift_clicks: vec![], after_shift: None, typed: vec![], returns: 0, scrolls: 0, fail_capture_at: None }
         }
     }
     impl Act for FakeActor {
@@ -305,6 +413,11 @@ mod tests {
         }
         fn click_png(&mut self, _cap: &Capture, px: u32, py: u32) -> Result<(), ScreenError> {
             self.clicks.push((px, py));
+            self.i = (self.i + 1).min(self.caps.len() - 1);
+            Ok(())
+        }
+        fn shift_click_png(&mut self, _cap: &Capture, px: u32, py: u32) -> Result<(), ScreenError> {
+            self.shift_clicks.push((px, py));
             self.i = (self.i + 1).min(self.caps.len() - 1);
             Ok(())
         }
@@ -328,6 +441,11 @@ mod tests {
         fn capture(&mut self) -> Result<Capture, ScreenError> {
             if self.fail_capture_at == Some(self.i) {
                 return Err(ScreenError::Capture("x".into(), "window closed".into()));
+            }
+            if !self.shift_clicks.is_empty()
+                && let Some(c) = &self.after_shift
+            {
+                return Ok(c.clone());
             }
             Ok(self.caps[self.i].clone())
         }
@@ -423,6 +541,9 @@ mod tests {
             fn click_png(&mut self, _: &Capture, _: u32, _: u32) -> Result<(), ScreenError> {
                 Err(ScreenError::Input("Google Chrome".into(), "refused".into()))
             }
+            fn shift_click_png(&mut self, _: &Capture, _: u32, _: u32) -> Result<(), ScreenError> {
+                Err(ScreenError::Input("Google Chrome".into(), "refused".into()))
+            }
             fn type_text(&mut self, _: &str) -> Result<(), ScreenError> {
                 Err(ScreenError::Input("Google Chrome".into(), "refused".into()))
             }
@@ -497,6 +618,37 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("asking again")));
         // the lump itself was never clicked
         assert_eq!(act.clicks[0], crate::picker::click_point(&g.rounds[1][0]));
+    }
+
+    #[test]
+    fn select_all_clicks_first_scrolls_to_the_end_and_shift_clicks_last() {
+        struct Grid;
+        impl Ground for Grid {
+            fn inventory(&self, _png: &[u8], task: &str) -> Result<Vec<Element>, ScreenError> {
+                if task == crate::picker::SELECTED_COUNTER {
+                    return Ok(vec![Element { label: "37 selected".into(), kind: String::new(), x1: 5, y1: 2, x2: 60, y2: 12 }]);
+                }
+                let tile = |l: &str, x1: u32, y1: u32| Element { label: l.into(), kind: String::new(), x1, y1, x2: x1 + 40, y2: y1 + 40 };
+                // three rows; the last row's rightmost tile is the end of the range
+                Ok(vec![tile("0:12", 120, 100), tile("0:05", 10, 10), tile("1:01", 60, 100), tile("0:30", 120, 10)])
+            }
+            fn find(&self, _png: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
+                Ok(target.contains("Done").then(|| Element { label: "Done".into(), kind: String::new(), x1: 180, y1: 0, x2: 199, y2: 20 }))
+            }
+        }
+        // grid, first tile selected, two scrolled pages, then the end (captures stop changing)
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(200), cap_of(90), cap_of(150)]);
+        act.after_shift = Some(cap_of(30));
+        let plan = Plan { select_all: true, ..Plan::default() };
+        let mut lines: Vec<String> = vec![];
+        let s = drive(&mut act, &Grid, &plan, &mut |l| lines.push(l.into())).unwrap();
+        let tile = |x1: u32, y1: u32| Element { label: String::new(), kind: String::new(), x1, y1, x2: x1 + 40, y2: y1 + 40 };
+        assert_eq!(act.clicks.first(), Some(&crate::picker::click_point(&tile(10, 10))), "the first tile: {:?}", act.clicks);
+        assert_eq!(act.shift_clicks, vec![crate::picker::click_point(&tile(120, 100))], "the last tile");
+        assert!(act.scrolls > 0, "it scrolled to the end");
+        assert_eq!(s.selected, 37, "the header count: {s:?}");
+        assert!(s.done_pressed);
+        assert!(lines.iter().any(|l| l.contains("range click")), "{lines:?}");
     }
 
     #[test]

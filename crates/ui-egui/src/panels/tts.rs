@@ -10,7 +10,12 @@
 //!
 //! Automation ids: `tts.language`, `tts.voice`, `tts.hearVoice`, `tts.advanced` (twirl),
 //! `tts.pitch`, `tts.pace`, `tts.text`, `tts.addPause`, `tts.preview`, `tts.save`, `tts.new`,
-//! `tts.download`, `tts.download.confirm`, `tts.download.cancel`.
+//! `tts.download`, `tts.download.confirm`, `tts.download.cancel`, `tts.cloneOpen` (twirl),
+//! `tts.cloneName`, `tts.cloneConsent`, `tts.clone`.
+//!
+//! **Cloned voices** (`clone:<name>`) are listed in the voice menu. "Clone a voice" makes one from
+//! the speech in the selected clips (`tts.cloneVoice`, a background job) once the user has named
+//! it and confirmed it is their own voice or that the speaker agreed.
 
 use egui::{Align2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_project::{ClipId, VocalPitch};
@@ -42,6 +47,14 @@ pub struct TtsDraft {
     pub confirm_download: bool,
     /// The running natural-voice download job.
     pub download_job: Option<u64>,
+    /// The "Clone a voice" section is open.
+    pub clone_open: bool,
+    /// Name for the next cloned voice.
+    pub clone_name: String,
+    /// The user confirmed it is their voice, or the speaker agreed.
+    pub clone_consent: bool,
+    /// The running cloning (or cloning-model download) job, and the voice it makes.
+    pub clone_job: Option<(u64, Option<String>)>,
 }
 
 /// A command to run when the synthesis job `job` finishes.
@@ -68,6 +81,10 @@ impl Default for TtsDraft {
             pending: None,
             confirm_download: false,
             download_job: None,
+            clone_open: false,
+            clone_name: String::new(),
+            clone_consent: false,
+            clone_job: None,
         }
     }
 }
@@ -78,9 +95,10 @@ impl TtsDraft {
     }
 }
 
-/// The natural voice package is downloaded.
+/// The natural voices can speak: this build has them and their package is downloaded (a build
+/// without them must not default to a voice it cannot use, even where the files are on disk).
 fn natural_installed() -> bool {
-    filmcraft_engine::transcript::models_dir().as_deref().is_some_and(filmcraft_tts::catalog::installed)
+    filmcraft_tts::NATURAL_VOICES && filmcraft_engine::transcript::models_dir().as_deref().is_some_and(filmcraft_tts::catalog::installed)
 }
 
 /// State of job `id`: `None` while running, else its result.
@@ -149,6 +167,19 @@ fn poll(app: &mut FilmcraftApp) {
             }
         }
     }
+    if let Some((j, voice)) = app.ui.tts.clone_job.clone()
+        && let Some(r) = job_outcome(app, j)
+    {
+        app.ui.tts.clone_job = None;
+        app.ui.status = match (r, voice) {
+            (Ok(()), Some(v)) => {
+                app.ui.tts.voice = v.clone();
+                format!("Cloned voice ready: {v}")
+            }
+            (Ok(()), None) => "Voice cloning model installed".into(),
+            (Err(e), _) => format!("Voice cloning failed: {e}"),
+        };
+    }
     if let Some(j) = app.ui.tts.download_job
         && let Some(r) = job_outcome(app, j)
     {
@@ -201,6 +232,9 @@ enum Action {
     New,
     Download,
     CancelDownload,
+    /// Clone a voice named this from the selected clips.
+    Clone(String),
+    DownloadCloneModel,
 }
 
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
@@ -209,7 +243,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     painter.rect_filled(rect, 0.0, t.panel_bg);
     let models = filmcraft_engine::transcript::models_dir();
     let voices = filmcraft_tts::voices_in(models.as_deref());
-    let installed = models.as_deref().is_some_and(filmcraft_tts::catalog::installed);
+    let installed = filmcraft_tts::NATURAL_VOICES && models.as_deref().is_some_and(filmcraft_tts::catalog::installed);
     let busy = app.ui.tts.pending.is_some();
     let download = app
         .ui
@@ -254,8 +288,25 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         auto.add("tts.language", visible(ui, cb.response.rect), "Language");
         ui.add_space(10.0);
         label(ui, &t, "Voice");
-        let voice_name = voices.iter().find(|v| v.id == d.voice).map_or(d.voice.as_str(), |v| v.name);
+        let cloned: Vec<(String, String)> = filmcraft_engine::voice_clone::cloned_json()
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| Some((v["id"].as_str()?.to_string(), v["name"].as_str()?.to_string()))).collect())
+            .unwrap_or_default();
+        let voice_name = voices
+            .iter()
+            .find(|v| v.id == d.voice)
+            .map(|v| v.name.to_string())
+            .or_else(|| cloned.iter().find(|(id, _)| *id == d.voice).map(|(_, n)| format!("{n} (cloned)")))
+            .unwrap_or_else(|| d.voice.clone());
         let cb = egui::ComboBox::from_id_salt("tts-voice").selected_text(voice_name).width(w).show_ui(ui, |ui| {
+            if !cloned.is_empty() {
+                ui.label(egui::RichText::new("Your cloned voices").color(t.text_faint).size(11.0));
+                for (id, name) in &cloned {
+                    if ui.selectable_label(d.voice == *id, name).on_hover_text("Kokoro speech re-voiced into this timbre").clicked() {
+                        d.voice = id.clone();
+                    }
+                }
+            }
             for (engine, heading) in [("neural", "Natural voices"), ("basic", "Basic voices (built in)")] {
                 ui.label(egui::RichText::new(heading).color(t.text_faint).size(11.0));
                 for v in voices.iter().filter(|v| v.language == d.language && v.engine == engine) {
@@ -268,6 +319,45 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         });
         auto.add("tts.voice", visible(ui, cb.response.rect), "Voice");
+        // clone a voice from the selected clip
+        ui.add_space(4.0);
+        let twirl = ui.add(
+            egui::Label::new(egui::RichText::new(if d.clone_open { "▾ Clone a voice" } else { "▸ Clone a voice" }).color(t.text_dim).size(11.5))
+                .sense(Sense::click()),
+        );
+        auto.add("tts.cloneOpen", visible(ui, twirl.rect), "Clone a voice");
+        if twirl.clicked() {
+            d.clone_open = !d.clone_open;
+        }
+        if d.clone_open {
+            egui::Frame::new().fill(t.field_bg).stroke(egui::Stroke::new(1.0, t.field_border)).corner_radius(4.0).inner_margin(8.0).show(ui, |ui| {
+                ui.set_width(w - 18.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Uses the speech in the selected clip (3 s or more). The timbre is copied; the accent and rhythm are the natural voice's.",
+                    )
+                    .color(t.text_dim)
+                    .size(11.0),
+                );
+                let name = ui.add(egui::TextEdit::singleline(&mut d.clone_name).hint_text("Name, e.g. My voice").desired_width(w - 18.0));
+                auto.add("tts.cloneName", visible(ui, name.rect), "Cloned voice name");
+                let consent = ui.checkbox(&mut d.clone_consent, "This is my voice, or the speaker agreed to it being cloned");
+                auto.add("tts.cloneConsent", visible(ui, consent.rect), "Consent to clone");
+                let model_ready = filmcraft_engine::transcript::models_dir().as_deref().is_some_and(filmcraft_tts::catalog::clone_installed);
+                let running = d.clone_job.is_some();
+                let ready = !d.clone_name.trim().is_empty() && d.clone_consent && !running;
+                let text = match (running, model_ready) {
+                    (true, _) => "Working…",
+                    (false, true) => "Clone from selected clip",
+                    (false, false) => "Download cloning model (131 MB)",
+                };
+                let b = ui.add_enabled(ready || (!model_ready && !running), egui::Button::new(text));
+                auto.add("tts.clone", visible(ui, b.rect), "Clone a voice");
+                if b.clicked() {
+                    actions.push(if model_ready { Action::Clone(d.clone_name.trim().to_string()) } else { Action::DownloadCloneModel });
+                }
+            });
+        }
         let natural = filmcraft_tts::catalog::find(&d.voice).is_some();
         if natural && !installed {
             ui.add_space(6.0);
@@ -422,6 +512,24 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     Err(e) => app.ui.status = e.to_string(),
                 }
             }
+            Action::Clone(name) => {
+                let clips: Vec<u64> = app.session.state.selection.iter().map(|c| c.0).collect();
+                if clips.is_empty() {
+                    app.ui.status = "Select a clip with the voice to clone".into();
+                } else {
+                    match app.session.execute("tts.cloneVoice", json!({"name": name, "consent": true, "clips": clips})) {
+                        Ok(r) => {
+                            app.ui.tts.clone_job = r["job"].as_u64().map(|j| (j, r["voice"].as_str().map(str::to_string)));
+                            app.ui.status = format!("Cloning voice {name}…");
+                        }
+                        Err(e) => app.ui.status = e.to_string(),
+                    }
+                }
+            }
+            Action::DownloadCloneModel => match app.session.execute("tts.downloadCloneModel", json!({})) {
+                Ok(r) => app.ui.tts.clone_job = r["job"].as_u64().map(|j| (j, None)),
+                Err(e) => app.ui.status = e.to_string(),
+            },
             Action::CancelDownload => {
                 if let Some(id) = app.ui.tts.download_job
                     && let Some(j) = app.session.jobs.iter().find(|j| j.id == id)

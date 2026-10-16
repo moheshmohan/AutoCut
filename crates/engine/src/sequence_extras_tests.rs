@@ -84,6 +84,22 @@ fn apply_default_transitions_to_selected_clips() {
 }
 
 #[test]
+fn default_transitions_take_a_length_in_frames() {
+    // AutoCut smooths its cuts with short transitions: `frames` sets each one's length
+    let mut s = demo();
+    let q = s.active_sequence().unwrap();
+    let c = q.video_tracks[0].items[2].clone();
+    let fd = s.sequence_rate().frame_duration();
+    s.execute("timeline.select", json!({"clips": [c.id.0]})).unwrap();
+    assert!(s.execute("trim.applyDefaultTransition", json!({"frames": 0})).is_err());
+    s.execute("trim.applyDefaultTransition", json!({"frames": 6})).unwrap();
+    let q = s.active_sequence().unwrap();
+    let cut = q.video_tracks[0].transitions.iter().find(|t| t.to == Some(c.id)).expect("transition at the in point");
+    assert_eq!(cut.duration, Tick(fd.0 * 6));
+    assert!(q.audio_tracks[0].transitions.iter().any(|t| t.duration == Tick(fd.0 * 6)), "audio too");
+}
+
+#[test]
 fn apply_video_transition_goes_to_the_selection_not_the_playhead() {
     // #1124: ⌘D with a clip selected adds the transition at its free edges wherever the playhead is
     let mut s = demo();

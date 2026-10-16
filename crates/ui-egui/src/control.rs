@@ -11,6 +11,8 @@
 //! - `ui.set {tool?, workspace?, mode?, theme?, focused?, playbackRes?, timeline?:{pps,scroll}}`
 //! - `ui.panel.show {panel}` / `ui.panel.close {panel}`
 //! - `ui.set {tts: {voice, pitch, pace, text…}}`: patch the Text to Speech panel draft
+//! - `ui.set {generateAudio: {kind, seconds, intensity, mood, key, bpm, seed}}`: patch the Generate
+//!   Audio panel
 //! - `ui.click {id | x,y, button?, count?, modifiers?}` / `ui.move {x,y}` / `ui.scroll {x,y,dx,dy}`
 //! - `ui.drag {from:{id|x,y}, to:{id|x,y}, steps?, modifiers?}`: synthetic press-move-release
 //! - `ui.key {key, command?, shift?, alt?, ctrl?}` / `ui.type {text}`
@@ -131,6 +133,15 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
                 match serde_json::from_value(cur) {
                     Ok(d) => app.ui.tts = d,
                     Err(e) => return err(format!("bad `tts`: {e}")),
+                }
+            }
+            // Generate Audio panel settings (kind, length, mood…), merged likewise
+            if let Some(patch) = p.get("generateAudio") {
+                let mut cur = serde_json::to_value(&app.ui.generate_audio).unwrap_or_default();
+                merge(&mut cur, patch);
+                match serde_json::from_value(cur) {
+                    Ok(d) => app.ui.generate_audio = d,
+                    Err(e) => return err(format!("bad `generateAudio`: {e}")),
                 }
             }
             if let Some(t) = s("tool") {

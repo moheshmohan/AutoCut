@@ -11,6 +11,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 pub mod aaf_omf;
+pub mod audio_generate;
 pub mod autosave;
 pub mod captions;
 pub mod clip_ops;
@@ -21,12 +22,15 @@ pub mod essential_sound;
 pub mod export_tools;
 pub mod graphic_templates;
 pub mod graphics;
+pub mod graphics_counter;
 pub mod interchange;
 pub mod keyboard;
 mod keyframe_move;
 mod marker_export;
 pub mod masks;
 pub mod media_browser;
+pub mod media_date;
+pub mod media_frame;
 pub mod media_pool;
 pub mod media_watch;
 pub mod mixer;
@@ -54,6 +58,7 @@ pub mod source_monitor;
 pub mod sync;
 pub mod transcript;
 pub mod trim;
+pub mod voice_clone;
 pub mod voiceover;
 
 use std::sync::Arc;
@@ -1213,6 +1218,8 @@ mod aaf_omf_tests;
 mod animated_image_tests;
 #[cfg(test)]
 mod audio_effects_tests;
+#[cfg(test)]
+mod audio_generate_tests;
 #[cfg(test)]
 mod audio_placement_tests;
 #[cfg(test)]

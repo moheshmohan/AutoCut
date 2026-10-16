@@ -209,7 +209,7 @@ async fn highlight_reel(params: &Value, digest: &Digest, ex: &dyn Executor) -> R
     };
     let target = params["targetSeconds"].as_f64().unwrap_or(60.0).clamp(1.0, 3600.0);
     let topic = params["topic"].as_str().map(str::to_string);
-    let (keep, removals, notes) = highlight::plan(&words, target, topic.as_deref());
+    let (keep, removals, notes) = highlight::plan(&words, target, topic.as_deref(), digest.duration_seconds());
     if removals.is_empty() {
         return Ok(Plan::Steps {
             steps: Vec::new(),
@@ -217,11 +217,14 @@ async fn highlight_reel(params: &Value, digest: &Digest, ex: &dyn Executor) -> R
         });
     }
     let n = removals.len();
-    let steps = removals
-        .into_iter()
-        .map(|(from, to)| PlannedStep::new("transcript.extract", json!({"from": from, "to": to}), "cut a stretch that is not part of the highlight reel"))
-        .collect();
-    let mut out = vec![format!("kept {keep} stretch(es) totalling about {target:.0}s of speech; cutting everything else in {n} cut(s)")];
+    // time cuts (mark In/Out + extract), last first so earlier times hold
+    let mut steps: Vec<PlannedStep> =
+        removals.into_iter().flat_map(|(from, to)| mark_and_remove(from, to, "extract", "cut a stretch that is not part of the highlight reel")).collect();
+    // and no hard jumps: a 6-frame dissolve / crossfade at every cut
+    steps.push(PlannedStep::new("edit.selectAll", json!({}), "select the edited clips"));
+    steps.push(PlannedStep::new("trim.applyDefaultTransition", json!({"frames": 6}), "smooth every cut with a short dissolve and crossfade"));
+    steps.push(PlannedStep::new("edit.deselectAll", json!({}), "clear the selection"));
+    let mut out = vec![format!("kept {keep} stretch(es) totalling about {target:.0}s of speech; cutting everything else in {n} cut(s), each smoothed")];
     out.extend(notes);
     Ok(Plan::Steps { steps, notes: out })
 }

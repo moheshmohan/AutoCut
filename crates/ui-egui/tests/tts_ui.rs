@@ -24,6 +24,9 @@ impl Driver {
         let harness = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000).build_eframe(move |_cc| app);
         let mut d = Driver { harness, tx };
         d.frames(4);
+        // the built-in voice: these tests are about the panel, and a natural voice (when this
+        // build has it and the machine has downloaded it) synthesizes too slowly for them
+        d.ok("ui.set", json!({"tts": {"voice": filmcraft_tts::default_voice_id()}}));
         d
     }
 

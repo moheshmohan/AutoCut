@@ -117,7 +117,8 @@ async fn slow_motion_with_optical_flow_retimes_and_renders() {
     assert_eq!(r.steps[0].id, "clip.speedDuration");
     assert_eq!(r.steps[0].params["speed"], json!(50.0));
     assert_eq!(r.steps[0].params["interpolation"], json!("opticalFlow"));
-    assert!(first_ok(&r, "clip.speedDuration").is_null());
+    // it reports where the slowed clip now sits
+    assert_eq!(first_ok(&r, "clip.speedDuration")["clips"][0]["clip"], json!(clip));
     // the retimed clip renders — this exercises the engine's optical-flow interpolation
     let png = ex.render(2.0, 320).await;
     let png = png.expect("a frame at 2s of the slowed clip");

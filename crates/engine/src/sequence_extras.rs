@@ -46,7 +46,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             &["Sequence"],
             // ⇧D comes from the Premiere shortcut audit (`shortcut_presets::PREMIERE`)
             None,
-            r#"{"clips":[id]?}"#,
+            r#"{"clips":[id]?,"frames":i64?}"#,
             has_clips_or_edit_points,
             apply_default_transitions,
         ),
@@ -135,7 +135,13 @@ fn apply_default_transitions(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
     let edges = clip_edges(q, &clips);
-    apply_at_edges(s, edges, &Value::Null, "Apply Default Transitions")
+    // `frames` (each transition's length) is the one setting shared by video and audio defaults
+    let settings = match p.get("frames").and_then(Value::as_i64) {
+        Some(f) if f > 0 => json!({"frames": f.min(10_000)}),
+        Some(_) => return Err(bad("trim.applyDefaultTransition", "`frames` must be more than zero")),
+        None => Value::Null,
+    };
+    apply_at_edges(s, edges, &settings, "Apply Default Transitions")
 }
 
 /// Apply Video / Audio Transition (⌘D / ⇧⌘D) with clips or edit points of `kind` selected: the

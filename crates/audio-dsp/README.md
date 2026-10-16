@@ -15,6 +15,29 @@ model).
   the stream is cut into blocks (tested for every effect with 0/1/random-size blocks).
 - Recursive state is flushed below ~1e-30, so no denormals without CPU FTZ flags.
 
+## Synthesis (`synth`)
+
+`synth::generate(&Params, sample_rate)` → planar stereo: procedural sound for edits, from
+band-limited (PolyBLEP) oscillators, pink/white noise, swept biquads, envelopes and the FDN
+reverb — no samples, no models, the same parameters and seed always giving the same audio.
+
+- **Effects** (peak-normalised): `whoosh` (band-passed noise swelling up and down, panned
+  across), `impact` (a sub boom dropping from ~110 to ~38 Hz with a noise crack and a long tail),
+  `riser` (rising noise and pitch, tremolo speeding up, ending on a cut), `drone` (a slowly
+  breathing low chord).
+- **Music** (`music`; loudness-normalised to −20 LUFS, a bed under a −16 LUFS voice, soft-limited):
+  a four-chord progression per mood (`epic` i–VI–III–VII, `tense` i–iv–VI–V, `uplifting`
+  I–V–vi–IV, `calm` I–vi–IV–V) in any key and tempo, arranged in sections — intro, build, main
+  (pads, pumping bass, taiko hits with a fill every fourth bar, claps, hats, arpeggio), a
+  breakdown every 24 bars on long cues, outro — with a hall reverb send.
+- Lengths are clamped (30 s for effects, 15 minutes for music), allocation is fallible, and
+  nothing non-finite leaves the module.
+
+The engine's `audio.generate` writes them as 48 kHz stereo WAVs and places them on the timeline.
+
+`resample::resample_sinc` converts whole buffers offline with a windowed-sinc low-pass (no
+aliasing going down, no imaging going up) — for model input/output rates (24 ↔ 22.05 kHz).
+
 ## Loudness (`loudness`)
 
 `LoudnessMeter::new(sample_rate, channels)` → `process(&[&[f32]])` / `process_interleaved`, then

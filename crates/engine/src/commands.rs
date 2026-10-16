@@ -1843,7 +1843,14 @@ fn build() -> Vec<CommandSpec> {
                     }
                     Ok(())
                 })?;
-                Ok(Value::Null)
+                // where each clip now sits, so a caller laying out a timeline can continue after it
+                let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+                let spans: Vec<Value> = sel
+                    .iter()
+                    .filter_map(|c| q.find_item(*c))
+                    .map(|(_, it)| json!({"clip": it.id.0, "start": it.start.0, "duration": it.duration.0, "end": it.end().0}))
+                    .collect();
+                Ok(json!({"clips": spans}))
             }
         ),
         // Each clip flips on its own, as in Premiere (#484): with one enabled and one disabled clip
@@ -3420,6 +3427,11 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::remix::commands());
     v.extend(crate::voiceover::commands());
     v.extend(crate::narration::commands());
+    v.extend(crate::audio_generate::commands());
+    v.extend(crate::voice_clone::commands());
+    v.extend(crate::media_frame::commands());
+    v.extend(crate::media_date::commands());
+    v.extend(crate::graphics_counter::commands());
     v.extend(crate::keyboard::commands());
     v.extend(crate::project_panel::commands());
     v.extend(crate::media_browser::commands());

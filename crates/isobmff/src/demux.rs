@@ -193,6 +193,8 @@ pub struct Mp4File {
     pub duration: u64,
     pub tracks: Vec<Track>,
     pub metadata: Metadata,
+    /// `mvhd` creation time: seconds since 1904-01-01 UTC (`None` when the file says 0).
+    pub creation_time: Option<u64>,
     /// File uses movie fragments (`mvex` present).
     pub fragmented: bool,
     /// Byte offset of the `moov` box.
@@ -272,6 +274,7 @@ pub fn open<S: ByteSource>(src: S) -> Result<Mp4File> {
         duration: 0,
         tracks: Vec::new(),
         metadata: Metadata::default(),
+        creation_time: None,
         fragmented: false,
         moov_offset,
         fragment_count: moofs.len(),
@@ -294,15 +297,20 @@ pub fn open<S: ByteSource>(src: S) -> Result<Mp4File> {
             b"mvhd" => {
                 let mut c = Cur::new(b.payload, "mvhd");
                 let (v, _) = c.full_header()?;
-                if v == 1 {
-                    c.skip(16)?;
-                    file.timescale = c.u32()?;
-                    file.duration = c.u64()?;
-                } else {
+                let created = if v == 1 {
+                    let created = c.u64()?;
                     c.skip(8)?;
                     file.timescale = c.u32()?;
+                    file.duration = c.u64()?;
+                    created
+                } else {
+                    let created = u64::from(c.u32()?);
+                    c.skip(4)?;
+                    file.timescale = c.u32()?;
                     file.duration = c.u32()? as u64;
-                }
+                    created
+                };
+                file.creation_time = (created != 0).then_some(created);
             }
             b"trak" => trak_payloads.push(b.payload),
             b"mvex" => {

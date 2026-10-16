@@ -64,7 +64,8 @@ impl BridgeClient {
             }
         };
         if let Some(e) = result.get("error").and_then(Value::as_str) {
-            return Err(AutomationError::App(format!("export failed: {e}")));
+            let what = if id == "file.exportMedia" { "export".to_string() } else { format!("`{id}`") };
+            return Err(AutomationError::App(format!("{what} failed: {e}")));
         }
         if let Some(o) = start.as_object_mut() {
             o.insert("result".into(), result);

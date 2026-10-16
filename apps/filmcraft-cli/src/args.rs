@@ -24,6 +24,19 @@ const VALUED: &[&str] = &[
     "--timeout",
     "--session",
     "--auto",
+    "--since",
+    "--items",
+    "--relabel",
+    "--export",
+    "--script-out",
+    "--script-in",
+    "--min-coverage",
+    "--bpm",
+    "--mood",
+    "--voice",
+    "--subtitle",
+    "--title",
+    "--report",
 ];
 
 #[derive(Debug, Default)]

@@ -1,5 +1,5 @@
-//! Long exports over MCP (docs/agents.md § Long exports): `file.exportMedia` with `wait: true`
-//! runs as a background engine job; the server reports its progress as MCP
+//! Long exports over MCP (docs/agents.md § Long exports): `file.exportMedia` (and the other
+//! [`LONG_COMMANDS`]: voice cloning and model downloads) with `wait: true` runs as a background engine job; the server reports its progress as MCP
 //! `notifications/progress` (when the request carried a `progressToken`) and stops it on
 //! `notifications/cancelled`, deleting the partial output. The session lock is only held for
 //! short polls, so other requests are answered while the export runs.
@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::server::FilmcraftMcp;
 
 /// Engine commands that block until a render is written when called with `wait: true`.
-pub const LONG_COMMANDS: &[&str] = &["file.exportMedia"];
+pub const LONG_COMMANDS: &[&str] = &["file.exportMedia", "tts.cloneVoice", "tts.downloadVoices", "tts.downloadCloneModel"];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);
@@ -75,7 +75,8 @@ impl FilmcraftMcp {
                 let offline = state.as_ref().and_then(|j| j.get("offlineMedia").cloned());
                 let result = state.map(|j| j["result"].clone()).unwrap_or(Value::Null);
                 if let Some(e) = result.get("error").and_then(Value::as_str) {
-                    return CallToolResult::error(vec![Content::text(format!("export failed: {e}"))]);
+                    let what = if id == "file.exportMedia" { "export".to_string() } else { format!("`{id}`") };
+                    return CallToolResult::error(vec![Content::text(format!("{what} failed: {e}"))]);
                 }
                 let mut out = start;
                 if let Some(o) = out.as_object_mut() {

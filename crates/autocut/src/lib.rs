@@ -14,6 +14,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+pub mod analyze;
 pub mod config;
 pub mod describe;
 pub mod digest;
@@ -23,6 +24,7 @@ pub mod llm;
 pub mod ollama;
 pub mod planner;
 pub mod runner;
+pub mod showcase;
 pub mod validate;
 
 use std::future::Future;
@@ -128,6 +130,12 @@ fn empty_object() -> Value {
 pub fn b64(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Standard base64 → bytes (`None` when it is not base64).
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(s.trim()).ok()
 }
 
 impl PlannedStep {

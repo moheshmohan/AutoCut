@@ -8,10 +8,10 @@
 //! [`Kokoro::speak`] takes Kokoro phonemes (from `filmcraft-tts-text`), at most
 //! [`MAX_PHONEMES`] per call, and a voice pack.
 
-mod dsp;
-mod layers;
+pub(crate) mod dsp;
+pub(crate) mod layers;
 mod model;
-mod weights;
+pub(crate) mod weights;
 
 use std::path::Path;
 

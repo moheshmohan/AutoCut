@@ -406,6 +406,17 @@ pub(crate) fn media_dir(s: &Session, p: &Value, fallback: &str) -> String {
     base.join(fallback).to_string_lossy().into_owned()
 }
 
+/// Directory media the app makes (narrations, generated sound) is written to: like
+/// [`media_dir`], except that next to the project it is the `name` folder there, so dozens of
+/// generated cues do not fill the project's own folder.
+pub(crate) fn generated_dir(s: &Session, p: &Value, name: &str) -> String {
+    let captured = s.project.settings.scratch.captured.as_deref().is_some_and(|d| !d.is_empty());
+    let beside_project =
+        str_p(p, "dir").is_none() && !captured && s.path.as_deref().and_then(|x| std::path::Path::new(x).parent()).is_some_and(|d| !d.as_os_str().is_empty());
+    let dir = media_dir(s, p, name);
+    if beside_project { std::path::Path::new(&dir).join(name).to_string_lossy().into_owned() } else { dir }
+}
+
 /// `<dir>/<base> <n>.wav` with the first `n` used by neither a project item nor an existing file;
 /// an error once `n` passes 99 999 (bounded: `file_size` is a filesystem call per try).
 pub(crate) fn unique_wav_path(s: &Session, dir: &str, base: &str) -> Result<String> {

@@ -39,7 +39,9 @@ pub fn parse_words(t: &Value) -> Option<Vec<Word>> {
 #[derive(Debug, Clone)]
 struct Segment {
     first: u64,
-    last: u64,
+    /// Positions of the first and last word in the word list.
+    first_pos: usize,
+    last_pos: usize,
     start: f64,
     end: f64,
     score: f64,
@@ -68,7 +70,7 @@ fn segments(words: &[Word]) -> Vec<Segment> {
 
 fn segment(words: &[Word], first: usize, last: usize) -> Segment {
     let text = words[first..=last].iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
-    Segment { first: words[first].i, last: words[last].i, start: words[first].start, end: words[last].end, score: 0.0, text }
+    Segment { first: words[first].i, first_pos: first, last_pos: last, start: words[first].start, end: words[last].end, score: 0.0, text }
 }
 
 /// Short glue words that carry no interest.
@@ -107,9 +109,21 @@ fn score(seg: &Segment, topic: Option<&str>) -> f64 {
     length + content + topic_hits * 2.0 + numbers
 }
 
-/// Pick the stretches to keep. Returns (kept count, removal ranges as `(from, to)` word indices,
-/// **last first** so ripple extraction does not shift earlier indices, notes).
-pub fn plan(words: &[Word], target_seconds: f64, topic: Option<&str>) -> (usize, Vec<(u64, u64)>, Vec<String>) {
+/// Lead-in kept before a passage's first word, seconds (taken only from the silence before it).
+const PRE_ROLL: f64 = 0.25;
+/// Tail kept after its last word, so a sentence lands instead of being clipped.
+const POST_ROLL: f64 = 0.45;
+/// Kept passages closer than this are joined: a cut that short reads as a glitch.
+const MERGE_GAP: f64 = 1.0;
+/// Removals shorter than this are left in for the same reason.
+const MIN_CUT: f64 = 0.4;
+
+/// Pick the passages to keep and the time ranges to cut. Returns (kept count, removal ranges
+/// `(start, end)` in sequence seconds, **last first** so ripple extraction does not shift the
+/// earlier ones, notes). Kept passages get a little lead-in and tail from the surrounding
+/// silence, close passages are joined, the silent head and tail of the sequence go too, and no
+/// sliver shorter than [`MIN_CUT`] is cut — the cuts land between thoughts, not on words.
+pub fn plan(words: &[Word], target_seconds: f64, topic: Option<&str>, total_seconds: f64) -> (usize, Vec<(f64, f64)>, Vec<String>) {
     let mut notes = Vec::new();
     let mut segs = segments(words);
     if segs.is_empty() {
@@ -143,19 +157,31 @@ pub fn plan(words: &[Word], target_seconds: f64, topic: Option<&str>) -> (usize,
     kept.sort_by_key(|i| segs[*i].first);
     let kept_count = kept.len();
     notes.push(format!("kept: {}", kept.iter().map(|i| format!("\"{}\"", truncate(&segs[*i].text, 60))).collect::<Vec<_>>().join(" / ")));
-    // complement ranges over the whole word span, emitted last-first
-    let (first_i, last_i) = (words[0].i, words[words.len() - 1].i);
-    let mut cuts: Vec<(u64, u64)> = Vec::new();
-    let mut cursor = first_i;
+    let total_seconds = if total_seconds.is_finite() && total_seconds > 0.0 { total_seconds } else { words.last().map_or(0.0, |w| w.end) };
+    // padded keep ranges: lead-in and tail come only from the silence around the passage
+    let mut keeps: Vec<(f64, f64)> = Vec::new();
     for i in &kept {
         let s = &segs[*i];
-        if s.first > cursor {
-            cuts.push((cursor, s.first - 1));
+        let before = s.first_pos.checked_sub(1).and_then(|p| words.get(p)).map(|w| (w.end + s.start) / 2.0).unwrap_or(0.0);
+        let after = words.get(s.last_pos + 1).map(|w| (s.end + w.start) / 2.0).unwrap_or(total_seconds);
+        let a = (s.start - PRE_ROLL).max(before).max(0.0);
+        let b = (s.end + POST_ROLL).min(after).min(total_seconds);
+        match keeps.last_mut() {
+            Some(last) if a - last.1 < MERGE_GAP => last.1 = last.1.max(b),
+            _ => keeps.push((a, b.max(a))),
         }
-        cursor = s.last + 1;
     }
-    if cursor <= last_i {
-        cuts.push((cursor, last_i));
+    // the complement over the whole sequence, without slivers
+    let mut cuts: Vec<(f64, f64)> = Vec::new();
+    let mut cursor = 0.0;
+    for (a, b) in &keeps {
+        if a - cursor >= MIN_CUT {
+            cuts.push((cursor, *a));
+        }
+        cursor = cursor.max(*b);
+    }
+    if total_seconds - cursor >= MIN_CUT {
+        cuts.push((cursor, total_seconds));
     }
     cuts.reverse();
     (kept_count, cuts, notes)
@@ -195,7 +221,7 @@ mod tests {
 
     #[test]
     fn keeps_topic_segments_and_cuts_the_rest_last_first() {
-        // 10 stretches of ~2.5s speech separated by 2s pauses; "launch" is the topic of #2 and #7
+        // 10 stretches of ~2.5s speech separated by pauses; "launch" is the topic of #2 and #7
         let mut ws = Vec::new();
         let mut i = 0u64;
         for s in 0..10 {
@@ -207,20 +233,46 @@ mod tests {
             }
         }
         let words = parse_words(&words(&ws)).unwrap();
-        let (kept, cuts, notes) = plan(&words, 6.0, Some("launch"));
+        let total = 125.0;
+        let (kept, cuts, notes) = plan(&words, 6.0, Some("launch"), total);
         assert_eq!(kept, 2, "{notes:?}");
         assert_eq!(cuts.len(), 3, "{cuts:?}"); // head + between + tail
-        // last first: the first cut emitted ends at the last word
-        let last_word = words[words.len() - 1].i;
-        assert_eq!(cuts[0].1, last_word);
+        // last first, and the tail goes to the end of the sequence
+        assert_eq!(cuts[0].1, total);
         assert!(cuts[0].0 > cuts[1].0, "ranges go last-first: {cuts:?}");
+        // the kept passages keep a lead-in and a tail: nothing is cut on a word
+        let first_kept = words.iter().find(|w| w.text == "launch").unwrap();
+        let head_end = cuts[2].1;
+        assert!(head_end < first_kept.start - 0.6 + 0.01, "lead-in kept: cut ends {head_end}, passage starts {}", first_kept.start);
+        for (a, b) in &cuts {
+            assert!(b - a >= MIN_CUT, "no slivers: {a}..{b}");
+            assert!(!words.iter().any(|w| w.text == "launch" && w.start < *b && *a < w.end), "a kept word was cut");
+        }
+    }
+
+    #[test]
+    fn close_passages_join_and_slivers_stay() {
+        // two kept sentences 0.5 s apart become one keep: no 0.5 s jump cut between them
+        let mut ws = Vec::new();
+        let mut t = 0.0;
+        for (k, text) in ["one two three.", "four five six.", "padding padding padding padding padding padding padding."].iter().enumerate() {
+            for w in text.split_whitespace() {
+                ws.push(word(ws.len() as u64, w, t, t + 0.4));
+                t += 0.5;
+            }
+            t += if k == 0 { 0.5 } else { 20.0 };
+        }
+        let words = parse_words(&words(&ws)).unwrap();
+        let (_, cuts, _) = plan(&words, 3.0, Some("two five"), t);
+        // nothing is cut between the first two sentences
+        assert!(!cuts.iter().any(|(a, b)| *a > 1.0 && *b < 3.6), "{cuts:?}");
     }
 
     #[test]
     fn short_speech_keeps_everything() {
         let ws = [word(0, "hi", 0.0, 0.5), word(1, "there", 0.6, 1.0)];
         let words = parse_words(&words(&ws)).unwrap();
-        let (kept, cuts, _) = plan(&words, 60.0, None);
+        let (kept, cuts, _) = plan(&words, 60.0, None, 1.0);
         assert_eq!((kept, cuts.len()), (1, 0));
     }
 }

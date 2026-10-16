@@ -1119,6 +1119,14 @@ pub fn set_speed_group(seq: &mut Sequence, clips: &[ClipId], speed: f64, reverse
         // a tiny speed saturates the cast: keep the clip's end representable
         let room = Tick(Tick::MAX.0.saturating_sub(it.start.0.max(0)));
         let mut new_dur = Tick((src_len.0 as f64 / speed).round() as i64).min(room).max(ctx.min_duration);
+        // a whole number of frames, as Speed/Duration shows it: the clip ends on a frame, so the
+        // clip after it can start right there
+        if let Some(end) = it.start.0.checked_add(new_dur.0).map(|e| work.settings.frame_rate.snap_nearest(Tick(e)))
+            && end > it.start
+            && end - it.start <= room
+        {
+            new_dur = (end - it.start).max(ctx.min_duration);
+        }
         let old_end = it.end();
         let tr = work.track(tid).ok_or(EditError::NoTrack(tid))?;
         let (_, next_start) = neighbours(tr, *clip);

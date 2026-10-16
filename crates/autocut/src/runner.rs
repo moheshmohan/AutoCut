@@ -375,7 +375,8 @@ mod tests {
         assert!(!r.notes.iter().any(|n| n.contains("stopping")), "{:?}", r.notes);
         assert!(r.notes.iter().any(|n| n.contains("waited for it to finish")), "{:?}", r.notes);
         assert!(ex.polls.load(std::sync::atomic::Ordering::SeqCst) >= 4, "it polled until the words came");
-        assert!(!r.steps.is_empty() && r.steps.iter().all(|s| s.id == "transcript.extract"), "{:?}", r.steps);
+        assert!(r.steps.iter().any(|s| s.id == "sequence.extract"), "{:?}", r.steps);
+        assert!(r.steps.iter().any(|s| s.id == "trim.applyDefaultTransition"), "cuts are smoothed: {:?}", r.steps);
         assert!(r.results.as_ref().is_some_and(|res| res.iter().all(|x| x.ok)), "{:?}", r.results);
     }
 

@@ -201,6 +201,13 @@ pub struct PhotosPickParams {
     /// is still authoritative.
     #[serde(default)]
     pub query: Option<String>,
+    /// With `query`: select every search result (the agent clicks the first tile and
+    /// Shift+clicks the last) instead of up to max_items tiles.
+    #[serde(default)]
+    pub all: Option<bool>,
+    /// Skip picked items created before this date (YYYY-MM-DD); they are not downloaded.
+    #[serde(default)]
+    pub since: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -572,18 +579,25 @@ impl FilmcraftMcp {
             Ok(gp) => gp,
             Err(e) => return Ok(fail(e)),
         };
+        let since = p.since.filter(|d| !d.trim().is_empty());
+        if let Some(d) = since.as_deref().filter(|d| !filmcraft_gphotos::is_day(d)) {
+            return Ok(fail(format!("`since` wants a date like 2020-01-01, not `{d}`")));
+        }
         let opts = filmcraft_gphotos::PickOptions {
             max_items: p.max_items,
             wait: std::time::Duration::from_secs(p.wait_seconds.unwrap_or(if p.query.is_some() { 900 } else { 300 })),
             resume: p.session.filter(|s| !s.trim().is_empty()),
             open_browser: true,
+            since,
         };
         let query = p.query.filter(|q| !q.trim().is_empty());
         let max_for_agent = p.max_items.unwrap_or(6);
+        let select_all = p.all.unwrap_or(false);
         // blocking HTTP and sleeps: keep them off the async threads
         let outcome = match tokio::task::spawn_blocking(move || {
             let prepared = gp.prepare(&opts, &mut |_| {})?;
-            let agent = query.map(|q| filmcraft_screenagent::agent::spawn(q, max_for_agent));
+            let agent =
+                query.map(|query| filmcraft_screenagent::agent::spawn(filmcraft_screenagent::agent::Request { query, max_items: max_for_agent, select_all }));
             gp.complete(prepared, opts.wait, &mut |_| {}).map(|o| (o, agent))
         })
         .await
@@ -632,7 +646,7 @@ impl FilmcraftMcp {
         let ok = imported.is_ok() && picked.failed.is_empty();
         let v = json!({
             "status": "done", "items": items, "downloaded": picked.fetched.len().saturating_sub(cached), "cached": cached,
-            "failed": picked.failed, "imported": imported.as_ref().ok(), "importError": imported.as_ref().err().map(|e| e.to_string()),
+            "failed": picked.failed, "skipped": picked.skipped, "imported": imported.as_ref().ok(), "importError": imported.as_ref().err().map(|e| e.to_string()),
             "autopick": autopick,
         });
         Ok(if ok { ok_json(&v) } else { CallToolResult::error(vec![Content::text(v.to_string())]) })
@@ -1039,6 +1053,7 @@ mod tests {
         let schema = Value::Object((*tool.input_schema).clone());
         let Some(props) = schema["properties"].as_object() else { panic!("schema: {schema}") };
         assert!(props.contains_key("query"), "properties: {props:?}");
+        assert!(props.contains_key("all") && props.contains_key("since"), "properties: {props:?}");
         assert!(props.contains_key("session"));
         assert!(props.contains_key("max_items"));
         assert!(schema["required"].as_array().is_none_or(|r| r.is_empty()), "{schema}");

@@ -43,9 +43,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 web-time = "1"
+filmcraft-isobmff = { workspace = true }
 
 [dev-dependencies]
 filmcraft-testkit = { workspace = true }
 filmcraft-dng = { workspace = true, features = ["writer"] }
-filmcraft-isobmff = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png", "gif"] }

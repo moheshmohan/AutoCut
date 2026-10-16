@@ -94,6 +94,22 @@ SUBCOMMANDS
   probe <media> [--image-sequence]
                                 media info as JSON, with MXF / Ogg / BWF details; with
                                 --image-sequence <media> is the first numbered still of a sequence
+  showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
+         [--bpm 100] [--min-coverage 0.3] [--script-in s.json] [--script-out s.json] [--plan]
+         [--export out.mp4]
+                                a narrated 16:9 showcase of every clip the analysis found, oldest
+                                first: title, a counter, name/date lower thirds, year cards,
+                                dramatic transitions with whooshes, a generated music bed ducked
+                                under the voice (cloned voices too), an outro; --plan prints the
+                                entries and the local model's script without building;
+                                --script-in takes a reviewed plan (entries and script, or entries
+                                alone for the model to write); with --export, YouTube chapters
+                                go to <out>.chapters.txt
+  analyze '<subject>' [--items 1,2] [--frames N] [--relabel earlier.json] [--out report.json]
+                                which video items show <subject> (e.g. robot): a local vision model
+                                (AUTOCUT_ANALYSIS_MODEL, default qwen2.5vl:7b) locates it in sampled
+                                frames and names it; with capture dates (media.captureDate), the
+                                best moment per clip, oldest first, as JSON
   autocut '<prompt>' [--dry-run] [--frames]
                                 plan (and run) a natural-language edit with AutoCut: a local
                                 model (Ollama) classifies the prompt and deterministic planners
@@ -107,7 +123,7 @@ SUBCOMMANDS
                                 AUTOCUT_CONFIDENCE_THRESHOLD
   photos auth                    sign in to Google Photos (browser consent, one time; needs
                                  client_secret.json from Google Cloud — see crates/gphotos/README.md)
-  photos pick [--auto query] [--max-items n] [--timeout secs] [--session id] [--no-browser]
+  photos pick [--auto query [--all]] [--since YYYY-MM-DD] [--max-items n] [--timeout secs] [--session id] [--no-browser]
                                  open the Google Photos picker in the browser, wait (default
                                  600 s, at most 3600) for your selection, download it into the
                                  cache and import it; --demo/--project/--bridge choose the
@@ -116,7 +132,9 @@ SUBCOMMANDS
                                  (Qwen2.5-VL via Ollama) drives the picker itself: it types
                                  the query into the picker's search, selects matching videos
                                  and presses Done (needs `ollama pull qwen2.5vl:7b`, Screen
-                                 Recording and Accessibility for this terminal).
+                                 Recording and Accessibility for this terminal). --all selects
+                                 every search result (first tile, then Shift+click the last);
+                                 --since skips items created before that date (not downloaded).
   photos cached [--json]         list the Google Photos originals already downloaded
   photos add <mediaItemId>...    import already-downloaded items again (ids from `photos cached`)
   bench-decode <media> [--frames N]
@@ -357,11 +375,20 @@ async fn cli() {
                     if auto.is_some() && a.flag("--no-browser") {
                         usage("photos pick: --auto drives the picker in a browser itself; drop --no-browser");
                     }
+                    let select_all = a.flag("--all");
+                    if select_all && auto.is_none() {
+                        usage("photos pick: --all is for the --auto agent (by hand, Shift+click the last tile)");
+                    }
+                    let since = a.opt("--since").map(str::to_string);
+                    if let Some(d) = since.as_deref().filter(|d| !filmcraft_gphotos::is_day(d)) {
+                        usage(format!("photos pick: --since wants a date like 2020-01-01, not `{d}`"));
+                    }
                     let opts = filmcraft_gphotos::PickOptions {
                         max_items: parse_num("--max-items").map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
                         wait: std::time::Duration::from_secs(parse_num("--timeout").unwrap_or(if auto.is_some() { 900 } else { 600 })),
                         resume: a.opt("--session").map(str::to_string),
                         open_browser: !a.flag("--no-browser"),
+                        since,
                     };
                     // the import target first, so a bad --project/--bridge fails before the user picks
                     let mut b = Backend::open(&a);
@@ -370,7 +397,13 @@ async fn cli() {
                         let prepared = gp.prepare(&opts, &mut |line| diag(format_args!("{line}")))?;
                         // with --auto, a local vision agent (Qwen2.5-VL via Ollama) drives the
                         // picker: it types the query, clicks matching video tiles, presses Done
-                        let agent = auto.map(|q| filmcraft_screenagent::agent::spawn(q, opts.max_items.unwrap_or(6)));
+                        let agent = auto.map(|query| {
+                            filmcraft_screenagent::agent::spawn(filmcraft_screenagent::agent::Request {
+                                query,
+                                max_items: opts.max_items.unwrap_or(6),
+                                select_all,
+                            })
+                        });
                         let outcome = gp.complete(prepared, opts.wait, &mut |line| diag(format_args!("{line}")));
                         // the pick outcome is authoritative; the agent's own budget bounds it
                         outcome.map(|o| (o, agent))
@@ -399,7 +432,13 @@ async fn cli() {
                         diag(format_args!("photos pick: {f}"));
                     }
                     if picked.fetched.is_empty() {
-                        fail(if picked.failed.is_empty() { "photos pick: nothing was picked" } else { "photos pick: nothing could be downloaded" });
+                        fail(if !picked.failed.is_empty() {
+                            "photos pick: nothing could be downloaded"
+                        } else if !picked.skipped.is_empty() {
+                            "photos pick: everything picked was created before --since"
+                        } else {
+                            "photos pick: nothing was picked"
+                        });
                     }
                     let paths: Vec<String> = picked.fetched.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
                     let cached = picked.fetched.iter().filter(|f| f.was_cached).count();
@@ -420,7 +459,7 @@ async fn cli() {
                                 "{}",
                                 json!({
                                     "imported": v, "items": items, "downloaded": picked.fetched.len().saturating_sub(cached), "cached": cached,
-                                    "failed": picked.failed,
+                                    "failed": picked.failed, "skipped": picked.skipped,
                                 })
                             );
                             b.finish(&a).await;
@@ -468,6 +507,189 @@ async fn cli() {
                     "photos {what}: Google retired library browsing and search for apps on 2025-03-31; use `photos pick` to choose items in Google Photos"
                 )),
                 other => usage(format!("photos: unknown `{other}` (auth | pick | cached | add)")),
+            }
+        }
+        "showcase" => {
+            // a narrated, counted showcase of every clip an analysis found (analyze --out)
+            let report = a.opt("--report").unwrap_or_else(|| usage("showcase --report analysis.json [--title T] [--voice clone:name] [--plan] …"));
+            let bytes = std::fs::read(report).unwrap_or_else(|e| fail(format!("showcase: {report}: {e}")));
+            let v: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| fail(format!("showcase: {report}: {e}")));
+            let mut facts: Vec<filmcraft_autocut::analyze::ClipFacts> = serde_json::from_value(v.get("clips").cloned().unwrap_or(Value::Null))
+                .unwrap_or_else(|e| fail(format!("showcase: {report}: not an analysis report ({e})")));
+            let mut opts = filmcraft_autocut::showcase::Options::default();
+            if let Some(subject) = v.get("subject").and_then(Value::as_str) {
+                opts.subject = subject.to_string();
+            }
+            for f in &mut facts {
+                f.label = filmcraft_autocut::analyze::sanitize_label(&f.label, &f.kind, &opts.subject);
+            }
+            if let Some(t) = a.opt("--title") {
+                opts.title = t.to_string();
+            }
+            opts.subtitle = a.opt("--subtitle").map(str::to_string);
+            opts.voice = a.opt("--voice").map(str::to_string);
+            if let Some(m) = a.opt("--mood") {
+                opts.mood = m.to_string();
+            }
+            if let Some(b) = a.opt("--bpm") {
+                opts.bpm = b.parse().unwrap_or_else(|_| usage(format!("showcase: --bpm wants a number, not `{b}`")));
+            }
+            if let Some(c) = a.opt("--min-coverage") {
+                opts.min_coverage = c.parse().unwrap_or_else(|_| usage(format!("showcase: --min-coverage wants 0..1, not `{c}`")));
+            }
+            opts.export = a.opt("--export").map(str::to_string);
+            let mut entries = filmcraft_autocut::showcase::group(&facts, &opts.subject, opts.min_coverage);
+            let cfg = filmcraft_autocut::config::Config::from_env();
+            // a reviewed plan (`--script-in`): its (edited) entries replace the grouping, and its
+            // script, when it has one, the model's
+            let mut reviewed: Option<filmcraft_autocut::showcase::Script> = None;
+            if let Some(path) = a.opt("--script-in") {
+                let b = std::fs::read(path).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
+                let sv: Value = serde_json::from_slice(&b).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
+                if let Some(es) = sv.get("entries") {
+                    entries = serde_json::from_value(es.clone()).unwrap_or_else(|e| fail(format!("showcase: {path}: bad entries ({e})")));
+                    for (i, e) in entries.iter_mut().enumerate() {
+                        e.number = i + 1;
+                    }
+                }
+                let script = match (sv.get("script"), sv.get("entries")) {
+                    (Some(s), _) => Some(s.clone()),
+                    // entries alone: the model writes the words for them
+                    (None, Some(_)) => None,
+                    (None, None) => Some(sv),
+                };
+                if let Some(s) = script {
+                    let script: filmcraft_autocut::showcase::Script =
+                        serde_json::from_value(s).unwrap_or_else(|e| fail(format!("showcase: {path}: not a script ({e})")));
+                    if script.lines.len() != entries.len() {
+                        fail(format!("showcase: {path}: {} script lines for {} entries", script.lines.len(), entries.len()));
+                    }
+                    reviewed = Some(script);
+                }
+            }
+            let script = match reviewed {
+                Some(s) => s,
+                None => {
+                    // the script model when it is installed, else the classifier
+                    let mut model = filmcraft_autocut::ollama::Ollama::new(&cfg.ollama_host, &cfg.script_model, cfg.http_timeout);
+                    if !model.available().unwrap_or(false) {
+                        diag(format_args!("showcase: {} is not installed; writing with {}", cfg.script_model, cfg.llm_model));
+                        model = filmcraft_autocut::ollama::Ollama::new(&cfg.ollama_host, &cfg.llm_model, cfg.http_timeout);
+                    }
+                    filmcraft_autocut::showcase::write_script(&model, &opts, &entries, &mut |l| diag(format_args!("showcase: {l}"))).await
+                }
+            };
+            let plan = json!({"entries": entries, "script": script});
+            if let Some(out) = a.opt("--script-out") {
+                std::fs::write(out, serde_json::to_string_pretty(&plan).unwrap_or_default()).unwrap_or_else(|e| fail(format!("showcase: {out}: {e}")));
+                diag(format_args!("showcase: wrote {out}"));
+            }
+            if a.flag("--plan") {
+                print(&a, &plan);
+                return;
+            }
+            let mut b = Backend::open(&a);
+            let mut progress = |l: &str| diag(format_args!("showcase: {l}"));
+            let result = match &mut b {
+                Backend::Local(s) => {
+                    let session = std::mem::take(s);
+                    let ex = filmcraft_autocut::SessionExecutor::from(*session);
+                    let r = filmcraft_autocut::showcase::build(&ex, &opts, &entries, &script, &mut progress).await;
+                    if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
+                        **s = inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                    r
+                }
+                Backend::Bridge(_) => {
+                    let addr = a.opt("--bridge").unwrap_or_default();
+                    let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
+                    let ex = filmcraft_automation::AutocutExecutor::bridge(client);
+                    filmcraft_autocut::showcase::build(&ex, &opts, &entries, &script, &mut progress).await
+                }
+            };
+            match result {
+                Ok(built) => {
+                    for n in &built.notes {
+                        diag(format_args!("showcase: {n}"));
+                    }
+                    // chapters for the YouTube description, next to the export
+                    let chapters = filmcraft_autocut::showcase::youtube_chapters(&built.chapters, built.seconds);
+                    if let Some(path) = &opts.export
+                        && !chapters.is_empty()
+                    {
+                        let txt = std::path::Path::new(path).with_extension("chapters.txt");
+                        match std::fs::write(&txt, format!("{chapters}\n")) {
+                            Ok(()) => diag(format_args!("showcase: chapters in {}", txt.display())),
+                            Err(e) => diag(format_args!("showcase: {}: {e}", txt.display())),
+                        }
+                    }
+                    let mut out = serde_json::to_value(&built).unwrap_or_default();
+                    out["youtubeChapters"] = json!(chapters);
+                    print(&a, &out);
+                    b.finish(&a).await;
+                }
+                Err(e) => fail(format!("showcase: {e}")),
+            }
+        }
+        "analyze" => {
+            // which clips show <subject>, what it is, when, and its best moment
+            let subject = a.positionals.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+            if subject.trim().is_empty() {
+                usage("analyze '<subject>' [--items 1,2,3] [--frames N] [--out report.json]");
+            }
+            let items: Option<Vec<u64>> = a.opt("--items").map(|v| {
+                v.split(',')
+                    .filter(|x| !x.trim().is_empty())
+                    .map(|x| x.trim().parse::<u64>().unwrap_or_else(|_| usage(format!("analyze: --items wants ids like 3,4,5, not `{x}`"))))
+                    .collect()
+            });
+            let frames =
+                a.opt("--frames").map(|v| v.parse::<usize>().unwrap_or_else(|_| usage(format!("analyze: --frames wants a number, not `{v}`")))).unwrap_or(6);
+            let cfg = filmcraft_autocut::config::Config::from_env();
+            let model = filmcraft_autocut::ollama::Ollama::new(&cfg.ollama_host, &cfg.analysis_model, cfg.http_timeout);
+            if !model.available().unwrap_or(false) {
+                fail(format!(
+                    "analyze: the vision model `{}` is not in Ollama at {} — `ollama pull {}`",
+                    cfg.analysis_model, cfg.ollama_host, cfg.analysis_model
+                ));
+            }
+            let mut b = Backend::open(&a);
+            let mut progress = |l: &str| diag(format_args!("analyze: {l}"));
+            // --relabel report.json: describe again from the report's best moments, no locating
+            let earlier: Option<Vec<filmcraft_autocut::analyze::ClipFacts>> = a.opt("--relabel").map(|path| {
+                let bytes = std::fs::read(path).unwrap_or_else(|e| fail(format!("analyze: {path}: {e}")));
+                let v: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| fail(format!("analyze: {path}: {e}")));
+                serde_json::from_value(v.get("clips").cloned().unwrap_or(Value::Null))
+                    .unwrap_or_else(|e| fail(format!("analyze: {path}: not an analysis report ({e})")))
+            });
+            let result = match &mut b {
+                Backend::Local(s) => {
+                    let session = std::mem::take(s);
+                    let ex = filmcraft_autocut::SessionExecutor::from(*session);
+                    let r = filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, earlier, &mut progress).await;
+                    if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
+                        **s = inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                    r
+                }
+                Backend::Bridge(_) => {
+                    let addr = a.opt("--bridge").unwrap_or_default();
+                    let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
+                    let ex = filmcraft_automation::AutocutExecutor::bridge(client);
+                    filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, earlier, &mut progress).await
+                }
+            };
+            match result {
+                Ok(facts) => {
+                    let v = json!({"subject": subject, "model": cfg.analysis_model, "clips": facts});
+                    if let Some(out) = a.opt("--out") {
+                        let text = serde_json::to_string_pretty(&v).unwrap_or_default();
+                        std::fs::write(out, text).unwrap_or_else(|e| fail(format!("analyze: {out}: {e}")));
+                        diag(format_args!("analyze: wrote {out}"));
+                    }
+                    print(&a, &v);
+                }
+                Err(e) => fail(format!("analyze: {e}")),
             }
         }
         "autocut" => {

@@ -95,21 +95,22 @@ impl Weights {
                 raw.insert(format!("{part}.{name}"), t);
             }
         }
-        // fuse weight norm: w = g · v / ‖v‖ (norm over every dim but the first)
-        let mut map = HashMap::with_capacity(raw.len());
-        let gs: Vec<String> = raw.keys().filter(|k| k.ends_with(".weight_g")).cloned().collect();
-        for g_name in gs {
-            let base = g_name.trim_end_matches("_g").to_string();
-            let v_name = format!("{base}_v");
-            let (Some(g), Some(v)) = (raw.remove(&g_name), raw.remove(&v_name)) else {
-                return Err(err(format!("{g_name} without {v_name}")));
-            };
-            let norm = v.sqr().map_err(err)?.sum_keepdim(1).map_err(err)?.sum_keepdim(2).map_err(err)?.sqrt().map_err(err)?;
-            let w = v.broadcast_div(&norm).map_err(err)?.broadcast_mul(&g).map_err(err)?;
-            map.insert(base, w);
+        Ok(Weights { map: fuse_weight_norm(raw)? })
+    }
+
+    /// A PyTorch checkpoint whose state dictionary sits under `key` (OpenVoice: `model`), weight
+    /// norm fused, `module.` prefixes dropped.
+    pub(crate) fn load_key(path: &Path, key: &str) -> Result<Weights, TtsError> {
+        let tensors = candle_core::pickle::read_all_with_key(path, Some(key)).map_err(|e| err(format!("{}: {e}", path.display())))?;
+        if tensors.is_empty() {
+            return Err(err(format!("{}: no `{key}` weights", path.display())));
         }
-        map.extend(raw);
-        Ok(Weights { map })
+        let mut raw = HashMap::with_capacity(tensors.len());
+        for (name, t) in tensors {
+            let name = name.strip_prefix("module.").unwrap_or(&name).to_string();
+            raw.insert(name, t.to_dtype(DType::F32).map_err(err)?);
+        }
+        Ok(Weights { map: fuse_weight_norm(raw)? })
     }
 
     pub(crate) fn get(&self, name: &str) -> Result<Tensor, TtsError> {
@@ -124,6 +125,27 @@ impl Weights {
         }
         Ok(t)
     }
+}
+
+/// Fuse weight-normalised layers: `w = g · v / ‖v‖`, the norm over every dimension but the
+/// first (1-D convolutions, transposed convolutions and 2-D convolutions alike).
+fn fuse_weight_norm(mut raw: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>, TtsError> {
+    let mut map = HashMap::with_capacity(raw.len());
+    let gs: Vec<String> = raw.keys().filter(|k| k.ends_with(".weight_g")).cloned().collect();
+    for g_name in gs {
+        let base = g_name.trim_end_matches("_g").to_string();
+        let v_name = format!("{base}_v");
+        let (Some(g), Some(v)) = (raw.remove(&g_name), raw.remove(&v_name)) else {
+            return Err(err(format!("{g_name} without {v_name}")));
+        };
+        let d0 = v.dim(0).map_err(err)?;
+        let norm = v.reshape((d0, ())).map_err(err)?.sqr().map_err(err)?.sum_keepdim(1).map_err(err)?.sqrt().map_err(err)?;
+        let norm = norm.reshape(g.shape()).map_err(err)?;
+        let w = v.broadcast_div(&norm).map_err(err)?.broadcast_mul(&g).map_err(err)?;
+        map.insert(base, w);
+    }
+    map.extend(raw);
+    Ok(map)
 }
 
 /// Number of style vectors in a voice pack (one per input length 1..=510).

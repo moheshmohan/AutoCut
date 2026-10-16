@@ -21,6 +21,14 @@ pub const ALLOWED_FAMILIES: &[&str] = &[
     "effects.",
     "essentialSound.",
     "tts.",
+    "graphics.",
+    "media.",
+    // single commands from families that otherwise hold interactive or device commands
+    "trim.applyDefaultTransition",
+    "audio.generate",
+    // a limiter on the mix bus (the showcase's mastering)
+    "mixer.addInsert",
+    "mixer.setInsert",
 ];
 
 /// Whether a command id is in an allowed family.

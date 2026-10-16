@@ -13,6 +13,13 @@ pub struct Config {
     /// Ollama vision model for frame descriptions (`AUTOCUT_VLM_MODEL`); moondream is small
     /// and captions reliably, heavier VLMs work too.
     pub vlm_model: String,
+    /// Ollama vision model for clip analysis (`AUTOCUT_ANALYSIS_MODEL`): it must ground objects
+    /// (boxes), so a Qwen2.5-VL class model; the same one the screen agent uses.
+    pub analysis_model: String,
+    /// Ollama model that writes voice-overs (`AUTOCUT_SCRIPT_MODEL`): prose for people to hear,
+    /// so a larger model than the classifier; callers fall back to `llm_model` when it is not
+    /// installed.
+    pub script_model: String,
     /// Local classifications below this confidence hand off to the supervisor (0..=1,
     /// `AUTOCUT_CONFIDENCE_THRESHOLD`).
     pub confidence_threshold: f32,
@@ -26,6 +33,8 @@ impl Default for Config {
             ollama_host: "http://127.0.0.1:11434".into(),
             llm_model: "phi4-mini".into(),
             vlm_model: "moondream".into(),
+            analysis_model: "qwen2.5vl:7b".into(),
+            script_model: "qwen3:8b".into(),
             confidence_threshold: 0.6,
             http_timeout: Duration::from_secs(180),
         }
@@ -44,6 +53,12 @@ impl Config {
         }
         if let Some(v) = env("AUTOCUT_VLM_MODEL") {
             c.vlm_model = v;
+        }
+        if let Some(v) = env("AUTOCUT_ANALYSIS_MODEL") {
+            c.analysis_model = v;
+        }
+        if let Some(v) = env("AUTOCUT_SCRIPT_MODEL") {
+            c.script_model = v;
         }
         if let Some(v) = env("AUTOCUT_CONFIDENCE_THRESHOLD").and_then(|v| v.parse::<f32>().ok()) {
             c.confidence_threshold = v.clamp(0.0, 1.0);
@@ -66,6 +81,7 @@ mod tests {
         let c = Config::default();
         assert!(c.ollama_host.starts_with("http://127.0.0.1"));
         assert_eq!(c.llm_model, "phi4-mini");
+        assert_eq!(c.script_model, "qwen3:8b");
         assert!((c.confidence_threshold - 0.6).abs() < 1e-9);
     }
 }

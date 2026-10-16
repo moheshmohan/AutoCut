@@ -60,12 +60,39 @@ pub struct PickOptions {
     pub resume: Option<String>,
     /// Open the picker in the default browser (otherwise only report the link).
     pub open_browser: bool,
+    /// Skip picked items created before this date (`YYYY-MM-DD`): they are not downloaded.
+    /// Lets a caller select a whole search result and keep only the recent part of it.
+    pub since: Option<String>,
 }
 
 impl Default for PickOptions {
     fn default() -> Self {
-        Self { max_items: None, wait: Duration::from_secs(600), resume: None, open_browser: true }
+        Self { max_items: None, wait: Duration::from_secs(600), resume: None, open_browser: true, since: None }
     }
+}
+
+/// Whether an item created at `created` (RFC 3339) is on or after `since` (`YYYY-MM-DD`).
+/// An item with no usable date is kept: a missing timestamp is not a reason to drop media.
+pub fn created_on_or_after(created: &str, since: &str) -> bool {
+    match (parse_day(created), parse_day(since)) {
+        (Some(c), Some(s)) => c >= s,
+        _ => true,
+    }
+}
+
+/// Whether `s` is a `YYYY-MM-DD` date (what [`PickOptions::since`] takes).
+pub fn is_day(s: &str) -> bool {
+    s.trim().len() == 10 && parse_day(s).is_some()
+}
+
+/// `(year, month, day)` from the first ten characters of an RFC 3339 / `YYYY-MM-DD` string.
+fn parse_day(s: &str) -> Option<(u32, u32, u32)> {
+    let d = s.trim().get(..10)?;
+    let mut it = d.split('-');
+    let y = it.next()?.parse().ok()?;
+    let m = it.next()?.parse().ok()?;
+    let dd = it.next()?.parse().ok()?;
+    (it.next().is_none() && (1..=12).contains(&m) && (1..=31).contains(&dd)).then_some((y, m, dd))
 }
 
 /// One picked item, now on disk.
@@ -81,6 +108,8 @@ pub struct Fetched {
 #[derive(Debug, Clone, Default)]
 pub struct Picked {
     pub fetched: Vec<Fetched>,
+    /// `"<filename>: created <date>"` for each item left out by [`PickOptions::since`].
+    pub skipped: Vec<String>,
     /// `"<filename>: <reason>"` for each item that could not be downloaded.
     pub failed: Vec<String>,
     /// Google confirmed the session's deletion (it expires on its own otherwise).
@@ -102,6 +131,8 @@ pub enum PickOutcome {
 #[derive(Debug, Clone)]
 pub struct Prepared {
     pub session: PickingSession,
+    /// [`PickOptions::since`], applied when the picks are fetched.
+    pub since: Option<String>,
 }
 
 impl GooglePhotos {
@@ -164,7 +195,7 @@ impl GooglePhotos {
                 s
             }
         };
-        Ok(Prepared { session })
+        Ok(Prepared { session, since: opts.since.clone().filter(|d| !d.trim().is_empty()) })
     }
 
     /// Step two of [`Self::pick`]: wait for the selection within `wait`, download every
@@ -183,7 +214,7 @@ impl GooglePhotos {
                 return Err(e);
             }
         };
-        let fetched = self.fetch_picked(&session.id, progress);
+        let fetched = self.fetch_picked(&session.id, prepared.since.as_deref(), progress);
         let session_deleted = self.delete_session(&session.id).is_ok();
         let mut picked = fetched?;
         picked.session_deleted = session_deleted;
@@ -215,16 +246,27 @@ impl GooglePhotos {
     }
 
     /// List the session's picked items and bring each one into the cache.
-    fn fetch_picked(&self, session_id: &str, progress: &mut dyn FnMut(&str)) -> Result<Picked, GPhotosError> {
+    fn fetch_picked(&self, session_id: &str, since: Option<&str>, progress: &mut dyn FnMut(&str)) -> Result<Picked, GPhotosError> {
         let items = self.picked_items(session_id)?;
         progress(&format!("{} item(s) picked", items.len()));
-        let total = items.len();
         let mut picked = Picked::default();
+        let (items, older): (Vec<PickedItem>, Vec<PickedItem>) = items.into_iter().partition(|i| since.is_none_or(|d| created_on_or_after(&i.created, d)));
+        if let Some(d) = since
+            && !older.is_empty()
+        {
+            progress(&format!("skipping {} item(s) created before {d}", older.len()));
+        }
+        picked.skipped = older.iter().map(|i| format!("{}: created {}", i.display_name(), i.created.get(..10).unwrap_or(&i.created))).collect();
+        let total = items.len();
         for (i, item) in items.into_iter().enumerate() {
             let was_cached = cache::cached_path(&item).is_some_and(|p| p.is_file()) || cache::find(&item.id).is_some();
             progress(&format!("[{}/{total}] {} {}", i + 1, if was_cached { "cached" } else { "downloading" }, item.display_name()));
             match self.local_copy(&item) {
-                Ok(path) => picked.fetched.push(Fetched { item, path, was_cached }),
+                Ok(path) => {
+                    // Google's re-encoded downloads drop the capture date: keep it beside the file
+                    cache::write_sidecar(&item, &path);
+                    picked.fetched.push(Fetched { item, path, was_cached })
+                }
                 Err(e) => picked.failed.push(format!("{}: {e}", item.display_name())),
             }
         }
@@ -296,6 +338,23 @@ impl From<std::io::Error> for GPhotosError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn since_keeps_items_on_or_after_the_date() {
+        assert!(created_on_or_after("2020-01-01T00:00:01Z", "2020-01-01"));
+        assert!(created_on_or_after("2024-05-17T09:30:00Z", "2020-01-01"));
+        assert!(!created_on_or_after("2019-12-31T23:59:59Z", "2020-01-01"));
+        assert!(!created_on_or_after("2013-07-27T10:00:00Z", "2020-01-01"));
+        // unknown or malformed dates are kept, never dropped; a malformed `since` keeps all
+        for c in ["", "garbage", "2020-13-01T00:00:00Z", "20"] {
+            assert!(created_on_or_after(c, "2020-01-01"), "{c}");
+        }
+        assert!(created_on_or_after("2010-01-01T00:00:00Z", "not a date"));
+        assert!(is_day("2020-01-01") && is_day(" 2024-12-31 "));
+        for no in ["2020-1-1", "2020-13-01", "20200101", "2020-01-01T00:00:00Z", ""] {
+            assert!(!is_day(no), "{no}");
+        }
+    }
+
     use super::*;
 
     #[test]

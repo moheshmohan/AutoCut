@@ -88,8 +88,89 @@ impl StreamResampler {
     }
 }
 
+/// Offline rate conversion of a whole mono buffer with a windowed-sinc (Blackman) low-pass at
+/// 95 % of the lower Nyquist: no aliasing when going down (24 kHz speech into a 22.05 kHz model),
+/// no imaging when going up. Equal rates return a copy; empty input or a zero rate returns empty.
+/// The output length is `round(len · to / from)`, capped at 2³¹ samples.
+pub fn resample_sinc(x: &[f32], from: u32, to: u32) -> Vec<f32> {
+    if x.is_empty() || from == 0 || to == 0 {
+        return Vec::new();
+    }
+    if from == to {
+        return x.to_vec();
+    }
+    let ratio = f64::from(to) / f64::from(from);
+    let n_out = ((x.len() as f64 * ratio).round() as usize).min(1 << 31);
+    // cutoff relative to the source rate; widen the kernel when down-sampling
+    let cutoff = 0.95 * 0.5 * ratio.min(1.0);
+    const HALF_ZEROS: f64 = 16.0;
+    let half = (HALF_ZEROS / (2.0 * cutoff)).ceil() as isize;
+    let mut out = Vec::new();
+    if out.try_reserve_exact(n_out).is_err() {
+        return Vec::new();
+    }
+    let len = x.len() as isize;
+    for k in 0..n_out {
+        let pos = k as f64 / ratio;
+        let centre = pos.floor() as isize;
+        let mut acc = 0.0f64;
+        let mut wsum = 0.0f64;
+        for j in (centre - half + 1)..=(centre + half) {
+            let d = pos - j as f64;
+            let arg = 2.0 * cutoff * d;
+            let sinc = if arg.abs() < 1e-12 { 1.0 } else { (std::f64::consts::PI * arg).sin() / (std::f64::consts::PI * arg) };
+            let t = (d / (half as f64 + 1.0) + 1.0) * 0.5; // 0..1 across the window
+            let w = if (0.0..=1.0).contains(&t) {
+                0.42 - 0.5 * (2.0 * std::f64::consts::PI * t).cos() + 0.08 * (4.0 * std::f64::consts::PI * t).cos()
+            } else {
+                0.0
+            };
+            let h = sinc * w;
+            wsum += h;
+            if (0..len).contains(&j) {
+                acc += h * f64::from(x.get(j as usize).copied().unwrap_or(0.0));
+            }
+        }
+        out.push(if wsum.abs() > 1e-12 { (acc / wsum) as f32 } else { 0.0 });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sinc_resampling_keeps_tones_and_rejects_aliases() {
+        let tone =
+            |hz: f64, rate: u32, n: usize| -> Vec<f32> { (0..n).map(|i| (std::f64::consts::TAU * hz * i as f64 / f64::from(rate)).sin() as f32).collect() };
+        let rms = |v: &[f32]| (v.iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>() / v.len().max(1) as f64).sqrt();
+        // 1 kHz survives 24 k → 22.05 k at the right length and level
+        let x = tone(1000.0, 24_000, 24_000);
+        let y = resample_sinc(&x, 24_000, 22_050);
+        assert_eq!(y.len(), 22_050);
+        let mid = &y[2000..20_000];
+        assert!((rms(mid) - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.02, "level {}", rms(mid));
+        // and is still 1 kHz: count zero crossings over one second
+        let zc = y.windows(2).filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0)).count();
+        assert!((1990..=2010).contains(&zc), "{zc} crossings");
+        // 11.5 kHz is above the new Nyquist (11.025 kHz): it must be removed, not folded down
+        let hi = tone(11_500.0, 24_000, 24_000);
+        let z = resample_sinc(&hi, 24_000, 22_050);
+        assert!(rms(&z[2000..20_000]) < 0.05, "alias {}", rms(&z[2000..20_000]));
+        // up-sampling keeps the tone too
+        let up = resample_sinc(&tone(440.0, 22_050, 22_050), 22_050, 24_000);
+        assert_eq!(up.len(), 24_000);
+        assert!((rms(&up[2000..22_000]) - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.02);
+    }
+
+    #[test]
+    fn sinc_resampling_edge_cases() {
+        assert!(resample_sinc(&[], 24_000, 22_050).is_empty());
+        assert!(resample_sinc(&[1.0, 2.0], 0, 22_050).is_empty());
+        assert!(resample_sinc(&[1.0, 2.0], 24_000, 0).is_empty());
+        assert_eq!(resample_sinc(&[1.0, 2.0], 48_000, 48_000), vec![1.0, 2.0]);
+        assert_eq!(resample_sinc(&[0.5; 10], 1, 3).len(), 30);
+    }
+
     use super::*;
 
     /// A sine at `hz`, sampled at `rate`, from absolute frame `start`; logs every pull.

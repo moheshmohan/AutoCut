@@ -150,3 +150,27 @@ fn speed_with_ripple_on_a_split_edit() {
     assert_eq!((range(&s, picture2), range(&s, sound2)), ((f48, f144), (f48, f168)), "picture 48 to 96 frames, sound 60 to 120");
     assert_eq!((range(&s, picture3).0, range(&s, sound3).0), (f156, f168), "the next sound still starts 12 after its picture");
 }
+
+/// An odd speed (62 %) left the clip ending between frames: the clip after it could not start
+/// where it ends, so the two never met (no crossfade, a sliver of silence).
+#[test]
+fn odd_speeds_leave_whole_frames() {
+    let mut s = Session::default();
+    let [(picture1, sound1), ..] = three_clips(&mut s);
+    // make room after the first clip (the others go with their linked sounds), then slow it
+    // without ripple
+    let q = s.active_sequence().unwrap();
+    let later: Vec<u64> = q.all_tracks().flat_map(|t| t.items.iter()).filter(|i| i.id != picture1 && i.id != sound1).map(|i| i.id.0).collect();
+    s.execute("edit.clear", json!({"clips": later})).unwrap();
+    let r = s.execute("clip.speedDuration", json!({"clips": [picture1.0], "speed": 62.0, "ripple": false})).unwrap();
+    let rate = s.sequence_rate();
+    for c in [picture1, sound1] {
+        let (start, end) = range(&s, c);
+        assert_eq!(rate.snap_nearest(end), end, "ends on a frame: {start:?}..{end:?}");
+        // 48 frames at 62 %: 77.4 → 77 frames
+        assert_eq!(end - start, rate.tick_of(77));
+    }
+    // the command reports where the clips now end
+    let ends: Vec<i64> = r["clips"].as_array().unwrap().iter().map(|c| c["end"].as_i64().unwrap()).collect();
+    assert!(ends.iter().all(|e| *e == rate.tick_of(77).0), "{r}");
+}

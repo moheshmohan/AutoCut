@@ -19,6 +19,9 @@ pub trait Act {
     fn activate(&mut self) -> Result<(), ScreenError>;
     /// Click a PNG-pixel coordinate of the last [`Self::capture`] (clamped into the window).
     fn click_png(&mut self, cap: &Capture, px: u32, py: u32) -> Result<(), ScreenError>;
+    /// The same click with Shift held: in the picker it selects the whole range from the last
+    /// clicked tile ("Hold Shift and click to select many items at once").
+    fn shift_click_png(&mut self, cap: &Capture, px: u32, py: u32) -> Result<(), ScreenError>;
     fn type_text(&mut self, text: &str) -> Result<(), ScreenError>;
     fn key_return(&mut self) -> Result<(), ScreenError>;
     fn key_escape(&mut self) -> Result<(), ScreenError>;
@@ -71,6 +74,27 @@ impl Act for MacActor {
             "var p = {{x: {x}, y: {y}}};\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 5, p, 0));\ndelay(0.08);\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 1, p, 0));\ndelay(0.05);\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 2, p, 0));"
         ))
         .map(|_| ())
+    }
+
+    fn shift_click_png(&mut self, cap: &Capture, px: u32, py: u32) -> Result<(), ScreenError> {
+        let Some((x, y)) = cap.click_point(px, py) else {
+            return Err(ScreenError::Other(format!("refusing to click outside the window: png ({px},{py})")));
+        };
+        // Chrome reads the live modifier state, not a click event's flags (verified live: a
+        // Shift-flagged CGEvent click selected one tile, not the range). So hold Shift
+        // system-wide around a real click — and always let go of it.
+        let shift = |down: bool| {
+            let s = format!("tell application \"System Events\" to key {} shift", if down { "down" } else { "up" });
+            self.shell.run("osascript", &["-e", &s]).map(|_| ()).map_err(|e| ScreenError::Input(self.app.clone(), e.to_string()))
+        };
+        shift(true)?;
+        let clicked = self
+            .jxa(&format!(
+                "var p = {{x: {x}, y: {y}}};\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 5, p, 0));\ndelay(0.1);\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 1, p, 0));\ndelay(0.05);\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 2, p, 0));\ndelay(0.1);"
+            ))
+            .map(|_| ());
+        let released = shift(false);
+        clicked.and(released)
     }
 
     fn type_text(&mut self, text: &str) -> Result<(), ScreenError> {
@@ -161,6 +185,37 @@ mod tests {
         let (mv, down, up) = (s.find("(null, 5, p, 0)"), s.find("(null, 1, p, 0)"), s.find("(null, 2, p, 0)"));
         assert!(mv < down && down < up && mv.is_some(), "{s}");
         assert!(!s.contains("click at"), "System Events clicks never reach web content: {s}");
+    }
+
+    #[test]
+    fn shift_click_holds_shift_system_wide_around_a_real_click() {
+        let (shared, sh) = FakeShell::new(false);
+        let mut actor = MacActor::new("Google Chrome", Box::new(sh));
+        actor.shift_click_png(&cap_2x(), 300, 500).unwrap();
+        let s = recorded(&shared);
+        let (down, click, up) = (s.find("key down shift"), s.find("CGEventCreateMouseEvent(null, 1, p, 0)"), s.find("key up shift"));
+        assert!(down.is_some() && down < click && click < up, "{s}");
+        assert!(s.contains("var p = {x: 150, y: 283};"), "{s}");
+        assert!(actor.shift_click_png(&cap_2x(), 9999, 1).is_err(), "out of the window is refused");
+    }
+
+    #[test]
+    fn shift_is_released_even_when_the_click_fails() {
+        /// Fails only the JXA click.
+        struct ClickFails(Arc<Mutex<Vec<String>>>);
+        impl Shell for ClickFails {
+            fn run(&self, _program: &str, args: &[&str]) -> Result<String, ScreenError> {
+                let script = args.last().copied().unwrap_or_default().to_string();
+                let jxa = args.first() == Some(&"-l");
+                self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(script);
+                if jxa { Err(ScreenError::Other("click refused".into())) } else { Ok(String::new()) }
+            }
+        }
+        let shared = Arc::new(Mutex::new(vec![]));
+        let mut actor = MacActor::new("Google Chrome", Box::new(ClickFails(Arc::clone(&shared))));
+        assert!(actor.shift_click_png(&cap_2x(), 300, 500).is_err());
+        let s = recorded(&shared);
+        assert!(s.ends_with("tell application \"System Events\" to key up shift"), "Shift must not stay held: {s}");
     }
 
     #[test]

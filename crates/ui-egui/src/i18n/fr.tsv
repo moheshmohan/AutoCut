@@ -3548,6 +3548,7 @@
 	GPU Rendering	Rendu GPU
 	Composite on the GPU when available	Composer sur le GPU si disponible
 	Text to Speech	Synthèse vocale
+	Generate Audio	Générer de l’audio
 	Edit Narration	Modifier la narration
 	Project Notes	Notes du projet
 	Get Project Notes	Obtenir les notes du projet

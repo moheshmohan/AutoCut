@@ -3558,6 +3558,7 @@
 	GPU Rendering	Rendering GPU
 	Composite on the GPU when available	Composizione sulla GPU quando disponibile
 	Text to Speech	Sintesi vocale
+	Generate Audio	Genera audio
 	Edit Narration	Modifica narrazione
 	Dock Panel	Aggancia pannello
 	Undock Panel	Sgancia pannello

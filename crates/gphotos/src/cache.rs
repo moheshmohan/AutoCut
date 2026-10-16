@@ -54,19 +54,49 @@ fn list_in(root: &Path) -> Vec<Value> {
             let path = find_in(root, &id)?;
             let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let filename = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-            Some(json!({"id": id, "filename": filename, "bytes": bytes, "path": path.to_string_lossy()}))
+            Some(json!({"id": id, "filename": filename, "bytes": bytes, "path": path.to_string_lossy(), "created": sidecar_created(&path)}))
         })
         .collect();
     out.sort_by(|a, b| a.get("filename").and_then(Value::as_str).cmp(&b.get("filename").and_then(Value::as_str)));
     out
 }
 
-/// A half-written download is never an original.
+/// A half-written download is never an original, and neither is a metadata sidecar.
 fn is_complete(p: &Path) -> bool {
     p.file_name().is_some_and(|n| {
         let n = n.to_string_lossy();
-        !n.ends_with(".part") && !n.starts_with('.')
+        !n.ends_with(".part") && !n.starts_with('.') && !n.ends_with(".json")
     })
+}
+
+/// The metadata sidecar of a cached original: `<file>.json`, the Google Takeout convention.
+pub fn sidecar_path(media: &Path) -> PathBuf {
+    let mut s = media.as_os_str().to_os_string();
+    s.push(".json");
+    PathBuf::from(s)
+}
+
+/// Write what Google knows about `item` next to its cached original. Google's video downloads
+/// are re-encoded without the camera's metadata, so this is the only record of when it was
+/// recorded (`media.captureDate` reads it). Best effort: a failure only loses the date.
+pub fn write_sidecar(item: &PickedItem, media: &Path) -> bool {
+    let v = json!({
+        "title": item.filename,
+        "created": item.created,
+        "googlePhotosId": item.id,
+        "mimeType": item.mime_type,
+    });
+    serde_json::to_vec_pretty(&v).is_ok_and(|bytes| std::fs::write(sidecar_path(media), bytes).is_ok())
+}
+
+/// The `created` time recorded in a cached original's sidecar.
+pub fn sidecar_created(media: &Path) -> Option<String> {
+    let path = sidecar_path(media);
+    if std::fs::metadata(&path).ok()?.len() > 1 << 20 {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    v.get("created").and_then(Value::as_str).map(str::to_string)
 }
 
 /// Media item ids are URL-safe base64; anything else is replaced so an id can never name a
@@ -184,6 +214,36 @@ impl GooglePhotos {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sidecars_record_the_date_and_are_never_the_original() {
+        let root = std::env::temp_dir().join(format!("filmcraft-gp-sidecar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("idS")).unwrap();
+        let media = root.join("idS/clip.mov");
+        std::fs::write(&media, b"video").unwrap();
+        let item = PickedItem {
+            id: "idS".into(),
+            filename: "clip.mov".into(),
+            mime_type: "video/quicktime".into(),
+            kind: MediaKind::Video,
+            created: "2022-10-14T10:01:08Z".into(),
+            base_url: String::new(),
+            video_status: None,
+        };
+        assert!(write_sidecar(&item, &media));
+        assert_eq!(sidecar_created(&media).as_deref(), Some("2022-10-14T10:01:08Z"));
+        // the sidecar sorts before nothing and is never picked as the original
+        for _ in 0..3 {
+            assert_eq!(find_in(&root, "idS"), Some(media.clone()));
+        }
+        let listed = list_in(&root);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["created"], "2022-10-14T10:01:08Z");
+        // a damaged sidecar is no date, not an error
+        std::fs::write(sidecar_path(&media), b"{nope").unwrap();
+        assert_eq!(sidecar_created(&media), None);
+    }
+
     use super::*;
 
     fn item(id: &str, filename: &str, kind: MediaKind) -> PickedItem {

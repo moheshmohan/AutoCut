@@ -31,3 +31,7 @@ required-features = ["kokoro"]
 [[example]]
 name = "narrate"
 required-features = ["kokoro"]
+
+[[example]]
+name = "clone_check"
+required-features = ["kokoro"]

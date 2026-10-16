@@ -67,6 +67,21 @@ pub const VIDEO_TILES: &str = "Locate every video thumbnail in this photo grid. 
 pub const ALL_TILES: &str =
     "Locate each thumbnail in this photo grid. Use the visible duration badge text (e.g. 0:12) as the label when the thumbnail has one, otherwise \"photo\".";
 
+/// The inventory ask for the picker's selection counter ("12 selected").
+pub const SELECTED_COUNTER: &str =
+    "Locate the text near the top-left corner that says how many items are selected (for example '12 selected'). Use that exact text as the label.";
+
+/// The number in a "12 selected" label; `None` for anything else or a count beyond the
+/// picker's 2000-item ceiling.
+pub fn selected_count(label: &str) -> Option<u32> {
+    let l = label.to_lowercase();
+    if !l.contains("selected") {
+        return None;
+    }
+    let digits: String = l.chars().skip_while(|c| !c.is_ascii_digit()).take_while(char::is_ascii_digit).take(6).collect();
+    digits.parse::<u32>().ok().filter(|n| (1..=2000).contains(n))
+}
+
 /// Appended for the one retry after [`enumeration_failed`].
 pub const STRICT: &str = "Your previous answer grouped several thumbnails into one box or repeated one label: give exactly one tight box per individual thumbnail, each labelled with its own duration text.";
 
@@ -148,6 +163,16 @@ mod tests {
         }
         for no in ["beach", "2024", "13: no", ":", "12-04", "search", "1h02"] {
             assert!(!label_has_duration(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn selected_counts_are_read_from_the_header() {
+        assert_eq!(selected_count("37 selected"), Some(37));
+        assert_eq!(selected_count("1 Selected"), Some(1));
+        assert_eq!(selected_count("Selected: 12 items"), Some(12));
+        for no in ["Select up to 200 items", "Done", "selected", "0 selected", "99999999 selected"] {
+            assert_eq!(selected_count(no), None, "{no}");
         }
     }
 

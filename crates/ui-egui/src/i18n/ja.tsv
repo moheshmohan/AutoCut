@@ -3552,6 +3552,7 @@
 	GPU Rendering	GPU レンダリング
 	Composite on the GPU when available	利用可能な場合は GPU で合成
 	Text to Speech	テキスト読み上げ
+	Generate Audio	オーディオを生成
 	Edit Narration	ナレーションを編集
 	Clear Transition	トランジションを消去
 	Set Transition Duration	トランジションの長さを設定
