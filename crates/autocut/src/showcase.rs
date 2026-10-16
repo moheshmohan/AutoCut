@@ -991,6 +991,7 @@ mod tests {
             description: format!("{label} doing things"),
             best: 6.0,
             frames: vec![FrameFact { seconds: 6.0, present: true, area: 0.3, center: [0.5, 0.5] }],
+            ..ClipFacts::default()
         }
     }
 

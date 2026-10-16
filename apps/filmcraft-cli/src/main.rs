@@ -521,7 +521,7 @@ async fn cli() {
                 opts.subject = subject.to_string();
             }
             for f in &mut facts {
-                f.label = filmcraft_autocut::analyze::sanitize_label(&f.label, &f.kind, &opts.subject);
+                f.label = filmcraft_autocut::analyze::sanitize_label_with(&f.label, &f.kind, &opts.subject, &f.text);
             }
             if let Some(t) = a.opt("--title") {
                 opts.title = t.to_string();
@@ -655,7 +655,8 @@ async fn cli() {
             }
             let mut b = Backend::open(&a);
             let mut progress = |l: &str| diag(format_args!("analyze: {l}"));
-            // --relabel report.json: describe again from the report's best moments, no locating
+            // --relabel report.json: read the text and describe again from the report's best
+            // moments, no locating
             let earlier: Option<Vec<filmcraft_autocut::analyze::ClipFacts>> = a.opt("--relabel").map(|path| {
                 let bytes = std::fs::read(path).unwrap_or_else(|e| fail(format!("analyze: {path}: {e}")));
                 let v: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| fail(format!("analyze: {path}: {e}")));

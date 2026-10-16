@@ -61,10 +61,21 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
 1. **`analyze`** (`analyze.rs`): for each video item, frames are sampled through the engine
    (`media.frame`) and a grounding vision model (Qwen2.5-VL, `AUTOCUT_ANALYSIS_MODEL`) is asked
    frame by frame to *locate* the subject — a box or none. A box says whether, how big and
-   where, so the best moment is where the subject is largest. One more request per clip names
-   and describes it; a proper name survives only if it is a known robot or maker
-   (`sanitize_label`), since a 7B model invents brands. Capture dates come from
-   `media.captureDate` (Google Photos picker sidecars, or the file's own metadata).
+   where, so the best moment is where the subject is largest. On the two best frames, fetched
+   larger (1280 px), the model then transcribes the legible text, sorted by place: `on_subject`
+   (printed, painted or stuck on the robot: "ARDET", "Swiss-Mile", "Go1", "temi") and `nearby`
+   (signs, booths, shop windows, and anything on a screen: "ETH zürich RSL", "QUOKKA", a
+   sponsor's "DP WORLD" on a tablet). Lines are cleaned and capped (12 per place, 60 characters
+   each) and kept in the report as `text` (absent in older reports, which still load). One more
+   request per clip names and describes it, with that text in the prompt; a proper name in the
+   label survives (`sanitize_label_with`) only if it is spelled out — in any case, spacing or
+   punctuation — by text read on the robot, or by a sign that introduces one ("Ameca AI
+   Interaction Guide", "Meet …", "… Robot"), or else is a known robot or maker (`KNOWN_NAMES`,
+   the fallback allowlist), since a 7B model invents brands ("Quokka robot" from the kiosk
+   behind it). A shop, company or sponsor name on a sign or screen may go in the description,
+   never in the label. Capture dates come from `media.captureDate` (Google Photos picker
+   sidecars, or the file's own metadata). `--relabel earlier.json` reads the text and describes
+   again from the earlier report's best moments, without locating again.
 2. **`showcase`** (`showcase.rs`): clips that show the subject are grouped into entries — the
    same robot is counted once: the same specific name within a week (an expo's other days), or
    the same day with a generic label of the same kind; up to three shots each. The local LLM

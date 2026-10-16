@@ -27,6 +27,7 @@ fn fact(item: u64, label: &str, unix: i64, seconds: f64) -> ClipFacts {
         description: format!("a {label}"),
         best: seconds / 2.0,
         frames: vec![FrameFact { seconds: seconds / 2.0, present: true, area: 0.4, center: [0.5, 0.5] }],
+        ..ClipFacts::default()
     }
 }
 
