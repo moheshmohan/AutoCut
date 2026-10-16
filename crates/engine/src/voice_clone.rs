@@ -3,13 +3,13 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `tts.cloneVoice` | take speech from project items / clips (whole, or `segments`), measure the speaker's tone colour, pick the closest Kokoro voice, save the profile `clone:<name>` — a background job; `consent: true` is required |
-//! | `tts.clonedVoices` | the saved cloned voices |
-//! | `tts.deleteClonedVoice` | remove one |
-//! | `tts.downloadCloneModel` | download the OpenVoice V2 converter (131 MB, MIT, SHA-256 checked) as a background job |
+//! | `tts.cloneVoice` | take speech from project items / clips (whole, or `segments`) and save the profile `clone:<name>` — a background job; `consent: true` is required. `engine`: `voxcpm` (natural: the model speaks in the speaker's own voice, accent and rhythm included; the default when a VoxCPM release is installed) or `openvoice` (timbre only: the closest Kokoro voice re-voiced). Natural clones keep the best 10–25 s of speech as a voice sample, transcribed with the speech model when the mode needs it (`transcript` gives it instead); `model`, `mode`, `cfg` and `steps` tune them |
+//! | `tts.clonedVoices` | the saved cloned voices, and the cloning models with their download state |
+//! | `tts.deleteClonedVoice` | remove one (and its voice sample) |
+//! | `tts.downloadCloneModel` | download a cloning model as a background job, every file SHA-256 checked: `openvoice-v2` (131 MB, MIT; the default), `voxcpm-1.5` (1.95 GB) or `voxcpm-2` (4.96 GB), both Apache-2.0 |
 //!
-//! Profiles live in `<data>/voices/<name>.json`, next to the models: a cloned voice is the
-//! user's, usable in every project. See `filmcraft_tts::clone` for how speech is re-voiced.
+//! Profiles live in `<data>/voices/<name>.json` (natural ones with `<name>.wav`), next to the
+//! models: a cloned voice is the user's, usable in every project. See `filmcraft_tts::clone`.
 
 use serde_json::{Value, json};
 
@@ -19,10 +19,15 @@ use filmcraft_time::Tick;
 use crate::commands::{CommandSpec, always, bad, bool_p, str_p, u64_p};
 use crate::{EngineError, Result, Session};
 
-/// Rate reference speech is decoded at (the converter's).
+/// Rate reference speech is decoded at for the OpenVoice converter.
 const REF_RATE: u32 = 22_050;
+/// Rate reference speech is decoded at for VoxCPM (VoxCPM1.5 encodes at 44.1 kHz: the voice
+/// sample keeps the recording's top octave).
+const NATURAL_REF_RATE: u32 = 44_100;
 /// Most reference audio decoded, seconds (speech is trimmed and capped again in the tts crate).
 const MAX_REFERENCE_SECONDS: f64 = 600.0;
+/// The timbre-only cloning model.
+const OPENVOICE: &str = "openvoice-v2";
 
 fn spec(id: &'static str, label: &'static str, params: &'static str, run: fn(&mut Session, &Value) -> Result<Value>, journal: bool) -> CommandSpec {
     CommandSpec { id, label, menu: &[], shortcut: None, params, enabled: always, run, journal }
@@ -33,13 +38,19 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.cloneVoice",
             "Clone a Voice",
-            r#"{"name":str,"consent":bool,"items":[id]?,"clips":[id]?,"segments":[{"item":id,"start":seconds,"end":seconds}]?,"baseVoice":"kokoro-…"?,"wait":bool?}"#,
+            r#"{"name":str,"consent":bool,"items":[id]?,"clips":[id]?,"segments":[{"item":id,"start":seconds,"end":seconds}]?,"engine":"voxcpm"|"openvoice"?,"model":"voxcpm-1.5"|"voxcpm-2"?,"mode":"reference"|"continuation"?,"transcript":str?,"speechModel":"whisper-…"?,"cfg":1..5?,"steps":2..50?,"baseVoice":"kokoro-…"?,"wait":bool?}"#,
             clone_voice,
             false,
         ),
         spec("tts.clonedVoices", "Cloned Voices", "{}", cloned_voices, false),
         spec("tts.deleteClonedVoice", "Delete Cloned Voice", r#"{"voice":"clone:…"}"#, delete_cloned, false),
-        spec("tts.downloadCloneModel", "Download Voice Cloning Model", r#"{"wait":bool?}"#, download_clone_model, false),
+        spec(
+            "tts.downloadCloneModel",
+            "Download Voice Cloning Model",
+            r#"{"model":"openvoice-v2"|"voxcpm-1.5"|"voxcpm-2"?,"wait":bool?}"#,
+            download_clone_model,
+            false,
+        ),
     ]
 }
 
@@ -51,11 +62,29 @@ pub fn cloned_json() -> Value {
         let list = filmcraft_tts::clone::list(&filmcraft_tts::clone::voices_dir(&dir));
         json!(
             list.iter()
-                .map(|p| json!({
-                    "id": p.id, "name": p.name, "baseVoice": p.base_voice, "baseSimilarity": p.base_similarity,
-                    "referenceSeconds": p.reference_seconds, "source": p.source, "created": p.created,
-                    "gender": filmcraft_tts::clone::gender(p),
-                }))
+                .map(|p| {
+                    let mut v = json!({
+                        "id": p.id, "name": p.name, "engine": p.engine.id(), "referenceSeconds": p.reference_seconds,
+                        "source": p.source, "created": p.created, "gender": filmcraft_tts::clone::gender(p),
+                    });
+                    match &p.natural {
+                        Some(n) => {
+                            v["model"] = json!(n.model);
+                            v["modelName"] = json!(filmcraft_tts::catalog::voxcpm(&n.model).map_or("", |m| m.name));
+                            v["mode"] = json!(n.mode);
+                            v["cfg"] = json!(n.cfg);
+                            v["steps"] = json!(n.timesteps);
+                            v["transcript"] = json!(n.transcript);
+                            v["sample"] = json!({"from": n.from, "to": n.to});
+                        }
+                        None => {
+                            v["model"] = json!(OPENVOICE);
+                            v["baseVoice"] = json!(p.base_voice);
+                            v["baseSimilarity"] = json!(p.base_similarity);
+                        }
+                    }
+                    v
+                })
                 .collect::<Vec<_>>()
         )
     }
@@ -65,10 +94,66 @@ pub fn cloned_json() -> Value {
     }
 }
 
+/// The cloning models: id, engine, name, download state, size, licence and source.
+pub fn models_json() -> Value {
+    let dir = crate::transcript::models_dir();
+    let mut out = vec![json!({
+        "id": OPENVOICE,
+        "engine": "openvoice",
+        "name": filmcraft_tts::catalog::CLONE_PACKAGE_NAME,
+        "description": "Timbre only: a Kokoro voice re-voiced into the speaker's tone colour. Fast; the accent and rhythm stay Kokoro's.",
+        "installed": dir.as_deref().is_some_and(filmcraft_tts::catalog::clone_installed),
+        "size": filmcraft_tts::catalog::CLONE_FILES.iter().map(|f| f.size).sum::<u64>(),
+        "missingBytes": dir.as_deref().map_or(0, filmcraft_tts::catalog::clone_missing_bytes),
+        "license": filmcraft_tts::catalog::CLONE_LICENSE,
+        "source": filmcraft_tts::catalog::CLONE_SOURCE,
+        "available": cfg!(feature = "neural-voices"),
+    })];
+    for m in filmcraft_tts::catalog::VOXCPM {
+        out.push(json!({
+            "id": m.id,
+            "engine": "voxcpm",
+            "name": m.name,
+            "description": m.description,
+            "installed": dir.as_deref().is_some_and(|d| filmcraft_tts::catalog::voxcpm_installed(d, m)),
+            "size": filmcraft_tts::catalog::voxcpm_size(m),
+            "missingBytes": dir.as_deref().map_or(filmcraft_tts::catalog::voxcpm_size(m), |d| filmcraft_tts::catalog::voxcpm_missing_bytes(d, m)),
+            "license": m.license,
+            "source": m.source,
+            "available": cfg!(feature = "neural-voices"),
+        }));
+    }
+    json!(out)
+}
+
+/// The VoxCPM release a natural clone uses when none is named: the default if installed, else
+/// any installed one, else the default.
+pub fn default_natural_model() -> &'static str {
+    let dir = crate::transcript::models_dir();
+    let installed =
+        |id: &str| dir.as_deref().is_some_and(|d| filmcraft_tts::catalog::voxcpm(id).is_some_and(|m| filmcraft_tts::catalog::voxcpm_installed(d, m)));
+    if installed(filmcraft_tts::catalog::DEFAULT_VOXCPM) {
+        return filmcraft_tts::catalog::DEFAULT_VOXCPM;
+    }
+    filmcraft_tts::catalog::VOXCPM.iter().map(|m| m.id).find(|id| installed(id)).unwrap_or(filmcraft_tts::catalog::DEFAULT_VOXCPM)
+}
+
+/// The engine new clones use: natural when this build has it and a VoxCPM release is installed.
+pub fn default_engine() -> &'static str {
+    let dir = crate::transcript::models_dir();
+    let natural = cfg!(feature = "neural-voices")
+        && dir.as_deref().is_some_and(|d| filmcraft_tts::catalog::VOXCPM.iter().any(|m| filmcraft_tts::catalog::voxcpm_installed(d, m)));
+    if natural { "voxcpm" } else { "openvoice" }
+}
+
 fn cloned_voices(_s: &mut Session, _p: &Value) -> Result<Value> {
     let dir = crate::transcript::models_dir();
     Ok(json!({
         "voices": cloned_json(),
+        "models": models_json(),
+        "defaultEngine": default_engine(),
+        "defaultModel": default_natural_model(),
+        // the timbre-only model, as before natural cloning existed
         "model": {
             "id": filmcraft_tts::catalog::CLONE_PACKAGE_ID,
             "name": filmcraft_tts::catalog::CLONE_PACKAGE_NAME,
@@ -97,16 +182,16 @@ fn delete_cloned(_s: &mut Session, p: &Value) -> Result<Value> {
     }
 }
 
-/// Mono audio of `item` from `start` for `len` (seconds) at [`REF_RATE`].
-fn decode(s: &Session, item: ItemId, start: f64, len: f64) -> Option<Vec<f32>> {
+/// Mono audio of `item` from `start` for `len` (seconds) at `rate`.
+fn decode(s: &Session, item: ItemId, start: f64, len: f64, rate: u32) -> Option<Vec<f32>> {
     let src = s.source(item)?;
     if !src.info().has_audio() || !start.is_finite() || !len.is_finite() || len <= 0.0 {
         return None;
     }
-    let rate = i64::from(REF_RATE);
-    let from = Tick::from_seconds_f64(start.max(0.0)).to_units_floor(rate).max(0);
-    let n = Tick::from_seconds_f64(len.min(MAX_REFERENCE_SECONDS)).to_units_floor(rate).max(0) as usize;
-    let buf = src.audio(from, n, REF_RATE).ok()?;
+    let r = i64::from(rate);
+    let from = Tick::from_seconds_f64(start.max(0.0)).to_units_floor(r).max(0);
+    let n = Tick::from_seconds_f64(len.min(MAX_REFERENCE_SECONDS)).to_units_floor(r).max(0) as usize;
+    let buf = src.audio(from, n, rate).ok()?;
     let mono = filmcraft_speech::downmix(&buf.channels);
     (!mono.is_empty()).then_some(mono)
 }
@@ -118,8 +203,9 @@ fn item_seconds(s: &Session, item: ItemId) -> Option<f64> {
     }
 }
 
-/// The reference speech the params point at, and a description of where it came from.
-fn reference(s: &Session, p: &Value) -> Result<(Vec<f32>, String)> {
+/// The reference speech the params point at (mono at `rate`), and a description of where it
+/// came from.
+fn reference(s: &Session, p: &Value, rate: u32) -> Result<(Vec<f32>, String)> {
     let cmd = "tts.cloneVoice";
     let mut parts: Vec<(ItemId, f64, f64)> = Vec::new();
     if let Some(list) = p.get("items") {
@@ -171,15 +257,56 @@ fn reference(s: &Session, p: &Value) -> Result<(Vec<f32>, String)> {
             break;
         }
         let len = len.min(MAX_REFERENCE_SECONDS - total);
-        let Some(a) = decode(s, item, start, len) else {
+        let Some(a) = decode(s, item, start, len, rate) else {
             return Err(bad(cmd, format!("item {} has no audio there", item.0)));
         };
-        total += a.len() as f64 / f64::from(REF_RATE);
+        total += a.len() as f64 / f64::from(rate);
         audio.extend_from_slice(&a);
         let name = s.project.item(item).map(|i| i.name.clone()).unwrap_or_default();
         names.push(format!("{name} [{start:.1}–{:.1} s]", start + len));
     }
     Ok((audio, names.join(", ")))
+}
+
+/// What a natural clone request asks for (checked before anything is decoded).
+#[cfg_attr(not(feature = "neural-voices"), allow(dead_code))]
+struct NaturalParams {
+    model: String,
+    mode: Option<&'static str>,
+    transcript: Option<String>,
+    cfg: f32,
+    steps: usize,
+}
+
+fn natural_params(p: &Value) -> Result<NaturalParams> {
+    let cmd = "tts.cloneVoice";
+    let model = match str_p(p, "model") {
+        Some(m) if filmcraft_tts::catalog::voxcpm(m).is_some() => m.to_string(),
+        Some(m) => return Err(bad(cmd, format!("unknown model `{m}` (voxcpm-1.5, voxcpm-2)"))),
+        None => default_natural_model().to_string(),
+    };
+    let mode = match str_p(p, "mode") {
+        None => None,
+        Some("reference") => Some("reference"),
+        Some("continuation") => Some("continuation"),
+        Some(m) => return Err(bad(cmd, format!("unknown mode `{m}` (reference, continuation)"))),
+    };
+    if p.get("transcript").is_some_and(|t| !t.is_string()) {
+        return Err(bad(cmd, "`transcript` must be a string"));
+    }
+    let transcript = str_p(p, "transcript").map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+    if transcript.as_ref().is_some_and(|t| t.len() > 16 * 1024) {
+        return Err(bad(cmd, "`transcript` is too long"));
+    }
+    let cfg = match p.get("cfg") {
+        None => 2.0,
+        Some(v) => v.as_f64().filter(|c| c.is_finite() && (1.0..=5.0).contains(c)).ok_or_else(|| bad(cmd, "`cfg` must be a number from 1 to 5"))?,
+    };
+    let steps = match p.get("steps") {
+        None => 10,
+        Some(v) => v.as_u64().filter(|n| (2..=50).contains(n)).ok_or_else(|| bad(cmd, "`steps` must be a whole number from 2 to 50"))?,
+    };
+    Ok(NaturalParams { model, mode, transcript, cfg: cfg as f32, steps: steps as usize })
 }
 
 fn clone_voice(s: &mut Session, p: &Value) -> Result<Value> {
@@ -188,83 +315,155 @@ fn clone_voice(s: &mut Session, p: &Value) -> Result<Value> {
     if !bool_p(p, "consent").unwrap_or(false) {
         return Err(bad(cmd, "cloning a voice needs consent: pass `consent: true` to confirm it is your own voice or that the speaker agreed"));
     }
+    let engine = match str_p(p, "engine") {
+        Some(e @ ("voxcpm" | "openvoice")) => e,
+        Some(e) => return Err(bad(cmd, format!("unknown engine `{e}` (voxcpm, openvoice)"))),
+        None => default_engine(),
+    };
+    let natural = if engine == "voxcpm" { Some(natural_params(p)?) } else { None };
     let base = str_p(p, "baseVoice").filter(|b| !b.is_empty() && *b != "auto").map(str::to_string);
     // the reference first: a bad request reads the same with or without the feature
-    let (audio, source) = reference(s, p)?;
+    let rate = if natural.is_some() { NATURAL_REF_RATE } else { REF_RATE };
+    let (audio, source) = reference(s, p, rate)?;
     #[cfg(feature = "neural-voices")]
     {
         let models = crate::transcript::models_dir().ok_or_else(|| bad(cmd, "no data directory for voice models"))?;
-        if !filmcraft_tts::catalog::installed(&models) {
-            return Err(bad(cmd, "the natural voices are not downloaded yet (tts.downloadVoices)"));
-        }
-        if !filmcraft_tts::catalog::clone_installed(&models) {
-            return Err(bad(cmd, "the voice cloning model is not downloaded yet (tts.downloadCloneModel)"));
-        }
         let id = format!("{}{}", filmcraft_tts::CLONE_PREFIX, filmcraft_tts::clone::slug(&name));
         if id == filmcraft_tts::CLONE_PREFIX {
             return Err(bad(cmd, "give the voice a name with letters or digits"));
         }
         let wait = bool_p(p, "wait").unwrap_or(false);
-        let job = crate::narration::new_job(s, format!("Cloning voice {name}"));
-        let (prog, res) = (job.progress.clone(), job.result.clone());
-        let job_id = crate::narration::spawn(s, job, wait, "filmcraft-voice-clone", move || {
-            let t0 = web_time::Instant::now();
-            let mut step = |line: &str| {
-                *prog.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = line.to_string();
-            };
-            let r = filmcraft_tts::clone::create(&name, &audio, REF_RATE, base.as_deref(), &source, true, &models, &mut step)
-                .map(|p| format!("Cloned {} through {} (similarity {:.2})", p.id, p.base_voice, p.base_similarity))
-                .map_err(|e| e.to_string());
-            crate::narration::finish(&prog, &res, r, t0);
-        })?;
-        Ok(json!({"job": job_id, "voice": id}))
+        match natural {
+            Some(np) => {
+                let pkg = filmcraft_tts::catalog::voxcpm(&np.model).ok_or_else(|| bad(cmd, "unknown model"))?;
+                if !filmcraft_tts::catalog::voxcpm_installed(&models, pkg) {
+                    return Err(bad(
+                        cmd,
+                        format!("the cloning model {} is not downloaded yet (tts.downloadCloneModel {{\"model\": \"{}\"}})", pkg.name, pkg.id),
+                    ));
+                }
+                let mode = np
+                    .mode
+                    .map(|m| if m == "continuation" { filmcraft_tts::clone::PromptMode::Continuation } else { filmcraft_tts::clone::PromptMode::Reference });
+                let needs_transcript = pkg.id == "voxcpm-1.5" || mode == Some(filmcraft_tts::clone::PromptMode::Continuation);
+                // the speech model, when the sample must be transcribed (found now: a request
+                // that cannot be served fails before the job starts)
+                let transcriber = if needs_transcript && np.transcript.is_none() {
+                    // `model` here names the cloning model; the speech model is `speechModel`
+                    // (else the one chosen in Settings)
+                    let speech = match str_p(p, "speechModel") {
+                        Some(m) => json!({"model": m}),
+                        None => json!({}),
+                    };
+                    Some(crate::transcript::transcriber(s, &speech).map_err(|e| bad(cmd, format!("{e}; or pass the voice sample's `transcript`")))?)
+                } else {
+                    None
+                };
+                let req =
+                    filmcraft_tts::clone::NaturalRequest { model: np.model.clone(), mode, transcript: np.transcript.clone(), cfg: np.cfg, timesteps: np.steps };
+                let job = crate::narration::new_job(s, format!("Cloning voice {name}"));
+                let (prog, res) = (job.progress.clone(), job.result.clone());
+                let job_id = crate::narration::spawn(s, job, wait, "filmcraft-voice-clone", move || {
+                    let t0 = web_time::Instant::now();
+                    let mut step = |line: &str| {
+                        *prog.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = line.to_string();
+                    };
+                    let mut transcribe = |x16: &[f32]| -> std::result::Result<String, String> {
+                        let t = transcriber.as_ref().ok_or_else(|| "no speech model".to_string())?;
+                        let opts = filmcraft_speech::Options { language: Some("en".into()), diarize: false, ..Default::default() };
+                        t.transcribe(x16, &opts, &mut |_, _| true).map(|tr| tr.text()).map_err(|e| e.to_string())
+                    };
+                    let r = filmcraft_tts::clone::create_natural(&name, &audio, NATURAL_REF_RATE, &req, &source, true, &models, &mut transcribe, &mut step)
+                        .map(|p| format!("Cloned {} with {} ({:.1} s voice sample)", p.id, p.model().unwrap_or(""), p.reference_seconds))
+                        .map_err(|e| e.to_string());
+                    crate::narration::finish(&prog, &res, r, t0);
+                })?;
+                Ok(json!({"job": job_id, "voice": id, "engine": "voxcpm", "model": np.model}))
+            }
+            None => {
+                if !filmcraft_tts::catalog::installed(&models) {
+                    return Err(bad(cmd, "the natural voices are not downloaded yet (tts.downloadVoices)"));
+                }
+                if !filmcraft_tts::catalog::clone_installed(&models) {
+                    return Err(bad(cmd, "the voice cloning model is not downloaded yet (tts.downloadCloneModel)"));
+                }
+                let job = crate::narration::new_job(s, format!("Cloning voice {name}"));
+                let (prog, res) = (job.progress.clone(), job.result.clone());
+                let job_id = crate::narration::spawn(s, job, wait, "filmcraft-voice-clone", move || {
+                    let t0 = web_time::Instant::now();
+                    let mut step = |line: &str| {
+                        *prog.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = line.to_string();
+                    };
+                    let r = filmcraft_tts::clone::create(&name, &audio, REF_RATE, base.as_deref(), &source, true, &models, &mut step)
+                        .map(|p| format!("Cloned {} through {} (similarity {:.2})", p.id, p.base_voice, p.base_similarity))
+                        .map_err(|e| e.to_string());
+                    crate::narration::finish(&prog, &res, r, t0);
+                })?;
+                Ok(json!({"job": job_id, "voice": id, "engine": "openvoice"}))
+            }
+        }
     }
     #[cfg(not(feature = "neural-voices"))]
     {
-        let _ = (name, base, audio, source);
+        let _ = (name, base, audio, source, natural);
         Err(bad(cmd, "voice cloning is not available in this build (built without `neural-voices`)"))
     }
 }
 
+/// A cloning model's files, pinned.
+fn model_files(model: &str) -> Option<(&'static str, &'static [filmcraft_tts::catalog::ModelFile])> {
+    if model == OPENVOICE {
+        return Some((filmcraft_tts::catalog::CLONE_PACKAGE_NAME, filmcraft_tts::catalog::CLONE_FILES));
+    }
+    filmcraft_tts::catalog::voxcpm(model).map(|m| (m.name, m.files))
+}
+
 fn download_clone_model(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "tts.downloadCloneModel";
+    let model = str_p(p, "model").unwrap_or(OPENVOICE).to_string();
+    let (name, files) = model_files(&model).ok_or_else(|| bad(cmd, format!("unknown model `{model}` (openvoice-v2, voxcpm-1.5, voxcpm-2)")))?;
     let dir = crate::transcript::models_dir().ok_or_else(|| bad(cmd, "no data directory for voice models"))?;
-    if filmcraft_tts::catalog::clone_installed(&dir) {
-        return Ok(json!({"job": null, "installed": true}));
+    let package = if model == OPENVOICE { filmcraft_tts::catalog::clone_package_dir(&dir) } else { dir.join(&model) };
+    let missing: u64 = files.iter().filter(|f| !std::fs::metadata(package.join(f.name)).is_ok_and(|m| m.len() == f.size)).map(|f| f.size).sum();
+    if missing == 0 {
+        return Ok(json!({"job": null, "installed": true, "model": model}));
     }
     if !cfg!(feature = "neural-voices") {
         return Err(bad(cmd, "voice cloning is not available in this build (built without `neural-voices`)"));
     }
     let wait = bool_p(p, "wait").unwrap_or(false);
-    let job = crate::narration::new_job(s, format!("Downloading {}", filmcraft_tts::catalog::CLONE_PACKAGE_NAME));
-    job.progress.total.store(filmcraft_tts::catalog::clone_missing_bytes(&dir), std::sync::atomic::Ordering::Relaxed);
+    let job = crate::narration::new_job(s, format!("Downloading {name}"));
+    job.progress.total.store(missing, std::sync::atomic::Ordering::Relaxed);
     let (prog, res) = (job.progress.clone(), job.result.clone());
+    let done = format!("{name} installed");
     let id = crate::narration::spawn(s, job, wait, "filmcraft-clone-download", move || {
         let t0 = web_time::Instant::now();
-        let r = download(&dir, &prog);
-        crate::narration::finish(&prog, &res, r.map(|()| "Voice cloning model installed".to_string()), t0);
+        let r = download(&package, files, &prog);
+        crate::narration::finish(&prog, &res, r.map(|()| done), t0);
     })?;
-    Ok(json!({"job": id, "installed": false}))
+    Ok(json!({"job": id, "installed": false, "model": model}))
 }
 
 #[cfg(feature = "neural-voices")]
-fn download(dir: &std::path::Path, prog: &filmcraft_export::Progress) -> std::result::Result<(), String> {
+fn download(
+    package: &std::path::Path,
+    files: &'static [filmcraft_tts::catalog::ModelFile],
+    prog: &filmcraft_export::Progress,
+) -> std::result::Result<(), String> {
     use std::sync::atomic::Ordering;
-    let files: Vec<filmcraft_speech::models::ModelFile> = filmcraft_tts::catalog::CLONE_FILES
-        .iter()
-        .map(|f| filmcraft_speech::models::ModelFile { name: f.name, url: f.url, sha256: f.sha256, size: f.size })
-        .collect();
+    let files: Vec<filmcraft_speech::models::ModelFile> =
+        files.iter().map(|f| filmcraft_speech::models::ModelFile { name: f.name, url: f.url, sha256: f.sha256, size: f.size }).collect();
     let mut progress = |done: u64, total: u64, file: &str| {
         prog.done.store(done, Ordering::Relaxed);
         prog.total.store(total, Ordering::Relaxed);
         *prog.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = format!("Downloading {file}");
         !prog.cancel.load(Ordering::Relaxed)
     };
-    filmcraft_speech::models::download_files(&filmcraft_tts::catalog::clone_package_dir(dir), &files, &mut progress).map_err(|e| e.to_string())
+    filmcraft_speech::models::download_files(package, &files, &mut progress).map_err(|e| e.to_string())
 }
 
 #[cfg(not(feature = "neural-voices"))]
-fn download(_: &std::path::Path, _: &filmcraft_export::Progress) -> std::result::Result<(), String> {
+fn download(_: &std::path::Path, _: &'static [filmcraft_tts::catalog::ModelFile], _: &filmcraft_export::Progress) -> std::result::Result<(), String> {
     Err("voice cloning is not available in this build".into())
 }
 
@@ -290,6 +489,35 @@ mod tests {
     }
 
     #[test]
+    fn hostile_clone_parameters_are_refused() {
+        let mut s = demo();
+        for p in [
+            json!({"name": "Me", "consent": true, "items": [5], "engine": "nope"}),
+            json!({"name": "Me", "consent": true, "items": [5], "engine": "voxcpm", "model": "voxcpm-9"}),
+            json!({"name": "Me", "consent": true, "items": [5], "engine": "voxcpm", "mode": "sideways"}),
+            json!({"name": "Me", "consent": true, "items": [5], "engine": "voxcpm", "cfg": 50}),
+            json!({"name": "Me", "consent": true, "items": [5], "engine": "voxcpm", "cfg": "high"}),
+            json!({"name": "Me", "consent": true, "items": [5], "engine": "voxcpm", "steps": 0}),
+            json!({"name": "Me", "consent": true, "items": [5], "engine": "voxcpm", "steps": 1e9}),
+            json!({"name": "Me", "consent": true, "items": [5], "engine": "voxcpm", "transcript": 5}),
+            json!({"name": "Me", "consent": true, "items": [5], "engine": "voxcpm", "transcript": "x".repeat(20_000)}),
+        ] {
+            let e = s.execute("tts.cloneVoice", p.clone()).unwrap_err();
+            assert!(!e.to_string().is_empty(), "{p}");
+        }
+        assert!(s.execute("tts.downloadCloneModel", json!({"model": "voxcpm-9"})).is_err());
+    }
+
+    #[test]
+    fn natural_params_have_safe_defaults() {
+        let n = natural_params(&json!({})).unwrap();
+        assert_eq!((n.cfg, n.steps, n.mode, n.transcript), (2.0, 10, None, None));
+        assert!(filmcraft_tts::catalog::voxcpm(&n.model).is_some());
+        let n = natural_params(&json!({"model": "voxcpm-2", "mode": "continuation", "transcript": "  hi  ", "cfg": 3, "steps": 6})).unwrap();
+        assert_eq!((n.model.as_str(), n.mode, n.transcript.as_deref(), n.cfg, n.steps), ("voxcpm-2", Some("continuation"), Some("hi"), 3.0, 6));
+    }
+
+    #[test]
     fn reference_validates_segments() {
         let s = demo();
         for p in [
@@ -300,7 +528,7 @@ mod tests {
             json!({"clips": [999_999]}),
             json!({}),
         ] {
-            assert!(reference(&s, &p).is_err(), "{p}");
+            assert!(reference(&s, &p, REF_RATE).is_err(), "{p}");
         }
     }
 
@@ -310,6 +538,13 @@ mod tests {
         let r = s.execute("tts.clonedVoices", json!({})).unwrap();
         assert!(r["voices"].is_array());
         assert_eq!(r["model"]["id"], "openvoice-v2");
+        let models = r["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1 + filmcraft_tts::catalog::VOXCPM.len());
+        for m in models {
+            assert!(m["license"].as_str().is_some_and(|l| !l.contains("NC")), "{m}");
+            assert!(m["size"].as_u64().is_some_and(|b| b > 0), "{m}");
+        }
+        assert!(matches!(r["defaultEngine"].as_str(), Some("voxcpm" | "openvoice")));
         assert!(s.execute("tts.deleteClonedVoice", json!({})).is_err());
     }
 }

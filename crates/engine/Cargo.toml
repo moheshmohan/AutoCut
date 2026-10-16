@@ -15,8 +15,9 @@ default = []
 whisper = ["filmcraft-speech/whisper"]
 # Speech-model downloads over HTTPS.
 speech-download = ["filmcraft-speech/download"]
-# Natural voices for Text to Speech: Kokoro-82M on candle (CPU) and their download.
-neural-voices = ["filmcraft-tts/kokoro", "speech-download"]
+# Natural voices for Text to Speech: Kokoro-82M on candle (CPU), natural voice cloning with
+# VoxCPM (candle; Metal on macOS) and their downloads.
+neural-voices = ["filmcraft-tts/kokoro", "filmcraft-tts/voxcpm", "speech-download"]
 
 [dependencies]
 filmcraft-time = { workspace = true }
@@ -49,3 +50,7 @@ filmcraft-isobmff = { workspace = true }
 filmcraft-testkit = { workspace = true }
 filmcraft-dng = { workspace = true, features = ["writer"] }
 image = { version = "0.25", default-features = false, features = ["png", "gif"] }
+
+[[example]]
+name = "clone_eval"
+required-features = ["neural-voices", "whisper"]

@@ -111,9 +111,10 @@ fn cache_key(n: &Narration) -> String {
 
 fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
     match e {
-        tts::TtsError::NotInstalled => {
-            bad(cmd, "the natural voices (or, for a cloned voice, the cloning model) are not downloaded yet: tts.downloadVoices, tts.downloadCloneModel")
-        }
+        tts::TtsError::NotInstalled => bad(
+            cmd,
+            "the natural voices (or, for a cloned voice, its cloning model) are not downloaded yet: tts.downloadVoices, tts.downloadCloneModel {\"model\": …}",
+        ),
         e => bad(cmd, e.to_string()),
     }
 }
