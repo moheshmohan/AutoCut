@@ -1,6 +1,6 @@
 //! Showcase panel: review an AutoCut showcase ("every robot I've filmed, in order") before it is
 //! built. "Analyze…" finds every clip that shows a subject (filmed since a date, or as a request
-//! in words) and writes a plan; the entries are listed in date order, each with a thumbnail, its
+//! in words; of the whole project, or only the clips of a Google Photos album) and writes a plan; the entries are listed in date order, each with a thumbnail, its
 //! label, description and the line the narrator says, a switch to leave it out, "Merge with
 //! previous" (the same robot again) and its shots (each plays in the Source monitor). Title,
 //! voice (cloned voices included), mood, intro and outro are the plan's too. "Write script" has
@@ -13,7 +13,7 @@
 //! "make a video of every robot since 2020") brings the panel forward and its plan loads here.
 //!
 //! Automation ids: `showcase.analyzeOpen`, `showcase.subject`, `showcase.since`, `showcase.prompt`,
-//! `showcase.analyze`, `showcase.analyzeCancel`, `showcase.cancel`, `showcase.title`,
+//! `showcase.album`, `showcase.analyze`, `showcase.analyzeCancel`, `showcase.cancel`, `showcase.title`,
 //! `showcase.voice`, `showcase.mood`, `showcase.intro`, `showcase.outro`,
 //! `showcase.entry.<i>.include`, `.thumb`, `.label`, `.description`, `.line`, `.merge`, `.shots`,
 //! `.shot.<k>`, `showcase.exportPath`, `showcase.upload`, `showcase.writeScript`,
@@ -72,6 +72,9 @@ pub struct ShowcaseDraft {
     pub since: String,
     /// Or the request in words ("make a video of every robot since 2020"), used without `subject`.
     pub prompt: String,
+    /// Take the clips from this Google Photos album (its exact title): picked whole, imported,
+    /// and only those analysed; empty: the project's clips.
+    pub album: String,
     pub title: String,
     /// Narration voice id (`clone:<name>` for a cloned voice); empty: no narration.
     pub voice: String,
@@ -101,6 +104,7 @@ impl Default for ShowcaseDraft {
             subject: "robot".into(),
             since: String::new(),
             prompt: String::new(),
+            album: String::new(),
             title: String::new(),
             voice: String::new(),
             mood: "epic".into(),
@@ -207,6 +211,9 @@ impl ShowcaseDraft {
         }
         if !self.since.trim().is_empty() {
             p["since"] = json!(self.since.trim());
+        }
+        if !self.album.trim().is_empty() {
+            p["album"] = json!(self.album.trim());
         }
         if !self.title.trim().is_empty() {
             p["title"] = json!(self.title.trim());
@@ -434,6 +441,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 label(ui, &t, "Or describe the video");
                 let r = ui.add(egui::TextEdit::singleline(&mut d.prompt).hint_text("make a video of every robot since 2020").desired_width(fw).char_limit(400));
                 add(auto, ui, "showcase.prompt", r.rect, "Describe the video");
+                label(ui, &t, "From a Google Photos album (optional)");
+                let r = ui.add(egui::TextEdit::singleline(&mut d.album).hint_text("the album's exact title").desired_width(fw).char_limit(500));
+                add(auto, ui, "showcase.album", r.rect, "Google Photos album");
                 ui.label(
                     egui::RichText::new(
                         "A vision model looks at every video clip, then the clips are grouped into entries and a voice-over is written. Nothing is built until you choose Build.",
@@ -775,6 +785,9 @@ mod tests {
         assert_eq!(d.make_params(), json!({"subject": "robot", "since": "2020", "voice": "", "mood": "epic"}));
         let d = ShowcaseDraft { subject: String::new(), prompt: "make a video of every robot".into(), title: "Robots".into(), ..Default::default() };
         assert_eq!(d.make_params(), json!({"prompt": "make a video of every robot", "title": "Robots", "voice": "", "mood": "epic"}));
+        // a Google Photos album as the seed
+        let d = ShowcaseDraft { album: " Robot showcase ".into(), ..Default::default() };
+        assert_eq!(d.make_params(), json!({"subject": "robot", "album": "Robot showcase", "voice": "", "mood": "epic"}));
     }
 
     #[test]

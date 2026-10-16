@@ -282,8 +282,9 @@ impl Backend {
         // `photos.upload` (also over MCP): the Google Photos sign-in of `photos auth --upload`
         s.photos = Some(filmcraft_gphotos::engine_uploader());
         // `autocut.analyze` / `autocut.showcasePlan` / `autocut.showcaseBuild` (also over MCP):
-        // showcase jobs with the Ollama models of the AUTOCUT_* environment
-        s.autocut.host = Some(filmcraft_autocut::host::engine_host());
+        // showcase jobs with the Ollama models of the AUTOCUT_* environment, which can take
+        // their clips from a Google Photos `album` (picked by the screen agent)
+        s.autocut.host = Some(filmcraft_autocut::host::engine_host_with_albums(filmcraft_automation::photos::album_source()));
         if let Some(p) = a.opt("--project") {
             if let Err(e) = s.execute("file.open", json!({"path": p})) {
                 fail(e);

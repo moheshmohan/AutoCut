@@ -118,6 +118,7 @@ fn analyze_review_rewrite_and_build_from_the_panel() {
         "showcase.subject",
         "showcase.since",
         "showcase.prompt",
+        "showcase.album",
         "showcase.analyze",
         "showcase.title",
         "showcase.voice",

@@ -258,11 +258,26 @@ fn photos_upload_params(p: PhotosUploadParams) -> Value {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ShowcaseAnalyzeParams {
-    /// What to look for in every clip, singular: "robot", "vintage car".
-    pub subject: String,
+    /// What to look for in every clip, singular: "robot", "vintage car". Or give a `prompt`.
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// Instead of `subject`: the video to make, in words ("a video of every robot since 2020"):
+    /// the subject (and a date and title, when it names them) is read from it — by built-in
+    /// rules, else the local classifier.
+    #[serde(default)]
+    pub prompt: Option<String>,
     /// Only these media items (ids from project_inspect); default: every video item.
     #[serde(default)]
     pub items: Option<Vec<u64>>,
+    /// The clips come from this Google Photos album (its exact title) instead of the project:
+    /// the album the user filled in Google Photos is picked whole (the local screen agent opens
+    /// it in Google's picker and selects all of it — Google lets apps read only albums they
+    /// made, so the picker is the way in), its videos downloaded and imported (files the
+    /// project already holds are reused, not imported twice), and only those are analysed. Not
+    /// with `items`. Needs `filmcraft-cli photos auth` once, the grounding model
+    /// (`ollama pull qwen2.5vl:7b`) and Screen Recording + Accessibility for this process.
+    #[serde(default)]
+    pub album: Option<String>,
     /// Only clips filmed on or after this date: "2020", "2020-06" or "2020-06-15" (clips without a
     /// capture date are left out).
     #[serde(default)]
@@ -293,12 +308,16 @@ pub struct ShowcaseAnalyzeParams {
 /// `autocut.analyze` (or, with `plan`, `autocut.makeShowcase`) and its params, as a long job.
 fn showcase_analyze_params(p: ShowcaseAnalyzeParams) -> (&'static str, Value) {
     let make = p.plan.unwrap_or(false);
-    let mut params = json!({"subject": p.subject, "wait": true});
+    let mut params = json!({"wait": true});
     let mut put = |k: &str, v: Option<Value>| {
         if let Some(v) = v {
             params[k] = v;
         }
     };
+    let text = |v: Option<String>| v.filter(|t| !t.trim().is_empty()).map(Value::String);
+    put("subject", text(p.subject));
+    put("prompt", text(p.prompt));
+    put("album", text(p.album));
     put("items", p.items.map(|i| json!(i)));
     put("since", p.since.map(Value::String));
     put("frames", p.frames.map(|n| json!(n)));
@@ -362,6 +381,10 @@ pub struct ShowcaseBuildParams {
     /// and `filmcraft-cli photos auth --upload` once).
     #[serde(default)]
     pub upload: Option<bool>,
+    /// With `upload`: also put the export into this album (FilmCraft's album of that title,
+    /// made when missing; needs `filmcraft-cli photos auth --albums` once).
+    #[serde(default)]
+    pub upload_album: Option<String>,
     /// Check the built show (gaps, black frames, the mix, the subject in every shot); default:
     /// with an export.
     #[serde(default)]
@@ -375,6 +398,9 @@ fn showcase_build_params(p: ShowcaseBuildParams) -> Value {
     }
     if let Some(e) = p.export {
         params["export"] = json!(e);
+    }
+    if let Some(a) = p.upload_album.filter(|a| !a.trim().is_empty()) {
+        params["uploadAlbum"] = json!(a);
     }
     if let Some(q) = p.qa {
         params["qa"] = json!(q);
@@ -980,7 +1006,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Showcase: find every clip of a subject",
-        description = "Step 1 of a showcase (\"every robot I've filmed, in order\": a counted, narrated video). A local vision model (Ollama, AUTOCUT_ANALYSIS_MODEL) looks at every video clip (or `items`, filmed `since` a date) for `subject`, names and describes what it finds, reads capture dates and tells which clips show the same one. Runs as the `autocut.analyze` engine job (progress notifications, cancellable); the report is kept in the session (showcase_inspect). With plan: true it goes on to step 2 (`autocut.makeShowcase`) and returns the plan. In the app the Showcase panel shows the job and the plan.",
+        description = "Step 1 of a showcase (\"every robot I've filmed, in order\": a counted, narrated video). A local vision model (Ollama, AUTOCUT_ANALYSIS_MODEL) looks at every video clip (or `items`, filmed `since` a date) for `subject` (or what a `prompt` asks for), names and describes what it finds, reads capture dates and tells which clips show the same one. With `album`, the clips are a Google Photos album the user filled: the whole album is picked through Google's picker by the local screen agent, imported (no duplicates) and only its clips are analysed — the one-call way to turn \"the clips in my album X\" into a video (then plan: true, review, showcase_build). Runs as the `autocut.analyze` engine job (progress notifications, cancellable); the report is kept in the session (showcase_inspect). With plan: true it goes on to step 2 (`autocut.makeShowcase`) and returns the plan. In the app the Showcase panel shows the job and the plan.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
     async fn showcase_analyze(
@@ -988,8 +1014,9 @@ impl FilmcraftMcp {
         Parameters(p): Parameters<ShowcaseAnalyzeParams>,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        if p.subject.trim().is_empty() {
-            return Ok(fail("`subject` is empty: say what to look for, e.g. \"robot\""));
+        let given = |v: &Option<String>| v.as_deref().is_some_and(|t| !t.trim().is_empty());
+        if !given(&p.subject) && !given(&p.prompt) {
+            return Ok(fail("say what to look for: a `subject` (e.g. \"robot\") or a `prompt` (\"a video of every robot since 2020\")"));
         }
         let (id, params) = showcase_analyze_params(p);
         Ok(self.run_long(id, params, &context).await)
@@ -1010,7 +1037,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Showcase: build (and export)",
-        description = "Step 3 of a showcase: build the plan (the kept one, or `plan` as edited) into a new 16:9 sequence — cold open, each entry with its narration, shots where the subject is in view, a lower third, transitions, the year cards, an on-screen counter, music ducked under the voice — all as ordinary undoable engine commands. With `export`, export it (YouTube 1080p) with chapters and a QA report beside it; with `upload`, then send the export to Google Photos. Runs as the `autocut.showcaseBuild` engine job (progress, cancellable).",
+        description = "Step 3 of a showcase: build the plan (the kept one, or `plan` as edited) into a new 16:9 sequence — cold open, each entry with its narration, shots where the subject is in view, a lower third, transitions, the year cards, an on-screen counter, music ducked under the voice — all as ordinary undoable engine commands. With `export`, export it (YouTube 1080p) with chapters and a QA report beside it; with `upload`, then send the export to Google Photos (into `upload_album` too). Runs as the `autocut.showcaseBuild` engine job (progress, cancellable).",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
     async fn showcase_build(
@@ -1205,7 +1232,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done, or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject (plan: true also plans), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done, or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -1551,9 +1578,8 @@ mod tests {
     #[test]
     fn showcase_tool_schemas_and_params() {
         let s = schema("showcase_analyze");
-        assert_eq!(props(&s), ["compare", "frames", "items", "plan", "screen", "since", "subject", "title", "voice"], "{s}");
-        assert_eq!(s["required"], json!(["subject"]), "{s}");
-        assert_eq!(s["properties"]["subject"]["type"], "string", "{s}");
+        assert_eq!(props(&s), ["album", "compare", "frames", "items", "plan", "prompt", "screen", "since", "subject", "title", "voice"], "{s}");
+        assert!(s["required"].as_array().is_none_or(|r| r.is_empty()), "a subject or a prompt: {s}");
         let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "since": "2020", "items": [5, 6]})).unwrap();
         assert_eq!(showcase_analyze_params(p), ("autocut.analyze", json!({"subject": "robot", "since": "2020", "items": [5, 6], "wait": true})));
         let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "plan": true, "title": "Robots", "voice": ""})).unwrap();
@@ -1561,7 +1587,9 @@ mod tests {
         // title and voice only matter with a plan
         let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "title": "Robots"})).unwrap();
         assert!(showcase_analyze_params(p).1.get("title").is_none());
-        assert!(serde_json::from_value::<ShowcaseAnalyzeParams>(json!({"since": "2020"})).is_err());
+        // a Google Photos album as the seed, with the video asked for in words
+        let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"prompt": "every robot since 2020", "album": "Robot showcase", "subject": " "})).unwrap();
+        assert_eq!(showcase_analyze_params(p), ("autocut.analyze", json!({"prompt": "every robot since 2020", "album": "Robot showcase", "wait": true})));
 
         let s = schema("showcase_plan");
         assert_eq!(props(&s), ["entries", "min_coverage", "mood", "subtitle", "title", "voice"], "{s}");
@@ -1570,9 +1598,11 @@ mod tests {
         assert_eq!(showcase_plan_params(p), json!({"title": "T", "minCoverage": 0.5, "entries": [{"label": "x"}], "wait": true}));
 
         let s = schema("showcase_build");
-        assert_eq!(props(&s), ["export", "plan", "qa", "upload"], "{s}");
+        assert_eq!(props(&s), ["export", "plan", "qa", "upload", "upload_album"], "{s}");
         let p: ShowcaseBuildParams = serde_json::from_value(json!({"export": "/x/robots.mp4", "upload": true})).unwrap();
         assert_eq!(showcase_build_params(p), json!({"export": "/x/robots.mp4", "upload": true, "wait": true}));
+        let p: ShowcaseBuildParams = serde_json::from_value(json!({"export": "/x/robots.mp4", "upload": true, "upload_album": "Showcases"})).unwrap();
+        assert_eq!(showcase_build_params(p), json!({"export": "/x/robots.mp4", "upload": true, "uploadAlbum": "Showcases", "wait": true}));
         assert_eq!(showcase_build_params(ShowcaseBuildParams::default()), json!({"upload": false, "wait": true}));
 
         assert_eq!(props(&schema("showcase_inspect")), ["report"]);
@@ -1648,6 +1678,10 @@ mod tests {
         assert_eq!(v["showcase"]["built"]["entries"], 2, "{v}");
         let r = c.call(5, "showcase_analyze", json!({"subject": " "})).await;
         assert_eq!(r["result"]["isError"], true, "{r}");
+        // an album needs a host that picks albums: this one says so before any job starts
+        let r = c.call(7, "showcase_analyze", json!({"prompt": "a video of every robot", "album": "Robot showcase"})).await;
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        assert!(r.to_string().contains("album") && r.to_string().contains("not available"), "{r}");
         let r = c.call(6, "showcase_build", json!({"plan": {"entries": []}})).await;
         assert_eq!(r["result"]["isError"], true, "{r}");
         assert!(r.to_string().contains("no entry is included"), "{r}");
