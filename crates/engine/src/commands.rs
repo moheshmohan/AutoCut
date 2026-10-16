@@ -1331,8 +1331,8 @@ fn build() -> Vec<CommandSpec> {
         cmd!("file.import", "Import…", ["File"], Some("Cmd+I"), r#"{"paths":[str],"bin":binId?,"imageSequence":bool?,"replace":bool?}"#, always, |s, p| {
             let bin = u64_p(p, "bin").map(filmcraft_project::BinId);
             let paths: Vec<String> = match p.get("paths").and_then(Value::as_array) {
-                Some(a) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
-                None => str_p(p, "path").map(|x| vec![x.to_string()]).unwrap_or_default(),
+                Some(a) => a.iter().filter_map(|v| v.as_str().map(crate::export_tools::expand_home)).collect(),
+                None => str_p(p, "path").map(|x| vec![crate::export_tools::expand_home(x)]).unwrap_or_default(),
             };
             if paths.is_empty() {
                 return Err(bad("file.import", "need `paths`"));
@@ -4324,6 +4324,8 @@ fn name_project(p: &mut filmcraft_project::Project, name: String) {
 }
 
 fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
+    // `~/…` is the home folder, as in a shell (not a folder named `~` in the working directory)
+    let path = &crate::export_tools::expand_home(path);
     let t0 = web_time::Instant::now();
     // Save As renames the project after its new file (not an edit: no undo step, not dirty).
     if adopt
@@ -4388,6 +4390,7 @@ fn install_project(s: &mut Session, proj: filmcraft_project::Project, path: Opti
 }
 
 fn open_project(s: &mut Session, path: &str) -> Result<Value> {
+    let path = &crate::export_tools::expand_home(path);
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let loaded = filmcraft_format::decode(&bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let (from, migrated) = (loaded.schema_version, loaded.migrated());
