@@ -1363,3 +1363,47 @@ fn own_importer_reads_32_bit_flac_at_full_scale() {
         }
     }
 }
+
+/// [`rgba_to_yuv420_8`] as it was (a division per code value, allocations per pair of rows).
+fn yuv420_reference(rgba: &[u8], w: usize, h: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let (mut y, mut u, mut v) = (vec![0u8; w * h], vec![0u8; cw * ch], vec![0u8; cw * ch]);
+    for cy in 0..ch {
+        let rows = (h - cy * 2).min(2);
+        let (mut us, mut vs, mut cnt) = (vec![0f32; cw], vec![0f32; cw], vec![0f32; cw]);
+        for dy in 0..rows {
+            let row = cy * 2 + dy;
+            let src = &rgba[row * w * 4..(row + 1) * w * 4];
+            for x in 0..w {
+                let (r, g, b) = (src[x * 4] as f32 / 255.0, src[x * 4 + 1] as f32 / 255.0, src[x * 4 + 2] as f32 / 255.0);
+                let yy = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                y[row * w + x] = (16.0 + 219.0 * yy).round().clamp(1.0, 254.0) as u8;
+                us[x / 2] += (b - yy) / 1.8556;
+                vs[x / 2] += (r - yy) / 1.5748;
+                cnt[x / 2] += 1.0;
+            }
+        }
+        for cx in 0..cw {
+            u[cy * cw + cx] = (128.0 + 224.0 * us[cx] / cnt[cx]).round().clamp(1.0, 254.0) as u8;
+            v[cy * cw + cx] = (128.0 + 224.0 * vs[cx] / cnt[cx]).round().clamp(1.0, 254.0) as u8;
+        }
+    }
+    (y, u, v)
+}
+
+/// The encoders' RGB → Y'CbCr conversion gives the bytes it always gave, for even and odd sizes;
+/// a picture with fewer bytes than its size says, or no size at all, converts without a panic.
+#[test]
+fn yuv420_conversion_keeps_its_bits() {
+    for (w, h) in [(1, 1), (2, 2), (3, 1), (1, 3), (7, 5), (64, 36), (321, 181)] {
+        let rgba: Vec<u8> = (0..w * h * 4).map(|i| ((i * 2_654_435_761usize) >> 9) as u8).collect();
+        let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        rgba_to_yuv420_8(&rgba, w, h, &mut y, &mut u, &mut v);
+        assert_eq!((y, u, v), yuv420_reference(&rgba, w, h), "{w}x{h}");
+    }
+    let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    rgba_to_yuv420_8(&[255; 10], 8, 8, &mut y, &mut u, &mut v);
+    assert_eq!((y.len(), u.len(), v.len()), (64, 16, 16));
+    rgba_to_yuv420_8(&[], 0, 0, &mut y, &mut u, &mut v);
+    assert!(y.is_empty() && u.is_empty() && v.is_empty());
+}
