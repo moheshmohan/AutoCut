@@ -121,6 +121,10 @@ pub fn drive<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, progre
     }
 }
 
+/// Looks for the picker's search field before going on without it, and the wait between them.
+const SEARCH_TRIES: usize = 4;
+const SEARCH_RETRY_MS: u64 = 1500;
+
 fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, progress: &mut dyn FnMut(&str)) -> Result<Summary, ScreenError> {
     let started = Instant::now();
     let mut summary = Summary::default();
@@ -137,8 +141,19 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
         if spend(&mut summary, plan)? || deadline() {
             return Err(budget(&summary));
         }
-        match grounder.find(&cap.png, picker::SEARCH_FIELD) {
-            Ok(Some(field)) => {
+        // the picker may still be loading: look again a few times before going on without it
+        let mut field = None;
+        for attempt in 0..SEARCH_TRIES {
+            field = grounder.find(&cap.png, picker::SEARCH_FIELD)?;
+            if field.is_some() || attempt + 1 == SEARCH_TRIES {
+                break;
+            }
+            progress("screenagent: no search field yet; waiting for the picker");
+            actor.sleep(SEARCH_RETRY_MS);
+            cap = actor.capture()?;
+        }
+        match field {
+            Some(field) => {
                 let (px, py) = field.center();
                 progress(&format!("screenagent: typing `{q}` into the picker search"));
                 actor.click_png(&cap, px, py)?;
@@ -149,8 +164,13 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
                 actor.sleep(SEARCH_SETTLE_MS);
                 cap = actor.capture()?;
             }
-            Ok(None) => progress("screenagent: no search field visible; using the grid as-is"),
-            Err(e) => return Err(e),
+            // selecting "everything" without the search would select the whole library
+            None if plan.select_all => {
+                return Err(ScreenError::Other(format!(
+                    "the picker's search field never appeared, so `{q}` could not be searched; refusing to select every item of the whole library (selecting all needs a search)"
+                )));
+            }
+            None => progress("screenagent: no search field visible; using the grid as-is"),
         }
     }
 
@@ -633,22 +653,41 @@ mod tests {
                 Ok(vec![tile("0:12", 120, 100), tile("0:05", 10, 10), tile("1:01", 60, 100), tile("0:30", 120, 10)])
             }
             fn find(&self, _png: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
+                if target == crate::picker::SEARCH_FIELD {
+                    return Ok(Some(Element { label: "Search".into(), kind: String::new(), x1: 40, y1: 0, x2: 160, y2: 8 }));
+                }
                 Ok(target.contains("Done").then(|| Element { label: "Done".into(), kind: String::new(), x1: 180, y1: 0, x2: 199, y2: 20 }))
             }
         }
-        // grid, first tile selected, two scrolled pages, then the end (captures stop changing)
-        let mut act = FakeActor::new(vec![cap_of(10), cap_of(200), cap_of(90), cap_of(150)]);
+        // the search, the grid, first tile selected, two scrolled pages, then the end (captures
+        // stop changing)
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(5), cap_of(200), cap_of(90), cap_of(150)]);
         act.after_shift = Some(cap_of(30));
         let plan = Plan { select_all: true, ..Plan::default() };
         let mut lines: Vec<String> = vec![];
         let s = drive(&mut act, &Grid, &plan, &mut |l| lines.push(l.into())).unwrap();
         let tile = |x1: u32, y1: u32| Element { label: String::new(), kind: String::new(), x1, y1, x2: x1 + 40, y2: y1 + 40 };
-        assert_eq!(act.clicks.first(), Some(&crate::picker::click_point(&tile(10, 10))), "the first tile: {:?}", act.clicks);
+        // the search field, then the first tile
+        assert_eq!(act.clicks.get(1), Some(&crate::picker::click_point(&tile(10, 10))), "the first tile: {:?}", act.clicks);
         assert_eq!(act.shift_clicks, vec![crate::picker::click_point(&tile(120, 100))], "the last tile");
         assert!(act.scrolls > 0, "it scrolled to the end");
         assert_eq!(s.selected, 37, "the header count: {s:?}");
         assert!(s.done_pressed);
         assert!(lines.iter().any(|l| l.contains("range click")), "{lines:?}");
+    }
+
+    #[test]
+    fn select_all_without_a_search_field_refuses_instead_of_taking_the_library() {
+        // the live failure: the picker had not loaded its search box yet, the agent went on with
+        // the whole library grid and began a range selection from its first tile
+        let g = FakeGrounder { inventory: vec![tile("0:30", 10)], finds: vec![] };
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40), cap_of(50)]);
+        let plan = Plan { select_all: true, query: Some("videos October 14 2022".into()), ..Plan::default() };
+        let mut lines: Vec<String> = vec![];
+        let err = drive(&mut act, &g, &plan, &mut |l| lines.push(l.into())).unwrap_err();
+        assert!(err.to_string().contains("refusing to select every item"), "{err}");
+        assert!(act.clicks.is_empty() && act.shift_clicks.is_empty(), "nothing was clicked: {:?}", act.clicks);
+        assert_eq!(lines.iter().filter(|l| l.contains("waiting for the picker")).count(), SEARCH_TRIES - 1, "{lines:?}");
     }
 
     #[test]
