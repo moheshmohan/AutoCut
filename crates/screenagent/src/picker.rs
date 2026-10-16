@@ -68,18 +68,27 @@ pub const ALL_TILES: &str =
     "Locate each thumbnail in this photo grid. Use the visible duration badge text (e.g. 0:12) as the label when the thumbnail has one, otherwise \"photo\".";
 
 /// The inventory ask for the picker's selection counter ("12 selected").
-pub const SELECTED_COUNTER: &str =
-    "Locate the text near the top-left corner that says how many items are selected (for example '12 selected'). Use that exact text as the label.";
+/// No number in it: an example count ("12 selected", as it once read) is what the model
+/// answered when the header showed no selection at all — live, three picks "selected 12".
+pub const SELECTED_COUNTER: &str = "Locate the text near the top-left corner that says how many items are selected: a number followed by the word 'selected'. Use that exact text as the label. If the header shows no such text (it invites you to select items instead), answer with an empty list.";
 
-/// The number in a "12 selected" label; `None` for anything else or a count beyond the
-/// picker's 2000-item ceiling.
+/// The number in an "N selected" label (a number, white space, then "selected"); `None` for
+/// anything else — a bare number, "Select up to … items" — or a count beyond the picker's
+/// 2000-item ceiling.
 pub fn selected_count(label: &str) -> Option<u32> {
     let l = label.to_lowercase();
-    if !l.contains("selected") {
-        return None;
-    }
-    let digits: String = l.chars().skip_while(|c| !c.is_ascii_digit()).take_while(char::is_ascii_digit).take(6).collect();
-    digits.parse::<u32>().ok().filter(|n| (1..=2000).contains(n))
+    l.match_indices("selected").find_map(|(at, _)| {
+        let before = l.get(..at)?;
+        let number = before.trim_end();
+        if number.len() == before.len() {
+            return None; // "12selected": not the picker's text
+        }
+        let digits: Vec<char> = number.chars().rev().take_while(char::is_ascii_digit).take(7).collect();
+        if digits.is_empty() || digits.len() > 6 {
+            return None;
+        }
+        digits.iter().rev().collect::<String>().parse::<u32>().ok().filter(|n| (1..=2000).contains(n))
+    })
 }
 
 /// The picker's Albums view (a tab or button), if it has one. Google's picker guide says
@@ -259,10 +268,25 @@ mod tests {
     fn selected_counts_are_read_from_the_header() {
         assert_eq!(selected_count("37 selected"), Some(37));
         assert_eq!(selected_count("1 Selected"), Some(1));
-        assert_eq!(selected_count("Selected: 12 items"), Some(12));
-        for no in ["Select up to 200 items", "Done", "selected", "0 selected", "99999999 selected"] {
+        assert_eq!(selected_count("✓ 2000  selected"), Some(2000));
+        // only "<number> selected" is a count: the live failure read a bare "12" (or parroted
+        // the prompt's example) off a header that showed no selection
+        for no in [
+            "12",
+            "Selected: 12 items",
+            "Select up to 300 items",
+            "Add from Google Photos",
+            "Done",
+            "selected",
+            "12selected",
+            "0 selected",
+            "2001 selected",
+            "99999999 selected",
+        ] {
             assert_eq!(selected_count(no), None, "{no}");
         }
+        // and the ask itself offers no number to copy
+        assert!(!SELECTED_COUNTER.chars().any(|c| c.is_ascii_digit()), "{SELECTED_COUNTER}");
     }
 
     #[test]

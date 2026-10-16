@@ -534,10 +534,19 @@ fn open_album<A: Act, G: Ground>(
 /// Wheel lines per scroll while looking for the end of the grid.
 const END_SCROLL_LINES: i32 = SCROLL_LINES * 3;
 
+/// Tries of the whole range gesture when the header shows nothing selected after it.
+const RANGE_TRIES: u32 = 2;
+/// Reads of the header's "N selected" before taking its absence as "nothing selected".
+const COUNTER_READS: u32 = 2;
+/// The most scrolls back to the top of the grid before a retry.
+const MAX_TOP_SCROLLS: u32 = 20;
+
 /// Select every result with the picker's range gesture: click the first tile, wheel to the end
 /// of the grid (until two scrolls change nothing — the grid loads lazily), Shift+click the
 /// last tile. Two clicks select a whole search result, where tile-by-tile selection misses
-/// the tiles the model does not box. The selected count is read off the picker's header.
+/// the tiles the model does not box. How many are selected is what the picker's header says
+/// ("N selected", nothing else is trusted): a header with no selection gets the gesture once
+/// more from the top, then an error — Done is never pressed with nothing selected.
 fn select_everything<A: Act, G: Ground>(
     actor: &mut A,
     grounder: &G,
@@ -547,6 +556,76 @@ fn select_everything<A: Act, G: Ground>(
     started: Instant,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(), ScreenError> {
+    for attempt in 0..RANGE_TRIES {
+        if attempt > 0 {
+            progress("screenagent: the picker shows nothing selected; selecting once more from the top of the grid");
+            back_to_top(actor, plan, summary, cap, started)?;
+        }
+        summary.selected = 0;
+        if range_once(actor, grounder, plan, summary, cap, started, progress)? == Ranged::NoTiles {
+            summary.note = "no tiles to select".into();
+            return Ok(());
+        }
+        if let Some(n) = read_selected(grounder, cap)? {
+            summary.selected = n;
+            progress(&format!("screenagent: the picker shows {n} selected"));
+            return Ok(());
+        }
+    }
+    summary.selected = 0;
+    Err(ScreenError::Stalled(format!("the picker shows nothing selected after selecting all ({RANGE_TRIES} tries); not pressing its Done button")))
+}
+
+/// The picker header's "N selected", read up to [`COUNTER_READS`] times; `None` when it shows
+/// no selection.
+fn read_selected<G: Ground>(grounder: &G, cap: &crate::capture::Capture) -> Result<Option<u32>, ScreenError> {
+    for _ in 0..COUNTER_READS {
+        let els = grounder.inventory(&cap.png, picker::SELECTED_COUNTER)?;
+        if let Some(n) = els.iter().find_map(|e| picker::selected_count(&e.label)) {
+            return Ok(Some(n));
+        }
+    }
+    Ok(None)
+}
+
+/// Wheel back to the top of the grid (until two scrolls change nothing).
+fn back_to_top<A: Act>(actor: &mut A, plan: &Plan, summary: &mut Summary, cap: &mut crate::capture::Capture, started: Instant) -> Result<(), ScreenError> {
+    let mut still = 0u32;
+    for _ in 0..MAX_TOP_SCROLLS {
+        if still >= 2 {
+            break;
+        }
+        if spend(summary, plan)? || started.elapsed() >= plan.timeout {
+            return Err(budget(summary));
+        }
+        let before = cap.png.clone();
+        actor.scroll(-END_SCROLL_LINES)?;
+        actor.sleep(900);
+        *cap = actor.capture()?;
+        still = if verify::changed(&before, &cap.png)? { 0 } else { still + 1 };
+    }
+    Ok(())
+}
+
+/// What one range gesture did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ranged {
+    /// There was no tile to select.
+    NoTiles,
+    /// It clicked (the header says what that selected).
+    Clicked,
+}
+
+/// One range gesture (see [`select_everything`]).
+fn range_once<A: Act, G: Ground>(
+    actor: &mut A,
+    grounder: &G,
+    plan: &Plan,
+    summary: &mut Summary,
+    cap: &mut crate::capture::Capture,
+    started: Instant,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Ranged, ScreenError> {
     let out_of_time = || started.elapsed() >= plan.timeout;
     // 1. the first tile, in reading order
     let mut first = None;
@@ -566,8 +645,7 @@ fn select_everything<A: Act, G: Ground>(
         *cap = actor.capture()?;
     }
     let Some(first) = first else {
-        summary.note = "no tiles to select".into();
-        return Ok(());
+        return Ok(Ranged::NoTiles);
     };
     if spend(summary, plan)? {
         return Err(budget(summary));
@@ -580,7 +658,6 @@ fn select_everything<A: Act, G: Ground>(
     if !verify::changed(&before, &cap.png)? {
         return Err(ScreenError::Stalled("clicking the first tile changed nothing (is Accessibility granted to this terminal?)".into()));
     }
-    summary.selected = 1;
     progress("screenagent: selected the first result; scrolling to the end of the grid");
     // 2. to the end of the grid
     let mut still = 0u32;
@@ -606,14 +683,14 @@ fn select_everything<A: Act, G: Ground>(
     let band = (cap.png_h / 16).max(1);
     let Some(last) = tiles.iter().max_by_key(|e| (e.y1 / band, e.x1)) else {
         summary.note = "found no tile at the end of the grid; only the first is selected".into();
-        return Ok(());
+        return Ok(Ranged::Clicked);
     };
     // the last tile is the first one (a grid of one): a Shift+click on it would toggle the
     // selection back off — the first click already selected it
     if picker::same_tile(&first, last, scrolled) || (!scrolled && first_page == 1 && tiles.len() == 1) {
         summary.note = "the grid holds one item; the first click selected it".into();
         progress("screenagent: the grid holds one item, already selected");
-        return Ok(());
+        return Ok(Ranged::Clicked);
     }
     if spend(summary, plan)? {
         return Err(budget(summary));
@@ -625,17 +702,10 @@ fn select_everything<A: Act, G: Ground>(
     *cap = actor.capture()?;
     if !verify::changed(&before, &cap.png)? {
         summary.note = "the range click changed nothing; only the first tile is selected".into();
-        return Ok(());
+        return Ok(Ranged::Clicked);
     }
-    summary.selected = 2;
-    // the header says how many: "37 selected"
-    if let Ok(els) = grounder.inventory(&cap.png, picker::SELECTED_COUNTER)
-        && let Some(n) = els.iter().find_map(|e| picker::selected_count(&e.label))
-    {
-        summary.selected = n.max(2);
-    }
-    progress(&format!("screenagent: selected {} item(s) with a range click", summary.selected));
-    Ok(())
+    progress("screenagent: range click done; reading how many are selected");
+    Ok(Ranged::Clicked)
 }
 
 /// Count an action; `Ok(true)` = budget exhausted.
@@ -1020,6 +1090,121 @@ mod tests {
         fn capture(&mut self) -> Result<Capture, ScreenError> {
             self.0.capture()
         }
+    }
+
+    /// Hands over a two-page grid: every click changes the screen, and the grid moves once per
+    /// scroll direction (then it is at the end, or back at the top).
+    #[derive(Default)]
+    struct TwoPages {
+        tag: u8,
+        dir: i32,
+        clicks: Vec<(u32, u32)>,
+        shift_clicks: Vec<(u32, u32)>,
+        ups: u32,
+    }
+    impl Act for TwoPages {
+        fn activate(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn click_png(&mut self, _: &Capture, px: u32, py: u32) -> Result<(), ScreenError> {
+            self.clicks.push((px, py));
+            self.tag = self.tag.wrapping_add(10);
+            Ok(())
+        }
+        fn shift_click_png(&mut self, _: &Capture, px: u32, py: u32) -> Result<(), ScreenError> {
+            self.shift_clicks.push((px, py));
+            self.tag = self.tag.wrapping_add(10);
+            Ok(())
+        }
+        fn type_text(&mut self, _: &str) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn key_return(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn key_escape(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn scroll(&mut self, n: i32) -> Result<(), ScreenError> {
+            if n < 0 {
+                self.ups += 1;
+            }
+            if n.signum() != self.dir {
+                self.dir = n.signum();
+                self.tag = self.tag.wrapping_add(7);
+            }
+            Ok(())
+        }
+        fn sleep(&mut self, _: u64) {}
+        fn capture(&mut self) -> Result<Capture, ScreenError> {
+            Ok(cap_of(self.tag))
+        }
+    }
+
+    /// A search result in two rows; the header reads the scripted labels in turn (`""`: no
+    /// counter at all), then nothing (the picker left its grid after Done).
+    struct Header(std::cell::RefCell<std::collections::VecDeque<&'static str>>);
+    impl Header {
+        fn reads(labels: &[&'static str]) -> Self {
+            Self(std::cell::RefCell::new(labels.iter().copied().collect()))
+        }
+    }
+    impl Ground for Header {
+        fn inventory(&self, _png: &[u8], task: &str) -> Result<Vec<Element>, ScreenError> {
+            if task == crate::picker::SELECTED_COUNTER {
+                let label = self.0.borrow_mut().pop_front().unwrap_or("");
+                return Ok(if label.is_empty() { vec![] } else { vec![Element { label: label.into(), kind: String::new(), x1: 5, y1: 2, x2: 60, y2: 12 }] });
+            }
+            let t = |l: &str, x1: u32, y1: u32| Element { label: l.into(), kind: String::new(), x1, y1, x2: x1 + 40, y2: y1 + 40 };
+            Ok(vec![t("0:05", 10, 30), t("0:30", 60, 30), t("0:12", 110, 90)])
+        }
+        fn find(&self, _png: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
+            if target == crate::picker::SEARCH_FIELD {
+                return Ok(Some(Element { label: "Search".into(), kind: String::new(), x1: 40, y1: 0, x2: 160, y2: 8 }));
+            }
+            Ok(target.contains("Done").then(|| Element { label: "Done".into(), kind: String::new(), x1: 180, y1: 0, x2: 199, y2: 20 }))
+        }
+    }
+
+    fn range_plan() -> Plan {
+        Plan { select_all: true, query: Some("robots".into()), ..Plan::default() }
+    }
+
+    #[test]
+    fn a_header_without_a_selection_is_never_confirmed() {
+        // the live failure: the header read "Select up to 300 items" (nothing selected), the
+        // model answered with a count anyway, and a disabled Done was pressed
+        let g = Header::reads(&["12", "Select up to 300 items", "12", "Add from Google Photos"]);
+        let mut act = TwoPages::default();
+        let mut lines: Vec<String> = vec![];
+        let err = drive(&mut act, &g, &range_plan(), &mut |l| lines.push(l.into())).unwrap_err().to_string();
+        assert!(err.contains("shows nothing selected"), "{err}");
+        assert!(!act.clicks.contains(&DONE_AT), "Done never pressed: {:?}", act.clicks);
+        // the gesture was tried twice, the second time from the top
+        assert_eq!(act.shift_clicks.len() as u32, RANGE_TRIES, "{:?}", act.shift_clicks);
+        assert!(act.ups > 0);
+        assert!(lines.iter().any(|l| l.contains("selecting once more")), "{lines:?}");
+    }
+
+    #[test]
+    fn only_an_n_selected_header_is_a_count() {
+        // "1 selected" after a range is trusted as it is (not rounded up to the two clicks)
+        let g = Header::reads(&["1 selected"]);
+        let mut act = TwoPages::default();
+        let s = drive(&mut act, &g, &range_plan(), &mut |_| {}).unwrap();
+        assert_eq!(s.selected, 1, "{s:?}");
+        assert!(s.done_pressed && act.clicks.iter().filter(|c| **c == DONE_AT).count() == 1, "{:?}", act.clicks);
+        // a counter missed once is read again before anything is retried
+        let g = Header::reads(&["", "37 selected"]);
+        let mut act = TwoPages::default();
+        let s = drive(&mut act, &g, &range_plan(), &mut |_| {}).unwrap();
+        assert_eq!((s.selected, act.shift_clicks.len()), (37, 1), "{s:?}");
+        // nothing on the first gesture, a count on the second: the retry took
+        let g = Header::reads(&["", "", "5 selected"]);
+        let mut act = TwoPages::default();
+        let s = drive(&mut act, &g, &range_plan(), &mut |_| {}).unwrap();
+        assert_eq!(s.selected, 5, "{s:?}");
+        assert!(s.done_pressed && act.ups > 0 && act.shift_clicks.len() == 2, "{:?}", act.shift_clicks);
     }
 
     #[test]
