@@ -69,6 +69,11 @@ pub struct Options {
     /// A music file to play under the show instead of a generated bed: fitted to the show's
     /// length, levelled and ducked like the bed, and the cuts land on its beats.
     pub music: Option<String>,
+    /// Warp Stabilizer on every shot (handheld footage; the analysis decodes each shot once).
+    pub stabilize: bool,
+    /// Match the colour of an entry's other shots to its first full-frame shot
+    /// (`lumetri.applyMatch`): clips of one robot filmed with different cameras or light.
+    pub match_color: bool,
 }
 
 impl Default for Options {
@@ -86,6 +91,8 @@ impl Default for Options {
             min_coverage: 0.3,
             export: None,
             music: None,
+            stabilize: false,
+            match_color: false,
         }
     }
 }
@@ -638,6 +645,10 @@ async fn media_size(ex: &dyn Executor, item: u64) -> Option<(f64, f64)> {
 struct Tracks {
     /// Frames per second of the sequence: every placement is frame-exact.
     fps: f64,
+    /// Width over height of the frame.
+    aspect: f64,
+    /// Warp Stabilizer on the shots ([`Options::stabilize`]).
+    stabilize: bool,
     bg: String,
     fg: String,
     /// Main titles and lower thirds.
@@ -733,10 +744,37 @@ struct Placed {
     end: f64,
 }
 
+/// How much larger a shot's picture grows a second in its push-in, and at most.
+const PUSH_PER_SECOND: f64 = 0.015;
+const PUSH_MAX: f64 = 0.06;
+
+/// A slow push-in over the shot `clip` from `t0` to `t1` (seconds, on frames): its scale from
+/// `scale` (as fitted) to [`PUSH_PER_SECOND`] larger a second, at most [`PUSH_MAX`], eased out
+/// of the first keyframe and into the last — keyframes on its Motion, which live in the media's
+/// time, so a shot slowed afterwards keeps the whole move.
+async fn push_in(ex: &dyn Executor, clip: u64, scale: f64, t0: f64, t1: f64, fps: f64) -> Result<(), AutoCutError> {
+    // the last keyframe on the last frame, where the move ends
+    let last = on_frame(t1 - 1.0 / fps, fps);
+    if !(scale.is_finite() && scale > 0.0) || last <= t0 {
+        return Ok(());
+    }
+    let grow = (PUSH_PER_SECOND * (t1 - t0)).min(PUSH_MAX);
+    for (at, value) in [(t0, scale), (last, scale * (1.0 + grow))] {
+        run(ex, "effects.setParam", json!({"clip": clip, "effect": "motion", "param": "scale", "value": value, "time": ticks(at), "keyframe": true})).await?;
+    }
+    for (at, ease) in [(t0, "easeOut"), (last, "easeIn")] {
+        run(ex, "effects.setInterpolation", json!({"clip": clip, "effect": "motion", "param": "scale", "time": ticks(at), "interpolation": ease})).await?;
+    }
+    Ok(())
+}
+
 /// Place `item`'s `[src, src + dur)` at `t` (both ends on frames): foreground fitted on V2 (with
-/// its sound on A1, which [`mix_down`] levels), and for a clip whose shape is not the frame's, a
-/// blurred, dimmed copy filling V1 behind it.
-async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64, dur: f64, frame_aspect: f64) -> Result<Placed, AutoCutError> {
+/// its sound on A1, which [`mix_down`] levels) with a slow push-in ([`push_in`]) and — when the
+/// show is stabilized ([`Options::stabilize`]) and `stabilize` — Warp Stabilizer; for a clip
+/// whose shape is not the frame's, a blurred, dimmed copy filling V1 behind it, which stays
+/// still.
+async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64, dur: f64, stabilize: bool) -> Result<Placed, AutoCutError> {
+    let frame_aspect = tr.aspect;
     let t = on_frame(t, tr.fps);
     let end = on_frame(t + dur, tr.fps).max(t + 1.0 / tr.fps);
     let dur = end - t;
@@ -749,7 +787,15 @@ async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64,
     let ids: Vec<u64> = r["clips"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
     let fg = *ids.first().ok_or_else(|| AutoCutError::Executor("timeline.place placed nothing".into()))?;
     let audio = ids.get(1).copied();
-    run(ex, "clip.fitToFrame", json!({"clips": [fg]})).await?;
+    let fit = run(ex, "clip.fitToFrame", json!({"clips": [fg]})).await?;
+    let scale = fit["clips"].as_array().and_then(|a| a.iter().find(|c| c["clip"].as_u64() == Some(fg))).and_then(|c| c["scale"].as_f64());
+    if let Some(scale) = scale {
+        // cosmetic, like the transitions: a shot without its push-in is still right
+        push_in(ex, fg, scale, t, end, tr.fps).await.ok();
+    }
+    if stabilize && tr.stabilize {
+        run(ex, "effects.apply", json!({"clips": [fg], "effect": "warp_stabilizer"})).await?;
+    }
     let aspect = media_size(ex, item).await.map(|(w, h)| w / h.max(1.0)).unwrap_or(frame_aspect);
     let mut bg = None;
     if (aspect - frame_aspect).abs() > 0.05 {
@@ -772,6 +818,62 @@ async fn fade_in(ex: &dyn Executor, audio: Option<u64>) {
     if let Some(a) = audio {
         run(ex, "sequence.applyAudioTransition", json!({"clip": a, "edge": "in", "effect": "constant_power", "frames": AUDIO_FADE_FRAMES})).await.ok();
     }
+}
+
+/// Match the colour of an entry's shots to its first full-frame shot (`lumetri.applyMatch`, the
+/// middle of that shot as the reference frame), so the clips of one robot — often from other
+/// cameras, days or light — look like one scene. Shots from the reference's own clip are left
+/// alone, and so is an entry without a full-frame shot (a portrait reference frame would hold
+/// the blurred copy behind it). `full[i]`: shot `i` fills the frame. Failures are noted.
+async fn match_colour(ex: &dyn Executor, shots: &[PlacedShot], full: &[bool], notes: &mut Vec<String>) {
+    let Some(r) = shots.iter().zip(full).find(|(_, f)| **f).map(|(s, _)| s) else { return };
+    let reference = (r.start + r.end) / 2.0;
+    for s in shots.iter().filter(|s| s.item != r.item) {
+        // the frame of the shot that is matched: its middle (the playhead's, pinned to the clip)
+        let mid = (s.start + s.end) / 2.0;
+        let matched = match run(ex, "playhead.set", json!({"time": ticks(mid)})).await {
+            Ok(_) => run(ex, "lumetri.applyMatch", json!({"clip": s.clip, "referenceTime": ticks(reference), "faceDetection": false})).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = matched {
+            notes.push(format!("colour match at {mid:.2}s: {e}"));
+        }
+    }
+}
+
+/// How long a lower third takes to slide and fade in (and out), seconds, and how far it slides
+/// (a share of the frame's width).
+const SLIDE: f64 = 0.4;
+const FADE: f64 = 0.25;
+const SLIDE_BY: f64 = 0.03;
+
+/// Animate the graphic clip `clip` (on screen from `t0` to `t1`, on frames) as a lower third:
+/// in from the left while fading in, decelerating into place; out the same way, accelerating —
+/// keyframes on its Motion position (the frame's centre, `w`×`h`) and its Opacity.
+async fn slide_in_out(ex: &dyn Executor, clip: u64, t0: f64, t1: f64, (w, h): (f64, f64), fps: f64) -> Result<(), AutoCutError> {
+    let last = on_frame(t1 - 1.0 / fps, fps);
+    if last - t0 < 2.0 * SLIDE {
+        return Ok(());
+    }
+    let (home, away) = ([w / 2.0, h / 2.0], [w / 2.0 - w * SLIDE_BY, h / 2.0]);
+    let (shown, gone) = (on_frame(t0 + SLIDE, fps), on_frame(last - SLIDE, fps));
+    let keys = [
+        ("motion", "position", t0, json!(away), "linear"),
+        ("motion", "position", shown, json!(home), "easeIn"),
+        ("motion", "position", gone, json!(home), "easeOut"),
+        ("motion", "position", last, json!(away), "linear"),
+        ("opacity", "opacity", t0, json!(0.0), "linear"),
+        ("opacity", "opacity", on_frame(t0 + FADE, fps), json!(100.0), "linear"),
+        ("opacity", "opacity", on_frame(last - FADE, fps), json!(100.0), "linear"),
+        ("opacity", "opacity", last, json!(0.0), "linear"),
+    ];
+    for (effect, param, at, value, _) in &keys {
+        run(ex, "effects.setParam", json!({"clip": clip, "effect": effect, "param": param, "value": value, "time": ticks(*at), "keyframe": true})).await?;
+    }
+    for (effect, param, at, _, ease) in keys.iter().filter(|k| k.4 != "linear") {
+        run(ex, "effects.setInterpolation", json!({"clip": clip, "effect": effect, "param": param, "time": ticks(*at), "interpolation": ease})).await?;
+    }
+    Ok(())
 }
 
 /// A text title clip on video track `track` (an index), from `t` for `dur` seconds, both ends on
@@ -1265,8 +1367,11 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let r =
         run(ex, "file.newSequence", json!({"name": opts.title, "width": opts.width, "height": opts.height, "fps": opts.fps, "video": 5, "audio": 5})).await?;
     built.sequence = r["sequence"].as_u64();
+    let (w, h) = (f64::from(opts.width), f64::from(opts.height));
     let tr = Tracks {
         fps: opts.fps.clamp(1.0, 240.0),
+        aspect: w / h.max(1.0),
+        stabilize: opts.stabilize,
         bg: "V1".into(),
         fg: "V2".into(),
         titles_index: 2,
@@ -1278,8 +1383,6 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         sfx: "A4".into(),
         hits: "A5".into(),
     };
-    let (w, h) = (f64::from(opts.width), f64::from(opts.height));
-    let frame_aspect = w / h.max(1.0);
     let voice = opts.voice.as_deref();
     let mut narrations = Narrations::default();
     let mut mix = Mix::default();
@@ -1327,7 +1430,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let next_cut = beats.as_ref().and_then(|b| b.nearest(at + cut, at + cut * 0.5, at + cut * 1.5)).unwrap_or(at + cut);
         let len = if i + 1 >= picks.len() { intro_len - at } else { (next_cut - at).min(intro_len - at) };
         let len = len.min((s.clip_seconds - 0.4).max(0.5));
-        let shot = place_shot(ex, &tr, s.item, at, s.window_start(len), len, frame_aspect).await?;
+        let shot = place_shot(ex, &tr, s.item, at, s.window_start(len), len, true).await?;
         fade_in(ex, shot.audio).await;
         mix.sounds.extend(shot.audio);
         at = shot.end;
@@ -1392,6 +1495,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let mut at = t;
         let mut firsts = None;
         let mut shots = Vec::new();
+        let mut full_frame = Vec::new();
         let n_wins = wins.len();
         for (i, Window { shot: s, start: src, len, reach }) in wins.iter().enumerate() {
             // the last shot ends on the beat's own frame, whatever rounding came before
@@ -1399,7 +1503,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 Some(end) if i + 1 == n_wins && slow >= 0.999 => (end - at).max(0.5).min(reach.max(0.5)),
                 _ => *len,
             };
-            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, len, frame_aspect).await?;
+            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, len, true).await?;
             mix.sounds.extend(audio);
             let mut shot_end = end;
             if slow < 0.999 {
@@ -1421,8 +1525,13 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "in", "effect": "cross_dissolve", "frames": 8})).await.ok();
             }
             shots.push(PlacedShot { clip: fg, item: s.item, start: on_frame(at, tr.fps), end: shot_end });
+            full_frame.push(bg.is_none());
             // a slowed shot can end between frames: the next starts on the following frame
             at = (shot_end * tr.fps - 1e-6).ceil() / tr.fps;
+        }
+        // (before this entry's titles and transitions are on the reference frame)
+        if opts.match_color {
+            match_colour(ex, &shots, &full_frame, &mut built.notes).await;
         }
         let entry_end = on_frame(at.max(t + 2.0), tr.fps);
         built.layout.push(PlacedEntry { number: e.number, label: e.label.clone(), start: t, end: entry_end, shots });
@@ -1454,18 +1563,21 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let when = month_year(e.unix);
         let name = display_label(&e.label);
         let lower = if when.is_empty() { name } else { format!("{name}\n{when}") };
-        title(
+        let shown_for = (entry_end - t - lead - 0.3).clamp(1.5, 4.5);
+        let third = title(
             ex,
             tr.titles_index,
             tr.fps,
             &lower,
             t + lead,
-            (entry_end - t - lead - 0.3).clamp(1.5, 4.5),
+            shown_for,
             46.0,
             (w * 0.05, h * 0.82),
             json!({"font_style": "Bold", "align": "left", "background": true, "background_opacity": 55, "background_size": 18, "shadow": false}),
         )
         .await?;
+        // it slides and fades in and out (cosmetic: still right without)
+        slide_in_out(ex, third, on_frame(t + lead, tr.fps), on_frame(t + lead + shown_for, tr.fps), (w, h), tr.fps).await.ok();
         counter_times.push(t + lead);
         progress(&format!("[{}/{}] {} — {} ({:.1}s)", e.number, entries.len(), when, e.label, entry_end - t));
         t = entry_end;
@@ -1478,7 +1590,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let outro_len = (outro_voice_at - t + outro_spoken + 1.5).max(5.0);
     if let Some(h0) = entries.last().and_then(|e| e.shots.first()) {
         let len = outro_len.min((h0.clip_seconds - 0.4).max(1.0));
-        let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, frame_aspect).await?;
+        let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, false).await?;
         mix.sounds.extend(audio);
         fade_in(ex, audio).await;
         if let Some(a) = audio {

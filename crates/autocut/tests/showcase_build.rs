@@ -208,6 +208,113 @@ async fn a_music_file_is_fitted_to_the_show_and_cut_on_its_beat() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The keyframe count of `param` of `effect` on a clip of `sequence.inspect`.
+fn keyframes(clip: &serde_json::Value, effect: &str, param: &str) -> u64 {
+    clip["effects"].as_array().and_then(|es| es.iter().find(|e| e["effect"] == effect)).and_then(|e| e["params"][param]["keyframes"].as_u64()).unwrap_or(0)
+}
+
+fn has_effect(clip: &serde_json::Value, effect: &str) -> bool {
+    clip["effects"].as_array().is_some_and(|es| es.iter().any(|e| e["effect"] == effect))
+}
+
+/// Mean luma (0..1) of the bottom-left quarter of a PNG frame, where the lower third sits.
+fn lower_left_luma(png: &[u8]) -> f64 {
+    let img = image::load_from_memory(png).unwrap().to_rgb8();
+    let (w, h) = img.dimensions();
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for y in h * 3 / 4..h {
+        for x in 0..w / 3 {
+            let p = img.get_pixel(x, y);
+            sum += (0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64) / 255.0;
+            n += 1.0;
+        }
+    }
+    sum / n
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shots_push_in_and_lower_thirds_slide_in_and_out() {
+    let ex = demo();
+    let opts = Options { title: "Robots".into(), width: 640, height: 360, ..Options::default() };
+    let built = showcase::build(&ex, &opts, &three(), &short_script(), &mut |_| {}).await.expect("the showcase builds");
+    assert!(built.notes.is_empty(), "{:?}", built.notes);
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let tps = 254_016_000_000i64;
+    let frame = tps / 30;
+    // every shot pushes in: two scale keyframes, eased, at its first and last frames
+    let v2 = seq["video"][1]["items"].as_array().cloned().unwrap();
+    assert!(v2.len() >= 6, "{}", v2.len());
+    for c in &v2 {
+        assert_eq!(keyframes(c, "motion", "scale"), 2, "{c}");
+        let (start, end) = (c["start"].as_i64().unwrap(), c["end"].as_i64().unwrap());
+        for (t, ease) in [(start, "easeOut"), (end - frame, "easeIn")] {
+            let r = ex
+                .execute("effects.setInterpolation", json!({"clip": c["clip"], "effect": "motion", "param": "scale", "time": t, "interpolation": ease}))
+                .await;
+            assert!(r.is_ok(), "a keyframe at {t} on clip {}: {r:?}", c["clip"]);
+        }
+        assert!(!has_effect(c, "warp_stabilizer"), "not stabilized unless asked");
+    }
+    // the blurred copies behind portrait shots stay still
+    for c in seq["video"][0]["items"].as_array().cloned().unwrap_or_default() {
+        assert_eq!(keyframes(&c, "motion", "scale"), 0, "{c}");
+    }
+    // each entry's lower third slides and fades in and out
+    let thirds: Vec<serde_json::Value> =
+        seq["video"][2]["items"].as_array().cloned().unwrap().into_iter().filter(|c| keyframes(c, "motion", "position") == 4).collect();
+    assert_eq!(thirds.len(), 3, "{:?}", seq["video"][2]);
+    assert!(thirds.iter().all(|c| keyframes(c, "opacity", "opacity") == 4));
+    // …so it is not there on its first and last frames, coming and going in between, and
+    // fully there a second in
+    let secs = |c: &serde_json::Value, k: &str| c[k].as_i64().unwrap() as f64 / tps as f64;
+    let (start, end) = (secs(&thirds[1], "start"), secs(&thirds[1], "end"));
+    let at = async |t: f64| lower_left_luma(&ex.render(t, 640).await.unwrap());
+    let (bare, first, second, shown) = (at(start - 0.2).await, at(start).await, at(start + 1.0 / 30.0).await, at(start + 1.0).await);
+    let (last, after) = (at(end - 1.0 / 30.0).await, at(end).await);
+    println!("lower third: before {bare:.3}, frames 0 {first:.3}, 1 {second:.3}, 30 {shown:.3}, last {last:.3}, after {after:.3}");
+    assert!(shown - bare > 0.1, "it shows: {bare} → {shown}");
+    assert!((first - bare).abs() < 0.01 && (last - after).abs() < 0.01, "not there on its first ({first} vs {bare}) and last ({last} vs {after}) frames");
+    assert!(second > first + 0.01 && second < shown - 0.05, "fading in: {first} {second} {shown}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stabilize_and_colour_match_when_asked() {
+    let ex = demo();
+    // one robot filmed twice the same day (one entry, two clips), then another
+    let day = 1_600_000_000;
+    let facts = vec![
+        fact(5, "Pepper humanoid robot", day, 18.0),
+        fact(6, "Pepper humanoid robot", day + 3600, 16.0),
+        fact(7, "red toy robot", day + 86_400 * 40, 14.0),
+    ];
+    let entries = showcase::group(&facts, "robot", 0.3);
+    assert_eq!(entries.iter().map(|e| e.shots.len()).collect::<Vec<_>>(), vec![2, 1]);
+    let script = Script {
+        lines: vec!["This is Pepper, filmed twice at the same little shop on the very same afternoon, waving at everyone.".into(), "And a toy.".into()],
+        ..short_script()
+    };
+    let opts =
+        Options { title: "Robots".into(), voice: Some("basic-male".into()), width: 640, height: 360, stabilize: true, match_color: true, ..Options::default() };
+    let built = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
+    assert!(built.notes.is_empty(), "{:?}", built.notes);
+    assert_eq!(built.layout[0].shots.iter().map(|s| s.item).collect::<Vec<_>>(), vec![5, 6], "{:?}", built.layout);
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let v2 = seq["video"][1]["items"].as_array().cloned().unwrap();
+    let outro = v2.last().unwrap();
+    assert!(has_effect(outro, "gaussian_blur") && !has_effect(outro, "warp_stabilizer"), "the blurred outro is not stabilized");
+    assert!(v2[..v2.len() - 1].iter().all(|c| has_effect(c, "warp_stabilizer")), "every other shot is");
+    // the first entry's second clip is matched to its first; nothing else is
+    let e1 = &built.layout[0];
+    let matched: Vec<u64> = v2.iter().filter(|c| has_effect(c, "lumetri")).filter_map(|c| c["clip"].as_u64()).collect();
+    let second = e1.shots.iter().find(|s| s.item == 6).map(|s| s.clip);
+    assert_eq!(matched.len(), 1, "{matched:?}");
+    assert_eq!(Some(matched[0]), second);
+    // a stabilized shot renders (its motion analysed on first use)
+    let mid = (e1.shots[0].start + e1.shots[0].end) / 2.0;
+    assert!(ex.render(mid, 320).await.is_some_and(|p| p.starts_with(b"\x89PNG")));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_voice_says_respellings_and_the_subtitles_show_the_text() {
     let ex = demo();

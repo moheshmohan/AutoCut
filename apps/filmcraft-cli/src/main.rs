@@ -96,15 +96,21 @@ SUBCOMMANDS
                                 --image-sequence <media> is the first numbered still of a sequence
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
          [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
-         [--script-out s.json] [--plan] [--export out.mp4 [--upload]] [--qa | --no-qa]
+         [--script-out s.json] [--plan] [--stabilize] [--match-color]
+         [--export out.mp4 [--upload]] [--qa | --no-qa]
                                 a narrated 16:9 showcase of every clip the analysis found, oldest
-                                first: title, a counter, name/date lower thirds, year cards,
+                                first: title, a counter, name/date lower thirds that slide and
+                                fade in and out, a slow push-in on every shot, year cards,
                                 dramatic transitions with whooshes, a generated music bed ducked
                                 under the voice (cloned voices too), an outro; montage cuts and
                                 entries land on the music's beat (the bed's --bpm grid, or with
                                 --music your own track: imported, its beats measured
                                 (media.beats), cut to length or remixed longer at its beats,
-                                levelled and ducked like the bed); --plan prints the
+                                levelled and ducked like the bed); --stabilize puts Warp
+                                Stabilizer on every shot (handheld footage; each shot is
+                                analysed once, about its length in decoding); --match-color
+                                matches an entry's other clips to its first full-frame one
+                                (lumetri.applyMatch); --plan prints the
                                 entries and the local model's script without building;
                                 --script-in takes a reviewed plan (entries and script, or entries
                                 alone for the model to write); a plan's script may hold
@@ -639,6 +645,8 @@ async fn cli() {
                 }
                 opts.music = Some(absolute(m));
             }
+            opts.stabilize = a.flag("--stabilize");
+            opts.match_color = a.flag("--match-color");
             // --upload: the export goes to Google Photos once built; a missing sign-in or
             // consent fails now, not after the build
             let upload = a.flag("--upload") && !a.flag("--plan");

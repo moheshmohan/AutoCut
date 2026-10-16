@@ -31,6 +31,8 @@ pub const ALLOWED_FAMILIES: &[&str] = &[
     "mixer.setInsert",
     // "make a video of every robot since 2020": the showcase job, which plans and waits for review
     "autocut.makeShowcase",
+    // shot-to-shot colour matching (the showcase's `match_color`)
+    "lumetri.applyMatch",
 ];
 
 /// Whether a command id is in an allowed family.
@@ -140,6 +142,7 @@ mod tests {
         assert!(allowed("timeline.razor"));
         assert!(allowed("essentialSound.autoMatch"));
         assert!(allowed("tts.create"));
+        assert!(allowed("lumetri.applyMatch") && !allowed("lumetri.setInputLut"));
         assert!(!allowed("app.quit"));
         assert!(!allowed("prefs.set"));
     }

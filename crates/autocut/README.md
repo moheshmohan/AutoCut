@@ -109,6 +109,21 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      name/date lower third; a dramatic transition from a rotating set (cross zoom, whip, flash,
      push, glitch, light leak, zoom blur; dip to black at a new year) with a whoosh; the year
      as a title card with an impact;
+   - **polish**: every shot pushes in slowly — Motion scale keyframes from as fitted to 1.5 %
+     larger a second (6 % at most), eased out of the first and into the last, in media time
+     so a slowed shot keeps the whole move; the blurred copy behind a portrait shot stays
+     still. Lower thirds slide in from the left (3 % of the width, 0.4 s, decelerating) while
+     fading in (0.25 s), and leave the same way (Motion position and Opacity keyframes on the
+     graphic clip). `--stabilize` (`Options::stabilize`) puts Warp Stabilizer
+     (`warp_stabilizer`: smooth motion, position/scale/rotation, crop and auto-scale) on every
+     shot but the blurred outro — the analysis has no camera-motion measure, so all footage is
+     treated as handheld; the stabilizer decodes each shot once at 480 px wide and tracks it
+     on first render (about the shot's length in decoding, cached for the export). The engine
+     has no automatic white balance or tone; its colour tool is Color Match
+     (`lumetri.applyMatch`), so `--match-color` (`Options::match_color`) matches an entry's
+     other clips to the middle of its first full-frame shot (an entry with only portrait
+     shots is left alone: their reference frame would hold the blurred copy) — one robot from
+     different cameras or light looks like one scene; entries are not matched to each other;
    - `graphics.counter` across all entries; an outro with the total over the latest robot;
    - **the music and its beat**: a generated bed (`audio.generate` at `--bpm`), or with
      `--music` (`Options::music`) the user's own track: imported, its tempo and beats measured
