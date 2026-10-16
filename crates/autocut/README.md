@@ -76,9 +76,25 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    never in the label. Capture dates come from `media.captureDate` (Google Photos picker
    sidecars, or the file's own metadata). `--relabel earlier.json` reads the text and describes
    again from the earlier report's best moments, without locating again.
-2. **`showcase`** (`showcase.rs`): clips that show the subject are grouped into entries — the
-   same robot is counted once: the same specific name within a week (an expo's other days), or
-   the same day with a generic label of the same kind; up to three shots each. The local LLM
+
+   Last, an **identity pass** (`identity.rs`) tells which clips show the same robot, since labels
+   alone miscount: one robot filmed on three days of an expo gets three different generic labels.
+   Candidate pairs — the same kind, filmed within 14 days, not already sharing a specific label —
+   are shown to the vision model as one image, the two clips' best frames side by side; it
+   describes both robots, then answers `{"same": bool, "confidence": 0..1}` (asked plainly, a 7B
+   model says yes to nearly any pair). Neighbours in time are asked first, pairs already joined
+   through others are skipped, and the number of comparisons is capped (`--compare N`, default
+   150; 0 joins by name only). Pairs it is sure of (confidence ≥ 0.7), and clips with the same
+   specific label within a week, are joined (union-find) into identities: each clip that shows
+   the subject gets `identity` (1, 2, … in time order) in the report; older reports, without it,
+   still load.
+2. **`showcase`** (`showcase.rs`): clips that show the subject are grouped into entries, each
+   robot counted once: clips with the same `identity` are one robot (across days too), and
+   different identities never merge; in reports without identities, by label as before — the
+   same specific name within a week (an expo's other days), or the same day with a generic
+   label of the same kind. An entry shows up to three shots, the clips where the robot is
+   longest in view (length × coverage), in time order, under the most specific label among its
+   clips (a name read on the robot first), dated when it was first filmed. The local LLM
    (`AUTOCUT_SCRIPT_MODEL`, falling back to `AUTOCUT_LLM_MODEL`) writes the voice-over from the
    facts, a few entries per request (template lines fill anything it does not deliver, and a
    copied item heading is dropped so it is not read out). The build runs ordinary engine

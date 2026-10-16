@@ -105,11 +105,14 @@ SUBCOMMANDS
                                 --script-in takes a reviewed plan (entries and script, or entries
                                 alone for the model to write); with --export, YouTube chapters
                                 go to <out>.chapters.txt
-  analyze '<subject>' [--items 1,2] [--frames N] [--relabel earlier.json] [--out report.json]
+  analyze '<subject>' [--items 1,2] [--frames N] [--relabel earlier.json] [--compare 150]
+         [--out report.json]
                                 which video items show <subject> (e.g. robot): a local vision model
                                 (AUTOCUT_ANALYSIS_MODEL, default qwen2.5vl:7b) locates it in sampled
-                                frames and names it; with capture dates (media.captureDate), the
-                                best moment per clip, oldest first, as JSON
+                                frames, reads the text on and around it, and names it; with capture
+                                dates (media.captureDate), the best moment per clip, oldest first,
+                                and an identity per robot (clips of the same one, compared side by
+                                side: at most --compare pairs, 0 = by name only), as JSON
   autocut '<prompt>' [--dry-run] [--frames]
                                 plan (and run) a natural-language edit with AutoCut: a local
                                 model (Ollama) classifies the prompt and deterministic planners
@@ -645,6 +648,11 @@ async fn cli() {
             });
             let frames =
                 a.opt("--frames").map(|v| v.parse::<usize>().unwrap_or_else(|_| usage(format!("analyze: --frames wants a number, not `{v}`")))).unwrap_or(6);
+            // side-by-side comparisons for telling the same robot across clips (0: by name only)
+            let compare = a
+                .opt("--compare")
+                .map(|v| v.parse::<usize>().unwrap_or_else(|_| usage(format!("analyze: --compare wants a number of pairs, not `{v}`"))))
+                .unwrap_or(filmcraft_autocut::identity::MAX_COMPARISONS);
             let cfg = filmcraft_autocut::config::Config::from_env();
             let model = filmcraft_autocut::ollama::Ollama::new(&cfg.ollama_host, &cfg.analysis_model, cfg.http_timeout);
             if !model.available().unwrap_or(false) {
@@ -667,7 +675,7 @@ async fn cli() {
                 Backend::Local(s) => {
                     let session = std::mem::take(s);
                     let ex = filmcraft_autocut::SessionExecutor::from(*session);
-                    let r = filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, earlier, &mut progress).await;
+                    let r = filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, earlier, compare, &mut progress).await;
                     if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
                         **s = inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
                     }
@@ -677,7 +685,7 @@ async fn cli() {
                     let addr = a.opt("--bridge").unwrap_or_default();
                     let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
                     let ex = filmcraft_automation::AutocutExecutor::bridge(client);
-                    filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, earlier, &mut progress).await
+                    filmcraft_autocut::analyze::run(&model, &ex, &subject, items.as_deref(), frames, earlier, compare, &mut progress).await
                 }
             };
             match result {

@@ -1,8 +1,9 @@
 //! Showcase videos: "every robot I've filmed, in order" — built from a clip analysis
 //! ([`crate::analyze`]) into a narrated 16:9 edit with an on-screen counter.
 //!
-//! 1. [`group`]: clips that show the subject, oldest first; consecutive clips from the same day
-//!    with the same (or a generic) label are one entry, shown in up to three shots.
+//! 1. [`group`]: clips that show the subject, oldest first; the clips of one robot are one
+//!    entry — the same identity from the analysis ([`crate::identity`]), or in older reports the
+//!    same (or, the same day, a generic) label — shown in up to three shots.
 //! 2. [`write_script`]: the local LLM writes the voice-over — an intro, one or two first-person
 //!    sentences per entry, an outro — with the analysis' facts only; any line it does not
 //!    deliver gets a plain template line, so the edit never depends on the model behaving.
@@ -226,7 +227,7 @@ pub fn month_year(unix: Option<i64>) -> String {
 
 /// A label that says only what kind of thing it is ("wheeled robot", "robot"), which the model
 /// gives when it cannot tell more.
-fn generic(label: &str, subject: &str) -> bool {
+pub(crate) fn generic(label: &str, subject: &str) -> bool {
     let l = label.to_lowercase();
     let words: Vec<&str> = l.split_whitespace().filter(|w| *w != subject && *w != "robot" && *w != "a" && *w != "the").collect();
     words.len() <= 1 && words.iter().all(|w| ["wheeled", "toy", "humanoid", "quadruped", "industrial", "small", "large", "arm", "other"].contains(w))
@@ -236,46 +237,91 @@ fn generic(label: &str, subject: &str) -> bool {
 const MAX_SHOTS: usize = 3;
 /// A robot with the same specific name filmed again within this many days (the next day of an
 /// expo) is the same robot: it is counted once.
-const SAME_EVENT_DAYS: i64 = 7;
+pub(crate) const SAME_EVENT_DAYS: i64 = 7;
 
-/// Clips that show the subject → entries, oldest first. A clip joins an earlier entry when it
-/// shows the same robot: the same specific name within [`SAME_EVENT_DAYS`], or, on the same day,
-/// the entry just before with a generic label of the same kind ("wheeled robot").
+/// A clip's label as an entry shows it: a bare kind (or nothing) becomes "{kind} {subject}".
+fn entry_label(f: &ClipFacts, subject: &str) -> String {
+    if f.label.trim().is_empty() || f.label.eq_ignore_ascii_case(&f.kind) { format!("{} {subject}", f.kind).trim().to_string() } else { f.label.clone() }
+}
+
+/// Whether clip `f` shows the robot of an entry (its clips `members`, oldest first; `last`: the
+/// entry just before). With identities from the analysis, the same identity is the same robot
+/// and a different one never is; without (an older report), by label against the entry's first
+/// clip: the same specific name within [`SAME_EVENT_DAYS`], or, on the same day and for the entry
+/// just before, a generic label of the same kind ("wheeled robot").
+fn same_robot(members: &[&ClipFacts], f: &ClipFacts, last: bool, subject: &str) -> bool {
+    let Some(first) = members.first() else { return false };
+    if let Some(id) = f.identity {
+        if members.iter().any(|m| m.identity == Some(id)) {
+            return true;
+        }
+        if members.iter().all(|m| m.identity.is_some()) {
+            return false;
+        }
+    }
+    let label = entry_label(first, subject);
+    let days_apart = match (first.unix, f.unix) {
+        (Some(a), Some(b)) => (b.div_euclid(86_400) - a.div_euclid(86_400)).abs(),
+        _ => i64::MAX,
+    };
+    let named = !generic(&label, subject) && label.eq_ignore_ascii_case(f.label.trim()) && days_apart <= SAME_EVENT_DAYS;
+    let generic_next = last && days_apart == 0 && generic(&label, subject) && generic(&f.label, subject) && first.kind == f.kind;
+    named || generic_next
+}
+
+/// Seconds a clip shows the subject, about: its length times the share of frames that show it.
+fn in_view(f: &ClipFacts) -> f64 {
+    // (a NaN coverage stays NaN through the clamp, and counts as nothing)
+    let v = f.coverage.clamp(0.0, 1.0) * f.seconds.max(0.0);
+    if v.is_finite() { v } else { 0.0 }
+}
+
+/// One counted robot from its clips (oldest first): the (up to) [`MAX_SHOTS`] clips that show it
+/// longest, in time order; the most specific label among them all — a name read on the robot
+/// ([`crate::analyze::FrameText::names`]), then any specific label, the earliest among equals —
+/// with that clip's kind and description; the date it was first filmed.
+fn entry(number: usize, members: &[&ClipFacts], subject: &str) -> Option<Entry> {
+    let first = members.first()?;
+    let rank = |f: &ClipFacts| {
+        if f.text.names(&f.label) {
+            2
+        } else if !generic(&entry_label(f, subject), subject) {
+            1
+        } else {
+            0
+        }
+    };
+    let named = members.iter().enumerate().max_by_key(|(i, f)| (rank(f), std::cmp::Reverse(*i))).map_or(*first, |(_, f)| *f);
+    let mut shown: Vec<(usize, &ClipFacts)> = members.iter().copied().enumerate().collect();
+    shown.sort_by(|(i, a), (j, b)| in_view(b).total_cmp(&in_view(a)).then(i.cmp(j)));
+    shown.truncate(MAX_SHOTS);
+    shown.sort_by_key(|(i, _)| *i);
+    Some(Entry {
+        number,
+        label: entry_label(named, subject),
+        kind: named.kind.clone(),
+        description: named.description.clone(),
+        unix: first.unix,
+        shots: shown.into_iter().map(|(_, f)| Shot::of(f)).collect(),
+    })
+}
+
+/// Clips that show the subject → entries, oldest first, one per robot ([`same_robot`]: by the
+/// analysis' identities, or by label in reports without them). A robot filmed more than three
+/// times shows the clips where it is longest in view.
 pub fn group(facts: &[ClipFacts], subject: &str, min_coverage: f64) -> Vec<Entry> {
     let mut clips: Vec<&ClipFacts> = facts.iter().filter(|f| f.present && f.coverage >= min_coverage).collect();
     clips.sort_by_key(|f| (f.unix.unwrap_or(i64::MAX), f.item));
-    let mut out: Vec<Entry> = Vec::new();
+    let mut robots: Vec<Vec<&ClipFacts>> = Vec::new();
     for f in clips {
-        let shot = Shot::of(f);
-        let day = f.unix.map(|t| t.div_euclid(86_400));
-        let n = out.len();
-        let same = out.iter().enumerate().rev().find(|(i, e)| {
-            let e_day = e.unix.map(|t| t.div_euclid(86_400));
-            let days_apart = match (e_day, day) {
-                (Some(a), Some(b)) => (b - a).abs(),
-                _ => i64::MAX,
-            };
-            let named = !generic(&e.label, subject) && e.label.eq_ignore_ascii_case(f.label.trim()) && days_apart <= SAME_EVENT_DAYS;
-            let generic_next = *i + 1 == n && days_apart == 0 && generic(&e.label, subject) && generic(&f.label, subject) && e.kind == f.kind;
-            named || generic_next
-        });
-        if let Some((i, _)) = same {
-            if let Some(e) = out.get_mut(i)
-                && e.shots.len() < MAX_SHOTS
-            {
-                e.shots.push(shot);
-            }
-            // a fourth clip of the same robot: it is already counted, and shown enough
-            continue;
+        let n = robots.len();
+        let same = robots.iter().enumerate().rev().find(|(i, members)| same_robot(members, f, *i + 1 == n, subject)).map(|(i, _)| i);
+        match same.and_then(|i| robots.get_mut(i)) {
+            Some(members) => members.push(f),
+            None => robots.push(vec![f]),
         }
-        let label = if f.label.trim().is_empty() || f.label.eq_ignore_ascii_case(&f.kind) {
-            format!("{} {subject}", f.kind).trim().to_string()
-        } else {
-            f.label.clone()
-        };
-        out.push(Entry { number: out.len() + 1, label, kind: f.kind.clone(), description: f.description.clone(), unix: f.unix, shots: vec![shot] });
     }
-    out
+    robots.iter().filter(|members| !members.is_empty()).enumerate().filter_map(|(k, members)| entry(k + 1, members, subject)).collect()
 }
 
 /// A label as a title shows it: its first letter capitalised ("service robot" → "Service robot").
@@ -1019,6 +1065,70 @@ mod tests {
         assert_eq!(e.iter().map(|x| x.number).collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(e[0].label, "wheeled robot");
         assert_eq!(years(&e), "2020");
+    }
+
+    /// `fact` with an identity from the analysis.
+    fn known(item: u64, label: &str, kind: &str, unix: i64, identity: u32) -> ClipFacts {
+        ClipFacts { identity: Some(identity), ..fact(item, label, kind, unix, 1.0) }
+    }
+
+    /// One expo: a red wheeled-legged robot filmed four times over three days under four labels
+    /// (its name read on day four), another wheeled robot right after it on day one, a Spot.
+    fn expo() -> Vec<ClipFacts> {
+        let day = 1_665_446_400; // 2022-10-11
+        vec![
+            known(1, "wheeled robot", "wheeled", day, 1),
+            known(2, "wheeled robot", "wheeled", day + 600, 2),
+            ClipFacts { coverage: 0.4, ..known(3, "red toy robot", "toy", day + 86_400 * 2, 1) },
+            ClipFacts {
+                text: crate::analyze::FrameText { on_subject: vec!["ARDET".into(), "Swiss-Mile".into()], nearby: vec!["ETH zürich RSL".into()] },
+                ..known(4, "Swiss-Mile ARDET robot", "wheeled", day + 86_400 * 3, 1)
+            },
+            ClipFacts { seconds: 30.0, ..known(5, "wheeled robot", "wheeled", day + 86_400 * 3 + 60, 1) },
+            known(6, "Boston Dynamics Spot", "quadruped", day + 86_400 * 3 + 120, 3),
+        ]
+    }
+
+    #[test]
+    fn identities_merge_across_days_and_keep_different_robots_apart() {
+        let e = group(&expo(), "robot", 0.3);
+        let shape: Vec<(&str, Vec<u64>)> = e.iter().map(|x| (x.label.as_str(), x.shots.iter().map(|s| s.item).collect())).collect();
+        // one robot over three days, named from what was read on it, its three clips longest in
+        // view (the short-coverage one left out) in time order; the other wheeled robot of day
+        // one, which a generic label would have merged with it, kept apart
+        assert_eq!(shape, vec![("Swiss-Mile ARDET robot", vec![1, 4, 5]), ("wheeled robot", vec![2]), ("Boston Dynamics Spot", vec![6])]);
+        assert_eq!(e.iter().map(|x| x.number).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(e[0].unix, Some(1_665_446_400), "dated when first filmed");
+        assert_eq!((e[0].kind.as_str(), e[0].description.as_str()), ("wheeled", "Swiss-Mile ARDET robot doing things"));
+        // hostile lengths and coverages from a report count as nothing in view
+        for (coverage, seconds) in [(f64::NAN, 10.0), (0.5, f64::INFINITY), (1.0, -5.0), (f64::INFINITY, f64::NAN)] {
+            assert_eq!(in_view(&ClipFacts { coverage, seconds, ..ClipFacts::default() }), 0.0, "{coverage} {seconds}");
+        }
+        assert_eq!(in_view(&ClipFacts { coverage: 7.0, seconds: 10.0, ..ClipFacts::default() }), 10.0);
+    }
+
+    #[test]
+    fn reports_without_identities_group_by_label_as_before() {
+        // an older report: no `identity` (nor `text`) in the JSON
+        let old: Vec<ClipFacts> = expo()
+            .into_iter()
+            .map(|f| {
+                let mut v = serde_json::to_value(&f).unwrap();
+                let o = v.as_object_mut().unwrap();
+                o.remove("identity");
+                o.remove("text");
+                serde_json::from_value(v).unwrap()
+            })
+            .collect();
+        assert!(old.iter().all(|f| f.identity.is_none() && f.text.is_empty()));
+        let e = group(&old, "robot", 0.3);
+        let shape: Vec<Vec<u64>> = e.iter().map(|x| x.shots.iter().map(|s| s.item).collect()).collect();
+        // day one's two generic wheeled robots are one by label; the rest stay apart
+        assert_eq!(shape, vec![vec![1, 2], vec![3], vec![4], vec![5], vec![6]]);
+        // a clip with an identity next to clips without one: by label
+        let day = 1_665_446_400;
+        let mixed = vec![fact(1, "Pepper humanoid robot", "humanoid", day, 1.0), known(2, "Pepper humanoid robot", "humanoid", day + 600, 7)];
+        assert_eq!(group(&mixed, "robot", 0.3).len(), 1);
     }
 
     #[test]

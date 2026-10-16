@@ -72,6 +72,10 @@ pub struct ClipFacts {
     /// Where it shows best (seconds into the clip).
     pub best: f64,
     pub frames: Vec<FrameFact>,
+    /// Which robot it is: clips showing the same one share it ([`crate::identity`]); `None` in
+    /// reports from before identities, and for clips that do not show the subject.
+    #[serde(default)]
+    pub identity: Option<u32>,
 }
 
 /// Text a vision model read in a clip's best frames, by where it is: what is printed on the
@@ -393,7 +397,9 @@ fn read_note(read: &FrameText) -> String {
     format!("; on it: {}", read.on_subject.iter().map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(", "))
 }
 
-/// Analyse afresh, or (with `earlier`) only read and describe again from an earlier analysis.
+/// Analyse afresh, or (with `earlier`) only read and describe again from an earlier analysis;
+/// then tell which clips show the same robot ([`crate::identity::identify`], at most `compare`
+/// model comparisons; 0 joins by name only).
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     model: &dyn ChatModel,
@@ -402,15 +408,18 @@ pub async fn run(
     items: Option<&[u64]>,
     frames_max: usize,
     earlier: Option<Vec<ClipFacts>>,
+    compare: usize,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Vec<ClipFacts>, AutoCutError> {
-    match earlier {
+    let mut facts = match earlier {
         Some(mut facts) => {
             relabel(model, ex, subject, &mut facts, progress).await?;
-            Ok(facts)
+            facts
         }
-        None => analyze(model, ex, subject, items, frames_max, progress).await,
-    }
+        None => analyze(model, ex, subject, items, frames_max, progress).await?,
+    };
+    crate::identity::identify(model, ex, subject.trim(), &mut facts, compare, progress).await;
+    Ok(facts)
 }
 
 /// Re-describe every clip that shows the subject, from its (up to three) best frames as the
@@ -612,6 +621,7 @@ async fn analyze_clip(
         text: FrameText::default(),
         best,
         frames,
+        identity: None,
     };
     if facts.present {
         // the text it carries and that is around it, then a description that can use it
@@ -971,6 +981,33 @@ mod tests {
         let none = FixedModel::new(vec![]);
         relabel(&none, &ex, "robot", &mut facts, &mut |_| {}).await.unwrap();
         assert_eq!((facts[0].label.as_str(), facts[0].text.on_subject.len()), ("Promobot reception robot", 1));
+    }
+
+    #[tokio::test]
+    async fn run_tells_which_clips_show_the_same_robot() {
+        let ex = testing::FakeEx::new(vec![]);
+        // an earlier report with nothing to describe again from: then the identity pass
+        let day = 1_665_446_400;
+        let earlier: Vec<ClipFacts> = (1..=2)
+            .map(|i| ClipFacts {
+                item: i,
+                name: format!("c{i}.mp4"),
+                seconds: 10.0,
+                unix: Some(day + i as i64 * 86_400),
+                present: true,
+                coverage: 1.0,
+                label: "wheeled robot".into(),
+                kind: "wheeled".into(),
+                best: 5.0,
+                ..ClipFacts::default()
+            })
+            .collect();
+        let model = FixedModel::new(vec![json!({"same": true, "confidence": 0.95})]);
+        let facts = run(&model, &ex, "robot", None, 2, Some(earlier.clone()), 10, &mut |_| {}).await.unwrap();
+        assert_eq!(facts.iter().map(|f| f.identity).collect::<Vec<_>>(), vec![Some(1), Some(1)]);
+        // no comparisons: each its own robot
+        let facts = run(&FixedModel::new(vec![]), &ex, "robot", None, 2, Some(earlier), 0, &mut |_| {}).await.unwrap();
+        assert_eq!(facts.iter().map(|f| f.identity).collect::<Vec<_>>(), vec![Some(1), Some(2)]);
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub mod config;
 pub mod describe;
 pub mod digest;
 pub mod highlight;
+pub mod identity;
 pub mod intent;
 pub mod llm;
 pub mod ollama;

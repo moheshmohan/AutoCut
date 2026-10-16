@@ -27,6 +27,7 @@ const VALUED: &[&str] = &[
     "--since",
     "--items",
     "--relabel",
+    "--compare",
     "--export",
     "--script-out",
     "--script-in",
