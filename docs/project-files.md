@@ -388,6 +388,11 @@ stays attached to its corresponding take.
 
 `file.import` reports this under `ingest`.
 
+`file.import {reuse: true}` (what Google Photos picks use) does not import a file the project
+already holds — at the same path, or the same content elsewhere (an ingest copy keeps its source
+fingerprint): its item comes back in `items` and in `reused`, and is not ingested or transcribed
+again. Without `reuse`, importing a file twice makes two items, as before.
+
 ## Project Manager
 
 `file.projectManager` (File ▸ Project Manager…) makes a self-contained copy of a project:

@@ -193,8 +193,9 @@ SUBCOMMANDS
               [--max-items n] [--timeout secs] [--session id] [--no-browser]
                                  open the Google Photos picker in the browser, wait (default
                                  600 s, at most 3600) for your selection, download it into the
-                                 cache and import it; --demo/--project/--bridge choose the
-                                 target. A timed-out wait prints the session id: --session
+                                 cache and import it (a file the project already holds is
+                                 reused, not imported twice); --demo/--project/--bridge choose
+                                 the target. A timed-out wait prints the session id: --session
                                  resumes it. With --auto <query>, a local vision agent
                                  (Qwen2.5-VL via Ollama) drives the picker itself: it types
                                  the query into the picker's search, selects matching videos
@@ -675,7 +676,7 @@ async fn cli() {
                             v
                         })
                         .collect();
-                    match b.exec("file.import", json!({"paths": paths})).await {
+                    match b.exec("file.import", json!({"paths": paths, "reuse": true})).await {
                         Ok(v) => {
                             outln!(
                                 "{}",
@@ -786,7 +787,7 @@ async fn cli() {
                         }
                     }
                     let mut b = Backend::open(&a);
-                    match b.exec("file.import", json!({"paths": paths})).await {
+                    match b.exec("file.import", json!({"paths": paths, "reuse": true})).await {
                         Ok(v) => {
                             outln!("{}", json!({"imported": v, "cached": ids.len()}));
                             b.finish(&a).await;

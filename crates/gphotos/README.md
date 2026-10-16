@@ -80,8 +80,9 @@ filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9876
 
 `photos pick` opens the picker in your default browser (`--no-browser` just prints the link),
 waits for you to press **Done** — 600 s by default, `--timeout` up to 3600 — then downloads
-each item and runs `file.import`. `--demo`/`--project`/`--bridge` choose where it imports, as
-for every other command. Progress goes to stderr; the result JSON (`items`, `downloaded`,
+each item and runs `file.import` with `reuse`: a file the project already holds (picked
+before) is reused, not imported twice. `--demo`/`--project`/`--bridge` choose where it imports,
+as for every other command. Progress goes to stderr; the result JSON (`items`, `downloaded`,
 `cached`, `failed`) to stdout.
 
 Over MCP (`filmcraft-cli mcp --demo` / `--bridge`): `googlephotos_pick` (same flow,

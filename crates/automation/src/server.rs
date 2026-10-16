@@ -810,7 +810,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Google Photos: pick and import",
-        description = "Open the Google Photos picker in the user's browser, wait for a selection and press Done, download the picks (cached under the app's data dir) and import them into the open project with file.import. Google offers apps no server-side search of the library (retired 2025-03-31): the choice happens in the picker. Either the user chooses (tell them what to pick), or — pass `query` — a local vision agent (Qwen2.5-VL via Ollama) drives the picker itself: it types the query into the picker's own search, selects matching video tiles and presses Done; needs `ollama pull qwen2.5vl:7b` plus Screen Recording and Accessibility for this process, and its report comes back as `autopick`. Pass `album` instead to use a whole Google Photos album as the seed (the user curates it in Google Photos): the agent opens the album with that exact title in the picker and selects all of it (`videos_only` keeps only its videos); no matching album selects nothing. Items a user adds to an album are reachable only this way (the Library API shows apps only what they uploaded). If the wait runs out the result is `status: pending` with a `session` and `pickerUri`; call again with that `session` to keep waiting (with short client tool timeouts, start with wait_seconds 0, then resume). Videos download whole, so they can take a while. One-time setup: `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
+        description = "Open the Google Photos picker in the user's browser, wait for a selection and press Done, download the picks (cached under the app's data dir) and import them into the open project with file.import (a file the project already holds is reused, not imported twice). Google offers apps no server-side search of the library (retired 2025-03-31): the choice happens in the picker. Either the user chooses (tell them what to pick), or — pass `query` — a local vision agent (Qwen2.5-VL via Ollama) drives the picker itself: it types the query into the picker's own search, selects matching video tiles and presses Done; needs `ollama pull qwen2.5vl:7b` plus Screen Recording and Accessibility for this process, and its report comes back as `autopick`. Pass `album` instead to use a whole Google Photos album as the seed (the user curates it in Google Photos): the agent opens the album with that exact title in the picker and selects all of it (`videos_only` keeps only its videos); no matching album selects nothing. Items a user adds to an album are reachable only this way (the Library API shows apps only what they uploaded). If the wait runs out the result is `status: pending` with a `session` and `pickerUri`; call again with that `session` to keep waiting (with short client tool timeouts, start with wait_seconds 0, then resume). Videos download whole, so they can take a while. One-time setup: `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
     async fn googlephotos_pick(&self, Parameters(p): Parameters<PhotosPickParams>) -> Result<CallToolResult, McpError> {
@@ -912,7 +912,7 @@ impl FilmcraftMcp {
                 v
             })
             .collect();
-        let imported = self.run("file.import", json!({"paths": paths})).await;
+        let imported = self.run("file.import", json!({"paths": paths, "reuse": true})).await;
         let ok = imported.is_ok() && picked.failed.is_empty();
         let v = json!({
             "status": "done", "items": items, "downloaded": picked.fetched.len().saturating_sub(cached), "cached": cached,
@@ -934,7 +934,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Google Photos: import downloaded items",
-        description = "Import already-downloaded Google Photos items (ids from googlephotos_pick or googlephotos_cached) into the open project with file.import. Items never picked are not reachable: Google shares only what the user picks, so use googlephotos_pick for new ones.",
+        description = "Import already-downloaded Google Photos items (ids from googlephotos_pick or googlephotos_cached) into the open project with file.import (files the project already holds are reused, not imported twice). Items never picked are not reachable: Google shares only what the user picks, so use googlephotos_pick for new ones.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn googlephotos_add(&self, Parameters(p): Parameters<PhotosAddParams>) -> Result<CallToolResult, McpError> {
@@ -963,7 +963,7 @@ impl FilmcraftMcp {
         if !missing.is_empty() {
             return Ok(fail(json!({"error": "not downloaded yet; pick these with googlephotos_pick", "missing": missing})));
         }
-        wrap(self.run("file.import", json!({"paths": paths})).await.map(|imported| json!({"imported": imported, "paths": paths})))
+        wrap(self.run("file.import", json!({"paths": paths, "reuse": true})).await.map(|imported| json!({"imported": imported, "paths": paths})))
     }
 
     #[tool(

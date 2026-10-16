@@ -36,7 +36,7 @@ pub struct CommandSpec {
 }
 
 macro_rules! cmd {
-    ($id:literal, $label:literal, [$($m:literal),*], $sc:expr, $params:literal, $en:expr, $run:expr) => {
+    ($id:literal, $label:literal, [$($m:literal),*], $sc:expr, $params:expr, $en:expr, $run:expr) => {
         CommandSpec { id: $id, label: $label, menu: &[$($m),*], shortcut: $sc, params: $params, enabled: $en, run: $run, journal: true }
     };
 }
@@ -680,6 +680,27 @@ pub fn import_image_sequence(s: &mut Session, path: &str, bin: Option<filmcraft_
 /// Settings ▸ Media ▸ Import image sequences: a single numbered still with later frames beside it.
 fn detect_image_sequence(s: &Session, path: &str) -> bool {
     filmcraft_media::sequence::Numbered::parse(path).is_some() && crate::media_pool::image_sequence_frames(path, &*s.services).is_ok_and(|f| f.len() > 1)
+}
+
+/// `file.import`'s parameters (`reuse`: see [`already_imported`]).
+const IMPORT_PARAMS: &str = r#"{"paths":[str],"bin":binId?,"imageSequence":bool?,"replace":bool?,"reuse":bool?}"#;
+
+/// The media item that already holds the file at `path` (`file.import` with `reuse`): one whose
+/// file is `path`, else one whose content identity (size and fingerprint) is that file's — the
+/// same media copied elsewhere, as ingest copies it. `None` when the project has neither (or
+/// the file cannot be read: the import then says why).
+fn already_imported(s: &Session, path: &str) -> Option<ItemId> {
+    let files = || {
+        s.project.items.values().filter_map(|i| match &i.kind {
+            ItemKind::Media(MediaClip { media: MediaRef::File { path }, identity, .. }) => Some((i.id, path.as_str(), *identity)),
+            _ => None,
+        })
+    };
+    if let Some((id, _, _)) = files().find(|(_, p, _)| *p == path || std::path::Path::new(p) == std::path::Path::new(path)) {
+        return Some(id);
+    }
+    let identity = crate::relink::identity_of(&*s.services, path).ok()?;
+    files().find(|(_, _, known)| *known == Some(identity)).map(|(id, _, _)| id)
 }
 
 fn import_source(
@@ -1328,8 +1349,11 @@ fn build() -> Vec<CommandSpec> {
                 Ok(json!({"items": ids.iter().map(|i| i.0).collect::<Vec<_>>()}))
             }
         ),
-        cmd!("file.import", "Import…", ["File"], Some("Cmd+I"), r#"{"paths":[str],"bin":binId?,"imageSequence":bool?,"replace":bool?}"#, always, |s, p| {
+        cmd!("file.import", "Import…", ["File"], Some("Cmd+I"), IMPORT_PARAMS, always, |s, p| {
             let bin = u64_p(p, "bin").map(filmcraft_project::BinId);
+            // `reuse`: a file the project already holds is not imported again; its item is
+            // returned in `items` (and listed in `reused`), as picks from Google Photos want
+            let reuse = bool_p(p, "reuse").unwrap_or(false);
             let paths: Vec<String> = match p.get("paths").and_then(Value::as_array) {
                 Some(a) => a.iter().filter_map(|v| v.as_str().map(crate::export_tools::expand_home)).collect(),
                 None => str_p(p, "path").map(|x| vec![crate::export_tools::expand_home(x)]).unwrap_or_default(),
@@ -1350,7 +1374,19 @@ fn build() -> Vec<CommandSpec> {
             // Settings ▸ Media ▸ Import image sequences on, a single numbered still is detected.
             let as_sequence = p.get("imageSequence").and_then(Value::as_bool).unwrap_or(false);
             let detect = !as_sequence && s.prefs.media.import_image_sequences && paths.len() == 1;
+            let mut reused: Vec<u64> = Vec::new();
             for path in paths {
+                if reuse
+                    && !as_sequence
+                    && let Some(id) = already_imported(s, &path)
+                {
+                    // (a path given twice in one call is one item)
+                    if !ids.contains(&id.0) {
+                        ids.push(id.0);
+                        reused.push(id.0);
+                    }
+                    continue;
+                }
                 if as_sequence || (detect && detect_image_sequence(s, &path)) {
                     match import_image_sequence(s, &path, bin) {
                         Ok((id, frames, missing)) => {
@@ -1398,11 +1434,13 @@ fn build() -> Vec<CommandSpec> {
             }
             // Project Settings ▸ Ingest: copy / transcode / create proxies
             // (image sequences are many files: ingest copies and transcodes single files only)
-            let item_ids: Vec<ItemId> = ids.iter().filter(|i| !image_sequences.iter().any(|q| q["item"].as_u64() == Some(**i))).map(|i| ItemId(*i)).collect();
+            // (items reused rather than imported were ingested and transcribed when they came in)
+            let fresh: Vec<u64> = ids.iter().copied().filter(|i| !reused.contains(i)).collect();
+            let item_ids: Vec<ItemId> = fresh.iter().filter(|i| !image_sequences.iter().any(|q| q["item"].as_u64() == Some(**i))).map(|i| ItemId(*i)).collect();
             // Settings ▸ Media Analysis & Transcription ▸ Automatically transcribe clips
             let ma = &s.prefs.media_analysis;
-            if ma.auto_transcribe && ma.auto_transcribe_scope == "allImported" && !ids.is_empty() {
-                let audio: Vec<u64> = ids.iter().copied().filter(|i| s.project.item(ItemId(*i)).is_some_and(|it| it.has_audio())).collect();
+            if ma.auto_transcribe && ma.auto_transcribe_scope == "allImported" && !fresh.is_empty() {
+                let audio: Vec<u64> = fresh.iter().copied().filter(|i| s.project.item(ItemId(*i)).is_some_and(|it| it.has_audio())).collect();
                 if !audio.is_empty() {
                     // without speech-to-text the setting can't act: say so instead of importing
                     // silently untranscribed (#89)
@@ -1430,6 +1468,9 @@ fn build() -> Vec<CommandSpec> {
             };
             if !image_sequences.is_empty() {
                 out["imageSequences"] = json!(image_sequences);
+            }
+            if reuse {
+                out["reused"] = json!(reused);
             }
             // Newly imported files may resolve paths the project already listed as offline
             // (issue #110): rebuild s.offline.missing so the "Media missing" badge clears, and drop

@@ -367,3 +367,45 @@ fn deleting_bin_preserves_intermediate_subclip_needed_by_surviving_clip() {
     assert_eq!(s.project.root.parent_of(parent), Some(bin));
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// `file.import` with `reuse` (what Google Photos picks ask for): a file the project already
+/// holds is not imported again — by its path, or by its content when it was copied elsewhere
+/// (ingest copies) — and its item comes back in `items` and `reused`; without `reuse` a second
+/// import is a second item, as before.
+#[test]
+fn import_with_reuse_does_not_duplicate_media() {
+    let root = tmp_dir("import-reuse");
+    let (a, b) = (root.join("a.mov"), root.join("b.mov"));
+    make_movie(&a, DemoScene::Aurora, W, H, 6);
+    make_movie(&b, DemoScene::CityNight, W, H, 6);
+    let (a_s, b_s) = (a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned());
+    let mut s = Session::default();
+    let media = |s: &Session| s.project.items.values().filter(|i| i.as_media().is_some()).count();
+    let first = s.execute("file.import", json!({"paths": [a_s], "reuse": true})).unwrap();
+    assert_eq!(first["reused"], json!([]), "{first}");
+    let a_id = first["items"][0].as_u64().unwrap();
+    let undo = s.history.undo.len();
+    // a again, and b twice: a's item comes back, b is imported once
+    let r = s.execute("file.import", json!({"paths": [a_s, b_s, b_s], "reuse": true})).unwrap();
+    let items: Vec<u64> = r["items"].as_array().unwrap().iter().filter_map(|i| i.as_u64()).collect();
+    assert_eq!((items.len(), items[0]), (2, a_id), "{r}");
+    assert_eq!(r["reused"], json!([a_id]), "{r}");
+    assert_eq!(media(&s), 2);
+    assert_eq!(s.history.undo.len(), undo + 1, "only b's import is an edit");
+    // a copy of a.mov elsewhere is the same media
+    let copies = root.join("copies");
+    std::fs::create_dir_all(&copies).unwrap();
+    let copy = copies.join("a-copy.mov");
+    std::fs::copy(&a, &copy).unwrap();
+    let r = s.execute("file.import", json!({"paths": [copy.to_string_lossy()], "reuse": true})).unwrap();
+    assert_eq!((r["items"].clone(), r["reused"].clone()), (json!([a_id]), json!([a_id])), "{r}");
+    assert_eq!(media(&s), 2);
+    // without `reuse`, a second item as before
+    let r = s.execute("file.import", json!({"paths": [a_s]})).unwrap();
+    assert!(r.get("reused").is_none(), "{r}");
+    assert_ne!(r["items"][0].as_u64(), Some(a_id));
+    assert_eq!(media(&s), 3);
+    // a file that is not there is still an error
+    assert!(s.execute("file.import", json!({"paths": [root.join("missing.mov").to_string_lossy()], "reuse": true})).is_err());
+    let _ = std::fs::remove_dir_all(&root);
+}
