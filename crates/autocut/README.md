@@ -125,6 +125,16 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      shots is left alone: their reference frame would hold the blurred copy) — one robot from
      different cameras or light looks like one scene; entries are not matched to each other;
    - `graphics.counter` across all entries; an outro with the total over the latest robot;
+   - **a target length** (`--target-minutes`, `Options::target_minutes`): the time left after
+     the intro, the entries placed so far and the outro (estimated from its words) is shared
+     out over the entries still to come — one breathing time after each entry's words, found
+     by bisection, each entry held between what its words need (lead, words, 0.8 s; at least
+     3 s) and how long its robot is in view in its shots (`Shot::spans`, at most 45 s); the
+     current entry's words are measured, the later ones' estimated from their word count. A
+     longer entry shows more and longer shots (time a shot cannot fill with its robot in view
+     goes to the next shot), a shorter one fewer. Nothing is ever padded with footage where the
+     robot is out of view or with held frames, so a target beyond the footage comes out
+     shorter: `seconds` in the output is what it came to, next to `target_seconds`;
    - **the music and its beat**: a generated bed (`audio.generate` at `--bpm`), or with
      `--music` (`Options::music`) the user's own track: imported, its tempo and beats measured
      by the engine (`media.beats`, the beat tracker of `filmcraft_audio_dsp::remix`), then

@@ -96,7 +96,7 @@ SUBCOMMANDS
                                 --image-sequence <media> is the first numbered still of a sequence
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
          [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
-         [--script-out s.json] [--plan] [--stabilize] [--match-color]
+         [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
          [--export out.mp4 [--upload]] [--qa | --no-qa]
                                 a narrated 16:9 showcase of every clip the analysis found, oldest
                                 first: title, a counter, name/date lower thirds that slide and
@@ -110,7 +110,12 @@ SUBCOMMANDS
                                 Stabilizer on every shot (handheld footage; each shot is
                                 analysed once, about its length in decoding); --match-color
                                 matches an entry's other clips to its first full-frame one
-                                (lumetri.applyMatch); --plan prints the
+                                (lumetri.applyMatch); --target-minutes aims for that length:
+                                each entry breathes longer after its words (more and longer
+                                shots, only while its robot is in view) or shorter, never padded
+                                with out-of-view footage or held frames (the length it came to
+                                is `seconds` in the output, next to `target_seconds`); --plan
+                                prints the
                                 entries and the local model's script without building;
                                 --script-in takes a reviewed plan (entries and script, or entries
                                 alone for the model to write); a plan's script may hold
@@ -651,6 +656,12 @@ async fn cli() {
             }
             opts.stabilize = a.flag("--stabilize");
             opts.match_color = a.flag("--match-color");
+            if let Some(m) = a.opt("--target-minutes") {
+                match m.parse::<f64>() {
+                    Ok(v) if v.is_finite() && v > 0.0 && v <= 24.0 * 60.0 => opts.target_minutes = Some(v),
+                    _ => usage(format!("showcase: --target-minutes wants a length in minutes (e.g. 10), not `{m}`")),
+                }
+            }
             // --upload: the export goes to Google Photos once built; a missing sign-in or
             // consent fails now, not after the build
             let upload = a.flag("--upload") && !a.flag("--plan");

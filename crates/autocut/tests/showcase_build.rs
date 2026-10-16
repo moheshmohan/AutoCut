@@ -2,6 +2,7 @@
 //! exist, accept its parameters and leave a playable sequence.
 
 use filmcraft_autocut::analyze::{ClipFacts, FrameFact};
+use filmcraft_autocut::qa;
 use filmcraft_autocut::showcase::{self, Options, Script};
 use filmcraft_autocut::{Executor as _, SessionExecutor};
 use filmcraft_engine::Session;
@@ -333,6 +334,67 @@ async fn a_thumbnail_is_composed_and_exported_through_the_engine() {
     let project = ex.execute("project.inspect", json!({})).await.unwrap();
     assert!(project.to_string().contains("Every Robot I've Met — Thumbnail"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_target_length_stretches_or_tightens_the_entries_within_the_robots_in_view() {
+    // three robots, each in view only between 4 s and 13.5 s of its 18 s clip
+    let partly = |item: u64, label: &str, unix: i64| ClipFacts {
+        frames: [(2.0, false), (6.0, true), (9.0, true), (12.0, true), (15.0, false)]
+            .iter()
+            .map(|(s, present)| FrameFact { seconds: *s, present: *present, area: 0.4, center: [0.5, 0.5] })
+            .collect(),
+        best: 9.0,
+        ..fact(item, label, unix, 18.0)
+    };
+    let facts =
+        vec![partly(5, "Pepper humanoid robot", 1_600_000_000), partly(6, "Boston Dynamics Spot", 1_665_741_668), partly(7, "red toy robot", 1_665_841_668)];
+    let entries = showcase::group(&facts, "robot", 0.3);
+    let script = Script {
+        intro: "Every robot I have met, in order.".into(),
+        lines: vec!["A friendly humanoid at a shop.".into(), "Spot walked right up to me.".into(), "A small red toy robot.".into()],
+        outro: "Thanks for watching.".into(),
+        ..Script::default()
+    };
+    let build = async |minutes: Option<f64>| {
+        let ex = demo();
+        let opts = Options { title: "Robots".into(), voice: Some("basic-male".into()), width: 640, height: 360, target_minutes: minutes, ..Options::default() };
+        let built = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
+        assert!(built.notes.is_empty(), "{:?}", built.notes);
+        (ex, built)
+    };
+    let (_, plain) = build(None).await;
+    // a target the robots allow: met within a couple of seconds (beats and frames)
+    let (_, near) = build(Some(0.6)).await;
+    println!("plain {:.1} s; 36 s target: {:.1} s", plain.seconds, near.seconds);
+    assert_eq!(near.target_seconds, Some(36.0));
+    assert!((near.seconds - 36.0).abs() < 2.0, "{}", near.seconds);
+    // tighter than the default: shorter entries, every narration still inside its entry
+    let (ex, tight) = build(Some(0.3)).await;
+    println!("18 s target: {:.1} s", tight.seconds);
+    assert!(tight.seconds < plain.seconds - 3.0, "{} vs {}", tight.seconds, plain.seconds);
+    for (e, line) in tight.layout.iter().zip(tight.narration.iter().skip(1)) {
+        assert!(line.end <= e.end + 0.05, "entry {} ends at {} before its words do ({})", e.number, e.end, line.end);
+    }
+    let q = qa::Options { frame_side: 160, mix: false, ..qa::Options::for_showcase(&Options::default(), &tight) };
+    assert_eq!(qa::check(&ex, &q, None, &mut |_| {}).await.errors, 0);
+    // longer than the robots are in view: as long as they are, no longer — and never out of view
+    let (ex, long) = build(Some(5.0)).await;
+    println!("5 min target: {:.1} s", long.seconds);
+    // (the robots are in view 3 × 9.5 s; the intro and outro take the rest)
+    assert!(long.seconds > near.seconds + 2.0 && long.seconds < 45.0, "{}", long.seconds);
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let tps = 254_016_000_000.0;
+    for e in &long.layout {
+        for s in &e.shots {
+            let c = seq["video"][1]["items"].as_array().unwrap().iter().find(|c| c["clip"].as_u64() == Some(s.clip)).unwrap();
+            let (a, b) = (c["sourceIn"].as_f64().unwrap() / tps, c["sourceOut"].as_f64().unwrap() / tps);
+            assert!(a >= 4.0 - 1e-3 && b <= 13.5 + 0.05, "entry {} shows {a:.2}–{b:.2} s of its clip, outside 4–13.5", e.number);
+            assert!((c["speed"].as_f64().unwrap() - 1.0).abs() < 1e-9, "no slowed or held frames: {c}");
+        }
+    }
+    let q = qa::Options { frame_side: 160, mix: false, ..qa::Options::for_showcase(&Options::default(), &long) };
+    assert_eq!(qa::check(&ex, &q, None, &mut |_| {}).await.errors, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

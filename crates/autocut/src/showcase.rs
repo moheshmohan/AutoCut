@@ -74,6 +74,10 @@ pub struct Options {
     /// Match the colour of an entry's other shots to its first full-frame shot
     /// (`lumetri.applyMatch`): clips of one robot filmed with different cameras or light.
     pub match_color: bool,
+    /// Aim for a show this long: each entry breathes longer (more and longer shots, as long as
+    /// its robot is in view) or shorter after its words. Never padded with footage where the
+    /// robot is out of view, nor with held frames; [`Built::seconds`] says what it came to.
+    pub target_minutes: Option<f64>,
 }
 
 impl Default for Options {
@@ -93,6 +97,7 @@ impl Default for Options {
             music: None,
             stabilize: false,
             match_color: false,
+            target_minutes: None,
         }
     }
 }
@@ -593,6 +598,9 @@ pub struct Built {
     pub music: Option<Music>,
     /// The YouTube thumbnail written next to the export (`<out>.thumbnail.jpg`).
     pub thumbnail: Option<String>,
+    /// The length aimed for ([`Options::target_minutes`]), seconds; [`Built::seconds`] is the
+    /// length it came to.
+    pub target_seconds: Option<f64>,
 }
 
 /// An entry as built: its span on the timeline and its shots, seconds.
@@ -990,8 +998,9 @@ fn shot_count(seconds: f64) -> usize {
 /// Shot windows for an entry lasting `seconds`: `(shot, source start, length)` in order, the
 /// time split over its shots, each shot's share cut from the stretches where the subject is in
 /// view ([`Shot::spans`]) — the longest first, around the best moment, more than one stretch of
-/// a clip when one is too short. The windows can add up to less than `seconds` when the subject
-/// is rarely in view; [`whole_windows`] is the fallback that always fills the time.
+/// a clip when one is too short; what a shot cannot fill goes to the next one. The windows can
+/// add up to less than `seconds` when the subject is rarely in view; [`whole_windows`] is the
+/// fallback that always fills the time.
 pub fn windows(e: &Entry, seconds: f64) -> Vec<(Shot, f64, f64)> {
     in_view_windows(e, seconds).into_iter().map(|w| (w.shot, w.start, w.len)).collect()
 }
@@ -1018,12 +1027,15 @@ fn in_view_windows(e: &Entry, seconds: f64) -> Vec<Window> {
     let shots: Vec<&Shot> = e.shots.iter().take(shot_count(seconds)).collect();
     let each = seconds / shots.len().max(1) as f64;
     let mut out = Vec::new();
+    // time a shot could not fill with its robot in view goes to the next one
+    let mut carry = 0.0;
     for s in shots {
-        let mut spans: Vec<(f64, f64)> = s.spans().into_iter().filter(|(a, b)| b - a >= MIN_WINDOW.min(each)).collect();
+        let share = each + carry;
+        let mut spans: Vec<(f64, f64)> = s.spans().into_iter().filter(|(a, b)| b - a >= MIN_WINDOW.min(share)).collect();
         // the longest stretches first, the one holding the best moment first among equals
         spans.sort_by(|x, y| (y.1 - y.0).total_cmp(&(x.1 - x.0)).then_with(|| (s.best < x.0 || s.best > x.1).cmp(&(s.best < y.0 || s.best > y.1))));
         let mut picked: Vec<(f64, f64, f64)> = Vec::new();
-        let mut left = each;
+        let mut left = share;
         for (a, b) in spans {
             if left < MIN_WINDOW * 0.5 {
                 break;
@@ -1033,6 +1045,7 @@ fn in_view_windows(e: &Entry, seconds: f64) -> Vec<Window> {
             picked.push((start, len, (b - start).max(len)));
             left -= len;
         }
+        carry = left.max(0.0);
         picked.sort_by(|x, y| x.0.total_cmp(&y.0));
         out.extend(picked.into_iter().map(|(start, len, reach)| Window { shot: s.clone(), start, len, reach }));
     }
@@ -1383,6 +1396,85 @@ const BREATHE: f64 = 2.8;
 /// Shortest and longest entry, seconds.
 const MIN_ENTRY: f64 = 6.0;
 const MAX_ENTRY: f64 = 22.0;
+
+/// With a target length ([`Options::target_minutes`]): the least an entry breathes after its
+/// words, and the most; the shortest entry, and the longest (its robot in view all along).
+const MIN_BREATHE: f64 = 0.8;
+const MAX_BREATHE: f64 = 60.0;
+const TIGHT_ENTRY: f64 = 3.0;
+const MAX_STRETCHED_ENTRY: f64 = 45.0;
+/// Words a narration voice says a second, about (the built-in voice says ~3.2, cloned ones
+/// fewer): to plan the entries still to come; each one's own words are measured.
+const WORDS_PER_SECOND: f64 = 2.8;
+
+/// Seconds the subject is in view in the shots an entry can show ([`Shot::spans`] at least a
+/// window long).
+fn in_view_seconds(e: &Entry) -> f64 {
+    let s: f64 = e.shots.iter().take(MAX_SHOTS).flat_map(|s| s.spans()).map(|(a, b)| b - a).filter(|l| *l >= MIN_WINDOW).sum();
+    if s.is_finite() { s.max(0.0) } else { 0.0 }
+}
+
+/// An entry's length as a function of how long it breathes after its words: its lead and words
+/// (`fixed`) plus that, never under what its words need (`min`) nor over what of its robot is in
+/// view (`max`; a `max` under `min` gives way: words are never cut).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stretch {
+    pub fixed: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl Stretch {
+    /// An entry whose lead and words take `fixed` seconds, with `in_view` seconds of its robot.
+    pub fn new(fixed: f64, in_view: f64) -> Self {
+        let fixed = if fixed.is_finite() { fixed.max(0.0) } else { 0.0 };
+        let min = (fixed + MIN_BREATHE).max(TIGHT_ENTRY);
+        let in_view = if in_view.is_finite() { in_view } else { 0.0 };
+        Self { fixed, min, max: in_view.min(MAX_STRETCHED_ENTRY).max(min) }
+    }
+
+    pub fn at(&self, breathe: f64) -> f64 {
+        (self.fixed + breathe).max(self.min).min(self.max)
+    }
+}
+
+/// The breathing time (the same for every entry) that makes entries of these stretches last
+/// `seconds` together, as near as their limits allow: [`MIN_BREATHE`] when even that is too
+/// long, [`MAX_BREATHE`] (every entry as long as its robot is in view) when nothing is long
+/// enough.
+pub fn breathe_for(stretches: &[Stretch], seconds: f64) -> f64 {
+    let total = |b: f64| stretches.iter().map(|s| s.at(b)).sum::<f64>();
+    if !seconds.is_finite() || total(MIN_BREATHE) >= seconds {
+        return MIN_BREATHE;
+    }
+    if total(MAX_BREATHE) <= seconds {
+        return MAX_BREATHE;
+    }
+    let (mut lo, mut hi) = (MIN_BREATHE, MAX_BREATHE);
+    for _ in 0..60 {
+        let mid = (lo + hi) / 2.0;
+        if total(mid) < seconds {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo + hi) / 2.0
+}
+
+/// The lead before each entry's words: longer at a new year (its card comes first).
+fn leads(entries: &[Entry]) -> Vec<f64> {
+    let mut last: Option<i64> = None;
+    entries
+        .iter()
+        .map(|e| {
+            let year = e.unix.map(|u| ymd(u).0);
+            let new_year = year.is_some() && year != last;
+            last = year.or(last);
+            if new_year { 1.4 } else { 0.5 }
+        })
+        .collect()
+}
 /// Fades on each shot's own sound, frames: no clip's sound starts or stops with a click.
 const AUDIO_FADE_FRAMES: i64 = 8;
 
@@ -1491,6 +1583,19 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let mut t = intro_len;
     let mut counter_times = Vec::new();
     let mut last_year: Option<i64> = None;
+    // a target length: each entry's share of it, planned from its words and its robot in view
+    let target = opts.target_minutes.filter(|m| m.is_finite() && *m > 0.0).map(|m| (m * 60.0).min(24.0 * 3600.0));
+    let words = |text: &str| if voice.is_some() { text.split_whitespace().count() as f64 / WORDS_PER_SECOND } else { 0.0 };
+    let planned: Vec<Stretch> = entries
+        .iter()
+        .zip(leads(entries))
+        .enumerate()
+        .map(|(k, (e, lead))| {
+            let line = script.lines.get(k).cloned().unwrap_or_else(|| template_line(e));
+            Stretch::new(lead + words(&script.spoken(&e.number.to_string(), &line)), in_view_seconds(e))
+        })
+        .collect();
+    let outro_estimate = (0.8 + words(&script.spoken("outro", &script.outro)) + 1.5).max(5.0);
 
     // ---- the entries
     for (k, e) in entries.iter().enumerate() {
@@ -1504,8 +1609,17 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         if spoken > 0.0 {
             voice_free_at = voice_at + spoken;
         }
-        // the words, then a moment of the robot's own picture and sound before the next one
-        let needed = (voice_at - t + spoken + BREATHE).clamp(MIN_ENTRY, MAX_ENTRY);
+        // the words, then a moment of the robot's own picture and sound before the next one —
+        // with a target length, as long a moment as shares out what is left of it over this
+        // entry and the ones still to come (planned from their words; this one's are measured)
+        let needed = match target {
+            Some(target) => {
+                let here = Stretch::new(voice_at - t + spoken, in_view_seconds(e));
+                let rest: Vec<Stretch> = std::iter::once(here).chain(planned.iter().skip(k + 1).copied()).collect();
+                here.at(breathe_for(&rest, target - t - outro_estimate))
+            }
+            None => (voice_at - t + spoken + BREATHE).clamp(MIN_ENTRY, MAX_ENTRY),
+        };
         let must = voice_at - t + spoken + 0.7;
         // the robot in view; when that is too little to carry the words even at half speed,
         // the clips as they are
@@ -1648,6 +1762,11 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     .await?;
     let total = t + outro_len;
     built.seconds = total;
+    built.target_seconds = target;
+    if let Some(target) = target {
+        let clock = |s: f64| format!("{}:{:02}", (s.max(0.0) / 60.0).floor(), (s.max(0.0) % 60.0).floor());
+        progress(&format!("length {} for a target of {}", clock(total), clock(target)));
+    }
 
     // ---- the counter, across the entries
     let counter_prefix = format!("{} #", opts.subject.to_uppercase());
@@ -2184,6 +2303,41 @@ mod tests {
         assert_eq!(snap_end(&mut wins, 10.0, 0.5, 7.0, &g), Some(17.0));
         assert!((wins[0].len - 3.5).abs() < 1e-9);
         assert!(snap_end(&mut [], 10.0, 1.0, 5.0, &g).is_none());
+    }
+
+    #[test]
+    fn a_target_length_is_shared_out_as_breathing_time() {
+        // words of 3, 5 and 2 s; the robots in view for 20, 8 and 1 s
+        let s = [Stretch::new(3.0, 20.0), Stretch::new(5.0, 8.0), Stretch::new(2.0, 1.0)];
+        assert_eq!((s[2].min, s[2].max), (TIGHT_ENTRY, TIGHT_ENTRY), "too little in view: as short as its words allow");
+        let total = |b: f64| s.iter().map(|x| x.at(b)).sum::<f64>();
+        for target in [16.0, 20.0, 25.0, 30.0] {
+            let b = breathe_for(&s, target);
+            assert!((total(b) - target).abs() < 1e-6, "{target}: {}", total(b));
+        }
+        // too short a target: as tight as the words allow; too long: as long as the robots are in view
+        assert_eq!(breathe_for(&s, 5.0), MIN_BREATHE);
+        assert!((total(breathe_for(&s, 5.0)) - (3.8 + 5.8 + 3.0)).abs() < 1e-9);
+        assert_eq!(breathe_for(&s, 1000.0), MAX_BREATHE);
+        assert!((total(MAX_BREATHE) - (20.0 + 8.0 + 3.0)).abs() < 1e-9, "never more than in view");
+        // hostile numbers
+        assert_eq!(breathe_for(&s, f64::NAN), MIN_BREATHE);
+        assert_eq!(breathe_for(&[], 30.0), MAX_BREATHE);
+        let odd = Stretch::new(f64::NAN, f64::INFINITY);
+        assert!(odd.at(5.0).is_finite() && odd.max <= MAX_STRETCHED_ENTRY);
+    }
+
+    #[test]
+    fn time_a_shot_cannot_fill_in_view_goes_to_the_next() {
+        // two shots: the first in view for 3 s only, the second for 15 s
+        let short = Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 5.0, seen: vec![4.0, 5.0, 6.0], unseen: vec![2.0, 8.0, 12.0], largest: None };
+        let long = Shot { item: 2, name: "b".into(), clip_seconds: 20.0, best: 10.0, seen: vec![3.0, 6.0, 9.0, 12.0, 15.0], unseen: vec![], largest: None };
+        let e = Entry { number: 1, label: "x".into(), kind: "x".into(), description: String::new(), unix: None, shots: vec![short, long] };
+        assert!((in_view_seconds(&e) - (4.0 + 19.6)).abs() < 1e-9, "{}", in_view_seconds(&e));
+        let w = windows(&e, 10.0);
+        let total: f64 = w.iter().map(|x| x.2).sum();
+        assert!((total - 10.0).abs() < 1e-9, "{w:?}");
+        assert!((w[0].2 - 4.0).abs() < 1e-9 && (w[1].2 - 6.0).abs() < 1e-9, "{w:?}");
     }
 
     #[test]

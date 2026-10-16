@@ -254,6 +254,18 @@ fn showcase_qa_and_the_narration_cache() {
         .unwrap();
     assert_eq!(o.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&o.stderr).contains("missing.mp3"), "{}", String::from_utf8_lossy(&o.stderr));
+    // a target length: what it came to next to what was asked; a nonsense one is a usage error
+    let (v, err) = run(&["--no-qa", "--target-minutes", "0.5"]);
+    assert_eq!(v["target_seconds"], 30.0, "{v}");
+    assert!(v["seconds"].as_f64().is_some_and(|s| (s - 30.0).abs() < 8.0), "{}", v["seconds"]);
+    assert!(err.contains("for a target of 0:30"), "{err}");
+    for bad in ["ten", "-1", "0", "inf"] {
+        let o = Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
+            .args(["--demo", "showcase", "--report", report.to_str().unwrap(), "--target-minutes", bad])
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(2), "{bad}: {}", String::from_utf8_lossy(&o.stderr));
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
