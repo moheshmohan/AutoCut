@@ -84,6 +84,27 @@ pub fn media_key(m: &MediaClip) -> String {
     }
 }
 
+/// Keep `src` (just opened for `item`, reference `key`) in `map` and return it, unless another
+/// caller kept a source for the same reference meanwhile: then return that one, and `src` goes.
+///
+/// The frames of an export render in parallel, so the first batch of a clip asks for its source
+/// many times at once and every caller finds none and opens the file. Each used to go on with its
+/// own source: its own decoder and frame cache, a seek from the keyframe each (14 decoders for one
+/// clip of a showcase export, all but one dropped after their frame). Now they all share the first
+/// one kept; only the extra openings of the container are wasted. (Making the others wait for the
+/// first opening instead would hold a lock across an opening that can run rayon work, a still's
+/// develop, inviting the work-stealing deadlock of #480.)
+fn keep(map: &RwLock<HashMap<ItemId, (String, SharedSource)>>, item: ItemId, key: String, src: SharedSource) -> SharedSource {
+    let mut map = map.write().unwrap_or_else(|e| e.into_inner());
+    if let Some((k, kept)) = map.get(&item)
+        && (k.is_empty() || *k == key)
+    {
+        return kept.clone();
+    }
+    map.insert(item, (key, src.clone()));
+    src
+}
+
 /// Open the image sequence that `first` (a numbered still) starts: its frames from that number to
 /// the highest present one, played at `rate`. Frames are listed with [`Services::list_dir`], or
 /// found by probing consecutive numbers (stopping after 100 missing in a row) when the host cannot
@@ -300,8 +321,7 @@ impl MediaPool {
                 }
             },
         };
-        self.sources.write().unwrap_or_else(|e| e.into_inner()).insert(item, (key, src.clone()));
-        Some(src)
+        Some(keep(&self.sources, item, key, src))
     }
 
     fn set_offline(&self, item: ItemId, reason: OfflineReason, path: &str, error: &str) {
@@ -330,8 +350,7 @@ impl MediaPool {
                     None
                 };
                 let src: SharedSource = Arc::new(ProxySource { proxy: s, info: m.info.clone(), audio_from });
-                self.proxies.write().unwrap_or_else(|e| e.into_inner()).insert(item, (key, src.clone()));
-                Some(src)
+                Some(keep(&self.proxies, item, key, src))
             }
             Err(e) => {
                 // a missing proxy falls back to the full-resolution media
@@ -631,6 +650,77 @@ mod tests {
             assert!(!session.is_enabled("file.mediaProperties"));
             assert!(session.execute("transcript.generate", serde_json::json!({"items":[a.0]})).is_err());
         }
+    }
+
+    /// A host that counts the files it opens and takes its time doing so (as a large file's index
+    /// does), so that callers asking at once all arrive while the first is still opening.
+    struct SlowFiles {
+        bytes: Arc<[u8]>,
+        opened: std::sync::atomic::AtomicUsize,
+    }
+    impl Services for SlowFiles {
+        fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::other(format!("{path}: read whole")))
+        }
+        fn write_file(&self, _path: &str, _data: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn reader(&self, _path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+            self.opened.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            Some(Ok(Arc::new(filmcraft_media::reader::MemReader(self.bytes.clone()))))
+        }
+    }
+
+    /// The frames of an export render in parallel: the first batch of a clip asked for its source
+    /// sixteen times at once, and each caller went on with a source of its own (its own decoder
+    /// and frame cache, a seek from the keyframe each). Callers asking at once share one source.
+    #[test]
+    fn callers_asking_at_once_share_one_source() {
+        let wav: Arc<[u8]> = filmcraft_media::wav::write_wav16(&vec![0.25; 4800], 2, 48_000).into();
+        let probe = MediaPool::default().open_file("a.wav", &ReaderOnly(wav.clone())).unwrap();
+        let mut project = Project::new("parallel");
+        let mut items = Vec::new();
+        for name in ["a.wav", "b.wav"] {
+            let clip = MediaClip {
+                media: MediaRef::File { path: format!("/media/{name}") },
+                info: probe.info().clone(),
+                interpret: Default::default(),
+                mark_in: None,
+                mark_out: None,
+                markers: vec![],
+                offline: false,
+                proxy: None,
+                identity: None,
+            };
+            items.push(project.add_item(name, filmcraft_project::Label::Iris, ItemKind::Media(clip), None));
+        }
+        let pool = MediaPool::default();
+        let host = SlowFiles { bytes: wav, opened: Default::default() };
+        let callers = 16;
+        let barrier = std::sync::Barrier::new(callers);
+        let got: Vec<(ItemId, SharedSource)> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..callers)
+                .map(|n| {
+                    let (pool, project, host, barrier) = (&pool, &project, &host, &barrier);
+                    let item = items[n % 2];
+                    s.spawn(move || {
+                        barrier.wait();
+                        (item, pool.full_res_source(project, item, host).expect("a source"))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(host.opened.load(Ordering::SeqCst) >= 2);
+        for item in items {
+            let kept = pool.cached(item).unwrap();
+            assert!(got.iter().filter(|(i, _)| *i == item).all(|(_, s)| Arc::ptr_eq(s, &kept)), "every caller got the kept source");
+        }
+        // asked again later: the kept source, nothing opened
+        let opened = host.opened.load(Ordering::SeqCst);
+        assert!(Arc::ptr_eq(&pool.full_res_source(&project, got[0].0, &host).unwrap(), &pool.cached(got[0].0).unwrap()));
+        assert_eq!(host.opened.load(Ordering::SeqCst), opened);
     }
 
     #[test]
