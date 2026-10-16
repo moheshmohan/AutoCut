@@ -26,11 +26,16 @@ pub struct Plan {
     /// Select every result instead of `max_items` tiles: click the first tile, wheel to the
     /// end of the grid and Shift+click the last one (the picker's own range selection).
     pub select_all: bool,
+    /// Pick every item of the user's album with this title instead of searching: open the
+    /// picker's Albums view (or search the title, Google's documented way to an album), open
+    /// the album whose label matches, select all of it, press Done. No matching album → an
+    /// error, with nothing selected. `query` is ignored; `select_all` is implied.
+    pub album: Option<String>,
 }
 
 impl Default for Plan {
     fn default() -> Self {
-        Self { query: None, max_items: 6, videos_only: true, max_actions: 40, timeout: Duration::from_secs(300), select_all: false }
+        Self { query: None, max_items: 6, videos_only: true, max_actions: 40, timeout: Duration::from_secs(300), select_all: false, album: None }
     }
 }
 
@@ -40,6 +45,12 @@ pub struct Request {
     pub query: String,
     pub max_items: u32,
     pub select_all: bool,
+    /// Pick the whole album with this title instead (see [`Plan::album`]); `query`,
+    /// `max_items` and `select_all` are then unused.
+    pub album: Option<String>,
+    /// Only video tiles (searches ask Google for videos; in an album, the range is grounded
+    /// on video tiles — the caller drops any photo in between when it downloads).
+    pub videos_only: bool,
 }
 
 /// What the agent did.
@@ -48,6 +59,8 @@ pub struct Summary {
     pub actions: u32,
     pub selected: u32,
     pub searched: bool,
+    /// The album of [`Plan::album`] was found and opened.
+    pub album_opened: bool,
     pub done_pressed: bool,
     pub note: String,
 }
@@ -92,10 +105,19 @@ pub fn spawn(req: Request) -> std::thread::JoinHandle<Result<Summary, String>> {
         if !grounder.model_available().map_err(|e| e.to_string())? {
             return Err(format!("the grounding model `{}` is not in Ollama — `ollama pull {}` first", cfg.model, cfg.model));
         }
-        let plan = Plan { query: Some(req.query), max_items: req.max_items, select_all: req.select_all, ..Plan::default() };
+        let plan = plan_for(req);
         let mut actor = crate::act::MacActor::new(app, Box::new(shell));
         drive(&mut actor, &grounder, &plan, &mut |l| eprintln!("{l}")).map_err(|e| e.to_string())
     })
+}
+
+/// The plan for a caller's request: an album pick selects the whole album (and has a few more
+/// actions to get there); otherwise the query is searched.
+pub fn plan_for(req: Request) -> Plan {
+    match req.album {
+        Some(album) => Plan { query: None, album: Some(album), select_all: true, videos_only: req.videos_only, max_actions: 60, ..Plan::default() },
+        None => Plan { query: Some(req.query), max_items: req.max_items, select_all: req.select_all, videos_only: req.videos_only, ..Plan::default() },
+    }
 }
 
 /// The clickable tiles in one capture. A reply that groups the grid into one box or loops
@@ -147,8 +169,11 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
     actor.sleep(600);
     let mut cap = actor.capture()?;
 
-    // 1. search — for videos always, so Google's own filter leaves only videos in the grid
-    if let Some(q) = picker::search_text(plan.query.as_deref(), plan.videos_only) {
+    // 1. the album, opened (or an error with nothing selected) — or the search, for videos
+    // always, so Google's own filter leaves only videos in the grid
+    if let Some(title) = plan.album.as_deref() {
+        open_album(actor, grounder, plan, &mut summary, &mut cap, title, started, progress)?;
+    } else if let Some(q) = picker::search_text(plan.query.as_deref(), plan.videos_only) {
         let q = q.as_str();
         if spend(&mut summary, plan)? || deadline() {
             return Err(budget(&summary));
@@ -186,12 +211,20 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
         }
     }
 
-    // 2. select tiles — every result, or up to max_items
-    if plan.select_all {
+    // 2. select tiles — every result (of the search, or of the album), or up to max_items
+    let select_all = plan.select_all || plan.album.is_some();
+    if select_all {
+        // only ever inside a search result or an opened album: never the whole library
+        if !summary.searched && !summary.album_opened {
+            return Err(ScreenError::Other(
+                "nothing was searched and no album was opened; refusing to select every item of the whole library (selecting all needs a search or an album)"
+                    .into(),
+            ));
+        }
         select_everything(actor, grounder, plan, &mut summary, &mut cap, started, progress)?;
     }
     let mut tried: Vec<(u32, u32)> = Vec::new();
-    while !plan.select_all && summary.selected < plan.max_items {
+    while !select_all && summary.selected < plan.max_items {
         if spend(&mut summary, plan)? || deadline() {
             return Err(budget(&summary));
         }
@@ -297,6 +330,166 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
     }
     progress(&format!("screenagent: {}", summary.note));
     Ok(summary)
+}
+
+/// An album view (or an opened album) needs this long to render.
+const ALBUM_SETTLE_MS: u64 = 2000;
+/// Search suggestions need this long to appear under the field.
+const SUGGEST_SETTLE_MS: u64 = 1500;
+/// Pages of an albums view looked through for the album.
+const ALBUM_PAGES: u32 = 4;
+
+/// How the picker leads to an album.
+enum WayIn {
+    /// An Albums view (tab or button) to switch to.
+    Tab(crate::ground::Element),
+    /// The search field: Google's documented way ("search for the album").
+    Search(crate::ground::Element),
+}
+
+/// The albums named `title` in the current capture (see [`picker::album_candidates`]).
+fn albums_named<G: Ground>(
+    grounder: &G,
+    cap: &crate::capture::Capture,
+    title: &str,
+    avoid: Option<&crate::ground::Element>,
+) -> Result<Vec<crate::ground::Element>, ScreenError> {
+    let els = grounder.inventory(&cap.png, picker::ALBUM_TILES)?;
+    Ok(picker::album_candidates(&els, title, avoid, cap.png_w, cap.png_h))
+}
+
+/// Open the user's album titled `title`: through the picker's Albums view when it has one
+/// (paging down it), else by searching the title (its suggestions, then its results). Only an
+/// element whose label names the album is ever clicked; no match, or two albums with that
+/// title, is an error before anything is selected. The opened screen must be headed by the
+/// title, so a click that opened something else selects nothing.
+#[allow(clippy::too_many_arguments)]
+fn open_album<A: Act, G: Ground>(
+    actor: &mut A,
+    grounder: &G,
+    plan: &Plan,
+    summary: &mut Summary,
+    cap: &mut crate::capture::Capture,
+    title: &str,
+    started: Instant,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(), ScreenError> {
+    if picker::normalize_title(title).is_empty() {
+        return Err(ScreenError::Other(format!("the album title `{title}` has no letters or digits to look for")));
+    }
+    let out_of_time = || started.elapsed() >= plan.timeout;
+    // 1. the way in, looked for a few times while the picker loads
+    let mut way = None;
+    for attempt in 0..SEARCH_TRIES {
+        if let Some(tab) = grounder.find(&cap.png, picker::ALBUMS_TAB)?.filter(|e| picker::is_albums_tab(e, cap.png_w, cap.png_h)) {
+            way = Some(WayIn::Tab(tab));
+            break;
+        }
+        if let Some(field) = grounder.find(&cap.png, picker::SEARCH_FIELD)? {
+            way = Some(WayIn::Search(field));
+            break;
+        }
+        if attempt + 1 < SEARCH_TRIES {
+            progress("screenagent: no Albums view or search field yet; waiting for the picker");
+            actor.sleep(SEARCH_RETRY_MS);
+            *cap = actor.capture()?;
+        }
+    }
+    // 2. the albums named `title`
+    let found = match way {
+        None => {
+            return Err(ScreenError::Other(format!(
+                "the picker showed neither an Albums view nor its search field, so the album `{title}` could not be opened; nothing was selected"
+            )));
+        }
+        Some(WayIn::Tab(tab)) => {
+            if spend(summary, plan)? || out_of_time() {
+                return Err(budget(summary));
+            }
+            progress("screenagent: opening the picker's Albums view");
+            let (px, py) = tab.center();
+            actor.click_png(cap, px, py)?;
+            actor.sleep(ALBUM_SETTLE_MS);
+            *cap = actor.capture()?;
+            let mut found = Vec::new();
+            for page in 0..ALBUM_PAGES {
+                found = albums_named(grounder, cap, title, None)?;
+                if !found.is_empty() || page + 1 == ALBUM_PAGES {
+                    break;
+                }
+                if spend(summary, plan)? || out_of_time() {
+                    return Err(budget(summary));
+                }
+                let before = cap.png.clone();
+                actor.scroll(SCROLL_LINES)?;
+                actor.sleep(900);
+                *cap = actor.capture()?;
+                if !verify::changed(&before, &cap.png)? {
+                    break; // the end of the albums
+                }
+            }
+            found
+        }
+        Some(WayIn::Search(field)) => {
+            if spend(summary, plan)? || out_of_time() {
+                return Err(budget(summary));
+            }
+            progress(&format!("screenagent: searching the picker for the album `{title}`"));
+            let (px, py) = field.center();
+            actor.click_png(cap, px, py)?;
+            actor.sleep(400);
+            actor.type_text(title)?;
+            summary.searched = true;
+            actor.sleep(SUGGEST_SETTLE_MS);
+            *cap = actor.capture()?;
+            // the album among the suggestions under the field, else among the results
+            let mut found = albums_named(grounder, cap, title, Some(&field))?;
+            if found.is_empty() {
+                if spend(summary, plan)? || out_of_time() {
+                    return Err(budget(summary));
+                }
+                actor.key_return()?;
+                actor.sleep(SEARCH_SETTLE_MS);
+                *cap = actor.capture()?;
+                found = albums_named(grounder, cap, title, Some(&field))?;
+            }
+            found
+        }
+    };
+    let album = match found.as_slice() {
+        [] => {
+            return Err(ScreenError::Other(format!(
+                "no album titled `{title}` showed up in the picker; nothing was selected (the title must match the album's; is it in this Google account?)"
+            )));
+        }
+        [one] => one.clone(),
+        many => {
+            return Err(ScreenError::Other(format!(
+                "{} albums titled `{title}` are on screen; not choosing between them (rename one, or pick by hand); nothing was selected",
+                many.len()
+            )));
+        }
+    };
+    // 3. open it, and check it is the album
+    if spend(summary, plan)? || out_of_time() {
+        return Err(budget(summary));
+    }
+    progress(&format!("screenagent: opening the album `{title}`"));
+    let before = cap.png.clone();
+    let (px, py) = album.center();
+    actor.click_png(cap, px, py)?;
+    actor.sleep(ALBUM_SETTLE_MS);
+    *cap = actor.capture()?;
+    if !verify::changed(&before, &cap.png)? {
+        return Err(ScreenError::Stalled(format!("clicking the album `{title}` changed nothing; nothing was selected")));
+    }
+    let heading = grounder.inventory(&cap.png, picker::ALBUM_HEADING)?;
+    if !heading.iter().any(|e| picker::heading_names(&e.label, title)) {
+        return Err(ScreenError::Other(format!("the screen that opened is not headed `{title}`; nothing was selected")));
+    }
+    summary.album_opened = true;
+    progress(&format!("screenagent: opened the album `{title}`; selecting all of it"));
+    Ok(())
 }
 
 /// Wheel lines per scroll while looking for the end of the grid.
@@ -725,6 +918,212 @@ mod tests {
         let done = Summary { done_pressed: true, selected: 3, ..Summary::default() };
         assert!(!done.stop_waiting(Duration::from_secs(5)));
         assert!(done.stop_waiting(DONE_GRACE));
+    }
+
+    /// A picker with (or without) an Albums view: scripted by ask, recording every ask.
+    struct AlbumPicker {
+        tab: Option<Element>,
+        search: bool,
+        /// What each ALBUM_TILES ask sees, in order (the last repeats).
+        albums: Vec<Vec<Element>>,
+        heading: &'static str,
+        asks: std::cell::RefCell<Vec<String>>,
+    }
+
+    fn album_card(label: &str, x1: u32, y1: u32) -> Element {
+        Element { label: label.into(), kind: "album".into(), x1, y1, x2: x1 + 50, y2: y1 + 50 }
+    }
+
+    const TAB: (u32, u32) = (65, 10);
+    const FIELD: (u32, u32) = (100, 4);
+
+    impl AlbumPicker {
+        fn new(tab: bool, albums: Vec<Vec<Element>>) -> Self {
+            let tab = tab.then(|| Element { label: "Albums".into(), kind: "tab".into(), x1: 50, y1: 5, x2: 80, y2: 15 });
+            Self { tab, search: true, albums, heading: "Robot showcase", asks: Default::default() }
+        }
+        fn asked(&self, task: &str) -> usize {
+            self.asks.borrow().iter().filter(|a| *a == task).count()
+        }
+        fn asked_for_tiles(&self) -> bool {
+            self.asks.borrow().iter().any(|a| a.starts_with(crate::picker::VIDEO_TILES) || a.starts_with(crate::picker::ALL_TILES))
+        }
+    }
+
+    impl Ground for AlbumPicker {
+        fn inventory(&self, _png: &[u8], task: &str) -> Result<Vec<Element>, ScreenError> {
+            self.asks.borrow_mut().push(task.to_string());
+            if task == crate::picker::ALBUM_TILES {
+                let n = self.asked(task);
+                return Ok(self.albums.get(n - 1).or(self.albums.last()).cloned().unwrap_or_default());
+            }
+            if task == crate::picker::ALBUM_HEADING {
+                return Ok(vec![Element { label: self.heading.into(), kind: "heading".into(), x1: 5, y1: 20, x2: 120, y2: 32 }]);
+            }
+            if task == crate::picker::SELECTED_COUNTER {
+                return Ok(vec![Element { label: "12 selected".into(), kind: String::new(), x1: 5, y1: 2, x2: 60, y2: 12 }]);
+            }
+            let tile = |l: &str, x1: u32, y1: u32| Element { label: l.into(), kind: String::new(), x1, y1, x2: x1 + 40, y2: y1 + 40 };
+            Ok(vec![tile("0:05", 10, 40), tile("photo", 60, 40), tile("0:12", 110, 100)])
+        }
+        fn find(&self, _png: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
+            self.asks.borrow_mut().push(target.to_string());
+            Ok(match target {
+                t if t == crate::picker::ALBUMS_TAB => self.tab.clone(),
+                t if t == crate::picker::SEARCH_FIELD && self.search => {
+                    Some(Element { label: "Search".into(), kind: "field".into(), x1: 40, y1: 0, x2: 160, y2: 8 })
+                }
+                t if t.contains("Done") => Some(Element { label: "Done".into(), kind: String::new(), x1: 180, y1: 0, x2: 199, y2: 20 }),
+                _ => None,
+            })
+        }
+    }
+
+    fn album_actor() -> FakeActor {
+        let mut a = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40), cap_of(50), cap_of(60)]);
+        a.after_shift = Some(cap_of(90));
+        a
+    }
+
+    fn album_plan(title: &str, videos_only: bool) -> Plan {
+        plan_for(Request { album: Some(title.into()), videos_only, query: "ignored".into(), max_items: 3, select_all: false })
+    }
+
+    #[test]
+    fn an_album_is_opened_from_the_albums_view_and_selected_whole() {
+        let wanted = album_card("Robot showcase", 60, 60);
+        let g = AlbumPicker::new(true, vec![vec![album_card("Cars", 0, 60), wanted.clone(), album_card("Robot showcase 2", 120, 60)]]);
+        let mut act = album_actor();
+        let plan = album_plan("Robot showcase", false);
+        assert!(plan.select_all && plan.query.is_none() && !plan.videos_only, "{plan:?}");
+        let mut lines: Vec<String> = vec![];
+        let s = drive(&mut act, &g, &plan, &mut |l| lines.push(l.into())).unwrap();
+        assert!(s.album_opened && s.done_pressed && !s.searched, "{s:?}");
+        assert_eq!(s.selected, 12, "the header count");
+        // the tab, the album, the first tile; the last tile by Shift+click; then Done
+        assert_eq!(act.clicks[0], TAB);
+        assert_eq!(act.clicks[1], wanted.center(), "{:?}", act.clicks);
+        let tile = |x1: u32, y1: u32| Element { label: String::new(), kind: String::new(), x1, y1, x2: x1 + 40, y2: y1 + 40 };
+        assert_eq!(act.clicks[2], crate::picker::click_point(&tile(10, 40)));
+        assert_eq!(act.shift_clicks, vec![crate::picker::click_point(&tile(110, 100))]);
+        assert_eq!(act.clicks.len(), 4, "tab, album, first tile, Done: {:?}", act.clicks);
+        assert!(act.typed.is_empty(), "nothing typed");
+        assert!(lines.iter().any(|l| l.contains("opened the album `Robot showcase`")), "{lines:?}");
+        // the whole album: photos too
+        assert!(g.asks.borrow().iter().any(|a| a == crate::picker::ALL_TILES));
+    }
+
+    #[test]
+    fn without_an_albums_view_the_title_is_searched_and_the_album_opened() {
+        // no suggestion under the field; the album card shows among the results
+        let wanted = album_card("Robot showcase", 60, 60);
+        let g = AlbumPicker::new(false, vec![vec![], vec![wanted.clone()]]);
+        let mut act = album_actor();
+        let s = drive(&mut act, &g, &album_plan("Robot showcase", true), &mut |_| {}).unwrap();
+        assert!(s.album_opened && s.searched && s.done_pressed, "{s:?}");
+        assert_eq!(act.typed, vec!["Robot showcase".to_string()], "the title as is: no ` videos`");
+        assert_eq!(act.returns, 1);
+        assert_eq!(act.clicks[0], FIELD);
+        assert_eq!(act.clicks[1], wanted.center());
+        // videos only: the range is grounded on video tiles
+        assert!(g.asks.borrow().iter().any(|a| a == crate::picker::VIDEO_TILES));
+        // a suggestion under the field is taken without pressing Return
+        let g = AlbumPicker::new(false, vec![vec![wanted.clone()]]);
+        let mut act = album_actor();
+        let s = drive(&mut act, &g, &album_plan("robot showcase", false), &mut |_| {}).unwrap();
+        assert!(s.album_opened && act.returns == 0, "{s:?}");
+    }
+
+    #[test]
+    fn an_album_that_is_not_there_selects_nothing() {
+        for tab in [true, false] {
+            let g = AlbumPicker::new(tab, vec![vec![album_card("Cars", 0, 60), album_card("Robot showcase 2", 60, 60)]]);
+            let mut act = album_actor();
+            let err = drive(&mut act, &g, &album_plan("Robot showcase", false), &mut |_| {}).unwrap_err().to_string();
+            assert!(err.contains("no album titled `Robot showcase`") && err.contains("nothing was selected"), "{err}");
+            // only the way in was clicked: no album, no tile, no Done
+            assert_eq!(act.clicks, vec![if tab { TAB } else { FIELD }], "tab {tab}");
+            assert!(act.shift_clicks.is_empty());
+            assert!(!g.asked_for_tiles(), "never even looked at tiles: {:?}", g.asks.borrow());
+        }
+        // the albums view is paged through, a bounded number of times
+        let g = AlbumPicker::new(true, vec![vec![]]);
+        let mut act = FakeActor::new((0..12).map(|i| cap_of(10 + i * 10)).collect());
+        assert!(drive(&mut act, &g, &album_plan("Robot showcase", false), &mut |_| {}).is_err());
+        assert_eq!(act.scrolls, SCROLL_LINES * (ALBUM_PAGES as i32 - 1));
+        assert_eq!(act.clicks.len(), 1);
+    }
+
+    #[test]
+    fn two_albums_with_the_title_are_not_chosen_between() {
+        let g = AlbumPicker::new(true, vec![vec![album_card("Robots", 0, 60), album_card("Robots", 120, 60)]]);
+        let mut act = album_actor();
+        let err = drive(&mut act, &g, &album_plan("Robots", false), &mut |_| {}).unwrap_err().to_string();
+        assert!(err.contains("2 albums titled `Robots`"), "{err}");
+        assert_eq!(act.clicks, vec![TAB]);
+        assert!(!g.asked_for_tiles());
+    }
+
+    #[test]
+    fn a_click_that_opens_something_else_selects_nothing() {
+        let mut g = AlbumPicker::new(true, vec![vec![album_card("Robot showcase", 60, 60)]]);
+        g.heading = "Recent photos";
+        let mut act = album_actor();
+        let err = drive(&mut act, &g, &album_plan("Robot showcase", false), &mut |_| {}).unwrap_err().to_string();
+        assert!(err.contains("not headed `Robot showcase`"), "{err}");
+        assert_eq!(act.clicks.len(), 2, "the tab and the album only: {:?}", act.clicks);
+        assert!(act.shift_clicks.is_empty() && !g.asked_for_tiles());
+        // and a click that changed nothing is a stall, not a selection
+        let g = AlbumPicker::new(true, vec![vec![album_card("Robot showcase", 60, 60)]]);
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(20)]);
+        let err = drive(&mut act, &g, &album_plan("Robot showcase", false), &mut |_| {}).unwrap_err().to_string();
+        assert!(err.contains("changed nothing"), "{err}");
+        assert!(!g.asked_for_tiles());
+    }
+
+    #[test]
+    fn a_picker_that_never_loads_or_a_tile_sized_tab_is_handled() {
+        // neither an Albums view nor a search field: an error after a few looks, no clicks
+        let mut g = AlbumPicker::new(false, vec![vec![]]);
+        g.search = false;
+        let mut act = album_actor();
+        let mut lines: Vec<String> = vec![];
+        let err = drive(&mut act, &g, &album_plan("Robot showcase", false), &mut |l| lines.push(l.into())).unwrap_err().to_string();
+        assert!(err.contains("neither an Albums view nor its search field"), "{err}");
+        assert!(act.clicks.is_empty() && act.typed.is_empty());
+        assert_eq!(lines.iter().filter(|l| l.contains("waiting for the picker")).count(), SEARCH_TRIES - 1);
+        // a misgrounded "Albums tab" the size of a thumbnail is never clicked: the search is used
+        let mut g = AlbumPicker::new(false, vec![vec![album_card("Robot showcase", 60, 60)]]);
+        g.tab = Some(Element { label: "album".into(), kind: String::new(), x1: 0, y1: 0, x2: 120, y2: 120 });
+        let mut act = album_actor();
+        let s = drive(&mut act, &g, &album_plan("Robot showcase", false), &mut |_| {}).unwrap();
+        assert!(s.searched && s.album_opened);
+        assert_eq!(act.clicks[0], FIELD);
+        // a title with nothing to match is refused before anything
+        let g = AlbumPicker::new(true, vec![vec![]]);
+        let mut act = album_actor();
+        assert!(drive(&mut act, &g, &album_plan(" !! ", false), &mut |_| {}).unwrap_err().to_string().contains("no letters or digits"));
+        assert!(act.clicks.is_empty() && g.asks.borrow().is_empty());
+    }
+
+    #[test]
+    fn select_all_never_takes_the_whole_library() {
+        // photos allowed and no query: there is nothing to search, so no select-all
+        let g = FakeGrounder { inventory: vec![tile("0:30", 10)], finds: vec![] };
+        let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30)]);
+        let plan = Plan { select_all: true, videos_only: false, query: None, ..Plan::default() };
+        let err = drive(&mut act, &g, &plan, &mut |_| {}).unwrap_err().to_string();
+        assert!(err.contains("refusing to select every item of the whole library"), "{err}");
+        assert!(act.clicks.is_empty() && act.shift_clicks.is_empty());
+    }
+
+    #[test]
+    fn requests_become_plans() {
+        let p = plan_for(Request { query: "beach".into(), max_items: 4, select_all: true, album: None, videos_only: true });
+        assert_eq!((p.query.as_deref(), p.max_items, p.select_all, p.videos_only, p.album), (Some("beach"), 4, true, true, None));
+        let p = plan_for(Request { query: String::new(), max_items: 0, select_all: false, album: Some("Robots".into()), videos_only: false });
+        assert_eq!((p.query, p.select_all, p.videos_only, p.album.as_deref()), (None, true, false, Some("Robots")));
+        assert!(p.max_actions >= Plan::default().max_actions);
     }
 
     #[test]

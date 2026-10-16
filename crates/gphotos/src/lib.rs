@@ -76,12 +76,34 @@ pub struct PickOptions {
     /// Skip picked items created before this date (`YYYY-MM-DD`): they are not downloaded.
     /// Lets a caller select a whole search result and keep only the recent part of it.
     pub since: Option<String>,
+    /// Skip picked photos: only videos are downloaded. A range selected in an album runs from
+    /// its first video to its last and takes the photos in between along.
+    pub videos_only: bool,
 }
 
 impl Default for PickOptions {
     fn default() -> Self {
-        Self { max_items: None, wait: Duration::from_secs(600), resume: None, open_browser: true, since: None }
+        Self { max_items: None, wait: Duration::from_secs(600), resume: None, open_browser: true, since: None, videos_only: false }
     }
+}
+
+/// Which picked items to download: those created on or after `since` and, with
+/// `videos_only`, videos. The rest come back as `"<filename>: <why>"` lines.
+pub fn keep_picked(items: Vec<PickedItem>, since: Option<&str>, videos_only: bool) -> (Vec<PickedItem>, Vec<String>) {
+    let mut kept = Vec::new();
+    let mut skipped = Vec::new();
+    for i in items {
+        if let Some(d) = since
+            && !created_on_or_after(&i.created, d)
+        {
+            skipped.push(format!("{}: created {}", i.display_name(), i.created.get(..10).unwrap_or(&i.created)));
+        } else if videos_only && i.kind != api::MediaKind::Video {
+            skipped.push(format!("{}: not a video", i.display_name()));
+        } else {
+            kept.push(i);
+        }
+    }
+    (kept, skipped)
 }
 
 /// Whether an item created at `created` (RFC 3339) is on or after `since` (`YYYY-MM-DD`).
@@ -146,6 +168,8 @@ pub struct Prepared {
     pub session: PickingSession,
     /// [`PickOptions::since`], applied when the picks are fetched.
     pub since: Option<String>,
+    /// [`PickOptions::videos_only`], applied when the picks are fetched.
+    pub videos_only: bool,
 }
 
 impl GooglePhotos {
@@ -208,7 +232,7 @@ impl GooglePhotos {
                 s
             }
         };
-        Ok(Prepared { session, since: opts.since.clone().filter(|d| !d.trim().is_empty()) })
+        Ok(Prepared { session, since: opts.since.clone().filter(|d| !d.trim().is_empty()), videos_only: opts.videos_only })
     }
 
     /// Step two of [`Self::pick`]: wait for the selection within `wait`, download every
@@ -241,7 +265,7 @@ impl GooglePhotos {
                 return Err(e);
             }
         };
-        let fetched = self.fetch_picked(&session.id, prepared.since.as_deref(), progress);
+        let fetched = self.fetch_picked(&session.id, prepared.since.as_deref(), prepared.videos_only, progress);
         let session_deleted = self.delete_session(&session.id).is_ok();
         let mut picked = fetched?;
         picked.session_deleted = session_deleted;
@@ -274,17 +298,20 @@ impl GooglePhotos {
     }
 
     /// List the session's picked items and bring each one into the cache.
-    fn fetch_picked(&self, session_id: &str, since: Option<&str>, progress: &mut dyn FnMut(&str)) -> Result<Picked, GPhotosError> {
+    fn fetch_picked(&self, session_id: &str, since: Option<&str>, videos_only: bool, progress: &mut dyn FnMut(&str)) -> Result<Picked, GPhotosError> {
         let items = self.picked_items(session_id)?;
         progress(&format!("{} item(s) picked", items.len()));
         let mut picked = Picked::default();
-        let (items, older): (Vec<PickedItem>, Vec<PickedItem>) = items.into_iter().partition(|i| since.is_none_or(|d| created_on_or_after(&i.created, d)));
-        if let Some(d) = since
-            && !older.is_empty()
-        {
-            progress(&format!("skipping {} item(s) created before {d}", older.len()));
+        let (items, skipped) = keep_picked(items, since, videos_only);
+        if !skipped.is_empty() {
+            let why = match (since, videos_only) {
+                (Some(d), true) => format!("created before {d} or not videos"),
+                (Some(d), false) => format!("created before {d}"),
+                (None, _) => "not videos".to_string(),
+            };
+            progress(&format!("skipping {} item(s) {why}", skipped.len()));
         }
-        picked.skipped = older.iter().map(|i| format!("{}: created {}", i.display_name(), i.created.get(..10).unwrap_or(&i.created))).collect();
+        picked.skipped = skipped;
         let total = items.len();
         for (i, item) in items.into_iter().enumerate() {
             let was_cached = cache::cached_path(&item).is_some_and(|p| p.is_file()) || cache::find(&item.id).is_some();
@@ -603,7 +630,37 @@ mod tests {
     #[test]
     fn default_wait_is_bounded() {
         let o = PickOptions::default();
-        assert!(o.wait <= MAX_WAIT && o.open_browser && o.resume.is_none());
+        assert!(o.wait <= MAX_WAIT && o.open_browser && o.resume.is_none() && !o.videos_only);
+    }
+
+    #[test]
+    fn picks_are_kept_by_date_and_kind() {
+        let item = |name: &str, kind: api::MediaKind, created: &str| PickedItem {
+            id: name.into(),
+            filename: name.into(),
+            mime_type: String::new(),
+            kind,
+            created: created.into(),
+            base_url: String::new(),
+            video_status: None,
+        };
+        let items = || {
+            vec![
+                item("old.mp4", api::MediaKind::Video, "2019-05-01T00:00:00Z"),
+                item("new.mp4", api::MediaKind::Video, "2024-05-01T00:00:00Z"),
+                item("new.jpg", api::MediaKind::Photo, "2024-05-01T00:00:00Z"),
+                item("odd", api::MediaKind::Unknown, "2024-05-01T00:00:00Z"),
+            ]
+        };
+        let names = |v: &[PickedItem]| v.iter().map(|i| i.filename.clone()).collect::<Vec<_>>();
+        let (kept, skipped) = keep_picked(items(), None, false);
+        assert_eq!((kept.len(), skipped.len()), (4, 0));
+        let (kept, skipped) = keep_picked(items(), None, true);
+        assert_eq!(names(&kept), ["old.mp4", "new.mp4"]);
+        assert_eq!(skipped, ["new.jpg: not a video", "odd: not a video"]);
+        let (kept, skipped) = keep_picked(items(), Some("2020-01-01"), true);
+        assert_eq!(names(&kept), ["new.mp4"]);
+        assert_eq!(skipped, ["old.mp4: created 2019-05-01", "new.jpg: not a video", "odd: not a video"]);
     }
 
     /// Answers in order; every request is counted (and its method, URL and body kept).

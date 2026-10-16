@@ -87,6 +87,11 @@ fn photos_albums_without_consent_name_the_fix() {
         vec!["photos", "upload", &clip, "--album"],
         vec!["photos", "upload", &clip, "--album", "  "],
         vec!["photos", "search", "robots"],
+        // a pick searches (--auto) or takes a whole album (--album), never both
+        vec!["photos", "pick", "--auto", "robots", "--album", "Robot showcase"],
+        vec!["photos", "pick", "--album", "Robot showcase", "--no-browser"],
+        vec!["photos", "pick", "--videos-only"],
+        vec!["photos", "pick", "--album"],
     ] {
         let o = run(&args);
         assert_eq!(o.status.code(), Some(2), "{args:?}: {}", err(&o));

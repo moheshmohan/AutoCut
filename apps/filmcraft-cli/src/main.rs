@@ -189,7 +189,8 @@ SUBCOMMANDS
                                  uploaded, and only into albums it made)
   photos albums [--json]         the albums FilmCraft made: title, item count, link (Google shows
                                  apps no other albums, and not the items you add to them by hand)
-  photos pick [--auto query [--all]] [--since YYYY-MM-DD] [--max-items n] [--timeout secs] [--session id] [--no-browser]
+  photos pick [--auto query [--all] | --album <title> [--videos-only]] [--since YYYY-MM-DD]
+              [--max-items n] [--timeout secs] [--session id] [--no-browser]
                                  open the Google Photos picker in the browser, wait (default
                                  600 s, at most 3600) for your selection, download it into the
                                  cache and import it; --demo/--project/--bridge choose the
@@ -201,6 +202,13 @@ SUBCOMMANDS
                                  Recording and Accessibility for this terminal). --all selects
                                  every search result (first tile, then Shift+click the last);
                                  --since skips items created before that date (not downloaded).
+                                 With --album <title> the same agent picks a whole album
+                                 instead — the seed you curate in Google Photos: it opens the
+                                 picker's Albums view (or searches the title), opens the album
+                                 with that title, selects all of it and presses Done; no
+                                 matching album selects nothing. --videos-only keeps only its
+                                 videos. Items you add to an album by hand are reachable only
+                                 this way (Google shows apps only what they uploaded)
   photos cached [--json]         list the Google Photos originals already downloaded
   photos add <mediaItemId>...    import already-downloaded items again (ids from `photos cached`)
   bench-decode <media> [--frames N]
@@ -537,43 +545,68 @@ async fn cli() {
                     }
                 }
                 "pick" => {
-                    let gp = filmcraft_gphotos::GooglePhotos::configured().unwrap_or_else(|e| fail(format!("photos: {e}")));
                     let parse_num = |k: &str| -> Option<u64> {
                         a.opt(k).map(|v| v.parse::<u64>().unwrap_or_else(|_| usage(format!("photos pick: {k} wants a whole number, not `{v}`"))))
                     };
                     let auto = a.opt("--auto").map(str::to_string);
-                    if auto.is_some() && a.flag("--no-browser") {
-                        usage("photos pick: --auto drives the picker in a browser itself; drop --no-browser");
+                    // --album: the agent opens that album in the picker and picks all of it
+                    let album = album_opt(&a, "photos pick");
+                    if auto.is_some() && album.is_some() {
+                        usage("photos pick: --auto searches, --album picks a whole album; use one of them");
+                    }
+                    if (auto.is_some() || album.is_some()) && a.flag("--no-browser") {
+                        usage("photos pick: --auto and --album drive the picker in a browser themselves; drop --no-browser");
                     }
                     let select_all = a.flag("--all");
-                    if select_all && auto.is_none() {
+                    if select_all && auto.is_none() && album.is_none() {
                         usage("photos pick: --all is for the --auto agent (by hand, Shift+click the last tile)");
                     }
+                    let videos_only = a.flag("--videos-only");
+                    if videos_only && album.is_none() {
+                        usage("photos pick: --videos-only is for --album (--auto always picks videos)");
+                    }
+                    let agent_drives = auto.is_some() || album.is_some();
                     let since = a.opt("--since").map(str::to_string);
                     if let Some(d) = since.as_deref().filter(|d| !filmcraft_gphotos::is_day(d)) {
                         usage(format!("photos pick: --since wants a date like 2020-01-01, not `{d}`"));
                     }
                     let opts = filmcraft_gphotos::PickOptions {
                         max_items: parse_num("--max-items").map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
-                        wait: std::time::Duration::from_secs(parse_num("--timeout").unwrap_or(if auto.is_some() { 900 } else { 600 })),
+                        wait: std::time::Duration::from_secs(parse_num("--timeout").unwrap_or(if agent_drives { 900 } else { 600 })),
                         resume: a.opt("--session").map(str::to_string),
                         open_browser: !a.flag("--no-browser"),
                         since,
+                        videos_only,
                     };
+                    let album_title = album.clone();
+                    // the arguments are fine: now the sign-in
+                    let gp = filmcraft_gphotos::GooglePhotos::configured().unwrap_or_else(|e| fail(format!("photos: {e}")));
                     // the import target first, so a bad --project/--bridge fails before the user picks
                     let mut b = Backend::open(&a);
                     // blocking HTTP and sleeps: keep them off the async runtime
                     let outcome = tokio::task::spawn_blocking(move || {
                         let prepared = gp.prepare(&opts, &mut |line| diag(format_args!("{line}")))?;
                         // with --auto, a local vision agent (Qwen2.5-VL via Ollama) drives the
-                        // picker: it types the query, clicks matching video tiles, presses Done
-                        let mut agent = auto.map(|query| {
-                            filmcraft_screenagent::agent::spawn(filmcraft_screenagent::agent::Request {
+                        // picker: it types the query, clicks matching video tiles, presses Done;
+                        // with --album it opens that album and selects all of it instead
+                        let request = match (auto, album) {
+                            (Some(query), _) => Some(filmcraft_screenagent::agent::Request {
                                 query,
                                 max_items: opts.max_items.unwrap_or(6),
                                 select_all,
-                            })
-                        });
+                                album: None,
+                                videos_only: true,
+                            }),
+                            (None, Some(title)) => Some(filmcraft_screenagent::agent::Request {
+                                query: String::new(),
+                                max_items: opts.max_items.unwrap_or(filmcraft_gphotos::api::MAX_PICK),
+                                select_all: true,
+                                album: Some(title),
+                                videos_only,
+                            }),
+                            (None, None) => None,
+                        };
+                        let mut agent = request.map(filmcraft_screenagent::agent::spawn);
                         // the pick outcome is authoritative; the agent's own budget bounds it.
                         // Once the agent is done without pressing Done (its search matched
                         // nothing, or it failed), nothing more will be picked: stop waiting.
@@ -607,7 +640,10 @@ async fn cli() {
                     let picked = match outcome {
                         filmcraft_gphotos::PickOutcome::Done(p) => p,
                         filmcraft_gphotos::PickOutcome::Pending(_) if report.as_ref().is_some_and(|r| r.as_ref().is_ok_and(|s| !s.done_pressed)) => {
-                            fail("photos pick: the search matched nothing to pick");
+                            match &album_title {
+                                Some(t) => fail(format!("photos pick: the album `{t}` had nothing to pick")),
+                                None => fail("photos pick: the search matched nothing to pick"),
+                            }
                         }
                         filmcraft_gphotos::PickOutcome::Pending(s) => {
                             outln!("{}", json!({"status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time}));
