@@ -160,6 +160,17 @@ pub fn heading_names(label: &str, title: &str) -> bool {
     !t.is_empty() && (album_label_matches(label, title) || format!(" {} ", normalize_title(label)).contains(&format!(" {t} ")))
 }
 
+/// Whether the tile ending a range is the one that started it: the grid never moved
+/// (`scrolled` false) and either box holds the other's click point. A Shift+click there would
+/// toggle the only selected item back off.
+pub fn same_tile(first: &Element, last: &Element, scrolled: bool) -> bool {
+    if scrolled {
+        return false;
+    }
+    let inside = |p: (u32, u32), e: &Element| p.0 >= e.x1 && p.0 < e.x2 && p.1 >= e.y1 && p.1 < e.y2;
+    inside(click_point(last), first) || inside(click_point(first), last)
+}
+
 /// Appended for the one retry after [`enumeration_failed`].
 pub const STRICT: &str = "Your previous answer grouped several thumbnails into one box or repeated one label: give exactly one tight box per individual thumbnail, each labelled with its own duration text.";
 
@@ -369,6 +380,15 @@ mod tests {
         // a thumbnail-sized box is never taken for the tab (clicking it would select a photo)
         assert!(!is_albums_tab(&el("album cover", "", 100, 100, 300, 300), 1000, 800));
         assert!(!is_albums_tab(&el("Albums", "", 10, 10, 10, 10), 1000, 800));
+    }
+
+    #[test]
+    fn a_range_that_ends_where_it_started_is_one_tile() {
+        let a = el("0:07", "", 10, 40, 50, 80);
+        assert!(same_tile(&a, &a, false));
+        assert!(same_tile(&a, &el("0:07", "", 12, 38, 52, 82), false), "boxed a little differently");
+        assert!(!same_tile(&a, &el("0:12", "", 60, 40, 100, 80), false), "the next tile");
+        assert!(!same_tile(&a, &a, true), "after scrolling, the same spot is another tile");
     }
 
     #[test]

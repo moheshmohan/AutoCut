@@ -550,8 +550,11 @@ fn select_everything<A: Act, G: Ground>(
     let out_of_time = || started.elapsed() >= plan.timeout;
     // 1. the first tile, in reading order
     let mut first = None;
+    let mut first_page = 0usize;
     for _ in 0..MAX_STALLED {
-        if let Some(t) = visible_tiles(grounder, cap, plan.videos_only, progress)?.into_iter().next() {
+        let tiles = visible_tiles(grounder, cap, plan.videos_only, progress)?;
+        first_page = tiles.len();
+        if let Some(t) = tiles.into_iter().next() {
             first = Some(t);
             break;
         }
@@ -581,6 +584,7 @@ fn select_everything<A: Act, G: Ground>(
     progress("screenagent: selected the first result; scrolling to the end of the grid");
     // 2. to the end of the grid
     let mut still = 0u32;
+    let mut scrolled = false;
     while still < 2 {
         if spend(summary, plan)? || out_of_time() {
             progress("screenagent: out of budget before the end of the grid; selecting up to here");
@@ -590,7 +594,12 @@ fn select_everything<A: Act, G: Ground>(
         actor.scroll(END_SCROLL_LINES)?;
         actor.sleep(1200);
         *cap = actor.capture()?;
-        still = if verify::changed(&before, &cap.png)? { 0 } else { still + 1 };
+        if verify::changed(&before, &cap.png)? {
+            still = 0;
+            scrolled = true;
+        } else {
+            still += 1;
+        }
     }
     // 3. Shift+click the last tile
     let tiles = visible_tiles(grounder, cap, plan.videos_only, progress)?;
@@ -599,6 +608,13 @@ fn select_everything<A: Act, G: Ground>(
         summary.note = "found no tile at the end of the grid; only the first is selected".into();
         return Ok(());
     };
+    // the last tile is the first one (a grid of one): a Shift+click on it would toggle the
+    // selection back off — the first click already selected it
+    if picker::same_tile(&first, last, scrolled) || (!scrolled && first_page == 1 && tiles.len() == 1) {
+        summary.note = "the grid holds one item; the first click selected it".into();
+        progress("screenagent: the grid holds one item, already selected");
+        return Ok(());
+    }
     if spend(summary, plan)? {
         return Err(budget(summary));
     }
@@ -928,6 +944,82 @@ mod tests {
         assert_eq!(act.clicks.len(), 3, "{:?}", act.clicks);
         assert_eq!(grid.0.get(), 2, "the range's count, then the check after Done");
         assert!(lines.iter().any(|l| l.contains("range click")), "{lines:?}");
+    }
+
+    /// A search result of one video (and a photo): the header reads "1 selected" until the
+    /// capture after Done (`gone`), when the picker has left its grid.
+    struct OneVideo {
+        gone: Vec<u8>,
+    }
+    impl Ground for OneVideo {
+        fn inventory(&self, png: &[u8], task: &str) -> Result<Vec<Element>, ScreenError> {
+            if task == crate::picker::SELECTED_COUNTER {
+                return Ok(if png == self.gone.as_slice() {
+                    vec![]
+                } else {
+                    vec![Element { label: "1 selected".into(), kind: String::new(), x1: 5, y1: 2, x2: 60, y2: 12 }]
+                });
+            }
+            let t = |l: &str, x1: u32| Element { label: l.into(), kind: String::new(), x1, y1: 40, x2: x1 + 40, y2: 80 };
+            Ok(vec![t("0:07", 10), t("photo", 60)])
+        }
+        fn find(&self, _png: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
+            if target == crate::picker::SEARCH_FIELD {
+                return Ok(Some(Element { label: "Search".into(), kind: String::new(), x1: 40, y1: 0, x2: 160, y2: 8 }));
+            }
+            Ok(target.contains("Done").then(|| Element { label: "Done".into(), kind: String::new(), x1: 180, y1: 0, x2: 199, y2: 20 }))
+        }
+    }
+
+    #[test]
+    fn a_grid_of_one_is_not_range_clicked_off_again() {
+        // the live failure (an "October 15 2018" search): one video tile; the range ended on the
+        // tile it started on, the Shift+click toggled it off, and Done was pressed with nothing
+        // selected. The grid never scrolls (captures stop changing after the first click).
+        let g = OneVideo { gone: frame(40) };
+        // the search, the grid, the tile selected, then (after Done) the picker gone
+        let mut act = ScrollStays(FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40)]));
+        let plan = Plan { select_all: true, query: Some("October 15 2018".into()), ..Plan::default() };
+        let mut lines: Vec<String> = vec![];
+        let s = drive(&mut act, &g, &plan, &mut |l| lines.push(l.into())).unwrap();
+        assert_eq!(s.selected, 1, "{s:?}");
+        assert!(s.done_pressed, "{s:?}");
+        let video = Element { label: String::new(), kind: String::new(), x1: 10, y1: 40, x2: 50, y2: 80 };
+        assert_eq!(act.0.clicks, vec![(100, 4), crate::picker::click_point(&video), (189, 10)], "search, the one tile, Done");
+        assert!(act.0.scrolls > 0, "it looked for the end of the grid");
+        assert!(lines.iter().any(|l| l.contains("one item")), "{lines:?}");
+    }
+
+    /// A FakeActor whose scrolls change nothing (a grid that fits the window), and which records
+    /// Shift+clicks: any is a failure here.
+    struct ScrollStays(FakeActor);
+    impl Act for ScrollStays {
+        fn activate(&mut self) -> Result<(), ScreenError> {
+            self.0.activate()
+        }
+        fn click_png(&mut self, cap: &Capture, px: u32, py: u32) -> Result<(), ScreenError> {
+            self.0.click_png(cap, px, py)
+        }
+        fn shift_click_png(&mut self, _cap: &Capture, px: u32, py: u32) -> Result<(), ScreenError> {
+            Err(ScreenError::Other(format!("a Shift+click at ({px}, {py}) would toggle the only selected tile off")))
+        }
+        fn type_text(&mut self, text: &str) -> Result<(), ScreenError> {
+            self.0.type_text(text)
+        }
+        fn key_return(&mut self) -> Result<(), ScreenError> {
+            self.0.key_return()
+        }
+        fn key_escape(&mut self) -> Result<(), ScreenError> {
+            self.0.key_escape()
+        }
+        fn scroll(&mut self, n: i32) -> Result<(), ScreenError> {
+            self.0.scrolls += n; // the screen stays where it is
+            Ok(())
+        }
+        fn sleep(&mut self, _ms: u64) {}
+        fn capture(&mut self) -> Result<Capture, ScreenError> {
+            self.0.capture()
+        }
     }
 
     #[test]
