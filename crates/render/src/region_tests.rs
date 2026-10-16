@@ -283,6 +283,76 @@ fn a_rectangle_mixes_like_the_padded_layer_in_every_blend_mode() {
     same_bits(&c, &base, "outside");
 }
 
+/// A graphic clip (a title, a name, AutoCut's counter) is drawn and mixed only over the rectangle
+/// its layers cover: the same bits as before, when its layers were drawn on a whole transparent
+/// frame mixed over the picture, at every opacity and blend mode, moved or not, partly off the
+/// frame, and with nothing on screen.
+#[test]
+fn a_graphic_clip_mixes_only_its_rectangle_with_the_same_bits() {
+    use filmcraft_geom::Vec2;
+    use filmcraft_project::graphic::new_text_layer;
+    // two tracks; the second one's clip becomes the title
+    let (mut p, seq, map) = scene(&[Spec::new(camera(W, H)), Spec::new(camera(W, H))]);
+    let g = p.add_item("Title", Label::Rose, ItemKind::Graphic { width: W as u32, height: H as u32, rate: FPS }, None);
+    let mut title = p.make_track_item(g, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, FPS.tick_of(48)), FPS).expect("graphic clip");
+    title.effects.push(new_text_layer("Robot", Vec2::new(8.0, 30.0), 18.0));
+    title.effects.push(new_text_layer("2024", Vec2::new(60.0, 50.0), 12.0));
+    for e in title.effects.iter_mut() {
+        filmcraft_project::resolve_auto_points(e, (W as u32, H as u32), (W as u32, H as u32));
+    }
+    if let Some(s) = p.sequence_mut(seq) {
+        s.video_tracks[1].items = vec![title];
+    }
+    let t = FPS.tick_of(3);
+    let tc = format_time(t, FPS, false, TimeDisplay::Timecode, 48_000);
+    let check_title = |p: &Project, what: &str| {
+        let s = p.sequence(seq).expect("sequence");
+        let item = &s.video_tracks[1].items[0];
+        // before: the layers on a whole transparent frame, mixed over the picture
+        let mut want = reference_below_titles(p, seq, t, &map);
+        let src = source_size(p, item.item).expect("size");
+        let mt = item.effect_time_at(t);
+        let mut layer = Image::new(W, H);
+        graphic_clip::render_graphic(item, mt, src, &motion_matrix(s, item, src, None, mt), &mut layer);
+        let (op, bl) = opacity_blend(item, mt);
+        blend::composite(&mut want, &layer, op, bl);
+        let got = render_sequence(p, seq, t, RenderOptions::default(), &map);
+        same_bits(&got, &want, what);
+        // and as a whole layer (transitions take it so)
+        let (full, _, _) = item_layer(p, s, item, t, RenderOptions::default(), &map, &tc).expect("layer");
+        same_bits(&full, &layer, &format!("{what}, whole layer"));
+        layer.px.as_chunks::<4>().0.iter().filter(|px| px[3] > 0.0).count()
+    };
+    assert!(check_title(&p, "title") > 50, "the title draws text");
+    for (opacity, mode) in [(60.0, 0u32), (100.0, 3), (75.0, 9)] {
+        let mut q = p.clone();
+        let o = q.sequence_mut(seq).and_then(|s| s.video_tracks[1].items[0].effect_mut("opacity")).expect("opacity");
+        o.params.get_mut("opacity").expect("opacity").value = ParamValue::Float(opacity);
+        o.params.get_mut("blend").expect("blend").value = ParamValue::Choice(mode);
+        check_title(&q, &format!("title at {opacity} % in blend {mode}"));
+    }
+    // moved partly off the frame, and entirely off it (nothing to draw)
+    for (x, y) in [(-30.0, 10.0), (500.0, 500.0)] {
+        let mut q = p.clone();
+        let m = q.sequence_mut(seq).and_then(|s| s.video_tracks[1].items[0].effect_mut("motion")).expect("motion");
+        m.params.get_mut("position").expect("position").value = ParamValue::Vec2(Vec2::new(x, y));
+        check_title(&q, &format!("title moved to ({x}, {y})"));
+    }
+}
+
+/// The picture under the titles of [`a_graphic_clip_mixes_only_its_rectangle_with_the_same_bits`].
+fn reference_below_titles(p: &Project, seq: ItemId, t: Tick, map: &SourceMap) -> Image {
+    let s = p.sequence(seq).expect("sequence");
+    let tc = format_time(t, FPS, false, TimeDisplay::Timecode, 48_000);
+    let mut canvas = Image::new(W, H);
+    if let Some(item) = s.video_tracks[0].item_at(t)
+        && let Some((layer, op, bl)) = item_layer(p, s, item, t, RenderOptions::default(), map, &tc)
+    {
+        blend::composite(&mut canvas, &layer, op, bl);
+    }
+    canvas
+}
+
 #[test]
 fn a_region_layer_expands_to_the_whole_layer() {
     let image = Image { w: 3, h: 2, px: (0..24).map(|i| i as f32 + 1.0).collect() };

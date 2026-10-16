@@ -473,12 +473,15 @@ pub(crate) fn item_layer_ex(
     let want = effects_scale(item, mt, (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32, opts);
     let pi = project.item(item.item)?;
     if matches!(pi.kind, ItemKind::Graphic { .. }) && !(item.has_opacity_masks() || opts.effects && item.has_standard_effects()) {
-        // vectors straight to the output: no resampling, crisp at any Motion scale
+        // vectors straight to the output: no resampling, crisp at any Motion scale. Only the
+        // rectangle the layers cover is drawn and mixed, the same pixels as a whole transparent
+        // frame with them on it: a title or a counter covers a corner, and a zeroed 1080p float
+        // frame plus a mix over all of it per graphic per frame was an eighth of a showcase export.
         let m = Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion);
-        let mut canvas = Image::new(w, h);
-        graphic_clip::render_graphic(item, mt, src_size, &m, &mut canvas);
         let (op, bl) = opacity_blend(item, mt);
-        return Some(Layer::Full { image: canvas, opacity: op, blend: bl, opaque: false });
+        let (image, x, y) = graphic_clip::render_graphic_tight(item, mt, src_size, &m, w, h).unwrap_or((Image::new(0, 0), 0, 0));
+        let (x, y) = (usize::try_from(x).unwrap_or(0), usize::try_from(y).unwrap_or(0));
+        return Some(Layer::Region { image, x, y, opacity: op, blend: bl });
     }
     // plain media: nothing but the frame itself reaches the output
     let plain_media = matches!(pi.kind, ItemKind::Media(_) | ItemKind::Subclip { .. })
