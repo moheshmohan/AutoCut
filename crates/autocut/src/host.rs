@@ -749,7 +749,7 @@ mod tests {
     }
 
     fn entry(n: usize, label: &str, shots: Vec<Shot>) -> Entry {
-        Entry { number: n, label: label.into(), kind: "toy".into(), description: format!("a {label}"), unix: Some(1_665_741_668), shots }
+        Entry { number: n, label: label.into(), kind: "toy".into(), description: format!("a {label}"), unix: Some(1_665_741_668), shots, ..Entry::default() }
     }
 
     #[test]

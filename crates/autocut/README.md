@@ -208,6 +208,11 @@ filmcraft-cli showcase --report robots.json --script-in plan.json --voice clone:
                                              # robots.vtt and robots.chapters.txt beside it
 ```
 
+Entries may carry `event` ("GITEX Global 2022, Dubai") and `facts` (checked facts about the
+robot): consecutive entries of one event share a chapter — a title card with the event's name,
+the event in the lower third and in the YouTube chapters — and the script model weaves one or two
+of an entry's facts into its line, told to use those and nothing else.
+
 A reviewed plan may hold `entries` alone (drop, merge or relabel robots, fix a shot's `best`
 moment or `seen` times): the model then writes the words for exactly those.
 

@@ -228,7 +228,7 @@ impl Shot {
 }
 
 /// One counted subject (a robot), with its shots.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Entry {
     pub number: usize,
     pub label: String,
@@ -236,6 +236,21 @@ pub struct Entry {
     pub description: String,
     pub unix: Option<i64>,
     pub shots: Vec<Shot>,
+    /// Where it was filmed ("GITEX Global 2022, Dubai"): consecutive entries of one event share a
+    /// chapter, opened by a title card with the event's name, and its lower third says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    /// Checked facts about it (who makes it, when it launched, what it does) the voice-over may
+    /// use — and nothing else: the script model is told to invent nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<String>,
+}
+
+impl Entry {
+    /// The chapter it belongs to: its event, else the year it was filmed.
+    pub fn section(&self) -> Option<String> {
+        self.event.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).or_else(|| self.unix.map(|u| ymd(u).0.to_string()))
+    }
 }
 
 /// The voice-over, as written to be read: subtitles show it as it is, and the voice reads it
@@ -416,6 +431,7 @@ fn entry(number: usize, members: &[&ClipFacts], subject: &str) -> Option<Entry> 
         description: named.description.clone(),
         unix: first.unix,
         shots: shown.into_iter().map(|(_, f)| Shot::of(f)).collect(),
+        ..Entry::default()
     })
 }
 
@@ -471,6 +487,20 @@ fn strip_heading(line: &str, e: &Entry) -> String {
     }
 }
 
+/// One item of the script request: number, date, name, where, what, and its facts.
+fn item_listing(n: usize, e: &Entry) -> String {
+    let mut s = format!("{n}. {} — {}", month_year(e.unix), e.label);
+    if let Some(ev) = e.event.as_deref().map(str::trim).filter(|x| !x.is_empty()) {
+        s.push_str(&format!(" (at {ev})"));
+    }
+    s.push_str(&format!(": {}", e.description));
+    let facts: Vec<&str> = e.facts.iter().map(|f| f.trim()).filter(|f| !f.is_empty()).take(6).collect();
+    if !facts.is_empty() {
+        s.push_str(&format!(" Facts: {}", facts.join(" | ")));
+    }
+    s
+}
+
 /// Entries per request: small local models write a handful of lines reliably and fast, where
 /// one long answer for a whole show can run past the request timeout.
 const SCRIPT_BATCH: usize = 6;
@@ -504,10 +534,15 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
     }
     let mut written: Vec<Option<String>> = vec![None; entries.len()];
     for (b, batch) in entries.chunks(SCRIPT_BATCH).enumerate() {
-        let listing: String =
-            batch.iter().enumerate().map(|(i, e)| format!("{}. {} — {}: {}", i + 1, month_year(e.unix), e.label, e.description)).collect::<Vec<_>>().join("\n");
+        let listing: String = batch.iter().enumerate().map(|(i, e)| item_listing(i + 1, e)).collect::<Vec<_>>().join("\n");
+        let with_facts = batch.iter().any(|e| !e.facts.is_empty());
+        let ask = if with_facts {
+            "Each is two or three short spoken sentences (at most 40 words) that say when and where I saw it and what it is or does, and weave in one or two of its facts naturally, as I would tell a friend; use only the facts listed for that item; do not start with the item's heading."
+        } else {
+            "Each is one or two short spoken sentences (at most 25 words) that say when it was and what it is or does, as I would tell a friend; do not start with the item's heading."
+        };
         let user = format!(
-            "{video}\n\nWrite \"lines\": exactly {} entries, one per item below in the same order. Each is one or two short spoken sentences (at most 25 words) that say when it was and what it is or does, as I would tell a friend; do not start with the item's heading.\n\nItems:\n{listing}\n\nJSON: {{\"lines\": [\"...\"]}}",
+            "{video}\n\nWrite \"lines\": exactly {} entries, one per item below in the same order. {ask}\n\nItems:\n{listing}\n\nJSON: {{\"lines\": [\"...\"]}}",
             batch.len()
         );
         match model.complete_json(SCRIPT_SYSTEM, &user, &[]).await {
@@ -1462,18 +1497,36 @@ pub fn breathe_for(stretches: &[Stretch], seconds: f64) -> f64 {
     (lo + hi) / 2.0
 }
 
-/// The lead before each entry's words: longer at a new year (its card comes first).
+/// The lead before each entry's words: longer where a new chapter (event or year) starts, as
+/// its card comes first.
 fn leads(entries: &[Entry]) -> Vec<f64> {
-    let mut last: Option<i64> = None;
+    let mut last: Option<String> = None;
     entries
         .iter()
         .map(|e| {
-            let year = e.unix.map(|u| ymd(u).0);
-            let new_year = year.is_some() && year != last;
-            last = year.or(last);
-            if new_year { 1.4 } else { 0.5 }
+            let section = e.section();
+            let new_section = section.is_some() && section != last;
+            last = section.or(last.take());
+            if new_section { CARD_LEAD } else { 0.5 }
         })
         .collect()
+}
+
+/// How long a chapter card shows before the entry's words, seconds.
+const CARD_LEAD: f64 = 1.8;
+
+/// A chapter card's text and size: a year big, an event's name smaller, on up to two lines.
+fn card(section: &str) -> (String, f64) {
+    let s = section.trim();
+    if s.chars().count() <= 6 {
+        return (s.to_string(), 160.0);
+    }
+    // "GITEX Global 2022, Dubai" → "GITEX GLOBAL 2022" over "DUBAI"
+    let upper = s.to_uppercase();
+    match upper.split_once(", ") {
+        Some((a, b)) => (format!("{a}\n{b}"), 96.0),
+        None => (upper, 96.0),
+    }
 }
 /// Fades on each shot's own sound, frames: no clip's sound starts or stops with a click.
 const AUDIO_FADE_FRAMES: i64 = 8;
@@ -1582,7 +1635,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     built.chapters.push(Chapter { seconds: 0.0, title: "Intro".into() });
     let mut t = intro_len;
     let mut counter_times = Vec::new();
-    let mut last_year: Option<i64> = None;
+    let mut last_section: Option<String> = None;
     // a target length: each entry's share of it, planned from its words and its robot in view
     let target = opts.target_minutes.filter(|m| m.is_finite() && *m > 0.0).map(|m| (m * 60.0).min(24.0 * 3600.0));
     let words = |text: &str| if voice.is_some() { text.split_whitespace().count() as f64 / WORDS_PER_SECOND } else { 0.0 };
@@ -1599,10 +1652,10 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
 
     // ---- the entries
     for (k, e) in entries.iter().enumerate() {
-        let year = e.unix.map(|u| ymd(u).0);
-        let new_year = year.is_some() && year != last_year;
-        last_year = year.or(last_year);
-        let lead = if new_year { 1.4 } else { 0.5 };
+        let section = e.section();
+        let new_year = section.is_some() && section != last_section;
+        last_section = section.clone().or(last_section.take());
+        let lead = if new_year { CARD_LEAD } else { 0.5 };
         let line = script.lines.get(k).cloned().unwrap_or_else(|| template_line(e));
         let voice_at = (t + lead).max(voice_free_at + 0.15);
         let spoken = narrate(ex, &tr, voice, &script.spoken(&e.number.to_string(), &line), &line, voice_at, &mut narrations).await?;
@@ -1696,15 +1749,22 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 sfx(ex, "whoosh", 1.2, (t - 0.55).max(0.0), &tr.sfx, 0.6, &mut mix).await?;
             }
         }
-        if new_year && let Some(y) = year {
-            built.chapters.push(Chapter { seconds: t, title: y.to_string() });
-            title(ex, tr.over_index, tr.fps, &y.to_string(), t, 1.4, 160.0, (w / 2.0, h * 0.58), title_props.clone()).await?;
+        if new_year && let Some(sec) = &section {
+            built.chapters.push(Chapter { seconds: t, title: sec.clone() });
+            let (text, size) = card(sec);
+            title(ex, tr.over_index, tr.fps, &text, t, CARD_LEAD, size, (w / 2.0, h * 0.55), title_props.clone()).await?;
             sfx(ex, "impact", 2.0, t, &tr.hits, 0.6, &mut mix).await?;
         }
-        // the name and date, bottom left, while the narration introduces it
+        // the name, and when and where, bottom left, while the narration introduces it
         let when = month_year(e.unix);
         let name = display_label(&e.label);
-        let lower = if when.is_empty() { name } else { format!("{name}\n{when}") };
+        let place = e.event.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let second = match (place, when.is_empty()) {
+            (Some(p), false) => format!("{p} · {when}"),
+            (Some(p), true) => p.to_string(),
+            (None, _) => when.clone(),
+        };
+        let lower = if second.is_empty() { name } else { format!("{name}\n{second}") };
         let shown_for = (entry_end - t - lead - 0.3).clamp(1.5, 4.5);
         let third = title(
             ex,
@@ -2088,6 +2148,7 @@ mod tests {
                 Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 19.5, seen: vec![], unseen: vec![], largest: None },
                 Shot { item: 2, name: "b".into(), clip_seconds: 3.0, best: 1.0, seen: vec![], unseen: vec![], largest: None },
             ],
+            ..Entry::default()
         };
         let w = whole_windows(&e, 8.0);
         assert_eq!(w.len(), 2);
@@ -2113,7 +2174,7 @@ mod tests {
         // hostile samples stay inside the clip
         assert!(Shot { seen: vec![f64::NAN, -5.0, 99.0], unseen: vec![], ..s.clone() }.spans().iter().all(|(a, b)| *a >= 0.2 && *b <= 15.3));
         // a 10 s entry of this clip: both stretches, in order, nothing out of view
-        let e = Entry { number: 1, label: "x".into(), kind: "x".into(), description: String::new(), unix: None, shots: vec![s] };
+        let e = Entry { number: 1, label: "x".into(), kind: "x".into(), description: String::new(), unix: None, shots: vec![s], ..Entry::default() };
         let w = windows(&e, 10.0);
         assert_eq!(w.len(), 2, "{w:?}");
         assert!(w[0].1 < w[1].1);
@@ -2188,6 +2249,27 @@ mod tests {
         assert_eq!(youtube_chapters(&[c(0.0, "Intro"), c(20.0, "2020"), c(40.0, "2021"), c(60.0, "Outro")], 65.0), "0:00 Intro\n0:20 2020\n0:40 2021 / Outro");
         // fewer than three: none at all
         assert_eq!(youtube_chapters(&[c(0.0, "Intro"), c(30.0, "Outro")], 60.0), "");
+    }
+
+    #[test]
+    fn events_make_chapters_and_reach_the_script() {
+        let day = 1_665_446_400; // 2022-10-11
+        let mut a = Entry { number: 1, label: "Spot".into(), unix: Some(day), event: Some("GITEX Global 2022, Dubai".into()), ..Entry::default() };
+        a.facts = vec!["Made by Boston Dynamics".into(), " ".into()];
+        let b = Entry { number: 2, label: "Pepper".into(), unix: Some(day + 600), event: Some("GITEX Global 2022, Dubai".into()), ..Entry::default() };
+        let c = Entry { number: 3, label: "Go1".into(), unix: Some(day + 86_400 * 7), ..Entry::default() };
+        // one card for the event, one for the year after it
+        assert_eq!(leads(&[a.clone(), b.clone(), c.clone()]), vec![CARD_LEAD, 0.5, CARD_LEAD]);
+        assert_eq!(c.section().as_deref(), Some("2022"));
+        assert_eq!(card("2022"), ("2022".to_string(), 160.0));
+        assert_eq!(card("GITEX Global 2022, Dubai"), ("GITEX GLOBAL 2022\nDUBAI".to_string(), 96.0));
+        // the script request carries where and the (non-empty) facts, and only for that item
+        let line = item_listing(1, &a);
+        assert!(line.contains("(at GITEX Global 2022, Dubai)") && line.contains("Facts: Made by Boston Dynamics") && !line.contains("|"), "{line}");
+        assert!(!item_listing(3, &c).contains("Facts"));
+        // old plans without the fields still load
+        let old: Entry = serde_json::from_value(json!({"number": 1, "label": "x", "kind": "x", "description": "", "unix": null, "shots": []})).unwrap();
+        assert!(old.event.is_none() && old.facts.is_empty());
     }
 
     #[test]
@@ -2332,7 +2414,7 @@ mod tests {
         // two shots: the first in view for 3 s only, the second for 15 s
         let short = Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 5.0, seen: vec![4.0, 5.0, 6.0], unseen: vec![2.0, 8.0, 12.0], largest: None };
         let long = Shot { item: 2, name: "b".into(), clip_seconds: 20.0, best: 10.0, seen: vec![3.0, 6.0, 9.0, 12.0, 15.0], unseen: vec![], largest: None };
-        let e = Entry { number: 1, label: "x".into(), kind: "x".into(), description: String::new(), unix: None, shots: vec![short, long] };
+        let e = Entry { number: 1, label: "x".into(), kind: "x".into(), description: String::new(), unix: None, shots: vec![short, long], ..Entry::default() };
         assert!((in_view_seconds(&e) - (4.0 + 19.6)).abs() < 1e-9, "{}", in_view_seconds(&e));
         let w = windows(&e, 10.0);
         let total: f64 = w.iter().map(|x| x.2).sum();
