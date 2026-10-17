@@ -75,6 +75,16 @@ E5 adjustment clips + per-track ducking; B6 TikTok.
 2. **Instagram**: the **Instagram API with Instagram Login** (no Facebook Page needed; a
    professional — Creator or Business — account, the user's own). A Meta developer app of the
    user's, the user's Instagram account as its tester; set up from the main session in Chrome.
+   **Done 2026-10-17**: @moheshmohan is a Creator account ("Digital creator"); Meta app
+   **AutoCut** (app ID 948613107902184, development mode, no business portfolio, use case "Manage
+   messaging & content on Instagram"); its Instagram app **AutoCut-IG** (Instagram app ID
+   2133883020551415; the secret stays in the dashboard — the user pastes it into AutoCut, never a
+   session); @moheshmohan added as Instagram Tester (invite to accept in Instagram ▸ Apps and
+   websites ▸ Tester invites). Still to do in lane I: the OAuth redirect URI under "Set up
+   Instagram business login", the permissions `instagram_business_basic` +
+   `instagram_business_content_publish`, and the token path — Instagram Login code exchange with
+   the app secret, or the dashboard's "Generate access tokens" (long-lived 60-day token, refreshed
+   with `ig_refresh_token`, no secret needed on the desktop).
 3. **Soundfont**: GeneralUser GS (licence v2.0, permissive; its author notes sample provenance
    is not fully certain) is **downloaded on first use with consent** (licence shown), like the
    voice and speech models — never bundled in the repo; the oscillator voices stay the fallback.
