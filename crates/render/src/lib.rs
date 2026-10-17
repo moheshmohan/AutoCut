@@ -768,6 +768,9 @@ mod adjustment_tests;
 mod mixer_tests;
 
 #[cfg(test)]
+mod transition_sound_tests;
+
+#[cfg(test)]
 mod nest_tests;
 
 #[cfg(test)]

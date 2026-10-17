@@ -31,6 +31,12 @@
 //! blend-mode dissolve (`blend_dissolve.wgsl`: a dissolve through any of the compositor's blend
 //! modes). Every preset of an engine shares its one pipeline.
 //!
+//! **Motion blur** (roadmap C4). Transitions with a `motion_blur` parameter (the zoom and whip
+//! ports: SimpleZoom, DreamyZoom, directionalwarp, crosswarp, Bounce) are evaluated at 8–16
+//! progresses spread over a shutter around the frame's and averaged, on the GPU (the prelude's
+//! loop) and in the CPU reference alike: the samples follow each pixel's own trajectory, so zooms
+//! streak radially and slides along their path. CrossZoom keeps its own 41-tap zoom blur.
+//!
 //! **The host owns time.** [`eased_progress`] applies the transition's easing (Penner curves or a
 //! cubic Bézier, [`super::easing`]) to the progress the timeline computed at the exact frame
 //! `Tick`, on the CPU; the CPU reference and the GPU uniforms both use that value, so preview and
@@ -91,9 +97,11 @@ use filmcraft_project::transition_engines::{self as engines, LumaShape};
 
 /// Number of shader parameter floats (`host.p0`..`host.p2`).
 pub const PARAMS: usize = 12;
-/// Uniform floats: width, height, eased progress, ratio, the parameters, then 1 / width,
-/// 1 / height and two zeros (80 bytes).
-pub const UNIFORM_FLOATS: usize = 4 + PARAMS + 4;
+/// Uniform floats: width, height, eased progress, ratio, the parameters, 1 / width, 1 / height
+/// and two zeros, then the motion blur (first tap's progress, step, taps, 0): 96 bytes.
+pub const UNIFORM_FLOATS: usize = 4 + PARAMS + 4 + 4;
+/// Shutter of the motion blur at 100 %, in progress units.
+pub const MAX_SHUTTER: f32 = 0.06;
 
 /// The host prelude every shader body is appended to.
 pub const PRELUDE: &str = include_str!("shader/prelude.wgsl");
@@ -628,6 +636,19 @@ impl Params<'_> {
         (c(v.x, self.w), c(v.y, self.h))
     }
 
+    /// The motion blur's shutter (progress units) and taps: (0, 0) when the transition has no
+    /// `motion_blur` parameter or it is 0.
+    fn motion_blur(&self) -> (f32, u32) {
+        if self.e.def().and_then(|d| d.param("motion_blur")).is_none() {
+            return (0.0, 0);
+        }
+        let amount = (self.num("motion_blur") / 100.0).clamp(0.0, 1.0);
+        if amount <= 0.0 {
+            return (0.0, 0);
+        }
+        (MAX_SHUTTER * amount, 8 + (8.0 * amount).round() as u32)
+    }
+
     /// A whole-number parameter, at least `min`.
     fn whole(&self, id: &str, min: f32) -> f32 {
         self.num(id).round().max(min)
@@ -664,6 +685,14 @@ pub fn uniforms(e: &EffectInstance, w: u32, h: u32, progress: f32, scale: f32) -
     out[4..4 + PARAMS].copy_from_slice(&(d.params)(&p));
     out[4 + PARAMS] = 1.0 / wf;
     out[5 + PARAMS] = 1.0 / hf;
+    // motion blur: taps at first, first + step, … (each clamped to 0..1 by the shader)
+    let (shutter, taps) = p.motion_blur();
+    if taps >= 2 {
+        let progress = out[2];
+        out[8 + PARAMS] = progress - shutter * 0.5;
+        out[9 + PARAMS] = shutter / (taps - 1) as f32;
+        out[10 + PARAMS] = taps as f32;
+    }
     Some(out)
 }
 
@@ -693,5 +722,21 @@ pub(crate) fn apply(id: &str, t: &Tx) -> Option<Image> {
     let c = Ctx { a: t.a, b: t.b, w: u[0], h: u[1], progress, ratio: u[3], p, map: map.as_deref() };
     // the prelude's uv: the pixel centre times 1 / size (see `Host::inv`)
     let (inv_w, inv_h) = (u[4 + PARAMS], u[5 + PARAMS]);
-    Some(paint(t.w, t.h, |x, y| (d.cpu)(&c, V2::new(x * inv_w, (c.h - y) * inv_h))))
+    let (first, step, taps) = (u[8 + PARAMS], u[9 + PARAMS], (u[10 + PARAMS] as i32).min(16));
+    if taps < 2 {
+        return Some(paint(t.w, t.h, |x, y| (d.cpu)(&c, V2::new(x * inv_w, (c.h - y) * inv_h))));
+    }
+    // the prelude's motion blur, operation for operation
+    let taps_ctx: Vec<Ctx> = (0..taps).map(|i| Ctx { progress: (first + i as f32 * step).clamp(0.0, 1.0), ..c }).collect();
+    Some(paint(t.w, t.h, |x, y| {
+        let uv = V2::new(x * inv_w, (c.h - y) * inv_h);
+        let mut acc = [0.0f32; 4];
+        for tc in &taps_ctx {
+            let v = (d.cpu)(tc, uv);
+            for k in 0..4 {
+                acc[k] += v[k];
+            }
+        }
+        acc.map(|v| v / taps as f32)
+    }))
 }

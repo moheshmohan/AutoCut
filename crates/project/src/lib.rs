@@ -25,6 +25,7 @@ pub mod multicam;
 pub mod narration;
 pub mod transcript;
 pub mod transition_engines;
+pub mod transition_sound;
 pub mod vtransition;
 
 use std::collections::BTreeMap;
@@ -45,6 +46,7 @@ pub use mixer::{AutomationMode, InputMap, MixerStrip, TrackSend};
 pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSource};
 pub use narration::{Delivery, Narration, VocalPitch};
 pub use transcript::{Speaker, Transcript, Word};
+pub use transition_sound::{SoundKind, TransitionSound};
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -721,6 +723,10 @@ pub struct Transition {
     pub align: TransitionAlign,
     #[serde(default)]
     pub reverse: bool,
+    /// A whoosh, riser or impact that plays with it ([`transition_sound`]); mixed into the
+    /// sequence's Mix, so it moves and goes away with the transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<TransitionSound>,
 }
 
 impl Transition {

@@ -176,6 +176,7 @@ fn showcase() -> (Arc<Project>, ItemId, SourceMap) {
         to: Some(b),
         align: Default::default(),
         reverse: false,
+        sound: None,
     };
     if let Some(s) = p.sequence_mut(seq) {
         s.video_tracks[1].transitions.push(tr);

@@ -72,6 +72,7 @@ fn project() -> (Project, ItemId) {
             to: Some(ids[i + 1]),
             align: TransitionAlign::CenterAtCut,
             reverse: false,
+            sound: None,
         });
     }
     let q = p.sequence_mut(s).unwrap();

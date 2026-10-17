@@ -36,6 +36,11 @@
 //!   BS.775 matrices. [`mix_graph`] returns the Mix's width; [`crate::audio::mix_sequence`] always
 //!   returns stereo.
 //!
+//! **Transition sounds.** A whoosh, riser or impact coupled to a video transition
+//! (`Transition::sound`) is synthesised with [`filmcraft_audio_dsp::synth`] (cached) and added to
+//! the Mix's input to the sample, at its gain (`add_transition_sounds`); it is silent while any
+//! strip is soloed and on a switched-off video track.
+//!
 //! [`LiveMix`] carries what the UI does while playing: control overrides while a fader is held
 //! (with Touch's ramp back to the automation), per-strip meters, and the newest project snapshot.
 
@@ -48,7 +53,7 @@ use filmcraft_audio_dsp::AudioEffect;
 use filmcraft_audio_dsp::channels::{self as chans, Layout, Mixdown, Pan51};
 use filmcraft_frame::AudioBuffer;
 use filmcraft_project::mixer::{LANE_MUTE, LANE_PAN, LANE_PAN51_CENTER, LANE_PAN51_LFE, LANE_PAN51_X, LANE_PAN51_Y, LANE_VOLUME, fx_lane, send_lane};
-use filmcraft_project::{AudioChannels, EffectInstance, InputMap, Param, ParamValue, Project, Sequence, Track, TrackId};
+use filmcraft_project::{AudioChannels, EffectInstance, InputMap, Param, ParamValue, Project, Sequence, SoundKind, Track, TrackId, TransitionSound};
 use filmcraft_time::Tick;
 use rayon::prelude::*;
 
@@ -836,6 +841,75 @@ fn run_strip(plan: &Plan, si: usize, st: &mut StripState, mut buf: Bus, x0: i64,
     StripOut { routes: outs, meter, out: None }
 }
 
+// ------------------------------------------------------------------------------------- transition sounds
+
+/// What a synthesised transition sound depends on: kind, seed, intensity, samples, rate.
+type SoundKey = (SoundKind, u64, u64, usize, u32);
+/// Synthesised transition sounds kept.
+const SOUND_CACHE: usize = 16;
+
+fn sound_cache() -> &'static Mutex<Vec<(SoundKey, Arc<[Vec<f32>; 2]>)>> {
+    static C: OnceLock<Mutex<Vec<(SoundKey, Arc<[Vec<f32>; 2]>)>>> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// The stereo samples of transition sound `snd`, exactly `n` long at `sr` (synthesised by
+/// [`filmcraft_audio_dsp::synth`] once, then cached). None when the synth refuses the rate.
+pub fn transition_sound_samples(snd: &TransitionSound, n: usize, sr: u32) -> Option<Arc<[Vec<f32>; 2]>> {
+    use filmcraft_audio_dsp::synth;
+    let intensity = snd.intensity();
+    let key = (snd.kind, snd.seed, intensity.to_bits(), n, sr);
+    if let Some(hit) = lock(sound_cache()).iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()) {
+        return Some(hit);
+    }
+    let kind = match snd.kind {
+        SoundKind::Whoosh => synth::Kind::Whoosh,
+        SoundKind::Riser => synth::Kind::Riser,
+        SoundKind::Impact => synth::Kind::Impact,
+    };
+    let mut q = synth::Params::new(kind);
+    q.seconds = n as f64 / f64::from(sr.max(1));
+    q.seed = snd.seed;
+    q.intensity = intensity;
+    let out = synth::generate(&q, sr).ok()?;
+    let (mut l, mut r) = (out.left, out.right);
+    l.resize(n, 0.0);
+    r.resize(n, 0.0);
+    let v = Arc::new([l, r]);
+    let mut c = lock(sound_cache());
+    c.push((key, v.clone()));
+    if c.len() > SOUND_CACHE {
+        c.remove(0);
+    }
+    Some(v)
+}
+
+/// Add the sounds coupled to `seq`'s video transitions into `bus` (the Mix's input), whose first
+/// sample is content sample `c0` at rate `sr`: each to the sample, at its gain, on the front left
+/// and right channels. A switched-off video track's transitions are silent.
+fn add_transition_sounds(seq: &Sequence, bus: &mut Bus, c0: i64, sr: u32) {
+    let n = bus.first().map_or(0, Vec::len);
+    let end = c0.saturating_add(n as i64);
+    for tr in seq.video_tracks.iter().filter(|t| t.enabled).flat_map(|t| t.transitions.iter()) {
+        let Some(snd) = &tr.sound else { continue };
+        let Some((first, len)) = snd.samples(tr.start, tr.duration, sr) else { continue };
+        let last = first.saturating_add(len as i64);
+        if last <= c0 || first >= end {
+            continue;
+        }
+        let Some(audio) = transition_sound_samples(snd, len, sr) else { continue };
+        let g = snd.gain();
+        let (from, to) = (c0.max(first), end.min(last));
+        for (ch, src) in bus.iter_mut().zip(audio.iter()) {
+            let (Ok(i0), Ok(j0), Ok(k)) = (usize::try_from(from - c0), usize::try_from(from - first), usize::try_from(to - from)) else { continue };
+            let (Some(dst), Some(s)) = (ch.get_mut(i0..i0.saturating_add(k)), src.get(j0..j0.saturating_add(k))) else { continue };
+            for (d, v) in dst.iter_mut().zip(s) {
+                *d += v * g;
+            }
+        }
+    }
+}
+
 /// Mix `frames` samples of the sequence starting at sample `start` through the mixer graph, at the
 /// Mix's width (2 channels, or 6 in L, R, C, LFE, Ls, Rs order for a 5.1 Mix). `live` adds the UI's
 /// held controls and receives the meters.
@@ -923,6 +997,8 @@ pub(crate) fn mix_graph_at(
     }
     // submixes in order, then the Mix
     let mut out = silent(plan.strips[ns - 1].width, total);
+    // a solo anywhere silences what is on no soloed path, transition sounds included
+    let soloing = plan.strips.iter().any(|s| s.kind != Kind::Master && s.track.solo);
     for (k, ss) in rest.iter_mut().enumerate() {
         let si = ntr + k;
         let s = &plan.strips[si];
@@ -930,7 +1006,11 @@ pub(crate) fn mix_graph_at(
             ss.delays.iter_mut().for_each(DelayLine::clear);
             continue;
         }
-        let input = bus[si].take().unwrap_or_else(|| silent(s.width, total));
+        let mut input = bus[si].take().unwrap_or_else(|| silent(s.width, total));
+        if s.kind == Kind::Master && !soloing {
+            // the sounds coupled to video transitions, lined up with the Mix's other inputs
+            add_transition_sounds(seq, &mut input, x0.saturating_sub(ss.in_lat as i64), sr);
+        }
         let o = run_strip(&plan, si, ss, input, x0, skip, sr, &ovs);
         if let Some(fin) = deliver(o, si, &mut bus, &mut meters) {
             out = fin;

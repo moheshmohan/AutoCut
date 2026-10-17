@@ -129,6 +129,7 @@ fn cross_dissolve_midpoint() {
         to: Some(b),
         align: Default::default(),
         reverse: false,
+        sound: None,
     };
     p.sequence_mut(seq).unwrap().video_tracks[0].transitions.push(tr);
     let img = render_sequence(&p, seq, r.tick_of(24), RenderOptions::default(), &map);
@@ -229,6 +230,7 @@ fn push_plan_preserves_reference_track_order_and_reverse() {
         to: Some(b),
         align: Default::default(),
         reverse: false,
+        sound: None,
     });
     for reverse in [false, true] {
         for scale in [1.0, 0.5] {
@@ -267,6 +269,7 @@ fn morph_cut_frames_render_on_the_cpu_with_the_morph() {
         to: Some(b),
         align: Default::default(),
         reverse: false,
+        sound: None,
     });
     let opts = RenderOptions { scale: 0.5, ..Default::default() };
     assert!(plan::is_cpu_frame(&p, seq, rate.tick_of(24)));

@@ -125,6 +125,7 @@ pub fn transition(
         to,
         align,
         reverse: false,
+        sound: None,
     });
     t.sort();
 }

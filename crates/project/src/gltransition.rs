@@ -64,6 +64,13 @@ fn num(id: &'static str, label: &'static str, def: f64, min: f64, max: f64, deci
     fixed(fs(id, label, def, (min, max), (min, max), "", decimals))
 }
 
+/// The host's motion blur (roadmap C4) for the zoom / whip transitions: the frame is the average
+/// of 8–16 evaluations spread over a shutter along the motion (`filmcraft-render`,
+/// `transitions::shader`). 0 turns it off.
+fn motion_blur() -> ParamDef {
+    fixed(fs("motion_blur", "Motion Blur", 50.0, (0.0, 100.0), (0.0, 100.0), "%", 0))
+}
+
 /// The generated grayscale maps the `displacement` and `luma` ports read (their upstream
 /// versions take an image; these are computed: `filmcraft-render`, `transitions::shader::maps`).
 /// Choice indices are stored in projects and never change.
@@ -105,6 +112,7 @@ pub(crate) fn defs() -> Vec<EffectDef> {
                 num("shadow_alpha", "Shadow Opacity", 0.6, 0.0, 1.0, 2),
                 num("shadow_height", "Shadow Height", 0.075, 0.01, 0.5, 3),
                 num("bounces", "Bounces", 3.0, 1.0, 10.0, 1),
+                motion_blur(),
             ],
         ),
         gl("gl_burn", "GL burn", vec![fixed(col("color", "Color", [0.9, 0.4, 0.2, 1.0]))]),
@@ -142,7 +150,7 @@ pub(crate) fn defs() -> Vec<EffectDef> {
                 num("fade_edge", "Fade Edge", 0.1, 0.0, 1.0, 2),
             ],
         ),
-        gl("gl_crosswarp", "GL crosswarp", vec![]),
+        gl("gl_crosswarp", "GL crosswarp", vec![motion_blur()]),
         gl("gl_crosszoom", "GL CrossZoom", vec![num("strength", "Strength", 0.4, 0.0, 1.0, 2)]),
         gl(
             "gl_cube",
@@ -161,6 +169,7 @@ pub(crate) fn defs() -> Vec<EffectDef> {
                 num("smoothness", "Smoothness", 0.1, 0.0, 1.0, 2),
                 num("direction_x", "Direction X", -1.0, -1.0, 1.0, 2),
                 num("direction_y", "Direction Y", 1.0, -1.0, 1.0, 2),
+                motion_blur(),
             ],
         ),
         gl("gl_displacement", "GL displacement", {
@@ -177,7 +186,7 @@ pub(crate) fn defs() -> Vec<EffectDef> {
                 num("depth", "Depth", 3.0, 1.0, 10.0, 2),
             ],
         ),
-        gl("gl_dreamyzoom", "GL DreamyZoom", vec![num("rotation", "Rotation", 6.0, -360.0, 360.0, 1), num("scale", "Scale", 1.2, 0.1, 10.0, 2)]),
+        gl("gl_dreamyzoom", "GL DreamyZoom", vec![num("rotation", "Rotation", 6.0, -360.0, 360.0, 1), num("scale", "Scale", 1.2, 0.1, 10.0, 2), motion_blur()]),
         gl("gl_filmburn", "GL FilmBurn", vec![num("seed", "Seed", 2.31, -1000.0, 1000.0, 2)]),
         gl("gl_glitchdisplace", "GL GlitchDisplace", vec![]),
         gl("gl_glitchmemories", "GL GlitchMemories", vec![]),
@@ -243,7 +252,7 @@ pub(crate) fn defs() -> Vec<EffectDef> {
             vec![num("size_x", "Columns", 10.0, 1.0, 400.0, 0), num("size_y", "Rows", 10.0, 1.0, 400.0, 0), num("smoothness", "Smoothness", 0.5, 0.0, 1.0, 2)],
         ),
         gl("gl_ripple", "GL ripple", vec![num("amplitude", "Amplitude", 100.0, 0.0, 500.0, 1), num("speed", "Speed", 50.0, 0.0, 500.0, 1)]),
-        gl("gl_simplezoom", "GL SimpleZoom", vec![num("zoom_quickness", "Zoom Quickness", 0.8, 0.2, 1.0, 2)]),
+        gl("gl_simplezoom", "GL SimpleZoom", vec![num("zoom_quickness", "Zoom Quickness", 0.8, 0.2, 1.0, 2), motion_blur()]),
         gl("gl_squeeze", "GL squeeze", vec![num("color_separation", "Color Separation", 0.04, 0.0, 1.0, 3)]),
         gl(
             "gl_starwipe",

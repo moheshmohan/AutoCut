@@ -249,6 +249,7 @@ fn dissolve(s: &mut Scene, track: usize, from: Option<ClipId>, to: Option<ClipId
         to,
         align: Default::default(),
         reverse: false,
+        sound: None,
     };
     s.p.sequence_mut(s.seq).unwrap().video_tracks[track].transitions.push(tr);
 }

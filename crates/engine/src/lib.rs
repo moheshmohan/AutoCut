@@ -62,6 +62,7 @@ pub mod shortcuts;
 pub mod source_monitor;
 pub mod sync;
 pub mod transcript;
+pub mod transition_tools;
 pub mod trim;
 pub mod video_templates;
 pub mod voice_clone;
@@ -1378,6 +1379,8 @@ mod timeline_move_tests;
 mod track_params_tests;
 #[cfg(test)]
 mod transcript_tests;
+#[cfg(test)]
+mod transition_tools_tests;
 #[cfg(test)]
 mod trim_tests;
 #[cfg(test)]

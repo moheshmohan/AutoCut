@@ -388,6 +388,7 @@ fn a_transition_inside_a_plain_nest_is_a_step_of_the_parent_plan() {
             to: Some(b),
             align: Default::default(),
             reverse,
+            sound: None,
         });
         let outer = r.seq("outer", 160, 90, rate);
         let under = r.matte([0.0, 1.0, 0.0, 1.0], 64, 64);

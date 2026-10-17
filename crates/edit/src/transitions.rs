@@ -1,6 +1,7 @@
 //! Applied transitions: where one may sit over its cut, its alignment, and moving / resizing /
 //! removing one (Effect Controls' Duration and Alignment, dragging its edges or its middle in the
-//! Timeline, Delete).
+//! Timeline, Delete), and where one goes when it is snapped to the music's beat
+//! ([`snap_to_beat`]: its midpoint on a beat, its length a musical fraction of a beat).
 //!
 //! Premiere (Align transitions; Change transition duration): a transition between two clips stays
 //! over their cut, "Center at Cut", "Start at Cut", "End at Cut" or, once dragged off-centre,
@@ -201,6 +202,113 @@ pub fn remove(seq: &mut Sequence, ids: &[TransitionId]) -> Result<usize> {
     if n == 0 { Err(EditError::Nothing) } else { Ok(n) }
 }
 
+/// Lengths a transition snapped to the beat may take, as fractions of a beat (numerator,
+/// denominator): a quarter, a half, one, two or four beats.
+pub const BEAT_FRACTIONS: [(i64, i64); 5] = [(1, 4), (1, 2), (1, 1), (2, 1), (4, 1)];
+
+/// How many of the beats nearest a transition's midpoint [`snap_to_beat`] tries.
+const BEATS_TRIED: usize = 6;
+
+/// Where [`snap_to_beat`] puts a transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BeatSnap {
+    pub start: Tick,
+    pub duration: Tick,
+    /// The beat its midpoint went to (None for a fade to or from nothing, which keeps its clip
+    /// edge and only takes a musical length).
+    pub beat: Option<Tick>,
+    /// Its length in beats, one of [`BEAT_FRACTIONS`].
+    pub beats: (i64, i64),
+}
+
+/// Snap transition `tr` on `track` to a beat grid: `beats` are the music's beats in timeline
+/// ticks (sorted, distinct) and `period` the length of one beat. Its midpoint goes to the nearest
+/// beat it can reach and its duration becomes the musical fraction of a beat
+/// ([`BEAT_FRACTIONS`]) nearest its own length, both on whole frames (`snap` rounds a time to the
+/// nearest frame boundary, `frame` is one frame), so the midpoint ends within half a frame of the
+/// beat. It stays where a transition may be ([`bounds`]: over its cut, inside the clips it joins)
+/// and clear of `others` (the spans of the other transitions on its track). A fade to or from
+/// nothing keeps its clip edge and only takes a musical length. None when no beat in reach works
+/// (or the clips are gone, or `period` is not positive).
+pub fn snap_to_beat(
+    track: &Track,
+    tr: &Transition,
+    beats: &[Tick],
+    period: Tick,
+    frame: Tick,
+    snap: impl Fn(Tick) -> Tick,
+    others: &[(Tick, Tick)],
+) -> Option<BeatSnap> {
+    let (lo, cut, hi) = bounds(track, tr)?;
+    if period <= Tick::ZERO {
+        return None;
+    }
+    let frame = frame.max(Tick(1));
+    let d0 = tr.duration.max(frame);
+    // the musical lengths on whole frames, the one nearest the current length (by ratio) first
+    let mut lengths: Vec<((i64, i64), Tick)> = BEAT_FRACTIONS.iter().map(|&(n, d)| ((n, d), snap(period.mul_ratio(n, d)).max(frame))).collect();
+    lengths.sort_by(|a, b| ratio_distance(a.1, d0).total_cmp(&ratio_distance(b.1, d0)));
+    let clear = |s: Tick, e: Tick| others.iter().all(|&(os, oe)| e <= os || oe <= s);
+    let fits = |s: Tick, d: Tick| {
+        let e = s + d;
+        lo <= s && e <= hi && clear(s, e)
+    };
+    match (tr.from, tr.to) {
+        (None, Some(_)) => lengths.iter().find(|(_, d)| fits(cut, *d)).map(|&(beats, d)| BeatSnap { start: cut, duration: d, beat: None, beats }),
+        (Some(_), None) => lengths.iter().find(|(_, d)| fits(cut - *d, *d)).map(|&(beats, d)| BeatSnap { start: cut - d, duration: d, beat: None, beats }),
+        _ => {
+            let mid = tr.start + tr.duration.mul_ratio(1, 2);
+            for b in nearest(beats, mid, BEATS_TRIED) {
+                for &(f, d) in &lengths {
+                    let s = snap(b - d.mul_ratio(1, 2));
+                    if s <= cut && cut <= s + d && fits(s, d) {
+                        return Some(BeatSnap { start: s, duration: d, beat: Some(b), beats: f });
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+/// How far apart two lengths are, as the size of their ratio.
+fn ratio_distance(a: Tick, b: Tick) -> f64 {
+    let (a, b) = (a.0.max(1) as f64, b.0.max(1) as f64);
+    (a / b).ln().abs()
+}
+
+/// Up to `n` of `beats` (sorted) nearest `t`, nearest first (the earlier one on a tie).
+fn nearest(beats: &[Tick], t: Tick, n: usize) -> Vec<Tick> {
+    let i = beats.partition_point(|b| *b < t);
+    let (mut left, mut right) = (i, i);
+    let mut out = Vec::with_capacity(n.min(beats.len()));
+    while out.len() < n {
+        let l = left.checked_sub(1).and_then(|k| beats.get(k).map(|b| (k, *b)));
+        let r = beats.get(right).copied();
+        match (l, r) {
+            (Some((k, a)), Some(b)) => {
+                if (t - a) <= (b - t) {
+                    out.push(a);
+                    left = k;
+                } else {
+                    out.push(b);
+                    right += 1;
+                }
+            }
+            (Some((k, a)), None) => {
+                out.push(a);
+                left = k;
+            }
+            (None, Some(b)) => {
+                out.push(b);
+                right += 1;
+            }
+            (None, None) => break,
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +363,7 @@ mod tests {
             to: to.map(ClipId),
             align: TransitionAlign::CenterAtCut,
             reverse: false,
+            sound: None,
         }
     }
 
@@ -397,5 +506,119 @@ mod tests {
         assert_eq!(left, vec![2]);
         assert_eq!(q.video_tracks[0].items.len(), 3, "the clips stay");
         assert_eq!(remove(&mut q, &[TransitionId(1)]), Err(EditError::Nothing));
+    }
+
+    // ---- snapping to the beat (roadmap C4)
+
+    /// A beat grid: `n` beats of `period` from `first`.
+    fn grid(first: Tick, period: Tick, n: i64) -> Vec<Tick> {
+        (0..n).map(|k| first + Tick(period.0 * k)).collect()
+    }
+
+    fn snap_nearest(t: Tick) -> Tick {
+        R.snap_nearest(t)
+    }
+
+    #[test]
+    fn a_transition_moves_its_midpoint_to_the_nearest_beat() {
+        let q = seq();
+        let t = &q.video_tracks[0];
+        let tr = t.transitions.iter().find(|x| x.id.0 == 1).unwrap();
+        // 120 BPM (12 frames a beat) with the beats 5 frames off the frame grid's cut at 48
+        let period = f(12);
+        let beats = grid(f(5), period, 12);
+        let s = snap_to_beat(t, tr, &beats, period, f(1), snap_nearest, &[]).unwrap();
+        // the nearest beat to the midpoint 48 is 53; 24 frames (2 beats) is the length nearest 24
+        assert_eq!(s.beat, Some(f(53)));
+        assert_eq!((s.start, s.duration, s.beats), (f(41), f(24), (2, 1)));
+        assert!(s.start <= f(48) && f(48) <= s.start + s.duration, "still over its cut");
+        // a short transition (half a beat) whose nearest beat is 5 frames past its cut: half a
+        // beat on that beat would leave the cut, so it takes the next nearest length, one beat
+        let mut short = tr.clone();
+        short.start = f(45);
+        short.duration = f(6);
+        let s = snap_to_beat(t, &short, &beats, period, f(1), snap_nearest, &[]).unwrap();
+        assert_eq!((s.start, s.duration, s.beat, s.beats), (f(47), f(12), Some(f(53)), (1, 1)));
+        // ...and keeps half a beat when the beat is close enough to its cut
+        let near = grid(f(2), period, 12);
+        let s = snap_to_beat(t, &short, &near, period, f(1), snap_nearest, &[]).unwrap();
+        assert_eq!((s.duration, s.beats, s.beat), (f(6), (1, 2), Some(f(50))));
+        let mid = s.start + s.duration.mul_ratio(1, 2);
+        assert!((mid - f(50)).abs() <= f(1).mul_ratio(1, 2), "midpoint {mid:?}");
+        assert!(s.start <= f(48) && f(48) <= s.start + s.duration);
+    }
+
+    #[test]
+    fn odd_tempos_land_within_half_a_frame() {
+        for (rate, bpm) in [(FrameRate::FPS_29_97, 77.7), (FrameRate::FPS_23_976, 203.0), (FrameRate::FPS_25, 41.3), (FrameRate::FPS_59_94, 133.33)] {
+            let frame = rate.frame_duration();
+            let fr = |n: i64| rate.tick_of(n);
+            let mut q = seq();
+            let t = &mut q.video_tracks[0];
+            t.items = vec![clip(1, 0, 0), clip(2, 0, 0)];
+            t.items[0].start = Tick::ZERO;
+            t.items[0].duration = fr(300);
+            t.items[1].start = fr(300);
+            t.items[1].duration = fr(300);
+            t.transitions = vec![transition(1, 0, 0, Some(1), Some(2))];
+            t.transitions[0].start = fr(290);
+            t.transitions[0].duration = fr(20);
+            let period = Tick::from_seconds_f64(60.0 / bpm);
+            let beats = grid(Tick::from_seconds_f64(0.137), period, 2000);
+            let s = snap_to_beat(t, &t.transitions[0], &beats, period, frame, |x| rate.snap_nearest(x), &[]).unwrap();
+            let b = s.beat.unwrap();
+            let mid = s.start + s.duration.mul_ratio(1, 2);
+            assert!((mid - b).abs() <= frame.mul_ratio(1, 2), "{rate:?} {bpm}: midpoint off the beat by {:?}", mid - b);
+            // the length is a musical fraction of the beat, rounded to whole frames
+            let (n, d) = s.beats;
+            assert!((s.duration - period.mul_ratio(n, d)).abs() <= frame.mul_ratio(1, 2) + Tick(1), "{rate:?} {bpm}: {:?}", s.duration);
+            assert_eq!(s.duration, rate.snap_nearest(s.duration), "whole frames");
+            assert_eq!(s.start, rate.snap_nearest(s.start), "on a frame");
+            assert!(s.start <= fr(300) && fr(300) <= s.start + s.duration);
+        }
+    }
+
+    #[test]
+    fn fades_keep_their_edge_and_neighbours_are_respected() {
+        let q = seq();
+        let t = &q.video_tracks[0];
+        let period = f(16);
+        let beats = grid(f(3), period, 12);
+        // the fade in at 0 keeps its start and takes the nearest musical length (16 frames)
+        let fade_in = t.transitions.iter().find(|x| x.id.0 == 2).unwrap();
+        let s = snap_to_beat(t, fade_in, &beats, period, f(1), snap_nearest, &[]).unwrap();
+        assert_eq!((s.start, s.duration, s.beat), (f(0), f(16), None));
+        let fade_out = t.transitions.iter().find(|x| x.id.0 == 3).unwrap();
+        let s = snap_to_beat(t, fade_out, &beats, period, f(1), snap_nearest, &[]).unwrap();
+        assert_eq!((s.start + s.duration, s.beat), (f(144), None));
+        // a neighbour in the way: the span must not overlap it
+        let tr = t.transitions.iter().find(|x| x.id.0 == 1).unwrap();
+        let s = snap_to_beat(t, tr, &beats, period, f(1), snap_nearest, &[(f(30), f(46))]).unwrap();
+        assert!(s.start >= f(46), "{s:?}");
+        // nothing fits: every beat out of reach of the cut
+        assert!(snap_to_beat(t, tr, &[f(1000), f(1016)], period, f(1), snap_nearest, &[]).is_none());
+    }
+
+    #[test]
+    fn hostile_grids_never_panic() {
+        let q = seq();
+        let t = &q.video_tracks[0];
+        let tr = t.transitions.iter().find(|x| x.id.0 == 1).unwrap();
+        let huge = [Tick(i64::MIN), Tick(-1), Tick(0), Tick(i64::MAX / 2), Tick(i64::MAX)];
+        for period in [Tick(i64::MIN), Tick(-5), Tick(0), Tick(1), f(1), Tick(i64::MAX)] {
+            for beats in [&[][..], &huge[..], &[f(48)][..], &[f(48), f(48), f(48)][..]] {
+                for frame in [Tick(0), Tick(-1), f(1), Tick(i64::MAX)] {
+                    if let Some(s) = snap_to_beat(t, tr, beats, period, frame, snap_nearest, &[]) {
+                        assert!(s.duration > Tick::ZERO && s.start >= Tick::ZERO && s.start <= f(48) && f(48) <= s.start + s.duration, "{s:?}");
+                    }
+                }
+            }
+        }
+        // nearest beats: in order of distance, never more than asked
+        let b = [f(0), f(10), f(20), f(30)];
+        assert_eq!(nearest(&b, f(19), 3), vec![f(20), f(10), f(30)]);
+        assert_eq!(nearest(&b, f(-100), 2), vec![f(0), f(10)]);
+        assert_eq!(nearest(&b, f(100), 9), vec![f(30), f(20), f(10), f(0)]);
+        assert!(nearest(&[], f(1), 4).is_empty());
     }
 }

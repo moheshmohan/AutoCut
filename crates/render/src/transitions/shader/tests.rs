@@ -96,8 +96,9 @@ fn uniforms_pack_the_host_values() {
     assert_eq!(&u[..4], &[320.0, 180.0, 0.25, 320.0 / 180.0]);
     // border thickness, rotation, centre (uv, frame centre by default), white border
     assert_eq!(&u[4..12], &[0.01, 0.75, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0]);
-    // then 1 / width and 1 / height: a pixel's uv is its centre times these, on CPU and GPU
-    assert_eq!(&u[4 + PARAMS..], &[1.0 / 320.0, 1.0 / 180.0, 0.0, 0.0]);
+    // then 1 / width and 1 / height: a pixel's uv is its centre times these, on CPU and GPU;
+    // no motion blur on a wipe
+    assert_eq!(&u[4 + PARAMS..], &[1.0 / 320.0, 1.0 / 180.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
     assert!(uniforms(&instance("cross_dissolve"), 320, 180, 0.5, 1.0).is_none());
     // a centre in sequence pixels maps to uv with y up; ½-resolution frames scale it
     let mut e = instance("gl_starwipe");
@@ -229,9 +230,14 @@ fn shaders_do_what_their_names_say() {
     let m = apply(&instance("gl_starwipe"), &a, &b, 0.15);
     assert!(is_b(m.get(w / 2, h / 2)) && is_a(m.get(0, 0)));
     assert!(m.px.chunks(4).any(|c| c[0] > 0.99 && c[1] > 0.99 && c[2] > 0.99), "border");
-    // DreamyZoom flashes to white at the midpoint without making alpha exceed 1
-    let m = apply(&instance("gl_dreamyzoom"), &a, &b, 0.5);
+    // DreamyZoom flashes to white at the midpoint without making alpha exceed 1 (the motion
+    // blur averages the flash with the frames around it)
+    let mut dreamy = instance("gl_dreamyzoom");
+    set(&mut dreamy, "motion_blur", ParamValue::Float(0.0));
+    let m = apply(&dreamy, &a, &b, 0.5);
     assert!(m.px.chunks(4).all(|c| c[1] >= 0.99 && c[3] <= 1.0));
+    let m = apply(&instance("gl_dreamyzoom"), &a, &b, 0.5);
+    assert!(m.px.chunks(4).all(|c| c[1] >= 0.9 && c[3] <= 1.0));
     // Mosaic ends on the incoming tile; pixelize is blocky at its strongest
     let m = apply(&instance("gl_mosaic"), &a, &b, 0.999);
     assert!(m.px.chunks(4).all(|c| c[2] > 0.99));
@@ -288,7 +294,7 @@ fn batch_two_shaders_do_what_their_names_say() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// C2: the engines and the map-reading ports
+// C2: the engines and the map-reading ports; C4: motion blur
 
 fn share(m: &Image, pred: impl Fn([f32; 4]) -> bool) -> f32 {
     m.px.chunks(4).filter(|c| pred([c[0], c[1], c[2], c[3]])).count() as f32 / (m.w * m.h) as f32
@@ -440,4 +446,46 @@ fn displacement_and_luma_read_generated_maps() {
     assert!(map(&instance("gl_crosswarp"), 64, 36, 1.0).is_none());
     assert!(map(&instance("blend_screen"), 64, 36, 1.0).is_none());
     assert!(map(&instance("luma_radial"), 64, 36, 1.0).is_some());
+}
+
+#[test]
+fn motion_blur_averages_the_zoom_over_the_shutter() {
+    let (w, h) = (64usize, 36usize);
+    let (a, b) = (frame(w, h, 0.3), frame(w, h, 0.7));
+    for id in ["gl_simplezoom", "gl_dreamyzoom", "gl_directionalwarp", "gl_crosswarp", "gl_bounce"] {
+        let blurred = instance(id);
+        let mut sharp = instance(id);
+        set(&mut sharp, "motion_blur", ParamValue::Float(0.0));
+        // the uniforms carry the shutter: 12 taps at 50 %, centred on the progress
+        let u = uniforms(&blurred, 64, 36, 0.4, 1.0).unwrap();
+        let (first, step, taps) = (u[8 + PARAMS], u[9 + PARAMS], u[10 + PARAMS]);
+        assert_eq!(taps, 12.0, "{id}");
+        assert!((first + step * (taps - 1.0) * 0.5 - 0.4).abs() < 1e-6, "{id}: centred");
+        assert!((step * (taps - 1.0) - MAX_SHUTTER * 0.5).abs() < 1e-6, "{id}: shutter");
+        assert_eq!(&uniforms(&sharp, 64, 36, 0.4, 1.0).unwrap()[8 + PARAMS..], &[0.0; 4]);
+        // blurred differs from sharp, and is the mean of the sharp frames over the shutter
+        let m = apply(&blurred, &a, &b, 0.4);
+        assert_ne!(m, apply(&sharp, &a, &b, 0.4), "{id}");
+        let mut mean = Image::new(w, h);
+        for i in 0..12 {
+            let q = (first + i as f32 * step).clamp(0.0, 1.0);
+            let f = apply(&sharp, &a, &b, q);
+            for (o, v) in mean.px.iter_mut().zip(&f.px) {
+                *o += v;
+            }
+        }
+        mean.px.iter_mut().for_each(|v| *v /= 12.0);
+        let worst = m.px.iter().zip(&mean.px).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "{id}: {worst}");
+        // still exact at the ends
+        assert_eq!(apply(&blurred, &a, &b, 0.0), a);
+        assert_eq!(apply(&blurred, &a, &b, 1.0), b);
+    }
+    // 100 % takes 16 taps; transitions without the parameter take none
+    let mut e = instance("gl_simplezoom");
+    set(&mut e, "motion_blur", ParamValue::Float(100.0));
+    assert_eq!(uniforms(&e, 8, 8, 0.5, 1.0).unwrap()[10 + PARAMS], 16.0);
+    set(&mut e, "motion_blur", ParamValue::Float(f64::NAN));
+    assert!(uniforms(&e, 8, 8, 0.5, 1.0).unwrap().iter().all(|v| v.is_finite()));
+    assert_eq!(uniforms(&instance("gl_crosszoom"), 8, 8, 0.5, 1.0).unwrap()[10 + PARAMS], 0.0);
 }

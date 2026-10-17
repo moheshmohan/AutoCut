@@ -140,6 +140,7 @@ is traced or derived from Adobe artwork.
 | Elements sound effects (whooshes, impacts, risers, swooshes, click, pop, sweep, boom) | `crates/engine/src/elements.rs` (`SOUNDS`): fixed parameters and seeds for the synths in `crates/audio-dsp/src/synth.rs` and `crates/audio-dsp/src/sfx.rs` (oscillators, noise, filters, reverb; no samples), rendered to WAV only when inserted |
 | Elements stickers and animated text presets (lower third, title pop, kinetic words, caption box, countdown, end card) | `crates/project/src/elements.rs`: original graphics templates (shape and text layers, keyframes, pins) with the bundled Inter font; sticker previews in `assets/elements/stickers/` |
 | Luma Wipes and Blend Dissolves (transition presets) and the grayscale maps of the luma wipes and of GL displacement / GL luma (radial, linear, iris shapes, barn doors, blinds, clock, fan, spiral, checker, rings, waves, blocks, value noise, Worley cells) | `crates/project/src/transition_engines.rs` (preset values and names), `crates/render/src/transitions/shader/maps.rs` (every map computed from scratch per frame size; no luma image files, none from MLT/Kdenlive/Shotcut or gl-transitions), `luma_wipe.wgsl` and `blend_dissolve.wgsl` (original shaders) |
+| Transition sounds (whoosh, riser, impact coupled to a video transition) | synthesised when the sequence is mixed by `crates/audio-dsp/src/synth.rs` (oscillators, noise, envelopes, filters; no samples) |
 
 ## Optional build input: craft-fonts
 

@@ -3477,6 +3477,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::narration::commands());
     v.extend(crate::audio_generate::commands());
     v.extend(crate::music::commands());
+    v.extend(crate::transition_tools::commands());
     v.extend(crate::voice_clone::commands());
     v.extend(crate::video_templates::commands());
     v.extend(crate::music_neural::commands());
@@ -4289,7 +4290,8 @@ pub fn preview_transition(s: &Session, p: &Value, kind: TrackKind) -> Result<(Tr
     } else {
         cut - dur
     };
-    let tr = Transition { id: TransitionId(0), effect: instance, start: rate.snap(start), duration: dur, from, to, align: Default::default(), reverse };
+    let tr =
+        Transition { id: TransitionId(0), effect: instance, start: rate.snap(start), duration: dur, from, to, align: Default::default(), reverse, sound: None };
     Ok((track, tr))
 }
 
@@ -4332,7 +4334,7 @@ pub fn inspect_sequence(s: &Session, id: ItemId, q: &filmcraft_project::Sequence
                 "enabled": i.enabled, "link": i.link, "label": i.label.name(),
                 "effects": i.effects.iter().map(|e| json!({"effect": e.effect, "enabled": e.enabled, "masks": e.masks.len(), "params": e.params.iter().map(|(k, p)| (k.clone(), json!({"value": format!("{:?}", p.value), "keyframes": p.keyframes.len()}))).collect::<serde_json::Map<_, _>>()})).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
-            "transitions": t.transitions.iter().map(|x| json!({"id": x.id.0, "effect": x.effect.effect, "start": x.start.0, "duration": x.duration.0, "from": x.from.map(|c| c.0), "to": x.to.map(|c| c.0), "reverse": x.reverse, "align": filmcraft_edit::transitions::bounds(t, x).map(|b| filmcraft_edit::transitions::alignment(x, b.1, rate.frame_duration()).id()), "params": x.effect.params.iter().map(|(k, v)| (k.clone(), serde_json::to_value(&v.value).unwrap_or_default())).collect::<serde_json::Map<_, _>>()})).collect::<Vec<_>>(),
+            "transitions": t.transitions.iter().map(|x| json!({"id": x.id.0, "effect": x.effect.effect, "start": x.start.0, "duration": x.duration.0, "from": x.from.map(|c| c.0), "to": x.to.map(|c| c.0), "reverse": x.reverse, "sound": x.sound.as_ref().map(|s| json!({"kind": s.kind.id(), "gain": s.gain_db, "intensity": s.intensity, "seed": s.seed, "length": s.length.map(|l| l.0)})), "align": filmcraft_edit::transitions::bounds(t, x).map(|b| filmcraft_edit::transitions::alignment(x, b.1, rate.frame_duration()).id()), "params": x.effect.params.iter().map(|(k, v)| (k.clone(), serde_json::to_value(&v.value).unwrap_or_default())).collect::<serde_json::Map<_, _>>()})).collect::<Vec<_>>(),
         })
     };
     // the frames export renders, a partial last frame included

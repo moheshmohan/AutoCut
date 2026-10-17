@@ -155,7 +155,7 @@ impl Builder {
             TransitionAlign::EndAtCut => at - dur,
         };
         if let Some(t) = q.tracks_mut(kind).get_mut(track) {
-            t.transitions.push(Transition { id, effect: def.instance(), start, duration: dur, from, to, align, reverse: false });
+            t.transitions.push(Transition { id, effect: def.instance(), start, duration: dur, from, to, align, reverse: false, sound: None });
             t.sort();
         }
     }

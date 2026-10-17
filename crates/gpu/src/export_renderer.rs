@@ -348,6 +348,7 @@ mod tests {
             to: Some(ib),
             align: Default::default(),
             reverse: false,
+            sound: None,
         });
         let under = p.make_track_item(matte, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, rate.tick_of(48)), rate).unwrap();
         p.sequence_mut(seq).unwrap().video_tracks[0].items.push(under);

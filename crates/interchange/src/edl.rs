@@ -512,7 +512,7 @@ fn import_event(ctx: &mut Ctx, ev: &Event, report: &mut Report) {
                 let eff = cache.get_or_insert_with(|| transition_for(l2.trans, ev.effect.as_deref(), audio, report)).clone();
                 let id = TransitionId(ctx.b.alloc());
                 let track = &mut ctx.seq.tracks_mut(kind)[idx];
-                track.transitions.push(Transition { id, effect: eff, start: t0, duration: d, from, to, align, reverse: false });
+                track.transitions.push(Transition { id, effect: eff, start: t0, duration: d, from, to, align, reverse: false, sound: None });
                 track.sort();
             }
         }
