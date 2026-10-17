@@ -24,9 +24,13 @@
 //! - `sweep [--days N] [--dev] [--dry-run]`: free the disk builds and tests took: agents'
 //!   `target/agent-*` builds and test outputs untouched for N days (default 3), incremental
 //!   caches, with `--dev` the whole dev profile; profiles a build is using are skipped (`sweep.rs`).
+//! - `live [--only a,b] [--google] [--picker] [--voice clone:NAME] [--clip FILE]`: the opt-in live
+//!   checks against this machine's models, sign-ins and browser in one command, a report in
+//!   `<target>/live/<time>/` (`live.rs`).
 
 mod changed;
 mod ico;
+mod live;
 mod parity;
 mod sweep;
 mod version;
@@ -510,6 +514,7 @@ fn main() -> ExitCode {
         "ci" if std::env::args().nth(2).as_deref() == Some("--changed") => changed::run_changed(&std::env::args().skip(3).collect::<Vec<_>>()),
         "ci" => ci(),
         "sweep" => sweep::run_sweep(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "live" => live::run_live(&std::env::args().skip(2).collect::<Vec<_>>()),
         "bench" => bench(),
         "bench-playback" => bench_playback(),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -526,7 +531,7 @@ fn main() -> ExitCode {
             ico::run(&rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
         _ => Err(
-            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci [--changed [--base REF]]|sweep [--days N] [--dev] [--dry-run]|bench [args]|bench-playback [args]>"
+            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci [--changed [--base REF]]|sweep [--days N] [--dev] [--dry-run]|live [--only a,b] [--google] [--picker] [--voice V] [--clip F]|bench [args]|bench-playback [args]>"
                 .into(),
         ),
     };

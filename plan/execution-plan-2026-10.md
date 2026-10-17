@@ -30,7 +30,7 @@ wrong base, 20–30 min gates re-run six times, CI minutes burned on every push.
 | 0.4 | Fast gate + nightly full gate | **Done 2026-10-17** (`7aa5581a`): `cargo xtask ci --changed`; full `cargo xtask ci` before each push. Not yet tried: `cargo nextest`, `sccache` |
 | 0.5 | Fork CI | **Done 2026-10-17**: heavy upstream workflows disabled on the fork (GitHub settings); `autocut-checks.yml` runs fmt, layers, assets on push |
 | 0.6 | Disk hygiene | **Done 2026-10-17**: `cargo xtask sweep [--days N] [--dev] [--dry-run]` (agents' builds and test outputs untouched for N days, incremental caches; skips a profile a build holds); weekly and after each lane merge (docs/contributing.md §5) |
-| 0.7 | One-command live check | `cargo xtask live` (env-gated, takes the locks): picker multi-search + tidy, upload into an album, a cloned line heard back, analysis-cache hit, a 10 s showcase build — report in `target/live/`, never touches `~/Movies` |
+| 0.7 | One-command live check | **Done 2026-10-17**: `cargo xtask live [--only …] [--google] [--picker] [--voice V] [--clip F]` — models, screen grounding, Whisper, a cloned line heard back, analysis-cache hit, a short showcase exported with QA; Google album/upload and the picker opt-in; report in `target/live/<time>/` (docs/testing.md). First run: all 6 default stages pass (voice 100 % heard, 34 s show, QA 0 errors, −14.1 LUFS) |
 | 0.8 | Where plans live | **Done 2026-10-17**: `plan/` is tracked; only `plan/premiere/` (the Premiere visual reference) stays gitignored |
 
 ## 3. Roadmap phases as parallel lanes

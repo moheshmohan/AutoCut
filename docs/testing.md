@@ -44,6 +44,27 @@ FILMCRAFT_REQUIRE_ORACLES=1 cargo test --workspace   # CI: missing ffmpeg fails 
 
 Commit `*.proptest-regressions` files so failing cases are re-run.
 
+### Live checks on a real machine
+
+Tests that need this machine's models, sign-ins or browser are opt-in (an environment variable
+each, so `cargo test` stays offline). `cargo xtask live` runs them in one go and writes
+`<target>/live/<time>/report.json`, each stage's output in `logs/`, and everything it makes
+(projects, the export) beside them, never in `~/Movies`:
+
+| Stage | Checks | Needs |
+|---|---|---|
+| `models` | prompt classifier, frame describer (`AUTOCUT_LIVE`) | Ollama + the AutoCut models |
+| `screen` | the screen agent's grounding finds a drawn button (`AUTOCUT_SCREEN_LIVE`) | Ollama `qwen2.5vl:7b` |
+| `whisper` | AutoCut removes the silences of natural speech (`AUTOCUT_WHISPER_LIVE`) | the Whisper model, macOS `say` |
+| `voice` | a new line in a cloned voice (`--voice`, else the first natural clone) heard back by Whisper, ≥ 50 % of its words | a VoxCPM clone; takes the GPU lock |
+| `analysis` | a clip (`--clip`, else one the analysis cache knows shows a robot) analysed twice, the second from the cache | Ollama |
+| `showcase` | a short narrated showcase of that clip exported; its QA must report no errors | the above |
+| `album`, `upload` (`--google`) | the "FilmCraft live check" album made or found, the showcase uploaded into it | `photos auth --albums` |
+| `picker` (`--picker`) | the picker agent's two searches in one session, then `photos tidy` | Chrome, Screen Recording; takes the browser lock — hands off the mouse |
+
+`--only voice,showcase` runs some. Run it before trusting a build with a real video, and after
+merging work on models, narration, analysis or Google Photos.
+
 ## 2. ffmpeg oracle tests
 
 ffmpeg and ffprobe are **external processes** used to generate fixtures and to check results. They
