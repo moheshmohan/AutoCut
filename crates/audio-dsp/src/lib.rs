@@ -12,6 +12,7 @@
 //! * [`synth`] — procedural sound effects (whoosh, impact, riser, drone) and music beds.
 //! * [`music`] — the soundtrack engine: block-arranged music of an exact length ending on a bar,
 //!   in stems, with a mood → genre → tempo → energy → use-case taxonomy and an exact beat map.
+//! * [`sfx`] — short procedural effects for the Elements library (click, pop, swooshes, sweep, boom).
 //!
 //! Conventions: audio is **planar f32** (`&mut [&mut [f32]]`, one slice per channel, all the same
 //! length). `process` never allocates; all buffers are sized at construction. Parameters may be
@@ -33,6 +34,7 @@ pub mod music;
 pub mod oversample;
 pub mod remix;
 pub mod resample;
+pub mod sfx;
 mod smooth;
 pub mod sync;
 pub mod synth;
