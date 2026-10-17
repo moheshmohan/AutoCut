@@ -21,10 +21,14 @@
 //!   upstream, else `main`): clippy on the changed crates and their dependents, the changed
 //!   crates' tests, wasm only when a web-built crate is affected (`changed.rs`). For iterating;
 //!   the full `ci` runs before every push.
+//! - `sweep [--days N] [--dev] [--dry-run]`: free the disk builds and tests took: agents'
+//!   `target/agent-*` builds and test outputs untouched for N days (default 3), incremental
+//!   caches, with `--dev` the whole dev profile; profiles a build is using are skipped (`sweep.rs`).
 
 mod changed;
 mod ico;
 mod parity;
+mod sweep;
 mod version;
 
 use std::process::{Command, ExitCode};
@@ -505,6 +509,7 @@ fn main() -> ExitCode {
         "fixtures" => fixtures(&std::env::args().skip(2).collect::<Vec<_>>()),
         "ci" if std::env::args().nth(2).as_deref() == Some("--changed") => changed::run_changed(&std::env::args().skip(3).collect::<Vec<_>>()),
         "ci" => ci(),
+        "sweep" => sweep::run_sweep(&std::env::args().skip(2).collect::<Vec<_>>()),
         "bench" => bench(),
         "bench-playback" => bench_playback(),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -521,7 +526,7 @@ fn main() -> ExitCode {
             ico::run(&rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
         _ => Err(
-            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci [--changed [--base REF]]|bench [args]|bench-playback [args]>"
+            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci [--changed [--base REF]]|sweep [--days N] [--dev] [--dry-run]|bench [args]|bench-playback [args]>"
                 .into(),
         ),
     };

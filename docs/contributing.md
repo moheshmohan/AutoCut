@@ -161,6 +161,13 @@ export CARGO_TARGET_DIR=target/agent-hevc     # separate build dir, no lock figh
   build. Keep every manifest valid at all times, including half-finished crates.
 - Test fixtures always go to `<repo>/target/fixtures/`, whatever `CARGO_TARGET_DIR` says.
 - `.mcp.json` points at `target/release/filmcraft-cli`. With a custom target dir, use your own path.
+- Shared machine resources (the browser an agent drives, the GPU) are locked: `filmcraft-cli locks`
+  shows who holds what, `filmcraft-cli locks hold chrome --minutes 30 --note "<what>"` holds one
+  ([agents.md §5](agents.md#5-autonomous-work-loop)).
+- Disk: an agent's `target/agent-<name>` is tens of GB. `cargo xtask sweep` removes agents' build
+  directories and test outputs untouched for 3 days (`--days N`) and every incremental cache, never
+  a profile a build is using; `--dev` also drops the dev profile, `--dry-run` only reports. Run it
+  weekly, and after merging a lane.
 
 ## 6. How to add…
 
