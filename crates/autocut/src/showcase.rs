@@ -906,16 +906,20 @@ async fn push_in(ex: &dyn Executor, clip: u64, scale: f64, t0: f64, t1: f64, fps
     Ok(())
 }
 
-/// How far a filled shot's crop travels across its subject, as a share of the picture.
+/// How far a filled shot's crop travels across its subject at least, as a share of the
+/// picture (a tall subject gets a longer tilt: [`reframe_path`]).
 const REFRAME_TILT: f64 = 0.06;
 
 /// Where a filled shot sits, start and end: the Motion position (sequence pixels) that puts the
 /// subject's centre `focus` (0..1 of the clip, x right, y down) mid-frame, as far as the picture
-/// still covers the `frame`, moving up to [`REFRAME_TILT`] along the axis the fill crops (a tilt
-/// down a portrait clip, so a tall robot is seen whole over the shot). The picture of a clip of
-/// shape `aspect` (width over height) filling the frame is as wide as the frame (a narrower
-/// clip) or as tall (a wider one). `None` for sizes that make no sense.
-fn reframe_path(aspect: f64, frame: (f64, f64), focus: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+/// still covers the `frame`, moving along the axis the fill crops (a tilt down a portrait clip)
+/// by [`REFRAME_TILT`], or across the whole subject when it is taller than the frame shows: its
+/// extent is taken from `area`, the share of the clip its box covers (a robot as tall as wide
+/// in the clip's shape, a little taller), so a big robot is revealed top to bottom over the
+/// shot. The picture of a clip of shape `aspect` (width over height) filling the frame is as
+/// wide as the frame (a narrower clip) or as tall (a wider one). `None` for sizes that make no
+/// sense.
+fn reframe_path(aspect: f64, frame: (f64, f64), focus: [f64; 2], area: f64) -> Option<([f64; 2], [f64; 2])> {
     let ok = |v: f64| v.is_finite() && v > 0.0;
     let (fw, fh) = frame;
     if !(ok(aspect) && ok(fw) && ok(fh)) {
@@ -930,7 +934,9 @@ fn reframe_path(aspect: f64, frame: (f64, f64), focus: [f64; 2]) -> Option<([f64
     };
     let centre = [clamp(0, focus[0]), clamp(1, focus[1])];
     let axis = if vis[1] <= vis[0] { 1 } else { 0 };
-    let d = REFRAME_TILT.min((1.0 - vis[axis]) / 2.0).max(0.0);
+    // the subject's extent along that axis (0..1), from its box's share of the clip
+    let extent = if area.is_finite() && area > 0.0 { (area.min(1.0).sqrt() * 1.3).min(1.0) } else { 0.0 };
+    let d = REFRAME_TILT.max((extent - vis[axis]) / 2.0).min((1.0 - vis[axis]) / 2.0).max(0.0);
     let (mut from, mut to) = (centre, centre);
     from[axis] = clamp(axis, centre[axis] - d);
     to[axis] = clamp(axis, centre[axis] + d);
@@ -942,9 +948,9 @@ fn reframe_path(aspect: f64, frame: (f64, f64), focus: [f64; 2]) -> Option<([f64
 /// Keyframe a filled shot's position along [`reframe_path`] from `t0` to `t1`, eased like the
 /// push-in.
 #[allow(clippy::too_many_arguments)]
-async fn reframe(ex: &dyn Executor, clip: u64, aspect: f64, frame: (f64, f64), focus: [f64; 2], t0: f64, t1: f64, fps: f64) -> Result<(), AutoCutError> {
+async fn reframe(ex: &dyn Executor, clip: u64, aspect: f64, frame: (f64, f64), focus: Moment, t0: f64, t1: f64, fps: f64) -> Result<(), AutoCutError> {
     let last = on_frame(t1 - 1.0 / fps, fps);
-    let Some((from, to)) = reframe_path(aspect, frame, focus) else { return Ok(()) };
+    let Some((from, to)) = reframe_path(aspect, frame, focus.center, focus.area) else { return Ok(()) };
     if last <= t0 {
         return Ok(());
     }
@@ -973,7 +979,7 @@ async fn place_shot(
     src: f64,
     dur: f64,
     stabilize: bool,
-    focus: Option<[f64; 2]>,
+    focus: Option<Moment>,
 ) -> Result<Placed, AutoCutError> {
     let frame_aspect = tr.aspect;
     let t = on_frame(t, tr.fps);
@@ -999,7 +1005,8 @@ async fn place_shot(
         // still right
         push_in(ex, fg, scale, t, end, tr.fps).await.ok();
         if fill {
-            reframe(ex, fg, aspect, tr.frame, focus.unwrap_or(Moment::middle()), t, end, tr.fps).await.ok();
+            let focus = focus.unwrap_or(Moment { seconds: 0.0, area: 0.0, center: Moment::middle() });
+            reframe(ex, fg, aspect, tr.frame, focus, t, end, tr.fps).await.ok();
         }
     }
     if stabilize && tr.stabilize {
@@ -1109,6 +1116,8 @@ struct Narrations {
     /// tried yet).
     retakes: usize,
     can_check: Option<bool>,
+    /// The cloned voice's own pitch, Hz (None: not asked yet; Some(None): unknown).
+    reference_pitch: Option<Option<f64>>,
     notes: Vec<String>,
 }
 
@@ -1118,6 +1127,11 @@ struct Narrations {
 const HEARD_ENOUGH: f64 = 0.5;
 /// Readings of one line at most (the first and two more takes).
 const MAX_TAKES: u32 = 3;
+/// A reading whose median pitch is more than this times its voice sample's overacted. Live
+/// (`median_pitch`), a sample at 84 Hz read 86–111 Hz in good lines (a reading sits a little
+/// above its sample, more so when excited), so only a reading pitched far up is caught; one
+/// that merely sounds over-excited (116 Hz) is not, and is better handled by its delivery.
+const PITCH_LIMIT: f64 = 1.45;
 
 /// The share of `said`'s words (letters only, three or more) that `heard` contains, a word
 /// counting when the recogniser wrote it or one starting with its first four letters ("Neolix"
@@ -1159,42 +1173,58 @@ async fn narrate(
         run(ex, "tts.create", json!({"text": say, "voice": voice, "delivery": delivery.id(), "take": take, "time": ticks(t), "track": tr.voice})).await
     };
     let mut r = create(0).await?;
-    // a cloned voice can garble a line: hear it back and read it again when it did not say it
-    // (another take), keeping the best reading
-    if voice.starts_with("clone:") && narrations.can_check != Some(false) {
+    // a cloned voice can garble a line, or overact it (a strained, much higher voice): hear it
+    // back and measure its pitch, and read it again (another take) when it did not say it or
+    // came out far above the voice's own pitch, keeping the best reading
+    if voice.starts_with("clone:") {
+        if narrations.reference_pitch.is_none() {
+            let r = ex.execute("tts.clonedVoices", json!({"voice": voice})).await.ok();
+            narrations.reference_pitch = Some(r.and_then(|r| r["pitchHz"].as_f64()).filter(|p| p.is_finite() && *p > 0.0));
+        }
+        let reference = narrations.reference_pitch.flatten();
         let mut best: Option<(f64, u32)> = None;
         for take in 0..MAX_TAKES {
             let Some(item) = r["item"].as_u64() else { break };
-            let Some(text) = heard(ex, item).await else {
-                narrations.can_check = Some(false);
-                narrations.notes.push("narration: lines were not heard back (no speech model): `transcript.downloadModel`".into());
-                break;
+            let share = if narrations.can_check == Some(false) {
+                1.0
+            } else {
+                match heard(ex, item).await {
+                    Some(text) => {
+                        narrations.can_check = Some(true);
+                        heard_share(say, &text)
+                    }
+                    None => {
+                        narrations.can_check = Some(false);
+                        narrations.notes.push("narration: lines were not heard back (no speech model): `transcript.downloadModel`".into());
+                        1.0
+                    }
+                }
             };
-            narrations.can_check = Some(true);
-            let share = heard_share(say, &text);
-            if share >= HEARD_ENOUGH {
+            let pitch = r["pitchHz"].as_f64();
+            let overacted = matches!((pitch, reference), (Some(p), Some(rf)) if p > rf * PITCH_LIMIT);
+            if share >= HEARD_ENOUGH && !overacted {
                 break;
             }
-            if best.is_none_or(|(b, _)| share > b) {
-                best = Some((share, take));
+            // a reading that says the line beats one that does not; overacting costs half
+            let score = share - if overacted { 0.5 } else { 0.0 };
+            if best.is_none_or(|(b, _)| score > b) {
+                best = Some((score, take));
             }
-            let clip = r["clip"].as_u64();
+            let why = if share < HEARD_ENOUGH { format!("the voice said {:.0}% of the line", share * 100.0) } else { "the voice overacted it".to_string() };
             let last = take + 1 >= MAX_TAKES;
             // the best reading when none was good enough (cached: nothing is read again)
             let next = if last { best.map_or(take, |(_, k)| k) } else { take + 1 };
             if last && next == take {
-                narrations.notes.push(format!("narration at {t:.1}s: the voice said {:.0}% of the line in its best take", share * 100.0));
+                narrations.notes.push(format!("narration at {t:.1}s: {why} in its best take"));
                 break;
             }
-            if let Some(c) = clip {
+            if let Some(c) = r["clip"].as_u64() {
                 run(ex, "edit.clear", json!({"clips": [c]})).await?;
             }
             r = create(next).await?;
             narrations.retakes += 1;
             if last {
-                narrations
-                    .notes
-                    .push(format!("narration at {t:.1}s: the voice said {:.0}% of the line in its best take", best.map_or(0.0, |(b, _)| b) * 100.0));
+                narrations.notes.push(format!("narration at {t:.1}s: no take was clean ({why} in the last); the best kept"));
                 break;
             }
         }
@@ -1864,7 +1894,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let next_cut = beats.as_ref().and_then(|b| b.nearest(at + cut, at + cut * 0.5, at + cut * 1.5)).unwrap_or(at + cut);
         let len = if i + 1 >= picks.len() { intro_len - at } else { (next_cut - at).min(intro_len - at) };
         let len = len.min((s.clip_seconds - 0.4).max(0.5));
-        let shot = place_shot(ex, &tr, s.item, at, s.window_start(len), len, true, s.largest.map(|m| m.center)).await?;
+        let shot = place_shot(ex, &tr, s.item, at, s.window_start(len), len, true, s.largest).await?;
         fade_in(ex, shot.audio).await;
         mix.sounds.extend(shot.audio);
         at = shot.end;
@@ -1960,7 +1990,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 Some(end) if i + 1 == n_wins && slow >= 0.999 => (end - at).max(0.5).min(reach.max(0.5)),
                 _ => *len,
             };
-            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, len, true, s.largest.map(|m| m.center)).await?;
+            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, len, true, s.largest).await?;
             mix.sounds.extend(audio);
             let mut shot_end = end;
             if slow < 0.999 {
@@ -2051,7 +2081,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let outro_len = (outro_voice_at - t + outro_spoken + 1.5).max(5.0);
     if let Some(h0) = entries.last().and_then(|e| e.shots.first()) {
         let len = outro_len.min((h0.clip_seconds - 0.4).max(1.0));
-        let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, false, h0.largest.map(|m| m.center)).await?;
+        let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, false, h0.largest).await?;
         mix.sounds.extend(audio);
         fade_in(ex, audio).await;
         if let Some(a) = audio {
@@ -2268,7 +2298,7 @@ async fn compose_thumbnail(
         hits: "A1".into(),
     };
     // the frame: a second of the shot from the moment, its first frame the one exported
-    place_shot(ex, &tr, shot.item, 0.0, moment.seconds, 1.0, false, Some(moment.center)).await?;
+    place_shot(ex, &tr, shot.item, 0.0, moment.seconds, 1.0, false, Some(moment)).await?;
     // the title, as large as two lines across the frame allow, in the half of the picture the
     // robot is not in (low unless it stands low), the count in the opposite corner
     let lines = thumbnail_lines(&opts.title);
@@ -2801,7 +2831,7 @@ mod tests {
         };
         // a portrait phone clip, robot in its upper third: a tilt down across it, frame covered
         let portrait = 1080.0 / 1920.0;
-        let (a, b) = reframe_path(portrait, frame, [0.5, 0.3]).unwrap();
+        let (a, b) = reframe_path(portrait, frame, [0.5, 0.3], 0.01).unwrap();
         assert_eq!((a[0], b[0]), (960.0, 960.0), "no pan across a portrait clip");
         assert!(a[1] > b[1], "the picture moves up: the view tilts down ({a:?} → {b:?})");
         let shown_h = 1920.0 / portrait;
@@ -2809,18 +2839,25 @@ mod tests {
         assert!(covers(portrait, a) && covers(portrait, b));
         // a robot at the very top: held at the edge, never showing past the picture
         for f in [[0.5, 0.0], [0.5, 1.0], [0.0, 0.5], [1.0, 1.0], [f64::NAN, 0.4]] {
-            let (a, b) = reframe_path(portrait, frame, f).unwrap();
+            let (a, b) = reframe_path(portrait, frame, f, 0.9).unwrap();
             assert!(covers(portrait, a) && covers(portrait, b), "{f:?}: {a:?} {b:?}");
         }
         // 4:3 crops a little top and bottom; a wide clip pans
-        let (a, b) = reframe_path(4.0 / 3.0, frame, [0.5, 0.5]).unwrap();
+        let (a, b) = reframe_path(4.0 / 3.0, frame, [0.5, 0.5], 0.05).unwrap();
         assert!(covers(4.0 / 3.0, a) && covers(4.0 / 3.0, b) && a[1] != b[1]);
-        let (a, b) = reframe_path(21.0 / 9.0, frame, [0.8, 0.5]).unwrap();
+        let (a, b) = reframe_path(21.0 / 9.0, frame, [0.8, 0.5], 0.05).unwrap();
         assert!(covers(21.0 / 9.0, a) && covers(21.0 / 9.0, b) && a[0] != b[0] && a[1] == 540.0);
         // the frame's own shape: no move; nonsense: nothing
-        assert_eq!(reframe_path(16.0 / 9.0, frame, [0.2, 0.2]), Some(([960.0, 540.0], [960.0, 540.0])));
-        assert_eq!(reframe_path(f64::NAN, frame, [0.5, 0.5]), None);
-        assert_eq!(reframe_path(0.5, (0.0, 1080.0), [0.5, 0.5]), None);
+        assert_eq!(reframe_path(16.0 / 9.0, frame, [0.2, 0.2], 0.5), Some(([960.0, 540.0], [960.0, 540.0])));
+        assert_eq!(reframe_path(f64::NAN, frame, [0.5, 0.5], 0.1), None);
+        assert_eq!(reframe_path(0.5, (0.0, 1080.0), [0.5, 0.5], 0.1), None);
+        // the live case: a guide robot covering 38 % of a portrait clip is taller than the
+        // frame shows, so the tilt runs most of the picture instead of a 6 % drift
+        let (small_a, small_b) = reframe_path(portrait, frame, [0.5, 0.43], 0.02).unwrap();
+        let (big_a, big_b) = reframe_path(portrait, frame, [0.5, 0.43], 0.38).unwrap();
+        assert!((big_a[1] - big_b[1]).abs() > 3.0 * (small_a[1] - small_b[1]).abs(), "{big_a:?} {big_b:?} vs {small_a:?} {small_b:?}");
+        assert!(covers(portrait, big_a) && covers(portrait, big_b));
+        assert!(reframe_path(portrait, frame, [0.5, 0.5], f64::NAN).is_some(), "an unknown size drifts the least");
     }
 
     #[test]
@@ -2844,6 +2881,8 @@ mod tests {
     struct Retakes {
         calls: std::sync::Mutex<Vec<(String, Value)>>,
         good_from: u64,
+        /// Takes before this one come out strained (far above the voice's 100 Hz).
+        calm_from: u64,
     }
 
     impl crate::Executor for Retakes {
@@ -2852,8 +2891,10 @@ mod tests {
             let r = match id {
                 "tts.create" => {
                     let take = p["take"].as_u64().unwrap_or(0);
-                    Ok(json!({"clip": 10 + take, "item": 100 + take, "duration": 5.0 * TPS, "cached": false}))
+                    let pitch = if take >= self.calm_from { 104.0 } else { 150.0 };
+                    Ok(json!({"clip": 10 + take, "item": 100 + take, "duration": 5.0 * TPS, "cached": false, "pitchHz": pitch}))
                 }
+                "tts.clonedVoices" => Ok(json!({"id": p["voice"], "pitchHz": 100.0})),
                 "transcript.generate" => Ok(json!({"items": []})),
                 "transcript.inspect" => {
                     let take = p["item"].as_u64().unwrap_or(0) - 100;
@@ -2889,7 +2930,7 @@ mod tests {
     #[tokio::test]
     async fn a_garbled_cloned_line_is_read_again() {
         let say = "Pepper greeted every visitor at the stand.";
-        let ex = Retakes { calls: Default::default(), good_from: 1 };
+        let ex = Retakes { calls: Default::default(), good_from: 1, calm_from: 0 };
         let mut n = Narrations::default();
         let secs = narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
         assert_eq!(secs, 5.0);
@@ -2900,18 +2941,24 @@ mod tests {
         assert_eq!(calls.iter().filter(|(c, p)| c == "tts.create" && p["take"] == 1).count(), 1);
 
         // never good: three takes, the best kept, and a note
-        let ex = Retakes { calls: Default::default(), good_from: 99 };
+        let ex = Retakes { calls: Default::default(), good_from: 99, calm_from: 0 };
         let mut n = Narrations::default();
         narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
         assert_eq!(n.clips.len(), 1);
-        assert!(n.notes.iter().any(|l| l.contains("best take")), "{:?}", n.notes);
+        assert!(n.notes.iter().any(|l| l.contains("best")), "{:?}", n.notes);
         assert!(ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").count() <= MAX_TAKES as usize + 1);
 
         // a voice that is not cloned is not heard back
-        let ex = Retakes { calls: Default::default(), good_from: 99 };
+        let ex = Retakes { calls: Default::default(), good_from: 99, calm_from: 0 };
         let mut n = Narrations::default();
         narrate(&ex, &voice_tracks(), Some("basic-male"), say, say, Delivery::Plain, 0.0, &mut n).await.unwrap();
         assert!(ex.calls.lock().unwrap().iter().all(|(c, _)| c == "tts.create"));
+
+        // said right but overacted (150 Hz from a 100 Hz voice): read again, the calm take kept
+        let ex = Retakes { calls: Default::default(), good_from: 0, calm_from: 1 };
+        let mut n = Narrations::default();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Excited, 3.0, &mut n).await.unwrap();
+        assert_eq!((n.clips.clone(), n.retakes), (vec![11], 1));
     }
 
     #[test]

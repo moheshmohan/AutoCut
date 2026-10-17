@@ -42,7 +42,7 @@ pub fn commands() -> Vec<CommandSpec> {
             clone_voice,
             false,
         ),
-        spec("tts.clonedVoices", "Cloned Voices", "{}", cloned_voices, false),
+        spec("tts.clonedVoices", "Cloned Voices", r#"{"voice":"clone:…"? (one voice, with its sample's pitchHz)}"#, cloned_voices, false),
         spec("tts.deleteClonedVoice", "Delete Cloned Voice", r#"{"voice":"clone:…"}"#, delete_cloned, false),
         spec(
             "tts.downloadCloneModel",
@@ -146,8 +146,17 @@ pub fn default_engine() -> &'static str {
     if natural { "voxcpm" } else { "openvoice" }
 }
 
-fn cloned_voices(_s: &mut Session, _p: &Value) -> Result<Value> {
+fn cloned_voices(_s: &mut Session, p: &Value) -> Result<Value> {
     let dir = crate::transcript::models_dir();
+    // one voice, with the pitch of its voice sample (measured: not for every listing)
+    if let Some(id) = str_p(p, "voice") {
+        let mut v = cloned_json()
+            .as_array()
+            .and_then(|a| a.iter().find(|v| v["id"] == id).cloned())
+            .ok_or_else(|| bad("tts.clonedVoices", format!("no cloned voice `{id}`")))?;
+        v["pitchHz"] = json!(sample_pitch(id));
+        return Ok(v);
+    }
     Ok(json!({
         "voices": cloned_json(),
         "models": models_json(),
@@ -164,6 +173,24 @@ fn cloned_voices(_s: &mut Session, _p: &Value) -> Result<Value> {
             "available": cfg!(feature = "neural-voices"),
         },
     }))
+}
+
+/// The median pitch of a natural cloned voice's sample, Hz.
+fn sample_pitch(id: &str) -> Option<f64> {
+    #[cfg(feature = "neural-voices")]
+    {
+        let dir = crate::transcript::models_dir()?;
+        let voices = filmcraft_tts::clone::voices_dir(&dir);
+        let profile = filmcraft_tts::clone::list(&voices).into_iter().find(|p| p.id == id)?;
+        let clip = profile.natural.as_ref()?.clip.clone();
+        let (x, rate) = filmcraft_tts::wav::read(&voices.join(clip)).ok()?;
+        filmcraft_tts::clone::median_pitch(&x, rate)
+    }
+    #[cfg(not(feature = "neural-voices"))]
+    {
+        let _ = id;
+        None
+    }
 }
 
 fn delete_cloned(_s: &mut Session, p: &Value) -> Result<Value> {

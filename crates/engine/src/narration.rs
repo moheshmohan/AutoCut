@@ -138,6 +138,20 @@ fn render(n: &Narration, models_dir: Option<&std::path::Path>) -> std::result::R
     voice.synthesize(&n.text, &params(n))
 }
 
+/// The median pitch of synthesized speech, Hz (natural voices' builds only): a reading that
+/// came out far above its voice's own pitch overacted.
+fn median_pitch(samples: &[f32], rate: u32) -> Option<f64> {
+    #[cfg(feature = "neural-voices")]
+    {
+        tts::clone::median_pitch(samples, rate)
+    }
+    #[cfg(not(feature = "neural-voices"))]
+    {
+        let _ = (samples, rate);
+        None
+    }
+}
+
 /// How `n` is spoken.
 fn params(n: &Narration) -> tts::Params {
     tts::Params { semitones: n.pitch.semitones(), pace: n.pace, style: n.delivery.style(), take: n.take }
@@ -336,6 +350,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
             "path": path,
             "sampleRate": rate,
             "cached": from_cache,
+            "pitchHz": median_pitch(&audio.samples, rate),
         }))
     })();
     crate::clip_ops::collapse_history(s, n0, "New Narration");

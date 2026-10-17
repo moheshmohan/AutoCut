@@ -521,9 +521,16 @@ fn normalize_loudness(x: &mut [f32], rate: u32) {
     x.iter_mut().for_each(|v| *v *= g);
 }
 
-/// Speaker gender from the median pitch of the voiced 40 ms frames (autocorrelation at 8 kHz;
-/// 165 Hz splits the usual ranges). `None` with too little voiced speech.
+/// Speaker gender from the median pitch ([`median_pitch`]; 165 Hz splits the usual ranges).
+/// `None` with too little voiced speech.
 pub fn estimate_gender(x: &[f32], rate: u32) -> Option<Gender> {
+    let median = median_pitch(x, rate)?;
+    Some(if median > 165.0 { Gender::Female } else { Gender::Male })
+}
+
+/// The median pitch (Hz) of the voiced 40 ms frames of speech `x` at `rate` (autocorrelation
+/// at 8 kHz, 60–400 Hz). `None` with too little voiced speech.
+pub fn median_pitch(x: &[f32], rate: u32) -> Option<f64> {
     let y = filmcraft_audio_dsp::resample::resample_sinc(x, rate, 8_000);
     let (win, hop) = (320usize, 160usize);
     let (min_lag, max_lag) = (20usize, 134usize); // 400 Hz … 60 Hz
@@ -559,8 +566,7 @@ pub fn estimate_gender(x: &[f32], rate: u32) -> Option<Gender> {
         return None;
     }
     f0s.sort_by(f64::total_cmp);
-    let median = f0s.get(f0s.len() / 2).copied()?;
-    Some(if median > 165.0 { Gender::Female } else { Gender::Male })
+    f0s.get(f0s.len() / 2).copied()
 }
 
 /// Make and save a timbre-only (OpenVoice) cloned voice from `reference` (mono speech at
