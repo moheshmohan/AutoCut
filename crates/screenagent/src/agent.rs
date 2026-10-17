@@ -1111,6 +1111,8 @@ const DAY_PAGES: u32 = 15;
 /// Clicks on one day at most: the one that selects it, and those that put the count back where
 /// it was when that went past the cap or the day was selected already.
 const DAY_CLICKS: u32 = 3;
+/// The wait before a second look for date headings when the first page showed none.
+const DAY_LOOK_AGAIN_MS: u64 = 1500;
 
 /// What selecting by date groups came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1126,6 +1128,9 @@ enum ByDays {
 struct Days {
     /// A date heading was on the first page.
     found: bool,
+    /// Headings of other dates than the searched one (Google answers a date it has nothing for
+    /// with neighbouring days), not selected.
+    foreign: u32,
     /// The days it selected ([`picker::day_key`]), in order.
     picked: Vec<String>,
     /// Days selected already (an earlier search of the session had them): the click lowered the
@@ -1163,6 +1168,12 @@ fn by_day_groups<A: Act, G: Ground>(
     let days = select_day_groups(actor, grounder, plan, summary, cap, started, before, query, progress)?;
     if !days.found {
         return Ok(ByDays::Range);
+    }
+    let none_of_its_own = days.picked.is_empty() && days.had.is_empty() && days.over.is_empty() && days.missed.is_empty();
+    if none_of_its_own && days.foreign > 0 {
+        // a range would select another date's days, another search's to pick
+        progress(&format!("screenagent: `{query}` shows only other dates' days; nothing of its own to select"));
+        return Ok(ByDays::Days(days));
     }
     if days.picked.is_empty() && days.had.is_empty() && days.over.is_empty() {
         progress("screenagent: the date groups selected nothing; selecting the range instead");
@@ -1209,10 +1220,16 @@ fn select_day_groups<A: Act, G: Ground>(
     let (mut still, mut look) = (0u32, true);
     'pages: for page in 0..DAY_PAGES {
         if look {
-            let els = grounder.inventory(&cap.png, picker::DAY_CHECKS)?;
-            let checks = picker::day_checks(&els, cap.png_w, cap.png_h);
+            let mut checks = picker::day_checks(&grounder.inventory(&cap.png, picker::DAY_CHECKS)?, cap.png_w, cap.png_h);
             if page == 0 && checks.is_empty() {
-                return Ok(days);
+                // the results may still be rendering (live, a day search's heading was missed
+                // once and found on the next try): one more look before the range
+                actor.sleep(DAY_LOOK_AGAIN_MS);
+                *cap = actor.capture()?;
+                checks = picker::day_checks(&grounder.inventory(&cap.png, picker::DAY_CHECKS)?, cap.png_w, cap.png_h);
+                if checks.is_empty() {
+                    return Ok(days);
+                }
             }
             days.found = true;
             // this page's tiles, grounded once a heading without a check button needs one
@@ -1223,6 +1240,7 @@ fn select_day_groups<A: Act, G: Ground>(
                     if !seen.iter().any(|s| s == label) {
                         progress(&format!("screenagent: `{label}` is not a day of `{query}`; not selecting it"));
                         seen.push(label.to_string());
+                        days.foreign = days.foreign.saturating_add(1);
                     }
                     continue;
                 };
@@ -1377,6 +1395,9 @@ fn days_outcome(days: &Days, query: &str, typed: &str, before: Option<u32>, cap_
     };
     let b = before.unwrap_or(0);
     let now = days.count.unwrap_or(0);
+    if days.picked.is_empty() && days.had.is_empty() && days.over.is_empty() && days.missed.is_empty() && days.foreign > 0 {
+        return (Outcome::NoResults, format!("its results show only {} other date(s)' days", days.foreign), Vec::new());
+    }
     let unnamed = |keys: usize, searches: usize| {
         if searches < keys { format!(" ({} could not be named as a search)", keys - searches) } else { String::new() }
     };
@@ -3115,6 +3136,33 @@ mod tests {
         let s = s.unwrap();
         assert_eq!((w.borrow().of_day(0), w.borrow().of_day(1), s.selected), (2, 0, 2), "{lines:#?}");
         assert_eq!(lines.iter().filter(|l| l.contains("`Fri, Sep 30, 2022` is not a day of")).count(), 1, "{lines:#?}");
+    }
+
+    #[test]
+    fn a_date_search_that_shows_only_other_dates_has_no_results() {
+        // live: `videos October 1 2022` showed Oct 26 (picked by its own search) and the range
+        // fallback ran over it
+        let w = Dated::new(&[("Thu, Oct 27, 2022", 2), ("Wed, Oct 26, 2022", 4)], &[("videos October 27 2022", &[0]), ("videos October 1 2022", &[1])], 2000);
+        let (s, lines) = drive_dated(&w, &many(&["videos October 27 2022", "videos October 1 2022"], MAX_PICK));
+        let s = s.unwrap();
+        assert_eq!(outcomes(&s), [(Outcome::Selected, Some(2)), (Outcome::NoResults, Some(2))], "{lines:#?}");
+        assert_eq!((w.borrow().of_day(1), w.borrow().shift_clicks), (0, 0), "no range over Oct 26");
+        assert!(s.retry().is_empty() && s.left.is_empty() && s.done_pressed, "{s:?}");
+        // alone: nothing selected, nothing to confirm
+        let w = Dated::new(&[("Wed, Oct 26, 2022", 4)], &[("videos October 1 2022", &[0])], 2000);
+        let (s, _) = drive_dated(&w, &one_search("videos October 1 2022", MAX_PICK));
+        let s = s.unwrap();
+        assert_eq!(outcomes(&s), [(Outcome::NoResults, Some(0))]);
+        assert!(!s.done_pressed && w.borrow().selected.is_empty(), "{s:?}");
+    }
+
+    #[test]
+    fn a_date_search_without_headings_is_looked_at_twice_before_the_range() {
+        let w = world();
+        let eyes = Eyes::new(&w, &["3 selected"]);
+        let s = drive(&mut Hands(Rc::clone(&w)), &eyes, &one_search("videos October 18 2022", MAX_PICK), &mut |_| {}).unwrap();
+        assert_eq!(eyes.asks.borrow().iter().filter(|a| *a == crate::picker::DAY_CHECKS).count(), 2);
+        assert_eq!((w.borrow().shift_clicks.len(), s.selected), (1, 3), "then the range: {s:?}");
     }
 
     #[test]

@@ -88,8 +88,10 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
     date search whose days took nothing gets the range only when the range guess has room, else
     it waits the same way. When its first day alone passes the
     cap its days are left as day searches, and a day search alone past the cap is `TooBig`
-    (`Summary::too_big`). When no day took at all, it falls back to the range gesture from the
-    top.
+    (`Summary::too_big`). A date search whose results show only other dates' days (Google
+    answers a day it has nothing for with neighbouring ones, live) has no results. A first page
+    with no date heading is looked at once more (results still rendering), and when no day took
+    at all it falls back to the range gesture from the top.
   - **Closing the tab**: when it begins, `drive` names the picker tab in front by its window
     and tab id (Chrome); when it finishes — after Done, or giving up — it closes *that* tab by
     those ids (`tabs::close_driven_picker`), only while its address is still the picker, closing
