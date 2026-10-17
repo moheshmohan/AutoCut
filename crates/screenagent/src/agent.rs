@@ -620,6 +620,8 @@ struct OneSearch {
 
 /// Search `query`, typed as `typed` (after emptying the field when `clear`), then select its
 /// results: everything on top of the `before` already selected, or tiles up to `max_items` in all.
+/// `range_room`: a range gesture is not expected to pass the session's cap (a range cannot be
+/// undone); without it, a date search whose day groups took nothing waits for a next session.
 #[allow(clippy::too_many_arguments)]
 fn one_of_many<A: Act, G: Ground>(
     actor: &mut A,
@@ -631,6 +633,7 @@ fn one_of_many<A: Act, G: Ground>(
     (query, typed): (&str, &str),
     clear: Option<usize>,
     before: Option<u32>,
+    range_room: bool,
     progress: &mut dyn FnMut(&str),
 ) -> Result<OneSearch, ScreenError> {
     let mut one = OneSearch { typed: false, outcome: Outcome::Failed, count: before, note: String::new(), closed: false, left: Vec::new() };
@@ -663,6 +666,15 @@ fn one_of_many<A: Act, G: Ground>(
             one.count = days.count.or(before);
             return Ok(one);
         }
+        ByDays::Range if !range_room && picker::is_date_search(typed) => {
+            one.outcome = Outcome::Deferred;
+            one.note = format!(
+                "its date groups selected nothing, and its range could pass the session's {cap_items}-item maximum beside the {} selected (a range cannot be undone); it waits for a next session",
+                before.unwrap_or(0)
+            );
+            one.left = vec![query.to_string()];
+            return Ok(one);
+        }
         ByDays::Range => match before {
             // nothing selected yet: the whole gesture, with its retry from the top
             None => match select_everything(actor, grounder, plan, summary, cap, started, progress)? {
@@ -690,8 +702,10 @@ fn one_of_many<A: Act, G: Ground>(
 /// selected on top of what is selected already, the header's count read after each — it only
 /// grows. A search with no results is skipped; a search that fails is noted and the next one
 /// tried; an error that ends the session (no grants, no model) ends it. Before each search the
-/// room is checked: the session's item cap (with the biggest search so far as the guess of the
-/// next one's size) and the budget, part of which stays back for Done. What does not fit is
+/// room is checked: the session's item cap and the budget, part of which stays back for Done.
+/// A range cannot be undone, so before one the biggest search so far is the guess of its size;
+/// a date search is taken day by day up to the cap instead, and the first search that does not
+/// all fit (split, or deferred beside what is selected) ends the session. What does not fit is
 /// left for a next session.
 #[allow(clippy::too_many_arguments)]
 fn search_many<A: Act, G: Ground>(
@@ -711,7 +725,7 @@ fn search_many<A: Act, G: Ground>(
     let mut biggest = 0u32;
     let mut holds: Option<usize> = None; // characters the search field holds
     let mut deferred: Vec<String> = Vec::new();
-    let mut full = false; // a day of a search did not fit
+    let mut full = false; // a search did not fit beside what is selected
     for (i, (query, typed)) in searches.iter().enumerate() {
         let so_far = if plan.select_all { count.unwrap_or(0) } else { summary.selected };
         if i > 0 {
@@ -720,8 +734,9 @@ fn search_many<A: Act, G: Ground>(
             let why = if so_far >= room {
                 Some(format!("the session holds its {room}-item maximum"))
             } else if full {
-                Some(format!("{so_far} are selected and a day of the last search did not fit under the session's {room}-item maximum"))
-            } else if plan.select_all && so_far.saturating_add(biggest) > room {
+                Some(format!("{so_far} are selected and the last search did not all fit under the session's {room}-item maximum"))
+            } else if plan.select_all && !picker::is_date_search(typed) && so_far.saturating_add(biggest) > room {
+                // a range cannot be undone; date groups are taken day by day up to the cap
                 Some(format!("{so_far} are selected and the next search could pass the session's {room}-item maximum"))
             } else if actions_left < SEARCH_MIN_ACTIONS || time_left < SEARCH_MIN_TIME {
                 Some("this session's budget is nearly spent".to_string())
@@ -735,7 +750,8 @@ fn search_many<A: Act, G: Ground>(
             }
         }
         progress(&format!("screenagent: search {} of {}: `{typed}`", i + 1, searches.len()));
-        let result = one_of_many(actor, grounder, &inner, summary, cap, started, (query, typed), holds, count, progress);
+        let range_room = so_far.saturating_add(biggest) <= room;
+        let result = one_of_many(actor, grounder, &inner, summary, cap, started, (query, typed), holds, count, range_room, progress);
         let one = match result {
             Ok(one) => one,
             Err(e) if fatal(&e) => return Err(e),
@@ -758,7 +774,7 @@ fn search_many<A: Act, G: Ground>(
         }
         // a search deferred whole, or the days of one split or missed: first in the next session
         deferred.extend(one.left);
-        full |= one.outcome == Outcome::Split;
+        full |= one.outcome == Outcome::Split || (one.outcome == Outcome::Deferred && count.unwrap_or(0) > 0);
         let selected = plan.select_all.then_some(count).flatten();
         progress(&format!("screenagent: `{query}`: {}", outcome_line(one.outcome, selected, &one.note)));
         summary.searches.push(Searched { query: query.clone(), outcome: one.outcome, selected, note: one.note });
@@ -3010,14 +3026,41 @@ mod tests {
         );
         let (s, lines) = drive_dated(&w, &many(&["videos October 2022", "videos November 2022", "videos December 2022"], 25));
         let s = s.unwrap();
-        // November's first day alone would make 29: unselected at once, the walk stops there
-        assert_eq!(outcomes(&s), [(Outcome::Selected, Some(4)), (Outcome::Deferred, Some(4)), (Outcome::Selected, Some(7))], "{lines:#?}");
-        assert_eq!(s.left, ["videos November 2022"]);
+        // November's first day alone would make 29: unselected at once, the walk stops there, and
+        // so does the session — the next session has room for November
+        assert_eq!(outcomes(&s), [(Outcome::Selected, Some(4)), (Outcome::Deferred, Some(4))], "{lines:#?}");
+        assert_eq!(s.left, ["videos November 2022", "videos December 2022"]);
         assert!(s.retry().is_empty() && s.too_big().is_empty(), "{s:?}");
         let w = w.borrow();
-        assert_eq!((w.of_day(1), w.of_day(2), w.selected.len()), (0, 0, 7), "nothing of November stays selected");
-        assert!(w.done && s.selected == 7 && w.dones == 1, "{s:?}");
+        assert_eq!((w.of_day(1), w.of_day(2), w.selected.len()), (0, 0, 4), "nothing of November stays selected");
+        assert!(w.done && s.selected == 4 && w.dones == 1, "{s:?}");
         assert!(s.note.contains("1 past the session's maximum"), "{}", s.note);
+    }
+
+    #[test]
+    fn date_searches_fill_a_session_past_the_biggest_search_guess() {
+        // after a 20-item day the next search could pass 25 — a guess a range needs (it cannot be
+        // undone), not date groups: they are taken day by day until one does not fit
+        let days = [("Sat, Oct 29, 2022", 20), ("Fri, Oct 28, 2022", 3), ("Thu, Oct 27, 2022", 10), ("Wed, Oct 26, 2022", 1)];
+        let finds: [(&str, &[usize]); 4] =
+            [("videos October 29 2022", &[0]), ("videos October 28 2022", &[1]), ("videos October 27 2022", &[2]), ("videos October 26 2022", &[3])];
+        let w = Dated::new(&days, &finds, 25);
+        let plan = many(&["videos October 29 2022", "videos October 28 2022", "videos October 27 2022", "videos October 26 2022"], 25);
+        let (s, lines) = drive_dated(&w, &plan);
+        let s = s.unwrap();
+        assert_eq!(outcomes(&s), [(Outcome::Selected, Some(20)), (Outcome::Selected, Some(23)), (Outcome::Deferred, Some(23))], "{lines:#?}");
+        assert_eq!(s.left, ["videos October 27 2022", "videos October 26 2022"]);
+        assert!(s.done_pressed && w.borrow().done && s.selected == 23 && w.borrow().selected.len() == 23, "{s:?}");
+        // a date search whose days take nothing falls back to a range: that one still waits when
+        // the range could pass the cap
+        let w = Dated::new(&days, &finds, 25);
+        w.borrow_mut().off_check = vec!["Fri, Oct 28, 2022"];
+        let (s, lines) = drive_dated(&w, &many(&["videos October 29 2022", "videos October 28 2022"], 25));
+        let s = s.unwrap();
+        assert_eq!(outcomes(&s), [(Outcome::Selected, Some(20)), (Outcome::Deferred, Some(20))], "{lines:#?}");
+        assert_eq!(s.left, ["videos October 28 2022"]);
+        assert_eq!((w.borrow().of_day(1), w.borrow().shift_clicks, s.selected), (0, 0, 20), "no range");
+        assert!(s.searches[1].note.contains("a range cannot be undone"), "{:?}", s.searches[1]);
     }
 
     #[test]

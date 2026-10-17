@@ -58,9 +58,10 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
     selects nothing (a range over the previous results would clear them); a count that falls
     means the search cleared earlier selections, so it and the searches before it are handed
     back for another try (`Summary::retry`). Before each search the room is checked — the
-    session's item cap (`max_items` when selecting all; the biggest search so far is the guess
-    of the next one's size) and the budget, which grows with the searches and keeps a reserve
-    for Done — and what does not fit is left in `Summary::left` for a next session. The picker
+    session's item cap (`max_items` when selecting all; before a range the biggest search so far
+    is the guess of its size, while date searches are taken day by day up to the cap) and the
+    budget, which grows with the searches and keeps a reserve for Done — and what does not fit
+    is left in `Summary::left` for a next session. The picker
     lets date groups and ranges select past the cap, then refuses Done (live: "143 selected",
     "Select up to 40 items", Done greyed out), so date groups are selected day by day up to the
     cap (below). A range cannot be undone (a second range toggles single tiles), so past the cap
@@ -83,7 +84,9 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
     the day while it is still on screen — no walk back over the days — and that day and the days
     after it (only listed) are left as day searches (`videos October 13 2022`) for a next
     session: the search is `Split`, and the session holds no more searches. When none of a search
-    fits beside what is selected it waits whole (`Deferred`); when its first day alone passes the
+    fits beside what is selected it waits whole (`Deferred`, and the session ends there too); a
+    date search whose days took nothing gets the range only when the range guess has room, else
+    it waits the same way. When its first day alone passes the
     cap its days are left as day searches, and a day search alone past the cap is `TooBig`
     (`Summary::too_big`). When no day took at all, it falls back to the range gesture from the
     top.
