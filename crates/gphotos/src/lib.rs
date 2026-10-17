@@ -12,8 +12,8 @@
 //!   at the top), over the same transport; `photos auth --albums` grants what they need.
 //! - [`GooglePhotos::pick`]: the whole flow — open a session, send the user to the picker,
 //!   wait (bounded) for their selection, download it, delete the session.
-//!   [`GooglePhotos::prepare_with`] lets a caller show the picker its own way (the picker tab
-//!   a browser already has open, instead of a new one).
+//!   [`GooglePhotos::prepare_with`] lets a caller show the picker its own way (closing the
+//!   earlier picker tabs first, say).
 //! - [`sweep`]: the date searches that sweep a stretch of a big library month by month (or day
 //!   by day), for picks that type many searches into one session.
 //! - [`GooglePhotos::upload`] and [`engine_uploader`]: upload a file (into an album, too); the
@@ -222,7 +222,7 @@ impl GooglePhotos {
     }
 
     /// [`Self::prepare`], with `open` showing a new session's picker link instead of a new tab of
-    /// the default browser — e.g. in the picker tab a browser already has open. It answers how
+    /// the default browser — e.g. after closing the earlier picker tabs. It answers how
     /// it showed it ("in your open picker tab"), or `None` when it could not (the link is then
     /// printed for the user to open).
     pub fn prepare_with(

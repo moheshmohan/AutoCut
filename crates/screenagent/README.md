@@ -95,11 +95,13 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
   date search and a date heading are, where a day's check button is, and that the browser's
   Leave button is labelled "Leave" and button-sized), as pure, unit-tested predicates.
 - `tabs.rs` — the picker's browser tabs. Chrome's AppleScript dictionary lists every tab
-  (window id, tab id, address); a tab is closed, focused or pointed at a new session only when
-  found by window, id *and* address and only when the address is Google's picker
-  (`https://photos.google.com/[u/N/]picker…` or `…/integration/picker…`), so nothing else is
-  ever touched. `reuse_picker_tab` shows a new picking session in the picker tab already open
-  instead of a new one; `tidy` (`filmcraft-cli photos tidy`) closes every picker tab;
+  (window id, tab id, address); a tab is closed or focused only when found by window, id *and*
+  address and only when the address is Google's picker (`https://photos.google.com/[u/N/]picker…`
+  or `…/integration/picker…`), so nothing else is ever touched. `close_picker_tabs` closes the
+  earlier picker tabs before an agent's session opens its own (pointing an open tab at the new
+  session was tried: a tab holding a selection asks "Leave site?" while Chrome already reports
+  the new address, so the agent met the dialog); `tidy` (`filmcraft-cli photos tidy`) closes
+  every picker tab;
   `answer_leave` lists the "Leave site?" dialog's buttons by their own text and clicks only the
   one that reads "Leave" (asked to *find* "the Leave button", qwen2.5vl boxes it right but
   labels it with the ask's own words, live). Chrome takes a second close of a tab that asks
@@ -135,7 +137,7 @@ what the agent did (`album_opened`, `selected`, `done_pressed`, `searches`, `lef
 3. **Accessibility** for the same process: System Settings ▸ Privacy & Security ▸
    Accessibility.
 4. **Automation ▸ Google Chrome** for the same process (macOS asks the first time): it lets the
-   agent read the front tab's address before closing it, reuse the open picker tab and tidy
+   agent read the front tab's address before closing it, close the earlier picker tabs and tidy
    picker tabs. Without it the tabs are simply left open.
 
 Missing grants and missing models come back as errors that say exactly this.
@@ -166,8 +168,8 @@ No model weights are committed to this repository or shipped with any binary.
   is verified by pixel-diff and bounded by budget, so a miss costs a retry, not a runaway.
   It never clicks outside the picker window.
 - Tabs are closed only where the address can be read: Chromium browsers (Chrome, Edge, Brave,
-  Arc, Vivaldi) and Safari. Elsewhere the finished picker tab stays open; tab reuse and
-  `photos tidy` are Chrome-only.
+  Arc, Vivaldi) and Safari. Elsewhere the finished picker tab stays open; closing the earlier
+  picker tabs and `photos tidy` are Chrome-only.
 - A search that overlaps an earlier one in the same session (a day inside a month already
   searched) can clear part of the earlier selection — Google's picker toggles what is clicked
   again. The agent sees the count fall and hands those searches back for another session; avoid
@@ -188,7 +190,7 @@ attempts, coordinate math, and the agent loop against scripted fake eyes/hands (
 termination, in-bounds guarantees), many-search sessions (cumulative counts, skipped empty
 searches, the cap and the budget leaving searches for a next session, a count that falls),
 date-group selection and its fallback, and the picker tabs against a fake Chrome (only picker
-tabs closed or reused, "Leave site?" answered with Leave and nothing else). A live model
+tabs closed, a tab that asks "Leave site?" closed once more, Leave clicked and nothing else). A live model
 round-trip can be run with
 `AUTOCUT_SCREEN_LIVE=1`, and a saved window capture can be replayed through the real
 grounding path with `AUTOCUT_SCREEN_LIVE_PNG=/path/to/capture.png cargo test -p

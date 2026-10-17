@@ -229,8 +229,9 @@ SUBCOMMANDS
                                  cache and import it (a file the project already holds is
                                  reused, not imported twice); --demo/--project/--bridge choose
                                  the target. A timed-out wait prints the session id: --session
-                                 resumes it. The picker opens in the picker tab Chrome already
-                                 has open when there is one (macOS), not in yet another tab.
+                                 resumes it. When the agent drives the picker (below), Chrome's
+                                 earlier picker tabs are closed first (macOS), so its tab is
+                                 the only one.
                                  With --auto <query>, a local vision agent (Qwen2.5-VL via
                                  Ollama) drives the picker itself: it types the query into the
                                  picker's search, selects matching videos and presses Done

@@ -1,21 +1,22 @@
-//! The browser tabs the Google Photos picker lives in: find them, point one at a new picking
-//! session instead of opening another, close them, and answer the browser's "Leave site?"
-//! dialog — only ever for tabs whose address is Google's picker.
+//! The browser tabs the Google Photos picker lives in: find them, close them (the earlier ones
+//! before an agent opens a new picking session, so one tab is open at a time), and answer the
+//! browser's "Leave site?" dialog — only ever for tabs whose address is Google's picker.
 //!
 //! Every pick used to open a new tab and nothing closed it: forty searches left forty tabs, and
 //! closing one by hand raises "Leave site?" (the picker keeps its selection behind a
 //! beforeunload handler). Chrome's AppleScript dictionary lists every tab with its window, its
-//! id and its address, and closes or navigates a tab found by id *and* address, so a tab that
-//! went somewhere else since it was listed is never touched. The Leave button is grounded like
-//! any other element and clicked only when the model's label says "Leave". macOS only, like
-//! the rest of the crate: elsewhere no tab is found and callers fall back to opening a new one.
+//! id and its address, and closes a tab found by id *and* address, so a tab that went somewhere
+//! else since it was listed is never touched. A tab that asks "Leave site?" is closed once more,
+//! which Chrome takes as Leave; where eyes are needed, the dialog's buttons are listed by their
+//! text and only the one that reads "Leave" is clicked. macOS only, like the rest of the crate:
+//! elsewhere no tab is found and nothing is closed.
 
 use crate::act::Act;
 use crate::capture::{Shell, escape_applescript};
 use crate::ground::Ground;
 use crate::{ScreenError, picker};
 
-/// The browser whose tabs are listed, reused and tidied.
+/// The browser whose tabs are listed and tidied.
 pub const CHROME: &str = "Google Chrome";
 
 /// Most tabs read from one listing.
@@ -25,7 +26,7 @@ const MAX_URL: usize = 8192;
 /// How long an AppleScript call to the browser may take before it is an error (a close that
 /// waits on a dialog must not hang the caller).
 const SCRIPT_TIMEOUT_SECS: u32 = 15;
-/// How long a closed or navigated tab gets before it is looked at again.
+/// How long a closed tab gets before it is looked at again.
 const SETTLE_MS: u64 = 1500;
 /// Presses of Leave per tab.
 const LEAVE_TRIES: u32 = 2;
@@ -132,15 +133,6 @@ pub fn focus(shell: &dyn Shell, tab: &Tab) -> Result<bool, ScreenError> {
     on_tab(shell, tab, "set active tab index of w to k\nset index of w to 1\nactivate")
 }
 
-/// Point a picker tab at `uri` (an `https://` link with nothing that could become script) and
-/// bring it to the front.
-pub fn navigate(shell: &dyn Shell, tab: &Tab, uri: &str) -> Result<bool, ScreenError> {
-    if !uri.starts_with("https://") || uri.len() > MAX_URL || uri.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\\') {
-        return Err(ScreenError::Other("refusing to open a link that is not a plain https:// address".into()));
-    }
-    on_tab(shell, tab, &format!("set URL of t to \"{uri}\"\nset active tab index of w to k\nset index of w to 1\nactivate"))
-}
-
 /// Answer the "Leave site?" dialog on `actor`'s front window: list its buttons by their text
 /// and click the one that reads "Leave". Anything not labelled "Leave" (and button-sized) is
 /// refused, so nothing else is ever clicked. `Ok(false)`: no Leave button showed.
@@ -190,54 +182,6 @@ pub fn close_front_picker<A: Act + ?Sized, G: Ground + ?Sized>(actor: &mut A, gr
     Ok(actor.front_url()?.as_deref() != Some(url.as_str()))
 }
 
-/// What reusing a picker tab came to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reused {
-    /// A picker tab now shows the new session, in front.
-    Navigated { others: usize },
-    /// A picker tab would not leave its page (its "Leave site?" went unanswered).
-    Blocked,
-    /// There is no picker tab to reuse.
-    NoTab,
-}
-
-/// Show `uri` (a new picking session) in Chrome's open picker tab instead of a new tab: point
-/// the first picker tab at it and bring it to the front. A page that holds a selection asks
-/// "Leave site?" first; with `leave` (hands on Chrome and eyes) that is answered with Leave,
-/// otherwise the reuse is [`Reused::Blocked`] and the caller opens a new tab.
-pub fn reuse_picker_tab(
-    shell: &dyn Shell,
-    uri: &str,
-    leave: Option<(&mut dyn Act, &dyn Ground)>,
-    pause: &mut dyn FnMut(u64),
-    progress: &mut dyn FnMut(&str),
-) -> Result<Reused, ScreenError> {
-    let tabs = picker_tabs(shell)?;
-    let Some(first) = tabs.first() else { return Ok(Reused::NoTab) };
-    let others = tabs.len().saturating_sub(1);
-    if !navigate(shell, first, uri)? {
-        return Ok(Reused::NoTab);
-    }
-    pause(SETTLE_MS);
-    let moved = |shell: &dyn Shell| -> Result<bool, ScreenError> {
-        Ok(picker_tabs(shell)?.iter().all(|t| !(t.window == first.window && t.id == first.id && t.url == first.url)))
-    };
-    if moved(shell)? {
-        return Ok(Reused::Navigated { others });
-    }
-    let Some((actor, grounder)) = leave else { return Ok(Reused::Blocked) };
-    for _ in 0..LEAVE_TRIES {
-        if !answer_leave(&mut *actor, grounder, progress)? {
-            break;
-        }
-        pause(SETTLE_MS);
-        if moved(shell)? {
-            return Ok(Reused::Navigated { others });
-        }
-    }
-    Ok(Reused::Blocked)
-}
-
 /// What `photos tidy` did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Tidied {
@@ -248,6 +192,48 @@ pub struct Tidied {
     /// The addresses of picker tabs still open.
     pub left: Vec<String>,
     pub notes: Vec<String>,
+}
+
+/// Close `tabs` (picker tabs just listed): each once, then once more those still open — a tab
+/// holding a selection asks "Leave site?" instead of closing, and Chrome takes a second close
+/// while it asks as Leave (live, Chrome 155). Answers those of `tabs` still open.
+fn close_twice(shell: &dyn Shell, tabs: &[Tab], pause: &mut dyn FnMut(u64), notes: &mut Vec<String>) -> Result<Vec<Tab>, ScreenError> {
+    let ours = |all: Vec<Tab>| -> Vec<Tab> { all.into_iter().filter(|x| tabs.iter().any(|t| t.window == x.window && t.id == x.id)).collect() };
+    let mut open: Vec<Tab> = tabs.to_vec();
+    for _ in 0..2 {
+        if open.is_empty() {
+            break;
+        }
+        for t in &open {
+            if let Err(e) = close(shell, t) {
+                notes.push(format!("{}: {e}", t.url));
+            }
+        }
+        pause(SETTLE_MS);
+        open = ours(picker_tabs(shell)?);
+    }
+    Ok(open)
+}
+
+/// Close every picker tab before an agent opens a new picking session, so the new session's tab
+/// is the only one; nothing is clicked and no eyes are needed. (Pointing an open picker tab at
+/// the new session instead was tried: a tab holding a selection asks "Leave site?" while Chrome
+/// already reports the new address — live, Chrome 155 — so the agent met the dialog, not the
+/// picker.) Only for a session an agent drives: a tab someone is picking in by hand is theirs.
+pub fn close_picker_tabs(shell: &dyn Shell, pause: &mut dyn FnMut(u64), progress: &mut dyn FnMut(&str)) -> Result<Tidied, ScreenError> {
+    let mut out = Tidied::default();
+    if !chrome_running(shell) {
+        return Ok(out);
+    }
+    let tabs = picker_tabs(shell)?;
+    out.found = tabs.len();
+    if tabs.is_empty() {
+        return Ok(out);
+    }
+    progress(&format!("screenagent: closing {} earlier Google Photos picker tab(s)", tabs.len()));
+    out.left = close_twice(shell, &tabs, pause, &mut out.notes)?.into_iter().map(|t| t.url).collect();
+    out.closed = out.found.saturating_sub(out.left.len());
+    Ok(out)
 }
 
 /// Close every Google Photos picker tab in Chrome — those tabs and nothing else. A tab that asks
@@ -272,25 +258,8 @@ pub fn tidy<A: Act + ?Sized>(
         return Ok(out);
     }
     progress(&format!("screenagent: closing {} Google Photos picker tab(s)", tabs.len()));
-    for t in &tabs {
-        if let Err(e) = close(shell, t) {
-            out.notes.push(format!("{}: {e}", t.url));
-        }
-    }
-    pause(SETTLE_MS);
     let ours = |all: Vec<Tab>| -> Vec<Tab> { all.into_iter().filter(|x| tabs.iter().any(|t| t.window == x.window && t.id == x.id)).collect() };
-    let mut waiting = ours(picker_tabs(shell)?);
-    if !waiting.is_empty() {
-        // a tab holding a selection asks "Leave site?" instead of closing; Chrome takes a second
-        // close while it asks as Leave (live, Chrome 155), so no eyes are needed for it
-        for t in &waiting {
-            if let Err(e) = close(shell, t) {
-                out.notes.push(format!("{}: {e}", t.url));
-            }
-        }
-        pause(SETTLE_MS);
-        waiting = ours(picker_tabs(shell)?);
-    }
+    let waiting = close_twice(shell, &tabs, pause, &mut out.notes)?;
     if !waiting.is_empty() {
         match leave {
             None => out.notes.push(format!(
@@ -386,18 +355,18 @@ mod tests {
         assert_eq!(parse_tabs(&"1\t2\thttps://a/\n".repeat(MAX_TABS + 10)).len(), MAX_TABS);
     }
 
-    /// A fake Chrome: a tab list that `close`/`navigate` scripts change, and every script kept.
-    /// `stubborn` tabs ask "Leave site?" instead: the close or navigation waits until their id
-    /// is in `left` (Leave was clicked) — or, with `second_close_leaves` (Chrome 155, live),
-    /// until the tab is closed again while it asks.
+    /// A fake Chrome: a tab list that `close` scripts change, and every script kept.
+    /// `stubborn` tabs ask "Leave site?" instead: the close waits until their id is in `left`
+    /// (Leave was clicked) — or, with `second_close_leaves` (Chrome 155, live), until the tab is
+    /// closed again while it asks.
     struct FakeChrome {
         running: bool,
         tabs: Mutex<Vec<Tab>>,
         stubborn: Vec<i64>,
         second_close_leaves: bool,
         left: Arc<Mutex<Vec<i64>>>,
-        /// Closes and navigations waiting on "Leave site?": (tab id, the new address or None).
-        waiting: Mutex<Vec<(i64, Option<String>)>>,
+        /// The tabs whose close waits on "Leave site?".
+        waiting: Mutex<Vec<i64>>,
         scripts: Mutex<Vec<String>>,
     }
 
@@ -417,13 +386,8 @@ mod tests {
         fn settle(&self, tabs: &mut Vec<Tab>) {
             let left = self.left.lock().unwrap_or_else(PoisonError::into_inner).clone();
             let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
-            for (id, to) in waiting.iter().filter(|(id, _)| left.contains(id)) {
-                match to {
-                    None => tabs.retain(|t| t.id != *id),
-                    Some(url) => tabs.iter_mut().filter(|t| t.id == *id).for_each(|t| t.url = url.clone()),
-                }
-            }
-            waiting.retain(|(id, _)| !left.contains(id));
+            tabs.retain(|t| !(waiting.contains(&t.id) && left.contains(&t.id)));
+            waiting.retain(|id| !left.contains(id));
         }
         fn scripts(&self) -> Vec<String> {
             self.scripts.lock().unwrap_or_else(PoisonError::into_inner).clone()
@@ -456,26 +420,20 @@ mod tests {
             }
             let Some((w, id, url)) = target(&s) else { return Err(ScreenError::Other(format!("unexpected script: {s}"))) };
             let Some(pos) = tabs.iter().position(|t| t.window == w && t.id == id && t.url == url) else { return Ok("gone\n".into()) };
-            let new = s.split("set URL of t to \"").nth(1).and_then(|r| r.split('"').next()).map(str::to_string);
-            let change = if s.contains("close t") { Some(None) } else { new.map(Some) };
+            if !s.contains("close t") {
+                return Ok("ok\n".into()); // focus
+            }
             let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
-            let asking = waiting.iter().any(|(w, _)| *w == id);
-            match change {
+            if waiting.contains(&id) {
                 // closed again while it asks "Leave site?": Chrome leaves
-                Some(None) if asking && self.second_close_leaves => {
-                    waiting.retain(|(w, _)| *w != id);
+                if self.second_close_leaves {
+                    waiting.retain(|w| *w != id);
                     tabs.remove(pos);
                 }
-                Some(change) if self.stubborn.contains(&id) => waiting.push((id, change)),
-                Some(None) => {
-                    tabs.remove(pos);
-                }
-                Some(Some(url)) => {
-                    if let Some(t) = tabs.get_mut(pos) {
-                        t.url = url;
-                    }
-                }
-                None => {} // focus
+            } else if self.stubborn.contains(&id) {
+                waiting.push(id);
+            } else {
+                tabs.remove(pos);
             }
             Ok("ok\n".into())
         }
@@ -633,41 +591,37 @@ mod tests {
     }
 
     #[test]
-    fn a_picker_tab_is_reused_for_the_next_session() {
-        let next = "https://photos.google.com/picker/s2/autoclose";
-        let chrome = FakeChrome::new(vec![tab(1, 9, "https://example.com/"), tab(1, 10, P1), tab(2, 20, P2)]);
-        let r = reuse_picker_tab(&chrome, next, None, &mut |_| {}, &mut |_| {}).unwrap();
-        assert_eq!(r, Reused::Navigated { others: 1 });
-        let urls: Vec<String> = chrome.tabs.lock().unwrap().iter().map(|t| t.url.clone()).collect();
-        assert_eq!(urls, ["https://example.com/", next, P2], "the first picker tab shows the new session");
-        // none open: nothing touched
-        let chrome = FakeChrome::new(vec![tab(1, 9, "https://example.com/")]);
-        assert_eq!(reuse_picker_tab(&chrome, next, None, &mut |_| {}, &mut |_| {}).unwrap(), Reused::NoTab);
-        // a tab holding a selection asks first: blocked without hands, answered with them
-        let left = Arc::new(Mutex::new(vec![]));
+    fn earlier_picker_tabs_are_closed_before_a_new_session() {
+        // one picker tab holding a selection (it asks "Leave site?" on the first close), one
+        // without, and two other tabs that are never touched
+        let mut chrome = FakeChrome::new(vec![tab(1, 9, "https://example.com/"), tab(1, 10, P1), tab(1, 11, "https://mail.google.com/"), tab(2, 20, P2)]);
+        chrome.stubborn = vec![10];
+        let mut lines = vec![];
+        let t = close_picker_tabs(&chrome, &mut |_| {}, &mut |l| lines.push(l.to_string())).unwrap();
+        assert_eq!((t.found, t.closed, t.left.len()), (2, 2, 0), "{t:?}");
+        assert_eq!(chrome.ids(), [9, 11]);
+        assert!(lines.iter().any(|l| l.contains("closing 2 earlier")), "{lines:?}");
+        assert!(!chrome.scripts().iter().any(|s| s.contains("set URL")), "no tab is pointed anywhere");
+        // a tab a second close does not shut is reported, not clicked at (there are no hands)
         let mut chrome = FakeChrome::new(vec![tab(1, 10, P1)]);
         chrome.stubborn = vec![10];
-        chrome.left = Arc::clone(&left);
-        assert_eq!(reuse_picker_tab(&chrome, next, None, &mut |_| {}, &mut |_| {}).unwrap(), Reused::Blocked);
-        let mut hands = Hands::new();
-        hands.left = Arc::clone(&left);
-        hands.answers = vec![10];
-        let eyes = leave_button();
-        let r = reuse_picker_tab(&chrome, next, Some((&mut hands as &mut dyn Act, &eyes as &dyn Ground)), &mut |_| {}, &mut |_| {}).unwrap();
-        assert_eq!(r, Reused::Navigated { others: 0 });
-        assert_eq!(hands.clicks.len(), 1);
-        // a link that could become script is refused before Chrome hears of it
-        let chrome = FakeChrome::new(vec![tab(1, 10, P1)]);
-        for bad in ["http://x/", "https://x/\" & (do shell script \"rm\") & \"", "https://x/a b", "javascript:alert(1)"] {
-            assert!(reuse_picker_tab(&chrome, bad, None, &mut |_| {}, &mut |_| {}).is_err(), "{bad}");
-        }
-        assert!(!chrome.scripts().iter().any(|s| s.contains("set URL")));
+        chrome.second_close_leaves = false;
+        let t = close_picker_tabs(&chrome, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!((t.closed, t.left.as_slice()), (0, [P1.to_string()].as_slice()));
+        // none open: nothing closed; Chrome not running: only asked whether it runs
+        let chrome = FakeChrome::new(vec![tab(1, 9, "https://example.com/")]);
+        assert_eq!(close_picker_tabs(&chrome, &mut |_| {}, &mut |_| {}).unwrap(), Tidied::default());
+        assert!(!chrome.scripts().iter().any(|s| s.contains("close t")));
+        let mut chrome = FakeChrome::new(vec![tab(1, 10, P1)]);
+        chrome.running = false;
+        assert_eq!(close_picker_tabs(&chrome, &mut |_| {}, &mut |_| {}).unwrap(), Tidied::default());
+        assert_eq!(chrome.scripts().len(), 1);
     }
 
     #[test]
     fn tab_ids_are_compared_as_text() {
         // live, Chrome 155: `(id of t) is 180477276` was false for that very tab (its id is
-        // text), so `photos tidy` closed nothing and a picker tab was never reused
+        // text), so `photos tidy` closed nothing
         let s = with_tab_script(CHROME, &tab(180_476_798, 180_477_276, P2), "close t").unwrap();
         assert!(s.contains("if (id of w as text) is \"180476798\" then"), "{s}");
         assert!(s.contains("if (id of t as text) is \"180477276\" and (URL of t) is \""), "{s}");
@@ -675,11 +629,10 @@ mod tests {
     }
 
     #[test]
-    fn only_picker_tabs_are_ever_closed_or_navigated() {
+    fn only_picker_tabs_are_ever_closed_or_focused() {
         let chrome = FakeChrome::new(vec![tab(1, 11, "https://mail.google.com/")]);
         let mail = tab(1, 11, "https://mail.google.com/");
         assert!(close(&chrome, &mail).is_err());
-        assert!(navigate(&chrome, &mail, P1).is_err());
         assert!(focus(&chrome, &mail).is_err());
         assert_eq!(chrome.scripts().len(), 0);
         // a picker tab that has gone since it was listed is reported gone, not guessed at

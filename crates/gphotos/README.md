@@ -90,9 +90,9 @@ filmcraft-cli photos pick --sweep 2017-10..2025-12 --bridge 127.0.0.1:9876
 filmcraft-cli photos tidy
 ```
 
-`photos pick` opens the picker in your default browser — or, on macOS, in the picker tab Chrome
-already has open, pointed at the new session, so picks do not pile up tabs (`--no-browser` just
-prints the link) — waits for you to press **Done** — 600 s by default, `--timeout` up to 3600 — then downloads
+`photos pick` opens the picker in a new tab of your default browser — when the agent drives
+it (`--auto`, `--album`, many searches), on macOS, after closing Chrome's earlier picker tabs,
+so picks do not pile up tabs (`--no-browser` just prints the link) — waits for you to press **Done** — 600 s by default, `--timeout` up to 3600 — then downloads
 each item and runs `file.import` with `reuse`: a file the project already holds (picked
 before) is reused, not imported twice. `--demo`/`--project`/`--bridge` choose where it imports,
 as for every other command. Progress goes to stderr; the result JSON (`items`, `downloaded`,
@@ -265,8 +265,12 @@ picked twice downloads nothing twice.
   "Leave site?" (the picker holds its selection), the agent lists the dialog's buttons by their
   text and clicks the one that reads Leave — nothing else.
 - A session the agent gave up on is deleted (`sessions.delete`), not left to linger.
-- A new session is shown in the picker tab Chrome already has open (AppleScript `set URL`),
-  not in a new tab; other browsers and systems get `open`/`xdg-open`.
+- Before an agent-driven session opens its tab, Chrome's earlier picker tabs are closed (a tab
+  holding a selection asks "Leave site?" and is closed once more, which Chrome takes as Leave),
+  so its tab is the only one. Pointing the open picker tab at the new session was tried: a tab
+  holding a selection asks "Leave site?" while Chrome already reports the new address, so the
+  agent met the dialog instead of the picker. A pick by hand leaves open picker tabs be (you may
+  be picking in one) and says how many there are.
 - `photos tidy` closes every picker tab in Chrome — those tabs only, by window, tab id *and*
   address. A tab that asks "Leave site?" is closed once more, which Chrome takes as Leave (no
   model needed); one still open after that gets its Leave clicked as above (when the grounding
@@ -278,8 +282,8 @@ allow it, or the tabs are left as they are (and `photos tidy` cannot list them).
 ## How a pick works
 
 1. `POST photospicker.googleapis.com/v1/sessions` (optionally `pickingConfig.maxItemCount`).
-2. Open the session's `pickerUri` + `/autoclose` — in Chrome's open picker tab when there is
-   one, else a new browser tab — so Google Photos closes its tab when the user is done (an
+2. Open the session's `pickerUri` + `/autoclose` in a new browser tab (for an agent, after
+   closing Chrome's earlier picker tabs) — so Google Photos closes its tab when the user is done (an
    agent closes it itself).
 3. Poll `GET /v1/sessions/{id}` at Google's `pollingConfig.pollInterval` (clamped to 1–30 s)
    until `mediaItemsSet`, Google's `timeoutIn` runs out, or our own wait does. Our own timeout

@@ -4,8 +4,8 @@
 //! Google's picker (`filmcraft-screenagent`), and a wait for the selection that ends as soon as
 //! the agent is done without pressing Done, instead of waiting out the whole timeout.
 //!
-//! One tab, one session, many searches: a new session is shown in the picker tab Chrome already
-//! has open (macOS) rather than a new tab, the agent types every search of a pick into that one
+//! One tab, one session, many searches: before an agent-driven session opens its tab, Chrome's
+//! earlier picker tabs are closed (macOS), the agent types every search of a pick into that one
 //! session and closes the tab when it is done, and a session the agent gave up on is deleted.
 //! Many searches — a list, or a sweep of a whole history — run in as few sessions as the item
 //! cap allows ([`pick_searches`]): what one session could not take goes to the next.
@@ -58,40 +58,34 @@ fn join(h: JoinHandle<Result<Summary, String>>) -> Result<Summary, String> {
     h.join().unwrap_or_else(|_| Err("the agent thread died".into()))
 }
 
-/// Show a new session's picker link: in the picker tab Chrome already has open (macOS) — with
-/// `agent` (an agent will drive the picker, so its eyes are there) an older tab's "Leave site?"
-/// is answered with Leave — else in a new tab of the default browser. Says how, or `None`.
+/// Show a new session's picker link in a new tab of the default browser. With `agent` (an agent
+/// will drive the picker, so nobody picks by hand in the earlier picker tabs) Chrome's earlier
+/// picker tabs are closed first (macOS) — a tab holding a selection asks "Leave site?" and is
+/// closed once more, Chrome's Leave — so the new session's tab is the only one; without, they
+/// are left be and only counted. Says how, or `None`.
 fn open_picker(uri: &str, agent: bool, notes: &mut Vec<String>) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        use filmcraft_screenagent::tabs::{self, Reused};
+        use filmcraft_screenagent::tabs;
         let shell = filmcraft_screenagent::capture::OsShell;
-        let mut pause = |ms: u64| std::thread::sleep(Duration::from_millis(ms.min(10_000)));
-        let mut note = |l: &str| notes.push(l.to_string());
-        let reused = if agent {
-            let eyes = filmcraft_screenagent::ground::QwenGrounder::from_config(&filmcraft_screenagent::Config::from_env());
-            let mut hands = filmcraft_screenagent::act::MacActor::new(tabs::CHROME, Box::new(filmcraft_screenagent::capture::OsShell));
-            tabs::reuse_picker_tab(
-                &shell,
-                uri,
-                Some((&mut hands as &mut dyn filmcraft_screenagent::act::Act, &eyes as &dyn filmcraft_screenagent::ground::Ground)),
-                &mut pause,
-                &mut note,
-            )
-        } else {
-            tabs::reuse_picker_tab(&shell, uri, None, &mut pause, &mut note)
-        };
-        match reused {
-            Ok(Reused::Navigated { others }) => {
-                if others > 0 {
-                    notes.push(format!("{others} more Google Photos picker tab(s) are open in Chrome: `filmcraft-cli photos tidy` closes them"));
+        if agent {
+            let mut pause = |ms: u64| std::thread::sleep(Duration::from_millis(ms.min(10_000)));
+            match tabs::close_picker_tabs(&shell, &mut pause, &mut |_| {}) {
+                Ok(t) => {
+                    if t.closed > 0 {
+                        notes.push(format!("closed {} earlier Google Photos picker tab(s) in Chrome", t.closed));
+                    }
+                    if !t.left.is_empty() {
+                        notes.push(format!("{} earlier picker tab(s) would not close: `filmcraft-cli photos tidy` closes picker tabs", t.left.len()));
+                    }
+                    notes.extend(t.notes);
                 }
-                return Some("in the picker tab already open in Chrome".into());
+                Err(e) => notes.push(format!("could not close the earlier picker tabs ({e})")),
             }
-            Ok(Reused::Blocked) => notes
-                .push("the picker tab already open asks \"Leave site?\"; opening a new tab instead (`filmcraft-cli photos tidy` closes picker tabs)".into()),
-            Ok(Reused::NoTab) => {}
-            Err(e) => notes.push(format!("could not reuse the open picker tab ({e}); opening a new tab")),
+        } else if let Ok(open) = tabs::picker_tabs(&shell)
+            && !open.is_empty()
+        {
+            notes.push(format!("{} more Google Photos picker tab(s) are open in Chrome: `filmcraft-cli photos tidy` closes them", open.len()));
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -103,8 +97,8 @@ fn open_picker(uri: &str, agent: bool, notes: &mut Vec<String>) -> Option<String
 /// drive Google's picker, and wait within `opts.wait` for the selection, then download it. The
 /// wait ends early once the agent finished without pressing Done (nothing will be picked), and
 /// when `cancelled()`. A session an agent drove that ends `Pending` is abandoned — the agent
-/// closed its tab — and deleted; one the user picks by hand stays open to resume. The picker is
-/// shown in the picker tab Chrome already has open when there is one. Blocking: HTTP, sleeps
+/// closed its tab — and deleted; one the user picks by hand stays open to resume. An agent's
+/// picker gets the only picker tab (the earlier ones are closed first). Blocking: HTTP, sleeps
 /// and the agent's thread.
 pub fn pick_driven(
     gp: &GooglePhotos,
