@@ -3616,3 +3616,10 @@
 	Uploading {file} to YouTube	正在将 {file} 上传到 YouTube
 	Uploaded to YouTube	已上传到 YouTube
 	Open on YouTube	在 YouTube 上打开
+# AutoCut Elements library (Effects panel ▸ Elements)
+	Elements	素材元素
+	Sounds	音效
+	Stickers	贴纸
+	Animated Text	动画文字
+	Insert at Playhead	在播放头处插入
+	Added {name} on {track}	已在 {track} 上添加 {name}

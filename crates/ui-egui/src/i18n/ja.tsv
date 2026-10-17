@@ -3750,3 +3750,10 @@
 	Uploading {file} to YouTube	{file} を YouTube にアップロード中
 	Uploaded to YouTube	YouTube にアップロードしました
 	Open on YouTube	YouTube で開く
+# AutoCut Elements library (Effects panel ▸ Elements)
+	Elements	エレメント
+	Sounds	サウンド
+	Stickers	ステッカー
+	Animated Text	アニメーションテキスト
+	Insert at Playhead	再生ヘッドの位置に挿入
+	Added {name} on {track}	{track} に {name} を追加しました

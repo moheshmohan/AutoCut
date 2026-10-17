@@ -7,6 +7,7 @@ pub mod color_dialogs;
 pub mod dialogs;
 pub mod effect_controls;
 pub mod effects;
+pub mod elements;
 pub mod essential_sound;
 pub mod events;
 pub mod export_mode;

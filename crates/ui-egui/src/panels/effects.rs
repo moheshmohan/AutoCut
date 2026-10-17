@@ -8,6 +8,9 @@
 //! When the panel is wide (maximized), clicking a Lumetri Presets folder shows its presets as a
 //! thumbnail grid to the right of the tree. Automation ids: `effects.lumetriPreset.<name>`,
 //! `effects.presetGrid` (the grid area), `effects.presetGrid.<name>`.
+//!
+//! The last folder, Elements, is the bundled sound / sticker / animated text library
+//! ([`crate::panels::elements`]).
 
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use serde_json::json;
@@ -117,6 +120,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             }
         }
+        crate::panels::elements::folder(app, ui, &filter);
     });
     if let Some(g) = grid_area
         && let Some(name) = preset_grid(app, ui, g)
@@ -139,7 +143,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 }
 
-fn folder_row(app: &mut FilmcraftApp, ui: &mut egui::Ui, key: &str, depth: usize, filter: &str) -> bool {
+pub(super) fn folder_row(app: &mut FilmcraftApp, ui: &mut egui::Ui, key: &str, depth: usize, filter: &str) -> bool {
     let t = app.tokens;
     let open = !filter.is_empty() || app.ui.expanded_fx.iter().any(|k| k == key);
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click());
