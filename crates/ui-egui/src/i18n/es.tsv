@@ -3743,3 +3743,11 @@
 	GL TVStatic	GL TVStatic
 	GL wind	GL wind
 	GL windowslice	GL windowslice
+# YouTube (Export ▸ Upload to YouTube)
+	Default channel	Canal predeterminado
+	Connect a channel	Conectar un canal
+	Upload to YouTube	Subir a YouTube
+	Pick the channel in Google's account chooser in your browser	Elige el canal en el selector de cuentas de Google en tu navegador
+	Uploading {file} to YouTube	Subiendo {file} a YouTube
+	Uploaded to YouTube	Subido a YouTube
+	Open on YouTube	Abrir en YouTube

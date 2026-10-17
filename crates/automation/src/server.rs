@@ -265,6 +265,62 @@ fn photos_upload_params(p: PhotosUploadParams) -> Value {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct YouTubeUploadParams {
+    /// Absolute path of the video to upload, typically a finished export (MP4, MOV, WebM, MKV…).
+    pub path: String,
+    /// The video's title (at most 100 characters, no < or >).
+    pub title: String,
+    /// The channel: its id (UC…), @handle or title (`youtube.channels` lists the connected
+    /// ones); default: the default channel.
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// At most 5000 bytes, no < or >. A showcase's `<file>.chapters.txt` is appended.
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// A category id (28) or name (Science & Technology); default 22 (People & Blogs).
+    #[serde(default)]
+    pub category: Option<String>,
+    /// private (default), unlisted or public.
+    #[serde(default)]
+    pub privacy: Option<String>,
+    /// A playlist of the channel (its title or id); needs `youtube auth --playlists`.
+    #[serde(default)]
+    pub playlist: Option<String>,
+    /// A JPEG or PNG thumbnail (default: `<file>.thumbnail.jpg` beside the video, if any).
+    #[serde(default)]
+    pub thumbnail: Option<String>,
+    /// Made for kids (YouTube's selfDeclaredMadeForKids); default false.
+    #[serde(default, rename = "madeForKids")]
+    pub made_for_kids: Option<bool>,
+}
+
+/// `youtube.upload` params for a `youtube_upload` call (a long job: progress and cancel).
+fn youtube_upload_params(p: YouTubeUploadParams) -> Value {
+    let mut params = json!({"path": p.path, "title": p.title, "wait": true});
+    for (k, v) in [
+        ("channel", p.channel),
+        ("description", p.description),
+        ("category", p.category),
+        ("privacy", p.privacy),
+        ("playlist", p.playlist),
+        ("thumbnail", p.thumbnail),
+    ] {
+        if let Some(v) = v {
+            params[k] = json!(v);
+        }
+    }
+    if let Some(t) = p.tags {
+        params["tags"] = json!(t);
+    }
+    if let Some(k) = p.made_for_kids {
+        params["madeForKids"] = json!(k);
+    }
+    params
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ShowcaseAnalyzeParams {
     /// What to look for in every clip, singular: "robot", "vintage car". Or give a `prompt`.
     #[serde(default)]
@@ -1094,6 +1150,22 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "YouTube: upload a video",
+        description = "Upload a video — typically a finished export (`file.exportMedia`, or a showcase's) — to one of the user's connected YouTube channels (`channel`: id, @handle or title; default: the default channel), resumably in 8 MiB chunks, and return the video (videoId, url, studioUrl, privacyStatus, the Shorts hint, the thumbnail and playlist outcome, today's quota). Private by default; YouTube may keep uploads from an unaudited Google Cloud project private whatever is asked. A showcase export's `<file>.chapters.txt` is appended to the description and `<file>.thumbnail.jpg` becomes the thumbnail. Runs as the `youtube.upload` engine job: progress notifications in bytes, cancelling stops it (running the same upload again resumes it). Channels are connected by the user once per channel with `filmcraft-cli youtube auth` (or the `youtube.connect` command: it opens the browser, where Google's account chooser picks the channel); `youtube.channels`, `youtube.setDefault`, `youtube.disconnect` (command_run) manage them. The quota: 100 uploads and 10,000 units a day per Google Cloud project, reset at midnight Pacific.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn youtube_upload(
+        &self,
+        Parameters(p): Parameters<YouTubeUploadParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.path.trim().is_empty() {
+            return Ok(fail("`path` is empty: pass the video to upload"));
+        }
+        Ok(self.run_long("youtube.upload", youtube_upload_params(p), &context).await)
+    }
+
+    #[tool(
         title = "Showcase: find every clip of a subject",
         description = "Step 1 of a showcase (\"every robot I've filmed, in order\": a counted, narrated video). A local vision model (Ollama, AUTOCUT_ANALYSIS_MODEL) looks at every video clip (or `items`, filmed `since` a date) for `subject` (or what a `prompt` asks for), names and describes what it finds, reads capture dates and tells which clips show the same one. With `album`, the clips are a Google Photos album the user filled: the whole album is picked through Google's picker by the local screen agent, imported (no duplicates) and only its clips are analysed — the one-call way to turn \"the clips in my album X\" into a video (then plan: true, review, showcase_build). Runs as the `autocut.analyze` engine job (progress notifications, cancellable); the report is kept in the session (showcase_inspect). With plan: true it goes on to step 2 (`autocut.makeShowcase`) and returns the plan. In the app the Showcase panel shows the job and the plan.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
@@ -1352,7 +1424,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -1604,6 +1676,22 @@ mod tests {
         assert_eq!(photos_upload_params(p), json!({"path": "/x/out.mp4", "wait": true}));
         assert!(serde_json::from_value::<PhotosUploadParams>(json!({"description": "no path"})).is_err());
         assert!(crate::long_job::is_long("photos.upload", &json!({"wait": true})));
+    }
+
+    /// `youtube_upload` takes `path` and `title` (required) and the metadata, and runs
+    /// `youtube.upload` as a long job.
+    #[test]
+    fn youtube_upload_schema_and_params() {
+        let m = FilmcraftMcp::headless(Session::default());
+        let Some(tool) = m.tool_router.get("youtube_upload") else { panic!("tool missing") };
+        let schema = Value::Object((*tool.input_schema).clone());
+        assert_eq!(schema["required"], json!(["path", "title"]), "{schema}");
+        assert!(schema["properties"]["madeForKids"].is_object(), "{schema}");
+        let p: YouTubeUploadParams = serde_json::from_value(json!({"path": "/x/out.mp4", "title": "Robots", "tags": ["a"], "channel": "@H4hacks"})).unwrap();
+        assert_eq!(youtube_upload_params(p), json!({"path": "/x/out.mp4", "title": "Robots", "tags": ["a"], "channel": "@H4hacks", "wait": true}));
+        assert!(serde_json::from_value::<YouTubeUploadParams>(json!({"path": "/x"})).is_err(), "a title is needed");
+        assert!(crate::long_job::is_long("youtube.upload", &json!({"wait": true})) && crate::long_job::is_long("youtube.connect", &json!({"wait": true})));
+        assert!(crate::long_job::JOB_EXTRAS.contains(&"youtube"));
     }
 
     /// Over MCP, an upload is the engine job: the media item comes back in the answer, and a

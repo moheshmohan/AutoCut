@@ -3742,3 +3742,11 @@
 	GL TVStatic	GL TVStatic
 	GL wind	GL wind
 	GL windowslice	GL windowslice
+# YouTube (Export ▸ Upload to YouTube)
+	Default channel	既定のチャンネル
+	Connect a channel	チャンネルを接続
+	Upload to YouTube	YouTube にアップロード
+	Pick the channel in Google's account chooser in your browser	ブラウザーの Google アカウント選択画面でチャンネルを選んでください
+	Uploading {file} to YouTube	{file} を YouTube にアップロード中
+	Uploaded to YouTube	YouTube にアップロードしました
+	Open on YouTube	YouTube で開く

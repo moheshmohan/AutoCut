@@ -53,6 +53,19 @@ const VALUED: &[&str] = &[
     "--slot",
     "--variant",
     "--name",
+    // youtube upload, showcase --upload-youtube
+    "--channel",
+    "--tags",
+    "--category",
+    "--privacy",
+    "--publish-at",
+    "--playlist",
+    "--thumbnail",
+    "--youtube-channel",
+    "--youtube-privacy",
+    "--youtube-playlist",
+    "--youtube-tags",
+    "--youtube-description",
 ];
 
 #[derive(Debug, Default)]

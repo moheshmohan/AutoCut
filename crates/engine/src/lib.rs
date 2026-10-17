@@ -65,6 +65,7 @@ pub mod trim;
 pub mod video_templates;
 pub mod voice_clone;
 pub mod voiceover;
+pub mod youtube;
 
 use std::sync::Arc;
 
@@ -460,6 +461,9 @@ pub struct Session {
     pub photos: Option<Arc<dyn photos::PhotosUploader>>,
     /// Upload job → its new media item, filled when the job finishes (`upload` in `jobs.list`).
     pub photo_uploads: std::collections::HashMap<u64, photos::UploadOutcome>,
+    /// YouTube (`youtube.*`): the host's publisher (None = not available: the commands are
+    /// disabled; hosts install filmcraft-youtube's, tests a fake) and what its jobs answered.
+    pub youtube: youtube::YouTubeState,
     /// AutoCut showcases (`autocut.*`): the host that runs their jobs (None = not available),
     /// the command port the jobs edit through, and what they made.
     pub autocut: autocut::AutoCut,
@@ -566,6 +570,7 @@ impl Session {
             transcriber: None,
             photos: None,
             photo_uploads: Default::default(),
+            youtube: Default::default(),
             autocut: Default::default(),
             log: Default::default(),
             browser: Default::default(),
@@ -1380,6 +1385,8 @@ mod vfx_tests;
 mod video_templates_tests;
 #[cfg(test)]
 mod voiceover_tests;
+#[cfg(test)]
+mod youtube_tests;
 
 #[cfg(test)]
 mod source_placement_tests;

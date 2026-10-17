@@ -1,19 +1,21 @@
 //! Export mode (header "Export"), laid out like Premiere 26: Destinations and the export queue on
 //! the left; the Media File settings in the middle (File Name, Location, Preset, Format, then the
 //! Video, Audio, Multiplexer, Captions, Effects and Metadata sections); the preview, Range,
-//! Scaling, the Summary with the estimated file size, Upload to Google Photos (once an export has
-//! finished), and Send to Queue / Export on the right. Also the Preset Manager (Preset ▸ More
+//! Scaling, the Summary with the estimated file size, Upload to Google Photos and Upload to YouTube
+//! (once an export has finished), and Send to Queue / Export on the right. Also the Preset Manager (Preset ▸ More
 //! presets…) and the header's Quick Export popup.
 //!
 //! Every setting lives in [`ExportUi`] (serde, `ui.inspect` / `ui.set {"export": {…}}`) and every
 //! action runs an engine command (`file.exportMedia`, `export.queue.*`, `export.presets.*`,
-//! `export.quick`, `photos.upload`).
+//! `export.quick`, `photos.upload`, `youtube.upload`, `youtube.connect`).
 //!
 //! Automation ids: `export.fileName`, `export.location`, `export.preset`, `export.preset.more`,
 //! `export.format`, `export.section.<video|audio|multiplexer|captions|effects|metadata>`,
 //! `export.video.*`, `export.audio.*`, `export.effects.*`, `export.metadata.*`, `export.range`,
 //! `export.scaling`, `export.summary`, `export.estimate`, `export.uploadGooglePhotos` (its label is
-//! the reason when disabled), `export.upload.status`, `export.upload.open`, `export.sendToQueue`,
+//! the reason when disabled), `export.upload.status`, `export.upload.open`, `export.youtube.channel`
+//! (and `….option.<i>`), `export.youtube.connect`, `export.uploadYouTube` (its label is the reason
+//! when disabled), `export.youtube.status`, `export.youtube.open`, `export.sendToQueue`,
 //! `export.button`,
 //! `export.queue.start|stop|clear`, `export.queue.item.<id>` and `….<id>.<up|down|cancel|retry|remove>`;
 //! Preset Manager: `presetManager.search`, `presetManager.favoritesOnly`,
@@ -65,6 +67,14 @@ pub struct ExportUi {
     /// The Google Photos upload started here (`photos.upload` job) and the export it sends.
     pub upload_job: Option<u64>,
     pub upload_path: String,
+    /// The YouTube upload started here (`youtube.upload` job) and the export it sends.
+    pub youtube_job: Option<u64>,
+    pub youtube_path: String,
+    /// The channel picked for it (id; empty: the default channel) and its label.
+    pub youtube_channel: String,
+    pub youtube_channel_label: String,
+    /// The `youtube.connect` job started here.
+    pub youtube_connect_job: Option<u64>,
 }
 
 impl Default for ExportUi {
@@ -86,6 +96,11 @@ impl Default for ExportUi {
             quick_preset: String::new(),
             upload_job: None,
             upload_path: String::new(),
+            youtube_job: None,
+            youtube_path: String::new(),
+            youtube_channel: String::new(),
+            youtube_channel_label: String::new(),
+            youtube_connect_job: None,
         }
     }
 }
@@ -1145,6 +1160,7 @@ fn preview_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq_id:
     let est = child.label(egui::RichText::new(tlf!("Estimated file size: {size}", size = format_bytes(sum.estimated_bytes))).color(t.text_dim));
     reg.add("export.estimate", est.rect, sum.estimated_size.clone());
     upload_section(app, &mut child);
+    youtube_section(app, &mut child);
     // buttons
     let go = Rect::from_min_size(pos2(rect.max.x - 120.0, rect.max.y - 44.0), vec2(104.0, 30.0));
     let queue = Rect::from_min_size(pos2(go.min.x - 132.0, go.min.y), vec2(122.0, 30.0));
@@ -1239,6 +1255,136 @@ fn upload_section(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     if let Some(url) = link {
         let r = ui.link(tl!("Open in Google Photos"));
         app.auto.add_response("export.upload.open", &r, &url);
+        if r.clicked() {
+            let ctx = ui.ctx().clone();
+            crate::links::open(app, &ctx, &url);
+        }
+    }
+}
+
+/// After an export: "Upload to YouTube" for the file it wrote (`youtube.upload`: private, titled
+/// like the file, its chapters and thumbnail from beside it), to the channel picked here (the
+/// connected ones; the default when none is picked), and "Connect a channel" (`youtube.connect`:
+/// the browser, where Google's account chooser picks the channel). A status line follows the
+/// sign-in or the upload. The full destinations form (metadata, privacy, playlists) is roadmap B5.
+fn youtube_section(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
+    use std::sync::atomic::Ordering;
+    let t = app.tokens;
+    let Some(path) = filmcraft_engine::photos::last_export(&app.session) else { return };
+    let Some(publisher) = app.session.youtube.publisher.clone() else { return };
+    let find = |id: Option<u64>| id.and_then(|id| app.session.jobs.iter().find(|j| j.id == id)).cloned();
+    let job = find(app.ui.export.youtube_job.filter(|_| app.ui.export.youtube_path == path));
+    let connecting = find(app.ui.export.youtube_connect_job);
+    let running = |j: &Option<filmcraft_engine::Job>| j.as_ref().is_some_and(|j| !j.progress.finished.load(Ordering::Relaxed));
+    let (busy, connect_busy) = (running(&job), running(&connecting));
+    let why_not = filmcraft_engine::youtube::can_upload(&app.session).err();
+    let file = std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| path.clone());
+    let title: String = std::path::Path::new(&path).file_stem().map(|f| f.to_string_lossy().to_string()).unwrap_or_default().chars().take(100).collect();
+    ui.add_space(6.0);
+    let mut picked: Option<(String, String)> = None;
+    let mut connect = false;
+    let mut upload = false;
+    ui.horizontal(|ui| {
+        let selected = if app.ui.export.youtube_channel.is_empty() { tl!("Default channel").to_string() } else { app.ui.export.youtube_channel_label.clone() };
+        let r = egui::ComboBox::from_id_salt("export.youtube.channel").selected_text(selected.clone()).width(150.0).show_ui(ui, |ui| {
+            if ui.selectable_label(app.ui.export.youtube_channel.is_empty(), tl!("Default channel")).clicked() {
+                picked = Some((String::new(), String::new()));
+            }
+            // read from disk only while the list is open
+            let list = publisher.channels().unwrap_or(Value::Null);
+            for (i, c) in list["channels"].as_array().into_iter().flatten().enumerate() {
+                let id = c["id"].as_str().unwrap_or_default().to_string();
+                let label = match c["handle"].as_str().filter(|h| !h.is_empty()) {
+                    Some(h) => format!("{} ({h})", c["title"].as_str().unwrap_or_default()),
+                    None => c["title"].as_str().unwrap_or_default().to_string(),
+                };
+                let resp = ui.selectable_label(app.ui.export.youtube_channel == id, &label);
+                app.auto.add(&format!("export.youtube.channel.option.{i}"), resp.rect, &label);
+                if resp.clicked() {
+                    picked = Some((id, label));
+                }
+            }
+        });
+        app.auto.add("export.youtube.channel", r.response.rect, &selected);
+        let can_connect = publisher.connect_ready();
+        let b = ui.add_enabled(can_connect.is_ok() && !connect_busy, egui::Button::new(tl!("Connect a channel")));
+        let b = match &can_connect {
+            Err(w) => b.on_disabled_hover_text(w.as_str()),
+            Ok(()) => b,
+        };
+        app.auto.add_response("export.youtube.connect", &b, can_connect.as_ref().err().map_or("Connect a channel", String::as_str));
+        connect = b.clicked();
+        let b = ui.add_enabled(why_not.is_none() && !busy, egui::Button::new(tl!("Upload to YouTube")));
+        let b = match &why_not {
+            Some(w) => b.on_disabled_hover_text(w.as_str()),
+            None => b,
+        };
+        app.auto.add_response("export.uploadYouTube", &b, why_not.as_deref().unwrap_or("Upload to YouTube"));
+        upload = b.clicked();
+    });
+    if let Some((id, label)) = picked {
+        app.ui.export.youtube_channel = id;
+        app.ui.export.youtube_channel_label = label;
+    }
+    if connect {
+        match app.session.execute("youtube.connect", json!({})) {
+            Ok(v) => {
+                app.ui.export.youtube_connect_job = v["job"].as_u64();
+                app.ui.status = tl!("Pick the channel in Google's account chooser in your browser").into();
+            }
+            Err(e) => app.ui.status = e.to_string(),
+        }
+    }
+    if upload {
+        let mut p = json!({"path": path, "title": if title.trim().is_empty() { "FilmCraft export".to_string() } else { title }});
+        if !app.ui.export.youtube_channel.is_empty() {
+            p["channel"] = json!(app.ui.export.youtube_channel);
+        }
+        match app.session.execute("youtube.upload", p) {
+            Ok(v) => {
+                app.ui.export.youtube_job = v["job"].as_u64();
+                app.ui.export.youtube_path = path.clone();
+                app.ui.status = tlf!("Uploading {file} to YouTube", file);
+            }
+            Err(e) => app.ui.status = e.to_string(),
+        }
+    }
+    // the status line: the sign-in while it runs, else this export's upload, else why not
+    let status_of = |j: &filmcraft_engine::Job| j.progress.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    let (text, color, link) = match (&connecting, &job) {
+        (Some(c), _) if connect_busy => {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            (status_of(c), t.accent, None)
+        }
+        (_, Some(j)) if busy => {
+            let f = j.progress.fraction().clamp(0.0, 1.0);
+            let pct = format!("{:.0}", f * 100.0);
+            let left = j.progress.eta().map(super::left_text).unwrap_or_default();
+            ui.add(egui::ProgressBar::new(f).desired_height(6.0));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            (tlf!("Uploading… {pct}%", pct) + &left, t.accent, None)
+        }
+        (_, Some(j)) => match j.progress.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+            Some(e) => (tlf!("Upload failed: {e}", e), t.danger, None),
+            None => {
+                let video = filmcraft_engine::youtube::outcome_json(&app.session, j.id);
+                let url = video["url"].as_str().filter(|u| u.starts_with("https://www.youtube.com/")).map(str::to_string);
+                (tl!("Uploaded to YouTube").to_string(), t.render_green, url)
+            }
+        },
+        (Some(c), None) => match c.progress.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+            Some(e) => (e, t.danger, None),
+            None => (status_of(c), t.render_green, None),
+        },
+        (None, None) => (why_not.clone().unwrap_or_default(), t.text_faint, None),
+    };
+    if !text.is_empty() {
+        let r = ui.add(egui::Label::new(egui::RichText::new(&text).size(11.0).color(color)).wrap_mode(egui::TextWrapMode::Wrap));
+        app.auto.add("export.youtube.status", r.rect, &text);
+    }
+    if let Some(url) = link {
+        let r = ui.link(tl!("Open on YouTube"));
+        app.auto.add_response("export.youtube.open", &r, &url);
         if r.clicked() {
             let ctx = ui.ctx().clone();
             crate::links::open(app, &ctx, &url);

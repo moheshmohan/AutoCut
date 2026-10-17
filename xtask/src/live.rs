@@ -18,6 +18,9 @@
 //!   ("FilmCraft live check", made once, reused after) and the showcase uploaded into it.
 //! - `picker` (with `--picker`): the picker agent drives Chrome — two searches in one session —
 //!   then `photos tidy`. It takes the browser lock itself; keep hands off the mouse meanwhile.
+//! - `youtube` (with `--youtube`): a YouTube channel connected (`youtube auth --default` opens the
+//!   browser when none is: pick the channel in Google's account chooser), then a 5 s clip of the
+//!   demo project uploaded **private** to the default channel, subscribers not notified.
 //!
 //! Everything a stage makes (projects, exports, reports) goes to `<target>/live/<time>/`, with
 //! each stage's output in `logs/<stage>.log` and the results in `report.json`; nothing goes to
@@ -50,6 +53,7 @@ const STAGES: &[(&str, &str)] = &[
     ("album", "Google Photos album made or found"),
     ("upload", "the showcase uploaded into the album"),
     ("picker", "picker agent: two searches, then tidy"),
+    ("youtube", "a 5 s private clip uploaded to the default YouTube channel"),
 ];
 
 #[derive(Debug, Default, PartialEq)]
@@ -57,6 +61,7 @@ pub(crate) struct Options {
     pub only: Option<Vec<String>>,
     pub google: bool,
     pub picker: bool,
+    pub youtube: bool,
     pub voice: Option<String>,
     pub clip: Option<PathBuf>,
 }
@@ -64,7 +69,7 @@ pub(crate) struct Options {
 pub(crate) fn parse(args: &[String]) -> Result<Options, String> {
     let mut o = Options::default();
     let mut it = args.iter();
-    let usage = "live [--only a,b] [--google] [--picker] [--voice clone:NAME] [--clip FILE]";
+    let usage = "live [--only a,b] [--google] [--picker] [--youtube] [--voice clone:NAME] [--clip FILE]";
     while let Some(a) = it.next() {
         match a.as_str() {
             "--only" => {
@@ -76,6 +81,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--google" => o.google = true,
             "--picker" => o.picker = true,
+            "--youtube" => o.youtube = true,
             "--voice" => o.voice = Some(it.next().ok_or(usage)?.clone()),
             "--clip" => o.clip = Some(PathBuf::from(it.next().ok_or(usage)?)),
             other => return Err(format!("live: unknown `{other}` ({usage})")),
@@ -91,6 +97,7 @@ pub(crate) fn wanted(o: &Options, id: &str) -> bool {
         None => match id {
             "keychain" | "album" | "upload" => o.google,
             "picker" => o.picker,
+            "youtube" => o.youtube,
             _ => true,
         },
     }
@@ -372,6 +379,69 @@ fn picker(run: &Run) -> Outcome {
     }
 }
 
+/// A channel connected (signing in when none is), then a 5 s private clip of the demo project
+/// uploaded to the default channel.
+fn youtube(run: &Run) -> Outcome {
+    let channels = |run: &Run| -> Result<Value, String> {
+        match run.exec("youtube", run.cli().args(["youtube", "channels", "--json", "--compact"]))? {
+            (out, true) => Ok(serde_json::from_str(&out).unwrap_or(Value::Null)),
+            (_, false) => Err(format!("youtube channels failed: {}", run.log("youtube").display())),
+        }
+    };
+    let mut listed = match channels(run) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e),
+    };
+    if listed["channels"].as_array().is_none_or(Vec::is_empty) {
+        eprintln!("live: youtube: no channel connected — the browser opens: pick the channel in Google's account chooser");
+        match run.exec("youtube", run.cli().args(["youtube", "auth", "--default"])) {
+            Ok((_, true)) => {}
+            Ok((_, false)) => return Outcome::Fail(format!("youtube auth failed: {}", run.log("youtube").display())),
+            Err(e) => return Outcome::Fail(e),
+        }
+        listed = match channels(run) {
+            Ok(v) => v,
+            Err(e) => return Outcome::Fail(e),
+        };
+    }
+    let channel = listed["default"]["title"].as_str().unwrap_or("the default channel").to_string();
+    let clip = run.dir.join("youtube-check.mp4");
+    match run.exec("youtube", run.cli().args(["--demo", "export"]).arg(&clip).args(["--start", "0", "--end", "5", "--scale", "0.5"])) {
+        Ok((_, true)) => {}
+        Ok((_, false)) => return Outcome::Fail(format!("the 5 s clip did not export: {}", run.log("youtube").display())),
+        Err(e) => return Outcome::Fail(e),
+    }
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let title = format!("FilmCraft live check {secs}");
+    let up = run.exec(
+        "youtube",
+        run.cli().args(["youtube", "upload"]).arg(&clip).args([
+            "--title",
+            &title,
+            "--description",
+            "A 5 second test upload by FilmCraft's live check (private).",
+            "--privacy",
+            "private",
+            "--no-notify",
+            "--no-sidecars",
+            "--compact",
+        ]),
+    );
+    match up {
+        Ok((out, true)) => {
+            let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            Outcome::Pass(format!(
+                "{} on {channel} ({}, Shorts: {})",
+                v["url"].as_str().unwrap_or("?"),
+                v["privacyStatus"].as_str().unwrap_or("?"),
+                v["shorts"]["likely"]
+            ))
+        }
+        Ok((_, false)) => Outcome::Fail(format!("youtube upload failed: {}", run.log("youtube").display())),
+        Err(e) => Outcome::Fail(e),
+    }
+}
+
 pub(crate) fn run_live(args: &[String]) -> Result<(), String> {
     let o = parse(args)?;
     let md = crate::metadata()?;
@@ -403,6 +473,7 @@ pub(crate) fn run_live(args: &[String]) -> Result<(), String> {
             "album" => cargo_test(&run, id, ("FILMCRAFT_GPHOTOS_LIVE_ALBUM", ALBUM), &["-p", "filmcraft-gphotos", "--test", "live_albums"]),
             "upload" => upload(&run),
             "picker" => picker(&run),
+            "youtube" => youtube(&run),
             _ => Outcome::Skip("unknown stage".into()),
         };
         let secs = start.elapsed().as_secs_f64();
@@ -433,6 +504,8 @@ mod tests {
         assert_eq!(on, ["models", "screen", "whisper", "voice", "analysis", "showcase"]);
         let o = parse(&args(&["--google", "--picker"])).unwrap();
         assert!(wanted(&o, "keychain") && wanted(&o, "album") && wanted(&o, "upload") && wanted(&o, "picker"));
+        assert!(!wanted(&o, "youtube"), "only --youtube uploads to YouTube");
+        assert!(wanted(&parse(&args(&["--youtube"])).unwrap(), "youtube"));
         let o = parse(&args(&["--only", "voice,album"])).unwrap();
         let on: Vec<&str> = STAGES.iter().map(|(id, _)| *id).filter(|id| wanted(&o, id)).collect();
         assert_eq!(on, ["voice", "album"]);

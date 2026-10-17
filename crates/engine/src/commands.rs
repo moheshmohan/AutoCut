@@ -3481,6 +3481,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::video_templates::commands());
     v.extend(crate::music_neural::commands());
     v.extend(crate::photos::commands());
+    v.extend(crate::youtube::commands());
     v.extend(crate::autocut::commands());
     v.extend(crate::media_frame::commands());
     v.extend(crate::media_date::commands());

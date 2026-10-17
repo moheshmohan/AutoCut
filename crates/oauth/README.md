@@ -1,8 +1,8 @@
 # filmcraft-oauth
 
 OAuth 2.0 sign-ins for FilmCraft's desktop integrations, and where their tokens live (layer L5).
-Google Photos ([`filmcraft-gphotos`](../gphotos/README.md)) signs in through it; the YouTube
-adapter (roadmap B3) is meant to as well.
+Google Photos ([`filmcraft-gphotos`](../gphotos/README.md)) and YouTube
+([`filmcraft-youtube`](../youtube/README.md)) sign in through it.
 
 It follows the native-app profile of OAuth ([RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)):
 the authorization-code grant ([RFC 6749](https://www.rfc-editor.org/rfc/rfc6749) §4.1) with
@@ -147,11 +147,10 @@ The real Keychain is opt-in (it writes a throwaway item, removed at the end):
 FILMCRAFT_LIVE_KEYCHAIN=1 cargo test -p filmcraft-oauth --test live_keychain -- --nocapture
 ```
 
-## For YouTube (B3)
+## YouTube (B3)
 
-A second integration needs its own `Provider` (Google's, for YouTube), a `SignInRequest` with
-its scopes, a `sign_in_command`, and a `TokenVault::system(<its data dir>, "FilmCraft YouTube")`.
-Bring-your-own-client-ID mode (the roadmap's answer to Google's verification for the
-`youtube.upload` scope) needs nothing more from this crate: the client id and secret are the
-caller's. Per-account sign-ins (several channels) would key the vault by account as well as by
-directory.
+[`filmcraft-youtube`](../youtube/README.md) uses Google's `Provider`, the user's own Desktop client
+(the Google Photos one), and one `TokenVault::system(<data dir>/youtube/channels/<channel id>,
+"FilmCraft YouTube")` per channel: each channel's sign-in is its own Keychain account (the vault
+keys accounts by directory), so several channels of one Google account (Brand Accounts) never
+share or overwrite a sign-in.

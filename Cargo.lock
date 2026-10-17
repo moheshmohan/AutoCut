@@ -1775,6 +1775,7 @@ dependencies = [
  "filmcraft-render",
  "filmcraft-time",
  "filmcraft-ui-egui",
+ "filmcraft-youtube",
  "glob",
  "log",
  "muda",
@@ -1945,6 +1946,7 @@ dependencies = [
  "filmcraft-screenagent",
  "filmcraft-testkit",
  "filmcraft-time",
+ "filmcraft-youtube",
  "serde_json",
  "tokio",
 ]
@@ -2590,6 +2592,22 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+]
+
+[[package]]
+name = "filmcraft-youtube"
+version = "0.8.0"
+dependencies = [
+ "filmcraft-engine",
+ "filmcraft-isobmff",
+ "filmcraft-oauth",
+ "rustls",
+ "rustls-rustcrypto",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]

@@ -63,9 +63,11 @@ each, so `cargo test` stays offline). `cargo xtask live` runs them in one go and
 | `keychain` (`--google`) | a throwaway sign-in saved in, moved into (from a `tokens.json`) and removed from the macOS Keychain (`FILMCRAFT_LIVE_KEYCHAIN`) | a Mac with an unlocked login keychain |
 | `album`, `upload` (`--google`) | the "FilmCraft live check" album made or found, the showcase uploaded into it | `photos auth --albums` |
 | `picker` (`--picker`) | the picker agent's two searches in one session, then `photos tidy` | Chrome, Screen Recording; takes the browser lock — hands off the mouse |
+| `youtube` (`--youtube`) | a channel connected (`youtube auth --default` opens the browser when none is: pick the channel in Google's account chooser), then a 5 s clip of the demo project uploaded **private** to the default channel, subscribers not notified | the OAuth client file, the YouTube Data API v3 enabled in its project; one upload of the day's 100 |
 
 `--only voice,showcase` runs some. Run it before trusting a build with a real video, and after
-merging work on models, narration, analysis or Google Photos.
+merging work on models, narration, analysis, Google Photos or YouTube. The YouTube adapter's
+offline tests (`cargo test -p filmcraft-youtube`) run against a mock Google on `127.0.0.1`.
 
 ## 2. ffmpeg oracle tests
 

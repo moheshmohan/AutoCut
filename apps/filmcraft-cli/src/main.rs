@@ -32,6 +32,7 @@ macro_rules! out {
 
 mod args;
 mod probe;
+mod youtube;
 
 use args::{Args, parse_value};
 use filmcraft_automation::BridgeClient;
@@ -121,7 +122,9 @@ SUBCOMMANDS
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
          [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
-         [--no-fill] [--export out.mp4 [--upload [--upload-album <title>]]] [--qa | --no-qa]
+         [--no-fill] [--export out.mp4 [--upload [--upload-album <title>]]
+         [--upload-youtube [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P]
+         [--youtube-tags a,b] [--youtube-description D]]] [--qa | --no-qa]
                                 a narrated 16:9 showcase of every clip the analysis found, oldest
                                 first: title, a counter, name/date lower thirds that slide and
                                 fade in and out, a slow push-in on every shot (portrait and 4:3
@@ -160,7 +163,10 @@ SUBCOMMANDS
                                 your Google Photos library (as `photos upload`; --upload-album
                                 puts it into that album, made when missing, to add the next
                                 round's material to by hand; with --report, --album still says
-                                the same). Spoken lines are
+                                the same); --upload-youtube sends it to YouTube (as `youtube
+                                upload`: the default channel or --youtube-channel, titled like
+                                the video, the chapters appended to the description, the
+                                thumbnail set, private unless --youtube-privacy). Spoken lines are
                                 cached in the data directory, so a rebuild synthesizes only the
                                 lines that changed. QA (on with --export, --qa without one, --no-qa
                                 to skip) checks the built show: gaps and overlaps between shots and
@@ -266,6 +272,34 @@ SUBCOMMANDS
                                  matching album selects nothing. --videos-only keeps only its
                                  videos. Items you add to an album by hand are reachable only
                                  this way (Google shows apps only what they uploaded)
+  youtube auth [--default] [--playlists]
+                                 connect a YouTube channel: the browser opens Google's consent,
+                                 whose account chooser lists your Google account and the channels
+                                 it manages (Brand Accounts); each sign-in connects the one picked
+                                 (run it again for another channel). Uses the Google Photos OAuth
+                                 client (client_secret.json; enable the YouTube Data API v3 in its
+                                 project). The first channel is the default; --default makes this
+                                 one the default; --playlists also asks to manage the channel's
+                                 playlists (for --playlist). Each channel's sign-in is its own
+                                 Keychain item account (\"FilmCraft YouTube\")
+  youtube channels [--json]      the connected channels (* the default) and today's quota
+  youtube default <channel>      uploads go there unless --channel says otherwise (id, @handle or
+                                 title)
+  youtube disconnect <channel>   revoke the channel's sign-in at Google and forget it here
+  youtube quota [--json]         today's YouTube quota as FilmCraft spent it (10,000 units and 100
+                                 uploads a Google Cloud project a day, reset at midnight Pacific)
+  youtube upload <file> --title T [--channel C] [--description D] [--tags a,b] [--category 28]
+         [--privacy private|unlisted|public] [--made-for-kids] [--publish-at 2026-11-01T18:00:00Z]
+         [--playlist <title|id>] [--thumbnail f.jpg] [--no-sidecars] [--no-notify]
+                                 upload a video to YouTube, resumably in 8 MiB chunks (a dropped
+                                 connection resumes; running the same upload again after a crash
+                                 or a cancel sends only the rest); progress on stderr, the video
+                                 (videoId, url, studioUrl, privacyStatus, shorts hint) as JSON.
+                                 Private by default (YouTube may keep an unaudited project's
+                                 uploads private whatever is asked). <file>.chapters.txt beside it
+                                 (a showcase export's) is appended to the description and
+                                 <file>.thumbnail.jpg becomes the thumbnail (--no-sidecars: not).
+                                 Vertical or square and up to 3 minutes: YouTube makes it a Short
   photos tidy                    close every Google Photos picker tab left open in Chrome (and
                                  nothing else); a tab that asks \"Leave site?\" is closed once
                                  more, which Chrome takes as Leave (macOS)
@@ -361,6 +395,8 @@ impl Backend {
         }
         // `photos.upload` (also over MCP): the Google Photos sign-in of `photos auth --upload`
         s.photos = Some(filmcraft_gphotos::engine_uploader());
+        // `youtube.*` (also over MCP): the channels connected with `youtube auth`
+        s.youtube.publisher = Some(filmcraft_youtube::engine_publisher());
         // `autocut.analyze` / `autocut.showcasePlan` / `autocut.showcaseBuild` (also over MCP):
         // showcase jobs with the Ollama models of the AUTOCUT_* environment, which can take
         // their clips from a Google Photos `album` (picked by the screen agent)
@@ -1241,6 +1277,7 @@ async fn cli() {
                 other => usage(format!("photos: unknown `{other}` (auth | pick | tidy | upload | album | albums | cached | add)")),
             }
         }
+        "youtube" => youtube::run(&a).await,
         "showcase" => {
             // a narrated, counted showcase of every clip an analysis found (`--report`, from
             // analyze --out), or of a Google Photos album's clips (`--album`: picked, imported
@@ -1290,6 +1327,20 @@ async fn cli() {
                 }
                 if let Err(e) = photos_readiness(album.is_some()) {
                     fail(format!("showcase: --upload: {e}"));
+                }
+            }
+            // --upload-youtube: the export goes to YouTube once built; bad options and a missing
+            // channel or sign-in fail now, not after the build
+            let upload_youtube = a.flag("--upload-youtube") && !a.flag("--plan");
+            if upload_youtube {
+                if opts.export.is_none() {
+                    usage("showcase: --upload-youtube sends the export to YouTube; add --export out.mp4");
+                }
+                // the options now (a usage error), then the channel and its sign-in from disk
+                let req =
+                    youtube::showcase_request(&a, "showcase.mp4", &opts.title, None).unwrap_or_else(|e| usage(format!("showcase: --upload-youtube: {e}")));
+                if let Err(e) = youtube::readiness(&req) {
+                    fail(format!("showcase: --upload-youtube: {e}"));
                 }
             }
             // the clips: the report, or the album picked, imported and analysed in the project
@@ -1497,6 +1548,22 @@ async fn cli() {
                             Err(e) => {
                                 out["uploadError"] = json!(e);
                                 upload_failed = Some(e);
+                            }
+                        }
+                    }
+                    // --upload-youtube: the export to YouTube, titled like the video, with its
+                    // chapters and thumbnail
+                    if upload_youtube && let Some(requested) = &opts.export {
+                        let file = built.export.as_ref().and_then(|r| written_paths(r, requested).into_iter().next()).unwrap_or_else(|| requested.clone());
+                        let r = match youtube::showcase_request(&a, &file, &opts.title, built.thumbnail.as_deref()) {
+                            Ok(req) => youtube::upload(req).await,
+                            Err(e) => Err(e),
+                        };
+                        match r {
+                            Ok(v) => out["youtube"] = v,
+                            Err(e) => {
+                                out["youtubeError"] = json!(e);
+                                upload_failed = Some(upload_failed.map_or(e.clone(), |p| format!("{p}; YouTube: {e}")));
                             }
                         }
                     }

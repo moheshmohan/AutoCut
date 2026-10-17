@@ -40,6 +40,7 @@ filmcraft-ogg = { workspace = true }
 filmcraft-automation = { workspace = true }
 filmcraft-autocut = { workspace = true }
 filmcraft-gphotos = { workspace = true }
+filmcraft-youtube = { workspace = true }
 filmcraft-screenagent = { workspace = true }
 filmcraft-locks = { workspace = true }
 serde_json = { workspace = true }

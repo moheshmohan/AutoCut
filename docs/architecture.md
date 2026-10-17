@@ -23,7 +23,7 @@ Design principles:
 
 ```text
  L6  apps/filmcraft · apps/filmcraft-cli · apps/filmcraft-web
- L5  ui-egui · automation · autocut · gphotos · oauth · screenagent · platform
+ L5  ui-egui · automation · autocut · gphotos · oauth · youtube · screenagent · platform
  L4  engine
  L3  render · gpu · export · templates · golden (test-only)
  L2  edit · codecs · interchange · captions · speech · tts · tts-text · acestep
@@ -83,7 +83,8 @@ and `filmcraft-cli`.
 | `automation` | L5 | MCP server (`rmcp`, stdio), headless or bridged to the running app |
 | `autocut` | L5 | prompt-driven editing: local LLM classification (Ollama), deterministic planners into engine commands, supervisor hand-off ([README](../crates/autocut/README.md)) |
 | `gphotos` | L5 | Google Photos: the sign-in on `oauth` (picker scope, plus the Library API's append-only scope on `--upload`), Picker-API sessions, download cache, resumable uploads of exports and the albums the app creates (Library API, app-created data only; `--albums` adds the app-created read scope) behind a fakeable transport; hosts install its uploader as the engine's `Session::photos` for `photos.upload`, `photos.createAlbum`, `photos.albums` and `photos.addToAlbum` ([README](../crates/gphotos/README.md)) |
-| `oauth` | L5 | OAuth 2.0 sign-ins for desktop integrations (Google Photos now, YouTube next): authorization code + PKCE S256, the system browser, a loopback redirect on `127.0.0.1` with a random port and a checked `state`, refresh (`invalid_grant` becomes "sign in again: <command>"), revocation; the tokens behind a `SecretStore` trait — the macOS Keychain through `/usr/bin/security` (no FFI), an owner-only `tokens.json` elsewhere — with the move of an existing `tokens.json` into the Keychain ([README](../crates/oauth/README.md)). Same-layer edge from `gphotos` |
+| `oauth` | L5 | OAuth 2.0 sign-ins for desktop integrations (Google Photos, YouTube): authorization code + PKCE S256, the system browser, a loopback redirect on `127.0.0.1` with a random port and a checked `state`, refresh (`invalid_grant` becomes "sign in again: <command>"), revocation; the tokens behind a `SecretStore` trait — the macOS Keychain through `/usr/bin/security` (no FFI), an owner-only `tokens.json` elsewhere — with the move of an existing `tokens.json` into the Keychain ([README](../crates/oauth/README.md)). Same-layer edges from `gphotos` and `youtube` |
+| `youtube` | L5 | YouTube publishing: channels connected through `oauth` (scopes `youtube.upload` + `youtube.readonly`; `youtube.force-ssl` only for playlists), one sign-in per channel (Google's account chooser picks it, Brand Accounts included) kept as its own Keychain account, a default channel; the resumable `videos.insert` upload (chunks, resume after a dropped connection or a crash, backoff, a dropped session started again), thumbnails, playlists, the Shorts hint, quota counted per Pacific day, Google's errors in words — behind a fakeable transport, tested against a mock Google on `127.0.0.1`; hosts install its publisher as the engine's `Session::youtube.publisher` for `youtube.connect`, `youtube.channels`, `youtube.setDefault`, `youtube.disconnect` and `youtube.upload` ([README](../crates/youtube/README.md)). Same-layer edge to `oauth` |
 | `screenagent` | L5 | eyes and hands for the agent: window capture, UI grounding (Qwen2.5-VL via Ollama), input synthesis with hard budgets — drives the Google Photos picker ([README](../crates/screenagent/README.md)) |
 | `platform` | L5 | OS media FFI only: hardware video decoding (VideoToolbox H.264 / HEVC on macOS; Media Foundation / Direct3D 11 H.264 / HEVC / VP9 / AV1 on Windows; VA-API H.264 / HEVC on Linux, with our own parsers and DPBs driving the stateless hardware; a no-op elsewhere) behind `codecs::VideoDecoder`, with transparent fallback to our decoders, and hardware H.264 encoding (VideoToolbox, opt-in) and H.265 encoding (VideoToolbox, the only H.265 encoder; the format exists only where a hardware encoder does) and NVIDIA NVENC H.264 (Windows and 64-bit Linux, opt-in) and H.265 (Windows, FilmCraft's only H.265 encoder there) encoding behind `export::VideoEncoder`; H.264 declines to the built-in encoder for what the hardware does not take. The one crate allowed `unsafe` ([ADR 0001](adr/0001-platform-ffi.md), [README](../crates/platform/README.md)) |
 | `filmcraft` | L6 | desktop binary: eframe/wgpu window, cpal audio output, file dialogs, native macOS menu, TCP control server |
@@ -100,7 +101,7 @@ are exempt):
 |---|---|
 | Every crate has a layer | A new crate fails the check until it is added to `LAYERS`. |
 | Only downward edges | A crate may not depend on a crate in a higher layer. |
-| Same-layer edges are listed | From L1 up, a same-layer edge must be in `SAME_LAYER`: `media→frame`, `project→media`, `project→frame`, `gpu→render`, `export→render`, `cli→filmcraft`, `gphotos→oauth`, plus a few reserved for planned crates. |
+| Same-layer edges are listed | From L1 up, a same-layer edge must be in `SAME_LAYER`: `media→frame`, `project→media`, `project→frame`, `gpu→render`, `export→render`, `cli→filmcraft`, `gphotos→oauth`, `youtube→oauth`, plus a few reserved for planned crates. |
 | L0 codecs stay standalone | L0 crates other than `time`, `geom`, `color`, `bitstream`, `locks`, `testkit` may depend on no workspace crate except `filmcraft-bitstream`. External crates such as `thiserror` and `rayon` are allowed. |
 | No UI/OS crates below L5 | `egui`, `eframe`, `egui-wgpu`, `winit`, `rfd`, `cpal`, `muda` are allowed only in L5 and L6. |
 

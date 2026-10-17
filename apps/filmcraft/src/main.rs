@@ -216,6 +216,8 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         session.voiceover.input = Some(Box::new(audio_in::CpalIn::new(&session.prefs.audio_hardware.device_class)));
         // Export ▸ Upload to Google Photos, over the sign-in of `filmcraft-cli photos auth --upload`
         session.photos = Some(filmcraft_gphotos::engine_uploader());
+        // Export ▸ Upload to YouTube, over the channels connected with `filmcraft-cli youtube auth`
+        session.youtube.publisher = Some(filmcraft_youtube::engine_publisher());
         // Sequence ▸ Make a Showcase… and the Showcase panel: AutoCut's showcase jobs, with the
         // Ollama models of the AUTOCUT_* environment; a job may take its clips from a Google
         // Photos `album`, picked through the picker by the screen agent
