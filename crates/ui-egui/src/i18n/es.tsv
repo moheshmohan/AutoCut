@@ -3758,3 +3758,76 @@
 	Animated Text	Texto animado
 	Insert at Playhead	Insertar en el cabezal
 	Added {name} on {track}	Se añadió {name} en {track}
+# Transition engines (Video Transitions ▸ Luma Wipes, Blend Dissolves) and GL displacement / luma
+	Luma Wipes	Barridos luma
+	Blend Dissolves	Disoluciones de fusión
+	Luma Barn Door Diagonal	Luma puertas de granero diagonal
+	Luma Barn Door Horizontal	Luma puertas de granero horizontal
+	Luma Barn Door Vertical	Luma puertas de granero vertical
+	Luma Blinds Diagonal	Luma persianas diagonales
+	Luma Blinds Horizontal	Luma persianas horizontales
+	Luma Blinds Vertical	Luma persianas verticales
+	Luma Box	Luma recuadro
+	Luma Box In	Luma recuadro hacia dentro
+	Luma Cells	Luma celdas
+	Luma Checkerboard	Luma damero
+	Luma Clock	Luma reloj
+	Luma Clock Reverse	Luma reloj inverso
+	Luma Clouds	Luma nubes
+	Luma Crackle	Luma grietas
+	Luma Cross	Luma cruz
+	Luma Diagonal	Luma diagonal
+	Luma Diamond	Luma diamante
+	Luma Fan	Luma abanico
+	Luma Linear	Luma lineal
+	Luma Linear Vertical	Luma lineal vertical
+	Luma Noise	Luma ruido
+	Luma Oval	Luma óvalo
+	Luma Radial	Luma radial
+	Luma Radial In	Luma radial hacia dentro
+	Luma Random Blocks	Luma bloques aleatorios
+	Luma Rings	Luma anillos
+	Luma Soft Linear	Luma lineal suave
+	Luma Spiral	Luma espiral
+	Luma Spiral Arms	Luma brazos de espiral
+	Luma Star	Luma estrella
+	Luma Starburst	Luma estallido de estrella
+	Luma Wave	Luma onda
+	Color Dissolve	Disolución de color
+	Color Burn Dissolve	Disolución de subexponer color
+	Color Dodge Dissolve	Disolución de sobreexponer color
+	Darken Dissolve	Disolución de oscurecer
+	Darker Color Dissolve	Disolución de color más oscuro
+	Difference Dissolve	Disolución de diferencia
+	Dither Dissolve	Disolución granulada
+	Divide Dissolve	Disolución de dividir
+	Exclusion Dissolve	Disolución de exclusión
+	Hard Light Dissolve	Disolución de luz fuerte
+	Hard Mix Dissolve	Disolución de mezcla definida
+	Hue Dissolve	Disolución de tono
+	Lighten Dissolve	Disolución de aclarar
+	Lighter Color Dissolve	Disolución de color más claro
+	Linear Burn Dissolve	Disolución de subexposición lineal
+	Linear Dodge Dissolve	Disolución de sobreexposición lineal
+	Linear Light Dissolve	Disolución de luz lineal
+	Luminosity Dissolve	Disolución de luminosidad
+	Multiply Dissolve	Disolución de multiplicar
+	Overlay Dissolve	Disolución de superponer
+	Pin Light Dissolve	Disolución de luz puntual
+	Saturation Dissolve	Disolución de saturación
+	Screen Dissolve	Disolución de trama
+	Soft Light Dissolve	Disolución de luz suave
+	Subtract Dissolve	Disolución de restar
+	Vivid Light Dissolve	Disolución de luz intensa
+	GL displacement	GL displacement
+	GL luma	GL luma
+	Arms	Brazos
+	Rings	Anillos
+	Cells	Celdas
+	Displacement Map	Mapa de desplazamiento
+	Luma Map	Mapa de luma
+	Map Scale	Escala del mapa
+	Clouds	Nubes
+	Spiral	Espiral
+	Conical	Cónico
+	Blinds	Persianas

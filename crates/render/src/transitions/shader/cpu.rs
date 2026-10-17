@@ -66,9 +66,18 @@ pub(crate) struct Ctx<'a> {
     pub progress: f32,
     pub ratio: f32,
     pub p: [f32; super::PARAMS],
+    /// The generated map (the GPU's map binding), when the shader reads one.
+    pub map: Option<&'a super::maps::Map>,
 }
 
 impl Ctx<'_> {
+    /// The host's `getMap`: the map's value at the pixel whose centre is at `uv` (0 without a map).
+    fn map(&self, uv: V2) -> f32 {
+        let Some(m) = self.map else { return 0.0 };
+        let x = (uv.x * self.w).floor();
+        let y = ((1.0 - uv.y) * self.h).floor();
+        m.at(x as i64, y as i64)
+    }
     fn sample(img: &Image, w: f32, h: f32, uv: V2) -> [f32; 4] {
         img.sample_bilinear_clamped(uv.x * w, (1.0 - uv.y) * h)
     }
@@ -1034,6 +1043,74 @@ pub(crate) fn window_slice(c: &Ctx, p: V2) -> [f32; 4] {
     let pr = smooth_step(-smoothness, 0.0, p.x - c.progress * (1.0 + smoothness));
     let s = step(pr, fract(count * p.x + 0.001));
     mix4(c.from(p), c.to(p), s)
+}
+
+// Author: Travis Fischer
+// License: MIT
+pub(crate) fn displacement(c: &Ctx, uv: V2) -> [f32; 4] {
+    let strength = c.p[0];
+    let displacement = c.map(uv) * strength;
+    let uv_from = V2::new(uv.x + c.progress * displacement, uv.y);
+    let uv_to = V2::new(uv.x - (1.0 - c.progress) * displacement, uv.y);
+    mix4(c.from(uv_from), c.to(uv_to), c.progress)
+}
+
+// Author: gre
+// License: MIT
+pub(crate) fn luma(c: &Ctx, uv: V2) -> [f32; 4] {
+    mix4(c.to(uv), c.from(uv), step(c.progress, c.map(uv)))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The transition engines (original work, MIT OR Apache-2.0): `luma_wipe.wgsl`, `blend_dissolve.wgsl`
+
+/// The luma-mask wipe engine.
+pub(crate) fn luma_wipe(c: &Ctx, uv: V2) -> [f32; 4] {
+    let softness = c.p[0];
+    let mut m = c.map(uv);
+    if c.p[1] > 0.5 {
+        m = 1.0 - m;
+    }
+    let k = smooth_step(m, m + softness, c.progress * (1.0 + softness));
+    mix4(c.from(uv), c.to(uv), k)
+}
+
+/// The incoming picture `b` composited onto the outgoing `a` with blend mode `mode` (the
+/// compositor's own formula, `crate::blend::composite_at`).
+fn blended(a: [f32; 4], b: [f32; 4], mode: u32) -> [f32; 4] {
+    use filmcraft_color::{linear_to_srgb, srgb_to_linear};
+    let (sa, da) = (b[3], a[3]);
+    if sa <= 0.0 {
+        return a;
+    }
+    if mode == 0 || da <= 0.0 {
+        let k = 1.0 - sa;
+        return [b[0] + a[0] * k, b[1] + a[1] * k, b[2] + a[2] * k, b[3] + a[3] * k];
+    }
+    let cs = [linear_to_srgb(b[0] / sa), linear_to_srgb(b[1] / sa), linear_to_srgb(b[2] / sa)];
+    let cb = [linear_to_srgb(a[0] / da), linear_to_srgb(a[1] / da), linear_to_srgb(a[2] / da)];
+    let bl = crate::blend::blend_rgb(crate::blend::Blend::from_index(mode), cb, cs);
+    let mut o = [0.0; 4];
+    for k in 0..3 {
+        let mixed = srgb_to_linear(bl[k].clamp(0.0, 1.0));
+        o[k] = b[k] * (1.0 - da) + a[k] * (1.0 - sa) + sa * da * mixed;
+    }
+    o[3] = sa + da - sa * da;
+    o
+}
+
+/// The blend-mode dissolve engine.
+pub(crate) fn blend_dissolve(c: &Ctx, uv: V2) -> [f32; 4] {
+    let (a, b) = (c.from(uv), c.to(uv));
+    let mode = c.p[0] as u32;
+    let strength = c.p[1];
+    let fade = mix4(a, b, c.progress);
+    if mode == 1 {
+        let dither = if c.rand_pixel(uv) < c.progress { b } else { a };
+        return mix4(fade, dither, strength);
+    }
+    let k = strength * 4.0 * c.progress * (1.0 - c.progress);
+    mix4(fade, blended(a, b, mode), k)
 }
 
 #[cfg(test)]

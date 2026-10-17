@@ -531,7 +531,7 @@ fn every_video_transition_applies_via_command() {
     s.execute("playhead.set", json!({"time": cut.0})).unwrap();
     let defs: Vec<_> =
         filmcraft_project::effect_defs().iter().filter(|d| d.kind == filmcraft_project::EffectKind::VideoTransition && d.category[0] != "Obsolete").collect();
-    assert_eq!(defs.len(), 84 + 21 + 38, "Premiere folders, Legacy, GL Transitions");
+    assert_eq!(defs.len(), 84 + 21 + 40 + 32 + 26, "Premiere folders, Legacy, GL Transitions, Luma Wipes, Blend Dissolves");
     for (i, d) in defs.iter().enumerate() {
         // alternate id and display-name lookups
         let name = if i % 2 == 0 { d.id } else { d.name };
@@ -615,12 +615,27 @@ fn gl_transitions_apply_and_render_through_commands() {
     // every GL transition is listed in its folder with its easing parameters
     let gl = s.execute("effects.list", json!({"folder": "Video Transitions/GL Transitions", "detail": true})).unwrap();
     let gl = gl.as_array().unwrap();
-    assert_eq!(gl.len(), 38);
+    assert_eq!(gl.len(), 40);
     for e in gl {
         let params = e["paramInfo"].as_array().unwrap();
         let easing = params.iter().find(|p| p["id"] == "easing").unwrap_or_else(|| panic!("{e}"));
         assert_eq!(easing["options"].as_array().unwrap().len(), 32);
     }
+    // the transition engines' folders: luma wipes and blend dissolves, with the same easing
+    for (folder, n) in [("Video Transitions/Luma Wipes", 32), ("Video Transitions/Blend Dissolves", 26)] {
+        let list = s.execute("effects.list", json!({"folder": folder, "detail": true})).unwrap();
+        let list = list.as_array().unwrap();
+        assert_eq!(list.len(), n, "{folder}");
+        assert!(list.iter().all(|e| e["paramInfo"].as_array().unwrap().iter().any(|p| p["id"] == "easing")), "{folder}");
+    }
+    // a preset applies by name, takes its engine's parameters and renders
+    let r = s.execute("sequence.applyVideoTransition", json!({"effect": "Luma Spiral", "params": {"softness": 20.0, "spin": "Counter-clockwise"}})).unwrap();
+    let id = r["transition"].as_u64().unwrap();
+    assert!(s.execute("sequence.setTransition", json!({"transition": id, "params": {"feather": 1e300, "count": -5}})).is_ok());
+    let q = s.active_sequence().unwrap();
+    let tr = q.video_tracks[0].transitions.iter().find(|t| t.id.0 == id).unwrap().clone();
+    let mid = tr.start + tr.duration.mul_ratio(1, 2);
+    assert!(s.render_program_at(0.25, mid).unwrap().px.iter().all(|v| v.is_finite()));
 }
 
 #[test]

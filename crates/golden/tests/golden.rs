@@ -759,6 +759,54 @@ fn gl_transitions_sheet() {
     assert!(failures.is_empty(), "golden mismatch: {failures:#?}");
 }
 
+/// Video Transitions ▸ Luma Wipes and Blend Dissolves: every preset of the two transition engines
+/// (`filmcraft_render::transitions::shader`, `luma_wipe.wgsl` and `blend_dissolve.wgsl` with their
+/// Rust references) at 45 %, from the same rendered demo frames as the GL sheets (48×27), in a
+/// grid of four by four presets per sheet (`transition_engines_sheet_<n>`, numbered from 1; luma
+/// wipes, then blend dissolves, each in id order).
+#[test]
+fn transition_engines_sheet() {
+    use filmcraft_project::transition_engines::{BLEND_PRESETS, LUMA_PRESETS};
+    use filmcraft_render::transitions::apply;
+    const PER_ROW: usize = 4;
+    const PER_SHEET: usize = 16;
+    let frame = |scene: DemoScene| {
+        let mut b = Builder::new(1);
+        let m = b.demo(scene);
+        b.place(0, m, 0, 48);
+        let s = b.at(12);
+        render_sequence(&s.project, s.seq, RATE.tick_of(s.frame), RenderOptions { scale: 0.15, ..RenderOptions::default() }, &s.sources)
+    };
+    let (a, b) = (frame(DemoScene::OceanSunset), frame(DemoScene::Aurora));
+    let (cw, ch) = (a.w, a.h);
+    let ids: Vec<&str> = LUMA_PRESETS.iter().map(|p| p.id).chain(BLEND_PRESETS.iter().map(|p| p.id)).collect();
+    let sheets: Vec<&[&str]> = ids.chunks(PER_SHEET).collect();
+    let mut failures = Vec::new();
+    for (i, cells) in sheets.iter().enumerate() {
+        let rows = cells.len().div_ceil(PER_ROW);
+        let (w, h) = (cw * PER_ROW, ch * rows);
+        let mut px = vec![0u8; w * h * 4];
+        for (k, id) in cells.iter().enumerate() {
+            let (r, c) = (k / PER_ROW, k % PER_ROW);
+            let cell = apply(&find_effect(id).unwrap().instance(), &a, &b, 0.45).over_black_rgba8();
+            for y in 0..ch {
+                let dst = ((r * ch + y) * w + c * cw) * 4;
+                px[dst..dst + cw * 4].copy_from_slice(&cell[y * cw * 4..(y + 1) * cw * 4]);
+            }
+        }
+        let rgba = Rgba8::new(w as u32, h as u32, px);
+        let name = format!("transition_engines_sheet_{}", i + 1);
+        let title = format!("Luma Wipes and Blend Dissolves (FilmCraft transition engines, Rust reference) at 45 %: {}", cells.join(", "));
+        match check_golden(&golden_path(&name), &rgba, Tolerance::RENDER, &title, &format!("crates/golden/tests/golden.rs ({name})")) {
+            Ok(d) => eprintln!("{name}: {d}"),
+            Err(e) => failures.push(e),
+        }
+    }
+    let stale = golden_path(&format!("transition_engines_sheet_{}", sheets.len() + 1));
+    assert!(!stale.exists(), "{} is not drawn any more: remove it, its sidecar and its ATTRIBUTION.md row", stale.display());
+    assert!(failures.is_empty(), "golden mismatch: {failures:#?}");
+}
+
 /// Effects panel ▸ Lumetri Presets thumbnail grid: every built-in preset graded by our Lumetri on
 /// the procedural preview picture (`filmcraft_render::lumetri_presets`).
 #[test]

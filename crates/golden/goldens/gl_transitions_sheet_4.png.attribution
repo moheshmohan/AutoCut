@@ -1,5 +1,5 @@
 asset:        gl_transitions_sheet_4.png
-title:        GL Transitions (WGSL ports, Rust reference) at 30 % and 60 %: gl_squeeze, gl_starwipe, gl_swap, gl_swirl, gl_tvstatic, gl_waterdrop, gl_wind, gl_windowslice
+title:        GL Transitions (WGSL ports, Rust reference) at 30 % and 60 %: gl_ripple, gl_simplezoom, gl_squeeze, gl_starwipe, gl_swap, gl_swirl, gl_tvstatic, gl_waterdrop, gl_wind, gl_windowslice
 author:       FilmCraft contributors
 source:       original work (rendered by FilmCraft's own renderer from a procedurally generated project; no external media)
 license:      MIT OR Apache-2.0

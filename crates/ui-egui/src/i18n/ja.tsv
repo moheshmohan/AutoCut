@@ -3757,3 +3757,76 @@
 	Animated Text	アニメーションテキスト
 	Insert at Playhead	再生ヘッドの位置に挿入
 	Added {name} on {track}	{track} に {name} を追加しました
+# Transition engines (Video Transitions ▸ Luma Wipes, Blend Dissolves) and GL displacement / luma
+	Luma Wipes	ルマワイプ
+	Blend Dissolves	描画モードディゾルブ
+	Luma Barn Door Diagonal	ルマ 観音開き (斜め)
+	Luma Barn Door Horizontal	ルマ 観音開き (水平)
+	Luma Barn Door Vertical	ルマ 観音開き (垂直)
+	Luma Blinds Diagonal	ルマ ブラインド (斜め)
+	Luma Blinds Horizontal	ルマ ブラインド (水平)
+	Luma Blinds Vertical	ルマ ブラインド (垂直)
+	Luma Box	ルマ ボックス
+	Luma Box In	ルマ ボックス (内向き)
+	Luma Cells	ルマ セル
+	Luma Checkerboard	ルマ チェッカーボード
+	Luma Clock	ルマ 時計
+	Luma Clock Reverse	ルマ 時計 (逆回り)
+	Luma Clouds	ルマ 雲
+	Luma Crackle	ルマ ひび割れ
+	Luma Cross	ルマ 十字
+	Luma Diagonal	ルマ 斜め
+	Luma Diamond	ルマ ひし形
+	Luma Fan	ルマ 扇形
+	Luma Linear	ルマ リニア
+	Luma Linear Vertical	ルマ リニア (垂直)
+	Luma Noise	ルマ ノイズ
+	Luma Oval	ルマ 楕円
+	Luma Radial	ルマ 円形
+	Luma Radial In	ルマ 円形 (内向き)
+	Luma Random Blocks	ルマ ランダムブロック
+	Luma Rings	ルマ リング
+	Luma Soft Linear	ルマ ソフトリニア
+	Luma Spiral	ルマ スパイラル
+	Luma Spiral Arms	ルマ スパイラル (複数の腕)
+	Luma Star	ルマ 星形
+	Luma Starburst	ルマ スターバースト
+	Luma Wave	ルマ ウェーブ
+	Color Dissolve	カラーディゾルブ
+	Color Burn Dissolve	焼き込みカラーディゾルブ
+	Color Dodge Dissolve	覆い焼きカラーディゾルブ
+	Darken Dissolve	比較 (暗) ディゾルブ
+	Darker Color Dissolve	カラー比較 (暗) ディゾルブ
+	Difference Dissolve	差の絶対値ディゾルブ
+	Dither Dissolve	ディザディゾルブ
+	Divide Dissolve	除算ディゾルブ
+	Exclusion Dissolve	除外ディゾルブ
+	Hard Light Dissolve	ハードライトディゾルブ
+	Hard Mix Dissolve	ハードミックスディゾルブ
+	Hue Dissolve	色相ディゾルブ
+	Lighten Dissolve	比較 (明) ディゾルブ
+	Lighter Color Dissolve	カラー比較 (明) ディゾルブ
+	Linear Burn Dissolve	焼き込み (リニア) ディゾルブ
+	Linear Dodge Dissolve	覆い焼き (リニア) ディゾルブ
+	Linear Light Dissolve	リニアライトディゾルブ
+	Luminosity Dissolve	輝度ディゾルブ
+	Multiply Dissolve	乗算ディゾルブ
+	Overlay Dissolve	オーバーレイディゾルブ
+	Pin Light Dissolve	ピンライトディゾルブ
+	Saturation Dissolve	彩度ディゾルブ
+	Screen Dissolve	スクリーンディゾルブ
+	Soft Light Dissolve	ソフトライトディゾルブ
+	Subtract Dissolve	減算ディゾルブ
+	Vivid Light Dissolve	ビビッドライトディゾルブ
+	GL displacement	GL displacement
+	GL luma	GL luma
+	Arms	腕の数
+	Rings	リング数
+	Cells	セル数
+	Displacement Map	置き換えマップ
+	Luma Map	ルママップ
+	Map Scale	マップのスケール
+	Clouds	雲
+	Spiral	スパイラル
+	Conical	円錐
+	Blinds	ブラインド

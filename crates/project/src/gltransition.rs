@@ -64,8 +64,18 @@ fn num(id: &'static str, label: &'static str, def: f64, min: f64, max: f64, deci
     fixed(fs(id, label, def, (min, max), (min, max), "", decimals))
 }
 
-/// The host's easing parameters, appended to every GL transition.
-fn easing() -> [ParamDef; 5] {
+/// The generated grayscale maps the `displacement` and `luma` ports read (their upstream
+/// versions take an image; these are computed: `filmcraft-render`, `transitions::shader::maps`).
+/// Choice indices are stored in projects and never change.
+pub const MAP_OPTS: &[&str] = &["Clouds", "Cells", "Spiral", "Conical", "Radial", "Square", "Linear", "Blinds"];
+
+/// A generated map: which one, its scale (sequence pixels: noise cell, Worley cell, slat) and seed.
+fn map_params(label: &'static str) -> [ParamDef; 3] {
+    [ch("map", label, MAP_OPTS, 0), fixed(fs("map_scale", "Map Scale", 120.0, (2.0, 2000.0), (2.0, 2000.0), "px", 0)), num("seed", "Seed", 1.0, 0.0, 9999.0, 0)]
+}
+
+/// The host's easing parameters, appended to every GL transition (and every engine transition).
+pub(crate) fn easing() -> [ParamDef; 5] {
     [
         ch("easing", "Easing", EASING_OPTS, 0),
         num("bezier_x1", "Bézier X1", 0.25, 0.0, 1.0, 2),
@@ -153,6 +163,11 @@ pub(crate) fn defs() -> Vec<EffectDef> {
                 num("direction_y", "Direction Y", 1.0, -1.0, 1.0, 2),
             ],
         ),
+        gl("gl_displacement", "GL displacement", {
+            let mut v = vec![num("strength", "Strength", 0.5, -2.0, 2.0, 2)];
+            v.extend(map_params("Displacement Map"));
+            v
+        }),
         gl(
             "gl_doorway",
             "GL doorway",
@@ -181,6 +196,7 @@ pub(crate) fn defs() -> Vec<EffectDef> {
                 num("power", "Power", 1.5, 0.1, 10.0, 2),
             ],
         ),
+        gl("gl_luma", "GL luma", map_params("Luma Map").to_vec()),
         gl(
             "gl_luminance_melt",
             "GL luminance_melt",
@@ -264,7 +280,7 @@ mod tests {
     fn gl_transitions_are_listed_in_their_folder() {
         let all = crate::effect::effect_defs();
         let gl: Vec<_> = all.iter().filter(|d| d.category == GL_TRANSITIONS).collect();
-        assert_eq!(gl.len(), 38);
+        assert_eq!(gl.len(), 40);
         let mut names: Vec<_> = gl.iter().map(|d| d.name.to_ascii_lowercase()).collect();
         let sorted = {
             let mut s = names.clone();
@@ -273,7 +289,7 @@ mod tests {
         };
         assert_eq!(names, sorted, "sorted by name");
         names.dedup();
-        assert_eq!(names.len(), 38);
+        assert_eq!(names.len(), 40);
         for d in gl {
             assert!(d.id.starts_with("gl_") && d.name.starts_with("GL "), "{}", d.id);
             assert_eq!(d.kind, EffectKind::VideoTransition);

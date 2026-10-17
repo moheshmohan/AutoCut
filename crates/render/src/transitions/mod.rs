@@ -14,8 +14,8 @@
 //! Contract (tested for every transition): `p = 0` is exactly the outgoing frame, `p = 1` exactly
 //! the incoming frame, the output is finite and deterministic, and it changes continuously near
 //! both ends. This module is the reference implementation. The GPU draws Push and the shader
-//! transitions ([`shader`]: GL Transitions ported to WGSL, each with its Rust reference here) on
-//! its own and is tested against this module; the GPU plan pre-renders every other transition
+//! transitions ([`shader`]: GL Transitions ported to WGSL and the Luma Wipes / Blend Dissolves
+//! engines, each with its Rust reference here) on its own and is tested against this module; the GPU plan pre-renders every other transition
 //! on the CPU (see `plan.rs`).
 //!
 //! Immersive (VR) transitions are flat approximations on the equirectangular frame: sampling wraps

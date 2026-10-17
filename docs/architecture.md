@@ -330,9 +330,12 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   keeps its clip's blend mode), so both paths give the same picture. Push and the GL Transitions
   (`render::transitions::shader`: shaders hand-ported from the MIT gl-transitions collection to
   WGSL, each with a Rust reference that is the CPU fallback and the GPU's test oracle; naga
-  validates every module into a registry before the GPU compiles it) are planned as two-input
-  steps, also inside a plain nested sequence: each side is drawn into its own image on the GPU
-  and one fragment pass combines them. The GPU export renderer draws them with the same stages,
+  validates every module into a registry before the GPU compiles it), and the two transition
+  engines behind the Luma Wipes and Blend Dissolves presets (one luma-mask wipe shader reading a
+  grayscale map generated from scratch for each shape, and one dissolve through any compositor
+  blend mode; GL displacement and luma read the same generated maps through a fourth binding),
+  are planned as two-input steps, also inside a plain nested sequence: each side is drawn into
+  its own image on the GPU and one fragment pass combines them. The GPU export renderer draws them with the same stages,
   so an export matches the Program monitor (a transition the device cannot draw sends that frame
   to the CPU reference). Their easing is applied to the progress on the CPU at the exact frame
   time, so both paths see the same value. Setting `FILMCRAFT_CPU_COMPOSITE=1`

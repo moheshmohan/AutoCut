@@ -1,5 +1,5 @@
 asset:        gl_transitions_sheet_3.png
-title:        GL Transitions (WGSL ports, Rust reference) at 30 % and 60 %: gl_luminance_melt, gl_mosaic, gl_perlin, gl_pinwheel, gl_pixelize, gl_polar_function, gl_polkadotscurtain, gl_randomsquares, gl_ripple, gl_simplezoom
+title:        GL Transitions (WGSL ports, Rust reference) at 30 % and 60 %: gl_kaleidoscope, gl_luma, gl_luminance_melt, gl_mosaic, gl_perlin, gl_pinwheel, gl_pixelize, gl_polar_function, gl_polkadotscurtain, gl_randomsquares
 author:       FilmCraft contributors
 source:       original work (rendered by FilmCraft's own renderer from a procedurally generated project; no external media)
 license:      MIT OR Apache-2.0

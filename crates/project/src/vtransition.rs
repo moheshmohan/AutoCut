@@ -383,6 +383,8 @@ pub(crate) fn video_transition_defs() -> Vec<EffectDef> {
     .into_iter()
     // ---- GL Transitions (after the Premiere folders in the panel) ----
     .chain(crate::gltransition::defs())
+    // ---- the transition engines' presets (Luma Wipes, Blend Dissolves) ----
+    .chain(crate::transition_engines::defs())
     .collect()
 }
 
@@ -395,8 +397,9 @@ pub fn find_transition(name: &str, kind: EffectKind) -> Option<&'static EffectDe
 
 /// The Effects panel folder tree for video transitions: `(folder path, transition ids)` in panel
 /// order (sub-folders as [`VIDEO_TRANSITION_FOLDERS`], then `Video Transitions/GL Transitions`
-/// ([`crate::gltransition`]), then `Legacy/Video Transitions`); items are sorted by name as in the
-/// panel.
+/// ([`crate::gltransition`]), `Video Transitions/Luma Wipes` and `Video Transitions/Blend Dissolves`
+/// ([`crate::transition_engines`]), then `Legacy/Video Transitions`); items are sorted by name as
+/// in the panel.
 pub fn video_transition_tree() -> Vec<(String, Vec<&'static str>)> {
     let defs = crate::effect::effect_defs();
     let folder = |cat: &[&str]| -> Vec<&'static str> {
@@ -407,6 +410,8 @@ pub fn video_transition_tree() -> Vec<(String, Vec<&'static str>)> {
     let mut out: Vec<(String, Vec<&'static str>)> =
         VIDEO_TRANSITION_FOLDERS.iter().map(|f| (format!("Video Transitions/{f}"), folder(&["Video Transitions", f]))).collect();
     out.push(("Video Transitions/GL Transitions".into(), folder(crate::gltransition::GL_TRANSITIONS)));
+    out.push(("Video Transitions/Luma Wipes".into(), folder(crate::transition_engines::LUMA_WIPES)));
+    out.push(("Video Transitions/Blend Dissolves".into(), folder(crate::transition_engines::BLEND_DISSOLVES)));
     out.push(("Legacy/Video Transitions".into(), folder(LEGACY_VIDEO_TRANSITIONS)));
     out
 }
@@ -419,7 +424,7 @@ mod tests {
     fn premiere_26_transition_tree() {
         let tree = video_transition_tree();
         let counts: Vec<usize> = tree.iter().map(|(_, v)| v.len()).collect();
-        assert_eq!(counts, vec![8, 11, 10, 8, 16, 8, 4, 2, 8, 9, 38, 21], "{tree:?}");
+        assert_eq!(counts, vec![8, 11, 10, 8, 16, 8, 4, 2, 8, 9, 40, 32, 26, 21], "{tree:?}");
         assert_eq!(counts[..10].iter().sum::<usize>(), 84);
         // every transition is in a known folder, ids and names are unique per kind
         let mut names = std::collections::HashSet::new();
@@ -428,7 +433,9 @@ mod tests {
             let ok = (d.category.len() == 2 && d.category[0] == "Video Transitions" && VIDEO_TRANSITION_FOLDERS.contains(&d.category[1]))
                 || d.category == LEGACY_VIDEO_TRANSITIONS
                 || d.category == OBSOLETE_VIDEO_TRANSITIONS
-                || d.category == crate::gltransition::GL_TRANSITIONS;
+                || d.category == crate::gltransition::GL_TRANSITIONS
+                || d.category == crate::transition_engines::LUMA_WIPES
+                || d.category == crate::transition_engines::BLEND_DISSOLVES;
             assert!(ok, "{} in {:?}", d.id, d.category);
             assert!(d.params.iter().all(|p| !p.animatable), "{}: transition params are not animatable", d.id);
         }

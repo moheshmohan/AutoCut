@@ -63,10 +63,10 @@ fn gpu_shader_transitions_match_the_cpu_reference() {
     let mut cases = 0u64;
     // an odd aspect ratio and a 16:9 frame; opaque and translucent clips
     for (w, h, alpha) in [(97usize, 41usize, 1.0f32), (128, 72, 0.6)] {
-        for d in shader::shaders() {
+        for id in shader::transition_ids() {
             let mut worst = (0u32, 0.0f64);
             for progress in [0.0f32, 0.13, 0.37, 0.5, 0.81, 1.0] {
-                let mut effect = filmcraft_project::find_effect(d.id).unwrap().instance();
+                let mut effect = filmcraft_project::find_effect(id).unwrap().instance();
                 // exercise the host's easing on half the cases
                 if progress > 0.4 {
                     effect.param_mut("easing").unwrap().value = ParamValue::Choice(9);
@@ -81,10 +81,10 @@ fn gpu_shader_transitions_match_the_cpu_reference() {
                 // the endpoints pass the inputs through: half-float rounding only
                 let limit = if progress == 0.0 || progress == 1.0 { (1, 0.5) } else { (6, 1.5) };
                 if p99 > limit.0 || mean >= limit.1 {
-                    failures.push(format!("{} {w}x{h} alpha {alpha} p={progress}: p99 {p99}, mean {mean:.3}", d.id));
+                    failures.push(format!("{id} {w}x{h} alpha {alpha} p={progress}: p99 {p99}, mean {mean:.3}"));
                 }
             }
-            eprintln!("{} {w}x{h}: worst p99 {}, mean {:.3}", d.id, worst.0, worst.1);
+            eprintln!("{id} {w}x{h}: worst p99 {}, mean {:.3}", worst.0, worst.1);
         }
     }
     assert!(failures.is_empty(), "GPU differs from the CPU reference:\n{}", failures.join("\n"));
@@ -102,10 +102,12 @@ fn shader_stage_only_takes_shader_transitions() {
     assert!(!stage.ready(&dev, "cross_dissolve"));
     assert!(!stage.ready(&dev, "push"));
     assert!(!stage.ready(&dev, ""));
-    for d in shader::shaders() {
-        assert!(stage.ready(&dev, d.id), "{} builds", d.id);
-        assert!(stage.ready(&dev, d.id), "{} is cached", d.id);
+    for id in shader::transition_ids() {
+        assert!(stage.ready(&dev, id), "{id} builds");
+        assert!(stage.ready(&dev, id), "{id} is cached");
     }
+    // the presets of an engine share its one pipeline
+    assert_eq!(stage.pipelines.len(), shader::shaders().len() + shader::engines().len());
 }
 
 /// GPU vs CPU speed of every shader transition on a 1080p frame (prints a table):
@@ -123,8 +125,8 @@ fn gl_transition_speed() {
     let a = filmcraft_render::Image { w, h, px: picture(w, h, 0, 1.0).to_linear_f32_decimated_with(1, None).2 };
     let b = filmcraft_render::Image { w, h, px: picture(w, h, 1, 1.0).to_linear_f32_decimated_with(1, None).2 };
     eprintln!("{:<20} {:>12} {:>12} {:>12}", "transition", "CPU ms", "GPU ms", "GPU frame ms");
-    for d in shader::shaders() {
-        let effect = filmcraft_project::find_effect(d.id).unwrap().instance();
+    for id in shader::transition_ids() {
+        let effect = filmcraft_project::find_effect(id).unwrap().instance();
         // CPU reference alone (rayon over rows)
         let runs = 3;
         let t = std::time::Instant::now();
@@ -168,6 +170,6 @@ fn gl_transition_speed() {
             let _ = c.read_output();
         }
         let frame_ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
-        eprintln!("{:<20} {cpu_ms:>12.1} {gpu_ms:>12.2} {frame_ms:>12.1}", d.id);
+        eprintln!("{:<20} {cpu_ms:>12.1} {gpu_ms:>12.2} {frame_ms:>12.1}", id);
     }
 }

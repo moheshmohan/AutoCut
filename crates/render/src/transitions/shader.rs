@@ -18,9 +18,18 @@
 //!   ([`filmcraft_project::gltransition`]) into the 12 shader floats, clamping hostile values to
 //!   the catalogue's ranges (a shader needing more would extend `Host` with another vec4).
 //!
-//! Shaders that need inputs the stage does not give yet stay out: `displacement` and `luma` (an
-//! extra grayscale texture: a third binding and an asset or a procedural map), and the BSD-licensed
-//! `InvertedPageCurl` and `StereoViewer` (MIT only).
+//! The BSD-licensed `InvertedPageCurl` and `StereoViewer` stay out (MIT only).
+//!
+//! **Generated maps.** A shader may read a grayscale map through the host's `getMap` (a fourth
+//! binding, one value per frame pixel). Maps are never loaded: [`maps`] computes them from the
+//! transition's parameters (`displacement` and `luma` read clouds, cells, spirals…; the luma-wipe
+//! engine its preset's shape), and the CPU reference and the GPU read the same values.
+//!
+//! **Engines** (roadmap C2). Besides the ports, two original shaders each draw a family of named
+//! presets (`filmcraft_project::transition_engines`): the luma-mask wipe (`luma_wipe.wgsl`: a
+//! wipe following a generated map, with softness, feather and invert; dozens of shapes) and the
+//! blend-mode dissolve (`blend_dissolve.wgsl`: a dissolve through any of the compositor's blend
+//! modes). Every preset of an engine shares its one pipeline.
 //!
 //! **The host owns time.** [`eased_progress`] applies the transition's easing (Penner curves or a
 //! cubic Bézier, [`super::easing`]) to the progress the timeline computed at the exact frame
@@ -73,10 +82,12 @@ use super::{Tx, paint};
 use crate::image::Image;
 
 mod cpu;
+pub mod maps;
 #[cfg(test)]
 mod tests;
 
 use cpu::{Ctx, V2};
+use filmcraft_project::transition_engines::{self as engines, LumaShape};
 
 /// Number of shader parameter floats (`host.p0`..`host.p2`).
 pub const PARAMS: usize = 12;
@@ -101,9 +112,16 @@ pub struct ShaderDef {
     pub body: &'static str,
     params: fn(&Params) -> [f32; PARAMS],
     cpu: fn(&Ctx, V2) -> [f32; 4],
+    /// The map the shader reads through `getMap` (None: it reads none).
+    map: Option<fn(&Params) -> maps::Spec>,
 }
 
 impl ShaderDef {
+    /// Whether the shader reads a generated map.
+    pub fn reads_map(&self) -> bool {
+        self.map.is_some()
+    }
+
     /// The complete WGSL module: the host prelude, then the body.
     pub fn wgsl(&self) -> String {
         format!("{PRELUDE}\n// ---- {} ----\n{}", self.upstream, self.body)
@@ -124,8 +142,89 @@ const fn def(
     params: fn(&Params) -> [f32; PARAMS],
     cpu: fn(&Ctx, V2) -> [f32; 4],
 ) -> ShaderDef {
-    ShaderDef { id, upstream, author, license: "MIT", body, params, cpu }
+    ShaderDef { id, upstream, author, license: "MIT", body, params, cpu, map: None }
 }
+
+/// A port that reads a generated map ([`MAP_OPTS`](filmcraft_project::gltransition::MAP_OPTS)).
+const fn def_map(
+    id: &'static str,
+    upstream: &'static str,
+    author: &'static str,
+    body: &'static str,
+    params: fn(&Params) -> [f32; PARAMS],
+    cpu: fn(&Ctx, V2) -> [f32; 4],
+) -> ShaderDef {
+    ShaderDef { id, upstream, author, license: "MIT", body, params, cpu, map: Some(gl_map) }
+}
+
+/// The map of the `displacement` and `luma` ports: the `map` choice, `map_scale` and `seed`.
+fn gl_map(p: &Params) -> maps::Spec {
+    let scale = p.num("map_scale").max(1.0) * p.scale;
+    let per_row = (p.w / scale).max(1.0);
+    let mut s = match p.choice("map") {
+        1 => maps::Spec { count: per_row, ..maps::Spec::new(LumaShape::Worley) },
+        2 => maps::Spec::new(LumaShape::Spiral),
+        3 => maps::Spec::new(LumaShape::Clock),
+        4 => maps::Spec::new(LumaShape::Radial),
+        5 => maps::Spec::new(LumaShape::Box),
+        6 => maps::Spec { angle: 90.0, ..maps::Spec::new(LumaShape::Linear) },
+        7 => maps::Spec { angle: 90.0, count: per_row, ..maps::Spec::new(LumaShape::Blinds) },
+        _ => maps::Spec { scale, ..maps::Spec::new(LumaShape::Noise) },
+    };
+    s.seed = p.num("seed").max(0.0) as u32;
+    s
+}
+
+/// The luma-wipe engine's uniforms: softness (0..1), invert.
+fn luma_params(p: &Params) -> [f32; PARAMS] {
+    pack(&[p.num("softness") / 100.0, p.bit("invert")])
+}
+
+/// The luma-wipe engine's map: the preset's shape with its parameters.
+fn luma_map(p: &Params) -> maps::Spec {
+    let shape = engines::luma_preset(&p.e.effect).map_or(LumaShape::Linear, |l| l.shape);
+    maps::Spec {
+        shape,
+        angle: p.num("angle"),
+        center: p.point_px("center"),
+        count: p.whole("count", 1.0),
+        inner: p.num("inner") / 100.0,
+        scale: p.num("scale").max(0.5) * p.scale,
+        seed: p.num("seed").max(0.0) as u32,
+        ccw: p.choice("spin") == 1,
+        feather: p.num("feather").max(0.0) * p.scale,
+    }
+}
+
+/// The blend-dissolve engine's uniforms: blend mode, strength (0..1).
+fn blend_params(p: &Params) -> [f32; PARAMS] {
+    let mode = p.choice("mode").min(filmcraft_project::effect::BLEND_MODES.len() as u32 - 1);
+    pack(&[mode as f32, p.num("strength") / 100.0])
+}
+
+/// The engines, each drawing a family of presets (`filmcraft_project::transition_engines`).
+static ENGINES: &[ShaderDef] = &[
+    ShaderDef {
+        id: "engine_luma_wipe",
+        upstream: "luma_wipe",
+        author: "FilmCraft contributors",
+        license: "MIT OR Apache-2.0",
+        body: include_str!("shader/luma_wipe.wgsl"),
+        params: luma_params,
+        cpu: cpu::luma_wipe,
+        map: Some(luma_map),
+    },
+    ShaderDef {
+        id: "engine_blend_dissolve",
+        upstream: "blend_dissolve",
+        author: "FilmCraft contributors",
+        license: "MIT OR Apache-2.0",
+        body: include_str!("shader/blend_dissolve.wgsl"),
+        params: blend_params,
+        cpu: cpu::blend_dissolve,
+        map: None,
+    },
+];
 
 /// Every ported transition, sorted by id.
 static SHADERS: &[ShaderDef] = &[
@@ -209,6 +308,7 @@ static SHADERS: &[ShaderDef] = &[
         },
         cpu::directional_warp,
     ),
+    def_map("gl_displacement", "displacement", "Travis Fischer", include_str!("shader/displacement.wgsl"), |p| pack(&[p.num("strength")]), cpu::displacement),
     def(
         "gl_doorway",
         "doorway",
@@ -244,6 +344,7 @@ static SHADERS: &[ShaderDef] = &[
         |p| pack(&[p.num("speed"), p.num("angle"), p.num("power")]),
         cpu::kaleidoscope,
     ),
+    def_map("gl_luma", "luma", "gre", include_str!("shader/luma.wgsl"), |_| [0.0; PARAMS], cpu::luma),
     def(
         "gl_luminance_melt",
         "luminance_melt",
@@ -341,9 +442,28 @@ pub fn shaders() -> &'static [ShaderDef] {
     SHADERS
 }
 
-/// The ported transition with effect id `id`.
+/// The engines (luma wipe, blend dissolve); each draws many presets.
+pub fn engines() -> &'static [ShaderDef] {
+    ENGINES
+}
+
+/// The shader that draws transition `id`: its port, or the engine of its preset.
 pub fn find(id: &str) -> Option<&'static ShaderDef> {
-    SHADERS.iter().find(|d| d.id == id)
+    if let Some(d) = SHADERS.iter().find(|d| d.id == id) {
+        return Some(d);
+    }
+    if engines::luma_preset(id).is_some() {
+        return ENGINES.first();
+    }
+    if engines::blend_preset(id).is_some() {
+        return ENGINES.get(1);
+    }
+    None
+}
+
+/// Every transition id the shader stage draws: the ports, then the engines' presets.
+pub fn transition_ids() -> impl Iterator<Item = &'static str> {
+    SHADERS.iter().map(|d| d.id).chain(engines::LUMA_PRESETS.iter().map(|p| p.id)).chain(engines::BLEND_PRESETS.iter().map(|p| p.id))
 }
 
 /// Whether `id` is a shader transition (drawn by the GPU's shader stage when one is available).
@@ -399,6 +519,7 @@ impl Registry {
     fn build() -> Registry {
         let entries = SHADERS
             .iter()
+            .chain(ENGINES)
             .map(|d| {
                 let src = d.wgsl();
                 (d.id, validate(d.id, &src).map(|()| src))
@@ -496,6 +617,17 @@ impl Params<'_> {
         (u, t)
     }
 
+    /// Point `id` in frame pixels (y down), limited to a frame around the picture; a NaN
+    /// coordinate stays NaN (the frame's centre).
+    fn point_px(&self, id: &str) -> (f32, f32) {
+        let v = match self.value(id) {
+            Some(ParamValue::Vec2(v)) => v,
+            _ => filmcraft_geom::Vec2::new(f64::NAN, f64::NAN),
+        };
+        let c = |v: f64, size: f32| if v.is_finite() { (v as f32 * self.scale).clamp(-size, 2.0 * size) } else { f32::NAN };
+        (c(v.x, self.w), c(v.y, self.h))
+    }
+
     /// A whole-number parameter, at least `min`.
     fn whole(&self, id: &str, min: f32) -> f32 {
         self.num(id).round().max(min)
@@ -535,6 +667,15 @@ pub fn uniforms(e: &EffectInstance, w: u32, h: u32, progress: f32, scale: f32) -
     Some(out)
 }
 
+/// The generated map shader transition `e` reads on a `w`×`h` frame (`scale` as for
+/// [`uniforms`]), from the map cache. None when it reads no map (or the frame is empty or too
+/// large for one: the shader then reads zeros).
+pub fn map(e: &EffectInstance, w: u32, h: u32, scale: f32) -> Option<std::sync::Arc<maps::Map>> {
+    let spec = find(&e.effect)?.map?;
+    let p = Params { e, w: w.max(1) as f32, h: h.max(1) as f32, scale: if scale.is_finite() && scale > 0.0 { scale } else { 1.0 } };
+    maps::cached(&spec(&p), w as usize, h as usize)
+}
+
 /// The CPU reference of shader transition `id` (None for other transitions).
 pub(crate) fn apply(id: &str, t: &Tx) -> Option<Image> {
     let d = find(id)?;
@@ -548,7 +689,8 @@ pub(crate) fn apply(id: &str, t: &Tx) -> Option<Image> {
     }
     let mut p = [0.0; PARAMS];
     p.copy_from_slice(&u[4..4 + PARAMS]);
-    let c = Ctx { a: t.a, b: t.b, w: u[0], h: u[1], progress, ratio: u[3], p };
+    let map = if d.reads_map() { map(t.e, t.w as u32, t.h as u32, t.scale) } else { None };
+    let c = Ctx { a: t.a, b: t.b, w: u[0], h: u[1], progress, ratio: u[3], p, map: map.as_deref() };
     // the prelude's uv: the pixel centre times 1 / size (see `Host::inv`)
     let (inv_w, inv_h) = (u[4 + PARAMS], u[5 + PARAMS]);
     Some(paint(t.w, t.h, |x, y| (d.cpu)(&c, V2::new(x * inv_w, (c.h - y) * inv_h))))

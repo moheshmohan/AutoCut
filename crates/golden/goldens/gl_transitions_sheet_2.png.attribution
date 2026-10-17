@@ -1,5 +1,5 @@
 asset:        gl_transitions_sheet_2.png
-title:        GL Transitions (WGSL ports, Rust reference) at 30 % and 60 %: gl_crosszoom, gl_cube, gl_directionalwarp, gl_doorway, gl_dreamyzoom, gl_filmburn, gl_glitchdisplace, gl_glitchmemories, gl_hexagonalize, gl_kaleidoscope
+title:        GL Transitions (WGSL ports, Rust reference) at 30 % and 60 %: gl_crosszoom, gl_cube, gl_directionalwarp, gl_displacement, gl_doorway, gl_dreamyzoom, gl_filmburn, gl_glitchdisplace, gl_glitchmemories, gl_hexagonalize
 author:       FilmCraft contributors
 source:       original work (rendered by FilmCraft's own renderer from a procedurally generated project; no external media)
 license:      MIT OR Apache-2.0

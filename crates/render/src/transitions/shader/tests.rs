@@ -28,9 +28,28 @@ fn set(e: &mut EffectInstance, id: &str, v: ParamValue) {
 fn every_shader_validates() {
     let reg = registry();
     assert!(reg.errors().is_empty(), "{:#?}", reg.errors());
-    for d in shaders() {
+    for d in shaders().iter().chain(engines()) {
         let src = reg.source(d.id).unwrap();
         assert!(src.contains("fn transition("), "{}", d.id);
+        assert_eq!(src.contains("getMap("), d.reads_map() || src.contains("fn getMap("), "{}", d.id);
+    }
+    // every preset is drawn by its engine; ports by themselves
+    let ids: Vec<&str> = transition_ids().collect();
+    assert_eq!(ids.len(), shaders().len() + engines::LUMA_PRESETS.len() + engines::BLEND_PRESETS.len());
+    for id in &ids {
+        let d = find(id).unwrap();
+        assert!(is_shader(id) && filmcraft_project::find_effect(id).is_some(), "{id}");
+        if id.starts_with("luma_") {
+            assert_eq!(d.id, "engine_luma_wipe");
+            assert!(d.reads_map());
+        } else if id.starts_with("blend_") {
+            assert_eq!(d.id, "engine_blend_dissolve");
+        } else {
+            assert_eq!(d.id, *id);
+        }
+    }
+    for d in engines() {
+        assert!(d.body.contains("original work, MIT OR Apache-2.0") && d.license == "MIT OR Apache-2.0", "{}", d.id);
     }
     assert_eq!(reg.source("cross_dissolve"), Err(ShaderError::Unknown("cross_dissolve".into())));
 }
@@ -127,10 +146,10 @@ fn easing_is_applied_by_the_host() {
 fn endpoints_are_exact_at_every_size() {
     for (w, h) in [(1, 1), (1, 9), (9, 1), (3, 2), (17, 5), (64, 36)] {
         let (a, b) = (frame(w, h, 0.2), frame(w, h, 0.9));
-        for d in shaders() {
-            let e = instance(d.id);
-            assert_eq!(apply(&e, &a, &b, 0.0), a, "{} {w}x{h}", d.id);
-            assert_eq!(apply(&e, &a, &b, 1.0), b, "{} {w}x{h}", d.id);
+        for id in transition_ids() {
+            let e = instance(id);
+            assert_eq!(apply(&e, &a, &b, 0.0), a, "{id} {w}x{h}");
+            assert_eq!(apply(&e, &a, &b, 1.0), b, "{id} {w}x{h}");
         }
     }
 }
@@ -147,8 +166,8 @@ fn fuzzed_parameters_and_odd_frames_never_panic() {
     let sizes = [(1usize, 1usize), (2, 1), (1, 2), (7, 3), (3, 7), (31, 2), (2, 31), (40, 23)];
     let progresses = [f32::NAN, -1.0, 0.0, 1e-7, 0.013, 0.25, 0.5, 0.5001, 0.75, 0.999_99, 1.0, 3.0, f32::INFINITY];
     let mut state = 0x5eed_u64;
-    for d in shaders() {
-        let def = filmcraft_project::find_effect(d.id).unwrap();
+    for id in transition_ids() {
+        let def = filmcraft_project::find_effect(id).unwrap();
         for round in 0..24 {
             let mut e = def.instance();
             for p in &def.params {
@@ -177,11 +196,11 @@ fn fuzzed_parameters_and_odd_frames_never_panic() {
             let (a, b) = (frame(w, h, 0.4), frame(w, h, 0.6));
             for &p in &progresses {
                 let m = apply(&e, &a, &b, p);
-                assert_eq!((m.w, m.h), (w, h), "{} {w}x{h}", d.id);
-                assert!(m.px.iter().all(|v| v.is_finite()), "{} p={p} {w}x{h} round {round}: non-finite", d.id);
+                assert_eq!((m.w, m.h), (w, h), "{id} {w}x{h}");
+                assert!(m.px.iter().all(|v| v.is_finite()), "{id} p={p} {w}x{h} round {round}: non-finite");
                 let u = uniforms(&e, w as u32, h as u32, p, 1.0).unwrap();
-                assert!(u.iter().all(|v| v.is_finite()), "{} uniforms {u:?}", d.id);
-                assert!((0.0..=1.0).contains(&u[2]), "{} eased progress {}", d.id, u[2]);
+                assert!(u.iter().all(|v| v.is_finite()), "{id} uniforms {u:?}");
+                assert!((0.0..=1.0).contains(&u[2]), "{id} eased progress {}", u[2]);
             }
         }
     }
@@ -266,4 +285,159 @@ fn batch_two_shaders_do_what_their_names_say() {
     let m = apply(&instance("gl_polkadotscurtain"), &a, &b, 0.05);
     assert!(is_b(m.get(0, h - 1)));
     assert!(is_a(m.get(w - 1, 0)));
+}
+
+// ---------------------------------------------------------------------------------------------
+// C2: the engines and the map-reading ports
+
+fn share(m: &Image, pred: impl Fn([f32; 4]) -> bool) -> f32 {
+    m.px.chunks(4).filter(|c| pred([c[0], c[1], c[2], c[3]])).count() as f32 / (m.w * m.h) as f32
+}
+
+#[test]
+fn luma_wipes_follow_their_maps() {
+    let (w, h) = (64usize, 36usize);
+    let a = Image::filled(w, h, [1.0, 0.0, 0.0, 1.0]);
+    let b = Image::filled(w, h, [0.0, 0.0, 1.0, 1.0]);
+    let is_b = |c: [f32; 4]| c[2] > 0.99 && c[0] < 0.01;
+    let is_a = |c: [f32; 4]| c[0] > 0.99 && c[2] < 0.01;
+    // Luma Linear (90°, left to right): left half in, right half out at the midpoint
+    let m = apply(&instance("luma_linear"), &a, &b, 0.5);
+    assert!(is_b(m.get(2, 10)) && is_a(m.get(w - 3, 10)));
+    assert!((share(&m, is_b) - 0.5).abs() < 0.08, "{}", share(&m, is_b));
+    // the incoming share grows with the progress
+    let shares: Vec<f32> = [0.1, 0.3, 0.5, 0.7, 0.9].iter().map(|&p| share(&apply(&instance("luma_clouds"), &a, &b, p), is_b)).collect();
+    assert!(shares.windows(2).all(|s| s[0] <= s[1]), "{shares:?}");
+    // Invert reverses the order: the radial iris opens at the corners instead
+    let m = apply(&instance("luma_radial"), &a, &b, 0.3);
+    assert!(is_b(m.get(w / 2, h / 2)) && is_a(m.get(0, 0)));
+    let m = apply(&instance("luma_radial_in"), &a, &b, 0.3);
+    assert!(is_a(m.get(w / 2, h / 2)) && is_b(m.get(0, 0)));
+    // softness 0 is a hard edge: only the two pictures, nothing between
+    let mut hard = instance("luma_diagonal");
+    set(&mut hard, "softness", ParamValue::Float(0.0));
+    let m = apply(&hard, &a, &b, 0.4);
+    assert!(m.px.chunks(4).all(|c| is_a([c[0], c[1], c[2], c[3]]) || is_b([c[0], c[1], c[2], c[3]])));
+    // ...and softness makes a band of mixed pixels
+    let mut soft = instance("luma_diagonal");
+    set(&mut soft, "softness", ParamValue::Float(60.0));
+    let m = apply(&soft, &a, &b, 0.4);
+    assert!(share(&m, |c| !is_a(c) && !is_b(c)) > 0.2);
+    // feathering a hard-edged map softens the edge too
+    let mut feathered = instance("luma_checkerboard");
+    set(&mut feathered, "softness", ParamValue::Float(0.0));
+    let plain = apply(&feathered, &a, &b, 0.5);
+    set(&mut feathered, "feather", ParamValue::Float(30.0));
+    assert_ne!(apply(&feathered, &a, &b, 0.5), plain);
+    // the wipe is complete exactly at the end, whatever the softness
+    for softness in [0.0, 50.0, 100.0] {
+        let mut e = instance("luma_star");
+        set(&mut e, "softness", ParamValue::Float(softness));
+        let m = apply(&e, &a, &b, 0.999_99);
+        assert!(share(&m, is_b) > 0.99, "softness {softness}");
+        let m = apply(&e, &a, &b, 0.000_01);
+        assert!(share(&m, is_a) > 0.99, "softness {softness}");
+    }
+    // a centre in sequence pixels, scaled with the frame
+    let mut e = instance("luma_radial");
+    set(&mut e, "center", ParamValue::Vec2(filmcraft_geom::Vec2::new(0.0, 0.0)));
+    let m = apply(&e, &a, &b, 0.2);
+    assert!(is_b(m.get(0, 0)) && is_a(m.get(w - 1, h - 1)));
+}
+
+#[test]
+fn every_luma_preset_reveals_and_completes() {
+    let (w, h) = (48usize, 27usize);
+    let a = Image::filled(w, h, [1.0, 0.0, 0.0, 1.0]);
+    let b = Image::filled(w, h, [0.0, 0.0, 1.0, 1.0]);
+    for p in engines::LUMA_PRESETS {
+        let e = instance(p.id);
+        let blue = |q: f32| apply(&e, &a, &b, q).px.chunks(4).map(|c| c[2]).sum::<f32>() / (w * h) as f32;
+        let (early, mid, late) = (blue(0.1), blue(0.5), blue(0.9));
+        assert!(early < mid && mid < late, "{}: {early} {mid} {late}", p.id);
+        assert!((0.15..=0.85).contains(&mid), "{}: half way {mid}", p.id);
+    }
+}
+
+#[test]
+fn blend_dissolves_pass_through_their_blend_mode() {
+    let (w, h) = (16usize, 9usize);
+    let a = Image::filled(w, h, [0.6, 0.1, 0.05, 1.0]);
+    let b = Image::filled(w, h, [0.05, 0.2, 0.5, 1.0]);
+    // at the midpoint with full strength the picture is the blend itself
+    for (id, mode) in [("blend_screen", crate::Blend::Screen), ("blend_multiply", crate::Blend::Multiply), ("blend_difference", crate::Blend::Difference)] {
+        let m = apply(&instance(id), &a, &b, 0.5);
+        let mut want = a.clone();
+        crate::blend::composite(&mut want, &b, 1.0, mode);
+        for (g, x) in m.px.iter().zip(&want.px) {
+            assert!((g - x).abs() < 1e-5, "{id}: {g} vs {x}");
+        }
+    }
+    // strength 0 is a plain cross dissolve
+    let mut e = instance("blend_overlay");
+    set(&mut e, "strength", ParamValue::Float(0.0));
+    let m = apply(&e, &a, &b, 0.3);
+    let want = a.clone().lerp(&b, 0.3);
+    assert!(m.px.iter().zip(&want.px).all(|(g, x)| (g - x).abs() < 1e-6));
+    // Screen lightens and Multiply darkens through the middle
+    let lum = |m: &Image| m.px.chunks(4).map(|c| c[0] + c[1] + c[2]).sum::<f32>();
+    let fade = a.clone().lerp(&b, 0.5);
+    assert!(lum(&apply(&instance("blend_screen"), &a, &b, 0.5)) > lum(&fade));
+    assert!(lum(&apply(&instance("blend_multiply"), &a, &b, 0.5)) < lum(&fade));
+    // the mode can be changed from a preset: Screen Dissolve set to Multiply is Multiply Dissolve
+    let mut e = instance("blend_screen");
+    set(&mut e, "mode", ParamValue::Choice(3));
+    assert_eq!(apply(&e, &a, &b, 0.4), apply(&instance("blend_multiply"), &a, &b, 0.4));
+    // Dither Dissolve: each pixel is one picture or the other, the incoming share follows p
+    let (w, h) = (128usize, 72usize);
+    let (a, b) = (Image::filled(w, h, [1.0, 0.0, 0.0, 1.0]), Image::filled(w, h, [0.0, 0.0, 1.0, 1.0]));
+    for p in [0.2f32, 0.5, 0.8] {
+        let m = apply(&instance("blend_dissolve"), &a, &b, p);
+        let blue = share(&m, |c| c[2] > 0.99);
+        assert!(m.px.chunks(4).all(|c| c[0] > 0.99 || c[2] > 0.99));
+        assert!((blue - p).abs() < 0.03, "p={p}: {blue}");
+    }
+    // hostile modes stay in range
+    let mut e = instance("blend_hue");
+    set(&mut e, "mode", ParamValue::Choice(u32::MAX));
+    assert!(apply(&e, &a, &b, 0.5).px.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn displacement_and_luma_read_generated_maps() {
+    let (w, h) = (64usize, 36usize);
+    let a = Image::filled(w, h, [1.0, 0.0, 0.0, 1.0]);
+    let b = Image::filled(w, h, [0.0, 0.0, 1.0, 1.0]);
+    let is_b = |c: [f32; 4]| c[2] > 0.99 && c[0] < 0.01;
+    // GL luma: a hard wipe, B where the map is below the progress
+    let e = instance("gl_luma");
+    let lmap = map(&e, w as u32, h as u32, 1.0).unwrap();
+    let m = apply(&e, &a, &b, 0.4);
+    for y in 0..h {
+        for x in 0..w {
+            let v = lmap.at(x as i64, y as i64);
+            assert_eq!(is_b(m.get(x, y)), v < 0.4, "({x}, {y}): map {v}");
+        }
+    }
+    // each map choice is a different map (at a scale that makes several cells and slats)
+    let mut maps_seen = std::collections::HashSet::new();
+    for c in 0..gltransition::MAP_OPTS.len() as u32 {
+        let mut e = instance("gl_luma");
+        set(&mut e, "map", ParamValue::Choice(c));
+        set(&mut e, "map_scale", ParamValue::Float(16.0));
+        maps_seen.insert(map(&e, w as u32, h as u32, 1.0).unwrap().px.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+    }
+    assert_eq!(maps_seen.len(), gltransition::MAP_OPTS.len());
+    // displacement: with no strength it is a cross dissolve; with some, the pictures move
+    let (fa, fb) = (frame(w, h, 0.3), frame(w, h, 0.7));
+    let mut flat = instance("gl_displacement");
+    set(&mut flat, "strength", ParamValue::Float(0.0));
+    let m = apply(&flat, &fa, &fb, 0.5);
+    let want = fa.clone().lerp(&fb, 0.5);
+    assert!(m.px.iter().zip(&want.px).all(|(g, x)| (g - x).abs() < 1e-5));
+    assert_ne!(apply(&instance("gl_displacement"), &fa, &fb, 0.5), m);
+    // only shaders that read a map get one
+    assert!(map(&instance("gl_crosswarp"), 64, 36, 1.0).is_none());
+    assert!(map(&instance("blend_screen"), 64, 36, 1.0).is_none());
+    assert!(map(&instance("luma_radial"), 64, 36, 1.0).is_some());
 }

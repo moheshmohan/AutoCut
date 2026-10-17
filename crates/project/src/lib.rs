@@ -24,6 +24,7 @@ pub mod mixer;
 pub mod multicam;
 pub mod narration;
 pub mod transcript;
+pub mod transition_engines;
 pub mod vtransition;
 
 use std::collections::BTreeMap;
