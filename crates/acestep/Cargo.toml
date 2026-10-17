@@ -1,0 +1,39 @@
+[package]
+name = "filmcraft-acestep"
+description = "FilmCraft neural text-to-music: ACE-Step 1.5 (MIT) on candle — the model catalogue, request checks and prompt layout, and (feature model) the Qwen3 text encoder, the turbo DiT, the flow-matching sampler and the Oobleck VAE decoder; Metal on macOS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The networks on candle (pure Rust). Off by default and in wasm builds; on macOS candle comes
+# with its Metal backend (below) and the models run on the GPU, falling back to the CPU.
+model = ["dep:candle-core", "dep:candle-nn", "dep:serde_json", "dep:zip", "dep:filmcraft-locks", "dep:unicode-general-category", "dep:icu_normalizer"]
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+filmcraft-locks = { workspace = true, optional = true }
+candle-core = { version = "0.9", default-features = false, optional = true }
+candle-nn = { version = "0.9", default-features = false, optional = true }
+serde_json = { workspace = true, optional = true }
+zip = { version = "7", default-features = false, optional = true }
+# the text tokenizer's pre-tokenizer classes (\p{L}, \p{N}) and its NFC normalizer
+unicode-general-category = { version = "1", optional = true }
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.9", default-features = false, features = ["metal"], optional = true }
+candle-nn = { version = "0.9", default-features = false, features = ["metal"], optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[[example]]
+name = "acestep_generate"
+required-features = ["model"]
