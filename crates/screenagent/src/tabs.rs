@@ -114,6 +114,34 @@ pub fn picker_tabs(shell: &dyn Shell) -> Result<Vec<Tab>, ScreenError> {
     Ok(parse_tabs(&out).into_iter().filter(|t| is_picker_url(&t.url)).collect())
 }
 
+/// Chrome's front window's active tab, named by its ids; `None` when Chrome is not running or
+/// has no window.
+pub fn front_tab(shell: &dyn Shell) -> Result<Option<Tab>, ScreenError> {
+    if !chrome_running(shell) {
+        return Ok(None);
+    }
+    let script = timed(
+        CHROME,
+        "if (count of windows) is 0 then return \"\"\nset w to front window\nset t to active tab of w\nreturn (id of w as text) & (character id 9) & (id of t as text) & (character id 9) & (URL of t)",
+    );
+    let out = shell.run("osascript", &["-e", &script]).map_err(|e| ScreenError::Other(format!("cannot read {CHROME}'s front tab: {e}")))?;
+    Ok(parse_tabs(&out).into_iter().next())
+}
+
+/// The address Chrome's tab with `tab`'s window and tab id shows now; `None` when it is gone.
+pub fn tab_url(shell: &dyn Shell, tab: &Tab) -> Result<Option<String>, ScreenError> {
+    let script = timed(
+        CHROME,
+        &format!(
+            "repeat with w in windows\nif (id of w as text) is \"{win}\" then\nrepeat with t in tabs of w\nif (id of t as text) is \"{id}\" then\nreturn \"url\" & (character id 9) & (URL of t)\nend if\nend repeat\nend if\nend repeat\nreturn \"gone\"",
+            win = tab.window,
+            id = tab.id
+        ),
+    );
+    let out = shell.run("osascript", &["-e", &script])?;
+    Ok(out.trim_end_matches(['\n', '\r']).strip_prefix("url\t").filter(|u| u.len() <= MAX_URL).map(str::to_string))
+}
+
 /// Run `body` on `tab`, refusing any tab that is not a picker; `Ok(false)` when it is gone.
 fn on_tab(shell: &dyn Shell, tab: &Tab, body: &str) -> Result<bool, ScreenError> {
     if !is_picker_url(&tab.url) {
@@ -166,6 +194,10 @@ pub fn close_front_picker<A: Act + ?Sized, G: Ground + ?Sized>(actor: &mut A, gr
     }
     progress("screenagent: closing the picker tab");
     actor.activate()?;
+    // the front tab may have changed while the browser came forward
+    if actor.front_url()?.as_deref() != Some(url.as_str()) {
+        return Ok(false);
+    }
     actor.close_tab()?;
     for _ in 0..=LEAVE_TRIES {
         actor.sleep(SETTLE_MS);
@@ -180,6 +212,58 @@ pub fn close_front_picker<A: Act + ?Sized, G: Ground + ?Sized>(actor: &mut A, gr
     }
     actor.sleep(SETTLE_MS);
     Ok(actor.front_url()?.as_deref() != Some(url.as_str()))
+}
+
+/// Close the picker tab an agent drove: `driven`, the tab it named by its ids when it began
+/// (else the front tab now), closed by those ids — never "whatever tab is in front" when the
+/// agent finishes, since by then another tab may be (live: another session was working in
+/// Chrome alongside). Only while its address is still the picker: a tab that went elsewhere
+/// is left be. A tab holding a selection asks "Leave site?" on the first close and goes on the
+/// second (Chrome takes it as Leave); one still open after three, if it is in front, gets its
+/// Leave clicked. A browser that does not name its tabs gets [`close_front_picker`]. `Ok(true)`:
+/// the agent closed it.
+pub fn close_driven_picker<A: Act + ?Sized, G: Ground + ?Sized>(
+    actor: &mut A,
+    grounder: &G,
+    driven: Option<&Tab>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<bool, ScreenError> {
+    let tab = match driven {
+        Some(t) => Some(t.clone()),
+        None => actor.front_tab()?.filter(|t| is_picker_url(&t.url)),
+    };
+    let Some(mut tab) = tab else {
+        return close_front_picker(actor, grounder, progress);
+    };
+    let mut announced = false;
+    for _ in 0..3 {
+        match actor.tab_url(&tab)? {
+            None => return Ok(announced), // closed (by us, or the picker closed itself)
+            Some(url) if !is_picker_url(&url) => {
+                progress("screenagent: the tab it drove shows something else now; leaving it open");
+                return Ok(false);
+            }
+            Some(url) => tab.url = url,
+        }
+        if !announced {
+            progress("screenagent: closing the picker tab");
+            announced = true;
+        }
+        actor.close_that_tab(&tab)?;
+        actor.sleep(SETTLE_MS);
+    }
+    if actor.tab_url(&tab)?.is_none() {
+        return Ok(true);
+    }
+    // still asking: Leave, only on this very tab in front
+    if actor.front_tab()?.is_some_and(|f| f.window == tab.window && f.id == tab.id) && answer_leave(actor, grounder, progress)? {
+        actor.sleep(SETTLE_MS);
+        if actor.tab_url(&tab)?.is_none() {
+            return Ok(true);
+        }
+    }
+    progress("screenagent: the picker tab did not close; leaving it open (`filmcraft-cli photos tidy` closes picker tabs)");
+    Ok(false)
 }
 
 /// What `photos tidy` did.
@@ -418,6 +502,17 @@ mod tests {
             if s.contains("set out to") {
                 return Ok(tabs.iter().map(|t| format!("{}\t{}\t{}\n", t.window, t.id, t.url)).collect());
             }
+            if s.contains("set w to front window") {
+                return Ok(tabs.first().map(|t| format!("{}\t{}\t{}\n", t.window, t.id, t.url)).unwrap_or_default());
+            }
+            if s.contains("return \"url\"") {
+                let id = |key: &str| s.split(key).nth(1)?.split('"').next()?.parse::<i64>().ok();
+                let (w, t) = (id("if (id of w as text) is \""), id("if (id of t as text) is \""));
+                return Ok(match tabs.iter().find(|x| Some(x.window) == w && Some(x.id) == t) {
+                    Some(x) => format!("url\t{}\n", x.url),
+                    None => "gone\n".into(),
+                });
+            }
             let Some((w, id, url)) = target(&s) else { return Err(ScreenError::Other(format!("unexpected script: {s}"))) };
             let Some(pos) = tabs.iter().position(|t| t.window == w && t.id == id && t.url == url) else { return Ok("gone\n".into()) };
             if !s.contains("close t") {
@@ -501,20 +596,25 @@ mod tests {
         }
     }
 
-    /// Eyes that see one button for the Leave dialog's ask (or nothing).
-    struct Sees(Option<Element>);
+    /// Eyes that see these buttons for the Leave dialog's ask (or nothing).
+    struct Sees(Vec<Element>);
     impl Ground for Sees {
         fn inventory(&self, _png: &[u8], task: &str) -> Result<Vec<Element>, ScreenError> {
             assert_eq!(task, picker::LEAVE_DIALOG_BUTTONS);
-            Ok(self.0.iter().cloned().collect())
+            Ok(self.0.clone())
         }
         fn find(&self, _png: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
             Err(ScreenError::Other(format!("not asked to find anything, asked for {target}")))
         }
     }
 
+    fn cancel_button() -> Element {
+        Element { label: "Cancel".into(), kind: "button".into(), x1: 70, y1: 90, x2: 110, y2: 104 }
+    }
+
+    /// The dialog's two buttons, as the model lists them live.
     fn leave_button() -> Sees {
-        Sees(Some(Element { label: "Leave".into(), kind: "button".into(), x1: 120, y1: 90, x2: 160, y2: 104 }))
+        Sees(vec![cancel_button(), Element { label: "Leave".into(), kind: "button".into(), x1: 120, y1: 90, x2: 160, y2: 104 }])
     }
 
     #[test]
@@ -577,7 +677,7 @@ mod tests {
         chrome.stubborn = vec![12];
         chrome.second_close_leaves = false;
         let mut hands = Hands::new();
-        let cancel = Sees(Some(Element { label: "Cancel".into(), kind: "button".into(), x1: 60, y1: 90, x2: 100, y2: 104 }));
+        let cancel = Sees(vec![cancel_button()]);
         let t = tidy(&chrome, &mut hands, Some(&cancel as &dyn Ground), &mut |_| {}, &mut |_| {}).unwrap();
         assert!(hands.clicks.is_empty(), "Cancel is never clicked");
         assert_eq!((t.closed, t.left.as_slice()), (0, [P2.to_string()].as_slice()));
@@ -619,6 +719,20 @@ mod tests {
     }
 
     #[test]
+    fn the_front_tab_and_a_named_tab_are_read_by_their_ids() {
+        let chrome = FakeChrome::new(vec![tab(7, 70, P2), tab(7, 71, "https://example.com/a,b")]);
+        assert_eq!(front_tab(&chrome).unwrap(), Some(tab(7, 70, P2)));
+        assert_eq!(tab_url(&chrome, &tab(7, 71, "")).unwrap().as_deref(), Some("https://example.com/a,b"));
+        assert_eq!(tab_url(&chrome, &tab(7, 72, P2)).unwrap(), None, "gone");
+        assert_eq!(tab_url(&chrome, &tab(8, 70, P2)).unwrap(), None, "another window's id");
+        // Chrome not running: no front tab, and it is not launched by asking
+        let mut chrome = FakeChrome::new(vec![tab(7, 70, P2)]);
+        chrome.running = false;
+        assert_eq!(front_tab(&chrome).unwrap(), None);
+        assert_eq!(chrome.scripts().len(), 1);
+    }
+
+    #[test]
     fn tab_ids_are_compared_as_text() {
         // live, Chrome 155: `(id of t) is 180477276` was false for that very tab (its id is
         // text), so `photos tidy` closed nothing
@@ -642,15 +756,15 @@ mod tests {
 
     #[test]
     fn the_driven_tab_is_closed_when_it_is_still_the_picker() {
-        // in front: the picker; after Cmd+W: another tab
+        // in front: the picker (looked at, and again right before Cmd+W); after it: another tab
         let mut hands = Hands::new();
-        hands.urls = RefCell::new([Some(P1.to_string()), Some("https://example.com/".to_string())].into());
-        assert!(close_front_picker(&mut hands, &Sees(None), &mut |_| {}).unwrap());
+        hands.urls = RefCell::new([Some(P1.to_string()), Some(P1.to_string()), Some("https://example.com/".to_string())].into());
+        assert!(close_front_picker(&mut hands, &Sees(vec![]), &mut |_| {}).unwrap());
         assert_eq!(hands.closed, 1);
         assert!(hands.clicks.is_empty());
         // "Leave site?" after Cmd+W: Leave is clicked, then the tab is gone
         let mut hands = Hands::new();
-        hands.urls = RefCell::new([Some(P1.to_string()), Some(P1.to_string()), None].into());
+        hands.urls = RefCell::new([Some(P1.to_string()), Some(P1.to_string()), Some(P1.to_string()), None].into());
         assert!(close_front_picker(&mut hands, &leave_button(), &mut |_| {}).unwrap());
         assert_eq!((hands.closed, hands.clicks.len()), (1, 1));
         // the front tab is not the picker (it closed itself): nothing is closed
@@ -666,9 +780,125 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("photos tidy")), "{lines:?}");
         // still there and the eyes offer Cancel: refused, left open
         let mut hands = Hands::new();
-        hands.urls = RefCell::new([Some(P1.to_string()), Some(P1.to_string())].into());
-        let cancel = Sees(Some(Element { label: "Cancel".into(), kind: "button".into(), x1: 60, y1: 90, x2: 100, y2: 104 }));
+        hands.urls = RefCell::new([Some(P1.to_string()), Some(P1.to_string()), Some(P1.to_string())].into());
+        let cancel = Sees(vec![cancel_button()]);
         assert!(!close_front_picker(&mut hands, &cancel, &mut |_| {}).unwrap());
         assert!(hands.clicks.is_empty());
+        // the front tab changed while the browser came forward: no Cmd+W
+        let mut hands = Hands::new();
+        hands.urls = RefCell::new([Some(P1.to_string()), Some(PHOTO.to_string())].into());
+        assert!(!close_front_picker(&mut hands, &leave_button(), &mut |_| {}).unwrap());
+        assert_eq!(hands.closed, 0);
+    }
+
+    /// Another session's Google Photos tab (live: it was in front when an agent finished).
+    const PHOTO: &str = "https://photos.google.com/photo/AF1QipNw0yVEeutKy";
+
+    /// A browser that names its tabs: a tab list, the front tab, closes by id (a `stubborn` tab
+    /// asks "Leave site?" on its first close and goes on the second), and every Cmd+W counted.
+    struct Named {
+        tabs: Vec<Tab>,
+        front: (i64, i64),
+        stubborn: Vec<i64>,
+        asking: Vec<i64>,
+        cmd_w: u32,
+        closes: Vec<i64>,
+    }
+    impl Named {
+        fn new(tabs: Vec<Tab>, front: (i64, i64)) -> Self {
+            Self { tabs, front, stubborn: vec![], asking: vec![], cmd_w: 0, closes: vec![] }
+        }
+        fn ids(&self) -> Vec<i64> {
+            self.tabs.iter().map(|t| t.id).collect()
+        }
+    }
+    impl Act for Named {
+        fn activate(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn click_png(&mut self, _cap: &Capture, _px: u32, _py: u32) -> Result<(), ScreenError> {
+            Err(ScreenError::Other("nothing is clicked here".into()))
+        }
+        fn shift_click_png(&mut self, _cap: &Capture, _px: u32, _py: u32) -> Result<(), ScreenError> {
+            Err(ScreenError::Other("no shift-clicks here".into()))
+        }
+        fn type_text(&mut self, _text: &str) -> Result<(), ScreenError> {
+            Err(ScreenError::Other("no typing here".into()))
+        }
+        fn key_return(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn key_escape(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn scroll(&mut self, _lines: i32) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn sleep(&mut self, _ms: u64) {}
+        fn capture(&mut self) -> Result<Capture, ScreenError> {
+            Ok(Capture { png: png(), rect: WindowRect { x: 0, y: 0, w: 200, h: 150 }, px_per_point: 1.0, png_w: 200, png_h: 150 })
+        }
+        fn front_url(&mut self) -> Result<Option<String>, ScreenError> {
+            Ok(self.tabs.iter().find(|t| (t.window, t.id) == self.front).map(|t| t.url.clone()))
+        }
+        fn close_tab(&mut self) -> Result<(), ScreenError> {
+            self.cmd_w += 1;
+            Ok(())
+        }
+        fn front_tab(&mut self) -> Result<Option<Tab>, ScreenError> {
+            Ok(self.tabs.iter().find(|t| (t.window, t.id) == self.front).cloned())
+        }
+        fn tab_url(&mut self, tab: &Tab) -> Result<Option<String>, ScreenError> {
+            Ok(self.tabs.iter().find(|t| t.window == tab.window && t.id == tab.id).map(|t| t.url.clone()))
+        }
+        fn close_that_tab(&mut self, tab: &Tab) -> Result<bool, ScreenError> {
+            assert!(is_picker_url(&tab.url), "only a picker is ever closed: {}", tab.url);
+            let Some(pos) = self.tabs.iter().position(|t| *t == *tab) else { return Ok(false) };
+            self.closes.push(tab.id);
+            if self.stubborn.contains(&tab.id) && !self.asking.contains(&tab.id) {
+                self.asking.push(tab.id); // "Leave site?"
+            } else {
+                self.tabs.remove(pos);
+            }
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn the_driven_tab_is_closed_by_its_ids_whatever_tab_is_in_front() {
+        // live: another session's photo tab was in front when the agent finished; Cmd+W would
+        // have closed it. The tab the agent drove (named when it began) is closed instead.
+        let driven = tab(1, 10, P1);
+        let mut b = Named::new(vec![tab(1, 9, "https://example.com/"), driven.clone(), tab(1, 11, PHOTO)], (1, 11));
+        let mut lines = vec![];
+        assert!(close_driven_picker(&mut b, &Sees(vec![]), Some(&driven), &mut |l| lines.push(l.to_string())).unwrap());
+        assert_eq!(b.ids(), [9, 11], "only the picker went");
+        assert_eq!(b.cmd_w, 0, "never Cmd+W");
+        assert!(lines.iter().any(|l| l.contains("closing the picker tab")), "{lines:?}");
+        // one holding a selection asks "Leave site?" and goes on the second close
+        let mut b = Named::new(vec![driven.clone(), tab(1, 11, PHOTO)], (1, 11));
+        b.stubborn = vec![10];
+        assert!(close_driven_picker(&mut b, &Sees(vec![]), Some(&driven), &mut |_| {}).unwrap());
+        assert_eq!((b.ids(), b.closes.as_slice()), (vec![11], [10, 10].as_slice()));
+        // its address moved on within the picker (auth → session): still that tab, still closed
+        let moved = tab(1, 10, "https://photos.google.com/integration/picker/session/abc?x=1");
+        let mut b = Named::new(vec![moved.clone()], (1, 10));
+        assert!(close_driven_picker(&mut b, &Sees(vec![]), Some(&driven), &mut |_| {}).unwrap());
+        assert!(b.ids().is_empty());
+        // it went somewhere else (a photo opened in it): left open, nothing closed
+        let mut b = Named::new(vec![tab(1, 10, PHOTO)], (1, 10));
+        assert!(!close_driven_picker(&mut b, &leave_button(), Some(&driven), &mut |_| {}).unwrap());
+        assert!(b.closes.is_empty() && b.ids() == [10]);
+        // already gone (the picker closed itself after Done): nothing to do, nothing closed
+        let mut b = Named::new(vec![tab(1, 11, PHOTO)], (1, 11));
+        assert!(!close_driven_picker(&mut b, &Sees(vec![]), Some(&driven), &mut |_| {}).unwrap());
+        assert!(b.closes.is_empty() && b.cmd_w == 0);
+        // none recorded: the front tab now, by its ids — only when it is a picker
+        let mut b = Named::new(vec![driven.clone(), tab(1, 11, PHOTO)], (1, 10));
+        assert!(close_driven_picker(&mut b, &Sees(vec![]), None, &mut |_| {}).unwrap());
+        assert_eq!(b.ids(), [11]);
+        let mut b = Named::new(vec![driven.clone(), tab(1, 11, PHOTO)], (1, 11));
+        assert!(!close_driven_picker(&mut b, &leave_button(), None, &mut |_| {}).unwrap());
+        assert_eq!((b.ids(), b.cmd_w), (vec![10, 11], 0), "a photo tab in front: nothing closed");
     }
 }

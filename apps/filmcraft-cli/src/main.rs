@@ -250,7 +250,10 @@ SUBCOMMANDS
                                  everything downloads in one batch. A search with no results is
                                  skipped. Each session takes up to 20 searches and --max-items
                                  items (default and most 2000); searches that would pass it go
-                                 to the next session, and those still left are written to
+                                 to the next session (the picker selects past it but refuses
+                                 Done: a date search's days past it are unselected again), one
+                                 too big for any session is reported to split (--month-days),
+                                 and those still left are written to
                                  <data dir>/google-photos/left-searches.txt for a next run.
                                  --since skips items created before that date (not downloaded).
                                  With --album <title> the same agent picks a whole album
@@ -897,6 +900,14 @@ async fn cli() {
                         if let Some(why) = &swept.stopped {
                             diag(format_args!("photos pick: stopped early: {why}"));
                         }
+                        if !swept.too_big.is_empty() {
+                            diag(format_args!(
+                                "photos pick: {} search(es) matched more than a session holds ({} items): split them by day (a sweep: --month-days 1-31) or raise --max-items: {}",
+                                swept.too_big.len(),
+                                agent_items,
+                                swept.too_big.join(" · ")
+                            ));
+                        }
                         if !swept.left.is_empty() {
                             let file = filmcraft_gphotos::data_dir().join("left-searches.txt");
                             let text: String = swept.left.iter().map(|q| format!("{q}\n")).collect();
@@ -912,7 +923,7 @@ async fn cli() {
                                 }
                             }
                         }
-                        let report = json!({"sessions": swept.sessions, "left": swept.left, "stopped": swept.stopped});
+                        let report = json!({"sessions": swept.sessions, "left": swept.left, "tooBig": swept.too_big, "stopped": swept.stopped});
                         Picks { picked: swept.picked, report, stopped: swept.stopped.is_some() }
                     } else {
                         // blocking HTTP and sleeps: keep them off the async runtime
@@ -945,7 +956,15 @@ async fn cli() {
                             None => {}
                         }
                         let nothing_to_pick = driven.nothing_to_pick();
+                        // a search whose results alone pass the session's cap was unselected
+                        let too_big = match &driven.agent {
+                            Some(Ok(s)) if !s.too_big().is_empty() => Some(s.note.clone()),
+                            _ => None,
+                        };
                         let picked = match driven.outcome {
+                            filmcraft_gphotos::PickOutcome::Pending(_) if too_big.is_some() => {
+                                fail(format!("photos pick: nothing was picked: {}", too_big.unwrap_or_default()))
+                            }
                             filmcraft_gphotos::PickOutcome::Done(p) => p,
                             filmcraft_gphotos::PickOutcome::Pending(_) if nothing_to_pick => match &album_title {
                                 Some(t) => fail(format!("photos pick: the album `{t}` had nothing to pick")),

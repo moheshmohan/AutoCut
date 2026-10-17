@@ -238,9 +238,22 @@ pub fn is_leave_button(e: &Element, w: u32, h: u32) -> bool {
     matches!(label.as_str(), "leave" | "leave button") && e.area() > 0 && e.area().saturating_mul(40) < screen
 }
 
-/// The Leave button among a [`LEAVE_DIALOG_BUTTONS`] inventory, if one is there.
+/// The Leave button among a [`LEAVE_DIALOG_BUTTONS`] inventory — only with the dialog's Cancel
+/// beside it: on the same row, just left of it. Live, with no dialog showing, the model once
+/// offered a lone "Leave" box on the picker's grid, and clicking it opened a photo; the dialog
+/// always shows both buttons together.
 pub fn leave_button(elements: &[Element], w: u32, h: u32) -> Option<&Element> {
-    elements.iter().find(|e| is_leave_button(e, w, h))
+    let screen = u64::from(w) * u64::from(h);
+    let is_cancel =
+        |e: &Element| matches!(normalize_title(&e.label).as_str(), "cancel" | "cancel button") && e.area() > 0 && e.area().saturating_mul(40) < screen;
+    elements.iter().filter(|e| is_leave_button(e, w, h)).find(|leave| {
+        let (lw, lh) = (leave.x2.saturating_sub(leave.x1), leave.y2.saturating_sub(leave.y1));
+        elements.iter().filter(|c| is_cancel(c)).any(|c| {
+            let same_row = leave.center().1.abs_diff(c.center().1) <= lh.max(c.y2.saturating_sub(c.y1)).max(1);
+            let just_left = c.x2 <= leave.x1.saturating_add(lw / 4) && leave.x1.saturating_sub(c.x2) <= lw.saturating_mul(3).max(1);
+            same_row && just_left
+        })
+    })
 }
 
 /// The inventory ask for the date groups of a search result: Google's picker heads each day's
@@ -276,9 +289,14 @@ fn is_year(w: &str) -> bool {
 
 /// The day a date heading names, as a key that stays the same however the heading is boxed or
 /// abbreviated: `"2022-10-13"`, or `"10-13"` when it shows no year (Google leaves the current
-/// year out), or `"2022-10"` for a month heading. `None` when the label names no month.
+/// year out), or `"2022-10"` for a month heading. `None` when the label names no month, or
+/// names what a heading never does — videos, photos, a search: live, the model offered the search
+/// box, labelled with the typed `videos October 2022`, as a date group.
 pub fn date_key(label: &str) -> Option<String> {
     let ws = words(label);
+    if ws.iter().any(|w| matches!(w.as_str(), "video" | "videos" | "photo" | "photos" | "search" | "results")) {
+        return None;
+    }
     let month = ws.iter().find_map(|w| month_of(w))?;
     let year = ws.iter().find(|w| is_year(w)).cloned();
     let day = ws.iter().filter_map(|w| w.parse::<u32>().ok()).find(|d| (1..=31).contains(d));
@@ -558,6 +576,14 @@ mod tests {
         assert!(leave_button(&crate::ground::parse_inventory_reply("There are none.", &png).unwrap(), 1344, 784).is_none());
         // only Cancel offered: nothing
         assert!(leave_button(&els[..1], 1344, 784).is_none());
+        // a lone "Leave" (live, with no dialog showing: clicking it opened a photo): nothing
+        assert!(leave_button(&els[1..], 1344, 784).is_none());
+        // Cancel on another row, right of Leave, or far away: not the dialog's pair
+        for (x1, y1) in [(609, 400), (760, 296), (100, 296)] {
+            let cancel = el("Cancel", "", x1, y1, x1 + 54, y1 + 20);
+            let pair = [cancel, els[1].clone()];
+            assert!(leave_button(&pair, 1344, 784).is_none(), "{x1},{y1}");
+        }
     }
 
     #[test]
@@ -572,7 +598,7 @@ mod tests {
         assert_eq!(date_key("October 13, 2022").as_deref(), Some("2022-10-13"), "the same day however it is written");
         assert_eq!(date_key("Sun, Sep 4").as_deref(), Some("09-04"), "no year shown");
         assert_eq!(date_key("December 2017").as_deref(), Some("2017-12"));
-        for no in ["2022", "photo", "", "0:30", "Thu 13", "October"] {
+        for no in ["2022", "photo", "", "0:30", "Thu 13", "October", "videos October 2022", "Search results for October 2022", "photos Oct 13, 2022"] {
             assert_eq!(date_key(no), None, "{no:?}");
         }
     }
@@ -586,6 +612,7 @@ mod tests {
             el("0:30", "", 60, 130, 200, 260),                  // a tile: no date
             el("Fri, Oct 14, 2022", "", 0, 0, 900, 700),        // a whole-grid box
             el("Search", "", 300, 10, 700, 40),                 // no date
+            el("videos October 2022", "", 300, 10, 700, 40),    // the search box, as typed (live)
         ];
         let checks = day_checks(&els, 1344, 784);
         assert_eq!(checks.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["Thu, Oct 13, 2022", "Wed, Oct 12, 2022"]);

@@ -931,8 +931,12 @@ impl FilmcraftMcp {
                 "status": "done", "items": items, "downloaded": swept.picked.fetched.len().saturating_sub(cached), "cached": cached,
                 "failed": swept.picked.failed, "skipped": swept.picked.skipped, "imported": imported.as_ref().ok(),
                 "importError": imported.as_ref().err().map(|e| e.to_string()),
-                "sessions": swept.sessions, "left": swept.left, "stopped": swept.stopped,
-                "next": if swept.left.is_empty() { Value::Null } else { json!("call googlephotos_pick again with `queries` = `left` (and the same `all`) for the searches no session got to") },
+                "sessions": swept.sessions, "left": swept.left, "tooBig": swept.too_big, "stopped": swept.stopped,
+                "next": if swept.left.is_empty() { Value::Null } else if swept.too_big.is_empty() {
+                    json!("call googlephotos_pick again with `queries` = `left` (and the same `all`) for the searches no session got to")
+                } else {
+                    json!("call googlephotos_pick again with `queries` = `left` (and the same `all`); split each of `tooBig` first (by day, or narrower searches): its results alone are more than a session holds")
+                },
             });
             let ok = imported.is_ok() && swept.picked.failed.is_empty() && swept.stopped.is_none();
             return Ok(if ok { ok_json(&v) } else { CallToolResult::error(vec![Content::text(v.to_string())]) });

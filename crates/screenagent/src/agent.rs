@@ -108,6 +108,12 @@ pub enum Outcome {
     /// The count fell: its gesture cleared some of what earlier searches selected (it overlapped
     /// one of them). It, and the searches before it, are worth another try.
     Cleared,
+    /// Its results took the count past the session's cap — the picker selects past it but then
+    /// refuses Done — so its days were unselected again: for a next session, which has room.
+    Deferred,
+    /// Its results alone are more than a session holds (unselected again): no session fits it;
+    /// split it (by day, or a narrower search) or raise the cap.
+    TooBig,
     /// It could not be searched or selected (the note says why).
     Failed,
 }
@@ -172,6 +178,11 @@ impl Summary {
             .map(|(_, s)| s.query.clone())
             .collect()
     }
+
+    /// The searches more than a whole session holds: never worth another try as they are.
+    pub fn too_big(&self) -> Vec<String> {
+        self.searches.iter().filter(|s| s.outcome == Outcome::TooBig).map(|s| s.query.clone()).collect()
+    }
 }
 
 /// Consecutive captures that all look the same before the agent gives up.
@@ -228,7 +239,16 @@ pub fn clean_queries(queries: Vec<String>) -> Vec<String> {
 /// that grows with each.
 pub fn plan_for(req: Request) -> Plan {
     match req.album {
-        Some(album) => Plan { queries: Vec::new(), album: Some(album), select_all: true, videos_only: req.videos_only, max_actions: 60, ..Plan::default() },
+        Some(album) => Plan {
+            queries: Vec::new(),
+            album: Some(album),
+            select_all: true,
+            videos_only: req.videos_only,
+            max_actions: 60,
+            // the session's item cap (none given: Google's most)
+            max_items: if req.max_items == 0 { MAX_PICK } else { req.max_items.min(MAX_PICK) },
+            ..Plan::default()
+        },
         None => {
             let queries = clean_queries(req.queries);
             let d = Plan::default();
@@ -270,12 +290,15 @@ fn visible_tiles<G: Ground>(
 /// giving up). `progress` receives one line per step, the gphotos convention
 /// (`&mut dyn FnMut(&str)`).
 pub fn drive<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, progress: &mut dyn FnMut(&str)) -> Result<Summary, ScreenError> {
+    // the picker tab it drives, named by its ids now while it is in front (Chrome), so that the
+    // close at the end is that tab's, whatever tab is in front by then
+    let driven = actor.front_tab().ok().flatten().filter(|t| crate::tabs::is_picker_url(&t.url));
     let result = drive_inner(actor, grounder, plan, progress);
     if let Err(e) = &result {
         // every exit is spoken: a silent agent thread is undebuggable from outside
         progress(&format!("screenagent: giving up: {e}"));
     }
-    let closed = crate::tabs::close_front_picker(actor, grounder, progress).unwrap_or_else(|e| {
+    let closed = crate::tabs::close_driven_picker(actor, grounder, driven.as_ref(), progress).unwrap_or_else(|e| {
         progress(&format!("screenagent: could not close the picker tab: {e}"));
         false
     });
@@ -302,7 +325,9 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
     // searches — for videos always, so Google's own filter leaves only videos in the grid
     if let Some(title) = plan.album.as_deref() {
         open_album(actor, grounder, plan, &mut summary, &mut cap, title, started, progress)?;
-        take_all(actor, grounder, plan, &mut summary, &mut cap, started, false, progress)?;
+        if let Some(found) = take_all(actor, grounder, plan, &mut summary, &mut cap, started, false, progress)? {
+            return Err(ScreenError::Other(format!("the album `{title}`: {}", too_big_note(found, plan.max_items.clamp(1, MAX_PICK)))));
+        }
     } else {
         let searches = plan.searches();
         if searches.len() > 1 {
@@ -310,6 +335,16 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
         } else if search_one(actor, grounder, plan, &mut summary, &mut cap, started, searches.first(), progress)? == Tiles::WindowClosed {
             return Ok(summary);
         }
+    }
+
+    // the picker selects past the session's item cap (date groups, ranges) but then refuses
+    // Done (live: "143 selected", "Select up to 40 items", Done greyed out): never press it
+    let cap_items = plan.max_items.clamp(1, MAX_PICK);
+    if plan.select_all && !summary.done_pressed && summary.selected > cap_items {
+        return Err(ScreenError::Stalled(format!(
+            "{} are selected, more than the session's {cap_items}-item maximum, and the picker refuses Done past it",
+            summary.selected
+        )));
     }
 
     // 3. confirm, and check the picker took it
@@ -404,6 +439,7 @@ fn search_one<A: Act, G: Ground>(
     progress: &mut dyn FnMut(&str),
 ) -> Result<Tiles, ScreenError> {
     let mut dates = false;
+    let mut over = None;
     if let Some((_, q)) = search {
         if spend(summary, plan)? || started.elapsed() >= plan.timeout {
             return Err(budget(summary));
@@ -432,18 +468,23 @@ fn search_one<A: Act, G: Ground>(
                     .into(),
             ));
         }
-        take_all(actor, grounder, plan, summary, cap, started, dates, progress)?;
+        over = take_all(actor, grounder, plan, summary, cap, started, dates, progress)?;
         Tiles::Done
     } else {
         pick_tiles(actor, grounder, plan, summary, cap, started, progress)?
     };
     if let Some((query, _)) = search.filter(|_| summary.searched) {
-        let outcome = match (summary.selected, plan.select_all) {
-            (0, _) => Outcome::NoResults,
-            (n, true) if n >= plan.max_items.clamp(1, MAX_PICK) => Outcome::AtCap,
-            _ => Outcome::Selected,
+        let cap_items = plan.max_items.clamp(1, MAX_PICK);
+        let (outcome, note) = match (over, summary.selected, plan.select_all) {
+            (Some(found), _, _) => (Outcome::TooBig, too_big_note(found, cap_items)),
+            (None, 0, _) => (Outcome::NoResults, String::new()),
+            (None, n, true) if n >= cap_items => (Outcome::AtCap, String::new()),
+            _ => (Outcome::Selected, String::new()),
         };
-        summary.searches.push(Searched { query: query.clone(), outcome, selected: plan.select_all.then_some(summary.selected), note: String::new() });
+        if !note.is_empty() {
+            summary.note = format!("`{query}`: {note}");
+        }
+        summary.searches.push(Searched { query: query.clone(), outcome, selected: plan.select_all.then_some(summary.selected), note });
     }
     Ok(tiles)
 }
@@ -612,6 +653,28 @@ fn one_of_many<A: Act, G: Ground>(
     let cap_items = plan.max_items.clamp(1, MAX_PICK);
     let after = match by_day_groups(actor, grounder, plan, summary, cap, started, before, picker::is_date_search(typed), progress)? {
         ByDays::Count(n) => n,
+        ByDays::OverCap { found, after } => {
+            let (b, now) = (before.unwrap_or(0), after.unwrap_or(0));
+            if now == b {
+                // undone: with nothing selected before it, no session has room for it
+                (one.outcome, one.note) = if b == 0 {
+                    (Outcome::TooBig, too_big_note(found, cap_items))
+                } else {
+                    (
+                        Outcome::Deferred,
+                        format!(
+                            "it took the count to {found}, past the session's {cap_items}-item maximum (the picker refuses Done past it); its days were unselected again, for a next session"
+                        ),
+                    )
+                };
+                one.count = before;
+            } else {
+                one.outcome = Outcome::Failed;
+                one.note = format!("it took the count to {found}, past the session's {cap_items}-item maximum, and unselecting its days left {now}, not {b}");
+                one.count = after;
+            }
+            return Ok(one);
+        }
         ByDays::Range => match before {
             // nothing selected yet: the whole gesture, with its retry from the top
             None => match select_everything(actor, grounder, plan, summary, cap, started, progress)? {
@@ -659,6 +722,7 @@ fn search_many<A: Act, G: Ground>(
     let mut count: Option<u32> = None;
     let mut biggest = 0u32;
     let mut holds: Option<usize> = None; // characters the search field holds
+    let mut deferred: Vec<String> = Vec::new();
     for (i, (query, typed)) in searches.iter().enumerate() {
         let so_far = if plan.select_all { count.unwrap_or(0) } else { summary.selected };
         if i > 0 {
@@ -701,6 +765,9 @@ fn search_many<A: Act, G: Ground>(
             }
             count = one.count;
         }
+        if one.outcome == Outcome::Deferred {
+            deferred.push(query.clone());
+        }
         let selected = plan.select_all.then_some(count).flatten();
         progress(&format!("screenagent: `{query}`: {}", outcome_line(one.outcome, selected, &one.note)));
         summary.searches.push(Searched { query: query.clone(), outcome: one.outcome, selected, note: one.note });
@@ -712,14 +779,21 @@ fn search_many<A: Act, G: Ground>(
     if plan.select_all {
         summary.selected = count.unwrap_or(0);
     }
+    if !deferred.is_empty() {
+        // first in the next session, which has room for them
+        deferred.append(&mut summary.left);
+        summary.left = deferred;
+    }
     let with = |o: Outcome| summary.searches.iter().filter(|s| s.outcome == o).count();
+    let past = with(Outcome::Deferred) + with(Outcome::TooBig);
     summary.note = format!(
-        "{} search(es): {} selected from, {} without results, {} with nothing new, {} failed{}; {} selected in all",
+        "{} search(es): {} selected from, {} without results, {} with nothing new, {} failed{}{}; {} selected in all",
         summary.searches.len(),
         with(Outcome::Selected) + with(Outcome::AtCap),
         with(Outcome::NoResults),
         with(Outcome::NothingNew),
         with(Outcome::Failed) + with(Outcome::Cleared),
+        if past == 0 { String::new() } else { format!(", {past} past the session's maximum (unselected)") },
         if summary.left.is_empty() { String::new() } else { format!(", {} left for a next session", summary.left.len()) },
         summary.selected
     );
@@ -733,6 +807,8 @@ fn outcome_line(o: Outcome, selected: Option<u32>, note: &str) -> String {
         Outcome::NothingNew => "nothing new selected",
         Outcome::AtCap => "selected up to the session's maximum",
         Outcome::Cleared => "cleared some earlier selections",
+        Outcome::Deferred => "past the session's maximum, unselected, left for a next session",
+        Outcome::TooBig => "more than a session holds, unselected",
         Outcome::Failed => "failed",
     };
     let count = selected.map(|n| format!(" ({n} selected so far)")).unwrap_or_default();
@@ -990,7 +1066,8 @@ fn select_everything<A: Act, G: Ground>(
 
 /// Select everything on screen — a search's results, or an opened album: by the date groups
 /// of a date search first, else (or when they select nothing) by the range gesture with its
-/// retry. `summary.selected` is the header's count after it.
+/// retry. `summary.selected` is the header's count after it. `Ok(Some(found))`: the date groups
+/// selected `found`, more than the session's cap, and were unselected again.
 #[allow(clippy::too_many_arguments)]
 fn take_all<A: Act, G: Ground>(
     actor: &mut A,
@@ -1001,15 +1078,29 @@ fn take_all<A: Act, G: Ground>(
     started: Instant,
     dates: bool,
     progress: &mut dyn FnMut(&str),
-) -> Result<(), ScreenError> {
-    if let ByDays::Count(Some(n)) = by_day_groups(actor, grounder, plan, summary, cap, started, None, dates, progress)? {
-        summary.selected = n;
-        return Ok(());
+) -> Result<Option<u32>, ScreenError> {
+    match by_day_groups(actor, grounder, plan, summary, cap, started, None, dates, progress)? {
+        ByDays::Count(Some(n)) => {
+            summary.selected = n;
+            return Ok(None);
+        }
+        ByDays::OverCap { found, after } => {
+            summary.selected = after.unwrap_or(0);
+            return Ok(Some(found));
+        }
+        ByDays::Count(None) | ByDays::Range => {}
     }
     if select_everything(actor, grounder, plan, summary, cap, started, progress)?.is_none() {
         summary.note = "no tiles to select".into();
     }
-    Ok(())
+    Ok(None)
+}
+
+/// Why a search (or album) that alone passes the session's cap was not picked.
+fn too_big_note(found: u32, cap_items: u32) -> String {
+    format!(
+        "its {found} results are more than the session's {cap_items}-item maximum (the picker refuses Done past it), so they were unselected again; split it (by day, or a narrower search) or raise --max-items"
+    )
 }
 
 /// Pages of a date search's results looked through for its date groups.
@@ -1023,13 +1114,18 @@ enum ByDays {
     Range,
     /// The header's count after the groups (`None`: it could not be read).
     Count(Option<u32>),
+    /// The groups took the count to `found`, past the session's cap — the picker selects past it
+    /// but then refuses Done — so the same groups were clicked again to unselect them; `after` is
+    /// the count then.
+    OverCap { found: u32, after: Option<u32> },
 }
 
 /// Select a date search's results by their date groups (see [`select_day_groups`]) — only for a
 /// date search (`dates`), and only while the header's count says they took: a count above
 /// `before` is taken; the same count (or none at all on a first selection) means the groups did
 /// nothing and the range gesture is used instead; a count that fell, or could not be read after
-/// an earlier selection, is reported as it is (another gesture could clear more).
+/// an earlier selection, is reported as it is (another gesture could clear more). A count past
+/// the session's cap is undone: the same days clicked once more ([`ByDays::OverCap`]).
 #[allow(clippy::too_many_arguments)]
 fn by_day_groups<A: Act, G: Ground>(
     actor: &mut A,
@@ -1045,10 +1141,24 @@ fn by_day_groups<A: Act, G: Ground>(
     if !dates {
         return Ok(ByDays::Range);
     }
-    let (clicked, scrolled) = select_day_groups(actor, grounder, plan, summary, cap, started, progress)?;
+    let (days, scrolled) = select_day_groups(actor, grounder, plan, summary, cap, started, None, progress)?;
+    let clicked = days.len();
     if clicked > 0 {
         let b = before.unwrap_or(0);
+        let cap_items = plan.max_items.clamp(1, MAX_PICK);
         match read_selected(grounder, cap)? {
+            Some(n) if n > cap_items => {
+                progress(&format!(
+                    "screenagent: the date groups took the count to {n}, past the session's {cap_items}-item maximum (the picker refuses Done past it); unselecting those {clicked} day(s)"
+                ));
+                rewind(actor, summary, cap)?;
+                let (undone, _) = select_day_groups(actor, grounder, plan, summary, cap, started, Some(&days), progress)?;
+                if undone.len() < clicked {
+                    progress(&format!("screenagent: unselected {} of the {clicked} day(s)", undone.len()));
+                }
+                let after = read_selected(grounder, cap)?;
+                return Ok(ByDays::OverCap { found: n, after });
+            }
             Some(n) if n > b => {
                 progress(&format!("screenagent: {clicked} day(s) selected by their date groups; the picker shows {n} selected"));
                 return Ok(ByDays::Count(Some(n)));
@@ -1067,8 +1177,13 @@ fn by_day_groups<A: Act, G: Ground>(
 /// Click the round check button of each date group of a date search's results, paging down for
 /// more. Only a check labelled with a date is clicked, each date once ([`picker::date_key`]: a
 /// heading still on screen after a scroll is the same day, and a second click would clear it),
-/// and none already filled in. `(groups clicked, scrolled)`; no dated check on the first page
-/// is `(0, false)` at once.
+/// and none already filled in. With `undo` (the keys of days this clicked before), exactly
+/// those days are clicked once more — a second click unselects a whole day (live) — whatever
+/// the model says of their fill, until all are; an undo never stops for the budget (it is
+/// bounded by the pages and the days), since stopping half way would leave a selection the
+/// picker refuses Done on. `(the keys of the days clicked, scrolled)`; no dated check on the
+/// first page is `([], false)` at once.
+#[allow(clippy::too_many_arguments)]
 fn select_day_groups<A: Act, G: Ground>(
     actor: &mut A,
     grounder: &G,
@@ -1076,28 +1191,43 @@ fn select_day_groups<A: Act, G: Ground>(
     summary: &mut Summary,
     cap: &mut crate::capture::Capture,
     started: Instant,
+    undo: Option<&[String]>,
     progress: &mut dyn FnMut(&str),
-) -> Result<(u32, bool), ScreenError> {
+) -> Result<(Vec<String>, bool), ScreenError> {
     let out_of_time = || started.elapsed() >= plan.timeout;
+    // an action from the budget; `true`: none left (an undo only counts it)
+    let stop = |summary: &mut Summary| -> Result<bool, ScreenError> {
+        if undo.is_some() {
+            summary.actions = summary.actions.saturating_add(1);
+            return Ok(false);
+        }
+        Ok(spend(summary, plan)? || out_of_time())
+    };
     let mut seen: Vec<String> = Vec::new();
-    let (mut clicked, mut scrolled, mut still, mut look) = (0u32, false, 0u32, true);
+    let mut clicked: Vec<String> = Vec::new();
+    let (mut scrolled, mut still, mut look) = (false, 0u32, true);
     for page in 0..DAY_PAGES {
         if look {
             let els = grounder.inventory(&cap.png, picker::DAY_CHECKS)?;
             let checks = picker::day_checks(&els, cap.png_w, cap.png_h);
-            if page == 0 && checks.is_empty() {
-                return Ok((0, false));
+            if page == 0 && checks.is_empty() && undo.is_none() {
+                return Ok((Vec::new(), false));
             }
             for c in checks {
                 let Some(key) = picker::date_key(&c.label) else { continue };
                 if seen.contains(&key) {
                     continue;
                 }
-                seen.push(key);
-                if picker::is_checked(&c) {
-                    continue;
+                match undo {
+                    Some(days) if !days.contains(&key) => continue,
+                    None if picker::is_checked(&c) => {
+                        seen.push(key);
+                        continue;
+                    }
+                    _ => {}
                 }
-                if spend(summary, plan)? || out_of_time() {
+                seen.push(key.clone());
+                if stop(summary)? {
                     return Err(budget(summary));
                 }
                 let (px, py) = picker::check_point(&c);
@@ -1106,12 +1236,15 @@ fn select_day_groups<A: Act, G: Ground>(
                 actor.sleep(CLICK_SETTLE_MS);
                 *cap = actor.capture()?;
                 if verify::changed(&before, &cap.png)? {
-                    clicked += 1;
-                    progress(&format!("screenagent: selected the day `{}`", c.label.trim()));
+                    progress(&format!("screenagent: {} the day `{}`", if undo.is_some() { "unselected" } else { "selected" }, c.label.trim()));
+                    clicked.push(key);
                 }
             }
         }
-        if spend(summary, plan)? || out_of_time() {
+        if undo.is_some_and(|days| days.iter().all(|d| clicked.contains(d))) {
+            break; // every day undone
+        }
+        if stop(summary)? {
             return Err(budget(summary));
         }
         let before = cap.png.clone();
@@ -1153,6 +1286,23 @@ fn back_to_top<A: Act>(actor: &mut A, plan: &Plan, summary: &mut Summary, cap: &
         if spend(summary, plan)? || started.elapsed() >= plan.timeout {
             return Err(budget(summary));
         }
+        let before = cap.png.clone();
+        actor.scroll(-END_SCROLL_LINES)?;
+        actor.sleep(900);
+        *cap = actor.capture()?;
+        still = if verify::changed(&before, &cap.png)? { 0 } else { still + 1 };
+    }
+    Ok(())
+}
+
+/// [`back_to_top`] for an undo: its scrolls are counted but never stop for the budget.
+fn rewind<A: Act>(actor: &mut A, summary: &mut Summary, cap: &mut crate::capture::Capture) -> Result<(), ScreenError> {
+    let mut still = 0u32;
+    for _ in 0..MAX_TOP_SCROLLS {
+        if still >= 2 {
+            break;
+        }
+        summary.actions = summary.actions.saturating_add(1);
         let before = cap.png.clone();
         actor.scroll(-END_SCROLL_LINES)?;
         actor.sleep(900);
@@ -1553,7 +1703,7 @@ mod tests {
         // stop changing)
         let mut act = FakeActor::new(vec![cap_of(10), cap_of(5), cap_of(200), cap_of(90), cap_of(150)]);
         act.after_shift = Some(cap_of(30));
-        let plan = Plan { select_all: true, ..Plan::default() };
+        let plan = Plan { select_all: true, max_items: MAX_PICK, ..Plan::default() };
         let mut lines: Vec<String> = vec![];
         let grid = Grid(Default::default());
         let s = drive(&mut act, &grid, &plan, &mut |l| lines.push(l.into())).unwrap();
@@ -1603,7 +1753,7 @@ mod tests {
         let g = OneVideo { gone: frame(40) };
         // the search, the grid, the tile selected, then (after Done) the picker gone
         let mut act = ScrollStays(FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40)]));
-        let plan = Plan { select_all: true, queries: vec!["October 15 2018".into()], ..Plan::default() };
+        let plan = Plan { select_all: true, max_items: MAX_PICK, queries: vec!["October 15 2018".into()], ..Plan::default() };
         let mut lines: Vec<String> = vec![];
         let s = drive(&mut act, &g, &plan, &mut |l| lines.push(l.into())).unwrap();
         assert_eq!(s.selected, 1, "{s:?}");
@@ -1721,7 +1871,7 @@ mod tests {
     }
 
     fn range_plan() -> Plan {
-        Plan { select_all: true, queries: vec!["robots".into()], ..Plan::default() }
+        Plan { select_all: true, max_items: MAX_PICK, queries: vec!["robots".into()], ..Plan::default() }
     }
 
     #[test]
@@ -1767,7 +1917,7 @@ mod tests {
         // the whole library grid and began a range selection from its first tile
         let g = FakeGrounder { inventory: vec![tile("0:30", 10)], finds: vec![] };
         let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40), cap_of(50)]);
-        let plan = Plan { select_all: true, queries: vec!["videos October 14 2022".into()], ..Plan::default() };
+        let plan = Plan { select_all: true, max_items: MAX_PICK, queries: vec!["videos October 14 2022".into()], ..Plan::default() };
         let mut lines: Vec<String> = vec![];
         let err = drive(&mut act, &g, &plan, &mut |l| lines.push(l.into())).unwrap_err();
         assert!(err.to_string().contains("refusing to select every item"), "{err}");
@@ -1789,7 +1939,7 @@ mod tests {
             }
         }
         let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30), cap_of(40), cap_of(50)]);
-        let plan = Plan { select_all: true, queries: vec!["Dubai Police robot".into()], ..Plan::default() };
+        let plan = Plan { select_all: true, max_items: MAX_PICK, queries: vec!["Dubai Police robot".into()], ..Plan::default() };
         let s = drive(&mut act, &NoResults, &plan, &mut |_| {}).unwrap();
         assert!(!s.done_pressed && s.selected == 0, "{s:?}");
         assert!(act.shift_clicks.is_empty());
@@ -1870,7 +2020,7 @@ mod tests {
     }
 
     fn album_plan(title: &str, videos_only: bool) -> Plan {
-        plan_for(Request { album: Some(title.into()), videos_only, queries: vec!["ignored".into()], max_items: 3, select_all: false })
+        plan_for(Request { album: Some(title.into()), videos_only, queries: vec!["ignored".into()], max_items: 0, select_all: false })
     }
 
     #[test]
@@ -1995,7 +2145,7 @@ mod tests {
         // photos allowed and no query: there is nothing to search, so no select-all
         let g = FakeGrounder { inventory: vec![tile("0:30", 10)], finds: vec![] };
         let mut act = FakeActor::new(vec![cap_of(10), cap_of(20), cap_of(30)]);
-        let plan = Plan { select_all: true, videos_only: false, queries: vec![], ..Plan::default() };
+        let plan = Plan { select_all: true, max_items: MAX_PICK, videos_only: false, queries: vec![], ..Plan::default() };
         let err = drive(&mut act, &g, &plan, &mut |_| {}).unwrap_err().to_string();
         assert!(err.contains("refusing to select every item of the whole library"), "{err}");
         assert!(act.clicks.is_empty() && act.shift_clicks.is_empty());
@@ -2388,6 +2538,61 @@ mod tests {
         let eyes = Eyes::new(&w, &["5 selected"]);
         drive(&mut Hands(Rc::clone(&w)), &eyes, &range_plan(), &mut |_| {}).unwrap();
         assert!(!eyes.asks.borrow().iter().any(|a| a == crate::picker::DAY_CHECKS));
+    }
+
+    #[test]
+    fn day_groups_past_the_cap_are_unselected_and_left_for_a_next_session() {
+        // live: the picker let a 40-item session's date groups reach 143 selected, then refused
+        // Done three times and the whole session was lost. Now the same days are clicked again
+        // (a second click unselects a day) and that search waits for a session with room.
+        let w = world();
+        let eyes = Eyes::new(&w, &["10 selected", "40 selected", "10 selected", "18 selected"]);
+        let mut lines: Vec<String> = vec![];
+        let s = drive(&mut Hands(Rc::clone(&w)), &eyes, &many(&["robots", "October 2022", "cats"], 25), &mut |l| lines.push(l.into())).unwrap();
+        assert_eq!(outcomes(&s), [(Outcome::Selected, Some(10)), (Outcome::Deferred, Some(10)), (Outcome::Selected, Some(18))]);
+        assert_eq!(s.left, ["October 2022"], "{s:?}");
+        assert!(s.retry().is_empty() && s.too_big().is_empty(), "{s:?}");
+        assert!(s.done_pressed && s.selected == 18, "{s:?}");
+        let w = w.borrow();
+        let at = |y: u32| crate::picker::check_point(&check("", y));
+        let days: Vec<(u32, u32)> = w.clicks.iter().copied().filter(|c| *c == at(30) || *c == at(90)).collect();
+        // the grid was still scrolled from the range before it: Oct 12 and Oct 11 were selected;
+        // from the top, exactly those are clicked again — Oct 12, (scroll) Oct 11 — never Oct 13
+        assert_eq!(days, [at(30), at(90), at(90), at(90)], "{:?} {lines:#?}", w.clicks);
+        assert_eq!(w.clicks.iter().filter(|c| **c == DONE_AT).count(), 1);
+        let undone: Vec<&String> = lines.iter().filter(|l| l.contains("unselected the day")).collect();
+        assert_eq!(undone.len(), 2, "{lines:?}");
+        assert!(!undone.iter().any(|l| l.contains("Oct 13")), "{undone:?}");
+        assert!(s.note.contains("1 past the session's maximum"), "{}", s.note);
+        // the first search of a session already too big alone: given up, the next one goes on
+        let w = world();
+        let eyes = Eyes::new(&w, &["40 selected", "", "", "18 selected"]);
+        let s = drive(&mut Hands(Rc::clone(&w)), &eyes, &many(&["October 2022", "cats"], 25), &mut |_| {}).unwrap();
+        assert_eq!(outcomes(&s), [(Outcome::TooBig, None), (Outcome::Selected, Some(18))]);
+        assert_eq!(s.too_big(), ["October 2022"]);
+        assert!(s.left.is_empty() && s.retry().is_empty() && s.done_pressed, "{s:?}");
+        assert!(s.searches[0].note.contains("split it"), "{:?}", s.searches[0]);
+    }
+
+    #[test]
+    fn a_lone_search_past_the_cap_is_unselected_and_never_confirmed() {
+        let w = world();
+        // 40 of 25 after the date groups; nothing after unselecting them (two reads)
+        let eyes = Eyes::new(&w, &["40 selected", "", ""]);
+        let plan = Plan { select_all: true, queries: vec!["October 2022".into()], max_items: 25, ..Plan::default() };
+        let s = drive(&mut Hands(Rc::clone(&w)), &eyes, &plan, &mut |_| {}).unwrap();
+        assert_eq!(outcomes(&s), [(Outcome::TooBig, Some(0))]);
+        assert!(!s.done_pressed && s.selected == 0 && s.stop_waiting(Duration::ZERO), "{s:?}");
+        assert!(s.note.contains("more than the session's 25-item maximum"), "{}", s.note);
+        assert_eq!(w.borrow().clicks.iter().filter(|c| **c == DONE_AT).count(), 0);
+        // a range past the cap cannot be unselected (a second range toggles single tiles, live):
+        // the agent stops before a Done the picker would refuse
+        let g = Header::reads(&["37 selected"]);
+        let mut act = TwoPages::default();
+        let plan = Plan { max_items: 25, ..range_plan() };
+        let err = drive(&mut act, &g, &plan, &mut |_| {}).unwrap_err().to_string();
+        assert!(err.contains("more than the session's 25-item maximum"), "{err}");
+        assert_eq!(act.clicks.iter().filter(|c| **c == DONE_AT).count(), 0, "{:?}", act.clicks);
     }
 
     #[test]

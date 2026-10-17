@@ -248,7 +248,13 @@ a sweep of date searches (`--sweep FROM..TO`, built by [`sweep`](src/sweep.rs): 
   gesture; a search with no results is skipped;
 - the session's item cap is `--max-items` (default and most 2000, Google's limit); before each
   search the agent checks the room left (guessing the next search's size from the biggest so
-  far) and its budget, and leaves the rest for the next session;
+  far) and its budget, and leaves the rest for the next session. Google's picker does not stop
+  a selection at the cap — date groups and ranges select past it ("143 selected · Select up to
+  40 items", live) — but then refuses Done, so a date search whose groups pass the cap has the
+  same days clicked once more (that unselects them) and goes to the next session; one too big
+  even for an empty session is given up and listed as too big (split it by day,
+  `--month-days 1-31`, or raise `--max-items`). A range past the cap cannot be undone, so the
+  agent stops before a Done the picker would refuse;
 - Done is pressed once and the selection downloads in one batch.
 
 Sessions take up to 20 searches each; what one session left (or failed once) goes first into
@@ -260,8 +266,9 @@ picked twice downloads nothing twice.
 ### Tabs
 
 - The agent closes the picker tab it drove when it finishes — after Done (the picker's finished
-  page), or when it gives up — only after checking the front tab's address is the picker
-  (`photos.google.com/picker…` or `photos.google.com/integration/picker…`). When Chrome asks
+  page), or when it gives up — that very tab, named by its Chrome window and tab id when the
+  agent began, and only while its address is still the picker (`photos.google.com/picker…` or
+  `photos.google.com/integration/picker…`); never whatever tab is in front by then. When Chrome asks
   "Leave site?" (the picker holds its selection), the agent lists the dialog's buttons by their
   text and clicks the one that reads Leave — nothing else.
 - A session the agent gave up on is deleted (`sessions.delete`), not left to linger.

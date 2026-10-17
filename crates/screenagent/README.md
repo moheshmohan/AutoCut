@@ -60,9 +60,15 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
     back for another try (`Summary::retry`). Before each search the room is checked — the
     session's item cap (`max_items` when selecting all; the biggest search so far is the guess
     of the next one's size) and the budget, which grows with the searches and keeps a reserve
-    for Done — and what does not fit is left in `Summary::left` for a next session. Done is
-    pressed once. `Summary::searches` reports each search (selected, no results, nothing new,
-    at the cap, cleared, failed). Losing a grant (Screen Recording, Accessibility) or the model
+    for Done — and what does not fit is left in `Summary::left` for a next session. The picker
+    lets date groups and ranges select past the cap, then refuses Done (live: "143 selected",
+    "Select up to 40 items", Done greyed out): date groups past it are clicked once more, which
+    unselects them, and the search is `Deferred` to a next session — or `TooBig`
+    (`Summary::too_big`) when nothing else was selected, since no session holds it. A range
+    cannot be undone that way (a second range toggles single tiles), so past the cap the agent
+    stops rather than press a Done the picker refuses. Done is pressed once.
+    `Summary::searches` reports each search (selected, no results, nothing new, at the cap,
+    cleared, deferred, too big, failed). Losing a grant (Screen Recording, Accessibility) or the model
     ends the session; a search that merely fails does not.
   - **Date groups**: for a date search ("videos October 13 2022", "videos October 2022")
     select-all first clicks the round check button left of each date heading — only checks
@@ -70,9 +76,13 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
     a scroll is the same day, and a second click would clear it), none already filled in —
     paging down for more groups; when the header's count says they selected nothing, it falls
     back to the range gesture from the top.
-  - **Closing the tab**: when it finishes — after Done, or giving up — `drive` closes the
-    picker tab it drove (`tabs::close_front_picker`): only when the front tab's address is the
-    picker, by Cmd+W, then Leave if the browser asks "Leave site?".
+  - **Closing the tab**: when it begins, `drive` names the picker tab in front by its window
+    and tab id (Chrome); when it finishes — after Done, or giving up — it closes *that* tab by
+    those ids (`tabs::close_driven_picker`), only while its address is still the picker, closing
+    once more if it asks "Leave site?". Never "whatever tab is in front then": another session
+    was working in Chrome alongside, live, and Cmd+W would have closed its tab. Browsers that do
+    not name their tabs get Cmd+W (`tabs::close_front_picker`), only when the front tab's address
+    is the picker right before it, then Leave if the browser asks.
   - **Select all** (`select_all`): click the first tile, wheel to the end, Shift+click the
     last. A grid of one is not Shift+clicked (that would toggle the only selection off). The
     count is the header's "N selected" alone — the ask names no number (an example count was

@@ -203,6 +203,17 @@ impl Queue {
         }
     }
 
+    /// Give up on `queries` (more than a session holds): they go to [`Self::remaining`] as they
+    /// are, never tried again in this pick.
+    pub fn give_up(&mut self, queries: &[String]) {
+        for q in queries {
+            self.todo.retain(|t| t != q);
+            if !self.given_up.contains(q) {
+                self.given_up.push(q.clone());
+            }
+        }
+    }
+
     /// Searches still waiting, then those given up on: what a next run should take.
     pub fn remaining(&self) -> Vec<String> {
         self.todo.iter().chain(&self.given_up).cloned().collect()
@@ -242,8 +253,12 @@ pub struct Swept {
     /// Every session's picks together (an item picked twice is there once).
     pub picked: Picked,
     pub sessions: Vec<SessionReport>,
-    /// Searches no session got to, or that failed twice: for a next run.
+    /// Searches no session got to, or that failed twice, or more than a session holds: for a next
+    /// run.
     pub left: Vec<String>,
+    /// Of `left`, the searches whose results alone are more than a session holds (the picker
+    /// selects past its cap but refuses Done): to split (by day) or to pick with a higher cap.
+    pub too_big: Vec<String>,
     /// Why the sweep stopped early, if it did.
     pub stopped: Option<String>,
 }
@@ -313,10 +328,23 @@ pub fn pick_searches(gp: &GooglePhotos, opts: &PickOptions, req: &Searches, prog
                 queue.after(&summary.left, &summary.retry());
             }
             PickOutcome::Pending(_) => {
-                // nothing came of it: what it selected is worth another go, what it skipped is not
-                let retry: Vec<String> =
-                    summary.searches.iter().filter(|s| s.outcome != filmcraft_screenagent::agent::Outcome::NoResults).map(|s| s.query.clone()).collect();
+                // nothing came of it: what it selected is worth another go; what it skipped, what
+                // it left (`left` goes back as it is) and what no session holds are not
+                use filmcraft_screenagent::agent::Outcome;
+                let retry: Vec<String> = summary
+                    .searches
+                    .iter()
+                    .filter(|s| !matches!(s.outcome, Outcome::NoResults | Outcome::Deferred | Outcome::TooBig))
+                    .map(|s| s.query.clone())
+                    .collect();
                 queue.after(&summary.left, &retry);
+            }
+        }
+        let too_big = summary.too_big();
+        queue.give_up(&too_big);
+        for q in too_big {
+            if !out.too_big.contains(&q) {
+                out.too_big.push(q);
             }
         }
         let got_somewhere = !summary.searches.is_empty();
@@ -465,6 +493,24 @@ mod tests {
         let batch = queue.next_batch(2);
         queue.after(&batch, &[]);
         assert_eq!(queue.remaining(), strings(&["p", "q", "r"]));
+    }
+
+    #[test]
+    fn a_search_more_than_a_session_holds_is_given_up_at_once() {
+        // live: `videos October 2022` took a 40-item session to 143; the agent unselected it
+        let mut queue = Queue::new(strings(&["oct", "nov", "dec"]));
+        let batch = queue.next_batch(1);
+        assert_eq!(batch, strings(&["oct"]));
+        queue.after(&[], &[]);
+        queue.give_up(&batch);
+        assert_eq!(queue.next_batch(9), strings(&["nov", "dec"]), "never tried again");
+        queue.after(&[], &[]);
+        assert_eq!(queue.remaining(), strings(&["oct"]), "but listed for a next run");
+        // given up while still waiting (handed back as `left` by mistake): taken out, listed once
+        let mut queue = Queue::new(strings(&["a", "b"]));
+        queue.give_up(&strings(&["b", "b"]));
+        assert_eq!(queue.remaining(), strings(&["a", "b"]));
+        assert_eq!(queue.next_batch(9), strings(&["a"]));
     }
 
     #[test]

@@ -44,6 +44,20 @@ pub trait Act {
     fn close_tab(&mut self) -> Result<(), ScreenError> {
         Err(ScreenError::Unsupported("closing a tab".into()))
     }
+    /// The front window's active tab named by its window id, tab id and address, when the app
+    /// is a browser whose tabs can be named so (Chrome); `None` otherwise.
+    fn front_tab(&mut self) -> Result<Option<crate::tabs::Tab>, ScreenError> {
+        Ok(None)
+    }
+    /// The address the tab with `tab`'s window and tab id shows now; `None` when it is gone.
+    fn tab_url(&mut self, _tab: &crate::tabs::Tab) -> Result<Option<String>, ScreenError> {
+        Err(ScreenError::Unsupported("naming tabs".into()))
+    }
+    /// Close that very tab — window id, tab id and address all still matching, and only a
+    /// Google Photos picker; `Ok(false)`: no such tab any more.
+    fn close_that_tab(&mut self, _tab: &crate::tabs::Tab) -> Result<bool, ScreenError> {
+        Err(ScreenError::Unsupported("closing a tab by its id".into()))
+    }
 }
 
 /// The most wheel lines one scroll may post.
@@ -185,6 +199,21 @@ impl Act for MacActor {
 
     fn close_tab(&mut self) -> Result<(), ScreenError> {
         self.script("keystroke \"w\" using command down").map(|_| ())
+    }
+
+    fn front_tab(&mut self) -> Result<Option<crate::tabs::Tab>, ScreenError> {
+        if self.app != crate::tabs::CHROME {
+            return Ok(None);
+        }
+        crate::tabs::front_tab(self.shell.as_ref())
+    }
+
+    fn tab_url(&mut self, tab: &crate::tabs::Tab) -> Result<Option<String>, ScreenError> {
+        crate::tabs::tab_url(self.shell.as_ref(), tab)
+    }
+
+    fn close_that_tab(&mut self, tab: &crate::tabs::Tab) -> Result<bool, ScreenError> {
+        crate::tabs::close(self.shell.as_ref(), tab)
     }
 }
 
