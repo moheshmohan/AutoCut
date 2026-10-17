@@ -257,8 +257,11 @@ pub fn leave_button(elements: &[Element], w: u32, h: u32) -> Option<&Element> {
 }
 
 /// The inventory ask for the date groups of a search result: Google's picker heads each day's
-/// items with its date and a round check button that selects that whole day.
-pub const DAY_CHECKS: &str = "Locate the round check button just left of each date heading (a date such as 'Thu, Oct 13, 2022' or 'October 13, 2022' written above a group of photos). Give one box per date heading, around its round check button, and use the date heading's text exactly as written as the label. If the check button is already filled in (the day is selected), use the kind \"checked\". Do not include the check marks on individual photos.";
+/// items with its date and a round check button that selects that whole day — except a day of
+/// one item, which in a search result's compact rows shows no check button at all, not even on
+/// hover (live, Chrome 155); the model then boxes the heading's text. It is not asked whether a
+/// check is filled in: it never said so (live), and the header's count tells instead.
+pub const DAY_CHECKS: &str = "Locate the round check button just left of each date heading (a date such as 'Thu, Oct 13, 2022' or 'October 13, 2022' written above a group of photos). Give one box per date heading, around its round check button, and use the date heading's text exactly as written as the label. Do not include the check marks on individual photos.";
 
 const MONTH_NAMES: [&str; 12] = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 
@@ -294,12 +297,27 @@ fn is_year(w: &str) -> bool {
 /// box, labelled with the typed `videos October 2022`, as a date group.
 pub fn date_key(label: &str) -> Option<String> {
     let ws = words(label);
-    if ws.iter().any(|w| matches!(w.as_str(), "video" | "videos" | "photo" | "photos" | "search" | "results")) {
+    if !is_heading(&ws) {
         return None;
     }
-    let month = ws.iter().find_map(|w| month_of(w))?;
-    let year = ws.iter().find(|w| is_year(w)).cloned();
+    key_of(date_parts(&ws))
+}
+
+/// Whether words could be a date heading's: none of them names what a heading never does.
+fn is_heading(ws: &[String]) -> bool {
+    !ws.iter().any(|w| matches!(w.as_str(), "video" | "videos" | "photo" | "photos" | "search" | "results"))
+}
+
+/// The (year, month, day) words name; a day only beside a month.
+fn date_parts(ws: &[String]) -> (Option<u32>, Option<u32>, Option<u32>) {
+    let month = ws.iter().find_map(|w| month_of(w));
+    let year = ws.iter().find(|w| is_year(w)).and_then(|w| w.parse::<u32>().ok());
     let day = ws.iter().filter_map(|w| w.parse::<u32>().ok()).find(|d| (1..=31).contains(d));
+    (year, month, month.and(day))
+}
+
+fn key_of((year, month, day): (Option<u32>, Option<u32>, Option<u32>)) -> Option<String> {
+    let month = month?;
     Some(match (year, day) {
         (Some(y), Some(d)) => format!("{y}-{month:02}-{d:02}"),
         (None, Some(d)) => format!("{month:02}-{d:02}"),
@@ -308,10 +326,67 @@ pub fn date_key(label: &str) -> Option<String> {
     })
 }
 
-/// Whether a grounded day check is already filled in (the day is selected).
-pub fn is_checked(e: &Element) -> bool {
-    let k = e.kind.to_lowercase();
-    (k.contains("checked") && !k.contains("unchecked")) || k.contains("selected")
+/// The day a date heading names inside the date search `query` ([`date_key`]), with the query's
+/// year when the heading shows none (Google leaves the current year out; one heading read with and
+/// without its year is one day, and a second click would clear it). `None` for a heading that is
+/// no date, or a date outside the searched one: the heading must name the query's month and day
+/// when it names them, and its year when both show one — a neighbouring day's results are another
+/// search's to pick.
+pub fn day_key(label: &str, query: &str) -> Option<String> {
+    let ws = words(label);
+    if !is_heading(&ws) {
+        return None;
+    }
+    let (y, m, d) = date_parts(&ws);
+    let (qy, qm, qd) = date_parts(&words(query));
+    let named = |q: Option<u32>, h: Option<u32>| q.is_none_or(|q| h == Some(q));
+    if !(named(qm, m) && named(qd, d) && (y.is_none() || named(qy, y))) {
+        return None;
+    }
+    key_of((y.or(qy), m, d))
+}
+
+/// The search for one day of a date search, from its key (`"2022-10-13"`): `videos October 13
+/// 2022`, the form of a sweep's own day searches — "videos" in front only when `query` asks for
+/// videos. `None` for a key that names no day or no year (no search would find just that day).
+pub fn day_query(key: &str, query: &str) -> Option<String> {
+    let mut parts = key.split('-').map(|p| p.parse::<u32>().ok());
+    let (Some(Some(y)), Some(Some(m)), Some(Some(d)), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return None };
+    let name = MONTH_NAMES.get(usize::try_from(m.checked_sub(1)?).ok()?)?;
+    if !(is_year(&y.to_string()) && (1..=31).contains(&d)) {
+        return None;
+    }
+    let mut chars = name.chars();
+    let name: String = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
+    let videos = words(query).iter().any(|w| w == "video" || w == "videos");
+    Some(if videos { format!("videos {name} {d} {y}") } else { format!("{name} {d} {y}") })
+}
+
+/// The tile to select a day by when its heading has no check button — a day of one item, in a
+/// search result's compact rows (live: not even on hover): the tile just below the heading that
+/// starts about where the heading starts. Only when no other tile follows it on its row before the
+/// next heading there (`headings`, the page's date headings): a click on one tile of a bigger day
+/// would select part of it and pass for the whole. `None` then, or when no tile is there.
+pub fn lone_tile(heading: &Element, headings: &[Element], tiles: &[Element]) -> Option<Element> {
+    let hh = heading.y2.saturating_sub(heading.y1);
+    let (_, hy) = heading.center();
+    let side = |t: &Element| (t.x2.saturating_sub(t.x1), t.y2.saturating_sub(t.y1));
+    let tile = tiles
+        .iter()
+        .filter(|t| {
+            let (tw, th) = side(t);
+            t.y1 >= hy && t.y1.saturating_sub(heading.y2) <= (th / 2).max(hh) && t.x1.abs_diff(heading.x1) <= tw / 2
+        })
+        .min_by_key(|t| (t.y1, t.x1.abs_diff(heading.x1)))?;
+    let (tw, th) = side(tile);
+    let (_, ty) = tile.center();
+    // where the next day on the heading's row starts
+    let end =
+        headings.iter().filter(|o| o.center().1.abs_diff(hy) <= hh.max(1) && o.x1 > tile.x1.saturating_add(tw / 2)).map(|o| o.x1).min().unwrap_or(u32::MAX);
+    let more = tiles
+        .iter()
+        .any(|t| t != tile && t.center().1.abs_diff(ty) < (th / 2).max(1) && t.x1 >= tile.x1.saturating_add(tw / 2) && t.x1.saturating_add(tw / 4) < end);
+    (!more).then(|| tile.clone())
 }
 
 /// The date-group checks worth clicking in a `w`×`h` capture, in reading order: labelled with
@@ -616,13 +691,66 @@ mod tests {
         ];
         let checks = day_checks(&els, 1344, 784);
         assert_eq!(checks.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["Thu, Oct 13, 2022", "Wed, Oct 12, 2022"]);
-        assert!(!is_checked(&checks[0]));
-        assert!(is_checked(&el("x", "checked", 0, 0, 1, 1)) && is_checked(&el("x", "Selected", 0, 0, 1, 1)));
-        assert!(!is_checked(&el("x", "unchecked", 0, 0, 1, 1)));
         // a square box is clicked in its centre; a wide one (the heading boxed too) at its left end
         assert_eq!(check_point(&el("", "", 20, 100, 44, 124)), (32, 112));
         assert_eq!(check_point(&el("", "", 20, 100, 320, 124)), (32, 112));
         assert_eq!(check_point(&el("", "", 9, 9, 9, 9)), (9, 9));
+    }
+
+    #[test]
+    fn day_keys_are_the_searched_dates_days() {
+        let q = "videos October 2022";
+        assert_eq!(day_key("Thu, Oct 13, 2022", q).as_deref(), Some("2022-10-13"));
+        // read without its year (Google leaves the current year out): the same day
+        assert_eq!(day_key("Thu, Oct 13", q).as_deref(), Some("2022-10-13"));
+        assert_eq!(day_key("Thu, Oct 13", "videos 2026").as_deref(), Some("2026-10-13"));
+        assert_eq!(day_key("Thu, Oct 13", "videos October").as_deref(), Some("10-13"));
+        // a neighbouring day Google's search shows too is another search's
+        for no in ["Fri, Sep 30, 2022", "Thu, Oct 13, 2021", "videos October 2022", "0:30", "Search", ""] {
+            assert_eq!(day_key(no, q), None, "{no:?}");
+        }
+        // a day search takes only its day, never a month heading
+        let day = "videos October 13 2022";
+        assert_eq!(day_key("October 13, 2022", day).as_deref(), Some("2022-10-13"));
+        assert_eq!(day_key("Wed, Oct 12, 2022", day), None);
+        assert_eq!(day_key("October 2022", day), None);
+        assert_eq!(day_key("October 2022", q).as_deref(), Some("2022-10"));
+    }
+
+    #[test]
+    fn day_searches_are_written_as_a_sweep_writes_them() {
+        assert_eq!(day_query("2022-10-13", "videos October 2022").as_deref(), Some("videos October 13 2022"));
+        assert_eq!(day_query("2022-11-05", "November 2022 videos").as_deref(), Some("videos November 5 2022"));
+        assert_eq!(day_query("2017-12-31", "December 2017").as_deref(), Some("December 31 2017"));
+        // no day or no year: no search finds just that day
+        for no in ["10-13", "2022-10", "", "2022-13-01", "2022-00-01", "2022-10-32", "1800-10-13", "2022-10-13-1", "x-y-z"] {
+            assert_eq!(day_query(no, "videos October 2022"), None, "{no:?}");
+        }
+    }
+
+    #[test]
+    fn a_day_without_a_check_is_selected_by_its_one_tile() {
+        let t = |x1: u32, y1: u32| el("0:12", "", x1, y1, x1 + 100, y1 + 100);
+        // compact rows: Oct 14 (two tiles), Oct 13 (one, no check button: its text boxed), Oct 12
+        let oct14 = el("Fri, Oct 14, 2022", "", 10, 100, 30, 120);
+        let oct13 = el("Thu, Oct 13, 2022", "", 230, 100, 330, 120);
+        let oct12 = el("Wed, Oct 12, 2022", "", 340, 100, 360, 120);
+        let headings = [oct14.clone(), oct13.clone(), oct12.clone()];
+        let tiles = [t(10, 128), t(120, 128), t(230, 128), t(340, 128), t(450, 128), t(10, 240)];
+        assert_eq!(lone_tile(&oct13, &headings, &tiles), Some(t(230, 128)));
+        // a day with more tiles on its row: a click on one would select part of it
+        assert_eq!(lone_tile(&oct14, &headings, &tiles), None);
+        assert_eq!(lone_tile(&oct12, &headings, &tiles), None);
+        // without the next heading, a tile after it may be its own: not lone either
+        assert_eq!(lone_tile(&oct13, std::slice::from_ref(&oct13), &tiles), None);
+        // the last day of a row
+        assert_eq!(lone_tile(&oct13, &headings, &tiles[..3]), Some(t(230, 128)));
+        // no tile right below, or none starting where the heading starts
+        assert_eq!(lone_tile(&oct13, &headings, &[t(230, 400)]), None);
+        assert_eq!(lone_tile(&oct13, &headings, &[t(300, 128)]), None);
+        assert_eq!(lone_tile(&oct13, &headings, &[]), None);
+        // degenerate boxes don't panic
+        assert_eq!(lone_tile(&el("", "", 5, 5, 5, 5), &[], &[el("", "", 5, 5, 5, 5)]), Some(el("", "", 5, 5, 5, 5)));
     }
 
     #[test]

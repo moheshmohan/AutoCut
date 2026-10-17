@@ -62,20 +62,31 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
     of the next one's size) and the budget, which grows with the searches and keeps a reserve
     for Done — and what does not fit is left in `Summary::left` for a next session. The picker
     lets date groups and ranges select past the cap, then refuses Done (live: "143 selected",
-    "Select up to 40 items", Done greyed out): date groups past it are clicked once more, which
-    unselects them, and the search is `Deferred` to a next session — or `TooBig`
-    (`Summary::too_big`) when nothing else was selected, since no session holds it. A range
-    cannot be undone that way (a second range toggles single tiles), so past the cap the agent
-    stops rather than press a Done the picker refuses. Done is pressed once.
+    "Select up to 40 items", Done greyed out), so date groups are selected day by day up to the
+    cap (below). A range cannot be undone (a second range toggles single tiles), so past the cap
+    the agent stops rather than press a Done the picker refuses. Done is pressed once.
     `Summary::searches` reports each search (selected, no results, nothing new, at the cap,
-    cleared, deferred, too big, failed). Losing a grant (Screen Recording, Accessibility) or the model
-    ends the session; a search that merely fails does not.
+    cleared, deferred, too big, split, failed). Losing a grant (Screen Recording, Accessibility) or
+    the model ends the session; a search that merely fails does not.
   - **Date groups**: for a date search ("videos October 13 2022", "videos October 2022")
-    select-all first clicks the round check button left of each date heading — only checks
-    labelled with a date, each date once (`picker::date_key`: a heading still on screen after
-    a scroll is the same day, and a second click would clear it), none already filled in —
-    paging down for more groups; when the header's count says they selected nothing, it falls
-    back to the range gesture from the top.
+    select-all walks the date headings, paging down, and selects each day of the searched date
+    once (`picker::day_key`: a heading still on screen after a scroll is the same day, read with
+    or without its year; a neighbouring day Google's search shows too is another search's) by the
+    round check button left of its heading. The header's "N selected" is read after every click —
+    one more model call per day, the price of an exact count: hover alone changes the pixels, so
+    only the count tells what a click did. A click that selected nothing is a day of one item,
+    which in compact rows has no check button at all (live, not even on hover): it is selected by
+    its tile (`picker::lone_tile`, only when no other tile follows it on its row — one tile of a
+    bigger day would pass for the whole), else left as a day search. A click that lowered the
+    count found a day selected already (the model never says a check is filled in) and clicks it
+    back on. A click that took the count past the cap is clicked again at once, which unselects
+    the day while it is still on screen — no walk back over the days — and that day and the days
+    after it (only listed) are left as day searches (`videos October 13 2022`) for a next
+    session: the search is `Split`, and the session holds no more searches. When none of a search
+    fits beside what is selected it waits whole (`Deferred`); when its first day alone passes the
+    cap its days are left as day searches, and a day search alone past the cap is `TooBig`
+    (`Summary::too_big`). When no day took at all, it falls back to the range gesture from the
+    top.
   - **Closing the tab**: when it begins, `drive` names the picker tab in front by its window
     and tab id (Chrome); when it finishes — after Done, or giving up — it closes *that* tab by
     those ids (`tabs::close_driven_picker`), only while its address is still the picker, closing
@@ -180,10 +191,12 @@ No model weights are committed to this repository or shipped with any binary.
 - Tabs are closed only where the address can be read: Chromium browsers (Chrome, Edge, Brave,
   Arc, Vivaldi) and Safari. Elsewhere the finished picker tab stays open; closing the earlier
   picker tabs and `photos tidy` are Chrome-only.
-- A search that overlaps an earlier one in the same session (a day inside a month already
-  searched) can clear part of the earlier selection — Google's picker toggles what is clicked
-  again. The agent sees the count fall and hands those searches back for another session; avoid
-  overlapping searches in one list.
+- A search that overlaps an earlier one in the same session can clear part of the earlier
+  selection — Google's picker toggles what is clicked again. Date groups are put back (the count
+  after each day tells); a range is not: the agent sees the count fall and hands those searches
+  back for another session. Avoid overlapping searches in one list.
+- The count is only as exact as the model's reading of "N selected": a misread can still take
+  one day for another outcome. A day the model never boxes as a heading is not selected.
 - It moves the real pointer while it works; leave the mouse alone for the minute or two
   it runs.
 - It drives whatever app is frontmost after the picker opens — the caller opens the picker
@@ -199,7 +212,10 @@ JSON, hostile coordinates, NaN, truncated PNGs), AppleScript escaping and inject
 attempts, coordinate math, and the agent loop against scripted fake eyes/hands (budgets,
 termination, in-bounds guarantees), many-search sessions (cumulative counts, skipped empty
 searches, the cap and the budget leaving searches for a next session, a count that falls),
-date-group selection and its fallback, and the picker tabs against a fake Chrome (only picker
+date-group selection against a fake picker with date groups (a day of one item without a check
+button, a day selected already, a session filled to its cap and the rest left as day searches,
+a search deferred whole or too big, a check the model boxed off its button, a neighbouring
+month's day, the range fallback), and the picker tabs against a fake Chrome (only picker
 tabs closed, a tab that asks "Leave site?" closed once more, Leave clicked and nothing else). A live model
 round-trip can be run with
 `AUTOCUT_SCREEN_LIVE=1`, and a saved window capture can be replayed through the real
