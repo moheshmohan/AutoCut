@@ -3473,6 +3473,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::narration::commands());
     v.extend(crate::audio_generate::commands());
     v.extend(crate::voice_clone::commands());
+    v.extend(crate::video_templates::commands());
     v.extend(crate::photos::commands());
     v.extend(crate::autocut::commands());
     v.extend(crate::media_frame::commands());

@@ -50,6 +50,9 @@ const VALUED: &[&str] = &[
     "--queries",
     "--sweep",
     "--month-days",
+    "--slot",
+    "--variant",
+    "--name",
 ];
 
 #[derive(Debug, Default)]

@@ -2033,6 +2033,7 @@ dependencies = [
  "filmcraft-render",
  "filmcraft-scopes",
  "filmcraft-speech",
+ "filmcraft-templates",
  "filmcraft-testkit",
  "filmcraft-text",
  "filmcraft-time",
@@ -2424,6 +2425,22 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "ureq",
+]
+
+[[package]]
+name = "filmcraft-templates"
+version = "0.8.0"
+dependencies = [
+ "filmcraft-format",
+ "filmcraft-geom",
+ "filmcraft-media",
+ "filmcraft-project",
+ "filmcraft-time",
+ "miniz_oxide 0.8.9",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

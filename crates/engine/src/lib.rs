@@ -60,6 +60,7 @@ pub mod source_monitor;
 pub mod sync;
 pub mod transcript;
 pub mod trim;
+pub mod video_templates;
 pub mod voice_clone;
 pub mod voiceover;
 
@@ -1367,6 +1368,8 @@ mod transcript_tests;
 mod trim_tests;
 #[cfg(test)]
 mod vfx_tests;
+#[cfg(test)]
+mod video_templates_tests;
 #[cfg(test)]
 mod voiceover_tests;
 

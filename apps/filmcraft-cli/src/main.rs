@@ -277,6 +277,21 @@ SUBCOMMANDS
                                  hold a resource yourself (default 30 min, Ctrl-C to let go):
                                  e.g. before driving Chrome by hand or from another session
   photos add <mediaItemId>...    import already-downloaded items again (ids from `photos cached`)
+  template list [query] [--json] the video templates: built-in starters and the user's
+                                (<data dir>/Video Templates); --json for everything
+  template inspect <id|name|path>
+                                one template: slots and their placements, variants, beat grid
+  template validate <path>      check a .fcvideo-template folder or .zip: every problem with
+                                its field; exit 1 when invalid
+  template apply <id|name|path> [--variant 9:16] [--slot <slot>=<file|item id|text>]...
+         [--name N] [--save | --save-as p.fcproj]
+                                a new sequence from a template: repeat --slot for each medium
+                                (`--slot photos=a.jpg --slot photos=b.jpg --slot title=Lisbon`);
+                                one undo step. E.g. template apply builtin:photo-beat-slideshow
+                                --variant 9:16 --slot photos=~/p1.jpg --slot music=~/song.mp3
+  template save <out.fcvideo-template | out.zip> [--name N] [--description D]
+                                the active sequence as a template: clips flagged with
+                                `exec template.markSlot` become slots
   bench-decode <media> [--frames N]
   mcp                           MCP server on stdio (headless, or --bridge to the live app)
   help                          this text
@@ -454,6 +469,17 @@ fn register_hardware_decoders() -> filmcraft_platform::Availability {
 /// `path` made absolute against the working directory, as the project stores it. Unlike
 /// `canonicalize`, `std::path::absolute` keeps symlinks and adds no Windows verbatim `\\?\`
 /// prefix (#850). A path it cannot resolve is kept as given.
+/// A template id or name as it is; a path made absolute.
+fn template_key(k: &str) -> String {
+    let lower = k.to_ascii_lowercase();
+    if k.contains('/') || k.contains('\\') || k.starts_with('~') || lower.ends_with(".zip") || lower.ends_with(".fcvideo-template") || lower.ends_with(".json")
+    {
+        absolute(&filmcraft_engine::export_tools::expand_home(k))
+    } else {
+        k.to_string()
+    }
+}
+
 fn absolute(path: &str) -> String {
     std::path::absolute(path).ok().and_then(|p| p.into_os_string().into_string().ok()).unwrap_or_else(|| path.to_string())
 }
@@ -1643,6 +1669,82 @@ async fn cli() {
                     outln!("{:<32} {:<34} {:<14} {}", s("id"), s("label"), s("shortcut"), s("params"));
                 }
             }
+        }
+        "template" => {
+            let mut b = Backend::open(&a);
+            let key = |i: usize, what: &str| a.pos(i).map(str::to_string).unwrap_or_else(|| usage(format!("template {what}")));
+            let (id, params) = match a.pos(1) {
+                Some("list") => ("template.list", a.pos(2).map(|q| json!({"query": q})).unwrap_or(json!({}))),
+                Some("inspect") => ("template.inspect", json!({"template": template_key(&key(2, "inspect <id|name|path>"))})),
+                Some("validate") => ("template.validate", json!({"path": absolute(&key(2, "validate <path>"))})),
+                Some("save") => {
+                    let mut p = json!({"path": absolute(&key(2, "save <out.fcvideo-template | out.zip>"))});
+                    if let Some(n) = a.opt("--name") {
+                        p["name"] = json!(n);
+                    }
+                    if let Some(d) = a.opt("--description") {
+                        p["description"] = json!(d);
+                    }
+                    ("template.save", p)
+                }
+                Some("apply") => {
+                    let mut p = json!({"template": template_key(&key(2, "apply <id|name|path> [--variant V] [--slot id=value]..."))});
+                    let mut slots = serde_json::Map::new();
+                    for x in a.all("--slot") {
+                        let Some((sid, v)) = x.split_once('=') else { usage(format!("--slot {x}: use <slot>=<file|item id|text>")) };
+                        let v = if std::path::Path::new(&filmcraft_engine::export_tools::expand_home(v)).exists() {
+                            json!(absolute(&filmcraft_engine::export_tools::expand_home(v)))
+                        } else {
+                            v.parse::<u64>().map(|n| json!(n)).unwrap_or_else(|_| json!(v))
+                        };
+                        match slots.entry(sid.to_string()).or_insert_with(|| json!([])) {
+                            Value::Array(list) => list.push(v),
+                            other => *other = json!([v]),
+                        }
+                    }
+                    p["slots"] = Value::Object(slots);
+                    if let Some(v) = a.opt("--variant") {
+                        p["variant"] = json!(v);
+                    }
+                    if let Some(n) = a.opt("--name") {
+                        p["name"] = json!(n);
+                    }
+                    ("template.apply", p)
+                }
+                _ => usage("template list | inspect <t> | validate <path> | apply <t> [--variant V] [--slot id=value]... | save <out>"),
+            };
+            match b.exec(id, params).await {
+                Ok(v) if id == "template.list" && !a.flag("--json") => {
+                    for t in v["templates"].as_array().cloned().unwrap_or_default() {
+                        let slots: Vec<String> = t["slots"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|s| format!("{}×{}", s["id"].as_str().unwrap_or(""), s["count"]))
+                            .collect();
+                        outln!(
+                            "{:<34} {:<26} {:>6.1} s  {:<10} {}",
+                            t["id"].as_str().unwrap_or(""),
+                            t["name"].as_str().unwrap_or(""),
+                            t["seconds"].as_f64().unwrap_or(0.0),
+                            t["variants"].as_array().map(|v| v.iter().filter_map(|x| x["id"].as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default(),
+                            slots.join(", ")
+                        );
+                    }
+                    for x in v["invalid"].as_array().cloned().unwrap_or_default() {
+                        outln!("invalid: {} — {}", x["path"].as_str().unwrap_or(""), x["error"].as_str().unwrap_or(""));
+                    }
+                }
+                Ok(v) => {
+                    print(&a, &v);
+                    if id == "template.validate" && v["valid"] != json!(true) {
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => fail(format!("{id}: {e}")),
+            }
+            b.finish(&a).await;
         }
         "exec" => {
             let id = a.pos(1).unwrap_or_else(|| usage("exec <id> [key=value ...]"));

@@ -429,6 +429,35 @@ pub struct ShowcaseInspectParams {
     pub report: Option<bool>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TemplateListParams {
+    /// Only templates whose name, description, id or tags contain this text.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// One template in full (id, name or path of a .fcvideo-template folder or .zip): its slots with
+    /// their placements, variants, beat grid and manifest.
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TemplateApplyParams {
+    /// Template id (`builtin:photo-beat-slideshow`, `builtin:channel-intro`, `builtin:top-3-listicle`),
+    /// name, or path of a .fcvideo-template folder or .zip.
+    pub template: String,
+    /// Aspect variant: `16:9`, `9:16`… (default: the template's own).
+    #[serde(default)]
+    pub variant: Option<String>,
+    /// What fills each slot, by slot id: a file path, a project item id, a text (text slots), or
+    /// {"path"|"item"|"text", "inSeconds"?, "focus"?: [x, y], "focusByVariant"?: {"9:16": [x, y]}},
+    /// or a list of them for slots that take several. Unfilled slots keep their placeholders.
+    #[serde(default)]
+    pub slots: Option<Value>,
+    /// Name of the new sequence.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// Signed-in Google Photos, or the tool-shaped setup error.
 fn gphotos() -> Result<filmcraft_gphotos::GooglePhotos, AutomationError> {
     filmcraft_gphotos::GooglePhotos::configured().map_err(|e| AutomationError::Other(e.to_string()))
@@ -1118,6 +1147,37 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Video templates: list",
+        description = "The video templates (whole-sequence starters with media slots: photo-beat slideshow, channel intro, top-3 countdown, and the user's own from <data dir>/Video Templates): id, name, length, variants (16:9, 9:16), slots (kind, count, required). Pass `template` for one in full, with every placement's time and the beat grid. Then template_apply.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn template_list(&self, Parameters(p): Parameters<TemplateListParams>) -> Result<CallToolResult, McpError> {
+        match p.template {
+            Some(t) => wrap(self.run("template.inspect", json!({"template": t})).await),
+            None => wrap(self.run("template.list", p.query.map(|q| json!({"query": q})).unwrap_or(json!({}))).await),
+        }
+    }
+
+    #[tool(
+        title = "Video templates: apply",
+        description = "Make a new sequence from a video template (`template.apply`): media conforms to each slot (trimmed, looped, stretched or held; music Remixed), effects, transitions and titles stay with the slots, cuts land on the music's beats (re-measured when you give your own track; an unfilled music slot gets a generated bed), the variant sets the frame (16:9 or 9:16) and the template's look, caption style and export preset come along. Files are imported (once each). One undo step; returns the sequence, what filled each placement and how, and warnings.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn template_apply(&self, Parameters(p): Parameters<TemplateApplyParams>) -> Result<CallToolResult, McpError> {
+        let mut params = json!({"template": p.template});
+        if let Some(v) = p.variant {
+            params["variant"] = json!(v);
+        }
+        if let Some(s) = p.slots {
+            params["slots"] = s;
+        }
+        if let Some(n) = p.name {
+            params["name"] = json!(n);
+        }
+        wrap(self.run("template.apply", params).await)
+    }
+
+    #[tool(
         title = "Render a frame",
         description = "Render the active sequence's frame (at `seconds` or the playhead) and return it as PNG.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -1408,6 +1468,29 @@ mod tests {
         assert!(v["cuts"].as_u64().unwrap() >= 2);
         let r = m.render_frame(Parameters(RenderParams { seconds: Some(1.0), max_side: Some(320) })).await.unwrap();
         assert_ne!(r.is_error, Some(true));
+    }
+
+    /// `template_list` / `template_apply`: the starters are listed, one is inspected, and applying
+    /// one makes the new sequence the active one.
+    #[tokio::test]
+    async fn template_tools_list_and_apply() {
+        let m = FilmcraftMcp::headless(Session::default());
+        let l = m.template_list(Parameters(TemplateListParams::default())).await.unwrap();
+        assert_ne!(l.is_error, Some(true));
+        let one = m.template_list(Parameters(TemplateListParams { query: None, template: Some("builtin:top-3-listicle".into()) })).await.unwrap();
+        assert_ne!(one.is_error, Some(true));
+        let p = TemplateApplyParams {
+            template: "builtin:top-3-listicle".into(),
+            variant: Some("9:16".into()),
+            slots: Some(json!({"title": "Best Bots", "labels": ["A", "B", "C"]})),
+            name: Some("Countdown".into()),
+        };
+        let r = m.template_apply(Parameters(p)).await.unwrap();
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let q = m.run("sequence.inspect", json!({})).await.unwrap();
+        assert_eq!(q["settings"]["width"], 1080, "{q}");
+        let bad = m.template_apply(Parameters(TemplateApplyParams { template: "nope".into(), variant: None, slots: None, name: None })).await.unwrap();
+        assert_eq!(bad.is_error, Some(true));
     }
 
     /// `render_frame` / `render_preview` are annotated read-only (#114): rendering at `seconds`
@@ -1824,6 +1907,8 @@ mod tests {
             "showcase_plan",
             "showcase_build",
             "showcase_inspect",
+            "template_list",
+            "template_apply",
         ] {
             assert!(names.contains(&want), "{want} not listed");
         }

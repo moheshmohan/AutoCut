@@ -274,6 +274,17 @@ fn beats(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
+/// The tempo and beats of `item`'s sound over `[from, from + dur)`: (bpm, the attack of each
+/// beat in media time). The same analysis as `media.beats`, in exact ticks (video templates
+/// re-quantize their cuts to them).
+pub(crate) fn beat_ticks(s: &Session, item: ItemId, from: Tick, dur: Tick) -> Result<(f64, Vec<Tick>)> {
+    let most = Tick::from_seconds_f64(MAX_BEATS_SECONDS);
+    let a = analysis(s, item, from, dur.min(most))?;
+    let sr = i64::from(a.sample_rate.max(1));
+    let lead = dsp::beat_lead(a.sample_rate);
+    Ok((a.bpm, a.beats.iter().map(|b| from + Tick::from_units(b.saturating_add(lead), sr)).collect()))
+}
+
 /// Remix state of every remixed clip in the active sequence (for agents and the UI).
 pub fn remixed_clips(s: &Session) -> HashMap<ClipId, Remix> {
     let mut out = HashMap::new();

@@ -94,6 +94,8 @@ const LAYERS: &[(&str, u8)] = &[
     ("playback", 3),
     ("export", 3),
     ("format", 3),
+    // video templates (.fcvideo-template): manifest, packages, slot fit, beat grids, built-in starters
+    ("templates", 3),
     ("engine", 4),
     ("platform", 5),
     ("ui-egui", 5),
@@ -126,6 +128,7 @@ const SAME_LAYER: &[(&str, &str)] = &[
     ("gpu", "render"),
     ("cli", "filmcraft"),
     ("tts", "tts-text"),
+    ("templates", "format"),
     ("automation", "autocut"),
     ("automation", "gphotos"),
     ("gphotos", "oauth"),

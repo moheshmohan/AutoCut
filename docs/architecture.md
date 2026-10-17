@@ -25,7 +25,7 @@ Design principles:
  L6  apps/filmcraft · apps/filmcraft-cli · apps/filmcraft-web
  L5  ui-egui · automation · autocut · gphotos · oauth · screenagent · platform
  L4  engine
- L3  render · gpu · export · golden (test-only)
+ L3  render · gpu · export · templates · golden (test-only)
  L2  edit · codecs · interchange · captions · speech · tts · tts-text
  L1  frame · media · project · audio-dsp · text
  L0  foundation: time · geom · color · bitstream · locks · testkit (dev-dependency only)
@@ -76,6 +76,7 @@ and `filmcraft-cli`.
 | `golden` | L3 | test-only: golden-image tests of the CPU renderer and GPU-vs-CPU parity; empty library, dev-dependencies only |
 | `scopes` | L3 | video scope maths: waveform, parade, histogram, YUV / HLS vectorscopes, numeric summaries ([crates/scopes/README.md](../crates/scopes/README.md)) |
 | `export` | L3 | render → encode → mux pipeline, progress/cancel |
+| `templates` | L3 | video templates (`.fcvideo-template` folders and ZIPs): manifest with typed slots, strict validation naming the field, slot auto-fit (trim / loop / stretch / hold / Remix), beat grids and re-quantizing cuts to a new track's beats, aspect variants with position hints, applying to a project, minimal save, and the built-in starters; the engine's `template.*` commands drive it ([README](../crates/templates/README.md)) |
 | `engine` | L4 | `Session`, command registry, undo history, media pool, jobs, interchange glue |
 | `ui-egui` | L5 | the egui frontend: docking, panels, timeline, monitors, playback, control-channel handlers |
 | `automation` | L5 | MCP server (`rmcp`, stdio), headless or bridged to the running app |
