@@ -369,9 +369,10 @@ pub fn day_query(key: &str, query: &str) -> Option<String> {
 /// The tile to select a day by when its heading has no check button — a day of one item, in a
 /// search result's compact rows (live: not even on hover): the tile just below the heading that
 /// starts about where the heading starts. Only when no other tile follows it on its row before the
-/// next heading there (`headings`, the page's date headings), and none before it reaches under the
-/// heading's start (the box may sit right of where its day starts): a click on one tile of a bigger
-/// day would select part of it and pass for the whole. `None` then, or when no tile is there.
+/// next heading there (`headings`, the page's date headings), none before it reaches under the
+/// heading's start (the box may sit right of where its day starts), and no other heading on the
+/// row starts over it: a click on one tile of a bigger day would select part of it and pass for
+/// the whole, and another day's tile would pass for this one. `None` then, or when no tile is there.
 pub fn lone_tile(heading: &Element, headings: &[Element], tiles: &[Element]) -> Option<Element> {
     let hh = heading.y2.saturating_sub(heading.y1);
     let (_, hy) = heading.center();
@@ -397,7 +398,10 @@ pub fn lone_tile(heading: &Element, headings: &[Element], tiles: &[Element]) -> 
         let reach = t.x2.saturating_add(hh) > tile.x1 || t.x2 > heading.x1.saturating_sub(hh);
         t != tile && t.center().1.abs_diff(ty) < (th / 2).max(1) && t.x1 < tile.x1 && reach
     });
-    (!more && !behind).then(|| tile.clone())
+    // another heading on the row starting over it too: two days claim the tile (live, a box for
+    // Oct 7 lay over Oct 8's lone tile, and Oct 8's clip was picked for Oct 7)
+    let claimed = headings.iter().any(|o| o != heading && o.center().1.abs_diff(hy) <= hh.max(1) && o.x1.abs_diff(tile.x1) <= tw / 2);
+    (!more && !behind && !claimed).then(|| tile.clone())
 }
 
 /// The date-group checks worth clicking in a `w`×`h` capture, in reading order: labelled with
@@ -784,6 +788,9 @@ mod tests {
         // a box right of where its day starts: the tile under it is that day's second
         let off = el("Thu, Oct 13, 2022", "", 150, 100, 250, 120);
         assert_eq!(lone_tile(&off, &[oct14.clone(), off.clone()], &tiles[..2]), None);
+        // another day's heading over the same tile: the tile is not this day's for sure
+        let oct12_over = el("Wed, Oct 12, 2022", "", 255, 100, 355, 120);
+        assert_eq!(lone_tile(&oct13, &[oct14.clone(), oct13.clone(), oct12_over], &tiles[..3]), None);
         // no tile right below, or none starting where the heading starts
         assert_eq!(lone_tile(&oct13, &headings, &[t(250, 400)]), None);
         assert_eq!(lone_tile(&oct13, &headings, &[t(320, 128)]), None);
