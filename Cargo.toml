@@ -53,6 +53,7 @@ filmcraft-speech = { path = "crates/speech" }
 filmcraft-tts = { path = "crates/tts" }
 filmcraft-tts-text = { path = "crates/tts-text" }
 filmcraft-acestep = { path = "crates/acestep" }
+filmcraft-soundfont = { path = "crates/soundfont" }
 filmcraft-render = { path = "crates/render" }
 filmcraft-gpu = { path = "crates/gpu" }
 filmcraft-scopes = { path = "crates/scopes" }

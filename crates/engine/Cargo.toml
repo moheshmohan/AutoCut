@@ -43,6 +43,7 @@ filmcraft-speech = { workspace = true }
 filmcraft-tts = { workspace = true }
 filmcraft-templates = { workspace = true }
 filmcraft-acestep = { workspace = true }
+filmcraft-soundfont = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

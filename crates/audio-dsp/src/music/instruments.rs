@@ -3,9 +3,9 @@
 //! A score names each part's [`Patch`]; an [`InstrumentBank`] turns a patch into an
 //! [`Instrument`] that takes note-on / note-off events and renders blocks of stereo audio
 //! (dry, plus a reverb send). Every patch maps to a General MIDI program and every drum to a
-//! General MIDI percussion key, so a SoundFont bank — for example one built on `rustysynth`
-//! (MIT, pure Rust) loading a user-supplied `.sf2` — can play the same score through the same
-//! two traits. The built-in [`OscillatorBank`] synthesizes everything from band-limited
+//! General MIDI percussion key, so a SoundFont bank — `filmcraft-soundfont`, built on
+//! `rustysynth` (MIT, pure Rust) — plays the same score through the same two traits, placed in
+//! the mix by [`mix_hints`]. The built-in [`OscillatorBank`] synthesizes everything from band-limited
 //! oscillators, FM, additive partials, noise and filters: no samples, deterministic.
 
 use std::f64::consts::{PI, TAU};
@@ -223,6 +223,19 @@ pub trait InstrumentBank {
     /// Shown in a track's metadata ("oscillators", or a SoundFont's name).
     fn name(&self) -> &str;
     fn instrument(&self, patch: Patch, ctx: &Context) -> Result<Box<dyn Instrument>, SynthError>;
+}
+
+/// Where the built-in voice of `patch` sits in the mix: its pan (-1 left .. 1 right) and its
+/// reverb send (0..1), so another bank (a SoundFont) can place its instruments the same way.
+pub fn mix_hints(patch: Patch, genre: Genre) -> (f64, f64) {
+    match patch {
+        Patch::Kit(_) => (0.0, 0.15),
+        Patch::Fx => (0.0, 0.4),
+        p => {
+            let t = tone(p, genre);
+            (t.pan, t.send)
+        }
+    }
 }
 
 /// The built-in bank: every patch synthesized.

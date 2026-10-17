@@ -39,6 +39,7 @@ pub mod mixer;
 pub mod multicam;
 pub mod music;
 pub mod music_neural;
+pub mod music_preview;
 pub mod narration;
 pub mod panels;
 pub mod paste_media;
@@ -59,6 +60,7 @@ pub mod sequence_tools;
 pub mod settings;
 pub mod shortcut_presets;
 pub mod shortcuts;
+pub mod soundfonts;
 pub mod source_monitor;
 pub mod sync;
 pub mod transcript;
@@ -447,6 +449,10 @@ pub struct Session {
     pub scene_jobs: Vec<scene_detect::PendingScene>,
     /// Neural music generations whose WAV is placed when their job finishes (`music.generateNeural`).
     pub neural_music: music_neural::NeuralMusic,
+    /// The SoundFont generated music plays on, loaded once (`music.useSoundfont`, `soundfont`).
+    pub soundfonts: soundfonts::SoundFonts,
+    /// The latest `music.preview`, for the host to play and `audio.generate` to place.
+    pub music_preview: music_preview::MusicPreview,
     /// Effect presets (built-in + the user's, persisted in the data directory).
     pub presets: presets::PresetLibrary,
     /// Export presets (built-in + the user's, persisted in the data directory) and favourites.
@@ -565,6 +571,8 @@ impl Session {
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
             neural_music: Default::default(),
+            soundfonts: Default::default(),
+            music_preview: Default::default(),
             presets: Default::default(),
             export_presets: Default::default(),
             export_queue: Default::default(),
@@ -1369,6 +1377,8 @@ mod sequence_tools_tests;
 mod settings_tests;
 #[cfg(test)]
 mod shortcuts_tests;
+#[cfg(test)]
+mod soundfonts_tests;
 #[cfg(test)]
 mod split_edit_ripple_trim_tests;
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! Generated audio: sound effects and music synthesized in the app
 //! ([`filmcraft_audio_dsp::synth`] and the soundtrack engine [`filmcraft_audio_dsp::music`] —
-//! oscillators, noise, envelopes, filters; no samples or models), written as WAV files, imported
-//! and placed.
+//! oscillators, noise, envelopes, filters; no models; music also on a SoundFont when one is
+//! chosen), written as WAV files, imported and placed.
 //!
 //! | command | does |
 //! |---|---|
@@ -19,6 +19,14 @@
 //! writes the drums, bass, melody and pad stems (`<Kind> <n> <stem>.wav`, up to 5 minutes; they
 //! sum to the mix) and places them, each on its own track, instead of the mix, so they can be
 //! muted or rebalanced; `levels` ({stem: dB | "mute"}) and `mute` ([stem]) rebalance the mix.
+//!
+//! **Instruments.** Music plays on a SoundFont when one is chosen — `soundfont` (`auto`,
+//! `oscillators`, `generaluser-gs` or an `.sf2` path), else Preferences ▸ `music.soundfont`
+//! (default `auto`: GeneralUser GS once downloaded, see [`crate::soundfonts`]) — and on the
+//! built-in oscillator voices otherwise; the arrangement and beat map are the same either way.
+//! The result's `instruments` and the item's "Music Instruments" say what played it, `soundfont`
+//! describes the font, `warning` says when a font failed and the oscillators stood in. When
+//! `music.preview` just played exactly this request, its audio is placed without rendering again.
 //!
 //! **Where it goes.** At `time` (default: the playhead) on `track` if given (it must be free
 //! there), else on the first audio track free for the cue's length, else on a new audio track.
@@ -42,6 +50,23 @@ use crate::{EngineError, Result, Session};
 pub const RATE: u32 = 48_000;
 /// Metadata key marking an item as a stem of generated music (its value: the stem).
 pub const STEM_KEY: &str = "Music Stem";
+/// Metadata key of what played generated music ("oscillators", or a SoundFont's name).
+pub const INSTRUMENTS_KEY: &str = "Music Instruments";
+
+/// A rendered track: just made, or shared with the preview that made it.
+enum Rendered {
+    Own(Box<music::Track>),
+    Shared(std::sync::Arc<crate::music_preview::Previewed>),
+}
+
+impl Rendered {
+    fn track(&self) -> &music::Track {
+        match self {
+            Rendered::Own(t) => t,
+            Rendered::Shared(p) => &p.track,
+        }
+    }
+}
 
 fn spec(
     id: &'static str,
@@ -59,7 +84,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "audio.generate",
             "Generate Audio",
-            r#"{"kind":"whoosh|impact|riser|drone|music"=music,"duration":seconds?|"durationTicks":ticks?,"seed":u64?,"intensity":0..1=0.7,"bpm":40..200?,"key":"A|C#|Eb…"="A","mood":"epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad"="epic","genre":"cinematic|electronic|pop|ambient|lofi|piano"?,"energy":0..1|[0..1 ×1..64]?,"stems":bool=false,"levels":{"drums|bass|melody|pad":dB|"mute"}?,"mute":["drums"…]?,"time":ticks?|"seconds":f64?,"track":"A2"|id?,"place":bool=true,"dir":str?}"#,
+            r#"{"kind":"whoosh|impact|riser|drone|music"=music,"duration":seconds?|"durationTicks":ticks?,"seed":u64?,"intensity":0..1=0.7,"bpm":40..200?,"key":"A|C#|Eb…"="A","mood":"epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad"="epic","genre":"cinematic|electronic|pop|ambient|lofi|piano"?,"energy":0..1|[0..1 ×1..64]?,"stems":bool=false,"levels":{"drums|bass|melody|pad":dB|"mute"}?,"mute":["drums"…]?,"soundfont":"auto|oscillators|generaluser-gs"|path?,"time":ticks?|"seconds":f64?,"track":"A2"|id?,"place":bool=true,"dir":str?}"#,
             always,
             generate,
             true,
@@ -190,9 +215,8 @@ fn params(s: &Session, p: &Value, kind: synth::Kind) -> Result<synth::Params> {
     Ok(q)
 }
 
-/// The music request a call asks for.
-fn music_request(s: &Session, p: &Value) -> Result<music::Request> {
-    let cmd = "audio.generate";
+/// The music request a call (`cmd`: `audio.generate`, `music.preview`) asks for.
+pub(crate) fn music_request(s: &Session, p: &Value, cmd: &str) -> Result<music::Request> {
     let mood = crate::music::mood_p(p, cmd)?.unwrap_or(music::Mood::Epic);
     let length = crate::music::length_p(p, cmd, synth::MAX_MUSIC_SECONDS)?.unwrap_or_else(|| Tick::from_seconds_f64(synth::Kind::Music.default_seconds()));
     if length.seconds() < music::MIN_SECONDS {
@@ -359,7 +383,7 @@ fn tags(title: &str, plan: &music::Plan) -> Tags {
 
 fn generate_music(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "audio.generate";
-    let req = music_request(s, p)?;
+    let req = music_request(s, p, cmd)?;
     let place = bool_p(p, "place").unwrap_or(true) && s.state.active_sequence.is_some();
     let at = time_p(s, p, "").unwrap_or(s.playhead());
     if at < Tick::ZERO {
@@ -369,8 +393,23 @@ fn generate_music(s: &mut Session, p: &Value) -> Result<Value> {
     let plan = music::plan(&req, RATE).map_err(|e| bad(cmd, e.to_string()))?;
     let dur = Tick::from_units(i64::try_from(plan.samples).unwrap_or(i64::MAX), i64::from(RATE));
     let chosen = if place { explicit_track(s, p, TimeRange::new(at, dur))? } else { None };
-    let track = music::generate(&req, RATE).map_err(|e| bad(cmd, e.to_string()))?;
-    let plan = track.plan;
+    let (inst, mut warning) = crate::soundfonts::resolve(s, p, cmd)?;
+    // what `music.preview` just played, when it is exactly this; else render it now
+    let rendered;
+    let track: &music::Track = match s.music_preview.matching(&req, &inst.key()) {
+        Some(prev) => {
+            warning = warning.or_else(|| prev.warning.clone());
+            rendered = Rendered::Shared(prev);
+            rendered.track()
+        }
+        None => {
+            let (t, w) = crate::soundfonts::render(&req, &inst).map_err(|e| bad(cmd, e))?;
+            warning = warning.or(w);
+            rendered = Rendered::Own(Box::new(t));
+            rendered.track()
+        }
+    };
+    let plan = track.plan.clone();
     let n0 = s.history.undo.len();
     let result = (|| -> Result<Value> {
         let dir = crate::voiceover::generated_dir(s, p, "Generated Audio");
@@ -379,12 +418,14 @@ fn generate_music(s: &mut Session, p: &Value) -> Result<Value> {
             std::fs::create_dir_all(&dir).map_err(|e| EngineError::Other(format!("{dir}: {e}")))?;
         }
         let title = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Music".into());
-        let meta = crate::music::metadata(&plan);
+        let mut meta = crate::music::metadata(&plan);
+        meta.push((INSTRUMENTS_KEY.into(), track.instruments.clone()));
         let bytes = write_wav_f32_stereo_tagged(&track.mix.left, &track.mix.right, RATE, &tags(&title, &plan));
         let item = write_and_import(s, &path, bytes, &meta)?;
         let mut out = json!({
             "item": item.0, "path": path, "kind": "music", "seconds": track.mix.seconds(), "seed": req.seed,
             "sampleRate": RATE, "clip": Value::Null, "track": Value::Null, "instruments": track.instruments,
+            "soundfont": inst.to_json(), "warning": warning,
         });
         if let (Some(o), Value::Object(info)) = (out.as_object_mut(), crate::music::track_json(&plan)) {
             o.extend(info);

@@ -177,6 +177,8 @@ pub struct Preferences {
     pub project_panel: crate::project_panel::ProjectPanelPrefs,
     /// Media Browser: Favorites, recent directories, file types, view, columns.
     pub media_browser: crate::media_browser::MediaBrowserPrefs,
+    /// Generated music: what it plays on (`music.useSoundfont`).
+    pub music: crate::soundfonts::MusicPrefs,
 }
 
 impl Default for Preferences {
@@ -204,6 +206,7 @@ impl Default for Preferences {
             voice_over: Default::default(),
             project_panel: Default::default(),
             media_browser: Default::default(),
+            music: Default::default(),
         }
     }
 }

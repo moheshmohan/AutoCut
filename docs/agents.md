@@ -138,7 +138,11 @@ progress and stop it:
 - The other long commands run the same way with `wait: true`: `tts.cloneVoice`,
   `tts.downloadVoices`, `tts.downloadCloneModel`, `music.generateNeural` (ACE-Step text to music;
   the answer carries `music`: the placed item, clip and track), `music.downloadNeuralModel` (needs
-  `consent: true` once the user agreed to the 6.3 GB download) and `photos.upload` (a file to the user's Google
+  `consent: true` once the user agreed to the 6.3 GB download), `music.downloadSoundfont` (GeneralUser
+  GS, 32 MB, for the procedural music's instruments: show the user `music.soundfonts` → `licenseText`
+  and pass `consent: true` once they agreed), `music.preview` (renders the music `audio.generate`
+  would place, for the user to hear first; returns at once when that exact preview is already
+  rendered) and `photos.upload` (a file to the user's Google
   Photos library; progress in bytes). `googlephotos_upload {path, description?}` is that upload as
   its own tool; its answer, like the finished job's `jobs.list` entry, carries `upload` (the new
   media item: `mediaItemId`, `productUrl`, …). Cancelling an upload stops it between chunks and

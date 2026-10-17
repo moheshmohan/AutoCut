@@ -62,8 +62,9 @@ voice) and soft-limited.
   keys comping or broken piano chords. Lo-fi swings; electronic pumps (side-chain) on the beat.
 - **Instruments** (`instruments`): an `InstrumentBank` makes an `Instrument` (note-on / note-off
   events, blocks of dry + reverb-send audio) for each `Patch`. Every patch maps to a General MIDI
-  program and every drum to a GM percussion key, so a SoundFont bank (for example `rustysynth`,
-  MIT, pure Rust, loading a user-supplied `.sf2`) can play the same score through the same traits.
+  program and every drum to a GM percussion key, so a SoundFont bank plays the same score through
+  the same traits: `filmcraft-soundfont` (L2; rustysynth, MIT, pure Rust, behind a structural check
+  of the `.sf2`) does, level-matched to these voices through `mix_hints` and their loudness.
   The built-in `OscillatorBank`: PolyBLEP saw / triangle / sine-saw voices with unison, two-operator
   FM (electric piano, bells), additive partials (piano), ADSR or struck envelopes, filter
   envelopes, vibrato; five drum kits (taiko, 909-style, rounded, dusty, soft) and risers/impacts.

@@ -37,4 +37,33 @@ async fn music_suggest_over_mcp() {
     assert_eq!(r["result"]["isError"], json!(true), "{r}");
     let r = ask(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"command_run","arguments":{"id":"music.suggest","params":{}}}})).await;
     assert_ne!(r["result"]["isError"], json!(true), "{r}");
+
+    // the SoundFont: listed with its licence; no download without consent
+    let r = ask(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"command_run","arguments":{"id":"music.soundfonts"}}})).await;
+    let v = text(&r);
+    assert_eq!(v["soundfonts"][0]["id"], "generaluser-gs", "{r}");
+    assert!(v["soundfonts"][0]["licenseText"].as_str().is_some_and(|t| t.contains("License v2.0")));
+    let installed = v["soundfonts"][0]["installed"] == json!(true);
+    let r = ask(json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"command_run","arguments":{"id":"music.downloadSoundfont","params":{"wait": true}}}})).await;
+    if !installed {
+        assert_eq!(r["result"]["isError"], json!(true), "{r}");
+        assert!(r.to_string().contains("consent"), "{r}");
+    }
+
+    // a preview as a long call (wait: true), then the same one again: ready at once, no job
+    let preview = json!({"mood": "calm", "duration": 3, "seed": 2, "soundfont": "oscillators", "wait": true});
+    let r =
+        ask(json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"command_run","arguments":{"id":"music.preview","params":preview}}})).await;
+    assert_ne!(r["result"]["isError"], json!(true), "{r}");
+    let v = text(&r);
+    assert!(v["job"].as_u64().is_some(), "{v}");
+    assert_eq!(v["seed"], 2);
+    let r =
+        ask(json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"command_run","arguments":{"id":"music.preview","params":preview}}})).await;
+    assert_ne!(r["result"]["isError"], json!(true), "{r}");
+    let v = text(&r);
+    assert_eq!((v["job"].clone(), v["ready"].clone()), (Value::Null, json!(true)), "{v}");
+    // a hostile one is an error the agent can read
+    let r = ask(json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"command_run","arguments":{"id":"music.preview","params":{"soundfont": "/no/such.sf2", "wait": true}}}})).await;
+    assert_eq!(r["result"]["isError"], json!(true), "{r}");
 }

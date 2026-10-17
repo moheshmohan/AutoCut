@@ -24,6 +24,8 @@ pub const LONG_COMMANDS: &[&str] = &[
     "tts.downloadCloneModel",
     "music.generateNeural",
     "music.downloadNeuralModel",
+    "music.downloadSoundfont",
+    "music.preview",
     "photos.upload",
     "youtube.upload",
     "youtube.connect",
@@ -81,6 +83,10 @@ impl FilmcraftMcp {
             Err(e) => return CallToolResult::error(vec![Content::text(e.to_string())]),
         };
         let Some(job) = start.get("job").and_then(Value::as_u64) else {
+            // nothing left to do (a model already installed, a preview already rendered)
+            if start.get("job").is_some_and(Value::is_null) {
+                return CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&start).unwrap_or_default())]);
+            }
             return CallToolResult::error(vec![Content::text(format!("{id} started no job: {start}"))]);
         };
         let path = start.get("path").and_then(Value::as_str).unwrap_or_default().to_string();

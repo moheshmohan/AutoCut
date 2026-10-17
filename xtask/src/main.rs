@@ -87,6 +87,8 @@ const LAYERS: &[(&str, u8)] = &[
     ("tts", 2),
     ("tts-text", 2),
     ("acestep", 2),
+    // SoundFont instruments for the music engine (rustysynth behind a structural SF2 check)
+    ("soundfont", 2),
     ("interchange", 2),
     ("render", 3),
     ("gpu", 3),

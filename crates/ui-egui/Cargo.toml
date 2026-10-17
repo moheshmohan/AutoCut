@@ -55,6 +55,8 @@ filmcraft-interchange = { workspace = true }
 # Showcase panel tests: the showcase jobs' host with scripted models (dev-only: the UI itself
 # reaches AutoCut through engine commands)
 filmcraft-autocut = { workspace = true }
+# Generate Audio panel tests: a tiny SoundFont made in code (never a downloaded one)
+filmcraft-soundfont = { workspace = true }
 egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }
 
 # build.rs bakes contributors/contributors.json into the binary (About ▸ Contributors).
