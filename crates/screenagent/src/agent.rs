@@ -68,13 +68,14 @@ impl Default for Plan {
 }
 
 impl Plan {
-    /// `(query, the text typed for it)` per search ([`picker::search_text`]); a videos-only
+    /// `(query, the text typed for it)` per search ([`picker::search_text`]; a resumed date
+    /// search is typed without the day it resumes from, [`picker::resume_point`]); a videos-only
     /// plan with no query still searches "videos".
     fn searches(&self) -> Vec<(String, String)> {
         if self.queries.is_empty() {
             return picker::search_text(None, self.videos_only).map(|t| vec![(t.clone(), t)]).unwrap_or_default();
         }
-        self.queries.iter().filter_map(|q| picker::search_text(Some(q), self.videos_only).map(|t| (q.clone(), t))).collect()
+        self.queries.iter().filter_map(|q| picker::search_text(Some(picker::resume_point(q).0), self.videos_only).map(|t| (q.clone(), t))).collect()
     }
 }
 
@@ -443,7 +444,7 @@ fn search_one<A: Act, G: Ground>(
 ) -> Result<Tiles, ScreenError> {
     let mut dates = None;
     let mut days = None;
-    if let Some((_, q)) = search {
+    if let Some((query, q)) = search {
         if spend(summary, plan)? || started.elapsed() >= plan.timeout {
             return Err(budget(summary));
         }
@@ -452,7 +453,7 @@ fn search_one<A: Act, G: Ground>(
             Some(field) => {
                 type_search(actor, cap, &field, q, None, progress)?;
                 summary.searched = true;
-                dates = Some(q.as_str());
+                dates = Some(DateWalk { typed: q, resume: picker::resume_point(query).1, earlier: &[] });
             }
             // selecting "everything" without the search would select the whole library
             None if plan.select_all => {
@@ -614,14 +615,18 @@ struct OneSearch {
     note: String,
     /// The picker window went away (tile-by-tile selection takes that as Done).
     closed: bool,
-    /// Searches it leaves for a next session: itself (deferred), or its days (split).
+    /// Searches it leaves for a next session: itself (deferred, or resumed where it was split),
+    /// and day searches.
     left: Vec<String>,
+    /// The days it selected by their date groups.
+    days: Vec<String>,
 }
 
 /// Search `query`, typed as `typed` (after emptying the field when `clear`), then select its
 /// results: everything on top of the `before` already selected, or tiles up to `max_items` in all.
 /// `range_room`: a range gesture is not expected to pass the session's cap (a range cannot be
 /// undone); without it, a date search whose day groups took nothing waits for a next session.
+/// `earlier`: the days earlier searches of the session selected.
 #[allow(clippy::too_many_arguments)]
 fn one_of_many<A: Act, G: Ground>(
     actor: &mut A,
@@ -633,10 +638,10 @@ fn one_of_many<A: Act, G: Ground>(
     (query, typed): (&str, &str),
     clear: Option<usize>,
     before: Option<u32>,
-    range_room: bool,
+    (range_room, earlier): (bool, &[String]),
     progress: &mut dyn FnMut(&str),
 ) -> Result<OneSearch, ScreenError> {
-    let mut one = OneSearch { typed: false, outcome: Outcome::Failed, count: before, note: String::new(), closed: false, left: Vec::new() };
+    let mut one = OneSearch { typed: false, outcome: Outcome::Failed, count: before, note: String::new(), closed: false, left: Vec::new(), days: Vec::new() };
     if spend(summary, plan)? || started.elapsed() >= plan.timeout {
         return Err(budget(summary));
     }
@@ -660,10 +665,12 @@ fn one_of_many<A: Act, G: Ground>(
         return Ok(one);
     }
     let cap_items = plan.max_items.clamp(1, MAX_PICK);
-    let after = match by_day_groups(actor, grounder, plan, summary, cap, started, before, Some(typed), progress)? {
+    let walk = DateWalk { typed, resume: picker::resume_point(query).1, earlier };
+    let after = match by_day_groups(actor, grounder, plan, summary, cap, started, before, Some(walk), progress)? {
         ByDays::Days(days) => {
             (one.outcome, one.note, one.left) = days_outcome(&days, query, typed, before, cap_items);
             one.count = days.count.or(before);
+            one.days = days.picked;
             return Ok(one);
         }
         ByDays::Range if !range_room && picker::is_date_search(typed) => {
@@ -726,6 +733,7 @@ fn search_many<A: Act, G: Ground>(
     let mut holds: Option<usize> = None; // characters the search field holds
     let mut deferred: Vec<String> = Vec::new();
     let mut full = false; // a search did not fit beside what is selected
+    let mut held: Vec<String> = Vec::new(); // the days the session's date searches selected
     for (i, (query, typed)) in searches.iter().enumerate() {
         let so_far = if plan.select_all { count.unwrap_or(0) } else { summary.selected };
         if i > 0 {
@@ -751,14 +759,14 @@ fn search_many<A: Act, G: Ground>(
         }
         progress(&format!("screenagent: search {} of {}: `{typed}`", i + 1, searches.len()));
         let range_room = so_far.saturating_add(biggest) <= room;
-        let result = one_of_many(actor, grounder, &inner, summary, cap, started, (query, typed), holds, count, range_room, progress);
+        let result = one_of_many(actor, grounder, &inner, summary, cap, started, (query, typed), holds, count, (range_room, &held), progress);
         let one = match result {
             Ok(one) => one,
             Err(e) if fatal(&e) => return Err(e),
             Err(e) => {
                 // the gesture may have changed the selection part way: read where it stands
                 let now = if plan.select_all { read_selected(grounder, cap).ok().flatten().or(count) } else { count };
-                OneSearch { typed: true, outcome: Outcome::Failed, count: now, note: e.to_string(), closed: false, left: Vec::new() }
+                OneSearch { typed: true, outcome: Outcome::Failed, count: now, note: e.to_string(), closed: false, left: Vec::new(), days: Vec::new() }
             }
         };
         if one.typed {
@@ -772,8 +780,9 @@ fn search_many<A: Act, G: Ground>(
             }
             count = one.count;
         }
-        // a search deferred whole, or the days of one split or missed: first in the next session
+        // a search deferred whole or resumed, and day searches: first in the next session
         deferred.extend(one.left);
+        held.extend(one.days);
         full |= one.outcome == Outcome::Split || (one.outcome == Outcome::Deferred && count.unwrap_or(0) > 0);
         let selected = plan.select_all.then_some(count).flatten();
         progress(&format!("screenagent: `{query}`: {}", outcome_line(one.outcome, selected, &one.note)));
@@ -1075,9 +1084,9 @@ fn select_everything<A: Act, G: Ground>(
 }
 
 /// Select everything on screen — a search's results, or an opened album: by the date groups
-/// of a date search (`dates`, the search's text) first, else (or when they select nothing) by the
-/// range gesture with its retry. `summary.selected` is the header's count after it. `Some(days)`:
-/// the date groups were walked, and [`days_outcome`] says what came of it.
+/// of a date search (`dates`) first, else (or when they select nothing) by the range gesture with
+/// its retry. `summary.selected` is the header's count after it. `Some(days)`: the date groups
+/// were walked, and [`days_outcome`] says what came of it.
 #[allow(clippy::too_many_arguments)]
 fn take_all<A: Act, G: Ground>(
     actor: &mut A,
@@ -1086,7 +1095,7 @@ fn take_all<A: Act, G: Ground>(
     summary: &mut Summary,
     cap: &mut crate::capture::Capture,
     started: Instant,
-    dates: Option<&str>,
+    dates: Option<DateWalk>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Option<Days>, ScreenError> {
     if let ByDays::Days(days) = by_day_groups(actor, grounder, plan, summary, cap, started, None, dates, progress)? {
@@ -1114,6 +1123,18 @@ const DAY_CLICKS: u32 = 3;
 /// The wait before a second look for date headings when the first page showed none.
 const DAY_LOOK_AGAIN_MS: u64 = 1500;
 
+/// A date search to walk by its day groups.
+#[derive(Debug, Clone, Copy)]
+struct DateWalk<'a> {
+    /// What was typed (the searched date).
+    typed: &'a str,
+    /// The day it resumes from ([`picker::resume_point`]): the days after it (newer) were picked
+    /// by an earlier session.
+    resume: Option<&'a str>,
+    /// The days earlier searches of this session selected.
+    earlier: &'a [String],
+}
+
 /// What selecting by date groups came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ByDays {
@@ -1129,19 +1150,25 @@ struct Days {
     /// A date heading was on the first page.
     found: bool,
     /// Headings of other dates than the searched one (Google answers a date it has nothing for
-    /// with neighbouring days), not selected.
+    /// with neighbouring days, and other years'), not selected.
     foreign: u32,
+    /// Days of a resumed search newer than its resume point: an earlier session's, not selected.
+    resumed_past: u32,
     /// The days it selected ([`picker::day_key`]), in order.
     picked: Vec<String>,
-    /// Days selected already (an earlier search of the session had them): the click lowered the
-    /// count, and one more put them back.
+    /// Days an earlier search of the session selected: the click lowered the count, and one more
+    /// put them back.
     had: Vec<String>,
-    /// Days neither their check button nor their lone tile selected.
+    /// Days no click selected (no check button where the heading is, and no lone tile), or whose
+    /// click hit another day selected already (a misplaced heading box): one more click put that
+    /// back.
     missed: Vec<String>,
-    /// Days that did not fit under the session's cap: the first, whose click took the count past
-    /// it (clicked again at once, which unselects it), then every day after it, only listed.
-    over: Vec<String>,
-    /// The count that first day took the header to.
+    /// Days whose items alone are more than the session's cap: unselected again, skipped.
+    too_big: Vec<String>,
+    /// The day that did not fit beside what was selected (clicked again at once, which unselects
+    /// it): the walk stopped there, and the search resumes from it in a next session.
+    over: Option<String>,
+    /// The count the last day past the cap took the header to.
     passed: Option<u32>,
     /// The header's count after the walk (`None`: nothing selected).
     count: Option<u32>,
@@ -1149,9 +1176,10 @@ struct Days {
 }
 
 /// Select a date search's results by their date groups ([`select_day_groups`]) — only for a date
-/// search (`dates`, its text) — on top of the `before` already selected. When no day took (no
-/// dated heading, or every click selected nothing) the grid is put back at its top for the range
-/// gesture.
+/// search (`dates`) — on top of the `before` already selected. Results that show only other dates'
+/// days are reported as they are (a range would select another search's days); when no day took
+/// otherwise (no dated heading, or every click selected nothing) the grid is put back at its top
+/// for the range gesture.
 #[allow(clippy::too_many_arguments)]
 fn by_day_groups<A: Act, G: Ground>(
     actor: &mut A,
@@ -1161,21 +1189,20 @@ fn by_day_groups<A: Act, G: Ground>(
     cap: &mut crate::capture::Capture,
     started: Instant,
     before: Option<u32>,
-    dates: Option<&str>,
+    dates: Option<DateWalk>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<ByDays, ScreenError> {
-    let Some(query) = dates.filter(|q| picker::is_date_search(q)) else { return Ok(ByDays::Range) };
-    let days = select_day_groups(actor, grounder, plan, summary, cap, started, before, query, progress)?;
+    let Some(walk) = dates.filter(|w| picker::is_date_search(w.typed)) else { return Ok(ByDays::Range) };
+    let days = select_day_groups(actor, grounder, plan, summary, cap, started, before, walk, progress)?;
     if !days.found {
         return Ok(ByDays::Range);
     }
-    let none_of_its_own = days.picked.is_empty() && days.had.is_empty() && days.over.is_empty() && days.missed.is_empty();
-    if none_of_its_own && days.foreign > 0 {
-        // a range would select another date's days, another search's to pick
-        progress(&format!("screenagent: `{query}` shows only other dates' days; nothing of its own to select"));
+    let took = !(days.picked.is_empty() && days.had.is_empty() && days.over.is_none() && days.too_big.is_empty());
+    if !took && days.missed.is_empty() && (days.foreign > 0 || days.resumed_past > 0) {
+        progress(&format!("screenagent: `{}` shows no day of its own left to select", walk.typed));
         return Ok(ByDays::Days(days));
     }
-    if days.picked.is_empty() && days.had.is_empty() && days.over.is_empty() {
+    if !took {
         progress("screenagent: the date groups selected nothing; selecting the range instead");
         if days.scrolled {
             back_to_top(actor, plan, summary, cap, started)?;
@@ -1185,22 +1212,25 @@ fn by_day_groups<A: Act, G: Ground>(
     progress(&format!(
         "screenagent: {} day(s) selected by their date groups{}; the picker shows {} selected",
         days.picked.len(),
-        if days.over.is_empty() { String::new() } else { format!(", {} that did not fit left", days.over.len()) },
+        days.over.as_deref().map(|k| format!(", stopped at {k}, which did not fit")).unwrap_or_default(),
         days.count.unwrap_or(0)
     ));
     Ok(ByDays::Days(days))
 }
 
-/// Walk a date search's day groups, paging down, and select each day of `query` once
-/// ([`picker::day_key`]: a heading still on screen after a scroll is the same day) on top of the
-/// `before` already selected: its round check button, or — a heading with none, a day of one item
-/// in compact rows — its lone tile ([`picker::lone_tile`]). The header's count is read after every
-/// click ([`click_day`]): hover alone changes the pixels, so only the count tells a click that
-/// selected nothing, a day selected already (put back), or a day past the session's cap (taken off
-/// again at once, while it is still on screen). From the first day that does not fit, the days
-/// after it are only listed, for a next session; when nothing of this search fits a session that
-/// holds something already, the walk stops there (the search waits whole for a next session). No
-/// dated heading on the first page: `found` false, nothing done.
+/// Walk a date search's day headings ([`picker::DAY_HEADINGS`]), paging down, and select each day
+/// of the searched date once ([`picker::day_key`]: a heading still on screen after a scroll is the
+/// same day) on top of the `before` already selected. A day is selected by its round check button,
+/// clicked on the heading's own row — only there: asked for check buttons instead, the model boxed
+/// tiles' selection circles under other headings and labelled them with dates (live) — at the left
+/// end of the heading's box, then just left of it ([`picker::check_points`]); a heading with no
+/// check button (a day of one item, in compact rows) by its lone tile ([`picker::lone_tile`]). The
+/// header's count is read after every click ([`click_day`]): hover alone changes the pixels, so
+/// only the count tells a click that selected nothing, a day selected already (put back: an earlier
+/// search's day, or else a misplaced box that hit another day), or a day past the session's cap
+/// (taken off again at once): a day too big alone is skipped; any other ends the walk there, to
+/// resume from in a next session. A resumed search skips the days newer than its resume point. No
+/// dated heading on the first page (looked at twice): `found` false, nothing done.
 #[allow(clippy::too_many_arguments)]
 fn select_day_groups<A: Act, G: Ground>(
     actor: &mut A,
@@ -1210,7 +1240,7 @@ fn select_day_groups<A: Act, G: Ground>(
     cap: &mut crate::capture::Capture,
     started: Instant,
     before: Option<u32>,
-    query: &str,
+    walk: DateWalk,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Days, ScreenError> {
     let cap_items = plan.max_items.clamp(1, MAX_PICK);
@@ -1220,25 +1250,25 @@ fn select_day_groups<A: Act, G: Ground>(
     let (mut still, mut look) = (0u32, true);
     'pages: for page in 0..DAY_PAGES {
         if look {
-            let mut checks = picker::day_checks(&grounder.inventory(&cap.png, picker::DAY_CHECKS)?, cap.png_w, cap.png_h);
-            if page == 0 && checks.is_empty() {
+            let mut headings = picker::day_checks(&grounder.inventory(&cap.png, picker::DAY_HEADINGS)?, cap.png_w, cap.png_h);
+            if page == 0 && headings.is_empty() {
                 // the results may still be rendering (live, a day search's heading was missed
                 // once and found on the next try): one more look before the range
                 actor.sleep(DAY_LOOK_AGAIN_MS);
                 *cap = actor.capture()?;
-                checks = picker::day_checks(&grounder.inventory(&cap.png, picker::DAY_CHECKS)?, cap.png_w, cap.png_h);
-                if checks.is_empty() {
+                headings = picker::day_checks(&grounder.inventory(&cap.png, picker::DAY_HEADINGS)?, cap.png_w, cap.png_h);
+                if headings.is_empty() {
                     return Ok(days);
                 }
             }
             days.found = true;
             // this page's tiles, grounded once a heading without a check button needs one
             let mut tiles: Option<Vec<Element>> = None;
-            for c in &checks {
+            for c in &headings {
                 let label = c.label.trim();
-                let Some(key) = picker::day_key(label, query) else {
+                let Some(key) = picker::day_key(label, walk.typed) else {
                     if !seen.iter().any(|s| s == label) {
-                        progress(&format!("screenagent: `{label}` is not a day of `{query}`; not selecting it"));
+                        progress(&format!("screenagent: `{label}` is not a day of `{}`; not selecting it", walk.typed));
                         seen.push(label.to_string());
                         days.foreign = days.foreign.saturating_add(1);
                     }
@@ -1248,21 +1278,29 @@ fn select_day_groups<A: Act, G: Ground>(
                     continue;
                 }
                 seen.push(key.clone());
-                if !days.over.is_empty() {
-                    days.over.push(key); // the session is full: listed for a next one
+                if let Some(from) = walk.resume
+                    && (key.len() < from.len() || key.as_str() > from)
+                {
+                    days.resumed_past = days.resumed_past.saturating_add(1); // an earlier session's
                     continue;
                 }
-                if spend(summary, plan)? || out_of_time() {
-                    return Err(budget(summary));
-                }
-                let mut click = click_day(actor, grounder, summary, cap, picker::check_point(c), days.count, cap_items)?;
+                let mut click = Click::Nothing;
                 let mut by_tile = false;
+                for at in picker::check_points(c) {
+                    if spend(summary, plan)? || out_of_time() {
+                        return Err(budget(summary));
+                    }
+                    click = click_day(actor, grounder, summary, cap, at, days.count, cap_items)?;
+                    if click != Click::Nothing {
+                        break;
+                    }
+                }
                 if click == Click::Nothing {
                     // no check button: a day of one item, selected by its tile
                     if tiles.is_none() {
                         tiles = Some(visible_tiles(grounder, cap, plan.videos_only, progress)?);
                     }
-                    if let Some(t) = picker::lone_tile(c, &checks, tiles.as_deref().unwrap_or_default()) {
+                    if let Some(t) = picker::lone_tile(c, &headings, tiles.as_deref().unwrap_or_default()) {
                         if spend(summary, plan)? || out_of_time() {
                             return Err(budget(summary));
                         }
@@ -1276,18 +1314,29 @@ fn select_day_groups<A: Act, G: Ground>(
                         days.picked.push(key);
                         days.count = Some(n);
                     }
-                    Click::Had => {
+                    Click::Had if walk.earlier.contains(&key) => {
                         progress(&format!("screenagent: the day `{label}` was selected already; clicked it back on"));
                         days.had.push(key);
                     }
-                    Click::Over(n) => {
+                    Click::Had => {
                         progress(&format!(
-                            "screenagent: the day `{label}` took the count to {n}, past the session's {cap_items}-item maximum (the picker refuses Done past it); unselected it again"
+                            "screenagent: the click for the day `{label}` hit another day selected already; clicked it back on, and `{label}` is left for a day search"
                         ));
+                        days.missed.push(key);
+                    }
+                    Click::Over(n) => {
                         days.passed = Some(n);
-                        days.over.push(key);
-                        if days.picked.is_empty() && before.is_some() {
-                            break 'pages; // nothing of it fits here: the whole search waits for a next session
+                        if days.count.unwrap_or(0) == 0 {
+                            progress(&format!(
+                                "screenagent: the day `{label}` alone took the count to {n}, past the session's {cap_items}-item maximum (the picker refuses Done past it); unselected it again, and going on without it"
+                            ));
+                            days.too_big.push(key);
+                        } else {
+                            progress(&format!(
+                                "screenagent: the day `{label}` took the count to {n}, past the session's {cap_items}-item maximum (the picker refuses Done past it); unselected it again, and the search resumes from it in a next session"
+                            ));
+                            days.over = Some(key);
+                            break 'pages;
                         }
                     }
                     Click::Nothing => {
@@ -1297,13 +1346,8 @@ fn select_day_groups<A: Act, G: Ground>(
                 }
             }
         }
-        // once the session is full the days after are only listed: never stopped half way
-        if days.over.is_empty() {
-            if spend(summary, plan)? || out_of_time() {
-                return Err(budget(summary));
-            }
-        } else {
-            summary.actions = summary.actions.saturating_add(1);
+        if spend(summary, plan)? || out_of_time() {
+            return Err(budget(summary));
         }
         let shown = cap.png.clone();
         actor.scroll(SCROLL_LINES)?;
@@ -1329,19 +1373,20 @@ enum Click {
     Nothing,
     /// The day is selected: the count rose to this, within the session's cap.
     Took(u32),
-    /// The day was selected already (the click lowered the count); clicked again, it is back.
+    /// The click lowered the count (it unselected something selected already); clicked again,
+    /// it is back.
     Had,
     /// The day took the count to this, past the session's cap; clicked again, it is unselected.
     Over(u32),
 }
 
 /// Click `at` — a day's check button or its lone tile — and read the header's count after it,
-/// from `before`: up within the session's cap, the day is selected; up past the cap, or down (the
-/// day was selected already: a second click unselects a day, live), the same spot is clicked again
-/// until the count is back at `before` — at most [`DAY_CLICKS`] clicks, the extra ones counted but
-/// never stopped by the budget (stopping there would leave a selection the picker refuses Done on,
-/// or one short of what was there). A header that shows no count after a selection is an error:
-/// guessing could unselect a day that took.
+/// from `before`: up within the session's cap, the day is selected; up past the cap, or down (it
+/// unselected something selected already: a second click unselects a day, live), the same spot is
+/// clicked again until the count is back at `before` — at most [`DAY_CLICKS`] clicks, the extra
+/// ones counted but never stopped by the budget (stopping there would leave a selection the picker
+/// refuses Done on, or one short of what was there). A header that shows no count after a
+/// selection is an error: guessing could unselect a day that took.
 fn click_day<A: Act, G: Ground>(
     actor: &mut A,
     grounder: &G,
@@ -1384,66 +1429,65 @@ fn click_day<A: Act, G: Ground>(
 
 /// What a walk over the day groups of search `query` (typed as `typed`) came to, on top of the
 /// `before` already selected: its outcome, a note, and the searches it leaves for a next session.
-/// Every day fit: selected (at the cap too — nothing was cut short), days that selected nothing
-/// left as day searches. A day did not fit: the days that did are kept and the others left as day
-/// searches (split); when none of it fit beside what was selected, the search waits whole
-/// (deferred); when its first day alone passes the cap, its days are left as day searches — a day
-/// search, or a day no search can name, is too big for any session.
+/// It stopped at a day that did not fit: split — the days that fit are kept and the search resumes
+/// from that day ([`picker::resume_from`]; one search per day would not do: Google's day search
+/// leaves out items its month view groups under that day, live) — or, when none of it fit beside
+/// what was selected, deferred whole. Otherwise selected (at the cap too: nothing was cut short).
+/// Days no click selected, and days too big alone, are left as day searches (a day too big alone
+/// is reported so by its own search); a search whose only days are too big is too big.
 fn days_outcome(days: &Days, query: &str, typed: &str, before: Option<u32>, cap_items: u32) -> (Outcome, String, Vec<String>) {
-    let as_searches = |keys: &[&String]| -> Vec<String> {
+    let day_searches = |keys: &[String]| -> Vec<String> {
         keys.iter().filter_map(|k| picker::day_query(k, typed)).filter(|q| !q.eq_ignore_ascii_case(typed) && !q.eq_ignore_ascii_case(query)).collect()
     };
     let b = before.unwrap_or(0);
     let now = days.count.unwrap_or(0);
-    if days.picked.is_empty() && days.had.is_empty() && days.over.is_empty() && days.missed.is_empty() && days.foreign > 0 {
-        return (Outcome::NoResults, format!("its results show only {} other date(s)' days", days.foreign), Vec::new());
+    let passed = days.passed.unwrap_or(now);
+    let took = !(days.picked.is_empty() && days.had.is_empty() && days.over.is_none() && days.too_big.is_empty());
+    if !took && days.missed.is_empty() {
+        let note = if days.resumed_past > 0 {
+            format!("its {} day(s) after its resume point were picked by an earlier session, and none is left", days.resumed_past)
+        } else {
+            format!("its results show only {} other date(s)' days", days.foreign)
+        };
+        return (Outcome::NoResults, note, Vec::new());
     }
-    let unnamed = |keys: usize, searches: usize| {
-        if searches < keys { format!(" ({} could not be named as a search)", keys - searches) } else { String::new() }
-    };
-    if !days.over.is_empty() {
-        let keys: Vec<&String> = days.over.iter().chain(&days.missed).collect();
-        let rest = as_searches(&keys);
-        let passed = days.passed.unwrap_or(now);
+    let mut rest: Vec<String> = day_searches(&days.missed);
+    rest.extend(day_searches(&days.too_big));
+    let mut also = String::new();
+    if !days.missed.is_empty() {
+        also.push_str(&format!("; {} day(s) no click selected are left as day searches", days.missed.len()));
+    }
+    if !days.too_big.is_empty() {
+        also.push_str(&format!("; {} day(s) alone more than the session's {cap_items}-item maximum are left as day searches", days.too_big.len()));
+    }
+    if let Some(from) = &days.over {
         if !days.picked.is_empty() {
             let note = format!(
-                "{} of its days fit under the session's {cap_items}-item maximum ({now} selected); the next would have taken the count to {passed}, so it and the days after it are left as {} day search(es) for a next session{}",
-                days.picked.len(),
-                rest.len(),
-                unnamed(keys.len(), rest.len())
+                "{} of its days fit under the session's {cap_items}-item maximum ({now} selected); {from} would have taken the count to {passed}, so the search resumes from it in a next session{also}",
+                days.picked.len()
             );
+            rest.insert(0, picker::resume_from(query, from));
             return (Outcome::Split, note, rest);
         }
-        if b > 0 {
-            let note = format!(
-                "its first day would have taken the count to {passed}, past the session's {cap_items}-item maximum (the picker refuses Done past it); unselected again, the search waits for a next session"
-            );
-            return (Outcome::Deferred, note, vec![query.to_string()]);
-        }
-        if rest.is_empty() {
-            return (Outcome::TooBig, too_big_note(passed, cap_items), Vec::new());
-        }
         let note = format!(
-            "its first day alone took the count to {passed}, past the session's {cap_items}-item maximum; unselected again, its days are left as {} day search(es) for next sessions{}",
-            rest.len(),
-            unnamed(keys.len(), rest.len())
+            "its first day would have taken the count to {passed}, past the session's {cap_items}-item maximum (the picker refuses Done past it); unselected again, the search waits for a next session"
         );
-        return (Outcome::Deferred, note, rest);
+        return (Outcome::Deferred, note, vec![query.to_string()]);
+    }
+    if days.picked.is_empty() && days.had.is_empty() && days.missed.is_empty() && !days.too_big.is_empty() {
+        // a day search too big, or a search whose every day is: no session holds them
+        return (Outcome::TooBig, too_big_note(passed, cap_items), Vec::new());
     }
     let (mut outcome, mut note) = outcome_of(before, days.count, cap_items);
     if outcome == Outcome::AtCap {
         (outcome, note) = (Outcome::Selected, String::new()); // every day fit
     }
-    let keys: Vec<&String> = days.missed.iter().collect();
-    let rest = as_searches(&keys);
-    if !keys.is_empty() {
-        let missed = format!(
-            "{} day(s) selected nothing when clicked (no check button, and no tile of its own); left as {} day search(es) for a next session{}",
-            keys.len(),
-            rest.len(),
-            unnamed(keys.len(), rest.len())
-        );
-        note = if note.is_empty() { missed } else { format!("{note}; {missed}") };
+    if outcome == Outcome::NothingNew && b > 0 && !days.missed.is_empty() {
+        note = "no day of it took".into();
+    }
+    let also = also.trim_start_matches("; ");
+    if !also.is_empty() {
+        note = if note.is_empty() { also.to_string() } else { format!("{note}; {also}") };
     }
     (outcome, note, rest)
 }
@@ -2674,7 +2718,7 @@ mod tests {
         let w = world();
         let eyes = Eyes::new(&w, &["5 selected"]);
         drive(&mut Hands(Rc::clone(&w)), &eyes, &range_plan(), &mut |_| {}).unwrap();
-        assert!(!eyes.asks.borrow().iter().any(|a| a == crate::picker::DAY_CHECKS));
+        assert!(!eyes.asks.borrow().iter().any(|a| a == crate::picker::DAY_HEADINGS));
         assert_eq!(w.borrow().shift_clicks.len(), 1, "the range gesture");
     }
 
@@ -2753,8 +2797,12 @@ mod tests {
         dones: u32,
         url: Option<String>,
         tabs_closed: u32,
-        /// Headings the eyes box over their date text instead of their check button.
+        /// Headings the eyes box from their date's text (the check button left of the box).
+        text_start: Vec<&'static str>,
+        /// Headings the eyes box too far right, off the check button and its spot beside the box.
         off_check: Vec<&'static str>,
+        /// (heading, other heading): the first is boxed on the second's row (when it is in view).
+        misplaced: Vec<(&'static str, &'static str)>,
         /// (heading, sighting from 0) the eyes do not box.
         blind: Vec<(&'static str, usize)>,
         sightings: std::collections::HashMap<&'static str, usize>,
@@ -2887,9 +2935,8 @@ mod tests {
         }
     }
 
-    /// Eyes on [`Dated`] that box headings as qwen2.5vl does: over the check button, labelled with
-    /// the date — never saying whether it is filled in — and over the date text for a day of one
-    /// item (it has no check button).
+    /// Eyes on [`Dated`] that box date headings as qwen2.5vl does: from the check button, or from
+    /// the date's text (always, for a day of one item: it has no check button), on the heading's row.
     struct DatedEyes(Rc<RefCell<Dated>>);
 
     impl Ground for DatedEyes {
@@ -2902,18 +2949,31 @@ mod tests {
                 return Ok(if n == 0 || w.done { vec![] } else { vec![el(&format!("{n} selected"), 5, 2, 60, 12)] });
             }
             let mut out = Vec::new();
-            for (d, y) in w.rows() {
+            let rows = w.rows();
+            for &(d, y) in &rows {
                 let (label, items) = w.days[d];
-                if task == crate::picker::DAY_CHECKS {
+                if task == crate::picker::DAY_HEADINGS {
                     let seen = w.sightings.entry(label).or_default();
                     let nth = *seen;
                     *seen += 1;
                     if w.blind.contains(&(label, nth)) {
                         continue;
                     }
-                    let mut check = if items == 1 || w.off_check.contains(&label) { el(label, 20, y, 64, y + 10) } else { el(label, 4, y, 14, y + 10) };
-                    check.kind = "check".into();
-                    out.push(check);
+                    let y = match w.misplaced.iter().find(|(l, _)| *l == label) {
+                        Some((_, other)) => match rows.iter().find(|(o, _)| w.days[*o].0 == *other) {
+                            Some(&(_, oy)) => oy,
+                            None => continue,
+                        },
+                        None => y,
+                    };
+                    let x1 = if w.off_check.contains(&label) {
+                        40
+                    } else if items == 1 || w.text_start.contains(&label) {
+                        20
+                    } else {
+                        4
+                    };
+                    out.push(el(label, x1, y + 1, x1 + 44, y + 9));
                 } else {
                     for i in 0..items.min(ROW_TILES) {
                         let x = 20 + 26 * i;
@@ -2984,7 +3044,8 @@ mod tests {
         assert_eq!(w.selected.len(), 24, "{lines:#?}");
         assert!(w.done && w.dones == 1 && s.done_pressed && s.selected == 24, "{s:?}");
         assert_eq!(outcomes(&s), [(Outcome::Selected, Some(4)), (Outcome::Split, Some(24))]);
-        assert_eq!(s.left, ["videos November 26 2022", "videos November 25 2022"], "{s:?}");
+        // the month resumes from Nov 26 in the next session, which skips the days picked here
+        assert_eq!(s.left, ["videos November 2022 from 2022-11-26"], "{s:?}");
         assert!(s.retry().is_empty() && s.too_big().is_empty(), "{s:?}");
         assert!(lines.iter().any(|l| l.contains("selected the day `Mon, Nov 28, 2022` by its one tile")), "{lines:#?}");
     }
@@ -3033,7 +3094,7 @@ mod tests {
         let s = s.unwrap();
         assert_eq!(outcomes(&s), [(Outcome::Split, Some(6))], "{lines:#?}");
         // October's one item would still fit, but the session is full where the split happened
-        assert_eq!(s.left, ["videos November 29 2022", "videos October 2022", "videos September 2022"]);
+        assert_eq!(s.left, ["videos November 2022 from 2022-11-29", "videos October 2022", "videos September 2022"]);
         assert!(s.done_pressed && w.borrow().done && s.selected == 6, "{s:?}");
         assert!(s.note.contains("1 split into day searches"), "{}", s.note);
     }
@@ -3085,23 +3146,24 @@ mod tests {
     }
 
     #[test]
-    fn a_search_whose_first_day_alone_passes_the_cap_is_left_day_by_day() {
+    fn a_day_alone_past_the_cap_is_skipped_and_the_walk_goes_on() {
         let days = [("Fri, Oct 14, 2022", 30), ("Thu, Oct 13, 2022", 5), ("Wed, Oct 12, 2022", 1)];
         let finds: [(&str, &[usize]); 2] = [("videos October 2022", &[0, 1, 2]), ("videos October 14 2022", &[0])];
-        // a lone month: nothing selected, no Done, its days for next sessions
+        // a month: its 30-item day fits no session; the others are picked, and that day is left as
+        // its own search, which reports it too big
         let w = Dated::new(&days, &finds, 25);
         let (s, lines) = drive_dated(&w, &one_search("videos October 2022", 25));
         let s = s.unwrap();
-        assert_eq!(outcomes(&s), [(Outcome::Deferred, Some(0))], "{lines:#?}");
-        assert_eq!(s.left, ["videos October 14 2022", "videos October 13 2022", "videos October 12 2022"]);
-        assert!(!s.done_pressed && s.stop_waiting(Duration::ZERO) && w.borrow().dones == 0, "{s:?}");
-        assert!(w.borrow().selected.is_empty());
+        assert_eq!(outcomes(&s), [(Outcome::Selected, Some(6))], "{lines:#?}");
+        assert_eq!(s.left, ["videos October 14 2022"]);
+        assert_eq!((w.borrow().of_day(0), w.borrow().selected.len()), (0, 6));
+        assert!(s.done_pressed && w.borrow().done, "{s:?}");
         // that day alone: no session holds it
         let w = Dated::new(&days, &finds, 25);
         let (s, _) = drive_dated(&w, &one_search("videos October 14 2022", 25));
         let s = s.unwrap();
         assert_eq!(outcomes(&s), [(Outcome::TooBig, Some(0))]);
-        assert!(s.left.is_empty() && !s.done_pressed && w.borrow().selected.is_empty(), "{s:?}");
+        assert!(s.left.is_empty() && !s.done_pressed && w.borrow().selected.is_empty() && s.stop_waiting(Duration::ZERO), "{s:?}");
         assert!(s.note.contains("more than the session's 25-item maximum"), "{}", s.note);
         // ...and in a session of many, the next search goes on
         let w = Dated::new(&[("Fri, Oct 14, 2022", 30), ("Thu, Oct 13, 2022", 5)], &[("videos October 14 2022", &[0]), ("videos October 13 2022", &[1])], 25);
@@ -3110,6 +3172,53 @@ mod tests {
         assert_eq!(outcomes(&s), [(Outcome::TooBig, None), (Outcome::Selected, Some(5))]);
         assert_eq!(s.too_big(), ["videos October 14 2022"]);
         assert!(s.left.is_empty() && s.retry().is_empty() && s.done_pressed && s.selected == 5, "{s:?}");
+    }
+
+    #[test]
+    fn a_resumed_search_skips_the_days_an_earlier_session_picked() {
+        let days = [("Wed, Nov 30, 2022", 6), ("Tue, Nov 29, 2022", 9), ("Sat, Nov 26, 2022", 7), ("Fri, Nov 25, 2022", 5)];
+        let w = Dated::new(&days, &[("videos November 2022", &[0, 1, 2, 3])], 40);
+        let (s, lines) = drive_dated(&w, &one_search("videos November 2022 from 2022-11-26", 40));
+        let s = s.unwrap();
+        assert_eq!(w.borrow().typed, ["videos November 2022"], "the resume point is not typed");
+        assert_eq!((w.borrow().of_day(0), w.borrow().of_day(1), w.borrow().selected.len()), (0, 0, 12), "{lines:#?}");
+        assert_eq!(outcomes(&s), [(Outcome::Selected, Some(12))]);
+        assert!(s.left.is_empty() && s.done_pressed, "{s:?}");
+        // resumed again where it stops again
+        let w = Dated::new(&days, &[("videos November 2022", &[0, 1, 2, 3])], 10);
+        let (s, _) = drive_dated(&w, &one_search("videos November 2022 from 2022-11-26", 10));
+        let s = s.unwrap();
+        assert_eq!(outcomes(&s), [(Outcome::Split, Some(7))]);
+        assert_eq!(s.left, ["videos November 2022 from 2022-11-25"]);
+        // nothing left after the resume point: no results, nothing to confirm
+        let w = Dated::new(&days[..2], &[("videos November 2022", &[0, 1])], 40);
+        let (s, _) = drive_dated(&w, &one_search("videos November 2022 from 2022-11-26", 40));
+        let s = s.unwrap();
+        assert_eq!(outcomes(&s), [(Outcome::NoResults, Some(0))]);
+        assert!(!s.done_pressed && w.borrow().selected.is_empty() && w.borrow().shift_clicks == 0, "{s:?}");
+    }
+
+    #[test]
+    fn a_heading_boxed_from_its_text_is_selected_by_the_button_left_of_it() {
+        let w = Dated::new(&[("Mon, Oct 24, 2022", 7), ("Sat, Oct 22, 2022", 8)], &[("videos October 2022", &[0, 1])], 2000);
+        w.borrow_mut().text_start = vec!["Mon, Oct 24, 2022", "Sat, Oct 22, 2022"];
+        let (s, lines) = drive_dated(&w, &one_search("videos October 2022", MAX_PICK));
+        let s = s.unwrap();
+        assert_eq!((w.borrow().selected.len(), s.selected), (15, 15), "{lines:#?}");
+        assert!(s.left.is_empty() && s.done_pressed, "{s:?}");
+    }
+
+    #[test]
+    fn a_click_that_hits_another_selected_day_is_put_back_and_its_day_left() {
+        // live: the box labelled Oct 18 sat on a row of Oct 22, which was selected: the click
+        // unselected Oct 22 and was taken for Oct 18 being selected already
+        let w = Dated::new(&[("Mon, Oct 24, 2022", 2), ("Sat, Oct 22, 2022", 3), ("Tue, Oct 18, 2022", 2)], &[("videos October 2022", &[0, 1, 2])], 2000);
+        w.borrow_mut().misplaced = vec![("Tue, Oct 18, 2022", "Sat, Oct 22, 2022")];
+        let (s, lines) = drive_dated(&w, &one_search("videos October 2022", MAX_PICK));
+        let s = s.unwrap();
+        assert_eq!((w.borrow().of_day(1), w.borrow().of_day(2), s.selected), (3, 0, 5), "Oct 22 put back: {lines:#?}");
+        assert_eq!(s.left, ["videos October 18 2022"]);
+        assert!(lines.iter().any(|l| l.contains("hit another day selected already")), "{lines:#?}");
     }
 
     #[test]
@@ -3125,7 +3234,7 @@ mod tests {
         assert_eq!((w.borrow().of_day(1), s.selected), (2, 2));
         assert_eq!(outcomes(&s), [(Outcome::Selected, Some(2))]);
         assert_eq!(s.left, ["videos October 14 2022"]);
-        assert!(s.searches[0].note.contains("1 day(s) selected nothing"), "{:?}", s.searches[0]);
+        assert!(s.searches[0].note.contains("1 day(s) no click selected"), "{:?}", s.searches[0]);
     }
 
     #[test]
@@ -3161,7 +3270,7 @@ mod tests {
         let w = world();
         let eyes = Eyes::new(&w, &["3 selected"]);
         let s = drive(&mut Hands(Rc::clone(&w)), &eyes, &one_search("videos October 18 2022", MAX_PICK), &mut |_| {}).unwrap();
-        assert_eq!(eyes.asks.borrow().iter().filter(|a| *a == crate::picker::DAY_CHECKS).count(), 2);
+        assert_eq!(eyes.asks.borrow().iter().filter(|a| *a == crate::picker::DAY_HEADINGS).count(), 2);
         assert_eq!((w.borrow().shift_clicks.len(), s.selected), (1, 3), "then the range: {s:?}");
     }
 

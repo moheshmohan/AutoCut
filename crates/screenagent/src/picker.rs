@@ -257,11 +257,15 @@ pub fn leave_button(elements: &[Element], w: u32, h: u32) -> Option<&Element> {
 }
 
 /// The inventory ask for the date groups of a search result: Google's picker heads each day's
-/// items with its date and a round check button that selects that whole day — except a day of
-/// one item, which in a search result's compact rows shows no check button at all, not even on
-/// hover (live, Chrome 155); the model then boxes the heading's text. It is not asked whether a
-/// check is filled in: it never said so (live), and the header's count tells instead.
-pub const DAY_CHECKS: &str = "Locate the round check button just left of each date heading (a date such as 'Thu, Oct 13, 2022' or 'October 13, 2022' written above a group of photos). Give one box per date heading, around its round check button, and use the date heading's text exactly as written as the label. Do not include the check marks on individual photos.";
+/// items with its date and a round check button left of it that selects that whole day — except a
+/// day of one item, which in a search result's compact rows shows no check button at all, not even
+/// on hover (live, Chrome 155). The headings are asked for, not the buttons: asked for "the round
+/// check button left of each date heading", qwen2.5vl boxed the selection circles of tiles under
+/// other headings and labelled them with those dates (live), so a click selected one tile or
+/// unselected another day; asked for headings, it boxes each on its own row with its own date —
+/// from the check button, or from the date's text. Nor is it asked whether a check is filled in:
+/// it never said so (live), and the header's count tells instead.
+pub const DAY_HEADINGS: &str = "Locate every date heading on this screen: a date such as 'Thu, Oct 13, 2022' or 'October 13, 2022' written above a group of photos, with or without a round check button beside it. Give one box per date heading, around its text, and use the date heading's text exactly as written as the label.";
 
 const MONTH_NAMES: [&str; 12] = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 
@@ -365,8 +369,9 @@ pub fn day_query(key: &str, query: &str) -> Option<String> {
 /// The tile to select a day by when its heading has no check button — a day of one item, in a
 /// search result's compact rows (live: not even on hover): the tile just below the heading that
 /// starts about where the heading starts. Only when no other tile follows it on its row before the
-/// next heading there (`headings`, the page's date headings): a click on one tile of a bigger day
-/// would select part of it and pass for the whole. `None` then, or when no tile is there.
+/// next heading there (`headings`, the page's date headings), and none before it reaches under the
+/// heading's start (the box may sit right of where its day starts): a click on one tile of a bigger
+/// day would select part of it and pass for the whole. `None` then, or when no tile is there.
 pub fn lone_tile(heading: &Element, headings: &[Element], tiles: &[Element]) -> Option<Element> {
     let hh = heading.y2.saturating_sub(heading.y1);
     let (_, hy) = heading.center();
@@ -386,7 +391,13 @@ pub fn lone_tile(heading: &Element, headings: &[Element], tiles: &[Element]) -> 
     let more = tiles
         .iter()
         .any(|t| t != tile && t.center().1.abs_diff(ty) < (th / 2).max(1) && t.x1 >= tile.x1.saturating_add(tw / 2) && t.x1.saturating_add(tw / 4) < end);
-    (!more).then(|| tile.clone())
+    // a tile just before it on its row (tiles of one day sit a few pixels apart, days further) or
+    // reaching under the heading's start is of the same day
+    let behind = tiles.iter().any(|t| {
+        let reach = t.x2.saturating_add(hh) > tile.x1 || t.x2 > heading.x1.saturating_sub(hh);
+        t != tile && t.center().1.abs_diff(ty) < (th / 2).max(1) && t.x1 < tile.x1 && reach
+    });
+    (!more && !behind).then(|| tile.clone())
 }
 
 /// The date-group checks worth clicking in a `w`×`h` capture, in reading order: labelled with
@@ -419,6 +430,30 @@ pub fn check_point(e: &Element) -> (u32, u32) {
     let (w, h) = (e.x2.saturating_sub(e.x1), e.y2.saturating_sub(e.y1));
     let (cx, cy) = e.center();
     if w > h.saturating_mul(2) { (e.x1.saturating_add(h / 2), cy) } else { (cx, cy) }
+}
+
+/// Where a heading's check button may be, in the order to try, both on the heading's own row: the
+/// left end of its box ([`check_point`]: the model boxed the heading from the button), then just
+/// left of the box (it boxed the date's text, and the button sits left of it — live, both).
+pub fn check_points(e: &Element) -> [(u32, u32); 2] {
+    let h = e.y2.saturating_sub(e.y1).max(1);
+    let (x, y) = check_point(e);
+    [(x, y), (e.x1.saturating_sub(h), y)]
+}
+
+/// A resumed date search: its search and the day it resumes from — `"videos October 2022 from
+/// 2022-10-29"` is `("videos October 2022", Some("2022-10-29"))` — the days after that one (newer)
+/// were picked by an earlier session. Anything else is the search as it is.
+pub fn resume_point(query: &str) -> (&str, Option<&str>) {
+    match query.rsplit_once(" from ") {
+        Some((base, key)) if day_query(key.trim(), "").is_some() && !base.trim().is_empty() => (base.trim_end(), Some(key.trim())),
+        _ => (query, None),
+    }
+}
+
+/// The search that resumes `query` from the day `key` (`"2022-10-29"`) — see [`resume_point`].
+pub fn resume_from(query: &str, key: &str) -> String {
+    format!("{} from {key}", resume_point(query).0)
 }
 
 /// Where to click a grounded tile: its left third (at most [`MAX_CLICK_INSET`] in),
@@ -731,23 +766,27 @@ mod tests {
     #[test]
     fn a_day_without_a_check_is_selected_by_its_one_tile() {
         let t = |x1: u32, y1: u32| el("0:12", "", x1, y1, x1 + 100, y1 + 100);
-        // compact rows: Oct 14 (two tiles), Oct 13 (one, no check button: its text boxed), Oct 12
+        // compact rows (live: a day's tiles a few pixels apart, days further): Oct 14 (two tiles),
+        // Oct 13 (one, no check button: its text boxed), Oct 12 (two)
         let oct14 = el("Fri, Oct 14, 2022", "", 10, 100, 30, 120);
-        let oct13 = el("Thu, Oct 13, 2022", "", 230, 100, 330, 120);
-        let oct12 = el("Wed, Oct 12, 2022", "", 340, 100, 360, 120);
+        let oct13 = el("Thu, Oct 13, 2022", "", 250, 100, 350, 120);
+        let oct12 = el("Wed, Oct 12, 2022", "", 390, 100, 410, 120);
         let headings = [oct14.clone(), oct13.clone(), oct12.clone()];
-        let tiles = [t(10, 128), t(120, 128), t(230, 128), t(340, 128), t(450, 128), t(10, 240)];
-        assert_eq!(lone_tile(&oct13, &headings, &tiles), Some(t(230, 128)));
+        let tiles = [t(10, 128), t(114, 128), t(250, 128), t(390, 128), t(494, 128), t(10, 240)];
+        assert_eq!(lone_tile(&oct13, &headings, &tiles), Some(t(250, 128)));
         // a day with more tiles on its row: a click on one would select part of it
         assert_eq!(lone_tile(&oct14, &headings, &tiles), None);
         assert_eq!(lone_tile(&oct12, &headings, &tiles), None);
         // without the next heading, a tile after it may be its own: not lone either
         assert_eq!(lone_tile(&oct13, std::slice::from_ref(&oct13), &tiles), None);
         // the last day of a row
-        assert_eq!(lone_tile(&oct13, &headings, &tiles[..3]), Some(t(230, 128)));
+        assert_eq!(lone_tile(&oct13, &headings, &tiles[..3]), Some(t(250, 128)));
+        // a box right of where its day starts: the tile under it is that day's second
+        let off = el("Thu, Oct 13, 2022", "", 150, 100, 250, 120);
+        assert_eq!(lone_tile(&off, &[oct14.clone(), off.clone()], &tiles[..2]), None);
         // no tile right below, or none starting where the heading starts
-        assert_eq!(lone_tile(&oct13, &headings, &[t(230, 400)]), None);
-        assert_eq!(lone_tile(&oct13, &headings, &[t(300, 128)]), None);
+        assert_eq!(lone_tile(&oct13, &headings, &[t(250, 400)]), None);
+        assert_eq!(lone_tile(&oct13, &headings, &[t(320, 128)]), None);
         assert_eq!(lone_tile(&oct13, &headings, &[]), None);
         // degenerate boxes don't panic
         assert_eq!(lone_tile(&el("", "", 5, 5, 5, 5), &[], &[el("", "", 5, 5, 5, 5)]), Some(el("", "", 5, 5, 5, 5)));

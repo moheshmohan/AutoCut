@@ -72,26 +72,36 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
   - **Date groups**: for a date search ("videos October 13 2022", "videos October 2022")
     select-all walks the date headings, paging down, and selects each day of the searched date
     once (`picker::day_key`: a heading still on screen after a scroll is the same day, read with
-    or without its year; a neighbouring day Google's search shows too is another search's) by the
-    round check button left of its heading. The header's "N selected" is read after every click —
-    one more model call per day, the price of an exact count: hover alone changes the pixels, so
-    only the count tells what a click did. A click that selected nothing is a day of one item,
-    which in compact rows has no check button at all (live, not even on hover): it is selected by
-    its tile (`picker::lone_tile`, only when no other tile follows it on its row — one tile of a
-    bigger day would pass for the whole), else left as a day search. A click that lowered the
-    count found a day selected already (the model never says a check is filled in) and clicks it
-    back on. A click that took the count past the cap is clicked again at once, which unselects
-    the day while it is still on screen — no walk back over the days — and that day and the days
-    after it (only listed) are left as day searches (`videos October 13 2022`) for a next
-    session: the search is `Split`, and the session holds no more searches. When none of a search
-    fits beside what is selected it waits whole (`Deferred`, and the session ends there too); a
-    date search whose days took nothing gets the range only when the range guess has room, else
-    it waits the same way. When its first day alone passes the
-    cap its days are left as day searches, and a day search alone past the cap is `TooBig`
-    (`Summary::too_big`). A date search whose results show only other dates' days (Google
-    answers a day it has nothing for with neighbouring ones, live) has no results. A first page
-    with no date heading is looked at once more (results still rendering), and when no day took
-    at all it falls back to the range gesture from the top.
+    or without its year; a neighbouring day or another year's that Google's search shows too is
+    another search's) by the round check button left of its heading. The model is asked for the
+    headings (`picker::DAY_HEADINGS`), not the buttons: asked for check buttons it boxed tiles'
+    selection circles under other headings and labelled them with dates (live), so a click
+    selected one tile or unselected another day. The button is clicked on the heading's own row
+    only — at the left end of its box, then just left of it (`picker::check_points`: the box
+    starts at the button or at the date's text, live, both). The header's "N selected" is read
+    after every click — one more model call per click, the price of an exact count: hover alone
+    changes the pixels, so only the count tells what a click did. A click that selected nothing
+    is a day of one item, which in compact rows has no check button at all (live, not even on
+    hover): it is selected by its tile (`picker::lone_tile`, only when no other tile of a bigger
+    day sits beside it on its row — one tile would pass for the whole day), else left as a day
+    search. A click that lowered the count unselected something selected already and is clicked
+    back on: a day an earlier search of the session selected (the model never says a check is
+    filled in), or else another day under a misplaced box (live) — that day is then left as a
+    day search. A click that took the count past the cap is clicked again at once, which
+    unselects the day while it is still on screen — no walk back over the days. A day too big
+    for any session alone is skipped (and left as its own search, which reports it `TooBig`);
+    any other ends the walk: the search is `Split`, the days before are kept, and it resumes
+    from that day in a next session (`videos October 2022 from 2022-10-29`,
+    `picker::resume_point`; typed without the resume point, the walk skips the days after it),
+    and the session holds no more searches. One search per day would not do: Google's day
+    search leaves out items its month view groups under that day (live: four clips just after
+    midnight) and shows other years' days. When none of a search fits beside what is selected it
+    waits whole (`Deferred`, and the session ends there too); a date search whose days took
+    nothing gets the range only when the range guess has room, else it waits the same way. A
+    date search whose results show only other dates' days (Google answers a day it has nothing
+    for with neighbouring ones, live), or nothing after its resume point, has no results. A first
+    page with no date heading is looked at once more (results still rendering), and when no day
+    took at all it falls back to the range gesture from the top.
   - **Closing the tab**: when it begins, `drive` names the picker tab in front by its window
     and tab id (Chrome); when it finishes — after Done, or giving up — it closes *that* tab by
     those ids (`tabs::close_driven_picker`), only while its address is still the picker, closing
@@ -201,7 +211,8 @@ No model weights are committed to this repository or shipped with any binary.
   after each day tells); a range is not: the agent sees the count fall and hands those searches
   back for another session. Avoid overlapping searches in one list.
 - The count is only as exact as the model's reading of "N selected": a misread can still take
-  one day for another outcome. A day the model never boxes as a heading is not selected.
+  one day for another outcome. A day the model never boxes as a heading is not selected, and a
+  day left as a day search inherits that search's limits (items near midnight can be missing).
 - It moves the real pointer while it works; leave the mouse alone for the minute or two
   it runs.
 - It drives whatever app is frontmost after the picker opens — the caller opens the picker
@@ -218,12 +229,14 @@ attempts, coordinate math, and the agent loop against scripted fake eyes/hands (
 termination, in-bounds guarantees), many-search sessions (cumulative counts, skipped empty
 searches, the cap and the budget leaving searches for a next session, a count that falls),
 date-group selection against a fake picker with date groups (a day of one item without a check
-button, a day selected already, a session filled to its cap and the rest left as day searches,
-a search deferred whole or too big, a check the model boxed off its button, a neighbouring
-month's day, the range fallback), and the picker tabs against a fake Chrome (only picker
+button, a heading boxed from its text, a day selected already, a misplaced box that hits another
+day, a session filled to its cap and the search resumed from the day that did not fit, a
+resumed search, a search deferred whole, a day too big alone, a neighbouring month's day, the
+range fallback), and the picker tabs against a fake Chrome (only picker
 tabs closed, a tab that asks "Leave site?" closed once more, Leave clicked and nothing else). A live model
 round-trip can be run with
 `AUTOCUT_SCREEN_LIVE=1`, and a saved window capture can be replayed through the real
 grounding path with `AUTOCUT_SCREEN_LIVE_PNG=/path/to/capture.png cargo test -p
-filmcraft-screenagent live_inventory -- --nocapture` (prints what the agent would click).
+filmcraft-screenagent live_inventory -- --nocapture` (prints what the agent would click; with
+`AUTOCUT_SCREEN_LIVE_TASK=day_headings`, the date headings it grounds).
 `AUTOCUT_SCREENAGENT_TRACE=1` logs every OS invocation to `/tmp/screenagent-cmds.log`.

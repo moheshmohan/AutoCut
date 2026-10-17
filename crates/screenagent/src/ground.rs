@@ -421,6 +421,17 @@ mod tests {
         let (w, h) = png_dims(&raw).unwrap();
         let cap = crate::capture::decode_and_scale(raw, crate::capture::WindowRect { x: 0, y: 0, w: w / 2, h: h / 2 }).unwrap();
         let g = QwenGrounder::from_config(&crate::Config::from_env());
+        // AUTOCUT_SCREEN_LIVE_TASK=day_headings: list the date headings it grounds instead
+        let task = match std::env::var("AUTOCUT_SCREEN_LIVE_TASK").as_deref() {
+            Ok("day_headings") => Some(crate::picker::DAY_HEADINGS),
+            _ => None,
+        };
+        if let Some(task) = task {
+            for e in g.inventory(&cap.png, task).unwrap() {
+                eprintln!("  {:?} kind {:?} box ({},{})-({},{}) key {:?}", e.label, e.kind, e.x1, e.y1, e.x2, e.y2, crate::picker::date_key(&e.label));
+            }
+            return;
+        }
         let els = g.inventory(&cap.png, crate::picker::VIDEO_TILES).unwrap();
         eprintln!("{} element(s); failed enumeration: {}", els.len(), crate::picker::enumeration_failed(&els, cap.png_w, cap.png_h));
         let tiles = crate::picker::tile_candidates(&els, true, cap.png_w, cap.png_h);
