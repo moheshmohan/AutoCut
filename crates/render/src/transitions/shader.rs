@@ -8,12 +8,19 @@
 //!   only; licence text in `shader/LICENSE-gl-transitions.txt`). The host prelude
 //!   (`shader/prelude.wgsl`) supplies the bindings, `progress`, `ratio`, the clamped bilinear
 //!   `getFromColor` / `getToColor` and the GLSL helpers WGSL lacks (`glsl_mod`, an
-//!   order-independent `smooth_step`, `atan2_safe`, an integer `hash`).
-//! - [`cpu`]: the same function in Rust, operation for operation: the reference export renders
-//!   and the GPU is tested against.
+//!   order-independent `smooth_step`, `atan2_safe`, an integer `hash` and its per-pixel,
+//!   per-cell, per-column and per-row forms, `in_bounds`).
+//! - [`cpu`]: the same function in Rust, operation for operation: the reference the GPU is tested
+//!   against, and what renders the transition when no GPU (or no working pipeline) is there.
+//!   Preview and export both draw with the GPU stage when they can (`filmcraft-gpu`), so they
+//!   show the same picture.
 //! - A parameter packer turning the catalogue's parameters
 //!   ([`filmcraft_project::gltransition`]) into the 12 shader floats, clamping hostile values to
-//!   the catalogue's ranges.
+//!   the catalogue's ranges (a shader needing more would extend `Host` with another vec4).
+//!
+//! Shaders that need inputs the stage does not give yet stay out: `displacement` and `luma` (an
+//! extra grayscale texture: a third binding and an asset or a procedural map), and the BSD-licensed
+//! `InvertedPageCurl` and `StereoViewer` (MIT only).
 //!
 //! **The host owns time.** [`eased_progress`] applies the transition's easing (Penner curves or a
 //! cubic Bézier, [`super::easing`]) to the progress the timeline computed at the exact frame
@@ -24,6 +31,13 @@
 //! errors instead of panicking; the GPU stage (`filmcraft-gpu`) only compiles sources the
 //! registry accepted, and renders a shader that fails anyway on the CPU.
 //!
+//! **Exact pixel positions.** A pixel's uv is its centre times 1 / width and 1 / height, rounded
+//! once on the CPU and passed in the uniforms (`Host::inv`): one correctly rounded
+//! multiplication, so the reference and every GPU see the same uv (a GPU division may be
+//! approximate). GPU compilers may still reassociate arithmetic, so a hard edge that a pixel
+//! centre can sit on exactly (uv.x = 0.5 on an odd width, the edge between two cells) gets a
+//! small bias in both versions (see BookFlip, windowslice, pixelize).
+//!
 //! **Porting another transition.**
 //! 1. Read the upstream file's own `// License:` header: port MIT only (no header means the
 //!    repository's MIT licence; anything else stays out).
@@ -31,11 +45,18 @@
 //!    translate: `vec2`→`vec2<f32>`, `float(x)`→`f32(x)`, explicit `.0` literals, `atan(y, x)`→
 //!    `atan2_safe`, `mod`→`glsl_mod`, `smoothstep`→`smooth_step`, `mix(a, b, t)` with a vector `t`,
 //!    ternaries→`select(f, t, cond)` (both sides are evaluated), `fract(sin(…) * 43758.5453)`→
-//!    `rand_pixel` / `rand_cell`, uniforms→`host.p0..p2` (vec4 slots: no vec3 padding to worry
-//!    about). Sampling is `textureLoad`-based, so it may sit in non-uniform control flow (no
+//!    `rand_pixel` / `rand_cell` (or `rand_column` / `rand_row` for `rand(vec2(uv.x, k))`, the
+//!    `_seeded` forms for a seed parameter: never a `sin`-based hash, whose value depends on the
+//!    GPU's precision), uniforms→`host.p0..p2` (vec4 slots: no vec3 padding to worry about).
+//!    `smoothstep(a, b, x)` with `b < a` (undefined in GLSL, a falling curve on real GPUs)→
+//!    `1.0 - smooth_step(b, a, x)`. Rename identifiers WGSL reserves (`from`, `mod`, …).
+//!    Sampling is `textureLoad`-based, so it may sit in non-uniform control flow (no
 //!    `textureSample`, whose derivatives need uniform flow). Float→int: `i32()` truncates as in
 //!    GLSL. Where a `floor` decides a cell, bias it by 0.001 cell so ties fall the same way on
-//!    the CPU and every GPU (see pixelize, Mosaic).
+//!    the CPU and every GPU (see pixelize, Mosaic). Upstream's opaque-canvas habits (an alpha
+//!    above 1 that an 8-bit target clamps) are clamped to 1; constants such as `sqrt(3.0) / 3.0`
+//!    are written out, so both versions round them alike; a `cos` / `sin` far from zero on a
+//!    fixed set of angles becomes a table (FilmBurn).
 //! 3. Write the Rust reference in [`cpu`] operation for operation (same order, `mix` as
 //!    `a·(1−t)+b·t`), add a [`ShaderDef`] here and its parameters (upstream names, units and
 //!    defaults) in `filmcraft_project::gltransition`, a `<file>.attribution` sidecar and an
@@ -59,8 +80,9 @@ use cpu::{Ctx, V2};
 
 /// Number of shader parameter floats (`host.p0`..`host.p2`).
 pub const PARAMS: usize = 12;
-/// Uniform floats: width, height, eased progress, ratio, then the parameters (64 bytes).
-pub const UNIFORM_FLOATS: usize = 4 + PARAMS;
+/// Uniform floats: width, height, eased progress, ratio, the parameters, then 1 / width,
+/// 1 / height and two zeros (80 bytes).
+pub const UNIFORM_FLOATS: usize = 4 + PARAMS + 4;
 
 /// The host prelude every shader body is appended to.
 pub const PRELUDE: &str = include_str!("shader/prelude.wgsl");
@@ -105,19 +127,75 @@ const fn def(
     ShaderDef { id, upstream, author, license: "MIT", body, params, cpu }
 }
 
-/// Every ported transition.
+/// Every ported transition, sorted by id.
 static SHADERS: &[ShaderDef] = &[
     def("gl_angular", "angular", "Fernando Kuteken", include_str!("shader/angular.wgsl"), |p| pack(&[p.num("starting_angle")]), cpu::angular),
+    def("gl_bookflip", "BookFlip", "hong", include_str!("shader/BookFlip.wgsl"), |_| [0.0; PARAMS], cpu::book_flip),
     def(
-        "gl_circleopen",
-        "circleopen",
+        "gl_bounce",
+        "Bounce",
+        "Adrian Purser",
+        include_str!("shader/Bounce.wgsl"),
+        |p| {
+            let c = p.color("shadow_colour");
+            pack(&[c[0], c[1], c[2], p.num("shadow_alpha"), p.num("shadow_height").max(0.01), p.num("bounces")])
+        },
+        cpu::bounce,
+    ),
+    def(
+        "gl_burn",
+        "burn",
         "gre",
-        include_str!("shader/circleopen.wgsl"),
-        |p| pack(&[p.num("smoothness"), if p.flag("opening") { 1.0 } else { 0.0 }]),
-        cpu::circle_open,
+        include_str!("shader/burn.wgsl"),
+        |p| {
+            let c = p.color("color");
+            pack(&[c[0], c[1], c[2]])
+        },
+        cpu::burn,
+    ),
+    def(
+        "gl_butterflywavescrawler",
+        "ButterflyWaveScrawler",
+        "mandubian",
+        include_str!("shader/ButterflyWaveScrawler.wgsl"),
+        |p| pack(&[p.num("amplitude"), p.num("waves"), p.num("color_separation")]),
+        cpu::butterfly_wave_scrawler,
+    ),
+    def("gl_chessboard", "chessboard", "lql", include_str!("shader/chessboard.wgsl"), |p| pack(&[p.num("grid_num").max(1.0)]), cpu::chessboard),
+    def("gl_circleopen", "circleopen", "gre", include_str!("shader/circleopen.wgsl"), |p| pack(&[p.num("smoothness"), p.bit("opening")]), cpu::circle_open),
+    def(
+        "gl_colorphase",
+        "colorphase",
+        "gre",
+        include_str!("shader/colorphase.wgsl"),
+        |p| {
+            let n = |id| p.num(id);
+            // alpha: upstream's default steps, 0 → 1
+            pack(&[n("from_step_r"), n("from_step_g"), n("from_step_b"), 0.0, n("to_step_r"), n("to_step_g"), n("to_step_b"), 1.0])
+        },
+        cpu::colorphase,
+    ),
+    def(
+        "gl_crosshatch",
+        "crosshatch",
+        "pthrasher",
+        include_str!("shader/crosshatch.wgsl"),
+        |p| {
+            let (cx, cy) = p.center_uv();
+            pack(&[cx, cy, p.num("threshold").max(0.01), p.num("fade_edge")])
+        },
+        cpu::crosshatch,
     ),
     def("gl_crosswarp", "crosswarp", "Eke Péter", include_str!("shader/crosswarp.wgsl"), |_| [0.0; PARAMS], cpu::crosswarp),
     def("gl_crosszoom", "CrossZoom", "rectalogic", include_str!("shader/CrossZoom.wgsl"), |p| pack(&[p.num("strength")]), cpu::cross_zoom),
+    def(
+        "gl_cube",
+        "cube",
+        "gre",
+        include_str!("shader/cube.wgsl"),
+        |p| pack(&[p.num("persp"), p.num("unzoom"), p.num("reflection"), p.num("floating")]),
+        cpu::cube,
+    ),
     def(
         "gl_directionalwarp",
         "directionalwarp",
@@ -132,6 +210,14 @@ static SHADERS: &[ShaderDef] = &[
         cpu::directional_warp,
     ),
     def(
+        "gl_doorway",
+        "doorway",
+        "gre",
+        include_str!("shader/doorway.wgsl"),
+        |p| pack(&[p.num("reflection"), p.num("perspective"), p.num("depth")]),
+        cpu::doorway,
+    ),
+    def(
         "gl_dreamyzoom",
         "DreamyZoom",
         "Zeh Fernando",
@@ -139,17 +225,75 @@ static SHADERS: &[ShaderDef] = &[
         |p| pack(&[p.num("rotation"), p.num("scale")]),
         cpu::dreamy_zoom,
     ),
+    def("gl_filmburn", "FilmBurn", "Anastasia Dunbar", include_str!("shader/FilmBurn.wgsl"), |p| pack(&[p.num("seed")]), cpu::film_burn),
+    def("gl_glitchdisplace", "GlitchDisplace", "Matt DesLauriers", include_str!("shader/GlitchDisplace.wgsl"), |_| [0.0; PARAMS], cpu::glitch_displace),
+    def("gl_glitchmemories", "GlitchMemories", "Gunnar Roth", include_str!("shader/GlitchMemories.wgsl"), |_| [0.0; PARAMS], cpu::glitch_memories),
+    def(
+        "gl_hexagonalize",
+        "hexagonalize",
+        "Fernando Kuteken",
+        include_str!("shader/hexagonalize.wgsl"),
+        |p| pack(&[p.whole("steps", 0.0), p.num("horizontal_hexagons").max(1.0)]),
+        cpu::hexagonalize,
+    ),
+    def(
+        "gl_kaleidoscope",
+        "kaleidoscope",
+        "nwoeanhinnogaehr",
+        include_str!("shader/kaleidoscope.wgsl"),
+        |p| pack(&[p.num("speed"), p.num("angle"), p.num("power")]),
+        cpu::kaleidoscope,
+    ),
+    def(
+        "gl_luminance_melt",
+        "luminance_melt",
+        "0gust1",
+        include_str!("shader/luminance_melt.wgsl"),
+        |p| pack(&[p.bit("melt_down"), p.num("l_threshold"), p.bit("above")]),
+        cpu::luminance_melt,
+    ),
     def("gl_mosaic", "Mosaic", "Xaychru", include_str!("shader/Mosaic.wgsl"), |p| pack(&[p.num("endx").round(), p.num("endy").round()]), cpu::mosaic),
+    def("gl_perlin", "perlin", "Rich Harris", include_str!("shader/perlin.wgsl"), |p| pack(&[p.num("scale"), p.num("smoothness"), p.num("seed")]), cpu::perlin),
+    def("gl_pinwheel", "pinwheel", "Mr Speaker", include_str!("shader/pinwheel.wgsl"), |p| pack(&[p.num("speed")]), cpu::pinwheel),
     def(
         "gl_pixelize",
         "pixelize",
         "gre",
         include_str!("shader/pixelize.wgsl"),
-        |p| pack(&[p.num("squares_min_x").round().max(1.0), p.num("squares_min_y").round().max(1.0), p.num("steps").round().max(0.0)]),
+        |p| pack(&[p.whole("squares_min_x", 1.0), p.whole("squares_min_y", 1.0), p.whole("steps", 0.0)]),
         cpu::pixelize,
+    ),
+    def(
+        "gl_polar_function",
+        "polar_function",
+        "Fernando Kuteken",
+        include_str!("shader/polar_function.wgsl"),
+        |p| pack(&[p.whole("segments", 0.0)]),
+        cpu::polar_function,
+    ),
+    def(
+        "gl_polkadotscurtain",
+        "PolkaDotsCurtain",
+        "bobylito",
+        include_str!("shader/PolkaDotsCurtain.wgsl"),
+        |p| {
+            // upstream's default centre is the bottom left corner
+            let (cx, cy) = p.point_uv("center", (0.0, 0.0));
+            pack(&[p.num("dots").max(1.0), cx, cy])
+        },
+        cpu::polka_dots_curtain,
+    ),
+    def(
+        "gl_randomsquares",
+        "randomsquares",
+        "gre",
+        include_str!("shader/randomsquares.wgsl"),
+        |p| pack(&[p.whole("size_x", 1.0), p.whole("size_y", 1.0), p.num("smoothness")]),
+        cpu::random_squares,
     ),
     def("gl_ripple", "ripple", "gre", include_str!("shader/ripple.wgsl"), |p| pack(&[p.num("amplitude"), p.num("speed")]), cpu::ripple),
     def("gl_simplezoom", "SimpleZoom", "0gust1", include_str!("shader/SimpleZoom.wgsl"), |p| pack(&[p.num("zoom_quickness")]), cpu::simple_zoom),
+    def("gl_squeeze", "squeeze", "gre", include_str!("shader/squeeze.wgsl"), |p| pack(&[p.num("color_separation")]), cpu::squeeze),
     def(
         "gl_starwipe",
         "StarWipe",
@@ -162,6 +306,9 @@ static SHADERS: &[ShaderDef] = &[
         },
         cpu::star_wipe,
     ),
+    def("gl_swap", "swap", "gre", include_str!("shader/swap.wgsl"), |p| pack(&[p.num("reflection"), p.num("perspective"), p.num("depth")]), cpu::swap),
+    def("gl_swirl", "Swirl", "Sergey Kosarevsky", include_str!("shader/Swirl.wgsl"), |_| [0.0; PARAMS], cpu::swirl),
+    def("gl_tvstatic", "TVStatic", "Brandon Anzaldi", include_str!("shader/TVStatic.wgsl"), |p| pack(&[p.num("offset")]), cpu::tv_static),
     def(
         "gl_waterdrop",
         "WaterDrop",
@@ -169,6 +316,15 @@ static SHADERS: &[ShaderDef] = &[
         include_str!("shader/WaterDrop.wgsl"),
         |p| pack(&[p.num("amplitude"), p.num("speed")]),
         cpu::water_drop,
+    ),
+    def("gl_wind", "wind", "gre", include_str!("shader/wind.wgsl"), |p| pack(&[p.num("size"), p.bit("reversed")]), cpu::wind),
+    def(
+        "gl_windowslice",
+        "windowslice",
+        "gre",
+        include_str!("shader/windowslice.wgsl"),
+        |p| pack(&[p.num("count").max(1.0), p.num("smoothness")]),
+        cpu::window_slice,
     ),
 ];
 
@@ -325,13 +481,29 @@ impl Params<'_> {
     /// The `center` point (sequence pixels, NaN = frame centre) in shader uv (origin bottom
     /// left), limited to a frame around the picture.
     fn center_uv(&self) -> (f32, f32) {
-        let v = match self.value("center") {
+        self.point_uv("center", (0.5, 0.5))
+    }
+
+    /// Point `id` (sequence pixels; a NaN coordinate = `default`'s, given in uv) in shader uv
+    /// (origin bottom left), limited to a frame around the picture.
+    fn point_uv(&self, id: &str, default: (f32, f32)) -> (f32, f32) {
+        let v = match self.value(id) {
             Some(ParamValue::Vec2(v)) => v,
             _ => filmcraft_geom::Vec2::new(f64::NAN, f64::NAN),
         };
-        let u = if v.x.is_finite() { (v.x as f32 * self.scale / self.w).clamp(-1.0, 2.0) } else { 0.5 };
-        let t = if v.y.is_finite() { (v.y as f32 * self.scale / self.h).clamp(-1.0, 2.0) } else { 0.5 };
-        (u, 1.0 - t)
+        let u = if v.x.is_finite() { (v.x as f32 * self.scale / self.w).clamp(-1.0, 2.0) } else { default.0 };
+        let t = if v.y.is_finite() { 1.0 - (v.y as f32 * self.scale / self.h).clamp(-1.0, 2.0) } else { default.1 };
+        (u, t)
+    }
+
+    /// A whole-number parameter, at least `min`.
+    fn whole(&self, id: &str, min: f32) -> f32 {
+        self.num(id).round().max(min)
+    }
+
+    /// A boolean parameter as the shader's 0 / 1.
+    fn bit(&self, id: &str) -> f32 {
+        if self.flag(id) { 1.0 } else { 0.0 }
     }
 
     fn bezier(&self) -> Bezier {
@@ -357,7 +529,9 @@ pub fn uniforms(e: &EffectInstance, w: u32, h: u32, progress: f32, scale: f32) -
     out[1] = hf;
     out[2] = eased_progress(e, progress);
     out[3] = wf / hf;
-    out[4..].copy_from_slice(&(d.params)(&p));
+    out[4..4 + PARAMS].copy_from_slice(&(d.params)(&p));
+    out[4 + PARAMS] = 1.0 / wf;
+    out[5 + PARAMS] = 1.0 / hf;
     Some(out)
 }
 
@@ -373,7 +547,9 @@ pub(crate) fn apply(id: &str, t: &Tx) -> Option<Image> {
         return Some(t.b.clone());
     }
     let mut p = [0.0; PARAMS];
-    p.copy_from_slice(&u[4..]);
+    p.copy_from_slice(&u[4..4 + PARAMS]);
     let c = Ctx { a: t.a, b: t.b, w: u[0], h: u[1], progress, ratio: u[3], p };
-    Some(paint(t.w, t.h, |x, y| (d.cpu)(&c, V2::new(x / c.w, 1.0 - y / c.h))))
+    // the prelude's uv: the pixel centre times 1 / size (see `Host::inv`)
+    let (inv_w, inv_h) = (u[4 + PARAMS], u[5 + PARAMS]);
+    Some(paint(t.w, t.h, |x, y| (d.cpu)(&c, V2::new(x * inv_w, (c.h - y) * inv_h))))
 }

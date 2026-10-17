@@ -1,0 +1,8 @@
+asset:        GlitchDisplace.wgsl
+title:        GL Transitions "GlitchDisplace" transition shader, hand-ported to WGSL
+author:       Matt DesLauriers (upstream GLSL); FilmCraft contributors (WGSL port and Rust reference)
+source:       https://github.com/gl-transitions/gl-transitions/blob/master/transitions/GlitchDisplace.glsl
+license:      MIT
+license-file: crates/render/src/transitions/shader/LICENSE-gl-transitions.txt
+added:        2026-10-17 by FilmCraft contributors (C1, lane T)
+notes:        Hand port of the upstream GLSL to WGSL, keeping its Author/License header; the upstream header says License: MIT. The FilmCraft host (prelude.wgsl, original work) supplies the bindings, progress (eased on the CPU), getFromColor/getToColor (clamped bilinear, linear premultiplied colour, uv origin bottom left) and GLSL helpers. The Rust reference of the same function is in cpu.rs. Changes from upstream: the voronoi() values upstream computes but never uses are left out (same picture); smoothstep(1.0, 0.5, x) written as 1.0 - smoothstep(0.5, 1.0, x), the same curve; the result's alpha is clamped to 1.

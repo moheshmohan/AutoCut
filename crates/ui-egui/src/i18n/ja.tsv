@@ -3693,3 +3693,52 @@
 	Bounce In	イーズイン (バウンス)
 	Bounce Out	イーズアウト (バウンス)
 	Bounce In-Out	イーズインアウト (バウンス)
+# GL Transitions, batch 2 (names are the collection's own, kept as they are)
+	Shadow Height	影の高さ
+	Bounces	バウンド回数
+	Waves	波の数
+	Color Separation	色ずれ
+	Squares per Row	1 行のマス数
+	From Step R	R の開始
+	From Step G	G の開始
+	From Step B	B の開始
+	To Step R	R の終了
+	To Step G	G の終了
+	To Step B	B の終了
+	Fade Edge	フェードの幅
+	Unzoom	ズームアウト
+	Reflection	反射
+	Floating	浮き
+	Seed	シード
+	Horizontal Hexagons	横方向の六角形数
+	Power	べき指数
+	Melt Downward	下へ溶ける
+	Melt Above Threshold	しきい値より明るい部分を溶かす
+	Dots	ドット数
+	Reversed	反転
+	GL BookFlip	GL BookFlip
+	GL Bounce	GL Bounce
+	GL burn	GL burn
+	GL ButterflyWaveScrawler	GL ButterflyWaveScrawler
+	GL chessboard	GL chessboard
+	GL colorphase	GL colorphase
+	GL crosshatch	GL crosshatch
+	GL cube	GL cube
+	GL doorway	GL doorway
+	GL FilmBurn	GL FilmBurn
+	GL GlitchDisplace	GL GlitchDisplace
+	GL GlitchMemories	GL GlitchMemories
+	GL hexagonalize	GL hexagonalize
+	GL kaleidoscope	GL kaleidoscope
+	GL luminance_melt	GL luminance_melt
+	GL perlin	GL perlin
+	GL pinwheel	GL pinwheel
+	GL polar_function	GL polar_function
+	GL PolkaDotsCurtain	GL PolkaDotsCurtain
+	GL randomsquares	GL randomsquares
+	GL squeeze	GL squeeze
+	GL swap	GL swap
+	GL Swirl	GL Swirl
+	GL TVStatic	GL TVStatic
+	GL wind	GL wind
+	GL windowslice	GL windowslice

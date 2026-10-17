@@ -1,0 +1,8 @@
+asset:        PolkaDotsCurtain.wgsl
+title:        GL Transitions "PolkaDotsCurtain" transition shader, hand-ported to WGSL
+author:       bobylito (upstream GLSL); FilmCraft contributors (WGSL port and Rust reference)
+source:       https://github.com/gl-transitions/gl-transitions/blob/master/transitions/PolkaDotsCurtain.glsl
+license:      MIT
+license-file: crates/render/src/transitions/shader/LICENSE-gl-transitions.txt
+added:        2026-10-17 by FilmCraft contributors (C1, lane T)
+notes:        Hand port of the upstream GLSL to WGSL, keeping its Author/License header; the upstream header says License: MIT. The FilmCraft host (prelude.wgsl, original work) supplies the bindings, progress (eased on the CPU), getFromColor/getToColor (clamped bilinear, linear premultiplied colour, uv origin bottom left) and GLSL helpers. The Rust reference of the same function is in cpu.rs. Changes from upstream: the distance to the centre is kept above 1e-6 (no division by zero when the centre is exactly on a pixel centre).

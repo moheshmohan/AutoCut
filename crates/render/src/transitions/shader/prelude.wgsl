@@ -17,6 +17,11 @@ struct Host {
     p0: vec4<f32>,
     p1: vec4<f32>,
     p2: vec4<f32>,
+    // 1 / width, 1 / height (rounded once, on the CPU), 0, 0: a pixel's uv is its centre times
+    // these, one correctly rounded multiplication, so the Rust reference and every GPU give each
+    // pixel the same uv (a division may be approximate on a GPU, and a pixel centre exactly on
+    // an edge, such as uv.x = 0.5 on an odd width, would fall either way)
+    inv: vec4<f32>,
 }
 
 @group(0) @binding(0) var from_tex: texture_2d<f32>;
@@ -94,7 +99,8 @@ fn atan2_safe(y: f32, x: f32) -> f32 {
 
 // Integer hash to [0, 1), the Rust reference's bit for bit. It replaces the collection's
 // `fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453)`, whose value depends on the
-// precision of the GPU's `sin`.
+// precision of the GPU's `sin`. Seeds used by the ports: 1 `rand_pixel`, 2 `rand_cell`, 3–9
+// the per-column / per-row noise of single transitions, parameter or progress bits otherwise.
 fn hash(x: i32, y: i32, s: u32) -> f32 {
     var h = (bitcast<u32>(x) * 0x8DA6B343u) ^ (bitcast<u32>(y) * 0xD8163841u) ^ (s * 0xCB1AB31Fu) ^ 0x9E3779B9u;
     h ^= h >> 15u;
@@ -116,6 +122,32 @@ fn rand_cell(cell: vec2<f32>) -> f32 {
     return hash(i32(cell.x), i32(cell.y), 2u);
 }
 
+// The same, varied by a seed (a parameter's bits, or the progress's for noise that changes
+// every frame).
+fn rand_pixel_seeded(uv: vec2<f32>, s: u32) -> f32 {
+    let at = floor(vec2(uv.x * host.frame.x, (1.0 - uv.y) * host.frame.y));
+    return hash(i32(at.x), i32(at.y), s);
+}
+
+fn rand_cell_seeded(cell: vec2<f32>, s: u32) -> f32 {
+    return hash(i32(cell.x), i32(cell.y), s);
+}
+
+// A random value per output pixel column (the same all the way down it) and per output pixel
+// row: the collection's `rand(vec2(uv.x, k))` and `rand(vec2(k, uv.y))`.
+fn rand_column(uv: vec2<f32>, s: u32) -> f32 {
+    return hash(i32(floor(uv.x * host.frame.x)), 0, s);
+}
+
+fn rand_row(uv: vec2<f32>, s: u32) -> f32 {
+    return hash(0, i32(floor((1.0 - uv.y) * host.frame.y)), s);
+}
+
+// Whether `p` is strictly inside the unit square (the collection's `inBounds`).
+fn in_bounds(p: vec2<f32>) -> bool {
+    return all(vec2(0.0) < p) && all(p < vec2(1.0));
+}
+
 @fragment
 fn fs(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
     progress = host.frame.z;
@@ -127,6 +159,6 @@ fn fs(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
     if progress >= 1.0 {
         return texel(1u, px);
     }
-    let uv = vec2(at.x / host.frame.x, 1.0 - at.y / host.frame.y);
+    let uv = vec2(at.x * host.inv.x, (host.frame.y - at.y) * host.inv.y);
     return transition(uv);
 }

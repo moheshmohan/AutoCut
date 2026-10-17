@@ -531,7 +531,7 @@ fn every_video_transition_applies_via_command() {
     s.execute("playhead.set", json!({"time": cut.0})).unwrap();
     let defs: Vec<_> =
         filmcraft_project::effect_defs().iter().filter(|d| d.kind == filmcraft_project::EffectKind::VideoTransition && d.category[0] != "Obsolete").collect();
-    assert_eq!(defs.len(), 84 + 21 + 12, "Premiere folders, Legacy, GL Transitions");
+    assert_eq!(defs.len(), 84 + 21 + 38, "Premiere folders, Legacy, GL Transitions");
     for (i, d) in defs.iter().enumerate() {
         // alternate id and display-name lookups
         let name = if i % 2 == 0 { d.id } else { d.name };
@@ -615,7 +615,7 @@ fn gl_transitions_apply_and_render_through_commands() {
     // every GL transition is listed in its folder with its easing parameters
     let gl = s.execute("effects.list", json!({"folder": "Video Transitions/GL Transitions", "detail": true})).unwrap();
     let gl = gl.as_array().unwrap();
-    assert_eq!(gl.len(), 12);
+    assert_eq!(gl.len(), 38);
     for e in gl {
         let params = e["paramInfo"].as_array().unwrap();
         let easing = params.iter().find(|p| p["id"] == "easing").unwrap_or_else(|| panic!("{e}"));

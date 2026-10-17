@@ -10,6 +10,11 @@
 //! machine, unsupported GPU) [`ExportRenderer::new`] returns `None` and the export falls back to
 //! the CPU renderer; a `FramePlan::Image` plan (HDR / wide gamut / anything the plan sends to the
 //! CPU) is returned unchanged — it already is the CPU image.
+//!
+//! Transitions planned as GPU steps (Push and the GL Transitions,
+//! `filmcraft_render::transitions::shader`) are drawn by the same stages the Program monitor
+//! uses, so an exported frame is the monitor's picture; a transition this device cannot draw
+//! (a shader it rejected) sends the frame to the CPU reference renderer.
 
 use crate::{GpuCompositor, prepare};
 use filmcraft_project::{ItemId, Project};
@@ -136,7 +141,10 @@ impl ExportRenderer {
         match &plan {
             // Already the CPU image: return it unchanged instead of rendering it twice.
             FramePlan::Image(img) => Some(img.clone()),
-            FramePlan::Layers { .. } => {
+            // Layers, and transitions drawn by the same stages as on the monitors (Push, the
+            // GL Transitions): an export matches the Program monitor. A transition this device
+            // cannot draw makes `render_export_prepared` return None: the CPU renders the frame.
+            FramePlan::Layers { .. } | FramePlan::Composite { .. } => {
                 if device_failed() {
                     return None;
                 }
@@ -149,8 +157,6 @@ impl ExportRenderer {
                 timing::add_frame();
                 Some(Image { w: w as usize, h: h as usize, px })
             }
-            // Transitions: the export path leaves them to the CPU reference renderer.
-            FramePlan::Composite { .. } => None,
         }
     }
 }
@@ -283,6 +289,125 @@ mod tests {
         let cpu = filmcraft_render::render_sequence(&p, seq, t, RenderOptions::default(), &m);
         let gpu = r.render(&p, seq, t, RenderOptions::default(), &m).expect("GPU rendered the frame");
         assert_parity(&cpu, &gpu, "transformed");
+    }
+
+    /// Two demo clips (160×90) cut at frame 24 under transition `effect` (frames 18–30), on V2
+    /// over a colour matte on V1; the outgoing clip at 70 % opacity, so the transition's result is
+    /// composited over the matte. `nested`: the cut is inside a sequence nested (plainly) in the
+    /// exported one.
+    fn transition_project(effect: &str, nested: bool) -> (Arc<Project>, ItemId, SourceMap) {
+        use filmcraft_media::DemoScene;
+        let rate = filmcraft_time::FrameRate::FPS_24;
+        let (w, h) = (160, 90);
+        let mut p = Project::new("x");
+        let mut m = SourceMap::default();
+        let mut add = |p: &mut Project, g: Generator| {
+            let g = GeneratorSource::new(g, w, h, rate, Tick(4 * TICKS_PER_SECOND));
+            let info = g.info().clone();
+            let id = p.add_item(
+                &info.name.clone(),
+                Label::Iris,
+                ItemKind::Media(MediaClip {
+                    media: MediaRef::Generator(g.generator.clone()),
+                    info,
+                    interpret: Default::default(),
+                    mark_in: None,
+                    mark_out: None,
+                    markers: vec![],
+                    offline: false,
+                    proxy: None,
+                    identity: None,
+                }),
+                None,
+            );
+            m.0.insert(id, Arc::new(g) as filmcraft_media::SharedSource);
+            id
+        };
+        let ocean = add(&mut p, Generator::Demo(DemoScene::OceanSunset));
+        let aurora = add(&mut p, Generator::Demo(DemoScene::Aurora));
+        let matte = add(&mut p, Generator::ColorMatte { color: [0.1, 0.6, 0.2, 1.0] });
+        let settings = SequenceSettings { width: w, height: h, frame_rate: rate, ..Default::default() };
+        let seq = p.new_sequence("s", settings.clone(), 2, 1, None);
+        let cut = if nested { p.new_sequence("inner", settings, 2, 1, None) } else { seq };
+        let clip = |p: &mut Project, item, start: i64| {
+            p.make_track_item(item, TrackKind::Video, rate.tick_of(start), TimeRange::new(Tick::ZERO, rate.tick_of(24)), rate).unwrap()
+        };
+        let mut a = clip(&mut p, ocean, 0);
+        a.effect_mut("opacity").unwrap().param_mut("opacity").unwrap().value = filmcraft_project::ParamValue::Float(70.0);
+        let b = clip(&mut p, aurora, 24);
+        let (ia, ib) = (a.id, b.id);
+        let track = if nested { 0 } else { 1 };
+        let s = p.sequence_mut(cut).unwrap();
+        s.video_tracks[track].items.extend([a, b]);
+        s.video_tracks[track].transitions.push(filmcraft_project::Transition {
+            id: filmcraft_project::TransitionId(1),
+            effect: filmcraft_project::find_effect(effect).unwrap().instance(),
+            start: rate.tick_of(18),
+            duration: rate.tick_of(12),
+            from: Some(ia),
+            to: Some(ib),
+            align: Default::default(),
+            reverse: false,
+        });
+        let under = p.make_track_item(matte, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, rate.tick_of(48)), rate).unwrap();
+        p.sequence_mut(seq).unwrap().video_tracks[0].items.push(under);
+        if nested {
+            let nest = p.make_track_item(cut, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, rate.tick_of(48)), rate).unwrap();
+            p.sequence_mut(seq).unwrap().video_tracks[1].items.push(nest);
+        }
+        (Arc::new(p), seq, m)
+    }
+
+    /// (99th percentile, mean) of the per-pixel max RGB difference over black, 8-bit.
+    fn levels(cpu: &Image, gpu: &Image) -> (u32, f64) {
+        let (a, b) = (cpu.over_black_rgba8(), gpu.over_black_rgba8());
+        let mut d: Vec<u32> = a
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(b.as_chunks::<4>().0)
+            .map(|(x, y)| (0..3).map(|k| (x[k] as u32).abs_diff(y[k] as u32)).max().unwrap_or(0))
+            .collect();
+        d.sort_unstable();
+        (d[d.len() * 99 / 100], d.iter().sum::<u32>() as f64 / d.len() as f64)
+    }
+
+    /// Export draws GL Transitions (and Push) with the stages the Program monitor uses, so an
+    /// exported frame is the monitor's picture exactly, and within a level of the CPU reference
+    /// (the fallback when a transition cannot be drawn on the device); also inside a nest.
+    #[test]
+    fn transitions_export_as_the_monitor_shows_them() {
+        let Some(mut r) = ExportRenderer::new() else {
+            eprintln!("SKIPPED (gpu export transitions): no adapter");
+            return;
+        };
+        let rate = filmcraft_time::FrameRate::FPS_24;
+        for effect in ["gl_mosaic", "gl_crosszoom", "gl_ripple", "push"] {
+            for nested in [false, true] {
+                let (p, seq, m) = transition_project(effect, nested);
+                for f in [19, 24, 28] {
+                    let t = rate.tick_of(f);
+                    let what = format!("{effect} nested {nested} frame {f}");
+                    let opts = RenderOptions::default();
+                    let plan = plan_frame(&p, seq, t, opts, &m);
+                    let FramePlan::Composite { steps, .. } = &plan else { panic!("{what}: not planned as GPU steps") };
+                    assert!(steps.iter().any(|s| matches!(s, filmcraft_render::plan::PlanStep::Transition { effect: e, .. } if e.effect == effect)), "{what}");
+                    let before = (r.compositor.gpu_transitions, r.compositor.cpu_transitions);
+                    let export = r.render(&p, seq, t, opts, &m).expect("GPU rendered the transition");
+                    assert_eq!(r.compositor.gpu_transitions, before.0 + 1, "{what}: drawn by the GPU stage");
+                    assert_eq!(r.compositor.cpu_transitions, before.1, "{what}: no CPU fallback");
+                    // the Program monitor's path (composite, then the same accumulator)
+                    r.compositor.composite_prepared(&plan, Some(&prepare(&plan)));
+                    let (w, h, monitor) = r.compositor.read_accumulator().expect("read-back");
+                    assert_eq!((w as usize, h as usize), (export.w, export.h));
+                    assert!(monitor == export.px, "{what}: export differs from the monitor");
+                    let cpu = filmcraft_render::render_sequence(&p, seq, t, opts, &m);
+                    let (p99, mean) = levels(&cpu, &export);
+                    eprintln!("{what}: export vs CPU reference p99 {p99}, mean {mean:.3}");
+                    assert!(p99 <= 1 && mean <= 0.5, "{what}: export vs CPU reference p99 {p99}, mean {mean:.3}");
+                }
+            }
+        }
     }
 
     #[test]

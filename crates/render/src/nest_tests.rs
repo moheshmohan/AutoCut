@@ -360,3 +360,53 @@ fn a_nest_that_is_not_plain_is_still_drawn_right() {
         assert!(w < 0.01, "{what}: plan and reference differ by {w}");
     }
 }
+
+#[test]
+fn a_transition_inside_a_plain_nest_is_a_step_of_the_parent_plan() {
+    // Push and the GL Transitions inside a plain nest are planned as two-input steps of the
+    // parent's plan (drawn by the GPU's stages), not rendered to one CPU image of the nest
+    let rate = FrameRate::FPS_24;
+    for (effect, reverse) in [("gl_crosswarp", false), ("gl_mosaic", true), ("push", false)] {
+        let mut r = Rig::new();
+        let demo = |r: &mut Rig, scene| r.add(GeneratorSource::new(Generator::Demo(scene), 160, 90, rate, Tick(4 * TICKS_PER_SECOND)));
+        let (ocean, aurora) = (demo(&mut r, DemoScene::OceanSunset), demo(&mut r, DemoScene::Aurora));
+        let inner = r.seq("inner", 160, 90, rate);
+        let a = r.put(inner, ocean, 24);
+        // the outgoing clip half transparent, so the transition's result is composited over
+        // the matte under the nest
+        r.clip(inner, a).effect_mut("opacity").unwrap().params.get_mut("opacity").unwrap().value = ParamValue::Float(50.0);
+        let tb = r.p.make_track_item(aurora, TrackKind::Video, rate.tick_of(24), TimeRange::new(Tick::ZERO, rate.tick_of(24)), rate).unwrap();
+        let b = tb.id;
+        let s = r.p.sequence_mut(inner).unwrap();
+        s.video_tracks[0].items.push(tb);
+        s.video_tracks[0].transitions.push(filmcraft_project::Transition {
+            id: filmcraft_project::TransitionId(7),
+            effect: filmcraft_project::find_effect(effect).unwrap().instance(),
+            start: rate.tick_of(18),
+            duration: rate.tick_of(12),
+            from: Some(a),
+            to: Some(b),
+            align: Default::default(),
+            reverse,
+        });
+        let outer = r.seq("outer", 160, 90, rate);
+        let under = r.matte([0.0, 1.0, 0.0, 1.0], 64, 64);
+        let mut below = r.p.make_track_item(under, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, rate.tick_of(48)), rate).unwrap();
+        below.scale_to_frame = true;
+        let nest = r.p.make_track_item(inner, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, rate.tick_of(48)), rate).unwrap();
+        let s = r.p.sequence_mut(outer).unwrap();
+        s.video_tracks[0].items.push(below);
+        s.video_tracks[1].items.push(nest);
+        for f in [19, 24, 29] {
+            let t = rate.tick_of(f);
+            let plan = plan::plan_frame(&r.p, outer, t, RenderOptions::default(), &r.map);
+            let plan::FramePlan::Composite { steps, .. } = &plan else { panic!("{effect} frame {f}: not planned as steps") };
+            let transitions = steps.iter().filter(|s| matches!(s, plan::PlanStep::Transition { effect: e, .. } if e.effect == effect)).count();
+            assert_eq!(transitions, 1, "{effect} frame {f}");
+            let w = worst(&plan::execute_cpu(&plan), &r.frame(outer, t));
+            assert!(w < 1e-4, "{effect} frame {f}: plan and reference differ by {w}");
+        }
+        // outside the transition the nest is plain layers again
+        assert_eq!(layer_count(&r, outer, rate.tick_of(10)), Some(2), "{effect}");
+    }
+}

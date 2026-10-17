@@ -77,6 +77,8 @@ fn uniforms_pack_the_host_values() {
     assert_eq!(&u[..4], &[320.0, 180.0, 0.25, 320.0 / 180.0]);
     // border thickness, rotation, centre (uv, frame centre by default), white border
     assert_eq!(&u[4..12], &[0.01, 0.75, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0]);
+    // then 1 / width and 1 / height: a pixel's uv is its centre times these, on CPU and GPU
+    assert_eq!(&u[4 + PARAMS..], &[1.0 / 320.0, 1.0 / 180.0, 0.0, 0.0]);
     assert!(uniforms(&instance("cross_dissolve"), 320, 180, 0.5, 1.0).is_none());
     // a centre in sequence pixels maps to uv with y up; ½-resolution frames scale it
     let mut e = instance("gl_starwipe");
@@ -222,4 +224,46 @@ fn shaders_do_what_their_names_say() {
         v.len()
     };
     assert!(distinct <= 21, "20 squares across: {distinct} distinct columns");
+}
+
+#[test]
+fn batch_two_shaders_do_what_their_names_say() {
+    let (w, h) = (64usize, 36usize);
+    let a = Image::filled(w, h, [1.0, 0.0, 0.0, 1.0]);
+    let b = Image::filled(w, h, [0.0, 0.0, 1.0, 1.0]);
+    let is_b = |c: [f32; 4]| c[2] > 0.99 && c[0] < 0.01;
+    let is_a = |c: [f32; 4]| c[0] > 0.99 && c[2] < 0.01;
+    let share_b = |m: &Image| m.px.chunks(4).filter(|c| is_b([c[0], c[1], c[2], c[3]])).count() as f32 / (w * h) as f32;
+    // TVStatic: opaque grey static in the middle, new on every frame
+    let s1 = apply(&instance("gl_tvstatic"), &a, &b, 0.5);
+    let s2 = apply(&instance("gl_tvstatic"), &a, &b, 0.51);
+    assert!(s1.px.chunks(4).all(|c| c[0] == c[1] && c[1] == c[2] && c[3] == 1.0));
+    assert_ne!(s1, s2);
+    // polar_function: the flower opens from the centre
+    let m = apply(&instance("gl_polar_function"), &a, &b, 0.3);
+    assert!(is_b(m.get(w / 2, h / 2)) && is_a(m.get(0, 0)));
+    // wind: left to right, or right to left reversed
+    let m = apply(&instance("gl_wind"), &a, &b, 0.5);
+    assert!(is_b(m.get(0, h / 2)) && is_a(m.get(w - 1, h / 2)));
+    let mut reversed = instance("gl_wind");
+    set(&mut reversed, "reversed", ParamValue::Bool(true));
+    let m = apply(&reversed, &a, &b, 0.5);
+    assert!(is_a(m.get(0, h / 2)) && is_b(m.get(w - 1, h / 2)));
+    // chessboard: half the squares have turned at the midpoint
+    let m = apply(&instance("gl_chessboard"), &a, &b, 0.5);
+    assert!((share_b(&m) - 0.5).abs() < 0.05, "{}", share_b(&m));
+    // squeeze: the outgoing image is squeezed into the middle
+    let m = apply(&instance("gl_squeeze"), &a, &b, 0.5);
+    assert!(is_a(m.get(w / 2, h / 2)) && is_b(m.get(w / 2, 0)) && is_b(m.get(w / 2, h - 1)));
+    // burn and the floors of doorway / swap / cube never make alpha exceed 1
+    for id in ["gl_burn", "gl_doorway", "gl_swap", "gl_cube", "gl_glitchdisplace"] {
+        for p in [0.2, 0.5, 0.8] {
+            let m = apply(&instance(id), &a, &b, p);
+            assert!(m.px.chunks(4).all(|c| c[3] <= 1.0 && c[3] >= 0.0), "{id} p={p}");
+        }
+    }
+    // PolkaDotsCurtain's dots grow from the bottom left corner by default
+    let m = apply(&instance("gl_polkadotscurtain"), &a, &b, 0.05);
+    assert!(is_b(m.get(0, h - 1)));
+    assert!(is_a(m.get(w - 1, 0)));
 }

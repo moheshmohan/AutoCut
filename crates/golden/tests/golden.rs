@@ -19,7 +19,7 @@ use filmcraft_project::{
     TrackKind, Transition, TransitionId, find_effect,
 };
 use filmcraft_render::{RenderOptions, SourceMap, render_sequence};
-use filmcraft_testkit::golden::{Rgba8, Tolerance, assert_golden, diff};
+use filmcraft_testkit::golden::{Rgba8, Tolerance, assert_golden, check_golden, diff};
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 
 const W: u32 = 320;
@@ -712,10 +712,12 @@ goldens!(
 
 /// Video Transitions ▸ GL Transitions: the Rust reference of every ported shader
 /// (`filmcraft_render::transitions::shader`) at 30 % and 60 %, one row per transition, from two
-/// rendered demo frames (OceanSunset → Aurora) at 48×27.
+/// rendered demo frames (OceanSunset → Aurora) at 48×27, on sheets of ten rows
+/// (`gl_transitions_sheet_<n>`, numbered from 1, each under the golden size limit).
 #[test]
 fn gl_transitions_sheet() {
     use filmcraft_render::transitions::{apply, shader};
+    const ROWS_PER_SHEET: usize = 10;
     let frame = |scene: DemoScene| {
         let mut b = Builder::new(1);
         let m = b.demo(scene);
@@ -727,24 +729,34 @@ fn gl_transitions_sheet() {
     assert_eq!((a.w, a.h), (48, 27));
     let (cw, ch) = (a.w, a.h);
     let ps = [0.3f32, 0.6];
-    let rows = shader::shaders();
-    let (w, h) = (cw * ps.len(), ch * rows.len());
-    let mut px = vec![0u8; w * h * 4];
-    for (r, d) in rows.iter().enumerate() {
-        let e = find_effect(d.id).unwrap().instance();
-        for (c, &p) in ps.iter().enumerate() {
-            let cell = apply(&e, &a, &b, p).over_black_rgba8();
-            for y in 0..ch {
-                let dst = ((r * ch + y) * w + c * cw) * 4;
-                px[dst..dst + cw * 4].copy_from_slice(&cell[y * cw * 4..(y + 1) * cw * 4]);
+    let sheets: Vec<&[shader::ShaderDef]> = shader::shaders().chunks(ROWS_PER_SHEET).collect();
+    let mut failures = Vec::new();
+    for (i, rows) in sheets.iter().enumerate() {
+        let (w, h) = (cw * ps.len(), ch * rows.len());
+        let mut px = vec![0u8; w * h * 4];
+        for (r, d) in rows.iter().enumerate() {
+            let e = find_effect(d.id).unwrap().instance();
+            for (c, &p) in ps.iter().enumerate() {
+                let cell = apply(&e, &a, &b, p).over_black_rgba8();
+                for y in 0..ch {
+                    let dst = ((r * ch + y) * w + c * cw) * 4;
+                    px[dst..dst + cw * 4].copy_from_slice(&cell[y * cw * 4..(y + 1) * cw * 4]);
+                }
             }
         }
+        let rgba = Rgba8::new(w as u32, h as u32, px);
+        let name = format!("gl_transitions_sheet_{}", i + 1);
+        let ids: Vec<&str> = rows.iter().map(|d| d.id).collect();
+        let title = format!("GL Transitions (WGSL ports, Rust reference) at 30 % and 60 %: {}", ids.join(", "));
+        match check_golden(&golden_path(&name), &rgba, Tolerance::RENDER, &title, &format!("crates/golden/tests/golden.rs ({name})")) {
+            Ok(d) => eprintln!("{name}: {d}"),
+            Err(e) => failures.push(e),
+        }
     }
-    let rgba = Rgba8::new(w as u32, h as u32, px);
-    let name = "gl_transitions_sheet";
-    let title = "GL Transitions (WGSL ports, Rust reference) at 30 % and 60 %";
-    let d = assert_golden(&golden_path(name), &rgba, Tolerance::RENDER, title, &format!("crates/golden/tests/golden.rs ({name})"));
-    eprintln!("{name}: {d}");
+    // no sheet left over from a longer list
+    let stale = golden_path(&format!("gl_transitions_sheet_{}", sheets.len() + 1));
+    assert!(!stale.exists(), "{} is not drawn any more: remove it, its sidecar and its ATTRIBUTION.md row", stale.display());
+    assert!(failures.is_empty(), "golden mismatch: {failures:#?}");
 }
 
 /// Effects panel ▸ Lumetri Presets thumbnail grid: every built-in preset graded by our Lumetri on

@@ -935,15 +935,28 @@ impl GpuCompositor {
         (if resolve { out_view } else { accum_view }, (w, h))
     }
 
-    fn composite_steps(&mut self, width: usize, height: usize, steps: &[PlanStep], prep: Option<&PreparedPlan>) -> (wgpu::TextureView, (u32, u32)) {
+    /// Whether every two-input transition of `steps` is drawn here: Push, and the shader
+    /// transitions whose pipeline builds on this device (built on first use).
+    fn steps_on_gpu(&mut self, steps: &[PlanStep]) -> bool {
         let device = &self.device;
         let shaders = &mut self.shader_transitions;
         let mut on_gpu = |e: &filmcraft_project::EffectInstance| e.effect == "push" || shaders.ready(device, &e.effect);
-        if steps.iter().any(|s| matches!(s, PlanStep::Transition { effect, .. } if !on_gpu(effect))) {
+        !steps.iter().any(|s| matches!(s, PlanStep::Transition { effect, .. } if !on_gpu(effect)))
+    }
+
+    fn composite_steps(&mut self, width: usize, height: usize, steps: &[PlanStep], prep: Option<&PreparedPlan>) -> (wgpu::TextureView, (u32, u32)) {
+        if !self.steps_on_gpu(steps) {
             self.cpu_transitions += 1;
             let plan = FramePlan::Composite { width, height, steps: steps.to_vec() };
             return self.composite_prepared(&FramePlan::Image(filmcraft_render::plan::execute_cpu(&plan)), None);
         }
+        self.draw_steps(width, height, steps, prep, true)
+    }
+
+    /// Draw `steps` (every transition [`steps_on_gpu`](Self::steps_on_gpu)) into the
+    /// accumulator, then resolve it to the output when `resolve`. Returns the output view
+    /// (resolved) or the accumulator's, and the frame size.
+    fn draw_steps(&mut self, width: usize, height: usize, steps: &[PlanStep], prep: Option<&PreparedPlan>, resolve: bool) -> (wgpu::TextureView, (u32, u32)) {
         let empty = FramePlan::Layers { width, height, layers: Vec::new() };
         let (canvas, dims) = self.render_plan(&empty, None, true, false);
         let mut children = prep.map(|p| p.children.iter());
@@ -973,18 +986,31 @@ impl GpuCompositor {
                 }
             }
         }
-        self.render_plan(&empty, None, false, true)
+        if resolve {
+            return self.render_plan(&empty, None, false, true);
+        }
+        (canvas, dims)
     }
 
     /// Export rendering: `plan` composited into the linear float accumulator and read back as
-    /// premultiplied RGBA f32 (the sRGB resolve is skipped). None for a plan the export path does
-    /// not run on the GPU (transitions: the caller renders those on the CPU) or a failed read-back.
+    /// premultiplied RGBA f32 (the sRGB resolve is skipped). Transitions are drawn by the same
+    /// stages as on the monitors (Push and the shader transitions), so an export matches what
+    /// the Program monitor showed. None when a transition of the plan cannot be drawn on this
+    /// device (the caller renders the frame with the CPU reference instead) or the read-back
+    /// failed.
     pub fn render_export_prepared(&mut self, plan: &FramePlan, prep: Option<&PreparedPlan>) -> Option<(u32, u32, Vec<f32>)> {
-        if matches!(plan, FramePlan::Composite { .. }) {
-            return None;
-        }
         let t = std::time::Instant::now();
-        self.render_plan(plan, prep, true, false);
+        match plan {
+            FramePlan::Composite { width, height, steps } => {
+                if !self.steps_on_gpu(steps) {
+                    return None;
+                }
+                self.draw_steps(*width, *height, steps, prep, false);
+            }
+            _ => {
+                self.render_plan(plan, prep, true, false);
+            }
+        }
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export") });
         let size = self.copy_accumulator(&mut enc)?;
         self.queue.submit([enc.finish()]);

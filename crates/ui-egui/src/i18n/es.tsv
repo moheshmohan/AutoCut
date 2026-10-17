@@ -3694,3 +3694,52 @@
 	Bounce In	Entrada con rebote
 	Bounce Out	Salida con rebote
 	Bounce In-Out	Entrada y salida con rebote
+# GL Transitions, batch 2 (names are the collection's own, kept as they are)
+	Shadow Height	Altura de la sombra
+	Bounces	Rebotes
+	Waves	Ondas
+	Color Separation	Separación de color
+	Squares per Row	Cuadros por fila
+	From Step R	Inicio R
+	From Step G	Inicio G
+	From Step B	Inicio B
+	To Step R	Final R
+	To Step G	Final G
+	To Step B	Final B
+	Fade Edge	Borde de fundido
+	Unzoom	Alejamiento
+	Reflection	Reflejo
+	Floating	Flotación
+	Seed	Semilla
+	Horizontal Hexagons	Hexágonos horizontales
+	Power	Potencia
+	Melt Downward	Fundir hacia abajo
+	Melt Above Threshold	Fundir por encima del umbral
+	Dots	Puntos
+	Reversed	Invertido
+	GL BookFlip	GL BookFlip
+	GL Bounce	GL Bounce
+	GL burn	GL burn
+	GL ButterflyWaveScrawler	GL ButterflyWaveScrawler
+	GL chessboard	GL chessboard
+	GL colorphase	GL colorphase
+	GL crosshatch	GL crosshatch
+	GL cube	GL cube
+	GL doorway	GL doorway
+	GL FilmBurn	GL FilmBurn
+	GL GlitchDisplace	GL GlitchDisplace
+	GL GlitchMemories	GL GlitchMemories
+	GL hexagonalize	GL hexagonalize
+	GL kaleidoscope	GL kaleidoscope
+	GL luminance_melt	GL luminance_melt
+	GL perlin	GL perlin
+	GL pinwheel	GL pinwheel
+	GL polar_function	GL polar_function
+	GL PolkaDotsCurtain	GL PolkaDotsCurtain
+	GL randomsquares	GL randomsquares
+	GL squeeze	GL squeeze
+	GL swap	GL swap
+	GL Swirl	GL Swirl
+	GL TVStatic	GL TVStatic
+	GL wind	GL wind
+	GL windowslice	GL windowslice

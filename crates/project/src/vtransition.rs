@@ -419,7 +419,7 @@ mod tests {
     fn premiere_26_transition_tree() {
         let tree = video_transition_tree();
         let counts: Vec<usize> = tree.iter().map(|(_, v)| v.len()).collect();
-        assert_eq!(counts, vec![8, 11, 10, 8, 16, 8, 4, 2, 8, 9, 12, 21], "{tree:?}");
+        assert_eq!(counts, vec![8, 11, 10, 8, 16, 8, 4, 2, 8, 9, 38, 21], "{tree:?}");
         assert_eq!(counts[..10].iter().sum::<usize>(), 84);
         // every transition is in a known folder, ids and names are unique per kind
         let mut names = std::collections::HashSet::new();

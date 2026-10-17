@@ -82,10 +82,78 @@ impl Ctx<'_> {
     }
     /// The host's `rand_pixel`: a hash of the output pixel whose centre is at `uv`.
     fn rand_pixel(&self, uv: V2) -> f32 {
+        self.rand_pixel_seeded(uv, 1)
+    }
+    /// The host's `rand_pixel_seeded`.
+    fn rand_pixel_seeded(&self, uv: V2, s: u32) -> f32 {
         let x = (uv.x * self.w).floor();
         let y = ((1.0 - uv.y) * self.h).floor();
-        super::super::hash(x as i32, y as i32, 1)
+        hash(x as i32, y as i32, s)
     }
+    /// The host's `rand_column`: a hash of the output pixel column at `uv`.
+    fn rand_column(&self, uv: V2, s: u32) -> f32 {
+        hash((uv.x * self.w).floor() as i32, 0, s)
+    }
+    /// The host's `rand_row`: a hash of the output pixel row at `uv`.
+    fn rand_row(&self, uv: V2, s: u32) -> f32 {
+        hash(0, ((1.0 - uv.y) * self.h).floor() as i32, s)
+    }
+}
+
+use super::super::hash;
+
+/// WGSL `fract` (`x − floor(x)`; Rust's `f32::fract` truncates instead).
+#[inline]
+fn fract(x: f32) -> f32 {
+    x - x.floor()
+}
+/// GLSL `mod` for floats (the host's `glsl_mod`).
+#[inline]
+fn glsl_mod(x: f32, y: f32) -> f32 {
+    x - y * (x / y).floor()
+}
+/// WGSL `step(edge, x)`: 1 when edge ≤ x.
+#[inline]
+fn step(edge: f32, x: f32) -> f32 {
+    if edge <= x { 1.0 } else { 0.0 }
+}
+/// WGSL `sign` (0 at 0; Rust's `signum` gives 1).
+#[inline]
+fn sign(x: f32) -> f32 {
+    if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+#[inline]
+fn dot(a: V2, b: V2) -> f32 {
+    a.x * b.x + a.y * b.y
+}
+#[inline]
+fn distance(a: V2, b: V2) -> f32 {
+    a.sub(b).length()
+}
+/// The host's `in_bounds`: strictly inside the unit square.
+#[inline]
+fn in_bounds(p: V2) -> bool {
+    0.0 < p.x && 0.0 < p.y && p.x < 1.0 && p.y < 1.0
+}
+/// The host's `rand_cell_seeded`.
+#[inline]
+fn rand_cell_seeded(cell: V2, s: u32) -> f32 {
+    hash(cell.x as i32, cell.y as i32, s)
+}
+#[inline]
+fn add4(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
+}
+/// A colour with its alpha clamped to 1 (what an 8-bit target does to upstream's).
+#[inline]
+fn alpha_at_most_1(c: [f32; 4]) -> [f32; 4] {
+    [c[0], c[1], c[2], c[3].min(1.0)]
 }
 
 /// GLSL `mix` (`a·(1−t) + b·t`, as WGSL defines it).
@@ -331,6 +399,641 @@ pub(crate) fn angular(c: &Ctx, uv: V2) -> [f32; 4] {
     // GLSL step(edge, x): 0 when x < edge
     let k = if c.progress < normalized_angle { 0.0 } else { 1.0 };
     mix4(c.from(uv), c.to(uv), k)
+}
+
+// ---- batch 2 ----
+
+// Author: hong
+// License: MIT
+pub(crate) fn book_flip(c: &Ctx, p: V2) -> [f32; 4] {
+    let progress = c.progress;
+    // Avoids dividing by zero when the page is edge-on (progress = 0.5).
+    let non_zero = |x: f32| {
+        if x.abs() < 1e-4 { if x < 0.0 { -1e-4 } else { 1e-4 } } else { x }
+    };
+    let skew_right = |p: V2| V2::new((p.x - progress) / non_zero(0.5 - progress) * 0.5, (p.y - 0.5) / (0.5 + progress * (p.x - 0.5) / 0.5) * 0.5 + 0.5);
+    let skew_left = |p: V2| V2::new((p.x - 0.5) / non_zero(progress - 0.5) * 0.5 + 0.5, (p.y - 0.5) / (0.5 + (1.0 - progress) * (0.5 - p.x) / 0.5) * 0.5 + 0.5);
+    let shade_val = 0.7f32.max((progress - 0.5).abs() * 2.0);
+    let shade = |col: [f32; 4]| [col[0] * shade_val, col[1] * shade_val, col[2] * shade_val, col[3] * 1.0];
+    let pr = step(1.0 - progress - 0.00001, p.x);
+    if p.x < 0.5 - 0.00001 { mix4(c.from(p), shade(c.to(skew_left(p))), pr) } else { mix4(shade(c.from(skew_right(p))), c.to(p), pr) }
+}
+
+// Author: Adrian Purser
+// License: MIT
+pub(crate) fn bounce(c: &Ctx, uv: V2) -> [f32; 4] {
+    let shadow_colour = [c.p[0], c.p[1], c.p[2], 1.0];
+    let (shadow_alpha, shadow_height, bounces) = (c.p[3], c.p[4], c.p[5]);
+    let time = c.progress;
+    let stime = (time * PI / 2.0).sin();
+    let phase = time * PI * bounces;
+    let y = phase.cos().abs() * (1.0 - stime);
+    let d = uv.y - y;
+    let shadow = step(d, shadow_height) * (1.0 - mix(((d / shadow_height) * shadow_alpha) + (1.0 - shadow_alpha), 1.0, smooth_step(0.95, 1.0, c.progress)));
+    mix4(mix4(c.to(uv), shadow_colour, shadow), c.from(V2::new(uv.x, uv.y + (1.0 - y))), step(d, 0.0))
+}
+
+// Author: gre
+// License: MIT
+pub(crate) fn burn(c: &Ctx, uv: V2) -> [f32; 4] {
+    let color = [c.p[0], c.p[1], c.p[2]];
+    let (a, b) = (c.from(uv), c.to(uv));
+    let pr = c.progress;
+    let a = [a[0] + pr * color[0], a[1] + pr * color[1], a[2] + pr * color[2], a[3] + 1.0];
+    let b = [b[0] + (1.0 - pr) * color[0], b[1] + (1.0 - pr) * color[1], b[2] + (1.0 - pr) * color[2], b[3] + 1.0];
+    alpha_at_most_1(mix4(a, b, pr))
+}
+
+// Author: mandubian
+// License: MIT
+pub(crate) fn butterfly_wave_scrawler(c: &Ctx, uv: V2) -> [f32; 4] {
+    let (amplitude, waves, color_separation) = (c.p[0], c.p[1], c.p[2]);
+    let compute = |p: V2, progress: f32, center: V2| {
+        let o = p.muls((progress * amplitude).sin()).sub(center);
+        // horizontal vector
+        let h = V2::new(1.0, 0.0);
+        // butterfly polar function (don't ask me why this one :))
+        let theta = dot(o, h).clamp(-1.0, 1.0).acos() * waves;
+        let s = ((2.0 * theta - PI) / 24.0).sin();
+        let s2 = s * s;
+        (theta.cos().exp() - 2.0 * (4.0 * theta).cos() + s2 * s2 * s) / 10.0
+    };
+    let p = uv;
+    let progress = c.progress;
+    let inv = 1.0 - progress;
+    let disp = compute(p, progress, V2::splat(0.5));
+    let tex_to = c.to(p.adds(inv * disp));
+    let g = c.from(p.adds(progress * disp));
+    let tex_from = [c.from(p.adds(progress * disp * (1.0 - color_separation)))[0], g[1], c.from(p.adds(progress * disp * (1.0 + color_separation)))[2], g[3]];
+    std::array::from_fn(|k| tex_to[k] * progress + tex_from[k] * inv)
+}
+
+// Author: lql
+// License: MIT
+pub(crate) fn chessboard(c: &Ctx, uv: V2) -> [f32; 4] {
+    let grid_num = c.p[0];
+    let st = uv.muls(grid_num);
+    let idx = st.adds(0.001).floor();
+    let grid = st.sub(idx);
+    let (a, b) = (c.from(uv), c.to(uv));
+    let checker = glsl_mod(idx.x + idx.y, 2.0);
+    let progress = c.progress;
+    let mix_factor = if progress <= 0.5 {
+        if checker > 0.5 { step(grid.x, progress * 2.0) } else { 0.0 }
+    } else if checker < 0.5 {
+        step(grid.x, (progress - 0.5) * 2.0)
+    } else {
+        1.0
+    };
+    mix4(a, b, mix_factor)
+}
+
+// Author: gre
+// License: MIT
+pub(crate) fn colorphase(c: &Ctx, uv: V2) -> [f32; 4] {
+    let (a, b) = (c.from(uv), c.to(uv));
+    std::array::from_fn(|k| mix(a[k], b[k], smooth_step(c.p[k], c.p[k + 4], c.progress)))
+}
+
+// License: MIT
+// Author: pthrasher
+pub(crate) fn crosshatch(c: &Ctx, p: V2) -> [f32; 4] {
+    let center = V2::new(c.p[0], c.p[1]);
+    let (threshold, fade_edge) = (c.p[2], c.p[3]);
+    let progress = c.progress;
+    let dist = distance(center, p) / threshold;
+    let r = progress - c.rand_row(p, 4).min(c.rand_column(p, 5));
+    let k = mix(0.0, mix(step(dist, r), 1.0, smooth_step(1.0 - fade_edge, 1.0, progress)), smooth_step(0.0, fade_edge, progress));
+    mix4(c.from(p), c.to(p), k)
+}
+
+const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+// Author: gre
+// License: MIT
+pub(crate) fn cube(c: &Ctx, op: V2) -> [f32; 4] {
+    let (persp, unzoom, reflection, floating) = (c.p[0], c.p[1], c.p[2], c.p[3]);
+    let progress = c.progress;
+    let project = |p: V2| V2::new(p.x * 1.0 + 0.0, p.y * -1.2 + -floating / 100.0);
+    // p : the position; persp : the perspective in [ 0, 1 ]; center : the xcenter in [0, 1] \ 0.5 excluded
+    let xskew = |p: V2, persp: f32, center: f32| {
+        let x = mix(p.x, 1.0 - p.x, center);
+        let dc = (center - 0.5).abs();
+        let sgn = if center < 0.5 { 1.0 } else { -1.0 };
+        V2::new(x, (p.y - 0.5 * (1.0 - persp) * x) / (1.0 + (persp - 1.0) * x))
+            .sub(V2::new(0.5 - dc, 0.0))
+            .mul(V2::new(0.5 / dc * sgn, 1.0))
+            .add(V2::new(if center < 0.5 { 0.0 } else { 1.0 }, 0.0))
+    };
+    let uz = unzoom * 2.0 * (0.5 - (0.5 - progress).abs());
+    let p = V2::new(-uz * 0.5 + (1.0 + uz) * op.x, -uz * 0.5 + (1.0 + uz) * op.y);
+    let from_p = xskew(p.sub(V2::new(progress, 0.0)).div(V2::new(1.0 - progress, 1.0)), 1.0 - mix(progress, 0.0, persp), 0.0);
+    let to_p = xskew(p.div(V2::new(progress, 1.0)), mix(progress.powf(2.0), 1.0, persp), 1.0);
+    if in_bounds(from_p) {
+        return c.from(from_p);
+    } else if in_bounds(to_p) {
+        return c.to(to_p);
+    }
+    let mut col = BLACK;
+    let pfr = project(from_p);
+    if in_bounds(pfr) {
+        col = add4(col, mix4([0.0; 4], c.from(pfr), reflection * mix(1.0, 0.0, pfr.y)));
+    }
+    let pto = project(to_p);
+    if in_bounds(pto) {
+        col = add4(col, mix4([0.0; 4], c.to(pto), reflection * mix(1.0, 0.0, pto.y)));
+    }
+    alpha_at_most_1(col)
+}
+
+// Author: gre
+// License: MIT
+pub(crate) fn doorway(c: &Ctx, p: V2) -> [f32; 4] {
+    let (reflection, perspective, depth) = (c.p[0], c.p[1], c.p[2]);
+    let progress = c.progress;
+    let project = |p: V2| V2::new(p.x * 1.0 + 0.0, p.y * -1.2 + -0.02);
+    let mut pfr = V2::splat(-1.0);
+    let middle_slit = 2.0 * (p.x - 0.5).abs() - progress;
+    if middle_slit > 0.0 {
+        let sgn = if p.x > 0.5 { -1.0 } else { 1.0 };
+        pfr = p.add(V2::new(sgn * (0.5 * progress), sgn * 0.0));
+        let d = 1.0 / (1.0 + perspective * progress * (1.0 - middle_slit));
+        pfr.y -= d / 2.0;
+        pfr.y *= d;
+        pfr.y += d / 2.0;
+    }
+    let size = mix(1.0, depth, 1.0 - progress);
+    let pto = p.add(V2::splat(-0.5)).mul(V2::splat(size)).add(V2::splat(0.5));
+    if in_bounds(pfr) {
+        return c.from(pfr);
+    } else if in_bounds(pto) {
+        return c.to(pto);
+    }
+    let mut col = BLACK;
+    let pt = project(pto);
+    if in_bounds(pt) {
+        col = add4(col, mix4(BLACK, c.to(pt), reflection * mix(1.0, 0.0, pt.y)));
+    }
+    alpha_at_most_1(col)
+}
+
+/// FilmBurn's 50 blur directions: `cos` / `sin` of `degrees((i / 50.) * 360.)` (computed in
+/// double precision, rounded to f32; the WGSL has the same table).
+const FILM_BURN_BLUR: [(f32, f32); 50] = [
+    (1.0, 0.0),
+    (-0.5562213, -0.8310342),
+    (-0.38123566, 0.9244779),
+    (0.9803362, -0.19733462),
+    (-0.70931876, -0.70488787),
+    (-0.19142744, 0.98150676),
+    (0.9221181, -0.38690853),
+    (-0.834335, -0.55125767),
+    (0.0062661488, 0.9999804),
+    (0.8277723, -0.5610642),
+    (-0.9267111, -0.37577465),
+    (0.20347367, 0.97908044),
+    (0.70060354, -0.71355075),
+    (-0.98273224, -0.1850335),
+    (0.39222997, 0.9198672),
+    (0.5464278, -0.83750623),
+    (-0.99992144, 0.012532052),
+    (0.5664413, 0.82410204),
+    (0.37041396, -0.9288668),
+    (-0.9778884, 0.20912728),
+    (0.7175868, 0.69646907),
+    (0.1793523, -0.9837849),
+    (-0.9171969, 0.3984342),
+    (0.8409138, 0.5411691),
+    (-0.018309265, -0.9998324),
+    (-0.8205365, 0.5715942),
+    (0.93152523, 0.36367676),
+    (-0.21525078, -0.9765588),
+    (-0.69231135, 0.7215989),
+    (0.9849739, 0.17270331),
+    (-0.40283334, -0.91527337),
+    (-0.53547686, 0.8445499),
+    (0.9996859, -0.025062134),
+    (-0.5763256, -0.8172202),
+    (-0.35828844, 0.9336109),
+    (0.97508264, -0.22184195),
+    (-0.725587, -0.68813044),
+    (-0.16700937, 0.9859553),
+    (0.91253155, -0.4090063),
+    (-0.84814745, -0.52976024),
+    (0.029861666, 0.99955404),
+    (0.8138766, -0.58103776),
+    (-0.9356655, -0.35288817),
+    (0.22747216, 0.97378457),
+    (0.6825004, -0.7308852),
+    (-0.98706084, -0.16034602),
+    (0.41427198, 0.91015315),
+    (0.5256819, -0.85068125),
+    (-0.99932957, 0.03661239),
+    (0.58493876, 0.8110775),
+];
+
+// Author: Anastasia Dunbar
+// License: MIT
+pub(crate) fn film_burn(c: &Ctx, uv: V2) -> [f32; 4] {
+    let seed = c.p[0].to_bits();
+    let progress = c.progress;
+    let sigmoid = |x: f32, a: f32| {
+        let mut b = (x * 2.0).powf(a) / 2.0;
+        if x > 0.5 {
+            b = 1.0 - (2.0 - (x * 2.0)).powf(a) / 2.0;
+        }
+        b
+    };
+    // upstream: rand(float co) = fract(sin((co * 24.9898) + Seed) * 43758.5453)
+    let rand1 = |co: f32| hash(co.to_bits() as i32, 7, seed);
+    let apow = |a: f32, b: f32| a.abs().powf(b) * sign(b);
+    let smooth_mix = |a: f32, b: f32, cc: f32| mix(a, b, sigmoid(cc, 2.0));
+    // upstream: fract(sin(dot(co, vec2(12.9898 + k * .5, 78.233 + Seed))) * 43758.5453)
+    let rand_lattice = |co: V2, k: f32| hash(co.x as i32, co.y as i32, k.to_bits() ^ seed.wrapping_mul(0x9E37_79B1));
+    let random = |co: V2, shft: f32| {
+        let co = co.adds(10.0);
+        smooth_mix(rand_lattice(co, shft.floor()), rand_lattice(co, (shft + 1.0).floor()), fract(shft))
+    };
+    let smooth_random = |co: V2, shft: f32| {
+        smooth_mix(
+            smooth_mix(random(co.floor(), shft), random(co.add(V2::new(1.0, 0.0)).floor(), shft), fract(co.x)),
+            smooth_mix(random(co.add(V2::new(0.0, 1.0)).floor(), shft), random(co.add(V2::new(1.0, 1.0)).floor(), shft), fract(co.x)),
+            fract(co.y),
+        )
+    };
+    let p = uv;
+    // the three channels of upstream's `f` are equal until `pow3`
+    let mut f = 0.0f32;
+    for k in 0..13 {
+        let i = k as f32;
+        f += ((p.x * rand1(i) * 6.0) + (progress * 8.0) + rand1(i + 1.43)).sin() * ((p.y * rand1(i + 4.4) * 6.0) + (progress * 6.0) + rand1(i + 2.4)).sin();
+        let spot = V2::new(smooth_random(V2::splat(progress * 1.3), i + 1.0), smooth_random(V2::splat(progress * 0.5), i + 6.25));
+        f += 1.0 - (p.sub(spot).length() * mix(20.0, 70.0, rand1(i))).clamp(0.0, 1.0);
+    }
+    f += 4.0;
+    f /= 11.0;
+    let s = (progress * PI).sin();
+    let f = [apow(f * 1.0, 1.0) * s, apow(f * 0.7, 2.0 - s) * s, apow(f * 0.6, 1.3) * s];
+
+    let mut q = p.subs(0.5);
+    q = q.muls(1.0 + (smooth_random(V2::splat(progress * 5.0), 6.3) * s * 0.05));
+    q = q.adds(0.5);
+
+    let mut blurred = [0.0f32; 4];
+    let bluramount = s * 0.03;
+    let k = sigmoid(progress, 10.0);
+    for (i, d) in FILM_BURN_BLUR.iter().enumerate() {
+        let dir = V2::new(d.0, d.1).muls(c.rand_pixel_seeded(uv, i as u32 + 16) + bluramount);
+        let uv2 = q.add(dir.muls(bluramount));
+        blurred = add4(blurred, mix4(c.from(uv2), c.to(uv2), k));
+    }
+    let blurred = blurred.map(|v| v / 50.0);
+    [blurred[0] + f[0], blurred[1] + f[1], blurred[2] + f[2], blurred[3] + 0.0]
+}
+
+// Author: Matt DesLauriers
+// License: MIT
+pub(crate) fn glitch_displace(c: &Ctx, uv: V2) -> [f32; 4] {
+    fn displace(tex: [f32; 4], tex_coord: V2, dot_depth: f32, texture_depth: f32, strength: f32) -> V2 {
+        let dt = tex.map(|v| v * 1.0);
+        let dis: [f32; 4] = std::array::from_fn(|k| dt[k] * dot_depth + 1.0 - tex[k] * texture_depth);
+        let dx = (dis[0] - 1.0 + texture_depth * dot_depth) * strength;
+        let dy = (dis[1] - 1.0 + texture_depth * dot_depth) * strength;
+        V2::new(tex_coord.x + dx - 0.0, tex_coord.y + dy)
+    }
+    fn ease1(t: f32) -> f32 {
+        if t == 0.0 || t == 1.0 {
+            t
+        } else if t < 0.5 {
+            0.5 * 2f32.powf((20.0 * t) - 10.0)
+        } else {
+            -0.5 * 2f32.powf(10.0 - (t * 20.0)) + 1.0
+        }
+    }
+    fn ease2(t: f32) -> f32 {
+        if t == 1.0 { t } else { 1.0 - 2f32.powf(-10.0 * t) }
+    }
+    let p = uv;
+    let progress = c.progress;
+    let color1 = c.from(p);
+    let color2 = c.to(p);
+    let disp = displace(color1, p, 0.33, 0.7, 1.0 - ease1(progress));
+    let disp2 = displace(color2, p, 0.33, 0.5, ease2(progress));
+    let d_color1 = c.to(disp);
+    let d_color2 = c.from(disp2);
+    let val = ease1(progress);
+    let m: [f32; 4] = std::array::from_fn(|k| d_color2[k].min(d_color1[k]));
+    let gray = m[0] * 0.299 + m[1] * 0.587 + m[2] * 0.114;
+    let d_color2 = [gray * 2.0, gray * 2.0, gray * 2.0, 1.0 * 2.0];
+    let color1 = mix4(color1, d_color2, smooth_step(0.0, 0.5, progress));
+    let color2 = mix4(color2, d_color1, 1.0 - smooth_step(0.5, 1.0, progress));
+    alpha_at_most_1(mix4(color1, color2, val))
+}
+
+// Author: Gunnar Roth
+// License: MIT
+pub(crate) fn glitch_memories(c: &Ctx, p: V2) -> [f32; 4] {
+    let progress = c.progress;
+    let blk = p.divs(16.0).floor();
+    let mut uv_noise = blk.divs(64.0);
+    uv_noise = uv_noise.add(V2::new((progress * 1200.0).floor(), (progress * 3500.0).floor()).divs(64.0));
+    let dist = if progress > 0.0 { V2::new(fract(uv_noise.x), fract(uv_noise.y)).subs(0.5).muls(0.3).muls(1.0 - progress) } else { V2::splat(0.0) };
+    let red = p.add(dist.muls(0.2));
+    let green = p.add(dist.muls(0.3));
+    let blue = p.add(dist.muls(0.5));
+    let g = mix4(c.from(green), c.to(green), progress);
+    [mix4(c.from(red), c.to(red), progress)[0], g[1], mix4(c.from(blue), c.to(blue), progress)[2], g[3]]
+}
+
+// Author: Fernando Kuteken
+// License: MIT
+pub(crate) fn hexagonalize(c: &Ctx, uv: V2) -> [f32; 4] {
+    const SQRT3: f32 = 1.732_050_807_568_877_2_f64 as f32;
+    const SQRT3_3: f32 = 0.577_350_269_189_625_8_f64 as f32;
+    const SQRT3_2: f32 = 0.866_025_403_784_438_6_f64 as f32;
+    const THIRD: f32 = (1.0f64 / 3.0) as f32;
+    const TWO_THIRDS: f32 = (2.0f64 / 3.0) as f32;
+    let steps = c.p[0] as i32;
+    let horizontal_hexagons = c.p[1];
+    // (q, r) of the hexagon nearest to cube coordinates (q, r, -q - r)
+    let round_hexagon = |q: f32, r: f32| {
+        let s = -q - r;
+        let (mut rq, mut rr) = ((q + 0.5).floor(), (r + 0.5).floor());
+        let rs = (s + 0.5).floor();
+        let (dq, dr, ds) = ((rq - q).abs(), (rr - r).abs(), (rs - s).abs());
+        if dq > dr && dq > ds {
+            rq = -rr - rs;
+        } else if dr > ds {
+            rr = -rq - rs;
+        }
+        (rq, rr)
+    };
+    let hexagon_from_point = |point: V2, size: f32| {
+        let point = V2::new(point.x, point.y / c.ratio).subs(0.5).divs(size);
+        let q = SQRT3_3 * point.x + (-THIRD) * point.y;
+        let r = 0.0 * point.x + TWO_THIRDS * point.y;
+        round_hexagon(q, r)
+    };
+    let point_from_hexagon = |(q, r): (f32, f32), size: f32| {
+        let x = (SQRT3 * q + SQRT3_2 * r) * size + 0.5;
+        let y = (0.0 * q + 1.5 * r) * size + 0.5;
+        V2::new(x, y * c.ratio)
+    };
+    let mut dist = 2.0 * c.progress.min(1.0 - c.progress);
+    if steps > 0 {
+        dist = (dist * steps as f32).ceil() / steps as f32;
+    }
+    let size = SQRT3_3 * dist / horizontal_hexagons;
+    let point = if dist > 0.0 { point_from_hexagon(hexagon_from_point(uv, size), size) } else { uv };
+    mix4(c.from(point), c.to(point), c.progress)
+}
+
+// Author: nwoeanhinnogaehr
+// License: MIT
+pub(crate) fn kaleidoscope(c: &Ctx, uv: V2) -> [f32; 4] {
+    let (speed, angle, power) = (c.p[0], c.p[1], c.p[2]);
+    let progress = c.progress;
+    let mut p = uv;
+    let q = p;
+    let mut t = progress.powf(power) * speed;
+    p = p.subs(0.5);
+    for _ in 0..7 {
+        let (s, co) = (t.sin(), t.cos());
+        p = V2::new(s * p.x + co * p.y, s * p.y - co * p.x);
+        t += angle;
+        p = V2::new((glsl_mod(p.x, 2.0) - 1.0).abs(), (glsl_mod(p.y, 2.0) - 1.0).abs());
+    }
+    mix4(mix4(c.from(q), c.to(q), progress), mix4(c.from(p), c.to(p), progress), 1.0 - 2.0 * (progress - 0.5).abs())
+}
+
+/// Ian McEwan's (Ashima Arts, MIT) 2-D simplex noise, as luminance_melt carries it.
+fn snoise(v: V2) -> f32 {
+    const CX: f32 = 0.211_324_865_405_187_f64 as f32; // (3.0-sqrt(3.0))/6.0
+    const CY: f32 = 0.366_025_403_784_439_f64 as f32; // 0.5*(sqrt(3.0)-1.0)
+    const CZ: f32 = -0.577_350_269_189_626_f64 as f32; // -1.0 + 2.0 * C.x
+    const CW: f32 = 0.024_390_243_902_439_f64 as f32; // 1.0 / 41.0
+    const INV289: f32 = (1.0f64 / 289.0) as f32;
+    const K1: f32 = 1.792_842_914_001_59_f64 as f32;
+    const K2: f32 = 0.853_734_720_953_14_f64 as f32;
+    let mod289 = |x: f32| x - (x * INV289).floor() * 289.0;
+    let permute = |x: f32| mod289(((x * 34.0) + 1.0) * x);
+    // First corner
+    let d = dot(v, V2::splat(CY));
+    let i = V2::new((v.x + d).floor(), (v.y + d).floor());
+    let di = dot(i, V2::splat(CX));
+    let x0 = V2::new(v.x - i.x + di, v.y - i.y + di);
+    // Other corners
+    let i1 = if x0.x > x0.y { V2::new(1.0, 0.0) } else { V2::new(0.0, 1.0) };
+    let x12 = [x0.x + CX - i1.x, x0.y + CX - i1.y, x0.x + CZ, x0.y + CZ];
+    // Permutations
+    let i = V2::new(mod289(i.x), mod289(i.y));
+    let py = [permute(i.y + 0.0), permute(i.y + i1.y), permute(i.y + 1.0)];
+    let p = [permute(py[0] + i.x + 0.0), permute(py[1] + i.x + i1.x), permute(py[2] + i.x + 1.0)];
+    let mut m = [(0.5 - dot(x0, x0)).max(0.0), (0.5 - (x12[0] * x12[0] + x12[1] * x12[1])).max(0.0), (0.5 - (x12[2] * x12[2] + x12[3] * x12[3])).max(0.0)];
+    m = m.map(|v| v * v);
+    m = m.map(|v| v * v);
+    // Gradients: 41 points uniformly over a line, mapped onto a diamond.
+    let x = p.map(|v| 2.0 * fract(v * CW) - 1.0);
+    let h = x.map(|v| v.abs() - 0.5);
+    let a0: [f32; 3] = std::array::from_fn(|k| x[k] - (x[k] + 0.5).floor());
+    // Normalise gradients implicitly by scaling m
+    for (k, mk) in m.iter_mut().enumerate() {
+        *mk *= K1 - K2 * (a0[k] * a0[k] + h[k] * h[k]);
+    }
+    // Compute final noise value at P
+    let g = [a0[0] * x0.x + h[0] * x0.y, a0[1] * x12[0] + h[1] * x12[1], a0[2] * x12[2] + h[2] * x12[3]];
+    130.0 * (m[0] * g[0] + m[1] * g[1] + m[2] * g[2])
+}
+
+// Author: 0gust1
+// License: MIT
+pub(crate) fn luminance_melt(c: &Ctx, uv: V2) -> [f32; 4] {
+    let direction = c.p[0] > 0.5;
+    let l_threshold = c.p[1];
+    let above = c.p[2] > 0.5;
+    let luminance = |color: [f32; 4]| color[0] * 0.299 + color[1] * 0.587 + color[2] * 0.114;
+    let center = V2::new(1.0, if direction { 1.0 } else { 0.0 });
+    let p = uv;
+    let progress = c.progress;
+    let x = progress;
+    let dist = distance(center, p) - progress * snoise(V2::new(p.x, 0.0)).exp();
+    let r = x - c.rand_column(p, 3);
+    let from = c.from(p);
+    let lum = luminance(from);
+    let melts = if above { lum > l_threshold } else { lum < l_threshold };
+    let m = if dist <= r && melts { 1.0 } else { progress * progress * progress };
+    mix4(from, c.to(p), m)
+}
+
+// Author: Rich Harris
+// License: MIT
+pub(crate) fn perlin(c: &Ctx, uv: V2) -> [f32; 4] {
+    let (scale, smoothness, seed) = (c.p[0], c.p[1], c.p[2].to_bits());
+    let random = |co: V2| rand_cell_seeded(co, seed);
+    // 2D Noise based on Morgan McGuire @morgan3d
+    let noise = |st: V2| {
+        let i = st.floor();
+        let f = st.sub(i);
+        // Four corners in 2D of a tile
+        let a = random(i);
+        let b = random(i.add(V2::new(1.0, 0.0)));
+        let cc = random(i.add(V2::new(0.0, 1.0)));
+        let d = random(i.add(V2::new(1.0, 1.0)));
+        // Cubic Hermine Curve.  Same as SmoothStep()
+        let u = V2::new(f.x * f.x * (3.0 - 2.0 * f.x), f.y * f.y * (3.0 - 2.0 * f.y));
+        mix(a, b, u.x) + (cc - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y
+    };
+    let n = noise(uv.muls(scale));
+    let p = mix(-smoothness, 1.0 + smoothness, c.progress);
+    let q = smooth_step(p - smoothness, p + smoothness, n);
+    mix4(c.from(uv), c.to(uv), 1.0 - q)
+}
+
+// Author: Mr Speaker
+// License: MIT
+#[allow(clippy::approx_constant, reason = "upstream's 3.1415, kept for the same look")]
+pub(crate) fn pinwheel(c: &Ctx, p: V2) -> [f32; 4] {
+    let speed = c.p[0];
+    let circ_pos = atan2_safe(p.y - 0.5, p.x - 0.5) + c.progress * speed;
+    let mod_pos = glsl_mod(circ_pos, 3.1415 / 4.0);
+    let sgn = sign(c.progress - mod_pos);
+    mix4(c.to(p), c.from(p), step(sgn, 0.5))
+}
+
+// Author: Fernando Kuteken
+// License: MIT
+pub(crate) fn polar_function(c: &Ctx, uv: V2) -> [f32; 4] {
+    let segments = c.p[0] as i32;
+    let angle = atan2_safe(uv.y - 0.5, uv.x - 0.5) - 0.5 * PI;
+    let radius = ((segments as f32 * angle).cos() + 4.0) / 4.0;
+    let difference = uv.sub(V2::splat(0.5)).length();
+    if difference > radius * c.progress { c.from(uv) } else { c.to(uv) }
+}
+
+// Author: bobylito
+// License: MIT
+pub(crate) fn polka_dots_curtain(c: &Ctx, uv: V2) -> [f32; 4] {
+    let dots = c.p[0];
+    let center = V2::new(c.p[1], c.p[2]);
+    let cell = uv.muls(dots);
+    let next_image = distance(V2::new(fract(cell.x), fract(cell.y)), V2::splat(0.5)) < (c.progress / distance(uv, center).max(1e-6));
+    if next_image { c.to(uv) } else { c.from(uv) }
+}
+
+// Author: gre
+// License: MIT
+pub(crate) fn random_squares(c: &Ctx, p: V2) -> [f32; 4] {
+    let size = V2::new(c.p[0], c.p[1]);
+    let smoothness = c.p[2];
+    let r = rand_cell(size.mul(p).adds(0.001).floor());
+    let m = 1.0 - smooth_step(-smoothness, 0.0, r - (c.progress * (1.0 + smoothness)));
+    mix4(c.from(p), c.to(p), m)
+}
+
+// Author: gre
+// License: MIT
+pub(crate) fn squeeze(c: &Ctx, uv: V2) -> [f32; 4] {
+    let color_separation = c.p[0];
+    let y = 0.5 + (uv.y - 0.5) / (1.0 - c.progress);
+    if !(0.0..=1.0).contains(&y) {
+        return c.to(uv);
+    }
+    let fp = V2::new(uv.x, y);
+    let off = V2::new(c.progress * 0.0, c.progress * color_separation);
+    let col = c.from(fp);
+    let cn = c.from(fp.sub(off));
+    let cp = c.from(fp.add(off));
+    [cn[0], col[1], cp[2], col[3]]
+}
+
+// Author: gre
+// License: MIT
+pub(crate) fn swap(c: &Ctx, p: V2) -> [f32; 4] {
+    let (reflection, perspective, depth) = (c.p[0], c.p[1], c.p[2]);
+    let progress = c.progress;
+    let project = |p: V2| V2::new(p.x * 1.0 + 0.0, p.y * -1.2 + -0.02);
+    let mut size = mix(1.0, depth, progress);
+    let mut persp = perspective * progress;
+    let pfr = V2::new((p.x + -0.0) * (size / (1.0 - perspective * progress)) + 0.0, (p.y + -0.5) * (size / (1.0 - size * persp * p.x)) + 0.5);
+    size = mix(1.0, depth, 1.0 - progress);
+    persp = perspective * (1.0 - progress);
+    let pto = V2::new((p.x + -1.0) * (size / (1.0 - perspective * (1.0 - progress))) + 1.0, (p.y + -0.5) * (size / (1.0 - size * persp * (0.5 - p.x))) + 0.5);
+    if progress < 0.5 {
+        if in_bounds(pfr) {
+            return c.from(pfr);
+        }
+        if in_bounds(pto) {
+            return c.to(pto);
+        }
+    }
+    if in_bounds(pto) {
+        return c.to(pto);
+    }
+    if in_bounds(pfr) {
+        return c.from(pfr);
+    }
+    let mut col = BLACK;
+    let pf = project(pfr);
+    if in_bounds(pf) {
+        col = add4(col, mix4(BLACK, c.from(pf), reflection * mix(1.0, 0.0, pf.y)));
+    }
+    let pt = project(pto);
+    if in_bounds(pt) {
+        col = add4(col, mix4(BLACK, c.to(pt), reflection * mix(1.0, 0.0, pt.y)));
+    }
+    alpha_at_most_1(col)
+}
+
+// License: MIT
+// Author: Sergey Kosarevsky
+#[allow(clippy::approx_constant, reason = "upstream's 3.14159, kept for the same look")]
+pub(crate) fn swirl(c: &Ctx, uv: V2) -> [f32; 4] {
+    let radius = 1.0f32;
+    let t = c.progress;
+    let mut uv = uv.sub(V2::splat(0.5));
+    let dist = uv.length();
+    if dist < radius {
+        let percent = (radius - dist) / radius;
+        let a = if t <= 0.5 { mix(0.0, 1.0, t / 0.5) } else { mix(1.0, 0.0, (t - 0.5) / 0.5) };
+        let theta = percent * percent * a * 8.0 * 3.14159;
+        let (s, co) = (theta.sin(), theta.cos());
+        uv = V2::new(dot(uv, V2::new(co, -s)), dot(uv, V2::new(s, co)));
+    }
+    let uv = uv.adds(0.5);
+    mix4(c.from(uv), c.to(uv), t)
+}
+
+// Author: Brandon Anzaldi
+// License: MIT
+pub(crate) fn tv_static(c: &Ctx, p: V2) -> [f32; 4] {
+    let offset = c.p[0];
+    if c.progress < offset {
+        c.from(p)
+    } else if c.progress > (1.0 - offset) {
+        c.to(p)
+    } else {
+        let n = c.rand_pixel_seeded(p, c.progress.to_bits());
+        [n, n, n, 1.0]
+    }
+}
+
+// Author: gre
+// License: MIT
+pub(crate) fn wind(c: &Ctx, uv: V2) -> [f32; 4] {
+    let (size, reversed) = (c.p[0], c.p[1] > 0.5);
+    let x = if reversed { 1.0 - uv.x } else { uv.x };
+    let r = c.rand_row(uv, 6);
+    let m = 1.0 - smooth_step(-size, 0.0, x * (1.0 - size) + size * r - (c.progress * (1.0 + size)));
+    mix4(c.from(uv), c.to(uv), m)
+}
+
+// Author: gre
+// License: MIT
+pub(crate) fn window_slice(c: &Ctx, p: V2) -> [f32; 4] {
+    let (count, smoothness) = (c.p[0], c.p[1]);
+    let pr = smooth_step(-smoothness, 0.0, p.x - c.progress * (1.0 + smoothness));
+    let s = step(pr, fract(count * p.x + 0.001));
+    mix4(c.from(p), c.to(p), s)
 }
 
 #[cfg(test)]
