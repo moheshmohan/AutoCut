@@ -13,6 +13,7 @@ repository = "https://github.com/storytold/filmcraft"
 [workspace.dependencies]
 # internal
 filmcraft-time = { path = "crates/time" }
+filmcraft-locks = { path = "crates/locks" }
 filmcraft-geom = { path = "crates/geom" }
 filmcraft-color = { path = "crates/color" }
 filmcraft-bitstream = { path = "crates/bitstream" }

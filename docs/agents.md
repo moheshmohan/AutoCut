@@ -321,6 +321,15 @@ Everything you need to contribute is also in the public docs above. Ask a mainta
 For parallel agents, use one git worktree and one `CARGO_TARGET_DIR` per agent, and keep each crate
 with one owner ([contributing.md §5](contributing.md#5-parallel-work-several-agents-or-worktrees)).
 
+Some resources on one machine can't be shared: the **browser** an agent drives with the real mouse
+and keyboard, and the **GPU** a large model speaks on. FilmCraft takes an advisory lock on each
+(`crates/locks`): the Google Photos picker agent and `photos tidy` hold `chrome`, cloned-voice
+narration holds `gpu`, and a busy lock waits, then fails naming the holder. `filmcraft-cli locks`
+shows who holds what. A session that drives the browser itself (Claude in Chrome, a script) holds
+it for the duration: `filmcraft-cli locks hold chrome --minutes 30 --note "<what>"` in the
+background, stopped when done. The OS releases a lock when its process exits, so a crash never
+leaves one stale.
+
 ## 6. Decision rules
 
 Don't block on choices you can make yourself:

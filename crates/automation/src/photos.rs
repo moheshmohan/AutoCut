@@ -93,6 +93,9 @@ fn open_picker(uri: &str, agent: bool, notes: &mut Vec<String>) -> Option<String
     filmcraft_gphotos::open_in_browser(uri).then(|| "in your browser".to_string())
 }
 
+/// Longest an agent's pick waits for the browser to be free.
+const BROWSER_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// Open (or resume) a picking session, let the screen agent (`request`; none: the user picks)
 /// drive Google's picker, and wait within `opts.wait` for the selection, then download it. The
 /// wait ends early once the agent finished without pressing Done (nothing will be picked), and
@@ -108,6 +111,22 @@ pub fn pick_driven(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Driven, GPhotosError> {
     let driven_by_agent = request.is_some();
+    // an agent drives Chrome with the real mouse and keyboard: one driver at a time (another
+    // pick, `photos tidy`, a Claude session holding the browser), held until the pick is over
+    let _browser = if driven_by_agent {
+        let mut said = false;
+        let wait = opts.wait.min(BROWSER_WAIT);
+        let guard = filmcraft_locks::acquire(filmcraft_locks::Resource::Chrome, "Google Photos picker agent", wait, &mut |e| {
+            if !said {
+                progress(&format!("waiting for {e}"));
+                said = true;
+            }
+        })
+        .map_err(|e| GPhotosError::Setup(format!("{e}; try again when it is free (`filmcraft-cli locks` shows who holds what)")))?;
+        Some(guard)
+    } else {
+        None
+    };
     let mut notes: Vec<String> = Vec::new();
     let prepared = gp.prepare_with(opts, &mut |uri| open_picker(uri, driven_by_agent, &mut notes), progress)?;
     for n in &notes {

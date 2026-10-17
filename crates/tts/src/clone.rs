@@ -880,6 +880,24 @@ mod natural {
     const TAKE_SEEDS: u64 = 7919;
     /// Prompts kept built (encoding a sample takes seconds).
     const PROMPTS: usize = 4;
+    /// Longest wait for the GPU while another process speaks on it (it is held one script at
+    /// a time, so a wait this long means someone reserved it).
+    const GPU_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+    /// The GPU, ours while the guard lives; waits for another process's script to finish.
+    /// Without a place to keep locks it speaks unlocked rather than refuse.
+    fn gpu() -> Result<Option<filmcraft_locks::Guard>, TtsError> {
+        use filmcraft_locks::{LockError, Resource};
+        // tests speak with tiny fake models: never wait on (or hold up) a real narration
+        if cfg!(test) {
+            return Ok(None);
+        }
+        match filmcraft_locks::acquire(Resource::Gpu, "VoxCPM narration", GPU_WAIT, &mut |_| {}) {
+            Ok(g) => Ok(Some(g)),
+            Err(e @ LockError::Busy(..)) => Err(TtsError::Model(format!("{e}; try again when it is free (`filmcraft-cli locks` shows who holds what)"))),
+            Err(LockError::Io(_)) => Ok(None),
+        }
+    }
 
     /// The release in `models_dir`, loaded once and shared (one at a time: they are large).
     fn model(models_dir: &Path, pkg: &catalog::VoxcpmPackage) -> Result<Arc<VoxCpm>, TtsError> {
@@ -984,6 +1002,7 @@ mod natural {
             // a spoken style goes in front of every utterance; VoxCPM2 follows it only after a
             // reference-only prompt (a continuation prompt sets the delivery itself)
             let style = params.style.filter(|_| self.model.variant() == Variant::V2 && !self.prompt.continues()).map(text::style_prefix).unwrap_or_default();
+            let _gpu = gpu()?;
             let mut out: Vec<f32> = Vec::new();
             let mut spoke = false;
             for (i, piece) in text::pieces(script)?.into_iter().enumerate() {

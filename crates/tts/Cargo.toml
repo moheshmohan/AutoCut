@@ -16,11 +16,13 @@ kokoro = ["dep:candle-core", "dep:candle-nn", "dep:zip", "dep:serde_json", "dep:
 # VoxCPM zero-shot voice cloning on candle (pure Rust; builds on the Kokoro stack's loaders and
 # text front end). Off by default and in wasm builds. On macOS it runs on the GPU through
 # candle's Metal backend (below), falling back to the CPU without one.
-voxcpm = ["kokoro", "dep:rayon"]
+voxcpm = ["kokoro", "dep:rayon", "dep:filmcraft-locks"]
 
 [dependencies]
 filmcraft-tts-text = { workspace = true, optional = true }
 filmcraft-audio-dsp = { workspace = true, optional = true }
+# the GPU lock VoxCPM speaks under, so parallel sessions take turns
+filmcraft-locks = { workspace = true, optional = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 # narration cache keys (pure Rust; also builds for wasm)

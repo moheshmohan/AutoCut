@@ -1853,6 +1853,7 @@ dependencies = [
  "filmcraft-autocut",
  "filmcraft-engine",
  "filmcraft-gphotos",
+ "filmcraft-locks",
  "filmcraft-screenagent",
  "filmcraft-time",
  "image",
@@ -1917,6 +1918,7 @@ dependencies = [
  "filmcraft-export",
  "filmcraft-gphotos",
  "filmcraft-gpu",
+ "filmcraft-locks",
  "filmcraft-media",
  "filmcraft-mpegts",
  "filmcraft-mxf",
@@ -2222,6 +2224,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "filmcraft-locks"
+version = "0.8.0"
+
+[[package]]
 name = "filmcraft-matroska"
 version = "0.8.0"
 dependencies = [
@@ -2438,6 +2444,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "filmcraft-audio-dsp",
+ "filmcraft-locks",
  "filmcraft-tts-text",
  "rayon",
  "serde",

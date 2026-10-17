@@ -39,6 +39,7 @@ filmcraft-automation = { workspace = true }
 filmcraft-autocut = { workspace = true }
 filmcraft-gphotos = { workspace = true }
 filmcraft-screenagent = { workspace = true }
+filmcraft-locks = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 

@@ -1,0 +1,12 @@
+[package]
+name = "filmcraft-locks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Advisory locks on shared machine resources (the browser, the GPU) so parallel sessions take turns"
+
+[lints]
+workspace = true
+
+[dependencies]

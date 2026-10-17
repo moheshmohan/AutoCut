@@ -267,6 +267,12 @@ SUBCOMMANDS
                                  nothing else); a tab that asks \"Leave site?\" is closed once
                                  more, which Chrome takes as Leave (macOS)
   photos cached [--json]         list the Google Photos originals already downloaded
+  locks [--json]                 who holds the shared resources (chrome: the browser an agent
+                                 drives; gpu: on-device models) — picks, tidy and narration take
+                                 them and wait their turn
+  locks hold <chrome|gpu> [--minutes M] [--note N]
+                                 hold a resource yourself (default 30 min, Ctrl-C to let go):
+                                 e.g. before driving Chrome by hand or from another session
   photos add <mediaItemId>...    import already-downloaded items again (ids from `photos cached`)
   bench-decode <media> [--frames N]
   mcp                           MCP server on stdio (headless, or --bridge to the live app)
@@ -780,6 +786,45 @@ async fn cli() {
             let (w, h, _) = f.to_linear_f32_decimated(2);
             outln!("½-res linear conversion {w}x{h}: {:.1} ms", t1.elapsed().as_secs_f64() * 1000.0);
         }
+        "locks" => match a.pos(1) {
+            None => {
+                let held: Vec<Value> = filmcraft_locks::Resource::ALL
+                    .iter()
+                    .map(|r| {
+                        let h = filmcraft_locks::holder(*r);
+                        json!({"resource": r.id(), "free": h.is_none(), "holder": h.as_ref().map(|h| json!({"pid": h.pid, "since": h.since, "what": h.what}))})
+                    })
+                    .collect();
+                if a.flag("--json") {
+                    outln!("{}", json!(held));
+                } else {
+                    for r in filmcraft_locks::Resource::ALL {
+                        match filmcraft_locks::holder(r) {
+                            Some(h) => outln!("{:7} busy: {h}", r.id()),
+                            None => outln!("{:7} free", r.id()),
+                        }
+                    }
+                }
+            }
+            Some("hold") => {
+                let r = a.pos(2).and_then(filmcraft_locks::Resource::from_id).unwrap_or_else(|| usage("locks hold <chrome|gpu> [--minutes M] [--note N]"));
+                let minutes = a
+                    .opt("--minutes")
+                    .map(|m| {
+                        m.parse::<f64>()
+                            .ok()
+                            .filter(|m| m.is_finite() && *m > 0.0 && *m <= 24.0 * 60.0)
+                            .unwrap_or_else(|| usage("locks hold: --minutes wants a number of minutes up to a day"))
+                    })
+                    .unwrap_or(30.0);
+                let note = a.opt("--note").unwrap_or("held by hand (filmcraft-cli locks hold)").to_string();
+                let _guard = filmcraft_locks::acquire(r, &note, std::time::Duration::from_secs(600), &mut |e| diag(format_args!("locks hold: waiting: {e}")))
+                    .unwrap_or_else(|e| fail(format!("locks hold: {e}")));
+                diag(format_args!("locks hold: holding {} for {minutes} min ({note}); Ctrl-C lets go", r.label()));
+                tokio::time::sleep(std::time::Duration::from_secs_f64(minutes * 60.0)).await;
+            }
+            Some(other) => usage(format!("locks: unknown `{other}` (locks [--json] | locks hold <chrome|gpu>)")),
+        },
         "photos" => {
             let what = a.pos(1).unwrap_or_else(|| usage("photos auth | pick | tidy | upload <file> | album create|add | albums | cached | add <id>..."));
             match what {
@@ -1019,6 +1064,11 @@ async fn cli() {
                     if a.positionals.len() > 2 {
                         usage("photos tidy (closes the Google Photos picker tabs left open in Chrome)");
                     }
+                    // tidying drives Chrome too: not while an agent or a session holds it
+                    let _browser = filmcraft_locks::acquire(filmcraft_locks::Resource::Chrome, "photos tidy", std::time::Duration::from_secs(120), &mut |e| {
+                        diag(format_args!("photos tidy: waiting: {e}"))
+                    })
+                    .unwrap_or_else(|e| fail(format!("photos tidy: {e}")));
                     let tidied = tokio::task::spawn_blocking(tidy_picker_tabs).await.unwrap_or_else(|e| fail(format!("photos tidy: {e}")));
                     match tidied {
                         Ok(t) => {
