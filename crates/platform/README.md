@@ -6,6 +6,9 @@ encoding, behind `filmcraft_export::VideoEncoder`. It holds OS media FFI and not
 It is the one crate of the workspace allowed to contain `unsafe`, under the rules of
 [ADR 0001](../../docs/adr/0001-platform-ffi.md) and [AGENTS.md](../../AGENTS.md) §0.3.
 
+Secret storage (OAuth tokens in the macOS Keychain) is not here: it needs no FFI, and lives in
+[`filmcraft-oauth`](../oauth/README.md#where-tokens-live), which explains why.
+
 ```rust
 // at startup (the desktop app, filmcraft-cli, the bench)
 let availability = filmcraft_platform::register(); // Available("VideoToolbox") on macOS, Available("Media Foundation") on Windows, Available("VA-API") on Linux with a driver

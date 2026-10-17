@@ -62,6 +62,7 @@ filmcraft-ui-egui = { path = "crates/ui-egui" }
 filmcraft-automation = { path = "crates/automation" }
 filmcraft-autocut = { path = "crates/autocut" }
 filmcraft-gphotos = { path = "crates/gphotos" }
+filmcraft-oauth = { path = "crates/oauth" }
 filmcraft-screenagent = { path = "crates/screenagent" }
 filmcraft-platform = { path = "crates/platform" }
 filmcraft-testkit = { path = "crates/testkit" }

@@ -100,6 +100,8 @@ const LAYERS: &[(&str, u8)] = &[
     ("automation", 5),
     ("autocut", 5),
     ("gphotos", 5),
+    // OAuth sign-ins and their tokens (loopback HTTP, the Keychain through /usr/bin/security)
+    ("oauth", 5),
     // desktop OS automation (osascript, screencapture, HTTP to Ollama): not WASM-portable
     ("screenagent", 5),
     ("filmcraft", 6),
@@ -126,6 +128,7 @@ const SAME_LAYER: &[(&str, &str)] = &[
     ("tts", "tts-text"),
     ("automation", "autocut"),
     ("automation", "gphotos"),
+    ("gphotos", "oauth"),
     ("automation", "screenagent"),
 ];
 

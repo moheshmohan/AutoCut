@@ -1,0 +1,24 @@
+[package]
+name = "filmcraft-oauth"
+description = "OAuth 2.0 for desktop sign-ins (authorization code + PKCE S256, system browser, loopback redirect, refresh) and where the tokens live: the macOS Keychain, or an owner-only file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# HTTPS to token endpoints: pure-Rust TLS (rustls + RustCrypto), OS certificate verification,
+# the same stack as filmcraft-gphotos.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "json"] }
+rustls = { version = "0.23", default-features = false }
+rustls-rustcrypto = { version = "0.0.2-alpha" }
+# PKCE S256 (RFC 7636 §4.2) and hashing data-dir paths into Keychain account names.
+sha2 = "0.10"
+# PKCE verifiers and `state` values from the OS's secure random source.
+getrandom = "0.3"

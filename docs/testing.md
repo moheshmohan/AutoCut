@@ -59,6 +59,7 @@ each, so `cargo test` stays offline). `cargo xtask live` runs them in one go and
 | `voice` | a new line in a cloned voice (`--voice`, else the first natural clone) heard back by Whisper, ≥ 50 % of its words | a VoxCPM clone; takes the GPU lock |
 | `analysis` | a clip (`--clip`, else one the analysis cache knows shows a robot) analysed twice, the second from the cache | Ollama |
 | `showcase` | a short narrated showcase of that clip exported; its QA must report no errors | the above |
+| `keychain` (`--google`) | a throwaway sign-in saved in, moved into (from a `tokens.json`) and removed from the macOS Keychain (`FILMCRAFT_LIVE_KEYCHAIN`) | a Mac with an unlocked login keychain |
 | `album`, `upload` (`--google`) | the "FilmCraft live check" album made or found, the showcase uploaded into it | `photos auth --albums` |
 | `picker` (`--picker`) | the picker agent's two searches in one session, then `photos tidy` | Chrome, Screen Recording; takes the browser lock — hands off the mouse |
 

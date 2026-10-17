@@ -195,12 +195,15 @@ SUBCOMMANDS
                                 handed-off document. Config: AUTOCUT_LLM_MODEL,
                                 AUTOCUT_VLM_MODEL, AUTOCUT_OLLAMA_HOST,
                                 AUTOCUT_CONFIDENCE_THRESHOLD
-  photos auth [--upload | --albums]
+  photos auth [--upload | --albums | --sign-out]
                                  sign in to Google Photos (browser consent, one time; needs
                                  client_secret.json from Google Cloud — see crates/gphotos/README.md);
                                  --upload also asks to add to your library (for `photos upload`),
                                  --albums that and to see the albums FilmCraft makes (for the
-                                 album commands), keeping what you granted before
+                                 album commands), keeping what you granted before. The sign-in
+                                 is kept in the macOS Keychain (elsewhere, or with
+                                 FILMCRAFT_SECRET_STORE=file, in an owner-only tokens.json).
+                                 --sign-out revokes it at Google and forgets it here
   photos upload <file> [--description D] [--album <title|id>]
                                  upload a file (an export: MP4/MOV/… video up to 10 GB, or a
                                  photo up to 200 MB) to your Google Photos library, resumably in
@@ -829,29 +832,49 @@ async fn cli() {
             let what = a.pos(1).unwrap_or_else(|| usage("photos auth | pick | tidy | upload <file> | album create|add | albums | cached | add <id>..."));
             match what {
                 "auth" => {
+                    use filmcraft_gphotos::auth::Access;
                     let dir = filmcraft_gphotos::data_dir();
+                    if a.flag("--sign-out") {
+                        if a.flag("--upload") || a.flag("--albums") {
+                            usage("photos auth: --sign-out goes alone");
+                        }
+                        match filmcraft_gphotos::auth::sign_out(&filmcraft_gphotos::api::http_agent(), &dir) {
+                            Ok(out) if !out.was_signed_in => outln!("not signed in to Google Photos; nothing to sign out"),
+                            Ok(out) => {
+                                if let Err(e) = &out.revoked {
+                                    diag(format_args!("photos auth: Google did not confirm the revocation: {e}"));
+                                }
+                                outln!("signed out of Google Photos{}", if out.revoked.is_ok() { " (revoked at Google)" } else { " here" });
+                            }
+                            Err(e) => fail(format!("photos auth --sign-out: {e}")),
+                        }
+                        return;
+                    }
                     // --upload: also the permission to add to the library; --albums: that and
                     // reading back the albums FilmCraft made (incremental consent)
                     let access = if a.flag("--albums") {
-                        filmcraft_gphotos::auth::Access::PickUploadAndAlbums
+                        Access::PickUploadAndAlbums
                     } else if a.flag("--upload") {
-                        filmcraft_gphotos::auth::Access::PickAndUpload
+                        Access::PickAndUpload
                     } else {
-                        filmcraft_gphotos::auth::Access::Pick
+                        Access::Pick
                     };
                     match filmcraft_gphotos::auth::ClientSecret::load(&dir) {
                         Ok(secret) => match filmcraft_gphotos::auth::consent(&secret, &dir, access) {
-                            Ok(t) => outln!(
-                                "signed in to Google Photos ({}); tokens in {}",
-                                if t.check_albums().is_ok() {
-                                    "pick, upload and albums"
-                                } else if t.grants(filmcraft_gphotos::auth::UPLOAD_SCOPE) {
-                                    "pick and upload"
-                                } else {
-                                    "pick"
-                                },
-                                dir.join("tokens.json").to_string_lossy()
-                            ),
+                            Ok((t, stored)) => {
+                                if let Some(note) = &stored.note {
+                                    diag(format_args!("photos auth: {note}"));
+                                }
+                                outln!(
+                                    "signed in to Google Photos ({}); tokens in {}",
+                                    match Access::for_grants(&t) {
+                                        Access::PickUploadAndAlbums => "pick, upload and albums",
+                                        Access::PickAndUpload => "pick and upload",
+                                        Access::Pick => "pick",
+                                    },
+                                    stored.place
+                                )
+                            }
                             Err(e) => fail(format!("photos auth: {e}")),
                         },
                         Err(e) => {

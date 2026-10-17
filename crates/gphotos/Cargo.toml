@@ -1,6 +1,6 @@
 [package]
 name = "filmcraft-gphotos"
-description = "Google Photos for the editor: OAuth (installed-app flow), the Photos Picker API, and an import cache"
+description = "Google Photos for the editor: the sign-in (on filmcraft-oauth), the Photos Picker API, an import cache, uploads and albums"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 filmcraft-engine = { workspace = true }
+filmcraft-oauth = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

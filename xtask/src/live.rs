@@ -12,6 +12,8 @@
 //! - `analysis`: a clip (`--clip`, else one the analysis cache already knows shows a robot) is
 //!   analysed twice; the second run must come from the analysis cache.
 //! - `showcase`: a short narrated showcase of that clip, exported (and checked by its QA).
+//! - `keychain` (with `--google`): the macOS Keychain keeps, moves in (from a `tokens.json`)
+//!   and forgets a throwaway sign-in (`FILMCRAFT_LIVE_KEYCHAIN`; passes elsewhere).
 //! - `album`, `upload` (with `--google`): an album in the signed-in Google Photos library
 //!   ("FilmCraft live check", made once, reused after) and the showcase uploaded into it.
 //! - `picker` (with `--picker`): the picker agent drives Chrome — two searches in one session —
@@ -44,6 +46,7 @@ const STAGES: &[(&str, &str)] = &[
     ("voice", "a cloned line heard back"),
     ("analysis", "analysis cache hit"),
     ("showcase", "a short showcase built and exported"),
+    ("keychain", "a throwaway sign-in kept in and moved into the Keychain"),
     ("album", "Google Photos album made or found"),
     ("upload", "the showcase uploaded into the album"),
     ("picker", "picker agent: two searches, then tidy"),
@@ -86,7 +89,7 @@ pub(crate) fn wanted(o: &Options, id: &str) -> bool {
     match &o.only {
         Some(list) => list.iter().any(|s| s == id),
         None => match id {
-            "album" | "upload" => o.google,
+            "keychain" | "album" | "upload" => o.google,
             "picker" => o.picker,
             _ => true,
         },
@@ -396,6 +399,7 @@ pub(crate) fn run_live(args: &[String]) -> Result<(), String> {
             "voice" => voice(&run, &o),
             "analysis" => analysis(&mut run, &o),
             "showcase" => showcase(&mut run, &o),
+            "keychain" => cargo_test(&run, id, ("FILMCRAFT_LIVE_KEYCHAIN", "1"), &["-p", "filmcraft-oauth", "--test", "live_keychain"]),
             "album" => cargo_test(&run, id, ("FILMCRAFT_GPHOTOS_LIVE_ALBUM", ALBUM), &["-p", "filmcraft-gphotos", "--test", "live_albums"]),
             "upload" => upload(&run),
             "picker" => picker(&run),
@@ -428,7 +432,7 @@ mod tests {
         let on: Vec<&str> = STAGES.iter().map(|(id, _)| *id).filter(|id| wanted(&o, id)).collect();
         assert_eq!(on, ["models", "screen", "whisper", "voice", "analysis", "showcase"]);
         let o = parse(&args(&["--google", "--picker"])).unwrap();
-        assert!(wanted(&o, "album") && wanted(&o, "upload") && wanted(&o, "picker"));
+        assert!(wanted(&o, "keychain") && wanted(&o, "album") && wanted(&o, "upload") && wanted(&o, "picker"));
         let o = parse(&args(&["--only", "voice,album"])).unwrap();
         let on: Vec<&str> = STAGES.iter().map(|(id, _)| *id).filter(|id| wanted(&o, id)).collect();
         assert_eq!(on, ["voice", "album"]);

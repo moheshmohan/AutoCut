@@ -14,9 +14,9 @@ fn json_out(o: &Output) -> Value {
     serde_json::from_slice(&o.stdout).expect("JSON on stdout")
 }
 
-/// Uploads without a Google Photos sign-in (a data dir of the test's own, so the user's sign-in
-/// is never read) fail before anything is sent, naming the command that fixes it; usage errors
-/// are usage errors.
+/// Uploads without a Google Photos sign-in (a data dir of the test's own, its sign-in in
+/// owner-only files, so the user's sign-in and Keychain are never read) fail before anything is
+/// sent, naming the command that fixes it; usage errors are usage errors.
 #[test]
 fn photos_upload_without_a_sign_in_names_the_fix() {
     let dir = std::env::temp_dir().join(format!("filmcraft-cli-upload-{}", std::process::id()));
@@ -26,12 +26,28 @@ fn photos_upload_without_a_sign_in_names_the_fix() {
     let clip = dir.join("clip.mp4");
     std::fs::write(&clip, b"not really a movie").unwrap();
     let clip = clip.to_string_lossy().to_string();
-    let run =
-        |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(args).env("FILMCRAFT_DATA_DIR", &data).output().expect("spawn filmcraft-cli");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
+            .args(args)
+            .env("FILMCRAFT_DATA_DIR", &data)
+            .env("FILMCRAFT_SECRET_STORE", "file")
+            .output()
+            .expect("spawn filmcraft-cli")
+    };
     let err = |o: &Output| String::from_utf8_lossy(&o.stderr).to_string();
 
     assert_eq!(run(&["photos", "upload"]).status.code(), Some(2));
     assert_eq!(run(&["photos", "upload", &clip, &clip]).status.code(), Some(2));
+    // signing out with nothing signed in: said, nothing sent; --sign-out goes alone
+    let o = run(&["photos", "auth", "--sign-out"]);
+    assert!(o.status.success() && String::from_utf8_lossy(&o.stdout).contains("nothing to sign out"), "{}", err(&o));
+    assert_eq!(run(&["photos", "auth", "--sign-out", "--upload"]).status.code(), Some(2));
+    // an unreadable sign-in is still forgotten (and Google is not asked: nothing is sent)
+    std::fs::write(data.join("google-photos/tokens.json"), "{not json").unwrap();
+    let o = run(&["photos", "auth", "--sign-out"]);
+    assert!(o.status.success() && String::from_utf8_lossy(&o.stdout).contains("signed out of Google Photos here"), "{}", err(&o));
+    assert!(err(&o).contains("could not be read") && err(&o).contains("myaccount.google.com"), "{}", err(&o));
+    assert!(!data.join("google-photos/tokens.json").exists());
     let o = run(&["photos", "upload", &clip, "--description", "Robots"]);
     assert_eq!(o.status.code(), Some(1), "{}", err(&o));
     assert!(err(&o).contains("not connected") && err(&o).contains("photos auth --upload"), "{}", err(&o));
@@ -69,8 +85,14 @@ fn photos_albums_without_consent_name_the_fix() {
     let clip = dir.join("clip.mp4");
     std::fs::write(&clip, b"not really a movie").unwrap();
     let clip = clip.to_string_lossy().to_string();
-    let run =
-        |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(args).env("FILMCRAFT_DATA_DIR", &data).output().expect("spawn filmcraft-cli");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
+            .args(args)
+            .env("FILMCRAFT_DATA_DIR", &data)
+            .env("FILMCRAFT_SECRET_STORE", "file")
+            .output()
+            .expect("spawn filmcraft-cli")
+    };
     let err = |o: &Output| String::from_utf8_lossy(&o.stderr).to_string();
 
     // usage errors: exit 2, nothing read
@@ -142,6 +164,7 @@ fn showcase_from_an_album_checks_before_it_picks() {
         Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
             .args(args)
             .env("FILMCRAFT_DATA_DIR", &data)
+            .env("FILMCRAFT_SECRET_STORE", "file")
             .env("AUTOCUT_OLLAMA_HOST", "http://127.0.0.1:9")
             .output()
             .expect("spawn filmcraft-cli")

@@ -1,9 +1,11 @@
 //! Google Photos for the editor: pick cloud media in Google's own picker and import it, and
 //! upload finished exports to the user's library.
 //!
-//! - [`auth`]: the OAuth 2.0 installed-app flow (browser + loopback redirect) and the token
-//!   store, under `<data dir>/google-photos/`. The Photos Picker's read-only scope always; the
-//!   Library API's append-only scope only after `photos auth --upload` (incremental consent).
+//! - [`auth`]: the sign-in, on the shared OAuth module (`filmcraft-oauth`: PKCE, the system
+//!   browser, a loopback redirect on a random port, refresh), with the tokens in the macOS
+//!   Keychain (an owner-only `<data dir>/google-photos/tokens.json` elsewhere). The Photos
+//!   Picker's read-only scope always; the Library API's append-only scope only after
+//!   `photos auth --upload` (incremental consent).
 //! - [`api`]: the Photos Picker API client — picking sessions, polling, the picked items.
 //! - [`cache`]: downloads originals into a local cache so an item is fetched only once.
 //! - [`upload`]: the Library API's resumable upload and `mediaItems:batchCreate`, behind a
@@ -44,9 +46,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use api::{PickedItem, PickingSession, Poll};
+use auth::Grants as _;
 
-/// Everything Google-Photos-related lives here: `client_secret.json`, `tokens.json`, and the
-/// downloaded-media cache.
+/// Everything Google-Photos-related lives here: `client_secret.json`, the sign-in's
+/// `signin.json` note (or, without a Keychain, `tokens.json`), and the downloaded-media cache.
 pub fn data_dir() -> PathBuf {
     filmcraft_engine::autosave::default_data_dir().unwrap_or_else(|| PathBuf::from(".")).join("google-photos")
 }
@@ -58,11 +61,12 @@ const MAX_POLLS: usize = 10_000;
 /// Consecutive failed polls (network blips) tolerated before giving up.
 const MAX_POLL_FAILURES: u32 = 3;
 
-/// A configured client: credentials, fresh tokens, and the HTTP agent.
+/// A configured client: credentials, fresh tokens, where they are kept, and the HTTP agent.
 #[derive(Clone)]
 pub struct GooglePhotos {
     pub secret: auth::ClientSecret,
     tokens: std::sync::Arc<std::sync::Mutex<auth::Tokens>>,
+    vault: Arc<filmcraft_oauth::TokenVault>,
     agent: ureq::Agent,
 }
 
@@ -178,17 +182,20 @@ pub struct Prepared {
 }
 
 impl GooglePhotos {
-    /// Load credentials and tokens from the data dir, refreshing the access token if needed.
+    /// Load credentials and tokens (the Keychain, or `tokens.json`, which moves into the Keychain
+    /// here the first time), refreshing the access token if needed.
     pub fn configured() -> Result<Self, GPhotosError> {
         let dir = data_dir();
         let secret = auth::ClientSecret::load(&dir)?;
-        let mut tokens = auth::Tokens::load(&dir)?;
+        let vault = Arc::new(auth::vault(&dir));
+        let (mut tokens, stored) = auth::load(&vault)?;
+        note(&stored);
         let agent = api::http_agent();
         if tokens.needs_refresh() {
             auth::refresh(&agent, &secret, &mut tokens)?;
-            tokens.save(&dir)?;
+            note(&vault.save(&tokens).map_err(auth::from_oauth)?);
         }
-        Ok(Self { secret, tokens: std::sync::Arc::new(std::sync::Mutex::new(tokens)), agent })
+        Ok(Self { secret, tokens: std::sync::Arc::new(std::sync::Mutex::new(tokens)), vault, agent })
     }
 
     /// An access token that is refreshed on demand (callers hold the lock only while copying).
@@ -196,7 +203,7 @@ impl GooglePhotos {
         let mut tokens = self.tokens.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if tokens.needs_refresh() {
             auth::refresh(&self.agent, &self.secret, &mut tokens)?;
-            tokens.save(&data_dir())?;
+            note(&self.vault.save(&tokens).map_err(auth::from_oauth)?);
         }
         Ok(tokens.access_token.clone())
     }
@@ -418,8 +425,16 @@ impl GooglePhotos {
     }
 }
 
-/// Whether an upload can start, from what is on disk in `dir` (no network): the OAuth client,
-/// a sign-in, and the upload permission. `Err` says what to do.
+/// Tell the user (stderr: stdout may be a protocol stream) what a load or save did on the way:
+/// a sign-in moved into the Keychain, or kept in a file because the Keychain could not take it.
+fn note(stored: &filmcraft_oauth::Stored) {
+    if let Some(n) = &stored.note {
+        eprintln!("google photos: {n}");
+    }
+}
+
+/// Whether an upload can start, from what is on disk in `dir` (no network, no Keychain): the
+/// OAuth client, a sign-in, and the upload permission. `Err` says what to do.
 pub fn upload_readiness(dir: &Path) -> Result<(), String> {
     if !dir.join("client_secret.json").is_file() {
         return Err(format!(
@@ -427,12 +442,12 @@ pub fn upload_readiness(dir: &Path) -> Result<(), String> {
             dir.join("client_secret.json").display()
         ));
     }
-    let tokens = auth::Tokens::load(dir).map_err(|_| "Google Photos is not connected: run `filmcraft-cli photos auth --upload`".to_string())?;
-    tokens.check_upload().map_err(|e| e.to_string())
+    let granted = auth::granted(dir).map_err(|_| "Google Photos is not connected: run `filmcraft-cli photos auth --upload`".to_string())?;
+    granted.check_upload().map_err(|e| e.to_string())
 }
 
-/// Whether a pick can start, from what is on disk in `dir` (no network): the OAuth client and a
-/// sign-in with the picker's permission. `Err` says what to do.
+/// Whether a pick can start, from what is on disk in `dir` (no network, no Keychain): the OAuth
+/// client and a sign-in with the picker's permission. `Err` says what to do.
 pub fn pick_readiness(dir: &Path) -> Result<(), String> {
     if !dir.join("client_secret.json").is_file() {
         return Err(format!(
@@ -440,11 +455,11 @@ pub fn pick_readiness(dir: &Path) -> Result<(), String> {
             dir.join("client_secret.json").display()
         ));
     }
-    auth::Tokens::load(dir).map(drop).map_err(|e| format!("Google Photos is not connected: {e}"))
+    auth::granted(dir).map(drop).map_err(|e| format!("Google Photos is not connected: {e}"))
 }
 
-/// Whether album commands can run, from what is on disk in `dir` (no network): the OAuth
-/// client, a sign-in, and the album permissions. `Err` says what to do.
+/// Whether album commands can run, from what is on disk in `dir` (no network, no Keychain): the
+/// OAuth client, a sign-in, and the album permissions. `Err` says what to do.
 pub fn album_readiness(dir: &Path) -> Result<(), String> {
     if !dir.join("client_secret.json").is_file() {
         return Err(format!(
@@ -452,8 +467,8 @@ pub fn album_readiness(dir: &Path) -> Result<(), String> {
             dir.join("client_secret.json").display()
         ));
     }
-    let tokens = auth::Tokens::load(dir).map_err(|_| "Google Photos is not connected: run `filmcraft-cli photos auth --albums`".to_string())?;
-    tokens.check_albums().map_err(|e| e.to_string())
+    let granted = auth::granted(dir).map_err(|_| "Google Photos is not connected: run `filmcraft-cli photos auth --albums`".to_string())?;
+    granted.check_albums().map_err(|e| e.to_string())
 }
 
 /// How long [`EngineUploader::ready`] trusts its last look at the disk (it runs while drawing).
@@ -562,40 +577,9 @@ enum Waited {
     OutOfTime(PickingSession),
 }
 
-/// Open an https link in the default browser, detached and silent (stdout may be an MCP
-/// stream). Anything that is not `https://` is refused, so a hostile link can never become an
-/// opener flag or a local file.
-pub fn open_in_browser(url: &str) -> bool {
-    if !url.starts_with("https://") || url.chars().any(char::is_whitespace) {
-        return false;
-    }
-    #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("open");
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("rundll32");
-        c.arg("url.dll,FileProtocolHandler");
-        c
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = std::process::Command::new("xdg-open");
-    #[cfg(not(any(unix, windows)))]
-    return false;
-    #[cfg(any(unix, windows))]
-    {
-        use std::process::Stdio;
-        match cmd.arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-            Ok(mut child) => {
-                // reap the opener without blocking (xdg-open can outlive the call)
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-                true
-            }
-            Err(_) => false,
-        }
-    }
-}
+/// Open an https link in the default browser, detached and silent (the shared opener of
+/// `filmcraft-oauth`: anything that is not `https://` is refused).
+pub use filmcraft_oauth::open_in_browser;
 
 /// Google Photos failures, all human-readable.
 #[derive(Debug, thiserror::Error)]
@@ -779,7 +763,7 @@ mod tests {
         assert!(e.contains("not connected") && e.contains("photos auth"), "{e}");
         std::fs::write(dir.join("tokens.json"), "{not json").unwrap();
         assert!(pick_readiness(&dir).unwrap_err().contains("not connected"));
-        auth::Tokens { access_token: "a".into(), refresh_token: Some("r".into()), expires_at: 1, scope: auth::SCOPE.into() }.save(&dir).unwrap();
+        save(&dir, &auth::Tokens { access_token: "a".into(), refresh_token: Some("r".into()), expires_at: 1, scope: auth::SCOPE.into() });
         assert_eq!(pick_readiness(&dir), Ok(()), "the picker needs no more than its own permission");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -790,7 +774,7 @@ mod tests {
         assert!(album_readiness(&dir).unwrap_err().contains("photos auth --albums"));
         std::fs::write(dir.join("client_secret.json"), r#"{"installed":{"client_id":"id","client_secret":"s"}}"#).unwrap();
         let t = |scope: &str| auth::Tokens { access_token: "a".into(), refresh_token: Some("r".into()), expires_at: 1, scope: scope.into() };
-        t(&format!("{} {}", auth::SCOPE, auth::UPLOAD_SCOPE)).save(&dir).unwrap();
+        save(&dir, &t(&format!("{} {}", auth::SCOPE, auth::UPLOAD_SCOPE)));
         let e = album_readiness(&dir).unwrap_err();
         assert!(e.contains("consent") && e.contains("photos auth --albums"), "{e}");
         assert_eq!(upload_readiness(&dir), Ok(()), "uploads alone still work");
@@ -798,7 +782,7 @@ mod tests {
         let up = EngineUploader::new(dir.clone());
         assert!(up.albums_ready().unwrap_err().contains("--albums"));
         assert_eq!(up.ready(), Ok(()));
-        t(&format!("{} {} {}", auth::SCOPE, auth::UPLOAD_SCOPE, auth::ALBUM_SCOPE)).save(&dir).unwrap();
+        save(&dir, &t(&format!("{} {} {}", auth::SCOPE, auth::UPLOAD_SCOPE, auth::ALBUM_SCOPE)));
         assert_eq!(album_readiness(&dir), Ok(()));
         assert_eq!(EngineUploader::new(dir.clone()).albums_ready(), Ok(()));
         std::fs::remove_dir_all(&dir).ok();
@@ -809,8 +793,36 @@ mod tests {
         GooglePhotos {
             secret: auth::ClientSecret { client_id: "id".into(), client_secret: "s".into() },
             tokens: Arc::new(Mutex::new(tokens)),
+            vault: Arc::new(filmcraft_oauth::TokenVault::file_only(Path::new("/nonexistent/filmcraft-gphotos-test"))),
             agent: api::http_agent(),
         }
+    }
+
+    /// A sign-in saved the way a machine without a Keychain keeps it.
+    fn save(dir: &Path, tokens: &auth::Tokens) {
+        filmcraft_oauth::TokenVault::file_only(dir).save(tokens).unwrap();
+    }
+
+    /// A sign-in in the Keychain (a fake one here): readiness answers from `signin.json`
+    /// without asking the store.
+    #[test]
+    fn readiness_reads_a_keychain_sign_in_from_its_note() {
+        use filmcraft_engine::photos::PhotosUploader as _;
+        let dir = temp("keychain-ready");
+        std::fs::write(dir.join("client_secret.json"), r#"{"installed":{"client_id":"id","client_secret":"s"}}"#).unwrap();
+        let store = Arc::new(filmcraft_oauth::MemoryStore::new());
+        let vault = filmcraft_oauth::TokenVault::with_store(&dir, store.clone());
+        let scope = format!("{} {}", auth::SCOPE, auth::UPLOAD_SCOPE);
+        let stored = vault.save(&auth::Tokens { access_token: "ya29".into(), refresh_token: Some("1//r".into()), expires_at: 1, scope }).unwrap();
+        assert_eq!(stored.place, filmcraft_oauth::Place::Secure("memory".into()));
+        assert!(!dir.join("tokens.json").exists() && dir.join("signin.json").is_file());
+        assert_eq!(upload_readiness(&dir), Ok(()));
+        assert_eq!(pick_readiness(&dir), Ok(()));
+        assert!(album_readiness(&dir).unwrap_err().contains("--albums"));
+        assert_eq!(EngineUploader::new(dir.clone()).ready(), Ok(()));
+        let note = std::fs::read_to_string(dir.join("signin.json")).unwrap();
+        assert!(!note.contains("ya29") && !note.contains("1//r"), "no token on disk: {note}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn temp(tag: &str) -> PathBuf {
@@ -863,12 +875,12 @@ mod tests {
         let e = upload_readiness(&dir).unwrap_err();
         assert!(e.contains("not connected") && e.contains("photos auth --upload"), "{e}");
         let t = |scope: &str| auth::Tokens { access_token: "a".into(), refresh_token: Some("r".into()), expires_at: 1, scope: scope.into() };
-        t(auth::SCOPE).save(&dir).unwrap();
+        save(&dir, &t(auth::SCOPE));
         let e = upload_readiness(&dir).unwrap_err();
         assert!(e.contains("consent") && e.contains("photos auth --upload"), "{e}");
         std::fs::write(dir.join("tokens.json"), "{not json").unwrap();
         assert!(upload_readiness(&dir).unwrap_err().contains("not connected"));
-        t(&format!("{} {}", auth::SCOPE, auth::UPLOAD_SCOPE)).save(&dir).unwrap();
+        save(&dir, &t(&format!("{} {}", auth::SCOPE, auth::UPLOAD_SCOPE)));
         assert_eq!(upload_readiness(&dir), Ok(()));
         let up = EngineUploader::new(dir.clone());
         assert_eq!(up.ready(), Ok(()));

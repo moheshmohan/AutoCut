@@ -2138,6 +2138,7 @@ name = "filmcraft-gphotos"
 version = "0.8.0"
 dependencies = [
  "filmcraft-engine",
+ "filmcraft-oauth",
  "rustls",
  "rustls-rustcrypto",
  "serde",
@@ -2282,6 +2283,20 @@ name = "filmcraft-mxf"
 version = "0.8.0"
 dependencies = [
  "filmcraft-testkit",
+]
+
+[[package]]
+name = "filmcraft-oauth"
+version = "0.8.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "rustls",
+ "rustls-rustcrypto",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]

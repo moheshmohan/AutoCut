@@ -35,8 +35,9 @@ publishing mode is fine — you are the only user.
    any port, so no redirect URI needs adding.
 5. Save it as `~/Library/Application Support/FilmCraft/google-photos/client_secret.json`
    (or the equivalent data dir on your platform).
-6. Run `filmcraft-cli photos auth` — a browser opens, you consent, tokens land next to the
-   secret (owner-only permissions). Done.
+6. Run `filmcraft-cli photos auth` — a browser opens, you consent, and the sign-in goes into
+   the macOS Keychain (elsewhere: an owner-only `tokens.json` next to the secret). Done. See
+   [Where the sign-in lives](#where-the-sign-in-lives).
 
 To **upload** exports as well:
 
@@ -57,8 +58,33 @@ To make **albums** (and upload into them):
 `--upload` adds `photoslibrary.appendonly`; `--albums` adds that and
 `photoslibrary.readonly.appcreateddata`. Nothing else is ever requested (the retired
 `photoslibrary`, `photoslibrary.readonly` and `photoslibrary.sharing` never are). Tokens never
-leave this machine and are stored `0600`. A `tokens.json` from the old Library-API version of
-this crate is refused with a "run `photos auth` again" error.
+leave this machine. A sign-in from the old Library-API version of this crate is refused with a
+"run `photos auth` again" error.
+
+### Where the sign-in lives
+
+The sign-in runs on the shared OAuth module, [`filmcraft-oauth`](../oauth/README.md):
+authorization code with PKCE (S256), the consent page in your default browser, the redirect
+caught on `http://127.0.0.1:<a random port>` with its `state` checked, then a page saying you
+can return to FilmCraft.
+
+- **On a Mac** the tokens are a Keychain item named **FilmCraft Google Photos** (Keychain Access
+  shows it; its account is the data directory, so each `FILMCRAFT_DATA_DIR` has its own).
+  `<data dir>/google-photos/signin.json` beside the secret notes the granted scopes, without
+  any token, so readiness checks never open the Keychain.
+- **Elsewhere**, with `FILMCRAFT_SECRET_STORE=file`, or when the Keychain cannot take a save (a
+  locked keychain nobody unlocks within two minutes, say), they are `tokens.json` there,
+  readable only by you (`0600`); `photos auth` says which, and why.
+- **Moving in:** a `tokens.json` from an earlier FilmCraft moves into the Keychain the first
+  time it is used (`photos pick`, `upload`, an album command, the app's upload); the file is
+  removed only after the Keychain item reads back the same. Nothing to do by hand.
+- **Expiry:** while your Google Cloud app is in Testing mode, Google ends its sign-ins after
+  7 days. The next call then says "Google no longer accepts the saved sign-in … sign in again:
+  `filmcraft-cli photos auth`" (with `--upload` or `--albums` when the sign-in had them) —
+  run that, and incremental consent keeps every permission you granted before.
+- **Signing out:** `filmcraft-cli photos auth --sign-out` revokes the sign-in at Google and
+  removes the Keychain item, `tokens.json` and `signin.json` (if Google cannot be reached it
+  says so; remove FilmCraft's access at https://myaccount.google.com/connections).
 
 ## Using it
 
@@ -343,19 +369,21 @@ large or of a type Google Photos does not take, an expired upload session.
 - **Videos download whole** (`=dv`, Google's high-quality file, up to GBs) and only once Google
   has finished processing them; a still-processing video is reported in `failed`.
 - **Photos come without location.** Google strips GPS from `=d` downloads.
-- **Test-mode sign-ins lapse after 7 days** if the Google Cloud app stays in Testing; re-run
-  `photos auth` (`--upload` if you upload). Promote the app to "In production" (still
-  unverified, 100 users) to stop that.
+- **Test-mode sign-ins lapse after 7 days** if the Google Cloud app stays in Testing; the error
+  names the `photos auth` to re-run (`--upload` or `--albums` when the sign-in had them).
+  Promote the app to "In production" (still unverified, 100 users) to stop that.
 - **Uploads count against your Google storage** and land in the library as Google stores them
   (in an album only with `--album`; Google may re-encode for playback). A cancelled upload leaves nothing in the
   library; Google drops the unfinished session on its own.
 
 ## Layout
 
-- `auth.rs` — the installed-app OAuth flow (browser + loopback redirect on
-  `http://127.0.0.1:8417`, waiting at most five minutes and ignoring stray connections), the
-  picker-only or picker-and-upload consent (`Access`), token refresh, the `0600` token store,
-  the granted-scope checks.
+- `auth.rs` — Google Photos on [`filmcraft-oauth`](../oauth/README.md) (PKCE, the system
+  browser, a loopback redirect on a random port, waiting at most five minutes and ignoring stray
+  connections): the picker-only, upload or album consent (`Access`), refresh (a lapsed sign-in
+  names the `photos auth` that grants what it had), the token vault (the Keychain item
+  "FilmCraft Google Photos", else the `0600` `tokens.json`; the first-use move into the
+  Keychain), the granted-scope checks (`Grants`, on the tokens or the on-disk summary), sign-out.
 - `api.rs` — the Picker client: sessions (create / get / delete), the polling rule,
   `mediaItems.list` paging, Google's error messages with setup hints.
 - `cache.rs` — streamed downloads into a per-item cache; ids and filenames sanitized so
@@ -377,8 +405,10 @@ The tab handling lives in `filmcraft-screenagent` (`tabs.rs`) and the many-sessi
 `filmcraft-automation` (`photos.rs`), which drives this crate's sessions.
 
 `cargo test -p filmcraft-gphotos` is fully offline: session, polling-interval and media item
-JSON parsing (including hostile and truncated input), the polling rule, token store and scope
-checks, consent URLs, the loopback redirect handling, cache path sanitizing and the
+JSON parsing (including hostile and truncated input), the polling rule, the token vault (files,
+and a fake Keychain for the move of a `tokens.json` into it) and scope checks, consent URLs and
+the command a lapsed sign-in names (the OAuth flow itself — PKCE, the loopback redirect, a mock
+token endpoint — is tested in `filmcraft-oauth`), readiness read from disk, cache path sanitizing and the
 download-host check, and the whole upload protocol against a fake Google (chunking, resume
 after dropped or half-kept chunks and lost final answers, retry caps, cancellation, hostile
 session URLs, granularities, offsets and tokens, `batchCreate` answers, error mapping), and
