@@ -67,7 +67,11 @@ E5 adjustment clips + per-track ducking; B6 TikTok.
    private (YouTube's rule since July 2020) — fine as a review step; apply for the API audit when
    the uploader is proven. The adapter must handle **Brand Accounts**: connect several channels
    (each sign-in grants one channel, picked in Google's account chooser), list them, and choose
-   the channel per upload; tokens per channel.
+   the channel per upload; tokens per channel. **Default channel: H4hacks (@H4hacks)**; the
+   user's others are Mohesh Mohan (@MoheshMohan), S4Saranya, Life Of 'S'. Done 2026-10-17: the
+   YouTube Data API v3 is enabled on `autocut-photos`; no consent-screen scopes are listed (the app
+   asks at sign-in, as Google Photos does). If Google refuses a Brand Account at sign-in (Testing
+   mode), add its address as a test user — the user has agreed to that.
 2. **Instagram**: the **Instagram API with Instagram Login** (no Facebook Page needed; a
    professional — Creator or Business — account, the user's own). A Meta developer app of the
    user's, the user's Instagram account as its tester; set up from the main session in Chrome.
