@@ -11,6 +11,7 @@
 
 pub mod caption;
 pub mod effect;
+pub mod elements;
 pub mod essential;
 pub mod find;
 pub mod gltransition;
