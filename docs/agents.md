@@ -300,9 +300,9 @@ media, sidecar and `ATTRIBUTION.md` entry.
 4. [architecture.md](architecture.md), then the README and tests of the crate you'll touch.
 5. [contributing.md](contributing.md) (how to add things, gates) and [testing.md](testing.md).
 
-Maintainers also keep a local planning folder, `plan/`. It is gitignored and not in the repository,
-and holds the task-level plan, the status file and behaviour reference notes. If you don't have it,
-everything you need to contribute is in the public docs above. Ask a maintainer for a task id.
+Maintainers also keep planning notes in `plan/` (roadmaps, execution plans, status), tracked in the
+repository; only `plan/premiere/`, the behaviour reference screenshots, stays local and gitignored.
+Everything you need to contribute is also in the public docs above. Ask a maintainer for a task id.
 
 ## 5. Autonomous work loop
 

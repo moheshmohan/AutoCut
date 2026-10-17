@@ -31,7 +31,7 @@ wrong base, 20–30 min gates re-run six times, CI minutes burned on every push.
 | 0.5 | Fork CI | Upstream-only workflows (FreeBSD schedule — failing, Windows ARM64 — 34 min a push, Nix, release) disabled on the fork; one macOS job on push |
 | 0.6 | Disk hygiene | Each agent builds in `target/agent-<lane>`, deleted on merge; weekly `cargo clean --profile dev` (or cargo-sweep); scratch removed per task. (Cleaned today: 173 → 404 GB free) |
 | 0.7 | One-command live check | `cargo xtask live` (env-gated, takes the locks): picker multi-search + tidy, upload into an album, a cloned line heard back, analysis-cache hit, a 10 s showcase build — report in `target/live/`, never touches `~/Movies` |
-| 0.8 | Where plans live | `plan/` is gitignored (your roadmap needed `git add -f`). Either keep force-adding, or move roadmaps and execution plans to tracked `docs/plans/` |
+| 0.8 | Where plans live | **Done 2026-10-17**: `plan/` is tracked; only `plan/premiere/` (the Premiere visual reference) stays gitignored |
 
 ## 3. Roadmap phases as parallel lanes
 
@@ -69,7 +69,7 @@ E5 adjustment clips + per-track ducking; B6 TikTok.
 3. **Soundfont**: GeneralUser GS needs its current licence confirmed before bundling; otherwise D1
    starts on the oscillator voices.
 4. **ACE-Step 1.5 port (120–250 h)**: commit in Q2, or keep tier 1 only?
-5. **Plans location**: keep `plan/` gitignored + `-f`, or move to `docs/plans/`.
+5. ~~Plans location~~ — decided: `plan/` is tracked.
 
 ## 5. Risks
 

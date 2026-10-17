@@ -1,5 +1,6 @@
 *~
-plan/
+# plan notes are tracked; the Premiere visual reference never is (AGENTS.md §1)
+plan/premiere/
 /target
 /dist
 /log
