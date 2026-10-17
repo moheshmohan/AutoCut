@@ -148,7 +148,10 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      goes to the next shot), a shorter one fewer. Nothing is ever padded with footage where the
      robot is out of view or with held frames, so a target beyond the footage comes out
      shorter: `seconds` in the output is what it came to, next to `target_seconds`;
-   - **the music and its beat**: a generated bed (`audio.generate` at `--bpm`), or with
+   - **the music and its beat**: a generated bed (`audio.generate` at `--bpm`: arranged to the
+     show's exact length, its energy building through the intro, high through the entries and
+     settling for the outro, scaled to the mood's own energy; it ends on a bar with its final
+     chord ringing out, so it is not faded; its exact beat map is the grid the cuts land on), or with
      `--music` (`Options::music`) the user's own track: imported, its tempo and beats measured
      by the engine (`media.beats`, the beat tracker of `filmcraft_audio_dsp::remix`), then
      laid from 0 under the whole show — cut to length and faded out when it is longer,

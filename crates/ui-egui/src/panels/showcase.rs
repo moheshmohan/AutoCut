@@ -39,7 +39,17 @@ const MAX_TEXT: usize = 600;
 /// Thumbnails asked for per frame (the frame cache decodes them in the background).
 const THUMBS_PER_FRAME: usize = 64;
 /// Music moods (`audio.generate`).
-const MOODS: [(&str, &str); 4] = [("epic", "Epic"), ("tense", "Tense"), ("uplifting", "Uplifting"), ("calm", "Calm")];
+const MOODS: [(&str, &str); 9] = [
+    ("epic", "Epic"),
+    ("tense", "Tense"),
+    ("uplifting", "Uplifting"),
+    ("calm", "Calm"),
+    ("happy", "Happy"),
+    ("dark", "Dark"),
+    ("dreamy", "Dreamy"),
+    ("energetic", "Energetic"),
+    ("sad", "Sad"),
+];
 
 /// One entry under review.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -78,7 +88,7 @@ pub struct ShowcaseDraft {
     pub title: String,
     /// Narration voice id (`clone:<name>` for a cloned voice); empty: no narration.
     pub voice: String,
-    /// Music mood: epic, tense, uplifting or calm.
+    /// Music mood: epic, tense, uplifting, calm, happy, dark, dreamy, energetic or sad.
     pub mood: String,
     pub intro: String,
     pub outro: String,

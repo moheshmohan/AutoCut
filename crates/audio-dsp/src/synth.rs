@@ -1,17 +1,20 @@
-//! Procedural audio for edits: sound effects (whoosh, impact, riser, drone) and a cinematic music
-//! bed, synthesized from oscillators, noise, envelopes and filters. No samples, no models: the
-//! same parameters and seed always give the same audio, so a generated cue is reproducible from
-//! the project alone.
+//! Procedural audio for edits: sound effects (whoosh, impact, riser, drone) and music beds,
+//! synthesized from oscillators, noise, envelopes and filters. No samples, no models: the same
+//! parameters and seed always give the same audio, so a generated cue is reproducible from the
+//! project alone.
 //!
 //! [`generate`] returns planar stereo at the requested rate. Every length and parameter is
 //! clamped ([`MAX_SFX_SECONDS`], [`MAX_MUSIC_SECONDS`], tempo, intensity), so hostile input can
-//! cost at most a bounded buffer. The music is loudness-normalised to [`MUSIC_LUFS`] (a bed that
-//! sits under narration) and peak-limited; effects are normalised to a peak instead.
+//! cost at most a bounded buffer. Music comes from the soundtrack engine ([`crate::music`]:
+//! arranged to the exact length, ending on a bar), loudness-normalised to [`MUSIC_LUFS`] (a bed
+//! that sits under narration) and peak-limited; effects are normalised to a peak instead.
 
 use std::f64::consts::{PI, TAU};
 
 use crate::biquad::{Biquad, Coeffs, FilterType};
 use crate::loudness::LoudnessMeter;
+
+pub use crate::music::Mood;
 
 /// Longest sound effect, seconds.
 pub const MAX_SFX_SECONDS: f64 = 30.0;
@@ -68,40 +71,6 @@ impl Kind {
     /// Longest cue of this kind, seconds.
     pub fn max_seconds(self) -> f64 {
         if matches!(self, Kind::Music | Kind::Drone) { MAX_MUSIC_SECONDS } else { MAX_SFX_SECONDS }
-    }
-}
-
-/// The character of a music bed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mood {
-    /// Minor, driving drums and arpeggio: trailers, showcases.
-    Epic,
-    /// Minor, sparse, pulsing: suspense.
-    Tense,
-    /// Major, bright arpeggio: positive reveals.
-    Uplifting,
-    /// Major, pads and soft pulse only.
-    Calm,
-}
-
-impl Mood {
-    pub const ALL: [Mood; 4] = [Mood::Epic, Mood::Tense, Mood::Uplifting, Mood::Calm];
-
-    pub fn id(self) -> &'static str {
-        match self {
-            Mood::Epic => "epic",
-            Mood::Tense => "tense",
-            Mood::Uplifting => "uplifting",
-            Mood::Calm => "calm",
-        }
-    }
-
-    pub fn from_id(s: &str) -> Option<Mood> {
-        Mood::ALL.into_iter().find(|m| m.id().eq_ignore_ascii_case(s.trim()))
-    }
-
-    fn minor(self) -> bool {
-        matches!(self, Mood::Epic | Mood::Tense)
     }
 }
 
@@ -185,6 +154,14 @@ pub fn generate(p: &Params, sample_rate: u32) -> Result<Stereo, SynthError> {
         return Err(SynthError("the length must be more than zero seconds".into()));
     }
     let seconds = seconds.clamp(0.05, p.kind.max_seconds());
+    if p.kind == Kind::Music {
+        let mut req = crate::music::Request::new(p.mood, filmcraft_time::Tick::from_seconds_f64(seconds));
+        req.seed = p.seed;
+        req.bpm = Some(p.bpm);
+        req.key = Some(p.key);
+        req.energy = Some(crate::music::Energy::Level(if p.intensity.is_finite() { p.intensity.clamp(0.0, 1.0) } else { 0.7 }));
+        return crate::music::generate(&req, sample_rate).map(|t| t.mix);
+    }
     let sr = f64::from(sample_rate);
     let n = (seconds * sr).round() as usize;
     let mut left = Vec::new();
@@ -195,10 +172,8 @@ pub fn generate(p: &Params, sample_rate: u32) -> Result<Stereo, SynthError> {
     right.resize(n, 0.0);
     let q = Clamped {
         sr,
-        seconds,
         seed: p.seed,
         intensity: if p.intensity.is_finite() { p.intensity.clamp(0.0, 1.0) } else { 0.7 },
-        bpm: if p.bpm.is_finite() { p.bpm.clamp(40.0, 200.0) } else { 96.0 },
         key: p.key.rem_euclid(12),
         mood: p.mood,
     };
@@ -206,8 +181,7 @@ pub fn generate(p: &Params, sample_rate: u32) -> Result<Stereo, SynthError> {
         Kind::Whoosh => whoosh(&q, &mut left, &mut right),
         Kind::Impact => impact(&q, &mut left, &mut right),
         Kind::Riser => riser(&q, &mut left, &mut right),
-        Kind::Drone => drone(&q, &mut left, &mut right),
-        Kind::Music => music(&q, &mut left, &mut right),
+        Kind::Drone | Kind::Music => drone(&q, &mut left, &mut right),
     }
     match p.kind {
         Kind::Music | Kind::Drone => normalize_loudness(&mut left, &mut right, sr, MUSIC_LUFS),
@@ -224,10 +198,8 @@ pub fn generate(p: &Params, sample_rate: u32) -> Result<Stereo, SynthError> {
 
 struct Clamped {
     sr: f64,
-    seconds: f64,
     seed: u64,
     intensity: f64,
-    bpm: f64,
     key: i32,
     mood: Mood,
 }
@@ -385,7 +357,7 @@ fn normalize_loudness(left: &mut [f32], right: &mut [f32], sr: f64, lufs: f64) {
 }
 
 /// Transparent below 0.7, smoothly saturating to ±0.98 above.
-fn soft_limit(x: f32) -> f32 {
+pub(crate) fn soft_limit(x: f32) -> f32 {
     const KNEE: f32 = 0.7;
     const CEIL: f32 = 0.98;
     let a = x.abs();
@@ -519,216 +491,6 @@ fn drone(q: &Clamped, left: &mut [f32], right: &mut [f32]) {
     reverb(left, right, q.sr, 5.0, 95.0, 35.0);
 }
 
-// ---------------------------------------------------------------------------------------------
-// music
-
-/// Where in the cue a moment falls.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Section {
-    Intro,
-    Build,
-    Main,
-    Breakdown,
-    Outro,
-}
-
-/// The section of bar `bar` of `bars` (long cues alternate main and breakdown every 16 bars).
-fn section(bar: usize, bars: usize) -> Section {
-    let bars = bars.max(1);
-    let x = bar as f64 / bars as f64;
-    let intro = (bars as f64 * 0.1).clamp(1.0, 8.0) as usize;
-    let outro = (bars as f64 * 0.12).clamp(1.0, 8.0) as usize;
-    let build = (bars as f64 * 0.15).clamp(1.0, 8.0) as usize;
-    if bar < intro || x < 0.0 {
-        Section::Intro
-    } else if bar >= bars.saturating_sub(outro) {
-        Section::Outro
-    } else if bar < intro + build {
-        Section::Build
-    } else {
-        let k = (bar - intro - build) % 24;
-        if k >= 16 { Section::Breakdown } else { Section::Main }
-    }
-}
-
-/// Chord roots (semitones above the tonic) of the progression, one chord per bar.
-fn progression(mood: Mood) -> [(i32, bool); 4] {
-    // (root offset, minor triad?)
-    match mood {
-        // i – VI – III – VII
-        Mood::Epic => [(0, true), (8, false), (3, false), (10, false)],
-        // i – iv – VI – V
-        Mood::Tense => [(0, true), (5, true), (8, false), (7, false)],
-        // I – V – vi – IV
-        Mood::Uplifting => [(0, false), (7, false), (9, true), (5, false)],
-        // I – vi – IV – V
-        Mood::Calm => [(0, false), (9, true), (5, false), (7, false)],
-    }
-}
-
-fn music(q: &Clamped, left: &mut [f32], right: &mut [f32]) {
-    let n = left.len();
-    let sr = q.sr;
-    let beat = 60.0 / q.bpm;
-    let bar_len = beat * 4.0;
-    let bars = ((q.seconds / bar_len).ceil() as usize).max(1);
-    let prog = progression(q.mood);
-    let tonic = 45.0 + f64::from(q.key); // A2
-    let dense = q.intensity;
-    let mut rng = Rng::new(q.seed);
-    let mut noise = Rng::new(q.seed.wrapping_add(17));
-
-    // pads and bass: rendered continuously, per-sample chord lookup with crossfaded changes
-    let mut pad_ph = [[0.0f64; 2]; 4];
-    let mut pad_lp = [Sweep::new(FilterType::LowPass, 0.8), Sweep::new(FilterType::LowPass, 0.8)];
-    let mut bass_ph = 0.0f64;
-    let mut bass_lp = Sweep::new(FilterType::LowPass, 0.9);
-    // percussion state
-    let mut taiko_ph = 0.0f64;
-    let mut snare_bp = Sweep::new(FilterType::BandPass, 0.8);
-    let mut hat_hp = Sweep::new(FilterType::HighPass, 0.7);
-    let mut arp_lp = Sweep::new(FilterType::LowPass, 1.2);
-    let mut arp_ph = 0.0f64;
-    let swing_seed = rng.unit();
-
-    // reverb send for pads, snare and arpeggio
-    let mut send_l = Vec::new();
-    let mut send_r = Vec::new();
-    if send_l.try_reserve_exact(n).is_err() || send_r.try_reserve_exact(n).is_err() {
-        return;
-    }
-    send_l.resize(n, 0.0f32);
-    send_r.resize(n, 0.0f32);
-
-    for i in 0..n {
-        let t = i as f64 / sr;
-        let bar = (t / bar_len) as usize;
-        let sec = section(bar, bars);
-        let in_bar = t - bar as f64 * bar_len;
-        let beat_i = (in_bar / beat) as usize;
-        let in_beat = in_bar - beat_i as f64 * beat;
-        let (root_off, minor) = prog.get(bar % 4).copied().unwrap_or((0, true));
-        let root = tonic + f64::from(root_off);
-        let third = if minor { 3.0 } else { 4.0 };
-        let chord = [root, root + third, root + 7.0, root + 12.0];
-        // chord change crossfade: dip the pads 40 ms around each bar line
-        let edge = in_bar.min(bar_len - in_bar);
-        let change = smoothstep(edge / 0.04);
-        let section_gain = match sec {
-            Section::Intro => smoothstep(t / (bar_len * 2.0).max(0.5)) * 0.8,
-            Section::Outro => {
-                let start = bars.saturating_sub((bars as f64 * 0.12).clamp(1.0, 8.0) as usize) as f64 * bar_len;
-                let len = (q.seconds - start).max(0.5);
-                (1.0 - smoothstep((t - start) / len)) * 0.9
-            }
-            _ => 1.0,
-        };
-
-        // pads: two detuned saws per chord tone, lowpassed, breathing with a slow LFO
-        let mut pad = [0.0f64; 2];
-        for (k, note) in chord.iter().enumerate() {
-            let f = hz(*note + 12.0);
-            for (side, p) in pad_ph.get_mut(k).into_iter().flat_map(|a| a.iter_mut()).enumerate() {
-                let det = if side == 0 { 0.996 } else { 1.004 };
-                let dt = f * det / sr;
-                *p = wrap(*p + dt);
-                if let Some(o) = pad.get_mut(side) {
-                    *o += saw(*p, dt) * 0.12;
-                }
-            }
-        }
-        let breath = 0.5 + 0.5 * (t * TAU * 0.05).sin();
-        let pad_cut = match sec {
-            Section::Intro | Section::Outro | Section::Breakdown => 700.0 + 500.0 * breath,
-            _ => 1100.0 + 900.0 * breath * (0.5 + dense),
-        };
-        let pl = pad_lp[0].tick(pad[0], pad_cut, sr) * change;
-        let pr = pad_lp[1].tick(pad[1], pad_cut * 1.02, sr) * change;
-
-        // bass: root, pumping on each beat in the busy sections
-        let bass_f = hz(root - 12.0);
-        bass_ph = wrap(bass_ph + bass_f / sr);
-        let bass_raw = (bass_ph * TAU).sin() * 0.7 + saw(bass_ph, bass_f / sr) * 0.3;
-        let pump = match sec {
-            Section::Main | Section::Build => 0.35 + 0.65 * smoothstep(in_beat / (beat * 0.6)),
-            _ => 0.8,
-        };
-        let bass = bass_lp.tick(bass_raw, 220.0, sr) * pump * if sec == Section::Intro { 0.4 } else { 0.9 };
-
-        // taiko: on 1 and 3 in the build, 1, 2½ and 3 (+ a fill every 4th bar) in the main
-        let hits: &[f64] = match sec {
-            Section::Build => &[0.0, 2.0],
-            Section::Main if bar % 4 == 3 => &[0.0, 1.5, 2.0, 3.0, 3.5],
-            Section::Main => &[0.0, 1.5, 2.0],
-            _ => &[],
-        };
-        let mut taiko = 0.0;
-        if let Some(since) = hits.iter().map(|b| in_bar - b * beat).filter(|d| *d >= 0.0).reduce(f64::min) {
-            let f = 48.0 + 40.0 * (-since / 0.03).exp();
-            taiko_ph = wrap(taiko_ph + f / sr);
-            taiko = (taiko_ph * TAU).sin() * (-since / 0.28).exp() * (0.8 + 0.4 * dense);
-            taiko += noise.white() * (-since / 0.015).exp() * 0.25;
-        }
-
-        // snare/clap on 2 and 4 in the main section
-        let mut snare = 0.0;
-        if sec == Section::Main && (beat_i == 1 || beat_i == 3) {
-            let s = snare_bp.tick(noise.white(), 1800.0, sr);
-            snare = s * (-in_beat / 0.12).exp() * 1.6 * (0.6 + 0.4 * dense);
-        }
-
-        // hats / pulse: eighth notes, accented offbeats
-        let mut hat = 0.0;
-        if matches!(sec, Section::Build | Section::Main | Section::Breakdown) {
-            let eighth = beat / 2.0;
-            let k = (in_bar / eighth) as usize;
-            let since = in_bar - k as f64 * eighth;
-            let accent = if k % 2 == 1 { 1.0 } else { 0.55 };
-            let h = hat_hp.tick(noise.white(), 7000.0, sr);
-            hat = h * (-since / 0.03).exp() * accent * 0.35 * (0.4 + 0.6 * dense);
-        }
-
-        // arpeggio: sixteenth plucks over the chord, in the main and breakdown
-        let mut arp = 0.0;
-        if matches!(sec, Section::Main | Section::Breakdown) && dense > 0.25 {
-            let six = beat / 4.0;
-            let k = (in_bar / six) as usize;
-            let since = in_bar - k as f64 * six;
-            let pattern = [0usize, 1, 2, 3, 2, 1, 2, 3];
-            let idx = pattern.get(k % pattern.len()).copied().unwrap_or(0);
-            let oct = if sec == Section::Breakdown || (bar / 8) % 2 == 1 { 24.0 } else { 12.0 };
-            let note = chord.get(idx).copied().unwrap_or(root) + oct;
-            let f = hz(note);
-            arp_ph = wrap(arp_ph + f / sr);
-            let env = (-since / (0.09 + 0.06 * swing_seed)).exp();
-            arp = arp_lp.tick(saw(arp_ph, f / sr), 600.0 + 3500.0 * env, sr) * env * 0.35;
-        }
-
-        let pad_gain = match sec {
-            Section::Main => 0.55,
-            _ => 0.8,
-        };
-        let dry_l = pl * pad_gain + bass + taiko + hat * 0.8 + arp * 0.9;
-        let dry_r = pr * pad_gain + bass + taiko + hat * 1.0 + arp * 0.7;
-        let wet_l = pl * 0.5 + snare * 0.8 + arp * 0.5;
-        let wet_r = pr * 0.5 + snare * 0.8 + arp * 0.6;
-        if let (Some(l), Some(r), Some(sl), Some(sr_)) = (left.get_mut(i), right.get_mut(i), send_l.get_mut(i), send_r.get_mut(i)) {
-            *l = ((dry_l + snare * 0.6) * section_gain) as f32;
-            *r = ((dry_r + snare * 0.6) * section_gain) as f32;
-            *sl = (wet_l * section_gain) as f32;
-            *sr_ = (wet_r * section_gain) as f32;
-        }
-    }
-    // the send gets a big hall; mix it back in
-    reverb(&mut send_l, &mut send_r, sr, 3.0, 85.0, 100.0);
-    for (x, s) in left.iter_mut().zip(send_l.iter()) {
-        *x += *s * 0.6;
-    }
-    for (x, s) in right.iter_mut().zip(send_r.iter()) {
-        *x += *s * 0.6;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,14 +610,5 @@ mod tests {
         assert_eq!(key_from_name("Bb"), Some(1));
         assert_eq!(key_from_name("H"), None);
         assert_eq!(key_from_name(""), None);
-    }
-
-    #[test]
-    fn sections_cover_the_cue() {
-        assert_eq!(section(0, 40), Section::Intro);
-        assert_eq!(section(39, 40), Section::Outro);
-        assert!((0..40).any(|b| section(b, 40) == Section::Main));
-        assert!((0..80).any(|b| section(b, 80) == Section::Breakdown), "long cues breathe");
-        assert_eq!(section(0, 0), Section::Intro);
     }
 }

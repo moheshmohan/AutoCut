@@ -1,7 +1,7 @@
 # filmcraft-audio-dsp
 
-Real-time audio DSP for FilmCraft. Layer **L1**, **no dependencies**, compiles for
-`wasm32-unknown-unknown`, no `unsafe`. Clean-room: written from the public standards
+Real-time audio DSP for FilmCraft. Layer **L1**, no dependencies but the L0 time crate (exact
+`Tick` beat maps), compiles for `wasm32-unknown-unknown`, no `unsafe`. Clean-room: written from the public standards
 (ITU-R BS.1770-4, EBU R128 / Tech 3341 / Tech 3342) and textbook DSP (RBJ cookbook biquads,
 Householder FDN, phase vocoder, spectral subtraction with the statistical late-reverberation
 model).
@@ -25,15 +25,56 @@ reverb — no samples, no models, the same parameters and seed always giving the
   across), `impact` (a sub boom dropping from ~110 to ~38 Hz with a noise crack and a long tail),
   `riser` (rising noise and pitch, tremolo speeding up, ending on a cut), `drone` (a slowly
   breathing low chord).
-- **Music** (`music`; loudness-normalised to −20 LUFS, a bed under a −16 LUFS voice, soft-limited):
-  a four-chord progression per mood (`epic` i–VI–III–VII, `tense` i–iv–VI–V, `uplifting`
-  I–V–vi–IV, `calm` I–vi–IV–V) in any key and tempo, arranged in sections — intro, build, main
-  (pads, pumping bass, taiko hits with a fill every fourth bar, claps, hats, arpeggio), a
-  breakdown every 24 bars on long cues, outro — with a hall reverb send.
+- **Music** (`Kind::Music`): made by the soundtrack engine below.
 - Lengths are clamped (30 s for effects, 15 minutes for music), allocation is fallible, and
   nothing non-finite leaves the module.
 
 The engine's `audio.generate` writes them as 48 kHz stereo WAVs and places them on the timeline.
+
+## Soundtrack engine (`music`)
+
+`music::generate(&Request, sample_rate)` → a `Track`: music of an **exact length** (to the
+sample: `round(length · rate)` samples of a `Tick` length) that **ends on a bar**, in four stems
+that sum to the mix, with its taxonomy and exact beat map. Deterministic: the same request (seed
+included) always gives the same audio. Loudness-normalised to −20 LUFS (a bed under a −16 LUFS
+voice) and soft-limited.
+
+- **Taxonomy** (`taxonomy`): 9 moods (epic, tense, uplifting, calm, happy, dark, dreamy,
+  energetic, sad; synonyms such as "suspense" or "chill" parse), 6 genres (cinematic, electronic,
+  pop, ambient, lofi, piano), 30 use cases, and 18 mood × genre styles each with a tempo range,
+  an energy and use cases; `suggest(&Query)` ranks them for a brief.
+- **Exact time** (`tempo`): the tempo is held in thousandths of a BPM and beat `k` falls on tick
+  `round(k · 60 000 · TPS / milli_bpm)` — no drift on long tracks; every note's sample comes from
+  its tick.
+- **Arranger** (`arrange`): the length fixes the whole bars before the final hit, leaving a
+  ring-out of at least two beats (1.2–3 s, under a bar more). A dynamic programme over (bar, last
+  section) searches the block graph — intro, verse, build, chorus, bridge, outro blocks of 1–8
+  bars; a build resolves into a chorus; the intro is first, the outro or a chorus last — for the
+  path filling those bars exactly, closest to the requested energy (a level shaped as an arc, or a
+  curve of up to 64 points), with the intro and outro in proportion; the seed nudges near-ties so
+  variations differ. No padding, looping or fade to fit: the final chord lands on the downbeat
+  and rings out to the last sample.
+- **Composer** (`compose`): a progression per mood for verses, choruses and bridges, a dominant
+  before the final hit (a cadence), and per-instrument patterns over each bar's chord and energy
+  (five tiers from sparse to full): drum lines and fills, risers into choruses, crashes opening
+  them; bass lines; a seeded melody (2-bar motifs fitted to the chords, phrases resolving on the
+  root or third, long tones in bridges); arpeggios; pads with common tones held across bar lines;
+  keys comping or broken piano chords. Lo-fi swings; electronic pumps (side-chain) on the beat.
+- **Instruments** (`instruments`): an `InstrumentBank` makes an `Instrument` (note-on / note-off
+  events, blocks of dry + reverb-send audio) for each `Patch`. Every patch maps to a General MIDI
+  program and every drum to a GM percussion key, so a SoundFont bank (for example `rustysynth`,
+  MIT, pure Rust, loading a user-supplied `.sf2`) can play the same score through the same traits.
+  The built-in `OscillatorBank`: PolyBLEP saw / triangle / sine-saw voices with unison, two-operator
+  FM (electric piano, bells), additive partials (piano), ADSR or struck envelopes, filter
+  envelopes, vibrato; five drum kits (taiko, 909-style, rounded, dusty, soft) and risers/impacts.
+  No samples, soundfonts or models are bundled.
+- **Rendering** (`render`): every part streams through its instrument (blocks split at note events,
+  so timing is sample-exact) into drums / bass / melody / pad stems, each with its own FDN room
+  (the mix alone shares one — the reverb is linear); one per-sample gain (loudness, then the soft
+  limiter) is applied to the mix and to every stem, so the stems still sum to it. Stems render on
+  scoped threads where the platform has them (one thread on the web), with the same result.
+- Limits: 0.05 s–15 minutes, stems up to 5 minutes; stem levels −60..+12 dB or muted;
+  allocation is fallible; hostile numbers are clamped or refused, never a panic.
 
 `resample::resample_sinc` converts whole buffers offline with a windowed-sinc low-pass (no
 aliasing going down, no imaging going up) — for model input/output rates (24 ↔ 22.05 kHz).

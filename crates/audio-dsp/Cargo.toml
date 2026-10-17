@@ -9,8 +9,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
-# Intentionally dependency-free (layer L1): planar `&mut [f32]` slices in, planar slices out.
+# Layer L1: planar `&mut [f32]` slices in, planar slices out. The only dependency is the L0 time
+# crate, for the exact `Tick` beat maps of generated music.
 [dependencies]
+filmcraft-time = { workspace = true }
 
 [dev-dependencies]
 filmcraft-testkit = { workspace = true }

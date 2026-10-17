@@ -32,7 +32,8 @@ pub struct GenerateAudioDraft {
     pub seconds: f64,
     /// 0..1.
     pub intensity: f64,
-    /// Music: `epic`, `tense`, `uplifting` or `calm`.
+    /// Music: a mood id (`epic`, `tense`, `uplifting`, `calm`, `happy`, `dark`, `dreamy`,
+    /// `energetic`, `sad`).
     pub mood: String,
     /// Music and drones.
     pub key: String,
@@ -96,16 +97,9 @@ fn kind_hint(k: Kind) -> &'static str {
         Kind::Impact => "A cinematic hit: a sub boom, a crack and a long tail.",
         Kind::Riser => "Tension that builds to a cut and stops dead.",
         Kind::Drone => "A low, slowly moving chord under a scene.",
-        Kind::Music => "A bed with chords, pads, bass, drums and arpeggio in sections, at -20 LUFS so it sits under a voice.",
-    }
-}
-
-fn mood_name(m: Mood) -> &'static str {
-    match m {
-        Mood::Epic => "Epic",
-        Mood::Tense => "Tense",
-        Mood::Uplifting => "Uplifting",
-        Mood::Calm => "Calm",
+        Kind::Music => {
+            "Music arranged to the exact length and ending on a bar: drums, bass, melody and pads in sections, at -20 LUFS so it sits under a voice."
+        }
     }
 }
 
@@ -152,9 +146,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ui.add_space(10.0);
             label(ui, "Mood");
             let current = Mood::from_id(&d.mood).unwrap_or(Mood::Epic);
-            let cb = egui::ComboBox::from_id_salt("generate-audio-mood").selected_text(mood_name(current)).width(w).show_ui(ui, |ui| {
+            let cb = egui::ComboBox::from_id_salt("generate-audio-mood").selected_text(current.name()).width(w).show_ui(ui, |ui| {
                 for m in Mood::ALL {
-                    if ui.selectable_label(m == current, mood_name(m)).clicked() {
+                    if ui.selectable_label(m == current, m.name()).clicked() {
                         d.mood = m.id().into();
                     }
                 }

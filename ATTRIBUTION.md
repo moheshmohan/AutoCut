@@ -122,6 +122,7 @@ is traced or derived from Adobe artwork.
 | Lumetri "Look" presets (Teal & Orange, Warm Film, …) | `crates/render/src/effects.rs` (`apply_look`): procedural colour transforms, not LUT files |
 | Lumetri Presets (Effects panel: Cinematic, Film Emulation, Monochrome, Technical) and their preview picture | `crates/render/src/lumetri_presets.rs`: Lumetri parameter values chosen by contributors, descriptive names, and a procedural preview picture (dusk sky, ridges, lake, grey ramp, colour chips) |
 | Colour palette and layout metrics | `crates/ui-egui/src/theme.rs`: colour values and sizes only; no artwork |
+| Generated sound effects and music: whooshes, impacts, risers, drones, and the soundtrack engine's mood / genre styles, chord progressions, drum, bass and keys patterns, melody rhythms and instrument voices | `crates/audio-dsp/src/synth.rs` and `crates/audio-dsp/src/music/`: synthesized at runtime from oscillators, FM, additive partials, noise and filters, with patterns and progressions written by contributors; no samples, soundfonts, MIDI files or models |
 
 ## Optional build input: craft-fonts
 

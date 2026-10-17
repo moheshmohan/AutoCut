@@ -26,6 +26,9 @@ pub const ALLOWED_FAMILIES: &[&str] = &[
     // single commands from families that otherwise hold interactive or device commands
     "trim.applyDefaultTransition",
     "audio.generate",
+    // finding music by feel (a query: mood, genre, use case, energy → styles and their params)
+    "music.suggest",
+    "music.taxonomy",
     // a limiter on the mix bus (the showcase's mastering)
     "mixer.addInsert",
     "mixer.setInsert",

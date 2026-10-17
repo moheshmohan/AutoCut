@@ -9,7 +9,9 @@
 //! * [`sync`] — offset between two recordings of one event (GCC-PHAT, sample-accurate).
 //! * [`resample`] — streaming, block-invariant rate conversion for playback on a device at another rate.
 //! * [`channels`] — channel layouts, ITU-R BS.775 up/downmix, 5.1 mixdown types, the 5.1 panner.
-//! * [`synth`] — procedural sound effects (whoosh, impact, riser, drone) and cinematic music beds.
+//! * [`synth`] — procedural sound effects (whoosh, impact, riser, drone) and music beds.
+//! * [`music`] — the soundtrack engine: block-arranged music of an exact length ending on a bar,
+//!   in stems, with a mood → genre → tempo → energy → use-case taxonomy and an exact beat map.
 //!
 //! Conventions: audio is **planar f32** (`&mut [&mut [f32]]`, one slice per channel, all the same
 //! length). `process` never allocates; all buffers are sized at construction. Parameters may be
@@ -27,6 +29,7 @@ pub mod ducking;
 pub mod effects;
 pub mod fft;
 pub mod loudness;
+pub mod music;
 pub mod oversample;
 pub mod remix;
 pub mod resample;

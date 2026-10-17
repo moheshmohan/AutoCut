@@ -1839,6 +1839,7 @@ name = "filmcraft-audio-dsp"
 version = "0.8.0"
 dependencies = [
  "filmcraft-testkit",
+ "filmcraft-time",
 ]
 
 [[package]]

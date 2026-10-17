@@ -1379,6 +1379,15 @@ impl Beats {
         (!t.is_empty()).then_some(Self { times: t, period })
     }
 
+    /// The beat map of generated music (`beats`: exact ticks from its start, as
+    /// `audio.generate` returns them) placed at `start` seconds of the timeline; `None` for
+    /// fewer than two beats.
+    pub fn from_ticks(beats: &[i64], start: f64) -> Option<Self> {
+        let times: Vec<f64> = beats.iter().take(MAX_BEATS).map(|t| start + *t as f64 / TPS).collect();
+        let period = times.get(1).zip(times.first()).map(|(b, a)| b - a)?;
+        Self::measured(&times, period)
+    }
+
     /// Seconds per beat.
     pub fn period(&self) -> f64 {
         self.period
@@ -1525,6 +1534,35 @@ pub struct Music {
     /// Cuts (montage cuts, entry and outro starts) within a frame of one of its beats, of all.
     pub cuts_on_beat: usize,
     pub cuts: usize,
+    /// A generated bed's genre.
+    pub genre: Option<String>,
+    /// Where a generated bed's final chord lands on its last bar, seconds of the timeline (it
+    /// rings out to the end of the bed: no fade).
+    pub ending: Option<f64>,
+}
+
+/// The energy (0..1) of a generated bed over a show `len` seconds long, as a curve of points
+/// spread evenly over it: building through the intro (to `intro_end`), high through the entries,
+/// settling for the outro (from `outro_at`) — scaled to the mood's own energy `base`.
+pub fn show_energy(len: f64, intro_end: f64, outro_at: f64, base: f64) -> Vec<f64> {
+    const POINTS: usize = 32;
+    let base = if base.is_finite() { base.clamp(0.05, 1.0) } else { 0.8 };
+    let len = if len.is_finite() { len.max(0.0) } else { 0.0 };
+    let intro_end = if intro_end.is_finite() { intro_end.clamp(0.0, len) } else { 0.0 };
+    let outro_at = if outro_at.is_finite() { outro_at.clamp(intro_end, len) } else { len };
+    (0..POINTS)
+        .map(|k| {
+            let x = k as f64 / (POINTS - 1) as f64 * len;
+            let shape = if x < intro_end {
+                0.7 + 0.25 * x / intro_end.max(1e-6)
+            } else if x < outro_at {
+                0.95 + 0.1 * (x - intro_end) / (outro_at - intro_end).max(1e-6)
+            } else {
+                0.55
+            };
+            ((base * shape).clamp(0.0, 1.0) * 1000.0).round() / 1000.0
+        })
+        .collect()
 }
 
 impl Music {
@@ -1858,9 +1896,14 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         Some(path) => Some(import_music(ex, path, &mut built.notes).await?),
         None => None,
     };
+    // a generated bed: the engine's own tempo (its beats are exact ticks from 0, the grid the
+    // cuts land on) and the mood's energy; an engine without `music.suggest` gives the asked ones
+    let bed = if track.is_none() { run(ex, "music.suggest", json!({"mood": opts.mood, "bpm": opts.bpm, "count": 1})).await.ok() } else { None };
+    let bed_bpm = bed.as_ref().and_then(|v| v["suggestions"][0]["track"]["bpm"].as_f64()).unwrap_or(opts.bpm);
+    let bed_energy = bed.as_ref().and_then(|v| v["suggestions"][0]["style"]["energy"].as_f64()).unwrap_or(0.8);
     let beats = match &track {
         Some(m) => m.beats.clone(),
-        None => Some(Beats::grid(opts.bpm)),
+        None => Some(Beats::grid(bed_bpm)),
     };
     if let Some(m) = &track {
         match &m.beats {
@@ -2074,6 +2117,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     }
 
     // ---- outro: the total, over a blurred shot of the latest one, with the closing words
+    let outro_at = t;
     built.chapters.push(Chapter { seconds: t, title: "Outro".into() });
     let outro_voice_at = (t + 0.8).max(voice_free_at + 0.15);
     let outro_spoken =
@@ -2135,18 +2179,33 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             (clips, Music { source: m.path.clone(), bpm: m.bpm, fit: fit.into(), ..Music::default() }.with_cuts(&cuts, played.as_ref(), tr.fps))
         }
         None => {
+            // arranged to the show's exact length, its energy following the show, ending on a
+            // bar with its final chord ringing out (so no fade); the mood's own energy scales it
+            let len = total + 0.5;
             let m = run(
                 ex,
                 "audio.generate",
-                json!({"kind": "music", "duration": total + 0.5, "mood": opts.mood, "bpm": opts.bpm, "time": 0, "track": tr.music, "intensity": 0.75}),
+                json!({"kind": "music", "duration": len, "mood": opts.mood, "bpm": opts.bpm, "time": 0, "track": tr.music, "energy": show_energy(len, intro_len, outro_at, bed_energy)}),
             )
             .await?;
-            let grid = Beats::grid(opts.bpm);
-            let info = Music { source: "generated".into(), bpm: Some(60.0 / grid.period()), fit: "generated".into(), ..Music::default() };
-            (m["clip"].as_u64().into_iter().collect::<Vec<u64>>(), info.with_cuts(&cuts, Some(&grid), tr.fps))
+            // the bed's own beat map (exact ticks): the grid the cuts were laid on
+            let map: Vec<i64> = m["beats"].as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
+            let played = Beats::from_ticks(&map, 0.0).unwrap_or_else(|| Beats::grid(bed_bpm));
+            let info = Music {
+                source: "generated".into(),
+                bpm: m["bpm"].as_f64().or(Some(60.0 / played.period())),
+                fit: "generated".into(),
+                genre: m["genre"].as_str().map(str::to_string),
+                ending: m["ending"].as_i64().map(|t| t as f64 / TPS),
+                ..Music::default()
+            };
+            (m["clip"].as_u64().into_iter().collect::<Vec<u64>>(), info.with_cuts(&cuts, Some(&played), tr.fps))
         }
     };
-    if let Some(last) = music.last() {
+    // the user's track is faded out where the show ends; a generated bed ends on its own
+    if track.is_some()
+        && let Some(last) = music.last()
+    {
         run(ex, "sequence.applyAudioTransition", json!({"clip": last, "edge": "out", "effect": "constant_power", "frames": (opts.fps * 3.0) as i64}))
             .await
             .ok();
@@ -2675,6 +2734,27 @@ mod tests {
         assert!(Beats::measured(&[f64::NAN], 0.5).is_none());
         assert!(g.nearest(f64::INFINITY, 0.0, 1.0).is_none() && g.nearest(1.0, 2.0, 1.0).is_none());
         assert!(g.next(1e300).is_none());
+        // a generated bed's exact beat map: the same grid
+        let bed = Beats::from_ticks(&[0, TPS as i64 / 2, TPS as i64, TPS as i64 * 3 / 2], 0.0).unwrap();
+        assert_eq!(bed.period(), 0.5);
+        assert_eq!(bed.nearest(7.3, 6.0, 8.0), g.nearest(7.3, 6.0, 8.0), "it goes on at its tempo");
+        assert!(Beats::from_ticks(&[0], 0.0).is_none() && Beats::from_ticks(&[], 0.0).is_none());
+        assert!(Beats::from_ticks(&[0, -5, i64::MIN], 0.0).is_none(), "nonsense maps are refused");
+    }
+
+    #[test]
+    fn a_generated_bed_builds_through_the_show_and_settles_for_the_outro() {
+        let e = show_energy(60.0, 8.0, 50.0, 0.8);
+        assert_eq!(e.len(), 32);
+        assert!(e.iter().all(|x| (0.0..=1.0).contains(x)));
+        let (intro, body, outro) = (e[0], e[20], e[31]);
+        assert!(intro < body && outro < intro, "{e:?}");
+        // a calm mood keeps it calm
+        assert!(show_energy(60.0, 8.0, 50.0, 0.3).iter().all(|x| *x <= 0.33));
+        // hostile numbers stay in range
+        for (len, a, b, base) in [(f64::NAN, 1.0, 2.0, 0.8), (10.0, f64::INFINITY, -1.0, f64::NAN), (-5.0, 100.0, 3.0, 9.0), (0.0, 0.0, 0.0, 0.8)] {
+            assert!(show_energy(len, a, b, base).iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x)));
+        }
     }
 
     #[test]
