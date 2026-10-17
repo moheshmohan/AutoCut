@@ -1016,6 +1016,55 @@ impl FilmcraftApp {
         Ok(seconds)
     }
 
+    /// Play the latest generated-music preview (`music.preview`, `Session::music_preview`) on the
+    /// audio output, stopping timeline playback first; its length in seconds.
+    pub fn play_music_preview(&mut self) -> Result<f64, String> {
+        let p = self.session.music_preview.latest().ok_or("no music preview yet")?;
+        if self.playback.playing {
+            self.stop();
+        }
+        let a = self.audio.as_mut().ok_or("no audio output (check Settings ▸ Audio Hardware)")?;
+        let sr = a.sample_rate().max(1);
+        a.stop();
+        let step = f64::from(p.track.mix.sample_rate.max(1)) / f64::from(sr);
+        let seconds = p.track.mix.seconds();
+        let mut pos = 0.0f64;
+        let fill = Box::new(move |buf: &mut [f32], ch: usize| {
+            let (l, r) = (&p.track.mix.left, &p.track.mix.right);
+            let at = |v: &Vec<f32>, i: usize, f: f32| {
+                let x0 = v.get(i).copied().unwrap_or(0.0);
+                let x1 = v.get(i + 1).copied().unwrap_or(0.0);
+                x0 + (x1 - x0) * f
+            };
+            for frame in buf.chunks_mut(ch.max(1)) {
+                let i = pos as usize;
+                let f = (pos - i as f64) as f32;
+                let (a, b) = (at(l, i, f), at(r, i, f));
+                for (c, out) in frame.iter_mut().enumerate() {
+                    *out = match c {
+                        0 if ch == 1 => 0.5 * (a + b),
+                        0 => a,
+                        1 => b,
+                        _ => 0.0,
+                    };
+                }
+                pos += step;
+            }
+        });
+        a.start(fill)?;
+        self.playback.audio_clock = false;
+        Ok(seconds)
+    }
+
+    /// Stop the music preview (the audio output only; timeline playback is not running).
+    pub fn stop_music_preview(&mut self) {
+        if !self.playback.playing
+            && let Some(a) = self.audio.as_mut()
+        {
+            a.stop();
+        }
+    }
+
     pub fn stop(&mut self) {
         self.playback.playing = false;
         self.playback.stop_at = None;

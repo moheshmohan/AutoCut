@@ -11,8 +11,8 @@
 //! - `ui.set {tool?, workspace?, mode?, theme?, focused?, playbackRes?, timeline?:{pps,scroll}}`
 //! - `ui.panel.show {panel}` / `ui.panel.close {panel}`
 //! - `ui.set {tts: {voice, pitch, pace, text…}}`: patch the Text to Speech panel draft
-//! - `ui.set {generateAudio: {kind, seconds, intensity, mood, key, bpm, seed}}`: patch the Generate
-//!   Audio panel
+//! - `ui.set {generateAudio: {kind, seconds, intensity, mood, key, bpm, seed, genre, levels, muted,
+//!   stems, engine, prompt, soundfontPath}}`: patch the Generate Audio panel (music: find by feel)
 //! - `ui.set {showcase: {subject, since, title, voice, mood, intro, outro, entries, exportPath, …}}`:
 //!   patch the Showcase panel's draft (`entries` a list, or `{"<index>": {include, label, line, …}}`)
 //! - `ui.click {id | x,y, button?, count?, modifiers?}` / `ui.move {x,y}` / `ui.scroll {x,y,dx,dy}`
