@@ -147,6 +147,15 @@ The real Keychain is opt-in (it writes a throwaway item, removed at the end):
 FILMCRAFT_LIVE_KEYCHAIN=1 cargo test -p filmcraft-oauth --test live_keychain -- --nocapture
 ```
 
+## Instagram (B4)
+
+[`filmcraft-instagram`](../instagram/README.md) does not use `OAuthClient`: Instagram's business
+login takes no PKCE, wants a redirect URI registered in advance (port included), and swaps its
+tokens with GET calls of its own. It uses `Loopback::bind_port` (the registered
+`http://localhost:<port>/`), `read_redirect`'s state check, `random_state`, the `TokenVault`
+(Keychain item **FilmCraft Instagram**) and a `SecretStore` for the app secret (Keychain item
+**FilmCraft Instagram app**).
+
 ## YouTube (B3)
 
 [`filmcraft-youtube`](../youtube/README.md) uses Google's `Provider`, the user's own Desktop client

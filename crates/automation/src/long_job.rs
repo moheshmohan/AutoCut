@@ -1,6 +1,6 @@
 //! Long exports over MCP (docs/agents.md § Long exports): `file.exportMedia` (and the other
 //! [`LONG_COMMANDS`]: voice cloning, neural music, model downloads, Google Photos and YouTube
-//! uploads, YouTube sign-ins and AutoCut showcase jobs) with `wait: true` runs as a background engine job; the server reports its progress as MCP
+//! uploads, YouTube sign-ins, Instagram Reels and sign-ins and AutoCut showcase jobs) with `wait: true` runs as a background engine job; the server reports its progress as MCP
 //! `notifications/progress` (when the request carried a `progressToken`) and stops it on
 //! `notifications/cancelled`, deleting an export's partial output (an upload's file is the
 //! user's and is never touched). The session lock is only held for short polls, so other
@@ -29,6 +29,8 @@ pub const LONG_COMMANDS: &[&str] = &[
     "photos.upload",
     "youtube.upload",
     "youtube.connect",
+    "instagram.publish",
+    "instagram.connect",
     "autocut.analyze",
     "autocut.showcasePlan",
     "autocut.makeShowcase",
@@ -37,8 +39,9 @@ pub const LONG_COMMANDS: &[&str] = &[
 
 /// The parts of a finished job's `jobs.list` entry a long call's answer carries besides
 /// `result`: an export's offline media, an upload's new media item, what a showcase job made, the
-/// clip a neural music job placed, what a YouTube job did (the channel connected, the video uploaded).
-pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload", "showcase", "music", "youtube"];
+/// clip a neural music job placed, what a YouTube job did (the channel connected, the video uploaded),
+/// what an Instagram job did (the account connected, the Reel published).
+pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload", "showcase", "music", "youtube", "instagram"];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);

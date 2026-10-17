@@ -1770,6 +1770,7 @@ dependencies = [
  "filmcraft-export",
  "filmcraft-gphotos",
  "filmcraft-gpu",
+ "filmcraft-instagram",
  "filmcraft-platform",
  "filmcraft-project",
  "filmcraft-render",
@@ -1935,6 +1936,7 @@ dependencies = [
  "filmcraft-export",
  "filmcraft-gphotos",
  "filmcraft-gpu",
+ "filmcraft-instagram",
  "filmcraft-locks",
  "filmcraft-media",
  "filmcraft-mpegts",
@@ -2216,6 +2218,21 @@ dependencies = [
  "filmcraft-testkit",
  "rayon",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "filmcraft-instagram"
+version = "0.8.0"
+dependencies = [
+ "filmcraft-engine",
+ "filmcraft-oauth",
+ "rustls",
+ "rustls-rustcrypto",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]

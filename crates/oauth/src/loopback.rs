@@ -52,6 +52,22 @@ impl Loopback {
         Ok(Self { listener, port })
     }
 
+    /// Listen on `127.0.0.1:<port>`: for providers that accept only a redirect URI registered
+    /// in advance, port included (Instagram's business login). A port another program holds is
+    /// an error that says so.
+    pub fn bind_port(port: u16) -> Result<Self, OAuthError> {
+        if port == 0 {
+            return Self::bind();
+        }
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).map_err(|e| {
+            OAuthError::SignIn(format!(
+                "cannot listen on 127.0.0.1:{port} for the sign-in redirect ({e}); close what uses that port, or register another redirect URI"
+            ))
+        })?;
+        listener.set_nonblocking(true).map_err(|e| OAuthError::SignIn(format!("cannot set up the sign-in listener: {e}")))?;
+        Ok(Self { listener, port })
+    }
+
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -256,6 +272,11 @@ mod tests {
         assert_ne!(a.port(), b.port());
         assert_ne!(a.port(), 0);
         assert_eq!(a.redirect_uri(), format!("http://127.0.0.1:{}", a.port()));
+        // a fixed port: taken while `a` holds it, free again once it is dropped
+        let port = a.port();
+        let taken = Loopback::bind_port(port).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(taken.contains(&format!("127.0.0.1:{port}")), "{taken:?}");
+        assert_ne!(Loopback::bind_port(0).unwrap().port(), 0, "0 picks a port");
         // nothing comes: a bounded wait, then an error
         let e = a.wait_for_code("s", Duration::from_millis(120), &DonePage::default()).unwrap_err();
         assert!(e.to_string().contains("no sign-in came back"), "{e}");

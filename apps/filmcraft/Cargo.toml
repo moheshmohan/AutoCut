@@ -34,6 +34,7 @@ filmcraft-platform = { workspace = true }
 # Export ▸ Upload to Google Photos (`photos.upload`): the uploader the session gets.
 filmcraft-gphotos = { workspace = true }
 filmcraft-youtube = { workspace = true }
+filmcraft-instagram = { workspace = true }
 # Sequence ▸ Make a Showcase… / the Showcase panel (`autocut.*`): the showcase jobs' host.
 filmcraft-autocut = { workspace = true }
 # A Google Photos album as a showcase's seed: the picker driven by the screen agent.

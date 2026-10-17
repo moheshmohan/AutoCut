@@ -25,6 +25,7 @@ pub mod export_tools;
 pub mod graphic_templates;
 pub mod graphics;
 pub mod graphics_counter;
+pub mod instagram;
 pub mod interchange;
 pub mod keyboard;
 mod keyframe_move;
@@ -472,6 +473,9 @@ pub struct Session {
     /// YouTube (`youtube.*`): the host's publisher (None = not available: the commands are
     /// disabled; hosts install filmcraft-youtube's, tests a fake) and what its jobs answered.
     pub youtube: youtube::YouTubeState,
+    /// Instagram (`instagram.*`): the host's publisher (None = not available: the commands are
+    /// disabled; hosts install filmcraft-instagram's, tests a fake) and what its jobs answered.
+    pub instagram: instagram::InstagramState,
     /// AutoCut showcases (`autocut.*`): the host that runs their jobs (None = not available),
     /// the command port the jobs edit through, and what they made.
     pub autocut: autocut::AutoCut,
@@ -581,6 +585,7 @@ impl Session {
             photos: None,
             photo_uploads: Default::default(),
             youtube: Default::default(),
+            instagram: Default::default(),
             autocut: Default::default(),
             log: Default::default(),
             browser: Default::default(),
@@ -1305,6 +1310,8 @@ mod home_paths_tests;
 mod image_sequence_tests;
 #[cfg(test)]
 mod individual_selection_tests;
+#[cfg(test)]
+mod instagram_tests;
 #[cfg(test)]
 mod interchange_auto_points_tests;
 #[cfg(test)]

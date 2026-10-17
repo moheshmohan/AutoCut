@@ -21,6 +21,14 @@
 //! - `youtube` (with `--youtube`): a YouTube channel connected (`youtube auth --default` opens the
 //!   browser when none is: pick the channel in Google's account chooser), then a 5 s clip of the
 //!   demo project uploaded **private** to the default channel, subscribers not notified.
+//! - `instagram` (with `--instagram`): the connected Instagram account and Instagram's count of its
+//!   posts (`instagram limits`: the token works against the Graph API), then a 4 s 9:16 clip of the
+//!   demo project sent to a Reel container with the resumable upload and processed by Instagram
+//!   (`instagram publish --upload-only`): it settles whether direct upload works for this app on
+//!   Instagram Login. Nothing is published (the container expires unused within 24 hours, one of
+//!   the day's 400) unless `--instagram-publish` is given too: then the clip is published as a
+//!   Reel on the account (delete it in the Instagram app afterwards). It never signs in: connect
+//!   first with `filmcraft-cli instagram token` (or `instagram setup` + `instagram auth`).
 //!
 //! Everything a stage makes (projects, exports, reports) goes to `<target>/live/<time>/`, with
 //! each stage's output in `logs/<stage>.log` and the results in `report.json`; nothing goes to
@@ -54,6 +62,7 @@ const STAGES: &[(&str, &str)] = &[
     ("upload", "the showcase uploaded into the album"),
     ("picker", "picker agent: two searches, then tidy"),
     ("youtube", "a 5 s private clip uploaded to the default YouTube channel"),
+    ("instagram", "the Instagram account and a 4 s Reel uploaded and processed (published only with --instagram-publish)"),
 ];
 
 #[derive(Debug, Default, PartialEq)]
@@ -62,6 +71,8 @@ pub(crate) struct Options {
     pub google: bool,
     pub picker: bool,
     pub youtube: bool,
+    pub instagram: bool,
+    pub instagram_publish: bool,
     pub voice: Option<String>,
     pub clip: Option<PathBuf>,
 }
@@ -69,7 +80,7 @@ pub(crate) struct Options {
 pub(crate) fn parse(args: &[String]) -> Result<Options, String> {
     let mut o = Options::default();
     let mut it = args.iter();
-    let usage = "live [--only a,b] [--google] [--picker] [--youtube] [--voice clone:NAME] [--clip FILE]";
+    let usage = "live [--only a,b] [--google] [--picker] [--youtube] [--instagram [--instagram-publish]] [--voice clone:NAME] [--clip FILE]";
     while let Some(a) = it.next() {
         match a.as_str() {
             "--only" => {
@@ -82,10 +93,15 @@ pub(crate) fn parse(args: &[String]) -> Result<Options, String> {
             "--google" => o.google = true,
             "--picker" => o.picker = true,
             "--youtube" => o.youtube = true,
+            "--instagram" => o.instagram = true,
+            "--instagram-publish" => o.instagram_publish = true,
             "--voice" => o.voice = Some(it.next().ok_or(usage)?.clone()),
             "--clip" => o.clip = Some(PathBuf::from(it.next().ok_or(usage)?)),
             other => return Err(format!("live: unknown `{other}` ({usage})")),
         }
+    }
+    if o.instagram_publish && !o.instagram && !o.only.as_ref().is_some_and(|l| l.iter().any(|s| s == "instagram")) {
+        return Err("live: --instagram-publish goes with --instagram (it publishes the stage's clip as a Reel)".into());
     }
     Ok(o)
 }
@@ -98,6 +114,7 @@ pub(crate) fn wanted(o: &Options, id: &str) -> bool {
             "keychain" | "album" | "upload" => o.google,
             "picker" => o.picker,
             "youtube" => o.youtube,
+            "instagram" => o.instagram,
             _ => true,
         },
     }
@@ -442,6 +459,63 @@ fn youtube(run: &Run) -> Outcome {
     }
 }
 
+/// The connected Instagram account and Instagram's count, then a 4 s 9:16 clip uploaded to a
+/// Reel container and processed; published only with `--instagram-publish`.
+fn instagram(run: &Run, o: &Options) -> Outcome {
+    let account = match run.exec("instagram", run.cli().args(["instagram", "account", "--json", "--compact"])) {
+        Ok((out, true)) => serde_json::from_str::<Value>(&out).unwrap_or(Value::Null),
+        Ok((_, false)) => return Outcome::Fail(format!("instagram account failed: {}", run.log("instagram").display())),
+        Err(e) => return Outcome::Fail(e),
+    };
+    let Some(username) = account["account"]["username"].as_str().map(str::to_string) else {
+        return Outcome::Fail(
+            "no Instagram account connected: run `filmcraft-cli instagram token` (paste a token from the Meta App Dashboard) or `instagram setup` + `instagram auth` first".into(),
+        );
+    };
+    if let Some(why) = account["ready"].as_str() {
+        return Outcome::Fail(format!("@{username}: {why}"));
+    }
+    let limits = match run.exec("instagram", run.cli().args(["instagram", "limits", "--json", "--compact"])) {
+        Ok((out, true)) => serde_json::from_str::<Value>(&out).unwrap_or(Value::Null),
+        Ok((_, false)) => return Outcome::Fail(format!("instagram limits failed (the token against the Graph API): {}", run.log("instagram").display())),
+        Err(e) => return Outcome::Fail(e),
+    };
+    let clip = run.dir.join("instagram-check.mp4");
+    let exported =
+        run.exec("instagram", run.cli().args(["--demo", "export"]).arg(&clip).args(["--start", "0", "--end", "4", "--preset", "Social Vertical 1080×1920"]));
+    match exported {
+        Ok((_, true)) => {}
+        Ok((_, false)) => return Outcome::Fail(format!("the 4 s clip did not export: {}", run.log("instagram").display())),
+        Err(e) => return Outcome::Fail(e),
+    }
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let caption = format!("FilmCraft live check {secs}");
+    let mut c = run.cli();
+    c.args(["instagram", "publish"]).arg(&clip).args(["--caption", &caption, "--compact"]);
+    if !o.instagram_publish {
+        c.arg("--upload-only");
+    }
+    let quota = format!("{} of {} posts today", limits["instagram"]["quotaUsage"], limits["instagram"]["quotaTotal"]);
+    match run.exec("instagram", &mut c) {
+        Ok((out, true)) => {
+            let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            if o.instagram_publish {
+                Outcome::Pass(format!("@{username}: published {} ({quota})", v["permalink"].as_str().unwrap_or("?")))
+            } else {
+                Outcome::Pass(format!(
+                    "@{username}: direct upload works — container {} uploaded and processed in {} s, not published ({quota})",
+                    v["container"].as_str().unwrap_or("?"),
+                    v["processingSeconds"]
+                ))
+            }
+        }
+        Ok((_, false)) => {
+            Outcome::Fail(format!("instagram publish failed (see whether Instagram refused the direct upload): {}", run.log("instagram").display()))
+        }
+        Err(e) => Outcome::Fail(e),
+    }
+}
+
 pub(crate) fn run_live(args: &[String]) -> Result<(), String> {
     let o = parse(args)?;
     let md = crate::metadata()?;
@@ -474,6 +548,7 @@ pub(crate) fn run_live(args: &[String]) -> Result<(), String> {
             "upload" => upload(&run),
             "picker" => picker(&run),
             "youtube" => youtube(&run),
+            "instagram" => instagram(&run, &o),
             _ => Outcome::Skip("unknown stage".into()),
         };
         let secs = start.elapsed().as_secs_f64();
@@ -506,6 +581,12 @@ mod tests {
         assert!(wanted(&o, "keychain") && wanted(&o, "album") && wanted(&o, "upload") && wanted(&o, "picker"));
         assert!(!wanted(&o, "youtube"), "only --youtube uploads to YouTube");
         assert!(wanted(&parse(&args(&["--youtube"])).unwrap(), "youtube"));
+        assert!(!wanted(&o, "instagram"), "only --instagram reaches Instagram");
+        let ig = parse(&args(&["--instagram"])).unwrap();
+        assert!(wanted(&ig, "instagram") && !ig.instagram_publish, "it publishes nothing unless asked");
+        assert!(parse(&args(&["--instagram", "--instagram-publish"])).unwrap().instagram_publish);
+        assert!(parse(&args(&["--instagram-publish"])).unwrap_err().contains("goes with --instagram"));
+        assert!(parse(&args(&["--only", "instagram", "--instagram-publish"])).is_ok());
         let o = parse(&args(&["--only", "voice,album"])).unwrap();
         let on: Vec<&str> = STAGES.iter().map(|(id, _)| *id).filter(|id| wanted(&o, id)).collect();
         assert_eq!(on, ["voice", "album"]);

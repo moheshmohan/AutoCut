@@ -31,6 +31,7 @@ macro_rules! out {
 }
 
 mod args;
+mod instagram;
 mod probe;
 mod youtube;
 
@@ -300,6 +301,35 @@ SUBCOMMANDS
                                  (a showcase export's) is appended to the description and
                                  <file>.thumbnail.jpg becomes the thumbnail (--no-sidecars: not).
                                  Vertical or square and up to 3 minutes: YouTube makes it a Short
+  instagram setup --app-id <Instagram app ID> [--redirect-uri http://localhost:8714/] [--forget]
+                                 set up your Meta app's Instagram business login once: its
+                                 Instagram app ID (not the Meta app ID) and the redirect URI you
+                                 registered under API setup with Instagram login; the app secret
+                                 is read from standard input (piped, or typed at a prompt that
+                                 does not show it) into the Keychain (\"FilmCraft Instagram app\")
+  instagram auth                 connect your professional (Creator or Business) account: the
+                                 browser opens Instagram's login; an http://localhost:<port>/
+                                 redirect comes back by itself, an https:// one is pasted back.
+                                 The 60-day token goes to the Keychain (\"FilmCraft Instagram\")
+                                 and is refreshed once a day while FilmCraft is used
+  instagram token                or connect with a token from App Dashboard ▸ Instagram ▸ API
+                                 setup with Instagram login ▸ Generate access tokens, read from
+                                 standard input (no app secret needed)
+  instagram account [--json] | refresh | limits [--json] | disconnect
+                                 the connected account and when its sign-in runs out; refresh it
+                                 now; Instagram's count of posts in the last 24 h (100 posts and
+                                 400 containers a day); forget the account here
+  instagram publish <file> [--caption C] [--cover-at SECONDS | --cover-url https://…] [--no-feed]
+         [--video-url https://…] [--upload-only]
+                                 publish a video as a Reel: a container, the file sent to it with
+                                 Meta's resumable upload (a dropped connection resumes; running the
+                                 same publish again after a cancel or a crash carries on), its
+                                 processing awaited (at most 5 minutes), then published; the Reel
+                                 (mediaId, permalink) as JSON. --video-url publishes from a public
+                                 address Instagram fetches instead. Caption: 2,200 characters, 30
+                                 hashtags, 20 @mentions at most; --no-feed keeps it out of the grid;
+                                 --upload-only stops before publishing (the container waits 23 h:
+                                 the same command without it publishes without sending again)
   photos tidy                    close every Google Photos picker tab left open in Chrome (and
                                  nothing else); a tab that asks \"Leave site?\" is closed once
                                  more, which Chrome takes as Leave (macOS)
@@ -397,6 +427,8 @@ impl Backend {
         s.photos = Some(filmcraft_gphotos::engine_uploader());
         // `youtube.*` (also over MCP): the channels connected with `youtube auth`
         s.youtube.publisher = Some(filmcraft_youtube::engine_publisher());
+        // `instagram.*` (also over MCP): the account connected with `instagram auth` / `token`
+        s.instagram.publisher = Some(filmcraft_instagram::engine_publisher());
         // `autocut.analyze` / `autocut.showcasePlan` / `autocut.showcaseBuild` (also over MCP):
         // showcase jobs with the Ollama models of the AUTOCUT_* environment, which can take
         // their clips from a Google Photos `album` (picked by the screen agent)
@@ -1278,6 +1310,7 @@ async fn cli() {
             }
         }
         "youtube" => youtube::run(&a).await,
+        "instagram" => instagram::run(&a).await,
         "showcase" => {
             // a narrated, counted showcase of every clip an analysis found (`--report`, from
             // analyze --out), or of a Google Photos album's clips (`--album`: picked, imported

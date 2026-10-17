@@ -24,7 +24,7 @@
 //! - `sweep [--days N] [--dev] [--dry-run]`: free the disk builds and tests took: agents'
 //!   `target/agent-*` builds and test outputs untouched for N days (default 3), incremental
 //!   caches, with `--dev` the whole dev profile; profiles a build is using are skipped (`sweep.rs`).
-//! - `live [--only a,b] [--google] [--picker] [--youtube] [--voice clone:NAME] [--clip FILE]`: the opt-in live
+//! - `live [--only a,b] [--google] [--picker] [--youtube] [--instagram [--instagram-publish]] [--voice clone:NAME] [--clip FILE]`: the opt-in live
 //!   checks against this machine's models, sign-ins and browser in one command, a report in
 //!   `<target>/live/<time>/` (`live.rs`).
 
@@ -109,6 +109,8 @@ const LAYERS: &[(&str, u8)] = &[
     ("oauth", 5),
     // YouTube channels and uploads (on oauth, HTTPS to the YouTube Data API)
     ("youtube", 5),
+    // Instagram account and Reels (on oauth, HTTPS to graph.instagram.com and rupload.facebook.com)
+    ("instagram", 5),
     // desktop OS automation (osascript, screencapture, HTTP to Ollama): not WASM-portable
     ("screenagent", 5),
     ("filmcraft", 6),
@@ -138,6 +140,7 @@ const SAME_LAYER: &[(&str, &str)] = &[
     ("automation", "gphotos"),
     ("gphotos", "oauth"),
     ("youtube", "oauth"),
+    ("instagram", "oauth"),
     ("automation", "screenagent"),
 ];
 
@@ -543,7 +546,7 @@ fn main() -> ExitCode {
             ico::run(&rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
         _ => Err(
-            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci [--changed [--base REF]]|sweep [--days N] [--dev] [--dry-run]|live [--only a,b] [--google] [--picker] [--youtube] [--voice V] [--clip F]|bench [args]|bench-playback [args]>"
+            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci [--changed [--base REF]]|sweep [--days N] [--dev] [--dry-run]|live [--only a,b] [--google] [--picker] [--youtube] [--instagram [--instagram-publish]] [--voice V] [--clip F]|bench [args]|bench-playback [args]>"
                 .into(),
         ),
     };

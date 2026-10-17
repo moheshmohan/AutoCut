@@ -66,6 +66,13 @@ const VALUED: &[&str] = &[
     "--youtube-playlist",
     "--youtube-tags",
     "--youtube-description",
+    // instagram setup / publish
+    "--app-id",
+    "--redirect-uri",
+    "--caption",
+    "--cover-at",
+    "--cover-url",
+    "--video-url",
 ];
 
 #[derive(Debug, Default)]

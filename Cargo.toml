@@ -67,6 +67,7 @@ filmcraft-autocut = { path = "crates/autocut" }
 filmcraft-gphotos = { path = "crates/gphotos" }
 filmcraft-oauth = { path = "crates/oauth" }
 filmcraft-youtube = { path = "crates/youtube" }
+filmcraft-instagram = { path = "crates/instagram" }
 filmcraft-screenagent = { path = "crates/screenagent" }
 filmcraft-platform = { path = "crates/platform" }
 filmcraft-testkit = { path = "crates/testkit" }

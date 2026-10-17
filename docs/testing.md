@@ -66,10 +66,14 @@ each, so `cargo test` stays offline). `cargo xtask live` runs them in one go and
 | `album`, `upload` (`--google`) | the "FilmCraft live check" album made or found, the showcase uploaded into it | `photos auth --albums` |
 | `picker` (`--picker`) | the picker agent's two searches in one session, then `photos tidy` | Chrome, Screen Recording; takes the browser lock — hands off the mouse |
 | `youtube` (`--youtube`) | a channel connected (`youtube auth --default` opens the browser when none is: pick the channel in Google's account chooser), then a 5 s clip of the demo project uploaded **private** to the default channel, subscribers not notified | the OAuth client file, the YouTube Data API v3 enabled in its project; one upload of the day's 100 |
+| `instagram` (`--instagram`) | the connected account and Instagram's count of its posts (`instagram limits`), then a 4 s 9:16 clip of the demo project uploaded to a Reel container and processed (`instagram publish --upload-only`): whether direct upload works for the app on Instagram Login. With `--instagram-publish` it is published as a Reel (delete it afterwards) | an account connected (`instagram token`, or `instagram setup` + `instagram auth`); one of the day's 400 containers (and of the 100 posts with `--instagram-publish`) |
 
 `--only voice,showcase` runs some. Run it before trusting a build with a real video, and after
 merging work on models, narration, analysis, Google Photos or YouTube. The YouTube adapter's
 offline tests (`cargo test -p filmcraft-youtube`) run against a mock Google on `127.0.0.1`.
+The Instagram stage (`--instagram`) never signs in and publishes nothing unless
+`--instagram-publish` is given too; its offline tests (`cargo test -p filmcraft-instagram`) run
+against a mock Instagram on `127.0.0.1`.
 
 ## 2. ffmpeg oracle tests
 

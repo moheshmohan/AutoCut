@@ -1,0 +1,25 @@
+[package]
+name = "filmcraft-instagram"
+description = "Instagram for the editor: a professional account connected through Instagram's business login (or a pasted 60-day token), refreshed before it runs out; Reels published from local files (resumable upload) or a public URL, with caption, cover and limits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+filmcraft-engine = { workspace = true }
+filmcraft-oauth = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# HTTPS to graph.instagram.com, api.instagram.com and rupload.facebook.com: pure-Rust TLS
+# (rustls + RustCrypto), OS certificate verification, the same stack as filmcraft-oauth and
+# filmcraft-youtube.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "json"] }
+rustls = { version = "0.23", default-features = false }
+rustls-rustcrypto = { version = "0.0.2-alpha" }
+# keys of the containers kept across runs (a re-run resumes instead of making another)
+sha2 = "0.10"

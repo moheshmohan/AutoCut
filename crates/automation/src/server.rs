@@ -321,6 +321,46 @@ fn youtube_upload_params(p: YouTubeUploadParams) -> Value {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct InstagramPublishParams {
+    /// Absolute path of the video to publish (MP4 or MOV, typically a finished export): sent
+    /// from this machine with Meta's resumable upload.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Instead of (or besides) `path`: a public https:// address Instagram fetches the video from.
+    #[serde(default, rename = "videoUrl")]
+    pub video_url: Option<String>,
+    /// At most 2,200 characters, 30 hashtags and 20 @mentions.
+    #[serde(default)]
+    pub caption: Option<String>,
+    /// Show it in the profile grid as well as the Reels tab (default true).
+    #[serde(default, rename = "shareToFeed")]
+    pub share_to_feed: Option<bool>,
+    /// The cover: the frame this many seconds in (default: the first frame).
+    #[serde(default, rename = "coverSeconds")]
+    pub cover_seconds: Option<f64>,
+    /// The cover: a public https:// JPEG (8 MB at most, 9:16 recommended); wins over `coverSeconds`.
+    #[serde(default, rename = "coverUrl")]
+    pub cover_url: Option<String>,
+}
+
+/// `instagram.publish` params for an `instagram_publish` call (a long job: progress and cancel).
+fn instagram_publish_params(p: InstagramPublishParams) -> Value {
+    let mut params = json!({"wait": true});
+    for (k, v) in [("path", p.path), ("videoUrl", p.video_url), ("caption", p.caption), ("coverUrl", p.cover_url)] {
+        if let Some(v) = v {
+            params[k] = json!(v);
+        }
+    }
+    if let Some(f) = p.share_to_feed {
+        params["shareToFeed"] = json!(f);
+    }
+    if let Some(c) = p.cover_seconds {
+        params["coverSeconds"] = json!(c);
+    }
+    params
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ShowcaseAnalyzeParams {
     /// What to look for in every clip, singular: "robot", "vintage car". Or give a `prompt`.
     #[serde(default)]
@@ -1167,6 +1207,22 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Instagram: publish a Reel",
+        description = "Publish a video — typically a finished export — as a Reel on the user's connected Instagram professional account: a container, the file sent from this machine with Meta's resumable upload (or `videoUrl`, a public https:// address Instagram fetches it from), Instagram's processing awaited (at most 5 minutes), then published; returns the Reel (mediaId, permalink) and the 24-hour limits (100 posts, 400 containers). Caption: at most 2,200 characters, 30 hashtags, 20 @mentions; `coverSeconds` picks the cover frame. Runs as the `instagram.publish` engine job: progress notifications in bytes, cancelling stops it (running the same publish again carries on with the same container). The account is connected by the user once with `filmcraft-cli instagram auth` (or `instagram token`); `instagram.account` / `instagram.limits` (command_run) show it.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn instagram_publish(
+        &self,
+        Parameters(p): Parameters<InstagramPublishParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.path.as_deref().is_none_or(|x| x.trim().is_empty()) && p.video_url.as_deref().is_none_or(|x| x.trim().is_empty()) {
+            return Ok(fail("pass `path` (the video to send) or `videoUrl` (a public https:// address)"));
+        }
+        Ok(self.run_long("instagram.publish", instagram_publish_params(p), &context).await)
+    }
+
+    #[tool(
         title = "Showcase: find every clip of a subject",
         description = "Step 1 of a showcase (\"every robot I've filmed, in order\": a counted, narrated video). A local vision model (Ollama, AUTOCUT_ANALYSIS_MODEL) looks at every video clip (or `items`, filmed `since` a date) for `subject` (or what a `prompt` asks for), names and describes what it finds, reads capture dates and tells which clips show the same one. With `album`, the clips are a Google Photos album the user filled: the whole album is picked through Google's picker by the local screen agent, imported (no duplicates) and only its clips are analysed — the one-call way to turn \"the clips in my album X\" into a video (then plan: true, review, showcase_build). Runs as the `autocut.analyze` engine job (progress notifications, cancellable); the report is kept in the session (showcase_inspect). With plan: true it goes on to step 2 (`autocut.makeShowcase`) and returns the plan. In the app the Showcase panel shows the job and the plan.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
@@ -1425,7 +1481,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -1693,6 +1749,24 @@ mod tests {
         assert!(serde_json::from_value::<YouTubeUploadParams>(json!({"path": "/x"})).is_err(), "a title is needed");
         assert!(crate::long_job::is_long("youtube.upload", &json!({"wait": true})) && crate::long_job::is_long("youtube.connect", &json!({"wait": true})));
         assert!(crate::long_job::JOB_EXTRAS.contains(&"youtube"));
+    }
+
+    /// `instagram_publish` takes a file or a URL and the Reel's options, and runs
+    /// `instagram.publish` as a long job.
+    #[test]
+    fn instagram_publish_schema_and_params() {
+        let m = FilmcraftMcp::headless(Session::default());
+        let Some(tool) = m.tool_router.get("instagram_publish") else { panic!("tool missing") };
+        let schema = Value::Object((*tool.input_schema).clone());
+        assert!(schema["properties"]["videoUrl"].is_object() && schema["properties"]["coverSeconds"].is_object(), "{schema}");
+        let p: InstagramPublishParams =
+            serde_json::from_value(json!({"path": "/x/out.mp4", "caption": "Robots #ai", "shareToFeed": false, "coverSeconds": 1.5})).unwrap();
+        assert_eq!(
+            instagram_publish_params(p),
+            json!({"path": "/x/out.mp4", "caption": "Robots #ai", "shareToFeed": false, "coverSeconds": 1.5, "wait": true})
+        );
+        assert!(crate::long_job::is_long("instagram.publish", &json!({"wait": true})) && crate::long_job::is_long("instagram.connect", &json!({"wait": true})));
+        assert!(crate::long_job::JOB_EXTRAS.contains(&"instagram"));
     }
 
     /// Over MCP, an upload is the engine job: the media item comes back in the answer, and a
