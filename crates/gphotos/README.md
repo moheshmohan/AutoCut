@@ -262,13 +262,15 @@ picked twice downloads nothing twice.
 - The agent closes the picker tab it drove when it finishes — after Done (the picker's finished
   page), or when it gives up — only after checking the front tab's address is the picker
   (`photos.google.com/picker…` or `photos.google.com/integration/picker…`). When Chrome asks
-  "Leave site?" (the picker holds its selection), the agent grounds the dialog's Leave button
-  and clicks it — nothing else.
+  "Leave site?" (the picker holds its selection), the agent lists the dialog's buttons by their
+  text and clicks the one that reads Leave — nothing else.
 - A session the agent gave up on is deleted (`sessions.delete`), not left to linger.
 - A new session is shown in the picker tab Chrome already has open (AppleScript `set URL`),
   not in a new tab; other browsers and systems get `open`/`xdg-open`.
 - `photos tidy` closes every picker tab in Chrome — those tabs only, by window, tab id *and*
-  address — answering "Leave site?" the same way (when the grounding model is in Ollama).
+  address. A tab that asks "Leave site?" is closed once more, which Chrome takes as Leave (no
+  model needed); one still open after that gets its Leave clicked as above (when the grounding
+  model is in Ollama).
 
 The first time, macOS asks once whether your terminal may control Google Chrome (Automation):
 allow it, or the tabs are left as they are (and `photos tidy` cannot list them).

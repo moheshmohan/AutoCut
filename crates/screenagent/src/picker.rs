@@ -221,18 +221,26 @@ pub fn enumeration_failed(elements: &[Element], w: u32, h: u32) -> bool {
     counts.values().any(|&n| n >= 4 && n.saturating_mul(2) > elements.len())
 }
 
-/// The `find` ask for Chrome's "Leave site?" dialog (the picker holds its selection in a
-/// beforeunload handler, so closing or navigating its tab asks first).
-pub const LEAVE_BUTTON: &str =
-    "the 'Leave' button of the browser's 'Leave site?' dialog (it asks whether to leave the page; its two buttons are 'Leave' and 'Cancel')";
+/// The inventory ask for the buttons of Chrome's "Leave site?" dialog (the picker holds its
+/// selection in a beforeunload handler, so closing or navigating its tab asks first), each
+/// labelled with its own text. Asked to `find` "the Leave button" instead, the model boxes it
+/// right but labels it with the ask's own words ("Leave button of the browser's 'Leave site?'
+/// dialog", live), which says nothing about what the box reads; listed with their text, the
+/// buttons come back as "Cancel" and "Leave", and a screen without the dialog as none.
+pub const LEAVE_DIALOG_BUTTONS: &str = "Locate the buttons of the browser's 'Leave site?' dialog (it asks whether to leave the page). Use each button's own text, exactly as written on it, as its label.";
 
-/// Whether a grounded element is the Leave button [`LEAVE_BUTTON`] asked for: labelled
-/// "Leave" (nothing else — never Cancel, Stay or a page element the model offered instead)
-/// and button-sized, never a thumbnail-sized box.
+/// Whether a grounded element is the Leave button: labelled "Leave" (nothing else — never
+/// Cancel, Stay or a page element the model offered instead) and button-sized, never a
+/// thumbnail-sized box.
 pub fn is_leave_button(e: &Element, w: u32, h: u32) -> bool {
     let screen = u64::from(w) * u64::from(h);
     let label = normalize_title(&e.label);
     matches!(label.as_str(), "leave" | "leave button") && e.area() > 0 && e.area().saturating_mul(40) < screen
+}
+
+/// The Leave button among a [`LEAVE_DIALOG_BUTTONS`] inventory, if one is there.
+pub fn leave_button(elements: &[Element], w: u32, h: u32) -> Option<&Element> {
+    elements.iter().find(|e| is_leave_button(e, w, h))
 }
 
 /// The inventory ask for the date groups of a search result: Google's picker heads each day's
@@ -526,6 +534,30 @@ mod tests {
         // a thumbnail-sized box, or an empty one, is never clicked as a button
         assert!(!is_leave_button(&el("Leave", "", 100, 100, 400, 400), 1344, 784));
         assert!(!is_leave_button(&el("Leave", "", 5, 5, 5, 5), 1344, 784));
+    }
+
+    #[test]
+    fn the_leave_button_is_read_from_the_dialogs_buttons() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::GrayImage::from_pixel(1344, 784, image::Luma([20])).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let png = png.into_inner();
+        // qwen2.5vl's live answer to LEAVE_DIALOG_BUTTONS over Chrome 155's dialog
+        let reply = r#"```json [ {"bbox_2d": [609, 296, 663, 316], "label": "Cancel"}, {"bbox_2d": [675, 296, 730, 316], "label": "Leave"} ] ```"#;
+        let els = crate::ground::parse_inventory_reply(reply, &png).unwrap();
+        let leave = leave_button(&els, 1344, 784).unwrap();
+        assert_eq!((leave.label.as_str(), leave.x1, leave.x2), ("Leave", 675, 730));
+        // its answer to a `find` of "the Leave button": the right box, labelled with the ask's
+        // own words — no proof of what it reads, so not clicked
+        let echo = crate::ground::parse_inventory_reply(
+            r#"```json {"bbox_2d": [676, 296, 757, 318], "label": "Leave button of the browser's 'Leave site?' dialog"} ```"#,
+            &png,
+        )
+        .unwrap();
+        assert!(leave_button(&echo, 1344, 784).is_none());
+        // no dialog: "There are none."
+        assert!(leave_button(&crate::ground::parse_inventory_reply("There are none.", &png).unwrap(), 1344, 784).is_none());
+        // only Cancel offered: nothing
+        assert!(leave_button(&els[..1], 1344, 784).is_none());
     }
 
     #[test]

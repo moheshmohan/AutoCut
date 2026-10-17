@@ -100,7 +100,11 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
   (`https://photos.google.com/[u/N/]picker…` or `…/integration/picker…`), so nothing else is
   ever touched. `reuse_picker_tab` shows a new picking session in the picker tab already open
   instead of a new one; `tidy` (`filmcraft-cli photos tidy`) closes every picker tab;
-  `answer_leave` grounds the "Leave site?" dialog's Leave button and refuses any other label.
+  `answer_leave` lists the "Leave site?" dialog's buttons by their own text and clicks only the
+  one that reads "Leave" (asked to *find* "the Leave button", qwen2.5vl boxes it right but
+  labels it with the ask's own words, live). Chrome takes a second close of a tab that asks
+  "Leave site?" as Leave, so `tidy` closes such a tab once more before it needs any eyes. Ids
+  are compared as text (Chrome 155 answers `tab id "180477276"`, never equal to a number).
   Every AppleScript call to the browser has a 15 s timeout, so a dialog cannot hang it.
 
 No `unsafe` (the workspace forbids it), no browser embedding, no model runtime linkage:

@@ -70,13 +70,15 @@ fn list_script(app: &str) -> String {
 }
 
 /// `body` run on the tab with `tab`'s window id, id and address (`w`, `k` its index, `t`
-/// itself); answers `ok`, or `gone` when no such tab is there any more.
+/// itself); answers `ok`, or `gone` when no such tab is there any more. Ids are compared as
+/// text: Chrome 155 answers them as text (`tab id "180477276"`), which never equals a number,
+/// and older versions as integers, which `as text` turns into the same digits.
 fn with_tab_script(app: &str, tab: &Tab, body: &str) -> Result<String, ScreenError> {
     let url = escape_applescript(&tab.url)?;
     Ok(timed(
         app,
         &format!(
-            "repeat with w in windows\nif (id of w) is {win} then\nrepeat with k from 1 to (count of tabs of w)\nset t to tab k of w\nif (id of t) is {id} and (URL of t) is \"{url}\" then\n{body}\nreturn \"ok\"\nend if\nend repeat\nend if\nend repeat\nreturn \"gone\"",
+            "repeat with w in windows\nif (id of w as text) is \"{win}\" then\nrepeat with k from 1 to (count of tabs of w)\nset t to tab k of w\nif (id of t as text) is \"{id}\" and (URL of t) is \"{url}\" then\n{body}\nreturn \"ok\"\nend if\nend repeat\nend if\nend repeat\nreturn \"gone\"",
             win = tab.window,
             id = tab.id
         ),
@@ -139,16 +141,19 @@ pub fn navigate(shell: &dyn Shell, tab: &Tab, uri: &str) -> Result<bool, ScreenE
     on_tab(shell, tab, &format!("set URL of t to \"{uri}\"\nset active tab index of w to k\nset index of w to 1\nactivate"))
 }
 
-/// Answer the "Leave site?" dialog on `actor`'s front window: ground its Leave button and
-/// click it. Anything grounded that is not labelled "Leave" (and button-sized) is refused, so
-/// nothing else is ever clicked. `Ok(false)`: no Leave button showed.
+/// Answer the "Leave site?" dialog on `actor`'s front window: list its buttons by their text
+/// and click the one that reads "Leave". Anything not labelled "Leave" (and button-sized) is
+/// refused, so nothing else is ever clicked. `Ok(false)`: no Leave button showed.
 pub fn answer_leave<A: Act + ?Sized, G: Ground + ?Sized>(actor: &mut A, grounder: &G, progress: &mut dyn FnMut(&str)) -> Result<bool, ScreenError> {
     let cap = actor.capture()?;
-    let Some(found) = grounder.find(&cap.png, picker::LEAVE_BUTTON)? else { return Ok(false) };
-    if !picker::is_leave_button(&found, cap.png_w, cap.png_h) {
-        progress(&format!("screenagent: the dialog's button reads `{}`, not Leave; not clicking it", found.label.trim()));
+    let buttons = grounder.inventory(&cap.png, picker::LEAVE_DIALOG_BUTTONS)?;
+    let Some(found) = picker::leave_button(&buttons, cap.png_w, cap.png_h) else {
+        if !buttons.is_empty() {
+            let read: Vec<String> = buttons.iter().take(4).map(|b| b.label.trim().chars().take(40).collect()).collect();
+            progress(&format!("screenagent: no Leave button among the dialog's buttons ({}); not clicking", read.join(", ")));
+        }
         return Ok(false);
-    }
+    };
     progress("screenagent: answering the browser's \"Leave site?\" with Leave");
     let (px, py) = found.center();
     actor.click_png(&cap, px, py)?;
@@ -246,8 +251,9 @@ pub struct Tidied {
 }
 
 /// Close every Google Photos picker tab in Chrome — those tabs and nothing else. A tab that asks
-/// "Leave site?" is brought to the front and answered with Leave through `leave` (`actor` must
-/// be hands on Chrome); without eyes it is left open and listed.
+/// "Leave site?" is closed once more (Chrome takes that as Leave); one still open after that is
+/// brought to the front and answered with Leave through `leave` (`actor` must be hands on
+/// Chrome); without eyes it is left open and listed.
 pub fn tidy<A: Act + ?Sized>(
     shell: &dyn Shell,
     actor: &mut A,
@@ -273,7 +279,18 @@ pub fn tidy<A: Act + ?Sized>(
     }
     pause(SETTLE_MS);
     let ours = |all: Vec<Tab>| -> Vec<Tab> { all.into_iter().filter(|x| tabs.iter().any(|t| t.window == x.window && t.id == x.id)).collect() };
-    let waiting = ours(picker_tabs(shell)?);
+    let mut waiting = ours(picker_tabs(shell)?);
+    if !waiting.is_empty() {
+        // a tab holding a selection asks "Leave site?" instead of closing; Chrome takes a second
+        // close while it asks as Leave (live, Chrome 155), so no eyes are needed for it
+        for t in &waiting {
+            if let Err(e) = close(shell, t) {
+                out.notes.push(format!("{}: {e}", t.url));
+            }
+        }
+        pause(SETTLE_MS);
+        waiting = ours(picker_tabs(shell)?);
+    }
     if !waiting.is_empty() {
         match leave {
             None => out.notes.push(format!(
@@ -371,11 +388,13 @@ mod tests {
 
     /// A fake Chrome: a tab list that `close`/`navigate` scripts change, and every script kept.
     /// `stubborn` tabs ask "Leave site?" instead: the close or navigation waits until their id
-    /// is in `left` (Leave was clicked).
+    /// is in `left` (Leave was clicked) — or, with `second_close_leaves` (Chrome 155, live),
+    /// until the tab is closed again while it asks.
     struct FakeChrome {
         running: bool,
         tabs: Mutex<Vec<Tab>>,
         stubborn: Vec<i64>,
+        second_close_leaves: bool,
         left: Arc<Mutex<Vec<i64>>>,
         /// Closes and navigations waiting on "Leave site?": (tab id, the new address or None).
         waiting: Mutex<Vec<(i64, Option<String>)>>,
@@ -384,7 +403,15 @@ mod tests {
 
     impl FakeChrome {
         fn new(tabs: Vec<Tab>) -> Self {
-            Self { running: true, tabs: Mutex::new(tabs), stubborn: vec![], left: Arc::default(), waiting: Mutex::default(), scripts: Mutex::new(vec![]) }
+            Self {
+                running: true,
+                tabs: Mutex::new(tabs),
+                stubborn: vec![],
+                second_close_leaves: true,
+                left: Arc::default(),
+                waiting: Mutex::default(),
+                scripts: Mutex::new(vec![]),
+            }
         }
         /// What Leave let through.
         fn settle(&self, tabs: &mut Vec<Tab>) {
@@ -406,10 +433,12 @@ mod tests {
         }
     }
 
+    /// The window id, tab id and address a script names. Like Chrome 155, whose ids are text, a
+    /// script that compares an id with a number names nothing.
     fn target(script: &str) -> Option<(i64, i64, String)> {
-        let num = |key: &str| script.split(key).nth(1)?.split_whitespace().next()?.parse::<i64>().ok();
+        let id = |key: &str| script.split(key).nth(1)?.split('"').next()?.parse::<i64>().ok();
         let url = script.split("(URL of t) is \"").nth(1)?.split('"').next()?.to_string();
-        Some((num("if (id of w) is ")?, num("if (id of t) is ")?, url))
+        Some((id("if (id of w as text) is \"")?, id("if (id of t as text) is \"")?, url))
     }
 
     impl Shell for FakeChrome {
@@ -429,8 +458,15 @@ mod tests {
             let Some(pos) = tabs.iter().position(|t| t.window == w && t.id == id && t.url == url) else { return Ok("gone\n".into()) };
             let new = s.split("set URL of t to \"").nth(1).and_then(|r| r.split('"').next()).map(str::to_string);
             let change = if s.contains("close t") { Some(None) } else { new.map(Some) };
+            let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+            let asking = waiting.iter().any(|(w, _)| *w == id);
             match change {
-                Some(change) if self.stubborn.contains(&id) => self.waiting.lock().unwrap_or_else(PoisonError::into_inner).push((id, change)),
+                // closed again while it asks "Leave site?": Chrome leaves
+                Some(None) if asking && self.second_close_leaves => {
+                    waiting.retain(|(w, _)| *w != id);
+                    tabs.remove(pos);
+                }
+                Some(change) if self.stubborn.contains(&id) => waiting.push((id, change)),
                 Some(None) => {
                     tabs.remove(pos);
                 }
@@ -507,15 +543,15 @@ mod tests {
         }
     }
 
-    /// Eyes that see one element for the Leave ask (or nothing).
+    /// Eyes that see one button for the Leave dialog's ask (or nothing).
     struct Sees(Option<Element>);
     impl Ground for Sees {
-        fn inventory(&self, _png: &[u8], _task: &str) -> Result<Vec<Element>, ScreenError> {
-            Ok(vec![])
+        fn inventory(&self, _png: &[u8], task: &str) -> Result<Vec<Element>, ScreenError> {
+            assert_eq!(task, picker::LEAVE_DIALOG_BUTTONS);
+            Ok(self.0.iter().cloned().collect())
         }
         fn find(&self, _png: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
-            assert_eq!(target, picker::LEAVE_BUTTON);
-            Ok(self.0.clone())
+            Err(ScreenError::Other(format!("not asked to find anything, asked for {target}")))
         }
     }
 
@@ -547,10 +583,27 @@ mod tests {
     }
 
     #[test]
+    fn tidy_closes_a_tab_that_asks_by_closing_it_again() {
+        // live, Chrome 155: a picker tab holding a selection asked "Leave site?" on the first
+        // close and was gone after the second — no eyes, nothing clicked
+        let mut chrome = FakeChrome::new(vec![tab(1, 11, "https://mail.google.com/"), tab(1, 12, P2)]);
+        chrome.stubborn = vec![12];
+        let mut hands = Hands::new();
+        let t = tidy(&chrome, &mut hands, None, &mut |_| {}, &mut |_| {}).unwrap();
+        assert_eq!((t.found, t.closed, t.left.len()), (1, 1, 0), "{t:?}");
+        assert!(t.notes.is_empty(), "{t:?}");
+        assert!(hands.clicks.is_empty());
+        assert_eq!(chrome.ids(), [11]);
+        assert_eq!(chrome.scripts().iter().filter(|s| s.contains("close t")).count(), 2);
+    }
+
+    #[test]
     fn tidy_answers_leave_site_with_leave_only() {
+        // a tab a second close does not shut: the eyes find Leave among the dialog's buttons
         let left = Arc::new(Mutex::new(vec![]));
         let mut chrome = FakeChrome::new(vec![tab(1, 10, P1), tab(1, 12, P2)]);
         chrome.stubborn = vec![12];
+        chrome.second_close_leaves = false;
         chrome.left = Arc::clone(&left);
         let mut hands = Hands::new();
         hands.left = Arc::clone(&left);
@@ -564,6 +617,7 @@ mod tests {
         // eyes that offer another button: nothing is clicked and the tab is reported
         let mut chrome = FakeChrome::new(vec![tab(1, 12, P2)]);
         chrome.stubborn = vec![12];
+        chrome.second_close_leaves = false;
         let mut hands = Hands::new();
         let cancel = Sees(Some(Element { label: "Cancel".into(), kind: "button".into(), x1: 60, y1: 90, x2: 100, y2: 104 }));
         let t = tidy(&chrome, &mut hands, Some(&cancel as &dyn Ground), &mut |_| {}, &mut |_| {}).unwrap();
@@ -572,6 +626,7 @@ mod tests {
         // no eyes at all: listed, with what to do
         let mut chrome = FakeChrome::new(vec![tab(1, 12, P2)]);
         chrome.stubborn = vec![12];
+        chrome.second_close_leaves = false;
         let t = tidy(&chrome, &mut Hands::new(), None, &mut |_| {}, &mut |_| {}).unwrap();
         assert_eq!(t.left, [P2]);
         assert!(t.notes.iter().any(|n| n.contains("click Leave")), "{t:?}");
@@ -607,6 +662,16 @@ mod tests {
             assert!(reuse_picker_tab(&chrome, bad, None, &mut |_| {}, &mut |_| {}).is_err(), "{bad}");
         }
         assert!(!chrome.scripts().iter().any(|s| s.contains("set URL")));
+    }
+
+    #[test]
+    fn tab_ids_are_compared_as_text() {
+        // live, Chrome 155: `(id of t) is 180477276` was false for that very tab (its id is
+        // text), so `photos tidy` closed nothing and a picker tab was never reused
+        let s = with_tab_script(CHROME, &tab(180_476_798, 180_477_276, P2), "close t").unwrap();
+        assert!(s.contains("if (id of w as text) is \"180476798\" then"), "{s}");
+        assert!(s.contains("if (id of t as text) is \"180477276\" and (URL of t) is \""), "{s}");
+        assert!(!s.contains("(id of t) is 1") && !s.contains("(id of w) is 1"), "{s}");
     }
 
     #[test]

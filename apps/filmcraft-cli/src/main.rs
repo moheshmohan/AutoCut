@@ -260,8 +260,8 @@ SUBCOMMANDS
                                  videos. Items you add to an album by hand are reachable only
                                  this way (Google shows apps only what they uploaded)
   photos tidy                    close every Google Photos picker tab left open in Chrome (and
-                                 nothing else), answering \"Leave site?\" with Leave when the
-                                 grounding model is in Ollama to see it (macOS)
+                                 nothing else); a tab that asks \"Leave site?\" is closed once
+                                 more, which Chrome takes as Leave (macOS)
   photos cached [--json]         list the Google Photos originals already downloaded
   photos add <mediaItemId>...    import already-downloaded items again (ids from `photos cached`)
   bench-decode <media> [--frames N]
