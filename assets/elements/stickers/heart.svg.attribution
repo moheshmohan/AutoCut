@@ -1,0 +1,8 @@
+asset:        heart.svg
+title:        Heart (FilmCraft Elements sticker `sticker.heart`, preview SVG)
+author:       FilmCraft contributors
+source:       original work, drawn from scratch in code (crates/project/src/elements.rs) from generic conventions, without reference to anyone's artwork
+license:      MIT OR Apache-2.0
+license-file: LICENSE-MIT, LICENSE-APACHE
+added:        2026-10-17 by Claude (agent, AutoCut lane E4)
+notes:        A heart from the classic parametric heart curve (x = 16 sin^3 t, y = 13 cos t - 5 cos 2t - 2 cos 3t - cos 4t), pink with a white outline. The app inserts the vector layers themselves (`elements.insert {"id": "sticker.heart"}`); this SVG is exported from the same layers by crates/engine/src/elements.rs (`sticker_svg`) and checked against them by the test `bundled_sticker_svgs_match_the_vectors` (regenerate with FILMCRAFT_BLESS=1). Any text is set in Inter (OFL-1.1), referenced by name, not embedded.

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Speech Bubble: a FilmCraft Elements sticker (`sticker.speech-bubble`). Original work by FilmCraft contributors, MIT OR Apache-2.0.
+     Exported from the vectors in crates/project/src/elements.rs by crates/engine/src/elements.rs;
+     regenerate with FILMCRAFT_BLESS=1 cargo test -p filmcraft-engine bundled_sticker_svgs -->
+<svg xmlns="http://www.w3.org/2000/svg" width="572" height="412" viewBox="680 350 572 412">
+  <defs>
+    <filter id="shadow1" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="5.66" dy="5.66" stdDeviation="12" flood-color="#000000" flood-opacity="0.35"/></filter>
+  </defs>
+  <g id="bubble" transform="matrix(1 0 0 1 960 520.07)" filter="url(#shadow1)">
+    <polygon points="193.73,-139.63 204.64,-138.55 215.13,-135.38 224.79,-130.22 233.27,-123.27 240.22,-114.81 245.39,-105.15 248.57,-94.67 249.65,-83.78 249.65,43.88 248.57,54.78 245.39,65.26 240.22,74.91 233.27,83.38 224.79,90.32 215.13,95.48 204.64,98.66 193.73,99.73 -69.9,99.73 -189.73,199.47 -139.8,99.73 -193.73,99.73 -204.64,98.66 -215.13,95.48 -224.79,90.32 -233.27,83.38 -240.22,74.91 -245.39,65.26 -248.57,54.78 -249.65,43.88 -249.65,-83.78 -248.57,-94.67 -245.39,-105.15 -240.22,-114.81 -233.27,-123.27 -224.79,-130.22 -215.13,-135.38 -204.64,-138.55 -193.73,-139.63" fill="#ffffff" stroke="#111827" stroke-width="8" stroke-linejoin="round"/>
+  </g>
+  <g id="text" transform="matrix(1 0 0 1 960 540)">
+    <text x="0" y="0" font-family="Inter, sans-serif" font-size="110" font-weight="700" text-anchor="middle" fill="#111827">Wow!</text>
+  </g>
+</svg>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Star: a FilmCraft Elements sticker (`sticker.star`). Original work by FilmCraft contributors, MIT OR Apache-2.0.
+     Exported from the vectors in crates/project/src/elements.rs by crates/engine/src/elements.rs;
+     regenerate with FILMCRAFT_BLESS=1 cargo test -p filmcraft-engine bundled_sticker_svgs -->
+<svg xmlns="http://www.w3.org/2000/svg" width="350" height="334" viewBox="785 367 350 334">
+  <g id="star" transform="matrix(1 0 0 1 960 550)">
+    <polygon points="0,-170 42.32,-58.25 161.68,-52.53 68.48,22.25 99.92,137.53 0,72 -99.92,137.53 -68.48,22.25 -161.68,-52.53 -42.32,-58.25" fill="#facc15" stroke="#111827" stroke-width="10" stroke-linejoin="round"/>
+  </g>
+</svg>

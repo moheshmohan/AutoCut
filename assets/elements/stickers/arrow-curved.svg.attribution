@@ -1,0 +1,8 @@
+asset:        arrow-curved.svg
+title:        Arrow – Curved (FilmCraft Elements sticker `sticker.arrow-curved`, preview SVG)
+author:       FilmCraft contributors
+source:       original work, drawn from scratch in code (crates/project/src/elements.rs) from generic conventions, without reference to anyone's artwork
+license:      MIT OR Apache-2.0
+license-file: LICENSE-MIT, LICENSE-APACHE
+added:        2026-10-17 by Claude (agent, AutoCut lane E4)
+notes:        An arrow arcing over the top from left to right (one polygon traced along two arcs, red with a white outline). The app inserts the vector layers themselves (`elements.insert {"id": "sticker.arrow-curved"}`); this SVG is exported from the same layers by crates/engine/src/elements.rs (`sticker_svg`) and checked against them by the test `bundled_sticker_svgs_match_the_vectors` (regenerate with FILMCRAFT_BLESS=1). Any text is set in Inter (OFL-1.1), referenced by name, not embedded.

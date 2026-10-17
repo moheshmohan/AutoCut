@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Arrow – Curved: a FilmCraft Elements sticker (`sticker.arrow-curved`). Original work by FilmCraft contributors, MIT OR Apache-2.0.
+     Exported from the vectors in crates/project/src/elements.rs by crates/engine/src/elements.rs;
+     regenerate with FILMCRAFT_BLESS=1 cargo test -p filmcraft-engine bundled_sticker_svgs -->
+<svg xmlns="http://www.w3.org/2000/svg" width="506" height="252" viewBox="721 418 506 252">
+  <g id="arrow" transform="matrix(1 0 0 1 960 560)">
+    <polygon points="-226.58,14.35 -217.67,-2.97 -207.43,-19.54 -195.94,-35.26 -183.26,-50.04 -169.47,-63.79 -154.65,-76.43 -138.89,-87.87 -122.29,-98.05 -104.95,-106.91 -86.97,-114.39 -68.46,-120.44 -49.54,-125.04 -30.31,-128.16 -10.9,-129.76 8.57,-129.85 27.99,-128.43 47.24,-125.5 66.21,-121.07 84.77,-115.19 102.82,-107.88 120.25,-99.18 136.94,-89.16 152.81,-77.86 167.75,-65.37 181.67,-51.75 194.48,-37.09 206.12,-21.47 216.51,-5 254.61,-27 218.79,97 126.44,47 164.54,25 155.24,10.46 144.66,-3.18 132.88,-15.81 120,-27.31 106.13,-37.59 91.39,-46.58 75.89,-54.19 59.76,-60.36 43.14,-65.04 26.17,-68.19 8.98,-69.79 -8.29,-69.82 -25.48,-68.28 -42.47,-65.19 -59.11,-60.57 -75.26,-54.46 -90.78,-46.91 -105.56,-37.98 -119.46,-27.74 -132.38,-16.29 -144.21,-3.71 -154.84,9.89 -164.2,24.4 -172.2,39.7" fill="#ef4444" stroke="#ffffff" stroke-width="8" stroke-linejoin="round"/>
+  </g>
+</svg>

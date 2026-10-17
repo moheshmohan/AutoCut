@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Notification Bell: a FilmCraft Elements sticker (`sticker.bell`). Original work by FilmCraft contributors, MIT OR Apache-2.0.
+     Exported from the vectors in crates/project/src/elements.rs by crates/engine/src/elements.rs;
+     regenerate with FILMCRAFT_BLESS=1 cargo test -p filmcraft-engine bundled_sticker_svgs -->
+<svg xmlns="http://www.w3.org/2000/svg" width="348" height="312" viewBox="786 370 348 312">
+  <g id="bell" transform="matrix(1 0 0 1 960 540)">
+    <polygon points="-20,-138 -19.02,-144.18 -16.18,-149.76 -11.76,-154.18 -6.18,-157.02 0,-158 6.18,-157.02 11.76,-154.18 16.18,-149.76 19.02,-144.18 20,-138 19.9,-138 41.46,-131 54.26,-124 63.8,-117 71.41,-110 77.66,-103 82.85,-96 87.17,-89 90.75,-82 93.67,-75 96,-68 97.77,-61 99.02,-54 99.75,-47 100,-40 100.22,-29 100.88,-18 101.98,-7 103.52,4 105.5,15 107.92,26 110.78,37 114.08,48 117.82,59 122,70 135.65,74.33 142.69,78.67 148.39,83 153.36,87.33 157.86,91.67 162,96 34,96 32.84,104.8 29.44,113 24.04,120.04 17,125.44 8.8,128.84 0,130 -8.8,128.84 -17,125.44 -24.04,120.04 -29.44,113 -32.84,104.8 -34,96 -162,96 -157.86,91.67 -153.36,87.33 -148.39,83 -142.69,78.67 -135.65,74.33 -122,70 -117.82,59 -114.08,48 -110.78,37 -107.92,26 -105.5,15 -103.52,4 -101.98,-7 -100.88,-18 -100.22,-29 -100,-40 -99.75,-47 -99.02,-54 -97.77,-61 -96,-68 -93.67,-75 -90.75,-82 -87.17,-89 -82.85,-96 -77.66,-103 -71.41,-110 -63.8,-117 -54.26,-124 -41.46,-131 -19.9,-138" fill="#facc15" stroke="#111827" stroke-width="8" stroke-linejoin="round"/>
+  </g>
+  <g id="badge" transform="matrix(1 0 0 1 1087.34 461)">
+    <rect x="-38.66" y="-80" width="77.31" height="113.44" rx="38.66" fill="#ef4444"/>
+    <text x="0" y="0" font-family="Inter, sans-serif" font-size="64" font-weight="700" text-anchor="middle" fill="#ffffff">3</text>
+  </g>
+</svg>

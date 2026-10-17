@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Check Badge: a FilmCraft Elements sticker (`sticker.check-badge`). Original work by FilmCraft contributors, MIT OR Apache-2.0.
+     Exported from the vectors in crates/project/src/elements.rs by crates/engine/src/elements.rs;
+     regenerate with FILMCRAFT_BLESS=1 cargo test -p filmcraft-engine bundled_sticker_svgs -->
+<svg xmlns="http://www.w3.org/2000/svg" width="345" height="345" viewBox="792 372 345 345">
+  <defs>
+    <filter id="shadow1" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="4.24" dy="4.24" stdDeviation="10" flood-color="#000000" flood-opacity="0.35"/></filter>
+  </defs>
+  <g id="disc" transform="matrix(1 0 0 1 960 540)" filter="url(#shadow1)">
+    <ellipse cx="0" cy="0" rx="140" ry="140" fill="#22c55e" stroke="#ffffff" stroke-width="8" stroke-linejoin="round"/>
+  </g>
+  <g id="check" transform="matrix(1 0 0 1 956 551)">
+    <polygon points="-80,-6 -56,-30 -22,4 56,-74 80,-50 -22,52" fill="#ffffff"/>
+  </g>
+</svg>
