@@ -24,12 +24,12 @@ wrong base, 20–30 min gates re-run six times, CI minutes burned on every push.
 
 | # | Item | Done when |
 |---|---|---|
-| 0.1 | Rebuild + relaunch AutoCut.app on :9876 | `packaging/macos/package.sh` (AutoCut env vars); Whisper transcription, Delivery, albums, frame fill work in the app |
-| 0.2 | Resource locks: Chrome, Ollama, GPU | `~/Library/Application Support/FilmCraft/locks/{chrome,ollama,gpu}.lock` (holder, pid, start) taken by `photos pick/tidy`, `analyze`, narration synthesis, live tests; a busy lock waits or fails with "busy: <holder>"; CLAUDE.md tells sessions (and Claude in Chrome use) to respect it |
-| 0.3 | Worktrees start from `main` | Agent/session worktrees are cut from local `main` (today they start at upstream `c2f65871`); until fixed, every brief says "ff to main first" |
-| 0.4 | Fast gate + nightly full gate | `cargo xtask ci --changed` (fmt, clippy, tests of touched crates, layers, assets) for agents; full `cargo xtask ci` once before each push; try `cargo nextest` + `sccache` |
-| 0.5 | Fork CI | Upstream-only workflows (FreeBSD schedule — failing, Windows ARM64 — 34 min a push, Nix, release) disabled on the fork; one macOS job on push |
-| 0.6 | Disk hygiene | Each agent builds in `target/agent-<lane>`, deleted on merge; weekly `cargo clean --profile dev` (or cargo-sweep); scratch removed per task. (Cleaned today: 173 → 404 GB free) |
+| 0.1 | Rebuild + relaunch AutoCut.app on :9876 | **Rebuilt and relaunched 2026-10-17** (`fd00c42d`, `packaging/macos/package.sh` with the AutoCut env vars); checking Whisper transcription, Delivery, albums and frame fill in the app is part of 0.7 |
+| 0.2 | Resource locks: Chrome, GPU | **Done 2026-10-17** (`crates/locks`): `<data dir>/locks/{chrome,gpu}.lock`, OS file locks naming the holder; the picker agent and `photos tidy` hold the browser, VoxCPM narration the GPU; busy waits then fails naming the holder; `filmcraft-cli locks [hold]`; CLAUDE.md tells sessions to hold `chrome` while driving it. Ollama left out: it queues requests itself |
+| 0.3 | Worktrees start from `main` | **Done 2026-10-17**: `.claude/settings.json` `worktree.baseRef: "head"` — Claude Code cut agent worktrees from `origin/HEAD` (upstream on this fork); now from the local HEAD, so start them from the main checkout on `main` |
+| 0.4 | Fast gate + nightly full gate | **Done 2026-10-17** (`7aa5581a`): `cargo xtask ci --changed`; full `cargo xtask ci` before each push. Not yet tried: `cargo nextest`, `sccache` |
+| 0.5 | Fork CI | **Done 2026-10-17**: heavy upstream workflows disabled on the fork (GitHub settings); `autocut-checks.yml` runs fmt, layers, assets on push |
+| 0.6 | Disk hygiene | **Done 2026-10-17**: `cargo xtask sweep [--days N] [--dev] [--dry-run]` (agents' builds and test outputs untouched for N days, incremental caches; skips a profile a build holds); weekly and after each lane merge (docs/contributing.md §5) |
 | 0.7 | One-command live check | `cargo xtask live` (env-gated, takes the locks): picker multi-search + tidy, upload into an album, a cloned line heard back, analysis-cache hit, a 10 s showcase build — report in `target/live/`, never touches `~/Movies` |
 | 0.8 | Where plans live | **Done 2026-10-17**: `plan/` is tracked; only `plan/premiere/` (the Premiere visual reference) stays gitignored |
 
