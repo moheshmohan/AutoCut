@@ -620,6 +620,7 @@ fn scenes() -> Vec<(&'static str, &'static str, fn() -> Scene)> {
         ("transition_cross_dissolve", "Cross Dissolve at 50%", || transition("cross_dissolve", 24)),
         ("transition_dip_to_black", "Dip to Black at 25%", || transition("dip_to_black", 21)),
         ("transition_wipe", "Wipe at 50%", || transition("wipe", 24)),
+        ("transition_gl_mosaic", "GL Mosaic (GL Transitions, WGSL port) at 50%", || transition("gl_mosaic", 24)),
         ("text_burnin", "Timecode and Clip Name burn-in text", text_burnin),
         ("graphic_title", "Graphic clip: title text with stroke and shadow, lower-third bar", graphic_title),
         ("graphic_shapes", "Graphic clip: ellipse, polygon, path and rotated text with background", graphic_shapes),
@@ -688,6 +689,7 @@ goldens!(
     transition_cross_dissolve,
     transition_dip_to_black,
     transition_wipe,
+    transition_gl_mosaic,
     text_burnin,
     graphic_title,
     graphic_shapes,
@@ -707,6 +709,43 @@ goldens!(
     vfx_vr_rotate,
     vfx_stylize
 );
+
+/// Video Transitions ▸ GL Transitions: the Rust reference of every ported shader
+/// (`filmcraft_render::transitions::shader`) at 30 % and 60 %, one row per transition, from two
+/// rendered demo frames (OceanSunset → Aurora) at 48×27.
+#[test]
+fn gl_transitions_sheet() {
+    use filmcraft_render::transitions::{apply, shader};
+    let frame = |scene: DemoScene| {
+        let mut b = Builder::new(1);
+        let m = b.demo(scene);
+        b.place(0, m, 0, 48);
+        let s = b.at(12);
+        render_sequence(&s.project, s.seq, RATE.tick_of(s.frame), RenderOptions { scale: 0.15, ..RenderOptions::default() }, &s.sources)
+    };
+    let (a, b) = (frame(DemoScene::OceanSunset), frame(DemoScene::Aurora));
+    assert_eq!((a.w, a.h), (48, 27));
+    let (cw, ch) = (a.w, a.h);
+    let ps = [0.3f32, 0.6];
+    let rows = shader::shaders();
+    let (w, h) = (cw * ps.len(), ch * rows.len());
+    let mut px = vec![0u8; w * h * 4];
+    for (r, d) in rows.iter().enumerate() {
+        let e = find_effect(d.id).unwrap().instance();
+        for (c, &p) in ps.iter().enumerate() {
+            let cell = apply(&e, &a, &b, p).over_black_rgba8();
+            for y in 0..ch {
+                let dst = ((r * ch + y) * w + c * cw) * 4;
+                px[dst..dst + cw * 4].copy_from_slice(&cell[y * cw * 4..(y + 1) * cw * 4]);
+            }
+        }
+    }
+    let rgba = Rgba8::new(w as u32, h as u32, px);
+    let name = "gl_transitions_sheet";
+    let title = "GL Transitions (WGSL ports, Rust reference) at 30 % and 60 %";
+    let d = assert_golden(&golden_path(name), &rgba, Tolerance::RENDER, title, &format!("crates/golden/tests/golden.rs ({name})"));
+    eprintln!("{name}: {d}");
+}
 
 /// Effects panel ▸ Lumetri Presets thumbnail grid: every built-in preset graded by our Lumetri on
 /// the procedural preview picture (`filmcraft_render::lumetri_presets`).

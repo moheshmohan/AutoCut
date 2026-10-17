@@ -531,7 +531,7 @@ fn every_video_transition_applies_via_command() {
     s.execute("playhead.set", json!({"time": cut.0})).unwrap();
     let defs: Vec<_> =
         filmcraft_project::effect_defs().iter().filter(|d| d.kind == filmcraft_project::EffectKind::VideoTransition && d.category[0] != "Obsolete").collect();
-    assert_eq!(defs.len(), 84 + 21);
+    assert_eq!(defs.len(), 84 + 21 + 12, "Premiere folders, Legacy, GL Transitions");
     for (i, d) in defs.iter().enumerate() {
         // alternate id and display-name lookups
         let name = if i % 2 == 0 { d.id } else { d.name };
@@ -584,6 +584,43 @@ fn transition_params_and_reverse_via_commands() {
     let js = seq["video"][0]["transitions"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
     assert_eq!(js["effect"], "iris_round");
     assert!(js["params"]["border_width"].is_object() || js["params"]["border_width"].is_number(), "{js}");
+}
+
+#[test]
+fn gl_transitions_apply_and_render_through_commands() {
+    let mut s = demo();
+    let cut = s.active_sequence().unwrap().video_tracks[0].items[2].start;
+    s.execute("playhead.set", json!({"time": cut.0})).unwrap();
+    // the name users of the collection know, with its parameters and the host's easing
+    let r = s.execute("sequence.applyVideoTransition", json!({"effect": "GL CrossZoom", "params": {"strength": 0.8, "easing": "Cubic In-Out"}})).unwrap();
+    let id = r["transition"].as_u64().unwrap();
+    let find = |s: &Session| s.active_sequence().unwrap().video_tracks[0].transitions.iter().find(|t| t.id.0 == id).cloned().unwrap();
+    let tr = find(&s);
+    assert_eq!(tr.effect.effect, "gl_crosszoom");
+    assert_eq!(tr.effect.params["strength"].value, filmcraft_project::ParamValue::Float(0.8));
+    assert_eq!(tr.effect.params["easing"].value, filmcraft_project::ParamValue::Choice(9));
+    // hostile values are clamped to the catalogue's range or refused, never a crash
+    s.execute("sequence.setTransition", json!({"transition": id, "params": {"strength": 1e300, "bezier_x1": -5.0}})).unwrap();
+    let tr = find(&s);
+    assert_eq!(tr.effect.params["strength"].value, filmcraft_project::ParamValue::Float(1.0));
+    assert_eq!(tr.effect.params["bezier_x1"].value, filmcraft_project::ParamValue::Float(0.0));
+    assert!(s.execute("sequence.setTransition", json!({"transition": id, "params": {"easing": "Wobbly"}})).is_err());
+    assert!(s.execute("sequence.setTransition", json!({"transition": id, "params": {"strength": "lots"}})).is_err());
+    // the middle of the transition renders, and differs from its first frame
+    let mid = tr.start + tr.duration.mul_ratio(1, 2);
+    let before = s.render_program_at(0.25, tr.start).unwrap();
+    let during = s.render_program_at(0.25, mid).unwrap();
+    assert!(during.px.iter().all(|v| v.is_finite()));
+    assert!(during.px.iter().zip(&before.px).any(|(a, b)| (a - b).abs() > 1e-3));
+    // every GL transition is listed in its folder with its easing parameters
+    let gl = s.execute("effects.list", json!({"folder": "Video Transitions/GL Transitions", "detail": true})).unwrap();
+    let gl = gl.as_array().unwrap();
+    assert_eq!(gl.len(), 12);
+    for e in gl {
+        let params = e["paramInfo"].as_array().unwrap();
+        let easing = params.iter().find(|p| p["id"] == "easing").unwrap_or_else(|| panic!("{e}"));
+        assert_eq!(easing["options"].as_array().unwrap().len(), 32);
+    }
 }
 
 #[test]

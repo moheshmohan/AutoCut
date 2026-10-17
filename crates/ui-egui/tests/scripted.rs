@@ -215,6 +215,8 @@ fn effects_panel_lists_the_premiere_transition_folders() {
     for f in filmcraft_project::vtransition::VIDEO_TRANSITION_FOLDERS {
         assert!(folders.contains(&format!("effects.folder.Video Transitions/{f}")), "{f}: {folders:?}");
     }
+    // the GL Transitions follow the Premiere folders
+    assert!(folders.iter().any(|f| f == "effects.folder.Video Transitions/GL Transitions"), "{folders:?}");
     assert!(folders.iter().any(|f| f == "effects.folder.Legacy"), "{folders:?}");
     // search opens the matching folders: every modern wipe, and the legacy ones
     d.ok("ui.set", json!({"effectsSearch": "wipe"}));
@@ -240,6 +242,10 @@ fn effects_panel_lists_the_premiere_transition_folders() {
     d.ok("ui.set", json!({"effectsSearch": "venetian"}));
     d.frames(3);
     assert!(d.element_ids("effects.item.").is_empty());
+    // a GL Transition is found by its collection name
+    d.ok("ui.set", json!({"effectsSearch": "waterdrop"}));
+    d.frames(3);
+    assert_eq!(d.element_ids("effects.item."), vec!["effects.item.gl_waterdrop".to_string()]);
     // clicking a sub-folder toggles it
     d.ok("ui.set", json!({"effectsSearch": ""}));
     d.frames(2);

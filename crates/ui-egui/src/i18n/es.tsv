@@ -3633,3 +3633,64 @@
 # AutoCut showcases (Sequence ▸ Make a Showcase…)
 	Make a Showcase…	Crear una recopilación…
 	Showcase	Recopilación
+# GL Transitions (Video Transitions ▸ GL Transitions): names are the collection's own, kept as they are
+	GL Transitions	Transiciones GL
+	Starting Angle	Ángulo inicial
+	Opening	Apertura
+	Direction X	Dirección X
+	Direction Y	Dirección Y
+	End X	Final X
+	End Y	Final Y
+	Minimum Squares X	Cuadros mínimos X
+	Minimum Squares Y	Cuadros mínimos Y
+	Steps	Pasos
+	Zoom Quickness	Rapidez del zoom
+	Border Thickness	Grosor del borde
+	Star Rotation	Rotación de la estrella
+	Bézier X1	Bézier X1
+	Bézier Y1	Bézier Y1
+	Bézier X2	Bézier X2
+	Bézier Y2	Bézier Y2
+	Custom Bézier	Bézier personalizada
+	GL angular	GL angular
+	GL circleopen	GL circleopen
+	GL crosswarp	GL crosswarp
+	GL CrossZoom	GL CrossZoom
+	GL directionalwarp	GL directionalwarp
+	GL DreamyZoom	GL DreamyZoom
+	GL Mosaic	GL Mosaic
+	GL pixelize	GL pixelize
+	GL ripple	GL ripple
+	GL SimpleZoom	GL SimpleZoom
+	GL StarWipe	GL StarWipe
+	GL WaterDrop	GL WaterDrop
+	Sine In	Entrada sinusoidal
+	Sine Out	Salida sinusoidal
+	Sine In-Out	Entrada y salida sinusoidal
+	Quad In	Entrada cuadrática
+	Quad Out	Salida cuadrática
+	Quad In-Out	Entrada y salida cuadrática
+	Cubic In	Entrada cúbica
+	Cubic Out	Salida cúbica
+	Cubic In-Out	Entrada y salida cúbica
+	Quart In	Entrada cuártica
+	Quart Out	Salida cuártica
+	Quart In-Out	Entrada y salida cuártica
+	Quint In	Entrada quíntica
+	Quint Out	Salida quíntica
+	Quint In-Out	Entrada y salida quíntica
+	Expo In	Entrada exponencial
+	Expo Out	Salida exponencial
+	Expo In-Out	Entrada y salida exponencial
+	Circ In	Entrada circular
+	Circ Out	Salida circular
+	Circ In-Out	Entrada y salida circular
+	Back In	Entrada con retroceso
+	Back Out	Salida con retroceso
+	Back In-Out	Entrada y salida con retroceso
+	Elastic In	Entrada elástica
+	Elastic Out	Salida elástica
+	Elastic In-Out	Entrada y salida elástica
+	Bounce In	Entrada con rebote
+	Bounce Out	Salida con rebote
+	Bounce In-Out	Entrada y salida con rebote

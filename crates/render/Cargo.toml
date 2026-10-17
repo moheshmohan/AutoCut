@@ -20,6 +20,8 @@ filmcraft-audio-dsp = { workspace = true }
 filmcraft-captions = { workspace = true }
 filmcraft-text = { workspace = true }
 rayon = { workspace = true }
+# WGSL parser and validator for the shader-transition registry (the version wgpu uses).
+naga = { version = "30", default-features = false, features = ["wgsl-in"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

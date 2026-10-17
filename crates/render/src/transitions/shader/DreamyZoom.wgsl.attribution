@@ -1,0 +1,8 @@
+asset:        DreamyZoom.wgsl
+title:        GL Transitions "DreamyZoom" transition shader, hand-ported to WGSL
+author:       Zeh Fernando (upstream GLSL); FilmCraft contributors (WGSL port and Rust reference)
+source:       https://github.com/gl-transitions/gl-transitions/blob/master/transitions/DreamyZoom.glsl
+license:      MIT
+license-file: crates/render/src/transitions/shader/LICENSE-gl-transitions.txt
+added:        2026-10-17 by FilmCraft contributors (C1, lane T)
+notes:        Hand port of the upstream GLSL to WGSL, keeping its Author/License header; the upstream header says License: MIT. The FilmCraft host (prelude.wgsl, original work) supplies the bindings, progress (eased on the CPU), getFromColor/getToColor (clamped bilinear, linear premultiplied colour, uv origin bottom left) and GLSL helpers. The Rust reference of the same function is in cpu.rs. Changes from upstream: the flash is added to the premultiplied RGB with alpha kept at most 1 (upstream adds it to all four channels); atan2 at the exact centre pinned to 0; upstream's DEG2RAD constant (pi/80) kept.

@@ -13,6 +13,7 @@ pub mod caption;
 pub mod effect;
 pub mod essential;
 pub mod find;
+pub mod gltransition;
 pub mod graphic;
 pub mod graphic_design;
 pub mod gtemplate;

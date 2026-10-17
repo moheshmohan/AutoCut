@@ -13,8 +13,10 @@
 //!
 //! Contract (tested for every transition): `p = 0` is exactly the outgoing frame, `p = 1` exactly
 //! the incoming frame, the output is finite and deterministic, and it changes continuously near
-//! both ends. There is no GPU transition path: the GPU plan pre-renders transition layers on the
-//! CPU (see `plan.rs`), so this module is the only implementation.
+//! both ends. This module is the reference implementation. The GPU draws Push and the shader
+//! transitions ([`shader`]: GL Transitions ported to WGSL, each with its Rust reference here) on
+//! its own and is tested against this module; the GPU plan pre-renders every other transition
+//! on the CPU (see `plan.rs`).
 //!
 //! Immersive (VR) transitions are flat approximations on the equirectangular frame: sampling wraps
 //! horizontally and the iris uses great-circle distance, but there is no sphere re-projection.
@@ -29,10 +31,12 @@ use crate::image::Image;
 
 pub mod cards;
 mod dissolve;
+pub mod easing;
 mod grunge;
 mod legacy;
 mod lights;
 mod motion;
+pub mod shader;
 mod special;
 pub mod wipe;
 
@@ -62,7 +66,8 @@ pub fn apply_scaled(e: &EffectInstance, a: &Image, b: &Image, p: f32, scale: f32
     }
     let t = Tx { e, a, b, p, w: a.w, h: a.h, wf: a.w as f32, hf: a.h as f32, scale: if scale.is_finite() && scale > 0.0 { scale } else { 1.0 } };
     let id = e.effect.as_str();
-    dissolve::apply(id, &t)
+    shader::apply(id, &t)
+        .or_else(|| dissolve::apply(id, &t))
         .or_else(|| wipe::apply(id, &t))
         .or_else(|| motion::apply(id, &t))
         .or_else(|| lights::apply(id, &t))

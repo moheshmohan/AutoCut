@@ -3632,3 +3632,64 @@
 # AutoCut showcases (Sequence ▸ Make a Showcase…)
 	Make a Showcase…	ショーケースを作成…
 	Showcase	ショーケース
+# GL Transitions (Video Transitions ▸ GL Transitions): names are the collection's own, kept as they are
+	GL Transitions	GL トランジション
+	Starting Angle	開始角度
+	Opening	開く
+	Direction X	方向 X
+	Direction Y	方向 Y
+	End X	終了 X
+	End Y	終了 Y
+	Minimum Squares X	最小マス数 X
+	Minimum Squares Y	最小マス数 Y
+	Steps	ステップ数
+	Zoom Quickness	ズームの速さ
+	Border Thickness	境界線の太さ
+	Star Rotation	星の回転
+	Bézier X1	ベジェ X1
+	Bézier Y1	ベジェ Y1
+	Bézier X2	ベジェ X2
+	Bézier Y2	ベジェ Y2
+	Custom Bézier	カスタムベジェ
+	GL angular	GL angular
+	GL circleopen	GL circleopen
+	GL crosswarp	GL crosswarp
+	GL CrossZoom	GL CrossZoom
+	GL directionalwarp	GL directionalwarp
+	GL DreamyZoom	GL DreamyZoom
+	GL Mosaic	GL Mosaic
+	GL pixelize	GL pixelize
+	GL ripple	GL ripple
+	GL SimpleZoom	GL SimpleZoom
+	GL StarWipe	GL StarWipe
+	GL WaterDrop	GL WaterDrop
+	Sine In	イーズイン (サイン)
+	Sine Out	イーズアウト (サイン)
+	Sine In-Out	イーズインアウト (サイン)
+	Quad In	イーズイン (2 次)
+	Quad Out	イーズアウト (2 次)
+	Quad In-Out	イーズインアウト (2 次)
+	Cubic In	イーズイン (3 次)
+	Cubic Out	イーズアウト (3 次)
+	Cubic In-Out	イーズインアウト (3 次)
+	Quart In	イーズイン (4 次)
+	Quart Out	イーズアウト (4 次)
+	Quart In-Out	イーズインアウト (4 次)
+	Quint In	イーズイン (5 次)
+	Quint Out	イーズアウト (5 次)
+	Quint In-Out	イーズインアウト (5 次)
+	Expo In	イーズイン (指数)
+	Expo Out	イーズアウト (指数)
+	Expo In-Out	イーズインアウト (指数)
+	Circ In	イーズイン (円)
+	Circ Out	イーズアウト (円)
+	Circ In-Out	イーズインアウト (円)
+	Back In	イーズイン (バック)
+	Back Out	イーズアウト (バック)
+	Back In-Out	イーズインアウト (バック)
+	Elastic In	イーズイン (弾性)
+	Elastic Out	イーズアウト (弾性)
+	Elastic In-Out	イーズインアウト (弾性)
+	Bounce In	イーズイン (バウンス)
+	Bounce Out	イーズアウト (バウンス)
+	Bounce In-Out	イーズインアウト (バウンス)

@@ -74,7 +74,9 @@ fn midpoint_is_a_real_transition_and_sane() {
             assert!(m.px.chunks(4).all(|c| (-1e-4..=1.0 + 1e-4).contains(&c[3])), "{} p={p}: alpha out of range", d.id);
             assert!(m.px.iter().all(|v| *v > -0.3 && *v < 50.0), "{} p={p}: wild values", d.id);
         }
-        let m = apply(&e, &a, &b, 0.5);
+        // GL StarWipe's star (upstream's radius) has covered all but the corners by p = 0.5
+        let mid = if d.id == "gl_starwipe" { 0.3 } else { 0.5 };
+        let m = apply(&e, &a, &b, mid);
         let (da, db) = (mean_abs(&m, &a), mean_abs(&m, &b));
         assert!(da > 0.005 && db > 0.005, "{}: midpoint equals one side (ΔA {da}, ΔB {db})", d.id);
     }
@@ -157,6 +159,12 @@ fn every_parameter_changes_the_picture() {
                 && let Some(bw) = base.params.get_mut("border_width")
             {
                 bw.value = ParamValue::Float(6.0);
+            }
+            // the Bézier control points shape the "Custom Bézier" easing of shader transitions
+            if pd.id.starts_with("bezier_")
+                && let Some(easing) = base.params.get_mut("easing")
+            {
+                easing.value = ParamValue::Choice(filmcraft_project::gltransition::EASING_CUSTOM_BEZIER);
             }
             let base = base;
             let mut e = base.clone();

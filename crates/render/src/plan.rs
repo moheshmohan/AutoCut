@@ -7,14 +7,15 @@
 //! them as a [`LayerFx`]: their parameters evaluated at the frame's time, run by the GPU on the
 //! clip's working image before Motion places it, in the CPU's order (effects → Motion → Opacity /
 //! blend). Anything the shaders don't cover yet — other standard effects, masks, adjustment
-//! layers, nested sequences, transitions other than dissolves, dips and Push — is rendered on the CPU
-//! for that layer (or the whole frame) and handed over as a pre-composited image, so the GPU path
-//! is always exact with respect to the CPU reference.
+//! layers, nested sequences, transitions other than dissolves, dips, Push and the shader
+//! transitions — is rendered on the CPU for that layer (or the whole frame) and handed over as a
+//! pre-composited image, so the GPU path is always exact with respect to the CPU reference.
 //!
-//! A Push transition is planned as ordered [`PlanStep`] operations on isolated clip inputs: each
-//! side is drawn into its own image, the two are pushed together, and the result is composited (Normal) over
-//! the canvas of the lower tracks, which is preserved for the blends above it. [`execute_cpu`]
-//! runs the same steps on the CPU and is the reference.
+//! A Push or shader transition ([`crate::transitions::shader`], the GL Transitions) is planned as
+//! ordered [`PlanStep`] operations on isolated clip inputs: each side is drawn into its own image,
+//! the transition combines the two, and the result is composited (Normal) over the canvas of the
+//! lower tracks, which is preserved for the blends above it. [`execute_cpu`] runs the same steps
+//! on the CPU and is the reference.
 
 use std::sync::Arc;
 
@@ -166,6 +167,11 @@ fn simple_transition(id: &str) -> bool {
     matches!(id, "cross_dissolve" | "dip_to_black" | "dip_to_white")
 }
 
+/// A transition planned as a two-input [`PlanStep::Transition`] (Push, the shader transitions).
+fn two_input_transition(id: &str) -> bool {
+    id == "push" || crate::transitions::shader::is_shader(id)
+}
+
 /// The standard effects of a media clip if the GPU can draw it (any blend mode, no opacity masks,
 /// every enabled standard effect unmasked and with a GPU implementation; empty without effects or
 /// with effects off). None: the clip is rendered on the CPU.
@@ -237,7 +243,7 @@ pub(crate) fn layered_at(project: &Project, seq: &Sequence, t: Tick) -> bool {
             continue;
         }
         if let Some(trn) = tr.transitions.iter().find(|x| x.range().contains(t)) {
-            if !simple_transition(&trn.effect.effect) && trn.effect.effect != "push" {
+            if !simple_transition(&trn.effect.effect) && !two_input_transition(&trn.effect.effect) {
                 return false;
             }
             if [trn.from, trn.to].into_iter().flatten().filter_map(|c| tr.item(c)).any(adjustment) {
@@ -267,7 +273,7 @@ fn push_tracks(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, 
             let a = trn.from.and_then(|id| tr.item(id)).filter(|i| i.enabled);
             let b = trn.to.and_then(|id| tr.item(id)).filter(|i| i.enabled);
             match trn.effect.effect.as_str() {
-                "push" => {
+                id if two_input_transition(id) => {
                     let mut inputs = [Vec::new(), Vec::new()];
                     for (slot, item) in inputs.iter_mut().zip([a, b]) {
                         if let Some(item) = item {
