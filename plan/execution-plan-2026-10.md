@@ -60,15 +60,23 @@ sharing, A4 recipes; V: E2 caption embedding, E3 vertical factory (tracking + lo
 **Phase 4 (quarter 2)** — C3 flow presets + content-aware wipe; D2 ACE-Step 1.5 on candle (MIT);
 E5 adjustment clips + per-track ducking; B6 TikTok.
 
-## 4. Decisions for you
+## 4. Decisions (answered 2026-10-17)
 
-1. **YouTube client ID**: BYO (each user brings a GCP client, as the roadmap recommends). For you
-   now: reuse the `autocut-photos` GCP project in Testing mode with the YouTube scope?
-2. **Instagram path**: Facebook Login + resumable upload needs a professional account linked to a
-   Page. Which account, and is a Page acceptable?
-3. **Soundfont**: GeneralUser GS needs its current licence confirmed before bundling; otherwise D1
-   starts on the oscillator voices.
-4. **ACE-Step 1.5 port (120–250 h)**: commit in Q2, or keep tier 1 only?
+1. **YouTube**: reuse the `autocut-photos` GCP project (Testing mode) with the YouTube Data API
+   and `youtube.upload` + `youtube.readonly` scopes. Uploads from an unaudited project stay
+   private (YouTube's rule since July 2020) — fine as a review step; apply for the API audit when
+   the uploader is proven. The adapter must handle **Brand Accounts**: connect several channels
+   (each sign-in grants one channel, picked in Google's account chooser), list them, and choose
+   the channel per upload; tokens per channel.
+2. **Instagram**: the **Instagram API with Instagram Login** (no Facebook Page needed; a
+   professional — Creator or Business — account, the user's own). A Meta developer app of the
+   user's, the user's Instagram account as its tester; set up from the main session in Chrome.
+3. **Soundfont**: GeneralUser GS (licence v2.0, permissive; its author notes sample provenance
+   is not fully certain) is **downloaded on first use with consent** (licence shown), like the
+   voice and speech models — never bundled in the repo; the oscillator voices stay the fallback.
+4. **ACE-Step 1.5**: **proceed** — an optional neural text-to-music backend next to the
+   procedural engine (D2, MIT weights on candle, downloaded with consent like VoxCPM); started
+   2026-10-17 as its own lane.
 5. ~~Plans location~~ — decided: `plan/` is tracked.
 
 ## 5. Risks
