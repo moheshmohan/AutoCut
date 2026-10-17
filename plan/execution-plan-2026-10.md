@@ -36,7 +36,9 @@ wrong base, 20–30 min gates re-run six times, CI minutes burned on every push.
 ## 3. Roadmap phases as parallel lanes
 
 Each lane is one worktree session with its own `target/agent-<lane>`, merged daily by the main
-session (gates green, cherry-picked in order). Lanes are chosen so they don't share files; the
+session (gates green, cherry-picked in order). Lanes run only their crates' checks; the full gate
+runs once, in the main session, after a merge (learned 2026-10-17: six concurrent full gates on one
+Mac reached load ~190 and none finished in 2.5 h). Lanes are chosen so they don't share files; the
 hot spots — the command registry (`crates/engine/src/commands.rs`), `crates/automation/src/server.rs`,
 `crates/project/src/vtransition.rs`, the CLI's `main.rs` — are touched by one lane at a time or
 merged in a fixed order.
