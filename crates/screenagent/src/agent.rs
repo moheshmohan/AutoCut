@@ -116,7 +116,8 @@ pub enum Outcome {
     /// split it (by day, or a narrower search) or raise the cap.
     TooBig,
     /// Its days did not all fit under the session's cap: those that fit are selected, and the
-    /// others are left as one search per day ([`Summary::left`]) for a next session.
+    /// search resumes from the first that did not in a next session ([`Summary::left`],
+    /// [`picker::resume_from`]).
     Split,
     /// It could not be searched or selected (the note says why).
     Failed,
@@ -149,7 +150,8 @@ pub struct Summary {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub searches: Vec<Searched>,
     /// Searches for a next session: those this session did not get to (its item cap, or its
-    /// budget), a date search deferred whole, or the day searches one was split into.
+    /// budget), a date search deferred whole or resumed where it was split, and day searches for
+    /// days no click selected.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub left: Vec<String>,
     /// The agent closed the picker tab when it finished.
@@ -810,7 +812,7 @@ fn search_many<A: Act, G: Ground>(
         with(Outcome::NoResults),
         with(Outcome::NothingNew),
         with(Outcome::Failed) + with(Outcome::Cleared),
-        if split == 0 { String::new() } else { format!(", {split} split into day searches") },
+        if split == 0 { String::new() } else { format!(", {split} split (to resume in a next session)") },
         if past == 0 { String::new() } else { format!(", {past} past the session's maximum (unselected)") },
         if summary.left.is_empty() { String::new() } else { format!(", {} left for a next session", summary.left.len()) },
         summary.selected
@@ -827,7 +829,7 @@ fn outcome_line(o: Outcome, selected: Option<u32>, note: &str) -> String {
         Outcome::Cleared => "cleared some earlier selections",
         Outcome::Deferred => "past the session's maximum, unselected, left for a next session",
         Outcome::TooBig => "more than a session holds, unselected",
-        Outcome::Split => "split: the days that fit are selected, the others left as day searches",
+        Outcome::Split => "split: the days that fit are selected, and it resumes from the next in a next session",
         Outcome::Failed => "failed",
     };
     let count = selected.map(|n| format!(" ({n} selected so far)")).unwrap_or_default();
@@ -3096,7 +3098,7 @@ mod tests {
         // October's one item would still fit, but the session is full where the split happened
         assert_eq!(s.left, ["videos November 2022 from 2022-11-29", "videos October 2022", "videos September 2022"]);
         assert!(s.done_pressed && w.borrow().done && s.selected == 6, "{s:?}");
-        assert!(s.note.contains("1 split into day searches"), "{}", s.note);
+        assert!(s.note.contains("1 split (to resume in a next session)"), "{}", s.note);
     }
 
     #[test]
