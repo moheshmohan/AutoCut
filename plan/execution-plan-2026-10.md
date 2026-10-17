@@ -79,7 +79,7 @@ E5 adjustment clips + per-track ducking; B6 TikTok.
    **AutoCut** (app ID 948613107902184, development mode, no business portfolio, use case "Manage
    messaging & content on Instagram"); its Instagram app **AutoCut-IG** (Instagram app ID
    2133883020551415; the secret stays in the dashboard — the user pastes it into AutoCut, never a
-   session); @moheshmohan added as Instagram Tester (invite to accept in Instagram ▸ Apps and
+   session); @moheshmohan is its Instagram Tester (invite accepted 2026-10-17 in Instagram ▸ Apps and
    websites ▸ Tester invites). Still to do in lane I: the OAuth redirect URI under "Set up
    Instagram business login", the permissions `instagram_business_basic` +
    `instagram_business_content_publish`, and the token path — Instagram Login code exchange with
