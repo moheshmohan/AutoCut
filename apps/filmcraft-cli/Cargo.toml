@@ -16,11 +16,13 @@ path = "src/main.rs"
 # AutoCut build: speech-to-text (Whisper) and natural narration voices (Kokoro) ship by default,
 # so transcript- and narration-driven automation works out of the box (upstream leaves them off
 # in release builds); model weights still download on demand with consent.
-default = ["whisper", "neural-voices"]
+default = ["whisper", "neural-voices", "neural-music"]
 # Speech-to-text (Text panel ▸ Transcribe) with Whisper on the CPU, and model downloads.
 whisper = ["filmcraft-engine/whisper", "filmcraft-engine/speech-download"]
 # Natural Text to Speech voices (Kokoro-82M on the CPU, downloaded on first use).
 neural-voices = ["filmcraft-engine/neural-voices"]
+# Neural text to music (ACE-Step 1.5 on candle, Metal on macOS; the model downloads on demand with consent).
+neural-music = ["filmcraft-engine/neural-music"]
 
 [dependencies]
 filmcraft-engine = { workspace = true }

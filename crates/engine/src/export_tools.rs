@@ -623,6 +623,9 @@ pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     if crate::photos::is_upload(s, j.id) {
         v["upload"] = crate::photos::upload_json(s, j.id);
     }
+    if let Some(m) = crate::music_neural::outcome_json(s, j.id) {
+        v["music"] = m;
+    }
     if crate::autocut::is_showcase(s, j.id) {
         v["showcase"] = crate::autocut::outcome_json(s, j.id);
     }

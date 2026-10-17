@@ -2030,6 +2030,7 @@ dependencies = [
 name = "filmcraft-engine"
 version = "0.8.0"
 dependencies = [
+ "filmcraft-acestep",
  "filmcraft-audio-dsp",
  "filmcraft-captions",
  "filmcraft-codecs",

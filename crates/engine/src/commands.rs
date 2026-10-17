@@ -1647,7 +1647,11 @@ fn build() -> Vec<CommandSpec> {
             has_seq,
             crate::export_tools::export_media
         ),
-        query!("jobs.list", "List Jobs", "{}", |s, _| Ok(Value::Array(s.jobs.iter().map(|j| crate::export_tools::job_json(s, j)).collect()))),
+        query!("jobs.list", "List Jobs", "{}", |s, _| {
+            // finished neural music lands before it is reported (headless callers poll this)
+            crate::music_neural::poll(s);
+            Ok(Value::Array(s.jobs.iter().map(|j| crate::export_tools::job_json(s, j)).collect()))
+        }),
         query!("perf.stats", "Performance Statistics", "{}", |s, _| Ok(crate::perf::stats(s))),
         cmd!("jobs.cancel", "Cancel Job", [], None, r#"{"job":id}"#, always, |s, p| {
             let id = u64_p(p, "job").ok_or_else(|| bad("jobs.cancel", "need `job`"))?;
@@ -3474,6 +3478,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::audio_generate::commands());
     v.extend(crate::voice_clone::commands());
     v.extend(crate::video_templates::commands());
+    v.extend(crate::music_neural::commands());
     v.extend(crate::photos::commands());
     v.extend(crate::autocut::commands());
     v.extend(crate::media_frame::commands());

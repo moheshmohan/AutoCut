@@ -136,7 +136,9 @@ progress and stop it:
   "Exporting… NN%" in its status bar) and the call returns when it is written, however long it
   takes. `filmcraft-cli --bridge … exec file.exportMedia … wait=true` blocks the same way.
 - The other long commands run the same way with `wait: true`: `tts.cloneVoice`,
-  `tts.downloadVoices`, `tts.downloadCloneModel` and `photos.upload` (a file to the user's Google
+  `tts.downloadVoices`, `tts.downloadCloneModel`, `music.generateNeural` (ACE-Step text to music;
+  the answer carries `music`: the placed item, clip and track), `music.downloadNeuralModel` (needs
+  `consent: true` once the user agreed to the 6.3 GB download) and `photos.upload` (a file to the user's Google
   Photos library; progress in bytes). `googlephotos_upload {path, description?}` is that upload as
   its own tool; its answer, like the finished job's `jobs.list` entry, carries `upload` (the new
   media item: `mediaItemId`, `productUrl`, …). Cancelling an upload stops it between chunks and

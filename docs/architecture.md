@@ -26,7 +26,7 @@ Design principles:
  L5  ui-egui · automation · autocut · gphotos · oauth · screenagent · platform
  L4  engine
  L3  render · gpu · export · templates · golden (test-only)
- L2  edit · codecs · interchange · captions · speech · tts · tts-text
+ L2  edit · codecs · interchange · captions · speech · tts · tts-text · acestep
  L1  frame · media · project · audio-dsp · text
  L0  foundation: time · geom · color · bitstream · locks · testkit (dev-dependency only)
      codecs/containers: isobmff · matroska · mxf · cfb · mpegts · ogg · h264 · h264enc · hevc · vp9 · av1 · mpeg2v · prores · dnx · apv · dng · aac · ac3 · mpa · opus
@@ -69,6 +69,7 @@ and `filmcraft-cli`.
 | `speech` | L2 | speech-to-text: `Transcriber` trait, Whisper model catalogue + verified downloader (feature `download`), pure-Rust Whisper inference on candle with word timestamps (feature `whisper`), speaker labelling ([transcripts.md](transcripts.md)) |
 | `tts` | L2 | text to speech: `Voice` trait, voice catalogue, pause markers, built-in formant voices; Kokoro-82M natural voices on candle and their pinned package catalogue (feature `kokoro`); cloned voices: OpenVoice V2 tone-colour conversion (feature `kokoro`) and VoxCPM zero-shot cloning on candle, Metal on macOS (feature `voxcpm`). Same-layer edge to `tts-text` |
 | `tts-text` | L2 | text front end for narration: normalizer (numbers, money, dates, acronyms, pauses) and English pronunciation (CMUdict + letter-to-sound) to Kokoro phonemes |
+| `acestep` | L2 | neural text to music: ACE-Step 1.5 (MIT) model catalogue (pinned, SHA-256), request checks and prompt layout; (feature `model`) the Qwen3 text encoder and byte-level BPE tokenizer, the turbo DiT, the 8-step flow-matching sampler and the Oobleck VAE on candle, Metal on macOS ([README](../crates/acestep/README.md)). Wasm builds compile it without the feature |
 | `codecs` | L2 | container + codec hub: MP4/MOV, MKV, MXF, Ogg and MPEG TS / PS / video elementary stream sources, GOP-aware seeking, decoder registry, audio decoding |
 | `interchange` | L2 | EDL, FCP7 XML, FCPXML, OTIO, AAF (on `cfb`) and OMF 2.0 import/export (no file I/O; the engine supplies rendered audio essence) ([README](../crates/interchange/README.md)) |
 | `render` | L3 | sequence evaluation, CPU compositor, video effects (`effects`, `vfx`; effects needing other frames or tracks read them through `vfx::FxEnv`), transitions, audio mix |
@@ -485,6 +486,8 @@ stereo / mono track ──5.1 panner───┼─► 5.1 submix / 5.1 Mix ─�
 - **Timbre only (OpenVoice, profile version 1).** The speaker's tone colour from the OpenVoice V2 reference encoder (MIT, 131 MB); a `clone:<name>` voice speaks with the Kokoro voice closest to the speaker and re-voices the result through the OpenVoice tone-colour converter (VITS posterior → flow → HiFi-GAN, candle, 22.05 kHz, windowed-sinc resampling either side). Faster; the accent and rhythm stay Kokoro's. Profiles made before the natural engine load unchanged.
 
 **Generated audio** (`engine::audio_generate`, `audio.generate`; `filmcraft_audio_dsp::synth`; the Generate Audio panel). Whooshes, impacts, risers, drones and music beds (mood, key, tempo; sections; -20 LUFS) are synthesized from oscillators, noise, envelopes, filters and a feedback-delay reverb — no samples or models — and written as 48 kHz stereo WAVs in a `Generated Audio` folder beside the project (narrations go to `Narrations`), imported and placed on a free audio track as one undo step. The same parameters and seed give the same sound.
+
+**Neural music** (`engine::music_neural`, `music.generateNeural` / `music.neuralModels` / `music.downloadNeuralModel`; `filmcraft-acestep`, feature `neural-music` of the desktop app and CLI). Instrumental music from a description (genre, mood, instruments; optional tempo, key, metre), 5–240 s, by ACE-Step 1.5 turbo (ACE Studio and StepFun, MIT; text encoder Qwen3-Embedding-0.6B, Apache-2.0) in pure Rust on candle — Metal on macOS with bf16 linear weights, else the CPU — under the machine-wide GPU lock. A background job runs the official text-to-music path without the LM planner (prompt layout, Qwen3 text encoder, condition encoder, eight Euler steps of the distilled flow-matching schedule, Oobleck VAE to 48 kHz stereo, peak −1 dBFS) and writes `Neural Music <n>.wav`; when the session next looks at its jobs (UI frame, `jobs.list`, any `music.*` command) the WAV is imported — model, seed and settings in the item's Description and Log Note — and placed at `atTime`/`atSeconds` (default the playhead) on the chosen or first free audio track, else a new one, as one undo step. The 6.3 GB package (eight files, pinned to a revision and SHA-256) downloads only with `consent: true` after the user saw its size, source and licence; `music.generateNeural` without it says exactly that. Checked against the official reference run as an oracle (`crates/acestep/README.md`).
 
 ### 5.1.3 Remix
 
