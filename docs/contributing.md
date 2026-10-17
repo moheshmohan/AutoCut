@@ -121,6 +121,7 @@ Every commit must pass all of these:
 | Assets | `cargo xtask assets` |
 | wasm | `cargo xtask wasm` (checks every L0–L4 crate, `filmcraft-ui-egui` and `filmcraft-web` for `wasm32-unknown-unknown`) |
 | All of the above | `cargo xtask ci` (runs clippy and tests with `--release`) |
+| The same for what changed | `cargo xtask ci --changed [--base REF]`: tests of the changed crates, clippy on them and every crate depending on them, wasm only when a web-built crate is affected; a workspace file (root manifest, `Cargo.lock`, `xtask/`) runs everything |
 
 Run them with `CRAFT_FONTS_DIR` set too when you change font code ([craft-fonts](#building-with-craft-fonts)).
 

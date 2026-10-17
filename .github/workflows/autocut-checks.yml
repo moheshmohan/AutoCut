@@ -1,0 +1,35 @@
+# AutoCut fork: the cheap repository checks on every push (a few minutes on Linux): formatting,
+# the crate layering rules and asset attribution. The full gates (`cargo xtask ci`: clippy, the
+# whole test suite, wasm) run locally before each push, as CLAUDE.md requires; upstream's heavy
+# platform workflows (FreeBSD, Windows ARM64, Nix) are disabled on this fork in GitHub's settings
+# rather than edited, so upstream merges stay conflict-free.
+name: AutoCut checks
+
+on:
+  push:
+    branches: [main, feat/autocut]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autocut-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Layering
+        run: cargo xtask layers
+      - name: Asset attribution
+        run: cargo xtask assets

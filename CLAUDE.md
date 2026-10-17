@@ -18,7 +18,7 @@ FilmCraft is a clean-room, open-source, pure-Rust non-linear video editor target
 - **Exact time:** all time is `filmcraft_time::Tick` (254 016 000 000/s). Never use f64 seconds for edit math.
 - **Everything is a command** (`crates/engine`): id, label, menu path, shortcut, params, enabled(), run(). UI, CLI, control channel and MCP all dispatch by id.
 - **Everything is agent-drivable:** every interactive widget registers an automation id; UI state is serde so the control channel can read/set it.
-- **Quality gates** before every commit: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo xtask layers`, `cargo xtask assets`, `cargo xtask wasm` (checks L0–L4 crates). `cargo xtask ci` runs them all.
+- **Quality gates** before every commit: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo xtask layers`, `cargo xtask assets`, `cargo xtask wasm` (checks L0–L4 crates). `cargo xtask ci` runs them all; `cargo xtask ci --changed [--base REF]` runs them for what changed (the changed crates' tests, clippy on them and their dependents) — for iterating, with the full `cargo xtask ci` before every push. The fork's GitHub CI only checks formatting, layering and assets (`.github/workflows/autocut-checks.yml`); upstream's platform workflows are disabled on the fork in GitHub, not edited.
 - **Commits:** one task id per commit (`M2.4: CABAC residual decoding`). Only green states. End messages with the attribution line required by the environment.
 
 ## Running and looking at the app

@@ -17,7 +17,12 @@
 //!   placement reported separately (`parity.rs`, docs/gaps.md G7).
 //! - `ico <out.ico> <in.png>…`: pack PNGs into a Windows `.ico` (used by `packaging/icons.sh`).
 //! - `ci`: fmt check, clippy -D warnings, tests, layers, assets, wasm.
+//! - `ci --changed [--base REF]`: the same for what changed since REF (default: the branch's
+//!   upstream, else `main`): clippy on the changed crates and their dependents, the changed
+//!   crates' tests, wasm only when a web-built crate is affected (`changed.rs`). For iterating;
+//!   the full `ci` runs before every push.
 
+mod changed;
 mod ico;
 mod parity;
 mod version;
@@ -497,6 +502,7 @@ fn main() -> ExitCode {
         "wasm" => wasm(),
         "assets" => assets(),
         "fixtures" => fixtures(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "ci" if std::env::args().nth(2).as_deref() == Some("--changed") => changed::run_changed(&std::env::args().skip(3).collect::<Vec<_>>()),
         "ci" => ci(),
         "bench" => bench(),
         "bench-playback" => bench_playback(),
@@ -514,7 +520,7 @@ fn main() -> ExitCode {
             ico::run(&rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
         _ => Err(
-            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci|bench [args]|bench-playback [args]>"
+            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci [--changed [--base REF]]|bench [args]|bench-playback [args]>"
                 .into(),
         ),
     };
