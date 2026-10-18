@@ -341,6 +341,28 @@ running job's progress and Cancel. A job started elsewhere (an agent, the prompt
 forward and its plan loads there. Every widget has an automation id and the draft is UI state
 (`ui.set {showcase: …}`, see [docs/control-protocol.md](../../docs/control-protocol.md)).
 
+## Shorts: long video → vertical clips
+
+`autocut.shorts` (job; `shorts.rs`) is the local "Opus Clip" factory. The transcript (Whisper's,
+made first when there is none) is cut into sentences (`.` `!` `?`, pauses over 1.2 s, at most 45
+words); every run of whole sentences `minSeconds`..`maxSeconds` long is a candidate, scored by the
+highlight reel's interest score (`highlight::interest`: content words, the topic, numbers) per
+sentence weighted by speaking time, a length term peaking mid-range, speech density and the
+opening's hook (a question, a direct address or a bold claim, said briefly). With Ollama the best
+36 openings are also rated 0..10 for how well they hook and get a short title (the script model,
+else the classifier). The best `count` that do not overlap each become a vertical sequence:
+`sequence.autoReframe` of its range (a little lead-in and tail from the silence around it) to
+`aspect`, the speaker followed by the subject tracker (`filmcraft_render::subject`, letterboxed
+where nobody is found); `transcript.createCaptions` (18 characters, one line) and
+`captions.setStyle` (76 px white with a 7 px outline, no box, low in the frame); a `title` card
+(`graphics.newText`); `file.exportMedia` into `export` with `burnCaptions`; `youtube.upload`
+(private unless `youtube.privacy`) with `uploadYoutube`. A step that fails for one short is noted
+in its `notes`; the others are still made.
+
+The showcase reuses the tracker: a filled (portrait or 4:3) shot calls `clip.autoReframe` with
+`keepScale` (the push-in stays) seeded from the analysis' box, and keeps the tilt only where its
+subject is not found (`Options::follow_subject`, `--no-track`).
+
 ## Configuration (environment)
 
 | Variable | Default | Meaning |
@@ -360,7 +382,8 @@ Caption styles: `add_captions` takes `style: tiktok | bold | clean | default` an
 - **CLI:** `filmcraft-cli autocut '<prompt>' [--dry-run] [--frames]` (headless `--demo`/`--project`,
   or `--bridge` to edit in the running app). A hand-off exits 1 with the report on stdout.
   Showcases: `analyze` + `showcase --report`, or `showcase --album "<title>" --prompt "…"` from
-  a Google Photos album in one command.
+  a Google Photos album in one command. Shorts: `filmcraft-cli shorts talk.mp4 --count 3
+  --export out/ [--upload-youtube]`.
 - **MCP:** the `autocut_plan` (dry run) and `autocut_edit` tools, on both MCP backends
   (`filmcraft-cli mcp --demo` / `--bridge`). When a report has `needsSupervisor`, the calling
   agent plans that edit itself with the command tools — that is the supervision loop. Showcases:

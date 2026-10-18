@@ -83,6 +83,10 @@ pub struct Options {
     /// around the subject with a slow tilt across it, as a 16:9 video should look; `false`: they
     /// sit whole over a blurred, dimmed copy of themselves.
     pub fill_frame: bool,
+    /// A filled shot's crop follows its subject (`clip.autoReframe`: the subject tracker, seeded
+    /// from the analysis' box) instead of tilting across a fixed point; shots where it is not
+    /// found keep the tilt.
+    pub follow_subject: bool,
 }
 
 impl Default for Options {
@@ -104,6 +108,7 @@ impl Default for Options {
             match_color: false,
             target_minutes: None,
             fill_frame: true,
+            follow_subject: true,
         }
     }
 }
@@ -785,6 +790,8 @@ struct Tracks {
     stabilize: bool,
     /// Odd-shaped clips fill the frame ([`Options::fill_frame`]).
     fill: bool,
+    /// Filled shots follow their subject ([`Options::follow_subject`]).
+    follow: bool,
     /// The frame's size, sequence pixels.
     frame: (f64, f64),
     bg: String,
@@ -963,6 +970,30 @@ async fn reframe(ex: &dyn Executor, clip: u64, aspect: f64, frame: (f64, f64), f
     Ok(())
 }
 
+/// Shots shorter than this (seconds) are not followed.
+const FOLLOW_MIN_SECONDS: f64 = 1.2;
+/// Frames a second the subject tracker looks at in a shot (a calm crop needs few).
+const FOLLOW_FPS: f64 = 8.0;
+
+/// Follow the subject through the filled shot `clip` (the clip's media `[src, src + dur)`, shape
+/// `aspect`): `clip.autoReframe` keyframes its position with the tracker (its scale, with the
+/// push-in, stays), seeded from `focus` — the analysis' box — when that moment is in the shot,
+/// else from what stands out. Whether the subject was followed; a shot where it was not found,
+/// or that failed, is left for the tilt ([`reframe`]).
+async fn follow_subject(ex: &dyn Executor, clip: u64, aspect: f64, src: f64, dur: f64, focus: Option<Moment>) -> bool {
+    let mut p = json!({"clips": [clip], "keepScale": true, "motion": "smooth", "fallback": "center", "analysisFps": FOLLOW_FPS, "wait": true});
+    if let Some(m) = focus.filter(|m| m.seconds.is_finite() && m.seconds >= src && m.seconds <= src + dur && m.area.is_finite() && m.area > 0.0) {
+        let aspect = if aspect.is_finite() && aspect > 0.0 { aspect } else { 1.0 };
+        let (w, h) = ((m.area.min(1.0) / aspect).sqrt().clamp(0.02, 1.0), (m.area.min(1.0) * aspect).sqrt().clamp(0.02, 1.0));
+        let c = m.center.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.5 });
+        p["subject"] = json!({"x": c[0] - w / 2.0, "y": c[1] - h / 2.0, "w": w, "h": h, "seconds": m.seconds});
+    }
+    match run(ex, "clip.autoReframe", p).await {
+        Ok(r) => r["reframe"]["followed"].as_u64().is_some_and(|n| n > 0),
+        Err(_) => false,
+    }
+}
+
 /// Place `item`'s `[src, src + dur)` at `t` (both ends on frames): foreground on V2 (with its
 /// sound on A1, which [`mix_down`] levels) with a slow push-in ([`push_in`]) and — when the
 /// show is stabilized ([`Options::stabilize`]) and `stabilize` — Warp Stabilizer. A clip whose
@@ -1004,7 +1035,9 @@ async fn place_shot(
         // cosmetic, like the transitions: a shot without its push-in (or its reframing) is
         // still right
         push_in(ex, fg, scale, t, end, tr.fps).await.ok();
-        if fill {
+        // a still (the thumbnail's second) has nothing to follow
+        let followed = fill && tr.follow && dur > FOLLOW_MIN_SECONDS && follow_subject(ex, fg, aspect, src, dur, focus).await;
+        if fill && !followed {
             let focus = focus.unwrap_or(Moment { seconds: 0.0, area: 0.0, center: Moment::middle() });
             reframe(ex, fg, aspect, tr.frame, focus, t, end, tr.fps).await.ok();
         }
@@ -1872,6 +1905,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         aspect: w / h.max(1.0),
         stabilize: opts.stabilize,
         fill: opts.fill_frame,
+        follow: opts.follow_subject,
         frame: (w, h),
         bg: "V1".into(),
         fg: "V2".into(),
@@ -2344,6 +2378,7 @@ async fn compose_thumbnail(
         stabilize: false,
         // the whole picture over its blurred copy: the title goes where the robot is not
         fill: false,
+        follow: false,
         frame: (w, h),
         bg: "V1".into(),
         fg: "V2".into(),
@@ -2993,6 +3028,7 @@ mod tests {
             aspect: 16.0 / 9.0,
             stabilize: false,
             fill: true,
+            follow: false,
             frame: (1920.0, 1080.0),
             bg: "V1".into(),
             fg: "V2".into(),

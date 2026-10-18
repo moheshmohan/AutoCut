@@ -520,8 +520,8 @@ fn dark_border_share(png: &[u8]) -> f64 {
 #[tokio::test(flavor = "multi_thread")]
 async fn clips_of_another_shape_fill_the_frame_around_their_robot() {
     // a square frame makes the demo's 16:9 clips "another shape" (as portrait phone clips are
-    // in a 16:9 show): they fill it, each keyframed along a pan across its robot, with no
-    // blurred copy behind
+    // in a 16:9 show): they fill it, each crop following its robot (the subject tracker) or,
+    // where it is not found, panning across it, with no blurred copy behind
     let ex = demo();
     let opts = Options { title: "Robots".into(), width: 480, height: 480, ..Options::default() };
     let built = showcase::build(&ex, &opts, &three(), &short_script(), &mut |_| {}).await.expect("the showcase builds");
@@ -530,8 +530,17 @@ async fn clips_of_another_shape_fill_the_frame_around_their_robot() {
     let v2 = seq["video"][1]["items"].as_array().cloned().unwrap();
     assert!(v2.len() >= 6, "{}", v2.len());
     for c in &v2 {
-        assert_eq!(keyframes(c, "motion", "position"), 2, "a pan across the robot: {c}");
-        assert_eq!(keyframes(c, "motion", "scale"), 2, "and the push-in: {c}");
+        // followed (a still crop, or a path of two or more keyframes) or panned (two)
+        assert_ne!(keyframes(c, "motion", "position"), 1, "the crop follows or pans: {c}");
+        assert_eq!(keyframes(c, "motion", "scale"), 2, "and the push-in stays: {c}");
+    }
+    // the tilt alone, as before, when following is off
+    let ex2 = demo();
+    let opts2 = Options { title: "Robots".into(), width: 480, height: 480, follow_subject: false, ..Options::default() };
+    showcase::build(&ex2, &opts2, &three(), &short_script(), &mut |_| {}).await.expect("the showcase builds");
+    let seq2 = ex2.execute("sequence.inspect", json!({})).await.unwrap();
+    for c in seq2["video"][1]["items"].as_array().cloned().unwrap() {
+        assert_eq!(keyframes(&c, "motion", "position"), 2, "a pan across the robot: {c}");
     }
     assert!(seq["video"][0]["items"].as_array().is_none_or(|a| a.is_empty()), "no blurred copies: {}", seq["video"][0]);
     let tps = 254_016_000_000f64;

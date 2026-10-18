@@ -93,7 +93,14 @@ fn score(seg: &Segment, topic: Option<&str>) -> f64 {
     } else {
         0.1
     };
-    let words: Vec<&str> = seg.text.split_whitespace().collect();
+    length + interest(&seg.text, topic)
+}
+
+/// How interesting a stretch of speech reads, whatever its length: the share of content words,
+/// two for each word of the `topic`, and a little for each number (facts, counts, prices). The
+/// highlight reel's scorer, also used by the shorts recipe.
+pub fn interest(text: &str, topic: Option<&str>) -> f64 {
+    let words: Vec<&str> = text.split_whitespace().collect();
     let content = words.iter().filter(|w| !is_stopword(w)).count() as f64 / words.len().max(1) as f64;
     let mut topic_hits = 0.0;
     if let Some(topic) = topic {
@@ -106,7 +113,7 @@ fn score(seg: &Segment, topic: Option<&str>) -> f64 {
         }
     }
     let numbers = words.iter().filter(|w| w.chars().any(|c| c.is_ascii_digit())).count() as f64 * 0.3;
-    length + content + topic_hits * 2.0 + numbers
+    content + topic_hits * 2.0 + numbers
 }
 
 /// Lead-in kept before a passage's first word, seconds (taken only from the silence before it).

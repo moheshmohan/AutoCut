@@ -37,13 +37,17 @@ pub const LONG_COMMANDS: &[&str] = &[
     "autocut.showcasePlan",
     "autocut.makeShowcase",
     "autocut.showcaseBuild",
+    "autocut.shorts",
+    "sequence.autoReframe",
+    "clip.autoReframe",
 ];
 
 /// The parts of a finished job's `jobs.list` entry a long call's answer carries besides
 /// `result`: an export's offline media, an upload's new media item, what a showcase job made, the
 /// clip a neural music job placed, what a YouTube job did (the channel connected, the video uploaded),
-/// what an Instagram job did (the account connected, the Reel published), a fixed copy's file and checks.
-pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload", "showcase", "music", "youtube", "instagram", "publish"];
+/// what an Instagram job did (the account connected, the Reel published), a fixed copy's file and checks,
+/// what an Auto Reframe made (the new sequence, the clips followed).
+pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload", "showcase", "music", "youtube", "instagram", "publish", "reframe"];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);

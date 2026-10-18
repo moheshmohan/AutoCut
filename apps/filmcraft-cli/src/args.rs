@@ -53,6 +53,15 @@ const VALUED: &[&str] = &[
     "--slot",
     "--variant",
     "--name",
+    // shorts
+    "--count",
+    "--aspect",
+    "--min-seconds",
+    "--max-seconds",
+    "--motion",
+    "--topic",
+    "--analysis-fps",
+    "--sequence",
     // youtube upload, showcase --upload-youtube
     "--channel",
     "--tags",

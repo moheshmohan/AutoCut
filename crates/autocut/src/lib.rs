@@ -29,6 +29,7 @@ pub mod ollama;
 pub mod planner;
 pub mod qa;
 pub mod runner;
+pub mod shorts;
 pub mod showcase;
 pub mod subtitles;
 pub mod validate;

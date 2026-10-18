@@ -73,6 +73,7 @@ impl AutoCutHost for Fake {
                 let frame = port.render(1.0, 64);
                 Ok(json!({"built": {"sequence": r["sequence"], "frame": frame.map(|(w, h, px)| json!([w, h, px.len()]))}, "status": "Built"}))
             }
+            TaskKind::Shorts => Ok(json!({"shorts": [], "params": task.params, "status": "Made 0 shorts"})),
         }
     }
 }
@@ -370,4 +371,46 @@ fn a_port_without_its_session_fails() {
     drop(s);
     assert_eq!(port.call("project.inspect", json!({})).unwrap_err(), "the session closed");
     assert!(port.render(0.0, 64).is_none());
+}
+
+/// `autocut.shorts` checks its parameters before a job starts, and hands the host the checked
+/// ones (defaults filled in).
+#[test]
+fn shorts_parameters_are_checked_and_defaulted() {
+    let (mut s, _) = session(Fake::default());
+    let r = s.execute("autocut.shorts", json!({"count": 2, "aspect": "1:1", "youtube": {"privacy": "unlisted", "tags": ["a"]}, "wait": true})).unwrap();
+    let p = &r["showcase"]["params"];
+    assert_eq!(
+        (p["count"].as_u64(), p["minSeconds"].as_f64(), p["maxSeconds"].as_f64(), p["aspect"].as_str(), p["captions"].as_bool(), p["title"].as_bool()),
+        (Some(2), Some(15.0), Some(60.0), Some("1:1"), Some(true), Some(false)),
+        "{r}"
+    );
+    assert_eq!(p["youtube"]["privacy"], "unlisted");
+    for bad in [
+        json!({"count": 0}),
+        json!({"count": 21}),
+        json!({"count": "three"}),
+        json!({"item": 3, "sequence": 4}),
+        json!({"item": -1}),
+        json!({"minSeconds": 1}),
+        json!({"maxSeconds": 1000}),
+        json!({"minSeconds": 30, "maxSeconds": 31}),
+        json!({"minSeconds": f64::MAX}),
+        json!({"aspect": "9:0"}),
+        json!({"aspect": 9}),
+        json!({"motion": "wobbly"}),
+        json!({"captions": "yes"}),
+        json!({"uploadYoutube": true}),
+        json!({"export": "out\u{0}dir"}),
+        json!({"youtube": "private"}),
+        json!({"youtube": {"privacy": "everyone"}}),
+        json!({"youtube": {"password": "x"}}),
+        json!({"topic": "x".repeat(10_000)}),
+        json!([1]),
+    ] {
+        assert!(s.execute("autocut.shorts", bad.clone()).is_err(), "{bad} was accepted");
+    }
+    // uploads need a YouTube publisher: refused before the job starts here (there is none)
+    let e = s.execute("autocut.shorts", json!({"export": "/tmp/x", "uploadYoutube": true})).unwrap_err().to_string();
+    assert!(e.contains("uploadYoutube"), "{e}");
 }

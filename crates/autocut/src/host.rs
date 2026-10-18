@@ -46,7 +46,17 @@ use crate::{AutoCutError, ExecFuture, Executor, RenderFuture};
 const MERGED_SHOTS: usize = 3;
 /// Engine commands that block until their job is done when called with `wait: true` (as
 /// `filmcraft_automation::long_job::LONG_COMMANDS`, plus `tts.render`).
-const LONG_COMMANDS: &[&str] = &["file.exportMedia", "tts.cloneVoice", "tts.downloadVoices", "tts.downloadCloneModel", "photos.upload", "tts.render"];
+const LONG_COMMANDS: &[&str] = &[
+    "file.exportMedia",
+    "tts.cloneVoice",
+    "tts.downloadVoices",
+    "tts.downloadCloneModel",
+    "photos.upload",
+    "tts.render",
+    "sequence.autoReframe",
+    "clip.autoReframe",
+    "youtube.upload",
+];
 /// How often a long command's job is looked at.
 const POLL: Duration = Duration::from_millis(if cfg!(test) { 20 } else { 100 });
 
@@ -302,7 +312,7 @@ fn long(port: &CommandPort, id: &str, mut params: Value) -> Result<Value, String
                 return Err(if id == "file.exportMedia" { format!("export failed: {e}") } else { format!("{id} failed: {e}") });
             }
             out["result"] = j["result"].clone();
-            for k in ["offlineMedia", "upload"] {
+            for k in ["offlineMedia", "upload", "reframe", "youtube"] {
                 if let Some(v) = j.get(k) {
                     out[k] = v.clone();
                 }
@@ -503,7 +513,30 @@ impl ShowcaseHost {
         Ok(Resolved { analysis, script })
     }
 
+    /// The model that rates the shorts' openings: the script model, else the classifier, when
+    /// Ollama has one; none (the shorts are scored without it) otherwise.
+    async fn rater(&self, progress: &Arc<Progress>) -> Option<Arc<dyn ChatModel>> {
+        let cfg = match &self.source {
+            Source::Fixed(m) => return Some(m.script.clone()),
+            Source::Config(cfg) => cfg.clone(),
+        };
+        for name in [cfg.script_model.clone(), cfg.llm_model.clone()] {
+            let o = Ollama::new(&cfg.ollama_host, &name, cfg.http_timeout);
+            let probe = o.clone();
+            if tokio::task::spawn_blocking(move || probe.available().unwrap_or(false)).await.unwrap_or(false) {
+                return Some(Arc::new(o));
+            }
+        }
+        note(progress, &format!("no local model at {}: the shorts are scored without hook ratings", cfg.ollama_host));
+        None
+    }
+
     async fn job(&self, task: Task, ex: &PortExecutor, progress: &Arc<Progress>) -> Result<Value, AutoCutError> {
+        if task.kind == TaskKind::Shorts {
+            let rater = self.rater(progress).await.map(|m| Arc::new(Cancellable { inner: m, progress: progress.clone() }) as Arc<dyn ChatModel>);
+            let mut lines = |l: &str| note(progress, l);
+            return crate::shorts::make(ex, &task.params, rater, &mut lines).await;
+        }
         let models = self.models(task.kind, progress).await?;
         let guard = |m: &Arc<dyn ChatModel>| Cancellable { inner: m.clone(), progress: progress.clone() };
         let script_model = guard(&models.script);
@@ -551,6 +584,8 @@ impl ShowcaseHost {
                 let qa_model = models.analysis.as_ref().map(guard);
                 build_plan(ex, p, task.plan.as_ref(), qa_model.as_ref().map(|m| m as &dyn ChatModel), progress).await
             }
+            // (handled above, without the showcase models)
+            TaskKind::Shorts => Err(AutoCutError::Other("shorts are not a showcase step".into())),
         }
     }
 }

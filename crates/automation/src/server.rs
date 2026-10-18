@@ -481,6 +481,138 @@ pub struct ShowcaseAnalyzeParams {
     pub voice: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ShortsParams {
+    /// A media item (video with speech) to make shorts of; it is put in a new sequence. Not with
+    /// `sequence`.
+    #[serde(default)]
+    pub item: Option<u64>,
+    /// The sequence to make shorts of (default: the active one).
+    #[serde(default)]
+    pub sequence: Option<u64>,
+    /// How many shorts, 1–20 (default 3).
+    #[serde(default)]
+    pub count: Option<u32>,
+    /// Shortest short, seconds (default 15).
+    #[serde(default)]
+    pub min_seconds: Option<f64>,
+    /// Longest short, seconds (default 60).
+    #[serde(default)]
+    pub max_seconds: Option<f64>,
+    /// "9:16" (default), "1:1", "4:5" or "16:9".
+    #[serde(default)]
+    pub aspect: Option<String>,
+    /// How the crop follows the speaker: "smooth" (default) or "responsive".
+    #[serde(default)]
+    pub motion: Option<String>,
+    /// Words that make a passage more interesting (e.g. "robots launch").
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Captions from the transcript (default true).
+    #[serde(default)]
+    pub captions: Option<bool>,
+    /// A title card over each short's first seconds (default false).
+    #[serde(default)]
+    pub title: Option<bool>,
+    /// Export each short into this folder (MP4, captions burned in).
+    #[serde(default)]
+    pub export: Option<String>,
+    /// Upload each export to YouTube (needs `export`; private unless `youtube_privacy`).
+    #[serde(default)]
+    pub upload_youtube: Option<bool>,
+    /// The YouTube channel (id, @handle or title; default: the default channel).
+    #[serde(default)]
+    pub youtube_channel: Option<String>,
+    /// "private" (default), "unlisted" or "public".
+    #[serde(default)]
+    pub youtube_privacy: Option<String>,
+    /// Tags for the uploads.
+    #[serde(default)]
+    pub youtube_tags: Option<Vec<String>>,
+}
+
+/// `autocut.shorts` params for a `shorts_make` call (a long job).
+fn shorts_params(p: ShortsParams) -> Value {
+    let mut params = json!({"wait": true});
+    let mut put = |k: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            params[k] = v;
+        }
+    };
+    put("item", p.item.map(|v| json!(v)));
+    put("sequence", p.sequence.map(|v| json!(v)));
+    put("count", p.count.map(|v| json!(v)));
+    put("minSeconds", p.min_seconds.map(|v| json!(v)));
+    put("maxSeconds", p.max_seconds.map(|v| json!(v)));
+    put("aspect", p.aspect.map(Value::String));
+    put("motion", p.motion.map(Value::String));
+    put("topic", p.topic.filter(|t| !t.trim().is_empty()).map(Value::String));
+    put("captions", p.captions.map(Value::Bool));
+    put("title", p.title.map(Value::Bool));
+    put("export", p.export.map(Value::String));
+    put("uploadYoutube", p.upload_youtube.map(Value::Bool));
+    let mut y = serde_json::Map::new();
+    if let Some(c) = p.youtube_channel {
+        y.insert("channel".into(), json!(c));
+    }
+    if let Some(v) = p.youtube_privacy {
+        y.insert("privacy".into(), json!(v));
+    }
+    if let Some(t) = p.youtube_tags {
+        y.insert("tags".into(), json!(t));
+    }
+    put("youtube", (!y.is_empty()).then_some(Value::Object(y)));
+    params
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct AutoReframeParams {
+    /// The sequence to reframe (default: the active one).
+    #[serde(default)]
+    pub sequence: Option<u64>,
+    /// "9:16" (default), "1:1", "4:5" or "16:9".
+    #[serde(default)]
+    pub aspect: Option<String>,
+    /// Boxes around the subject, 0..1 of the picture: {x, y, w, h} (top-left corner and size),
+    /// with `clip` (one clip) and `seconds` (its media time) when known — the vision model's.
+    #[serde(default)]
+    pub subject: Option<Vec<Value>>,
+    /// "smooth" (default) or "responsive".
+    #[serde(default)]
+    pub motion: Option<String>,
+    /// Clips with nobody to follow: "letterbox" (default) or "center".
+    #[serde(default)]
+    pub fallback: Option<String>,
+    /// Only this part of the sequence, seconds.
+    #[serde(default)]
+    pub start_seconds: Option<f64>,
+    #[serde(default)]
+    pub end_seconds: Option<f64>,
+    /// The new sequence's name (default "<name> (9:16)").
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// `sequence.autoReframe` params for a `sequence_auto_reframe` call (a long job).
+fn auto_reframe_params(p: AutoReframeParams) -> Value {
+    let mut params = json!({"wait": true});
+    let mut put = |k: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            params[k] = v;
+        }
+    };
+    put("sequence", p.sequence.map(|v| json!(v)));
+    put("aspect", p.aspect.map(Value::String));
+    put("subject", p.subject.map(Value::Array));
+    put("motion", p.motion.map(Value::String));
+    put("fallback", p.fallback.map(Value::String));
+    put("name", p.name.map(Value::String));
+    if p.start_seconds.is_some() || p.end_seconds.is_some() {
+        put("range", Some(json!({"startSeconds": p.start_seconds, "endSeconds": p.end_seconds})));
+    }
+    params
+}
+
 /// `autocut.analyze` (or, with `plan`, `autocut.makeShowcase`) and its params, as a long job.
 fn showcase_analyze_params(p: ShowcaseAnalyzeParams) -> (&'static str, Value) {
     let make = p.plan.unwrap_or(false);
@@ -1350,6 +1482,32 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Shorts: make vertical shorts from a long video",
+        description = "Long video → shorts (the `autocut.shorts` engine job: progress, cancellable). The transcript of `sequence` (default the active one) or of media `item` (put in a new sequence) — Whisper's, made first when there is none — is cut into sentences; runs of them `min_seconds`..`max_seconds` long are scored for interest and for the strength of their opening hook (the local Ollama model rates the best openings and titles them when it is there), and the best `count` that do not overlap each become a vertical sequence: `sequence.autoReframe` to `aspect` (the speaker followed by the subject tracker, Motion keyframes; letterboxed where nobody is found), big outlined captions from the transcript, an optional `title` card. With `export` (a folder) each is exported with the captions burned in; with `upload_youtube` each export goes to YouTube, private unless `youtube_privacy`. Returns each short's sequence, range, score, hook, title and export.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn shorts_make(
+        &self,
+        Parameters(p): Parameters<ShortsParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(self.run_long("autocut.shorts", shorts_params(p), &context).await)
+    }
+
+    #[tool(
+        title = "Auto Reframe Sequence",
+        description = "A copy of a sequence in another shape — `aspect` \"9:16\" (default), \"1:1\", \"4:5\" or \"16:9\" — whose clips follow their subject (`sequence.autoReframe`, one undo step): a pure-Rust tracker (Median Flow on pyramidal Lucas–Kanade, re-detection by template after occlusions and cuts) seeded from `subject` boxes (0..1 of the picture: {x, y, w, h, clip?, seconds?}, e.g. the vision model's) or the salient region, smoothed by a critically damped zero-phase follow (`motion`: smooth keeps a calm camera window, responsive follows closely) into Motion Position/Scale keyframes; clips with nobody to follow are letterboxed (`fallback: \"center\"` crops centred instead). `range` {startSeconds, endSeconds} reframes only that part. Runs as an engine job with progress; returns the new sequence and, per clip, whether its subject was followed.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn sequence_auto_reframe(
+        &self,
+        Parameters(p): Parameters<AutoReframeParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(self.run_long("sequence.autoReframe", auto_reframe_params(p), &context).await)
+    }
+
+    #[tool(
         title = "Showcase: inspect",
         description = "What the session keeps of the showcase: the analysis report (a summary, or every clip with report: true), the plan, the last build, and the latest showcase job (running or done).",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -1564,7 +1722,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -1987,6 +2145,25 @@ mod tests {
         p
     }
 
+    /// The vertical-video tools' arguments and the engine jobs they run.
+    #[test]
+    fn shorts_and_reframe_tool_params() {
+        let s = schema("shorts_make");
+        assert!(props(&s).contains(&"upload_youtube".to_string()) && props(&s).contains(&"count".to_string()), "{s}");
+        let p: ShortsParams =
+            serde_json::from_value(json!({"item": 4, "count": 2, "export": "/x", "upload_youtube": true, "youtube_privacy": "unlisted", "topic": " "}))
+                .unwrap();
+        assert_eq!(shorts_params(p), json!({"item": 4, "count": 2, "export": "/x", "uploadYoutube": true, "youtube": {"privacy": "unlisted"}, "wait": true}));
+        let p: AutoReframeParams =
+            serde_json::from_value(json!({"aspect": "1:1", "start_seconds": 2.0, "end_seconds": 9.5, "subject": [{"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}]}))
+                .unwrap();
+        assert_eq!(
+            auto_reframe_params(p),
+            json!({"aspect": "1:1", "range": {"startSeconds": 2.0, "endSeconds": 9.5}, "subject": [{"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}], "wait": true})
+        );
+        assert!(crate::long_job::is_long("autocut.shorts", &json!({"wait": true})) && crate::long_job::is_long("sequence.autoReframe", &json!({"wait": true})));
+    }
+
     /// The showcase tools' arguments and the engine jobs they run (as long jobs: progress, cancel).
     #[test]
     fn showcase_tool_schemas_and_params() {
@@ -2167,6 +2344,8 @@ mod tests {
             "showcase_plan",
             "showcase_build",
             "showcase_inspect",
+            "shorts_make",
+            "sequence_auto_reframe",
             "template_list",
             "template_apply",
         ] {

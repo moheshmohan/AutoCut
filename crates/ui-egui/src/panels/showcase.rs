@@ -17,7 +17,10 @@
 //! `showcase.voice`, `showcase.mood`, `showcase.intro`, `showcase.outro`,
 //! `showcase.entry.<i>.include`, `.thumb`, `.label`, `.description`, `.line`, `.merge`, `.shots`,
 //! `.shot.<k>`, `showcase.exportPath`, `showcase.upload`, `showcase.writeScript`,
-//! `showcase.build`, `showcase.buildExport`. The draft is UI state: `ui.set {showcase: {...}}`
+//! `showcase.build`, `showcase.buildExport`; for shorts (`autocut.shorts` on the active
+//! sequence: its best passages reframed to a vertical shape, captioned) `showcase.shortsOpen`,
+//! `showcase.shortsCount`, `showcase.shortsAspect`, `showcase.shortsExport`, `showcase.shorts`.
+//! The draft is UI state: `ui.set {showcase: {...}}`
 //! patches it, with `entries` a list (replaced) or `{"<index>": {...}}` (those entries patched).
 
 use std::sync::atomic::Ordering;
@@ -38,6 +41,8 @@ const MAX_LABEL: usize = 120;
 const MAX_TEXT: usize = 600;
 /// Thumbnails asked for per frame (the frame cache decodes them in the background).
 const THUMBS_PER_FRAME: usize = 64;
+/// The shapes "Make shorts" offers.
+const SHORT_ASPECTS: [&str; 4] = ["9:16", "1:1", "4:5", "16:9"];
 /// Music moods (`audio.generate`).
 const MOODS: [(&str, &str); 9] = [
     ("epic", "Epic"),
@@ -105,6 +110,14 @@ pub struct ShowcaseDraft {
     /// The latest showcase job the panel has shown, and the one whose end it has reported.
     pub seen_job: Option<u64>,
     pub reported_job: Option<u64>,
+    /// The "Shorts" form is open.
+    pub shorts_open: bool,
+    /// How many shorts "Make shorts" cuts from the active sequence (1..20).
+    pub shorts_count: u32,
+    /// Their shape: "9:16", "1:1", "4:5" or "16:9".
+    pub shorts_aspect: String,
+    /// A folder to export them into (captions burned in); empty: not exported.
+    pub shorts_export: String,
 }
 
 impl Default for ShowcaseDraft {
@@ -128,6 +141,10 @@ impl Default for ShowcaseDraft {
             report_revision: 0,
             seen_job: None,
             reported_job: None,
+            shorts_open: false,
+            shorts_count: 3,
+            shorts_aspect: "9:16".into(),
+            shorts_export: String::new(),
         }
     }
 }
@@ -209,6 +226,16 @@ impl ShowcaseDraft {
     pub fn export_to(&self) -> String {
         let p = self.export_path.trim();
         if p.is_empty() { default_export_path(&self.title) } else { p.to_string() }
+    }
+
+    /// `autocut.shorts` parameters from the Shorts form (the active sequence's shorts).
+    fn shorts_params(&self) -> Value {
+        let aspect = if SHORT_ASPECTS.contains(&self.shorts_aspect.as_str()) { self.shorts_aspect.as_str() } else { "9:16" };
+        let mut p = json!({"count": self.shorts_count.clamp(1, 20), "aspect": aspect, "captions": true});
+        if !self.shorts_export.trim().is_empty() {
+            p["export"] = json!(self.shorts_export.trim());
+        }
+        p
     }
 
     /// `autocut.makeShowcase` parameters from the Analyze form.
@@ -373,6 +400,7 @@ fn shots(e: &Value) -> Vec<(u64, String, f64)> {
 
 enum Action {
     Analyze,
+    Shorts,
     WriteScript,
     Build { export: bool },
     Cancel(u64),
@@ -474,6 +502,41 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         d.analyze_open = false;
                     }
                 });
+            });
+        }
+        // long video → shorts, from the active sequence
+        ui.add_space(6.0);
+        let toggle_text = if d.shorts_open { format!("{} ▾", tl!("Shorts")) } else { tl!("Make shorts from this sequence…").to_string() };
+        let toggle = ui.add_enabled(!busy, egui::Button::new(toggle_text).small());
+        add(auto, ui, "showcase.shortsOpen", toggle.rect, "Make shorts");
+        if toggle.clicked() {
+            d.shorts_open = !d.shorts_open;
+        }
+        if d.shorts_open && !busy {
+            egui::Frame::new().fill(t.field_bg).stroke(egui::Stroke::new(1.0, t.field_border)).corner_radius(4.0).inner_margin(8.0).show(ui, |ui| {
+                ui.set_width(w - 18.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Shorts")).color(t.text).size(12.0));
+                    let r = ui.add(egui::DragValue::new(&mut d.shorts_count).range(1..=20));
+                    add(auto, ui, "showcase.shortsCount", r.rect, "How many shorts");
+                    let cb = egui::ComboBox::from_id_salt("showcase-shorts-aspect").selected_text(d.shorts_aspect.clone()).show_ui(ui, |ui| {
+                        for a in SHORT_ASPECTS {
+                            if ui.selectable_label(d.shorts_aspect == a, a).clicked() {
+                                d.shorts_aspect = a.to_string();
+                            }
+                        }
+                    });
+                    add(auto, ui, "showcase.shortsAspect", cb.response.rect, "Shape");
+                });
+                let r = ui.add(egui::TextEdit::singleline(&mut d.shorts_export).hint_text(tl!("Export folder (optional)")).desired_width(w - 18.0).char_limit(4096));
+                add(auto, ui, "showcase.shortsExport", r.rect, "Export folder");
+                let about = tl!("The transcript's best passages, on whole sentences, each a new sequence reframed to follow the speaker, with big captions.");
+                ui.label(egui::RichText::new(about).color(t.text_dim).size(11.0));
+                let b = ui.add_enabled(available.is_ok(), egui::Button::new(egui::RichText::new(tl!("Make shorts")).strong()));
+                add(auto, ui, "showcase.shorts", b.rect, "Make shorts");
+                if b.clicked() {
+                    actions.push(Action::Shorts);
+                }
             });
         }
         // the running (or last failed) job
@@ -669,6 +732,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let p = app.ui.showcase.make_params();
                 app.session.execute("autocut.makeShowcase", p).map(|_| "Finding the clips…")
             }
+            Action::Shorts => {
+                let p = app.ui.showcase.shorts_params();
+                app.session.execute("autocut.shorts", p).map(|_| tl!("Finding the best passages for shorts…"))
+            }
             Action::WriteScript => {
                 let d = &app.ui.showcase;
                 let mut p = json!({"title": d.title.trim(), "voice": d.voice.trim(), "mood": d.mood});
@@ -798,6 +865,21 @@ mod tests {
         // a Google Photos album as the seed
         let d = ShowcaseDraft { album: " Robot showcase ".into(), ..Default::default() };
         assert_eq!(d.make_params(), json!({"subject": "robot", "album": "Robot showcase", "voice": "", "mood": "epic"}));
+    }
+
+    #[test]
+    fn shorts_params_from_the_form() {
+        let mut d = ShowcaseDraft::default();
+        assert_eq!(d.shorts_params(), json!({"count": 3, "aspect": "9:16", "captions": true}));
+        // what an agent or a hand-edited state could put there
+        d.shorts_count = 99;
+        d.shorts_aspect = "weird".into();
+        d.shorts_export = " /tmp/out ".into();
+        assert_eq!(d.shorts_params(), json!({"count": 20, "aspect": "9:16", "captions": true, "export": "/tmp/out"}));
+        d.shorts_count = 0;
+        d.shorts_aspect = "4:5".into();
+        assert_eq!(d.shorts_params()["count"], 1);
+        assert_eq!(d.shorts_params()["aspect"], "4:5");
     }
 
     #[test]

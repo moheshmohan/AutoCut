@@ -376,6 +376,12 @@
 	Quick Export	Exportación rápida
 	Join the ArtCraft Discord (discord.gg/artcraft)	Únete al Discord de ArtCraft (discord.gg/artcraft)
 	Cancel	Cancelar
+	Make shorts from this sequence…	Crear shorts de esta secuencia…
+	Shorts	Shorts
+	Export folder (optional)	Carpeta de exportación (opcional)
+	The transcript's best passages, on whole sentences, each a new sequence reframed to follow the speaker, with big captions.	Los mejores pasajes de la transcripción, en frases completas, cada uno en una secuencia nueva reencuadrada para seguir a quien habla, con subtítulos grandes.
+	Make shorts	Crear shorts
+	Finding the best passages for shorts…	Buscando los mejores pasajes para shorts…
 	OK	Aceptar
 	Interpret Footage	Interpretar material
 	Color Management · {n} item	Gestión del color · {n} elemento
@@ -3633,6 +3639,10 @@
 # AutoCut showcases (Sequence ▸ Make a Showcase…)
 	Make a Showcase…	Crear una recopilación…
 	Showcase	Recopilación
+# Auto Reframe (sequence.autoReframe, clip.autoReframe) and its History entries
+	Auto Reframe Sequence…	Reencuadrar secuencia automáticamente…
+	Auto Reframe Clips	Reencuadrar clips automáticamente
+	Auto Reframe Sequence	Reencuadrar secuencia automáticamente
 # GL Transitions (Video Transitions ▸ GL Transitions): names are the collection's own, kept as they are
 	GL Transitions	Transiciones GL
 	Starting Angle	Ángulo inicial

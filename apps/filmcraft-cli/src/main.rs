@@ -124,14 +124,15 @@ SUBCOMMANDS
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
          [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
-         [--no-fill] [--export out.mp4 [--upload [--upload-album <title>]]
+         [--no-fill] [--no-track] [--export out.mp4 [--upload [--upload-album <title>]]
          [--upload-youtube [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P]
          [--youtube-tags a,b] [--youtube-description D]]] [--qa | --no-qa]
                                 a narrated 16:9 showcase of every clip the analysis found, oldest
                                 first: title, a counter, name/date lower thirds that slide and
                                 fade in and out, a slow push-in on every shot (portrait and 4:3
-                                clips fill the frame, cropped on their robot with a slow tilt
-                                across it; --no-fill shows them whole over a blurred copy), year cards,
+                                clips fill the frame, the crop following their robot with the
+                                subject tracker, or a slow tilt across it where it is not found
+                                or with --no-track; --no-fill shows them whole over a blurred copy), year cards,
                                 dramatic transitions with whooshes, a generated music bed ducked
                                 under the voice (cloned voices too), an outro; montage cuts and
                                 entries land on the music's beat (the bed's --bpm grid, or with
@@ -192,6 +193,24 @@ SUBCOMMANDS
                                 subject, the model and --frames/--screen: a clip analysed before
                                 is not analysed again (`cached` counts them); --fresh analyses
                                 every clip again (also for showcase --album)
+  shorts <project.fcproj | media file> [--count 3] [--aspect 9:16] [--min-seconds 15]
+         [--max-seconds 60] [--motion smooth|responsive] [--topic T] [--title-card]
+         [--no-captions] [--analysis-fps 30] [--sequence id] [--export dir [--upload-youtube
+         [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P] [--youtube-tags a,b]]]
+                                long video → shorts (autocut.shorts): the transcript (Whisper's,
+                                made first when there is none) is cut into sentences, runs of them
+                                --min-seconds..--max-seconds long are scored for interest and the
+                                strength of their opening (the local model rates the hooks when
+                                Ollama has one), and the best --count that do not overlap each
+                                become a vertical sequence: reframed to --aspect with the speaker
+                                followed (sequence.autoReframe: the subject tracker, Motion
+                                keyframes, letterboxed where nobody is found), big outlined
+                                captions from the transcript, a title card with --title-card;
+                                --export writes each to <dir>/NN-<title>.mp4 with the captions
+                                burned in and --upload-youtube sends each to YouTube (private
+                                unless --youtube-privacy). A media file is imported first; a
+                                project's active sequence (or --sequence) is used. --save keeps
+                                the shorts in the --project
   autocut '<prompt>' [--dry-run] [--frames]
                                 plan (and run) a natural-language edit with AutoCut: a local
                                 model (Ollama) classifies the prompt and deterministic planners
@@ -483,6 +502,56 @@ impl Backend {
             fail(format!("saving: {e}"));
         }
     }
+}
+
+/// `shorts` options as `autocut.shorts` parameters (with `wait: true`); a usage error says what
+/// is wrong.
+fn shorts_params(a: &Args) -> Result<Value, String> {
+    let num = |k: &str| -> Result<Option<f64>, String> {
+        a.opt(k).map(|v| v.parse::<f64>().ok().filter(|f| f.is_finite()).ok_or_else(|| format!("{k} wants a number, not `{v}`"))).transpose()
+    };
+    let mut p = json!({"wait": true, "count": 3});
+    if let Some(n) = a.opt("--count") {
+        let n: u64 = n.parse().ok().filter(|n| (1..=20).contains(n)).ok_or_else(|| format!("--count wants 1 to 20, not `{n}`"))?;
+        p["count"] = json!(n);
+    }
+    for (flag, key) in [("--min-seconds", "minSeconds"), ("--max-seconds", "maxSeconds"), ("--analysis-fps", "analysisFps")] {
+        if let Some(v) = num(flag)? {
+            p[key] = json!(v);
+        }
+    }
+    for (flag, key) in [("--aspect", "aspect"), ("--motion", "motion"), ("--topic", "topic")] {
+        if let Some(v) = a.opt(flag) {
+            p[key] = json!(v);
+        }
+    }
+    if let Some(q) = a.opt("--sequence") {
+        p["sequence"] = json!(q.parse::<u64>().map_err(|_| format!("--sequence wants a sequence id, not `{q}`"))?);
+    }
+    p["captions"] = json!(!a.flag("--no-captions"));
+    p["title"] = json!(a.flag("--title-card"));
+    if let Some(d) = a.opt("--export") {
+        p["export"] = json!(absolute(d));
+    }
+    if a.flag("--upload-youtube") {
+        if a.opt("--export").is_none() {
+            return Err("--upload-youtube sends the exports to YouTube; add --export <dir>".into());
+        }
+        p["uploadYoutube"] = json!(true);
+        let mut y = serde_json::Map::new();
+        for (flag, key) in
+            [("--youtube-channel", "channel"), ("--youtube-privacy", "privacy"), ("--youtube-playlist", "playlist"), ("--youtube-description", "description")]
+        {
+            if let Some(v) = a.opt(flag) {
+                y.insert(key.into(), json!(v));
+            }
+        }
+        if let Some(t) = a.opt("--youtube-tags") {
+            y.insert("tags".into(), json!(t.split(',').map(str::trim).filter(|t| !t.is_empty()).collect::<Vec<_>>()));
+        }
+        p["youtube"] = Value::Object(y);
+    }
+    Ok(p)
 }
 
 fn print(a: &Args, v: &Value) {
@@ -1360,6 +1429,8 @@ async fn cli() {
             opts.stabilize = a.flag("--stabilize");
             opts.match_color = a.flag("--match-color");
             opts.fill_frame = !a.flag("--no-fill");
+            // a filled shot's crop follows its robot (the subject tracker); --no-track: the tilt
+            opts.follow_subject = !a.flag("--no-track");
             if let Some(m) = a.opt("--target-minutes") {
                 match m.parse::<f64>() {
                     Ok(v) if v.is_finite() && v > 0.0 && v <= 24.0 * 60.0 => opts.target_minutes = Some(v),
@@ -1624,6 +1695,60 @@ async fn cli() {
                     }
                 }
                 Err(e) => fail(format!("showcase: {e}")),
+            }
+        }
+        "shorts" => {
+            // long video → vertical shorts (autocut.shorts); every usage error before anything runs
+            let src = a.pos(1).unwrap_or_else(|| usage("shorts <project.fcproj | media file> [--count N] [--aspect 9:16] [--export dir] [--upload-youtube]"));
+            let params = shorts_params(&a).unwrap_or_else(|e| usage(format!("shorts: {e}")));
+            if params["uploadYoutube"] == json!(true) {
+                let req = youtube::showcase_request(&a, "short.mp4", "Short", None).unwrap_or_else(|e| usage(format!("shorts: --upload-youtube: {e}")));
+                if let Err(e) = youtube::readiness(&req) {
+                    fail(format!("shorts: --upload-youtube: {e}"));
+                }
+            }
+            let is_project = std::path::Path::new(src).extension().is_some_and(|x| x.eq_ignore_ascii_case("fcproj"));
+            if a.opt("--bridge").is_none() && !std::path::Path::new(src).exists() {
+                fail(format!("shorts: {src}: no such file"));
+            }
+            let mut b = Backend::open(&a);
+            let mut params = params;
+            if is_project {
+                b.exec("file.open", json!({"path": absolute(src)})).await.unwrap_or_else(|e| fail(format!("shorts: {src}: {e}")));
+            } else {
+                let r = b.exec("file.import", json!({"paths": [absolute(src)], "reuse": true})).await.unwrap_or_else(|e| fail(format!("shorts: {src}: {e}")));
+                let item = r["items"]
+                    .as_array()
+                    .and_then(|i| i.first())
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| fail(format!("shorts: {src}: nothing was imported")));
+                params["item"] = json!(item);
+                if let Some(o) = params.as_object_mut() {
+                    o.remove("sequence");
+                }
+            }
+            diag(format_args!("shorts: finding the best {} passage(s) of {src}", params["count"]));
+            match b.exec("autocut.shorts", params).await {
+                Ok(r) => {
+                    let made = &r["showcase"];
+                    for s in made["shorts"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                        diag(format_args!(
+                            "shorts: #{} \"{}\" {:.1}-{:.1}s{}{}",
+                            s["number"],
+                            s["title"].as_str().unwrap_or_default(),
+                            s["start"].as_f64().unwrap_or(0.0),
+                            s["end"].as_f64().unwrap_or(0.0),
+                            s["export"].as_str().map(|p| format!(" → {p}")).unwrap_or_default(),
+                            if s["followed"] == json!(true) { "" } else { " (letterboxed: nobody to follow)" }
+                        ));
+                        for n in s["notes"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                            diag(format_args!("shorts:   {}", n.as_str().unwrap_or_default()));
+                        }
+                    }
+                    print(&a, made);
+                    b.finish(&a).await;
+                }
+                Err(e) => fail(format!("shorts: {e}")),
             }
         }
         "analyze" => {
@@ -2139,6 +2264,56 @@ mod album_tests {
         let e = super::album_analysis(&mut b, json!({"album": "Nothing", "subject": "robot", "wait": false})).await.unwrap_err();
         assert!(e.contains("has no video"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod shorts_tests {
+    use super::{Args, shorts_params};
+
+    fn args(v: &[&str]) -> Args {
+        Args::parse(v.iter().map(|s| s.to_string()))
+    }
+
+    /// `shorts` options become `autocut.shorts` parameters; bad values are usage errors.
+    #[test]
+    fn shorts_options_become_job_params() {
+        let p = shorts_params(&args(&[
+            "shorts",
+            "talk.mp4",
+            "--count",
+            "2",
+            "--aspect",
+            "1:1",
+            "--min-seconds",
+            "10",
+            "--title-card",
+            "--no-captions",
+            "--export",
+            "out",
+            "--upload-youtube",
+            "--youtube-privacy",
+            "unlisted",
+            "--youtube-tags",
+            "a, b,",
+        ]))
+        .unwrap();
+        assert_eq!((p["count"].as_u64(), p["aspect"].as_str(), p["minSeconds"].as_f64()), (Some(2), Some("1:1"), Some(10.0)));
+        assert_eq!((p["title"].as_bool(), p["captions"].as_bool(), p["uploadYoutube"].as_bool()), (Some(true), Some(false), Some(true)));
+        assert!(p["export"].as_str().is_some_and(|e| e.ends_with("out") && std::path::Path::new(e).is_absolute()), "{p}");
+        assert_eq!(p["youtube"], serde_json::json!({"privacy": "unlisted", "tags": ["a", "b"]}));
+        assert_eq!(p["wait"], true);
+        let defaults = shorts_params(&args(&["shorts", "talk.mp4"])).unwrap();
+        assert_eq!((defaults["count"].as_u64(), defaults["captions"].as_bool()), (Some(3), Some(true)));
+        for bad in [
+            &["shorts", "x", "--count", "0"][..],
+            &["shorts", "x", "--count", "many"],
+            &["shorts", "x", "--min-seconds", "NaN"],
+            &["shorts", "x", "--sequence", "main"],
+            &["shorts", "x", "--upload-youtube"],
+        ] {
+            assert!(shorts_params(&args(bad)).is_err(), "{bad:?}");
+        }
     }
 }
 

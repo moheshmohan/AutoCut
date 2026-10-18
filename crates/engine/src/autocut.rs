@@ -10,6 +10,7 @@
 //! | `autocut.showcaseBuild` | job: build the plan (the kept one, or `plan`) into a new sequence; `export` it (YouTube 1080p, chapters and a QA report beside it) and `upload` the export to Google Photos (into `uploadAlbum` too) |
 //! | `autocut.showcaseInspect` | the kept report (a summary, or all of it with `report: true`), plan and last build, and the latest job |
 //! | `autocut.showcaseSet` | keep a `report` or `plan` from elsewhere (or `reportPath` / `planPath`: the CLI's `analyze --out` and `showcase --script-out` files); `null` clears one |
+//! | `autocut.shorts` | job: long video → shorts. The transcript of `sequence` (or of media `item`, put in a new sequence) is cut into sentences; runs of them `minSeconds`..`maxSeconds` long are scored for interest (and, with the local model, for the strength of their opening hook), and the best `count` that do not overlap each become a vertical sequence (`sequence.autoReframe` to `aspect`, following the speaker) with bold captions from the transcript (`captions`) and an optional `title` card; `export` (a folder) exports each with its captions burned in, and `uploadYoutube` sends each export to YouTube, private unless `youtube.privacy` says otherwise |
 //!
 //! A plan is `{subject, title, subtitle?, voice?, mood, entries, script: {intro, lines, outro}}`;
 //! each entry is the CLI plan's entry (`number`, `label`, `kind`, `description`, `unix`, `shots`)
@@ -76,6 +77,8 @@ pub enum TaskKind {
     Plan,
     Make,
     Build,
+    /// Long video → shorts (`autocut.shorts`).
+    Shorts,
 }
 
 impl TaskKind {
@@ -85,6 +88,7 @@ impl TaskKind {
             TaskKind::Plan => "autocut.showcasePlan",
             TaskKind::Make => "autocut.makeShowcase",
             TaskKind::Build => "autocut.showcaseBuild",
+            TaskKind::Shorts => "autocut.shorts",
         }
     }
 
@@ -95,6 +99,7 @@ impl TaskKind {
             TaskKind::Plan => "Writing the showcase script".into(),
             TaskKind::Make => format!("Making a showcase of every {subject}"),
             TaskKind::Build => "Building the showcase".into(),
+            TaskKind::Shorts => "Making shorts".into(),
         }
     }
 }
@@ -321,6 +326,13 @@ pub fn commands() -> Vec<CommandSpec> {
             r#"{"plan":Plan?,"export":str?,"upload":bool=false,"uploadAlbum":str?,"qa":bool?,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Build, p),
         ),
+        job(
+            "autocut.shorts",
+            "Make Shorts…",
+            &[],
+            r#"{"item":id?,"sequence":id?,"count":1..20=3,"minSeconds":3..180=15,"maxSeconds":5..180=60,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","motion":"smooth"|"responsive"?,"captions":bool=true,"title":bool=false,"topic":str?,"analysisFps":1..60=30,"export":dir?,"uploadYoutube":bool=false,"youtube":{"channel":str?,"privacy":"private"|"unlisted"|"public"="private","tags":[str]?,"playlist":str?,"description":str?}?,"wait":bool=false}"#,
+            |s, p| start(s, TaskKind::Shorts, p),
+        ),
         CommandSpec {
             id: "autocut.showcaseInspect",
             label: "Inspect Showcase",
@@ -494,7 +506,108 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
             put(&mut out, "qa", Some(json!(q.as_bool().ok_or_else(|| bad(cmd, "`qa` must be true or false"))?)));
         }
     }
+    if kind == TaskKind::Shorts {
+        shorts_params(cmd, p, &mut out)?;
+    }
     Ok(Value::Object(out))
+}
+
+/// Most shorts one job makes.
+pub const MAX_SHORTS: u64 = 20;
+
+/// The checked parameters of `autocut.shorts` (see the module docs).
+fn shorts_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) -> Result<()> {
+    let id = |k: &str| -> Result<Option<u64>> {
+        match p.get(k).filter(|v| !v.is_null()) {
+            None => Ok(None),
+            Some(v) => v.as_u64().map(Some).ok_or_else(|| bad(cmd, format!("`{k}` must be an id"))),
+        }
+    };
+    let (item, sequence) = (id("item")?, id("sequence")?);
+    if item.is_some() && sequence.is_some() {
+        return Err(bad(cmd, "give `item` (a media clip) or `sequence`, not both"));
+    }
+    if let Some(i) = item {
+        out.insert("item".into(), json!(i));
+    }
+    if let Some(q) = sequence {
+        out.insert("sequence".into(), json!(q));
+    }
+    out.insert("count".into(), json!(count_p(cmd, p, "count", 1, MAX_SHORTS)?.unwrap_or(3)));
+    let secs = |k: &str, lo: f64, hi: f64, default: f64| -> Result<f64> {
+        match p.get(k).filter(|v| !v.is_null()) {
+            None => Ok(default),
+            Some(v) => {
+                v.as_f64().filter(|f| f.is_finite() && (lo..=hi).contains(f)).ok_or_else(|| bad(cmd, format!("`{k}` is a number of seconds from {lo} to {hi}")))
+            }
+        }
+    };
+    let (min, max) = (secs("minSeconds", 3.0, 180.0, 15.0)?, secs("maxSeconds", 5.0, 180.0, 60.0)?);
+    if max < min + 2.0 {
+        return Err(bad(cmd, "`maxSeconds` must be at least 2 seconds more than `minSeconds`"));
+    }
+    out.insert("minSeconds".into(), json!(min));
+    out.insert("maxSeconds".into(), json!(max));
+    let aspect = text_p(cmd, p, "aspect", 16)?.unwrap_or_else(|| "9:16".into());
+    if filmcraft_render::reframe::parse_aspect(&aspect).is_none() {
+        return Err(bad(cmd, format!("`aspect` is \"9:16\", \"1:1\", \"4:5\" or \"16:9\", not \"{aspect}\"")));
+    }
+    out.insert("aspect".into(), json!(aspect));
+    if let Some(m) = text_p(cmd, p, "motion", 32)? {
+        let f = filmcraft_render::reframe::Follow::from_name(&m).ok_or_else(|| bad(cmd, "`motion` is \"smooth\" or \"responsive\""))?;
+        out.insert("motion".into(), json!(f.name()));
+    }
+    for (k, default) in [("captions", true), ("title", false), ("uploadYoutube", false)] {
+        let v = match p.get(k).filter(|v| !v.is_null()) {
+            None => default,
+            Some(v) => v.as_bool().ok_or_else(|| bad(cmd, format!("`{k}` must be true or false")))?,
+        };
+        out.insert(k.into(), json!(v));
+    }
+    if let Some(t) = text_p(cmd, p, "topic", MAX_TEXT_CHARS)? {
+        out.insert("topic".into(), json!(t));
+    }
+    if let Some(f) = p.get("analysisFps").filter(|v| !v.is_null()) {
+        let f = f
+            .as_f64()
+            .filter(|f| f.is_finite() && (1.0..=60.0).contains(f))
+            .ok_or_else(|| bad(cmd, "`analysisFps` is a number of frames a second from 1 to 60"))?;
+        out.insert("analysisFps".into(), json!(f));
+    }
+    let export = text_p(cmd, p, "export", 4096)?;
+    if out.get("uploadYoutube") == Some(&json!(true)) && export.is_none() {
+        return Err(bad(cmd, "`uploadYoutube` sends the exports to YouTube: give an `export` folder too"));
+    }
+    if let Some(e) = export {
+        if e.chars().any(char::is_control) {
+            return Err(bad(cmd, "`export` is a folder path"));
+        }
+        out.insert("export".into(), json!(e));
+    }
+    if let Some(y) = p.get("youtube").filter(|v| !v.is_null()) {
+        let o = y.as_object().ok_or_else(|| bad(cmd, "`youtube` is an object: {channel?, privacy?, tags?, playlist?, description?}"))?;
+        let mut keep = serde_json::Map::new();
+        for (k, v) in o {
+            let ok = match (k.as_str(), v) {
+                ("channel" | "playlist" | "description" | "category", Value::String(t)) => t.chars().count() <= 5000,
+                ("privacy", Value::String(t)) => matches!(t.as_str(), "private" | "unlisted" | "public"),
+                ("tags", Value::Array(a)) => a.len() <= 500 && a.iter().all(Value::is_string),
+                ("madeForKids" | "notifySubscribers", Value::Bool(_)) => true,
+                _ => false,
+            };
+            if !ok {
+                return Err(bad(
+                    cmd,
+                    format!(
+                        "`youtube.{k}` is not an option this takes (channel, privacy, tags, playlist, description, category, madeForKids, notifySubscribers)"
+                    ),
+                ));
+            }
+            keep.insert(k.clone(), v.clone());
+        }
+        out.insert("youtube".into(), Value::Object(keep));
+    }
+    Ok(())
 }
 
 /// Reviewed entries: a list of at most [`MAX_ENTRIES`] objects.
@@ -553,6 +666,9 @@ fn start(s: &mut Session, kind: TaskKind, p: &Value) -> Result<Value> {
         }
         TaskKind::Build if plan.is_none() && params.get("plan").is_none() => {
             return Err(bad(cmd, "nothing to build yet: write a plan first (autocut.showcasePlan), or pass a `plan`"));
+        }
+        TaskKind::Shorts if params["uploadYoutube"] == json!(true) => {
+            crate::youtube::can_upload(s).map_err(|e| bad(cmd, format!("uploadYoutube: {e}")))?;
         }
         TaskKind::Build if params["upload"] == json!(true) => {
             crate::photos::can_upload(s).map_err(|e| bad(cmd, format!("upload: {e}")))?;
