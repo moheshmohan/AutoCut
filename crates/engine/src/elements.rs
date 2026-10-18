@@ -365,7 +365,7 @@ fn chosen_audio_track(s: &Session, p: &Value, range: TimeRange) -> Result<Option
 /// back), else that file (written, or found with the same audio) imported. A different file of
 /// that name is never touched: the WAV goes beside it as `<file> <n>.wav`. Returns (item, path,
 /// reused).
-fn sound_item(s: &mut Session, p: &Value, snd: &Sound, bytes: Vec<u8>) -> Result<(ItemId, String, bool)> {
+pub(crate) fn sound_item(s: &mut Session, p: &Value, snd: &Sound, bytes: Vec<u8>) -> Result<(ItemId, String, bool)> {
     let dir = crate::voiceover::generated_dir(s, p, "Generated Audio");
     let mut path = std::path::Path::new(&dir).join(format!("{}.wav", snd.file)).to_string_lossy().into_owned();
     let write = |s: &Session, path: &str| -> Result<()> {

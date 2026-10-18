@@ -28,6 +28,9 @@ use crate::{Package, TemplateError};
 
 /// Name prefix of the clip markers that flag template slots (`slot:<kind>:<slot id>:<placement>`).
 pub const SLOT_MARKER: &str = "slot:";
+/// Comment prefix of a sequence marker whose name follows a text slot (`text:<slot id>:<media
+/// index>`): a chapter marker named after its chapter card's title.
+pub const TEXT_MARKER: &str = "text:";
 
 /// A clip's flag as a template slot placement (a clip marker named
 /// `slot:<kind>:<slot id>[:<placement>[:<text layer uid>]]`).
@@ -87,12 +90,32 @@ impl MediaFill {
 pub enum SlotFill {
     Media(Vec<MediaFill>),
     Text(Vec<String>),
+    /// A captions slot's cues, in timeline time of the applied sequence (the engine makes them
+    /// from a transcript; an empty list clears the placeholder captions).
+    Captions(Vec<Cue>),
 }
+
+/// One caption of a captions slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cue {
+    pub start: Tick,
+    pub end: Tick,
+    pub text: String,
+    pub speaker: Option<String>,
+}
+
+/// Most cues a captions slot takes.
+pub const MAX_CUES: usize = 10_000;
+/// Longest cue text, characters.
+pub const MAX_CUE_CHARS: usize = 1000;
 
 /// The beats of the music filling the music slot, in media time of its item.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MusicBeats {
     pub beats: Vec<Tick>,
+    /// How the cuts follow them (default: the template's `beatGrid.mode`). A generated bed made
+    /// at the template's tempo uses `Nearest`: its exact beats, the template's length.
+    pub mode: Option<QuantizeMode>,
 }
 
 /// How to apply a template.
@@ -151,6 +174,11 @@ pub struct Applied {
     /// The template's own items added (placeholders, graphics) and their bin.
     pub items: Vec<ItemId>,
     pub bin: filmcraft_project::BinId,
+    /// The captions slot's sources as placed: the audio clips whose speech it captions.
+    pub caption_clips: Vec<ClipId>,
+    /// A source of the captions slot was filled and no cues were given: its placeholder captions
+    /// were cleared, for the engine to transcribe the sources ([`set_captions`]).
+    pub captions_pending: bool,
 }
 
 fn err(m: impl Into<String>) -> TemplateError {
@@ -177,7 +205,28 @@ fn check_fills(p: &Project, m: &Manifest, opts: &ApplyOptions, warnings: &mut Ve
             let ids: Vec<&str> = m.slots.iter().map(|s| s.id.as_str()).collect();
             err(format!("the template has no slot `{id}` (its slots: {})", ids.join(", ")))
         })?;
+        if slot.kind == SlotKind::Captions && !matches!(fill, SlotFill::Captions(_)) {
+            return Err(err(format!("slot `{id}` takes captions (cues with a start, an end and text)")));
+        }
         let n = match fill {
+            SlotFill::Captions(cues) => {
+                if slot.kind != SlotKind::Captions {
+                    return Err(err(format!("slot `{id}` takes {}, not captions", slot.kind.id())));
+                }
+                if cues.len() > MAX_CUES {
+                    return Err(err(format!("slot `{id}`: {} cues (at most {MAX_CUES})", cues.len())));
+                }
+                let latest = Tick(crate::manifest::MAX_TEMPLATE_TICKS.saturating_mul(4));
+                for c in cues {
+                    if c.start < Tick::ZERO || c.end <= c.start || c.end > latest {
+                        return Err(err(format!("slot `{id}`: a cue must start at 0 or later and end after it starts (“{}”)", c.text)));
+                    }
+                    if c.text.chars().count() > MAX_CUE_CHARS || c.speaker.as_ref().is_some_and(|s| s.chars().count() > 200) {
+                        return Err(err(format!("slot `{id}`: a cue's text is longer than {MAX_CUE_CHARS} characters")));
+                    }
+                }
+                usize::from(!cues.is_empty())
+            }
             SlotFill::Text(t) => {
                 if slot.kind != SlotKind::Text {
                     return Err(err(format!("slot `{id}` takes {} media, not text", slot.kind.id())));
@@ -253,8 +302,9 @@ fn check_fills(p: &Project, m: &Manifest, opts: &ApplyOptions, warnings: &mut Ve
         let given = opts.fills.get(&s.id).map_or(0, |f| match f {
             SlotFill::Media(l) => l.len(),
             SlotFill::Text(t) => t.len(),
+            SlotFill::Captions(c) => c.len(),
         });
-        if given == 0 && s.min_count > 0 && s.kind != SlotKind::Text && !matches!(s.default, Some(SlotDefault::Generate { .. })) {
+        if given == 0 && s.min_count > 0 && !matches!(s.kind, SlotKind::Text | SlotKind::Captions) && !matches!(s.default, Some(SlotDefault::Generate { .. })) {
             let msg = format!("slot `{}` ({}) needs {} {}", s.id, s.name, s.min_count, if s.min_count == 1 { "item" } else { "items" });
             if opts.require_all {
                 return Err(err(msg));
@@ -450,8 +500,9 @@ fn retime(seq: &mut Sequence, m: &Manifest, ids: &Ids, opts: &ApplyOptions, warn
         }
         _ => None,
     });
+    let mode_for_new = opts.music_beats.as_ref().and_then(|b| b.mode).unwrap_or(grid.mode);
     let (new_grid, mode) = match new_music {
-        Some(g) if g.len() >= 2 => (g, grid.mode),
+        Some(g) if g.len() >= 2 => (g, mode_for_new),
         Some(_) => {
             warnings.push("the music's beats could not be found; the cuts stay on the template's beat grid".into());
             (grid.beats.clone(), QuantizeMode::Nearest)
@@ -716,6 +767,82 @@ fn frame_clip(it: &mut TrackItem, src: (f64, f64), design: (f64, f64), frame: (f
     }
 }
 
+/// Frame a picture clip in a box of the frame (`area`, fractions of the frame) and crop it to
+/// the box: a collage cell, one side of a split screen, a picture-in-picture. Like
+/// [`frame_clip`], the template's Motion scale is relative to the box (100 = exactly filling or
+/// fitting it); the picture's focus point lands as near the box's centre as covering the box
+/// allows, and Motion's anchor is the box's centre, so a pop-in scales about it.
+#[allow(clippy::too_many_arguments)]
+fn frame_box(
+    it: &mut TrackItem,
+    src: (f64, f64),
+    storage: Option<(u32, u32)>,
+    design: (f64, f64),
+    frame: (f64, f64),
+    framing: Framing,
+    focus: [f64; 2],
+    hint: Option<&Hint>,
+    area: [f64; 4],
+) {
+    let ((cw, ch), (w0, h0), (w, h)) = (src, design, frame);
+    if !(cw > 0.0 && ch > 0.0 && w0 > 0.0 && h0 > 0.0 && w > 0.0 && h > 0.0) || !area.iter().all(|x| x.is_finite()) {
+        return;
+    }
+    let (bx, by, bw, bh) = (area[0] * w, area[1] * h, area[2] * w, area[3] * h);
+    if !(bw > 0.0 && bh > 0.0) {
+        return;
+    }
+    let fr = hint.and_then(|h| h.frame).unwrap_or(framing);
+    let k = match fr {
+        Framing::Fill => (bw / cw).max(bh / ch),
+        Framing::Fit => (bw / cw).min(bh / ch),
+        Framing::None => 1.0,
+    };
+    it.scale_to_frame = false;
+    let (sw, sh) = (cw * k, ch * k);
+    let ox = if sw > bw { between((focus[0] - 0.5) * sw, -(sw - bw) / 2.0, (sw - bw) / 2.0) } else { 0.0 };
+    let oy = if sh > bh { between((focus[1] - 0.5) * sh, -(sh - bh) / 2.0, (sh - bh) / 2.0) } else { 0.0 };
+    let (cx, cy) = (bx + bw / 2.0, by + bh / 2.0);
+    // the picture's edges in the frame, and what of it lies outside the box
+    let (left, top) = (cx - ox - sw / 2.0, cy - oy - sh / 2.0);
+    let pct = |outside: f64, size: f64| between(outside.max(0.0) / size * 100.0, 0.0, 99.0);
+    let crop = [pct(bx - left, sw), pct(by - top, sh), pct(left + sw - (bx + bw), sw), pct(top + sh - (by + bh), sh)];
+    let k_scale = k * hint.and_then(|h| h.scale).map_or(1.0, |s| s / 100.0);
+    let Some(mo) = it.effects.iter_mut().find(|e| e.effect == "motion") else { return };
+    let sp = mo.params.entry("scale".into()).or_insert_with(|| Param::new(ParamValue::Float(100.0)));
+    map_f64(sp, |v| v * k_scale);
+    let pos = mo.params.entry("position".into()).or_insert_with(|| Param::new(ParamValue::Vec2(Vec2::new(f64::NAN, f64::NAN))));
+    if pos.is_animated() {
+        map_vec2(pos, |q| Vec2::new(q.x / w0 * w, q.y / h0 * h));
+    } else {
+        pos.value = ParamValue::Vec2(Vec2::new(cx, cy));
+    }
+    // the anchor: the point of the picture at the box's centre, in its own pixels
+    let (px, py) = storage.map_or((1.0, 1.0), |(a, b)| (f64::from(a) / cw, f64::from(b) / ch));
+    let anchor = Vec2::new((cw / 2.0 + ox / k.max(1e-9)) * px, (ch / 2.0 + oy / k.max(1e-9)) * py);
+    match mo.params.get_mut("anchor") {
+        Some(a) if a.is_animated() => {}
+        Some(a) => a.value = ParamValue::Vec2(anchor),
+        None => {
+            mo.params.insert("anchor".into(), Param::new(ParamValue::Vec2(anchor)));
+        }
+    }
+    // crop to the box (the picture's own percentages, so a pop-in scales the cropped picture)
+    if crop.iter().any(|c| *c > 1e-6) {
+        if !it.effects.iter().any(|e| e.effect == "crop")
+            && let Some(def) = filmcraft_project::find_effect("crop")
+        {
+            let at = it.effects.iter().position(|e| e.def().is_some_and(|d| d.intrinsic)).unwrap_or(it.effects.len());
+            it.effects.insert(at, def.instance());
+        }
+        if let Some(c) = it.effects.iter_mut().find(|e| e.effect == "crop") {
+            for (name, v) in ["left", "top", "right", "bottom"].iter().zip(crop) {
+                c.params.insert((*name).to_string(), Param::new(ParamValue::Float(v)));
+            }
+        }
+    }
+}
+
 /// Lay a graphic clip's layers out for a new frame: positions keep their place as fractions of
 /// the frame, each layer scales with the frame's smaller ratio, hints override both.
 fn layout_graphic(it: &mut TrackItem, design: (f64, f64), frame: (f64, f64), hint: Option<&Hint>) {
@@ -739,8 +866,22 @@ fn layout_graphic(it: &mut TrackItem, design: (f64, f64), frame: (f64, f64), hin
                 }
             }
         }
+        // an area text's box keeps its share of the frame (a hinted text size wraps it anew)
+        for k in ["box_width", "box_height"] {
+            if let Some(p) = e.params.get_mut(k) {
+                map_f64(p, |v| if v > 0.0 { v * s } else { v });
+            }
+        }
         match lh.and_then(|l| l.size) {
             Some(size) if e.effect == TEXT_LAYER => {
+                // a text centred by its anchor (the middle of its capitals) stays centred
+                let old = e.params.get("size").and_then(|p| p.value.as_f64()).filter(|x| x.is_finite() && *x > 0.0);
+                if let (Some(old), Some(a)) = (old, e.params.get_mut("anchor"))
+                    && !a.is_animated()
+                {
+                    let k = size / old;
+                    map_vec2(a, |q| Vec2::new(q.x * k, q.y * k));
+                }
                 e.params.insert("size".into(), Param::new(ParamValue::Float(size)));
             }
             _ => {
@@ -755,9 +896,19 @@ fn layout_graphic(it: &mut TrackItem, design: (f64, f64), frame: (f64, f64), hin
             pin.offsets.iter_mut().for_each(|o| *o *= s);
         }
     }
-    // a graphic clip's own Motion position, if the template set one
-    if let Some(pp) = it.effects.iter_mut().find(|e| e.effect == "motion").and_then(|m| m.params.get_mut("position")) {
-        map_vec2(pp, |q| Vec2::new(q.x / w0 * w, q.y / h0 * h));
+    // a graphic clip's own Motion position and anchor (canvas pixels), if the template set them;
+    // a hint's position places the clip
+    if let Some(mo) = it.effects.iter_mut().find(|e| e.effect == "motion") {
+        for k in ["position", "anchor"] {
+            if let Some(pp) = mo.params.get_mut(k) {
+                map_vec2(pp, |q| Vec2::new(q.x / w0 * w, q.y / h0 * h));
+            }
+        }
+        if let (Some([x, y]), Some(pp)) = (hint.and_then(|h| h.position), mo.params.get_mut("position"))
+            && !pp.is_animated()
+        {
+            pp.value = ParamValue::Vec2(Vec2::new(x * w, y * h));
+        }
     }
 }
 
@@ -907,6 +1058,19 @@ pub fn apply(p: &mut Project, pkg: &Package, opts: &ApplyOptions) -> Result<Appl
         }
     }
 
+    // sequence markers named after a text slot (chapters) take its text
+    for mk in seq.markers.iter_mut() {
+        let Some(rest) = mk.comment.strip_prefix(TEXT_MARKER) else { continue };
+        let Some((sid, idx)) = rest.rsplit_once(':') else { continue };
+        let Ok(i) = idx.parse::<usize>() else { continue };
+        if let Some(SlotFill::Text(texts)) = opts.fills.get(sid)
+            && !texts.is_empty()
+            && let Some(t) = texts.get(i).or_else(|| texts.get(i % texts.len()))
+        {
+            mk.name = t.chars().take(200).collect();
+        }
+    }
+
     // the variant's layout
     let hints: HashMap<u64, &Hint> = variant.hints.iter().map(|h| (h.clip, h)).collect();
     let template_clip: HashMap<ClipId, u64> = ids.clips.iter().map(|(o, n)| (*n, *o)).collect();
@@ -921,7 +1085,9 @@ pub fn apply(p: &mut Project, pkg: &Package, opts: &ApplyOptions) -> Result<Appl
                 Some(ItemKind::Graphic { .. }) => layout_graphic(it, design, frame, hint),
                 Some(ItemKind::AdjustmentLayer { .. }) | None => {}
                 Some(_) => {
-                    let slot = tc.and_then(|c| m.placement_of(c)).map(|(s, _)| s);
+                    let placement = tc.and_then(|c| m.placement_of(c));
+                    let slot = placement.map(|(s, _)| s);
+                    let area = hint.and_then(|h| h.area).or_else(|| placement.and_then(|(s, i)| s.placements.get(i)).and_then(|pl| pl.area));
                     let framing = slot.map_or(Framing::Fill, |s| s.fit.frame);
                     let focus = match (origin.get(&it.id), slot) {
                         (Some((_, Some(sid), mi)), Some(_)) => match opts.fills.get(sid) {
@@ -931,7 +1097,10 @@ pub fn apply(p: &mut Project, pkg: &Package, opts: &ApplyOptions) -> Result<Appl
                         _ => [0.5, 0.5],
                     };
                     if let Some(src) = p.conformed_source_size(it.item, par) {
-                        frame_clip(it, src, design, frame, framing, focus, hint);
+                        match area {
+                            Some(b) => frame_box(it, src, p.source_size(it.item), design, frame, framing, focus, hint, b),
+                            None => frame_clip(it, src, design, frame, framing, focus, hint),
+                        }
                     }
                 }
             }
@@ -971,6 +1140,33 @@ pub fn apply(p: &mut Project, pkg: &Package, opts: &ApplyOptions) -> Result<Appl
             t.style = style.clone();
         }
     }
+    // the captions slot: its cues, or — when a source is filled — an empty track for the engine
+    // to transcribe into (the placeholder captions are not the user's words)
+    let mut caption_clips = Vec::new();
+    let mut captions_pending = false;
+    if let Some(cs) = m.captions_slot() {
+        let spec = cs.captions.clone().unwrap_or_default();
+        let sources: Vec<ClipId> = placed.iter().filter(|x| spec.source.contains(&x.slot)).flat_map(|x| x.clips.iter().copied()).collect();
+        let links: Vec<u64> = seq.video_tracks.iter().flat_map(|t| t.items.iter()).filter(|c| sources.contains(&c.id)).filter_map(|c| c.link).collect();
+        caption_clips = seq
+            .audio_tracks
+            .iter()
+            .flat_map(|t| t.items.iter())
+            .filter(|c| sources.contains(&c.id) || c.link.is_some_and(|l| links.contains(&l)))
+            .map(|c| c.id)
+            .collect();
+        let source_filled = spec.source.iter().any(|s| matches!(opts.fills.get(s), Some(SlotFill::Media(l)) if !l.is_empty()));
+        match opts.fills.get(&cs.id) {
+            Some(SlotFill::Captions(cues)) => {
+                write_cues(&mut seq, p, cues, m.caption_style.as_ref());
+            }
+            _ if source_filled => {
+                write_cues(&mut seq, p, &[], m.caption_style.as_ref());
+                captions_pending = true;
+            }
+            _ => {}
+        }
+    }
     seq.check().map_err(|e| err(format!("the applied template is not a valid sequence: {e}")))?;
     let duration = seq.duration();
     let name = opts.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("{} ({})", m.name, variant.id));
@@ -983,7 +1179,107 @@ pub fn apply(p: &mut Project, pkg: &Package, opts: &ApplyOptions) -> Result<Appl
             it.metadata.insert("Template Export Preset".into(), e.clone());
         }
     }
-    Ok(Applied { sequence: sid, variant: variant.id, duration, placed, cuts, retimed, remix, export_preset, warnings, items: added, bin })
+    Ok(Applied {
+        sequence: sid,
+        variant: variant.id,
+        duration,
+        placed,
+        cuts,
+        retimed,
+        remix,
+        export_preset,
+        warnings,
+        items: added,
+        bin,
+        caption_clips,
+        captions_pending,
+    })
+}
+
+/// Put `cues` on the first caption track of `seq` (made, in `style`, when there is none),
+/// replacing its captions; times land on frames. Returns how many were written.
+fn write_cues(seq: &mut Sequence, p: &mut Project, cues: &[Cue], style: Option<&filmcraft_project::CaptionStyle>) -> usize {
+    let rate = seq.settings.frame_rate;
+    let frame = rate.frame_duration().max(Tick(1));
+    if seq.caption_tracks.is_empty() {
+        let mut t = CaptionTrack::new(TrackId(p.alloc_id()), "Captions".into(), CaptionFormat::Subtitle);
+        if let Some(st) = style {
+            t.style = st.clone();
+        }
+        seq.caption_tracks.push(t);
+    }
+    let mut out: Vec<filmcraft_project::Caption> = Vec::new();
+    for c in cues.iter().take(MAX_CUES) {
+        let start = rate.snap_nearest(c.start.max(Tick::ZERO));
+        // after the previous cue, never over it
+        let start = out.last().map_or(start, |l: &filmcraft_project::Caption| start.max(l.start + l.duration));
+        let end = rate.snap_nearest(c.end).max(start + frame);
+        let text: String = c.text.chars().take(MAX_CUE_CHARS).collect();
+        if text.trim().is_empty() {
+            continue;
+        }
+        out.push(filmcraft_project::Caption {
+            id: ClipId(p.alloc_id()),
+            start,
+            duration: end - start,
+            text,
+            speaker: c.speaker.clone(),
+            cue_id: None,
+            settings: String::new(),
+        });
+    }
+    let n = out.len();
+    if let Some(t) = seq.caption_tracks.first_mut() {
+        t.captions = out;
+    }
+    n
+}
+
+/// Put a captions slot's cues on sequence `seq_id` (the engine's transcript of the slot's
+/// sources), replacing the captions of its first caption track. Returns how many were written.
+pub fn set_captions(p: &mut Project, seq_id: ItemId, cues: &[Cue], style: Option<&filmcraft_project::CaptionStyle>) -> Result<usize, TemplateError> {
+    let mut seq = p.sequence(seq_id).cloned().ok_or_else(|| err("no such sequence"))?;
+    let n = write_cues(&mut seq, p, cues, style);
+    seq.check().map_err(err)?;
+    let q = p.sequence_mut(seq_id).ok_or_else(|| err("no such sequence"))?;
+    *q = seq;
+    Ok(n)
+}
+
+/// Make every clip of sequence `seq_id` that shows item `from` show `to` instead (an Elements
+/// sound's stand-in swapped for the sound), and remove `from` from the project when nothing else
+/// uses it. Returns the clips changed.
+pub fn swap_item(p: &mut Project, seq_id: ItemId, from: ItemId, to: ItemId) -> Result<usize, TemplateError> {
+    let name = p.item(to).map(|i| i.name.clone()).ok_or_else(|| err("the new item is not in the project"))?;
+    let len = media_length(p, to);
+    let q = p.sequence_mut(seq_id).ok_or_else(|| err("no such sequence"))?;
+    let mut n = 0;
+    for t in q.video_tracks.iter_mut().chain(q.audio_tracks.iter_mut()) {
+        for c in t.items.iter_mut().filter(|c| c.item == from) {
+            c.item = to;
+            c.name = name.clone();
+            // never past the end of the new media
+            if let Some(l) = len {
+                let avail = (l - c.source_in).max(Tick::ZERO);
+                let speed = c.speed.abs().max(0.01);
+                let most = Tick((avail.0 as f64 / speed).floor() as i64);
+                if c.duration > most && most > Tick::ZERO {
+                    c.duration = most;
+                }
+            }
+            n += 1;
+        }
+    }
+    q.check().map_err(err)?;
+    let used = p.items.values().any(|i| match &i.kind {
+        ItemKind::Sequence(s) => s.all_tracks().any(|t| t.items.iter().any(|c| c.item == from)),
+        _ => false,
+    });
+    if !used {
+        p.items.remove(&from);
+        p.root.remove_item(from);
+    }
+    Ok(n)
 }
 
 /// Loop a clip to `target` from its in point (a music clip Remix could not stretch).

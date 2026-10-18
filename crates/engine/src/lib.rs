@@ -68,6 +68,7 @@ pub mod sync;
 pub mod transcript;
 pub mod transition_tools;
 pub mod trim;
+pub mod video_template_frames;
 pub mod video_templates;
 pub mod voice_clone;
 pub mod voiceover;
@@ -1408,6 +1409,8 @@ mod transition_tools_tests;
 mod trim_tests;
 #[cfg(test)]
 mod vfx_tests;
+#[cfg(test)]
+mod video_template_frames_tests;
 #[cfg(test)]
 mod video_templates_tests;
 #[cfg(test)]

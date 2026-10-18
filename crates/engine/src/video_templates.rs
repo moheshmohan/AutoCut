@@ -4,26 +4,34 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `template.list` | the built-in starters and the user's templates (`<data dir>/Video Templates/`: `*.fcvideo-template` folders and `.zip` packages); `query`, `category`, `source` filter; templates that fail to read are listed under `invalid` with why |
+//! | `template.list` | the built-in starters and the user's templates (`<data dir>/Video Templates/`: `*.fcvideo-template` folders and `.zip` packages); `query`, `category`, `source`, `aspect` (a layout it has: `9:16`), `kind` (a slot kind it has: `captions`), `minMedia` / `maxMedia` (how many clips or photos it takes) filter; templates that fail to read are listed under `invalid` with why |
 //! | `template.inspect` | one template (`template`: id, name or path): slots with their placements, variants, beat grid, look, caption style, export preset, the manifest |
 //! | `template.validate` | check a package (`path`: folder, `.zip` or `template.json`): `valid`, and every problem with the field it is about |
-//! | `template.apply` | a new sequence from a template: `variant` (`16:9`, `9:16`…), `slots` (`{"photos": ["/a.jpg", 12, {"path": "/b.mov", "inSeconds": 3, "focus": [0.4, 0.5]}], "title": "Lisbon"}`), `name`; one undo step |
+//! | `template.apply` | a new sequence from a template: `variant` (`16:9`, `9:16`…), `slots` (`{"photos": ["/a.jpg", 12, {"path": "/b.mov", "inSeconds": 3, "focus": [0.4, 0.5]}], "title": "Lisbon", "captions": [{"start": ticks, "end": ticks, "text": "…"}]}`), `name`, `captions: false` (no transcribing); one undo step |
 //! | `template.save` | the minimal "save as template": clips flagged as slots (`template.markSlot`, or left by an earlier apply) become slots with generated placeholders; other personal media is left out; writes a folder or a `.zip` |
 //! | `template.markSlot` | flag clips as placeholders of a slot (`kind`, `slot`) for `template.save`, or `clear` the flag |
+//! | `template.thumbnail` | a frame of the template's own placeholder sequence (`variant`, `seconds`, default its poster frame; `maxSide`) as PNG — what the template browser shows ([`crate::video_template_frames`]) |
+//! | `template.preview` | frames of the template filled with project items and text (`slots` as for apply, item ids only), without changing the project |
+//! | `template.media` | the project's media that can fill a slot (`kind`), Google Photos picks marked |
 //!
 //! **Applying.** Files named in `slots` are imported (a file the project already holds is reused,
 //! and one file named for several placements is one item). A filled music slot is measured
 //! (`media.beats`' analysis) and the cuts re-quantized to its beats; an unfilled one with a
-//! `generate` default gets a bed made with `audio.generate` at the template's tempo and length.
-//! Music shorter than the show is Remixed to length (looped when Remix cannot). The template's
-//! look goes on the picture slots (`lumetri.applyPreset` / `presets.apply`), its caption style on
-//! the caption tracks, and its export preset (the variant's) becomes Quick Export's preset.
+//! `generate` default gets a bed made with `audio.generate` at the template's tempo and length,
+//! and the cuts move to that bed's exact beats (its length kept). Music shorter than the show is
+//! Remixed to length (looped when Remix cannot). The template's Elements sounds (stand-ins naming
+//! a `sound.*` element) are synthesized and swapped in. A captions slot whose sources were filled
+//! is transcribed (`transcript.generate`: Whisper, or the host's transcriber) and its captions
+//! written on the template's caption track, `maxChars` a line; without speech-to-text the track
+//! stays empty with a warning. The template's look goes on the picture slots
+//! (`lumetri.applyPreset` / `presets.apply`), its caption style on the caption tracks, and its
+//! export preset (the variant's) becomes Quick Export's preset.
 
 use std::collections::BTreeMap;
 
 use filmcraft_project::{ClipId, ItemId, Label, Marker, MarkerId, MarkerKind, TrackKind};
-use filmcraft_templates::apply::{self as tapply, ApplyOptions, MediaFill, MusicBeats, SlotFill, parse_slot_marker, slot_marker_name};
-use filmcraft_templates::manifest::{Look, MAX_TEMPLATE_TICKS, Manifest, Slot, SlotDefault, SlotKind};
+use filmcraft_templates::apply::{self as tapply, ApplyOptions, Cue, MediaFill, MusicBeats, SlotFill, parse_slot_marker, slot_marker_name};
+use filmcraft_templates::manifest::{Look, MAX_TEMPLATE_TICKS, Manifest, QuantizeMode, Slot, SlotDefault, SlotKind};
 use filmcraft_templates::{EXTENSION, MANIFEST_FILE, Package, TemplateError};
 use filmcraft_time::Tick;
 use serde_json::{Value, json};
@@ -56,8 +64,15 @@ fn spec(
 }
 
 pub fn commands() -> Vec<CommandSpec> {
-    vec![
-        spec("template.list", "List Video Templates", r#"{"query":str?,"category":str?,"source":"builtin"|"user"?}"#, always, list, false),
+    let mut v = vec![
+        spec(
+            "template.list",
+            "List Video Templates",
+            r#"{"query":str?,"category":str?,"source":"builtin"|"user"?,"aspect":"16:9"|"9:16"|"1:1"|"4:5"?,"kind":"video"|"photo"|"text"|"logo"|"music"|"captions"?,"minMedia":n?,"maxMedia":n?}"#,
+            always,
+            list,
+            false,
+        ),
         spec("template.inspect", "Inspect Video Template", r#"{"template":id|name|path}"#, always, inspect, false),
         spec(
             "template.validate",
@@ -70,7 +85,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "template.apply",
             "Apply Video Template",
-            r#"{"template":id|name|path,"variant":"16:9"|"9:16"|…?,"slots":{"<slot>": path|itemId|text|{"path"|"item"|"text","in":ticks?,"inSeconds":f64?,"focus":[x,y]?,"focusByVariant":{"9:16":[x,y]}?}|[…]}?,"name":str?,"sequence":str (name)?,"requireAll":bool?,"generateMusic":bool=true,"look":bool=true}"#,
+            r#"{"template":id|name|path,"variant":"16:9"|"9:16"|…?,"slots":{"<slot>": path|itemId|text|{"path"|"item"|"text","in":ticks?,"inSeconds":f64?,"focus":[x,y]?,"focusByVariant":{"9:16":[x,y]}?}|[…], "<captions slot>": [{"start":ticks|"startSeconds":f64,"end":ticks|"endSeconds":f64,"text":str,"speaker":str?}]}?,"name":str?,"sequence":str (name)?,"requireAll":bool?,"generateMusic":bool=true,"look":bool=true,"sounds":bool=true,"captions":bool=true}"#,
             always,
             apply,
             true,
@@ -91,7 +106,9 @@ pub fn commands() -> Vec<CommandSpec> {
             mark_slot,
             true,
         ),
-    ]
+    ];
+    v.extend(crate::video_template_frames::commands());
+    v
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -247,8 +264,7 @@ pub fn find_template(s: &Session, key: &str, cmd: &str) -> Result<Entry> {
     if looks_like_path(key) {
         return read_package(s, key).map_err(|e| EngineError::Other(format!("{key}: {e}")));
     }
-    let builtin = filmcraft_templates::builtin::builtin_templates();
-    if let Some(p) = builtin.iter().find(|p| p.manifest.id == key || p.manifest.name.eq_ignore_ascii_case(key)) {
+    if let Some(p) = filmcraft_templates::builtin::find(key) {
         return Ok(Entry { package: p.clone(), source: "builtin", path: None, asset_dir: None });
     }
     let (lib, _) = library(s);
@@ -269,6 +285,7 @@ fn slot_json(s: &Slot) -> Value {
         "fit": {"short": s.fit.short.id(), "portion": format!("{:?}", s.fit.portion).to_ascii_lowercase(), "frame": s.fit.frame.id(), "minSpeed": s.fit.min_speed},
         "constraints": serde_json::to_value(&s.constraints).unwrap_or_default(),
         "default": s.default.as_ref().map(|d| serde_json::to_value(d).unwrap_or_default()),
+        "captions": s.captions.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default()),
     })
 }
 
@@ -293,18 +310,43 @@ fn summary(e: &Entry) -> Value {
         "exportPreset": m.export_preset,
         "beatGrid": m.beat_grid.as_ref().map(|g| json!({"bpm": g.bpm, "beats": g.beats.len(), "mode": format!("{:?}", g.mode).to_ascii_lowercase()})),
         "assets": m.assets.len(),
+        "aspects": m.variants.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
+        "mediaSlots": m.media_slots(),
+        "mediaCount": m.media_count(),
+        "captions": m.captions_slot().is_some(),
+        "poster": m.poster_time().0,
+        "posterSeconds": m.poster_time().seconds(),
     })
 }
 
+/// Whether a template matches `template.list`'s (and the browser's) filters: `aspect` a layout
+/// it has, `kind` a slot kind it has, the clips or photos it takes ([`Manifest::media_count`])
+/// within `min..=max`.
+pub fn matches_filters(m: &Manifest, aspect: Option<&str>, kind: Option<SlotKind>, min: Option<usize>, max: Option<usize>) -> bool {
+    aspect.is_none_or(|a| m.variants.iter().any(|v| v.id.eq_ignore_ascii_case(a)))
+        && kind.is_none_or(|k| m.slots.iter().any(|s| s.kind == k))
+        && min.is_none_or(|n| m.media_count() >= n)
+        && max.is_none_or(|n| m.media_count() <= n)
+}
+
 fn list(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "template.list";
     let q = str_p(p, "query").unwrap_or("").to_ascii_lowercase();
     let cat = str_p(p, "category").map(str::to_ascii_lowercase);
     let src = str_p(p, "source");
+    let aspect = str_p(p, "aspect");
+    let kind = match str_p(p, "kind") {
+        Some(k) => Some(SlotKind::from_id(k).ok_or_else(|| bad(CMD, format!("unknown slot kind `{k}` (video, photo, text, logo, music, captions)")))?),
+        None => None,
+    };
+    let n = |k: &str| crate::commands::u64_p(p, k).map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    let (min, max) = (n("minMedia"), n("maxMedia"));
     let (lib, invalid) = library(s);
     let v: Vec<Value> = lib
         .iter()
         .filter(|e| src.is_none_or(|x| x.eq_ignore_ascii_case(e.source)))
         .filter(|e| cat.as_deref().is_none_or(|c| e.package.manifest.category.to_ascii_lowercase() == c))
+        .filter(|e| matches_filters(&e.package.manifest, aspect, kind, min, max))
         .filter(|e| {
             let m = &e.package.manifest;
             q.is_empty()
@@ -349,7 +391,7 @@ fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
     }
     v["captionStyle"] = e.package.manifest.caption_style.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default()).unwrap_or(Value::Null);
     v["manifest"] = serde_json::to_value(&e.package.manifest).unwrap_or_default();
-    v["checks"] = Value::Array(engine_checks(s, &e.package.manifest).iter().map(|(f, m)| json!({"field": f, "message": m})).collect());
+    v["checks"] = Value::Array(package_checks(s, &e.package).iter().map(|(f, m)| json!({"field": f, "message": m})).collect());
     Ok(v)
 }
 
@@ -378,13 +420,39 @@ fn engine_checks(s: &Session, m: &Manifest) -> Vec<(String, String)> {
     out
 }
 
+/// [`engine_checks`] with the package: the Elements sounds its stand-ins name exist, and its
+/// generated beds' moods and genres are the generator's.
+fn package_checks(s: &Session, p: &Package) -> Vec<(String, String)> {
+    let mut out = engine_checks(s, &p.manifest);
+    for it in p.fragment.items.values() {
+        if let Some(e) = it.metadata.get(filmcraft_templates::ELEMENT_METADATA)
+            && crate::elements::sound(e).is_none()
+        {
+            out.push((format!("sequence item {} (“{}”)", it.id.0, it.name), format!("no Elements sound `{e}` (see elements.list)")));
+        }
+    }
+    for (i, sl) in p.manifest.slots.iter().enumerate() {
+        if let Some(SlotDefault::Generate { mood, genre, .. }) = &sl.default {
+            if filmcraft_audio_dsp::music::Mood::from_id(mood).is_none() {
+                out.push((format!("slots[{i}].default.generate.mood"), format!("`{mood}` is not a mood audio.generate knows")));
+            }
+            if let Some(g) = genre
+                && !filmcraft_audio_dsp::music::Genre::ALL.iter().any(|x| x.id() == g)
+            {
+                out.push((format!("slots[{i}].default.generate.genre"), format!("`{g}` is not a genre audio.generate knows")));
+            }
+        }
+    }
+    out
+}
+
 fn validate(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "template.validate";
     let path = str_p(p, "path").or_else(|| str_p(p, "template")).ok_or_else(|| bad(CMD, "need `path`"))?;
     let e = if looks_like_path(path) { read_package(s, path) } else { find_template(s, path, CMD).map_err(|e| TemplateError::Package(e.to_string())) };
     Ok(match e {
         Ok(e) => {
-            let checks = engine_checks(s, &e.package.manifest);
+            let checks = package_checks(s, &e.package);
             json!({
                 "valid": checks.is_empty(),
                 "errors": checks.iter().map(|(f, m)| json!({"field": f, "message": m})).collect::<Vec<_>>(),
@@ -404,15 +472,92 @@ fn validate(s: &mut Session, p: &Value) -> Result<Value> {
 // ------------------------------------------------------------------------------------------------
 
 /// One entry of a slot fill, before importing.
-enum Given {
+pub enum Given {
     Path { path: String, source_in: Option<Tick>, focus: Option<[f64; 2]>, by_variant: BTreeMap<String, [f64; 2]> },
     Item { item: ItemId, source_in: Option<Tick>, focus: Option<[f64; 2]>, by_variant: BTreeMap<String, [f64; 2]> },
     Text(String),
+    Cue(Cue),
 }
 
 fn pair(v: &Value) -> Option<[f64; 2]> {
     let a = v.as_array().filter(|a| a.len() == 2)?;
     Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?])
+}
+
+/// A cue for a captions slot: `{"start": ticks | "startSeconds": s, "end" | "endSeconds", "text", "speaker"?}`.
+fn cue(v: &Value, slot: &Slot, cmd: &str) -> Result<Cue> {
+    let o = v.as_object().ok_or_else(|| bad(cmd, format!("slot `{}` takes cues: {{\"start\", \"end\", \"text\"}}", slot.id)))?;
+    let time = |k: &str| -> Result<Tick> {
+        match (o.get(k).and_then(Value::as_i64), f64_p(v, &format!("{k}Seconds"))) {
+            (Some(t), _) if (0..=MAX_TEMPLATE_TICKS.saturating_mul(4)).contains(&t) => Ok(Tick(t)),
+            (None, Some(sec)) if sec.is_finite() && (0.0..=4.0 * 3600.0).contains(&sec) => Ok(Tick::from_seconds_f64(sec)),
+            _ => Err(bad(cmd, format!("slot `{}`: a cue needs `{k}` (ticks) or `{k}Seconds`, from 0 to 4 hours", slot.id))),
+        }
+    };
+    let (start, end) = (time("start")?, time("end")?);
+    let text = o
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|t| t.len() <= 4096)
+        .ok_or_else(|| bad(cmd, format!("slot `{}`: a cue needs `text` (at most 4096 bytes)", slot.id)))?;
+    let speaker = o.get("speaker").and_then(Value::as_str).map(|s| s.chars().take(200).collect());
+    Ok(Cue { start, end, text: text.to_string(), speaker })
+}
+
+/// Every slot value of `p["slots"]`, read and checked against the template before anything
+/// changes.
+pub fn read_slots(m: &Manifest, p: &Value, cmd: &str) -> Result<BTreeMap<String, Vec<Given>>> {
+    let mut wanted: BTreeMap<String, Vec<Given>> = BTreeMap::new();
+    let mut count = 0usize;
+    if let Some(slots) = p.get("slots").filter(|v| !v.is_null()) {
+        let o = slots.as_object().ok_or_else(|| bad(cmd, "`slots` is an object: {\"<slot id>\": value or [values]}"))?;
+        for (id, v) in o {
+            let slot = m.slot(id).ok_or_else(|| {
+                let ids: Vec<&str> = m.slots.iter().map(|s| s.id.as_str()).collect();
+                bad(cmd, format!("the template has no slot `{id}` (its slots: {})", ids.join(", ")))
+            })?;
+            let list: Vec<&Value> = match v {
+                Value::Array(a) => a.iter().collect(),
+                Value::Null => Vec::new(),
+                one => vec![one],
+            };
+            count = count.saturating_add(list.len());
+            if count > MAX_FILL_MEDIA.max(tapply::MAX_CUES) || (slot.kind != SlotKind::Captions && count > MAX_FILL_MEDIA) {
+                return Err(bad(cmd, format!("at most {MAX_FILL_MEDIA} values in `slots`")));
+            }
+            let mut gs = Vec::new();
+            for x in list {
+                gs.push(if slot.kind == SlotKind::Captions { Given::Cue(cue(x, slot, cmd)?) } else { given(x, slot, cmd)? });
+            }
+            wanted.insert(id.clone(), gs);
+        }
+    }
+    Ok(wanted)
+}
+
+/// Fills of the values that need no importing (items, text, cues); `Err` names a file path.
+pub fn fills_without_import(m: &Manifest, wanted: BTreeMap<String, Vec<Given>>, cmd: &str) -> Result<BTreeMap<String, SlotFill>> {
+    let mut fills = BTreeMap::new();
+    for (id, gs) in wanted {
+        let Some(slot) = m.slot(&id) else { continue };
+        let fill = match slot.kind {
+            SlotKind::Text => SlotFill::Text(gs.into_iter().filter_map(|g| if let Given::Text(t) = g { Some(t) } else { None }).collect()),
+            SlotKind::Captions => SlotFill::Captions(gs.into_iter().filter_map(|g| if let Given::Cue(c) = g { Some(c) } else { None }).collect()),
+            _ => {
+                let mut list = Vec::new();
+                for g in gs {
+                    match g {
+                        Given::Item { item, source_in, focus, by_variant } => list.push(MediaFill { item, source_in, focus, focus_by_variant: by_variant }),
+                        Given::Path { path, .. } => return Err(bad(cmd, format!("slot `{id}`: {path} is a file; import it first and give its item id"))),
+                        Given::Text(_) | Given::Cue(_) => {}
+                    }
+                }
+                SlotFill::Media(list)
+            }
+        };
+        fills.insert(id, fill);
+    }
+    Ok(fills)
 }
 
 fn given(v: &Value, slot: &Slot, cmd: &str) -> Result<Given> {
@@ -510,31 +655,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     let entry = find_template(s, key, CMD)?;
     let m = entry.package.manifest.clone();
     // read every slot value before anything changes
-    let mut wanted: BTreeMap<String, Vec<Given>> = BTreeMap::new();
-    let mut count = 0usize;
-    if let Some(slots) = p.get("slots") {
-        let o = slots.as_object().ok_or_else(|| bad(CMD, "`slots` is an object: {\"<slot id>\": value or [values]}"))?;
-        for (id, v) in o {
-            let slot = m.slot(id).ok_or_else(|| {
-                let ids: Vec<&str> = m.slots.iter().map(|s| s.id.as_str()).collect();
-                bad(CMD, format!("the template has no slot `{id}` (its slots: {})", ids.join(", ")))
-            })?;
-            let list: Vec<&Value> = match v {
-                Value::Array(a) => a.iter().collect(),
-                Value::Null => Vec::new(),
-                one => vec![one],
-            };
-            count = count.saturating_add(list.len());
-            if count > MAX_FILL_MEDIA {
-                return Err(bad(CMD, format!("at most {MAX_FILL_MEDIA} values in `slots`")));
-            }
-            let mut gs = Vec::new();
-            for x in list {
-                gs.push(given(x, slot, CMD)?);
-            }
-            wanted.insert(id.clone(), gs);
-        }
-    }
+    let wanted = read_slots(&m, p, CMD)?;
     let variant = str_p(p, "variant").map(str::to_string);
     if let Some(v) = &variant
         && m.variant(Some(v)).is_none()
@@ -546,6 +667,8 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     let generate_music = bool_p(p, "generateMusic").unwrap_or(true);
     let with_look = bool_p(p, "look").unwrap_or(true);
     let require_all = bool_p(p, "requireAll").unwrap_or(false);
+    let with_sounds = bool_p(p, "sounds").unwrap_or(true);
+    let with_captions = bool_p(p, "captions").unwrap_or(true);
     let label = format!("Apply Template {}", m.name);
     let step = label.clone();
     s.edit_group(&step, move |s| {
@@ -559,6 +682,11 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                 fills.insert(id, SlotFill::Text(texts));
                 continue;
             }
+            if slot.kind == SlotKind::Captions {
+                let cues = gs.into_iter().filter_map(|g| if let Given::Cue(c) = g { Some(c) } else { None }).collect();
+                fills.insert(id, SlotFill::Captions(cues));
+                continue;
+            }
             let mut list = Vec::new();
             for g in gs {
                 let (item, source_in, focus, by_variant) = match g {
@@ -566,7 +694,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                         (import_once(s, &path, &mut cache, &mut imported, CMD)?, source_in, focus, by_variant)
                     }
                     Given::Item { item, source_in, focus, by_variant } => (item, source_in, focus, by_variant),
-                    Given::Text(_) => continue,
+                    Given::Text(_) | Given::Cue(_) => continue,
                 };
                 list.push(MediaFill { item, source_in, focus, focus_by_variant: by_variant });
             }
@@ -588,7 +716,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                     match crate::remix::beat_ticks(s, f.item, from, dur) {
                         Ok((bpm, beats)) => {
                             music = json!({"item": f.item.0, "generated": false, "bpm": bpm, "beats": beats.len()});
-                            music_beats = Some(MusicBeats { beats });
+                            music_beats = Some(MusicBeats { beats, mode: None });
                         }
                         Err(e) => {
                             warnings.push(format!("the music's beats could not be measured ({e}); the cuts stay on the template's grid"));
@@ -596,13 +724,23 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                         }
                     }
                 }
-            } else if let (true, Some(SlotDefault::Generate { mood, bpm, seed })) = (generate_music, &ms.default) {
+            } else if let (true, Some(SlotDefault::Generate { mood, bpm, seed, genre })) = (generate_music, &ms.default) {
                 let secs = m.duration.seconds() + 0.5;
-                match s.execute("audio.generate", json!({"kind": "music", "duration": secs, "mood": mood, "bpm": bpm, "seed": seed, "place": false})) {
+                let mut gp = json!({"kind": "music", "duration": secs, "mood": mood, "bpm": bpm, "seed": seed, "place": false});
+                if let Some(g) = genre {
+                    gp["genre"] = json!(g);
+                }
+                match s.execute("audio.generate", gp) {
                     Ok(r) => {
                         if let Some(id) = r["item"].as_u64() {
                             fills.insert(ms.id.clone(), SlotFill::Media(vec![MediaFill::new(ItemId(id))]));
-                            music = json!({"item": id, "generated": true, "bpm": bpm, "mood": mood});
+                            music = json!({"item": id, "generated": true, "bpm": bpm, "mood": mood, "genre": genre});
+                            // the bed's exact beats (from its start): the cuts move onto them, the length stays
+                            let beats: Vec<Tick> =
+                                r["beats"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(Value::as_i64).map(Tick).collect();
+                            if beats.len() >= 2 {
+                                music_beats = Some(MusicBeats { beats, mode: Some(QuantizeMode::Nearest) });
+                            }
                         }
                     }
                     Err(e) => warnings.push(format!("no music was generated ({e}); the placeholder stays")),
@@ -621,6 +759,10 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
             Ok(a)
         })?;
         warnings.extend(applied.warnings.iter().cloned());
+        // the Elements sounds: synthesized, imported (once) and swapped for their stand-ins
+        let sounds = if with_sounds { swap_in_sounds(s, &applied, &label, &mut warnings) } else { Vec::new() };
+        // the captions slot: transcribe what its sources say
+        let captions = if with_captions && applied.captions_pending { caption_sources(s, &m, &applied, &label, &mut warnings) } else { Value::Null };
         // music shorter than the show: Remix it to length, or loop it
         let mut remixed = Vec::new();
         for (clip, to) in &applied.remix {
@@ -685,9 +827,108 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
             "music": music,
             "remixed": remixed,
             "look": look,
+            "sounds": sounds,
+            "captions": captions,
             "warnings": warnings,
         }))
     })
+}
+
+/// Synthesize the template's Elements sounds and swap them in for their stand-ins (part of the
+/// apply's undo step). Returns what was swapped.
+fn swap_in_sounds(s: &mut Session, applied: &tapply::Applied, label: &str, warnings: &mut Vec<String>) -> Vec<Value> {
+    let mut out = Vec::new();
+    let stand_ins: Vec<(ItemId, String)> = applied
+        .items
+        .iter()
+        .filter_map(|i| s.project.item(*i).and_then(|it| it.metadata.get(filmcraft_templates::ELEMENT_METADATA).map(|e| (*i, e.clone()))))
+        .collect();
+    for (stand_in, id) in stand_ins {
+        let Some(snd) = crate::elements::sound(&id) else {
+            warnings.push(format!("the template names an Elements sound `{id}` this build does not have; it stays silent"));
+            continue;
+        };
+        let audio = match snd.render() {
+            Ok(a) => a,
+            Err(e) => {
+                warnings.push(format!("the sound `{id}` could not be made ({e}); it stays silent"));
+                continue;
+            }
+        };
+        let bytes = crate::audio_generate::write_wav_f32_stereo(&audio.left, &audio.right, crate::elements::RATE);
+        let real = match crate::elements::sound_item(s, &json!({}), snd, bytes) {
+            Ok((item, _, _)) => item,
+            Err(e) => {
+                warnings.push(format!("the sound `{id}` could not be written ({e}); it stays silent"));
+                continue;
+            }
+        };
+        let seq = applied.sequence;
+        let e = id.clone();
+        let r = s.edit(label, move |pr, _| {
+            if let Some(it) = pr.item_mut(real) {
+                it.metadata.insert(filmcraft_templates::ELEMENT_METADATA.into(), e);
+            }
+            tapply::swap_item(pr, seq, stand_in, real).map_err(|err| EngineError::Other(err.to_string()))
+        });
+        match r {
+            Ok(n) => out.push(json!({"element": id, "item": real.0, "clips": n})),
+            Err(e) => warnings.push(format!("the sound `{id}` was not placed: {e}")),
+        }
+    }
+    out
+}
+
+/// Transcribe the sources of the template's captions slot and write their captions (part of the
+/// apply's undo step). Without speech-to-text, a warning says how to get it.
+fn caption_sources(s: &mut Session, m: &Manifest, applied: &tapply::Applied, label: &str, warnings: &mut Vec<String>) -> Value {
+    let Some(spec) = m.captions_slot().and_then(|c| c.captions.clone()) else { return Value::Null };
+    let seq_id = applied.sequence;
+    let Some(seq) = s.project.sequence(seq_id).cloned() else { return Value::Null };
+    let mut items: Vec<ItemId> = Vec::new();
+    for c in seq.audio_tracks.iter().flat_map(|t| t.items.iter()).filter(|c| applied.caption_clips.contains(&c.id)) {
+        if let Some((root, _, _)) = s.project.resolve_media(c.item)
+            && !items.contains(&root)
+        {
+            items.push(root);
+        }
+    }
+    if items.is_empty() {
+        warnings.push("auto-captions: the captioned media has no sound".into());
+        return json!({"captions": 0});
+    }
+    let missing: Vec<u64> = items.iter().filter(|i| !s.project.transcripts.contains_key(i)).map(|i| i.0).collect();
+    if !missing.is_empty() {
+        if let Err(why) = crate::transcript::can_transcribe(s) {
+            warnings.push(format!("auto-captions: {why} (Transcribe… and the captions slot can be filled later)"));
+            return json!({"captions": 0, "transcribed": false});
+        }
+        if let Err(e) = s.execute("transcript.generate", json!({"items": missing})) {
+            warnings.push(format!("auto-captions: transcribing failed ({e})"));
+            return json!({"captions": 0, "transcribed": false});
+        }
+    }
+    // the words of the captioned clips only, on the timeline
+    let mut only = seq.clone();
+    for t in only.audio_tracks.iter_mut() {
+        t.items.retain(|c| applied.caption_clips.contains(&c.id));
+    }
+    let words = filmcraft_edit::transcript::sequence_words(&only, &s.project.transcripts);
+    let rules = filmcraft_edit::transcript::CaptionRules {
+        max_chars: spec.max_chars as usize,
+        lines: spec.lines as usize,
+        ..filmcraft_edit::transcript::CaptionRules::default()
+    };
+    let blocks = filmcraft_edit::transcript::caption_blocks(&words, &rules, seq.settings.frame_rate);
+    let cues: Vec<Cue> = blocks.iter().map(|b| Cue { start: b.start, end: b.end, text: b.text.clone(), speaker: b.speaker.clone() }).collect();
+    let style = m.caption_style.clone();
+    match s.edit(label, move |pr, _| tapply::set_captions(pr, seq_id, &cues, style.as_ref()).map_err(|e| EngineError::Other(e.to_string()))) {
+        Ok(n) => json!({"captions": n, "transcribed": true, "words": words.len()}),
+        Err(e) => {
+            warnings.push(format!("auto-captions: {e}"));
+            json!({"captions": 0, "transcribed": true})
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -761,6 +1002,9 @@ fn mark_slot(s: &mut Session, p: &Value) -> Result<Value> {
         None if clear => None,
         None => return Err(bad(CMD, "need `kind` (video, photo, text, logo or music)")),
     };
+    if kind == Some(SlotKind::Captions) {
+        return Err(bad(CMD, "a captions slot has no clips: it captions the slots it names (author it in the manifest)"));
+    }
     let slot = str_p(p, "slot").map(str::to_string).or_else(|| kind.map(|k| k.id().to_string())).unwrap_or_default();
     if !clear && !filmcraft_templates::manifest::is_slot_id(&slot) {
         return Err(bad(CMD, format!("`{slot}`: slot ids use lower-case letters, digits, `_` and `-`")));

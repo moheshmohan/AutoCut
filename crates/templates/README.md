@@ -93,19 +93,37 @@ not one of loop, stretch, hold, remix, error`).
 | `captionStyle` | a caption track style (the project's `CaptionStyle`), set on every caption track |
 | `exportPreset` | export preset name when a variant names none |
 | `beatGrid` | the music's beats on the timeline (≥ 2, increasing, ≤ 20 000) and how cuts follow a new track |
+| `poster` | the moment (ticks) its thumbnail shows; default a third of the way in |
 | `assets` | the attribution manifest of `assets/` |
 
 ### Slots
 
 | field | meaning |
 |---|---|
-| `id`, `kind` | `[a-z0-9_-]`; `video`, `photo`, `text`, `logo` or `music` |
+| `id`, `kind` | `[a-z0-9_-]`; `video`, `photo`, `text`, `logo`, `music` or `captions` |
 | `count`, `minCount` | how many media the slot takes, and the fewest accepted (0 = optional) |
-| `placements` | the clips it fills: `clip` (id in the template sequence), `media` (which of the slot's media; several placements may share one), `layer` (text slots: the text layer's uid) |
+| `placements` | the clips it fills: `clip` (id in the template sequence), `media` (which of the slot's media; several placements may share one), `layer` (text slots: the text layer's uid), `box` (picture slots: `[x, y, width, height]` in fractions of the frame — the picture fills that box and is cropped to it: a collage cell, half of a split screen, a picture-in-picture) |
 | `constraints` | `minDuration` / `maxDuration` (what a placement may become when re-timed), `orientation` (`any`, `landscape`, `portrait`, `square`), `aspect` (`"16:9"`), `strict` (a wrong shape is an error, not a warning), `maxChars` (text) |
 | `fit` | `short`: media shorter than its placement `loop`s, `stretch`es (no slower than `minSpeed`, then loops), `hold`s its last frame, is `remix`ed (music) or is an `error`; `portion`: which part of longer media (`start`, `center`, `end`; the caller's `in` point wins); `frame`: `fill` (cover, cropped around the focus point), `fit` (whole), `none` |
 | `beatSync` | the edges of this slot's placements are cuts on the beat grid |
-| `default` | `{"text": …}` for text slots, `{"generate": {"mood", "bpm", "seed"}}` for music (a bed made with `audio.generate`) |
+| `default` | `{"text": …}` for text slots, `{"generate": {"mood", "bpm", "seed", "genre"?}}` for music (a bed made with `audio.generate`; moods `epic`, `tense`, `uplifting`, `calm`, `happy`, `dark`, `dreamy`, `energetic`, `sad`; genres `cinematic`, `electronic`, `pop`, `ambient`, `lofi`, `piano`) |
+| `captions` | captions slots: `{"source": [slot ids], "maxChars": 32, "lines": 1}` |
+
+**Captions slots** (one per template) caption what is said in the `source` slots' media (video or
+music slots). They have no placements: the captions go on the template's first caption track, in its
+`captionStyle`. The template's own captions there are a preview: they stay while no source is filled
+and go when one is; the engine then transcribes the sources' sound (`transcript.generate`: Whisper or
+the host's transcriber) and writes captions of `maxChars` a line from the words in the sources' clips
+only. Callers may give the cues themselves (`[{"start", "end", "text", "speaker"?}]`, timeline
+ticks of the result). Without speech-to-text the track stays empty and the apply warns.
+
+**Elements sounds** are clips of an item whose metadata `Element` names a sound element
+(`sound.whoosh-short`, `sound.pop`… — `elements.list`): in the package that item is generated silence
+of the sound's length, sound only; the engine synthesizes the element when the template is applied
+and swaps it in (the WAV keeps the metadata, so saving the sequence as a template turns it back into
+a stand-in). Stickers and animated text presets of the Elements library are ordinary graphic clips
+(their layers, linked to the graphics template they came from), and their text layers can be text
+slots.
 
 Placements are clips of the template sequence: video, photo and logo slots on video tracks, music on
 an audio track, text slots on graphic clips with a text layer. Two text slots may share one graphic
@@ -126,8 +144,15 @@ Magic-Resize model). Pictures are framed per their slot's `frame` rule around th
 point (`focus` / `focusByVariant` when applying: the same photo can be re-framed for 16:9 and 9:16);
 graphic layers keep their place as fractions of the frame and scale with the frame's smaller ratio.
 A hint overrides that for one clip: `position` (fractions of the frame), `scale` (a percentage of the
-template's own), `frame`, and per graphic layer `position` and text `size` (pixels in that variant).
-Full-frame generated placeholders are drawn at the variant's size.
+template's own), `frame`, `box` (the picture's box in this layout: two speakers side by side in
+16:9 stack in 9:16), and per graphic layer `position` and text `size` (pixels in that variant; an
+area text's box keeps its share of the frame and the text wraps anew). A graphic clip's own Motion position and anchor keep their place as
+fractions of the frame. Full-frame generated placeholders are drawn at the variant's size.
+
+In a box, Motion's scale is relative to the box (100 = exactly filling or fitting it), the picture's
+focus lands as near the box's centre as covering the box allows, Motion's anchor is the picture's
+point at the box's centre (so a pop-in scales about the box) and a Crop effect cuts what lies
+outside the box.
 
 ## Beat grid
 
@@ -152,31 +177,58 @@ does not move.
    exactly its length — trimmed from the chosen portion, looped, stretched, held or marked for Remix.
    Each piece carries a `slot:<kind>:<slot>:<placement>` clip marker, so the sequence can be saved as
    a template again.
-5. Lay out the variant, set the caption style, record the template, variant and export preset in
-   the sequence's metadata.
+5. Lay out the variant, name the chapter markers after their text slots (a sequence marker whose
+   comment is `text:<slot>:<index>`), set the caption style and the captions slot's cues, record
+   the template, variant and export preset in the sequence's metadata.
 
-The engine wraps all of it — imports, beat measuring, the generated bed, Remix, the look — in one
-undo step. A required slot left unfilled keeps its placeholder with a warning (a preview of the
+The engine wraps all of it — imports, beat measuring, the generated bed (whose exact beats the cuts
+move onto, the length kept), Remix, the Elements sounds, transcribing the captions, the look — in
+one undo step. A required slot left unfilled keeps its placeholder with a warning (a preview of the
 template); `requireAll` makes it an error.
 
 ## Built-in starters
 
-Original designs made in code ([`builtin.rs`](src/builtin.rs)); placeholders are the procedural demo
-scenes and colour mattes, text is Inter (bundled, OFL). Each has a 16:9 and a 9:16 variant.
+Original designs made in code ([`builtin/`](src/builtin/)), from generic conventions (a lower third,
+a countdown, a split screen) without reference to anyone's templates: placeholders are the
+procedural demo scenes and colour mattes, titles and stickers come from the Elements library or are
+drawn in code with Inter (bundled, OFL), sounds are Elements sounds, transitions come from the
+built-in and GL Transitions catalogs, and unfilled music is generated in the app. Every starter has
+16:9 and 9:16 layouts; the social ones also 1:1 and 4:5. The template browser shows them by category:
+Reels & Shorts, YouTube, Vlog, Business, Social, Events and Tech.
 
 | id | length | slots |
 |---|---|---|
 | `builtin:photo-beat-slideshow` | 16 s, 120 bpm | `photos` ×8 (beat-synced, slow push-in), `music`, `title`, `outro` |
 | `builtin:channel-intro` | 5 s | `logo` (fit, pop-in), `name`, `tagline` (one graphic, two layers), `background`, `music` |
 | `builtin:top-3-listicle` | 18.5 s, 120 bpm | `items` ×3 (#3, #2, #1 = media 2, 1, 0), `labels` ×3, `title`, `music` |
+| `builtin:talking-head-captions` | 30 s | `speaker` (with its sound), `hook`, `name`, `role`, `cta`, `captions` (of the speaker), `music` (kept low) |
+| `builtin:product-promo-15` | 15 s, 120 bpm | `shots` ×4 (beat-synced, GL transitions, whooshes), `logo` (boxed, twice), `product`, `features` ×4, `offer` (on a burst sticker), `cta`, `music` |
+| `builtin:travel-vlog-intro` | 10 s, 120 bpm | `clips` ×6 (beat-synced), `hook` (three punch-in words), `place`, `date`, `music` |
+| `builtin:travel-vlog-outro` | 10 s | `clips` ×3 (crossfades), `thanks`, `next`, `music` |
+| `builtin:top-5-listicle` | 22 s, 120 bpm | `items` ×5 (#5 … #1), `labels` ×5, `title`, `music` |
+| `builtin:before-after-reveal` | 10 s | `before`, `after` (full, a wipe, then boxed side by side / stacked), `labels`, `split_labels`, `title`, `music` |
+| `builtin:lower-third-chapter-kit` | 40 s | `video`, `name`, `role`, `chapters` ×3 (cards and chapter markers) |
+| `builtin:end-card-subscribe` | 12 s | `next` ×2 (boxed in the end card's frames), `background` (blurred), `heading`, `subheading`, `labels`, `music` |
+| `builtin:tutorial-pip` | 60 s | `screen` (fit), `webcam` (picture-in-picture), `title`, `steps` ×3, `captions` (of both), `music` |
+| `builtin:podcast-two-speakers` | 60 s | `host`, `guest` (side by side; stacked when vertical), `show`, `host_name`, `guest_name`, `captions`, `music` (intro sting) |
+| `builtin:photo-collage` | 10 s | `photos` ×4 (boxed in a 2×2 grid, popping in), `title`, `music` |
+| `builtin:quote-card` | 8 s | `background`, `quote` (area text), `author`, `music` |
+| `builtin:countdown` | 8 s | `background` (blurred), `title`, `subtitle`, `music` — 3, 2, 1, GO with ticks, a riser and a boom |
+| `builtin:event-recap` | 16 s, 120 bpm | `clips` ×12 (beat-synced, glitch transitions), `logo`, `event`, `date`, `outro`, `music` |
+| `builtin:day-in-my-life` | 18 s, 100 bpm | `moments` ×6 (beat-synced), `title`, `times` ×6, `music` |
+| `builtin:unboxing` | 15 s, 120 bpm | `package`, `opening`, `reveal`, `details` ×2 (beat-synced, with their sound), `hook`, `reveal_text`, `verdict`, `music` |
+| `builtin:qa-session` | 24 s | `answers` ×3 (with their sound), `questions` ×3 (speech-bubble cards), `captions`, `music` |
+| `builtin:robot-showcase` | 26 s, 120 bpm | `intro`, `robots` ×5 (beat-synced, glitch transitions), `title`, `subtitle`, `names` ×5, `facts` ×5 (spec cards), `outro`, `outro_sub`, `music` |
 
 ## Saving (`save::save`)
 
 The minimal flow (the full authoring flow is A3): clips flagged with a `slot:` marker
 (`template.markSlot`, or left by an earlier apply) become slots with generated placeholders; pieces of
 one placement merge back into one clip; other clips using the user's own files are left out with a
-warning; captions are left out (their text is the user's), their style is kept. The variant of the
-sequence's own size is joined by its rotated twin (16:9 ↔ 9:16).
+warning; captions are left out (their text is the user's), their style is kept; Elements sounds
+become stand-ins again. The variant of the sequence's own size is joined by its rotated twin
+(16:9 ↔ 9:16). A captions slot, boxes, 1:1 / 4:5 layouts and a poster frame are authored in the
+manifest for now (the authoring flow, A3, is to carry them over).
 
 ## Never crash
 

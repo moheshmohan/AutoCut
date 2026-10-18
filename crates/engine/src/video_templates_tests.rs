@@ -50,10 +50,20 @@ fn list_and_inspect_the_starters() {
     let mut s = session(&dir);
     let r = s.execute("template.list", json!({})).unwrap();
     let ids: Vec<&str> = r["templates"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["builtin:photo-beat-slideshow", "builtin:channel-intro", "builtin:top-3-listicle"]);
+    assert_eq!(ids, filmcraft_templates::builtin::BUILTIN_IDS);
     assert!(r["userFolder"].as_str().unwrap().ends_with("Video Templates"));
-    let shorts = s.execute("template.list", json!({"query": "countdown"})).unwrap();
+    let shorts = s.execute("template.list", json!({"query": "unboxing"})).unwrap();
     assert_eq!(shorts["templates"].as_array().unwrap().len(), 1);
+    // the browser's filters: a layout, a slot kind, how many media slots
+    let count = |s: &mut Session, p: Value| s.execute("template.list", p).unwrap()["templates"].as_array().unwrap().len();
+    assert_eq!(count(&mut s, json!({"aspect": "9:16"})), ids.len(), "every starter has a vertical layout");
+    let square = count(&mut s, json!({"aspect": "1:1"}));
+    assert!(square >= 10 && square < ids.len(), "{square}");
+    assert_eq!(count(&mut s, json!({"kind": "captions"})), 4, "talking head, tutorial, podcast, Q&A");
+    assert_eq!(count(&mut s, json!({"maxMedia": 1})), 4, "talking head, lower-third kit, quote card, countdown");
+    assert_eq!(count(&mut s, json!({"minMedia": 7})), 2, "the slideshow and the event recap");
+    assert_eq!(count(&mut s, json!({"minMedia": 4, "maxMedia": 3})), 0);
+    assert!(s.execute("template.list", json!({"kind": "sticker"})).is_err());
     let i = s.execute("template.inspect", json!({"template": "Photo Beat Slideshow"})).unwrap();
     assert_eq!(i["id"], "builtin:photo-beat-slideshow");
     assert_eq!(i["seconds"], 16.0);

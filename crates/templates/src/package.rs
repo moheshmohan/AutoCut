@@ -122,6 +122,23 @@ impl Package {
         self.fragment.sequence(ItemId(self.manifest.sequence))
     }
 
+    /// A text slot's own texts, one per media index (what an unfilled slot shows).
+    pub fn placeholder_texts(&self, slot: &str) -> Vec<String> {
+        let (Some(s), Some(q)) = (self.manifest.slot(slot), self.sequence()) else { return Vec::new() };
+        let mut out = vec![String::new(); s.count as usize];
+        for pl in &s.placements {
+            let Some((_, c)) = q.find_item(filmcraft_project::ClipId(pl.clip)) else { continue };
+            let layer = c.effects.iter().find(|e| e.effect == TEXT_LAYER && pl.layer.is_none_or(|l| filmcraft_project::gtemplate::layer_uid(e) == l));
+            if let (Some(e), Some(slot_text)) = (layer, out.get_mut(pl.media as usize))
+                && slot_text.is_empty()
+                && let Some(filmcraft_project::ParamValue::Text(t)) = e.params.get("text").map(|p| &p.value)
+            {
+                *slot_text = t.clone();
+            }
+        }
+        out
+    }
+
     /// Cross-check the manifest, the sequence file and the bundled files.
     pub fn check(&self) -> Issues {
         let mut is = Issues::default();
@@ -218,8 +235,17 @@ fn check_fragment(m: &Manifest, p: &Project, is: &mut Issues) {
                     MediaRef::Generator(_) => {}
                     MediaRef::File { path } => {
                         if !m.assets.iter().any(|a| &a.path == path) {
-                            is.push(at, format!("uses `{path}`: a template's media is generated or a bundled asset listed in `assets`"));
+                            is.push(at.clone(), format!("uses `{path}`: a template's media is generated or a bundled asset listed in `assets`"));
                         }
+                    }
+                }
+                // a stand-in for an Elements sound: generated, sound only, a well-formed id
+                if let Some(e) = it.metadata.get(crate::ELEMENT_METADATA) {
+                    if !crate::is_sound_element_id(e) {
+                        is.push(at.clone(), format!("`{}` is `{e}`, not a sound element id (`sound.whoosh-short`)", crate::ELEMENT_METADATA));
+                    }
+                    if !matches!(mc.media, MediaRef::Generator(_)) || mc.info.video.is_some() {
+                        is.push(at, "an Elements sound stand-in is generated and has no picture");
                     }
                 }
                 if mc.info.kind == MediaKind::ImageSequence {

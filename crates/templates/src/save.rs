@@ -99,7 +99,9 @@ pub fn save(p: &Project, seq: ItemId, opts: &SaveOptions, beat_grid: Option<Beat
             // pieces of one placement (a loop, a hold) become one clip again
             let mut last_slot: Option<(String, usize, usize)> = None;
             for mut c in std::mem::take(&mut t.items) {
-                let flags: Vec<crate::apply::SlotFlag> = c.markers.iter().filter_map(|m| parse_slot_marker(&m.name)).take(64).collect();
+                // (a captions slot has no clips: a `slot:captions` flag means nothing)
+                let flags: Vec<crate::apply::SlotFlag> =
+                    c.markers.iter().filter_map(|m| parse_slot_marker(&m.name)).filter(|f| f.kind != SlotKind::Captions).take(64).collect();
                 c.markers.retain(|m| !m.name.starts_with(crate::apply::SLOT_MARKER));
                 let item = p.item(c.item);
                 match flags.first().cloned() {
@@ -170,6 +172,17 @@ pub fn save(p: &Project, seq: ItemId, opts: &SaveOptions, beat_grid: Option<Beat
                     }
                     None => {
                         last_slot = None;
+                        // an Elements sound (its synthesized WAV) becomes its stand-in again
+                        if let Some((it, e)) = item.and_then(|i| i.metadata.get(crate::ELEMENT_METADATA).map(|e| (i, e)))
+                            && crate::is_sound_element_id(e)
+                            && it.as_media().is_some()
+                        {
+                            let len = it.duration();
+                            let id = *copied.entry(c.item).or_insert_with(|| crate::builtin::sound_stand_in(&mut fragment, e, &it.name, len));
+                            c.item = id;
+                            keep.push(c);
+                            continue;
+                        }
                         let ok = item.is_some_and(|i| match &i.kind {
                             ItemKind::Graphic { .. } | ItemKind::AdjustmentLayer { .. } => true,
                             ItemKind::Media(m) => matches!(m.media, MediaRef::Generator(_)),
@@ -240,12 +253,13 @@ pub fn save(p: &Project, seq: ItemId, opts: &SaveOptions, beat_grid: Option<Beat
             placements: pls
                 .iter()
                 .enumerate()
-                .map(|(k, (_, clip, layer))| Placement { clip: *clip, media: u32::try_from(k).unwrap_or(0), layer: *layer })
+                .map(|(k, (_, clip, layer))| Placement { clip: *clip, media: u32::try_from(k).unwrap_or(0), layer: *layer, area: None })
                 .collect(),
             constraints: Constraints::default(),
             fit: default_fit(kind),
             beat_sync: beat_grid.is_some() && kind.is_visual(),
             default: None,
+            captions: None,
         };
         if kind == SlotKind::Music {
             s.count = 1;
@@ -296,6 +310,7 @@ pub fn save(p: &Project, seq: ItemId, opts: &SaveOptions, beat_grid: Option<Beat
         default_variant: variants.first().map(|v| v.id.clone()).unwrap_or_default(),
         variants,
         slots: manifest_slots,
+        poster: None,
         look: None,
         caption_style,
         export_preset: None,

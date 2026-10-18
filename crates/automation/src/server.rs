@@ -1360,7 +1360,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Video templates: list",
-        description = "The video templates (whole-sequence starters with media slots: photo-beat slideshow, channel intro, top-3 countdown, and the user's own from <data dir>/Video Templates): id, name, length, variants (16:9, 9:16), slots (kind, count, required). Pass `template` for one in full, with every placement's time and the beat grid. Then template_apply.",
+        description = "The video templates (whole-sequence starters with media slots — 21 built in: photo-beat slideshow, channel intro, top 3 / top 5, talking head with auto-captions, product promo, travel vlog intro and outro, before/after, lower thirds + chapters, end card, tutorial with webcam, podcast, collage, quote card, countdown, event recap, day in my life, unboxing, Q&A, robot showcase — and the user's own from <data dir>/Video Templates): id, name, length, variants (16:9, 9:16, 1:1, 4:5), slots (kind, count, required). Pass `template` for one in full, with every placement's time and the beat grid. Then template_apply (a `captions` slot is transcribed from its sources).",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn template_list(&self, Parameters(p): Parameters<TemplateListParams>) -> Result<CallToolResult, McpError> {

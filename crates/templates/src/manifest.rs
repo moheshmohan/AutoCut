@@ -46,10 +46,14 @@ pub enum SlotKind {
     Text,
     Logo,
     Music,
+    /// Captions of what is said in other slots' media (`captions.source`): transcribed when the
+    /// template is applied (Whisper), or given as cues. Shown on the template's first caption
+    /// track in its caption style; it has no placements.
+    Captions,
 }
 
 impl SlotKind {
-    pub const ALL: [SlotKind; 5] = [SlotKind::Video, SlotKind::Photo, SlotKind::Text, SlotKind::Logo, SlotKind::Music];
+    pub const ALL: [SlotKind; 6] = [SlotKind::Video, SlotKind::Photo, SlotKind::Text, SlotKind::Logo, SlotKind::Music, SlotKind::Captions];
     pub fn id(self) -> &'static str {
         match self {
             SlotKind::Video => "video",
@@ -57,6 +61,7 @@ impl SlotKind {
             SlotKind::Text => "text",
             SlotKind::Logo => "logo",
             SlotKind::Music => "music",
+            SlotKind::Captions => "captions",
         }
     }
     pub fn from_id(s: &str) -> Option<SlotKind> {
@@ -209,7 +214,7 @@ pub struct Constraints {
 }
 
 /// Where a slot's media appears: one clip of the template sequence.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Placement {
     /// The clip (id in the template sequence).
@@ -220,6 +225,11 @@ pub struct Placement {
     /// Text slots: the text layer (its uid); default the clip's first text layer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer: Option<u64>,
+    /// Picture slots: the part of the frame the picture fills (`[x, y, width, height]`,
+    /// fractions of the frame): framed in that box by the slot's `frame` rule and cropped to it —
+    /// a collage cell, one side of a split screen, a picture-in-picture. Default: the whole frame.
+    #[serde(rename = "box", skip_serializing_if = "Option::is_none")]
+    pub area: Option<[f64; 4]>,
 }
 
 /// What an unfilled slot becomes.
@@ -228,8 +238,38 @@ pub struct Placement {
 pub enum SlotDefault {
     /// Text slots: this text (else the template's own placeholder text stays).
     Text(String),
-    /// Music slots: a bed generated in the app (`audio.generate`) at the template's length.
-    Generate { mood: String, bpm: f64, seed: u64 },
+    /// Music slots: a bed generated in the app (`audio.generate`) at the template's length, in
+    /// `mood` (and `genre`), at `bpm`.
+    Generate {
+        mood: String,
+        bpm: f64,
+        seed: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        genre: Option<String>,
+    },
+}
+
+/// Moods a generated music bed may have (`audio.generate`'s).
+pub const MOODS: [&str; 9] = ["epic", "tense", "uplifting", "calm", "happy", "dark", "dreamy", "energetic", "sad"];
+/// Genres a generated music bed may have (`audio.generate`'s).
+pub const GENRES: [&str; 6] = ["cinematic", "electronic", "pop", "ambient", "lofi", "piano"];
+
+/// How a captions slot captions its sources.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionSpec {
+    /// The slots (video or music) whose speech is captioned.
+    pub source: Vec<String>,
+    /// Longest caption line, characters.
+    pub max_chars: u32,
+    /// Lines per caption (1 or 2).
+    pub lines: u32,
+}
+
+impl Default for CaptionSpec {
+    fn default() -> Self {
+        CaptionSpec { source: Vec::new(), max_chars: 32, lines: 1 }
+    }
 }
 
 /// A typed placeholder.
@@ -257,6 +297,9 @@ pub struct Slot {
     pub beat_sync: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<SlotDefault>,
+    /// Captions slots: what is captioned and how.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captions: Option<CaptionSpec>,
 }
 
 /// A graphic layer's place in one variant.
@@ -286,6 +329,9 @@ pub struct Hint {
     pub scale: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame: Option<Framing>,
+    /// The box the picture fills in this layout (fractions of the frame; see [`Placement::area`]).
+    #[serde(rename = "box", skip_serializing_if = "Option::is_none")]
+    pub area: Option<[f64; 4]>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<LayerHint>,
 }
@@ -398,6 +444,9 @@ pub struct Manifest {
     pub variants: Vec<Variant>,
     pub default_variant: String,
     pub slots: Vec<Slot>,
+    /// The moment its thumbnail shows (default: a third of the way in).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poster: Option<Tick>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub look: Option<Look>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -426,6 +475,22 @@ impl Manifest {
     /// The slot and placement index of a template clip.
     pub fn placement_of(&self, clip: u64) -> Option<(&Slot, usize)> {
         self.slots.iter().find_map(|s| s.placements.iter().position(|p| p.clip == clip).map(|i| (s, i)))
+    }
+    /// The moment the thumbnail shows: `poster`, else a third of the way in.
+    pub fn poster_time(&self) -> Tick {
+        self.poster.unwrap_or(Tick(self.duration.0 / 3)).max(Tick::ZERO).min(self.duration.max(Tick::ZERO))
+    }
+    /// Slots that take media (video, photo, logo, music).
+    pub fn media_slots(&self) -> usize {
+        self.slots.iter().filter(|s| !matches!(s.kind, SlotKind::Text | SlotKind::Captions)).count()
+    }
+    /// How many clips or photos it takes: the counts of its picture slots (video, photo, logo).
+    pub fn media_count(&self) -> usize {
+        self.slots.iter().filter(|s| s.kind.is_visual()).map(|s| s.count as usize).sum()
+    }
+    /// The captions slot, if the template has one.
+    pub fn captions_slot(&self) -> Option<&Slot> {
+        self.slots.iter().find(|s| s.kind == SlotKind::Captions)
     }
 }
 
@@ -656,6 +721,30 @@ fn pair_f64(v: &Value, field: &str, is: &mut Issues, lo: f64, hi: f64) -> Option
     }
 }
 
+/// A box `[x, y, width, height]` in fractions of the frame: the corner within -1..2, the size
+/// more than 0 and at most 2.
+fn read_box(v: &Value, field: &str, is: &mut Issues) -> Option<[f64; 4]> {
+    let a = v.as_array().filter(|a| a.len() == 4);
+    let b = a.and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?, a.get(3)?.as_f64()?]));
+    match b {
+        Some([x, y, w, h])
+            if [x, y, w, h].iter().all(|n| n.is_finite())
+                && (-1.0..=2.0).contains(&x)
+                && (-1.0..=2.0).contains(&y)
+                && w > 0.0
+                && h > 0.0
+                && w <= 2.0
+                && h <= 2.0 =>
+        {
+            Some([x, y, w, h])
+        }
+        _ => {
+            is.push(field, "expected [x, y, width, height] in fractions of the frame (corner -1 to 2, size more than 0 and at most 2)");
+            None
+        }
+    }
+}
+
 /// Parse an aspect such as `16:9` (or `[16, 9]`); terms 1–100.
 pub fn parse_aspect(v: &Value) -> Option<[u32; 2]> {
     let (a, b) = match v {
@@ -684,7 +773,7 @@ pub fn default_fit(kind: SlotKind) -> Fit {
         SlotKind::Photo => Fit::default(),
         SlotKind::Logo => Fit { frame: Framing::Fit, ..Fit::default() },
         SlotKind::Music => Fit { short: ShortFit::Remix, frame: Framing::None, ..Fit::default() },
-        SlotKind::Text => Fit { frame: Framing::None, ..Fit::default() },
+        SlotKind::Text | SlotKind::Captions => Fit { frame: Framing::None, ..Fit::default() },
     }
 }
 
@@ -753,16 +842,22 @@ fn read_default(o: Option<Obj<'_>>, kind: SlotKind, is: &mut Issues) -> Option<S
         }
         (None, Some(mut g)) => {
             let mood = g.string(is, "mood", 32, false).unwrap_or_else(|| "uplifting".into());
-            if !["epic", "tense", "uplifting", "calm"].contains(&mood.as_str()) {
-                is.push(g.field("mood"), format!("`{mood}` is not one of epic, tense, uplifting, calm"));
+            if !MOODS.contains(&mood.as_str()) {
+                is.push(g.field("mood"), format!("`{mood}` is not one of {}", MOODS.join(", ")));
             }
             let bpm = g.f64(is, "bpm", 40.0, 200.0, false).unwrap_or(120.0);
             let seed = g.u64(is, "seed", 0, u64::from(u32::MAX), false).unwrap_or(1);
+            let genre = g.string(is, "genre", 32, false);
+            if let Some(x) = &genre
+                && !GENRES.contains(&x.as_str())
+            {
+                is.push(g.field("genre"), format!("`{x}` is not one of {}", GENRES.join(", ")));
+            }
             g.finish(is);
             if kind != SlotKind::Music {
                 is.push(o.field("generate"), "only music slots can generate a default");
             }
-            Some(SlotDefault::Generate { mood, bpm, seed })
+            Some(SlotDefault::Generate { mood, bpm, seed, genre })
         }
         (Some(_), Some(_)) => {
             is.push(o.field("text"), "give `text` or `generate`, not both");
@@ -802,9 +897,13 @@ fn read_slot(v: &Value, path: &str, is: &mut Issues) -> Option<Slot> {
         is.push(o.field("minCount"), format!("{min_count} is more than count ({count})"));
     }
     let mut placements = Vec::new();
-    if let Some(a) = o.array(is, "placements", MAX_PLACEMENTS, true) {
-        if a.is_empty() {
+    let captions_kind = kind == Some(SlotKind::Captions);
+    if let Some(a) = o.array(is, "placements", MAX_PLACEMENTS, !captions_kind) {
+        if a.is_empty() && !captions_kind {
             is.push(o.field("placements"), "a slot needs at least one placement");
+        }
+        if !a.is_empty() && captions_kind {
+            is.push(o.field("placements"), "a captions slot has no placements (its captions go on the first caption track)");
         }
         for (i, p) in a.iter().enumerate() {
             let pp = format!("{}[{i}]", o.field("placements"));
@@ -818,12 +917,16 @@ fn read_slot(v: &Value, path: &str, is: &mut Issues) -> Option<Slot> {
             if layer.is_some() && kind.is_some_and(|k| k != SlotKind::Text) {
                 is.push(po.field("layer"), "only text slots name a layer");
             }
+            let area = po.raw("box").and_then(|b| read_box(b, &po.field("box"), is));
+            if area.is_some() && kind.is_some_and(|k| !k.is_visual()) {
+                is.push(po.field("box"), "only video, photo and logo slots take a box");
+            }
             po.finish(is);
             if let Some(clip) = clip {
                 if placements.iter().any(|x: &Placement| x.clip == clip && x.layer == layer) {
                     is.push(po_field(&pp, "clip"), format!("clip {clip} is placed twice"));
                 }
-                placements.push(Placement { clip, media, layer });
+                placements.push(Placement { clip, media, layer, area });
             }
         }
         for m in 0..count {
@@ -834,9 +937,38 @@ fn read_slot(v: &Value, path: &str, is: &mut Issues) -> Option<Slot> {
         }
     }
     let kind = kind?;
-    if kind == SlotKind::Music && count != 1 {
-        is.push(o.field("count"), "a music slot takes one track");
+    if matches!(kind, SlotKind::Music | SlotKind::Captions) && count != 1 {
+        is.push(o.field("count"), format!("a {} slot takes one", kind.id()));
     }
+    let captions = match o.object(is, "captions", false) {
+        Some(mut c) => {
+            let mut spec = CaptionSpec::default();
+            if let Some(a) = c.array(is, "source", 16, true) {
+                for (i, x) in a.iter().enumerate() {
+                    match x.as_str() {
+                        Some(sid) if is_slot_id(sid) => spec.source.push(sid.to_string()),
+                        _ => is.push(format!("{}[{i}]", c.field("source")), "expected a slot id"),
+                    }
+                }
+                if a.is_empty() {
+                    is.push(c.field("source"), "name the slots whose speech is captioned");
+                }
+            }
+            spec.max_chars = c.u32(is, "maxChars", 8, 200, false).unwrap_or(spec.max_chars);
+            spec.lines = c.u32(is, "lines", 1, 2, false).unwrap_or(spec.lines);
+            c.finish(is);
+            if kind != SlotKind::Captions {
+                is.push(o.field("captions"), "only captions slots take `captions`");
+            }
+            Some(spec)
+        }
+        None => {
+            if kind == SlotKind::Captions {
+                is.push(o.field("captions"), "a captions slot needs `captions` ({\"source\": [slot ids]})");
+            }
+            None
+        }
+    };
     let constraints = read_constraints(o.object(is, "constraints", false), kind, is);
     let fit = read_fit(o.object(is, "fit", false), kind, is);
     let beat_sync = o.bool(is, "beatSync").unwrap_or(false);
@@ -858,6 +990,7 @@ fn read_slot(v: &Value, path: &str, is: &mut Issues) -> Option<Slot> {
         fit,
         beat_sync,
         default,
+        captions,
     })
 }
 
@@ -871,6 +1004,7 @@ fn read_hint(v: &Value, path: &str, is: &mut Issues) -> Option<Hint> {
     let position = o.raw("position").and_then(|p| pair_f64(p, &o.field("position"), is, -1.0, 2.0));
     let scale = o.f64(is, "scale", 1.0, 1000.0, false);
     let frame = o.choice(is, "frame", &FRAMINGS);
+    let area = o.raw("box").and_then(|b| read_box(b, &o.field("box"), is));
     let mut layers = Vec::new();
     if let Some(a) = o.array(is, "layers", 256, false) {
         for (i, l) in a.iter().enumerate() {
@@ -886,7 +1020,7 @@ fn read_hint(v: &Value, path: &str, is: &mut Issues) -> Option<Hint> {
         }
     }
     o.finish(is);
-    Some(Hint { clip: clip?, position, scale, frame, layers })
+    Some(Hint { clip: clip?, position, scale, frame, area, layers })
 }
 
 fn read_variant(v: &Value, path: &str, is: &mut Issues) -> Option<Variant> {
@@ -1054,6 +1188,30 @@ pub fn from_value(v: &Value) -> Result<Manifest, TemplateError> {
     if total > 4 * MAX_PLACEMENTS {
         is.push("slots", format!("{total} placements in all (at most {})", 4 * MAX_PLACEMENTS));
     }
+    // captions: one slot at most, captioning video or music slots of this template
+    let mut captions_slots = 0;
+    for (i, s) in slots.iter().enumerate() {
+        let Some(c) = &s.captions else { continue };
+        captions_slots += 1;
+        if captions_slots > 1 {
+            is.push(format!("slots[{i}].kind"), "a template has one captions slot at most");
+        }
+        for (k, src) in c.source.iter().enumerate() {
+            match slots.iter().find(|x| x.id == *src) {
+                Some(x) if matches!(x.kind, SlotKind::Video | SlotKind::Music) => {}
+                Some(x) => {
+                    is.push(format!("slots[{i}].captions.source[{k}]"), format!("`{src}` is a {} slot; captions come from video or music slots", x.kind.id()))
+                }
+                None => is.push(format!("slots[{i}].captions.source[{k}]"), format!("the template has no slot `{src}`")),
+            }
+        }
+    }
+    let poster = o.tick(&mut is, "poster", 0, MAX_TEMPLATE_TICKS, false);
+    if let (Some(p), Some(d)) = (poster, duration)
+        && p > d
+    {
+        is.push("poster", "is after the end of the template");
+    }
     let look = o.object(&mut is, "look", false).and_then(|mut l| {
         let lumetri = l.string(&mut is, "lumetri", MAX_SHORT, false);
         let preset = l.string(&mut is, "preset", MAX_SHORT, false);
@@ -1159,6 +1317,7 @@ pub fn from_value(v: &Value) -> Result<Manifest, TemplateError> {
         variants,
         default_variant,
         slots,
+        poster,
         look,
         caption_style,
         export_preset,

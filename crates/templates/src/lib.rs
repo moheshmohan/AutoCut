@@ -5,7 +5,7 @@
 //! ZIP archive) holding
 //!
 //! - `template.json`, the [`Manifest`]: name, description, version, author, licence, aspect
-//!   [`Variant`]s, typed [`Slot`]s (video, photo, text, logo, music) with their placements,
+//!   [`Variant`]s, typed [`Slot`]s (video, photo, text, logo, music, captions) with their placements,
 //!   constraints and auto-fit policy, references to a look, a caption style and an export
 //!   preset, and the music's [`BeatGrid`] in exact ticks;
 //! - `sequence.json`, a FilmCraft project file (the `.fcproj` schema) with the template's
@@ -39,10 +39,10 @@ pub mod package;
 pub mod save;
 pub mod zip;
 
-pub use apply::{Applied, ApplyOptions, MediaFill, MusicBeats, SlotFill};
+pub use apply::{Applied, ApplyOptions, Cue, MediaFill, MusicBeats, SlotFill};
 pub use manifest::{
-    AssetEntry, BeatGrid, Constraints, Fit, Framing, Hint, LayerHint, Look, Manifest, Orientation, Placement, Portion, QuantizeMode, ShortFit, Slot,
-    SlotDefault, SlotKind, Variant,
+    AssetEntry, BeatGrid, CaptionSpec, Constraints, Fit, Framing, Hint, LayerHint, Look, Manifest, Orientation, Placement, Portion, QuantizeMode, ShortFit,
+    Slot, SlotDefault, SlotKind, Variant,
 };
 pub use package::Package;
 
@@ -58,6 +58,15 @@ pub const MANIFEST_FILE: &str = "template.json";
 pub const SEQUENCE_FILE: &str = "sequence.json";
 /// The folder of bundled assets in a package.
 pub const ASSETS_DIR: &str = "assets/";
+/// Item metadata naming the Elements sound (`sound.whoosh-short`) an item stands in for: in a
+/// package the item is generated silence of the sound's length; the engine swaps in the
+/// synthesized sound when the template is applied (and `save` turns it back into a stand-in).
+pub const ELEMENT_METADATA: &str = "Element";
+
+/// Whether `id` is a well-formed sound element id: `sound.` and 1–48 of `[a-z0-9-]`.
+pub fn is_sound_element_id(id: &str) -> bool {
+    id.strip_prefix("sound.").is_some_and(|r| !r.is_empty() && r.len() <= 48 && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+}
 
 /// One problem found in a template, with the field it is about (`slots[2].fit.short`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,5 +172,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     s
 }
 
+#[cfg(test)]
+mod starter_tests;
 #[cfg(test)]
 mod tests;

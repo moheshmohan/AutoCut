@@ -78,7 +78,7 @@ fn every_builtin_builds_and_validates() {
     for (name, r) in build_all() {
         let p = r.unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(p.check().is_empty(), "{name}: {:?}", p.check());
-        assert_eq!(p.manifest.variants.len(), 2, "{name}");
+        assert!(p.manifest.variants.len() >= 2, "{name}");
         assert!(p.manifest.variant(Some("9:16")).is_some() && p.manifest.variant(Some("16:9")).is_some());
     }
     let ids: Vec<String> = builtin_templates().iter().map(|p| p.manifest.id.clone()).collect();
@@ -141,8 +141,8 @@ fn validation_errors_name_their_field() {
         (Box::new(|v| v["slots"][0]["constraints"]["aspect"] = json!("wide")), "slots[0].constraints.aspect"),
         (Box::new(|v| v["slots"][0]["constraints"]["orientation"] = json!("diagonal")), "slots[0].constraints.orientation"),
         (Box::new(|v| v["slots"][0]["constraints"]["maxChars"] = json!(10)), "slots[0].constraints.maxChars: only text slots"),
-        (Box::new(|v| v["slots"][1]["count"] = json!(2)), "slots[1].count: a music slot takes one track"),
-        (Box::new(|v| v["slots"][1]["default"] = json!({"generate": {"mood": "sad"}})), "slots[1].default.generate.mood"),
+        (Box::new(|v| v["slots"][1]["count"] = json!(2)), "slots[1].count: a music slot takes one"),
+        (Box::new(|v| v["slots"][1]["default"] = json!({"generate": {"mood": "angry"}})), "slots[1].default.generate.mood"),
         (Box::new(|v| v["slots"][2]["default"] = json!({"generate": {}})), "slots[2].default.generate: only music slots"),
         (Box::new(|v| v["slots"][0]["default"] = json!({"text": "x"})), "slots[0].default.text: only text slots"),
         (Box::new(|v| v["slots"][1]["beatSync"] = json!(true)), "slots[1].beatSync"),
@@ -159,6 +159,50 @@ fn validation_errors_name_their_field() {
         ),
         (Box::new(|v| v["variants"][1]["hints"][0]["position"] = json!([0.5])), "variants[1].hints[0].position: expected [x, y]"),
         (Box::new(|v| v["tags"] = json!([1])), "tags[0]"),
+        // boxes, the poster, the generated bed's genre
+        (Box::new(|v| v["slots"][0]["placements"][0]["box"] = json!([0, 0, 0, 1])), "slots[0].placements[0].box: expected [x, y, width, height]"),
+        (Box::new(|v| v["slots"][0]["placements"][0]["box"] = json!([0, 0, f64::MAX, 1])), "slots[0].placements[0].box"),
+        (Box::new(|v| v["slots"][2]["placements"][0]["box"] = json!([0, 0, 1, 1])), "only video, photo and logo slots take a box"),
+        (Box::new(|v| v["variants"][1]["hints"][0]["box"] = json!([0, 0, 5, 1])), "variants[1].hints[0].box"),
+        (Box::new(|v| v["poster"] = json!(99 * S)), "poster: is after the end"),
+        (Box::new(|v| v["poster"] = json!(-1)), "poster:"),
+        (Box::new(|v| v["slots"][1]["default"] = json!({"generate": {"genre": "polka"}})), "slots[1].default.generate.genre"),
+        // captions slots
+        (
+            Box::new(|v| v["slots"].as_array_mut().unwrap().push(json!({"id": "cc", "kind": "captions", "captions": {"source": ["nope"]}}))),
+            "slots[4].captions.source[0]: the template has no slot `nope`",
+        ),
+        (
+            Box::new(|v| v["slots"].as_array_mut().unwrap().push(json!({"id": "cc", "kind": "captions", "captions": {"source": ["title"]}}))),
+            "is a text slot; captions come from video or music slots",
+        ),
+        (
+            Box::new(|v| {
+                v["slots"].as_array_mut().unwrap().push(json!({"id": "cc", "kind": "captions", "placements": [{"clip": 5}], "captions": {"source": ["music"]}}))
+            }),
+            "a captions slot has no placements",
+        ),
+        (Box::new(|v| v["slots"].as_array_mut().unwrap().push(json!({"id": "cc", "kind": "captions"}))), "a captions slot needs `captions`"),
+        (
+            Box::new(|v| v["slots"].as_array_mut().unwrap().push(json!({"id": "cc", "kind": "captions", "count": 2, "captions": {"source": ["music"]}}))),
+            "a captions slot takes one",
+        ),
+        (
+            Box::new(|v| {
+                v["slots"].as_array_mut().unwrap().push(json!({"id": "cc", "kind": "captions", "captions": {"source": ["music"], "lines": 9, "maxChars": 1}}))
+            }),
+            "slots[4].captions.lines",
+        ),
+        (
+            Box::new(|v| {
+                let s = json!({"id": "c1", "kind": "captions", "captions": {"source": ["music"]}});
+                let a = v["slots"].as_array_mut().unwrap();
+                a.push(s.clone());
+                a.push(json!({"id": "c2", "kind": "captions", "captions": {"source": ["music"]}}));
+            }),
+            "a template has one captions slot at most",
+        ),
+        (Box::new(|v| v["slots"][0]["captions"] = json!({"source": ["music"]})), "slots[0].captions: only captions slots take `captions`"),
     ];
     for (i, (f, want)) in cases.into_iter().enumerate() {
         let got = issues_after(f);
@@ -467,7 +511,7 @@ fn cuts_follow_the_beats_of_new_music() {
     // the song beats at 100 bpm from 0.25 s (media time)
     let period = 0.6;
     let beats: Vec<Tick> = (0..100).map(|k| Tick::from_seconds_f64(0.25 + period * k as f64)).collect();
-    let a = apply(&mut p, &pkg, &ApplyOptions { fills, music_beats: Some(MusicBeats { beats: beats.clone() }), ..Default::default() }).unwrap();
+    let a = apply(&mut p, &pkg, &ApplyOptions { fills, music_beats: Some(MusicBeats { beats: beats.clone(), mode: None }), ..Default::default() }).unwrap();
     assert!(a.retimed);
     let q = seq(&p, a.sequence);
     let rate = q.settings.frame_rate;
@@ -537,9 +581,9 @@ fn bad_fills_are_refused_with_the_slot_named() {
 }
 
 #[test]
-fn every_builtin_applies_in_both_variants_unfilled() {
+fn every_builtin_applies_in_every_variant_unfilled() {
     for pkg in builtin_templates() {
-        for v in ["16:9", "9:16"] {
+        for v in pkg.manifest.variants.iter().map(|v| v.id.as_str()) {
             let mut p = Project::new("p");
             let a =
                 apply(&mut p, &pkg, &ApplyOptions { variant: Some(v.into()), ..Default::default() }).unwrap_or_else(|e| panic!("{} {v}: {e}", pkg.manifest.id));
