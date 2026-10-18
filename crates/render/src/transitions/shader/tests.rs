@@ -35,17 +35,27 @@ fn every_shader_validates() {
     }
     // every preset is drawn by its engine; ports by themselves
     let ids: Vec<&str> = transition_ids().collect();
-    assert_eq!(ids.len(), shaders().len() + engines::LUMA_PRESETS.len() + engines::BLEND_PRESETS.len());
+    use filmcraft_project::flow_transitions::{CONTENT_AWARE_WIPE, FLOW_PRESETS};
+    assert_eq!(ids.len(), shaders().len() + engines::LUMA_PRESETS.len() + engines::BLEND_PRESETS.len() + FLOW_PRESETS.len() + 1);
     for id in &ids {
         let d = find(id).unwrap();
         assert!(is_shader(id) && filmcraft_project::find_effect(id).is_some(), "{id}");
+        assert_eq!(d.reads_content(), reads_content(id));
+        assert_eq!(reads_content(id), filmcraft_project::flow_transitions::reads_content(id), "{id}");
         if id.starts_with("luma_") {
             assert_eq!(d.id, "engine_luma_wipe");
             assert!(d.reads_map());
         } else if id.starts_with("blend_") {
             assert_eq!(d.id, "engine_blend_dissolve");
+        } else if id.starts_with("flow_") {
+            assert_eq!(d.id, "engine_flow");
+            assert!(d.reads_content() && !d.reads_map());
+        } else if *id == CONTENT_AWARE_WIPE {
+            assert_eq!(d.id, "engine_content_wipe");
+            assert!(d.reads_content() && !d.reads_map());
         } else {
             assert_eq!(d.id, *id);
+            assert!(!d.reads_content());
         }
     }
     for d in engines() {

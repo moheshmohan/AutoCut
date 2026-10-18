@@ -935,17 +935,22 @@ impl GpuCompositor {
         (if resolve { out_view } else { accum_view }, (w, h))
     }
 
-    /// Whether every two-input transition of `steps` is drawn here: Push, and the shader
-    /// transitions whose pipeline builds on this device (built on first use).
-    fn steps_on_gpu(&mut self, steps: &[PlanStep]) -> bool {
+    /// Whether every two-input transition of `steps` (on a `width`×`height` frame) is drawn
+    /// here: Push, and the shader transitions whose pipeline builds on this device (built on
+    /// first use); a content-aware one only with its content field, of the frame's field size.
+    fn steps_on_gpu(&mut self, width: usize, height: usize, steps: &[PlanStep]) -> bool {
+        use filmcraft_render::transitions::{content, shader};
         let device = &self.device;
         let shaders = &mut self.shader_transitions;
-        let mut on_gpu = |e: &filmcraft_project::EffectInstance| e.effect == "push" || shaders.ready(device, &e.effect);
-        !steps.iter().any(|s| matches!(s, PlanStep::Transition { effect, .. } if !on_gpu(effect)))
+        let mut on_gpu = |e: &filmcraft_project::EffectInstance, field: Option<&content::Field>| {
+            let fits = |f: &content::Field| (f.w, f.h) == content::field_size(width, height);
+            e.effect == "push" || (shaders.ready(device, &e.effect) && (!shader::reads_content(&e.effect) || field.is_some_and(fits)))
+        };
+        !steps.iter().any(|s| matches!(s, PlanStep::Transition { effect, content, .. } if !on_gpu(effect, content.as_deref())))
     }
 
     fn composite_steps(&mut self, width: usize, height: usize, steps: &[PlanStep], prep: Option<&PreparedPlan>) -> (wgpu::TextureView, (u32, u32)) {
-        if !self.steps_on_gpu(steps) {
+        if !self.steps_on_gpu(width, height, steps) {
             self.cpu_transitions += 1;
             let plan = FramePlan::Composite { width, height, steps: steps.to_vec() };
             return self.composite_prepared(&FramePlan::Image(filmcraft_render::plan::execute_cpu(&plan)), None);
@@ -966,7 +971,7 @@ impl GpuCompositor {
                     let p = children.as_mut().and_then(Iterator::next);
                     self.render_plan(&FramePlan::Layers { width, height, layers: layers.clone() }, p, false, false);
                 }
-                PlanStep::Transition { inputs, effect, progress, scale } => {
+                PlanStep::Transition { inputs, effect, progress, scale, content } => {
                     let mut views = [self.dummy.clone(), self.dummy.clone()];
                     for (index, layers) in inputs.iter().enumerate() {
                         let p = children.as_mut().and_then(Iterator::next);
@@ -980,7 +985,7 @@ impl GpuCompositor {
                     if effect.effect == "push" {
                         self.transition.draw(&self.device, &self.queue, &canvas, inputs, dims, effect, *progress);
                     } else {
-                        self.shader_transitions.draw(&self.device, &self.queue, &canvas, inputs, dims, effect, *progress, *scale);
+                        self.shader_transitions.draw(&self.device, &self.queue, &canvas, inputs, dims, effect, *progress, *scale, content.as_deref());
                     }
                     self.gpu_transitions += 1;
                 }
@@ -1002,7 +1007,7 @@ impl GpuCompositor {
         let t = std::time::Instant::now();
         match plan {
             FramePlan::Composite { width, height, steps } => {
-                if !self.steps_on_gpu(steps) {
+                if !self.steps_on_gpu(*width, *height, steps) {
                     return None;
                 }
                 self.draw_steps(*width, *height, steps, prep, false);

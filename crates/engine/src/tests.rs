@@ -531,7 +531,7 @@ fn every_video_transition_applies_via_command() {
     s.execute("playhead.set", json!({"time": cut.0})).unwrap();
     let defs: Vec<_> =
         filmcraft_project::effect_defs().iter().filter(|d| d.kind == filmcraft_project::EffectKind::VideoTransition && d.category[0] != "Obsolete").collect();
-    assert_eq!(defs.len(), 84 + 21 + 40 + 32 + 26, "Premiere folders, Legacy, GL Transitions, Luma Wipes, Blend Dissolves");
+    assert_eq!(defs.len(), 84 + 21 + 40 + 32 + 26 + 7, "Premiere folders, Legacy, GL Transitions, Luma Wipes, Blend Dissolves, Flow & Morph");
     for (i, d) in defs.iter().enumerate() {
         // alternate id and display-name lookups
         let name = if i % 2 == 0 { d.id } else { d.name };

@@ -12,12 +12,15 @@
 //! The engines' presets (Luma Wipes, Blend Dissolves) share their engine's pipeline. A shader
 //! that reads a generated map (`shader::map`: the luma wipes, GL displacement and GL luma) gets
 //! it as an `R32Float` texture in binding 3, uploaded once per map (the last few are kept, keyed
-//! like the render crate's map cache); every other shader gets a 1×1 placeholder there.
+//! like the render crate's map cache). A content-aware shader (the flow transitions, the
+//! Content-Aware Wipe) gets the content field the plan carries there instead, as an
+//! `Rgba32Float` texture of its grid (kept the same way, by the field's key), and is not drawn
+//! without one; every other shader gets a 1×1 placeholder there.
 
 use std::collections::HashMap;
 
 use filmcraft_project::EffectInstance;
-use filmcraft_render::transitions::shader;
+use filmcraft_render::transitions::{content, shader};
 use wgpu::util::DeviceExt;
 
 /// Map textures kept on the device.
@@ -33,6 +36,8 @@ pub(crate) struct ShaderStage {
     no_map: wgpu::TextureView,
     /// Uploaded maps by key, most recently used last.
     maps: Vec<(u64, wgpu::TextureView)>,
+    /// Uploaded content fields by key, most recently used last.
+    fields: Vec<(u64, wgpu::TextureView)>,
 }
 
 impl ShaderStage {
@@ -57,7 +62,7 @@ impl ShaderStage {
             immediate_size: 0,
         });
         let no_map = Self::map_texture(device, None, 1, 1, &[0.0]);
-        Self { bgl, layout, pipelines: HashMap::new(), no_map, maps: Vec::new() }
+        Self { bgl, layout, pipelines: HashMap::new(), no_map, maps: Vec::new(), fields: Vec::new() }
     }
 
     /// An `R32Float` texture of `w`×`h` values (rows from the top), uploaded with `queue` when
@@ -105,6 +110,46 @@ impl ShaderStage {
             self.maps.remove(0);
         }
         view
+    }
+
+    /// Binding 3 for a content-aware shader: `field` as an `Rgba32Float` texture of its grid
+    /// (uploaded on first use, the last few kept by key). None for a field whose cells do not
+    /// match its size.
+    fn field_view(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, field: &content::Field) -> Option<wgpu::TextureView> {
+        let (w, h) = (u32::try_from(field.w).ok()?, u32::try_from(field.h).ok()?);
+        if w == 0 || h == 0 || field.px.len() != field.w.checked_mul(field.h)? {
+            return None;
+        }
+        if let Some(i) = self.fields.iter().position(|(k, _)| *k == field.key) {
+            let hit = self.fields.remove(i);
+            let view = hit.1.clone();
+            self.fields.push(hit);
+            return Some(view);
+        }
+        let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+        let t = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shader-transition-field"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let bytes: Vec<u8> = field.px.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
+            size,
+        );
+        let view = t.create_view(&Default::default());
+        self.fields.push((field.key, view.clone()));
+        if self.fields.len() > MAP_TEXTURES {
+            self.fields.remove(0);
+        }
+        Some(view)
     }
 
     /// Whether the transition `id` can be drawn here, building its pipeline on first use. False
@@ -160,7 +205,9 @@ impl ShaderStage {
     }
 
     /// Draw transition `effect` at timeline progress `progress` from `inputs` (outgoing,
-    /// incoming) over `canvas`. False (nothing drawn) when it is not [`ready`](Self::ready).
+    /// incoming) over `canvas`, a content-aware one with its `field`. False (nothing drawn) when
+    /// it is not [`ready`](Self::ready), or reads a field and `field` is missing or of another
+    /// size than the frame's.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -172,12 +219,20 @@ impl ShaderStage {
         effect: &EffectInstance,
         progress: f32,
         scale: f32,
+        field: Option<&content::Field>,
     ) -> bool {
-        if !shader::find(&effect.effect).is_some_and(|d| matches!(self.pipelines.get(d.id), Some(Some(_)))) {
+        let Some(def) = shader::find(&effect.effect) else { return false };
+        if !matches!(self.pipelines.get(def.id), Some(Some(_))) {
             return false;
         }
         let Some(values) = shader::uniforms(effect, size.0, size.1, progress, scale) else { return false };
-        let map = self.map_view(device, queue, effect, size, scale);
+        let map = if def.reads_content() {
+            let grid = content::field_size(size.0 as usize, size.1 as usize);
+            let Some(view) = field.filter(|f| (f.w, f.h) == grid).and_then(|f| self.field_view(device, queue, f)) else { return false };
+            view
+        } else {
+            self.map_view(device, queue, effect, size, scale)
+        };
         let Some(Some(pipeline)) = shader::find(&effect.effect).and_then(|d| self.pipelines.get(d.id)) else { return false };
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

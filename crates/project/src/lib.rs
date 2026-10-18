@@ -14,6 +14,7 @@ pub mod effect;
 pub mod elements;
 pub mod essential;
 pub mod find;
+pub mod flow_transitions;
 pub mod gltransition;
 pub mod graphic;
 pub mod graphic_design;

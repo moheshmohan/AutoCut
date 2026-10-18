@@ -10,6 +10,9 @@ use std::f32::consts::PI;
 
 use crate::image::Image;
 
+mod engines;
+pub(crate) use engines::{content_wipe, flow_engine};
+
 /// A 2-D vector with GLSL-style arithmetic.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct V2 {
@@ -68,9 +71,29 @@ pub(crate) struct Ctx<'a> {
     pub p: [f32; super::PARAMS],
     /// The generated map (the GPU's map binding), when the shader reads one.
     pub map: Option<&'a super::maps::Map>,
+    /// The content field (the GPU's map binding for a content-aware shader), when it reads one.
+    pub field: Option<&'a crate::transitions::content::Field>,
+    /// The field's cells per frame pixel (`Host::inv.zw`).
+    pub field_ratio: (f32, f32),
 }
 
 impl Ctx<'_> {
+    /// The host's `getField` at frame position (`x`, `y`) (zeros without a field).
+    fn field(&self, x: f32, y: f32) -> [f32; 4] {
+        self.field.map_or([0.0; 4], |f| f.sample(x, y, self.field_ratio))
+    }
+    /// The host's `getFromPx`: the outgoing frame at frame position (`x`, `y`).
+    fn outgoing_px(&self, x: f32, y: f32) -> [f32; 4] {
+        self.a.sample_bilinear_clamped(x, y)
+    }
+    /// The host's `getToPx`.
+    fn incoming_px(&self, x: f32, y: f32) -> [f32; 4] {
+        self.b.sample_bilinear_clamped(x, y)
+    }
+    /// The host's `uv_px`: the frame position of `uv`.
+    fn uv_px(&self, uv: V2) -> (f32, f32) {
+        (uv.x * self.w, (1.0 - uv.y) * self.h)
+    }
     /// The host's `getMap`: the map's value at the pixel whose centre is at `uv` (0 without a map).
     fn map(&self, uv: V2) -> f32 {
         let Some(m) = self.map else { return 0.0 };

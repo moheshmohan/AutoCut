@@ -90,6 +90,10 @@ pub enum PlanStep {
         effect: filmcraft_project::EffectInstance,
         progress: f32,
         scale: f32,
+        /// What a content-aware transition (a flow transition, the Content-Aware Wipe) learnt
+        /// from the clips it joins ([`crate::transitions::content`]); None for the others. Such
+        /// a transition is drawn on the GPU only with one.
+        content: Option<Arc<crate::transitions::content::Field>>,
     },
 }
 
@@ -288,7 +292,8 @@ fn push_tracks(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, 
                     } else {
                         p
                     };
-                    layers.0.push(PlanStep::Transition { inputs, effect: trn.effect.clone(), progress, scale: opts.scale });
+                    let content = crate::transition_content(project, seq, tr, trn, opts, sources);
+                    layers.0.push(PlanStep::Transition { inputs, effect: trn.effect.clone(), progress, scale: opts.scale, content });
                 }
                 "dip_to_black" | "dip_to_white" => {
                     let col = if trn.effect.effect == "dip_to_black" { [0.0, 0.0, 0.0, 1.0] } else { [1.0, 1.0, 1.0, 1.0] };
@@ -509,13 +514,13 @@ pub fn execute_cpu(plan: &FramePlan) -> crate::Image {
             for step in steps {
                 match step {
                     PlanStep::Layers(layers) => execute_layers(&mut canvas, layers),
-                    PlanStep::Transition { inputs, effect, progress, scale } => {
+                    PlanStep::Transition { inputs, effect, progress, scale, content } => {
                         let [a, b] = inputs.each_ref().map(|layers| {
                             let mut input = crate::Image::new(*width, *height);
                             execute_layers(&mut input, layers);
                             input
                         });
-                        let mixed = crate::transitions::apply_scaled(effect, &a, &b, *progress, *scale);
+                        let mixed = crate::transitions::apply_with(effect, &a, &b, *progress, *scale, content.as_deref());
                         crate::blend::composite(&mut canvas, &mixed, 1.0, Blend::Normal);
                     }
                 }
@@ -569,6 +574,7 @@ mod tests {
             effect: filmcraft_project::find_effect("push").unwrap().instance(),
             progress: 0.0,
             scale: 1.0,
+            content: None,
         }];
         let expected = execute_cpu(&FramePlan::Composite { width: 1, height: 1, steps: steps.clone() });
         let layers = PlanStack(steps).into_layers(1, 1);

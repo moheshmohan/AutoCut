@@ -30,6 +30,7 @@ use rayon::prelude::*;
 use crate::image::Image;
 
 pub mod cards;
+pub mod content;
 mod dissolve;
 pub mod easing;
 mod grunge;
@@ -41,6 +42,8 @@ mod special;
 pub mod wipe;
 
 #[cfg(test)]
+mod flow_tests;
+#[cfg(test)]
 mod tests;
 
 /// Render transition `e` at progress `p` (full-resolution parameters).
@@ -51,6 +54,13 @@ pub fn apply(e: &EffectInstance, a: &Image, b: &Image, p: f32) -> Image {
 /// Render transition `e` at progress `p`; `scale` converts pixel parameters (border width, blur
 /// length, centre) from sequence pixels to working-image pixels (½ for half-resolution playback).
 pub fn apply_scaled(e: &EffectInstance, a: &Image, b: &Image, p: f32, scale: f32) -> Image {
+    apply_with(e, a, b, p, scale, None)
+}
+
+/// [`apply_scaled`] with the content field of a content-aware transition ([`content`]): the
+/// timeline's, computed once from the clips at the cut. Without one (or for one of another
+/// size) such a transition analyses `a` and `b` themselves.
+pub fn apply_with(e: &EffectInstance, a: &Image, b: &Image, p: f32, scale: f32, field: Option<&content::Field>) -> Image {
     let p = if p.is_finite() { p.clamp(0.0, 1.0) } else { 0.0 };
     if a.w == 0 || a.h == 0 || (a.w, a.h) != (b.w, b.h) {
         return if p < 0.5 { a.clone() } else { b.clone() };
@@ -64,7 +74,8 @@ pub fn apply_scaled(e: &EffectInstance, a: &Image, b: &Image, p: f32, scale: f32
     if let Some(img) = legacy::apply(e, a, b, p) {
         return img;
     }
-    let t = Tx { e, a, b, p, w: a.w, h: a.h, wf: a.w as f32, hf: a.h as f32, scale: if scale.is_finite() && scale > 0.0 { scale } else { 1.0 } };
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let t = Tx { e, a, b, p, w: a.w, h: a.h, wf: a.w as f32, hf: a.h as f32, scale, content: field };
     let id = e.effect.as_str();
     shader::apply(id, &t)
         .or_else(|| dissolve::apply(id, &t))
@@ -99,6 +110,8 @@ pub(crate) struct Tx<'a> {
     pub wf: f32,
     pub hf: f32,
     pub scale: f32,
+    /// The content field of a content-aware transition, when the caller has one.
+    pub content: Option<&'a content::Field>,
 }
 
 impl Tx<'_> {

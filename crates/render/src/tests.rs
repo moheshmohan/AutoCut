@@ -279,6 +279,62 @@ fn morph_cut_frames_render_on_the_cpu_with_the_morph() {
     assert_eq!(plan::execute_cpu(&plan).px, render_sequence(&p, seq, rate.tick_of(24), opts, &map).px);
 }
 
+#[test]
+fn flow_transitions_analyse_the_clips_once_and_plan_on_the_gpu() {
+    // a flow transition and the Content-Aware Wipe between two clips: the field is computed once
+    // from the clips at the midpoint and reused by every frame, the CPU and the GPU plan alike
+    let (mut p, red, ocean, seq, map) = setup();
+    let a = place(&mut p, seq, 0, ocean, 0, 24);
+    let b = place(&mut p, seq, 0, red, 24, 24);
+    let rate = FrameRate::FPS_24;
+    for id in ["flow_morph", "content_aware_wipe"] {
+        for reverse in [false, true] {
+            let tracks = &mut p.sequence_mut(seq).unwrap().video_tracks;
+            tracks[0].transitions = vec![filmcraft_project::Transition {
+                id: filmcraft_project::TransitionId(997),
+                effect: filmcraft_project::find_effect(id).unwrap().instance(),
+                start: rate.tick_of(18),
+                duration: rate.tick_of(12),
+                from: Some(a),
+                to: Some(b),
+                align: Default::default(),
+                reverse,
+                sound: None,
+            }];
+            let s = p.sequence(seq).unwrap();
+            let (track, tr) = (&s.video_tracks[0], &s.video_tracks[0].transitions[0]);
+            let opts = RenderOptions { scale: 0.5, ..Default::default() };
+            let first = transition_content(&p, s, track, tr, opts, &map).expect("a field");
+            assert_eq!((first.w, first.h), transitions::content::field_size(160, 90));
+            for f in [19, 24, 28] {
+                let t = rate.tick_of(f);
+                assert!(!plan::is_cpu_frame(&p, seq, t), "{id}: a shader transition plans on the GPU");
+                let plan = plan::plan_frame(&p, seq, t, opts, &map);
+                let plan::FramePlan::Composite { steps, .. } = &plan else { panic!("{id}: composite plan") };
+                let content = steps.iter().find_map(|s| match s {
+                    plan::PlanStep::Transition { content, .. } => content.clone(),
+                    _ => None,
+                });
+                assert!(content.is_some_and(|c| Arc::ptr_eq(&c, &first)), "{id} frame {f}: the plan carries the cached field");
+                let again = transition_content(&p, s, track, tr, opts, &map).expect("a field");
+                assert!(Arc::ptr_eq(&again, &first), "{id} frame {f}: reused, not recomputed");
+                let reference = render_sequence(&p, seq, t, opts, &map);
+                let got = plan::execute_cpu(&plan);
+                let max = got.px.iter().zip(&reference.px).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
+                assert!(max < 1e-5, "{id} reverse {reverse} frame {f}: {max}");
+            }
+            // another frame size is another field; a changed clip is another field
+            let half = transition_content(&p, s, track, tr, RenderOptions { scale: 0.25, ..Default::default() }, &map).expect("a field");
+            assert!(!Arc::ptr_eq(&half, &first));
+        }
+    }
+    // other transitions read none
+    let s = p.sequence_mut(seq).unwrap();
+    s.video_tracks[0].transitions[0].effect = filmcraft_project::find_effect("gl_crosswarp").unwrap().instance();
+    let s = p.sequence(seq).unwrap();
+    assert!(transition_content(&p, s, &s.video_tracks[0], &s.video_tracks[0].transitions[0], RenderOptions::default(), &map).is_none());
+}
+
 /// A project with a 4 s bars-and-tone clip (1 kHz at −20 dBFS) on A1, with extra audio effects.
 fn tone_with(effects: &[(&str, &[(&str, f64)])]) -> (Project, ItemId, SourceMap) {
     let mut p = Project::new("fx");

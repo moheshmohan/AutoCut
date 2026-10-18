@@ -408,6 +408,44 @@ fn flow_at(a: &Gray, b: &Gray, f01: &Flow, f10: &Flow, t: f32) -> Flow {
     Flow { w, h, uv: out }
 }
 
+/// Dense optical flow both ways between two frames of the same size (frame `a` → frame `b` and
+/// back), estimated once on the working grid: what the flow transitions warp with
+/// (`transitions::content`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlowPair {
+    /// Frame pixels per working pixel.
+    step: f32,
+    /// `a(x) ≈ b(x + fwd(x))`, working pixels.
+    fwd: Flow,
+    /// `b(x) ≈ a(x + bwd(x))`, working pixels.
+    bwd: Flow,
+}
+
+impl FlowPair {
+    /// The forward and backward flow at frame position (`x`, `y`) (pixel centres at +0.5), both
+    /// in frame pixels; bilinear between working pixels, clamped at the edges.
+    pub fn at(&self, x: f32, y: f32) -> ([f32; 2], [f32; 2]) {
+        let to_work = |v: f32| v / self.step - 0.5;
+        let (f, b) = (self.fwd.sample(to_work(x), to_work(y)), self.bwd.sample(to_work(x), to_work(y)));
+        ([f[0] * self.step, f[1] * self.step], [b[0] * self.step, b[1] * self.step])
+    }
+}
+
+/// The dense flow between `a` and `b` both ways ([`FlowPair`]). None for frames of different
+/// sizes, empty frames or pixel buffers that do not match their size. Frames larger than
+/// [`WORK_W`] in either direction are box-reduced first.
+pub fn flow_pair(a: &Image, b: &Image) -> Option<FlowPair> {
+    let n = a.w.checked_mul(a.h)?.checked_mul(4)?;
+    if (a.w, a.h) != (b.w, b.h) || a.w == 0 || a.h == 0 || a.px.len() != n || b.px.len() != n {
+        return None;
+    }
+    let s = a.w.max(a.h).div_ceil(WORK_W).max(1);
+    let (pa, pb) = (pyramid(work_luma(a, s)), pyramid(work_luma(b, s)));
+    let fwd = dense_flow(&pa, &pb)?;
+    let bwd = dense_flow(&pb, &pa)?;
+    Some(FlowPair { step: s as f32, fwd, bwd })
+}
+
 #[inline]
 fn agree(d: f32) -> f32 {
     let q = d / AGREE_PX;

@@ -198,7 +198,7 @@ fn gpu_push_matches_cpu_with_alpha_and_surrounding_blends() {
                     height: h,
                     steps: vec![
                         PlanStep::Layers(vec![layer(1)]),
-                        PlanStep::Transition { inputs: [vec![layer(0)], vec![layer(1)]], effect, progress, scale: 1.0 },
+                        PlanStep::Transition { inputs: [vec![layer(0)], vec![layer(1)]], effect, progress, scale: 1.0, content: None },
                         PlanStep::Layers(vec![above]),
                     ],
                 };
@@ -227,6 +227,7 @@ fn gpu_push_matches_cpu_with_alpha_and_surrounding_blends() {
             effect: filmcraft_project::find_effect("cross_dissolve").unwrap().instance(),
             progress: 0.37,
             scale: 1.0,
+            content: None,
         }],
     };
     c.composite(&fallback);
@@ -242,6 +243,7 @@ fn gpu_push_matches_cpu_with_alpha_and_surrounding_blends() {
         effect: filmcraft_project::find_effect("push").unwrap().instance(),
         progress,
         scale: 1.0,
+        content: None,
     };
     let mut middle = layer(0);
     middle.blend = Blend::Screen;

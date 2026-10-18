@@ -29,8 +29,21 @@ fn picture(w: usize, h: usize, side: usize, alpha: f32) -> Arc<VideoFrame> {
     Arc::new(VideoFrame::rgba_f32(w as u32, h as u32, px))
 }
 
+/// The working image of a test picture (what the CPU reference draws a layer of it as).
+fn image(frame: &VideoFrame) -> filmcraft_render::Image {
+    let (w, h, px) = frame.to_linear_f32_decimated_with(1, None);
+    filmcraft_render::Image { w, h, px }
+}
+
+/// The content field a content-aware transition reads (None for the others), from the two test
+/// pictures as its anchors.
+fn content_of(effect: &filmcraft_project::EffectInstance, w: usize, h: usize, alpha: f32) -> Option<Arc<filmcraft_render::transitions::content::Field>> {
+    filmcraft_render::transitions::content::for_frames(effect, &image(&picture(w, h, 0, alpha)), &image(&picture(w, h, 1, alpha)))
+}
+
 fn transition_plan(w: usize, h: usize, effect: filmcraft_project::EffectInstance, progress: f32, alpha: f32) -> FramePlan {
     let layer = |side| PlanLayer::new(picture(w, h, side, alpha), Affine::IDENTITY, 1.0, Blend::Normal);
+    let content = content_of(&effect, w, h, alpha);
     let mut above = PlanLayer::new(picture(w, h, 1, 0.5), Affine::IDENTITY, 0.4, Blend::Screen);
     above.opacity = 0.4;
     FramePlan::Composite {
@@ -38,7 +51,7 @@ fn transition_plan(w: usize, h: usize, effect: filmcraft_project::EffectInstance
         height: h,
         steps: vec![
             PlanStep::Layers(vec![PlanLayer::new(picture(w, h, 0, 1.0), Affine::IDENTITY, 1.0, Blend::Normal)]),
-            PlanStep::Transition { inputs: [vec![layer(0)], vec![layer(1)]], effect, progress, scale: 1.0 },
+            PlanStep::Transition { inputs: [vec![layer(0)], vec![layer(1)]], effect, progress, scale: 1.0, content },
             PlanStep::Layers(vec![above]),
         ],
     }
@@ -79,7 +92,9 @@ fn gpu_shader_transitions_match_the_cpu_reference() {
                 let (p99, mean) = compare(&cpu, &gpu);
                 worst = (worst.0.max(p99), worst.1.max(mean));
                 // the endpoints pass the inputs through: half-float rounding only
-                let limit = if progress == 0.0 || progress == 1.0 { (1, 0.5) } else { (6, 1.5) };
+                // FilmCraft's content-aware engines (the flow transitions, the Content-Aware Wipe)
+                // agree within one 8-bit level
+                let limit = if progress == 0.0 || progress == 1.0 || shader::reads_content(id) { (1, 0.5) } else { (6, 1.5) };
                 if p99 > limit.0 || mean >= limit.1 {
                     failures.push(format!("{id} {w}x{h} alpha {alpha} p={progress}: p99 {p99}, mean {mean:.3}"));
                 }
@@ -131,7 +146,8 @@ fn gl_transition_speed() {
         let runs = 3;
         let t = std::time::Instant::now();
         for _ in 0..runs {
-            std::hint::black_box(filmcraft_render::transitions::apply(&effect, &a, &b, 0.43));
+            let field = content_of(&effect, w, h, 1.0);
+            std::hint::black_box(filmcraft_render::transitions::apply_with(&effect, &a, &b, 0.43, 1.0, field.as_deref()));
         }
         let cpu_ms = t.elapsed().as_secs_f64() * 1000.0 / runs as f64;
         // GPU: the transition pass alone on resident inputs, waited for
@@ -146,6 +162,7 @@ fn gl_transition_speed() {
                 effect: effect.clone(),
                 progress: 0.43,
                 scale: 1.0,
+                content: content_of(&effect, w, h, 1.0),
             }],
         };
         let prep = prepare(&plan);
@@ -158,7 +175,8 @@ fn gl_transition_speed() {
         let _ = dev.poll(wgpu::PollType::wait_indefinitely());
         let t = std::time::Instant::now();
         for _ in 0..gpu_runs {
-            assert!(c.shader_transitions.draw(&dev, &q, &canvas, [&va, &vb], (w as u32, h as u32), &effect, 0.43, 1.0));
+            let field = content_of(&effect, w, h, 1.0);
+            assert!(c.shader_transitions.draw(&dev, &q, &canvas, [&va, &vb], (w as u32, h as u32), &effect, 0.43, 1.0, field.as_deref()));
         }
         let _ = dev.poll(wgpu::PollType::wait_indefinitely());
         let gpu_ms = t.elapsed().as_secs_f64() * 1000.0 / gpu_runs as f64;

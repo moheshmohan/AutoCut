@@ -211,12 +211,14 @@ pub(crate) fn render_seq_tracks(project: &Project, seq: &Sequence, t: Tick, opts
             let la = la.map(|l| l.0).unwrap_or_else(|| Image::new(w, h));
             let lb = lb.map(|l| l.0).unwrap_or_else(|| Image::new(w, h));
             let p = tr.progress(t) as f32;
+            // a flow transition or the Content-Aware Wipe reads what it learnt from the clips
+            let field = transition_content(project, seq, track, tr, opts, sources);
             // Reverse plays the transition backwards (e.g. an iris closing on the outgoing clip)
             // while still going from A to B.
             let mixed = if tr.reverse {
-                transitions::apply_scaled(&tr.effect, &lb, &la, 1.0 - p, opts.scale)
+                transitions::apply_with(&tr.effect, &lb, &la, 1.0 - p, opts.scale, field.as_deref())
             } else {
-                transitions::apply_scaled(&tr.effect, &la, &lb, p, opts.scale)
+                transitions::apply_with(&tr.effect, &la, &lb, p, opts.scale, field.as_deref())
             };
             blend::composite(canvas.get(), &mixed, 1.0, bl);
             continue;
@@ -269,6 +271,58 @@ pub(crate) fn render_seq_tracks(project: &Project, seq: &Sequence, t: Tick, opts
         }
     }
     canvas
+}
+
+/// The content field of transition `tr` on `track` of `seq` (the flow transitions and the
+/// Content-Aware Wipe; None for every other transition): computed once from both clips at the
+/// transition's midpoint, the outgoing clip just before it leaves and the incoming one just after
+/// it arrives, in the order the transition plays (Reverse swaps them), and cached under a key of
+/// everything those two pictures depend on (the transition, both clips with their effects and
+/// sources, the frame size). The CPU reference and the GPU plan both use this one field.
+pub(crate) fn transition_content(
+    project: &Project,
+    seq: &Sequence,
+    track: &filmcraft_project::Track,
+    tr: &filmcraft_project::Transition,
+    opts: RenderOptions,
+    sources: &dyn SourceProvider,
+) -> Option<Arc<transitions::content::Field>> {
+    use std::hash::{Hash, Hasher};
+    let pk = transitions::content::params_key(&tr.effect)?;
+    let a = tr.from.and_then(|id| track.item(id)).filter(|i| i.enabled);
+    let b = tr.to.and_then(|id| track.item(id)).filter(|i| i.enabled);
+    let (w, h) = output_size(seq, opts.scale);
+    let mut s = std::collections::hash_map::DefaultHasher::new();
+    ("timeline", pk, w, h, opts.scale.to_bits(), opts.effects, opts.depth, seq.settings.width, seq.settings.height).hash(&mut s);
+    serde_json::to_string(tr).unwrap_or_default().hash(&mut s);
+    for item in [a, b] {
+        match item {
+            Some(i) => {
+                serde_json::to_string(i).unwrap_or_default().hash(&mut s);
+                // a media source by what it reads (a nested sequence by its id: its clips are
+                // its own)
+                match project.item(i.item).map(|p| &p.kind) {
+                    Some(ItemKind::Media(m)) => serde_json::to_string(m).unwrap_or_default().hash(&mut s),
+                    _ => i.item.hash(&mut s),
+                }
+            }
+            None => 0u8.hash(&mut s),
+        }
+    }
+    transitions::content::cached(s.finish(), || {
+        let mid = tr.start + Tick(tr.duration.0 / 2);
+        let tc = format_time(mid, seq.settings.frame_rate, seq.settings.drop_frame, TimeDisplay::Timecode, seq.settings.sample_rate as i64);
+        // (an adjustment layer has no picture of its own to analyse)
+        let picture = |i: Option<&TrackItem>| {
+            i.filter(|i| !is_adjustment(project, i))
+                .and_then(|i| item_layer(project, seq, i, mid, opts, sources, &tc))
+                .map(|(img, op, _)| with_opacity(img, op))
+                .unwrap_or_else(|| Image::new(w, h))
+        };
+        let (pa, pb) = (picture(a), picture(b));
+        let (pa, pb) = if tr.reverse { (pb, pa) } else { (pa, pb) };
+        transitions::content::analyse(&tr.effect, &pa, &pb)
+    })
 }
 
 fn is_adjustment(project: &Project, item: &TrackItem) -> bool {

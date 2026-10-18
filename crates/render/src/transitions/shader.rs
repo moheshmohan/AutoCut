@@ -98,7 +98,8 @@ use filmcraft_project::transition_engines::{self as engines, LumaShape};
 /// Number of shader parameter floats (`host.p0`..`host.p2`).
 pub const PARAMS: usize = 12;
 /// Uniform floats: width, height, eased progress, ratio, the parameters, 1 / width, 1 / height
-/// and two zeros, then the motion blur (first tap's progress, step, taps, 0): 96 bytes.
+/// and the content field's cells per frame pixel (zeros for other shaders), then the motion blur
+/// (first tap's progress, step, taps, 0): 96 bytes.
 pub const UNIFORM_FLOATS: usize = 4 + PARAMS + 4 + 4;
 /// Shutter of the motion blur at 100 %, in progress units.
 pub const MAX_SHUTTER: f32 = 0.06;
@@ -122,12 +123,19 @@ pub struct ShaderDef {
     cpu: fn(&Ctx, V2) -> [f32; 4],
     /// The map the shader reads through `getMap` (None: it reads none).
     map: Option<fn(&Params) -> maps::Spec>,
+    /// Whether the shader reads the content field (`getField`) computed from the two clips.
+    content: bool,
 }
 
 impl ShaderDef {
     /// Whether the shader reads a generated map.
     pub fn reads_map(&self) -> bool {
         self.map.is_some()
+    }
+
+    /// Whether the shader reads a content field ([`super::content`]) through its map binding.
+    pub fn reads_content(&self) -> bool {
+        self.content
     }
 
     /// The complete WGSL module: the host prelude, then the body.
@@ -150,7 +158,7 @@ const fn def(
     params: fn(&Params) -> [f32; PARAMS],
     cpu: fn(&Ctx, V2) -> [f32; 4],
 ) -> ShaderDef {
-    ShaderDef { id, upstream, author, license: "MIT", body, params, cpu, map: None }
+    ShaderDef { id, upstream, author, license: "MIT", body, params, cpu, map: None, content: false }
 }
 
 /// A port that reads a generated map ([`MAP_OPTS`](filmcraft_project::gltransition::MAP_OPTS)).
@@ -162,7 +170,7 @@ const fn def_map(
     params: fn(&Params) -> [f32; PARAMS],
     cpu: fn(&Ctx, V2) -> [f32; 4],
 ) -> ShaderDef {
-    ShaderDef { id, upstream, author, license: "MIT", body, params, cpu, map: Some(gl_map) }
+    ShaderDef { id, upstream, author, license: "MIT", body, params, cpu, map: Some(gl_map), content: false }
 }
 
 /// The map of the `displacement` and `luma` ports: the `map` choice, `map_scale` and `seed`.
@@ -210,27 +218,57 @@ fn blend_params(p: &Params) -> [f32; PARAMS] {
     pack(&[mode as f32, p.num("strength") / 100.0])
 }
 
-/// The engines, each drawing a family of presets (`filmcraft_project::transition_engines`).
+/// The flow engine's uniforms (see `flow_engine.wgsl`): mode, flow strength, dissolve width and
+/// the style's own parameters (pixel sizes in frame pixels).
+fn flow_params(p: &Params) -> [f32; PARAMS] {
+    use filmcraft_project::flow_transitions::{FlowStyle, flow_preset};
+    let Some(preset) = flow_preset(&p.e.effect) else { return [0.0; PARAMS] };
+    let mode = preset.style.mode() as f32;
+    let (k, width) = (p.num("strength") / 100.0, p.num("width") / 100.0);
+    let pct = |id: &str| p.num(id) / 100.0;
+    let px = |id: &str| p.num(id).max(0.0) * p.scale;
+    let seed = p.num("seed").max(0.0).round();
+    match preset.style {
+        FlowStyle::Morph => pack(&[mode, k, width]),
+        FlowStyle::Doppler => {
+            let (cx, cy) = p.point_px("center");
+            let cx = if cx.is_finite() { cx } else { p.w * 0.5 };
+            let cy = if cy.is_finite() { cy } else { p.h * 0.5 };
+            pack(&[mode, k, width, pct("streaks"), pct("zoom"), 0.0, 0.0, 0.0, cx, cy])
+        }
+        // the ramp rushes through the middle: a dissolve over the whole ramped progress
+        FlowStyle::HypeRamp => pack(&[mode, k, 1.0, p.num("ramp"), pct("blur"), pct("pulse"), 0.0, pct("zoom")]),
+        FlowStyle::Glitch => pack(&[mode, k, width, px("block_size"), pct("density"), px("rgb_split"), pct("smear"), 0.0, 0.0, 0.0, seed]),
+        FlowStyle::SplitBands => pack(&[mode, k, 0.0, p.whole("bands", 1.0), p.choice("orientation").min(1) as f32, pct("stagger")]),
+        FlowStyle::Datamosh => pack(&[mode, k, 0.0, px("block_size"), pct("smear"), pct("spread"), 0.0, 0.0, 0.0, 0.0, seed]),
+    }
+}
+
+/// The content-aware wipe's uniforms: softness (0..1).
+fn content_wipe_params(p: &Params) -> [f32; PARAMS] {
+    pack(&[p.num("softness") / 100.0])
+}
+
+/// FilmCraft's own engine shaders (original work, MIT OR Apache-2.0).
+const fn engine(
+    id: &'static str,
+    upstream: &'static str,
+    body: &'static str,
+    params: fn(&Params) -> [f32; PARAMS],
+    cpu: fn(&Ctx, V2) -> [f32; 4],
+) -> ShaderDef {
+    ShaderDef { id, upstream, author: "FilmCraft contributors", license: "MIT OR Apache-2.0", body, params, cpu, map: None, content: false }
+}
+
+/// The engines, each drawing a family of presets (`filmcraft_project::transition_engines`,
+/// `filmcraft_project::flow_transitions`).
 static ENGINES: &[ShaderDef] = &[
+    ShaderDef { map: Some(luma_map), ..engine("engine_luma_wipe", "luma_wipe", include_str!("shader/luma_wipe.wgsl"), luma_params, cpu::luma_wipe) },
+    engine("engine_blend_dissolve", "blend_dissolve", include_str!("shader/blend_dissolve.wgsl"), blend_params, cpu::blend_dissolve),
+    ShaderDef { content: true, ..engine("engine_flow", "flow_engine", include_str!("shader/flow_engine.wgsl"), flow_params, cpu::flow_engine) },
     ShaderDef {
-        id: "engine_luma_wipe",
-        upstream: "luma_wipe",
-        author: "FilmCraft contributors",
-        license: "MIT OR Apache-2.0",
-        body: include_str!("shader/luma_wipe.wgsl"),
-        params: luma_params,
-        cpu: cpu::luma_wipe,
-        map: Some(luma_map),
-    },
-    ShaderDef {
-        id: "engine_blend_dissolve",
-        upstream: "blend_dissolve",
-        author: "FilmCraft contributors",
-        license: "MIT OR Apache-2.0",
-        body: include_str!("shader/blend_dissolve.wgsl"),
-        params: blend_params,
-        cpu: cpu::blend_dissolve,
-        map: None,
+        content: true,
+        ..engine("engine_content_wipe", "content_wipe", include_str!("shader/content_wipe.wgsl"), content_wipe_params, cpu::content_wipe)
     },
 ];
 
@@ -466,12 +504,31 @@ pub fn find(id: &str) -> Option<&'static ShaderDef> {
     if engines::blend_preset(id).is_some() {
         return ENGINES.get(1);
     }
+    if filmcraft_project::flow_transitions::flow_preset(id).is_some() {
+        return ENGINES.get(2);
+    }
+    if id == filmcraft_project::flow_transitions::CONTENT_AWARE_WIPE {
+        return ENGINES.get(3);
+    }
     None
 }
 
 /// Every transition id the shader stage draws: the ports, then the engines' presets.
 pub fn transition_ids() -> impl Iterator<Item = &'static str> {
-    SHADERS.iter().map(|d| d.id).chain(engines::LUMA_PRESETS.iter().map(|p| p.id)).chain(engines::BLEND_PRESETS.iter().map(|p| p.id))
+    use filmcraft_project::flow_transitions::{CONTENT_AWARE_WIPE, FLOW_PRESETS};
+    SHADERS
+        .iter()
+        .map(|d| d.id)
+        .chain(engines::LUMA_PRESETS.iter().map(|p| p.id))
+        .chain(engines::BLEND_PRESETS.iter().map(|p| p.id))
+        .chain(FLOW_PRESETS.iter().map(|p| p.id))
+        .chain(std::iter::once(CONTENT_AWARE_WIPE))
+}
+
+/// Whether shader transition `id` reads a content field (the flow transitions, the Content-Aware
+/// Wipe): it is drawn only with one, which the timeline computes from the clips it joins.
+pub fn reads_content(id: &str) -> bool {
+    find(id).is_some_and(ShaderDef::reads_content)
 }
 
 /// Whether `id` is a shader transition (drawn by the GPU's shader stage when one is available).
@@ -685,6 +742,11 @@ pub fn uniforms(e: &EffectInstance, w: u32, h: u32, progress: f32, scale: f32) -
     out[4..4 + PARAMS].copy_from_slice(&(d.params)(&p));
     out[4 + PARAMS] = 1.0 / wf;
     out[5 + PARAMS] = 1.0 / hf;
+    if d.content {
+        let (rx, ry) = super::content::field_ratio(w.max(1) as usize, h.max(1) as usize);
+        out[6 + PARAMS] = rx;
+        out[7 + PARAMS] = ry;
+    }
     // motion blur: taps at first, first + step, … (each clamped to 0..1 by the shader)
     let (shutter, taps) = p.motion_blur();
     if taps >= 2 {
@@ -719,7 +781,12 @@ pub(crate) fn apply(id: &str, t: &Tx) -> Option<Image> {
     let mut p = [0.0; PARAMS];
     p.copy_from_slice(&u[4..4 + PARAMS]);
     let map = if d.reads_map() { map(t.e, t.w as u32, t.h as u32, t.scale) } else { None };
-    let c = Ctx { a: t.a, b: t.b, w: u[0], h: u[1], progress, ratio: u[3], p, map: map.as_deref() };
+    // a content-aware shader reads the field it was given (the timeline's, from the clips at
+    // the cut), else one computed from the two pictures at hand
+    let fits = |f: &super::content::Field| (f.w, f.h) == super::content::field_size(t.w, t.h);
+    let own = if d.content && !t.content.is_some_and(fits) { super::content::for_frames(t.e, t.a, t.b).filter(|f| fits(f)) } else { None };
+    let field = if d.content { t.content.filter(|f| fits(f)).or(own.as_deref()) } else { None };
+    let c = Ctx { a: t.a, b: t.b, w: u[0], h: u[1], progress, ratio: u[3], p, map: map.as_deref(), field, field_ratio: (u[6 + PARAMS], u[7 + PARAMS]) };
     // the prelude's uv: the pixel centre times 1 / size (see `Host::inv`)
     let (inv_w, inv_h) = (u[4 + PARAMS], u[5 + PARAMS]);
     let (first, step, taps) = (u[8 + PARAMS], u[9 + PARAMS], (u[10 + PARAMS] as i32).min(16));
