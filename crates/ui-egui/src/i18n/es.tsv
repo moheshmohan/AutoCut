@@ -3831,3 +3831,7 @@
 	Spiral	Espiral
 	Conical	Cónico
 	Blinds	Persianas
+# Transition tools (C4): beat snap and transition sounds
+	Snap Transitions to Beats	Ajustar transiciones a los pulsos
+	Add Transition Sound	Añadir sonido a la transición
+	Remove Transition Sound	Quitar sonido de la transición

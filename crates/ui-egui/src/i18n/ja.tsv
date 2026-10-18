@@ -3830,3 +3830,7 @@
 	Spiral	スパイラル
 	Conical	円錐
 	Blinds	ブラインド
+# Transition tools (C4): beat snap and transition sounds
+	Snap Transitions to Beats	トランジションをビートに合わせる
+	Add Transition Sound	トランジションにサウンドを追加
+	Remove Transition Sound	トランジションのサウンドを削除
