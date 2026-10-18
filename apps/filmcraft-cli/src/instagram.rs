@@ -108,7 +108,7 @@ pub async fn run(a: &Args) {
             }
             let path = a.pos(2).map(crate::absolute);
             let req = publish_request(a, path.as_deref()).unwrap_or_else(|e| usage(format!("instagram publish: {e}")));
-            match publish(req).await {
+            match publish(req, a.flag("--no-preflight")).await {
                 Ok(v) => print(a, &v),
                 Err(e) => fail(format!("instagram publish: {e}")),
             }
@@ -274,10 +274,18 @@ pub fn publish_request(a: &Args, path: Option<&str>) -> Result<ReelRequest, Stri
 
 /// Publish with progress on stderr (a line per status change, at most two a second while the
 /// bytes go); the Reel as JSON.
-pub async fn publish(req: ReelRequest) -> Result<Value, String> {
+pub async fn publish(req: ReelRequest, skip_preflight: bool) -> Result<Value, String> {
     tokio::task::spawn_blocking(move || {
         let i = filmcraft_instagram::Instagram::new();
         let pre = i.preflight(&req).map_err(|e| e.to_string())?;
+        // the shared pre-flight of the file (unless only a URL is published)
+        if let Some(path) = req.path.as_deref().filter(|_| !skip_preflight) {
+            let r = crate::publish::preflight(filmcraft_engine::publish::Destination::InstagramReel, path, false)?;
+            crate::publish::print_report(&r);
+            if r["ok"] != true {
+                return Err(format!("{path} does not pass the Instagram Reel pre-flight; `filmcraft-cli publish fix instagramReel {path}` writes a copy that does where the checks say so (or --no-preflight)"));
+            }
+        }
         diag(format_args!("instagram publish: to {} — {}", pre.account.label(), req.source()));
         for n in &pre.notes {
             diag(format_args!("instagram publish: {n}"));

@@ -79,7 +79,7 @@ and `filmcraft-cli`.
 | `scopes` | L3 | video scope maths: waveform, parade, histogram, YUV / HLS vectorscopes, numeric summaries ([crates/scopes/README.md](../crates/scopes/README.md)) |
 | `export` | L3 | render → encode → mux pipeline, progress/cancel |
 | `templates` | L3 | video templates (`.fcvideo-template` folders and ZIPs): manifest with typed slots, strict validation naming the field, slot auto-fit (trim / loop / stretch / hold / Remix), beat grids and re-quantizing cuts to a new track's beats, aspect variants with position hints, applying to a project, minimal save, and the built-in starters; the engine's `template.*` commands drive it ([README](../crates/templates/README.md)) |
-| `engine` | L4 | `Session`, command registry, undo history, media pool, jobs, interchange glue |
+| `engine` | L4 | `Session`, command registry, undo history, media pool, jobs, interchange glue; the publishing destinations and their shared pre-flight (`publish.*`: probe, checks per platform, fixed copies — re-encode or fast start — and `publish.run` over the YouTube and Instagram publishers) |
 | `ui-egui` | L5 | the egui frontend: docking, panels, timeline, monitors, playback, control-channel handlers |
 | `automation` | L5 | MCP server (`rmcp`, stdio), headless or bridged to the running app |
 | `autocut` | L5 | prompt-driven editing: local LLM classification (Ollama), deterministic planners into engine commands, supervisor hand-off ([README](../crates/autocut/README.md)) |

@@ -116,6 +116,53 @@ The answer (JSON): `published`, `mediaId`, `permalink`, `container`, `account`, 
 - **MCP**: `instagram_publish` (a long call: progress notifications in bytes, cancellation);
   `command_run` for `instagram.account`, `instagram.limits`, `instagram.connect`.
 
+## Destinations and the pre-flight (B5)
+
+Export mode's **Destinations** column lists Media File, YouTube, YouTube Short and Instagram
+Reel, each with a generic glyph drawn in `icons.rs` (a file, a play triangle in a rounded square,
+an upright frame, a still camera — no platform logo) and its connect state. Picking a platform
+shows its form instead of the Media File settings: the account (Connect), the metadata (title,
+description, tags, privacy and channel for YouTube; caption with its counts, grid, cover frame
+for Instagram), the file (the last export unless another is given), **Check**, the checklist,
+**Export a Fixed Copy** when a copy can mend it, and **Publish** (disabled, with the reason, until
+the account is connected and the file passes).
+
+The pre-flight is the engine's (`crates/engine/src/publish.rs`), shared by every destination and
+run before any byte leaves:
+
+| check | Instagram Reel | YouTube Short | YouTube |
+|---|---|---|---|
+| container | MP4 / MOV (error) | — | — |
+| video codec, chroma | H.264 / HEVC, 4:2:0 (error) | — | — |
+| frame rate | 23–60 fps (error) | over 60: a note | over 60: a note |
+| width | ≤ 1920 px (error) | — | — |
+| aspect | 9:16 recommended (warning), 0.01:1–10:1 (error) | vertical or square (error) | — |
+| bitrate | ≤ 25 Mbps (error) | — | — |
+| duration | 3 s–15 min (error) | ≤ 3 min (error) | ≤ 12 h; over 15 min: a note |
+| size | ≤ 300 MB (error) | ≤ 256 GB | ≤ 256 GB |
+| audio | AAC, ≤ 48 kHz, mono/stereo (error) | — | — |
+| `moov` at the front | warning (fast-start fix) | — | — |
+| loudness, true peak | −14 LUFS ±2, ≤ −1 dBTP (warnings) | the same | the same |
+
+Loudness is BS.1770 over the first 10 minutes. Every failure and warning carries its fix; where
+an export preset can make a passing copy, `publish.fixCopy` writes `<name> (<Destination>).mp4`
+beside it: re-encoded (H.264, AAC 48 kHz stereo, scaled to the width limit, 30 or 60 fps, the
+bitrate that fits the size, loudness normalized to −14 LUFS with peaks at −1 dBTP, `moov` at the
+front for Instagram) when a check needs it, else only the `moov` moved to the front — the same
+samples, every chunk offset shifted. A length or a shape no copy can mend is said instead.
+
+- **Engine**: `publish.destinations`, `publish.preflight {destination, path, loudness?}`,
+  `publish.fixCopy {destination, path, out?, wait?}` (a job; `publish` in `jobs.list`),
+  `publish.run {destination, path, …metadata, wait?}` (the pre-flight, then `youtube.upload` or
+  `instagram.publish` as a job with progress and cancel — the MCP supervisor and the CLI chain
+  export → publish with it).
+- **CLI**: `publish destinations | check <destination> <file> | fix <destination> <file> | run
+  <destination> <file> …`; `instagram publish` runs the pre-flight first (`--no-preflight` skips it).
+- **MCP**: `publish_run` (a long call), `command_run` for `publish.preflight`, `publish.fixCopy`,
+  `publish.destinations`.
+- **App automation ids**: `export.destination.<id>`, `export.publish.*` (see
+  `crates/ui-egui/src/panels/destinations.rs`).
+
 ## Layout
 
 - `auth.rs` — the app (`app.json`, the secret in a `SecretStore`), redirect URIs, the consent URL,

@@ -3623,3 +3623,28 @@
 	Animated Text	动画文字
 	Insert at Playhead	在播放头处插入
 	Added {name} on {track}	已在 {track} 上添加 {name}
+# Export ▸ Destinations (YouTube, YouTube Short, Instagram Reel)
+	Also show it in the profile grid	同时显示在个人主页网格中
+	Caption	说明文字
+	Check	检查
+	Check the file first	请先检查文件
+	Connect	连接
+	Connected	已连接
+	Cover frame at	封面帧位于
+	Export a Fixed Copy	导出修正后的副本
+	Export first, or type the path of a video	请先导出，或输入视频的路径
+	File to publish	要发布的文件
+	Finish the sign-in in your browser	请在浏览器中完成登录
+	Fix what the check found first	请先修正检查发现的问题
+	Not available	不可用
+	Not connected	未连接
+	Open it	打开
+	Privacy	隐私
+	Publish Reel	发布 Reel
+	Publishing…	正在发布…
+	Ready to publish	可以发布
+	Tags	标签
+	The file's name	文件名
+	Use the last export	使用最近的导出
+	Ready to publish, with {n} warning(s)	可以发布，有 {n} 个警告
+	{n} problem(s) to fix before publishing	发布前需要修正 {n} 个问题

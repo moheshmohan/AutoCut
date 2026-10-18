@@ -52,6 +52,7 @@ pub mod project_manager;
 pub mod project_panel;
 pub mod project_tools;
 pub mod proxies;
+pub mod publish;
 pub mod relink;
 pub mod remix;
 pub mod scene_detect;
@@ -476,6 +477,8 @@ pub struct Session {
     /// Instagram (`instagram.*`): the host's publisher (None = not available: the commands are
     /// disabled; hosts install filmcraft-instagram's, tests a fake) and what its jobs answered.
     pub instagram: instagram::InstagramState,
+    /// Destinations (`publish.*`): the fixed-copy jobs' answers (`publish` in `jobs.list`).
+    pub publish: publish::PublishState,
     /// AutoCut showcases (`autocut.*`): the host that runs their jobs (None = not available),
     /// the command port the jobs edit through, and what they made.
     pub autocut: autocut::AutoCut,
@@ -586,6 +589,7 @@ impl Session {
             photo_uploads: Default::default(),
             youtube: Default::default(),
             instagram: Default::default(),
+            publish: Default::default(),
             autocut: Default::default(),
             log: Default::default(),
             browser: Default::default(),
@@ -1362,6 +1366,8 @@ mod project_manager_tests;
 mod project_panel_tests;
 #[cfg(test)]
 mod proxies_tests;
+#[cfg(test)]
+mod publish_tests;
 #[cfg(test)]
 mod relink_tests;
 #[cfg(test)]

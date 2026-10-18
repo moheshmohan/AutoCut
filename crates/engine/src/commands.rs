@@ -3486,6 +3486,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::photos::commands());
     v.extend(crate::youtube::commands());
     v.extend(crate::instagram::commands());
+    v.extend(crate::publish::commands());
     v.extend(crate::autocut::commands());
     v.extend(crate::media_frame::commands());
     v.extend(crate::media_date::commands());

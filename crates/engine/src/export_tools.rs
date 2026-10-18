@@ -636,6 +636,9 @@ pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     if crate::instagram::is_job(s, j.id) {
         v["instagram"] = crate::instagram::outcome_json(s, j.id);
     }
+    if crate::publish::is_job(s, j.id) {
+        v["publish"] = crate::publish::outcome_json(s, j.id);
+    }
     v
 }
 

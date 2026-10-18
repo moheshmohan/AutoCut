@@ -33,6 +33,7 @@ macro_rules! out {
 mod args;
 mod instagram;
 mod probe;
+mod publish;
 mod youtube;
 
 use args::{Args, parse_value};
@@ -330,6 +331,21 @@ SUBCOMMANDS
                                  hashtags, 20 @mentions at most; --no-feed keeps it out of the grid;
                                  --upload-only stops before publishing (the container waits 23 h:
                                  the same command without it publishes without sending again)
+  publish destinations           the destinations (Media File, YouTube, YouTube Short, Instagram
+                                 Reel) and whether each is connected, as JSON
+  publish check <destination> <file> [--no-loudness] [--json]
+                                 the pre-flight of a file for youtube, youtubeShort or
+                                 instagramReel: container, codecs, 4:2:0, frame rate, width,
+                                 aspect, bitrate, duration, size, audio rate and channels, moov
+                                 placement, loudness (−14 LUFS) and true peak — each failure with
+                                 its fix; exits 1 when one fails
+  publish fix <destination> <file> [--out F]
+                                 a copy that passes: re-encoded (H.264 + AAC 48 kHz, the size,
+                                 rate and bitrate it takes, loudness −14 LUFS / −1 dBTP) when a
+                                 check needs it, else only the moov moved to the front
+  publish run <destination> <file> [youtube upload / instagram publish options] [--no-preflight]
+                                 the pre-flight, then `youtube upload` (youtube, youtubeShort; the
+                                 title defaults to the file's name) or `instagram publish`
   photos tidy                    close every Google Photos picker tab left open in Chrome (and
                                  nothing else); a tab that asks \"Leave site?\" is closed once
                                  more, which Chrome takes as Leave (macOS)
@@ -1311,6 +1327,7 @@ async fn cli() {
         }
         "youtube" => youtube::run(&a).await,
         "instagram" => instagram::run(&a).await,
+        "publish" => publish::run(&a).await,
         "showcase" => {
             // a narrated, counted showcase of every clip an analysis found (`--report`, from
             // analyze --out), or of a Google Photos album's clips (`--album`: picked, imported

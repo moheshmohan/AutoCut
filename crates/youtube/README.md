@@ -160,7 +160,9 @@ Google's answer is authoritative. Errors in words:
   channel (`export.youtube.connect`), Upload to YouTube (`export.uploadYouTube`, private, titled
   like the file; its label is the reason when disabled), the status line
   (`export.youtube.status`) and the link to the video (`export.youtube.open`). The full
-  destinations form (metadata, privacy, playlists, pre-flight) is roadmap B5.
+  destinations form is Export ▸ Destinations ▸ YouTube / YouTube Short (B5: the channel, title,
+  description, tags, privacy, the pre-flight and Publish through `publish.run`; see
+  [crates/instagram](../instagram/README.md#destinations-and-the-pre-flight-b5)).
 
 ## Layout
 

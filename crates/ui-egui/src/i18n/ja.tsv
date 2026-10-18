@@ -3834,3 +3834,28 @@
 	Snap Transitions to Beats	トランジションをビートに合わせる
 	Add Transition Sound	トランジションにサウンドを追加
 	Remove Transition Sound	トランジションのサウンドを削除
+# Export ▸ Destinations (YouTube, YouTube Short, Instagram Reel)
+	Also show it in the profile grid	プロフィールのグリッドにも表示
+	Caption	キャプション
+	Check	確認
+	Check the file first	先にファイルを確認してください
+	Connect	接続
+	Connected	接続済み
+	Cover frame at	カバーのフレーム位置
+	Export a Fixed Copy	修正したコピーを書き出す
+	Export first, or type the path of a video	先に書き出すか、ビデオのパスを入力してください
+	File to publish	公開するファイル
+	Finish the sign-in in your browser	ブラウザーでサインインを完了してください
+	Fix what the check found first	先に確認で見つかった問題を修正してください
+	Not available	利用できません
+	Not connected	未接続
+	Open it	開く
+	Privacy	プライバシー
+	Publish Reel	リールを公開
+	Publishing…	公開中…
+	Ready to publish	公開の準備ができました
+	Tags	タグ
+	The file's name	ファイル名
+	Use the last export	最後の書き出しを使う
+	Ready to publish, with {n} warning(s)	公開できます（警告 {n} 件）
+	{n} problem(s) to fix before publishing	公開前に修正が必要な問題が {n} 件あります

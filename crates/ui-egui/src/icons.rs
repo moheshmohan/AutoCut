@@ -122,6 +122,14 @@ pub enum Icon {
     Moon,
     /// Colour parameters: pick a colour from the Program monitor (a pipette).
     Eyedropper,
+    /// Export destinations (generic glyphs drawn here, no platform logo): a media file (a page
+    /// with a folded corner and a play triangle), a video site (a play triangle in a rounded
+    /// square outline), a short vertical video (a tall rounded frame with a play triangle), and
+    /// a reel of photos and clips (a classic still camera: body, viewfinder bump, round lens).
+    DestFile,
+    DestVideo,
+    DestShort,
+    DestCamera,
 }
 
 pub struct Pen16<'a> {
@@ -770,6 +778,28 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(9.5, 7.5), (3.5, 12.5)]);
             pen.line(&[(3.5, 12.5), (2.5, 13.5)]);
         }
+        DestFile => {
+            // a page with its top right corner folded, a small play triangle on it
+            pen.closed(&[(3.5, 1.5), (9.5, 1.5), (12.5, 4.5), (12.5, 14.5), (3.5, 14.5)]);
+            pen.line(&[(9.5, 1.5), (9.5, 4.5), (12.5, 4.5)]);
+            pen.fill(&[(6.5, 7.0), (10.0, 9.25), (6.5, 11.5)]);
+        }
+        DestVideo => {
+            // a play triangle inside a rounded square outline
+            pen.rect(2.0, 2.0, 14.0, 14.0);
+            pen.fill(&[(6.3, 5.0), (11.3, 8.0), (6.3, 11.0)]);
+        }
+        DestShort => {
+            // a tall rounded frame (a phone held upright) with a play triangle
+            pen.rect(4.5, 1.5, 11.5, 14.5);
+            pen.line(&[(7.0, 12.5), (9.0, 12.5)]);
+            pen.fill(&[(6.8, 5.2), (10.2, 7.5), (6.8, 9.8)]);
+        }
+        DestCamera => {
+            // a still camera: the body, a bump for the viewfinder on its top left, a round lens
+            pen.closed(&[(1.5, 5.0), (4.5, 5.0), (5.5, 3.0), (9.0, 3.0), (10.0, 5.0), (14.5, 5.0), (14.5, 13.0), (1.5, 13.0)]);
+            pen.circle(8.0, 9.0, 2.6);
+        }
     }
 }
 
@@ -903,6 +933,10 @@ mod tests {
         Network,
         Clock,
         Eyedropper,
+        DestFile,
+        DestVideo,
+        DestShort,
+        DestCamera,
     ];
 
     /// Paint `icon` at `ppp` device pixels per point into a rect of `size` points whose corner is

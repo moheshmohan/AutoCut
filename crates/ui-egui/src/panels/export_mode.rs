@@ -1,5 +1,6 @@
-//! Export mode (header "Export"), laid out like Premiere 26: Destinations and the export queue on
-//! the left; the Media File settings in the middle (File Name, Location, Preset, Format, then the
+//! Export mode (header "Export"), laid out like Premiere 26: Destinations (Media File, YouTube,
+//! YouTube Short, Instagram Reel: `destinations.rs`, whose form replaces the Media File settings
+//! when a platform is picked) and the export queue on the left; the Media File settings in the middle (File Name, Location, Preset, Format, then the
 //! Video, Audio, Multiplexer, Captions, Effects and Metadata sections); the preview, Range,
 //! Scaling, the Summary with the estimated file size, Upload to Google Photos and Upload to YouTube
 //! (once an export has finished), and Send to Queue / Export on the right. Also the Preset Manager (Preset ▸ More
@@ -75,6 +76,10 @@ pub struct ExportUi {
     pub youtube_channel_label: String,
     /// The `youtube.connect` job started here.
     pub youtube_connect_job: Option<u64>,
+    /// The destination picked in the Destinations column (`mediaFile`, `youtube`,
+    /// `youtubeShort`, `instagramReel`) and the platform form's state.
+    pub destination: String,
+    pub publish: super::destinations::PublishForm,
 }
 
 impl Default for ExportUi {
@@ -101,6 +106,8 @@ impl Default for ExportUi {
             youtube_channel: String::new(),
             youtube_channel_label: String::new(),
             youtube_connect_job: None,
+            destination: "mediaFile".into(),
+            publish: Default::default(),
         }
     }
 }
@@ -189,15 +196,25 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     for r in [left, mid, right] {
         ui.painter().rect_filled(r, t.radius, t.panel_bg);
     }
+    let platform = super::destinations::current(app) != filmcraft_engine::publish::Destination::MediaFile;
     let Some(seq_id) = app.session.state.active_sequence else {
-        crate::dock::placeholder(ui, mid, &t, tl!("Open a sequence to export"));
+        if platform {
+            // publishing a file needs no sequence
+            super::destinations::form(app, ui, mid);
+        } else {
+            crate::dock::placeholder(ui, mid, &t, tl!("Open a sequence to export"));
+        }
         queue_column(app, ui, left);
         return;
     };
     sync_sequence(app);
     let before = settings_json(&app.ui.export.settings);
     queue_column(app, ui, left);
-    settings_column(app, ui, mid);
+    if platform {
+        super::destinations::form(app, ui, mid);
+    } else {
+        settings_column(app, ui, mid);
+    }
     preview_column(app, ui, right, seq_id);
     // editing any setting turns the preset into "Custom"
     if settings_json(&app.ui.export.settings) != before
@@ -219,15 +236,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 fn queue_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let mut reg = Reg::default();
-    let p = ui.painter();
-    p.text(rect.min + vec2(14.0, 20.0), Align2::LEFT_CENTER, tl!("Destinations"), Tokens::semibold(13.0), t.text);
-    let mf = Rect::from_min_size(rect.min + vec2(8.0, 38.0), vec2(rect.width() - 16.0, 26.0));
-    p.rect_filled(mf, 4.0, t.row_selected);
-    p.text(pos2(mf.min.x + 10.0, mf.center().y), Align2::LEFT_CENTER, tl!("Media File"), Tokens::ui(12.5), t.text);
-    reg.add("export.destination.mediaFile", mf, "Media File");
-    let qtop = mf.max.y + 18.0;
+    ui.painter().text(rect.min + vec2(14.0, 20.0), Align2::LEFT_CENTER, tl!("Destinations"), Tokens::semibold(13.0), t.text);
+    // Media File, YouTube, YouTube Short, Instagram Reel (`export.destination.<id>`)
+    let rows_end = super::destinations::rows(app, ui, rect, rect.min.y + 38.0);
+    let qtop = rows_end + 16.0;
     let n = app.session.export_queue.items.len();
-    p.text(pos2(rect.min.x + 14.0, qtop), Align2::LEFT_CENTER, tlf!("Queue ({n})", n), Tokens::semibold(13.0), t.text);
+    ui.painter().text(pos2(rect.min.x + 14.0, qtop), Align2::LEFT_CENTER, tlf!("Queue ({n})", n), Tokens::semibold(13.0), t.text);
     let body = Rect::from_min_max(pos2(rect.min.x + 8.0, qtop + 14.0), pos2(rect.max.x - 8.0, rect.max.y - 40.0));
     let items: Vec<Value> = app.session.execute("export.queue.list", json!({})).ok().and_then(|v| v["items"].as_array().cloned()).unwrap_or_default();
     let mut action: Option<(&'static str, Value)> = None;
