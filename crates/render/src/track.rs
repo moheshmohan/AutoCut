@@ -212,7 +212,7 @@ pub fn features(g: &Gray, region: &[Vec2], max: usize, min_dist: f32) -> Vec<[f3
 }
 
 /// Pyramidal Lucas–Kanade: where `p` in `a` moved to in `b` (pyramids from [`Gray::pyramid`]).
-fn lk(pa: &[Gray], pb: &[Gray], p: [f32; 2]) -> Option<[f32; 2]> {
+pub(crate) fn lk(pa: &[Gray], pb: &[Gray], p: [f32; 2]) -> Option<[f32; 2]> {
     let levels = pa.len().min(pb.len());
     let mut d = [0.0f32; 2];
     for lvl in (0..levels).rev() {
@@ -389,7 +389,7 @@ pub struct Step {
 
 /// A frame prepared for tracking (its pyramid).
 pub struct Prepared {
-    levels: Vec<Gray>,
+    pub(crate) levels: Vec<Gray>,
 }
 
 impl Prepared {

@@ -53,6 +53,7 @@ pub mod project_panel;
 pub mod project_tools;
 pub mod proxies;
 pub mod publish;
+pub mod reframe;
 pub mod relink;
 pub mod remix;
 pub mod scene_detect;
@@ -450,6 +451,9 @@ pub struct Session {
     pub mask_jobs: Vec<masks::PendingTrack>,
     /// Scene Edit Detection jobs whose results are applied when they finish.
     pub scene_jobs: Vec<scene_detect::PendingScene>,
+    /// Auto Reframe analyses whose keyframes are written when they finish (`sequence.autoReframe`,
+    /// `clip.autoReframe`), and what the finished ones made.
+    pub reframes: reframe::Reframes,
     /// Neural music generations whose WAV is placed when their job finishes (`music.generateNeural`).
     pub neural_music: music_neural::NeuralMusic,
     /// The SoundFont generated music plays on, loaded once (`music.useSoundfont`, `soundfont`).
@@ -578,6 +582,7 @@ impl Session {
             media_jobs: Vec::new(),
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
+            reframes: Default::default(),
             neural_music: Default::default(),
             soundfonts: Default::default(),
             music_preview: Default::default(),
@@ -694,6 +699,7 @@ impl Session {
         proxies::poll(self);
         masks::poll(self);
         scene_detect::poll(self);
+        reframe::poll(self);
         music_neural::poll(self);
         export_tools::pump_queue(self, false);
         panels::log_jobs(self);
