@@ -13,6 +13,9 @@
 //! - `ui.set {tts: {voice, pitch, pace, text…}}`: patch the Text to Speech panel draft
 //! - `ui.set {generateAudio: {kind, seconds, intensity, mood, key, bpm, seed, genre, levels, muted,
 //!   stems, engine, prompt, soundfontPath}}`: patch the Generate Audio panel (music: find by feel)
+//! - `ui.set {templates: {query, aspect, category, slots, selected, variant, fills, googlePhotos, name}}`:
+//!   patch the Templates panel (filters, the template being filled, `fills` as `template.apply`'s
+//!   `slots`: item ids and text)
 //! - `ui.set {showcase: {subject, since, title, voice, mood, intro, outro, entries, exportPath, …}}`:
 //!   patch the Showcase panel's draft (`entries` a list, or `{"<index>": {include, label, line, …}}`)
 //! - `ui.click {id | x,y, button?, count?, modifiers?}` / `ui.move {x,y}` / `ui.scroll {x,y,dx,dy}`
@@ -145,6 +148,12 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
                     Ok(d) => app.ui.generate_audio = d,
                     Err(e) => return err(format!("bad `generateAudio`: {e}")),
                 }
+            }
+            // Templates panel: filters, the template being filled and its slots, merged likewise
+            if let Some(patch) = p.get("templates")
+                && let Err(e) = crate::panels::templates::patch(app, patch)
+            {
+                return err(e);
             }
             // Showcase panel draft (subject, title, voice, entries…), merged likewise
             if let Some(patch) = p.get("showcase")

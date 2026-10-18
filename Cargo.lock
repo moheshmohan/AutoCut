@@ -2568,6 +2568,7 @@ dependencies = [
  "filmcraft-render",
  "filmcraft-scopes",
  "filmcraft-soundfont",
+ "filmcraft-templates",
  "filmcraft-text",
  "filmcraft-time",
  "filmcraft-tts",
