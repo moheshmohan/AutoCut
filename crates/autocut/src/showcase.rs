@@ -850,6 +850,9 @@ pub struct Built {
     /// left clear for it ([`crate::outro`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outro: Option<outro::BuiltOutro>,
+    /// What the privacy pass hid, clip by clip ([`crate::privacy::redact_show`]): for QA.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub privacy: Vec<crate::privacy::Hidden>,
 }
 
 /// A transition from the catalogue as placed: its id, effect, where (`within` an entry,
@@ -3230,7 +3233,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         if built.subtitles.is_empty() { None } else { caption_track(ex, &built.subtitles, if opts.malayalam() { "ml" } else { "en" }, &mut built.notes).await };
     built.theme = theme;
     // ---- privacy: visitors' faces and plates hidden, the robots left alone ([`crate::privacy`])
-    crate::privacy::redact_show(ex, opts.redact.as_ref(), &built.layout, entries, &mut built.notes, progress).await;
+    built.privacy = crate::privacy::redact_show(ex, opts.redact.as_ref(), &built.layout, entries, &mut built.notes, progress).await;
     if let Some(path) = &opts.export {
         progress("exporting (YouTube 1080p)");
         let mut p = json!({"path": path, "preset": "YouTube 1080p Full HD", "wait": true});

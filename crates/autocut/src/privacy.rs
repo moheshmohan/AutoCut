@@ -532,10 +532,71 @@ pub fn show_params(plan: Option<&Redact>, layout: &[PlacedEntry], entries: &[Ent
     Some(p)
 }
 
+/// What the privacy pass hid in one clip and its copies (a shot's blurred background), from
+/// `clip.autoRedact`'s outcome: for the showcase's QA ([`crate::qa`]).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hidden {
+    pub clip: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<u64>,
+    pub name: String,
+    pub faces: usize,
+    pub plates: usize,
+    /// Places of named targets (logos, signs).
+    pub named: usize,
+    pub masks: usize,
+    /// The largest share of the clip's picture one mask covers, that mask, and when (sequence
+    /// seconds).
+    pub largest_mask: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub largest_mask_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub largest_at: Option<f64>,
+    /// The most of the picture hidden at once, and when (sequence seconds).
+    pub most_hidden: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub most_hidden_at: Option<f64>,
+}
+
+/// Most clips read from an outcome.
+const MAX_HIDDEN: usize = 100_000;
+
+/// The clips of a `clip.autoRedact` outcome (its `redact` object), hostile values dropped.
+pub fn hidden_from(outcome: &Value) -> Vec<Hidden> {
+    let share = |v: &Value| v.as_f64().filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(0.0, 1.0));
+    let when = |v: &Value| v["sequence"].as_f64().filter(|x| x.is_finite() && *x >= 0.0);
+    let count = |v: &Value| v.as_u64().map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
+    outcome["clips"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .take(MAX_HIDDEN)
+        .filter_map(|c| {
+            let cov = &c["coverage"];
+            Some(Hidden {
+                clip: c["clip"].as_u64()?,
+                also: c["also"].as_array().map(|a| a.iter().filter_map(Value::as_u64).take(64).collect()).unwrap_or_default(),
+                name: c["name"].as_str().unwrap_or_default().chars().take(200).collect(),
+                faces: count(&c["faces"]),
+                plates: count(&c["plates"]),
+                named: count(&c["targets"]),
+                masks: count(&c["masks"]),
+                largest_mask: share(&cov["largestMask"]),
+                largest_mask_name: cov["largestMaskName"].as_str().map(|s| s.chars().take(80).collect()),
+                largest_at: when(&cov["largestAt"]),
+                most_hidden: share(&cov["mostHidden"]),
+                most_hidden_at: when(&cov["mostHiddenAt"]),
+            })
+        })
+        .collect()
+}
+
 /// The showcase's privacy pass ([`show_params`]): `clip.autoRedact` over the show's footage,
 /// each robot's own box excluded from the face and plate rules; what happened goes into
-/// `notes`. A copy of a clip shows the same frames, so the engine analyses it once with its clip
-/// and gives it the same masks.
+/// `notes`, and what was hidden where is returned. A copy of a clip shows the same frames, so the
+/// engine analyses it once with its clip and gives it the same masks.
 pub async fn redact_show(
     ex: &dyn Executor,
     plan: Option<&Redact>,
@@ -543,10 +604,10 @@ pub async fn redact_show(
     entries: &[Entry],
     notes: &mut Vec<String>,
     progress: &mut dyn FnMut(&str),
-) {
+) -> Vec<Hidden> {
     let wanted = plan.is_some() || entries.iter().any(|e| e.redact.is_some() || e.shots.iter().any(|s| s.redact.is_some()));
     if !wanted {
-        return;
+        return Vec::new();
     }
     // each footage item's shape, for the robots' boxes
     let mut aspects: Vec<(u64, f64)> = Vec::new();
@@ -560,7 +621,7 @@ pub async fn redact_show(
         };
         aspects.push((item, a));
     }
-    let Some(p) = show_params(plan, layout, entries, &aspects, notes) else { return };
+    let Some(p) = show_params(plan, layout, entries, &aspects, notes) else { return Vec::new() };
     let n = p["clips"].as_array().map_or(0, Vec::len);
     let named = p["targets"].as_array().map_or(0, Vec::len);
     progress(&format!("privacy: looking for faces, plates{} in {n} clip(s)", if named > 0 { format!(" and {named} named target(s)") } else { String::new() }));
@@ -591,8 +652,12 @@ pub async fn redact_show(
                     notes.push(format!("privacy: {}: looking for named targets: {}", c["name"].as_str().unwrap_or(""), e.as_str().unwrap_or("")));
                 }
             }
+            hidden_from(o)
         }
-        Err(e) => notes.push(format!("privacy: nothing was hidden: {e}")),
+        Err(e) => {
+            notes.push(format!("privacy: nothing was hidden: {e}"));
+            Vec::new()
+        }
     }
 }
 
@@ -721,6 +786,24 @@ mod tests {
         assert_eq!(notes.len(), 1);
         // nothing asked: nothing to do
         assert!(show_params(None, &layout[1..], &entries, &[], &mut notes).is_none());
+    }
+
+    #[test]
+    fn what_was_hidden_is_read_from_the_outcome() {
+        let o = json!({"clips": [
+            {"clip": 7, "also": [9], "name": "a.mov", "faces": 2, "plates": 0, "targets": 1, "masks": 3,
+             "coverage": {"largestMask": 0.34, "largestMaskName": "Redact logo 1", "largestAt": {"media": 3.0, "sequence": 12.5},
+                          "mostHidden": 0.4, "mostHiddenAt": {"media": 3.0, "sequence": 12.5}}},
+            {"clip": 8, "faces": -1, "coverage": {"largestMask": 7.0, "mostHidden": "x", "largestAt": {"sequence": -3}}},
+            {"name": "no id"}
+        ]});
+        let h = hidden_from(&o);
+        assert_eq!(h.len(), 2);
+        assert_eq!((h[0].clip, &h[0].also, h[0].faces, h[0].named, h[0].masks), (7, &vec![9], 2, 1, 3));
+        assert_eq!((h[0].largest_mask, h[0].largest_mask_name.as_deref(), h[0].largest_at), (0.34, Some("Redact logo 1"), Some(12.5)));
+        // hostile numbers: shares clamped, counts and times dropped
+        assert_eq!((h[1].largest_mask, h[1].most_hidden, h[1].faces, h[1].largest_at), (1.0, 0.0, 0, None));
+        assert!(hidden_from(&json!("nothing")).is_empty());
     }
 
     #[test]

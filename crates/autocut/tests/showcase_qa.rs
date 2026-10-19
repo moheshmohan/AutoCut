@@ -266,3 +266,71 @@ async fn a_showcase_on_the_users_music_has_no_errors() {
     assert!(l.voice_margin_db.is_some_and(|m| m >= 4.0), "{l:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The privacy check: a mask over a third of a picture (the blur that filled a tablet close-up)
+/// is a warning at its time; what was hidden is counted per entry; the privacy sheet holds a
+/// frame of each clip with masks and is written beside the export.
+#[tokio::test(flavor = "multi_thread")]
+async fn privacy_flags_large_masks_counts_per_entry_and_draws_a_sheet() {
+    use filmcraft_autocut::privacy::Hidden;
+    use filmcraft_autocut::showcase::{PlacedEntry, PlacedShot};
+    let ex = demo();
+    let dir = tmp("privacy");
+    run(&ex, "file.newSequence", json!({"name": "Privacy", "width": 640, "height": 360, "fps": 30, "video": 2, "audio": 2})).await;
+    let a = place(&ex, 5, "V2", None, 0.0, 1.0, 2.0).await[0];
+    let b = place(&ex, 6, "V2", None, 2.0, 1.0, 2.0).await[0];
+    let c = place(&ex, 7, "V2", None, 4.0, 1.0, 2.0).await[0];
+    let entry = |number: usize, label: &str, clip: u64, start: f64| PlacedEntry {
+        number,
+        label: label.into(),
+        start,
+        end: start + 2.0,
+        shots: vec![PlacedShot { clip, item: 5, start, end: start + 2.0, ..PlacedShot::default() }],
+        ..PlacedEntry::default()
+    };
+    let hidden = |clip: u64, faces: usize, named: usize, largest: f64, at: f64| Hidden {
+        clip,
+        name: format!("clip {clip}"),
+        faces,
+        named,
+        masks: faces + named,
+        largest_mask: largest,
+        largest_mask_name: Some("Redact logo 1".into()),
+        largest_at: Some(at),
+        most_hidden: largest,
+        most_hidden_at: Some(at),
+        ..Hidden::default()
+    };
+    let opts = qa::Options {
+        frame_side: 160,
+        mix: false,
+        work_dir: Some(dir.clone().into()),
+        entries: vec![entry(1, "Pepper", a, 0.0), entry(2, "Promobot", b, 2.0), entry(3, "Spot", c, 4.0)],
+        privacy: vec![hidden(a, 3, 0, 0.04, 1.0), hidden(b, 0, 2, 0.34, 3.2), hidden(c, 0, 0, 0.0, 5.0)],
+        ..qa::Options::default()
+    };
+    let mut r = qa::check(&ex, &opts, None, &mut |_| {}).await;
+    let warnings = r.of("privacy", Severity::Warning);
+    assert_eq!(warnings.len(), 1, "{:#?}", r.findings);
+    let w = warnings[0];
+    assert_eq!((w.entry, w.clip, (w.seconds - 3.2).abs() < 1e-9), (Some(2), Some(b), true));
+    assert!(w.message.contains("34 %") && w.message.contains("Redact logo 1"), "{}", w.message);
+    // what was hidden, entry by entry (the third had nothing)
+    let counts: Vec<(usize, &str, usize, usize)> = r.privacy.iter().map(|p| (p.entry, p.label.as_str(), p.faces, p.named)).collect();
+    assert_eq!(counts, vec![(1, "Pepper", 3, 0), (2, "Promobot", 0, 2), (3, "Spot", 0, 0)]);
+    // the sheet: the two clips with masks, side by side
+    let sheet = image::load_from_memory(r.privacy_sheet_png.as_ref().unwrap()).unwrap();
+    assert_eq!(sheet.width(), 2 * (160 + 4) + 4);
+    let out = std::path::Path::new(&dir).join("show.mp4");
+    qa::write_next_to(&mut r, &out).unwrap();
+    assert!(std::path::Path::new(&dir).join("show.privacy.png").is_file());
+    let v: Value = serde_json::from_slice(&std::fs::read(std::path::Path::new(&dir).join("show.qa.json")).unwrap()).unwrap();
+    assert_eq!(v["privacy"][1]["named"], json!(2), "{v}");
+    assert!(v["privacySheet"].as_str().is_some_and(|p| p.ends_with("show.privacy.png")));
+    // nothing redacted: the check is skipped and there is no sheet
+    let none = qa::Options { privacy: Vec::new(), ..opts };
+    let r = qa::check(&ex, &none, None, &mut |_| {}).await;
+    assert_eq!(r.checks.iter().find(|c| c.name == "privacy").map(|c| c.status), Some("skipped"));
+    assert!(r.privacy_sheet_png.is_none() && r.privacy.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

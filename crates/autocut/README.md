@@ -571,6 +571,16 @@ subject is not found (`Options::follow_subject`, `--no-track`).
   tracker that only held a lost box drifted onto the robot's face (now a held box is not kept,
   and a look that does not find it ends it).
 
+- QA of what was hidden: `clip.autoRedact`'s outcome now says, per clip, how much of the picture
+  its masks cover (`coverage`: the largest single mask at any keyframe and the most hidden at
+  once, as shares of the clip's frame, with when in media and sequence seconds), and the build
+  keeps it (`Built::privacy`, [`privacy::Hidden`](src/privacy.rs)). The showcase QA's `privacy`
+  check warns about any mask over a fifth of a picture (the real bug of the v5 round: a named
+  target's box over a close-up of the Promobot's tablet filled the frame with blur), counts the
+  faces, plates and named places hidden in each entry (`privacy` in `<out>.qa.json`), and draws
+  a privacy sheet, `<out>.privacy.png`: one frame of each clip with masks, where most of it is
+  hidden, under its entry's number.
+
 Measured on Robot Showcase v4 (560 s of footage, 90 clips, mostly 1080p H.264 with some VP9
 4:4:4), the whole sequence on an M-series Mac, 2026-10-19: with faces counted as the sequence
 shows them and a face score of 0.6, 356 s (detection 141 s, vision check 214 s for 211

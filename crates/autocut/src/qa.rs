@@ -14,10 +14,12 @@
 //! | `black` | rendered frames whose picture is black or nearly (92 % of the frame darker than 5 % luma, so a counter or lower third over black still counts) — sampled every 2 s, at each picture clip's first frame and at the first frame after it — outside dips to black (errors) |
 //! | `mix` | the mix exported as 32-bit float WAV and metered (BS.1770): integrated loudness outside −16…−14 LUFS (±0.5 LU) and true peak above −1 dBTP (warnings); true peak above 0 dBTP or samples at full scale: clipping (error); the median short-term loudness during narration clips (A2) vs between them: the voice less than 4 dB louder (warning), or not louder at all (error) |
 //! | `subject` | shots where the grounding model (`AUTOCUT_ANALYSIS_MODEL`, the analysis' prompt) does not find the subject in a rendered frame (warnings); skipped when no model is reachable |
+//! | `privacy` | from what the privacy pass hid ([`Options::privacy`]): a redaction mask covering more than [`Options::max_mask`] (a fifth) of a clip's picture at any keyframe (warnings: a blur that size hides the shot, as one on a close-up of a tablet did); the faces, plates and named places hidden in each entry (`privacy` in the report) |
 //!
 //! The report ([`QaReport`], serde) also holds a contact sheet: one rendered frame per entry
 //! under its number, the band red or amber when the entry has an error or a warning
-//! ([`write_next_to`] writes `<out>.qa.json` and `<out>.qa.png`). Nothing here edits the
+//! ([`write_next_to`] writes `<out>.qa.json` and `<out>.qa.png`), and a privacy sheet: one frame
+//! per clip with masks, where most of it is hidden (`<out>.privacy.png`). Nothing here edits the
 //! project; a check that cannot run is recorded as skipped, never fatal.
 
 use std::path::{Path, PathBuf};
@@ -86,6 +88,10 @@ pub struct Options {
     pub max_true_peak: f64,
     /// How much louder (dB) the voice must be than what plays between the lines.
     pub voice_margin: f64,
+    /// What the privacy pass hid ([`Built::privacy`]); empty: the privacy check is skipped.
+    pub privacy: Vec<crate::privacy::Hidden>,
+    /// The largest share of a clip's picture one redaction mask may cover.
+    pub max_mask: f64,
 }
 
 impl Default for Options {
@@ -105,6 +111,8 @@ impl Default for Options {
             loudness: (-16.0, -14.0),
             max_true_peak: -1.0,
             voice_margin: 4.0,
+            privacy: Vec::new(),
+            max_mask: 0.2,
         }
     }
 }
@@ -112,7 +120,7 @@ impl Default for Options {
 impl Options {
     /// The checks of a showcase built with `opts`.
     pub fn for_showcase(opts: &crate::showcase::Options, built: &Built) -> Self {
-        Self { subject: opts.subject.clone(), entries: built.layout.clone(), ..Self::default() }
+        Self { subject: opts.subject.clone(), entries: built.layout.clone(), privacy: built.privacy.clone(), ..Self::default() }
     }
 }
 
@@ -217,6 +225,29 @@ pub struct QaReport {
     /// The contact sheet, PNG.
     #[serde(skip)]
     pub contact_sheet_png: Option<Vec<u8>>,
+    /// What the privacy pass hid in each entry.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub privacy: Vec<EntryPrivacy>,
+    /// Where the privacy sheet was written ([`write_next_to`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privacy_sheet: Option<String>,
+    /// The privacy sheet, PNG: a frame of each clip with masks, where most of it is hidden.
+    #[serde(skip)]
+    pub privacy_sheet_png: Option<Vec<u8>>,
+}
+
+/// What the privacy pass hid in one entry: faces, number plates, places of named targets (logos,
+/// signs), masks, and the largest share of a picture one mask covers.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryPrivacy {
+    pub entry: usize,
+    pub label: String,
+    pub faces: usize,
+    pub plates: usize,
+    pub named: usize,
+    pub masks: usize,
+    pub largest_mask: f64,
 }
 
 impl QaReport {
@@ -248,7 +279,8 @@ impl QaReport {
 }
 
 /// Write `<out>.qa.json` and, when there is one, the contact sheet `<out>.qa.png` next to `out`
-/// (the export): the paths written.
+/// (the export): the paths written. The privacy sheet, when there is one, goes to
+/// `<out>.privacy.png` (its path in [`QaReport::privacy_sheet`]).
 pub fn write_next_to(report: &mut QaReport, out: &Path) -> Result<(PathBuf, Option<PathBuf>), String> {
     let json_path = out.with_extension("qa.json");
     let mut png_path = None;
@@ -257,6 +289,11 @@ pub fn write_next_to(report: &mut QaReport, out: &Path) -> Result<(PathBuf, Opti
         std::fs::write(&p, png).map_err(|e| format!("{}: {e}", p.display()))?;
         report.contact_sheet = Some(p.display().to_string());
         png_path = Some(p);
+    }
+    if let Some(png) = &report.privacy_sheet_png {
+        let p = out.with_extension("privacy.png");
+        std::fs::write(&p, png).map_err(|e| format!("{}: {e}", p.display()))?;
+        report.privacy_sheet = Some(p.display().to_string());
     }
     let text = serde_json::to_string_pretty(report).map_err(|e| e.to_string())?;
     std::fs::write(&json_path, format!("{text}\n")).map_err(|e| format!("{}: {e}", json_path.display()))?;
@@ -1049,6 +1086,85 @@ async fn mix(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport) -> 
     Check::ran(name, &r.findings, note)
 }
 
+// ------------------------------------------------------------------ privacy
+
+/// The entry showing any of `clips` (as its picture or its background copy).
+fn entry_of_clips<'a>(opts: &'a Options, clips: &[u64]) -> Option<&'a PlacedEntry> {
+    opts.entries.iter().find(|e| e.shots.iter().any(|s| clips.contains(&s.clip) || s.background.is_some_and(|b| clips.contains(&b))))
+}
+
+/// What the privacy pass hid (see the module docs): masks over more than [`Options::max_mask`] of
+/// a picture as warnings, the counts per entry into the report, and a frame of each clip with
+/// masks where most of it is hidden, for the privacy sheet: `(entry, PNG)`.
+async fn privacy(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport, progress: &mut dyn FnMut(&str)) -> (Check, Vec<(usize, Option<Vec<u8>>)>) {
+    let name = "privacy";
+    if opts.privacy.is_empty() {
+        return (Check::skipped(name, "nothing was redacted"), Vec::new());
+    }
+    let max = if opts.max_mask.is_finite() { opts.max_mask.clamp(0.0, 1.0) } else { 0.2 };
+    let masked = opts.privacy.iter().filter(|h| h.masks > 0).count().min(MAX_TILES);
+    if masked > 0 {
+        progress(&format!("rendering {masked} privacy frames"));
+    }
+    let (mut per, mut tiles): (Vec<EntryPrivacy>, Vec<(usize, Option<Vec<u8>>)>) = (Vec::new(), Vec::new());
+    for h in opts.privacy.iter().take(MAX_CLIPS) {
+        let ids: Vec<u64> = std::iter::once(h.clip).chain(h.also.iter().copied()).collect();
+        let placed = entry_of_clips(opts, &ids);
+        let number = placed.map(|e| e.number).or_else(|| h.largest_at.or(h.most_hidden_at).and_then(|t| entry_at(seq, opts, t)));
+        if let Some(n) = number {
+            let i = match per.iter().position(|p| p.entry == n) {
+                Some(i) => i,
+                None => {
+                    per.push(EntryPrivacy { entry: n, label: placed.map(|e| e.label.clone()).unwrap_or_default(), ..EntryPrivacy::default() });
+                    per.len() - 1
+                }
+            };
+            if let Some(p) = per.get_mut(i) {
+                p.faces = p.faces.saturating_add(h.faces);
+                p.plates = p.plates.saturating_add(h.plates);
+                p.named = p.named.saturating_add(h.named);
+                p.masks = p.masks.saturating_add(h.masks);
+                p.largest_mask = p.largest_mask.max(h.largest_mask);
+            }
+        }
+        if h.largest_mask > max {
+            let at = h.largest_at.unwrap_or(0.0);
+            let mask = h.largest_mask_name.as_deref().map(|m| format!(" ({m})")).unwrap_or_default();
+            let mut f = Finding::new(
+                name,
+                Severity::Warning,
+                at,
+                format!(
+                    "a redaction mask{mask} covers {:.0} % of “{}” at {}: a blur that size hides the shot, not a face or a logo",
+                    h.largest_mask * 100.0,
+                    h.name,
+                    stamp(at)
+                ),
+            )
+            .clip(Some(h.clip));
+            f.entry = number;
+            r.findings.push(f);
+        }
+        if h.masks > 0 && tiles.len() < MAX_TILES {
+            let png = match h.most_hidden_at {
+                Some(t) => ex.render(secs(seq.frame_tick(seq.frame_floor((t * TPS_F).round() as i64))), opts.frame_side).await,
+                None => None,
+            };
+            if png.is_some() {
+                r.frames_rendered += 1;
+            }
+            tiles.push((number.unwrap_or(0), png));
+        }
+    }
+    per.sort_by_key(|p| p.entry);
+    tiles.sort_by_key(|t| t.0);
+    let total = |f: fn(&EntryPrivacy) -> usize| per.iter().map(f).sum::<usize>();
+    let note =
+        format!("{} face(s), {} plate(s), {} named place(s) hidden in {} entr(ies)", total(|p| p.faces), total(|p| p.plates), total(|p| p.named), per.len());
+    r.privacy = per;
+    (Check::ran(name, &r.findings, Some(note)), tiles)
+}
+
 // ------------------------------------------------------------------ the whole check
 
 /// Check the active sequence (see the module docs). `model`: a grounding vision model for the
@@ -1074,6 +1190,9 @@ pub async fn check(ex: &dyn Executor, opts: &Options, model: Option<&dyn ChatMod
     progress("QA: subject and contact sheet");
     let (c, tiles) = subject(ex, &seq, opts, model, &mut r, progress).await;
     r.checks.push(c);
+    progress("QA: privacy");
+    let (c, privacy_tiles) = privacy(ex, &seq, opts, &mut r, progress).await;
+    r.checks.push(c);
     if opts.mix {
         progress("QA: the mix");
         let c = mix(ex, &seq, opts, &mut r).await;
@@ -1087,6 +1206,8 @@ pub async fn check(ex: &dyn Executor, opts: &Options, model: Option<&dyn ChatMod
         }
     }
     r.contact_sheet_png = contact_sheet(&tiles, &r.findings, opts.frame_side, seq.aspect);
+    let privacy_findings: Vec<Finding> = r.findings.iter().filter(|f| f.check == "privacy").cloned().collect();
+    r.privacy_sheet_png = contact_sheet(&privacy_tiles, &privacy_findings, opts.frame_side, seq.aspect);
     r.tally();
     r
 }

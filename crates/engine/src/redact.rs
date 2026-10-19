@@ -927,11 +927,7 @@ pub fn mask_for(t: &Track, n: usize, c: &ClipRedact, padding: f64) -> Option<Mas
     push(end, shape(t, last, c.size, padding));
     let first_shape = keys.first().map(|k| k.value.clone())?;
     let ParamValue::Path(path0) = first_shape else { return None };
-    let what = match (&t.kind, &t.label) {
-        (Kind::Target, Some(l)) => l.chars().take(40).collect::<String>(),
-        (k, _) => k.name().to_string(),
-    };
-    let mut m = Mask::new(format!("{MASK_PREFIX}{what} {n}"), path0);
+    let mut m = Mask::new(mask_name(t, n), path0);
     if keys.len() > 1 {
         m.path.keyframes = keys;
     }
@@ -988,20 +984,96 @@ pub fn effect_for(c: &ClipRedact, o: &Options) -> Option<EffectInstance> {
             e
         }
     };
-    // numbered per kind (per named target)
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for t in hidden {
-        let key = format!("{}:{}", t.kind.name(), t.label.as_deref().unwrap_or(""));
-        let n = {
-            let c = counts.entry(key).or_insert(0);
-            *c += 1;
-            *c
-        };
+    for (t, n) in numbered(c) {
         if let Some(m) = mask_for(t, n, c, o.padding) {
             e.masks.push(m);
         }
     }
     (!e.masks.is_empty()).then_some(e)
+}
+
+/// The tracks of `c` to hide, each with its number among its kind (per named target).
+fn numbered(c: &ClipRedact) -> Vec<(&Track, usize)> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    c.hidden()
+        .map(|t| {
+            let n = counts.entry(format!("{}:{}", t.kind.name(), t.label.as_deref().unwrap_or(""))).or_insert(0);
+            *n += 1;
+            (t, *n)
+        })
+        .collect()
+}
+
+/// The name of the mask hiding track `t`, number `n` of its kind (`Redact face 2`, `Redact DP
+/// World logo 1`).
+fn mask_name(t: &Track, n: usize) -> String {
+    let what = match (&t.kind, &t.label) {
+        (Kind::Target, Some(l)) => l.chars().take(40).collect::<String>(),
+        (k, _) => k.name().to_string(),
+    };
+    format!("{MASK_PREFIX}{what} {n}")
+}
+
+/// How much of a clip's picture its masks cover, as shares of the clip's frame: the largest
+/// single mask at any of its keyframes (a face's ellipse as an ellipse, a plate or a named target
+/// as its box, each padded as it is hidden) and the most hidden at once, with when (media
+/// seconds). A mask over a large part of the picture hides the shot, not a face or a logo.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Coverage {
+    pub largest: f64,
+    pub largest_name: String,
+    pub largest_at: f64,
+    pub most: f64,
+    pub most_at: f64,
+}
+
+/// The share of the frame the mask of track `t` covers at point `p`.
+fn share(t: &Track, p: &filmcraft_vision::track::TrackPoint, padding: f64) -> f64 {
+    let pad = if t.kind == Kind::Target { padding + TARGET_MARGIN } else { padding };
+    let b = filmcraft_vision::track::padded(&p.bbox, pad);
+    let w = ((b[0] + b[2]).min(1.0) - b[0].max(0.0)).max(0.0);
+    let h = ((b[1] + b[3]).min(1.0) - b[1].max(0.0)).max(0.0);
+    let a = w * h * if t.kind == Kind::Face { std::f64::consts::FRAC_PI_4 } else { 1.0 };
+    if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 }
+}
+
+/// [`Coverage`] of the masks hiding `c`'s tracks.
+pub fn coverage(c: &ClipRedact, padding: f64) -> Coverage {
+    let mut cov = Coverage::default();
+    // the share hidden at each analysed moment (milliseconds of media time)
+    let mut at: std::collections::BTreeMap<i64, f64> = std::collections::BTreeMap::new();
+    for (t, n) in numbered(c) {
+        for p in t.points.iter().filter(|p| p.t.is_finite()) {
+            let a = share(t, p, padding);
+            if a > cov.largest {
+                (cov.largest, cov.largest_name, cov.largest_at) = (a, mask_name(t, n), p.t);
+            }
+            *at.entry((p.t * 1000.0).round() as i64).or_insert(0.0) += a;
+        }
+    }
+    if let Some((k, a)) = at.iter().max_by(|a, b| a.1.total_cmp(b.1)) {
+        (cov.most, cov.most_at) = (a.min(1.0), *k as f64 / 1000.0);
+    }
+    cov
+}
+
+/// Where media time `media` of clip `it` plays in its sequence (inside the clip; a frame hold:
+/// its start).
+fn timeline_at(it: &filmcraft_project::TrackItem, media: Tick) -> Tick {
+    let speed = it.speed.abs();
+    if it.frame_hold.is_some() || !(speed.is_finite() && speed > 0.0) {
+        return it.start;
+    }
+    let rel = if it.reverse {
+        (it.source_in.0 as f64 + it.duration.0 as f64 * speed - 1.0 - media.0 as f64) / speed
+    } else {
+        (media.0 as f64 - it.source_in.0 as f64) / speed
+    };
+    let last = Tick(it.end().0.saturating_sub(1)).max(it.start);
+    if !rel.is_finite() {
+        return it.start;
+    }
+    Tick(it.start.0.saturating_add(rel.round() as i64)).clamp(it.start, last)
 }
 
 /// An effect this command made earlier: a blur or mosaic whose masks are all its own.
@@ -1048,6 +1120,21 @@ fn clip_json(c: &ClipRedact, dry: bool, masks: usize) -> Value {
         "masks": masks,
         "skipped": {"tooSmall": skipped(Skip::TooSmall), "tooBrief": skipped(Skip::TooBrief), "excluded": skipped(Skip::Excluded), "notAPerson": skipped(Skip::NotAPerson), "notAPlate": skipped(Skip::NotAPlate)},
         "tracks": c.tracks.iter().map(|(t, s)| track_json(t, *s, dry)).collect::<Vec<_>>(),
+    })
+}
+
+/// A clip's [`Coverage`] for its outcome: shares to a thousandth, and when, in media and (as the
+/// clip `it` plays) sequence seconds.
+fn coverage_json(c: &ClipRedact, padding: f64, it: Option<&filmcraft_project::TrackItem>) -> Value {
+    let cov = coverage(c, padding);
+    let r = |v: f64| (v * 1000.0).round() / 1000.0;
+    let when = |m: f64| json!({"media": r(m), "sequence": it.map(|it| r(timeline_at(it, Tick::from_seconds_f64(m)).seconds()))});
+    json!({
+        "largestMask": r(cov.largest),
+        "largestMaskName": (!cov.largest_name.is_empty()).then_some(cov.largest_name),
+        "largestAt": when(cov.largest_at),
+        "mostHidden": r(cov.most),
+        "mostHiddenAt": when(cov.most_at),
     })
 }
 
@@ -1300,7 +1387,15 @@ fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &V
     let effects: Vec<(ClipId, Option<EffectInstance>)> =
         clips.iter().zip(&made).flat_map(|(c, e)| std::iter::once(c.clip).chain(c.also.iter().copied()).map(move |id| (id, e.clone()))).collect();
     let masks = |id: ClipId| effects.iter().find(|(c, _)| *c == id).and_then(|(_, e)| e.as_ref()).map_or(0, |e| e.masks.len());
-    let summary: Vec<Value> = clips.iter().map(|c| clip_json(c, o.dry_run, if o.dry_run { 0 } else { masks(c.clip) })).collect();
+    let placed = s.project.sequence(pj.seq);
+    let summary: Vec<Value> = clips
+        .iter()
+        .map(|c| {
+            let mut v = clip_json(c, o.dry_run, if o.dry_run { 0 } else { masks(c.clip) });
+            v["coverage"] = coverage_json(c, o.padding, placed.and_then(|q| q.find_item(c.clip)).map(|(_, it)| it));
+            v
+        })
+        .collect();
     let mut changed = 0usize;
     if !o.dry_run {
         if s.project.sequence(pj.seq).is_none() {

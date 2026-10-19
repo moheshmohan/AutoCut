@@ -2069,6 +2069,9 @@ async fn cli() {
                                     if let Some(p) = png {
                                         diag(format_args!("showcase: contact sheet in {}", p.display()));
                                     }
+                                    if let Some(p) = &report.privacy_sheet {
+                                        diag(format_args!("showcase: privacy sheet in {p}"));
+                                    }
                                 }
                                 Err(e) => diag(format_args!("showcase: QA: {e}")),
                             }

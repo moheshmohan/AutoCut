@@ -466,3 +466,54 @@ fn stopping_changes_nothing() {
     assert!(o["error"].as_str().is_some_and(|e| e.contains("stopped")), "{o}");
     assert!(!clip_effects(&s, seq, clip).iter().any(is_auto_redaction));
 }
+
+/// The outcome says how much of the picture the masks cover, and when in the sequence: a small
+/// face is a few percent; a "face" over most of the picture (what a blur filling the frame came
+/// from) is reported as such, at its sequence time.
+#[test]
+fn coverage_reports_the_largest_mask_and_when_it_plays() {
+    let (mut s, _, seq) = session();
+    // the clip starts 1 s into the sequence
+    let mut p = (*s.project).clone();
+    p.sequence_mut(seq).unwrap().video_tracks[0].items[0].start = Tick::from_seconds_f64(1.0);
+    s.project = Arc::new(p);
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "verify": false})).unwrap();
+    let cov = &r["redact"]["clips"][0]["coverage"];
+    // a 48 px disc in 320 × 180, padded by a fifth each side, as an ellipse: about 6 %
+    let largest = cov["largestMask"].as_f64().unwrap();
+    assert!((0.04..0.09).contains(&largest), "{cov}");
+    assert_eq!(cov["largestMaskName"], json!("Redact face 1"));
+    assert_eq!(cov["mostHidden"].as_f64(), Some(largest), "one face: the most hidden is that face");
+    let (media, sequence) = (cov["largestAt"]["media"].as_f64().unwrap(), cov["largestAt"]["sequence"].as_f64().unwrap());
+    assert!((sequence - media - 1.0).abs() < 0.01, "{cov}");
+    // a detector that boxes most of the picture
+    s.redacts.detector = Some(Arc::new(|_: &[u8], _: usize, _: usize, _: usize| {
+        vec![Detection { kind: Kind::Face, score: 0.95, bbox: [0.1, 0.05, 0.8, 0.9], points: Vec::new() }]
+    }));
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "verify": false})).unwrap();
+    let cov = &r["redact"]["clips"][0]["coverage"];
+    assert!(cov["largestMask"].as_f64().unwrap() > 0.5, "{cov}");
+}
+
+#[test]
+fn media_times_map_to_the_sequence_through_speed_and_reverse() {
+    let (s, clip, seq) = session();
+    let mut it = s.project.sequence(seq).unwrap().find_item(clip).unwrap().1.clone();
+    it.start = Tick::from_seconds_f64(2.0);
+    it.source_in = Tick::from_seconds_f64(1.0);
+    let at = |it: &filmcraft_project::TrackItem, m: f64| timeline_at(it, Tick::from_seconds_f64(m)).seconds();
+    assert!((at(&it, 1.5) - 2.5).abs() < 1e-6);
+    it.speed = 2.0;
+    assert!((at(&it, 2.0) - 2.5).abs() < 1e-6, "twice as fast: a media second is half a sequence second");
+    it.reverse = true;
+    let end = it.source_out().seconds();
+    assert!((at(&it, end) - 2.0).abs() < 0.01, "reversed: the media's end plays first");
+    // outside the clip: its first or last frame; hostile speeds: its start
+    it.reverse = false;
+    assert_eq!(timeline_at(&it, Tick::ZERO), it.start);
+    assert!(timeline_at(&it, Tick::from_seconds_f64(1e6)) < it.end());
+    it.speed = f64::NAN;
+    assert_eq!(timeline_at(&it, Tick::from_seconds_f64(3.0)), it.start);
+    it.speed = 0.0;
+    assert_eq!(timeline_at(&it, Tick::from_seconds_f64(3.0)), it.start);
+}
