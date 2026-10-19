@@ -52,7 +52,7 @@ pub struct Settings {
     pub cfg: f32,
     /// Sway sampling coefficient, −1–1 (−1 spends the steps early, on the coarse shape).
     pub sway: f32,
-    /// Speaking speed, 0.5–2.
+    /// Speaking speed, 0.25–4 (the duration is divided by it).
     pub speed: f32,
     /// Seed of the noise.
     pub seed: u64,
@@ -75,8 +75,8 @@ impl Settings {
         if !(self.sway.is_finite() && (-1.0..=1.0).contains(&self.sway)) {
             return Err(TtsError::Invalid("sway must be between -1 and 1".into()));
         }
-        if !(self.speed.is_finite() && (0.5..=2.0).contains(&self.speed)) {
-            return Err(TtsError::Invalid("speed must be between 0.5 and 2".into()));
+        if !(self.speed.is_finite() && (0.25..=4.0).contains(&self.speed)) {
+            return Err(TtsError::Invalid("speed must be between 0.25 and 4".into()));
         }
         Ok(())
     }

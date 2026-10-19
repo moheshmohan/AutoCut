@@ -55,16 +55,18 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.voiceReference",
             "Voice Reference for Malayalam",
-            r#"{"voice":"clone:…","transcript":str? (the clip's words; else heard by the speech model),"redo":bool?,"speechModel":"whisper-…"?}"#,
+            r#"{"voice":"clone:…","items":[id]?,"clips":[id]?,"segments":[{"item":id,"start":seconds,"end":seconds}]? (a recording of the speaker: its best 10–15 s),"transcript":str? (the clip's words),"redo":bool?,"speechModel":"whisper-…"?}"#,
             voice_reference,
             false,
         ),
     ]
 }
 
-/// The Malayalam reference of a natural cloned voice: the stretch of its voice sample IndicF5
-/// speaks from and that stretch's words. Shown when made; made (or made again with `redo`)
-/// with the words given in `transcript`, else heard by the speech model (English).
+/// The Malayalam reference of a natural cloned voice: 10–15 s of the speaker IndicF5 speaks
+/// from, and their words. Shown when made. Made (or made again with `redo`) from a recording
+/// given as `items` / `clips` / `segments` (full band: the best source), else from the voice's
+/// own recording; the words heard by the speech model (English) unless given. `transcript`
+/// alone corrects the words of the clip already made.
 fn voice_reference(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "tts.voiceReference";
     let voice = str_p(p, "voice").ok_or_else(|| bad(cmd, "`voice` is required (clone:<name>)"))?.to_string();
@@ -78,10 +80,15 @@ fn voice_reference(s: &mut Session, p: &Value) -> Result<Value> {
     {
         let models = crate::transcript::models_dir().ok_or_else(|| bad(cmd, "no data directory for voice models"))?;
         let transcript = str_p(p, "transcript").map(str::to_string);
-        let redo = bool_p(p, "redo").unwrap_or(false) || transcript.is_some();
+        let sourced = ["items", "clips", "segments"].iter().any(|k| p.get(*k).is_some());
+        // a recording given: decoded at the natural clones' rate (full band)
+        let source = if sourced { Some(reference(s, p, NATURAL_REF_RATE)?) } else { None };
+        let redo = bool_p(p, "redo").unwrap_or(false) || sourced;
         let current = filmcraft_tts::clone::cross_reference(&models, &voice).map_err(|e| bad(cmd, e.to_string()))?;
-        let r = match current {
-            Some(r) if !redo => r,
+        let r = match (current, transcript.as_deref()) {
+            // the words of the clip already made, corrected
+            (Some(_), Some(t)) if !redo => filmcraft_tts::clone::set_cross_transcript(&models, &voice, t).map_err(|e| bad(cmd, e.to_string()))?,
+            (Some(r), None) if !redo => r,
             _ => {
                 let transcriber = if transcript.is_none() {
                     let speech = match str_p(p, "speechModel") {
@@ -97,10 +104,11 @@ fn voice_reference(s: &mut Session, p: &Value) -> Result<Value> {
                     let opts = filmcraft_speech::Options { language: Some("en".into()), diarize: false, ..Default::default() };
                     t.transcribe(x16, &opts, &mut |_, _| true).map(|tr| tr.text()).map_err(|e| e.to_string())
                 };
-                filmcraft_tts::clone::prepare_cross_lingual(&models, &voice, transcript.as_deref(), &mut hear).map_err(|e| bad(cmd, e.to_string()))?
+                let src = source.as_ref().map(|(audio, what)| filmcraft_tts::clone::CrossSource { audio, rate: NATURAL_REF_RATE, source: what });
+                filmcraft_tts::clone::prepare_cross_lingual(&models, &voice, src, transcript.as_deref(), &mut hear).map_err(|e| bad(cmd, e.to_string()))?
             }
         };
-        Ok(json!({"voice": voice, "from": r.from, "to": r.to, "transcript": r.transcript, "given": r.given}))
+        Ok(json!({"voice": voice, "source": r.source, "from": r.from, "to": r.to, "transcript": r.transcript, "given": r.given, "clip": r.clip}))
     }
     #[cfg(not(feature = "neural-voices"))]
     {

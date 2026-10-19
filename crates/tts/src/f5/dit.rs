@@ -94,8 +94,11 @@ impl ConvNext {
 
 struct Block {
     ada: Linear,
-    /// v, q and k in one matrix (v first: see `attend`).
-    qkv: Linear,
+    // three products, each transposed into heads: on Metal one stacked product and a 5-D
+    // permute were twice as slow (measured)
+    q: Linear,
+    k: Linear,
+    v: Linear,
     o: Linear,
     ff1: Linear,
     ff2: Linear,
@@ -148,11 +151,9 @@ impl Dit {
             let b = |n: &str| p(&format!("transformer_blocks.{i}.{n}"));
             blocks.push(Block {
                 ada: ld.linear(&b("attn_norm.linear"), d, 6 * d, true)?,
-                qkv: Linear::stack(&[
-                    ld.linear(&b("attn.to_v"), d, d, true)?,
-                    ld.linear(&b("attn.to_q"), d, d, true)?,
-                    ld.linear(&b("attn.to_k"), d, d, true)?,
-                ])?,
+                q: ld.linear(&b("attn.to_q"), d, d, true)?,
+                k: ld.linear(&b("attn.to_k"), d, d, true)?,
+                v: ld.linear(&b("attn.to_v"), d, d, true)?,
                 o: ld.linear(&b("attn.to_out.0"), d, d, true)?,
                 ff1: ld.linear(&b("ff.ff.0.0"), d, cfg.ff, true)?,
                 ff2: ld.linear(&b("ff.ff.2"), cfg.ff, d, true)?,
@@ -258,19 +259,18 @@ impl Dit {
     fn attend(&self, blk: &Block, x: &Tensor, ctx: &Context) -> R<Tensor> {
         let (b, n, _) = x.dims3().map_err(err)?;
         let (h, hd) = (self.cfg.heads, self.cfg.head_dim);
-        // [b, n, 3·d] → [3, b, h, n, hd] in one copy: v, q and k come out contiguous. v is
-        // first, so it starts the buffer: candle's Metal attention reads its inputs from their
-        // offset in elements as if it were bytes (q and k are new tensors after the rotation)
-        let qkv = blk.qkv.fwd(x)?.reshape((b, n, 3, h, hd)).map_err(err)?.permute((2, 0, 3, 1, 4)).map_err(err)?.contiguous().map_err(err)?;
-        let part = |i: usize| -> R<Tensor> { qkv.get(i).map_err(err) };
+        // each projection [b, n, d] → [b, h, n, hd], a new tensor starting its buffer (candle's
+        // fused Metal attention reads an input that does not from the wrong place: it takes the
+        // offset in elements for bytes)
+        let heads = |y: Tensor| -> R<Tensor> { y.reshape((b, n, h, hd)).map_err(err)?.transpose(1, 2).map_err(err)?.contiguous().map_err(err) };
         // rotary on head 0 only (the reference rotates the first 64 channels of the projection)
         let rotate = |y: Tensor| -> R<Tensor> {
             let flat = y.reshape((b * h, 1, n, hd)).map_err(err)?;
             candle_nn::rotary_emb::rope_i(&flat, &ctx.cos, &ctx.sin).map_err(err)?.reshape((b, h, n, hd)).map_err(err)
         };
-        let v = part(0)?;
-        let q = rotate(part(1)?)?;
-        let k = rotate(part(2)?)?;
+        let q = rotate(heads(blk.q.fwd(x)?)?)?;
+        let k = rotate(heads(blk.k.fwd(x)?)?)?;
+        let v = heads(blk.v.fwd(x)?)?;
         let scale = 1.0 / (hd as f64).sqrt();
         let o = if x.device().is_metal() {
             candle_nn::ops::sdpa(&q, &k, &v, None, false, scale as f32, 1.0).map_err(err)?

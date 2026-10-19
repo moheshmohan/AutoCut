@@ -179,6 +179,13 @@ impl F5 {
         Ok(Reference { mel, frames, audio_len: audio.len() / HOP, rms, text: reference_text(transcript) })
     }
 
+    /// Seconds the reference's formula gives `text` after `r` at speed 1 (the transcript's
+    /// speaking rate).
+    pub fn natural_seconds(&self, r: &Reference, text: &str) -> f64 {
+        let (ref_len, gen_len) = (spoken_len(&r.text).max(1), spoken_len(text));
+        (r.audio_len as f64 / ref_len as f64 * gen_len as f64) * HOP as f64 / f64::from(RATE)
+    }
+
     /// The frames to generate for `text` after `r` at `speed` (the reference's formula), and
     /// the tokens of transcript and text together.
     pub(crate) fn plan(&self, r: &Reference, text: &str, speed: f32) -> R<(Vec<u32>, usize, Vec<char>)> {

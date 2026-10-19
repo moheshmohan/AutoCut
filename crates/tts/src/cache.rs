@@ -63,7 +63,7 @@ pub fn voice_identity(id: &str, models_dir: Option<&Path>) -> Option<String> {
 
 /// Version of the Malayalam front end (`crate::malayalam`) and voice: bumped when either reads
 /// the same script differently, so old Malayalam entries miss.
-pub const MALAYALAM_VERSION: u32 = 1;
+pub const MALAYALAM_VERSION: u32 = 2;
 
 /// [`voice_identity`] of the voice `id` speaking `language`: English is exactly
 /// [`voice_identity`] (so English entries keep their keys); Malayalam is the cloned voice's
@@ -85,13 +85,12 @@ fn malayalam_identity(id: &str, models_dir: &Path) -> Option<String> {
     let mut h = Sha256::new();
     h.update(r.transcript.as_bytes());
     Some(format!(
-        "{}|clone v{}|created {}|sample {}|indicf5 ref {}–{} {}|{}|{} v{MALAYALAM_VERSION}",
+        "{}|clone v{}|created {}|sample {}|indicf5 ref {} {}|{}|{} v{MALAYALAM_VERSION}",
         p.id,
         p.version,
         p.created,
         r.sample,
-        r.from.to_bits(),
-        r.to.to_bits(),
+        r.clip_sha,
         hex(&h.finalize()),
         pins(catalog::INDICF5.files),
         crate::malayalam::TAG,

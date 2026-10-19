@@ -200,7 +200,7 @@ fn malayalam_reference(n: &Narration, models_dir: Option<&std::path::Path>, tran
             let opts = filmcraft_speech::Options { language: Some("en".into()), diarize: false, ..Default::default() };
             t.transcribe(x16, &opts, &mut |_, _| true).map(|tr| tr.text()).map_err(|e| e.to_string())
         };
-        tts::clone::prepare_cross_lingual(dir, &n.voice, None, &mut hear)?;
+        tts::clone::prepare_cross_lingual(dir, &n.voice, None, None, &mut hear)?;
     }
     #[cfg(not(feature = "neural-voices"))]
     let _ = transcriber;

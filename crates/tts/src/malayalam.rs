@@ -502,6 +502,34 @@ fn latin(word: &str, note: &mut dyn FnMut(String)) -> String {
     groups.join(" ")
 }
 
+/// Syllables of Malayalam text: every vowel sound — an independent vowel, a consonant that is
+/// not silenced by a virama inside a cluster (its inherent or written vowel), and a word-final
+/// virama (spoken as a short "ŭ", as in "ആണ്"). Chillus and conjunct halves add none; other
+/// scripts count their letter groups roughly (a vowel letter run each).
+pub fn syllables(text: &str) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let mut n = 0usize;
+    for (i, c) in chars.iter().enumerate() {
+        let next = chars.get(i + 1).copied();
+        match *c {
+            'അ'..='ഔ' => n += 1,
+            'ക'..='ഹ' => {
+                // silenced only by a virama that a consonant follows (a cluster)
+                let clustered = next == Some(VIRAMA) && chars.get(i + 2).is_some_and(|x| ('ക'..='ഹ').contains(x));
+                if !clustered {
+                    n += 1;
+                }
+            }
+            _ => {}
+        }
+        // a Latin word: its vowel groups
+        if c.is_ascii_alphabetic() && "aeiouyAEIOUY".contains(*c) && !chars.get(i.wrapping_sub(1)).is_some_and(|p| "aeiouyAEIOUY".contains(*p)) {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// A piece of a script.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Piece {
@@ -704,6 +732,17 @@ mod tests {
         let n = normalize("ഹായ് 🙂!");
         assert_eq!(n.text, "ഹായ്!");
         assert!(n.notes.iter().any(|x| x.contains('🙂')));
+    }
+
+    #[test]
+    fn syllables_are_counted() {
+        assert_eq!(syllables("ഇത്"), 2);
+        assert_eq!(syllables("കണ്ടുമുട്ടിയ"), 5);
+        assert_eq!(syllables("ഞാൻ"), 1);
+        assert_eq!(syllables("ആൻഡ്രോയിഡ്"), 4, "aan-ḍroy-i-ḍŭ");
+        assert_eq!(syllables("ദുബായിൽ നടന്ന ജൈടെക്സിൽ ഈ ആൻഡ്രോയിഡ് ഒരു മനുഷ്യനെപ്പോലെ തന്നെ തോന്നി."), 26);
+        assert_eq!(syllables("robot"), 2);
+        assert_eq!(syllables(""), 0);
     }
 
     #[test]

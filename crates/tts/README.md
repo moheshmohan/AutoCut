@@ -106,8 +106,8 @@ clip behaviour: `crates/engine/src/narration.rs`.
     are counted.
   - Devices: Metal on macOS, else the CPU (`FILMCRAFT_F5_CPU` forces it). candle's fused Metal
     attention reads an input that does not start its buffer from the wrong place (it passes
-    the element offset as a byte offset), so v is projected first (a regression test compares
-    the GPU with the CPU).
+    the element offset as a byte offset), so q, k and v are each a tensor of their own (a
+    regression test compares the GPU with the CPU).
 
 - **Malayalam** (`voice_for(id, "ml-IN", …)`): a natural clone speaks Malayalam through IndicF5.
   - `malayalam` (no feature): the text front end. Spelling made canonical (two-part vowel
@@ -118,20 +118,26 @@ clip behaviour: `crates/engine/src/narration.rs`.
     digits in codes with English names ("G1" → "ജി വൺ"); other Latin words kept and reported;
     emoji and unknown symbols dropped and reported (`report`); sentences grouped into utterances
     that fit the model, a long one split at commas, else between words; pause markers exact.
-    `detect` says whether a script is written in Malayalam.
-  - `clone`: the *Malayalam reference* (`<name>.indicf5.json`): 8–12 s of the voice sample
-    between pauses and its words — heard once by the speech model (English) or given by the
-    user — tied to the sample's SHA-256 (a voice made again needs a new one). The sample is
-    English: IndicF5 is prompted across languages. `clone:<name>` in Malayalam reads each
-    utterance after it (pace is IndicF5's own speed, pitch the pitch shifter; takes reseed),
-    250 ms between utterances, under the GPU lock.
+    `detect` says whether a script is written in Malayalam; `syllables` counts its syllables.
+  - `clone`: the *Malayalam reference* (`<name>.indicf5.json` and the clip
+    `<name>.indicf5.wav`, 24 kHz): the best 10–15 s between pauses of the best recording there
+    is — one given for it (`tts.voiceReference` with project items), else the voice sample's
+    full-band copy (`<name>.full.wav`, which natural clones now keep at the recording's rate),
+    else the voice sample itself — and its words, heard once by the speech model (English) or
+    given by the user (and correctable). Tied to the sample's SHA-256 (a voice made again needs
+    a new one); the English profile and its sample are never touched. The recording is English:
+    IndicF5 is prompted across languages. `clone:<name>` in Malayalam reads each utterance after
+    it (pace is IndicF5's own speed, pitch the pitch shifter; takes reseed), 250 ms between
+    utterances, under the GPU lock. The duration is held within 4.6–6 syllables a second
+    (Malayalam read aloud runs about 5–6): the reference's characters-per-second estimate is
+    far off across languages and when the speech model adds words that were never said.
   - `catalog::INDICF5`: `model.safetensors` (1 402 789 408 bytes) and `vocab.txt` (11 283),
     MIT. The official repository is gated (sign-in and a click-through); FilmCraft downloads
     anonymously, so the files come from a public mirror pinned to a commit whose bytes have the
     official SHA-256.
   - `cache::voice_identity_for`: English is exactly `voice_identity` (English entries keep
-    their keys); Malayalam keys on the profile, the sample, the reference clip and words, the
-    IndicF5 pins and the front end's version.
+    their keys); Malayalam keys on the profile, the sample, the reference clip (SHA-256) and
+    words, the IndicF5 pins and the front end's version.
 
 - `clone` also makes **natural clones** (profile version 2, engine `voxcpm`): a *voice sample*
   is kept next to the profile (`<name>.wav`: the best continuous 10–25 s of speech between
@@ -223,6 +229,61 @@ The author's own recording (a phone video, 0–120 s, Indian English, room noise
 - Speed: VoxCPM1.5 runs ~0.6× real time on the M3 Max GPU, VoxCPM2 ~0.8×; on the CPU (candle's
   gemm) ~2.3× and ~4.8×. Loading takes 2–5 s; a voice sample is encoded once per profile.
 
+## Malayalam (IndicF5): checked and measured (2026-10-19)
+
+**Against the reference.** The release's own PyTorch code run on the CPU as an oracle
+(`oracle/f5_oracle.py`-style, a venv under the lane's target directory, never shipped) with the
+port's noise, a 7.6 s clip of the author's voice sample and a Malayalam line
+(`live_matches_the_reference_oracle`):
+
+| Compared | CPU | Metal |
+|---|---|---|
+| Tokens of transcript + line (149) | equal | equal |
+| State after Euler step 1 / 2 (values up to 4.6) | 2.4e-7 / 6.7e-7 | 2.4e-7 / 6.3e-7 |
+| Final mel after 32 steps, max / mean (values up to 17) | 5.9e-4 / 4e-6 | 9.0e-3 / 3e-5 |
+| Vocos on the same mel (amplitude up to 1.2) | 2.1e-5 | 3.0e-5 |
+| Reference mel | 9.9e-5 in magnitude | |
+
+The log mel of the reference differs by up to 0.2 only in the bands above 8 kHz, which a 16 kHz
+sample leaves near the 1e-5 floor: there the reference's single-precision FFT rounding is a
+large share of the value (this port's FFT is f64). Fed the reference's own mel, the network
+matches as above.
+
+**Quality.** The author's natural clone (`clone:mohesh-natural`, made from a phone video in
+Indian English), the two test lines through `tts.preview` (Apple M3 Max; the GPU shared with
+other sessions and a local LLM, so times are high). Similarity is the cosine against held-out
+speech of the speaker (the recording minus the voice sample): ECAPA is SpeechBrain's
+`spkrec-ecapa-voxceleb` (Apache-2.0, an external measuring instrument), *colour* the OpenVoice
+converter's reference encoder (`examples/voice_similarity.rs`). *Heard* is the share of the
+line's consonants Whisper-base (`ml`) hears, compared across scripts as the showcase does —
+Whisper-base writes Malayalam in Tamil script; a garbled reading scores near 0.
+
+| IndicF5 reference | ECAPA (line 1 / 2) | Colour | Heard | Rate (syll./s) |
+|---|---|---|---|---|
+| **14.4 s of the original recording, 24 kHz, Whisper's words** (`tts.voiceReference` with the video) | **0.77 / 0.67** | **0.86 / 0.80** | 0.68 / 0.61 | 6.3 / 6.9 |
+| 10.8 s of VoxCPM2 speaking English, exact words | 0.62 / 0.55 | 0.76 / 0.69 | 0.76 / 0.58 | 6.3 / 6.6 |
+| 15.6 s of the 16 kHz voice sample | 0.45 / 0.44 | 0.74 / 0.67 | 0.72 / 0.67 | 5.9 / 5.6 |
+| 7.6 s of the 16 kHz voice sample | 0.49 / 0.38 | | | 4.2 / 4.0 |
+| VoxCPM2 speaking the lines in English (for comparison) | 0.55 / 0.59 | 0.83 / 0.73 | | |
+| The speaker: another stretch of the recording | 0.92 | 0.97 | | |
+
+- The full-band recording is what carries the voice: IndicF5 speaking Malayalam from it is
+  closer to the speaker than VoxCPM2 speaking English (ECAPA 0.72 against 0.57 on average). A
+  16 kHz sample makes IndicF5 speak band-limited and less like the speaker (0.45), hence the
+  full-band copy natural clones now keep, and `tts.voiceReference` with a recording for voices
+  made before. A longer clip helps (7 s → 15 s: 0.48 → 0.62 on the 24 kHz variant).
+- The timbre carried over well enough that the OpenVoice tone-colour converter was not added as
+  a second stage.
+- Whisper-base heard the lines as Malayalam (in Tamil script), e.g. line 2 as
+  "…நடந்தத்தைத்திடிக்சல் … ஒரு மன்ஷினைப் படுத்தனை தோன்றி" (*naṭanta … oru manuṣyane … tōnni*);
+  line 1's years came back as digits.
+- 16 Euler steps instead of 32 measured the same (ECAPA 0.74 / 0.65 against 0.76 / 0.65) in
+  half the time; 32, the reference's, is kept.
+- Speed: one step is two passes over reference + line (about 2 000 frames for a 14 s clip and
+  a 5 s line): 0.4 s at 1 300 frames and 0.8 s at 2 000 on an idle M3 Max GPU, so about
+  25 s a line (real-time factor 4–6); the reference clip's length sets most of it. A
+  rebuild reads from the narration cache.
+
 ## Limitations
 
 - The built-in voices are **robotic** and nearly unintelligible to a recogniser (above); they are
@@ -236,6 +297,13 @@ The author's own recording (a phone video, 0–120 s, Indian English, room noise
 - A *timbre-only* cloned voice copies **timbre**, not accent or rhythm: those are still Kokoro's
   (US English). Natural (VoxCPM) clones copy accent and rhythm too, but are large downloads
   (2–5 GB) and want a GPU: on the CPU VoxCPM2 is about 5× slower than real time.
+- Malayalam: the reference clip's words come from the speech model, and Whisper-base hears
+  Indian English on a phone video imperfectly (it added a sentence that was never said to the
+  author's clip). IndicF5 aligns its reading to those words, so wrong ones can blur the first
+  syllables of a line; check them with `tts.voiceReference` and correct them with
+  `transcript`. IndicF5 is about 4–6× slower than real time on the M3 Max GPU (a CPU is far
+  slower: 22× in the oracle run). Latin words left in a Malayalam script are read as best the
+  model can (reported in `notes`). Only Malayalam is wired up of IndicF5's eleven languages.
 - Natural clones are English-normalised (the text front end); VoxCPM2 itself speaks 30 languages.
   VoxCPM1.5 needs a clean voice sample with an exact transcript (above). Natural voices reproduce
   the sample's recording colour (room, microphone) along with the voice.
@@ -261,6 +329,20 @@ utterances and refuse texts past their context; natural profiles round-trip and 
 voice sample is the densest stretch between pauses at −20 LUFS. With a release in
 `FILMCRAFT_VOXCPM_DIR`: the tokenizer's ids equal Hugging Face's, the reference oracle comparison
 (`VOXCPM_ORACLE`), and per-part timings (`live_voxcpm_parts`).
+
+IndicF5 (feature `indicf5`): the vocabulary (Python's line rules) and the reference's
+tokenization; the mel (silence on the floor, a tone in its band), the f64 FFT against a DFT and
+the inverse STFT inverting the STFT; depthwise convolution, Mish, the position table and the
+first-head rotary against loops (CPU and GPU); a tiny random release speaks deterministically,
+reseeds, follows speed, refuses texts past 4096 frames, stops when asked; the GPU equals the
+CPU; hostile references (short, long, silent, NaN, no words) and broken releases (vocabulary
+mismatch, foreign weights, garbage) are errors; the Malayalam reference is made once per sample
+(full-band source preferred, words corrected, stale when the sample changes, damaged clips
+refused) and keys Malayalam only; the Malayalam voice speaks scripts with pauses, takes, pace
+and pitch; the speaking rate is held. The front end: numbers (0 to crores), suffix sandhi,
+ranges, symbols, acronyms, canonical spelling, syllables, utterance splitting and hostile
+scripts. With a release in `FILMCRAFT_F5_DIR`: the oracle comparison (`F5_ORACLE`) and per-part
+timings (`live_f5_parts`).
 
 Model-dependent tests run when `FILMCRAFT_KOKORO_DIR` names a downloaded package directory
 (determinism, whole frames, pace changes length, refusals); the loaders have hostile-input tests
