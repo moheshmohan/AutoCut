@@ -1520,7 +1520,9 @@ fn back_to_top<A: Act>(actor: &mut A, plan: &Plan, summary: &mut Summary, cap: &
         actor.scroll(-END_SCROLL_LINES)?;
         actor.sleep(900);
         *cap = actor.capture()?;
-        still = if verify::changed(&before, &cap.png)? { 0 } else { still + 1 };
+        // `moved`, not `changed`: the hovered video tile plays its preview, so the screen
+        // never stops changing at the top either
+        still = if verify::moved(&before, &cap.png)? { 0 } else { still + 1 };
     }
     Ok(())
 }
@@ -1589,7 +1591,10 @@ fn range_once<A: Act, G: Ground>(
         actor.scroll(END_SCROLL_LINES)?;
         actor.sleep(1200);
         *cap = actor.capture()?;
-        if verify::changed(&before, &cap.png)? {
+        // `moved`, not `changed`: the video tile under the pointer plays its preview, which
+        // kept the screen "changing" forever and spent the whole budget scrolling (a 92-item
+        // album, 2026-10-19)
+        if verify::moved(&before, &cap.png)? {
             still = 0;
             scrolled = true;
         } else {

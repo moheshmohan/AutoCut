@@ -13,6 +13,9 @@ const THRESHOLD: f32 = 2.0;
 const PIXEL_DELTA: u8 = 24;
 /// Clearly-changed pixels above this share (1/2000 = 0.05%) count as "the screen changed".
 const CHANGED_SHARE_DIV: u64 = 2000;
+/// Clearly-changed pixels above this share (1/10) count as "the view moved" (a scroll): a
+/// hovered video tile playing its preview (a few percent of a picker window) stays under.
+const MOVED_SHARE_DIV: u64 = 10;
 
 fn to_small_gray(png: &[u8]) -> Result<image::GrayImage, ScreenError> {
     let img = image::load_from_memory(png).map_err(|e| ScreenError::Other(format!("cannot decode a capture for comparison: {e}")))?;
@@ -22,6 +25,23 @@ fn to_small_gray(png: &[u8]) -> Result<image::GrayImage, ScreenError> {
     let nw = ((f64::from(w) * f).round() as u32).max(1);
     let nh = ((f64::from(h) * f).round() as u32).max(1);
     Ok(img.resize_exact(nw, nh, image::imageops::FilterType::Triangle).to_luma8())
+}
+
+/// Whether the view moved as a whole between two captures (a scroll did something), as
+/// opposed to a small part of it changing: more than a tenth of the pixels changed clearly.
+/// [`changed`] is too sensitive for "is this the end of the grid?": in Google Photos the video
+/// tile under the pointer plays its preview, so the screen never stops changing.
+pub fn moved(a: &[u8], b: &[u8]) -> Result<bool, ScreenError> {
+    let (ga, gb) = (to_small_gray(a)?, to_small_gray(b)?);
+    if ga.width() == 0 || ga.height() == 0 || ga.width() != gb.width() || ga.height() != gb.height() {
+        return Ok(true);
+    }
+    let (mut clear, mut n) = (0u64, 0u64);
+    for (pa, pb) in ga.pixels().zip(gb.pixels()) {
+        clear += u64::from(pa.0[0].abs_diff(pb.0[0]) > PIXEL_DELTA);
+        n += 1;
+    }
+    Ok(n == 0 || clear.saturating_mul(MOVED_SHARE_DIV) > n)
 }
 
 /// Whether two captures differ visually. Identical inputs are `false`; decode failures are
@@ -49,6 +69,31 @@ pub fn changed(a: &[u8], b: &[u8]) -> Result<bool, ScreenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_playing_tile_is_a_change_but_not_a_move() {
+        // a 160×160 square on 800×600 is ~5% of the frame: a hovered tile playing its preview
+        let (still, playing) = (png_with(None), png_with(Some((320, 200))));
+        assert!(changed(&still, &playing).unwrap(), "the tile changed");
+        assert!(!moved(&still, &playing).unwrap(), "but the view did not move");
+        // the whole view shifting (a scroll) is a move
+        let mut a = image::GrayImage::new(800, 600);
+        let mut b = image::GrayImage::new(800, 600);
+        for y in 0..600u32 {
+            for x in 0..800u32 {
+                let stripe = |yy: u32| if (yy / 40).is_multiple_of(2) { 30u8 } else { 220u8 };
+                a.put_pixel(x, y, image::Luma([stripe(y)]));
+                b.put_pixel(x, y, image::Luma([stripe(y + 40)]));
+            }
+        }
+        let png = |img: &image::GrayImage| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        assert!(moved(&png(&a), &png(&b)).unwrap());
+        assert!(!moved(&png(&a), &png(&a)).unwrap());
+    }
 
     fn png_with(square_at: Option<(u32, u32)>) -> Vec<u8> {
         let mut img = image::GrayImage::from_pixel(800, 600, image::Luma([100u8]));
