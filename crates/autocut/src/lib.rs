@@ -28,6 +28,7 @@ pub mod llm;
 pub mod ollama;
 pub mod planner;
 pub mod qa;
+pub mod recipes;
 pub mod runner;
 pub mod shorts;
 pub mod showcase;

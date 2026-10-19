@@ -3645,3 +3645,32 @@
 	Downloading the template…	Baixando o modelo…
 	Installed “{name}”	“{name}” instalado
 	Wrote {path}	Gravado {path}
+# Recipes (Window ▸ Recipes)
+	Recipes	Receitas
+	Save this edit as a recipe	Salvar esta edição como receita
+	Record, edit as usual, then stop: the edits become a recipe you can run again.	Grave, edite como de costume e pare: as edições viram uma receita que você pode executar de novo.
+	● Record	● Gravar
+	Recording: {n} edits so far	Gravando: {n} edições até agora
+	Recipe name	Nome da receita
+	Stop and Save	Parar e salvar
+	({n} files could not be read: recipe.list says why)	({n} arquivos não puderam ser lidos: recipe.list diz por quê)
+	yours	sua
+	The recipe {id} is gone	A receita {id} não existe mais
+	AutoCut: {intent}	AutoCut: {intent}
+	(when {param} is on)	(quando {param} está ligado)
+	Parameters	Parâmetros
+	a file path	um caminho de arquivo
+	a template id (Templates panel)	um id de modelo (painel Modelos)
+	Run	Executar
+	Edit steps	Editar etapas
+	Steps (JSON)	Etapas (JSON)
+	Save Steps	Salvar etapas
+	Running the recipe…	Executando a receita…
+	Recipe: {e}	Receita: {e}
+	Recipe deleted	Receita excluída
+	Recording: edit as usual, then Stop and Save in Recipes	Gravando: edite como de costume e depois Parar e salvar em Receitas
+	Saved the recipe “{name}” ({n} steps)	Receita “{name}” salva ({n} etapas)
+	Nothing was recorded	Nada foi gravado
+	Recording discarded	Gravação descartada
+	The steps are not JSON: {e}	As etapas não são JSON: {e}
+	Recipe saved	Receita salva

@@ -3639,3 +3639,32 @@
 	Downloading the template…	Mengunduh templat…
 	Installed “{name}”	“{name}” terpasang
 	Wrote {path}	Ditulis ke {path}
+# Recipes (Window ▸ Recipes)
+	Recipes	Resep
+	Save this edit as a recipe	Simpan suntingan ini sebagai resep
+	Record, edit as usual, then stop: the edits become a recipe you can run again.	Rekam, sunting seperti biasa, lalu berhenti: suntingan itu menjadi resep yang bisa dijalankan lagi.
+	● Record	● Rekam
+	Recording: {n} edits so far	Merekam: {n} suntingan sejauh ini
+	Recipe name	Nama resep
+	Stop and Save	Hentikan dan Simpan
+	({n} files could not be read: recipe.list says why)	({n} file tidak dapat dibaca: recipe.list menjelaskan sebabnya)
+	yours	milik Anda
+	The recipe {id} is gone	Resep {id} sudah tidak ada
+	AutoCut: {intent}	AutoCut: {intent}
+	(when {param} is on)	(jika {param} aktif)
+	Parameters	Parameter
+	a file path	jalur file
+	a template id (Templates panel)	id templat (panel Templat)
+	Run	Jalankan
+	Edit steps	Sunting langkah
+	Steps (JSON)	Langkah (JSON)
+	Save Steps	Simpan Langkah
+	Running the recipe…	Menjalankan resep…
+	Recipe: {e}	Resep: {e}
+	Recipe deleted	Resep dihapus
+	Recording: edit as usual, then Stop and Save in Recipes	Merekam: sunting seperti biasa, lalu Hentikan dan Simpan di Resep
+	Saved the recipe “{name}” ({n} steps)	Resep “{name}” disimpan ({n} langkah)
+	Nothing was recorded	Tidak ada yang terekam
+	Recording discarded	Rekaman dibuang
+	The steps are not JSON: {e}	Langkah bukan JSON: {e}
+	Recipe saved	Resep disimpan

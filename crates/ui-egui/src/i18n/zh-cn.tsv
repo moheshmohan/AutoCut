@@ -3706,3 +3706,32 @@
 	Downloading the template…	正在下载模板…
 	Installed “{name}”	已安装“{name}”
 	Wrote {path}	已写入 {path}
+# Recipes (Window ▸ Recipes)
+	Recipes	配方
+	Save this edit as a recipe	将此编辑保存为配方
+	Record, edit as usual, then stop: the edits become a recipe you can run again.	开始录制，照常编辑，然后停止：这些编辑会变成可以再次运行的配方。
+	● Record	● 录制
+	Recording: {n} edits so far	录制中：目前 {n} 处编辑
+	Recipe name	配方名称
+	Stop and Save	停止并保存
+	({n} files could not be read: recipe.list says why)	（{n} 个文件无法读取：原因见 recipe.list）
+	yours	我的
+	The recipe {id} is gone	配方 {id} 已不存在
+	AutoCut: {intent}	AutoCut：{intent}
+	(when {param} is on)	（{param} 开启时）
+	Parameters	参数
+	a file path	文件路径
+	a template id (Templates panel)	模板 ID（模板面板）
+	Run	运行
+	Edit steps	编辑步骤
+	Steps (JSON)	步骤 (JSON)
+	Save Steps	保存步骤
+	Running the recipe…	正在运行配方…
+	Recipe: {e}	配方：{e}
+	Recipe deleted	配方已删除
+	Recording: edit as usual, then Stop and Save in Recipes	录制中：照常编辑，然后在配方中点“停止并保存”
+	Saved the recipe “{name}” ({n} steps)	已保存配方“{name}”（{n} 步）
+	Nothing was recorded	没有录制到任何内容
+	Recording discarded	已丢弃录制
+	The steps are not JSON: {e}	步骤不是 JSON：{e}
+	Recipe saved	配方已保存

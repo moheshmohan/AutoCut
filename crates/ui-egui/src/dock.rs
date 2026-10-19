@@ -44,10 +44,12 @@ pub enum PanelKind {
     Showcase,
     /// The video template browser: starters and saved templates, filled and built.
     Templates,
+    /// Recipes: one-click chains of commands and AutoCut intents, run as a job; recording an edit as one.
+    Recipes,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 31] = [
+    pub const ALL: [PanelKind; 32] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -79,6 +81,7 @@ impl PanelKind {
         PanelKind::ProjectNotes,
         PanelKind::Showcase,
         PanelKind::Templates,
+        PanelKind::Recipes,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -113,6 +116,7 @@ impl PanelKind {
             PanelKind::ProjectNotes => "Project Notes",
             PanelKind::Showcase => "Showcase",
             PanelKind::Templates => "Templates",
+            PanelKind::Recipes => "Recipes",
         }
     }
     pub fn id(self) -> String {

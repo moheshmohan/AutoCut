@@ -3660,3 +3660,32 @@
 	Downloading the template…	템플릿을 내려받는 중…
 	Installed “{name}”	“{name}” 설치됨
 	Wrote {path}	{path}에 썼습니다
+# Recipes (Window ▸ Recipes)
+	Recipes	레시피
+	Save this edit as a recipe	이 편집을 레시피로 저장
+	Record, edit as usual, then stop: the edits become a recipe you can run again.	기록을 시작하고 평소처럼 편집한 뒤 멈추면, 그 편집이 다시 실행할 수 있는 레시피가 됩니다.
+	● Record	● 기록
+	Recording: {n} edits so far	기록 중: 지금까지 편집 {n}개
+	Recipe name	레시피 이름
+	Stop and Save	멈추고 저장
+	({n} files could not be read: recipe.list says why)	(파일 {n}개를 읽지 못했습니다. 이유는 recipe.list에)
+	yours	내 것
+	The recipe {id} is gone	레시피 {id}이(가) 없습니다
+	AutoCut: {intent}	AutoCut: {intent}
+	(when {param} is on)	({param}이(가) 켜져 있을 때)
+	Parameters	매개변수
+	a file path	파일 경로
+	a template id (Templates panel)	템플릿 ID(템플릿 패널)
+	Run	실행
+	Edit steps	단계 편집
+	Steps (JSON)	단계(JSON)
+	Save Steps	단계 저장
+	Running the recipe…	레시피 실행 중…
+	Recipe: {e}	레시피: {e}
+	Recipe deleted	레시피를 삭제했습니다
+	Recording: edit as usual, then Stop and Save in Recipes	기록 중: 평소처럼 편집한 뒤 레시피에서 멈추고 저장
+	Saved the recipe “{name}” ({n} steps)	레시피 “{name}”을(를) 저장했습니다({n}단계)
+	Nothing was recorded	기록된 것이 없습니다
+	Recording discarded	기록을 버렸습니다
+	The steps are not JSON: {e}	단계가 JSON이 아닙니다: {e}
+	Recipe saved	레시피를 저장했습니다

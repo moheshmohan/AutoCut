@@ -3644,3 +3644,32 @@
 	Downloading the template…	Téléchargement du modèle…
 	Installed “{name}”	« {name} » installé
 	Wrote {path}	Écrit : {path}
+# Recipes (Window ▸ Recipes)
+	Recipes	Recettes
+	Save this edit as a recipe	Enregistrer ce montage comme recette
+	Record, edit as usual, then stop: the edits become a recipe you can run again.	Enregistrez, montez comme d'habitude, puis arrêtez : vos modifications deviennent une recette à relancer.
+	● Record	● Enregistrer
+	Recording: {n} edits so far	Enregistrement : {n} modifications pour l'instant
+	Recipe name	Nom de la recette
+	Stop and Save	Arrêter et enregistrer
+	({n} files could not be read: recipe.list says why)	({n} fichiers illisibles : recipe.list dit pourquoi)
+	yours	à vous
+	The recipe {id} is gone	La recette {id} n'existe plus
+	AutoCut: {intent}	AutoCut : {intent}
+	(when {param} is on)	(si {param} est activé)
+	Parameters	Paramètres
+	a file path	un chemin de fichier
+	a template id (Templates panel)	un id de modèle (panneau Modèles)
+	Run	Lancer
+	Edit steps	Modifier les étapes
+	Steps (JSON)	Étapes (JSON)
+	Save Steps	Enregistrer les étapes
+	Running the recipe…	Recette en cours…
+	Recipe: {e}	Recette : {e}
+	Recipe deleted	Recette supprimée
+	Recording: edit as usual, then Stop and Save in Recipes	Enregistrement : montez comme d'habitude, puis Arrêter et enregistrer dans Recettes
+	Saved the recipe “{name}” ({n} steps)	Recette « {name} » enregistrée ({n} étapes)
+	Nothing was recorded	Rien n'a été enregistré
+	Recording discarded	Enregistrement abandonné
+	The steps are not JSON: {e}	Les étapes ne sont pas du JSON : {e}
+	Recipe saved	Recette enregistrée

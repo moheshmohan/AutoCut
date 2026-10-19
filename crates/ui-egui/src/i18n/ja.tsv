@@ -3984,3 +3984,32 @@
 	Downloading the template…	テンプレートをダウンロード中…
 	Installed “{name}”	「{name}」をインストールしました
 	Wrote {path}	{path} を書き出しました
+# Recipes (Window ▸ Recipes)
+	Recipes	レシピ
+	Save this edit as a recipe	この編集をレシピとして保存
+	Record, edit as usual, then stop: the edits become a recipe you can run again.	記録して普段どおり編集し、停止すると、その編集が何度でも実行できるレシピになります。
+	● Record	● 記録
+	Recording: {n} edits so far	記録中: これまでに {n} 件の編集
+	Recipe name	レシピ名
+	Stop and Save	停止して保存
+	({n} files could not be read: recipe.list says why)	（{n} 個のファイルを読み込めませんでした。理由は recipe.list に）
+	yours	自分用
+	The recipe {id} is gone	レシピ {id} が見つかりません
+	AutoCut: {intent}	AutoCut: {intent}
+	(when {param} is on)	（{param} がオンのとき）
+	Parameters	パラメーター
+	a file path	ファイルのパス
+	a template id (Templates panel)	テンプレート ID（テンプレートパネル）
+	Run	実行
+	Edit steps	ステップを編集
+	Steps (JSON)	ステップ (JSON)
+	Save Steps	ステップを保存
+	Running the recipe…	レシピを実行中…
+	Recipe: {e}	レシピ: {e}
+	Recipe deleted	レシピを削除しました
+	Recording: edit as usual, then Stop and Save in Recipes	記録中: 普段どおり編集し、レシピで「停止して保存」
+	Saved the recipe “{name}” ({n} steps)	レシピ「{name}」を保存しました（{n} ステップ）
+	Nothing was recorded	何も記録されませんでした
+	Recording discarded	記録を破棄しました
+	The steps are not JSON: {e}	ステップが JSON ではありません: {e}
+	Recipe saved	レシピを保存しました

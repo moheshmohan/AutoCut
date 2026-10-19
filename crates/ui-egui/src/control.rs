@@ -18,6 +18,9 @@
 //!   posterSeconds, bundle, zip}, install, exportPath, otioPath, link}}`: patch the Templates panel
 //!   (filters, the template being filled, `fills` as `template.apply`'s `slots`: item ids and text;
 //!   the Save as Template form; the install field; the Share section's paths and link)
+//! - `ui.set {recipes: {selected, params, recordName, stepsJson, editOpen}}`: patch the Recipes
+//!   panel (the recipe open, its parameter values, the name a recording is saved under, the steps
+//!   editor)
 //! - `ui.set {showcase: {subject, since, title, voice, mood, intro, outro, entries, exportPath, …}}`:
 //!   patch the Showcase panel's draft (`entries` a list, or `{"<index>": {include, label, line, …}}`)
 //! - `ui.click {id | x,y, button?, count?, modifiers?}` / `ui.move {x,y}` / `ui.scroll {x,y,dx,dy}`
@@ -154,6 +157,12 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
             // Templates panel: filters, the template being filled and its slots, merged likewise
             if let Some(patch) = p.get("templates")
                 && let Err(e) = crate::panels::templates::patch(app, patch)
+            {
+                return err(e);
+            }
+            // Recipes panel: the recipe open, its parameters, the recording's name, the steps editor
+            if let Some(patch) = p.get("recipes")
+                && let Err(e) = crate::panels::recipes::patch(app, patch)
             {
                 return err(e);
             }

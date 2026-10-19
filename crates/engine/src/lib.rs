@@ -53,6 +53,7 @@ pub mod project_panel;
 pub mod project_tools;
 pub mod proxies;
 pub mod publish;
+pub mod recipes;
 pub mod reframe;
 pub mod relink;
 pub mod remix;
@@ -490,6 +491,8 @@ pub struct Session {
     pub autocut: autocut::AutoCut,
     /// Sharing video templates (`template.install {url}`): the host's fetcher (None: links are not installed).
     pub sharing: video_template_share::Sharing,
+    /// Recipes (`recipe.*`): the host's AutoCut planner for intent steps, the runs' outcomes, the recording.
+    pub recipes: recipes::Recipes,
     /// The Events panel log: failed commands, job results, auto-save errors, messages.
     pub log: panels::EventLog,
     /// Media Browser navigation (directory, back / forward history, selected files).
@@ -601,6 +604,7 @@ impl Session {
             publish: Default::default(),
             autocut: Default::default(),
             sharing: Default::default(),
+            recipes: Default::default(),
             log: Default::default(),
             browser: Default::default(),
             exec_depth: 0,
@@ -806,6 +810,10 @@ impl Session {
         // playback reads the newest snapshot (mixer moves, mutes… are heard while playing)
         self.previews.live.publish_project(self.project.clone());
         if r.is_ok() && spec.journal {
+            // "Save this edit as a recipe": the user's own edits, not those commands run inside
+            if self.exec_depth == 0 && self.recipes.recording.is_some() {
+                recipes::observe(self, id, &params);
+            }
             self.journal.push((id.to_string(), params));
             if self.journal.len() > 10_000 {
                 self.journal.drain(..1000);
@@ -1379,6 +1387,8 @@ mod project_panel_tests;
 mod proxies_tests;
 #[cfg(test)]
 mod publish_tests;
+#[cfg(test)]
+mod recipes_tests;
 #[cfg(test)]
 mod relink_tests;
 #[cfg(test)]

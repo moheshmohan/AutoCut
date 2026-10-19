@@ -470,6 +470,8 @@ impl Backend {
         s.autocut.host = Some(filmcraft_autocut::host::engine_host_with_albums(filmcraft_automation::photos::album_source()));
         // `template.install {url}` (also over MCP)
         s.sharing.fetcher = Some(filmcraft_automation::template_fetch::fetcher());
+        // `recipe.run` (also over MCP): intent steps planned by AutoCut's planner
+        s.recipes.planner = Some(filmcraft_autocut::recipes::planner());
         if let Some(p) = a.opt("--project") {
             if let Err(e) = s.execute("file.open", json!({"path": p})) {
                 fail(e);

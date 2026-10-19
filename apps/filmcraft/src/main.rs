@@ -226,6 +226,8 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         session.autocut.host = Some(filmcraft_autocut::host::engine_host_with_albums(filmcraft_automation::photos::album_source()));
         // Templates ▸ Install from an https:// link
         session.sharing.fetcher = Some(filmcraft_automation::template_fetch::fetcher());
+        // Window ▸ Recipes: steps that are AutoCut intents are planned by AutoCut's planner
+        session.recipes.planner = Some(filmcraft_autocut::recipes::planner());
         let (project, media) = args::project_and_media(&files);
         if let Some(p) = project {
             if let Err(e) = session.execute("file.open", json!({"path": p})) {

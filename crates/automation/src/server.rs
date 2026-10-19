@@ -754,6 +754,30 @@ pub struct TemplateApplyParams {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct RecipeListParams {
+    /// One recipe in full (id or name): its parameters, its steps, and the steps as they would
+    /// run with `params` (checked, nothing runs).
+    #[serde(default)]
+    pub recipe: Option<String>,
+    /// With `recipe`: parameter values to plan with.
+    #[serde(default)]
+    pub params: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RecipeRunParams {
+    /// Recipe id (`builtin:talking-head-clean-up`, `builtin:vertical-short`,
+    /// `builtin:template-publish-youtube`, or a saved `user:…`) or name; see recipe_list.
+    pub recipe: String,
+    /// Parameter values by parameter id (recipe_list shows them); the rest keep their defaults.
+    #[serde(default)]
+    pub params: Option<Value>,
+    /// Check and plan the steps only; nothing runs (default false).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+}
+
 /// Signed-in Google Photos, or the tool-shaped setup error.
 fn gphotos() -> Result<filmcraft_gphotos::GooglePhotos, AutomationError> {
     filmcraft_gphotos::GooglePhotos::configured().map_err(|e| AutomationError::Other(e.to_string()))
@@ -1548,6 +1572,46 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Recipes: list",
+        description = "The recipes: one-click chains of engine commands and AutoCut intents with parameters (built in: talking-head clean-up — pauses, fillers, voice, captions; vertical short from a long clip — highlights, 9:16, captions, export; apply a template and publish privately to YouTube — publishing off unless asked), and the user's own from <data dir>/Recipes. Pass `recipe` for one in full: its parameters (kinds, defaults, choices) and its steps as they would run with `params`. Then recipe_run. Recipes are saved with command_run `recipe.save` or recorded with `recipe.record`.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn recipe_list(&self, Parameters(p): Parameters<RecipeListParams>) -> Result<CallToolResult, McpError> {
+        match p.recipe {
+            Some(r) => {
+                let mut q = json!({"name": r});
+                if let Some(v) = p.params {
+                    q["params"] = v;
+                }
+                wrap(self.run("recipe.inspect", q).await)
+            }
+            None => wrap(self.run("recipe.list", json!({})).await),
+        }
+    }
+
+    #[tool(
+        title = "Recipes: run",
+        description = "Run a recipe on the open project (`recipe.run`, an engine job: progress, cancellable). Every step is checked before it runs — an AutoCut intent is planned against the open sequence and its commands checked against the registry and the recipe allowlist; a command that starts a job (an export, a publish) is waited for; a failing step stops the run and the answer says which and why. Each edit is an ordinary undoable command. Returns each step's commands and results (`recipe`). `dry_run` plans only.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn recipe_run(
+        &self,
+        Parameters(p): Parameters<RecipeRunParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut q = json!({"name": p.recipe});
+        if let Some(v) = p.params {
+            q["params"] = v;
+        }
+        if p.dry_run.unwrap_or(false) {
+            q["dryRun"] = json!(true);
+            return wrap(self.run("recipe.run", q).await);
+        }
+        q["wait"] = json!(true);
+        Ok(self.run_long("recipe.run", q, &context).await)
+    }
+
+    #[tool(
         title = "Render a frame",
         description = "Render the active sequence's frame (at `seconds` or the playhead) and return it as PNG.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -1838,6 +1902,33 @@ mod tests {
         assert!(v["cuts"].as_u64().unwrap() >= 2);
         let r = m.render_frame(Parameters(RenderParams { seconds: Some(1.0), max_side: Some(320) })).await.unwrap();
         assert_ne!(r.is_error, Some(true));
+    }
+
+    /// `recipe_list` / `recipe_run`: the built-ins are listed, one is inspected, a saved recipe
+    /// (a command and a planned AutoCut intent) runs as a job over MCP — the port's pump thread
+    /// serves its commands — and the answer carries each step; a bad name is an error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recipe_tools_list_and_run() {
+        let mut s = demo();
+        s.recipes.planner = Some(filmcraft_autocut::recipes::planner());
+        let mut c = Client::start(s);
+        c.init().await;
+        let l = tool_json(&c.call(1, "recipe_list", json!({})).await);
+        assert!(l["recipes"].as_array().unwrap().iter().any(|r| r["id"] == "builtin:vertical-short"), "{l}");
+        let one = tool_json(&c.call(2, "recipe_list", json!({"recipe": "builtin:talking-head-clean-up"})).await);
+        assert_eq!(one["ready"], true, "{one}");
+        let steps = json!([{"command": "markers.add", "params": {"name": "mcp"}}, {"intent": "enhance_voice", "params": {"loudness": false}}]);
+        let save = c.call(3, "command_run", json!({"id": "recipe.save", "params": {"name": "Marks", "steps": steps}})).await;
+        assert_eq!(save["result"]["isError"], false, "{save}");
+        let r = c.call(4, "recipe_run", json!({"recipe": "Marks"})).await;
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let v = tool_json(&r);
+        assert_eq!(v["recipe"]["ok"], true, "{v}");
+        assert_eq!(v["recipe"]["steps"].as_array().unwrap().len(), 2);
+        let bad = c.call(5, "recipe_run", json!({"recipe": "no such recipe"})).await;
+        assert_eq!(bad["result"]["isError"], true, "{bad}");
+        let dry = tool_json(&c.call(6, "recipe_run", json!({"recipe": "builtin:vertical-short", "dry_run": true})).await);
+        assert!(dry["plan"].is_array(), "{dry}");
     }
 
     /// `template_list` / `template_apply`: the starters are listed, one is inspected, and applying
@@ -2348,6 +2439,8 @@ mod tests {
             "sequence_auto_reframe",
             "template_list",
             "template_apply",
+            "recipe_list",
+            "recipe_run",
         ] {
             assert!(names.contains(&want), "{want} not listed");
         }

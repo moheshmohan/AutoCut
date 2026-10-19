@@ -494,6 +494,9 @@ pub struct UiState {
     /// Templates panel: the browser's filters and the template being filled.
     #[serde(default)]
     pub templates: crate::panels::templates::TemplatesDraft,
+    /// Recipes panel: the recipe open, its parameter values, the recording's name, the steps editor.
+    #[serde(default)]
+    pub recipes: crate::panels::recipes::RecipesDraft,
     /// Export mode: settings, preset, destination, range, the Preset Manager and Quick Export.
     #[serde(default)]
     pub export: crate::panels::export_mode::ExportUi,
@@ -995,6 +998,7 @@ impl Default for UiState {
             generate_audio: Default::default(),
             showcase: Default::default(),
             templates: Default::default(),
+            recipes: Default::default(),
             export: Default::default(),
             text_tab: captions_tab(),
             caption_search: String::new(),

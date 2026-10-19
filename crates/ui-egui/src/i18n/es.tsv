@@ -3985,3 +3985,32 @@
 	Downloading the template…	Descargando la plantilla…
 	Installed “{name}”	«{name}» instalada
 	Wrote {path}	Escrito {path}
+# Recipes (Window ▸ Recipes)
+	Recipes	Recetas
+	Save this edit as a recipe	Guardar esta edición como receta
+	Record, edit as usual, then stop: the edits become a recipe you can run again.	Graba, edita como siempre y detente: las ediciones se convierten en una receta que puedes volver a ejecutar.
+	● Record	● Grabar
+	Recording: {n} edits so far	Grabando: {n} ediciones hasta ahora
+	Recipe name	Nombre de la receta
+	Stop and Save	Detener y guardar
+	({n} files could not be read: recipe.list says why)	({n} archivos no se pudieron leer: recipe.list dice por qué)
+	yours	tuya
+	The recipe {id} is gone	La receta {id} ya no está
+	AutoCut: {intent}	AutoCut: {intent}
+	(when {param} is on)	(si {param} está activo)
+	Parameters	Parámetros
+	a file path	una ruta de archivo
+	a template id (Templates panel)	un id de plantilla (panel Plantillas)
+	Run	Ejecutar
+	Edit steps	Editar pasos
+	Steps (JSON)	Pasos (JSON)
+	Save Steps	Guardar pasos
+	Running the recipe…	Ejecutando la receta…
+	Recipe: {e}	Receta: {e}
+	Recipe deleted	Receta eliminada
+	Recording: edit as usual, then Stop and Save in Recipes	Grabando: edita como siempre y luego Detener y guardar en Recetas
+	Saved the recipe “{name}” ({n} steps)	Receta «{name}» guardada ({n} pasos)
+	Nothing was recorded	No se grabó nada
+	Recording discarded	Grabación descartada
+	The steps are not JSON: {e}	Los pasos no son JSON: {e}
+	Recipe saved	Receta guardada

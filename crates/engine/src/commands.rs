@@ -3490,6 +3490,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::instagram::commands());
     v.extend(crate::publish::commands());
     v.extend(crate::autocut::commands());
+    v.extend(crate::recipes::commands());
     v.extend(crate::media_frame::commands());
     v.extend(crate::media_date::commands());
     v.extend(crate::graphics_counter::commands());
