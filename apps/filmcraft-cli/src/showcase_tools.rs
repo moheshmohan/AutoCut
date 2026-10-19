@@ -28,9 +28,10 @@ fn language_path(out: &str, language: &str) -> String {
 }
 
 /// `showcase-plan --base plan.json [--patch notes.json]… [--project p.fcproj | --clips inspect.json]
+/// [--places-from-locations locations.json]
 /// [--out new.json] [--lines script-ml.json [--language ml] [--lines-out new-ml.json]]`.
 pub async fn plan(a: &Args) {
-    const USAGE: &str = "showcase-plan --base plan.json [--patch notes.json]... [--project p.fcproj | --clips items.json] [--out new.json] [--lines script-ml.json [--language ml] [--lines-out new-ml.json]]";
+    const USAGE: &str = "showcase-plan --base plan.json [--patch notes.json]... [--project p.fcproj | --clips items.json] [--places-from-locations locations.json] [--out new.json] [--lines script-ml.json [--language ml] [--lines-out new-ml.json]]";
     let Some(base_path) = a.opt("--base") else { usage(USAGE) };
     let lines_path = a.opt("--lines");
     let language = a.opt("--language").unwrap_or("ml").trim().to_ascii_lowercase();
@@ -51,10 +52,19 @@ pub async fn plan(a: &Args) {
         }
         (None, false) => Default::default(),
     };
-    let patched = filmcraft_autocut::plan_patch::apply(&base, &patches, &clips).unwrap_or_else(|e| fail(format!("showcase-plan: {e}")));
+    let mut patched = filmcraft_autocut::plan_patch::apply(&base, &patches, &clips).unwrap_or_else(|e| fail(format!("showcase-plan: {e}")));
     for n in &patched.notes {
         diag(format_args!("showcase-plan: {n}"));
     }
+    // --places-from-locations: entries without a place get the one Google Photos shows for their
+    // first shot (the file `photos locations` wrote)
+    let filled = a.opt("--places-from-locations").map(|path| {
+        let v = read_json("showcase-plan: --places-from-locations", path);
+        let places = filmcraft_autocut::places::Places::from_json(&v).unwrap_or_else(|e| fail(format!("showcase-plan: {path}: {e}")));
+        let filled = filmcraft_autocut::plan_patch::fill_places(&mut patched.plan, &places);
+        diag(format_args!("showcase-plan: {} entr(y/ies) got their place from {path} ({} place(s) in it)", filled.len(), places.len()));
+        filled
+    });
     if !patched.unlined.is_empty() {
         diag(format_args!(
             "showcase-plan: {} entr{} without a line: {}",
@@ -64,6 +74,9 @@ pub async fn plan(a: &Args) {
         ));
     }
     let mut summary = patched.summary();
+    if let Some(f) = filled {
+        summary["placesFilled"] = json!(f);
+    }
     if let (Some(lp), Some(lo)) = (lines_path, lines_out.as_deref()) {
         let lines = read_json("showcase-plan: --lines", lp);
         let (other, notes) =

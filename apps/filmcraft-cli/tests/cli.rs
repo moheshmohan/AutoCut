@@ -726,6 +726,27 @@ fn showcase_plan_applies_notes_and_writes_the_other_language() {
     let read = |p: &std::path::Path| -> Value { serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap() };
     assert_eq!(read(std::path::Path::new(&out)), read(&data.join("expected.json")));
     assert_eq!(read(&dir.join("plan-v5-ml.json")), read(&data.join("expected-ml.json")));
+    // the places `photos locations` read fill the entries without one, by their first shot
+    let locations = dir.join("locations.json");
+    std::fs::write(&locations, r#"[{"fileName": "org_video_6553912_1642930732000.MP4", "place": "Expo City, Dubai", "estimated": false}]"#).unwrap();
+    let placed = dir.join("placed.json");
+    let v = json_out(&cli(&[
+        "showcase-plan",
+        "--base",
+        &f("base.json"),
+        "--patch",
+        &f("notes.json"),
+        "--clips",
+        &f("clips.json"),
+        "--places-from-locations",
+        locations.to_str().unwrap(),
+        "--out",
+        placed.to_str().unwrap(),
+    ]));
+    assert_eq!(v["placesFilled"], serde_json::json!(["Micropolis M02"]), "{v}");
+    let p = read(&placed);
+    let m02 = p["entries"].as_array().unwrap().iter().find(|e| e["label"] == "Micropolis M02").unwrap();
+    assert_eq!(m02["place"], "Expo City, Dubai");
     // a note for an entry the plan does not have
     let bad = dir.join("bad.json");
     std::fs::write(&bad, r#"{"entries": {"No such robot": {"line": "x"}}}"#).unwrap();

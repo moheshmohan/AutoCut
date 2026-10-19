@@ -219,6 +219,25 @@ fn dates_read_in_the_patch_timezone_or_their_own() {
 }
 
 #[test]
+fn places_from_a_locations_file_fill_entries_without_one() {
+    let mut plan = apply(&base(), &[], &Clips::new()).unwrap().plan;
+    // the arm's second shot and the dog's shot were read by `photos locations`
+    let file = json!([
+        {"fileName": "C3.MP4", "place": "Abu Dhabi", "estimated": false},
+        {"fileName": "c4.mov", "place": "Sydney, Australia", "estimated": true},
+        {"fileName": "c9.mp4"}
+    ]);
+    let places = crate::places::Places::from_json(&file).unwrap();
+    let filled = fill_places(&mut plan, &places);
+    // the dog keeps the place its entry gives; the hall's clip has none
+    assert_eq!(filled, ["Arm"]);
+    assert_eq!(plan["entries"][1]["place"], json!("Abu Dhabi"));
+    assert_eq!(plan["entries"][2]["place"], json!("Dubai"));
+    assert_eq!(plan["entries"][0].get("place"), None);
+    assert!(fill_places(&mut json!({"entries": 3}), &places).is_empty());
+}
+
+#[test]
 fn another_language_needs_every_spoken_line() {
     let p = apply(&base(), &[], &Clips::new()).unwrap().plan;
     let lines = json!({"intro": "ഹായ്", "outro": "നന്ദി", "lines": {"Arm": "കൈ", "Dog": "നായ", "Ghost": "?"}});

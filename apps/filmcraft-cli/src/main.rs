@@ -242,6 +242,7 @@ SUBCOMMANDS
                                 every shot; findings in <out>.qa.json and a numbered contact
                                 sheet in <out>.qa.png (and under `qa` in the output)
   showcase-plan --base plan.json [--patch notes.json]... [--project p.fcproj | --clips items.json]
+         [--places-from-locations locations.json]
          [--out new.json] [--lines script-ml.json [--language ml] [--lines-out new-ml.json]]
                                 a reviewed showcase plan changed by review notes keyed by entry
                                 label (docs/showcase-runbook.md): an entry's line, chips,
@@ -254,10 +255,13 @@ SUBCOMMANDS
                                 delivery follow them, the robot count in the outro (\"Forty-three\",
                                 or {Count}) is updated, and entries without a line are reported.
                                 Plain shots take their clip's name and length from --project (or
-                                --clips, a project.inspect JSON). --lines also writes the plan for
-                                another language (--language, default ml) beside --out as
-                                <out>-ml.json: {\"intro\", \"outro\", \"lines\": {\"<label>\": \"…\"}}
-                                read over it; it fails on any spoken entry without a line
+                                --clips, a project.inspect JSON). --places-from-locations takes
+                                the file `photos locations` wrote and gives every entry without
+                                a \"place\" the one Google Photos shows for its first shot (by
+                                file name). --lines also writes the plan for another language
+                                (--language, default ml) beside --out as <out>-ml.json:
+                                {\"intro\", \"outro\", \"lines\": {\"<label>\": \"…\"}} read over it; it
+                                fails on any spoken entry without a line
   sheet --project p.fcproj --items 2407,2408:0-30,14 [--n 8] [--at 3.5,7] [--side 320 | --scale 0.25]
          [--columns N] --out sheet.jpg
                                 a contact sheet of source clips (media.contactSheet): a row per

@@ -51,6 +51,9 @@
 //! `delivery` and `say` are rebuilt aligned with them (a scene's chips are dropped, chips are cut
 //! to three, `delivery` defaults to warm). [`apply`] reports the entries left without a line.
 //!
+//! [`fill_places`] gives entries without a `place` the one Google Photos shows for their first
+//! shot (a `photos locations` file, [`crate::places`]; `showcase-plan --places-from-locations`).
+//!
 //! [`with_lines`] writes the plan for another language: `{"intro", "outro", "lines": {"<label>":
 //! "…"}}` read over it — every spoken entry needs a line — with `language` set and the English
 //! respellings and `say` cleared (chips and on-screen text stay as written).
@@ -847,6 +850,29 @@ pub fn count_words(text: &str, old: usize, new: usize) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------------------------
+// places
+
+/// Give every entry of `plan` without a `place` the place Google Photos shows for its first shot
+/// that has one (a `photos locations` file read with [`crate::places::Places::from_json`], shots
+/// matched by file name): [`crate::places::fill`] on the plan as written, so a place a note
+/// gives is kept. The labels of the entries that got one.
+pub fn fill_places(plan: &mut Value, places: &crate::places::Places) -> Vec<String> {
+    let mut filled = Vec::new();
+    for e in plan.get_mut("entries").and_then(Value::as_array_mut).into_iter().flatten() {
+        if e.get("place").and_then(Value::as_str).is_some_and(|p| !p.trim().is_empty()) {
+            continue;
+        }
+        let shots = e.get("shots").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        let Some(place) = shots.iter().find_map(|s| places.of(s.get("name").and_then(Value::as_str)?)).map(str::to_string) else { continue };
+        if let Some(o) = e.as_object_mut() {
+            filled.push(o.get("label").and_then(Value::as_str).unwrap_or_default().to_string());
+            o.insert("place".into(), json!(place));
+        }
+    }
+    filled
 }
 
 // ---------------------------------------------------------------------------------------------

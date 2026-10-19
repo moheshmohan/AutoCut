@@ -14,7 +14,8 @@ filmcraft-cli`; the binary is `target/release/filmcraft-cli`). How each piece wo
   `ollama pull qwen3:8b` (scripts).
 - The face and plate detectors: `filmcraft-cli exec redact.downloadModels wait=true` (4.4 MB).
 - A cloned voice for both languages (`tts.cloneVoice`; Malayalam through IndicF5:
-  `exec tts.downloadCloneModel model=indicf5`).
+  `exec tts.downloadCloneModel model=indicf5`, with a Malayalam reference trimmed to a sentence
+  end by `tts.voiceReference` — the steps are in [malayalam-narration.md](malayalam-narration.md)).
 - Malayalam on screen and in subtitles needs the craft-fonts build input (`CRAFT_FONTS_DIR`, see
   `CLAUDE.md`).
 - The browser is shared: check `filmcraft-cli locks` first. The picker agent takes the `chrome`
@@ -57,10 +58,27 @@ filmcraft-cli --project "$P" analyze robot --items 4841,2630,2631 --out "$R/repo
 
 ## 2. Where each clip was filmed
 
-`filmcraft-cli photos locations` reads the place of each album item from Google Photos'
-info panel (see `filmcraft-cli help`; it drives Chrome and takes the `chrome` lock). Its places go
-into the notes as each entry's `place` ("Busan, South Korea"): the lower third shows it, and it
-starts no chapter of its own.
+Google strips the location from the clips its API and picker hand out, so `photos locations` reads
+each album item's place from the Google Photos page (the screen agent opens each item's Info panel;
+it holds the `chrome` lock; `--max-items 5` is a dry run, `--resume` goes on after an interruption):
+
+```sh
+filmcraft-cli --project "$P" photos locations --album "Robot showcase" --out "$R/locations-v6.json" --save
+```
+
+It writes `[{fileName, date, gmtOffset, place, estimated, …}]` to `--out` and, with `--project`,
+stores each place with the project's item (its `Location` field, and `Location Estimated` when
+Google only guessed it). An entry's `place` ("Busan, South Korea") is what its lower third shows
+(it starts no chapter of its own). Three ways to use them, the most reviewable first:
+
+- `showcase-plan … --places-from-locations "$R/locations-v6.json"` (step 4) writes the place of
+  each entry without one into the plan, from its first shot (matched by file name), and lists the
+  entries it filled (`placesFilled`); a `place` in the notes always wins;
+- `showcase … --places-from-locations <file>` does the same at build time;
+- the build also fills places from the items' stored `Location` by itself.
+
+(The code: `filmcraft_autocut::places::{Places::from_json, fill, from_items}`, and
+`plan_patch::fill_places` for the plan as written.)
 
 ## 3. Look at the clips
 
@@ -111,16 +129,23 @@ The notes are JSON keyed by entry **label** (numbers change; labels do not). The
   project. `from`/`to`/`speed`/`fit`/`mute`/`volume`/`focus` are the shot's controls.
 - `split` makes a second entry from one (two robots in one entry); `add` brings new robots.
 - The outro's robot count ("Forty-three", or `{Count}`) follows the entries.
+- Top-level fields merge into the plan: the look (`outro`, `style`, `transitions`, …) and, for the
+  Malayalam narration, `"numbers": "malayalam"` (digits said as Malayalam words; by default they
+  are said the English way, as Malayali creators say them — see
+  [malayalam-narration.md](malayalam-narration.md)).
 
 ```sh
 filmcraft-cli showcase-plan --base "$R/plan-v5.json" --patch "$R/notes-v6.json" --project "$P" \
+    --places-from-locations "$R/locations-v6.json" \
     --out "$R/plan-v6.json" --lines "$R/script-ml-v6.json"
 ```
 
-It writes `plan-v6.json` and `plan-v6-ml.json`, prints the counts, and names every robot entry left
-without a line; the Malayalam plan fails naming each spoken entry its lines file lacks. Several
-`--patch` files apply in turn. (The v5 round's 200-line Python script is one notes file:
-`showcase-plan` reproduces its `plan-v5.json` and `plan-v5-ml.json` exactly.)
+It writes `plan-v6.json` and `plan-v6-ml.json`, prints the counts, names every robot entry left
+without a line and the entries that took their place from the locations file; the Malayalam plan
+fails naming each spoken entry its lines file lacks. Several `--patch` files apply in turn. (The v5
+round's 200-line Python script is one notes file: `showcase-plan` reproduces its `plan-v5.json` and
+`plan-v5-ml.json` exactly.) Write the Malayalam lines with numbers as digits; the voice, its
+reference and how numbers are said: [malayalam-narration.md](malayalam-narration.md).
 
 ## 5. Build both languages, with privacy
 
