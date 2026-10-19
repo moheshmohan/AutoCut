@@ -32,6 +32,8 @@ use serde::{Deserialize, Serialize};
 pub enum Kind {
     Face,
     Plate,
+    /// Something named by the user (a logo, a sign), found by a vision model.
+    Target,
 }
 
 impl Kind {
@@ -39,6 +41,7 @@ impl Kind {
         match self {
             Kind::Face => "face",
             Kind::Plate => "plate",
+            Kind::Target => "target",
         }
     }
     pub fn from_name(s: &str) -> Option<Self> {

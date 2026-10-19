@@ -175,6 +175,9 @@ pub struct Shot {
     pub mute: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<f64>,
+    /// This shot's privacy ([`crate::privacy::LocalRedact`]): `false`, or named targets to hide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redact: Option<Value>,
 }
 
 /// A sampled moment of a clip that shows the subject: seconds into the clip, the share of the
@@ -309,6 +312,9 @@ pub struct Entry {
     /// own (its `event` still does).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub place: Option<String>,
+    /// This entry's privacy ([`crate::privacy::LocalRedact`]): `false`, or named targets to hide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redact: Option<Value>,
 }
 
 /// The `kind` of a scene entry: footage that shows no robot (a hall, a stage, a skyline) to
@@ -3199,9 +3205,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         if built.subtitles.is_empty() { None } else { caption_track(ex, &built.subtitles, if opts.malayalam() { "ml" } else { "en" }, &mut built.notes).await };
     built.theme = theme;
     // ---- privacy: visitors' faces and plates hidden, the robots left alone ([`crate::privacy`])
-    if let Some(r) = &opts.redact {
-        crate::privacy::redact_show(ex, r, &built.layout, entries, &mut built.notes, progress).await;
-    }
+    crate::privacy::redact_show(ex, opts.redact.as_ref(), &built.layout, entries, &mut built.notes, progress).await;
     if let Some(path) = &opts.export {
         progress("exporting (YouTube 1080p)");
         let mut p = json!({"path": path, "preset": "YouTube 1080p Full HD", "wait": true});

@@ -1,7 +1,7 @@
 //! Privacy for AutoCut's videos: the vision check behind the engine's automatic blur
 //! (`clip.autoRedact`), and the showcase's `redact` option that runs it over a built show.
 //!
-//! - [`OllamaJudge`]: the engine's [`FaceJudge`]. The faces the detectors found are tiled, up to
+//! - [`OllamaJudge`]: the engine's [`VisionJudge`]. The faces the detectors found are tiled, up to
 //!   six at a time, into one numbered grid picture, and the local vision model (Qwen2.5-VL
 //!   through Ollama, [`crate::config::Config::analysis_model`]) says for each tile whether it is a
 //!   real person, a humanoid robot, a mannequin, a statue, a poster or a face on a screen. A grid
@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use filmcraft_engine::redact::{Crop, FaceJudge};
+use filmcraft_engine::redact::{Crop, VisionJudge};
 use filmcraft_vision::Kind;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -144,7 +144,7 @@ impl OllamaJudge {
     }
 }
 
-impl FaceJudge for OllamaJudge {
+impl VisionJudge for OllamaJudge {
     fn name(&self) -> String {
         format!("ollama:{}", self.ollama.model)
     }
@@ -164,11 +164,64 @@ impl FaceJudge for OllamaJudge {
         }
         Ok(out)
     }
+
+    fn find(&self, frame: &Crop, targets: &[String]) -> Result<Vec<(usize, [f64; 4])>, String> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let img = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone()).ok_or("the frame's pixels do not fit its size")?;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).to_rgb8().write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        let v = self.ollama.chat_json(crate::analyze::GROUND_SYSTEM, &find_prompt(targets), &[png.into_inner()]).map_err(|e| e.to_string())?;
+        Ok(parse_found(&v, targets.len(), frame.width, frame.height))
+    }
+}
+
+/// The question that asks the vision model where the user's named targets are.
+pub fn find_prompt(targets: &[String]) -> String {
+    let listing: Vec<String> = targets.iter().enumerate().map(|(i, t)| format!("{}. {}", i + 1, t.replace(['\n', '\r'], " "))).collect();
+    format!(
+        "Find these in the image: {}. Wherever one of them appears (on screens, signs, clothing, machines, the floor; large or small), give its box, each place separately; a box covers the whole of it (a logo with its emblem and its words). Answer JSON only: {{\"found\": [{{\"target\": <number from the list>, \"bbox_2d\": [x1, y1, x2, y2]}}, ...]}} in absolute pixels; an empty list when none is visible.",
+        listing.join("; ")
+    )
+}
+
+/// The places in the model's answer for `n` targets in a `w` × `h` picture: (target index, box
+/// normalised `[x, y, w, h]`). The model's boxes are in the pixels of the frame it resized the
+/// picture to ([`crate::analyze::model_frame`]); hostile numbers and empty boxes are dropped.
+pub fn parse_found(v: &Value, n: usize, w: u32, h: u32) -> Vec<(usize, [f64; 4])> {
+    let (fw, fh) = crate::analyze::model_frame(w, h);
+    let mut out = Vec::new();
+    for f in v.get("found").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default().iter().take(64) {
+        // a 1-based number from the list (a 0 is read as the first); one target needs none
+        let target = match f.get("target").and_then(Value::as_u64) {
+            Some(0) => 0,
+            Some(k) => (k as usize).saturating_sub(1),
+            None if n == 1 => 0,
+            None => continue,
+        };
+        if target >= n {
+            continue;
+        }
+        let Some(b) = f.get("bbox_2d").or_else(|| f.get("box_2d")).and_then(Value::as_array) else { continue };
+        let c: Vec<f64> = b.iter().filter_map(Value::as_f64).collect();
+        let [x1, y1, x2, y2] = c.as_slice() else { continue };
+        if ![x1, y1, x2, y2].iter().all(|v| v.is_finite()) || fw <= 0.0 || fh <= 0.0 {
+            continue;
+        }
+        let (x1, x2) = ((x1 / fw).clamp(0.0, 1.0), (x2 / fw).clamp(0.0, 1.0));
+        let (y1, y2) = ((y1 / fh).clamp(0.0, 1.0), (y2 / fh).clamp(0.0, 1.0));
+        if x2 - x1 < 0.002 || y2 - y1 < 0.002 {
+            continue;
+        }
+        out.push((target, [x1, y1, x2 - x1, y2 - y1]));
+    }
+    out
 }
 
 /// The vision check hosts install into the engine (`Session::redacts.judge`): AutoCut's analysis
 /// model over the Ollama of the `AUTOCUT_*` environment.
-pub fn engine_judge() -> Arc<dyn FaceJudge> {
+pub fn engine_judge() -> Arc<dyn VisionJudge> {
     let cfg = crate::config::Config::from_env();
     Arc::new(OllamaJudge::new(&cfg.ollama_host, &cfg.analysis_model))
 }
@@ -191,11 +244,58 @@ pub struct Redact {
     pub min_face_height: Option<f64>,
     /// Ask the vision model which faces are people (default on).
     pub verify: bool,
+    /// Things named in words ("DP World logo"), found by the vision model in every clip.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
 }
 
 impl Default for Redact {
     fn default() -> Self {
-        Self { faces: true, plates: true, style: None, strength: None, min_face_height: None, verify: true }
+        Self { faces: true, plates: true, style: None, strength: None, min_face_height: None, verify: true, targets: Vec::new() }
+    }
+}
+
+/// Most named targets a plan, an entry or a shot gives, and the longest.
+const MAX_TARGETS: usize = 16;
+const MAX_TARGET_CHARS: usize = 120;
+
+/// A plan's `targets`: descriptions on one line.
+fn targets_of(v: Option<&Value>) -> Result<Vec<String>, AutoCutError> {
+    let list = match v {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::String(s)) => vec![Value::String(s.clone())],
+        Some(Value::Array(a)) if a.len() <= MAX_TARGETS => a.clone(),
+        Some(_) => return Err(invalid(format!("targets: up to {MAX_TARGETS} descriptions (\"DP World logo\")"))),
+    };
+    list.iter()
+        .map(|t| {
+            let t = t.as_str().map(str::trim).unwrap_or_default();
+            if t.is_empty() || t.chars().count() > MAX_TARGET_CHARS || t.chars().any(char::is_control) {
+                Err(invalid(format!("a target is a description on one line, 1 to {MAX_TARGET_CHARS} characters")))
+            } else {
+                Ok(t.to_string())
+            }
+        })
+        .collect()
+}
+
+/// What an entry or a shot of a plan says about privacy (its `redact`): `false` leaves its
+/// footage alone; `{"targets": [...]}` (or the list itself) adds things to hide in it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LocalRedact {
+    pub skip: bool,
+    pub targets: Vec<String>,
+}
+
+impl LocalRedact {
+    pub fn from_plan(v: Option<&Value>) -> Result<Self, AutoCutError> {
+        match v {
+            None | Some(Value::Null) | Some(Value::Bool(true)) => Ok(Self::default()),
+            Some(Value::Bool(false)) => Ok(Self { skip: true, targets: Vec::new() }),
+            Some(Value::Object(o)) => Ok(Self { skip: false, targets: targets_of(o.get("targets"))? }),
+            Some(t @ (Value::Array(_) | Value::String(_))) => Ok(Self { skip: false, targets: targets_of(Some(t))? }),
+            Some(_) => Err(invalid("an entry's or shot's redact is false, a list of targets or {targets}")),
+        }
     }
 }
 
@@ -209,22 +309,28 @@ fn kinds(list: &[&str]) -> Result<(bool, bool), AutoCutError> {
         match filmcraft_vision::Kind::from_name(k) {
             Some(filmcraft_vision::Kind::Face) => faces = true,
             Some(filmcraft_vision::Kind::Plate) => plates = true,
-            None => return Err(invalid(format!("\"{}\" is neither faces nor plates", k.chars().take(40).collect::<String>()))),
+            Some(filmcraft_vision::Kind::Target) | None => {
+                return Err(invalid(format!("\"{}\" is neither faces nor plates", k.chars().take(40).collect::<String>())));
+            }
         }
     }
-    if faces || plates { Ok((faces, plates)) } else { Err(invalid("name faces, plates or both")) }
+    Ok((faces, plates))
 }
 
 impl Redact {
     /// `faces,plates`, `faces`, `plates` (the CLI's `--redact`).
     pub fn parse(s: &str) -> Result<Self, AutoCutError> {
         let (faces, plates) = kinds(&s.split(',').collect::<Vec<_>>())?;
+        if !faces && !plates {
+            return Err(invalid("name faces, plates or both"));
+        }
         Ok(Self { faces, plates, ..Self::default() })
     }
 
     /// The plan's `redact`: `true`, `"faces,plates"`, `["faces", "plates"]`, or
     /// `{"kinds": …, "style": "blur"|"mosaic", "strength": 1..100, "minFaceHeight": 0..1,
-    /// "verify": bool}`; absent, `null` or `false`: nothing is hidden.
+    /// "verify": bool, "targets": ["DP World logo", …]}` (`kinds: []` with targets hides only
+    /// them); absent, `null` or `false`: nothing is hidden.
     pub fn from_plan(v: Option<&Value>) -> Result<Option<Self>, AutoCutError> {
         let list = |a: &[Value]| -> Result<(bool, bool), AutoCutError> {
             let names: Vec<&str> = a.iter().map(|x| x.as_str().ok_or_else(|| invalid("kinds are names (faces, plates)"))).collect::<Result<_, _>>()?;
@@ -236,6 +342,9 @@ impl Redact {
             Some(Value::String(s)) => Self::parse(s).map(Some),
             Some(Value::Array(a)) => {
                 let (faces, plates) = list(a)?;
+                if !faces && !plates {
+                    return Err(invalid("name faces, plates or both"));
+                }
                 Ok(Some(Self { faces, plates, ..Self::default() }))
             }
             Some(Value::Object(o)) => {
@@ -268,6 +377,10 @@ impl Redact {
                     Some(Value::Bool(b)) => r.verify = *b,
                     Some(_) => return Err(invalid("verify: true or false")),
                 }
+                r.targets = targets_of(o.get("targets"))?;
+                if !r.faces && !r.plates && r.targets.is_empty() {
+                    return Err(invalid("nothing to hide: kinds faces and/or plates, or targets"));
+                }
                 Ok(Some(r))
             }
             Some(_) => Err(invalid("true, \"faces,plates\", a list or an object")),
@@ -285,6 +398,9 @@ impl Redact {
         }
         if let Some(h) = self.min_face_height {
             v["minFaceHeight"] = json!(h);
+        }
+        if !self.targets.is_empty() {
+            v["targets"] = json!(self.targets);
         }
         v
     }
@@ -315,40 +431,122 @@ fn subject_box(shot: &crate::showcase::Shot, clip: u64, aspect: f64) -> Option<V
     Some(json!({"x": cx - w / 2.0, "y": cy - h / 2.0, "w": w, "h": h, "clip": clip, "seconds": m.seconds.max(0.0)}))
 }
 
-/// The showcase's privacy pass: `clip.autoRedact` over every footage clip of the built show
-/// (`layout`) and the blurred background copy behind a shot shown whole (`fit: full`), each
-/// robot's own box excluded in both; what happened goes into `notes`. A copy shows the same
-/// frames, so the engine analyses it once with its clip and gives it the same masks.
-pub async fn redact_show(ex: &dyn Executor, r: &Redact, layout: &[PlacedEntry], entries: &[Entry], notes: &mut Vec<String>, progress: &mut dyn FnMut(&str)) {
-    let clips: Vec<u64> = layout.iter().flat_map(|p| p.shots.iter().flat_map(|s| std::iter::once(s.clip).chain(s.background))).collect();
-    if clips.is_empty() {
-        return;
-    }
-    let mut exclude = Vec::new();
-    for p in layout.iter().filter(|p| !p.scene) {
-        let Some(e) = entries.iter().find(|e| e.number == p.number) else { continue };
+/// The clips a showcase hides things in, and what: from the plan's `redact` (`plan`: faces and
+/// plates and its targets, in every footage clip) and each entry's and shot's own `redact`
+/// (their targets in their clips; `false` leaves them alone). A shot's clip comes with the
+/// blurred background copy behind it when it is shown whole (`fit: full`). Returns the
+/// `clip.autoRedact` parameters, or `None` when there is nothing to do; problems with an entry's
+/// or shot's `redact` go to `notes`.
+pub fn show_params(plan: Option<&Redact>, layout: &[PlacedEntry], entries: &[Entry], aspects: &[(u64, f64)], notes: &mut Vec<String>) -> Option<Value> {
+    let mut clips: Vec<u64> = Vec::new();
+    let mut exclude: Vec<Value> = Vec::new();
+    // each named target with the clips it is looked for in
+    let mut local: Vec<(String, Vec<u64>)> = Vec::new();
+    for p in layout {
+        let e = entries.iter().find(|e| e.number == p.number);
+        let er = match e.map(|e| LocalRedact::from_plan(e.redact.as_ref())).transpose() {
+            Ok(r) => r.unwrap_or_default(),
+            Err(err) => {
+                notes.push(format!("privacy: entry {}: {err}", p.number));
+                LocalRedact::default()
+            }
+        };
         for placed in &p.shots {
-            let Some(shot) = e.shots.iter().find(|s| s.item == placed.item) else { continue };
-            let aspect = match ex.execute("media.frame", json!({"item": placed.item, "seconds": 0.0, "maxSide": 64})).await {
-                Ok(v) => v["width"].as_f64().zip(v["height"].as_f64()).map_or(16.0 / 9.0, |(w, h)| w / h.max(1.0)),
-                Err(_) => 16.0 / 9.0,
+            let shot = e.and_then(|e| e.shots.iter().find(|s| s.item == placed.item));
+            let sr = match shot.map(|s| LocalRedact::from_plan(s.redact.as_ref())).transpose() {
+                Ok(r) => r.unwrap_or_default(),
+                Err(err) => {
+                    notes.push(format!("privacy: entry {}, a shot: {err}", p.number));
+                    LocalRedact::default()
+                }
             };
-            for clip in std::iter::once(placed.clip).chain(placed.background) {
-                exclude.extend(subject_box(shot, clip, aspect));
+            if er.skip || sr.skip {
+                continue;
+            }
+            let here: Vec<&String> = er.targets.iter().chain(&sr.targets).collect();
+            if plan.is_none() && here.is_empty() {
+                continue;
+            }
+            let ids: Vec<u64> = std::iter::once(placed.clip).chain(placed.background).collect();
+            clips.extend(&ids);
+            for t in here {
+                match local.iter_mut().find(|(x, _)| x == t) {
+                    Some((_, c)) => c.extend(&ids),
+                    None => local.push((t.clone(), ids.clone())),
+                }
+            }
+            // the robot itself keeps its face (named targets are hidden even inside it)
+            if !p.scene
+                && let Some(shot) = shot
+            {
+                let aspect = aspects.iter().find(|(i, _)| *i == placed.item).map_or(16.0 / 9.0, |a| a.1);
+                for clip in &ids {
+                    exclude.extend(subject_box(shot, *clip, aspect));
+                }
             }
         }
     }
-    let mut p = json!({"clips": clips, "kinds": r.kinds_json(), "exclude": exclude, "verify": r.verify, "wait": true});
-    if let Some(s) = &r.style {
-        p["style"] = json!(s);
+    if clips.is_empty() {
+        return None;
     }
-    if let Some(s) = r.strength {
-        p["strength"] = json!(s);
+    let mut targets: Vec<Value> = plan.map(|r| r.targets.iter().map(|t| json!(t)).collect()).unwrap_or_default();
+    targets.extend(local.into_iter().map(|(t, c)| json!({"text": t, "clips": c})));
+    let mut p = json!({
+        "clips": clips,
+        "kinds": plan.map_or(json!([]), Redact::kinds_json),
+        "exclude": exclude,
+        "verify": plan.is_none_or(|r| r.verify),
+        "wait": true,
+    });
+    if !targets.is_empty() {
+        p["targets"] = Value::Array(targets);
     }
-    if let Some(h) = r.min_face_height {
-        p["minFaceHeight"] = json!(h);
+    if let Some(r) = plan {
+        if let Some(s) = &r.style {
+            p["style"] = json!(s);
+        }
+        if let Some(s) = r.strength {
+            p["strength"] = json!(s);
+        }
+        if let Some(h) = r.min_face_height {
+            p["minFaceHeight"] = json!(h);
+        }
     }
-    progress(&format!("privacy: looking for faces and plates in {} clip(s)", clips.len()));
+    Some(p)
+}
+
+/// The showcase's privacy pass ([`show_params`]): `clip.autoRedact` over the show's footage,
+/// each robot's own box excluded from the face and plate rules; what happened goes into
+/// `notes`. A copy of a clip shows the same frames, so the engine analyses it once with its clip
+/// and gives it the same masks.
+pub async fn redact_show(
+    ex: &dyn Executor,
+    plan: Option<&Redact>,
+    layout: &[PlacedEntry],
+    entries: &[Entry],
+    notes: &mut Vec<String>,
+    progress: &mut dyn FnMut(&str),
+) {
+    let wanted = plan.is_some() || entries.iter().any(|e| e.redact.is_some() || e.shots.iter().any(|s| s.redact.is_some()));
+    if !wanted {
+        return;
+    }
+    // each footage item's shape, for the robots' boxes
+    let mut aspects: Vec<(u64, f64)> = Vec::new();
+    for item in layout.iter().flat_map(|p| p.shots.iter().map(|s| s.item)) {
+        if aspects.iter().any(|(i, _)| *i == item) {
+            continue;
+        }
+        let a = match ex.execute("media.frame", json!({"item": item, "seconds": 0.0, "maxSide": 64})).await {
+            Ok(v) => v["width"].as_f64().zip(v["height"].as_f64()).map_or(16.0 / 9.0, |(w, h)| w / h.max(1.0)),
+            Err(_) => 16.0 / 9.0,
+        };
+        aspects.push((item, a));
+    }
+    let Some(p) = show_params(plan, layout, entries, &aspects, notes) else { return };
+    let n = p["clips"].as_array().map_or(0, Vec::len);
+    let named = p["targets"].as_array().map_or(0, Vec::len);
+    progress(&format!("privacy: looking for faces, plates{} in {n} clip(s)", if named > 0 { format!(" and {named} named target(s)") } else { String::new() }));
     match crate::showcase::run(ex, "clip.autoRedact", p).await {
         Ok(v) => {
             let o = &v["redact"];
@@ -356,9 +554,10 @@ pub async fn redact_show(ex: &dyn Executor, r: &Redact, layout: &[PlacedEntry], 
             let sum = |k: &str| clips.iter().filter_map(|c| c[k].as_u64()).sum::<u64>();
             let skipped = |k: &str| clips.iter().filter_map(|c| c["skipped"][k].as_u64()).sum::<u64>();
             progress(&format!(
-                "privacy: {} face(s) and {} plate(s) hidden in {} clip(s); left alone: {} robot(s) or picture(s), {} small face(s), {} excluded",
+                "privacy: {} face(s), {} plate(s) and {} named place(s) hidden in {} clip(s); left alone: {} robot(s) or picture(s), {} small face(s), {} excluded",
                 sum("faces"),
                 sum("plates"),
+                sum("targets"),
                 o["clipsChanged"],
                 skipped("notAPerson"),
                 skipped("tooSmall"),
@@ -370,8 +569,13 @@ pub async fn redact_show(ex: &dyn Executor, r: &Redact, layout: &[PlacedEntry], 
                 }
                 _ => {}
             }
+            for c in clips {
+                for e in c["looks"]["errors"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(1) {
+                    notes.push(format!("privacy: {}: looking for named targets: {}", c["name"].as_str().unwrap_or(""), e.as_str().unwrap_or("")));
+                }
+            }
         }
-        Err(e) => notes.push(format!("privacy: faces and plates were not hidden: {e}")),
+        Err(e) => notes.push(format!("privacy: nothing was hidden: {e}")),
     }
 }
 
@@ -387,6 +591,31 @@ mod tests {
         assert_eq!(parse_answer(Kind::Plate, &p, 3), vec![Some(true), Some(false), None]);
         assert_eq!(parse_answer(Kind::Face, &json!("garbage"), 2), vec![None, None]);
         assert_eq!(parse_answer(Kind::Face, &json!({"tiles": [{"what": "mannequin"}]}), 1), vec![Some(false)]);
+    }
+
+    #[test]
+    fn found_places_are_read_in_the_models_frame() {
+        // a 1280 × 720 picture: Qwen2.5-VL sees it as 1288 × 728
+        assert_eq!(crate::analyze::model_frame(1280, 720), (1288.0, 728.0));
+        let v = json!({"found": [
+            {"target": 1, "bbox_2d": [644, 364, 966, 546]},
+            {"target": 2, "bbox_2d": [0, 0, 100, 100]},
+            {"target": 0, "bbox_2d": [10, 10, 20, 20]},
+            {"target": 9, "bbox_2d": [0, 0, 100, 100]},
+            {"target": 1, "bbox_2d": [500, 500, 400, 400]},
+            {"target": 1, "bbox_2d": "x"},
+            {"bbox_2d": [0, 0, 100, 100]}
+        ]});
+        let f = parse_found(&v, 2, 1280, 720);
+        assert_eq!(f.len(), 3, "{f:?}");
+        assert_eq!(f[0].0, 0);
+        assert!((f[0].1[0] - 0.5).abs() < 1e-9 && (f[0].1[2] - 0.25).abs() < 1e-9);
+        assert_eq!((f[1].0, f[2].0), (1, 0));
+        // one target: the number may be missing
+        assert_eq!(parse_found(&json!({"found": [{"bbox_2d": [0, 0, 100, 100]}]}), 1, 1280, 720).len(), 1);
+        assert!(parse_found(&json!({"found": "none"}), 1, 1280, 720).is_empty());
+        assert!(parse_found(&json!({}), 1, 0, 0).is_empty());
+        assert!(find_prompt(&["DP World logo".into(), "a\nsign".into()]).contains("1. DP World logo; 2. a sign"));
     }
 
     #[test]
@@ -423,6 +652,49 @@ mod tests {
         // a plan written out reads back the same
         let r = Redact { faces: false, style: Some("mosaic".into()), strength: Some(70.0), min_face_height: Some(0.1), verify: false, ..Redact::default() };
         assert_eq!(Redact::from_plan(Some(&r.to_plan())).unwrap(), Some(r));
+    }
+
+    #[test]
+    fn entries_and_shots_add_their_own_targets() {
+        use crate::showcase::{PlacedShot, Shot};
+        let shot = |item: u64, redact: Option<Value>| Shot { item, redact, ..Shot::default() };
+        let entries = vec![
+            Entry {
+                number: 1,
+                shots: vec![shot(70, Some(json!({"targets": ["dpworld.com text"]}))), shot(68, None)],
+                redact: Some(json!({"targets": ["DP World logo"]})),
+                ..Entry::default()
+            },
+            Entry { number: 2, shots: vec![shot(5, None)], ..Entry::default() },
+            Entry { number: 3, shots: vec![shot(6, None)], redact: Some(json!(false)), ..Entry::default() },
+        ];
+        let placed = |n: usize, shots: Vec<(u64, u64, Option<u64>)>| PlacedEntry {
+            number: n,
+            shots: shots.into_iter().map(|(clip, item, background)| PlacedShot { clip, item, background, ..PlacedShot::default() }).collect(),
+            ..PlacedEntry::default()
+        };
+        let layout = vec![placed(1, vec![(100, 70, Some(101)), (102, 68, None)]), placed(2, vec![(103, 5, None)]), placed(3, vec![(104, 6, None)])];
+        let mut notes = Vec::new();
+        // no plan-level redaction: only the clips with targets, faces and plates off
+        let p = show_params(None, &layout, &entries, &[], &mut notes).unwrap();
+        assert_eq!(p["clips"], json!([100, 101, 102]));
+        assert_eq!(p["kinds"], json!([]));
+        let t = p["targets"].as_array().unwrap();
+        assert_eq!(t[0], json!({"text": "DP World logo", "clips": [100, 101, 102]}));
+        assert_eq!(t[1], json!({"text": "dpworld.com text", "clips": [100, 101]}));
+        // with the plan's: every clip but entry 3's (false), its targets everywhere
+        let plan = Redact { targets: vec!["Acme banner".into()], ..Redact::default() };
+        let p = show_params(Some(&plan), &layout, &entries, &[], &mut notes).unwrap();
+        assert_eq!(p["clips"], json!([100, 101, 102, 103]));
+        assert_eq!(p["targets"][0], json!("Acme banner"));
+        assert_eq!(p["kinds"], json!(["faces", "plates"]));
+        assert!(notes.is_empty(), "{notes:?}");
+        // a bad entry redact is noted, not fatal
+        let bad = vec![Entry { number: 1, shots: vec![shot(70, None)], redact: Some(json!(7)), ..Entry::default() }];
+        assert!(show_params(Some(&plan), &layout[..1], &bad, &[], &mut notes).is_some());
+        assert_eq!(notes.len(), 1);
+        // nothing asked: nothing to do
+        assert!(show_params(None, &layout[1..], &entries, &[], &mut notes).is_none());
     }
 
     #[test]

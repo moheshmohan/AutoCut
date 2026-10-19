@@ -58,6 +58,7 @@ pub mod proxies;
 pub mod publish;
 pub mod recipes;
 pub mod redact;
+mod redact_targets;
 pub mod reframe;
 pub mod relink;
 pub mod remix;

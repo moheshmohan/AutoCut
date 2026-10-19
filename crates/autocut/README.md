@@ -499,7 +499,7 @@ subject is not found (`Options::follow_subject`, `--no-track`).
 `privacy.rs` holds AutoCut's side of the engine's automatic blur (`clip.autoRedact`,
 `crates/engine/src/redact.rs`; detectors in `crates/vision`):
 
-- `OllamaJudge`, the engine's `FaceJudge` (installed by the desktop app and the CLI): the crops
+- `OllamaJudge`, the engine's `VisionJudge` (installed by the desktop app and the CLI): the crops
   of what the detectors found, up to six, tiled into one numbered grid picture; the analysis model
   (`AUTOCUT_ANALYSIS_MODEL`) answers per tile — faces: person / robot / mannequin / statue /
   poster / screen; plates (outlined in red): plate / label / sign / screen. Only people and
@@ -512,6 +512,11 @@ subject is not found (`Options::follow_subject`, `--no-track`).
   blurred background copy of each shot shown whole (`fit: full`; the engine analyses a copy once
   with its clip), each robot's subject box (the analysis' largest moment, taken square) excluded.
   What happened goes to the build's notes and progress.
+- Named targets: the plan's `redact.targets` (`--redact-target`, repeatable) hide logos, brands
+  or signs in every footage clip; an entry's or a shot's own `redact` (`{"targets": [...]}`, or
+  `false` to leave its footage alone) adds targets for its clips only. `OllamaJudge::find`
+  asks for every place each target appears (`{"found": [{"target", "bbox_2d"}]}` in the model's
+  resized frame, `analyze::model_frame`); the engine follows them between looks.
 
 Measured on Robot Showcase v4 (560 s of footage, 90 clips, mostly 1080p H.264 with some VP9
 4:4:4): the whole sequence analysed in 248 s on an M-series Mac (detection 123 s, vision check

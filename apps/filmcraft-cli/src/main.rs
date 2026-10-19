@@ -128,7 +128,7 @@ SUBCOMMANDS
          [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
          [--outro-logo logo.png] [--outro-channel C] [--outro-handle @h] [--outro-tagline T]
          [--outro-cta S] [--outro-cta-done S] [--outro-terminal L] [--outro-seconds 12]
-         [--outro-background item[:from[:to]]]… [--redact faces,plates]
+         [--outro-background item[:from[:to]]]… [--redact faces,plates] [--redact-target T]…
          [--export out.mp4 [--upload [--upload-album <title>]]
          [--upload-youtube [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P]
          [--youtube-tags a,b] [--youtube-description D]]] [--qa | --no-qa]
@@ -195,7 +195,9 @@ SUBCOMMANDS
                                 --redact faces,plates (or the plan's \"redact\") hides visitors'
                                 faces and number plates in the footage behind a tracked blur (as
                                 `redact`), each shot's robot and every robot the vision model
-                                recognises left sharp;
+                                recognises left sharp; --redact-target (the plan's \"redact\":
+                                {\"targets\": [...]}, also on an entry or a shot) hides named
+                                logos or signs too;
                                 with --export, YouTube chapters go to <out>.chapters.txt and the
                                 narration's subtitles to <out>.srt and <out>.vtt (at most 2 lines
                                 of 42 characters, 1-7 s a cue; also on the sequence's Subtitles
@@ -237,7 +239,8 @@ SUBCOMMANDS
   redact [--clips 1,2 | --sequence id] [--kinds faces,plates] [--style blur|mosaic]
          [--strength 1-100] [--padding 0.2] [--min-face-height 0.05] [--min-plate-width 0.025]
          [--face-score 0.7] [--plate-score 0.8] [--analysis-fps 10] [--exclude '<json boxes>']
-         [--no-verify] [--dry-run] [--keep] [--download] [--save | --save-as p.fcproj]
+         [--no-verify] [--dry-run] [--keep] [--target T]... [--target-every 1]
+         [--download] [--save | --save-as p.fcproj]
                                 hide clearly recognisable faces and legible number plates in the
                                 --project's active sequence (or --sequence, or the --clips given)
                                 behind a tracked blur (clip.autoRedact / sequence.autoRedact):
@@ -248,7 +251,10 @@ SUBCOMMANDS
                                 shown once to the local vision model (AUTOCUT_ANALYSIS_MODEL), so
                                 robots, mannequins, posters and screens stay sharp (--no-verify
                                 hides every face found). --dry-run lists the tracks; --keep keeps
-                                an earlier redaction. --download fetches the detectors first
+                                an earlier redaction. --target names something else to hide (a
+                                logo, a sign; repeatable): the local vision model looks for it
+                                every --target-every seconds and at shot changes, and the tracker
+                                follows it between looks. --download fetches the detectors first
                                 (4.4 MB, MIT and Apache-2.0, SHA-256 checked). --save keeps it
   shorts <project.fcproj | media file> [--count 3] [--aspect 9:16] [--min-seconds 15]
          [--max-seconds 60] [--motion smooth|responsive] [--topic T] [--title-card]
@@ -608,6 +614,14 @@ fn redact_params(a: &Args) -> Result<Value, String> {
     }
     if a.flag("--keep") {
         p["replace"] = json!(false);
+    }
+    // named targets (logos, signs), found by the local vision model: --target "DP World logo"
+    let targets = a.all("--target");
+    if !targets.is_empty() {
+        p["targets"] = json!(targets);
+    }
+    if let Some(v) = num("--target-every")? {
+        p["targetEvery"] = json!(v);
     }
     match (a.opt("--clips"), a.opt("--sequence")) {
         (Some(_), Some(_)) => return Err("give --clips or --sequence, not both".into()),
@@ -1850,6 +1864,12 @@ async fn cli() {
             }
             if redact_flag.is_some() {
                 opts.redact = redact_flag;
+            }
+            // --redact-target "DP World logo" (repeatable): named targets hidden in every shot
+            let named: Vec<String> = a.all("--redact-target").into_iter().map(str::to_string).collect();
+            if !named.is_empty() {
+                let r = opts.redact.get_or_insert_with(|| filmcraft_autocut::privacy::Redact { faces: false, plates: false, ..Default::default() });
+                r.targets.extend(named);
             }
             if let Some(r) = &opts.redact {
                 look_fields.insert("redact".into(), r.to_plan());

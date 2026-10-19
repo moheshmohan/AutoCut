@@ -101,6 +101,9 @@ const VALUED: &[&str] = &[
     "--plate-score",
     "--exclude",
     "--redact",
+    "--target",
+    "--target-every",
+    "--redact-target",
     // instagram setup / publish
     "--app-id",
     "--redirect-uri",

@@ -3769,3 +3769,4 @@
 	Choose faces, plates or both	请选择人脸、车牌或两者
 	Auto Redact: finding faces and plates in the background (see Progress)	自动遮挡：正在后台查找人脸和车牌（参见进度）
 	Auto Redact	自动遮挡
+	Also hide (logos, signs; separated by ;):	同时遮挡（标志、标牌；用 ; 分隔）：

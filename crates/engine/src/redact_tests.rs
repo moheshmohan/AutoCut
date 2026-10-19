@@ -159,7 +159,7 @@ fn busy(s: &mut Session, k: u32) -> f64 {
 
 struct Judge(std::result::Result<Option<bool>, String>, std::sync::atomic::AtomicUsize);
 
-impl FaceJudge for Judge {
+impl VisionJudge for Judge {
     fn name(&self) -> String {
         "test judge".into()
     }
@@ -168,6 +168,46 @@ impl FaceJudge for Judge {
         assert!(crops.iter().all(|c| c.width > 0 && c.height > 0 && c.rgba.len() == (c.width * c.height * 4) as usize));
         self.0.clone().map(|a| vec![a; crops.len()])
     }
+    /// The warm disc, for the first target.
+    fn find(&self, frame: &Crop, targets: &[String]) -> std::result::Result<Vec<(usize, [f64; 4])>, String> {
+        assert!(!targets.is_empty());
+        Ok(warm_disc(&frame.rgba, frame.width as usize, frame.height as usize)
+            .into_iter()
+            .map(|d| (0, [f64::from(d.bbox[0]), f64::from(d.bbox[1]), f64::from(d.bbox[2]), f64::from(d.bbox[3])]))
+            .collect())
+    }
+}
+
+#[test]
+fn a_named_target_is_found_followed_and_hidden_under_a_rectangle() {
+    let (mut s, clip, seq) = session();
+    // without a vision model, named targets cannot be looked for
+    let e = s.execute("clip.autoRedact", json!({"wait": true, "kinds": [], "targets": ["the logo"]})).unwrap_err().to_string();
+    assert!(e.contains("vision model"), "{e}");
+    s.redacts.judge = Some(Arc::new(Judge(Ok(Some(true)), Default::default())));
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "kinds": [], "targets": ["the logo"], "targetEvery": 0.5})).unwrap();
+    let c = &r["redact"]["clips"][0];
+    assert_eq!(c["targets"], json!(1), "{r}");
+    assert_eq!(c["faces"], json!(0));
+    assert!(c["looks"]["asked"].as_u64().unwrap() >= 2, "{c}");
+    let fx = clip_effects(&s, seq, clip);
+    let m = &fx.iter().find(|e| is_auto_redaction(e)).unwrap().masks[0];
+    assert_eq!(m.name, "Redact the logo 1");
+    // a rectangle (four corners) that follows the disc
+    let it = s.project.sequence(seq).unwrap().find_item(clip).unwrap().1.clone();
+    let rate = s.project.sequence(seq).unwrap().settings.frame_rate;
+    for k in [4u32, 20, 35] {
+        let path = m.path_at(it.source_time_at(rate.tick_of(k as i64)));
+        assert_eq!(path.vertices.len(), 4);
+        let c = path.centroid();
+        let (fx, fy) = face_at(k);
+        assert!((c.x - fx).abs() < 10.0 && (c.y - fy).abs() < 8.0, "frame {k}: {c:?} for ({fx}, {fy})");
+    }
+    // hostile targets
+    for t in [json!("a"), json!([""]), json!([7]), json!([{"text": "x", "clips": "all"}]), json!(["a\nb"]), json!(vec!["x"; 17])] {
+        assert!(s.execute("clip.autoRedact", json!({"targets": t.clone()})).is_err(), "{t}");
+    }
+    assert!(s.execute("clip.autoRedact", json!({"kinds": []})).is_err(), "nothing to hide");
 }
 
 #[test]
@@ -346,7 +386,7 @@ fn needs_a_selection_and_says_how_to_get_the_models() {
 fn masks_switch_on_and_off_with_their_track() {
     use filmcraft_vision::track::TrackPoint;
     let pt = |t: f64, x: f64| TrackPoint { t, bbox: [x, 0.4, 0.1, 0.2], corners: vec![], seen: true };
-    let track = Track { kind: Kind::Face, points: vec![pt(2.0, 0.1), pt(2.1, 0.2), pt(2.2, 0.3)], hits: 3, best_score: 0.9 };
+    let track = Track { kind: Kind::Face, label: None, points: vec![pt(2.0, 0.1), pt(2.1, 0.2), pt(2.2, 0.3)], hits: 3, best_score: 0.9 };
     let c = ClipRedact {
         clip: ClipId(1),
         also: Vec::new(),
@@ -357,6 +397,9 @@ fn masks_switch_on_and_off_with_their_track() {
         interval: 0.1,
         media: (Tick::from_seconds_f64(1.0), Tick::from_seconds_f64(6.0)),
         missed: 0,
+        looks: 0,
+        found: 0,
+        look_errors: Vec::new(),
     };
     let m = mask_for(&track, 1, &c, 0.2).unwrap();
     let at = |s: f64| m.opacity.f64_at(Tick::from_seconds_f64(s));

@@ -75,6 +75,9 @@ pub struct TrackPoint {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub kind: Kind,
+    /// What a [`Kind::Target`] track follows (the user's description).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Its moments in time order, one per analysed frame from its first sighting to its last.
     pub points: Vec<TrackPoint>,
     /// Detections linked to it.
@@ -89,9 +92,9 @@ impl Track {
     pub fn end(&self) -> f64 {
         self.points.last().map_or(0.0, |p| p.t)
     }
-    /// The largest box height (faces) or width (plates) over the track.
+    /// The largest box height (faces, targets) or width (plates) over the track.
     pub fn max_size(&self) -> f64 {
-        self.points.iter().map(|p| if self.kind == Kind::Face { p.bbox[3] } else { p.bbox[2] }).fold(0.0, f64::max)
+        self.points.iter().map(|p| if self.kind == Kind::Plate { p.bbox[2] } else { p.bbox[3] }).fold(0.0, f64::max)
     }
     /// The moment nearest `t`.
     pub fn at(&self, t: f64) -> Option<&TrackPoint> {
@@ -243,7 +246,12 @@ fn fill(frames: &[Frame], o: &Open) -> Option<Track> {
         points.push(TrackPoint { t, bbox, corners, seen: false });
     }
     let best_score = o.seen.iter().map(|s| s.3).fold(0.0f32, f32::max);
-    Some(Track { kind: o.kind, points, hits: o.seen.len(), best_score })
+    Some(Track { kind: o.kind, label: None, points, hits: o.seen.len(), best_score })
+}
+
+/// [`link`]'s smoothing for a track made elsewhere (a followed target).
+pub fn smoothed(t: Track, sigma: f64) -> Track {
+    smooth(t, sigma)
 }
 
 /// Gaussian-weighted local linear smoothing of the box centres, sizes and corners over time
@@ -347,6 +355,8 @@ pub fn verdict(track: &Track, kp: &KeepParams, exclude: &[Exclude]) -> Option<Sk
     let big = match track.kind {
         Kind::Face => track.max_size() >= kp.min_face_height,
         Kind::Plate => track.max_size() >= kp.min_plate_width,
+        // what the user named is hidden at any size, and is not checked against exclusions
+        Kind::Target => return None,
     };
     if !big {
         return Some(Skip::TooSmall);
@@ -458,6 +468,7 @@ mod tests {
         let kp = KeepParams::default();
         let mk = |h: f64, hits: usize, score: f32| Track {
             kind: Kind::Face,
+            label: None,
             points: vec![TrackPoint { t: 1.0, bbox: [0.4, 0.4, h * 0.6, h], corners: vec![], seen: true }],
             hits,
             best_score: score,

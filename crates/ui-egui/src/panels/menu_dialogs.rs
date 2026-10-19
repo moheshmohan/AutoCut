@@ -336,7 +336,10 @@ fn defaults(app: &mut FilmcraftApp, cmd: &str, id: &str) -> Result<(Value, Value
         "clip.sceneEditDetection" => (json!({"applyCuts": true, "createSubclips": false, "generateMarkers": false, "sensitivity": 50.0}), Value::Null),
         "clip.autoRedact" => {
             let st = s.execute("redact.status", json!({})).map_err(|e| e.to_string())?;
-            (json!({"faces": true, "plates": true, "style": "blur", "strength": 60.0, "minFaceHeight": 5.0, "padding": 20.0, "verify": true}), st)
+            (
+                json!({"faces": true, "plates": true, "targets": "", "style": "blur", "strength": 60.0, "minFaceHeight": 5.0, "padding": 20.0, "verify": true}),
+                st,
+            )
         }
         "sequence.normalizeMixTrack" => (json!({"db": 0.0}), Value::Null),
         "sequence.simplify" => {
@@ -736,6 +739,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 ui.label(RichText::new(tl!("Hide")).strong());
                 check(ui, &mut elems, pre, p, "faces", tl!("Faces clearly recognisable"));
                 check(ui, &mut elems, pre, p, "plates", tl!("Vehicle number plates"));
+                text(ui, &mut elems, pre, p, "targets", tl!("Also hide (logos, signs; separated by ;):"), 260.0);
                 number(ui, &mut elems, pre, p, "minFaceHeight", tl!("Smallest face:"), 0.0..=100.0, tl!(" % of the picture height"));
                 radios(ui, &mut elems, pre, p, "style", tl!("Style:"), &[("blur", tl!("Blur")), ("mosaic", tl!("Mosaic"))]);
                 number(ui, &mut elems, pre, p, "strength", tl!("Strength:"), 1.0..=100.0, "");
@@ -949,7 +953,8 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
             if p["plates"] == json!(true) {
                 kinds.push("plates");
             }
-            if kinds.is_empty() {
+            let targets: Vec<&str> = p["targets"].as_str().unwrap_or_default().split(';').map(str::trim).filter(|t| !t.is_empty()).collect();
+            if kinds.is_empty() && targets.is_empty() {
                 return Err(tl!("Choose faces, plates or both").into());
             }
             let q = json!({
@@ -959,6 +964,7 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
                 "minFaceHeight": p["minFaceHeight"].as_f64().unwrap_or(5.0) / 100.0,
                 "padding": p["padding"].as_f64().unwrap_or(20.0) / 100.0,
                 "verify": p["verify"],
+                "targets": targets,
             });
             s.execute(&d.command, q).map_err(|e| e.to_string())?;
             app.ui.status = tl!("Auto Redact: finding faces and plates in the background (see Progress)").into();

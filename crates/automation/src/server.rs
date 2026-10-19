@@ -630,6 +630,13 @@ pub struct AutoRedactParams {
     /// Report the tracks without changing anything.
     #[serde(default)]
     pub dry_run: Option<bool>,
+    /// Things named in words to hide too ("DP World logo", "the dpworld.com floor sign"), found by
+    /// the local vision model; each a description, or {text, clips} for some clips only.
+    #[serde(default)]
+    pub targets: Option<Vec<Value>>,
+    /// Seconds between the vision model's looks for the targets (default 1).
+    #[serde(default)]
+    pub target_every: Option<f64>,
 }
 
 /// `clip.autoRedact` (with `clips`) or `sequence.autoRedact` params for an `auto_redact` call.
@@ -654,6 +661,8 @@ fn auto_redact_params(p: AutoRedactParams) -> (&'static str, Value) {
     put("exclude", p.exclude.map(Value::Array));
     put("verify", p.verify.map(Value::Bool));
     put("dryRun", p.dry_run.map(Value::Bool));
+    put("targets", p.targets.map(Value::Array));
+    put("targetEvery", p.target_every.map(|v| json!(v)));
     (id, params)
 }
 
@@ -1597,7 +1606,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Auto Redact Faces and Plates",
-        description = "Hide clearly recognisable faces and legible vehicle number plates behind a tracked blur (`clip.autoRedact` with `clips`, else `sequence.autoRedact`; one undo step). Local detectors (YuNet faces, LPD-YuNet plates; download them once with `redact.downloadModels` after the user agrees: 4.4 MB, MIT / Apache-2.0) run on every analysed frame; detections become smoothed tracks, faces smaller than `min_face_height` of the picture (5 %) are left alone, and with `verify` the local vision model sees one crop per track so humanoid robots, mannequins, posters, screens and signs stay sharp. `exclude` boxes are never hidden. Each clip gets one Gaussian Blur (or Mosaic) with a keyframed ellipse / quad mask per track, ahead of its other effects, so it follows the clip's motion, scale and crop. `dry_run` reports the tracks only. Runs as an engine job with progress; returns per clip what was hidden and why the rest was not.",
+        description = "Hide clearly recognisable faces and legible vehicle number plates behind a tracked blur (`clip.autoRedact` with `clips`, else `sequence.autoRedact`; one undo step). Local detectors (YuNet faces, LPD-YuNet plates; download them once with `redact.downloadModels` after the user agrees: 4.4 MB, MIT / Apache-2.0) run on every analysed frame; detections become smoothed tracks, faces smaller than `min_face_height` of the picture (5 %) are left alone, and with `verify` the local vision model sees one crop per track so humanoid robots, mannequins, posters, screens and signs stay sharp. `exclude` boxes are never hidden. `targets` names logos, brands or signs to hide too: the vision model looks for them every `target_every` seconds and at shot changes, a tracker follows them between looks, a rectangle mask each. Each clip gets one Gaussian Blur (or Mosaic) with a keyframed ellipse / quad mask per track, ahead of its other effects, so it follows the clip's motion, scale and crop. `dry_run` reports the tracks only. Runs as an engine job with progress; returns per clip what was hidden and why the rest was not.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn auto_redact(
@@ -2342,6 +2351,16 @@ mod tests {
         assert_eq!(
             auto_redact_params(p),
             ("clip.autoRedact", json!({"clips": [3, 4], "kinds": ["faces"], "minFaceHeight": 0.1, "dryRun": true, "wait": true}))
+        );
+        let p: AutoRedactParams =
+            serde_json::from_value(json!({"clips": [1], "kinds": [], "targets": ["DP World logo", {"text": "a sign", "clips": [1]}], "target_every": 0.5}))
+                .unwrap();
+        assert_eq!(
+            auto_redact_params(p),
+            (
+                "clip.autoRedact",
+                json!({"clips": [1], "kinds": [], "targets": ["DP World logo", {"text": "a sign", "clips": [1]}], "targetEvery": 0.5, "wait": true})
+            )
         );
         let p: AutoRedactParams =
             serde_json::from_value(json!({"sequence": 9, "style": "mosaic", "verify": false, "exclude": [{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}]})).unwrap();

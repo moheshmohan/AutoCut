@@ -20,12 +20,21 @@
 //! inside an `exclude` box.
 //!
 //! **Not robots.** With `verify` (the default) every track still to be hidden is shown once,
-//! cropped with its surroundings, to a local vision model (the host's [`FaceJudge`]: AutoCut's
+//! cropped with its surroundings, to a local vision model (the host's [`VisionJudge`]: AutoCut's
 //! Qwen2.5-VL through Ollama): a face is hidden only if it is a real person's (not a humanoid
 //! robot, mannequin, statue, poster or screen), a plate only if it is a vehicle's (not a sign or
 //! a robot's name badge); an unclear answer hides it. Without a judge the check is skipped and
 //! noted: everything detected is hidden. Plates must also have a plate's shape (wider than tall,
 //! not huge: `filmcraft_vision::post::plausible_plate`).
+//!
+//! **Named targets.** `targets` names other things to hide in words — a logo, a brand, a sign
+//! ("DP World logo", "dpworld.com text"; a description, or `{text, clips}` for some clips only).
+//! The host's vision model ([`VisionJudge::find`], grounding boxes) looks at the analysed frames
+//! every `targetEvery` seconds (1) and at shot changes; the subject tracker carries each place
+//! it finds between its looks, backwards to the previous look for a new place
+//! (`redact_targets`). They are hidden at any size, inside an `exclude` box too (a robot's
+//! box excludes its face, not the logo on its chest), under a rectangle with a wider margin.
+//! Without a vision model the command refuses targets.
 //!
 //! **The edit.** Each clip with something to hide gets one Gaussian Blur (or Mosaic, `style`)
 //! effect, its strength from the largest face or plate, with one mask per track — an ellipse for
@@ -44,8 +53,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use filmcraft_geom::Vec2;
 use filmcraft_project::{ClipId, EffectInstance, Interpolation, ItemId, ItemKind, Keyframe, Mask, MaskPath, Param, ParamValue, TrackKind};
 use filmcraft_time::Tick;
-use filmcraft_vision::Kind;
 use filmcraft_vision::track::{Exclude, KeepParams, LinkParams, Skip, Track};
+pub use filmcraft_vision::{Detection, Kind};
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, always, bad, bool_p, has_seq};
@@ -85,7 +94,7 @@ pub struct Crop {
 /// The vision check: whether a detected face is a real person's (and a detected plate a
 /// vehicle's). Hosts install one ([`Redacts::judge`]); AutoCut's asks Qwen2.5-VL through a local
 /// Ollama.
-pub trait FaceJudge: Send + Sync {
+pub trait VisionJudge: Send + Sync {
     /// Which model answers ("ollama:qwen2.5vl:7b").
     fn name(&self) -> String;
     /// For each crop of a `kind` detection, in order. Faces: `Some(true)` a real person's face,
@@ -94,6 +103,13 @@ pub trait FaceJudge: Send + Sync {
     /// vehicle's number plate, `Some(false)` something else (a sign, a label or name on a
     /// machine). `None`: cannot tell. An error means the check could not run at all.
     fn judge(&self, kind: Kind, crops: &[Crop]) -> std::result::Result<Vec<Option<bool>>, String>;
+    /// Where the things the user named (`targets`: "DP World logo", "the company's website
+    /// on the floor") are in a frame: `(index into targets, [x, y, w, h])` per place, the box
+    /// normalised to the frame. Hosts without a grounding model say so.
+    fn find(&self, frame: &Crop, targets: &[String]) -> std::result::Result<Vec<(usize, [f64; 4])>, String> {
+        let _ = (frame, targets);
+        Err("this vision model cannot find named things".into())
+    }
 }
 
 /// The effect the masks go on.
@@ -127,7 +143,23 @@ pub struct Options {
     pub plate_side: usize,
     /// Remove an earlier automatic redaction of the clip first.
     pub replace: bool,
+    /// Things the user names ("DP World logo"), each for every clip or for some.
+    pub targets: Vec<TargetP>,
+    /// Seconds between the vision model's looks for the targets.
+    pub target_every: f64,
 }
+
+/// A named target from the parameters.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetP {
+    pub text: String,
+    /// Only in these clips (none: every clip).
+    pub clips: Option<Vec<ClipId>>,
+}
+
+/// Most targets a command takes, and the longest description.
+pub const MAX_TARGETS: usize = 16;
+pub const MAX_TARGET_CHARS: usize = 120;
 
 impl Default for Options {
     fn default() -> Self {
@@ -147,6 +179,8 @@ impl Default for Options {
             face_side: 640,
             plate_side: 640,
             replace: true,
+            targets: Vec::new(),
+            target_every: 1.0,
         }
     }
 }
@@ -179,6 +213,8 @@ struct Work {
     /// Longest side of the picture the face detector sees for this clip (larger for a zoomed-in
     /// clip, so its smallest face to hide is still big enough to find).
     face_side: usize,
+    /// The named targets looked for in this clip.
+    targets: Vec<String>,
     exclude: Vec<Exclude>,
     /// The clip's media range (the masks' lead-in and lead-out stay inside it).
     media: (Tick, Tick),
@@ -201,6 +237,10 @@ pub struct ClipRedact {
     pub media: (Tick, Tick),
     /// Frames that did not decode.
     pub missed: usize,
+    /// The named targets' looks: asked, places found, errors.
+    pub looks: usize,
+    pub found: usize,
+    pub look_errors: Vec<String>,
 }
 
 impl ClipRedact {
@@ -251,7 +291,7 @@ pub struct Redacts {
     pending: Vec<PendingRedact>,
     outcomes: HashMap<u64, Value>,
     /// The vision check (None: not available; faces are hidden unchecked).
-    pub judge: Option<Arc<dyn FaceJudge>>,
+    pub judge: Option<Arc<dyn VisionJudge>>,
     /// A detector used instead of the downloaded models (tests; a host with its own).
     pub detector: Option<DetectFn>,
 }
@@ -286,6 +326,7 @@ fn kinds_p(cmd: &str, p: &Value) -> Result<(bool, bool)> {
     let names: Vec<String> = match p.get("kinds").filter(|v| !v.is_null()) {
         None => return Ok((true, true)),
         Some(Value::String(s)) => s.split(',').map(str::to_string).collect(),
+        Some(Value::Array(a)) if a.is_empty() => return Ok((false, false)),
         Some(Value::Array(a)) if a.len() <= 8 => {
             a.iter().map(|v| v.as_str().map(str::to_string)).collect::<Option<_>>().ok_or_else(|| bad(cmd, "`kinds` lists \"faces\" and/or \"plates\""))?
         }
@@ -296,13 +337,47 @@ fn kinds_p(cmd: &str, p: &Value) -> Result<(bool, bool)> {
         match Kind::from_name(n) {
             Some(Kind::Face) => faces = true,
             Some(Kind::Plate) => plates = true,
-            None => return Err(bad(cmd, format!("`kinds`: \"{}\" is neither \"faces\" nor \"plates\"", n.chars().take(40).collect::<String>()))),
+            Some(Kind::Target) | None => {
+                return Err(bad(cmd, format!("`kinds`: \"{}\" is neither \"faces\" nor \"plates\"", n.chars().take(40).collect::<String>())));
+            }
         }
     }
-    if !faces && !plates {
-        return Err(bad(cmd, "`kinds` needs \"faces\", \"plates\" or both"));
-    }
     Ok((faces, plates))
+}
+
+/// `targets`: descriptions (`"DP World logo"`), or `{"text", "clips": [id]}` for some clips.
+fn targets_p(cmd: &str, p: &Value) -> Result<Vec<TargetP>> {
+    let list = match p.get("targets").filter(|v| !v.is_null()) {
+        None => return Ok(Vec::new()),
+        Some(Value::Array(a)) if a.len() <= MAX_TARGETS => a,
+        Some(Value::Array(_)) => return Err(bad(cmd, format!("at most {MAX_TARGETS} targets"))),
+        Some(_) => return Err(bad(cmd, "`targets` is a list of descriptions (\"DP World logo\") or {text, clips}")),
+    };
+    list.iter()
+        .map(|t| {
+            let (text, clips) = match t {
+                Value::String(s) => (s.as_str(), None),
+                Value::Object(o) => {
+                    let text = o.get("text").or_else(|| o.get("target")).and_then(Value::as_str).ok_or_else(|| bad(cmd, "a target object needs `text`"))?;
+                    let clips = match (o.get("clips").filter(|v| !v.is_null()), o.get("clip").filter(|v| !v.is_null())) {
+                        (Some(Value::Array(a)), _) if a.len() <= MAX_CLIPS => Some(
+                            a.iter().map(|v| v.as_u64().map(ClipId)).collect::<Option<Vec<_>>>().ok_or_else(|| bad(cmd, "a target's `clips` are clip ids"))?,
+                        ),
+                        (Some(_), _) => return Err(bad(cmd, "a target's `clips` are clip ids")),
+                        (None, Some(c)) => Some(vec![ClipId(c.as_u64().ok_or_else(|| bad(cmd, "a target's `clip` is a clip id"))?)]),
+                        (None, None) => None,
+                    };
+                    (text, clips)
+                }
+                _ => return Err(bad(cmd, "a target is a description or {text, clips}")),
+            };
+            let text = text.trim();
+            if text.is_empty() || text.chars().count() > MAX_TARGET_CHARS || text.chars().any(char::is_control) {
+                return Err(bad(cmd, format!("a target is a description on one line, 1 to {MAX_TARGET_CHARS} characters")));
+            }
+            Ok(TargetP { text: text.to_string(), clips })
+        })
+        .collect()
 }
 
 /// The options of a command's parameters.
@@ -343,6 +418,11 @@ pub fn options_p(cmd: &str, p: &Value) -> Result<Options> {
         face_side: unit_p(cmd, p, "faceSide", 160.0, 1920.0, d.face_side as f64)? as usize,
         plate_side: unit_p(cmd, p, "plateSide", 160.0, 2560.0, d.plate_side as f64)? as usize,
         replace: flag("replace", d.replace)?,
+        targets: targets_p(cmd, p)?,
+        target_every: unit_p(cmd, p, "targetEvery", 0.25, 10.0, d.target_every)?,
+    })
+    .and_then(|o| {
+        if o.faces || o.plates || !o.targets.is_empty() { Ok(o) } else { Err(bad(cmd, "nothing to hide: `kinds` faces and/or plates, or `targets`")) }
     })
 }
 
@@ -466,13 +546,32 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
             let long = size.0.max(size.1);
             let needed = 16.0 / (keep.min_face_height.max(0.004) * size.1 / long);
             let face_side = (needed.ceil() as usize).clamp(o.face_side, 1920.max(o.face_side)).min(long as usize).max(160);
-            let side = (if o.faces { face_side } else { 0 }).max(if o.plates { o.plate_side } else { 0 }).max(64) as f64;
+            let targets: Vec<String> = o.targets.iter().filter(|t| t.clips.as_ref().is_none_or(|c| c.contains(&it.id))).map(|t| t.text.clone()).collect();
+            let look = if targets.is_empty() { 0 } else { crate::redact_targets::LOOK_SIDE };
+            let side = (if o.faces { face_side } else { 0 }).max(if o.plates { o.plate_side } else { 0 }).max(look).max(64) as f64;
             let scale = (side / long).min(1.0) as f32;
             let ex = exclude.iter().filter(|e| e.clip.is_none_or(|c| c == it.id)).map(|e| e.ex).collect();
-            let w = Work { clip: it.id, also: Vec::new(), item: it.item, name: it.name.clone(), src, times, size, scale, keep, face_side, exclude: ex, media };
+            let w = Work {
+                clip: it.id,
+                also: Vec::new(),
+                item: it.item,
+                name: it.name.clone(),
+                src,
+                times,
+                size,
+                scale,
+                keep,
+                face_side,
+                targets,
+                exclude: ex,
+                media,
+            };
             // a copy of a clip already listed (same media, same frames, same exclusions) is
             // analysed once
-            match work.iter_mut().find(|o: &&mut Work| o.item == w.item && o.times == w.times && o.exclude == w.exclude && o.keep == w.keep) {
+            match work
+                .iter_mut()
+                .find(|o: &&mut Work| o.item == w.item && o.times == w.times && o.exclude == w.exclude && o.keep == w.keep && o.targets == w.targets)
+            {
                 Some(o) => {
                     o.also.push(w.clip);
                     total = total.saturating_sub(w.times.len());
@@ -538,9 +637,10 @@ fn load_detectors(_: &Options) -> std::result::Result<DetectFn, String> {
 }
 
 /// Analyse one clip: detect on every analysed frame, link, decide. `None` when stopped.
-fn analyse(w: &Work, det: &DetectFn, o: &Options, sh: &Shared<'_>) -> Option<ClipRedact> {
+fn analyse(w: &Work, det: &DetectFn, o: &Options, vision: Option<&dyn VisionJudge>, sh: &Shared<'_>) -> Option<ClipRedact> {
     let mut frames = Vec::with_capacity(w.times.len());
     let mut missed = 0usize;
+    let mut follower = vision.filter(|_| !w.targets.is_empty()).map(|v| crate::redact_targets::Follower::new(&w.targets, o.target_every, v));
     for (k, mt) in w.times.iter().enumerate() {
         if sh.cancelled() {
             return None;
@@ -548,7 +648,11 @@ fn analyse(w: &Work, det: &DetectFn, o: &Options, sh: &Shared<'_>) -> Option<Cli
         let detections = match w.src.video_frame(filmcraft_media::FrameRequest { time: *mt, scale: w.scale }) {
             Ok(f) => {
                 let rgba = f.to_rgba8();
-                det(&rgba, f.width as usize, f.height as usize, w.face_side)
+                let (fw, fh) = (f.width as usize, f.height as usize);
+                if let Some(fo) = follower.as_mut() {
+                    fo.push(&rgba, fw, fh, mt.seconds());
+                }
+                if o.faces || o.plates { det(&rgba, fw, fh, w.face_side) } else { Vec::new() }
             }
             Err(_) => {
                 // a frame that does not decode shows nothing; its gap is filled if short
@@ -564,26 +668,34 @@ fn analyse(w: &Work, det: &DetectFn, o: &Options, sh: &Shared<'_>) -> Option<Cli
         }
     }
     let tracks = filmcraft_vision::track::link(&frames, &o.link);
-    let tracks = tracks.into_iter().map(|t| {
-        let v = filmcraft_vision::track::verdict(&t, &w.keep, &w.exclude);
-        (t, v)
-    });
+    let mut tracks: Vec<(Track, Option<Skip>)> = tracks
+        .into_iter()
+        .map(|t| {
+            let v = filmcraft_vision::track::verdict(&t, &w.keep, &w.exclude);
+            (t, v)
+        })
+        .collect();
+    let followed = follower.map(|f| f.finish(o.link.smooth)).unwrap_or_default();
+    tracks.extend(followed.tracks.into_iter().map(|t| (t, None)));
     let interval = if w.times.len() > 1 { (w.media.1 - w.media.0).seconds().abs() / (w.times.len() - 1) as f64 } else { 0.0 };
     Some(ClipRedact {
         clip: w.clip,
         also: w.also.clone(),
         name: w.name.clone(),
         size: w.size,
-        tracks: tracks.collect(),
+        tracks,
         frames: w.times.len(),
         interval,
         media: w.media,
         missed,
+        looks: followed.looks,
+        found: followed.found,
+        look_errors: followed.errors,
     })
 }
 
 /// Analyse every clip, a few at a time (decoding one while detecting in another).
-fn analyse_all(work: &[Work], det: &DetectFn, o: &Options, sh: &Shared<'_>) -> Option<Vec<ClipRedact>> {
+fn analyse_all(work: &[Work], det: &DetectFn, o: &Options, vision: Option<&dyn VisionJudge>, sh: &Shared<'_>) -> Option<Vec<ClipRedact>> {
     let workers = std::thread::available_parallelism().map_or(2, |n| n.get() / 3).clamp(1, 4).min(work.len().max(1));
     let next = AtomicUsize::new(0);
     let made: Mutex<Vec<(usize, ClipRedact)>> = Mutex::new(Vec::with_capacity(work.len()));
@@ -592,7 +704,7 @@ fn analyse_all(work: &[Work], det: &DetectFn, o: &Options, sh: &Shared<'_>) -> O
             let i = next.fetch_add(1, Ordering::Relaxed);
             let Some(w) = work.get(i) else { return };
             // a clip that panics in a decoder is a clip with nothing found, not a dead job
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyse(w, det, o, sh))) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyse(w, det, o, vision, sh))) {
                 Ok(Some(r)) => lock(&made).push((i, r)),
                 Ok(None) => {
                     sh.stop.store(true, Ordering::Relaxed);
@@ -697,13 +809,13 @@ fn outline(c: &mut Crop, r: [f64; 4]) {
 /// The vision check: one crop per track still to be hidden (a face at its largest sighting, a
 /// plate at its widest), shown to the judge [`JUDGE_BATCH`] at a time; tracks it calls
 /// something else (a robot's face, a sign) are left alone.
-fn verify(made: &mut [ClipRedact], work: &[Work], judge: &dyn FaceJudge, sh: &Shared<'_>) -> Verified {
+fn verify(made: &mut [ClipRedact], work: &[Work], judge: &dyn VisionJudge, sh: &Shared<'_>) -> Verified {
     // (kind, clip, track, crop)
     let mut asks: Vec<(Kind, usize, usize, Crop)> = Vec::new();
     for (ci, c) in made.iter().enumerate() {
         let Some(w) = work.iter().find(|w| w.clip == c.clip) else { continue };
         for (ti, (t, skip)) in c.tracks.iter().enumerate() {
-            if skip.is_some() {
+            if skip.is_some() || t.kind == Kind::Target {
                 continue;
             }
             if sh.cancelled() {
@@ -775,8 +887,16 @@ fn shape(t: &Track, p: &filmcraft_vision::track::TrackPoint, size: (f64, f64), p
         }
         Kind::Plate => MaskPath::rect(b[0], b[1], b[0] + b[2], b[1] + b[3]),
         Kind::Face => MaskPath::ellipse(Vec2::new(b[0] + b[2] / 2.0, b[1] + b[3] / 2.0), Vec2::new(b[2] / 2.0, b[3] / 2.0)),
+        // a named target's box is the vision model's, looser than a detector's: a wider margin
+        Kind::Target => {
+            let b = px_box(&filmcraft_vision::track::padded(&p.bbox, padding + TARGET_MARGIN), size);
+            MaskPath::rect(b[0], b[1], b[0] + b[2], b[1] + b[3])
+        }
     }
 }
+
+/// What a named target's mask adds to `padding` on every side.
+const TARGET_MARGIN: f64 = 0.1;
 
 fn hold(t: Tick, v: f64) -> Keyframe {
     let mut k = Keyframe::new(t, ParamValue::Float(v));
@@ -807,7 +927,11 @@ pub fn mask_for(t: &Track, n: usize, c: &ClipRedact, padding: f64) -> Option<Mas
     push(end, shape(t, last, c.size, padding));
     let first_shape = keys.first().map(|k| k.value.clone())?;
     let ParamValue::Path(path0) = first_shape else { return None };
-    let mut m = Mask::new(format!("{MASK_PREFIX}{} {n}", t.kind.name()), path0);
+    let what = match (&t.kind, &t.label) {
+        (Kind::Target, Some(l)) => l.chars().take(40).collect::<String>(),
+        (k, _) => k.name().to_string(),
+    };
+    let mut m = Mask::new(format!("{MASK_PREFIX}{what} {n}"), path0);
     if keys.len() > 1 {
         m.path.keyframes = keys;
     }
@@ -840,7 +964,7 @@ pub fn effect_for(c: &ClipRedact, o: &Options) -> Option<EffectInstance> {
     }
     // the size to hide: the largest face's height, a plate's width counting for less
     let size =
-        hidden.iter().map(|t| if t.kind == Kind::Face { t.max_size() * c.size.1 } else { t.max_size() * c.size.0 * 0.6 }).fold(0.0f64, f64::max).max(8.0);
+        hidden.iter().map(|t| if t.kind == Kind::Plate { t.max_size() * c.size.0 * 0.6 } else { t.max_size() * c.size.1 }).fold(0.0f64, f64::max).max(8.0);
     let s = (o.strength / 100.0).clamp(0.01, 1.0);
     let mut e = match o.style {
         Style::Blur => {
@@ -864,17 +988,14 @@ pub fn effect_for(c: &ClipRedact, o: &Options) -> Option<EffectInstance> {
             e
         }
     };
-    let (mut faces, mut plates) = (0usize, 0usize);
+    // numbered per kind (per named target)
+    let mut counts: HashMap<String, usize> = HashMap::new();
     for t in hidden {
-        let n = match t.kind {
-            Kind::Face => {
-                faces += 1;
-                faces
-            }
-            Kind::Plate => {
-                plates += 1;
-                plates
-            }
+        let key = format!("{}:{}", t.kind.name(), t.label.as_deref().unwrap_or(""));
+        let n = {
+            let c = counts.entry(key).or_insert(0);
+            *c += 1;
+            *c
         };
         if let Some(m) = mask_for(t, n, c, o.padding) {
             e.masks.push(m);
@@ -893,6 +1014,7 @@ fn track_json(t: &Track, skip: Option<Skip>, with_path: bool) -> Value {
     let r = |v: f64| (v * 1000.0).round() / 1000.0;
     let mut v = json!({
         "kind": t.kind.name(),
+        "label": t.label,
         "start": r(t.start()),
         "end": r(t.end()),
         "hits": t.hits,
@@ -921,6 +1043,8 @@ fn clip_json(c: &ClipRedact, dry: bool, masks: usize) -> Value {
         "missedFrames": c.missed,
         "faces": count(Kind::Face),
         "plates": count(Kind::Plate),
+        "targets": count(Kind::Target),
+        "looks": {"asked": c.looks, "found": c.found, "errors": c.look_errors},
         "masks": masks,
         "skipped": {"tooSmall": skipped(Skip::TooSmall), "tooBrief": skipped(Skip::TooBrief), "excluded": skipped(Skip::Excluded), "notAPerson": skipped(Skip::NotAPerson), "notAPlate": skipped(Skip::NotAPlate)},
         "tracks": c.tracks.iter().map(|(t, s)| track_json(t, *s, dry)).collect::<Vec<_>>(),
@@ -938,7 +1062,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Faces and Plates…",
             menu: &["Clip"],
             shortcut: None,
-            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"replace":bool=true,"wait":bool=false}"#,
+            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"wait":bool=false}"#,
             enabled: has_video_selection,
             run: redact_clips,
             journal: true,
@@ -948,7 +1072,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Sequence…",
             menu: &[],
             shortcut: None,
-            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"replace":bool=true,"wait":bool=false}"#,
+            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"wait":bool=false}"#,
             enabled: has_seq,
             run: redact_sequence,
             journal: true,
@@ -972,6 +1096,18 @@ fn has_video_selection(s: &Session) -> std::result::Result<(), String> {
     let q = s.active_sequence().ok_or("no sequence is open")?;
     let any = s.state.selection.iter().any(|c| q.find_item(*c).is_some_and(|(t, _)| q.track(t).is_some_and(|t| t.kind == TrackKind::Video)));
     if any { Ok(()) } else { Err("select the video clips to redact in the timeline".into()) }
+}
+
+/// What a job needs before it starts: the detectors for faces and plates, the vision model for
+/// named targets.
+fn preflight(s: &Session, cmd: &str, o: &Options) -> Result<()> {
+    if (o.faces || o.plates) && s.redacts.detector.is_none() {
+        ready(cmd)?;
+    }
+    if !o.targets.is_empty() && s.redacts.judge.is_none() {
+        return Err(bad(cmd, "finding named targets needs the local vision model (Ollama with qwen2.5vl:7b), which this app does not have"));
+    }
+    Ok(())
 }
 
 /// The models must be there before a job starts.
@@ -1014,9 +1150,7 @@ fn redact_clips(s: &mut Session, p: &Value) -> Result<Value> {
     if only.is_empty() {
         return Err(bad(cmd, "select the video clips to redact (or pass `clips`)"));
     }
-    if s.redacts.detector.is_none() {
-        ready(cmd)?;
-    }
+    preflight(s, cmd, &o)?;
     let (work, skipped) = build_work(s, seq, Some(&only), &o, &ex)?;
     if work.is_empty() {
         return Err(bad(cmd, "no video footage to redact among the clips (graphics, nested sequences and offline media are left alone)"));
@@ -1038,9 +1172,7 @@ fn redact_sequence(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let o = options_p(cmd, p)?;
     let ex = exclude_p(cmd, p)?;
-    if s.redacts.detector.is_none() {
-        ready(cmd)?;
-    }
+    preflight(s, cmd, &o)?;
     let (work, skipped) = build_work(s, seq, None, &o, &ex)?;
     if work.is_empty() {
         return Err(bad(cmd, "the sequence has no video footage to redact"));
@@ -1058,6 +1190,7 @@ fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipp
     let results: Results = Arc::default();
     let (prog, res, out) = (job.progress.clone(), job.result.clone(), results.clone());
     let judge = if o.verify { s.redacts.judge.clone() } else { None };
+    let vision = if o.targets.is_empty() { None } else { s.redacts.judge.clone() };
     let custom = s.redacts.detector.clone();
     let verify_wanted = o.verify;
     let opts = o.clone();
@@ -1090,7 +1223,7 @@ fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipp
             Err(e) => return finish(Err(e.clone()), e, 0),
         };
         let sh = Shared { prog: &prog, done: AtomicU64::new(0), clips_done: AtomicUsize::new(0), clips: work.len(), stop: AtomicBool::new(false) };
-        let Some(mut made) = analyse_all(&work, &det, &opts, &sh) else {
+        let Some(mut made) = analyse_all(&work, &det, &opts, vision.as_deref(), &sh) else {
             return finish(Err("stopped".into()), "Stopped: nothing was changed".into(), sh.done.load(Ordering::Relaxed));
         };
         let t_analysis = t0.elapsed().as_secs_f64();
@@ -1200,11 +1333,13 @@ fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &V
         }
         let faces: usize = clips.iter().map(|c| c.hidden().filter(|t| t.kind == Kind::Face).count()).sum();
         let plates: usize = clips.iter().map(|c| c.hidden().filter(|t| t.kind == Kind::Plate).count()).sum();
+        let targets: usize = clips.iter().map(|c| c.hidden().filter(|t| t.kind == Kind::Target).count()).sum();
         let note = match verified {
             Verified::Skipped(why) | Verified::Failed(why) => format!(" (vision check: {why})"),
             _ => String::new(),
         };
-        s.toast(format!("{LABEL}: {faces} face(s) and {plates} plate(s) hidden in {changed} clip(s){note}"));
+        let named = if pj.opts.targets.is_empty() { String::new() } else { format!(", {targets} named place(s)") };
+        s.toast(format!("{LABEL}: {faces} face(s) and {plates} plate(s){named} hidden in {changed} clip(s){note}"));
     }
     Ok(json!({
         "sequence": pj.seq.0,
@@ -1228,7 +1363,7 @@ fn status(s: &mut Session, _: &Value) -> Result<Value> {
     let dir = crate::transcript::models_dir();
     Ok(json!({
         "available": available(),
-        "installed": installed(),
+        "installed": installed() || s.redacts.detector.is_some(),
         "missingBytes": dir.as_deref().map_or(filmcraft_vision::catalog::total_bytes(), filmcraft_vision::catalog::missing_bytes),
         "package": filmcraft_vision::catalog::PACKAGE_NAME,
         "license": filmcraft_vision::catalog::LICENSE,
