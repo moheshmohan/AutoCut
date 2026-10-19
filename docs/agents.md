@@ -289,6 +289,11 @@ on desktop, a download on web). It exports sequence markers only, not clip/sourc
 reports are limited to 100000 markers and a conservative 16 MiB output budget. Invalid timing or a
 failed write reports an error. The menu opens the normal save dialog; cancelling writes nothing.
 
+**A robot-showcase round** (the album's new clips, review notes into the plan with
+`showcase-plan`, both languages built with privacy in one `showcase --languages en,ml` run, QA and
+its privacy sheet, `sheet` / `frames` to look at clips and results, the upload, the 4K export) is a
+handful of commands: [showcase-runbook.md](showcase-runbook.md).
+
 ## 3. Verifying UI work
 
 For any UI change, look at the result:
