@@ -218,7 +218,9 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    back with Whisper in Malayalam, which is weak (Whisper-base writes Malayalam in Tamil
    script), so the check compares consonant skeletons across the two scripts (place of
    articulation, voicing ignored) and only a reading that keeps less than 30 % of its line's
-   consonants is read again, once at most.
+   consonants is read again, once at most. Lines of fewer than ten consonants, and answers in
+   another script altogether, are not judged: in a live build Whisper-base heard "ഒന്ന്." as
+   Devanagari noise and "കണ്ടതിന് നന്ദി." as "amitabha".
 
    Narration goes through `tts.create`, which looks in the engine's narration cache
    (`<data dir>/narration-cache`, see `crates/tts/README.md`) before synthesizing: a rebuild with

@@ -1470,11 +1470,19 @@ fn skeleton(text: &str) -> Vec<char> {
         .collect()
 }
 
+/// Lines with fewer consonants than this are not judged: Whisper-base hears a one- or two-word
+/// Malayalam line as anything at all (a live build: "ഒന്ന്." twice as Devanagari noise).
+const MIN_JUDGED_CONSONANTS: usize = 10;
+
 /// The share of `said`'s consonant skeleton ([`skeleton`]) that `heard` follows in order
-/// (longest common subsequence); 1 for a line without consonants.
+/// (longest common subsequence); 1 when it cannot be judged: a short line, or Whisper
+/// answering in another script altogether (a live build: "amitabha" for "കണ്ടതിന് നന്ദി").
 pub(crate) fn heard_share_indic(said: &str, heard: &str) -> f64 {
     let (a, b) = (skeleton(said), skeleton(heard));
-    if a.is_empty() {
+    if a.len() < MIN_JUDGED_CONSONANTS {
+        return 1.0;
+    }
+    if b.is_empty() && heard.chars().any(char::is_alphabetic) {
         return 1.0;
     }
     // bounded: a line is at most a few hundred consonants
@@ -4015,6 +4023,9 @@ mod tests {
         assert_eq!(heard_share_indic(said, ""), 0.0);
         assert!(heard_share_indic(said, "ഇന്ന് മഴ പെയ്യും എന്ന് തോന്നുന്നു") < good);
         assert_eq!(heard_share_indic("2013!!", "x"), 1.0, "nothing to check");
+        // too short to judge, or heard in another script: not judged (a live build's false alarms)
+        assert_eq!(heard_share_indic("ഒന്ന്.", "आपाशाशाशाशाश"), 1.0);
+        assert_eq!(heard_share_indic(said, "amitabha"), 1.0);
         assert!(heard_share_indic(&"കട ".repeat(5000), &"கட ".repeat(5000)).is_finite());
         assert!(is_malayalam_text(said) && !is_malayalam_text("That's all.") && !is_malayalam_text(""));
         let o = Options { language: Some("ml-IN".into()), ..Options::default() };

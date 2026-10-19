@@ -35,6 +35,7 @@ const VALUED: &[&str] = &[
     "--bpm",
     "--mood",
     "--voice",
+    "--language",
     "--subtitle",
     "--title",
     "--report",
@@ -212,6 +213,9 @@ mod tests {
         let b = args("--bridge=127.0.0.1:9876 inspect sequence");
         assert_eq!(b.opt("--bridge"), Some("127.0.0.1:9876"));
         assert_eq!(b.pos(1), Some("sequence"));
+        // regression: --language took no value, so `--language ml` was a flag and a positional
+        let c = args("showcase --report r.json --language ml --plan");
+        assert_eq!((c.opt("--language"), c.positionals.as_slice()), (Some("ml"), &["showcase".to_string()][..]));
     }
 
     #[test]
