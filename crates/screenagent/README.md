@@ -164,6 +164,48 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
   are compared as text (Chrome 155 answers `tab id "180477276"`, never equal to a number).
   Every AppleScript call to the browser has a 15 s timeout, so a dialog cannot hang it.
 
+- `locations.rs` — **where an album's items were taken**, read from the Google Photos page
+  (Google strips the location from what its API and picker hand out; the owner's page still
+  shows it). `find_album` opens the albums page, finds the card with the album's exact title
+  (the vision model's box, below the top bar), clicks it and checks the page's title reads as
+  asked; `read_album` opens the album's first thumbnail (or, resuming, the item after the last
+  one read, by its address), opens the Info panel with its shortcut `i` when the model reads no
+  panel, then for each item crops the right part of a full-resolution capture, has the model
+  transcribe the Details lines (`PANEL_ASK`: the place's line marked `Location:`), parses them
+  (`parse_panel`: date, time, GMT offset, file name, pixel size, place and the line under it,
+  "Estimated location"; told apart by shape — a date, a time, an extension, "1920 × 1080", "ƒ/1.8",
+  a camera maker — and by order: the line after the time is the file name), and goes on with
+  the Right arrow, or the "next" arrow beside the item when the key does not move on, until
+  the address stops changing. Nothing in the library is changed: only the Right arrow and `i`
+  are pressed (`i` only while an item is open), nothing is typed, and the only clicks are an
+  album card, the first thumbnail and the "next" arrow, each checked to lie where such a thing
+  sits (below the top bar; the arrow on the right half, mid-height, left of the Info panel), so
+  a misplaced box never reaches the toolbar's favourite, delete or share. The reader opens its
+  own Chrome tab, names it by window and tab id, touches it only while it shows
+  `photos.google.com` and closes it at the end. Bounded: `max_items`, `per_item` (an item that
+  does not read is recorded with its `error` and read again on `--resume`), `budget`; a panel
+  that still shows the item before is read again. `filmcraft-automation::locations` holds the
+  `chrome` lock, remembers album addresses by title (`<data>/google-photos/locations/albums.json`),
+  and writes the JSON after every item; `AUTOCUT_LOCATIONS_DEBUG=<dir>` keeps every capture the
+  model is shown and every answer.
+  What the live runs taught (qwen2.5vl:7b, 2026-10-20):
+  - an item in albums or with people has them above its Details, which push the place below the
+    window: the panel is wheel-scrolled to its end (one event over its middle) before each look;
+  - scrolled, the map shows, and the model took its labels ("Business Bay Metro Station") for
+    the place ("Home"): the coloured block at the panel's bottom is cut off (`rows_above_map`:
+    the panel is grey, the map is not), and the ask says never to take names from a map;
+  - an ask with a way out ("write NONE if there is no panel") was taken for panels read
+    perfectly a moment before; the ask has none, and an open panel is told from what is read;
+  - asked to copy "Estimated location" when shown, the model wrote it under every place; a
+    separate question (`ESTIMATED_ASK`) — is there a circled i after the place? — answered it
+    right (Home ⓘ: yes; Elackad: no), and the circled i is taken to mean estimated;
+  - long file names wrap ("…_HSR_120.mp" / "4") and are joined again; a place the model makes
+    up from Google's notes ("Shared by saranya mohesh", "Storage saver.") is refused.
+  Live, on the album "Every Robot I've Met" (99 items) against the main session's hand reading:
+  12 items read (8, then 4 more with `--resume` after the last), 11 places and the one item
+  without a place as read by hand; the twelfth's invented place is refused by the parser since
+  (unit test on that transcription). About 8–15 s an item on an M3 Max (two or three model calls).
+
 No `unsafe` (the workspace forbids it), no browser embedding, no model runtime linkage:
 the OS contact is subprocesses (`osascript`, `screencapture`) exactly like
 filmcraft-gphotos' `open`, and the model is served by the Ollama server AutoCut already
@@ -176,6 +218,10 @@ whole album: `filmcraft-cli photos pick --album "Robot showcase" [--videos-only]
 or many searches in one session: `--auto "q1" --auto "q2" --all`, `--queries file --all`, or a
 sweep of a whole history: `--sweep 2017-10..2025-12 [--month-days 10-21]`. `filmcraft-cli
 photos tidy` closes picker tabs left in Chrome.
+
+Places: `filmcraft-cli photos locations --album "Every Robot I've Met" [--max-items 5]
+[--resume] [--out locations.json] [--project p.fcproj --save]` (engine: `photos.locations`, then
+`photos.applyLocations`).
 
 MCP: `googlephotos_pick { query: "beach sunset videos", max_items: 5 }`,
 `googlephotos_pick { queries: ["videos October 2022", "videos November 2022"], all: true }` or
@@ -267,3 +313,18 @@ grounding path with `AUTOCUT_SCREEN_LIVE_PNG=/path/to/capture.png cargo test -p
 filmcraft-screenagent live_inventory -- --nocapture` (prints what the agent would click; with
 `AUTOCUT_SCREEN_LIVE_TASK=day_headings`, the date headings it grounds).
 `AUTOCUT_SCREENAGENT_TRACE=1` logs every OS invocation to `/tmp/screenagent-cmds.log`.
+
+Places (`locations`): the panel parser on panels laid out as the page shows them and as the
+model transcribes them (bullets, `x` for ×, `Location:`), on the album "Every Robot I've Met"
+as read by hand (20 items: file names with and without extensions or with spaces, no place,
+"Home", estimated places), a description above Details with its own date and time, and hostile
+text (huge lines, control characters, 50 000 lines); addresses (accounts, shared albums, look-
+alike hosts and AppleScript injection refused); the reader against a fake Google Photos tab: an
+album read to its end, the item limit and the budget, a run stopped by its caller, resuming
+after the last item read (by address, no thumbnail clicked), an unreadable item recorded and
+read again on resume, a panel lagging one item behind, the "next" arrow when the key does not
+move on (and never inside the Info panel or the toolbar), an Info panel that will not open, a
+lost model, misplaced thumbnails never clicked; the album found on the albums page by its title
+(a card that opens another album refused). `AUTOCUT_LOCATIONS_LIVE=<album address> cargo test
+-p filmcraft-screenagent live_read_a_few_items -- --ignored --nocapture` reads five items live
+(hold the `chrome` lock).

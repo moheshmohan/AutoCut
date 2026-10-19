@@ -32,6 +32,7 @@ macro_rules! out {
 
 mod args;
 mod instagram;
+mod locations;
 mod probe;
 mod publish;
 mod youtube;
@@ -122,6 +123,7 @@ SUBCOMMANDS
                                 \"a video of every robot since 2020\" --voice clone:me --export
                                 ~/Movies/robots.mp4 --upload --project robots.fcproj --save
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--language ml]
+         [--numbers english|malayalam] [--places-from-locations locations.json]
          [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
          [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social]
@@ -164,6 +166,14 @@ SUBCOMMANDS
                                 (a cloned voice through IndicF5: tts.downloadCloneModel
                                 {\"model\": \"indicf5\"}), hears them back in Malayalam and makes
                                 Malayalam subtitles; chips and on-screen labels show as written;
+                                in Malayalam, numbers written in digits are said the English way
+                                Malayali creators say them (years, prices, from 100 up: \"2021\"
+                                → ട്വന്റി ട്വന്റി വൺ) unless --numbers malayalam (or the
+                                plan's \"numbers\") asks for Malayalam words; see
+                                docs/malayalam-narration.md. --places-from-locations takes the
+                                file `photos locations` wrote and gives every entry without a
+                                \"place\" the place Google Photos shows for its first shot
+                                that has one (matched by file name), for its lower third;
                                 the look (crates/autocut/README.md): --style
                                 tech (or the plan's \"style\") themes the titles, lower thirds,
                                 cards, chips and outro (DIN Condensed / DIN Alternate / Futura,
@@ -432,6 +442,26 @@ SUBCOMMANDS
   publish run <destination> <file> [youtube upload / instagram publish options] [--no-preflight]
                                  the pre-flight, then `youtube upload` (youtube, youtubeShort; the
                                  title defaults to the file's name) or `instagram publish`
+  photos locations --album '<exact title>' | --album-url https://photos.google.com/album/…
+         [--out locations.json] [--resume] [--max-items N] [--per-item S] [--timeout MIN]
+         [--project p.fcproj --save | --bridge HOST:PORT]
+                                 where each item of a Google Photos album was taken (Google
+                                 strips the location from API and picker downloads): the local
+                                 screen agent opens the album in Chrome (found once on the albums
+                                 page by its exact title, then remembered), opens its first item
+                                 and the Info panel (i), and for each item reads the panel with
+                                 the vision model (date, time, GMT offset, file name, size,
+                                 place, \"Estimated location\") and goes on with the Right arrow;
+                                 nothing in the library is changed. Writes [{fileName, date,
+                                 gmtOffset, place, estimated, …}] to --out (default
+                                 <data>/google-photos/locations/<album>.json) after every item;
+                                 --resume goes on after the last item read (failed ones are read
+                                 again). --max-items 5 is a dry run. With --project/--bridge the
+                                 places go into the project's items (their Location field, as
+                                 `exec photos.applyLocations path=…`), which a showcase's
+                                 lower thirds use. Holds the `chrome` lock; needs Screen
+                                 Recording, Accessibility and Automation ▸ Chrome for this
+                                 terminal and `ollama pull qwen2.5vl:7b` (macOS)
   photos tidy                    close every Google Photos picker tab left open in Chrome (and
                                  nothing else); a tab that asks \"Leave site?\" is closed once
                                  more, which Chrome takes as Leave (macOS)
@@ -527,6 +557,9 @@ impl Backend {
         }
         // `photos.upload` (also over MCP): the Google Photos sign-in of `photos auth --upload`
         s.photos = Some(filmcraft_gphotos::engine_uploader());
+        // `photos.locations` (also over MCP): places read from the Google Photos page by the
+        // screen agent (Chrome, the local vision model, the `chrome` lock)
+        s.photo_locations.locator = Some(filmcraft_automation::locations::locator());
         // `youtube.*` (also over MCP): the channels connected with `youtube auth`
         s.youtube.publisher = Some(filmcraft_youtube::engine_publisher());
         // `instagram.*` (also over MCP): the account connected with `instagram auth` / `token`
@@ -1258,7 +1291,8 @@ async fn cli() {
             Some(other) => usage(format!("locks: unknown `{other}` (locks [--json] | locks hold <chrome|gpu>)")),
         },
         "photos" => {
-            let what = a.pos(1).unwrap_or_else(|| usage("photos auth | pick | tidy | upload <file> | album create|add | albums | cached | add <id>..."));
+            let what =
+                a.pos(1).unwrap_or_else(|| usage("photos auth | pick | locations | tidy | upload <file> | album create|add | albums | cached | add <id>..."));
             match what {
                 "auth" => {
                     use filmcraft_gphotos::auth::Access;
@@ -1521,6 +1555,7 @@ async fn cli() {
                         std::process::exit(1);
                     }
                 }
+                "locations" => locations::run(&a).await,
                 "tidy" => {
                     if a.positionals.len() > 2 {
                         usage("photos tidy (closes the Google Photos picker tabs left open in Chrome)");
@@ -1846,6 +1881,12 @@ async fn cli() {
             }
             if let Some(l) = language_flag {
                 opts.language = Some(l);
+            }
+            // --places-from-locations: the places `photos locations` read, for entries without one
+            if let Some(path) = a.opt("--places-from-locations") {
+                let places = locations::places_file(path);
+                let n = filmcraft_autocut::places::fill(&mut entries, &places);
+                diag(format_args!("showcase: {n} entr(y/ies) got their place from {path} ({} place(s) in it)", places.len()));
             }
             if numbers_flag.is_some() {
                 opts.numbers = numbers_flag;

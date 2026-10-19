@@ -176,6 +176,12 @@ const MAX_SIDE: u32 = 1344;
 
 /// Screenshot `app`'s front window, downscaled to at most [`MAX_SIDE`] on its long edge.
 pub fn capture_window(shell: &dyn Shell, app: &str) -> Result<Capture, ScreenError> {
+    capture_window_max(shell, app, MAX_SIDE)
+}
+
+/// Screenshot `app`'s front window, downscaled to at most `max_side` (64–8192) on its long edge
+/// (a larger side keeps small text readable for a crop of it).
+pub fn capture_window_max(shell: &dyn Shell, app: &str, max_side: u32) -> Result<Capture, ScreenError> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (shell, app);
@@ -201,21 +207,28 @@ pub fn capture_window(shell: &dyn Shell, app: &str) -> Result<Capture, ScreenErr
         if png.is_empty() {
             return Err(ScreenError::Capture(app.to_string(), "the screenshot was empty".into()));
         }
-        decode_and_scale(png, rect)
+        decode_scaled(png, rect, max_side)
     }
 }
 
 /// Decode the captured PNG, downscale for the model, and derive the pixel-per-point scale
 /// from the real image size (Retina-proof: whatever `screencapture` produced).
+#[cfg(test)]
 pub(crate) fn decode_and_scale(png: Vec<u8>, rect: WindowRect) -> Result<Capture, ScreenError> {
+    decode_scaled(png, rect, MAX_SIDE)
+}
+
+/// [`decode_and_scale`] to at most `max_side` (clamped to 64–8192).
+pub(crate) fn decode_scaled(png: Vec<u8>, rect: WindowRect, max_side: u32) -> Result<Capture, ScreenError> {
+    let max_side = max_side.clamp(64, 8192);
     let img = image::load_from_memory(&png).map_err(|e| ScreenError::Capture("the target".into(), format!("the screenshot is not a decodable image: {e}")))?;
     let (w0, h0) = (img.width(), img.height());
     if w0 == 0 || h0 == 0 {
         return Err(ScreenError::Capture("the target".into(), "the screenshot has no area".into()));
     }
     let long = u64::from(w0.max(h0));
-    let (img, w, h) = if long > u64::from(MAX_SIDE) {
-        let f = f64::from(MAX_SIDE) / long as f64;
+    let (img, w, h) = if long > u64::from(max_side) {
+        let f = f64::from(max_side) / long as f64;
         let nw = ((f64::from(w0) * f).round() as u32).max(1);
         let nh = ((f64::from(h0) * f).round() as u32).max(1);
         let scaled = img.resize_exact(nw, nh, image::imageops::FilterType::Triangle);

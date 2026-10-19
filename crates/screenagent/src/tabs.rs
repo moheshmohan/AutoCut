@@ -58,7 +58,7 @@ pub struct Tab {
     pub url: String,
 }
 
-fn timed(app: &str, body: &str) -> String {
+pub(crate) fn timed(app: &str, body: &str) -> String {
     format!("with timeout of {SCRIPT_TIMEOUT_SECS} seconds\ntell application \"{app}\"\n{body}\nend tell\nend timeout")
 }
 

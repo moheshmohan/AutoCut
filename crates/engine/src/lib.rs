@@ -48,6 +48,7 @@ pub mod narration;
 pub mod panels;
 pub mod paste_media;
 pub mod perf;
+pub mod photo_locations;
 pub mod photos;
 pub mod presets;
 pub mod previews;
@@ -486,6 +487,10 @@ pub struct Session {
     pub photos: Option<Arc<dyn photos::PhotosUploader>>,
     /// Upload job → its new media item, filled when the job finishes (`upload` in `jobs.list`).
     pub photo_uploads: std::collections::HashMap<u64, photos::UploadOutcome>,
+    /// Places from Google Photos (`photos.locations`): the host's locator (None = not
+    /// available: the command is disabled; hosts install filmcraft-automation's, tests a fake)
+    /// and what its jobs answered (`locations` in `jobs.list`).
+    pub photo_locations: photo_locations::LocationsState,
     /// YouTube (`youtube.*`): the host's publisher (None = not available: the commands are
     /// disabled; hosts install filmcraft-youtube's, tests a fake) and what its jobs answered.
     pub youtube: youtube::YouTubeState,
@@ -608,6 +613,7 @@ impl Session {
             transcriber: None,
             photos: None,
             photo_uploads: Default::default(),
+            photo_locations: Default::default(),
             youtube: Default::default(),
             instagram: Default::default(),
             publish: Default::default(),
@@ -1391,6 +1397,8 @@ mod panels_tests;
 mod par_tests;
 #[cfg(test)]
 mod paste_media_tests;
+#[cfg(test)]
+mod photo_locations_tests;
 #[cfg(test)]
 mod photos_tests;
 #[cfg(test)]

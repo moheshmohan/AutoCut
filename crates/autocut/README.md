@@ -297,6 +297,18 @@ An entry's `"place": "Busan, South Korea"` goes in its lower third instead of it
 ("Busan, South Korea · October 2023"; the month alone when the place names the year) and starts
 no chapter or card of its own; its `event` still does.
 
+**Places from Google Photos** (`places`). Google strips the location from what its API and
+picker hand out, so an entry has no place unless the plan gives one. `filmcraft-cli photos
+locations --album "<title>"` reads every album item's place from the Google Photos page
+(`crates/screenagent/README.md`) into `[{fileName, date, gmtOffset, place, estimated}]`;
+`photos.applyLocations` stores those places with the project's items as their `Location` field
+(`Location Estimated: yes` when Google marked it estimated). An entry without a `place` then
+takes its first shot's `Location` when the show is built (`places::from_items`, through
+`metadata.get`), and `showcase --places-from-locations <file>` fills the plan's entries from the
+file itself, matched by the shots' file names (case and a photo or video extension ignored), so
+the plan written out (`--plan`, `--script-out`) shows them for review. A place the plan gives is
+never replaced.
+
 ```json
 {"number": 12, "label": "Disinfection robot", "event": "GITEX Global 2022, Dubai",
  "shots": [{"item": 14, "clip_seconds": 13.8, "best": 6.9, "from": 6.0, "to": 11.5},

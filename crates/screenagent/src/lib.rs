@@ -14,6 +14,8 @@
 //! - [`picker`]: the Google Photos picker's visual semantics (duration badges, Done).
 //! - [`agent`]: the budgeted see–decide–act loop that selects media and presses Done — over
 //!   one search or many in one picking session — and closes the picker tab it drove.
+//! - [`locations`]: where an album's items were taken, read from the Google Photos page's Info
+//!   panel item by item (Google strips locations from what its API and picker hand out).
 //! - [`tabs`]: the picker's browser tabs — reuse one for the next session, close them, answer
 //!   "Leave site?", and `photos tidy`.
 //!
@@ -27,6 +29,7 @@ pub mod act;
 pub mod agent;
 pub mod capture;
 pub mod ground;
+pub mod locations;
 pub mod picker;
 pub mod tabs;
 pub mod verify;

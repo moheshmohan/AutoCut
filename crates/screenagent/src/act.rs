@@ -104,6 +104,25 @@ impl MacActor {
         let full = format!("tell application \"System Events\"\ntell process \"{app}\"\n{body}\nend tell\nend tell");
         self.shell.run("osascript", &["-e", &full]).map_err(|e| ScreenError::Input(self.app.clone(), e.to_string()))
     }
+
+    /// A wheel scroll of `lines` (negative: up) with the pointer at the screen point `(x, y)`,
+    /// which must lie inside the target app's front window.
+    pub fn scroll_at(&mut self, x: i32, y: i32, lines: i32) -> Result<(), ScreenError> {
+        let lines = lines.clamp(-MAX_SCROLL_LINES, MAX_SCROLL_LINES);
+        let r = capture::window_bounds(self.shell.as_ref(), &self.app)?;
+        let (x, y) = r.clamp(x, y).ok_or_else(|| ScreenError::Other(format!("refusing to scroll outside the window at ({x},{y})")))?;
+        let wheel = lines.saturating_neg();
+        self.jxa(&format!(
+            "var p = {{x: {x}, y: {y}}};\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 5, p, 0));\ndelay(0.08);\n$.CGEventPost(0, $.CGEventCreateScrollWheelEvent2(null, 1, 1, {wheel}, 0, 0));"
+        ))
+        .map(|_| ())
+    }
+
+    /// Press the key with macOS virtual key code `code` (124 the Right arrow, 34 the I key) in
+    /// the target app, nothing held.
+    pub fn key_code(&mut self, code: u16) -> Result<(), ScreenError> {
+        self.script(&format!("key code {code}")).map(|_| ())
+    }
 }
 
 impl Act for MacActor {

@@ -216,6 +216,8 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         session.voiceover.input = Some(Box::new(audio_in::CpalIn::new(&session.prefs.audio_hardware.device_class)));
         // Export ▸ Upload to Google Photos, over the sign-in of `filmcraft-cli photos auth --upload`
         session.photos = Some(filmcraft_gphotos::engine_uploader());
+        // photos.locations: places read from the Google Photos page by the screen agent
+        session.photo_locations.locator = Some(filmcraft_automation::locations::locator());
         // Export ▸ Upload to YouTube, over the channels connected with `filmcraft-cli youtube auth`
         session.youtube.publisher = Some(filmcraft_youtube::engine_publisher());
         // Export ▸ Destinations ▸ Instagram Reel, over the account of `filmcraft-cli instagram auth`

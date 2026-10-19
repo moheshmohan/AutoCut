@@ -370,7 +370,10 @@ large or of a type Google Photos does not take, an expired upload session.
   them; the late items fail with a 403 and can be picked again (cached ones are skipped).
 - **Videos download whole** (`=dv`, Google's high-quality file, up to GBs) and only once Google
   has finished processing them; a still-processing video is reported in `failed`.
-- **Photos come without location.** Google strips GPS from `=d` downloads.
+- **Photos come without location.** Google strips GPS from `=d` downloads (and from videos:
+  none of 752 downloaded clips had a location atom). The places are still on the Google Photos
+  page: `filmcraft-cli photos locations --album "<title>"` reads them from each item's Info panel
+  with the screen agent (`crates/screenagent/README.md`).
 - **Test-mode sign-ins lapse after 7 days** if the Google Cloud app stays in Testing; the error
   names the `photos auth` to re-run (`--upload` or `--albums` when the sign-in had them).
   Promote the app to "In production" (still unverified, 100 users) to stop that.

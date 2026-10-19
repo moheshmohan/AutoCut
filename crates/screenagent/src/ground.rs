@@ -46,6 +46,9 @@ pub trait Ground {
     fn find(&self, png: &[u8], target: &str) -> Result<Option<Element>, ScreenError>;
 }
 
+/// How the model is set up to read text (not to ground).
+const READ_SYSTEM: &str = "You read text in screenshots for an automation agent, exactly as it is shown: no guesses, no explanations.";
+
 const SYSTEM: &str =
     "You ground UI screenshots for an automation agent. Coordinates are absolute pixels of the given image, origin top-left, as [x1, y1, x2, y2].";
 
@@ -85,13 +88,13 @@ pub fn model_frame(w: u32, h: u32) -> (u32, u32) {
 }
 
 /// A PNG resized to the model's frame, remembering both sizes for mapping back.
-struct Framed {
-    png: Vec<u8>,
+pub(crate) struct Framed {
+    pub(crate) png: Vec<u8>,
     src: (u32, u32),
     frame: (u32, u32),
 }
 
-fn to_model_frame(png: &[u8]) -> Result<Framed, ScreenError> {
+pub(crate) fn to_model_frame(png: &[u8]) -> Result<Framed, ScreenError> {
     let img = image::load_from_memory(png).map_err(|e| ScreenError::Parse(format!("the screenshot is not a decodable image: {e}")))?;
     let src = (img.width(), img.height());
     if src.0 == 0 || src.1 == 0 {
@@ -185,11 +188,23 @@ impl QwenGrounder {
     /// One grounding ask; the reply text, unparsed. No `format: json` — that constrains the
     /// model to one object, while it grounds best answering its trained shape (an array).
     fn chat(&self, user: &str, png: &[u8]) -> Result<String, ScreenError> {
+        self.chat_as(SYSTEM, user, png)
+    }
+
+    /// What the model reads in `png` when asked `ask` (a transcription, a title): the reply
+    /// text, at most 8 000 characters. The image goes in the model's own frame, as for grounding.
+    pub fn read_text(&self, png: &[u8], ask: &str) -> Result<String, ScreenError> {
+        let framed = to_model_frame(png)?;
+        let reply = self.chat_as(READ_SYSTEM, ask, &framed.png)?;
+        Ok(reply.chars().take(8000).collect())
+    }
+
+    fn chat_as(&self, system: &str, user: &str, png: &[u8]) -> Result<String, ScreenError> {
         let body = json!({
             "model": self.model,
             "stream": false,
             "messages": [
-                {"role": "system", "content": SYSTEM},
+                {"role": "system", "content": system},
                 {"role": "user", "content": user, "images": [b64(png)]}
             ],
             "options": {"temperature": 0.1, "num_predict": 2048}

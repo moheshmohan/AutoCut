@@ -2482,6 +2482,10 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     if robots == 0 {
         return Err(AutoCutError::Invalid(format!("only scene entries: a showcase needs at least one {}", opts.subject)));
     }
+    // an entry without a place takes the one Google Photos showed for its first shot (its
+    // item's `Location`, stored by `photos.applyLocations`; crate::places)
+    let placed = crate::places::from_items(ex, entries).await;
+    let entries = placed.as_slice();
     let (w, h) = (f64::from(opts.width), f64::from(opts.height));
     // the plan's chips and the timeline's dates are checked before anything is built
     let numbers: Vec<usize> = entries.iter().map(|e| e.number).collect();

@@ -3491,6 +3491,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::video_templates::commands());
     v.extend(crate::music_neural::commands());
     v.extend(crate::photos::commands());
+    v.extend(crate::photo_locations::commands());
     v.extend(crate::youtube::commands());
     v.extend(crate::instagram::commands());
     v.extend(crate::publish::commands());
