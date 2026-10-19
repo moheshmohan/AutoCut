@@ -1,0 +1,685 @@
+{
+ "style": "tech",
+ "timeline": true,
+ "events": [
+  {
+   "name": "GITEX 2021",
+   "from": "2021-10-17",
+   "to": "2021-10-21"
+  },
+  {
+   "name": "Expo 2020",
+   "from": "2021-10-01",
+   "to": "2022-03-31"
+  },
+  {
+   "name": "GITEX 2022",
+   "from": "2022-10-10",
+   "to": "2022-10-14"
+  },
+  {
+   "name": "Amsterdam",
+   "from": "2023-11-25",
+   "to": "2023-11-25"
+  },
+  {
+   "name": "AI Festival",
+   "from": "2025-04-23",
+   "to": "2025-04-24"
+  }
+ ],
+ "transitions": true,
+ "entries": [
+  {
+   "label": "Al Wasl Plaza · January 2022",
+   "kind": "scene",
+   "caption": "Al Wasl Plaza · January 2022",
+   "description": "Al Wasl Plaza · January 2022",
+   "unix": 1642930703,
+   "shots": [
+    {
+     "item": 2436,
+     "name": "org_video_6553915_1642931204000.mp4",
+     "clip_seconds": 46.98,
+     "best": 23.49,
+     "seen": [
+      21.99,
+      23.49,
+      24.99
+     ],
+     "unseen": [],
+     "largest": null
+    },
+    {
+     "item": 2453,
+     "name": "org_video_6553933_1642933402000.mp4",
+     "clip_seconds": 112.879,
+     "best": 56.4395,
+     "seen": [
+      54.9395,
+      56.4395,
+      57.9395
+     ],
+     "unseen": [],
+     "largest": null
+    },
+    {
+     "item": 2468,
+     "name": "org_video_6553956_1642935714000.mp4",
+     "clip_seconds": 49.917,
+     "best": 24.9585,
+     "seen": [
+      23.4585,
+      24.9585,
+      26.4585
+     ],
+     "unseen": [],
+     "largest": null
+    }
+   ],
+   "event": "Expo 2020 Dubai",
+   "facts": [],
+   "number": 1
+  },
+  {
+   "label": "Micropolis M02",
+   "kind": "patrol vehicle",
+   "description": "The frames show 'MICROPOLIS', the M logo and 'DESIGNED AND MADE IN THE UAE'. Micropolis's own 2025 release gives the M02 10–15 km/h for pedestrian areas (the larger M01 does 40–47 km/h). Gulf News calls the M02 the 'buggy-like' model for narrow roads and dense neighbourhoods. The cameras, 4D imaging radar, face recognition and drone are reported for the patrol vehicles in general. The official unveiling was at the World Police Summit at Expo 2020 (Dubai Exhibition Centre) on 14 March 2022; the user's clip is from January 2022, before that. Not used, because sources conflict: a WhichCar '25 km/h, 450 kg, 10 h' figure for an 'M2', and a Digital Trends '7 km/h, 15 h' figure for an unnamed model. A 'DPR 02' Dubai Police robot launched at GITEX 2025 and Global Village may be the production M02, but that is unconfirmed.",
+   "unix": 1642930733,
+   "shots": [
+    {
+     "item": 2407,
+     "name": "org_video_6553912_1642930732000.mp4",
+     "clip_seconds": 93.2932,
+     "best": 54.337700000000005,
+     "seen": [
+      8.191099999999999,
+      23.5733,
+      38.9555,
+      54.337700000000005,
+      69.7199,
+      85.1021
+     ],
+     "unseen": [],
+     "largest": {
+      "seconds": 54.337700000000005,
+      "area": 0.9734219269102989,
+      "center": [
+       0.5124584717607973,
+       0.5
+      ]
+     }
+    }
+   ],
+   "event": "Expo 2020 Dubai",
+   "facts": [],
+   "number": 2
+  },
+  {
+   "label": "Micropolis M01",
+   "kind": "patrol vehicle",
+   "description": "The larger Micropolis autonomous patrol car for Dubai Police, marked 01, at Expo 2020.",
+   "unix": 1642930835,
+   "shots": [
+    {
+     "item": 2408,
+     "name": "org_video_6553913_1642930834000.mp4",
+     "clip_seconds": 78.91216666666666,
+     "best": 6.992680555555555,
+     "seen": [
+      6.992680555555555,
+      19.978041666666666,
+      71.91948611111111
+     ],
+     "unseen": [
+      32.96340277777778,
+      45.94876388888889,
+      58.934124999999995
+     ],
+     "largest": {
+      "seconds": 6.992680555555555,
+      "area": 0.829734219269103,
+      "center": [
+       0.5843023255813953,
+       0.5
+      ]
+     }
+    },
+    {
+     "item": 2409,
+     "name": "org_video_6553914_1642930922000.mp4",
+     "clip_seconds": 24.257566666666666,
+     "best": 21.81943611111111,
+     "seen": [
+      21.81943611111111
+     ],
+     "unseen": [
+      2.4381305555555555,
+      6.314391666666666,
+      10.190652777777776,
+      14.06691388888889,
+      17.943175
+     ],
+     "largest": {
+      "seconds": 21.81943611111111,
+      "area": 0.18526291330485678,
+      "center": [
+       0.6565614617940199,
+       0.5967261904761905
+      ]
+     },
+     "from": 19.0,
+     "to": 23.5
+    }
+   ],
+   "event": "Expo 2020 Dubai",
+   "facts": [],
+   "number": 3
+  },
+  {
+   "number": 4,
+   "label": "Disinfection robot",
+   "kind": "wheeled",
+   "description": "A tall white robot with a glowing blue ring, misting the air as it moved between visitors at GITEX 2022.",
+   "unix": 1665472008,
+   "shots": [
+    {
+     "item": 14,
+     "name": "VID_20221011_110649.mp4",
+     "clip_seconds": 13.8,
+     "best": 6.9,
+     "seen": [
+      1.78,
+      4.340000000000001,
+      6.9,
+      9.46,
+      12.02
+     ],
+     "unseen": [],
+     "largest": {
+      "seconds": 6.9,
+      "area": 0.18982731173864892,
+      "center": [
+       0.23586309523809523,
+       0.3866279069767442
+      ]
+     },
+     "from": 0.0,
+     "fit": "full"
+    }
+   ],
+   "event": "GITEX Global 2022, Dubai",
+   "facts": [
+    "GITEX Global 2022 was the forty-second edition, with more than 170,000 visitors at Dubai World Trade Centre"
+   ]
+  },
+  {
+   "number": 5,
+   "label": "Pepper",
+   "kind": "humanoid",
+   "description": "SoftBank's Pepper, the white humanoid with a tablet on its chest, greeting visitors — several of them at GITEX.",
+   "unix": 1665473905,
+   "shots": [
+    {
+     "item": 18,
+     "name": "VID_20221011_113825.mp4",
+     "clip_seconds": 22.326,
+     "best": 12.940166666666668,
+     "seen": [
+      2.277166666666667,
+      5.8315,
+      9.385833333333332,
+      12.940166666666668,
+      16.494500000000002,
+      20.048833333333334
+     ],
+     "unseen": [],
+     "largest": {
+      "seconds": 12.940166666666668,
+      "area": 0.5672757475083057,
+      "center": [
+       0.44892026578073085,
+       0.5
+      ]
+     }
+    },
+    {
+     "item": 19,
+     "name": "VID_20221011_132939.mp4",
+     "clip_seconds": 49.267,
+     "best": 36.70025,
+     "seen": [
+      4.5222500000000005,
+      12.56675,
+      20.61125,
+      28.65575,
+      36.70025,
+      44.74475
+     ],
+     "unseen": [],
+     "largest": {
+      "seconds": 36.70025,
+      "area": 0.5249243592785952,
+      "center": [
+       0.3762458471760798,
+       0.5498511904761905
+      ]
+     }
+    },
+    {
+     "item": 22,
+     "name": "VID_20221011_135128.mp4",
+     "clip_seconds": 15.8,
+     "best": 1.98,
+     "seen": [
+      1.98,
+      4.94,
+      7.9,
+      10.86,
+      13.820000000000002
+     ],
+     "unseen": [],
+     "largest": {
+      "seconds": 1.98,
+      "area": 0.39890716461003006,
+      "center": [
+       0.5137043189368771,
+       0.4992559523809524
+      ]
+     }
+    }
+   ],
+   "event": "GITEX Global 2022, Dubai",
+   "facts": [
+    "Pepper was introduced in Tokyo in 2014 and was designed to read emotions from faces and voices",
+    "About 27,000 were built before production was paused in 2021"
+   ]
+  },
+  {
+   "number": 6,
+   "label": "Ameca",
+   "kind": "humanoid",
+   "description": "Ameca, the humanoid robot with a lifelike grey face, surrounded by a crowd filming it at GITEX 2022 — and again in 2025 at the Museum of the Future.",
+   "unix": 1665744499,
+   "shots": [
+    {
+     "item": 621,
+     "name": "VID_20221014_144819.mp4",
+     "clip_seconds": 52.268,
+     "best": 47.495666666666665,
+     "seen": [
+      4.772333333333333,
+      13.317,
+      21.861666666666668,
+      30.406333333333333,
+      38.951,
+      47.495666666666665
+     ],
+     "unseen": [],
+     "largest": {
+      "seconds": 47.495666666666665,
+      "area": 0.368812786742604,
+      "center": [
+       0.4887873754152824,
+       0.5550595238095238
+      ]
+     }
+    },
+    {
+     "item": 622,
+     "name": "VID_20221014_144910.mp4",
+     "clip_seconds": 17.2,
+     "best": 12.649999999999999,
+     "seen": [
+      1.8499999999999999,
+      4.55,
+      7.25,
+      9.95,
+      12.649999999999999,
+      15.35
+     ],
+     "unseen": [],
+     "largest": {
+      "seconds": 12.649999999999999,
+      "area": 0.5722591362126246,
+      "center": [
+       0.3791528239202657,
+       0.5
+      ]
+     }
+    }
+   ],
+   "event": "GITEX Global 2022, Dubai",
+   "facts": [
+    "Ameca was unveiled in 2021 by Engineered Arts, a British company",
+    "It is famous for one of the most expressive robot faces ever made",
+    "I met it again in 2025 at the Museum of the Future in Dubai"
+   ]
+  },
+  {
+   "label": "Dilly S serving robot",
+   "kind": "service robot",
+   "description": "The frame shows only stacked dark trays between two side pillars, an arched top bar with a touchscreen (unreadable, possibly East Asian script) and perforated grilles. It doesn't match PuduBot 2 (tube arch with a face panel), Keenon T5/T6/T9 (single back column) or Bear Robotics Servi/Servi Plus, so it is kept generic. The chips describe only what is visible. If the user remembers the restaurant (e.g. a Korean or Chinese restaurant), the model might be identifiable.",
+   "unix": 1697965468,
+   "shots": [
+    {
+     "item": 2417,
+     "name": "IMG_5926.MOV",
+     "clip_seconds": 36.953583333333334,
+     "best": 6.25,
+     "seen": [
+      2.0,
+      4.12,
+      6.25,
+      8.38,
+      10.5
+     ],
+     "unseen": [],
+     "largest": null,
+     "fit": "full",
+     "from": 2.0,
+     "to": 10.5
+    },
+    {
+     "item": 2417,
+     "name": "IMG_5926.MOV",
+     "clip_seconds": 36.953583333333334,
+     "best": 25.5,
+     "seen": [
+      18.0,
+      21.75,
+      25.5,
+      29.25,
+      33.0
+     ],
+     "unseen": [],
+     "largest": null,
+     "fit": "full",
+     "speed": 3.0,
+     "mute": true,
+     "from": 18.0,
+     "to": 33.0
+    }
+   ],
+   "facts": [],
+   "number": 7,
+   "place": "Busan, South Korea"
+  },
+  {
+   "label": "Spot, again",
+   "kind": "quadruped",
+   "description": "NYU Abu Dhabi's Boston Dynamics Spot with a lidar and camera payload.",
+   "unix": 1745392070,
+   "shots": [
+    {
+     "item": 64,
+     "name": "Flow_VID_20250423_110404_07_033.MOV",
+     "clip_seconds": 21.133,
+     "best": 3.0,
+     "seen": [
+      0.0,
+      1.5,
+      3.0,
+      4.5,
+      6.0
+     ],
+     "unseen": [],
+     "largest": null
+    },
+    {
+     "item": 2631,
+     "name": "Flow_VID_20250423_110907_07_043.MOV",
+     "clip_seconds": 20.567,
+     "best": 10.28,
+     "seen": [
+      0.0,
+      5.14,
+      10.28,
+      15.43,
+      20.57
+     ],
+     "unseen": [],
+     "largest": null
+    },
+    {
+     "item": 2632,
+     "name": "Flow_VID_20250423_110937_07_045.MOV",
+     "clip_seconds": 11.733,
+     "best": 5.87,
+     "seen": [
+      0.0,
+      2.93,
+      5.87,
+      8.8,
+      11.73
+     ],
+     "unseen": [],
+     "largest": null
+    }
+   ],
+   "facts": [],
+   "event": "Dubai AI Festival 2025",
+   "number": 8
+  },
+  {
+   "label": "Ameca, again",
+   "kind": "humanoid",
+   "description": "Ameca greeting visitors at the Museum of the Future, Dubai.",
+   "unix": 1752418740,
+   "shots": [
+    {
+     "item": 67,
+     "name": "IMG_7952.MOV",
+     "clip_seconds": 61.578,
+     "best": 35.83716666666667,
+     "seen": [
+      5.548166666666667,
+      15.6445,
+      25.74083333333333,
+      35.83716666666667,
+      45.9335,
+      56.029833333333336
+     ],
+     "unseen": [],
+     "largest": {
+      "seconds": 35.83716666666667,
+      "area": 0.7151162790697675,
+      "center": [
+       0.6374584717607974,
+       0.5
+      ]
+     },
+     "mute": true
+    }
+   ],
+   "facts": [],
+   "place": "Museum of the Future, Dubai",
+   "number": 9
+  },
+  {
+   "number": 10,
+   "label": "Promobot",
+   "kind": "humanoid",
+   "description": "A Promobot humanoid with a face on its screen and the Company logo on its tablet, greeting visitors in a company lobby.",
+   "unix": 1755760412,
+   "shots": [
+    {
+     "item": 68,
+     "name": "IMG_8190.MOV",
+     "clip_seconds": 16.633,
+     "best": 11.5,
+     "seen": [
+      9.0,
+      10.25,
+      11.5,
+      12.75,
+      14.0
+     ],
+     "unseen": [],
+     "largest": null,
+     "from": 9.0,
+     "to": 14.0
+    },
+    {
+     "item": 70,
+     "name": "IMG_8187.MOV",
+     "clip_seconds": 85.636,
+     "best": 6.5,
+     "seen": [
+      4.0,
+      5.25,
+      6.5,
+      7.75,
+      9.0
+     ],
+     "unseen": [],
+     "largest": null,
+     "from": 4.0,
+     "to": 9.0
+    }
+   ],
+   "facts": [
+    "Promobot robots work in more than forty countries, including at the Dubai Mall and Dubai Police headquarters"
+   ],
+   "place": "Dubai",
+   "redact": {
+    "targets": [
+     "Company logo",
+     "company website text"
+    ]
+   }
+  }
+ ],
+ "script": {
+  "intro": "This is every robot I've met, from 2013 to 2025. I found most of them at Expo 2020 and GITEX in Dubai, and the first two I built myself.",
+  "outro": "Nine robots in twelve years, and I'm still meeting new ones. Thanks for watching, and tell me which one you'd most like to meet.",
+  "lines": [
+   "That same month, Expo 2020 was a city of its own, with robots around every corner.",
+   "There I met two driverless police patrols. This little one is the M02, a self-driving police buggy for narrow streets and neighbourhoods, with its cameras up on a mast.",
+   "And this is its big brother, the M01, built for the main roads. Micropolis designed and made it in the UAE with Dubai Police, and it can even launch its own drone.",
+   "October 2022, back at GITEX with over a hundred and seventy thousand visitors, and first up, a robot misting disinfectant as it glided through the crowd.",
+   "Pepper was everywhere, greeting people. SoftBank built it to read emotions in faces and voices, and made about twenty-seven thousand before pausing production in 2020.",
+   "And then Ameca, with the most expressive robot face I've ever seen. Britain's Engineered Arts unveiled it at the end of 2021.",
+   "In October 2023, in Busan, my food came on a Dilly S, a serving robot from the Korean delivery app Baemin. Three trays, and about fifteen hours on a charge.",
+   "Then NYU Abu Dhabi's stand, with a Spot of their own, kitted out with lidars and cameras for mapping.",
+   "The next day I met Ameca again, at the Museum of the Future, where it has greeted visitors since 2022. Its head and face alone have twenty-seven motorised movements, and it chats in more than six languages.",
+   "In August 2025, a Promobot V.4 was greeting visitors in a Dubai lobby. It raises itself to your eye level, and its battery lasts up to eight hours."
+  ],
+  "templated": 0,
+  "chips": {
+   "2": [
+    "Micropolis M02",
+    "Made in UAE",
+    "Narrow streets"
+   ],
+   "3": [
+    "Micropolis M01",
+    "Lidar + 360° cams",
+    "Carries a drone"
+   ],
+   "4": [
+    "GITEX 2022",
+    "170k+ visitors"
+   ],
+   "5": [
+    "1.2 m tall",
+    "12 h battery",
+    "~27,000 built"
+   ],
+   "6": [
+    "1.87 m tall",
+    "Unveiled 2021"
+   ],
+   "7": [
+    "Dilly S",
+    "3 trays",
+    "~15 h battery"
+   ],
+   "8": [
+    "NYU Abu Dhabi",
+    "Lidar payload",
+    "Spot, again"
+   ],
+   "9": [
+    "Since 2022",
+    "27 head motors",
+    "6+ languages"
+   ],
+   "10": [
+    "Promobot V.4",
+    "Up to 8 h",
+    "Perm, Russia"
+   ]
+  },
+  "pronounce": {
+   "GITEX": "Jai-tex",
+   "NAO": "Now",
+   "NodeMCU": "Node M C U",
+   "e&": "e and",
+   "xArm": "X-Arm",
+   "UFACTORY": "U-Factory",
+   "ETH": "E T H",
+   "OnRobot": "On Robot",
+   "Company": "D P World",
+   "Robotemi": "Robo-temi",
+   "KTH": "K T H",
+   "peykBot": "Payk-Bot",
+   "Peyk": "Payk",
+   "Neolix": "Neo-licks",
+   "Furhat": "Fur-hat",
+   "Robo-C": "Robo-See",
+   "Emrill": "Em-rill",
+   "Ottobot": "Otto-bot",
+   "Ottonomy": "Otto-nomy",
+   "Expo 2020": "Expo twenty twenty",
+   "LionsBot": "Lions-Bot",
+   "M02": "M zero two",
+   "4K": "four K",
+   "ARMA 3": "Arma three",
+   "CC1": "C C One",
+   "Pudu": "Poo-doo",
+   "Micropolis": "Micro-polis",
+   "FANUC": "Fanuc",
+   "LR Mate": "L R Mate",
+   "Czechia": "Check-ia",
+   "M01": "M zero one",
+   "RTA": "R T A",
+   "NYU": "N Y U",
+   "H1": "H one",
+   "Go2": "Go two",
+   "V.4": "V four",
+   "Baemin": "Bae-min"
+  },
+  "delivery": {
+   "1": "warm",
+   "2": "warm",
+   "3": "amazed",
+   "4": "warm",
+   "5": "warm",
+   "6": "amazed",
+   "7": "warm",
+   "8": "curious",
+   "9": "warm",
+   "10": "calm",
+   "intro": "warm",
+   "outro": "warm"
+  }
+ },
+ "outro": {
+  "logo": "/branding/logo.png",
+  "channel": "My Channel",
+  "handle": "@My Channel",
+  "tagline": "Robots and gadgets",
+  "cta": "Subscribe",
+  "ctaDone": "Subscribed",
+  "terminal": "> example.com",
+  "background": [
+   {
+    "item": 4829,
+    "from": 2.0,
+    "to": 16.0
+   }
+  ],
+  "seconds": 12
+ }
+}

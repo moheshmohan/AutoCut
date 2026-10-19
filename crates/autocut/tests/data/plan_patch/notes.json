@@ -1,0 +1,204 @@
+{
+ "timezone": "+04:00",
+ "entries": {
+  "Promobot": {
+   "place": "Dubai",
+   "line": "In August 2025, a Promobot V.4 was greeting visitors in a Dubai lobby. It raises itself to your eye level, and its battery lasts up to eight hours.",
+   "chips": [
+    "Promobot V.4",
+    "Up to 8 h",
+    "Perm, Russia"
+   ],
+   "delivery": "calm",
+   "redact": {
+    "targets": [
+     "Company logo",
+     "company website text"
+    ]
+   },
+   "shots": [
+    {
+     "item": 68,
+     "plain": true,
+     "from": 9.0,
+     "to": 14.0
+    },
+    {
+     "item": 70,
+     "plain": true,
+     "from": 4.0,
+     "to": 9.0
+    }
+   ]
+  },
+  "Restaurant serving robot": {
+   "place": "Busan, South Korea",
+   "label": "Dilly S serving robot",
+   "shots": [
+    {
+     "item": 2417,
+     "plain": true,
+     "from": 2.0,
+     "to": 10.5,
+     "fit": "full"
+    },
+    {
+     "item": 2417,
+     "plain": true,
+     "from": 18.0,
+     "to": 33.0,
+     "fit": "full",
+     "speed": 3.0,
+     "mute": true
+    }
+   ],
+   "line": "In October 2023, in Busan, my food came on a Dilly S, a serving robot from the Korean delivery app Baemin. Three trays, and about fifteen hours on a charge.",
+   "chips": [
+    "Dilly S",
+    "3 trays",
+    "~15 h battery"
+   ]
+  },
+  "Pepper": {
+   "line": "Pepper was everywhere, greeting people. SoftBank built it to read emotions in faces and voices, and made about twenty-seven thousand before pausing production in 2020."
+  },
+  "Micropolis M02": {
+   "shots": [
+    {
+     "item": 2407
+    }
+   ],
+   "line": "There I met two driverless police patrols. This little one is the M02, a self-driving police buggy for narrow streets and neighbourhoods, with its cameras up on a mast.",
+   "chips": [
+    "Micropolis M02",
+    "Made in UAE",
+    "Narrow streets"
+   ],
+   "split": [
+    {
+     "label": "Micropolis M01",
+     "description": "The larger Micropolis autonomous patrol car for Dubai Police, marked 01, at Expo 2020.",
+     "unix": "2022-01-23 13:40:35",
+     "shots": [
+      {
+       "item": 2408
+      },
+      {
+       "item": 2409,
+       "from": 19.0,
+       "to": 23.5
+      }
+     ],
+     "line": "And this is its big brother, the M01, built for the main roads. Micropolis designed and made it in the UAE with Dubai Police, and it can even launch its own drone.",
+     "chips": [
+      "Micropolis M01",
+      "Lidar + 360° cams",
+      "Carries a drone"
+     ],
+     "delivery": "amazed"
+    }
+   ]
+  },
+  "Disinfection robot": {
+   "shotEdits": {
+    "14": {
+     "from": 0.0,
+     "fit": "full"
+    }
+   }
+  },
+  "Ameca": {
+   "shots": [
+    {
+     "item": 621
+    },
+    {
+     "item": 622
+    }
+   ],
+   "line": "And then Ameca, with the most expressive robot face I've ever seen. Britain's Engineered Arts unveiled it at the end of 2021."
+  }
+ },
+ "add": [
+  {
+   "label": "Ameca, again",
+   "kind": "humanoid",
+   "description": "Ameca greeting visitors at the Museum of the Future, Dubai.",
+   "unix": "2025-07-13 18:59:00",
+   "shots": [
+    {
+     "item": 67,
+     "mute": true
+    }
+   ],
+   "facts": [],
+   "place": "Museum of the Future, Dubai",
+   "line": "The next day I met Ameca again, at the Museum of the Future, where it has greeted visitors since 2022. Its head and face alone have twenty-seven motorised movements, and it chats in more than six languages.",
+   "chips": [
+    "Since 2022",
+    "27 head motors",
+    "6+ languages"
+   ],
+   "delivery": "warm"
+  },
+  {
+   "label": "Spot, again",
+   "kind": "quadruped",
+   "description": "NYU Abu Dhabi's Boston Dynamics Spot with a lidar and camera payload.",
+   "unix": "2025-04-23 11:07:50",
+   "shots": [
+    {
+     "item": 64,
+     "plain": [
+      0.0,
+      6.0
+     ]
+    },
+    {
+     "item": 2631
+    },
+    {
+     "item": 2632
+    }
+   ],
+   "facts": [],
+   "event": "Dubai AI Festival 2025",
+   "line": "Then NYU Abu Dhabi's stand, with a Spot of their own, kitted out with lidars and cameras for mapping.",
+   "chips": [
+    "NYU Abu Dhabi",
+    "Lidar payload",
+    "Spot, again"
+   ],
+   "delivery": "curious"
+  }
+ ],
+ "script": {
+  "pronounce": {
+   "GITEX": "Jai-tex",
+   "M01": "M zero one",
+   "RTA": "R T A",
+   "NYU": "N Y U",
+   "H1": "H one",
+   "Go2": "Go two",
+   "V.4": "V four",
+   "Baemin": "Bae-min"
+  }
+ },
+ "outro": {
+  "logo": "/branding/logo.png",
+  "channel": "My Channel",
+  "handle": "@My Channel",
+  "tagline": "Robots and gadgets",
+  "cta": "Subscribe",
+  "ctaDone": "Subscribed",
+  "terminal": "> example.com",
+  "background": [
+   {
+    "item": 4829,
+    "from": 2.0,
+    "to": 16.0
+   }
+  ],
+  "seconds": 12
+ }
+}

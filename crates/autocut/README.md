@@ -492,6 +492,28 @@ plan loads there. Every widget has an automation id (`showcase.lookOpen`, `showc
 (`ui.set {showcase: {look: {outro: {channel: "H4hacks"}}}}`, see
 [docs/control-protocol.md](../../docs/control-protocol.md)).
 
+### Review notes into the plan (`showcase-plan`)
+
+A new round of a showcase is a reviewed plan plus notes, keyed by entry **label** (numbers change
+as entries come and go): [`plan_patch::apply`](src/plan_patch.rs) (`filmcraft-cli showcase-plan
+--base plan.json --patch notes.json --project p.fcproj --out new.json`) changes entries (`line`,
+`chips`, `delivery`, `say`, `place`, `event`, `kind`, `description`, `redact`, `unix` as seconds or
+a date in the notes' `timezone`), replaces their `shots` (`{item, from, to, speed, fit, mute}`: the
+plan's analysed shot of that item, or with `plain` a shot counted in view across its window, its
+clip's name and length from the project) or edits them (`shotEdits`), splits one entry into two
+(`split`), removes one (`remove`), adds new ones (`add`), and merges the script's `intro`, `outro`,
+`pronounce` and the look's fields (`outro`, …). The entries are sorted by date and numbered again;
+`script.lines`, `chips`, `delivery` and `say` follow them, a scene keeps no chips, and the robot
+count in the outro ("Forty-three", or `{Count}`) is updated. Entries without a line are reported.
+[`plan_patch::with_lines`](src/plan_patch.rs) (`--lines script-ml.json`) writes the plan for
+another language: `{"intro", "outro", "lines": {"<label>": "…"}}` over it, `language` set, the
+English respellings and `say` cleared, failing on any spoken entry without a line. Numbers are
+read and written back exactly (serde_json's `float_roundtrip`). Measured 2026-10-20: the v5 round
+(its 14 places, 16 changed lines, a split, 4 new robots, the Malayalam lines) as one notes file
+reproduces the `plan-v5.json` and `plan-v5-ml.json` the round's Python script wrote, value for
+value; a trimmed copy is the test fixture (`tests/data/plan_patch`). The steps of a whole round:
+[docs/showcase-runbook.md](../../docs/showcase-runbook.md).
+
 ## Shorts: long video → vertical clips
 
 `autocut.shorts` (job; `shorts.rs`) is the local "Opus Clip" factory. The transcript (Whisper's,
