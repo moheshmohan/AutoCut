@@ -641,6 +641,16 @@ pub async fn redact_show(
                 skipped("tooSmall"),
                 skipped("excluded")
             ));
+            let cache = &o["cache"];
+            if cache["enabled"].as_bool() == Some(true) {
+                progress(&format!(
+                    "privacy: {} frame(s) and {} check(s) from the redaction cache, {} frame(s) decoded, {:.0} s",
+                    cache["framesFromCache"],
+                    cache["verdictsFromCache"],
+                    cache["framesDecoded"],
+                    o["seconds"]["analysis"].as_f64().unwrap_or(0.0) + o["seconds"]["check"].as_f64().unwrap_or(0.0)
+                ));
+            }
             match o["verify"]["state"].as_str() {
                 Some("skipped") | Some("failed") => {
                     notes.push(format!("privacy: the robot check did not run ({}); every face found is hidden", o["verify"]["reason"].as_str().unwrap_or("")))

@@ -277,7 +277,7 @@ SUBCOMMANDS
   redact [--clips 1,2 | --sequence id] [--kinds faces,plates] [--style blur|mosaic]
          [--strength 1-100] [--padding 0.2] [--min-face-height 0.05] [--min-plate-width 0.025]
          [--face-score 0.7] [--plate-score 0.8] [--analysis-fps 10] [--exclude '<json boxes>']
-         [--no-verify] [--dry-run] [--keep] [--target T]... [--target-every 1]
+         [--no-verify] [--dry-run] [--keep] [--target T]... [--target-every 1] [--fresh]
          [--download] [--save | --save-as p.fcproj]
                                 hide clearly recognisable faces and legible number plates in the
                                 --project's active sequence (or --sequence, or the --clips given)
@@ -293,7 +293,11 @@ SUBCOMMANDS
                                 logo, a sign; repeatable): the local vision model looks for it
                                 every --target-every seconds and at shot changes, and the tracker
                                 follows it between looks. --download fetches the detectors first
-                                (4.4 MB, MIT and Apache-2.0, SHA-256 checked). --save keeps it
+                                (4.4 MB, MIT and Apache-2.0, SHA-256 checked). --save keeps it.
+                                What is found is kept in <data dir>/redact-cache (by the file's
+                                content, the settings and the models; 512 MB, least recently used
+                                out first): the same footage again, or another window of the same
+                                clips, is not decoded or asked about again; --fresh reads none of it
   shorts <project.fcproj | media file> [--count 3] [--aspect 9:16] [--min-seconds 15]
          [--max-seconds 60] [--motion smooth|responsive] [--topic T] [--title-card]
          [--no-captions] [--analysis-fps 30] [--sequence id] [--export dir [--upload-youtube
@@ -582,6 +586,8 @@ impl Backend {
         if let Some(dir) = a.opt("--data-dir").map(std::path::PathBuf::from).or_else(filmcraft_engine::autosave::default_data_dir) {
             s.export_presets.set_dir(&dir);
             s.use_narration_cache(&dir);
+            // and the redaction cache: the same footage redacted again is not analysed again
+            s.use_redaction_cache(&dir);
         }
         // `photos.upload` (also over MCP): the Google Photos sign-in of `photos auth --upload`
         s.photos = Some(filmcraft_gphotos::engine_uploader());
@@ -675,6 +681,10 @@ fn redact_params(a: &Args) -> Result<Value, String> {
     }
     if a.flag("--keep") {
         p["replace"] = json!(false);
+    }
+    // --fresh: nothing from the redaction cache (<data dir>/redact-cache)
+    if a.flag("--fresh") {
+        p["fresh"] = json!(true);
     }
     // named targets (logos, signs), found by the local vision model: --target "DP World logo"
     let targets = a.all("--target");

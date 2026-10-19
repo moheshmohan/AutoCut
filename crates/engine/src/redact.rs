@@ -45,13 +45,29 @@
 //! scale, crop and reframing. The masks are named `Redact face 1`, `Redact plate 2`…; running
 //! it again replaces an earlier automatic redaction of the clip (`replace: false` keeps it).
 //! `dryRun` only reports the tracks (the job's `redact` outcome), changing nothing.
+//!
+//! **The cache.** A clip is analysed at the media times of a grid (its first and last frame, and
+//! every multiple of the analysis step in media time), so two windows of one clip share the
+//! frames they overlap. With a redaction cache ([`crate::redact_cache`], `<data dir>/redact-cache`,
+//! on in the app and the CLI) the detections at each of those times, the vision check's answer
+//! for each track and the named targets' looks are kept by the file's content identity, the
+//! settings and the models: the same footage redacted again — a rebuilt showcase, the same show
+//! in another language — decodes and asks only what it has not seen. The outcome's `cache` says
+//! what came from it; `fresh: true` reads none of it. Measured 2026-10-20 on 11 clips of Robot
+//! Showcase v5 (656 analysed frames, 64 vision checks; M-series Mac, load 5–10): 152 s the first
+//! time, 0.13 s the second, 34 s with every clip's window moved half a second (576 frames and 52
+//! answers from the cache, 80 frames decoded and 13 asked).
+//!
+//! **Coverage.** The outcome says, per clip, how much of the picture its masks cover (`coverage`:
+//! the largest single mask at any keyframe, and the most hidden at once, with when in media and
+//! sequence seconds): a mask over a large part of the frame hides the shot, not a face or a logo.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use filmcraft_geom::Vec2;
-use filmcraft_project::{ClipId, EffectInstance, Interpolation, ItemId, ItemKind, Keyframe, Mask, MaskPath, Param, ParamValue, TrackKind};
+use filmcraft_project::{ClipId, EffectInstance, Interpolation, ItemId, ItemKind, Keyframe, Mask, MaskPath, MediaRef, Param, ParamValue, TrackKind};
 use filmcraft_time::Tick;
 use filmcraft_vision::track::{Exclude, KeepParams, LinkParams, Skip, Track};
 pub use filmcraft_vision::{Detection, Kind};
@@ -147,6 +163,9 @@ pub struct Options {
     pub targets: Vec<TargetP>,
     /// Seconds between the vision model's looks for the targets.
     pub target_every: f64,
+    /// Read nothing from the redaction cache ([`crate::redact_cache`]): analyse and ask again
+    /// (what is found still replaces what was kept).
+    pub fresh: bool,
 }
 
 /// A named target from the parameters.
@@ -181,6 +200,7 @@ impl Default for Options {
             replace: true,
             targets: Vec::new(),
             target_every: 1.0,
+            fresh: false,
         }
     }
 }
@@ -218,6 +238,11 @@ struct Work {
     exclude: Vec<Exclude>,
     /// The clip's media range (the masks' lead-in and lead-out stay inside it).
     media: (Tick, Tick),
+    /// The file decoded (none, so not cached: a generator, or a proxy plays instead), and what
+    /// else decides its frames (picture size, length, interpreted rate): the redaction cache's
+    /// media key.
+    file: Option<String>,
+    desc: String,
 }
 
 /// What the analysis made of one clip.
@@ -253,7 +278,7 @@ impl ClipRedact {
 #[derive(Clone, Debug, PartialEq)]
 enum Verified {
     Off,
-    Done { judge: String, asked: usize, not_people: usize, not_plates: usize, unsure: usize },
+    Done { judge: String, asked: usize, cached: usize, not_people: usize, not_plates: usize, unsure: usize },
     Skipped(String),
     Failed(String),
 }
@@ -262,8 +287,8 @@ impl Verified {
     fn to_json(&self) -> Value {
         match self {
             Verified::Off => json!({"state": "off"}),
-            Verified::Done { judge, asked, not_people, not_plates, unsure } => {
-                json!({"state": "done", "judge": judge, "asked": asked, "notPeople": not_people, "notPlates": not_plates, "unsure": unsure})
+            Verified::Done { judge, asked, cached, not_people, not_plates, unsure } => {
+                json!({"state": "done", "judge": judge, "asked": asked, "fromCache": cached, "notPeople": not_people, "notPlates": not_plates, "unsure": unsure})
             }
             Verified::Skipped(why) => json!({"state": "skipped", "reason": why}),
             Verified::Failed(why) => json!({"state": "failed", "reason": why}),
@@ -272,7 +297,7 @@ impl Verified {
 }
 
 /// What a job found, how the vision check went, and how long the analysis and the check took (seconds).
-type Found = (Vec<ClipRedact>, Verified, [f64; 2]);
+type Found = (Vec<ClipRedact>, Verified, [f64; 2], Value);
 type Results = Arc<Mutex<Option<std::result::Result<Found, String>>>>;
 
 /// A running analysis; applied by [`poll`] when it finishes.
@@ -294,6 +319,12 @@ pub struct Redacts {
     pub judge: Option<Arc<dyn VisionJudge>>,
     /// A detector used instead of the downloaded models (tests; a host with its own).
     pub detector: Option<DetectFn>,
+    /// What [`Redacts::detector`] is, for the cache's keys: a detector without an id is not
+    /// cached.
+    pub detector_id: Option<String>,
+    /// The redaction cache ([`crate::redact_cache`]; native frontends turn it on with
+    /// [`Session::use_redaction_cache`]).
+    pub cache: Option<Arc<crate::redact_cache::RedactCache>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -420,6 +451,7 @@ pub fn options_p(cmd: &str, p: &Value) -> Result<Options> {
         replace: flag("replace", d.replace)?,
         targets: targets_p(cmd, p)?,
         target_every: unit_p(cmd, p, "targetEvery", 0.25, 10.0, d.target_every)?,
+        fresh: flag("fresh", d.fresh)?,
     })
     .and_then(|o| {
         if o.faces || o.plates || !o.targets.is_empty() { Ok(o) } else { Err(bad(cmd, "nothing to hide: `kinds` faces and/or plates, or `targets`")) }
@@ -513,11 +545,7 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
             };
             let Some((w, h)) = filmcraft_render::source_size(&s.project, it.item).filter(|(w, h)| *w > 0 && *h > 0) else { continue };
             let n = (it.duration.0 / fd.0).max(1);
-            let mut times: Vec<Tick> =
-                (0..n).step_by(usize::try_from(step).unwrap_or(1).max(1)).map(|j| it.source_time_at(it.start + Tick(fd.0.saturating_mul(j)))).collect();
-            times.push(it.source_time_at(it.start + Tick(fd.0.saturating_mul(n - 1))));
-            times.sort();
-            times.dedup();
+            let times = grid_times(it, fd, step, n);
             total = total.saturating_add(times.len());
             if total > MAX_FRAMES {
                 return Err(EngineError::Other(format!("too many frames to analyse (more than {MAX_FRAMES}); lower analysisFps or redact fewer clips")));
@@ -542,15 +570,25 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
                 min_plate_width: (o.keep.min_plate_width / mag_w).clamp(0.0, 1.0),
                 ..o.keep
             };
-            // the smallest face to hide is at least 16 px where the detector looks
+            // the smallest face to hide is at least 16 px where the detector looks (in steps, so
+            // two windows of a shot zoomed a little differently see the same picture, and share
+            // the cache's detections)
             let long = size.0.max(size.1);
             let needed = 16.0 / (keep.min_face_height.max(0.004) * size.1 / long);
-            let face_side = (needed.ceil() as usize).clamp(o.face_side, 1920.max(o.face_side)).min(long as usize).max(160);
+            let stepped = FACE_SIDES.iter().copied().find(|s| *s as f64 >= needed).unwrap_or(1920);
+            let face_side = stepped.clamp(o.face_side, 1920.max(o.face_side)).min(long as usize).max(160);
             let targets: Vec<String> = o.targets.iter().filter(|t| t.clips.as_ref().is_none_or(|c| c.contains(&it.id))).map(|t| t.text.clone()).collect();
             let look = if targets.is_empty() { 0 } else { crate::redact_targets::LOOK_SIDE };
             let side = (if o.faces { face_side } else { 0 }).max(if o.plates { o.plate_side } else { 0 }).max(look).max(64) as f64;
             let scale = (side / long).min(1.0) as f32;
             let ex = exclude.iter().filter(|e| e.clip.is_none_or(|c| c == it.id)).map(|e| e.ex).collect();
+            // the file the frames come from, for the cache (not a proxy playing instead)
+            let resolved = s.project.resolve_media(it.item);
+            let file = resolved.and_then(|(_, m, _)| match &m.media {
+                MediaRef::File { path } if !(s.media.use_proxies() && m.proxy.is_some()) => Some(path.clone()),
+                _ => None,
+            });
+            let desc = resolved.map_or_else(String::new, |(_, m, _)| format!("{w}x{h}|{}|{:?}", m.duration().0, m.interpret.frame_rate));
             let w = Work {
                 clip: it.id,
                 also: Vec::new(),
@@ -565,6 +603,8 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
                 targets,
                 exclude: ex,
                 media,
+                file,
+                desc,
             };
             // a copy of a clip already listed (same media, same frames, same exclusions) is
             // analysed once
@@ -581,6 +621,30 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
         }
     }
     Ok((work, skipped))
+}
+
+/// The steps of the picture size the face detector sees (its long side, pixels).
+const FACE_SIDES: [usize; 6] = [640, 800, 960, 1280, 1600, 1920];
+
+/// The media times clip `it` (`n` sequence frames of `fd`) is analysed at: its first and last
+/// frame, and between them every multiple of the analysis step in media time (`step` sequence
+/// frames at the clip's speed). A grid, so two windows of one clip share the frames they overlap
+/// (and the redaction cache's entries). In order, without repeats.
+fn grid_times(it: &filmcraft_project::TrackItem, fd: Tick, step: i64, n: i64) -> Vec<Tick> {
+    let first = it.source_time_at(it.start);
+    let last = it.source_time_at(it.start + Tick(fd.0.saturating_mul(n.saturating_sub(1))));
+    let (lo, hi) = (first.min(last), first.max(last));
+    let speed = if it.speed.is_finite() && it.speed != 0.0 { it.speed.abs().clamp(1e-3, 1e3) } else { 1.0 };
+    let g = ((fd.0 as f64) * step.max(1) as f64 * speed).round().clamp(1.0, 1e15) as i64;
+    let k0 = lo.0.div_euclid(g) + i64::from(lo.0.rem_euclid(g) != 0);
+    let k1 = hi.0.div_euclid(g);
+    let mut times = vec![first, last];
+    // (a hostile clip gets one past the job's limit, which then refuses it)
+    let count = usize::try_from(k1.saturating_sub(k0).saturating_add(1).max(0)).unwrap_or(0).min(MAX_FRAMES + 1);
+    times.extend((0..count).map(|k| Tick((k0 + k as i64).saturating_mul(g))));
+    times.sort();
+    times.dedup();
+    times
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -636,29 +700,163 @@ fn load_detectors(_: &Options) -> std::result::Result<DetectFn, String> {
     Err("automatic redaction is not available in this build (built without the `privacy-models` feature)".into())
 }
 
-/// Analyse one clip: detect on every analysed frame, link, decide. `None` when stopped.
-fn analyse(w: &Work, det: &DetectFn, o: &Options, vision: Option<&dyn VisionJudge>, sh: &Shared<'_>) -> Option<ClipRedact> {
+/// The redaction cache as one job uses it ([`crate::redact_cache`]): each work's media key (none:
+/// not cached), the detector's identity (none: not cached), and what came from it.
+struct Cached<'a> {
+    cache: &'a crate::redact_cache::RedactCache,
+    /// Read nothing ([`Options::fresh`]); what is found is still kept.
+    fresh: bool,
+    media: Vec<Option<String>>,
+    detector: Option<String>,
+    /// Frames whose detections came from the cache, frames decoded, verdicts and looks reused.
+    frames: AtomicUsize,
+    decoded: AtomicUsize,
+    verdicts: AtomicUsize,
+    looks: AtomicUsize,
+}
+
+impl Cached<'_> {
+    fn stats(&self) -> Value {
+        json!({
+            "framesFromCache": self.frames.load(Ordering::Relaxed),
+            "framesDecoded": self.decoded.load(Ordering::Relaxed),
+            "verdictsFromCache": self.verdicts.load(Ordering::Relaxed),
+            "looksFromCache": self.looks.load(Ordering::Relaxed),
+        })
+    }
+
+    /// The key of `w`'s detections (media key `media`).
+    fn detections_key(&self, media: &str, w: &Work, o: &Options) -> Option<String> {
+        let d = self.detector.as_ref()?;
+        Some(format!(
+            "det v{}|{media}|{d}|faces={} plates={} fs={:.3} ps={:.3} side={} pside={} scale={:.5}",
+            crate::redact_cache::VERSION,
+            o.faces,
+            o.plates,
+            o.face_score,
+            o.plate_score,
+            w.face_side,
+            o.plate_side,
+            w.scale
+        ))
+    }
+}
+
+/// The vision model's looks for named targets through the cache: a look at a media time asked
+/// before (the same file, picture, model and targets) is answered from it.
+struct CachedFinder<'a> {
+    inner: &'a dyn VisionJudge,
+    known: crate::redact_cache::Looks,
+    fresh: Mutex<crate::redact_cache::Looks>,
+    /// The media time (ticks) of the frame being looked at.
+    now: std::sync::atomic::AtomicI64,
+    hits: &'a AtomicUsize,
+}
+
+impl VisionJudge for CachedFinder<'_> {
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn judge(&self, kind: Kind, crops: &[Crop]) -> std::result::Result<Vec<Option<bool>>, String> {
+        self.inner.judge(kind, crops)
+    }
+    fn find(&self, frame: &Crop, targets: &[String]) -> std::result::Result<Vec<(usize, [f64; 4])>, String> {
+        let t = self.now.load(Ordering::Relaxed);
+        if let Some(found) = self.known.get(&t) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(found.clone());
+        }
+        let found = self.inner.find(frame, targets)?;
+        lock(&self.fresh).insert(t, found.clone());
+        Ok(found)
+    }
+}
+
+/// Analyse one clip: detect on every analysed frame (or take what the cache keeps for it), link,
+/// decide. `None` when stopped.
+fn analyse(
+    w: &Work,
+    det: &DetectFn,
+    o: &Options,
+    vision: Option<&dyn VisionJudge>,
+    sh: &Shared<'_>,
+    cached: Option<(&Cached<'_>, &str)>,
+) -> Option<ClipRedact> {
     let mut frames = Vec::with_capacity(w.times.len());
     let mut missed = 0usize;
-    let mut follower = vision.filter(|_| !w.targets.is_empty()).map(|v| crate::redact_targets::Follower::new(&w.targets, o.target_every, v));
+    // what the cache knows of this file: detections, and the targets' looks
+    let det_key = cached.and_then(|(c, media)| c.detections_key(media, w, o)).filter(|_| o.faces || o.plates);
+    let known: crate::redact_cache::Detections = match (cached, &det_key) {
+        (Some((c, _)), Some(k)) if !c.fresh => c.cache.load(k).unwrap_or_default(),
+        _ => Default::default(),
+    };
+    let mut found: crate::redact_cache::Detections = Default::default();
+    let look_key = cached.zip(vision).filter(|_| !w.targets.is_empty()).map(|((c, media), v)| {
+        let key = format!(
+            "find v{}|{media}|{}|scale={:.5} side={}|{}",
+            crate::redact_cache::VERSION,
+            v.name(),
+            w.scale,
+            crate::redact_targets::LOOK_SIDE,
+            w.targets.join("\u{1f}")
+        );
+        let known = if c.fresh { Default::default() } else { c.cache.load(&key).unwrap_or_default() };
+        (key, CachedFinder { inner: v, known, fresh: Mutex::default(), now: Default::default(), hits: &c.looks })
+    });
+    let finder: Option<&dyn VisionJudge> = match &look_key {
+        Some((_, f)) => Some(f),
+        None => vision,
+    };
+    let mut follower = finder.filter(|_| !w.targets.is_empty()).map(|v| crate::redact_targets::Follower::new(&w.targets, o.target_every, v));
     for (k, mt) in w.times.iter().enumerate() {
         if sh.cancelled() {
             return None;
         }
-        let detections = match w.src.video_frame(filmcraft_media::FrameRequest { time: *mt, scale: w.scale }) {
-            Ok(f) => {
-                let rgba = f.to_rgba8();
-                let (fw, fh) = (f.width as usize, f.height as usize);
-                if let Some(fo) = follower.as_mut() {
-                    fo.push(&rgba, fw, fh, mt.seconds());
+        let known_here = known.get(&mt.0);
+        let detections = match known_here {
+            // nothing to decode: the detections are known and no target is followed
+            Some(d) if follower.is_none() => {
+                if let Some((c, _)) = cached {
+                    c.frames.fetch_add(1, Ordering::Relaxed);
                 }
-                if o.faces || o.plates { det(&rgba, fw, fh, w.face_side) } else { Vec::new() }
+                d.clone()
             }
-            Err(_) => {
-                // a frame that does not decode shows nothing; its gap is filled if short
-                missed += 1;
-                Vec::new()
-            }
+            _ => match w.src.video_frame(filmcraft_media::FrameRequest { time: *mt, scale: w.scale }) {
+                Ok(f) => {
+                    if let Some((c, _)) = cached {
+                        c.decoded.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let rgba = f.to_rgba8();
+                    let (fw, fh) = (f.width as usize, f.height as usize);
+                    if let Some(fo) = follower.as_mut() {
+                        if let Some((_, f)) = &look_key {
+                            f.now.store(mt.0, Ordering::Relaxed);
+                        }
+                        fo.push(&rgba, fw, fh, mt.seconds());
+                    }
+                    match known_here {
+                        Some(d) => {
+                            if let Some((c, _)) = cached {
+                                c.frames.fetch_add(1, Ordering::Relaxed);
+                            }
+                            d.clone()
+                        }
+                        None if o.faces || o.plates => {
+                            let d = det(&rgba, fw, fh, w.face_side);
+                            if det_key.is_some() {
+                                found.insert(mt.0, d.clone());
+                            }
+                            d
+                        }
+                        None => Vec::new(),
+                    }
+                }
+                Err(_) => {
+                    // a frame that does not decode shows nothing; its gap is filled if short
+                    missed += 1;
+                    known_here.cloned().unwrap_or_default()
+                }
+            },
         };
         frames.push(filmcraft_vision::track::Frame { t: mt.seconds(), detections });
         sh.frame();
@@ -677,6 +875,18 @@ fn analyse(w: &Work, det: &DetectFn, o: &Options, vision: Option<&dyn VisionJudg
         .collect();
     let followed = follower.map(|f| f.finish(o.link.smooth)).unwrap_or_default();
     tracks.extend(followed.tracks.into_iter().map(|t| (t, None)));
+    // what was found for the first time, kept for the next run
+    if let (Some((c, _)), Some(key)) = (cached, &det_key)
+        && !found.is_empty()
+    {
+        c.cache.update::<crate::redact_cache::Detections>(key, |e| e.append(&mut found));
+    }
+    if let (Some((c, _)), Some((key, f))) = (cached, look_key) {
+        let mut fresh = f.fresh.into_inner().unwrap_or_else(PoisonError::into_inner);
+        if !fresh.is_empty() {
+            c.cache.update::<crate::redact_cache::Looks>(&key, |e| e.append(&mut fresh));
+        }
+    }
     let interval = if w.times.len() > 1 { (w.media.1 - w.media.0).seconds().abs() / (w.times.len() - 1) as f64 } else { 0.0 };
     Some(ClipRedact {
         clip: w.clip,
@@ -695,7 +905,14 @@ fn analyse(w: &Work, det: &DetectFn, o: &Options, vision: Option<&dyn VisionJudg
 }
 
 /// Analyse every clip, a few at a time (decoding one while detecting in another).
-fn analyse_all(work: &[Work], det: &DetectFn, o: &Options, vision: Option<&dyn VisionJudge>, sh: &Shared<'_>) -> Option<Vec<ClipRedact>> {
+fn analyse_all(
+    work: &[Work],
+    det: &DetectFn,
+    o: &Options,
+    vision: Option<&dyn VisionJudge>,
+    sh: &Shared<'_>,
+    cached: Option<&Cached<'_>>,
+) -> Option<Vec<ClipRedact>> {
     let workers = std::thread::available_parallelism().map_or(2, |n| n.get() / 3).clamp(1, 4).min(work.len().max(1));
     let next = AtomicUsize::new(0);
     let made: Mutex<Vec<(usize, ClipRedact)>> = Mutex::new(Vec::with_capacity(work.len()));
@@ -703,8 +920,9 @@ fn analyse_all(work: &[Work], det: &DetectFn, o: &Options, vision: Option<&dyn V
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);
             let Some(w) = work.get(i) else { return };
+            let media = cached.and_then(|c| Some((c, c.media.get(i)?.as_deref()?)));
             // a clip that panics in a decoder is a clip with nothing found, not a dead job
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyse(w, det, o, vision, sh))) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyse(w, det, o, vision, sh, media))) {
                 Ok(Some(r)) => lock(&made).push((i, r)),
                 Ok(None) => {
                     sh.stop.store(true, Ordering::Relaxed);
@@ -806,14 +1024,35 @@ fn outline(c: &mut Crop, r: [f64; 4]) {
     }
 }
 
+/// A question for the vision check: (kind, clip, track, crop, where its answer is kept: the
+/// cache entry and the moment's key and box).
+type Ask = (Kind, usize, usize, Crop, Option<(usize, (String, [f64; 4]))>);
+
 /// The vision check: one crop per track still to be hidden (a face at its largest sighting, a
 /// plate at its widest), shown to the judge [`JUDGE_BATCH`] at a time; tracks it calls
-/// something else (a robot's face, a sign) are left alone.
-fn verify(made: &mut [ClipRedact], work: &[Work], judge: &dyn VisionJudge, sh: &Shared<'_>) -> Verified {
-    // (kind, clip, track, crop)
-    let mut asks: Vec<(Kind, usize, usize, Crop)> = Vec::new();
+/// something else (a robot's face, a sign) are left alone. Answers kept in the cache from an
+/// earlier run (the same track, at any of its moments) are not asked again.
+fn verify(made: &mut [ClipRedact], work: &[Work], judge: &dyn VisionJudge, sh: &Shared<'_>, cached: Option<&Cached<'_>>) -> Verified {
+    let name = judge.name();
+    // the verdicts the cache keeps for each media file: (key, kept, new)
+    let mut kept: Vec<(String, crate::redact_cache::Verdicts, crate::redact_cache::Verdicts)> = Vec::new();
+    let mut asks: Vec<Ask> = Vec::new();
+    // (kind, clip, track, answer) from the cache
+    let mut known: Vec<(Kind, usize, usize, Option<bool>)> = Vec::new();
     for (ci, c) in made.iter().enumerate() {
-        let Some(w) = work.iter().find(|w| w.clip == c.clip) else { continue };
+        let Some(wi) = work.iter().position(|w| w.clip == c.clip) else { continue };
+        let Some(w) = work.get(wi) else { continue };
+        let slot = cached.and_then(|cc| Some((cc, cc.media.get(wi)?.as_ref()?))).map(|(cc, media)| {
+            let key = format!("judge v{}|{media}|{name}", crate::redact_cache::VERSION);
+            match kept.iter().position(|k| k.0 == key) {
+                Some(i) => i,
+                None => {
+                    let old = if cc.fresh { Default::default() } else { cc.cache.load(&key).unwrap_or_default() };
+                    kept.push((key, old, Default::default()));
+                    kept.len() - 1
+                }
+            }
+        });
         for (ti, (t, skip)) in c.tracks.iter().enumerate() {
             if skip.is_some() || t.kind == Kind::Target {
                 continue;
@@ -823,50 +1062,82 @@ fn verify(made: &mut [ClipRedact], work: &[Work], judge: &dyn VisionJudge, sh: &
             }
             let size = |p: &&filmcraft_vision::track::TrackPoint| if t.kind == Kind::Face { p.bbox[3] } else { p.bbox[2] };
             let Some(best) = t.points.iter().filter(|p| p.seen).max_by(|a, b| size(a).total_cmp(&size(b))) else { continue };
-            *lock(&sh.prog.status) = format!("Checking what was found in {}", c.name);
             let mt = Tick::from_seconds_f64(best.t);
+            // the answer about this track kept from an earlier run, at any of its moments
+            let moments = std::iter::once(best).chain(t.points.iter().filter(|p| p.seen)).map(|p| (Tick::from_seconds_f64(p.t), &p.bbox));
+            if let Some(a) = slot.and_then(|i| kept.get(i)).and_then(|k| crate::redact_cache::verdict_for(&k.1, t.kind, moments)) {
+                known.push((t.kind, ci, ti, a));
+                continue;
+            }
+            let vkey = (crate::redact_cache::verdict_key(t.kind, mt), best.bbox);
+            *lock(&sh.prog.status) = format!("Checking what was found in {}", c.name);
             let scale = (1080.0 / w.size.0.max(w.size.1)).min(1.0) as f32;
             if let Ok(f) = w.src.video_frame(filmcraft_media::FrameRequest { time: mt, scale }) {
                 let rgba = f.to_rgba8();
                 if let Some(crop) = crop_around(&rgba, f.width as usize, f.height as usize, &best.bbox, t.kind == Kind::Plate) {
-                    asks.push((t.kind, ci, ti, crop));
+                    asks.push((t.kind, ci, ti, crop, slot.map(|i| (i, vkey))));
                 }
             }
         }
     }
+    if let Some(cc) = cached {
+        cc.verdicts.fetch_add(known.len(), Ordering::Relaxed);
+    }
     let (mut not_people, mut not_plates, mut unsure) = (0usize, 0usize, 0usize);
+    let mut decide = |made: &mut [ClipRedact], kind: Kind, ci: usize, ti: usize, a: Option<bool>| match a {
+        Some(false) => {
+            if let Some((_, skip)) = made.get_mut(ci).and_then(|c| c.tracks.get_mut(ti)) {
+                if kind == Kind::Face {
+                    *skip = Some(Skip::NotAPerson);
+                    not_people += 1;
+                } else {
+                    *skip = Some(Skip::NotAPlate);
+                    not_plates += 1;
+                }
+            }
+        }
+        None => unsure += 1,
+        Some(true) => {}
+    };
+    for (kind, ci, ti, a) in &known {
+        decide(made, *kind, *ci, *ti, *a);
+    }
+    // what the model answered is kept, also when a later batch fails
+    let save = |kept: &[(String, crate::redact_cache::Verdicts, crate::redact_cache::Verdicts)]| {
+        for (key, _, new) in kept.iter().filter(|k| !k.2.is_empty()) {
+            if let Some(cc) = cached {
+                cc.cache.update::<crate::redact_cache::Verdicts>(key, |e| crate::redact_cache::merge_verdicts(e, new));
+            }
+        }
+    };
     for kind in [Kind::Face, Kind::Plate] {
-        let mine: Vec<&(Kind, usize, usize, Crop)> = asks.iter().filter(|a| a.0 == kind).collect();
+        let mine: Vec<&Ask> = asks.iter().filter(|a| a.0 == kind).collect();
         for batch in mine.chunks(JUDGE_BATCH) {
             if sh.cancelled() {
+                save(&kept);
                 return Verified::Skipped("stopped".into());
             }
-            *lock(&sh.prog.status) = format!("Asking {} which of {} {}s are real", judge.name(), mine.len(), kind.name());
+            *lock(&sh.prog.status) = format!("Asking {name} which of {} {}s are real", mine.len(), kind.name());
             let crops: Vec<Crop> = batch.iter().map(|a| a.3.clone()).collect();
             let answers = match judge.judge(kind, &crops) {
                 Ok(a) => a,
-                Err(e) => return Verified::Failed(format!("{e}; everything found is hidden")),
+                Err(e) => {
+                    save(&kept);
+                    return Verified::Failed(format!("{e}; everything found is hidden"));
+                }
             };
-            for ((_, ci, ti, _), a) in batch.iter().copied().zip(answers.into_iter().chain(std::iter::repeat(None))) {
-                match a {
-                    Some(false) => {
-                        if let Some((_, skip)) = made.get_mut(*ci).and_then(|c| c.tracks.get_mut(*ti)) {
-                            if kind == Kind::Face {
-                                *skip = Some(Skip::NotAPerson);
-                                not_people += 1;
-                            } else {
-                                *skip = Some(Skip::NotAPlate);
-                                not_plates += 1;
-                            }
-                        }
-                    }
-                    None => unsure += 1,
-                    Some(true) => {}
+            for ((_, ci, ti, _, slot), a) in batch.iter().copied().zip(answers.into_iter().chain(std::iter::repeat(None))) {
+                decide(made, kind, *ci, *ti, a);
+                if let Some((i, (vkey, b))) = slot
+                    && let Some(k) = kept.get_mut(*i)
+                {
+                    k.2.entry(vkey.clone()).or_default().push((*b, a));
                 }
             }
         }
     }
-    Verified::Done { judge: judge.name(), asked: asks.len(), not_people, not_plates, unsure }
+    save(&kept);
+    Verified::Done { judge: name, asked: asks.len(), cached: known.len(), not_people, not_plates, unsure }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1149,7 +1420,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Faces and Plates…",
             menu: &["Clip"],
             shortcut: None,
-            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"wait":bool=false}"#,
+            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"wait":bool=false}"#,
             enabled: has_video_selection,
             run: redact_clips,
             journal: true,
@@ -1159,7 +1430,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Sequence…",
             menu: &[],
             shortcut: None,
-            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"wait":bool=false}"#,
+            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"wait":bool=false}"#,
             enabled: has_seq,
             run: redact_sequence,
             journal: true,
@@ -1279,6 +1550,13 @@ fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipp
     let judge = if o.verify { s.redacts.judge.clone() } else { None };
     let vision = if o.targets.is_empty() { None } else { s.redacts.judge.clone() };
     let custom = s.redacts.detector.clone();
+    // the cache: a host's own detector is cached only under its id
+    let cache = s.redacts.cache.clone();
+    let detector_id = match &custom {
+        Some(_) => s.redacts.detector_id.clone().map(|id| format!("custom:{id}")),
+        None => Some(format!("models:{}", crate::redact_cache::detector_pins())),
+    };
+    let services = s.services.clone();
     let verify_wanted = o.verify;
     let opts = o.clone();
     let run = move || {
@@ -1310,23 +1588,59 @@ fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipp
             Err(e) => return finish(Err(e.clone()), e, 0),
         };
         let sh = Shared { prog: &prog, done: AtomicU64::new(0), clips_done: AtomicUsize::new(0), clips: work.len(), stop: AtomicBool::new(false) };
-        let Some(mut made) = analyse_all(&work, &det, &opts, vision.as_deref(), &sh) else {
+        // each clip's file as the cache knows it (its content identity, read once per file)
+        let cached = cache.as_deref().map(|c| {
+            *lock(&prog.status) = "Reading the redaction cache".into();
+            let mut ids: HashMap<String, Option<String>> = HashMap::new();
+            let media = work
+                .iter()
+                .map(|w| {
+                    let file = w.file.as_ref()?;
+                    let id = ids
+                        .entry(file.clone())
+                        .or_insert_with(|| crate::relink::identity_of(&*services, file).ok().map(|i| format!("file:{}:{:016x}", i.size, i.fingerprint)))
+                        .clone()?;
+                    Some(format!("{id}|{}", w.desc))
+                })
+                .collect();
+            Cached {
+                cache: c,
+                fresh: opts.fresh,
+                media,
+                detector: detector_id.clone(),
+                frames: AtomicUsize::new(0),
+                decoded: AtomicUsize::new(0),
+                verdicts: AtomicUsize::new(0),
+                looks: AtomicUsize::new(0),
+            }
+        });
+        let Some(mut made) = analyse_all(&work, &det, &opts, vision.as_deref(), &sh, cached.as_ref()) else {
             return finish(Err("stopped".into()), "Stopped: nothing was changed".into(), sh.done.load(Ordering::Relaxed));
         };
         let t_analysis = t0.elapsed().as_secs_f64();
         let verified = match (&judge, verify_wanted) {
             (_, false) => Verified::Off,
             (None, true) => Verified::Skipped("no local vision model to tell people from robots and plates from signs: everything found is hidden".into()),
-            (Some(j), true) => verify(&mut made, &work, j.as_ref(), &sh),
+            (Some(j), true) => verify(&mut made, &work, j.as_ref(), &sh, cached.as_ref()),
         };
         if sh.cancelled() {
             return finish(Err("stopped".into()), "Stopped: nothing was changed".into(), sh.done.load(Ordering::Relaxed));
         }
         let hidden: usize = made.iter().map(|c| c.hidden().count()).sum();
         let frames = sh.done.load(Ordering::Relaxed);
-        let status = format!("Found {hidden} face(s) and plate(s) to hide in {} clip(s), {frames} frame(s) in {:.1}s", made.len(), t0.elapsed().as_secs_f64());
+        let from_cache = cached.as_ref().map_or(0, |c| c.frames.load(Ordering::Relaxed));
+        let status = format!(
+            "Found {hidden} face(s) and plate(s) to hide in {} clip(s), {frames} frame(s) ({from_cache} from the cache) in {:.1}s",
+            made.len(),
+            t0.elapsed().as_secs_f64()
+        );
         let t_verify = t0.elapsed().as_secs_f64() - t_analysis;
-        finish(Ok((made, verified, [t_analysis, t_verify])), status, frames);
+        let stats = cached.as_ref().map_or(json!({"enabled": false}), |c| {
+            let mut v = c.stats();
+            v["enabled"] = json!(true);
+            v
+        });
+        finish(Ok((made, verified, [t_analysis, t_verify], stats)), status, frames);
     };
     s.redacts.pending.push(PendingRedact { job: id, cmd, seq, opts: o, skipped, results });
     let wait = bool_p(p, "wait").unwrap_or(false);
@@ -1360,7 +1674,7 @@ pub fn poll(s: &mut Session) {
         let pj = s.redacts.pending.remove(i);
         let results = lock(&pj.results).take();
         let outcome = match results {
-            Some(Ok((clips, verified, secs))) => match apply(s, &pj, &clips, &verified, secs) {
+            Some(Ok((clips, verified, secs, cache))) => match apply(s, &pj, &clips, &verified, secs, cache) {
                 Ok(v) => v,
                 Err(e) => {
                     s.error_toast(pj.cmd, format!("{LABEL}: {e}"));
@@ -1379,7 +1693,7 @@ pub fn poll(s: &mut Session) {
     }
 }
 
-fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &Verified, secs: [f64; 2]) -> Result<Value> {
+fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &Verified, secs: [f64; 2], cache: Value) -> Result<Value> {
     let o = &pj.opts;
     let made: Vec<Option<EffectInstance>> = clips.iter().map(|c| effect_for(c, o)).collect();
     let hidden: usize = made.iter().flatten().map(|e| e.masks.len()).sum();
@@ -1444,6 +1758,7 @@ fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &V
         "hidden": hidden,
         "verify": verified.to_json(),
         "seconds": {"analysis": (secs[0] * 10.0).round() / 10.0, "check": (secs[1] * 10.0).round() / 10.0},
+        "cache": cache,
         "clips": summary,
         "skippedClips": pj.skipped,
     }))

@@ -110,9 +110,13 @@ impl<'a> Follower<'a> {
         let sig = signature(&small, sw, sh);
         let cut = self.prev_sig.as_ref().is_some_and(|p| difference(p, &sig) > CUT);
         self.prev_sig = Some(sig);
+        // a look at the first frame of every `every` seconds of media time — a grid, so two
+        // windows of one clip look at the same frames (and share the redaction cache's looks) —
+        // and at a cut
+        let bucket = |t: f64| (t / self.every + 1e-9).floor();
         let look = match self.last_look {
             None => true,
-            Some(l) => t - l >= self.every - 1e-6 || (cut && t - l >= MIN_LOOK_GAP),
+            Some(l) => bucket(t) > bucket(l) || (cut && t - l >= MIN_LOOK_GAP),
         };
         if look {
             self.look(rgba, w, h, t, &small, sw, sh);

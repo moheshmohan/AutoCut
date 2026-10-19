@@ -517,3 +517,126 @@ fn media_times_map_to_the_sequence_through_speed_and_reverse() {
     it.speed = 0.0;
     assert_eq!(timeline_at(&it, Tick::from_seconds_f64(3.0)), it.start);
 }
+
+/// The session with a redaction cache of its own and the warm-disc detector counting its calls
+/// (cached under an id, as a host's detector is).
+fn cached_session(calls: Arc<std::sync::atomic::AtomicUsize>) -> (Session, ClipId, ItemId) {
+    let (mut s, clip, seq) = session();
+    s.redacts.cache = Some(Arc::new(crate::redact_cache::RedactCache::in_data_dir(&tmp_dir("redact-cache"))));
+    s.redacts.detector = Some(Arc::new(move |rgba: &[u8], w: usize, h: usize, _: usize| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        warm_disc(rgba, w, h)
+    }));
+    s.redacts.detector_id = Some("warm disc v1".into());
+    (s, clip, seq)
+}
+
+fn tracks_of(r: &Value) -> Value {
+    r["redact"]["clips"].as_array().unwrap().iter().map(|c| c["tracks"].clone()).collect()
+}
+
+/// A second run over the same footage decodes and detects nothing: every frame's detections and
+/// the vision check's answers come from the cache, and what is found is the same; `fresh` reads
+/// none of it.
+#[test]
+fn a_second_run_takes_detections_and_verdicts_from_the_cache() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (mut s, _, _) = cached_session(calls.clone());
+    let judge = Arc::new(Judge(Ok(Some(true)), Default::default()));
+    s.redacts.judge = Some(judge.clone());
+    let first = s.execute("clip.autoRedact", json!({"wait": true, "dryRun": true})).unwrap();
+    let c1 = &first["redact"]["cache"];
+    let frames = first["frames"].as_u64().unwrap();
+    assert_eq!((c1["enabled"].as_bool(), c1["framesFromCache"].as_u64(), c1["framesDecoded"].as_u64()), (Some(true), Some(0), Some(frames)), "{c1}");
+    let detected = calls.load(std::sync::atomic::Ordering::Relaxed);
+    let asked = judge.1.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(detected as u64 == frames && asked >= 1, "{detected} detections, {asked} crops");
+    let second = s.execute("clip.autoRedact", json!({"wait": true, "dryRun": true})).unwrap();
+    let c2 = &second["redact"]["cache"];
+    assert_eq!((c2["framesFromCache"].as_u64(), c2["framesDecoded"].as_u64()), (Some(frames), Some(0)), "{c2}");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), detected, "nothing detected again");
+    assert_eq!(judge.1.load(std::sync::atomic::Ordering::Relaxed), asked, "nothing asked again");
+    assert_eq!(second["redact"]["verify"]["fromCache"].as_u64(), Some(asked as u64));
+    assert_eq!(tracks_of(&first), tracks_of(&second), "the same tracks");
+    // the real edit from the cache hides the face as before
+    let r = s.execute("clip.autoRedact", json!({"wait": true})).unwrap();
+    assert_eq!(r["redact"]["clips"][0]["faces"], json!(1), "{r}");
+    // fresh: analysed again
+    let fresh = s.execute("clip.autoRedact", json!({"wait": true, "dryRun": true, "fresh": true})).unwrap();
+    assert_eq!(fresh["redact"]["cache"]["framesDecoded"].as_u64(), Some(frames));
+    assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > detected);
+}
+
+/// Another window of the same clip (the next language's cut of a shot) shares the frames it
+/// overlaps: they come from the cache, only the new ones are decoded.
+#[test]
+fn another_window_of_a_clip_shares_the_frames_it_overlaps() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (mut s, clip, seq) = cached_session(calls.clone());
+    // the first window: the clip's first 30 frames
+    let rate = s.project.sequence(seq).unwrap().settings.frame_rate;
+    let mut p = (*s.project).clone();
+    p.sequence_mut(seq).unwrap().video_tracks[0].items[0].duration = rate.tick_of(30);
+    s.project = Arc::new(p);
+    let first = s.execute("clip.autoRedact", json!({"wait": true, "dryRun": true, "verify": false})).unwrap();
+    // the second: frames 6 to 40, placed elsewhere in the sequence
+    let mut p = (*s.project).clone();
+    let it = &mut p.sequence_mut(seq).unwrap().video_tracks[0].items[0];
+    (it.start, it.source_in, it.duration) = (rate.tick_of(12), rate.tick_of(6), rate.tick_of(34));
+    s.project = Arc::new(p);
+    let second = s.execute("clip.autoRedact", json!({"wait": true, "dryRun": true, "verify": false})).unwrap();
+    let c = &second["redact"]["cache"];
+    let (hit, decoded) = (c["framesFromCache"].as_u64().unwrap(), c["framesDecoded"].as_u64().unwrap());
+    assert!(hit >= 6 && decoded <= 6, "{c} (first run: {})", first["redact"]["cache"]);
+    assert_eq!(second["redact"]["clips"][0]["faces"], json!(1));
+    let _ = clip;
+}
+
+/// The named targets' looks come from the cache too; a detector without an id is not cached.
+#[test]
+fn looks_are_cached_and_an_unnamed_detector_is_not() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (mut s, _, _) = cached_session(calls.clone());
+    s.redacts.judge = Some(Arc::new(Judge(Ok(Some(true)), Default::default())));
+    let p = json!({"wait": true, "dryRun": true, "kinds": [], "targets": ["the logo"], "targetEvery": 0.5});
+    let first = s.execute("clip.autoRedact", p.clone()).unwrap();
+    let looks = first["redact"]["clips"][0]["looks"]["asked"].as_u64().unwrap();
+    assert!(looks >= 2);
+    let second = s.execute("clip.autoRedact", p).unwrap();
+    assert_eq!(second["redact"]["cache"]["looksFromCache"].as_u64(), Some(looks), "{}", second["redact"]["cache"]);
+    assert_eq!(tracks_of(&first), tracks_of(&second));
+    // a host's detector without an id: nothing kept
+    s.redacts.detector_id = None;
+    s.redacts.cache = Some(Arc::new(crate::redact_cache::RedactCache::in_data_dir(&tmp_dir("redact-cache-none"))));
+    for _ in 0..2 {
+        let r = s.execute("clip.autoRedact", json!({"wait": true, "dryRun": true, "verify": false})).unwrap();
+        assert_eq!(r["redact"]["cache"]["framesFromCache"].as_u64(), Some(0));
+    }
+}
+
+#[test]
+fn analysis_times_are_a_grid_of_media_time() {
+    let (s, clip, seq) = session();
+    let q = s.project.sequence(seq).unwrap();
+    let rate = q.settings.frame_rate;
+    let fd = rate.frame_duration();
+    let mut it = q.find_item(clip).unwrap().1.clone();
+    it.duration = rate.tick_of(30);
+    let g = fd.0 * 3;
+    let a = grid_times(&it, fd, 3, 30);
+    // the first and last frames, and every third frame of media time between them
+    assert_eq!(a.first(), Some(&it.source_in));
+    assert!(a.iter().skip(1).take(a.len().saturating_sub(2)).all(|t| t.0 % g == 0), "{a:?}");
+    // a window starting 4 frames later shares the grid's frames
+    it.source_in = rate.tick_of(4);
+    let b = grid_times(&it, fd, 3, 30);
+    let shared = a.iter().filter(|t| b.contains(t)).count();
+    assert!(shared >= 7, "{shared} of {} shared", a.len());
+    // twice as fast: a grid twice as wide in media time; hostile speeds stay bounded
+    it.speed = 2.0;
+    assert!(grid_times(&it, fd, 3, 30).iter().skip(1).all(|t| t.0 % (2 * g) == 0 || *t == it.source_time_at(it.start + Tick(fd.0 * 29))));
+    it.speed = f64::NAN;
+    assert!(!grid_times(&it, fd, 3, 30).is_empty());
+    it.speed = 1e-12;
+    assert!(grid_times(&it, fd, 3, 30).len() <= MAX_FRAMES + 3);
+}

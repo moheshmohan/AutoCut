@@ -60,6 +60,7 @@ pub mod proxies;
 pub mod publish;
 pub mod recipes;
 pub mod redact;
+pub mod redact_cache;
 mod redact_targets;
 pub mod reframe;
 pub mod relink;
@@ -669,6 +670,7 @@ impl Session {
         self.presets.set_dir(&cfg.data_dir);
         self.export_presets.set_dir(&cfg.data_dir);
         self.use_narration_cache(&cfg.data_dir);
+        self.use_redaction_cache(&cfg.data_dir);
         self.prefs_path = Some(prefs_path);
         self.apply_media_cache();
         self.persistence = Some(autosave::Persistence::start(&cfg, self.prefs.auto_save.clone())?);
@@ -680,6 +682,13 @@ impl Session {
     /// out first), so `tts.create` / `tts.render` read a script once across sessions.
     pub fn use_narration_cache(&mut self, data_dir: &std::path::Path) {
         self.tts_disk = Some(filmcraft_tts::cache::DiskCache::in_data_dir(data_dir));
+    }
+
+    /// Keep what `clip.autoRedact` finds in `<data_dir>/redact-cache` (512 MB, least recently
+    /// used out first), so redacting the same footage again decodes and asks almost nothing
+    /// ([`redact_cache`]).
+    pub fn use_redaction_cache(&mut self, data_dir: &std::path::Path) {
+        self.redacts.cache = Some(Arc::new(redact_cache::RedactCache::in_data_dir(data_dir)));
     }
 
     /// Clean shutdown: flush and stop the worker. Unsaved changes stay in the journal (offered on
