@@ -3934,3 +3934,53 @@
 	Shift	ずれ
 	Line Height	線の高さ
 	Axis	軸
+# Video template authoring and sharing (Templates ▸ Save as Template, Install, Share)
+	Save as Video Template…	ビデオテンプレートとして保存…
+	Template Slot	テンプレートのスロット
+	Make a template of the open sequence: mark its placeholders, choose what travels with it	開いているシーケンスからテンプレートを作成：プレースホルダーを指定し、一緒に含めるものを選びます
+	A .zip package or an https:// link	.zip パッケージまたは https:// リンク
+	Install	インストール
+	Check the package and add it to your templates; nothing in it is run	パッケージを確認してテンプレートに追加します。中身が実行されることはありません
+	Photo	写真
+	Logo	ロゴ
+	Not a Slot	スロットにしない
+	{n} clips are no slot now	{n} 個のクリップをスロットから外しました
+	{n} clips are now slot “{slot}”	{n} 個のクリップをスロット「{slot}」にしました
+	Install: {e}	インストール: {e}
+	Installed {path}	{path} をインストールしました
+	‹ All templates	‹ すべてのテンプレート
+	All templates	すべてのテンプレート
+	Your clips become placeholders: the template never carries your footage, photos or words.	クリップはプレースホルダーになります。テンプレートにあなたの映像・写真・言葉が含まれることはありません。
+	Author	作成者
+	Licence (SPDX)	ライセンス (SPDX)
+	Category	カテゴリ
+	Placeholders	プレースホルダー
+	Mark the selected clips ({n}) as a slot:	選択したクリップ（{n}）をスロットに指定:
+	slot id (optional)	スロット ID（任意）
+	No clip is a slot yet: select clips in the Timeline and mark them.	まだスロットのクリップはありません。タイムラインでクリップを選択して指定してください。
+	{n} clips	{n} 個のクリップ
+	name shown when filling	差し込み時に表示する名前
+	Captions slot (transcribed from the video slots with sound)	キャプションスロット（音声付きのビデオスロットから書き起こし）
+	Captions slot	キャプションスロット
+	Layouts:	レイアウト:
+	Poster frame at	ポスターフレームの位置
+	Your own files outside the slots	スロット外にある自分のファイル
+	Left out unless you bundle them; a bundled file is marked as yours, under the template's licence.	同梱しない限り含まれません。同梱したファイルはあなたのものとして、テンプレートのライセンスで記録されます。
+	Bundle “{name}”	「{name}」を同梱
+	Save as one .zip file	1 つの .zip ファイルとして保存
+	Save Template	テンプレートを保存
+	Share	共有
+	Templates are plain files: pass on the .zip, or put it online and share its link.	テンプレートはただのファイルです。.zip を渡すか、オンラインに置いてリンクを共有しましょう。
+	Folder or .zip path	フォルダーまたは .zip のパス
+	.otio path	.otio のパス
+	Export .zip	.zip を書き出し
+	Export OpenTimelineIO	OpenTimelineIO を書き出し
+	https:// link to the .zip, for a QR code	.zip への https:// リンク（QR コード用）
+	QR code of the install link	インストールリンクの QR コード
+	Scan to download; open the file with Templates ▸ Install.	スキャンしてダウンロードし、テンプレート ▸ インストールでファイルを開きます。
+	Saved “{name}” to your templates	「{name}」をテンプレートに保存しました
+	Saved “{name}” to your templates ({n} notes: template.save lists them)	「{name}」をテンプレートに保存しました（注意 {n} 件: template.save に一覧）
+	Save as Template: {e}	テンプレートとして保存: {e}
+	Downloading the template…	テンプレートをダウンロード中…
+	Installed “{name}”	「{name}」をインストールしました
+	Wrote {path}	{path} を書き出しました

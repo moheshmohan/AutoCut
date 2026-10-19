@@ -3589,3 +3589,53 @@
 	Remove from favorites	Hapus dari favorit
 # Video templates (Window ▸ Templates)
 	Templates	Templat
+# Video template authoring and sharing (Templates ▸ Save as Template, Install, Share)
+	Save as Video Template…	Simpan sebagai Templat Video…
+	Template Slot	Slot Templat
+	Make a template of the open sequence: mark its placeholders, choose what travels with it	Buat templat dari sekuens yang terbuka: tandai placeholder-nya, pilih apa yang ikut bersamanya
+	A .zip package or an https:// link	Paket .zip atau tautan https://
+	Install	Pasang
+	Check the package and add it to your templates; nothing in it is run	Periksa paket lalu tambahkan ke templat Anda; tidak ada isinya yang dijalankan
+	Photo	Foto
+	Logo	Logo
+	Not a Slot	Bukan Slot
+	{n} clips are no slot now	{n} klip kini bukan slot
+	{n} clips are now slot “{slot}”	{n} klip kini menjadi slot “{slot}”
+	Install: {e}	Pasang: {e}
+	Installed {path}	Terpasang {path}
+	‹ All templates	‹ Semua templat
+	All templates	Semua templat
+	Your clips become placeholders: the template never carries your footage, photos or words.	Klip Anda menjadi placeholder: templat tidak pernah membawa rekaman, foto, atau kata-kata Anda.
+	Author	Pembuat
+	Licence (SPDX)	Lisensi (SPDX)
+	Category	Kategori
+	Placeholders	Placeholder
+	Mark the selected clips ({n}) as a slot:	Tandai klip terpilih ({n}) sebagai slot:
+	slot id (optional)	id slot (opsional)
+	No clip is a slot yet: select clips in the Timeline and mark them.	Belum ada klip yang menjadi slot: pilih klip di Linimasa lalu tandai.
+	{n} clips	{n} klip
+	name shown when filling	nama yang tampil saat mengisi
+	Captions slot (transcribed from the video slots with sound)	Slot takarir (ditranskripsi dari slot video yang bersuara)
+	Captions slot	Slot takarir
+	Layouts:	Tata letak:
+	Poster frame at	Bingkai poster pada
+	Your own files outside the slots	File Anda sendiri di luar slot
+	Left out unless you bundle them; a bundled file is marked as yours, under the template's licence.	Ditinggalkan kecuali Anda menyertakannya; file yang disertakan ditandai sebagai milik Anda, di bawah lisensi templat.
+	Bundle “{name}”	Sertakan “{name}”
+	Save as one .zip file	Simpan sebagai satu file .zip
+	Save Template	Simpan Templat
+	Share	Bagikan
+	Templates are plain files: pass on the .zip, or put it online and share its link.	Templat hanyalah file biasa: berikan .zip-nya, atau unggah dan bagikan tautannya.
+	Folder or .zip path	Folder atau jalur .zip
+	.otio path	jalur .otio
+	Export .zip	Ekspor .zip
+	Export OpenTimelineIO	Ekspor OpenTimelineIO
+	https:// link to the .zip, for a QR code	tautan https:// ke .zip, untuk kode QR
+	QR code of the install link	Kode QR tautan pemasangan
+	Scan to download; open the file with Templates ▸ Install.	Pindai untuk mengunduh; buka file dengan Templat ▸ Pasang.
+	Saved “{name}” to your templates	“{name}” disimpan ke templat Anda
+	Saved “{name}” to your templates ({n} notes: template.save lists them)	“{name}” disimpan ke templat Anda ({n} catatan: template.save mencantumkannya)
+	Save as Template: {e}	Simpan sebagai Templat: {e}
+	Downloading the template…	Mengunduh templat…
+	Installed “{name}”	“{name}” terpasang
+	Wrote {path}	Ditulis ke {path}

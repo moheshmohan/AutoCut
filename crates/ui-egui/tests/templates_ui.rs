@@ -183,6 +183,97 @@ fn browse_filter_fill_preview_and_build_a_template() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
+/// A3 from the panel: mark the demo's clips as slots (the save form and the Timeline's clip menu),
+/// save the sequence as a template into the user folder (it shows in the grid), export it as a
+/// .zip, install that .zip again under a new id, and show the QR code of its link.
+#[test]
+fn save_share_and_install_from_the_panel() {
+    let scratch = std::env::temp_dir().join(format!("filmcraft-templates-ui-author-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let mut d = Driver::demo(&scratch.to_string_lossy());
+    d.app().session.prefs_path = Some(scratch.join("prefs.json"));
+    d.ok("ui.panel.show", json!({"panel": "Templates"}));
+    d.frames(4);
+    // Sequence ▸ Save as Video Template… opens the form
+    d.ok("engine.execute", json!({"id": "template.save"}));
+    d.frames(3);
+    assert!(d.app().ui.templates.save.is_some());
+    d.wait_for("templates.save.go");
+    for id in [
+        "templates.save.name",
+        "templates.save.author",
+        "templates.save.license",
+        "templates.save.mark.video",
+        "templates.save.captions",
+        "templates.save.variant.1:1",
+    ] {
+        d.wait_for(id);
+    }
+    // select two clips and mark them as the `shots` slot
+    let clips: Vec<u64> = d.app().session.active_sequence().unwrap().video_tracks[0].items.iter().take(2).map(|c| c.id.0).collect();
+    d.ok("engine.execute", json!({"id": "timeline.select", "params": {"clips": clips}}));
+    d.ok("ui.set", json!({"templates": {"save": {"slot": "shots", "name": "Demo Kit", "author": "Tester", "variants": ["9:16", "1:1"]}}}));
+    d.frames(2);
+    d.click("templates.save.mark.video");
+    assert!(d.app().ui.status.contains("shots"), "{}", d.app().ui.status);
+    d.wait_for("templates.save.slot.shots.name");
+    d.ok("ui.set", json!({"templates": {"save": {"slotNames": {"shots": "Your shots"}}}}));
+    d.frames(2);
+    d.click("templates.save.go");
+    d.frames(4);
+    let status = d.app().ui.status.clone();
+    assert!(status.contains("Demo Kit"), "{status}");
+    assert!(d.app().ui.templates.save.is_none());
+    assert_eq!(d.app().ui.templates.selected.as_deref(), Some("user:demo-kit"), "the saved template opens");
+    {
+        let e = filmcraft_engine::video_templates::find_template(&d.app().session, "user:demo-kit", "t").unwrap();
+        assert_eq!(e.source, "user");
+        let m = &e.package.manifest;
+        assert_eq!(m.slot("shots").unwrap().name, "Your shots");
+        assert_eq!(m.variants.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["16:9", "9:16", "1:1"]);
+        assert_eq!(m.author, "Tester");
+    }
+    // the Share section: export a .zip, show the QR code of a link
+    d.reveal_by("templates.share.exportPath", -160.0);
+    let zip = scratch.join("demo-kit-shared.zip");
+    d.ok("ui.set", json!({"templates": {"exportPath": zip.to_string_lossy(), "link": "https://example.org/templates/demo-kit.zip"}}));
+    d.frames(2);
+    d.reveal_by("templates.share.export", -160.0);
+    d.click("templates.share.export");
+    assert!(zip.exists(), "{}", d.app().ui.status);
+    d.reveal_by("templates.share.qr", -160.0);
+    // back in the grid: the saved template is a card; install the shared copy under another id
+    d.reveal_by("templates.back", 400.0);
+    d.click("templates.back");
+    // (the user's templates come after the starters: search brings them into view)
+    d.ok("ui.set", json!({"templates": {"query": "kit"}}));
+    d.frames(3);
+    d.wait_for("templates.card.user:demo-kit");
+    let mut pkg = filmcraft_templates::Package::from_zip(&std::fs::read(&zip).unwrap()).unwrap();
+    pkg.manifest.id = "user:friends-kit".into();
+    pkg.manifest.name = "Friend's Kit".into();
+    let theirs = scratch.join("friends-kit.zip");
+    std::fs::write(&theirs, pkg.to_zip().unwrap()).unwrap();
+    d.ok("ui.set", json!({"templates": {"install": theirs.to_string_lossy()}}));
+    d.frames(2);
+    d.click("templates.install.go");
+    assert!(d.app().ui.status.contains("Friend's Kit"), "{}", d.app().ui.status);
+    d.wait_for("templates.card.user:friends-kit");
+    // a hostile file is refused with a message
+    let junk = scratch.join("junk.zip");
+    std::fs::write(&junk, b"PK\x03\x04 nope").unwrap();
+    d.ok("ui.set", json!({"templates": {"install": junk.to_string_lossy()}}));
+    d.frames(2);
+    d.click("templates.install.go");
+    assert!(d.app().ui.status.starts_with("Install"), "{}", d.app().ui.status);
+    // the Timeline's clip menu flags clips too
+    d.ok("engine.execute", json!({"id": "template.markSlot", "params": {"clips": [clips[0]], "clear": true}}));
+    let q = d.app().session.active_sequence().unwrap().clone();
+    assert!(q.video_tracks[0].items[0].markers.iter().all(|m| !m.name.starts_with("slot:")));
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 #[test]
 fn hostile_template_drafts_are_refused() {
     let scratch = std::env::temp_dir().join(format!("filmcraft-templates-ui-hostile-{}", std::process::id()));

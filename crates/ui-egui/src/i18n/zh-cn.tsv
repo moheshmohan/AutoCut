@@ -3656,3 +3656,53 @@
 	{n} problem(s) to fix before publishing	发布前需要修正 {n} 个问题
 # Video templates (Window ▸ Templates)
 	Templates	模板
+# Video template authoring and sharing (Templates ▸ Save as Template, Install, Share)
+	Save as Video Template…	另存为视频模板…
+	Template Slot	模板槽位
+	Make a template of the open sequence: mark its placeholders, choose what travels with it	用打开的序列制作模板：标记占位，选择随模板一起带走的内容
+	A .zip package or an https:// link	.zip 包或 https:// 链接
+	Install	安装
+	Check the package and add it to your templates; nothing in it is run	检查该包并加入你的模板；包中的任何内容都不会被运行
+	Photo	照片
+	Logo	标志
+	Not a Slot	不是槽位
+	{n} clips are no slot now	{n} 个剪辑已不再是槽位
+	{n} clips are now slot “{slot}”	{n} 个剪辑现在是槽位“{slot}”
+	Install: {e}	安装：{e}
+	Installed {path}	已安装 {path}
+	‹ All templates	‹ 全部模板
+	All templates	全部模板
+	Your clips become placeholders: the template never carries your footage, photos or words.	你的剪辑会变成占位：模板绝不会带上你的视频、照片或话语。
+	Author	作者
+	Licence (SPDX)	许可证 (SPDX)
+	Category	类别
+	Placeholders	占位
+	Mark the selected clips ({n}) as a slot:	将所选剪辑（{n}）标记为槽位：
+	slot id (optional)	槽位 ID（可选）
+	No clip is a slot yet: select clips in the Timeline and mark them.	还没有剪辑是槽位：在时间轴中选择剪辑并标记。
+	{n} clips	{n} 个剪辑
+	name shown when filling	填充时显示的名称
+	Captions slot (transcribed from the video slots with sound)	字幕槽位（从有声音的视频槽位转写）
+	Captions slot	字幕槽位
+	Layouts:	版式：
+	Poster frame at	封面帧位于
+	Your own files outside the slots	槽位之外你自己的文件
+	Left out unless you bundle them; a bundled file is marked as yours, under the template's licence.	除非打包，否则不会包含；打包的文件会标记为你的作品，采用模板的许可证。
+	Bundle “{name}”	打包“{name}”
+	Save as one .zip file	保存为单个 .zip 文件
+	Save Template	保存模板
+	Share	分享
+	Templates are plain files: pass on the .zip, or put it online and share its link.	模板就是普通文件：直接传 .zip，或放到网上分享链接。
+	Folder or .zip path	文件夹或 .zip 路径
+	.otio path	.otio 路径
+	Export .zip	导出 .zip
+	Export OpenTimelineIO	导出 OpenTimelineIO
+	https:// link to the .zip, for a QR code	指向 .zip 的 https:// 链接，用于生成二维码
+	QR code of the install link	安装链接的二维码
+	Scan to download; open the file with Templates ▸ Install.	扫码下载；用 模板 ▸ 安装 打开该文件。
+	Saved “{name}” to your templates	已将“{name}”保存到你的模板
+	Saved “{name}” to your templates ({n} notes: template.save lists them)	已将“{name}”保存到你的模板（{n} 条提示：见 template.save）
+	Save as Template: {e}	另存为模板：{e}
+	Downloading the template…	正在下载模板…
+	Installed “{name}”	已安装“{name}”
+	Wrote {path}	已写入 {path}

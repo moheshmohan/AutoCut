@@ -2020,6 +2020,7 @@ pub(crate) const CLIP_MENU: &[&[(&str, &str)]] = &[
         ("Fill frame", "clip.fillFrame"),
     ],
     &[("Reveal in Project", "clip.revealInProject"), ("Join Through Edits", "sequence.joinThroughEdits")],
+    &[("Template Slot", "template.markSlot")],
 ];
 
 /// The cut right-clicked on a track (#219): the clip ending there and the clip starting there,
@@ -2861,6 +2862,10 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                         });
                         app.auto.add_response("timeline.clipMenu.edit.label", &menu.response, crate::i18n::t(label));
                     });
+                    continue;
+                }
+                if cmd == "template.markSlot" {
+                    crate::panels::templates::slot_menu(app, ui, !sel.is_empty());
                     continue;
                 }
                 if cmd == "clip.multicam" {

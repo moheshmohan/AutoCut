@@ -3615,3 +3615,53 @@
 	Open this address in your browser yourself:	Apri tu questo indirizzo nel browser:
 # Video templates (Window ▸ Templates)
 	Templates	Modelli
+# Video template authoring and sharing (Templates ▸ Save as Template, Install, Share)
+	Save as Video Template…	Salva come modello video…
+	Template Slot	Slot del modello
+	Make a template of the open sequence: mark its placeholders, choose what travels with it	Crea un modello dalla sequenza aperta: indica i segnaposto e scegli cosa portare con sé
+	A .zip package or an https:// link	Un pacchetto .zip o un link https://
+	Install	Installa
+	Check the package and add it to your templates; nothing in it is run	Controlla il pacchetto e lo aggiunge ai tuoi modelli; nulla al suo interno viene eseguito
+	Photo	Foto
+	Logo	Logo
+	Not a Slot	Non è uno slot
+	{n} clips are no slot now	{n} clip non sono più uno slot
+	{n} clips are now slot “{slot}”	{n} clip ora sono lo slot “{slot}”
+	Install: {e}	Installazione: {e}
+	Installed {path}	Installato {path}
+	‹ All templates	‹ Tutti i modelli
+	All templates	Tutti i modelli
+	Your clips become placeholders: the template never carries your footage, photos or words.	Le tue clip diventano segnaposto: il modello non porta mai con sé i tuoi filmati, foto o parole.
+	Author	Autore
+	Licence (SPDX)	Licenza (SPDX)
+	Category	Categoria
+	Placeholders	Segnaposto
+	Mark the selected clips ({n}) as a slot:	Indica le clip selezionate ({n}) come slot:
+	slot id (optional)	id dello slot (facoltativo)
+	No clip is a slot yet: select clips in the Timeline and mark them.	Nessuna clip è ancora uno slot: seleziona delle clip nella Timeline e indicale.
+	{n} clips	{n} clip
+	name shown when filling	nome mostrato durante il riempimento
+	Captions slot (transcribed from the video slots with sound)	Slot dei sottotitoli (trascritti dagli slot video con audio)
+	Captions slot	Slot dei sottotitoli
+	Layouts:	Formati:
+	Poster frame at	Fotogramma di copertina a
+	Your own files outside the slots	I tuoi file fuori dagli slot
+	Left out unless you bundle them; a bundled file is marked as yours, under the template's licence.	Esclusi a meno che non li includi; un file incluso è indicato come tuo, con la licenza del modello.
+	Bundle “{name}”	Includi “{name}”
+	Save as one .zip file	Salva come un unico file .zip
+	Save Template	Salva modello
+	Share	Condividi
+	Templates are plain files: pass on the .zip, or put it online and share its link.	I modelli sono semplici file: passa lo .zip, oppure mettilo online e condividi il link.
+	Folder or .zip path	Cartella o percorso .zip
+	.otio path	percorso .otio
+	Export .zip	Esporta .zip
+	Export OpenTimelineIO	Esporta OpenTimelineIO
+	https:// link to the .zip, for a QR code	link https:// allo .zip, per un codice QR
+	QR code of the install link	Codice QR del link di installazione
+	Scan to download; open the file with Templates ▸ Install.	Scansiona per scaricare; apri il file con Modelli ▸ Installa.
+	Saved “{name}” to your templates	“{name}” salvato nei tuoi modelli
+	Saved “{name}” to your templates ({n} notes: template.save lists them)	“{name}” salvato nei tuoi modelli ({n} note: template.save le elenca)
+	Save as Template: {e}	Salva come modello: {e}
+	Downloading the template…	Download del modello in corso…
+	Installed “{name}”	“{name}” installato
+	Wrote {path}	Scritto {path}

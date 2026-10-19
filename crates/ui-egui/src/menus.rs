@@ -448,6 +448,11 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
             filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
             return crate::panels::interchange_export::open(app, ctx, id);
         }
+        // Sequence ▸ Save as Video Template… opens the Templates panel's save form; with parameters
+        // it saves directly.
+        "template.save" if params.as_object().is_none_or(|m| m.is_empty()) => {
+            return crate::panels::templates::open_save(app);
+        }
         // Sequence ▸ Make a Showcase… opens the Showcase panel's Analyze form; with a subject (or a
         // prompt) the job starts directly.
         "autocut.makeShowcase" if params.get("subject").is_none() && params.get("prompt").is_none() => {

@@ -3610,3 +3610,53 @@
 	Open this address in your browser yourself:	이 주소를 브라우저에서 직접 여세요:
 # Video templates (Window ▸ Templates)
 	Templates	템플릿
+# Video template authoring and sharing (Templates ▸ Save as Template, Install, Share)
+	Save as Video Template…	비디오 템플릿으로 저장…
+	Template Slot	템플릿 슬롯
+	Make a template of the open sequence: mark its placeholders, choose what travels with it	열린 시퀀스로 템플릿을 만듭니다. 자리 표시자를 지정하고 함께 담을 것을 고르세요
+	A .zip package or an https:// link	.zip 패키지 또는 https:// 링크
+	Install	설치
+	Check the package and add it to your templates; nothing in it is run	패키지를 확인해 내 템플릿에 추가합니다. 안의 내용은 절대 실행되지 않습니다
+	Photo	사진
+	Logo	로고
+	Not a Slot	슬롯 아님
+	{n} clips are no slot now	클립 {n}개가 이제 슬롯이 아닙니다
+	{n} clips are now slot “{slot}”	클립 {n}개가 이제 슬롯 “{slot}”입니다
+	Install: {e}	설치: {e}
+	Installed {path}	{path} 설치됨
+	‹ All templates	‹ 모든 템플릿
+	All templates	모든 템플릿
+	Your clips become placeholders: the template never carries your footage, photos or words.	클립은 자리 표시자가 됩니다. 템플릿에는 내 영상, 사진, 말이 절대 담기지 않습니다.
+	Author	작성자
+	Licence (SPDX)	라이선스(SPDX)
+	Category	카테고리
+	Placeholders	자리 표시자
+	Mark the selected clips ({n}) as a slot:	선택한 클립({n})을 슬롯으로 지정:
+	slot id (optional)	슬롯 ID(선택)
+	No clip is a slot yet: select clips in the Timeline and mark them.	아직 슬롯인 클립이 없습니다. 타임라인에서 클립을 선택해 지정하세요.
+	{n} clips	클립 {n}개
+	name shown when filling	채울 때 보이는 이름
+	Captions slot (transcribed from the video slots with sound)	캡션 슬롯(소리가 있는 비디오 슬롯에서 받아쓰기)
+	Captions slot	캡션 슬롯
+	Layouts:	레이아웃:
+	Poster frame at	포스터 프레임 위치
+	Your own files outside the slots	슬롯 밖의 내 파일
+	Left out unless you bundle them; a bundled file is marked as yours, under the template's licence.	함께 묶지 않으면 빠집니다. 묶은 파일은 내 것으로 표시되며 템플릿의 라이선스를 따릅니다.
+	Bundle “{name}”	“{name}” 함께 묶기
+	Save as one .zip file	.zip 파일 하나로 저장
+	Save Template	템플릿 저장
+	Share	공유
+	Templates are plain files: pass on the .zip, or put it online and share its link.	템플릿은 그냥 파일입니다. .zip을 전달하거나 온라인에 올리고 링크를 공유하세요.
+	Folder or .zip path	폴더 또는 .zip 경로
+	.otio path	.otio 경로
+	Export .zip	.zip 내보내기
+	Export OpenTimelineIO	OpenTimelineIO 내보내기
+	https:// link to the .zip, for a QR code	.zip의 https:// 링크(QR 코드용)
+	QR code of the install link	설치 링크의 QR 코드
+	Scan to download; open the file with Templates ▸ Install.	스캔해 내려받고 템플릿 ▸ 설치로 파일을 여세요.
+	Saved “{name}” to your templates	“{name}”을(를) 내 템플릿에 저장했습니다
+	Saved “{name}” to your templates ({n} notes: template.save lists them)	“{name}”을(를) 내 템플릿에 저장했습니다(참고 {n}개: template.save에 나열)
+	Save as Template: {e}	템플릿으로 저장: {e}
+	Downloading the template…	템플릿을 내려받는 중…
+	Installed “{name}”	“{name}” 설치됨
+	Wrote {path}	{path}에 썼습니다

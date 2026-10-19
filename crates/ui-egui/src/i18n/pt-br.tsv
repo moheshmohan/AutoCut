@@ -3595,3 +3595,53 @@
 	Showcase	Compilação
 # Video templates (Window ▸ Templates)
 	Templates	Modelos
+# Video template authoring and sharing (Templates ▸ Save as Template, Install, Share)
+	Save as Video Template…	Salvar como modelo de vídeo…
+	Template Slot	Espaço do modelo
+	Make a template of the open sequence: mark its placeholders, choose what travels with it	Crie um modelo da sequência aberta: marque os espaços reservados e escolha o que vai junto
+	A .zip package or an https:// link	Um pacote .zip ou um link https://
+	Install	Instalar
+	Check the package and add it to your templates; nothing in it is run	Verifica o pacote e o adiciona aos seus modelos; nada dele é executado
+	Photo	Foto
+	Logo	Logotipo
+	Not a Slot	Não é um espaço
+	{n} clips are no slot now	{n} clipes não são mais um espaço
+	{n} clips are now slot “{slot}”	{n} clipes agora são o espaço “{slot}”
+	Install: {e}	Instalação: {e}
+	Installed {path}	Instalado {path}
+	‹ All templates	‹ Todos os modelos
+	All templates	Todos os modelos
+	Your clips become placeholders: the template never carries your footage, photos or words.	Seus clipes viram espaços reservados: o modelo nunca leva suas filmagens, fotos ou palavras.
+	Author	Autor
+	Licence (SPDX)	Licença (SPDX)
+	Category	Categoria
+	Placeholders	Espaços reservados
+	Mark the selected clips ({n}) as a slot:	Marque os clipes selecionados ({n}) como espaço:
+	slot id (optional)	id do espaço (opcional)
+	No clip is a slot yet: select clips in the Timeline and mark them.	Nenhum clipe é um espaço ainda: selecione clipes na Linha do tempo e marque-os.
+	{n} clips	{n} clipes
+	name shown when filling	nome exibido ao preencher
+	Captions slot (transcribed from the video slots with sound)	Espaço de legendas (transcritas dos espaços de vídeo com som)
+	Captions slot	Espaço de legendas
+	Layouts:	Formatos:
+	Poster frame at	Quadro de capa em
+	Your own files outside the slots	Seus próprios arquivos fora dos espaços
+	Left out unless you bundle them; a bundled file is marked as yours, under the template's licence.	Ficam de fora, a menos que você os inclua; um arquivo incluído é marcado como seu, sob a licença do modelo.
+	Bundle “{name}”	Incluir “{name}”
+	Save as one .zip file	Salvar como um único arquivo .zip
+	Save Template	Salvar modelo
+	Share	Compartilhar
+	Templates are plain files: pass on the .zip, or put it online and share its link.	Modelos são arquivos comuns: passe o .zip adiante, ou coloque-o online e compartilhe o link.
+	Folder or .zip path	Pasta ou caminho .zip
+	.otio path	caminho .otio
+	Export .zip	Exportar .zip
+	Export OpenTimelineIO	Exportar OpenTimelineIO
+	https:// link to the .zip, for a QR code	link https:// para o .zip, para um código QR
+	QR code of the install link	Código QR do link de instalação
+	Scan to download; open the file with Templates ▸ Install.	Escaneie para baixar; abra o arquivo em Modelos ▸ Instalar.
+	Saved “{name}” to your templates	“{name}” salvo nos seus modelos
+	Saved “{name}” to your templates ({n} notes: template.save lists them)	“{name}” salvo nos seus modelos ({n} observações: template.save as lista)
+	Save as Template: {e}	Salvar como modelo: {e}
+	Downloading the template…	Baixando o modelo…
+	Installed “{name}”	“{name}” instalado
+	Wrote {path}	Gravado {path}

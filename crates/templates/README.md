@@ -222,13 +222,41 @@ Reels & Shorts, YouTube, Vlog, Business, Social, Events and Tech.
 
 ## Saving (`save::save`)
 
-The minimal flow (the full authoring flow is A3): clips flagged with a `slot:` marker
-(`template.markSlot`, or left by an earlier apply) become slots with generated placeholders; pieces of
-one placement merge back into one clip; other clips using the user's own files are left out with a
-warning; captions are left out (their text is the user's), their style is kept; Elements sounds
-become stand-ins again. The variant of the sequence's own size is joined by its rotated twin
-(16:9 ↔ 9:16). A captions slot, boxes, 1:1 / 4:5 layouts and a poster frame are authored in the
-manifest for now (the authoring flow, A3, is to carry them over).
+The authoring flow (`template.save`, Sequence ▸ Save as Video Template…, the Templates panel's
+form). Clips flagged with a `slot:` marker (`template.markSlot`, the Timeline's clip menu ▸ Template
+Slot, or left by an earlier apply) become slots with neutral generated placeholders (the demo
+scenes, colour mattes); pieces of one placement merge back into one clip. A placeholder's Motion is
+rewritten the way a template means it — scale relative to the slot's framing of the media (100 =
+exactly filling the frame, or the box) — so it shows the way the clip did; a cropped picture is a
+picture box (the visible rectangle). Other clips using the user's own files are left out with a
+warning unless bundled: a bundled file goes in `assets/` with its SHA-256 and attribution (its
+`.attribution` sidecar's, else the author's own work under the template's licence). Captions are
+the user's words: with a captions slot (`captions: {source}`, or the base's) their timing stays
+with neutral preview text, otherwise they go; their style stays. Elements sounds become stand-ins
+again, text slots show the base template's own text again.
+
+What the format carries beyond the timeline comes from the author's options, else from the
+template the sequence was made from (its `Template` metadata), else defaults: slot names, prompts,
+counts, constraints, fit, beat sync and defaults (`slots`); the captions slot; the layouts
+(`variants`: 16:9, 9:16, 1:1, 4:5 at the sequence's short side, the base's sizes, its per-clip
+hints moved onto the saved clips; the layout the sequence is in is the design, hint-free); the
+poster frame; the look and the export presets. The result goes through the strict manifest reader
+and the package cross-checks, so a saved template always reads back. Saving an applied starter
+gives back the starter's slots, boxes, captions slot, layouts, hints, poster, look and sounds
+(`save_tests.rs` checks all 21).
+
+## Sharing
+
+Templates are plain files ([`video_template_share.rs`](../engine/src/video_template_share.rs)):
+`template.export` writes one `.zip`; `template.install` takes a `.zip` from a file or an https link
+(a job, through the host's pure-Rust HTTPS fetcher, at most 128 MiB), checks it whole in memory
+(the ZIP caps, names leaving the package, the strict manifest, the sequence; built-in ids refused)
+before anything is written, and writes it — re-encoded from what was read — into the user folder.
+Nothing in a package is ever run. The panel shows a QR code of the install link ([`qr`](src/qr.rs):
+an encoder written from ISO/IEC 18004:2015 — byte mode, levels L–H, versions 1–40, the eight masks
+and their penalty rules). `template.exportOtio` / `sequence.exportOtio` write OpenTimelineIO
+(`filmcraft-interchange`'s writer) with the slots in `metadata.filmcraft` (the timeline's
+`template`, each placement clip's `slot`).
 
 ## Never crash
 

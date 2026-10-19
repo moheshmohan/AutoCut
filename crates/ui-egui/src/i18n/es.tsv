@@ -3935,3 +3935,53 @@
 	Shift	Desplazamiento
 	Line Height	Altura de línea
 	Axis	Eje
+# Video template authoring and sharing (Templates ▸ Save as Template, Install, Share)
+	Save as Video Template…	Guardar como plantilla de video…
+	Template Slot	Espacio de plantilla
+	Make a template of the open sequence: mark its placeholders, choose what travels with it	Crea una plantilla de la secuencia abierta: marca sus marcadores de posición y elige qué viaja con ella
+	A .zip package or an https:// link	Un paquete .zip o un enlace https://
+	Install	Instalar
+	Check the package and add it to your templates; nothing in it is run	Comprueba el paquete y lo añade a tus plantillas; nada de su contenido se ejecuta
+	Photo	Foto
+	Logo	Logotipo
+	Not a Slot	No es un espacio
+	{n} clips are no slot now	{n} clips ya no son un espacio
+	{n} clips are now slot “{slot}”	{n} clips son ahora el espacio «{slot}»
+	Install: {e}	Instalar: {e}
+	Installed {path}	Instalado {path}
+	‹ All templates	‹ Todas las plantillas
+	All templates	Todas las plantillas
+	Your clips become placeholders: the template never carries your footage, photos or words.	Tus clips se convierten en marcadores de posición: la plantilla nunca lleva tus videos, fotos ni palabras.
+	Author	Autor
+	Licence (SPDX)	Licencia (SPDX)
+	Category	Categoría
+	Placeholders	Marcadores de posición
+	Mark the selected clips ({n}) as a slot:	Marca los clips seleccionados ({n}) como espacio:
+	slot id (optional)	id del espacio (opcional)
+	No clip is a slot yet: select clips in the Timeline and mark them.	Aún ningún clip es un espacio: selecciona clips en la línea de tiempo y márcalos.
+	{n} clips	{n} clips
+	name shown when filling	nombre que se ve al rellenar
+	Captions slot (transcribed from the video slots with sound)	Espacio de subtítulos (transcritos de los espacios de video con sonido)
+	Captions slot	Espacio de subtítulos
+	Layouts:	Formatos:
+	Poster frame at	Fotograma de portada en
+	Your own files outside the slots	Tus propios archivos fuera de los espacios
+	Left out unless you bundle them; a bundled file is marked as yours, under the template's licence.	Se omiten salvo que los incluyas; un archivo incluido queda marcado como tuyo, bajo la licencia de la plantilla.
+	Bundle “{name}”	Incluir «{name}»
+	Save as one .zip file	Guardar como un único archivo .zip
+	Save Template	Guardar plantilla
+	Share	Compartir
+	Templates are plain files: pass on the .zip, or put it online and share its link.	Las plantillas son archivos normales: pasa el .zip o súbelo a internet y comparte su enlace.
+	Folder or .zip path	Carpeta o ruta .zip
+	.otio path	ruta .otio
+	Export .zip	Exportar .zip
+	Export OpenTimelineIO	Exportar OpenTimelineIO
+	https:// link to the .zip, for a QR code	enlace https:// al .zip, para un código QR
+	QR code of the install link	Código QR del enlace de instalación
+	Scan to download; open the file with Templates ▸ Install.	Escanéalo para descargar; abre el archivo con Plantillas ▸ Instalar.
+	Saved “{name}” to your templates	«{name}» guardada en tus plantillas
+	Saved “{name}” to your templates ({n} notes: template.save lists them)	«{name}» guardada en tus plantillas ({n} notas: template.save las enumera)
+	Save as Template: {e}	Guardar como plantilla: {e}
+	Downloading the template…	Descargando la plantilla…
+	Installed “{name}”	«{name}» instalada
+	Wrote {path}	Escrito {path}

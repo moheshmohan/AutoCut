@@ -14,6 +14,7 @@ pub mod bridge;
 pub mod long_job;
 pub mod photos;
 pub mod server;
+pub mod template_fetch;
 
 pub use bridge::BridgeClient;
 pub use server::{AutocutExecutor, FilmcraftMcp};

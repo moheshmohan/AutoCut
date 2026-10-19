@@ -3594,3 +3594,53 @@
 	Showcase	Compilation
 # Video templates (Window ▸ Templates)
 	Templates	Modèles
+# Video template authoring and sharing (Templates ▸ Save as Template, Install, Share)
+	Save as Video Template…	Enregistrer comme modèle vidéo…
+	Template Slot	Emplacement de modèle
+	Make a template of the open sequence: mark its placeholders, choose what travels with it	Créer un modèle à partir de la séquence ouverte : marquez ses espaces réservés, choisissez ce qui l'accompagne
+	A .zip package or an https:// link	Un paquet .zip ou un lien https://
+	Install	Installer
+	Check the package and add it to your templates; nothing in it is run	Vérifie le paquet et l'ajoute à vos modèles ; rien de son contenu n'est exécuté
+	Photo	Photo
+	Logo	Logo
+	Not a Slot	Pas un emplacement
+	{n} clips are no slot now	{n} clips ne sont plus un emplacement
+	{n} clips are now slot “{slot}”	{n} clips forment maintenant l'emplacement « {slot} »
+	Install: {e}	Installation : {e}
+	Installed {path}	Installé : {path}
+	‹ All templates	‹ Tous les modèles
+	All templates	Tous les modèles
+	Your clips become placeholders: the template never carries your footage, photos or words.	Vos clips deviennent des espaces réservés : le modèle n'emporte jamais vos images, photos ni paroles.
+	Author	Auteur
+	Licence (SPDX)	Licence (SPDX)
+	Category	Catégorie
+	Placeholders	Espaces réservés
+	Mark the selected clips ({n}) as a slot:	Marquer les clips sélectionnés ({n}) comme emplacement :
+	slot id (optional)	id de l'emplacement (facultatif)
+	No clip is a slot yet: select clips in the Timeline and mark them.	Aucun clip n'est encore un emplacement : sélectionnez des clips dans la Timeline et marquez-les.
+	{n} clips	{n} clips
+	name shown when filling	nom affiché au remplissage
+	Captions slot (transcribed from the video slots with sound)	Emplacement de sous-titres (transcrits des emplacements vidéo avec son)
+	Captions slot	Emplacement de sous-titres
+	Layouts:	Formats :
+	Poster frame at	Image d'affiche à
+	Your own files outside the slots	Vos propres fichiers hors des emplacements
+	Left out unless you bundle them; a bundled file is marked as yours, under the template's licence.	Laissés de côté sauf si vous les joignez ; un fichier joint est indiqué comme le vôtre, sous la licence du modèle.
+	Bundle “{name}”	Joindre « {name} »
+	Save as one .zip file	Enregistrer en un seul fichier .zip
+	Save Template	Enregistrer le modèle
+	Share	Partager
+	Templates are plain files: pass on the .zip, or put it online and share its link.	Les modèles sont de simples fichiers : transmettez le .zip, ou mettez-le en ligne et partagez son lien.
+	Folder or .zip path	Dossier ou chemin .zip
+	.otio path	chemin .otio
+	Export .zip	Exporter le .zip
+	Export OpenTimelineIO	Exporter en OpenTimelineIO
+	https:// link to the .zip, for a QR code	lien https:// vers le .zip, pour un code QR
+	QR code of the install link	Code QR du lien d'installation
+	Scan to download; open the file with Templates ▸ Install.	Scannez pour télécharger ; ouvrez le fichier avec Modèles ▸ Installer.
+	Saved “{name}” to your templates	« {name} » enregistré dans vos modèles
+	Saved “{name}” to your templates ({n} notes: template.save lists them)	« {name} » enregistré dans vos modèles ({n} remarques : template.save les liste)
+	Save as Template: {e}	Enregistrer comme modèle : {e}
+	Downloading the template…	Téléchargement du modèle…
+	Installed “{name}”	« {name} » installé
+	Wrote {path}	Écrit : {path}

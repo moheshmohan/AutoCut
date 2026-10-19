@@ -36,6 +36,7 @@ pub mod builtin;
 pub mod fit;
 pub mod manifest;
 pub mod package;
+pub mod qr;
 pub mod save;
 pub mod zip;
 
@@ -172,6 +173,8 @@ pub fn sha256_hex(data: &[u8]) -> String {
     s
 }
 
+#[cfg(test)]
+mod save_tests;
 #[cfg(test)]
 mod starter_tests;
 #[cfg(test)]

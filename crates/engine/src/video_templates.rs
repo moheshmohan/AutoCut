@@ -8,11 +8,12 @@
 //! | `template.inspect` | one template (`template`: id, name or path): slots with their placements, variants, beat grid, look, caption style, export preset, the manifest |
 //! | `template.validate` | check a package (`path`: folder, `.zip` or `template.json`): `valid`, and every problem with the field it is about |
 //! | `template.apply` | a new sequence from a template: `variant` (`16:9`, `9:16`…), `slots` (`{"photos": ["/a.jpg", 12, {"path": "/b.mov", "inSeconds": 3, "focus": [0.4, 0.5]}], "title": "Lisbon", "captions": [{"start": ticks, "end": ticks, "text": "…"}]}`), `name`, `captions: false` (no transcribing); one undo step |
-//! | `template.save` | the minimal "save as template": clips flagged as slots (`template.markSlot`, or left by an earlier apply) become slots with generated placeholders; other personal media is left out; writes a folder or a `.zip` |
+//! | `template.save` | Save as Template: clips flagged as slots (`template.markSlot`, or left by an earlier apply) become slots with neutral generated placeholders; other personal media is left out unless `bundle`d (with its attribution); the base template's (or the author's) slot details, captions slot, layouts and hints, poster, look and export presets carry over; written into the user templates folder (or `path`: a folder or a `.zip`), where the browser shows it |
 //! | `template.markSlot` | flag clips as placeholders of a slot (`kind`, `slot`) for `template.save`, or `clear` the flag |
 //! | `template.thumbnail` | a frame of the template's own placeholder sequence (`variant`, `seconds`, default its poster frame; `maxSide`) as PNG — what the template browser shows ([`crate::video_template_frames`]) |
 //! | `template.preview` | frames of the template filled with project items and text (`slots` as for apply, item ids only), without changing the project |
 //! | `template.media` | the project's media that can fill a slot (`kind`), Google Photos picks marked |
+//! | `template.export`, `template.install`, `template.qr`, `template.exportOtio`, `sequence.exportOtio` | sharing as plain files and OpenTimelineIO ([`crate::video_template_share`]) |
 //!
 //! **Applying.** Files named in `slots` are imported (a file the project already holds is reused,
 //! and one file named for several placements is one item). A filled music slot is measured
@@ -90,14 +91,16 @@ pub fn commands() -> Vec<CommandSpec> {
             apply,
             true,
         ),
-        spec(
-            "template.save",
-            "Save Sequence as Video Template",
-            r#"{"path":str (.fcvideo-template folder or .zip),"sequence":id?,"name":str?,"id":str?,"description":str?,"author":str?,"license":str="MIT OR Apache-2.0","category":str?,"overwrite":bool?}"#,
-            always,
-            save,
-            false,
-        ),
+        CommandSpec {
+            id: "template.save",
+            label: "Save as Video Template…",
+            menu: &["Sequence"],
+            shortcut: None,
+            params: SAVE_PARAMS,
+            enabled: has_seq,
+            run: save,
+            journal: false,
+        },
         spec(
             "template.markSlot",
             "Mark Clips as Template Slot",
@@ -108,7 +111,24 @@ pub fn commands() -> Vec<CommandSpec> {
         ),
     ];
     v.extend(crate::video_template_frames::commands());
+    v.extend(crate::video_template_share::commands());
     v
+}
+
+/// `template.save`'s parameters.
+pub const SAVE_PARAMS: &str = r#"{"path":str (.fcvideo-template folder or .zip; default: the user templates folder)?,"zip":bool=false,"sequence":id?,"name":str?,"id":str?,"description":str?,"author":str?,"license":str="MIT OR Apache-2.0","category":str?,"version":str?,"tags":[str]?,"base":id|"none"?,"slots":{"<slot>":{"name","prompt","order","minCount","beatSync","fit","constraints","default"}}?,"captions":bool|{"id","name","source":[slot],"maxChars","lines"}?,"variants":["16:9"|"9:16"|"1:1"|"4:5"]?,"poster":ticks?,"posterSeconds":f64?,"look":{"lumetri":str}|{"preset":str}?,"exportPreset":str?,"bundle":[itemId]|true?,"overwrite":bool?}"#;
+
+/// Bumped whenever a template is saved or installed in the user folder (the browser re-reads).
+static LIBRARY_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The user templates folder's revision ([`bump_library`]).
+pub fn library_revision() -> u64 {
+    LIBRARY_REVISION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Note that the user templates folder changed.
+pub fn bump_library() {
+    LIBRARY_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -422,7 +442,7 @@ fn engine_checks(s: &Session, m: &Manifest) -> Vec<(String, String)> {
 
 /// [`engine_checks`] with the package: the Elements sounds its stand-ins name exist, and its
 /// generated beds' moods and genres are the generator's.
-fn package_checks(s: &Session, p: &Package) -> Vec<(String, String)> {
+pub fn package_checks(s: &Session, p: &Package) -> Vec<(String, String)> {
     let mut out = engine_checks(s, &p.manifest);
     for it in p.fragment.items.values() {
         if let Some(e) = it.metadata.get(filmcraft_templates::ELEMENT_METADATA)
@@ -935,16 +955,270 @@ fn caption_sources(s: &mut Session, m: &Manifest, applied: &tapply::Applied, lab
 // Save and slot flags
 // ------------------------------------------------------------------------------------------------
 
+/// Largest file `template.save` bundles, and all of them together.
+const MAX_BUNDLE_FILE: u64 = 128 * 1024 * 1024;
+const MAX_BUNDLE_TOTAL: u64 = 256 * 1024 * 1024;
+
+/// What a `<file>.attribution` sidecar (AGENTS.md §1.3's format) says: title, author, source,
+/// licence.
+pub fn read_attribution(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in text.lines().take(200) {
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim().to_ascii_lowercase();
+            if matches!(k.as_str(), "title" | "author" | "source" | "license" | "licence") && !out.contains_key(&k) {
+                out.insert(if k == "licence" { "license".into() } else { k }, v.trim().chars().take(400).collect());
+            }
+        }
+    }
+    out
+}
+
+/// The slot ids flagged on a sequence's clips, with their kinds.
+fn flagged_slots(q: &filmcraft_project::Sequence) -> BTreeMap<String, SlotKind> {
+    let mut out = BTreeMap::new();
+    for t in q.video_tracks.iter().chain(q.audio_tracks.iter()) {
+        for c in &t.items {
+            for f in c.markers.iter().filter_map(|m| parse_slot_marker(&m.name)) {
+                out.entry(f.slot).or_insert(f.kind);
+            }
+        }
+    }
+    out
+}
+
+/// `template.save`'s authoring options (everything but the files to bundle).
+fn save_options(
+    s: &Session,
+    p: &Value,
+    q: &filmcraft_project::Sequence,
+    seq_id: ItemId,
+    name: &str,
+    warnings: &mut Vec<String>,
+) -> Result<filmcraft_templates::save::SaveOptions> {
+    use filmcraft_templates::save::{CaptionsChoice, CaptionsEdit, SaveOptions};
+    const CMD: &str = "template.save";
+    let text = |k: &str, max: usize| str_p(p, k).unwrap_or("").chars().take(max).collect::<String>();
+    // the template the sequence was made from (an earlier apply), unless `base: "none"`
+    let base = match str_p(p, "base") {
+        Some("none") => None,
+        Some(key) => Some(find_template(s, key, CMD)?.package),
+        None => match s.project.item(seq_id).and_then(|i| i.metadata.get("Template")).cloned() {
+            Some(id) => match find_template(s, &id, CMD) {
+                Ok(e) => Some(e.package),
+                Err(_) => {
+                    warnings.push(format!("the template this sequence was made from (`{id}`) is not installed; its slot details are not carried over"));
+                    None
+                }
+            },
+            None => None,
+        },
+    };
+    let flagged = flagged_slots(q);
+    let mut slots = BTreeMap::new();
+    if let Some(v) = p.get("slots").filter(|v| !v.is_null()) {
+        let o = v.as_object().ok_or_else(|| bad(CMD, "`slots` is an object: {\"<slot id>\": {\"name\", \"prompt\", …}}"))?;
+        if o.len() > filmcraft_templates::manifest::MAX_SLOTS {
+            return Err(bad(CMD, "too many slots in `slots`"));
+        }
+        for (id, edit) in o {
+            let kind = flagged.get(id).copied().ok_or_else(|| {
+                let ids: Vec<&str> = flagged.keys().map(String::as_str).collect();
+                bad(CMD, format!("no clip is flagged as slot `{id}` (flagged: {}; template.markSlot flags clips)", ids.join(", ")))
+            })?;
+            let e = filmcraft_templates::manifest::read_slot_edit(edit, kind, &format!("slots.{id}")).map_err(|e| bad(CMD, e.to_string()))?;
+            slots.insert(id.clone(), e);
+        }
+    }
+    let captions = match p.get("captions") {
+        None | Some(Value::Null) => CaptionsChoice::Auto,
+        Some(Value::Bool(false)) => CaptionsChoice::Off,
+        Some(Value::Bool(true)) => CaptionsChoice::Slot(CaptionsEdit::default()),
+        Some(Value::Object(o)) => {
+            let mut c = CaptionsEdit::default();
+            if let Some(id) = o.get("id").and_then(Value::as_str) {
+                c.id = id.chars().take(64).collect();
+            }
+            if let Some(n) = o.get("name").and_then(Value::as_str) {
+                c.name = n.chars().take(200).collect();
+            }
+            if let Some(a) = o.get("source") {
+                let a = a.as_array().ok_or_else(|| bad(CMD, "`captions.source` is a list of slot ids"))?;
+                c.source = a.iter().take(16).filter_map(Value::as_str).map(str::to_string).collect();
+            }
+            if let Some(n) = o.get("maxChars").and_then(Value::as_u64) {
+                c.max_chars = u32::try_from(n.clamp(8, 200)).unwrap_or(32);
+            }
+            if let Some(n) = o.get("lines").and_then(Value::as_u64) {
+                c.lines = u32::try_from(n.clamp(1, 2)).unwrap_or(1);
+            }
+            CaptionsChoice::Slot(c)
+        }
+        Some(v) => return Err(bad(CMD, format!("`captions` is true, false or {{\"source\": [slot ids], \"maxChars\", \"lines\"}}, not {v}"))),
+    };
+    let variants: Vec<String> = match p.get("variants") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(a)) if a.len() <= 16 => a.iter().filter_map(Value::as_str).map(|v| v.chars().take(16).collect()).collect(),
+        Some(_) => return Err(bad(CMD, "`variants` is a list of layouts such as [\"16:9\", \"9:16\", \"1:1\", \"4:5\"]")),
+    };
+    let max = Tick(filmcraft_templates::manifest::MAX_TEMPLATE_TICKS);
+    let poster = match (p.get("poster").and_then(Value::as_i64), crate::commands::f64_p(p, "posterSeconds")) {
+        (Some(t), _) if (0..=max.0).contains(&t) => Some(Tick(t)),
+        (Some(_), _) => return Err(bad(CMD, "`poster` is ticks from the start of the template")),
+        (None, Some(x)) if x.is_finite() && (0.0..=max.seconds()).contains(&x) => Some(Tick::from_seconds_f64(x)),
+        (None, Some(_)) => return Err(bad(CMD, "`posterSeconds` is seconds from the start of the template")),
+        (None, None) => None,
+    };
+    let look = match p.get("look") {
+        None | Some(Value::Null) => None,
+        Some(v) => match (v.get("lumetri").and_then(Value::as_str), v.get("preset").and_then(Value::as_str)) {
+            (Some(n), None) if n.len() <= 200 => Some(Look::Lumetri(n.to_string())),
+            (None, Some(n)) if n.len() <= 200 => Some(Look::Preset(n.to_string())),
+            _ => return Err(bad(CMD, "`look` is {\"lumetri\": name} or {\"preset\": name}")),
+        },
+    };
+    let tags: Vec<String> = match p.get("tags") {
+        Some(Value::Array(a)) => a.iter().take(32).filter_map(Value::as_str).map(|t| t.chars().take(64).collect()).collect(),
+        _ => Vec::new(),
+    };
+    Ok(SaveOptions {
+        id: text("id", 128),
+        name: name.to_string(),
+        description: text("description", 4000),
+        author: text("author", 200),
+        license: str_p(p, "license").filter(|l| !l.trim().is_empty()).unwrap_or("MIT OR Apache-2.0").chars().take(200).collect(),
+        category: text("category", 200),
+        version: text("version", 32),
+        tags,
+        base,
+        slots,
+        captions,
+        variants,
+        poster,
+        look,
+        export_preset: str_p(p, "exportPreset").map(|e| e.chars().take(200).collect()),
+        bundle: Vec::new(),
+    })
+}
+
+/// The user's own media of a sequence that no slot uses: (item, file path).
+pub fn own_media(s: &Session, q: &filmcraft_project::Sequence) -> Vec<(ItemId, String)> {
+    let mut out: Vec<(ItemId, String)> = Vec::new();
+    for t in q.video_tracks.iter().chain(q.audio_tracks.iter()) {
+        for c in &t.items {
+            if c.markers.iter().any(|m| parse_slot_marker(&m.name).is_some()) || out.iter().any(|(i, _)| *i == c.item) {
+                continue;
+            }
+            let Some(it) = s.project.item(c.item) else { continue };
+            if it.metadata.contains_key(filmcraft_templates::ELEMENT_METADATA) {
+                continue;
+            }
+            if let Some(m) = it.as_media()
+                && let filmcraft_project::MediaRef::File { path } = &m.media
+            {
+                out.push((c.item, path.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// The files `bundle` names, read with their attribution (the sidecar's, else the author's own
+/// work under the template's licence).
+fn bundle_files(
+    s: &Session,
+    p: &Value,
+    q: &filmcraft_project::Sequence,
+    opts: &filmcraft_templates::save::SaveOptions,
+) -> Result<Vec<filmcraft_templates::save::BundleFile>> {
+    const CMD: &str = "template.save";
+    let own = own_media(s, q);
+    let wanted: Vec<(ItemId, String)> = match p.get("bundle") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => return Ok(Vec::new()),
+        Some(Value::Bool(true)) => own,
+        Some(Value::Array(a)) => {
+            let mut v = Vec::new();
+            for x in a.iter().take(filmcraft_templates::manifest::MAX_ASSETS + 1) {
+                let id = x.as_u64().map(ItemId).ok_or_else(|| bad(CMD, "`bundle` is true or a list of item ids"))?;
+                let f = own
+                    .iter()
+                    .find(|(i, _)| *i == id)
+                    .cloned()
+                    .ok_or_else(|| bad(CMD, format!("item {} is not your own media in this sequence (outside the slots)", id.0)))?;
+                v.push(f);
+            }
+            v
+        }
+        Some(_) => return Err(bad(CMD, "`bundle` is true or a list of item ids")),
+    };
+    if wanted.len() > filmcraft_templates::manifest::MAX_ASSETS {
+        return Err(bad(CMD, format!("at most {} bundled files", filmcraft_templates::manifest::MAX_ASSETS)));
+    }
+    let mut total: u64 = 0;
+    let mut out = Vec::new();
+    for (item, path) in wanted {
+        let size = s.services.file_size(&path).map_err(|e| bad(CMD, format!("bundling {path}: {e}")))?;
+        total = total.saturating_add(size);
+        if size > MAX_BUNDLE_FILE || total > MAX_BUNDLE_TOTAL {
+            return Err(bad(CMD, format!("bundling {path}: at most {MAX_BUNDLE_FILE} bytes a file and {MAX_BUNDLE_TOTAL} in all")));
+        }
+        let bytes = s.services.read_file(&path).map_err(|e| bad(CMD, format!("bundling {path}: {e}")))?;
+        let file = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "asset".into());
+        let item_name = s.project.item(item).map(|i| i.name.clone()).unwrap_or_else(|| file.clone());
+        let sidecar =
+            s.services.read_file(&format!("{path}.attribution")).ok().filter(|b| b.len() <= 64 * 1024).map(|b| read_attribution(&String::from_utf8_lossy(&b)));
+        let author = if opts.author.trim().is_empty() { "the template's author".to_string() } else { opts.author.clone() };
+        let (title, author, source, license) = match sidecar {
+            Some(a) if a.contains_key("license") => (
+                a.get("title").cloned().unwrap_or(item_name),
+                a.get("author").cloned().unwrap_or(author),
+                a.get("source").cloned().unwrap_or_else(|| "original work".into()),
+                a.get("license").cloned().unwrap_or_default(),
+            ),
+            // the author's own file: theirs, under the template's licence
+            _ => (item_name, author, "original work".to_string(), opts.license.clone()),
+        };
+        if filmcraft_templates::manifest::licence_refused(&license) {
+            return Err(bad(CMD, format!("{path} is licensed `{license}`, which a template cannot bundle (no NC / ND or proprietary files)")));
+        }
+        out.push(filmcraft_templates::save::BundleFile { item, bytes, name: file, title, author, source, license });
+    }
+    Ok(out)
+}
+
 fn save(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "template.save";
-    let path = str_p(p, "path").map(crate::export_tools::expand_home).ok_or_else(|| bad(CMD, "need `path` (a .fcvideo-template folder or a .zip)"))?;
     let seq_id = crate::commands::item_p(p, "sequence").or(s.state.active_sequence).ok_or_else(|| bad(CMD, "no sequence: open one or pass `sequence`"))?;
-    let q = s.project.sequence(seq_id).ok_or_else(|| bad(CMD, "no such sequence"))?;
+    let q = s.project.sequence(seq_id).ok_or_else(|| bad(CMD, "no such sequence"))?.clone();
     let seq_name = s.project.item(seq_id).map(|i| i.name.clone()).unwrap_or_default();
     let name = str_p(p, "name").map(str::to_string).filter(|n| !n.trim().is_empty()).unwrap_or(seq_name);
     if name.len() > 256 {
         return Err(bad(CMD, "`name` is longer than 256 bytes"));
     }
+    let zip_default = bool_p(p, "zip").unwrap_or(false);
+    // where: the path given, else the user templates folder
+    let path = match str_p(p, "path") {
+        Some(x) if x.trim().is_empty() || x.len() > 4096 || x.contains('\0') => return Err(bad(CMD, "`path` must be a .fcvideo-template folder or a .zip")),
+        Some(x) => crate::export_tools::expand_home(x),
+        None => {
+            let dir = user_dir(s).ok_or_else(|| bad(CMD, "need `path` (a .fcvideo-template folder or a .zip): there is no data directory"))?;
+            let stem = filmcraft_templates::slug(&name);
+            let ext = if zip_default { "zip".to_string() } else { EXTENSION.to_string() };
+            let mut out = dir.join(format!("{stem}.{ext}"));
+            let mut n = 2;
+            while (s.services.file_size(&out.to_string_lossy()).is_ok() || is_dir(s, &out.to_string_lossy()))
+                && !bool_p(p, "overwrite").unwrap_or(false)
+                && n < 1000
+            {
+                out = dir.join(format!("{stem}-{n}.{ext}"));
+                n += 1;
+            }
+            out.to_string_lossy().to_string()
+        }
+    };
+    let mut warnings = Vec::new();
+    let mut opts = save_options(s, p, &q, seq_id, &name, &mut warnings)?;
+    opts.bundle = bundle_files(s, p, &q, &opts)?;
     // the music's beats on the timeline, when a music slot is flagged
     let mut grid = None;
     let music = q
@@ -961,15 +1235,8 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
             grid = Some(filmcraft_templates::BeatGrid { bpm, beats: on_timeline, mode: Default::default() });
         }
     }
-    let opts = filmcraft_templates::save::SaveOptions {
-        id: str_p(p, "id").unwrap_or("").to_string(),
-        name: name.clone(),
-        description: str_p(p, "description").unwrap_or("").chars().take(4000).collect(),
-        author: str_p(p, "author").unwrap_or("").chars().take(200).collect(),
-        license: str_p(p, "license").unwrap_or("MIT OR Apache-2.0").chars().take(200).collect(),
-        category: str_p(p, "category").unwrap_or("My Templates").chars().take(200).collect(),
-    };
     let saved = filmcraft_templates::save::save(&s.project, seq_id, &opts, grid).map_err(|e| bad(CMD, e.to_string()))?;
+    warnings.extend(saved.warnings.iter().cloned());
     let overwrite = bool_p(p, "overwrite").unwrap_or(false);
     let zip = path.to_ascii_lowercase().ends_with(".zip");
     let out = if zip || path.to_ascii_lowercase().ends_with(&format!(".{EXTENSION}")) { path.clone() } else { format!("{path}.{EXTENSION}") };
@@ -978,6 +1245,11 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
     }
     if zip {
         let bytes = saved.package.to_zip().map_err(|e| bad(CMD, e.to_string()))?;
+        if !cfg!(target_arch = "wasm32")
+            && let Some(parent) = std::path::Path::new(&out).parent().filter(|d| !d.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(|e| EngineError::Other(format!("{}: {e}", parent.display())))?;
+        }
         s.services.write_file(&out, &bytes).map_err(|e| EngineError::Other(format!("{out}: {e}")))?;
     } else {
         for (rel, bytes) in saved.package.files() {
@@ -990,8 +1262,17 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
             s.services.write_file(&f, &bytes).map_err(|e| EngineError::Other(format!("{f}: {e}")))?;
         }
     }
-    let e = Entry { package: saved.package, source: "file", path: Some(out.clone()), asset_dir: None };
-    Ok(json!({"path": out, "template": summary(&e), "warnings": saved.warnings}))
+    bump_library();
+    let in_library = user_dir(s).is_some_and(|d| std::path::Path::new(&out).parent() == Some(d.as_path()));
+    let assets: Vec<Value> = saved
+        .package
+        .manifest
+        .assets
+        .iter()
+        .map(|a| json!({"path": a.path, "sha256": a.sha256, "title": a.title, "author": a.author, "source": a.source, "license": a.license}))
+        .collect();
+    let e = Entry { package: saved.package, source: if in_library { "user" } else { "file" }, path: Some(out.clone()), asset_dir: None };
+    Ok(json!({"path": out, "inLibrary": in_library, "template": summary(&e), "assets": assets, "warnings": warnings}))
 }
 
 fn mark_slot(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1014,19 +1295,43 @@ fn mark_slot(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(CMD, "select clips or pass `clips`"));
     }
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    // the clips of the selection that fit the kind (a linked selection holds both halves of a
+    // clip: a picture slot takes the picture, a music slot the sound)
+    let mut targets: Vec<ClipId> = Vec::new();
+    let mut refused: Option<String> = None;
     for c in &clips {
         let (tid, it) = seq.find_item(*c).ok_or_else(|| bad(CMD, format!("no clip {} in the active sequence", c.0)))?;
         let track_kind = seq.track(tid).map(|t| t.kind).unwrap_or_default();
-        match kind {
+        let why = match kind {
             Some(SlotKind::Text) if !matches!(s.project.item(it.item).map(|i| &i.kind), Some(filmcraft_project::ItemKind::Graphic { .. })) => {
-                return Err(bad(CMD, format!("“{}” is not a graphic: text slots are graphic clips with a text layer", it.name)));
+                Some(format!("“{}” is not a graphic: text slots are graphic clips with a text layer", it.name))
             }
-            Some(SlotKind::Music) if track_kind != TrackKind::Audio => return Err(bad(CMD, format!("“{}” is not on an audio track", it.name))),
-            Some(k) if k.is_visual() && track_kind != TrackKind::Video => return Err(bad(CMD, format!("“{}” is not on a video track", it.name))),
-            _ => {}
+            Some(SlotKind::Music) if track_kind != TrackKind::Audio => Some(format!("“{}” is not on an audio track", it.name)),
+            Some(k) if k.is_visual() && track_kind != TrackKind::Video => Some(format!("“{}” is not on a video track", it.name)),
+            _ => None,
+        };
+        match why {
+            None => targets.push(*c),
+            Some(w) => {
+                refused.get_or_insert(w);
+            }
         }
     }
-    let n = s.edit_sequence(if clear { "Clear Template Slot" } else { "Mark Template Slot" }, |q, ctx, _| {
+    let fitted = targets.len();
+    // a picture slot's clips bring their linked sound along, as an applied template's do
+    if kind.is_some_and(SlotKind::is_visual) && !clear {
+        let links: Vec<u64> = targets.iter().filter_map(|c| seq.find_item(*c).and_then(|(_, it)| it.link)).collect();
+        for it in seq.audio_tracks.iter().flat_map(|t| t.items.iter()) {
+            if it.link.is_some_and(|l| links.contains(&l)) && !targets.contains(&it.id) {
+                targets.push(it.id);
+            }
+        }
+    }
+    if targets.is_empty() {
+        return Err(bad(CMD, refused.unwrap_or_else(|| "no clip fits".into())));
+    }
+    let clips = targets;
+    let n: usize = s.edit_sequence(if clear { "Clear Template Slot" } else { "Mark Template Slot" }, |q, ctx, _| {
         let mut n = 0;
         for c in &clips {
             if let Some((_, it)) = q.find_item_mut(*c) {
@@ -1047,5 +1352,6 @@ fn mark_slot(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(n)
     })?;
-    Ok(json!({"clips": n, "kind": kind.map(|k| k.id()), "slot": if clear { Value::Null } else { json!(slot) }}))
+    let linked = n.saturating_sub(fitted);
+    Ok(json!({"clips": n - linked, "linked": linked, "kind": kind.map(|k| k.id()), "slot": if clear { Value::Null } else { json!(slot) }}))
 }

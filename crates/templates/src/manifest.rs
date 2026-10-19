@@ -1085,6 +1085,28 @@ fn read_caption_style(v: &Value, path: &str, is: &mut Issues) -> Option<CaptionS
     ok.then_some(st)
 }
 
+/// An author's edit of one slot of kind `kind` (`template.save`'s `slots`): the slot fields that
+/// are not about placements — `name`, `prompt`, `order`, `minCount`, `beatSync`, `fit`,
+/// `constraints`, `default` — read and checked like the manifest's; unknown fields are errors.
+pub fn read_slot_edit(v: &Value, kind: SlotKind, path: &str) -> Result<crate::save::SlotEdit, TemplateError> {
+    let mut is = Issues::default();
+    let Some(mut o) = Obj::of(v, path, &mut is) else { return Err(TemplateError::Invalid(is.0)) };
+    let name = o.string(&mut is, "name", MAX_SHORT, false);
+    let prompt = o.string(&mut is, "prompt", MAX_LONG, false);
+    let order = o.u32(&mut is, "order", 0, 10_000, false);
+    let min_count = o.u32(&mut is, "minCount", 0, MAX_COUNT, false);
+    let beat_sync = o.bool(&mut is, "beatSync");
+    let fit = o.object(&mut is, "fit", false).map(|f| read_fit(Some(f), kind, &mut is));
+    let constraints = o.object(&mut is, "constraints", false).map(|c| read_constraints(Some(c), kind, &mut is));
+    let default = o.object(&mut is, "default", false).and_then(|d| read_default(Some(d), kind, &mut is));
+    o.finish(&mut is);
+    if name.as_deref().is_some_and(|n| n.trim().is_empty()) {
+        is.push(format!("{path}.name"), "is empty");
+    }
+    is.into_result()?;
+    Ok(crate::save::SlotEdit { name, prompt, order, min_count, beat_sync, fit, constraints, default })
+}
+
 /// Read and check a manifest. All problems are reported at once, each with its field.
 pub fn parse(bytes: &[u8]) -> Result<Manifest, TemplateError> {
     if crate::zip::is_zip(bytes) {

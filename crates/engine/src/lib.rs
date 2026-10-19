@@ -70,6 +70,7 @@ pub mod transcript;
 pub mod transition_tools;
 pub mod trim;
 pub mod video_template_frames;
+pub mod video_template_share;
 pub mod video_templates;
 pub mod voice_clone;
 pub mod voiceover;
@@ -487,6 +488,8 @@ pub struct Session {
     /// AutoCut showcases (`autocut.*`): the host that runs their jobs (None = not available),
     /// the command port the jobs edit through, and what they made.
     pub autocut: autocut::AutoCut,
+    /// Sharing video templates (`template.install {url}`): the host's fetcher (None: links are not installed).
+    pub sharing: video_template_share::Sharing,
     /// The Events panel log: failed commands, job results, auto-save errors, messages.
     pub log: panels::EventLog,
     /// Media Browser navigation (directory, back / forward history, selected files).
@@ -597,6 +600,7 @@ impl Session {
             instagram: Default::default(),
             publish: Default::default(),
             autocut: Default::default(),
+            sharing: Default::default(),
             log: Default::default(),
             browser: Default::default(),
             exec_depth: 0,
@@ -1417,6 +1421,8 @@ mod trim_tests;
 mod vfx_tests;
 #[cfg(test)]
 mod video_template_frames_tests;
+#[cfg(test)]
+mod video_template_share_tests;
 #[cfg(test)]
 mod video_templates_tests;
 #[cfg(test)]

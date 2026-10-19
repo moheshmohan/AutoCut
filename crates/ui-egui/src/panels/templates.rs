@@ -14,6 +14,17 @@
 //! `templates.slot.<slot>.add`, `templates.slot.<slot>.option.<item id>`,
 //! `templates.slot.<slot>.<i>.remove`, `templates.slot.<slot>.text.<i>`, `templates.name`,
 //! `templates.preview`, `templates.previewFrame.<k>`, `templates.build`, `templates.openTimeline`.
+//!
+//! Authoring and sharing (A3): Save as Template… (`templates.saveAs`, also Sequence ▸ Save as Video
+//! Template…) opens a form — `templates.save.name` / `.description` / `.author` / `.license` /
+//! `.category`, `templates.save.slotId` and `templates.save.mark.<kind>` / `.mark.clear` (flag the
+//! selected clips), `templates.save.slot.<id>.name`, `templates.save.captions`,
+//! `templates.save.variant.<layout>`, `templates.save.posterOn` / `.poster`,
+//! `templates.save.bundle.<item>`, `templates.save.zip`, `templates.save.cancel` / `.close` /
+//! `.go` — that writes into the user templates folder. `templates.install.path` and
+//! `templates.install.go` install a `.zip` or an https link. An open template's Share section:
+//! `templates.share.exportPath` / `.export`, `templates.share.otioPath` / `.otio`,
+//! `templates.share.link` and its QR code `templates.share.qr`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -23,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use filmcraft_engine::video_template_frames::{self as frames, Candidate, THUMB_SIDE};
+use filmcraft_engine::video_template_share as vts;
 use filmcraft_engine::video_templates as vt;
 use filmcraft_templates::manifest::{Manifest, SlotKind};
 
@@ -78,6 +90,84 @@ pub struct TemplatesDraft {
     pub name: String,
     /// The sequence the last Build made.
     pub built: Option<u64>,
+    /// The Save as Template form, open while set.
+    pub save: Option<SaveDraft>,
+    /// Install: a `.zip` package's path or an https link to one.
+    pub install: String,
+    /// The install-from-a-link job running.
+    pub install_job: Option<u64>,
+    /// Share (the template open): where Export .zip writes (a folder or a `.zip`).
+    pub export_path: String,
+    /// Share: where Export OpenTimelineIO writes (`.otio`).
+    pub otio_path: String,
+    /// Share: the link the package will be downloaded from, shown as a QR code.
+    pub link: String,
+}
+
+/// The Save as Template form (UI state): `template.save`'s parameters for the active sequence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SaveDraft {
+    pub name: String,
+    pub description: String,
+    pub author: String,
+    pub license: String,
+    pub category: String,
+    /// The slot id the Mark buttons flag the selected clips with (empty: the kind's own).
+    pub slot: String,
+    /// Display names of the slots, by slot id.
+    pub slot_names: BTreeMap<String, String>,
+    /// A captions slot (of the video slots with sound).
+    pub captions: bool,
+    /// The layouts besides the sequence's own.
+    pub variants: Vec<String>,
+    /// Where the thumbnail is taken, seconds (none: the template's own choice).
+    pub poster_seconds: Option<f64>,
+    /// Media items of the user's (no slot) to bundle with their attribution.
+    pub bundle: Vec<u64>,
+    /// Write one `.zip` instead of a folder.
+    pub zip: bool,
+}
+
+impl Default for SaveDraft {
+    fn default() -> Self {
+        SaveDraft {
+            name: String::new(),
+            description: String::new(),
+            author: String::new(),
+            license: "MIT OR Apache-2.0".into(),
+            category: "My Templates".into(),
+            slot: String::new(),
+            slot_names: BTreeMap::new(),
+            captions: false,
+            variants: vec!["9:16".into(), "1:1".into(), "4:5".into()],
+            poster_seconds: None,
+            bundle: Vec::new(),
+            zip: false,
+        }
+    }
+}
+
+impl SaveDraft {
+    /// `template.save`'s parameters (into the user templates folder).
+    pub fn params(&self) -> Value {
+        let mut p = json!({
+            "name": self.name.trim(), "description": self.description, "author": self.author.trim(),
+            "license": self.license.trim(), "category": self.category.trim(), "variants": self.variants,
+            "captions": self.captions, "zip": self.zip,
+        });
+        if !self.slot_names.is_empty() {
+            p["slots"] =
+                Value::Object(self.slot_names.iter().filter(|(_, n)| !n.trim().is_empty()).map(|(k, n)| (k.clone(), json!({"name": n.trim()}))).collect());
+        }
+        if let Some(x) = self.poster_seconds.filter(|x| x.is_finite() && *x >= 0.0) {
+            p["posterSeconds"] = json!(x);
+        }
+        if !self.bundle.is_empty() {
+            p["bundle"] = json!(self.bundle);
+        }
+        p
+    }
 }
 
 impl TemplatesDraft {
@@ -100,6 +190,30 @@ pub fn patch(app: &mut FilmcraftApp, patch: &Value) -> Result<(), String> {
     let mut cur = serde_json::to_value(&app.ui.templates).map_err(|e| e.to_string())?;
     crate::control::merge(&mut cur, patch);
     let mut d: TemplatesDraft = serde_json::from_value(cur).map_err(|e| format!("bad `templates`: {e}"))?;
+    let cap = |s: &mut String, n: usize| {
+        if s.chars().count() > n {
+            *s = s.chars().take(n).collect();
+        }
+    };
+    for s in [&mut d.install, &mut d.export_path, &mut d.otio_path, &mut d.link] {
+        cap(s, 4096);
+    }
+    if let Some(sd) = d.save.as_mut() {
+        for (s, n) in
+            [(&mut sd.name, 200), (&mut sd.description, 4000), (&mut sd.author, 200), (&mut sd.license, 200), (&mut sd.category, 200), (&mut sd.slot, 64)]
+        {
+            cap(s, n);
+        }
+        sd.variants.truncate(8);
+        sd.bundle.truncate(256);
+        if sd.slot_names.len() > 64 {
+            sd.slot_names = sd.slot_names.iter().take(64).map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+        for v in sd.slot_names.values_mut() {
+            cap(v, 200);
+        }
+        sd.poster_seconds = sd.poster_seconds.filter(|x| x.is_finite() && *x >= 0.0 && *x <= 3600.0);
+    }
     for v in d.fills.values_mut() {
         v.truncate(MAX_VALUES);
         for x in v.iter_mut() {
@@ -144,6 +258,8 @@ struct Library {
     cards: Arc<Vec<Card>>,
     invalid: usize,
     read: bool,
+    /// The user folder's revision when it was read ([`vt::library_revision`]).
+    revision: u64,
 }
 
 /// Textures of thumbnails (`id|variant`) and of the current preview.
@@ -195,7 +311,7 @@ fn read_library(app: &FilmcraftApp) -> Library {
             }
         })
         .collect();
-    Library { cards: Arc::new(cards), invalid: invalid.len(), read: true }
+    Library { cards: Arc::new(cards), invalid: invalid.len(), read: true, revision: vt::library_revision() }
 }
 
 /// The cards the filters let through.
@@ -271,6 +387,322 @@ enum Action {
     Preview,
     Build,
     OpenTimeline,
+    OpenSave,
+    CancelSave,
+    Save,
+    /// Flag the selected clips as a slot of this kind (None: clear the flag).
+    Mark(Option<SlotKind>),
+    Install,
+    Export,
+    ExportOtio,
+}
+
+/// The kinds the Mark buttons flag clips with: (kind, label).
+const MARK_KINDS: [(SlotKind, &str); 5] =
+    [(SlotKind::Video, "Video"), (SlotKind::Photo, "Photo"), (SlotKind::Logo, "Logo"), (SlotKind::Music, "Music"), (SlotKind::Text, "Text")];
+
+/// The layouts a saved template can have besides the sequence's own.
+const LAYOUTS: [&str; 4] = ["16:9", "9:16", "1:1", "4:5"];
+
+fn kind_label(k: SlotKind) -> &'static str {
+    match k {
+        SlotKind::Video => tl!("Video"),
+        SlotKind::Photo => tl!("Photo"),
+        SlotKind::Logo => tl!("Logo"),
+        SlotKind::Music => tl!("Music"),
+        SlotKind::Text => tl!("Text"),
+        SlotKind::Captions => tl!("Captions"),
+    }
+}
+
+/// The slots flagged on the active sequence's clips: id → (kind, clips).
+fn flagged(app: &FilmcraftApp) -> BTreeMap<String, (SlotKind, usize)> {
+    let mut out: BTreeMap<String, (SlotKind, usize)> = BTreeMap::new();
+    let Some(q) = app.session.active_sequence() else { return out };
+    for t in q.video_tracks.iter().chain(q.audio_tracks.iter()) {
+        for c in &t.items {
+            for f in c.markers.iter().filter_map(|m| filmcraft_templates::apply::parse_slot_marker(&m.name)) {
+                out.entry(f.slot).or_insert((f.kind, 0)).1 += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The Template Slot submenu of the Timeline's clip menu: flag the selected clips as a slot of a
+/// kind (`template.markSlot`), or clear the flag. Automation ids
+/// `timeline.clipMenu.templateSlot.<kind>` and `timeline.clipMenu.templateSlot.clear`.
+pub fn slot_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, any: bool) {
+    let mut run: Option<Value> = None;
+    ui.add_enabled_ui(any, |ui| {
+        let r = ui.menu_button(crate::i18n::t("Template Slot"), |ui| {
+            for (k, _) in MARK_KINDS {
+                let label = kind_label(k);
+                let r = ui.button(label);
+                app.auto.add(&format!("timeline.clipMenu.templateSlot.{}", k.id()), r.rect, label);
+                if r.clicked() {
+                    run = Some(json!({"kind": k.id()}));
+                    ui.close();
+                }
+            }
+            ui.separator();
+            let r = ui.button(tl!("Not a Slot"));
+            app.auto.add("timeline.clipMenu.templateSlot.clear", r.rect, tl!("Not a Slot"));
+            if r.clicked() {
+                run = Some(json!({"clear": true}));
+                ui.close();
+            }
+        });
+        app.auto.add_response("timeline.clipMenu.template.markSlot", &r.response, crate::i18n::t("Template Slot"));
+    });
+    if let Some(p) = run {
+        app.ui.status = match app.session.execute("template.markSlot", p) {
+            Ok(v) if v["slot"].is_null() => tlf!("{n} clips are no slot now", n = v["clips"]),
+            Ok(v) => tlf!("{n} clips are now slot “{slot}”", n = v["clips"], slot = v["slot"].as_str().unwrap_or_default()),
+            Err(e) => e.to_string(),
+        };
+    }
+}
+
+/// Sequence ▸ Save as Video Template…: the panel with the save form open.
+pub fn open_save(app: &mut FilmcraftApp) -> Result<Value, String> {
+    filmcraft_engine::find_command("template.save").map_or(Ok(()), |c| (c.enabled)(&app.session))?;
+    start_save(app);
+    app.show_panel(PanelKind::Templates);
+    Ok(json!({"panel": "Templates"}))
+}
+
+fn start_save(app: &mut FilmcraftApp) {
+    let name = app.session.state.active_sequence.and_then(|s| app.session.project.item(s)).map(|i| i.name.clone()).unwrap_or_default();
+    let mut sd = app.ui.templates.save.take().unwrap_or_default();
+    if sd.name.trim().is_empty() {
+        sd.name = name;
+    }
+    app.ui.templates.save = Some(sd);
+}
+
+/// A finished install-from-a-link job: say so and read the folder again.
+fn poll_install(app: &mut FilmcraftApp, ctx: &egui::Context) {
+    let Some(id) = app.ui.templates.install_job else { return };
+    let Some(j) = app.session.jobs.iter().find(|j| j.id == id).map(|j| j.to_json()) else {
+        app.ui.templates.install_job = None;
+        return;
+    };
+    if j["finished"] != json!(true) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        return;
+    }
+    app.ui.templates.install_job = None;
+    app.ui.status = match j["result"]["error"].as_str() {
+        Some(e) => tlf!("Install: {e}", e),
+        None => {
+            app.ui.templates.install.clear();
+            tlf!("Installed {path}", path = j["result"]["path"].as_str().unwrap_or_default())
+        }
+    };
+}
+
+/// The QR code of `link` as a texture (cached by the link).
+fn qr_texture(ctx: &egui::Context, link: &str) -> Option<egui::TextureHandle> {
+    #[derive(Clone, Default)]
+    struct Qr(String, Option<egui::TextureHandle>);
+    let id = egui::Id::new("templates-panel-qr");
+    if let Some(Qr(k, t)) = ctx.data(|d| d.get_temp::<Qr>(id))
+        && k == link
+    {
+        return t;
+    }
+    let tex = vts::qr_code(link, filmcraft_templates::qr::EcLevel::M).ok().map(|q| {
+        let (w, h, px) = q.to_rgba(4, 4);
+        ctx.load_texture("template-share-qr", egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px), egui::TextureOptions::NEAREST)
+    });
+    ctx.data_mut(|d| d.insert_temp(id, Qr(link.to_string(), tex.clone())));
+    tex
+}
+
+/// The Save as Template form: what the template is called and who made it, its placeholders
+/// (mark the selected clips), a captions slot, its layouts, the poster frame, the user's own
+/// files to bundle; Save writes it into the user templates folder.
+fn save_form(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, body: Rect, actions: &mut Vec<Action>) {
+    let t = app.tokens;
+    let slots = flagged(app);
+    let own: Vec<(u64, String)> = app
+        .session
+        .active_sequence()
+        .map(|q| {
+            vt::own_media(&app.session, q).into_iter().map(|(i, _)| (i.0, app.session.project.item(i).map(|x| x.name.clone()).unwrap_or_default())).collect()
+        })
+        .unwrap_or_default();
+    let selected = app.session.state.selection.len();
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("templates-save"));
+    let ui = &mut child;
+    egui::ScrollArea::vertical().id_salt("templates-save-scroll").auto_shrink([false, false]).show(ui, |ui| {
+        ui.set_max_width(ui.available_width() - 6.0);
+        let w = ui.available_width();
+        ui.horizontal(|ui| {
+            let b = ui.small_button(tl!("‹ All templates"));
+            add(&mut app.auto, ui, "templates.save.cancel", b.rect, tl!("All templates"));
+            if b.clicked() {
+                actions.push(Action::CancelSave);
+            }
+            ui.label(egui::RichText::new(tl!("Save as Template")).color(t.text).size(14.0).strong());
+        });
+        small(ui, &t, tl!("Your clips become placeholders: the template never carries your footage, photos or words."));
+        ui.add_space(6.0);
+        let Some(sd) = app.ui.templates.save.as_mut() else { return };
+        for (id, label, field, max) in [
+            ("templates.save.name", tl!("Name"), &mut sd.name, 200),
+            ("templates.save.description", tl!("Description"), &mut sd.description, 4000),
+            ("templates.save.author", tl!("Author"), &mut sd.author, 200),
+            ("templates.save.license", tl!("Licence (SPDX)"), &mut sd.license, 200),
+            ("templates.save.category", tl!("Category"), &mut sd.category, 200),
+        ] {
+            ui.horizontal(|ui| {
+                ui.add_sized(vec2(90.0, 18.0), egui::Label::new(egui::RichText::new(label).color(t.text_dim).size(11.5)));
+                let r = ui.add(egui::TextEdit::singleline(field).desired_width((w - 100.0).max(60.0)).char_limit(max));
+                add(&mut app.auto, ui, id, r.rect, label);
+            });
+        }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(tl!("Placeholders")).color(t.text).size(12.0).strong());
+        small(ui, &t, &tlf!("Mark the selected clips ({n}) as a slot:", n = selected));
+        ui.horizontal_wrapped(|ui| {
+            let r = ui.add(egui::TextEdit::singleline(&mut sd.slot).hint_text(tl!("slot id (optional)")).desired_width(120.0).char_limit(64));
+            add(&mut app.auto, ui, "templates.save.slotId", r.rect, tl!("slot id (optional)"));
+            for (k, _) in MARK_KINDS {
+                let b = ui.add_enabled(selected > 0, egui::Button::new(kind_label(k)).small());
+                add(&mut app.auto, ui, &format!("templates.save.mark.{}", k.id()), b.rect, kind_label(k));
+                if b.clicked() {
+                    actions.push(Action::Mark(Some(k)));
+                }
+            }
+            let b = ui.add_enabled(selected > 0, egui::Button::new(tl!("Not a Slot")).small());
+            add(&mut app.auto, ui, "templates.save.mark.clear", b.rect, tl!("Not a Slot"));
+            if b.clicked() {
+                actions.push(Action::Mark(None));
+            }
+        });
+        if slots.is_empty() {
+            small(ui, &t, tl!("No clip is a slot yet: select clips in the Timeline and mark them."));
+        }
+        for (id, (kind, n)) in &slots {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{} · {id} · {}", kind_label(*kind), tlf!("{n} clips", n))).color(t.text).size(11.5));
+                let name = sd.slot_names.entry(id.clone()).or_default();
+                let r = ui.add(egui::TextEdit::singleline(name).hint_text(tl!("name shown when filling")).desired_width((w - 220.0).max(60.0)).char_limit(200));
+                add(&mut app.auto, ui, &format!("templates.save.slot.{id}.name"), r.rect, id);
+            });
+        }
+        ui.add_space(8.0);
+        let c = ui.checkbox(&mut sd.captions, tl!("Captions slot (transcribed from the video slots with sound)"));
+        add(&mut app.auto, ui, "templates.save.captions", c.rect, tl!("Captions slot"));
+        ui.horizontal_wrapped(|ui| {
+            small(ui, &t, tl!("Layouts:"));
+            for l in LAYOUTS {
+                let mut on = sd.variants.iter().any(|v| v == l);
+                let c = ui.checkbox(&mut on, l);
+                add(&mut app.auto, ui, &format!("templates.save.variant.{l}"), c.rect, l);
+                if c.changed() {
+                    sd.variants.retain(|v| v != l);
+                    if on {
+                        sd.variants.push(l.to_string());
+                    }
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut has = sd.poster_seconds.is_some();
+            let c = ui.checkbox(&mut has, tl!("Poster frame at"));
+            add(&mut app.auto, ui, "templates.save.posterOn", c.rect, tl!("Poster frame at"));
+            if c.changed() {
+                sd.poster_seconds = has.then_some(0.0);
+            }
+            if let Some(x) = sd.poster_seconds.as_mut() {
+                let r = ui.add(egui::DragValue::new(x).range(0.0..=3600.0).speed(0.1).suffix(" s"));
+                add(&mut app.auto, ui, "templates.save.poster", r.rect, tl!("Poster frame at"));
+            }
+        });
+        if !own.is_empty() {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(tl!("Your own files outside the slots")).color(t.text).size(12.0).strong());
+            small(ui, &t, tl!("Left out unless you bundle them; a bundled file is marked as yours, under the template's licence."));
+            for (item, name) in &own {
+                let mut on = sd.bundle.contains(item);
+                let c = ui.checkbox(&mut on, tlf!("Bundle “{name}”", name));
+                add(&mut app.auto, ui, &format!("templates.save.bundle.{item}"), c.rect, name);
+                if c.changed() {
+                    sd.bundle.retain(|x| x != item);
+                    if on {
+                        sd.bundle.push(*item);
+                    }
+                }
+            }
+        }
+        ui.add_space(6.0);
+        let c = ui.checkbox(&mut sd.zip, tl!("Save as one .zip file"));
+        add(&mut app.auto, ui, "templates.save.zip", c.rect, tl!("Save as one .zip file"));
+    });
+    // footer: Cancel | Save
+    let fy = rect.max.y - FOOTER_H + 8.0;
+    let half = (rect.width() - PAD * 2.0 - 8.0) / 2.0;
+    let ready = app.ui.templates.save.as_ref().is_some_and(|s| !s.name.trim().is_empty()) && app.session.state.active_sequence.is_some();
+    for (k, (bid, text)) in [("templates.save.close", tl!("Cancel")), ("templates.save.go", tl!("Save Template"))].into_iter().enumerate() {
+        let r = Rect::from_min_size(pos2(rect.min.x + PAD + k as f32 * (half + 8.0), fy), vec2(half, 28.0));
+        let primary = k == 1;
+        let b = ui.put(
+            r,
+            egui::Button::new(egui::RichText::new(text).strong().color(if primary { egui::Color32::WHITE } else { t.text })).fill(if primary {
+                t.accent
+            } else {
+                t.field_bg
+            }),
+        );
+        app.auto.add(bid, r, text);
+        if b.clicked() && (!primary || ready) {
+            actions.push(if primary { Action::Save } else { Action::CancelSave });
+        }
+    }
+}
+
+/// The open template's Share section: one `.zip` to pass on, its timeline as OpenTimelineIO, and
+/// the QR code of the link it will be downloaded from.
+fn share_section(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &egui::Context, w: f32, actions: &mut Vec<Action>) {
+    let t = app.tokens;
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(tl!("Share")).color(t.text).size(12.0).strong());
+    small(ui, &t, tl!("Templates are plain files: pass on the .zip, or put it online and share its link."));
+    let d = &mut app.ui.templates;
+    for (field, hint, bid, fid, label, action) in [
+        (&mut d.export_path, tl!("Folder or .zip path"), "templates.share.export", "templates.share.exportPath", tl!("Export .zip"), Action::Export),
+        (&mut d.otio_path, tl!(".otio path"), "templates.share.otio", "templates.share.otioPath", tl!("Export OpenTimelineIO"), Action::ExportOtio),
+    ] {
+        ui.horizontal(|ui| {
+            let r = ui.add(egui::TextEdit::singleline(field).hint_text(hint).desired_width((w - 170.0).max(60.0)).char_limit(4096));
+            add(&mut app.auto, ui, fid, r.rect, hint);
+            let b = ui.add_enabled(!field.trim().is_empty(), egui::Button::new(label).small());
+            add(&mut app.auto, ui, bid, b.rect, label);
+            if b.clicked() {
+                actions.push(action);
+            }
+        });
+    }
+    let r = ui.add(egui::TextEdit::singleline(&mut d.link).hint_text(tl!("https:// link to the .zip, for a QR code")).desired_width(w - 10.0).char_limit(2048));
+    add(&mut app.auto, ui, "templates.share.link", r.rect, tl!("https:// link to the .zip, for a QR code"));
+    let link = d.link.trim().to_string();
+    if !link.is_empty() {
+        match vts::check_url(&link) {
+            Ok(()) => {
+                if let Some(tex) = qr_texture(ctx, &link) {
+                    let side = (w * 0.5).clamp(96.0, 220.0);
+                    let (r, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+                    ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    add(&mut app.auto, ui, "templates.share.qr", r, tl!("QR code of the install link"));
+                    small(ui, &t, tl!("Scan to download; open the file with Templates ▸ Install."));
+                }
+            }
+            Err(e) => small(ui, &t, &e),
+        }
+    }
 }
 
 /// Register widget `id` by the part of `r` the scroll area shows.
@@ -324,20 +756,58 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     ui.painter().rect_filled(rect, 0.0, t.panel_bg);
     let ctx = ui.ctx().clone();
     let mut lib = ctx.data(|d| d.get_temp::<Library>(lib_id())).unwrap_or_default();
-    if !lib.read {
+    if !lib.read || lib.revision != vt::library_revision() {
+        if lib.read {
+            // a template was saved or installed: its thumbnails and the open one are read anew
+            ctx.data_mut(|d| {
+                d.remove::<Textures>(tex_id());
+                d.remove::<Selected>(sel_id());
+            });
+        }
         lib = read_library(app);
         ctx.data_mut(|d| d.insert_temp(lib_id(), lib.clone()));
     }
+    poll_install(app, &ctx);
     let mut actions: Vec<Action> = Vec::new();
     let mut budget = THUMBS_PER_FRAME;
     let mut missing = false;
     let body = Rect::from_min_max(pos2(rect.min.x + PAD, rect.min.y + 8.0), pos2(rect.max.x - PAD, rect.max.y - FOOTER_H));
+    if app.ui.templates.save.is_some() {
+        save_form(app, ui, rect, body, &mut actions);
+        for a in actions {
+            run(app, &ctx, a);
+        }
+        return;
+    }
     match app.ui.templates.selected.clone() {
         None => {
             // the filters
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("templates-grid"));
             let ui = &mut child;
             let w = ui.available_width();
+            // authoring and sharing: save the open sequence, install a package
+            ui.horizontal(|ui| {
+                let has_seq = app.session.state.active_sequence.is_some();
+                let b = ui.add_enabled(has_seq, egui::Button::new(tl!("Save as Template…")));
+                add(&mut app.auto, ui, "templates.saveAs", b.rect, tl!("Save as Template…"));
+                if b.on_hover_text(tl!("Make a template of the open sequence: mark its placeholders, choose what travels with it")).clicked() {
+                    actions.push(Action::OpenSave);
+                }
+                let d = &mut app.ui.templates;
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut d.install)
+                        .hint_text(tl!("A .zip package or an https:// link"))
+                        .desired_width((w - 220.0).max(60.0))
+                        .char_limit(2048),
+                );
+                add(&mut app.auto, ui, "templates.install.path", r.rect, tl!("A .zip package or an https:// link"));
+                let ready = !d.install.trim().is_empty() && d.install_job.is_none();
+                let b = ui.add_enabled(ready, egui::Button::new(tl!("Install")));
+                add(&mut app.auto, ui, "templates.install.go", b.rect, tl!("Install"));
+                if b.on_hover_text(tl!("Check the package and add it to your templates; nothing in it is run")).clicked() {
+                    actions.push(Action::Install);
+                }
+            });
             ui.horizontal(|ui| {
                 let d = &mut app.ui.templates;
                 let r = ui.add(egui::TextEdit::singleline(&mut d.query).hint_text("Search templates").desired_width((w - 90.0).max(60.0)).char_limit(120));
@@ -635,6 +1105,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         }
                     });
                 }
+                share_section(app, ui, &ctx, w, &mut actions);
             });
             // footer: Preview | Build
             let fy = rect.max.y - FOOTER_H + 8.0;
@@ -740,6 +1211,75 @@ fn run(app: &mut FilmcraftApp, ctx: &egui::Context, a: Action) {
             }
         }
         Action::OpenTimeline => app.show_panel(PanelKind::Timeline),
+        Action::OpenSave => start_save(app),
+        Action::CancelSave => app.ui.templates.save = None,
+        Action::Mark(kind) => {
+            let slot = app.ui.templates.save.as_ref().map(|s| s.slot.trim().to_string()).unwrap_or_default();
+            let mut p = match kind {
+                Some(k) => json!({"kind": k.id()}),
+                None => json!({"clear": true}),
+            };
+            if kind.is_some() && !slot.is_empty() {
+                p["slot"] = json!(slot);
+            }
+            app.ui.status = match app.session.execute("template.markSlot", p) {
+                Ok(v) if v["slot"].is_null() => tlf!("{n} clips are no slot now", n = v["clips"]),
+                Ok(v) => tlf!("{n} clips are now slot “{slot}”", n = v["clips"], slot = v["slot"].as_str().unwrap_or_default()),
+                Err(e) => e.to_string(),
+            };
+        }
+        Action::Save => {
+            let Some(sd) = app.ui.templates.save.clone() else { return };
+            match app.session.execute("template.save", sd.params()) {
+                Ok(r) => {
+                    let name = r["template"]["name"].as_str().unwrap_or_default().to_string();
+                    let warn = r["warnings"].as_array().map_or(0, Vec::len);
+                    app.ui.status = if warn == 0 {
+                        tlf!("Saved “{name}” to your templates", name)
+                    } else {
+                        tlf!("Saved “{name}” to your templates ({n} notes: template.save lists them)", name, n = warn)
+                    };
+                    app.ui.templates.save = None;
+                    // open it: the user sees what was saved
+                    if let Some(id) = r["template"]["id"].as_str() {
+                        app.ui.templates.selected = Some(id.to_string());
+                        app.ui.templates.variant = r["template"]["defaultVariant"].as_str().unwrap_or_default().to_string();
+                        app.ui.templates.fills.clear();
+                        app.ui.templates.built = None;
+                    }
+                }
+                Err(e) => app.ui.status = tlf!("Save as Template: {e}", e),
+            }
+        }
+        Action::Install => {
+            let what = app.ui.templates.install.trim().to_string();
+            let p = if what.starts_with("https://") || what.starts_with("http://") { json!({"url": what}) } else { json!({"path": what}) };
+            match app.session.execute("template.install", p) {
+                Ok(r) if r["job"].is_u64() => {
+                    app.ui.templates.install_job = r["job"].as_u64();
+                    app.ui.status = tl!("Downloading the template…").into();
+                }
+                Ok(r) => {
+                    app.ui.templates.install.clear();
+                    app.ui.status = tlf!("Installed “{name}”", name = r["name"].as_str().unwrap_or_default());
+                }
+                Err(e) => app.ui.status = tlf!("Install: {e}", e),
+            }
+        }
+        Action::Export | Action::ExportOtio => {
+            let Some(id) = app.ui.templates.selected.clone() else { return };
+            let otio = matches!(a, Action::ExportOtio);
+            let d = &app.ui.templates;
+            let p = if otio {
+                json!({"template": id, "path": d.otio_path.trim(), "variant": d.variant})
+            } else {
+                json!({"template": id, "path": d.export_path.trim()})
+            };
+            match app.session.execute(if otio { "template.exportOtio" } else { "template.export" }, p) {
+                Ok(r) => app.ui.status = tlf!("Wrote {path}", path = r["path"].as_str().unwrap_or_default()),
+                Err(e) => app.ui.status = e.to_string(),
+            }
+        }
     }
 }
 

@@ -468,6 +468,8 @@ impl Backend {
         // showcase jobs with the Ollama models of the AUTOCUT_* environment, which can take
         // their clips from a Google Photos `album` (picked by the screen agent)
         s.autocut.host = Some(filmcraft_autocut::host::engine_host_with_albums(filmcraft_automation::photos::album_source()));
+        // `template.install {url}` (also over MCP)
+        s.sharing.fetcher = Some(filmcraft_automation::template_fetch::fetcher());
         if let Some(p) = a.opt("--project") {
             if let Err(e) = s.execute("file.open", json!({"path": p})) {
                 fail(e);
