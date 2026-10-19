@@ -126,6 +126,9 @@ SUBCOMMANDS
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
          [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social]
          [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
+         [--outro-logo logo.png] [--outro-channel C] [--outro-handle @h] [--outro-tagline T]
+         [--outro-cta S] [--outro-cta-done S] [--outro-terminal L] [--outro-seconds 12]
+         [--outro-background item[:from[:to]]]…
          [--export out.mp4 [--upload [--upload-album <title>]]
          [--upload-youtube [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P]
          [--youtube-tags a,b] [--youtube-description D]]] [--qa | --no-qa]
@@ -169,6 +172,21 @@ SUBCOMMANDS
                                 (audio.normalizeLoudness, -1 dBTP), --soundfont plays the bed on
                                 those instruments, --embed-captions embeds the narration's
                                 captions (CEA-608/708) in the export;
+                                a plan's shot may set \"from\"/\"to\" (its window, seconds into
+                                the clip), \"speed\" (0.25-16; its sound dropped), \"fit\":
+                                \"fill\"|\"full\" (a portrait clip whole over its blurred copy),
+                                \"focus\": [x, y] (0..1, what a fill crop keeps in view),
+                                \"mute\": true and \"volume\" (dB), and an entry \"place\" (its
+                                lower third's where, no chapter); the --outro-* flags (or the
+                                plan's \"outro\") make a branded channel outro instead of the
+                                count card: the footage of --outro-background darkened (else a
+                                gradient), the logo glitching in on a glowing badge with a burst
+                                of halftone dots, the --outro-cta button clicked into
+                                --outro-cta-done, then a lockup of logo, channel and handle at the
+                                top, the tagline and a typed --outro-terminal line at the bottom,
+                                the middle left clear for YouTube's end screen (a video tile left
+                                of centre, the subscribe button right of it) for its last 5-20 s;
+                                every word on it comes from these flags or the plan;
                                 with --export, YouTube chapters go to <out>.chapters.txt and the
                                 narration's subtitles to <out>.srt and <out>.vtt (at most 2 lines
                                 of 42 characters, 1-7 s a cue; also on the sequence's Subtitles
@@ -653,6 +671,57 @@ fn template_key(k: &str) -> String {
     } else {
         k.to_string()
     }
+}
+
+/// The `--outro-*` flags of `showcase` as fields of a plan's `outro` ([`filmcraft_autocut::outro`]):
+/// the logo must be a file (made absolute: the running app imports it over --bridge), the length a
+/// number, each `--outro-background` `item[:from[:to]]` (repeatable). The fields themselves are
+/// checked with the plan's.
+fn outro_flags(a: &Args) -> Result<serde_json::Map<String, Value>, String> {
+    let mut o = serde_json::Map::new();
+    if let Some(p) = a.opt("--outro-logo") {
+        if !std::path::Path::new(p).is_file() {
+            return Err(format!("--outro-logo: {p}: no such file"));
+        }
+        o.insert("logo".into(), json!(absolute(p)));
+    }
+    for (flag, key) in [
+        ("--outro-channel", "channel"),
+        ("--outro-handle", "handle"),
+        ("--outro-tagline", "tagline"),
+        ("--outro-cta", "cta"),
+        ("--outro-cta-done", "ctaDone"),
+        ("--outro-terminal", "terminal"),
+    ] {
+        if let Some(v) = a.opt(flag) {
+            o.insert(key.into(), json!(v));
+        }
+    }
+    if let Some(s) = a.opt("--outro-seconds") {
+        let n: f64 = s.parse().ok().filter(|n: &f64| n.is_finite()).ok_or_else(|| format!("--outro-seconds wants a length in seconds (8 to 30), not `{s}`"))?;
+        o.insert("seconds".into(), json!(n));
+    }
+    let mut list = Vec::new();
+    for b in a.all("--outro-background") {
+        let mut parts = b.split(':');
+        let item: u64 =
+            parts.next().and_then(|i| i.trim().parse().ok()).ok_or_else(|| format!("--outro-background wants item[:from[:to]] (4830:12:30), not `{b}`"))?;
+        let mut f = json!({"item": item});
+        for key in ["from", "to"] {
+            if let Some(x) = parts.next().map(str::trim).filter(|x| !x.is_empty()) {
+                let v: f64 = x.parse().ok().filter(|v: &f64| v.is_finite()).ok_or_else(|| format!("--outro-background: `{x}` in `{b}` is not seconds"))?;
+                f[key] = json!(v);
+            }
+        }
+        if parts.next().is_some() {
+            return Err(format!("--outro-background wants item[:from[:to]], not `{b}`"));
+        }
+        list.push(f);
+    }
+    if !list.is_empty() {
+        o.insert("background".into(), Value::Array(list));
+    }
+    Ok(o)
 }
 
 fn absolute(path: &str) -> String {
@@ -1474,6 +1543,8 @@ async fn cli() {
             let loudness_flag = a
                 .opt("--loudness")
                 .map(|l| filmcraft_autocut::look::Loudness::from_plan(&json!(l)).unwrap_or_else(|e| usage(format!("showcase: --loudness: {e}"))));
+            // the branded outro's flags (over the plan's `outro`), checked now
+            let outro_flag = outro_flags(&a).unwrap_or_else(|e| usage(format!("showcase: {e}")));
             let soundfont_flag = a.opt("--soundfont").map(|f| {
                 let ids = ["auto", "oscillators", "generaluser-gs", "generaluser", "gugs"];
                 if !ids.contains(&f.trim().to_ascii_lowercase().as_str()) && !std::path::Path::new(f).is_file() {
@@ -1609,6 +1680,14 @@ async fn cli() {
             }
             if soundfont_flag.is_some() {
                 opts.look.soundfont = soundfont_flag;
+            }
+            if !outro_flag.is_empty() {
+                let mut o = look_fields.get("outro").and_then(Value::as_object).cloned().unwrap_or_default();
+                o.extend(outro_flag);
+                let v = Value::Object(o);
+                opts.look.outro = filmcraft_autocut::outro::Outro::from_plan(&v).unwrap_or_else(|e| usage(format!("showcase: --outro-*: {e}")));
+                // (and the plan written out keeps it)
+                look_fields.insert("outro".into(), v);
             }
             let script = match reviewed {
                 Some(s) => s,

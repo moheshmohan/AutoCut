@@ -27,6 +27,7 @@ pub mod intent;
 pub mod llm;
 pub mod look;
 pub mod ollama;
+pub mod outro;
 pub mod planner;
 pub mod qa;
 pub mod recipes;

@@ -625,3 +625,75 @@ fn export_with_missing_media_fails_unless_allowed() {
     assert!(String::from_utf8_lossy(&render.stderr).contains("still.png"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `showcase --outro-*`: bad flags are usage errors; good ones become the plan's `outro`
+/// (written out with `--plan`), over the reviewed plan's own fields.
+#[test]
+fn showcase_outro_flags_become_the_plans_outro() {
+    let dir = std::env::temp_dir().join(format!("filmcraft-cli-showcase-outro-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
+            .args(args)
+            .env("FILMCRAFT_DATA_DIR", dir.join("data"))
+            .env("AUTOCUT_OLLAMA_HOST", "http://127.0.0.1:9")
+            .output()
+            .expect("spawn filmcraft-cli")
+    };
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).to_string();
+    let report = dir.join("report.json");
+    std::fs::write(&report, r#"{"subject":"robot","clips":[]}"#).unwrap();
+    let report = report.to_string_lossy().to_string();
+    let logo = dir.join("logo.png");
+    std::fs::write(&logo, b"\x89PNG").unwrap();
+    let logo = logo.to_string_lossy().to_string();
+    let plan = dir.join("plan.json");
+    std::fs::write(&plan, r#"{"entries": [], "outro": {"channel": "From the plan", "tagline": "kept"}}"#).unwrap();
+    let plan = plan.to_string_lossy().to_string();
+    for bad in [
+        vec!["--outro-logo", "/no/such/logo.png"],
+        vec!["--outro-seconds", "soon"],
+        vec!["--outro-background", "x:1:2"],
+        vec!["--outro-background", "4830:a"],
+        vec!["--outro-background", "4830:1:2:3"],
+        vec!["--outro-channel", "H4hacks", "--outro-seconds", "3"],
+        vec!["--outro-channel", "two\nlines"],
+    ] {
+        let mut args = vec!["showcase", "--report", &report, "--plan"];
+        args.extend(bad.iter().copied());
+        let o = run(&args);
+        assert_eq!(o.status.code(), Some(2), "{bad:?}: {}", err(&o));
+        assert!(err(&o).contains("outro"), "{bad:?}: {}", err(&o));
+    }
+    let o = run(&[
+        "showcase",
+        "--report",
+        &report,
+        "--script-in",
+        &plan,
+        "--plan",
+        "--outro-logo",
+        &logo,
+        "--outro-channel",
+        "H4hacks",
+        "--outro-handle",
+        "@H4hacks",
+        "--outro-cta",
+        "Subscribe",
+        "--outro-background",
+        "4830:5:25",
+        "--outro-background",
+        "4831",
+        "--outro-seconds",
+        "11",
+    ]);
+    let v = json_out(&o);
+    let outro = &v["outro"];
+    assert_eq!(outro["channel"], "H4hacks", "{v}");
+    assert_eq!(outro["tagline"], "kept", "the plan's own fields stay");
+    assert_eq!(outro["background"], serde_json::json!([{"item": 4830, "from": 5.0, "to": 25.0}, {"item": 4831}]));
+    assert_eq!(outro["seconds"], 11.0);
+    assert!(outro["logo"].as_str().is_some_and(|p| std::path::Path::new(p).is_absolute()));
+    let _ = std::fs::remove_dir_all(&dir);
+}

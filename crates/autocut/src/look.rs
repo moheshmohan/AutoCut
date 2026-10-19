@@ -12,6 +12,7 @@
 //! | `loudness: "social"` | `--loudness social` | `audio.normalizeLoudness` on the mix (−14 LUFS, −1 dBTP) |
 //! | `embedCaptions: true` | `--embed-captions` | the export carries the narration's captions (CEA-608/708) |
 //! | `soundfont: "generaluser-gs"` | `--soundfont …` | the instruments of the generated music bed |
+//! | `outro: {logo, channel, handle, tagline, cta, ctaDone, terminal, background, seconds}` | `--outro-logo …` | a branded channel outro with the end screen's regions left clear ([`crate::outro`]) |
 //!
 //! Every field of the plan is checked before anything is built: a field that makes no sense is
 //! an error that says which and why, never a panic and never a half-built show.
@@ -29,7 +30,7 @@ fn invalid(msg: impl Into<String>) -> AutoCutError {
 }
 
 /// The fields of a plan this module reads.
-pub const PLAN_KEYS: &[&str] = &["style", "timeline", "events", "transitions", "loudness", "embedCaptions", "soundfont"];
+pub const PLAN_KEYS: &[&str] = &["style", "timeline", "events", "transitions", "loudness", "embedCaptions", "soundfont", "outro"];
 
 // ---------------------------------------------------------------------------------------------
 // Colours and fonts
@@ -614,6 +615,9 @@ pub struct Look {
     pub embed_captions: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub soundfont: Option<String>,
+    /// A branded channel outro instead of the plain card ([`crate::outro`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outro: Option<crate::outro::Outro>,
 }
 
 impl Look {
@@ -636,12 +640,15 @@ impl Look {
             loudness: Loudness::from_plan(get("loudness"))?,
             embed_captions: flag("embedCaptions")?,
             soundfont: soundfont_from(get("soundfont"))?,
+            outro: crate::outro::Outro::from_plan(get("outro"))?,
         })
     }
 
     /// The fields of `plan` that are about the look, as they are (to write a plan out again).
     pub fn plan_fields(plan: &Value) -> serde_json::Map<String, Value> {
-        plan.as_object().map(|o| o.iter().filter(|(k, _)| PLAN_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
+        // (a script file's `outro` is its spoken line, not the look's)
+        let ours = |k: &str, v: &Value| PLAN_KEYS.contains(&k) && !(k == "outro" && v.is_string());
+        plan.as_object().map(|o| o.iter().filter(|(k, v)| ours(k, v)).map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
     }
 }
 
@@ -684,7 +691,7 @@ pub fn chips_by_entry(chips: &BTreeMap<String, Vec<String>>, numbers: &[usize]) 
 // Drawing: panels of text, chips
 
 /// The size of the frame's elements relative to 1080 lines.
-fn unit(frame: (f64, f64)) -> f64 {
+pub(crate) fn unit(frame: (f64, f64)) -> f64 {
     let h = frame.1;
     if h.is_finite() && h > 0.0 { h / 1080.0 } else { 1.0 }
 }
@@ -699,7 +706,7 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    fn union(self, o: Bounds) -> Bounds {
+    pub(crate) fn union(self, o: Bounds) -> Bounds {
         Bounds { left: self.left.min(o.left), top: self.top.min(o.top), right: self.right.max(o.right), bottom: self.bottom.max(o.bottom) }
     }
 
@@ -707,18 +714,18 @@ impl Bounds {
         Bounds { left: self.left - x, top: self.top - y, right: self.right + x, bottom: self.bottom + y }
     }
 
-    fn centre(&self) -> [f64; 2] {
+    pub(crate) fn centre(&self) -> [f64; 2] {
         [(self.left + self.right) / 2.0, (self.top + self.bottom) / 2.0]
     }
 
-    fn size(&self) -> [f64; 2] {
+    pub(crate) fn size(&self) -> [f64; 2] {
         [(self.right - self.left).max(1.0), (self.bottom - self.top).max(1.0)]
     }
 }
 
 /// About where point text of `size` at `pos` (its alignment point on the baseline) lands, when
 /// the engine cannot measure it.
-fn estimate(text: &str, size: f64, pos: [f64; 2], align: &str) -> Bounds {
+pub(crate) fn estimate(text: &str, size: f64, pos: [f64; 2], align: &str) -> Bounds {
     let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f64;
     let lines = text.lines().count().max(1) as f64;
     let w = longest * size * 0.56;
@@ -755,12 +762,12 @@ pub(crate) async fn measure(ex: &dyn Executor, clip: u64, layer: Option<usize>) 
     out
 }
 
-async fn set(ex: &dyn Executor, clip: u64, layer: usize, props: Value) -> Result<(), AutoCutError> {
+pub(crate) async fn set(ex: &dyn Executor, clip: u64, layer: usize, props: Value) -> Result<(), AutoCutError> {
     run(ex, "graphics.set", json!({"clip": clip, "layer": layer, "props": props})).await.map(|_| ())
 }
 
 /// A text layer added to graphic clip `clip`: its index.
-async fn add_text(ex: &dyn Executor, clip: u64, text: &str, pos: [f64; 2], size: f64, props: Value) -> Result<usize, AutoCutError> {
+pub(crate) async fn add_text(ex: &dyn Executor, clip: u64, text: &str, pos: [f64; 2], size: f64, props: Value) -> Result<usize, AutoCutError> {
     let r = run(ex, "graphics.newText", json!({"clip": clip, "text": text, "position": pos, "size": size})).await?;
     let layer = layer_of(&r, clip, "graphics.newText")?;
     set(ex, clip, layer, props).await?;
@@ -768,7 +775,7 @@ async fn add_text(ex: &dyn Executor, clip: u64, text: &str, pos: [f64; 2], size:
 }
 
 /// A shape layer (`rectangle`, `ellipse`) added to graphic clip `clip`: its index.
-async fn add_shape(ex: &dyn Executor, clip: u64, shape: &str, centre: [f64; 2], size: [f64; 2], props: Value) -> Result<usize, AutoCutError> {
+pub(crate) async fn add_shape(ex: &dyn Executor, clip: u64, shape: &str, centre: [f64; 2], size: [f64; 2], props: Value) -> Result<usize, AutoCutError> {
     let r = run(ex, "graphics.newShape", json!({"clip": clip, "shape": shape, "position": centre, "size": size})).await?;
     let layer = layer_of(&r, clip, "graphics.newShape")?;
     set(ex, clip, layer, props).await?;
@@ -785,7 +792,7 @@ fn layer_of(r: &Value, clip: u64, cmd: &str) -> Result<usize, AutoCutError> {
 /// A new graphic clip of one shape on video track `track` (an index) from `t` for `dur`
 /// seconds (both ends on frames): its id.
 #[allow(clippy::too_many_arguments)]
-async fn shape_clip(
+pub(crate) async fn shape_clip(
     ex: &dyn Executor,
     track: usize,
     fps: f64,
@@ -806,7 +813,7 @@ async fn shape_clip(
 
 /// A new graphic clip of one text on video track `track` from `t` for `dur` seconds.
 #[allow(clippy::too_many_arguments)]
-async fn text_clip(
+pub(crate) async fn text_clip(
     ex: &dyn Executor,
     track: usize,
     fps: f64,
@@ -1670,6 +1677,10 @@ mod tests {
         assert!(Look::from_plan(&json!({"timeline": "yes"})).is_err());
         assert_eq!(Look::from_plan(&json!([1, 2])).unwrap(), Look::default());
         assert_eq!(Look::plan_fields(&json!({"timeline": true, "entries": [], "style": "tech"})).len(), 2);
+        // a script alone read as a plan (the CLI's --script-in): its spoken outro is no look
+        let script = json!({"intro": "Hi.", "lines": ["One."], "outro": "Thanks for watching."});
+        assert_eq!(Look::from_plan(&script).unwrap(), Look::default());
+        assert!(Look::plan_fields(&script).is_empty());
     }
 
     #[test]

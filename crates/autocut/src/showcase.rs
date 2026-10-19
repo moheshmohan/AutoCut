@@ -33,6 +33,7 @@ use serde_json::{Value, json};
 use crate::analyze::ClipFacts;
 use crate::llm::ChatModel;
 use crate::look::{self, Look, Role, Theme};
+use crate::outro;
 use crate::shot_edit::{self, Fit, ShotEdit};
 use crate::subtitles::Cue;
 use crate::{AutoCutError, Executor};
@@ -806,6 +807,10 @@ pub struct Built {
     /// What `audio.normalizeLoudness` measured and did ([`Look::loudness`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loudness: Option<Value>,
+    /// The branded outro as built: its elements, when the end screen may show and the regions
+    /// left clear for it ([`crate::outro`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outro: Option<outro::BuiltOutro>,
 }
 
 /// A transition from the catalogue as placed: its id, effect, where (`within` an entry,
@@ -1983,6 +1988,22 @@ pub fn lift_energy(energy: &mut [f64], len: f64, spans: &[(f64, f64)]) {
     }
 }
 
+/// `energy` (points spread evenly over a show `len` seconds long) swelling from `from` to the
+/// end: at the mood's peak (`base` a little raised) instead of settling — under a branded outro.
+pub fn swell_energy(energy: &mut [f64], len: f64, from: f64, base: f64) {
+    let n = energy.len();
+    if n < 2 || !(len.is_finite() && len > 0.0 && from.is_finite()) {
+        return;
+    }
+    let peak = if base.is_finite() { (base.clamp(0.05, 1.0) * 1.05).min(1.0) } else { 0.85 };
+    for (k, e) in energy.iter_mut().enumerate() {
+        let x = k as f64 / (n - 1) as f64 * len;
+        if x >= from {
+            *e = (peak * 1000.0).round() / 1000.0;
+        }
+    }
+}
+
 impl Music {
     /// With the count of `cuts` (seconds) within a frame of a beat of the music as it plays.
     fn with_cuts(self, cuts: &[f64], played: Option<&Beats>, fps: f64) -> Self {
@@ -2352,6 +2373,12 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         video += look::MAX_CHIPS;
         c
     };
+    // a branded outro's own, on top
+    let outro_tracks: Option<[usize; outro::OWN_TRACKS]> = look.outro.as_ref().map(|_| {
+        let own = std::array::from_fn(|i| video + i);
+        video += outro::OWN_TRACKS;
+        own
+    });
     let r = run(ex, "file.newSequence", json!({"name": opts.title, "width": opts.width, "height": opts.height, "fps": opts.fps, "video": video, "audio": 5}))
         .await?;
     built.sequence = r["sequence"].as_u64();
@@ -2499,7 +2526,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             Stretch::new(lead + words(&script.spoken(&e.number.to_string(), &line)), in_view_seconds(e))
         })
         .collect();
-    let outro_estimate = (0.8 + words(&script.spoken("outro", &script.outro)) + 1.5).max(5.0);
+    let outro_estimate = (0.8 + words(&script.spoken("outro", &script.outro)) + 1.5).max(look.outro.as_ref().map_or(5.0, |o| o.seconds));
     // transitions from the catalogue: each list in turn, about a beat long (two into a chapter)
     let (mut n_within, mut n_between, mut n_chapter) = (0usize, 0usize, 0usize);
     let frames_of = |beats: f64, lo: f64, hi: f64| (beat * beats * tr.fps).round().clamp(lo, hi) as i64;
@@ -2816,8 +2843,28 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let outro_voice_at = (t + 0.8).max(voice_free_at + 0.15);
     let outro_spoken =
         narrate(ex, &tr, voice, &script.spoken("outro", &script.outro), &script.outro, script.delivery_of("outro"), outro_voice_at, &mut narrations).await?;
-    let outro_len = (outro_voice_at - t + outro_spoken + 1.5).max(5.0);
-    if let Some(h0) = entries.iter().rev().find(|e| !e.is_scene()).and_then(|e| e.shots.first()) {
+    // a branded outro lasts its own length at least, on frames
+    let outro_len = match &look.outro {
+        Some(o) => on_frame((outro_voice_at - t + outro_spoken + 1.5).max(o.seconds), tr.fps),
+        None => (outro_voice_at - t + outro_spoken + 1.5).max(5.0),
+    };
+    if let (Some(o), Some(own)) = (&look.outro, outro_tracks) {
+        // the channel's own: its logo, name and button over its footage, the end screen's
+        // regions left clear ([`crate::outro`])
+        let th = theme.as_ref().unwrap_or(&overlay);
+        let tracks = outro::Tracks { picture: tr.fg.clone(), picture_index: 1, wash: tr.titles_index, glow: tr.over_index, burst: tr.counter_index, own };
+        let made = outro::build(ex, th, &tracks, tr.fps, (w, h), o, t, outro_len, &mut built.notes).await?;
+        for (kind, at, dur, intensity) in &made.cues {
+            sfx(ex, kind, *dur, *at, &tr.hits, *intensity, &mut mix).await?;
+        }
+        progress(&format!(
+            "outro: {} ({:.1}s), the end screen's regions clear from {:.1}s",
+            o.channel.as_deref().or(o.handle.as_deref()).unwrap_or("logo"),
+            outro_len,
+            made.end_screen[0]
+        ));
+        built.outro = Some(made);
+    } else if let Some(h0) = entries.iter().rev().find(|e| !e.is_scene()).and_then(|e| e.shots.first()) {
         let len = outro_len.min((h0.clip_seconds - 0.4).max(1.0));
         let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, Framing::plain(h0.largest, false)).await?;
         mix.sounds.extend(audio);
@@ -2832,9 +2879,12 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "in", "effect": "dip_to_black", "frames": 18})).await.ok();
         run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "out", "effect": "dip_to_black", "frames": 30})).await.ok();
     }
-    sfx(ex, "impact", 3.0, t, &tr.hits, 0.7, &mut mix).await?;
+    if look.outro.is_none() {
+        sfx(ex, "impact", 3.0, t, &tr.hits, 0.7, &mut mix).await?;
+    }
     let closing = format!("{robots} {}S", opts.subject.to_uppercase());
     match &theme {
+        _ if look.outro.is_some() => {}
         Some(th) => look::outro_card(ex, th, [tr.titles_index, tr.over_index], tr.fps, (w, h), &closing, "and counting", t, outro_len).await?,
         None => {
             title(ex, tr.titles_index, tr.fps, &closing, t + 0.3, outro_len - 0.3, 130.0, (w / 2.0, h * 0.48), title_props.clone()).await?;
@@ -2934,6 +2984,10 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             let len = total + 0.5;
             let mut energy = show_energy(len, intro_len, outro_at, bed_energy);
             lift_energy(&mut energy, len, &quiet_scenes);
+            // a branded outro: the music swells into it instead of settling
+            if look.outro.is_some() {
+                swell_energy(&mut energy, len, outro_at, bed_energy);
+            }
             let mut p = json!({"kind": "music", "duration": len, "mood": opts.mood, "bpm": opts.bpm, "time": 0, "track": tr.music, "energy": energy});
             if let Some(sf) = &look.soundfont {
                 p["soundfont"] = json!(sf);
@@ -3586,6 +3640,20 @@ mod tests {
         // hostile numbers stay in range
         for (len, a, b, base) in [(f64::NAN, 1.0, 2.0, 0.8), (10.0, f64::INFINITY, -1.0, f64::NAN), (-5.0, 100.0, 3.0, 9.0), (0.0, 0.0, 0.0, 0.8)] {
             assert!(show_energy(len, a, b, base).iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x)));
+        }
+    }
+
+    #[test]
+    fn the_bed_swells_into_a_branded_outro() {
+        let mut e = show_energy(60.0, 8.0, 50.0, 0.8);
+        let settled = e[31];
+        swell_energy(&mut e, 60.0, 50.0, 0.8);
+        assert!(e[31] > settled && e[31] >= e[20], "it swells instead of settling: {e:?}");
+        assert_eq!(e[..26], show_energy(60.0, 8.0, 50.0, 0.8)[..26], "nothing before the outro changes");
+        for (len, from, base) in [(f64::NAN, 1.0, 0.8), (10.0, f64::NAN, 0.8), (10.0, 2.0, f64::INFINITY), (-1.0, 0.0, 0.5)] {
+            let mut e = show_energy(10.0, 1.0, 8.0, 0.8);
+            swell_energy(&mut e, len, from, base);
+            assert!(e.iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x)));
         }
     }
 
