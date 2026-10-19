@@ -231,6 +231,43 @@ pub fn voxcpm_size(p: &VoxcpmPackage) -> u64 {
     p.files.iter().map(|f| f.size).sum()
 }
 
+/// IndicF5 (feature `indicf5`): cloned voices speaking Malayalam and ten other Indian
+/// languages. One file holds the F5-TTS model and its Vocos vocoder; the other is the character
+/// vocabulary. Code and weights MIT (AI4Bharat; Vocos by charactr, MIT, bundled unchanged).
+///
+/// The official repository (`ai4bharat/IndicF5`) is gated: downloads need a signed-in account
+/// that accepted its terms ("only clone voices for which you have explicit permission" —
+/// FilmCraft's profiles record that consent), and FilmCraft downloads anonymously. The files
+/// are therefore fetched from a public mirror, pinned to a commit, whose bytes are the official
+/// release's: the SHA-256 below is the one the official repository lists for
+/// `model.safetensors` at fb652a96 (and `vocab.txt` has the same git blob). Verified 2026-10-19.
+pub static INDICF5: VoxcpmPackage = VoxcpmPackage {
+    id: "indicf5",
+    name: "Malayalam and Indian languages (IndicF5)",
+    description: "Cloned voices speaking Malayalam (and Assamese, Bengali, Gujarati, Hindi, Kannada, Marathi, Odia, Punjabi, Tamil, Telugu) from the voice sample of a natural clone. About 0.4 B parameters, 24 kHz; 1.4 GB of memory.",
+    license: "MIT (IndicF5 by AI4Bharat; Vocos by charactr)",
+    source: "https://huggingface.co/ai4bharat/IndicF5",
+    files: &[
+        ModelFile {
+            name: "model.safetensors",
+            url: "https://huggingface.co/rsolanki1822/IndicF5-mirror/resolve/ed31e9aae072d4ffc247f271d5f2b208488b28a7/model.safetensors",
+            sha256: "ba7f3671180fb7784e24bd1dafc96e729a38ce02e7f6d3877cdef32525a1865c",
+            size: 1_402_789_408,
+        },
+        ModelFile {
+            name: "vocab.txt",
+            url: "https://huggingface.co/rsolanki1822/IndicF5-mirror/resolve/ed31e9aae072d4ffc247f271d5f2b208488b28a7/checkpoints/vocab.txt",
+            sha256: "d3a5ff6aac12ea4fb50628a66a97b20c1e83b9e5ca356e5afae17b511cda96df",
+            size: 11_283,
+        },
+    ],
+};
+
+/// A cloning model by id: a VoxCPM release or IndicF5.
+pub fn cloning_model(id: &str) -> Option<&'static VoxcpmPackage> {
+    voxcpm(id).or(Some(&INDICF5).filter(|p| p.id == id))
+}
+
 /// A neural voice: catalogue entry and its voice-pack file.
 #[derive(Clone, Copy, Debug)]
 pub struct NeuralVoice {
@@ -336,9 +373,26 @@ mod tests {
         }
         assert!(voxcpm_size(voxcpm("voxcpm-1.5").unwrap()) > 1_900_000_000);
         assert!(voxcpm_size(voxcpm("voxcpm-2").unwrap()) > 4_900_000_000);
+        // IndicF5: the two files the loader reads, pinned to a commit, MIT, the official hash
+        let mut names: Vec<&str> = INDICF5.files.iter().map(|f| f.name).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["model.safetensors", "vocab.txt"]);
+        for f in INDICF5.files {
+            assert_eq!(f.sha256.len(), 64, "{}", f.name);
+            assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert!(f.url.starts_with("https://huggingface.co/") && f.url.contains("/resolve/"), "{}", f.url);
+            let rev = f.url.split("/resolve/").nth(1).and_then(|r| r.split('/').next()).unwrap_or("");
+            assert_eq!(rev.len(), 40, "pinned to a commit: {}", f.url);
+        }
+        assert!(INDICF5.license.starts_with("MIT"));
+        assert_eq!(cloning_model("indicf5").map(|p| p.id), Some("indicf5"));
+        assert_eq!(cloning_model("voxcpm-2").map(|p| p.id), Some("voxcpm-2"));
+        assert!(cloning_model("nope").is_none());
+        assert!(voxcpm_size(&INDICF5) > 1_400_000_000);
         let dir = std::env::temp_dir().join(format!("filmcraft-tts-cat-{}", std::process::id()));
         assert!(!installed(&dir));
         assert_eq!(missing_bytes(&dir), size());
+        assert!(!voxcpm_installed(&dir, &INDICF5));
         for p in VOXCPM {
             assert!(!voxcpm_installed(&dir, p));
             assert_eq!(voxcpm_missing_bytes(&dir, p), voxcpm_size(p));

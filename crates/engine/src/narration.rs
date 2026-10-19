@@ -36,6 +36,13 @@
 //! **Delivery** (`plain`, `conversational`, `warm`, `excited`, `amazed`, `curious`, `calm`,
 //! `dramatic`) is the feeling a line is spoken with: the natural cloned voices (VoxCPM2) are
 //! asked for it in words; the other voices read the script as they always do.
+//!
+//! **Language** (`language`: `en-US` or `ml-IN`; without it a script written in Malayalam
+//! script is Malayalam). Malayalam is spoken by cloned voices through IndicF5
+//! (`tts.downloadCloneModel {"model": "indicf5"}`), from the voice sample of a natural clone and
+//! that sample's words: the first Malayalam narration of a voice has the speech model hear them
+//! (once; `tts.voiceReference` shows them, or sets them by hand). Results carry `notes`: what
+//! the Malayalam front end could not read as written. English narrations keep their cache keys.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -73,9 +80,9 @@ fn has_narration_clip(s: &Session) -> std::result::Result<(), String> {
 }
 
 /// Script and settings from params, on top of `base`.
-fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration> {
+pub(crate) fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration> {
     // a setting of the wrong type is an error, never silently replaced by a default
-    for key in ["text", "voice", "pitch", "delivery"] {
+    for key in ["text", "voice", "pitch", "delivery", "language"] {
         if p.get(key).is_some_and(|v| !v.is_string()) {
             return Err(bad(cmd, format!("`{key}` must be a string")));
         }
@@ -85,7 +92,21 @@ fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration>
         None => base.map(|b| b.text.clone()).ok_or_else(|| bad(cmd, "`text` is required"))?,
     };
     let voice = str_p(p, "voice").map(str::to_string).or_else(|| base.map(|b| b.voice.clone())).unwrap_or_else(|| tts::default_voice_id().to_string());
-    let language = if voice.starts_with(tts::CLONE_PREFIX) {
+    // the language: given, else the script's (Malayalam script reads as Malayalam), else the
+    // narration's own when only its voice settings change
+    let malayalam = match str_p(p, "language") {
+        Some(l) if tts::malayalam::is_tag(l) => true,
+        Some(l) if l.trim().to_ascii_lowercase().starts_with("en") => false,
+        Some(l) => return Err(bad(cmd, format!("unknown language `{l}` (en-US, ml-IN)"))),
+        None if str_p(p, "text").is_none() && base.is_some() => base.is_some_and(|b| tts::malayalam::is_tag(&b.language)),
+        None => tts::malayalam::detect(&text),
+    };
+    let language = if malayalam {
+        if !voice.starts_with(tts::CLONE_PREFIX) {
+            return Err(bad(cmd, format!("`{voice}` speaks English; Malayalam is spoken by cloned voices (`clone:<name>`, see tts.clonedVoices)")));
+        }
+        tts::malayalam::TAG
+    } else if voice.starts_with(tts::CLONE_PREFIX) {
         // a cloned voice: its profile is checked when it speaks
         "en-US"
     } else {
@@ -118,8 +139,10 @@ fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration>
 pub type SynthCache = Arc<Mutex<Vec<(String, Arc<tts::Audio>)>>>;
 const CACHE_ENTRIES: usize = 6;
 
-fn cache_key(n: &Narration) -> String {
-    format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", n.voice, n.pitch.id(), n.pace.to_bits(), n.delivery.id(), n.take, n.text)
+pub(crate) fn cache_key(n: &Narration) -> String {
+    let key = format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", n.voice, n.pitch.id(), n.pace.to_bits(), n.delivery.id(), n.take, n.text);
+    // English keeps the key it always had
+    if tts::malayalam::is_tag(&n.language) { format!("{key}\u{1f}{}", n.language) } else { key }
 }
 
 fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
@@ -132,10 +155,65 @@ fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
     }
 }
 
-/// Synthesize `n` (no cache).
-fn render(n: &Narration, models_dir: Option<&std::path::Path>) -> std::result::Result<tts::Audio, tts::TtsError> {
-    let voice = tts::voice_in(&n.voice, models_dir)?;
+/// Synthesize `n` (no cache). A cloned voice speaking Malayalam first gets its Malayalam
+/// reference when it has none ([`malayalam_reference`]).
+fn render(n: &Narration, models_dir: Option<&std::path::Path>, transcriber: Option<&Transcriber>) -> std::result::Result<tts::Audio, tts::TtsError> {
+    malayalam_reference(n, models_dir, transcriber)?;
+    let voice = tts::voice_for(&n.voice, &n.language, models_dir)?;
     voice.synthesize(&n.text, &params(n))
+}
+
+type Transcriber = Arc<dyn filmcraft_speech::Transcriber>;
+
+/// Whether `n` is a cloned voice speaking Malayalam whose Malayalam reference (its voice
+/// sample's clip and that clip's transcript) is still to be made.
+fn needs_malayalam_reference(n: &Narration, models_dir: Option<&std::path::Path>) -> bool {
+    #[cfg(feature = "neural-voices")]
+    {
+        tts::malayalam::is_tag(&n.language)
+            && n.voice.starts_with(tts::CLONE_PREFIX)
+            && models_dir.is_some_and(|d| matches!(tts::clone::cross_reference(d, &n.voice), Ok(None)))
+    }
+    #[cfg(not(feature = "neural-voices"))]
+    {
+        let _ = (n, models_dir);
+        false
+    }
+}
+
+/// Make the Malayalam reference of `n`'s cloned voice when it has none: the speech model hears
+/// the clip's words (in English: the voice sample is the speaker's English). Once per voice.
+fn malayalam_reference(n: &Narration, models_dir: Option<&std::path::Path>, transcriber: Option<&Transcriber>) -> std::result::Result<(), tts::TtsError> {
+    if !needs_malayalam_reference(n, models_dir) {
+        return Ok(());
+    }
+    #[cfg(feature = "neural-voices")]
+    {
+        let dir = models_dir.ok_or(tts::TtsError::NotInstalled)?;
+        let t = transcriber.ok_or_else(|| {
+            tts::TtsError::Invalid(format!(
+                "{} speaks Malayalam from its voice sample, whose words must be known: download a speech model (transcript.downloadModel) or give them (tts.voiceReference {{\"voice\": \"{}\", \"transcript\": …}})",
+                n.voice, n.voice
+            ))
+        })?;
+        let mut hear = |x16: &[f32]| -> std::result::Result<String, String> {
+            let opts = filmcraft_speech::Options { language: Some("en".into()), diarize: false, ..Default::default() };
+            t.transcribe(x16, &opts, &mut |_, _| true).map(|tr| tr.text()).map_err(|e| e.to_string())
+        };
+        tts::clone::prepare_cross_lingual(dir, &n.voice, None, &mut hear)?;
+    }
+    #[cfg(not(feature = "neural-voices"))]
+    let _ = transcriber;
+    Ok(())
+}
+
+/// The speech model, when `n` needs it to make its voice's Malayalam reference (None otherwise,
+/// or when there is none: rendering then says how to give the words instead).
+fn reference_transcriber(s: &Session, n: &Narration, models_dir: Option<&std::path::Path>) -> Option<Transcriber> {
+    if !needs_malayalam_reference(n, models_dir) {
+        return None;
+    }
+    crate::transcript::transcriber(s, &json!({})).ok()
 }
 
 /// The median pitch of synthesized speech, Hz (natural voices' builds only): a reading that
@@ -152,6 +230,11 @@ fn median_pitch(samples: &[f32], rate: u32) -> Option<f64> {
     }
 }
 
+/// What the voice could not read as written (Malayalam: Latin words, symbols): empty for English.
+pub(crate) fn notes(n: &Narration) -> Vec<String> {
+    if tts::malayalam::is_tag(&n.language) { tts::malayalam::report(&n.text) } else { Vec::new() }
+}
+
 /// How `n` is spoken.
 fn params(n: &Narration) -> tts::Params {
     tts::Params { semitones: n.pitch.semitones(), pace: n.pace, style: n.delivery.style(), take: n.take }
@@ -160,7 +243,7 @@ fn params(n: &Narration) -> tts::Params {
 /// The disk cache's key for `n` (None: the voice has no stable identity, e.g. a cloned voice
 /// whose profile cannot be read; it is then not cached).
 fn disk_key(n: &Narration, models_dir: Option<&std::path::Path>) -> Option<String> {
-    let identity = tts::cache::voice_identity(&n.voice, models_dir)?;
+    let identity = tts::cache::voice_identity_for(&n.voice, &n.language, models_dir)?;
     Some(tts::cache::DiskCache::key(&identity, &n.text, &params(n)))
 }
 
@@ -182,7 +265,8 @@ fn synthesize(s: &Session, cmd: &str, n: &Narration) -> Result<(Arc<tts::Audio>,
     if let Some(a) = cached(s, n, models.as_deref()) {
         return Ok((a, true));
     }
-    let a = Arc::new(render(n, models.as_deref()).map_err(|e| tts_err(cmd, e))?);
+    let transcriber = reference_transcriber(s, n, models.as_deref());
+    let a = Arc::new(render(n, models.as_deref(), transcriber.as_ref()).map_err(|e| tts_err(cmd, e))?);
     if let (Some(disk), Some(k)) = (&s.tts_disk, disk_key(n, models.as_deref())) {
         disk.put(&k, &a);
     }
@@ -216,7 +300,7 @@ fn voices(_s: &mut Session, _p: &Value) -> Result<Value> {
     let dir = crate::transcript::models_dir();
     Ok(json!({
         "package": package_json(),
-        "languages": tts::LANGUAGES.iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>(),
+        "languages": tts::languages().iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>(),
         "voices": tts::voices_in(dir.as_deref()),
         "cloned": crate::voice_clone::cloned_json(),
         "defaultVoice": tts::default_voice_id(),
@@ -248,7 +332,7 @@ fn preview(s: &mut Session, p: &Value) -> Result<Value> {
         path = json!(dest);
     }
     s.tts_preview = Some(audio);
-    Ok(json!({"seconds": seconds, "samples": samples, "sampleRate": rate, "voice": n.voice, "path": path}))
+    Ok(json!({"seconds": seconds, "samples": samples, "sampleRate": rate, "voice": n.voice, "language": n.language, "path": path, "notes": notes(&n)}))
 }
 
 /// Write `samples` as a new WAV and import it (its own undo step; callers collapse history).
@@ -351,6 +435,8 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
             "sampleRate": rate,
             "cached": from_cache,
             "pitchHz": median_pitch(&audio.samples, rate),
+            "language": n.language,
+            "notes": notes(&n),
         }))
     })();
     crate::clip_ops::collapse_history(s, n0, "New Narration");
@@ -505,18 +591,20 @@ fn render_job(s: &mut Session, p: &Value) -> Result<Value> {
         return Ok(json!({"job": null, "cached": true}));
     }
     let key = cache_key(&n);
-    let disk = s.tts_disk.clone().zip(disk_key(&n, models.as_deref()));
+    let disk = s.tts_disk.clone();
     let job = new_job(s, "Synthesizing narration".into());
     let (prog, res, cache) = (job.progress.clone(), job.result.clone(), s.tts_cache.clone());
     let wait = p.get("wait").and_then(Value::as_bool).unwrap_or(false);
+    let transcriber = reference_transcriber(s, &n, models.as_deref());
     let id = spawn(s, job, wait, "filmcraft-tts", move || {
         let t0 = web_time::Instant::now();
         *prog.status.lock().unwrap_or_else(PoisonError::into_inner) = "Synthesizing…".into();
-        let r = match render(&n, models.as_deref()) {
+        let r = match render(&n, models.as_deref(), transcriber.as_ref()) {
             Ok(a) => {
                 let secs = a.seconds();
-                if let Some((dc, k)) = &disk {
-                    dc.put(k, &a);
+                // keyed after rendering: a Malayalam voice's reference may have been made just now
+                if let Some((dc, k)) = disk.zip(disk_key(&n, models.as_deref())) {
+                    dc.put(&k, &a);
                 }
                 cache_put(&cache, key, Arc::new(a));
                 Ok(format!("{secs:.1} s of speech"))
@@ -587,7 +675,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.preview",
             "Preview Narration",
-            r#"{"text":str?,"voice":str?,"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"?,"sample":bool?,"clip":id?,"path":str?}"#,
+            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"?,"sample":bool?,"clip":id?,"path":str?}"#,
             always,
             preview,
             false,
@@ -595,7 +683,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.create",
             "New Narration",
-            r#"{"text":str,"voice":str?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
+            r#"{"text":str,"voice":str?,"language":"en-US|ml-IN"?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
             has_seq,
             create,
             true,
@@ -603,7 +691,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.edit",
             "Edit Narration",
-            r#"{"clip":id?,"text":str?,"voice":str?,"pitch":str?,"pace":f64?,"delivery":str?,"take":0..99?,"dir":str?}"#,
+            r#"{"clip":id?,"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"pitch":str?,"pace":f64?,"delivery":str?,"take":0..99?,"dir":str?}"#,
             has_narration_clip,
             edit,
             true,
@@ -612,7 +700,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.render",
             "Synthesize Narration",
-            r#"{"text":str?,"voice":str?,"pitch":str?,"pace":f64?,"delivery":str?,"sample":bool?,"clip":id?,"wait":bool?}"#,
+            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"pitch":str?,"pace":f64?,"delivery":str?,"sample":bool?,"clip":id?,"wait":bool?}"#,
             always,
             render_job,
             false,

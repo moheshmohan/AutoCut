@@ -6,7 +6,8 @@
 //! | `tts.cloneVoice` | take speech from project items / clips (whole, or `segments`) and save the profile `clone:<name>` — a background job; `consent: true` is required. `engine`: `voxcpm` (natural: the model speaks in the speaker's own voice, accent and rhythm included; the default when a VoxCPM release is installed) or `openvoice` (timbre only: the closest Kokoro voice re-voiced). Natural clones keep the best 10–25 s of speech as a voice sample, transcribed with the speech model when the mode needs it (`transcript` gives it instead); `model`, `mode`, `cfg` and `steps` tune them |
 //! | `tts.clonedVoices` | the saved cloned voices, and the cloning models with their download state |
 //! | `tts.deleteClonedVoice` | remove one (and its voice sample) |
-//! | `tts.downloadCloneModel` | download a cloning model as a background job, every file SHA-256 checked: `openvoice-v2` (131 MB, MIT; the default), `voxcpm-1.5` (1.95 GB) or `voxcpm-2` (4.96 GB), both Apache-2.0 |
+//! | `tts.downloadCloneModel` | download a cloning model as a background job, every file SHA-256 checked: `openvoice-v2` (131 MB, MIT; the default), `voxcpm-1.5` (1.95 GB) or `voxcpm-2` (4.96 GB), both Apache-2.0, or `indicf5` (1.40 GB, MIT: cloned voices speaking Malayalam) |
+//! | `tts.voiceReference` | a natural clone's Malayalam reference: the 8–12 s of its voice sample IndicF5 speaks from and their words (heard by the speech model once, or given in `transcript`); `redo` makes it again |
 //!
 //! Profiles live in `<data>/voices/<name>.json` (natural ones with `<name>.wav`), next to the
 //! models: a cloned voice is the user's, usable in every project. See `filmcraft_tts::clone`.
@@ -47,11 +48,65 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.downloadCloneModel",
             "Download Voice Cloning Model",
-            r#"{"model":"openvoice-v2"|"voxcpm-1.5"|"voxcpm-2"?,"wait":bool?}"#,
+            r#"{"model":"openvoice-v2"|"voxcpm-1.5"|"voxcpm-2"|"indicf5"?,"wait":bool?}"#,
             download_clone_model,
             false,
         ),
+        spec(
+            "tts.voiceReference",
+            "Voice Reference for Malayalam",
+            r#"{"voice":"clone:…","transcript":str? (the clip's words; else heard by the speech model),"redo":bool?,"speechModel":"whisper-…"?}"#,
+            voice_reference,
+            false,
+        ),
     ]
+}
+
+/// The Malayalam reference of a natural cloned voice: the stretch of its voice sample IndicF5
+/// speaks from and that stretch's words. Shown when made; made (or made again with `redo`)
+/// with the words given in `transcript`, else heard by the speech model (English).
+fn voice_reference(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "tts.voiceReference";
+    let voice = str_p(p, "voice").ok_or_else(|| bad(cmd, "`voice` is required (clone:<name>)"))?.to_string();
+    if !voice.starts_with(filmcraft_tts::CLONE_PREFIX) {
+        return Err(bad(cmd, "`voice` must be a cloned voice (clone:<name>)"));
+    }
+    if p.get("transcript").is_some_and(|t| !t.is_string()) {
+        return Err(bad(cmd, "`transcript` must be a string"));
+    }
+    #[cfg(feature = "neural-voices")]
+    {
+        let models = crate::transcript::models_dir().ok_or_else(|| bad(cmd, "no data directory for voice models"))?;
+        let transcript = str_p(p, "transcript").map(str::to_string);
+        let redo = bool_p(p, "redo").unwrap_or(false) || transcript.is_some();
+        let current = filmcraft_tts::clone::cross_reference(&models, &voice).map_err(|e| bad(cmd, e.to_string()))?;
+        let r = match current {
+            Some(r) if !redo => r,
+            _ => {
+                let transcriber = if transcript.is_none() {
+                    let speech = match str_p(p, "speechModel") {
+                        Some(m) => json!({"model": m}),
+                        None => json!({}),
+                    };
+                    Some(crate::transcript::transcriber(s, &speech).map_err(|e| bad(cmd, format!("{e}; or give the clip's words in `transcript`")))?)
+                } else {
+                    None
+                };
+                let mut hear = |x16: &[f32]| -> std::result::Result<String, String> {
+                    let t = transcriber.as_ref().ok_or_else(|| "no speech model".to_string())?;
+                    let opts = filmcraft_speech::Options { language: Some("en".into()), diarize: false, ..Default::default() };
+                    t.transcribe(x16, &opts, &mut |_, _| true).map(|tr| tr.text()).map_err(|e| e.to_string())
+                };
+                filmcraft_tts::clone::prepare_cross_lingual(&models, &voice, transcript.as_deref(), &mut hear).map_err(|e| bad(cmd, e.to_string()))?
+            }
+        };
+        Ok(json!({"voice": voice, "from": r.from, "to": r.to, "transcript": r.transcript, "given": r.given}))
+    }
+    #[cfg(not(feature = "neural-voices"))]
+    {
+        let _ = s;
+        Err(bad(cmd, "voice cloning is not available in this build (built without `neural-voices`)"))
+    }
 }
 
 /// The saved cloned voices as JSON (empty without the feature or a data directory).
@@ -109,10 +164,10 @@ pub fn models_json() -> Value {
         "source": filmcraft_tts::catalog::CLONE_SOURCE,
         "available": cfg!(feature = "neural-voices"),
     })];
-    for m in filmcraft_tts::catalog::VOXCPM {
+    for (m, engine) in filmcraft_tts::catalog::VOXCPM.iter().map(|m| (m, "voxcpm")).chain(std::iter::once((&filmcraft_tts::catalog::INDICF5, "indicf5"))) {
         out.push(json!({
             "id": m.id,
-            "engine": "voxcpm",
+            "engine": engine,
             "name": m.name,
             "description": m.description,
             "installed": dir.as_deref().is_some_and(|d| filmcraft_tts::catalog::voxcpm_installed(d, m)),
@@ -442,13 +497,13 @@ fn model_files(model: &str) -> Option<(&'static str, &'static [filmcraft_tts::ca
     if model == OPENVOICE {
         return Some((filmcraft_tts::catalog::CLONE_PACKAGE_NAME, filmcraft_tts::catalog::CLONE_FILES));
     }
-    filmcraft_tts::catalog::voxcpm(model).map(|m| (m.name, m.files))
+    filmcraft_tts::catalog::cloning_model(model).map(|m| (m.name, m.files))
 }
 
 fn download_clone_model(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "tts.downloadCloneModel";
     let model = str_p(p, "model").unwrap_or(OPENVOICE).to_string();
-    let (name, files) = model_files(&model).ok_or_else(|| bad(cmd, format!("unknown model `{model}` (openvoice-v2, voxcpm-1.5, voxcpm-2)")))?;
+    let (name, files) = model_files(&model).ok_or_else(|| bad(cmd, format!("unknown model `{model}` (openvoice-v2, voxcpm-1.5, voxcpm-2, indicf5)")))?;
     let dir = crate::transcript::models_dir().ok_or_else(|| bad(cmd, "no data directory for voice models"))?;
     let package = if model == OPENVOICE { filmcraft_tts::catalog::clone_package_dir(&dir) } else { dir.join(&model) };
     let missing: u64 = files.iter().filter(|f| !std::fs::metadata(package.join(f.name)).is_ok_and(|m| m.len() == f.size)).map(|f| f.size).sum();
@@ -566,7 +621,9 @@ mod tests {
         assert!(r["voices"].is_array());
         assert_eq!(r["model"]["id"], "openvoice-v2");
         let models = r["models"].as_array().unwrap();
-        assert_eq!(models.len(), 1 + filmcraft_tts::catalog::VOXCPM.len());
+        // OpenVoice, the VoxCPM releases and IndicF5 (Malayalam)
+        assert_eq!(models.len(), 1 + filmcraft_tts::catalog::VOXCPM.len() + 1);
+        assert!(models.iter().any(|m| m["id"] == "indicf5"));
         for m in models {
             assert!(m["license"].as_str().is_some_and(|l| !l.contains("NC")), "{m}");
             assert!(m["size"].as_u64().is_some_and(|b| b > 0), "{m}");

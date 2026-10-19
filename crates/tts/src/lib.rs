@@ -23,6 +23,7 @@ pub mod f5;
 pub mod formant;
 #[cfg(feature = "kokoro")]
 pub mod kokoro;
+pub mod malayalam;
 #[cfg(feature = "kokoro")]
 pub mod neural;
 #[cfg(feature = "kokoro")]
@@ -200,6 +201,39 @@ pub fn voice_in(id: &str, models_dir: Option<&std::path::Path>) -> Result<Box<dy
         }
     }
     voice(id)
+}
+
+/// The languages this build speaks: English, and Malayalam (cloned voices through IndicF5,
+/// feature `indicf5`).
+pub fn languages() -> Vec<(&'static str, &'static str)> {
+    let mut l = LANGUAGES.to_vec();
+    if cfg!(feature = "indicf5") {
+        l.push((malayalam::TAG, "Malayalam (India)"));
+    }
+    l
+}
+
+/// The voice `id` speaking `language` (a BCP 47 tag): English as [`voice_in`]; Malayalam
+/// ([`malayalam::is_tag`]) through a cloned voice's IndicF5 reading (feature `indicf5`).
+pub fn voice_for(id: &str, language: &str, models_dir: Option<&std::path::Path>) -> Result<Box<dyn Voice>, TtsError> {
+    if !malayalam::is_tag(language) {
+        return voice_in(id, models_dir);
+    }
+    if !id.starts_with(CLONE_PREFIX) {
+        return Err(TtsError::Invalid(format!(
+            "`{id}` speaks English; Malayalam is spoken by cloned voices (`clone:<name>`, made from a recording of the speaker)"
+        )));
+    }
+    #[cfg(feature = "kokoro")]
+    {
+        let dir = models_dir.ok_or(TtsError::NotInstalled)?;
+        clone::load_malayalam(id, dir)
+    }
+    #[cfg(not(feature = "kokoro"))]
+    {
+        let _ = models_dir;
+        Err(TtsError::Unavailable)
+    }
 }
 
 /// The voice used when none is chosen.

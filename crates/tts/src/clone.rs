@@ -860,6 +860,273 @@ impl Voice for CloneVoice {
     }
 }
 
+/// The Malayalam (IndicF5) reference of a natural clone: the stretch of its voice sample IndicF5
+/// continues, and that stretch's transcript, which IndicF5 needs. Kept next to the profile
+/// (`<name>.indicf5.json`) and made on first use ([`prepare_cross_lingual`]: Whisper hears the
+/// transcript) or with a transcript the user gives. It belongs to one voice sample: a voice made
+/// again needs a new one. The sample's language does not matter (an English sample speaks
+/// Malayalam: cross-lingual prompting).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrossReference {
+    pub version: u32,
+    /// SHA-256 of the voice sample's file it was made from.
+    pub sample: String,
+    /// The stretch of the sample (seconds).
+    pub from: f64,
+    pub to: f64,
+    pub transcript: String,
+    /// The user gave the transcript (else the speech model heard it).
+    #[serde(default)]
+    pub given: bool,
+}
+
+/// Version of [`CrossReference`].
+pub const CROSS_REFERENCE_VERSION: u32 = 1;
+/// The reference stretch's length: IndicF5 is trained on short prompts, and every second of it
+/// is generated again with each utterance (it sets the cost).
+pub const CROSS_REFERENCE_SECONDS: (f64, f64) = (8.0, 12.0);
+
+fn cross_path(voices: &Path, p: &Profile) -> Result<PathBuf, TtsError> {
+    Ok(profile_path(voices, &p.id)?.with_extension("indicf5.json"))
+}
+
+/// SHA-256 (hex) of a natural clone's voice sample file.
+fn sample_hash(voices: &Path, p: &Profile) -> Result<String, TtsError> {
+    use sha2::Digest;
+    let path = sample_path(voices, p).ok_or_else(|| TtsError::Invalid(format!("{} has no voice sample (a natural clone has one)", p.id)))?;
+    let meta = std::fs::metadata(&path).map_err(|e| TtsError::Model(format!("{}: {e}", path.display())))?;
+    if meta.len() > crate::wav::MAX_BYTES {
+        return Err(TtsError::Invalid(format!("{}: too large for a voice sample", path.display())));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| TtsError::Model(format!("{}: {e}", path.display())))?;
+    Ok(sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The stretch of a natural clone's voice sample IndicF5 speaks from ([`CROSS_REFERENCE_SECONDS`]
+/// between pauses, loudness-normalised): mono at the sample's rate, the rate, and where it is.
+pub fn cross_clip(voices: &Path, p: &Profile) -> Result<(Vec<f32>, u32, f64, f64), TtsError> {
+    let n = p
+        .natural
+        .as_ref()
+        .ok_or_else(|| TtsError::Invalid(format!("{} is a timbre-only clone; Malayalam needs a natural clone (its voice sample is the reference)", p.id)))?;
+    let (x, rate) = crate::wav::read(&voices.join(&n.clip))?;
+    let s = pick_sample_within(&x, rate, CROSS_REFERENCE_SECONDS)?;
+    Ok((s.audio, rate, s.from, s.to))
+}
+
+/// The Malayalam reference of `id`, when one was made from its current voice sample.
+pub fn cross_reference(models_dir: &Path, id: &str) -> Result<Option<CrossReference>, TtsError> {
+    let voices = voices_dir(models_dir);
+    let p = load_profile(&voices, id)?;
+    let path = cross_path(&voices, &p)?;
+    let Ok(meta) = std::fs::metadata(&path) else { return Ok(None) };
+    if meta.len() > MAX_PROFILE_BYTES {
+        return Ok(None);
+    }
+    let Ok(r) = std::fs::read(&path).map_err(|_| ()).and_then(|b| serde_json::from_slice::<CrossReference>(&b).map_err(|_| ())) else {
+        return Ok(None);
+    };
+    let fresh = r.version == CROSS_REFERENCE_VERSION
+        && r.sample == sample_hash(&voices, &p)?
+        && r.transcript.chars().any(char::is_alphanumeric)
+        && r.transcript.chars().count() <= MAX_TRANSCRIPT_CHARS
+        && r.from.is_finite()
+        && r.to.is_finite();
+    Ok(fresh.then_some(r))
+}
+
+/// Make the Malayalam reference of `id`: its clip ([`cross_clip`]) and the clip's transcript —
+/// `transcript` when given, else what `transcribe` (mono 16 kHz → text) hears.
+pub fn prepare_cross_lingual(
+    models_dir: &Path,
+    id: &str,
+    transcript: Option<&str>,
+    transcribe: &mut dyn FnMut(&[f32]) -> Result<String, String>,
+) -> Result<CrossReference, TtsError> {
+    let voices = voices_dir(models_dir);
+    let p = load_profile(&voices, id)?;
+    let (clip, rate, from, to) = cross_clip(&voices, &p)?;
+    let (text, given) = match transcript.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => (t.to_string(), true),
+        None => {
+            let x16 = filmcraft_audio_dsp::resample::resample_sinc(&clip, rate, 16_000);
+            let t = transcribe(&x16).map_err(|e| TtsError::Invalid(format!("the voice sample could not be transcribed ({e}); give its transcript")))?;
+            (t, false)
+        }
+    };
+    let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_TRANSCRIPT_CHARS).collect();
+    if !text.chars().any(char::is_alphanumeric) {
+        return Err(TtsError::Invalid("no words were heard in the voice sample; give its transcript".into()));
+    }
+    let r = CrossReference { version: CROSS_REFERENCE_VERSION, sample: sample_hash(&voices, &p)?, from, to, transcript: text, given };
+    let path = cross_path(&voices, &p)?;
+    let bytes = serde_json::to_vec_pretty(&r).map_err(|e| TtsError::Model(e.to_string()))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &bytes).map_err(|e| TtsError::Model(format!("{}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, &path).map_err(|e| TtsError::Model(format!("{}: {e}", path.display())))?;
+    Ok(r)
+}
+
+/// The cloned voice `id` speaking Malayalam (IndicF5, feature `indicf5`); its Malayalam
+/// reference must have been made ([`prepare_cross_lingual`]).
+pub fn load_malayalam(id: &str, models_dir: &Path) -> Result<Box<dyn Voice>, TtsError> {
+    let profile = load_profile(&voices_dir(models_dir), id)?;
+    malayalam_voice::load(profile, models_dir)
+}
+
+/// Cloned voices speaking Malayalam through IndicF5 (feature `indicf5`).
+#[cfg(feature = "indicf5")]
+mod malayalam_voice {
+    use super::*;
+    use crate::f5::{self, F5, Reference};
+
+    /// Silence between utterances, ms.
+    const UTTERANCE_GAP_MS: u64 = 250;
+    /// Seeds between takes.
+    const TAKE_SEEDS: u64 = 7919;
+    /// References kept built.
+    const REFERENCES: usize = 4;
+
+    /// The release in `models_dir`, loaded once and shared.
+    fn model(models_dir: &Path) -> Result<Arc<F5>, TtsError> {
+        static M: OnceLock<Mutex<Option<(PathBuf, Arc<F5>)>>> = OnceLock::new();
+        if !catalog::voxcpm_installed(models_dir, &catalog::INDICF5) {
+            return Err(TtsError::NotInstalled);
+        }
+        let dir = catalog::voxcpm_dir(models_dir, &catalog::INDICF5);
+        let mut g = M.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((d, m)) = g.as_ref()
+            && *d == dir
+        {
+            return Ok(m.clone());
+        }
+        *g = None;
+        let m = Arc::new(F5::load(&dir)?);
+        *g = Some((dir, m.clone()));
+        Ok(m)
+    }
+
+    /// The transcript as the English front end normalises it (numbers and symbols spelled), with
+    /// dashes as commas (IndicF5's vocabulary has no dash).
+    fn english(t: &str) -> Result<String, TtsError> {
+        Ok(crate::voxcpm::text::sentences(t)?.join(" ").replace(" —", ",").replace(['—', '–'], ","))
+    }
+
+    /// The reference IndicF5 speaks after, built once per profile and reference.
+    pub(super) fn reference(p: &Profile, r: &CrossReference, m: &F5, voices: &Path) -> Result<Arc<Reference>, TtsError> {
+        type Refs = Vec<(String, Arc<Reference>)>;
+        static C: OnceLock<Mutex<Refs>> = OnceLock::new();
+        let key = format!("{}|{}|{}|{}|{}|{}", p.id, p.created, r.sample, r.from, r.to, r.transcript);
+        let cache = C.get_or_init(Default::default);
+        if let Some(found) = cache.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()) {
+            return Ok(found);
+        }
+        let (clip, rate, _, _) = cross_clip(voices, p)?;
+        let mut x = filmcraft_audio_dsp::resample::resample_sinc(&clip, rate, f5::RATE);
+        // 50 ms of silence after the clip, as the reference prepares it
+        x.extend(std::iter::repeat_n(0.0, (f5::RATE / 20) as usize));
+        let built = Arc::new(m.reference(&x, &english(&r.transcript)?)?);
+        let mut c = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        c.retain(|(k, _)| *k != key);
+        c.push((key, built.clone()));
+        let extra = c.len().saturating_sub(REFERENCES);
+        c.drain(..extra);
+        Ok(built)
+    }
+
+    pub(super) fn load(profile: Profile, models_dir: &Path) -> Result<Box<dyn Voice>, TtsError> {
+        let voices = voices_dir(models_dir);
+        let r = cross_reference(models_dir, &profile.id)?
+            .ok_or_else(|| TtsError::Invalid(format!("{} has no Malayalam reference yet: make it with tts.voiceReference", profile.id)))?;
+        let m = model(models_dir)?;
+        let reference = reference(&profile, &r, &m, &voices)?;
+        Ok(Box::new(MalayalamVoice { gender: gender(&profile), model: m, reference, base: f5::Settings::default() }))
+    }
+
+    /// A cloned voice speaking Malayalam.
+    pub struct MalayalamVoice {
+        gender: Gender,
+        model: Arc<F5>,
+        reference: Arc<Reference>,
+        /// Steps and guidance (the reference's defaults); speed and seed come per reading.
+        base: f5::Settings,
+    }
+
+    #[cfg(test)]
+    impl MalayalamVoice {
+        pub(super) fn new(gender: Gender, model: Arc<F5>, reference: Arc<Reference>, base: f5::Settings) -> MalayalamVoice {
+            MalayalamVoice { gender, model, reference, base }
+        }
+    }
+
+    impl Voice for MalayalamVoice {
+        fn info(&self) -> VoiceInfo {
+            VoiceInfo {
+                id: "clone",
+                name: "Cloned voice (Malayalam)",
+                language: crate::malayalam::TAG,
+                gender: self.gender,
+                engine: "clone",
+                description: "A cloned voice speaking Malayalam: IndicF5 continuing the speaker's voice sample",
+                license: "IndicF5 MIT (AI4Bharat); Vocos MIT (charactr)",
+                installed: true,
+            }
+        }
+
+        fn synthesize(&self, script: &str, params: &Params) -> Result<Audio, TtsError> {
+            crate::check_text(script)?;
+            params.check()?;
+            let (pieces, _) = crate::malayalam::pieces(script, self.reference.max_chars())?;
+            let rate = f5::RATE;
+            let max = (crate::MAX_SECONDS * f64::from(rate)) as usize;
+            let gap = (UTTERANCE_GAP_MS * u64::from(rate) / 1000) as usize;
+            let _gpu = super::natural::gpu("IndicF5 narration")?;
+            let mut out: Vec<f32> = Vec::new();
+            let mut spoke = false;
+            for (i, piece) in pieces.into_iter().enumerate() {
+                match piece {
+                    crate::malayalam::Piece::Pause(ms) => out.resize(out.len().saturating_add((u64::from(ms) * u64::from(rate) / 1000) as usize), 0.0),
+                    crate::malayalam::Piece::Say(u) => {
+                        if spoke {
+                            out.resize(out.len().saturating_add(gap), 0.0);
+                        }
+                        // pace is IndicF5's own speed (the duration it is asked for); each take
+                        // reads afresh with its own run of seeds
+                        let seed = 1u64.wrapping_add(u64::from(params.take).wrapping_mul(TAKE_SEEDS)).wrapping_add(i as u64);
+                        let s = f5::Settings { speed: params.pace as f32, seed, ..self.base };
+                        let a = self.model.speak(&self.reference, &u, &s, &mut |_, _| true)?;
+                        out.extend_from_slice(super::natural::trim_silence(&a, rate));
+                        spoke = true;
+                    }
+                }
+                if out.len() > max {
+                    return Err(TtsError::AudioTooLong);
+                }
+            }
+            if !spoke {
+                return Err(TtsError::Empty);
+            }
+            let mut out = if params.semitones.abs() > 1e-6 { neural::pitch_shift(out, params.semitones, rate) } else { out };
+            let peak = out.iter().fold(0f32, |m, v| m.max(v.abs()));
+            if peak > 0.98 {
+                let g = 0.98 / peak;
+                out.iter_mut().for_each(|v| *v *= g);
+            }
+            Ok(Audio { samples: out, sample_rate: rate })
+        }
+    }
+}
+
+#[cfg(not(feature = "indicf5"))]
+mod malayalam_voice {
+    use super::*;
+
+    pub(super) fn load(_profile: Profile, _models_dir: &Path) -> Result<Box<dyn Voice>, TtsError> {
+        Err(TtsError::Invalid("Malayalam voices (IndicF5) are not available in this build (built without the `indicf5` feature)".into()))
+    }
+}
+
 /// The gender of a profile: the natural clone's estimate, else its base voice's.
 pub fn gender(p: &Profile) -> Gender {
     if let Some(g) = p.natural.as_ref().and_then(|n| n.gender) {
@@ -886,13 +1153,13 @@ mod natural {
 
     /// The GPU, ours while the guard lives; waits for another process's script to finish.
     /// Without a place to keep locks it speaks unlocked rather than refuse.
-    fn gpu() -> Result<Option<filmcraft_locks::Guard>, TtsError> {
+    pub(super) fn gpu(what: &str) -> Result<Option<filmcraft_locks::Guard>, TtsError> {
         use filmcraft_locks::{LockError, Resource};
         // tests speak with tiny fake models: never wait on (or hold up) a real narration
         if cfg!(test) {
             return Ok(None);
         }
-        match filmcraft_locks::acquire(Resource::Gpu, "VoxCPM narration", GPU_WAIT, &mut |_| {}) {
+        match filmcraft_locks::acquire(Resource::Gpu, what, GPU_WAIT, &mut |_| {}) {
             Ok(g) => Ok(Some(g)),
             Err(e @ LockError::Busy(..)) => Err(TtsError::Model(format!("{e}; try again when it is free (`filmcraft-cli locks` shows who holds what)"))),
             Err(LockError::Io(_)) => Ok(None),
@@ -1002,7 +1269,7 @@ mod natural {
             // a spoken style goes in front of every utterance; VoxCPM2 follows it only after a
             // reference-only prompt (a continuation prompt sets the delivery itself)
             let style = params.style.filter(|_| self.model.variant() == Variant::V2 && !self.prompt.continues()).map(text::style_prefix).unwrap_or_default();
-            let _gpu = gpu()?;
+            let _gpu = gpu("VoxCPM narration")?;
             let mut out: Vec<f32> = Vec::new();
             let mut spoke = false;
             for (i, piece) in text::pieces(script)?.into_iter().enumerate() {
@@ -1452,6 +1719,109 @@ pub(crate) mod tests {
         // silence or a second of speech makes no voice
         assert!(save_natural("me", "Me", &vec![0.0; rate as usize * 20], rate, "voxcpm-2", PromptMode::Reference, &req, "", &d, &mut tr, &mut |_| {}).is_err());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A natural clone `clone:my-voice` with a 20 s voice sample of bursts in `<root>/voices`.
+    pub(crate) fn natural_clone(root: &Path) -> PathBuf {
+        let models = root.join("models");
+        let voices = voices_dir(&models);
+        save(&voices, &natural_profile()).unwrap();
+        let x = bursts(16_000, &[(2.0, 0.3); 9]);
+        crate::wav::write(&voices.join("my-voice.wav"), &x, 16_000).unwrap();
+        models
+    }
+
+    #[test]
+    fn the_malayalam_reference_is_made_once_per_sample() {
+        let root = tmp("cross");
+        let models = natural_clone(&root);
+        let voices = voices_dir(&models);
+        assert_eq!(cross_reference(&models, "clone:my-voice").unwrap(), None);
+        let heard = std::cell::Cell::new(0usize);
+        let mut tr = |x: &[f32]| {
+            heard.set(x.len());
+            Ok(" hello   there ".to_string())
+        };
+        let r = prepare_cross_lingual(&models, "clone:my-voice", None, &mut tr).unwrap();
+        assert_eq!((r.transcript.as_str(), r.given), ("hello there", false));
+        // the clip Whisper heard (16 kHz) is the 8–12 s stretch
+        let secs = heard.get() as f64 / 16_000.0;
+        assert!((7.0..=12.5).contains(&secs), "{secs}");
+        assert!(r.to - r.from <= CROSS_REFERENCE_SECONDS.1 + 0.5);
+        assert_eq!(cross_reference(&models, "clone:my-voice").unwrap(), Some(r.clone()));
+        assert!(voices.join("my-voice.indicf5.json").exists());
+        // the identity of the Malayalam voice: present now, follows the transcript; English
+        // keeps its own (unchanged) identity
+        let en = crate::cache::voice_identity("clone:my-voice", Some(&models)).unwrap();
+        assert_eq!(crate::cache::voice_identity_for("clone:my-voice", "en-US", Some(&models)), Some(en.clone()));
+        let ml = crate::cache::voice_identity_for("clone:my-voice", "ml-IN", Some(&models)).unwrap();
+        assert_ne!(ml, en);
+        assert!(ml.contains("indicf5") && ml.contains("ml-IN"), "{ml}");
+        let given = prepare_cross_lingual(&models, "clone:my-voice", Some(" exact words "), &mut |_| Err("unused".into())).unwrap();
+        assert_eq!((given.transcript.as_str(), given.given), ("exact words", true));
+        assert_ne!(crate::cache::voice_identity_for("clone:my-voice", "ml-IN", Some(&models)).unwrap(), ml);
+        // a voice sample made again: the reference is stale
+        crate::wav::write(&voices.join("my-voice.wav"), &bursts(16_000, &[(2.5, 0.3); 8]), 16_000).unwrap();
+        assert_eq!(cross_reference(&models, "clone:my-voice").unwrap(), None);
+        assert_eq!(crate::cache::voice_identity_for("clone:my-voice", "ml-IN", Some(&models)), None);
+        // nothing heard, a failed transcription, a damaged file
+        assert!(prepare_cross_lingual(&models, "clone:my-voice", None, &mut |_| Ok(" ... ".into())).is_err());
+        assert!(prepare_cross_lingual(&models, "clone:my-voice", None, &mut |_| Err("no model".into())).is_err());
+        std::fs::write(voices.join("my-voice.indicf5.json"), b"{not json").unwrap();
+        assert_eq!(cross_reference(&models, "clone:my-voice").unwrap(), None);
+        // a timbre-only clone has no voice sample
+        save(&voices, &Profile { id: "clone:other".into(), ..profile() }).unwrap();
+        assert!(prepare_cross_lingual(&models, "clone:other", Some("hi"), &mut |_| Err(String::new())).is_err());
+        assert!(cross_reference(&models, "clone:missing").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The Malayalam voice on a tiny random IndicF5: scripts with pauses, takes, pace, pitch.
+    #[cfg(feature = "indicf5")]
+    #[test]
+    fn a_malayalam_voice_speaks_scripts() {
+        let root = tmp("ml-voice");
+        let models = natural_clone(&root);
+        let voices = voices_dir(&models);
+        let r = prepare_cross_lingual(&models, "clone:my-voice", Some("hello there, this is my voice"), &mut |_| Err(String::new())).unwrap();
+        let dir = root.join("f5");
+        crate::f5::model::tests::fake_release(&dir);
+        let m = Arc::new(crate::f5::F5::load_on(&dir, &candle_core::Device::Cpu).unwrap());
+        let p = load_profile(&voices, "clone:my-voice").unwrap();
+        let reference = malayalam_voice::reference(&p, &r, &m, &voices).unwrap();
+        let v = malayalam_voice::MalayalamVoice::new(Gender::Male, m, reference, crate::f5::Settings { steps: 2, ..Default::default() });
+        assert_eq!(v.info().language, "ml-IN");
+        let script = "ഇത് 2013 ആണ്. [pause 500ms] ശരി.";
+        let a = v.synthesize(script, &Params::default()).unwrap();
+        assert_eq!(a.sample_rate, crate::f5::RATE);
+        assert!(a.samples.iter().all(|x| x.is_finite() && x.abs() <= 0.98));
+        assert!(a.seconds() > 0.5 + 0.25, "{}", a.seconds());
+        assert_eq!(v.synthesize(script, &Params::default()).unwrap(), a, "deterministic");
+        assert_ne!(v.synthesize(script, &Params { take: 1, ..Default::default() }).unwrap(), a, "another take reads afresh");
+        let fast = v.synthesize(script, &Params { pace: 2.0, ..Default::default() }).unwrap();
+        assert!(fast.seconds() < a.seconds(), "{} vs {}", fast.seconds(), a.seconds());
+        let high = v.synthesize(script, &Params { semitones: 3.0, ..Default::default() }).unwrap();
+        assert_ne!(high, a);
+        assert_eq!(v.synthesize("", &Params::default()), Err(TtsError::Empty));
+        assert_eq!(v.synthesize("[pause 1s]", &Params::default()), Err(TtsError::Empty));
+        assert!(v.synthesize("ഇത്", &Params { pace: 9.0, ..Default::default() }).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn malayalam_needs_a_cloned_voice() {
+        let root = tmp("ml-route");
+        let models = natural_clone(&root);
+        // built-in and Kokoro voices speak English only
+        let e = crate::voice_for("basic-female", "ml-IN", Some(&models)).err().unwrap();
+        assert!(e.to_string().contains("cloned voices"), "{e}");
+        // a clone without its Malayalam reference says how to make it
+        if let Err(e) = crate::voice_for("clone:my-voice", "ml", Some(&models)) {
+            assert!(e.to_string().contains("tts.voiceReference") || e == TtsError::NotInstalled || e.to_string().contains("indicf5"), "{e}");
+        }
+        // English routing is unchanged
+        assert!(crate::voice_for("basic-female", "en-US", Some(&models)).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

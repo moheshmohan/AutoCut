@@ -61,6 +61,48 @@ pub fn voice_identity(id: &str, models_dir: Option<&Path>) -> Option<String> {
     formant::VOICES.iter().any(|v| v.info.id == id).then(|| format!("{id}|formant"))
 }
 
+/// Version of the Malayalam front end (`crate::malayalam`) and voice: bumped when either reads
+/// the same script differently, so old Malayalam entries miss.
+pub const MALAYALAM_VERSION: u32 = 1;
+
+/// [`voice_identity`] of the voice `id` speaking `language`: English is exactly
+/// [`voice_identity`] (so English entries keep their keys); Malayalam is the cloned voice's
+/// profile and voice sample, its Malayalam reference (clip and transcript), the pinned IndicF5
+/// files and [`MALAYALAM_VERSION`]. `None` when nothing stable can be keyed on (no such clone,
+/// or its Malayalam reference not made yet).
+pub fn voice_identity_for(id: &str, language: &str, models_dir: Option<&Path>) -> Option<String> {
+    if !crate::malayalam::is_tag(language) {
+        return voice_identity(id, models_dir);
+    }
+    malayalam_identity(id, models_dir?)
+}
+
+#[cfg(feature = "kokoro")]
+fn malayalam_identity(id: &str, models_dir: &Path) -> Option<String> {
+    let voices = crate::clone::voices_dir(models_dir);
+    let p = crate::clone::load_profile(&voices, id).ok()?;
+    let r = crate::clone::cross_reference(models_dir, id).ok()??;
+    let mut h = Sha256::new();
+    h.update(r.transcript.as_bytes());
+    Some(format!(
+        "{}|clone v{}|created {}|sample {}|indicf5 ref {}–{} {}|{}|{} v{MALAYALAM_VERSION}",
+        p.id,
+        p.version,
+        p.created,
+        r.sample,
+        r.from.to_bits(),
+        r.to.to_bits(),
+        hex(&h.finalize()),
+        pins(catalog::INDICF5.files),
+        crate::malayalam::TAG,
+    ))
+}
+
+#[cfg(not(feature = "kokoro"))]
+fn malayalam_identity(_id: &str, _models_dir: &Path) -> Option<String> {
+    None
+}
+
 #[cfg(feature = "kokoro")]
 fn clone_identity(id: &str, models_dir: &Path) -> Option<String> {
     let voices = crate::clone::voices_dir(models_dir);

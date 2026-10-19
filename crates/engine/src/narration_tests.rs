@@ -534,3 +534,61 @@ fn a_damaged_disk_cache_entry_is_synthesized_again() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+#[test]
+fn the_language_is_given_or_read_from_the_script() {
+    use crate::narration::settings;
+    let en = settings("t", &json!({"text": "Hello there."}), None).unwrap();
+    assert_eq!(en.language, "en-US");
+    // Malayalam script is Malayalam; it needs a cloned voice
+    let ml = settings("t", &json!({"text": "ഇത് ശരിയാണ്.", "voice": "clone:me"}), None).unwrap();
+    assert_eq!(ml.language, "ml-IN");
+    let e = settings("t", &json!({"text": "ഇത് ശരിയാണ്."}), None).unwrap_err();
+    assert!(e.to_string().contains("cloned voices"), "{e}");
+    // given: `ml`, `ml-IN`, `en`
+    assert_eq!(settings("t", &json!({"text": "Hi", "voice": "clone:me", "language": "ml"}), None).unwrap().language, "ml-IN");
+    assert_eq!(settings("t", &json!({"text": "ഇത്", "voice": "clone:me", "language": "en"}), None).unwrap().language, "en-US");
+    for bad_lang in [json!("fr"), json!(5), json!("")] {
+        assert!(settings("t", &json!({"text": "Hi", "voice": "clone:me", "language": bad_lang}), None).is_err(), "{bad_lang}");
+    }
+    // an edit of the voice keeps the narration's language; a new script is read again
+    assert_eq!(settings("t", &json!({"voice": "clone:other"}), Some(&ml)).unwrap().language, "ml-IN");
+    assert_eq!(settings("t", &json!({"text": "Hello"}), Some(&ml)).unwrap().language, "en-US");
+}
+
+#[test]
+fn english_narrations_keep_their_cache_keys() {
+    use crate::narration::{cache_key, notes, settings};
+    use filmcraft_project::Narration;
+    // the key English narrations had before languages: unchanged, so the cache still hits
+    let n = settings("t", &json!({"text": "Hello there.", "voice": "clone:me", "pace": 1.0}), None).unwrap();
+    assert_eq!(cache_key(&n), format!("clone:me\u{1f}default\u{1f}{}\u{1f}plain\u{1f}0\u{1f}Hello there.", 1.0f64.to_bits()));
+    let ml = Narration { language: "ml-IN".into(), ..n.clone() };
+    assert_ne!(cache_key(&ml), cache_key(&n));
+    assert!(notes(&n).is_empty());
+    let odd = Narration { text: "ഇത് iPhone 🙂".into(), ..ml };
+    assert_eq!(notes(&odd).len(), 2, "{:?}", notes(&odd));
+}
+
+#[test]
+fn malayalam_commands_refuse_what_they_cannot_do() {
+    let mut s = demo();
+    let dir = tmp("ml-refuse");
+    let snap = (*s.project).clone();
+    for p in [
+        json!({"text": "ഇത് ശരിയാണ്.", "dir": dir}),
+        json!({"text": "Hi", "voice": "basic-male", "language": "ml-IN", "dir": dir}),
+        json!({"text": "ഇത്", "voice": "clone:nobody", "dir": dir}),
+    ] {
+        assert!(s.execute("tts.create", p.clone()).is_err(), "{p}");
+        assert_eq!(*s.project, snap, "{p}");
+    }
+    for p in [json!({}), json!({"voice": "basic-male"}), json!({"voice": "clone:nobody", "transcript": 5})] {
+        assert!(s.execute("tts.voiceReference", p.clone()).is_err(), "{p}");
+    }
+    let models = crate::voice_clone::models_json();
+    assert!(models.as_array().unwrap().iter().any(|m| m["id"] == "indicf5" && m["engine"] == "indicf5"), "{models}");
+    let v = s.execute("tts.voices", json!({})).unwrap();
+    assert_eq!(v["languages"][0]["id"], "en-US");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -109,6 +109,30 @@ clip behaviour: `crates/engine/src/narration.rs`.
     the element offset as a byte offset), so v is projected first (a regression test compares
     the GPU with the CPU).
 
+- **Malayalam** (`voice_for(id, "ml-IN", …)`): a natural clone speaks Malayalam through IndicF5.
+  - `malayalam` (no feature): the text front end. Spelling made canonical (two-part vowel
+    signs composed, old ZWJ chillus made atomic, zero-width joiners dropped, Malayalam digits);
+    numbers in Malayalam words, Indian system ("2013" → "രണ്ടായിരത്തി പതിമൂന്ന്"), with
+    suffixes joined by sandhi ("2013-ൽ" → "…പതിമൂന്നിൽ"), ranges ("… മുതൽ … വരെ"), percent,
+    rupees, decimals; Latin acronyms read with the letters' Malayalam names ("AI" → "എഐ"),
+    digits in codes with English names ("G1" → "ജി വൺ"); other Latin words kept and reported;
+    emoji and unknown symbols dropped and reported (`report`); sentences grouped into utterances
+    that fit the model, a long one split at commas, else between words; pause markers exact.
+    `detect` says whether a script is written in Malayalam.
+  - `clone`: the *Malayalam reference* (`<name>.indicf5.json`): 8–12 s of the voice sample
+    between pauses and its words — heard once by the speech model (English) or given by the
+    user — tied to the sample's SHA-256 (a voice made again needs a new one). The sample is
+    English: IndicF5 is prompted across languages. `clone:<name>` in Malayalam reads each
+    utterance after it (pace is IndicF5's own speed, pitch the pitch shifter; takes reseed),
+    250 ms between utterances, under the GPU lock.
+  - `catalog::INDICF5`: `model.safetensors` (1 402 789 408 bytes) and `vocab.txt` (11 283),
+    MIT. The official repository is gated (sign-in and a click-through); FilmCraft downloads
+    anonymously, so the files come from a public mirror pinned to a commit whose bytes have the
+    official SHA-256.
+  - `cache::voice_identity_for`: English is exactly `voice_identity` (English entries keep
+    their keys); Malayalam keys on the profile, the sample, the reference clip and words, the
+    IndicF5 pins and the front end's version.
+
 - `clone` also makes **natural clones** (profile version 2, engine `voxcpm`): a *voice sample*
   is kept next to the profile (`<name>.wav`: the best continuous 10–25 s of speech between
   pauses, long pauses shortened, −20 LUFS, at the encoder's rate) with its transcript. VoxCPM2
