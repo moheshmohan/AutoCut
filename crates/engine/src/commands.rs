@@ -3447,7 +3447,7 @@ fn build() -> Vec<CommandSpec> {
         query!(
             "effects.list",
             "List Effects",
-            r#"{"kind":"Video"|"Audio"|"VideoTransition"|"AudioTransition"?,"folder":"Video Transitions/Wipe"?,"detail":bool?}"#,
+            r#"{"kind":"Video"|"Audio"|"VideoTransition"|"AudioTransition"?,"folder":"Video Transitions/Wipe"?,"query":"text (name or transition keyword)"?,"detail":bool?}"#,
             |_, p| Ok(list_effects(p))
         ),
         query!("history.list", "List History", "{}", |s, _| Ok(
@@ -3921,10 +3921,16 @@ fn list_effects(p: &Value) -> Value {
     let kind = str_p(p, "kind");
     let folder = str_p(p, "folder");
     let detail = p.get("detail").and_then(Value::as_bool).unwrap_or(false);
+    // a search: the name, or one of a transition's keywords (roadmap C5)
+    let query = str_p(p, "query").map(|q| q.trim().to_lowercase()).filter(|q| !q.is_empty());
+    let found = |d: &filmcraft_project::EffectDef| {
+        query.as_deref().is_none_or(|q| d.name.to_lowercase().contains(q) || filmcraft_project::transition_catalog::keyword_match(d.id, q))
+    };
     let out = filmcraft_project::effect_defs()
         .iter()
         .filter(|d| kind.is_none_or(|k| format!("{:?}", d.kind).eq_ignore_ascii_case(k)))
         .filter(|d| folder.is_none_or(|f| d.category.join("/").starts_with(f)))
+        .filter(|d| found(d))
         .map(|d| {
             let mut v = json!({
                 "id": d.id,
@@ -3936,6 +3942,9 @@ fn list_effects(p: &Value) -> Value {
                 "params": d.params.iter().map(|p| p.id).collect::<Vec<_>>(),
                 "badges": {"accelerated": d.accelerated, "float32": d.float32, "yuv": d.yuv},
             });
+            if d.kind == filmcraft_project::EffectKind::VideoTransition {
+                v["keywords"] = json!(filmcraft_project::transition_catalog::transition_keywords(d.id));
+            }
             if detail {
                 v["paramInfo"] = Value::Array(d.params.iter().map(param_info).collect());
             }

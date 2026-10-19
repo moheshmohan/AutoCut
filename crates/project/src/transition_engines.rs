@@ -313,12 +313,13 @@ mod tests {
     fn presets_are_listed_in_their_folders() {
         let all = crate::effect::effect_defs();
         for (cat, n) in [(LUMA_WIPES, LUMA_PRESETS.len()), (BLEND_DISSOLVES, BLEND_PRESETS.len())] {
-            let defs: Vec<_> = all.iter().filter(|d| d.category == cat).collect();
-            assert_eq!(defs.len(), n);
-            let names: Vec<String> = defs.iter().map(|d| d.name.to_ascii_lowercase()).collect();
+            // (the GL shape wipes share the Luma Wipes folder)
+            let names: Vec<String> = all.iter().filter(|d| d.category == cat).map(|d| d.name.to_ascii_lowercase()).collect();
             let mut sorted = names.clone();
             sorted.sort();
             assert_eq!(names, sorted, "{cat:?} sorted by name");
+            let defs: Vec<_> = all.iter().filter(|d| d.category == cat && is_engine_transition(d.id)).collect();
+            assert_eq!(defs.len(), n);
             for d in defs {
                 assert!(is_engine_transition(d.id), "{}", d.id);
                 assert_eq!(d.kind, EffectKind::VideoTransition);

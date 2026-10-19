@@ -57,7 +57,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
                 continue;
             }
-            let mut items: Vec<_> = defs.iter().filter(|d| d.category.first() == Some(&top)).filter(|d| crate::i18n::matches_query(d.name, &filter)).collect();
+            // (a transition is also found by its keywords: "leak", "datamosh", "zoom"…)
+            let mut items: Vec<_> = defs
+                .iter()
+                .filter(|d| d.category.first() == Some(&top))
+                .filter(|d| crate::i18n::matches_query(d.name, &filter) || filmcraft_project::transition_catalog::keyword_match(d.id, &filter))
+                .collect();
             // Premiere lists effect folders and effects alphabetically (obsolete ones last)
             if top == "Video Effects" || top == "Legacy" {
                 items.sort_by_key(|d| (d.category.get(1) == Some(&"Obsolete"), d.category.get(1).copied().unwrap_or(""), d.name.to_ascii_lowercase()));

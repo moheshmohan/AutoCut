@@ -92,9 +92,10 @@ fn gpu_shader_transitions_match_the_cpu_reference() {
                 let (p99, mean) = compare(&cpu, &gpu);
                 worst = (worst.0.max(p99), worst.1.max(mean));
                 // the endpoints pass the inputs through: half-float rounding only
-                // FilmCraft's content-aware engines (the flow transitions, the Content-Aware Wipe)
-                // agree within one 8-bit level
-                let limit = if progress == 0.0 || progress == 1.0 || shader::reads_content(id) { (1, 0.5) } else { (6, 1.5) };
+                // FilmCraft's C3 and C5 engines (the flow transitions, the Content-Aware Wipe, the
+                // light & film, pattern and camera presets) agree within one 8-bit level
+                let strict = shader::reads_content(id) || filmcraft_project::transition_catalog::style_preset(id).is_some();
+                let limit = if progress == 0.0 || progress == 1.0 || strict { (1, 0.5) } else { (6, 1.5) };
                 if p99 > limit.0 || mean >= limit.1 {
                     failures.push(format!("{id} {w}x{h} alpha {alpha} p={progress}: p99 {p99}, mean {mean:.3}"));
                 }

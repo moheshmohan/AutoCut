@@ -11,7 +11,9 @@ use std::f32::consts::PI;
 use crate::image::Image;
 
 mod engines;
+mod styles;
 pub(crate) use engines::{content_wipe, flow_engine};
+pub(crate) use styles::{camera, light_film, patterns};
 
 /// A 2-D vector with GLSL-style arithmetic.
 #[derive(Clone, Copy, Debug, PartialEq)]

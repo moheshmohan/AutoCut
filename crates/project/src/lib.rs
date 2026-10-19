@@ -25,6 +25,7 @@ pub mod mixer;
 pub mod multicam;
 pub mod narration;
 pub mod transcript;
+pub mod transition_catalog;
 pub mod transition_engines;
 pub mod transition_sound;
 pub mod vtransition;

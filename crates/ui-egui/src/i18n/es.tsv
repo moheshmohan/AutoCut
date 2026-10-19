@@ -3896,3 +3896,42 @@
 	Subject Protection	Protección del sujeto
 	Seam Freedom	Libertad de la costura
 # Transition tools (roadmap C4: transitions on the beat, transition sounds)
+# Transition catalogue folders and engines (roadmap C5)
+	Zooms & Camera	Zooms y cámara
+	3D & Spatial	3D y espacio
+	Light & Film	Luz y película
+	Glitch & Datamosh	Fallos y datamosh
+	Particles & Patterns	Partículas y patrones
+	Warm Light Leak	Fuga de luz cálida
+	Prism Leak	Fuga de luz prismática
+	Burn Through	Quemado de película
+	Lens Flare Sweep	Barrido de destello de lente
+	Exposure Flash	Destello de exposición
+	Bokeh Defocus	Desenfoque bokeh
+	Projector Roll	Salto de proyector
+	Halftone Dots	Puntos de semitono
+	Triangle Tiles	Mosaico de triángulos
+	Heart Bubbles	Burbujas de corazones
+	Sparkle Dissolve	Disolución con destellos
+	RGB Split Glitch	Fallo de separación RGB
+	Scanline Glitch	Fallo de líneas de barrido
+	Punch Zoom In	Zoom de impacto hacia dentro
+	Pull Zoom Out	Zoom hacia fuera
+	Spin Zoom	Zoom con giro
+	Whip Pan	Barrido rápido
+	Shake Cut	Corte con sacudida
+	Card Flip	Volteo de tarjeta
+	Tilt Slide	Deslizamiento inclinado
+	Leak Color	Color de la fuga
+	Color Split	Separación de color
+	Sweep Angle	Ángulo del barrido
+	Flash Color	Color del destello
+	Blur Radius	Radio del desenfoque
+	Highlight Boost	Realce de luces
+	Frame Line	Línea entre fotogramas
+	Scratches	Arañazos
+	Cells per Row	Celdas por fila
+	Sparkle Color	Color de los destellos
+	Shift	Desplazamiento
+	Line Height	Altura de línea
+	Axis	Eje

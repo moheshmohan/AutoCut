@@ -531,7 +531,15 @@ fn every_video_transition_applies_via_command() {
     s.execute("playhead.set", json!({"time": cut.0})).unwrap();
     let defs: Vec<_> =
         filmcraft_project::effect_defs().iter().filter(|d| d.kind == filmcraft_project::EffectKind::VideoTransition && d.category[0] != "Obsolete").collect();
-    assert_eq!(defs.len(), 84 + 21 + 40 + 32 + 26 + 7, "Premiere folders, Legacy, GL Transitions, Luma Wipes, Blend Dissolves, Flow & Morph");
+    // Premiere folders, Legacy, and the themed folders (40 GL ports, 32 Luma Wipes, 26 Blend
+    // Dissolves, 6 flow transitions and the Content-Aware Wipe, 20 light, pattern and camera
+    // presets: roadmap C3 / C5)
+    let themed: usize = filmcraft_project::transition_catalog::THEMED_FOLDERS
+        .iter()
+        .map(|f| filmcraft_project::effect_defs().iter().filter(|d| d.category == *f).count())
+        .sum();
+    assert_eq!(themed, 40 + 32 + 26 + 7 + 20);
+    assert_eq!(defs.len(), 84 + 21 + themed, "Premiere folders, Legacy, themed folders");
     for (i, d) in defs.iter().enumerate() {
         // alternate id and display-name lookups
         let name = if i % 2 == 0 { d.id } else { d.name };
@@ -612,17 +620,18 @@ fn gl_transitions_apply_and_render_through_commands() {
     let during = s.render_program_at(0.25, mid).unwrap();
     assert!(during.px.iter().all(|v| v.is_finite()));
     assert!(during.px.iter().zip(&before.px).any(|(a, b)| (a - b).abs() > 1e-3));
-    // every GL transition is listed in its folder with its easing parameters
-    let gl = s.execute("effects.list", json!({"folder": "Video Transitions/GL Transitions", "detail": true})).unwrap();
-    let gl = gl.as_array().unwrap();
+    // every GL transition is listed in its themed folder with its easing parameters
+    let all = s.execute("effects.list", json!({"kind": "VideoTransition", "detail": true})).unwrap();
+    let gl: Vec<&serde_json::Value> = all.as_array().unwrap().iter().filter(|e| e["id"].as_str().unwrap().starts_with("gl_")).collect();
     assert_eq!(gl.len(), 40);
+    assert!(gl.iter().all(|e| e["path"] != "Video Transitions/GL Transitions"), "the GL folder is gone");
     for e in gl {
         let params = e["paramInfo"].as_array().unwrap();
         let easing = params.iter().find(|p| p["id"] == "easing").unwrap_or_else(|| panic!("{e}"));
         assert_eq!(easing["options"].as_array().unwrap().len(), 32);
     }
     // the transition engines' folders: luma wipes and blend dissolves, with the same easing
-    for (folder, n) in [("Video Transitions/Luma Wipes", 32), ("Video Transitions/Blend Dissolves", 26)] {
+    for (folder, n) in [("Video Transitions/Luma Wipes", 40), ("Video Transitions/Blend Dissolves", 26)] {
         let list = s.execute("effects.list", json!({"folder": folder, "detail": true})).unwrap();
         let list = list.as_array().unwrap();
         assert_eq!(list.len(), n, "{folder}");
@@ -656,6 +665,29 @@ fn effects_list_reports_transition_folders() {
     assert_eq!(aa["options"].as_array().unwrap().len(), 4);
     let legacy = s.execute("effects.list", json!({"folder": "Legacy/Video Transitions"})).unwrap();
     assert_eq!(legacy.as_array().unwrap().len(), 21);
+    // the themed folders (roadmap C5), and a search by name or keyword
+    for (folder, at_least) in [
+        ("Flow & Morph", 6),
+        ("Zooms & Camera", 10),
+        ("3D & Spatial", 7),
+        ("Light & Film", 10),
+        ("Distortion", 8),
+        ("Glitch & Datamosh", 7),
+        ("Particles & Patterns", 11),
+    ] {
+        let list = s.execute("effects.list", json!({"folder": format!("Video Transitions/{folder}")})).unwrap();
+        assert!(list.as_array().unwrap().len() >= at_least, "{folder}");
+    }
+    let leaks = s.execute("effects.list", json!({"kind": "VideoTransition", "query": "Leak"})).unwrap();
+    let ids: Vec<&str> = leaks.as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"lf_light_leak") && ids.contains(&"light_leak") && ids.contains(&"lf_prism_leak"), "{ids:?}");
+    let dm = s.execute("effects.list", json!({"kind": "VideoTransition", "query": "datamosh"})).unwrap();
+    let dm = dm.as_array().unwrap();
+    assert!(dm.iter().any(|e| e["id"] == "flow_datamosh" && e["keywords"].as_array().is_some_and(|k| !k.is_empty())));
+    assert!(dm.iter().all(|e| e["keywords"].as_array().is_some_and(|k| k.iter().any(|w| w.as_str().is_some_and(|w| w.contains("datamosh"))))
+        || e["name"].as_str().unwrap().to_lowercase().contains("datamosh")));
+    let none = s.execute("effects.list", json!({"query": "  "})).unwrap();
+    assert_eq!(none.as_array().unwrap().len(), filmcraft_project::effect_defs().len(), "a blank search lists everything");
     // the default transition accepts names shared with video effects
     s.execute("effects.setDefaultTransition", json!({"effect": "Mosaic"})).unwrap();
     assert_eq!(s.state.default_video_transition, "mosaic_transition");

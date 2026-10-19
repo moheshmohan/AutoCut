@@ -215,8 +215,11 @@ fn effects_panel_lists_the_premiere_transition_folders() {
     for f in filmcraft_project::vtransition::VIDEO_TRANSITION_FOLDERS {
         assert!(folders.contains(&format!("effects.folder.Video Transitions/{f}")), "{f}: {folders:?}");
     }
-    // the GL Transitions follow the Premiere folders
-    assert!(folders.iter().any(|f| f == "effects.folder.Video Transitions/GL Transitions"), "{folders:?}");
+    // the themed folders (Flow & Morph, Zooms & Camera, …) follow the Premiere folders
+    for f in filmcraft_project::transition_catalog::THEMED_FOLDERS {
+        assert!(folders.iter().any(|x| *x == format!("effects.folder.{}", f.join("/"))), "{f:?}: {folders:?}");
+    }
+    assert!(!folders.iter().any(|f| f == "effects.folder.Video Transitions/GL Transitions"), "{folders:?}");
     assert!(folders.iter().any(|f| f == "effects.folder.Legacy"), "{folders:?}");
     // search opens the matching folders: every modern wipe, and the legacy ones
     d.ok("ui.set", json!({"effectsSearch": "wipe"}));
@@ -246,6 +249,13 @@ fn effects_panel_lists_the_premiere_transition_folders() {
     d.ok("ui.set", json!({"effectsSearch": "waterdrop"}));
     d.frames(3);
     assert_eq!(d.element_ids("effects.item."), vec!["effects.item.gl_waterdrop".to_string()]);
+    // ...and a transition by its keywords
+    d.ok("ui.set", json!({"effectsSearch": "datamosh"}));
+    d.frames(3);
+    let items = d.element_ids("effects.item.");
+    for id in ["flow_datamosh", "flow_glitch"] {
+        assert!(items.iter().any(|i| i == &format!("effects.item.{id}")), "{id}: {items:?}");
+    }
     // clicking a sub-folder toggles it
     d.ok("ui.set", json!({"effectsSearch": ""}));
     d.frames(2);

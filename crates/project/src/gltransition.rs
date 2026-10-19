@@ -2,16 +2,20 @@
 //! [gl-transitions](https://github.com/gl-transitions/gl-transitions) collection to WGSL, with a
 //! Rust reference of each (`filmcraft-render`, `transitions::shader`).
 //!
-//! They live in their own Effects-panel folder, `Video Transitions ▸ GL Transitions`, and are
-//! named `GL <upstream name>` (the names users of the collection know, kept apart from the
-//! Premiere-style transitions of the same name, such as Mosaic). Ids are `gl_<upstream name in
+//! They live in the themed folders of the catalogue (`Zooms & Camera`, `3D & Spatial`, `Light &
+//! Film`, `Distortion`, `Glitch & Datamosh`, `Particles & Patterns`, `Luma Wipes`:
+//! [`crate::transition_catalog::gl_folder`]) and are named `GL <upstream name>` (the names users
+//! of the collection know, kept apart from the Premiere-style transitions of the same name, such
+//! as Mosaic). Ids are `gl_<upstream name in
 //! lower case>` and never change. Each transition keeps its upstream parameters (same units and
 //! defaults), followed by the host's easing: progress is eased on the CPU at the exact frame time
 //! before the shader sees it, so preview and export see the same value.
 
 use crate::effect::{EffectDef, EffectKind, ParamDef, ang, b, ch, col, fs, pt};
 
-/// Category of the GL Transitions folder.
+/// The former folder of the GL ports, `Video Transitions ▸ GL Transitions`. They now live in the
+/// themed folders ([`crate::transition_catalog`]); no transition is listed here any more (ids
+/// did not change, so projects that use them load as before).
 pub const GL_TRANSITIONS: &[&str] = &["Video Transitions", "GL Transitions"];
 
 /// Easing curves applied to the transition's progress (choice indices are stored in projects and
@@ -95,7 +99,8 @@ pub(crate) fn easing() -> [ParamDef; 5] {
 fn gl(id: &'static str, name: &'static str, params: Vec<ParamDef>) -> EffectDef {
     let mut params = params;
     params.extend(easing());
-    EffectDef { id, name, kind: EffectKind::VideoTransition, category: GL_TRANSITIONS, params, intrinsic: false, accelerated: true, float32: true, yuv: false }
+    let category = crate::transition_catalog::gl_folder(id).unwrap_or(GL_TRANSITIONS);
+    EffectDef { id, name, kind: EffectKind::VideoTransition, category, params, intrinsic: false, accelerated: true, float32: true, yuv: false }
 }
 
 /// The GL Transitions, sorted by name (the Effects panel lists them in this order).
@@ -286,21 +291,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gl_transitions_are_listed_in_their_folder() {
+    fn gl_transitions_are_listed_in_their_folders() {
         let all = crate::effect::effect_defs();
-        let gl: Vec<_> = all.iter().filter(|d| d.category == GL_TRANSITIONS).collect();
+        assert!(all.iter().all(|d| d.category != GL_TRANSITIONS), "the old folder is empty");
+        let gl: Vec<_> = all.iter().filter(|d| d.id.starts_with("gl_")).collect();
         assert_eq!(gl.len(), 40);
         let mut names: Vec<_> = gl.iter().map(|d| d.name.to_ascii_lowercase()).collect();
-        let sorted = {
-            let mut s = names.clone();
-            s.sort();
-            s
-        };
-        assert_eq!(names, sorted, "sorted by name");
+        names.sort();
         names.dedup();
         assert_eq!(names.len(), 40);
         for d in gl {
-            assert!(d.id.starts_with("gl_") && d.name.starts_with("GL "), "{}", d.id);
+            assert!(d.name.starts_with("GL "), "{}", d.id);
+            assert_eq!(Some(d.category), crate::transition_catalog::gl_folder(d.id), "{}", d.id);
             assert_eq!(d.kind, EffectKind::VideoTransition);
             assert!(d.params.iter().all(|p| !p.animatable), "{}", d.id);
             assert_eq!(d.param("easing").map(|p| &p.default), Some(&crate::ParamValue::Choice(0)), "{}: linear by default", d.id);

@@ -29,7 +29,12 @@
 //! presets (`filmcraft_project::transition_engines`): the luma-mask wipe (`luma_wipe.wgsl`: a
 //! wipe following a generated map, with softness, feather and invert; dozens of shapes) and the
 //! blend-mode dissolve (`blend_dissolve.wgsl`: a dissolve through any of the compositor's blend
-//! modes). Every preset of an engine shares its one pipeline.
+//! modes). Every preset of an engine shares its one pipeline. Roadmap C3 adds two content-aware
+//! engines that read the field the timeline computes from the clips ([`super::content`]: optical
+//! flow, seams) instead of a map: the flow engine (`flow_engine.wgsl`: Flow Morph, Doppler Warp,
+//! Hype Ramp, Glitch Flow, Split Bands, Datamosh) and the Content-Aware Wipe
+//! (`content_wipe.wgsl`); roadmap C5 three procedural ones (`light_film.wgsl`, `patterns.wgsl`,
+//! `camera.wgsl`: [`filmcraft_project::transition_catalog::STYLE_PRESETS`]).
 //!
 //! **Motion blur** (roadmap C4). Transitions with a `motion_blur` parameter (the zoom and whip
 //! ports: SimpleZoom, DreamyZoom, directionalwarp, crosswarp, Bounce) are evaluated at 8–16
@@ -249,6 +254,59 @@ fn content_wipe_params(p: &Params) -> [f32; PARAMS] {
     pack(&[p.num("softness") / 100.0])
 }
 
+/// The C5 engines' uniforms (see `light_film.wgsl`, `patterns.wgsl`, `camera.wgsl`): the
+/// preset's mode, then its own parameters (pixel sizes in frame pixels, angles in radians,
+/// directions as unit vectors).
+fn style_params(p: &Params) -> [f32; PARAMS] {
+    use filmcraft_project::transition_catalog::{StyleEngine, style_preset};
+    let Some(preset) = style_preset(&p.e.effect) else { return [0.0; PARAMS] };
+    let mode = preset.mode as f32;
+    let pct = |id: &str| p.num(id) / 100.0;
+    let px = |id: &str| p.num(id).max(0.0) * p.scale;
+    let seed = p.num("seed").max(0.0).round();
+    let c = p.color("color");
+    // the travel of a `direction` choice: From North moves down, From West moves right
+    let dir = || match p.choice("direction") {
+        0 => (0.0, 1.0),
+        1 => (-1.0, 0.0),
+        2 => (0.0, -1.0),
+        _ => (1.0, 0.0),
+    };
+    match (preset.engine, preset.mode) {
+        (StyleEngine::Light, 0) => pack(&[mode, pct("amount"), seed, 0.0, c[0], c[1], c[2]]),
+        (StyleEngine::Light, 1) => pack(&[mode, pct("amount"), seed, px("split")]),
+        (StyleEngine::Light, 2) => pack(&[mode, 0.0, seed, pct("edge"), c[0], c[1], c[2]]),
+        (StyleEngine::Light, 3) => {
+            let a = p.num("angle").to_radians();
+            pack(&[mode, pct("amount"), 0.0, 0.0, c[0], c[1], c[2], 0.0, a.cos(), a.sin()])
+        }
+        (StyleEngine::Light, 4) => pack(&[mode, pct("intensity"), 0.0, 0.0, c[0], c[1], c[2]]),
+        (StyleEngine::Light, 5) => pack(&[mode, 0.0, 0.0, px("radius"), 0.0, 0.0, 0.0, pct("boost")]),
+        (StyleEngine::Light, _) => pack(&[mode, 0.0, seed, px("gap"), 0.0, 0.0, 0.0, 0.0, pct("flicker"), pct("scratches")]),
+        (StyleEngine::Pattern, m) => {
+            let order = p.choice("order").min(2) as f32;
+            let (shift, extra) = match m {
+                4 => (px("shift"), p.whole("bands", 1.0)),
+                5 => (px("shift"), px("lines").max(1.0)),
+                _ => (0.0, 0.0),
+            };
+            pack(&[mode, p.whole("count", 1.0), order, seed, c[0], c[1], c[2], pct("amount"), shift, extra])
+        }
+        (StyleEngine::Camera, 0 | 1) => pack(&[mode, pct("zoom")]),
+        (StyleEngine::Camera, 2) => pack(&[mode, p.num("rotation").to_radians(), pct("zoom")]),
+        (StyleEngine::Camera, 3) => {
+            let (dx, dy) = dir();
+            pack(&[mode, dx, dy, pct("blur")])
+        }
+        (StyleEngine::Camera, 4) => pack(&[mode, px("shake"), p.num("speed").max(1.0), seed]),
+        (StyleEngine::Camera, 5) => pack(&[mode, p.choice("axis").min(1) as f32, 2.0 + 8.0 * (1.0 - pct("perspective"))]),
+        (StyleEngine::Camera, _) => {
+            let (dx, dy) = dir();
+            pack(&[mode, dx, dy, p.num("tilt").to_radians()])
+        }
+    }
+}
+
 /// FilmCraft's own engine shaders (original work, MIT OR Apache-2.0).
 const fn engine(
     id: &'static str,
@@ -261,7 +319,7 @@ const fn engine(
 }
 
 /// The engines, each drawing a family of presets (`filmcraft_project::transition_engines`,
-/// `filmcraft_project::flow_transitions`).
+/// `filmcraft_project::flow_transitions`, `filmcraft_project::transition_catalog`).
 static ENGINES: &[ShaderDef] = &[
     ShaderDef { map: Some(luma_map), ..engine("engine_luma_wipe", "luma_wipe", include_str!("shader/luma_wipe.wgsl"), luma_params, cpu::luma_wipe) },
     engine("engine_blend_dissolve", "blend_dissolve", include_str!("shader/blend_dissolve.wgsl"), blend_params, cpu::blend_dissolve),
@@ -270,6 +328,9 @@ static ENGINES: &[ShaderDef] = &[
         content: true,
         ..engine("engine_content_wipe", "content_wipe", include_str!("shader/content_wipe.wgsl"), content_wipe_params, cpu::content_wipe)
     },
+    engine("engine_light_film", "light_film", include_str!("shader/light_film.wgsl"), style_params, cpu::light_film),
+    engine("engine_patterns", "patterns", include_str!("shader/patterns.wgsl"), style_params, cpu::patterns),
+    engine("engine_camera", "camera", include_str!("shader/camera.wgsl"), style_params, cpu::camera),
 ];
 
 /// Every ported transition, sorted by id.
@@ -510,7 +571,12 @@ pub fn find(id: &str) -> Option<&'static ShaderDef> {
     if id == filmcraft_project::flow_transitions::CONTENT_AWARE_WIPE {
         return ENGINES.get(3);
     }
-    None
+    use filmcraft_project::transition_catalog::{StyleEngine, style_preset};
+    match style_preset(id)?.engine {
+        StyleEngine::Light => ENGINES.get(4),
+        StyleEngine::Pattern => ENGINES.get(5),
+        StyleEngine::Camera => ENGINES.get(6),
+    }
 }
 
 /// Every transition id the shader stage draws: the ports, then the engines' presets.
@@ -523,6 +589,7 @@ pub fn transition_ids() -> impl Iterator<Item = &'static str> {
         .chain(engines::BLEND_PRESETS.iter().map(|p| p.id))
         .chain(FLOW_PRESETS.iter().map(|p| p.id))
         .chain(std::iter::once(CONTENT_AWARE_WIPE))
+        .chain(filmcraft_project::transition_catalog::STYLE_PRESETS.iter().map(|p| p.id))
 }
 
 /// Whether shader transition `id` reads a content field (the flow transitions, the Content-Aware

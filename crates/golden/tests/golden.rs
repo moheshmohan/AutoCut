@@ -808,6 +808,57 @@ fn transition_engines_sheet() {
     assert!(failures.is_empty(), "golden mismatch: {failures:#?}");
 }
 
+/// Roadmap C3 and C5: the flow transitions and the Content-Aware Wipe (their flow and seams
+/// computed from the two frames), then the light & film, pattern and camera presets, at 45 %,
+/// from the same rendered demo frames as the other transition sheets (48×27), four by four per
+/// sheet (`transition_styles_sheet_<n>`, numbered from 1).
+#[test]
+fn transition_styles_sheet() {
+    use filmcraft_project::flow_transitions::{CONTENT_AWARE_WIPE, FLOW_PRESETS};
+    use filmcraft_project::transition_catalog::STYLE_PRESETS;
+    use filmcraft_render::transitions::apply;
+    const PER_ROW: usize = 4;
+    const PER_SHEET: usize = 16;
+    let frame = |scene: DemoScene| {
+        let mut b = Builder::new(1);
+        let m = b.demo(scene);
+        b.place(0, m, 0, 48);
+        let s = b.at(12);
+        render_sequence(&s.project, s.seq, RATE.tick_of(s.frame), RenderOptions { scale: 0.15, ..RenderOptions::default() }, &s.sources)
+    };
+    let (a, b) = (frame(DemoScene::OceanSunset), frame(DemoScene::Aurora));
+    let (cw, ch) = (a.w, a.h);
+    let ids: Vec<&str> = FLOW_PRESETS.iter().map(|p| p.id).chain([CONTENT_AWARE_WIPE]).chain(STYLE_PRESETS.iter().map(|p| p.id)).collect();
+    let sheets: Vec<&[&str]> = ids.chunks(PER_SHEET).collect();
+    let mut failures = Vec::new();
+    for (i, cells) in sheets.iter().enumerate() {
+        let rows = cells.len().div_ceil(PER_ROW);
+        let (w, h) = (cw * PER_ROW, ch * rows);
+        let mut px = vec![0u8; w * h * 4];
+        for (k, id) in cells.iter().enumerate() {
+            let (r, c) = (k / PER_ROW, k % PER_ROW);
+            let cell = apply(&find_effect(id).unwrap().instance(), &a, &b, 0.45).over_black_rgba8();
+            for y in 0..ch {
+                let dst = ((r * ch + y) * w + c * cw) * 4;
+                px[dst..dst + cw * 4].copy_from_slice(&cell[y * cw * 4..(y + 1) * cw * 4]);
+            }
+        }
+        let rgba = Rgba8::new(w as u32, h as u32, px);
+        let name = format!("transition_styles_sheet_{}", i + 1);
+        let title = format!(
+            "Flow & Morph, Light & Film, Particles & Patterns and camera transitions (FilmCraft engines, Rust reference) at 45 %: {}",
+            cells.join(", ")
+        );
+        match check_golden(&golden_path(&name), &rgba, Tolerance::RENDER, &title, &format!("crates/golden/tests/golden.rs ({name})")) {
+            Ok(d) => eprintln!("{name}: {d}"),
+            Err(e) => failures.push(e),
+        }
+    }
+    let stale = golden_path(&format!("transition_styles_sheet_{}", sheets.len() + 1));
+    assert!(!stale.exists(), "{} is not drawn any more: remove it, its sidecar and its ATTRIBUTION.md row", stale.display());
+    assert!(failures.is_empty(), "golden mismatch: {failures:#?}");
+}
+
 /// Effects panel ▸ Lumetri Presets thumbnail grid: every built-in preset graded by our Lumetri on
 /// the procedural preview picture (`filmcraft_render::lumetri_presets`).
 #[test]

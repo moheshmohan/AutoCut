@@ -7,8 +7,9 @@
 //!   of double-exposing (the "AI transition" morph). Its presets are styles on the same warp:
 //!   Flow Morph (the plain morph), Doppler Warp (velocity-scaled radial streaks), Hype Ramp (a speed
 //!   ramp with a motion blur, a punch-in and a brightness pulse peaking at the swap), Glitch Flow
-//!   (datamosh blocks pushed along the flow, clustered at the cut) and Split Bands (bands sliding
-//!   out alternately, the incoming clip reassembling behind them).
+//!   (datamosh blocks pushed along the flow, clustered at the cut), Split Bands (bands sliding
+//!   out alternately, the incoming clip reassembling behind them) and Datamosh (in `Glitch &
+//!   Datamosh`: the outgoing picture dragged along the flow until blocks refresh).
 //! - **Content-Aware Wipe** (`content_aware_wipe`): a wipe whose edge is routed around what stands
 //!   out in either picture, by seam carving (Avidan & Shamir, "Seam Carving for Content-Aware Image
 //!   Resizing", SIGGRAPH 2007) on their gradient energy. A sequence of monotone seams across the
@@ -71,7 +72,7 @@ const fn flow(id: &'static str, name: &'static str, style: FlowStyle) -> FlowPre
 
 /// Every flow transition, by id.
 pub const FLOW_PRESETS: &[FlowPreset] = &[
-    flow("flow_datamosh", "Datamosh", FlowStyle::Datamosh),
+    FlowPreset { category: crate::transition_catalog::GLITCH_DATAMOSH, ..flow("flow_datamosh", "Datamosh", FlowStyle::Datamosh) },
     flow("flow_doppler_warp", "Doppler Warp", FlowStyle::Doppler),
     flow("flow_glitch", "Glitch Flow", FlowStyle::Glitch),
     flow("flow_hype_ramp", "Hype Ramp", FlowStyle::HypeRamp),
@@ -174,11 +175,10 @@ pub(crate) fn content_aware_wipe_def() -> EffectDef {
     )
 }
 
-/// The Flow & Morph folder (sorted by name).
+/// The flow transitions (each in its folder) and the Content-Aware Wipe.
 pub(crate) fn defs() -> Vec<EffectDef> {
-    let mut v: Vec<EffectDef> = FLOW_PRESETS.iter().filter(|p| p.category == FLOW_MORPH).map(flow_def).collect();
+    let mut v: Vec<EffectDef> = FLOW_PRESETS.iter().map(flow_def).collect();
     v.push(content_aware_wipe_def());
-    v.sort_by_key(|d| d.name.to_ascii_lowercase());
     v
 }
 

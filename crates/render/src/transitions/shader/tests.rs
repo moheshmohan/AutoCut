@@ -36,7 +36,8 @@ fn every_shader_validates() {
     // every preset is drawn by its engine; ports by themselves
     let ids: Vec<&str> = transition_ids().collect();
     use filmcraft_project::flow_transitions::{CONTENT_AWARE_WIPE, FLOW_PRESETS};
-    assert_eq!(ids.len(), shaders().len() + engines::LUMA_PRESETS.len() + engines::BLEND_PRESETS.len() + FLOW_PRESETS.len() + 1);
+    let styles = filmcraft_project::transition_catalog::STYLE_PRESETS;
+    assert_eq!(ids.len(), shaders().len() + engines::LUMA_PRESETS.len() + engines::BLEND_PRESETS.len() + FLOW_PRESETS.len() + 1 + styles.len());
     for id in &ids {
         let d = find(id).unwrap();
         assert!(is_shader(id) && filmcraft_project::find_effect(id).is_some(), "{id}");
@@ -53,6 +54,15 @@ fn every_shader_validates() {
         } else if *id == CONTENT_AWARE_WIPE {
             assert_eq!(d.id, "engine_content_wipe");
             assert!(d.reads_content() && !d.reads_map());
+        } else if let Some(p) = filmcraft_project::transition_catalog::style_preset(id) {
+            use filmcraft_project::transition_catalog::StyleEngine;
+            let engine = match p.engine {
+                StyleEngine::Light => "engine_light_film",
+                StyleEngine::Pattern => "engine_patterns",
+                StyleEngine::Camera => "engine_camera",
+            };
+            assert_eq!(d.id, engine, "{id}");
+            assert!(!d.reads_content() && !d.reads_map());
         } else {
             assert_eq!(d.id, *id);
             assert!(!d.reads_content());
@@ -82,9 +92,10 @@ fn invalid_wgsl_is_an_error_not_a_panic() {
 
 #[test]
 fn catalogue_and_registry_match() {
-    let gl: Vec<&str> = effect_defs().iter().filter(|d| d.category == gltransition::GL_TRANSITIONS).map(|d| d.id).collect();
+    let mut gl: Vec<&str> = effect_defs().iter().filter(|d| d.id.starts_with("gl_")).map(|d| d.id).collect();
+    gl.sort_unstable();
     let ids: Vec<&str> = shaders().iter().map(|d| d.id).collect();
-    assert_eq!(gl, ids, "catalogue order (by name) and registry order (by id) agree");
+    assert_eq!(gl, ids, "every port is in the catalogue (the registry is sorted by id)");
     for d in shaders() {
         assert!(is_shader(d.id));
         let body = d.body;
@@ -498,4 +509,63 @@ fn motion_blur_averages_the_zoom_over_the_shutter() {
     set(&mut e, "motion_blur", ParamValue::Float(f64::NAN));
     assert!(uniforms(&e, 8, 8, 0.5, 1.0).unwrap().iter().all(|v| v.is_finite()));
     assert_eq!(uniforms(&instance("gl_crosszoom"), 8, 8, 0.5, 1.0).unwrap()[10 + PARAMS], 0.0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// C5: the light & film, pattern and camera engines
+
+#[test]
+fn c5_engines_do_what_their_names_say() {
+    let (w, h) = (64usize, 36usize);
+    let a = Image::filled(w, h, [1.0, 0.0, 0.0, 1.0]);
+    let b = Image::filled(w, h, [0.0, 0.0, 1.0, 1.0]);
+    let is_b = |c: [f32; 4]| c[2] > 0.99 && c[0] < 0.01;
+    let is_a = |c: [f32; 4]| c[0] > 0.99 && c[2] < 0.01;
+    let lum = |m: &Image| m.px.chunks(4).map(|c| c[0] + c[1] + c[2]).sum::<f32>() / (m.w * m.h) as f32;
+    let fade = a.clone().lerp(&b, 0.5);
+    // the light presets add light at the cut; the flash blows out towards white
+    for id in ["lf_light_leak", "lf_prism_leak", "lf_flare_sweep", "lf_exposure_flash"] {
+        assert!(lum(&apply(&instance(id), &a, &b, 0.5)) > lum(&fade) * 1.1, "{id}");
+    }
+    let flash = apply(&instance("lf_exposure_flash"), &a, &b, 0.5);
+    assert!(flash.px.chunks(4).all(|c| c[1] > 0.9), "white at the cut");
+    // Burn Through opens from a point: some of each picture half way, complete near the end
+    let burn = |p: f32| share(&apply(&instance("lf_burn_through"), &a, &b, p), is_b);
+    assert!(burn(0.05) < burn(0.5) && burn(0.5) < burn(0.95) && burn(0.97) > 0.99, "{} {} {}", burn(0.05), burn(0.5), burn(0.95));
+    // Projector Roll: a black frame line rolls through
+    let roll = apply(&instance("lf_projector_roll"), &a, &b, 0.5);
+    assert!(roll.px.chunks(4).any(|c| c[0] < 0.01 && c[1] < 0.01 && c[2] < 0.01 && c[3] > 0.99));
+    // Halftone Dots from the centre out; hearts, triangles and sparkles turn every cell
+    let dots = apply(&instance("pt_halftone"), &a, &b, 0.35);
+    assert!(is_b(dots.get(w / 2, h / 2)) && is_a(dots.get(0, 0)));
+    for id in ["pt_halftone", "pt_triangles", "pt_hearts", "pt_sparkle"] {
+        let s: Vec<f32> = [0.2, 0.5, 0.8].iter().map(|&p| share(&apply(&instance(id), &a, &b, p), is_b)).collect();
+        assert!(s[0] < s[1] && s[1] < s[2], "{id}: {s:?}");
+    }
+    // the glitches swap the pictures around the cut
+    for id in ["glitch_rgb_split", "glitch_scanlines"] {
+        assert!(share(&apply(&instance(id), &a, &b, 0.3), |c| c[0] > c[2]) > 0.9, "{id}");
+        assert!(share(&apply(&instance(id), &a, &b, 0.7), |c| c[2] > c[0]) > 0.9, "{id}");
+    }
+    // Card Flip: edge on (nothing) at the middle, the outgoing face first, the incoming after
+    let flip = |p: f32| apply(&instance("sp_card_flip"), &a, &b, p);
+    assert!(flip(0.5).px.chunks(4).all(|c| c[3] < 0.01));
+    assert!(flip(0.25).get(w / 2, h / 2)[0] > 0.5 && flip(0.75).get(w / 2, h / 2)[2] > 0.5);
+    // Whip Pan from the west: the incoming picture comes in on the left
+    let mut whip = instance("cam_whip_pan");
+    set(&mut whip, "blur", ParamValue::Float(0.0));
+    let m = apply(&whip, &a, &b, 0.5);
+    assert!(is_b(m.get(2, h / 2)) && is_a(m.get(w - 3, h / 2)));
+    // Pull Zoom Out shows the picture mirrored beyond its edges (never a smeared edge colour)
+    let ramp = paint(w, h, |x, _| [x / w as f32, 0.0, 0.0, 1.0]);
+    let out = apply(&instance("cam_pull_out"), &ramp, &ramp, 0.45);
+    assert!(out.get(0, h / 2)[0] > ramp.get(0, h / 2)[0] + 0.05, "mirrored, not clamped");
+    // the uniforms of a flare carry its direction, of a whip its travel
+    let mut flare = instance("lf_flare_sweep");
+    set(&mut flare, "angle", ParamValue::Float(90.0));
+    let u = uniforms(&flare, 64, 36, 0.5, 1.0).unwrap();
+    assert!(u[12].abs() < 1e-6 && (u[13] - 1.0).abs() < 1e-6, "{:?}", &u[12..14]);
+    let mut east = instance("cam_whip_pan");
+    set(&mut east, "direction", ParamValue::Choice(1));
+    assert_eq!(&uniforms(&east, 64, 36, 0.5, 1.0).unwrap()[5..7], &[-1.0, 0.0]);
 }
