@@ -301,11 +301,15 @@ SUBCOMMANDS
                                  <data dir>/google-photos/left-searches.txt for a next run.
                                  --since skips items created before that date (not downloaded).
                                  With --album <title> the same agent picks a whole album
-                                 instead — the seed you curate in Google Photos: it opens the
-                                 picker's Albums view (or searches the title), opens the album
-                                 with that title, selects all of it and presses Done; no
-                                 matching album selects nothing. --videos-only keeps only its
-                                 videos. Items you add to an album by hand are reachable only
+                                 instead — the seed you curate in Google Photos: it searches
+                                 the picker for that exact title (the picker has no Albums
+                                 view; Return on an album's exact title shows its items),
+                                 selects that whole result and presses Done. A search that
+                                 shows nothing new, or a result too big for an album (more
+                                 than --max-items, or a grid that never ends), selects
+                                 nothing. --videos-only downloads only its videos (the album
+                                 is selected whole, photos too; how many were left out is
+                                 said). Items you add to an album by hand are reachable only
                                  this way (Google shows apps only what they uploaded)
   youtube auth [--default] [--playlists]
                                  connect a YouTube channel: the browser opens Google's consent,
@@ -1249,12 +1253,21 @@ async fn cli() {
                     for f in &picked.failed {
                         diag(format_args!("photos pick: {f}"));
                     }
+                    // an album is selected whole, photos too (the picker cannot select by type)
+                    let photos = filmcraft_gphotos::not_videos(&picked.skipped);
+                    if photos > 0 && album_title.is_some() {
+                        diag(format_args!("photos pick: {photos} photo(s) of the album were selected with it and not downloaded (--videos-only)"));
+                    }
                     if picked.fetched.is_empty() {
                         if report.as_object().is_some_and(|o| !o.is_empty()) {
                             outln!("{report}");
                         }
                         fail(if !picked.failed.is_empty() {
                             "photos pick: nothing could be downloaded"
+                        } else if photos > 0 && photos == picked.skipped.len() {
+                            "photos pick: everything picked was a photo (--videos-only downloads only videos)"
+                        } else if photos > 0 {
+                            "photos pick: everything picked was a photo (--videos-only) or created before --since"
                         } else if !picked.skipped.is_empty() {
                             "photos pick: everything picked was created before --since"
                         } else {

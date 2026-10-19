@@ -96,6 +96,16 @@ impl Default for PickOptions {
     }
 }
 
+/// Why [`keep_picked`] leaves out an item of a videos-only pick.
+const NOT_A_VIDEO: &str = "not a video";
+
+/// How many of [`keep_picked`]'s skipped lines are items a videos-only pick left out for not being
+/// videos — the photos a whole album's selection took along (the picker cannot select by type).
+pub fn not_videos(skipped: &[String]) -> usize {
+    let why = format!(": {NOT_A_VIDEO}");
+    skipped.iter().filter(|s| s.ends_with(&why)).count()
+}
+
 /// Which picked items to download: those created on or after `since` and, with
 /// `videos_only`, videos. The rest come back as `"<filename>: <why>"` lines.
 pub fn keep_picked(items: Vec<PickedItem>, since: Option<&str>, videos_only: bool) -> (Vec<PickedItem>, Vec<String>) {
@@ -107,7 +117,7 @@ pub fn keep_picked(items: Vec<PickedItem>, since: Option<&str>, videos_only: boo
         {
             skipped.push(format!("{}: created {}", i.display_name(), i.created.get(..10).unwrap_or(&i.created)));
         } else if videos_only && i.kind != api::MediaKind::Video {
-            skipped.push(format!("{}: not a video", i.display_name()));
+            skipped.push(format!("{}: {NOT_A_VIDEO}", i.display_name()));
         } else {
             kept.push(i);
         }
@@ -674,6 +684,8 @@ mod tests {
         let (kept, skipped) = keep_picked(items(), Some("2020-01-01"), true);
         assert_eq!(names(&kept), ["new.mp4"]);
         assert_eq!(skipped, ["old.mp4: created 2019-05-01", "new.jpg: not a video", "odd: not a video"]);
+        assert_eq!(not_videos(&skipped), 2, "the photos (and the item of no known kind), not the old video");
+        assert_eq!(not_videos(&[]), 0);
     }
 
     /// Answers in order; every request is counted (and its method, URL and body kept).

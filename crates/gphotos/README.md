@@ -99,8 +99,9 @@ filmcraft-cli photos add <id>… --bridge 127.0.0.1:9876  # import cached items 
 # it types the query into the picker's search, selects matching videos, presses Done
 filmcraft-cli photos pick --auto "beach sunset videos" --max-items 5 --bridge 127.0.0.1:9876
 
-# a whole album as the seed: the agent opens the album titled "Robot showcase" in the picker
-# and selects all of it (--videos-only keeps its videos)
+# a whole album as the seed: the agent searches the picker for the exact title "Robot
+# showcase" (the result is the album's items) and selects all of it (--videos-only downloads
+# only its videos)
 filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9876
 
 # many searches, ONE picking session and ONE tab: each typed in turn, every result selected
@@ -359,9 +360,10 @@ large or of a type Google Photos does not take, an expired upload session.
   filters: items are chosen in Google's UI — by the user, or by the local screen agent
   (`--auto`, `--album`) driving that UI. Items already in the cache can be re-imported by id
   without the picker.
-- **Album picks depend on what the picker shows.** Google documents no Albums view in the
-  picker; the agent searches the album's title when it finds none, and needs the album to come
-  up as a suggestion or a result. A title shared by two albums is refused.
+- **Album picks depend on Google's search.** The picker has no Albums view and never suggests
+  an album; Return on an album's exact title shows the album's items, and the agent selects
+  that whole result. A title that is no album's gets ordinary search results instead, taken
+  for the album up to the run's item cap (past it nothing is confirmed): give the exact title.
 - **A person has to be there.** Each pick needs someone at a browser signed in to the Google
   account; there is no unattended import.
 - **Download links last 60 minutes.** A very large selection over a slow line can outlive

@@ -114,14 +114,33 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
     count is the header's "N selected" alone — the ask names no number (an example count was
     once answered back from an empty header), a bare number is not a count — and a header
     showing no selection gets the gesture once more from the top, then an error: Done is
-    never pressed with nothing selected. Select-all only ever runs inside a search result or
-    an opened album, never the whole library.
-  - **An album** (`album: Some(title)`): the picker's Albums view when one is grounded (a
-    small "album" element, never a thumbnail-sized box), else the title typed into the
-    picker's search (Google documents no Albums view; users search an album's title); only
-    an element labelled with the title is clicked, the opened screen must be headed by it,
-    then select-all. No match, or two albums with that title, is an error with nothing
-    selected.
+    never pressed with nothing selected. Select-all only ever runs inside a search result (an
+    album's too), never the whole library. The range starts at the first tile in reading order.
+  - **An album** (`album: Some(title)`): Google's picker has no Albums view (that view is only
+    in the Google Photos page behind the picker, where a selection does not count), and its
+    search suggestions never name an album (live, 2026-10-19: generic suggestions and people).
+    But Return on an album's exact title shows a search result that *is* the album's items,
+    newest first, under date headings — the grid of any search result (checked against the
+    page: 93 tiles for a 92-item album and the app's own export). So the agent types the title
+    as it is, presses Return and takes that result grid for the album: the range gesture over
+    all of it — every tile, photos too, so its first and last items are the album's ends — the
+    header's "N selected", then Done. There is no album card to look for and nothing to "open".
+    The guards come from the live failure, in which the model took the typed title in the search
+    field for "the album" and for "the album's heading", and the agent range-selected the
+    unfiltered library until its budget ran out:
+    - the search must visibly have run: the view moved after Return (`verify::moved`, looked at
+      once more while results load) and the grid's first screen — its date headings and its
+      tiles — is not the library's as the picker opened; otherwise "searching the picker for
+      `<title>` showed nothing new; nothing was selected";
+    - nothing inside the search field's box is ever a result, a tile or a heading
+      (`picker::in_field`: every grounding answer of an album pick is filtered through it);
+    - a runaway is never confirmed: a grid that does not end within the budget, or a count
+      above the run's `max_items`, ends the pick without Done (the agent closes the tab, and
+      the caller deletes the session).
+
+    The picker cannot select by type, so `--videos-only` takes the album whole and its photos
+    are skipped when downloading (`filmcraft_gphotos::keep_picked`); the CLI and the album
+    source say how many photos were left out.
   - **Done is checked**: after the press the agent re-captures; the press took when the
     window closed, the button is gone, or "N selected" is gone. Otherwise it presses again
     (at most twice more, from the budget), then reports that the picker did not accept Done.
@@ -161,7 +180,7 @@ photos tidy` closes picker tabs left in Chrome.
 MCP: `googlephotos_pick { query: "beach sunset videos", max_items: 5 }`,
 `googlephotos_pick { queries: ["videos October 2022", "videos November 2022"], all: true }` or
 `googlephotos_pick { album: "Robot showcase" }` — the result carries an `autopick` report of
-what the agent did (`album_opened`, `selected`, `done_pressed`, `searches`, `left`,
+what the agent did (`album_shown`, `selected`, `done_pressed`, `searches`, `left`,
 `tab_closed`, `note`), or for many searches the `sessions` and the searches `left`.
 
 ## One-time prerequisites
@@ -220,6 +239,10 @@ No model weights are committed to this repository or shipped with any binary.
 - macOS only for now; other platforms get a clean "unsupported" error.
 - Search happens in Google's own picker UI, so it inherits Google's ranking — an exact
   filename or a distinctive subject works best.
+- An album pick trusts Google's search: the picker shows no album as such, so a title that is
+  no album's still gets ordinary search results, and they are taken for the album (up to the
+  run's `max_items`; past it, or past the budget, nothing is confirmed). Give the album's exact
+  title, one no other text in the library matches better.
 
 ## Testing
 
@@ -232,7 +255,11 @@ date-group selection against a fake picker with date groups (a day of one item w
 button, a heading boxed from its text, a day selected already, a misplaced box that hits another
 day, a session filled to its cap and the search resumed from the day that did not fit, a
 resumed search, a search deferred whole, a day too big alone, a neighbouring month's day, the
-range fallback), and the picker tabs against a fake Chrome (only picker
+range fallback), album picks against a fake picker that behaves as Google's does (suggestions
+that never name the album, Return showing its items under date headings, the typed title boxed
+in the field as a tile and as a heading, a Return that shows nothing new, a runaway grid that is
+never confirmed, an exact album of 92 items selected whole), and the picker tabs against a fake
+Chrome (only picker
 tabs closed, a tab that asks "Leave site?" closed once more, Leave clicked and nothing else). A live model
 round-trip can be run with
 `AUTOCUT_SCREEN_LIVE=1`, and a saved window capture can be replayed through the real

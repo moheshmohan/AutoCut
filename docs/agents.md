@@ -160,8 +160,8 @@ progress and stop it:
   `photos.addToAlbum {album, mediaItemIds}` (only items FilmCraft uploaded). They need
   `filmcraft-cli photos auth --albums` once; until then they are disabled with that reason. To
   read a user-curated album back, use `googlephotos_pick {album: "<title>"}`: the Library API
-  never returns items a user added by hand, so the picker's vision agent opens the album and
-  selects all of it. To make a showcase straight from such an album, `showcase_analyze {album,
+  never returns items a user added by hand, so the picker's vision agent searches the picker
+  for the album's exact title (the result is the album's items) and selects all of it. To make a showcase straight from such an album, `showcase_analyze {album,
   prompt, plan: true}` picks it, imports its videos once (files the project holds are reused)
   and analyses only those clips (`autocut.analyze` / `autocut.makeShowcase` with `album`).
 - So do the AutoCut showcase jobs (`autocut.analyze`, `autocut.showcasePlan`, `autocut.makeShowcase`,

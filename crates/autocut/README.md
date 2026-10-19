@@ -301,8 +301,9 @@ In order:
    vintage cars"), else the classifier (`AUTOCUT_LLM_MODEL`); `--subject robot` skips that. A
    prompt nobody can read stops here, before the picker opens.
 3. **The album, picked whole.** Google's picker opens in the browser, and the local screen agent
-   ([crates/screenagent](../screenagent/README.md)) opens the album with exactly that title and
-   selects all of it, then presses Done. Its videos are downloaded into the cache (an item picked
+   ([crates/screenagent](../screenagent/README.md)) searches the picker for exactly that title —
+   Return on an album's exact title shows the album's items — selects that whole result, then
+   presses Done. Its videos are downloaded into the cache (an item picked
    before is not downloaded again). Photos are skipped — a showcase is built from video clips, so
    there is no `--with-photos` — and `--since` skips items created before it.
 4. **Imported once.** `file.import {reuse: true}`: a file the project already holds is reused,
@@ -322,9 +323,9 @@ In order:
 **Why the picker.** Since 2025-03-31 Google lets an app read back through the Library API only
 the albums and media items it created itself, so the clips a person adds to an album by hand —
 the seed — are reachable only through the Photos Picker, where a person, or the screen agent
-standing in for one, selects them. FilmCraft cannot list an album's contents; the agent finds
-the album in the picker by its exact title (its Albums view, or a search for the title) and
-selects everything. It needs Screen Recording and Accessibility for the terminal or app running
+standing in for one, selects them. FilmCraft cannot list an album's contents, and the picker
+has no Albums view; the agent searches the picker for the album's exact title, whose result is
+the album's items, and selects all of it. It needs Screen Recording and Accessibility for the terminal or app running
 it.
 
 The same in the app and for agents: `autocut.analyze` / `autocut.makeShowcase` with `album` (and

@@ -91,17 +91,6 @@ pub fn selected_count(label: &str) -> Option<u32> {
     })
 }
 
-/// The picker's Albums view (a tab or button), if it has one. Google's picker guide says
-/// albums "are not shown directly" and users find one by searching its title, so this is
-/// looked for first and the search is the way when it is absent.
-pub const ALBUMS_TAB: &str = "the 'Albums' tab or button in the picker's navigation (it switches the view from photos to the user's albums)";
-
-/// The inventory ask for albums: cards of an albums view, or album entries the search suggests.
-pub const ALBUM_TILES: &str = "Locate every album shown on this screen: album cards in a grid (a cover image with the album's title under it) and album entries in a list of search suggestions (an album icon or cover next to the album's title). Do not include the search box itself or individual photos. Use each album's title text, exactly as written, as its label.";
-
-/// The inventory ask for the heading of an opened album (or the album a filtered grid shows).
-pub const ALBUM_HEADING: &str = "Locate the title of the album whose photos this screen shows (the heading above the photos, or the album name in the search box or filter chip). Use that exact text as the label.";
-
 /// A title as compared: lower case, letters and digits only, words separated by one space
 /// ("Robots, 2020–2026" and "robots 2020-2026" are the same).
 pub fn normalize_title(s: &str) -> String {
@@ -109,64 +98,18 @@ pub fn normalize_title(s: &str) -> String {
     spaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Whether a grounded label names the album `title`: the same normalized words, optionally
-/// with the item count Google prints under a card ("12 items"), or "album" in front.
-pub fn album_label_matches(label: &str, title: &str) -> bool {
-    let t = normalize_title(title);
-    if t.is_empty() {
-        return false;
-    }
-    let mut l = normalize_title(label);
-    if !t.starts_with("album ")
-        && let Some(rest) = l.strip_prefix("album ")
-    {
-        l = rest.to_string();
-    }
-    if l == t {
+/// Whether a grounded element is inside the search `field`: its centre lies in the field's box,
+/// or at least half of its own box does. The field holds what was typed — an album's title,
+/// which the model offered live as "the album", as the album's heading and as a tile — so in an
+/// album pick nothing there is ever a result, a tile or a heading.
+pub fn in_field(e: &Element, field: &Element) -> bool {
+    let (cx, cy) = e.center();
+    if cx >= field.x1 && cx < field.x2 && cy >= field.y1 && cy < field.y2 {
         return true;
     }
-    let Some(rest) = l.strip_prefix(&t).and_then(|r| r.strip_prefix(' ')) else { return false };
-    let words: Vec<&str> = rest.split(' ').collect();
-    matches!(words.as_slice(), [n, unit] if n.chars().all(|c| c.is_ascii_digit()) && matches!(*unit, "item" | "items" | "photo" | "photos" | "video" | "videos"))
-}
-
-/// Whether an element is the Albums tab [`ALBUMS_TAB`] asked for: labelled "album…" and
-/// small, never a thumbnail-sized box (a misgrounded tile click would select a photo).
-pub fn is_albums_tab(e: &Element, w: u32, h: u32) -> bool {
-    let screen = u64::from(w) * u64::from(h);
-    e.label.to_lowercase().contains("album") && e.area() > 0 && e.area().saturating_mul(40) < screen
-}
-
-/// The albums in a `w`×`h` capture whose label names `title`, in reading order: never a
-/// whole-screen box, never one overlapping `avoid` (the search box, which holds the typed
-/// title), and a box whose centre falls inside one already kept is the model repeating itself.
-pub fn album_candidates(elements: &[Element], title: &str, avoid: Option<&Element>, w: u32, h: u32) -> Vec<Element> {
-    let screen = u64::from(w) * u64::from(h);
-    let band = (h / 16).max(1);
-    let overlaps = |a: &Element, b: &Element| a.x1 < b.x2 && b.x1 < a.x2 && a.y1 < b.y2 && b.y1 < a.y2;
-    let mut found: Vec<Element> = elements
-        .iter()
-        .filter(|e| album_label_matches(&e.label, title))
-        .filter(|e| e.area() > 0 && e.area().saturating_mul(10) < screen.saturating_mul(6))
-        .filter(|e| avoid.is_none_or(|a| !overlaps(e, a)))
-        .cloned()
-        .collect();
-    found.sort_by_key(|e| (e.y1 / band, e.x1));
-    let mut kept: Vec<Element> = Vec::new();
-    for e in found {
-        let (cx, cy) = e.center();
-        if !kept.iter().any(|k| cx >= k.x1 && cx < k.x2 && cy >= k.y1 && cy < k.y2) {
-            kept.push(e);
-        }
-    }
-    kept
-}
-
-/// Whether a heading read off an opened album names `title` (it may say more: "Robots ·
-/// 12 items", a search chip "Robots").
-pub fn heading_names(label: &str, title: &str) -> bool {
-    let t = normalize_title(title);
-    !t.is_empty() && (album_label_matches(label, title) || format!(" {} ", normalize_title(label)).contains(&format!(" {t} ")))
+    let w = u64::from(e.x2.min(field.x2).saturating_sub(e.x1.max(field.x1)));
+    let h = u64::from(e.y2.min(field.y2).saturating_sub(e.y1.max(field.y1)));
+    e.area() > 0 && w.saturating_mul(h).saturating_mul(2) >= e.area()
 }
 
 /// Whether the tile ending a range is the one that started it: the grid never moved
@@ -404,18 +347,19 @@ pub fn lone_tile(heading: &Element, headings: &[Element], tiles: &[Element]) -> 
     (!more && !behind && !claimed).then(|| tile.clone())
 }
 
+/// Whether an element is the size of a heading (or its check button) in a `w`×`h` capture: never
+/// a thumbnail, never a band across the grid.
+pub fn heading_sized(e: &Element, w: u32, h: u32) -> bool {
+    let screen = u64::from(w) * u64::from(h);
+    e.area() > 0 && e.area().saturating_mul(60) < screen && e.y2.saturating_sub(e.y1).saturating_mul(14) <= h
+}
+
 /// The date-group checks worth clicking in a `w`×`h` capture, in reading order: labelled with
 /// a date ([`date_key`]: the key that keeps one day from being clicked twice — a second click
 /// clears it), heading-sized (never a thumbnail), one per date.
 pub fn day_checks(elements: &[Element], w: u32, h: u32) -> Vec<Element> {
-    let screen = u64::from(w) * u64::from(h);
     let band = (h / 16).max(1);
-    let mut found: Vec<Element> = elements
-        .iter()
-        .filter(|e| date_key(&e.label).is_some())
-        .filter(|e| e.area() > 0 && e.area().saturating_mul(60) < screen && e.y2.saturating_sub(e.y1).saturating_mul(14) <= h)
-        .cloned()
-        .collect();
+    let mut found: Vec<Element> = elements.iter().filter(|e| date_key(&e.label).is_some()).filter(|e| heading_sized(e, w, h)).cloned().collect();
     found.sort_by_key(|e| (e.y1 / band, e.x1));
     let mut keys: Vec<String> = Vec::new();
     found.retain(|e| match date_key(&e.label) {
@@ -583,66 +527,27 @@ mod tests {
     }
 
     #[test]
-    fn album_titles_match_by_their_words() {
+    fn titles_are_compared_by_their_words() {
         assert_eq!(normalize_title("  Robots,\t2020–2026! "), "robots 2020 2026");
         assert_eq!(normalize_title("ÉTÉ à Paris"), "été à paris");
-        for (label, title) in [
-            ("Robot showcase", "Robot showcase"),
-            ("robot SHOWCASE", "Robot showcase"),
-            ("Robots, 2020-2026", "Robots, 2020–2026"),
-            ("Robot showcase 12 items", "Robot showcase"),
-            ("Robot showcase · 1 item", "Robot showcase"),
-            ("Robot showcase\n3 videos", "Robot showcase"),
-            ("Album: Robot showcase", "Robot showcase"),
-            ("Album 2024", "Album 2024"),
-        ] {
-            assert!(album_label_matches(label, title), "{label:?} ~ {title:?}");
-        }
-        for (label, title) in [
-            ("Robot showcase 2", "Robot showcase"),   // another album
-            ("Robot showcase old", "Robot showcase"), // another album
-            ("Robot", "Robot showcase"),              // a prefix is not the album
-            ("Robots", "Robot"),                      // nor a longer word
-            ("Robot showcase 12 apples", "Robot showcase"),
-            ("Search", "Robot showcase"),
-            ("anything", "!!!"), // nothing to match
-            ("", ""),
-        ] {
-            assert!(!album_label_matches(label, title), "{label:?} !~ {title:?}");
-        }
-        assert!(heading_names("Robot showcase", "Robot showcase"));
-        assert!(heading_names("Search: robot showcase", "Robot showcase"));
-        assert!(!heading_names("Robot showcases", "Robot showcase"));
-        assert!(!heading_names("Photos", "Robot showcase") && !heading_names("Photos", ""));
+        assert_eq!(normalize_title(" !! "), "");
     }
 
     #[test]
-    fn album_candidates_are_matching_cards_not_the_search_box() {
-        let search = el("Robot showcase", "input", 100, 10, 600, 40);
-        let els = vec![
-            search.clone(),                                      // the typed title in the search box
-            el("Robot showcase", "album", 100, 50, 400, 90),     // the suggestion
-            el("Robot showcase 2", "album", 100, 100, 400, 140), // another album
-            el("Robot showcase", "album", 110, 55, 390, 85),     // the model repeating itself
-            el("Robot showcase", "", 0, 0, 1000, 800),           // a whole-screen box
-            el("Robot showcase", "", 5, 5, 5, 5),                // an empty box
-        ];
-        let found = album_candidates(&els, "Robot showcase", Some(&search), 1000, 800);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!((found[0].x1, found[0].y1), (100, 50));
-        // two different albums with the title: both kept (the agent refuses to choose)
-        let two = vec![el("Robots", "", 10, 100, 200, 300), el("Robots", "", 400, 100, 600, 300)];
-        assert_eq!(album_candidates(&two, "Robots", None, 1000, 800).len(), 2);
-        assert!(album_candidates(&two, "Cars", None, 1000, 800).is_empty());
-    }
-
-    #[test]
-    fn the_albums_tab_is_a_small_album_labelled_element() {
-        assert!(is_albums_tab(&el("Albums", "tab", 200, 10, 260, 30), 1000, 800));
-        assert!(!is_albums_tab(&el("Photos", "tab", 200, 10, 260, 30), 1000, 800));
-        // a thumbnail-sized box is never taken for the tab (clicking it would select a photo)
-        assert!(!is_albums_tab(&el("album cover", "", 100, 100, 300, 300), 1000, 800));
-        assert!(!is_albums_tab(&el("Albums", "", 10, 10, 10, 10), 1000, 800));
+    fn what_lies_in_the_search_field_is_in_it() {
+        let field = el("Search", "input", 100, 10, 600, 40);
+        // the typed title, boxed tightly, loosely, or as a tile-sized "photo" (live: all three)
+        for typed in [el("Every Robot I've Met", "", 120, 15, 300, 35), el("Every Robot I've Met", "", 90, 5, 620, 45), el("photo", "", 110, 0, 160, 50)] {
+            assert!(in_field(&typed, &field), "{typed:?}");
+        }
+        // the grid's first row just under the field, a heading beside it, the Done button
+        for outside in [el("0:12", "", 100, 38, 200, 138), el("Thu, Oct 16", "", 10, 50, 90, 60), el("Done", "", 900, 10, 990, 40)] {
+            assert!(!in_field(&outside, &field), "{outside:?}");
+        }
+        // degenerate boxes don't panic
+        assert!(in_field(&el("", "", 200, 20, 200, 20), &field));
+        assert!(!in_field(&el("", "", 5, 5, 5, 5), &field));
+        assert!(!in_field(&el("", "", 5, 5, 5, 5), &el("", "", 5, 5, 5, 5)));
     }
 
     #[test]

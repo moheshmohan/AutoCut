@@ -397,9 +397,20 @@ pub fn pick_readiness() -> Result<(), String> {
     filmcraft_gphotos::pick_readiness(&filmcraft_gphotos::data_dir())
 }
 
-/// What a finished album pick brought to disk.
+/// What a finished album pick brought to disk. The agent selects an album whole, photos too (the
+/// picker cannot select by type): the note says how many photos a videos-only pick left out.
 fn fetched(picked: Picked, note: Option<String>) -> AlbumFetched {
     let cached = picked.fetched.iter().filter(|f| f.was_cached).count();
+    let note = match filmcraft_gphotos::not_videos(&picked.skipped) {
+        0 => note,
+        n => {
+            let photos = format!("{n} photo(s) of the album were selected with it and not downloaded (videos only)");
+            Some(match note.filter(|s| !s.is_empty()) {
+                Some(s) => format!("{s}; {photos}"),
+                None => photos,
+            })
+        }
+    };
     AlbumFetched {
         paths: picked.fetched.iter().map(|f| f.path.to_string_lossy().into_owned()).collect(),
         downloaded: picked.fetched.len().saturating_sub(cached),
@@ -554,9 +565,14 @@ mod tests {
     #[test]
     fn an_album_pick_brings_back_what_was_downloaded() {
         let picked = Picked { fetched: vec![], failed: vec!["b.mp4: 404".into()], skipped: vec!["c.jpg: not a video".into()], session_deleted: true };
-        let f = fetched(picked, Some("selected 2".into()));
+        let f = fetched(picked.clone(), Some("selected 2".into()));
         assert_eq!((f.paths.len(), f.downloaded, f.cached, f.failed.len(), f.skipped.len()), (0, 0, 0, 1, 1));
-        assert_eq!(f.note.as_deref(), Some("selected 2"));
+        // the album was selected whole, photos too: how many were left out is said
+        assert_eq!(f.note.as_deref(), Some("selected 2; 1 photo(s) of the album were selected with it and not downloaded (videos only)"));
+        assert_eq!(fetched(picked, None).note.as_deref(), Some("1 photo(s) of the album were selected with it and not downloaded (videos only)"));
+        // no photo left out: the agent's note as it is
+        let f = fetched(Picked { skipped: vec!["old.mp4: created 2019-05-01".into()], ..Picked::default() }, Some("selected 1".into()));
+        assert_eq!(f.note.as_deref(), Some("selected 1"));
     }
 
     #[test]
