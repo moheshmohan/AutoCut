@@ -141,7 +141,18 @@ clip behaviour: `crates/engine/src/narration.rs`.
     full-band copy (`<name>.full.wav`, which natural clones now keep at the recording's rate),
     else the voice sample itself — and its words, heard once by the speech model (English) or
     given by the user (and correctable). Tied to the sample's SHA-256 (a voice made again needs
-    a new one); the English profile and its sample are never touched. The recording is English:
+    a new one); the English profile and its sample are never touched. **Trimmed to a sentence
+    end** (`trim_cross_reference`, `tts.voiceReference {"trimToSentence": true}`): IndicF5
+    continues the clip, so a clip that stops mid-sentence garbles the first words of every
+    line. The cut goes at the quietest 20 ms frame (levels smoothed over three frames; nearer
+    frames preferred, 0.5 dB per 100 ms) within 8 % of the speech (at least 0.8 s) of where the
+    transcript's words put the latest sentence end (syllables up to it over all, across the
+    speech's span), keeping at least `SENTENCE_REFERENCE_MIN_SECONDS` (8 s; the automatic
+    pick keeps 10–15 s); the words are cut to that sentence, or taken as given (words that
+    begin the transcript and end a sentence pick that sentence). `start` / `end` cut at given
+    times (with the kept words). The cut is faded over 12 ms; the clip before the first trim is
+    kept as `<name>.indicf5.untrimmed.wav` / `.json`. The author's hand-made cut (14.6 s ending
+    mid-sentence → 9.3 s ending at "…ഇല്ല.") is what the user preferred. The recording is English:
     IndicF5 is prompted across languages. `clone:<name>` in Malayalam reads each utterance after
     it (pace is IndicF5's own speed, pitch the pitch shifter; takes reseed), 250 ms between
     utterances, under the GPU lock. The duration is held within 4.6–6 syllables a second
@@ -355,9 +366,14 @@ CPU; hostile references (short, long, silent, NaN, no words) and broken releases
 mismatch, foreign weights, garbage) are errors; the Malayalam reference is made once per sample
 (full-band source preferred, words corrected, stale when the sample changes, damaged clips
 refused) and keys Malayalam only; the Malayalam voice speaks scripts with pauses, takes, pace
-and pitch; the speaking rate is held. The front end: numbers (0 to crores), suffix sandhi,
-ranges, symbols, acronyms, canonical spelling, syllables, utterance splitting and hostile
-scripts. With a release in `FILMCRAFT_F5_DIR`: the oracle comparison (`F5_ORACLE`) and per-part
+and pitch; the speaking rate is held; a reference trimmed to its last sentence end on
+synthetic speech (syllables with −20 dB dips, sentences with −30 dB pauses: the cut within 80 ms
+of the pause that leaves 8 s, the words cut to match, the untrimmed clip kept once), given words
+and times, and hostile trims (NaN, negative, past the end, too short, no sentence end, silence,
+no reference) refused with the files unchanged. The front end: numbers in both styles (0 to
+crores, years 1100–2099, money, decimals, codes), suffix sandhi after Malayalam and English
+words, the hand-converted v5 script, `spell_numbers` keeping pauses, ranges, symbols, acronyms,
+canonical spelling, syllables, utterance splitting and hostile scripts. With a release in `FILMCRAFT_F5_DIR`: the oracle comparison (`F5_ORACLE`) and per-part
 timings (`live_f5_parts`).
 
 Model-dependent tests run when `FILMCRAFT_KOKORO_DIR` names a downloaded package directory

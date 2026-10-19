@@ -294,7 +294,7 @@ pub fn delete(voices_dir: &Path, id: &str) -> Result<(), TtsError> {
     let path = profile_path(voices_dir, id)?;
     std::fs::remove_file(&path).map_err(|_| TtsError::UnknownVoice(id.to_string()))?;
     // the sample has the same stem; it may not exist (OpenVoice clones have none)
-    for ext in ["wav", "full.wav", "indicf5.json", "indicf5.wav"] {
+    for ext in ["wav", "full.wav", "indicf5.json", "indicf5.wav", "indicf5.untrimmed.wav", "indicf5.untrimmed.json"] {
         let _ = std::fs::remove_file(path.with_extension(ext));
     }
     Ok(())
@@ -996,6 +996,219 @@ pub fn set_cross_transcript(models_dir: &Path, id: &str, transcript: &str) -> Re
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &bytes).map_err(|e| TtsError::Model(format!("{}: {e}", tmp.display())))?;
     std::fs::rename(&tmp, &path).map_err(|e| TtsError::Model(format!("{}: {e}", path.display())))?;
+    Ok(r)
+}
+
+/// The shortest Malayalam reference a cut at a sentence end leaves ([`trim_cross_reference`]):
+/// a clip that ends where a sentence ends carries the voice from 8 s (by ear: the author's 14.6 s
+/// clip ended mid-sentence and garbled the first words of every line; the 9.3 s cut of it that
+/// ended at a full stop was preferred).
+pub const SENTENCE_REFERENCE_MIN_SECONDS: f64 = 8.0;
+
+/// How a Malayalam reference is cut ([`trim_cross_reference`]). Times are seconds into the
+/// current clip.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Trim {
+    /// Keep from here.
+    pub start: Option<f64>,
+    /// Keep up to here (with `to_sentence`: the cut is at or before it).
+    pub end: Option<f64>,
+    /// End at the last sentence end the transcript implies that leaves at least
+    /// [`SENTENCE_REFERENCE_MIN_SECONDS`]: at the quietest point near where the transcript's
+    /// words put it.
+    pub to_sentence: bool,
+    /// The words of what is kept; by default the transcript up to the sentence end chosen
+    /// (needed when `start` or a plain `end` cut words away).
+    pub transcript: Option<String>,
+}
+
+/// Energy frames of the sentence search, seconds.
+const TRIM_FRAME: f64 = 0.02;
+/// How far from where the words put a sentence end its pause is looked for: this share of the
+/// speech, at least [`TRIM_MIN_WINDOW`] seconds.
+const TRIM_WINDOW: f64 = 0.08;
+const TRIM_MIN_WINDOW: f64 = 0.8;
+/// Fades at a cut, seconds (no click).
+const TRIM_FADE: f64 = 0.012;
+
+/// Per-frame level of `x` in dB (frames of [`TRIM_FRAME`]), smoothed over three frames.
+fn frame_levels(x: &[f32], rate: u32) -> Vec<f64> {
+    let n = ((f64::from(rate) * TRIM_FRAME) as usize).max(1);
+    let raw: Vec<f64> = x
+        .chunks(n)
+        .map(|c| {
+            let e = c.iter().map(|v| f64::from(*v) * f64::from(*v)).filter(|v| v.is_finite()).sum::<f64>() / c.len().max(1) as f64;
+            10.0 * (e + 1e-12).log10()
+        })
+        .collect();
+    (0..raw.len())
+        .map(|i| {
+            let w = raw.get(i.saturating_sub(1)..(i + 2).min(raw.len())).unwrap_or(&[]);
+            w.iter().sum::<f64>() / w.len().max(1) as f64
+        })
+        .collect()
+}
+
+/// The sentence ends of `text`: the character index just past each `.`, `?`, `!` or `।` that
+/// ends a sentence (followed by a space or the end; "..." counts once).
+fn sentence_ends(text: &str) -> Vec<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    for (i, c) in chars.iter().enumerate() {
+        let next = chars.get(i + 1);
+        if matches!(c, '.' | '?' | '!' | '।') && next.is_none_or(|n| n.is_whitespace()) {
+            out.push(i + 1);
+        }
+    }
+    out
+}
+
+/// Where to cut `x` (the current clip) at a sentence end of `transcript` (its words): the
+/// sample, and how many characters of the transcript are kept. The cut is at the quietest
+/// point near where the words put the latest sentence end in `(lo + min, hi]` seconds (`only`:
+/// that sentence end, a character index).
+fn sentence_cut(x: &[f32], rate: u32, transcript: &str, lo: f64, hi: f64, min: f64, only: Option<usize>) -> Result<(usize, usize), TtsError> {
+    let levels = frame_levels(x, rate);
+    let peak = levels.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !peak.is_finite() || peak < -80.0 {
+        return Err(TtsError::Invalid("the reference clip is silent".into()));
+    }
+    // the speech: from the first frame within 35 dB of the loudest to the last
+    let speech = |l: &f64| *l > peak - 35.0;
+    let first = levels.iter().position(speech).unwrap_or(0);
+    let last = levels.iter().rposition(speech).unwrap_or(levels.len().saturating_sub(1));
+    let (t_a, t_b) = (first as f64 * TRIM_FRAME, (last + 1) as f64 * TRIM_FRAME);
+    let span = (t_b - t_a).max(TRIM_FRAME);
+    let total = crate::malayalam::syllables(transcript).max(1) as f64;
+    let window = (span * TRIM_WINDOW).max(TRIM_MIN_WINDOW);
+    let chars: Vec<char> = transcript.chars().collect();
+    let ends = sentence_ends(transcript);
+    // the latest sentence end whose pause leaves enough before it
+    for &k in ends.iter().rev().filter(|k| only.is_none_or(|o| o == **k)) {
+        let said: String = chars.get(..k).unwrap_or(&[]).iter().collect();
+        let at = t_a + crate::malayalam::syllables(&said) as f64 / total * span;
+        // a sentence the kept clip does not reach is not its end
+        if at > hi + 0.25 {
+            continue;
+        }
+        let (from, to) = ((at - window).max(lo + min), (at + window).min(hi));
+        if from >= to {
+            continue;
+        }
+        // the quietest frame there, nearer ones preferred among equals (0.5 dB per 100 ms)
+        let (f0, f1) = ((from / TRIM_FRAME).ceil() as usize, ((to / TRIM_FRAME).floor() as usize).min(levels.len().saturating_sub(1)));
+        let best =
+            (f0..=f1).filter_map(|f| levels.get(f).map(|l| (f, l + 5.0 * ((f as f64 + 0.5) * TRIM_FRAME - at).abs()))).min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((f, _)) = best {
+            let cut = (((f as f64 + 0.5) * TRIM_FRAME) * f64::from(rate)).round() as usize;
+            return Ok((cut.min(x.len()), k));
+        }
+    }
+    Err(TtsError::Invalid(format!(
+        "no sentence end of the transcript leaves at least {min:.0} s of the clip: give `end` and the words up to it (`transcript`)"
+    )))
+}
+
+/// The clip before its first trim, kept beside it (`<name>.indicf5.untrimmed.wav` and `.json`).
+fn untrimmed_paths(voices: &Path, p: &Profile) -> Result<(PathBuf, PathBuf), TtsError> {
+    let base = profile_path(voices, &p.id)?;
+    Ok((base.with_extension("indicf5.untrimmed.wav"), base.with_extension("indicf5.untrimmed.json")))
+}
+
+/// Cut `id`'s Malayalam reference ([`Trim`]): from `start`, to `end`, or to the last sentence end
+/// its transcript implies (`to_sentence`) — IndicF5 continues the clip, so a clip that stops
+/// mid-sentence garbles the first words of every line. The clip is written again (faded in and
+/// out over a few milliseconds), its words become `transcript` (or the transcript up to the
+/// sentence end chosen), and where it lies in its source is updated. The clip before the first
+/// trim is kept beside it (`<name>.indicf5.untrimmed.wav`). The kept clip must be at least
+/// [`SENTENCE_REFERENCE_MIN_SECONDS`] long.
+pub fn trim_cross_reference(models_dir: &Path, id: &str, trim: &Trim) -> Result<CrossReference, TtsError> {
+    let mut r =
+        cross_reference(models_dir, id)?.ok_or_else(|| TtsError::Invalid(format!("{id} has no Malayalam reference yet: make it with tts.voiceReference")))?;
+    let voices = voices_dir(models_dir);
+    let p = load_profile(&voices, id)?;
+    let (x, rate) = crate::wav::read(&voices.join(&r.clip))?;
+    if rate == 0 || x.is_empty() {
+        return Err(TtsError::Invalid("the reference clip is empty".into()));
+    }
+    let dur = x.len() as f64 / f64::from(rate);
+    let check = |v: Option<f64>, what: &str| -> Result<Option<f64>, TtsError> {
+        match v {
+            Some(t) if !t.is_finite() || t < 0.0 || t > dur + 0.05 => Err(TtsError::Invalid(format!("`{what}` must be a time within the {dur:.2} s clip"))),
+            other => Ok(other.map(|t| t.min(dur))),
+        }
+    };
+    let start = check(trim.start, "start")?.unwrap_or(0.0);
+    let end = check(trim.end, "end")?.unwrap_or(dur);
+    if start >= end {
+        return Err(TtsError::Invalid("`start` must come before `end`".into()));
+    }
+    let given = trim.transcript.as_deref().map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|t| !t.is_empty());
+    if trim.transcript.is_some() && given.is_none() {
+        return Err(TtsError::Invalid("give the kept clip's words".into()));
+    }
+    let s0 = ((start * f64::from(rate)).round() as usize).min(x.len());
+    let (s1, words) = if trim.to_sentence {
+        // words given that begin the transcript and end a sentence: cut at that sentence's end
+        let only = given.as_ref().filter(|g| r.transcript.starts_with(g.as_str()) && g.ends_with(['.', '?', '!', '।'])).map(|g| g.chars().count());
+        let (cut, k) = sentence_cut(&x, rate, &r.transcript, start, end, SENTENCE_REFERENCE_MIN_SECONDS, only)?;
+        let derived: String = r.transcript.chars().take(k).collect::<String>().trim().to_string();
+        match (&given, start > 0.0) {
+            (Some(g), _) => (cut, g.clone()),
+            // words cut away at the start too: they must be given
+            (None, true) => return Err(TtsError::Invalid("`start` cuts words away: give the kept clip's words (`transcript`)".into())),
+            (None, false) => (cut, derived),
+        }
+    } else {
+        if trim.start.is_none() && trim.end.is_none() {
+            return Err(TtsError::Invalid("nothing to trim: give `start`, `end` or `trimToSentence`".into()));
+        }
+        let words = given.clone().ok_or_else(|| TtsError::Invalid("the cut takes words away: give the kept clip's words (`transcript`)".into()))?;
+        (((end * f64::from(rate)).round() as usize).min(x.len()), words)
+    };
+    let kept = s1.saturating_sub(s0) as f64 / f64::from(rate);
+    if kept + 1e-6 < SENTENCE_REFERENCE_MIN_SECONDS {
+        return Err(TtsError::Invalid(format!("that keeps {kept:.1} s; a Malayalam reference needs at least {SENTENCE_REFERENCE_MIN_SECONDS:.0} s")));
+    }
+    if !words.chars().any(char::is_alphanumeric) || words.chars().count() > MAX_TRANSCRIPT_CHARS {
+        return Err(TtsError::Invalid("give the kept clip's words".into()));
+    }
+    let mut clip: Vec<f32> = x.get(s0..s1).unwrap_or(&[]).to_vec();
+    let fade = ((TRIM_FADE * f64::from(rate)) as usize).min(clip.len() / 4);
+    for i in 0..fade {
+        let g = i as f32 / fade.max(1) as f32;
+        if s0 > 0
+            && let Some(v) = clip.get_mut(i)
+        {
+            *v *= g;
+        }
+        let n = clip.len();
+        if let Some(v) = clip.get_mut(n.saturating_sub(1 + i)) {
+            *v *= g;
+        }
+    }
+    // the clip before the first trim stays beside it
+    let (keep_wav, keep_json) = untrimmed_paths(&voices, &p)?;
+    if !keep_wav.exists() {
+        std::fs::copy(voices.join(&r.clip), &keep_wav).map_err(|e| TtsError::Model(format!("{}: {e}", keep_wav.display())))?;
+        let bytes = serde_json::to_vec_pretty(&r).map_err(|e| TtsError::Model(e.to_string()))?;
+        std::fs::write(&keep_json, bytes).map_err(|e| TtsError::Model(format!("{}: {e}", keep_json.display())))?;
+    }
+    let path = voices.join(&r.clip);
+    let tmp = path.with_extension("wav.part");
+    crate::wav::write(&tmp, &clip, rate)?;
+    std::fs::rename(&tmp, &path).map_err(|e| TtsError::Model(format!("{}: {e}", path.display())))?;
+    r.clip_sha = sha_hex(&read_capped(&path)?);
+    let from = r.from;
+    r.from = from + start;
+    r.to = from + s1 as f64 / f64::from(rate);
+    r.given = r.given || given.is_some();
+    r.transcript = words;
+    let json_path = cross_path(&voices, &p)?;
+    let bytes = serde_json::to_vec_pretty(&r).map_err(|e| TtsError::Model(e.to_string()))?;
+    let tmp = json_path.with_extension("json.tmp");
+    std::fs::write(&tmp, &bytes).map_err(|e| TtsError::Model(format!("{}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, &json_path).map_err(|e| TtsError::Model(format!("{}: {e}", json_path.display())))?;
     Ok(r)
 }
 
@@ -1912,6 +2125,179 @@ pub(crate) mod tests {
         assert!(prepare_cross_lingual(&models, "clone:other", None, Some("hi"), &mut |_| Err(String::new())).is_err());
         assert!(cross_reference(&models, "clone:missing").is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Speech-like audio at `rate`: sentences of `n` syllables each (180 ms of a buzz at 0.3,
+    /// dips of 40 ms to −20 dB between syllables), 150 ms pauses at −30 dB between sentences,
+    /// and the centres of those pauses (seconds).
+    fn sentences_audio(rate: u32, sentences: &[usize]) -> (Vec<f32>, Vec<f64>) {
+        let mut x: Vec<f32> = Vec::new();
+        let mut pauses = Vec::new();
+        let push = |x: &mut Vec<f32>, secs: f64, amp: f32| {
+            let n = (secs * f64::from(rate)).round() as usize;
+            for _ in 0..n {
+                let t = x.len() as f32 / rate as f32;
+                let w = std::f32::consts::TAU * 160.0 * t;
+                x.push(amp * (0.6 * w.sin() + 0.3 * (2.0 * w).sin() + 0.1 * (3.0 * w).sin()));
+            }
+        };
+        for (k, &n) in sentences.iter().enumerate() {
+            for s in 0..n {
+                push(&mut x, 0.18, 0.3);
+                if s + 1 < n {
+                    push(&mut x, 0.04, 0.03);
+                }
+            }
+            if k + 1 < sentences.len() {
+                pauses.push(x.len() as f64 / f64::from(rate) + 0.075);
+                push(&mut x, 0.15, 0.0095);
+            }
+        }
+        (x, pauses)
+    }
+
+    /// "ka ka … ka." per sentence (one syllable a word); the last without its full stop.
+    fn sentences_text(sentences: &[usize]) -> Vec<String> {
+        sentences.iter().map(|&n| vec!["ka"; n].join(" ")).collect()
+    }
+
+    /// `clone:my-voice` with `x` as its Malayalam reference clip and `words` as its transcript.
+    fn with_reference(models: &Path, x: &[f32], rate: u32, words: &str) -> CrossReference {
+        let mut r = prepare_cross_lingual(models, "clone:my-voice", None, Some("placeholder"), &mut |_| Err("unused".into())).unwrap();
+        let voices = voices_dir(models);
+        crate::wav::write(&voices.join(&r.clip), x, rate).unwrap();
+        r.clip_sha = sha_hex(&read_capped(&voices.join(&r.clip)).unwrap());
+        r.transcript = words.into();
+        r.from = 56.1;
+        r.to = 56.1 + x.len() as f64 / f64::from(rate);
+        std::fs::write(voices.join("my-voice.indicf5.json"), serde_json::to_vec_pretty(&r).unwrap()).unwrap();
+        assert_eq!(cross_reference(models, "clone:my-voice").unwrap(), Some(r.clone()));
+        r
+    }
+
+    #[test]
+    fn a_reference_is_trimmed_to_its_last_sentence_end() {
+        let root = tmp("trim");
+        let models = natural_clone(&root);
+        let voices = voices_dir(&models);
+        let rate = CROSS_REFERENCE_RATE;
+        // two whole sentences, and a third cut off mid-way (as a clip picked by length is)
+        let (x, pauses) = sentences_audio(rate, &[20, 22, 18]);
+        let s = sentences_text(&[20, 22, 18]);
+        let words = format!("{}. {}. {}", s[0], s[1], s[2]);
+        let before = with_reference(&models, &x, rate, &words);
+        let original = std::fs::read(voices.join(&before.clip)).unwrap();
+        let r = trim_cross_reference(&models, "clone:my-voice", &Trim { to_sentence: true, ..Trim::default() }).unwrap();
+        let clip = crate::wav::read(&voices.join(&r.clip)).unwrap().0;
+        let cut = clip.len() as f64 / f64::from(rate);
+        // at the second sentence's pause (the first would leave less than 8 s)
+        assert!((cut - pauses[1]).abs() < 0.08, "cut at {cut:.3} s, pause at {:.3} s", pauses[1]);
+        assert_eq!(r.transcript, format!("{}. {}.", s[0], s[1]));
+        assert!((r.from - 56.1).abs() < 1e-9 && (r.to - (56.1 + cut)).abs() < 1e-3, "{} {}", r.from, r.to);
+        assert!(r.given);
+        assert!(clip.last().is_some_and(|v| v.abs() < 1e-3), "faded out");
+        assert_eq!(cross_reference(&models, "clone:my-voice").unwrap(), Some(r.clone()), "a fresh reference");
+        // the clip before is kept beside it, once
+        let p = load_profile(&voices, "clone:my-voice").unwrap();
+        let (keep_wav, keep_json) = untrimmed_paths(&voices, &p).unwrap();
+        assert_eq!(std::fs::read(&keep_wav).unwrap(), original);
+        assert!(std::fs::read_to_string(&keep_json).unwrap().contains(&before.clip_sha));
+        // trimmed again it ends at its own last sentence end, and the first copy stays
+        let again = trim_cross_reference(&models, "clone:my-voice", &Trim { to_sentence: true, ..Trim::default() }).unwrap();
+        assert_eq!(again.transcript, r.transcript);
+        assert_eq!(std::fs::read(&keep_wav).unwrap(), original);
+        // deleting the voice deletes the copy
+        delete(&voices, "clone:my-voice").unwrap();
+        assert!(!keep_wav.exists() && !keep_json.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_trim_takes_the_words_it_is_given() {
+        let root = tmp("trim-words");
+        let models = natural_clone(&root);
+        let voices = voices_dir(&models);
+        let rate = CROSS_REFERENCE_RATE;
+        let (x, pauses) = sentences_audio(rate, &[20, 22, 18]);
+        let s = sentences_text(&[20, 22, 18]);
+        let words = format!("{}. {}. {}", s[0], s[1], s[2]);
+        // the words up to a sentence end: cut there
+        with_reference(&models, &x, rate, &words);
+        let given = format!("{}.   {}.", s[0], s[1]);
+        let r = trim_cross_reference(&models, "clone:my-voice", &Trim { to_sentence: true, transcript: Some(given), ..Trim::default() }).unwrap();
+        let cut = crate::wav::read(&voices.join(&r.clip)).unwrap().0.len() as f64 / f64::from(rate);
+        assert!((cut - pauses[1]).abs() < 0.08, "{cut}");
+        assert_eq!(r.transcript, format!("{}. {}.", s[0], s[1]), "spaces made single");
+        // a plain cut takes the words given
+        with_reference(&models, &x, rate, &words);
+        let r = trim_cross_reference(
+            &models,
+            "clone:my-voice",
+            &Trim { start: Some(1.0), end: Some(10.0), transcript: Some("the words".into()), ..Trim::default() },
+        )
+        .unwrap();
+        let clip = crate::wav::read(&voices.join(&r.clip)).unwrap().0;
+        assert!((clip.len() as f64 / f64::from(rate) - 9.0).abs() < 0.01);
+        assert!(clip.first().is_some_and(|v| v.abs() < 1e-3), "faded in");
+        assert_eq!((r.transcript.as_str(), r.from, r.to), ("the words", 57.1, 66.1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hostile_trims_are_refused_and_change_nothing() {
+        let root = tmp("trim-hostile");
+        let models = natural_clone(&root);
+        let voices = voices_dir(&models);
+        let rate = CROSS_REFERENCE_RATE;
+        assert!(trim_cross_reference(&models, "clone:my-voice", &Trim { to_sentence: true, ..Trim::default() }).is_err(), "no reference yet");
+        let (x, _) = sentences_audio(rate, &[20, 22, 18]);
+        let s = sentences_text(&[20, 22, 18]);
+        let r = with_reference(&models, &x, rate, &format!("{}. {}. {}", s[0], s[1], s[2]));
+        let dur = x.len() as f64 / f64::from(rate);
+        for t in [
+            Trim::default(),
+            Trim { start: Some(f64::NAN), to_sentence: true, ..Trim::default() },
+            Trim { end: Some(f64::INFINITY), transcript: Some("w".into()), ..Trim::default() },
+            Trim { start: Some(-1.0), transcript: Some("w".into()), ..Trim::default() },
+            Trim { end: Some(dur + 5.0), transcript: Some("w".into()), ..Trim::default() },
+            Trim { start: Some(5.0), end: Some(4.0), transcript: Some("w".into()), ..Trim::default() },
+            // a plain cut without the words it keeps
+            Trim { end: Some(10.0), ..Trim::default() },
+            // the start cuts words away
+            Trim { start: Some(0.5), to_sentence: true, ..Trim::default() },
+            // too short
+            Trim { end: Some(5.0), transcript: Some("w".into()), ..Trim::default() },
+            Trim { end: Some(9.0), to_sentence: true, ..Trim::default() },
+            // empty words
+            Trim { end: Some(10.0), transcript: Some("   ".into()), ..Trim::default() },
+            Trim { end: Some(10.0), transcript: Some("x".repeat(MAX_TRANSCRIPT_CHARS + 1)), ..Trim::default() },
+            // given words that end a sentence too early
+            Trim { to_sentence: true, transcript: Some(format!("{}.", s[0])), ..Trim::default() },
+        ] {
+            assert!(trim_cross_reference(&models, "clone:my-voice", &t).is_err(), "{t:?}");
+            assert_eq!(cross_reference(&models, "clone:my-voice").unwrap(), Some(r.clone()), "{t:?}");
+        }
+        // a transcript with no sentence end, or a silent clip: no sentence to cut at
+        with_reference(&models, &x, rate, "ka ka ka ka");
+        assert!(trim_cross_reference(&models, "clone:my-voice", &Trim { to_sentence: true, ..Trim::default() }).is_err());
+        with_reference(&models, &vec![0.0; rate as usize * 12], rate, "ka. ka.");
+        assert!(trim_cross_reference(&models, "clone:my-voice", &Trim { to_sentence: true, ..Trim::default() }).is_err());
+        assert!(!voices.join("my-voice.indicf5.untrimmed.wav").exists(), "nothing trimmed, nothing kept");
+        assert!(trim_cross_reference(&models, "clone:nobody", &Trim { to_sentence: true, ..Trim::default() }).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sentence_ends_and_levels() {
+        assert_eq!(sentence_ends("One. Two? Three! Four"), vec![4, 9, 16]);
+        assert_eq!(sentence_ends("ഇത്. അതും। ശരി..."), vec![4, 10, 17]);
+        assert_eq!(sentence_ends("3.5 kilos. Done"), vec![10]);
+        assert!(sentence_ends("").is_empty());
+        let lv = frame_levels(&[0.0; 4800], 24_000);
+        assert_eq!(lv.len(), 10);
+        assert!(lv.iter().all(|l| l.is_finite() && *l < -100.0));
+        assert!(frame_levels(&[], 24_000).is_empty());
+        assert!(frame_levels(&[f32::NAN; 960], 24_000).iter().all(|l| l.is_finite()));
     }
 
     /// The speaking rate is held within 4.6–6 syllables a second, whatever the transcript did.

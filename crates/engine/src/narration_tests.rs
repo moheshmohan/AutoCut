@@ -612,7 +612,20 @@ fn malayalam_commands_refuse_what_they_cannot_do() {
         assert!(s.execute("tts.create", p.clone()).is_err(), "{p}");
         assert_eq!(*s.project, snap, "{p}");
     }
-    for p in [json!({}), json!({"voice": "basic-male"}), json!({"voice": "clone:nobody", "transcript": 5})] {
+    for p in [
+        json!({}),
+        json!({"voice": "basic-male"}),
+        json!({"voice": "clone:nobody", "transcript": 5}),
+        // trims: hostile times and switches, a trim mixed with a new recording, a missing voice
+        json!({"voice": "clone:nobody", "start": -1}),
+        json!({"voice": "clone:nobody", "start": "1s"}),
+        json!({"voice": "clone:nobody", "end": 1e12}),
+        json!({"voice": "clone:nobody", "trimToSentence": "yes"}),
+        json!({"voice": "clone:nobody", "trimToSentence": true, "redo": true}),
+        json!({"voice": "clone:nobody", "trimToSentence": true, "items": [1]}),
+        json!({"voice": "clone:nobody", "trimToSentence": true}),
+        json!({"voice": "clone:nobody", "end": 9.3, "transcript": "words."}),
+    ] {
         assert!(s.execute("tts.voiceReference", p.clone()).is_err(), "{p}");
     }
     let models = crate::voice_clone::models_json();

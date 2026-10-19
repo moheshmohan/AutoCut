@@ -7,7 +7,7 @@
 //! | `tts.clonedVoices` | the saved cloned voices, and the cloning models with their download state |
 //! | `tts.deleteClonedVoice` | remove one (and its voice sample) |
 //! | `tts.downloadCloneModel` | download a cloning model as a background job, every file SHA-256 checked: `openvoice-v2` (131 MB, MIT; the default), `voxcpm-1.5` (1.95 GB) or `voxcpm-2` (4.96 GB), both Apache-2.0, or `indicf5` (1.40 GB, MIT: cloned voices speaking Malayalam) |
-//! | `tts.voiceReference` | a natural clone's Malayalam reference: the 8–12 s of its voice sample IndicF5 speaks from and their words (heard by the speech model once, or given in `transcript`); `redo` makes it again |
+//! | `tts.voiceReference` | a natural clone's Malayalam reference: the 10–15 s of its voice sample IndicF5 speaks from and their words (heard by the speech model once, or given in `transcript`); `redo` makes it again; `start` / `end` / `trimToSentence` cut the clip already made — `trimToSentence` ends it at the quietest point near the last sentence end its words imply (at least 8 s; a clip that stops mid-sentence garbles the first words of every line), the words cut to match unless `transcript` gives them; the clip before the first trim is kept as `<name>.indicf5.untrimmed.wav` |
 //!
 //! Profiles live in `<data>/voices/<name>.json` (natural ones with `<name>.wav`), next to the
 //! models: a cloned voice is the user's, usable in every project. See `filmcraft_tts::clone`.
@@ -55,7 +55,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.voiceReference",
             "Voice Reference for Malayalam",
-            r#"{"voice":"clone:…","items":[id]?,"clips":[id]?,"segments":[{"item":id,"start":seconds,"end":seconds}]? (a recording of the speaker: its best 10–15 s),"transcript":str? (the clip's words),"redo":bool?,"speechModel":"whisper-…"?}"#,
+            r#"{"voice":"clone:…","items":[id]?,"clips":[id]?,"segments":[{"item":id,"start":seconds,"end":seconds}]? (a recording of the speaker: its best 10–15 s),"transcript":str? (the clip's words),"redo":bool?,"speechModel":"whisper-…"?,"start":seconds?,"end":seconds? (cut the clip already made, seconds within it),"trimToSentence":bool? (end it at the last sentence end its words imply, at least 8 s)}"#,
             voice_reference,
             false,
         ),
@@ -76,10 +76,37 @@ fn voice_reference(s: &mut Session, p: &Value) -> Result<Value> {
     if p.get("transcript").is_some_and(|t| !t.is_string()) {
         return Err(bad(cmd, "`transcript` must be a string"));
     }
+    // a trim of the clip already made: `start` / `end` (seconds within it), `trimToSentence`
+    let mut trim = ReferenceTrim::default();
+    for (key, slot) in [("start", &mut trim.start), ("end", &mut trim.end)] {
+        match p.get(key) {
+            None | Some(Value::Null) => {}
+            Some(v) => match v.as_f64().filter(|t| t.is_finite() && *t >= 0.0 && *t <= 3600.0) {
+                Some(t) => *slot = Some(t),
+                None => return Err(bad(cmd, format!("`{key}` must be seconds within the reference clip"))),
+            },
+        }
+    }
+    match p.get("trimToSentence") {
+        None | Some(Value::Null) => {}
+        Some(Value::Bool(b)) => trim.to_sentence = *b,
+        Some(_) => return Err(bad(cmd, "`trimToSentence` must be true or false")),
+    }
+    let trimming = trim.start.is_some() || trim.end.is_some() || trim.to_sentence;
+    if trimming && (["items", "clips", "segments"].iter().any(|k| p.get(*k).is_some()) || bool_p(p, "redo").unwrap_or(false)) {
+        return Err(bad(cmd, "a trim cuts the reference already made: give `start`/`end`/`trimToSentence` without a recording or `redo`"));
+    }
     #[cfg(feature = "neural-voices")]
     {
         let models = crate::transcript::models_dir().ok_or_else(|| bad(cmd, "no data directory for voice models"))?;
         let transcript = str_p(p, "transcript").map(str::to_string);
+        if trimming {
+            let t = filmcraft_tts::clone::Trim { start: trim.start, end: trim.end, to_sentence: trim.to_sentence, transcript };
+            let r = filmcraft_tts::clone::trim_cross_reference(&models, &voice, &t).map_err(|e| bad(cmd, e.to_string()))?;
+            return Ok(
+                json!({"voice": voice, "source": r.source, "from": r.from, "to": r.to, "seconds": r.to - r.from, "transcript": r.transcript, "given": r.given, "clip": r.clip, "trimmed": true}),
+            );
+        }
         let sourced = ["items", "clips", "segments"].iter().any(|k| p.get(*k).is_some());
         // a recording given: decoded at the natural clones' rate (full band)
         let source = if sourced { Some(reference(s, p, NATURAL_REF_RATE)?) } else { None };
@@ -112,9 +139,17 @@ fn voice_reference(s: &mut Session, p: &Value) -> Result<Value> {
     }
     #[cfg(not(feature = "neural-voices"))]
     {
-        let _ = s;
+        let _ = (s, trimming);
         Err(bad(cmd, "voice cloning is not available in this build (built without `neural-voices`)"))
     }
+}
+
+/// `tts.voiceReference`'s trim parameters, checked before anything is touched.
+#[derive(Default)]
+struct ReferenceTrim {
+    start: Option<f64>,
+    end: Option<f64>,
+    to_sentence: bool,
 }
 
 /// The saved cloned voices as JSON (empty without the feature or a data directory).
