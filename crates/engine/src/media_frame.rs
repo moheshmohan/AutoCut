@@ -16,7 +16,7 @@ use crate::commands::{CommandSpec, always, bad, f64_p, str_p, u64_p};
 use crate::{Result, Session};
 
 /// Largest image `maxSide` allows.
-const MAX_SIDE: u32 = 4096;
+pub(crate) const MAX_SIDE: u32 = 4096;
 
 pub fn commands() -> Vec<CommandSpec> {
     vec![CommandSpec {
@@ -72,23 +72,37 @@ pub fn downscale_rgba(rgba: &[u8], w: u32, h: u32, max_side: u32) -> (Vec<u8>, u
     (out, nw, nh)
 }
 
-fn frame(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "media.frame";
-    let item = ItemId(u64_p(p, "item").ok_or_else(|| bad(cmd, "`item` is required"))?);
+/// A decoded frame: straight RGBA8, its size, and the media time it shows (seconds).
+pub(crate) struct Decoded {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub seconds: f64,
+}
+
+/// The length of media item `item`, if it is video media.
+pub(crate) fn video_length(s: &Session, cmd: &str, item: ItemId) -> Result<Tick> {
     let it = s.project.item(item).ok_or_else(|| bad(cmd, format!("no item {}", item.0)))?;
     let dur = match &it.kind {
         ItemKind::Media(m) => m.duration(),
-        _ => return Err(bad(cmd, "the item is not media")),
+        _ => return Err(bad(cmd, format!("item {} is not media", item.0))),
     };
     if !it.has_video() {
-        return Err(bad(cmd, "the item has no video"));
+        return Err(bad(cmd, format!("item {} has no video", item.0)));
     }
-    let secs = match f64_p(p, "seconds") {
+    Ok(dur)
+}
+
+/// The frame of media item `item` at `secs` (default: the middle; past the end: the last frame),
+/// its long side at most `max_side` (16..=[`MAX_SIDE`]).
+pub(crate) fn decode(s: &Session, cmd: &str, item: ItemId, secs: Option<f64>, max_side: u32) -> Result<Decoded> {
+    let dur = video_length(s, cmd, item)?;
+    let secs = match secs {
         Some(x) if x.is_finite() && x >= 0.0 => x,
         Some(_) => return Err(bad(cmd, "`seconds` must be zero or more")),
         None => dur.seconds() / 2.0,
     };
-    let max_side = u64_p(p, "maxSide").unwrap_or(512).clamp(16, u64::from(MAX_SIDE)) as u32;
+    let max_side = max_side.clamp(16, MAX_SIDE);
     let src = s.source(item).ok_or_else(|| bad(cmd, "the item's media is offline or unreadable"))?;
     let info = src.info().video.clone().ok_or_else(|| bad(cmd, "the item has no video"))?;
     // the last frame starts one frame before the end
@@ -97,8 +111,17 @@ fn frame(s: &mut Session, p: &Value) -> Result<Value> {
     let scale = (f64::from(max_side) / f64::from(info.width.max(info.height).max(1))).clamp(0.05, 1.0) as f32;
     let vf = src.video_frame(filmcraft_media::FrameRequest { time: t, scale }).map_err(|e| bad(cmd, format!("cannot decode the frame: {e}")))?;
     let (rgba, w, h) = downscale_rgba(&vf.to_rgba8(), vf.width, vf.height, max_side);
-    let png = filmcraft_export::encode_png(rgba, w, h).map_err(|e| bad(cmd, e.to_string()))?;
-    let mut out = json!({"item": item.0, "seconds": t.seconds(), "width": w, "height": h});
+    Ok(Decoded { rgba, width: w, height: h, seconds: t.seconds() })
+}
+
+fn frame(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "media.frame";
+    let item = ItemId(u64_p(p, "item").ok_or_else(|| bad(cmd, "`item` is required"))?);
+    let max_side = u64_p(p, "maxSide").unwrap_or(512).clamp(16, u64::from(MAX_SIDE)) as u32;
+    let d = decode(s, cmd, item, f64_p(p, "seconds"), max_side)?;
+    let (w, h, t) = (d.width, d.height, d.seconds);
+    let png = filmcraft_export::encode_png(d.rgba, w, h).map_err(|e| bad(cmd, e.to_string()))?;
+    let mut out = json!({"item": item.0, "seconds": t, "width": w, "height": h});
     match str_p(p, "path") {
         Some(path) => {
             s.services.write_file(path, &png).map_err(|e| bad(cmd, format!("{path}: {e}")))?;

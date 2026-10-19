@@ -20,6 +20,7 @@ pub mod captions;
 pub mod clip_ops;
 pub mod color;
 pub mod commands;
+pub mod contact_sheet;
 pub mod demo;
 pub mod elements;
 pub mod essential_sound;
