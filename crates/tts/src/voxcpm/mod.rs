@@ -121,13 +121,20 @@ pub(crate) struct Linear {
 }
 
 impl Linear {
-    /// Several bias-free layers over the same input as one (outputs concatenated).
+    /// Several layers over the same input as one (outputs concatenated): all without a bias,
+    /// or all with one.
     pub(crate) fn stack(parts: &[Linear]) -> R<Linear> {
-        if parts.iter().any(|p| p.b.is_some()) {
-            return Err(err("only bias-free layers are stacked"));
-        }
         let ws: Vec<&Tensor> = parts.iter().map(|p| &p.w).collect();
-        Ok(Linear { w: Tensor::cat(&ws, 0).map_err(err)?, b: None, out: parts.iter().map(|p| p.out).sum() })
+        let w = Tensor::cat(&ws, 0).map_err(err)?;
+        let out = parts.iter().map(|p| p.out).sum();
+        if parts.iter().all(|p| p.b.is_none()) {
+            return Ok(Linear { w, b: None, out });
+        }
+        let bs: Vec<&Tensor> = parts.iter().filter_map(|p| p.b.as_ref()).collect();
+        if bs.len() != parts.len() {
+            return Err(err("layers with and without a bias are not stacked"));
+        }
+        Ok(Linear { w, b: Some(Tensor::cat(&bs, 0).map_err(err)?), out })
     }
 
     pub(crate) fn fwd(&self, x: &Tensor) -> R<Tensor> {

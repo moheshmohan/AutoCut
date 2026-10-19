@@ -74,6 +74,41 @@ clip behaviour: `crates/engine/src/narration.rs`.
   - Checked against the PyTorch reference run as an oracle with the same noise: the first
     patches agree to 1e-4 (VoxCPM1.5 zero-shot and continuation; VoxCPM2 reference +
     continuation); later ones drift only where the scalar quantizer rounds a borderline value.
+- `f5` (feature `indicf5`): **IndicF5** (AI4Bharat, MIT) in pure Rust on candle — F5-TTS
+  fine-tuned on eleven Indian languages, Malayalam among them, with the Vocos vocoder
+  (charactr, MIT; IndicF5 ships its weights unchanged — checked bit-equal to
+  `charactr/vocos-mel-24khz`). Non-autoregressive: the whole utterance's mel is generated at
+  once by flow matching, infilling after a reference clip whose mel and transcript go in front,
+  so the voice continues the clip's speaker. Ported from the MIT reference code shipped with the
+  release (`f5_tts/model/{cfm,modules}.py`, `backbones/dit.py`, `infer/utils_infer.py`),
+  x-transformers' rotary embedding and the `vocos` package.
+  - `config`: the architecture read from the tensor shapes (the release's `config.json` only
+    names the Hugging Face wrapper) and checked: 100 mels, 1024-point FFT, 64-wide heads,
+    caps on every size.
+  - `vocab`: `vocab.txt` read as Python does (universal newlines, last character of each line
+    dropped) and the reference's tokenization (`;` → `,`, curly quotes, a space before an
+    ASCII word, one token per character; unknown characters reported, not silently spaces).
+  - `mel`: torchaudio's mel (periodic Hann, reflection-padded centre STFT, HTK filterbank,
+    `log(max(·, 1e-5))`) and `torch.istft(center=True)`, both in f64.
+  - `dit`: the DiT — text embedding (sinusoid + four ConvNeXt-V2 blocks with GRN), input
+    embedding (noisy mel, masked reference mel, text; grouped convolutional position embedding
+    with Mish), sinusoidal time MLP, 22 AdaLN-Zero blocks whose rotary embedding turns only
+    the first 64 channels (head 0) as the reference applies it, final AdaLN. Guidance's two
+    passes run as one batch; the text embeddings are made once per utterance.
+  - `vocos`: ConvNeXt backbone and ISTFT head.
+  - `model`: references (RMS raised to 0.1 as the reference does, transcript ending `".  "`),
+    the duration, and the sampler: seeded noise, 32 Euler steps on the sway schedule
+    (`s = −1`), guidance 2, reference frames put back.
+  - Duration: the reference's frames plus as many again as the text is longer than the
+    transcript. The reference counts UTF-8 bytes; that is the character ratio when both are in
+    one script, but an English sample speaking Malayalam (three bytes a letter) would then
+    speak three times too slowly (17.9 s instead of 6.5 s for one test line), so characters
+    are counted.
+  - Devices: Metal on macOS, else the CPU (`FILMCRAFT_F5_CPU` forces it). candle's fused Metal
+    attention reads an input that does not start its buffer from the wrong place (it passes
+    the element offset as a byte offset), so v is projected first (a regression test compares
+    the GPU with the CPU).
+
 - `clone` also makes **natural clones** (profile version 2, engine `voxcpm`): a *voice sample*
   is kept next to the profile (`<name>.wav`: the best continuous 10–25 s of speech between
   pauses, long pauses shortened, −20 LUFS, at the encoder's rate) with its transcript. VoxCPM2

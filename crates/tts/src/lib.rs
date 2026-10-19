@@ -18,6 +18,8 @@ pub mod cache;
 pub mod catalog;
 #[cfg(feature = "kokoro")]
 pub mod clone;
+#[cfg(feature = "indicf5")]
+pub mod f5;
 pub mod formant;
 #[cfg(feature = "kokoro")]
 pub mod kokoro;

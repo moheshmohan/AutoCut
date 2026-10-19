@@ -17,6 +17,9 @@ kokoro = ["dep:candle-core", "dep:candle-nn", "dep:zip", "dep:serde_json", "dep:
 # text front end). Off by default and in wasm builds. On macOS it runs on the GPU through
 # candle's Metal backend (below), falling back to the CPU without one.
 voxcpm = ["kokoro", "dep:rayon", "dep:filmcraft-locks"]
+# IndicF5 (F5-TTS + Vocos) on candle: cloned voices speaking Malayalam and other Indian
+# languages. Builds on the VoxCPM stack's safetensors reader, device choice and GPU lock.
+indicf5 = ["voxcpm"]
 
 [dependencies]
 filmcraft-tts-text = { workspace = true, optional = true }
@@ -58,3 +61,7 @@ required-features = ["voxcpm"]
 [[example]]
 name = "voice_similarity"
 required-features = ["kokoro"]
+
+[[example]]
+name = "f5_say"
+required-features = ["indicf5"]

@@ -81,6 +81,13 @@ impl SafeTensors {
         self.entries.contains_key(name)
     }
 
+    /// The shape of the tensor `name`, if the file has it (IndicF5 reads its architecture from
+    /// the shapes).
+    #[cfg(feature = "indicf5")]
+    pub(crate) fn shape(&self, name: &str) -> Option<&[usize]> {
+        self.entries.get(name).map(|e| e.shape.as_slice())
+    }
+
     #[cfg(test)]
     pub(crate) fn count(&self) -> usize {
         self.entries.len()
