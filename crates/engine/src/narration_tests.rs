@@ -571,6 +571,35 @@ fn english_narrations_keep_their_cache_keys() {
 }
 
 #[test]
+fn malayalam_numbers_are_english_unless_asked() {
+    use crate::narration::{cache_key, settings, spoken_text};
+    use filmcraft_project::NumberStyle;
+    let ml = settings("t", &json!({"text": "2013-ൽ, $1,600. [pause 1s] ഇത്.", "voice": "clone:me", "language": "ml"}), None).unwrap();
+    assert_eq!(ml.numbers, NumberStyle::English);
+    assert_eq!(spoken_text(&ml), "ട്വന്റി തേർട്ടീനിൽ, സിക്സ്റ്റീൻ ഹണ്ട്രഡ് ഡോളർ. [pause 1000ms] ഇത്.");
+    let words = settings("t", &json!({"text": "2013-ൽ ഇത്.", "voice": "clone:me", "numbers": "malayalam"}), None).unwrap();
+    assert_eq!(words.numbers, NumberStyle::Malayalam);
+    assert_eq!(spoken_text(&words), "രണ്ടായിരത്തി പതിമൂന്നിൽ ഇത്.");
+    // the style is kept through an edit, and keys the reading
+    let edited = settings("t", &json!({"text": "2013-ൽ, $1,600. [pause 1s] ഇത്.", "language": "ml"}), Some(&words)).unwrap();
+    assert_eq!(edited.numbers, NumberStyle::Malayalam);
+    assert_ne!(cache_key(&edited), cache_key(&ml));
+    // English narrations read their digits themselves, and keep their keys whatever the style
+    let en = settings("t", &json!({"text": "In 2013.", "voice": "clone:me", "numbers": "malayalam"}), None).unwrap();
+    assert_eq!(spoken_text(&en), "In 2013.");
+    let en_default = settings("t", &json!({"text": "In 2013.", "voice": "clone:me"}), None).unwrap();
+    assert_eq!(cache_key(&en), cache_key(&en_default));
+    // a bad style is an error, never a silent default
+    for bad_numbers in [json!("roman"), json!(5), json!(""), json!(["english"])] {
+        let p = json!({"text": "2013", "voice": "clone:me", "language": "ml", "numbers": bad_numbers});
+        assert!(settings("t", &p, None).is_err(), "{p}");
+    }
+    let mut s = demo();
+    let v = s.execute("tts.voices", json!({})).unwrap();
+    assert_eq!(v["numbers"][0]["id"], "english");
+}
+
+#[test]
 fn malayalam_commands_refuse_what_they_cannot_do() {
     let mut s = demo();
     let dir = tmp("ml-refuse");

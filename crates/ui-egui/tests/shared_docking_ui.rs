@@ -487,6 +487,7 @@ fn narration_selection_reveals_covered_floating_tts_once_without_editing_the_pro
         pace: 1.2,
         delivery: filmcraft_project::Delivery::Plain,
         take: 0,
+        numbers: filmcraft_project::NumberStyle::English,
         speech_duration: filmcraft_time::Tick::ZERO,
     };
     std::sync::Arc::make_mut(&mut session.project).narrations.insert(clip.item, narration.clone());

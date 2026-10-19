@@ -109,12 +109,28 @@ clip behaviour: `crates/engine/src/narration.rs`.
     the element offset as a byte offset), so q, k and v are each a tensor of their own (a
     regression test compares the GPU with the CPU).
 
-- **Malayalam** (`voice_for(id, "ml-IN", …)`): a natural clone speaks Malayalam through IndicF5.
+- **Malayalam** (`voice_for(id, "ml-IN", …)`): a natural clone speaks Malayalam through IndicF5. The workflow (clone, reference, transcript, numbers, trim): [docs/malayalam-narration.md](../../docs/malayalam-narration.md).
   - `malayalam` (no feature): the text front end. Spelling made canonical (two-part vowel
     signs composed, old ZWJ chillus made atomic, zero-width joiners dropped, Malayalam digits);
-    numbers in Malayalam words, Indian system ("2013" → "രണ്ടായിരത്തി പതിമൂന്ന്"), with
-    suffixes joined by sandhi ("2013-ൽ" → "…പതിമൂന്നിൽ"), ranges ("… മുതൽ … വരെ"), percent,
-    rupees, decimals; Latin acronyms read with the letters' Malayalam names ("AI" → "എഐ"),
+    numbers in one of two styles (`Numbers`): **English** (the narration default) says years,
+    money, decimals and numbers from 100 up the English way in Malayalam script, as Malayali
+    tech creators speak — "2021" → "ട്വന്റി ട്വന്റി വൺ", "2008" → "ടു തൗസന്റ് എയ്റ്റ്", "1969" →
+    "നൈന്റീൻ സിക്സ്റ്റി നൈൻ", "$1,600" → "സിക്സ്റ്റീൻ ഹണ്ട്രഡ് ഡോളർ", "2,500" → "ടു തൗസന്റ്
+    ഫൈവ് ഹണ്ട്രഡ്", "170,000" → "വൺ ലാഖ് സെവന്റി തൗസന്റ്" (lakh and crore) — and small counts
+    in Malayalam words ("2 ദിവസം" → "രണ്ട് ദിവസം"); a four-digit number from 1100 to 2099
+    without a group comma is a year; **Malayalam** says every number in Malayalam words, Indian
+    system ("2013" → "രണ്ടായിരത്തി പതിമൂന്ന്"). The long Malayalam words garbled the start of
+    lines in IndicF5's reading; the user prefers the English style. Suffixes join by sandhi in
+    both ("2013-ൽ" → "…പതിമൂന്നിൽ" / "ട്വന്റി തേർട്ടീനിൽ", "2021-ൽ" → "ട്വന്റി ട്വന്റി
+    വണ്ണിൽ": a chillu takes its consonant back, doubled after a short one-syllable word; a
+    vowel takes the glide യ or വ: "2020-ലും" → "ട്വന്റി ട്വന്റിയിലും"), ranges ("… മുതൽ …
+    വരെ"), percent, money (a currency symbol, or a currency word after the amount), decimals;
+    digits joined to capitals are a code ("4K" → "ഫോർ കെ"). `spell_numbers` rewrites only a
+    script's numbers (pause markers kept): the engine spells a Malayalam narration's numbers in
+    its `numbers` style before the voice reads it, and keys the narration cache on that text,
+    so scripts without digits keep their cached readings. Checked against the v5 showcase
+    script, whose numbers were converted to English by hand: with the digits put back, the
+    front end says every one as the hand conversion does. Latin acronyms read with the letters' Malayalam names ("AI" → "എഐ"),
     digits in codes with English names ("G1" → "ജി വൺ"); other Latin words kept and reported;
     emoji and unknown symbols dropped and reported (`report`); sentences grouped into utterances
     that fit the model, a long one split at commas, else between words; pause markers exact.

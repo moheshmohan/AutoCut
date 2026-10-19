@@ -111,6 +111,11 @@ const VALUED: &[&str] = &[
     "--cover-at",
     "--cover-url",
     "--video-url",
+    // narration numbers, photo locations (photos locations, showcase --places-from-locations)
+    "--numbers",
+    "--places-from-locations",
+    "--album-url",
+    "--per-item",
 ];
 
 #[derive(Debug, Default)]

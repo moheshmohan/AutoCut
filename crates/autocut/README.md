@@ -222,6 +222,14 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    another script altogether, are not judged: in a live build Whisper-base heard "ഒന്ന്." as
    Devanagari noise and "കണ്ടതിന് നന്ദി." as "amitabha".
 
+   **Numbers in Malayalam.** Digits in a Malayalam line are said the way Malayali tech
+   creators say them: years, prices and numbers from 100 up in English, in Malayalam script
+   ("2021-ൽ" → "ട്വന്റി ട്വന്റി വണ്ണിൽ", "$1,600" → "സിക്സ്റ്റീൻ ഹണ്ട്രഡ് ഡോളർ"), small
+   counts in Malayalam words. A plan's top-level `"numbers": "malayalam"` (or `--numbers
+   malayalam`) asks for Malayalam words throughout; it goes to `tts.create` as `numbers`. So a
+   script can keep its numbers as digits and the subtitles show them as digits. See
+   [docs/malayalam-narration.md](../../docs/malayalam-narration.md).
+
    Narration goes through `tts.create`, which looks in the engine's narration cache
    (`<data dir>/narration-cache`, see `crates/tts/README.md`) before synthesizing: a rebuild with
    the same voice reads only the lines that changed (`narration_cached` in the output counts

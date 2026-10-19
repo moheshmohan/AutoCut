@@ -43,12 +43,18 @@
 //! that sample's words: the first Malayalam narration of a voice has the speech model hear them
 //! (once; `tts.voiceReference` shows them, or sets them by hand). Results carry `notes`: what
 //! the Malayalam front end could not read as written. English narrations keep their cache keys.
+//!
+//! **Numbers** (`numbers`: `english`, the default, or `malayalam`): how a Malayalam narration
+//! says numbers written in digits. `english` says years, money, decimals and numbers from 100 up
+//! the English way in Malayalam script, as Malayali tech creators speak ("2021-ൽ" → "ട്വന്റി
+//! ട്വന്റി വണ്ണിൽ", "$1,600" → "സിക്സ്റ്റീൻ ഹണ്ട്രഡ് ഡോളർ"), small counts in Malayalam words;
+//! `malayalam` says every number in Malayalam words. Kept with the narration.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 
-use filmcraft_project::{ClipId, Delivery, ItemId, ItemKind, MediaRef, Narration, TrackId, TrackKind, VocalPitch};
+use filmcraft_project::{ClipId, Delivery, ItemId, ItemKind, MediaRef, Narration, NumberStyle, TrackId, TrackKind, VocalPitch};
 use filmcraft_time::{Tick, TimeRange};
 use filmcraft_tts as tts;
 
@@ -82,7 +88,7 @@ fn has_narration_clip(s: &Session) -> std::result::Result<(), String> {
 /// Script and settings from params, on top of `base`.
 pub(crate) fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result<Narration> {
     // a setting of the wrong type is an error, never silently replaced by a default
-    for key in ["text", "voice", "pitch", "delivery", "language"] {
+    for key in ["text", "voice", "pitch", "delivery", "language", "numbers"] {
         if p.get(key).is_some_and(|v| !v.is_string()) {
             return Err(bad(cmd, format!("`{key}` must be a string")));
         }
@@ -129,7 +135,12 @@ pub(crate) fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result
         Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(|| bad(cmd, "`take` must be a whole number"))?,
         None => base.map_or(0, |b| b.take),
     };
-    let n = Narration { text, language: language.to_string(), voice, pitch, pace, delivery, take, speech_duration: Tick::ZERO };
+    // how a Malayalam narration says numbers written in digits (English ignores it)
+    let numbers = match str_p(p, "numbers") {
+        Some(v) => NumberStyle::from_id(v).ok_or_else(|| bad(cmd, format!("unknown numbers `{v}` (english, malayalam)")))?,
+        None => base.map(|b| b.numbers).unwrap_or_default(),
+    };
+    let n = Narration { text, language: language.to_string(), voice, pitch, pace, delivery, take, numbers, speech_duration: Tick::ZERO };
     n.check().map_err(|e| bad(cmd, e))?;
     Ok(n)
 }
@@ -141,8 +152,27 @@ const CACHE_ENTRIES: usize = 6;
 
 pub(crate) fn cache_key(n: &Narration) -> String {
     let key = format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", n.voice, n.pitch.id(), n.pace.to_bits(), n.delivery.id(), n.take, n.text);
-    // English keeps the key it always had
-    if tts::malayalam::is_tag(&n.language) { format!("{key}\u{1f}{}", n.language) } else { key }
+    // English keeps the key it always had; Malayalam reads numbers in a style
+    if tts::malayalam::is_tag(&n.language) { format!("{key}\u{1f}{}\u{1f}{}", n.language, n.numbers.id()) } else { key }
+}
+
+/// The front end's style for `n`'s numbers.
+fn number_style(n: &Narration) -> tts::malayalam::Numbers {
+    match n.numbers {
+        NumberStyle::English => tts::malayalam::Numbers::English,
+        NumberStyle::Malayalam => tts::malayalam::Numbers::Malayalam,
+    }
+}
+
+/// The script the voice reads: a Malayalam narration's numbers spelled in its style
+/// ([`tts::malayalam::spell_numbers`]); English as written. Synthesis and the disk cache key
+/// on it, so a script without digits keeps its cached readings whatever the style.
+pub(crate) fn spoken_text(n: &Narration) -> std::borrow::Cow<'_, str> {
+    if tts::malayalam::is_tag(&n.language) {
+        std::borrow::Cow::Owned(tts::malayalam::spell_numbers(&n.text, number_style(n)))
+    } else {
+        std::borrow::Cow::Borrowed(&n.text)
+    }
 }
 
 fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
@@ -160,7 +190,7 @@ fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
 fn render(n: &Narration, models_dir: Option<&std::path::Path>, transcriber: Option<&Transcriber>) -> std::result::Result<tts::Audio, tts::TtsError> {
     malayalam_reference(n, models_dir, transcriber)?;
     let voice = tts::voice_for(&n.voice, &n.language, models_dir)?;
-    voice.synthesize(&n.text, &params(n))
+    voice.synthesize(&spoken_text(n), &params(n))
 }
 
 type Transcriber = Arc<dyn filmcraft_speech::Transcriber>;
@@ -244,7 +274,7 @@ fn params(n: &Narration) -> tts::Params {
 /// whose profile cannot be read; it is then not cached).
 fn disk_key(n: &Narration, models_dir: Option<&std::path::Path>) -> Option<String> {
     let identity = tts::cache::voice_identity_for(&n.voice, &n.language, models_dir)?;
-    Some(tts::cache::DiskCache::key(&identity, &n.text, &params(n)))
+    Some(tts::cache::DiskCache::key(&identity, &spoken_text(n), &params(n)))
 }
 
 /// `n` from the memory cache, else the disk cache (then also kept in memory).
@@ -306,6 +336,7 @@ fn voices(_s: &mut Session, _p: &Value) -> Result<Value> {
         "defaultVoice": tts::default_voice_id(),
         "pitches": VocalPitch::ALL.iter().map(|p| json!({"id": p.id(), "label": p.label(), "semitones": p.semitones()})).collect::<Vec<_>>(),
         "deliveries": Delivery::ALL.iter().map(|d| json!({"id": d.id(), "label": d.label(), "style": d.style()})).collect::<Vec<_>>(),
+        "numbers": NumberStyle::ALL.iter().map(|n| json!({"id": n.id(), "label": n.label()})).collect::<Vec<_>>(),
         "pace": {"min": tts::MIN_PACE, "max": tts::MAX_PACE, "default": 1.0},
         "pauseMarker": tts::script::PAUSE_MARKER,
         "maxTextBytes": tts::MAX_TEXT_BYTES,
@@ -436,6 +467,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
             "cached": from_cache,
             "pitchHz": median_pitch(&audio.samples, rate),
             "language": n.language,
+            "numbers": n.numbers.id(),
             "notes": notes(&n),
         }))
     })();
@@ -675,7 +707,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.preview",
             "Preview Narration",
-            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"?,"sample":bool?,"clip":id?,"path":str?}"#,
+            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"? (Malayalam: how digits are said; english = years, money and numbers from 100 up in English),"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"?,"sample":bool?,"clip":id?,"path":str?}"#,
             always,
             preview,
             false,
@@ -683,7 +715,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.create",
             "New Narration",
-            r#"{"text":str,"voice":str?,"language":"en-US|ml-IN"?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
+            r#"{"text":str,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
             has_seq,
             create,
             true,
@@ -691,7 +723,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.edit",
             "Edit Narration",
-            r#"{"clip":id?,"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"pitch":str?,"pace":f64?,"delivery":str?,"take":0..99?,"dir":str?}"#,
+            r#"{"clip":id?,"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"take":0..99?,"dir":str?}"#,
             has_narration_clip,
             edit,
             true,
@@ -700,7 +732,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.render",
             "Synthesize Narration",
-            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"pitch":str?,"pace":f64?,"delivery":str?,"sample":bool?,"clip":id?,"wait":bool?}"#,
+            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"sample":bool?,"clip":id?,"wait":bool?}"#,
             always,
             render_job,
             false,

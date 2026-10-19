@@ -1673,6 +1673,9 @@ async fn cli() {
                 "en" | "en-us" | "english" => "en".to_string(),
                 _ => usage(format!("showcase: --language wants ml (Malayalam) or en, not `{l}`")),
             });
+            // how a Malayalam narration says numbers (over the plan's `numbers`), checked now
+            let numbers_flag =
+                a.opt("--numbers").map(|n| filmcraft_autocut::showcase::number_style(n).unwrap_or_else(|e| usage(format!("showcase: --numbers: {e}"))));
             if let Some(m) = a.opt("--mood") {
                 opts.mood = m.to_string();
             }
@@ -1814,6 +1817,11 @@ async fn cli() {
                 opts.look = filmcraft_autocut::look::Look::from_plan(&sv).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
                 look_fields = filmcraft_autocut::look::Look::plan_fields(&sv);
                 opts.language = sv.get("language").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).map(str::to_string);
+                opts.numbers = match sv.get("numbers") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(n)) => Some(filmcraft_autocut::showcase::number_style(n).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")))),
+                    Some(_) => fail(format!("showcase: {path}: numbers: english or malayalam")),
+                };
                 opts.redact = filmcraft_autocut::privacy::Redact::from_plan(sv.get("redact")).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
                 if let Some(es) = sv.get("entries") {
                     entries = serde_json::from_value(es.clone()).unwrap_or_else(|e| fail(format!("showcase: {path}: bad entries ({e})")));
@@ -1838,6 +1846,9 @@ async fn cli() {
             }
             if let Some(l) = language_flag {
                 opts.language = Some(l);
+            }
+            if numbers_flag.is_some() {
+                opts.numbers = numbers_flag;
             }
             if let Some(st) = style_flag {
                 opts.look.style = st;
@@ -1891,6 +1902,9 @@ async fn cli() {
                 o.extend(look_fields);
                 if let Some(l) = &opts.language {
                     o.insert("language".into(), json!(l));
+                }
+                if let Some(n) = &opts.numbers {
+                    o.insert("numbers".into(), json!(n));
                 }
             }
             if let Some(out) = a.opt("--script-out") {

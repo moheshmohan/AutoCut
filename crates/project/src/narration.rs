@@ -138,6 +138,41 @@ impl Delivery {
     }
 }
 
+/// How a Malayalam narration says numbers written in digits (`filmcraft_tts::malayalam::Numbers`):
+/// years, money and numbers from 100 up in English, in Malayalam script, as Malayali speakers
+/// mix them (the default), or every number in Malayalam words. English narrations ignore it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NumberStyle {
+    #[default]
+    English,
+    Malayalam,
+}
+
+impl NumberStyle {
+    pub const ALL: [NumberStyle; 2] = [NumberStyle::English, NumberStyle::Malayalam];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NumberStyle::English => "English words",
+            NumberStyle::Malayalam => "Malayalam words",
+        }
+    }
+
+    /// The command / serde id (`english`, `malayalam`).
+    pub fn id(self) -> &'static str {
+        match self {
+            NumberStyle::English => "english",
+            NumberStyle::Malayalam => "malayalam",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Option<NumberStyle> {
+        let n = s.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|d| d.id() == n)
+    }
+}
+
 /// The script and voice settings a narration was generated from.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +194,9 @@ pub struct Narration {
     /// (the natural cloned voices) read it afresh for another take; at most [`MAX_TAKE`].
     #[serde(default, skip_serializing_if = "is_zero")]
     pub take: u32,
+    /// How a Malayalam narration says numbers (projects from before have none: English).
+    #[serde(default, skip_serializing_if = "is_english")]
+    pub numbers: NumberStyle,
     /// Length of the speech in the generated file. The file can be longer: when an edit made the
     /// speech shorter than its clip, the file is padded with silence to the clip's length.
     pub speech_duration: Tick,
@@ -166,6 +204,10 @@ pub struct Narration {
 
 fn is_plain(d: &Delivery) -> bool {
     *d == Delivery::Plain
+}
+
+fn is_english(n: &NumberStyle) -> bool {
+    *n == NumberStyle::English
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -207,6 +249,7 @@ mod tests {
             pace: 1.25,
             delivery: Delivery::Warm,
             take: 2,
+            numbers: NumberStyle::Malayalam,
             speech_duration: Tick::from_seconds_f64(2.5),
         }
     }
@@ -235,6 +278,22 @@ mod tests {
         let n: Narration = serde_json::from_value(old).unwrap();
         assert_eq!(n.delivery, Delivery::Plain);
         assert!(!serde_json::to_string(&n).unwrap().contains("delivery"));
+    }
+
+    #[test]
+    fn number_styles_round_trip_and_old_projects_read_english() {
+        for n in NumberStyle::ALL {
+            assert_eq!(NumberStyle::from_id(n.id()), Some(n));
+        }
+        assert_eq!(NumberStyle::from_id(" Malayalam "), Some(NumberStyle::Malayalam));
+        assert_eq!(NumberStyle::from_id("roman"), None);
+        let s = serde_json::to_string(&sample()).unwrap();
+        assert!(s.contains("\"numbers\":\"malayalam\""), "{s}");
+        let mut old: serde_json::Value = serde_json::from_str(&s).unwrap();
+        old.as_object_mut().unwrap().remove("numbers");
+        let n: Narration = serde_json::from_value(old).unwrap();
+        assert_eq!(n.numbers, NumberStyle::English);
+        assert!(!serde_json::to_string(&n).unwrap().contains("numbers"));
     }
 
     #[test]

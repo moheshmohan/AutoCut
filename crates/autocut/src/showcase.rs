@@ -97,6 +97,11 @@ pub struct Options {
     /// the script's Malayalam parts in Malayalam (a cloned voice through IndicF5), heard back
     /// in Malayalam, with Malayalam subtitles; `None` or anything else: English.
     pub language: Option<String>,
+    /// How a Malayalam narration says numbers written in digits (`--numbers`, a plan's
+    /// `"numbers"`): `english` (the default: years, prices and numbers from 100 up said the
+    /// English way, as Malayali tech creators speak) or `malayalam` (Malayalam words); `None`:
+    /// the default. Checked by [`number_style`].
+    pub numbers: Option<String>,
     /// Hide visitors' faces and number plates in the footage, robots excluded ([`crate::privacy`]).
     pub redact: Option<crate::privacy::Redact>,
 }
@@ -133,8 +138,18 @@ impl Default for Options {
             follow_subject: true,
             look: Look::default(),
             language: None,
+            numbers: None,
             redact: None,
         }
+    }
+}
+
+/// A plan's or flag's number style (`english`, `malayalam`, any case), as `tts.create` takes it.
+pub fn number_style(s: &str) -> Result<String, AutoCutError> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "english" | "en" => Ok("english".into()),
+        "malayalam" | "ml" => Ok("malayalam".into()),
+        _ => Err(AutoCutError::Invalid(format!("numbers: `{}` is neither english nor malayalam", s.chars().take(40).collect::<String>()))),
     }
 }
 
@@ -1400,6 +1415,8 @@ struct Narrations {
     notes: Vec<String>,
     /// The show is in Malayalam ([`Options::language`]): its Malayalam parts are read so.
     malayalam: bool,
+    /// How its Malayalam parts say numbers ([`Options::numbers`]; None: the voice's default).
+    numbers: Option<String>,
 }
 
 /// A cloned voice's line is heard back (Whisper) and read again when less than this share of
@@ -1534,10 +1551,14 @@ async fn narrate(
     // a Malayalam show reads its Malayalam parts in Malayalam (anything left in English stays so)
     let malayalam = narrations.malayalam && is_malayalam_text(say);
     let (max_takes, enough, hear_in) = if malayalam { (MAX_TAKES_ML, HEARD_ENOUGH_ML, "ml") } else { (MAX_TAKES, HEARD_ENOUGH, "en") };
+    let numbers = narrations.numbers.clone();
     let create = async |take: u32| {
         let mut p = json!({"text": say, "voice": voice, "delivery": delivery.id(), "take": take, "time": ticks(t), "track": tr.voice});
         if malayalam {
             p["language"] = json!("ml-IN");
+            if let Some(n) = &numbers {
+                p["numbers"] = json!(n);
+            }
         }
         run(ex, "tts.create", p).await
     };
@@ -2532,7 +2553,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // what the new overlays (the timeline, chips, scene captions) wear without a theme
     let overlay = theme.clone().unwrap_or_else(|| look::Style::classic().resolve(None));
     let voice = opts.voice.as_deref();
-    let mut narrations = Narrations { malayalam: opts.malayalam(), ..Narrations::default() };
+    let mut narrations = Narrations { malayalam: opts.malayalam(), numbers: opts.numbers.clone(), ..Narrations::default() };
     let mut mix = Mix::default();
     let mut fg_firsts: Vec<(u64, Option<u64>)> = Vec::new();
     // shots' own sounds the plan sets a level for: (clip, dB)
@@ -4080,7 +4101,16 @@ mod tests {
         let calls = ex.calls.lock().unwrap().clone();
         assert!(calls.iter().filter(|(c, _)| c == "tts.create").all(|(_, p)| p["language"] == "ml-IN"), "{calls:?}");
         assert!(calls.iter().filter(|(c, _)| c == "transcript.generate").all(|(_, p)| p["language"] == "ml"));
+        assert!(calls.iter().all(|(_, p)| p.get("numbers").is_none()), "the voice's default style unless the plan says");
         assert_eq!(n.lines.first().map(|c| c.text.as_str()), Some(say), "the subtitles show the Malayalam");
+        // the plan's number style goes to every Malayalam reading
+        let ex = MalayalamTakes { calls: Default::default(), good_from: 0 };
+        let mut n = Narrations { malayalam: true, numbers: Some("malayalam".into()), ..Narrations::default() };
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        assert!(ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").all(|(_, p)| p["numbers"] == "malayalam"));
+        assert_eq!(number_style(" English ").unwrap(), "english");
+        assert_eq!(number_style("ml").unwrap(), "malayalam");
+        assert!(number_style("roman").is_err() && number_style("").is_err());
         // never heard: one retake at most (Whisper's Malayalam is weak), the best kept
         let ex = MalayalamTakes { calls: Default::default(), good_from: 99 };
         let mut n = Narrations { malayalam: true, ..Narrations::default() };

@@ -219,6 +219,12 @@ impl PlanDoc {
         opts.look = crate::look::Look::from_plan(&Value::Object(self.look.clone()))?;
         // the narration's language: a plan's top-level `"language"` (`ml`: Malayalam)
         opts.language = self.look.get("language").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).map(str::to_string);
+        // how a Malayalam narration says numbers: the plan's top-level `"numbers"`
+        opts.numbers = match self.look.get("numbers") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(n)) => Some(showcase::number_style(n)?),
+            Some(_) => return Err(AutoCutError::Invalid("numbers: english or malayalam".into())),
+        };
         opts.redact = crate::privacy::Redact::from_plan(self.look.get("redact"))?;
         let (entries, heads) = resolve(&self.entries);
         if entries.is_empty() {
@@ -1015,6 +1021,17 @@ mod tests {
         let ml: PlanDoc = serde_json::from_value(ml).unwrap();
         assert!(ml.resolve().unwrap().0.malayalam());
         assert_eq!(serde_json::to_value(&ml).unwrap()["language"], "ml");
+        assert_eq!(ml.resolve().unwrap().0.numbers, None);
+        // and how it says numbers: the plan's `numbers`, checked
+        let mut words = serde_json::to_value(&ml).unwrap();
+        words["numbers"] = json!("Malayalam");
+        let words: PlanDoc = serde_json::from_value(words).unwrap();
+        assert_eq!(words.resolve().unwrap().0.numbers.as_deref(), Some("malayalam"));
+        for bad in [json!("roman"), json!(3)] {
+            let mut v = serde_json::to_value(&ml).unwrap();
+            v["numbers"] = bad;
+            assert!(serde_json::from_value::<PlanDoc>(v).unwrap().resolve().is_err());
+        }
         // the review's fields round-trip
         let mut v = serde_json::to_value(&plan).unwrap();
         v["entries"][0]["include"] = json!(false);

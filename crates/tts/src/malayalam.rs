@@ -5,12 +5,25 @@
 //! - **Spelling** is made canonical: the two-part vowel signs composed (`െ` + `ാ` → `ൊ`, as NFC
 //!   does), old-style chillus (consonant + virama + ZWJ) made the atomic chillu letters, other
 //!   zero-width joiners dropped, Malayalam digits made ASCII digits.
-//! - **Numbers** become Malayalam words in the Indian system (ആയിരം, ലക്ഷം, കോടി): "2013" →
-//!   "രണ്ടായിരത്തി പതിമൂന്ന്". Years are read as numbers, as Malayalam does. A suffix written
-//!   after a number joins it ("2013-ൽ" → "…പതിമൂന്നിൽ", "2-ാം" → "രണ്ടാം"); a range
-//!   "2013–2025" → "… മുതൽ … വരെ"; "50%" → "… ശതമാനം"; "₹500" → "… രൂപ"; decimals with
-//!   "പോയിന്റ്" and their digits one by one; digit strings longer than twelve, or with a
-//!   leading zero, digit by digit.
+//! - **Numbers** written in digits are read in one of two styles ([`Numbers`]):
+//!   - [`Numbers::English`], the default for narration: years, money and numbers from 100 up
+//!     are said the English way in Malayalam script, as Malayali tech creators speak ("2021" →
+//!     "ട്വന്റി ട്വന്റി വൺ", "2008" → "ടു തൗസന്റ് എയ്റ്റ്", "$1,600" → "സിക്സ്റ്റീൻ ഹണ്ട്രഡ്
+//!     ഡോളർ", "170,000" → "വൺ ലാഖ് സെവന്റി തൗസന്റ്", the Indian system with lakh and crore);
+//!     decimals too ("2.5" → "ടു പോയിന്റ് ഫൈവ്"); small counts stay Malayalam words ("2
+//!     ദിവസം" → "രണ്ട് ദിവസം"). A four-digit number from 1100 to 2099 without a group comma is
+//!     a year ("1969" → "നൈന്റീൻ സിക്സ്റ്റി നൈൻ"): write a count with its comma ("1,234").
+//!   - [`Numbers::Malayalam`]: Malayalam words in the Indian system (ആയിരം, ലക്ഷം, കോടി):
+//!     "2013" → "രണ്ടായിരത്തി പതിമൂന്ന്"; years are read as numbers, as written Malayalam does.
+//!
+//!   A suffix written after a number joins its last word with the sandhi Malayalam writes
+//!   ("2013-ൽ" → "…പതിമൂന്നിൽ" or "ട്വന്റി തേർട്ടീനിൽ", "2021-ൽ" → "ട്വന്റി ട്വന്റി വണ്ണിൽ",
+//!   "2020-ലും" → "ട്വന്റി ട്വന്റിയിലും", "2-ാം" → "രണ്ടാം"); a range "2013–2025" → "… മുതൽ …
+//!   വരെ"; "50%" → "… ശതമാനം"; "₹500" → "… രൂപ" (a currency symbol or word makes it money);
+//!   decimals with "പോയിന്റ്" and their digits one by one; digit strings longer than twelve, or
+//!   with a leading zero, digit by digit; digits joined to capitals are a code ("4K" → "ഫോർ
+//!   കെ"). [`spell_numbers`] rewrites only the numbers of a script (pause markers kept), so a
+//!   caller can choose the style before the voice reads it.
 //! - **Latin letters**: an acronym (all capitals, at most eight) is read letter by letter with
 //!   the letters' Malayalam names ("AI" → "എഐ"), digits inside a code with their English names
 //!   in Malayalam script ("G1" → "ജി വൺ"); any other Latin word is kept, and reported (the model
@@ -170,17 +183,183 @@ pub fn ordinal(n: u64) -> String {
     attach(&number(n), "ാം")
 }
 
+/// How numbers written in digits are read in a Malayalam script (see the module docs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Numbers {
+    /// Years, money, decimals and numbers from 100 up said in English, in Malayalam script, the
+    /// Indian way (lakh, crore); small counts in Malayalam words. The default for narration.
+    #[default]
+    English,
+    /// Every number in Malayalam words.
+    Malayalam,
+}
+
+impl Numbers {
+    pub const ALL: [Numbers; 2] = [Numbers::English, Numbers::Malayalam];
+
+    /// The parameter id (`english`, `malayalam`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Numbers::English => "english",
+            Numbers::Malayalam => "malayalam",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Option<Numbers> {
+        let s = s.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|n| n.id() == s)
+    }
+}
+
+/// English number names in Malayalam script, 0–19.
+const EN_UNITS: [&str; 20] = [
+    "സീറോ",
+    "വൺ",
+    "ടു",
+    "ത്രീ",
+    "ഫോർ",
+    "ഫൈവ്",
+    "സിക്സ്",
+    "സെവൻ",
+    "എയ്റ്റ്",
+    "നൈൻ",
+    "ടെൻ",
+    "ഇലവൻ",
+    "ട്വെൽവ്",
+    "തേർട്ടീൻ",
+    "ഫോർട്ടീൻ",
+    "ഫിഫ്റ്റീൻ",
+    "സിക്സ്റ്റീൻ",
+    "സെവന്റീൻ",
+    "എയ്റ്റീൻ",
+    "നൈന്റീൻ",
+];
+/// English tens in Malayalam script.
+const EN_TENS: [&str; 10] = ["", "", "ട്വന്റി", "തേർട്ടി", "ഫോർട്ടി", "ഫിഫ്റ്റി", "സിക്സ്റ്റി", "സെവന്റി", "എയ്റ്റി", "നൈന്റി"];
+const EN_HUNDRED: &str = "ഹണ്ട്രഡ്";
+const EN_THOUSAND: &str = "തൗസന്റ്";
+const EN_LAKH: &str = "ലാഖ്";
+const EN_CRORE: &str = "ക്രോർ";
+const EN_POINT: &str = "പോയിന്റ്";
+/// "Oh", as in "nineteen oh five".
+const EN_OH: &str = "ഓ";
+
+fn en_unit(n: u64) -> &'static str {
+    EN_UNITS.get(n as usize).copied().unwrap_or("")
+}
+
+fn english_below_100(n: u64) -> String {
+    let n = n % 100;
+    if n < 20 {
+        return en_unit(n).to_string();
+    }
+    let tens = EN_TENS.get((n / 10) as usize).copied().unwrap_or("");
+    if n.is_multiple_of(10) { tens.to_string() } else { format!("{tens} {}", en_unit(n % 10)) }
+}
+
+fn english_below_1000(n: u64) -> String {
+    let n = n % 1000;
+    let (h, r) = (n / 100, n % 100);
+    match (h, r) {
+        (0, r) => english_below_100(r),
+        (h, 0) => format!("{} {EN_HUNDRED}", en_unit(h)),
+        (h, r) => format!("{} {EN_HUNDRED} {}", en_unit(h), english_below_100(r)),
+    }
+}
+
+/// `n` said in English, in Malayalam script, the Indian way ("170000" → "വൺ ലാഖ് സെവന്റി
+/// തൗസന്റ്"); round hundreds from 1100 to 1900 as hundreds ("1600" → "സിക്സ്റ്റീൻ ഹണ്ട്രഡ്").
+pub fn english_number(n: u64) -> String {
+    if n == 0 {
+        return en_unit(0).to_string();
+    }
+    if (1100..=1999).contains(&n) && n.is_multiple_of(100) {
+        return format!("{} {EN_HUNDRED}", en_unit(n / 100));
+    }
+    let crore = n / 10_000_000;
+    let lakh = (n / 100_000) % 100;
+    let thousand = (n / 1000) % 100;
+    let rest = n % 1000;
+    let mut parts: Vec<String> = Vec::new();
+    if crore > 0 {
+        // crore < n: the recursion ends
+        parts.push(format!("{} {EN_CRORE}", english_number(crore)));
+    }
+    if lakh > 0 {
+        parts.push(format!("{} {EN_LAKH}", english_below_100(lakh)));
+    }
+    if thousand > 0 {
+        parts.push(format!("{} {EN_THOUSAND}", english_below_100(thousand)));
+    }
+    if rest > 0 {
+        parts.push(english_below_1000(rest));
+    }
+    parts.join(" ")
+}
+
+/// A year said in English, in Malayalam script: "2021" → "ട്വന്റി ട്വന്റി വൺ", "2008" → "ടു
+/// തൗസന്റ് എയ്റ്റ്", "1969" → "നൈന്റീൻ സിക്സ്റ്റി നൈൻ", "1905" → "നൈന്റീൻ ഓ ഫൈവ്", "1900" →
+/// "നൈന്റീൻ ഹണ്ട്രഡ്"; other numbers as [`english_number`].
+pub fn english_year(n: u64) -> String {
+    match n {
+        2010..=2099 => format!("{} {}", EN_TENS[2], english_below_100(n % 100)),
+        1100..=1999 => {
+            let (hi, lo) = (en_unit(n / 100), n % 100);
+            match lo {
+                0 => format!("{hi} {EN_HUNDRED}"),
+                1..=9 => format!("{hi} {EN_OH} {}", en_unit(lo)),
+                _ => format!("{hi} {}", english_below_100(lo)),
+            }
+        }
+        _ => english_number(n),
+    }
+}
+
+/// Digits read one by one with their English names, in Malayalam script.
+fn english_digits(d: &str) -> String {
+    d.chars().filter_map(|c| c.to_digit(10)).map(|v| en_unit(u64::from(v))).collect::<Vec<_>>().join(" ")
+}
+
+/// A four-digit number without a group comma, from 1100 to 2099: read as a year.
+fn is_year(int: &str, n: u64) -> bool {
+    int.len() == 4 && !int.contains(',') && (1100..=2099).contains(&n)
+}
+
+/// The words of a number written `int` (digits, group commas) and `frac` (decimals, may be
+/// empty) in `style`; `money` when a currency goes with it.
+fn number_words(int: &str, frac: &str, money: bool, style: Numbers) -> String {
+    let n = parse_number(int);
+    match style {
+        Numbers::Malayalam => {
+            let words = n.map(number).unwrap_or_else(|| digit_words(int));
+            if frac.is_empty() { words } else { format!("{words} {EN_POINT} {}", digit_words(frac)) }
+        }
+        Numbers::English => {
+            let small = n.is_some_and(|v| v < 100);
+            let words = match n {
+                // small counts stay Malayalam ("രണ്ട് ദിവസം"), unless money or a decimal
+                Some(v) if small && !money && frac.is_empty() => return number(v),
+                Some(v) if !money && frac.is_empty() && is_year(int, v) => english_year(v),
+                Some(v) => english_number(v),
+                None => english_digits(int),
+            };
+            if frac.is_empty() { words } else { format!("{words} {EN_POINT} {}", english_digits(frac)) }
+        }
+    }
+}
+
 /// Join a suffix written after a number (`-ൽ`, `-ാം`, `-ഓടെ`…) to its word, with the sandhi
 /// Malayalam writes.
 fn attach(word: &str, suffix: &str) -> String {
     let Some(first) = suffix.chars().next() else { return word.to_string() };
     let sign = vowel_sign(first);
+    let rest: String = suffix.chars().skip(1).collect();
     if let Some(stem) = word.strip_suffix(VIRAMA) {
         return match (first, sign) {
             // a vowel sign replaces the virama's half-vowel
             (c, _) if is_vowel_sign(c) => format!("{stem}{suffix}"),
             // an independent vowel becomes its sign
-            (_, Some(s)) => format!("{stem}{s}{}", suffix.chars().skip(1).collect::<String>()),
+            (_, Some(s)) => format!("{stem}{s}{rest}"),
             // a consonant or chillu: the half-vowel becomes ി ("…മൂന്നിൽ")
             _ => format!("{stem}ി{suffix}"),
         };
@@ -189,11 +368,55 @@ fn attach(word: &str, suffix: &str) -> String {
         // ആയിരം + ൽ → ആയിരത്തിൽ
         return match (first, sign) {
             (c, _) if is_vowel_sign(c) => format!("{stem}ത്ത{suffix}"),
-            (_, Some(s)) => format!("{stem}ത്ത{s}{}", suffix.chars().skip(1).collect::<String>()),
+            (_, Some(s)) => format!("{stem}ത്ത{s}{rest}"),
             _ => format!("{stem}ത്തി{suffix}"),
         };
     }
+    let Some(last) = word.chars().last() else { return suffix.to_string() };
+    let stem = word.get(..word.len().saturating_sub(last.len_utf8())).unwrap_or("");
+    if let Some(base) = chillu_base(last) {
+        // a chillu takes its consonant back: "ഫോർ" + "ൽ" → "ഫോറിൽ"; after the short vowel of a
+        // one-syllable word it doubles: "വൺ" + "ൽ" → "വണ്ണിൽ", "ടെൻ" → "ടെന്നിൽ"
+        let cons = if base != 'റ' && short_syllable(stem) { format!("{base}{VIRAMA}{base}") } else { base.to_string() };
+        return match (first, sign) {
+            (c, _) if is_vowel_sign(c) => format!("{stem}{cons}{suffix}"),
+            (_, Some(s)) => format!("{stem}{cons}{s}{rest}"),
+            _ => format!("{stem}{cons}ി{suffix}"),
+        };
+    }
+    if is_vowel_sign(last) || vowel_sign(last).is_some() {
+        // a vowel ending takes a glide: "ട്വന്റി" + "ൽ" → "ട്വന്റിയിൽ", "ടു" + "ൽ" → "ടുവിൽ"
+        let glide = if matches!(last, 'ു' | 'ൂ' | 'ഉ' | 'ഊ') { 'വ' } else { 'യ' };
+        // the genitive after a vowel is -ുടെ ("ട്വന്റിയുടെ"), not -ന്റെ
+        if let Some(after) = suffix.strip_prefix("ന്റെ") {
+            return format!("{word}{glide}ുടെ{after}");
+        }
+        return match (first, sign) {
+            (c, _) if is_vowel_sign(c) => format!("{word}{glide}{suffix}"),
+            (_, Some(s)) => format!("{word}{glide}{s}{rest}"),
+            _ => format!("{word}{glide}ി{suffix}"),
+        };
+    }
     format!("{word}{suffix}")
+}
+
+/// The consonant a chillu stands for (`ൻ` → `ന`; `ർ` → `റ`, as loanwords take it).
+fn chillu_base(c: char) -> Option<char> {
+    Some(match c {
+        'ൻ' => 'ന',
+        'ൺ' => 'ണ',
+        'ർ' => 'റ',
+        'ൽ' => 'ല',
+        'ൾ' => 'ള',
+        'ൿ' => 'ക',
+        _ => return None,
+    })
+}
+
+/// `stem` (a word without its final chillu) is one syllable with a short vowel ("വ", "ടെ").
+fn short_syllable(stem: &str) -> bool {
+    let long = ['ാ', 'ീ', 'ൂ', 'േ', 'ൈ', 'ോ', 'ൌ', 'ൗ', 'ആ', 'ഈ', 'ഊ', 'ഏ', 'ഐ', 'ഓ', 'ഔ'];
+    syllables(stem) == 1 && !stem.chars().any(|c| long.contains(&c))
 }
 
 fn is_vowel_sign(c: char) -> bool {
@@ -300,8 +523,120 @@ fn parse_number(run: &str) -> Option<u64> {
     plain.parse().ok()
 }
 
-/// Normalise one stretch of speech (no pause markers) for a Malayalam voice.
+/// Normalise one stretch of speech (no pause markers) for a Malayalam voice, numbers in the
+/// narration default ([`Numbers::English`]).
 pub fn normalize(text: &str) -> Normalized {
+    normalize_with(text, Numbers::default())
+}
+
+/// Normalise one stretch of speech (no pause markers) for a Malayalam voice, numbers in `style`.
+pub fn normalize_with(text: &str, style: Numbers) -> Normalized {
+    rewrite(text, style, false)
+}
+
+/// `text` with only its numbers spelled out in `style` (and its spelling made canonical):
+/// everything else, pause markers included, stays as written, for the voice's front end to
+/// read. Lets a caller choose how numbers are said before the voice reads the script.
+pub fn spell_numbers(text: &str, style: Numbers) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    for seg in script::parse(text) {
+        match seg {
+            Segment::Speech(t) => out.push_str(&rewrite(&t, style, true).text),
+            Segment::Pause { millis } => {
+                if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+                    out.push(' ');
+                }
+                out.push_str(&format!("[pause {millis}ms]"));
+            }
+        }
+    }
+    out
+}
+
+/// The currency word of a symbol written before an amount.
+fn currency_word(c: char) -> Option<&'static str> {
+    Some(match c {
+        '₹' => "രൂപ",
+        '$' => "ഡോളർ",
+        '€' => "യൂറോ",
+        '£' => "പൗണ്ട്",
+        _ => return None,
+    })
+}
+
+/// Words after an amount that make it money ("50 ഡോളർ"): read in English with
+/// [`Numbers::English`] whatever its size.
+const CURRENCY_WORDS: [&str; 8] = ["ഡോളർ", "ഡോളറ", "രൂപ", "ദിർഹം", "ദിർഹ", "യൂറോ", "പൗണ്ട", "ദിനാർ"];
+
+/// Whether the word after `i` (past spaces) is a currency.
+fn money_follows(chars: &[char], mut i: usize) -> bool {
+    while chars.get(i).is_some_and(|c| *c == ' ') {
+        i += 1;
+    }
+    let word: String = chars.get(i..).unwrap_or(&[]).iter().take_while(|c| is_malayalam(**c)).collect();
+    CURRENCY_WORDS.iter().any(|w| word.starts_with(w))
+}
+
+/// The number written at `chars[i]` (a digit) read in `style`, with what goes with it: a
+/// currency (`currency`, its symbol written before), a decimal part, a range, a percent sign, a
+/// suffix. Returns the words and where the number ends.
+fn read_number(chars: &[char], mut i: usize, currency: Option<&str>, style: Numbers) -> (String, usize) {
+    // digits with group commas and one decimal point
+    let s = i;
+    while chars.get(i).is_some_and(|c| c.is_ascii_digit() || (*c == ',' && chars.get(i + 1).is_some_and(char::is_ascii_digit))) {
+        i += 1;
+    }
+    let int: String = chars.get(s..i).unwrap_or(&[]).iter().collect();
+    let mut frac = String::new();
+    if chars.get(i) == Some(&'.') && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+        i += 1;
+        while let Some(c) = chars.get(i).filter(|c| c.is_ascii_digit()) {
+            frac.push(*c);
+            i += 1;
+        }
+    }
+    let money = currency.is_some() || money_follows(chars, i);
+    let mut words = number_words(&int, &frac, money, style);
+    // a range: 2013–2025
+    if currency.is_none() && frac.is_empty() && matches!(chars.get(i), Some('-' | '–')) && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+        let s2 = i + 1;
+        let mut j = s2;
+        while chars.get(j).is_some_and(char::is_ascii_digit) {
+            j += 1;
+        }
+        let second: String = chars.get(s2..j).unwrap_or(&[]).iter().collect();
+        let w2 = number_words(&second, "", money, style);
+        return (format!("{words} മുതൽ {w2} വരെ"), j);
+    }
+    // a percentage
+    if chars.get(i) == Some(&'%') {
+        return (format!("{words} ശതമാനം"), i + 1);
+    }
+    if let Some(c) = currency {
+        words = format!("{words} {c}");
+    }
+    // a suffix written after the number: "2013-ൽ", "2-ാം", "2013ൽ", "$1,600-നാണ്"
+    let hyphen = usize::from(matches!(chars.get(i), Some('-')) && chars.get(i + 1).is_some_and(|c| is_malayalam(*c)));
+    if chars.get(i + hyphen).is_some_and(|c| is_malayalam(*c)) {
+        let s3 = i + hyphen;
+        let mut j = s3;
+        while chars.get(j).is_some_and(|c| is_malayalam(*c)) {
+            j += 1;
+        }
+        let suffix: String = chars.get(s3..j).unwrap_or(&[]).iter().collect();
+        // the suffix joins the number's last word
+        let joined = match words.rsplit_once(' ') {
+            Some((head, last)) => format!("{head} {}", attach(last, &suffix)),
+            None => attach(&words, &suffix),
+        };
+        return (joined, j);
+    }
+    (words, i)
+}
+
+/// Normalise `text` for a Malayalam voice (`numbers_only`: spell its numbers, keep the rest as
+/// written).
+fn rewrite(text: &str, style: Numbers, numbers_only: bool) -> Normalized {
     let text = canonical(text);
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len() * 2);
@@ -313,64 +648,41 @@ pub fn normalize(text: &str) -> Normalized {
     };
     let mut i = 0;
     while let Some(&c) = chars.get(i) {
-        if c.is_ascii_digit() {
-            // a number: digits with group commas and one decimal point
-            let s = i;
-            while chars.get(i).is_some_and(|c| c.is_ascii_digit() || (*c == ',' && chars.get(i + 1).is_some_and(char::is_ascii_digit))) {
-                i += 1;
+        // an amount after a currency symbol: "$1,600", "₹ 500"
+        if let Some(word) = currency_word(c) {
+            let mut j = i + 1;
+            while chars.get(j).is_some_and(|c| *c == ' ') {
+                j += 1;
             }
-            let int: String = chars.get(s..i).unwrap_or(&[]).iter().collect();
-            let mut frac = String::new();
-            if chars.get(i) == Some(&'.') && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
-                i += 1;
-                while chars.get(i).is_some_and(char::is_ascii_digit) {
-                    frac.push(chars.get(i).copied().unwrap_or('0'));
+            if chars.get(j).is_some_and(char::is_ascii_digit) {
+                let (words, next) = read_number(&chars, j, Some(word), style);
+                push_word(&mut out, &words);
+                i = next;
+                continue;
+            }
+        }
+        if c.is_ascii_digit() {
+            // digits joined to capitals are a code ("4K", "3D"): read as one
+            let mut j = i;
+            while chars.get(j).is_some_and(char::is_ascii_digit) {
+                j += 1;
+            }
+            if chars.get(j).is_some_and(char::is_ascii_uppercase) {
+                let s = i;
+                while chars.get(i).is_some_and(char::is_ascii_alphanumeric) {
                     i += 1;
                 }
-            }
-            let mut words = match parse_number(&int) {
-                Some(n) => number(n),
-                None => digit_words(&int),
-            };
-            if !frac.is_empty() {
-                words = format!("{words} പോയിന്റ് {}", digit_words(&frac));
-            }
-            // a range: 2013–2025
-            if matches!(chars.get(i), Some('-' | '–')) && chars.get(i + 1).is_some_and(char::is_ascii_digit) && frac.is_empty() {
-                let s2 = i + 1;
-                let mut j = s2;
-                while chars.get(j).is_some_and(char::is_ascii_digit) {
-                    j += 1;
+                let word: String = chars.get(s..i).unwrap_or(&[]).iter().collect();
+                if numbers_only {
+                    out.push_str(&word);
+                } else {
+                    push_word(&mut out, &latin(&word, &mut note));
                 }
-                let second: String = chars.get(s2..j).unwrap_or(&[]).iter().collect();
-                let w2 = parse_number(&second).map(number).unwrap_or_else(|| digit_words(&second));
-                push_word(&mut out, &format!("{words} മുതൽ {w2} വരെ"));
-                i = j;
                 continue;
             }
-            // a percentage
-            if chars.get(i) == Some(&'%') {
-                push_word(&mut out, &format!("{words} ശതമാനം"));
-                i += 1;
-                continue;
-            }
-            // a suffix written after the number: "2013-ൽ", "2-ാം", "2013ൽ"
-            let hyphen = usize::from(matches!(chars.get(i), Some('-')) && chars.get(i + 1).is_some_and(|c| is_malayalam(*c)));
-            if chars.get(i + hyphen).is_some_and(|c| is_malayalam(*c)) {
-                let s3 = i + hyphen;
-                let mut j = s3;
-                while chars.get(j).is_some_and(|c| is_malayalam(*c)) {
-                    j += 1;
-                }
-                let suffix: String = chars.get(s3..j).unwrap_or(&[]).iter().collect();
-                // the suffix joins the number's last word
-                let (head, last) = words.rsplit_once(' ').map_or((String::new(), words.clone()), |(h, l)| (h.to_string(), l.to_string()));
-                let joined = attach(&last, &suffix);
-                push_word(&mut out, &if head.is_empty() { joined } else { format!("{head} {joined}") });
-                i = j;
-                continue;
-            }
+            let (words, next) = read_number(&chars, i, None, style);
             push_word(&mut out, &words);
+            i = next;
             continue;
         }
         if c.is_ascii_alphabetic() {
@@ -379,10 +691,18 @@ pub fn normalize(text: &str) -> Normalized {
                 i += 1;
             }
             let word: String = chars.get(s..i).unwrap_or(&[]).iter().collect();
-            push_word(&mut out, &latin(&word, &mut note));
+            if numbers_only {
+                out.push_str(&word);
+            } else {
+                push_word(&mut out, &latin(&word, &mut note));
+            }
             continue;
         }
         i += 1;
+        if numbers_only {
+            out.push(c);
+            continue;
+        }
         match c {
             c if is_malayalam(c) => {
                 // a Malayalam word continues the current one
@@ -419,10 +739,9 @@ pub fn normalize(text: &str) -> Normalized {
             '&' => push_word(&mut out, "ആൻഡ്"),
             '+' => push_word(&mut out, "പ്ലസ്"),
             '@' => push_word(&mut out, "അറ്റ്"),
-            '₹' => push_word(&mut out, "രൂപ"),
-            '$' => push_word(&mut out, "ഡോളർ"),
             '°' => push_word(&mut out, "ഡിഗ്രി"),
             '=' => push_word(&mut out, "സമം"),
+            c if currency_word(c).is_some() => push_word(&mut out, currency_word(c).unwrap_or("")),
             '/' | '|' | '_' | '*' | '#' | '~' | '^' | '`' | '<' | '>' | '[' | ']' | '{' | '}' | '\\' => {
                 if !out.is_empty() && !out.ends_with(' ') {
                     out.push(' ');
@@ -432,7 +751,10 @@ pub fn normalize(text: &str) -> Normalized {
             c => note(format!("left out `{c}` (not readable as written)")),
         }
     }
-    // a currency word read before its amount goes after it, as it is spoken ("₹500" → "500 രൂപ")
+    if numbers_only {
+        return Normalized { text: out, notes };
+    }
+    // a currency word read before its amount goes after it, as it is spoken
     let text = move_currency(&out.split_whitespace().collect::<Vec<_>>().join(" "));
     Normalized { text, notes }
 }
@@ -467,6 +789,8 @@ fn is_number_word(w: &str) -> bool {
         || w.ends_with("ായിരം")
         || w.ends_with("ായിരത്തി")
         || w.ends_with("ലക്ഷത്തി")
+        || EN_UNITS.iter().chain(&EN_TENS).any(|u| !u.is_empty() && w == *u)
+        || [EN_HUNDRED, EN_THOUSAND, EN_LAKH, EN_CRORE, EN_OH].contains(&w)
 }
 
 /// A Latin word for a Malayalam voice: acronyms and codes spelled, other words kept (noted).
@@ -587,6 +911,11 @@ fn split_long(s: &str, max: usize) -> Vec<String> {
 /// A script → utterances of at most `max` characters and pauses, and the notes of its
 /// normalisation (see the module docs).
 pub fn pieces(text: &str, max: usize) -> Result<(Vec<Piece>, Vec<String>), TtsError> {
+    pieces_with(text, max, Numbers::default())
+}
+
+/// [`pieces`] with numbers read in `style`.
+pub fn pieces_with(text: &str, max: usize, style: Numbers) -> Result<(Vec<Piece>, Vec<String>), TtsError> {
     check_text(text)?;
     let max = max.max(20);
     let mut out: Vec<Piece> = Vec::new();
@@ -595,7 +924,7 @@ pub fn pieces(text: &str, max: usize) -> Result<(Vec<Piece>, Vec<String>), TtsEr
         match seg {
             Segment::Pause { millis } => out.push(Piece::Pause(millis)),
             Segment::Speech(t) => {
-                let n = normalize(&t);
+                let n = normalize_with(&t, style);
                 for x in n.notes {
                     if !notes.contains(&x) {
                         notes.push(x);
@@ -693,30 +1022,216 @@ mod tests {
 
     #[test]
     fn the_test_lines_normalise() {
-        let n = normalize("ഇത് ഞാൻ കണ്ടുമുട്ടിയ എല്ലാ റോബോട്ടുകളുമാണ്, 2013 മുതൽ 2025 വരെ.");
+        let ml = |t: &str| normalize_with(t, Numbers::Malayalam);
+        let n = ml("ഇത് ഞാൻ കണ്ടുമുട്ടിയ എല്ലാ റോബോട്ടുകളുമാണ്, 2013 മുതൽ 2025 വരെ.");
         assert_eq!(n.text, "ഇത് ഞാൻ കണ്ടുമുട്ടിയ എല്ലാ റോബോട്ടുകളുമാണ്, രണ്ടായിരത്തി പതിമൂന്ന് മുതൽ രണ്ടായിരത്തി ഇരുപത്തിയഞ്ച് വരെ.");
         assert!(n.notes.is_empty());
+        // the narration default says the years in English
+        let n = normalize("ഇത് ഞാൻ കണ്ടുമുട്ടിയ എല്ലാ റോബോട്ടുകളുമാണ്, 2013 മുതൽ 2025 വരെ.");
+        assert_eq!(n.text, "ഇത് ഞാൻ കണ്ടുമുട്ടിയ എല്ലാ റോബോട്ടുകളുമാണ്, ട്വന്റി തേർട്ടീൻ മുതൽ ട്വന്റി ട്വന്റി ഫൈവ് വരെ.");
         let n = normalize("ദുബായിൽ നടന്ന ജൈടെക്സിൽ ഈ ആൻഡ്രോയിഡ് ഒരു മനുഷ്യനെപ്പോലെ തന്നെ തോന്നി.");
         assert_eq!(n.text, "ദുബായിൽ നടന്ന ജൈടെക്സിൽ ഈ ആൻഡ്രോയിഡ് ഒരു മനുഷ്യനെപ്പോലെ തന്നെ തോന്നി.");
     }
 
     #[test]
     fn suffixes_ranges_and_symbols() {
-        assert_eq!(normalize("2013-ൽ").text, "രണ്ടായിരത്തി പതിമൂന്നിൽ");
-        assert_eq!(normalize("2013ൽ").text, "രണ്ടായിരത്തി പതിമൂന്നിൽ");
-        assert_eq!(normalize("2-ാം").text, "രണ്ടാം");
-        assert_eq!(normalize("1000-ൽ").text, "ആയിരത്തിൽ");
-        assert_eq!(normalize("2013-ഓടെ").text, "രണ്ടായിരത്തി പതിമൂന്നോടെ");
-        assert_eq!(normalize("2013–2025").text, "രണ്ടായിരത്തി പതിമൂന്ന് മുതൽ രണ്ടായിരത്തി ഇരുപത്തിയഞ്ച് വരെ");
-        assert_eq!(normalize("50%").text, "അമ്പത് ശതമാനം");
-        assert_eq!(normalize("₹500").text, "അഞ്ഞൂറ് രൂപ");
-        assert_eq!(normalize("2.5").text, "രണ്ട് പോയിന്റ് അഞ്ച്");
-        assert_eq!(normalize("1,00,000 ആളുകൾ").text, "ഒരു ലക്ഷം ആളുകൾ");
-        assert_eq!(normalize("1,000,000").text, "പത്ത് ലക്ഷം");
-        assert_eq!(normalize("007").text, "പൂജ്യം പൂജ്യം ഏഴ്");
-        assert_eq!(normalize("൨൦൨൫").text, "രണ്ടായിരത്തി ഇരുപത്തിയഞ്ച്");
+        let ml = |t: &str| normalize_with(t, Numbers::Malayalam).text;
+        assert_eq!(ml("2013-ൽ"), "രണ്ടായിരത്തി പതിമൂന്നിൽ");
+        assert_eq!(ml("2013ൽ"), "രണ്ടായിരത്തി പതിമൂന്നിൽ");
+        assert_eq!(ml("2-ാം"), "രണ്ടാം");
+        assert_eq!(ml("1000-ൽ"), "ആയിരത്തിൽ");
+        assert_eq!(ml("2013-ഓടെ"), "രണ്ടായിരത്തി പതിമൂന്നോടെ");
+        assert_eq!(ml("2013–2025"), "രണ്ടായിരത്തി പതിമൂന്ന് മുതൽ രണ്ടായിരത്തി ഇരുപത്തിയഞ്ച് വരെ");
+        assert_eq!(ml("50%"), "അമ്പത് ശതമാനം");
+        assert_eq!(ml("₹500"), "അഞ്ഞൂറ് രൂപ");
+        assert_eq!(ml("₹ 500"), "അഞ്ഞൂറ് രൂപ");
+        assert_eq!(ml("2.5"), "രണ്ട് പോയിന്റ് അഞ്ച്");
+        assert_eq!(ml("1,00,000 ആളുകൾ"), "ഒരു ലക്ഷം ആളുകൾ");
+        assert_eq!(ml("1,000,000"), "പത്ത് ലക്ഷം");
+        assert_eq!(ml("007"), "പൂജ്യം പൂജ്യം ഏഴ്");
+        assert_eq!(ml("൨൦൨൫"), "രണ്ടായിരത്തി ഇരുപത്തിയഞ്ച്");
+        // a word ending in a vowel takes a glide before the suffix
+        assert_eq!(ml("1,00,00,000-ൽ"), "ഒരു കോടിയിൽ");
         assert_eq!(normalize("ഇതും — അതും").text, "ഇതും, അതും");
         assert_eq!(normalize("A & B").text, "എ ആൻഡ് ബി");
+    }
+
+    #[test]
+    fn english_numbers_in_malayalam_script() {
+        let cases: &[(u64, &str)] = &[
+            (0, "സീറോ"),
+            (7, "സെവൻ"),
+            (12, "ട്വെൽവ്"),
+            (19, "നൈന്റീൻ"),
+            (20, "ട്വന്റി"),
+            (85, "എയ്റ്റി ഫൈവ്"),
+            (100, "വൺ ഹണ്ട്രഡ്"),
+            (600, "സിക്സ് ഹണ്ട്രഡ്"),
+            (999, "നൈൻ ഹണ്ട്രഡ് നൈന്റി നൈൻ"),
+            (1000, "വൺ തൗസന്റ്"),
+            (1234, "വൺ തൗസന്റ് ടു ഹണ്ട്രഡ് തേർട്ടി ഫോർ"),
+            (1600, "സിക്സ്റ്റീൻ ഹണ്ട്രഡ്"),
+            (2500, "ടു തൗസന്റ് ഫൈവ് ഹണ്ട്രഡ്"),
+            (2700, "ടു തൗസന്റ് സെവൻ ഹണ്ട്രഡ്"),
+            (27_000, "ട്വന്റി സെവൻ തൗസന്റ്"),
+            (100_000, "വൺ ലാഖ്"),
+            (170_000, "വൺ ലാഖ് സെവന്റി തൗസന്റ്"),
+            (10_000_000, "വൺ ക്രോർ"),
+            (35_000_000, "ത്രീ ക്രോർ ഫിഫ്റ്റി ലാഖ്"),
+        ];
+        for (n, w) in cases {
+            assert_eq!(english_number(*n), *w, "{n}");
+        }
+        let years: &[(u64, &str)] = &[
+            (1969, "നൈന്റീൻ സിക്സ്റ്റി നൈൻ"),
+            (1900, "നൈന്റീൻ ഹണ്ട്രഡ്"),
+            (1905, "നൈന്റീൻ ഓ ഫൈവ്"),
+            (2000, "ടു തൗസന്റ്"),
+            (2008, "ടു തൗസന്റ് എയ്റ്റ്"),
+            (2010, "ട്വന്റി ടെൻ"),
+            (2013, "ട്വന്റി തേർട്ടീൻ"),
+            (2016, "ട്വന്റി സിക്സ്റ്റീൻ"),
+            (2020, "ട്വന്റി ട്വന്റി"),
+            (2021, "ട്വന്റി ട്വന്റി വൺ"),
+            (2025, "ട്വന്റി ട്വന്റി ഫൈവ്"),
+        ];
+        for (n, w) in years {
+            assert_eq!(english_year(*n), *w, "{n}");
+        }
+        // never panics, whatever the size
+        assert!(!english_number(u64::MAX).is_empty());
+        assert!(!english_year(u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn english_is_the_narration_default() {
+        let en = |t: &str| normalize(t).text;
+        // the user's examples
+        assert_eq!(en("2021"), "ട്വന്റി ട്വന്റി വൺ");
+        assert_eq!(en("2013"), "ട്വന്റി തേർട്ടീൻ");
+        assert_eq!(en("2008"), "ടു തൗസന്റ് എയ്റ്റ്");
+        assert_eq!(en("1969"), "നൈന്റീൻ സിക്സ്റ്റി നൈൻ");
+        assert_eq!(en("$1,600"), "സിക്സ്റ്റീൻ ഹണ്ട്രഡ് ഡോളർ");
+        assert_eq!(en("2,500"), "ടു തൗസന്റ് ഫൈവ് ഹണ്ട്രഡ്");
+        assert_eq!(en("170,000"), "വൺ ലാഖ് സെവന്റി തൗസന്റ്");
+        assert_eq!(en("2021-ൽ"), "ട്വന്റി ട്വന്റി വണ്ണിൽ");
+        // suffixes after English words: chillus, glides, the genitive
+        assert_eq!(en("2013-ൽ"), "ട്വന്റി തേർട്ടീനിൽ");
+        assert_eq!(en("2024-ൽ"), "ട്വന്റി ട്വന്റി ഫോറിൽ");
+        assert_eq!(en("2023-ൽ"), "ട്വന്റി ട്വന്റി ത്രീയിൽ");
+        assert_eq!(en("2022-ൽ"), "ട്വന്റി ട്വന്റി ടുവിൽ");
+        assert_eq!(en("2020-ലും"), "ട്വന്റി ട്വന്റിയിലും");
+        assert_eq!(en("2020-ന്റെ"), "ട്വന്റി ട്വന്റിയുടെ");
+        assert_eq!(en("2021-ന്റെ"), "ട്വന്റി ട്വന്റി വണ്ണിന്റെ");
+        assert_eq!(en("2013-ഓടെ"), "ട്വന്റി തേർട്ടീനോടെ");
+        assert_eq!(en("2025-ൽ"), "ട്വന്റി ട്വന്റി ഫൈവിൽ");
+        assert_eq!(en("2007-ൽ"), "ടു തൗസന്റ് സെവനിൽ");
+        assert_eq!(en("170,000-ലധികം"), "വൺ ലാഖ് സെവന്റി തൗസന്റിലധികം");
+        assert_eq!(en("$2,700-നാണ്"), "ടു തൗസന്റ് സെവൻ ഹണ്ട്രഡ് ഡോളറിനാണ്");
+        // money is English at any size, small counts stay Malayalam
+        assert_eq!(en("$5"), "ഫൈവ് ഡോളർ");
+        assert_eq!(en("₹500"), "ഫൈവ് ഹണ്ട്രഡ് രൂപ");
+        assert_eq!(en("50 ഡോളർ"), "ഫിഫ്റ്റി ഡോളർ");
+        assert_eq!(en("2 ദിവസം"), "രണ്ട് ദിവസം");
+        assert_eq!(en("85%"), "എൺപത്തിയഞ്ച് ശതമാനം");
+        assert_eq!(en("2-ാം"), "രണ്ടാം");
+        // decimals, codes, digit strings
+        assert_eq!(en("2.5"), "ടു പോയിന്റ് ഫൈവ്");
+        assert_eq!(en("007"), "സീറോ സീറോ സെവൻ");
+        assert_eq!(en("4K ക്യാമറ"), "ഫോർ കെ ക്യാമറ");
+        assert_eq!(en("3D"), "ത്രീ ഡി");
+        assert_eq!(en("1,234"), "വൺ തൗസന്റ് ടു ഹണ്ട്രഡ് തേർട്ടി ഫോർ");
+        assert_eq!(en("1,00,00,000"), "വൺ ക്രോർ");
+        assert_eq!(en("2100"), "ടു തൗസന്റ് വൺ ഹണ്ട്രഡ്");
+        assert_eq!(en("2013–2025"), "ട്വന്റി തേർട്ടീൻ മുതൽ ട്വന്റി ട്വന്റി ഫൈവ് വരെ");
+        assert_eq!(en("൨൦൨൫"), "ട്വന്റി ട്വന്റി ഫൈവ്");
+        assert_eq!(Numbers::from_id(" English "), Some(Numbers::English));
+        assert_eq!(Numbers::from_id("malayalam"), Some(Numbers::Malayalam));
+        assert_eq!(Numbers::from_id("roman"), None);
+        assert_eq!(Numbers::default(), Numbers::English);
+    }
+
+    /// The Malayalam script of "Every Robot I've Met" (v5), whose numbers were converted to
+    /// English words by hand, with digits put back where they were: the front end must say them
+    /// as the hand conversion does.
+    const HAND_CONVERTED: &[(&str, &str)] = &[
+        (
+            "2013 മുതൽ 2025 വരെ ഞാൻ കണ്ടുമുട്ടിയ എല്ലാ റോബോട്ടുകളും ആണ് ഇത്. ഇതിൽ മിക്കതിനെയും ദുബായിലെ എക്സ്പോ 2020-ലും ജൈടെക്സിലും ആണ് കണ്ടത്, ആദ്യത്തെ രണ്ടെണ്ണം ഞാൻ തന്നെ ഉണ്ടാക്കിയതാണ്.",
+            "ട്വന്റി തേർട്ടീൻ മുതൽ ട്വന്റി ട്വന്റി ഫൈവ് വരെ ഞാൻ കണ്ടുമുട്ടിയ എല്ലാ റോബോട്ടുകളും ആണ് ഇത്. ഇതിൽ മിക്കതിനെയും ദുബായിലെ എക്സ്പോ ട്വന്റി ട്വന്റിയിലും ജൈടെക്സിലും ആണ് കണ്ടത്, ആദ്യത്തെ രണ്ടെണ്ണം ഞാൻ തന്നെ ഉണ്ടാക്കിയതാണ്.",
+        ),
+        (
+            "എല്ലാം തുടങ്ങിയത് ഇവിടെ നിന്നാണ്. 2013-ൽ, നാട്ടിൽ കേരളത്തിൽ വെച്ച്, ഒരു കിറ്റിൽ നിന്ന് ഞാൻ എന്റെ ആദ്യത്തെ റോബോട്ട് ഉണ്ടാക്കി.",
+            "എല്ലാം തുടങ്ങിയത് ഇവിടെ നിന്നാണ്. ട്വന്റി തേർട്ടീനിൽ, നാട്ടിൽ കേരളത്തിൽ വെച്ച്, ഒരു കിറ്റിൽ നിന്ന് ഞാൻ എന്റെ ആദ്യത്തെ റോബോട്ട് ഉണ്ടാക്കി.",
+        ),
+        (
+            "2021 ഒക്ടോബറിൽ ജൈടെക്സിൽ, ഈ ആൻഡ്രോയിഡിനെ കണ്ടാൽ ശരിക്കും ഒരു മനുഷ്യനാണെന്ന് തോന്നും.",
+            "ട്വന്റി ട്വന്റി വൺ ഒക്ടോബറിൽ ജൈടെക്സിൽ, ഈ ആൻഡ്രോയിഡിനെ കണ്ടാൽ ശരിക്കും ഒരു മനുഷ്യനാണെന്ന് തോന്നും.",
+        ),
+        ("2022 ഒക്ടോബർ, വീണ്ടും ജൈടെക്സിൽ, 170,000-ലധികം സന്ദർശകർ.", "ട്വന്റി ട്വന്റി ടു ഒക്ടോബർ, വീണ്ടും ജൈടെക്സിൽ, വൺ ലാഖ് സെവന്റി തൗസന്റിലധികം സന്ദർശകർ."),
+        (
+            "സോഫ്റ്റ്ബാങ്ക് ഉണ്ടാക്കിയ റോബോട്ട് ആണ്, 2020-ൽ നിർമ്മാണം നിർത്തുന്നതിന് മുമ്പ് ഏകദേശം ഇരുപത്തിയേഴായിരം എണ്ണം ഉണ്ടാക്കി.",
+            "സോഫ്റ്റ്ബാങ്ക് ഉണ്ടാക്കിയ റോബോട്ട് ആണ്, ട്വന്റി ട്വന്റിയിൽ നിർമ്മാണം നിർത്തുന്നതിന് മുമ്പ് ഏകദേശം ഇരുപത്തിയേഴായിരം എണ്ണം ഉണ്ടാക്കി.",
+        ),
+        ("മിനിറ്റിൽ 2,500 ഗാലൻ വെള്ളം പമ്പ് ചെയ്യും, ഡീസലിൽ ഇരുപത് മണിക്കൂർ ഓടും.", "മിനിറ്റിൽ ടു തൗസന്റ് ഫൈവ് ഹണ്ട്രഡ് ഗാലൻ വെള്ളം പമ്പ് ചെയ്യും, ഡീസലിൽ ഇരുപത് മണിക്കൂർ ഓടും."),
+        ("2008 മുതൽ കുട്ടികളെയും ഗവേഷകരെയും പഠിപ്പിക്കുന്നു.", "ടു തൗസന്റ് എയ്റ്റ് മുതൽ കുട്ടികളെയും ഗവേഷകരെയും പഠിപ്പിക്കുന്നു."),
+        (
+            "ജപ്പാനിലെ ആദ്യത്തെ സ്വദേശി ഇൻഡസ്ട്രിയൽ റോബോട്ട് ഉണ്ടാക്കിയത് കവാസാക്കി ആണ്, 1969-ൽ.",
+            "ജപ്പാനിലെ ആദ്യത്തെ സ്വദേശി ഇൻഡസ്ട്രിയൽ റോബോട്ട് ഉണ്ടാക്കിയത് കവാസാക്കി ആണ്, നൈന്റീൻ സിക്സ്റ്റി നൈനിൽ.",
+        ),
+        ("ബ്രിട്ടനിലെ എഞ്ചിനീയേർഡ് ആർട്സ് 2021-ന്റെ അവസാനത്തിലാണ് ഇതിനെ അവതരിപ്പിച്ചത്.", "ബ്രിട്ടനിലെ എഞ്ചിനീയേർഡ് ആർട്സ് ട്വന്റി ട്വന്റി വണ്ണിന്റെ അവസാനത്തിലാണ് ഇതിനെ അവതരിപ്പിച്ചത്."),
+        (
+            "പന്ത്രണ്ട് കിലോ ഭാരം, ഏകദേശം $2,700-നാണ് ഇറങ്ങിയത്, പഴയ റോബോട്ട് നായകളുടെ വിലയുടെ ഒരു ചെറിയ ഭാഗം മാത്രം.",
+            "പന്ത്രണ്ട് കിലോ ഭാരം, ഏകദേശം ടു തൗസന്റ് സെവൻ ഹണ്ട്രഡ് ഡോളറിനാണ് ഇറങ്ങിയത്, പഴയ റോബോട്ട് നായകളുടെ വിലയുടെ ഒരു ചെറിയ ഭാഗം മാത്രം.",
+        ),
+        ("2023 ഒക്ടോബറിൽ, ബുസാനിൽ, എന്റെ ഭക്ഷണം കൊണ്ടുവന്നത് ഡില്ലി എസ് ആണ്.", "ട്വന്റി ട്വന്റി ത്രീ ഒക്ടോബറിൽ, ബുസാനിൽ, എന്റെ ഭക്ഷണം കൊണ്ടുവന്നത് ഡില്ലി എസ് ആണ്."),
+        (
+            "വീണ്ടും പെപ്പർ, സോഫ്റ്റ്ബാങ്ക് നിർമ്മാണം നിർത്തി വർഷങ്ങൾ കഴിഞ്ഞിട്ടും, 2024-ലും ഒരു ഗ്ലാസ് ബോക്സിൽ നിന്ന് ആളുകളെ സ്വാഗതം ചെയ്യുന്നു.",
+            "വീണ്ടും പെപ്പർ, സോഫ്റ്റ്ബാങ്ക് നിർമ്മാണം നിർത്തി വർഷങ്ങൾ കഴിഞ്ഞിട്ടും, ട്വന്റി ട്വന്റി ഫോറിലും ഒരു ഗ്ലാസ് ബോക്സിൽ നിന്ന് ആളുകളെ സ്വാഗതം ചെയ്യുന്നു.",
+        ),
+        ("ചൈനയിലെ ഹാങ്ഷൗവിൽ 2016-ലാണ് യൂണിട്രീ തുടങ്ങിയത്.", "ചൈനയിലെ ഹാങ്ഷൗവിൽ ട്വന്റി സിക്സ്റ്റീനിലാണ് യൂണിട്രീ തുടങ്ങിയത്."),
+        ("ബേസിക് മോഡൽ 2023-ൽ $1,600-നാണ് ഇറങ്ങിയത്.", "ബേസിക് മോഡൽ ട്വന്റി ട്വന്റി ത്രീയിൽ സിക്സ്റ്റീൻ ഹണ്ട്രഡ് ഡോളറിനാണ് ഇറങ്ങിയത്."),
+        (
+            "ഫുട്പാത്തിന്റെ അരികുകൾ കയറും, 2024-ൽ യു കെ-യിലെ ആദ്യത്തെ ക്യാമ്പസ് റോബോട്ട് ഡെലിവറി തുടങ്ങിയത് ഇതാണ്.",
+            "ഫുട്പാത്തിന്റെ അരികുകൾ കയറും, ട്വന്റി ട്വന്റി ഫോറിൽ യു കെ-യിലെ ആദ്യത്തെ ക്യാമ്പസ് റോബോട്ട് ഡെലിവറി തുടങ്ങിയത് ഇതാണ്.",
+        ),
+        (
+            "പിറ്റേ ദിവസം മ്യൂസിയം ഓഫ് ദ ഫ്യൂച്ചറിൽ ഞാൻ വീണ്ടും അമേക്കയെ കണ്ടു, 2022 മുതൽ അവിടെ സന്ദർശകരെ സ്വാഗതം ചെയ്യുന്നു.",
+            "പിറ്റേ ദിവസം മ്യൂസിയം ഓഫ് ദ ഫ്യൂച്ചറിൽ ഞാൻ വീണ്ടും അമേക്കയെ കണ്ടു, ട്വന്റി ട്വന്റി ടു മുതൽ അവിടെ സന്ദർശകരെ സ്വാഗതം ചെയ്യുന്നു.",
+        ),
+        ("ഏറ്റവും പുതിയത്, 2025 നവംബറിൽ, ജുമൈറയിലെ സൺസെറ്റ് മാളിന് പിന്നിലുള്ള ബീച്ചിൽ.", "ഏറ്റവും പുതിയത്, ട്വന്റി ട്വന്റി ഫൈവ് നവംബറിൽ, ജുമൈറയിലെ സൺസെറ്റ് മാളിന് പിന്നിലുള്ള ബീച്ചിൽ."),
+    ];
+
+    #[test]
+    fn numbers_read_as_the_hand_converted_script() {
+        for (digits, hand) in HAND_CONVERTED {
+            // only the numbers change, as the hand conversion changed them
+            assert_eq!(spell_numbers(digits, Numbers::English), *hand, "{digits}");
+            // and the voice reads both alike
+            assert_eq!(normalize(digits).text, normalize(hand).text, "{digits}");
+            // the Malayalam style says them in Malayalam words, and no digit survives either
+            assert!(!spell_numbers(digits, Numbers::Malayalam).chars().any(|c| c.is_ascii_digit()), "{digits}");
+        }
+        assert_eq!(
+            spell_numbers(HAND_CONVERTED[1].0, Numbers::Malayalam),
+            "എല്ലാം തുടങ്ങിയത് ഇവിടെ നിന്നാണ്. രണ്ടായിരത്തി പതിമൂന്നിൽ, നാട്ടിൽ കേരളത്തിൽ വെച്ച്, ഒരു കിറ്റിൽ നിന്ന് ഞാൻ എന്റെ ആദ്യത്തെ റോബോട്ട് ഉണ്ടാക്കി."
+        );
+    }
+
+    #[test]
+    fn spelling_numbers_keeps_pauses_and_codes() {
+        let s = spell_numbers("2013-ൽ ഞാൻ. [pause 1s] Go1, 4K, 2025.", Numbers::English);
+        assert_eq!(s, "ട്വന്റി തേർട്ടീനിൽ ഞാൻ. [pause 1000ms] Go1, 4K, ട്വന്റി ട്വന്റി ഫൈവ്.");
+        let (p, _) = pieces(&s, 200).unwrap();
+        assert_eq!(p.get(1), Some(&Piece::Pause(1000)), "{p:?}");
+        assert_eq!(p.get(2), Some(&Piece::Say("Go വൺ, ഫോർ കെ, ട്വന്റി ട്വന്റി ഫൈവ്.".into())), "{p:?}");
+        // a script with no numbers is unchanged
+        let plain = "ഇത് ശരിയാണ്. [pause 500ms] അതെ!";
+        assert_eq!(spell_numbers(plain, Numbers::English), "ഇത് ശരിയാണ്. [pause 500ms] അതെ!");
+        // pieces in either style
+        let (p, _) = pieces_with("2013.", 100, Numbers::Malayalam).unwrap();
+        assert_eq!(p, vec![Piece::Say("രണ്ടായിരത്തി പതിമൂന്ന്.".into())]);
+        let (p, _) = pieces("2013.", 100).unwrap();
+        assert_eq!(p, vec![Piece::Say("ട്വന്റി തേർട്ടീൻ.".into())]);
     }
 
     #[test]
@@ -797,6 +1312,18 @@ mod tests {
             let _ = pieces(t, 100);
             let _ = normalize(t);
             let _ = report(t);
+            for style in Numbers::ALL {
+                let _ = pieces_with(t, 100, style);
+                let _ = normalize_with(t, style);
+                let _ = spell_numbers(t, style);
+            }
+        }
+        // money, ranges and suffixes cut off anywhere
+        for t in ["$", "$ ", "₹1,", "$1.", "2013–", "2013-ൽ-", "1,00,", "€9999999999999999999", "0.0000000000000000001%", "1-2-3-4", "$1-2"] {
+            for style in Numbers::ALL {
+                let _ = normalize_with(t, style);
+                let _ = spell_numbers(t, style);
+            }
         }
     }
 }

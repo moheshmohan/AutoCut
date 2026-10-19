@@ -9,7 +9,7 @@
 //! licence); it runs as a job with progress and Cancel.
 //!
 //! Automation ids: `tts.language`, `tts.voice`, `tts.hearVoice`, `tts.advanced` (twirl),
-//! `tts.pitch`, `tts.delivery`, `tts.pace`, `tts.text`, `tts.addPause`, `tts.preview`, `tts.save`, `tts.new`,
+//! `tts.pitch`, `tts.delivery`, `tts.pace`, `tts.numbers` (a Malayalam script), `tts.text`, `tts.addPause`, `tts.preview`, `tts.save`, `tts.new`,
 //! `tts.download`, `tts.download.confirm`, `tts.download.cancel`, `tts.cloneOpen` (twirl),
 //! `tts.cloneEngine`, `tts.cloneModel`, `tts.cloneName`, `tts.cloneConsent`, `tts.clone`,
 //! `tts.cloneDownload.confirm`, `tts.cloneDownload.cancel`.
@@ -28,7 +28,7 @@
 //! other voices read plainly, and the menu says so.
 
 use egui::{Align2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
-use filmcraft_project::{ClipId, Delivery, VocalPitch};
+use filmcraft_project::{ClipId, Delivery, NumberStyle, VocalPitch};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -49,6 +49,8 @@ pub struct TtsDraft {
     pub pitch: VocalPitch,
     pub delivery: Delivery,
     pub pace: f64,
+    /// How a Malayalam script's digits are said (English words, the default, or Malayalam).
+    pub numbers: NumberStyle,
     pub advanced_open: bool,
     /// The narration clip and item the draft was loaded from (None: a new narration).
     pub loaded_from: Option<(u64, u64)>,
@@ -94,6 +96,7 @@ impl Default for TtsDraft {
             pitch: VocalPitch::Default,
             delivery: Delivery::Plain,
             pace: 1.0,
+            numbers: NumberStyle::English,
             advanced_open: true,
             loaded_from: None,
             pending: None,
@@ -112,7 +115,7 @@ impl Default for TtsDraft {
 
 impl TtsDraft {
     fn params(&self) -> serde_json::Value {
-        json!({"text": self.text, "voice": self.voice, "pitch": self.pitch.id(), "delivery": self.delivery.id(), "pace": self.pace})
+        json!({"text": self.text, "voice": self.voice, "pitch": self.pitch.id(), "delivery": self.delivery.id(), "pace": self.pace, "numbers": self.numbers.id()})
     }
 }
 
@@ -235,6 +238,7 @@ pub fn follow_selection(app: &mut FilmcraftApp) {
                 d.pitch = n.pitch;
                 d.delivery = n.delivery;
                 d.pace = n.pace;
+                d.numbers = n.numbers;
                 d.loaded_from = Some((clip.0, item));
                 if first_time {
                     app.show_panel(crate::dock::PanelKind::TextToSpeech);
@@ -599,6 +603,22 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             for (x, l) in [(0.0, "0.5×"), (1.0 / 3.0, "1×"), (1.0, "2×")] {
                 let px = r.min.x + 6.0 + (r.width() - 12.0) * x;
                 ui.painter().text(pos2(px, r.center().y), Align2::CENTER_CENTER, l, Tokens::ui(10.5), t.text_faint);
+            }
+            // a Malayalam script: how its digits are said
+            if filmcraft_tts::malayalam::detect(&d.text) {
+                ui.add_space(10.0);
+                label(ui, &t, "Numbers");
+                let cb = egui::ComboBox::from_id_salt("tts-numbers").selected_text(d.numbers.label()).width(half).show_ui(ui, |ui| {
+                    for n in NumberStyle::ALL {
+                        if ui.selectable_label(d.numbers == n, n.label()).clicked() {
+                            d.numbers = n;
+                        }
+                    }
+                });
+                let r = cb.response.on_hover_text(
+                    "How digits are said in Malayalam: years, prices and numbers from 100 up in English words (2021: twenty twenty-one), as Malayali creators say them, or every number in Malayalam words",
+                );
+                auto.add("tts.numbers", visible(ui, r.rect), "Numbers");
             }
         }
         ui.add_space(12.0);
