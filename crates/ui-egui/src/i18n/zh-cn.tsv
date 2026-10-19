@@ -3749,3 +3749,23 @@
 # Loudness normalisation and auto-duck commands
 	Normalize Loudness	标准化响度
 	Auto-Duck Track	自动闪避轨道
+# Auto Redact Faces and Plates (clip.autoRedact): the Clip menu item, its dialog and status
+	Auto Redact Faces and Plates…	自动遮挡人脸和车牌…
+	Auto Redact Faces and Plates	自动遮挡人脸和车牌
+	Redact	遮挡
+	Hide	遮挡对象
+	Faces clearly recognisable	可清楚辨认的人脸
+	Vehicle number plates	车辆号牌
+	Smallest face:	最小人脸：
+	 % of the picture height	 %（占画面高度）
+	Style:	样式：
+	Strength:	强度：
+	Margin:	边距：
+	Leave robots, mannequins, posters, screens and signs alone	不遮挡机器人、人体模型、海报、屏幕和标牌
+	No local vision model: everything found is hidden.	没有本地视觉模型：找到的内容全部遮挡。
+	Each face and plate found is shown once to {judge}, on this computer.	找到的每张人脸和每块车牌都会在这台电脑上交给 {judge} 确认一次。
+	The face and plate detectors ({mb} MB; {license}) are downloaded first: Redact starts the download, then choose Auto Redact again.	需要先下载人脸和车牌检测器（{mb} MB；{license}）：点击遮挡开始下载，完成后请再次选择自动遮挡。
+	Downloading the face and plate detectors (see Progress); choose Auto Redact again when it finishes	正在下载人脸和车牌检测器（参见进度）；完成后请再次选择自动遮挡
+	Choose faces, plates or both	请选择人脸、车牌或两者
+	Auto Redact: finding faces and plates in the background (see Progress)	自动遮挡：正在后台查找人脸和车牌（参见进度）
+	Auto Redact	自动遮挡

@@ -4027,3 +4027,23 @@
 # Loudness normalisation and auto-duck commands
 	Normalize Loudness	ラウドネスを正規化
 	Auto-Duck Track	トラックをオートダッキング
+# Auto Redact Faces and Plates (clip.autoRedact): the Clip menu item, its dialog and status
+	Auto Redact Faces and Plates…	顔とナンバープレートを自動でぼかす…
+	Auto Redact Faces and Plates	顔とナンバープレートを自動でぼかす
+	Redact	ぼかす
+	Hide	隠す対象
+	Faces clearly recognisable	はっきり判別できる顔
+	Vehicle number plates	車両のナンバープレート
+	Smallest face:	最小の顔:
+	 % of the picture height	 % (画面の高さに対する割合)
+	Style:	スタイル:
+	Strength:	強さ:
+	Margin:	余白:
+	Leave robots, mannequins, posters, screens and signs alone	ロボット、マネキン、ポスター、画面、看板はぼかさない
+	No local vision model: everything found is hidden.	ローカルの画像認識モデルがありません: 見つかったものはすべてぼかします。
+	Each face and plate found is shown once to {judge}, on this computer.	見つかった顔とナンバープレートは、このコンピューター上の {judge} に一度ずつ確認されます。
+	The face and plate detectors ({mb} MB; {license}) are downloaded first: Redact starts the download, then choose Auto Redact again.	先に顔とナンバープレートの検出器 ({mb} MB、{license}) をダウンロードします: ぼかすを押すとダウンロードが始まります。終わったら自動ぼかしをもう一度選んでください。
+	Downloading the face and plate detectors (see Progress); choose Auto Redact again when it finishes	顔とナンバープレートの検出器をダウンロード中 (進行状況を参照)。終わったら自動ぼかしをもう一度選んでください
+	Choose faces, plates or both	顔、ナンバープレート、またはその両方を選んでください
+	Auto Redact: finding faces and plates in the background (see Progress)	自動ぼかし: バックグラウンドで顔とナンバープレートを検出中 (進行状況を参照)
+	Auto Redact	自動ぼかし

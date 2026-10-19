@@ -3703,3 +3703,23 @@
 # Loudness normalisation and auto-duck commands
 	Normalize Loudness	라우드니스 정규화
 	Auto-Duck Track	트랙 자동 더킹
+# Auto Redact Faces and Plates (clip.autoRedact): the Clip menu item, its dialog and status
+	Auto Redact Faces and Plates…	얼굴 및 번호판 자동 가림…
+	Auto Redact Faces and Plates	얼굴 및 번호판 자동 가림
+	Redact	가리기
+	Hide	가리기
+	Faces clearly recognisable	또렷하게 알아볼 수 있는 얼굴
+	Vehicle number plates	차량 번호판
+	Smallest face:	가장 작은 얼굴:
+	 % of the picture height	 % (화면 높이 기준)
+	Style:	스타일:
+	Strength:	강도:
+	Margin:	여백:
+	Leave robots, mannequins, posters, screens and signs alone	로봇, 마네킹, 포스터, 화면, 표지판은 가리지 않기
+	No local vision model: everything found is hidden.	로컬 비전 모델이 없음: 찾은 것을 모두 가립니다.
+	Each face and plate found is shown once to {judge}, on this computer.	찾은 얼굴과 번호판을 이 컴퓨터의 {judge}에 한 번씩 보여 줍니다.
+	The face and plate detectors ({mb} MB; {license}) are downloaded first: Redact starts the download, then choose Auto Redact again.	얼굴 및 번호판 검출기({mb} MB; {license})를 먼저 다운로드합니다. 가리기를 누르면 다운로드가 시작되고, 끝나면 자동 가림을 다시 선택하세요.
+	Downloading the face and plate detectors (see Progress); choose Auto Redact again when it finishes	얼굴 및 번호판 검출기 다운로드 중(진행률 참조). 끝나면 자동 가림을 다시 선택하세요
+	Choose faces, plates or both	얼굴, 번호판 또는 둘 다 선택하세요
+	Auto Redact: finding faces and plates in the background (see Progress)	자동 가림: 백그라운드에서 얼굴과 번호판을 찾는 중(진행률 참조)
+	Auto Redact	자동 가림

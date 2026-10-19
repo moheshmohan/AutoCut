@@ -595,6 +595,68 @@ pub struct AutoReframeParams {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct AutoRedactParams {
+    /// These clips (default: every video clip of `sequence`).
+    #[serde(default)]
+    pub clips: Option<Vec<u64>>,
+    /// The sequence whose clips are redacted (default: the active one; ignored with `clips`).
+    #[serde(default)]
+    pub sequence: Option<u64>,
+    /// What to hide: ["faces", "plates"] (default both).
+    #[serde(default)]
+    pub kinds: Option<Vec<String>>,
+    /// "blur" (default) or "mosaic".
+    #[serde(default)]
+    pub style: Option<String>,
+    /// 1..100 (default 60).
+    #[serde(default)]
+    pub strength: Option<f64>,
+    /// Share of the box added on every side, 0..1 (default 0.2).
+    #[serde(default)]
+    pub padding: Option<f64>,
+    /// Smallest face hidden, share of the picture height (default 0.05).
+    #[serde(default)]
+    pub min_face_height: Option<f64>,
+    /// Smallest plate hidden, share of the picture width (default 0.025).
+    #[serde(default)]
+    pub min_plate_width: Option<f64>,
+    /// Areas never hidden, 0..1 of the clip's picture: {x, y, w, h, clip?, seconds?} (a robot's box).
+    #[serde(default)]
+    pub exclude: Option<Vec<Value>>,
+    /// Ask the local vision model which faces are people and which plates are vehicles' (default true).
+    #[serde(default)]
+    pub verify: Option<bool>,
+    /// Report the tracks without changing anything.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+}
+
+/// `clip.autoRedact` (with `clips`) or `sequence.autoRedact` params for an `auto_redact` call.
+fn auto_redact_params(p: AutoRedactParams) -> (&'static str, Value) {
+    let mut params = json!({"wait": true});
+    let mut put = |k: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            params[k] = v;
+        }
+    };
+    let id = if p.clips.is_some() { "clip.autoRedact" } else { "sequence.autoRedact" };
+    put("clips", p.clips.map(|c| json!(c)));
+    if id == "sequence.autoRedact" {
+        put("sequence", p.sequence.map(|v| json!(v)));
+    }
+    put("kinds", p.kinds.map(|k| json!(k)));
+    put("style", p.style.map(Value::String));
+    put("strength", p.strength.map(|v| json!(v)));
+    put("padding", p.padding.map(|v| json!(v)));
+    put("minFaceHeight", p.min_face_height.map(|v| json!(v)));
+    put("minPlateWidth", p.min_plate_width.map(|v| json!(v)));
+    put("exclude", p.exclude.map(Value::Array));
+    put("verify", p.verify.map(Value::Bool));
+    put("dryRun", p.dry_run.map(Value::Bool));
+    (id, params)
+}
+
 /// `sequence.autoReframe` params for a `sequence_auto_reframe` call (a long job).
 fn auto_reframe_params(p: AutoReframeParams) -> Value {
     let mut params = json!({"wait": true});
@@ -1534,6 +1596,20 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Auto Redact Faces and Plates",
+        description = "Hide clearly recognisable faces and legible vehicle number plates behind a tracked blur (`clip.autoRedact` with `clips`, else `sequence.autoRedact`; one undo step). Local detectors (YuNet faces, LPD-YuNet plates; download them once with `redact.downloadModels` after the user agrees: 4.4 MB, MIT / Apache-2.0) run on every analysed frame; detections become smoothed tracks, faces smaller than `min_face_height` of the picture (5 %) are left alone, and with `verify` the local vision model sees one crop per track so humanoid robots, mannequins, posters, screens and signs stay sharp. `exclude` boxes are never hidden. Each clip gets one Gaussian Blur (or Mosaic) with a keyframed ellipse / quad mask per track, ahead of its other effects, so it follows the clip's motion, scale and crop. `dry_run` reports the tracks only. Runs as an engine job with progress; returns per clip what was hidden and why the rest was not.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn auto_redact(
+        &self,
+        Parameters(p): Parameters<AutoRedactParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let (id, params) = auto_redact_params(p);
+        Ok(self.run_long(id, params, &context).await)
+    }
+
+    #[tool(
         title = "Showcase: inspect",
         description = "What the session keeps of the showcase: the analysis report (a summary, or every clip with report: true), the plan, the last build, and the latest showcase job (running or done).",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -1788,7 +1864,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -2257,6 +2333,32 @@ mod tests {
         assert!(crate::long_job::is_long("autocut.shorts", &json!({"wait": true})) && crate::long_job::is_long("sequence.autoReframe", &json!({"wait": true})));
     }
 
+    #[test]
+    fn auto_redact_tool_params() {
+        let s = schema("auto_redact");
+        assert!(props(&s).contains(&"dry_run".to_string()) && props(&s).contains(&"exclude".to_string()), "{s}");
+        let p: AutoRedactParams =
+            serde_json::from_value(json!({"clips": [3, 4], "kinds": ["faces"], "min_face_height": 0.1, "dry_run": true, "sequence": 9})).unwrap();
+        assert_eq!(
+            auto_redact_params(p),
+            ("clip.autoRedact", json!({"clips": [3, 4], "kinds": ["faces"], "minFaceHeight": 0.1, "dryRun": true, "wait": true}))
+        );
+        let p: AutoRedactParams =
+            serde_json::from_value(json!({"sequence": 9, "style": "mosaic", "verify": false, "exclude": [{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}]})).unwrap();
+        assert_eq!(
+            auto_redact_params(p),
+            (
+                "sequence.autoRedact",
+                json!({"sequence": 9, "style": "mosaic", "verify": false, "exclude": [{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}], "wait": true})
+            )
+        );
+        assert_eq!(auto_redact_params(AutoRedactParams::default()), ("sequence.autoRedact", json!({"wait": true})));
+        for id in ["clip.autoRedact", "sequence.autoRedact", "redact.downloadModels"] {
+            assert!(crate::long_job::is_long(id, &json!({"wait": true})), "{id}");
+        }
+        assert!(crate::long_job::JOB_EXTRAS.contains(&"redact"));
+    }
+
     /// The showcase tools' arguments and the engine jobs they run (as long jobs: progress, cancel).
     #[test]
     fn showcase_tool_schemas_and_params() {
@@ -2439,6 +2541,7 @@ mod tests {
             "showcase_inspect",
             "shorts_make",
             "sequence_auto_reframe",
+            "auto_redact",
             "template_list",
             "template_apply",
             "recipe_list",

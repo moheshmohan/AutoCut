@@ -3687,3 +3687,23 @@
 # Loudness normalisation and auto-duck commands
 	Normalize Loudness	Normaliser la sonie
 	Auto-Duck Track	Atténuation automatique de la piste
+# Auto Redact Faces and Plates (clip.autoRedact): the Clip menu item, its dialog and status
+	Auto Redact Faces and Plates…	Masquer automatiquement visages et plaques…
+	Auto Redact Faces and Plates	Masquer automatiquement visages et plaques
+	Redact	Masquer
+	Hide	Masquer
+	Faces clearly recognisable	Visages clairement reconnaissables
+	Vehicle number plates	Plaques d'immatriculation
+	Smallest face:	Plus petit visage :
+	 % of the picture height	 % de la hauteur de l'image
+	Style:	Style :
+	Strength:	Intensité :
+	Margin:	Marge :
+	Leave robots, mannequins, posters, screens and signs alone	Laisser intacts robots, mannequins, affiches, écrans et panneaux
+	No local vision model: everything found is hidden.	Aucun modèle de vision local : tout ce qui est trouvé est masqué.
+	Each face and plate found is shown once to {judge}, on this computer.	Chaque visage et chaque plaque trouvés sont montrés une fois à {judge}, sur cet ordinateur.
+	The face and plate detectors ({mb} MB; {license}) are downloaded first: Redact starts the download, then choose Auto Redact again.	Les détecteurs de visages et de plaques ({mb} Mo ; {license}) sont d'abord téléchargés : Masquer lance le téléchargement, puis choisissez à nouveau Masquer automatiquement.
+	Downloading the face and plate detectors (see Progress); choose Auto Redact again when it finishes	Téléchargement des détecteurs de visages et de plaques (voir Progression) ; choisissez à nouveau Masquer automatiquement une fois terminé
+	Choose faces, plates or both	Choisissez visages, plaques ou les deux
+	Auto Redact: finding faces and plates in the background (see Progress)	Masquer automatiquement : recherche de visages et de plaques en arrière-plan (voir Progression)
+	Auto Redact	Masquer automatiquement

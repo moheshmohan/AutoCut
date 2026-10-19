@@ -494,6 +494,32 @@ The showcase reuses the tracker: a filled (portrait or 4:3) shot calls `clip.aut
 `keepScale` (the push-in stays) seeded from the analysis' box, and keeps the tilt only where its
 subject is not found (`Options::follow_subject`, `--no-track`).
 
+## Privacy: faces and plates hidden, robots left alone
+
+`privacy.rs` holds AutoCut's side of the engine's automatic blur (`clip.autoRedact`,
+`crates/engine/src/redact.rs`; detectors in `crates/vision`):
+
+- `OllamaJudge`, the engine's `FaceJudge` (installed by the desktop app and the CLI): the crops
+  of what the detectors found, up to six, tiled into one numbered grid picture; the analysis model
+  (`AUTOCUT_ANALYSIS_MODEL`) answers per tile — faces: person / robot / mannequin / statue /
+  poster / screen; plates (outlined in red): plate / label / sign / screen. Only people and
+  vehicles' plates are hidden; an unclear answer hides. Measured 2026-10-19 on GITEX footage:
+  a grid of six takes about 5 s (one picture alone about 3 s); sending six pictures in one
+  request took 20 s and called a robot's head a person, the grid did not.
+- The showcase's privacy pass (`Options::redact`; `--redact faces,plates`, the plan's `redact`:
+  `true`, `"faces,plates"`, a list, or `{kinds, style, strength, minFaceHeight, verify}`): after the
+  show is built and before it is exported, `clip.autoRedact` runs over every footage clip and the
+  blurred background copy of each shot shown whole (`fit: full`; the engine analyses a copy once
+  with its clip), each robot's subject box (the analysis' largest moment, taken square) excluded.
+  What happened goes to the build's notes and progress.
+
+Measured on Robot Showcase v4 (560 s of footage, 90 clips, mostly 1080p H.264 with some VP9
+4:4:4): the whole sequence analysed in 248 s on an M-series Mac (detection 123 s, vision check
+125 s for 140 tracks): 99 faces hidden, 36 robots / screens / posters left sharp (Pepper,
+NAO, Ameca, Furhat, Promobot), 126 faces under 5 % of the picture left alone; the plate
+detector's 33 hits were all robot name badges, signs or machines (no vehicle in the footage):
+the shape check removed most, the vision check the last 5.
+
 ## Configuration (environment)
 
 | Variable | Default | Meaning |

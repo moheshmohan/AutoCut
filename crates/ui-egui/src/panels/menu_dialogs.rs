@@ -1,6 +1,7 @@
 //! Menu long tail (M3.11): the dialogs of Find, Create Search Bin, Project Settings (General /
 //! Scratch Disks / Ingest Settings), Get Media File Properties, Edit Offline, Source Settings,
-//! Update Metadata, Automate to Sequence, Scene Edit Detection, Normalize Mix Track, Simplify
+//! Update Metadata, Automate to Sequence, Scene Edit Detection, Auto Redact Faces and Plates,
+//! Normalize Mix Track, Simplify
 //! Sequence, Transcribe Sequence, Save as Template, Add Flash Cue Marker and the System
 //! Compatibility Report; plus the frontend side of Edit Original / Reveal Log Files (the OS
 //! opener), Reveal in Finder, Generate Audio Waveform (the timeline's peak cache), Import from
@@ -63,6 +64,7 @@ fn meta(command: &str) -> Option<(&'static str, &'static str, &'static str)> {
         "clip.updateMetadata" => (tl!("Update Metadata"), "updateMetadata", tl!("OK")),
         "clip.automateToSequence" => (tl!("Automate To Sequence"), "automate", tl!("OK")),
         "clip.sceneEditDetection" => (tl!("Scene Edit Detection"), "sceneDetect", tl!("Analyze")),
+        "clip.autoRedact" => (tl!("Auto Redact Faces and Plates"), "autoRedact", tl!("Redact")),
         "sequence.normalizeMixTrack" => (tl!("Normalize Mix Track"), "normalizeMix", tl!("OK")),
         "sequence.simplify" => (tl!("Simplify Sequence"), "simplify", tl!("Simplify")),
         "sequence.transcribe" => (tl!("Transcribe Sequence"), "transcribe", tl!("Transcribe")),
@@ -87,6 +89,7 @@ fn dialog_command(id: &str) -> Option<&'static str> {
         "clip.updateMetadata" => "clip.updateMetadata",
         "clip.automateToSequence" => "clip.automateToSequence",
         "clip.sceneEditDetection" => "clip.sceneEditDetection",
+        "clip.autoRedact" => "clip.autoRedact",
         "sequence.normalizeMixTrack" => "sequence.normalizeMixTrack",
         "sequence.simplify" => "sequence.simplify",
         "sequence.transcribe" => "sequence.transcribe",
@@ -331,6 +334,10 @@ fn defaults(app: &mut FilmcraftApp, cmd: &str, id: &str) -> Result<(Value, Value
             json!({"sequence": s.active_sequence().map(|_| s.state.active_sequence.and_then(|q| s.project.item(q)).map(|i| i.name.clone()).unwrap_or_default())}),
         ),
         "clip.sceneEditDetection" => (json!({"applyCuts": true, "createSubclips": false, "generateMarkers": false, "sensitivity": 50.0}), Value::Null),
+        "clip.autoRedact" => {
+            let st = s.execute("redact.status", json!({})).map_err(|e| e.to_string())?;
+            (json!({"faces": true, "plates": true, "style": "blur", "strength": 60.0, "minFaceHeight": 5.0, "padding": 20.0, "verify": true}), st)
+        }
         "sequence.normalizeMixTrack" => (json!({"db": 0.0}), Value::Null),
         "sequence.simplify" => {
             let name = s.state.active_sequence.and_then(|q| s.project.item(q)).map(|i| tlf!("{name} (Simplified)", name = i.name)).unwrap_or_default();
@@ -725,6 +732,31 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     p["sensitivity"] = json!(v);
                 });
             }
+            "clip.autoRedact" => {
+                ui.label(RichText::new(tl!("Hide")).strong());
+                check(ui, &mut elems, pre, p, "faces", tl!("Faces clearly recognisable"));
+                check(ui, &mut elems, pre, p, "plates", tl!("Vehicle number plates"));
+                number(ui, &mut elems, pre, p, "minFaceHeight", tl!("Smallest face:"), 0.0..=100.0, tl!(" % of the picture height"));
+                radios(ui, &mut elems, pre, p, "style", tl!("Style:"), &[("blur", tl!("Blur")), ("mosaic", tl!("Mosaic"))]);
+                number(ui, &mut elems, pre, p, "strength", tl!("Strength:"), 1.0..=100.0, "");
+                number(ui, &mut elems, pre, p, "padding", tl!("Margin:"), 0.0..=100.0, " %");
+                let judge = d.info["judge"].as_str().unwrap_or_default().to_string();
+                check(ui, &mut elems, pre, p, "verify", tl!("Leave robots, mannequins, posters, screens and signs alone"));
+                if judge.is_empty() {
+                    ui.small(tl!("No local vision model: everything found is hidden."));
+                } else {
+                    ui.small(tlf!("Each face and plate found is shown once to {judge}, on this computer.", judge = judge));
+                }
+                if d.info["installed"] != json!(true) {
+                    let mb = format!("{:.1}", d.info["missingBytes"].as_f64().unwrap_or(0.0) / 1e6);
+                    let license = d.info["license"].as_str().unwrap_or_default();
+                    ui.small(tlf!(
+                        "The face and plate detectors ({mb} MB; {license}) are downloaded first: Redact starts the download, then choose Auto Redact again.",
+                        mb = mb,
+                        license = license
+                    ));
+                }
+            }
             "sequence.normalizeMixTrack" => number(ui, &mut elems, pre, p, "db", tl!("Normalize Mix Track to:"), -96.0..=24.0, " dB"),
             "sequence.simplify" => {
                 text(ui, &mut elems, pre, p, "name", tl!("Sequence Name:"), 240.0);
@@ -901,6 +933,35 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
         "clip.sceneEditDetection" => {
             s.execute(&d.command, p.clone()).map_err(|e| e.to_string())?;
             app.ui.status = tl!("Scene Edit Detection: analysing in the background (see Progress)").into();
+            Ok(None)
+        }
+        "clip.autoRedact" => {
+            if d.info["installed"] != json!(true) {
+                // the user agreed to the download in the dialog (size, source and licence shown)
+                s.execute("redact.downloadModels", json!({})).map_err(|e| e.to_string())?;
+                app.ui.status = tl!("Downloading the face and plate detectors (see Progress); choose Auto Redact again when it finishes").into();
+                return Ok(None);
+            }
+            let mut kinds = Vec::new();
+            if p["faces"] == json!(true) {
+                kinds.push("faces");
+            }
+            if p["plates"] == json!(true) {
+                kinds.push("plates");
+            }
+            if kinds.is_empty() {
+                return Err(tl!("Choose faces, plates or both").into());
+            }
+            let q = json!({
+                "kinds": kinds,
+                "style": p["style"],
+                "strength": p["strength"],
+                "minFaceHeight": p["minFaceHeight"].as_f64().unwrap_or(5.0) / 100.0,
+                "padding": p["padding"].as_f64().unwrap_or(20.0) / 100.0,
+                "verify": p["verify"],
+            });
+            s.execute(&d.command, q).map_err(|e| e.to_string())?;
+            app.ui.status = tl!("Auto Redact: finding faces and plates in the background (see Progress)").into();
             Ok(None)
         }
         cmd => {

@@ -3682,3 +3682,23 @@
 # Loudness normalisation and auto-duck commands
 	Normalize Loudness	Normalisasi Kenyaringan
 	Auto-Duck Track	Peredaman Otomatis Trek
+# Auto Redact Faces and Plates (clip.autoRedact): the Clip menu item, its dialog and status
+	Auto Redact Faces and Plates…	Samarkan Wajah dan Pelat Nomor Otomatis…
+	Auto Redact Faces and Plates	Samarkan Wajah dan Pelat Nomor Otomatis
+	Redact	Samarkan
+	Hide	Samarkan
+	Faces clearly recognisable	Wajah yang jelas dikenali
+	Vehicle number plates	Pelat nomor kendaraan
+	Smallest face:	Wajah terkecil:
+	 % of the picture height	 % dari tinggi gambar
+	Style:	Gaya:
+	Strength:	Kekuatan:
+	Margin:	Margin:
+	Leave robots, mannequins, posters, screens and signs alone	Biarkan robot, manekin, poster, layar, dan papan tanda
+	No local vision model: everything found is hidden.	Tidak ada model visi lokal: semua yang ditemukan disamarkan.
+	Each face and plate found is shown once to {judge}, on this computer.	Setiap wajah dan pelat yang ditemukan ditunjukkan sekali ke {judge}, di komputer ini.
+	The face and plate detectors ({mb} MB; {license}) are downloaded first: Redact starts the download, then choose Auto Redact again.	Detektor wajah dan pelat ({mb} MB; {license}) diunduh lebih dulu: Samarkan memulai unduhan, lalu pilih Samarkan Otomatis lagi.
+	Downloading the face and plate detectors (see Progress); choose Auto Redact again when it finishes	Mengunduh detektor wajah dan pelat (lihat Kemajuan); pilih Samarkan Otomatis lagi setelah selesai
+	Choose faces, plates or both	Pilih wajah, pelat, atau keduanya
+	Auto Redact: finding faces and plates in the background (see Progress)	Samarkan Otomatis: mencari wajah dan pelat di latar belakang (lihat Kemajuan)
+	Auto Redact	Samarkan Otomatis

@@ -40,6 +40,9 @@ pub const LONG_COMMANDS: &[&str] = &[
     "autocut.shorts",
     "sequence.autoReframe",
     "clip.autoReframe",
+    "sequence.autoRedact",
+    "clip.autoRedact",
+    "redact.downloadModels",
     "recipe.run",
 ];
 
@@ -47,8 +50,9 @@ pub const LONG_COMMANDS: &[&str] = &[
 /// `result`: an export's offline media, an upload's new media item, what a showcase job made, the
 /// clip a neural music job placed, what a YouTube job did (the channel connected, the video uploaded),
 /// what an Instagram job did (the account connected, the Reel published), a fixed copy's file and checks,
-/// what an Auto Reframe made (the new sequence, the clips followed), what a recipe ran.
-pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload", "showcase", "music", "youtube", "instagram", "publish", "reframe", "recipe"];
+/// what an Auto Reframe made (the new sequence, the clips followed), what an Auto Redact hid
+/// (per clip, and why the rest was not), what a recipe ran.
+pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload", "showcase", "music", "youtube", "instagram", "publish", "reframe", "redact", "recipe"];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);

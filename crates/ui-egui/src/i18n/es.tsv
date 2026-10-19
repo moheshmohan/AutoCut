@@ -4028,3 +4028,23 @@
 # Loudness normalisation and auto-duck commands
 	Normalize Loudness	Normalizar sonoridad
 	Auto-Duck Track	Atenuación automática de pista
+# Auto Redact Faces and Plates (clip.autoRedact): the Clip menu item, its dialog and status
+	Auto Redact Faces and Plates…	Ocultar rostros y matrículas automáticamente…
+	Auto Redact Faces and Plates	Ocultar rostros y matrículas automáticamente
+	Redact	Ocultar
+	Hide	Ocultar
+	Faces clearly recognisable	Rostros claramente reconocibles
+	Vehicle number plates	Matrículas de vehículos
+	Smallest face:	Rostro más pequeño:
+	 % of the picture height	 % de la altura de la imagen
+	Style:	Estilo:
+	Strength:	Intensidad:
+	Margin:	Margen:
+	Leave robots, mannequins, posters, screens and signs alone	No ocultar robots, maniquíes, carteles, pantallas ni letreros
+	No local vision model: everything found is hidden.	No hay un modelo de visión local: se oculta todo lo encontrado.
+	Each face and plate found is shown once to {judge}, on this computer.	Cada rostro y matrícula encontrados se muestran una vez a {judge}, en este ordenador.
+	The face and plate detectors ({mb} MB; {license}) are downloaded first: Redact starts the download, then choose Auto Redact again.	Primero se descargan los detectores de rostros y matrículas ({mb} MB; {license}): Ocultar inicia la descarga; después elige de nuevo Ocultar automáticamente.
+	Downloading the face and plate detectors (see Progress); choose Auto Redact again when it finishes	Descargando los detectores de rostros y matrículas (ver Progreso); elige de nuevo Ocultar automáticamente cuando termine
+	Choose faces, plates or both	Elige rostros, matrículas o ambos
+	Auto Redact: finding faces and plates in the background (see Progress)	Ocultar automáticamente: buscando rostros y matrículas en segundo plano (ver Progreso)
+	Auto Redact	Ocultar automáticamente

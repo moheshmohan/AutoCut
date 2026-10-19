@@ -3708,3 +3708,23 @@
 # Loudness normalisation and auto-duck commands
 	Normalize Loudness	Normalizza loudness
 	Auto-Duck Track	Attenuazione automatica traccia
+# Auto Redact Faces and Plates (clip.autoRedact): the Clip menu item, its dialog and status
+	Auto Redact Faces and Plates…	Oscura automaticamente volti e targhe…
+	Auto Redact Faces and Plates	Oscura automaticamente volti e targhe
+	Redact	Oscura
+	Hide	Oscura
+	Faces clearly recognisable	Volti chiaramente riconoscibili
+	Vehicle number plates	Targhe dei veicoli
+	Smallest face:	Volto più piccolo:
+	 % of the picture height	 % dell'altezza dell'immagine
+	Style:	Stile:
+	Strength:	Intensità:
+	Margin:	Margine:
+	Leave robots, mannequins, posters, screens and signs alone	Non oscurare robot, manichini, poster, schermi e cartelli
+	No local vision model: everything found is hidden.	Nessun modello di visione locale: tutto ciò che viene trovato è oscurato.
+	Each face and plate found is shown once to {judge}, on this computer.	Ogni volto e targa trovati vengono mostrati una volta a {judge}, su questo computer.
+	The face and plate detectors ({mb} MB; {license}) are downloaded first: Redact starts the download, then choose Auto Redact again.	Prima vengono scaricati i rilevatori di volti e targhe ({mb} MB; {license}): Oscura avvia il download, poi scegli di nuovo Oscura automaticamente.
+	Downloading the face and plate detectors (see Progress); choose Auto Redact again when it finishes	Download dei rilevatori di volti e targhe (vedi Avanzamento); scegli di nuovo Oscura automaticamente al termine
+	Choose faces, plates or both	Scegli volti, targhe o entrambi
+	Auto Redact: finding faces and plates in the background (see Progress)	Oscura automaticamente: ricerca di volti e targhe in background (vedi Avanzamento)
+	Auto Redact	Oscura automaticamente
