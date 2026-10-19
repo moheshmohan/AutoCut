@@ -186,6 +186,9 @@ pub fn find_prompt(targets: &[String]) -> String {
     )
 }
 
+/// Largest share of the picture a named target's box may cover ([`parse_found`]).
+const MAX_TARGET_AREA: f64 = 0.25;
+
 /// The places in the model's answer for `targets` in a `w` × `h` picture: (target index, box
 /// normalised `[x, y, w, h]`). The model's boxes are in the pixels of the frame it resized the
 /// picture to ([`crate::analyze::model_frame`]); hostile numbers and empty boxes are dropped.
@@ -221,6 +224,11 @@ pub fn parse_found(v: &Value, targets: &[String], w: u32, h: u32) -> Vec<(usize,
         let (x1, x2) = ((x1 / fw).clamp(0.0, 1.0), (x2 / fw).clamp(0.0, 1.0));
         let (y1, y2) = ((y1 / fh).clamp(0.0, 1.0), (y2 / fh).clamp(0.0, 1.0));
         if x2 - x1 < 0.002 || y2 - y1 < 0.002 {
+            continue;
+        }
+        // a box over a quarter of the picture is the model boxing a whole screen or the scene,
+        // not the logo: blurring it hid the shot (a close-up of the Promobot's tablet)
+        if (x2 - x1) * (y2 - y1) > MAX_TARGET_AREA {
             continue;
         }
         out.push((target, [x1, y1, x2 - x1, y2 - y1]));
@@ -627,6 +635,9 @@ mod tests {
         assert_eq!(parse_found(&slip, &two, 1280, 720)[0].0, 1);
         let one = vec!["the logo".to_string()];
         assert_eq!(parse_found(&json!({"found": [{"bbox_2d": [0, 0, 100, 100]}]}), &one, 1280, 720).len(), 1);
+        // a box over a quarter of the picture (the whole tablet in a close-up) is not a logo
+        let screen = json!({"found": [{"target": 1, "bbox_2d": [464, 184, 1176, 640]}, {"target": 1, "bbox_2d": [0, 0, 1288, 728]}]});
+        assert!(parse_found(&screen, &one, 1280, 720).is_empty());
         assert!(parse_found(&json!({"found": "none"}), &one, 1280, 720).is_empty());
         assert!(parse_found(&json!({}), &one, 0, 0).is_empty());
         assert!(parse_found(&slip, &[], 1280, 720).is_empty());
