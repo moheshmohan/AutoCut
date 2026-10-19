@@ -316,9 +316,11 @@ fn subject_box(shot: &crate::showcase::Shot, clip: u64, aspect: f64) -> Option<V
 }
 
 /// The showcase's privacy pass: `clip.autoRedact` over every footage clip of the built show
-/// (`layout`), each robot's own box excluded; what happened goes into `notes`.
+/// (`layout`) and the blurred background copy behind a shot shown whole (`fit: full`), each
+/// robot's own box excluded in both; what happened goes into `notes`. A copy shows the same
+/// frames, so the engine analyses it once with its clip and gives it the same masks.
 pub async fn redact_show(ex: &dyn Executor, r: &Redact, layout: &[PlacedEntry], entries: &[Entry], notes: &mut Vec<String>, progress: &mut dyn FnMut(&str)) {
-    let clips: Vec<u64> = layout.iter().flat_map(|p| p.shots.iter().map(|s| s.clip)).collect();
+    let clips: Vec<u64> = layout.iter().flat_map(|p| p.shots.iter().flat_map(|s| std::iter::once(s.clip).chain(s.background))).collect();
     if clips.is_empty() {
         return;
     }
@@ -331,7 +333,9 @@ pub async fn redact_show(ex: &dyn Executor, r: &Redact, layout: &[PlacedEntry], 
                 Ok(v) => v["width"].as_f64().zip(v["height"].as_f64()).map_or(16.0 / 9.0, |(w, h)| w / h.max(1.0)),
                 Err(_) => 16.0 / 9.0,
             };
-            exclude.extend(subject_box(shot, placed.clip, aspect));
+            for clip in std::iter::once(placed.clip).chain(placed.background) {
+                exclude.extend(subject_box(shot, clip, aspect));
+            }
         }
     }
     let mut p = json!({"clips": clips, "kinds": r.kinds_json(), "exclude": exclude, "verify": r.verify, "wait": true});

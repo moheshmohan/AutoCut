@@ -12,9 +12,12 @@
 //! default) with `filmcraft-vision`'s YuNet face and LPD-YuNet plate detectors (pure Rust on
 //! candle, CPU). Detections are linked into tracks, gaps filled and the paths smoothed
 //! (`filmcraft_vision::track`). A face is hidden when it is at least `minFaceHeight` of the
-//! picture tall at some point (5 %: smaller faces in the crowd are not recognisable), a plate
-//! when it is at least `minPlateWidth` of its width (2.5 %); either must be seen twice, or once
-//! with a score of 0.9, and its centre must not be inside an `exclude` box.
+//! sequence's frame tall at some point as the sequence shows it (5 %: smaller faces in the crowd
+//! are not recognisable; Motion ▸ Scale and Scale to Frame Size count, so a clip zoomed in or a
+//! portrait clip filling a landscape frame has its faces counted larger, and the face detector
+//! looks at it closer), a plate when it is at least `minPlateWidth` of the frame's width
+//! (2.5 %); either must be seen twice, or once with a score of 0.9, and its centre must not be
+//! inside an `exclude` box.
 //!
 //! **Not robots.** With `verify` (the default) every track still to be hidden is shown once,
 //! cropped with its surroundings, to a local vision model (the host's [`FaceJudge`]: AutoCut's
@@ -133,7 +136,7 @@ impl Default for Options {
             plates: true,
             keep: KeepParams::default(),
             link: LinkParams::default(),
-            face_score: 0.7,
+            face_score: 0.6,
             plate_score: 0.8,
             style: Style::Blur,
             strength: 60.0,
@@ -158,6 +161,10 @@ struct ExcludeP {
 /// One clip to analyse.
 struct Work {
     clip: ClipId,
+    /// Other clips showing the same frames (a blurred background copy of a clip): they share
+    /// this analysis and get the same masks.
+    also: Vec<ClipId>,
+    item: ItemId,
     name: String,
     src: filmcraft_media::SharedSource,
     /// Media time of each analysed frame, in order, without repeats.
@@ -166,6 +173,12 @@ struct Work {
     size: (f64, f64),
     /// Scale of the frames asked for (the detectors see at most `max(face_side, plate_side)`).
     scale: f32,
+    /// The size rules for this clip: the command's, measured on the picture as the sequence
+    /// shows it (a zoomed-in clip's faces count larger).
+    keep: KeepParams,
+    /// Longest side of the picture the face detector sees for this clip (larger for a zoomed-in
+    /// clip, so its smallest face to hide is still big enough to find).
+    face_side: usize,
     exclude: Vec<Exclude>,
     /// The clip's media range (the masks' lead-in and lead-out stay inside it).
     media: (Tick, Tick),
@@ -175,6 +188,8 @@ struct Work {
 #[derive(Clone, Debug)]
 pub struct ClipRedact {
     pub clip: ClipId,
+    /// Clips sharing this analysis ([`Work::also`]).
+    pub also: Vec<ClipId>,
     pub name: String,
     /// Clip pixels.
     pub size: (f64, f64),
@@ -380,7 +395,6 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
     let rate = q.settings.frame_rate.sane();
     let fd = rate.frame_duration().max(Tick(1));
     let step = ((rate.as_f64() / o.analysis_fps).round() as i64).max(1);
-    let side = (if o.faces { o.face_side } else { 0 }).max(if o.plates { o.plate_side } else { 0 }).max(64) as f64;
     let (mut work, mut skipped) = (Vec::new(), Vec::new());
     let mut total = 0usize;
     for t in &q.video_tracks {
@@ -430,9 +444,41 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
             }
             let media = (times.first().copied().unwrap_or(it.source_in), times.last().copied().unwrap_or(it.source_in));
             let size = (f64::from(w), f64::from(h));
-            let scale = (side / size.0.max(size.1)).min(1.0) as f32;
+            // how large the picture is shown: the rules are about the sequence's frame
+            let display = s.project.conformed_source_size(it.item, q.settings.par).filter(|d| d.0 > 0.0 && d.1 > 0.0).unwrap_or(size);
+            let (seq_w, seq_h) = (f64::from(q.settings.width.max(1)), f64::from(q.settings.height.max(1)));
+            let fit = if it.scale_to_frame { (seq_w / display.0).min(seq_h / display.1) } else { 1.0 };
+            let zoom = (0..n)
+                .step_by(usize::try_from(step).unwrap_or(1).max(1))
+                .map(|j| it.effect("motion").map_or(100.0, |m| m.f64_at("scale", it.effect_time_at(it.start + Tick(fd.0.saturating_mul(j))))))
+                .filter(|v| v.is_finite())
+                .fold(0.0f64, f64::max)
+                .max(1.0)
+                / 100.0
+                * fit;
+            let (mag_w, mag_h) = ((zoom * display.0 / seq_w).clamp(0.05, 50.0), (zoom * display.1 / seq_h).clamp(0.05, 50.0));
+            let keep = KeepParams {
+                min_face_height: (o.keep.min_face_height / mag_h).clamp(0.0, 1.0),
+                min_plate_width: (o.keep.min_plate_width / mag_w).clamp(0.0, 1.0),
+                ..o.keep
+            };
+            // the smallest face to hide is at least 16 px where the detector looks
+            let long = size.0.max(size.1);
+            let needed = 16.0 / (keep.min_face_height.max(0.004) * size.1 / long);
+            let face_side = (needed.ceil() as usize).clamp(o.face_side, 1920.max(o.face_side)).min(long as usize).max(160);
+            let side = (if o.faces { face_side } else { 0 }).max(if o.plates { o.plate_side } else { 0 }).max(64) as f64;
+            let scale = (side / long).min(1.0) as f32;
             let ex = exclude.iter().filter(|e| e.clip.is_none_or(|c| c == it.id)).map(|e| e.ex).collect();
-            work.push(Work { clip: it.id, name: it.name.clone(), src, times, size, scale, exclude: ex, media });
+            let w = Work { clip: it.id, also: Vec::new(), item: it.item, name: it.name.clone(), src, times, size, scale, keep, face_side, exclude: ex, media };
+            // a copy of a clip already listed (same media, same frames, same exclusions) is
+            // analysed once
+            match work.iter_mut().find(|o: &&mut Work| o.item == w.item && o.times == w.times && o.exclude == w.exclude && o.keep == w.keep) {
+                Some(o) => {
+                    o.also.push(w.clip);
+                    total = total.saturating_sub(w.times.len());
+                }
+                None => work.push(w),
+            }
         }
     }
     Ok((work, skipped))
@@ -461,8 +507,9 @@ impl Shared<'_> {
     }
 }
 
-/// A detector: the faces and plates in an RGBA frame (`rgba`, width, height), normalised to it.
-pub type DetectFn = Arc<dyn Fn(&[u8], usize, usize) -> Vec<filmcraft_vision::Detection> + Send + Sync>;
+/// A detector: the faces and plates in an RGBA frame (`rgba`, width, height; the longest side
+/// the face detector looks at), normalised to it.
+pub type DetectFn = Arc<dyn Fn(&[u8], usize, usize, usize) -> Vec<filmcraft_vision::Detection> + Send + Sync>;
 
 /// The downloaded detectors, for what `o` looks for.
 #[cfg(feature = "privacy-models")]
@@ -473,10 +520,10 @@ fn load_detectors(o: &Options) -> std::result::Result<DetectFn, String> {
         e => e.to_string(),
     })?;
     let o = o.clone();
-    Ok(Arc::new(move |rgba: &[u8], w: usize, h: usize| {
+    Ok(Arc::new(move |rgba: &[u8], w: usize, h: usize, face_side: usize| {
         let mut out = Vec::new();
         if let Some(f) = det.face.as_ref().filter(|_| o.faces) {
-            out.extend(f.detect(rgba, w, h, o.face_side, o.face_score).unwrap_or_default());
+            out.extend(f.detect(rgba, w, h, face_side, o.face_score).unwrap_or_default());
         }
         if let Some(p) = det.plate.as_ref().filter(|_| o.plates) {
             out.extend(p.detect(rgba, w, h, o.plate_side, o.plate_score).unwrap_or_default());
@@ -501,7 +548,7 @@ fn analyse(w: &Work, det: &DetectFn, o: &Options, sh: &Shared<'_>) -> Option<Cli
         let detections = match w.src.video_frame(filmcraft_media::FrameRequest { time: *mt, scale: w.scale }) {
             Ok(f) => {
                 let rgba = f.to_rgba8();
-                det(&rgba, f.width as usize, f.height as usize)
+                det(&rgba, f.width as usize, f.height as usize, w.face_side)
             }
             Err(_) => {
                 // a frame that does not decode shows nothing; its gap is filled if short
@@ -518,11 +565,21 @@ fn analyse(w: &Work, det: &DetectFn, o: &Options, sh: &Shared<'_>) -> Option<Cli
     }
     let tracks = filmcraft_vision::track::link(&frames, &o.link);
     let tracks = tracks.into_iter().map(|t| {
-        let v = filmcraft_vision::track::verdict(&t, &o.keep, &w.exclude);
+        let v = filmcraft_vision::track::verdict(&t, &w.keep, &w.exclude);
         (t, v)
     });
     let interval = if w.times.len() > 1 { (w.media.1 - w.media.0).seconds().abs() / (w.times.len() - 1) as f64 } else { 0.0 };
-    Some(ClipRedact { clip: w.clip, name: w.name.clone(), size: w.size, tracks: tracks.collect(), frames: w.times.len(), interval, media: w.media, missed })
+    Some(ClipRedact {
+        clip: w.clip,
+        also: w.also.clone(),
+        name: w.name.clone(),
+        size: w.size,
+        tracks: tracks.collect(),
+        frames: w.times.len(),
+        interval,
+        media: w.media,
+        missed,
+    })
 }
 
 /// Analyse every clip, a few at a time (decoding one while detecting in another).
@@ -858,6 +915,7 @@ fn clip_json(c: &ClipRedact, dry: bool, masks: usize) -> Value {
     let skipped = |s: Skip| c.tracks.iter().filter(|(_, x)| *x == Some(s)).count();
     json!({
         "clip": c.clip.0,
+        "also": c.also.iter().map(|a| a.0).collect::<Vec<_>>(),
         "name": c.name,
         "frames": c.frames,
         "missedFrames": c.missed,
@@ -880,7 +938,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Faces and Plates…",
             menu: &["Clip"],
             shortcut: None,
-            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.7,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"replace":bool=true,"wait":bool=false}"#,
+            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"replace":bool=true,"wait":bool=false}"#,
             enabled: has_video_selection,
             run: redact_clips,
             journal: true,
@@ -890,7 +948,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Sequence…",
             menu: &[],
             shortcut: None,
-            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.7,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"replace":bool=true,"wait":bool=false}"#,
+            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"replace":bool=true,"wait":bool=false}"#,
             enabled: has_seq,
             run: redact_sequence,
             journal: true,
@@ -1103,9 +1161,12 @@ pub fn poll(s: &mut Session) {
 
 fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &Verified, secs: [f64; 2]) -> Result<Value> {
     let o = &pj.opts;
-    let effects: Vec<(ClipId, Option<EffectInstance>)> = clips.iter().map(|c| (c.clip, effect_for(c, o))).collect();
+    let made: Vec<Option<EffectInstance>> = clips.iter().map(|c| effect_for(c, o)).collect();
+    let hidden: usize = made.iter().flatten().map(|e| e.masks.len()).sum();
+    // every clip of an analysis, and its copies, with the effect hiding what it shows
+    let effects: Vec<(ClipId, Option<EffectInstance>)> =
+        clips.iter().zip(&made).flat_map(|(c, e)| std::iter::once(c.clip).chain(c.also.iter().copied()).map(move |id| (id, e.clone()))).collect();
     let masks = |id: ClipId| effects.iter().find(|(c, _)| *c == id).and_then(|(_, e)| e.as_ref()).map_or(0, |e| e.masks.len());
-    let hidden: usize = effects.iter().filter_map(|(_, e)| e.as_ref()).map(|e| e.masks.len()).sum();
     let summary: Vec<Value> = clips.iter().map(|c| clip_json(c, o.dry_run, if o.dry_run { 0 } else { masks(c.clip) })).collect();
     let mut changed = 0usize;
     if !o.dry_run {
@@ -1115,7 +1176,7 @@ fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &V
         let any_old = s
             .project
             .sequence(pj.seq)
-            .is_some_and(|q| clips.iter().any(|c| q.find_item(c.clip).is_some_and(|(_, it)| o.replace && it.effects.iter().any(is_auto_redaction))));
+            .is_some_and(|q| effects.iter().any(|(id, _)| q.find_item(*id).is_some_and(|(_, it)| o.replace && it.effects.iter().any(is_auto_redaction))));
         if hidden > 0 || any_old {
             changed = s.edit(LABEL, |pr, _| {
                 let q = pr.sequence_mut(pj.seq).ok_or(EngineError::NoSequence)?;
@@ -1126,7 +1187,10 @@ fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &V
                         it.effects.retain(|x| !is_auto_redaction(x));
                     }
                     if let Some(e) = e {
-                        it.effects.push(e.clone());
+                        // ahead of the clip's other standard effects: the masks are in the
+                        // source's own pixels, before anything moves them (Warp Stabilizer)
+                        let at = it.effects.iter().position(|x| x.def().is_some_and(|d| !d.intrinsic)).unwrap_or(it.effects.len());
+                        it.effects.insert(at, e.clone());
                         n += 1;
                     }
                 }

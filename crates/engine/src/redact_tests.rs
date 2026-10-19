@@ -68,8 +68,54 @@ fn session() -> (Session, ClipId, ItemId) {
     s.state.active_sequence = Some(seq);
     s.state.open_sequences = vec![seq];
     s.state.selection = vec![clip];
-    s.redacts.detector = Some(Arc::new(warm_disc));
+    s.redacts.detector = Some(Arc::new(|rgba: &[u8], w: usize, h: usize, _: usize| warm_disc(rgba, w, h)));
     (s, clip, seq)
+}
+
+/// The session with a blurred background copy of the clip on V1 (the clip itself moved up to a
+/// new V2), as the showcase lays out a portrait shot shown whole.
+fn session_with_background() -> (Session, ClipId, ClipId, ItemId) {
+    let (mut s, clip, seq) = session();
+    let mut p = (*s.project).clone();
+    let q = p.sequence(seq).unwrap();
+    let mut bg = q.video_tracks[0].items[0].clone();
+    bg.id = ClipId(p.next_id);
+    p.next_id += 1;
+    bg.effects.push(filmcraft_project::find_effect("gaussian_blur").unwrap().instance());
+    let bg_id = bg.id;
+    let q = p.sequence_mut(seq).unwrap();
+    let mut v2 = q.video_tracks[0].clone();
+    v2.id = filmcraft_project::TrackId(p.next_id);
+    p.next_id += 1;
+    let q = p.sequence_mut(seq).unwrap();
+    // the foreground stays on top (V2), the copy goes under it (V1)
+    q.video_tracks[0].items = vec![bg];
+    q.video_tracks.push(v2);
+    q.check().unwrap();
+    s.project = std::sync::Arc::new(p);
+    s.state.selection = vec![clip, bg_id];
+    (s, clip, bg_id, seq)
+}
+
+#[test]
+fn a_background_copy_shares_the_analysis_and_gets_the_masks_first() {
+    let (mut s, clip, bg, seq) = session_with_background();
+    let one = s.execute("clip.autoRedact", json!({"clips": [clip.0], "wait": true, "verify": false, "dryRun": true})).unwrap();
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "verify": false})).unwrap();
+    assert_eq!(r["frames"], one["frames"], "the copy is analysed once: {r}");
+    assert_eq!(r["redact"]["clips"].as_array().unwrap().len(), 1, "{r}");
+    let c = &r["redact"]["clips"][0];
+    let mut both = vec![c["clip"].as_u64().unwrap(), c["also"][0].as_u64().unwrap()];
+    both.sort();
+    assert_eq!(both, vec![clip.0.min(bg.0), clip.0.max(bg.0)], "{c}");
+    assert_eq!(r["redact"]["clipsChanged"], json!(2));
+    for id in [clip, bg] {
+        let fx = clip_effects(&s, seq, id);
+        let at = fx.iter().position(is_auto_redaction).unwrap_or_else(|| panic!("{id:?} has no redaction"));
+        // ahead of every other standard effect (the copy's own blur)
+        let first_standard = fx.iter().position(|e| e.def().is_some_and(|d| !d.intrinsic)).unwrap();
+        assert_eq!(at, first_standard, "{id:?}: {:?}", fx.iter().map(|e| e.effect.as_str()).collect::<Vec<_>>());
+    }
 }
 
 /// The fake detector: the warm pixels' bounding box as a face.
@@ -225,10 +271,17 @@ fn the_vision_check_leaves_robots_alone() {
 
 #[test]
 fn small_faces_and_excluded_boxes_are_left_alone() {
-    let (mut s, _, _) = session();
+    let (mut s, clip, seq) = session();
     let r = s.execute("clip.autoRedact", json!({"wait": true, "verify": false, "minFaceHeight": 0.5})).unwrap();
     assert_eq!(r["redact"]["hidden"], json!(0));
     assert_eq!(r["redact"]["clips"][0]["skipped"]["tooSmall"], json!(1), "{r}");
+    // the same face on a clip zoomed in to 300 % is shown three times as tall: hidden
+    let mut p = (*s.project).clone();
+    let (_, it) = p.sequence_mut(seq).unwrap().find_item_mut(clip).unwrap();
+    *it.effect_mut("motion").unwrap().param_mut("scale").unwrap() = filmcraft_project::Param::new(filmcraft_project::ParamValue::Float(300.0));
+    s.project = std::sync::Arc::new(p);
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "verify": false, "minFaceHeight": 0.5})).unwrap();
+    assert_eq!(r["redact"]["hidden"], json!(1), "{r}");
     let r = s.execute("clip.autoRedact", json!({"wait": true, "verify": false, "exclude": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}})).unwrap();
     assert_eq!(r["redact"]["clips"][0]["skipped"]["excluded"], json!(1), "{r}");
     // an exclusion at a moment the face is elsewhere does not apply
@@ -296,6 +349,7 @@ fn masks_switch_on_and_off_with_their_track() {
     let track = Track { kind: Kind::Face, points: vec![pt(2.0, 0.1), pt(2.1, 0.2), pt(2.2, 0.3)], hits: 3, best_score: 0.9 };
     let c = ClipRedact {
         clip: ClipId(1),
+        also: Vec::new(),
         name: "a".into(),
         size: (1000.0, 500.0),
         tracks: vec![(track.clone(), None)],
@@ -344,7 +398,7 @@ fn stopping_changes_nothing() {
     // a detector that cancels the job on its first frame
     let jobs: Arc<std::sync::Mutex<Option<Arc<filmcraft_export::Progress>>>> = Arc::default();
     let j2 = jobs.clone();
-    s.redacts.detector = Some(Arc::new(move |rgba: &[u8], w: usize, h: usize| {
+    s.redacts.detector = Some(Arc::new(move |rgba: &[u8], w: usize, h: usize, _: usize| {
         // wait for the test to know the job, then stop it
         for _ in 0..500 {
             if let Some(p) = j2.lock().unwrap().as_ref() {
