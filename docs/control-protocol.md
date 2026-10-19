@@ -109,6 +109,11 @@ command that changes the clips involved, the changed clips are ducked again insi
 step. `enabled: false` turns it off and restores the clips' levels. UI id: `timeline.track.A<n>.autoDuck`
 (the D toggle on an audio track header; label `Auto-Duck On` / `Auto-Duck Off`).
 
+Loudness: `audio.normalizeLoudness {target?, truePeak?, sequence?}` normalises a sequence's mix to `social`
+(−14 LUFS, the default), `voice` (−16), `broadcast` (−23, EBU R128) or a number of LUFS, with true peaks under
+`truePeak` dBTP (−1): the Mix fader plus a post-fader true-peak Hard Limiter; one undo step. The answer has
+`measuredLufs`, `loudnessLufs`, `truePeakDbtp`, `gainDb` and `masterVolumeDb`.
+
 Adjustment clips: `timeline.newAdjustmentClip {track?, startTime|startSeconds…?, duration|seconds?, effects?, name?}`
 makes an Adjustment Layer item and places it over the selected clips (else In to Out, else 5 s from the
 playhead) on the first free video track above them (a new top track when there is none), with `effects`

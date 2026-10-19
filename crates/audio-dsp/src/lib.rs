@@ -1,7 +1,10 @@
 //! Real-time audio DSP for FilmCraft (layer L1, dependency-free, `wasm32` clean).
 //!
 //! * [`loudness`] — ITU-R BS.1770-4 / EBU R128 loudness meter (momentary, short-term,
-//!   integrated, loudness range, sample peak, true peak) and the loudness-normalisation helper.
+//!   integrated, loudness range, sample peak, true peak), the loudness-normalisation helper and
+//!   the destinations' targets ([`loudness::LoudnessTarget`]).
+//! * [`beats`] — tempo and beat tracking of music (onset strength → autocorrelation tempo →
+//!   dynamic-programming beats with a local tempo that follows drift; Ellis 2007).
 //! * [`effects`] — clip/track audio effects behind the common [`AudioEffect`] trait, with a
 //!   registry ([`effects()`]) describing every effect's parameters (range, unit, default) so the
 //!   engine and UI can build controls generically.
@@ -23,6 +26,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+pub mod beats;
 pub mod biquad;
 pub mod channels;
 pub mod design;

@@ -421,6 +421,64 @@ pub fn measure(channels: &[&[f32]], sample_rate: f64) -> LoudnessSummary {
     m.summary()
 }
 
+/// A destination's loudness target (integrated, LUFS) and its true-peak ceiling.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LoudnessTarget {
+    /// Social video and streaming platforms (YouTube, Instagram, TikTok): −14 LUFS.
+    Social,
+    /// Voice-forward programmes (podcasts, explainers, audiobooks): −16 LUFS.
+    Voice,
+    /// Broadcast, EBU R128: −23 LUFS.
+    Broadcast,
+    /// Any integrated loudness.
+    Lufs(f64),
+}
+
+impl LoudnessTarget {
+    /// The integrated loudness, LUFS.
+    pub const fn lufs(self) -> f64 {
+        match self {
+            LoudnessTarget::Social => -14.0,
+            LoudnessTarget::Voice => -16.0,
+            LoudnessTarget::Broadcast => -23.0,
+            LoudnessTarget::Lufs(v) => v,
+        }
+    }
+
+    /// The true-peak ceiling, dBTP (−1: the platforms' recommendation and EBU R128's maximum).
+    pub const fn true_peak_dbtp(self) -> f64 {
+        -1.0
+    }
+
+    /// `social` (also `youtube`, `instagram`, `tiktok`, `web`), `voice` (`podcast`, `speech`),
+    /// `broadcast` (`ebu`, `r128`, `tv`), or a number of LUFS between −70 and 0.
+    pub fn parse(s: &str) -> Option<LoudnessTarget> {
+        let k = s.trim().to_ascii_lowercase();
+        Some(match k.as_str() {
+            "social" | "youtube" | "instagram" | "tiktok" | "web" | "streaming" => LoudnessTarget::Social,
+            "voice" | "podcast" | "speech" | "dialogue" => LoudnessTarget::Voice,
+            "broadcast" | "ebu" | "r128" | "ebur128" | "tv" => LoudnessTarget::Broadcast,
+            _ => {
+                let v: f64 = k.trim_end_matches("lufs").trim().parse().ok()?;
+                if !(v.is_finite() && (-70.0..=0.0).contains(&v)) {
+                    return None;
+                }
+                LoudnessTarget::Lufs(v)
+            }
+        })
+    }
+
+    /// The name [`LoudnessTarget::parse`] takes (`lufs` for a number).
+    pub fn name(self) -> &'static str {
+        match self {
+            LoudnessTarget::Social => "social",
+            LoudnessTarget::Voice => "voice",
+            LoudnessTarget::Broadcast => "broadcast",
+            LoudnessTarget::Lufs(_) => "lufs",
+        }
+    }
+}
+
 /// Gain (dB) that moves a programme measured at `measured_lufs` to `target_lufs`.
 /// Returns 0 for silent / unmeasurable input.
 pub fn normalize_gain_db(measured_lufs: f64, target_lufs: f64) -> f64 {
@@ -689,5 +747,18 @@ mod tests {
         // Mono is summed without the dual-mono +3 dB (BS.1770).
         let expect = -0.691 + 20.0 * rms(&x).log10() + 10.0 * k_weighting_power(440.0, sr).log10();
         assert!((a.integrated() - expect).abs() < 0.1, "{} vs {expect}", a.integrated());
+    }
+
+    #[test]
+    fn destination_targets() {
+        assert_eq!(LoudnessTarget::parse("Social").map(LoudnessTarget::lufs), Some(-14.0));
+        assert_eq!(LoudnessTarget::parse("podcast").map(LoudnessTarget::lufs), Some(-16.0));
+        assert_eq!(LoudnessTarget::parse("EBU").map(LoudnessTarget::lufs), Some(-23.0));
+        assert_eq!(LoudnessTarget::parse("-18 LUFS"), Some(LoudnessTarget::Lufs(-18.0)));
+        for bad in ["loud", "", "5", "-100", "NaN", "inf", "-inf"] {
+            assert_eq!(LoudnessTarget::parse(bad), None, "{bad}");
+        }
+        assert_eq!(LoudnessTarget::Broadcast.true_peak_dbtp(), -1.0);
+        assert_eq!(LoudnessTarget::parse(LoudnessTarget::Voice.name()), Some(LoudnessTarget::Voice));
     }
 }

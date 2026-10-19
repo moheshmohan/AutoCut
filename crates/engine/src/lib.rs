@@ -31,6 +31,7 @@ pub mod instagram;
 pub mod interchange;
 pub mod keyboard;
 mod keyframe_move;
+pub mod loudness;
 mod marker_export;
 pub mod masks;
 pub mod media_browser;
@@ -1353,6 +1354,8 @@ mod keyboard_tests;
 mod linked_speed_tests;
 #[cfg(test)]
 mod locked_clip_edits_tests;
+#[cfg(test)]
+mod loudness_tests;
 #[cfg(test)]
 mod masks_tests;
 #[cfg(test)]

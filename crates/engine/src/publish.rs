@@ -26,10 +26,10 @@ use crate::commands::{CommandSpec, always, bad, bool_p};
 use crate::{EngineError, Result, Session};
 
 /// The loudness social platforms play at (YouTube, Instagram), LUFS, and how far off still passes.
-pub const SOCIAL_LUFS: f64 = -14.0;
+pub const SOCIAL_LUFS: f64 = filmcraft_audio_dsp::loudness::LoudnessTarget::Social.lufs();
 pub const LUFS_TOLERANCE: f64 = 2.0;
 /// The true-peak ceiling of a normalized copy, dBTP.
-pub const TRUE_PEAK_DBTP: f64 = -1.0;
+pub const TRUE_PEAK_DBTP: f64 = filmcraft_audio_dsp::loudness::LoudnessTarget::Social.true_peak_dbtp();
 /// Audio measured at most (longer files: the first this many seconds).
 pub const MAX_LOUDNESS_SECONDS: f64 = 10.0 * 60.0;
 /// Top-level boxes walked at most.
@@ -673,10 +673,12 @@ fn finish(d: Destination, p: &Probe, mut out: Vec<Check>) -> Vec<Check> {
             (Some(l), _) => {
                 let off = l.integrated_lufs - SOCIAL_LUFS;
                 let status = if off.abs() <= LUFS_TOLERANCE { Status::Pass } else { Status::Warn };
+                // the same normalisation as `audio.normalizeLoudness`, which also fixes the sequence itself
+                const SEQUENCE_FIX: &str = "or normalize the sequence before exporting (`audio.normalizeLoudness {target: social}`)";
                 let how = if off > 0.0 {
-                    format!("{} turns louder videos down to about −14 LUFS: {FIXED_COPY}, normalized to −14 LUFS", d.label())
+                    format!("{} turns louder videos down to about −14 LUFS: {FIXED_COPY}, normalized to −14 LUFS, {SEQUENCE_FIX}", d.label())
                 } else {
-                    format!("{} plays it quieter than other videos: {FIXED_COPY}, normalized to −14 LUFS", d.label())
+                    format!("{} plays it quieter than other videos: {FIXED_COPY}, normalized to −14 LUFS, {SEQUENCE_FIX}", d.label())
                 };
                 let measured = if l.seconds + 0.5 < p.seconds {
                     format!("{:.1} LUFS (first {:.0} min)", l.integrated_lufs, l.seconds / 60.0)
@@ -939,9 +941,19 @@ pub fn reexport(
             t.items.push(ti);
         }
     }
-    let project = Arc::new(p);
     let provider = move |id: filmcraft_project::ItemId| (id == item).then(|| src.clone());
-    filmcraft_export::export(&project, seq, settings, &provider, progress).map_err(|e| e.to_string())
+    // loudness: the copy's sequence is normalised like `audio.normalizeLoudness` does (Mix fader
+    // and a true-peak limiter); the export's own normalisation stays the fallback
+    let mut settings = settings.clone();
+    if has_a && settings.effects.loudness.enabled {
+        let ln = settings.effects.loudness.clone();
+        let cancel = || progress.cancel.load(std::sync::atomic::Ordering::Relaxed);
+        if crate::loudness::normalize_sequence(&mut p, seq, ln.target_lufs, ln.true_peak_dbtp, &provider, &cancel).is_ok() {
+            settings.effects.loudness.enabled = false;
+        }
+    }
+    let project = Arc::new(p);
+    filmcraft_export::export(&project, seq, &settings, &provider, progress).map_err(|e| e.to_string())
 }
 
 /// `<dir>/<stem> (<label>).mp4`, numbered when taken.

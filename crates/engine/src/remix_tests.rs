@@ -181,6 +181,22 @@ fn media_beats_gives_the_tempo_and_beat_times_of_an_item() {
     assert!(s.execute("media.beats", json!({"item": item.0, "sourceIn": Tick::from_seconds_f64(31.0).0})).is_err(), "a second has too few beats");
 }
 
+/// `media.beats` on imported music whose tempo drifts (112 → 128 BPM over 30 s): every beat is
+/// found on its attack, within 10 ms, and the reported tempo is the mean one.
+#[test]
+fn media_beats_follows_tempo_drift() {
+    let (m, truth) = filmcraft_audio_dsp::beats::drift_music(SR, 112.0, 128.0, 30.0, 9);
+    let truth: Vec<f64> = truth.iter().map(|b| *b as f64 / SR as f64).collect();
+    let (mut s, c) = session(&m, None);
+    let item = item(&s, c).item;
+    let r = s.execute("media.beats", json!({"item": item.0})).unwrap();
+    assert!((r["bpm"].as_f64().unwrap() - 120.0).abs() < 3.0, "{r}");
+    let beats: Vec<f64> = r["beats"].as_array().unwrap().iter().filter_map(Value::as_f64).collect();
+    let hit = truth.iter().filter(|t| beats.iter().any(|b| (*t - b).abs() < 0.010)).count();
+    assert!(hit * 100 >= truth.len() * 95, "{hit} of {} beats found within 10 ms", truth.len());
+    assert!(beats.iter().all(|b| truth.iter().any(|t| (t - b).abs() < 0.010)), "no beat between the beats");
+}
+
 #[test]
 fn overlaps_are_refused_and_noise_cannot_be_remixed() {
     let (m, _) = music();

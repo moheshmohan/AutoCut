@@ -3685,3 +3685,6 @@
 	New Adjustment Clip	Novo clipe de ajuste
 	Auto-Duck is on: this track goes down under the others. Click to turn it off.	A atenuação automática está ativada: esta faixa abaixa sob as outras. Clique para desativá-la.
 	Auto-Duck: lower this track under the other tracks' sound	Atenuação automática: abaixar esta faixa sob o som das outras
+# Loudness normalisation and auto-duck commands
+	Normalize Loudness	Normalizar loudness
+	Auto-Duck Track	Atenuação automática da faixa

@@ -3746,3 +3746,6 @@
 	New Adjustment Clip	新建调整剪辑
 	Auto-Duck is on: this track goes down under the others. Click to turn it off.	自动闪避已开启：此轨道会在其他轨道有声音时降低音量。单击可关闭。
 	Auto-Duck: lower this track under the other tracks' sound	自动闪避：在其他轨道有声音时降低此轨道
+# Loudness normalisation and auto-duck commands
+	Normalize Loudness	标准化响度
+	Auto-Duck Track	自动闪避轨道

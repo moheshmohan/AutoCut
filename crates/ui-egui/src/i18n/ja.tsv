@@ -4024,3 +4024,6 @@
 	New Adjustment Clip	新規調整クリップ
 	Auto-Duck is on: this track goes down under the others. Click to turn it off.	オートダッキングがオン：このトラックは他のトラックの下で音量が下がります。クリックでオフにします。
 	Auto-Duck: lower this track under the other tracks' sound	オートダッキング：他のトラックの音の下でこのトラックの音量を下げる
+# Loudness normalisation and auto-duck commands
+	Normalize Loudness	ラウドネスを正規化
+	Auto-Duck Track	トラックをオートダッキング

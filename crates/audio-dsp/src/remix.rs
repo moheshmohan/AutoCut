@@ -2,10 +2,9 @@
 //! beat boundaries (Clip ▸ Remix).
 //!
 //! ```text
-//! mono mix ─► STFT (≈46 ms Hann, ¼ hop) ─► log-magnitude spectral flux = onset envelope
-//!          ─► tempo: autocorrelation of the envelope, 50–200 BPM, log-Gaussian prior at 120 BPM
-//!          ─► beats: dynamic programming (onset strength + penalty on beat-to-beat deviation
-//!             from the period, squared log ratio), backtracked from the strongest end
+//! mono mix ─► tempo and beats ([`crate::beats`]: mel onset strength, autocorrelation tempo
+//!             with a log-Gaussian prior at 120 BPM, dynamic-programming beats following the
+//!             local tempo, each beat on its attack)
 //!          ─► per beat: 12-bin chroma and 12 mel cepstra (26 mel bands, DCT-II, c0 dropped)
 //!          ─► beat self-similarity S(i, j) = 0.6 · cos(chroma) + 0.4 · (1 + cos(z-scored cepstra)) / 2
 //! plan:  output = piece₀ ⧺ piece₁ ⧺ … ⧺ piece_k; each joint leaves the source at a beat boundary
@@ -185,103 +184,11 @@ fn stft_mag(x: &[f32], n: usize, hop: usize) -> Vec<Vec<f32>> {
     out
 }
 
-/// STFT frame for the onset envelope: the power of two nearest to 46 ms (1024 at 22.05 kHz, 2048
+/// Base STFT frame of the beat features: the power of two nearest to 46 ms (1024 at 22.05 kHz, 2048
 /// at 44.1/48 kHz).
 fn onset_frame(sr: u32) -> usize {
     let n = (sr as f64 * 0.046).max(256.0);
     1usize << n.log2().round() as u32
-}
-
-/// Below this normalised autocorrelation at the beat period there is no usable pulse.
-const MIN_PULSE: f64 = 0.1;
-
-/// Onset strength per hop: half-wave rectified log-magnitude spectral flux, normalised to unit
-/// standard deviation. Returns (envelope, frame size, hop).
-pub fn onset_envelope(x: &[f32], sr: u32) -> (Vec<f32>, usize, usize) {
-    let n = onset_frame(sr);
-    let hop = n / 4;
-    let mags = stft_mag(x, n, hop);
-    let mut env = vec![0f32; mags.len()];
-    let lg: Vec<Vec<f32>> = mags.iter().map(|m| m.iter().map(|v| (1.0 + 1000.0 * v).ln()).collect()).collect();
-    for t in 1..lg.len() {
-        env[t] = lg[t].iter().zip(&lg[t - 1]).map(|(a, b)| (a - b).max(0.0)).sum();
-    }
-    let mean = env.iter().sum::<f32>() / env.len().max(1) as f32;
-    let sd = (env.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / env.len().max(1) as f32).sqrt();
-    if sd > 0.0 {
-        env.iter_mut().for_each(|v| *v /= sd);
-    }
-    (env, n, hop)
-}
-
-/// Beat period in envelope frames from the autocorrelation (50–200 BPM, prior centred at 120 BPM).
-fn tempo(env: &[f32], frame_rate: f64) -> Option<f64> {
-    let mean = env.iter().sum::<f32>() / env.len().max(1) as f32;
-    let e: Vec<f32> = env.iter().map(|v| v - mean).collect();
-    let lo = (frame_rate * 60.0 / 200.0).floor().max(2.0) as usize;
-    let hi = ((frame_rate * 60.0 / 50.0).ceil() as usize).min(e.len() / 2);
-    if hi <= lo + 2 {
-        return None;
-    }
-    let ac = |lag: usize| -> f64 { e.iter().zip(&e[lag..]).map(|(a, b)| (*a as f64) * (*b as f64)).sum::<f64>() / (e.len() - lag) as f64 };
-    let raw: Vec<f64> = (lo - 1..=hi + 1).map(ac).collect();
-    let weighted = |k: usize| {
-        let lag = (lo - 1 + k) as f64;
-        let bpm = 60.0 * frame_rate / lag;
-        raw[k] * (-0.5 * ((bpm / 120.0).log2() / 1.0).powi(2)).exp()
-    };
-    let (mut best, mut bk) = (f64::MIN, 0usize);
-    for k in 1..raw.len() - 1 {
-        let w = weighted(k);
-        if w > best {
-            best = w;
-            bk = k;
-        }
-    }
-    if best <= 0.0 || raw[bk] <= MIN_PULSE * ac(0) {
-        return None;
-    }
-    // parabolic refinement on the raw autocorrelation
-    let (a, b, c) = (raw[bk - 1], raw[bk], raw[bk + 1]);
-    let den = a - 2.0 * b + c;
-    let d = if den < 0.0 { (0.5 * (a - c) / den).clamp(-0.5, 0.5) } else { 0.0 };
-    Some((lo - 1 + bk) as f64 + d)
-}
-
-/// Dynamic-programming beat tracker: frame indices of beats.
-fn track_beats(env: &[f32], period: f64) -> Vec<usize> {
-    let n = env.len();
-    let mut score = vec![0f64; n];
-    let mut back = vec![usize::MAX; n];
-    let tight = 100.0;
-    let lo = (period * 0.5).round().max(1.0) as usize;
-    let hi = (period * 2.0).round() as usize;
-    for t in 0..n {
-        let mut best = 0.0f64;
-        let mut arg = usize::MAX;
-        if t >= lo {
-            for prev in t.saturating_sub(hi)..=t - lo {
-                let r = ((t - prev) as f64 / period).ln();
-                let v = score[prev] - tight * r * r;
-                if arg == usize::MAX || v > best {
-                    best = v;
-                    arg = prev;
-                }
-            }
-        }
-        score[t] = env[t] as f64 + if arg == usize::MAX { 0.0 } else { best.max(0.0) };
-        back[t] = if arg != usize::MAX && best > 0.0 { arg } else { usize::MAX };
-    }
-    // strongest end within the last period
-    let tail = n.saturating_sub(period.ceil() as usize + 1);
-    let mut t = (tail..n).max_by(|&a, &b| score[a].total_cmp(&score[b]).then(b.cmp(&a))).unwrap_or(0);
-    let mut beats = vec![t];
-    while back[t] != usize::MAX {
-        t = back[t];
-        beats.push(t);
-    }
-    beats.reverse();
-    beats
 }
 
 fn hz_to_mel(f: f64) -> f64 {
@@ -392,42 +299,16 @@ pub fn beat_lead(sample_rate: u32) -> i64 {
     (XFADE_S * 0.5 * sample_rate as f64).round() as i64
 }
 
-fn local_max(env: &[f32], t: usize, r: usize) -> f32 {
-    env[t.saturating_sub(r)..(t + r + 1).min(env.len())].iter().copied().fold(0.0, f32::max)
-}
-
 /// Analyse planar audio (channels are summed to mono).
 pub fn analyze(channels: &[&[f32]], sample_rate: u32) -> Result<Analysis, RemixError> {
     let len = channels.iter().map(|c| c.len()).max().unwrap_or(0);
     let k = 1.0 / channels.len().max(1) as f32;
     let mono: Vec<f32> = (0..len).map(|i| channels.iter().map(|c| c.get(i).copied().unwrap_or(0.0)).sum::<f32>() * k).collect();
-    let (env, n, hop) = onset_envelope(&mono, sample_rate);
-    let frame_rate = sample_rate as f64 / hop as f64;
-    let period = tempo(&env, frame_rate).ok_or(RemixError::NoBeat)?;
-    let mut frames = track_beats(&env, period);
-    // weak beats at the edges (silence before / after the music) are not beats
-    let mut strengths: Vec<f32> = frames.iter().map(|&t| local_max(&env, t, 2)).collect();
-    strengths.sort_by(f32::total_cmp);
-    let median = strengths.get(strengths.len() / 2).copied().unwrap_or(0.0);
-    while frames.first().is_some_and(|&t| local_max(&env, t, 2) < 0.3 * median) {
-        frames.remove(0);
-    }
-    while frames.last().is_some_and(|&t| local_max(&env, t, 2) < 0.3 * median) {
-        frames.pop();
-    }
-    // …and edge beats off the grid (the tracker's end search can settle on an off-beat)
-    let off_grid = |a: usize, b: usize| ((b - a) as f64 / period - 1.0).abs() > 0.05;
-    while frames.len() > 2 && off_grid(frames[frames.len() - 2], frames[frames.len() - 1]) {
-        frames.pop();
-    }
-    while frames.len() > 2 && off_grid(frames[0], frames[1]) {
-        frames.remove(0);
-    }
-    // the flux of frame t peaks as soon as an attack enters the newer window, at about
-    // t·hop + n − ¾·hop (measured on generated drums); joints sit half a crossfade earlier so a joint's fade is over
-    // when the beat's attack starts
-    let mut beats: Vec<i64> =
-        frames.iter().map(|&t| (t * hop + n) as i64 - 3 * hop as i64 / 4 - beat_lead(sample_rate)).filter(|&b| b > 0 && b < len as i64).collect();
+    // tempo and beats: the tracker of [`crate::beats`] (attacks); joints sit half a crossfade
+    // earlier, so a joint's fade is over when the beat's attack starts
+    let found = crate::beats::track(channels, sample_rate).map_err(|_| RemixError::NoBeat)?;
+    let lead = beat_lead(sample_rate);
+    let mut beats: Vec<i64> = found.beats.iter().map(|b| b - lead).filter(|&b| b > 0 && b < len as i64).collect();
     beats.dedup();
     if beats.len() < 2 * MIN_PIECE_BEATS + 2 {
         return Err(if beats.len() < 4 { RemixError::NoBeat } else { RemixError::TooShort });
@@ -440,8 +321,7 @@ pub fn analyze(channels: &[&[f32]], sample_rate: u32) -> Result<Analysis, RemixE
             sim[i * m + j] = 0.6 * cos(&chroma[i], &chroma[j]) + 0.4 * (1.0 + cos(&cep[i], &cep[j])) * 0.5;
         }
     }
-    let period_s = period * hop as f64;
-    Ok(Analysis { sample_rate, len: len as i64, beats, period: period_s, bpm: 60.0 * sample_rate as f64 / period_s, sim })
+    Ok(Analysis { sample_rate, len: len as i64, beats, period: found.period, bpm: found.bpm, sim })
 }
 
 // ------------------------------------------------------------------------------------- planning
