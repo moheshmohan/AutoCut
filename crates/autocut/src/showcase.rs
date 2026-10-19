@@ -33,6 +33,7 @@ use serde_json::{Value, json};
 use crate::analyze::ClipFacts;
 use crate::llm::ChatModel;
 use crate::look::{self, Look, Role, Theme};
+use crate::shot_edit::{self, Fit, ShotEdit};
 use crate::subtitles::Cue;
 use crate::{AutoCutError, Executor};
 
@@ -135,6 +136,26 @@ pub struct Shot {
     /// from before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub largest: Option<Moment>,
+    /// The plan's controls for this shot ([`crate::shot_edit`]): the source window, seconds into
+    /// the clip, instead of the automatic one…
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<f64>,
+    /// …its speed (4: four times as fast; its own sound dropped)…
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
+    /// …`"fill"` (cropped to the frame) or `"full"` (whole, over a blurred copy)…
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit: Option<String>,
+    /// …the point (0..1 of the clip) a fill crop keeps in view…
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<[f64; 2]>,
+    /// …no sound of its own (`true`), or its sound this many dB from the mix's level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mute: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f64>,
 }
 
 /// A sampled moment of a clip that shows the subject: seconds into the clip, the share of the
@@ -169,6 +190,7 @@ impl Shot {
                 area: x.area.min(1.0),
                 center: x.center.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.5 }),
             }),
+            ..Self::default()
         }
     }
 
@@ -263,6 +285,11 @@ pub struct Entry {
     /// A scene's caption ("GITEX 2022 · Dubai World Trade Centre"; its label without one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
+    /// Where it was filmed, for its lower third only ("Busan, South Korea"): shown there instead of
+    /// its `event` ("Busan, South Korea · October 2023"), and it starts no chapter or card of its
+    /// own (its `event` still does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
 }
 
 /// The `kind` of a scene entry: footage that shows no robot (a hall, a stage, a skyline) to
@@ -284,6 +311,17 @@ impl Entry {
             .find(|s| !s.is_empty())
             .map(|s| s.chars().take(MAX_CAPTION_CHARS).collect())
             .unwrap_or_default()
+    }
+
+    /// Where its lower third says it was: its `place`, else its `event` (trimmed, one line, at most
+    /// [`MAX_CAPTION_CHARS`]).
+    pub fn where_shown(&self) -> Option<String> {
+        [self.place.as_deref(), self.event.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(|s| s.split(char::is_control).next().unwrap_or_default().trim())
+            .find(|s| !s.is_empty())
+            .map(|s| s.chars().take(MAX_CAPTION_CHARS).collect())
     }
 
     /// The chapter it belongs to: its event, else the year it was filmed.
@@ -588,8 +626,11 @@ fn lower_third_place(place: Option<&str>, when: &str) -> String {
 /// One item of the script request: number, date, name, where, what, and its facts.
 fn item_listing(n: usize, e: &Entry) -> String {
     let mut s = format!("{n}. {} — {}", month_year(e.unix), e.label);
-    if let Some(ev) = e.event.as_deref().map(str::trim).filter(|x| !x.is_empty()) {
-        s.push_str(&format!(" (at {ev})"));
+    let trimmed = |x: Option<&str>| x.map(str::trim).filter(|x| !x.is_empty()).map(str::to_string);
+    match (trimmed(e.event.as_deref()), trimmed(e.place.as_deref())) {
+        (Some(ev), Some(pl)) if !ev.contains(&pl) => s.push_str(&format!(" (at {ev}, in {pl})")),
+        (Some(at), _) | (None, Some(at)) => s.push_str(&format!(" (at {at})")),
+        (None, None) => {}
     }
     s.push_str(&format!(": {}", e.description));
     let facts: Vec<&str> = e.facts.iter().map(|f| f.trim()).filter(|f| !f.is_empty()).take(6).collect();
@@ -799,13 +840,38 @@ pub struct PlacedEntry {
     pub chips: Vec<u64>,
 }
 
-/// A shot as built: its picture clip (on V2) and media item, and where it plays.
+/// A shot as built: its picture clip (on V2) and media item, where it plays, and what the plan's
+/// controls ([`crate::shot_edit`]) made of it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlacedShot {
     pub clip: u64,
     pub item: u64,
     pub start: f64,
     pub end: f64,
+    /// The window of its clip it plays, seconds `[from, to]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<[f64; 2]>,
+    /// Its speed when not 1 (the plan's, or slowed to carry the words).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
+    /// The window is the plan's own (`from` and `to`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fixed: bool,
+    /// A clip of another shape than the frame: cropped to `fill` it, or shown `full` over a
+    /// blurred copy (its clip on V1: `background`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit: Option<Fit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<u64>,
+    /// The plan's point a fill crop keeps in view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<[f64; 2]>,
+    /// Its own sound's clip (on A1); none when muted, at another speed or without sound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<u64>,
+    /// The plan's level for that sound, dB from the mix's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f64>,
 }
 
 /// A chapter of the video.
@@ -968,13 +1034,44 @@ async fn mix_down(ex: &dyn Executor, mix: &Mix, narrations: &[u64], music: &[u64
     }
 }
 
-/// A placed shot: its foreground, background and sound clips, and where it ends (seconds, on a
-/// frame).
+/// A placed shot: its foreground, background and sound clips, where it ends (seconds, on a
+/// frame), and how it fills the frame when its shape is not the frame's.
 struct Placed {
     fg: u64,
     bg: Option<u64>,
     audio: Option<u64>,
     end: f64,
+    fit: Option<Fit>,
+}
+
+/// How a shot is placed ([`place_shot`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct Framing {
+    /// Warp Stabilizer on it when the show is stabilized ([`Options::stabilize`]).
+    stabilize: bool,
+    /// The analysis' moment where its subject is largest (the box a crop centres on and the
+    /// tracker starts from).
+    moment: Option<Moment>,
+    /// The subject tracker may follow it ([`Options::follow_subject`]).
+    follow: bool,
+    /// The plan's `fit` and `focus` for it ([`crate::shot_edit`]).
+    fit: Option<Fit>,
+    focus: Option<[f64; 2]>,
+    /// Its own sound is placed (a shot at another speed has none).
+    sound: bool,
+}
+
+impl Framing {
+    /// A shot of the show: stabilized when the show is, its analysis' moment, followed when
+    /// `follow`, with the plan's controls `edit`, its sound unless it plays at another speed.
+    fn of(shot: &Shot, edit: &ShotEdit, speed: f64, follow: bool) -> Self {
+        Self { stabilize: true, moment: shot.largest, follow, fit: edit.fit, focus: edit.focus, sound: speed == 1.0 && !edit.mute }
+    }
+
+    /// A shot with only its analysis' moment (the montage, the outro, the thumbnail).
+    fn plain(moment: Option<Moment>, stabilize: bool) -> Self {
+        Self { stabilize, moment, follow: true, sound: true, ..Self::default() }
+    }
 }
 
 /// How much larger a shot's picture grows a second in its push-in, and at most.
@@ -1083,55 +1180,61 @@ async fn follow_subject(ex: &dyn Executor, clip: u64, aspect: f64, src: f64, dur
 }
 
 /// Place `item`'s `[src, src + dur)` at `t` (both ends on frames): foreground on V2 (with its
-/// sound on A1, which [`mix_down`] levels) with a slow push-in ([`push_in`]) and — when the
-/// show is stabilized ([`Options::stabilize`]) and `stabilize` — Warp Stabilizer. A clip whose
-/// shape is not the frame's fills it ([`Options::fill_frame`]), its crop on the subject's
-/// centre `focus` (0..1 of the clip; the middle without one) and tilting across it
-/// ([`reframe`]); otherwise it is fitted whole over a blurred, dimmed copy filling V1 behind
-/// it, which stays still.
-#[allow(clippy::too_many_arguments)]
-async fn place_shot(
-    ex: &dyn Executor,
-    tr: &Tracks,
-    item: u64,
-    t: f64,
-    src: f64,
-    dur: f64,
-    stabilize: bool,
-    focus: Option<Moment>,
-    follow: bool,
-) -> Result<Placed, AutoCutError> {
+/// sound on A1, which [`mix_down`] levels, unless `how` says not) with a slow push-in
+/// ([`push_in`]) and — when the show is stabilized ([`Options::stabilize`]) and `how` asks —
+/// Warp Stabilizer. A clip whose shape is not the frame's fills it ([`Options::fill_frame`], or
+/// the plan's `fit: "fill"`), its crop on the subject's centre (the plan's `focus`, else the
+/// analysis' box; the middle without either) and tilting across it ([`reframe`]) or following it
+/// ([`follow_subject`], not with a `focus`); otherwise (`fit: "full"`) it is fitted whole over a
+/// blurred, dimmed, enlarged copy filling V1 behind it — still, unless the whole picture was
+/// asked for: then the picture stays whole and the copy behind it pushes in.
+async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64, dur: f64, how: Framing) -> Result<Placed, AutoCutError> {
     let frame_aspect = tr.aspect;
     let t = on_frame(t, tr.fps);
     let end = on_frame(t + dur, tr.fps).max(t + 1.0 / tr.fps);
     let dur = end - t;
-    let r = run(
-        ex,
-        "timeline.place",
-        json!({"item": item, "track": tr.fg, "audioTrack": tr.clip_audio, "time": ticks(t), "sourceIn": ticks(src), "duration": ticks(dur)}),
-    )
-    .await?;
+    let mut p = json!({"item": item, "track": tr.fg, "time": ticks(t), "sourceIn": ticks(src), "duration": ticks(dur)});
+    if how.sound {
+        p["audioTrack"] = json!(tr.clip_audio);
+    } else {
+        p["audio"] = json!(false);
+    }
+    let r = run(ex, "timeline.place", p).await?;
     let ids: Vec<u64> = r["clips"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
     let fg = *ids.first().ok_or_else(|| AutoCutError::Executor("timeline.place placed nothing".into()))?;
-    let audio = ids.get(1).copied();
+    let audio = if how.sound { ids.get(1).copied() } else { None };
     let size = media_size(ex, item).await;
     let aspect = size.map(|(w, h)| w / h.max(1.0)).unwrap_or(frame_aspect);
     let odd = (aspect - frame_aspect).abs() > 0.05;
-    let fill = odd && tr.fill && size.is_some_and(|(w, h)| w > 0.0 && h > 0.0);
+    let shaped = size.is_some_and(|(w, h)| w > 0.0 && h > 0.0);
+    let fill = odd
+        && shaped
+        && match how.fit {
+            Some(Fit::Fill) => true,
+            Some(Fit::Full) => false,
+            None => tr.fill,
+        };
+    // the whole picture asked for: nothing of it is pushed out of the frame
+    let whole = odd && how.fit == Some(Fit::Full);
     let fit = run(ex, if fill { "clip.fillFrame" } else { "clip.fitToFrame" }, json!({"clips": [fg]})).await?;
     let scale = fit["clips"].as_array().and_then(|a| a.iter().find(|c| c["clip"].as_u64() == Some(fg))).and_then(|c| c["scale"].as_f64());
     if let Some(scale) = scale {
         // cosmetic, like the transitions: a shot without its push-in (or its reframing) is
         // still right
-        push_in(ex, fg, scale, t, end, tr.fps).await.ok();
+        if !whole {
+            push_in(ex, fg, scale, t, end, tr.fps).await.ok();
+        }
+        // the plan's point to keep in view: held there (a slow tilt across it), not tracked
+        let point = how.focus.map(|c| Moment { seconds: src + dur / 2.0, area: 0.0, center: c });
         // a still (the thumbnail's second) has nothing to follow
-        let followed = fill && tr.follow && follow && dur > FOLLOW_MIN_SECONDS && follow_subject(ex, fg, aspect, src, dur, focus).await;
+        let followed =
+            fill && point.is_none() && tr.follow && how.follow && dur > FOLLOW_MIN_SECONDS && follow_subject(ex, fg, aspect, src, dur, how.moment).await;
         if fill && !followed {
-            let focus = focus.unwrap_or(Moment { seconds: 0.0, area: 0.0, center: Moment::middle() });
+            let focus = point.or(how.moment).unwrap_or(Moment { seconds: 0.0, area: 0.0, center: Moment::middle() });
             reframe(ex, fg, aspect, tr.frame, focus, t, end, tr.fps).await.ok();
         }
     }
-    if stabilize && tr.stabilize {
+    if how.stabilize && tr.stabilize {
         run(ex, "effects.apply", json!({"clips": [fg], "effect": "warp_stabilizer"})).await?;
     }
     let mut bg = None;
@@ -1140,15 +1243,30 @@ async fn place_shot(
             run(ex, "timeline.place", json!({"item": item, "track": tr.bg, "time": ticks(t), "sourceIn": ticks(src), "duration": ticks(dur), "audio": false}))
                 .await?;
         if let Some(b) = r["clips"].as_array().and_then(|a| a.first()).and_then(Value::as_u64) {
-            run(ex, "clip.fillFrame", json!({"clips": [b]})).await?;
+            let filled = run(ex, "clip.fillFrame", json!({"clips": [b]})).await?;
+            let scale = filled["clips"].as_array().and_then(|a| a.iter().find(|c| c["clip"].as_u64() == Some(b))).and_then(|c| c["scale"].as_f64());
             run(ex, "effects.apply", json!({"clips": [b], "effect": "gaussian_blur"})).await?;
             run(ex, "effects.setParam", json!({"clip": b, "effect": "gaussian_blur", "param": "blurriness", "value": 60.0})).await?;
-            run(ex, "effects.setParam", json!({"clip": b, "effect": "opacity", "param": "opacity", "value": 45.0})).await?;
+            // its edges blurred from its own pixels, not from black
+            run(ex, "effects.setParam", json!({"clip": b, "effect": "gaussian_blur", "param": "repeat_edge", "value": true})).await.ok();
+            run(ex, "effects.setParam", json!({"clip": b, "effect": "opacity", "param": "opacity", "value": BACKDROP_OPACITY})).await?;
+            if let Some(sc) = scale.filter(|s| s.is_finite() && *s > 0.0) {
+                if whole {
+                    push_in(ex, b, sc * BACKDROP_ZOOM, t, end, tr.fps).await.ok();
+                } else {
+                    run(ex, "effects.setParam", json!({"clip": b, "effect": "motion", "param": "scale", "value": sc * BACKDROP_ZOOM})).await.ok();
+                }
+            }
             bg = Some(b);
         }
     }
-    Ok(Placed { fg, bg, audio, end })
+    Ok(Placed { fg, bg, audio, end, fit: odd.then_some(if fill { Fit::Fill } else { Fit::Full }) })
 }
+
+/// The blurred copy behind a whole picture: its opacity over black (dimmed), and how much larger
+/// than the frame it is (its blurred edges outside).
+const BACKDROP_OPACITY: f64 = 45.0;
+const BACKDROP_ZOOM: f64 = 1.08;
 
 /// Fade a shot's own sound in at its start (a crossfade when it follows another shot's sound).
 async fn fade_in(ex: &dyn Executor, audio: Option<u64>) {
@@ -1433,6 +1551,21 @@ struct Window {
     start: f64,
     len: f64,
     reach: f64,
+    /// How fast it plays (the plan's `speed`): it takes `len / speed` of the timeline.
+    speed: f64,
+    /// The plan's own window (`from` and `to`): never lengthened or shortened, not even onto a beat.
+    fixed: bool,
+}
+
+impl Window {
+    fn new(shot: Shot, start: f64, len: f64, reach: f64) -> Self {
+        Self { shot, start, len, reach, speed: 1.0, fixed: false }
+    }
+
+    /// Its length on the timeline, seconds.
+    fn placed(&self) -> f64 {
+        self.len / self.speed.max(shot_edit::MIN_SPEED)
+    }
 }
 
 /// [`windows`], with each window's reach.
@@ -1460,7 +1593,7 @@ fn in_view_windows(e: &Entry, seconds: f64) -> Vec<Window> {
         }
         carry = left.max(0.0);
         picked.sort_by(|x, y| x.0.total_cmp(&y.0));
-        out.extend(picked.into_iter().map(|(start, len, reach)| Window { shot: s.clone(), start, len, reach }));
+        out.extend(picked.into_iter().map(|(start, len, reach)| Window::new(s.clone(), start, len, reach)));
     }
     out
 }
@@ -1475,9 +1608,124 @@ fn filling_windows(e: &Entry, seconds: f64) -> Vec<Window> {
             let usable = (s.clip_seconds - 0.4).max(0.5);
             let len = each.min(usable);
             let start = s.window_start(len);
-            Window { shot: s.clone(), start, len, reach: (s.clip_seconds - 0.2 - start).max(len) }
+            Window::new(s.clone(), start, len, (s.clip_seconds - 0.2 - start).max(len))
         })
         .collect()
+}
+
+/// Windows for an entry whose plan times some of its shots ([`ShotEdit::timed`]; `edits[k]` for
+/// shot `k`), in the shots' order. A shot with both ends (`from`, `to`) plays exactly that, at its
+/// speed (`(to - from) / speed` of the timeline); the entry's other shots share what is left of
+/// `seconds` — every one anchored by one end, then as many plain ones as the time left calls for
+/// ([`shot_count`]; one at least when nothing else plays) — a plain one cut where its subject is
+/// in view ([`in_view_windows`]; a scene's whatever is in view), a sped one running its share times
+/// its speed of the clip. `must` is what the words need: when the windows fall short of it, the
+/// ones that may grow run on (as far as their clip allows, the last first), then the clip after
+/// the last window; the note says so, and how far the words still run on when nothing can.
+fn edited_windows(e: &Entry, edits: &[ShotEdit], seconds: f64, must: f64, scene: bool) -> (Vec<Window>, Option<String>) {
+    let seconds = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
+    let edit = |k: usize| edits.get(k).copied().unwrap_or_default();
+    let fixed: Vec<usize> = (0..e.shots.len()).filter(|k| edit(*k).fixed().is_some()).collect();
+    let anchored: Vec<usize> = (0..e.shots.len()).filter(|k| edit(*k).fixed().is_none() && (edit(*k).from.is_some() || edit(*k).to.is_some())).collect();
+    let plain: Vec<usize> = (0..e.shots.len()).filter(|k| edit(*k).from.is_none() && edit(*k).to.is_none()).collect();
+    let fixed_time: f64 = fixed.iter().filter_map(|k| edit(*k).fixed().map(|(a, b)| (b - a) / edit(*k).speed)).sum();
+    let left = (seconds - fixed_time).max(0.0);
+    let others = !fixed.is_empty() || !anchored.is_empty();
+    let n_plain = if others && left < MIN_WINDOW { 0 } else { shot_count(left).saturating_sub(anchored.len()).max(usize::from(!others)).min(plain.len()) };
+    let sharers = anchored.len() + n_plain;
+    let share = if sharers > 0 { left / sharers as f64 } else { 0.0 };
+    let mut per_shot: Vec<Vec<Window>> = vec![Vec::new(); e.shots.len()];
+    for (k, s) in e.shots.iter().enumerate() {
+        let ed = edit(k);
+        let Some(slot) = per_shot.get_mut(k) else { continue };
+        let usable = (s.clip_seconds - 0.2).max(MIN_WINDOW);
+        if let Some((a, b)) = ed.fixed() {
+            *slot = vec![Window { speed: ed.speed, fixed: true, ..Window::new(s.clone(), a, b - a, b - a) }];
+        } else if anchored.contains(&k) {
+            if let Some((a, len)) = ed.anchored(share, s.clip_seconds) {
+                // one anchored at its start may run on; one ending at its `to` may not
+                let reach = if ed.from.is_some() { (usable - a).max(len) } else { len };
+                *slot = vec![Window { speed: ed.speed, ..Window::new(s.clone(), a, len, reach) }];
+            }
+        } else if plain.iter().take(n_plain).any(|p| *p == k) {
+            if ed.speed != 1.0 {
+                let len = (share * ed.speed).min(s.clip_seconds - 0.4).max(0.5);
+                let start = s.window_start(len);
+                *slot = vec![Window { speed: ed.speed, ..Window::new(s.clone(), start, len, (usable - start).max(len)) }];
+            } else {
+                let one = Entry { shots: vec![s.clone()], ..Entry::default() };
+                let mut wins = if scene { filling_windows(&one, share) } else { in_view_windows(&one, share) };
+                if !scene && wins.iter().map(|w| w.len).sum::<f64>() < share * 0.6 {
+                    wins = filling_windows(&one, share);
+                }
+                *slot = wins;
+            }
+        }
+    }
+    let mut wins: Vec<Window> = per_shot.into_iter().flatten().filter(|w| w.len.is_finite() && w.len > 0.0).collect();
+    // the words always fit: what may grow runs on, the last first; then the clip after the last
+    let mut short = must - wins.iter().map(Window::placed).sum::<f64>();
+    if short.is_nan() || short <= 1e-6 {
+        return (wins, None);
+    }
+    let mut grown = 0.0;
+    for w in wins.iter_mut().rev().filter(|w| !w.fixed) {
+        let more = ((w.reach - w.len) / w.speed).max(0.0).min(short);
+        w.len += more * w.speed;
+        short -= more;
+        grown += more;
+        if short <= 1e-6 {
+            break;
+        }
+    }
+    // the clip after the last window (half a second at least: no flash of a shot)
+    let mut ran_on = 0.0;
+    let mut ran_name = String::new();
+    if short > 1e-6
+        && let Some(last) = wins.last().cloned()
+    {
+        let from = last.start + last.len;
+        let room = (last.shot.clip_seconds - 0.2 - from).max(0.0);
+        let len = (short.max(0.5) * last.speed).min(room);
+        if len >= 0.5 * last.speed.min(1.0) {
+            ran_on = len / last.speed;
+            short -= ran_on;
+            ran_name = last_name(&wins);
+            wins.push(Window { speed: last.speed, ..Window::new(last.shot.clone(), from, len, len) });
+        }
+    }
+    // then a fast-forwarded window plays less fast (never slower than as filmed)
+    let mut eased: Vec<(String, f64, f64)> = Vec::new();
+    for w in wins.iter_mut().rev().filter(|w| w.fixed && w.speed > 1.0) {
+        if short <= 1e-6 {
+            break;
+        }
+        let more = (w.len - w.len / w.speed).min(short);
+        let speed = w.len / (w.len / w.speed + more);
+        eased.push((format!("\"{}\"", w.shot.name), w.speed, speed));
+        w.speed = speed;
+        short -= more;
+    }
+    let mut said = Vec::new();
+    if grown > 0.05 {
+        said.push(format!("its other shots run {grown:.1} s longer"));
+    }
+    if ran_on > 0.05 {
+        said.push(format!("{ran_name} runs on {ran_on:.1} s after its window"));
+    }
+    for (name, was, now) in &eased {
+        said.push(format!("{name} plays at {now:.2}× instead of {was}×"));
+    }
+    if short > 0.05 {
+        said.push(format!("its words still run {short:.1} s past its footage"));
+    }
+    let note = (!said.is_empty()).then(|| format!("entry {}: its shots are shorter than its words: {}", e.number, said.join("; ")));
+    (wins, note)
+}
+
+/// The name of the last window's clip.
+fn last_name(wins: &[Window]) -> String {
+    wins.last().map_or_else(|| "its last shot".to_string(), |w| format!("\"{}\"", w.shot.name))
 }
 
 /// The beats of the music under the show, in seconds of the timeline: the ones measured in the
@@ -1619,14 +1867,20 @@ const BEAT_SNAP: f64 = 0.4;
 /// window is changed to match; `None` (nothing changed) when no beat is that close.
 fn snap_end(wins: &mut [Window], t: f64, slow: f64, min_len: f64, beats: &Beats) -> Option<f64> {
     let slow = if slow.is_finite() { slow.clamp(0.5, 1.0) } else { 1.0 };
-    let footage: f64 = wins.iter().map(|w| w.len).sum();
+    let footage: f64 = wins.iter().map(Window::placed).sum();
     let last = wins.last_mut()?;
+    // the plan's own window stays as it is
+    if last.fixed {
+        return None;
+    }
+    // (a window played at another speed: `rate` seconds of its clip a second of the timeline)
+    let rate = slow * last.speed;
     let end = t + footage / slow;
     let tol = BEAT_SNAP.min(beats.period() * 0.5);
-    let shorter = ((last.len - 0.5).max(0.0) / slow).min(end - (t + min_len)).max(0.0).min(tol);
-    let longer = ((last.reach - last.len).max(0.0) / slow).min(tol);
+    let shorter = ((last.len - 0.5).max(0.0) / rate).min(end - (t + min_len)).max(0.0).min(tol);
+    let longer = ((last.reach - last.len).max(0.0) / rate).min(tol);
     let b = beats.nearest(end, end - shorter, end + longer)?;
-    last.len = (last.len + (b - end) * slow).max(0.0);
+    last.len = (last.len + (b - end) * rate).max(0.0);
     Some(b)
 }
 
@@ -2041,19 +2295,24 @@ fn snap_cuts(wins: &mut [Window], t: f64, beats: &Beats) {
     let mut at = t;
     for i in 0..wins.len().saturating_sub(1) {
         let (Some(cur), Some(next)) = (wins.get(i).cloned(), wins.get(i + 1).cloned()) else { break };
-        let cut = at + cur.len;
-        let earlier = (cur.len - 0.5).max(0.0).min((next.reach - next.len).max(0.0)).min(tol);
-        let later = (cur.reach - cur.len).max(0.0).min((next.len - 0.5).max(0.0)).min(tol);
-        if let Some(b) = beats.nearest(cut, cut - earlier, cut + later) {
-            let d = b - cut;
-            if let Some(w) = wins.get_mut(i) {
-                w.len += d;
-            }
-            if let Some(w) = wins.get_mut(i + 1) {
-                w.len -= d;
+        let cut = at + cur.placed();
+        // (lengths on the timeline: a window played faster covers less of it; the plan's own
+        // windows are left as they are)
+        let (rc, rn) = (cur.speed.max(shot_edit::MIN_SPEED), next.speed.max(shot_edit::MIN_SPEED));
+        if !(cur.fixed || next.fixed) {
+            let earlier = ((cur.len - 0.5).max(0.0) / rc).min((next.reach - next.len).max(0.0) / rn).min(tol);
+            let later = ((cur.reach - cur.len).max(0.0) / rc).min((next.len - 0.5).max(0.0) / rn).min(tol);
+            if let Some(b) = beats.nearest(cut, cut - earlier, cut + later) {
+                let d = b - cut;
+                if let Some(w) = wins.get_mut(i) {
+                    w.len += d * rc;
+                }
+                if let Some(w) = wins.get_mut(i + 1) {
+                    w.len -= d * rn;
+                }
             }
         }
-        at += wins.get(i).map_or(0.0, |w| w.len);
+        at += wins.get(i).map_or(0.0, Window::placed);
     }
 }
 
@@ -2071,6 +2330,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // the plan's chips and the timeline's dates are checked before anything is built
     let numbers: Vec<usize> = entries.iter().map(|e| e.number).collect();
     let chips = look::chips_by_entry(&script.chips, &numbers)?;
+    // …and every shot's own controls (windows, speeds, fit, focus, sound)
+    let edits = shot_edit::check(entries)?;
     if look.timeline {
         let dates: Vec<i64> = entries.iter().filter_map(|e| e.unix).collect();
         look::Scale::new(&dates, (w, h))?;
@@ -2133,6 +2394,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let mut narrations = Narrations::default();
     let mut mix = Mix::default();
     let mut fg_firsts: Vec<(u64, Option<u64>)> = Vec::new();
+    // shots' own sounds the plan sets a level for: (clip, dB)
+    let mut gains: Vec<(u64, f64)> = Vec::new();
     let title_props = json!({"font_style": "Bold", "align": "center", "stroke": true, "stroke_width": 6, "shadow": true});
 
     // ---- the music's beats, which the cuts land on: the user's track (imported now, its beats
@@ -2182,7 +2445,11 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let next_cut = beats.as_ref().and_then(|b| b.nearest(at + cut, at + cut * 0.5, at + cut * 1.5)).unwrap_or(at + cut);
         let len = if i + 1 >= picks.len() { intro_len - at } else { (next_cut - at).min(intro_len - at) };
         let len = len.min((s.clip_seconds - 0.4).max(0.5));
-        let shot = place_shot(ex, &tr, s.item, at, s.window_start(len), len, true, s.largest, true).await?;
+        // the plan's framing, and its window's start when the turn fits after it
+        let ed = ShotEdit::of(s, 0, 0).unwrap_or_default();
+        let start = ed.from.filter(|a| a + len <= s.clip_seconds - 0.2).unwrap_or_else(|| s.window_start(len));
+        let how = Framing { fit: ed.fit, focus: ed.focus, sound: !ed.mute, ..Framing::plain(s.largest, true) };
+        let shot = place_shot(ex, &tr, s.item, at, start, len, how).await?;
         fade_in(ex, shot.audio).await;
         mix.sounds.extend(shot.audio);
         at = shot.end;
@@ -2270,16 +2537,24 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             None => (voice_at - t + spoken + BREATHE).clamp(MIN_ENTRY, MAX_ENTRY),
         };
         let must = voice_at - t + spoken + 0.7;
-        // the robot in view; when that is too little to carry the words even at half speed,
-        // the clips as they are (a scene has no robot: its clips as they are)
-        let mut wins = if scene { filling_windows(e, needed) } else { in_view_windows(e, needed) };
-        if !scene && wins.iter().map(|w| w.len).sum::<f64>() / 0.5 < must {
-            wins = filling_windows(e, needed);
-        }
-        let footage: f64 = wins.iter().map(|w| w.len).sum();
-        // footage too short for the words: slow the shots to cover them, never below half speed
-        // (an entry with words to spare just ends sooner)
-        let slow = if footage + 0.05 < must { (footage / must).clamp(0.5, 1.0) } else { 1.0 };
+        let entry_edits = edits.get(k).map(Vec::as_slice).unwrap_or_default();
+        let (mut wins, slow) = if entry_edits.iter().any(ShotEdit::timed) {
+            // the plan's own windows and speeds, the other shots around them, the words fitting
+            let (wins, note) = edited_windows(e, entry_edits, needed, must, scene);
+            built.notes.extend(note);
+            (wins, 1.0)
+        } else {
+            // the robot in view; when that is too little to carry the words even at half speed,
+            // the clips as they are (a scene has no robot: its clips as they are)
+            let mut wins = if scene { filling_windows(e, needed) } else { in_view_windows(e, needed) };
+            if !scene && wins.iter().map(|w| w.len).sum::<f64>() / 0.5 < must {
+                wins = filling_windows(e, needed);
+            }
+            let footage: f64 = wins.iter().map(|w| w.len).sum();
+            // footage too short for the words: slow the shots to cover them, never below half
+            // speed (an entry with words to spare just ends sooner)
+            (wins, if footage + 0.05 < must { (footage / must).clamp(0.5, 1.0) } else { 1.0 })
+        };
         // with transitions from the catalogue, the cuts within the entry land on beats too
         if look.transitions.is_some()
             && slow >= 0.999
@@ -2295,25 +2570,45 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let mut shots = Vec::new();
         let mut full_frame = Vec::new();
         let n_wins = wins.len();
-        for (i, Window { shot: s, start: src, len, reach }) in wins.iter().enumerate() {
-            // the last shot ends on the beat's own frame, whatever rounding came before
+        for (i, w) in wins.iter().enumerate() {
+            let s = &w.shot;
+            // the last shot ends on the beat's own frame, whatever rounding came before (not the
+            // plan's own window)
             let len = match beat_end {
-                Some(end) if i + 1 == n_wins && slow >= 0.999 => (end - at).max(0.5).min(reach.max(0.5)),
-                _ => *len,
+                Some(end) if i + 1 == n_wins && slow >= 0.999 && !w.fixed => ((end - at) * w.speed).max(0.5).min(w.reach.max(0.5)),
+                _ => w.len,
             };
-            // (a scene has no robot to frame or follow)
-            let focus = if scene { None } else { s.largest };
-            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, len, true, focus, !scene).await?;
+            // the plan's controls (checked before anything was built); a scene has no robot to
+            // frame or follow
+            let ed = entry_edits.iter().zip(&e.shots).find(|(_, x)| *x == s).map(|(ed, _)| *ed).unwrap_or_default();
+            let mut how = Framing::of(s, &ed, w.speed, !scene);
+            if scene {
+                how.moment = None;
+            }
+            let Placed { fg, bg, audio, end, fit } = place_shot(ex, &tr, s.item, at, w.start, len, how).await?;
             mix.sounds.extend(audio);
+            if let (Some(a), Some(db)) = (audio, ed.volume) {
+                gains.push((a, db));
+            }
             let mut shot_end = end;
-            if slow < 0.999 {
+            // slowed to carry the words, or the plan's speed (sped up: frames sampled, sharp)
+            let change = if slow < 0.999 {
+                Some((slow, "frameBlending"))
+            } else if w.speed != 1.0 {
+                Some((w.speed, if w.speed > 1.0 { "frameSampling" } else { "frameBlending" }))
+            } else {
+                None
+            };
+            if let Some((speed, interpolation)) = change {
                 let clips: Vec<u64> = std::iter::once(fg).chain(bg).chain(audio).collect();
-                if let Ok(r) =
-                    run(ex, "clip.speedDuration", json!({"clips": clips, "speed": slow * 100.0, "interpolation": "frameBlending", "ripple": false})).await
-                {
-                    // where the slowed shot really ends (the engine rounds to frames)
-                    let slowed = r["clips"].as_array().and_then(|a| a.iter().find(|c| c["clip"].as_u64() == Some(fg))).and_then(|c| c["end"].as_f64());
-                    shot_end = slowed.map_or_else(|| on_frame(at + len / slow, tr.fps), |e| e / TPS);
+                match run(ex, "clip.speedDuration", json!({"clips": clips, "speed": speed * 100.0, "interpolation": interpolation, "ripple": false})).await {
+                    Ok(r) => {
+                        // where the shot really ends (the engine rounds to frames)
+                        let moved = r["clips"].as_array().and_then(|a| a.iter().find(|c| c["clip"].as_u64() == Some(fg))).and_then(|c| c["end"].as_f64());
+                        shot_end = moved.map_or_else(|| on_frame(at + len / speed, tr.fps), |e| e / TPS);
+                    }
+                    Err(err) if w.speed != 1.0 => built.notes.push(format!("entry {}: speed {}: {err}", e.number, w.speed)),
+                    Err(_) => {}
                 }
             }
             // after any speed change, which moves the clip's end
@@ -2344,7 +2639,20 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                     }
                 }
             }
-            shots.push(PlacedShot { clip: fg, item: s.item, start: on_frame(at, tr.fps), end: shot_end });
+            shots.push(PlacedShot {
+                clip: fg,
+                item: s.item,
+                start: on_frame(at, tr.fps),
+                end: shot_end,
+                source: Some([w.start, w.start + len]),
+                speed: change.map(|c| c.0),
+                fixed: w.fixed,
+                fit,
+                focus: ed.focus,
+                background: bg,
+                sound: audio,
+                volume: audio.and(ed.volume),
+            });
             full_frame.push(bg.is_none());
             // a slowed shot can end between frames: the next starts on the following frame
             at = (shot_end * tr.fps - 1e-6).ceil() / tr.fps;
@@ -2450,8 +2758,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             }
         } else {
             let name = display_label(&e.label);
-            let place = e.event.as_deref().map(str::trim).filter(|s| !s.is_empty());
-            let second = lower_third_place(place, &when);
+            let place = e.where_shown();
+            let second = lower_third_place(place.as_deref(), &when);
             match &theme {
                 Some(th) => {
                     let mut lines = vec![look::Line { text: &name, role: Role::Title, size: 54.0, color: &th.text, caps: true, opacity: 100.0 }];
@@ -2511,7 +2819,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let outro_len = (outro_voice_at - t + outro_spoken + 1.5).max(5.0);
     if let Some(h0) = entries.iter().rev().find(|e| !e.is_scene()).and_then(|e| e.shots.first()) {
         let len = outro_len.min((h0.clip_seconds - 0.4).max(1.0));
-        let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, false, h0.largest, true).await?;
+        let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, Framing::plain(h0.largest, false)).await?;
         mix.sounds.extend(audio);
         fade_in(ex, audio).await;
         if let Some(a) = audio {
@@ -2697,6 +3005,12 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // ---- the mix
     progress("mixing");
     mix_down(ex, &mix, &narrations.clips, &music, look.loudness.is_none(), &mut built.notes).await;
+    // the plan's own levels for shots' sound, on top of the mix's
+    for (clip, db) in &gains {
+        if let Err(e) = run(ex, "clip.audioGain", json!({"clips": [clip], "mode": "adjust", "db": db})).await {
+            built.notes.push(format!("volume {db} dB: {e}"));
+        }
+    }
     // to a destination's loudness, with a true-peak ceiling (instead of the limiter alone)
     if let Some(l) = &look.loudness {
         progress("loudness: normalising the mix");
@@ -2865,7 +3179,7 @@ async fn compose_thumbnail(
         chips: Vec::new(),
     };
     // the frame: a second of the shot from the moment, its first frame the one exported
-    place_shot(ex, &tr, shot.item, 0.0, moment.seconds, 1.0, false, Some(moment), true).await?;
+    place_shot(ex, &tr, shot.item, 0.0, moment.seconds, 1.0, Framing::plain(Some(moment), false)).await?;
     // the title, as large as two lines across the frame allow, in the half of the picture the
     // robot is not in (low unless it stands low), the count in the opposite corner
     let lines = thumbnail_lines(&opts.title);
@@ -3006,8 +3320,8 @@ mod tests {
             description: String::new(),
             unix: None,
             shots: vec![
-                Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 19.5, seen: vec![], unseen: vec![], largest: None },
-                Shot { item: 2, name: "b".into(), clip_seconds: 3.0, best: 1.0, seen: vec![], unseen: vec![], largest: None },
+                Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 19.5, seen: vec![], unseen: vec![], largest: None, ..Shot::default() },
+                Shot { item: 2, name: "b".into(), clip_seconds: 3.0, best: 1.0, seen: vec![], unseen: vec![], largest: None, ..Shot::default() },
             ],
             ..Entry::default()
         };
@@ -3024,7 +3338,16 @@ mod tests {
     #[test]
     fn stretches_in_view_come_from_the_samples() {
         // statues at 2.0 s and 7.8 s of a 15.5 s clip, not at 4.9, 10.7 and 13.6
-        let s = Shot { item: 47, name: "s".into(), clip_seconds: 15.5, best: 7.8, seen: vec![2.0, 7.8], unseen: vec![4.9, 10.7, 13.6], largest: None };
+        let s = Shot {
+            item: 47,
+            name: "s".into(),
+            clip_seconds: 15.5,
+            best: 7.8,
+            seen: vec![2.0, 7.8],
+            unseen: vec![4.9, 10.7, 13.6],
+            largest: None,
+            ..Shot::default()
+        };
         let spans = s.spans();
         assert_eq!(spans.len(), 2, "{spans:?}");
         assert!((spans[0].0 - 0.2).abs() < 1e-9 && (spans[0].1 - 3.45).abs() < 1e-9, "{spans:?}");
@@ -3057,6 +3380,7 @@ mod tests {
             seen: vec![21.0, 24.0, 27.0, 30.0, 33.0, 36.0, 39.0],
             unseen: vec![3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 42.0, 45.0],
             largest: None,
+            ..Shot::default()
         };
         let a = s.window_start(8.0);
         assert!(a >= 19.0 && a + 8.0 <= 41.0, "{a}");
@@ -3267,8 +3591,8 @@ mod tests {
 
     #[test]
     fn an_entry_ends_on_the_nearest_beat_it_can_reach() {
-        let shot = Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 5.0, seen: vec![], unseen: vec![], largest: None };
-        let w = |len: f64, reach: f64| Window { shot: shot.clone(), start: 2.0, len, reach };
+        let shot = Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 5.0, seen: vec![], unseen: vec![], largest: None, ..Shot::default() };
+        let w = |len: f64, reach: f64| Window::new(shot.clone(), 2.0, len, reach);
         let g = Beats::grid(120.0);
         // 10 + 7.3 s: the beat at 17.5 is in reach
         let mut wins = vec![w(4.0, 4.0), w(3.3, 6.0)];
@@ -3317,8 +3641,26 @@ mod tests {
     #[test]
     fn time_a_shot_cannot_fill_in_view_goes_to_the_next() {
         // two shots: the first in view for 3 s only, the second for 15 s
-        let short = Shot { item: 1, name: "a".into(), clip_seconds: 20.0, best: 5.0, seen: vec![4.0, 5.0, 6.0], unseen: vec![2.0, 8.0, 12.0], largest: None };
-        let long = Shot { item: 2, name: "b".into(), clip_seconds: 20.0, best: 10.0, seen: vec![3.0, 6.0, 9.0, 12.0, 15.0], unseen: vec![], largest: None };
+        let short = Shot {
+            item: 1,
+            name: "a".into(),
+            clip_seconds: 20.0,
+            best: 5.0,
+            seen: vec![4.0, 5.0, 6.0],
+            unseen: vec![2.0, 8.0, 12.0],
+            largest: None,
+            ..Shot::default()
+        };
+        let long = Shot {
+            item: 2,
+            name: "b".into(),
+            clip_seconds: 20.0,
+            best: 10.0,
+            seen: vec![3.0, 6.0, 9.0, 12.0, 15.0],
+            unseen: vec![],
+            largest: None,
+            ..Shot::default()
+        };
         let e = Entry { number: 1, label: "x".into(), kind: "x".into(), description: String::new(), unix: None, shots: vec![short, long], ..Entry::default() };
         assert!((in_view_seconds(&e) - (4.0 + 19.6)).abs() < 1e-9, "{}", in_view_seconds(&e));
         let w = windows(&e, 10.0);
@@ -3592,7 +3934,7 @@ mod tests {
     #[test]
     fn cuts_within_an_entry_move_onto_the_beat_and_keep_its_length() {
         let shot = Shot { item: 1, clip_seconds: 30.0, best: 10.0, ..Shot::default() };
-        let w = |start: f64, len: f64, reach: f64| Window { shot: shot.clone(), start, len, reach };
+        let w = |start: f64, len: f64, reach: f64| Window::new(shot.clone(), start, len, reach);
         // at 120 bpm from t = 10: cuts at 12.3 and 15.1 move to 12.5 and 15.0
         let mut wins = vec![w(1.0, 2.3, 5.0), w(8.0, 2.8, 6.0), w(20.0, 3.0, 5.0)];
         snap_cuts(&mut wins, 10.0, &Beats::grid(120.0));

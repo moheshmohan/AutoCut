@@ -32,6 +32,7 @@ pub mod qa;
 pub mod recipes;
 pub mod runner;
 pub mod shorts;
+pub mod shot_edit;
 pub mod showcase;
 pub mod subtitles;
 pub mod validate;
