@@ -516,14 +516,28 @@ subject is not found (`Options::follow_subject`, `--no-track`).
   or signs in every footage clip; an entry's or a shot's own `redact` (`{"targets": [...]}`, or
   `false` to leave its footage alone) adds targets for its clips only. `OllamaJudge::find`
   asks for every place each target appears (`{"found": [{"target", "bbox_2d"}]}` in the model's
-  resized frame, `analyze::model_frame`); the engine follows them between looks.
+  resized frame, `analyze::model_frame`); the engine follows them between looks. Measured
+  2026-10-19 on the Promobot clips of Robot Showcase v5 (items 70, 68, 69: 130 s, targets "DP
+  World logo" and "dpworld.com text", a look a second), scored by eye on 63 frames sampled
+  every 1–2.5 s: 52 of 59 legible DP World logos, wordmarks and the dpworld.com floor sign
+  hidden (88 %; 9 of them only the wordmark, the emblem above it left), 7 missed (small badges
+  on the robot's arm and base, the dpworld.com label on a printed photo), 3 blurs on something
+  else (the tablet's header text, its bezel, a wall screen after its picture changed); the
+  robot's LED face never blurred; 794 s (131 looks at about 6 s each). Before two fixes the
+  same clip scored 73 % on item 70 and missed the floor sign entirely: the model sometimes
+  writes a box corner into `target` (now the place is kept, named by its `label`), and a
+  tracker that only held a lost box drifted onto the robot's face (now a held box is not kept,
+  and a look that does not find it ends it).
 
 Measured on Robot Showcase v4 (560 s of footage, 90 clips, mostly 1080p H.264 with some VP9
-4:4:4): the whole sequence analysed in 248 s on an M-series Mac (detection 123 s, vision check
-125 s for 140 tracks): 99 faces hidden, 36 robots / screens / posters left sharp (Pepper,
-NAO, Ameca, Furhat, Promobot), 126 faces under 5 % of the picture left alone; the plate
-detector's 33 hits were all robot name badges, signs or machines (no vehicle in the footage):
-the shape check removed most, the vision check the last 5.
+4:4:4), the whole sequence on an M-series Mac, 2026-10-19: with faces counted as the sequence
+shows them and a face score of 0.6, 356 s (detection 141 s, vision check 214 s for 211
+tracks; load average 12 falling to 3): 151 faces hidden in 35 clips, 55 robots / screens /
+posters left sharp (Pepper, NAO, Ameca, Furhat, Promobot), 163 faces too small to recognise
+left alone. An earlier pass at score 0.7 on the source picture: 248 s, 99 faces hidden; it
+missed half-turned faces in a crowd at 0.6–0.7. The plate detector's 33 hits were all robot
+name badges, signs or machines (no vehicle in the footage): the shape check removed most, the
+vision check the last 5.
 
 ## Configuration (environment)
 

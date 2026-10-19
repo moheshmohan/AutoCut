@@ -39,6 +39,11 @@ trained on Chinese plates; it finds other countries' plates less reliably.
   included). `verdict` keeps faces at least 5 % of the picture tall at some point and plates at
   least 2.5 % of its width, seen twice or once with a score ≥ 0.9, and not inside an `Exclude`
   box (at its time ± 1 s). `padded` / `padded_corners` grow boxes and plate quads.
+  `Kind::Target` tracks (named logos and signs, followed by the engine from a vision model's
+  boxes, `crates/engine/src/redact_targets.rs`) carry their `label`, are smoothed the same way
+  (`smoothed`) and are hidden at any size, exclusions or not.
+- `post::plausible_plate`: LPD-YuNet also fires on text, badges and large shapes; a plate must be
+  at least 1.4 times as wide as tall, at most 40 % of the picture wide and 25 % tall.
 
 ## Accuracy (measured)
 

@@ -173,7 +173,7 @@ impl VisionJudge for OllamaJudge {
         let mut png = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(img).to_rgb8().write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
         let v = self.ollama.chat_json(crate::analyze::GROUND_SYSTEM, &find_prompt(targets), &[png.into_inner()]).map_err(|e| e.to_string())?;
-        Ok(parse_found(&v, targets.len(), frame.width, frame.height))
+        Ok(parse_found(&v, targets, frame.width, frame.height))
     }
 }
 
@@ -186,23 +186,32 @@ pub fn find_prompt(targets: &[String]) -> String {
     )
 }
 
-/// The places in the model's answer for `n` targets in a `w` × `h` picture: (target index, box
+/// The places in the model's answer for `targets` in a `w` × `h` picture: (target index, box
 /// normalised `[x, y, w, h]`). The model's boxes are in the pixels of the frame it resized the
 /// picture to ([`crate::analyze::model_frame`]); hostile numbers and empty boxes are dropped.
-pub fn parse_found(v: &Value, n: usize, w: u32, h: u32) -> Vec<(usize, [f64; 4])> {
+/// Which target a place is comes from its 1-based `target` number (0 read as the first), else its
+/// `label`; a place the model did not name is still kept (as the first target): Qwen2.5-VL
+/// sometimes writes the box's corner into `target`, and a place it found is a place to hide.
+pub fn parse_found(v: &Value, targets: &[String], w: u32, h: u32) -> Vec<(usize, [f64; 4])> {
+    let n = targets.len();
+    if n == 0 {
+        return Vec::new();
+    }
     let (fw, fh) = crate::analyze::model_frame(w, h);
     let mut out = Vec::new();
     for f in v.get("found").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default().iter().take(64) {
-        // a 1-based number from the list (a 0 is read as the first); one target needs none
+        let by_label = || {
+            let l = f.get("label").and_then(Value::as_str)?.trim().to_ascii_lowercase();
+            targets.iter().position(|t| {
+                let t = t.trim().to_ascii_lowercase();
+                !l.is_empty() && (t == l || t.contains(&l) || l.contains(&t))
+            })
+        };
         let target = match f.get("target").and_then(Value::as_u64) {
             Some(0) => 0,
-            Some(k) => (k as usize).saturating_sub(1),
-            None if n == 1 => 0,
-            None => continue,
+            Some(k) if (k as usize) <= n => k as usize - 1,
+            _ => by_label().unwrap_or(0),
         };
-        if target >= n {
-            continue;
-        }
         let Some(b) = f.get("bbox_2d").or_else(|| f.get("box_2d")).and_then(Value::as_array) else { continue };
         let c: Vec<f64> = b.iter().filter_map(Value::as_f64).collect();
         let [x1, y1, x2, y2] = c.as_slice() else { continue };
@@ -606,15 +615,21 @@ mod tests {
             {"target": 1, "bbox_2d": "x"},
             {"bbox_2d": [0, 0, 100, 100]}
         ]});
-        let f = parse_found(&v, 2, 1280, 720);
-        assert_eq!(f.len(), 3, "{f:?}");
+        let two = vec!["DP World logo".to_string(), "dpworld.com text".to_string()];
+        let f = parse_found(&v, &two, 1280, 720);
+        // every well-formed box is kept: the unknown target number and the unnamed place too
+        assert_eq!(f.len(), 5, "{f:?}");
         assert_eq!(f[0].0, 0);
         assert!((f[0].1[0] - 0.5).abs() < 1e-9 && (f[0].1[2] - 0.25).abs() < 1e-9);
-        assert_eq!((f[1].0, f[2].0), (1, 0));
-        // one target: the number may be missing
-        assert_eq!(parse_found(&json!({"found": [{"bbox_2d": [0, 0, 100, 100]}]}), 1, 1280, 720).len(), 1);
-        assert!(parse_found(&json!({"found": "none"}), 1, 1280, 720).is_empty());
-        assert!(parse_found(&json!({}), 1, 0, 0).is_empty());
+        assert_eq!(f.iter().map(|x| x.0).collect::<Vec<_>>(), vec![0, 1, 0, 0, 0]);
+        // the model's slip seen on GITEX footage: the box's corner in `target`, the label beside
+        let slip = json!({"found": [{"target": [1085, 515], "bbox_2d": [1085, 515, 1182, 665], "label": "dpworld.com text"}]});
+        assert_eq!(parse_found(&slip, &two, 1280, 720)[0].0, 1);
+        let one = vec!["the logo".to_string()];
+        assert_eq!(parse_found(&json!({"found": [{"bbox_2d": [0, 0, 100, 100]}]}), &one, 1280, 720).len(), 1);
+        assert!(parse_found(&json!({"found": "none"}), &one, 1280, 720).is_empty());
+        assert!(parse_found(&json!({}), &one, 0, 0).is_empty());
+        assert!(parse_found(&slip, &[], 1280, 720).is_empty());
         assert!(find_prompt(&["DP World logo".into(), "a\nsign".into()]).contains("1. DP World logo; 2. a sign"));
     }
 

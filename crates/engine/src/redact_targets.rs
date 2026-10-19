@@ -8,7 +8,8 @@
 //! overlaps: Median Flow (`filmcraft_render::subject::SubjectTracker`) carries the box over the
 //! analysed frames in between — forwards, and backwards to the previous look for a place found
 //! for the first time, so the blur is on from where the target came into view. A follow ends when
-//! the tracker loses it or the model has not seen it at [`UNCONFIRMED_LOOKS`] looks in a row.
+//! the tracker loses it (a box it only holds is not kept, and a look that does not find the
+//! place again ends it) or the model has not seen it at [`UNCONFIRMED_LOOKS`] looks in a row.
 //! The follows become tracks (`filmcraft_vision::track::Kind::Target`) like faces and plates:
 //! smoothed, padded, a rectangle mask each on the clip's blur.
 
@@ -29,8 +30,9 @@ pub const LOOK_SIDE: usize = 1280;
 const CUT: f32 = 0.3;
 /// …but not closer than this to the previous look, seconds.
 const MIN_LOOK_GAP: f64 = 0.3;
-/// A follow the model has not confirmed at this many looks in a row ends.
-pub const UNCONFIRMED_LOOKS: usize = 3;
+/// A follow the model has not confirmed at this many looks in a row ends (it often names one
+/// place a look, so a single miss is not the end).
+pub const UNCONFIRMED_LOOKS: usize = 2;
 /// A place found overlapping a follow's box at least this much (IoU), or centred inside it,
 /// re-seeds that follow.
 const SAME: f64 = 0.2;
@@ -47,6 +49,9 @@ struct Follow {
     points: Vec<(f64, [f64; 4])>,
     last: SubjectBox,
     unconfirmed: usize,
+    /// The tracker has lost it and holds its last box: nothing is recorded, and a look that
+    /// does not find it again ends the follow (a held box drifts onto whatever is there now).
+    coasting: bool,
     /// A box from the latest look, for the next frame pushed.
     hint: Option<SubjectBox>,
 }
@@ -117,7 +122,9 @@ impl<'a> Follower<'a> {
             let o = f.tracker.push(&small, sw, sh, t, hint);
             match (o.state, o.bbox) {
                 (TrackState::Lost | TrackState::None, _) | (_, None) => f.unconfirmed = usize::MAX,
+                (TrackState::Coasting, _) => f.coasting = true,
                 (_, Some(b)) => {
+                    f.coasting = false;
                     f.last = b;
                     f.points.push((t, corner(&b)));
                 }
@@ -150,7 +157,7 @@ impl<'a> Follower<'a> {
             None => Vec::new(),
         };
         for f in &mut self.active {
-            f.unconfirmed += 1;
+            f.unconfirmed = if f.coasting { UNCONFIRMED_LOOKS } else { f.unconfirmed + 1 };
         }
         for (target, b) in found {
             if target >= self.names.len() || !b.iter().all(|v| v.is_finite()) {
@@ -158,9 +165,11 @@ impl<'a> Follower<'a> {
             }
             let Some(sb) = SubjectBox::from_corner(b[0], b[1], b[2], b[3]) else { continue };
             self.out.found += 1;
-            if let Some(f) = self.active.iter_mut().filter(|f| f.target == target).find(|f| same_place(&f.last, &sb)) {
+            // the same place again (under any of the targets' names: the model mixes them up)
+            if let Some(f) = self.active.iter_mut().find(|f| same_place(&f.last, &sb)) {
                 f.hint = Some(sb);
                 f.unconfirmed = 0;
+                f.coasting = false;
                 continue;
             }
             if self.active.len() >= MAX_FOLLOWS {
@@ -178,7 +187,7 @@ impl<'a> Follower<'a> {
                 }
             }
             before.reverse();
-            self.active.push(Follow { target, tracker: SubjectTracker::new(), points: before, last: sb, unconfirmed: 0, hint: Some(sb) });
+            self.active.push(Follow { target, tracker: SubjectTracker::new(), points: before, last: sb, unconfirmed: 0, coasting: false, hint: Some(sb) });
         }
         let (ended, active): (Vec<Follow>, Vec<Follow>) = std::mem::take(&mut self.active).into_iter().partition(|f| f.unconfirmed >= UNCONFIRMED_LOOKS);
         self.active = active;
@@ -308,6 +317,25 @@ mod tests {
             let cx = p.bbox[0] + p.bbox[2] / 2.0;
             assert!((cx - want).abs() < 0.03, "at {}: {cx} for {want}", p.t);
         }
+    }
+
+    /// Regression (Promobot clip, 70 s): when the logo left the picture, the tracker held its
+    /// last box and the blur drifted onto the robot's LED face for three seconds. A held box is
+    /// not kept, and a look that does not find the place again ends it.
+    #[test]
+    fn a_target_that_leaves_the_picture_is_not_followed_on() {
+        let names = vec!["the logo".to_string()];
+        let finder = Finder { looks: Default::default(), from: 0 };
+        let mut f = Follower::new(&names, 1.0, &finder);
+        let empty = frame(5.0);
+        for k in 0..40 {
+            let t = k as f64 / 10.0;
+            // the logo until 1.45 s, then only the ground
+            if t < 1.45 { f.push(&frame(0.4), 320, 180, t) } else { f.push(&empty, 320, 180, t) }
+        }
+        let out = f.finish(0.08);
+        let end = out.tracks.iter().map(Track::end).fold(0.0, f64::max);
+        assert!(end <= 2.05, "followed until {end}");
     }
 
     #[test]

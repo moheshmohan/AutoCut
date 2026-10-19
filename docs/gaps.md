@@ -217,7 +217,14 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   model; not reachable locally), media-intelligence search, caption translation, model-based
   Enhance Speech, Auto Reframe beyond heuristics, auto colour, Auto-Tag Audio Types.
 - **Have:** local Whisper transcription (off in releases, G19), Kokoro-82M text-to-speech
-  narration (#278), scene edit detection, colour match.
+  narration (#278), scene edit detection, colour match, automatic privacy blur (Clip ▸ Auto
+  Redact Faces and Plates…: YuNet / LPD-YuNet on candle, tracked masks, robots and screens told
+  apart by the local vision model, named logos and signs found by it).
+- **Privacy blur limits (measured 2026-10-19 on GITEX footage):** YuNet misses faces in
+  profile and half-hidden ones; LPD-YuNet was trained on Chinese plates and fired only on
+  badges and signs there (no vehicles to measure recall on); named targets depend on a 7B vision
+  model's boxes (one place per look is typical, wordmarks more than emblems); masked effects
+  render on the CPU.
 - **Needs:** openly licensed models we can ship. **150–300 h.**
 
 ## G13. Delivery formats
