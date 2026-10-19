@@ -697,3 +697,65 @@ fn showcase_outro_flags_become_the_plans_outro() {
     assert!(outro["logo"].as_str().is_some_and(|p| std::path::Path::new(p).is_absolute()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `showcase-plan`: a real round's notes (trimmed, crates/autocut/tests/data/plan_patch) applied to
+/// its plan give the plans it made, English and Malayalam; bad notes fail naming the entry.
+#[test]
+fn showcase_plan_applies_notes_and_writes_the_other_language() {
+    let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/autocut/tests/data/plan_patch");
+    let f = |n: &str| data.join(n).to_string_lossy().to_string();
+    let dir = std::env::temp_dir().join(format!("fc-cli-plan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("plan-v5.json").to_string_lossy().to_string();
+    let o = cli(&[
+        "showcase-plan",
+        "--base",
+        &f("base.json"),
+        "--patch",
+        &f("notes.json"),
+        "--clips",
+        &f("clips.json"),
+        "--out",
+        &out,
+        "--lines",
+        &f("lines-ml.json"),
+    ]);
+    let v = json_out(&o);
+    assert_eq!((v["entries"].as_u64(), v["robots"].as_u64()), (Some(10), Some(9)), "{v}");
+    let read = |p: &std::path::Path| -> Value { serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap() };
+    assert_eq!(read(std::path::Path::new(&out)), read(&data.join("expected.json")));
+    assert_eq!(read(&dir.join("plan-v5-ml.json")), read(&data.join("expected-ml.json")));
+    // a note for an entry the plan does not have
+    let bad = dir.join("bad.json");
+    std::fs::write(&bad, r#"{"entries": {"No such robot": {"line": "x"}}}"#).unwrap();
+    let o = cli(&["showcase-plan", "--base", &f("base.json"), "--patch", bad.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("No such robot"));
+    assert_eq!(cli(&["showcase-plan", "--patch", &f("notes.json")]).status.code(), Some(2));
+    assert_eq!(cli(&["showcase-plan", "--base", &f("base.json"), "--lines", &f("lines-ml.json")]).status.code(), Some(2), "--lines needs somewhere to go");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `sheet` over the demo project and `frames` of a file exported from it: labelled sheets.
+#[test]
+fn sheets_of_clips_and_frames_of_a_video() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/export-tests").join(format!("sheet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sheet = dir.join("sheet.png");
+    let v = json_out(&cli(&["--demo", "sheet", "--items", "5,5:0.5-1.5", "--n", "3", "--side", "120", "--out", sheet.to_str().unwrap()]));
+    assert_eq!((v["frames"].as_u64(), v["missing"].as_u64()), (Some(6), Some(0)), "{v}");
+    assert!(std::fs::read(&sheet).unwrap().starts_with(b"\x89PNG"));
+    assert_eq!(cli(&["--demo", "sheet", "--items", "5:9-1", "--out", sheet.to_str().unwrap()]).status.code(), Some(2));
+    assert_eq!(cli(&["--demo", "sheet", "--items", "999", "--out", sheet.to_str().unwrap()]).status.code(), Some(1));
+    let video = dir.join("clip.mp4");
+    json_out(&cli(&["--demo", "export", video.to_str().unwrap(), "--start", "0", "--end", "1", "--scale", "0.25"]));
+    let jpg = dir.join("frames.jpg");
+    let v = json_out(&cli(&["frames", video.to_str().unwrap(), "--at", "0.2,0.6", "--out", jpg.to_str().unwrap()]));
+    assert_eq!(v["frames"].as_u64(), Some(2), "{v}");
+    assert!(std::fs::read(&jpg).unwrap().starts_with(&[0xFF, 0xD8]));
+    assert_eq!(cli(&["frames", video.to_str().unwrap(), "--out", jpg.to_str().unwrap()]).status.code(), Some(2), "--at or --n");
+    assert_eq!(cli(&["frames", dir.join("none.mp4").to_str().unwrap(), "--at", "1", "--out", jpg.to_str().unwrap()]).status.code(), Some(1));
+    let _ = std::fs::remove_dir_all(&dir);
+}

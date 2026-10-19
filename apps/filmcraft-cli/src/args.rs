@@ -116,6 +116,17 @@ const VALUED: &[&str] = &[
     "--places-from-locations",
     "--album-url",
     "--per-item",
+    // showcase-plan, sheet, frames; showcase in two languages
+    "--base",
+    "--patch",
+    "--lines",
+    "--lines-out",
+    "--n",
+    "--side",
+    "--columns",
+    "--at",
+    "--languages",
+    "--lines-ml",
 ];
 
 #[derive(Debug, Default)]

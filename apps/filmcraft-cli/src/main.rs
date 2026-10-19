@@ -35,6 +35,7 @@ mod instagram;
 mod locations;
 mod probe;
 mod publish;
+mod showcase_tools;
 mod youtube;
 
 use args::{Args, parse_value};
@@ -231,6 +232,33 @@ SUBCOMMANDS
                                 lines and, when AUTOCUT_ANALYSIS_MODEL answers, the subject in
                                 every shot; findings in <out>.qa.json and a numbered contact
                                 sheet in <out>.qa.png (and under `qa` in the output)
+  showcase-plan --base plan.json [--patch notes.json]... [--project p.fcproj | --clips items.json]
+         [--out new.json] [--lines script-ml.json [--language ml] [--lines-out new-ml.json]]
+                                a reviewed showcase plan changed by review notes keyed by entry
+                                label (docs/showcase-runbook.md): an entry's line, chips,
+                                delivery, place, event, kind, description, redact, unix (seconds
+                                or \"2022-01-23 13:40:35\" in the notes' \"timezone\"), shots
+                                ({item, from, to, speed, fit, mute, plain}), shotEdits, split and
+                                remove; new entries (\"add\"); the script's intro, outro and
+                                pronounce; the look's fields (\"outro\", …). The entries are
+                                sorted by date and numbered, the script's lines, chips and
+                                delivery follow them, the robot count in the outro (\"Forty-three\",
+                                or {Count}) is updated, and entries without a line are reported.
+                                Plain shots take their clip's name and length from --project (or
+                                --clips, a project.inspect JSON). --lines also writes the plan for
+                                another language (--language, default ml) beside --out as
+                                <out>-ml.json: {\"intro\", \"outro\", \"lines\": {\"<label>\": \"…\"}}
+                                read over it; it fails on any spoken entry without a line
+  sheet --project p.fcproj --items 2407,2408:0-30,14 [--n 8] [--at 3.5,7] [--side 320 | --scale 0.25]
+         [--columns N] --out sheet.jpg
+                                a contact sheet of source clips (media.contactSheet): a row per
+                                item of --n frames spread over it (or over from-to seconds), or at
+                                the --at times; tiles --side px on their long side (portrait clips
+                                get tall tiles) or --scale of the frame, each labelled with its
+                                item and time; JPEG or PNG by the extension
+  frames <video> (--at 601,603,605 | --n 6) [--scale 0.5] [--columns 4] --out sheet.jpg
+                                frames of any video file (an export, say) in one labelled sheet;
+                                the file is read in a fresh headless session, no project needed
   analyze '<subject>' [--items 1,2] [--frames N] [--screen N] [--relabel earlier.json] [--compare 150]
          [--out report.json] [--fresh]
                                 which video items show <subject> (e.g. robot): a local vision model
@@ -2086,6 +2114,10 @@ async fn cli() {
             }
         }
         "redact" => redact(&a).await,
+        // a showcase round's steps: review notes into the plan, contact sheets, frames of a video
+        "showcase-plan" => showcase_tools::plan(&a).await,
+        "sheet" => showcase_tools::sheet(&a).await,
+        "frames" => showcase_tools::frames(&a).await,
         "shorts" => {
             // long video → vertical shorts (autocut.shorts); every usage error before anything runs
             let src = a.pos(1).unwrap_or_else(|| usage("shorts <project.fcproj | media file> [--count N] [--aspect 9:16] [--export dir] [--upload-youtube]"));
