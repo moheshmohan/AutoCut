@@ -57,6 +57,7 @@ pub mod project_tools;
 pub mod proxies;
 pub mod publish;
 pub mod recipes;
+pub mod redact;
 pub mod reframe;
 pub mod relink;
 pub mod remix;
@@ -459,6 +460,9 @@ pub struct Session {
     /// Auto Reframe analyses whose keyframes are written when they finish (`sequence.autoReframe`,
     /// `clip.autoReframe`), and what the finished ones made.
     pub reframes: reframe::Reframes,
+    /// Automatic privacy blur jobs (`clip.autoRedact`, `sequence.autoRedact`) whose masks are
+    /// written when they finish, what the finished ones made, and the host's vision check.
+    pub redacts: redact::Redacts,
     /// Neural music generations whose WAV is placed when their job finishes (`music.generateNeural`).
     pub neural_music: music_neural::NeuralMusic,
     /// The SoundFont generated music plays on, loaded once (`music.useSoundfont`, `soundfont`).
@@ -592,6 +596,7 @@ impl Session {
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
             reframes: Default::default(),
+            redacts: Default::default(),
             neural_music: Default::default(),
             soundfonts: Default::default(),
             music_preview: Default::default(),
@@ -711,6 +716,7 @@ impl Session {
         masks::poll(self);
         scene_detect::poll(self);
         reframe::poll(self);
+        redact::poll(self);
         music_neural::poll(self);
         export_tools::pump_queue(self, false);
         panels::log_jobs(self);

@@ -21,6 +21,9 @@ speech-download = ["filmcraft-speech/download"]
 neural-voices = ["filmcraft-tts/kokoro", "filmcraft-tts/voxcpm", "filmcraft-tts/indicf5", "speech-download"]
 # Neural text to music: ACE-Step 1.5 on candle (Metal on macOS) and its download.
 neural-music = ["filmcraft-acestep/model", "speech-download"]
+# Automatic privacy blur: the YuNet face and LPD-YuNet plate detectors on candle (CPU) and
+# their download.
+privacy-models = ["filmcraft-vision/model", "speech-download"]
 
 [dependencies]
 filmcraft-time = { workspace = true }
@@ -45,6 +48,7 @@ filmcraft-tts = { workspace = true }
 filmcraft-templates = { workspace = true }
 filmcraft-acestep = { workspace = true }
 filmcraft-soundfont = { workspace = true }
+filmcraft-vision = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

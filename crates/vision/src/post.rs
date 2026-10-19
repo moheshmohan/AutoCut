@@ -114,6 +114,17 @@ pub fn decode_lpd(raw: &[f32], priors: &[[f32; 4]], w: usize, h: usize, threshol
     out
 }
 
+/// Whether a plate detection (in the pixels of a `w` × `h` picture) has a number plate's shape:
+/// at least 1.4 times as wide as it is tall, at most 40 % of the picture wide and 25 % tall,
+/// its centre inside the picture. LPD-YuNet also fires on text, badges and large shapes; the
+/// tall, square and huge ones go here (seen on exhibition footage: robot name labels, signs,
+/// whole machines).
+pub fn plausible_plate(d: &Detection, w: f32, h: f32) -> bool {
+    let [x, y, bw, bh] = d.bbox;
+    let (cx, cy) = (x + bw / 2.0, y + bh / 2.0);
+    bw.is_finite() && bh.is_finite() && bh > 0.0 && bw >= 1.4 * bh && bw <= 0.4 * w && bh <= 0.25 * h && (0.0..=w).contains(&cx) && (0.0..=h).contains(&cy)
+}
+
 /// Intersection over union of two `[x, y, w, h]` boxes (0 for empty boxes).
 pub fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let ix = ((a[0] + a[2]).min(b[0] + b[2]) - a[0].max(b[0])).max(0.0);
@@ -192,6 +203,23 @@ mod tests {
         }
         raw[16] = 0.0;
         assert!(decode_lpd(&raw, &priors, 100, 100, 0.5).is_empty());
+    }
+
+    #[test]
+    fn plates_need_a_plates_shape() {
+        let p = |b: [f32; 4]| Detection { kind: Kind::Plate, score: 0.9, bbox: b, points: Vec::new() };
+        assert!(plausible_plate(&p([100.0, 100.0, 60.0, 20.0]), 640.0, 360.0));
+        // square, tall, huge, outside, degenerate
+        for b in [
+            [100.0, 100.0, 30.0, 30.0],
+            [100.0, 100.0, 20.0, 60.0],
+            [0.0, 0.0, 400.0, 80.0],
+            [700.0, 100.0, 60.0, 20.0],
+            [0.0, 0.0, 10.0, 0.0],
+            [f32::NAN, 0.0, 10.0, 5.0],
+        ] {
+            assert!(!plausible_plate(&p(b), 640.0, 360.0), "{b:?}");
+        }
     }
 
     #[test]

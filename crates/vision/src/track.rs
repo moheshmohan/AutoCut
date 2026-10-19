@@ -338,6 +338,8 @@ pub enum Skip {
     Excluded,
     /// The vision model said it is not a real person's face.
     NotAPerson,
+    /// The vision model said it is not a vehicle's number plate (a sign, a label on a machine).
+    NotAPlate,
 }
 
 /// Whether `track` is hidden under `kp` and `exclude`: `None` hides it.

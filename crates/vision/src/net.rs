@@ -512,7 +512,8 @@ impl PlateDetector {
         if raw.len() != priors.len() * post::LPD_STRIDE {
             return Err(err(format!("{} head values for {} priors", raw.len(), priors.len())));
         }
-        let dets = post::nms(post::decode_lpd(&raw, &priors, fw, fh, threshold), 0.3, 750);
+        let found = post::decode_lpd(&raw, &priors, fw, fh, threshold).into_iter().filter(|d| post::plausible_plate(d, fw as f32, fh as f32)).collect();
+        let dets = post::nms(found, 0.3, 750);
         Ok(dets.iter().map(|d| d.normalized(fw as f32, fh as f32)).collect())
     }
 }
