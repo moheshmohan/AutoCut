@@ -287,6 +287,26 @@ async fn a_tech_show_with_its_timeline_chips_scene_and_catalogue_transitions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_short_scene_keeps_its_caption_inside_it() {
+    // a 2.5-second scene with no words between two robots: its caption used to be held for at
+    // least 1.5 s after a lead-in, spilling into the next entry's lower third on the same track
+    // ("V3 is not free here") and failing the whole build
+    let ex = demo();
+    let mut entries = gitex();
+    entries[1].shots[0].clip_seconds = 2.5;
+    entries[1].shots[0].best = 1.25;
+    let look = Look { style: Some(Style::tech()), timeline: true, ..Look::default() };
+    let built = showcase::build(&ex, &tech(look), &entries, &gitex_script(), &mut |_| {}).await.expect("a short scene still builds");
+    let hall = built.layout.iter().find(|e| e.scene).expect("the scene");
+    let next = built.layout.iter().skip_while(|e| !e.scene).nth(1).expect("the robot after it");
+    with_seq(&ex, &built, |seq| {
+        let caption = item(seq, hall.caption.expect("a caption"));
+        let lower = item(seq, next.lower_third.expect("a lower third"));
+        assert!(caption.end() <= lower.start, "the caption ends at {:?}, after the next lower third starts at {:?}", caption.end(), lower.start);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_theme_falls_back_to_inter_when_its_fonts_are_missing() {
     let ex = demo();
     let style = Style { title_font: "No Such Family Anywhere".into(), body_font: "Neither This One".into(), ..Style::tech() };

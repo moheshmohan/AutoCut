@@ -2426,7 +2426,10 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         // the name, and when and where, bottom left, while the narration introduces it (a
         // scene: its caption)
         let when = month_year(e.unix);
-        let shown_for = (entry_end - t - lead - 0.3).clamp(1.5, 4.5);
+        // shown while the entry lasts, at most 4.5 s: never into the next entry, whose lower
+        // third goes on the same track (a 2.5-second scene once spilled into it: "V3 is not
+        // free here", and the whole build failed)
+        let shown_for = (entry_end - t - lead - 0.3).min(4.5).max(1.0 / tr.fps.max(1.0));
         let (t0, t1) = (on_frame(t + lead, tr.fps), on_frame(t + lead + shown_for, tr.fps));
         // (raised a little over the timeline)
         let low = if look.timeline { h * 0.78 } else { h * 0.82 };
