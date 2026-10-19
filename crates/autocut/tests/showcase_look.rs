@@ -143,6 +143,9 @@ async fn a_tech_show_with_its_timeline_chips_scene_and_catalogue_transitions() {
         assert_eq!(fonts(&counter), vec![th.number.family.clone()]);
         let text = counter.effects.iter().find(|e| e.effect == "graphic_text").and_then(|e| e.param("text")).unwrap();
         assert_eq!(text.keyframes.len(), 3, "three robots counted");
+        // the second robot's number from its first frame, before its name comes in
+        let says = |t: f64| text.value_at(counter.source_time_at(Tick::from_seconds_f64(t)));
+        assert_eq!(says(spot.start + 0.1), ParamValue::Text("ROBOT #2".into()), "over the second robot's footage");
         // …and steps aside while the scene plays
         let op = counter.effect("opacity").and_then(|e| e.param("opacity")).expect("faded");
         assert_eq!(op.keyframes.len(), 4);

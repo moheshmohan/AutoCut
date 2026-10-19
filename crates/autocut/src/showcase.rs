@@ -2475,7 +2475,9 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             placed.caption = Some(shown);
         } else {
             placed.lower_third = Some(shown);
-            counter_times.push(t + lead);
+            // the count steps with the footage, not with its name: a chapter card's lead once
+            // showed "ROBOT #28" over the 29th robot
+            counter_times.push(t);
         }
         // its spec chips beside it, one after the other while its words are said
         if let Some(texts) = chips.get(&e.number) {
