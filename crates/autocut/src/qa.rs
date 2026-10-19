@@ -1159,8 +1159,14 @@ async fn privacy(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport,
     per.sort_by_key(|p| p.entry);
     tiles.sort_by_key(|t| t.0);
     let total = |f: fn(&EntryPrivacy) -> usize| per.iter().map(f).sum::<usize>();
-    let note =
-        format!("{} face(s), {} plate(s), {} named place(s) hidden in {} entr(ies)", total(|p| p.faces), total(|p| p.plates), total(|p| p.named), per.len());
+    let hiding = per.iter().filter(|p| p.faces + p.plates + p.named > 0).count();
+    let note = format!(
+        "{} face(s), {} plate(s), {} named place(s) hidden in {hiding} of the {} entries checked",
+        total(|p| p.faces),
+        total(|p| p.plates),
+        total(|p| p.named),
+        per.len()
+    );
     r.privacy = per;
     (Check::ran(name, &r.findings, Some(note)), tiles)
 }
