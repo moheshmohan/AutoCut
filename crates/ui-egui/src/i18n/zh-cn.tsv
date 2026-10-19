@@ -3741,3 +3741,8 @@
 # Export preset: H.264 with embedded closed captions
 	H.264 1080p with Closed Captions	H.264 1080p（含隐藏式字幕）
 	H.264 1920×1080, VBR 1 pass, 20 Mbps, CEA-608/708 closed captions embedded	H.264 1920×1080，VBR 1 遍，20 Mbps，嵌入 CEA-608/708 隐藏式字幕
+# Adjustment clips and per-track auto-duck
+	Adjustment Clip	调整剪辑
+	New Adjustment Clip	新建调整剪辑
+	Auto-Duck is on: this track goes down under the others. Click to turn it off.	自动闪避已开启：此轨道会在其他轨道有声音时降低音量。单击可关闭。
+	Auto-Duck: lower this track under the other tracks' sound	自动闪避：在其他轨道有声音时降低此轨道

@@ -102,6 +102,19 @@ Essential Sound: `essentialSound.inspect`, `essentialSound.setType {type: dialog
 `essentialSound.ducking.against.<Type>`, `essentialSound.generateDucking`, `essentialSound.volume.on`,
 `essentialSound.volume.levelDb`, `essentialSound.mute`, `essentialSound.browse.<Type>.<preset>`.
 
+Per-track auto-duck: `track.setAutoDuck {track, under?, amount?, attack?, release?, sensitivity?, enabled?}`
+ducks an audio track (`A2` or an id) under the `under` tracks (default: the other audio tracks) by `amount`
+dB (12) with `attack` / `release` ramps (0.25 / 0.5 s), through the Generate Ducking analysis; after every
+command that changes the clips involved, the changed clips are ducked again inside that command's undo
+step. `enabled: false` turns it off and restores the clips' levels. UI id: `timeline.track.A<n>.autoDuck`
+(the D toggle on an audio track header; label `Auto-Duck On` / `Auto-Duck Off`).
+
+Adjustment clips: `timeline.newAdjustmentClip {track?, startTime|startSeconds…?, duration|seconds?, effects?, name?}`
+makes an Adjustment Layer item and places it over the selected clips (else In to Out, else 5 s from the
+playhead) on the first free video track above them (a new top track when there is none), with `effects`
+applied; one undo step. UI ids: `project.newItem.timeline.newAdjustmentClip`,
+`timeline.clipMenu.timeline.newAdjustmentClip`.
+
 Project files, auto-save, crash recovery and preferences commands (`file.recover`, `prefs.set`, …) and their
 automation ids are listed in [project-files.md](project-files.md). That file also lists the media
 management commands and dialog ids: offline media and relinking (`media.findMissing`,

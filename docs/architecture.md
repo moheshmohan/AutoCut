@@ -521,6 +521,9 @@ Clip ▸ Remix ▸ Enable Remix / Remix Properties… / Revert Remix (`clip.remi
 clip.essential (type + settings)  ──apply()──►  clip effects marked `essential`, clip gain, Volume, Panner
 essentialSound.autoMatch   BS.1770 integrated loudness of render::audio::clip_signal (mono clips as one channel) → match gain (clip gain)
 essentialSound.generateDucking   trigger clips' summed level (10 ms hops) → activity regions → Volume keyframes
+track.setAutoDuck                the same per clip of a track, under chosen tracks (attack / release ramps),
+                                 re-run for clips whose signature (clip, trigger clips, settings) changed
+                                 after every edit, inside the edit's undo step (`engine::auto_duck`)
 ```
 
 - **Model** (`project::essential`). A clip's `essential: Option<EssentialSound>` holds its audio type

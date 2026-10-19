@@ -3695,3 +3695,8 @@
 # Export preset: H.264 with embedded closed captions
 	H.264 1080p with Closed Captions	H.264 1080p 폐쇄 자막 포함
 	H.264 1920×1080, VBR 1 pass, 20 Mbps, CEA-608/708 closed captions embedded	H.264 1920×1080, VBR 1패스, 20 Mbps, CEA-608/708 폐쇄 자막 포함
+# Adjustment clips and per-track auto-duck
+	Adjustment Clip	조정 클립
+	New Adjustment Clip	새 조정 클립
+	Auto-Duck is on: this track goes down under the others. Click to turn it off.	자동 더킹 켜짐: 이 트랙은 다른 트랙 아래에서 작아집니다. 클릭하면 끕니다.
+	Auto-Duck: lower this track under the other tracks' sound	자동 더킹: 다른 트랙의 소리 아래에서 이 트랙을 낮춥니다

@@ -11,7 +11,9 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 pub mod aaf_omf;
+pub mod adjustment_clip;
 pub mod audio_generate;
+pub mod auto_duck;
 pub mod autocut;
 pub mod autosave;
 pub mod captions;
@@ -806,6 +808,10 @@ impl Session {
         {
             self.log.push(panels::Level::Error, id, e.to_string());
         }
+        // auto-ducked tracks follow clip changes, inside the undo step of the change
+        if r.is_ok() && spec.journal && self.exec_depth == 0 && id != "track.setAutoDuck" {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| auto_duck::refresh(self)));
+        }
         self.sync_persistence();
         // playback reads the newest snapshot (mixer moves, mutes… are heard while playing)
         self.previews.live.publish_project(self.project.clone());
@@ -1300,6 +1306,8 @@ const MAX_SUBCLIP_CHAIN: usize = 16;
 #[cfg(test)]
 mod aaf_omf_tests;
 #[cfg(test)]
+mod adjustment_clip_tests;
+#[cfg(test)]
 mod animated_image_tests;
 #[cfg(test)]
 mod audio_effects_tests;
@@ -1307,6 +1315,8 @@ mod audio_effects_tests;
 mod audio_generate_tests;
 #[cfg(test)]
 mod audio_placement_tests;
+#[cfg(test)]
+mod auto_duck_tests;
 #[cfg(test)]
 mod autocut_tests;
 #[cfg(test)]

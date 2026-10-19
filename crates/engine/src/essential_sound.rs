@@ -333,15 +333,15 @@ fn auto_match(s: &mut Session, p: &Value) -> Result<Value> {
 // ------------------------------------------------------------------------------------- ducking
 
 /// Analysis hop and smoothing window of the ducking detector.
-const DUCK_HOP_S: f64 = 0.01;
+pub(crate) const DUCK_HOP_S: f64 = 0.01;
 const DUCK_WINDOW_HOPS: usize = 5;
 /// Ignore trigger blips shorter than this; bridge pauses between words shorter than this.
-const DUCK_MIN_ON_S: f32 = 0.1;
-const DUCK_BRIDGE_S: f32 = 0.25;
+pub(crate) const DUCK_MIN_ON_S: f32 = 0.1;
+pub(crate) const DUCK_BRIDGE_S: f32 = 0.25;
 
 /// Level envelope (dBFS, 10 ms hops, 50 ms centred window) of the summed trigger clips over
 /// timeline samples `[a0, a1)`.
-fn trigger_envelope(triggers: &[&TrackItem], a0: i64, a1: i64, sr: u32, sources: &dyn SourceProvider) -> Vec<f32> {
+pub(crate) fn trigger_envelope(triggers: &[&TrackItem], a0: i64, a1: i64, sr: u32, sources: &dyn SourceProvider) -> Vec<f32> {
     let hop = ((sr as f64 * DUCK_HOP_S).round() as usize).max(1);
     let hops = ((a1 - a0).max(0) as usize).div_ceil(hop);
     let mut power = vec![0.0f64; hops];

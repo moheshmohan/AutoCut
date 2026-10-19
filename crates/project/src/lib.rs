@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+pub mod auto_duck;
 pub mod caption;
 pub mod effect;
 pub mod elements;
@@ -771,6 +772,9 @@ pub struct Track {
     /// Audio Track Mixer state: automation mode and lanes, sends, output, record arm.
     #[serde(default)]
     pub mixer: MixerStrip,
+    /// Audio: auto-duck under other tracks ([`auto_duck`]); `None` = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_duck: Option<auto_duck::AutoDuck>,
 }
 
 impl Track {
@@ -791,6 +795,7 @@ impl Track {
             pan: 0.0,
             effects: Vec::new(),
             mixer: MixerStrip::default(),
+            auto_duck: None,
         }
     }
     pub fn end(&self) -> Tick {

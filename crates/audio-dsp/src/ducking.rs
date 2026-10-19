@@ -83,15 +83,37 @@ pub fn sensitivity_threshold_db(sensitivity: f32) -> f32 {
 /// itself reaches the edge). Times are strictly increasing; no regions → no keyframes. `fade_s` is
 /// at least 1 ms so a ramp never collapses into two keyframes at the same time.
 pub fn duck_keyframes(regions: &[(f64, f64)], clip_start_s: f64, clip_end_s: f64, base_db: f64, reduce_db: f64, fade_s: f64) -> Vec<(f64, f64)> {
-    let fade = fade_s.max(1e-3);
-    let ducked = base_db - reduce_db.abs();
-    let mut sorted: Vec<(f64, f64)> = regions.iter().copied().filter(|(a, b)| b > a && *b > clip_start_s && *a < clip_end_s).collect();
+    duck_keyframes_ar(regions, clip_start_s, clip_end_s, base_db, reduce_db, fade_s, fade_s)
+}
+
+/// [`duck_keyframes`] with separate ramps: down over `attack_s` before each region, back up
+/// over `release_s` after it (per-track auto-duck). Non-finite values never reach the keyframes:
+/// regions with them are skipped, and ramps and levels fall back to safe values.
+pub fn duck_keyframes_ar(
+    regions: &[(f64, f64)],
+    clip_start_s: f64,
+    clip_end_s: f64,
+    base_db: f64,
+    reduce_db: f64,
+    attack_s: f64,
+    release_s: f64,
+) -> Vec<(f64, f64)> {
+    let finite = |v: f64, d: f64| if v.is_finite() { v } else { d };
+    let attack = finite(attack_s, 1e-3).max(1e-3);
+    let fade = finite(release_s, 1e-3).max(1e-3);
+    let base_db = finite(base_db, 0.0);
+    let ducked = base_db - finite(reduce_db, 0.0).abs();
+    if !(clip_start_s.is_finite() && clip_end_s.is_finite()) {
+        return Vec::new();
+    }
+    let mut sorted: Vec<(f64, f64)> =
+        regions.iter().copied().filter(|(a, b)| a.is_finite() && b.is_finite() && b > a && *b > clip_start_s && *a < clip_end_s).collect();
     sorted.sort_by(|x, y| x.0.total_cmp(&y.0));
     // merge regions whose ramps touch or overlap
     let mut groups: Vec<(f64, f64)> = Vec::new();
     for r in sorted {
         match groups.last_mut() {
-            Some(g) if r.0 - fade <= g.1 + fade => g.1 = g.1.max(r.1),
+            Some(g) if r.0 - attack <= g.1 + fade => g.1 = g.1.max(r.1),
             _ => groups.push(r),
         }
     }
@@ -108,10 +130,10 @@ pub fn duck_keyframes(regions: &[(f64, f64)], clip_start_s: f64, clip_end_s: f64
         }
     };
     // value of the down-ramp ending at `a` / up-ramp starting at `b`, at time t
-    let down = |a: f64, t: f64| base_db + (ducked - base_db) * ((t - (a - fade)) / fade).clamp(0.0, 1.0);
+    let down = |a: f64, t: f64| base_db + (ducked - base_db) * ((t - (a - attack)) / attack).clamp(0.0, 1.0);
     let up = |b: f64, t: f64| ducked + (base_db - ducked) * ((t - b) / fade).clamp(0.0, 1.0);
     for (a, b) in groups {
-        let ramp_start = a - fade;
+        let ramp_start = a - attack;
         if ramp_start >= clip_start_s {
             push(ramp_start, base_db);
         } else {
@@ -225,5 +247,24 @@ mod tests {
         assert!(duck_keyframes(&[(11.0, 12.0)], 0.0, 10.0, 0.0, 10.0, 0.5).is_empty());
         let k = duck_keyframes(&[(2.0, 3.0)], 0.0, 10.0, 0.0, 10.0, 0.0);
         assert!(strictly_increasing(&k) && k.len() == 4);
+    }
+
+    #[test]
+    fn attack_and_release_ramps() {
+        // 0.25 s down before, 1 s up after
+        let k = duck_keyframes_ar(&[(2.0, 4.0)], 0.0, 10.0, -2.0, 12.0, 0.25, 1.0);
+        assert_eq!(k, vec![(1.75, -2.0), (2.0, -14.0), (4.0, -14.0), (5.0, -2.0)]);
+        // regions merge when the release of one reaches the attack of the next
+        let k = duck_keyframes_ar(&[(2.0, 3.0), (4.1, 5.0)], 0.0, 10.0, 0.0, 6.0, 0.2, 1.0);
+        assert_eq!(k, vec![(1.8, 0.0), (2.0, -6.0), (5.0, -6.0), (6.0, 0.0)]);
+        let k = duck_keyframes_ar(&[(2.0, 3.0), (4.5, 5.0)], 0.0, 10.0, 0.0, 6.0, 0.2, 1.0);
+        assert_eq!(k.len(), 8);
+        // hostile numbers: no NaN keyframes, no panic
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let k = duck_keyframes_ar(&[(2.0, 4.0), (bad, 5.0), (1.0, bad)], 0.0, 10.0, bad, bad, bad, bad);
+            assert!(k.iter().all(|(t, v)| t.is_finite() && v.is_finite()), "{k:?}");
+            assert!(strictly_increasing(&k));
+            assert!(duck_keyframes_ar(&[(2.0, 4.0)], bad, 10.0, 0.0, 6.0, 0.1, 0.1).is_empty());
+        }
     }
 }

@@ -3679,3 +3679,8 @@
 # Export preset: H.264 with embedded closed captions
 	H.264 1080p with Closed Captions	H.264 1080p avec sous-titres codés
 	H.264 1920×1080, VBR 1 pass, 20 Mbps, CEA-608/708 closed captions embedded	H.264 1920×1080, VBR 1 passe, 20 Mbps, sous-titres codés CEA-608/708 incorporés
+# Adjustment clips and per-track auto-duck
+	Adjustment Clip	Clip d'effets
+	New Adjustment Clip	Nouveau clip d'effets
+	Auto-Duck is on: this track goes down under the others. Click to turn it off.	L'atténuation automatique est activée : cette piste baisse sous les autres. Cliquez pour la désactiver.
+	Auto-Duck: lower this track under the other tracks' sound	Atténuation automatique : baisser cette piste sous le son des autres

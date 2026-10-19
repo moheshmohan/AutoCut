@@ -1395,6 +1395,29 @@ fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows:
             let h = if r.kind == TrackKind::Video { &mut app.ui.timeline.video_track_h } else { &mut app.ui.timeline.audio_track_h };
             *h = if *h < 50.0 { 64.0 } else { 30.0 };
         }
+        // 6. audio: auto-duck under the other tracks (lower line, right; above the header's own click area)
+        if r.kind == TrackKind::Audio && hrect.height() >= 40.0 {
+            let on = tr.auto_duck.is_some();
+            let dr = Rect::from_center_size(pos2(hrect.min.x + 190.0, hrect.min.y + 34.0), vec2(14.0, 14.0));
+            let dresp = crate::widgets::letter_toggle(
+                ui,
+                dr.intersect(visible),
+                "D",
+                on,
+                Color32::from_rgb(0xe0, 0x8a, 0x3c),
+                t,
+                egui::Id::new(("autoDuck", r.track.0)),
+            )
+            .on_hover_text(if on {
+                tl!("Auto-Duck is on: this track goes down under the others. Click to turn it off.")
+            } else {
+                tl!("Auto-Duck: lower this track under the other tracks' sound")
+            });
+            app.auto.add(&format!("timeline.track.{label}.autoDuck"), dr, if on { "Auto-Duck On" } else { "Auto-Duck Off" });
+            if dresp.clicked() {
+                actions.push(("track.setAutoDuck".into(), json!({"track": r.track.0, "enabled": !on})));
+            }
+        }
     }
     // column separator
     ui.painter().line_segment([pos2(rect.min.x + hw - 0.5, vclip.min.y), pos2(rect.min.x + hw - 0.5, aclip.max.y + MASTER_H)], Stroke::new(1.0, t.separator));
@@ -2003,6 +2026,7 @@ pub(crate) const CLIP_MENU: &[&[(&str, &str)]] = &[
         ("Synchronize…", "clip.synchronize"),
         ("Merge Clips…", "clip.mergeClips"),
         ("Nest…", "clip.nest"),
+        ("New Adjustment Clip", "timeline.newAdjustmentClip"),
         ("Make Subsequence", "sequence.makeSubsequence"),
         ("Reveal Nested Sequence", "sequence.revealNested"),
         ("Multi-Camera", "clip.multicam"),

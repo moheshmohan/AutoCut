@@ -3674,3 +3674,8 @@
 # Export preset: H.264 with embedded closed captions
 	H.264 1080p with Closed Captions	H.264 1080p dengan teks tertutup
 	H.264 1920×1080, VBR 1 pass, 20 Mbps, CEA-608/708 closed captions embedded	H.264 1920×1080, VBR 1 lintasan, 20 Mbps, teks tertutup CEA-608/708 tersemat
+# Adjustment clips and per-track auto-duck
+	Adjustment Clip	Klip Penyesuaian
+	New Adjustment Clip	Klip Penyesuaian Baru
+	Auto-Duck is on: this track goes down under the others. Click to turn it off.	Peredaman otomatis aktif: trek ini turun di bawah trek lain. Klik untuk mematikannya.
+	Auto-Duck: lower this track under the other tracks' sound	Peredaman otomatis: turunkan trek ini di bawah suara trek lain

@@ -652,9 +652,11 @@ fn footer(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, v: &View, action
     }
 }
 
-pub const NEW_ITEMS: [(&str, &str); 8] = [
+pub const NEW_ITEMS: [(&str, &str); 9] = [
     ("Sequence…", "file.newSequence"),
     ("Adjustment Layer…", "file.newAdjustmentLayer"),
+    // placed on the timeline too, over the selection (Shotcut's adjustment clip)
+    ("Adjustment Clip", "timeline.newAdjustmentClip"),
     ("Bars and Tone…", "file.newBarsAndTone"),
     ("Black Video…", "file.newBlackVideo"),
     ("Color Matte…", "file.newColorMatte"),
