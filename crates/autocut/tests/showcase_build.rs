@@ -172,7 +172,10 @@ async fn a_music_file_is_fitted_to_the_show_and_cut_on_its_beat() {
         let ex = demo();
         // the user's track: 128 bpm music written to a file (not placed)
         let g = ex
-            .execute("audio.generate", json!({"kind": "music", "duration": seconds, "bpm": 128, "seed": 11, "place": false, "dir": dir.to_string_lossy()}))
+            .execute(
+                "audio.generate",
+                json!({"kind": "music", "duration": seconds, "bpm": 128, "seed": 11, "soundfont": "oscillators", "place": false, "dir": dir.to_string_lossy()}),
+            )
             .await
             .unwrap();
         let path = g["path"].as_str().unwrap().to_string();

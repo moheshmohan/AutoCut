@@ -236,7 +236,12 @@ async fn a_showcase_on_the_users_music_has_no_errors() {
     let ex = demo();
     let dir = tmp("music");
     // a track shorter than the show (remixed to length), loud: it is levelled and ducked
-    let g = run(&ex, "audio.generate", json!({"kind": "music", "duration": 14, "bpm": 110, "seed": 5, "intensity": 1.0, "place": false, "dir": dir})).await;
+    let g = run(
+        &ex,
+        "audio.generate",
+        json!({"kind": "music", "duration": 14, "bpm": 110, "seed": 5, "intensity": 1.0, "soundfont": "oscillators", "place": false, "dir": dir}),
+    )
+    .await;
     let facts = vec![
         fact(5, "Pepper humanoid robot", 1_600_000_000, 18.0),
         fact(6, "Boston Dynamics Spot", 1_665_741_668, 16.0),
