@@ -121,8 +121,8 @@ SUBCOMMANDS
                                 running app. E.g. showcase --album \"Robot showcase\" --prompt
                                 \"a video of every robot since 2020\" --voice clone:me --export
                                 ~/Movies/robots.mp4 --upload --project robots.fcproj --save
-  showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
-         [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
+  showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--language ml]
+         [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
          [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social]
          [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
@@ -159,7 +159,12 @@ SUBCOMMANDS
                                 \"pronounce\" ({\"Zaku II\": \"Zaku Two\"}: respellings the voice
                                 reads, whole words) and \"say\" ({\"3\": \"...\", \"outro\": \"...\"}:
                                 what the voice says instead of a part), while subtitles show the
-                                text as written; the look (crates/autocut/README.md): --style
+                                text as written; --language ml (or the plan's \"language\": \"ml\")
+                                reads the script's Malayalam lines, intro and outro in Malayalam
+                                (a cloned voice through IndicF5: tts.downloadCloneModel
+                                {\"model\": \"indicf5\"}), hears them back in Malayalam and makes
+                                Malayalam subtitles; chips and on-screen labels show as written;
+                                the look (crates/autocut/README.md): --style
                                 tech (or the plan's \"style\") themes the titles, lower thirds,
                                 cards, chips and outro (DIN Condensed / DIN Alternate / Futura,
                                 cyan, dark panels; Inter where a font is missing), --timeline (or
@@ -1508,6 +1513,12 @@ async fn cli() {
             }
             opts.subtitle = a.opt("--subtitle").map(str::to_string);
             opts.voice = a.opt("--voice").map(str::to_string);
+            // the narration's language (over the plan's `language`), checked now
+            let language_flag = a.opt("--language").map(|l| match l.trim().to_ascii_lowercase().as_str() {
+                "ml" | "ml-in" | "malayalam" => "ml".to_string(),
+                "en" | "en-us" | "english" => "en".to_string(),
+                _ => usage(format!("showcase: --language wants ml (Malayalam) or en, not `{l}`")),
+            });
             if let Some(m) = a.opt("--mood") {
                 opts.mood = m.to_string();
             }
@@ -1645,6 +1656,7 @@ async fn cli() {
                 let sv: Value = serde_json::from_slice(&b).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
                 opts.look = filmcraft_autocut::look::Look::from_plan(&sv).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
                 look_fields = filmcraft_autocut::look::Look::plan_fields(&sv);
+                opts.language = sv.get("language").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).map(str::to_string);
                 if let Some(es) = sv.get("entries") {
                     entries = serde_json::from_value(es.clone()).unwrap_or_else(|e| fail(format!("showcase: {path}: bad entries ({e})")));
                     for (i, e) in entries.iter_mut().enumerate() {
@@ -1665,6 +1677,9 @@ async fn cli() {
                     }
                     reviewed = Some(script);
                 }
+            }
+            if let Some(l) = language_flag {
+                opts.language = Some(l);
             }
             if let Some(st) = style_flag {
                 opts.look.style = st;
@@ -1704,6 +1719,9 @@ async fn cli() {
             let mut plan = json!({"entries": entries, "script": script});
             if let Some(o) = plan.as_object_mut() {
                 o.extend(look_fields);
+                if let Some(l) = &opts.language {
+                    o.insert("language".into(), json!(l));
+                }
             }
             if let Some(out) = a.opt("--script-out") {
                 std::fs::write(out, serde_json::to_string_pretty(&plan).unwrap_or_default()).unwrap_or_else(|e| fail(format!("showcase: {out}: {e}")));

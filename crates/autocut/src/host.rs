@@ -217,6 +217,8 @@ impl PlanDoc {
             opts.fps = f.clamp(1.0, 120.0);
         }
         opts.look = crate::look::Look::from_plan(&Value::Object(self.look.clone()))?;
+        // the narration's language: a plan's top-level `"language"` (`ml`: Malayalam)
+        opts.language = self.look.get("language").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).map(str::to_string);
         let (entries, heads) = resolve(&self.entries);
         if entries.is_empty() {
             return Err(AutoCutError::Invalid("no entry is included: include at least one".into()));
@@ -1005,6 +1007,13 @@ mod tests {
         // an empty line and outro get plain ones
         assert_eq!(script.lines, vec!["One.".to_string(), "In October 2022, I met the Spot.".to_string()]);
         assert!(script.outro.contains("2 robots"), "{}", script.outro);
+        assert!(!opts.malayalam());
+        // the narration's language: the plan's top-level `language`, kept when written back
+        let mut ml = serde_json::to_value(&plan).unwrap();
+        ml["language"] = json!("ml");
+        let ml: PlanDoc = serde_json::from_value(ml).unwrap();
+        assert!(ml.resolve().unwrap().0.malayalam());
+        assert_eq!(serde_json::to_value(&ml).unwrap()["language"], "ml");
         // the review's fields round-trip
         let mut v = serde_json::to_value(&plan).unwrap();
         v["entries"][0]["include"] = json!(false);

@@ -210,6 +210,16 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    and a line no take says well enough is noted. Without a speech model the check is skipped
    (noted once).
 
+   **Malayalam.** A plan's top-level `"language": "ml"` (or `--language ml`) narrates the
+   script's Malayalam parts — `lines`, `intro`, `outro` written in Malayalam script — in
+   Malayalam: `tts.create` with `language: "ml-IN"`, a cloned voice speaking through IndicF5
+   (`crates/tts/README.md`). Parts left in English, `chips` and on-screen labels stay as written.
+   The subtitles carry the Malayalam text (the caption track is tagged `ml`). Lines are heard
+   back with Whisper in Malayalam, which is weak (Whisper-base writes Malayalam in Tamil
+   script), so the check compares consonant skeletons across the two scripts (place of
+   articulation, voicing ignored) and only a reading that keeps less than 30 % of its line's
+   consonants is read again, once at most.
+
    Narration goes through `tts.create`, which looks in the engine's narration cache
    (`<data dir>/narration-cache`, see `crates/tts/README.md`) before synthesizing: a rebuild with
    the same voice reads only the lines that changed (`narration_cached` in the output counts
