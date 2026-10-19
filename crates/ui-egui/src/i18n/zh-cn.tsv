@@ -3735,3 +3735,9 @@
 	Recording discarded	已丢弃录制
 	The steps are not JSON: {e}	步骤不是 JSON：{e}
 	Recipe saved	配方已保存
+# Export ▸ Captions ▸ Embed in Output File (CEA-608/708)
+	Embed in Output File	嵌入输出文件
+	CEA-608 and CEA-708 closed captions in the video stream, from the first enabled caption track.	将第一个已启用的字幕轨道作为 CEA-608 和 CEA-708 隐藏式字幕放入视频流。
+# Export preset: H.264 with embedded closed captions
+	H.264 1080p with Closed Captions	H.264 1080p（含隐藏式字幕）
+	H.264 1920×1080, VBR 1 pass, 20 Mbps, CEA-608/708 closed captions embedded	H.264 1920×1080，VBR 1 遍，20 Mbps，嵌入 CEA-608/708 隐藏式字幕

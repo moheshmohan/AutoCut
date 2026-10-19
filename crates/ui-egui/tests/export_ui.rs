@@ -580,3 +580,32 @@ fn upload_to_google_photos_after_an_export() {
     assert_eq!(entry["upload"]["mediaItemId"], "M1", "{entry}");
     d.snapshot("export-upload-google-photos");
 }
+
+/// Captions ▸ Export Options offers Embed in Output File for H.264 and H.265 only: choosing it
+/// turns `embed_captions` on; another format takes the choice (and the setting) away.
+#[test]
+fn captions_can_be_embedded_in_h26x_exports() {
+    use filmcraft_engine::export::Format;
+    let mut d = Driver::new("embedcc");
+    d.ok("ui.set", json!({"mode": "export"}));
+    d.frames(4);
+    d.click("export.section.video");
+    d.click("export.section.audio");
+    if !d.has("export.captions.mode") {
+        d.click("export.section.captions");
+    }
+    assert!(d.has("export.captions.mode"));
+    d.click("export.captions.mode");
+    assert!(d.has("export.captions.mode.option.3"), "H.264 offers embedding");
+    d.click("export.captions.mode.option.3");
+    let s = &d.app().ui.export.settings;
+    assert!(s.embed_captions && !s.burn_captions && s.caption_sidecar.is_none());
+    let label = d.ok("ui.elements", json!({"prefix": "export.captions.mode"}))[0]["label"].as_str().unwrap().to_string();
+    assert_eq!(label, "Embed in Output File");
+    // ProRes cannot carry them: the option and the setting go
+    d.app().ui.export.settings.format = Format::ProRes;
+    d.frames(4);
+    assert!(!d.app().ui.export.settings.embed_captions);
+    d.click("export.captions.mode");
+    assert!(d.has("export.captions.mode.option.2") && !d.has("export.captions.mode.option.3"));
+}

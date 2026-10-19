@@ -601,20 +601,36 @@ fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             if !has_captions {
                 ui.label(egui::RichText::new(tl!("The sequence has no caption track.")).color(t.text_dim).size(11.5));
             }
+            // embedded CEA-608/708 captions: H.264 and H.265 only
+            let can_embed = s.format.is_h26x();
+            if !can_embed {
+                s.embed_captions = false;
+            }
             row(ui, &t, tl!("Export Options"), |ui| {
-                let modes = [tl!("None"), tl!("Burn Captions Into Video"), tl!("Create Sidecar File")];
+                let all = [tl!("None"), tl!("Burn Captions Into Video"), tl!("Create Sidecar File"), tl!("Embed in Output File")];
+                let modes = if can_embed { &all[..] } else { &all[..3] };
                 let cur = if s.burn_captions {
-                    modes[1]
+                    all[1]
                 } else if s.caption_sidecar.is_some() {
-                    modes[2]
+                    all[2]
+                } else if s.embed_captions {
+                    all[3]
                 } else {
-                    modes[0]
+                    all[0]
                 };
-                if let Some(i) = combo(ui, &mut reg, "export.captions.mode", cur, &opts(&modes), 220.0) {
+                if let Some(i) = combo(ui, &mut reg, "export.captions.mode", cur, &opts(modes), 220.0) {
                     s.burn_captions = i == 1;
                     s.caption_sidecar = (i == 2).then(|| s.caption_sidecar.clone().unwrap_or_else(|| "srt".into()));
+                    s.embed_captions = i == 3;
                 }
             });
+            if s.embed_captions {
+                ui.label(
+                    egui::RichText::new(tl!("CEA-608 and CEA-708 closed captions in the video stream, from the first enabled caption track."))
+                        .color(t.text_dim)
+                        .size(11.5),
+                );
+            }
             if let Some(kind) = s.caption_sidecar.clone() {
                 row(ui, &t, tl!("File Format"), |ui| {
                     let formats = [tl!("SubRip Subtitle (.srt)"), tl!("WebVTT (.vtt)")];

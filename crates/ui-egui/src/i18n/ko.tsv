@@ -3689,3 +3689,9 @@
 	Recording discarded	기록을 버렸습니다
 	The steps are not JSON: {e}	단계가 JSON이 아닙니다: {e}
 	Recipe saved	레시피를 저장했습니다
+# Export ▸ Captions ▸ Embed in Output File (CEA-608/708)
+	Embed in Output File	출력 파일에 포함
+	CEA-608 and CEA-708 closed captions in the video stream, from the first enabled caption track.	처음 켜진 자막 트랙을 CEA-608 및 CEA-708 폐쇄 자막으로 비디오 스트림에 넣습니다.
+# Export preset: H.264 with embedded closed captions
+	H.264 1080p with Closed Captions	H.264 1080p 폐쇄 자막 포함
+	H.264 1920×1080, VBR 1 pass, 20 Mbps, CEA-608/708 closed captions embedded	H.264 1920×1080, VBR 1패스, 20 Mbps, CEA-608/708 폐쇄 자막 포함

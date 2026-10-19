@@ -815,3 +815,62 @@ fn caption_sidecars_keep_only_the_exported_interval() {
         assert!(doc.cues.is_empty(), "half-open export excludes cues touching either boundary: {doc:?}");
     }
 }
+
+/// `file.exportMedia {embedCaptions: true}` carries the caption track inside the H.264 stream as
+/// CEA-608 / CEA-708 (read back with the caption crate's SEI parser); formats that cannot carry
+/// them are refused with the alternatives.
+#[test]
+fn export_media_embeds_closed_captions_in_h264() {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use filmcraft_captions::embed::{self, Codec, Stream};
+    use filmcraft_time::FrameRate;
+
+    #[derive(Default)]
+    struct MemoryFiles(Mutex<BTreeMap<String, Vec<u8>>>);
+    impl crate::Services for MemoryFiles {
+        fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            self.0.lock().unwrap().get(path).cloned().ok_or_else(|| std::io::ErrorKind::NotFound.into())
+        }
+        fn write_file(&self, path: &str, bytes: &[u8]) -> std::io::Result<()> {
+            self.0.lock().unwrap().insert(path.to_owned(), bytes.to_vec());
+            Ok(())
+        }
+        fn export_in_memory(&self) -> bool {
+            true
+        }
+    }
+    let files = Arc::new(MemoryFiles::default());
+    files
+        .0
+        .lock()
+        .unwrap()
+        .insert("cc.srt".into(), b"1\n00:00:01,000 --> 00:00:02,000\nHello there\n\n2\n00:00:02,000 --> 00:00:03,000\nSecond line\n".to_vec());
+    let mut s = Session::new(files.clone());
+    s.execute("file.newSequence", json!({"name": "CC", "fps": 25, "width": 32, "height": 32, "video": 1, "audio": 0})).unwrap();
+    s.execute("captions.import", json!({"path": "cc.srt"})).unwrap();
+    let r = s.execute("file.exportMedia", json!({"format": "h264", "path": "cc.mp4", "embedCaptions": true, "audio": false, "wait": true})).unwrap();
+    assert!(r["result"]["bytes"].as_u64().is_some_and(|n| n > 0), "{r}");
+    let bytes = files.0.lock().unwrap().get("cc.mp4").unwrap().clone();
+    let file = filmcraft_isobmff::open(bytes.as_slice()).unwrap();
+    let vt = file.track_of_kind(filmcraft_isobmff::TrackKind::Video).unwrap();
+    let t = &file.tracks[vt];
+    let mut frames: Vec<(i64, Vec<[u8; 3]>)> = (0..t.samples.len())
+        .map(|i| {
+            let shown = t.presentation_pts(i).unwrap() / i64::from(t.samples[i].duration.max(1));
+            (shown, embed::sample_cc(&file.read_sample(bytes.as_slice(), vt, i).unwrap(), Codec::H264, 4))
+        })
+        .collect();
+    frames.sort_by_key(|f| f.0);
+    let rate = FrameRate::FPS_25;
+    for stream in [Stream::Cea608, Stream::Cea708] {
+        let cues = embed::decode(&frames, rate, stream);
+        let got: Vec<(i64, i64, &str)> = cues.iter().map(|c| (rate.frame_at(c.start), rate.frame_at(c.end), c.text.as_str())).collect();
+        assert_eq!(got.len(), 2, "{stream:?}: {got:?}");
+        assert_eq!((got[0].2, got[1].2), ("Hello there", "Second line"));
+        assert!((got[0].0 - 25).abs() <= 1 && (got[1].0 - 50).abs() <= 1 && (got[1].1 - 75).abs() <= 1, "{stream:?}: {got:?}");
+    }
+    let e = s.execute("file.exportMedia", json!({"format": "prores", "path": "cc.mov", "embedCaptions": true, "wait": true})).unwrap_err().to_string();
+    assert!(e.contains("H.264 or H.265"), "{e}");
+}

@@ -307,8 +307,9 @@ impl Dtv {
     }
 }
 
-/// Schedule CEA-708 service 1 pop-on captions (see the module docs).
-fn schedule_708(doc: &Document) -> BTreeMap<i64, Vec<(bool, u8, u8)>> {
+/// Schedule CEA-708 service 1 pop-on captions (see the module docs): DTVCC pairs
+/// `(start_of_packet, b1, b2)` per 29.97 fps frame, at most 18 per frame.
+pub(crate) fn schedule_708(doc: &Document) -> BTreeMap<i64, Vec<(bool, u8, u8)>> {
     let mut d = Dtv { frames: BTreeMap::new() };
     let mut seq = 0u8;
     let mut cursor = 0i64;
@@ -626,21 +627,24 @@ pub fn parse(text: &str) -> Result<Document> {
             }
         }
     }
-    if any608 {
-        doc.cues = scc::decode_pairs(f1, rate.0);
-    } else {
-        let mut d = Dec708::new();
-        let mut last = 0;
-        for (f, start, a, b) in dtv {
-            d.pair(f, start, a, b);
-            last = f + 1;
-        }
-        if let Some((s, t)) = d.open.take() {
-            d.cues.push((s, last.max(s + 1), t));
-        }
-        doc.cues = d.cues.into_iter().map(|(s, e, text)| Cue { start: rate.0.tick_of(s), end: rate.0.tick_of(e), text, ..Default::default() }).collect();
-    }
+    doc.cues = if any608 { scc::decode_pairs(f1, rate.0) } else { decode_708(dtv, rate.0, None) };
     Ok(doc)
+}
+
+/// Decode CEA-708 service 1 from DTVCC pairs `(frame, start_of_packet, b1, b2)` (frames
+/// ascending) into cues at `rate`. A caption still showing after the last pair ends at `end`
+/// (the end of the stream), or one frame after the last pair when that is unknown.
+pub(crate) fn decode_708(dtv: impl IntoIterator<Item = (i64, bool, u8, u8)>, rate: FrameRate, end: Option<i64>) -> Vec<Cue> {
+    let mut d = Dec708::new();
+    let mut last = 0i64;
+    for (f, start, a, b) in dtv {
+        d.pair(f, start, a, b);
+        last = f.saturating_add(1);
+    }
+    if let Some((s, t)) = d.open.take() {
+        d.cues.push((s, end.unwrap_or(last).max(last).max(s.saturating_add(1)), t));
+    }
+    d.cues.into_iter().map(|(s, e, text)| Cue { start: rate.tick_of(s), end: rate.tick_of(e), text, ..Default::default() }).collect()
 }
 
 #[cfg(test)]

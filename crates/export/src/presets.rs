@@ -146,6 +146,12 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
         p("APV 422-12", bc, "QuickTime, APV 422-12 (12-bit 4:2:2), 24-bit 48 kHz PCM", mov(Format::Apv, "422-12")),
         p("MXF OP1a DNxHR HQ", bc, "MXF OP1a, DNxHR HQ (8-bit 4:2:2), 24-bit 48 kHz PCM, start timecode", mxf(Format::MxfOp1a, MxfVideoCodec::Dnxhr, "hq")),
         p("MXF OP1a ProRes 422 HQ", bc, "MXF OP1a, ProRes 422 HQ, 24-bit 48 kHz PCM, start timecode", mxf(Format::MxfOp1a, MxfVideoCodec::ProRes, "hq")),
+        p(
+            "H.264 1080p with Closed Captions",
+            bc,
+            "H.264 1920×1080, VBR 1 pass, 20 Mbps, CEA-608/708 closed captions embedded",
+            ExportSettings { embed_captions: true, ..h264(Some((1920, 1080)), 20_000, 24_000) },
+        ),
         p("MXF OP1a H.264", bc, "MXF OP1a, H.264 High long GOP (0.3 bits per pixel), 24-bit 48 kHz PCM", mxf(Format::MxfOp1a, MxfVideoCodec::H264, "")),
         p(
             "MXF OP-Atom DNxHR (Avid)",

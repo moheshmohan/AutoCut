@@ -1912,6 +1912,7 @@ dependencies = [
 name = "filmcraft-captions"
 version = "0.8.0"
 dependencies = [
+ "filmcraft-bitstream",
  "filmcraft-color",
  "filmcraft-project",
  "filmcraft-text",
@@ -2076,12 +2077,14 @@ dependencies = [
  "filmcraft-aac",
  "filmcraft-apv",
  "filmcraft-audio-dsp",
+ "filmcraft-captions",
  "filmcraft-codecs",
  "filmcraft-color",
  "filmcraft-dnx",
  "filmcraft-flac",
  "filmcraft-frame",
  "filmcraft-geom",
+ "filmcraft-h264",
  "filmcraft-h264enc",
  "filmcraft-isobmff",
  "filmcraft-media",

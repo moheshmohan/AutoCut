@@ -3674,3 +3674,9 @@
 	Recording discarded	Gravação descartada
 	The steps are not JSON: {e}	As etapas não são JSON: {e}
 	Recipe saved	Receita salva
+# Export ▸ Captions ▸ Embed in Output File (CEA-608/708)
+	Embed in Output File	Incorporar no arquivo de saída
+	CEA-608 and CEA-708 closed captions in the video stream, from the first enabled caption track.	Legendas ocultas CEA-608 e CEA-708 no fluxo de vídeo, da primeira faixa de legendas ativada.
+# Export preset: H.264 with embedded closed captions
+	H.264 1080p with Closed Captions	H.264 1080p com legendas ocultas
+	H.264 1920×1080, VBR 1 pass, 20 Mbps, CEA-608/708 closed captions embedded	H.264 1920×1080, VBR 1 passagem, 20 Mbps, legendas ocultas CEA-608/708 incorporadas

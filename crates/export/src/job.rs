@@ -206,6 +206,8 @@ pub struct Exporter {
     overlapped_steps: u64,
     brand: Brand,
     venc: Box<dyn VideoEncoder>,
+    /// Embedded captions (Export ▸ Captions ▸ Embed in Output File), when there are any.
+    captions: Option<Arc<filmcraft_captions::embed::Schedule>>,
     aenc: Option<Box<dyn AudioEncoder>>,
     audio: Option<AudioOut>,
     /// The loudness pass ran (or is not needed).
@@ -292,7 +294,9 @@ impl Exporter {
             progress.total.store(nframes * if two_pass { 2 } else { 1 }, Ordering::Relaxed);
             progress.set_status(format!("Exporting {} frames ({})", nframes, settings.format.label()));
         }
-        let venc = make_venc(&settings, pipe.w, pipe.h, pipe.rate)?;
+        let captions = crate::captions_out::schedule(&project, seq, &settings, range, pipe.rate, f0);
+        let venc =
+            crate::captions_out::CaptionSei::wrap(make_venc(&settings, pipe.w, pipe.h, pipe.rate)?, captions.as_ref(), settings.video_format(), pipe.rate);
         let brand = if settings.format.is_mp4_with(settings.multiplexer) { Brand::Mp4 } else { Brand::Mov };
         let audio = if settings.has_audio() { Some(AudioOut::new(project.clone(), seq, &settings, range)?) } else { None };
         let aenc: Option<Box<dyn AudioEncoder>> = match (&audio, settings.audio_codec()) {
@@ -318,6 +322,7 @@ impl Exporter {
             overlapped_steps: 0,
             brand,
             venc,
+            captions,
             aenc,
             audio,
             measured,
@@ -517,7 +522,8 @@ impl Exporter {
             let _ = self.venc.flush()?;
             let stats = self.venc.pass_stats().ok_or_else(|| ExportError::Encode("two-pass statistics missing".into()))?;
             self.settings.h264_pass = H264Pass::Second(stats);
-            self.venc = make_venc(&self.settings, self.pipe.w, self.pipe.h, self.pipe.rate)?;
+            let venc = make_venc(&self.settings, self.pipe.w, self.pipe.h, self.pipe.rate)?;
+            self.venc = crate::captions_out::CaptionSei::wrap(venc, self.captions.as_ref(), self.settings.video_format(), self.pipe.rate);
             self.first_pass = false;
             self.next = self.f0;
             return Ok(Step::Progress);

@@ -72,6 +72,22 @@ also splits captions.
   alignment, position). Automation ids: `text.tab.Captions`, `text.captions.add|split|merge|delete|export|search|track`,
   `text.captions.<id>.in|out|text|goto|row`, `text.captions.style.*`.
 
+## Embedded closed captions
+
+`file.exportMedia` `{"embedCaptions": true}` (Export mode: Captions ▸ **Embed in Output File**,
+H.264 and H.265 only; the built-in preset *H.264 1080p with Closed Captions* turns it on) carries
+the first enabled caption track inside the video stream as CEA-608 (CC1, field 1) and CEA-708
+(service 1) closed captions: ATSC A/53 `cc_data()` in a `user_data_registered_itu_t_t35` SEI
+message (country 0xB5, provider 0x0031, `GA94`, type 0x03; ANSI/SCTE 128-1, ATSC A/72) in every
+access unit, before its first slice. The pop-on CEA-608 schedule of the SCC writer and the
+two-window CEA-708 schedule of the MCC writer (both on the 29.97 fps line 21 grid) move to the
+nearest video frame, `cc_count` = 600 / frame rate triplets a frame (20 at 29.97, 25 at 23.976,
+10 at 59.94), padded; each packet gets the data of the frame it shows, through B-frame
+reordering, so a caption appears on its first frame at 29.97 fps and within one frame at other
+rates. The SEI goes into the stream after encoding, so the hardware H.264 / H.265 encoders get it
+too. `filmcraft_captions::embed` also reads the captions back (`sample_cc`, `decode`). Sidecar
+files (`captionSidecar`) and burn-in stay available.
+
 ## Burn-in
 
 The Program monitor shows the visible caption tracks. On export, `file.exportMedia`

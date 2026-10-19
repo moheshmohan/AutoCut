@@ -17,6 +17,7 @@ use std::io::Write;
 
 mod aac_out;
 mod audio_out;
+mod captions_out;
 mod deflate;
 mod job;
 mod mxf_out;
@@ -395,6 +396,11 @@ pub struct ExportSettings {
     pub multiplexer: Multiplexer,
     /// Captions ▸ Create Sidecar File: `srt` or `vtt` next to the output (written by the engine).
     pub caption_sidecar: Option<String>,
+    /// Captions ▸ Embed in Output File: the first enabled caption track as CEA-608 / CEA-708
+    /// closed captions in the H.264 / H.265 stream (ATSC A/53 `cc_data` SEI in every frame,
+    /// [`filmcraft_captions::embed`]). H.264 and H.265 (MP4 or QuickTime) only.
+    #[serde(default)]
+    pub embed_captions: bool,
     pub effects: ExportEffects,
     pub metadata: ExportMetadata,
     /// Two-pass state (set by the exporter).
@@ -585,6 +591,7 @@ impl Default for ExportSettings {
             audio: AudioSettings::default(),
             multiplexer: Multiplexer::Mp4,
             caption_sidecar: None,
+            embed_captions: false,
             effects: ExportEffects::default(),
             metadata: ExportMetadata::default(),
             h264_pass: H264Pass::Single,
@@ -639,6 +646,12 @@ impl ExportSettings {
         }
         if self.effects.image_overlay.enabled && self.effects.image_overlay.path.trim().is_empty() {
             return Err(ExportError::Unsupported("image overlay: no image file chosen".into()));
+        }
+        if self.embed_captions && !self.format.is_h26x() {
+            return Err(ExportError::Unsupported(format!(
+                "{}: embedded captions (CEA-608/708) need H.264 or H.265; choose a sidecar file or burn them in",
+                self.format.label()
+            )));
         }
         if self.format == Format::Hevc && self.bitrate_mode == BitrateMode::Vbr2Pass {
             return Err(ExportError::Unsupported("H.265 export has no two-pass mode: choose CBR or VBR, 1 pass".into()));
@@ -2035,3 +2048,6 @@ mod determinism_tests;
 
 #[cfg(test)]
 mod hdr_tests;
+
+#[cfg(test)]
+mod captions_tests;

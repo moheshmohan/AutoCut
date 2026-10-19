@@ -12,6 +12,9 @@
 //!   (drop-frame or not) convert exactly; [`Document::snap_to_frames`] snaps to a sequence's frames.
 //! - **Model:** [`track_from_document`] / [`document_from_track`] convert to and from the project's
 //!   [`CaptionTrack`].
+//! - **Embedding:** [`embed`] carries CEA-608 / CEA-708 captions in H.264 / H.265 video as ATSC
+//!   A/53 `cc_data` in `user_data_registered_itu_t_t35` SEI messages, timed to the frames, and
+//!   reads them back.
 //! - **Burn-in:** [`burn`] lays a caption out with the track style and draws it with the
 //!   `filmcraft-text` engine (Inter SemiBold, shaped and kerned).
 
@@ -19,6 +22,7 @@
 
 pub mod burn;
 pub mod cea608;
+pub mod embed;
 pub mod mcc;
 pub mod scc;
 pub mod srt;
