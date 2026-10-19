@@ -55,6 +55,11 @@ impl Ollama {
         Ok(text)
     }
 
+    /// Chat with the reply forced to JSON (`format: json`); the reply parsed.
+    pub fn chat_json(&self, system: &str, user: &str, images: &[Vec<u8>]) -> Result<Value, AutoCutError> {
+        self.chat(system, user, images)
+    }
+
     fn chat(&self, system: &str, user: &str, images: &[Vec<u8>]) -> Result<Value, AutoCutError> {
         let body = self.chat_body(system, user, images, true);
         let content = self.post_chat(&body)?;

@@ -219,6 +219,7 @@ impl PlanDoc {
         opts.look = crate::look::Look::from_plan(&Value::Object(self.look.clone()))?;
         // the narration's language: a plan's top-level `"language"` (`ml`: Malayalam)
         opts.language = self.look.get("language").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).map(str::to_string);
+        opts.redact = crate::privacy::Redact::from_plan(self.look.get("redact"))?;
         let (entries, heads) = resolve(&self.entries);
         if entries.is_empty() {
             return Err(AutoCutError::Invalid("no entry is included: include at least one".into()));

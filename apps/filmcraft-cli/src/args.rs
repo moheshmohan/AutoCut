@@ -90,6 +90,17 @@ const VALUED: &[&str] = &[
     "--youtube-playlist",
     "--youtube-tags",
     "--youtube-description",
+    // redact (and showcase --redact)
+    "--clips",
+    "--kinds",
+    "--strength",
+    "--padding",
+    "--min-face-height",
+    "--min-plate-width",
+    "--face-score",
+    "--plate-score",
+    "--exclude",
+    "--redact",
     // instagram setup / publish
     "--app-id",
     "--redirect-uri",

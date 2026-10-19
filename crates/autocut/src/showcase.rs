@@ -97,6 +97,8 @@ pub struct Options {
     /// the script's Malayalam parts in Malayalam (a cloned voice through IndicF5), heard back
     /// in Malayalam, with Malayalam subtitles; `None` or anything else: English.
     pub language: Option<String>,
+    /// Hide visitors' faces and number plates in the footage, robots excluded ([`crate::privacy`]).
+    pub redact: Option<crate::privacy::Redact>,
 }
 
 impl Options {
@@ -131,6 +133,7 @@ impl Default for Options {
             follow_subject: true,
             look: Look::default(),
             language: None,
+            redact: None,
         }
     }
 }
@@ -3195,6 +3198,10 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let captions =
         if built.subtitles.is_empty() { None } else { caption_track(ex, &built.subtitles, if opts.malayalam() { "ml" } else { "en" }, &mut built.notes).await };
     built.theme = theme;
+    // ---- privacy: visitors' faces and plates hidden, the robots left alone ([`crate::privacy`])
+    if let Some(r) = &opts.redact {
+        crate::privacy::redact_show(ex, r, &built.layout, entries, &mut built.notes, progress).await;
+    }
     if let Some(path) = &opts.export {
         progress("exporting (YouTube 1080p)");
         let mut p = json!({"path": path, "preset": "YouTube 1080p Full HD", "wait": true});

@@ -224,6 +224,8 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         // Ollama models of the AUTOCUT_* environment; a job may take its clips from a Google
         // Photos `album`, picked through the picker by the screen agent
         session.autocut.host = Some(filmcraft_autocut::host::engine_host_with_albums(filmcraft_automation::photos::album_source()));
+        // Clip ▸ Auto Redact Faces and Plates…: the local vision model tells people from robots
+        session.redacts.judge = Some(filmcraft_autocut::privacy::engine_judge());
         // Templates ▸ Install from an https:// link
         session.sharing.fetcher = Some(filmcraft_automation::template_fetch::fetcher());
         // Window ▸ Recipes: steps that are AutoCut intents are planned by AutoCut's planner

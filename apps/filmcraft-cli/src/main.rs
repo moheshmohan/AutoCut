@@ -128,7 +128,7 @@ SUBCOMMANDS
          [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
          [--outro-logo logo.png] [--outro-channel C] [--outro-handle @h] [--outro-tagline T]
          [--outro-cta S] [--outro-cta-done S] [--outro-terminal L] [--outro-seconds 12]
-         [--outro-background item[:from[:to]]]…
+         [--outro-background item[:from[:to]]]… [--redact faces,plates]
          [--export out.mp4 [--upload [--upload-album <title>]]
          [--upload-youtube [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P]
          [--youtube-tags a,b] [--youtube-description D]]] [--qa | --no-qa]
@@ -192,6 +192,10 @@ SUBCOMMANDS
                                 the middle left clear for YouTube's end screen (a video tile left
                                 of centre, the subscribe button right of it) for its last 5-20 s;
                                 every word on it comes from these flags or the plan;
+                                --redact faces,plates (or the plan's \"redact\") hides visitors'
+                                faces and number plates in the footage behind a tracked blur (as
+                                `redact`), each shot's robot and every robot the vision model
+                                recognises left sharp;
                                 with --export, YouTube chapters go to <out>.chapters.txt and the
                                 narration's subtitles to <out>.srt and <out>.vtt (at most 2 lines
                                 of 42 characters, 1-7 s a cue; also on the sequence's Subtitles
@@ -230,6 +234,22 @@ SUBCOMMANDS
                                 subject, the model and --frames/--screen: a clip analysed before
                                 is not analysed again (`cached` counts them); --fresh analyses
                                 every clip again (also for showcase --album)
+  redact [--clips 1,2 | --sequence id] [--kinds faces,plates] [--style blur|mosaic]
+         [--strength 1-100] [--padding 0.2] [--min-face-height 0.05] [--min-plate-width 0.025]
+         [--face-score 0.7] [--plate-score 0.8] [--analysis-fps 10] [--exclude '<json boxes>']
+         [--no-verify] [--dry-run] [--keep] [--download] [--save | --save-as p.fcproj]
+                                hide clearly recognisable faces and legible number plates in the
+                                --project's active sequence (or --sequence, or the --clips given)
+                                behind a tracked blur (clip.autoRedact / sequence.autoRedact):
+                                YuNet and LPD-YuNet run locally on every analysed frame, each face
+                                or plate becomes a track, and each clip gets one Gaussian Blur
+                                (or Mosaic) with a keyframed mask per track. Faces under
+                                --min-face-height of the picture are left alone, and each face is
+                                shown once to the local vision model (AUTOCUT_ANALYSIS_MODEL), so
+                                robots, mannequins, posters and screens stay sharp (--no-verify
+                                hides every face found). --dry-run lists the tracks; --keep keeps
+                                an earlier redaction. --download fetches the detectors first
+                                (4.4 MB, MIT and Apache-2.0, SHA-256 checked). --save keeps it
   shorts <project.fcproj | media file> [--count 3] [--aspect 9:16] [--min-seconds 15]
          [--max-seconds 60] [--motion smooth|responsive] [--topic T] [--title-card]
          [--no-captions] [--analysis-fps 30] [--sequence id] [--export dir [--upload-youtube
@@ -509,6 +529,8 @@ impl Backend {
         // showcase jobs with the Ollama models of the AUTOCUT_* environment, which can take
         // their clips from a Google Photos `album` (picked by the screen agent)
         s.autocut.host = Some(filmcraft_autocut::host::engine_host_with_albums(filmcraft_automation::photos::album_source()));
+        // `clip.autoRedact` (also over MCP): the local vision model tells people from robots
+        s.redacts.judge = Some(filmcraft_autocut::privacy::engine_judge());
         // `template.install {url}` (also over MCP)
         s.sharing.fetcher = Some(filmcraft_automation::template_fetch::fetcher());
         // `recipe.run` (also over MCP): intent steps planned by AutoCut's planner
@@ -546,6 +568,124 @@ impl Backend {
         if let Some(Err(e)) = r {
             fail(format!("saving: {e}"));
         }
+    }
+}
+
+/// `redact` options as `clip.autoRedact` / `sequence.autoRedact` parameters (with `wait: true`);
+/// a usage error says what is wrong.
+fn redact_params(a: &Args) -> Result<Value, String> {
+    let mut p = json!({"wait": true});
+    let num = |k: &str| -> Result<Option<f64>, String> {
+        a.opt(k).map(|v| v.parse::<f64>().ok().filter(|f| f.is_finite()).ok_or_else(|| format!("{k} wants a number, not `{v}`"))).transpose()
+    };
+    for (flag, key) in [
+        ("--strength", "strength"),
+        ("--padding", "padding"),
+        ("--min-face-height", "minFaceHeight"),
+        ("--min-plate-width", "minPlateWidth"),
+        ("--face-score", "faceScore"),
+        ("--plate-score", "plateScore"),
+        ("--analysis-fps", "analysisFps"),
+    ] {
+        if let Some(v) = num(flag)? {
+            p[key] = json!(v);
+        }
+    }
+    if let Some(k) = a.opt("--kinds") {
+        p["kinds"] = json!(k);
+    }
+    if let Some(s) = a.opt("--style") {
+        p["style"] = json!(s);
+    }
+    if let Some(e) = a.opt("--exclude") {
+        p["exclude"] = serde_json::from_str(e).map_err(|e| format!("--exclude wants JSON boxes ({e})"))?;
+    }
+    if a.flag("--no-verify") {
+        p["verify"] = json!(false);
+    }
+    if a.flag("--dry-run") {
+        p["dryRun"] = json!(true);
+    }
+    if a.flag("--keep") {
+        p["replace"] = json!(false);
+    }
+    match (a.opt("--clips"), a.opt("--sequence")) {
+        (Some(_), Some(_)) => return Err("give --clips or --sequence, not both".into()),
+        (Some(c), None) => {
+            let ids = c
+                .split(',')
+                .filter(|x| !x.trim().is_empty())
+                .map(|x| x.trim().parse::<u64>().map_err(|_| format!("--clips wants ids like 3,4,5, not `{x}`")))
+                .collect::<Result<Vec<_>, _>>()?;
+            p["clips"] = json!(ids);
+        }
+        (None, Some(s)) => p["sequence"] = json!(s.parse::<u64>().map_err(|_| format!("--sequence wants a sequence id, not `{s}`"))?),
+        (None, None) => {}
+    }
+    Ok(p)
+}
+
+/// `redact`: faces and number plates hidden behind a tracked blur (`clip.autoRedact`,
+/// `sequence.autoRedact`); `--download` fetches the detectors first.
+async fn redact(a: &Args) {
+    let p = redact_params(a).unwrap_or_else(|e| usage(format!("redact: {e}")));
+    let mut b = Backend::open(a);
+    let st = b.exec("redact.status", json!({})).await.unwrap_or_else(|e| fail(format!("redact: {e}")));
+    if st["installed"] != json!(true) {
+        if !a.flag("--download") {
+            fail(format!(
+                "redact: the face and plate detectors are not downloaded yet ({:.1} MB, {}; from {}): add --download",
+                st["missingBytes"].as_f64().unwrap_or(0.0) / 1e6,
+                st["license"].as_str().unwrap_or(""),
+                st["source"].as_str().unwrap_or("")
+            ));
+        }
+        diag(format_args!(
+            "redact: downloading {} ({:.1} MB; {})",
+            st["package"].as_str().unwrap_or("the detectors"),
+            st["missingBytes"].as_f64().unwrap_or(0.0) / 1e6,
+            st["license"].as_str().unwrap_or("")
+        ));
+        b.exec("redact.downloadModels", json!({"wait": true})).await.unwrap_or_else(|e| fail(format!("redact: download: {e}")));
+    }
+    if a.flag("--download") && a.opt("--project").is_none() && a.opt("--bridge").is_none() {
+        diag(format_args!("redact: the detectors are installed"));
+        return;
+    }
+    let id = if p.get("clips").is_some() { "clip.autoRedact" } else { "sequence.autoRedact" };
+    let t0 = std::time::Instant::now();
+    match b.exec(id, p).await {
+        Ok(v) => {
+            let o = &v["redact"];
+            for c in o["clips"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                let sk = &c["skipped"];
+                diag(format_args!(
+                    "redact: {} — {} face(s), {} plate(s) hidden; left alone: {} not people, {} not plates, {} small, {} brief, {} excluded",
+                    c["name"].as_str().unwrap_or(""),
+                    c["faces"],
+                    c["plates"],
+                    sk["notAPerson"],
+                    sk["notAPlate"],
+                    sk["tooSmall"],
+                    sk["tooBrief"],
+                    sk["excluded"]
+                ));
+            }
+            if let Some(why) = o["verify"]["reason"].as_str() {
+                diag(format_args!("redact: the vision check: {why}"));
+            }
+            diag(format_args!(
+                "redact: {} mask(s) in {} clip(s), {} frame(s) analysed in {:.1}s{}",
+                o["hidden"],
+                o["clipsChanged"],
+                v["frames"],
+                t0.elapsed().as_secs_f64(),
+                if o["dryRun"] == json!(true) { " (dry run: nothing changed)" } else { "" }
+            ));
+            print(a, o);
+            b.finish(a).await;
+        }
+        Err(e) => fail(format!("redact: {e}")),
     }
 }
 
@@ -1542,6 +1682,9 @@ async fn cli() {
             opts.fill_frame = !a.flag("--no-fill");
             // a filled shot's crop follows its robot (the subject tracker); --no-track: the tilt
             opts.follow_subject = !a.flag("--no-track");
+            // --redact faces,plates: visitors' faces and plates hidden, the robots left alone
+            let redact_flag =
+                a.opt("--redact").map(|r| filmcraft_autocut::privacy::Redact::parse(r).unwrap_or_else(|e| usage(format!("showcase: --redact: {e}"))));
             if let Some(m) = a.opt("--target-minutes") {
                 match m.parse::<f64>() {
                     Ok(v) if v.is_finite() && v > 0.0 && v <= 24.0 * 60.0 => opts.target_minutes = Some(v),
@@ -1657,6 +1800,7 @@ async fn cli() {
                 opts.look = filmcraft_autocut::look::Look::from_plan(&sv).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
                 look_fields = filmcraft_autocut::look::Look::plan_fields(&sv);
                 opts.language = sv.get("language").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).map(str::to_string);
+                opts.redact = filmcraft_autocut::privacy::Redact::from_plan(sv.get("redact")).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
                 if let Some(es) = sv.get("entries") {
                     entries = serde_json::from_value(es.clone()).unwrap_or_else(|e| fail(format!("showcase: {path}: bad entries ({e})")));
                     for (i, e) in entries.iter_mut().enumerate() {
@@ -1703,6 +1847,12 @@ async fn cli() {
                 opts.look.outro = filmcraft_autocut::outro::Outro::from_plan(&v).unwrap_or_else(|e| usage(format!("showcase: --outro-*: {e}")));
                 // (and the plan written out keeps it)
                 look_fields.insert("outro".into(), v);
+            }
+            if redact_flag.is_some() {
+                opts.redact = redact_flag;
+            }
+            if let Some(r) = &opts.redact {
+                look_fields.insert("redact".into(), r.to_plan());
             }
             let script = match reviewed {
                 Some(s) => s,
@@ -1860,6 +2010,7 @@ async fn cli() {
                 Err(e) => fail(format!("showcase: {e}")),
             }
         }
+        "redact" => redact(&a).await,
         "shorts" => {
             // long video → vertical shorts (autocut.shorts); every usage error before anything runs
             let src = a.pos(1).unwrap_or_else(|| usage("shorts <project.fcproj | media file> [--count N] [--aspect 9:16] [--export dir] [--upload-youtube]"));

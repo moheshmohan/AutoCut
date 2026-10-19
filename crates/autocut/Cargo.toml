@@ -15,6 +15,8 @@ filmcraft-time = { workspace = true }
 # showcase QA: reading the exported mix and metering it
 filmcraft-media = { workspace = true }
 filmcraft-audio-dsp = { workspace = true }
+# the privacy pass names what it hides (faces, plates)
+filmcraft-vision = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
