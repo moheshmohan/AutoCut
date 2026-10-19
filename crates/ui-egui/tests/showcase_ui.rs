@@ -268,3 +268,59 @@ fn hostile_drafts_and_no_host() {
     let job = d.finish_job();
     assert!(job["result"]["error"].as_str().is_some_and(|e| e.contains("not a showcase plan")), "{job}");
 }
+
+/// The look and the channel outro from the panel: its controls (automation ids), filled by clicks
+/// and `ui.set`, go into the plan the build takes, and the show ends with the branded outro.
+#[test]
+fn the_look_and_a_channel_outro_from_the_panel() {
+    let mut d = Driver::demo(Some(Models::scripted()));
+    d.ok("ui.menu.invoke", json!({"id": "autocut.makeShowcase"}));
+    d.frames(3);
+    d.ok("ui.set", json!({"showcase": {"subject": "robot", "title": "Robots", "voice": ""}}));
+    d.ok("ui.click", json!({"id": "showcase.analyze"}));
+    let job = d.finish_job();
+    assert_eq!(job["result"]["error"], Value::Null, "{job}");
+    // the section opens with a click; the outro's fields show once it is on
+    d.ok("ui.set", json!({"showcase": {"extra": {"width": 320, "height": 180}}}));
+    d.ok("ui.click", json!({"id": "showcase.lookOpen"}));
+    d.frames(3);
+    let ids = d.ids();
+    for id in ["showcase.style", "showcase.timeline", "showcase.loudness", "showcase.embedCaptions", "showcase.outroOn"] {
+        assert!(ids.iter().any(|i| i == id), "{id} in {ids:?}");
+    }
+    d.ok("ui.click", json!({"id": "showcase.outroOn"}));
+    d.frames(3);
+    assert_eq!(d.draft()["look"]["outro"]["on"], true);
+    let ids = d.ids();
+    for id in [
+        "showcase.outroLogo",
+        "showcase.outroLogoBrowse",
+        "showcase.outroChannel",
+        "showcase.outroHandle",
+        "showcase.outroTagline",
+        "showcase.outroCta",
+        "showcase.outroCtaDone",
+        "showcase.outroTerminal",
+        "showcase.outroSeconds",
+        "showcase.outroBackground",
+    ] {
+        assert!(ids.iter().any(|i| i == id), "{id} in {ids:?}");
+    }
+    let outro = json!({"channel": "H4hacks", "handle": "@H4hacks", "cta": "Subscribe", "ctaDone": "Subscribed", "terminal": "> h4hacks.com", "background": "7:1:9", "seconds": 9.0});
+    d.ok("ui.set", json!({"showcase": {"look": {"style": "tech", "outro": outro}}}));
+    d.frames(3);
+    let keep = std::env::var_os("FILMCRAFT_UI_SNAPSHOT_DIR").map(std::path::PathBuf::from);
+    let dir = keep.unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let shot = dir.join(format!("showcase-outro-{}.png", std::process::id()));
+    d.ok("ui.screenshot", json!({"path": shot.to_string_lossy(), "panel": "Showcase"}));
+    assert!(std::fs::metadata(&shot).is_ok_and(|m| m.len() > 1000), "a screenshot of the panel");
+    // Build: the plan carries the look and the outro; the show ends with it
+    d.ok("ui.click", json!({"id": "showcase.build"}));
+    let job = d.finish_job();
+    assert_eq!((job["command"].as_str(), job["result"]["error"].clone()), (Some("autocut.showcaseBuild"), Value::Null), "{job}");
+    let built = &job["showcase"]["built"];
+    assert_eq!(built["theme"]["name"], "tech", "{built}");
+    assert_eq!(built["outro"]["background"], "footage", "{built}");
+    assert!(built["outro"]["elements"].as_array().is_some_and(|e| e.iter().any(|x| x["name"] == "lockup")), "{built}");
+}

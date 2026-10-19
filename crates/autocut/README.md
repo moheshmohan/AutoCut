@@ -248,6 +248,42 @@ of an entry's facts into its line, told to use those and nothing else.
 A reviewed plan may hold `entries` alone (drop, merge or relabel robots, fix a shot's `best`
 moment or `seen` times): the model then writes the words for exactly those.
 
+### Per-shot controls
+
+A plan's shot may carry these, all optional ([`shot_edit.rs`](src/shot_edit.rs)); each is checked
+before anything is built, and a value that makes no sense (a negative or not-a-number time, `to`
+not after `from` or past the clip's end, a speed of 0 or 1000, a window playing more than a minute,
+an unknown `fit`, a `focus` outside 0..1, a volume beyond −60…+12 dB) is an `invalid plan:` error
+naming the entry and shot.
+
+| shot field | what it does |
+|---|---|
+| `"from": 12.0, "to": 18.5` | the source window, seconds into the clip, instead of the automatic one ("the part where it sprays the mist"); one end alone anchors the window and the entry picks its length. Never moved onto the beat |
+| `"speed": 4` | 0.25–16: the shot plays that fast (`clip.speedDuration`, frames sampled when faster), taking `(to − from) / speed` of the timeline; its own sound is dropped, never chipmunked under the narration |
+| `"fit": "full"` / `"fill"` | `full`: the whole picture — a portrait clip at full height in the middle over a blurred (Gaussian Blur, edges repeated), dimmed (45 % over black), 8 % enlarged copy of itself filling the frame, the copy pushing in while the picture stays whole; `fill`: the frame filled (cropped around the subject), whatever `--no-fill` says |
+| `"focus": [0.5, 0.3]` | the point (0..1 of the clip, x right, y down) a fill crop keeps in view, instead of the analysis' box: held with a slow tilt, not tracked |
+| `"mute": true` | no sound of its own (a robot talking after the narration ends sounds like a garbled voice-over) |
+| `"volume": -20` | its own sound that many dB from the level the mix gives the shots (`clip.audioGain` after the mix) |
+
+An entry keeps its shots in order. A shot with both ends takes a fixed length; the entry's other
+shots (those anchored by one end, then as many plain ones as the time left calls for) share what
+its words still need. When the fixed shots alone are shorter than the words, the shots that may
+grow run on, then the clip after the last window, then a fast-forward plays less fast, and a note
+says so: the narration always fits. The output's `layout` shows each shot's `source` window,
+`speed`, `fixed`, `fit`, `background` (the blurred copy's clip), `focus`, `sound` (its clip on A1,
+none when muted or sped) and `volume`.
+
+An entry's `"place": "Busan, South Korea"` goes in its lower third instead of its `event`
+("Busan, South Korea · October 2023"; the month alone when the place names the year) and starts
+no chapter or card of its own; its `event` still does.
+
+```json
+{"number": 12, "label": "Disinfection robot", "event": "GITEX Global 2022, Dubai",
+ "shots": [{"item": 14, "clip_seconds": 13.8, "best": 6.9, "from": 6.0, "to": 11.5},
+           {"item": 2417, "clip_seconds": 37.0, "best": 15.5, "from": 2.0, "to": 26.0, "speed": 6},
+           {"item": 2422, "clip_seconds": 106.4, "best": 97.1, "fit": "full", "mute": true}]}
+```
+
 ### The look: theme, timeline, chips, scenes, transitions, finishing
 
 All optional ([`look.rs`](src/look.rs)): a plan without these fields, and a command without these
@@ -267,10 +303,56 @@ not there, years beyond 1900–2200) is an `invalid plan:` error saying which an
 | `"loudness": "social"` | `--loudness social\|voice\|broadcast\|<LUFS>` | `audio.normalizeLoudness` on the finished mix (social −14 LUFS, voice −16, broadcast −23) with a −1 dBTP true-peak limiter, instead of the mix's own limiter alone; `loudness` in the output |
 | `"embedCaptions": true` | `--embed-captions` | the export carries the narration's captions as CEA-608/708 closed captions (besides `.srt` / `.vtt`) |
 | `"soundfont": "generaluser-gs"` | `--soundfont generaluser-gs\|oscillators\|auto\|<file.sf2>` | the instruments of the generated bed (`audio.generate`'s `soundfont`; Preferences are not changed); one that cannot play is noted and the bed played without it; `music.instruments` in the output |
+| `"outro": {"logo", "channel", "handle", "tagline", "cta", "ctaDone", "terminal", "background", "seconds"}` | `--outro-logo f.png --outro-channel C --outro-handle @h --outro-tagline T --outro-cta S --outro-cta-done S --outro-terminal L --outro-seconds 12 --outro-background item[:from[:to]]` (repeatable; the flags go over the plan's fields) | a branded channel outro instead of the count card ([`outro.rs`](src/outro.rs)), below |
 
 The output says what was made: `theme` (fonts as resolved), `timeline` (its scale, bands, the
 marker's stops and the clips), `transitions` (id, effect, where, sound), `beat_snap`, `loudness`,
 `scenes`, and per entry in `layout` its `lower_third` or `caption` and `chips` clips.
+
+#### The branded outro
+
+`"outro"` (or the `--outro-*` flags) replaces the plain "N ROBOTS and counting" card with the
+channel's own, at least `seconds` long (8–30, 12 by default; longer when the spoken outro needs
+it), the spoken outro line over it and the generated bed swelling into it instead of settling (a
+music file fades out at the end as before; the loudness pass still applies). Every word on it comes
+from the plan (a Malayalam cut gives Malayalam fields); a field left out leaves its element out;
+it needs a `logo` or a `channel`.
+
+1. **Reveal** (about 4.5 s): the `background` clips (`{"item", "from", "to"}`, in turn; their sound
+   left out) blurred and darkened under a near-black purple wash — a gradient when none can be
+   placed (noted); the logo (a PNG, imported) on a light badge glowing purple glitches in at the
+   centre (held opacity flickers and jitters), scales up past its size and back, a cyan ring
+   pulses out and two rings of rainbow halftone dots (the logo's) burst outward and fade; an
+   impact lands with it. The `cta` button pops in under it, a cursor glides in and clicks it (a
+   ripple), and it turns into `ctaDone`.
+2. **End screen** (the rest: at least 5 s, at most 20): the button goes, the logo glides up (a
+   whoosh) into a lockup with the `channel` name (title font, capitals, the logo's purple-to-blue)
+   and the `handle` (number font, the theme's accent), a ring pulsing as it lands; the `tagline`
+   rises in along the bottom and the `terminal` line types itself out under it (a monospaced font
+   when one is installed) with a blinking cursor. The last half second fades to black.
+
+YouTube's end screen shows in the last 5–20 s of a video at least 25 s long, with up to four
+elements the creator places in YouTube Studio; a video element is about a third of the frame wide
+(16:9), the subscribe element a circle about 300 px across on 1920×1080. The layout leaves two
+regions clear for the whole end-screen stretch (on 1920×1080, other sizes scaled): **a video tile
+left of centre, x 180–900, y 380–785** (720×405, room to enlarge the default tile) and **the
+subscribe button right of centre, a 350 px square centred at (1350, 582)**; the lockup stays above
+y 360, the tagline and terminal line below y 820. Place the end-screen elements there.
+
+The output's `outro` says what was made: `start`, `end`, `end_screen` (from when to the end the
+regions are clear), `regions` (`video`, `subscribe`), `background` (`footage` or `gradient`) and its
+clips, and each element (`name`, `clip`, `from`, `to`, and `settled`: where it sits once the end
+screen starts). Tests check every element's timing, that each one on screen in the end screen is
+inside the frame and clear of both regions, that a rendered frame there has nothing bright in them,
+and that QA finds no error in a branded show.
+
+```sh
+filmcraft-cli showcase --report robots.json --script-in plan.json --voice clone:me --style tech \
+    --outro-logo ~/Movies/AutoCut/branding/h4hacks-logo.png --outro-channel H4hacks \
+    --outro-handle @H4hacks --outro-tagline "Hacking, gadgets and robots in English and Malayalam" \
+    --outro-cta Subscribe --outro-cta-done Subscribed --outro-terminal "> h4hacks.com" \
+    --outro-background 4830:5:25 --outro-seconds 12 --export ~/Movies/AutoCut/robots.mp4
+```
 
 ```sh
 filmcraft-cli showcase --report robots.json --script-in plan.json --voice clone:me \
@@ -368,9 +450,15 @@ order, each with a thumbnail, its label, description and narration line (all edi
 leave it out, "Merge with previous", and its shots (each plays in the Source monitor); the title,
 voice (cloned voices listed), mood, intro and outro; Write script (the words again, for the entries
 as reviewed), Build, and Build and export (with the export path, and optionally the upload); the
-running job's progress and Cancel. A job started elsewhere (an agent, the prompt) brings the panel
-forward and its plan loads there. Every widget has an automation id and the draft is UI state
-(`ui.set {showcase: …}`, see [docs/control-protocol.md](../../docs/control-protocol.md)).
+running job's progress and Cancel. "Look and channel outro" holds the style (tech, classic or as
+planned), the timeline, loudness and embedded captions, and the branded outro: its logo (Choose… or
+a path), channel, handle, tagline, button and clicked words, typed line, length and footage
+(`item:from:to, …`); the plan's other look fields (a custom style object, transitions, events) go
+back as they came. A job started elsewhere (an agent, the prompt) brings the panel forward and its
+plan loads there. Every widget has an automation id (`showcase.lookOpen`, `showcase.style`,
+`showcase.outroChannel`, …: the panel's module docs list them) and the draft is UI state
+(`ui.set {showcase: {look: {outro: {channel: "H4hacks"}}}}`, see
+[docs/control-protocol.md](../../docs/control-protocol.md)).
 
 ## Shorts: long video → vertical clips
 

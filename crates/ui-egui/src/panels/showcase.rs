@@ -20,6 +20,12 @@
 //! `showcase.build`, `showcase.buildExport`; for shorts (`autocut.shorts` on the active
 //! sequence: its best passages reframed to a vertical shape, captioned) `showcase.shortsOpen`,
 //! `showcase.shortsCount`, `showcase.shortsAspect`, `showcase.shortsExport`, `showcase.shorts`.
+//! The look and the branded outro (`look` in the draft; the plan's `style`, `timeline`,
+//! `loudness`, `embedCaptions` and `outro`): `showcase.lookOpen`, `showcase.style`,
+//! `showcase.timeline`, `showcase.loudness`, `showcase.embedCaptions`, `showcase.outroOn`,
+//! `showcase.outroLogo`, `showcase.outroLogoBrowse`, `showcase.outroChannel`, `showcase.outroHandle`,
+//! `showcase.outroTagline`, `showcase.outroCta`, `showcase.outroCtaDone`, `showcase.outroTerminal`,
+//! `showcase.outroSeconds`, `showcase.outroBackground`.
 //! The draft is UI state: `ui.set {showcase: {...}}`
 //! patches it, with `entries` a list (replaced) or `{"<index>": {...}}` (those entries patched).
 
@@ -75,6 +81,141 @@ pub struct DraftEntry {
     pub entry: Value,
 }
 
+/// The look of the show and its branded outro, as the panel edits them (the plan's `style`,
+/// `timeline`, `loudness`, `embedCaptions` and `outro`; `filmcraft_autocut::look`). Empty text
+/// leaves a field out; a plan's own `style` object or LUFS number is kept as it came.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LookDraft {
+    /// The section is open.
+    pub open: bool,
+    /// `tech`, `classic`, or empty: as the plan says.
+    pub style: String,
+    pub timeline: bool,
+    /// `social`, `voice`, `broadcast`, or empty: not normalised.
+    pub loudness: String,
+    pub embed_captions: bool,
+    pub outro: OutroDraft,
+}
+
+/// The branded outro's fields (`filmcraft_autocut::outro`): every word on it comes from here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OutroDraft {
+    /// A branded outro instead of the count card.
+    pub on: bool,
+    /// The logo image (a PNG with transparency).
+    pub logo: String,
+    pub channel: String,
+    pub handle: String,
+    pub tagline: String,
+    /// The subscribe button's words, and once clicked.
+    pub cta: String,
+    pub cta_done: String,
+    /// A line typed out terminal-style.
+    pub terminal: String,
+    pub seconds: f64,
+    /// Footage under it: `item[:from[:to]]`, comma-separated.
+    pub background: String,
+}
+
+impl Default for OutroDraft {
+    fn default() -> Self {
+        Self {
+            on: false,
+            logo: String::new(),
+            channel: String::new(),
+            handle: String::new(),
+            tagline: String::new(),
+            cta: String::new(),
+            cta_done: String::new(),
+            terminal: String::new(),
+            seconds: 12.0,
+            background: String::new(),
+        }
+    }
+}
+
+/// Longest outro text a field takes (the outro checks its own limits when it is built).
+const MAX_OUTRO_TEXT: usize = 90;
+/// The themes and loudness targets the panel offers.
+const STYLES: [(&str, &str); 3] = [("", "As planned"), ("tech", "Tech"), ("classic", "Classic")];
+const LOUDNESS: [(&str, &str); 4] = [("", "Off"), ("social", "Social (−14 LUFS)"), ("voice", "Voice (−16)"), ("broadcast", "Broadcast (−23)")];
+
+impl OutroDraft {
+    /// From a plan's `outro` object.
+    fn load(v: &Value) -> Self {
+        let text = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+        let background = v["background"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .take(16)
+            .filter_map(|f| {
+                let item = f["item"].as_u64()?;
+                Some(match (f["from"].as_f64(), f["to"].as_f64()) {
+                    (Some(a), Some(b)) => format!("{item}:{a}:{b}"),
+                    (Some(a), None) => format!("{item}:{a}"),
+                    (None, Some(b)) => format!("{item}::{b}"),
+                    (None, None) => item.to_string(),
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Self {
+            on: true,
+            logo: text("logo"),
+            channel: text("channel"),
+            handle: text("handle"),
+            tagline: text("tagline"),
+            cta: text("cta"),
+            cta_done: text("ctaDone"),
+            terminal: text("terminal"),
+            seconds: v["seconds"].as_f64().filter(|s| s.is_finite()).unwrap_or(12.0),
+            background,
+        }
+    }
+
+    /// As a plan's `outro`: the fields given; `background` from `item[:from[:to]]` pieces (a piece
+    /// that is not one is left out).
+    fn plan(&self) -> Value {
+        let mut o = serde_json::Map::new();
+        for (k, v) in [
+            ("logo", &self.logo),
+            ("channel", &self.channel),
+            ("handle", &self.handle),
+            ("tagline", &self.tagline),
+            ("cta", &self.cta),
+            ("ctaDone", &self.cta_done),
+            ("terminal", &self.terminal),
+        ] {
+            if !v.trim().is_empty() {
+                o.insert(k.into(), json!(v.trim()));
+            }
+        }
+        if self.seconds.is_finite() {
+            o.insert("seconds".into(), json!(self.seconds));
+        }
+        let mut list = Vec::new();
+        for piece in self.background.split(',').map(str::trim).filter(|p| !p.is_empty()).take(16) {
+            let mut parts = piece.split(':').map(str::trim);
+            let Some(item) = parts.next().and_then(|i| i.parse::<u64>().ok()) else { continue };
+            let mut f = json!({"item": item});
+            for k in ["from", "to"] {
+                if let Some(x) = parts.next().filter(|x| !x.is_empty()).and_then(|x| x.parse::<f64>().ok()).filter(|x| x.is_finite()) {
+                    f[k] = json!(x);
+                }
+            }
+            list.push(f);
+        }
+        if !list.is_empty() {
+            o.insert("background".into(), Value::Array(list));
+        }
+        Value::Object(o)
+    }
+}
+
 /// The showcase under review (UI state, serde so agents can read and set it).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -98,6 +239,8 @@ pub struct ShowcaseDraft {
     pub intro: String,
     pub outro: String,
     pub entries: Vec<DraftEntry>,
+    /// The look and the branded outro.
+    pub look: LookDraft,
     /// Where "Build and export" writes the video; empty: the AutoCut folder, named after the title.
     pub export_path: String,
     /// Upload the export to Google Photos.
@@ -134,6 +277,7 @@ impl Default for ShowcaseDraft {
             intro: String::new(),
             outro: String::new(),
             entries: Vec::new(),
+            look: LookDraft::default(),
             export_path: String::new(),
             upload: false,
             extra: serde_json::Map::new(),
@@ -186,6 +330,28 @@ impl ShowcaseDraft {
             .as_object()
             .map(|o| o.iter().filter(|(k, _)| !PLAN_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
+        // the look the panel edits comes out of `extra` (what it cannot show stays there)
+        let open = self.look.open;
+        self.look = LookDraft { open, ..LookDraft::default() };
+        let mut take = |k: &str, ok: fn(&Value) -> bool| match self.extra.get(k) {
+            Some(v) if ok(v) => self.extra.remove(k),
+            _ => None,
+        };
+        if let Some(s) = take("style", |v| v.as_str().is_some_and(|s| STYLES.iter().any(|(id, _)| *id == s))) {
+            self.look.style = s.as_str().unwrap_or_default().to_string();
+        }
+        if let Some(b) = take("timeline", Value::is_boolean) {
+            self.look.timeline = b.as_bool().unwrap_or(false);
+        }
+        if let Some(l) = take("loudness", |v| v.as_str().is_some_and(|s| LOUDNESS.iter().any(|(id, _)| *id == s))) {
+            self.look.loudness = l.as_str().unwrap_or_default().to_string();
+        }
+        if let Some(b) = take("embedCaptions", Value::is_boolean) {
+            self.look.embed_captions = b.as_bool().unwrap_or(false);
+        }
+        if let Some(o) = take("outro", Value::is_object) {
+            self.look.outro = OutroDraft::load(&o);
+        }
     }
 
     /// The plan as reviewed, for `autocut.showcaseBuild {plan}`.
@@ -201,6 +367,22 @@ impl ShowcaseDraft {
         p["mood"] = json!(self.mood);
         p["entries"] = Value::Array(self.reviewed_entries());
         p["script"] = json!({"intro": self.intro, "outro": self.outro, "lines": self.entries.iter().map(|e| e.line.clone()).collect::<Vec<_>>()});
+        let l = &self.look;
+        if !l.style.is_empty() {
+            p["style"] = json!(l.style);
+        }
+        if l.timeline {
+            p["timeline"] = json!(true);
+        }
+        if !l.loudness.is_empty() {
+            p["loudness"] = json!(l.loudness);
+        }
+        if l.embed_captions {
+            p["embedCaptions"] = json!(true);
+        }
+        if l.outro.on {
+            p["outro"] = l.outro.plan();
+        }
         p
     }
 
@@ -405,6 +587,7 @@ enum Action {
     Build { export: bool },
     Cancel(u64),
     Play { item: u64, seconds: f64 },
+    PickLogo,
 }
 
 /// Voices for the narration menu: `(id, name)` — no narration, the cloned voices, then the
@@ -593,6 +776,16 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 add(auto, right, "showcase.mood", cb.response.rect, "Mood");
             }
         });
+        // the look, and the channel's own outro
+        ui.add_space(6.0);
+        let toggle = ui.add(egui::Button::new(if d.look.open { "Look and channel outro ▾" } else { "Look and channel outro…" }).small());
+        add(auto, ui, "showcase.lookOpen", toggle.rect, "Look and channel outro");
+        if toggle.clicked() {
+            d.look.open = !d.look.open;
+        }
+        if d.look.open {
+            look_form(ui, auto, &t, &mut d.look, w, &mut actions);
+        }
         ui.add_space(6.0);
         label(ui, &t, "Intro");
         let r = ui.add(egui::TextEdit::multiline(&mut d.intro).hint_text("What the narrator says first").desired_width(w).desired_rows(2).char_limit(MAX_TEXT));
@@ -757,6 +950,17 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 app.session.execute("autocut.showcaseBuild", p).map(|_| "Building the showcase…")
             }
             Action::Cancel(job) => app.session.execute("jobs.cancel", json!({"job": job})).map(|_| "Cancelling…"),
+            Action::PickLogo => {
+                let dialog =
+                    crate::native_dialogs::FileDialog::OpenFile { filter: "Image".into(), exts: ["png", "jpg", "jpeg", "webp"].map(String::from).to_vec() };
+                app.pick_ui(dialog, |app, paths| {
+                    if let Some(p) = paths.into_iter().next() {
+                        app.ui.showcase.look.outro.logo = p;
+                        app.ui.showcase.look.outro.on = true;
+                    }
+                });
+                Ok("Choose the channel's logo")
+            }
             Action::Play { item, seconds } => {
                 let r = app
                     .session
@@ -773,6 +977,87 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             Err(e) => e.to_string(),
         };
     }
+}
+
+/// The look and the channel outro: theme, timeline, loudness, embedded captions; the outro's
+/// logo, words, length and footage.
+fn look_form(ui: &mut egui::Ui, auto: &mut crate::automation::Registry, t: &crate::theme::Tokens, l: &mut LookDraft, w: f32, actions: &mut Vec<Action>) {
+    egui::Frame::new().fill(t.field_bg).stroke(egui::Stroke::new(1.0, t.field_border)).corner_radius(4.0).inner_margin(8.0).show(ui, |ui| {
+        ui.set_width(w - 18.0);
+        let fw = w - 18.0;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Style").color(t.text).size(12.0));
+            let shown = STYLES.iter().find(|(id, _)| *id == l.style).map_or(l.style.as_str(), |(_, n)| n).to_string();
+            let cb = egui::ComboBox::from_id_salt("showcase-style").selected_text(shown).show_ui(ui, |ui| {
+                for (id, n) in STYLES {
+                    if ui.selectable_label(l.style == id, n).clicked() {
+                        l.style = id.to_string();
+                    }
+                }
+            });
+            add(auto, ui, "showcase.style", cb.response.rect, "Style");
+            ui.label(egui::RichText::new("Loudness").color(t.text).size(12.0));
+            let shown = LOUDNESS.iter().find(|(id, _)| *id == l.loudness).map_or(l.loudness.as_str(), |(_, n)| n).to_string();
+            let cb = egui::ComboBox::from_id_salt("showcase-loudness").selected_text(shown).show_ui(ui, |ui| {
+                for (id, n) in LOUDNESS {
+                    if ui.selectable_label(l.loudness == id, n).clicked() {
+                        l.loudness = id.to_string();
+                    }
+                }
+            });
+            add(auto, ui, "showcase.loudness", cb.response.rect, "Loudness");
+        });
+        ui.horizontal(|ui| {
+            let c = ui.checkbox(&mut l.timeline, "Timeline of the years");
+            add(auto, ui, "showcase.timeline", c.rect, "Timeline");
+            let c = ui.checkbox(&mut l.embed_captions, "Captions in the export");
+            add(auto, ui, "showcase.embedCaptions", c.rect, "Embed captions");
+        });
+        ui.add_space(4.0);
+        let o = &mut l.outro;
+        let c = ui.checkbox(&mut o.on, "Channel outro (logo, subscribe button, end screen)");
+        add(auto, ui, "showcase.outroOn", c.rect, "Channel outro");
+        if !o.on {
+            return;
+        }
+        ui.horizontal(|ui| {
+            let b = ui.small_button("Choose…");
+            add(auto, ui, "showcase.outroLogoBrowse", b.rect, "Choose the logo");
+            if b.clicked() {
+                actions.push(Action::PickLogo);
+            }
+            let r = ui.add(egui::TextEdit::singleline(&mut o.logo).hint_text("Logo (PNG)").desired_width(ui.available_width()).char_limit(4096));
+            add(auto, ui, "showcase.outroLogo", r.rect, "Logo");
+        });
+        let field_w = (fw - 70.0).max(40.0);
+        egui::Grid::new("showcase-outro").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
+            let mut row = |ui: &mut egui::Ui, name: &str, id: &str, text: &mut String, hint: &str| {
+                ui.add_sized([64.0, 18.0], egui::Label::new(egui::RichText::new(name).color(t.text_dim).size(11.0)));
+                let r = ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(field_w).char_limit(MAX_OUTRO_TEXT));
+                add(auto, ui, id, r.rect, name);
+                ui.end_row();
+            };
+            row(ui, "Channel", "showcase.outroChannel", &mut o.channel, "the channel's name");
+            row(ui, "Handle", "showcase.outroHandle", &mut o.handle, "@handle");
+            row(ui, "Tagline", "showcase.outroTagline", &mut o.tagline, "what the channel is about");
+            row(ui, "Button", "showcase.outroCta", &mut o.cta, "the subscribe button's words");
+            row(ui, "Clicked", "showcase.outroCtaDone", &mut o.cta_done, "the button once clicked");
+            row(ui, "Typed", "showcase.outroTerminal", &mut o.terminal, "> a line typed out");
+            row(ui, "Footage", "showcase.outroBackground", &mut o.background, "item:from:to, item…");
+        });
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Seconds").color(t.text_dim).size(11.0));
+            let r = ui.add(egui::DragValue::new(&mut o.seconds).range(8.0..=30.0).speed(0.1));
+            add(auto, ui, "showcase.outroSeconds", r.rect, "Outro length");
+        });
+        ui.label(
+            egui::RichText::new(
+                "Its last 5–20 s leave the middle clear for YouTube's end screen: a video tile left of centre, the subscribe button right of it.",
+            )
+            .color(t.text_dim)
+            .size(11.0),
+        );
+    });
 }
 
 /// Register widget `id` by the part of `r` the scroll area shows (what a click can reach); one
@@ -838,6 +1123,48 @@ mod tests {
             d.entries.iter().map(|e| (e.include, e.merge_previous, e.label.clone(), e.description.clone(), e.line.clone())).collect::<Vec<_>>()
         };
         assert_eq!(review(&again), review(&d));
+    }
+
+    #[test]
+    fn the_look_and_the_channel_outro_load_and_go_back() {
+        let mut p = plan();
+        p["style"] = json!("tech");
+        p["timeline"] = json!(true);
+        p["loudness"] = json!("social");
+        p["transitions"] = json!(true);
+        p["outro"] = json!({
+            "logo": "/x/logo.png", "channel": "H4hacks", "handle": "@H4hacks", "cta": "Subscribe", "ctaDone": "Subscribed",
+            "background": [{"item": 4830, "from": 5.0, "to": 25.0}, {"item": 4831}], "seconds": 11.0
+        });
+        let mut d = ShowcaseDraft::default();
+        d.load(&p);
+        assert_eq!((d.look.style.as_str(), d.look.timeline, d.look.loudness.as_str(), d.look.embed_captions), ("tech", true, "social", false));
+        let o = &d.look.outro;
+        assert!(o.on && o.channel == "H4hacks" && o.cta_done == "Subscribed" && o.seconds == 11.0);
+        assert_eq!(o.background, "4830:5:25, 4831");
+        // the rest of the look stays as it came
+        assert_eq!(d.extra.keys().collect::<Vec<_>>(), ["subtitle", "transitions", "width"]);
+        d.look.outro.tagline = "Hacking, gadgets and robots".into();
+        d.look.outro.background = "4830:5:25, nonsense, 4832::9".into();
+        d.look.embed_captions = true;
+        let back = d.plan();
+        assert_eq!(
+            (back["style"].as_str(), back["timeline"].as_bool(), back["loudness"].as_str(), back["embedCaptions"].as_bool()),
+            (Some("tech"), Some(true), Some("social"), Some(true))
+        );
+        assert_eq!(back["transitions"], true);
+        assert_eq!(back["outro"]["tagline"], "Hacking, gadgets and robots");
+        assert_eq!(back["outro"]["background"], json!([{"item": 4830, "from": 5.0, "to": 25.0}, {"item": 4832, "to": 9.0}]));
+        assert!(back["outro"].get("terminal").is_none(), "no words made up");
+        // the engine takes it
+        assert!(filmcraft_autocut::look::Look::from_plan(&back).is_ok_and(|l| l.outro.is_some_and(|o| o.channel.as_deref() == Some("H4hacks"))));
+        // a custom style object stays in the plan; the outro off leaves it out
+        let mut p = plan();
+        p["style"] = json!({"accent": "#ff0080"});
+        d.load(&p);
+        assert!(d.look.style.is_empty() && !d.look.outro.on);
+        assert_eq!(d.plan()["style"], json!({"accent": "#ff0080"}));
+        assert!(d.plan().get("outro").is_none());
     }
 
     #[test]
