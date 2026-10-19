@@ -42,6 +42,10 @@ const VALUED: &[&str] = &[
     "--album",
     "--music",
     "--target-minutes",
+    // showcase look
+    "--style",
+    "--loudness",
+    "--soundfont",
     "--screen",
     "--prompt",
     "--subject",

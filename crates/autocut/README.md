@@ -248,6 +248,36 @@ of an entry's facts into its line, told to use those and nothing else.
 A reviewed plan may hold `entries` alone (drop, merge or relabel robots, fix a shot's `best`
 moment or `seen` times): the model then writes the words for exactly those.
 
+### The look: theme, timeline, chips, scenes, transitions, finishing
+
+All optional ([`look.rs`](src/look.rs)): a plan without these fields, and a command without these
+flags, builds the show exactly as above. They are top-level fields of the plan (beside `entries`
+and `script`; the app's reviewed plan keeps them too), and every one is checked before anything is
+built — a field that makes no sense (an unknown theme or field, a colour that is not `#rrggbb`, a
+transition id the catalogue does not have, a date that does not exist, chips for an entry that is
+not there, years beyond 1900–2200) is an `invalid plan:` error saying which and why.
+
+| plan field | CLI flag | what it does |
+|---|---|---|
+| `"style": "tech"` or `{"titleFont", "bodyFont", "numberFont", "accent", "text", "panel", "base"}` | `--style tech` (`classic`: today's look) | a theme on the title card, lower thirds, chapter/year cards, spec chips, timeline, counter and outro. `tech`: DIN Condensed titles (in capitals), DIN Alternate numbers, Futura text, electric cyan `#00e5ff`, text `#f4f8fb`, dark translucent panels `#0a1018` at 72 %. An object overrides the `base` theme (`tech` by default): fonts by family name, colours `#rrggbb`, `panel` `#rrggbb`, `#rrggbbaa` or `{"color", "alpha"}`. Families come from `fonts.list` (macOS: the system's, so DIN and Futura are there); one that is not installed is drawn in Inter, noted, and listed in `theme.missing` |
+| `"timeline": true`, `"events": [{"name": "GITEX 2022", "from": "2022-10-10", "to": "2022-10-14"}]` | `--timeline` | a thin timeline along the bottom from the first entry to the outro (not over the title or the outro; fading in and out): a tick at each year's start and the years between, event bands (the plan's `events` — dates `YYYY-MM-DD`, `YYYY-MM` or `YYYY` — else each entry `event` from its first date to its last) with their names, and a marker that glides to each entry's date as the entry starts (Motion position keyframes, leaving on the entry's first frame and arriving 0.6 s later, eased out and in); the current year and event are picked out (accent, on a panel). Lower thirds sit a little higher above it |
+| `script.chips`: `{"3": ["32.5 kg", "1.6 m/s", "14 kg payload"]}` | | spec chips beside entry 3's lower third (above it when the row would leave the frame): up to three of up to 32 characters, in the number font on a rounded panel, rising and fading in 0.3 s apart from half a second into its narration, leaving together with the lower third; renumbered with their entries on review like `say` |
+| entries with `"kind": "scene"` and `"caption": "GITEX 2022 · Dubai World Trade Centre"` | | a scene shot: footage without a robot (a hall, a stage) that opens its event's chapter — its chapter card over it, full frame, a one-line caption (its `caption`, else its label) instead of a name lower third; not counted, never in the thumbnail, no subject check in QA, no words unless its script line has some (an empty line: none, and a scene without words plays 4.5 s with the bed's energy lifted under it and nothing to duck it) |
+| `"transitions": true` or `{"within": [ids], "between": [ids], "chapter": [ids]}` | | transitions from the catalogue (`effects.list`), each list in turn: `within` an entry's shots (default none: straight cuts, moved onto the beat), `between` entries (default `cam_punch_in`, `flow_morph`, `gl_crosswarp`, `cam_whip_pan`, `gl_directionalwarp`, `flow_doppler_warp` — Zooms & Camera, Flow & Morph, GL; about a beat long) with a whoosh, into a `chapter` (default `lf_light_leak`, `gl_filmburn`; about two beats) with a riser into the card's impact — the sounds coupled to the transitions (`transitions.addSound`), replacing the whoosh clips; then `transitions.snapToBeats` on the music's beat map puts each midpoint on a beat and makes each a musical length. An empty list means cuts |
+| `"loudness": "social"` | `--loudness social\|voice\|broadcast\|<LUFS>` | `audio.normalizeLoudness` on the finished mix (social −14 LUFS, voice −16, broadcast −23) with a −1 dBTP true-peak limiter, instead of the mix's own limiter alone; `loudness` in the output |
+| `"embedCaptions": true` | `--embed-captions` | the export carries the narration's captions as CEA-608/708 closed captions (besides `.srt` / `.vtt`) |
+| `"soundfont": "generaluser-gs"` | `--soundfont generaluser-gs\|oscillators\|auto\|<file.sf2>` | the instruments of the generated bed (`audio.generate`'s `soundfont`; Preferences are not changed); one that cannot play is noted and the bed played without it; `music.instruments` in the output |
+
+The output says what was made: `theme` (fonts as resolved), `timeline` (its scale, bands, the
+marker's stops and the clips), `transitions` (id, effect, where, sound), `beat_snap`, `loudness`,
+`scenes`, and per entry in `layout` its `lower_third` or `caption` and `chips` clips.
+
+```sh
+filmcraft-cli showcase --report robots.json --script-in plan.json --voice clone:me \
+    --style tech --timeline --loudness social --embed-captions --soundfont generaluser-gs \
+    --export ~/Movies/AutoCut/robots.mp4
+```
+
 ### Album as the seed
 
 Put the clips for a video into one album in Google Photos — and add to it whenever you film

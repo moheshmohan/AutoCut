@@ -124,7 +124,9 @@ SUBCOMMANDS
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--mood epic]
          [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
-         [--no-fill] [--no-track] [--export out.mp4 [--upload [--upload-album <title>]]
+         [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social]
+         [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
+         [--export out.mp4 [--upload [--upload-album <title>]]
          [--upload-youtube [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P]
          [--youtube-tags a,b] [--youtube-description D]]] [--qa | --no-qa]
                                 a narrated 16:9 showcase of every clip the analysis found, oldest
@@ -154,7 +156,19 @@ SUBCOMMANDS
                                 \"pronounce\" ({\"Zaku II\": \"Zaku Two\"}: respellings the voice
                                 reads, whole words) and \"say\" ({\"3\": \"...\", \"outro\": \"...\"}:
                                 what the voice says instead of a part), while subtitles show the
-                                text as written;
+                                text as written; the look (crates/autocut/README.md): --style
+                                tech (or the plan's \"style\") themes the titles, lower thirds,
+                                cards, chips and outro (DIN Condensed / DIN Alternate / Futura,
+                                cyan, dark panels; Inter where a font is missing), --timeline (or
+                                \"timeline\": true, \"events\") a timeline of the years along the
+                                bottom with a marker gliding to each entry's date, the script's
+                                \"chips\" spec chips beside a lower third, entries of \"kind\":
+                                \"scene\" footage without a robot, the plan's \"transitions\"
+                                catalogue transitions with sounds snapped to the beat;
+                                --loudness social|voice|broadcast|<LUFS> normalises the mix
+                                (audio.normalizeLoudness, -1 dBTP), --soundfont plays the bed on
+                                those instruments, --embed-captions embeds the narration's
+                                captions (CEA-608/708) in the export;
                                 with --export, YouTube chapters go to <out>.chapters.txt and the
                                 narration's subtitles to <out>.srt and <out>.vtt (at most 2 lines
                                 of 42 characters, 1-7 s a cue; also on the sequence's Subtitles
@@ -1441,6 +1455,19 @@ async fn cli() {
                     _ => usage(format!("showcase: --target-minutes wants a length in minutes (e.g. 10), not `{m}`")),
                 }
             }
+            // the look's flags, checked now (they override the plan's fields, applied after it)
+            let style_flag =
+                a.opt("--style").map(|s| filmcraft_autocut::look::Style::from_plan(&json!(s)).unwrap_or_else(|e| usage(format!("showcase: --style: {e}"))));
+            let loudness_flag = a
+                .opt("--loudness")
+                .map(|l| filmcraft_autocut::look::Loudness::from_plan(&json!(l)).unwrap_or_else(|e| usage(format!("showcase: --loudness: {e}"))));
+            let soundfont_flag = a.opt("--soundfont").map(|f| {
+                let ids = ["auto", "oscillators", "generaluser-gs", "generaluser", "gugs"];
+                if !ids.contains(&f.trim().to_ascii_lowercase().as_str()) && !std::path::Path::new(f).is_file() {
+                    fail(format!("showcase: --soundfont: {f}: neither auto, oscillators, generaluser-gs nor an .sf2 file"));
+                }
+                if ids.contains(&f.trim().to_ascii_lowercase().as_str()) { f.trim().to_string() } else { absolute(f) }
+            });
             // --upload: the export goes to Google Photos once built; a missing sign-in or
             // consent fails now, not after the build. --upload-album: the upload also goes into
             // that album (FilmCraft's, created when missing), where the next iteration's
@@ -1527,9 +1554,13 @@ async fn cli() {
             // a reviewed plan (`--script-in`): its (edited) entries replace the grouping, and its
             // script, when it has one, the model's
             let mut reviewed: Option<filmcraft_autocut::showcase::Script> = None;
+            // the plan's look (theme, timeline, transitions, finishing), kept for the plan written out
+            let mut look_fields = serde_json::Map::new();
             if let Some(path) = a.opt("--script-in") {
                 let b = std::fs::read(path).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
                 let sv: Value = serde_json::from_slice(&b).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
+                opts.look = filmcraft_autocut::look::Look::from_plan(&sv).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
+                look_fields = filmcraft_autocut::look::Look::plan_fields(&sv);
                 if let Some(es) = sv.get("entries") {
                     entries = serde_json::from_value(es.clone()).unwrap_or_else(|e| fail(format!("showcase: {path}: bad entries ({e})")));
                     for (i, e) in entries.iter_mut().enumerate() {
@@ -1551,6 +1582,21 @@ async fn cli() {
                     reviewed = Some(script);
                 }
             }
+            if let Some(st) = style_flag {
+                opts.look.style = st;
+            }
+            if a.flag("--timeline") {
+                opts.look.timeline = true;
+            }
+            if let Some(l) = loudness_flag {
+                opts.look.loudness = l;
+            }
+            if a.flag("--embed-captions") {
+                opts.look.embed_captions = true;
+            }
+            if soundfont_flag.is_some() {
+                opts.look.soundfont = soundfont_flag;
+            }
             let script = match reviewed {
                 Some(s) => s,
                 None => {
@@ -1563,7 +1609,10 @@ async fn cli() {
                     filmcraft_autocut::showcase::write_script(&model, &opts, &entries, &mut |l| diag(format_args!("showcase: {l}"))).await
                 }
             };
-            let plan = json!({"entries": entries, "script": script});
+            let mut plan = json!({"entries": entries, "script": script});
+            if let Some(o) = plan.as_object_mut() {
+                o.extend(look_fields);
+            }
             if let Some(out) = a.opt("--script-out") {
                 std::fs::write(out, serde_json::to_string_pretty(&plan).unwrap_or_default()).unwrap_or_else(|e| fail(format!("showcase: {out}: {e}")));
                 diag(format_args!("showcase: wrote {out}"));
