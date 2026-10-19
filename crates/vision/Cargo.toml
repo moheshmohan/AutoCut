@@ -1,0 +1,26 @@
+[package]
+name = "filmcraft-vision"
+description = "FilmCraft privacy detection: the YuNet face (MIT) and LPD-YuNet licence-plate (Apache-2.0) detector catalogue, a strict ONNX weight reader, output decoding, tracking with gap filling and smoothing, and (feature model) both networks on candle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The two networks on candle (pure Rust, CPU). Off by default and in wasm builds.
+model = ["dep:candle-core", "dep:rayon"]
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+candle-core = { version = "0.9", default-features = false, optional = true }
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# live tests read the oracle's picture
+image = { version = "0.25", default-features = false, features = ["png"] }

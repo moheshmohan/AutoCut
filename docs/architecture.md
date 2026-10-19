@@ -26,7 +26,7 @@ Design principles:
  L5  ui-egui · automation · autocut · gphotos · oauth · youtube · instagram · screenagent · platform
  L4  engine
  L3  render · gpu · export · templates · golden (test-only)
- L2  edit · codecs · interchange · captions · speech · tts · tts-text · acestep · soundfont
+ L2  edit · codecs · interchange · captions · speech · tts · tts-text · acestep · soundfont · vision
  L1  frame · media · project · audio-dsp · text
  L0  foundation: time · geom · color · bitstream · locks · testkit (dev-dependency only)
      codecs/containers: isobmff · matroska · mxf · cfb · mpegts · ogg · h264 · h264enc · hevc · vp9 · av1 · mpeg2v · prores · dnx · apv · dng · aac · ac3 · mpa · opus
@@ -70,6 +70,7 @@ and `filmcraft-cli`.
 | `tts` | L2 | text to speech: `Voice` trait, voice catalogue, pause markers, built-in formant voices; Kokoro-82M natural voices on candle and their pinned package catalogue (feature `kokoro`); cloned voices: OpenVoice V2 tone-colour conversion (feature `kokoro`) and VoxCPM zero-shot cloning on candle, Metal on macOS (feature `voxcpm`). Same-layer edge to `tts-text` |
 | `tts-text` | L2 | text front end for narration: normalizer (numbers, money, dates, acronyms, pauses) and English pronunciation (CMUdict + letter-to-sound) to Kokoro phonemes |
 | `soundfont` | L2 | SoundFont instruments for the procedural music: a structural check of `.sf2` files (every chunk, record list, zone and sample range in bounds, even sizes) in front of rustysynth (MIT, pure Rust; every call under `catch_unwind`), a General MIDI `InstrumentBank` level-matched to the oscillator voices with them as the fallback, and the GeneralUser GS download pin (never bundled) ([README](../crates/soundfont/README.md)) |
+| `vision` | L2 | privacy detection for the automatic blur (`clip.autoRedact`): the YuNet face (MIT) and LPD-YuNet plate (Apache-2.0) detector catalogue (pinned, SHA-256), a strict ONNX weight reader, output decoding and suppression, linking detections into smoothed tracks and the rules for which are hidden; (feature `model`) both networks on candle, checked layer by layer against the file ([README](../crates/vision/README.md)). Wasm builds compile it without the feature |
 | `acestep` | L2 | neural text to music: ACE-Step 1.5 (MIT) model catalogue (pinned, SHA-256), request checks and prompt layout; (feature `model`) the Qwen3 text encoder and byte-level BPE tokenizer, the turbo DiT, the 8-step flow-matching sampler and the Oobleck VAE on candle, Metal on macOS ([README](../crates/acestep/README.md)). Wasm builds compile it without the feature |
 | `codecs` | L2 | container + codec hub: MP4/MOV, MKV, MXF, Ogg and MPEG TS / PS / video elementary stream sources, GOP-aware seeking, decoder registry, audio decoding |
 | `interchange` | L2 | EDL, FCP7 XML, FCPXML, OTIO, AAF (on `cfb`) and OMF 2.0 import/export (no file I/O; the engine supplies rendered audio essence) ([README](../crates/interchange/README.md)) |

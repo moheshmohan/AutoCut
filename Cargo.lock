@@ -2588,6 +2588,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "filmcraft-vision"
+version = "0.8.0"
+dependencies = [
+ "candle-core",
+ "image",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "filmcraft-vp8"
 version = "0.8.0"
 dependencies = [
