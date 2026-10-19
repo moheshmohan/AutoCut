@@ -150,7 +150,7 @@ pub(crate) fn run_changed(args: &[String]) -> Result<(), String> {
         }
         crate::run(clippy.args(["--", "-D", "warnings"]))?;
         let mut test = Command::new(cargo);
-        test.args(["test", "--release"]);
+        test.args(["test", "--release", "--no-fail-fast"]);
         for c in &p.changed {
             test.args(["-p", c]);
         }

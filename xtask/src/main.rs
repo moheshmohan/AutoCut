@@ -493,7 +493,8 @@ fn ci() -> Result<(), String> {
     let cargo = env!("CARGO");
     run(Command::new(cargo).args(["fmt", "--check"]))?;
     run(Command::new(cargo).args(["clippy", "--workspace", "--all-targets", "--release", "--", "-D", "warnings"]))?;
-    run(Command::new(cargo).args(["test", "--workspace", "--release"]))?;
+    // --no-fail-fast: one (long) run reports every failing suite, not just the first
+    run(Command::new(cargo).args(["test", "--workspace", "--release", "--no-fail-fast"]))?;
     layers()?;
     assets()?;
     wasm()

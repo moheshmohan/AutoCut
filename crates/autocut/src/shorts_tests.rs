@@ -192,5 +192,8 @@ async fn makes_vertical_shorts_with_captions_end_to_end() {
     let item = bare.execute("file.newBarsAndTone", json!({"seconds": 20})).unwrap()["item"].as_u64().unwrap();
     let ex = SessionExecutor::from(bare);
     let e = make(&ex, &json!({"item": item}), None, &mut |_| {}).await.unwrap_err().to_string();
-    assert!(e.contains("transcri"), "{e}");
+    // without Whisper the transcription fails; where it is compiled in (the workspace's features
+    // are unified in `cargo test --workspace`) and its model is installed, it hears a sentence or
+    // so in the tone — either way no short is made, and the error says why
+    assert!(e.contains("transcri") || e.contains("sentence"), "{e}");
 }
