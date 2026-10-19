@@ -23,7 +23,7 @@
 //!    confidence decays. A shot change (the [`crate::scene`] signature difference, well above the
 //!    recent activity) re-seeds from the template, a hint or the saliency.
 //! 5. **Hints** — a box from the vision model for a frame re-seeds the tracker when it is lost or
-//!    when the tracked box no longer overlaps the hint (the model knows what the subject is; the
+//!    when the tracked box overlaps the hint by less than half (the model knows what the subject is; the
 //!    tracker only knows what it looked like).
 //!
 //! Everything is in the analysis frame's pixels internally; [`SubjectBox`] is normalised (0..1 of
@@ -58,6 +58,8 @@ const LEARN_RATE: f32 = 0.08;
 const COAST_SECONDS: f64 = 1.2;
 /// Largest template side, pixels.
 const TEMPLATE_SIDE: f64 = 24.0;
+/// A hint overlapping the tracked box less than this (intersection over union) re-seeds it.
+const HINT_AGREES: f64 = 0.5;
 /// A shot change: a signature difference above this and well above the recent activity.
 const CUT_DIFFERENCE: f32 = 0.28;
 
@@ -279,9 +281,10 @@ impl SubjectTracker {
             let ncc = self.template.as_ref().and_then(|tp| match_at(frame, tp, &b)).unwrap_or(0.0);
             (ncc >= LOST_NCC).then_some((b, ncc, reliability))
         });
-        // a hint that disagrees with the track wins: the model knows what the subject is
+        // a hint that disagrees with the track wins: the model knows what the subject is (and a
+        // smooth subject correlates well with itself even where the track has slid half off it)
         if let Some(h) = hint {
-            let agrees = result.as_ref().is_some_and(|(b, ncc, _)| b.iou(&h) >= 0.15 && *ncc >= 0.5);
+            let agrees = result.as_ref().is_some_and(|(b, ncc, _)| b.iou(&h) >= HINT_AGREES && *ncc >= 0.5);
             if !agrees {
                 return self.seed(frame, h, t, 0.9, TrackState::Seeded, false);
             }
