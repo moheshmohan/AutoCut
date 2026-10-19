@@ -62,6 +62,27 @@ sharing, A4 recipes; V: E2 caption embedding, E3 vertical factory (tracking + lo
 **Phase 4 (quarter 2)** — C3 flow presets + content-aware wipe; D2 ACE-Step 1.5 on candle (MIT);
 E5 adjustment clips + per-track ducking; B6 TikTok.
 
+## 3b. Lane status (2026-10-19)
+
+First milestones merged into `main` (each lane's own checks, then the full gate in the main
+session before every push):
+
+| Lane | Roadmap | Merged |
+|---|---|---|
+| T | C1 GL Transitions (40, export on the GPU), C2 Luma Wipes (32) + Blend Dissolves (26), C3 flow transitions + Content-Aware Wipe, C4 beat snap + transition sounds + motion blur, C5 themed catalog | 209 named transitions |
+| M | D1 procedural soundtrack engine (exact length, stems, taxonomy, beat maps), SoundFont instruments (GeneralUser GS on consent), "find music by feel" panel | ✓ |
+| D2 | ACE-Step 1.5 turbo on candle, oracle-matched, `music.generateNeural` | first milestone |
+| O, Y, I | B2 OAuth (PKCE, Keychain), B3 YouTube (channels per sign-in, resumable, quota), B4 Instagram (token or business login), B5 Destinations + pre-flight + `publish.run` | live checks pending (user) |
+| E | E4 Elements: 12 sounds, 10 stickers, 6 text presets | ✓ |
+| A | A1 template format + engine, A2 21 starters + Templates panel, A3 save/share/OTIO, A4 recipes | ✓ |
+| V | E3 subject tracker, auto-reframe, long → shorts | ✓ |
+| X | E2 embedded CEA-608/708 captions, E5 adjustment clips + per-track auto-duck, D3 loudness targets + beat tracker | ✓ |
+
+Left: live checks of YouTube/Instagram publishing (user at the Mac); ACE-Step's LM planner,
+lyrics/vocals, other variants and UI; per-genre drum kits (after the user listens); Morph Cut
+face gating; flow at several points of long transitions; stem separation; B6 TikTok; a rebuilt
+AutoCut.app with all of it for real videos.
+
 ## 4. Decisions (answered 2026-10-17)
 
 1. **YouTube**: reuse the `autocut-photos` GCP project (Testing mode) with the YouTube Data API
