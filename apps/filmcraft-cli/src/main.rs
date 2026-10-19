@@ -132,6 +132,7 @@ SUBCOMMANDS
          [--outro-logo logo.png] [--outro-channel C] [--outro-handle @h] [--outro-tagline T]
          [--outro-cta S] [--outro-cta-done S] [--outro-terminal L] [--outro-seconds 12]
          [--outro-background item[:from[:to]]]… [--redact faces,plates] [--redact-target T]…
+         [--languages en,ml --lines-ml script-ml.json]
          [--export out.mp4 [--upload [--upload-album <title>]]
          [--upload-youtube [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P]
          [--youtube-tags a,b] [--youtube-description D]]] [--qa | --no-qa]
@@ -175,6 +176,14 @@ SUBCOMMANDS
                                 file `photos locations` wrote and gives every entry without a
                                 \"place\" the place Google Photos shows for its first shot
                                 that has one (matched by file name), for its lower third;
+                                --languages en,ml builds the show in each language in one run
+                                from one reviewed English plan (--script-in): Malayalam reads
+                                --lines-ml ({\"intro\", \"outro\", \"lines\": {\"<label>\": \"…\"}}, as
+                                showcase-plan --lines) over it; the first language exports to
+                                --export, the next beside it as \"<out> (Malayalam).mp4\" with its
+                                own subtitles, chapters, thumbnail, QA and uploads (titled
+                                \"<title> (Malayalam)\"); the footage's redaction is taken from
+                                the redaction cache the second time;
                                 the look (crates/autocut/README.md): --style
                                 tech (or the plan's \"style\") themes the titles, lower thirds,
                                 cards, chips and outro (DIN Condensed / DIN Alternate / Futura,
@@ -1749,6 +1758,19 @@ async fn cli() {
             // how a Malayalam narration says numbers (over the plan's `numbers`), checked now
             let numbers_flag =
                 a.opt("--numbers").map(|n| filmcraft_autocut::showcase::number_style(n).unwrap_or_else(|e| usage(format!("showcase: --numbers: {e}"))));
+            // --languages en,ml: the show in each language from one reviewed plan (--lines-ml:
+            // the Malayalam lines by entry label), checked now
+            let languages = a.opt("--languages").map(|l| showcase_tools::parse_languages(l).unwrap_or_else(|e| usage(format!("showcase: --languages: {e}"))));
+            if languages.is_some() && language_flag.is_some() {
+                usage("showcase: give --languages or --language, not both");
+            }
+            if languages.is_some() && a.opt("--script-in").is_none() {
+                usage("showcase: --languages builds from a reviewed plan: add --script-in plan.json");
+            }
+            if languages.as_ref().is_some_and(|l| l.iter().any(|l| l == "ml")) && a.opt("--lines-ml").is_none() {
+                usage("showcase: --languages with ml needs --lines-ml script-ml.json (the Malayalam lines by entry label)");
+            }
+            let lines_ml = a.opt("--lines-ml").map(|p| showcase_tools::read_json("showcase: --lines-ml", p));
             if let Some(m) = a.opt("--mood") {
                 opts.mood = m.to_string();
             }
@@ -1929,6 +1951,9 @@ async fn cli() {
             if numbers_flag.is_some() {
                 opts.numbers = numbers_flag;
             }
+            if languages.is_some() && opts.malayalam() {
+                fail("showcase: --languages builds every language from the English plan; this plan is Malayalam");
+            }
             if let Some(st) = style_flag {
                 opts.look.style = st;
             }
@@ -2012,118 +2037,41 @@ async fn cli() {
                 None
             };
             let mut b = backend.unwrap_or_else(|| Backend::open(&a));
-            let mut progress = |l: &str| diag(format_args!("showcase: {l}"));
-            let (result, qa) = match &mut b {
-                Backend::Local(s) => {
-                    let session = std::mem::take(s);
-                    let ex = filmcraft_autocut::SessionExecutor::from(*session);
-                    let r = filmcraft_autocut::showcase::build(&ex, &opts, &entries, &script, &mut progress).await;
-                    let qa = match &r {
-                        Ok(built) if qa_on => Some(showcase_qa(&ex, &opts, built, qa_model.as_ref(), &mut progress).await),
-                        _ => None,
-                    };
-                    if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
-                        **s = inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    }
-                    (r, qa)
-                }
-                Backend::Bridge(_) => {
-                    let addr = a.opt("--bridge").unwrap_or_default();
-                    let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
-                    let ex = filmcraft_automation::AutocutExecutor::bridge(client);
-                    let r = filmcraft_autocut::showcase::build(&ex, &opts, &entries, &script, &mut progress).await;
-                    let qa = match &r {
-                        Ok(built) if qa_on => Some(showcase_qa(&ex, &opts, built, qa_model.as_ref(), &mut progress).await),
-                        _ => None,
-                    };
-                    (r, qa)
-                }
-            };
-            match result {
-                Ok(built) => {
-                    for n in &built.notes {
-                        diag(format_args!("showcase: {n}"));
-                    }
-                    // chapters for the YouTube description, next to the export
-                    let chapters = filmcraft_autocut::showcase::youtube_chapters(&built.chapters, built.seconds);
-                    if let Some(path) = &opts.export
-                        && !chapters.is_empty()
-                    {
-                        let txt = std::path::Path::new(path).with_extension("chapters.txt");
-                        match std::fs::write(&txt, format!("{chapters}\n")) {
-                            Ok(()) => diag(format_args!("showcase: chapters in {}", txt.display())),
-                            Err(e) => diag(format_args!("showcase: {}: {e}", txt.display())),
+            // one build per language (--languages en,ml: from the same plan, the Malayalam lines
+            // read over it, its export beside the first); the redaction cache and the narration
+            // cache share what the builds have in common
+            let runs = showcase_tools::language_runs(&opts, &plan, &script, languages.as_deref(), lines_ml.as_ref())
+                .unwrap_or_else(|e| fail(format!("showcase: {e}")));
+            let ship = showcase_tools::Ship { qa_on, qa_model: qa_model.as_ref(), upload, upload_youtube, album: album.clone() };
+            let (mut outs, mut upload_failed, mut build_failed) = (Vec::new(), None::<String>, None::<String>);
+            for run in &runs {
+                match showcase_tools::build_and_ship(&a, &mut b, run, &entries, &ship).await {
+                    Ok((out, failed)) => {
+                        outs.push(out);
+                        if let Some(e) = failed {
+                            upload_failed = Some(upload_failed.map_or(e.clone(), |p| format!("{p}; {e}")));
                         }
                     }
-                    for file in &built.subtitle_files {
-                        diag(format_args!("showcase: subtitles in {file}"));
-                    }
-                    if let Some(file) = &built.thumbnail {
-                        diag(format_args!("showcase: thumbnail in {file}"));
-                    }
-                    let mut out = serde_json::to_value(&built).unwrap_or_default();
-                    out["youtubeChapters"] = json!(chapters);
-                    if !album_summary.is_null() {
-                        out["album"] = album_summary;
-                    }
-                    if let Some(mut report) = qa {
-                        diag(format_args!("showcase: QA: {}", report.summary()));
-                        for f in report.findings.iter().filter(|f| f.severity >= filmcraft_autocut::qa::Severity::Warning).take(40) {
-                            diag(format_args!("showcase: QA {:?} at {:.2}s ({}): {}", f.severity, f.seconds, f.check, f.message));
-                        }
-                        // the report and the contact sheet next to the export
-                        if let Some(path) = &opts.export {
-                            match filmcraft_autocut::qa::write_next_to(&mut report, std::path::Path::new(path)) {
-                                Ok((j, png)) => {
-                                    diag(format_args!("showcase: QA report in {}", j.display()));
-                                    if let Some(p) = png {
-                                        diag(format_args!("showcase: contact sheet in {}", p.display()));
-                                    }
-                                    if let Some(p) = &report.privacy_sheet {
-                                        diag(format_args!("showcase: privacy sheet in {p}"));
-                                    }
-                                }
-                                Err(e) => diag(format_args!("showcase: QA: {e}")),
-                            }
-                        }
-                        out["qa"] = serde_json::to_value(&report).unwrap_or_default();
-                    }
-                    // --upload: the finished export to Google Photos, titled like the video
-                    let mut upload_failed = None;
-                    if upload && let Some(requested) = &opts.export {
-                        let file = built.export.as_ref().and_then(|r| written_paths(r, requested).into_iter().next()).unwrap_or_else(|| requested.clone());
-                        let description = a.opt("--description").map(str::to_string).or_else(|| Some(opts.title.clone()).filter(|t| !t.trim().is_empty()));
-                        match upload_to_photos(absolute(&file), description, album.clone()).await {
-                            Ok(v) => out["upload"] = v,
-                            Err(e) => {
-                                out["uploadError"] = json!(e);
-                                upload_failed = Some(e);
-                            }
-                        }
-                    }
-                    // --upload-youtube: the export to YouTube, titled like the video, with its
-                    // chapters and thumbnail
-                    if upload_youtube && let Some(requested) = &opts.export {
-                        let file = built.export.as_ref().and_then(|r| written_paths(r, requested).into_iter().next()).unwrap_or_else(|| requested.clone());
-                        let r = match youtube::showcase_request(&a, &file, &opts.title, built.thumbnail.as_deref()) {
-                            Ok(req) => youtube::upload(req).await,
-                            Err(e) => Err(e),
-                        };
-                        match r {
-                            Ok(v) => out["youtube"] = v,
-                            Err(e) => {
-                                out["youtubeError"] = json!(e);
-                                upload_failed = Some(upload_failed.map_or(e.clone(), |p| format!("{p}; YouTube: {e}")));
-                            }
-                        }
-                    }
-                    print(&a, &out);
-                    b.finish(&a).await;
-                    if let Some(e) = upload_failed {
-                        fail(format!("showcase: the video is built, but the upload failed: {e}"));
+                    // the first build failing is the command failing; a later one keeps the
+                    // builds before it (printed, and saved with --save)
+                    Err(e) if outs.is_empty() => fail(format!("showcase: {e}")),
+                    Err(e) => {
+                        build_failed = Some(e);
+                        break;
                     }
                 }
-                Err(e) => fail(format!("showcase: {e}")),
+            }
+            let mut out = if languages.is_some() { json!({"languages": outs}) } else { outs.pop().unwrap_or_default() };
+            if !album_summary.is_null() {
+                out["album"] = album_summary;
+            }
+            print(&a, &out);
+            b.finish(&a).await;
+            if let Some(e) = build_failed {
+                fail(format!("showcase: the next language did not build: {e}"));
+            }
+            if let Some(e) = upload_failed {
+                fail(format!("showcase: the video is built, but the upload failed: {e}"));
             }
         }
         "redact" => redact(&a).await,

@@ -759,3 +759,54 @@ fn sheets_of_clips_and_frames_of_a_video() {
     assert_eq!(cli(&["frames", dir.join("none.mp4").to_str().unwrap(), "--at", "1", "--out", jpg.to_str().unwrap()]).status.code(), Some(1));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `showcase --languages en,ml`: one run builds the show twice from one plan, the second in
+/// Malayalam from its lines by label; what it needs is checked before anything is built.
+/// Offline: no voice, the model host a closed local port.
+#[test]
+fn showcase_in_two_languages_from_one_plan() {
+    let dir = std::env::temp_dir().join(format!("fc-cli-languages-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let shot = |item: u64| serde_json::json!({"item": item, "name": format!("{item}.mp4"), "clip_seconds": 14.0, "best": 7.0, "seen": [7.0], "unseen": []});
+    let entry = |n: usize, label: &str, item: u64, unix: i64| serde_json::json!({"number": n, "label": label, "kind": "humanoid", "description": label, "unix": unix, "shots": [shot(item)]});
+    let plan = serde_json::json!({
+        "entries": [entry(1, "Pepper", 5, 1_600_000_000), entry(2, "Toy robot", 6, 1_665_841_668)],
+        "script": {"intro": "Every robot, in order.", "lines": ["The first one.", "The second one."], "outro": "Thanks for watching."}
+    });
+    let report = dir.join("report.json");
+    std::fs::write(&report, r#"{"subject": "robot", "clips": []}"#).unwrap();
+    let plan_path = dir.join("plan.json");
+    std::fs::write(&plan_path, plan.to_string()).unwrap();
+    let lines = dir.join("script-ml.json");
+    std::fs::write(&lines, r#"{"intro": "എല്ലാ റോബോട്ടുകളും.", "outro": "നന്ദി.", "lines": {"Pepper": "ആദ്യത്തേത്.", "Toy robot": "രണ്ടാമത്തേത്."}}"#).unwrap();
+    let run = |extra: &[&str]| {
+        let mut args = vec!["--demo", "--compact", "showcase", "--report", report.to_str().unwrap(), "--script-in", plan_path.to_str().unwrap(), "--no-qa"];
+        args.extend(extra);
+        Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(&args).env("AUTOCUT_OLLAMA_HOST", "http://127.0.0.1:9").output().unwrap()
+    };
+    let o = run(&["--languages", "en,ml", "--lines-ml", lines.to_str().unwrap()]);
+    let v = json_out(&o);
+    let builds = v["languages"].as_array().unwrap();
+    assert_eq!(builds.len(), 2, "{v}");
+    assert_eq!((builds[0].get("language"), builds[1]["language"].as_str()), (None, Some("ml")));
+    assert_ne!(builds[0]["sequence"], builds[1]["sequence"], "two sequences");
+    assert_eq!((builds[0]["entries"].as_u64(), builds[1]["entries"].as_u64()), (Some(2), Some(2)));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("showcase (Malayalam):"), "{}", String::from_utf8_lossy(&o.stderr));
+    // what it needs, before anything is built
+    assert_eq!(run(&["--languages", "en,ml"]).status.code(), Some(2), "Malayalam needs its lines");
+    assert_eq!(run(&["--languages", "en,fr"]).status.code(), Some(2));
+    assert_eq!(run(&["--languages", "en", "--language", "ml"]).status.code(), Some(2));
+    let no_plan = Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
+        .args(["--demo", "showcase", "--report", report.to_str().unwrap(), "--languages", "en"])
+        .output()
+        .unwrap();
+    assert_eq!(no_plan.status.code(), Some(2));
+    // a spoken entry without a Malayalam line
+    let short = dir.join("short-ml.json");
+    std::fs::write(&short, r#"{"intro": "a", "outro": "b", "lines": {"Pepper": "x"}}"#).unwrap();
+    let o = run(&["--languages", "en,ml", "--lines-ml", short.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("Toy robot"), "{}", String::from_utf8_lossy(&o.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
