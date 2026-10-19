@@ -652,6 +652,8 @@ async fn black(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport, p
 struct ShotRef {
     entry: usize,
     first: bool,
+    /// A scene's shot: no subject to look for.
+    scene: bool,
     clip: Option<u64>,
     start: f64,
     end: f64,
@@ -663,16 +665,16 @@ fn shots(seq: &Seq, opts: &Options) -> Vec<ShotRef> {
     if opts.entries.is_empty() {
         if let Some(v) = seq.track(&opts.picture_track) {
             for (i, c) in v.clips.iter().filter(|c| c.enabled).enumerate() {
-                out.push(ShotRef { entry: i + 1, first: true, clip: Some(c.id), start: secs(c.start), end: secs(c.end) });
+                out.push(ShotRef { entry: i + 1, first: true, scene: false, clip: Some(c.id), start: secs(c.start), end: secs(c.end) });
             }
         }
     } else {
         for e in &opts.entries {
             if e.shots.is_empty() {
-                out.push(ShotRef { entry: e.number, first: true, clip: None, start: e.start, end: e.end });
+                out.push(ShotRef { entry: e.number, first: true, scene: e.scene, clip: None, start: e.start, end: e.end });
             }
             for (i, s) in e.shots.iter().enumerate() {
-                out.push(ShotRef { entry: e.number, first: i == 0, clip: Some(s.clip), start: s.start, end: s.end });
+                out.push(ShotRef { entry: e.number, first: i == 0, scene: e.scene, clip: Some(s.clip), start: s.start, end: s.end });
             }
         }
     }
@@ -713,14 +715,15 @@ async fn subject(
         let mid = seq.frame_floor((((s.start + s.end) / 2.0) * TPS_F).round() as i64);
         let t = secs(seq.frame_tick(mid));
         let side = if model.is_some() { opts.ground_side } else { opts.frame_side };
-        if model.is_none() && !s.first {
+        // (a scene shows no subject: only its tile for the contact sheet)
+        if (model.is_none() || s.scene) && !s.first {
             continue;
         }
         let png = ex.render(t, side).await;
         if png.is_some() {
             r.frames_rendered += 1;
         }
-        if let (Some(m), Some(png)) = (model, &png) {
+        if let (Some(m), Some(png), false) = (model, &png, s.scene) {
             let dims = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok().map(|i| (i.width(), i.height()));
             if let Some((w, h)) = dims {
                 asked += 1;

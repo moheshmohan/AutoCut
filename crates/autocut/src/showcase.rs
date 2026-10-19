@@ -32,12 +32,13 @@ use serde_json::{Value, json};
 
 use crate::analyze::ClipFacts;
 use crate::llm::ChatModel;
+use crate::look::{self, Look, Role, Theme};
 use crate::subtitles::Cue;
 use crate::{AutoCutError, Executor};
 
 const TPS: f64 = filmcraft_time::TICKS_PER_SECOND as f64;
 
-fn ticks(seconds: f64) -> i64 {
+pub(crate) fn ticks(seconds: f64) -> i64 {
     (seconds.max(0.0) * TPS).round() as i64
 }
 
@@ -87,6 +88,9 @@ pub struct Options {
     /// from the analysis' box) instead of tilting across a fixed point; shots where it is not
     /// found keep the tilt.
     pub follow_subject: bool,
+    /// The look: a theme, the timeline, transitions from the catalogue, loudness, embedded
+    /// captions, the SoundFont ([`crate::look`]); the default is today's look.
+    pub look: Look,
 }
 
 impl Default for Options {
@@ -109,6 +113,7 @@ impl Default for Options {
             target_minutes: None,
             fill_frame: true,
             follow_subject: true,
+            look: Look::default(),
         }
     }
 }
@@ -255,14 +260,40 @@ pub struct Entry {
     /// use — and nothing else: the script model is told to invent nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub facts: Vec<String>,
+    /// A scene's caption ("GITEX 2022 · Dubai World Trade Centre"; its label without one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
 }
 
+/// The `kind` of a scene entry: footage that shows no robot (a hall, a stage, a skyline) to
+/// open a chapter with — no counter, no name lower third, its words optional.
+pub const SCENE: &str = "scene";
+
 impl Entry {
+    /// A scene shot ([`SCENE`]), not a robot.
+    pub fn is_scene(&self) -> bool {
+        self.kind.trim().eq_ignore_ascii_case(SCENE)
+    }
+
+    /// What a scene's caption says: its `caption`, else its label, else its event.
+    pub fn caption_text(&self) -> String {
+        [self.caption.as_deref(), Some(self.label.as_str()), self.event.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|s| !s.is_empty())
+            .map(|s| s.chars().take(MAX_CAPTION_CHARS).collect())
+            .unwrap_or_default()
+    }
+
     /// The chapter it belongs to: its event, else the year it was filmed.
     pub fn section(&self) -> Option<String> {
         self.event.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).or_else(|| self.unix.map(|u| ymd(u).0.to_string()))
     }
 }
+
+/// Longest scene caption shown, characters.
+const MAX_CAPTION_CHARS: usize = 80;
 
 /// The voice-over, as written to be read: subtitles show it as it is, and the voice reads it
 /// with the show's respellings ([`Script::pronounce`]) or a line's own spoken version
@@ -290,6 +321,10 @@ pub struct Script {
     /// default. Voices that cannot take a delivery read every part plainly.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub delivery: BTreeMap<String, String>,
+    /// Spec chips beside an entry's lower third, by entry number (`{"3": ["32.5 kg", "1.6
+    /// m/s"]}`): up to three each, shown while its narration plays ([`look::chips_by_entry`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub chips: BTreeMap<String, Vec<String>>,
 }
 
 /// How the intro is spoken when the script does not say.
@@ -453,10 +488,12 @@ fn entry(number: usize, members: &[&ClipFacts], subject: &str) -> Option<Entry> 
     shown.sort_by(|(i, a), (j, b)| in_view(b).total_cmp(&in_view(a)).then(i.cmp(j)));
     shown.truncate(MAX_SHOTS);
     shown.sort_by_key(|(i, _)| *i);
+    // (a scene comes only from a plan: an analysed clip that calls itself one is a robot)
+    let kind = if named.kind.trim().eq_ignore_ascii_case(SCENE) { "other".to_string() } else { named.kind.clone() };
     Some(Entry {
         number,
         label: entry_label(named, subject),
-        kind: named.kind.clone(),
+        kind,
         description: named.description.clone(),
         unix: first.unix,
         shots: shown.into_iter().map(|(_, f)| Shot::of(f)).collect(),
@@ -491,6 +528,10 @@ pub fn display_label(label: &str) -> String {
 /// A line for an entry the script has none for, said as a sentence: "In October 2022, I met
 /// the red robot."
 pub(crate) fn template_line(e: &Entry) -> String {
+    // a scene says nothing unless its plan gives it words
+    if e.is_scene() {
+        return String::new();
+    }
     let when = month_year(e.unix);
     let what = e.label.trim();
     if when.is_empty() { format!("Next up, I met the {what}.") } else { format!("In {when}, I met the {what}.") }
@@ -569,14 +610,16 @@ const SCRIPT_SYSTEM: &str = "You write short, natural voice-over lines for a You
 /// deliver gets a plain template line, so the edit never depends on the model behaving.
 pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entry], progress: &mut dyn FnMut(&str)) -> Script {
     let years = years(entries);
+    // scenes (no robot) get no words from the model: a plan gives them their own, or none
+    let robots: Vec<(usize, &Entry)> = entries.iter().enumerate().filter(|(_, e)| !e.is_scene()).collect();
     let video = format!(
         "The video: \"{}\" — every {} I have filmed{}, in the order I met them ({} in all). A counter on screen numbers them, so do not say the numbers.",
         opts.title,
         opts.subject,
         if years.is_empty() { String::new() } else { format!(" ({years})") },
-        entries.len()
+        robots.len()
     );
-    let names: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+    let names: Vec<&str> = robots.iter().map(|(_, e)| e.label.as_str()).collect();
     let user = format!(
         "{video}\n\nAmong them: {}.\n\nWrite \"intro\": two sentences that open the video, and \"outro\": two sentences that close it.\n\nJSON: {{\"intro\": \"...\", \"outro\": \"...\"}}",
         names.join(", ")
@@ -591,9 +634,9 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
     }
     let mut written: Vec<Option<String>> = vec![None; entries.len()];
     let mut delivery: BTreeMap<String, String> = BTreeMap::new();
-    for (b, batch) in entries.chunks(SCRIPT_BATCH).enumerate() {
-        let listing: String = batch.iter().enumerate().map(|(i, e)| item_listing(i + 1, e)).collect::<Vec<_>>().join("\n");
-        let with_facts = batch.iter().any(|e| !e.facts.is_empty());
+    for (b, batch) in robots.chunks(SCRIPT_BATCH).enumerate() {
+        let listing: String = batch.iter().enumerate().map(|(i, (_, e))| item_listing(i + 1, e)).collect::<Vec<_>>().join("\n");
+        let with_facts = batch.iter().any(|(_, e)| !e.facts.is_empty());
         let ask = if with_facts {
             "Each is two or three short spoken sentences (at most 40 words) that say when and where I saw it and what it is or does, and weave in one or two of its facts naturally, as I would tell a friend; use only the facts listed for that item; do not start with the item's heading."
         } else {
@@ -609,14 +652,14 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
             Ok(v) => {
                 let lines = v.get("lines").and_then(Value::as_array).cloned().unwrap_or_default();
                 let said = v.get("deliveries").and_then(Value::as_array).cloned().unwrap_or_default();
-                for (i, e) in batch.iter().enumerate() {
+                for (i, (at, e)) in batch.iter().enumerate() {
                     let line = lines.get(i).and_then(Value::as_str).map(tidy).map(|l| strip_heading(&l, e)).filter(|l| l.split_whitespace().count() >= 3);
                     // only a delivery the model may choose, and only for a line it wrote
                     let mood = said.get(i).and_then(Value::as_str).and_then(Delivery::from_id).filter(|d| SCRIPT_DELIVERIES.contains(d));
                     if let (Some(_), Some(d)) = (&line, mood) {
                         delivery.insert(e.number.to_string(), d.id().to_string());
                     }
-                    if let Some(slot) = written.get_mut(b * SCRIPT_BATCH + i) {
+                    if let Some(slot) = written.get_mut(*at) {
                         *slot = line;
                     }
                 }
@@ -632,6 +675,7 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
         .zip(written)
         .map(|(e, w)| match w {
             Some(l) => l,
+            None if e.is_scene() => String::new(),
             None => {
                 templated += 1;
                 template_line(e)
@@ -646,7 +690,7 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
         );
     }
     if outro.split_whitespace().count() < 4 {
-        outro = format!("That's {} {}s so far. Thanks for watching, and see you at the next one.", entries.len(), opts.subject);
+        outro = format!("That's {} {}s so far. Thanks for watching, and see you at the next one.", robots.len(), opts.subject);
     }
     Script { intro, lines, outro, templated, delivery, ..Script::default() }
 }
@@ -704,6 +748,35 @@ pub struct Built {
     /// The length aimed for ([`Options::target_minutes`]), seconds; [`Built::seconds`] is the
     /// length it came to.
     pub target_seconds: Option<f64>,
+    /// Scene entries among [`Built::entries`] ([`Entry::is_scene`]).
+    pub scenes: usize,
+    /// The theme as drawn — its fonts as installed — when one was asked for ([`Look::style`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<Theme>,
+    /// The timeline along the bottom, as laid out and drawn ([`Look::timeline`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<look::Timeline>,
+    /// Transitions from the catalogue, as placed ([`Look::transitions`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub transitions: Vec<PlacedTransition>,
+    /// What `transitions.snapToBeats` did with them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub beat_snap: Option<Value>,
+    /// What `audio.normalizeLoudness` measured and did ([`Look::loudness`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loudness: Option<Value>,
+}
+
+/// A transition from the catalogue as placed: its id, effect, where (`within` an entry,
+/// `between` entries, into a `chapter`), the sound coupled to it, and the entry it leads into.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PlacedTransition {
+    pub id: u64,
+    pub effect: String,
+    pub at: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sound: Option<&'static str>,
+    pub entry: usize,
 }
 
 /// An entry as built: its span on the timeline and its shots, seconds.
@@ -714,6 +787,16 @@ pub struct PlacedEntry {
     pub start: f64,
     pub end: f64,
     pub shots: Vec<PlacedShot>,
+    /// A scene ([`Entry::is_scene`]): no robot to look for in its shots.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scene: bool,
+    /// Its name lower third (a robot's) or caption (a scene's), and its spec chips: graphic clips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lower_third: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chips: Vec<u64>,
 }
 
 /// A shot as built: its picture clip (on V2) and media item, and where it plays.
@@ -769,7 +852,7 @@ pub fn youtube_chapters(chapters: &[Chapter], total: f64) -> String {
         .join("\n")
 }
 
-async fn run(ex: &dyn Executor, id: &str, p: Value) -> Result<Value, AutoCutError> {
+pub(crate) async fn run(ex: &dyn Executor, id: &str, p: Value) -> Result<Value, AutoCutError> {
     let step = crate::PlannedStep::new(id, p.clone(), "showcase");
     crate::validate::validate_step(&step).map_err(AutoCutError::Invalid)?;
     ex.execute(id, p).await.map_err(|e| AutoCutError::Executor(format!("{id}: {e}")))
@@ -808,6 +891,10 @@ struct Tracks {
     sfx: String,
     /// Impacts and risers.
     hits: String,
+    /// The overlays' video tracks (indices): the timeline's base, picked-out and marker tracks,
+    /// and one for each spec chip.
+    timeline: Option<[usize; 3]>,
+    chips: Vec<usize>,
 }
 
 /// A generated sound effect at `t` on `track`, or on any free audio track when that one is busy
@@ -845,7 +932,7 @@ const FALLBACK_SOUND_DB: f64 = -14.0;
 /// Mix the show: set each clip's audio type, match its loudness to its role's target, duck the
 /// shots' sound and the music under the voice, and put a limiter on the mix so nothing clips.
 /// Steps that fail are noted, never fatal: the edit is still usable unmixed.
-async fn mix_down(ex: &dyn Executor, mix: &Mix, narrations: &[u64], music: &[u64], notes: &mut Vec<String>) {
+async fn mix_down(ex: &dyn Executor, mix: &Mix, narrations: &[u64], music: &[u64], limit: bool, notes: &mut Vec<String>) {
     let mut step = async |id: &str, p: Value| {
         if let Err(e) = run(ex, id, p).await {
             notes.push(format!("mix: {e}"));
@@ -875,7 +962,8 @@ async fn mix_down(ex: &dyn Executor, mix: &Mix, narrations: &[u64], music: &[u64
         let ducked: Vec<u64> = mix.sounds.iter().chain(music).copied().collect();
         step("essentialSound.generateDucking", json!({"clips": ducked})).await;
     }
-    if step("mixer.addInsert", json!({"strip": "Mix", "effect": "hard_limiter"})).await {
+    // (a mix normalised to a loudness target gets its limiter from the normalisation)
+    if limit && step("mixer.addInsert", json!({"strip": "Mix", "effect": "hard_limiter"})).await {
         step("mixer.setInsert", json!({"strip": "Mix", "slot": 0, "params": {"max": CEILING_DB}})).await;
     }
 }
@@ -1011,6 +1099,7 @@ async fn place_shot(
     dur: f64,
     stabilize: bool,
     focus: Option<Moment>,
+    follow: bool,
 ) -> Result<Placed, AutoCutError> {
     let frame_aspect = tr.aspect;
     let t = on_frame(t, tr.fps);
@@ -1036,7 +1125,7 @@ async fn place_shot(
         // still right
         push_in(ex, fg, scale, t, end, tr.fps).await.ok();
         // a still (the thumbnail's second) has nothing to follow
-        let followed = fill && tr.follow && dur > FOLLOW_MIN_SECONDS && follow_subject(ex, fg, aspect, src, dur, focus).await;
+        let followed = fill && tr.follow && follow && dur > FOLLOW_MIN_SECONDS && follow_subject(ex, fg, aspect, src, dur, focus).await;
         if fill && !followed {
             let focus = focus.unwrap_or(Moment { seconds: 0.0, area: 0.0, center: Moment::middle() });
             reframe(ex, fg, aspect, tr.frame, focus, t, end, tr.fps).await.ok();
@@ -1098,7 +1187,7 @@ const SLIDE_BY: f64 = 0.03;
 /// Animate the graphic clip `clip` (on screen from `t0` to `t1`, on frames) as a lower third:
 /// in from the left while fading in, decelerating into place; out the same way, accelerating —
 /// keyframes on its Motion position (the frame's centre, `w`×`h`) and its Opacity.
-async fn slide_in_out(ex: &dyn Executor, clip: u64, t0: f64, t1: f64, (w, h): (f64, f64), fps: f64) -> Result<(), AutoCutError> {
+pub(crate) async fn slide_in_out(ex: &dyn Executor, clip: u64, t0: f64, t1: f64, (w, h): (f64, f64), fps: f64) -> Result<(), AutoCutError> {
     let last = on_frame(t1 - 1.0 / fps, fps);
     if last - t0 < 2.0 * SLIDE {
         return Ok(());
@@ -1127,7 +1216,17 @@ async fn slide_in_out(ex: &dyn Executor, clip: u64, t0: f64, t1: f64, (w, h): (f
 /// A text title clip on video track `track` (an index), from `t` for `dur` seconds, both ends on
 /// frames.
 #[allow(clippy::too_many_arguments)]
-async fn title(ex: &dyn Executor, track: usize, fps: f64, text: &str, t: f64, dur: f64, size: f64, pos: (f64, f64), props: Value) -> Result<u64, AutoCutError> {
+pub(crate) async fn title(
+    ex: &dyn Executor,
+    track: usize,
+    fps: f64,
+    text: &str,
+    t: f64,
+    dur: f64,
+    size: f64,
+    pos: (f64, f64),
+    props: Value,
+) -> Result<u64, AutoCutError> {
     let (t0, t1) = (on_frame(t, fps), on_frame(t + dur, fps));
     let dur = (t1 - t0).max(1.0 / fps.max(1.0));
     let r =
@@ -1478,6 +1577,16 @@ impl Beats {
         (k..=k + 2).filter_map(|i| self.at(i)).find(|b| *b >= t - 1e-9)
     }
 
+    /// The beats from `from` to `to` seconds, at most [`MAX_BEATS`], the tempo's grid going on
+    /// past the measured ones.
+    pub fn list(&self, from: f64, to: f64) -> Vec<f64> {
+        if !(from.is_finite() && to.is_finite()) || to < from {
+            return Vec::new();
+        }
+        let (Some(k0), Some(k1)) = (self.index_before(from.max(0.0)), self.index_before(to)) else { return Vec::new() };
+        (k0..=k1.saturating_add(1)).take(MAX_BEATS + 2).filter_map(|k| self.at(k)).filter(|b| *b >= from - 1e-9 && *b <= to).take(MAX_BEATS).collect()
+    }
+
     /// How far `t` is from the nearest beat, seconds.
     pub fn distance(&self, t: f64) -> f64 {
         self.nearest(t, t - self.period * 2.0, t + self.period * 2.0).map_or(f64::INFINITY, |b| (b - t).abs())
@@ -1572,6 +1681,9 @@ pub struct Music {
     /// Where a generated bed's final chord lands on its last bar, seconds of the timeline (it
     /// rings out to the end of the bed: no fade).
     pub ending: Option<f64>,
+    /// What played a generated bed: a SoundFont's name, or the built-in oscillators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruments: Option<String>,
 }
 
 /// The energy (0..1) of a generated bed over a show `len` seconds long, as a curve of points
@@ -1596,6 +1708,25 @@ pub fn show_energy(len: f64, intro_end: f64, outro_at: f64, base: f64) -> Vec<f6
             ((base * shape).clamp(0.0, 1.0) * 1000.0).round() / 1000.0
         })
         .collect()
+}
+
+/// How much a generated bed's energy comes up while a scene plays without words.
+const SCENE_LIFT: f64 = 0.15;
+
+/// `energy` (points spread evenly over a show `len` seconds long, as [`show_energy`] gives
+/// them) lifted by [`SCENE_LIFT`] wherever one of `spans` (seconds) plays: the music comes up
+/// under a scene without words.
+pub fn lift_energy(energy: &mut [f64], len: f64, spans: &[(f64, f64)]) {
+    let n = energy.len();
+    if n < 2 || !(len.is_finite() && len > 0.0) {
+        return;
+    }
+    for (k, e) in energy.iter_mut().enumerate() {
+        let x = k as f64 / (n - 1) as f64 * len;
+        if spans.iter().any(|(a, b)| x >= *a && x < *b) {
+            *e = ((*e + SCENE_LIFT).clamp(0.0, 1.0) * 1000.0).round() / 1000.0;
+        }
+    }
 }
 
 impl Music {
@@ -1890,16 +2021,79 @@ fn balanced(text: &str, max: usize) -> Vec<String> {
 /// Fades on each shot's own sound, frames: no clip's sound starts or stops with a click.
 const AUDIO_FADE_FRAMES: i64 = 8;
 
+/// How long a scene without words plays (after its chapter card's lead), seconds.
+const SCENE_SECONDS: f64 = 4.5;
+
+/// The next of `list` in turn (`counter` counts the turns); `None` for an empty list (cuts).
+fn in_turn<'a>(list: &'a [String], counter: &mut usize) -> Option<&'a String> {
+    let pick = list.get(*counter % list.len().max(1));
+    *counter += 1;
+    pick
+}
+
+/// Within-entry cuts with transitions from the catalogue: each cut between an entry's windows
+/// (starting at `t`, played at full speed) moved to the nearest beat within [`BEAT_SNAP`] (half a
+/// beat at most) — the window before it a little longer (only as far as its reach, the robot
+/// still in view) or shorter (never under half a second), the one after it the other way — so
+/// the entry keeps its length and every cut in it lands on the music.
+fn snap_cuts(wins: &mut [Window], t: f64, beats: &Beats) {
+    let tol = BEAT_SNAP.min(beats.period() * 0.5);
+    let mut at = t;
+    for i in 0..wins.len().saturating_sub(1) {
+        let (Some(cur), Some(next)) = (wins.get(i).cloned(), wins.get(i + 1).cloned()) else { break };
+        let cut = at + cur.len;
+        let earlier = (cur.len - 0.5).max(0.0).min((next.reach - next.len).max(0.0)).min(tol);
+        let later = (cur.reach - cur.len).max(0.0).min((next.len - 0.5).max(0.0)).min(tol);
+        if let Some(b) = beats.nearest(cut, cut - earlier, cut + later) {
+            let d = b - cut;
+            if let Some(w) = wins.get_mut(i) {
+                w.len += d;
+            }
+            if let Some(w) = wins.get_mut(i + 1) {
+                w.len -= d;
+            }
+        }
+        at += wins.get(i).map_or(0.0, |w| w.len);
+    }
+}
+
 /// Build the showcase into a new sequence. `progress` gets a line per entry.
 pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script: &Script, progress: &mut dyn FnMut(&str)) -> Result<Built, AutoCutError> {
     if entries.is_empty() {
         return Err(AutoCutError::Invalid(format!("no clip shows a {} clearly enough to count", opts.subject)));
     }
-    let mut built = Built { entries: entries.len(), ..Built::default() };
-    let r =
-        run(ex, "file.newSequence", json!({"name": opts.title, "width": opts.width, "height": opts.height, "fps": opts.fps, "video": 5, "audio": 5})).await?;
-    built.sequence = r["sequence"].as_u64();
+    let look = &opts.look;
+    let robots = entries.iter().filter(|e| !e.is_scene()).count();
+    if robots == 0 {
+        return Err(AutoCutError::Invalid(format!("only scene entries: a showcase needs at least one {}", opts.subject)));
+    }
     let (w, h) = (f64::from(opts.width), f64::from(opts.height));
+    // the plan's chips and the timeline's dates are checked before anything is built
+    let numbers: Vec<usize> = entries.iter().map(|e| e.number).collect();
+    let chips = look::chips_by_entry(&script.chips, &numbers)?;
+    if look.timeline {
+        let dates: Vec<i64> = entries.iter().filter_map(|e| e.unix).collect();
+        look::Scale::new(&dates, (w, h))?;
+    }
+    let mut built = Built { entries: entries.len(), scenes: entries.len() - robots, ..Built::default() };
+    // the overlays get tracks of their own, above the show's five
+    let mut video = 5;
+    let timeline_tracks = if look.timeline {
+        video += 3;
+        Some([5, 6, 7])
+    } else {
+        None
+    };
+    let chip_tracks: Vec<usize> = if chips.is_empty() {
+        Vec::new()
+    } else {
+        let c = (video..video + look::MAX_CHIPS).collect();
+        video += look::MAX_CHIPS;
+        c
+    };
+    let r = run(ex, "file.newSequence", json!({"name": opts.title, "width": opts.width, "height": opts.height, "fps": opts.fps, "video": video, "audio": 5}))
+        .await?;
+    built.sequence = r["sequence"].as_u64();
     let tr = Tracks {
         fps: opts.fps.clamp(1.0, 240.0),
         aspect: w / h.max(1.0),
@@ -1917,7 +2111,24 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         music: "A3".into(),
         sfx: "A4".into(),
         hits: "A5".into(),
+        timeline: timeline_tracks,
+        chips: chip_tracks,
     };
+    // the theme, its families as installed (Inter for one that is not)
+    let theme: Option<Theme> = match &look.style {
+        Some(st) => {
+            let installed = look::installed_fonts(ex).await;
+            let th = st.resolve(installed.as_deref());
+            for m in &th.missing {
+                built.notes.push(format!("style: the font {m} is not installed; {} stands in", look::FALLBACK_FAMILY));
+            }
+            progress(&format!("style: {} — {}, {}, {}", th.name, th.title.family, th.body.family, th.number.family));
+            Some(th)
+        }
+        None => None,
+    };
+    // what the new overlays (the timeline, chips, scene captions) wear without a theme
+    let overlay = theme.clone().unwrap_or_else(|| look::Style::classic().resolve(None));
     let voice = opts.voice.as_deref();
     let mut narrations = Narrations::default();
     let mut mix = Mix::default();
@@ -1971,7 +2182,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let next_cut = beats.as_ref().and_then(|b| b.nearest(at + cut, at + cut * 0.5, at + cut * 1.5)).unwrap_or(at + cut);
         let len = if i + 1 >= picks.len() { intro_len - at } else { (next_cut - at).min(intro_len - at) };
         let len = len.min((s.clip_seconds - 0.4).max(0.5));
-        let shot = place_shot(ex, &tr, s.item, at, s.window_start(len), len, true, s.largest).await?;
+        let shot = place_shot(ex, &tr, s.item, at, s.window_start(len), len, true, s.largest, true).await?;
         fade_in(ex, shot.audio).await;
         mix.sounds.extend(shot.audio);
         at = shot.end;
@@ -1984,21 +2195,26 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let hit = beats.as_ref().and_then(|b| b.nearest(1.8, 1.3, 2.4)).map_or(1.8, |x| on_frame(x, tr.fps));
     sfx(ex, "riser", hit.min(1.8), (hit - 1.8).max(0.0), &tr.hits, 0.7, &mut mix).await?;
     sfx(ex, "impact", 3.0, hit, &tr.hits, 0.8, &mut mix).await?;
-    title(ex, tr.titles_index, tr.fps, &opts.title, hit, intro_len - hit, 110.0, (w / 2.0, h * 0.46), title_props.clone()).await?;
     let subtitle = opts.subtitle.clone().unwrap_or_else(|| years(entries));
-    if !subtitle.is_empty() {
-        title(
-            ex,
-            tr.over_index,
-            tr.fps,
-            &subtitle,
-            hit + 0.5,
-            intro_len - hit - 0.5,
-            54.0,
-            (w / 2.0, h * 0.46 + 95.0),
-            json!({"font_style": "Bold", "align": "center", "fill_color": "#ffcc00", "shadow": true}),
-        )
-        .await?;
+    match &theme {
+        Some(th) => look::title_card(ex, th, [tr.titles_index, tr.over_index], tr.fps, (w, h), &opts.title, &subtitle, hit, intro_len).await?,
+        None => {
+            title(ex, tr.titles_index, tr.fps, &opts.title, hit, intro_len - hit, 110.0, (w / 2.0, h * 0.46), title_props.clone()).await?;
+            if !subtitle.is_empty() {
+                title(
+                    ex,
+                    tr.over_index,
+                    tr.fps,
+                    &subtitle,
+                    hit + 0.5,
+                    intro_len - hit - 0.5,
+                    54.0,
+                    (w / 2.0, h * 0.46 + 95.0),
+                    json!({"font_style": "Bold", "align": "center", "fill_color": "#ffcc00", "shadow": true}),
+                )
+                .await?;
+            }
+        }
     }
     built.chapters.push(Chapter { seconds: 0.0, title: "Intro".into() });
     let mut t = intro_len;
@@ -2017,17 +2233,27 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         })
         .collect();
     let outro_estimate = (0.8 + words(&script.spoken("outro", &script.outro)) + 1.5).max(5.0);
+    // transitions from the catalogue: each list in turn, about a beat long (two into a chapter)
+    let (mut n_within, mut n_between, mut n_chapter) = (0usize, 0usize, 0usize);
+    let frames_of = |beats: f64, lo: f64, hi: f64| (beat * beats * tr.fps).round().clamp(lo, hi) as i64;
+    // scenes that play without words: the music comes up under them
+    let mut quiet_scenes: Vec<(f64, f64)> = Vec::new();
 
     // ---- the entries
     for (k, e) in entries.iter().enumerate() {
+        let scene = e.is_scene();
         let section = cards.get(k).cloned().flatten();
         let new_year = section.is_some();
         let lead = if new_year { CARD_LEAD } else { 0.5 };
         let line = script.lines.get(k).cloned().unwrap_or_else(|| template_line(e));
         let voice_at = (t + lead).max(voice_free_at + 0.15);
-        let spoken =
+        // (a part with no words — a scene's, usually — is not narrated)
+        let spoken = if line.trim().is_empty() {
+            0.0
+        } else {
             narrate(ex, &tr, voice, &script.spoken(&e.number.to_string(), &line), &line, script.delivery_of(&e.number.to_string()), voice_at, &mut narrations)
-                .await?;
+                .await?
+        };
         if spoken > 0.0 {
             voice_free_at = voice_at + spoken;
         }
@@ -2040,19 +2266,27 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 let rest: Vec<Stretch> = std::iter::once(here).chain(planned.iter().skip(k + 1).copied()).collect();
                 here.at(breathe_for(&rest, target - t - outro_estimate))
             }
+            None if scene && spoken <= 0.0 => (lead + SCENE_SECONDS).clamp(MIN_ENTRY, MAX_ENTRY),
             None => (voice_at - t + spoken + BREATHE).clamp(MIN_ENTRY, MAX_ENTRY),
         };
         let must = voice_at - t + spoken + 0.7;
         // the robot in view; when that is too little to carry the words even at half speed,
-        // the clips as they are
-        let mut wins = in_view_windows(e, needed);
-        if wins.iter().map(|w| w.len).sum::<f64>() / 0.5 < must {
+        // the clips as they are (a scene has no robot: its clips as they are)
+        let mut wins = if scene { filling_windows(e, needed) } else { in_view_windows(e, needed) };
+        if !scene && wins.iter().map(|w| w.len).sum::<f64>() / 0.5 < must {
             wins = filling_windows(e, needed);
         }
         let footage: f64 = wins.iter().map(|w| w.len).sum();
         // footage too short for the words: slow the shots to cover them, never below half speed
         // (an entry with words to spare just ends sooner)
         let slow = if footage + 0.05 < must { (footage / must).clamp(0.5, 1.0) } else { 1.0 };
+        // with transitions from the catalogue, the cuts within the entry land on beats too
+        if look.transitions.is_some()
+            && slow >= 0.999
+            && let Some(b) = beats.as_ref()
+        {
+            snap_cuts(&mut wins, t, b);
+        }
         // the entry ends on a beat (so the next one, its transition and year card start on one)
         let beat_end = beats.as_ref().and_then(|b| snap_end(&mut wins, t, slow, must.max(2.0), b)).map(|x| on_frame(x, tr.fps));
         cuts.push(t);
@@ -2067,7 +2301,9 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 Some(end) if i + 1 == n_wins && slow >= 0.999 => (end - at).max(0.5).min(reach.max(0.5)),
                 _ => *len,
             };
-            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, len, true, s.largest).await?;
+            // (a scene has no robot to frame or follow)
+            let focus = if scene { None } else { s.largest };
+            let Placed { fg, bg, audio, end } = place_shot(ex, &tr, s.item, at, *src, len, true, focus, !scene).await?;
             mix.sounds.extend(audio);
             let mut shot_end = end;
             if slow < 0.999 {
@@ -2085,8 +2321,28 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             if i == 0 {
                 firsts = Some((fg, bg));
             } else {
-                // between shots (or stretches of one clip) of an entry: a quick dissolve
-                run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "in", "effect": "cross_dissolve", "frames": 8})).await.ok();
+                match &look.transitions {
+                    // between shots (or stretches of one clip) of an entry: a quick dissolve
+                    None => {
+                        run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "in", "effect": "cross_dissolve", "frames": 8})).await.ok();
+                    }
+                    // or the plan's own (none by default: a cut, on the beat)
+                    Some(tp) => {
+                        if let Some(effect) = in_turn(&tp.within, &mut n_within) {
+                            let p = json!({"clip": fg, "edge": "in", "effect": effect, "frames": frames_of(0.5, 6.0, 15.0)});
+                            match run(ex, "sequence.applyVideoTransition", p).await {
+                                Ok(r) => built.transitions.extend(r["transition"].as_u64().map(|id| PlacedTransition {
+                                    id,
+                                    effect: effect.clone(),
+                                    at: "within",
+                                    sound: None,
+                                    entry: e.number,
+                                })),
+                                Err(err) => built.notes.push(format!("transition {effect} in entry {}: {err}", e.number)),
+                            }
+                        }
+                    }
+                }
             }
             shots.push(PlacedShot { clip: fg, item: s.item, start: on_frame(at, tr.fps), end: shot_end });
             full_frame.push(bg.is_none());
@@ -2098,55 +2354,146 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             match_colour(ex, &shots, &full_frame, &mut built.notes).await;
         }
         let entry_end = on_frame(at.max(t + 2.0), tr.fps);
-        built.layout.push(PlacedEntry { number: e.number, label: e.label.clone(), start: t, end: entry_end, shots });
+        if scene && spoken <= 0.0 {
+            quiet_scenes.push((t, entry_end));
+        }
+        let mut placed = PlacedEntry { number: e.number, label: e.label.clone(), start: t, end: entry_end, shots, scene, ..PlacedEntry::default() };
         if let Some((fg, bg)) = firsts {
             fg_firsts.push((fg, bg));
             // (the first entry follows the intro montage)
-            {
-                let (effect, param) =
-                    if new_year { ("dip_to_black", None) } else { TRANSITIONS.get(k % TRANSITIONS.len()).copied().unwrap_or(("cross_dissolve", None)) };
-                let mut p = json!({"clip": fg, "edge": "in", "effect": effect, "frames": if new_year { 18 } else { 12 }});
-                if let Some((name, value)) = param {
-                    p["params"] = json!({name: value});
+            match &look.transitions {
+                None => {
+                    let (effect, param) =
+                        if new_year { ("dip_to_black", None) } else { TRANSITIONS.get(k % TRANSITIONS.len()).copied().unwrap_or(("cross_dissolve", None)) };
+                    let mut p = json!({"clip": fg, "edge": "in", "effect": effect, "frames": if new_year { 18 } else { 12 }});
+                    if let Some((name, value)) = param {
+                        p["params"] = json!({name: value});
+                    }
+                    if let Err(err) = run(ex, "sequence.applyVideoTransition", p).await {
+                        built.notes.push(format!("transition {effect} at entry {}: {err}", e.number));
+                    }
+                    if let Some(b) = bg {
+                        run(ex, "sequence.applyVideoTransition", json!({"clip": b, "edge": "in", "effect": "cross_dissolve", "frames": 12})).await.ok();
+                    }
+                    sfx(ex, "whoosh", 1.2, (t - 0.55).max(0.0), &tr.sfx, 0.6, &mut mix).await?;
                 }
-                if let Err(err) = run(ex, "sequence.applyVideoTransition", p).await {
-                    built.notes.push(format!("transition {effect} at entry {}: {err}", e.number));
+                // from the catalogue, each with its sound (a whoosh between entries, a riser
+                // into a chapter, whose card brings the impact)
+                Some(tp) => {
+                    let (list, where_, sound, frames, counter) = if new_year {
+                        (&tp.chapter, "chapter", "riser", frames_of(2.0, 12.0, 40.0), &mut n_chapter)
+                    } else {
+                        (&tp.between, "between", "whoosh", frames_of(1.0, 8.0, 24.0), &mut n_between)
+                    };
+                    if let Some(effect) = in_turn(list, counter) {
+                        match run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "in", "effect": effect, "frames": frames})).await {
+                            Ok(r) => {
+                                if let Some(id) = r["transition"].as_u64() {
+                                    let intensity = if new_year { 0.75 } else { 0.6 };
+                                    let with_sound =
+                                        match run(ex, "transitions.addSound", json!({"transitions": [id], "kind": sound, "intensity": intensity})).await {
+                                            Ok(_) => Some(sound),
+                                            Err(err) => {
+                                                built.notes.push(format!("transition sound at entry {}: {err}", e.number));
+                                                None
+                                            }
+                                        };
+                                    built.transitions.push(PlacedTransition { id, effect: effect.clone(), at: where_, sound: with_sound, entry: e.number });
+                                }
+                            }
+                            Err(err) => built.notes.push(format!("transition {effect} at entry {}: {err}", e.number)),
+                        }
+                    }
+                    if let Some(b) = bg {
+                        run(ex, "sequence.applyVideoTransition", json!({"clip": b, "edge": "in", "effect": "cross_dissolve", "frames": 12})).await.ok();
+                    }
                 }
-                if let Some(b) = bg {
-                    run(ex, "sequence.applyVideoTransition", json!({"clip": b, "edge": "in", "effect": "cross_dissolve", "frames": 12})).await.ok();
-                }
-                sfx(ex, "whoosh", 1.2, (t - 0.55).max(0.0), &tr.sfx, 0.6, &mut mix).await?;
             }
         }
         if new_year && let Some(sec) = &section {
             built.chapters.push(Chapter { seconds: t, title: sec.clone() });
             let (text, size) = card(sec, w);
-            title(ex, tr.over_index, tr.fps, &text, t, CARD_LEAD, size, (w / 2.0, h * 0.55), title_props.clone()).await?;
+            match &theme {
+                Some(th) => {
+                    look::chapter_card(ex, th, tr.over_index, tr.fps, (w, h), &text, size, t, CARD_LEAD).await?;
+                }
+                None => {
+                    title(ex, tr.over_index, tr.fps, &text, t, CARD_LEAD, size, (w / 2.0, h * 0.55), title_props.clone()).await?;
+                }
+            }
             sfx(ex, "impact", 2.0, t, &tr.hits, 0.6, &mut mix).await?;
         }
-        // the name, and when and where, bottom left, while the narration introduces it
+        // the name, and when and where, bottom left, while the narration introduces it (a
+        // scene: its caption)
         let when = month_year(e.unix);
-        let name = display_label(&e.label);
-        let place = e.event.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let second = lower_third_place(place, &when);
-        let lower = if second.is_empty() { name } else { format!("{name}\n{second}") };
         let shown_for = (entry_end - t - lead - 0.3).clamp(1.5, 4.5);
-        let third = title(
-            ex,
-            tr.titles_index,
-            tr.fps,
-            &lower,
-            t + lead,
-            shown_for,
-            46.0,
-            (w * 0.05, h * 0.82),
-            json!({"font_style": "Bold", "align": "left", "background": true, "background_opacity": 55, "background_size": 18, "shadow": false}),
-        )
-        .await?;
+        let (t0, t1) = (on_frame(t + lead, tr.fps), on_frame(t + lead + shown_for, tr.fps));
+        // (raised a little over the timeline)
+        let low = if look.timeline { h * 0.78 } else { h * 0.82 };
+        let (shown, beside) = if scene {
+            let caption = e.caption_text();
+            match &theme {
+                Some(th) => {
+                    let line = look::Line { text: &caption, role: Role::Body, size: 34.0, color: &th.text, caps: false, opacity: 100.0 };
+                    let (c, b) = look::panel_text(ex, th, tr.titles_index, tr.fps, (w, h), &[line], t + lead, shown_for, (w * 0.05, h * 0.82)).await?;
+                    (c, Some(b))
+                }
+                None => {
+                    let props =
+                        json!({"font_style": "Medium", "align": "left", "background": true, "background_opacity": 45, "background_size": 14, "shadow": false});
+                    let c = title(ex, tr.titles_index, tr.fps, &caption, t + lead, shown_for, 40.0, (w * 0.05, low), props).await?;
+                    (c, None)
+                }
+            }
+        } else {
+            let name = display_label(&e.label);
+            let place = e.event.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let second = lower_third_place(place, &when);
+            match &theme {
+                Some(th) => {
+                    let mut lines = vec![look::Line { text: &name, role: Role::Title, size: 54.0, color: &th.text, caps: true, opacity: 100.0 }];
+                    if !second.is_empty() {
+                        lines.push(look::Line { text: &second, role: Role::Body, size: 27.0, color: &th.text, caps: false, opacity: 82.0 });
+                    }
+                    let (c, b) = look::panel_text(ex, th, tr.titles_index, tr.fps, (w, h), &lines, t + lead, shown_for, (w * 0.05, h * 0.80)).await?;
+                    (c, Some(b))
+                }
+                None => {
+                    let lower = if second.is_empty() { name } else { format!("{name}\n{second}") };
+                    let props =
+                        json!({"font_style": "Bold", "align": "left", "background": true, "background_opacity": 55, "background_size": 18, "shadow": false});
+                    (title(ex, tr.titles_index, tr.fps, &lower, t + lead, shown_for, 46.0, (w * 0.05, low), props).await?, None)
+                }
+            }
+        };
         // it slides and fades in and out (cosmetic: still right without)
-        slide_in_out(ex, third, on_frame(t + lead, tr.fps), on_frame(t + lead + shown_for, tr.fps), (w, h), tr.fps).await.ok();
-        counter_times.push(t + lead);
-        progress(&format!("[{}/{}] {} — {} ({:.1}s)", e.number, entries.len(), when, e.label, entry_end - t));
+        slide_in_out(ex, shown, t0, t1, (w, h), tr.fps).await.ok();
+        if scene {
+            placed.caption = Some(shown);
+        } else {
+            placed.lower_third = Some(shown);
+            counter_times.push(t + lead);
+        }
+        // its spec chips beside it, one after the other while its words are said
+        if let Some(texts) = chips.get(&e.number) {
+            let beside = match beside {
+                Some(b) => Some(b),
+                // the plain lower third (its background reaches 18 px, or 14 for a caption, past the text)
+                None => look::measure(ex, shown, Some(0)).await.map(|b| b.pad(if scene { 14.0 } else { 18.0 }, if scene { 14.0 } else { 18.0 })),
+            };
+            let c0 = if spoken > 0.0 { voice_at + 0.5 } else { t + lead + 0.6 };
+            let c1 = (t + lead + shown_for).max(voice_at + spoken + 0.3).min(entry_end - 0.1);
+            match beside {
+                Some(b) if c1 - c0 >= 1.2 => match look::chips(ex, &overlay, &tr.chips, tr.fps, (w, h), texts, b, c0, c1).await {
+                    Ok(c) => placed.chips = c,
+                    Err(err) => built.notes.push(format!("chips of entry {}: {err}", e.number)),
+                },
+                Some(_) => built.notes.push(format!("chips of entry {}: the entry is too short to show them", e.number)),
+                None => built.notes.push(format!("chips of entry {}: its lower third could not be measured", e.number)),
+            }
+        }
+        built.layout.push(placed);
+        progress(&format!("[{}/{}] {} — {} ({:.1}s)", e.number, entries.len(), when, if scene { e.caption_text() } else { e.label.clone() }, entry_end - t));
         t = entry_end;
     }
 
@@ -2157,9 +2504,9 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let outro_spoken =
         narrate(ex, &tr, voice, &script.spoken("outro", &script.outro), &script.outro, script.delivery_of("outro"), outro_voice_at, &mut narrations).await?;
     let outro_len = (outro_voice_at - t + outro_spoken + 1.5).max(5.0);
-    if let Some(h0) = entries.last().and_then(|e| e.shots.first()) {
+    if let Some(h0) = entries.iter().rev().find(|e| !e.is_scene()).and_then(|e| e.shots.first()) {
         let len = outro_len.min((h0.clip_seconds - 0.4).max(1.0));
-        let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, false, h0.largest).await?;
+        let Placed { fg, audio, .. } = place_shot(ex, &tr, h0.item, t, h0.window_start(len), len, false, h0.largest, true).await?;
         mix.sounds.extend(audio);
         fade_in(ex, audio).await;
         if let Some(a) = audio {
@@ -2173,20 +2520,25 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "out", "effect": "dip_to_black", "frames": 30})).await.ok();
     }
     sfx(ex, "impact", 3.0, t, &tr.hits, 0.7, &mut mix).await?;
-    let closing = format!("{} {}S", entries.len(), opts.subject.to_uppercase());
-    title(ex, tr.titles_index, tr.fps, &closing, t + 0.3, outro_len - 0.3, 130.0, (w / 2.0, h * 0.48), title_props.clone()).await?;
-    title(
-        ex,
-        tr.over_index,
-        tr.fps,
-        "and counting",
-        t + 0.9,
-        outro_len - 0.9,
-        56.0,
-        (w / 2.0, h * 0.48 + 90.0),
-        json!({"font_style": "Bold", "align": "center", "fill_color": "#ffcc00", "shadow": true}),
-    )
-    .await?;
+    let closing = format!("{robots} {}S", opts.subject.to_uppercase());
+    match &theme {
+        Some(th) => look::outro_card(ex, th, [tr.titles_index, tr.over_index], tr.fps, (w, h), &closing, "and counting", t, outro_len).await?,
+        None => {
+            title(ex, tr.titles_index, tr.fps, &closing, t + 0.3, outro_len - 0.3, 130.0, (w / 2.0, h * 0.48), title_props.clone()).await?;
+            title(
+                ex,
+                tr.over_index,
+                tr.fps,
+                "and counting",
+                t + 0.9,
+                outro_len - 0.9,
+                56.0,
+                (w / 2.0, h * 0.48 + 90.0),
+                json!({"font_style": "Bold", "align": "center", "fill_color": "#ffcc00", "shadow": true}),
+            )
+            .await?;
+        }
+    }
     let total = t + outro_len;
     built.seconds = total;
     built.target_seconds = target;
@@ -2197,35 +2549,102 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
 
     // ---- the counter, across the entries
     let counter_prefix = format!("{} #", opts.subject.to_uppercase());
-    run(
+    let counter = run(
         ex,
         "graphics.counter",
         json!({"times": counter_times, "end": t, "prefix": counter_prefix, "corner": "topRight", "size": 60, "color": "#ffffff", "track": tr.counter_index}),
     )
     .await?;
+    if let (Some(th), Some(clip)) = (&theme, counter["clip"].as_u64()) {
+        // in the theme's number font, without the outline
+        let mut props = th.text_props(Role::Number, &th.text, "right");
+        props["shadow_blur"] = json!(20);
+        if let Err(err) = run(ex, "graphics.set", json!({"clip": clip, "layer": 0, "props": props})).await {
+            built.notes.push(format!("style: the counter: {err}"));
+        }
+    }
+    // it steps aside while a scene plays (there is no robot to count)
+    if let Some(clip) = counter["clip"].as_u64() {
+        let first = counter_times.first().copied().unwrap_or(f64::INFINITY);
+        let mut spans: Vec<(f64, f64)> = Vec::new();
+        for p in built.layout.iter().filter(|p| p.scene && p.start > first) {
+            match spans.last_mut() {
+                Some(last) if (p.start - last.1).abs() < 1e-6 => last.1 = p.end,
+                _ => spans.push((p.start, p.end)),
+            }
+        }
+        if let Err(err) = look::hide_during(ex, clip, &spans, tr.fps).await {
+            built.notes.push(format!("the counter over a scene: {err}"));
+        }
+    }
+
+    // ---- the timeline along the bottom, from the first entry to the outro
+    if let Some(tracks) = tr.timeline {
+        let along: Vec<look::TimelineEntry> = built
+            .layout
+            .iter()
+            .zip(entries)
+            .map(|(p, e)| look::TimelineEntry { number: e.number, start: p.start, unix: e.unix, event: e.event.clone() })
+            .collect();
+        match look::plan_timeline(&along, &look.events, intro_len, outro_at, (w, h), tr.fps) {
+            Ok(Some(mut tl)) => {
+                if let Err(err) = look::draw_timeline(ex, &overlay, &mut tl, tracks, tr.fps, (w, h)).await {
+                    built.notes.push(format!("timeline: {err}"));
+                }
+                progress(&format!(
+                    "timeline: {}–{}, {} bands, the marker at {} dates",
+                    tl.scale.first_year,
+                    tl.scale.last_year,
+                    tl.bands.len(),
+                    tl.stops.len()
+                ));
+                built.timeline = Some(tl);
+            }
+            Ok(None) => built.notes.push("timeline: no entry has a date".into()),
+            Err(err) => built.notes.push(format!("timeline: {err}")),
+        }
+    }
 
     // ---- music under everything, ducked under the voice, faded out: the user's track fitted to
     // the show, or a generated bed
     cuts.push(t);
-    let (music, info) = match &track {
+    let (music, info, played) = match &track {
         Some(m) => {
             let (clips, fit, played) = place_music(ex, &tr, m, total + 0.5, &mut built.notes).await?;
-            (clips, Music { source: m.path.clone(), bpm: m.bpm, fit: fit.into(), ..Music::default() }.with_cuts(&cuts, played.as_ref(), tr.fps))
+            let info = Music { source: m.path.clone(), bpm: m.bpm, fit: fit.into(), ..Music::default() }.with_cuts(&cuts, played.as_ref(), tr.fps);
+            (clips, info, played)
         }
         None => {
-            // arranged to the show's exact length, its energy following the show, ending on a
-            // bar with its final chord ringing out (so no fade); the mood's own energy scales it
+            // arranged to the show's exact length, its energy following the show (up under the
+            // scenes without words), ending on a bar with its final chord ringing out (so no
+            // fade); the mood's own energy scales it
             let len = total + 0.5;
-            let m = run(
-                ex,
-                "audio.generate",
-                json!({"kind": "music", "duration": len, "mood": opts.mood, "bpm": opts.bpm, "time": 0, "track": tr.music, "energy": show_energy(len, intro_len, outro_at, bed_energy)}),
-            )
-            .await?;
+            let mut energy = show_energy(len, intro_len, outro_at, bed_energy);
+            lift_energy(&mut energy, len, &quiet_scenes);
+            let mut p = json!({"kind": "music", "duration": len, "mood": opts.mood, "bpm": opts.bpm, "time": 0, "track": tr.music, "energy": energy});
+            if let Some(sf) = &look.soundfont {
+                p["soundfont"] = json!(sf);
+            }
+            let m = match run(ex, "audio.generate", p.clone()).await {
+                Ok(m) => m,
+                // a SoundFont that cannot play: the bed on the built-in instruments, noted
+                Err(err) if look.soundfont.is_some() => {
+                    built.notes.push(format!("music: {err}; the bed is played without that SoundFont"));
+                    if let Some(o) = p.as_object_mut() {
+                        o.remove("soundfont");
+                    }
+                    run(ex, "audio.generate", p).await?
+                }
+                Err(err) => return Err(err),
+            };
             // the bed's own beat map (exact ticks): the grid the cuts were laid on
             let map: Vec<i64> = m["beats"].as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
             let played = Beats::from_ticks(&map, 0.0).unwrap_or_else(|| Beats::grid(bed_bpm));
+            if let (Some(_), Some(warning)) = (&look.soundfont, m["warning"].as_str()) {
+                built.notes.push(format!("music: {warning}"));
+            }
             let info = Music {
+                instruments: m["soundfont"]["name"].as_str().map(str::to_string),
                 source: "generated".into(),
                 bpm: m["bpm"].as_f64().or(Some(60.0 / played.period())),
                 fit: "generated".into(),
@@ -2233,7 +2652,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 ending: m["ending"].as_i64().map(|t| t as f64 / TPS),
                 ..Music::default()
             };
-            (m["clip"].as_u64().into_iter().collect::<Vec<u64>>(), info.with_cuts(&cuts, Some(&played), tr.fps))
+            let info = info.with_cuts(&cuts, Some(&played), tr.fps);
+            (m["clip"].as_u64().into_iter().collect::<Vec<u64>>(), info, Some(played))
         }
     };
     // the user's track is faded out where the show ends; a generated bed ends on its own
@@ -2246,12 +2666,47 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     }
     progress(&format!("music: {} ({}); {} of {} cuts on the beat", info.source, info.fit, info.cuts_on_beat, info.cuts));
     built.music = Some(info);
+    // ---- transitions from the catalogue: on the music's beats, each a musical length
+    if !built.transitions.is_empty() {
+        match &played {
+            Some(b) => {
+                let ids: Vec<u64> = built.transitions.iter().map(|x| x.id).collect();
+                match run(ex, "transitions.snapToBeats", json!({"transitions": ids, "beats": b.list(0.0, total + 0.5)})).await {
+                    Ok(r) => {
+                        let snapped = r["snapped"].as_array().map_or(0, Vec::len);
+                        for s in r["skipped"].as_array().into_iter().flatten() {
+                            built.notes.push(format!("transition {}: not on the beat ({})", s["transition"], s["reason"].as_str().unwrap_or("")));
+                        }
+                        progress(&format!("transitions: {snapped} of {} on the beat", ids.len()));
+                        built.beat_snap = Some(json!({"snapped": snapped, "of": ids.len(), "bpm": r["bpm"], "skipped": r["skipped"]}));
+                    }
+                    Err(err) => built.notes.push(format!("transitions: {err}")),
+                }
+            }
+            None => built.notes.push("transitions: the music has no beat to put them on".into()),
+        }
+    }
     if !narrations.clips.is_empty() {
         progress(&format!("{} narration lines, {} from the narration cache, {} read again", narrations.clips.len(), narrations.cached, narrations.retakes));
     }
     // ---- the mix
     progress("mixing");
-    mix_down(ex, &mix, &narrations.clips, &music, &mut built.notes).await;
+    mix_down(ex, &mix, &narrations.clips, &music, look.loudness.is_none(), &mut built.notes).await;
+    // to a destination's loudness, with a true-peak ceiling (instead of the limiter alone)
+    if let Some(l) = &look.loudness {
+        progress("loudness: normalising the mix");
+        match run(ex, "audio.normalizeLoudness", json!({"target": l.target(), "truePeak": look::TRUE_PEAK})).await {
+            Ok(r) => {
+                progress(&format!(
+                    "loudness: {:.1} LUFS, true peak {:.1} dBTP",
+                    r["loudnessLufs"].as_f64().unwrap_or(f64::NAN),
+                    r["truePeakDbtp"].as_f64().unwrap_or(f64::NAN)
+                ));
+                built.loudness = Some(r);
+            }
+            Err(err) => built.notes.push(format!("loudness: {err}")),
+        }
+    }
     built.narration_lines = narrations.clips.len();
     built.narration_cached = narrations.cached;
     built.narration_retakes = narrations.retakes;
@@ -2260,9 +2715,19 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     built.subtitles = crate::subtitles::cues(&narrations.lines, tr.fps);
     built.narration = narrations.lines;
     let captions = if built.subtitles.is_empty() { None } else { caption_track(ex, &built.subtitles, &mut built.notes).await };
+    built.theme = theme;
     if let Some(path) = &opts.export {
         progress("exporting (YouTube 1080p)");
-        built.export = Some(run(ex, "file.exportMedia", json!({"path": path, "preset": "YouTube 1080p Full HD", "wait": true})).await?);
+        let mut p = json!({"path": path, "preset": "YouTube 1080p Full HD", "wait": true});
+        // the subtitles in the video too, as closed captions (CEA-608/708)
+        if look.embed_captions {
+            if captions.is_some() {
+                p["embedCaptions"] = json!(true);
+            } else {
+                built.notes.push("captions: no narration to caption; nothing embedded".into());
+            }
+        }
+        built.export = Some(run(ex, "file.exportMedia", p).await?);
         // the subtitles next to the export, for YouTube (SubRip) and the web (WebVTT)
         if let Some(track) = captions {
             for ext in ["srt", "vtt"] {
@@ -2294,7 +2759,7 @@ pub const THUMBNAIL_SIZE: (u32, u32) = (1280, 720);
 /// moment, in the middle of the frame, as a modest size.
 pub fn thumbnail_frame(entries: &[Entry], subject: &str) -> Option<(Shot, Moment, usize)> {
     let mut pick: Option<(f64, &Shot, Moment, usize)> = None;
-    for e in entries {
+    for e in entries.iter().filter(|e| !e.is_scene()) {
         let weight = if crate::analyze::famous(&e.label) {
             2.0
         } else if generic(&e.label, subject) {
@@ -2350,7 +2815,8 @@ pub async fn thumbnail(ex: &dyn Executor, opts: &Options, entries: &[Entry], sho
     let r = run(ex, "file.newSequence", json!({"name": format!("{} — Thumbnail", opts.title), "width": w, "height": h, "fps": fps, "video": 4, "audio": 1}))
         .await?;
     let thumb = r["sequence"].as_u64();
-    let made = compose_thumbnail(ex, opts, entries.len(), &shot, moment, thumb, path).await;
+    let robots = entries.iter().filter(|e| !e.is_scene()).count();
+    let made = compose_thumbnail(ex, opts, robots, &shot, moment, thumb, path).await;
     if let Some(t) = thumb {
         run(ex, "sequence.close", json!({"item": t})).await.ok();
     }
@@ -2390,9 +2856,11 @@ async fn compose_thumbnail(
         music: "A1".into(),
         sfx: "A1".into(),
         hits: "A1".into(),
+        timeline: None,
+        chips: Vec::new(),
     };
     // the frame: a second of the shot from the moment, its first frame the one exported
-    place_shot(ex, &tr, shot.item, 0.0, moment.seconds, 1.0, false, Some(moment)).await?;
+    place_shot(ex, &tr, shot.item, 0.0, moment.seconds, 1.0, false, Some(moment), true).await?;
     // the title, as large as two lines across the frame allow, in the half of the picture the
     // robot is not in (low unless it stands low), the count in the opposite corner
     let lines = thumbnail_lines(&opts.title);
@@ -3040,6 +3508,8 @@ mod tests {
             music: "A3".into(),
             sfx: "A4".into(),
             hits: "A5".into(),
+            timeline: None,
+            chips: Vec::new(),
         }
     }
 
@@ -3112,6 +3582,61 @@ mod tests {
         let none = crate::llm::FixedModel::new(vec![]);
         let s = write_script(&none, &Options::default(), &entries, &mut |_| {}).await;
         assert_eq!((s.lines.len(), s.templated), (2, 2));
+    }
+
+    #[test]
+    fn cuts_within_an_entry_move_onto_the_beat_and_keep_its_length() {
+        let shot = Shot { item: 1, clip_seconds: 30.0, best: 10.0, ..Shot::default() };
+        let w = |start: f64, len: f64, reach: f64| Window { shot: shot.clone(), start, len, reach };
+        // at 120 bpm from t = 10: cuts at 12.3 and 15.1 move to 12.5 and 15.0
+        let mut wins = vec![w(1.0, 2.3, 5.0), w(8.0, 2.8, 6.0), w(20.0, 3.0, 5.0)];
+        snap_cuts(&mut wins, 10.0, &Beats::grid(120.0));
+        let lens: Vec<f64> = wins.iter().map(|x| x.len).collect();
+        assert!((lens[0] - 2.5).abs() < 1e-9 && (lens[0] + lens[1] - 5.0).abs() < 1e-9, "{lens:?}");
+        assert!((lens.iter().sum::<f64>() - 8.1).abs() < 1e-9, "the entry keeps its length: {lens:?}");
+        // a window at its reach does not grow, one at half a second does not shrink
+        let mut tight = vec![w(1.0, 2.3, 2.3), w(8.0, 0.5, 6.0)];
+        snap_cuts(&mut tight, 10.0, &Beats::grid(120.0));
+        assert_eq!(tight.iter().map(|x| x.len).collect::<Vec<_>>(), vec![2.3, 0.5]);
+        // the beats of a span, the tempo going on past the measured ones
+        let b = Beats::measured(&[1.0, 1.5, 2.0], 0.5).unwrap();
+        assert_eq!(b.list(0.0, 3.2), vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]);
+        assert!(b.list(5.0, 1.0).is_empty() && b.list(f64::NAN, 3.0).is_empty());
+        assert!(Beats::grid(200.0).list(0.0, 1e9).len() <= MAX_BEATS);
+        // the bed comes up under a scene without words
+        let mut e = vec![0.5; 11];
+        lift_energy(&mut e, 10.0, &[(3.0, 5.5)]);
+        assert_eq!(e, vec![0.5, 0.5, 0.5, 0.65, 0.65, 0.65, 0.5, 0.5, 0.5, 0.5, 0.5]);
+        lift_energy(&mut e, f64::NAN, &[(0.0, 10.0)]);
+        assert_eq!(e[0], 0.5);
+    }
+
+    #[tokio::test]
+    async fn scenes_get_no_words_from_the_model_and_are_never_robots() {
+        let day = 1_665_741_668;
+        let mut entries = group(
+            &[fact(1, "Boston Dynamics Spot", "quadruped", day, 1.0), fact(2, "Pepper humanoid robot", "humanoid", day + 86_400 * 400, 1.0)],
+            "robot",
+            0.3,
+        );
+        let hall = Entry { number: 2, label: "the hall".into(), kind: "Scene".into(), unix: Some(day), ..Entry::default() };
+        entries.insert(1, hall);
+        // the model is asked about the two robots only, and its two lines go to them
+        let model = crate::llm::FixedModel::new(vec![
+            json!({"intro": "Every robot I met, in the order I met them.", "outro": "That is all for now, thanks for watching!"}),
+            json!({"lines": ["I met Spot at an expo and it danced.", "Pepper waved at everyone in the shop."]}),
+        ]);
+        let s = write_script(&model, &Options::default(), &entries, &mut |_| {}).await;
+        assert_eq!(s.lines, vec!["I met Spot at an expo and it danced.".to_string(), String::new(), "Pepper waved at everyone in the shop.".to_string()]);
+        assert_eq!(s.templated, 0);
+        assert!(entries[1].is_scene() && template_line(&entries[1]).is_empty());
+        assert_eq!(entries[1].caption_text(), "the hall");
+        // an analysed clip that calls itself a scene is still counted as a robot
+        let odd = group(&[fact(3, "a robot", "scene", day, 1.0)], "robot", 0.3);
+        assert!(!odd[0].is_scene());
+        // the thumbnail never shows a scene
+        let only = vec![Entry { shots: vec![Shot { item: 9, clip_seconds: 10.0, ..Shot::default() }], ..entries[1].clone() }, entries[0].clone()];
+        assert_eq!(thumbnail_frame(&only, "robot").map(|p| p.2), Some(entries[0].number));
     }
 
     #[tokio::test]

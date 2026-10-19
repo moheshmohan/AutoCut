@@ -113,6 +113,10 @@ pub struct PlanDoc {
     /// The voice-over; `lines` follows `entries` one to one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<Script>,
+    /// The look (`style`, `timeline`, `events`, `transitions`, `loudness`, `embedCaptions`,
+    /// `soundfont`: [`crate::look`]), kept as written and checked when the plan is built.
+    #[serde(flatten)]
+    pub look: serde_json::Map<String, Value>,
 }
 
 /// `Some(trimmed)` unless empty.
@@ -212,6 +216,7 @@ impl PlanDoc {
         if let Some(f) = self.fps.filter(|f| f.is_finite()) {
             opts.fps = f.clamp(1.0, 120.0);
         }
+        opts.look = crate::look::Look::from_plan(&Value::Object(self.look.clone()))?;
         let (entries, heads) = resolve(&self.entries);
         if entries.is_empty() {
             return Err(AutoCutError::Invalid("no entry is included: include at least one".into()));
@@ -245,7 +250,14 @@ impl PlanDoc {
                 delivery.insert((k + 1).to_string(), v.clone());
             }
         }
-        Ok((opts, entries, Script { intro, lines, outro, templated: script.templated, pronounce: script.pronounce.clone(), say, delivery }))
+        // and so do the spec chips
+        let mut chips: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for (k, &h) in heads.iter().enumerate() {
+            if let Some(v) = script.chips.get(&(h + 1).to_string()) {
+                chips.insert((k + 1).to_string(), v.clone());
+            }
+        }
+        Ok((opts, entries, Script { intro, lines, outro, templated: script.templated, pronounce: script.pronounce.clone(), say, delivery, chips }))
     }
 }
 
@@ -845,6 +857,7 @@ async fn write_plan(model: &dyn ChatModel, p: &Value, report: Option<&Value>, ke
         fps: kept.fps,
         entries: review,
         script: Some(Script { lines, ..script }),
+        look: kept.look,
     })
 }
 

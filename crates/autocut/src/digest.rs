@@ -36,6 +36,12 @@ pub const ALLOWED_FAMILIES: &[&str] = &[
     "autocut.makeShowcase",
     // shot-to-shot colour matching (the showcase's `match_color`)
     "lumetri.applyMatch",
+    // the showcase's look: transitions on the beat with their sounds, the mix at a loudness
+    // target, and the installed fonts its theme falls back from
+    "transitions.snapToBeats",
+    "transitions.addSound",
+    "audio.normalizeLoudness",
+    "fonts.list",
 ];
 
 /// Whether a command id is in an allowed family.

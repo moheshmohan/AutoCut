@@ -25,6 +25,7 @@ pub mod host;
 pub mod identity;
 pub mod intent;
 pub mod llm;
+pub mod look;
 pub mod ollama;
 pub mod planner;
 pub mod qa;
