@@ -439,10 +439,49 @@ async fn single(model: &dyn ChatModel, examples: &str, english: &English, lock: 
     answer_lines(&v, 1).into_iter().next().flatten().ok_or_else(|| AutoCutError::Llm(format!("{} wrote no Malayalam for {}", model.id(), p.key)))
 }
 
+/// The parts of a showcase script by entry label: the intro, each entry with words, the outro.
+pub fn script_parts(script: &crate::showcase::Script, entries: &[crate::showcase::Entry]) -> Vec<Part> {
+    let mut parts = vec![Part { key: "intro".into(), text: script.intro.clone() }];
+    for (e, l) in entries.iter().zip(&script.lines) {
+        if !l.trim().is_empty() && !parts.iter().any(|p| p.key == e.label) {
+            parts.push(Part { key: e.label.clone(), text: l.clone() });
+        }
+    }
+    parts.push(Part { key: "outro".into(), text: script.outro.clone() });
+    parts.retain(|p| !p.text.trim().is_empty());
+    parts
+}
+
+/// The lint's summary of a Malayalam showcase script (`script.lintMalayalam`'s).
+pub fn check_script(script: &crate::showcase::Script, entries: &[crate::showcase::Entry]) -> Value {
+    let parts = script_parts(script, entries);
+    let reports = filmcraft_engine::ml_script::lint_parts(&parts, None, &Options::default(), false);
+    filmcraft_engine::ml_script::report_json(&parts, &reports, None)["summary"].clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::llm::FnModel;
+
+    #[test]
+    fn a_showcase_script_is_checked_by_entry() {
+        let entries: Vec<crate::showcase::Entry> = serde_json::from_value(json!([
+            {"number": 1, "label": "Pepper", "kind": "robot", "description": "", "unix": 1, "shots": []},
+            {"number": 2, "label": "Scene", "kind": "scene", "description": "", "unix": 2, "shots": []}
+        ]))
+        .unwrap();
+        let script = crate::showcase::Script {
+            intro: "ഹായ്.".into(),
+            lines: vec!["പെപ്പർ സന്ദർശകരെ സ്വാഗതം ചെയ്യുന്നു.".into(), String::new()],
+            outro: "ബൈ.".into(),
+            ..Default::default()
+        };
+        let keys: Vec<String> = script_parts(&script, &entries).into_iter().map(|p| p.key).collect();
+        assert_eq!(keys, ["intro", "Pepper", "outro"]);
+        let c = check_script(&script, &entries);
+        assert_eq!((c["parts"].as_u64(), c["warnings"].as_u64(), c["byKind"]["formal"].as_u64()), (Some(3), Some(2), Some(2)), "{c}");
+    }
 
     fn plan() -> Value {
         json!({

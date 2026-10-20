@@ -3,11 +3,11 @@
 //! the local model, checked and revised once; `--remember` keeps a reviewed script's lines as
 //! examples) and `showcase`'s check of a Malayalam script before it is voiced.
 
-use filmcraft_autocut::ml_translate::{self, Settings};
+use filmcraft_autocut::ml_translate::{self, Settings, script_parts as parts_of};
 use filmcraft_autocut::showcase::{Entry, Script};
 use filmcraft_engine::Session;
 use filmcraft_engine::ml_script::lint::{self, Level, Options};
-use filmcraft_engine::ml_script::{English, Part, english_of_plan, lint_parts, malayalam_parts};
+use filmcraft_engine::ml_script::{English, english_of_plan, lint_parts, malayalam_parts};
 use serde_json::{Value, json};
 
 use crate::args::Args;
@@ -177,19 +177,6 @@ pub async fn translate(a: &Args) {
     summary["out"] = json!(out);
     summary["seconds"] = json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
     print(a, &summary);
-}
-
-/// The parts of a Malayalam build's script, by entry label.
-fn parts_of(script: &Script, entries: &[Entry]) -> Vec<Part> {
-    let mut parts = vec![Part { key: "intro".into(), text: script.intro.clone() }];
-    for (e, l) in entries.iter().zip(&script.lines) {
-        if !l.trim().is_empty() && !parts.iter().any(|p| p.key == e.label) {
-            parts.push(Part { key: e.label.clone(), text: l.clone() });
-        }
-    }
-    parts.push(Part { key: "outro".into(), text: script.outro.clone() });
-    parts.retain(|p| !p.text.trim().is_empty());
-    parts
 }
 
 /// The Malayalam script of each Malayalam build, linted (and checked against `english`, the

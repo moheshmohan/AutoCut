@@ -947,8 +947,16 @@ async fn build_plan(
     let plan: PlanDoc = serde_json::from_value(plan.clone()).map_err(|e| AutoCutError::Invalid(format!("not a showcase plan ({e})")))?;
     let (mut opts, entries, script) = plan.resolve()?;
     opts.export = p["export"].as_str().map(str::to_string);
+    // a Malayalam script is checked before it is voiced (docs/malayalam-style.md)
+    let script_check = opts.malayalam().then(|| crate::ml_translate::check_script(&script, &entries));
+    if let Some(c) = &script_check {
+        note(progress, &format!("Malayalam script: {} warning(s), {} hint(s) (script.lintMalayalam lists them)", c["warnings"], c["hints"]));
+    }
     let built = showcase::build(ex, &opts, &entries, &script, &mut |l| note(progress, l)).await?;
     let mut out = serde_json::to_value(&built).map_err(|e| AutoCutError::Other(e.to_string()))?;
+    if let Some(c) = script_check {
+        out["scriptCheck"] = c;
+    }
     let chapters = showcase::youtube_chapters(&built.chapters, built.seconds);
     out["youtubeChapters"] = json!(chapters);
     // where the export went (the engine expands `~` and adds the extension)
