@@ -40,6 +40,7 @@ pub mod media_date;
 pub mod media_frame;
 pub mod media_pool;
 pub mod media_watch;
+pub mod mix_analysis;
 pub mod mixer;
 pub mod ml_script;
 pub mod multicam;
@@ -1393,6 +1394,8 @@ mod media_browser_tests;
 mod media_test_util;
 #[cfg(test)]
 mod media_watch_tests;
+#[cfg(test)]
+mod mix_analysis_tests;
 #[cfg(test)]
 mod mixer_tests;
 #[cfg(test)]

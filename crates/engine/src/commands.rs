@@ -3465,6 +3465,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::auto_duck::commands());
     v.extend(crate::adjustment_clip::commands());
     v.extend(crate::loudness::commands());
+    v.extend(crate::mix_analysis::commands());
     v.extend(crate::color::commands());
     v.extend(crate::graphics::commands());
     v.extend(crate::graphic_templates::commands());
