@@ -13,9 +13,13 @@
 //!   read off one minimum-edit alignment of the two texts; characters heard just before a
 //!   sentence's first one count double against its start (speech in front of a sentence is the
 //!   garble: IndicF5 saying its reference's last word again, "ഇല്ല ഇവിടെ നിന്നാണ്…").
+//! - [`signal`]: an advisory scan of a reading's samples (empty, invalid, clipped, a dropout
+//!   mid-reading, a burst at the start); each finding fails the reading.
+//! - [`hear_in_pieces`]: a long reading heard in stretches cut at pauses (a recogniser's decoder
+//!   holds about 12 s of Malayalam).
 //! - [`Policy`] and [`read_until_clear`]: an utterance is read, heard and scored; one that fails
 //!   is read again (the caller varies the seed and the settings per attempt) up to
-//!   [`Policy::max_takes`], the best kept ([`Score::badness`]), every try reported.
+//!   [`Policy::max_takes`], the best kept ([`Score::badness`]), every try reported with its seed.
 //!
 //! Pure functions: no model here. The caller hears (a speech model fine-tuned for Malayalam: the
 //! engine's `check: "strict"`).

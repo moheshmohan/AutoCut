@@ -157,14 +157,35 @@ clip behaviour: `crates/engine/src/narration.rs`.
     it (pace is IndicF5's own speed, pitch the pitch shifter; takes reseed), 250 ms between
     utterances, under the GPU lock. The duration is held within 4.6–6 syllables a second
     (Malayalam read aloud runs about 5–6): the reference's characters-per-second estimate is
-    far off across languages and when the speech model adds words that were never said.
+    far off across languages and when the speech model adds words that were never said. The
+    reference's words reach IndicF5 as written (Malayalam through the Malayalam front end,
+    English through the English one; until 2026-10-20 Malayalam went through the English one,
+    which dropped every virama: the cause of the garbled sentence starts, below). How it reads
+    is a `clone::Reading` (the pause after the reference, packing, sampler, lead-in; the
+    default is the measured best), every utterance with its own seed
+    (`MalayalamVoice::seed(take, utterance, attempt)`).
+  - `heard` (no feature): **the strict check**. `Voice::synthesize_checked` reads under it:
+    the Malayalam voice hears every utterance with a `heard::Hearer` (the engine's: the
+    Malayalam speech model, `filmcraft_speech::models::MALAYALAM_MODEL`), scores it
+    (`heard::score`: the character error rate after normalising — NFC's two-part vowels,
+    chillus as consonant + virama, ZWJ/ZWNJ, punctuation and spaces dropped — and the first six
+    syllables of every sentence on their own, speech heard in front of a sentence counting
+    double), scans its signal (`heard::signal`: empty, invalid, clipped, a silence over 0.9 s
+    mid-reading, a burst at the start) and reads a failing utterance again
+    (`heard::read_until_clear`): a new seed, then (from the third reading) twice the sampling
+    steps (`Reading::for_attempt`), at most four readings, the best kept, every try reported with
+    its seed. Long readings are heard in pieces of at most 12 s cut at pauses (Whisper's decoder
+    holds about 440 tokens; Malayalam takes about two a character).
   - `catalog::INDICF5`: `model.safetensors` (1 402 789 408 bytes) and `vocab.txt` (11 283),
     MIT. The official repository is gated (sign-in and a click-through); FilmCraft downloads
     anonymously, so the files come from a public mirror pinned to a commit whose bytes have the
     official SHA-256.
   - `cache::voice_identity_for`: English is exactly `voice_identity` (English entries keep
     their keys); Malayalam keys on the profile, the sample, the reference clip (SHA-256) and
-    words, the IndicF5 pins and the front end's version.
+    words, the IndicF5 pins and the front end's version (`MALAYALAM_VERSION` 3 since the
+    sentence-start fix: old readings are read again). The engine adds the strict check's
+    recogniser and version to a checked reading's key, and keeps the check's report beside the
+    entry (`DiskCache::put_note`, `<key>.json`, removed with it).
 
 - `clone` also makes **natural clones** (profile version 2, engine `voxcpm`): a *voice sample*
   is kept next to the profile (`<name>.wav`: the best continuous 10–25 s of speech between
@@ -335,6 +356,83 @@ A good voice still sounds robotic reading written Malayalam, so the script is ch
   got 54 warnings and the natural rewrite 7 (no formal word); the fact lock found exactly the three
   facts the rewrite dropped and no false alarm in either.
 
+## Malayalam: sentence starts and the strict check (measured 2026-10-20)
+
+The author, a native speaker, heard gibberish in the v5 Malayalam narration, mostly where a
+sentence begins. Measured with the strict check as the oracle (`examples/ml_lab.rs`; the
+recogniser is `whisper-medium-ml`, chosen in `crates/speech/README.md`), on ten test lines (the
+three sample lines and seven lines of the v5 robot script, 21 sentences), in the author's cloned
+voice and reference (`clone:mohesh-natural`, the 9.3 s clip ending "…ഇല്ല."), two takes each
+(their own seeds), Apple M3 Max GPU. *First starts*: the first six syllables of each line (where
+a generation begins after the reference); *later starts*: the other sentences of a line (inside
+the same generation); a start is garbled above 0.3.
+
+**The cause: the reference's words did not match the clip.** IndicF5 is given the clip's mel
+and its words, then the new text; it aligns the words to the clip and goes on. The voice passed
+the words through the English text front end, which drops every virama (U+0D4D): "ഫൈവ് പോയിന്റ്
+ത്രീ … ഇല്ല." reached the model as "ഫൈവ പോയിന റ ത രീ … ഇല ല." — 138 characters of which many
+were not what the clip says. The model then said the reference's last word again before the
+line: 12 of the 20 old readings start with "ഇല്ല", "ലാ" or "ലല്ല" (heard: "ഇല്ല ഇതാണ് ബോസ്റ്റൺ
+ഡൈനാമിക്സിന്റെ സ്പോർട്ട്…", "ലാ ട്വഞ്ച് ട്വഞ്ച് ഈ വൺ ഒട്ടോബർ…"); not one of the readings with the
+words intact does. Sentences later in a line were never affected (0 of 22 garbled). The fix: a
+transcript written in Malayalam goes through the Malayalam front end (canonical spelling,
+numbers spelled), one in English through the English one (regression test
+`the_reference_words_reach_indicf5_intact`; the cache's `MALAYALAM_VERSION` 3, so old readings
+are read again).
+
+| Reading (10 lines × 2 takes unless said) | Mean CER | First starts: mean, garbled | Later starts: mean, garbled | Lines passing the check | Synthesis |
+|---|---|---|---|---|---|
+| before (English front end on the words) | 0.121 | 0.413, 10 of 20 | 0.057, 0 of 22 | 10 of 20 | 372 s |
+| **words intact** (the default) | **0.086** | **0.051, 0 of 20** | 0.110, 1 of 22 | **19 of 20** | 350 s |
+| words intact, 300 ms of the clip's room tone after it | 0.083 | 0.021, 0 of 20 | 0.118, 2 of 22 | 18 of 20 | 342 s |
+| words intact, 300 ms of silence after it (50 ms is the reference implementation's) | 0.092 | 0.052, 0 of 20 | 0.101, 2 of 22 | 18 of 20 | 356 s |
+| words intact, every sentence its own utterance | 0.096 | 0.078, 2 of 20 | 0.092, 2 of 22 | 16 of 20 | 561 s |
+| words intact, 64 sampling steps (32 is the reference's) | 0.081 | 0.051, 0 of 20 | 0.119, 1 of 22 | 19 of 20 | 737 s |
+| words intact, a lead-in ("ശരി.") read first and cut away (11 readings) | 0.129 | 0.477, 11 of 11 | 0.136, 1 of 11 | 0 of 11 | 223 s |
+| words intact, 16 sampling steps (1 take) | 0.093 | 0.071, 0 of 10 | 0.146, 1 of 11 | 9 of 10 | 83 s |
+| words intact, guidance 1.5 (2 is the reference's; 1 take) | 0.110 | 0.041, 0 of 10 | 0.179, 2 of 11 | 8 of 10 | 194 s |
+| words intact, guidance 2.5 (1 take) | 0.085 | 0.042, 0 of 10 | 0.096, 1 of 11 | 9 of 10 | 190 s |
+| words intact, sway −0.5 (−1 is the reference's; 1 take) | 0.104 | 0.052, 0 of 10 | 0.128, 1 of 11 | 9 of 10 | 173 s |
+(*Garbled*: a start over 0.3; *passing*: the default policy, CER ≤ 0.25 and every start ≤ 0.3 —
+a reading that fails it is read again. The few garbled later starts with the words intact are a
+word the model added ("പക്ഷേ ഇവിടെ…") or loanwords the recogniser spells otherwise ("അപ്ലോഡർ"
+for "ആപ്പിൽ ഓർഡർ"). The signal scan flagged none of the 100 readings of the first five rows.)
+
+- **The pause after the reference** (50 ms of silence, the reference implementation's; 300 ms
+  of silence; 300 ms of the clip's room tone — the author's phone recording has a −30 dB floor
+  and the clip ends on a word): no measurable difference once the words match. The default stays
+  50 ms; `Reading::tail_ms` / `room_tone` keep the choice.
+- **One utterance per sentence** instead of the whole line (packed while it fits): no better,
+  and 60 % slower (every sentence pays for the reference again). Lines stay packed
+  (`Reading::per_sentence`).
+- **The sampler** (sampling steps 16 / 32 / 64, guidance 1.5 / 2 / 2.5, sway −0.5 / −1): once
+  the words match, none moves the starts beyond the noise of 10–20 readings; 64 steps take
+  twice as long for the same, 16 steps lose a little, guidance 1.5 adds errors later in the
+  line. The reference's 32 steps, guidance 2 and sway −1 stay; the strict check's third and
+  fourth readings use 64 steps as another path through the sampler.
+- **A lead-in** ("ശരി.", read first and cut away at its pause): harmful. IndicF5 runs it into
+  the sentence without a pause, so the cut leaves it heard ("ശരി ഇതാണ്…", 11 of 11 first starts
+  garbled — which also shows the check catching a word in front of a sentence). Not used
+  (`Reading::lead_in`, measurement only).
+- **Compared with the reference implementation** (IndicF5's `infer/utils_infer.py`): the
+  duration (ours counts characters and holds 4.6–6 syllables a second), the transcript's
+  `". "` ending, the reference raised to RMS 0.1 and the 50 ms pause match; it cross-fades
+  batches over 150 ms where we trim silence and leave 250 ms between utterances (a join, not a
+  start); it never rewrites the reference's words — the difference that mattered.
+
+**The strict check.** Every utterance is heard, scored and read again until clear
+([`heard`]): the character error rate after normalising (≤ 0.25), the first six syllables of
+every sentence (≤ 0.3; a character heard in front of a sentence counts double — the leaked
+"ഇല്ല" is the garble), and a signal scan (empty, invalid samples, clipping, a silence over
+0.9 s between words, a burst more than 9 dB over the speech in the first 200 ms; advisory,
+each fails the reading). Thresholds from the readings above: with the words intact no first
+start and 1–2 of 22 later starts score over 0.3, the worst CER is 0.23; the old readings' leaked
+words score 0.4–1. A failing utterance is read again with its own seed
+(`MalayalamVoice::seed(take, utterance, attempt)`), from the third reading with 64 sampling steps;
+at most four readings, the best kept
+(start garble weighs double), every try reported with its seed, so one sentence can be read
+again alone and reproduced.
+
 ## Limitations
 
 - The built-in voices are **robotic** and nearly unintelligible to a recogniser (above); they are
@@ -350,9 +448,12 @@ A good voice still sounds robotic reading written Malayalam, so the script is ch
   (2–5 GB) and want a GPU: on the CPU VoxCPM2 is about 5× slower than real time.
 - Malayalam: the reference clip's words come from the speech model, and Whisper-base hears
   Indian English on a phone video imperfectly (it added a sentence that was never said to the
-  author's clip). IndicF5 aligns its reading to those words, so wrong ones can blur the first
-  syllables of a line; check them with `tts.voiceReference` and correct them with
-  `transcript`. IndicF5 is about 4–6× slower than real time on the M3 Max GPU (a CPU is far
+  author's clip). IndicF5 aligns its reading to those words, so wrong ones garble the first
+  syllables of a line (measured above); `tts.voiceReference` hears the clip with the Malayalam
+  speech model and warns when its words do not match (`transcriptCheck`), and `transcript`
+  corrects them. The strict check is only as good as its recogniser: `whisper-medium-ml` spells
+  some loanwords its own way (a few false retakes) and could miss a garble that happens to
+  sound like the line; the author's ear is the final judge. IndicF5 is about 4–6× slower than real time on the M3 Max GPU (a CPU is far
   slower: 22× in the oracle run). Latin words left in a Malayalam script are read as best the
   model can (reported in `notes`). Only Malayalam is wired up of IndicF5's eleven languages.
 - Natural clones are English-normalised (the text front end); VoxCPM2 itself speaks 30 languages.
