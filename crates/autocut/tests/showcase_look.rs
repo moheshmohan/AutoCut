@@ -452,3 +452,32 @@ async fn hostile_plans_are_refused_before_anything_is_built() {
     assert_eq!(script.chips.get("1").map(Vec::len), Some(1));
     assert_eq!(serde_json::to_value(&doc).unwrap()["style"], "tech", "the look is kept as written");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bigger_frame_draws_every_title_and_the_counter_bigger() {
+    // the counter, the intro and closing titles were sized in pixels: a 4K show drew them at
+    // half their 1080p size. Built at twice the frame they now come out twice as big
+    async fn sizes(w: u32, h: u32) -> (f64, Vec<f64>) {
+        let ex = demo();
+        let opts = Options { width: w, height: h, ..tech(Look::default()) };
+        let built = showcase::build(&ex, &opts, &gitex(), &gitex_script(), &mut |_| {}).await.expect("the showcase builds");
+        with_seq(&ex, &built, |seq| {
+            let size = |c: &TrackItem| {
+                c.effects.iter().find(|e| e.effect == "graphic_text").and_then(|e| e.param("size")).and_then(|p| p.value.as_f64()).unwrap_or(f64::NAN)
+            };
+            let all: Vec<&TrackItem> = seq.video_tracks.iter().flat_map(|t| t.items.iter()).collect();
+            let counter = all.iter().find(|c| c.name == "Counter").map(|c| size(c)).expect("the counter");
+            let mut titles: Vec<f64> = all.iter().filter(|c| c.name != "Counter").map(|c| size(c)).filter(|s| s.is_finite()).collect();
+            titles.sort_by(|a, b| b.total_cmp(a));
+            titles.truncate(3);
+            (counter, titles)
+        })
+    }
+    let (c1, t1) = sizes(640, 360).await;
+    let (c2, t2) = sizes(1280, 720).await;
+    assert!((c2 / c1 - 2.0).abs() < 1e-6, "counter {c1} → {c2}");
+    assert_eq!(t1.len(), t2.len());
+    for (a, b) in t1.iter().zip(&t2) {
+        assert!((b / a - 2.0).abs() < 1e-6, "title {a} → {b}");
+    }
+}

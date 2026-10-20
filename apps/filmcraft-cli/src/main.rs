@@ -127,7 +127,7 @@ SUBCOMMANDS
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--language ml]
          [--numbers english|malayalam] [--no-narration-check] [--places-from-locations locations.json]
          [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
-         [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
+         [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N] [--resolution 1080p|4k|WxH]
          [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social]
          [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
          [--outro-logo logo.png] [--outro-channel C] [--outro-handle @h] [--outro-tagline T]
@@ -1839,6 +1839,14 @@ async fn cli() {
                 match m.parse::<f64>() {
                     Ok(v) if v.is_finite() && v > 0.0 && v <= 24.0 * 60.0 => opts.target_minutes = Some(v),
                     _ => usage(format!("showcase: --target-minutes wants a length in minutes (e.g. 10), not `{m}`")),
+                }
+            }
+            // --resolution 4k: the show built at 3840×2160, its graphics drawn at that size, and
+            // exported as YouTube's 2160p
+            if let Some(r) = a.opt("--resolution") {
+                match filmcraft_autocut::showcase::resolution(r) {
+                    Ok((w, h)) => (opts.width, opts.height) = (w, h),
+                    Err(e) => usage(format!("showcase: --resolution: {e}")),
                 }
             }
             // the look's flags, checked now (they override the plan's fields, applied after it)

@@ -937,6 +937,32 @@ pub struct Chapter {
     pub title: String,
 }
 
+/// The export preset for a show `height` lines tall: YouTube's 2160p from 2160 lines up, else
+/// its 1080p; `(what the progress says, preset name)`.
+pub fn export_preset(height: u32) -> (&'static str, &'static str) {
+    if height >= 2160 { ("YouTube 2160p", "YouTube 2160p 4K Ultra HD") } else { ("YouTube 1080p", "YouTube 1080p Full HD") }
+}
+
+/// The frame size `--resolution` names: `1080p`, `4k` / `2160p`, or `WxH` (even sides, 320–7680
+/// wide, 180–4320 tall).
+pub fn resolution(s: &str) -> Result<(u32, u32), AutoCutError> {
+    let t = s.trim().to_ascii_lowercase();
+    let (w, h) = match t.as_str() {
+        "1080p" | "hd" | "fhd" => (1920, 1080),
+        "4k" | "2160p" | "uhd" => (3840, 2160),
+        _ => {
+            let (a, b) = t.split_once('x').ok_or_else(|| AutoCutError::Invalid(format!("resolution `{s}`: 1080p, 4k or WxH")))?;
+            let w: u32 = a.trim().parse().map_err(|_| AutoCutError::Invalid(format!("resolution `{s}`: width")))?;
+            let h: u32 = b.trim().parse().map_err(|_| AutoCutError::Invalid(format!("resolution `{s}`: height")))?;
+            (w, h)
+        }
+    };
+    if !(320..=7680).contains(&w) || !(180..=4320).contains(&h) || w % 2 != 0 || h % 2 != 0 {
+        return Err(AutoCutError::Invalid(format!("resolution {w}x{h}: even sides, 320–7680 × 180–4320")));
+    }
+    Ok((w, h))
+}
+
 /// YouTube's shortest chapter, seconds.
 const MIN_CHAPTER: f64 = 10.0;
 
@@ -2544,6 +2570,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let placed = crate::places::from_items(ex, entries).await;
     let entries = placed.as_slice();
     let (w, h) = (f64::from(opts.width), f64::from(opts.height));
+    // sizes below are written for 1080 lines and scale with the frame (a 4K show: twice as big)
+    let px = look::unit((w, h));
     // the plan's chips and the timeline's dates are checked before anything is built
     let numbers: Vec<usize> = entries.iter().map(|e| e.number).collect();
     let chips = look::chips_by_entry(&script.chips, &numbers)?;
@@ -2620,7 +2648,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let mut fg_firsts: Vec<(u64, Option<u64>)> = Vec::new();
     // shots' own sounds the plan sets a level for: (clip, dB)
     let mut gains: Vec<(u64, f64)> = Vec::new();
-    let title_props = json!({"font_style": "Bold", "align": "center", "stroke": true, "stroke_width": 6, "shadow": true});
+    let title_props = json!({"font_style": "Bold", "align": "center", "stroke": true, "stroke_width": 6.0 * px, "shadow": true});
 
     // ---- the music's beats, which the cuts land on: the user's track (imported now, its beats
     // measured) or the generated bed's steady grid
@@ -2690,7 +2718,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     match &theme {
         Some(th) => look::title_card(ex, th, [tr.titles_index, tr.over_index], tr.fps, (w, h), &opts.title, &subtitle, hit, intro_len).await?,
         None => {
-            title(ex, tr.titles_index, tr.fps, &opts.title, hit, intro_len - hit, 110.0, (w / 2.0, h * 0.46), title_props.clone()).await?;
+            title(ex, tr.titles_index, tr.fps, &opts.title, hit, intro_len - hit, 110.0 * px, (w / 2.0, h * 0.46), title_props.clone()).await?;
             if !subtitle.is_empty() {
                 title(
                     ex,
@@ -2699,8 +2727,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                     &subtitle,
                     hit + 0.5,
                     intro_len - hit - 0.5,
-                    54.0,
-                    (w / 2.0, h * 0.46 + 95.0),
+                    54.0 * px,
+                    (w / 2.0, h * 0.46 + 95.0 * px),
                     json!({"font_style": "Bold", "align": "center", "fill_color": "#ffcc00", "shadow": true}),
                 )
                 .await?;
@@ -2944,7 +2972,9 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         }
         if new_year && let Some(sec) = &section {
             built.chapters.push(Chapter { seconds: t, title: sec.clone() });
-            let (text, size) = card(sec, w);
+            // laid out for a 1080-line frame, then scaled with it
+            let (text, size) = card(sec, w / px);
+            let size = size * px;
             match &theme {
                 Some(th) => {
                     look::chapter_card(ex, th, tr.over_index, tr.fps, (w, h), &text, size, t, CARD_LEAD).await?;
@@ -2974,9 +3004,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                     (c, Some(b))
                 }
                 None => {
-                    let props =
-                        json!({"font_style": "Medium", "align": "left", "background": true, "background_opacity": 45, "background_size": 14, "shadow": false});
-                    let c = title(ex, tr.titles_index, tr.fps, &caption, t + lead, shown_for, 40.0, (w * 0.05, low), props).await?;
+                    let props = json!({"font_style": "Medium", "align": "left", "background": true, "background_opacity": 45, "background_size": 14.0 * px, "shadow": false});
+                    let c = title(ex, tr.titles_index, tr.fps, &caption, t + lead, shown_for, 40.0 * px, (w * 0.05, low), props).await?;
                     (c, None)
                 }
             }
@@ -2995,9 +3024,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 }
                 None => {
                     let lower = if second.is_empty() { name } else { format!("{name}\n{second}") };
-                    let props =
-                        json!({"font_style": "Bold", "align": "left", "background": true, "background_opacity": 55, "background_size": 18, "shadow": false});
-                    (title(ex, tr.titles_index, tr.fps, &lower, t + lead, shown_for, 46.0, (w * 0.05, low), props).await?, None)
+                    let props = json!({"font_style": "Bold", "align": "left", "background": true, "background_opacity": 55, "background_size": 18.0 * px, "shadow": false});
+                    (title(ex, tr.titles_index, tr.fps, &lower, t + lead, shown_for, 46.0 * px, (w * 0.05, low), props).await?, None)
                 }
             }
         };
@@ -3084,7 +3112,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         _ if look.outro.is_some() => {}
         Some(th) => look::outro_card(ex, th, [tr.titles_index, tr.over_index], tr.fps, (w, h), &closing, "and counting", t, outro_len).await?,
         None => {
-            title(ex, tr.titles_index, tr.fps, &closing, t + 0.3, outro_len - 0.3, 130.0, (w / 2.0, h * 0.48), title_props.clone()).await?;
+            title(ex, tr.titles_index, tr.fps, &closing, t + 0.3, outro_len - 0.3, 130.0 * px, (w / 2.0, h * 0.48), title_props.clone()).await?;
             title(
                 ex,
                 tr.over_index,
@@ -3092,8 +3120,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 "and counting",
                 t + 0.9,
                 outro_len - 0.9,
-                56.0,
-                (w / 2.0, h * 0.48 + 90.0),
+                56.0 * px,
+                (w / 2.0, h * 0.48 + 90.0 * px),
                 json!({"font_style": "Bold", "align": "center", "fill_color": "#ffcc00", "shadow": true}),
             )
             .await?;
@@ -3112,7 +3140,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let counter = run(
         ex,
         "graphics.counter",
-        json!({"times": counter_times, "end": t, "prefix": counter_prefix, "corner": "topRight", "size": 60, "color": "#ffffff", "track": tr.counter_index}),
+        json!({"times": counter_times, "end": t, "prefix": counter_prefix, "corner": "topRight", "size": 60.0 * px, "color": "#ffffff", "track": tr.counter_index}),
     )
     .await?;
     if let (Some(th), Some(clip)) = (&theme, counter["clip"].as_u64()) {
@@ -3297,8 +3325,10 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // ---- privacy: visitors' faces and plates hidden, the robots left alone ([`crate::privacy`])
     built.privacy = crate::privacy::redact_show(ex, opts.redact.as_ref(), &built.layout, entries, &mut built.notes, progress).await;
     if let Some(path) = &opts.export {
-        progress("exporting (YouTube 1080p)");
-        let mut p = json!({"path": path, "preset": "YouTube 1080p Full HD", "wait": true});
+        // the preset follows the frame: a 4K show exports as YouTube's 2160p
+        let (label, preset) = export_preset(opts.height);
+        progress(&format!("exporting ({label})"));
+        let mut p = json!({"path": path, "preset": preset, "wait": true});
         // the subtitles in the video too, as closed captions (CEA-608/708)
         if look.embed_captions {
             if captions.is_some() {
@@ -3684,6 +3714,20 @@ mod tests {
         assert_eq!(items(1), vec![0]);
         assert_eq!(items(50).len(), 10, "never more shots than entries");
         assert!(montage(&[], 5).is_empty());
+    }
+
+    #[test]
+    fn resolutions_and_their_export_preset() {
+        assert_eq!(resolution("4k").unwrap(), (3840, 2160));
+        assert_eq!(resolution(" 2160P ").unwrap(), (3840, 2160));
+        assert_eq!(resolution("1080p").unwrap(), (1920, 1080));
+        assert_eq!(resolution("2560x1440").unwrap(), (2560, 1440));
+        for bad in ["", "8k", "1921x1080", "100x100", "99999x2", "axb", "1920x"] {
+            assert!(resolution(bad).is_err(), "{bad}");
+        }
+        assert_eq!(export_preset(2160).1, "YouTube 2160p 4K Ultra HD");
+        assert_eq!(export_preset(1080).1, "YouTube 1080p Full HD");
+        assert_eq!(export_preset(360).1, "YouTube 1080p Full HD");
     }
 
     #[test]

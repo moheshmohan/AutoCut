@@ -227,8 +227,10 @@ fn lower_left_luma(png: &[u8]) -> f64 {
     let (w, h) = img.dimensions();
     let mut sum = 0.0;
     let mut n = 0.0;
-    for y in h * 3 / 4..h {
-        for x in 0..w / 3 {
+    // where the lower third sits (left, just above the bottom): its text is sized for the frame
+    // (46 px at 1080 lines), so a looser region would dilute it in a small test frame
+    for y in h * 74 / 100..h * 90 / 100 {
+        for x in w * 4 / 100..w * 30 / 100 {
             let p = img.get_pixel(x, y);
             sum += (0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64) / 255.0;
             n += 1.0;
