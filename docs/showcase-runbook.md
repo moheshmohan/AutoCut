@@ -206,14 +206,15 @@ Each export gets, beside it:
 
 | file | what |
 |---|---|
-| `<out>.qa.json` | findings (joins, black frames, loudness and voice level, the robot in every shot, privacy) and per-entry privacy counts (`privacy`: faces, plates, named places) |
+| `<out>.qa.json` | findings (joins, black frames, loudness and voice level, the mix on small speakers, the robot in every shot, privacy), per-entry privacy counts (`privacy`: faces, plates, named places) and the mix per stem (`mixAnalysis`) |
 | `<out>.qa.png` | a frame of every entry under its number, red/amber when it has an error/warning |
 | `<out>.privacy.png` | a frame of every clip with masks, where most of it is hidden |
 | `<out>.narration-check.json` | the Malayalam narration as the strict check heard it, line by line (Malayalam builds) |
 
 Read the summary line the build prints (`showcase: QA: …`), then look at both sheets. A privacy
 warning ("a redaction mask … covers 34 % of …") means a blur that size hides the shot: give that
-entry or shot `"redact": false`, narrow its targets, or choose another window.
+entry or shot `"redact": false`, narrow its targets, or choose another window. The mix's
+warnings for small speakers are below ([Mix for small speakers](#mix-for-small-speakers)).
 
 ## 7. Check frames of the result
 
@@ -248,3 +249,60 @@ filmcraft-cli --project "$P" export "$R/Every Robot I've Met - v6 4K.mp4" --pres
 
 `--upload-youtube` on the build (or `filmcraft-cli publish run youtube <file>`) sends a video to
 YouTube with its chapters and thumbnail, private unless `--youtube-privacy` says otherwise.
+
+## Mix for small speakers
+
+The shows are watched on TVs, laptops and phones, often quietly. Their speakers play little below
+about 120 Hz, and words are understood at low volume from what they carry between 1 and 4 kHz.
+The first finished show sounded bassy and distorted on a TV and had to be turned up to be
+understood; measured per stem, the cause was the cloned narration (37 % of its energy below
+120 Hz, 1 % at 1–4 kHz) and its peaks, which made the Mix's limiter take up to 3.7 dB off the
+whole mix. So every build is now mixed **speech first** (`--mix speech`, the default; the details
+and the before/after numbers: [crates/autocut/README.md](../crates/autocut/README.md#mix-for-small-speakers)):
+
+- the narration, on A2: high-passed at 80 Hz, its boom and mud cut and its presence (1–4 kHz)
+  lifted as far as its measured tone needs (the cloned voices: all the way), de-essed,
+  compressed 3:1 and peak-limited, its fader making up the level the chain took;
+- the music (A3), the shots' sound (A1) and the effects (A4, A5) high-passed (40, 100 and 120 Hz)
+  with less bass, the music ducked 18 dB under the voice and dipped 4 dB around 2.5 kHz while it
+  speaks, the effects and the transitions' sounds quieter;
+- the Mix normalised as before (`--loudness social`: −14 LUFS, −1 dBTP), its limiter now taking
+  under 1 dB off the peaks.
+
+Everything is ordinary track effects and keyframes: open the Audio Track Mixer to adjust them.
+`--mix cinematic` (or `"mix": "cinematic"` in the plan) keeps the earlier full-range balance.
+
+Measure a build, or any sequence (the active one, or `sequence`; `from`/`to` for a stretch):
+
+```sh
+filmcraft-cli --project "$P" exec audio.analyzeMix '{"sequence": <id>}'
+```
+
+It reports per stem the loudness, true peak, band shares (`sub` below 120 Hz, `presence` 1–4 kHz)
+and octave levels, the Mix's limiter's gain reduction (and a track limiter's), how far the
+narration stands above the music and above everything else while it speaks, and clipping in each
+narration clip. QA runs it on every export and warns when:
+
+| warning | what to do |
+|---|---|
+| the narration less than 12 LU above the music while it speaks | duck the music deeper (Essential Sound ▸ Ducking on its clip, then Generate) or lower it |
+| the Mix's limiter takes more than 2 dB off the peaks | hold the loudest stem's peaks on its own track (its level, compressor or limiter); `exec audio.analyzeMix` names each stem's true peak |
+| more than 25 % of the mix's energy below 120 Hz | high-pass the stem it names (the speech mix does; a `--mix cinematic` build does not) |
+| a narration clip is clipped (flat tops) | read the line again (`tts.edit … take=1`), or lower it before it reaches the mix |
+
+**A show built before** (a final already exported) is mixed again without rebuilding it, on a copy
+of its project:
+
+```sh
+cp "$P" "$R/Robot Showcase v6 (speech mix).fcproj"
+P2="$R/Robot Showcase v6 (speech mix).fcproj"
+filmcraft-cli --project "$P2" showcase-remix --sequence <id> --loudness social --save
+filmcraft-cli --project "$P2" exec audio.analyzeMix '{"sequence": <id>, "from": 40, "to": 100}'
+filmcraft-cli --project "$P2" export "$R/Every Robot I've Met - v6 4K.mp4" --preset "YouTube 2160p 4K Ultra HD"
+```
+
+(`showcase-remix` opens that sequence, takes off the effects an earlier mix put on A1–A5,
+levels, ducks and treats every stem again, sets the transitions' sounds to the profile's level
+and normalises; running it twice gives the same mix. To hear the difference first, export a
+minute of each: `export before.mp4 --preset "YouTube 1080p Full HD" --start 40 --end 100` on the
+old project and the same on the new.)
