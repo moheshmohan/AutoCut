@@ -420,6 +420,20 @@ for "ആപ്പിൽ ഓർഡർ"). The signal scan flagged none of the 100 
   batches over 150 ms where we trim silence and leave 250 ms between utterances (a join, not a
   start); it never rewrites the reference's words — the difference that mattered.
 
+**Confirmed on fresh seeds** (takes 2–4 of the same ten lines, 30 readings each, never seen
+while choosing):
+
+| Reading | Mean CER | First starts: mean, garbled | Later starts: mean, garbled | Lines passing the check | Readings that start with words never asked for |
+|---|---|---|---|---|---|
+| before | 0.190 | 0.608, 22 of 30 | 0.109, 3 of 33 | 6 of 30 | 22 of 30 ("ഇല്ല", "പബിൽ"… — the end of the reference: "…കേപ്പബിലിറ്റീസ് ഇല്ല.") |
+| **the default now** | **0.088** | **0.040, 0 of 30** | 0.097, 2 of 33 | **28 of 30** | **0 of 30** |
+
+The two readings that fail the check with the defaults are the recogniser's: it wrote
+"ട്വന്റി തേർട്ടീനിൽ" as "2013-ല്" and heard "ആപ്പിൽ ഓർഡർ" as "ആപ്പി ഓടർ"; the check reads them
+again (a false retake costs one reading). The three sample lines in the app's own path
+(`tts.preview`, strict check on, the author's voice) were all heard clearly on their first
+reading (CER 0.08, 0.07, 0.07).
+
 **The strict check.** Every utterance is heard, scored and read again until clear
 ([`heard`]): the character error rate after normalising (≤ 0.25), the first six syllables of
 every sentence (≤ 0.3; a character heard in front of a sentence counts double — the leaked
