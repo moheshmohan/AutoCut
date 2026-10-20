@@ -73,7 +73,11 @@ impl Driver {
 
     /// Scroll the template's detail view (`dy` < 0 down, > 0 up) until widget `id` shows.
     fn reveal_by(&mut self, id: &str, dy: f64) {
-        for _ in 0..20 {
+        // frames are instant but what they wait for (the preview's frames, rendered in the
+        // background) is not: keep going until a deadline, not a number of frames (on a loaded
+        // machine the preview once took longer than 20 × 3 frames and the full gate failed)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
             if self.ids(id).iter().any(|x| x == id) {
                 return;
             }
@@ -83,6 +87,7 @@ impl Driver {
             let (x, y) = (r[0].as_f64().unwrap() + r[2].as_f64().unwrap() / 2.0, r[1].as_f64().unwrap() - 60.0);
             self.ok("ui.scroll", json!({"x": x, "y": y, "dx": 0.0, "dy": dy}));
             self.frames(3);
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("{id} never showed: {:?}", self.ids("templates."));
     }
