@@ -61,11 +61,18 @@ impl Whisper {
     /// Load a model directory (`config.json`, `generation_config.json`, `tokenizer.json`,
     /// `model.safetensors`).
     pub fn load(dir: &Path, id: &str) -> Result<Self, SpeechError> {
+        Self::load_on(dir, id, false)
+    }
+
+    /// [`Whisper::load`], on the GPU when `gpu` and this machine has one (Metal on macOS;
+    /// `FILMCRAFT_SPEECH_CPU` keeps it on the CPU), else on the CPU. A PyTorch checkpoint
+    /// (`pytorch_model.bin`) is read with candle's restricted pickle reader (tensors only, no
+    /// code runs) when there is no `model.safetensors`.
+    pub fn load_on(dir: &Path, id: &str, gpu: bool) -> Result<Self, SpeechError> {
         let read = |n: &str| std::fs::read(dir.join(n)).map_err(|e| SpeechError::Model(format!("{}: {e}", dir.join(n).display())));
         let cfg: Config = serde_json::from_slice(&read("config.json")?).map_err(|e| SpeechError::Model(format!("config.json: {e}")))?;
         let gen_cfg: serde_json::Value = serde_json::from_slice(&read("generation_config.json")?).unwrap_or_default();
         let tok = Tokenizer::from_json(&String::from_utf8_lossy(&read("tokenizer.json")?))?;
-        let weights = read("model.safetensors")?;
         let alignment_heads = gen_cfg["alignment_heads"]
             .as_array()
             .map(|a| a.iter().filter_map(|p| Some((p[0].as_u64()? as usize, p[1].as_u64()? as usize))).collect::<Vec<_>>())
@@ -80,7 +87,18 @@ impl Whisper {
             .as_array()
             .map(|a| a.iter().filter_map(|x| x.as_u64().map(|v| v as u32)).collect())
             .unwrap_or_else(|| vec![220, tok.eot]);
-        let model = Model::load(cfg, weights).map_err(merr)?;
+        if cfg.vocab_size <= tok.timestamp_begin as usize {
+            return Err(SpeechError::Model(format!(
+                "tokenizer.json does not fit the model ({} tokens, timestamps from {})",
+                cfg.vocab_size, tok.timestamp_begin
+            )));
+        }
+        let model = if dir.join("model.safetensors").is_file() {
+            Model::load(cfg, read("model.safetensors")?, device(gpu))
+        } else {
+            Model::load_pth(cfg, &dir.join("pytorch_model.bin"), device(gpu))
+        }
+        .map_err(merr)?;
         Ok(Self { id: id.to_string(), model: Mutex::new(model), tok, alignment_heads, suppress, begin_suppress })
     }
 
@@ -191,6 +209,60 @@ impl Whisper {
         let avg = sum_lp / (seq.len() + 1) as f32;
         Ok((seq, avg, no_speech))
     }
+
+    /// Greedy decode of one window as plain text (`<|notimestamps|>`): text tokens only, up to
+    /// what the decoder's context holds after the prompt.
+    fn decode_text(&self, m: &mut Model, xa: &Tensor, prompt: &[u32]) -> Result<Vec<u32>, SpeechError> {
+        m.decoder.reset();
+        let mut seq: Vec<u32> = Vec::new();
+        let (logits, _) = m.decoder.forward(prompt, xa, true, None).map_err(merr)?;
+        let mut cur = Model::last_logits(&logits).map_err(merr)?;
+        let room = m.cfg.max_target_positions.saturating_sub(prompt.len() + 1);
+        for _ in 0..room {
+            for &s in &self.suppress {
+                if let Some(v) = cur.get_mut(s as usize) {
+                    *v = f32::NEG_INFINITY;
+                }
+            }
+            // no timestamps, and something before the end
+            if let Some(ts) = cur.get_mut(self.tok.timestamp_begin as usize..) {
+                ts.iter_mut().for_each(|v| *v = f32::NEG_INFINITY);
+            }
+            if seq.is_empty() {
+                for &s in &self.begin_suppress {
+                    if let Some(v) = cur.get_mut(s as usize) {
+                        *v = f32::NEG_INFINITY;
+                    }
+                }
+            }
+            let next = argmax(&cur);
+            if next == self.tok.eot || !cur.get(next as usize).is_some_and(|v| v.is_finite()) {
+                break;
+            }
+            seq.push(next);
+            if repeating(&seq, self.tok.timestamp_begin) {
+                break;
+            }
+            let (logits, _) = m.decoder.forward(&[next], xa, true, None).map_err(merr)?;
+            cur = Model::last_logits(&logits).map_err(merr)?;
+        }
+        Ok(seq)
+    }
+}
+
+/// The device a model runs on: the GPU when asked and there is one, else the CPU.
+fn device(gpu: bool) -> candle_core::Device {
+    #[cfg(target_os = "macos")]
+    {
+        if gpu
+            && std::env::var_os("FILMCRAFT_SPEECH_CPU").is_none()
+            && let Ok(d) = candle_core::Device::new_metal(0)
+        {
+            return d;
+        }
+    }
+    let _ = gpu;
+    candle_core::Device::Cpu
 }
 
 fn softmax_at(x: &[f32], i: usize) -> f32 {
@@ -329,7 +401,70 @@ impl Transcriber for Whisper {
         progress(1.0, "Done");
         Ok(t)
     }
+
+    /// The words of `audio` as plain text, in `language`: each 30 s window decoded without
+    /// timestamps (models fine-tuned without them read this way), no word times or speakers.
+    fn hear(&self, audio: &[f32], language: &str) -> Result<String, SpeechError> {
+        let mut text = String::new();
+        for toks in self.hear_tokens(audio, language)? {
+            let part = self.tok.decode(&toks);
+            if !text.is_empty() && !part.starts_with(' ') {
+                text.push(' ');
+            }
+            text.push_str(&part);
+        }
+        Ok(text.trim().to_string())
+    }
 }
+
+impl Whisper {
+    /// The text tokens [`Transcriber::hear`] decodes, window by window (the oracle test compares
+    /// them with the reference implementation's).
+    pub fn hear_tokens(&self, audio: &[f32], language: &str) -> Result<Vec<Vec<u32>>, SpeechError> {
+        let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
+        let n_mels = m.cfg.num_mel_bins;
+        let window = N_FRAMES * SAMPLES_PER_FRAME;
+        let lang = Some(language).filter(|l| !l.is_empty() && *l != "auto");
+        if lang.is_some_and(|l| self.tok.multilingual() && self.tok.language_token(l).is_none()) {
+            return Err(SpeechError::Model(format!("the model does not know the language `{language}`")));
+        }
+        let mut detected: Option<String> = None;
+        let mut out = Vec::new();
+        for chunk in audio.chunks(window).take(MAX_HEARD_WINDOWS) {
+            let mut padded = chunk.to_vec();
+            padded.resize(window, 0.0);
+            let (frames, mel) = crate::mel::log_mel(&padded, n_mels);
+            let win = Self::window(&mel, n_mels, frames, 0);
+            let x = Tensor::from_vec(win, (1, n_mels, N_FRAMES), &m.device).map_err(merr)?;
+            let xa = m.encoder.forward(&x).map_err(merr)?;
+            let mut prompt = vec![self.tok.sot];
+            if self.tok.multilingual() {
+                let l = match (lang, &detected) {
+                    (Some(l), _) => l.to_string(),
+                    (None, Some(d)) => d.clone(),
+                    (None, None) => {
+                        let d = self.detect_language(&mut m, &xa)?;
+                        detected = Some(d.clone());
+                        d
+                    }
+                };
+                prompt.push(self.tok.language_token(&l).unwrap_or(self.tok.sot + 1));
+                prompt.push(self.tok.transcribe);
+            }
+            prompt.push(self.tok.no_timestamps);
+            let clock = std::time::Instant::now();
+            let toks = self.decode_text(&mut m, &xa, &prompt)?;
+            if std::env::var_os("FILMCRAFT_SPEECH_TRACE").is_some() {
+                eprintln!("decoded {} tokens in {:.2} s", toks.len(), clock.elapsed().as_secs_f64());
+            }
+            out.push(toks);
+        }
+        Ok(out)
+    }
+}
+
+/// Windows (30 s each) [`Transcriber::hear`] reads at most: a check of a few seconds of speech.
+const MAX_HEARD_WINDOWS: usize = 20;
 
 #[cfg(test)]
 mod tests {

@@ -260,9 +260,19 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn load(cfg: Config, weights: Vec<u8>) -> Result<Self> {
-        let device = Device::Cpu;
+    pub fn load(cfg: Config, weights: Vec<u8>, device: Device) -> Result<Self> {
         let vb = VarBuilder::from_buffered_safetensors(weights, DType::F32, &device)?;
+        Self::from_vb(cfg, vb, device)
+    }
+
+    /// From a PyTorch checkpoint (`pytorch_model.bin`), read with candle's restricted pickle
+    /// reader (tensors only; no code from the file runs).
+    pub fn load_pth(cfg: Config, path: &std::path::Path, device: Device) -> Result<Self> {
+        let vb = VarBuilder::from_pth(path, DType::F32, &device)?;
+        Self::from_vb(cfg, vb, device)
+    }
+
+    fn from_vb(cfg: Config, vb: VarBuilder, device: Device) -> Result<Self> {
         let vb = vb.pp("model");
         Ok(Self { encoder: Encoder::new(&cfg, vb.pp("encoder"))?, decoder: Decoder::new(&cfg, vb.pp("decoder"))?, cfg, device })
     }

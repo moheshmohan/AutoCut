@@ -92,6 +92,13 @@ pub trait Transcriber: Send + Sync {
     fn id(&self) -> String;
     /// Transcribe mono 16 kHz `audio`. Word times are relative to the first sample.
     fn transcribe(&self, audio: &[f32], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError>;
+    /// The words of mono 16 kHz `audio` as plain text in `language` (ISO 639-1; empty or `auto`:
+    /// detected), for checking what a voice said: no word times, no speakers. Whisper decodes
+    /// without timestamps, as models fine-tuned without them read best.
+    fn hear(&self, audio: &[f32], language: &str) -> Result<String, SpeechError> {
+        let opts = Options { language: Some(language.to_string()).filter(|l| !l.is_empty() && l != "auto"), diarize: false, ..Default::default() };
+        self.transcribe(audio, &opts, &mut |_, _| true).map(|t| t.text())
+    }
 }
 
 /// A transcriber that returns a fixed transcript (tests, demos and agents that bring their own
@@ -120,16 +127,23 @@ impl Transcriber for FixedTranscriber {
 
 /// Load the transcriber for catalogue model `id` from `models_dir` (feature `whisper`).
 pub fn load(models_dir: &std::path::Path, id: &str) -> Result<std::sync::Arc<dyn Transcriber>, SpeechError> {
+    load_on(models_dir, id, false)
+}
+
+/// [`load`], on the GPU when `gpu` and the machine has one (Metal on macOS): the strict check of
+/// narration hears on the GPU it already holds.
+pub fn load_on(models_dir: &std::path::Path, id: &str, gpu: bool) -> Result<std::sync::Arc<dyn Transcriber>, SpeechError> {
     let m = models::find(id).ok_or_else(|| SpeechError::UnknownModel(id.into()))?;
     if !models::installed(models_dir, m) {
         return Err(SpeechError::NotInstalled(id.into()));
     }
     #[cfg(feature = "whisper")]
     {
-        Ok(std::sync::Arc::new(whisper::Whisper::load(&models::model_dir(models_dir, m), m.id)?))
+        Ok(std::sync::Arc::new(whisper::Whisper::load_on(&models::model_dir(models_dir, m), m.id, gpu)?))
     }
     #[cfg(not(feature = "whisper"))]
     {
+        let _ = gpu;
         Err(SpeechError::Unavailable("built without the `whisper` feature".into()))
     }
 }

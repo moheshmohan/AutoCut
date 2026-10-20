@@ -91,3 +91,36 @@ fn tiny_model_transcribes_public_domain_speech() {
     eprintln!("whisper-tiny WER {:.1}% over {words} words", wer * 100.0);
     assert!(wer < 0.25, "WER {wer}");
 }
+
+/// The Malayalam model's plain-text decoding (`Transcriber::hear`) against Hugging Face
+/// transformers run as an oracle (`tools/whisper_oracle.py`, a venv under the lane's target
+/// directory). Gated: `WHISPER_ORACLE=<dir>` holding the clips (`<name>.f32`, mono 16 kHz) and
+/// the oracle's `oracle.json` (`{"<name>.f32": [tokens]}`), the model in `FILMCRAFT_MODELS_DIR`.
+/// CPU, as the oracle runs.
+#[test]
+#[ignore = "needs the Malayalam model and the oracle's output"]
+fn malayalam_hearing_matches_the_reference_oracle() {
+    let Some(work) = std::env::var_os("WHISPER_ORACLE").map(PathBuf::from) else {
+        eprintln!("SKIPPED: WHISPER_ORACLE unset");
+        return;
+    };
+    let Some(dir) = model_dir(models::MALAYALAM_MODEL) else {
+        eprintln!("SKIPPED: {} not found", models::MALAYALAM_MODEL);
+        return;
+    };
+    let w = filmcraft_speech::whisper::Whisper::load_on(&dir, models::MALAYALAM_MODEL, false).unwrap();
+    let oracle: std::collections::BTreeMap<String, Vec<u32>> = serde_json::from_slice(&std::fs::read(work.join("oracle.json")).unwrap()).unwrap();
+    assert!(!oracle.is_empty());
+    let mut equal = 0;
+    for (name, want) in &oracle {
+        let audio = read_f32(&work.join(name));
+        let got = w.hear_tokens(&audio, "ml").unwrap().concat();
+        // the first difference, if any
+        let same = got.iter().zip(want).take_while(|(a, b)| a == b).count();
+        eprintln!("{name}: {} tokens ours, {} reference, equal for {same}", got.len(), want.len());
+        if got == *want {
+            equal += 1;
+        }
+    }
+    assert_eq!(equal, oracle.len(), "every clip decodes to the reference's tokens");
+}
