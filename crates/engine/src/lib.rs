@@ -41,6 +41,7 @@ pub mod media_frame;
 pub mod media_pool;
 pub mod media_watch;
 pub mod mixer;
+pub mod ml_script;
 pub mod multicam;
 pub mod music;
 pub mod music_neural;
