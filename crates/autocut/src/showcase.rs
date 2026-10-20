@@ -102,6 +102,10 @@ pub struct Options {
     /// English way, as Malayali tech creators speak) or `malayalam` (Malayalam words); `None`:
     /// the default. Checked by [`number_style`].
     pub numbers: Option<String>,
+    /// Turn off the strict check of a Malayalam narration (`--no-narration-check`): by default
+    /// every utterance is heard back by the Malayalam speech model and read again until clear,
+    /// and what was heard goes into [`Built::narration_check`].
+    pub skip_narration_check: bool,
     /// Hide visitors' faces and number plates in the footage, robots excluded ([`crate::privacy`]).
     pub redact: Option<crate::privacy::Redact>,
 }
@@ -139,6 +143,7 @@ impl Default for Options {
             look: Look::default(),
             language: None,
             numbers: None,
+            skip_narration_check: false,
             redact: None,
         }
     }
@@ -809,6 +814,10 @@ pub struct Built {
     pub narration_cached: usize,
     /// Narration lines read again because the voice did not say them ([`narrate`]).
     pub narration_retakes: usize,
+    /// What the strict check heard in a Malayalam show's narration, line by line (text, what
+    /// was heard, character error rate, sentence-start error rate, readings, seeds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narration_check: Option<NarrationCheck>,
     /// Where each part starts: the intro, each year, the outro.
     pub chapters: Vec<Chapter>,
     pub notes: Vec<String>,
@@ -1420,6 +1429,86 @@ struct Narrations {
     malayalam: bool,
     /// How its Malayalam parts say numbers ([`Options::numbers`]; None: the voice's default).
     numbers: Option<String>,
+    /// The strict check of the Malayalam lines is off ([`Options::skip_narration_check`]).
+    unchecked: bool,
+    /// What the strict check found in each Malayalam line ([`Built::narration_check`]).
+    check: NarrationCheck,
+}
+
+/// What the strict check heard in a Malayalam show's narration, line by line (the engine's
+/// `tts.create` `check`: every utterance heard back by the Malayalam speech model and read again
+/// until clear). Written next to the export as `<out>.narration-check.json`.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NarrationCheck {
+    /// The speech model that heard the lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Why lines were not checked, when some were not (no Malayalam speech model, or turned off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
+    pub lines: Vec<CheckedLine>,
+}
+
+impl NarrationCheck {
+    /// Lines whose every utterance was heard clearly, and lines checked.
+    pub fn clear(&self) -> (usize, usize) {
+        (self.lines.iter().filter(|l| l.passed).count(), self.lines.len())
+    }
+}
+
+/// One Malayalam line as the strict check heard it.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckedLine {
+    /// When it is spoken, seconds.
+    pub start: f64,
+    /// The line as shown (the subtitles).
+    pub text: String,
+    /// What the voice was asked to say (numbers spelled), utterance by utterance joined.
+    pub said: String,
+    /// What the speech model heard in the readings kept.
+    pub heard: String,
+    /// Character error rate over the line (utterances weighted by their length).
+    pub cer: f64,
+    /// The worst sentence start (first six syllables) of the line.
+    pub start_cer: f64,
+    /// Readings made, over every utterance.
+    pub takes: u64,
+    /// Every utterance was heard clearly.
+    pub passed: bool,
+    /// The engine's report of each utterance: text, heard, scores, the seed kept, every try.
+    pub utterances: Value,
+}
+
+/// The line `shown` at `start` as the strict check (`check`, a `tts.create` result's) heard it;
+/// `None` when it was not checked.
+fn checked_line(start: f64, shown: &str, check: &Value) -> Option<CheckedLine> {
+    let utterances = check["utterances"].as_array()?;
+    let (mut chars, mut edits, mut worst, mut takes) = (0.0, 0.0, 0f64, 0u64);
+    let (mut said, mut heard) = (Vec::new(), Vec::new());
+    for u in utterances {
+        let text = u["text"].as_str().unwrap_or("");
+        let n = text.chars().filter(|c| c.is_alphanumeric()).count().max(1) as f64;
+        let cer = u["cer"].as_f64().filter(|v| v.is_finite()).unwrap_or(1.0);
+        chars += n;
+        edits += cer * n;
+        worst = worst.max(u["startCer"].as_f64().filter(|v| v.is_finite()).unwrap_or(1.0));
+        takes = takes.saturating_add(u["takes"].as_u64().unwrap_or(1));
+        said.push(text.to_string());
+        heard.push(u["heard"].as_str().unwrap_or("").to_string());
+    }
+    Some(CheckedLine {
+        start,
+        text: shown.to_string(),
+        said: said.join(" "),
+        heard: heard.join(" "),
+        cer: if chars > 0.0 { edits / chars } else { 0.0 },
+        start_cer: worst,
+        takes,
+        passed: check["status"] == "clear",
+        utterances: Value::Array(utterances.clone()),
+    })
 }
 
 /// A cloned voice's line is heard back (Whisper) and read again when less than this share of
@@ -1449,85 +1538,15 @@ pub(crate) fn heard_share(said: &str, heard: &str) -> f64 {
     found as f64 / said.len() as f64
 }
 
-/// A Malayalam line is read again only when Whisper (whose Malayalam is weak: it often writes
-/// it in Tamil script) hears less than this share of its consonants ([`heard_share_indic`]):
-/// a garbled reading scores near nothing, a good one about half or more.
-const HEARD_ENOUGH_ML: f64 = 0.3;
-/// Readings of a Malayalam line at most: one more take, not two (false alarms cost a reading).
+/// Readings of a Malayalam line at most when it comes out overacted: one more take. (What it
+/// says is checked utterance by utterance by the engine's strict check, which reads unclear
+/// utterances again itself.)
 const MAX_TAKES_ML: u32 = 2;
 
 /// Whether `text` is written in Malayalam (more Malayalam letters than Latin ones).
 pub(crate) fn is_malayalam_text(text: &str) -> bool {
     let ml = text.chars().filter(|c| ('\u{0D00}'..='\u{0D7F}').contains(c) && c.is_alphabetic()).count();
     ml > 0 && ml >= text.chars().filter(char::is_ascii_alphabetic).count()
-}
-
-/// The consonant skeleton of Indian-script text: each consonant by its place of articulation
-/// (the scripts share one layout, so Malayalam and the Tamil Whisper often writes compare),
-/// voicing and aspiration ignored; vowels, signs and everything else dropped.
-fn skeleton(text: &str) -> Vec<char> {
-    text.chars()
-        .filter_map(|c| {
-            let cp = c as u32;
-            if !(0x0900..0x0E00).contains(&cp) {
-                return None;
-            }
-            // Malayalam's chillus (atomic final consonants)
-            let class = match cp {
-                0x0D7A | 0x0D7B => 'n',
-                0x0D7C => 'r',
-                0x0D7D | 0x0D7E => 'l',
-                0x0D7F => 'k',
-                _ => match cp & 0x7F {
-                    0x15..=0x18 => 'k',
-                    0x1A..=0x1D => 'c',
-                    0x1F..=0x22 | 0x24..=0x27 => 't',
-                    0x19 | 0x1E | 0x23 | 0x28 | 0x29 => 'n',
-                    0x2A..=0x2D => 'p',
-                    0x2E => 'm',
-                    0x2F => 'y',
-                    0x30 | 0x31 => 'r',
-                    0x32..=0x34 => 'l',
-                    0x35 => 'v',
-                    0x36..=0x38 => 's',
-                    0x39 => 'h',
-                    _ => return None,
-                },
-            };
-            Some(class)
-        })
-        .collect()
-}
-
-/// Lines with fewer consonants than this are not judged: Whisper-base hears a one- or two-word
-/// Malayalam line as anything at all (a live build: "ഒന്ന്." twice as Devanagari noise).
-const MIN_JUDGED_CONSONANTS: usize = 10;
-
-/// The share of `said`'s consonant skeleton ([`skeleton`]) that `heard` follows in order
-/// (longest common subsequence); 1 when it cannot be judged: a short line, or Whisper
-/// answering in another script altogether (a live build: "amitabha" for "കണ്ടതിന് നന്ദി").
-pub(crate) fn heard_share_indic(said: &str, heard: &str) -> f64 {
-    let (a, b) = (skeleton(said), skeleton(heard));
-    if a.len() < MIN_JUDGED_CONSONANTS {
-        return 1.0;
-    }
-    if b.is_empty() && heard.chars().any(char::is_alphabetic) {
-        return 1.0;
-    }
-    // bounded: a line is at most a few hundred consonants
-    let (a, b) = (&a[..a.len().min(2000)], &b[..b.len().min(2000)]);
-    let mut prev = vec![0usize; b.len() + 1];
-    let mut cur = vec![0usize; b.len() + 1];
-    for x in a {
-        for (j, y) in b.iter().enumerate() {
-            let v = if x == y { prev.get(j).copied().unwrap_or(0) + 1 } else { prev.get(j + 1).copied().unwrap_or(0).max(cur.get(j).copied().unwrap_or(0)) };
-            if let Some(c) = cur.get_mut(j + 1) {
-                *c = v;
-            }
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev.last().copied().unwrap_or(0) as f64 / a.len() as f64
 }
 
 /// What the voice said in the narration `item`: transcribed, then read back. `None` when it
@@ -1553,12 +1572,15 @@ async fn narrate(
     let Some(voice) = voice else { return Ok(0.0) };
     // a Malayalam show reads its Malayalam parts in Malayalam (anything left in English stays so)
     let malayalam = narrations.malayalam && is_malayalam_text(say);
-    let (max_takes, enough, hear_in) = if malayalam { (MAX_TAKES_ML, HEARD_ENOUGH_ML, "ml") } else { (MAX_TAKES, HEARD_ENOUGH, "en") };
+    let max_takes = if malayalam { MAX_TAKES_ML } else { MAX_TAKES };
     let numbers = narrations.numbers.clone();
+    let check = if narrations.unchecked { "off" } else { "strict" };
     let create = async |take: u32| {
         let mut p = json!({"text": say, "voice": voice, "delivery": delivery.id(), "take": take, "time": ticks(t), "track": tr.voice});
         if malayalam {
             p["language"] = json!("ml-IN");
+            // every utterance heard back and read again until clear (the engine's default, said)
+            p["check"] = json!(check);
             if let Some(n) = &numbers {
                 p["numbers"] = json!(n);
             }
@@ -1568,7 +1590,8 @@ async fn narrate(
     let mut r = create(0).await?;
     // a cloned voice can garble a line, or overact it (a strained, much higher voice): hear it
     // back and measure its pitch, and read it again (another take) when it did not say it or
-    // came out far above the voice's own pitch, keeping the best reading
+    // came out far above the voice's own pitch, keeping the best reading. A Malayalam line is
+    // heard by the engine's strict check, utterance by utterance, inside `tts.create`.
     if voice.starts_with("clone:") {
         if narrations.reference_pitch.is_none() {
             let r = ex.execute("tts.clonedVoices", json!({"voice": voice})).await.ok();
@@ -1578,13 +1601,13 @@ async fn narrate(
         let mut best: Option<(f64, u32)> = None;
         for take in 0..max_takes {
             let Some(item) = r["item"].as_u64() else { break };
-            let share = if narrations.can_check == Some(false) {
+            let share = if malayalam || narrations.can_check == Some(false) {
                 1.0
             } else {
-                match heard(ex, item, hear_in).await {
+                match heard(ex, item, "en").await {
                     Some(text) => {
                         narrations.can_check = Some(true);
-                        if malayalam { heard_share_indic(say, &text) } else { heard_share(say, &text) }
+                        heard_share(say, &text)
                     }
                     None => {
                         narrations.can_check = Some(false);
@@ -1595,7 +1618,7 @@ async fn narrate(
             };
             let pitch = r["pitchHz"].as_f64();
             let overacted = matches!((pitch, reference), (Some(p), Some(rf)) if p > rf * PITCH_LIMIT);
-            if share >= enough && !overacted {
+            if share >= HEARD_ENOUGH && !overacted {
                 break;
             }
             // a reading that says the line beats one that does not; overacting costs half
@@ -1603,7 +1626,7 @@ async fn narrate(
             if best.is_none_or(|(b, _)| score > b) {
                 best = Some((score, take));
             }
-            let why = if share < enough { format!("the voice said {:.0}% of the line", share * 100.0) } else { "the voice overacted it".to_string() };
+            let why = if share < HEARD_ENOUGH { format!("the voice said {:.0}% of the line", share * 100.0) } else { "the voice overacted it".to_string() };
             let last = take + 1 >= max_takes;
             // the best reading when none was good enough (cached: nothing is read again)
             let next = if last { best.map_or(take, |(_, k)| k) } else { take + 1 };
@@ -1622,6 +1645,9 @@ async fn narrate(
             }
         }
     }
+    if malayalam {
+        record_check(narrations, t, shown, &r["check"]);
+    }
     if let Some(c) = r["clip"].as_u64() {
         narrations.clips.push(c);
     }
@@ -1633,6 +1659,34 @@ async fn narrate(
         narrations.lines.push(Cue { start: t, end: t + seconds, text: shown.to_string() });
     }
     Ok(seconds)
+}
+
+/// Keep what the strict check found in the Malayalam line at `t` (`check`: `tts.create`'s).
+fn record_check(narrations: &mut Narrations, t: f64, shown: &str, check: &Value) {
+    match check["status"].as_str() {
+        Some("clear" | "unclear") => {
+            if let Some(m) = check["model"].as_str() {
+                narrations.check.model = Some(m.to_string());
+            }
+            if let Some(line) = checked_line(t, shown, check) {
+                if !line.passed {
+                    narrations.notes.push(format!(
+                        "narration at {t:.1}s: not heard clearly in {} readings (character error rate {:.2}, sentence start {:.2}); the best kept — listen to it",
+                        line.takes, line.cer, line.start_cer
+                    ));
+                }
+                narrations.check.lines.push(line);
+            }
+        }
+        Some("skipped") | Some("off") => {
+            let why = check["reason"].as_str().unwrap_or("the strict check is off").to_string();
+            if narrations.check.skipped.is_none() {
+                narrations.notes.push(format!("narration: the Malayalam lines were not heard back: {why}"));
+            }
+            narrations.check.skipped = Some(why);
+        }
+        _ => {}
+    }
 }
 
 /// The subtitles on a new caption track of the sequence ("Subtitles", shown in the app, never
@@ -2560,7 +2614,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // what the new overlays (the timeline, chips, scene captions) wear without a theme
     let overlay = theme.clone().unwrap_or_else(|| look::Style::classic().resolve(None));
     let voice = opts.voice.as_deref();
-    let mut narrations = Narrations { malayalam: opts.malayalam(), numbers: opts.numbers.clone(), ..Narrations::default() };
+    let mut narrations =
+        Narrations { malayalam: opts.malayalam(), numbers: opts.numbers.clone(), unchecked: opts.skip_narration_check, ..Narrations::default() };
     let mut mix = Mix::default();
     let mut fg_firsts: Vec<(u64, Option<u64>)> = Vec::new();
     // shots' own sounds the plan sets a level for: (clip, dB)
@@ -3225,6 +3280,13 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     built.narration_lines = narrations.clips.len();
     built.narration_cached = narrations.cached;
     built.narration_retakes = narrations.retakes;
+    if opts.malayalam() && !narrations.lines.is_empty() {
+        let (clear, of) = narrations.check.clear();
+        if of > 0 {
+            progress(&format!("narration check: {clear} of {of} Malayalam lines heard clearly"));
+        }
+        built.narration_check = Some(std::mem::take(&mut narrations.check));
+    }
     built.notes.append(&mut narrations.notes);
     // ---- subtitles: what the narration says, as written, on a caption track
     built.subtitles = crate::subtitles::cues(&narrations.lines, tr.fps);
@@ -4051,30 +4113,19 @@ mod tests {
     }
 
     #[test]
-    fn a_malayalam_reading_is_heard_by_its_consonants() {
-        // Whisper-base on IndicF5's reading of a test line: Malayalam, written in Tamil script
+    fn malayalam_is_detected() {
         let said = "ദുബായിൽ നടന്ന ജൈടെക്സിൽ ഈ ആൻഡ്രോയിഡ് ഒരു മനുഷ്യനെപ്പോലെ തന്നെ തോന്നി.";
-        let heard = "துபையில் நடந்தத்தையிட்டையில் இ அண்டுவிட்டு ஒரு மனிஷினை போலேனே தோனி";
-        let good = heard_share_indic(said, heard);
-        assert!(good >= HEARD_ENOUGH_ML, "{good}");
-        // a hallucinated "thank you", silence, another sentence
-        assert!(heard_share_indic(said, "நன்றி.") < HEARD_ENOUGH_ML);
-        assert_eq!(heard_share_indic(said, ""), 0.0);
-        assert!(heard_share_indic(said, "ഇന്ന് മഴ പെയ്യും എന്ന് തോന്നുന്നു") < good);
-        assert_eq!(heard_share_indic("2013!!", "x"), 1.0, "nothing to check");
-        // too short to judge, or heard in another script: not judged (a live build's false alarms)
-        assert_eq!(heard_share_indic("ഒന്ന്.", "आपाशाशाशाशाश"), 1.0);
-        assert_eq!(heard_share_indic(said, "amitabha"), 1.0);
-        assert!(heard_share_indic(&"കട ".repeat(5000), &"கட ".repeat(5000)).is_finite());
         assert!(is_malayalam_text(said) && !is_malayalam_text("That's all.") && !is_malayalam_text(""));
         let o = Options { language: Some("ml-IN".into()), ..Options::default() };
         assert!(o.malayalam() && !Options::default().malayalam() && !Options { language: Some("en".into()), ..o }.malayalam());
     }
 
-    /// An engine reading Malayalam: take 0 garbled, later takes heard (in Tamil script).
+    /// An engine reading Malayalam under its strict check: `tts.create` reports what it heard,
+    /// clear from take `clear_from` on (or skipped: no speech model).
     struct MalayalamTakes {
         calls: std::sync::Mutex<Vec<(String, Value)>>,
-        good_from: u64,
+        clear_from: u64,
+        skipped: bool,
     }
 
     impl crate::Executor for MalayalamTakes {
@@ -4083,14 +4134,22 @@ mod tests {
             let r = match id {
                 "tts.create" => {
                     let take = p["take"].as_u64().unwrap_or(0);
-                    Ok(json!({"clip": 10 + take, "item": 100 + take, "duration": 5.0 * TPS, "cached": false, "pitchHz": 100.0}))
+                    let clear = take >= self.clear_from;
+                    let check = if p["check"] == "off" {
+                        json!({"status": "off"})
+                    } else if self.skipped {
+                        json!({"status": "skipped", "reason": "the Malayalam speech model is not downloaded"})
+                    } else {
+                        let u = |text: &str, heard: &str, cer: f64, start: f64, passed: bool| json!({"text": text, "heard": heard, "cer": cer, "startCer": start, "takes": if passed { 1 } else { 4 }, "kept": 0, "seed": 1, "passed": passed, "signal": [], "tries": []});
+                        json!({
+                            "status": if clear { "clear" } else { "unclear" },
+                            "model": "whisper-medium-ml check v1",
+                            "utterances": [u("ഒരു മനുഷ്യനെപ്പോലെ.", "ഒരു മനുഷ്യനെപ്പോലെ", 0.0, 0.0, true), u("തന്നെ തോന്നി.", if clear { "തന്നെ തോന്നി" } else { "ഹ്മ് തോന്നി" }, if clear { 0.1 } else { 0.5 }, if clear { 0.0 } else { 0.8 }, clear)],
+                        })
+                    };
+                    Ok(json!({"clip": 10 + take, "item": 100 + take, "duration": 5.0 * TPS, "cached": false, "pitchHz": 100.0, "check": check}))
                 }
                 "tts.clonedVoices" => Ok(json!({"id": p["voice"], "pitchHz": 100.0})),
-                "transcript.generate" => Ok(json!({"items": []})),
-                "transcript.inspect" => {
-                    let take = p["item"].as_u64().unwrap_or(0) - 100;
-                    Ok(json!({"text": if take >= self.good_from { "ஒரு மனிஷினை போலேனே தோனி" } else { "நன்றி." }}))
-                }
                 "edit.clear" => Ok(json!({})),
                 other => Err(format!("unexpected {other}")),
             };
@@ -4099,36 +4158,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_malayalam_show_reads_and_hears_in_malayalam() {
-        let say = "ഒരു മനുഷ്യനെപ്പോലെ തന്നെ തോന്നി.";
-        let ex = MalayalamTakes { calls: Default::default(), good_from: 1 };
+    async fn a_malayalam_show_is_checked_line_by_line() {
+        let say = "ഒരു മനുഷ്യനെപ്പോലെ. തന്നെ തോന്നി.";
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, ..Narrations::default() };
         narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
-        assert_eq!((n.clips.clone(), n.retakes), (vec![11], 1), "the second take is kept");
         let calls = ex.calls.lock().unwrap().clone();
-        assert!(calls.iter().filter(|(c, _)| c == "tts.create").all(|(_, p)| p["language"] == "ml-IN"), "{calls:?}");
-        assert!(calls.iter().filter(|(c, _)| c == "transcript.generate").all(|(_, p)| p["language"] == "ml"));
+        // read in Malayalam under the strict check; never heard back by Whisper here (the engine's
+        // check hears every utterance)
+        assert!(calls.iter().filter(|(c, _)| c == "tts.create").all(|(_, p)| p["language"] == "ml-IN" && p["check"] == "strict"), "{calls:?}");
+        assert!(calls.iter().all(|(c, _)| c != "transcript.generate"));
         assert!(calls.iter().all(|(_, p)| p.get("numbers").is_none()), "the voice's default style unless the plan says");
         assert_eq!(n.lines.first().map(|c| c.text.as_str()), Some(say), "the subtitles show the Malayalam");
+        // the line's report: text, heard, CER weighted by length, the worst start, readings
+        assert_eq!(n.check.model.as_deref(), Some("whisper-medium-ml check v1"));
+        let line = &n.check.lines[0];
+        assert_eq!((line.start, line.text.as_str(), line.passed, line.takes), (3.0, say, true, 2));
+        assert_eq!(line.heard, "ഒരു മനുഷ്യനെപ്പോലെ തന്നെ തോന്നി");
+        assert!(line.cer > 0.0 && line.cer < 0.1 && line.start_cer == 0.0, "{line:?}");
+        assert_eq!(n.check.clear(), (1, 1));
+        assert_eq!(n.retakes, 0);
+        // a line never heard clearly is reported and noted (the engine kept its best readings)
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 99, skipped: false };
+        let mut n = Narrations { malayalam: true, ..Narrations::default() };
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        assert_eq!(n.check.clear(), (0, 1));
+        assert!(n.check.lines[0].start_cer >= 0.8 && n.check.lines[0].takes == 5);
+        assert!(n.notes.iter().any(|l| l.contains("not heard clearly")), "{:?}", n.notes);
+        // no speech model: noted once, the lines still read
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: true };
+        let mut n = Narrations { malayalam: true, ..Narrations::default() };
+        for t in [0.0, 6.0] {
+            narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, t, &mut n).await.unwrap();
+        }
+        assert_eq!(n.clips.len(), 2);
+        assert!(n.check.lines.is_empty() && n.check.skipped.as_deref().is_some_and(|w| w.contains("not downloaded")));
+        assert_eq!(n.notes.iter().filter(|l| l.contains("not heard back")).count(), 1, "{:?}", n.notes);
+        // turned off: said so to the engine
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
+        let mut n = Narrations { malayalam: true, unchecked: true, ..Narrations::default() };
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        assert!(ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").all(|(_, p)| p["check"] == "off"));
+        assert!(n.check.lines.is_empty());
         // the plan's number style goes to every Malayalam reading
-        let ex = MalayalamTakes { calls: Default::default(), good_from: 0 };
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, numbers: Some("malayalam".into()), ..Narrations::default() };
         narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
         assert!(ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").all(|(_, p)| p["numbers"] == "malayalam"));
         assert_eq!(number_style(" English ").unwrap(), "english");
         assert_eq!(number_style("ml").unwrap(), "malayalam");
         assert!(number_style("roman").is_err() && number_style("").is_err());
-        // never heard: one retake at most (Whisper's Malayalam is weak), the best kept
-        let ex = MalayalamTakes { calls: Default::default(), good_from: 99 };
-        let mut n = Narrations { malayalam: true, ..Narrations::default() };
-        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
-        assert!(ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").count() <= MAX_TAKES_ML as usize + 1);
-        assert_eq!(n.clips.len(), 1);
-        // an English part of a Malayalam show stays English (no language given)
-        let ex = MalayalamTakes { calls: Default::default(), good_from: 0 };
+        // an English part of a Malayalam show stays English (no language, no check given)
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, ..Narrations::default() };
         narrate(&ex, &voice_tracks(), Some("basic-male"), "Thanks for watching.", "Thanks for watching.", Delivery::Plain, 0.0, &mut n).await.unwrap();
-        assert!(ex.calls.lock().unwrap().iter().all(|(c, p)| c == "tts.create" && p.get("language").is_none()));
+        assert!(ex.calls.lock().unwrap().iter().all(|(c, p)| c == "tts.create" && p.get("language").is_none() && p.get("check").is_none()));
+        assert!(n.check.lines.is_empty());
+    }
+
+    /// A hostile `check` (not an object, missing numbers, NaN) never fails a line.
+    #[test]
+    fn hostile_check_reports_are_read_safely() {
+        assert!(checked_line(0.0, "x", &json!(null)).is_none());
+        assert!(checked_line(0.0, "x", &json!({"utterances": "no"})).is_none());
+        let l = checked_line(1.0, "x", &json!({"status": "clear", "utterances": [{}, {"cer": "bad", "startCer": null, "takes": -3}]})).unwrap();
+        assert!(l.passed && l.cer == 1.0 && l.start_cer == 1.0 && l.takes == 2, "{l:?}");
+        let mut n = Narrations::default();
+        record_check(&mut n, 0.0, "x", &json!({"status": 42}));
+        record_check(&mut n, 0.0, "x", &json!([1, 2]));
+        assert!(n.check.lines.is_empty() && n.notes.is_empty());
     }
 
     fn voice_tracks() -> Tracks {

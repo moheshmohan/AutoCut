@@ -352,6 +352,15 @@ pub async fn build_and_ship(a: &Args, b: &mut Backend, run: &Run, entries: &[Ent
     for file in &built.subtitle_files {
         progress(&format!("subtitles in {file}"));
     }
+    // what the strict check heard in a Malayalam narration, line by line, next to the export
+    if let (Some(path), Some(check)) = (&opts.export, &built.narration_check) {
+        let file = std::path::Path::new(path).with_extension("narration-check.json");
+        let (clear, of) = check.clear();
+        match std::fs::write(&file, serde_json::to_vec_pretty(check).unwrap_or_default()) {
+            Ok(()) => progress(&format!("narration check in {} ({clear} of {of} Malayalam lines heard clearly)", file.display())),
+            Err(e) => progress(&format!("{}: {e}", file.display())),
+        }
+    }
     if let Some(file) = &built.thumbnail {
         progress(&format!("thumbnail in {file}"));
     }

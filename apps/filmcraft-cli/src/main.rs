@@ -125,7 +125,7 @@ SUBCOMMANDS
                                 \"a video of every robot since 2020\" --voice clone:me --export
                                 ~/Movies/robots.mp4 --upload --project robots.fcproj --save
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--language ml]
-         [--numbers english|malayalam] [--places-from-locations locations.json]
+         [--numbers english|malayalam] [--no-narration-check] [--places-from-locations locations.json]
          [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N]
          [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social]
@@ -172,7 +172,11 @@ SUBCOMMANDS
                                 in Malayalam, numbers written in digits are said the English way
                                 Malayali creators say them (years, prices, from 100 up: \"2021\"
                                 → ട്വന്റി ട്വന്റി വൺ) unless --numbers malayalam (or the
-                                plan's \"numbers\") asks for Malayalam words; see
+                                plan's \"numbers\") asks for Malayalam words; every Malayalam
+                                utterance is heard back by the Malayalam speech model
+                                (transcript.downloadModel {\"model\": \"whisper-medium-ml\"}) and read
+                                again until clear, what was heard written to
+                                <out>.narration-check.json (--no-narration-check: off); see
                                 docs/malayalam-narration.md. --places-from-locations takes the
                                 file `photos locations` wrote and gives every entry without a
                                 \"place\" the place Google Photos shows for its first shot
@@ -1985,6 +1989,8 @@ async fn cli() {
             if numbers_flag.is_some() {
                 opts.numbers = numbers_flag;
             }
+            // a Malayalam narration is heard back utterance by utterance unless turned off
+            opts.skip_narration_check = a.flag("--no-narration-check");
             if languages.is_some() && opts.malayalam() {
                 fail("showcase: --languages builds every language from the English plan; this plan is Malayalam");
             }
