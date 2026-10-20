@@ -137,9 +137,18 @@ what to fix, and the better version is kept. The output is the lines file; what 
 is printed (and in `--report-out`). Parts the model could not write are left out, and
 `showcase-plan --lines` names them.
 
-A small local model's Malayalam is uneven: read the draft, fix what sounds wrong, and run
-`ml-lint` again. The lint and the fact lock are the dependable part. Any writer can follow this
-page instead: you, or the agent driving the editor, then `ml-lint` the result.
+**How good is the draft?** Measured 2026-10-20 on the 52-part showcase plan above, with
+`qwen3:8b` on an M3 Max shared with another lane (25 minutes; 23 safe fixes made, 23 lines sent
+back, 5 rewrites kept): every part came back, short sentences in the right register, digits and
+spelled acronyms, no lint warning. But the Malayalam itself is weak. The fact lock flagged 19
+parts (the hand-written script: 3), for real errors: fourteen kilograms became twelve, "seven or
+eight kilos" seven or five, five-finger hands ten-finger ones, "six hundred" nonsense, a year or a
+city gone. Other lines are fluent-looking but wrong where no fact is checked: the yellow robot
+turned green, "Japan's first home-grown" robot became "Japan's first Indian" one, a garbled
+sentence about NAO. By a native-reader standard, perhaps one line in five is usable after a light
+edit. So treat it as a rough draft at most: the style guide, `ml-lint` and the fact lock are the
+dependable parts. A capable writer (you, or the agent driving the editor) following this page,
+then `ml-lint --plan` on the result, is the way to a script that sounds like you.
 
 ### Teaching it your voice
 

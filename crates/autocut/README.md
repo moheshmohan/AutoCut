@@ -524,6 +524,12 @@ examples.json`, kept by `--remember`, never committed), each line with the facts
 Every line then gets `filmcraft_tts::ml_script::fix`, the lint and the fact lock; a line with a
 warning or a lost or added fact goes back once with what to fix, and the better version is kept.
 Ollama is asked for a 16k context (`Ollama::with_context`): Malayalam takes many tokens.
+Measured 2026-10-20 on a 52-part plan with `qwen3:8b` (25 min on a shared M3 Max): all parts
+written, no lint warning, but the fact lock flagged 19 parts (the hand-written script: 3) and
+several unflagged lines changed meaning; qwen3:8b's Malayalam is a rough draft at best, and the
+lint and the fact lock are the dependable part (details in the style guide). The run also found a
+bug, fixed: cleaning the model's answer dropped a year that started a line, taking it for a list
+number.
 
 ## Shorts: long video → vertical clips
 

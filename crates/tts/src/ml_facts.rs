@@ -656,7 +656,9 @@ fn skeleton_en(word: &str) -> Vec<String> {
         let two = nx.map(|n| [c, *n]);
         let digraph: Option<Vec<&'static str>> = match two {
             Some(['c', 'h']) => Some(vec!["C", "K"]),
-            Some(['s', 'h']) | Some(['z', 'h']) => Some(vec!["S"]),
+            Some(['s', 'h']) => Some(vec!["S"]),
+            // pinyin's zh is a j (Hangzhou ഹാങ്ചൗ), English's a zh (ഹാങ്ഷൗ)
+            Some(['z', 'h']) => Some(vec!["S", "C"]),
             Some(['t', 'h']) | Some(['d', 'h']) => Some(vec!["T"]),
             Some(['p', 'h']) => Some(vec!["F"]),
             Some(['c', 'k']) | Some(['k', 'h']) => Some(vec!["K"]),
@@ -954,11 +956,12 @@ impl FactLock {
                 i += 1;
                 continue;
             }
-            if letters_only.chars().count() >= 2 && letters_only.chars().count() <= 8 && letters_only.chars().all(|c| c.is_ascii_uppercase()) {
-                push(
-                    Fact { kind: FactKind::Letters, text: text_shown, want: Want::Letters(letters_loose(&letters_only), skeleton_en(&letters_only)) },
-                    &mut out,
-                );
+            let n = letters_only.chars().count();
+            if (2..=8).contains(&n) && letters_only.chars().all(|c| c.is_ascii_uppercase()) {
+                // two or three capitals are spelled (QR, AI, UAE); from four, the acronym may be
+                // said as a word (NEMO നീമോ), so its sound counts too
+                let sound = if n >= 4 { skeleton_en(&letters_only) } else { Vec::new() };
+                push(Fact { kind: FactKind::Letters, text: text_shown, want: Want::Letters(letters_loose(&letters_only), sound) }, &mut out);
             } else {
                 let v = skeleton_en(&w.text);
                 if !v.is_empty() {
@@ -991,7 +994,11 @@ impl FactLock {
                 Want::Letters(spelled, vars) => {
                     in_latin || (!spelled.is_empty() && loose_all.contains(spelled.as_str())) || (!vars.is_empty() && sound_found(&skel, vars))
                 }
-                Want::Stems(stems) => stems.iter().any(|s| ml.contains(s)),
+                // spellings of one sound compare equal ("ഓക്ടോബർ" for ഒക്ടോബർ)
+                Want::Stems(stems) => stems.iter().any(|s| {
+                    let ls = ml_script::loose(s);
+                    ml.contains(s) || (!ls.is_empty() && loose_all.contains(ls.as_str()))
+                }),
             };
             if !ok {
                 missing.push(f);

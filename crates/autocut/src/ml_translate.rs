@@ -15,9 +15,11 @@
 //! (`{"intro", "outro", "lines": {"<label>": …}}`, as `showcase-plan --lines` takes it) and a
 //! report of what is left for a person to look at.
 //!
-//! A small local model's Malayalam is uneven; the lint and the fact lock are the dependable
-//! part, and the report says where to look. Any writer (a person, or the agent driving the
-//! editor) can follow the same guide and check its lines with `script.lintMalayalam`.
+//! A small local model's Malayalam is weak (measured with qwen3:8b on a 52-part plan: lint-clean,
+//! but 19 parts lost or changed a fact and more changed meaning unchecked; see
+//! `docs/malayalam-style.md`): the result is a rough draft, the lint and the fact lock are the
+//! dependable part, and the report says where to look. Any writer (a person, or the agent
+//! driving the editor) can follow the same guide and check its lines with `script.lintMalayalam`.
 
 use std::path::{Path, PathBuf};
 
@@ -305,7 +307,16 @@ fn answer_lines(v: &Value, n: usize) -> Vec<Option<String>> {
 /// One clean line: no quotes, numbering, labels or line breaks.
 fn tidy(s: &str) -> String {
     let s = s.replace(['\n', '\r', '"', '“', '”'], " ");
-    let mut t = s.trim().trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')').trim();
+    let mut t = s.trim();
+    // a list number the model copied ("1. ", "2) "), never the digits of a year or a count the
+    // line starts with ("2023-ലെ", "12 വർഷം")
+    let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if (1..=2).contains(&digits)
+        && let Some(rest) = t.get(digits..).and_then(|r| r.strip_prefix(['.', ')']))
+        && rest.starts_with(char::is_whitespace)
+    {
+        t = rest.trim();
+    }
     for prefix in ["ML:", "Malayalam:", "ML :"] {
         if let Some(r) = t.strip_prefix(prefix) {
             t = r.trim();
@@ -617,5 +628,10 @@ mod tests {
         assert_eq!(answer_lines(&json!({"lines": ["English only"]}), 1), [None]);
         assert_eq!(answer_lines(&json!("x"), 1), [None]);
         assert_eq!(tidy("  \"1. ML: ഇത്\n ആണ്.\" "), "ഇത് ആണ്.");
+        // regression (a live run): a line starting with a year or a count kept it
+        assert_eq!(tidy("2023-ലെ ഒക്ടോബറിൽ."), "2023-ലെ ഒക്ടോബറിൽ.");
+        assert_eq!(tidy("12 വർഷം, 48 റോബോട്ടുകൾ."), "12 വർഷം, 48 റോബോട്ടുകൾ.");
+        assert_eq!(tidy("2) 2024 മാർച്ചിൽ."), "2024 മാർച്ചിൽ.");
+        assert_eq!(tidy("1.8 മീറ്റർ."), "1.8 മീറ്റർ.");
     }
 }

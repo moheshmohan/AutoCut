@@ -108,6 +108,11 @@ fn acronyms_letters_months() {
     assert_eq!(missing(&check("In March 2024, in May 2025.", "ട്വന്റി ട്വന്റി ഫോർ മാർച്ചിൽ, ട്വന്റി ട്വന്റി ഫൈവ് മേയിൽ.")), Vec::<&str>::new());
     assert!(FactLock::default().facts("May I say something?").is_empty());
     assert_eq!(missing(&check("In April 2024.", "ട്വന്റി ട്വന്റി ഫോറിൽ.")), ["April"]);
+    // found in a live run: a long-vowel spelling of a month, pinyin's zh, a two-letter acronym
+    // that is not there (its sound alone, K, is in most lines)
+    assert!(check("That October.", "ആ ഓക്ടോബർ മാസത്തിൽ.").is_clean());
+    assert!(check("It started in Hangzhou, China.", "ഹാങ്ചൗ ചൈനയിൽ തുടങ്ങി.").is_clean());
+    assert_eq!(missing(&check("You unlock it with a QR code.", "കോഡ് കിട്ടിയാൽ തുറക്കാം.")), ["QR"]);
 }
 
 #[test]
