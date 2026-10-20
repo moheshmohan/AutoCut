@@ -9,6 +9,8 @@
 //! - `voxcpm` (feature `voxcpm`): VoxCPM zero-shot voice cloning on candle — speech generated
 //!   directly in a speaker's voice from a few seconds of it.
 //! - [`wav`]: WAV reading and writing for voice samples.
+//! - [`heard`]: the strict heard-back check of Malayalam narration (character error rates of
+//!   what a recogniser heard, sentence starts scored on their own) and its retake policy.
 //! - [`cache`]: synthesized narrations kept on disk (keyed by script, voice identity, pitch and
 //!   pace), so a script is read by a voice once across sessions.
 //!
@@ -21,6 +23,7 @@ pub mod clone;
 #[cfg(feature = "indicf5")]
 pub mod f5;
 pub mod formant;
+pub mod heard;
 #[cfg(feature = "kokoro")]
 pub mod kokoro;
 pub mod malayalam;
@@ -148,6 +151,13 @@ pub trait Voice: Send + Sync {
     fn info(&self) -> VoiceInfo;
     /// Speak `text` (pause markers allowed). Fails on an empty or over-long script, or bad params.
     fn synthesize(&self, text: &str, params: &Params) -> Result<Audio, TtsError>;
+    /// [`Voice::synthesize`] under the strict heard-back check ([`heard`]): a voice that reads
+    /// utterance by utterance (the Malayalam voice) hears each and reads it again until it is
+    /// clear, and reports what was heard; the others read once and report nothing.
+    fn synthesize_checked(&self, text: &str, params: &Params, strict: &heard::Strict) -> Result<(Audio, Vec<heard::Checked>), TtsError> {
+        let _ = strict;
+        Ok((self.synthesize(text, params)?, Vec::new()))
+    }
 }
 
 /// Languages offered (English only for now).

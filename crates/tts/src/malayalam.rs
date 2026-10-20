@@ -916,6 +916,16 @@ pub fn pieces(text: &str, max: usize) -> Result<(Vec<Piece>, Vec<String>), TtsEr
 
 /// [`pieces`] with numbers read in `style`.
 pub fn pieces_with(text: &str, max: usize, style: Numbers) -> Result<(Vec<Piece>, Vec<String>), TtsError> {
+    split_script(text, max, style, true)
+}
+
+/// [`pieces`], every sentence an utterance of its own (a long one still split at commas).
+pub fn sentence_pieces(text: &str, max: usize) -> Result<(Vec<Piece>, Vec<String>), TtsError> {
+    split_script(text, max, Numbers::default(), false)
+}
+
+/// A script → utterances and pauses; `pack`: sentences share an utterance while they fit.
+fn split_script(text: &str, max: usize, style: Numbers, pack: bool) -> Result<(Vec<Piece>, Vec<String>), TtsError> {
     check_text(text)?;
     let max = max.max(20);
     let mut out: Vec<Piece> = Vec::new();
@@ -932,6 +942,9 @@ pub fn pieces_with(text: &str, max: usize, style: Numbers) -> Result<(Vec<Piece>
                 }
                 let mut cur = String::new();
                 for s in sentences(&n.text) {
+                    if !pack && !cur.is_empty() {
+                        out.push(Piece::Say(std::mem::take(&mut cur)));
+                    }
                     for part in split_long(&s, max) {
                         if !cur.is_empty() && cur.chars().count() + 1 + part.chars().count() > max {
                             out.push(Piece::Say(std::mem::take(&mut cur)));

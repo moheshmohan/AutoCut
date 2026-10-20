@@ -65,3 +65,11 @@ required-features = ["kokoro"]
 [[example]]
 name = "f5_say"
 required-features = ["indicf5"]
+
+[[example]]
+name = "ml_lab"
+required-features = ["indicf5"]
+
+[dev-dependencies]
+# the Malayalam lab (`examples/ml_lab.rs`) hears its readings with a speech model
+filmcraft-speech = { workspace = true, features = ["whisper"] }

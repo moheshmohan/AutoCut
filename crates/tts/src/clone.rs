@@ -1277,16 +1277,103 @@ pub fn load_malayalam(id: &str, models_dir: &Path) -> Result<Box<dyn Voice>, Tts
     malayalam_voice::load(profile, models_dir)
 }
 
+/// How a cloned voice reads Malayalam ([`load_malayalam`] reads with [`Reading::default`], the
+/// measured best: the crate README's "Sentence starts"). Each utterance is generated after the
+/// reference clip, so how the clip ends and how each utterance begins decide whether its first
+/// syllables come out clear.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reading {
+    /// Silence after the reference clip, ms (the reference implementation adds 50 ms).
+    pub tail_ms: u32,
+    /// Fill that silence with the clip's own room tone (its quietest stretch) instead of
+    /// digital silence.
+    pub room_tone: bool,
+    /// Each sentence is an utterance of its own (else sentences are packed into as few
+    /// utterances as one generation holds).
+    pub per_sentence: bool,
+    /// Euler steps, classifier-free guidance and sway of the sampler ([`crate::f5::Settings`]).
+    pub steps: usize,
+    pub cfg: f32,
+    pub sway: f32,
+    /// Words read in front of each utterance and cut away again (a neutral lead-in), if any.
+    pub lead_in: Option<String>,
+    /// The reference's words through the English front end before IndicF5 reads them (how the
+    /// voice read before 2026-10-20; kept to measure against).
+    pub english_transcript: bool,
+}
+
+/// The neutral lead-in a retake may read first and cut away ("ശരി." — "right."):
+/// [`Reading::for_attempt`].
+pub const LEAD_IN: &str = "ശരി.";
+
+impl Default for Reading {
+    fn default() -> Self {
+        Reading { tail_ms: 50, room_tone: false, per_sentence: false, steps: 32, cfg: 2.0, sway: -1.0, lead_in: None, english_transcript: false }
+    }
+}
+
+impl Reading {
+    /// How the voice read before the sentence-start fix (2026-10-20): before/after comparisons.
+    pub fn before_fix() -> Reading {
+        Reading { tail_ms: 50, room_tone: false, per_sentence: false, steps: 32, cfg: 2.0, sway: -1.0, lead_in: None, english_transcript: true }
+    }
+
+    /// How the strict check's reading `attempt` of an utterance reads (each attempt also has its
+    /// own seed): the first two as set, then with twice the sampling steps, then with a lead-in
+    /// cut away — the sampler settings only, so every attempt speaks after the same reference.
+    pub fn for_attempt(&self, attempt: u32) -> Reading {
+        let mut r = self.clone();
+        if attempt >= 2 {
+            r.steps = (self.steps * 2).min(64);
+        }
+        if attempt >= 3 && r.lead_in.is_none() {
+            r.lead_in = Some(LEAD_IN.to_string());
+        }
+        r
+    }
+
+    /// What of the reading decides the reference IndicF5 is given (keys the built references).
+    fn reference_key(&self) -> String {
+        format!("tail {} room {} english {}", self.tail_ms, self.room_tone, self.english_transcript)
+    }
+
+    pub fn check(&self) -> Result<(), TtsError> {
+        crate::f5::Settings { steps: self.steps, cfg: self.cfg, sway: self.sway, ..Default::default() }.check()?;
+        if self.tail_ms > 2000 {
+            return Err(TtsError::Invalid("the pause after the reference is at most 2 s".into()));
+        }
+        if self.lead_in.as_ref().is_some_and(|l| l.chars().count() > 80) {
+            return Err(TtsError::Invalid("a lead-in is a few words".into()));
+        }
+        Ok(())
+    }
+}
+
+/// The cloned voice `id` speaking Malayalam with `reading` (feature `indicf5`): the lab's way to
+/// read single utterances ([`MalayalamVoice::read`]).
+#[cfg(feature = "indicf5")]
+pub fn malayalam_voice(id: &str, models_dir: &Path, reading: Reading) -> Result<MalayalamVoice, TtsError> {
+    let profile = load_profile(&voices_dir(models_dir), id)?;
+    malayalam_voice::load_with(profile, models_dir, reading)
+}
+
+#[cfg(feature = "indicf5")]
+pub use malayalam_voice::MalayalamVoice;
+
 /// Cloned voices speaking Malayalam through IndicF5 (feature `indicf5`).
 #[cfg(feature = "indicf5")]
 mod malayalam_voice {
     use super::*;
     use crate::f5::{self, F5, Reference};
+    use crate::heard;
 
     /// Silence between utterances, ms.
     const UTTERANCE_GAP_MS: u64 = 250;
     /// Seeds between takes.
     const TAKE_SEEDS: u64 = 7919;
+    /// Seeds between the strict check's readings of one utterance (apart from the takes' and the
+    /// utterances' own).
+    const ATTEMPT_SEEDS: u64 = 104_729;
     /// References kept built.
     const REFERENCES: usize = 4;
 
@@ -1295,11 +1382,11 @@ mod malayalam_voice {
     /// duration comes from the transcript's characters per second; across languages, and with a
     /// transcript the speech model got wrong, that can be far off (measured on the test lines:
     /// 4.0–4.2 after a 7.6 s clip, 7.3–7.5 when Whisper added a phrase that was never said).
-    pub(super) const SYLLABLE_RATE: (f64, f64) = (4.6, 6.0);
+    pub(crate) const SYLLABLE_RATE: (f64, f64) = (4.6, 6.0);
 
     /// The speed that brings `text`, at `seconds` by the reference's formula, within
     /// [`SYLLABLE_RATE`] (1 when it is).
-    pub(super) fn rate_correction(text: &str, seconds: f64) -> f64 {
+    pub(crate) fn rate_correction(text: &str, seconds: f64) -> f64 {
         let syl = crate::malayalam::syllables(text) as f64;
         if syl < 4.0 || !(seconds.is_finite() && seconds > 0.05) {
             return 1.0;
@@ -1333,20 +1420,70 @@ mod malayalam_voice {
         Ok(crate::voxcpm::text::sentences(t)?.join(" ").replace(" —", ",").replace(['—', '–'], ","))
     }
 
-    /// The reference IndicF5 speaks after, built once per profile and reference.
-    pub(super) fn reference(p: &Profile, r: &CrossReference, m: &F5, models_dir: &Path) -> Result<Arc<Reference>, TtsError> {
+    /// The reference's words as IndicF5 reads them: written in Malayalam, through the Malayalam
+    /// front end (canonical spelling, numbers spelled); else through the English one (numbers and
+    /// symbols spelled). `english`: always the English front end, as the voice read before
+    /// 2026-10-20 — which drops every virama from Malayalam ("ഫൈവ് പോയിന്റ് ത്രീ" became "ഫൈവ
+    /// പോയിന റ ത രീ"), so the words no longer matched the clip.
+    pub(crate) fn reference_words(transcript: &str, english_always: bool) -> Result<String, TtsError> {
+        if english_always || !crate::malayalam::detect(transcript) {
+            return english(transcript);
+        }
+        let n = crate::malayalam::normalize(transcript);
+        Ok(n.text.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+
+    /// The quietest `secs` of `x` (20 ms frames): the clip's room tone.
+    pub(crate) fn room_tone(x: &[f32], rate: u32, secs: f64) -> Vec<f32> {
+        let n = ((f64::from(rate) * secs) as usize).max(1);
+        if x.len() <= n {
+            return vec![0.0; n];
+        }
+        let hop = ((rate / 50) as usize).max(1);
+        let energy = |s: usize| x.get(s..s + n).map_or(f64::INFINITY, |w| w.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>());
+        let best = (0..=(x.len() - n) / hop).map(|k| k * hop).min_by(|a, b| energy(*a).total_cmp(&energy(*b))).unwrap_or(0);
+        x.get(best..best + n).map(<[f32]>::to_vec).unwrap_or_else(|| vec![0.0; n])
+    }
+
+    /// The pause after the clip: `ms` of room tone (faded in from the clip's end and out to
+    /// silence) or of silence.
+    pub(crate) fn tail(clip: &[f32], rate: u32, ms: u32, room: bool) -> Vec<f32> {
+        let n = (u64::from(ms) * u64::from(rate) / 1000) as usize;
+        if !room || n == 0 {
+            return vec![0.0; n];
+        }
+        let tone = room_tone(clip, rate, 0.2);
+        let fade = ((rate / 100) as usize).max(1).min(n / 2).max(1);
+        (0..n)
+            .map(|i| {
+                let v = tone.get(i % tone.len().max(1)).copied().unwrap_or(0.0);
+                let g = if i < fade {
+                    i as f32 / fade as f32
+                } else if n - i <= fade {
+                    (n - i) as f32 / fade as f32
+                } else {
+                    1.0
+                };
+                v * g
+            })
+            .collect()
+    }
+
+    /// The reference IndicF5 speaks after, built once per profile, reference and reading.
+    pub(crate) fn reference(p: &Profile, r: &CrossReference, m: &F5, models_dir: &Path, reading: &Reading) -> Result<Arc<Reference>, TtsError> {
         type Refs = Vec<(String, Arc<Reference>)>;
         static C: OnceLock<Mutex<Refs>> = OnceLock::new();
-        let key = format!("{}|{}|{}|{}|{}", p.id, p.created, r.sample, r.clip_sha, r.transcript);
+        let key = format!("{}|{}|{}|{}|{}|{}", p.id, p.created, r.sample, r.clip_sha, r.transcript, reading.reference_key());
         let cache = C.get_or_init(Default::default);
         if let Some(found) = cache.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()) {
             return Ok(found);
         }
         let clip = cross_audio(models_dir, r)?;
         let mut x = filmcraft_audio_dsp::resample::resample_sinc(&clip, CROSS_REFERENCE_RATE, f5::RATE);
-        // 50 ms of silence after the clip, as the reference prepares it
-        x.extend(std::iter::repeat_n(0.0, (f5::RATE / 20) as usize));
-        let built = Arc::new(m.reference(&x, &english(&r.transcript)?)?);
+        let pause = tail(&x, f5::RATE, reading.tail_ms, reading.room_tone);
+        x.extend(pause);
+        let words = reference_words(&r.transcript, reading.english_transcript)?;
+        let built = Arc::new(m.reference(&x, &words)?);
         let mut c = cache.lock().unwrap_or_else(PoisonError::into_inner);
         c.retain(|(k, _)| *k != key);
         c.push((key, built.clone()));
@@ -1356,11 +1493,16 @@ mod malayalam_voice {
     }
 
     pub(super) fn load(profile: Profile, models_dir: &Path) -> Result<Box<dyn Voice>, TtsError> {
+        Ok(Box::new(load_with(profile, models_dir, Reading::default())?))
+    }
+
+    pub(super) fn load_with(profile: Profile, models_dir: &Path, reading: Reading) -> Result<MalayalamVoice, TtsError> {
+        reading.check()?;
         let r = cross_reference(models_dir, &profile.id)?
             .ok_or_else(|| TtsError::Invalid(format!("{} has no Malayalam reference yet: make it with tts.voiceReference", profile.id)))?;
         let m = model(models_dir)?;
-        let reference = reference(&profile, &r, &m, models_dir)?;
-        Ok(Box::new(MalayalamVoice { gender: gender(&profile), model: m, reference, base: f5::Settings::default() }))
+        let reference = reference(&profile, &r, &m, models_dir, &reading)?;
+        Ok(MalayalamVoice { gender: gender(&profile), model: m, reference, reading })
     }
 
     /// A cloned voice speaking Malayalam.
@@ -1368,14 +1510,165 @@ mod malayalam_voice {
         gender: Gender,
         model: Arc<F5>,
         reference: Arc<Reference>,
-        /// Steps and guidance (the reference's defaults); speed and seed come per reading.
-        base: f5::Settings,
+        reading: Reading,
+    }
+
+    /// Frames of the lead-in cut, seconds.
+    const CUT_FRAME: f64 = 0.02;
+
+    /// Where the lead-in ends in `a` (a reading of `lead` then `text`): the end of the longest
+    /// pause near where the syllables put the boundary.
+    pub(crate) fn lead_in_cut(a: &[f32], rate: u32, lead: &str, text: &str) -> usize {
+        let (sl, st) = (crate::malayalam::syllables(lead) as f64, crate::malayalam::syllables(text) as f64);
+        let n = ((f64::from(rate) * CUT_FRAME) as usize).max(1);
+        let levels: Vec<f64> =
+            a.chunks(n).map(|c| 10.0 * (c.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / c.len().max(1) as f64 + 1e-12).log10()).collect();
+        let at = (levels.len() as f64 * sl / (sl + st).max(1.0)) as usize;
+        let mut sorted = levels.clone();
+        sorted.sort_by(f64::total_cmp);
+        let loud = sorted.get(sorted.len() * 95 / 100).copied().unwrap_or(-120.0);
+        let quiet = |l: f64| l < loud - 30.0;
+        let (lo, hi) = (at / 2, (at * 2).min(levels.len()));
+        // the longest quiet run starting in [lo, hi)
+        let mut best: Option<(usize, usize)> = None;
+        let mut f = lo;
+        while f < hi {
+            if levels.get(f).is_some_and(|l| quiet(*l)) {
+                let start = f;
+                while levels.get(f).is_some_and(|l| quiet(*l)) {
+                    f += 1;
+                }
+                if best.is_none_or(|(_, len)| f - start > len) {
+                    best = Some((start, f - start));
+                }
+            } else {
+                f += 1;
+            }
+        }
+        let frame = match best {
+            // the end of the pause, a frame before the speech
+            Some((start, len)) => start + len.saturating_sub(1),
+            None => at,
+        };
+        (frame * n).min(a.len())
+    }
+
+    impl MalayalamVoice {
+        pub fn reading(&self) -> &Reading {
+            &self.reading
+        }
+
+        /// The reference's words as IndicF5 is given them.
+        pub fn reference_text(&self) -> &str {
+            self.reference.text()
+        }
+
+        /// The reference's length with its pause, seconds.
+        pub fn reference_seconds(&self) -> f64 {
+            self.reference.seconds()
+        }
+
+        /// The longest utterance one generation takes, characters.
+        pub fn max_chars(&self) -> usize {
+            self.reference.max_chars()
+        }
+
+        /// The seed of reading `attempt` of utterance `index` of take `take`: every utterance and
+        /// attempt has its own, so one can be read again alone and reproduced.
+        pub fn seed(take: u32, index: usize, attempt: u32) -> u64 {
+            1u64.wrapping_add(u64::from(take).wrapping_mul(TAKE_SEEDS)).wrapping_add(index as u64).wrapping_add(u64::from(attempt).wrapping_mul(ATTEMPT_SEEDS))
+        }
+
+        /// The utterances and pauses `script` is read as.
+        pub fn pieces(&self, script: &str) -> Result<Vec<crate::malayalam::Piece>, TtsError> {
+            let max = self.reference.max_chars();
+            let (pieces, _) = if self.reading.per_sentence { crate::malayalam::sentence_pieces(script, max)? } else { crate::malayalam::pieces(script, max)? };
+            Ok(pieces)
+        }
+
+        /// One utterance read with `seed` at `pace`, its silence trimmed.
+        pub fn read(&self, text: &str, pace: f64, seed: u64) -> Result<Vec<f32>, TtsError> {
+            self.read_as(&self.reading, text, pace, seed)
+        }
+
+        /// [`MalayalamVoice::read`] with the sampler settings and lead-in of `reading` (its
+        /// reference settings are the voice's own).
+        pub fn read_as(&self, reading: &Reading, text: &str, pace: f64, seed: u64) -> Result<Vec<f32>, TtsError> {
+            let rate = f5::RATE;
+            let lead = reading.lead_in.as_deref().map(str::trim).filter(|l| !l.is_empty());
+            let said = match lead {
+                Some(l) => format!("{l} {text}"),
+                None => text.to_string(),
+            };
+            // pace is IndicF5's own speed (the duration it is asked for), held to a natural rate
+            let speed = pace * rate_correction(&said, self.model.natural_seconds(&self.reference, &said));
+            let s = f5::Settings { steps: reading.steps, cfg: reading.cfg, sway: reading.sway, speed: speed as f32, seed };
+            let a = self.model.speak(&self.reference, &said, &s, &mut |_, _| true)?;
+            let a = match lead {
+                Some(l) => a.get(lead_in_cut(&a, rate, l, text)..).unwrap_or(&[]).to_vec(),
+                None => a,
+            };
+            Ok(super::natural::trim_silence(&a, rate).to_vec())
+        }
+
+        fn speak(&self, script: &str, params: &Params, strict: Option<&heard::Strict>) -> Result<(Audio, Vec<heard::Checked>), TtsError> {
+            crate::check_text(script)?;
+            params.check()?;
+            let pieces = self.pieces(script)?;
+            let rate = f5::RATE;
+            let max = (crate::MAX_SECONDS * f64::from(rate)) as usize;
+            let gap = (UTTERANCE_GAP_MS * u64::from(rate) / 1000) as usize;
+            let _gpu = super::natural::gpu("IndicF5 narration")?;
+            let mut out: Vec<f32> = Vec::new();
+            let mut checks = Vec::new();
+            let mut spoke = false;
+            for (i, piece) in pieces.into_iter().enumerate() {
+                match piece {
+                    crate::malayalam::Piece::Pause(ms) => out.resize(out.len().saturating_add((u64::from(ms) * u64::from(rate) / 1000) as usize), 0.0),
+                    crate::malayalam::Piece::Say(u) => {
+                        if spoke {
+                            out.resize(out.len().saturating_add(gap), 0.0);
+                        }
+                        let a = match strict {
+                            None => self.read(&u, params.pace, Self::seed(params.take, i, 0))?,
+                            Some(st) => {
+                                let mut read = |attempt: u32| {
+                                    let seed = Self::seed(params.take, i, attempt);
+                                    Ok(heard::Read { samples: self.read_as(&self.reading.for_attempt(attempt), &u, params.pace, seed)?, seed })
+                                };
+                                let mut hear = |x: &[f32]| {
+                                    st.hearer.hear(x, rate).map_err(|e| TtsError::Model(format!("the strict check could not hear the reading: {e}")))
+                                };
+                                let (a, c) = heard::read_until_clear(&u, &st.policy, rate, &mut read, &mut hear)?;
+                                checks.push(c);
+                                a
+                            }
+                        };
+                        out.extend_from_slice(&a);
+                        spoke = true;
+                    }
+                }
+                if out.len() > max {
+                    return Err(TtsError::AudioTooLong);
+                }
+            }
+            if !spoke {
+                return Err(TtsError::Empty);
+            }
+            let mut out = if params.semitones.abs() > 1e-6 { neural::pitch_shift(out, params.semitones, rate) } else { out };
+            let peak = out.iter().fold(0f32, |m, v| m.max(v.abs()));
+            if peak > 0.98 {
+                let g = 0.98 / peak;
+                out.iter_mut().for_each(|v| *v *= g);
+            }
+            Ok((Audio { samples: out, sample_rate: rate }, checks))
+        }
     }
 
     #[cfg(test)]
     impl MalayalamVoice {
-        pub(super) fn new(gender: Gender, model: Arc<F5>, reference: Arc<Reference>, base: f5::Settings) -> MalayalamVoice {
-            MalayalamVoice { gender, model, reference, base }
+        pub(crate) fn new(gender: Gender, model: Arc<F5>, reference: Arc<Reference>, reading: Reading) -> MalayalamVoice {
+            MalayalamVoice { gender, model, reference, reading }
         }
     }
 
@@ -1394,46 +1687,11 @@ mod malayalam_voice {
         }
 
         fn synthesize(&self, script: &str, params: &Params) -> Result<Audio, TtsError> {
-            crate::check_text(script)?;
-            params.check()?;
-            let (pieces, _) = crate::malayalam::pieces(script, self.reference.max_chars())?;
-            let rate = f5::RATE;
-            let max = (crate::MAX_SECONDS * f64::from(rate)) as usize;
-            let gap = (UTTERANCE_GAP_MS * u64::from(rate) / 1000) as usize;
-            let _gpu = super::natural::gpu("IndicF5 narration")?;
-            let mut out: Vec<f32> = Vec::new();
-            let mut spoke = false;
-            for (i, piece) in pieces.into_iter().enumerate() {
-                match piece {
-                    crate::malayalam::Piece::Pause(ms) => out.resize(out.len().saturating_add((u64::from(ms) * u64::from(rate) / 1000) as usize), 0.0),
-                    crate::malayalam::Piece::Say(u) => {
-                        if spoke {
-                            out.resize(out.len().saturating_add(gap), 0.0);
-                        }
-                        // pace is IndicF5's own speed (the duration it is asked for); each take
-                        // reads afresh with its own run of seeds
-                        let seed = 1u64.wrapping_add(u64::from(params.take).wrapping_mul(TAKE_SEEDS)).wrapping_add(i as u64);
-                        let speed = params.pace * rate_correction(&u, self.model.natural_seconds(&self.reference, &u));
-                        let s = f5::Settings { speed: speed as f32, seed, ..self.base };
-                        let a = self.model.speak(&self.reference, &u, &s, &mut |_, _| true)?;
-                        out.extend_from_slice(super::natural::trim_silence(&a, rate));
-                        spoke = true;
-                    }
-                }
-                if out.len() > max {
-                    return Err(TtsError::AudioTooLong);
-                }
-            }
-            if !spoke {
-                return Err(TtsError::Empty);
-            }
-            let mut out = if params.semitones.abs() > 1e-6 { neural::pitch_shift(out, params.semitones, rate) } else { out };
-            let peak = out.iter().fold(0f32, |m, v| m.max(v.abs()));
-            if peak > 0.98 {
-                let g = 0.98 / peak;
-                out.iter_mut().for_each(|v| *v *= g);
-            }
-            Ok(Audio { samples: out, sample_rate: rate })
+            Ok(self.speak(script, params, None)?.0)
+        }
+
+        fn synthesize_checked(&self, script: &str, params: &Params, strict: &heard::Strict) -> Result<(Audio, Vec<heard::Checked>), TtsError> {
+            self.speak(script, params, Some(strict))
         }
     }
 }
@@ -2328,9 +2586,10 @@ pub(crate) mod tests {
         crate::f5::model::tests::fake_release(&dir);
         let m = Arc::new(crate::f5::F5::load_on(&dir, &candle_core::Device::Cpu).unwrap());
         let p = load_profile(&voices, "clone:my-voice").unwrap();
-        let reference = malayalam_voice::reference(&p, &r, &m, &models).unwrap();
+        let reading = Reading { steps: 2, ..Default::default() };
+        let reference = malayalam_voice::reference(&p, &r, &m, &models, &reading).unwrap();
 
-        let v = malayalam_voice::MalayalamVoice::new(Gender::Male, m, reference, crate::f5::Settings { steps: 2, ..Default::default() });
+        let v = malayalam_voice::MalayalamVoice::new(Gender::Male, m.clone(), reference, reading.clone());
         assert_eq!(v.info().language, "ml-IN");
         let script = "ഇത് 2013 ആണ്. [pause 500ms] ശരി.";
         let a = v.synthesize(script, &Params::default()).unwrap();
@@ -2346,7 +2605,136 @@ pub(crate) mod tests {
         assert_eq!(v.synthesize("", &Params::default()), Err(TtsError::Empty));
         assert_eq!(v.synthesize("[pause 1s]", &Params::default()), Err(TtsError::Empty));
         assert!(v.synthesize("ഇത്", &Params { pace: 9.0, ..Default::default() }).is_err());
+
+        // the strict check: a recogniser that hears the first reading of every utterance garbled
+        struct Fake(std::sync::atomic::AtomicU32, Vec<String>);
+        impl crate::heard::Hearer for Fake {
+            fn hear(&self, _: &[f32], _: u32) -> Result<String, String> {
+                let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) as usize;
+                Ok(if n.is_multiple_of(2) { "ഹ്മ്".into() } else { self.1[(n / 2) % self.1.len()].clone() })
+            }
+            fn id(&self) -> String {
+                "fake".into()
+            }
+        }
+        let says: Vec<String> =
+            v.pieces(script).unwrap().into_iter().filter_map(|p| if let crate::malayalam::Piece::Say(s) = p { Some(s) } else { None }).collect();
+        let hearer = Fake(Default::default(), says);
+        let strict = crate::heard::Strict { hearer: &hearer, policy: crate::heard::Policy { max_takes: 3, max_cer: 0.2, max_start_cer: 0.2 } };
+        let (checked, report) = v.synthesize_checked(script, &Params::default(), &strict).unwrap();
+        assert_eq!(report.len(), 2, "one report per utterance");
+        for (c, i) in report.iter().zip([0usize, 2]) {
+            assert_eq!((c.takes, c.kept, c.passed), (2, 1, true), "{c:?}");
+            // the kept reading's seed is its own: the second attempt of utterance i
+            assert_eq!(c.seed, malayalam_voice::MalayalamVoice::seed(0, i, 1));
+            assert_eq!(c.tries[0].seed, malayalam_voice::MalayalamVoice::seed(0, i, 0));
+        }
+        assert_ne!(checked, a, "retaken utterances read afresh");
+        // seeds never collide between utterances, attempts and takes
+        let mut seeds: Vec<u64> = (0..4).flat_map(|t| (0..40).flat_map(move |i| (0..8).map(move |k| malayalam_voice::MalayalamVoice::seed(t, i, k)))).collect();
+        let n = seeds.len();
+        seeds.sort_unstable();
+        seeds.dedup();
+        assert_eq!(seeds.len(), n);
+
+        // a reading with each sentence its own utterance, a pause of room tone after the clip and
+        // a lead-in cut away
+        let reading = Reading {
+            steps: 2,
+            per_sentence: true,
+            tail_ms: 300,
+            room_tone: true,
+            lead_in: Some("ശരി.".into()),
+            english_transcript: false,
+            ..Default::default()
+        };
+        let reference = malayalam_voice::reference(&p, &r, &m, &models, &reading).unwrap();
+        let w = malayalam_voice::MalayalamVoice::new(Gender::Male, m, reference, reading);
+        let two = "ഇത് ശരിയാണ്. അത് തെറ്റാണ്.";
+        assert_eq!(w.pieces(two).unwrap().len(), 2);
+        assert_eq!(v.pieces(two).unwrap().len(), 1, "packed");
+        let b = w.synthesize(two, &Params::default()).unwrap();
+        assert!(!b.samples.is_empty() && b.samples.iter().all(|x| x.is_finite()));
+        assert!(Reading { tail_ms: 5000, ..Default::default() }.check().is_err());
+        assert!(Reading { steps: 0, ..Default::default() }.check().is_err());
+        assert!(Reading { lead_in: Some("ക".repeat(200)), ..Default::default() }.check().is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The strict check's retakes: new seeds first, then more sampling steps, then a lead-in.
+    #[test]
+    fn retakes_read_more_carefully() {
+        let r = Reading::default();
+        assert!(!r.english_transcript, "the reference's words reach IndicF5 as written");
+        assert_eq!((r.for_attempt(0), r.for_attempt(1)), (r.clone(), r.clone()));
+        assert_eq!((r.for_attempt(2).steps, r.for_attempt(2).lead_in.clone()), (64, None));
+        assert_eq!(r.for_attempt(3).lead_in.as_deref(), Some(LEAD_IN));
+        assert_eq!(Reading { steps: 48, ..r.clone() }.for_attempt(2).steps, 64, "at most 64");
+        for a in 0..10 {
+            assert!(r.for_attempt(a).check().is_ok());
+            assert_eq!(r.for_attempt(a).reference_key(), r.reference_key(), "every attempt speaks after the same reference");
+        }
+        assert!(Reading::before_fix().english_transcript);
+    }
+
+    /// Regression: the reference's Malayalam words went through the English front end, which
+    /// dropped every virama ("ഫൈവ് പോയിന്റ് ത്രീ" became "ഫൈവ പോയിന റ ത രീ"): the words no longer
+    /// matched the clip, and IndicF5 said the reference's last word again at the start of every
+    /// utterance (heard as "ഇല്ല ഇവിടെ നിന്നാണ്…", the clip ending "…ഇല്ല.").
+    #[cfg(feature = "indicf5")]
+    #[test]
+    fn the_reference_words_reach_indicf5_intact() {
+        let t = "ഏഹ്, ഫൈവ് പോയിന്റ് ത്രീ ഫ്ലാഷ്. ഈ ഫൈവ് പോയിന്റ് ത്രീക്ക് വിഷൻ കേപ്പബിലിറ്റീസ് ഇല്ല.";
+        let w = malayalam_voice::reference_words(t, false).unwrap();
+        assert_eq!(w, t);
+        // the English front end mangles it (the old reading, kept to measure against)
+        let old = malayalam_voice::reference_words(t, true).unwrap();
+        assert!(!old.contains('\u{0D4D}') && old != t, "{old}");
+        // English words still go through the English front end; Malayalam numbers are spelled
+        assert!(malayalam_voice::reference_words("It costs $5.", false).unwrap().contains("five dollars"));
+        assert!(malayalam_voice::reference_words("ഇത് 2021 ആണ്.", false).unwrap().contains("ട്വന്റി ട്വന്റി വൺ"));
+        assert_eq!(malayalam_voice::reference_words("  ഇത്   ശരി.  ", false).unwrap(), "ഇത് ശരി.");
+    }
+
+    /// The pause after the reference: room tone from the clip's quietest stretch, faded; or
+    /// silence.
+    #[cfg(feature = "indicf5")]
+    #[test]
+    fn the_reference_pause_is_room_tone_or_silence() {
+        let rate = 24_000;
+        // loud speech, then a quiet stretch of hiss, then speech
+        let mut clip: Vec<f32> = (0..rate).map(|i| 0.3 * (i as f32 * 0.05).sin()).collect();
+        clip.extend((0..rate / 2).map(|i| 0.002 * ((i * 7919 % 101) as f32 / 50.0 - 1.0)));
+        clip.extend((0..rate).map(|i| 0.3 * (i as f32 * 0.05).sin()));
+        let room = malayalam_voice::tail(&clip, rate, 300, true);
+        assert_eq!(room.len(), 7200);
+        let peak = room.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.0 && peak <= 0.002 + 1e-6, "{peak}");
+        assert_eq!((room[0], *room.last().unwrap()), (0.0, room[room.len() - 1]));
+        assert!(room.last().unwrap().abs() < 1e-3);
+        assert_eq!(malayalam_voice::tail(&clip, rate, 300, false), vec![0.0; 7200]);
+        assert!(malayalam_voice::tail(&clip, rate, 0, true).is_empty());
+        // a clip shorter than the room tone wanted
+        assert_eq!(malayalam_voice::room_tone(&[0.1; 10], rate, 0.2).len(), 4800);
+    }
+
+    /// A lead-in is cut at the pause after it, wherever the syllables put the boundary.
+    #[cfg(feature = "indicf5")]
+    #[test]
+    fn a_lead_in_is_cut_at_its_pause() {
+        let rate = 24_000u32;
+        let tone = |secs: f64| -> Vec<f32> { (0..(secs * f64::from(rate)) as usize).map(|i| 0.3 * (i as f32 * 0.05).sin()).collect() };
+        // 0.4 s of lead-in, a 0.3 s pause, then 2 s of speech
+        let mut a = tone(0.4);
+        a.extend(std::iter::repeat_n(0.0, (0.3 * f64::from(rate)) as usize));
+        a.extend(tone(2.0));
+        let cut = malayalam_voice::lead_in_cut(&a, rate, "ശരി.", "ഇത് ഒരു നീണ്ട വാക്യമാണ്, ശരിക്കും.");
+        let t = cut as f64 / f64::from(rate);
+        assert!((0.66..=0.70).contains(&t), "{t}");
+        // no pause: cut where the syllables say, never past the end
+        let flat = tone(2.0);
+        assert!(malayalam_voice::lead_in_cut(&flat, rate, "ശരി.", "ഇത്.") < flat.len());
+        assert_eq!(malayalam_voice::lead_in_cut(&[], rate, "ശരി.", "ഇത്."), 0);
     }
 
     #[test]

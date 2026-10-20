@@ -39,6 +39,10 @@ pub const DIR_NAME: &str = "narration-cache";
 const MAGIC: &[u8; 4] = b"FCNC";
 const HEADER: usize = 28;
 const EXT: &str = "fcnc";
+/// A note beside an entry ([`DiskCache::put_note`]).
+const NOTE_EXT: &str = "json";
+/// Largest note kept.
+pub const MAX_NOTE_BYTES: usize = 1024 * 1024;
 /// Highest sample rate an entry may claim.
 const MAX_RATE: u32 = 384_000;
 /// Files looked at when trimming to the cap (a cache holds hundreds, not millions).
@@ -62,8 +66,10 @@ pub fn voice_identity(id: &str, models_dir: Option<&Path>) -> Option<String> {
 }
 
 /// Version of the Malayalam front end (`crate::malayalam`) and voice: bumped when either reads
-/// the same script differently, so old Malayalam entries miss.
-pub const MALAYALAM_VERSION: u32 = 2;
+/// the same script differently, so old Malayalam entries miss. 3 (2026-10-20): the reference's
+/// Malayalam words reach IndicF5 intact (they lost every virama before, which garbled the start
+/// of every utterance) and the sentence-start fixes of `crate::clone::Reading`.
+pub const MALAYALAM_VERSION: u32 = 3;
 
 /// [`voice_identity`] of the voice `id` speaking `language`: English is exactly
 /// [`voice_identity`] (so English entries keep their keys); Malayalam is the cloned voice's
@@ -249,9 +255,39 @@ impl DiskCache {
             None => {
                 drop(f);
                 let _ = fs::remove_file(&path);
+                let _ = fs::remove_file(path.with_extension(NOTE_EXT));
                 None
             }
         }
+    }
+
+    /// Keep a small note beside `key`'s entry (`<key>.json`: what the strict check heard in the
+    /// reading), at most [`MAX_NOTE_BYTES`]; it goes when its entry goes. Failures are ignored.
+    pub fn put_note(&self, key: &str, note: &[u8]) {
+        if cfg!(target_arch = "wasm32") || note.len() > MAX_NOTE_BYTES {
+            return;
+        }
+        let Some(path) = self.path(key).map(|p| p.with_extension(NOTE_EXT)) else { return };
+        if fs::create_dir_all(&self.dir).is_err() {
+            return;
+        }
+        let tmp = self.dir.join(format!("{key}.{}-{}.tmp", std::process::id(), TMP_SEQ.fetch_add(1, Ordering::Relaxed)));
+        if fs::write(&tmp, note).is_err() || fs::rename(&tmp, &path).is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+
+    /// The note beside `key`'s entry, while the entry is there.
+    pub fn note(&self, key: &str) -> Option<Vec<u8>> {
+        if cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        let entry = self.path(key)?;
+        let path = entry.with_extension(NOTE_EXT);
+        if !entry.is_file() || fs::metadata(&path).ok()?.len() > MAX_NOTE_BYTES as u64 {
+            return None;
+        }
+        fs::read(path).ok()
     }
 
     /// Keep `audio` under `key` (atomically), then trim the cache to its cap. Failures are
@@ -325,6 +361,7 @@ impl DiskCache {
             }
             if fs::remove_file(&path).is_ok() {
                 total = total.saturating_sub(len);
+                let _ = fs::remove_file(path.with_extension(NOTE_EXT));
             }
         }
     }
@@ -515,6 +552,42 @@ mod tests {
         assert_eq!(c.get("../../etc/passwd"), None);
         c.put("../x", &good);
         assert_eq!(c.usage().0, 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A note lives beside its entry: read while the entry is there, removed with it (damaged or
+    /// evicted), never larger than its cap, never for a key that is not ours.
+    #[test]
+    fn notes_live_and_die_with_their_entry() {
+        let dir = tmp("notes");
+        let c = DiskCache::new(&dir, DEFAULT_CAP_BYTES);
+        let v = Counting { calls: AtomicUsize::new(0) };
+        let p = Params::default();
+        let key = DiskCache::key(&voice_identity("basic-male", None).unwrap(), "Note me.", &p);
+        c.put_note(&key, b"{\"heard\": 1}");
+        assert_eq!(c.note(&key), None, "no entry, no note");
+        speak(&c, &v, "basic-male", "Note me.", p);
+        c.put_note(&key, b"{\"heard\": 1}");
+        assert_eq!(c.note(&key).as_deref(), Some(&b"{\"heard\": 1}"[..]));
+        assert_eq!(c.usage().0, 1, "a note is not an entry");
+        c.put_note(&key, &vec![b' '; MAX_NOTE_BYTES + 1]);
+        assert_eq!(c.note(&key).as_deref(), Some(&b"{\"heard\": 1}"[..]), "an oversized note is not kept");
+        c.put_note("../x", b"{}");
+        assert_eq!(c.note("../x"), None);
+        // a damaged entry takes its note with it
+        fs::write(c.path(&key).unwrap(), b"FCNC").unwrap();
+        assert_eq!(c.get(&key), None);
+        assert!(!c.path(&key).unwrap().with_extension(NOTE_EXT).exists());
+        // eviction too
+        let small = DiskCache::new(&dir, 1);
+        speak(&small, &v, "basic-male", "Note me.", p);
+        let _ = fs::remove_dir_all(&dir);
+        let c = DiskCache::new(&dir, DEFAULT_CAP_BYTES);
+        speak(&c, &v, "basic-male", "Note me.", p);
+        c.put_note(&key, b"{}");
+        let tiny = DiskCache::new(&dir, 10);
+        tiny.trim();
+        assert!(!c.path(&key).unwrap().exists() && !c.path(&key).unwrap().with_extension(NOTE_EXT).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

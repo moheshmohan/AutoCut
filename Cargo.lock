@@ -2530,6 +2530,7 @@ dependencies = [
  "candle-nn",
  "filmcraft-audio-dsp",
  "filmcraft-locks",
+ "filmcraft-speech",
  "filmcraft-tts-text",
  "rayon",
  "serde",
