@@ -212,10 +212,13 @@ fn rescore(args: &[String]) -> Res<()> {
     Ok(())
 }
 
-/// Score the stored hearings of `gen` runs again with the current scorer, and count what
-/// policies would read again: `score <results.jsonl>…`.
+/// Score the stored hearings of `gen` runs again with the current scorer: `score
+/// <results.jsonl>…` prints a table row per reading — mean CER, first and later sentence starts
+/// (mean, how many over the default policy's threshold), lines that pass the default policy, and
+/// the synthesis time.
 fn score_again(args: &[String]) -> Res<()> {
-    let mut by: std::collections::BTreeMap<String, Vec<heard::Score>> = Default::default();
+    type Row = (heard::Score, f64);
+    let mut by: std::collections::BTreeMap<String, Vec<Row>> = Default::default();
     for f in args {
         for l in std::fs::read_to_string(f)?.lines() {
             let r: serde_json::Value = serde_json::from_str(l)?;
@@ -223,29 +226,33 @@ fn score_again(args: &[String]) -> Res<()> {
                 continue;
             }
             let s = heard::score(r["said"].as_str().unwrap_or(""), r["heard"].as_str().unwrap_or(""));
-            by.entry(format!("{f}:{}", r["reading"].as_str().unwrap_or(""))).or_default().push(s);
+            by.entry(r["reading"].as_str().unwrap_or("").to_string()).or_default().push((s, r["synthSeconds"].as_f64().unwrap_or(0.0)));
         }
     }
-    for (name, scores) in &by {
-        let first: Vec<f64> = scores.iter().filter_map(|s| s.starts.first().copied()).collect();
-        let later: Vec<f64> = scores.iter().flat_map(|s| s.starts.iter().skip(1).copied()).collect();
-        let over = |v: &[f64], t: f64| v.iter().filter(|x| **x > t).count();
-        let cers: Vec<f64> = scores.iter().map(|s| s.cer).collect();
+    let p = heard::Policy::default();
+    println!(
+        "| reading | readings | mean CER | first starts: mean, over {} | later starts: mean, over {} | lines passing | synthesis |",
+        p.max_start_cer, p.max_start_cer
+    );
+    for (name, rows) in &by {
+        let first: Vec<f64> = rows.iter().filter_map(|(s, _)| s.starts.first().copied()).collect();
+        let later: Vec<f64> = rows.iter().flat_map(|(s, _)| s.starts.iter().skip(1).copied()).collect();
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+        let over = |v: &[f64]| v.iter().filter(|x| **x > p.max_start_cer).count();
+        let cers: Vec<f64> = rows.iter().map(|(s, _)| s.cer).collect();
         println!(
-            "{name}: {} readings; mean CER {:.3}; first starts mean {:.3} (>0.2 {} >0.3 {} >0.4 {}); later starts mean {:.3} (>0.2 {} >0.3 {} >0.4 {}); CER >0.2 {} >0.25 {} >0.3 {}",
-            scores.len(),
-            cers.iter().sum::<f64>() / cers.len().max(1) as f64,
-            first.iter().sum::<f64>() / first.len().max(1) as f64,
-            over(&first, 0.2),
-            over(&first, 0.3),
-            over(&first, 0.4),
-            later.iter().sum::<f64>() / later.len().max(1) as f64,
-            over(&later, 0.2),
-            over(&later, 0.3),
-            over(&later, 0.4),
-            over(&cers, 0.2),
-            over(&cers, 0.25),
-            over(&cers, 0.3)
+            "| {name} | {} | {:.3} | {:.3}, {} of {} | {:.3}, {} of {} | {} of {} | {:.0} s |",
+            rows.len(),
+            mean(&cers),
+            mean(&first),
+            over(&first),
+            first.len(),
+            mean(&later),
+            over(&later),
+            later.len(),
+            rows.iter().filter(|(s, _)| p.passes(s)).count(),
+            rows.len(),
+            rows.iter().map(|(_, t)| t).sum::<f64>()
         );
     }
     Ok(())

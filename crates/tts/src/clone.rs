@@ -1302,8 +1302,9 @@ pub struct Reading {
     pub english_transcript: bool,
 }
 
-/// The neutral lead-in a retake may read first and cut away ("ശരി." — "right."):
-/// [`Reading::for_attempt`].
+/// The neutral lead-in measured as `Reading::lead_in` ("ശരി." — "right."): IndicF5 runs it into
+/// the sentence without a pause, so the cut leaves it heard ("ശരി ഇതാണ്…": 11 of 11 first
+/// starts garbled, crate README). Not used by default or in retakes.
 pub const LEAD_IN: &str = "ശരി.";
 
 impl Default for Reading {
@@ -1319,15 +1320,13 @@ impl Reading {
     }
 
     /// How the strict check's reading `attempt` of an utterance reads (each attempt also has its
-    /// own seed): the first two as set, then with twice the sampling steps, then with a lead-in
-    /// cut away — the sampler settings only, so every attempt speaks after the same reference.
+    /// own seed): the first two as set, the later ones with twice the sampling steps (another
+    /// path through the sampler; measured as good as 32 on average, at twice the time) — the
+    /// sampler settings only, so every attempt speaks after the same reference.
     pub fn for_attempt(&self, attempt: u32) -> Reading {
         let mut r = self.clone();
         if attempt >= 2 {
             r.steps = (self.steps * 2).min(64);
-        }
-        if attempt >= 3 && r.lead_in.is_none() {
-            r.lead_in = Some(LEAD_IN.to_string());
         }
         r
     }
@@ -2661,14 +2660,16 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The strict check's retakes: new seeds first, then more sampling steps, then a lead-in.
+    /// The strict check's retakes: new seeds first, then more sampling steps; never the lead-in
+    /// (measured harmful).
     #[test]
     fn retakes_read_more_carefully() {
         let r = Reading::default();
         assert!(!r.english_transcript, "the reference's words reach IndicF5 as written");
         assert_eq!((r.for_attempt(0), r.for_attempt(1)), (r.clone(), r.clone()));
         assert_eq!((r.for_attempt(2).steps, r.for_attempt(2).lead_in.clone()), (64, None));
-        assert_eq!(r.for_attempt(3).lead_in.as_deref(), Some(LEAD_IN));
+        assert!((0..10).all(|a| r.for_attempt(a).lead_in.is_none()));
+        assert_eq!(LEAD_IN, "ശരി.");
         assert_eq!(Reading { steps: 48, ..r.clone() }.for_attempt(2).steps, 64, "at most 64");
         for a in 0..10 {
             assert!(r.for_attempt(a).check().is_ok());
