@@ -26,6 +26,25 @@ use crate::redact::{Crop, VisionJudge};
 const TRACK_SIDE: usize = 384;
 /// Longest side of the frame the vision model is shown.
 pub const LOOK_SIDE: usize = 1280;
+
+/// Largest share of the picture a named target's box may cover: a logo, a sign or a line of text.
+/// A bigger box is the model boxing a whole screen, the scene, or the thing that wears the logo
+/// (a close-up of the Promobot's tablet, the Promobot itself): blurring it hid the shot.
+pub const MAX_TARGET_AREA: f64 = 0.12;
+/// A target's box at most this much taller than wide (in pixels): a taller one is a person or a
+/// robot carrying the logo (the whole Promobot was boxed as "DP World logo" and blurred).
+pub const MAX_TARGET_TALL: f64 = 1.6;
+
+/// Whether a box the vision model found for a named target (`[x, y, w, h]`, 0..1 of a `fw` × `fh`
+/// picture) can be the target itself rather than what carries it.
+pub fn plausible_target(b: [f64; 4], fw: u32, fh: u32) -> bool {
+    let [_, _, w, h] = b;
+    if !(w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 || w * h > MAX_TARGET_AREA {
+        return false;
+    }
+    let (pw, ph) = (w * f64::from(fw.max(1)), h * f64::from(fh.max(1)));
+    ph <= pw * MAX_TARGET_TALL
+}
 /// A shot change (scene signature difference) brings a look forward.
 const CUT: f32 = 0.3;
 /// …but not closer than this to the previous look, seconds.
@@ -226,6 +245,21 @@ impl<'a> Follower<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_target_is_never_the_robot_that_wears_it() {
+        // a 1920 × 1080 picture
+        let ok = |b| plausible_target(b, 1920, 1080);
+        assert!(ok([0.40, 0.30, 0.12, 0.06]), "a logo on a tablet");
+        assert!(ok([0.10, 0.80, 0.30, 0.08]), "a wide floor sign");
+        // the live failures: the whole Promobot (tall), the whole tablet (big), the whole frame
+        assert!(!ok([0.45, 0.05, 0.16, 0.85]), "a robot's body");
+        assert!(!ok([0.36, 0.25, 0.55, 0.62]), "a tablet filling the frame");
+        assert!(!ok([0.0, 0.0, 1.0, 1.0]), "the frame");
+        assert!(!ok([0.0, 0.0, f64::NAN, 0.1]) && !ok([0.0, 0.0, 0.0, 0.1]) && !ok([0.0, 0.0, 0.1, -0.1]));
+        // hostile picture sizes do not divide by zero
+        assert!(plausible_target([0.1, 0.1, 0.1, 0.1], 0, 0));
+    }
+
     use super::*;
 
     fn hash(x: i64, y: i64) -> u8 {

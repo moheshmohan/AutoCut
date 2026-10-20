@@ -762,13 +762,18 @@ impl VisionJudge for CachedFinder<'_> {
     }
     fn find(&self, frame: &Crop, targets: &[String]) -> std::result::Result<Vec<(usize, [f64; 4])>, String> {
         let t = self.now.load(Ordering::Relaxed);
+        // what can be the target, cached or fresh (a cache written before a rule tightened still
+        // holds the boxes it dropped)
+        let plausible = |found: &[(usize, [f64; 4])]| -> Vec<(usize, [f64; 4])> {
+            found.iter().copied().filter(|(_, b)| crate::redact_targets::plausible_target(*b, frame.width, frame.height)).collect()
+        };
         if let Some(found) = self.known.get(&t) {
             self.hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(found.clone());
+            return Ok(plausible(found));
         }
         let found = self.inner.find(frame, targets)?;
         lock(&self.fresh).insert(t, found.clone());
-        Ok(found)
+        Ok(plausible(&found))
     }
 }
 

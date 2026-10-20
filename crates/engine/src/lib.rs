@@ -62,7 +62,7 @@ pub mod publish;
 pub mod recipes;
 pub mod redact;
 pub mod redact_cache;
-mod redact_targets;
+pub mod redact_targets;
 pub mod reframe;
 pub mod relink;
 pub mod remix;
