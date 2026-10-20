@@ -963,6 +963,12 @@ pub fn resolution(s: &str) -> Result<(u32, u32), AutoCutError> {
     Ok((w, h))
 }
 
+/// Whether embedded broadcast captions (CEA-608/708) can carry `text`: Latin letters, Latin-1
+/// accents and common typographic punctuation; any other script (Malayalam) is lost in them.
+pub fn embeddable(text: &str) -> bool {
+    text.chars().all(|c| (c as u32) < 0x180 || matches!(c, '–' | '—' | '‘' | '’' | '“' | '”' | '…' | '·' | '€'))
+}
+
 /// YouTube's shortest chapter, seconds.
 const MIN_CHAPTER: f64 = 10.0;
 
@@ -3331,10 +3337,17 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let mut p = json!({"path": path, "preset": preset, "wait": true});
         // the subtitles in the video too, as closed captions (CEA-608/708)
         if look.embed_captions {
-            if captions.is_some() {
-                p["embedCaptions"] = json!(true);
-            } else {
+            if captions.is_none() {
                 built.notes.push("captions: no narration to caption; nothing embedded".into());
+            } else if !built.subtitles.iter().all(|c| embeddable(&c.text)) {
+                // CEA-608/708 carry Latin letters only: Malayalam came out as dots and commas, and
+                // YouTube listed them as "English - CC1" / "DTVCC1" tracks
+                built.notes.push(
+                    "captions: the narration's script cannot be carried by embedded CEA-608/708 captions; not embedded (upload the .srt beside the video instead)"
+                        .into(),
+                );
+            } else {
+                p["embedCaptions"] = json!(true);
             }
         }
         built.export = Some(run(ex, "file.exportMedia", p).await?);
@@ -3714,6 +3727,14 @@ mod tests {
         assert_eq!(items(1), vec![0]);
         assert_eq!(items(50).len(), 10, "never more shots than entries");
         assert!(montage(&[], 5).is_empty());
+    }
+
+    #[test]
+    fn embedded_captions_take_latin_text_only() {
+        assert!(embeddable("Swiss-Mile's robot from ETH Zürich — 20 km/h…"));
+        assert!(!embeddable("ട്വന്റി ട്വന്റി വൺ ഒക്ടോബറിൽ"));
+        assert!(!embeddable("Robot ロボット"));
+        assert!(embeddable(""));
     }
 
     #[test]
