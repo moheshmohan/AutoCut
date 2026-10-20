@@ -3770,3 +3770,6 @@
 	Auto Redact: finding faces and plates in the background (see Progress)	自动遮挡：正在后台查找人脸和车牌（参见进度）
 	Auto Redact	自动遮挡
 	Also hide (logos, signs; separated by ;):	同时遮挡（标志、标牌；用 ; 分隔）：
+	Photos	照片
+	Apply Places to Project Items	将地点应用到项目项
+	Read Places from Google Photos	从 Google 相册读取地点

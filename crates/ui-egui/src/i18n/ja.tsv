@@ -4048,3 +4048,6 @@
 	Auto Redact: finding faces and plates in the background (see Progress)	自動ぼかし: バックグラウンドで顔とナンバープレートを検出中 (進行状況を参照)
 	Auto Redact	自動ぼかし
 	Also hide (logos, signs; separated by ;):	ほかにぼかすもの (ロゴ、看板。; で区切る):
+	Photos	フォト
+	Apply Places to Project Items	場所をプロジェクトの項目に適用
+	Read Places from Google Photos	Google フォトから場所を読み込む
