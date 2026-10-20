@@ -27,6 +27,16 @@ through VoxCPM2 and Malayalam through IndicF5:
 filmcraft-cli exec tts.downloadCloneModel '{"model": "indicf5", "wait": true}'
 ```
 
+And the Malayalam speech model, which hears every Malayalam narration back (the strict check,
+step 6) and checks the reference's words (step 3): Whisper medium fine-tuned on Malayalam by
+Thennal D K (Apache-2.0), 3.06 GB, every file pinned and SHA-256 checked:
+
+```sh
+filmcraft-cli exec transcript.downloadModel '{"model": "whisper-medium-ml"}'
+```
+
+Without it Malayalam narration is still read, unchecked, and every result says so.
+
 ## 2. The reference
 
 IndicF5 speaks by *continuing* a reference clip of the speaker: it hears the clip and its words,
@@ -55,6 +65,20 @@ filmcraft-cli exec tts.voiceReference '{"voice": "clone:me", "transcript": "ഏ�
 ```
 
 The clip stays; only its words change (and the narration cache's key with them).
+
+**The words are checked against the clip.** With the Malayalam speech model installed,
+`tts.voiceReference` hears the clip and scores its words against what it heard
+(`transcriptCheck`: `matches` or `mismatch`, the character error rate `cer`, what was heard).
+More than 0.3 is a `warning`: the words are not what the clip says (they run past the cut, or
+belong to another stretch). The author's 9.3 s clip with its hand-typed words scores 0.14 (the
+filler "ഏഹ്" is not heard; loanwords are spelled a little differently). `"checkTranscript":
+false` skips it.
+
+The words reach IndicF5 exactly as written. Until 2026-10-20 they went through the English text
+front end, which dropped every virama ("ഫൈവ് പോയിന്റ് ത്രീ" became "ഫൈവ പോയിന റ ത രീ"); the words
+then no longer matched the clip, and IndicF5 said the clip's last word again at the start of
+every utterance — heard as "ഇല്ല ഇവിടെ നിന്നാണ്…" after a clip ending "…ഇല്ല.". That was the
+gibberish at the start of sentences.
 
 ## 4. Trim the reference to a sentence end
 
@@ -131,11 +155,36 @@ Each line takes about 25 s on an M3 Max GPU (the reference's length sets most of
 are kept in the narration cache, so a rebuild reads nothing twice. A script without digits keeps
 its cached readings whichever number style is chosen. `take: 1, 2, …` reads a line afresh.
 
+**The strict check (on by default).** `tts.preview`, `tts.create`, `tts.edit` and `tts.render`
+hear every Malayalam utterance back with the Malayalam speech model and score it: the character
+error rate over the utterance, and the error rate of the first six syllables of each of its
+sentences on their own — where IndicF5's garble was. An utterance over the thresholds (0.25
+overall, 0.3 at a sentence start), or whose signal is broken (empty, clipped, a long silence
+mid-reading, a burst of level at the start), is read again with its own seed, up to four
+readings, and the best is kept. Results carry `check`:
+
+```json
+{"status": "clear", "model": "whisper-medium-ml check v1", "utterances": [
+  {"text": "ഇതാണ് ബോസ്റ്റൺ ഡൈനാമിക്സിന്റെ സ്പോട്ട്.", "heard": "ഇതാണ് ബോസ്റ്റൺ ഡൈനാമിക്സിന്റെ സ്പോട്ട്",
+   "cer": 0.0, "startCer": 0.0, "takes": 1, "kept": 0, "seed": 1, "passed": true, "signal": [],
+   "tries": [{"attempt": 0, "seed": 1, "heard": "…", "cer": 0.0, "startCer": 0.0, "starts": [0.0], "signal": []}]}]}
+```
+
+`status` is `clear`, `unclear` (an utterance never passed: listen to it, or read it with
+another `take`), `skipped` (no speech model: `reason`) or `off`. Every utterance has its own
+seed, recorded with each try, so one bad sentence is read again alone and can be reproduced.
+Checked readings are cached under their own key with their report, so a rebuild still reports.
+`"check": "off"` reads without hearing. The Text to Speech panel shows the outcome in the
+status bar.
+
 ## 7. A Malayalam showcase
 
 A showcase plan with `"language": "ml"` narrates its Malayalam `intro`, `lines` and `outro` in
-Malayalam, hears them back and makes Malayalam subtitles; `"numbers": "malayalam"` (or
-`--numbers malayalam`) changes how digits are said:
+Malayalam under the strict check and makes Malayalam subtitles; what was heard, line by line
+(text, heard, `cer`, `startCer`, readings, the seeds kept), goes into the build's
+`narration_check` and next to the export as `<out>.narration-check.json`, and every line never
+heard clearly is noted (`--no-narration-check` turns the check off). `"numbers": "malayalam"`
+(or `--numbers malayalam`) changes how digits are said:
 
 ```sh
 filmcraft-cli showcase --report analysis.json --script-in plan-ml.json --language ml \
@@ -172,4 +221,6 @@ prints the findings; `--strict-script` stops the build on them.
 | `<data>/voices/me.json`, `me.wav` | the clone and its voice sample (English) |
 | `<data>/voices/me.indicf5.wav`, `.json` | the Malayalam reference clip, its words, where it came from |
 | `<data>/voices/me.indicf5.untrimmed.wav`, `.json` | the reference before its first trim |
-| `<data>/narration-cache/` | readings, keyed by voice, reference, words and settings |
+| `<data>/narration-cache/` | readings, keyed by voice, reference, words and settings; a checked reading's report beside it (`<key>.json`) |
+| `<data>/models/whisper-medium-ml/` | the Malayalam speech model (the strict check) |
+| `<out>.narration-check.json` | a Malayalam showcase's narration as the strict check heard it |

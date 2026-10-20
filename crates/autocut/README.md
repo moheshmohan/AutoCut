@@ -214,13 +214,19 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    script's Malayalam parts — `lines`, `intro`, `outro` written in Malayalam script — in
    Malayalam: `tts.create` with `language: "ml-IN"`, a cloned voice speaking through IndicF5
    (`crates/tts/README.md`). Parts left in English, `chips` and on-screen labels stay as written.
-   The subtitles carry the Malayalam text (the caption track is tagged `ml`). Lines are heard
-   back with Whisper in Malayalam, which is weak (Whisper-base writes Malayalam in Tamil
-   script), so the check compares consonant skeletons across the two scripts (place of
-   articulation, voicing ignored) and only a reading that keeps less than 30 % of its line's
-   consonants is read again, once at most. Lines of fewer than ten consonants, and answers in
-   another script altogether, are not judged: in a live build Whisper-base heard "ഒന്ന്." as
-   Devanagari noise and "കണ്ടതിന് നന്ദി." as "amitabha".
+   The subtitles carry the Malayalam text (the caption track is tagged `ml`). **Every
+   Malayalam utterance is heard back** by the engine's strict check (`tts.create` `check:
+   "strict"`, the default; `--no-narration-check` or `Options::skip_narration_check` turns it
+   off): the Malayalam speech model (`whisper-medium-ml`) hears each utterance, the character
+   error rate and the first six syllables of every sentence are scored, and an unclear
+   utterance is read again with its own seed, the best of four kept (see
+   `crates/tts/README.md`, "The strict check"). The build keeps what was heard line by line in
+   `narration_check` (text, heard, `cer`, `startCer`, readings, and per utterance its seed and
+   every try), written next to the export as `<out>.narration-check.json`, and notes every line
+   never heard clearly. Without the speech model the lines are still read, and that is noted
+   once. (Whisper-base, which writes Malayalam in Tamil script, no longer judges Malayalam
+   lines: its scores were noise.) A reading far above the voice's pitch is still read again
+   as another take.
 
    **Numbers in Malayalam.** Digits in a Malayalam line are said the way Malayali tech
    creators say them: years, prices and numbers from 100 up in English, in Malayalam script

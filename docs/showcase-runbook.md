@@ -16,6 +16,10 @@ filmcraft-cli`; the binary is `target/release/filmcraft-cli`). How each piece wo
 - A cloned voice for both languages (`tts.cloneVoice`; Malayalam through IndicF5:
   `exec tts.downloadCloneModel model=indicf5`, with a Malayalam reference trimmed to a sentence
   end by `tts.voiceReference` — the steps are in [malayalam-narration.md](malayalam-narration.md)).
+- The Malayalam speech model, which hears every Malayalam line back (the strict check, on by
+  default): `exec transcript.downloadModel model=whisper-medium-ml` (3.06 GB). Then
+  `exec tts.voiceReference voice=clone:<name>` says whether the reference's words match its clip
+  (`transcriptCheck`).
 - Malayalam on screen and in subtitles needs the craft-fonts build input (`CRAFT_FONTS_DIR`, see
   `CLAUDE.md`).
 - The browser is shared: check `filmcraft-cli locks` first. The picker agent takes the `chrome`
@@ -187,6 +191,15 @@ hidden. Two caches in the data directory make the second language and every rebu
 Heavy runs: the GPU is shared (`locks`), and a build with a cloned voice takes a while; try notes
 on a small plan (`--voice` left out builds without narration) before the full round.
 
+**The Malayalam narration is heard back.** Every Malayalam utterance is heard by the Malayalam
+speech model and read again until clear (the strict check, [malayalam-narration.md](malayalam-narration.md)
+step 6); the build prints `narration check: N of M Malayalam lines heard clearly` and writes
+`… (Malayalam).narration-check.json` next to the export: per line its text, what was heard, the
+character error rate (`cer`), the worst sentence start (`startCer`), the readings made, and per
+utterance the seed kept and every try. Listen to every line with `"passed": false` (the build
+notes them too); read one again with another take by editing it (`tts.edit … take=1`), or
+rewrite it. `--no-narration-check` builds without the check.
+
 ## 6. QA
 
 Each export gets, beside it:
@@ -196,6 +209,7 @@ Each export gets, beside it:
 | `<out>.qa.json` | findings (joins, black frames, loudness and voice level, the robot in every shot, privacy) and per-entry privacy counts (`privacy`: faces, plates, named places) |
 | `<out>.qa.png` | a frame of every entry under its number, red/amber when it has an error/warning |
 | `<out>.privacy.png` | a frame of every clip with masks, where most of it is hidden |
+| `<out>.narration-check.json` | the Malayalam narration as the strict check heard it, line by line (Malayalam builds) |
 
 Read the summary line the build prints (`showcase: QA: …`), then look at both sheets. A privacy
 warning ("a redaction mask … covers 34 % of …") means a blur that size hides the shot: give that

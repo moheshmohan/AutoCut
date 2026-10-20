@@ -69,6 +69,13 @@ revision of OpenAI's Hugging Face repositories and checked against its SHA-256:
 | `whisper-tiny` | multilingual | MIT (OpenAI); HF conversion Apache-2.0 |
 | `whisper-base` (default) | multilingual | MIT (OpenAI); HF conversion Apache-2.0 |
 | `whisper-small` | multilingual | MIT (OpenAI); HF conversion Apache-2.0 |
+| `whisper-medium-ml` | Malayalam (fine-tune of Whisper medium by Thennal D K; 3.06 GB) | Apache-2.0; base model MIT (OpenAI) |
+
+`whisper-medium-ml` is what hears Malayalam narration back (the strict check, see
+[malayalam-narration.md](malayalam-narration.md)); it also transcribes Malayalam, English
+loanwords written in Malayalam script. Its file list pins Thennal D K's repository (the
+safetensors conversion, pull request 2) and Whisper medium's own `tokenizer.json`. The survey that
+chose it is in [`crates/speech/README.md`](../crates/speech/README.md).
 
 ### Testing
 
