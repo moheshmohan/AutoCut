@@ -10,8 +10,8 @@
 //! | `mix` | integrated loudness, true peak, loudness range and band shares of the mix as it plays |
 //! | `preLimiter` | the same before the Mix's limiters, and `limiter`: the gain reduction they apply (largest, 99th percentile, seconds over 1 and 2 dB) |
 //! | `stems` | per track (`A1`…, and `transitions`): its role (from its clips' audio types), loudness, true peak, band shares, and the gain reduction of a limiter on the track (`limiter`) |
-//! | `speech` | where the speech tracks (Dialogue clips) speak: their loudness, the mix's loudness then, and how far they stand above the music (`toMusic`) and above everything else (`toRest`) — median and quietest tenth of the momentary (400 ms) loudness difference |
-//! | `narrationClips` | each speech clip's own signal (clip gain and effects): peak, samples over full scale, flat tops (a clipped source) |
+//! | `speech` | where the speech tracks (Dialogue clips) speak: their loudness, the mix's loudness then and in their pauses (`mixBetweenSpeechLufs`, where the music comes up), and how far they stand above the music (`toMusic`) and above everything else (`toRest`) — median and quietest tenth of the momentary (400 ms) loudness difference |
+//! | `narrationClips` | each speech clip's own signal (clip gain and effects): peak, samples over full scale (`overs`: hot, not clipping in the floating-point mix), flat tops (`flatRuns`: a clipped source; `clipped` from three) |
 //!
 //! Band shares are the energy below 120 Hz (`sub`), 120–500 Hz (`lowMid`), 500 Hz–1 kHz (`mid`),
 //! 1–4 kHz (`presence`), 4–6 kHz (`upper`) and above 6 kHz (`air`), fractions of the whole;
@@ -20,7 +20,7 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `audio.analyzeMix {sequence?, from?, to?, speech?, music?}` | `from`/`to`: seconds (default: all of it); `speech`, `music`: track labels (`["A2"]`) instead of the clips' audio types |
+//! | `audio.analyzeMix {sequence?, from?, to?, speech?, music?, only?}` | `from`/`to`: seconds (default: all of it); `speech`, `music`: track labels (`["A2"]`) instead of the clips' audio types; `only`: just these tracks' stems (no pass over the whole mix) |
 
 use serde_json::{Value, json};
 
@@ -290,6 +290,57 @@ fn tracks_p(p: &Value, key: &str, n: usize) -> Result<Option<Vec<usize>>> {
     Ok(Some(out))
 }
 
+/// Audio track `k` of `q` alone over `range` (and, when it has a limiter, without it: the
+/// limiter's work): its report, and its meter.
+fn stem(
+    project: &Project,
+    q: &Sequence,
+    k: usize,
+    range: (i64, i64),
+    sources: &dyn SourceProvider,
+    role: Role,
+) -> std::result::Result<(Value, Metered), String> {
+    let t = q.audio_tracks.get(k).ok_or("no such track")?;
+    let sr = q.settings.sample_rate.clamp(8_000, 384_000);
+    let sub = (sr / 10).max(1) as usize;
+    let mut m = Metered::new(sr);
+    let solo = only(q, &[k]);
+    let track_limits = limits(&t.effects);
+    let unlimited = track_limits.then(|| without_track_limiters(&solo, k));
+    let mut tgr = GainReductionMeter::new(f64::from(sr));
+    render_pair(project, &solo, unlimited.as_ref(), range, sources, &mut |[l, r], before| {
+        m.feed(l, r, sub);
+        if let Some([pl, pr]) = before {
+            tgr.process(&[pl, pr], &[l, r]);
+        }
+    })?;
+    let mut v = m.json();
+    v["track"] = json!(format!("A{}", k + 1));
+    v["name"] = json!(t.name);
+    v["role"] = json!(role.name());
+    if track_limits {
+        v["limiter"] = gr_json(&tgr.summary());
+    }
+    Ok((v, m))
+}
+
+/// Only the audio tracks `tracks` of `seq`, each alone, over samples `[a0, a1)`: `{sequence,
+/// from, to, stems}` (no rendering of the whole mix, so cheap: what a mix measures its narration
+/// with before treating it).
+pub fn analyze_stems(project: &Project, seq: ItemId, range: (i64, i64), tracks: &[usize], sources: &dyn SourceProvider) -> std::result::Result<Value, String> {
+    let q = project.sequence(seq).ok_or("no such sequence")?;
+    let sr = f64::from(q.settings.sample_rate.clamp(8_000, 384_000));
+    if range.1 <= range.0 {
+        return Err("nothing to analyse: the range is empty".into());
+    }
+    let mut stems = Vec::new();
+    for k in tracks {
+        let role = q.audio_tracks.get(*k).map_or(Role::Other, track_role);
+        stems.push(stem(project, q, *k, range, sources, role)?.0);
+    }
+    Ok(json!({"sequence": seq.0, "from": num(range.0 as f64 / sr), "to": num(range.1 as f64 / sr), "stems": stems}))
+}
+
 /// Analyse samples `[a0, a1)` of sequence `seq` (see the module docs).
 pub fn analyze(
     project: &Project,
@@ -328,28 +379,11 @@ pub fn analyze(
             gr.process(&[pl, pr], &[l, r]);
         }
     })?;
-    // each audible track alone (and, when it has a limiter, without it: the limiter's work)
+    // each audible track alone
     let mut stems = Vec::new();
     let mut alone: Vec<(usize, Vec<f64>, f64)> = Vec::new();
-    for (k, t) in q.audio_tracks.iter().enumerate().filter(|(_, t)| audible(t)) {
-        let mut m = Metered::new(sr);
-        let solo = only(q, &[k]);
-        let track_limits = limits(&t.effects);
-        let unlimited = track_limits.then(|| without_track_limiters(&solo, k));
-        let mut tgr = GainReductionMeter::new(f64::from(sr));
-        render_pair(project, &solo, unlimited.as_ref(), range, sources, &mut |[l, r], before| {
-            m.feed(l, r, sub);
-            if let Some([pl, pr]) = before {
-                tgr.process(&[pl, pr], &[l, r]);
-            }
-        })?;
-        let mut v = m.json();
-        v["track"] = json!(format!("A{}", k + 1));
-        v["name"] = json!(t.name);
-        v["role"] = json!(roles.get(k).copied().unwrap_or(Role::Other).name());
-        if track_limits {
-            v["limiter"] = gr_json(&tgr.summary());
-        }
+    for k in (0..q.audio_tracks.len()).filter(|k| q.audio_tracks.get(*k).is_some_and(audible)) {
+        let (v, m) = stem(project, q, k, range, sources, roles.get(k).copied().unwrap_or(Role::Other))?;
         stems.push(v);
         let integrated = m.loud.integrated();
         alone.push((k, m.momentary, integrated));
@@ -396,15 +430,32 @@ pub fn analyze(
         let mut rest = Metered::new(sr);
         render(project, &muting(q, &speech), a0, a1, sources, &mut |l, r| rest.feed(l, r, sub))?;
         let to_rest = mixcheck::speech_ratio(&s, &rest.momentary, gate, HOP_S);
-        // the mix (as it plays) while the speech is active
-        let mut during: Vec<f64> = s.iter().zip(&post.momentary).filter(|(v, m)| v.is_finite() && **v >= gate && m.is_finite()).map(|(_, m)| *m).collect();
-        during.sort_by(f64::total_cmp);
-        let mix_during = during.get(during.len() / 2).copied().unwrap_or(f64::NEG_INFINITY);
+        // the mix (as it plays) while the speech is active, and in its pauses (between its first
+        // and last word, where the music comes up)
+        let active = |v: &f64| v.is_finite() && *v >= gate;
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v.get(v.len() / 2).copied().unwrap_or(f64::NEG_INFINITY)
+        };
+        let mix_during = median(s.iter().zip(&post.momentary).filter(|(v, m)| active(v) && m.is_finite()).map(|(_, m)| *m).collect());
+        let (first, last) = (s.iter().position(active), s.iter().rposition(active));
+        let mix_between = match (first, last) {
+            (Some(a), Some(b)) => median(
+                s.iter()
+                    .zip(&post.momentary)
+                    .enumerate()
+                    .filter(|(i, (v, m))| *i > a && *i < b && !active(v) && m.is_finite() && **m > -70.0)
+                    .map(|(_, (_, m))| *m)
+                    .collect(),
+            ),
+            _ => f64::NEG_INFINITY,
+        };
         json!({
             "tracks": speech.iter().map(|k| format!("A{}", k + 1)).collect::<Vec<_>>(),
             "music": music.iter().map(|k| format!("A{}", k + 1)).collect::<Vec<_>>(),
             "loudnessLufs": num(s_int),
             "mixDuringSpeechLufs": num(mix_during),
+            "mixBetweenSpeechLufs": num(mix_between),
             "toMusic": ratio_json(to_music),
             "toRest": ratio_json(to_rest),
         })
@@ -426,7 +477,7 @@ pub fn analyze(
                 pos += n as i64;
             }
             let c = m.clipping();
-            let bad = c.overs > 0 || c.flat_runs > 0;
+            let bad = c.clipped();
             clipped += usize::from(bad);
             clips.push(json!({
                 "clip": it.id.0,
@@ -495,9 +546,14 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let n = q.audio_tracks.len();
     let speech = tracks_p(p, "speech", n)?;
     let music = tracks_p(p, "music", n)?;
+    let only = tracks_p(p, "only", n)?;
     let range = ((from * sr).round() as i64, (to * sr).round() as i64);
     let provider = s.media.full_res_provider(s.project.clone(), s.services.clone());
-    analyze(&s.project, seq, range, speech, music, &provider).map_err(|e| bad(CMD, e))
+    match only {
+        Some(tracks) => analyze_stems(&s.project, seq, range, &tracks, &provider),
+        None => analyze(&s.project, seq, range, speech, music, &provider),
+    }
+    .map_err(|e| bad(CMD, e))
 }
 
 pub fn commands() -> Vec<CommandSpec> {
@@ -506,7 +562,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Analyze Mix",
         menu: &[],
         shortcut: None,
-        params: r#"{"sequence":id?,"from":seconds?,"to":seconds?,"speech":["A2"]?,"music":["A3"]?}"#,
+        params: r#"{"sequence":id?,"from":seconds?,"to":seconds?,"speech":["A2"]?,"music":["A3"]?,"only":["A2"]?}"#,
         enabled: has_seq,
         run,
         journal: false,

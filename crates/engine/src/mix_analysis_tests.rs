@@ -88,18 +88,33 @@ fn stems_bands_and_speech_over_the_music() {
     let base = f(&r["speech"]["toMusic"]["medianLu"]);
     // the bed alone is the rest: the two ratios agree
     assert!((f(&r["speech"]["toRest"]["medianLu"]) - base).abs() < 0.2, "{r}");
+    // in the pauses the mix is the bed alone
+    let between = f(&r["speech"]["mixBetweenSpeechLufs"]);
+    assert!((between - f(&stem(&r, "A3")["integratedLufs"])).abs() < 1.0 && between < f(&r["speech"]["mixDuringSpeechLufs"]) - 5.0, "{}", r["speech"]);
     // 6 dB more bed: 6 LU less speech over it
     let bed_clip = s.active_sequence().unwrap().audio_tracks[2].items[0].id;
     s.execute("clip.audioGain", json!({"clips": [bed_clip.0], "mode": "adjust", "db": 6.0})).unwrap();
     let r2 = s.execute("audio.analyzeMix", json!({})).unwrap();
     let louder = f(&r2["speech"]["toMusic"]["medianLu"]);
     assert!((base - louder - 6.0).abs() < 0.3, "{base} → {louder}");
+    // one track alone, without a pass over the whole mix: the same stem
+    let only = s.execute("audio.analyzeMix", json!({"only": ["A2"]})).unwrap();
+    assert!(only.get("mix").is_none() && only["stems"].as_array().unwrap().len() == 1, "{only}");
+    assert_eq!(only["stems"][0]["integratedLufs"], stem(&r, "A2")["integratedLufs"]);
+    assert_eq!(only["stems"][0]["octavesDb"], stem(&r, "A2")["octavesDb"]);
     // no limiter on the Mix: none reported; nothing clipped
     assert_eq!(r["limiter"]["present"], false);
     assert_eq!(r["clippedNarrationClips"], 0);
     assert_eq!(r["narrationClips"].as_array().unwrap().len(), 1);
     // the mix as it plays holds both
     assert!(f(&r["mix"]["bands"]["sub"]) > 0.3 && f(&r["mix"]["integratedLufs"]) < 0.0);
+    // a clean voice lifted over full scale by its clip gain is hot, not clipped (the mix is float)
+    let voice_clip = s.active_sequence().unwrap().audio_tracks[1].items[0].id;
+    s.execute("clip.audioGain", json!({"clips": [voice_clip.0], "mode": "adjust", "db": 14.0})).unwrap();
+    let r = s.execute("audio.analyzeMix", json!({"from": 0.0, "to": 3.0})).unwrap();
+    let c = &r["narrationClips"][0];
+    assert!(c["overs"].as_u64().unwrap() > 0 && f(&c["peakDbfs"]) > 0.0 && c["clipped"] == false, "{c}");
+    assert_eq!(r["clippedNarrationClips"], 0);
 }
 
 #[test]
