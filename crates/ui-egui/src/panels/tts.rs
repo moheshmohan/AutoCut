@@ -164,15 +164,36 @@ fn run_now(app: &mut FilmcraftApp, cmd: &str, params: serde_json::Value, play: b
             if play {
                 if let Err(e) = app.play_tts_preview() {
                     app.ui.status = e;
+                } else if let Some(c) = check_status(&r) {
+                    app.ui.status = format!("Preview: {c}");
                 }
             } else {
-                app.ui.status = match cmd {
+                let done = match cmd {
                     "tts.create" => format!("Narration added on {}", r["track"].as_str().unwrap_or("an audio track")),
                     _ => "Narration updated".into(),
+                };
+                app.ui.status = match check_status(&r) {
+                    Some(c) => format!("{done} · {c}"),
+                    None => done,
                 };
             }
         }
         Err(e) => app.ui.status = e.to_string(),
+    }
+}
+
+/// What the strict check of a Malayalam narration found, for the status bar (None: English, or
+/// nothing to say).
+fn check_status(r: &serde_json::Value) -> Option<String> {
+    let c = &r["check"];
+    match c["status"].as_str()? {
+        "clear" => Some("every sentence heard clearly".into()),
+        "unclear" => {
+            let n = c["utterances"].as_array().map_or(0, |u| u.iter().filter(|x| x["passed"].as_bool() != Some(true)).count());
+            Some(format!("{n} sentence(s) not heard clearly after retakes: listen, or read it again with another take"))
+        }
+        "skipped" => Some(format!("not heard back: {}", c["reason"].as_str().unwrap_or("no Malayalam speech model"))),
+        _ => None,
     }
 }
 
@@ -787,4 +808,21 @@ fn button(ui: &mut egui::Ui, t: &Tokens, r: Rect, icon: Icon, text: &str, primar
     icons::paint(p, Rect::from_center_size(pos2(x0 + 7.0, r.center().y), vec2(14.0, 14.0)), icon, fg);
     p.galley(pos2(x0 + 18.0, r.center().y - g.size().y / 2.0), g, fg);
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_status;
+    use serde_json::json;
+
+    #[test]
+    fn the_strict_check_is_said_in_the_status_bar() {
+        assert_eq!(check_status(&json!({})), None, "English: nothing");
+        assert_eq!(check_status(&json!({"check": {"status": "off"}})), None);
+        assert_eq!(check_status(&json!({"check": {"status": "clear"}})).as_deref(), Some("every sentence heard clearly"));
+        let unclear = json!({"check": {"status": "unclear", "utterances": [{"passed": true}, {"passed": false}]}});
+        assert!(check_status(&unclear).is_some_and(|s| s.starts_with("1 sentence")));
+        assert!(check_status(&json!({"check": {"status": "skipped", "reason": "no model"}})).is_some_and(|s| s.contains("no model")));
+        assert_eq!(check_status(&json!({"check": {"status": 3}})), None);
+    }
 }
