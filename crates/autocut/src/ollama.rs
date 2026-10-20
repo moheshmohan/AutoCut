@@ -16,6 +16,9 @@ const MAX_REPLY_TOKENS: u32 = 4096;
 pub struct Ollama {
     pub host: String,
     pub model: String,
+    /// The context window asked for (`num_ctx`); `None`: Ollama's default. Long prompts in
+    /// scripts that take many tokens (Malayalam) need more than the default.
+    pub context: Option<u32>,
     agent: ureq::Agent,
     /// A short-timeout agent for liveness/model checks.
     fast: ureq::Agent,
@@ -23,7 +26,19 @@ pub struct Ollama {
 
 impl Ollama {
     pub fn new(host: &str, model: &str, timeout: Duration) -> Self {
-        Self { host: host.trim_end_matches('/').to_string(), model: model.to_string(), agent: agent_with(timeout), fast: agent_with(Duration::from_secs(5)) }
+        Self {
+            host: host.trim_end_matches('/').to_string(),
+            model: model.to_string(),
+            context: None,
+            agent: agent_with(timeout),
+            fast: agent_with(Duration::from_secs(5)),
+        }
+    }
+
+    /// This client, asking for a context window of `tokens` (2048–131072).
+    pub fn with_context(mut self, tokens: u32) -> Self {
+        self.context = Some(tokens.clamp(2048, 131_072));
+        self
     }
 
     /// Whether the server answers and has the configured model (`GET /api/tags`).
@@ -71,7 +86,7 @@ impl Ollama {
         if !images.is_empty() {
             message["images"] = Value::Array(images.iter().map(|png| Value::String(crate::b64(png))).collect());
         }
-        json!({
+        let mut body = json!({
             "model": self.model,
             "stream": false,
             "format": json.then_some("json"),
@@ -82,7 +97,11 @@ impl Ollama {
             // a cap on the reply: a model stuck emitting whitespace in JSON mode stops instead
             // of running into the request timeout
             "options": {"temperature": 0.1, "num_predict": MAX_REPLY_TOKENS}
-        })
+        });
+        if let Some(n) = self.context {
+            body["options"]["num_ctx"] = json!(n);
+        }
+        body
     }
 
     fn post_chat(&self, body: &serde_json::Value) -> Result<String, AutoCutError> {

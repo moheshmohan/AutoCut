@@ -26,6 +26,7 @@ pub mod identity;
 pub mod intent;
 pub mod llm;
 pub mod look;
+pub mod ml_translate;
 pub mod ollama;
 pub mod outro;
 pub mod places;

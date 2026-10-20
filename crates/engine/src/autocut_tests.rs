@@ -74,6 +74,13 @@ impl AutoCutHost for Fake {
                 Ok(json!({"built": {"sequence": r["sequence"], "frame": frame.map(|(w, h, px)| json!([w, h, px.len()]))}, "status": "Built"}))
             }
             TaskKind::Shorts => Ok(json!({"shorts": [], "params": task.params, "status": "Made 0 shorts"})),
+            TaskKind::MalayalamScript => {
+                let plan = task.params.get("plan").cloned().or(task.plan).unwrap_or_default();
+                let n = plan["entries"].as_array().map_or(0, Vec::len);
+                Ok(
+                    json!({"malayalam": {"intro": "ഹായ്.", "outro": "ബൈ.", "lines": {}}, "summary": {"parts": n + 2}, "params": task.params, "status": "Translated"}),
+                )
+            }
         }
     }
 }
@@ -371,6 +378,49 @@ fn a_port_without_its_session_fails() {
     drop(s);
     assert_eq!(port.call("project.inspect", json!({})).unwrap_err(), "the session closed");
     assert!(port.render(0.0, 64).is_none());
+}
+
+/// `autocut.malayalamScript` translates the kept plan, a given one or one from a file, checks
+/// its parameters first, and keeps the session's plan as it was.
+#[test]
+fn a_plan_is_translated_into_malayalam() {
+    let (mut s, fake) = session(Fake::default());
+    let e = s.execute("autocut.malayalamScript", json!({})).unwrap_err().to_string();
+    assert!(e.contains("nothing to translate"), "{e}");
+    let plan = json!({"entries": [{"label": "Pepper"}], "script": {"intro": "Hi.", "lines": ["Pepper greets people."], "outro": "Bye."}});
+    let r = s.execute("autocut.malayalamScript", json!({"plan": plan, "model": "qwen3:8b", "revise": false, "maxWords": 12, "wait": true})).unwrap();
+    assert_eq!(r["showcase"]["malayalam"]["intro"], "ഹായ്.", "{r}");
+    assert_eq!(r["showcase"]["summary"]["parts"], 3);
+    let (kind, p) = fake.tasks.lock().unwrap()[0].clone();
+    assert_eq!(
+        (kind, p["model"].as_str(), p["revise"].as_bool(), p["maxWords"].as_u64()),
+        (TaskKind::MalayalamScript, Some("qwen3:8b"), Some(false), Some(12))
+    );
+    // the session's plan is not touched by a translation
+    assert!(s.execute("autocut.showcaseInspect", json!({})).unwrap()["plan"].is_null());
+    // a plan from a file
+    let dir = std::env::temp_dir().join(format!("fc-ml-job-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("plan.json");
+    std::fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+    let r = s.execute("autocut.malayalamScript", json!({"planPath": path.to_string_lossy(), "wait": true})).unwrap();
+    assert_eq!(r["showcase"]["params"]["plan"]["entries"][0]["label"], "Pepper", "{r}");
+    std::fs::remove_dir_all(dir).ok();
+    for bad in [
+        json!({"plan": 5}),
+        json!({"plan": {"script": {}}}),
+        json!({"plan": plan, "planPath": "/x.json"}),
+        json!({"planPath": "/no/such/plan.json"}),
+        json!({"plan": plan, "model": "qwen3 8b"}),
+        json!({"plan": plan, "model": "x".repeat(500)}),
+        json!({"plan": plan, "revise": "no"}),
+        json!({"plan": plan, "maxWords": 2}),
+        json!({"plan": plan, "maxWords": 61}),
+        json!({"plan": plan, "out": 5}),
+        json!([1]),
+    ] {
+        assert!(s.execute("autocut.malayalamScript", bad.clone()).is_err(), "{bad} was accepted");
+    }
 }
 
 /// `autocut.shorts` checks its parameters before a job starts, and hands the host the checked

@@ -552,11 +552,75 @@ impl ShowcaseHost {
         None
     }
 
+    /// The model that writes Malayalam: `model` when given, else the script model, with room for
+    /// Malayalam's many tokens. No fallback to the small classifier: its Malayalam is unusable.
+    async fn translator(&self, p: &Value) -> Result<Arc<dyn ChatModel>, AutoCutError> {
+        let cfg = match &self.source {
+            Source::Fixed(m) => return Ok(m.script.clone()),
+            Source::Config(cfg) => cfg.clone(),
+        };
+        let name = p["model"].as_str().map_or_else(|| cfg.script_model.clone(), str::to_string);
+        let o = Ollama::new(&cfg.ollama_host, &name, cfg.http_timeout).with_context(crate::ml_translate::CONTEXT_TOKENS);
+        let probe = o.clone();
+        let ok = tokio::task::spawn_blocking(move || probe.available().unwrap_or(false)).await.unwrap_or(false);
+        if !ok {
+            return Err(AutoCutError::Llm(format!(
+                "the model `{name}` is not in Ollama at {} — start Ollama (`ollama serve`) and `ollama pull {name}`",
+                cfg.ollama_host
+            )));
+        }
+        Ok(Arc::new(o))
+    }
+
+    /// `autocut.malayalamScript`: the plan's English voice-over in natural spoken Malayalam.
+    async fn malayalam_script(&self, task: &Task, progress: &Arc<Progress>) -> Result<Value, AutoCutError> {
+        let p = &task.params;
+        let plan = p.get("plan").cloned().or_else(|| task.plan.clone()).ok_or_else(|| AutoCutError::Invalid("no plan to translate".into()))?;
+        let model = Cancellable { inner: self.translator(p).await?, progress: progress.clone() };
+        let examples_path = p["examples"]
+            .as_str()
+            .map(|e| std::path::PathBuf::from(filmcraft_engine::export_tools::expand_home(e)))
+            .or_else(crate::ml_translate::examples_path);
+        let examples = match examples_path.as_deref().map(crate::ml_translate::load_examples) {
+            Some(Ok(e)) => e,
+            Some(Err(e)) => {
+                note(progress, &format!("the approved examples were not read ({e}); writing with the built-in ones"));
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        let defaults = crate::ml_translate::Settings::default();
+        let settings = crate::ml_translate::Settings {
+            max_words: p["maxWords"].as_u64().map_or(defaults.max_words, |n| n as usize),
+            revise: p["revise"].as_bool().unwrap_or(true),
+            batch: defaults.batch,
+            examples,
+        };
+        let t = crate::ml_translate::translate(&model, &plan, &settings, &mut |l| note(progress, l)).await?;
+        let script = t.script();
+        if let Some(out) = p["out"].as_str() {
+            let path = filmcraft_engine::export_tools::expand_home(out);
+            let text = serde_json::to_string_pretty(&script).unwrap_or_default();
+            std::fs::write(&path, format!("{text}\n")).map_err(|e| AutoCutError::Other(format!("{path}: {e}")))?;
+        }
+        let summary = t.summary();
+        let status = format!(
+            "Malayalam: {} of {} parts written, {} clean",
+            summary["translated"].as_u64().unwrap_or(0),
+            summary["parts"].as_u64().unwrap_or(0),
+            summary["clean"].as_u64().unwrap_or(0)
+        );
+        Ok(json!({"malayalam": script, "lines": t.lines, "notes": t.notes(), "summary": summary, "out": p["out"], "status": status}))
+    }
+
     async fn job(&self, task: Task, ex: &PortExecutor, progress: &Arc<Progress>) -> Result<Value, AutoCutError> {
         if task.kind == TaskKind::Shorts {
             let rater = self.rater(progress).await.map(|m| Arc::new(Cancellable { inner: m, progress: progress.clone() }) as Arc<dyn ChatModel>);
             let mut lines = |l: &str| note(progress, l);
             return crate::shorts::make(ex, &task.params, rater, &mut lines).await;
+        }
+        if task.kind == TaskKind::MalayalamScript {
+            return self.malayalam_script(&task, progress).await;
         }
         let models = self.models(task.kind, progress).await?;
         let guard = |m: &Arc<dyn ChatModel>| Cancellable { inner: m.clone(), progress: progress.clone() };
@@ -606,7 +670,7 @@ impl ShowcaseHost {
                 build_plan(ex, p, task.plan.as_ref(), qa_model.as_ref().map(|m| m as &dyn ChatModel), progress).await
             }
             // (handled above, without the showcase models)
-            TaskKind::Shorts => Err(AutoCutError::Other("shorts are not a showcase step".into())),
+            TaskKind::Shorts | TaskKind::MalayalamScript => Err(AutoCutError::Other("not a showcase step".into())),
         }
     }
 }

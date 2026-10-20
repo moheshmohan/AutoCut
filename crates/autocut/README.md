@@ -514,6 +514,17 @@ reproduces the `plan-v5.json` and `plan-v5-ml.json` the round's Python script wr
 value; a trimmed copy is the test fixture (`tests/data/plan_patch`). The steps of a whole round:
 [docs/showcase-runbook.md](../../docs/showcase-runbook.md).
 
+### Malayalam lines in natural spoken Malayalam (`ml_translate`)
+
+[`ml_translate::translate`](src/ml_translate.rs) (`filmcraft-cli ml-script`, the
+`autocut.malayalamScript` job) writes the lines file of a plan's English voice-over with the
+script model, in the style of [docs/malayalam-style.md](../../docs/malayalam-style.md): the style
+as the system prompt, built-in examples and the user's approved pairs (`<data>/autocut/malayalam-
+examples.json`, kept by `--remember`, never committed), each line with the facts it must keep.
+Every line then gets `filmcraft_tts::ml_script::fix`, the lint and the fact lock; a line with a
+warning or a lost or added fact goes back once with what to fix, and the better version is kept.
+Ollama is asked for a 16k context (`Ollama::with_context`): Malayalam takes many tokens.
+
 ## Shorts: long video → vertical clips
 
 `autocut.shorts` (job; `shorts.rs`) is the local "Opus Clip" factory. The transcript (Whisper's,

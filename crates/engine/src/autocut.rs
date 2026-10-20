@@ -10,6 +10,7 @@
 //! | `autocut.showcaseBuild` | job: build the plan (the kept one, or `plan`) into a new sequence; `export` it (YouTube 1080p, chapters and a QA report beside it) and `upload` the export to Google Photos (into `uploadAlbum` too) |
 //! | `autocut.showcaseInspect` | the kept report (a summary, or all of it with `report: true`), plan and last build, and the latest job |
 //! | `autocut.showcaseSet` | keep a `report` or `plan` from elsewhere (or `reportPath` / `planPath`: the CLI's `analyze --out` and `showcase --script-out` files); `null` clears one |
+//! | `autocut.malayalamScript` | job: the plan's (the kept one, `plan` or `planPath`) English intro, lines and outro in natural spoken Malayalam, written by the local script model (or `model`) from `docs/malayalam-style.md`, its examples and the user's approved pairs; every line keeps its English's facts, gets the safe fixes and the lint (`script.lintMalayalam`) and goes back to the model once with what to fix (`revise: false`: not). The outcome's `malayalam` is the lines file (`{intro, outro, lines: {label: …}}`), written to `out` too, and `lines` what is left to look at |
 //! | `autocut.shorts` | job: long video → shorts. The transcript of `sequence` (or of media `item`, put in a new sequence) is cut into sentences; runs of them `minSeconds`..`maxSeconds` long are scored for interest (and, with the local model, for the strength of their opening hook), and the best `count` that do not overlap each become a vertical sequence (`sequence.autoReframe` to `aspect`, following the speaker) with bold captions from the transcript (`captions`) and an optional `title` card; `export` (a folder) exports each with its captions burned in, and `uploadYoutube` sends each export to YouTube, private unless `youtube.privacy` says otherwise |
 //!
 //! A plan is `{subject, title, subtitle?, voice?, mood, entries, script: {intro, lines, outro}}`;
@@ -79,6 +80,8 @@ pub enum TaskKind {
     Build,
     /// Long video → shorts (`autocut.shorts`).
     Shorts,
+    /// The plan's English voice-over in natural spoken Malayalam (`autocut.malayalamScript`).
+    MalayalamScript,
 }
 
 impl TaskKind {
@@ -89,6 +92,7 @@ impl TaskKind {
             TaskKind::Make => "autocut.makeShowcase",
             TaskKind::Build => "autocut.showcaseBuild",
             TaskKind::Shorts => "autocut.shorts",
+            TaskKind::MalayalamScript => "autocut.malayalamScript",
         }
     }
 
@@ -100,6 +104,7 @@ impl TaskKind {
             TaskKind::Make => format!("Making a showcase of every {subject}"),
             TaskKind::Build => "Building the showcase".into(),
             TaskKind::Shorts => "Making shorts".into(),
+            TaskKind::MalayalamScript => "Writing the Malayalam script".into(),
         }
     }
 }
@@ -333,6 +338,13 @@ pub fn commands() -> Vec<CommandSpec> {
             r#"{"item":id?,"sequence":id?,"count":1..20=3,"minSeconds":3..180=15,"maxSeconds":5..180=60,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","motion":"smooth"|"responsive"?,"captions":bool=true,"title":bool=false,"topic":str?,"analysisFps":1..60=30,"export":dir?,"uploadYoutube":bool=false,"youtube":{"channel":str?,"privacy":"private"|"unlisted"|"public"="private","tags":[str]?,"playlist":str?,"description":str?}?,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Shorts, p),
         ),
+        job(
+            "autocut.malayalamScript",
+            "Write Malayalam Script",
+            &[],
+            r#"{"plan":Plan?,"planPath":str?,"out":str?,"model":str?,"examples":str?,"revise":bool=true,"maxWords":4..60=14,"wait":bool=false}"#,
+            |s, p| start(s, TaskKind::MalayalamScript, p),
+        ),
         CommandSpec {
             id: "autocut.showcaseInspect",
             label: "Inspect Showcase",
@@ -509,6 +521,27 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
     if kind == TaskKind::Shorts {
         shorts_params(cmd, p, &mut out)?;
     }
+    if kind == TaskKind::MalayalamScript {
+        if let Some(plan) = p.get("plan").filter(|v| !v.is_null()) {
+            check_plan(cmd, plan)?;
+            put(&mut out, "plan", Some(plan.clone()));
+        }
+        if p.get("plan").is_some_and(|v| !v.is_null()) && p.get("planPath").is_some_and(|v| !v.is_null()) {
+            return Err(bad(cmd, "give `plan` or `planPath`, not both"));
+        }
+        put(&mut out, "planPath", text_p(cmd, p, "planPath", 4096)?.map(Value::String));
+        put(&mut out, "out", text_p(cmd, p, "out", 4096)?.map(Value::String));
+        put(&mut out, "examples", text_p(cmd, p, "examples", 4096)?.map(Value::String));
+        let model = text_p(cmd, p, "model", MAX_SUBJECT_CHARS)?;
+        if model.as_deref().is_some_and(|m| m.chars().any(|c| c.is_whitespace() || c.is_control())) {
+            return Err(bad(cmd, "`model` is an Ollama model name like qwen3:8b"));
+        }
+        put(&mut out, "model", model.map(Value::String));
+        if let Some(r) = p.get("revise").filter(|v| !v.is_null()) {
+            put(&mut out, "revise", Some(json!(r.as_bool().ok_or_else(|| bad(cmd, "`revise` must be true or false"))?)));
+        }
+        put(&mut out, "maxWords", count_p(cmd, p, "maxWords", 4, 60)?.map(|n| json!(n)));
+    }
     Ok(Value::Object(out))
 }
 
@@ -655,12 +688,21 @@ fn start(s: &mut Session, kind: TaskKind, p: &Value) -> Result<Value> {
     if let Some((id, k)) = running(s) {
         return Err(bad(cmd, format!("a showcase job is already running ({}, job {id}); wait for it or cancel it (jobs.cancel)", k.command())));
     }
-    let params = job_params(cmd, kind, p)?;
+    let mut params = job_params(cmd, kind, p)?;
     let (report, plan) = {
         let st = lock(&s.autocut.state);
         (st.report.clone(), st.plan.clone())
     };
+    // a plan from a file (the CLI's `showcase --script-out`, `showcase-plan --out`)
+    if let Some(path) = params.get("planPath").and_then(Value::as_str).map(str::to_string) {
+        let v = read_json(s, cmd, &path)?;
+        check_plan(cmd, &v)?;
+        params["plan"] = v;
+    }
     match kind {
+        TaskKind::MalayalamScript if plan.is_none() && params.get("plan").is_none() => {
+            return Err(bad(cmd, "nothing to translate yet: write a plan first (autocut.showcasePlan), or pass a `plan` or `planPath`"));
+        }
         TaskKind::Plan if report.is_none() && params.get("entries").is_none() => {
             return Err(bad(cmd, "nothing to plan yet: find the clips first (autocut.analyze), or pass reviewed `entries`"));
         }
