@@ -89,7 +89,8 @@ impl Driver {
             self.frames(3);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("{id} never showed: {:?}", self.ids("templates."));
+        let status = self.app().ui.status.clone();
+        panic!("{id} never showed (status: {status}): {:?}", self.ids("templates."));
     }
 
     /// Frames until widget `id` is registered.
