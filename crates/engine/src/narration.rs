@@ -251,14 +251,49 @@ impl tts::heard::Hearer for Judge {
     }
 }
 
+/// The Malayalam speech model's check, as results and cache keys name it.
+fn judge_id() -> String {
+    format!("{} check v{}", filmcraft_speech::models::MALAYALAM_MODEL, tts::heard::VERSION)
+}
+
+/// The Malayalam speech model in `dir`, loaded once per process (on the GPU where there is one).
+fn judge(dir: &std::path::Path) -> std::result::Result<Arc<Judge>, String> {
+    static JUDGE: OnceLock<Mutex<Option<(std::path::PathBuf, Arc<Judge>)>>> = OnceLock::new();
+    let mut g = JUDGE.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((d, j)) = g.as_ref()
+        && d == dir
+    {
+        return Ok(j.clone());
+    }
+    let t = filmcraft_speech::load_on(dir, filmcraft_speech::models::MALAYALAM_MODEL, true).map_err(|e| e.to_string())?;
+    let j = Arc::new(Judge { t, id: judge_id() });
+    *g = Some((dir.to_path_buf(), j.clone()));
+    Ok(j)
+}
+
+/// The Malayalam speech model, loaded when it first hears: a reading found in the cache needs
+/// only the check's name.
+struct LazyJudge {
+    dir: std::path::PathBuf,
+}
+
+impl tts::heard::Hearer for LazyJudge {
+    fn hear(&self, samples: &[f32], rate: u32) -> std::result::Result<String, String> {
+        judge(&self.dir)?.hear(samples, rate)
+    }
+
+    fn id(&self) -> String {
+        judge_id()
+    }
+}
+
 /// What hears Malayalam narration: the host's ([`Session::narration_hearer`]), else the
-/// Malayalam speech model, loaded once (on the GPU where there is one). `Err`: why the strict
-/// check cannot run (said in the result; the narration is still read).
+/// Malayalam speech model. `Err`: why the strict check cannot run (said in the result; the
+/// narration is still read).
 fn hearer(s: &Session, models_dir: Option<&std::path::Path>) -> std::result::Result<Arc<dyn tts::heard::Hearer>, String> {
     if let Some(h) = &s.narration_hearer {
         return Ok(h.clone());
     }
-    static JUDGE: OnceLock<Mutex<Option<(std::path::PathBuf, Arc<Judge>)>>> = OnceLock::new();
     let id = filmcraft_speech::models::MALAYALAM_MODEL;
     let m = filmcraft_speech::models::find(id).ok_or_else(|| format!("unknown speech model {id}"))?;
     let dir = models_dir.ok_or("no data directory for speech models")?;
@@ -271,16 +306,7 @@ fn hearer(s: &Session, models_dir: Option<&std::path::Path>) -> std::result::Res
             m.size() as f64 / 1e9
         ));
     }
-    let mut g = JUDGE.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((d, j)) = g.as_ref()
-        && d == dir
-    {
-        return Ok(j.clone());
-    }
-    let t = filmcraft_speech::load_on(dir, id, true).map_err(|e| e.to_string())?;
-    let j = Arc::new(Judge { t, id: format!("{id} check v{}", tts::heard::VERSION) });
-    *g = Some((dir.to_path_buf(), j.clone()));
-    Ok(j)
+    Ok(Arc::new(LazyJudge { dir: dir.to_path_buf() }))
 }
 
 /// What the Malayalam speech model hears in `samples` (mono, `rate`), and which model heard it.
@@ -1015,6 +1041,12 @@ mod tests {
         let j = check_json(&n, &strict, Some(&unclear));
         assert_eq!((j["status"].as_str(), j["model"].as_str()), (Some("unclear"), Some("ear v1")));
         assert_eq!(check_json(&n, &strict, None)["status"], "unclear", "a reading without its report is not called clear");
+        // the model's check is named without loading it (a cached reading never loads it); a
+        // model that cannot load is an error when it would hear, never a crash
+        let lazy = LazyJudge { dir: std::env::temp_dir().join("filmcraft-no-such-models") };
+        assert_eq!(tts::heard::Hearer::id(&lazy), judge_id());
+        assert!(judge_id().starts_with("whisper-medium-ml check v"));
+        assert!(tts::heard::Hearer::hear(&lazy, &[0.0; 16_000], 16_000).is_err());
         // reports kept by key, the newest 64
         for i in 0..70 {
             report_put(format!("k{i}"), json!(i));
