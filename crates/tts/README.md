@@ -311,6 +311,30 @@ Whisper-base writes Malayalam in Tamil script; a garbled reading scores near 0.
   25 s a line (real-time factor 4–6); the reference clip's length sets most of it. A
   rebuild reads from the narration cache.
 
+## Natural spoken Malayalam: the script lint and the fact lock (2026-10-20)
+
+A good voice still sounds robotic reading written Malayalam, so the script is checked too
+([docs/malayalam-style.md](../../docs/malayalam-style.md)):
+
+- [`ml_script`](src/ml_script.rs): `lint` finds sentences over 14 spoken words (a number said the
+  English way or a spelled acronym is one word), formal words with a spoken form (a curated table,
+  `FORMAL`: written → spoken, a hint where it depends on context, a fix only when the replacement
+  takes the same suffixes), numbers from 100 up in Malayalam words, Latin letters, and (a hint)
+  sentences with no verb ending; `fix` makes the safe replacements and keeps the rest of the text
+  byte for byte. `numbers` reads every number a script says: digits, Malayalam words (an atom
+  parser with the joining, glided and elided forms scripts write, "നൂറ്റമ്പതിലധികം" 150,
+  "ഇരുപത്തിയേഴായിരം" 27 000, never "ആയിരുന്നു"), English words in Malayalam script ("ട്വന്റി
+  തേർട്ടീനിൽ" 2013, "എം സീറോ ടു" 2). Tested by reading back every number `malayalam::number`,
+  `english_number` and `english_year` write.
+- [`ml_facts`](src/ml_facts.rs): the facts of an English line (numbers by value, including "two
+  and a half thousand" and halves of years; names; acronyms; units after a number; months) must
+  be in its Malayalam, and no number added. Names match by sound: consonant-class skeletons of both
+  sides, the English one found within up to three Malayalam words with one difference in four;
+  a plan's respellings give the sound.
+- Measured on a real 52-part showcase script against its English plan: the robotic first draft
+  got 54 warnings and the natural rewrite 7 (no formal word); the fact lock found exactly the three
+  facts the rewrite dropped and no false alarm in either.
+
 ## Limitations
 
 - The built-in voices are **robotic** and nearly unintelligible to a recogniser (above); they are

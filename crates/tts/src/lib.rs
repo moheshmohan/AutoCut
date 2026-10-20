@@ -24,6 +24,8 @@ pub mod formant;
 #[cfg(feature = "kokoro")]
 pub mod kokoro;
 pub mod malayalam;
+pub mod ml_facts;
+pub mod ml_script;
 #[cfg(feature = "kokoro")]
 pub mod neural;
 #[cfg(feature = "kokoro")]
