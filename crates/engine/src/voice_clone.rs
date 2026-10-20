@@ -100,11 +100,17 @@ fn voice_reference(s: &mut Session, p: &Value) -> Result<Value> {
     {
         let models = crate::transcript::models_dir().ok_or_else(|| bad(cmd, "no data directory for voice models"))?;
         let transcript = str_p(p, "transcript").map(str::to_string);
+        let check_words = match p.get("checkTranscript") {
+            None | Some(Value::Null) => true,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(bad(cmd, "`checkTranscript` must be true or false")),
+        };
         if trimming {
             let t = filmcraft_tts::clone::Trim { start: trim.start, end: trim.end, to_sentence: trim.to_sentence, transcript };
             let r = filmcraft_tts::clone::trim_cross_reference(&models, &voice, &t).map_err(|e| bad(cmd, e.to_string()))?;
+            let checked = if check_words { transcript_check(s, &models, &r) } else { Value::Null };
             return Ok(
-                json!({"voice": voice, "source": r.source, "from": r.from, "to": r.to, "seconds": r.to - r.from, "transcript": r.transcript, "given": r.given, "clip": r.clip, "trimmed": true}),
+                json!({"voice": voice, "source": r.source, "from": r.from, "to": r.to, "seconds": r.to - r.from, "transcript": r.transcript, "given": r.given, "clip": r.clip, "trimmed": true, "transcriptCheck": checked}),
             );
         }
         let sourced = ["items", "clips", "segments"].iter().any(|k| p.get(*k).is_some());
@@ -135,12 +141,51 @@ fn voice_reference(s: &mut Session, p: &Value) -> Result<Value> {
                 filmcraft_tts::clone::prepare_cross_lingual(&models, &voice, src, transcript.as_deref(), &mut hear).map_err(|e| bad(cmd, e.to_string()))?
             }
         };
-        Ok(json!({"voice": voice, "source": r.source, "from": r.from, "to": r.to, "transcript": r.transcript, "given": r.given, "clip": r.clip}))
+        let checked = if check_words { transcript_check(s, &models, &r) } else { Value::Null };
+        Ok(
+            json!({"voice": voice, "source": r.source, "from": r.from, "to": r.to, "transcript": r.transcript, "given": r.given, "clip": r.clip, "transcriptCheck": checked}),
+        )
     }
     #[cfg(not(feature = "neural-voices"))]
     {
         let _ = (s, trimming);
         Err(bad(cmd, "voice cloning is not available in this build (built without `neural-voices`)"))
+    }
+}
+
+/// Highest character error rate between a Malayalam reference's words and what the Malayalam
+/// speech model hears in its clip that still counts as the clip's words. The author's own clip
+/// with its hand-typed words scores 0.14 (a filler, "ഏഹ്", is not heard, and loanwords are
+/// spelled a little differently); words that run past the cut, or belong to another stretch,
+/// score far higher.
+pub const TRANSCRIPT_MATCH_CER: f64 = 0.3;
+
+/// Whether the words of `r` are what its clip says (IndicF5 aligns its reading to them: words
+/// that do not match the clip garble the start of every line): the clip heard by the Malayalam
+/// speech model and scored against them. Only words written in Malayalam are checked.
+#[cfg(feature = "neural-voices")]
+fn transcript_check(s: &Session, models: &std::path::Path, r: &filmcraft_tts::clone::CrossReference) -> Value {
+    if !filmcraft_tts::malayalam::detect(&r.transcript) {
+        return json!({"status": "skipped", "reason": "the words are not written in Malayalam"});
+    }
+    let audio = match filmcraft_tts::clone::cross_audio(models, r) {
+        Ok(a) => a,
+        Err(e) => return json!({"status": "skipped", "reason": e.to_string()}),
+    };
+    match crate::narration::hear_malayalam(s, Some(models), &audio, filmcraft_tts::clone::CROSS_REFERENCE_RATE) {
+        Ok((heard, model)) => {
+            let sc = filmcraft_tts::heard::score(&r.transcript, &heard);
+            let matches = sc.cer <= TRANSCRIPT_MATCH_CER;
+            let mut v = json!({"status": if matches { "matches" } else { "mismatch" }, "model": model, "heard": heard, "cer": sc.cer});
+            if !matches {
+                v["warning"] = json!(format!(
+                    "the words do not match what the clip says (character error rate {:.2}, at most {TRANSCRIPT_MATCH_CER} expected): IndicF5 aligns its reading to them, so give the exact words of the clip (`transcript`) or trim the clip to them",
+                    sc.cer
+                ));
+            }
+            v
+        }
+        Err(why) => json!({"status": "skipped", "reason": why}),
     }
 }
 

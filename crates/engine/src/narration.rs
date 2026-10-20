@@ -49,8 +49,20 @@
 //! the English way in Malayalam script, as Malayali tech creators speak ("2021-ൽ" → "ട്വന്റി
 //! ട്വന്റി വണ്ണിൽ", "$1,600" → "സിക്സ്റ്റീൻ ഹണ്ട്രഡ് ഡോളർ"), small counts in Malayalam words;
 //! `malayalam` says every number in Malayalam words. Kept with the narration.
+//!
+//! **The strict check** (`check`: `strict`, the default, or `off`): a Malayalam narration is
+//! heard back utterance by utterance by the Malayalam speech model
+//! (`filmcraft_speech::models::MALAYALAM_MODEL`, `transcript.downloadModel {"model":
+//! "whisper-medium-ml"}`), scored ([`tts::heard`]: the character error rate, and the first six
+//! syllables of every sentence on their own — where IndicF5's garble is) and read again with
+//! another seed until it is clear, at most four readings, the best kept. Results carry `check`:
+//! `status` (`clear`, `unclear`: an utterance never passed, `skipped`: no speech model, with
+//! `reason`, `off`), `model` and per utterance its text, what was heard, `cer`, `startCer`,
+//! `takes`, the `seed` kept and every try. Checked readings are cached under their own key, the
+//! report beside them, so a rebuild reads nothing twice and still reports. English narrations
+//! are not checked (`check` is null).
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use serde_json::{Value, json};
 
@@ -185,12 +197,151 @@ fn tts_err(cmd: &str, e: tts::TtsError) -> EngineError {
     }
 }
 
-/// Synthesize `n` (no cache). A cloned voice speaking Malayalam first gets its Malayalam
-/// reference when it has none ([`malayalam_reference`]).
-fn render(n: &Narration, models_dir: Option<&std::path::Path>, transcriber: Option<&Transcriber>) -> std::result::Result<tts::Audio, tts::TtsError> {
+/// Synthesize `n` (no cache), under `strict` when given. A cloned voice speaking Malayalam first
+/// gets its Malayalam reference when it has none ([`malayalam_reference`]).
+fn render(
+    n: &Narration,
+    models_dir: Option<&std::path::Path>,
+    transcriber: Option<&Transcriber>,
+    strict: Option<&tts::heard::Strict>,
+) -> std::result::Result<(tts::Audio, Vec<tts::heard::Checked>), tts::TtsError> {
     malayalam_reference(n, models_dir, transcriber)?;
     let voice = tts::voice_for(&n.voice, &n.language, models_dir)?;
-    voice.synthesize(&spoken_text(n), &params(n))
+    match strict {
+        Some(st) => voice.synthesize_checked(&spoken_text(n), &params(n), st),
+        None => Ok((voice.synthesize(&spoken_text(n), &params(n))?, Vec::new())),
+    }
+}
+
+/// Whether `p` asks for the strict check: `check` is `"strict"` (the default) or `"off"`
+/// (`true` / `false` too).
+pub(crate) fn strict_requested(cmd: &str, p: &Value) -> Result<bool> {
+    match p.get("check") {
+        None | Some(Value::Null) => Ok(true),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(Value::String(s)) if s == "strict" => Ok(true),
+        Some(Value::String(s)) if s == "off" => Ok(false),
+        Some(v) => Err(bad(cmd, format!("`check` must be \"strict\" or \"off\", not {v}"))),
+    }
+}
+
+/// The strict check applies to `n`: a cloned voice speaking Malayalam.
+fn checkable(n: &Narration) -> bool {
+    tts::malayalam::is_tag(&n.language) && n.voice.starts_with(tts::CLONE_PREFIX)
+}
+
+/// The Malayalam speech model hearing narration (the strict check): resampled to 16 kHz, long
+/// readings heard in pieces cut at pauses.
+struct Judge {
+    t: Arc<dyn filmcraft_speech::Transcriber>,
+    id: String,
+}
+
+impl tts::heard::Hearer for Judge {
+    fn hear(&self, samples: &[f32], rate: u32) -> std::result::Result<String, String> {
+        let mut each = |piece: &[f32]| {
+            let x16 = filmcraft_audio_dsp::resample::resample_sinc(piece, rate, filmcraft_speech::SAMPLE_RATE);
+            self.t.hear(&x16, "ml").map_err(|e| tts::TtsError::Model(e.to_string()))
+        };
+        tts::heard::hear_in_pieces(samples, rate, tts::heard::HEARD_SECONDS, &mut each).map_err(|e| e.to_string())
+    }
+
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+}
+
+/// What hears Malayalam narration: the host's ([`Session::narration_hearer`]), else the
+/// Malayalam speech model, loaded once (on the GPU where there is one). `Err`: why the strict
+/// check cannot run (said in the result; the narration is still read).
+fn hearer(s: &Session, models_dir: Option<&std::path::Path>) -> std::result::Result<Arc<dyn tts::heard::Hearer>, String> {
+    if let Some(h) = &s.narration_hearer {
+        return Ok(h.clone());
+    }
+    static JUDGE: OnceLock<Mutex<Option<(std::path::PathBuf, Arc<Judge>)>>> = OnceLock::new();
+    let id = filmcraft_speech::models::MALAYALAM_MODEL;
+    let m = filmcraft_speech::models::find(id).ok_or_else(|| format!("unknown speech model {id}"))?;
+    let dir = models_dir.ok_or("no data directory for speech models")?;
+    if !filmcraft_speech::available() {
+        return Err(crate::transcript::NO_SPEECH.to_string());
+    }
+    if !filmcraft_speech::models::installed(dir, m) {
+        return Err(format!(
+            "the Malayalam speech model is not downloaded: transcript.downloadModel {{\"model\": \"{id}\"}} ({:.1} GB)",
+            m.size() as f64 / 1e9
+        ));
+    }
+    let mut g = JUDGE.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((d, j)) = g.as_ref()
+        && d == dir
+    {
+        return Ok(j.clone());
+    }
+    let t = filmcraft_speech::load_on(dir, id, true).map_err(|e| e.to_string())?;
+    let j = Arc::new(Judge { t, id: format!("{id} check v{}", tts::heard::VERSION) });
+    *g = Some((dir.to_path_buf(), j.clone()));
+    Ok(j)
+}
+
+/// What the Malayalam speech model hears in `samples` (mono, `rate`), and which model heard it.
+/// `Err`: why it cannot hear (no model, this build).
+#[cfg(feature = "neural-voices")]
+pub(crate) fn hear_malayalam(s: &Session, models_dir: Option<&std::path::Path>, samples: &[f32], rate: u32) -> std::result::Result<(String, String), String> {
+    let h = hearer(s, models_dir)?;
+    Ok((h.hear(samples, rate)?, h.id()))
+}
+
+/// How `n` is checked: by `hearer`'s model, or not (and why).
+#[derive(Clone)]
+enum Check {
+    /// Not a narration the strict check reads (English), or `check: "off"`.
+    Off,
+    /// Asked for but impossible: the reason.
+    Skipped(String),
+    Strict(Arc<dyn tts::heard::Hearer>),
+}
+
+/// The strict check `n` reads under, when `p` asks for it.
+fn check_for(s: &Session, cmd: &str, p: &Value, n: &Narration) -> Result<Check> {
+    let on = strict_requested(cmd, p)?;
+    if !checkable(n) || !on {
+        return Ok(Check::Off);
+    }
+    let models = crate::transcript::models_dir();
+    Ok(match hearer(s, models.as_deref()) {
+        Ok(h) => Check::Strict(h),
+        Err(why) => Check::Skipped(why),
+    })
+}
+
+/// The `check` of a result: what the strict check found in `n`'s reading.
+fn check_json(n: &Narration, check: &Check, report: Option<&Value>) -> Value {
+    match check {
+        Check::Off if !checkable(n) => Value::Null,
+        Check::Off => json!({"status": "off"}),
+        Check::Skipped(why) => json!({"status": "skipped", "reason": why}),
+        Check::Strict(h) => {
+            let utterances = report.cloned().unwrap_or(Value::Null);
+            let clear = utterances.as_array().is_some_and(|u| u.iter().all(|c| c["passed"].as_bool() == Some(true)));
+            json!({"status": if clear { "clear" } else { "unclear" }, "model": h.id(), "utterances": utterances})
+        }
+    }
+}
+
+/// Reports of checked readings by memory cache key, newest last (the disk keeps them beside
+/// each entry).
+static REPORTS: OnceLock<Mutex<Vec<(String, Value)>>> = OnceLock::new();
+
+fn report_put(key: String, report: Value) {
+    let mut r = REPORTS.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner);
+    r.retain(|(k, _)| *k != key);
+    r.push((key, report));
+    let extra = r.len().saturating_sub(64);
+    r.drain(..extra);
+}
+
+fn report_get(key: &str) -> Option<Value> {
+    REPORTS.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
 }
 
 type Transcriber = Arc<dyn filmcraft_speech::Transcriber>;
@@ -270,38 +421,88 @@ fn params(n: &Narration) -> tts::Params {
     tts::Params { semitones: n.pitch.semitones(), pace: n.pace, style: n.delivery.style(), take: n.take }
 }
 
-/// The disk cache's key for `n` (None: the voice has no stable identity, e.g. a cloned voice
-/// whose profile cannot be read; it is then not cached).
-fn disk_key(n: &Narration, models_dir: Option<&std::path::Path>) -> Option<String> {
+/// The disk cache's key for `n` read under `check` (None: the voice has no stable identity,
+/// e.g. a cloned voice whose profile cannot be read; it is then not cached). A checked reading
+/// has its own key: its utterances may have been read again.
+fn disk_key(n: &Narration, models_dir: Option<&std::path::Path>, check: &Check) -> Option<String> {
     let identity = tts::cache::voice_identity_for(&n.voice, &n.language, models_dir)?;
+    let identity = match check {
+        Check::Strict(h) => format!("{identity}|strict {}", h.id()),
+        _ => identity,
+    };
     Some(tts::cache::DiskCache::key(&identity, &spoken_text(n), &params(n)))
 }
 
-/// `n` from the memory cache, else the disk cache (then also kept in memory).
-fn cached(s: &Session, n: &Narration, models_dir: Option<&std::path::Path>) -> Option<Arc<tts::Audio>> {
-    let key = cache_key(n);
-    if let Some(a) = s.tts_cache.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(k, _)| *k == key).map(|(_, a)| a.clone()) {
-        return Some(a);
+/// The memory cache's key for `n` read under `check`.
+fn memory_key(n: &Narration, check: &Check) -> String {
+    match check {
+        Check::Strict(h) => format!("{}\u{1f}strict\u{1f}{}", cache_key(n), h.id()),
+        _ => cache_key(n),
     }
-    let disk = s.tts_disk.as_ref()?;
-    let a = Arc::new(disk.get(&disk_key(n, models_dir)?)?);
-    cache_put(&s.tts_cache, key, a.clone());
-    Some(a)
 }
 
-/// The audio of `n` and whether it came from a cache (nothing was synthesized).
-fn synthesize(s: &Session, cmd: &str, n: &Narration) -> Result<(Arc<tts::Audio>, bool)> {
+/// `n` from the memory cache, else the disk cache (then also kept in memory), with the strict
+/// check's report of the reading when there is one.
+fn cached(s: &Session, n: &Narration, models_dir: Option<&std::path::Path>, check: &Check) -> Option<(Arc<tts::Audio>, Option<Value>)> {
+    let key = memory_key(n, check);
+    if let Some(a) = s.tts_cache.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(k, _)| *k == key).map(|(_, a)| a.clone()) {
+        return Some((a, report_get(&key)));
+    }
+    let disk = s.tts_disk.as_ref()?;
+    let dk = disk_key(n, models_dir, check)?;
+    let a = Arc::new(disk.get(&dk)?);
+    let report = disk.note(&dk).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    if let Some(r) = &report {
+        report_put(key.clone(), r.clone());
+    }
+    cache_put(&s.tts_cache, key, a.clone());
+    Some((a, report))
+}
+
+/// Keep a fresh reading of `n` (and its strict check's report) in the caches.
+fn keep(
+    cache: &SynthCache,
+    disk: Option<&tts::cache::DiskCache>,
+    n: &Narration,
+    models_dir: Option<&std::path::Path>,
+    check: &Check,
+    a: &Arc<tts::Audio>,
+    report: &[tts::heard::Checked],
+) {
+    let report = matches!(check, Check::Strict(_)).then(|| serde_json::to_value(report).unwrap_or(Value::Null));
+    if let (Some(disk), Some(k)) = (disk, disk_key(n, models_dir, check)) {
+        disk.put(&k, a);
+        if let Some(r) = &report
+            && let Ok(bytes) = serde_json::to_vec(r)
+        {
+            disk.put_note(&k, &bytes);
+        }
+    }
+    let key = memory_key(n, check);
+    if let Some(r) = report {
+        report_put(key.clone(), r);
+    }
+    cache_put(cache, key, a.clone());
+}
+
+/// The audio of `n` under the strict check `p` asks for, whether it came from a cache (nothing
+/// was synthesized), and the result's `check`.
+fn synthesize(s: &Session, cmd: &str, p: &Value, n: &Narration) -> Result<(Arc<tts::Audio>, bool, Value)> {
     let models = crate::transcript::models_dir();
-    if let Some(a) = cached(s, n, models.as_deref()) {
-        return Ok((a, true));
+    let check = check_for(s, cmd, p, n)?;
+    if let Some((a, report)) = cached(s, n, models.as_deref(), &check) {
+        return Ok((a, true, check_json(n, &check, report.as_ref())));
     }
     let transcriber = reference_transcriber(s, n, models.as_deref());
-    let a = Arc::new(render(n, models.as_deref(), transcriber.as_ref()).map_err(|e| tts_err(cmd, e))?);
-    if let (Some(disk), Some(k)) = (&s.tts_disk, disk_key(n, models.as_deref())) {
-        disk.put(&k, &a);
-    }
-    cache_put(&s.tts_cache, cache_key(n), a.clone());
-    Ok((a, false))
+    let strict = match &check {
+        Check::Strict(h) => Some(tts::heard::Strict { hearer: h.as_ref(), policy: tts::heard::Policy::default() }),
+        _ => None,
+    };
+    let (a, report) = render(n, models.as_deref(), transcriber.as_ref(), strict.as_ref()).map_err(|e| tts_err(cmd, e))?;
+    let a = Arc::new(a);
+    keep(&s.tts_cache, s.tts_disk.as_ref(), n, models.as_deref(), &check, &a, &report);
+    let report = serde_json::to_value(&report).unwrap_or(Value::Null);
+    Ok((a, false, check_json(n, &check, Some(&report))))
 }
 
 fn cache_put(c: &SynthCache, key: String, a: Arc<tts::Audio>) {
@@ -352,7 +553,7 @@ fn preview(s: &mut Session, p: &Value) -> Result<Value> {
         q["text"] = json!(tts::SAMPLE_SENTENCE);
     }
     let n = settings(cmd, &q, base.as_ref())?;
-    let (audio, _) = synthesize(s, cmd, &n)?;
+    let (audio, _, check) = synthesize(s, cmd, &q, &n)?;
     let seconds = audio.seconds();
     let samples = audio.samples.len();
     let rate = audio.sample_rate;
@@ -363,7 +564,9 @@ fn preview(s: &mut Session, p: &Value) -> Result<Value> {
         path = json!(dest);
     }
     s.tts_preview = Some(audio);
-    Ok(json!({"seconds": seconds, "samples": samples, "sampleRate": rate, "voice": n.voice, "language": n.language, "path": path, "notes": notes(&n)}))
+    Ok(
+        json!({"seconds": seconds, "samples": samples, "sampleRate": rate, "voice": n.voice, "language": n.language, "path": path, "notes": notes(&n), "check": check}),
+    )
 }
 
 /// Write `samples` as a new WAV and import it (its own undo step; callers collapse history).
@@ -418,7 +621,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     if at < Tick::ZERO {
         return Err(bad(cmd, "the start time cannot be negative"));
     }
-    let (audio, from_cache) = synthesize(s, cmd, &n)?;
+    let (audio, from_cache, check) = synthesize(s, cmd, p, &n)?;
     let rate = audio.sample_rate.max(1);
     let dur = Tick::from_units(audio.samples.len() as i64, i64::from(rate));
     n.speech_duration = dur;
@@ -469,6 +672,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
             "language": n.language,
             "numbers": n.numbers.id(),
             "notes": notes(&n),
+            "check": check,
         }))
     })();
     crate::clip_ops::collapse_history(s, n0, "New Narration");
@@ -509,7 +713,7 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
     let (old_item, clip_dur, speed) = (it.item, it.duration, it.speed);
     let base = s.project.narrations.get(&old_item).cloned().ok_or_else(|| bad(cmd, "the clip is not a narration"))?;
     let mut n = settings(cmd, p, Some(&base))?;
-    let (audio, _) = synthesize(s, cmd, &n)?;
+    let (audio, _, check) = synthesize(s, cmd, p, &n)?;
     let rate = audio.sample_rate.max(1);
     let speech = audio.samples.len();
     n.speech_duration = Tick::from_units(speech as i64, i64::from(rate));
@@ -545,6 +749,7 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
             "fileDuration": Tick::from_units(file_len as i64, i64::from(rate)).0,
             "path": path,
             "sampleRate": rate,
+            "check": check,
         }))
     })();
     crate::clip_ops::collapse_history(s, n0, "Edit Narration");
@@ -618,11 +823,11 @@ fn render_job(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let n = settings(cmd, &q, base.as_ref())?;
     let models = crate::transcript::models_dir();
+    let check = check_for(s, cmd, p, &n)?;
     // memory, then disk: an entry on disk is a quick read, not a job
-    if cached(s, &n, models.as_deref()).is_some() {
-        return Ok(json!({"job": null, "cached": true}));
+    if let Some((_, report)) = cached(s, &n, models.as_deref(), &check) {
+        return Ok(json!({"job": null, "cached": true, "check": check_json(&n, &check, report.as_ref())}));
     }
-    let key = cache_key(&n);
     let disk = s.tts_disk.clone();
     let job = new_job(s, "Synthesizing narration".into());
     let (prog, res, cache) = (job.progress.clone(), job.result.clone(), s.tts_cache.clone());
@@ -631,15 +836,22 @@ fn render_job(s: &mut Session, p: &Value) -> Result<Value> {
     let id = spawn(s, job, wait, "filmcraft-tts", move || {
         let t0 = web_time::Instant::now();
         *prog.status.lock().unwrap_or_else(PoisonError::into_inner) = "Synthesizing…".into();
-        let r = match render(&n, models.as_deref(), transcriber.as_ref()) {
-            Ok(a) => {
+        let strict = match &check {
+            Check::Strict(h) => Some(tts::heard::Strict { hearer: h.as_ref(), policy: tts::heard::Policy::default() }),
+            _ => None,
+        };
+        let r = match render(&n, models.as_deref(), transcriber.as_ref(), strict.as_ref()) {
+            Ok((a, report)) => {
                 let secs = a.seconds();
+                let unclear = report.iter().filter(|c| !c.passed).count();
                 // keyed after rendering: a Malayalam voice's reference may have been made just now
-                if let Some((dc, k)) = disk.zip(disk_key(&n, models.as_deref())) {
-                    dc.put(&k, &a);
-                }
-                cache_put(&cache, key, Arc::new(a));
-                Ok(format!("{secs:.1} s of speech"))
+                keep(&cache, disk.as_ref(), &n, models.as_deref(), &check, &Arc::new(a), &report);
+                Ok(match (&check, unclear) {
+                    (Check::Strict(_), 0) => format!("{secs:.1} s of speech, every utterance heard clearly"),
+                    (Check::Strict(_), k) => format!("{secs:.1} s of speech; {k} utterance(s) never heard clearly (best reading kept)"),
+                    (Check::Skipped(why), _) => format!("{secs:.1} s of speech, not checked: {why}"),
+                    (Check::Off, _) => format!("{secs:.1} s of speech"),
+                })
             }
             Err(tts::TtsError::NotInstalled) => Err("the natural voices are not downloaded yet".to_string()),
             Err(e) => Err(e.to_string()),
@@ -707,7 +919,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.preview",
             "Preview Narration",
-            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"? (Malayalam: how digits are said; english = years, money and numbers from 100 up in English),"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"?,"sample":bool?,"clip":id?,"path":str?}"#,
+            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"? (Malayalam: how digits are said; english = years, money and numbers from 100 up in English),"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"?,"sample":bool?,"clip":id?,"check":"strict|off"? (Malayalam: hear every utterance back and read unclear ones again; strict is the default),"path":str?}"#,
             always,
             preview,
             false,
@@ -715,7 +927,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.create",
             "New Narration",
-            r#"{"text":str,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"dir":str?}"#,
+            r#"{"text":str,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"check":"strict|off"?,"dir":str?}"#,
             has_seq,
             create,
             true,
@@ -723,7 +935,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.edit",
             "Edit Narration",
-            r#"{"clip":id?,"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"take":0..99?,"dir":str?}"#,
+            r#"{"clip":id?,"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"take":0..99?,"check":"strict|off"?,"dir":str?}"#,
             has_narration_clip,
             edit,
             true,
@@ -732,11 +944,82 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.render",
             "Synthesize Narration",
-            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"sample":bool?,"clip":id?,"wait":bool?}"#,
+            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"sample":bool?,"clip":id?,"check":"strict|off"?,"wait":bool?}"#,
             always,
             render_job,
             false,
         ),
         spec("tts.downloadVoices", "Download Natural Voices", r#"{"wait":bool?}"#, always, download_voices, false),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Ear;
+
+    impl tts::heard::Hearer for Ear {
+        fn hear(&self, _: &[f32], _: u32) -> std::result::Result<String, String> {
+            Ok(String::new())
+        }
+        fn id(&self) -> String {
+            "ear v1".into()
+        }
+    }
+
+    fn ml() -> Narration {
+        settings("t", &json!({"text": "ഇത് ശരിയാണ്.", "voice": "clone:me"}), None).unwrap()
+    }
+
+    #[test]
+    fn the_check_is_strict_unless_turned_off() {
+        assert!(strict_requested("t", &json!({})).unwrap());
+        assert!(strict_requested("t", &json!({"check": null})).unwrap());
+        assert!(strict_requested("t", &json!({"check": "strict"})).unwrap());
+        assert!(strict_requested("t", &json!({"check": true})).unwrap());
+        assert!(!strict_requested("t", &json!({"check": "off"})).unwrap());
+        assert!(!strict_requested("t", &json!({"check": false})).unwrap());
+        for bad in [json!("loose"), json!(1), json!(["strict"]), json!({})] {
+            assert!(strict_requested("t", &json!({"check": bad})).is_err(), "{bad}");
+        }
+        // only a cloned voice speaking Malayalam is checked
+        assert!(checkable(&ml()));
+        let en = settings("t", &json!({"text": "Hello.", "voice": "clone:me"}), None).unwrap();
+        assert!(!checkable(&en));
+        let s = Session::default();
+        assert!(matches!(check_for(&s, "t", &json!({}), &en).unwrap(), Check::Off));
+        assert!(matches!(check_for(&s, "t", &json!({"check": "off"}), &ml()).unwrap(), Check::Off));
+        assert!(check_for(&s, "t", &json!({"check": 3}), &en).is_err(), "a hostile check is refused for English too");
+        // the host's recogniser hears
+        let s = Session { narration_hearer: Some(Arc::new(Ear)), ..Session::default() };
+        assert!(matches!(check_for(&s, "t", &json!({}), &ml()).unwrap(), Check::Strict(_)));
+    }
+
+    #[test]
+    fn checked_readings_have_their_own_keys_and_reports() {
+        let n = ml();
+        let strict = Check::Strict(Arc::new(Ear));
+        assert_eq!(memory_key(&n, &Check::Off), cache_key(&n), "unchecked readings keep their keys");
+        assert_eq!(memory_key(&n, &Check::Skipped("x".into())), cache_key(&n));
+        assert_ne!(memory_key(&n, &strict), cache_key(&n));
+        assert!(memory_key(&n, &strict).ends_with("ear v1"));
+        // results: English null, off, skipped with its reason, clear or unclear by the utterances
+        let en = settings("t", &json!({"text": "Hello.", "voice": "basic-male"}), None).unwrap();
+        assert_eq!(check_json(&en, &Check::Off, None), Value::Null);
+        assert_eq!(check_json(&n, &Check::Off, None), json!({"status": "off"}));
+        assert_eq!(check_json(&n, &Check::Skipped("no model".into()), None), json!({"status": "skipped", "reason": "no model"}));
+        let clear = json!([{"passed": true}, {"passed": true}]);
+        assert_eq!(check_json(&n, &strict, Some(&clear))["status"], "clear");
+        let unclear = json!([{"passed": true}, {"passed": false}]);
+        let j = check_json(&n, &strict, Some(&unclear));
+        assert_eq!((j["status"].as_str(), j["model"].as_str()), (Some("unclear"), Some("ear v1")));
+        assert_eq!(check_json(&n, &strict, None)["status"], "unclear", "a reading without its report is not called clear");
+        // reports kept by key, the newest 64
+        for i in 0..70 {
+            report_put(format!("k{i}"), json!(i));
+        }
+        assert_eq!(report_get("k69"), Some(json!(69)));
+        assert_eq!(report_get("k0"), None);
+    }
 }

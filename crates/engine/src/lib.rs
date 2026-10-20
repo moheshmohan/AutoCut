@@ -485,6 +485,10 @@ pub struct Session {
     /// Speech recogniser for `transcript.generate` (None = the Whisper model named by the command,
     /// feature `whisper`). Hosts and tests install one here.
     pub transcriber: Option<Arc<dyn filmcraft_speech::Transcriber>>,
+    /// What hears a Malayalam narration for its strict check (`tts.create` … `check`; None = the
+    /// Malayalam speech model, `filmcraft_speech::models::MALAYALAM_MODEL`, when downloaded).
+    /// Hosts and tests install one here.
+    pub narration_hearer: Option<Arc<dyn filmcraft_tts::heard::Hearer>>,
     /// Uploads to Google Photos for `photos.upload` (None = not available: the command is
     /// disabled). Hosts install filmcraft-gphotos' uploader here; tests a fake.
     pub photos: Option<Arc<dyn photos::PhotosUploader>>,
@@ -614,6 +618,7 @@ impl Session {
             export_queue: Default::default(),
             stepped: Vec::new(),
             transcriber: None,
+            narration_hearer: None,
             photos: None,
             photo_uploads: Default::default(),
             photo_locations: Default::default(),
