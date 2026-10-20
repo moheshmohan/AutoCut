@@ -3,6 +3,8 @@
 //! * [`loudness`] — ITU-R BS.1770-4 / EBU R128 loudness meter (momentary, short-term,
 //!   integrated, loudness range, sample peak, true peak), the loudness-normalisation helper and
 //!   the destinations' targets ([`loudness::LoudnessTarget`]).
+//! * [`mixcheck`] — a mix on small speakers, measured: band balance, speech above the rest while
+//!   it plays, a limiter's gain reduction, clipping.
 //! * [`beats`] — tempo and beat tracking of music (onset strength → autocorrelation tempo →
 //!   dynamic-programming beats with a local tempo that follows drift; Ellis 2007).
 //! * [`effects`] — clip/track audio effects behind the common [`AudioEffect`] trait, with a
@@ -34,6 +36,7 @@ pub mod ducking;
 pub mod effects;
 pub mod fft;
 pub mod loudness;
+pub mod mixcheck;
 pub mod music;
 pub mod oversample;
 pub mod remix;
