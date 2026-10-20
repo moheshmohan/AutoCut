@@ -127,6 +127,9 @@ const VALUED: &[&str] = &[
     "--at",
     "--languages",
     "--lines-ml",
+    // locks hold
+    "--minutes",
+    "--note",
     // natural spoken Malayalam: ml-lint, ml-script
     "--max-words",
     "--model",
@@ -305,6 +308,17 @@ mod tests {
         let b = args("photos pick --sweep 2017-10..2025-12 --month-days 10-21 --queries list.txt");
         assert_eq!((b.opt("--sweep"), b.opt("--month-days"), b.opt("--queries")), (Some("2017-10..2025-12"), Some("10-21"), Some("list.txt")));
         assert_eq!(b.positionals, ["photos", "pick"]);
+    }
+
+    /// Regression: `locks hold gpu --minutes 45 --note "…"` (as CLAUDE.md writes it) held for the
+    /// default 30 minutes under the default note, its values taken as positionals.
+    #[test]
+    fn locks_hold_takes_its_minutes_and_note() {
+        let a = Args::parse(["locks", "hold", "gpu", "--minutes", "45", "--note", "M3: a measurement"].map(str::to_string));
+        assert_eq!(
+            (a.opt("--minutes"), a.opt("--note"), a.positionals.as_slice()),
+            (Some("45"), Some("M3: a measurement"), &["locks".to_string(), "hold".to_string(), "gpu".to_string()][..])
+        );
     }
 
     #[test]
