@@ -15,6 +15,25 @@ model).
   the stream is cut into blocks (tested for every effect with 0/1/random-size blocks).
 - Recursive state is flushed below ~1e-30, so no denormals without CPU FTZ flags.
 
+## Mix check (`mixcheck`)
+
+How a mix holds up on small speakers, measured (streaming, any block size, planar `f32`):
+
+- `BandMeter`: the energy share below 120 Hz, 120–500 Hz, 500 Hz–1 kHz, 1–4 kHz, 4–6 kHz and
+  above 6 kHz, and the level of each octave band (31.5 Hz…16 kHz) relative to the whole, from
+  4096-point Hann-windowed FFT frames with half overlap, channels summed. Tested: a tone lands in
+  its band, white noise rises 3 dB an octave.
+- `speech_ratio(speech, other, gate, hop)`: over loudness series (momentary, every 100 ms), where
+  the speech is at or above its gate (`speech_gate`: 15 LU under its integrated loudness, not
+  under −50 LUFS), how far it stood above the other signal — median and quietest tenth; a silent
+  other signal counts at −70 LUFS.
+- `GainReductionMeter`: a limiter's work, from the signal before and after it (time-aligned) in
+  10 ms blocks: the largest reduction, the 99th percentile, time over 1 and 2 dB.
+- `ClipMeter`: peak, samples at or over full scale (hot, but not clipping in a float mix) and
+  flat tops (runs of 5 equal samples at or above 0.25: a clipped source; `clipped()` from 3).
+
+The engine's `audio.analyzeMix` runs them over a sequence's stems.
+
 ## Synthesis (`synth`)
 
 `synth::generate(&Params, sample_rate)` → planar stereo: procedural sound for edits, from

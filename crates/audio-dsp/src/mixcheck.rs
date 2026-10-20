@@ -300,6 +300,8 @@ impl GainReductionMeter {
 
 /// Clipping in a signal: samples at or over full scale, and flat tops (runs of equal samples near
 /// the top of a signal's range, what a clipped source looks like whatever gain it plays at).
+/// Samples over full scale alone are not clipping in a floating-point mix (a clip's gain can lift
+/// a source over 0 dBFS and a later stage bring it down); flat tops are.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Clipping {
     pub peak: f32,
@@ -309,9 +311,12 @@ pub struct Clipping {
     pub flat_runs: u64,
 }
 
-/// A run this long of equal samples is a flat top (a sine at 1 kHz changes every sample; 3 equal
-/// samples in a row at a high level do not happen in sound that was not clipped).
-pub const FLAT_RUN: usize = 3;
+/// A run this long of equal samples is a flat top: sound that was not clipped changes from sample
+/// to sample near its peaks (a 16-bit source can repeat a sample or two at a low note's crest, or
+/// three once a 24 kHz voice is doubled to 48 kHz); a clip a listener hears flattens 0.1 ms or more.
+pub const FLAT_RUN: usize = 5;
+/// Flat tops from which a clip counts as clipped ([`Clipping::clipped`]).
+pub const CLIPPED_RUNS: u64 = 3;
 /// Level (linear) from which equal samples count as a flat top.
 pub const FLAT_LEVEL: f32 = 0.25;
 
@@ -321,6 +326,13 @@ pub struct ClipMeter {
     out: Clipping,
     /// Per channel: the last sample and how many times in a row it repeated.
     run: Vec<(f32, usize)>,
+}
+
+impl Clipping {
+    /// Whether the signal was clipped: at least [`CLIPPED_RUNS`] flat tops.
+    pub fn clipped(&self) -> bool {
+        self.flat_runs >= CLIPPED_RUNS
+    }
 }
 
 impl ClipMeter {
@@ -477,6 +489,7 @@ mod tests {
         let c = m.clipping();
         assert_eq!(c.overs, 0);
         assert!((c.flat_runs as i64 - 40).abs() <= 1, "{c:?}"); // 20 cycles, two tops each
+        assert!(c.clipped());
         assert!((c.peak - 0.5).abs() < 1e-6);
         // a clean sine: none; one over full scale counts
         let mut m = ClipMeter::new();
@@ -484,6 +497,11 @@ mod tests {
         s[100] = 1.2;
         m.process(&[&s, &[f32::NAN; 3]]);
         assert_eq!((m.clipping().overs, m.clipping().flat_runs), (1, 0));
+        assert!(!m.clipping().clipped(), "an over alone is not clipping in a float mix");
+        // a few repeated samples at a crest (a quantised low note) are not a flat top
+        let mut m = ClipMeter::new();
+        m.process(&[&[0.1, 0.5, 0.5, 0.5, 0.5, 0.1, 0.6, 0.6, 0.2]]);
+        assert_eq!(m.clipping().flat_runs, 0);
         // quiet silence and quiet repeats are not flat tops
         let mut m = ClipMeter::new();
         m.process(&[&[0.0; 100], &[0.1; 100]]);
