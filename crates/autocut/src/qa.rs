@@ -12,7 +12,7 @@
 //! |---|---|
 //! | `joins` | on the picture track (V2): gaps of a frame or more, gaps that hold a frame boundary (that frame renders black) and overlaps (errors), clips that do not quite touch (warnings); on the shots' sound track (A1): neighbours that do not touch, so their fades meet silence instead of crossfading (warnings); time where no video track has a clip (errors; a picture that ends before the sound: info) |
 //! | `black` | rendered frames whose picture is black or nearly (92 % of the frame darker than 5 % luma, so a counter or lower third over black still counts) — sampled every 2 s, at each picture clip's first frame and at the first frame after it — outside dips to black (errors) |
-//! | `mix` | the mix exported as 32-bit float WAV and metered (BS.1770): integrated loudness outside −16…−14 LUFS (±0.5 LU) and true peak above −1 dBTP (warnings); true peak above 0 dBTP or samples at full scale: clipping (error); the median short-term loudness during narration clips (A2) vs between them: the voice less than 4 dB louder (warning), or not louder at all (error) |
+//! | `mix` | the mix exported as 32-bit float WAV and metered (BS.1770): integrated loudness outside −16…−14 LUFS (±0.5 LU) and true peak above −1 dBTP (warnings); true peak above 0 dBTP or samples at full scale: clipping (error); the median short-term loudness during narration clips (A2) vs between them: the voice less than 4 dB louder (warning), or not louder at all (error); and per stem (`audio.analyzeMix`, [`mix_findings`]), for small speakers: the narration less than 12 LU above the music while it speaks, the Mix's limiter taking more than 2 dB off the peaks, more than a quarter of the mix's energy below 120 Hz, a narration clip with a clipped source (warnings) |
 //! | `subject` | shots where the grounding model (`AUTOCUT_ANALYSIS_MODEL`, the analysis' prompt) does not find the subject in a rendered frame (warnings); skipped when no model is reachable |
 //! | `privacy` | from what the privacy pass hid ([`Options::privacy`]): a redaction mask covering more than [`Options::max_mask`] (a fifth) of a clip's picture at any keyframe (warnings: a blur that size hides the shot, as one on a close-up of a tablet did); the faces, plates and named places hidden in each entry (`privacy` in the report) |
 //!
@@ -52,6 +52,14 @@ const DARK: f64 = 0.05;
 const BLACK_SHARE: f64 = 0.92;
 /// Loudness below this (LUFS) is silence for the voice comparison.
 const SILENT_LUFS: f64 = -70.0;
+/// For small speakers ([`mix_findings`]): the narration at least this far above the music while
+/// it speaks (LU; 15 is the speech mix's aim, measured 22–28 on a finished show), the Mix's
+/// limiter taking at most this much off (dB; the first finished show's took 3.7 dB, the speech
+/// mix's 1), and at most this share of the energy below 120 Hz (the first show: 38 %, the
+/// speech mix: 15 %).
+pub const MIN_SPEECH_OVER_MUSIC: f64 = 12.0;
+pub const MAX_LIMITER_DB: f64 = 2.0;
+pub const MAX_LOW_SHARE: f64 = 0.25;
 /// A limiter set to the ceiling lands a hair over it (−0.99997 dBTP for −1): not a finding.
 const PEAK_TOLERANCE: f64 = 0.05;
 /// Integrated loudness this close to the target range (LU) is on target: meters and loudness
@@ -88,6 +96,16 @@ pub struct Options {
     pub max_true_peak: f64,
     /// How much louder (dB) the voice must be than what plays between the lines.
     pub voice_margin: f64,
+    /// The music's track, for the speech-over-music measure (showcase layout: A3).
+    pub music_track: String,
+    /// Measure the mix per stem too (`audio.analyzeMix`; about four renders of the mix).
+    pub analyze_mix: bool,
+    /// The least the narration should stand above the music while it speaks (LU, median).
+    pub min_speech_over_music: f64,
+    /// The most the Mix's limiter should take off the peaks (dB).
+    pub max_limiter_db: f64,
+    /// The largest share of the mix's energy below 120 Hz.
+    pub max_low_share: f64,
     /// What the privacy pass hid ([`Built::privacy`]); empty: the privacy check is skipped.
     pub privacy: Vec<crate::privacy::Hidden>,
     /// The largest share of a clip's picture one redaction mask may cover.
@@ -111,6 +129,11 @@ impl Default for Options {
             loudness: (-16.0, -14.0),
             max_true_peak: -1.0,
             voice_margin: 4.0,
+            music_track: "A3".into(),
+            analyze_mix: true,
+            min_speech_over_music: MIN_SPEECH_OVER_MUSIC,
+            max_limiter_db: MAX_LIMITER_DB,
+            max_low_share: MAX_LOW_SHARE,
             privacy: Vec::new(),
             max_mask: 0.2,
         }
@@ -205,6 +228,19 @@ pub struct Loudness {
     pub voice_margin_db: Option<f64>,
     /// `shortTerm` (3 s windows) or, with lines or pauses too short for those, `momentary` (400 ms).
     pub window: Option<&'static str>,
+    /// From the per-stem analysis ([`QaReport::mix_analysis`]): the narration above the music and
+    /// above everything else while it speaks (median, LU), the most the Mix's limiter takes off
+    /// (dB), and the mix's share of energy below 120 Hz and between 1 and 4 kHz.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speech_over_music_lu: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speech_over_rest_lu: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limiter_db: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub low_share: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_share: Option<f64>,
 }
 
 /// Everything [`check`] found.
@@ -219,6 +255,10 @@ pub struct QaReport {
     pub checks: Vec<Check>,
     pub findings: Vec<Finding>,
     pub loudness: Option<Loudness>,
+    /// The mix per stem, as `audio.analyzeMix` measured it (bands, speech over the rest,
+    /// limiting, clipping in the narration).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mix_analysis: Option<Value>,
     pub frames_rendered: usize,
     /// Where the contact sheet was written ([`write_next_to`]).
     pub contact_sheet: Option<String>,
@@ -1082,8 +1122,118 @@ async fn mix(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport) -> 
             _ => note = Some("too little narration, or too little between its lines, to compare".into()),
         }
     }
+    // per stem, for small speakers
+    if opts.analyze_mix {
+        let exists = |label: &str| label.trim_start_matches('A').parse::<usize>().ok().and_then(|k| k.checked_sub(1)).is_some_and(|k| k < seq.audio.len());
+        let mut p = json!({});
+        if let Some(id) = seq.id {
+            p["sequence"] = json!(id);
+        }
+        if exists(&opts.voice_track) {
+            p["speech"] = json!([opts.voice_track]);
+        }
+        if exists(&opts.music_track) && opts.music_track != opts.voice_track {
+            p["music"] = json!([opts.music_track]);
+        }
+        match ex.execute("audio.analyzeMix", p).await {
+            Ok(a) => {
+                let num = |v: &Value| v.as_f64().filter(|x| x.is_finite());
+                l.speech_over_music_lu = num(&a["speech"]["toMusic"]["medianLu"]);
+                l.speech_over_rest_lu = num(&a["speech"]["toRest"]["medianLu"]);
+                l.limiter_db = a["limiter"]["present"].as_bool().filter(|p| *p).and_then(|_| num(&a["limiter"]["maxGainReductionDb"]));
+                l.low_share = num(&a["mix"]["bands"]["sub"]);
+                l.presence_share = num(&a["mix"]["bands"]["presence"]);
+                r.findings.extend(mix_findings(&a, opts));
+                r.mix_analysis = Some(a);
+            }
+            Err(e) => {
+                let why = format!("the mix was not measured per stem: {e}");
+                note = Some(note.map_or(why.clone(), |n| format!("{n}; {why}")));
+            }
+        }
+    }
     r.loudness = Some(l);
     Check::ran(name, &r.findings, note)
+}
+
+/// What the per-stem analysis (`audio.analyzeMix`) says about the mix on small speakers, as
+/// warnings: speech not far enough above the music while it plays, a limiter working hard on the
+/// Mix, too much energy below 120 Hz, a narration clip whose source is clipped.
+pub fn mix_findings(a: &Value, opts: &Options) -> Vec<Finding> {
+    let name = "mix";
+    let mut out = Vec::new();
+    let num = |v: &Value| v.as_f64().filter(|x| x.is_finite());
+    let from = num(&a["from"]).unwrap_or(0.0);
+    if let Some(m) = num(&a["speech"]["toMusic"]["medianLu"])
+        && m < opts.min_speech_over_music
+    {
+        let p10 = num(&a["speech"]["toMusic"]["p10Lu"]).map(|p| format!(", {p:.1} LU in its quietest tenth")).unwrap_or_default();
+        out.push(Finding::new(
+            name,
+            Severity::Warning,
+            from,
+            format!(
+                "while the narration speaks it is only {m:.1} LU above the music (median{p10}); at least {} keeps it understood at low volume: duck the music deeper or lower it",
+                opts.min_speech_over_music
+            ),
+        ));
+    }
+    if a["limiter"]["present"].as_bool() == Some(true)
+        && let Some(gr) = num(&a["limiter"]["maxGainReductionDb"])
+        && gr > opts.max_limiter_db
+    {
+        let over = num(&a["limiter"]["secondsOver2Db"]).unwrap_or(0.0);
+        out.push(Finding::new(
+            name,
+            Severity::Warning,
+            from,
+            format!(
+                "the Mix's limiter takes up to {gr:.1} dB off the peaks ({over:.1} s over 2 dB; at most {} is clean): hold the loudest stem's peaks before the Mix (its level, a compressor or limiter on its track)",
+                opts.max_limiter_db
+            ),
+        ));
+    }
+    if let Some(low) = num(&a["mix"]["bands"]["sub"])
+        && low > opts.max_low_share
+    {
+        // the stem that brings the most energy below 120 Hz (its share times its power)
+        let worst = a["stems"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| Some((s["track"].as_str()?, num(&s["bands"]["sub"])?, num(&s["integratedLufs"])?)))
+            .filter(|(_, sub, _)| *sub > opts.max_low_share)
+            .max_by(|x, y| (x.1 * 10f64.powf(x.2 / 10.0)).total_cmp(&(y.1 * 10f64.powf(y.2 / 10.0))))
+            .map(|(t, sub, _)| format!(" (most from {t}: {:.0} % of its own)", sub * 100.0))
+            .unwrap_or_default();
+        out.push(Finding::new(
+            name,
+            Severity::Warning,
+            from,
+            format!(
+                "{:.0} % of the mix's energy is below 120 Hz{worst}, more than {:.0} %: small speakers cannot play it, and it pushes everything else down; high-pass the stems (the speech mix does)",
+                low * 100.0,
+                opts.max_low_share * 100.0
+            ),
+        ));
+    }
+    for c in a["narrationClips"].as_array().into_iter().flatten().filter(|c| c["clipped"] == true).take(MAX_SHOTS) {
+        let at = num(&c["seconds"]).unwrap_or(from);
+        out.push(
+            Finding::new(
+                name,
+                Severity::Warning,
+                at,
+                format!(
+                    "narration \"{}\" is clipped: {} flat tops (its source was cut off at its peaks); voice it again or lower it before it reaches the mix",
+                    c["name"].as_str().unwrap_or("?").chars().take(80).collect::<String>(),
+                    c["flatRuns"].as_u64().unwrap_or(0)
+                ),
+            )
+            .clip(c["clip"].as_u64()),
+        );
+    }
+    out
 }
 
 // ------------------------------------------------------------------ privacy
@@ -1341,6 +1491,50 @@ mod tests {
         assert_eq!(median(vec![1.0, f64::NAN, 3.0]), Some(2.0));
         assert_eq!(median(vec![]), None);
         assert!(voice_and_between(&points, &[], 3.0, |p| p.2).0.is_empty());
+    }
+
+    #[test]
+    fn the_mix_on_small_speakers_is_judged_from_its_stems() {
+        let opts = Options::default();
+        // the first finished show, as measured: fine on speech, but bass-heavy and limited hard
+        let before = json!({
+            "from": 0.0,
+            "mix": {"bands": {"sub": 0.378, "presence": 0.015}},
+            "limiter": {"present": true, "maxGainReductionDb": 3.7, "secondsOver2Db": 0.85},
+            "speech": {"toMusic": {"medianLu": 25.9, "p10Lu": 20.2}},
+            "stems": [
+                {"track": "A2", "bands": {"sub": 0.368}, "integratedLufs": -13.2},
+                {"track": "A5", "bands": {"sub": 0.974}, "integratedLufs": -22.8},
+            ],
+            "narrationClips": [{"clip": 7, "name": "Narration 1.wav", "seconds": 2.2, "clipped": false, "flatRuns": 0, "overs": 296}],
+        });
+        let f = mix_findings(&before, &opts);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f.iter().all(|x| x.severity == Severity::Warning && x.check == "mix"));
+        assert!(f[0].message.contains("3.7 dB"), "{}", f[0].message);
+        assert!(f[1].message.contains("38 %") && f[1].message.contains("A2"), "{}", f[1].message);
+        // the speech mix: nothing to say
+        let after = json!({
+            "mix": {"bands": {"sub": 0.151}},
+            "limiter": {"present": true, "maxGainReductionDb": 0.95},
+            "speech": {"toMusic": {"medianLu": 27.4}},
+            "narrationClips": [],
+        });
+        assert!(mix_findings(&after, &opts).is_empty());
+        // speech buried, a clipped narration clip
+        let bad = json!({
+            "speech": {"toMusic": {"medianLu": 7.0, "p10Lu": 3.0}},
+            "limiter": {"present": false, "maxGainReductionDb": 9.0},
+            "narrationClips": [{"clip": 9, "name": "Narration 3.wav", "seconds": 12.5, "clipped": true, "flatRuns": 40}],
+        });
+        let f = mix_findings(&bad, &opts);
+        assert_eq!(f.len(), 2, "no limiter on the Mix: its reduction is not judged: {f:?}");
+        assert!(f[0].message.contains("7.0 LU") && f[0].message.contains("3.0 LU"));
+        assert_eq!((f[1].clip, f[1].seconds), (Some(9), 12.5));
+        // hostile or empty analyses: nothing, no panic
+        for v in [json!(null), json!({}), json!({"mix": {"bands": {"sub": "lots"}}, "narrationClips": 3, "speech": [1]})] {
+            assert!(mix_findings(&v, &opts).is_empty(), "{v}");
+        }
     }
 
     #[test]
