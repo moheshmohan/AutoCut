@@ -33,6 +33,7 @@ macro_rules! out {
 mod args;
 mod instagram;
 mod locations;
+mod ml_script;
 mod probe;
 mod publish;
 mod showcase_tools;
@@ -132,7 +133,7 @@ SUBCOMMANDS
          [--outro-logo logo.png] [--outro-channel C] [--outro-handle @h] [--outro-tagline T]
          [--outro-cta S] [--outro-cta-done S] [--outro-terminal L] [--outro-seconds 12]
          [--outro-background item[:from[:to]]]… [--redact faces,plates] [--redact-target T]…
-         [--languages en,ml --lines-ml script-ml.json]
+         [--languages en,ml --lines-ml script-ml.json] [--strict-script]
          [--export out.mp4 [--upload [--upload-album <title>]]
          [--upload-youtube [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P]
          [--youtube-tags a,b] [--youtube-description D]]] [--qa | --no-qa]
@@ -183,7 +184,10 @@ SUBCOMMANDS
                                 --export, the next beside it as \"<out> (Malayalam).mp4\" with its
                                 own subtitles, chapters, thumbnail, QA and uploads (titled
                                 \"<title> (Malayalam)\"); the footage's redaction is taken from
-                                the redaction cache the second time;
+                                the redaction cache the second time; a Malayalam script is
+                                checked before it is voiced, as `ml-lint` (and against the
+                                English plan with --languages), its warnings printed, and with
+                                --strict-script they stop the build;
                                 the look (crates/autocut/README.md): --style
                                 tech (or the plan's \"style\") themes the titles, lower thirds,
                                 cards, chips and outro (DIN Condensed / DIN Alternate / Futura,
@@ -262,6 +266,32 @@ SUBCOMMANDS
                                 (--language, default ml) beside --out as <out>-ml.json:
                                 {\"intro\", \"outro\", \"lines\": {\"<label>\": \"…\"}} read over it; it
                                 fails on any spoken entry without a line
+  ml-lint <script-ml.json | plan-ml.json | script.txt> [--plan plan.json] [--max-words 14]
+         [--fix --out fixed.json] [--hints] [--report-out report.json] [--strict]
+                                a Malayalam narration script checked for what makes it sound
+                                written rather than spoken (script.lintMalayalam,
+                                docs/malayalam-style.md): sentences over --max-words spoken words,
+                                formal words with a common spoken form (സ്വാഗതം ചെയ്യുന്നു →
+                                വെൽക്കം ചെയ്യുന്നു), numbers from 100 up in Malayalam words, Latin
+                                letters; --hints adds the weaker cases and sentences without a
+                                verb. With --plan (the English plan) every line is also checked
+                                against its English: each number, name, unit and month kept,
+                                no number added. --fix --out writes the script with the safe
+                                replacements made; --strict exits 1 unless it is clean
+  ml-script --plan plan.json --out script-ml.json [--model qwen3:8b] [--examples pairs.json]
+         [--no-revise] [--max-words 14] [--batch 3] [--report-out report.json]
+  ml-script --plan plan.json --remember script-ml.json [--examples pairs.json]
+                                the plan's English intro, lines and outro in natural spoken
+                                Malayalam, written by the local model (AUTOCUT_SCRIPT_MODEL,
+                                default qwen3:8b) from the style guide, built-in examples and your
+                                approved pairs (<data dir>/autocut/malayalam-examples.json, or
+                                --examples); each line keeps the facts of its English, gets the
+                                safe fixes and the lint, and goes back to the model once with
+                                what to fix (--no-revise: not). Writes the lines file
+                                showcase-plan --lines and showcase --lines-ml take, and names
+                                every line left to look at. --remember adds a reviewed script's
+                                lines to your approved pairs, so the next script is written
+                                more like it
   sheet --project p.fcproj --items 2407,2408:0-30,14 [--n 8] [--at 3.5,7] [--side 320 | --scale 0.25]
          [--columns N] --out sheet.jpg
                                 a contact sheet of source clips (media.contactSheet): a row per
@@ -2046,6 +2076,11 @@ async fn cli() {
             // cache share what the builds have in common
             let runs = showcase_tools::language_runs(&opts, &plan, &script, languages.as_deref(), lines_ml.as_ref())
                 .unwrap_or_else(|e| fail(format!("showcase: {e}")));
+            // a Malayalam script is checked before it is voiced (against the English plan when
+            // its lines are read over it); --strict-script: its warnings fail the build
+            if let Err(e) = ml_script::check_showcase(&runs, &entries, languages.is_some().then_some(&script), a.flag("--strict-script")) {
+                fail(format!("showcase: {e}"));
+            }
             let ship = showcase_tools::Ship { qa_on, qa_model: qa_model.as_ref(), upload, upload_youtube, album: album.clone() };
             let (mut outs, mut upload_failed, mut build_failed) = (Vec::new(), None::<String>, None::<String>);
             for run in &runs {
@@ -2081,6 +2116,9 @@ async fn cli() {
         "redact" => redact(&a).await,
         // a showcase round's steps: review notes into the plan, contact sheets, frames of a video
         "showcase-plan" => showcase_tools::plan(&a).await,
+        // natural spoken Malayalam: a script checked, a plan's English translated
+        "ml-lint" => ml_script::lint(&a),
+        "ml-script" => ml_script::translate(&a).await,
         "sheet" => showcase_tools::sheet(&a).await,
         "frames" => showcase_tools::frames(&a).await,
         "shorts" => {

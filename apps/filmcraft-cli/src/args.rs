@@ -127,7 +127,21 @@ const VALUED: &[&str] = &[
     "--at",
     "--languages",
     "--lines-ml",
+    // natural spoken Malayalam: ml-lint, ml-script
+    "--max-words",
+    "--model",
+    "--examples",
+    "--remember",
+    "--batch",
 ];
+
+/// Options that take a value in one subcommand only: `showcase --plan` is a flag, while
+/// `ml-script --plan plan.json` names a file.
+const VALUED_IN: &[(&str, &[&str])] = &[("ml-script", &["--plan"]), ("ml-lint", &["--plan"])];
+
+fn valued_in(cmd: Option<&String>, opt: &str) -> bool {
+    cmd.is_some_and(|c| VALUED_IN.iter().any(|(sub, opts)| sub == c && opts.contains(&opt)))
+}
 
 #[derive(Debug, Default)]
 pub struct Args {
@@ -144,7 +158,7 @@ impl Args {
                 a.positionals.extend(it.by_ref());
             } else if let Some((k, v)) = s.split_once('=').filter(|(k, _)| k.starts_with("--")) {
                 a.opts.push((k.to_string(), Some(v.to_string())));
-            } else if VALUED.contains(&s.as_str()) {
+            } else if VALUED.contains(&s.as_str()) || valued_in(a.positionals.first(), &s) {
                 let v = it.next();
                 a.opts.push((s, v));
             } else if s.starts_with("--") && s.len() > 2 {
@@ -291,6 +305,17 @@ mod tests {
         let b = args("photos pick --sweep 2017-10..2025-12 --month-days 10-21 --queries list.txt");
         assert_eq!((b.opt("--sweep"), b.opt("--month-days"), b.opt("--queries")), (Some("2017-10..2025-12"), Some("10-21"), Some("list.txt")));
         assert_eq!(b.positionals, ["photos", "pick"]);
+    }
+
+    #[test]
+    fn plan_takes_a_file_in_the_malayalam_commands_only() {
+        let a = args("ml-script --plan p.json --out s.json");
+        assert_eq!((a.opt("--plan"), a.opt("--out"), a.positionals.as_slice()), (Some("p.json"), Some("s.json"), &["ml-script".to_string()][..]));
+        let b = args("--data-dir d ml-lint s.json --plan p.json --strict");
+        assert_eq!((b.opt("--plan"), b.pos(1), b.flag("--strict")), (Some("p.json"), Some("s.json"), true));
+        // showcase --plan stays a flag
+        let c = args("showcase --plan --report r.json");
+        assert!(c.flag("--plan") && c.opt("--plan").is_none() && c.opt("--report") == Some("r.json"));
     }
 
     #[test]

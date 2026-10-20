@@ -145,6 +145,26 @@ filmcraft-cli showcase --report analysis.json --script-in plan-ml.json --languag
 `--places-from-locations` takes the places `filmcraft-cli photos locations --album "<title>"`
 read from Google Photos (Google strips them from downloads) for each entry's lower third.
 
+## Natural spoken Malayalam
+
+The voice reads what is written: a script in written, textbook Malayalam sounds robotic however
+good the voice. Write it the way a Malayali tech creator talks: short sentences, English tech
+words in Malayalam script (വെൽക്കം ചെയ്യുന്നു, വിസിറ്റേഴ്സ്, ലോഞ്ച് ചെയ്തു), spoken endings
+(ഉണ്ടാക്കിയതാ, തോന്നൂ, പറയണേ), digits for numbers, acronyms letter by letter. The rules, with
+before-and-after examples, are [malayalam-style.md](malayalam-style.md). Three tools keep a script
+that way:
+
+```sh
+filmcraft-cli ml-lint script-ml.json --plan plan.json          # what sounds written, and facts lost
+filmcraft-cli ml-script --plan plan.json --out script-ml.json  # a first draft by the local model
+filmcraft-cli ml-script --plan plan.json --remember script-ml.json  # your reviewed lines, as examples
+```
+
+(`script.lintMalayalam` and `autocut.malayalamScript` are the commands.) Your approved lines are
+kept in `<data>/autocut/malayalam-examples.json`, on your machine only, and shown to the model
+first next time. A Malayalam showcase checks its script before the first line is voiced and
+prints the findings; `--strict-script` stops the build on them.
+
 ## Files
 
 | File | What |

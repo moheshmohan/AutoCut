@@ -147,6 +147,23 @@ round's 200-line Python script is one notes file: `showcase-plan` reproduces its
 `plan-v5-ml.json` exactly.) Write the Malayalam lines with numbers as digits; the voice, its
 reference and how numbers are said: [malayalam-narration.md](malayalam-narration.md).
 
+### The Malayalam lines, spoken not written
+
+Write `script-ml-v6.json` in natural spoken Malayalam ([malayalam-style.md](malayalam-style.md)),
+or start from a draft by the local model, then read and fix it:
+
+```sh
+filmcraft-cli ml-script --plan "$R/plan-v6.json" --out "$R/script-ml-v6.json"   # a draft (qwen3:8b)
+filmcraft-cli ml-lint "$R/script-ml-v6.json" --plan "$R/plan-v6.json"           # sounds written? facts lost?
+filmcraft-cli ml-script --plan "$R/plan-v6.json" --remember "$R/script-ml-v6.json"   # once approved
+```
+
+`ml-lint` names each line that sounds written (long sentences, formal words, numbers in
+Malayalam words, Latin letters) and each number, name, unit or month of the English it lost;
+`--fix --out` makes the safe replacements. `--remember` keeps the approved lines as examples for
+the next round's draft. The build checks the script again before voicing it (`--strict-script`:
+any warning stops it).
+
 ## 5. Build both languages, with privacy
 
 ```sh

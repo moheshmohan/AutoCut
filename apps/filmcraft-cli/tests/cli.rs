@@ -698,6 +698,59 @@ fn showcase_outro_flags_become_the_plans_outro() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `ml-lint` checks a Malayalam lines file (against the English plan), fixes it, and with
+/// `--strict` fails unless it is clean; `ml-script` keeps approved lines as examples and names
+/// the model it cannot reach. No model runs here.
+#[test]
+fn malayalam_scripts_are_linted_and_remembered() {
+    let dir = std::env::temp_dir().join(format!("fc-cli-ml-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let plan = dir.join("plan.json");
+    std::fs::write(
+        &plan,
+        r#"{"entries": [{"label": "Pepper"}], "script": {"intro": "Hi.", "lines": ["Pepper greets visitors; SoftBank made twenty-seven thousand."], "outro": "Thanks for watching."}}"#,
+    )
+    .unwrap();
+    let lines = dir.join("script-ml.json");
+    std::fs::write(&lines, r#"{"intro": "ഹായ്.", "outro": "കണ്ടതിന് നന്ദി.", "lines": {"Pepper": "പെപ്പർ സന്ദർശകരെ സ്വാഗതം ചെയ്യുന്നു. സോഫ്റ്റ്ബാങ്ക് പത്ത് എണ്ണം ഉണ്ടാക്കി."}}"#)
+        .unwrap();
+    let (p, l) = (plan.to_str().unwrap(), lines.to_str().unwrap());
+    let o = cli(&["ml-lint", l, "--plan", p]);
+    let v = json_out(&o);
+    assert_eq!((v["warnings"].as_u64(), v["factsMissing"].as_u64(), v["numbersAdded"].as_u64()), (Some(2), Some(1), Some(1)), "{v}");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("Pepper: formal: «സന്ദർശകരെ» → വിസിറ്റേഴ്സിനെ") && err.contains("Pepper: facts: missing: twenty-seven thousand; added: 10"), "{err}");
+    assert_eq!(cli(&["ml-lint", l, "--plan", p, "--strict"]).status.code(), Some(1));
+    // the safe fixes, written as a lines file again
+    let fixed = dir.join("fixed.json");
+    json_out(&cli(&["ml-lint", l, "--fix", "--out", fixed.to_str().unwrap()]));
+    let f: Value = serde_json::from_slice(&std::fs::read(&fixed).unwrap()).unwrap();
+    assert_eq!(f["lines"]["Pepper"], "പെപ്പർ വിസിറ്റേഴ്സിനെ വെൽക്കം ചെയ്യുന്നു. സോഫ്റ്റ്ബാങ്ക് പത്ത് എണ്ണം ഉണ്ടാക്കി.");
+    assert_eq!(f["outro"], "കണ്ടതിന് താങ്ക്സ്.");
+    assert_eq!(cli(&["ml-lint"]).status.code(), Some(2));
+    assert_eq!(cli(&["ml-lint", l, "--fix"]).status.code(), Some(2), "--fix needs --out");
+    assert_eq!(cli(&["ml-lint", "/no/such/script.json"]).status.code(), Some(1));
+    // approved lines become examples
+    let examples = dir.join("examples.json");
+    let v = json_out(&cli(&["ml-script", "--plan", p, "--remember", fixed.to_str().unwrap(), "--examples", examples.to_str().unwrap()]));
+    assert_eq!((v["remembered"].as_u64(), v["kept"].as_u64()), (Some(3), Some(3)), "{v}");
+    let e: Value = serde_json::from_slice(&std::fs::read(&examples).unwrap()).unwrap();
+    assert_eq!(e["pairs"][1]["en"], "Pepper greets visitors; SoftBank made twenty-seven thousand.");
+    // usage errors, and a model that is not there
+    assert_eq!(cli(&["ml-script", "--out", "x.json"]).status.code(), Some(2));
+    assert_eq!(cli(&["ml-script", "--plan", p]).status.code(), Some(2));
+    assert_eq!(cli(&["ml-script", "--plan", p, "--out", "x.json", "--batch", "0"]).status.code(), Some(2));
+    let o = Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
+        .args(["ml-script", "--plan", p, "--out", dir.join("out.json").to_str().unwrap()])
+        .env("AUTOCUT_OLLAMA_HOST", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("127.0.0.1:9"), "{}", String::from_utf8_lossy(&o.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `showcase-plan`: a real round's notes (trimmed, crates/autocut/tests/data/plan_patch) applied to
 /// its plan give the plans it made, English and Malayalam; bad notes fail naming the entry.
 #[test]
