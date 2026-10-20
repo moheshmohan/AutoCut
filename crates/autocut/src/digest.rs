@@ -29,9 +29,17 @@ pub const ALLOWED_FAMILIES: &[&str] = &[
     // finding music by feel (a query: mood, genre, use case, energy → styles and their params)
     "music.suggest",
     "music.taxonomy",
-    // a limiter on the mix bus (the showcase's mastering)
+    // the showcase's mix: track effects (a limiter on the mix bus, the stems' EQ and dynamics),
+    // the narration's fader, the music's presence dip as track automation, a remix taking an
+    // earlier mix's effects off, and the mix measured per stem (QA)
     "mixer.addInsert",
     "mixer.setInsert",
+    "mixer.removeInsert",
+    "mixer.setStrip",
+    "mixer.inspect",
+    "mixer.writeAutomation",
+    "mixer.clearLane",
+    "audio.analyzeMix",
     // "make a video of every robot since 2020": the showcase job, which plans and waits for review
     "autocut.makeShowcase",
     // shot-to-shot colour matching (the showcase's `match_color`)

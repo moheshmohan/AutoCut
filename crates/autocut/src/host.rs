@@ -113,7 +113,7 @@ pub struct PlanDoc {
     /// The voice-over; `lines` follows `entries` one to one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<Script>,
-    /// The look (`style`, `timeline`, `events`, `transitions`, `loudness`, `embedCaptions`,
+    /// The look (`style`, `timeline`, `events`, `transitions`, `loudness`, `mix`, `embedCaptions`,
     /// `soundfont`: [`crate::look`]), kept as written and checked when the plan is built.
     #[serde(flatten)]
     pub look: serde_json::Map<String, Value>,

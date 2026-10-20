@@ -164,9 +164,14 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      and year card start on one; the last shot is placed to the beat's own frame. `music` in
      the output says how the track was fitted and how many cuts are within a frame of a beat
      as it finally plays (computed from the remix's pieces when remixed);
-   - **the mix**: the voice matched to -16 LUFS (dialogue), the shots' sound (ambience, -27)
-     and the music (-24, generated or the user's) ducked under it, effects at -23, and a
-     hard limiter at -1 dBFS on the mix;
+   - **the mix** ([`mix.rs`](src/mix.rs)): the voice matched to -16 LUFS (dialogue), the
+     shots' sound (ambience, -27) and the music (-24, generated or the user's) ducked under it,
+     the effects at -26, and a hard limiter at -1 dBFS on the mix (or the loudness target's).
+     By default the mix is **speech first, for small speakers** (`--mix speech`, below): the
+     narration EQ'd as far as its measured tone needs, de-essed, compressed and peak-limited on
+     its track, the other stems high-passed, the music ducked 18 dB and dipped around 2.5 kHz
+     under the voice; `--mix cinematic` keeps the earlier full-range balance (music ducked
+     15 dB, effects at -23, the transitions' sounds at -6 dB);
    - **subtitles** (`subtitles.rs`): each narration line as written, split into cues of at most
      two 42-character lines, 1–7 s each, at sentence ends first and then clauses (a small
      dynamic programme over the words), timed in proportion to the characters within the line's
@@ -250,7 +255,7 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    |---|---|
    | `joins` (`sequence.inspect`) | on V2 (the shots): gaps of a frame or more, gaps holding a frame start (that frame is black), overlaps — errors; clips that do not quite touch (a slowed shot ending between frames) — warnings; on A1 (the shots' sound): neighbours that do not touch, so the fade-in meets silence instead of a crossfade — warnings; time with no clip on any video track — errors (a picture ending before the sound: info) |
    | `black` (`Executor::render`) | frames whose picture is black or nearly (92 % of the frame darker than 5 % luma, so the counter or a lower third over black still counts), sampled every 2 s, at each shot's first frame and at the first frame after it, outside dip-to-black transitions — errors |
-   | `mix` (`file.exportMedia` to a temporary 32-bit float WAV, metered with `filmcraft-audio-dsp`'s BS.1770 `LoudnessMeter`) | integrated loudness outside −16…−14 LUFS (±0.5 LU) — warning; true peak above −1 dBTP — warning; above 0 dBTP or any sample at full scale — error (clipping, with the time of the first); the median short-term loudness (3 s windows wholly inside narration clips on A2 vs wholly between them; 400 ms windows when lines or pauses are too short) — the voice less than 4 dB louder: warning, not louder at all: error |
+   | `mix` (`file.exportMedia` to a temporary 32-bit float WAV, metered with `filmcraft-audio-dsp`'s BS.1770 `LoudnessMeter`) | integrated loudness outside −16…−14 LUFS (±0.5 LU) — warning; true peak above −1 dBTP — warning; above 0 dBTP or any sample at full scale — error (clipping, with the time of the first); the median short-term loudness (3 s windows wholly inside narration clips on A2 vs wholly between them; 400 ms windows when lines or pauses are too short) — the voice less than 4 dB louder: warning, not louder at all: error. Then per stem (`audio.analyzeMix`, `qa::mix_findings`), each a warning: the narration (A2) less than 12 LU above the music (A3) while it speaks (median), the Mix's limiter taking more than 2 dB off the peaks, more than 25 % of the mix's energy below 120 Hz (naming the stem that brings most of it), a narration clip whose source is clipped (flat tops). The analysis is `mix_analysis` in the report and its headline numbers are in `loudness` (`speechOverMusicLu`, `speechOverRestLu`, `limiterDb`, `lowShare`, `presenceShare`) |
    | `subject` (`AUTOCUT_ANALYSIS_MODEL`) | the middle frame of every shot, rendered and grounded with the analysis' prompt (`analyze::ground_prompt`) — a shot where the subject is not found: warning; without a reachable model the check is recorded as skipped (model unavailable) |
 
    QA never edits the project and never fails the build: a check that cannot run (no frames
@@ -339,6 +344,7 @@ not there, years beyond 1900–2200) is an `invalid plan:` error saying which an
 | entries with `"kind": "scene"` and `"caption": "GITEX 2022 · Dubai World Trade Centre"` | | a scene shot: footage without a robot (a hall, a stage) that opens its event's chapter — its chapter card over it, full frame, a one-line caption (its `caption`, else its label) instead of a name lower third; not counted, never in the thumbnail, no subject check in QA, no words unless its script line has some (an empty line: none, and a scene without words plays 4.5 s with the bed's energy lifted under it and nothing to duck it) |
 | `"transitions": true` or `{"within": [ids], "between": [ids], "chapter": [ids]}` | | transitions from the catalogue (`effects.list`), each list in turn: `within` an entry's shots (default none: straight cuts, moved onto the beat), `between` entries (default `cam_punch_in`, `flow_morph`, `gl_crosswarp`, `cam_whip_pan`, `gl_directionalwarp`, `flow_doppler_warp` — Zooms & Camera, Flow & Morph, GL; about a beat long) with a whoosh, into a `chapter` (default `lf_light_leak`, `gl_filmburn`; about two beats) with a riser into the card's impact — the sounds coupled to the transitions (`transitions.addSound`), replacing the whoosh clips; then `transitions.snapToBeats` on the music's beat map puts each midpoint on a beat and makes each a musical length. An empty list means cuts |
 | `"loudness": "social"` | `--loudness social\|voice\|broadcast\|<LUFS>` | `audio.normalizeLoudness` on the finished mix (social −14 LUFS, voice −16, broadcast −23) with a −1 dBTP true-peak limiter, instead of the mix's own limiter alone; `loudness` in the output |
+| `"mix": "speech"` (default) or `"cinematic"` | `--mix speech\|cinematic` | how the stems are balanced and treated ([`mix.rs`](src/mix.rs), "Mix for small speakers" below); `mix` in the output says what was done (the narration's measured tilt, how much EQ it got, its fader) |
 | `"embedCaptions": true` | `--embed-captions` | the export carries the narration's captions as CEA-608/708 closed captions (besides `.srt` / `.vtt`) |
 | `"soundfont": "generaluser-gs"` | `--soundfont generaluser-gs\|oscillators\|auto\|<file.sf2>` | the instruments of the generated bed (`audio.generate`'s `soundfont`; Preferences are not changed); one that cannot play is noted and the bed played without it; `music.instruments` in the output |
 | `"outro": {"logo", "channel", "handle", "tagline", "cta", "ctaDone", "terminal", "background", "seconds"}` | `--outro-logo f.png --outro-channel C --outro-handle @h --outro-tagline T --outro-cta S --outro-cta-done S --outro-terminal L --outro-seconds 12 --outro-background item[:from[:to]]` (repeatable; the flags go over the plan's fields) | a branded channel outro instead of the count card ([`outro.rs`](src/outro.rs)), below |
@@ -397,6 +403,58 @@ filmcraft-cli showcase --report robots.json --script-in plan.json --voice clone:
     --style tech --timeline --loudness social --embed-captions --soundfont generaluser-gs \
     --export ~/Movies/AutoCut/robots.mp4
 ```
+
+### Mix for small speakers
+
+A TV, a laptop or a phone plays little below about 120 Hz, and words are understood at low volume
+from what they have between 1 and 4 kHz. The first finished show, measured with
+`audio.analyzeMix` (per stem: band balance, speech over the music while it speaks, the limiters'
+gain reduction, clipping), sounded bassy and muffled on a TV because of its narration: the cloned
+voice had 37 % of its energy below 120 Hz and 1 % between 1 and 4 kHz, and its peaks made the
+Mix's limiter take up to 3.7 dB off the whole mix (4.3 s over 1 dB). The music was not the
+problem (the voice already stood 26 LU above it while speaking). So the default mix
+([`mix::MixProfile::Speech`](src/mix.rs)) treats each stem on its track, with the engine's own
+effects (editable in the Audio Track Mixer):
+
+| stem | track effects | level |
+|---|---|---|
+| narration (A2) | Parametric EQ: high-pass 80 Hz (24 dB/oct); low shelf −3 dB at 200 Hz and, as far as the voice is dark, up to −3 dB more, −2 dB at 300 Hz, +5 dB at 1.2 kHz, +5 dB at 3 kHz, high shelf +3 dB from 6 kHz; DeEsser (6 kHz, −10 dB, at most 6 dB); compressor 3:1 from −20 dB, 1 ms attack, 120 ms release, +6 dB; Hard Limiter at −3.5 dB | each line matched to −16 LUFS; the track's fader makes up what the chain took (measured before and after it), so the voice keeps its level against the other stems |
+| music (A3) | Parametric EQ: high-pass 40 Hz, low shelf −6 dB at 120 Hz, a band at 2.5 kHz that dips 4 dB while the narration speaks (track automation following the ducking's stretches) | −24 LUFS, ducked 18 dB under the narration |
+| shots' sound (A1) | Parametric EQ: high-pass 100 Hz, low shelf −3 dB at 150 Hz | −27 LUFS, ducked 15 dB |
+| effects (A4, A5) | Parametric EQ: high-pass 120 Hz (the impacts' sub booms out) | −26 LUFS; the transitions' own sounds at −10 dB |
+
+How much EQ the narration gets is measured: before treating it the mix renders the narration's
+track alone (`audio.analyzeMix {"only": ["A2"]}`) and takes its **tilt**, the mean level of its
+1, 2 and 4 kHz octaves minus that of its 125 and 250 Hz ones. The cloned voices (IndicF5's
+Malayalam and the English clone) measure −18 dB; a typical voice about −10. The EQ's cuts and
+lifts move a voice's tilt by 8.8 dB, so a voice at −17.8 dB or darker gets all of them, one at the
+target (−9 dB, a touch brighter than typical) or brighter gets only the high-pass and half the low
+shelf, and one in between its share (`mix.voice.tiltDb`, `eqAmount` in the output). A bright voice
+made brighter only gets harsher and peakier.
+
+Measured on the Malayalam final (742 s, `--loudness social`), before → after:
+
+| | before | after |
+|---|---|---|
+| integrated loudness, true peak | −14.1 LUFS, −1.3 dBTP | −14.0 LUFS, −1.3 dBTP |
+| energy below 120 Hz / 1–4 kHz (mix) | 37.8 % / 1.5 % | 15.2 % / 8.4 % |
+| the narration's, alone | 36.8 % / 1.0 % | 15.2 % / 8.4 % |
+| the Mix's limiter: most, time over 1 dB | 3.7 dB, 4.3 s | 0.8 dB, 0 s |
+| the mix before its limiter, true peak | +2.4 dBTP | −0.5 dBTP |
+| the narration over the music while it speaks (median / quietest tenth) | 25.9 / 20.2 LU | 30.5 / 25.3 LU |
+| the narration over everything else | 22.0 / 15.7 LU | 28.2 / 22.3 LU |
+| the impacts and risers (A5) / the transitions' sounds | −22.8 / −20.6 LUFS, 97 % / 22 % below 120 Hz | −31.7 / −24.6 LUFS, 25 % / 22 % |
+
+The narration's own limiter catches its onsets (at most 5.3 dB, 0.8 dB at the 99th percentile,
+3.8 s over 1 dB in 536 s of speech), so the Mix's limiter has almost nothing left to do.
+Known limits: the transitions' sounds are synthesised on the Mix's input, so they cannot be
+high-passed (only made quieter); the EQ is fixed in shape (only its amount follows the voice).
+
+`showcase-remix [--sequence id] [--mix speech|cinematic] [--loudness social]` ([`mix::remix`])
+applies a profile to a show built before: the effects an earlier mix put on the stems' tracks
+(and their automation) are taken off, every clip levelled and ducked again, the profile's track
+effects put on, the transitions' sounds set to its level, and the mix normalised; running it
+twice gives the same mix. `--save` (or `--save-as`) keeps it; then export the sequence.
 
 ### Album as the seed
 

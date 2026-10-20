@@ -33,6 +33,7 @@ use serde_json::{Value, json};
 use crate::analyze::ClipFacts;
 use crate::llm::ChatModel;
 use crate::look::{self, Look, Role, Theme};
+use crate::mix::{self, Mix};
 use crate::outro;
 use crate::shot_edit::{self, Fit, ShotEdit};
 use crate::subtitles::Cue;
@@ -855,6 +856,9 @@ pub struct Built {
     /// What `audio.normalizeLoudness` measured and did ([`Look::loudness`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loudness: Option<Value>,
+    /// How the show was mixed ([`crate::mix::mix_down`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mix: Option<Value>,
     /// The branded outro as built: its elements, when the end screen may show and the regions
     /// left clear for it ([`crate::outro`]).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1063,65 +1067,6 @@ async fn sfx(ex: &dyn Executor, kind: &str, duration: f64, t: f64, track: &str, 
     Ok(())
 }
 
-/// The sound clips of the show by role, for the mix.
-#[derive(Default)]
-struct Mix {
-    /// The shots' own sound.
-    sounds: Vec<u64>,
-    /// Whooshes, impacts, risers.
-    effects: Vec<u64>,
-}
-
-/// Loudness targets (LUFS) of the mix: the voice on top at a YouTube level, the shots' own
-/// sound and the music under it (and ducked further while the voice speaks), the effects between.
-const VOICE_LUFS: f64 = -16.0;
-const SOUND_LUFS: f64 = -27.0;
-const MUSIC_LUFS: f64 = -24.0;
-const EFFECTS_LUFS: f64 = -23.0;
-/// Ceiling of the limiter on the mix, dBFS.
-const CEILING_DB: f64 = -1.0;
-/// The shots' own sound when it cannot be measured.
-const FALLBACK_SOUND_DB: f64 = -14.0;
-
-/// Mix the show: set each clip's audio type, match its loudness to its role's target, duck the
-/// shots' sound and the music under the voice, and put a limiter on the mix so nothing clips.
-/// Steps that fail are noted, never fatal: the edit is still usable unmixed.
-async fn mix_down(ex: &dyn Executor, mix: &Mix, narrations: &[u64], music: &[u64], limit: bool, notes: &mut Vec<String>) {
-    let mut step = async |id: &str, p: Value| {
-        if let Err(e) = run(ex, id, p).await {
-            notes.push(format!("mix: {e}"));
-            return false;
-        }
-        true
-    };
-    if !narrations.is_empty() {
-        step("essentialSound.setType", json!({"clips": narrations, "type": "dialogue"})).await;
-        step("essentialSound.autoMatch", json!({"clips": narrations, "target": VOICE_LUFS})).await;
-    }
-    if !mix.sounds.is_empty() {
-        step("essentialSound.applyPreset", json!({"clips": mix.sounds, "preset": "Duck Under Dialogue", "type": "ambience"})).await;
-        if !step("essentialSound.autoMatch", json!({"clips": mix.sounds, "target": SOUND_LUFS})).await {
-            step("clip.audioGain", json!({"clips": mix.sounds, "mode": "set", "db": FALLBACK_SOUND_DB})).await;
-        }
-    }
-    if !mix.effects.is_empty() {
-        step("essentialSound.setType", json!({"clips": mix.effects, "type": "sfx"})).await;
-        step("essentialSound.autoMatch", json!({"clips": mix.effects, "target": EFFECTS_LUFS})).await;
-    }
-    if !music.is_empty() {
-        step("essentialSound.applyPreset", json!({"clips": music, "preset": "Duck Under Dialogue", "type": "music"})).await;
-        step("essentialSound.autoMatch", json!({"clips": music, "target": MUSIC_LUFS})).await;
-    }
-    if !narrations.is_empty() {
-        let ducked: Vec<u64> = mix.sounds.iter().chain(music).copied().collect();
-        step("essentialSound.generateDucking", json!({"clips": ducked})).await;
-    }
-    // (a mix normalised to a loudness target gets its limiter from the normalisation)
-    if limit && step("mixer.addInsert", json!({"strip": "Mix", "effect": "hard_limiter"})).await {
-        step("mixer.setInsert", json!({"strip": "Mix", "slot": 0, "params": {"max": CEILING_DB}})).await;
-    }
-}
-
 /// A placed shot: its foreground, background and sound clips, where it ends (seconds, on a
 /// frame), and how it fills the frame when its shape is not the frame's.
 struct Placed {
@@ -1268,7 +1213,7 @@ async fn follow_subject(ex: &dyn Executor, clip: u64, aspect: f64, src: f64, dur
 }
 
 /// Place `item`'s `[src, src + dur)` at `t` (both ends on frames): foreground on V2 (with its
-/// sound on A1, which [`mix_down`] levels, unless `how` says not) with a slow push-in
+/// sound on A1, which [`mix::mix_down`] levels, unless `how` says not) with a slow push-in
 /// ([`push_in`]) and — when the show is stabilized ([`Options::stabilize`]) and `how` asks —
 /// Warp Stabilizer. A clip whose shape is not the frame's fills it ([`Options::fill_frame`], or
 /// the plan's `fit: "fill"`), its crop on the subject's centre (the plan's `focus`, else the
@@ -2956,14 +2901,14 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                             Ok(r) => {
                                 if let Some(id) = r["transition"].as_u64() {
                                     let intensity = if new_year { 0.75 } else { 0.6 };
-                                    let with_sound =
-                                        match run(ex, "transitions.addSound", json!({"transitions": [id], "kind": sound, "intensity": intensity})).await {
-                                            Ok(_) => Some(sound),
-                                            Err(err) => {
-                                                built.notes.push(format!("transition sound at entry {}: {err}", e.number));
-                                                None
-                                            }
-                                        };
+                                    let p = json!({"transitions": [id], "kind": sound, "intensity": intensity, "gain": look.mix.transition_gain_db()});
+                                    let with_sound = match run(ex, "transitions.addSound", p).await {
+                                        Ok(_) => Some(sound),
+                                        Err(err) => {
+                                            built.notes.push(format!("transition sound at entry {}: {err}", e.number));
+                                            None
+                                        }
+                                    };
                                     built.transitions.push(PlacedTransition { id, effect: effect.clone(), at: where_, sound: with_sound, entry: e.number });
                                 }
                             }
@@ -3289,7 +3234,11 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     }
     // ---- the mix
     progress("mixing");
-    mix_down(ex, &mix, &narrations.clips, &music, look.loudness.is_none(), &mut built.notes).await;
+    mix.narrations.clone_from(&narrations.clips);
+    mix.music.clone_from(&music);
+    let stems =
+        mix::MixTracks { sounds: tr.clip_audio.clone(), voice: tr.voice.clone(), music: tr.music.clone(), effects: vec![tr.sfx.clone(), tr.hits.clone()] };
+    built.mix = Some(mix::mix_down(ex, &mix, &stems, look.mix, look.loudness.is_none(), &mut built.notes).await);
     // the plan's own levels for shots' sound, on top of the mix's
     for (clip, db) in &gains {
         if let Err(e) = run(ex, "clip.audioGain", json!({"clips": [clip], "mode": "adjust", "db": db})).await {

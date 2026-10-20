@@ -47,6 +47,7 @@ const VALUED: &[&str] = &[
     // showcase look
     "--style",
     "--loudness",
+    "--mix",
     "--soundfont",
     // showcase branded outro
     "--outro-logo",

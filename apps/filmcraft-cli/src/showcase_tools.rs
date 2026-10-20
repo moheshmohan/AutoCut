@@ -1,13 +1,59 @@
 //! The steps of a showcase round that used to be throwaway scripts, as subcommands:
 //! `showcase-plan` (review notes applied to a plan, and the plan in another language), `sheet`
-//! (contact sheets of a project's source clips) and `frames` (frames of any video file); and
-//! `showcase`'s build step, once per language with `--languages en,ml`.
+//! (contact sheets of a project's source clips), `frames` (frames of any video file) and
+//! `showcase-remix` (a built show mixed again); and `showcase`'s build step, once per language
+//! with `--languages en,ml`.
 
 use filmcraft_autocut::showcase::{Entry, Options, Script};
 use serde_json::{Value, json};
 
 use crate::args::Args;
-use crate::{Backend, absolute, diag, fail, print, usage};
+use crate::{Backend, BridgeClient, absolute, diag, fail, print, usage};
+
+/// `showcase-remix [--sequence id] [--mix speech|cinematic] [--loudness social|…|off]`: a showcase
+/// built before, mixed again with a profile ([`filmcraft_autocut::mix::remix`]); with `--save`
+/// the project keeps it, then `export` makes the file.
+pub async fn remix(a: &Args) {
+    const USAGE: &str =
+        "showcase-remix [--sequence id] [--mix speech|cinematic] [--loudness social|voice|broadcast|<LUFS>|off] (--project p.fcproj | --bridge addr) [--save]";
+    if let Some(o) = a.unknown_opt(&["--sequence", "--mix", "--loudness", "--project", "--bridge", "--save", "--save-as", "--json", "--compact", "--data-dir"])
+    {
+        usage(format!("showcase-remix: unknown option {o}\n{USAGE}"));
+    }
+    let sequence = a.opt("--sequence").map(|v| v.parse::<u64>().unwrap_or_else(|_| usage(format!("showcase-remix: --sequence: a sequence id, not {v}"))));
+    let profile = filmcraft_autocut::mix::MixProfile::from_plan(&a.opt("--mix").map_or(Value::Null, |m| json!(m)))
+        .unwrap_or_else(|e| usage(format!("showcase-remix: --mix: {e}")));
+    let loudness = filmcraft_autocut::look::Loudness::from_plan(&a.opt("--loudness").map_or(Value::Null, |l| json!(l)))
+        .unwrap_or_else(|e| usage(format!("showcase-remix: --loudness: {e}")));
+    let mut notes = Vec::new();
+    let mut b = Backend::open(a);
+    let r = match &mut b {
+        Backend::Local(s) => {
+            // the mix goes through an Executor; lend it the session and take it back for --save
+            let session = std::mem::take(s);
+            let ex = filmcraft_autocut::SessionExecutor::from(*session);
+            let r = filmcraft_autocut::mix::remix(&ex, sequence, profile, loudness.as_ref(), &mut notes).await;
+            if let Ok(inner) = std::sync::Arc::try_unwrap(ex.0) {
+                **s = inner.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            r
+        }
+        Backend::Bridge(_) => {
+            let addr = a.opt("--bridge").unwrap_or_default();
+            let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
+            let ex = filmcraft_automation::AutocutExecutor::bridge(client);
+            filmcraft_autocut::mix::remix(&ex, sequence, profile, loudness.as_ref(), &mut notes).await
+        }
+    };
+    for n in &notes {
+        diag(format_args!("showcase-remix: {n}"));
+    }
+    match r {
+        Ok(v) => print(a, &v),
+        Err(e) => fail(format!("showcase-remix: {e}")),
+    }
+    b.finish(a).await;
+}
 
 pub(crate) fn read_json(what: &str, path: &str) -> Value {
     let bytes = std::fs::read(path).unwrap_or_else(|e| fail(format!("{what}: {path}: {e}")));

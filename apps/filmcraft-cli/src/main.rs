@@ -128,7 +128,7 @@ SUBCOMMANDS
          [--numbers english|malayalam] [--no-narration-check] [--places-from-locations locations.json]
          [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N] [--resolution 1080p|4k|WxH]
-         [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social]
+         [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social] [--mix speech|cinematic]
          [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
          [--outro-logo logo.png] [--outro-channel C] [--outro-handle @h] [--outro-tagline T]
          [--outro-cta S] [--outro-cta-done S] [--outro-terminal L] [--outro-seconds 12]
@@ -202,7 +202,14 @@ SUBCOMMANDS
                                 \"scene\" footage without a robot, the plan's \"transitions\"
                                 catalogue transitions with sounds snapped to the beat;
                                 --loudness social|voice|broadcast|<LUFS> normalises the mix
-                                (audio.normalizeLoudness, -1 dBTP), --soundfont plays the bed on
+                                (audio.normalizeLoudness, -1 dBTP); the mix is speech first for
+                                small speakers (TVs, laptops, phones): the narration EQ'd for
+                                clarity (rumble and boom out, presence up), de-essed, compressed
+                                and peak-limited, the music, the shots' sound and the effects
+                                high-passed (no sub-bass), the music ducked 18 dB and dipped
+                                around 2.5 kHz under the voice, so the Mix's limiter barely works
+                                (--mix cinematic, or the plan's \"mix\", keeps the earlier
+                                full-range balance); --soundfont plays the bed on
                                 those instruments, --embed-captions embeds the narration's
                                 captions (CEA-608/708) in the export;
                                 a plan's shot may set \"from\"/\"to\" (its window, seconds into
@@ -249,6 +256,14 @@ SUBCOMMANDS
                                 lines and, when AUTOCUT_ANALYSIS_MODEL answers, the subject in
                                 every shot; findings in <out>.qa.json and a numbered contact
                                 sheet in <out>.qa.png (and under `qa` in the output)
+  showcase-remix [--sequence id] [--mix speech|cinematic] [--loudness social|<LUFS>|off] --project p.fcproj --save
+                                a showcase built before, mixed again (its picture untouched): the
+                                effects an earlier mix put on its tracks (A1 shots' sound, A2
+                                narration, A3 music, A4/A5 effects) taken off, every clip
+                                levelled and ducked again, the profile's track effects put on,
+                                the transitions' sounds set to its level, and with --loudness the
+                                mix normalised; then `export` the sequence. `exec audio.analyzeMix`
+                                measures the result (bands, speech over the music, limiting)
   showcase-plan --base plan.json [--patch notes.json]... [--project p.fcproj | --clips items.json]
          [--places-from-locations locations.json]
          [--out new.json] [--lines script-ml.json [--language ml] [--lines-out new-ml.json]]
@@ -1855,6 +1870,8 @@ async fn cli() {
             let loudness_flag = a
                 .opt("--loudness")
                 .map(|l| filmcraft_autocut::look::Loudness::from_plan(&json!(l)).unwrap_or_else(|e| usage(format!("showcase: --loudness: {e}"))));
+            let mix_flag =
+                a.opt("--mix").map(|m| filmcraft_autocut::mix::MixProfile::from_plan(&json!(m)).unwrap_or_else(|e| usage(format!("showcase: --mix: {e}"))));
             // the branded outro's flags (over the plan's `outro`), checked now
             let outro_flag = outro_flags(&a).unwrap_or_else(|e| usage(format!("showcase: {e}")));
             let soundfont_flag = a.opt("--soundfont").map(|f| {
@@ -2011,6 +2028,9 @@ async fn cli() {
             if let Some(l) = loudness_flag {
                 opts.look.loudness = l;
             }
+            if let Some(m) = mix_flag {
+                opts.look.mix = m;
+            }
             if a.flag("--embed-captions") {
                 opts.look.embed_captions = true;
             }
@@ -2130,6 +2150,7 @@ async fn cli() {
         "redact" => redact(&a).await,
         // a showcase round's steps: review notes into the plan, contact sheets, frames of a video
         "showcase-plan" => showcase_tools::plan(&a).await,
+        "showcase-remix" => showcase_tools::remix(&a).await,
         // natural spoken Malayalam: a script checked, a plan's English translated
         "ml-lint" => ml_script::lint(&a),
         "ml-script" => ml_script::translate(&a).await,
