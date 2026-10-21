@@ -96,10 +96,10 @@ fn hex(c: [u8; 4]) -> String {
 }
 
 /// The caption format of a file, if it is one (extension `.srt` / `.vtt` / `.scc` / `.mcc` /
-/// `.stl` / `.ttml` / `.dfxp` / `.xml`, confirmed by content).
+/// `.stl` / `.ttml` / `.dfxp` / `.xml` / `.ass` / `.ssa`, confirmed by content).
 pub fn detect(path: &str, bytes: &[u8]) -> Option<Format> {
     let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-    if !matches!(ext.as_deref(), Some("srt" | "vtt" | "scc" | "webvtt" | "mcc" | "stl" | "ttml" | "dfxp" | "xml")) {
+    if !matches!(ext.as_deref(), Some("srt" | "vtt" | "scc" | "webvtt" | "mcc" | "stl" | "ttml" | "dfxp" | "xml" | "ass" | "ssa")) {
         return None;
     }
     filmcraft_captions::detect(bytes, ext.as_deref())
@@ -508,7 +508,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "Captions…",
             &["File", "Export"],
             None,
-            r#"{"path":str,"format":"srt|vtt|scc|mcc|stl|ttml|dfxp"? (default: from the extension),"track":id|"C1"?,"dropFrame":bool=true}"#,
+            r#"{"path":str,"format":"srt|vtt|scc|mcc|stl|ttml|dfxp|ass"? (default: from the extension),"track":id|"C1"?,"dropFrame":bool=true}"#,
             has_caption_track,
             export,
         ),

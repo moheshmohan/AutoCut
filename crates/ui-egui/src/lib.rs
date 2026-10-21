@@ -1394,7 +1394,7 @@ impl FilmcraftApp {
                     .iter()
                     .chain(filmcraft_media::AUDIO_EXTENSIONS)
                     .chain(filmcraft_media::STILL_EXTENSIONS)
-                    .chain(&["srt", "vtt", "scc", "edl", "xml", "fcpxml", "otio", "aaf", "omf"])
+                    .chain(&["srt", "vtt", "scc", "ass", "ssa", "edl", "xml", "fcpxml", "otio", "aaf", "omf"])
                     .copied()
                     .collect();
                 let bin = params.get("bin").cloned();
@@ -1442,7 +1442,7 @@ impl FilmcraftApp {
                     app.session.execute("graphics.newFromFile", json!({"path": path})).map_err(|e| e.to_string())
                 })
             }
-            "captions.import" => self.pick(FileDialog::open_files(&["srt", "vtt", "scc", "mcc", "stl", "ttml", "dfxp", "xml"]), |app, paths| {
+            "captions.import" => self.pick(FileDialog::open_files(&["srt", "vtt", "scc", "mcc", "stl", "ttml", "dfxp", "xml", "ass", "ssa"]), |app, paths| {
                 let Some(path) = paths.into_iter().next() else { return Ok(Value::Null) };
                 app.session.execute("captions.import", json!({"path": path})).map_err(|e| e.to_string())
             }),
@@ -1450,8 +1450,8 @@ impl FilmcraftApp {
                 let name = self.session.state.active_sequence.and_then(|s| self.session.project.item(s)).map(|i| i.name.clone()).unwrap_or_default();
                 let suggested = format!("{}.srt", name.replace(' ', "_"));
                 let dialog = FileDialog::save_as(
-                    "Captions (SRT, WebVTT, SCC, MCC, EBU STL, TTML, DFXP)",
-                    &["srt", "vtt", "scc", "mcc", "stl", "ttml", "dfxp"],
+                    "Captions (SRT, WebVTT, SCC, MCC, EBU STL, TTML, DFXP, ASS)",
+                    &["srt", "vtt", "scc", "mcc", "stl", "ttml", "dfxp", "ass"],
                     &suggested,
                 );
                 let mut p = params.clone();

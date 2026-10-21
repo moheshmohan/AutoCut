@@ -54,8 +54,8 @@ fn captions_import_edit_export_and_burn_in() {
     assert_eq!(list["tracks"][0]["captions"][0]["speaker"], "Ann");
     s.active_sequence().unwrap().check().unwrap();
 
-    // export in all three formats and read back: same texts
-    for ext in ["srt", "vtt", "scc"] {
+    // export in four formats and read back: same texts
+    for ext in ["srt", "vtt", "scc", "ass"] {
         let path = dir.join(format!("out.{ext}")).to_string_lossy().to_string();
         let r = s.execute("captions.export", json!({"path": path})).unwrap();
         assert_eq!(r["captions"], 3, "{ext}: {r}");
@@ -157,4 +157,45 @@ fn caption_list_track_filter_never_falls_back_to_every_track() {
     for sel in [json!(missing), json!("C3"), json!("C0"), json!("nope")] {
         assert!(s.execute("captions.list", json!({"track": sel})).is_err(), "{sel} names no caption track");
     }
+}
+
+#[test]
+fn ass_import_sets_the_track_style_and_round_trips() {
+    let dir = std::env::temp_dir().join(format!("fc-cap-ass-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ass = dir.join("anime.ass");
+    std::fs::write(
+        &ass,
+        "\u{feff}[Script Info]\r\nScriptType: v4.00+\r\nPlayResX: 1920\r\nPlayResY: 1080\r\n\r\n[V4+ Styles]\r\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\r\nStyle: Default,Noto Sans,64,&H0000FFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,3,0,2,40,40,60,1\r\n\r\n[Events]\r\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\nDialogue: 0,0:00:00.50,0:00:02.00,Default,Ann,0,0,0,,Hello {\\i1}there{\\i0}\\Nfriend\r\nDialogue: 0,0:00:02.50,0:00:04.00,Default,,0,0,0,,{\\an8}On top\r\n",
+    )
+    .unwrap();
+    // File ▸ Import detects it, like the other caption formats
+    let mut s = demo();
+    let undo_before = s.history.undo.len();
+    let r = s.execute("file.import", json!({"paths": [ass.to_string_lossy()]})).unwrap();
+    assert_eq!(r["documents"][0]["captions"], 2, "{r}");
+    let tr = s.active_sequence().unwrap().caption_tracks[0].clone();
+    assert_eq!(tr.name, "anime");
+    assert_eq!((tr.style.font.as_str(), tr.style.size, tr.style.color, tr.style.background), ("Noto Sans", 64.0, [255, 255, 0, 255], false));
+    assert_eq!(tr.captions[0].text, "Hello <i>there</i>\nfriend");
+    assert_eq!(tr.captions[0].speaker.as_deref(), Some("Ann"));
+    assert_eq!(tr.captions[1].settings, "line:5.56% align:center");
+    // one undo step takes it back
+    assert_eq!(s.history.undo.len(), undo_before + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.active_sequence().unwrap().caption_tracks.is_empty());
+    // captions.import too, then export as ASS and read it back
+    s.execute("captions.import", json!({"path": ass.to_string_lossy()})).unwrap();
+    let out = dir.join("out.ass").to_string_lossy().to_string();
+    let r = s.execute("captions.export", json!({"path": out})).unwrap();
+    assert_eq!(r["captions"], 2, "{r}");
+    let back = filmcraft_captions::parse(&std::fs::read(&out).unwrap(), filmcraft_captions::Format::Ass).unwrap();
+    assert_eq!(back.cues[0].text, "Hello <i>there</i>\nfriend");
+    assert_eq!(back.cues[1].settings, "line:5.56% align:center");
+    assert_eq!(back.style.map(|st| (st.font, st.size)), Some(("Noto Sans".to_string(), 64.0)));
+    // a file that is not a script is refused with an error, never a panic
+    let bad = dir.join("bad.ass");
+    std::fs::write(&bad, "this is not a script").unwrap();
+    assert!(s.execute("captions.import", json!({"path": bad.to_string_lossy()})).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }
