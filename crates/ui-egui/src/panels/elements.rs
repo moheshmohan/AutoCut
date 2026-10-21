@@ -126,7 +126,8 @@ pub fn folder(app: &mut FilmcraftApp, ui: &mut egui::Ui, filter: &str) {
             if resp.hovered() {
                 ui.painter().rect_filled(rect, 0.0, t.hover);
             }
-            let tr = Rect::from_min_size(pos2(rect.min.x + 40.0, rect.min.y + 3.0), vec2(32.0, 18.0));
+            // inside an Elements sub-folder: one level deeper than it (#2329)
+            let tr = Rect::from_min_size(pos2(rect.min.x + super::effects::tree_x(2) + 12.0, rect.min.y + 3.0), vec2(32.0, 18.0));
             ui.painter().rect_filled(tr, 2.0, t.field_bg);
             match &r.template {
                 Some(tpl) => {
