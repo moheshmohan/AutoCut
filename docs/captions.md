@@ -22,13 +22,16 @@ version 2; version 1 projects open with no caption tracks).
 | Format | Import | Export | Notes |
 |---|---|---|---|
 | SubRip `.srt` | ✓ | ✓ | Forgiving reader (BOM, UTF-16, Windows-1252, CRLF, missing indexes, `,`/`.` ms, missing hours). |
-| WebVTT `.vtt` | ✓ | ✓ | Keeps cue ids, cue settings, `<v Speaker>`, STYLE/REGION/NOTE blocks. `line:N%` and `align:` are honoured when drawing. |
+| WebVTT `.vtt` | ✓ | ✓ | Keeps cue ids, cue settings, `<v Speaker>`, STYLE/REGION/NOTE blocks. `line:N%` (with `,start` / `,center` / `,end`), `position:N%` and `align:` are honoured when drawing. |
 | Scenarist SCC `.scc` | ✓ | ✓ | CEA-608 at 29.97 fps. Reads pop-on, roll-up and paint-on; writes pop-on with drop-frame (default) or non-drop timecode. |
+| MacCaption `.mcc`, EBU STL `.stl`, TTML `.ttml`, DFXP `.dfxp` | ✓ | ✓ | See the crate README. |
+| Advanced SubStation Alpha `.ass`, SubStation Alpha `.ssa` | ✓ | `.ass` | The style most lines use becomes the track style (font, size, colour, alignment, margin, outline, opaque box); `\b` `\i` `\u` become tags, `\N` line breaks, the actor the speaker; `\an`, `\pos` and other styles' placement become cue settings; other overrides and drawings are dropped. |
 
 `File ▸ Import` (or dropping a file) recognises caption files by extension and content and adds a
 new caption track to the open sequence (a sequence is created when none is open). Cue times are
 snapped to the sequence's frames. `File ▸ Export ▸ Captions…` writes the chosen caption track in
-the format given by the file extension (`.srt`, `.vtt`, `.scc`).
+the format given by the file extension (`.srt`, `.vtt`, `.scc`, `.mcc`, `.stl`, `.ttml`, `.dfxp`,
+`.ass`).
 
 Details of each format and the SCC encoder are in [`crates/captions/README.md`](../crates/captions/README.md).
 
