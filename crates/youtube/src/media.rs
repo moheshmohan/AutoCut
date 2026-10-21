@@ -163,6 +163,31 @@ pub fn thumbnail_beside(video: &Path) -> PathBuf {
     video.with_extension("thumbnail.jpg")
 }
 
+/// The largest QA report read.
+const MAX_QA_BYTES: u64 = 32 << 20;
+
+/// Why a video must not go out: the QA report beside it (`<file>.qa.json`, what a showcase's QA
+/// writes) lists privacy errors — faces of people its picture shows unblurred. `None` without a
+/// report, or with one that cannot be read, or without such errors.
+pub fn privacy_blocker(video: &Path) -> Option<String> {
+    let qa = video.with_extension("qa.json");
+    let f = std::fs::File::open(&qa).ok()?;
+    let mut text = String::new();
+    f.take(MAX_QA_BYTES).read_to_string(&mut text).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let errors: Vec<&serde_json::Value> =
+        v["findings"].as_array()?.iter().filter(|f| f["check"].as_str() == Some("privacy") && f["severity"].as_str() == Some("error")).collect();
+    let first = errors.first()?;
+    let at = first["seconds"].as_f64().filter(|s| s.is_finite() && *s >= 0.0).unwrap_or(0.0);
+    Some(format!(
+        "{} lists {} unblurred face(s) of people (the first at {}:{:04.1}): blur them and check again, or upload anyway with --allow-privacy-findings",
+        qa.display(),
+        errors.len(),
+        (at / 60.0).floor() as u64,
+        at % 60.0
+    ))
+}
+
 /// YouTube chapters from a file: lines of `0:00 Title` (the first at 0:00, at least three, as
 /// YouTube wants them). `Ok(None)` when there is no file; `Err` says why a file is not usable.
 pub fn read_chapters(path: &Path) -> Result<Option<String>, String> {
@@ -233,6 +258,27 @@ mod tests {
         assert!(check_video(&d.join("missing.mp4")).is_err());
         std::fs::create_dir_all(d.join("dir.mp4")).unwrap();
         assert!(check_video(&d.join("dir.mp4")).unwrap_err().to_string().contains("not a file"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A showcase whose QA found a visitor's face unblurred is not uploaded (Every Robot I've Met
+    /// went out with two, 2026-10-21); warnings and other checks' errors do not stop it.
+    #[test]
+    fn a_qa_report_with_unblurred_faces_stops_the_upload() {
+        let d = dir("qa");
+        let v = d.join("Every Robot (Malayalam, 4K).mp4");
+        std::fs::write(&v, b"x").unwrap();
+        assert_eq!(privacy_blocker(&v), None, "no report");
+        let qa = d.join("Every Robot (Malayalam, 4K).qa.json");
+        let write = |findings: serde_json::Value| std::fs::write(&qa, serde_json::json!({"findings": findings}).to_string()).unwrap();
+        write(serde_json::json!([{"check": "privacy", "severity": "warning", "seconds": 3.0}, {"check": "black", "severity": "error", "seconds": 4.0}]));
+        assert_eq!(privacy_blocker(&v), None);
+        write(serde_json::json!([{"check": "privacy", "severity": "error", "seconds": 427.8}, {"check": "privacy", "severity": "error", "seconds": "x"}]));
+        let why = privacy_blocker(&v).unwrap();
+        assert!(why.contains("2 unblurred face(s)") && why.contains("7:07.8") && why.contains("--allow-privacy-findings"), "{why}");
+        // a damaged report is no report
+        std::fs::write(&qa, b"{not json").unwrap();
+        assert_eq!(privacy_blocker(&v), None);
         let _ = std::fs::remove_dir_all(&d);
     }
 

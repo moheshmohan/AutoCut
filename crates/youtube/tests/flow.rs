@@ -75,6 +75,7 @@ fn request(path: &Path, title: &str) -> UploadRequest {
         playlist: None,
         thumbnail: None,
         sidecars: true,
+        allow_privacy_findings: false,
     }
 }
 

@@ -414,6 +414,8 @@ pub async fn build_and_ship(a: &Args, b: &mut Backend, run: &Run, entries: &[Ent
     if let Some(l) = &opts.language {
         out["language"] = json!(l);
     }
+    // a person's face shown unblurred: nothing is uploaded
+    let blocked = qa.as_ref().and_then(filmcraft_autocut::qa::QaReport::publish_blocker);
     if let Some(mut report) = qa {
         progress(&format!("QA: {}", report.summary()));
         for f in report.findings.iter().filter(|f| f.severity >= filmcraft_autocut::qa::Severity::Warning).take(40) {
@@ -438,7 +440,15 @@ pub async fn build_and_ship(a: &Args, b: &mut Backend, run: &Run, entries: &[Ent
     }
     // --upload: the finished export to Google Photos, titled like the video
     let mut upload_failed = None;
+    if let Some(b) = &blocked {
+        progress(&format!("PRIVACY: {b}"));
+        out["privacyBlocked"] = json!(b);
+        if ship.upload || ship.upload_youtube {
+            upload_failed = Some(format!("not uploaded: {b}"));
+        }
+    }
     if ship.upload
+        && blocked.is_none()
         && let Some(requested) = &opts.export
     {
         let file = built.export.as_ref().and_then(|r| crate::written_paths(r, requested).into_iter().next()).unwrap_or_else(|| requested.clone());
@@ -454,6 +464,7 @@ pub async fn build_and_ship(a: &Args, b: &mut Backend, run: &Run, entries: &[Ent
     // --upload-youtube: the export to YouTube, titled like the video, with its chapters and
     // thumbnail
     if ship.upload_youtube
+        && blocked.is_none()
         && let Some(requested) = &opts.export
     {
         let file = built.export.as_ref().and_then(|r| crate::written_paths(r, requested).into_iter().next()).unwrap_or_else(|| requested.clone());

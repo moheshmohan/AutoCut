@@ -853,6 +853,40 @@ safe zone, an end card, and the show's masked blur on its shot; hostile requests
   a privacy sheet, `<out>.privacy.png`: one frame of each clip with masks, where most of it is
   hidden, under its entry's number.
 
+- **Unblurred faces in the finished picture** (QA `privacy`, on for a show that hides faces):
+  the bug of 2026-10-21. *Every Robot I've Met* went out with visitors' faces sharp next to
+  Ameca (7:08–7:14, VID_20221014_144910) while QA said privacy OK. Root cause: the robot's
+  exclusion box is its largest analysed box taken square (area 0.57 there: 57 % of the frame's
+  width, all its height), and every face whose centre was inside it within a second of that
+  moment was left sharp as the robot's, never shown to the vision model — eight tracks in that
+  clip, two of them (0.92, a sixth of the frame tall) the faces reported; the detector had found
+  them in every frame, and QA only looked at the masks that were made. Now:
+  - the engine shows faces inside the robot's box to the vision model too, and hides them unless
+    it says they are not a person; a face it calls not a person is looked at a second time,
+    alone with the face outlined in red (`OllamaJudge::confirm`; in a grid a visitor beside the
+    robot's head was called a robot), and left sharp only if both agree; a face the detector is
+    sure of (0.85) that is never inside the robot's box is hidden whatever the model says
+    (`crates/engine/src/redact.rs`, *Not robots*); the face detector looks at each frame a
+    second time twice as close (a visitor 7 % of the frame tall was missed at 640 px, found at
+    1280), and a mask stays on 0.4 s before and after its face is found (a smile under the
+    robot's head as the visitor went behind it);
+  - QA renders the finished sequence every half second and at every shot's start as it
+    exports, runs the face detector on the frames (`sequence.checkPrivacy`,
+    `crates/engine/src/privacy_check.rs`), and every face at least 5 % of the frame tall that
+    no redaction mask covers (in a transition, in either clip) is a finding unless the vision
+    model twice calls it not a person and it is on the robot (its box from the privacy pass,
+    `Hidden::robots`) or the detector is not sure of it. An error — a stop — when the detector
+    scores it 0.75 or more and the model sees a person (on the robot both looks must; away from
+    it, nobody could tell counts too); a warning to look at otherwise (a score under 0.75: the
+    false finds on the v5 show, a shoe, a robot's base, the floor, scored 0.60–0.69; two looks
+    that disagree on the robot; "not a person" away from it, a robot on a phone's screen or a
+    painting). Each face with its time and box goes into `unblurredFaces` in `<out>.qa.json`
+    (what YouTube Studio's custom blur needs if the video is already out) and a crop of it,
+    outlined, onto the privacy sheet;
+  - such an error stops the uploads (`showcase --upload` / `--upload-youtube`, the app's
+    `upload`: `QaReport::publish_blocker`, `privacyBlocked` in the build), and `youtube upload`
+    refuses a file whose `<file>.qa.json` lists one (`--allow-privacy-findings` to override).
+
 Measured on Robot Showcase v4 (560 s of footage, 90 clips, mostly 1080p H.264 with some VP9
 4:4:4), the whole sequence on an M-series Mac, 2026-10-19: with faces counted as the sequence
 shows them and a face score of 0.6, 356 s (detection 141 s, vision check 214 s for 211

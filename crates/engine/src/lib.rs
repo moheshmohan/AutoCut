@@ -59,6 +59,7 @@ pub mod photos;
 pub mod pillars;
 pub mod presets;
 pub mod previews;
+pub mod privacy_check;
 pub mod project_manager;
 pub mod project_panel;
 pub mod project_tools;

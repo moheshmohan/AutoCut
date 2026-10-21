@@ -307,8 +307,11 @@ fn smooth(mut t: Track, sigma: f64) -> Track {
     t
 }
 
-/// An area never hidden: a track whose box centre lies inside it (at `t`, if given, within a
-/// second of it; else at any time) is left alone — the subject a video is about (a robot's face).
+/// The subject a video is about (a robot's face): a track whose box centre lies inside the area
+/// (at `t`, if given, within a second of it; else at any time) is the subject's, left alone
+/// ([`Skip::Excluded`]). The engine shows such a track to its vision model when it has one, and
+/// hides it if the model sees a person: a subject's box is coarse, and visitors crowd around a
+/// robot (2026-10-21: two visitors next to Ameca were left sharp).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Exclude {
     pub t: Option<f64>,
@@ -320,9 +323,7 @@ pub const EXCLUDE_REACH: f64 = 1.0;
 
 impl Exclude {
     fn covers(&self, p: &TrackPoint) -> bool {
-        let (cx, cy) = (p.bbox[0] + p.bbox[2] / 2.0, p.bbox[1] + p.bbox[3] / 2.0);
-        let b = &self.bbox;
-        cx >= b[0] && cx <= b[0] + b[2] && cy >= b[1] && cy <= b[1] + b[3]
+        self.contains(p.bbox[0] + p.bbox[2] / 2.0, p.bbox[1] + p.bbox[3] / 2.0)
     }
 
     /// The exclusion applies to `track`.
@@ -331,6 +332,19 @@ impl Exclude {
             Some(t) => track.at(t).is_some_and(|p| (p.t - t).abs() <= EXCLUDE_REACH && self.covers(p)),
             None => track.points.iter().any(|p| self.covers(p)),
         }
+    }
+
+    /// `track`'s box centre is inside the area at any of its moments, whatever the exclusion's
+    /// time: the track may be on the subject (a robot keeps its place in a shot), which is where
+    /// a vision model's "not a person" is believed for a face the detector is sure of.
+    pub fn near(&self, track: &Track) -> bool {
+        track.points.iter().any(|p| self.covers(p))
+    }
+
+    /// Whether point `(x, y)` (normalised) is inside the area.
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        let b = &self.bbox;
+        x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3]
     }
 }
 
@@ -342,7 +356,7 @@ pub enum Skip {
     TooSmall,
     /// Seen fewer than `min_hits` times and never surely.
     TooBrief,
-    /// Inside an excluded box.
+    /// Inside an excluded box (the subject's), with no vision model to ask.
     Excluded,
     /// The vision model said it is not a real person's face.
     NotAPerson,
@@ -482,8 +496,12 @@ mod tests {
         assert_eq!(verdict(&mk(0.2, 5, 0.8), &kp, &[ex]), Some(Skip::Excluded));
         let late = Exclude { t: Some(5.0), ..ex };
         assert_eq!(verdict(&mk(0.2, 5, 0.8), &kp, &[late]), None);
+        // …which is still on the subject's place, at any time
+        assert!(late.near(&mk(0.2, 5, 0.8)) && ex.near(&mk(0.2, 5, 0.8)));
         let elsewhere = Exclude { t: None, bbox: [0.0, 0.0, 0.1, 0.1] };
         assert_eq!(verdict(&mk(0.2, 5, 0.8), &kp, &[elsewhere]), None);
+        assert!(!elsewhere.near(&mk(0.2, 5, 0.8)));
+        assert!(elsewhere.contains(0.05, 0.1) && !elsewhere.contains(0.05, 0.11) && !elsewhere.contains(f64::NAN, 0.0));
         // plates by width
         let mut p = mk(0.02, 3, 0.8);
         p.kind = Kind::Plate;

@@ -549,6 +549,7 @@ SUBCOMMANDS
   youtube upload <file> --title T [--channel C] [--description D] [--tags a,b] [--category 28]
          [--privacy private|unlisted|public] [--made-for-kids] [--publish-at 2026-11-01T18:00:00Z]
          [--playlist <title|id>] [--thumbnail f.jpg] [--no-sidecars] [--no-notify]
+         [--allow-privacy-findings]
                                  upload a video to YouTube, resumably in 8 MiB chunks (a dropped
                                  connection resumes; running the same upload again after a crash
                                  or a cancel sends only the rest); progress on stderr, the video
@@ -557,7 +558,9 @@ SUBCOMMANDS
                                  uploads private whatever is asked). <file>.chapters.txt beside it
                                  (a showcase export's) is appended to the description and
                                  <file>.thumbnail.jpg becomes the thumbnail (--no-sidecars: not).
-                                 Vertical or square and up to 3 minutes: YouTube makes it a Short
+                                 Vertical or square and up to 3 minutes: YouTube makes it a Short.
+                                 Refused when <file>.qa.json (a showcase's QA) lists unblurred
+                                 faces of people, unless --allow-privacy-findings
   instagram setup --app-id <Instagram app ID> [--redirect-uri http://localhost:8714/] [--forget]
                                  set up your Meta app's Instagram business login once: its
                                  Instagram app ID (not the Meta app ID) and the redirect URI you

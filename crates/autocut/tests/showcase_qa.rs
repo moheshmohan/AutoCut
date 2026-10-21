@@ -334,3 +334,137 @@ async fn privacy_flags_large_masks_counts_per_entry_and_draws_a_sheet() {
     assert!(r.privacy_sheet_png.is_none() && r.privacy.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A face-sized warm disc, finely textured, at (100, 90) of a 320 × 180 picture lit red on the
+/// left and green on the right (a show's lighting), as an image sequence of 40 frames in `dir`:
+/// the first frame's path.
+fn face_frames(dir: &str) -> String {
+    for k in 0..40 {
+        let img = image::RgbaImage::from_fn(320, 180, |x, y| {
+            let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+            if ((fx - 100.0).powi(2) + (fy - 90.0).powi(2)).sqrt() < 24.0 {
+                let v = if (x / 2 + y / 2) % 2 == 0 { 255 } else { 120 };
+                image::Rgba([v, v / 2, 0, 255])
+            } else if x < 160 {
+                image::Rgba([90, 30, 60, 255])
+            } else {
+                image::Rgba([30, 90, 60, 255])
+            }
+        });
+        img.save(std::path::Path::new(dir).join(format!("visit{k:04}.png"))).unwrap();
+    }
+    std::path::Path::new(dir).join("visit0000.png").to_string_lossy().into_owned()
+}
+
+/// The face detector of the tests: the warm disc's box (none once a blur has spread it).
+fn warm_disc(rgba: &[u8], w: usize, h: usize) -> Vec<filmcraft_vision::Detection> {
+    let (mut x0, mut y0, mut x1, mut y1, mut n) = (usize::MAX, usize::MAX, 0, 0, 0usize);
+    for (i, p) in rgba.as_chunks::<4>().0.iter().enumerate() {
+        if p[0] > 200 && p[1] > 100 && p[2] < 30 {
+            let (x, y) = (i % w, i / w);
+            (x0, y0, x1, y1, n) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y), n + 1);
+        }
+    }
+    if x1 < x0 || n < 20 {
+        return Vec::new();
+    }
+    let d = filmcraft_vision::Detection {
+        kind: filmcraft_vision::Kind::Face,
+        score: 0.92,
+        bbox: [x0 as f32, y0 as f32, (x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32],
+        points: Vec::new(),
+    };
+    vec![d.normalized(w as f32, h as f32)]
+}
+
+/// The vision model of the tests: the same answer at both looks.
+struct Says(Option<bool>);
+
+impl filmcraft_engine::redact::VisionJudge for Says {
+    fn name(&self) -> String {
+        "says".into()
+    }
+    fn judge(&self, _: filmcraft_vision::Kind, crops: &[filmcraft_engine::redact::Crop]) -> Result<Vec<Option<bool>>, String> {
+        Ok(vec![self.0; crops.len()])
+    }
+}
+
+fn set_judge(ex: &SessionExecutor, j: Option<Says>) {
+    let mut g = ex.0.lock().unwrap();
+    g.redacts.judge = j.map(|j| std::sync::Arc::new(j) as std::sync::Arc<dyn filmcraft_engine::redact::VisionJudge>);
+}
+
+/// The QA of 2026-10-21 said privacy OK on a show that published two visitors' faces unblurred:
+/// it only looked at the masks the redaction made. Now it looks at the finished picture: a face
+/// shown that no mask hides is an error, with its time, box and a crop on the privacy sheet, and
+/// stops the upload; masked, the check passes; on the robot and called a robot, it may stay.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unblurred_face_in_the_finished_picture_is_an_error_until_it_is_masked() {
+    use filmcraft_autocut::privacy::Hidden;
+    use filmcraft_autocut::showcase::{PlacedEntry, PlacedShot};
+    let dir = tmp("faces");
+    let mut s = Session::default();
+    let first = face_frames(&dir);
+    let item = s.execute("file.importImageSequence", json!({"path": first})).unwrap()["items"][0].as_u64().unwrap();
+    s.redacts.detector = Some(std::sync::Arc::new(|rgba: &[u8], w: usize, h: usize, _: usize| warm_disc(rgba, w, h)));
+    let ex = SessionExecutor::from(s);
+    run(&ex, "file.newSequence", json!({"name": "Visit", "width": 320, "height": 180, "fps": 25, "video": 2, "audio": 1})).await;
+    let clip = place(&ex, item, "V2", None, 0.0, 0.0, 1.5).await[0];
+    let entry = PlacedEntry {
+        number: 28,
+        label: "Ameca".into(),
+        start: 0.0,
+        end: 1.5,
+        shots: vec![PlacedShot { clip, item, start: 0.0, end: 1.5, ..PlacedShot::default() }],
+        ..PlacedEntry::default()
+    };
+    // the redaction ran (faces asked for) and hid nothing in the clip
+    let opts = qa::Options {
+        frame_side: 160,
+        mix: false,
+        faces: true,
+        work_dir: Some(dir.clone().into()),
+        entries: vec![entry],
+        privacy: vec![Hidden { clip, name: "visit".into(), ..Hidden::default() }],
+        ..qa::Options::default()
+    };
+    let mut r = qa::check(&ex, &opts, None, &mut |_| {}).await;
+    let errors = r.of("privacy", Severity::Error);
+    assert_eq!(errors.len(), 1, "{:#?}", r.findings);
+    let e = errors[0];
+    assert_eq!((e.entry, e.clip, e.seconds), (Some(28), Some(clip), 0.0), "{e:?}");
+    assert!(e.message.contains("unblurred face") && e.message.contains("needs a blur"), "{}", e.message);
+    let f = &r.unblurred_faces[0];
+    // the disc: 48 px of 180 tall, its centre at (100, 90)
+    assert!((f.bbox[3] * 180.0 - 48.0).abs() < 3.0 && ((f.bbox[0] + f.bbox[2] / 2.0) * 320.0 - 100.0).abs() < 3.0, "{f:?}");
+    assert!(f.end >= 1.0 && f.verdict == "unchecked" && !f.allowed, "{f:?}");
+    assert!(r.publish_blocker().is_some_and(|b| b.contains("1 unblurred face")), "{:?}", r.publish_blocker());
+    // the privacy sheet holds a crop of it, and the report its box
+    assert!(r.privacy_sheet_png.is_some());
+    let out = std::path::Path::new(&dir).join("show.mp4");
+    qa::write_next_to(&mut r, &out).unwrap();
+    let v: Value = serde_json::from_slice(&std::fs::read(std::path::Path::new(&dir).join("show.qa.json")).unwrap()).unwrap();
+    assert_eq!(v["unblurredFaces"][0]["clip"], json!(clip), "{v}");
+    assert_eq!(v["unblurredFaces"][0]["severity"], json!("error"));
+    // blurred: the check passes
+    run(&ex, "clip.autoRedact", json!({"clips": [clip], "wait": true, "verify": false})).await;
+    let r = qa::check(&ex, &opts, None, &mut |_| {}).await;
+    assert!(r.of("privacy", Severity::Error).is_empty(), "{:#?}", r.findings);
+    assert!(r.publish_blocker().is_none() && r.unblurred_faces.is_empty());
+    run(&ex, "edit.undo", json!({})).await;
+    // on the robot (its box from the redaction) and called a robot twice: left sharp, no finding
+    set_judge(&ex, Some(Says(Some(false))));
+    let robot = qa::Options { privacy: vec![Hidden { clip, robots: vec![[0.1, 0.1, 0.6, 0.8]], ..Hidden::default() }], ..opts.clone() };
+    let r = qa::check(&ex, &robot, None, &mut |_| {}).await;
+    assert!(r.of("privacy", Severity::Warning).is_empty(), "{:#?}", r.findings);
+    assert!(r.unblurred_faces.first().is_some_and(|f| f.allowed && f.on_subject && f.verdict == "notPerson"), "{:?}", r.unblurred_faces);
+    // …but a person there is an error
+    set_judge(&ex, Some(Says(Some(true))));
+    let r = qa::check(&ex, &robot, None, &mut |_| {}).await;
+    assert_eq!(r.of("privacy", Severity::Error).len(), 1, "{:#?}", r.findings);
+    // and without a model, on the robot, a warning to look at
+    set_judge(&ex, None);
+    let r = qa::check(&ex, &robot, None, &mut |_| {}).await;
+    assert_eq!((r.of("privacy", Severity::Error).len(), r.of("privacy", Severity::Warning).len()), (0, 1), "{:#?}", r.findings);
+    let _ = std::fs::remove_dir_all(&dir);
+}
