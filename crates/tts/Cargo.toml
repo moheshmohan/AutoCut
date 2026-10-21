@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 default = []
-# Kokoro-82M neural voices on the CPU via candle (pure Rust). Off by default and in wasm builds.
+# Kokoro-82M neural voices via candle (pure Rust; Metal on macOS, else the CPU). Off by default and in wasm builds.
 kokoro = ["dep:candle-core", "dep:candle-nn", "dep:zip", "dep:serde_json", "dep:filmcraft-tts-text", "dep:filmcraft-audio-dsp"]
 # VoxCPM zero-shot voice cloning on candle (pure Rust; builds on the Kokoro stack's loaders and
 # text front end). Off by default and in wasm builds. On macOS it runs on the GPU through
@@ -36,8 +36,8 @@ zip = { version = "7", default-features = false, optional = true }
 serde_json = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 
-# On macOS candle comes with its Metal backend, which VoxCPM runs on (Kokoro and OpenVoice keep
-# running on the CPU).
+# On macOS candle comes with its Metal backend, which Kokoro, OpenVoice, VoxCPM and IndicF5 run
+# on (the CPU being the fallback).
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = { version = "0.9", default-features = false, features = ["metal"], optional = true }
 candle-nn = { version = "0.9", default-features = false, features = ["metal"], optional = true }

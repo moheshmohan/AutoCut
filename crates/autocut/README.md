@@ -190,7 +190,10 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      dynamic programme over the words), timed in proportion to the characters within the line's
      clip (a cue too short to read stays up into the pause after it, never into the next line);
      on a `Subtitles` caption track of the sequence (shown in the app, not burned in);
-   - optionally the YouTube 1080p export, with `<out>.chapters.txt` (intro, each year, outro —
+   - optionally the YouTube 1080p export (composited on the GPU, the default since 2026-10-21:
+     the redaction blur, the blurred fills under portraits, the transitions and the keyframes run
+     there, the CPU only for what the GPU does not draw — [docs/gpu.md](../../docs/gpu.md)), with
+     `<out>.chapters.txt` (intro, each year, outro —
      YouTube's rules: from 0:00, at least three, none under 10 s) for the description, the
      subtitles as `<out>.srt` and `<out>.vtt` (`captions.export`) to upload with it, and a
      **thumbnail**, `<out>.thumbnail.jpg` (1280×720): the sampled moment where a robot is

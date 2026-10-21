@@ -135,9 +135,10 @@ Every Auto row rendered all its frames on the GPU, without fallbacks.
 
 On a plain clip the export is decoding- and encoding-bound and both take the same time; with
 layers and effects the GPU is 2.4× (1080p) to 3.2× (4K) faster, with a third to a quarter of the
-CPU. GPU rendering is nevertheless **Off by default** (opt-in per export) until it has been
-measured on Windows and macOS: the GPU result matches the CPU within the compositor's parity
-tolerance, not bit for bit, and Off keeps exports byte-reproducible on every machine. (The 4K row used the same scene with the sequence, clip and positions scaled to 4K.)
+CPU. GPU rendering was **Off by default** (opt-in per export) until 2026-10-21, when the owner
+made the GPU the default wherever it is supported ([gpu.md](gpu.md)): the GPU result matches the
+CPU within the compositor's parity tolerance, not bit for bit, and Off still keeps an export
+byte-reproducible on every machine. (The 4K row used the same scene with the sequence, clip and positions scaled to 4K.)
 
 ### Memory after an export
 
@@ -405,8 +406,8 @@ Not done: the HLG sections are now the slowest (75 fps; software VP9 profile 3 d
 source, 2 samples per frame at 60 fps, and a batch's frames wait for it: decoding the next batch ahead
 would overlap it, but needs the GOP cache's per-source budget, 64 frames of 12 MB, raised to hold two
 batches); transitions with many taps (zoom blur, motion blur) are now the largest CPU cost of the
-frames they cover; GPU rendering (Auto) did not change the export's speed in a quick check and stays
-off by default.
+frames they cover; GPU rendering (Auto) did not change the export's speed in a quick check — the CLI
+built on its own had no wgpu backend, so Auto rendered on the CPU (fixed 2026-10-21, [gpu.md](gpu.md)).
 
 ## Results (HW3: VideoToolbox hardware H.265 (HEVC) encoding, against hardware H.264)
 

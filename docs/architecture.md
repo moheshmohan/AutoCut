@@ -66,11 +66,11 @@ and `filmcraft-cli`.
 | `audio-dsp` | L1 | loudness metering (BS.1770 / R128), audio effects, channel layouts (BS.775 up/downmix, 5.1 panner), music remix analysis; no dependencies |
 | `text` | L1 | text engine: font database (bundled OFL fonts + system fonts), shaping (harfrust), bidi, line breaking, paragraph layout, glyph/path rasteriser, strokes ([crates/text/README.md](../crates/text/README.md)) |
 | `edit` | L2 | pure edit algebra (insert, overwrite, razor, ripple, roll, slip, slide, rate stretch…; text-based editing: `edit::transcript`) |
-| `speech` | L2 | speech-to-text: `Transcriber` trait, Whisper model catalogue + verified downloader (feature `download`), pure-Rust Whisper inference on candle with word timestamps (feature `whisper`), speaker labelling ([transcripts.md](transcripts.md)) |
-| `tts` | L2 | text to speech: `Voice` trait, voice catalogue, pause markers, built-in formant voices; Kokoro-82M natural voices on candle and their pinned package catalogue (feature `kokoro`); cloned voices: OpenVoice V2 tone-colour conversion (feature `kokoro`) and VoxCPM zero-shot cloning on candle, Metal on macOS (feature `voxcpm`). Same-layer edge to `tts-text` |
+| `speech` | L2 | speech-to-text: `Transcriber` trait, Whisper model catalogue + verified downloader (feature `download`), pure-Rust Whisper inference on candle with word timestamps (feature `whisper`; Metal on macOS, the CPU as the fallback: [gpu.md](gpu.md)), speaker labelling ([transcripts.md](transcripts.md)) |
+| `tts` | L2 | text to speech: `Voice` trait, voice catalogue, pause markers, built-in formant voices; Kokoro-82M natural voices on candle and their pinned package catalogue (feature `kokoro`); cloned voices: OpenVoice V2 tone-colour conversion (feature `kokoro`) and VoxCPM zero-shot cloning on candle (feature `voxcpm`); all on Metal on macOS with the CPU as the fallback ([gpu.md](gpu.md)). Same-layer edge to `tts-text` |
 | `tts-text` | L2 | text front end for narration: normalizer (numbers, money, dates, acronyms, pauses) and English pronunciation (CMUdict + letter-to-sound) to Kokoro phonemes |
 | `soundfont` | L2 | SoundFont instruments for the procedural music: a structural check of `.sf2` files (every chunk, record list, zone and sample range in bounds, even sizes) in front of rustysynth (MIT, pure Rust; every call under `catch_unwind`), a General MIDI `InstrumentBank` level-matched to the oscillator voices with them as the fallback, and the GeneralUser GS download pin (never bundled) ([README](../crates/soundfont/README.md)) |
-| `vision` | L2 | privacy detection for the automatic blur (`clip.autoRedact`): the YuNet face (MIT) and LPD-YuNet plate (Apache-2.0) detector catalogue (pinned, SHA-256), a strict ONNX weight reader, output decoding and suppression, linking detections into smoothed tracks and the rules for which are hidden; (feature `model`) both networks on candle, checked layer by layer against the file ([README](../crates/vision/README.md)). Wasm builds compile it without the feature |
+| `vision` | L2 | privacy detection for the automatic blur (`clip.autoRedact`): the YuNet face (MIT) and LPD-YuNet plate (Apache-2.0) detector catalogue (pinned, SHA-256), a strict ONNX weight reader, output decoding and suppression, linking detections into smoothed tracks and the rules for which are hidden; (feature `model`) both networks on candle, checked layer by layer against the file, and on macOS on the GPU as fused WGSL passes (wgpu), the CPU as the fallback ([README](../crates/vision/README.md), [gpu.md](gpu.md)). Wasm builds compile it without the feature |
 | `acestep` | L2 | neural text to music: ACE-Step 1.5 (MIT) model catalogue (pinned, SHA-256), request checks and prompt layout; (feature `model`) the Qwen3 text encoder and byte-level BPE tokenizer, the turbo DiT, the 8-step flow-matching sampler and the Oobleck VAE on candle, Metal on macOS ([README](../crates/acestep/README.md)). Wasm builds compile it without the feature |
 | `codecs` | L2 | container + codec hub: MP4/MOV, MKV, MXF, Ogg and MPEG TS / PS / video elementary stream sources, GOP-aware seeking, decoder registry, audio decoding |
 | `interchange` | L2 | EDL, FCP7 XML, FCPXML, OTIO, AAF (on `cfb`) and OMF 2.0 import/export (no file I/O; the engine supplies rendered audio essence) ([README](../crates/interchange/README.md)) |
@@ -325,7 +325,9 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   the effects' parameters evaluated at that time: the source is drawn into an `Rgba32Float`
   working image at the size the CPU decodes it, each effect runs as compute passes with the CPU
   reference's math (effects, then Motion, then Opacity / blend, as on the CPU), and the result is
-  placed like any layer. Other standard effects, effect and opacity masks, adjustment layers,
+  placed like any layer. An effect with masks runs there too (the effect, then the mix with the
+  original by the masks' coverage, computed in WGSL with the CPU's math), and so do opacity masks
+  (`FxOp::Masked`, `FxOp::OpacityMask`). Other standard effects, adjustment layers,
   nested sequences (except a plain one, whose own layers go into the plan: same frame size and
   colour settings as its parent, nothing on the clip that changes the picture, every layer inside
   blended normally) and transitions other than dissolves, dips, Push and the GL Transitions are
@@ -342,7 +344,12 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   are planned as two-input steps, also inside a plain nested sequence: each side is drawn into
   its own image on the GPU and one fragment pass combines them. The GPU export renderer draws them with the same stages,
   so an export matches the Program monitor (a transition the device cannot draw sends that frame
-  to the CPU reference). Their easing is applied to the progress on the CPU at the exact frame
+  to the CPU reference). A cross dissolve is drawn as clip A with clip B over it at the progress
+  only where that is the CPU's linear mix (B an opaque media clip filling the frame); between
+  clips that do not fill the frame it is a two-input step mixed like the CPU. What GPU plans
+  leave to the CPU is counted by reason (`perf.stats` `export.gpu.cpuWork`), and export
+  rendering is on the GPU by default (`GpuRendering::Auto`); [gpu.md](gpu.md) lists what runs
+  where. The transitions' easing is applied to the progress on the CPU at the exact frame
   time, so both paths see the same value. Setting `FILMCRAFT_CPU_COMPOSITE=1`
   forces the CPU path in the desktop app.
 - **CPU compositor shortcuts.** The CPU compositor, which is what export runs, works on
@@ -840,5 +847,6 @@ native menus) in `apps/filmcraft`. [roadmap.md](roadmap.md) has the milestone st
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-21 | minor | GPU by default (`gpu.md`): export rendering Auto, masked effects and opacity masks on the GPU, dissolves of clips that do not fill the frame mixed like the CPU, `cpuWork` counters; speech, tts and vision on the GPU on macOS |
 | 2026-10-21 | minor | §5.1 Speed and pitch: Maintain Audio Pitch (WSOLA time stretch in render::audio) |
 | 2026-10-10 | trivial | Status line and revision history added (craftrules progress-docs standard); milestone link points at docs/roadmap.md |

@@ -11,18 +11,18 @@ build = "build.rs"
 workspace = true
 
 [features]
-# AutoCut build: speech-to-text (Text panel ▸ Transcribe) with Whisper on the CPU, and model
+# AutoCut build: speech-to-text (Text panel ▸ Transcribe) with Whisper, and model
 # downloads, on by default so transcript-driven automation works out of the box (upstream
 # leaves them off in release builds).
 default = ["whisper", "neural-voices", "neural-music", "privacy-models"]
-# Speech-to-text (Text panel ▸ Transcribe) with Whisper on the CPU, and model downloads.
+# Speech-to-text (Text panel ▸ Transcribe) with Whisper (Metal on macOS, else the CPU), and model downloads.
 whisper = ["filmcraft-engine/whisper", "filmcraft-engine/speech-download"]
-# Natural Text to Speech voices (Kokoro-82M on the CPU, downloaded on first use).
+# Natural Text to Speech voices (Kokoro-82M; Metal on macOS, else the CPU; downloaded on first use).
 neural-voices = ["filmcraft-engine/neural-voices"]
 # Neural text to music (ACE-Step 1.5 on candle, Metal on macOS; the model downloads on demand with consent).
 neural-music = ["filmcraft-engine/neural-music"]
 # Automatic privacy blur (Clip ▸ Auto Redact Faces and Plates…): the YuNet and LPD-YuNet detectors
-# on candle (CPU; 4.4 MB, downloaded on demand with consent).
+# (the GPU on macOS, else the CPU; 4.4 MB, downloaded on demand with consent).
 privacy-models = ["filmcraft-engine/privacy-models"]
 
 [dependencies]

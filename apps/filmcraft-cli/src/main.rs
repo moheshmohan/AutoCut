@@ -97,7 +97,9 @@ SUBCOMMANDS
                                 from the extension); --range entire|inOut|workArea, or a custom
                                 range in seconds; --settings is ExportSettings JSON merged over the
                                 preset; --scale renders at a fraction of the frame size (0.5 =
-                                half); --quality 0-100 for the formats that take one; --no-audio
+                                half); --quality 0-100 for the formats that take one;
+                                --gpu-rendering off composites on the CPU (auto, the default, on
+                                the GPU where there is one); --no-audio
                                 leaves the sound out; --queue adds to the export queue and runs it
                                 instead. Offline media (missing, made offline, unreadable) renders
                                 as placeholder frames: the export then lists it in `offlineMedia`,
