@@ -4,7 +4,7 @@
 //! | command | does |
 //! |---|---|
 //! | `voice.findReferences` | scan clips (files, folders, `.fcproj` projects' media) for speech by the voice's speaker (tone-colour similarity to its reference) and rank stretches as references per engine: VoxCPM (English, 10–30 s) and IndicF5 (Malayalam, 6–12 s), on similarity, signal quality, whole sentences, length and language; writes `refs.json` and the candidates' WAVs. A background job (`wait: true` runs it now) |
-//! | `voice.audition` | the current reference and the best candidates of a `refs.json` (and two variants: two references joined, one lightly cleaned) speak a fixed test set; every reading is scored on speaker similarity against held-out genuine speech, on what a speech model hears (CER, sentence-start CER) and on artefacts; writes `audition.json`, the readings (WAV and M4A) and `README.txt` |
+//! | `voice.audition` | the current reference and the best candidates of a `refs.json` (and two variants: two references joined, one lightly cleaned) speak a fixed test set, `takes` readings of each line (the same seeds for every reference); every reading is scored on speaker similarity against held-out genuine speech, on what a speech model hears (CER, sentence-start CER) and on artefacts; writes `audition.json`, the readings (WAV and M4A) and `README.txt` |
 //! | `voice.promote` | make an auditioned (or found) reference the voice's: its sample (`voxcpm`) or its Malayalam reference (`indicf5`, with the clip's words: the speech model's, or `transcript`), from the original recording at full band; the old one is kept as a version; consent carries over (same speaker, checked) |
 //! | `voice.versions` / `voice.rollback` | the references a voice had, and going back to one |
 //! | `voice.mixCheck` | how far a mix chain (the showcase's narration chain) moves a voice: speaker similarity of readings and of genuine speech before and after it, and the voice's balance for small speakers |
@@ -33,7 +33,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "voice.audition",
             "Audition Voice References",
-            r#"{"voice":"clone:…","report":"<dir>/refs.json","out":dir?,"top":3?,"engines":["voxcpm","indicf5"]?,"variants":bool?,"m4a":bool?,"wait":bool?}"#,
+            r#"{"voice":"clone:…","report":"<dir>/refs.json","out":dir?,"top":3?,"takes":1..5?,"engines":["voxcpm","indicf5"]?,"variants":bool?,"m4a":bool?,"wait":bool?}"#,
             audition,
         ),
         spec(
@@ -163,6 +163,7 @@ struct AuditionParams {
     report: String,
     out: Option<String>,
     top: usize,
+    takes: u32,
     engines: Vec<String>,
     variants: bool,
     m4a: bool,
@@ -193,6 +194,7 @@ fn audition_params(p: &Value) -> Result<AuditionParams> {
         report,
         out: str_p(p, "out").map(str::to_string),
         top: num_p(cmd, p, "top", 3.0, (1.0, 10.0))? as usize,
+        takes: num_p(cmd, p, "takes", 2.0, (1.0, 5.0))? as u32,
         engines,
         variants: flag("variants", true)?,
         m4a: flag("m4a", true)?,

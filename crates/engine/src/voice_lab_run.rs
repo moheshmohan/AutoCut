@@ -744,7 +744,7 @@ pub(super) fn audition(ap: &AuditionParams, media: &MediaPool, services: &dyn Se
                 return Err("cancelled".into());
             }
             status(prog, &format!("{}: {} ({})", target.id(), e.id, e.source));
-            let r = audition_one(e, target, &n, gender, &models, &ap.voice, &profile, media, services, &mut ears, &pool, &out, ap.m4a, prog);
+            let r = audition_one(e, target, &n, gender, &models, &ap.voice, &profile, media, services, &mut ears, &pool, &out, ap.m4a, ap.takes, prog);
             match r {
                 Ok((s, files)) => {
                     let mut extra = entry_json(e);
@@ -810,6 +810,7 @@ pub(super) fn audition(ap: &AuditionParams, media: &MediaPool, services: &dyn Se
         "refs": ap.report,
         "pool": pool,
         "lines": {"voxcpm": au::ENGLISH, "indicf5": au::MALAYALAM},
+        "takes": ap.takes,
         "best": best,
         "entries": entries,
         "notes": notes,
@@ -836,6 +837,7 @@ fn audition_one(
     pool: &au::Pool,
     out: &Path,
     m4a: bool,
+    readings: u32,
     prog: &filmcraft_export::Progress,
 ) -> R<(au::Scored, Value)> {
     // the reference, and the voice speaking from it
@@ -880,30 +882,39 @@ fn audition_one(
     let reference_similarity = vl::cosine(&ears.speech_colour(&reference, RATE)?, &pool.colour);
     // speak every line first (the voice takes the GPU per line), then hear them
     let lines = au::lines(target);
-    let mut spoken: Vec<filmcraft_tts::Audio> = Vec::new();
-    for (k, line) in lines.iter().enumerate() {
-        if cancelled(prog) {
-            return Err("cancelled".into());
+    let mut spoken: Vec<(usize, u32, filmcraft_tts::Audio)> = Vec::new();
+    for take in 0..readings.max(1) {
+        for (k, line) in lines.iter().enumerate() {
+            if cancelled(prog) {
+                return Err("cancelled".into());
+            }
+            status(prog, &format!("{}: {} line {} take {}", target.id(), e.id, k + 1, take + 1));
+            let params = Params { take, ..Params::default() };
+            spoken.push((k, take, voice.synthesize(line, &params).map_err(|e| e.to_string())?));
         }
-        status(prog, &format!("{}: {} line {}", target.id(), e.id, k + 1));
-        spoken.push(voice.synthesize(line, &Params::default()).map_err(|e| e.to_string())?);
     }
     drop(voice);
     let _gpu = if target == Target::Indicf5 { gpu("voice lab: hearing the Malayalam auditions")? } else { None };
     let mut takes = Vec::new();
     let mut joined: Vec<f32> = Vec::new();
     let mut joined_rate = 0u32;
-    for (k, (line, a)) in lines.iter().zip(&spoken).enumerate() {
+    for (k, take, a) in &spoken {
+        let line = lines.get(*k).copied().unwrap_or("");
         let heard = match target {
             Target::Voxcpm => ears.hear_en(&a.samples, a.sample_rate)?,
             Target::Indicf5 => ears.hear_ml(&a.samples, a.sample_rate)?,
         };
         let colour = ears.speech_colour(&a.samples, a.sample_rate)?;
         let mut t = au::take(k + 1, line, &heard, &a.samples, a.sample_rate, &colour, pool);
-        let wav = dir.join(format!("line{}.wav", k + 1));
+        t.take = *take;
+        let wav = dir.join(format!("line{}-take{}.wav", k + 1, take + 1));
         filmcraft_tts::wav::write(&wav, &a.samples, a.sample_rate).map_err(|e| e.to_string())?;
         t.file = wav.to_string_lossy().into_owned();
         takes.push(t);
+        // the set to listen to: every line's first reading
+        if *take > 0 {
+            continue;
+        }
         if joined_rate == 0 {
             joined_rate = a.sample_rate;
         }
@@ -941,7 +952,11 @@ fn audition_one(
 fn readme(v: &Value) -> String {
     let mut s = String::new();
     s.push_str(&format!("Voice auditions for {}\n\n", v["voice"].as_str().unwrap_or("")));
-    s.push_str("Each reference read the same test lines (English for VoxCPM, Malayalam for IndicF5).\n");
+    s.push_str(&format!(
+        "Each reference read the same test lines (English for VoxCPM, Malayalam for IndicF5), {} reading(s) of each; the numbers are means over them,\n",
+        v["takes"]
+    ));
+    s.push_str("and the files to listen to (readings) are every line's first reading.\n");
     s.push_str("Similarity is to held-out genuine speech of the speaker (OpenVoice tone colour, 1 = same);\n");
     s.push_str("CER is what the speech model heard against the line; start CER the first syllables of each sentence.\n\n");
     for t in Target::ALL {

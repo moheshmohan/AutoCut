@@ -10,7 +10,7 @@ use crate::{Backend, absolute, diag, fail, print, usage};
 const USAGE: &str = "\
 voice refs --voice clone:<name> <media|folder|project.fcproj>… [--out DIR] [--max-minutes M] [--max-clip-seconds S]
            [--max-files N] [--min-similarity X] [--top N] [--per-clip N] [--held-out-seconds S]
-voice audition --voice clone:<name> --report <refs.json> [--out DIR] [--top K] [--engines voxcpm,indicf5] [--no-variants] [--no-m4a]
+voice audition --voice clone:<name> --report <refs.json> [--out DIR] [--top K] [--takes N] [--engines voxcpm,indicf5] [--no-variants] [--no-m4a]
 voice promote --voice clone:<name> --report <audition.json|refs.json> <candidate id> [--transcript \"exact words\"] [--min-similarity X]
 voice versions --voice clone:<name>
 voice rollback --voice clone:<name> <version (r0, r1, …)>
@@ -113,6 +113,9 @@ pub async fn run(a: &Args) {
             let mut p = json!({"voice": voice(), "report": absolute(report), "wait": wait, "variants": !a.flag("--no-variants"), "m4a": !a.flag("--no-m4a")});
             if let Some(v) = num(a, "--top") {
                 p["top"] = json!(v);
+            }
+            if let Some(v) = num(a, "--takes") {
+                p["takes"] = json!(v);
             }
             if let Some(e) = a.opt("--engines") {
                 p["engines"] = json!(e.split(',').map(str::trim).filter(|x| !x.is_empty()).collect::<Vec<_>>());

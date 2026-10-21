@@ -24,6 +24,8 @@ fn hostile_voice_lab_parameters_are_refused() {
         ("voice.audition", json!({"voice": "clone:me", "report": "/x", "engines": ["kokoro"]})),
         ("voice.audition", json!({"voice": "clone:me", "report": "/x", "engines": []})),
         ("voice.audition", json!({"voice": "clone:me", "report": "/x", "top": 99})),
+        ("voice.audition", json!({"voice": "clone:me", "report": "/x", "takes": 0})),
+        ("voice.audition", json!({"voice": "clone:me", "report": "/x", "takes": 50})),
         ("voice.audition", json!({"voice": "clone:me", "report": "/x", "variants": "yes"})),
         ("voice.promote", json!({"voice": "clone:me", "report": "/x"})),
         ("voice.promote", json!({"voice": "clone:me", "candidate": "voxcpm-1"})),
