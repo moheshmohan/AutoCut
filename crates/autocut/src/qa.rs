@@ -12,6 +12,7 @@
 //! |---|---|
 //! | `joins` | on the picture track (V2): gaps of a frame or more, gaps that hold a frame boundary (that frame renders black) and overlaps (errors), clips that do not quite touch (warnings); on the shots' sound track (A1): neighbours that do not touch, so their fades meet silence instead of crossfading (warnings; not across a photo, which is silent on purpose); time where no video track has a clip (errors; a picture that ends before the sound: info) |
 //! | `black` | rendered frames whose picture is black or nearly (92 % of the frame darker than 5 % luma, so a counter or lower third over black still counts) — sampled every 2 s, at each picture clip's first frame and at the first frame after it — outside dips to black (errors) |
+//! | `sides` | rendered frames where a side of the frame — the left or right pillar, the bar above or below — is black while the picture in the middle still shows ([`black_sides`]): sampled around every transition (its first frames, either side of the cut, its last frames; over a dip its first and last quarters) and at the first and last frame of each picture shown whole over a blurred copy (the showcase's `fit: "full"`, a clip over Auto Reframe's Blur Fill track); flagged only where that side shows something in the frame just before or after the transition or in the middle of the picture shown whole, so letterboxing kept on purpose is not one (errors, with the time and the side) |
 //! | `mix` | the mix exported as 32-bit float WAV and metered (BS.1770): integrated loudness outside −16…−14 LUFS (±0.5 LU) and true peak above −1 dBTP (warnings); true peak above 0 dBTP or samples at full scale: clipping (error); the median short-term loudness during narration clips (A2) vs between them: the voice less than 4 dB louder (warning), or not louder at all (error); and per stem (`audio.analyzeMix`, [`mix_findings`]), for small speakers: the narration less than 12 LU above the music while it speaks, the Mix's limiter taking more than 2 dB off the peaks, more than a quarter of the mix's energy below 120 Hz, a narration clip with a clipped source (warnings) |
 //! | `subject` | shots where the grounding model (`AUTOCUT_ANALYSIS_MODEL`, the analysis' prompt) does not find the subject in a rendered frame (warnings); skipped when no model is reachable |
 //! | `privacy` | from what the privacy pass hid ([`Options::privacy`]): a redaction mask covering more than [`Options::max_mask`] (a fifth) of a clip's picture at any keyframe (warnings: a blur that size hides the shot, as one on a close-up of a tablet did); the faces, plates and named places hidden in each entry (`privacy` in the report) |
@@ -166,7 +167,7 @@ pub enum Severity {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
-    /// `joins`, `black`, `mix`, `subject`, `privacy`, `safe_zones` or `sequence`.
+    /// `joins`, `black`, `sides`, `mix`, `subject`, `privacy`, `safe_zones` or `sequence`.
     pub check: &'static str,
     pub severity: Severity,
     /// Where, in seconds of the sequence.
@@ -357,12 +358,24 @@ struct Clip {
     enabled: bool,
 }
 
+/// A transition: its span (ticks), the clips it goes from and to, and its effect.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Trans {
+    start: i64,
+    end: i64,
+    from: Option<u64>,
+    to: Option<u64>,
+    effect: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Track {
+    name: String,
     enabled: bool,
     clips: Vec<Clip>,
     /// Dip-to-black transitions, ticks.
     dips: Vec<(i64, i64)>,
+    transitions: Vec<Trans>,
 }
 
 /// What QA needs of `sequence.inspect`, in ticks; hostile values are dropped or replaced.
@@ -421,7 +434,32 @@ fn parse(v: &Value) -> Seq {
                     .collect()
             })
             .unwrap_or_default();
-        Track { enabled: t["enabled"].as_bool().unwrap_or(true), clips, dips }
+        let mut transitions: Vec<Trans> = t["transitions"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .take(MAX_CLIPS)
+                    .filter_map(|x| {
+                        let start = x["start"].as_i64()?;
+                        Some(Trans {
+                            start,
+                            end: start.checked_add(x["duration"].as_i64()?.max(0))?,
+                            from: x["from"].as_u64(),
+                            to: x["to"].as_u64(),
+                            effect: x["effect"].as_str().unwrap_or("transition").chars().take(60).collect(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        transitions.sort_by_key(|x| (x.start, x.end));
+        Track {
+            name: t["name"].as_str().unwrap_or_default().chars().take(200).collect(),
+            enabled: t["enabled"].as_bool().unwrap_or(true),
+            clips,
+            dips,
+            transitions,
+        }
     };
     let tracks = |k: &str| v[k].as_array().map(|a| a.iter().take(MAX_TRACKS).map(track).collect()).unwrap_or_default();
     Seq {
@@ -743,6 +781,365 @@ async fn black(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport, p
         r.findings.push(f.clip(clip_at(seq, opts, ta).map(|c| c.id)));
     }
     Check::ran(name, &r.findings, Some(format!("{rendered} frames rendered")))
+}
+
+// ------------------------------------------------------------------ black sides
+
+/// A side of the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Side {
+    const ALL: [Side; 4] = [Side::Left, Side::Right, Side::Top, Side::Bottom];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Side::Left => "left",
+            Side::Right => "right",
+            Side::Top => "top",
+            Side::Bottom => "bottom",
+        }
+    }
+}
+
+/// How dark the band along one side of a frame is: the share of the darker of its two halves
+/// that is black ([`SIDE_DARK`]), the share of the whole band, and its mean luma (0..1).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Band {
+    pub half: f64,
+    pub dark: f64,
+    pub luma: f64,
+}
+
+/// What the sides check sees of a frame ([`bands`]): the band along each side (left, right, top,
+/// bottom), and the mean luma of the frame's centre and the share of it that is black.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bands {
+    pub sides: [Band; 4],
+    pub centre: f64,
+    pub centre_dark: f64,
+}
+
+impl Bands {
+    pub fn side(&self, s: Side) -> Band {
+        self.sides.get(s as usize).copied().unwrap_or_default()
+    }
+}
+
+/// The bands the sides check looks at, as shares of the frame `[x0, x1, y0, y1]`, in the order of
+/// [`Side::ALL`]: the outer 8 % of the frame on each side — wholly inside the pillars beside a
+/// portrait or 4:3 picture in a 16:9 frame, or the bars above and below a 16:9 picture in a
+/// vertical one — the left and right over rows 15–70 % (clear of a counter, a name lower third,
+/// captions), the top and bottom over columns 10–90 %; each in two halves along its length (a
+/// whip or a push can black out half of one). And the centre: the middle fifth.
+const SIDE_BANDS: [[[f64; 4]; 2]; 4] = [
+    [[0.0, 0.08, 0.15, 0.425], [0.0, 0.08, 0.425, 0.70]],
+    [[0.92, 1.0, 0.15, 0.425], [0.92, 1.0, 0.425, 0.70]],
+    [[0.10, 0.50, 0.0, 0.08], [0.50, 0.90, 0.0, 0.08]],
+    [[0.10, 0.50, 0.92, 1.0], [0.50, 0.90, 0.92, 1.0]],
+];
+const CENTRE: [f64; 4] = [0.4, 0.6, 0.4, 0.6];
+/// A pixel at the side of the frame is black below this luma: nothing drawn there (the frame's
+/// black, or a dip's colour) is black to within a few levels, while a dimmed, blurred copy of a
+/// dark picture is not.
+const SIDE_DARK: f64 = 0.015;
+/// A side is black when this share of one half of its band is black.
+const SIDE_BLACK: f64 = 0.85;
+/// In a frame it is compared with, a side shows something when less than this share of its band
+/// is black and its mean luma is at least [`SIDE_LIT_LUMA`] (a fill too dim to tell from black
+/// is no reference).
+const SIDE_LIT: f64 = 0.5;
+const SIDE_LIT_LUMA: f64 = 3.0 * SIDE_DARK;
+/// The picture still shows when the frame's centre is at least this share as bright as in the
+/// frame it is compared with (and not dark: over a dip the sides may go dark with the picture),
+/// and less than [`CENTRE_BLACK`] of it is black (a title or a year card over black is not a
+/// picture).
+const CENTRE_SHOWN: f64 = 0.5;
+const CENTRE_BLACK: f64 = 0.25;
+
+/// The bands of a rendered frame (PNG) for the sides check; None when it does not decode or is
+/// too small to have them.
+pub fn bands(png: &[u8]) -> Option<Bands> {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgb8();
+    let (w, h) = img.dimensions();
+    if w < 16 || h < 16 {
+        return None;
+    }
+    // (dark pixels, pixels, luma sum) of a region given in shares of the frame
+    let region = |[x0, x1, y0, y1]: [f64; 4]| {
+        let at = |a: f64, n: u32| ((a * f64::from(n)).round() as u32).min(n);
+        let (xa, ya) = (at(x0, w).min(w - 1), at(y0, h).min(h - 1));
+        let (xb, yb) = (at(x1, w).max(xa + 1), at(y1, h).max(ya + 1));
+        let (mut dark, mut n, mut sum) = (0usize, 0usize, 0f64);
+        for y in ya..yb {
+            for x in xa..xb {
+                let Some(p) = img.get_pixel_checked(x, y) else { continue };
+                let [r, g, b] = p.0;
+                let l = (0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)) / 255.0;
+                n += 1;
+                sum += l;
+                dark += usize::from(l < SIDE_DARK);
+            }
+        }
+        (dark, n, sum)
+    };
+    let share = |(d, n, _): (usize, usize, f64)| d as f64 / n.max(1) as f64;
+    let mut sides = [Band::default(); 4];
+    for (band, [a, b]) in sides.iter_mut().zip(SIDE_BANDS) {
+        let (a, b) = (region(a), region(b));
+        let n = a.1.saturating_add(b.1).max(1) as f64;
+        *band = Band { half: share(a).max(share(b)), dark: a.0.saturating_add(b.0) as f64 / n, luma: (a.2 + b.2) / n };
+    }
+    let c = region(CENTRE);
+    Some(Bands { sides, centre: c.2 / c.1.max(1) as f64, centre_dark: share(c) })
+}
+
+/// The sides black in `frame` while its centre still shows a picture, of those that show
+/// something in one of the frames it is compared with (`refs`: the frame just before or after
+/// the transition, the middle of the picture shown whole) while the centre there is not much
+/// brighter: black only around a transition, or where the pillars or the blur fill should be. A
+/// side black in every frame it is compared with (letterboxing kept on purpose) is not one, nor
+/// a side that darkens with the picture (a dip).
+pub fn black_sides(frame: &Bands, refs: &[Bands]) -> Vec<Side> {
+    Side::ALL
+        .into_iter()
+        .filter(|s| {
+            frame.side(*s).half >= SIDE_BLACK
+                && frame.centre_dark < CENTRE_BLACK
+                && refs.iter().any(|r| {
+                    let b = r.side(*s);
+                    b.dark < SIDE_LIT && b.luma >= SIDE_LIT_LUMA && frame.centre >= SIDE_LIT_LUMA.max(CENTRE_SHOWN * r.centre)
+                })
+        })
+        .collect()
+}
+
+/// A picture shown whole over a blurred copy — a showcase shot with `fit: "full"`, or a clip over
+/// Auto Reframe's Blur Fill track: the picture's and its copy's clips, its name and span (ticks),
+/// and the frame where its copy surely shows (the middle of where it is under the picture).
+#[derive(Clone, Debug, PartialEq)]
+struct Whole {
+    clips: Vec<u64>,
+    name: String,
+    start: i64,
+    end: i64,
+    mid: i64,
+}
+
+/// The pictures shown whole: the entries' shots with a blurred copy, and the clips over a
+/// [`filmcraft_engine::reframe::BLUR_FILL_TRACK`] (the track directly above it), where a copy is
+/// under them.
+fn shown_whole(seq: &Seq, opts: &Options) -> Vec<Whole> {
+    let tick = |s: f64| (s.is_finite() && s.abs() < 1e7).then(|| (s * TPS_F).round() as i64);
+    let middle = |a: i64, b: i64| i64::try_from((i128::from(a) + i128::from(b)) / 2).unwrap_or(a);
+    let mut out = Vec::new();
+    for e in &opts.entries {
+        for s in e.shots.iter().filter(|s| s.background.is_some()) {
+            let (Some(a), Some(b)) = (tick(s.start), tick(s.end)) else { continue };
+            if b > a {
+                out.push(Whole {
+                    clips: [Some(s.clip), s.background].into_iter().flatten().collect(),
+                    name: e.label.clone(),
+                    start: a,
+                    end: b,
+                    mid: seq.frame_floor(middle(a, b)),
+                });
+            }
+        }
+    }
+    for (i, fills) in seq.video.iter().enumerate().filter(|(_, t)| t.enabled && t.name == filmcraft_engine::reframe::BLUR_FILL_TRACK) {
+        let Some(above) = seq.video.get(i.saturating_add(1)) else { continue };
+        for f in fills.clips.iter().filter(|c| c.enabled && c.end > c.start) {
+            for p in above.clips.iter().filter(|p| p.enabled && p.start < f.end && f.start < p.end) {
+                let (a, b) = (p.start.max(f.start), p.end.min(f.end));
+                out.push(Whole { clips: vec![p.id, f.id], name: p.name.clone(), start: p.start, end: p.end, mid: seq.frame_floor(middle(a, b)) });
+            }
+        }
+    }
+    out.truncate(MAX_SHOTS);
+    out
+}
+
+/// A frame the sides check looks at: the frames it is compared with ([`black_sides`]), where it
+/// is (for the finding), the clip showing there, and its group — the transition or picture it
+/// is at: one finding per group.
+#[derive(Clone, Debug, PartialEq)]
+struct Probe {
+    frame: i64,
+    refs: Vec<i64>,
+    group: usize,
+    what: String,
+    clip: Option<u64>,
+}
+
+/// The frames the sides check looks at: around every transition on an enabled video track —
+/// its first two frames, the middle of each half, either side of the cut, its last two — each
+/// compared with the frame just before the transition (before the cut) or just after it (after
+/// the cut), and with the middle of the picture shown whole on that side of the cut if it is one
+/// (over a dip, only its first and last quarters, where the picture is at least half shown);
+/// and the first and last frame of every picture shown whole, compared with its middle. Within
+/// [`Options::max_frames`] frames rendered.
+fn side_probes(seq: &Seq, opts: &Options, whole: &[Whole]) -> Vec<Probe> {
+    let last = seq.frame_ceil(seq.picture().last().map_or(0, |s| s.1)); // frames 0..last show picture
+    let whole_of = |c: Option<u64>| c.and_then(|c| whole.iter().find(|w| w.clips.contains(&c)));
+    let mut probes = Vec::new();
+    let mut group = 0usize;
+    for t in seq.video.iter().filter(|t| t.enabled) {
+        let clip = |c: Option<u64>| c.and_then(|c| t.clips.iter().find(|x| x.id == c));
+        let name = |c: Option<u64>| clip(c).map(|x| format!("“{}”", x.name));
+        for x in &t.transitions {
+            let (ks, ke) = (seq.frame_ceil(x.start), seq.frame_ceil(x.end).min(last));
+            if ke <= ks {
+                continue;
+            }
+            // the cut: where the clip it goes from ends, else where the one it goes to starts
+            let cut = clip(x.from).map(|c| c.end).or_else(|| clip(x.to).map(|c| c.start)).unwrap_or(x.start / 2 + x.end / 2);
+            let kc = seq.frame_ceil(cut).max(ks).min(ke);
+            let what = match (name(x.from), name(x.to)) {
+                (Some(a), Some(b)) => format!("in the {} from {a} into {b}", x.effect),
+                (Some(a), None) => format!("in the {} out of {a}", x.effect),
+                (None, Some(b)) => format!("in the {} into {b}", x.effect),
+                (None, None) => format!("in a {}", x.effect),
+            };
+            let mut frames = vec![
+                ks,
+                ks.saturating_add(1),
+                ks + (kc - ks) / 2,
+                kc.saturating_sub(1),
+                kc,
+                kc.saturating_add(1),
+                kc + (ke - kc) / 2,
+                ke.saturating_sub(2),
+                ke.saturating_sub(1),
+            ];
+            frames.retain(|k| (ks..ke).contains(k));
+            // over a dip, only where the picture is at least half shown (its first and last
+            // quarters): nearer its middle a dark part of the picture is black too
+            if x.effect.starts_with("dip_to") {
+                let d = i128::from(x.end) - i128::from(x.start);
+                frames.retain(|k| {
+                    let t = i128::from(seq.frame_tick(*k));
+                    4 * (t - i128::from(x.start)) <= d || 4 * (i128::from(x.end) - t) <= d
+                });
+            }
+            frames.sort_unstable();
+            frames.dedup();
+            for k in frames {
+                let (near, shown, c) = if k < kc {
+                    (ks.checked_sub(1).filter(|k| *k >= 0), whole_of(x.from), x.from)
+                } else {
+                    (Some(ke).filter(|k| *k < last), whole_of(x.to), x.to)
+                };
+                let refs = near.into_iter().chain(shown.map(|w| w.mid)).collect();
+                probes.push(Probe { frame: k, refs, group, what: what.clone(), clip: c });
+            }
+            group = group.saturating_add(1);
+        }
+    }
+    for w in whole {
+        let (first, end) = (seq.frame_ceil(w.start), seq.frame_ceil(w.end).min(last));
+        for (k, which) in [(first, "first"), (end.saturating_sub(1), "last")] {
+            if (first..end).contains(&k) && k != w.mid {
+                let what = format!("at the {which} frame of “{}”, shown whole", w.name);
+                probes.push(Probe { frame: k, refs: vec![w.mid], group, what, clip: w.clips.first().copied() });
+                group = group.saturating_add(1);
+            }
+        }
+    }
+    // within the budget, references included
+    let mut frames = std::collections::BTreeSet::new();
+    let budget = opts.max_frames.max(1);
+    probes
+        .into_iter()
+        .take_while(|p| {
+            frames.insert(p.frame);
+            frames.extend(p.refs.iter().copied());
+            frames.len() <= budget
+        })
+        .collect()
+}
+
+async fn sides(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport, progress: &mut dyn FnMut(&str)) -> Check {
+    let name = "sides";
+    let whole = shown_whole(seq, opts);
+    let probes = side_probes(seq, opts, &whole);
+    if probes.is_empty() {
+        return Check::skipped(name, "no transitions and no picture shown whole");
+    }
+    let frames: std::collections::BTreeSet<i64> = probes.iter().flat_map(|p| std::iter::once(p.frame).chain(p.refs.iter().copied())).collect();
+    progress(&format!("rendering {} frames around transitions", frames.len()));
+    let mut seen: std::collections::BTreeMap<i64, Bands> = std::collections::BTreeMap::new();
+    let mut rendered = 0usize;
+    for k in frames {
+        if let Some(png) = ex.render(secs(seq.frame_tick(k)), opts.frame_side).await {
+            rendered += 1;
+            if let Some(b) = bands(&png) {
+                seen.insert(k, b);
+            }
+        }
+    }
+    r.frames_rendered += rendered;
+    if rendered == 0 {
+        return Check::skipped(name, "this backend renders no frames");
+    }
+    // per group, the probes where each side is black
+    let mut flagged: std::collections::BTreeMap<usize, std::collections::BTreeMap<Side, Vec<&Probe>>> = std::collections::BTreeMap::new();
+    for p in &probes {
+        let Some(b) = seen.get(&p.frame) else { continue };
+        let refs: Vec<Bands> = p.refs.iter().filter_map(|k| seen.get(k).copied()).collect();
+        for s in black_sides(b, &refs) {
+            flagged.entry(p.group).or_default().entry(s).or_default().push(p);
+        }
+    }
+    let fd = 1.0 / seq.fps();
+    let groups = flagged.len();
+    for by_side in flagged.into_values() {
+        // sides black on the same frames are one finding ("the left and right sides")
+        let mut runs: Vec<(Vec<Side>, Vec<&Probe>)> = Vec::new();
+        for (side, ps) in by_side {
+            match runs.iter_mut().find(|(_, q)| q.iter().map(|p| p.frame).eq(ps.iter().map(|p| p.frame))) {
+                Some((sides, _)) => sides.push(side),
+                None => runs.push((vec![side], ps)),
+            }
+        }
+        for (sides, ps) in runs {
+            let (Some(a), Some(b)) = (ps.first(), ps.last()) else { continue };
+            let names: Vec<&str> = sides.iter().map(|s| s.name()).collect();
+            let which = match names.as_slice() {
+                [one] => format!("the {one} side is"),
+                [rest @ .., last] => format!("the {} and {last} sides are", rest.join(", ")),
+                [] => continue,
+            };
+            let (ta, tb) = (secs(seq.frame_tick(a.frame)), secs(seq.frame_tick(b.frame)));
+            let f = if a.frame == b.frame {
+                Finding::new(name, Severity::Error, ta, format!("{which} black at {} (frame {}) while the picture shows, {}", stamp(ta), a.frame, a.what))
+            } else {
+                Finding::new(
+                    name,
+                    Severity::Error,
+                    ta,
+                    format!(
+                        "{which} black from {} to {} ({} sampled frames, {}–{}) while the picture shows, {}",
+                        stamp(ta),
+                        stamp(tb + fd),
+                        ps.len(),
+                        a.frame,
+                        b.frame,
+                        a.what
+                    ),
+                )
+                .until(tb + fd)
+            };
+            r.findings.push(f.clip(a.clip));
+        }
+    }
+    let note = format!("{rendered} frames rendered around transitions and {} picture(s) shown whole; {groups} place(s) with black sides", whole.len());
+    Check::ran(name, &r.findings, Some(note))
 }
 
 // ------------------------------------------------------------------ the subject, the sheet
@@ -1421,6 +1818,9 @@ pub async fn check(ex: &dyn Executor, opts: &Options, model: Option<&dyn ChatMod
     progress("QA: black frames");
     let c = black(ex, &seq, opts, &mut r, progress).await;
     r.checks.push(c);
+    progress("QA: black sides");
+    let c = sides(ex, &seq, opts, &mut r, progress).await;
+    r.checks.push(c);
     progress("QA: subject and contact sheet");
     let (c, tiles) = subject(ex, &seq, opts, model, &mut r, progress).await;
     r.checks.push(c);
@@ -1558,6 +1958,109 @@ mod tests {
         assert_eq!(is_black(&png(64, 36, |_, _| [40, 40, 40])), Some(false), "a dim shot");
         assert_eq!(is_black(&png(64, 36, |x, y| if (x + y) % 3 == 0 { [90, 90, 90] } else { [5, 5, 5] })), Some(false), "a dark, textured shot");
         assert_eq!(is_black(b"not a png"), None);
+    }
+
+    #[test]
+    fn black_sides_are_told_from_letterboxing() {
+        // a portrait picture in a 16:9 frame: its middle third lit, the pillars lit or black
+        let wide = |pillars: u8, picture: u8| bands(&png(160, 90, |x, _| if (53..107).contains(&x) { [picture; 3] } else { [pillars; 3] })).unwrap();
+        let (filled, black) = (wide(90, 200), wide(0, 200));
+        assert!(filled.side(Side::Left).dark < 0.01 && black.side(Side::Left).half > 0.99 && black.side(Side::Top).half < 0.85);
+        // black pillars while the picture shows, where the frame compared with has them lit
+        assert_eq!(black_sides(&black, &[filled]), [Side::Left, Side::Right]);
+        // pillarboxed throughout (black there too), or nothing to compare with: nothing
+        assert!(black_sides(&black, &[black]).is_empty());
+        assert!(black_sides(&black, &[]).is_empty());
+        assert_eq!(black_sides(&black, &[black, filled]), [Side::Left, Side::Right], "one frame that shows them is enough");
+        // the picture dark too (the middle of a dip), or the pillars dimmed with it: nothing
+        assert!(black_sides(&wide(0, 15), &[filled]).is_empty());
+        assert!(black_sides(&wide(0, 60), &[filled]).is_empty(), "the picture at under half its brightness");
+        assert!(black_sides(&wide(40, 110), &[filled]).is_empty());
+        // a title over black (a year card in a dip) is no picture
+        let title = bands(&png(160, 90, |x, y| if (60..100).contains(&x) && (38..52).contains(&y) && x % 3 != 0 { [255; 3] } else { [0; 3] })).unwrap();
+        assert!(title.centre > 0.3 && black_sides(&title, &[filled]).is_empty(), "{title:?}");
+        // a fill too dim to tell from black is no reference; a dim one is
+        assert!(black_sides(&black, &[wide(3, 200)]).is_empty());
+        assert_eq!(black_sides(&black, &[wide(18, 200)]), [Side::Left, Side::Right]);
+        // one side black (a whip half over), or half of one (a push across it)
+        let left = bands(&png(160, 90, |x, _| {
+            if x < 53 {
+                [0; 3]
+            } else if x < 107 {
+                [200; 3]
+            } else {
+                [90; 3]
+            }
+        }))
+        .unwrap();
+        assert_eq!(black_sides(&left, &[filled]), [Side::Left]);
+        let half = bands(&png(160, 90, |x, y| {
+            if x >= 107 && y < 40 {
+                [0; 3]
+            } else if (53..107).contains(&x) {
+                [200; 3]
+            } else {
+                [90; 3]
+            }
+        }))
+        .unwrap();
+        assert_eq!(black_sides(&half, &[filled]), [Side::Right]);
+        // a wide picture in a vertical frame: the bars above and below
+        let tall = |bars: u8| bands(&png(90, 160, |_, y| if (53..107).contains(&y) { [200; 3] } else { [bars; 3] })).unwrap();
+        assert_eq!(black_sides(&tall(0), &[tall(90)]), [Side::Top, Side::Bottom]);
+        assert!(black_sides(&tall(0), &[tall(0)]).is_empty());
+        // not a PNG, too small: no bands
+        assert!(bands(b"nope").is_none() && bands(&png(8, 8, |_, _| [0; 3])).is_none());
+        assert!(bands(&png(16, 16, |_, _| [0; 3])).is_some());
+    }
+
+    #[test]
+    fn the_sides_are_looked_at_around_transitions_and_pictures_shown_whole() {
+        let x = |effect: &str, a: f64, b: f64, from: u64, to: u64| json!({"effect": effect, "start": tick(a), "duration": tick(b - a), "from": from, "to": to});
+        let v = json!([
+            {"name": "Video 1", "items": [clip(11, 2.0, 4.0)]},
+            {"name": "Video 2", "items": [clip(1, 0.0, 2.0), clip(2, 2.0, 4.0), clip(3, 4.0, 6.0)],
+             "transitions": [x("push", 1.9, 2.1, 1, 2), x("dip_to_black", 3.8, 4.2, 2, 3)]}
+        ]);
+        let s = seq(v.clone());
+        let shot = crate::showcase::PlacedShot { clip: 2, item: 9, start: 2.0, end: 4.0, background: Some(11), ..Default::default() };
+        let entry = PlacedEntry { number: 2, label: "Tall robot".into(), start: 2.0, end: 4.0, shots: vec![shot], ..Default::default() };
+        let opts = Options { entries: vec![entry], ..Options::default() };
+        let whole = shown_whole(&s, &opts);
+        assert_eq!(whole, [Whole { clips: vec![2, 11], name: "Tall robot".into(), start: tick(2.0), end: tick(4.0), mid: 90 }]);
+        let probes = side_probes(&s, &opts, &whole);
+        let at = |k: i64| probes.iter().filter(|p| p.frame == k).map(|p| (p.group, p.refs.clone())).collect::<Vec<_>>();
+        // the push into the picture shown whole, frames 57–62 (the cut at 60): before the cut
+        // compared with the frame before it, after with the frame after it and the picture's middle
+        let push: Vec<i64> = probes.iter().filter(|p| p.group == 0).map(|p| p.frame).collect();
+        assert_eq!(push, [57, 58, 59, 60, 61, 62]);
+        assert_eq!(at(58), [(0, vec![56])]);
+        assert_eq!(at(61), [(0, vec![63, 90])]);
+        // the dip out of it, frames 114–125 (the cut at 120): its first and last quarters
+        let dip: Vec<i64> = probes.iter().filter(|p| p.group == 1).map(|p| p.frame).collect();
+        assert_eq!(dip, [114, 115, 117, 123, 124, 125]);
+        assert_eq!(at(115), [(1, vec![113, 90])]);
+        assert_eq!(at(124), [(1, vec![126])]);
+        assert!(probes[0].what.contains("push from “c1” into “c2”"), "{}", probes[0].what);
+        // its first and last frames, compared with its middle
+        assert_eq!(at(60), [(0, vec![63, 90]), (2, vec![90])]);
+        assert_eq!(at(119), [(3, vec![90])]);
+        // Auto Reframe's Blur Fill: the clips over it are shown whole where it is under them
+        let mut filled = v.clone();
+        filled[0]["name"] = json!("Blur Fill");
+        let s = seq(filled);
+        let whole = shown_whole(&s, &Options::default());
+        assert_eq!(whole.iter().map(|w| (w.clips.clone(), w.mid)).collect::<Vec<_>>(), [(vec![2, 11], 90)]);
+        assert_eq!(side_probes(&s, &Options::default(), &whole).len(), probes.len());
+        // within the budget; hostile spans and a sequence without picture give nothing to look at
+        assert!(side_probes(&seq(v), &Options { max_frames: 5, ..opts.clone() }, &[]).len() <= 5);
+        let hostile = seq(json!([{"items": [clip(1, 0.0, 2.0)], "transitions": [
+            {"effect": "push", "start": i64::MIN, "duration": i64::MAX, "from": 1},
+            {"effect": "push", "start": i64::MAX, "duration": 5},
+            {"effect": "x", "start": tick(1.0), "duration": -9}
+        ]}]));
+        assert!(side_probes(&hostile, &Options::default(), &[]).iter().all(|p| (0..60).contains(&p.frame)));
+        assert!(side_probes(&seq(json!([])), &opts, &shown_whole(&seq(json!([])), &opts)).is_empty());
     }
 
     #[test]

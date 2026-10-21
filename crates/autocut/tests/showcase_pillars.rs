@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use filmcraft_autocut::analyze::{ClipFacts, FrameFact};
+use filmcraft_autocut::qa;
 use filmcraft_autocut::showcase::{self, Built, Entry, Options, Script};
 use filmcraft_autocut::{Executor as _, SessionExecutor};
 use filmcraft_engine::Session;
@@ -240,5 +241,80 @@ async fn the_pillars_stay_through_the_transitions_of_a_picture_shown_whole() {
     for w in v1.windows(2) {
         assert!(w[0]["end"].as_i64() <= w[1]["start"].as_i64(), "{w:?}");
     }
+    let _ = std::fs::remove_dir_all(&m.dir);
+}
+
+/// Put the old bug back into a built show: each blurred copy only under its own picture, and the
+/// dips over the pictures again (on V2, where a dip's black covers the pillars at once).
+async fn stop_the_pillars_short(ex: &SessionExecutor, built: &Built) {
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let items = |t: usize| seq["video"][t]["items"].as_array().cloned().unwrap_or_default();
+    let (copies, pictures) = (items(0), items(1));
+    let span =
+        |list: &[Value], id: u64| list.iter().find(|c| c["clip"].as_u64() == Some(id)).map(|c| (c["start"].as_i64().unwrap(), c["end"].as_i64().unwrap()));
+    // the dips back on the pictures' track, where they were
+    for x in seq["video"][0]["transitions"].as_array().unwrap().iter().filter(|x| x["effect"].as_str().unwrap().starts_with("dip_to")) {
+        let (start, duration) = (x["start"].as_i64().unwrap(), x["duration"].as_i64().unwrap());
+        let cut = pictures.iter().find(|c| (start..=start + duration).contains(&c["end"].as_i64().unwrap())).unwrap_or_else(|| panic!("a picture ends in {x}"));
+        let r = ex
+            .execute(
+                "sequence.applyVideoTransition",
+                json!({"clip": cut["clip"], "edge": "out", "effect": x["effect"], "frames": (duration as f64 / TPS * FPS).round()}),
+            )
+            .await
+            .unwrap();
+        ex.execute("sequence.setTransition", json!({"transition": r["transition"], "start": start, "duration": duration})).await.unwrap();
+        ex.execute("sequence.removeTransition", json!({"transitions": [x["id"]]})).await.unwrap();
+    }
+    // each copy trimmed back to its picture's span
+    for s in built.layout.iter().flat_map(|e| &e.shots) {
+        let Some(b) = s.background else { continue };
+        let ((cs, ce), (ps, pe)) = (span(&copies, b).unwrap(), span(&pictures, s.clip).unwrap());
+        if ce > pe {
+            ex.execute("timeline.trim", json!({"clip": b, "edge": "out", "mode": "regular", "delta": pe - ce})).await.unwrap();
+        }
+        if cs < ps {
+            ex.execute("timeline.trim", json!({"clip": b, "edge": "in", "mode": "regular", "delta": ps - cs})).await.unwrap();
+        }
+    }
+    let v1 = ex.execute("sequence.inspect", json!({})).await.unwrap()["video"][0].clone();
+    for s in built.layout.iter().flat_map(|e| &e.shots).filter(|s| s.background.is_some()) {
+        let b = span(v1["items"].as_array().unwrap(), s.background.unwrap()).unwrap();
+        assert_eq!(b, span(&pictures, s.clip).unwrap(), "the copy only under its picture");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qa_finds_the_sides_going_black_where_the_pillars_stop_short() {
+    let m = session();
+    let entries = entries(&m);
+    let built = showcase::build(&m.ex, &opts(), &entries, &script(), &mut |_| {}).await.expect("it builds");
+    let changes = changes(&m.ex, &built).await;
+    let qa_opts = qa::Options { mix: false, ..qa::Options::for_showcase(&opts(), &built) };
+    let sides = |r: &qa::QaReport| r.of("sides", qa::Severity::Warning).into_iter().cloned().collect::<Vec<_>>();
+    // as built: the pillars stay through every transition
+    let r = qa::check(&m.ex, &qa_opts, None, &mut |_| {}).await;
+    let check = r.checks.iter().find(|c| c.name == "sides").unwrap_or_else(|| panic!("{:?}", r.checks));
+    println!("as built: {check:?}");
+    assert_eq!(check.status, "ok", "{:#?}", sides(&r));
+    assert!(r.frames_rendered > 0);
+    // with the old bug: the sides go black in the transitions next to the pictures shown whole
+    stop_the_pillars_short(&m.ex, &built).await;
+    let r = qa::check(&m.ex, &qa_opts, None, &mut |_| {}).await;
+    let found = sides(&r);
+    for f in &found {
+        println!("{:7.3} s {:?}: {}", f.seconds, f.until, f.message);
+    }
+    assert!(found.iter().all(|f| f.severity == qa::Severity::Error && f.message.contains(" side")), "{found:#?}");
+    // the pillars going black are found in each dip next to a picture shown whole (from its first
+    // frame out of one, over its second half into one) and in the whip out of the clip (on the
+    // frame after the cut, as lane F6 saw them), and nothing outside the transitions next to one
+    let fd = 1.0 / FPS;
+    let near = |c: &Change, f: &qa::Finding| f.seconds >= c.start - fd && f.seconds < c.end + fd;
+    let pillars = |f: &qa::Finding| f.message.contains("left") || f.message.contains("right");
+    for c in changes.iter().filter(|c| c.effect.starts_with("dip_to") || c.effect == "whip") {
+        assert!(found.iter().any(|f| near(c, f) && pillars(f)), "nothing found in {c:?}: {found:#?}");
+    }
+    assert!(found.iter().all(|f| changes.iter().any(|c| near(c, f))), "{found:#?}");
     let _ = std::fs::remove_dir_all(&m.dir);
 }

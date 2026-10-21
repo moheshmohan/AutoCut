@@ -56,6 +56,7 @@ pub mod paste_media;
 pub mod perf;
 pub mod photo_locations;
 pub mod photos;
+pub mod pillars;
 pub mod presets;
 pub mod previews;
 pub mod project_manager;

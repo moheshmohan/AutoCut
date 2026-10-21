@@ -239,7 +239,7 @@ Each export gets, beside it:
 
 | file | what |
 |---|---|
-| `<out>.qa.json` | findings (joins, black frames, loudness and voice level, the mix on small speakers, the robot in every shot, privacy), per-entry privacy counts (`privacy`: faces, plates, named places) and the mix per stem (`mixAnalysis`) |
+| `<out>.qa.json` | findings (joins, black frames, black sides around transitions, loudness and voice level, the mix on small speakers, the robot in every shot, privacy), per-entry privacy counts (`privacy`: faces, plates, named places) and the mix per stem (`mixAnalysis`) |
 | `<out>.qa.png` | a frame of every entry under its number, red/amber when it has an error/warning |
 | `<out>.privacy.png` | a frame of every clip with masks, where most of it is hidden |
 | `<out>.narration-check.json` | the Malayalam narration as the strict check heard it, line by line (Malayalam builds) |
