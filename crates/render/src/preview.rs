@@ -317,6 +317,14 @@ fn hash_item(h: &mut Fnv128, project: &Project, it: &TrackItem, origin: Tick, ki
     hash_source(h, project, it.item, kind, depth);
 }
 
+/// A content key of item `id`'s sound (its media reference, or a nested sequence's whole mix), as
+/// the audio segment hashes see it: what the time-stretch memo of a clip is keyed by.
+pub(crate) fn source_audio_key(project: &Project, id: ItemId) -> u128 {
+    let mut h = Fnv128::new();
+    hash_source(&mut h, project, id, TrackKind::Audio, 0);
+    h.0
+}
+
 fn hash_source(h: &mut Fnv128, project: &Project, id: ItemId, kind: TrackKind, depth: u32) {
     let Some(pi) = project.item(id) else {
         h.json(&"missing");

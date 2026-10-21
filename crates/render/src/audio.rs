@@ -1,6 +1,15 @@
 //! Clip-level audio: clip gain → clip effects → Volume / Channel Volume / Panner, audio transitions
-//! and speed changes (varispeed resampling), summed per track. The track/submix/Mix graph that
-//! consumes it is [`crate::mixer`].
+//! and speed changes, summed per track. The track/submix/Mix graph that consumes it is
+//! [`crate::mixer`].
+//!
+//! A clip at another speed plays varispeed (resampled: its pitch moves with the speed), or, with
+//! Speed/Duration's Maintain Audio Pitch ([`TrackItem::maintain_pitch`]), time-stretched at its
+//! own pitch ([`filmcraft_audio_dsp::stretch`], 1/16…16×; other speeds and frame holds play
+//! varispeed). Reversed clips stretch too: the stretch reads the media backwards. The stretch's
+//! output 0 is the timeline sample where the clip's media, in playback order, would start
+//! ([`stretch_origin`]), which a clip lengthened over a transition keeps, so a transition's
+//! re-mix plays the same samples as the clip itself. Stretchers (their memo of splice points)
+//! are cached by source content, stream, speed, direction, origin, rate and width.
 //!
 //! Stereo, mono and adaptive tracks carry two channels. 5.1 tracks carry six (L, R, C, LFE, Ls,
 //! Rs): their clips play the source's first six channels (or the six `source_channels` picked with
@@ -9,11 +18,13 @@
 //! 5.1 clips, and Channel Volume's left/right levels apply to L and R.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use filmcraft_audio_dsp::channels::{self as chans, Layout, Mixdown};
+use filmcraft_audio_dsp::stretch::{self, TimeStretch};
 use filmcraft_frame::AudioBuffer;
 use filmcraft_project::{AudioChannels, Project, Sequence, Track, TrackId, TrackItem};
-use filmcraft_time::{Tick, TimeRange};
+use filmcraft_time::{TICKS_PER_SECOND, Tick, TimeRange};
 
 use crate::mixer::Override;
 use crate::{SourceProvider, transitions};
@@ -223,13 +234,13 @@ fn mix_item(
         // The nested sequence is the clip's source: speed, reverse and clip effects apply to its
         // mix exactly as they do to a media clip's sound.
         let read = |m0: i64, len: usize| Some(nested_mix(project, &q, m0, len, sr, sources, w, live.depth));
-        effected(item, &read, a0, n, sr, w)
+        effected(item, &read, &|| crate::preview::source_audio_key(project, item.item), a0, n, sr, w)
     } else {
         let Some(src) = sources.source(item.item) else { return };
         if !src.info().has_audio() {
             return;
         }
-        effected(item, &|m0, len| src.audio_stream(item.audio_stream, m0, len, sr).ok(), a0, n, sr, w)
+        effected(item, &|m0, len| src.audio_stream(item.audio_stream, m0, len, sr).ok(), &|| crate::preview::source_audio_key(project, item.item), a0, n, sr, w)
     };
     // gains: clip gain × Volume (keyframed, per 64-sample block) × channel volume × panner
     let clip_gain = db_to_gain(item.gain_db);
@@ -326,10 +337,13 @@ fn nested_mix(project: &Project, nested: &Sequence, m0: i64, len: usize, sr: u32
 /// sequence's sample rate (a media source's audio, or a nested sequence's mix).
 type SourceAudio<'a> = &'a dyn Fn(i64, usize) -> Option<AudioBuffer>;
 
+/// A content key of a clip's source sound (computed only when a stretch needs it).
+type SourceKey<'a> = &'a dyn Fn() -> u128;
+
 /// The clip's audio after speed/reverse and clip effects (before clip gain, Volume and Panner) for
 /// timeline samples `[a0, a0 + n)`, `w` channels.
-fn effected(item: &TrackItem, src: SourceAudio, a0: i64, n: usize, sr: u32, w: usize) -> Vec<Vec<f32>> {
-    let read = |x0: i64, len: usize| raw_channels(item, src, x0, len, sr, w);
+fn effected(item: &TrackItem, src: SourceAudio, key: SourceKey, a0: i64, n: usize, sr: u32, w: usize) -> Vec<Vec<f32>> {
+    let read = |x0: i64, len: usize| raw_channels(item, src, key, x0, len, sr, w);
     if crate::audio_fx::has_effects(item) { crate::audio_fx::process(item, a0, n, sr, &read) } else { read(a0, n) }
 }
 
@@ -349,7 +363,8 @@ pub fn clip_signal(item: &TrackItem, start: i64, frames: usize, sr: u32, sources
         let n = (a1 - a0) as usize;
         let off = (a0 - start) as usize;
         let g = db_to_gain(item.gain_db);
-        let buf = effected(item, &|m0, len| src.audio_stream(item.audio_stream, m0, len, sr).ok(), a0, n, sr, 2);
+        // (no project here: the media item is the stretch memo's key)
+        let buf = effected(item, &|m0, len| src.audio_stream(item.audio_stream, m0, len, sr).ok(), &|| u128::from(item.item.0), a0, n, sr, 2);
         for (dst, b) in out.iter_mut().zip(&buf) {
             for (d, x) in dst[off..off + n].iter_mut().zip(b) {
                 *d = x * g;
@@ -374,7 +389,7 @@ pub fn clip_is_mono(item: &TrackItem, sources: &dyn SourceProvider) -> Option<bo
 /// The clip's audio (after speed/reverse) for timeline samples `[x0, x0 + len)` as `w` channels
 /// (2: stereo, mono sources on both sides, 5.1 sources folded down; 6: 5.1), with silence outside
 /// the clip.
-fn raw_channels(item: &TrackItem, src: SourceAudio, x0: i64, len: usize, sr: u32, w: usize) -> Vec<Vec<f32>> {
+fn raw_channels(item: &TrackItem, src: SourceAudio, key: SourceKey, x0: i64, len: usize, sr: u32, w: usize) -> Vec<Vec<f32>> {
     let mut out = vec![vec![0.0f32; len]; w];
     let item_s0 = item.start.to_units_floor(sr as i64);
     let item_s1 = item.end().to_units_floor(sr as i64);
@@ -390,6 +405,8 @@ fn raw_channels(item: &TrackItem, src: SourceAudio, x0: i64, len: usize, sr: u32
     let remixed = crate::remix::read(item, &|m0, len| src(m0, len), a0 - item_s0, n, sr);
     let buf = if remixed.is_some() {
         remixed
+    } else if let Some(b) = stretched(item, src, key, a0, n, sr, w) {
+        Some(b)
     } else if (speed - 1.0).abs() < 1e-9 && !item.reverse {
         src(src_start_ticks.to_units_floor(sr as i64), n)
     } else {
@@ -445,6 +462,90 @@ fn raw_channels(item: &TrackItem, src: SourceAudio, x0: i64, len: usize, sr: u32
         dst[off..off + m].copy_from_slice(&ch[..m]);
     }
     out
+}
+
+/// The timeline sample (at `sr`) where the clip's media, in playback order and at the clip's speed,
+/// would start: output 0 of its time stretch, so output sample `a − origin` plays media position
+/// `(a − origin) · speed` counted in playback order (from the media's start forward; from its end
+/// backward when reversed). [`with_handles`] keeps it, since it keeps the media timing. `None` for
+/// a speed of zero or a position out of the stretch's range.
+fn stretch_origin(item: &TrackItem, sr: u32) -> Option<i64> {
+    let speed = item.speed.abs();
+    if !(speed.is_finite() && speed > 0.0) {
+        return None;
+    }
+    let media = item.source_in.0 as f64 / speed;
+    let edge = if item.reverse { item.end().0 as f64 + media } else { item.start.0 as f64 - media };
+    let o = (edge * sr as f64 / TICKS_PER_SECOND as f64).round();
+    (o.is_finite() && o.abs() < (stretch::MAX_POSITION / 2) as f64).then_some(o as i64)
+}
+
+/// What a clip's stretch depends on: its source's content, stream, speed, direction and origin,
+/// the rate and the width it is read at.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct StretchKey {
+    source: u128,
+    stream: usize,
+    speed: u64,
+    reverse: bool,
+    origin: i64,
+    rate: u32,
+    width: usize,
+}
+
+/// Stretchers in use, with their memo of splice points.
+const STRETCHERS: usize = 64;
+
+fn stretchers() -> &'static Mutex<HashMap<StretchKey, Arc<Mutex<TimeStretch>>>> {
+    static C: OnceLock<Mutex<HashMap<StretchKey, Arc<Mutex<TimeStretch>>>>> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// The clip's sound for timeline samples `[a0, a0 + n)`, time-stretched at its own pitch, as the
+/// source's channels; `None` when Maintain Audio Pitch does not apply (off, 100 %, a frame hold,
+/// a speed the stretch does not take) and the clip plays varispeed.
+fn stretched(item: &TrackItem, src: SourceAudio, key: SourceKey, a0: i64, n: usize, sr: u32, w: usize) -> Option<AudioBuffer> {
+    let speed = item.speed.abs();
+    if !item.maintain_pitch || (speed - 1.0).abs() < 1e-9 || item.frame_hold.is_some() || !stretch::speed_supported(speed) {
+        return None;
+    }
+    let origin = stretch_origin(item, sr)?;
+    let reverse = item.reverse;
+    // the media in playback order: forward its own samples, reversed read backwards from its end
+    let read = |u: i64, len: usize| -> Option<AudioBuffer> {
+        if !reverse {
+            return src(u, len);
+        }
+        let start = u.checked_add(len as i64)?.checked_neg()?;
+        let mut b = src(start, len)?;
+        for c in b.channels.iter_mut() {
+            c.resize(len, 0.0);
+            c.reverse();
+        }
+        Some(b)
+    };
+    let o0 = a0.checked_sub(origin)?;
+    let k = StretchKey { source: key(), stream: item.audio_stream, speed: speed.to_bits(), reverse, origin, rate: sr, width: w };
+    let found = stretchers().lock().unwrap_or_else(PoisonError::into_inner).get(&k).cloned();
+    let ts = match found {
+        Some(ts) => ts,
+        None => {
+            // the source's channel count, from one sample where the request starts
+            let at = (o0 as f64 * speed).round() as i64;
+            let channels = read(at, 1)?.channel_count().clamp(1, stretch::MAX_CHANNELS);
+            let made = Arc::new(Mutex::new(TimeStretch::new(sr, channels, speed).ok()?));
+            let mut c = stretchers().lock().unwrap_or_else(PoisonError::into_inner);
+            if c.len() >= STRETCHERS {
+                c.clear();
+            }
+            c.entry(k).or_insert(made).clone()
+        }
+    };
+    let mut ts = ts.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut out = vec![vec![0f32; n]; ts.channels()];
+    let mut input = |u: i64, len: usize| read(u, len).map(|b| b.channels).unwrap_or_default();
+    ts.render(&mut input, o0, &mut out).ok()?;
+    Some(AudioBuffer { sample_rate: sr, channels: out })
 }
 
 /// The source channels a clip on a 5.1 track plays: six picked channels (Modify ▸ Audio Channels),

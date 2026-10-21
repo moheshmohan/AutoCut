@@ -750,3 +750,131 @@ fn a_nest_trimmed_in_starts_later_in_its_sequence() {
     let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None);
     assert!(worst(&mix, start, 8, |t| tone.at(t + 3.0)) < 0.01);
 }
+
+// ---- Maintain Audio Pitch
+
+fn tone440(i: i64, _: usize) -> f32 {
+    (0.5 * (std::f64::consts::TAU * 440.0 * i as f64 / 48_000.0).sin()) as f32
+}
+
+/// The amplitude of the strongest component within ±3 Hz of `f` (single-bin DFTs ¼ Hz apart).
+fn amp_near(x: &[f32], f: f64) -> f64 {
+    (-12..=12)
+        .map(|k| {
+            let hz = f + k as f64 * 0.25;
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, &v) in x.iter().enumerate() {
+                let w = std::f64::consts::TAU * hz * i as f64 / 48_000.0;
+                re += v as f64 * w.cos();
+                im += v as f64 * w.sin();
+            }
+            2.0 * (re * re + im * im).sqrt() / x.len() as f64
+        })
+        .fold(0.0, f64::max)
+}
+
+fn retime(r: &mut Rig, speed: f64, reverse: bool, keep: bool) {
+    let it = &mut r.track(0).items[0];
+    it.speed = speed;
+    it.reverse = reverse;
+    it.duration = Tick((10.0 * TICKS_PER_SECOND as f64 / speed).round() as i64);
+    it.maintain_pitch = keep;
+}
+
+#[test]
+fn maintain_pitch_keeps_a_retimed_clips_pitch_varispeed_moves_it() {
+    for (speed, reverse) in [(2.0, false), (0.5, false), (1.5, false), (1.5, true), (0.75, true)] {
+        for keep in [false, true] {
+            let mut r = Rig::new(&[tone440]);
+            retime(&mut r, speed, reverse, keep);
+            let [l, rr] = r.mix(48_000, 24_000);
+            assert_eq!(l, rr, "{speed}");
+            let (own, moved) = (amp_near(&l, 440.0), amp_near(&l, 440.0 * speed));
+            let (heard, gone) = if keep { (own, moved) } else { (moved, own) };
+            assert!(heard > 0.45 && gone < 0.03, "{speed}× reverse {reverse} maintain {keep}: {own:.3} at 440 Hz, {moved:.3} at {} Hz", 440.0 * speed);
+        }
+    }
+}
+
+#[test]
+fn a_stretched_clip_sounds_the_same_however_the_mix_is_cut() {
+    fn sig(i: i64, c: usize) -> f32 {
+        tone440(i, c) * 0.5 + noise(i, c)
+    }
+    for (speed, reverse) in [(1.7, false), (0.6, true)] {
+        let mut r = Rig::new(&[sig]);
+        retime(&mut r, speed, reverse, true);
+        let whole = r.mix(30_000, 150_000);
+        let cut = r.mix_cut(30_000, 150_000, &[1, 517, 4096, 30_000], None);
+        assert_eq!(whole, cut, "{speed}");
+    }
+}
+
+/// A transition re-mixes its clips lengthened into their handles: the stretched sound there must
+/// be the clip's own, or the cut in and out of the transition would click.
+#[test]
+fn a_transition_between_stretched_clips_does_not_click() {
+    // 437 Hz: a handle of 0.4 s of media is no whole number of its periods, so playing the handle
+    // from anywhere else would show
+    fn tone437(i: i64, _: usize) -> f32 {
+        (0.5 * (std::f64::consts::TAU * 437.0 * i as f64 / 48_000.0).sin()) as f32
+    }
+    let mut r = Rig::new(&[tone437]);
+    let src = r.track(0).items[0].item;
+    let sec = |s: f64| Tick::from_seconds_f64(s);
+    let mut a = r.p.make_track_item(src, TrackKind::Audio, Tick::ZERO, TimeRange::new(Tick::ZERO, sec(2.0)), FrameRate::FPS_24).unwrap();
+    let mut b = r.p.make_track_item(src, TrackKind::Audio, sec(1.0), TimeRange::new(sec(4.0), sec(2.0)), FrameRate::FPS_24).unwrap();
+    // the outgoing clip reversed (its handle moves its end), the incoming forward (its start)
+    for (it, reverse) in [(&mut a, true), (&mut b, false)] {
+        it.speed = 2.0;
+        it.duration = sec(1.0);
+        it.reverse = reverse;
+        it.maintain_pitch = true;
+    }
+    let effect = filmcraft_project::vtransition::find_transition("constant_power", filmcraft_project::EffectKind::AudioTransition).unwrap().instance();
+    let tr = Transition {
+        id: TransitionId(1),
+        effect,
+        start: sec(0.8),
+        duration: sec(0.4),
+        from: Some(a.id),
+        to: Some(b.id),
+        align: Default::default(),
+        reverse: false,
+        sound: None,
+    };
+    let t0 = r.track(0);
+    t0.items = vec![a, b];
+    t0.transitions.push(tr);
+    let [l, _] = r.mix_cut(24_000, 48_000, &[1000, 4800], None);
+    // a clean tone's largest step, with the √2 of a constant-power fade between two of them
+    let step = 0.5 * std::f32::consts::TAU * 437.0 / 48_000.0;
+    let jump = l.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+    assert!(jump < 1.5 * step, "largest step {jump} vs {step}");
+    assert!(amp_near(&l[..12_000], 437.0) > 0.45 && amp_near(&l[36_000..], 437.0) > 0.45);
+}
+
+#[test]
+fn a_nest_with_maintain_pitch_keeps_its_pitch() {
+    let (mut p, outer, map, tone) = nested_tone(48_000);
+    let nest = &mut p.sequence_mut(outer).unwrap().audio_tracks[0].items[0];
+    nest.speed = 2.0;
+    nest.duration = Tick(5 * TICKS_PER_SECOND);
+    nest.maintain_pitch = true;
+    let mix = mix_graph(&p, p.sequence(outer).unwrap(), 48_000, 24_000, &map, None);
+    assert!(amp_near(&mix.channels[0], tone.hz) > 0.45 && amp_near(&mix.channels[0], 2.0 * tone.hz) < 0.03);
+}
+
+/// Speeds the stretch does not take, a frame hold and 100 % play as they did.
+#[test]
+fn maintain_pitch_outside_the_stretch_plays_as_before() {
+    for (speed, hold) in [(1.0, false), (20.0, false), (0.01, false), (2.0, true)] {
+        let mut plain = Rig::new(&[tone440]);
+        retime(&mut plain, speed, false, false);
+        plain.track(0).items[0].frame_hold = hold.then_some(Tick(TICKS_PER_SECOND));
+        let mut kept = Rig::new(&[tone440]);
+        retime(&mut kept, speed, false, true);
+        kept.track(0).items[0].frame_hold = hold.then_some(Tick(TICKS_PER_SECOND));
+        assert_eq!(plain.mix(4_800, 4_800), kept.mix(4_800, 4_800), "{speed} hold {hold}");
+    }
+}

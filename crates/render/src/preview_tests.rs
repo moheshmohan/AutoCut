@@ -266,6 +266,22 @@ fn audio_hashes(p: &Project, seq: ItemId) -> Vec<String> {
     audio_segments(p, seq).into_iter().map(|g| g.hash).collect()
 }
 
+/// Maintain Audio Pitch changes a retimed clip's sound, so its audio preview; turned off again the
+/// clip hashes as it did before the flag existed (old previews stay valid).
+#[test]
+fn maintain_pitch_is_part_of_the_audio_preview_hash() {
+    let (mut p, _, ocean, seq) = setup();
+    let snd = place_kind(&mut p, seq, TrackKind::Audio, ocean, 0, 48);
+    p.sequence_mut(seq).unwrap().find_item_mut(snd).unwrap().1.speed = 2.0;
+    let varispeed = audio_hashes(&p, seq);
+    assert_eq!(varispeed.len(), 1);
+    p.sequence_mut(seq).unwrap().find_item_mut(snd).unwrap().1.maintain_pitch = true;
+    let kept = audio_hashes(&p, seq);
+    assert_ne!(kept, varispeed);
+    p.sequence_mut(seq).unwrap().find_item_mut(snd).unwrap().1.maintain_pitch = false;
+    assert_eq!(audio_hashes(&p, seq), varispeed);
+}
+
 #[test]
 fn a_nests_audio_previews_follow_the_sound_of_its_sequence() {
     // Inner has a picture clip and a sound clip; Outer nests Inner (picture and sound), and Top
