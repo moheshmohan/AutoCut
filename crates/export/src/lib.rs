@@ -817,23 +817,92 @@ fn audio_factories() -> &'static RwLock<Vec<AudioEncoderFactory>> {
 }
 
 /// Hardware encoder counters (`perf.stats` `export.hardware`): pictures encoded by hardware
-/// encoders, encoders created, and requests a hardware encoder declined (the software encoder
-/// took them).
+/// encoders, encoders created, requests a hardware encoder declined (the software encoder
+/// took them), and exports encoded by several hardware sessions at once ([`EncodeSessions`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HwEncodeStats {
     pub frames: u64,
     pub sessions: u64,
     pub declined: u64,
+    pub parallel: u64,
 }
 
 static HW_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static HW_SESSIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static HW_DECLINED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HW_PARALLEL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The hardware encoder counters so far.
 pub fn hw_encode_stats() -> HwEncodeStats {
     use std::sync::atomic::Ordering::Relaxed;
-    HwEncodeStats { frames: HW_FRAMES.load(Relaxed), sessions: HW_SESSIONS.load(Relaxed), declined: HW_DECLINED.load(Relaxed) }
+    HwEncodeStats {
+        frames: HW_FRAMES.load(Relaxed),
+        sessions: HW_SESSIONS.load(Relaxed),
+        declined: HW_DECLINED.load(Relaxed),
+        parallel: HW_PARALLEL.load(Relaxed),
+    }
+}
+
+/// An export is encoded by several hardware sessions at once.
+pub fn note_hw_encode_parallel() {
+    HW_PARALLEL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many hardware encoding sessions one export may run at once (process-wide).
+///
+/// Chips with two media engines (Apple's M-series Max and Ultra) encode two streams at once. A
+/// hardware encoder may then cut an export into segments of whole closed GOPs, encode them by two
+/// sessions side by side and join them into one stream (`filmcraft_platform::parallel_encode`):
+/// about 1.6× the frames per second of one session for 4K H.264. `Auto` lets the encoder decide
+/// where that helps; `One` is the single-session path as it was before; `Two` asks for two
+/// wherever the encoder can (measurements and tests). The `FILMCRAFT_HW_ENCODE_SESSIONS`
+/// environment variable (`one` / `1`, `auto`, `two` / `2`) sets the starting value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EncodeSessions {
+    One,
+    #[default]
+    Auto,
+    Two,
+}
+
+impl EncodeSessions {
+    /// From the environment variable's value (`None`: not one of the names).
+    pub fn parse(s: &str) -> Option<EncodeSessions> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "one" | "1" | "off" | "single" => Some(EncodeSessions::One),
+            "auto" | "" => Some(EncodeSessions::Auto),
+            "two" | "2" | "on" => Some(EncodeSessions::Two),
+            _ => None,
+        }
+    }
+}
+
+/// 0: not set yet (the environment decides), then 1 + the [`EncodeSessions`] index.
+static ENCODE_SESSIONS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Set [`EncodeSessions`] for the exports that start from now on.
+pub fn set_hw_encode_sessions(s: EncodeSessions) {
+    let v = match s {
+        EncodeSessions::One => 1,
+        EncodeSessions::Auto => 2,
+        EncodeSessions::Two => 3,
+    };
+    ENCODE_SESSIONS.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The current [`EncodeSessions`]: what [`set_hw_encode_sessions`] set, else
+/// `FILMCRAFT_HW_ENCODE_SESSIONS`, else `Auto`.
+pub fn hw_encode_sessions() -> EncodeSessions {
+    match ENCODE_SESSIONS.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => EncodeSessions::One,
+        3 => EncodeSessions::Two,
+        2 => EncodeSessions::Auto,
+        _ => {
+            static FROM_ENV: OnceLock<EncodeSessions> = OnceLock::new();
+            // (a value that is not one of the names is `Auto`)
+            *FROM_ENV.get_or_init(|| std::env::var("FILMCRAFT_HW_ENCODE_SESSIONS").ok().and_then(|v| EncodeSessions::parse(&v)).unwrap_or_default())
+        }
+    }
 }
 
 /// A hardware encoder encoded a picture.

@@ -517,3 +517,29 @@ impl FrameRenderer for FakeRenderer {
         Some(filmcraft_render::Image::new(320, 180))
     }
 }
+
+/// `FILMCRAFT_HW_ENCODE_SESSIONS` and the switch: names are forgiving, anything else is refused
+/// (`Auto` then), and a value set wins over the environment.
+#[test]
+fn encode_sessions_switch() {
+    for (s, want) in [
+        ("one", Some(EncodeSessions::One)),
+        (" 1 ", Some(EncodeSessions::One)),
+        ("OFF", Some(EncodeSessions::One)),
+        ("auto", Some(EncodeSessions::Auto)),
+        ("", Some(EncodeSessions::Auto)),
+        ("Two", Some(EncodeSessions::Two)),
+        ("2", Some(EncodeSessions::Two)),
+        ("3", None),
+        ("twelve", None),
+        ("\u{0}", None),
+    ] {
+        assert_eq!(EncodeSessions::parse(s), want, "{s:?}");
+    }
+    assert_eq!(EncodeSessions::default(), EncodeSessions::Auto);
+    // (nothing else in this crate's tests reads the switch)
+    for s in [EncodeSessions::One, EncodeSessions::Two, EncodeSessions::Auto] {
+        set_hw_encode_sessions(s);
+        assert_eq!(hw_encode_sessions(), s);
+    }
+}

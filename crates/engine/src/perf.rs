@@ -48,7 +48,8 @@ pub fn decode_json() -> Value {
     })
 }
 
-/// Export counters: pictures encoded by hardware encoders, sessions, declined requests; and the wall
+/// Export counters: pictures encoded by hardware encoders, sessions, declined requests, exports encoded
+/// by several sessions at once (`parallel`); and the wall
 /// time of each export stage in milliseconds (`stages`: setup, loudness, render, encode with its
 /// `convert` part, audio, mux, finish, wait), summed over the exports of this process (diff two readings).
 /// Render and encode overlap (the next batch renders while this one is encoded), so their sum can exceed
@@ -57,7 +58,7 @@ pub fn export_json() -> Value {
     let hw = filmcraft_export::hw_encode_stats();
     let stages: serde_json::Map<String, Value> =
         filmcraft_export::stage_times().into_iter().map(|(s, ns)| (format!("{}Ms", s.name()), json!(ns as f64 / 1e6))).collect();
-    json!({"hardware": {"frames": hw.frames, "sessions": hw.sessions, "declined": hw.declined}, "stages": stages})
+    json!({"hardware": {"frames": hw.frames, "sessions": hw.sessions, "declined": hw.declined, "parallel": hw.parallel}, "stages": stages})
 }
 
 /// The engine's `perf.stats`.

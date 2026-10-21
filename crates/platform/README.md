@@ -160,6 +160,35 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
 - The first frame is completed straight away: the SPS / PPS the container needs come with the first
   compressed frame, and the muxer asks for them after the first group of pictures.
 
+### Two sessions at once (M-series Max and Ultra)
+
+These chips have two media engines. One offline session encodes 3840×2160 H.264 at 63 fps (M3
+Max), and two offline sessions slow each other down (50 fps together): an offline session spreads its
+frames over both engines. A *real-time* session of a stream one engine can encode at its frame rate
+keeps to one engine (53 fps), and two of them run side by side (105 fps). So a 4K H.264 export there
+is encoded by `hardware_encode::ParallelEncoder`: two real-time sessions taking one keyframe interval
+each in turn, joined into one stream by `parallel_encode::Joiner` (safe, generic code, tested on
+every system with a stand-in encoder):
+
+- every segment starts with a forced keyframe (an IDR picture) and nothing is reordered, so each is
+  a closed GOP and a join needs no mending; each session numbers its pictures on a timeline of its
+  own, so its rate control sees the export's frame rate; the parameter sets of every session must
+  equal the first one's (a session that differs is retired before it gives a frame, and the export
+  goes on with the other);
+- a session that has not started warms up on the last third of the segment before its first one (at
+  least 20 pictures), its frames dropped: started cold, its first pictures got 4.6 dB less;
+- pictures are queued for the sessions within 384 MiB (32 at 4K: the half segment two sessions need
+  to overlap), the frames of a later segment wait until the earlier ones are out (the muxer gets them
+  up to a segment late), and each session runs on a thread of its own under `catch_unwind`.
+
+`hardware_encode::lanes_for` decides: H.264 only (with HEVC a second real-time session lowers the
+quality of both, 0.8 dB at the same bitrate on 4K footage), a chip whose name says Max or Ultra
+(`videotoolbox_encode::media_engines`, from `machdep.cpu.brand_string`), a picture larger than 2560×1440
+and no more samples per second than 4096×2160 at 30 fps (4K60 needs both engines per session), and a
+keyframe interval the queue covers. `filmcraft_export::set_hw_encode_sessions` (`One` / `Auto` / `Two`)
+or `FILMCRAFT_HW_ENCODE_SESSIONS=one|auto|two` switch it; `perf.stats` counts such exports in
+`export.hardware.parallel`. Measurements: [performance.md](../../docs/performance.md#results-two-videotoolbox-sessions-at-once-4k-h264-export-one-session--two).
+
 ## Hardware H.265 (HEVC) encoding (macOS)
 
 The same session wrapper, created for `kCMVideoCodecType_HEVC` with the HEVC Main profile

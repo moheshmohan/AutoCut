@@ -408,6 +408,106 @@ batches); transitions with many taps (zoom blur, motion blur) are now the larges
 frames they cover; GPU rendering (Auto) did not change the export's speed in a quick check and stays
 off by default.
 
+## Results (two VideoToolbox sessions at once: 4K H.264 export, one session → two)
+
+Apple M3 Max (14 cores, 36 GB, two media encode engines), 2026-10-21, release builds, a machine shared
+with other lanes' builds (load average 20–54: the media engines are not shared, the CPU is). The
+benchmarks are `crates/platform/tests/vt_encode_scaling.rs` (ignored tests; the knobs are in its
+module docs); "real 4K footage" is the owner's 4K export of the Robot Showcase (H.264, decoded by
+our decoders), re-encoded at the YouTube 2160p preset's 45 Mb/s target (54 Mb/s ceiling), a
+keyframe every 60 pictures, luma PSNR of our decoder's output against those pictures.
+
+### Sessions side by side (`perf_vt_sessions_scale`, aggregate frames/s, 180–300 pictures each)
+
+| | 1 session | 2 | 3 | 4 |
+|---|---|---|---|---|
+| 3840×2160 H.264, offline (the export's session) | **63** | 50 | 61 | 56 |
+| 3840×2160 HEVC, offline | 73 | 52 | 61 | 57 |
+| 3840×2160 H.264, real-time | 53 | **105** | 80 | 107 |
+| 3840×2160 HEVC, real-time | 51 | 187 | 143 | 190 |
+| 1920×1080 H.264, offline | 208 | 177 | 216 | 204 |
+| 1920×1080 H.264, real-time | 101 | 200 | 253 | 340 |
+| 4096×2160 H.264, offline / real-time | 59 / 49 | 47 / **98** | | |
+| 2560×1440 H.264, offline / real-time | 129 / 105 | 106 / 208 | | |
+| 3840×2160 at 60 fps H.264, real-time | 65 | 51 | | |
+
+An offline session spreads its frames over both engines, and a second offline session slows both
+down. A real-time session of a stream one engine can encode at its frame rate (4K30, not 4K60:
+VideoToolbox decides from `ExpectedFrameRate`, which also picks the level, so it stays the real
+rate) keeps to one engine, so two of them run side by side. `PrioritizeEncodingSpeedOverQuality` and
+`MaximizePowerEfficiency` change nothing (63.1 and 62.9 fps), `MaxFrameDelayCount` is not supported
+by the hardware encoder; one session cannot go faster than 63 fps at 4K.
+
+### What two sessions cost in quality (`perf_vt_quality`, real 4K footage)
+
+- **Real-time against offline, one session:** the same (48.97 against 48.97 dB over 600 pictures; 51.09
+  against 51.06 dB over 180 from three places).
+- **HEVC:** a second real-time session, even an idle one, lowers the first one's quality by 0.75 dB
+  (47.16 → 46.41 dB over 300 pictures; 0.9 dB with both encoding). H.264 is unchanged by it (51.33 →
+  51.33 dB). So only H.264 takes two sessions by default.
+- **Joins, H.264, two sessions taking keyframe intervals in turn:** the mean is the same (−0.08 dB),
+  but the second session starts cold: its first pictures 4.6 dB below one session's at the same point.
+  Warming it up on the end of the segment before its first one (its frames dropped) removes that:
+  the last 20 pictures do as well as the whole segment (5: −1.8 dB, 10: −1.2 dB). Re-priming every
+  session before each of its segments costs more than it gains (−0.2 to −0.3 dB: the dropped frames
+  spend bits). Splitting into halves instead (one join) gives the same mean (−0.01 dB) but needs two
+  render positions at once.
+
+The export's encoder, one session against `ParallelEncoder` (`perf_export_encoder_quality`):
+
+| real 4K footage | one session | two sessions |
+|---|---|---|
+| 600 pictures from 90 s | 36.46 Mb/s, 48.97 dB | 36.75 Mb/s, 48.95 dB |
+| 3 × 200 pictures from 0, 244.8 and 300 s | 30.22 Mb/s, 52.16 dB | 30.74 Mb/s, 52.20 dB |
+
+Per keyframe interval the two sessions are within −1.2 / +0.4 dB of one session, and the first five
+pictures after a join within ±1.7 dB, except one join of nine at −5.8 dB (49.6 → 43.9 dB, back to
+−1.2 dB over the interval): the session resuming there had last coded the content two seconds
+earlier and its rate control gave the keyframe 320 kB where one session gave 510. On smooth synthetic
+content (`tests/parallel_encode.rs`) every join is within 0.01 dB of one session.
+
+### The export's encoder (`perf_export_encoder_one_vs_two_sessions`, fed from one thread as an export feeds it)
+
+| 3840×2160 H.264, pictures | one session | two sessions |
+|---|---|---|
+| 60 | 60.3 fps | 52.7 fps (0.87×: one real-time session) |
+| 120 | 62.3 fps | 76.0 fps (1.22×) |
+| 300 | 63.0 fps | 88.2 fps (1.40×) |
+| 600 | 63.3 fps | **98.5 fps (1.56×)** |
+| 1800 | 63.5 fps | 100.4 fps (1.58×) |
+
+4096×2160: 60.0 → 92.3 fps (600 pictures). HEVC, asked for with `Two`: 74.4 → 158.3 fps. A stream
+starts and ends on one session (about a segment each), so short exports gain less; one keyframe
+interval or less loses 0.15 s. The pictures queued for the sessions (32 at 4K, 397 MB) are what lets
+the second session work on its segment while the export produces the next.
+
+### Whole exports (`filmcraft-cli`, YouTube 2160p / 1080p presets, A/B interleaved, 3 rounds, medians)
+
+The binary before the change, the binary after it, and the binary after it with
+`FILMCRAFT_HW_ENCODE_SESSIONS=one` (the old path, one switch away), at load 18–29:
+
+| range | before | two sessions | switched off |
+|---|---|---|---|
+| a 4K clip re-exported at 4K, 100–110 s (300 frames) | 5.32 s, 56 fps | **3.57 s, 84 fps** | 5.32 s |
+| Robot Showcase v5, 4K montage, 0–15.6 s (468) | 8.65 s, 54 fps | **6.45 s, 73 fps** | 8.58 s |
+
+Both were bound by the encoder before (the encoding side took 4.7 and 5.4 s; with two sessions 2.2
+and 1.4 s). The rest of the bench ranges, before against after, at load 32–54:
+
+| range | before | two sessions | |
+|---|---|---|---|
+| 4K montage, 0–15.6 s (468 frames) | 8.53 s | **5.94 s** | |
+| 4K re-export, 100–110 s (300) | 5.39 s | **4.45 s** | |
+| 4K titles over 1080p shots, 102–112 s (300) | 12.87 s | 11.88 s | render-bound at this load (the encoder waited 8–11 s): noise |
+| 4K, 16 face masks on a blur, 244.8–250.8 s (180) | 10.55 s | 7.61 s | render-bound (waited 6–9 s): noise |
+| 1080p, 102–112 s (300) | 3.05 s | 2.73 s | one session either way: noise |
+| 1080p, 244.8–250.8 s (180) | 4.75 s | 5.07 s | one session either way: noise |
+
+Where the CPU keeps up with the encoder, a 4K export is 1.3–1.5× faster; where it does not (most of
+this show while other builds load the machine) nothing changes, and 1080p is untouched. Peak memory
+grows by the queue and the second session: +0.4 GB on the re-export (2.77 → 3.20 GB), +0.9 GB on the
+montage (7.9 → 8.9 GB), whose render also runs further ahead now.
+
 ## Results (HW3: VideoToolbox hardware H.265 (HEVC) encoding, against hardware H.264)
 
 Apple M1 (8 cores, 16 GB), 2026-10-07, single runs on an otherwise idle machine, release build. Both
