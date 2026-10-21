@@ -17,8 +17,12 @@ struct U {
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var dst: texture_storage_2d<rgba32float, write>;
-// Unsharp Mask: the image before blurring.
+// Unsharp Mask: the image before blurring; a masked effect: the image before the effect.
 @group(0) @binding(3) var aux: texture_2d<f32>;
+// The masks of OP_MASK_MIX / OP_MASK_SCALE (`fx.rs` `mask_words`): `u.i1.x` headers of 12
+// words (first point, points, mode, inverted, feather, expansion, opacity, unused, then the box
+// x0, y0, x1, y1 outside which the coverage is the mask's outside value), then the points.
+@group(0) @binding(4) var<storage, read> mk: array<u32>;
 
 const OP_BRIGHTNESS_CONTRAST: u32 = 1u;
 const OP_PROC_AMP: u32 = 2u;
@@ -50,6 +54,97 @@ const OP_MIRROR: u32 = 28u;
 const OP_OFFSET: u32 = 29u;
 const OP_VIDEO_LIMITER: u32 = 30u;
 const OP_LUMETRI: u32 = 31u;
+const OP_MASK_MIX: u32 = 32u;
+const OP_MASK_SCALE: u32 = 33u;
+
+// Mask coverage, the math of `filmcraft_render::mask` (and `mask.wgsl`): signed distance to the
+// polygon (nonzero winding), the feather falloff, the masks combined top to bottom by mode.
+
+fn mask_falloff(s: f32, feather: f32) -> f32 {
+    let w = max(feather, 1.0);
+    let t = clamp(s / w + 0.5, 0.0, 1.0);
+    let sm = t * t * (3.0 - 2.0 * t);
+    return t + (sm - t) * min(feather, 1.0);
+}
+
+// MaskMode index: None 0, Add 1, Subtract 2, Intersect 3, Lighten 4, Darken 5, Difference 6.
+fn mask_start(mode: u32) -> f32 {
+    return select(0.0, 1.0, mode == 2u || mode == 3u || mode == 5u);
+}
+
+fn mask_combine(mode: u32, a: f32, m: f32) -> f32 {
+    switch mode {
+        case 1u: { return a + m - a * m; }
+        case 2u: { return a * (1.0 - m); }
+        case 3u: { return a * m; }
+        case 4u: { return max(a, m); }
+        case 5u: { return min(a, m); }
+        case 6u: { return a + m - 2.0 * a * m; }
+        default: { return a; }
+    }
+}
+
+fn mask_pt(base: u32, i: u32) -> vec2<f32> {
+    return vec2(bitcast<f32>(mk[base + 2u * i]), bitcast<f32>(mk[base + 2u * i + 1u]));
+}
+
+fn mask_seg_dist2(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let d = b - a;
+    let q = p - a;
+    let l2 = dot(d, d);
+    var t = 0.0;
+    if l2 > 0.0 {
+        t = clamp(dot(q, d) / l2, 0.0, 1.0);
+    }
+    let e = q - d * t;
+    return dot(e, e);
+}
+
+// Mask `i`'s coverage at pixel centre `p`.
+fn mask_value(i: u32, p: vec2<f32>) -> f32 {
+    let h = i * 12u;
+    let start = mk[h];
+    let len = mk[h + 1u];
+    let inverted = mk[h + 3u] != 0u;
+    let feather = bitcast<f32>(mk[h + 4u]);
+    let expansion = bitcast<f32>(mk[h + 5u]);
+    let opacity = bitcast<f32>(mk[h + 6u]);
+    let lo = vec2(bitcast<f32>(mk[h + 8u]), bitcast<f32>(mk[h + 9u]));
+    let hi = vec2(bitcast<f32>(mk[h + 10u]), bitcast<f32>(mk[h + 11u]));
+    let band = abs(expansion) + max(feather, 1.0) * 0.5 + 1.0;
+    var sd = -band;
+    // beyond the box no edge is within the band and the winding is zero
+    if len >= 3u && all(p >= lo) && all(p <= hi) {
+        let pts = u.i1.x * 12u + 2u * start;
+        var wind = 0;
+        var d2 = band * band;
+        for (var k = 0u; k < len; k++) {
+            let a = mask_pt(pts, k);
+            let c = mask_pt(pts, (k + 1u) % len);
+            if (a.y <= p.y) != (c.y <= p.y) {
+                let t = (p.y - a.y) / (c.y - a.y);
+                if a.x + (c.x - a.x) * t < p.x {
+                    wind += select(-1, 1, c.y > a.y);
+                }
+            }
+            d2 = min(d2, mask_seg_dist2(p, a, c));
+        }
+        let d = sqrt(d2);
+        sd = select(-d, d, wind != 0);
+    }
+    let c = mask_falloff(sd + expansion, feather);
+    return opacity * select(c, 1.0 - c, inverted);
+}
+
+// The masks' combined coverage at pixel `p`.
+fn mask_coverage(p: vec2<i32>) -> f32 {
+    let pc = vec2<f32>(p) + 0.5;
+    var acc = mask_start(mk[2]);
+    for (var i = 0u; i < u.i1.x; i++) {
+        acc = clamp(mask_combine(mk[i * 12u + 2u], acc, mask_value(i, pc)), 0.0, 1.0);
+    }
+    return acc;
+}
 
 fn size() -> vec2<i32> {
     return vec2<i32>(i32(u.i0.y), i32(u.i0.z));
@@ -586,6 +681,15 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
                 acc += sample_clamped(pc.x + dx * t, pc.y + dy * t);
             }
             return acc / f32(steps);
+        }
+        case OP_MASK_MIX: {
+            // src: the effected image, aux: the original (`mask::mix`)
+            let o = textureLoad(aux, p, 0);
+            return o + (ld(p) - o) * mask_coverage(p);
+        }
+        case OP_MASK_SCALE: {
+            // opacity masks (`mask::scale_by`)
+            return ld(p) * mask_coverage(p);
         }
         case OP_UNSHARP: {
             // src: the blurred image, aux: the original

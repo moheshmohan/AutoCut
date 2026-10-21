@@ -239,7 +239,13 @@ impl Pipeline {
         // planner hands back as one CPU image anyway (an adjustment layer, a complex transition,
         // HDR) does not take a pooled renderer: it would render on the CPU inside the pool, as
         // many frames at a time as there are renderers instead of one per export thread.
-        let pool = self.renderer.as_ref().filter(|_| !filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t));
+        let pool = self.renderer.as_ref().filter(|_| {
+            let cpu = filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t);
+            if cpu {
+                filmcraft_render::plan::note_cpu_frame(&self.project, self.seq, t);
+            }
+            !cpu
+        });
         let gpu = match pool {
             Some(pool) => {
                 let asked = web_time::Instant::now();

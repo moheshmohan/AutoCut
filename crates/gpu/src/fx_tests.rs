@@ -411,6 +411,94 @@ fn gpu_effect_chains_match_cpu() {
     }
 }
 
+/// Masked effects (the automatic redaction's blur behind a tracked face mask, an inverted
+/// subtracted rectangle, a masked Unsharp keeping two originals at once) and opacity masks: the
+/// GPU's coverage and mix against `mask::apply_effect` / `apply_opacity_masks` on the CPU.
+#[test]
+fn masked_effects_match_cpu() {
+    use filmcraft_project::{Mask, MaskMode, MaskPath};
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let (w, h) = (96u32, 54u32);
+    let px = picture(w, h);
+    let frame = VideoFrame::rgba_f32(w, h, px.clone());
+    let face = |feather: f64| {
+        let mut m = Mask::new("face", MaskPath::ellipse(Vec2::new(40.0, 25.0), Vec2::new(18.0, 14.0)));
+        m.feather.value = fl(feather);
+        m
+    };
+    let mut cut = Mask::new("cut", MaskPath::rect(30.5, 10.0, 70.0, 33.25));
+    cut.mode = MaskMode::Subtract;
+    cut.inverted = true;
+    cut.expansion.value = fl(-2.0);
+    cut.opacity.value = fl(70.0);
+    let mut second = face(0.0);
+    second.path.value = ParamValue::Path(MaskPath::ellipse(Vec2::new(75.0, 30.0), Vec2::new(9.0, 12.0)));
+    let px_scale = 0.75;
+    let cases: Vec<(&str, EffectInstance, Vec<Mask>)> = vec![
+        ("redaction blur", effect("gaussian_blur", &[("blurriness", fl(60.0)), ("repeat_edge", ParamValue::Bool(true))]), vec![face(12.0)]),
+        ("two hard faces", effect("gaussian_blur", &[("blurriness", fl(20.0))]), vec![face(0.0), second]),
+        ("subtracted", effect("brightness_contrast", &[("brightness", fl(40.0))]), vec![face(6.0), cut.clone()]),
+        ("masked unsharp", effect("unsharp_mask", &[("amount", fl(150.0)), ("radius", fl(3.0))]), vec![face(4.0)]),
+        ("no blur", effect("gaussian_blur", &[("blurriness", fl(0.0))]), vec![face(4.0)]),
+    ];
+    for (what, e, masks) in cases {
+        let op = FxOp::eval(&e, &cx(Tick::ZERO, px_scale), w as usize, h as usize).expect("op");
+        let op = FxOp::Masked { op: Box::new(op), masks: filmcraft_render::mask::prepare(&masks, Tick::ZERO, px_scale) };
+        assert!(op.gpu_ok(), "{what}");
+        // the reference: the effect limited to its masks as the CPU renderer applies it
+        let mut reference = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+        let mut e = e.clone();
+        e.masks = masks.clone();
+        filmcraft_render::mask::apply_effect(&mut reference, &e, &cx(Tick::ZERO, px_scale));
+        let mut cpu = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+        op.apply(&mut cpu);
+        let (worst, flips) = compare(&reference.px, &cpu.px);
+        assert!(worst < EXACT && flips == 0.0, "{what}: FxOp::Masked is mask::apply_effect ({worst}, {flips})");
+        // a masked effect between two others
+        let ops = vec![FxOp::Gamma { g: 1.2 }, op, FxOp::Invert { channel: 0, blend: 0.3 }];
+        let mut cpu = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+        for op in &ops {
+            op.apply(&mut cpu);
+        }
+        let (_, _, gpu) = c.effect_image(&frame, &LayerFx { size: (w, h), decimation: 1, ops }).expect("effect image");
+        let (worst, flips) = compare(&cpu.px, &gpu);
+        eprintln!("{what}: max rel diff {worst:.2e}, {:.3}% flipped", flips * 100.0);
+        assert!(worst < EXACT * 4.0 && flips < 0.001, "{what}: {worst}, {flips}");
+    }
+    // opacity masks after an effect
+    let ops = vec![
+        FxOp::eval(&effect("gaussian_blur", &[("blurriness", fl(10.0))]), &cx(Tick::ZERO, 1.0), w as usize, h as usize).expect("op"),
+        FxOp::OpacityMask { masks: filmcraft_render::mask::prepare(&[face(8.0), cut], Tick::ZERO, 1.0) },
+    ];
+    assert!(ops.iter().all(FxOp::gpu_ok));
+    let mut cpu = filmcraft_render::Image { w: w as usize, h: h as usize, px: px.clone() };
+    for op in &ops {
+        op.apply(&mut cpu);
+    }
+    let (_, _, gpu) = c.effect_image(&frame, &LayerFx { size: (w, h), decimation: 1, ops }).expect("effect image");
+    let (worst, flips) = compare(&cpu.px, &gpu);
+    eprintln!("opacity masks: max rel diff {worst:.2e}, {:.3}% flipped", flips * 100.0);
+    assert!(worst < EXACT * 4.0 && flips < 0.001, "opacity masks: {worst}, {flips}");
+    // what the GPU stage does not take stays on the CPU
+    let bad =
+        filmcraft_render::mask::FlatMask { pts: vec![[f32::NAN, 0.0]; 3], feather: 0.0, expansion: 0.0, opacity: 1.0, inverted: false, mode: MaskMode::Add };
+    assert!(!FxOp::OpacityMask { masks: vec![bad] }.gpu_ok());
+    assert!(!FxOp::OpacityMask { masks: vec![] }.gpu_ok());
+    let huge = filmcraft_render::mask::FlatMask {
+        pts: vec![[1.0, 1.0]; filmcraft_render::gpufx::GPU_MASK_POINTS + 1],
+        feather: 0.0,
+        expansion: 0.0,
+        opacity: 1.0,
+        inverted: false,
+        mode: MaskMode::Add,
+    };
+    assert!(!FxOp::OpacityMask { masks: vec![huge] }.gpu_ok());
+}
+
 /// Keyframed parameters are evaluated at the layer's time on the CPU: the GPU result follows them.
 #[test]
 fn keyframed_effects_follow_time() {

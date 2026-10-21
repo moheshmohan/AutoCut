@@ -5,11 +5,12 @@
 //! pixels, an opacity and a blend mode (all 27 of [`Blend`] are composited by the GPU). A media
 //! clip whose enabled standard effects all have a GPU implementation ([`crate::gpufx`]) carries
 //! them as a [`LayerFx`]: their parameters evaluated at the frame's time, run by the GPU on the
-//! clip's working image before Motion places it, in the CPU's order (effects → Motion → Opacity /
-//! blend). Anything the shaders don't cover yet — other standard effects, masks, adjustment
-//! layers, nested sequences, transitions other than dissolves, dips, Push and the shader
-//! transitions — is rendered on the CPU for that layer (or the whole frame) and handed over as a
-//! pre-composited image, so the GPU path is always exact with respect to the CPU reference.
+//! clip's working image before Motion places it, in the CPU's order (effects, each limited to its
+//! masks → opacity masks → Motion → Opacity / blend). Anything the shaders don't cover yet — other
+//! standard effects, adjustment layers, nested sequences, transitions other than dissolves, dips,
+//! Push and the shader transitions — is rendered on the CPU for that layer (or the whole frame)
+//! and handed over as a pre-composited image, so the GPU path matches the CPU reference; what
+//! went to the CPU is counted by reason in [`cpu_work`] (`docs/gpu.md`).
 //!
 //! A Push or shader transition ([`crate::transitions::shader`], the GL Transitions) is planned as
 //! ordered [`PlanStep`] operations on isolated clip inputs: each side is drawn into its own image,
@@ -167,6 +168,60 @@ fn cpu_frame(img: crate::Image) -> Arc<VideoFrame> {
     Arc::new(VideoFrame::rgba_f32(img.w as u32, img.h as u32, img.px))
 }
 
+/// What GPU plans left to the CPU, by reason: process-wide counts since the start (`perf.stats`
+/// `export.gpu.cpuWork`, `docs/gpu.md`). A whole frame counts once per plan (`frame: …`), a layer
+/// rendered on the CPU and handed to the GPU as an image once per frame it is in (`layer: …`).
+pub mod cpu_work {
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, PoisonError};
+
+    static COUNTS: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+
+    pub fn note(reason: String) {
+        let mut g = COUNTS.lock().unwrap_or_else(PoisonError::into_inner);
+        let n = g.entry(reason).or_insert(0);
+        *n = n.saturating_add(1);
+    }
+
+    /// The counts by reason.
+    pub fn counts() -> BTreeMap<String, u64> {
+        COUNTS.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// Start counting again from zero.
+    pub fn reset() {
+        COUNTS.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+}
+
+/// Why [`plan_frame`] renders the frame of `seq` at `t` on the CPU ([`whole_frame_on_cpu`]).
+fn whole_frame_reason(seq: &Sequence, t: Tick) -> String {
+    if !seq.settings.color.is_plain() {
+        return "frame: HDR or wide-gamut sequence".into();
+    }
+    for tr in seq.video_tracks.iter().filter(|tr| tr.enabled) {
+        if let Some(trn) = tr.transitions.iter().find(|x| x.range().contains(t))
+            && !simple_transition(&trn.effect.effect)
+            && !two_input_transition(&trn.effect.effect)
+        {
+            return format!("frame: transition {}", trn.effect.effect);
+        }
+    }
+    "frame: adjustment layer".into()
+}
+
+/// Why `item`'s layer is rendered on the CPU (the end of [`push_item`]).
+fn cpu_layer_reason(project: &Project, item: &TrackItem, opts: RenderOptions) -> String {
+    match project.item(item.item).map(|p| &p.kind) {
+        Some(ItemKind::Graphic { .. }) => "layer: graphic with effects or masks".into(),
+        Some(ItemKind::Sequence(_)) => "layer: nested sequence".into(),
+        _ => match gpu_chain(project, item, opts) {
+            Err(why) => why,
+            Ok(_) => "layer: colour-managed (log) media, frame blending, or a parameter or mask the GPU does not take".into(),
+        },
+    }
+}
+
 fn simple_transition(id: &str) -> bool {
     matches!(id, "cross_dissolve" | "dip_to_black" | "dip_to_white")
 }
@@ -176,29 +231,54 @@ fn two_input_transition(id: &str) -> bool {
     id == "push" || crate::transitions::shader::is_shader(id)
 }
 
-/// The standard effects of a media clip if the GPU can draw it (any blend mode, no opacity masks,
-/// every enabled standard effect unmasked and with a GPU implementation; empty without effects or
-/// with effects off). None: the clip is rendered on the CPU.
-fn gpu_chain<'a>(project: &Project, item: &'a TrackItem, opts: RenderOptions) -> Option<Vec<&'a filmcraft_project::EffectInstance>> {
+/// What the GPU effect stage runs for a media clip: its enabled standard effects (each with its
+/// masks, if any) and whether its Opacity effect has masks.
+struct GpuChain<'a> {
+    effects: Vec<&'a filmcraft_project::EffectInstance>,
+    opacity_masks: bool,
+}
+
+/// The standard effects of a media clip if the GPU can draw it (any blend mode, every enabled
+/// standard effect with a GPU implementation, masked or not; no effects with effects off), and
+/// whether its opacity is masked. Err: the clip is rendered on the CPU, and why.
+fn gpu_chain<'a>(project: &Project, item: &'a TrackItem, opts: RenderOptions) -> Result<GpuChain<'a>, String> {
     let is_media = project.item(item.item).is_some_and(|p| matches!(p.kind, ItemKind::Media(_) | ItemKind::Subclip { .. }));
-    if !is_media || item.has_opacity_masks() {
-        return None;
+    if !is_media {
+        return Err("layer: other item".into());
     }
-    if !opts.effects {
-        return Some(Vec::new());
-    }
-    let mut chain = Vec::new();
-    for e in item.effects.iter().filter(|e| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e)) {
-        if !e.enabled {
-            continue;
+    let opacity_masks = item.has_opacity_masks();
+    let mut effects = Vec::new();
+    if opts.effects {
+        for e in item.effects.iter().filter(|e| e.enabled && e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e)) {
+            if !crate::gpufx::GPU_EFFECTS.contains(&e.effect.as_str()) {
+                return Err(format!("layer: effect {}", e.effect));
+            }
+            effects.push(e);
         }
-        let masked = e.masks.iter().any(|m| m.mode != filmcraft_project::MaskMode::None);
-        if masked || !crate::gpufx::GPU_EFFECTS.contains(&e.effect.as_str()) {
-            return None;
-        }
-        chain.push(e);
     }
-    Some(chain)
+    Ok(GpuChain { effects, opacity_masks })
+}
+
+/// The GPU ops of a clip's effects ([`GpuChain`]) for a working image of `w` × `h` (`cx`), in the
+/// CPU's order: each effect (limited to its masks), then the opacity masks. None when one of them
+/// is not something the GPU stage reproduces.
+fn gpu_ops(chain: &GpuChain<'_>, item: &TrackItem, cx: &crate::effects::FxCtx, w: usize, h: usize) -> Option<Vec<FxOp>> {
+    let mut ops = Vec::with_capacity(chain.effects.len() + 1);
+    for e in &chain.effects {
+        let op = FxOp::eval(e, cx, w, h)?;
+        let op = match e.masks.iter().any(|m| m.mode != filmcraft_project::MaskMode::None) {
+            true => FxOp::Masked { op: Box::new(op), masks: crate::mask::prepare(&e.masks, cx.t, cx.px_scale) },
+            false => op,
+        };
+        ops.push(op.gpu_ok().then_some(op)?);
+    }
+    if chain.opacity_masks
+        && let Some(o) = item.effect("opacity")
+    {
+        let op = FxOp::OpacityMask { masks: crate::mask::prepare(&o.masks, cx.t, cx.px_scale) };
+        ops.push(op.gpu_ok().then_some(op)?);
+    }
+    Some(ops)
 }
 
 /// Plan the frame at timeline `t`.
@@ -206,6 +286,7 @@ pub fn plan_frame(project: &Project, seq_id: ItemId, t: Tick, opts: RenderOption
     let Some(seq) = project.sequence(seq_id) else { return FramePlan::Image(crate::Image::new(1, 1)) };
     let (w, h) = output_size(seq, opts.scale);
     if whole_frame_on_cpu(project, seq, t) {
+        cpu_work::note(whole_frame_reason(seq, t));
         return FramePlan::Image(crate::render_sequence(project, seq_id, t, opts, sources));
     }
     let mut layers = PlanStack::default();
@@ -228,6 +309,16 @@ pub fn plan_frame(project: &Project, seq_id: ItemId, t: Tick, opts: RenderOption
 /// pool) can render it on the CPU without taking one.
 pub fn is_cpu_frame(project: &Project, seq_id: ItemId, t: Tick) -> bool {
     project.sequence(seq_id).is_none_or(|seq| whole_frame_on_cpu(project, seq, t))
+}
+
+/// Count the frame at `t` in [`cpu_work`] with the reason [`is_cpu_frame`] holds for it (a caller
+/// that renders such a frame on the CPU without planning it).
+pub fn note_cpu_frame(project: &Project, seq_id: ItemId, t: Tick) {
+    let why = match project.sequence(seq_id) {
+        Some(seq) => whole_frame_reason(seq, t),
+        None => "frame: no sequence".into(),
+    };
+    cpu_work::note(why);
 }
 
 /// The frames [`plan_frame`] does not plan: an HDR / wide-gamut sequence composites and converts
@@ -414,12 +505,13 @@ fn push_item(
         let Some(size) = crate::source_size(project, item.item) else { return };
         let (w, h) = output_size(seq, opts.scale);
         let m = Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion_matrix(seq, item, size, None, mt));
+        cpu_work::note("layer: graphic (text and shapes rasterised on the CPU)".into());
         if let Some((img, x, y)) = crate::graphic_clip::render_graphic_tight(item, mt, size, &m, w, h) {
             out.push(PlanLayer::new(cpu_frame(img), Affine::translate(x as f64, y as f64), op * extra_opacity, bl));
         }
         return;
     }
-    if let Some(chain) = gpu_chain(project, item, opts) {
+    if let Ok(chain) = gpu_chain(project, item, opts) {
         let Some(src) = sources.source(item.item) else { return };
         let Some(size) = crate::source_size(project, item.item) else { return };
         let motion = motion_matrix(seq, item, size, crate::source_par(project, item.item), mt);
@@ -436,7 +528,7 @@ fn push_item(
         let input = if crate::colorman::needs_management(pipe, cs, &frame) { crate::colorman::gpu_input(project, item.item, pipe, cs, &frame) } else { None };
         let plain =
             (input.is_some() || !crate::colorman::needs_management(pipe, cs, &frame)) && crate::interpolation_blend(item, t, src.info().frame_rate()).is_none();
-        if plain && !chain.is_empty() {
+        if plain && !(chain.effects.is_empty() && !chain.opacity_masks) {
             // GPU effect stage: the working image the CPU would decode (`base_layer`), the
             // effects evaluated for it, placed as `item_layer` places it
             let n = crate::decimation(frame.width as f32, size.0 as f32 * want);
@@ -454,8 +546,7 @@ fn push_item(
                 frame_rate: seq.settings.frame_rate.as_f64(),
                 working: seq.settings.color.working,
             };
-            let ops: Option<Vec<FxOp>> = chain.iter().map(|e| FxOp::eval(e, &cx, lw, lh).filter(FxOp::gpu_ok)).collect();
-            if let Some(ops) = ops {
+            if let Some(ops) = gpu_ops(&chain, item, &cx, lw, lh) {
                 let m = Affine::scale(opts.scale as f64, opts.scale as f64)
                     .then_apply(&motion)
                     .then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
@@ -480,6 +571,7 @@ fn push_item(
         }
     }
     // CPU-rendered layer (standard effects): drawn by the GPU as a pre-rendered canvas image.
+    cpu_work::note(cpu_layer_reason(project, item, opts));
     let tc = filmcraft_time::format_time(t, seq.settings.frame_rate, seq.settings.drop_frame, filmcraft_time::TimeDisplay::Timecode, 48_000);
     if let Some((img, op2, _)) = crate::item_layer(project, seq, item, t, opts, sources, &tc) {
         out.push(PlanLayer::new(cpu_frame(img), Affine::IDENTITY, op2 * extra_opacity, bl));

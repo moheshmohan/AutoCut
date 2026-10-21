@@ -1008,6 +1008,14 @@ impl GpuCompositor {
         match plan {
             FramePlan::Composite { width, height, steps } => {
                 if !self.steps_on_gpu(*width, *height, steps) {
+                    let ids: Vec<&str> = steps
+                        .iter()
+                        .filter_map(|s| match s {
+                            PlanStep::Transition { effect, .. } => Some(effect.effect.as_str()),
+                            PlanStep::Layers(_) => None,
+                        })
+                        .collect();
+                    filmcraft_render::plan::cpu_work::note(format!("frame: transition {} not drawn by this GPU (or its flow field missing)", ids.join(", ")));
                     return None;
                 }
                 self.draw_steps(*width, *height, steps, prep, false);
