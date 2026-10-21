@@ -393,7 +393,8 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
 ### 5.1 Audio mixer
 
 ```text
-clip: gain → clip effects → Volume / Channel Volume / Panner (clip keyframes, media time)
+clip: speed (varispeed, or time-stretched with Maintain Audio Pitch) → gain → clip effects
+      → Volume / Channel Volume / Panner (clip keyframes, media time)
       → audio transitions → summed per track                           render::audio::track_input
 track / submix strip:  input map, mono fold → pre-fader inserts → pre-fader sends → mute
       → fader (volume) → meter → post-fader inserts → post-fader sends → pan / balance → output
@@ -417,6 +418,17 @@ Mix:  bus sum → pre-fader inserts → fader → meter → post-fader inserts �
   tracks and sends use balance. Solo keeps soloed and solo-safe strips plus everything feeding them
   or fed by them. 24 tracks × (EQ + Dynamics + Studio Reverb) + a compressed submix renders at
   ~6× realtime on one core (release).
+- **Speed and pitch** (`render::audio`). A clip at another speed plays varispeed (resampled, so
+  its pitch follows the speed) unless Speed/Duration's **Maintain Audio Pitch** is on
+  (`TrackItem::maintain_pitch`, `clip.speedDuration` / `timeline.rateStretch` `maintainPitch`, the
+  dialog's checkbox, FCPXML `timeMap preservesPitch`): then 1/16…16× (designed for 0.25…4×) is
+  time-stretched at its own pitch by WSOLA (`audio_dsp::stretch`; the same splice points for every
+  channel), reversed clips included. The stretch is a pure function of the output position — its
+  chain of splice choices restarts every 1.92 s and is bridged across — so any request, in any
+  order and size, gives the same samples; its output 0 is where the clip's media in playback order
+  would start, which a clip lengthened into its handles for a transition keeps. Stretchers are
+  cached by source content, stream, speed, direction, origin, rate and width; the audio preview
+  hash covers the flag. Frame holds, remixed clips and other speeds play varispeed.
 - **Automation modes** (Premiere semantics). Off ignores lanes; Read plays them; Latch records from
   the first touch and holds the last value until playback stops; Touch records while held and ramps
   back to the existing automation over the **automatch time** (Preferences ▸ Audio, 1 s); Write
@@ -815,4 +827,5 @@ native menus) in `apps/filmcraft`. [roadmap.md](roadmap.md) has the milestone st
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-21 | minor | §5.1 Speed and pitch: Maintain Audio Pitch (WSOLA time stretch in render::audio) |
 | 2026-10-10 | trivial | Status line and revision history added (craftrules progress-docs standard); milestone link points at docs/roadmap.md |
