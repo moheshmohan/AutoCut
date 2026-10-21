@@ -26,6 +26,7 @@ pub mod doc_path;
 pub mod elements;
 pub mod essential_sound;
 pub mod export_tools;
+pub mod feedback;
 pub mod graphic_templates;
 pub mod graphics;
 pub mod graphics_counter;
@@ -239,14 +240,38 @@ pub struct History {
     /// Key of the last [`Session::edit_merged`] step: a continuous gesture (a fader drag) with the
     /// same key folds into that one undo step.
     pub merge_key: Option<String>,
+    /// When undo steps were made, undone and redone, oldest first (the last
+    /// [`History::LOG_MAX`]; `history.list` `log`, the feedback bundle).
+    pub log: Vec<HistoryEvent>,
+}
+
+/// One entry of [`History::log`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HistoryEvent {
+    /// Milliseconds since the Unix epoch.
+    pub unix_ms: u64,
+    /// `edit`, `group` (several edits made one step), `undo` or `redo`.
+    pub action: &'static str,
+    pub label: String,
 }
 
 impl History {
+    /// Most entries [`History::log`] keeps.
+    pub const LOG_MAX: usize = 500;
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+    /// Record an undo-history event now.
+    pub fn record(&mut self, action: &'static str, label: &str) {
+        let unix_ms = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)).unwrap_or(0);
+        self.log.push(HistoryEvent { unix_ms, action, label: label.chars().take(200).collect() });
+        if self.log.len() > Self::LOG_MAX {
+            let extra = self.log.len() - Self::LOG_MAX;
+            self.log.drain(..extra);
+        }
     }
 }
 
@@ -972,6 +997,7 @@ impl Session {
         }
         self.history.redo.clear();
         self.history.merge_key = None;
+        self.history.record("edit", label);
         self.state = st;
         self.drop_stale_gap();
         self.bump();
@@ -1025,6 +1051,7 @@ impl Session {
                     self.history.undo.remove(0);
                 }
                 self.history.merge_key = None;
+                self.history.record("group", label);
                 Ok(v)
             }
             (Ok(Ok(v)), None) => Ok(v),
@@ -1111,6 +1138,7 @@ impl Session {
     pub fn undo(&mut self) -> Option<String> {
         let (label, prev) = self.history.undo.pop()?;
         self.history.merge_key = None;
+        self.history.record("undo", &label);
         let cur = std::mem::replace(&mut self.project, prev);
         self.history.redo.push((label.clone(), cur));
         self.fix_state();
@@ -1121,6 +1149,7 @@ impl Session {
     pub fn redo(&mut self) -> Option<String> {
         let (label, next) = self.history.redo.pop()?;
         self.history.merge_key = None;
+        self.history.record("redo", &label);
         let cur = std::mem::replace(&mut self.project, next);
         self.history.undo.push((label.clone(), cur));
         self.fix_state();

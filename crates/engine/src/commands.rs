@@ -3495,9 +3495,12 @@ fn build() -> Vec<CommandSpec> {
             r#"{"kind":"Video"|"Audio"|"VideoTransition"|"AudioTransition"?,"folder":"Video Transitions/Wipe"?,"query":"text (name or transition keyword)"?,"detail":bool?}"#,
             |_, p| Ok(list_effects(p))
         ),
-        query!("history.list", "List History", "{}", |s, _| Ok(
-            json!({"undo": s.history.undo.iter().map(|h| &h.0).collect::<Vec<_>>(), "redo": s.history.redo.iter().map(|h| &h.0).collect::<Vec<_>>()})
-        )),
+        query!("history.list", "List History", "{}", |s, _| Ok(json!({
+            "undo": s.history.undo.iter().map(|h| &h.0).collect::<Vec<_>>(),
+            "redo": s.history.redo.iter().map(|h| &h.0).collect::<Vec<_>>(),
+            // when steps were made, undone and redone (the last 50; the feedback bundle has more)
+            "log": s.history.log.iter().rev().take(50).rev().collect::<Vec<_>>(),
+        }))),
     ];
     crate::sequence_tools::splice(&mut v);
     v.extend(crate::captions::commands());
@@ -3518,6 +3521,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::proxies::commands());
     v.extend(crate::project_manager::commands());
     v.extend(crate::masks::commands());
+    v.extend(crate::feedback::commands());
     v.extend(crate::presets::commands());
     v.extend(crate::export_tools::commands());
     v.extend(crate::transcript::commands());
