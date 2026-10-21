@@ -5,7 +5,9 @@ A round takes the previous round's reviewed plan, the new clips added to the Goo
 and the review notes, and produces the English and Malayalam videos, checked, uploaded to the album
 and exported in 4K. Everything below is `filmcraft-cli` (build it with `cargo build --release -p
 filmcraft-cli`; the binary is `target/release/filmcraft-cli`). How each piece works:
-[crates/autocut/README.md](../crates/autocut/README.md); every flag: `filmcraft-cli help`.
+[crates/autocut/README.md](../crates/autocut/README.md); every flag: `filmcraft-cli help`. The
+whole pipeline, from the album to YouTube and Instagram, with this show as the worked example:
+[video-pipeline.md](video-pipeline.md).
 
 ## Before the first round (once)
 

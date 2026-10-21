@@ -1,16 +1,17 @@
-# AutoCut projects
+# AutoCut examples
 
-The working files of videos made with AutoCut, kept apart from the product code on `main`.
-No media lives here: the clips are in Google Photos (and AutoCut's cache), the exports and
-`.fcproj` projects in `~/Movies/AutoCut/`.
+The working files of real videos made with AutoCut, kept as worked examples for
+[docs/video-pipeline.md](../docs/video-pipeline.md). No media lives here: the clips are in Google
+Photos (and AutoCut's cache), the exports and `.fcproj` projects in `~/Movies/AutoCut/`.
 
 ## every-robot — "Every Robot I've Met" (H4hacks)
 
-Final: Malayalam narration in the cloned voice, 4K, speech-first mix, uploaded private to
-H4hacks on 2026-10-21 (https://www.youtube.com/watch?v=7FYPOxDYWBc), Malayalam subtitles added
-in YouTube Studio.
+Final: Malayalam narration in the cloned voice, 4K, speech-first mix, on YouTube
+(https://www.youtube.com/watch?v=7FYPOxDYWBc) with Malayalam subtitles; a 34-second Instagram Reel
+trailer.
 
 - `v5/` — the inputs of the final:
+  - `report-robots.json`: the clip analysis (`analyze robot`) the builds read;
   - `plan-v5.json`, `plan-v5-ml.json`: the showcase plans (English, Malayalam);
   - `build_plan_v5.py`: wrote them from the v4 plan and the v5 review notes
     (`filmcraft-cli showcase-plan` now does this from a notes file);
@@ -20,9 +21,8 @@ in YouTube Studio.
   - `ref-transcript.json`: the voice reference's transcript (from Gemini);
   - `youtube-final.json`: title, description, tags;
   - `every-robot-ml-2.srt`: the subtitles uploaded to Studio;
-  - `build-final2-ml.log`: the final build's log.
+  - `build-final2-ml.json`, `build-final2-ml.log`: the final build's report (the trailer reads it)
+    and log.
 - `final/` — the final's chapters, subtitles, QA and narration-check reports.
+- `reel/` — the trailer's Instagram caption and QA.
 - `history/` — the v3 and v4 plans and the researched robot facts.
-
-Rebuild or revise: `docs/showcase-runbook.md` on `main` (`showcase-plan` with a notes file, then
-`showcase --languages ml --resolution 4k`).
