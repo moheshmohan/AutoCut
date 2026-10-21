@@ -3,6 +3,12 @@
 use filmcraft_geom::Affine;
 use rayon::prelude::*;
 
+/// The two pixels of eight floats.
+#[inline]
+fn split4(p: [f32; 8]) -> ([f32; 4], [f32; 4]) {
+    ([p[0], p[1], p[2], p[3]], [p[4], p[5], p[6], p[7]])
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Image {
     pub w: usize,
@@ -93,20 +99,30 @@ impl Image {
             let m2 = m.then_apply(&Affine::scale(2.0, 2.0));
             return half.transformed(w, h, &m2);
         }
-        let mut out = Image::new(w, h);
+        let Some(len) = w.checked_mul(h).and_then(|n| n.checked_mul(4)).filter(|_| w > 0 && h > 0) else { return Image::new(w, h) };
+        // Every sample is written below (zero where nothing lands), so a recycled buffer serves
+        // without the zero-fill: at 4K a placed clip's layer is 133 MB to clear per frame.
+        let mut out = Image { w, h, px: filmcraft_frame::pool::take_f32_overwritten(len) };
         // Destination bounds of the source rect, to skip empty rows/cols.
         let b = m.bounds(&filmcraft_geom::Rect::new(0.0, 0.0, self.w as f64, self.h as f64));
         let y0 = (b.y.floor().max(0.0) as usize).min(h);
         let y1 = (b.bottom().ceil().max(0.0) as usize).min(h);
         let x0 = (b.x.floor().max(0.0) as usize).min(w);
-        let x1 = (b.right().ceil().max(0.0) as usize).min(w);
+        let x1 = (b.right().ceil().max(0.0) as usize).min(w).max(x0);
         let axis_aligned = m.b == 0.0 && m.c == 0.0;
-        out.px.par_chunks_mut(w * 4).enumerate().skip(y0).take(y1.saturating_sub(y0)).for_each(|(y, row)| {
-            let py = y as f64 + 0.5;
-            if axis_aligned {
-                self.scaled_row(row, x0..x1, py, &inv);
+        // Without rotation every row samples the same source columns with the same weights.
+        let cols = if axis_aligned { self.column_taps(x0..x1, &inv) } else { Vec::new() };
+        out.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+            if y < y0 || y >= y1 {
+                row.fill(0.0);
                 return;
             }
+            let py = y as f64 + 0.5;
+            if axis_aligned {
+                self.scaled_row(row, x0, &cols, py, &inv);
+                return;
+            }
+            row.fill(0.0);
             for x in x0..x1 {
                 let px = x as f64 + 0.5;
                 let (u, v) =
@@ -121,13 +137,33 @@ impl Image {
         out
     }
 
+    /// The source column and horizontal weight each destination column `xs` of an axis-aligned
+    /// [`Self::transformed`] samples (`None`: nothing lands there), worked out as
+    /// [`Self::sample_bilinear`] does.
+    fn column_taps(&self, xs: std::ops::Range<usize>, inv: &Affine) -> Vec<Option<(isize, f32)>> {
+        xs.map(|x| {
+            let px = x as f64 + 0.5;
+            let u = inv.a * px + inv.e;
+            if u < -1.0 || u > self.w as f64 + 1.0 {
+                return None;
+            }
+            let fx = u as f32 - 0.5;
+            let x0 = fx.floor();
+            Some((x0 as isize, fx - x0))
+        })
+        .collect()
+    }
+
     /// One row of [`Self::transformed`] for a transform without rotation or shear (Motion's scale and
     /// position, what every placed clip has): the source rows and the vertical weight are the same
-    /// for the whole row, so they are found once instead of per pixel. The arithmetic is
-    /// [`Self::sample_bilinear`]'s, so the pixels are the same to the bit.
-    fn scaled_row(&self, row: &mut [f32], xs: std::ops::Range<usize>, py: f64, inv: &Affine) {
+    /// for the whole row, so they are found once instead of per pixel, and the columns' taps
+    /// (`cols`, from destination column `x0`) once for the whole image. The arithmetic is
+    /// [`Self::sample_bilinear`]'s, so the pixels are the same to the bit. Every sample of `row` is
+    /// written (zero where nothing lands).
+    fn scaled_row(&self, row: &mut [f32], x0: usize, cols: &[Option<(isize, f32)>], py: f64, inv: &Affine) {
         let v = inv.d * py + inv.f;
         if v < -1.0 || v > self.h as f64 + 1.0 {
+            row.fill(0.0);
             return;
         }
         let fy = v as f32 - 0.5;
@@ -143,18 +179,25 @@ impl Image {
                 _ => [0.0; 4],
             }
         };
-        for x in xs {
-            let px = x as f64 + 0.5;
-            let u = inv.a * px + inv.e;
-            if u < -1.0 || u > self.w as f64 + 1.0 {
+        // two neighbouring source pixels at once, when both are inside the row
+        let pair = |r: Option<&[f32]>, x: isize| -> Option<[f32; 8]> {
+            let i = usize::try_from(x).ok()?.checked_mul(4)?;
+            r?.get(i..i.checked_add(8)?).and_then(|p| <[f32; 8]>::try_from(p).ok())
+        };
+        let x1 = x0.saturating_add(cols.len()).min(row.len() / 4);
+        let (left, rest) = row.split_at_mut((x0 * 4).min(row.len()));
+        left.fill(0.0);
+        let (mid, right) = rest.split_at_mut((x1.saturating_sub(x0) * 4).min(rest.len()));
+        right.fill(0.0);
+        for (o, col) in mid.as_chunks_mut::<4>().0.iter_mut().zip(cols) {
+            let Some((sx, tx)) = *col else {
+                *o = [0.0; 4];
                 continue;
-            }
-            let fx = u as f32 - 0.5;
-            let x0 = fx.floor();
-            let tx = fx - x0;
-            let x0 = x0 as isize;
-            let (a, b, c, d) = (tap(top, x0), tap(top, x0 + 1), tap(bottom, x0), tap(bottom, x0 + 1));
-            let Some(o) = row.get_mut(x * 4..x * 4 + 4) else { continue };
+            };
+            let ((a, b), (c, d)) = match (pair(top, sx), pair(bottom, sx)) {
+                (Some(t), Some(u)) => (split4(t), split4(u)),
+                _ => ((tap(top, sx), tap(top, sx + 1)), (tap(bottom, sx), tap(bottom, sx + 1))),
+            };
             for k in 0..4 {
                 let t = a[k] + (b[k] - a[k]) * tx;
                 let b2 = c[k] + (d[k] - c[k]) * tx;
@@ -355,5 +398,34 @@ mod tests {
             let got = img.transformed(64, 40, &m);
             assert!(got.px.iter().zip(&want.px).all(|(a, b)| a.to_bits() == b.to_bits()), "{m:?}");
         }
+    }
+
+    /// The resampled image comes from the float pool with whatever its buffer held: every sample
+    /// is still written, so a buffer full of NaN gives the same bits as a zeroed one, placed,
+    /// rotated, off the frame or not.
+    #[test]
+    fn transformed_writes_every_sample_of_a_recycled_buffer() {
+        let (sw, sh) = (41usize, 29usize);
+        let img = Image { w: sw, h: sh, px: (0..sw * sh * 4).map(|i| ((i * 104_729) % 1000) as f32 / 999.0).collect() };
+        let (w, h) = (130usize, 90usize);
+        let cases = [
+            Affine::scale(2.0, 2.0),
+            Affine::scale(3.1, 3.1).then_apply(&Affine::translate(-7.3, 2.2)),
+            Affine::scale(1.3, 0.9).then_apply(&Affine::translate(100.0, 70.0)),
+            Affine::rotate_deg(17.0).then_apply(&Affine::translate(30.0, 5.0)),
+            Affine::translate(-500.0, 0.0),
+            Affine::translate(0.0, 1e6),
+        ];
+        for m in cases {
+            let want = transformed_per_pixel(&img, w, h, &m);
+            for _ in 0..3 {
+                filmcraft_frame::pool::recycle_f32(vec![f32::NAN; w * h * 4]);
+            }
+            let got = img.transformed(w, h, &m);
+            assert!(got.px.iter().zip(&want.px).all(|(a, b)| a.to_bits() == b.to_bits()), "{m:?}");
+        }
+        // degenerate sizes give an empty image, not a panic
+        assert_eq!(img.transformed(0, 5, &Affine::IDENTITY).px.len(), 0);
+        assert_eq!(img.transformed(5, 0, &Affine::IDENTITY).px.len(), 0);
     }
 }
