@@ -181,6 +181,57 @@ fn media_beats_gives_the_tempo_and_beat_times_of_an_item() {
     assert!(s.execute("media.beats", json!({"item": item.0, "sourceIn": Tick::from_seconds_f64(31.0).0})).is_err(), "a second has too few beats");
 }
 
+/// `media.pauses` finds where a "narration" pauses between its "sentences" (bursts of tone with
+/// silences between them), in seconds of the media, inside a range; hostile parameters are errors.
+#[test]
+fn media_pauses_finds_the_silences_between_sentences() {
+    // 0.3 s quiet, 2 s of sound, 0.6 s pause, 1.5 s of sound with a 0.1 s gap in it, 0.5 s pause,
+    // 1 s of sound, quiet to 6 s
+    let sound = [(0.3, 2.3), (2.9, 3.6), (3.7, 4.4), (4.9, 5.9)];
+    let n = (6.0 * SR as f64) as usize;
+    let tone: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f64 / SR as f64;
+            if sound.iter().any(|(a, b)| t >= *a && t < *b) { (0.3 * (t * 2.0 * std::f64::consts::PI * 220.0).sin()) as f32 } else { 0.0 }
+        })
+        .collect();
+    let (mut s, c) = session(&[tone.clone(), tone], None);
+    let item = item(&s, c).item;
+    let r = s.execute("media.pauses", json!({"item": item.0})).unwrap();
+    let span = |v: &Value| (v["start"].as_f64().unwrap(), v["end"].as_f64().unwrap());
+    let pauses: Vec<(f64, f64)> = r["pauses"].as_array().unwrap().iter().map(span).collect();
+    assert_eq!(pauses.len(), 2, "the 0.1 s gap is not a pause: {r}");
+    for ((a, b), (wa, wb)) in pauses.iter().zip([(2.3, 2.9), (4.4, 4.9)]) {
+        assert!((a - wa).abs() < 0.06 && (b - wb).abs() < 0.06, "{a}–{b} for {wa}–{wb}");
+    }
+    let sound_spans = r["sound"].as_array().unwrap();
+    assert_eq!(sound_spans.len(), 3);
+    assert!((span(&sound_spans[0]).0 - 0.3).abs() < 0.06, "{r}");
+    // a range: times stay in the media's seconds
+    let r = s.execute("media.pauses", json!({"item": item.0, "sourceIn": Tick::from_seconds_f64(2.0).0, "duration": Tick::from_seconds_f64(3.0).0})).unwrap();
+    let pauses: Vec<(f64, f64)> = r["pauses"].as_array().unwrap().iter().map(span).collect();
+    assert_eq!(pauses.len(), 2, "{r}");
+    assert!((pauses[0].0 - 2.3).abs() < 0.06, "{pauses:?}");
+    // longer pauses only
+    let r = s.execute("media.pauses", json!({"item": item.0, "minSeconds": 0.5})).unwrap();
+    assert_eq!(r["pauses"].as_array().map(Vec::len), Some(1), "{r}");
+    // hostile parameters: errors, never a panic
+    for bad in [
+        json!({}),
+        json!({"item": 999_999}),
+        json!({"item": item.0, "sourceIn": i64::MAX}),
+        json!({"item": item.0, "duration": 0}),
+        json!({"item": item.0, "minSeconds": f64::MAX}),
+        json!({"item": item.0, "minSeconds": "long"}),
+        json!({"item": item.0, "belowDb": -5}),
+    ] {
+        assert!(s.execute("media.pauses", bad.clone()).is_err(), "{bad}");
+    }
+    assert!(s.execute("media.pauses", json!({"item": item.0, "sourceIn": -5, "duration": i64::MAX})).is_ok());
+    let seq = s.state.active_sequence.unwrap();
+    assert!(s.execute("media.pauses", json!({"item": seq.0})).is_err(), "a sequence is not audio media");
+}
+
 /// `media.beats` on imported music whose tempo drifts (112 → 128 BPM over 30 s): every beat is
 /// found on its attack, within 10 ms, and the reported tempo is the mean one.
 #[test]

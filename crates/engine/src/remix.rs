@@ -9,6 +9,7 @@
 //! | `clip.remix.revert` | Clip ▸ Remix ▸ Revert Remix | restores the clip as it was before the remix |
 //! | `clip.remix` | — | agents: enable (if needed) and remix `clip` (default: the selected audio clip) to a target |
 //! | `media.beats` | — | agents: the tempo and beat times of an audio item (the same analysis), to cut picture on the beat |
+//! | `media.pauses` | — | agents: where an audio item's sound pauses (its level `belowDb` under its loudest for at least `minSeconds`), and the stretches of sound between: to cut a narration at a sentence's end |
 //!
 //! The remix keeps the clip's start and source In, plays the intro from the beginning and ends on
 //! the source's end; only the duration changes. The clip's linked partners are not changed. When
@@ -274,6 +275,68 @@ fn beats(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
+/// Longest stretch of an item `media.pauses` reads, seconds (held in memory at
+/// [`PAUSES_RATE`]).
+pub const MAX_PAUSES_SECONDS: f64 = 10.0 * 60.0;
+/// The rate `media.pauses` reads the sound at: a level envelope needs no more.
+const PAUSES_RATE: u32 = 16_000;
+/// Its envelope's step and window, seconds.
+const PAUSES_HOP: f32 = 0.01;
+const PAUSES_WINDOW: f32 = 0.05;
+
+/// `media.pauses`: where `item`'s sound pauses over `[sourceIn, sourceIn + duration)` (default:
+/// the whole item, up to [`MAX_PAUSES_SECONDS`]): `pauses` and the stretches of `sound` between
+/// them, `{start, end}` in seconds of the media. A pause is at least `minSeconds` (0.25) where
+/// the level (50 ms RMS) stays more than `belowDb` (30) under the loudest of the stretch; the
+/// silence before the first sound and after the last is not one.
+fn pauses(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "media.pauses";
+    let item = crate::commands::item_p(p, "item").ok_or_else(|| bad(CMD, "need `item`"))?;
+    let it = s.project.item(item).ok_or_else(|| bad(CMD, "no such item"))?;
+    if !matches!(it.kind, filmcraft_project::ItemKind::Media(_)) || !it.has_audio() {
+        return Err(bad(CMD, "the item has no audio media"));
+    }
+    let length = it.duration();
+    let from = Tick(p.get("sourceIn").and_then(Value::as_i64).unwrap_or(0).clamp(0, length.0.max(0)));
+    let most = Tick::from_seconds_f64(MAX_PAUSES_SECONDS);
+    let dur = Tick(p.get("duration").and_then(Value::as_i64).unwrap_or(i64::MAX).clamp(0, (length - from).0.max(0)).min(most.0));
+    if dur.0 <= 0 {
+        return Err(bad(CMD, "nothing to read in that range"));
+    }
+    let num = |k: &str, lo: f64, hi: f64, default: f64| -> Result<f64> {
+        match p.get(k).filter(|v| !v.is_null()) {
+            None => Ok(default),
+            Some(v) => v.as_f64().filter(|f| f.is_finite() && (lo..=hi).contains(f)).ok_or_else(|| bad(CMD, format!("`{k}` is a number from {lo} to {hi}"))),
+        }
+    };
+    let min_pause = num("minSeconds", 0.05, 10.0, 0.25)?;
+    let below = num("belowDb", 6.0, 80.0, 30.0)?;
+    let sr = PAUSES_RATE;
+    let m0 = from.to_units_floor(i64::from(sr));
+    let len = usize::try_from(((from + dur).to_units_floor(i64::from(sr)) - m0).max(0)).unwrap_or(0);
+    let provider = s.media.provider(s.project.clone(), s.services.clone());
+    let src = filmcraft_render::SourceProvider::source(&provider, item).ok_or_else(|| EngineError::Other("the item's media is offline".into()))?;
+    let buf = src.audio(m0, len, sr).map_err(|e| EngineError::Other(format!("reading the item's sound: {e}")))?;
+    let refs: Vec<&[f32]> = buf.channels.iter().map(Vec::as_slice).collect();
+    let env = filmcraft_audio_dsp::ducking::envelope_db(&refs, sr as f32, PAUSES_HOP, PAUSES_WINDOW);
+    let loudest = env.iter().copied().fold(filmcraft_audio_dsp::ducking::FLOOR_DB, f32::max);
+    let at = |x: f64| ((from.seconds() + x) * 1000.0).round() / 1000.0;
+    if loudest <= filmcraft_audio_dsp::ducking::FLOOR_DB + 1.0 {
+        return Ok(json!({"item": item.0, "pauses": [], "sound": [], "seconds": dur.seconds(), "silent": true}));
+    }
+    let threshold = (loudest - below as f32).max(-90.0);
+    // sound: above the threshold, gaps shorter than a pause bridged, blips under 60 ms dropped
+    let sound = filmcraft_audio_dsp::ducking::activity(&env, PAUSES_HOP, threshold, 0.06, min_pause as f32);
+    let pauses: Vec<Value> = sound.windows(2).filter_map(|w| Some((w.first()?.1, w.get(1)?.0))).map(|(a, b)| json!({"start": at(a), "end": at(b)})).collect();
+    Ok(json!({
+        "item": item.0,
+        "pauses": pauses,
+        "sound": sound.iter().map(|(a, b)| json!({"start": at(*a), "end": at(*b)})).collect::<Vec<_>>(),
+        "seconds": dur.seconds(),
+        "loudestDb": (f64::from(loudest) * 10.0).round() / 10.0,
+    }))
+}
+
 /// The tempo and beats of `item`'s sound over `[from, from + dur)`: (bpm, the attack of each
 /// beat in media time). The same analysis as `media.beats`, in exact ticks (video templates
 /// re-quantize their cuts to them).
@@ -351,6 +414,16 @@ pub fn commands() -> Vec<CommandSpec> {
             params: r#"{"item":id,"sourceIn":ticks?,"duration":ticks?}"#,
             enabled: crate::commands::always,
             run: beats,
+            journal: false,
+        },
+        CommandSpec {
+            id: "media.pauses",
+            label: "Pauses in Media",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"item":id,"sourceIn":ticks?,"duration":ticks?,"minSeconds":0.05..10=0.25,"belowDb":6..80=30}"#,
+            enabled: crate::commands::always,
+            run: pauses,
             journal: false,
         },
     ]
