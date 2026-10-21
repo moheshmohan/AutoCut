@@ -31,6 +31,7 @@ pub mod graphics;
 pub mod graphics_counter;
 pub mod instagram;
 pub mod interchange;
+pub mod ken_burns;
 pub mod keyboard;
 mod keyframe_move;
 pub mod loudness;
