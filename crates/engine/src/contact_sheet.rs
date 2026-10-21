@@ -2,7 +2,7 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `media.contactSheet` | frames of media items in one labelled picture (JPEG or PNG at `path`, else `pngBase64`): per item, `n` frames spread evenly over its length (or `from`..`to`), or the exact `at` seconds |
+//! | `media.contactSheet` | frames of media items in one labelled picture (JPEG or PNG at `path`, else `pngBase64`): per item, `n` frames spread evenly over its length (or `from`..`to`), or the exact `at` seconds; a photo (a still) is one tile, labelled with its item alone |
 //!
 //! Each item starts a row (wrapped every `columns` tiles). A tile is the source frame as decoded
 //! ([`crate::media_frame`]: display rotation applied, before any clip effects), its long side
@@ -92,7 +92,7 @@ fn sheet(s: &mut Session, p: &Value) -> Result<Value> {
         Some(_) => return Err(bad(CMD, "`labels` is item or time")),
     };
     // what to decode: (item, times) per row, checked before anything is decoded
-    let mut rows: Vec<(ItemId, Vec<f64>)> = Vec::with_capacity(items.len());
+    let mut rows: Vec<(ItemId, Vec<f64>, bool)> = Vec::with_capacity(items.len());
     for (i, it) in items.iter().enumerate() {
         let id = match it {
             Value::Number(_) => it.as_u64(),
@@ -101,7 +101,10 @@ fn sheet(s: &mut Session, p: &Value) -> Result<Value> {
         .map(ItemId)
         .ok_or_else(|| bad(CMD, format!("items[{i}]: an item id")))?;
         let len = video_length(s, CMD, id)?.seconds();
+        // a photo is one picture: one tile, whatever `n` says
+        let still = s.project.item(id).and_then(|i| i.as_media()).is_some_and(|m| m.info.kind == filmcraft_media::MediaKind::Still);
         let times = match it.get("at").filter(|v| !v.is_null()) {
+            _ if still => vec![0.0],
             Some(Value::Array(a)) if !a.is_empty() && a.len() <= MAX_TILES => a
                 .iter()
                 .map(|t| t.as_f64().filter(|t| t.is_finite() && *t >= 0.0))
@@ -117,7 +120,7 @@ fn sheet(s: &mut Session, p: &Value) -> Result<Value> {
                 spread(a, b, n)
             }
         };
-        rows.push((id, times));
+        rows.push((id, times, still));
     }
     let tiles: usize = rows.iter().map(|r| r.1.len()).sum();
     if tiles > MAX_TILES {
@@ -128,7 +131,7 @@ fn sheet(s: &mut Session, p: &Value) -> Result<Value> {
     // sheet as laid out stays within its pixel budget
     let mut plan: Vec<(f64, f64)> = rows
         .iter()
-        .map(|(id, _)| {
+        .map(|(id, _, _)| {
             let (w, h) = s.project.source_size(*id).filter(|(w, h)| *w > 0 && *h > 0).unwrap_or((1920, 1080));
             let want = match scale {
                 Some(k) => (f64::from(w.max(h)) * k).round(),
@@ -139,7 +142,7 @@ fn sheet(s: &mut Session, p: &Value) -> Result<Value> {
         .collect();
     let dims = |want: f64, aspect: f64| if aspect >= 1.0 { (want, want / aspect) } else { (want * aspect, want) };
     let (mut sheet_w, mut sheet_h) = (0.0f64, 0.0f64);
-    for ((_, times), (want, aspect)) in rows.iter().zip(&plan) {
+    for ((_, times, _), (want, aspect)) in rows.iter().zip(&plan) {
         let (w, h) = dims(*want, *aspect);
         let full = times.len().div_ceil(per);
         sheet_w = sheet_w.max(times.len().min(per) as f64 * (w + f64::from(GAP)));
@@ -154,11 +157,15 @@ fn sheet(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let mut made: Vec<Vec<Tile>> = Vec::with_capacity(rows.len());
     let mut report = Vec::with_capacity(tiles);
-    for ((id, times), (want, aspect)) in rows.iter().zip(&plan) {
+    for ((id, times, still), (want, aspect)) in rows.iter().zip(&plan) {
         let want = want.round() as u32;
         let mut row = Vec::with_capacity(times.len());
         for t in times {
-            let label = if only_time { stamp(*t) } else { format!("#{} {}", id.0, stamp(*t)) };
+            let label = match (only_time, *still) {
+                (_, true) => format!("#{}", id.0),
+                (true, false) => stamp(*t),
+                (false, false) => format!("#{} {}", id.0, stamp(*t)),
+            };
             match decode(s, CMD, *id, Some(*t), want) {
                 Ok(d) => {
                     report.push(json!({"item": id.0, "seconds": d.seconds, "ok": true}));
@@ -397,6 +404,22 @@ mod tests {
         assert!(f64::from(w) * f64::from(h) <= MAX_PIXELS * 1.5, "{w}x{h}");
         let (w, h) = png_size(&r);
         assert!(f64::from(w) * f64::from(h) <= MAX_PIXELS * 1.5, "{w}x{h}");
+    }
+
+    #[test]
+    fn a_photo_is_one_tile() {
+        let mut s = demo();
+        let dir = std::env::temp_dir().join(format!("fc-sheet-photo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("robot.png");
+        image::RgbaImage::from_pixel(60, 90, image::Rgba([200, 30, 30, 255])).save(&path).unwrap();
+        let r = s.execute("file.import", json!({"paths": [path.to_string_lossy()]})).unwrap();
+        let item = r["items"][0].as_u64().unwrap();
+        let r = s.execute(CMD, json!({"items": [{"item": item}, {"item": 5}], "n": 4, "side": 120})).unwrap();
+        let tiles = r["tiles"].as_array().unwrap();
+        assert_eq!(tiles.iter().filter(|t| t["item"] == json!(item)).count(), 1, "{r}");
+        assert_eq!(tiles.len(), 5);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

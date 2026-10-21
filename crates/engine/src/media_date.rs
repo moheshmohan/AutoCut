@@ -2,12 +2,14 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `media.captureDate` | the capture date of media items (all, or `items`): a metadata sidecar (`<file>.json` from the Google Photos picker or Google Takeout), else QuickTime `com.apple.quicktime.creationdate` / `©day` (with the camera's time zone), else the `mvhd` creation time — as RFC 3339 UTC plus Unix seconds |
+//! | `media.captureDate` | the capture date of media items (all, or `items`): a metadata sidecar (`<file>.json` from the Google Photos picker or Google Takeout), else QuickTime `com.apple.quicktime.creationdate` / `©day` (with the camera's time zone), else the `mvhd` creation time, else (a photo) its EXIF `DateTimeOriginal` (with `OffsetTimeOriginal`) — as RFC 3339 UTC plus Unix seconds; a photo's EXIF position as `gps` `[latitude, longitude]` |
 //!
-//! Sidecars are read for any file; embedded metadata only for MP4 / MOV / M4V / 3GP (other
-//! containers report `null`). Google's video downloads are re-encoded without the camera's
-//! metadata, which is why the picker writes the sidecar. Nothing is stored in the project: the
-//! files are the record, so a re-linked file answers for itself.
+//! Sidecars are read for any file; embedded metadata for MP4 / MOV / M4V / 3GP and for photos
+//! (JPEG, TIFF, HEIF; other files report `null`). Google's video downloads are re-encoded without
+//! the camera's metadata, which is why the picker writes the sidecar; its photo downloads keep
+//! their EXIF but not its position (Google takes it out). A photo whose EXIF has no zone is read
+//! as UTC. Nothing is stored in the project: the files are the record, so a re-linked file
+//! answers for itself.
 
 use serde_json::{Value, json};
 
@@ -144,12 +146,48 @@ pub fn sidecar_date(path: &str) -> Option<i64> {
     None
 }
 
-/// `(unix seconds, where it came from)`: a metadata sidecar, else (MP4 family) the file's own
-/// metadata.
+/// Most of a photo's file read for its EXIF: a JPEG's or TIFF's start (the block is near the top),
+/// and a HEIF file whole (its `Exif` item may be anywhere) up to this size.
+#[cfg(not(target_arch = "wasm32"))]
+const PHOTO_HEAD: u64 = 1 << 20;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_HEIF_READ: u64 = 64 << 20;
+
+/// The EXIF of a photo file (JPEG, TIFF or HEIF, by extension); `None` for anything else.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn photo_exif(path: &str) -> Option<filmcraft_media::exif::Exif> {
+    use std::io::Read;
+    let ext = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    let heif = filmcraft_media::HEIF_EXTENSIONS.contains(&ext.as_str());
+    if !heif && !matches!(ext.as_str(), "jpg" | "jpeg" | "jpe" | "tif" | "tiff") {
+        return None;
+    }
+    let f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if heif && len > MAX_HEIF_READ {
+        return None;
+    }
+    let want = if heif { len } else { len.min(PHOTO_HEAD) };
+    let mut bytes = Vec::with_capacity(usize::try_from(want).ok()?);
+    f.take(want).read_to_end(&mut bytes).ok()?;
+    if heif { filmcraft_codecs::heif::exif(&bytes) } else { filmcraft_media::exif::of_file(&bytes) }
+}
+
+/// When a photo was taken, from its EXIF (Unix seconds; a time without a zone read as UTC).
+#[cfg(not(target_arch = "wasm32"))]
+fn exif_date(exif: &filmcraft_media::exif::Exif) -> Option<i64> {
+    parse_iso(&exif.taken_iso()?).filter(|t| *t >= EARLIEST)
+}
+
+/// `(unix seconds, where it came from)`: a metadata sidecar, else the file's own metadata (MP4
+/// family: QuickTime keys or `mvhd`; photos: EXIF).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn file_capture_date(path: &str) -> Option<(i64, &'static str)> {
     if let Some(t) = sidecar_date(path) {
         return Some((t, "sidecar"));
+    }
+    if let Some(t) = photo_exif(path).as_ref().and_then(exif_date) {
+        return Some((t, "exif"));
     }
     let ext = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
     if !matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "3gp" | "qt") {
@@ -170,6 +208,11 @@ pub fn file_capture_date(path: &str) -> Option<(i64, &'static str)> {
 
 #[cfg(target_arch = "wasm32")]
 pub fn file_capture_date(_path: &str) -> Option<(i64, &'static str)> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn photo_exif(_path: &str) -> Option<filmcraft_media::exif::Exif> {
     None
 }
 
@@ -199,12 +242,15 @@ fn capture_dates(s: &mut Session, p: &Value) -> Result<Value> {
             _ => None,
         };
         let found = path.as_deref().and_then(file_capture_date);
+        let still = matches!(&it.kind, ItemKind::Media(m) if m.info.kind == filmcraft_media::MediaKind::Still);
+        let gps = if still { path.as_deref().and_then(photo_exif).and_then(|e| e.gps) } else { None };
         out.push(json!({
             "item": id.0,
             "name": it.name,
             "created": found.map(|(t, _)| rfc3339(t)),
             "unix": found.map(|(t, _)| t),
             "source": found.map(|(_, src)| src),
+            "gps": gps.map(|(la, lo)| [la, lo]),
         }));
     }
     Ok(json!({"items": out}))
@@ -256,6 +302,31 @@ mod tests {
         assert_eq!(sidecar_date(&c), None);
         std::fs::write(format!("{c}.json"), br#"{"created": "1970-01-01T00:00:00Z"}"#).unwrap();
         assert_eq!(sidecar_date(&c), None);
+    }
+
+    #[test]
+    fn photos_date_and_place_from_their_exif() {
+        let d = std::env::temp_dir().join(format!("filmcraft-exif-date-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        let tiff = filmcraft_media::exif::build::block(Some(1), Some("2022:11:02 19:39:53"), Some("+04:00"), Some((25.2, 55.27)));
+        let jpeg = filmcraft_media::exif::build::into_jpeg(&[0xFF, 0xD8, 0xFF, 0xDA, 0, 2, 0xFF, 0xD9], &tiff);
+        let a = d.join("IMG_1.JPG").to_string_lossy().into_owned();
+        std::fs::write(&a, &jpeg).unwrap();
+        assert_eq!(file_capture_date(&a), Some((parse_iso("2022-11-02T15:39:53Z").unwrap(), "exif")));
+        assert!(photo_exif(&a).and_then(|e| e.gps).is_some_and(|(la, lo)| (la - 25.2).abs() < 1e-4 && (lo - 55.27).abs() < 1e-4));
+        // the picker's sidecar (Google's own date) still comes first
+        std::fs::write(format!("{a}.json"), br#"{"created": "2022-11-02T15:39:54Z"}"#).unwrap();
+        assert_eq!(file_capture_date(&a).map(|x| x.1), Some("sidecar"));
+        // a damaged photo has no date, and no panic
+        let b = d.join("bad.jpg").to_string_lossy().into_owned();
+        std::fs::write(&b, &jpeg[..jpeg.len() / 2]).unwrap();
+        assert_eq!(file_capture_date(&b), None);
+        let c = d.join("bad.heic").to_string_lossy().into_owned();
+        let mut heic = 24u32.to_be_bytes().to_vec();
+        heic.extend(b"ftypheic\0\0\0\0mif1heic");
+        std::fs::write(&c, &heic).unwrap();
+        assert_eq!(file_capture_date(&c), None);
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]

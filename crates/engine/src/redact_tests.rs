@@ -118,6 +118,41 @@ fn a_background_copy_shares_the_analysis_and_gets_the_masks_first() {
     }
 }
 
+#[test]
+fn a_photo_is_looked_at_once_and_hidden_for_its_whole_hold() {
+    let dir = tmp_dir("redact-photo");
+    let path = dir.join("visit.png");
+    frame(10).save(&path).unwrap();
+    let mut s = Session::default();
+    let r = s.execute("file.import", json!({"paths": [path.to_string_lossy()]})).unwrap();
+    let item = r["items"][0].as_u64().unwrap_or_else(|| panic!("{r}"));
+    s.execute("file.newSequence", json!({"name": "Photos", "width": W, "height": H, "fps": 25})).unwrap();
+    let four = Tick::from_seconds_f64(4.0).0;
+    let placed = s.execute("timeline.place", json!({"item": item, "track": "V1", "time": 0, "sourceIn": 0, "duration": four, "audio": false})).unwrap();
+    let clip = placed["clips"][0].as_u64().unwrap();
+    // a detector that is not sure of it (0.6): on a photo, seen once is enough
+    s.redacts.detector = Some(Arc::new(|rgba: &[u8], w: usize, h: usize, _: usize| {
+        warm_disc(rgba, w, h)
+            .into_iter()
+            .map(|mut d| {
+                d.score = 0.6;
+                d
+            })
+            .collect()
+    }));
+    let r = s.execute("clip.autoRedact", json!({"clips": [clip], "wait": true, "verify": false})).unwrap();
+    assert_eq!(r["frames"], json!(1), "one look for the whole hold: {r}");
+    assert_eq!(r["redact"]["clips"][0]["faces"], json!(1), "{r}");
+    let seq = s.state.active_sequence.unwrap();
+    let fx = clip_effects(&s, seq, ClipId(clip));
+    let m = &fx.iter().find(|e| is_auto_redaction(e)).unwrap().masks[0];
+    // the same mask from the first frame to the last, never switched off
+    assert!(m.path.keyframes.len() <= 2, "{} path keyframes", m.path.keyframes.len());
+    assert!(m.opacity.keyframes.is_empty(), "{:?}", m.opacity.keyframes);
+    assert_eq!(m.opacity.value, filmcraft_project::ParamValue::Float(100.0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The fake detector: the warm pixels' bounding box as a face.
 fn warm_disc(rgba: &[u8], w: usize, h: usize) -> Vec<Detection> {
     let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
