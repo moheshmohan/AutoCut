@@ -1203,24 +1203,29 @@ impl PhotoMove {
     }
 }
 
+/// A photo whose filling crop keeps at least this share of it always fills the frame: a phone's
+/// 4:3 landscape photo in a 16:9 show (three quarters of its height), as a 4:3 clip does.
+const ALWAYS_FILLS: f64 = 0.74;
+
 /// Whether a photo of shape `aspect` fills a frame of `frame` (cropped, the move aimed at its
-/// subject) rather than being shown whole over its blurred copy: when it is about the frame's
-/// shape, or its subject's box fits in what the crop shows (with a margin). A portrait photo with
-/// no subject found, or a tall robot, is shown whole.
+/// subject) rather than being shown whole over its blurred copy: when the crop keeps most of it
+/// ([`ALWAYS_FILLS`]: a landscape photo in a landscape show), else when its subject's box fits in
+/// what the crop shows (with a margin). A portrait photo with no subject found, or of a tall
+/// robot, is shown whole.
 fn photo_fills(aspect: f64, frame: (f64, f64), subject: Option<[f64; 4]>) -> bool {
     let (fw, fh) = frame;
     if !(aspect.is_finite() && aspect > 0.0 && fw > 0.0 && fh > 0.0) {
         return true;
     }
     let frame_aspect = fw / fh;
-    if (aspect - frame_aspect).abs() <= 0.05 {
-        return true;
-    }
     // the share of the picture's width and height a filling crop shows
     let vis = if aspect < frame_aspect { (1.0, aspect / frame_aspect) } else { (frame_aspect / aspect, 1.0) };
+    if vis.0.min(vis.1) >= ALWAYS_FILLS {
+        return true;
+    }
     match subject {
         Some(b) => b[2] <= vis.0 * 0.92 && b[3] <= vis.1 * 0.92,
-        None => aspect >= 1.0,
+        None => false,
     }
 }
 
@@ -3724,12 +3729,18 @@ mod tests {
         assert!(!photo_fills(0.75, frame, None), "no robot found: the whole photo, over pillars");
         assert!(!photo_fills(0.75, frame, Some([0.3, 0.05, 0.4, 0.9])), "a tall robot would be cut");
         assert!(photo_fills(0.75, frame, Some([0.4, 0.3, 0.2, 0.3])), "a small robot fits the crop");
-        // landscape photos fill
+        // landscape photos fill, as landscape clips do — a phone's 4:3 photo of a robot as tall
+        // as the picture too (the crop keeps three quarters of it; the move aims at the robot)
         assert!(
             photo_fills(4.0 / 3.0, frame, None)
+                && photo_fills(4.0 / 3.0, frame, Some([0.0, 0.0, 1.0, 1.0]))
                 && photo_fills(1.5, frame, Some([0.0, 0.0, 0.5, 0.5]))
                 && photo_fills(16.0 / 9.0, frame, Some([0.0, 0.0, 1.0, 1.0]))
         );
+        // a square photo: as a portrait one (the crop keeps 56 % of it)
+        assert!(!photo_fills(1.0, frame, None) && photo_fills(1.0, frame, Some([0.4, 0.4, 0.2, 0.2])));
+        // a landscape photo in a vertical show: whole unless its robot fits the crop
+        assert!(!photo_fills(16.0 / 9.0, (1080.0, 1920.0), None) && photo_fills(0.75, (1080.0, 1920.0), None));
         assert!(photo_fills(f64::NAN, frame, None) && photo_fills(1.0, (0.0, 0.0), None), "sizes that make no sense: as filled");
     }
 

@@ -349,7 +349,7 @@ video; an entry may still mix them). A photo shot is the plan's shot with `"phot
 |---|---|
 | `"hold": 4.0` | how long it is shown, 1–20 s; without it, its share of the entry's time. When its words need longer, it is held longer (noted), never a second window of it, which would start its move again; it is never slowed, and has no sound |
 | `"move": "in"` | `in` (from wide to the robot), `out`, `pan` (across it at a steady zoom), `none`; without it, the other way from the photo before (in after out, out after in; a pan crosses back from the last pan) |
-| `"fit": "full"` / `"fill"` | `full`: whole over its blurred copy (the pillars of a portrait clip), the picture breathing at most 5 % towards the robot while the copy pushes in; `fill`: the frame filled, the move aimed at the robot. Without it: filled when the photo is the frame's shape or its robot's box fits in what a crop shows (with a margin), else whole — a portrait photo of a tall robot keeps the whole robot |
+| `"fit": "full"` / `"fill"` | `full`: whole over its blurred copy (the pillars of a portrait clip), the picture breathing at most 5 % towards the robot while the copy pushes in; `fill`: the frame filled, the move aimed at the robot. Without it: a landscape photo fills the frame (the crop keeps three quarters of it or more, as for a 4:3 clip); a portrait or square one fills it when its robot's box fits in what a crop shows (with a margin), else it is whole — a portrait photo of a tall robot, or with no robot found, keeps the whole picture |
 | `"focus": [0.6, 0.3]` | the point to aim at instead of the analysis' box (0..1 of the photo) |
 | `"subject"` | the analysis' box `[x, y, w, h]` the move ends on (absent: from the largest moment's centre and size, else the middle) |
 
