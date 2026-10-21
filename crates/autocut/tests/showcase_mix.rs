@@ -147,6 +147,12 @@ async fn cinematic_keeps_the_earlier_balance_and_a_remix_switches_between_them()
     assert!(sub(&once) < sub(&before), "{} → {}", sub(&before), sub(&once));
     let voice = |a: &Value| a["stems"].as_array().unwrap().iter().find(|s| s["track"] == "A2").map(|s| f(&s["bands"]["presence"])).unwrap();
     assert!(voice(&once) > voice(&before), "{} → {}", voice(&before), voice(&once));
+    // gentle: the same stems treated, the narration's EQ voice-preserving (no low-mid cut)
+    let r = mix::remix(&ex, None, MixProfile::Gentle, None, &mut notes).await.unwrap();
+    assert_eq!(r["profile"], "gentle");
+    assert_eq!(effects(&strip(&ex, "A2").await), ["parametric_eq", "deesser", "single_band_compressor", "hard_limiter"]);
+    let gentle = ex.execute("audio.analyzeMix", json!({"speech": ["A2"], "music": ["A3"]})).await.unwrap();
+    assert!(sub(&gentle) < sub(&before) && voice(&gentle) > voice(&before), "{gentle}");
     // and back to cinematic: the track effects are gone
     let r = mix::remix(&ex, None, MixProfile::Cinematic, None, &mut notes).await.unwrap();
     assert_eq!(r["profile"], "cinematic");

@@ -10,12 +10,11 @@ use serde_json::{Value, json};
 use crate::args::Args;
 use crate::{Backend, BridgeClient, absolute, diag, fail, print, usage};
 
-/// `showcase-remix [--sequence id] [--mix speech|cinematic] [--loudness social|…|off]`: a showcase
+/// `showcase-remix [--sequence id] [--mix speech|gentle|cinematic] [--loudness social|…|off]`: a showcase
 /// built before, mixed again with a profile ([`filmcraft_autocut::mix::remix`]); with `--save`
 /// the project keeps it, then `export` makes the file.
 pub async fn remix(a: &Args) {
-    const USAGE: &str =
-        "showcase-remix [--sequence id] [--mix speech|cinematic] [--loudness social|voice|broadcast|<LUFS>|off] (--project p.fcproj | --bridge addr) [--save]";
+    const USAGE: &str = "showcase-remix [--sequence id] [--mix speech|gentle|cinematic] [--loudness social|voice|broadcast|<LUFS>|off] (--project p.fcproj | --bridge addr) [--save]";
     if let Some(o) = a.unknown_opt(&["--sequence", "--mix", "--loudness", "--project", "--bridge", "--save", "--save-as", "--json", "--compact", "--data-dir"])
     {
         usage(format!("showcase-remix: unknown option {o}\n{USAGE}"));

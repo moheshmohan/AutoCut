@@ -10,7 +10,7 @@
 //! | entries with `"kind": "scene"` (and `caption`) | | scene shots: footage without a robot, full frame, with a caption instead of a name lower third, opening their chapter; no counter, no ducking without words |
 //! | `transitions: {within, between, chapter}` (or `true`) | | transitions from the catalogue ([`TransitionPlan`]) with a sound each (`transitions.addSound`), snapped to the music's beats (`transitions.snapToBeats`) |
 //! | `loudness: "social"` | `--loudness social` | `audio.normalizeLoudness` on the mix (−14 LUFS, −1 dBTP) |
-//! | `mix: "speech"` (the default) or `"cinematic"` | `--mix cinematic` | how the stems are balanced and treated ([`crate::mix::MixProfile`]): speech first for small speakers, or the earlier full-range balance |
+//! | `mix: "speech"` (the default), `"gentle"` or `"cinematic"` | `--mix gentle`, `--mix cinematic` | how the stems are balanced and treated ([`crate::mix::MixProfile`]): speech first for small speakers, the same with a voice-preserving narration EQ, or the earlier full-range balance |
 //! | `embedCaptions: true` | `--embed-captions` | the export carries the narration's captions (CEA-608/708) |
 //! | `soundfont: "generaluser-gs"` | `--soundfont …` | the instruments of the generated music bed |
 //! | `outro: {logo, channel, handle, tagline, cta, ctaDone, terminal, background, seconds}` | `--outro-logo …` | a branded channel outro with the end screen's regions left clear ([`crate::outro`]) |
@@ -613,7 +613,7 @@ pub struct Look {
     pub transitions: Option<TransitionPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loudness: Option<Loudness>,
-    /// How the stems are mixed (speech first unless the plan or the CLI says `cinematic`).
+    /// How the stems are mixed (speech first unless the plan or the CLI says `gentle` or `cinematic`).
     pub mix: crate::mix::MixProfile,
     pub embed_captions: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

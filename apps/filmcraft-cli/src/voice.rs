@@ -24,6 +24,7 @@ fn default_chains() -> Value {
         "none": [],
         "speech": to_json(filmcraft_autocut::mix::voice_chain(1.0)),
         "speech (EQ only)": to_json(filmcraft_autocut::mix::voice_chain(1.0).into_iter().take(1).collect()),
+        "gentle": to_json(filmcraft_autocut::mix::voice_chain_gentle(1.0)),
     })
 }
 

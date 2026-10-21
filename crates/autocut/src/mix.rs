@@ -11,14 +11,16 @@
 //!
 //! | stem | track effects (editable in the Audio Track Mixer) | level |
 //! |---|---|---|
-//! | narration | Parametric EQ: high-pass 80 Hz (24 dB/oct), low shelf −3 dB at 200 Hz, +5 dB at 2 kHz, +6 dB at 3.5 kHz, high shelf +3 dB from 6 kHz (the lifts as far as the voice needs: measured, [`voice_eq_amount`]; voice-preserving, see [`voice_chain`]); DeEsser (6 kHz, light); compressor 3:1 from −20 dB, 1 ms attack (4–6 dB on speech), +6 dB out; Hard Limiter at −3.5 dB (the onsets the compressor lets through); the track's fader makes up the level the chain took, measured | each line matched to −16 LUFS |
+//! | narration | Parametric EQ: high-pass 80 Hz (24 dB/oct), low shelf −6 dB at 200 Hz, −2 dB at 300 Hz, +5 dB at 1.2 kHz, +5 dB at 3 kHz, high shelf +3 dB from 6 kHz (the cuts and lifts as far as the voice needs: measured, [`voice_eq_amount`]); DeEsser (6 kHz, light); compressor 3:1 from −20 dB, 1 ms attack (4–6 dB on speech), +6 dB out; Hard Limiter at −3.5 dB (the onsets the compressor lets through); the track's fader makes up the level the chain took, measured | each line matched to −16 LUFS |
 //! | music | Parametric EQ: high-pass 40 Hz, low shelf −6 dB at 120 Hz, and a 4 dB dip around 2.5 kHz while the narration speaks (automation that follows the ducking) | −24 LUFS, ducked 18 dB under the narration |
 //! | shots' own sound | Parametric EQ: high-pass 100 Hz, low shelf −3 dB at 150 Hz | −27 LUFS, ducked 15 dB |
 //! | whooshes, impacts, risers | Parametric EQ: high-pass 120 Hz (no sub-bass booms) | −26 LUFS; the transitions' own sounds at −10 dB |
 //!
 //! The Mix keeps its loudness target (`--loudness`) and its true-peak limiter, which then has
-//! little to do. `cinematic` is the balance before (full-range stems, a shallower duck, louder
-//! effects). The effects are ordinary track inserts and keyframes, so the result stays editable.
+//! little to do. `gentle` is the same mix with a voice-preserving narration EQ
+//! ([`voice_chain_gentle`]: no low-mid cut, the lift above the vowels), for a cloned voice that
+//! must stay closest to its speaker. `cinematic` is the balance before (full-range stems, a
+//! shallower duck, louder effects). The effects are ordinary track inserts and keyframes, so the result stays editable.
 //!
 //! [`remix`] applies a profile to a showcase sequence built before (its track layout: A1 the
 //! shots' sound, A2 the narration, A3 the music, A4 and A5 the effects), replacing what an
@@ -37,6 +39,8 @@ pub enum MixProfile {
     /// Speech first, for small speakers (see the module docs).
     #[default]
     Speech,
+    /// Speech first, with the voice-preserving narration EQ ([`voice_chain_gentle`]).
+    Gentle,
     /// The earlier balance: full-range stems, the music ducked 15 dB, louder effects.
     Cinematic,
 }
@@ -45,27 +49,29 @@ impl MixProfile {
     pub fn name(self) -> &'static str {
         match self {
             MixProfile::Speech => "speech",
+            MixProfile::Gentle => "gentle",
             MixProfile::Cinematic => "cinematic",
         }
     }
 
-    /// A plan's or the CLI's `mix`: `speech` (the default) or `cinematic`.
+    /// A plan's or the CLI's `mix`: `speech` (the default), `gentle` or `cinematic`.
     pub fn from_plan(v: &Value) -> Result<Self, AutoCutError> {
         match v {
             Value::Null => Ok(Self::default()),
             Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
                 "speech" | "" => Ok(MixProfile::Speech),
+                "gentle" => Ok(MixProfile::Gentle),
                 "cinematic" => Ok(MixProfile::Cinematic),
-                other => Err(AutoCutError::Invalid(format!("mix: speech or cinematic, not {other:?}"))),
+                other => Err(AutoCutError::Invalid(format!("mix: speech, gentle or cinematic, not {other:?}"))),
             },
-            other => Err(AutoCutError::Invalid(format!("mix: speech or cinematic, not {other}"))),
+            other => Err(AutoCutError::Invalid(format!("mix: speech, gentle or cinematic, not {other}"))),
         }
     }
 
     /// The level of the sounds coupled to transitions (whooshes, risers), dB.
     pub fn transition_gain_db(self) -> f64 {
         match self {
-            MixProfile::Speech => -10.0,
+            MixProfile::Speech | MixProfile::Gentle => -10.0,
             MixProfile::Cinematic => -6.0,
         }
     }
@@ -74,7 +80,7 @@ impl MixProfile {
     /// music and the shots' sound duck under the narration (dB).
     fn levels(self) -> Levels {
         match self {
-            MixProfile::Speech => Levels { sound: -27.0, music: -24.0, effects: -26.0, music_duck: -18.0, sound_duck: -15.0 },
+            MixProfile::Speech | MixProfile::Gentle => Levels { sound: -27.0, music: -24.0, effects: -26.0, music_duck: -18.0, sound_duck: -15.0 },
             MixProfile::Cinematic => Levels { sound: -27.0, music: -24.0, effects: -23.0, music_duck: -15.0, sound_duck: -10.0 },
         }
     }
@@ -116,13 +122,18 @@ fn eq(set: Value) -> Value {
 }
 
 /// The tilt the narration's EQ aims for (dB): its 1–4 kHz octaves this far under its
-/// 125–250 Hz ones ([`voice_tilt`]); a typical male voice sits about 10 dB down. (−9 dB until
-/// 2026-10-21: a touch brighter, but every dB of it moved the cloned voice further from its
-/// speaker — [`voice_chain`].)
-pub const VOICE_TILT: f64 = -10.0;
+/// 125–250 Hz ones ([`voice_tilt`]); a typical male voice sits about 10 dB down, and a touch
+/// brighter carries better on small speakers.
+pub const VOICE_TILT: f64 = -9.0;
 /// How far the whole EQ ([`voice_chain`] at amount 1) moves a voice's tilt (dB), measured on the
-/// cloned narration: IndicF5's Malayalam −18.2 → −10.0 dB, VoxCPM2's English −17.7 → −10.2 (the mean).
-pub const VOICE_EQ_SPAN: f64 = 7.8;
+/// cloned narration (−17.8 → −9.0 dB).
+pub const VOICE_EQ_SPAN: f64 = 8.8;
+/// The `gentle` profile's target tilt (dB): a typical voice, since every dB brighter moves a
+/// cloned voice further from its speaker ([`voice_chain_gentle`]).
+pub const VOICE_TILT_GENTLE: f64 = -10.0;
+/// How far [`voice_chain_gentle`] at amount 1 moves a voice's tilt (dB), measured on the cloned
+/// narration: IndicF5's Malayalam −18.2 → −10.0 dB, VoxCPM2's English −17.7 → −10.2 (the mean).
+pub const VOICE_EQ_SPAN_GENTLE: f64 = 7.8;
 
 /// A voice's tilt (dB): the mean level of its 1, 2 and 4 kHz octaves minus that of its 125 and
 /// 250 Hz ones, from a stem's `octavesDb` (`audio.analyzeMix`). The cloned narration measured
@@ -138,15 +149,45 @@ pub fn voice_tilt(octaves: &Value) -> Option<f64> {
 /// cloned narration, none for one already at [`VOICE_TILT`] or brighter (a bright voice made
 /// brighter only gets harsher and peakier); all of it when the voice could not be measured.
 pub fn voice_eq_amount(tilt: Option<f64>) -> f64 {
+    eq_amount(tilt, VOICE_TILT, VOICE_EQ_SPAN)
+}
+
+/// [`voice_eq_amount`] for [`voice_chain_gentle`] (its target [`VOICE_TILT_GENTLE`]).
+pub fn voice_eq_amount_gentle(tilt: Option<f64>) -> f64 {
+    eq_amount(tilt, VOICE_TILT_GENTLE, VOICE_EQ_SPAN_GENTLE)
+}
+
+fn eq_amount(tilt: Option<f64>, target: f64, span: f64) -> f64 {
     match tilt {
-        Some(t) if t.is_finite() => ((VOICE_TILT - t) / VOICE_EQ_SPAN).clamp(0.0, 1.0),
+        Some(t) if t.is_finite() && span > 0.0 => ((target - t) / span).clamp(0.0, 1.0),
         _ => 1.0,
     }
 }
 
 /// The narration's track effects (speech profile), in order: what each is and its settings, the
-/// EQ's lifts scaled by `amount` ([`voice_eq_amount`]; the high-pass and the low shelf are always
-/// on).
+/// EQ's cuts and lifts scaled by `amount` ([`voice_eq_amount`]; the high-pass and half the low
+/// shelf are always on). The author chose this one over [`voice_chain_gentle`] on their TV
+/// (2026-10-21): the clearest words at low volume.
+pub fn voice_chain(amount: f64) -> Vec<(&'static str, Value)> {
+    let a = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 1.0 };
+    let g = |db: f64| (db * a * 100.0).round() / 100.0;
+    let eq_settings = eq(json!({
+        // the rumble and the boom below the voice, the low-mid mud
+        "hp_on": true, "hp_freq": 80.0, "hp_slope": 1,
+        // (half the low shelf whatever the voice: small speakers play nothing down there)
+        "low_on": true, "low_freq": 200.0, "low_gain": -3.0 + g(-3.0), "low_q": 0.71,
+        "b1_on": true, "b1_freq": 300.0, "b1_gain": g(-2.0), "b1_q": 1.0,
+        // presence: what makes words understood at low volume
+        "mid_on": true, "mid_freq": 1200.0, "mid_gain": g(5.0), "mid_q": 0.8,
+        "b4_on": true, "b4_freq": 3000.0, "b4_gain": g(5.0), "b4_q": 0.8,
+        "high_on": true, "high_freq": 6000.0, "high_gain": g(3.0), "high_q": 0.71,
+    }));
+    with_dynamics(eq_settings)
+}
+
+/// The `gentle` profile's narration effects: as [`voice_chain`], the EQ voice-preserving, its
+/// lifts scaled by `amount` ([`voice_eq_amount_gentle`]; the high-pass and the low shelf are
+/// always on).
 ///
 /// **Voice-preserving** (2026-10-21). Any EQ moves a voice away from its speaker's (the tone
 /// colour of the readings against the speaker's genuine speech, `voice.mixCheck`), and how far
@@ -160,25 +201,27 @@ pub fn voice_eq_amount(tilt: Option<f64>) -> f64 {
 /// (−11.0 dB, from −20.4), with about a fifth less change of timbre on the Malayalam voice
 /// (similarity to the speaker 0.921 → 0.867 instead of → 0.856) and a quarter less on the English
 /// one (0.861 → 0.787 instead of → 0.759); the energy below 120 Hz 19 % instead of 15 %.
-pub fn voice_chain(amount: f64) -> Vec<(&'static str, Value)> {
+pub fn voice_chain_gentle(amount: f64) -> Vec<(&'static str, Value)> {
     let a = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 1.0 };
     let g = |db: f64| (db * a * 100.0).round() / 100.0;
+    let eq_settings = eq(json!({
+        // the rumble and the boom below the voice
+        "hp_on": true, "hp_freq": 80.0, "hp_slope": 1,
+        // (the low shelf whatever the voice: small speakers play nothing down there; no more,
+        // and no low-mid cut: the voice's body is its speaker's)
+        "low_on": true, "low_freq": 200.0, "low_gain": -3.0, "low_q": 0.71,
+        // consonants: what makes words understood at low volume, above the vowels' formants
+        "mid_on": true, "mid_freq": 2000.0, "mid_gain": g(5.0), "mid_q": 0.8,
+        "b4_on": true, "b4_freq": 3500.0, "b4_gain": g(6.0), "b4_q": 0.8,
+        "high_on": true, "high_freq": 6000.0, "high_gain": g(3.0), "high_q": 0.71,
+    }));
+    with_dynamics(eq_settings)
+}
+
+/// The narration's EQ followed by the dynamics both chains share.
+fn with_dynamics(eq_settings: Value) -> Vec<(&'static str, Value)> {
     vec![
-        (
-            "parametric_eq",
-            eq(json!({
-                // the rumble and the boom below the voice
-                "hp_on": true, "hp_freq": 80.0, "hp_slope": 1,
-                // (the low shelf whatever the voice: small speakers play nothing down there; no
-                // more, and no low-mid cut: the voice's body is its speaker's)
-                "low_on": true, "low_freq": 200.0, "low_gain": -3.0, "low_q": 0.71,
-                // consonants: what makes words understood at low volume, above the vowels'
-                // formants
-                "mid_on": true, "mid_freq": 2000.0, "mid_gain": g(5.0), "mid_q": 0.8,
-                "b4_on": true, "b4_freq": 3500.0, "b4_gain": g(6.0), "b4_q": 0.8,
-                "high_on": true, "high_freq": 6000.0, "high_gain": g(3.0), "high_q": 0.71,
-            })),
-        ),
+        ("parametric_eq", eq_settings),
         ("deesser", json!({"frequency": 6000.0, "threshold": -10.0, "reduction": 6.0})),
         // an even level: 3:1, fast enough to catch the syllables' onsets
         ("single_band_compressor", json!({"threshold": -20.0, "ratio": 3.0, "attack": 1.0, "release": 120.0, "output": 6.0})),
@@ -276,7 +319,7 @@ async fn inserts(ex: &dyn Executor, strip: &str, chain: &[(&str, Value)], notes:
 /// are noted, never fatal: the edit is still usable unmixed. Returns what it did.
 pub async fn mix_down(ex: &dyn Executor, mix: &Mix, tracks: &MixTracks, profile: MixProfile, limit: bool, notes: &mut Vec<String>) -> Value {
     let lv = profile.levels();
-    let speech = profile == MixProfile::Speech;
+    let speech = profile != MixProfile::Cinematic;
     let step = async |id: &str, p: Value, notes: &mut Vec<String>| match run(ex, id, p).await {
         Ok(v) => Some(v),
         Err(e) => {
@@ -333,8 +376,13 @@ pub async fn mix_down(ex: &dyn Executor, mix: &Mix, tracks: &MixTracks, profile:
                 }
             };
             let tilt = before.as_ref().and_then(|a| voice_tilt(&a["stems"][0]["octavesDb"]));
-            let amount = voice_eq_amount(tilt);
-            let chain = voice_chain(amount);
+            let (amount, chain) = if profile == MixProfile::Gentle {
+                let a = voice_eq_amount_gentle(tilt);
+                (a, voice_chain_gentle(a))
+            } else {
+                let a = voice_eq_amount(tilt);
+                (a, voice_chain(a))
+            };
             let slots = inserts(ex, &tracks.voice, &chain, notes).await;
             // the chain changes the voice's tone, not its level against the other stems: its
             // fader makes up what the EQ and the compressor took (measured again through them)
@@ -490,17 +538,23 @@ mod tests {
         assert_eq!(MixProfile::from_plan(&Value::Null).unwrap(), MixProfile::Speech);
         assert_eq!(MixProfile::from_plan(&json!("Cinematic")).unwrap(), MixProfile::Cinematic);
         assert_eq!(MixProfile::from_plan(&json!(" speech ")).unwrap(), MixProfile::Speech);
+        assert_eq!(MixProfile::from_plan(&json!("Gentle")).unwrap(), MixProfile::Gentle);
         for bad in [json!("loud"), json!(3), json!(true), json!(["speech"])] {
             assert!(MixProfile::from_plan(&bad).is_err(), "{bad}");
         }
         assert!(MixProfile::Speech.transition_gain_db() < MixProfile::Cinematic.transition_gain_db());
         let (s, c) = (MixProfile::Speech.levels(), MixProfile::Cinematic.levels());
         assert!(s.music_duck < c.music_duck && s.sound_duck < c.sound_duck && s.effects < c.effects);
+        // gentle is speech first too: only the narration's EQ differs
+        let g = MixProfile::Gentle.levels();
+        assert!(g.music_duck == s.music_duck && g.sound_duck == s.sound_duck && g.effects == s.effects);
+        assert_eq!(MixProfile::Gentle.transition_gain_db(), MixProfile::Speech.transition_gain_db());
     }
 
     #[test]
     fn the_chains_are_the_engines_effects_with_their_own_parameters() {
         let mut all: Vec<(&str, Value)> = voice_chain(1.0);
+        all.extend(voice_chain_gentle(1.0));
         all.extend([("parametric_eq", music_eq()), ("parametric_eq", sound_eq()), ("parametric_eq", effects_eq())]);
         for (effect, params) in &all {
             let def = filmcraft_engine::project::find_effect(effect).unwrap_or_else(|| panic!("{effect} is not an effect"));
@@ -517,19 +571,25 @@ mod tests {
                 }
             }
         }
-        // the narration: rumble out, consonants up, peaks held; no low-mid cut, the lift above
-        // the vowels' formants (voice-preserving)
+        // the narration: rumble out, presence up, peaks held
         let eq = &voice_chain(1.0)[0].1;
         assert_eq!((eq["hp_on"].as_bool(), eq["hp_freq"].as_f64()), (Some(true), Some(80.0)));
-        assert!(eq["b4_gain"].as_f64().unwrap() > 0.0 && eq["low_gain"].as_f64().unwrap() == -3.0);
-        assert_eq!(eq["b1_on"].as_bool(), Some(false));
-        assert!(eq["mid_freq"].as_f64().unwrap() >= 2000.0 && eq["b4_freq"].as_f64().unwrap() >= 3000.0);
+        assert!(eq["b4_gain"].as_f64().unwrap() > 0.0 && eq["low_gain"].as_f64().unwrap() < -3.0);
         assert_eq!(voice_chain(1.0).iter().map(|c| c.0).collect::<Vec<_>>(), ["parametric_eq", "deesser", "single_band_compressor", "hard_limiter"]);
         // a voice bright already: the high-pass only; half way: half the lift
         let flat = &voice_chain(0.0)[0].1;
         assert_eq!((flat["hp_on"].as_bool(), flat["b4_gain"].as_f64(), flat["low_gain"].as_f64()), (Some(true), Some(0.0), Some(-3.0)));
-        assert_eq!(voice_chain(0.5)[0].1["b4_gain"].as_f64(), Some(3.0));
-        assert_eq!(voice_chain(f64::NAN)[0].1["b4_gain"].as_f64(), Some(6.0));
+        assert_eq!(voice_chain(0.5)[0].1["b4_gain"].as_f64(), Some(2.5));
+        assert_eq!(voice_chain(f64::NAN)[0].1["b4_gain"].as_f64(), Some(5.0));
+        // gentle: no low-mid cut, the lift above the vowels' formants (voice-preserving), the same
+        // dynamics after it
+        let eq = &voice_chain_gentle(1.0)[0].1;
+        assert!(eq["b4_gain"].as_f64().unwrap() > 0.0 && eq["low_gain"].as_f64().unwrap() == -3.0);
+        assert_eq!(eq["b1_on"].as_bool(), Some(false));
+        assert!(eq["mid_freq"].as_f64().unwrap() >= 2000.0 && eq["b4_freq"].as_f64().unwrap() >= 3000.0);
+        assert_eq!(voice_chain_gentle(1.0)[1..], voice_chain(1.0)[1..]);
+        assert_eq!(voice_chain_gentle(0.5)[0].1["b4_gain"].as_f64(), Some(3.0));
+        assert_eq!(voice_chain_gentle(f64::NAN)[0].1["b4_gain"].as_f64(), Some(6.0));
     }
 
     #[test]
@@ -540,12 +600,17 @@ mod tests {
         assert!((t - -17.8).abs() < 0.05, "{t}");
         assert!(voice_eq_amount(Some(t)) > 0.99);
         // after the chain it sits at the target: nothing more to do
-        let treated = json!({"125": -4.7, "250": -6.4, "1000": -15.9, "2000": -14.4, "4000": -16.2});
+        let treated = json!({"125": -4.7, "250": -6.4, "1000": -14.9, "2000": -13.4, "4000": -15.2});
         assert!((voice_tilt(&treated).unwrap() - VOICE_TILT).abs() < 0.1);
         assert!(voice_eq_amount(voice_tilt(&treated)) < 0.02);
         // a bright voice gets none, one in between some; unmeasured: the full correction
         assert_eq!(voice_eq_amount(Some(-3.0)), 0.0);
-        assert!((voice_eq_amount(Some(-13.9)) - 0.5).abs() < 1e-9);
+        assert!((voice_eq_amount(Some(-13.4)) - 0.5).abs() < 1e-9);
+        // gentle aims a dB darker, over its own span
+        assert!(voice_eq_amount_gentle(Some(t)) > 0.99);
+        assert!((voice_eq_amount_gentle(Some(-13.9)) - 0.5).abs() < 1e-9);
+        assert_eq!(voice_eq_amount_gentle(Some(-9.5)), 0.0);
+        assert_eq!(voice_eq_amount_gentle(Some(f64::INFINITY)), 1.0);
         assert_eq!(voice_eq_amount(None), 1.0);
         assert_eq!(voice_eq_amount(Some(f64::NAN)), 1.0);
         assert!(voice_tilt(&json!({"125": -3.0})).is_none() && voice_tilt(&json!({"125": null, "250": "x"})).is_none());

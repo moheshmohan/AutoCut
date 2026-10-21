@@ -139,7 +139,7 @@ SUBCOMMANDS
          [--numbers english|malayalam] [--no-narration-check] [--places-from-locations locations.json]
          [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N] [--resolution 1080p|4k|WxH]
-         [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social] [--mix speech|cinematic]
+         [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social] [--mix speech|gentle|cinematic]
          [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
          [--outro-logo logo.png] [--outro-channel C] [--outro-handle @h] [--outro-tagline T]
          [--outro-cta S] [--outro-cta-done S] [--outro-terminal L] [--outro-seconds 12]
@@ -267,7 +267,7 @@ SUBCOMMANDS
                                 lines and, when AUTOCUT_ANALYSIS_MODEL answers, the subject in
                                 every shot; findings in <out>.qa.json and a numbered contact
                                 sheet in <out>.qa.png (and under `qa` in the output)
-  showcase-remix [--sequence id] [--mix speech|cinematic] [--loudness social|<LUFS>|off] --project p.fcproj --save
+  showcase-remix [--sequence id] [--mix speech|gentle|cinematic] [--loudness social|<LUFS>|off] --project p.fcproj --save
                                 a showcase built before, mixed again (its picture untouched): the
                                 effects an earlier mix put on its tracks (A1 shots' sound, A2
                                 narration, A3 music, A4/A5 effects) taken off, every clip

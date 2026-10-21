@@ -293,11 +293,12 @@ understood; measured per stem, the cause was the cloned narration (37 % of its e
 whole mix. So every build is now mixed **speech first** (`--mix speech`, the default; the details
 and the before/after numbers: [crates/autocut/README.md](../crates/autocut/README.md#mix-for-small-speakers)):
 
-- the narration, on A2: high-passed at 80 Hz, a gentle low shelf, and its consonants (2–3.5 kHz,
-  above the vowels' formants, so the voice stays its speaker's) lifted as far as its measured
-  tone needs (the cloned voices: all the way), de-essed, compressed 3:1 and peak-limited, its
-  fader making up the level the chain took (`filmcraft-cli voice mix-check` measures how far a
-  chain moves a voice);
+- the narration, on A2: high-passed at 80 Hz, its boom and mud cut and its presence (1–4 kHz)
+  lifted as far as its measured tone needs (the cloned voices: all the way), de-essed,
+  compressed 3:1 and peak-limited, its fader making up the level the chain took. `--mix gentle`
+  keeps the voice closer to its speaker (no low-mid cut, the lift at 2–3.5 kHz, above the
+  vowels' formants); the author preferred the clearer default on their TV (2026-10-21), and
+  `filmcraft-cli voice mix-check` measures how far each chain moves a voice;
 - the music (A3), the shots' sound (A1) and the effects (A4, A5) high-passed (40, 100 and 120 Hz)
   with less bass, the music ducked 18 dB under the voice and dipped 4 dB around 2.5 kHz while it
   speaks, the effects and the transitions' sounds quieter;
