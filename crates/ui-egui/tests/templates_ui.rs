@@ -14,6 +14,9 @@ use serde_json::{Value, json};
 struct Driver {
     harness: Harness<'static, FilmcraftApp>,
     tx: Sender<ControlRequest>,
+    /// The last status lines, oldest first: the bar clears a line after 8 s, which is 32 frames
+    /// here, so by the time a wait gives up the line itself is empty.
+    statuses: Vec<String>,
 }
 
 impl Driver {
@@ -24,7 +27,7 @@ impl Driver {
         let (tx, rx) = channel();
         let app = FilmcraftApp::new(session).with_control(rx);
         let harness = Harness::builder().with_size(egui::vec2(1600.0, 1200.0)).with_max_steps(10_000).build_eframe(move |_cc| app);
-        let mut d = Driver { harness, tx };
+        let mut d = Driver { harness, tx, statuses: Vec::new() };
         d.frames(4);
         d
     }
@@ -36,6 +39,14 @@ impl Driver {
             eframe::App::raw_input_hook(self.harness.state_mut(), &ctx, &mut raw);
             *self.harness.input_mut() = raw;
             self.harness.step();
+            let status = &self.harness.state().ui.status;
+            if !status.is_empty() && self.statuses.last() != Some(status) {
+                let status = status.clone();
+                if self.statuses.len() >= 8 {
+                    self.statuses.remove(0);
+                }
+                self.statuses.push(status);
+            }
         }
     }
 
@@ -73,9 +84,8 @@ impl Driver {
 
     /// Scroll the template's detail view (`dy` < 0 down, > 0 up) until widget `id` shows.
     fn reveal_by(&mut self, id: &str, dy: f64) {
-        // frames are instant but what they wait for (the preview's frames, rendered in the
-        // background) is not: keep going until a deadline, not a number of frames (on a loaded
-        // machine the preview once took longer than 20 × 3 frames and the full gate failed)
+        // a deadline rather than a number of tries, for a slow machine (what is waited for is drawn
+        // in the frames themselves: the preview renders in the frame Preview is clicked in)
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while std::time::Instant::now() < deadline {
             if self.ids(id).iter().any(|x| x == id) {
@@ -89,8 +99,8 @@ impl Driver {
             self.frames(3);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let status = self.app().ui.status.clone();
-        panic!("{id} never showed (status: {status}): {:?}", self.ids("templates."));
+        let shown = self.ids("templates.");
+        panic!("{id} never showed (status lines: {:?}): {shown:?}", self.statuses);
     }
 
     /// Frames until widget `id` is registered.
@@ -101,7 +111,8 @@ impl Driver {
             }
             self.frames(2);
         }
-        panic!("{id} never showed: {:?}", self.ids("templates."));
+        let shown = self.ids("templates.");
+        panic!("{id} never showed (status lines: {:?}): {shown:?}", self.statuses);
     }
 }
 
@@ -158,7 +169,7 @@ fn browse_filter_fill_preview_and_build_a_template() {
     };
     d.click("templates.preview");
     d.frames(3);
-    assert!(d.app().ui.status.starts_with("Preview"), "{}", d.app().ui.status);
+    assert_eq!(d.app().ui.status, "Preview: 6 frames");
     d.reveal_by("templates.previewFrame.0", -160.0);
     assert_eq!(d.ids("templates.previewFrame.").len(), 6);
     {
@@ -186,6 +197,67 @@ fn browse_filter_fill_preview_and_build_a_template() {
     d.reveal_by("templates.back", 400.0);
     d.click("templates.back");
     assert!(d.app().ui.templates.selected.is_none());
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// A preview stays while its template reads the same, when a template is saved or installed
+/// elsewhere (another window, an agent; the library's revision is the process's), and goes when its
+/// own template changes. It went on any install: `browse_filter_fill_preview_and_build_a_template`
+/// failed whenever `save_share_and_install_from_the_panel`, beside it in this binary, installed a
+/// template between its Preview click and its look at the frames (8 runs in 20 on a loaded machine).
+#[test]
+fn a_preview_stays_while_its_template_does() {
+    let scratch = std::env::temp_dir().join(format!("filmcraft-templates-ui-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    // the quote card as a package of its own
+    let package = |id: &str, description: &str| {
+        let mut pkg = filmcraft_templates::builtin::find("builtin:quote-card").unwrap().clone();
+        pkg.manifest.id = id.into();
+        pkg.manifest.name = id.into();
+        pkg.manifest.description = description.into();
+        let path = scratch.join(format!("{}.zip", id.replace(':', "-")));
+        std::fs::write(&path, pkg.to_zip().unwrap()).unwrap();
+        path.to_string_lossy().into_owned()
+    };
+    // another window installs a template into its own folder
+    let install_elsewhere = |id: &str| {
+        let before = filmcraft_engine::video_templates::library_revision();
+        let mut other = Session::default();
+        other.prefs_path = Some(scratch.join("elsewhere").join("prefs.json"));
+        other.execute("template.install", json!({"path": package(id, "")})).unwrap();
+        assert!(filmcraft_engine::video_templates::library_revision() > before);
+    };
+    let mut d = Driver::demo(&scratch.to_string_lossy());
+    d.app().session.prefs_path = Some(scratch.join("prefs.json"));
+    d.ok("ui.panel.show", json!({"panel": "Templates"}));
+    d.frames(4);
+    // a built-in template's preview
+    d.ok("ui.set", json!({"templates": {"selected": "builtin:quote-card"}}));
+    d.wait_for("templates.preview");
+    d.click("templates.preview");
+    assert_eq!(d.app().ui.status, "Preview: 6 frames");
+    d.reveal_by("templates.previewFrame.0", -160.0);
+    install_elsewhere("user:elsewhere-one");
+    d.frames(4);
+    assert_eq!(d.ids("templates.previewFrame.").len(), 6, "the preview stays when another template is installed");
+    // a template of the user's own: its preview stays while it reads the same
+    d.app().session.execute("template.install", json!({"path": package("user:my-quote", "Mine")})).unwrap();
+    d.ok("ui.set", json!({"templates": {"selected": "user:my-quote"}}));
+    d.frames(4);
+    d.click("templates.preview");
+    assert_eq!(d.app().ui.status, "Preview: 6 frames");
+    d.reveal_by("templates.previewFrame.0", -160.0);
+    install_elsewhere("user:elsewhere-two");
+    d.frames(4);
+    assert_eq!(d.ids("templates.previewFrame.").len(), 6, "the preview of an unchanged user template stays");
+    // … and goes when the template is replaced: those frames show it as it was
+    let changed = package("user:my-quote", "Mine, changed");
+    d.app().session.execute("template.install", json!({"path": changed, "overwrite": true})).unwrap();
+    d.frames(4);
+    assert_eq!(d.app().ui.templates.selected.as_deref(), Some("user:my-quote"));
+    assert!(d.ids("templates.previewFrame.").is_empty(), "a stale preview is not shown");
+    d.wait_for("templates.preview");
     let _ = std::fs::remove_dir_all(&scratch);
 }
 

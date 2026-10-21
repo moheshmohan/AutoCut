@@ -269,6 +269,30 @@ struct Textures {
     failed: HashMap<String, String>,
     preview_key: String,
     preview: Vec<(egui::TextureHandle, f64)>,
+    /// The template the preview was drawn from (the key it was found by, and the package as read).
+    preview_of: Option<(String, Arc<filmcraft_templates::Package>)>,
+}
+
+impl Textures {
+    /// The user templates folder changed (a template saved or installed, by this window, another
+    /// one or an agent): what did not change stays. The built-in thumbnails are compiled in; the
+    /// preview stays while its template reads the same. The rest is drawn anew. (Dropping it all
+    /// made the preview vanish whenever any template was installed, and with it a UI test that
+    /// ran beside one that installs.)
+    fn library_changed(&mut self, session: &filmcraft_engine::Session) {
+        let builtin = |key: &String| key.rsplit_once('|').is_some_and(|(id, _)| filmcraft_templates::builtin::find(id).is_some_and(|p| p.manifest.id == id));
+        self.thumbs.retain(|k, _| builtin(k));
+        self.failed.retain(|k, _| builtin(k));
+        // (by their files: `Package`'s `==` is false between two copies of the same template, as
+        // a fragment's motion effects hold NaN for "the frame's centre")
+        let same =
+            self.preview_of.as_ref().is_some_and(|(key, was)| vt::find_template(session, key, "templates").is_ok_and(|e| e.package.files() == was.files()));
+        if !same {
+            self.preview_key.clear();
+            self.preview.clear();
+            self.preview_of = None;
+        }
+    }
 }
 
 /// The template being filled, as read.
@@ -758,9 +782,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut lib = ctx.data(|d| d.get_temp::<Library>(lib_id())).unwrap_or_default();
     if !lib.read || lib.revision != vt::library_revision() {
         if lib.read {
-            // a template was saved or installed: its thumbnails and the open one are read anew
+            // a template was saved or installed: the open one is read anew, and the textures
+            // of what changed are drawn anew
+            let mut tx = ctx.data(|d| d.get_temp::<Textures>(tex_id())).unwrap_or_default();
+            tx.library_changed(&app.session);
             ctx.data_mut(|d| {
-                d.remove::<Textures>(tex_id());
+                d.insert_temp(tex_id(), tx);
                 d.remove::<Selected>(sel_id());
             });
         }
@@ -1172,10 +1199,11 @@ fn run(app: &mut FilmcraftApp, ctx: &egui::Context, a: Action) {
             let r = vt::find_template(&app.session, &id, "template.preview").and_then(|e| {
                 let wanted = vt::read_slots(&e.package.manifest, &p, "template.preview")?;
                 let fills = vt::fills_without_import(&e.package.manifest, wanted, "template.preview")?;
-                frames::preview(&app.session, &id, p["variant"].as_str(), fills, PREVIEW_FRAMES, 240)
+                let (fs, warnings) = frames::preview(&app.session, &id, p["variant"].as_str(), fills, PREVIEW_FRAMES, 240)?;
+                Ok((fs, warnings, Arc::new(e.package)))
             });
             match r {
-                Ok((fs, warnings)) => {
+                Ok((fs, warnings, package)) => {
                     let key = format!("{}|{}|{}", id, app.ui.templates.variant, serde_json::to_string(&app.ui.templates.fills).unwrap_or_default());
                     let list: Vec<(egui::TextureHandle, f64)> = fs
                         .iter()
@@ -1189,6 +1217,7 @@ fn run(app: &mut FilmcraftApp, ctx: &egui::Context, a: Action) {
                         let tx = d.get_temp_mut_or_default::<Textures>(tex_id());
                         tx.preview_key = key;
                         tx.preview = list;
+                        tx.preview_of = Some((id, package));
                     });
                     app.ui.status = match warnings.first() {
                         Some(w) => format!("Preview: {w}"),
