@@ -792,6 +792,16 @@ fn showcase_build_params(p: ShowcaseBuildParams) -> Value {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct FeedbackParams {
+    /// The folder to write (absolute). Default: <data dir>/Feedback/FilmCraft Feedback <date>.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// An AutoCut QA report (`<export>.qa.json`) to include; by default the session's last one.
+    #[serde(default)]
+    pub qa_report: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ShowcaseInspectParams {
     /// The whole analysis report (every clip's facts) instead of its summary.
     #[serde(default)]
@@ -1641,6 +1651,22 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Save a feedback bundle",
+        description = "Write one folder to diagnose a problem from (`app.feedbackBundle`): manifest.json (app version, build, OS, every file), system.json, history.json (undo / redo steps with times, the last commands), events.json, jobs.json, perf.json (perf.stats; the running app's, with playback and frame workers, in bridge mode), project.json (project.inspect), preferences.json, qa.json (the last AutoCut QA report), logs/ (the end of the app's logs) and crashes/ (recent crash reports). Secrets (tokens, passwords, API keys, cookies) and the home folder are taken out; capped at 8 MiB. Returns the folder and its files: read them with your file tools.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn feedback_bundle(&self, Parameters(p): Parameters<FeedbackParams>) -> Result<CallToolResult, McpError> {
+        let mut params = json!({});
+        if let Some(path) = p.path {
+            params["path"] = json!(path);
+        }
+        if let Some(qa) = p.qa_report {
+            params["qaReport"] = json!(qa);
+        }
+        wrap(self.run("app.feedbackBundle", params).await)
+    }
+
+    #[tool(
         title = "Video templates: list",
         description = "The video templates (whole-sequence starters with media slots — 21 built in: photo-beat slideshow, channel intro, top 3 / top 5, talking head with auto-captions, product promo, travel vlog intro and outro, before/after, lower thirds + chapters, end card, tutorial with webcam, podcast, collage, quote card, countdown, event recap, day in my life, unboxing, Q&A, robot showcase — and the user's own from <data dir>/Video Templates): id, name, length, variants (16:9, 9:16, 1:1, 4:5), slots (kind, count, required). Pass `template` for one in full, with every placement's time and the beat grid. Then template_apply (a `captions` slot is transcribed from its sources).",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -2002,6 +2028,30 @@ mod tests {
         assert!(v["cuts"].as_u64().unwrap() >= 2);
         let r = m.render_frame(Parameters(RenderParams { seconds: Some(1.0), max_side: Some(320) })).await.unwrap();
         assert_ne!(r.is_error, Some(true));
+    }
+
+    /// `feedback_bundle` writes the bundle where it is told and lists its files; a bad path is an
+    /// error result.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn feedback_bundle_tool_writes_the_folder() {
+        let dir = std::env::temp_dir().join(format!("fc-mcp-feedback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut s = demo();
+        s.prefs_path = Some(dir.join("data").join("preferences.json"));
+        let mut c = Client::start(s);
+        c.init().await;
+        let out = dir.join("bundle");
+        let r = c.call(1, "feedback_bundle", json!({"path": out.to_string_lossy()})).await;
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let v = tool_json(&r);
+        assert_eq!(v["path"].as_str(), out.to_str());
+        let files: Vec<&str> = v["files"].as_array().unwrap().iter().filter_map(|f| f["file"].as_str()).collect();
+        for want in ["README.txt", "manifest.json", "history.json", "perf.json", "project.json"] {
+            assert!(files.contains(&want) && out.join(want).is_file(), "{want}: {files:?}");
+        }
+        let bad = c.call(2, "feedback_bundle", json!({"path": ""})).await;
+        assert_eq!(bad["result"]["isError"], true, "{bad}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `recipe_list` / `recipe_run`: the built-ins are listed, one is inspected, a saved recipe
@@ -2578,6 +2628,7 @@ mod tests {
             "template_apply",
             "recipe_list",
             "recipe_run",
+            "feedback_bundle",
         ] {
             assert!(names.contains(&want), "{want} not listed");
         }

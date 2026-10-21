@@ -905,3 +905,43 @@ fn showcase_in_two_languages_from_one_plan() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("Toy robot"), "{}", String::from_utf8_lossy(&o.stderr));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `feedback <folder>` writes a bundle from the data directory's logs, without the sign-in files
+/// next to them or the secrets in the logs.
+#[test]
+fn feedback_writes_a_redacted_bundle() {
+    let dir = std::env::temp_dir().join(format!("filmcraft-cli-feedback-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let data = dir.join("data");
+    std::fs::create_dir_all(data.join("Logs")).unwrap();
+    std::fs::create_dir_all(data.join("google-photos")).unwrap();
+    std::fs::write(data.join("google-photos/tokens.json"), r#"{"refresh_token":"1//0FAKECLITOKEN"}"#).unwrap();
+    std::fs::write(data.join("Logs/filmcraft.log"), "[WARN filmcraft_engine] upload retry with access_token=ya29.FAKECLIACCESS\n").unwrap();
+    std::fs::write(data.join("Logs/crash-20380.log"), "=== FilmCraft (unix 1)\nboom (at x.rs:1, thread main)\n").unwrap();
+    let out = dir.join("bundle");
+    let o = Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
+        .args(["feedback", out.to_str().unwrap()])
+        .env("FILMCRAFT_DATA_DIR", &data)
+        .env("FILMCRAFT_SECRET_STORE", "file")
+        .output()
+        .expect("spawn filmcraft-cli");
+    let v = json_out(&o);
+    assert_eq!(v["path"].as_str(), out.to_str());
+    for f in ["README.txt", "manifest.json", "history.json", "perf.json", "project.json", "logs/filmcraft.log", "crashes/crash-20380.log"] {
+        assert!(out.join(f).is_file(), "{f} missing: {v}");
+    }
+    let log = std::fs::read_to_string(out.join("logs/filmcraft.log")).unwrap();
+    assert!(log.contains("upload retry with access_token=[redacted]"), "{log}");
+    let mut stack = vec![out.clone()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            if e.path().is_dir() {
+                stack.push(e.path());
+            } else {
+                let text = String::from_utf8_lossy(&std::fs::read(e.path()).unwrap()).into_owned();
+                assert!(!text.contains("FAKECLI"), "{} leaks a secret", e.path().display());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
