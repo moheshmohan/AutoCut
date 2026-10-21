@@ -791,8 +791,9 @@ hook's frame with its title, full size; inside the 3:4 the profile grid shows), 
 (the caption to paste: the title, three robots by name — the hook's and the most striking others —
 "Full video on YouTube: @handle, link in bio" — a Reel's caption shows no links — and hashtags from
 the robots' kinds, events, places, the channel and the narration's language), `<out>.caption.json`
-(the same with `link`, for the profile's bio, and the robots), `<out>.frames.jpg` (a frame of every
-shot from the exported file, read in a session of its own) and QA (`<out>.qa.json`, `.qa.png`,
+(the same with `link`, for the profile's bio, and the robots), `<out>.frames.jpg` (16 frames at most
+from the exported file, read in a session of its own: the hook, the shots — evenly spread when
+there are more — and the end card) and QA (`<out>.qa.json`, `.qa.png`,
 `.privacy.png`: joins, black frames, black sides of the bands, the robot in every shot, privacy, the
 platform's safe zones and the mix — the voice measured against the music while it speaks, not
 against the louder music after it — plus the trailer's own: cuts off the beat, text or the logo

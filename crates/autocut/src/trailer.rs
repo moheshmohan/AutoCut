@@ -4,23 +4,25 @@
 //! **What it reads.** The show's plan (its entries: labels, kinds, dates, shots with their
 //! analysed best moments, and each entry's `redact` targets) and the show's build report (where
 //! each entry's shots played — the window of each clip — what the privacy pass hid, and the
-//! narration's lines); the show's sequence for its narration clip. Without a plan the entries
-//! are read from the sequence itself ([`entries_from_sequence`]: the clips of the picture track,
-//! named by the lower thirds over them, without dates).
+//! narration's lines); the show's sequence for its narration clip and its privacy blur. Without a
+//! plan the entries are read from the sequence itself ([`entries_from_sequence`]: the clips of the
+//! picture track, named by the lower thirds over them, without dates).
 //!
 //! **The cut** ([`timing`]), every length a whole number of beats of the music:
 //! 1. *Hook* (about 3 s): the most striking robot ([`striking`]: a humanoid or a robot dog, big in
-//!    its picture, filmed upright; or `hook`) under a big title — `"48 robots"` and `"2013 →
-//!    2025"`, from the show's robot count and years (or `title`). The show's first narration
-//!    sentence plays over it (`hookVoice`, on when the show is narrated): its narration clip, cut
-//!    at the pause after the first sentence (`media.pauses`), in the owner's voice.
+//!    its picture, filmed upright; or `hook`, from `hookAt`), filling the frame under a big title —
+//!    `"48 robots"` and `"2013 → 2025"`, from the show's robot count and years (or `title`). The
+//!    show's first narration sentence plays over it (`hookVoice`, on when the show is narrated):
+//!    its narration clip, cut at the pause after the first sentence (`media.pauses`), in the
+//!    owner's voice.
 //! 2. *Montage*: `robots` robots (12–18 by default, as the length allows), chronological so the
 //!    years build up — the earliest and the latest always, and in between the most striking of
 //!    each stretch of the show ([`choose`]), one per robot (an "again" visit is the same robot) —
 //!    each 1.3–2.4 s, the longer ones first, every cut on a beat. Each shot plays its entry's best
-//!    moment inside the window the show played, reframed to the frame following the robot
-//!    (`clip.autoReframe`, seeded with the analysis' box; the whole picture over a blurred copy
-//!    where it is lost), its name and year in a panel inside the platform's safe zone.
+//!    moment inside the window the show played (or where `at` says). A robot the vertical crop
+//!    holds fills the frame, followed by `clip.autoReframe` (seeded with the analysis' box); a
+//!    wider one is shown whole in a [`band`] over a blurred copy of itself. Its name and year sit
+//!    in a panel inside the platform's safe zone.
 //! 3. *End card* (about 3 s) from the music's final hit: the channel's logo on a light badge,
 //!    `endText` ("Full video on YouTube") and the channel's handle, over a blurred copy of the
 //!    hook's footage, all inside the safe zone.
@@ -28,23 +30,26 @@
 //! **Sound.** Generated music (`music.suggest` → `audio.generate`, `mood` energetic, `bpm` 124, a
 //! fixed `seed`), arranged to end on a bar with its final chord where the end card starts (a
 //! riser into it, an impact on it); the hook voice over its opening; mixed speech first
-//! ([`crate::mix::mix_down`]) and normalised to −14 LUFS, −1 dBTP.
+//! ([`crate::mix::mix_down`]), the music brought up from a bed's level and limited on its track,
+//! the voice's fader down a little, normalised to −14 LUFS, −1 dBTP.
 //!
-//! **Privacy.** The trailer's clips get the show's privacy pass again ([`crate::privacy`]: faces
-//! and plates — the report says whether the show hid any — and every entry's named targets, each
-//! robot's own box left sharp), through the redaction cache. A face is hidden at the size the show
-//! hid it at: the threshold is scaled by how much smaller the trailer shows the picture than the
-//! show did ([`face_threshold`]: a portrait clip that filled the 16:9 show was three times larger
-//! there), so no face the show blurred is shown; QA says where the show hid faces in a clip the
-//! trailer hides none in.
+//! **Privacy.** What the show blurred stays blurred: the show's own blur — the masks its privacy
+//! pass made, keyed in media time — is carried onto every trailer shot of footage it hid something
+//! in (`carry_redaction`), and the trailer's clips get the show's privacy pass again
+//! ([`crate::privacy`]: faces and plates — the report says whether the show hid any — and every
+//! entry's named targets, each robot's own box left sharp) through the redaction cache, with a face
+//! hidden at the size the show hid it ([`face_threshold`]: a portrait clip that filled the 16:9
+//! show was three times larger there). QA says where the show hid faces in footage the trailer's
+//! own pass hides none in.
 //!
 //! **Out.** The sequence (`<show> — Reel trailer`), and with `export`: the video (Social Vertical
 //! 1080×1920 for 9:16: H.264, AAC 48 kHz, 12 Mb/s, GPU rendering as set), `<out>.cover.jpg` (the
 //! hook's frame with its title), `<out>.caption.txt` (a caption with hashtags; "link in bio": a
-//! Reel's caption cannot hold a link), `<out>.frames.jpg` (a frame of every shot, from the file)
-//! and QA (`<out>.qa.json`: joins, black frames, black sides, the subject, privacy, the platform's
-//! safe zones, the mix; plus the trailer's own: cuts on the beat, the logo in the safe zone, the
-//! show's redaction carried over).
+//! Reel's caption cannot hold a link; `<out>.caption.json` with the link for the bio),
+//! `<out>.frames.jpg` (16 frames at most, from the file: the hook, the shots, the end card) and QA
+//! (`<out>.qa.json`: joins, black frames, black sides, the subject, privacy, the platform's safe
+//! zones, the mix; plus the trailer's own: cuts on the beat, the text and logo in the safe zone,
+//! the show's redaction carried over).
 //!
 //! Every edit is an engine command, so the trailer is an ordinary sequence in History.
 
@@ -81,7 +86,7 @@ pub const END_CARD_SECONDS: f64 = 3.0;
 pub const MIN_ROBOTS: usize = 3;
 pub const MAX_ROBOTS: usize = 30;
 /// The usual montage, as the length allows.
-const AUTO_ROBOTS: (usize, usize) = (12, 18);
+pub const AUTO_ROBOTS: (usize, usize) = (12, 18);
 /// What the end card says by default.
 pub const DEFAULT_END_TEXT: &str = "Full video on YouTube";
 /// The trailer's frame rate.
@@ -91,7 +96,7 @@ pub const VERTICAL_PRESET: &str = "Social Vertical 1080×1920";
 /// The face a showcase hides: this share of its frame's height (`clip.autoRedact`'s default).
 pub const SHOW_MIN_FACE: f64 = 0.05;
 /// The most a showcase pushes in on a shot (its faces grow by that much: [`face_threshold`]).
-const SHOW_PUSH: f64 = 1.06;
+pub const SHOW_PUSH: f64 = 1.06;
 /// Room for error in [`face_threshold`]: a face a tenth smaller than the show's is hidden too.
 const FACE_MARGIN: f64 = 0.9;
 /// Most entries, shots and labels looked at.
@@ -810,9 +815,9 @@ pub struct Band {
 }
 
 /// A robot this much narrower than what a filling crop shows is followed by the crop.
-const CROP_ROOM: f64 = 0.8;
+pub const CROP_ROOM: f64 = 0.8;
 /// The robot fills this share of the frame's width in a band.
-const BAND_FILL: f64 = 0.9;
+pub const BAND_FILL: f64 = 0.9;
 
 /// How a montage shot of a picture `aspect` wide (width over height) is shown in a `frame`:
 /// `None` — filling the frame, the crop following its robot (a picture about as narrow as the
@@ -934,7 +939,7 @@ pub fn face_threshold(show_fit: Option<Fit>, aspect: f64, show_frame: (f64, f64)
 
 /// What the show hid in an item, and what the trailer hid: a privacy finding where the show hid
 /// faces (or plates) and the trailer's own pass hid none in a shot of it — a warning, or, when
-/// the show's own blur was carried onto that shot (`carried`: [`carry_redaction`]), a note for the
+/// the show's own blur was carried onto that shot (`carried`, by `carry_redaction`), a note for the
 /// record.
 pub fn carried_over(show: &[Hidden], show_layout: &[PlacedEntry], trailer: &[Hidden], shots: &[TrailerShot], carried: &[u64]) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -1033,12 +1038,26 @@ pub fn label_lines(c: &Candidate) -> (String, Option<String>) {
 // ---------------------------------------------------------------------------------------------
 // Caption
 
-/// A suggested caption: what it is, three of its robots, where the full video is ("link in bio":
-/// a Reel's caption cannot hold a link), and hashtags from the robots' kinds, the events and
-/// places, the channel and the show's language.
+/// Words that make a label a description rather than a robot's name ("Reception robot", "Robot
+/// arm game"): a caption names robots by name.
+const GENERIC_WORDS: &[&str] = &["robot", "robots", "arm", "arms", "game", "hoop", "van", "dog", "vehicle", "kiosk", "printer"];
+
+/// A label that names a robot (not "My first robot", not "Reception robot").
+fn proper_name(name: &str) -> bool {
+    let lower = name.trim().to_lowercase();
+    let last = lower.split_whitespace().last().unwrap_or_default();
+    !lower.is_empty() && !lower.starts_with("my ") && !GENERIC_WORDS.contains(&last)
+}
+
+/// A suggested caption: what it is, three of its robots by name — the hook's, then those asked
+/// for (`named_first`, the `include` list), then the most striking of the kinds not named yet (a
+/// robot dog after a humanoid) — where the full video is ("link in bio": a Reel's caption cannot
+/// hold a link), and hashtags from the robots' kinds, the events and places, the channel and the
+/// show's language.
 pub fn caption(
     title: &(String, Option<String>),
     picked: &[&Candidate],
+    named_first: &[String],
     events: &[String],
     channel: Option<&str>,
     language: Option<&str>,
@@ -1050,20 +1069,38 @@ pub fn caption(
         None => format!("{}.", title.0),
     };
     lines.push(head);
-    // the hook's robot, then the most striking others, each once, by name ("Pepper", not
-    // "Pepper, again"; not "My first robot")
-    let mut order: Vec<&Candidate> = picked.iter().skip(1).copied().collect();
-    order.sort_by(|a, b| b.score.total_cmp(&a.score));
+    // each robot once, by its name ("Pepper", not "Pepper, again")
+    let class = |k: &str| kind_weight(k).to_bits();
+    let mut rest: Vec<&Candidate> = picked.iter().skip(1).copied().collect();
+    rest.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let asked: Vec<&Candidate> = named_first.iter().filter_map(|l| rest.iter().copied().find(|c| matches_label(c, l))).collect();
+    let mut chosen: Vec<&Candidate> = Vec::new();
     let mut names: Vec<String> = Vec::new();
-    for c in picked.first().copied().into_iter().chain(order) {
+    fn take<'a>(c: &'a Candidate, chosen: &mut Vec<&'a Candidate>, names: &mut Vec<String>) {
         let name = shown_name(&c.label);
-        if name.is_empty() || name.to_lowercase().starts_with("my ") || names.iter().any(|n| same_robot(n, &name)) {
-            continue;
+        if names.len() < 3 && proper_name(&name) && !names.iter().any(|n| same_robot(n, &name)) {
+            names.push(name);
+            chosen.push(c);
         }
-        names.push(name);
-        if names.len() == 3 {
+    }
+    for c in picked.first().copied().into_iter().chain(asked) {
+        take(c, &mut chosen, &mut names);
+    }
+    // then a kind not named yet, the most striking of it, while there is one
+    while names.len() < 3 {
+        let before = names.len();
+        if let Some(c) =
+            rest.iter().copied().find(|c| !chosen.iter().any(|k| class(&k.kind) == class(&c.kind)) && proper_name(&shown_name(&c.label)) && !chosen.contains(c))
+        {
+            take(c, &mut chosen, &mut names);
+        }
+        if names.len() == before {
             break;
         }
+    }
+    // and the most striking of any kind
+    for c in rest.iter().copied() {
+        take(c, &mut chosen, &mut names);
     }
     if !names.is_empty() {
         lines.push(format!("{} and more: every robot I've met, in the order I met them.", names.join(", ")));
@@ -1894,7 +1931,7 @@ pub async fn build(
         let events: Vec<String> = show.entries.iter().filter_map(|e| e.event.clone().or_else(|| e.place.clone())).collect();
         let picked: Vec<&Candidate> = std::iter::once(&hook_c).chain(montage.iter()).collect();
         let language = plan_language(show);
-        let (text, tags) = caption(&(t1.clone(), t2.clone()), &picked, &events, channel.as_deref(), language.as_deref(), &opts.end_text);
+        let (text, tags) = caption(&(t1.clone(), t2.clone()), &picked, &opts.include, &events, channel.as_deref(), language.as_deref(), &opts.end_text);
         // the caption as it is pasted, and beside it the same with the link for the profile's bio
         let cap = beside(&written, "caption.txt");
         match std::fs::write(&cap, format!("{text}\n")) {
@@ -1908,17 +1945,9 @@ pub async fn build(
         }
         made.caption_text = Some(text);
         made.hashtags = tags;
-        // a frame of every shot, from the file
-        let times: Vec<f64> = made
-            .timing
-            .as_ref()
-            .map(|t| {
-                std::iter::once((t.hook[0] + t.hook[1]) / 2.0)
-                    .chain(t.shots.iter().map(|s| (s[0] + s[1]) / 2.0))
-                    .chain(std::iter::once((t.end_card[0] + t.end_card[1]) / 2.0 + 0.3))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // the frame sheet, from the file: the hook, the end card and the shots between (all of
+        // them up to [`SHEET_FRAMES`], else spread evenly over the montage)
+        let times: Vec<f64> = made.timing.as_ref().map(sheet_times).unwrap_or_default();
         let sheet = beside(&written, "frames.jpg");
         match frames_sheet(&written, &times, &sheet).await {
             Ok(()) => made.frames = Some(sheet.display().to_string()),
@@ -2029,6 +2058,22 @@ async fn place_logo(ex: &dyn Executor, track: usize, path: &str, t: f64, dur: f6
     run(ex, "effects.setParam", json!({"clip": clip, "effect": "motion", "param": "scale", "value": scale})).await?;
     run(ex, "effects.setParam", json!({"clip": clip, "effect": "motion", "param": "position", "value": c})).await?;
     Ok((clip, scale))
+}
+
+/// Most frames on the review sheet.
+pub const SHEET_FRAMES: usize = 16;
+
+/// The review sheet's moments: the middle of the hook, of the shots (every one when they fit in
+/// [`SHEET_FRAMES`] with the hook and the end card, else that many spread evenly) and of the end
+/// card (a little after, the logo in).
+pub fn sheet_times(t: &Timing) -> Vec<f64> {
+    let room = SHEET_FRAMES - 2;
+    let n = t.shots.len();
+    let picks: Vec<usize> = if n <= room { (0..n).collect() } else { (0..room).map(|k| k * (n - 1) / (room - 1).max(1)).collect() };
+    std::iter::once((t.hook[0] + t.hook[1]) / 2.0)
+        .chain(picks.iter().filter_map(|&i| t.shots.get(i)).map(|s| (s[0] + s[1]) / 2.0))
+        .chain(std::iter::once((t.end_card[0] + t.end_card[1]) / 2.0 + 0.3))
+        .collect()
 }
 
 /// A PNG frame as a JPEG at `path`.

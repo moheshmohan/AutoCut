@@ -301,11 +301,12 @@ filmcraft-cli --project "$T" trailer --sequence <final sequence id> \
 
 It writes, beside the video: `.cover.jpg` (the hook's frame with its title, the Reel's cover),
 `.caption.txt` (a caption with hashtags; Reels' captions hold no links, so it says "link in
-bio"; `.caption.json` adds `--link` for the bio), `.frames.jpg` (a frame of every shot, from the
-file) and `.qa.json` (with `.qa.png` and `.privacy.png`). Then:
+bio"; `.caption.json` adds `--link` for the bio), `.frames.jpg` (16 frames from the file: the
+hook, the shots — all of them when they fit — and the end card) and `.qa.json` (with `.qa.png` and `.privacy.png`). Then:
 
-- **Look at `.frames.jpg`.** Every robot recognisable and in its frame (the reframe follows it;
-  a shot where it was lost shows the whole picture over its blurred copy), every label readable.
+- **Look at `.frames.jpg`.** Every robot recognisable and in its frame (a robot the vertical crop
+  holds is followed by it, a wider one shown whole in a band over a blurred copy), every label
+  readable.
 - **Read the QA summary** the command prints: no errors; `safe_zones` ok (every word and the logo
   inside Reels' safe area: 14 % top, 35 % bottom, 6 % each side); `privacy` — a warning names any
   shot of footage the show hid faces in where the trailer hides none: look at that shot.

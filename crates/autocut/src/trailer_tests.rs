@@ -154,6 +154,14 @@ fn a_reel_at_124_bpm_is_about_34_seconds_of_16_robots() {
     // it rings out at least two beats (1.2 s) and less than a bar more
     let tail = t.total - t.end_card[0];
     assert!(tail >= 1.2 && tail < 4.0 * t.beat + 1.2, "{tail}");
+    // the review sheet: 12–16 frames, the hook first, the end card last, the first and the last
+    // shot in it
+    let sheet = sheet_times(&t);
+    assert!((12..=SHEET_FRAMES).contains(&sheet.len()), "{}", sheet.len());
+    assert!(sheet.windows(2).all(|w| w[0] < w[1]));
+    assert!(sheet[0] < t.hook[1] && *sheet.last().unwrap() > t.end_card[0]);
+    let mid = |s: [f64; 2]| (s[0] + s[1]) / 2.0;
+    assert!(sheet.contains(&mid(t.shots[0])) && sheet.contains(&mid(*t.shots.last().unwrap())));
     // a count asked for is kept
     assert_eq!(shot_count(beats.period(), 34.0, Some(14), 47), 14);
     assert_eq!(shot_count(beats.period(), 34.0, Some(30), 47), 30, "the length follows the count asked for");
@@ -369,13 +377,15 @@ fn titles_labels_and_the_caption() {
     let (text, tags) = caption(
         &("48 robots".into(), Some("2013 → 2025".into())),
         &picked,
+        &["Promobot Robo-C".into()],
         &["GITEX Global 2022, Dubai".into(), "Expo 2020 Dubai".into()],
         Some("@H4hacks"),
         Some("ml"),
         DEFAULT_END_TEXT,
     );
     assert!(text.starts_with("48 robots, 2013 → 2025."), "{text}");
-    assert!(text.contains("\nBoston Dynamics Spot, Pepper, Promobot Robo-C and more: every robot"), "the most striking, by name: {text}");
+    // by name (not "My first robot", not "DIY tracked robot"): the one asked for, then another kind
+    assert!(text.contains("\nPromobot Robo-C, Boston Dynamics Spot, Pepper and more: every robot"), "{text}");
     assert!(text.contains("Full video on YouTube (in Malayalam): @H4hacks, link in bio."), "{text}");
     assert!(!text.contains("http"), "a Reel's caption holds no link: {text}");
     for t in ["#robots", "#humanoidrobot", "#robotdog", "#GITEX", "#Expo2020", "#Dubai", "#Malayalam", "#H4hacks"] {
