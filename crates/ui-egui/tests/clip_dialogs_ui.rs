@@ -283,10 +283,22 @@ fn speed_duration_from_the_clip_menu_opens_the_dialog() {
         dlg.params["speed"] = json!(200.0);
     }
     d.click("speedDuration.interpolation.frameBlending");
+    assert!(d.has("speedDuration.maintainPitch"), "Maintain Audio Pitch");
+    assert_eq!(d.app().ui.clip_dialog.as_ref().map(|g| g.params["maintainPitch"].clone()), Some(json!(false)), "off, as the clip is");
+    d.click("speedDuration.maintainPitch");
     d.click("speedDuration.ok");
     let got = d.v1(0);
     assert_eq!(got.speed, 2.0);
     assert_eq!(got.time_interpolation, filmcraft_project::TimeInterpolation::FrameBlending);
+    assert!(got.maintain_pitch, "the checkbox applied");
+    // the dialog opens with the clip's own setting; unticking it applies, and undoes as one step
+    d.menu("clip.speedDuration");
+    assert_eq!(d.app().ui.clip_dialog.as_ref().map(|g| g.params["maintainPitch"].clone()), Some(json!(true)));
+    d.click("speedDuration.maintainPitch");
+    d.click("speedDuration.ok");
+    assert!(!d.v1(0).maintain_pitch);
+    d.exec("edit.undo", json!({}));
+    assert!(d.v1(0).maintain_pitch && d.v1(0).speed == 2.0);
 }
 
 /// #786: the clip's right-click Label menu lists the labels by the user's names (with their
