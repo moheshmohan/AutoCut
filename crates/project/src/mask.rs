@@ -275,6 +275,164 @@ impl MaskPath {
     }
 }
 
+/// Most tips of a star / sides of a regular polygon preset.
+pub const MAX_PRESET_POINTS: usize = 100;
+
+/// The corner a diagonal split keeps ([`MaskPath::diagonal_split`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitCorner {
+    #[default]
+    TopRight,
+    TopLeft,
+    BottomLeft,
+    BottomRight,
+}
+
+impl SplitCorner {
+    pub const ALL: [SplitCorner; 4] = [SplitCorner::TopRight, SplitCorner::TopLeft, SplitCorner::BottomLeft, SplitCorner::BottomRight];
+    pub fn name(self) -> &'static str {
+        match self {
+            SplitCorner::TopRight => "topRight",
+            SplitCorner::TopLeft => "topLeft",
+            SplitCorner::BottomLeft => "bottomLeft",
+            SplitCorner::BottomRight => "bottomRight",
+        }
+    }
+    pub fn from_name(s: &str) -> Option<Self> {
+        let s = s.to_ascii_lowercase().replace(['-', '_', ' '], "");
+        Self::ALL.into_iter().find(|c| c.name().to_ascii_lowercase() == s)
+    }
+}
+
+/// Shape presets (`masks.add` `shape`). Each is an ordinary path — corner vertices, or smooth
+/// vertices with Bézier handles for the heart — edited, keyframed, feathered and tracked like any
+/// other mask. Counts and ratios are clamped to sensible ranges, so any input gives a valid path.
+impl MaskPath {
+    /// A star of `points` tips (3–[`MAX_PRESET_POINTS`]) on the ellipse of `radius`, its inner
+    /// vertices at `inner` (0.05–1) of that radius, the first tip straight up: `2·points` corners.
+    pub fn star(center: Vec2, radius: Vec2, points: usize, inner: f64) -> Self {
+        let n = points.clamp(3, MAX_PRESET_POINTS);
+        let inner = if inner.is_finite() { inner.clamp(0.05, 1.0) } else { 0.5 };
+        let step = std::f64::consts::PI / n as f64;
+        let pts: Vec<Vec2> = (0..2 * n)
+            .map(|k| {
+                let a = -std::f64::consts::FRAC_PI_2 + k as f64 * step;
+                let r = if k % 2 == 0 { 1.0 } else { inner };
+                center + Vec2::new(radius.x * r * a.cos(), radius.y * r * a.sin())
+            })
+            .collect();
+        Self::polygon(&pts)
+    }
+
+    /// A regular polygon of `sides` (3–[`MAX_PRESET_POINTS`]) inscribed in the ellipse of
+    /// `radius`, the first vertex straight up.
+    pub fn regular_polygon(center: Vec2, radius: Vec2, sides: usize) -> Self {
+        let n = sides.clamp(3, MAX_PRESET_POINTS);
+        let step = std::f64::consts::TAU / n as f64;
+        let pts: Vec<Vec2> = (0..n)
+            .map(|k| {
+                let a = -std::f64::consts::FRAC_PI_2 + k as f64 * step;
+                center + Vec2::new(radius.x * a.cos(), radius.y * a.sin())
+            })
+            .collect();
+        Self::polygon(&pts)
+    }
+
+    /// A triangle filling the box: apex at the top centre, base along the bottom.
+    pub fn triangle(x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
+        Self::polygon(&[Vec2::new((x0 + x1) / 2.0, y0), Vec2::new(x1, y1), Vec2::new(x0, y1)])
+    }
+
+    /// A heart filling the box `center ± radius`: two round lobes (smooth vertices with Bézier
+    /// handles) meeting in a cusp at the top and a point at the bottom; six vertices.
+    pub fn heart(center: Vec2, radius: Vec2) -> Self {
+        // (point, in handle, out handle) in a unit box (-1..1, y down), drawn for this preset
+        const UNIT: [[(f64, f64); 3]; 6] = [
+            [(0.0, -0.55), (-0.15, -0.33), (0.15, -0.33)],
+            [(0.5, -1.0), (-0.28, 0.0), (0.28, 0.0)],
+            [(1.0, -0.35), (0.0, -0.36), (0.0, 0.36)],
+            [(0.0, 1.0), (0.38, -0.4), (-0.38, -0.4)],
+            [(-1.0, -0.35), (0.0, 0.36), (0.0, -0.36)],
+            [(-0.5, -1.0), (-0.28, 0.0), (0.28, 0.0)],
+        ];
+        let s = |(x, y): (f64, f64)| Vec2::new(x * radius.x, y * radius.y);
+        Self { vertices: UNIT.iter().map(|[p, i, o]| MaskVertex { p: center + s(*p), t_in: s(*i), t_out: s(*o) }).collect(), closed: true }
+    }
+
+    /// A plus sign filling the box, its arms `thickness` (0.05–0.95) of the box wide: 12 corners.
+    pub fn cross(center: Vec2, radius: Vec2, thickness: f64) -> Self {
+        let t = if thickness.is_finite() { thickness.clamp(0.05, 0.95) } else { 1.0 / 3.0 };
+        let (rx, ry) = (radius.x, radius.y);
+        let (hx, hy) = (rx * t, ry * t);
+        let pts = [(-hx, -ry), (hx, -ry), (hx, -hy), (rx, -hy), (rx, hy), (hx, hy), (hx, ry), (-hx, ry), (-hx, hy), (-rx, hy), (-rx, -hy), (-hx, -hy)];
+        Self::polygon(&pts.map(|(x, y)| center + Vec2::new(x, y)))
+    }
+
+    /// An arrow pointing right, filling the box: a shaft 0.7 of the box high and a head over the
+    /// right 40%: 7 corners.
+    pub fn arrow(center: Vec2, radius: Vec2) -> Self {
+        let (rx, ry) = (radius.x, radius.y);
+        let (shaft, head) = (0.35 * ry, 0.2 * rx);
+        let pts = [(-rx, -shaft), (head, -shaft), (head, -ry), (rx, 0.0), (head, ry), (head, shaft), (-rx, shaft)];
+        Self::polygon(&pts.map(|(x, y)| center + Vec2::new(x, y)))
+    }
+
+    /// The picture area between cinematic bars on a `w`×`h` frame: a rectangle of the frame's
+    /// width at `aspect` (width / height; e.g. 2.39), centred — or of its height when `aspect` is
+    /// narrower than the frame (bars at the sides). Edges without bars reach 10% past the frame so
+    /// feathering never darkens them. Masking Opacity with it cuts the bars out; inverted, an
+    /// effect fills the bars. None when the frame or aspect is not a positive finite size.
+    pub fn letterbox(w: f64, h: f64, aspect: f64) -> Option<Self> {
+        if !(w.is_finite() && h.is_finite() && aspect.is_finite() && w > 0.0 && h > 0.0 && aspect > 0.0) {
+            return None;
+        }
+        let m = 0.1 * w.max(h);
+        Some(if aspect >= w / h {
+            let ph = w / aspect;
+            let y0 = (h - ph) / 2.0;
+            Self::rect(-m, y0, w + m, y0 + ph)
+        } else {
+            let pw = h * aspect;
+            let x0 = (w - pw) / 2.0;
+            Self::rect(x0, -m, x0 + pw, h + m)
+        })
+    }
+
+    /// Half of a `w`×`h` frame cut along a diagonal: the half holding `corner`. Edges other than
+    /// the diagonal reach 10% past the frame, so only the diagonal is feathered. None when the
+    /// frame is not a positive finite size.
+    pub fn diagonal_split(w: f64, h: f64, corner: SplitCorner) -> Option<Self> {
+        if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
+            return None;
+        }
+        let m = 0.1 * w.max(h);
+        let rect = [Vec2::new(-m, -m), Vec2::new(w + m, -m), Vec2::new(w + m, h + m), Vec2::new(-m, h + m)];
+        // the split line through two opposite frame corners, and the corner whose half is kept
+        let (a, b, keep) = match corner {
+            SplitCorner::TopRight => (Vec2::new(0.0, 0.0), Vec2::new(w, h), Vec2::new(w, 0.0)),
+            SplitCorner::BottomLeft => (Vec2::new(0.0, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)),
+            SplitCorner::TopLeft => (Vec2::new(w, 0.0), Vec2::new(0.0, h), Vec2::new(0.0, 0.0)),
+            SplitCorner::BottomRight => (Vec2::new(w, 0.0), Vec2::new(0.0, h), Vec2::new(w, h)),
+        };
+        let raw = |p: Vec2| (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+        let sign = raw(keep).signum();
+        let side = |p: Vec2| raw(p) * sign;
+        // Sutherland–Hodgman against one half-plane (side ≥ 0 is kept)
+        let mut out = Vec::with_capacity(6);
+        for (p, q) in rect.iter().zip(rect.iter().cycle().skip(1)) {
+            let (sp, sq) = (side(*p), side(*q));
+            if sp >= 0.0 {
+                out.push(*p);
+            }
+            if (sp < 0.0 && sq > 0.0) || (sp > 0.0 && sq < 0.0) {
+                let t = sp / (sp - sq);
+                out.push(*p + (*q - *p) * t);
+            }
+        }
+        (out.len() >= 3).then(|| Self::polygon(&out))
+    }
+}
+
 /// Point on a cubic Bézier at `t`.
 pub fn cubic(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2, t: f64) -> Vec2 {
     let u = 1.0 - t;
@@ -576,5 +734,134 @@ mod tests {
         let q = line.with_rounded_corners(2.0, &[1]);
         assert_eq!(q.len(), 5);
         assert_eq!(q.vertices[1].p, q.vertices[2].p);
+    }
+
+    /// Nonzero winding of a flattened path around `p`.
+    fn inside(path: &MaskPath, p: Vec2) -> bool {
+        let poly = path.flatten(0.05);
+        let mut wn = 0i32;
+        for (a, b) in poly.iter().zip(poly.iter().cycle().skip(1)) {
+            let cross = (b.x - a.x) * (p.y - a.y) - (p.x - a.x) * (b.y - a.y);
+            if a.y <= p.y && b.y > p.y && cross > 0.0 {
+                wn += 1;
+            } else if a.y > p.y && b.y <= p.y && cross < 0.0 {
+                wn -= 1;
+            }
+        }
+        wn != 0
+    }
+
+    fn close(a: Vec2, b: Vec2) -> bool {
+        (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9
+    }
+
+    #[test]
+    fn star_alternates_outer_and_inner_vertices() {
+        let c = Vec2::new(500.0, 400.0);
+        let s = MaskPath::star(c, Vec2::new(100.0, 100.0), 5, 0.4);
+        assert_eq!(s.len(), 10);
+        assert!(s.vertices.iter().all(MaskVertex::is_corner));
+        assert!(close(s.vertices[0].p, Vec2::new(500.0, 300.0)), "first tip straight up: {:?}", s.vertices[0].p);
+        for (k, v) in s.vertices.iter().enumerate() {
+            let r = (v.p - c).length();
+            let want = if k % 2 == 0 { 100.0 } else { 40.0 };
+            assert!((r - want).abs() < 1e-9, "vertex {k}: radius {r}");
+        }
+        assert!(inside(&s, c) && !inside(&s, Vec2::new(500.0, 255.0)) && !inside(&s, Vec2::new(560.0, 330.0)), "a notch between tips is outside");
+        // counts and ratios are clamped; non-finite ratios fall back
+        assert_eq!(MaskPath::star(c, Vec2::new(10.0, 10.0), 0, f64::NAN).len(), 6);
+        assert_eq!(MaskPath::star(c, Vec2::new(10.0, 10.0), usize::MAX, 9.0).len(), 2 * MAX_PRESET_POINTS);
+        assert_eq!(MaskPath::regular_polygon(c, Vec2::new(10.0, 10.0), 6).len(), 6);
+        assert_eq!(MaskPath::regular_polygon(c, Vec2::new(10.0, 10.0), 1).len(), 3);
+    }
+
+    #[test]
+    fn heart_is_symmetric_with_a_cusp_and_a_point() {
+        let c = Vec2::new(0.0, 0.0);
+        let h = MaskPath::heart(c, Vec2::new(100.0, 100.0));
+        assert_eq!(h.len(), 6);
+        // mirror image about the vertical axis: vertex k mirrors vertex (6 - k) % 6
+        for k in 0..6 {
+            let (a, b) = (h.vertices[k], h.vertices[(6 - k) % 6]);
+            assert!(close(a.p, Vec2::new(-b.p.x, b.p.y)), "vertex {k}");
+            assert!(close(a.t_in, Vec2::new(-b.t_out.x, b.t_out.y)), "vertex {k} handles");
+        }
+        // the cusp and the bottom point are corners with broken handles, the lobes smooth
+        assert!(h.vertices[0].t_in != h.vertices[0].t_out * -1.0 && h.vertices[3].t_in != h.vertices[3].t_out * -1.0);
+        assert_eq!(h.vertices[1].t_in, h.vertices[1].t_out * -1.0);
+        let (lo, hi) = {
+            let poly = h.flatten(0.05);
+            poly.iter().fold((Vec2::new(f64::MAX, f64::MAX), Vec2::new(f64::MIN, f64::MIN)), |(lo, hi), p| {
+                (Vec2::new(lo.x.min(p.x), lo.y.min(p.y)), Vec2::new(hi.x.max(p.x), hi.y.max(p.y)))
+            })
+        };
+        assert!((lo.x + 100.0).abs() < 1.0 && (hi.x - 100.0).abs() < 1.0 && (lo.y + 100.0).abs() < 1.0 && (hi.y - 100.0).abs() < 1.0, "{lo:?} {hi:?}");
+        assert!(inside(&h, c) && inside(&h, Vec2::new(-50.0, -80.0)) && inside(&h, Vec2::new(0.0, 80.0)));
+        assert!(!inside(&h, Vec2::new(0.0, -80.0)), "the notch between the lobes is outside");
+        assert!(!inside(&h, Vec2::new(90.0, 80.0)), "beside the point is outside");
+    }
+
+    #[test]
+    fn letterbox_keeps_the_picture_between_the_bars() {
+        let p = MaskPath::letterbox(1920.0, 1080.0, 2.39).unwrap();
+        let (lo, hi) = p.bounds();
+        let ph = 1920.0 / 2.39;
+        assert!((hi.y - lo.y - ph).abs() < 1e-9 && ((lo.y + hi.y) / 2.0 - 540.0).abs() < 1e-9, "{lo:?} {hi:?}");
+        assert!(lo.x < 0.0 && hi.x > 1920.0, "no bars at the sides: past the frame");
+        assert!(inside(&p, Vec2::new(960.0, 540.0)) && !inside(&p, Vec2::new(960.0, 50.0)) && !inside(&p, Vec2::new(960.0, 1030.0)));
+        // narrower than the frame: bars at the sides (a 4:3 pillarbox in 16:9)
+        let p = MaskPath::letterbox(1920.0, 1080.0, 4.0 / 3.0).unwrap();
+        let (lo, hi) = p.bounds();
+        assert!((hi.x - lo.x - 1440.0).abs() < 1e-9 && lo.y < 0.0 && hi.y > 1080.0, "{lo:?} {hi:?}");
+        // vertical frames get bars too
+        assert!(MaskPath::letterbox(1080.0, 1920.0, 1.0).is_some());
+        for (w, h, a) in [(0.0, 1080.0, 2.39), (1920.0, -1.0, 2.39), (1920.0, 1080.0, 0.0), (1920.0, 1080.0, f64::NAN), (f64::INFINITY, 1.0, 1.0)] {
+            assert!(MaskPath::letterbox(w, h, a).is_none(), "{w} {h} {a}");
+        }
+    }
+
+    #[test]
+    fn diagonal_split_keeps_the_named_corner() {
+        let (w, h) = (1920.0, 1080.0);
+        for corner in SplitCorner::ALL {
+            let p = MaskPath::diagonal_split(w, h, corner).unwrap();
+            assert!(p.len() >= 3 && p.vertices.iter().all(MaskVertex::is_corner));
+            let at = |x: f64, y: f64| inside(&p, Vec2::new(x * w, y * h));
+            // the kept corner's side and the opposite corner's (the other two corners lie on the
+            // split line)
+            let (kept, opposite) = match corner {
+                SplitCorner::TopRight => (at(0.9, 0.1), at(0.1, 0.9)),
+                SplitCorner::TopLeft => (at(0.1, 0.1), at(0.9, 0.9)),
+                SplitCorner::BottomLeft => (at(0.1, 0.9), at(0.9, 0.1)),
+                SplitCorner::BottomRight => (at(0.9, 0.9), at(0.1, 0.1)),
+            };
+            assert!(kept && !opposite, "{corner:?}");
+            // past the frame on the kept side is covered (no feathered frame edge)
+            let outside_frame = match corner {
+                SplitCorner::TopRight => at(1.05, -0.05),
+                SplitCorner::TopLeft => at(-0.05, -0.05),
+                SplitCorner::BottomLeft => at(-0.05, 1.05),
+                SplitCorner::BottomRight => at(1.05, 1.05),
+            };
+            assert!(outside_frame, "{corner:?}");
+            assert_eq!(SplitCorner::from_name(corner.name()), Some(corner));
+        }
+        assert_eq!(SplitCorner::from_name("bottom-right"), Some(SplitCorner::BottomRight));
+        assert!(MaskPath::diagonal_split(0.0, 1.0, SplitCorner::TopLeft).is_none());
+    }
+
+    #[test]
+    fn triangle_cross_and_arrow_fill_their_box() {
+        let c = Vec2::new(100.0, 100.0);
+        let t = MaskPath::triangle(0.0, 0.0, 200.0, 200.0);
+        assert_eq!(t.len(), 3);
+        assert!(inside(&t, Vec2::new(100.0, 150.0)) && !inside(&t, Vec2::new(10.0, 10.0)));
+        let x = MaskPath::cross(c, Vec2::new(100.0, 100.0), 0.3);
+        assert_eq!(x.len(), 12);
+        assert!(inside(&x, c) && inside(&x, Vec2::new(100.0, 10.0)) && !inside(&x, Vec2::new(10.0, 10.0)));
+        assert_eq!(MaskPath::cross(c, Vec2::new(1.0, 1.0), f64::INFINITY).len(), 12);
+        let a = MaskPath::arrow(c, Vec2::new(100.0, 50.0));
+        assert_eq!(a.len(), 7);
+        assert!(inside(&a, Vec2::new(190.0, 100.0)) && inside(&a, Vec2::new(10.0, 100.0)) && !inside(&a, Vec2::new(10.0, 60.0)));
     }
 }
