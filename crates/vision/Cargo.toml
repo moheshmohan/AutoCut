@@ -20,13 +20,13 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 candle-core = { version = "0.9", default-features = false, optional = true }
 rayon = { workspace = true, optional = true }
-wgpu = { version = "30", default-features = false, features = ["wgsl"], optional = true }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "std"], optional = true }
 pollster = { version = "0.4", optional = true }
 
 # On macOS the detectors run on the GPU (`gpu.rs`) through wgpu's Metal backend; the other
 # platforms keep the CPU.
 [target.'cfg(target_os = "macos")'.dependencies]
-wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"], optional = true }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "std", "metal"], optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
