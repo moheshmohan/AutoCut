@@ -41,7 +41,7 @@ impl Numbered {
         let (dir, name) = path.split_at(cut);
         let ext_at = name.rfind('.').filter(|&i| i > 0)?;
         let ext = name[ext_at + 1..].to_ascii_lowercase();
-        if !crate::STILL_EXTENSIONS.contains(&ext.as_str()) {
+        if !crate::STILL_EXTENSIONS.contains(&ext.as_str()) || crate::HEIF_EXTENSIONS.contains(&ext.as_str()) {
             return None;
         }
         let stem = &name[..ext_at];

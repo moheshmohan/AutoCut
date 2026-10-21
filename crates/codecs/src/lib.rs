@@ -17,6 +17,7 @@
 //!   MP3 / MP2 and AC-3 audio.
 //! - [`AudioFileSource`]: standalone compressed audio files (MP3, FLAC, AIFF, …).
 //! - [`Y4mSource`]: uncompressed YUV4MPEG2 (`.y4m`) video, frames read on demand.
+//! - [`heif`]: HEIF / HEIC photos (HEVC pictures and grids of them) as stills.
 //! - [`openers`]: the openers to register with the engine's media pool.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
@@ -25,6 +26,7 @@ pub mod apv;
 pub mod audio;
 pub mod avi;
 pub mod gop;
+pub mod heif;
 pub mod hw;
 mod hw_frame;
 pub mod mkv;
@@ -130,16 +132,18 @@ pub fn software_video_decoder(entry: &filmcraft_isobmff::SampleEntry) -> Result<
     Err(CodecError::Unsupported(format!("no decoder for {} video", entry.codec.name())))
 }
 
-/// Openers for the engine's media pool (MP4/MOV, Matroska/WebM, MXF, Ogg Opus/Vorbis, MPEG TS/PS and
+/// Openers for the engine's media pool (HEIF photos, MP4/MOV, Matroska/WebM, MXF, Ogg Opus/Vorbis, MPEG TS/PS and
 /// MPEG-1/2 video elementary streams, APV raw bitstreams, YUV4MPEG2, standalone audio).
 pub fn openers() -> Vec<filmcraft_media::Opener> {
-    vec![mp4::opener, mkv::opener, mxf::opener, ogg::opener, mpeg::opener, apv::opener, avi::opener, y4m::opener, audio::opener]
+    // (a HEIF photo starts like an MP4: it is looked at first)
+    vec![heif::opener, mp4::opener, mkv::opener, mxf::opener, ogg::opener, mpeg::opener, apv::opener, avi::opener, y4m::opener, audio::opener]
 }
 
 fn reader_registry() -> &'static RwLock<Vec<filmcraft_media::ReaderOpener>> {
     static R: std::sync::OnceLock<RwLock<Vec<filmcraft_media::ReaderOpener>>> = std::sync::OnceLock::new();
     R.get_or_init(|| {
         RwLock::new(vec![
+            heif::reader_opener,
             mp4::reader_opener,
             mkv::reader_opener,
             mxf::reader_opener,
