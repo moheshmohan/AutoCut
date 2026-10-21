@@ -27,6 +27,7 @@
 use std::collections::BTreeMap;
 
 use filmcraft_engine::ken_burns::Move as KenBurns;
+use filmcraft_engine::pillars::{Backdrop, Join, PillarEdit, Span, dip_of, pillar_edits};
 use filmcraft_engine::project::Delivery;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1444,127 +1445,6 @@ async fn backdrop(ex: &dyn Executor, tr: &Tracks, item: u64, (t0, t1): (f64, f64
 /// ([`pillar_edits`]).
 const STILL_HEAD: f64 = 10.0;
 
-/// A clip on a track as `sequence.inspect` lists it: its id and span, ticks.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Span {
-    clip: u64,
-    start: i64,
-    end: i64,
-}
-
-/// A transition on the pictures' track: its id and span (ticks), the clips it goes from and to,
-/// and — a dip to black or white without a sound of its own — the dip.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Join {
-    id: u64,
-    start: i64,
-    end: i64,
-    from: Option<u64>,
-    to: Option<u64>,
-    dip: Option<&'static str>,
-}
-
-/// The dips a picture shown whole goes through with its copy ([`pillar_edits`]), by the
-/// transition's id; a dip's colour is opaque, over the whole frame.
-fn dip_of(effect: &str) -> Option<&'static str> {
-    match effect {
-        "dip_to_black" | "dip_to_black_legacy" => Some("dip_to_black"),
-        "dip_to_white" => Some("dip_to_white"),
-        _ => None,
-    }
-}
-
-/// An edit that keeps a picture's blurred copy under its transitions ([`pillar_edits`]).
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum PillarEdit {
-    /// Move the copy's Out edge `by` ticks later: on until the transition out of its picture ends.
-    Out { clip: u64, by: i64 },
-    /// Move its In edge `by` ticks earlier: there when the transition into its picture begins.
-    In { clip: u64, by: i64 },
-    /// `effect` on the copies' track over `[start, end)`: from copy `from` into copy `to` where
-    /// both are given (they meet at the cut), else out of or into the one given at its own edge.
-    Copies { effect: &'static str, from: Option<u64>, to: Option<u64>, start: i64, end: i64 },
-    /// The pictures' dip `transition` taken off: picture `from` fades out over its first half and
-    /// `to` in over its second (Opacity keyframes), over the dip on the copies' track.
-    Fades { transition: u64, from: Option<u64>, to: Option<u64>, start: i64, end: i64 },
-}
-
-/// The pillars through the pictures' transitions. A picture shown whole has its blurred copy on
-/// the track below for exactly its own span, but a transition on the pictures' track runs past
-/// the cut on both sides (the clips' handles): out of a picture shown whole, the second half
-/// had nothing under the outgoing picture's empty sides — black there until the next picture
-/// covered them; into one, the first half had nothing under the incoming picture's sides. So
-/// each copy reaches on to the end of the transition out of its picture and back to the start
-/// of the one into it, as far as the copies beside it leave room (the engine stops a copy where
-/// its media does), and two copies that meet at the cut dissolve into each other over the
-/// transition. A dip to black is opaque over the whole frame — the sides went black at its
-/// first frame while the picture was still fading — so at a picture shown whole the dip goes
-/// to the copies' track instead, under the pictures fading out and in over its halves: the
-/// pillars dip with the picture (over the darkest frames, a little of the blurred copy shows
-/// through the fading picture). `copies`: the copies' track; `joins`: the pictures'
-/// transitions; `backdrops`: (picture, its copy). Hostile spans are skipped.
-fn pillar_edits(copies: &[Span], joins: &[Join], backdrops: &[(u64, u64)]) -> Vec<PillarEdit> {
-    let mut track: Vec<Span> = copies.iter().copied().filter(|s| s.end > s.start).collect();
-    track.sort_by_key(|s| (s.start, s.end));
-    let copy_of = |picture: Option<u64>| picture.and_then(|p| backdrops.iter().find(|(f, _)| *f == p).map(|(_, b)| *b));
-    let at = |track: &[Span], copy: Option<u64>| copy.and_then(|c| track.iter().position(|s| s.clip == c));
-    let mut edits = Vec::new();
-    for j in joins.iter().filter(|j| j.end > j.start) {
-        let (a, b) = (copy_of(j.from), copy_of(j.to));
-        // the outgoing picture's copy, on to the transition's end
-        if let Some(i) = at(&track, a) {
-            let room = track.get(i + 1).map_or(i64::MAX, |s| s.start);
-            if let Some(s) = track.get_mut(i)
-                && j.end.min(room) > s.end
-            {
-                let to = j.end.min(room);
-                edits.push(PillarEdit::Out { clip: s.clip, by: to.saturating_sub(s.end) });
-                s.end = to;
-            }
-        }
-        // the incoming picture's copy, back to the transition's start
-        if let Some(i) = at(&track, b) {
-            let room = i.checked_sub(1).and_then(|k| track.get(k)).map_or(i64::MIN, |s| s.end);
-            if let Some(s) = track.get_mut(i)
-                && j.start.max(room) < s.start
-            {
-                let from = j.start.max(room);
-                edits.push(PillarEdit::In { clip: s.clip, by: s.start.saturating_sub(from) });
-                s.start = from;
-            }
-        }
-        let (ia, ib) = (at(&track, a), at(&track, b));
-        let (sa, sb) = (ia.and_then(|i| track.get(i)), ib.and_then(|i| track.get(i)));
-        // both shown whole, their copies meeting at the cut inside the transition
-        let meet = matches!((ia, ib, sa, sb), (Some(i), Some(k), Some(x), Some(y)) if k == i + 1 && x.end == y.start && j.start < x.end && y.start < j.end);
-        let effect = match j.dip {
-            Some(dip) if sa.is_some() || sb.is_some() => {
-                edits.push(PillarEdit::Fades { transition: j.id, from: j.from, to: j.to, start: j.start, end: j.end });
-                dip
-            }
-            _ if meet => "cross_dissolve",
-            _ => continue,
-        };
-        if meet {
-            edits.push(PillarEdit::Copies { effect, from: sa.map(|s| s.clip), to: sb.map(|s| s.clip), start: j.start, end: j.end });
-            continue;
-        }
-        // a copy on its own dips at its own edge, unless another copy touches it there (the
-        // transition would join the two)
-        if let (Some(i), Some(s)) = (ia, sa)
-            && track.get(i + 1).is_none_or(|n| n.start > s.end)
-        {
-            edits.push(PillarEdit::Copies { effect, from: Some(s.clip), to: None, start: j.start, end: j.end });
-        }
-        if let (Some(k), Some(s)) = (ib, sb)
-            && k.checked_sub(1).and_then(|p| track.get(p)).is_none_or(|p| p.end < s.start)
-        {
-            edits.push(PillarEdit::Copies { effect, from: None, to: Some(s.clip), start: j.start, end: j.end });
-        }
-    }
-    edits
-}
-
 /// `effects.setParam` keyframes on a clip's Opacity: `(time, percent)`.
 async fn opacity_keys(ex: &dyn Executor, clip: u64, keys: [(i64, f64); 2]) -> Result<(), AutoCutError> {
     for (time, value) in keys {
@@ -1580,7 +1460,7 @@ async fn pillar_edit(ex: &dyn Executor, edit: PillarEdit, fps: f64) -> Result<()
         PillarEdit::In { clip, by } => {
             run(ex, "timeline.trim", json!({"clip": clip, "edge": "in", "mode": "regular", "delta": by.saturating_neg()})).await.map(drop)
         }
-        PillarEdit::Copies { effect, from, to, start, end } => {
+        PillarEdit::Copies { effect, from, to, start, end, .. } => {
             let duration = end.saturating_sub(start);
             let frames = (duration as f64 / TPS * fps).round().max(1.0) as i64;
             let (clip, edge) = match (from, to) {
@@ -1612,9 +1492,15 @@ async fn pillar_edit(ex: &dyn Executor, edit: PillarEdit, fps: f64) -> Result<()
     }
 }
 
-/// Keep the pillars under the pictures' transitions ([`pillar_edits`]) once every transition is
-/// where it stays (after `transitions.snapToBeats`): `backdrops` (picture, its blurred copy),
-/// the sequence at `fps`. Cosmetic, like the transitions: what the engine refuses is noted.
+/// Keep the pillars under the pictures' transitions once every transition is where it stays
+/// (after `transitions.snapToBeats`): the engine's plan ([`pillar_edits`], shared with Auto
+/// Reframe's Blur Fill) made through commands — each copy reaching on under the transition out
+/// of its picture and back under the one into it, as far as the copies beside it leave room (the
+/// engine stops a copy where its media does), two copies that meet at the cut dissolving into
+/// each other, and a dip at a picture shown whole going to the copies' track, the pictures fading
+/// out and in over it (over the darkest frames, a little of the blurred copy shows through the
+/// fading picture). `backdrops`: (picture, its blurred copy, under the whole of it); the
+/// sequence at `fps`. Cosmetic, like the transitions: what the engine refuses is noted.
 async fn pillars_through_transitions(ex: &dyn Executor, backdrops: &[(u64, u64)], fps: f64, notes: &mut Vec<String>) {
     let Some(&(picture, copy)) = backdrops.first() else { return };
     let seq = match run(ex, "sequence.inspect", json!({})).await {
@@ -1631,7 +1517,7 @@ async fn pillars_through_transitions(ex: &dyn Executor, backdrops: &[(u64, u64)]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|c| Some(Span { clip: c["clip"].as_u64()?, start: c["start"].as_i64()?, end: c["end"].as_i64()? }))
+        .filter_map(|c| Some(Span::new(c["clip"].as_u64()?, c["start"].as_i64()?, c["end"].as_i64()?)))
         .collect();
     let joins: Vec<Join> = pictures["transitions"]
         .as_array()
@@ -1644,7 +1530,8 @@ async fn pillars_through_transitions(ex: &dyn Executor, backdrops: &[(u64, u64)]
             Some(Join { id: x["id"].as_u64()?, start, end: start.checked_add(x["duration"].as_i64()?)?, from: x["from"].as_u64(), to: x["to"].as_u64(), dip })
         })
         .collect();
-    for edit in pillar_edits(&copies, &joins, backdrops) {
+    let backdrops: Vec<Backdrop> = backdrops.iter().map(|&(p, c)| Backdrop::whole(p, c)).collect();
+    for edit in pillar_edits(&copies, &joins, &backdrops) {
         if let Err(err) = pillar_edit(ex, edit, fps).await {
             notes.push(format!("the blurred copy under a transition ({edit:?}): {err}"));
         }
@@ -4618,71 +4505,6 @@ mod tests {
         assert!((big_a[1] - big_b[1]).abs() > 3.0 * (small_a[1] - small_b[1]).abs(), "{big_a:?} {big_b:?} vs {small_a:?} {small_b:?}");
         assert!(covers(portrait, big_a) && covers(portrait, big_b));
         assert!(reframe_path(portrait, frame, [0.5, 0.5], f64::NAN).is_some(), "an unknown size drifts the least");
-    }
-
-    #[test]
-    fn the_pillars_reach_under_their_pictures_transitions() {
-        use PillarEdit::{Copies, Fades, In, Out};
-        let span = |clip: u64, start: i64, end: i64| Span { clip, start, end };
-        let join = |from: Option<u64>, to: Option<u64>, start: i64, end: i64| Join { id: 99, start, end, from, to, dip: None };
-        let dip = |j: Join| Join { dip: Some("dip_to_black"), ..j };
-        // pictures 1, 2, 3 cut at 100 and 200; 1 and 3 shown whole (copies 11 and 13)
-        let backdrops = [(1, 11), (3, 13)];
-        let copies = [span(11, 0, 100), span(13, 200, 300)];
-        // out of a whole picture: its copy stays on to the transition's end; into one: its copy
-        // is there from the transition's start
-        let joins = [join(Some(1), Some(2), 90, 110), join(Some(2), Some(3), 190, 210)];
-        assert_eq!(pillar_edits(&copies, &joins, &backdrops), [Out { clip: 11, by: 10 }, In { clip: 13, by: 10 }]);
-        // a dip: the same, the pictures' dip goes to the copies' track (each copy dipping at its
-        // own edge) and the pictures fade out and in over it
-        let joins = [dip(join(Some(1), Some(2), 90, 110)), dip(join(Some(2), Some(3), 190, 210))];
-        assert_eq!(
-            pillar_edits(&copies, &joins, &backdrops),
-            [
-                Out { clip: 11, by: 10 },
-                Fades { transition: 99, from: Some(1), to: Some(2), start: 90, end: 110 },
-                Copies { effect: "dip_to_black", from: Some(11), to: None, start: 90, end: 110 },
-                In { clip: 13, by: 10 },
-                Fades { transition: 99, from: Some(2), to: Some(3), start: 190, end: 210 },
-                Copies { effect: "dip_to_black", from: None, to: Some(13), start: 190, end: 210 },
-            ]
-        );
-        // two pictures shown whole, cut together: their copies dissolve (or dip) into each other
-        let copies2 = [span(11, 0, 100), span(12, 100, 200)];
-        let both = [(1, 11), (2, 12)];
-        let j = join(Some(1), Some(2), 90, 110);
-        assert_eq!(pillar_edits(&copies2, &[j], &both), [Copies { effect: "cross_dissolve", from: Some(11), to: Some(12), start: 90, end: 110 }]);
-        assert_eq!(
-            pillar_edits(&copies2, &[dip(j)], &both),
-            [
-                Fades { transition: 99, from: Some(1), to: Some(2), start: 90, end: 110 },
-                Copies { effect: "dip_to_black", from: Some(11), to: Some(12), start: 90, end: 110 }
-            ]
-        );
-        // a copy reaches no further than the next one starts (a short shot between)
-        let copies3 = [span(11, 0, 100), span(13, 104, 300)];
-        let joins = [join(Some(1), Some(2), 90, 110), join(Some(2), Some(3), 100, 108)];
-        assert_eq!(pillar_edits(&copies3, &joins, &backdrops), [Out { clip: 11, by: 4 }]);
-        // a transition beside no picture shown whole, a one-sided one inside its picture, a dip
-        // between two filled pictures: nothing to do
-        let joins = [join(Some(2), Some(4), 400, 420), join(Some(1), None, 80, 100), dip(join(Some(5), Some(6), 500, 520))];
-        assert!(pillar_edits(&copies, &joins, &backdrops).is_empty());
-        // the outro's dip out of a picture shown whole, at the very end: its copy dips there
-        let j = dip(join(Some(3), None, 280, 300));
-        assert_eq!(
-            pillar_edits(&copies, &[j], &backdrops),
-            [
-                Fades { transition: 99, from: Some(3), to: None, start: 280, end: 300 },
-                Copies { effect: "dip_to_black", from: Some(13), to: None, start: 280, end: 300 }
-            ]
-        );
-        // hostile spans: empty or backwards transitions and copies are skipped, extremes saturate
-        // (the first copy reaches the second, which then has no room to reach back)
-        let joins = [join(Some(1), Some(2), 110, 90), join(Some(1), Some(2), i64::MIN, i64::MAX), join(Some(2), Some(3), i64::MIN, i64::MAX)];
-        let copies4 = [span(11, 0, 100), span(13, 300, 200), span(13, 200, 300)];
-        let edits = pillar_edits(&copies4, &joins, &backdrops);
-        assert_eq!(edits, [Out { clip: 11, by: 100 }], "{edits:?}");
-        assert!(pillar_edits(&[span(11, i64::MIN, i64::MAX)], &[join(Some(1), None, i64::MIN, i64::MAX)], &backdrops).is_empty());
     }
 
     #[test]

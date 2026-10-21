@@ -27,7 +27,13 @@
 //! to the whole picture and back in when the subject returns (see [`filmcraft_render::reframe`]).
 //! The copies are trimmed to those stretches and go on a [`BLUR_FILL_TRACK`] video track directly
 //! under the clip's own (one an earlier run made is reused, its old copies under the clip
-//! replaced); clips on such a track are never reframed themselves.
+//! replaced); clips on such a track are never reframed themselves. A copy at a clip's edge stays
+//! under the transition there ([`crate::pillars`]): it reaches on under the transition out of
+//! the clip and back under the one into it, as far as its media and the copies beside it allow;
+//! two copies that meet at the cut dissolve into each other with their clips; and a dip to black
+//! (or white) next to a blur-filled stretch goes down to the Blur Fill track, the clips fading out
+//! and in over it with Opacity keyframes, so the fill dips with the picture (on the clips' track
+//! a dip's colour would cover the frame at once).
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -586,15 +592,33 @@ fn trimmed_copy(it: &TrackItem, a: Tick, e: Tick) -> Option<TrackItem> {
     Some(b)
 }
 
+/// Where the media of each project item starts and ends (None: a still, without end), for
+/// [`add_blur_fill`]'s copies reaching under transitions.
+type MediaSpans = HashMap<ItemId, (Tick, Option<Tick>)>;
+
+/// [`MediaSpans`] of the clips on `q`'s video tracks.
+fn media_spans(project: &filmcraft_project::Project, media: &crate::media_pool::MediaPool, q: &Sequence) -> MediaSpans {
+    q.video_tracks
+        .iter()
+        .flat_map(|t| t.items.iter().map(|i| i.item))
+        .map(|id| (id, (crate::media_start(project, id), crate::media_duration(project, media, id))))
+        .collect()
+}
+
 /// Put the blurred copies under the clips of `q` that got some ([`ClipReframe::fill`]): per
 /// video track, a [`BLUR_FILL_TRACK`] directly under it — the one already there (an earlier run's,
-/// its copies under these clips taken away) or a new one. How many copies were made.
-fn add_blur_fill(q: &mut Sequence, clips: &[ClipReframe], next_id: &mut u64) -> usize {
+/// its copies under these clips taken away) or a new one. The copies at a clip's edges then reach
+/// under the transitions there, as far as `media` and the copies beside them allow, dissolving
+/// into a neighbour's copy, and a dip there goes down to the copies, the clips fading over it
+/// ([`crate::pillars`]). How many copies were made.
+fn add_blur_fill(q: &mut Sequence, clips: &[ClipReframe], media: &MediaSpans, next_id: &mut u64) -> usize {
     let mut alloc = || {
         let v = *next_id;
         *next_id = next_id.saturating_add(1);
         v
     };
+    let rate = q.settings.frame_rate.sane();
+    let reach = |it: &TrackItem| crate::pillars::reach(it, media.get(&it.item).copied().unwrap_or((Tick::ZERO, None)), rate);
     let mut made = 0;
     // from the top down, so inserting a track leaves the indices still to do as they are
     for ti in (0..q.video_tracks.len()).rev() {
@@ -603,15 +627,17 @@ fn add_blur_fill(q: &mut Sequence, clips: &[ClipReframe], next_id: &mut u64) -> 
             continue;
         }
         let mut copies: Vec<TrackItem> = Vec::new();
-        let mut under: Vec<(Tick, Tick)> = Vec::new();
+        let mut owners: Vec<(ClipId, ClipId)> = Vec::new();
+        let mut refilled: Vec<ClipId> = Vec::new();
         for r in clips.iter().filter(|r| !r.fill.is_empty() && !r.keep_scale) {
             let Some(it) = track.items.iter().find(|i| i.id == r.clip) else { continue };
-            under.push((it.start, it.end()));
+            refilled.push(it.id);
             for &(a, e) in &r.fill {
                 let Some(mut b) = trimmed_copy(it, a, e) else { continue };
                 b.id = ClipId(alloc());
                 b.name = format!("{} (blur fill)", it.name);
                 make_backdrop(&mut b, r.fill_position, r.fill_scale, r.anchor);
+                owners.push((b.id, it.id));
                 copies.push(b);
             }
         }
@@ -619,19 +645,21 @@ fn add_blur_fill(q: &mut Sequence, clips: &[ClipReframe], next_id: &mut u64) -> 
             continue;
         }
         made += copies.len();
+        let pictures = track.items.clone();
         let reuse = ti.checked_sub(1).filter(|b| q.video_tracks.get(*b).is_some_and(|t| t.name == BLUR_FILL_TRACK));
-        let fill_track = match reuse {
-            Some(b) => q.video_tracks.get_mut(b),
+        let (fills, above) = match reuse {
+            Some(b) => (b, ti),
             None => {
                 q.video_tracks.insert(ti, filmcraft_project::Track::new(TrackId(alloc()), filmcraft_project::TrackKind::Video, BLUR_FILL_TRACK.into()));
-                q.video_tracks.get_mut(ti)
+                (ti, ti + 1)
             }
         };
-        let Some(t) = fill_track else { continue };
-        t.items.retain(|i| !under.iter().any(|(a, e)| i.start < *e && *a < i.end()));
-        t.transitions.retain(|tr| t.items.iter().any(|i| tr.from == Some(i.id) || tr.to == Some(i.id)));
+        let Some(t) = q.video_tracks.get_mut(fills) else { continue };
+        let cleared = crate::pillars::clear_under(t, &pictures, &refilled);
         t.items.extend(copies);
         t.sort();
+        owners.extend(cleared.owners);
+        crate::pillars::through_transitions(q, (above, fills), &owners, &cleared.moved, &reach, &mut alloc);
     }
     made
 }
@@ -897,6 +925,7 @@ fn apply(s: &mut Session, target: Target, clips: &[ClipReframe]) -> Result<Value
     let followed = clips.iter().filter(|r| !r.letterbox).count();
     let filled = clips.iter().filter(|r| !r.fill.is_empty() && !r.keep_scale).count();
     let summary: Vec<Value> = clips.iter().map(ClipReframe::to_json).collect();
+    let pool = s.media.clone();
     match target {
         Target::Copy { seq, name, next_id, label, bin, aspect } => {
             let (w, h) = (seq.settings.width, seq.settings.height);
@@ -909,7 +938,8 @@ fn apply(s: &mut Session, target: Target, clips: &[ClipReframe]) -> Result<Value
                     }
                 }
                 pr.next_id = pr.next_id.max(next_id);
-                add_blur_fill(&mut q, clips, &mut pr.next_id);
+                let media = media_spans(pr, &pool, &q);
+                add_blur_fill(&mut q, clips, &media, &mut pr.next_id);
                 q.check().map_err(EngineError::Other)?;
                 let id = pr.add_item(&n, label, ItemKind::Sequence(Arc::new(q)), bin);
                 st.active_sequence = Some(id);
@@ -931,13 +961,14 @@ fn apply(s: &mut Session, target: Target, clips: &[ClipReframe]) -> Result<Value
             let label = if clips.len() == 1 { "Auto Reframe" } else { "Auto Reframe Clips" };
             s.edit(label, |pr, _| {
                 let mut next_id = pr.next_id;
+                let media = media_spans(pr, &pool, pr.sequence(seq).ok_or(EngineError::NoSequence)?);
                 let q = pr.sequence_mut(seq).ok_or(EngineError::NoSequence)?;
                 for r in clips {
                     if let Some((_, it)) = q.find_item_mut(r.clip) {
                         apply_clip(it, r);
                     }
                 }
-                add_blur_fill(q, clips, &mut next_id);
+                add_blur_fill(q, clips, &media, &mut next_id);
                 q.check().map_err(EngineError::Other)?;
                 pr.next_id = pr.next_id.max(next_id);
                 Ok(())

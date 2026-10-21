@@ -290,7 +290,7 @@ fn a_lost_stretch_gets_a_trimmed_copy_under_it() {
         fill_scale: 1.08,
     };
     let mut next = 10_000;
-    assert_eq!(add_blur_fill(&mut q, std::slice::from_ref(&r), &mut next), 2);
+    assert_eq!(add_blur_fill(&mut q, std::slice::from_ref(&r), &Default::default(), &mut next), 2);
     q.check().unwrap();
     let fills = &q.video_tracks[0].items;
     assert_eq!((fills[0].start, fills[0].duration), (a, e - a));
@@ -405,4 +405,106 @@ fn hostile_parameters_are_refused() {
     let mut empty = Session::default();
     assert!(empty.execute("sequence.autoReframe", json!({})).is_err());
     assert!(empty.execute("clip.autoReframe", json!({})).is_err());
+}
+
+/// Five clips with eight-frame transitions, each clip with media on both sides of what it plays:
+/// flat A (nobody to follow: fitted whole over its blurred copy), the subject B (followed: it
+/// fills the frame), flat C and D, the subject E — a dip from A into B, a push from B into C, a
+/// dip from C into D (both whole), a cross dissolve from D into E. 30 frames each, at the image
+/// sequences' rate. The session, with the sequence open.
+fn transitions_session() -> Session {
+    let dir = tmp_dir("reframe-transitions");
+    for k in 0..FRAMES {
+        image::RgbaImage::from_pixel(W, H, image::Rgba([200, 200, 200, 255])).save(dir.join(format!("flat{k:04}.png"))).unwrap();
+        frame(k, true).save(dir.join(format!("subj{k:04}.png"))).unwrap();
+    }
+    let mut s = Session::default();
+    let import = |s: &mut Session, name: &str| {
+        let r = s.execute("file.importImageSequence", json!({"path": dir.join(name).to_string_lossy()})).unwrap();
+        ItemId(r["items"][0].as_u64().unwrap_or_else(|| panic!("{r}")))
+    };
+    let (flat, subj) = (import(&mut s, "flat0000.png"), import(&mut s, "subj0000.png"));
+    let rate = s.project.item(flat).unwrap().as_media().unwrap().info.video.clone().unwrap().frame_rate;
+    let mut p = (*s.project).clone();
+    let seq = p.new_sequence("Cuts", SequenceSettings { width: W, height: H, frame_rate: rate, ..Default::default() }, 1, 1, None);
+    let mut clips = Vec::new();
+    for (k, (item, from)) in [(flat, 0), (subj, 9), (flat, 9), (flat, 9), (subj, 9)].into_iter().enumerate() {
+        let range = TimeRange::new(rate.tick_of(from), rate.tick_of(30));
+        let mut v = p.make_track_item(item, TrackKind::Video, rate.tick_of(30 * k as i64), range, rate).unwrap();
+        for e in &mut v.effects {
+            filmcraft_project::resolve_auto_points(e, (W, H), (W, H));
+        }
+        clips.push(v.id);
+        p.sequence_mut(seq).unwrap().video_tracks[0].items.push(v);
+    }
+    s.project = std::sync::Arc::new(p);
+    s.state.active_sequence = Some(seq);
+    s.state.open_sequences = vec![seq];
+    for (clip, effect) in clips.iter().zip(["dip_to_black", "push", "dip_to_black", "cross_dissolve"]) {
+        s.execute("sequence.applyVideoTransition", json!({"clip": clip.0, "edge": "out", "effect": effect, "frames": 8})).unwrap();
+    }
+    s
+}
+
+/// The bars above and below a picture fitted whole into the vertical frame — rows 8–96 and
+/// 224–312 of 320 — at frame `k`: the share of their pixels that are not black, and their mean
+/// luma (0..1).
+fn bars(s: &mut Session, k: i64) -> (f64, f64) {
+    let (w, h, px) = crate::media_test_util::frame_rgba(s, k, 1.0);
+    assert_eq!((w, h), (180, 320));
+    let (mut lit, mut luma, mut n) = (0usize, 0.0, 0usize);
+    for y in (8..96).chain(224..312) {
+        for x in 0..w {
+            let p = &px[(y * w + x) * 4..(y * w + x) * 4 + 3];
+            n += 1;
+            lit += usize::from(p.iter().any(|c| *c > 8));
+            luma += (0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2])) / 255.0;
+        }
+    }
+    (lit as f64 / n as f64, luma / n as f64)
+}
+
+#[test]
+fn the_blur_fill_stays_through_the_transitions() {
+    let mut s = transitions_session();
+    let r = s.execute("sequence.autoReframe", json!({"aspect": "9:16", "fallback": "blur", "wait": true})).unwrap();
+    let out = &r["reframe"];
+    let followed: Vec<bool> = out["clips"].as_array().unwrap().iter().map(|c| c["followed"] == json!(true)).collect();
+    assert_eq!(followed, [false, true, false, false, true], "{out}");
+    // the bars' brightness in the middle of each shot: the blurred copy's, or the followed picture's
+    let mid: Vec<f64> = (0..5).map(|k| bars(&mut s, 30 * k + 15).1).collect();
+    assert!(mid.iter().all(|l| *l > 0.2), "{mid:?}");
+    let mut bad = Vec::new();
+    // (first frame, effect, the clip going out, the clip coming in)
+    for (first, effect, a, b) in [(26, "dip", 0, 1), (56, "push", 1, 2), (86, "dip", 2, 3), (116, "dissolve", 3, 4)] {
+        for k in first..first + 8 {
+            let (lit, luma) = bars(&mut s, k);
+            let p = (k - first) as f64 / 8.0;
+            let ok = match effect {
+                // over a dip the bars fade with the picture: out of the first over its first half,
+                // into the second over its second
+                "dip" => {
+                    let (shown, of) = if p < 0.5 { (1.0 - 2.0 * p, mid[a]) } else { (2.0 * p - 1.0, mid[b]) };
+                    luma >= 0.3 * of * shown
+                }
+                // a push: never black
+                "push" => lit >= 0.95,
+                // a dissolve: the first shot's bars, then the second's, mixed
+                _ => luma >= 0.7 * ((1.0 - p) * mid[a] + p * mid[b]),
+            };
+            println!("{effect:>8} frame {k}: bars {:5.1} % lit, luma {luma:.3}{}", lit * 100.0, if ok { "" } else { "  BLACK" });
+            if !ok {
+                bad.push((effect, k, lit, luma));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "the bars go black during a transition: {bad:?}");
+    // the dips went down to the Blur Fill track (the clips fade over them); the push and the
+    // dissolve stay with the clips
+    let q = s.project.sequence(ItemId(out["sequence"].as_u64().unwrap())).unwrap();
+    let effects = |t: usize| q.video_tracks[t].transitions.iter().map(|x| x.effect.effect.as_str()).collect::<Vec<_>>();
+    assert_eq!((q.video_tracks[0].name.as_str(), q.video_tracks.len()), (BLUR_FILL_TRACK, 2));
+    assert_eq!(effects(1), ["push", "cross_dissolve"]);
+    assert_eq!(effects(0), ["dip_to_black", "dip_to_black"]);
+    q.check().unwrap();
 }
