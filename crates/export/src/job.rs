@@ -119,8 +119,33 @@ pub const INTERLEAVE: i64 = 16;
 /// the one being rendered), see [`overlap_batch`].
 pub const IN_FLIGHT_BUDGET: u64 = 1 << 29;
 
-/// One rendered picture: straight RGBA8, or for HDR exports the encoded R'G'B' floats.
-type Frame = (Vec<u8>, Vec<f32>);
+/// One rendered picture: straight RGBA8, or for HDR exports the encoded R'G'B' floats; for an
+/// encoder that takes Y'CbCr ([`VideoEncoder::takes_yuv420`]) the RGBA's [`crate::rgba_to_yuv420_8`]
+/// planes (Y, then Cb, then Cr) instead of the RGBA.
+struct Frame {
+    px: Vec<u8>,
+    hdr: Vec<f32>,
+    yuv420: bool,
+}
+
+/// `pipe`'s frame `fi`, converted for an encoder that takes Y'CbCr when `yuv420` (and not HDR):
+/// on the render threads, which draw frames in parallel, instead of on the encoding thread.
+fn rendered(pipe: &Pipeline, fi: i64, sources: &dyn SourceProvider, yuv420: bool) -> Frame {
+    let (px, hdr) = pipe.frame(fi, sources);
+    if !yuv420 || pipe.hdr_out {
+        return Frame { px, hdr, yuv420: false };
+    }
+    let (w, h) = (pipe.w as usize, pipe.h as usize);
+    let planes = timed(Stage::Convert, || {
+        let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        crate::rgba_to_yuv420_8(&px, w, h, &mut y, &mut u, &mut v);
+        y.reserve_exact(u.len().saturating_add(v.len()));
+        y.extend_from_slice(&u);
+        y.extend_from_slice(&v);
+        y
+    });
+    Frame { px: planes, hdr, yuv420: true }
+}
 
 /// Bytes of one [`Frame`] of a `w` x `h` export (RGBA8, or three f32 per pixel for HDR).
 pub(crate) fn frame_bytes(w: u32, h: u32, hdr: bool) -> u64 {
@@ -172,13 +197,13 @@ struct Ahead {
 
 /// Render frames `f..end` in parallel. `None` when a source was not ready for one of them (the
 /// pending flag, taken after every frame because it is per thread): the batch is incomplete and
-/// must be rendered again.
-fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider) -> Option<Vec<Frame>> {
+/// must be rendered again. `yuv420`: converted for an encoder that takes Y'CbCr ([`rendered`]).
+fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider, yuv420: bool) -> Option<Vec<Frame>> {
     let pending = AtomicBool::new(false);
     let frames: Vec<Frame> = (f..end)
         .into_par_iter()
         .map(|fi| {
-            let frame = pipe.frame(fi, sources);
+            let frame = rendered(pipe, fi, sources, yuv420);
             if filmcraft_media::pending::take() {
                 pending.store(true, Ordering::Relaxed);
             }
@@ -643,6 +668,8 @@ impl Exporter {
 
     /// Encode (and mux) the batch starting at `self.next`, rendering the one after it meanwhile.
     fn step_batch(&mut self, sources: &dyn SourceProvider, progress: &Progress) -> Result<Step> {
+        // the encoder takes Y'CbCr: frames are converted where they are drawn
+        let yuv420 = self.venc.takes_yuv420();
         let (f, frames) = match self.ahead.take() {
             Some(a) if a.first == self.next => (a.first, a.frames),
             _ => {
@@ -651,7 +678,7 @@ impl Exporter {
                 let pipe = &self.pipe;
                 self.pictures.drop_before(f);
                 let serving = crate::ahead::Serving { inner: sources, pictures: &self.pictures };
-                match timed(Stage::Render, || on_render_pool(render_pool.as_deref(), || render_batch(pipe, f, end, &serving))) {
+                match timed(Stage::Render, || on_render_pool(render_pool.as_deref(), || render_batch(pipe, f, end, &serving, yuv420))) {
                     Some(frames) => (f, frames),
                     None => return Ok(Step::Pending),
                 }
@@ -693,7 +720,7 @@ impl Exporter {
             // the render goes to its own pool, the encoding side's parallel work to the global one
             render_scope(render_pool.as_deref(), |s| {
                 s.spawn(|_| {
-                    slot = Some(catch_unwind(AssertUnwindSafe(|| timed(Stage::Render, || render_batch(&pipe, a, b, &serving)))));
+                    slot = Some(catch_unwind(AssertUnwindSafe(|| timed(Stage::Render, || render_batch(&pipe, a, b, &serving, yuv420)))));
                 });
                 let r = self.encode_batch(f, frames, sources);
                 encode_done = Some(web_time::Instant::now());
@@ -768,16 +795,22 @@ impl Exporter {
         Ok(Encoded::Done)
     }
 
-    fn encode(&mut self, frames: &[(Vec<u8>, Vec<f32>)], f: i64) -> Result<Vec<EncodedPacket>> {
+    fn encode(&mut self, frames: &[Frame], f: i64) -> Result<Vec<EncodedPacket>> {
         let mut packets = Vec::new();
-        for (k, (rgba, hdr)) in frames.iter().enumerate() {
-            let fr = EncoderFrame {
-                width: self.pipe.w,
-                height: self.pipe.h,
-                rgba,
-                hdr: self.pipe.hdr_out.then_some(hdr.as_slice()),
-                index: (f - self.f0) as u64 + k as u64,
-            };
+        for (k, frame) in frames.iter().enumerate() {
+            let index = (f - self.f0) as u64 + k as u64;
+            if frame.yuv420 {
+                let (w, h) = (self.pipe.w as usize, self.pipe.h as usize);
+                let c = w.div_ceil(2).saturating_mul(h.div_ceil(2));
+                let planes = frame.px.split_at_checked(w.saturating_mul(h)).and_then(|(y, rest)| rest.split_at_checked(c).map(|(u, v)| (y, u, v)));
+                let Some((y, u, v)) = planes.filter(|(_, _, v)| v.len() == c) else {
+                    return Err(ExportError::Encode("internal: a converted frame has the wrong size".into()));
+                };
+                let fr = EncoderFrame { width: self.pipe.w, height: self.pipe.h, rgba: &[], hdr: None, index };
+                packets.extend(self.venc.encode_yuv420(&fr, y, u, v)?);
+                continue;
+            }
+            let fr = EncoderFrame { width: self.pipe.w, height: self.pipe.h, rgba: &frame.px, hdr: self.pipe.hdr_out.then_some(frame.hdr.as_slice()), index };
             packets.extend(self.venc.encode(&fr)?);
         }
         Ok(packets)

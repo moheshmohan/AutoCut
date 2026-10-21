@@ -764,6 +764,22 @@ pub trait VideoEncoder: Send {
     fn pass_stats(&self) -> Option<filmcraft_h264enc::PassStats> {
         None
     }
+    /// Whether the encoder's input is [`rgba_to_yuv420_8`] of the picture (the hardware encoders):
+    /// an export then converts each frame on its render threads, where frames are drawn in
+    /// parallel, and hands the planes to [`Self::encode_yuv420`]; the encoding thread, which feeds
+    /// the encoder one frame after the other, no longer converts.
+    fn takes_yuv420(&self) -> bool {
+        false
+    }
+    /// Encode a frame as [`rgba_to_yuv420_8`] converted it (`frame.rgba` is then empty); only
+    /// called when [`Self::takes_yuv420`] says so. An encoder that does not take it refuses.
+    fn encode_yuv420(&mut self, frame: &EncoderFrame, y: &[u8], u: &[u8], v: &[u8]) -> Result<Vec<EncodedPacket>> {
+        let _ = (y, u, v);
+        if frame.rgba.is_empty() {
+            return Err(ExportError::Encode("internal: this encoder takes RGBA pictures, not Y'CbCr".into()));
+        }
+        self.encode(frame)
+    }
 }
 
 /// Audio encoder (AAC) plugged in by codec crates; PCM is built in.
