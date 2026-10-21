@@ -244,6 +244,27 @@ pub fn composite(dst: &mut Image, src: &Image, opacity: f32, mode: Blend) {
     composite_at(dst, src, 0, 0, opacity, mode);
 }
 
+/// What [`composite`] in Normal mode gives over transparent black, worked out in place: `img`
+/// becomes `composite(&mut Image::new(w, h), &img, opacity, Blend::Normal)`, to the bit, without
+/// the zero-filled canvas and the pass that mixes the layer into it. The first layer of a frame
+/// that is not simply opaque (a clip scaled or moved by Motion, faded, with transparent edges) is
+/// mixed over nothing: at 4K that canvas was 133 MB to zero and a pass reading two such images.
+pub fn over_nothing(img: &mut Image, opacity: f32) {
+    img.px.par_chunks_mut(4096).for_each(|chunk| {
+        for p in chunk.as_chunks_mut::<4>().0 {
+            let sp = [p[0] * opacity, p[1] * opacity, p[2] * opacity, p[3] * opacity];
+            let sa = sp[3];
+            // the arithmetic of `composite_at` with a destination of +0.0
+            *p = if sa <= 0.0 {
+                [0.0; 4]
+            } else {
+                let k = 1.0 - sa;
+                [sp[0] + 0.0 * k, sp[1] + 0.0 * k, sp[2] + 0.0 * k, sp[3] + 0.0 * k]
+            };
+        }
+    });
+}
+
 /// [`composite`] for a `src` that is only a rectangle of its layer, with its top-left corner at
 /// (`x0`, `y0`) of `dst`. The rest of the layer is transparent, which leaves `dst` as it is, so only
 /// the rectangle is visited; its pixels are mixed exactly as [`composite`] mixes them (the dissolve
@@ -301,6 +322,32 @@ mod tests {
         let s = Image::filled(2, 1, [0.0, 0.25, 0.0, 0.5]);
         composite(&mut d, &s, 1.0, Blend::Normal);
         assert_eq!(d.get(0, 0), [0.25, 0.25, 0.0, 1.0]);
+    }
+
+    /// Mixing a layer over nothing in place gives what compositing it onto a zeroed canvas gives,
+    /// to the bit: opaque, translucent, transparent and over-unity alpha, colour on transparent
+    /// pixels, negative and −0.0 values, NaN and infinities, at any opacity.
+    #[test]
+    fn over_nothing_matches_compositing_onto_transparent_black() {
+        let special = [0.0f32, -0.0, 1.0, 0.5, 1e-7, -0.25, 1.5, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.999_999_9, 3.0e-39];
+        let (w, h) = (37, 11);
+        let mut seed = 0x9e37_79b9_u32;
+        let px: Vec<f32> = (0..w * h * 4)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                if i % 3 == 0 { special[(seed >> 8) as usize % special.len()] } else { (seed >> 8) as f32 / (1u32 << 24) as f32 }
+            })
+            .collect();
+        let src = Image { w, h, px };
+        for opacity in [1.0f32, 0.0, 0.37, 1e-6, -0.0] {
+            let mut expect = Image::new(w, h);
+            composite(&mut expect, &src, opacity, Blend::Normal);
+            let mut got = src.clone();
+            over_nothing(&mut got, opacity);
+            for (i, (a, b)) in expect.px.iter().zip(&got.px).enumerate() {
+                assert!(a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()), "opacity {opacity}, sample {i}: {a} vs {b}");
+            }
+        }
     }
 
     #[test]
