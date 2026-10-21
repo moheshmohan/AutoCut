@@ -964,6 +964,12 @@
 	Create ellipse mask	Buat masker elips
 	Create 4-point polygon mask	Buat masker poligon 4 titik
 	Free draw bezier	Gambar bezier bebas
+	Mask shape presets	Preset bentuk masker
+	Rounded Rectangle	Persegi panjang membulat
+	Cross	Silang
+	Arrow	Panah
+	Cinematic Bars ({aspect})	Bilah sinema ({aspect})
+	Diagonal Split	Belah diagonal
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	Klik di monitor Program untuk menempatkan titik masker (seret untuk kurva); klik titik pertama atau tekan Enter untuk menutup
 	Delete Mask	Hapus Masker
 	Inverted	Terbalik

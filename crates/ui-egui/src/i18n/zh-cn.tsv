@@ -955,6 +955,12 @@
 	Create ellipse mask	创建椭圆蒙版
 	Create 4-point polygon mask	创建 4 点多边形蒙版
 	Free draw bezier	自由绘制贝塞尔
+	Mask shape presets	蒙版形状预设
+	Rounded Rectangle	圆角矩形
+	Cross	十字形
+	Arrow	箭头
+	Cinematic Bars ({aspect})	电影遮幅 ({aspect})
+	Diagonal Split	对角分割
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	在节目监视器中点击以放置蒙版点（拖动可绘制曲线）；点击第一个点或按 Enter 键闭合
 	Delete Mask	删除蒙版
 	Inverted	反相

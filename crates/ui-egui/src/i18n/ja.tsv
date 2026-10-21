@@ -961,6 +961,12 @@
 	Create ellipse mask	楕円マスクを作成
 	Create 4-point polygon mask	4 点の多角形マスクを作成
 	Free draw bezier	ベジェで自由に描画
+	Mask shape presets	マスクの図形プリセット
+	Rounded Rectangle	角丸長方形
+	Cross	十字
+	Arrow	矢印
+	Cinematic Bars ({aspect})	シネマバー ({aspect})
+	Diagonal Split	対角分割
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	プログラムモニターをクリックしてマスクのポイントを配置します (ドラッグで曲線)。最初のポイントをクリックするか Enter キーを押すと、マスクが閉じます
 	Delete Mask	マスクを削除
 	Inverted	反転

@@ -994,6 +994,12 @@
 	Create ellipse mask	Ellipsenmaske erstellen
 	Create 4-point polygon mask	4-Punkt-Polygonmaske erstellen
 	Free draw bezier	Freihand-Bézier
+	Mask shape presets	Maskenform-Vorgaben
+	Rounded Rectangle	Abgerundetes Rechteck
+	Cross	Kreuz
+	Arrow	Pfeil
+	Cinematic Bars ({aspect})	Kinobalken ({aspect})
+	Diagonal Split	Diagonale Teilung
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	Klick in den Programmmonitor, um Maskenpunkte zu setzen (ziehen für Kurven); klick auf den ersten Punkt oder drück die Eingabetaste, um sie zu schließen
 	Delete Mask	Maske löschen
 	Inverted	Umgekehrt

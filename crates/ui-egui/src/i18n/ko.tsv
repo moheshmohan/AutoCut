@@ -1243,6 +1243,12 @@
 	Frames per Still:	스틸당 프레임:
 	Framing	프레이밍
 	Free draw bezier	자유 그리기 베지어
+	Mask shape presets	마스크 모양 사전 설정
+	Rounded Rectangle	둥근 사각형
+	Cross	십자형
+	Arrow	화살표
+	Cinematic Bars ({aspect})	시네마 바 ({aspect})
+	Diagonal Split	대각선 분할
 	Freeform	자유형
 	Freeform View	자유형 보기
 	Freeform View Options	자유형 보기 옵션

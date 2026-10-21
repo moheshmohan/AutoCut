@@ -1,9 +1,13 @@
 //! Effect masks in the UI: the mask rows of Effect Controls (create ellipse / 4-point polygon /
-//! pen masks, per-mask Path / Feather / Opacity / Expansion / Inverted / mode) and on-monitor
-//! editing on the Program monitor (drag vertices, Bézier handles, the whole mask, feather,
-//! expansion and corner-roundness handles; the pen places a free-draw Bézier mask).
+//! pen masks and the shape presets — rounded rectangle, star, heart, triangle, hexagon, cross,
+//! arrow, cinematic bars, diagonal split —, per-mask Path / Feather / Opacity / Expansion /
+//! Inverted / mode) and on-monitor editing on the Program monitor (drag vertices, Bézier handles,
+//! the whole mask, feather, expansion and corner-roundness handles; the pen places a free-draw
+//! Bézier mask).
 //!
-//! Automation ids: `effectControls.<effect>.mask.{ellipse,polygon,pen}`,
+//! Automation ids: `effectControls.<effect>.mask.{ellipse,polygon,pen,presets}`, the presets
+//! menu's `effectControls.<effect>.mask.preset.<key>` (`roundedRectangle`, `star`, `heart`,
+//! `triangle`, `hexagon`, `cross`, `arrow`, `bars-2.39`, `bars-2`, `bars-1.85`, `diagonalSplit`),
 //! `effectControls.<effect>.mask<k>` (+ `.mode`, `.inverted`, `.delete`, and the parameter rows
 //! `effectControls.<effect>.mask<k>.<param>.*`), `program.mask.vertex.<i>`, `program.mask.in.<i>`,
 //! `program.mask.out.<i>`, `program.mask.body`, `program.mask.feather`, `program.mask.expansion`,
@@ -25,6 +29,47 @@ const ROW_H: f32 = 22.0;
 pub fn maskable(e: &EffectInstance) -> bool {
     let Some(d) = e.def() else { return false };
     d.kind == filmcraft_project::EffectKind::Video && (!d.intrinsic || e.effect == "opacity") && !filmcraft_project::graphic::is_layer(e)
+}
+
+/// The shape presets menu: `(automation key, label, masks.add parameters)`, in menu order.
+fn presets() -> Vec<(&'static str, String, Value)> {
+    vec![
+        ("roundedRectangle", tl!("Rounded Rectangle").to_string(), json!({"shape": "roundedRectangle"})),
+        ("star", tl!("Star").to_string(), json!({"shape": "star"})),
+        ("heart", tl!("Heart").to_string(), json!({"shape": "heart"})),
+        ("triangle", tl!("Triangle").to_string(), json!({"shape": "triangle"})),
+        ("hexagon", tl!("Hexagon").to_string(), json!({"shape": "regularPolygon", "sides": 6})),
+        ("cross", tl!("Cross").to_string(), json!({"shape": "cross"})),
+        ("arrow", tl!("Arrow").to_string(), json!({"shape": "arrow"})),
+        ("bars-2.39", tlf!("Cinematic Bars ({aspect})", aspect = "2.39:1"), json!({"shape": "cinematicBars", "aspect": "2.39:1"})),
+        ("bars-2", tlf!("Cinematic Bars ({aspect})", aspect = "2:1"), json!({"shape": "cinematicBars", "aspect": "2:1"})),
+        ("bars-1.85", tlf!("Cinematic Bars ({aspect})", aspect = "1.85:1"), json!({"shape": "cinematicBars", "aspect": "1.85:1"})),
+        ("diagonalSplit", tl!("Diagonal Split").to_string(), json!({"shape": "diagonalSplit"})),
+    ]
+}
+
+/// The shape presets button after the creation tools: a menu of [`presets`], each a `masks.add`.
+fn preset_button(app: &mut FilmcraftApp, ui: &mut egui::Ui, br: Rect, clip: ClipId, idx: usize, e: &EffectInstance, actions: &mut Vec<(String, Value)>) {
+    let t = app.tokens;
+    let tip = tl!("Mask shape presets");
+    let resp = ui.interact(br, egui::Id::new(("mask-presets", clip.0, idx)), Sense::click()).on_hover_text(tip);
+    if resp.hovered() {
+        ui.painter().rect_filled(br, 3.0, t.hover);
+    }
+    icons::paint(ui.painter(), br.shrink(3.0), Icon::Star, t.icon);
+    app.auto.add(&format!("effectControls.{}.mask.presets", e.effect), br, tip);
+    egui::Popup::menu(&resp).show(|ui| {
+        for (key, label, params) in presets() {
+            let item = ui.button(&label);
+            app.auto.add(&format!("effectControls.{}.mask.preset.{key}", e.effect), item.rect, &label);
+            if item.clicked() {
+                let mut p = params;
+                p["clip"] = json!(clip.0);
+                p["effect"] = json!(idx);
+                actions.push(("masks.add".into(), p));
+            }
+        }
+    });
 }
 
 /// Mask rows under an effect in Effect Controls.
@@ -76,6 +121,7 @@ pub(crate) fn effect_rows(
             }
         }
     }
+    preset_button(app, ui, Rect::from_center_size(pos2(r.min.x + 40.0 + 3.0 * 24.0, r.center().y), vec2(20.0, 18.0)), clip, idx, e, actions);
     let defs = filmcraft_project::mask::mask_param_defs();
     for (k, m) in e.masks.iter().enumerate() {
         let key = format!("mask:{}:{}:{}", clip.0, idx, k);

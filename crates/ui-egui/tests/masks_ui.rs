@@ -247,6 +247,34 @@ fn mask_handles_follow_the_clip_selection() {
     assert!(d.has("program.mask.vertex.0"), "the handles come back with the clip");
 }
 
+/// The shape presets button opens a menu; each entry adds an ordinary mask (one undo step).
+#[test]
+fn shape_presets_menu_adds_masks() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Effects"}));
+    let seq = d.exec("sequence.inspect", json!({}));
+    let clip = &seq["video"][0]["items"][0];
+    let (id, start, dur) = (clip["clip"].as_u64().unwrap(), clip["start"].as_i64().unwrap(), clip["duration"].as_i64().unwrap());
+    d.exec("playhead.set", json!({"time": start + dur / 2}));
+    d.exec("timeline.select", json!({"clips": [id]}));
+    d.frames(4);
+    for (key, vertices) in [("star", 10), ("heart", 6), ("bars-2.39", 4)] {
+        d.ok("ui.click", json!({"id": "effectControls.opacity.mask.presets"}));
+        d.frames(3);
+        d.ok("ui.click", json!({"id": format!("effectControls.opacity.mask.preset.{key}")}));
+        d.frames(3);
+        let m = d.masks();
+        let last = m.last().unwrap_or_else(|| panic!("{key}: no mask"));
+        assert_eq!(last["path"]["vertices"].as_array().unwrap().len(), vertices, "{key}: {last}");
+        assert_eq!(last["selected"], true, "{key}");
+        d.shot(&format!("mask-preset-{key}"));
+    }
+    assert_eq!(d.masks().len(), 3);
+    d.exec("edit.undo", json!({}));
+    d.frames(2);
+    assert_eq!(d.masks().len(), 2, "one undo step per preset");
+}
+
 /// Shift held while placing pen points snaps each new segment to 45° steps from the previous
 /// point; a Shift-drag also constrains the Bézier handle it pulls out (#853).
 #[test]

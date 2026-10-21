@@ -959,6 +959,12 @@
 	Create ellipse mask	Créer un masque elliptique
 	Create 4-point polygon mask	Créer un masque polygonal à 4 points
 	Free draw bezier	Bézier à main levée
+	Mask shape presets	Formes de masque prédéfinies
+	Rounded Rectangle	Rectangle arrondi
+	Cross	Croix
+	Arrow	Flèche
+	Cinematic Bars ({aspect})	Bandes cinéma ({aspect})
+	Diagonal Split	Partage en diagonale
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	Cliquez dans le moniteur programme pour placer les points du masque (faites glisser pour créer des courbes) ; cliquez sur le premier point ou appuyez sur Entrée pour fermer
 	Delete Mask	Supprimer le masque
 	Inverted	Inversé
