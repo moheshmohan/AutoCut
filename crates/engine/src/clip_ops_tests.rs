@@ -474,6 +474,58 @@ fn field_options_and_time_interpolation_are_stored() {
     assert_eq!(back.sequence(seq).unwrap().find_item(filmcraft_project::ClipId(c)).unwrap().1, &clip(&s, c));
 }
 
+/// Speed/Duration's Maintain Audio Pitch: set with the speed on the clip and its linked partner as
+/// one undo step, kept when a later call leaves it out, refused when not a boolean (nothing
+/// changes), on the Rate Stretch tool too, and reported by the sequence inspection.
+#[test]
+fn maintain_pitch_rides_with_the_speed_and_undoes() {
+    let mut s = demo();
+    let v = v1(&s).into_iter().find(|c| c.link.is_some()).expect("a linked clip in the demo");
+    let a = s.active_sequence().unwrap().audio_tracks.iter().flat_map(|t| &t.items).find(|c| c.link == v.link).expect("its sound").id.0;
+    select(&mut s, &[v.id.0]);
+    let both = |s: &Session| (clip(s, v.id.0).maintain_pitch, clip(s, a).maintain_pitch);
+    assert_eq!(both(&s), (false, false));
+    s.execute("clip.speedDuration", json!({"speed": 200.0, "maintainPitch": true})).unwrap();
+    assert_eq!(both(&s), (true, true));
+    assert_eq!((clip(&s, v.id.0).speed, clip(&s, a).speed), (2.0, 2.0));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(both(&s), (false, false));
+    assert_eq!(clip(&s, a).speed, 1.0, "speed and pitch undo together");
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(both(&s), (true, true));
+    // left out: kept
+    s.execute("clip.speedDuration", json!({"speed": 150.0})).unwrap();
+    assert_eq!(both(&s), (true, true));
+    // hostile values change nothing
+    let before = s.project.clone();
+    for bad in [json!("yes"), json!(1), json!([true]), json!({"on": true})] {
+        assert!(s.execute("clip.speedDuration", json!({"speed": 50.0, "maintainPitch": bad})).is_err(), "{bad}");
+        assert!(s.execute("timeline.rateStretch", json!({"clip": a, "edge": "out", "delta": 1000, "maintainPitch": bad})).is_err(), "{bad}");
+    }
+    assert!(s.project == before, "a refused call changes nothing");
+    s.execute("clip.speedDuration", json!({"speed": 150.0, "maintainPitch": false})).unwrap();
+    assert_eq!(both(&s), (false, false));
+    // the Rate Stretch tool
+    let rate = s.sequence_rate();
+    s.execute("timeline.rateStretch", json!({"clip": v.id.0, "edge": "out", "delta": rate.tick_of(10).0, "maintainPitch": true})).unwrap();
+    assert_eq!(both(&s), (true, true));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(both(&s), (false, false));
+    // the inspection says so
+    s.execute("clip.speedDuration", json!({"speed": 200.0, "maintainPitch": true})).unwrap();
+    let seq = s.state.active_sequence.unwrap();
+    let q = s.active_sequence().unwrap();
+    let inspected = crate::commands::inspect_sequence(&s, seq, q);
+    let items: Vec<&serde_json::Value> = inspected["audio"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(inspected["video"].as_array().into_iter().flatten())
+        .flat_map(|t| t["items"].as_array().into_iter().flatten())
+        .collect();
+    assert!(items.iter().any(|i| i["clip"] == json!(a) && i["maintainPitch"] == json!(true)), "{inspected}");
+}
+
 fn mean_abs_diff(a: &filmcraft_render::Image, b: &filmcraft_render::Image) -> f32 {
     a.px.iter().zip(&b.px).map(|(x, y)| (x - y).abs()).sum::<f32>() / a.px.len() as f32
 }

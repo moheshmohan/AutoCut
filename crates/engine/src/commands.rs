@@ -215,6 +215,14 @@ fn fps_p(p: &Value, cmd: &str) -> Result<Option<FrameRate>> {
 pub(crate) fn bool_p(p: &Value, k: &str) -> Option<bool> {
     p.get(k).and_then(Value::as_bool)
 }
+/// `maintainPitch` (Speed/Duration's Maintain Audio Pitch): absent leaves each clip's as it is;
+/// anything but a boolean is refused.
+fn maintain_pitch_p(p: &Value, cmd: &str) -> Result<Option<bool>> {
+    match p.get("maintainPitch") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_bool().map(Some).ok_or_else(|| bad(cmd, "`maintainPitch` must be true or false")),
+    }
+}
 pub(crate) fn u64_p(p: &Value, k: &str) -> Option<u64> {
     p.get(k).and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
 }
@@ -1851,7 +1859,7 @@ fn build() -> Vec<CommandSpec> {
             "Speed/Duration…",
             ["Clip"],
             Some("Cmd+R"),
-            r#"{"clips":[id]?,"speed":percent=100,"reverse":bool,"ripple":bool,"interpolation":"frameSampling|frameBlending|opticalFlow"?}"#,
+            r#"{"clips":[id]?,"speed":percent=100,"reverse":bool,"ripple":bool,"interpolation":"frameSampling|frameBlending|opticalFlow"?,"maintainPitch":bool?}"#,
             has_selection,
             |s, p| {
                 let speed = f64_p(p, "speed").unwrap_or(100.0) / 100.0;
@@ -1861,6 +1869,7 @@ fn build() -> Vec<CommandSpec> {
                     Some(m) => Some(filmcraft_project::TimeInterpolation::from_name(m).ok_or_else(|| bad("clip.speedDuration", "unknown interpolation"))?),
                     None => None,
                 };
+                let keep_pitch = maintain_pitch_p(p, "clip.speedDuration")?;
                 let sel = with_links(s, &clips_p(s, p));
                 s.edit_sequence("Speed/Duration", |q, ctx, _| {
                     // a clip and its linked partners on other tracks change as one edit, so a ripple
@@ -1888,8 +1897,13 @@ fn build() -> Vec<CommandSpec> {
                         edit::set_speed_group(q, &unlocked, speed, reverse, ripple, ctx)?;
                     }
                     for c in &sel {
-                        if let (Some(m), Some((_, it))) = (interp, q.find_item_mut(*c)) {
-                            it.time_interpolation = m;
+                        if let Some((_, it)) = q.find_item_mut(*c) {
+                            if let Some(m) = interp {
+                                it.time_interpolation = m;
+                            }
+                            if let Some(k) = keep_pitch {
+                                it.maintain_pitch = k;
+                            }
                         }
                     }
                     Ok(())
@@ -2886,8 +2900,9 @@ fn build() -> Vec<CommandSpec> {
             })?;
             Ok(Value::Null)
         }),
-        cmd!("timeline.rateStretch", "Rate Stretch", [], None, r#"{"clip":id,"edge":"in|out","delta":ticks}"#, has_seq, |s, p| {
+        cmd!("timeline.rateStretch", "Rate Stretch", [], None, r#"{"clip":id,"edge":"in|out","delta":ticks,"maintainPitch":bool?}"#, has_seq, |s, p| {
             let c = clip_p(p, "clip").ok_or_else(|| bad("timeline.rateStretch", "need `clip`"))?;
+            let keep_pitch = maintain_pitch_p(p, "timeline.rateStretch")?;
             let edge = if str_p(p, "edge") == Some("in") { Edge::In } else { Edge::Out };
             let d = p
                 .get("delta")
@@ -2896,7 +2911,17 @@ fn build() -> Vec<CommandSpec> {
                 .or_else(|| p.get("deltaFrames").and_then(Value::as_i64).map(|f| s.sequence_rate().tick_of(f)))
                 .unwrap_or_default();
             let clips = with_links(s, &[c]);
-            let sp = s.edit_sequence("Rate Stretch", |q, ctx, _| Ok(edit::rate_stretch_items(q, &clips, edge, d, ctx)?))?;
+            let sp = s.edit_sequence("Rate Stretch", |q, ctx, _| {
+                let sp = edit::rate_stretch_items(q, &clips, edge, d, ctx)?;
+                if let Some(k) = keep_pitch {
+                    for c in &clips {
+                        if let Some((_, it)) = q.find_item_mut(*c) {
+                            it.maintain_pitch = k;
+                        }
+                    }
+                }
+                Ok(sp)
+            })?;
             Ok(json!({"speed": sp}))
         }),
         cmd!("timeline.razor", "Razor", [], None, r#"{"time":ticks,"track":"V1"|id?,"clip":id?}"#, has_seq, |s, p| {
@@ -4374,7 +4399,7 @@ pub fn inspect_sequence(s: &Session, id: ItemId, q: &filmcraft_project::Sequence
             "label": t.label.map(|l| l.name()),
             "items": t.items.iter().map(|i| json!({
                 "clip": i.id.0, "item": i.item.0, "name": i.name, "start": i.start.0, "duration": i.duration.0,
-                "startFrame": rate.frame_at(i.start), "durationFrames": rate.frame_at(i.duration), "sourceIn": i.source_in.0, "speed": i.speed, "reverse": i.reverse,
+                "startFrame": rate.frame_at(i.start), "durationFrames": rate.frame_at(i.duration), "sourceIn": i.source_in.0, "speed": i.speed, "reverse": i.reverse, "maintainPitch": i.maintain_pitch,
                 "end": i.end().0, "endFrame": rate.frame_at(i.end()), "sourceOut": i.source_out().0, "gainDb": i.gain_db,
                 "enabled": i.enabled, "link": i.link, "label": i.label.name(),
                 "effects": i.effects.iter().map(|e| json!({"effect": e.effect, "enabled": e.enabled, "masks": e.masks.len(), "params": e.params.iter().map(|(k, p)| (k.clone(), json!({"value": format!("{:?}", p.value), "keyframes": p.keyframes.len()}))).collect::<serde_json::Map<_, _>>()})).collect::<Vec<_>>(),
