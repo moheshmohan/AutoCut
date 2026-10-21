@@ -13,6 +13,8 @@
 //! * [`biquad`] — RBJ-cookbook biquads (TDF-II) with analytic magnitude response.
 //! * [`sync`] — offset between two recordings of one event (GCC-PHAT, sample-accurate).
 //! * [`resample`] — streaming, block-invariant rate conversion for playback on a device at another rate.
+//! * [`stretch`] — time stretch that keeps pitch (WSOLA, renderable from any position): Speed/Duration's
+//!   Maintain Audio Pitch.
 //! * [`channels`] — channel layouts, ITU-R BS.775 up/downmix, 5.1 mixdown types, the 5.1 panner.
 //! * [`synth`] — procedural sound effects (whoosh, impact, riser, drone) and music beds.
 //! * [`music`] — the soundtrack engine: block-arranged music of an exact length ending on a bar,
@@ -43,6 +45,7 @@ pub mod remix;
 pub mod resample;
 pub mod sfx;
 mod smooth;
+pub mod stretch;
 pub mod sync;
 pub mod synth;
 

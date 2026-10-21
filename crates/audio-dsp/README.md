@@ -4,7 +4,7 @@ Real-time audio DSP for FilmCraft. Layer **L1**, no dependencies but the L0 time
 `Tick` beat maps), compiles for `wasm32-unknown-unknown`, no `unsafe`. Clean-room: written from the public standards
 (ITU-R BS.1770-4, EBU R128 / Tech 3341 / Tech 3342) and textbook DSP (RBJ cookbook biquads,
 Householder FDN, phase vocoder, spectral subtraction with the statistical late-reverberation
-model).
+model, WSOLA time stretching after Verhelst & Roelands, ICASSP 1993).
 
 ## Conventions
 
@@ -204,6 +204,51 @@ Pure functions for Essential Sound auto-ducking:
   merge; clamped to the clip (a ramp cut by an edge gets the ramp's value at the edge); strictly
   increasing times.
 
+## Time stretch that keeps pitch (`stretch`)
+
+Clip ▸ Speed/Duration ▸ **Maintain Audio Pitch**: a clip at 0.25…4× (any speed from 1/16 to 16×)
+plays at its new length with its own pitch. `TimeStretch::new(sample_rate, channels, speed)` →
+`render(read, o0, out)`: output sample `o` plays input position `o · speed`, `read(start, len)`
+supplies planar input (any position; silence outside the media is the caller's).
+`stretch(&[&[f32]], rate, speed)` does whole buffers (`round(len / speed)` samples).
+
+- **WSOLA** (waveform-similarity overlap-add): 30 ms periodic-Hann frames at a 15 ms synthesis hop
+  (the windows sum to one); each frame's input start is moved by up to ±12.5 ms from where the
+  speed puts its centre to the place most like the natural continuation of the previous frame —
+  normalised cross-correlation summed over **all channels**, so every channel splices at the same
+  samples (inter-channel delays and polarity are kept exactly). Search at ~12 kHz (box-decimated),
+  refined at the full rate around the two best coarse lags; a 1 % preference for the nominal
+  position breaks the ties of periodic signals. Integer positions: speed 1 is the identity.
+- **Renderable from anywhere, deterministic.** The chain of choices restarts every 128 frames
+  (1.92 s): a range renders from at most three chains, never from the start of the clip, and the
+  result does not depend on how the output is cut into requests, in which order, or whether the
+  stretcher is fresh (tested bit-exact). At each restart (a 13-frame junction) the output moves to
+  the new chain where the two choose the same input (speech: within a few frames), otherwise in
+  twelve equal steps of at most 1/24 period on a sustained tone, so a tone neither clicks nor dips.
+- **Bounded:** the memo holds 24 chains of frame positions; the input window is 2¹⁶ samples plus a
+  frame's search region per channel (per-frame reads above ~3.3×, where frames do not overlap in
+  the input). Speeds outside 1/16…16 or not finite, rates outside 1–768 kHz, 0 or > 64 channels and
+  positions beyond ±2⁴⁶ are errors; non-finite input reads as silence.
+- **Measured** (`cargo test --release -p filmcraft-audio-dsp stretch -- --include-ignored --nocapture`):
+  a 440 Hz tone at 0.25, 0.5, 1.5, 2 and 4× peaks within 1 Hz of 440 (≤ 0.7 Hz), ≥ 99.5 % of its
+  energy within 10 Hz, level within 0.3 dB, 10 ms level never more than 0.6 dB down across
+  junctions, no sample step over 1.1× a clean tone's; it ends within the tolerance of where the
+  speed puts its end. A 0.5 ms inter-channel delay survives every 100 ms of stretched speech.
+  Against the phase-vocoder route (the phase-locked `pitch_shifter` by 1/speed, then a sinc rate
+  change) on speech-like audio — envelope distance (1/6-octave levels of 43 ms frames against the
+  input at the mapped time) and voiced-frame harmonicity (input 0.40):
+
+  | speed | WSOLA distance | PV distance | WSOLA harmonicity | PV harmonicity |
+  |---|---|---|---|---|
+  | 0.5 | 4.06 dB | 6.98 dB | 0.478 | 0.515 |
+  | 0.75 | 3.76 dB | 3.76 dB | 0.452 | 0.481 |
+  | 1.5 | 3.99 dB | 6.69 dB | 0.409 | 0.360 |
+  | 2 | 4.99 dB | 8.96 dB | 0.431 | 0.282 |
+
+  Speed (60 s of 48 kHz stereo speech-like audio, release, Apple Silicon under a load of ~25):
+  0.5× → 120 s out in 0.44 s (270× real time), 0.75× 216×, 1.5× 170–316×, 2× 175–260×, 4×
+  153–217×; a seek (fresh stretcher, 1024 samples) 4–9 ms mid-segment, ≤ 30 ms on a junction.
+
 ## Audio synchronisation (`sync`)
 
 `find_offset(a, b, sample_rate, &SyncOptions)` returns the lag `L` with `b[n] ≈ g·a[n + L]`, a
@@ -227,3 +272,7 @@ sub-sample estimate, and two trust figures (`confidence` = peak / RMS of the cor
 - DeNoise adapts continuously; a perfectly stationary tone is (by design) treated as noise after
   ~1.5 s. There is no explicit "learn noise print" mode yet.
 - Filter type / choice changes switch immediately (continuous parameters are smoothed).
+- Time stretch splices at whole samples: a sustained pure tone comes out up to ~3 cents sharp or
+  flat (0.7 Hz at 440 Hz) and drifts in phase across each junction; speech and ambience are not
+  affected audibly. Transients are repeated (slowing) or skipped (speeding) as in any time-domain
+  stretch; speeds outside 1/16…16 are refused (the render plays them varispeed).
