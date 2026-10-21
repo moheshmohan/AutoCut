@@ -1237,7 +1237,8 @@ impl Worker {
         let Some(s) = &self.latest else { return Err("nothing to save".into()) };
         // (owned: saving the project below updates `self.latest`)
         let (project, revision, project_path) = (s.project.clone(), s.revision, s.path.clone());
-        let scratch = crate::project_tools::trusted_scratch(project.settings.scratch.auto_save.as_deref(), project_path.as_deref(), &self.prefs.scratch_folders);
+        let scratch =
+            crate::project_tools::trusted_scratch(project.settings.scratch.auto_save.as_deref(), project_path.as_deref(), &self.prefs.scratch_folders);
         let (dir, name) = match (&project_path, scratch) {
             // Project Settings ▸ Scratch Disks ▸ Project Auto Save
             (Some(p), Some(scratch)) => {
