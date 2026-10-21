@@ -10,15 +10,22 @@
 //!    well they hook a viewer (0..10) and get a short title.
 //! 4. **Pick** — the best `count` that do not overlap (a second apart at least).
 //! 5. **Build** — each through ordinary engine commands: `sequence.autoReframe` of its range to
-//!    the vertical shape (the speaker followed), `transcript.createCaptions` and
-//!    `captions.setStyle` for big outlined captions, `graphics.newText` for the title card; then
-//!    `file.exportMedia` (captions burned in) and `youtube.upload` (private unless asked).
+//!    the vertical shape (the speaker followed; where nobody is, for a whole clip or a stretch of
+//!    one, the whole picture over a blurred copy of itself — `fallback`, `"blur"` by default,
+//!    `"letterbox"` for black bars), `transcript.createCaptions` and
+//!    `captions.setStyle` for big outlined captions, `graphics.newText` for the title card — both
+//!    inside the target `platform`'s safe zone (`"youtube"` by default; `"reels"`, `"tiktok"`,
+//!    `"vertical"` for all three): the captions just above its bottom zone and shrunk until
+//!    `sequence.checkSafeZones` finds them clear of its side zones, the title in a box across the
+//!    top of its safe area; what still overlaps is noted. Then `file.exportMedia` (captions
+//!    burned in) and `youtube.upload` (private unless asked).
 //!
 //! Every step is a command, so the shorts are ordinary sequences in History; a step that fails
 //! for one short is noted and the others still get made.
 
 use std::sync::Arc;
 
+use filmcraft_engine::safe_zones::Platform;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -330,8 +337,15 @@ pub struct Made {
     pub rating: Option<f64>,
     pub hook: String,
     pub text: String,
-    /// Whether the speaker was followed (else the picture was letterboxed).
+    /// Whether the speaker was followed (else the picture was fitted whole: over its blurred copy
+    /// with the `blur` fallback, the default).
     pub followed: bool,
+    /// Clips that got the blurred fill under a stretch (or all) of them.
+    #[serde(rename = "blurFill")]
+    pub blur_fill: u64,
+    /// The captions and title against the platform's safe zones: `{platform, ok, overlaps}`.
+    #[serde(rename = "safeZones", skip_serializing_if = "Option::is_none")]
+    pub safe_zones: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub export: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -413,7 +427,12 @@ pub async fn make(ex: &dyn Executor, p: &Value, rater: Option<Arc<dyn ChatModel>
         let name = format!("{src_name} — Short {number}: {}", clip_text(&title, 60));
         progress(&format!("[{number}/{n}] reframing \"{title}\""));
         let (a, b) = range_of(c, &words, &sents, length);
-        let mut rp = json!({"sequence": src, "aspect": aspect, "range": {"startSeconds": a, "endSeconds": b}, "name": name, "wait": true});
+        // whose interface the captions and the title keep clear of
+        let platform = p["platform"].as_str().and_then(Platform::from_name).unwrap_or(Platform::Youtube);
+        // nobody to follow: the whole picture over a blurred copy of itself (not black bars)
+        let fallback = p["fallback"].as_str().unwrap_or("blur");
+        let mut rp =
+            json!({"sequence": src, "aspect": aspect, "range": {"startSeconds": a, "endSeconds": b}, "name": name, "fallback": fallback, "wait": true});
         if let Some(m) = p["motion"].as_str() {
             rp["motion"] = json!(m);
         }
@@ -423,6 +442,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, rater: Option<Arc<dyn ChatModel>
         let r = run(ex, "sequence.autoReframe", rp).await?;
         let seq = r["reframe"]["sequence"].as_u64().ok_or_else(|| AutoCutError::Executor(format!("sequence.autoReframe made no sequence: {r}")))?;
         let followed = r["reframe"]["followed"].as_u64().is_some_and(|f| f > 0);
+        let blur_fill = r["reframe"]["blurFill"].as_u64().unwrap_or(0);
         let mut short = Made {
             number,
             sequence: seq,
@@ -435,26 +455,37 @@ pub async fn make(ex: &dyn Executor, p: &Value, rater: Option<Arc<dyn ChatModel>
             hook: c.hook.clone(),
             text: c.text.clone(),
             followed,
+            blur_fill,
+            safe_zones: None,
             export: None,
             youtube: None,
             notes: Vec::new(),
         };
         // the reframed copy is the active sequence now
         let frame = run(ex, "sequence.inspect", json!({"item": seq})).await.ok();
-        let (fw, fh) = frame
-            .as_ref()
-            .map_or((1080.0, 1920.0), |f| (f["settings"]["width"].as_f64().unwrap_or(1080.0), f["settings"]["height"].as_f64().unwrap_or(1920.0)));
+        let size = |k: &str, or: f64| frame.as_ref().and_then(|f| f["settings"][k].as_f64()).filter(|v| v.is_finite() && *v >= 16.0).unwrap_or(or);
+        let (fw, fh) = (size("width", 1080.0), size("height", 1920.0));
         if p["captions"].as_bool() != Some(false) {
             progress(&format!("[{number}/{n}] captions"));
-            if let Err(e) = captions(ex).await {
+            if let Err(e) = captions(ex, platform).await {
                 short.notes.push(format!("captions: {e}"));
             }
         }
-        if p["title"].as_bool() == Some(true) {
-            let tp = json!({"text": title, "seconds": 2.5, "time": 0, "size": (fw * 0.075).round(), "position": [fw / 2.0, fh * 0.2]});
-            if let Err(e) = run(ex, "graphics.newText", tp).await {
-                short.notes.push(format!("title card: {e}"));
+        if p["title"].as_bool() == Some(true)
+            && let Err(e) = title_card(ex, platform, &title, (fw, fh)).await
+        {
+            short.notes.push(format!("title card: {e}"));
+        }
+        // what still reaches into the platform's interface is said, not hidden
+        match run(ex, "sequence.checkSafeZones", json!({"platform": platform.name(), "sequence": seq})).await {
+            Ok(v) => {
+                let overlaps = v["overlaps"].as_array().map(Vec::as_slice).unwrap_or_default();
+                for o in overlaps.iter().take(20) {
+                    short.notes.push(safe_zone_note(o, platform));
+                }
+                short.safe_zones = Some(json!({"platform": platform.name(), "ok": overlaps.is_empty(), "overlaps": overlaps.len()}));
             }
+            Err(e) => short.notes.push(format!("safe zones: {e}")),
         }
         if let Some(dir) = &export_dir {
             let path = dir.join(format!("{:02}-{}.mp4", number, slug(&title)));
@@ -501,14 +532,91 @@ pub async fn make(ex: &dyn Executor, p: &Value, rater: Option<Arc<dyn ChatModel>
     }))
 }
 
-/// Big, outlined captions a few words at a time from the active sequence's transcript.
-async fn captions(ex: &dyn Executor) -> Result<(), AutoCutError> {
+/// The captions' size (pixels at 1080 lines) to start from, and the smallest they shrink to so
+/// that they stay clear of a platform's side zones.
+pub const CAPTION_SIZE: f64 = 76.0;
+pub const MIN_CAPTION_SIZE: f64 = 44.0;
+/// Room between the captions and the platform's bottom zone, a share of the frame's height.
+pub const CAPTION_GAP: f64 = 0.02;
+
+/// Big, outlined captions a few words at a time from the active sequence's transcript, just above
+/// `platform`'s bottom zone (its channel, description and buttons) and narrow enough for its side
+/// zones ([`fit_captions`]).
+async fn captions(ex: &dyn Executor, platform: Platform) -> Result<(), AutoCutError> {
     let r = run(ex, "transcript.createCaptions", json!({"maxChars": 18, "lines": 1, "minSeconds": 0.5, "maxSeconds": 2.2, "gapFrames": 0, "name": "Captions"}))
         .await?;
     let track = r["track"].as_u64().ok_or_else(|| AutoCutError::Executor("transcript.createCaptions made no track".into()))?;
-    let style = json!({"track": track, "size": 76, "color": "#ffffff", "background": false, "outline": 7, "outlineColor": "#000000", "align": "center", "anchor": "bottom", "margin": 0.24, "lineSpacing": 1.1});
+    let margin = (platform.margins().bottom + CAPTION_GAP).min(0.45);
+    let style = json!({"track": track, "size": CAPTION_SIZE, "color": "#ffffff", "background": false, "outline": 7, "outlineColor": "#000000", "align": "center", "anchor": "bottom", "margin": margin, "lineSpacing": 1.1});
     run(ex, "captions.setStyle", style).await?;
+    fit_captions(ex, track, platform, CAPTION_SIZE).await
+}
+
+/// How much smaller (a factor, at most 1) the widest caption in `check` (a
+/// `sequence.checkSafeZones` answer) must be to fit, centred, between `platform`'s side zones at
+/// its height; 1 when no caption reaches into them.
+pub fn caption_shrink(check: &Value, platform: Platform) -> f64 {
+    let frame = |k: usize, or: f64| check["frame"][k].as_f64().filter(|v| v.is_finite() && *v >= 1.0).unwrap_or(or);
+    let (fw, fh) = (frame(0, 1080.0), frame(1, 1920.0));
+    let mut need: f64 = 1.0;
+    for o in check["overlaps"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter(|o| o["kind"] == "caption").take(10_000) {
+        let r: Vec<f64> = o["rect"].as_array().map(|a| a.iter().filter_map(Value::as_f64).filter(|v| v.is_finite()).collect()).unwrap_or_default();
+        let [x0, y0, x1, y1] = r.as_slice() else { continue };
+        let (l, right) = platform.safe_span(y0 / fh, y1 / fh);
+        let allowed = 2.0 * (0.5 - l).min(right - 0.5) * fw;
+        let width = x1 - x0;
+        if width > 0.0 && allowed > 0.0 {
+            need = need.min(allowed / width);
+        }
+    }
+    need.clamp(0.0, 1.0)
+}
+
+/// Shrink the captions of `track` (now at `size`) until none reaches into `platform`'s side zones,
+/// down to [`MIN_CAPTION_SIZE`]; a few rounds at most.
+async fn fit_captions(ex: &dyn Executor, track: u64, platform: Platform, mut size: f64) -> Result<(), AutoCutError> {
+    for _ in 0..4 {
+        let check = run(ex, "sequence.checkSafeZones", json!({"platform": platform.name()})).await?;
+        let need = caption_shrink(&check, platform);
+        let next = (size * need * 0.97).floor().max(MIN_CAPTION_SIZE);
+        if need >= 1.0 || next >= size {
+            break;
+        }
+        size = next;
+        run(ex, "captions.setStyle", json!({"track": track, "size": size})).await?;
+    }
     Ok(())
+}
+
+/// Where the title card goes: a text box across `platform`'s safe area, just under its top zone
+/// (`[x, y]`, `[w, h]` in the pixels of a `w`×`h` frame).
+pub fn title_box(platform: Platform, (fw, fh): (f64, f64)) -> ([f64; 2], [f64; 2]) {
+    let safe = platform.safe_area();
+    let pad = 0.02;
+    let x = (safe.x0 + pad) * fw;
+    let w = ((safe.width() - 2.0 * pad) * fw).max(1.0);
+    ([x.round(), ((safe.y0 + pad) * fh).round()], [w.round(), (0.16 * fh).round()])
+}
+
+/// The title card: bold paragraph text centred in [`title_box`].
+async fn title_card(ex: &dyn Executor, platform: Platform, title: &str, (fw, fh): (f64, f64)) -> Result<(), AutoCutError> {
+    let (position, size) = title_box(platform, (fw, fh));
+    let tp = json!({"text": title, "seconds": 2.5, "time": 0, "size": (fw.min(fh) * 0.075).round(), "position": position, "box": size});
+    let r = run(ex, "graphics.newText", tp).await?;
+    if let Some(clip) = r["clip"].as_u64() {
+        // cosmetic: a title that keeps the default alignment and weight is still a title
+        run(ex, "graphics.set", json!({"clip": clip, "props": {"align": "center", "font_style": "Bold"}})).await.ok();
+    }
+    Ok(())
+}
+
+/// A short's note for one overlap of a `sequence.checkSafeZones` answer.
+fn safe_zone_note(o: &Value, platform: Platform) -> String {
+    let kind = if o["kind"] == "caption" { "caption" } else { "title" };
+    let text: String = o["text"].as_str().unwrap_or_default().chars().take(60).collect();
+    let zones = o["zones"].as_array().map(|z| z.iter().filter_map(Value::as_str).take(5).collect::<Vec<_>>().join(" and ")).unwrap_or_default();
+    let at = o["seconds"].as_f64().filter(|s| s.is_finite()).unwrap_or(0.0);
+    format!("safe zones: the {kind} \"{text}\" at {at:.1} s reaches into {}'s {zones} zone", platform.label())
 }
 
 #[cfg(test)]

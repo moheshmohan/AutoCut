@@ -20,13 +20,16 @@ focused monitor (Program by default). Code: `crates/ui-egui/src/panels/monitor_v
 | `view.addGuide` | View ▸ Add Guide… | dialog, or `{"orientation": "vertical\|horizontal", "position": px}` |
 | `view.snapInProgramMonitor` | View ▸ Snap in Program Monitor | graphic moves snap to the frame edges / centre and the guides (6 pt) |
 | `view.safeMargins` | Guide Templates ▸ Safe Margins | action- and title-safe boxes |
+| `view.safeZones.<off\|youtube\|reels\|tiktok\|vertical>`, `view.safeZones {"platform", "monitor"}` | View ▸ Platform Safe Zones, and the wrench menu's Platform Safe Zones | the parts of a vertical picture YouTube Shorts, Instagram Reels or TikTok (or all of them: `vertical`) cover with their own interface, as translucent rectangles, the safe area outlined and the platform's name in small text (`MonitorView.safe_zones`). `view.safeZones` is also an engine command (headless agents; `platform: null` turns it off, no `platform` says which is on); the Program monitor follows the engine's `EditorState.safe_zones` whenever a command changes it. `sequence.checkSafeZones {platform}` lists the captions and graphics that reach into the zones. Numbers and sources: `crates/render/src/safe_zones.rs` |
 | `view.guideTemplates.save`, `.manage`, `.apply`, `.delete` | Guide Templates ▸ Save Guides as Template… / Manage Guides… | templates are stored in the user preferences (`guides.templates`) |
 
 Guides are in frame pixels. Drag out of the top ruler for a horizontal guide or the left ruler for
 a vertical one; drag a guide to move it (unless locked) and drop it outside the picture to remove it.
 
 Automation ids: `<monitor>.zoom`, `<monitor>.zoom.<level>`, `<monitor>.settings.<command suffix>`
-(wrench menu items, e.g. `program.settings.display.alpha`), `<monitor>.ruler.top|left`,
+(wrench menu items, e.g. `program.settings.display.alpha`; `program.settings.safeZones` opens the
+Platform Safe Zones submenu, `program.settings.safeZones.tiktok` picks one), `<monitor>.safeZones`
+(the zones drawn over the picture), `<monitor>.ruler.top|left`,
 `<monitor>.guide.<n>`, `program.compare.reference|prev|next|set`, `source.waveform`, and in the
 dialogs `guides.add.vertical|horizontal|position|ok|cancel`, `guides.save.name|ok|cancel`,
 `guides.manage.row.<n>|apply|delete|close`.

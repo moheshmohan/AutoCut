@@ -149,6 +149,33 @@ fn ticks(s: f64) -> i64 {
     (s * TICKS_PER_SECOND as f64).round() as i64
 }
 
+#[test]
+fn captions_shrink_to_fit_between_the_side_zones() {
+    let check = |rect: [f64; 4]| json!({"frame": [1080, 1920], "overlaps": [{"kind": "caption", "rect": rect, "zones": ["right"]}]});
+    // 800 px wide at two thirds down: YouTube allows 2 × 0.32 of the width centred
+    let need = caption_shrink(&check([140.0, 1100.0, 940.0, 1190.0]), Platform::Youtube);
+    assert!((need - 0.64 * 1080.0 / 800.0).abs() < 1e-9, "{need}");
+    // TikTok's button column narrows it low in the frame, not high
+    let low = caption_shrink(&check([90.0, 1100.0, 990.0, 1190.0]), Platform::TikTok);
+    let high = caption_shrink(&check([90.0, 400.0, 990.0, 490.0]), Platform::TikTok);
+    assert!(low < high && high < 1.0, "{low} {high}");
+    // nothing in the way, a title, hostile answers: no shrinking, no panic
+    for v in [
+        json!({"overlaps": []}),
+        json!({"overlaps": [{"kind": "graphic", "rect": [0, 0, 1080, 300]}]}),
+        json!(null),
+        json!({"frame": [0, -1], "overlaps": [{"kind": "caption", "rect": [f64::MAX, 0, 1, "x"]}, {"kind": "caption", "rect": "wide"}]}),
+    ] {
+        assert_eq!(caption_shrink(&v, Platform::Vertical), 1.0, "{v}");
+    }
+    // the title's box stays inside every platform's safe area
+    for p in Platform::ALL {
+        let ([x, y], [w, h]) = title_box(p, (1080.0, 1920.0));
+        let a = filmcraft_engine::safe_zones::Area::from_pixels([x, y, x + w, y + h], (1080.0, 1920.0));
+        assert!(p.overlaps(&a).is_empty(), "{p:?}: {a:?}");
+    }
+}
+
 /// End to end on a headless session: a 160-second clip with a transcript becomes two vertical
 /// shorts on whole sentences, each its own sequence with styled captions; one is exported.
 #[tokio::test(flavor = "multi_thread")]
@@ -178,7 +205,25 @@ async fn makes_vertical_shorts_with_captions_end_to_end() {
             assert!(!cap.style.background && cap.style.outline > 0.0 && cap.style.size > 60.0, "the social style");
             assert!(cap.captions.iter().all(|c| c.text.chars().count() <= 24), "a few words at a time");
             assert!(q.video_tracks.iter().flat_map(|t| &t.items).count() >= 2, "the clip and the title card");
+            // the captions and the title inside YouTube Shorts' safe zone: above its bottom zone
+            let safe = filmcraft_engine::safe_zones::check(&g.project, q, Platform::Youtube);
+            assert_eq!(safe["ok"], true, "{safe}");
+            assert!(safe["checked"].as_u64().unwrap() >= 5, "the captions and the title were checked: {safe}");
+            assert!(cap.style.margin as f64 >= Platform::Youtube.margins().bottom, "{}", cap.style.margin);
+            assert_eq!(sh["safeZones"], json!({"platform": "youtube", "ok": true, "overlaps": 0}), "{sh}");
         }
+    }
+    // TikTok: its wider side margins and button column; still inside
+    let p = json!({"item": item, "count": 1, "minSeconds": 8.0, "maxSeconds": 30.0, "captions": true, "title": true, "platform": "tiktok", "analysisFps": 1});
+    let out = make(&ex, &p, None, &mut |_| {}).await.unwrap();
+    let sh = &out["shorts"][0];
+    assert_eq!(sh["safeZones"]["ok"], true, "{sh}");
+    {
+        let g = ex.0.lock().unwrap();
+        let id = sh["sequence"].as_u64().unwrap();
+        let q = g.project.items.values().find(|i| i.id.0 == id).and_then(|i| i.as_sequence()).unwrap();
+        let safe = filmcraft_engine::safe_zones::check(&g.project, q, Platform::TikTok);
+        assert_eq!(safe["ok"], true, "{safe}");
     }
     assert!(lines.iter().any(|l| l.contains("reframing")), "{lines:?}");
     // the same with an export folder: one short, exported with its captions burned in

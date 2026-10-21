@@ -264,6 +264,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             ui.painter().line_segment([c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)], Stroke::new(1.0, Color32::from_white_alpha(120)));
             ui.painter().line_segment([c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)], Stroke::new(1.0, Color32::from_white_alpha(120)));
         }
+        if let Some(p) = mv.safe_zones {
+            monitor_view::draw_safe_zones(ui, pic, p);
+            app.auto.add(&format!("{prefix}.safeZones"), pic, monitor_view::platform_label(p));
+        }
         if display != DisplayMode::Composite && !compare {
             let label = match display {
                 DisplayMode::Composite => tl!("Composite"),

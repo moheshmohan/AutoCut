@@ -68,6 +68,7 @@ pub mod redact_targets;
 pub mod reframe;
 pub mod relink;
 pub mod remix;
+pub mod safe_zones;
 pub mod scene_detect;
 pub mod scopes;
 pub mod sequence_extras;
@@ -390,6 +391,10 @@ pub struct EditorState {
     /// The last Edit ▸ Find… (Find Next continues it).
     #[serde(default)]
     pub find: Option<project_tools::FindState>,
+    /// View ▸ Platform Safe Zones (`view.safeZones`): the platform whose interface the Program
+    /// monitor outlines over a vertical picture.
+    #[serde(default)]
+    pub safe_zones: Option<safe_zones::Platform>,
 }
 
 /// Events for frontends (drained each frame).

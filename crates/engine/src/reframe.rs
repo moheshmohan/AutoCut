@@ -20,7 +20,14 @@
 //! `seconds` (media time), for that moment — the vision model's boxes re-seed the tracker where
 //! they are. Without one it starts on the frame's salient region. A clip whose subject is seen in
 //! fewer than 30 % of its analysed frames gets `fallback`: `"letterbox"` (fitted whole, the
-//! default) or `"center"` (a centred crop).
+//! default), `"center"` (a centred crop) or `"blur"`: fitted whole over a blurred, dimmed,
+//! enlarged copy of itself — the look the showcase gives its portrait shots ([`BACKDROP_BLURRINESS`],
+//! [`BACKDROP_OPACITY`], [`BACKDROP_ZOOM`]). `"blur"` also works per stretch: in a followed clip,
+//! where the subject is lost for a second or more (or a shot has nobody in it) the crop eases out
+//! to the whole picture and back in when the subject returns (see [`filmcraft_render::reframe`]).
+//! The copies are trimmed to those stretches and go on a [`BLUR_FILL_TRACK`] video track directly
+//! under the clip's own (one an earlier run made is reused, its old copies under the clip
+//! replaced); clips on such a track are never reframed themselves.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -54,6 +61,19 @@ const MAX_OUTCOMES: usize = 256;
 const SEQ_CMD: &str = "sequence.autoReframe";
 const CLIP_CMD: &str = "clip.autoReframe";
 
+/// The look of the blurred copy behind a picture that does not fill the frame — Auto Reframe's
+/// `blur` fallback and the showcase's whole portrait shots share it: Gaussian Blur at this
+/// blurriness (edges repeated, so they blur from the picture rather than from black), this
+/// opacity over black (dimmed), and this much larger than the frame it fills (its blurred edges
+/// outside).
+pub const BACKDROP_BLURRINESS: f64 = 60.0;
+pub const BACKDROP_OPACITY: f64 = 45.0;
+pub const BACKDROP_ZOOM: f64 = 1.08;
+/// The video track the blurred copies go on, directly under the clips' own.
+pub const BLUR_FILL_TRACK: &str = "Blur Fill";
+/// Most blurred copies one clip gets.
+const MAX_FILLS_PER_CLIP: usize = 1000;
+
 pub fn commands() -> Vec<CommandSpec> {
     vec![
         CommandSpec {
@@ -61,7 +81,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Reframe Sequence…",
             menu: &[],
             shortcut: None,
-            params: r#"{"sequence":id?,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","subject":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"motion":"smooth"|"responsive"="smooth","fallback":"letterbox"|"center"="letterbox","range":{"start":ticks,"end":ticks}|{"startSeconds":f64,"endSeconds":f64}?,"name":str?,"analysisFps":1..60=30,"wait":bool=false}"#,
+            params: r#"{"sequence":id?,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","subject":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"motion":"smooth"|"responsive"="smooth","fallback":"letterbox"|"center"|"blur"="letterbox","range":{"start":ticks,"end":ticks}|{"startSeconds":f64,"endSeconds":f64}?,"name":str?,"analysisFps":1..60=30,"wait":bool=false}"#,
             enabled: has_seq,
             run: auto_reframe_sequence,
             journal: true,
@@ -71,7 +91,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Reframe Clips",
             menu: &[],
             shortcut: None,
-            params: r#"{"clips":[id]?,"subject":{"x","y","w","h","clip"?,"seconds"?}|[box]?,"motion":"smooth"|"responsive"="smooth","fallback":"letterbox"|"center"="letterbox","keepScale":bool=false,"analysisFps":1..60=30,"wait":bool=false}"#,
+            params: r#"{"clips":[id]?,"subject":{"x","y","w","h","clip"?,"seconds"?}|[box]?,"motion":"smooth"|"responsive"="smooth","fallback":"letterbox"|"center"|"blur"="letterbox","keepScale":bool=false,"analysisFps":1..60=30,"wait":bool=false}"#,
             enabled: has_seq,
             run: auto_reframe_clips,
             journal: true,
@@ -121,15 +141,24 @@ pub struct ClipReframe {
     pub frames: usize,
     anchor: Vec2,
     keep_scale: bool,
+    pub fallback: Fallback,
+    /// Where (sequence time) the clip gets the blurred copy under it.
+    pub fill: Vec<(Tick, Tick)>,
+    /// The copy's Motion: the frame's centre and its scale (a share).
+    fill_position: Vec2,
+    fill_scale: f64,
 }
 
 impl ClipReframe {
     fn to_json(&self) -> Value {
+        let secs = |t: Tick| (t.seconds() * 1000.0).round() / 1000.0;
         json!({
             "clip": self.clip.0,
             "name": self.name,
             "followed": !self.letterbox,
             "letterbox": self.letterbox,
+            "fallback": self.fallback.name(),
+            "blurFill": self.fill.iter().map(|(a, b)| [secs(*a), secs(*b)]).collect::<Vec<_>>(),
             "found": (self.found * 1000.0).round() / 1000.0,
             "keyframes": if self.animate_position || self.animate_scale { self.keys.len() } else { 0 },
             "shots": self.shots,
@@ -182,8 +211,8 @@ fn follow_p(cmd: &str, p: &Value) -> Result<Follow> {
 fn fallback_p(cmd: &str, p: &Value) -> Result<Fallback> {
     match p.get("fallback").filter(|v| !v.is_null()) {
         None => Ok(Fallback::Letterbox),
-        Some(Value::String(s)) => Fallback::from_name(s).ok_or_else(|| bad(cmd, format!("`fallback` is \"letterbox\" or \"center\", not \"{s}\""))),
-        Some(_) => Err(bad(cmd, "`fallback` is \"letterbox\" or \"center\"")),
+        Some(Value::String(s)) => Fallback::from_name(s).ok_or_else(|| bad(cmd, format!("`fallback` is \"letterbox\", \"center\" or \"blur\", not \"{s}\""))),
+        Some(_) => Err(bad(cmd, "`fallback` is \"letterbox\", \"center\" or \"blur\"")),
     }
 }
 
@@ -315,7 +344,8 @@ fn build_work(s: &Session, q: &Sequence, only: Option<&[ClipId]>, hints: &[Hint]
     let frame = (q.settings.width as f64, q.settings.height as f64);
     let mut work = Vec::new();
     let mut total = 0usize;
-    for t in &q.video_tracks {
+    // the blurred copies an earlier run made are not reframed themselves
+    for t in q.video_tracks.iter().filter(|t| t.name != BLUR_FILL_TRACK) {
         for it in &t.items {
             if only.is_some_and(|o| !o.contains(&it.id)) || !it.enabled {
                 continue;
@@ -424,12 +454,36 @@ fn analyse(w: &Work, follow: Follow, fallback: Fallback, progress: &mut dyn FnMu
         None => Zoom::Track,
     };
     let plan = filmcraft_render::reframe::plan(&samples, w.geometry, follow, zoom, fallback);
-    Some(result_of(w, &plan))
+    Some(result_of(w, &plan, fallback))
+}
+
+/// A plan's blurred-fill stretches (sample indices) in sequence time: from the first sample's
+/// frame (the clip's start for the first) to the frame after the last's (the clip's end for the
+/// last), merged, inside the clip.
+fn fill_spans(w: &Work, spans: &[(usize, usize)]) -> Vec<(Tick, Tick)> {
+    let (start, end) = (w.item.start, w.item.end());
+    let mut out: Vec<(Tick, Tick)> = Vec::new();
+    for &(a, b) in spans.iter().take(MAX_FILLS_PER_CLIP) {
+        let from = if a == 0 { start } else { w.frames.get(a).map_or(start, |f| f.0) };
+        let to = match b.checked_add(1).and_then(|k| w.frames.get(k)) {
+            Some(f) => f.0,
+            None => end,
+        };
+        let (from, to) = (from.max(start), to.min(end));
+        if to <= from {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if from <= last.1 => last.1 = last.1.max(to),
+            _ => out.push((from, to)),
+        }
+    }
+    out
 }
 
 /// A plan in the clip's media time: a shot's last keyframe goes on the frame before the next
 /// shot's first (the jump lands on the cut, whatever the analysis rate).
-fn result_of(w: &Work, plan: &Plan) -> ClipReframe {
+fn result_of(w: &Work, plan: &Plan, fallback: Fallback) -> ClipReframe {
     let frozen = w.item.frame_hold.is_some();
     let mut keys: Vec<(Tick, Vec2, f64, bool)> = plan
         .keys
@@ -447,6 +501,16 @@ fn result_of(w: &Work, plan: &Plan) -> ClipReframe {
     if !animate {
         keys.truncate(1);
     }
+    // the blurred copy goes where the picture may not cover the frame: the plan's stretches, or
+    // — a placement that does not move (a frozen frame) — the whole clip when it is fitted
+    let blur = fallback == Fallback::Blur && w.keep.is_none();
+    let fill = match keys.first() {
+        _ if !blur => Vec::new(),
+        _ if animate => fill_spans(w, &plan.fill),
+        Some((_, p, s, _)) if !w.geometry.covers([p.x, p.y], *s) => vec![(w.item.start, w.item.end())],
+        _ => Vec::new(),
+    };
+    let g = &w.geometry;
     ClipReframe {
         clip: w.clip,
         name: w.name.clone(),
@@ -459,7 +523,117 @@ fn result_of(w: &Work, plan: &Plan) -> ClipReframe {
         frames: w.frames.len(),
         anchor: w.anchor,
         keep_scale: w.keep.is_some(),
+        fallback,
+        fill,
+        fill_position: Vec2::new(g.frame.0 / 2.0, g.frame.1 / 2.0),
+        fill_scale: g.fill_scale() * BACKDROP_ZOOM,
     }
+}
+
+/// Make `b` — a copy of a clip — the blurred copy behind it ([`BACKDROP_BLURRINESS`] …): no link,
+/// group or markers; Motion centred at `position` at `scale` (a share) about `anchor` (the
+/// picture's centre); Opacity [`BACKDROP_OPACITY`] (no fades, blend modes or masks); Gaussian
+/// Blur added before the intrinsic effects (its other effects stay, so its colour matches).
+pub fn make_backdrop(b: &mut TrackItem, position: Vec2, scale: f64, anchor: Vec2) {
+    b.link = None;
+    b.group = None;
+    b.markers.clear();
+    b.scale_to_frame = false;
+    let scale = if scale.is_finite() && scale > 0.0 { scale.min(100.0) } else { 1.0 };
+    if let Some(def) = filmcraft_project::effect::find_effect("motion")
+        && let Some(m) = b.effect_mut("motion")
+    {
+        *m = def.instance();
+        set_static(m, "anchor", ParamValue::Vec2(anchor));
+        set_static(m, "position", ParamValue::Vec2(position));
+        set_static(m, "uniform_scale", ParamValue::Bool(true));
+        set_static(m, "scale", ParamValue::Float(scale * 100.0));
+    }
+    if let Some(def) = filmcraft_project::effect::find_effect("opacity")
+        && let Some(o) = b.effect_mut("opacity")
+    {
+        *o = def.instance();
+        set_static(o, "opacity", ParamValue::Float(BACKDROP_OPACITY));
+    }
+    if let Some(def) = filmcraft_project::effect::find_effect("gaussian_blur") {
+        let mut blur = def.instance();
+        set_static(&mut blur, "blurriness", ParamValue::Float(BACKDROP_BLURRINESS));
+        set_static(&mut blur, "repeat_edge", ParamValue::Bool(true));
+        let at = b.effects.iter().position(|e| e.def().is_some_and(|d| d.intrinsic)).unwrap_or(b.effects.len());
+        b.effects.insert(at, blur);
+    }
+}
+
+/// A copy of `it` showing what it shows over `[a, e)` of the sequence (inside the clip), or None.
+fn trimmed_copy(it: &TrackItem, a: Tick, e: Tick) -> Option<TrackItem> {
+    let (a, e) = (a.max(it.start), e.min(it.end()));
+    if e <= a {
+        return None;
+    }
+    let mut b = it.clone();
+    let speed = if it.speed.is_finite() { it.speed.abs() } else { 1.0 };
+    let media = |d: Tick| Tick((d.0 as f64 * speed).round() as i64);
+    b.start = a;
+    b.duration = e - a;
+    if it.frame_hold.is_none() {
+        b.source_in = if it.reverse {
+            // reversed: the piece's last frame is the clip's media at `a`
+            it.source_in + media(it.duration) - media(a - it.start) - media(b.duration)
+        } else {
+            it.source_in + media(a - it.start)
+        };
+    }
+    Some(b)
+}
+
+/// Put the blurred copies under the clips of `q` that got some ([`ClipReframe::fill`]): per
+/// video track, a [`BLUR_FILL_TRACK`] directly under it — the one already there (an earlier run's,
+/// its copies under these clips taken away) or a new one. How many copies were made.
+fn add_blur_fill(q: &mut Sequence, clips: &[ClipReframe], next_id: &mut u64) -> usize {
+    let mut alloc = || {
+        let v = *next_id;
+        *next_id = next_id.saturating_add(1);
+        v
+    };
+    let mut made = 0;
+    // from the top down, so inserting a track leaves the indices still to do as they are
+    for ti in (0..q.video_tracks.len()).rev() {
+        let Some(track) = q.video_tracks.get(ti) else { continue };
+        if track.name == BLUR_FILL_TRACK {
+            continue;
+        }
+        let mut copies: Vec<TrackItem> = Vec::new();
+        let mut under: Vec<(Tick, Tick)> = Vec::new();
+        for r in clips.iter().filter(|r| !r.fill.is_empty() && !r.keep_scale) {
+            let Some(it) = track.items.iter().find(|i| i.id == r.clip) else { continue };
+            under.push((it.start, it.end()));
+            for &(a, e) in &r.fill {
+                let Some(mut b) = trimmed_copy(it, a, e) else { continue };
+                b.id = ClipId(alloc());
+                b.name = format!("{} (blur fill)", it.name);
+                make_backdrop(&mut b, r.fill_position, r.fill_scale, r.anchor);
+                copies.push(b);
+            }
+        }
+        if copies.is_empty() {
+            continue;
+        }
+        made += copies.len();
+        let reuse = ti.checked_sub(1).filter(|b| q.video_tracks.get(*b).is_some_and(|t| t.name == BLUR_FILL_TRACK));
+        let fill_track = match reuse {
+            Some(b) => q.video_tracks.get_mut(b),
+            None => {
+                q.video_tracks.insert(ti, filmcraft_project::Track::new(TrackId(alloc()), filmcraft_project::TrackKind::Video, BLUR_FILL_TRACK.into()));
+                q.video_tracks.get_mut(ti)
+            }
+        };
+        let Some(t) = fill_track else { continue };
+        t.items.retain(|i| !under.iter().any(|(a, e)| i.start < *e && *a < i.end()));
+        t.transitions.retain(|tr| t.items.iter().any(|i| tr.from == Some(i.id) || tr.to == Some(i.id)));
+        t.items.extend(copies);
+        t.sort();
+    }
+    made
 }
 
 /// Set Motion parameter `id` to `v` (no keyframes), adding it when the instance lacks it.
@@ -721,6 +895,7 @@ pub fn poll(s: &mut Session) {
 
 fn apply(s: &mut Session, target: Target, clips: &[ClipReframe]) -> Result<Value> {
     let followed = clips.iter().filter(|r| !r.letterbox).count();
+    let filled = clips.iter().filter(|r| !r.fill.is_empty() && !r.keep_scale).count();
     let summary: Vec<Value> = clips.iter().map(ClipReframe::to_json).collect();
     match target {
         Target::Copy { seq, name, next_id, label, bin, aspect } => {
@@ -733,8 +908,9 @@ fn apply(s: &mut Session, target: Target, clips: &[ClipReframe]) -> Result<Value
                         apply_clip(it, r);
                     }
                 }
-                q.check().map_err(EngineError::Other)?;
                 pr.next_id = pr.next_id.max(next_id);
+                add_blur_fill(&mut q, clips, &mut pr.next_id);
+                q.check().map_err(EngineError::Other)?;
                 let id = pr.add_item(&n, label, ItemKind::Sequence(Arc::new(q)), bin);
                 st.active_sequence = Some(id);
                 if !st.open_sequences.contains(&id) {
@@ -746,7 +922,7 @@ fn apply(s: &mut Session, target: Target, clips: &[ClipReframe]) -> Result<Value
             })?;
             s.events.push(crate::Event::OpenSequence(id));
             s.toast(format!("Auto Reframe: \"{name}\" ({aspect}), the subject followed in {followed} of {} clip(s)", clips.len()));
-            Ok(json!({"sequence": id.0, "name": name, "aspect": aspect, "width": w, "height": h, "followed": followed, "clips": summary}))
+            Ok(json!({"sequence": id.0, "name": name, "aspect": aspect, "width": w, "height": h, "followed": followed, "blurFill": filled, "clips": summary}))
         }
         Target::InPlace { seq } => {
             if s.project.sequence(seq).is_none() {
@@ -754,16 +930,19 @@ fn apply(s: &mut Session, target: Target, clips: &[ClipReframe]) -> Result<Value
             }
             let label = if clips.len() == 1 { "Auto Reframe" } else { "Auto Reframe Clips" };
             s.edit(label, |pr, _| {
+                let mut next_id = pr.next_id;
                 let q = pr.sequence_mut(seq).ok_or(EngineError::NoSequence)?;
                 for r in clips {
                     if let Some((_, it)) = q.find_item_mut(r.clip) {
                         apply_clip(it, r);
                     }
                 }
+                add_blur_fill(q, clips, &mut next_id);
                 q.check().map_err(EngineError::Other)?;
+                pr.next_id = pr.next_id.max(next_id);
                 Ok(())
             })?;
-            Ok(json!({"sequence": seq.0, "followed": followed, "clips": summary}))
+            Ok(json!({"sequence": seq.0, "followed": followed, "blurFill": filled, "clips": summary}))
         }
     }
 }

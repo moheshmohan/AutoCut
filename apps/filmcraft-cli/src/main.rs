@@ -361,8 +361,10 @@ SUBCOMMANDS
                                 out first): the same footage again, or another window of the same
                                 clips, is not decoded or asked about again; --fresh reads none of it
   shorts <project.fcproj | media file> [--count 3] [--aspect 9:16] [--min-seconds 15]
-         [--max-seconds 60] [--motion smooth|responsive] [--topic T] [--title-card]
-         [--no-captions] [--analysis-fps 30] [--sequence id] [--export dir [--upload-youtube
+         [--max-seconds 60] [--motion smooth|responsive] [--fallback blur|letterbox|center]
+         [--platform youtube|reels|tiktok|vertical] [--topic T] [--title-card] [--no-captions]
+         [--analysis-fps 30] [--sequence id]
+         [--export dir [--upload-youtube
          [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P] [--youtube-tags a,b]]]
                                 long video → shorts (autocut.shorts): the transcript (Whisper's,
                                 made first when there is none) is cut into sentences, runs of them
@@ -371,8 +373,13 @@ SUBCOMMANDS
                                 Ollama has one), and the best --count that do not overlap each
                                 become a vertical sequence: reframed to --aspect with the speaker
                                 followed (sequence.autoReframe: the subject tracker, Motion
-                                keyframes, letterboxed where nobody is found), big outlined
-                                captions from the transcript, a title card with --title-card;
+                                keyframes; where nobody is found, for a clip or a stretch of
+                                one, the whole picture over a blurred, dimmed copy of itself —
+                                --fallback letterbox for black bars), big outlined
+                                captions from the transcript and a title card with
+                                --title-card, both inside the --platform's safe zone (the
+                                parts its own interface does not cover; youtube by default,
+                                vertical for all three; what still overlaps is noted);
                                 --export writes each to <dir>/NN-<title>.mp4 with the captions
                                 burned in and --upload-youtube sends each to YouTube (private
                                 unless --youtube-privacy). A media file is imported first; a
@@ -856,6 +863,15 @@ fn shorts_params(a: &Args) -> Result<Value, String> {
         if let Some(v) = a.opt(flag) {
             p[key] = json!(v);
         }
+    }
+    if let Some(f) = a.opt("--fallback") {
+        let f = filmcraft_render::reframe::Fallback::from_name(f).ok_or_else(|| format!("--fallback is blur, letterbox or center, not `{f}`"))?;
+        p["fallback"] = json!(f.name());
+    }
+    if let Some(pl) = a.opt("--platform") {
+        let pl =
+            filmcraft_engine::safe_zones::Platform::from_name(pl).ok_or_else(|| format!("--platform is youtube, reels, tiktok or vertical, not `{pl}`"))?;
+        p["platform"] = json!(pl.name());
     }
     if let Some(q) = a.opt("--sequence") {
         p["sequence"] = json!(q.parse::<u64>().map_err(|_| format!("--sequence wants a sequence id, not `{q}`"))?);
@@ -2774,8 +2790,13 @@ mod shorts_tests {
         assert_eq!(p["wait"], true);
         let defaults = shorts_params(&args(&["shorts", "talk.mp4"])).unwrap();
         assert_eq!((defaults["count"].as_u64(), defaults["captions"].as_bool()), (Some(3), Some(true)));
+        assert!(defaults.get("fallback").is_none() && defaults.get("platform").is_none(), "the job's defaults (blur, youtube)");
+        let bars = shorts_params(&args(&["shorts", "talk.mp4", "--fallback", "Letterbox", "--platform", "tik-tok"])).unwrap();
+        assert_eq!((bars["fallback"].as_str(), bars["platform"].as_str()), (Some("letterbox"), Some("tiktok")));
         for bad in [
-            &["shorts", "x", "--count", "0"][..],
+            &["shorts", "x", "--fallback", "stretch"][..],
+            &["shorts", "x", "--platform", "snapchat"],
+            &["shorts", "x", "--count", "0"],
             &["shorts", "x", "--count", "many"],
             &["shorts", "x", "--min-seconds", "NaN"],
             &["shorts", "x", "--sequence", "main"],

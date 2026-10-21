@@ -332,6 +332,9 @@ pub struct FilmcraftApp {
     pub(crate) monitor_asked: HashMap<String, std::collections::VecDeque<FrameKey>>,
     /// The frame whose picture the Program monitor drew last: the frame due, or its stand-in.
     pub(crate) program_shown: Option<FrameKey>,
+    /// The engine's Platform Safe Zones as last copied to the Program monitor (an agent's
+    /// `view.safeZones` run straight on the session shows on the next frame).
+    pub(crate) seen_safe_zones: Option<filmcraft_engine::safe_zones::Platform>,
     /// Consecutive frames the timeline zoom / scroll has been at rest. `ui.elements` answers from
     /// the frame before the last one, so its timeline rects are final from 2 on.
     pub(crate) timeline_still: u32,
@@ -577,6 +580,7 @@ impl FilmcraftApp {
             monitor_inexact: false,
             monitor_asked: HashMap::new(),
             program_shown: None,
+            seen_safe_zones: None,
             timeline_still: 0,
             input_waiters: Vec::new(),
             next_token: 1,
@@ -1872,6 +1876,7 @@ impl FilmcraftApp {
             }
         }
         self.sync_timeline_view();
+        panels::monitor_view::sync_safe_zones(self);
         self.handle_drops(&ctx);
         if let Some(rx) = self.command_inbox.take() {
             while let Ok(id) = rx.try_recv() {

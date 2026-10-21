@@ -20,7 +20,15 @@
 //!    interpolation; the last keyframe of a shot holds until the next shot's first.
 //!
 //! A clip where the subject is seen in less than [`MIN_FOUND`] of its frames gets the
-//! [`Fallback`]: letterboxed (fitted whole) or a centred crop.
+//! [`Fallback`]: letterboxed (fitted whole), a centred crop, or — [`Fallback::Blur`] — fitted
+//! whole over a blurred, dimmed, enlarged copy of itself (the engine adds the copy, under the
+//! [`Plan::fill`] stretches).
+//!
+//! With [`Fallback::Blur`] it also works per stretch of a followed clip: where the subject is lost
+//! for [`MIN_LOST_SECONDS`] or longer (or a whole shot has nobody in it) the crop eases out to the
+//! whole picture over [`EASE_SECONDS`] (a smoothstep on the position and on the logarithm of the
+//! scale), stays there, and eases back in to the tracked crop as the subject comes back; a cut
+//! jumps as before. Shorter losses are bridged.
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +42,12 @@ pub const MIN_FOUND: f64 = 0.3;
 pub const TOLERANCE_PX: f64 = 1.0;
 /// Most samples planned for one clip (a long clip is analysed at a lower rate).
 pub const MAX_SAMPLES: usize = 400_000;
+/// With [`Fallback::Blur`], a followed clip's subject lost this long (seconds) gets the blurred
+/// fill for the stretch; a shorter loss is bridged.
+pub const MIN_LOST_SECONDS: f64 = 1.0;
+/// How long the crop takes to ease out to the whole picture, and back in, seconds (each way; a
+/// short loss eases over half its length).
+pub const EASE_SECONDS: f64 = 0.5;
 
 /// How the crop follows the subject.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +113,9 @@ pub enum Fallback {
     Letterbox,
     /// Filling the frame, centred.
     Center,
+    /// Fitted whole over a blurred, dimmed, enlarged copy of itself; per stretch in a followed
+    /// clip (see the module docs).
+    Blur,
 }
 
 impl Fallback {
@@ -106,7 +123,15 @@ impl Fallback {
         match s.trim().to_ascii_lowercase().as_str() {
             "letterbox" | "fit" | "bars" => Some(Fallback::Letterbox),
             "center" | "centre" | "crop" => Some(Fallback::Center),
+            "blur" | "blurred" | "blur-fill" | "blurfill" | "blurred-fill" => Some(Fallback::Blur),
             _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Fallback::Letterbox => "letterbox",
+            Fallback::Center => "center",
+            Fallback::Blur => "blur",
         }
     }
 }
@@ -151,6 +176,13 @@ impl Geometry {
     /// The scale at which the whole picture fits in the frame.
     pub fn fit_scale(&self) -> f64 {
         (self.frame.0 / self.picture.0.max(1.0)).min(self.frame.1 / self.picture.1.max(1.0))
+    }
+    /// Whether the picture (its anchor at its centre) covers the frame at Motion `position` and
+    /// scale `s` (half a pixel of slack).
+    pub fn covers(&self, position: [f64; 2], s: f64) -> bool {
+        let (hw, hh) = (self.picture.0 * s / 2.0, self.picture.1 * s / 2.0);
+        let [x, y] = position;
+        x - hw <= 0.5 && x + hw >= self.frame.0 - 0.5 && y - hh <= 0.5 && y + hh >= self.frame.1 - 0.5
     }
     /// The share of the picture the frame shows at scale `s`, per axis (at most 1).
     fn visible(&self, s: f64) -> [f64; 2] {
@@ -209,13 +241,93 @@ pub struct Plan {
     pub found: f64,
     /// Shots in the clip.
     pub shots: usize,
+    /// With [`Fallback::Blur`]: the stretches (first and last sample, inclusive; a sample either
+    /// side of the eased change included) where the picture may not cover the frame, which the
+    /// blurred copy goes under. Empty otherwise.
+    pub fill: Vec<(usize, usize)>,
 }
 
 impl Plan {
-    fn fixed(g: &Geometry, scale: f64, letterbox: bool, found: f64) -> Self {
+    fn fixed(g: &Geometry, scale: f64, letterbox: bool, found: f64, fill: Vec<(usize, usize)>) -> Self {
         let position = [g.frame.0 / 2.0, g.frame.1 / 2.0];
-        Plan { keys: vec![Key { index: 0, position, scale, hold: false }], animate_position: false, animate_scale: false, letterbox, found, shots: 1 }
+        Plan { keys: vec![Key { index: 0, position, scale, hold: false }], animate_position: false, animate_scale: false, letterbox, found, shots: 1, fill }
     }
+}
+
+/// Smoothstep: 0 at 0, 1 at 1, flat at both ends.
+fn ease(u: f64) -> f64 {
+    let u = if u.is_finite() { u.clamp(0.0, 1.0) } else { 0.0 };
+    u * u * (3.0 - 2.0 * u)
+}
+
+/// How far (0: the tracked crop, 1: the whole picture) each sample of a shot is towards the
+/// blurred fill: the shot's runs of samples where the subject is not `seen` that last
+/// [`MIN_LOST_SECONDS`] or more (until it is seen again), or the whole shot, eased in and out over
+/// [`EASE_SECONDS`] — not at the shot's own ends, where the cut is the change.
+fn lost_weights(seen: &[bool], times: &[f64]) -> Vec<f64> {
+    let m = seen.len().min(times.len());
+    let mut w = vec![0.0; m];
+    let time = |k: usize| times.get(k).copied().filter(|t| t.is_finite()).unwrap_or(k as f64 / 30.0);
+    let lost = |k: usize| !seen.get(k).copied().unwrap_or(true);
+    let mut k = 0;
+    while k < m {
+        if !lost(k) {
+            k += 1;
+            continue;
+        }
+        let a = k;
+        while k < m && lost(k) {
+            k += 1;
+        }
+        let b = k.saturating_sub(1);
+        let (at_start, at_end) = (a == 0, k >= m);
+        // lost until it is seen again (the next sample), or to the shot's end
+        let until = if at_end { time(b) } else { time(k) };
+        let long = (until - time(a)).abs() >= MIN_LOST_SECONDS;
+        if !(long || (at_start && at_end)) {
+            continue;
+        }
+        let ramp = ((time(b) - time(a)).abs() / 2.0).min(EASE_SECONDS);
+        for (j, v) in w.iter_mut().enumerate().take(b + 1).skip(a) {
+            let into = if at_start || ramp <= 0.0 { 1.0 } else { ease((time(j) - time(a)) / ramp) };
+            let out = if at_end || ramp <= 0.0 { 1.0 } else { ease((time(b) - time(j)) / ramp) };
+            *v = into.min(out);
+        }
+    }
+    w
+}
+
+/// Add the runs of `weights` above zero (sample `offset + k`), a sample either side included, to
+/// `out`, merged with what is there.
+fn spans(weights: &[f64], offset: usize, out: &mut Vec<(usize, usize)>) {
+    let n = weights.len();
+    let on = |k: usize| weights.get(k).copied().unwrap_or(0.0) > 0.0;
+    let mut k = 0;
+    while k < n {
+        if !on(k) {
+            k += 1;
+            continue;
+        }
+        let a = k;
+        while k < n && on(k) {
+            k += 1;
+        }
+        let (a, b) = (offset.saturating_add(a.saturating_sub(1)), offset.saturating_add(k.min(n.saturating_sub(1))));
+        match out.last_mut() {
+            Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+}
+
+/// The placement `u` (0..1) of the way from `a` to `b`: the position in a straight line, the
+/// scale evenly on a logarithmic scale (a zoom that looks even).
+fn towards(a: ([f64; 2], f64), b: ([f64; 2], f64), u: f64) -> ([f64; 2], f64) {
+    let u = if u.is_finite() { u.clamp(0.0, 1.0) } else { 0.0 };
+    let lerp = |x: f64, y: f64| x + (y - x) * u;
+    let positive = |s: f64| s.is_finite() && s > 0.0;
+    let scale = if positive(a.1) && positive(b.1) { (a.1.ln() + (b.1.ln() - a.1.ln()) * u).exp() } else { lerp(a.1, b.1) };
+    ([lerp(a.0[0], b.0[0]), lerp(a.0[1], b.0[1])], scale)
 }
 
 /// Step a critically damped spring at `x` (velocity `v`) towards `target` over `dt` seconds,
@@ -390,18 +502,29 @@ pub fn plan(samples: &[Sample], g: Geometry, follow_mode: Follow, zoom: Zoom, fa
             None => s0,
         }
     };
+    // the whole picture, over the blurred copy for the whole clip
+    let blur_all = |n: usize| if n > 0 { vec![(0, n - 1)] } else { Vec::new() };
     if !g.valid() || n == 0 {
-        return Plan::fixed(&g, if fallback == Fallback::Letterbox { g.fit_scale() } else { base(0) }, true, 0.0);
+        return match (fallback, keep) {
+            (Fallback::Letterbox, _) => Plan::fixed(&g, g.fit_scale(), true, 0.0, Vec::new()),
+            (Fallback::Blur, None) if g.valid() => Plan::fixed(&g, g.fit_scale(), true, 0.0, blur_all(n)),
+            _ => Plan::fixed(&g, base(0), true, 0.0, Vec::new()),
+        };
     }
     let seen = |s: &Sample| s.bbox.is_some() && s.confidence >= MIN_CONFIDENCE && s.confidence.is_finite();
     let found = samples.iter().filter(|s| seen(s)).count() as f64 / n as f64;
     if found < MIN_FOUND {
-        let scale = match (fallback, keep) {
-            (Fallback::Letterbox, None) => g.fit_scale(),
-            _ => base(0),
+        return match (fallback, keep) {
+            (Fallback::Letterbox, None) => Plan::fixed(&g, g.fit_scale(), true, found, Vec::new()),
+            (Fallback::Blur, None) => Plan::fixed(&g, g.fit_scale(), true, found, blur_all(n)),
+            _ => Plan::fixed(&g, base(0), true, found, Vec::new()),
         };
-        return Plan::fixed(&g, scale, true, found);
     }
+    // with the blurred fill, lost stretches ease out to the whole picture (not with the clip's
+    // own scale: only its position follows then)
+    let blur = fallback == Fallback::Blur && keep.is_none();
+    let whole = ([g.frame.0 / 2.0, g.frame.1 / 2.0], g.fit_scale());
+    let mut fill_spans: Vec<(usize, usize)> = Vec::new();
     let times: Vec<f64> = samples.iter().enumerate().map(|(i, s)| if s.t.is_finite() { s.t } else { i as f64 / 30.0 }).collect();
     // shots: [start, end) ranges
     let mut shots: Vec<(usize, usize)> = Vec::new();
@@ -466,13 +589,17 @@ pub fn plan(samples: &[Sample], g: Geometry, follow_mode: Follow, zoom: Zoom, fa
             // nobody in this shot: a centred crop
             _ => vec![[0.5, 0.5]; m],
         };
+        let weights = if blur { lost_weights(&shot.iter().map(seen).collect::<Vec<_>>(), t) } else { Vec::new() };
         for k in 0..m {
             let s = scales.get(k).copied().unwrap_or(s0);
             // with the clip's own scale the position is figured at the shot's smallest: the
             // picture then covers the frame at any scale it animates to between keyframes
             let at = if keep.is_some() && floor.is_finite() { floor } else { s };
-            path.push((g.position(centres.get(k).copied().unwrap_or([0.5, 0.5]), at), s));
+            let tracked = (g.position(centres.get(k).copied().unwrap_or([0.5, 0.5]), at), s);
+            let u = weights.get(k).copied().unwrap_or(0.0);
+            path.push(if u > 0.0 { towards(tracked, whole, u) } else { tracked });
         }
+        spans(&weights, a, &mut fill_spans);
     }
     // keyframes: per shot, the fewest that reproduce the path
     let unit = g.picture.0.max(g.picture.1) / 2.0;
@@ -494,7 +621,7 @@ pub fn plan(samples: &[Sample], g: Geometry, follow_mode: Follow, zoom: Zoom, fa
     if !animate_position && !animate_scale {
         keys.truncate(1);
     }
-    Plan { keys, animate_position, animate_scale, letterbox: false, found, shots: shots.len() }
+    Plan { keys, animate_position, animate_scale, letterbox: false, found, shots: shots.len(), fill: fill_spans }
 }
 
 /// The plan's placement at sample `i` (linear between keyframes, holding after a shot's last),
