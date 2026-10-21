@@ -1565,12 +1565,13 @@ impl VideoEncoder for H264Encoder {
 
 /// BT.709 limited-range 8-bit 4:2:0 from straight RGBA8 (2×2 chroma average).
 ///
-/// The hardware encoders' input, converted for every exported frame on the encoding side: code
-/// values are normalised through a table (the same quotients as dividing each one), the chroma sums
-/// reuse one buffer per worker instead of three allocations per pair of rows, and the planes are
-/// walked without bounds checks per sample. The result is the same to the bit
-/// (`settings_tests::yuv420_conversion_keeps_its_bits`). A picture smaller than `w`×`h` says
-/// converts as black where it lacks data.
+/// The hardware encoders' input, converted for every exported frame on the encoding side (at 4K,
+/// with a hardware encoder, the largest cost the encoding side has): each row goes through plain
+/// loops over arrays — code values to floats, then luma and the two chroma terms, then the chroma
+/// sums — which the compiler runs four lanes at a time, with the arithmetic and the order of the
+/// sums of one pixel after the other; the buffers are one set per worker. The result is the same
+/// to the bit (`settings_tests::yuv420_conversion_keeps_its_bits`). A picture smaller than
+/// `w`×`h` says converts as black where it lacks data.
 pub fn rgba_to_yuv420_8(rgba: &[u8], w: usize, h: usize, y: &mut Vec<u8>, u: &mut Vec<u8>, v: &mut Vec<u8>) {
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     y.resize(w * h, 0);
@@ -1579,37 +1580,60 @@ pub fn rgba_to_yuv420_8(rgba: &[u8], w: usize, h: usize, y: &mut Vec<u8>, u: &mu
     if w == 0 || h == 0 {
         return;
     }
-    let norm: [f32; 256] = std::array::from_fn(|i| i as f32 / 255.0);
-    let sums = || (vec![0f32; cw], vec![0f32; cw]);
-    y.par_chunks_mut(w * 2).zip(u.par_chunks_mut(cw).zip(v.par_chunks_mut(cw))).enumerate().for_each_init(sums, |(us, vs), (cy, (yr, (ur, vr)))| {
-        us.fill(0.0);
-        vs.fill(0.0);
-        let rows = yr.len() / w;
-        for (dy, out) in yr.chunks_exact_mut(w).enumerate() {
-            let row = cy * 2 + dy;
-            let src = rgba.get(row * w * 4..(row + 1) * w * 4).unwrap_or(&[]);
-            let mut px = src.as_chunks::<4>().0.iter();
-            for (x, o) in out.iter_mut().enumerate() {
-                let p = px.next().copied().unwrap_or([0, 0, 0, 255]);
-                let (r, g, b) = (norm[usize::from(p[0])], norm[usize::from(p[1])], norm[usize::from(p[2])]);
-                let yy = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-                *o = (16.0 + 219.0 * yy).round().clamp(1.0, 254.0) as u8;
-                if let (Some(su), Some(sv)) = (us.get_mut(x / 2), vs.get_mut(x / 2)) {
-                    *su += (b - yy) / 1.8556;
-                    *sv += (r - yy) / 1.5748;
+    // per worker: the chroma sums of a pair of rows, and a row's normalised R, G, B and chroma
+    // terms (each step a plain loop over arrays, which the compiler runs four lanes at a time;
+    // the arithmetic and the order of the sums are those of one pixel after the other)
+    let bufs = || (vec![0f32; cw], vec![0f32; cw], [vec![0f32; w], vec![0f32; w], vec![0f32; w]], vec![0f32; w], vec![0f32; w]);
+    y.par_chunks_mut(w * 2).zip(u.par_chunks_mut(cw).zip(v.par_chunks_mut(cw))).enumerate().for_each_init(
+        bufs,
+        |(us, vs, rgb, tu, tv), (cy, (yr, (ur, vr)))| {
+            us.fill(0.0);
+            vs.fill(0.0);
+            let rows = yr.len() / w;
+            for (dy, out) in yr.chunks_exact_mut(w).enumerate() {
+                let row = cy * 2 + dy;
+                let src = rgba.get(row * w * 4..(row + 1) * w * 4).unwrap_or(&[]);
+                let px = src.as_chunks::<4>().0;
+                let [rs, gs, bs] = rgb;
+                // code value / 255, and black where the picture lacks data
+                let have = px.len().min(w);
+                for (((p, r), g), b) in px.iter().zip(rs.iter_mut()).zip(gs.iter_mut()).zip(bs.iter_mut()) {
+                    (*r, *g, *b) = (f32::from(p[0]) / 255.0, f32::from(p[1]) / 255.0, f32::from(p[2]) / 255.0);
+                }
+                for c in [&mut *rs, &mut *gs, &mut *bs] {
+                    c.get_mut(have..).into_iter().flatten().for_each(|v| *v = 0.0);
+                }
+                for (((((o, &r), &g), &b), cu), cv) in out.iter_mut().zip(rs.iter()).zip(gs.iter()).zip(bs.iter()).zip(tu.iter_mut()).zip(tv.iter_mut()) {
+                    let yy = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    *o = (16.0 + 219.0 * yy).round().clamp(1.0, 254.0) as u8;
+                    *cu = (b - yy) / 1.8556;
+                    *cv = (r - yy) / 1.5748;
+                }
+                // each chroma sample sums its pixels left to right, a row at a time
+                let ((pu, lu), (pv, lv)) = (tu.as_chunks::<2>(), tv.as_chunks::<2>());
+                for (((su, sv), a), b) in us.iter_mut().zip(vs.iter_mut()).zip(pu).zip(pv) {
+                    *su += a[0];
+                    *su += a[1];
+                    *sv += b[0];
+                    *sv += b[1];
+                }
+                // an odd width's last column
+                if let (Some(su), Some(sv), Some(a), Some(b)) = (us.get_mut(pu.len()), vs.get_mut(pv.len()), lu.first(), lv.first()) {
+                    *su += *a;
+                    *sv += *b;
                 }
             }
-        }
-        // samples summed per chroma sample: the rows of the pair, times one or two columns
-        let last_single = w % 2 == 1;
-        for (cx, (uo, vo)) in ur.iter_mut().zip(vr.iter_mut()).enumerate() {
-            let cols = if last_single && cx + 1 == cw { 1 } else { 2 };
-            let cnt = (rows * cols) as f32;
-            let (su, sv) = (us.get(cx).copied().unwrap_or(0.0), vs.get(cx).copied().unwrap_or(0.0));
-            *uo = (128.0 + 224.0 * su / cnt).round().clamp(1.0, 254.0) as u8;
-            *vo = (128.0 + 224.0 * sv / cnt).round().clamp(1.0, 254.0) as u8;
-        }
-    });
+            // samples summed per chroma sample: the rows of the pair, times one or two columns
+            let last_single = w % 2 == 1;
+            for (cx, (uo, vo)) in ur.iter_mut().zip(vr.iter_mut()).enumerate() {
+                let cols = if last_single && cx + 1 == cw { 1 } else { 2 };
+                let cnt = (rows * cols) as f32;
+                let (su, sv) = (us.get(cx).copied().unwrap_or(0.0), vs.get(cx).copied().unwrap_or(0.0));
+                *uo = (128.0 + 224.0 * su / cnt).round().clamp(1.0, 254.0) as u8;
+                *vo = (128.0 + 224.0 * sv / cnt).round().clamp(1.0, 254.0) as u8;
+            }
+        },
+    );
 }
 
 /// Limited-range 8-bit 4:2:0 from encoded R'G'B' floats with matrix (Kr, Kb).
