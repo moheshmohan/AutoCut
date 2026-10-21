@@ -166,6 +166,13 @@ pub struct Profile {
     pub created: u64,
     /// The maker confirmed they may clone this voice.
     pub consent: bool,
+    /// How often the voice's reference was replaced ([`promote`], [`rollback`]); 0 as made.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revision: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 impl Profile {
@@ -221,6 +228,16 @@ impl Profile {
         self.natural.as_ref().map(|n| n.model.as_str())
     }
 }
+
+/// The files of a natural voice's references next to its profile, by extension: the voice
+/// sample, its full-band copy, the Malayalam reference and the clip it had before a trim.
+pub const REFERENCE_FILES: [&str; 6] = ["wav", "full.wav", "indicf5.json", "indicf5.wav", "indicf5.untrimmed.wav", "indicf5.untrimmed.json"];
+/// The folder of a voice's earlier references (`<name>.versions`).
+const VERSIONS_EXT: &str = "versions";
+
+#[path = "clone_versions.rs"]
+mod versioning;
+pub use versioning::{MAX_VERSIONS, NewReference, Part, Version, promote, rollback, sample_from, versions};
 
 /// `name` → a file-safe id part: lowercase ASCII letters, digits and dashes, at most 40.
 pub fn slug(name: &str) -> String {
@@ -294,9 +311,11 @@ pub fn delete(voices_dir: &Path, id: &str) -> Result<(), TtsError> {
     let path = profile_path(voices_dir, id)?;
     std::fs::remove_file(&path).map_err(|_| TtsError::UnknownVoice(id.to_string()))?;
     // the sample has the same stem; it may not exist (OpenVoice clones have none)
-    for ext in ["wav", "full.wav", "indicf5.json", "indicf5.wav", "indicf5.untrimmed.wav", "indicf5.untrimmed.json"] {
+    for ext in REFERENCE_FILES {
         let _ = std::fs::remove_file(path.with_extension(ext));
     }
+    // and the references it had before ([`promote`])
+    let _ = std::fs::remove_dir_all(path.with_extension(VERSIONS_EXT));
     Ok(())
 }
 
@@ -634,6 +653,7 @@ pub fn create(
         source: source.chars().take(500).collect(),
         created: now(),
         consent: true,
+        revision: 0,
     };
     save(&voices_dir(models_dir), &profile)?;
     Ok(profile)
@@ -792,6 +812,7 @@ fn save_natural(
         source: source.chars().take(500).collect(),
         created: now(),
         consent: true,
+        revision: 0,
     };
     profile.check()?;
     save(voices, &profile)?;
@@ -1277,6 +1298,35 @@ pub fn load_malayalam(id: &str, models_dir: &Path) -> Result<Box<dyn Voice>, Tts
     malayalam_voice::load(profile, models_dir)
 }
 
+/// A natural voice speaking English from `clip` (mono speech at `rate`) as its isolated
+/// reference, without a saved profile: how the voice lab auditions a candidate reference
+/// (VoxCPM2's reference mode; give it the sample a promotion would make, [`sample_from`]).
+pub fn audition_voice(models_dir: &Path, model: &str, clip: &[f32], rate: u32, cfg: f32, steps: usize) -> Result<Box<dyn Voice>, TtsError> {
+    if catalog::voxcpm(model).is_none() || model == "voxcpm-1.5" {
+        return Err(TtsError::Invalid(format!("`{model}`: references are auditioned with VoxCPM2 (voxcpm-2)")));
+    }
+    if rate == 0 || clip.iter().any(|v| !v.is_finite()) || (clip.len() as f64) < MIN_SPEECH_SECONDS * f64::from(rate) {
+        return Err(TtsError::Invalid("the reference to audition is empty or damaged".into()));
+    }
+    if !(cfg.is_finite() && (1.0..=5.0).contains(&cfg)) || !(2..=50).contains(&steps) {
+        return Err(TtsError::Invalid("guidance must be 1–5 and steps 2–50".into()));
+    }
+    natural::from_clip(models_dir, model, clip, rate, cfg, steps)
+}
+
+/// The cloned voice speaking Malayalam (IndicF5) from `clip` (mono at `rate`) and its exact
+/// words, without a saved reference: how the voice lab auditions a Malayalam reference.
+pub fn audition_malayalam(models_dir: &Path, clip: &[f32], rate: u32, transcript: &str, gender: Gender) -> Result<Box<dyn Voice>, TtsError> {
+    if rate == 0 || clip.iter().any(|v| !v.is_finite()) || (clip.len() as f64) < 2.0 * f64::from(rate) {
+        return Err(TtsError::Invalid("the reference to audition is empty or damaged".into()));
+    }
+    let words: String = transcript.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_TRANSCRIPT_CHARS).collect();
+    if !words.chars().any(char::is_alphanumeric) {
+        return Err(TtsError::Invalid("a Malayalam reference needs the clip's words".into()));
+    }
+    malayalam_voice::from_clip(models_dir, clip, rate, &words, gender)
+}
+
 /// How a cloned voice reads Malayalam ([`load_malayalam`] reads with [`Reading::default`], the
 /// measured best: the crate README's "Sentence starts"). Each utterance is generated after the
 /// reference clip, so how the clip ends and how each utterance begins decide whether its first
@@ -1495,6 +1545,18 @@ mod malayalam_voice {
         Ok(Box::new(load_with(profile, models_dir, Reading::default())?))
     }
 
+    /// A Malayalam voice from a clip and its words (the voice lab's audition), read as
+    /// [`Reading::default`].
+    pub(super) fn from_clip(models_dir: &Path, clip: &[f32], rate: u32, words: &str, gender: Gender) -> Result<Box<dyn Voice>, TtsError> {
+        let reading = Reading::default();
+        let m = model(models_dir)?;
+        let mut x = filmcraft_audio_dsp::resample::resample_sinc(clip, rate, f5::RATE);
+        let pause = tail(&x, f5::RATE, reading.tail_ms, reading.room_tone);
+        x.extend(pause);
+        let reference = Arc::new(m.reference(&x, &reference_words(words, reading.english_transcript)?)?);
+        Ok(Box::new(MalayalamVoice { gender, model: m, reference, reading }))
+    }
+
     pub(super) fn load_with(profile: Profile, models_dir: &Path, reading: Reading) -> Result<MalayalamVoice, TtsError> {
         reading.check()?;
         let r = cross_reference(models_dir, &profile.id)?
@@ -1702,6 +1764,10 @@ mod malayalam_voice {
     pub(super) fn load(_profile: Profile, _models_dir: &Path) -> Result<Box<dyn Voice>, TtsError> {
         Err(TtsError::Invalid("Malayalam voices (IndicF5) are not available in this build (built without the `indicf5` feature)".into()))
     }
+
+    pub(super) fn from_clip(_models_dir: &Path, _clip: &[f32], _rate: u32, _words: &str, _gender: Gender) -> Result<Box<dyn Voice>, TtsError> {
+        Err(TtsError::Invalid("Malayalam voices (IndicF5) are not available in this build (built without the `indicf5` feature)".into()))
+    }
 }
 
 /// The gender of a profile: the natural clone's estimate, else its base voice's.
@@ -1767,7 +1833,7 @@ mod natural {
     fn prompt(p: &Profile, n: &Natural, m: &VoxCpm, voices: &Path) -> Result<Arc<Prompt>, TtsError> {
         type Prompts = Vec<(String, Arc<Prompt>)>;
         static P: OnceLock<Mutex<Prompts>> = OnceLock::new();
-        let key = format!("{}|{}|{}|{:?}|{}", p.id, p.created, n.model, n.mode, n.denoise_db);
+        let key = format!("{}|{}|r{}|{}|{:?}|{}", p.id, p.created, p.revision, n.model, n.mode, n.denoise_db);
         let cache = P.get_or_init(Default::default);
         if let Some(found) = cache.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()) {
             return Ok(found);
@@ -1804,6 +1870,28 @@ mod natural {
         x.drain(..lat.min(x.len()));
         x.truncate(n);
         x
+    }
+
+    /// A natural voice speaking from `clip` as an isolated reference (VoxCPM2), no profile.
+    pub(super) fn from_clip(models_dir: &Path, model_id: &str, clip: &[f32], rate: u32, cfg: f32, steps: usize) -> Result<Box<dyn Voice>, TtsError> {
+        let pkg = catalog::voxcpm(model_id).ok_or_else(|| TtsError::Invalid(format!("unknown cloning model `{model_id}`")))?;
+        let m = model(models_dir, pkg)?;
+        let x = filmcraft_audio_dsp::resample::resample_sinc(clip, rate, m.encode_rate());
+        let prompt = Arc::new(m.prompt(&x, None)?);
+        let gender = estimate_gender(clip, rate).unwrap_or(Gender::Male);
+        let natural = Natural {
+            model: pkg.id.to_string(),
+            clip: String::new(),
+            transcript: String::new(),
+            mode: PromptMode::Reference,
+            cfg,
+            timesteps: steps,
+            denoise_db: 0.0,
+            from: 0.0,
+            to: clip.len() as f64 / f64::from(rate.max(1)),
+            gender: Some(gender),
+        };
+        Ok(Box::new(NaturalVoice { gender, natural, model: m, prompt }))
     }
 
     pub(super) fn load(profile: Profile, models_dir: &Path) -> Result<Box<dyn Voice>, TtsError> {
@@ -1972,6 +2060,10 @@ mod natural {
     pub(super) fn load(_profile: Profile, _models_dir: &Path) -> Result<Box<dyn Voice>, TtsError> {
         Err(TtsError::Invalid("natural cloned voices (VoxCPM) are not available in this build (built without the `voxcpm` feature)".into()))
     }
+
+    pub(super) fn from_clip(_models_dir: &Path, _model: &str, _clip: &[f32], _rate: u32, _cfg: f32, _steps: usize) -> Result<Box<dyn Voice>, TtsError> {
+        Err(TtsError::Invalid("natural cloned voices (VoxCPM) are not available in this build (built without the `voxcpm` feature)".into()))
+    }
 }
 
 #[cfg(test)]
@@ -1993,6 +2085,7 @@ pub(crate) mod tests {
             source: "IMG_3337.MOV".into(),
             created: 1,
             consent: true,
+            revision: 0,
         }
     }
 
@@ -2022,6 +2115,7 @@ pub(crate) mod tests {
             source: "IMG_3337.MOV".into(),
             created: 1,
             consent: true,
+            revision: 0,
         }
     }
 
