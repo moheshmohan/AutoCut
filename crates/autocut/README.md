@@ -257,6 +257,7 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    | `black` (`Executor::render`) | frames whose picture is black or nearly (92 % of the frame darker than 5 % luma, so the counter or a lower third over black still counts), sampled every 2 s, at each shot's first frame and at the first frame after it, outside dip-to-black transitions — errors |
    | `mix` (`file.exportMedia` to a temporary 32-bit float WAV, metered with `filmcraft-audio-dsp`'s BS.1770 `LoudnessMeter`) | integrated loudness outside −16…−14 LUFS (±0.5 LU) — warning; true peak above −1 dBTP — warning; above 0 dBTP or any sample at full scale — error (clipping, with the time of the first); the median short-term loudness (3 s windows wholly inside narration clips on A2 vs wholly between them; 400 ms windows when lines or pauses are too short) — the voice less than 4 dB louder: warning, not louder at all: error. Then per stem (`audio.analyzeMix`, `qa::mix_findings`), each a warning: the narration (A2) less than 12 LU above the music (A3) while it speaks (median), the Mix's limiter taking more than 2 dB off the peaks, more than 25 % of the mix's energy below 120 Hz (naming the stem that brings most of it), a narration clip whose source is clipped (flat tops). The analysis is `mix_analysis` in the report and its headline numbers are in `loudness` (`speechOverMusicLu`, `speechOverRestLu`, `limiterDb`, `lowShare`, `presenceShare`) |
    | `subject` (`AUTOCUT_ANALYSIS_MODEL`) | the middle frame of every shot, rendered and grounded with the analysis' prompt (`analyze::ground_prompt`) — a shot where the subject is not found: warning; without a reachable model the check is recorded as skipped (model unavailable) |
+   | `safe_zones` (`sequence.checkSafeZones`) | a caption, title or lower third reaching into the platform's interface (`Options::platform`; a vertical sequence without one: every platform at once, `vertical`) — warning, with the zone and how much of it is in there; a horizontal sequence without a platform: skipped |
 
    QA never edits the project and never fails the build: a check that cannot run (no frames
    from a bridge without the UI tools, an export that fails) is recorded as skipped.
@@ -606,12 +607,43 @@ opening's hook (a question, a direct address or a bold claim, said briefly). Wit
 36 openings are also rated 0..10 for how well they hook and get a short title (the script model,
 else the classifier). The best `count` that do not overlap each become a vertical sequence:
 `sequence.autoReframe` of its range (a little lead-in and tail from the silence around it) to
-`aspect`, the speaker followed by the subject tracker (`filmcraft_render::subject`, letterboxed
-where nobody is found); `transcript.createCaptions` (18 characters, one line) and
-`captions.setStyle` (76 px white with a 7 px outline, no box, low in the frame); a `title` card
-(`graphics.newText`); `file.exportMedia` into `export` with `burnCaptions`; `youtube.upload`
-(private unless `youtube.privacy`) with `uploadYoutube`. A step that fails for one short is noted
-in its `notes`; the others are still made.
+`aspect`, the speaker followed by the subject tracker (`filmcraft_render::subject`); where nobody
+is found — a whole clip, or a stretch of a second or more where the subject is lost — the
+`fallback`, `blur` by default: the whole picture fitted to the width over a blurred, dimmed,
+enlarged copy of itself (the showcase's portrait-shot look; the crop eases out to it and back in,
+cuts jump), `letterbox` for black bars; `transcript.createCaptions` (18 characters, one line) and
+`captions.setStyle` (76 px white with a 7 px outline, no box) just above the target `platform`'s
+bottom zone, shrunk until `sequence.checkSafeZones` finds none in its side zones; a `title` card
+(`graphics.newText`, bold paragraph text centred in a box at the top of the safe area);
+`file.exportMedia` into `export` with `burnCaptions`; `youtube.upload` (private unless
+`youtube.privacy`) with `uploadYoutube`. A step that fails for one short is noted in its `notes`;
+the others are still made.
+
+### Platform safe zones
+
+`platform` (`--platform` on `filmcraft-cli shorts`): `youtube` (the default), `reels`, `tiktok` or
+`vertical` (safe on all three). The zones are the parts of a 9:16 frame each platform's own
+interface covers, as shares of the frame, rounded outwards from the platforms' public guidance
+(sources in `crates/render/src/safe_zones.rs`):
+
+| platform | top | bottom | left | right | buttons |
+|---|---|---|---|---|---|
+| YouTube Shorts | 15 % | 35 % | 5 % | 18 % | |
+| Instagram Reels | 14 % | 35 % | 6 % | 6 % | |
+| TikTok | 13 % | 35 % | 12 % | 12 % | right 20 % from 40 % down |
+| all (`vertical`) | 15 % | 35 % | 12 % | 18 % | right 20 % from 40 % down |
+
+Each short reports `safeZones` (`{platform, ok, overlaps}`) and a note per caption or title still
+in a zone. The QA (`qa.rs`, check `safe_zones`) warns on the same, for `Options::platform` or, on
+a vertical sequence without one, for all of them. In the app, the monitors' wrench menu and View ▸
+Platform Safe Zones draw the zones over the picture (`view.safeZones`).
+
+Demo (`tests/blur_fill_demo.rs`, by hand): synthetic footage whose subject is gone for a stretch
+becomes a 1080×1920 short — followed, eased out to the blurred fill and back, captions and title
+inside YouTube Shorts' safe zone — with stills of each state and of the zones over the fill:
+`FILMCRAFT_DEMO_DIR=target/blur-fill-demo cargo test --release -p filmcraft-autocut --test
+blur_fill_demo -- --ignored --nocapture`; then `safe_zones_ui`'s ignored test screenshots it in
+the app under the zones (`FILMCRAFT_DEMO_PROJECT=<dir>/demo.fcproj FILMCRAFT_UI_SHOTS=<dir>`).
 
 The showcase reuses the tracker: a filled (portrait or 4:3) shot calls `clip.autoReframe` with
 `keepScale` (the push-in stays) seeded from the analysis' box, and keeps the tilt only where its
@@ -692,7 +724,8 @@ Caption styles: `add_captions` takes `style: tiktok | bold | clean | default` an
   or `--bridge` to edit in the running app). A hand-off exits 1 with the report on stdout.
   Showcases: `analyze` + `showcase --report`, or `showcase --album "<title>" --prompt "…"` from
   a Google Photos album in one command. Shorts: `filmcraft-cli shorts talk.mp4 --count 3
-  --export out/ [--upload-youtube]`.
+  --export out/ [--platform youtube|reels|tiktok|vertical] [--fallback blur|letterbox|center]
+  [--upload-youtube]`.
 - **MCP:** the `autocut_plan` (dry run) and `autocut_edit` tools, on both MCP backends
   (`filmcraft-cli mcp --demo` / `--bridge`). When a report has `needsSupervisor`, the calling
   agent plans that edit itself with the command tools — that is the supervision loop. Showcases:

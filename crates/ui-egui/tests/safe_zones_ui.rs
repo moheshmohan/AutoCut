@@ -30,6 +30,9 @@ impl Driver {
             .execute("sequence.autoReframe", json!({"fallback": "blur", "range": {"startSeconds": 0.0, "endSeconds": 3.0}, "analysisFps": 2, "wait": true}))
             .expect("reframed");
         assert!(r["reframe"]["sequence"].as_u64().is_some(), "{r}");
+        Self::with(session)
+    }
+    fn with(session: Session) -> Self {
         let (tx, rx) = channel();
         let app = FilmcraftApp::new(session).with_control(rx);
         let shots = std::env::var_os("FILMCRAFT_UI_SHOTS").map(std::path::PathBuf::from);
@@ -145,4 +148,29 @@ fn safe_zones_toggle_from_the_wrench_menu_the_view_menu_the_engine_and_ui_set() 
     let r = d.call("ui.set", json!({"program": {"safe_zones": "snapchat"}}));
     assert_eq!(r["ok"], false, "{r}");
     assert_eq!(d.view("program")["safe_zones"], Value::Null);
+}
+
+/// The demo short (`filmcraft-autocut`'s `blur_fill_demo` saves `demo.fcproj`) in the Program
+/// monitor in the middle of its blurred fill, under YouTube Shorts' and TikTok's zones:
+///
+/// ```text
+/// FILMCRAFT_DEMO_PROJECT=$PWD/target/blur-fill-demo/demo.fcproj FILMCRAFT_UI_SHOTS=$PWD/target/blur-fill-demo \
+///   cargo test -p filmcraft-ui-egui --test safe_zones_ui -- --ignored
+/// ```
+#[test]
+#[ignore = "needs the demo project: run it by hand"]
+fn the_demo_short_under_the_safe_zones() {
+    let Some(project) = std::env::var_os("FILMCRAFT_DEMO_PROJECT") else { return };
+    let mut session = Session::default();
+    session.execute("file.open", json!({"path": std::path::Path::new(&project).to_string_lossy()})).expect("the demo project");
+    let shorts: Vec<u64> = session.project.items.values().filter(|i| i.as_sequence().is_some() && i.name.contains("Short 1")).map(|i| i.id.0).collect();
+    let short = *shorts.first().unwrap_or_else(|| panic!("no short in {project:?}"));
+    session.execute("sequence.open", json!({"item": short})).unwrap();
+    let mut d = Driver::with(session);
+    d.exec("playhead.set", json!({"seconds": 4.9}));
+    for p in ["youtube", "tiktok"] {
+        d.exec("view.safeZones", json!({"platform": p}));
+        d.frames(4);
+        d.shot(&format!("demo-{p}"));
+    }
 }
