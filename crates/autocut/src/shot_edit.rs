@@ -10,15 +10,28 @@
 //! | `mute` | `true`: the shot carries no sound of its own (a robot talking after the narration ends sounds like a garbled voice-over) |
 //! | `volume` | its own sound this many dB above (or below: `-20`) the level the mix gives the shots' sound, −60 to +12 |
 //!
-//! An entry's shots keep their order. A shot with both ends has a fixed length on the timeline;
-//! the entry's other shots share what its words still need ([`crate::showcase`]'s windows), and
-//! the narration always fits: when fixed shots alone are too short for the words, the footage
-//! after the last one runs on, and the build says so.
+//! A **photo** shot (`"photo": true`, a still image item) has no window, speed or sound; instead:
+//!
+//! | photo field | what it does |
+//! |---|---|
+//! | `hold` | how long it is shown, seconds ([`MIN_HOLD`]..[`crate::showcase::PHOTO_REACH`]); without it, its share of the entry's time |
+//! | `move` | its slow pan and zoom (`clip.kenBurns`): `"in"` (from wide to its subject), `"out"`, `"pan"` (across it), `"none"`; without it, in and out in turn |
+//! | `fit` | `"fill"`: the frame filled, the move aimed at the subject; `"full"`: the whole photo over its blurred copy (a portrait photo's pillars); without it, whole when the crop would cut its subject |
+//! | `focus` | `[x, y]`: the point the move aims at instead of the analysis' box |
+//!
+//! An entry's shots keep their order. A shot with both ends has a fixed length on the timeline
+//! (so has a photo with a `hold`); the entry's other shots share what its words still need
+//! ([`crate::showcase`]'s windows), and the narration always fits: when fixed shots alone are too
+//! short for the words, the footage after the last one runs on, and the build says so.
 
+use filmcraft_engine::ken_burns::Move;
 use serde::{Deserialize, Serialize};
 
 use crate::AutoCutError;
-use crate::showcase::Shot;
+use crate::showcase::{PHOTO_REACH, Shot};
+
+/// Shortest a photo is held, seconds.
+pub const MIN_HOLD: f64 = 1.0;
 
 /// Slowest and fastest a shot plays.
 pub const MIN_SPEED: f64 = 0.25;
@@ -74,11 +87,15 @@ pub struct ShotEdit {
     pub mute: bool,
     /// Its own sound, dB from the mix's level for the shots.
     pub volume: Option<f64>,
+    /// A photo: no sound, no speed; its `hold` is its window (`from` 0, `to` the hold).
+    pub photo: bool,
+    /// A photo's move (none: in and out in turn).
+    pub motion: Option<Move>,
 }
 
 impl Default for ShotEdit {
     fn default() -> Self {
-        Self { from: None, to: None, speed: 1.0, fit: None, focus: None, mute: false, volume: None }
+        Self { from: None, to: None, speed: 1.0, fit: None, focus: None, mute: false, volume: None, photo: false, motion: None }
     }
 }
 
@@ -97,7 +114,13 @@ impl ShotEdit {
     /// known), at least [`MIN_WINDOW`] long and at most [`MAX_PLACED`] on the timeline; speed
     /// from [`MIN_SPEED`] to [`MAX_SPEED`]; `fit` `fill` or `full`; `focus` two numbers 0..1.
     pub fn of(shot: &Shot, entry: usize, k: usize) -> Result<Self, AutoCutError> {
+        if shot.photo {
+            return Self::of_photo(shot, entry, k);
+        }
         let at = format!("entry {entry}, shot {k}");
+        if shot.hold.is_some() || shot.motion.is_some() {
+            return Err(invalid(format!("{at}: `hold` and `move` are a photo's (\"photo\": true); a video shot takes `from`, `to` and `speed`")));
+        }
         let len = shot.clip_seconds;
         let known = len.is_finite() && len > 0.0;
         let time = |name: &str, v: Option<f64>| -> Result<Option<f64>, AutoCutError> {
@@ -154,7 +177,39 @@ impl ShotEdit {
             Some(v) => return Err(invalid(format!("{at}: `volume` is dB from {MIN_VOLUME} to +{MAX_VOLUME} (-20: much quieter), not {}", num(v)))),
         };
         let mute = shot.mute.unwrap_or(false);
-        Ok(Self { from, to, speed, fit, focus, mute, volume })
+        Ok(Self { from, to, speed, fit, focus, mute, volume, photo: false, motion: None })
+    }
+
+    /// A photo shot's controls: `hold` ([`MIN_HOLD`]..[`PHOTO_REACH`] seconds), `move`, `fit` and
+    /// `focus`; a window, a speed or a level of its own sound make no sense for a still.
+    fn of_photo(shot: &Shot, entry: usize, k: usize) -> Result<Self, AutoCutError> {
+        let at = format!("entry {entry}, shot {k} (a photo)");
+        if shot.from.is_some() || shot.to.is_some() || shot.speed.is_some() {
+            return Err(invalid(format!("{at}: a photo has no window or speed: give it a `hold` in seconds")));
+        }
+        let to = match shot.hold {
+            None => None,
+            Some(h) if h.is_finite() && (MIN_HOLD..=PHOTO_REACH).contains(&h) => Some(h),
+            Some(h) => return Err(invalid(format!("{at}: `hold` is seconds, {MIN_HOLD} to {PHOTO_REACH}, not {}", num(h)))),
+        };
+        let motion = match shot.motion.as_deref() {
+            None => None,
+            Some(m) => Some(
+                Move::parse(m).ok_or_else(|| invalid(format!("{at}: `move` is in, out, pan or none, not \"{}\"", m.chars().take(40).collect::<String>())))?,
+            ),
+        };
+        let fit = match shot.fit.as_deref() {
+            None => None,
+            Some(f) => {
+                Some(Fit::parse(f).ok_or_else(|| invalid(format!("{at}: `fit` is \"fill\" or \"full\", not \"{}\"", f.chars().take(40).collect::<String>())))?)
+            }
+        };
+        let focus = match shot.focus {
+            None => None,
+            Some(p) if p.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) => Some(p),
+            Some(p) => return Err(invalid(format!("{at}: `focus` is [x, y], each 0..1 of the photo, not [{}, {}]", num(p[0]), num(p[1])))),
+        };
+        Ok(Self { from: to.map(|_| 0.0), to, speed: 1.0, fit, focus, mute: true, volume: None, photo: true, motion })
     }
 
     /// Both ends given: the shot's length on the timeline is fixed.
@@ -240,6 +295,43 @@ mod tests {
         ] {
             let err = std::panic::catch_unwind(|| ShotEdit::of(&bad, 3, 2)).expect("no panic").expect_err(says).to_string();
             assert!(err.contains("entry 3, shot 2") && err.contains(says), "{says}: {err}");
+        }
+    }
+
+    #[test]
+    fn photo_holds_and_moves_are_checked() {
+        let photo = |hold: Option<f64>, motion: Option<&str>| Shot {
+            item: 7,
+            name: "IMG_1.HEIC".into(),
+            clip_seconds: PHOTO_REACH,
+            photo: true,
+            hold,
+            motion: motion.map(str::to_string),
+            ..Shot::default()
+        };
+        let e = ShotEdit::of(&photo(Some(4.0), Some("OUT")), 1, 1).unwrap();
+        assert_eq!((e.fixed(), e.photo, e.motion, e.sound(), e.speed), (Some((0.0, 4.0)), true, Some(Move::Out), false, 1.0));
+        let e = ShotEdit::of(&photo(None, None), 1, 1).unwrap();
+        assert_eq!((e.fixed(), e.timed(), e.motion, e.mute), (None, false, None, true), "no hold: its share of the entry");
+        let full = ShotEdit::of(&Shot { fit: Some("full".into()), focus: Some([0.2, 0.3]), ..photo(Some(PHOTO_REACH), Some("pan")) }, 1, 1).unwrap();
+        assert_eq!((full.fit, full.focus, full.motion), (Some(Fit::Full), Some([0.2, 0.3]), Some(Move::Pan)));
+        for (bad, says) in [
+            (photo(Some(0.0), None), "hold"),
+            (photo(Some(-3.0), None), "hold"),
+            (photo(Some(f64::NAN), None), "not a number"),
+            (photo(Some(f64::INFINITY), None), "hold"),
+            (photo(Some(PHOTO_REACH + 1.0), None), "hold"),
+            (photo(None, Some("zoom")), "move"),
+            (Shot { from: Some(1.0), ..photo(None, None) }, "no window"),
+            (Shot { speed: Some(2.0), ..photo(None, None) }, "no window"),
+            (Shot { fit: Some("stretch".into()), ..photo(None, None) }, "fit"),
+            (Shot { focus: Some([2.0, 0.5]), ..photo(None, None) }, "focus"),
+            // a photo's controls on a video
+            (Shot { photo: false, ..photo(Some(3.0), None) }, "photo"),
+            (Shot { photo: false, ..photo(None, Some("in")) }, "photo"),
+        ] {
+            let err = std::panic::catch_unwind(|| ShotEdit::of(&bad, 2, 1)).expect("no panic").expect_err(says).to_string();
+            assert!(err.contains("entry 2, shot 1") && err.contains(says), "{says}: {err}");
         }
     }
 

@@ -89,6 +89,12 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    frame was read and every model call answered is kept; entries are written atomically, capped
    (20 000, the oldest go first), and a damaged one is ignored.
 
+   **Photos** (still image items: JPEG, HEIC/HEIF, PNG…) are analysed too, from their one
+   picture: located once (at 640 px), read once (1280 px), described as a photo ("This photo
+   shows a robot"); the report marks them `photo: true` and keeps the subject's box where it is
+   largest as `subject` (`[x, y, w, h]`, 0..1; kept for clips too), and a photo's EXIF position as
+   `gps` when the file has one. They are cached like clips (one frame, no screening, in the key).
+
    Last, an **identity pass** (`identity.rs`) tells which clips show the same robot, since labels
    alone miscount: one robot filmed on three days of an expo gets three different generic labels.
    Candidate pairs — the same kind, filmed within 14 days, not already sharing a specific label —
@@ -105,8 +111,10 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    different identities never merge; in reports without identities, by label as before — the
    same specific name within a week (an expo's other days), or the same day with a generic
    label of the same kind. An entry shows up to three shots, the clips where the robot is
-   longest in view (length × coverage), in time order, under the most specific label among its
-   clips (a name read on the robot first), dated when it was first filmed. The local LLM
+   longest in view (length × coverage), in time order — its videos, or its photos when it was
+   only photographed ([Photos](#photos-a-slow-pan-and-zoom-towards-the-robot)) — under the most
+   specific label among its clips (a name read on the robot first), dated when it was first
+   filmed. The local LLM
    (`AUTOCUT_SCRIPT_MODEL`, falling back to `AUTOCUT_LLM_MODEL`) writes the voice-over from the
    facts, a few entries per request (template lines fill anything it does not deliver, and a
    copied item heading is dropped so it is not read out). The build runs ordinary engine
@@ -329,6 +337,43 @@ never replaced.
            {"item": 2422, "clip_seconds": 106.4, "best": 97.1, "fit": "full", "mute": true}]}
 ```
 
+### Photos: a slow pan and zoom towards the robot
+
+A robot that was only photographed is an entry of its photos (a robot with video is shown in its
+video; an entry may still mix them). A photo shot is the plan's shot with `"photo": true`:
+
+```json
+{"item": 4977, "name": "IMG_4512.HEIC", "clip_seconds": 20.0, "best": 0.0, "photo": true,
+ "subject": [0.55, 0.2, 0.25, 0.5], "hold": 4.0, "move": "in"}
+```
+
+| photo field | what it does |
+|---|---|
+| `"hold": 4.0` | how long it is shown, 1–20 s; without it, its share of the entry's time. When its words need longer, it is held longer (noted), never a second window of it, which would start its move again; it is never slowed, and has no sound |
+| `"move": "in"` | `in` (from wide to the robot), `out`, `pan` (across it at a steady zoom), `none`; without it, the other way from the photo before (in after out, out after in; a pan crosses back from the last pan) |
+| `"fit": "full"` / `"fill"` | `full`: whole over its blurred copy (the pillars of a portrait clip), the picture breathing at most 5 % towards the robot while the copy pushes in; `fill`: the frame filled, the move aimed at the robot. Without it: a landscape photo fills the frame (the crop keeps three quarters of it or more, as for a 4:3 clip); a portrait or square one fills it when its robot's box fits in what a crop shows (with a margin), else it is whole — a portrait photo of a tall robot, or with no robot found, keeps the whole picture |
+| `"focus": [0.6, 0.3]` | the point to aim at instead of the analysis' box (0..1 of the photo) |
+| `"subject"` | the analysis' box `[x, y, w, h]` the move ends on (absent: from the largest moment's centre and size, else the middle) |
+
+The move is the engine's `clip.kenBurns` (Clip ▸ Video Options ▸ Ken Burns, for any still): Motion
+Position and Scale keyframed from the clip's first frame to its last, eased out of the first and
+into the last. The wide end fills the frame centred halfway between the photo's middle and the
+robot; the close end is centred on the robot (as far as the photo still covers the frame: no edge
+ever shows) and as close as the robot's box filling three quarters of the frame asks, but never
+more than 2.5 % closer a second of the hold (at least 4 %, at most 25 %): slow and subtle, and
+further on a long hold. A pan travels 2 % of the photo a second along its longest room. The
+montage of the cold open takes an entry's video before its photos; photos are left out of
+`--match-color`. The privacy pass looks at a photo once (a face found there is blurred for its
+whole hold), the contact sheet (`media.contactSheet`, `filmcraft-cli sheet`) shows it as one tile,
+and QA does not take a photo's silence for a dip in the shots' sound. The output's `layout` marks
+photo shots `photo: true` with their `move`.
+
+Notes (`showcase-plan`, [`plan_patch`](src/plan_patch.rs)) add photo shots and entries of photos:
+`{"item": 4977, "hold": 4, "move": "in"}` (an item the project holds as a still is a photo;
+`"photo": true` says so without a project) — the plan's analysed shot of it with these over it,
+else one aimed at its middle; `from`, `to`, `speed` and `plain` are refused for a photo, and
+`hold`/`move` for a video.
+
 ### The look: theme, timeline, chips, scenes, transitions, finishing
 
 All optional ([`look.rs`](src/look.rs)): a plan without these fields, and a command without these
@@ -487,7 +532,8 @@ twice gives the same mix. `--save` (or `--save-as`) keeps it; then export the se
 
 ### Album as the seed
 
-Put the clips for a video into one album in Google Photos — and add to it whenever you film
+Put the clips for a video into one album in Google Photos (and the photos of robots you never
+filmed) — and add to it whenever you film
 more — then make the whole video from it with one command:
 
 ```sh
@@ -510,9 +556,11 @@ In order:
 3. **The album, picked whole.** Google's picker opens in the browser, and the local screen agent
    ([crates/screenagent](../screenagent/README.md)) searches the picker for exactly that title —
    Return on an album's exact title shows the album's items — selects that whole result, then
-   presses Done. Its videos are downloaded into the cache (an item picked
-   before is not downloaded again). Photos are skipped — a showcase is built from video clips, so
-   there is no `--with-photos` — and `--since` skips items created before it.
+   presses Done. Its videos and photos are downloaded into the cache (photos as Google's
+   full-resolution originals; an item picked before is not downloaded again): a robot that was
+   only photographed is shown in its photos ([Photos](#photos-a-slow-pan-and-zoom-towards-the-robot)).
+   `--videos-only` (`photos: false` for the jobs and `showcase_analyze`) leaves the photos out,
+   and `--since` skips items created before it.
 4. **Imported once.** `file.import {reuse: true}`: a file the project already holds is reused,
    never imported twice — run the command again after adding clips to the album and only the new
    ones come in.
@@ -547,7 +595,7 @@ review happens where the footage is:
 
 | command | job |
 |---|---|
-| `autocut.analyze {subject \| prompt, items? \| album?, since?, frames?, compare?}` | the analysis above; `since` ("2020", "2020-06", "2020-06-15") keeps the clips filmed on or after it (undated ones are left out); `album` takes the clips from that Google Photos album (picked, imported once, only those analysed: [Album as the seed](#album-as-the-seed)). The report is kept in the session |
+| `autocut.analyze {subject \| prompt, items? \| album?, photos?, since?, frames?, compare?}` | the analysis above (photos too, unless `photos: false`); `since` ("2020", "2020-06", "2020-06-15") keeps the clips filmed on or after it (undated ones are left out); `album` takes the clips from that Google Photos album (picked, imported once, only those analysed: [Album as the seed](#album-as-the-seed)). The report is kept in the session |
 | `autocut.showcasePlan {subject?, title?, subtitle?, voice?, mood?, minCoverage?, entries?}` | group the kept report's clips (or take reviewed `entries`) and write the voice-over; the plan is kept |
 | `autocut.makeShowcase {subject \| prompt, since?, items? \| album?, title?, voice?, mood?}` | both in one job (Sequence ▸ Make a Showcase…, the `showcase` intent) |
 | `autocut.showcaseBuild {plan?, export?, upload?, uploadAlbum?, qa?}` | build the plan (the kept one, or `plan`); with `export`, the YouTube export, `<out>.chapters.txt` and the QA report beside it; with `upload`, a Google Photos upload job for the export (into `uploadAlbum` too) |
@@ -773,7 +821,15 @@ job; the prompt starting the job with no model and no open sequence; cancel; bad
 the seed (`tests/showcase_album.rs`, `album::FixedAlbum` for the picker, real ProRes clips from our
 encoder): only the album's clips are analysed, a clip already in the project is reused and a
 second run imports nothing, a prompt names the subject (rules or classifier, a date reaching the
-picker), an unreadable prompt picks nothing, an empty album and a host without albums say why. Showcase QA
+picker), an unreadable prompt picks nothing, an empty album and a host without albums say why, an
+album's photo is kept, analysed once and built as a photo (and left out with `photos: false`).
+Photos (`tests/showcase_photos.rs`, photos drawn in the test): a robot only photographed is an
+entry of its photos; the planned hold is the still clip's length; Motion position and scale are
+eased from the first frame to the last and end with the robot whole in frame; consecutive photos
+move the other way; a portrait photo whose robot a crop would cut is whole over its blurred copy;
+an entry mixes video and a photo; a visitor's face in a photo is hidden by one static mask; QA
+finds no dip or black around the photos; hostile holds and moves are refused before anything is
+built. Showcase QA
 (`tests/showcase_qa.rs`): a deliberately broken sequence on the demo media (a half-second gap,
 a black slate, a tone pushed 30 dB over full scale between two narration lines) gets each
 finding (the gap, the hole on every track, black in the gap and on the slate, clipping, the

@@ -2081,6 +2081,7 @@ pub(crate) const CLIP_MENU: &[&[(&str, &str)]] = &[
         ("Scale to Frame Size", "clip.scaleToFrameSize"),
         ("Fit to frame", "clip.fitToFrame"),
         ("Fill frame", "clip.fillFrame"),
+        ("Ken Burns", "clip.kenBurns"),
     ],
     &[("Reveal in Project", "clip.revealInProject"), ("Join Through Edits", "sequence.joinThroughEdits")],
     &[("Template Slot", "template.markSlot")],

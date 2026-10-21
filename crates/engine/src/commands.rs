@@ -3551,6 +3551,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::recipes::commands());
     v.extend(crate::media_frame::commands());
     v.extend(crate::contact_sheet::commands());
+    v.extend(crate::ken_burns::commands());
     v.extend(crate::media_date::commands());
     v.extend(crate::graphics_counter::commands());
     v.extend(crate::keyboard::commands());

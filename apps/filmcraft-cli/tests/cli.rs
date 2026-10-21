@@ -185,13 +185,15 @@ fn showcase_from_an_album_checks_before_it_picks() {
         // what the video is of
         vec!["showcase", "--album", "Robots"],
         vec!["showcase", "--album", "Robots", "--prompt", " "],
-        vec!["showcase", "--album", "Robots", "--prompt", "a video of every robot", "--with-photos"],
+        // the photos are kept (--with-photos) or left out (--videos-only): not both
+        vec!["showcase", "--album", "Robots", "--prompt", "a video of every robot", "--with-photos", "--videos-only"],
         vec!["showcase", "--album", "Robots", "--subject", "robot", "--since", "last year"],
         vec!["showcase", "--album", "Robots", "--subject", "robot", "--frames", "many"],
         vec!["showcase", "--album", "Robots", "--subject", "robot", "--upload-album", "Showcases"],
         vec!["showcase", "--album", "Robots", "--subject", "robot", "--upload"],
         // a report already says what it found
         vec!["showcase", "--report", &report, "--prompt", "a video of every robot"],
+        vec!["showcase", "--report", &report, "--videos-only"],
         vec!["showcase", "--report", &report, "--export", &out, "--upload-album", "Showcases"],
     ] {
         let o = run(&args);

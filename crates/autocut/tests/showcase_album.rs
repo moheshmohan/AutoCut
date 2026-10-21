@@ -10,6 +10,7 @@ use std::sync::Arc;
 use filmcraft_autocut::album::{AlbumPick, FixedAlbum};
 use filmcraft_autocut::host::{Models, ShowcaseHost};
 use filmcraft_autocut::llm::FixedModel;
+use filmcraft_autocut::showcase;
 use filmcraft_engine::Session;
 use filmcraft_engine::project::{ItemKind, Label, MediaClip, MediaRef, Project, SequenceSettings};
 use filmcraft_media::generators::GeneratorSource;
@@ -108,7 +109,7 @@ fn only_the_album_is_analysed_and_nothing_is_imported_twice() {
     let items: Vec<u64> = seed["items"].as_array().unwrap().iter().filter_map(Value::as_u64).collect();
     assert_eq!(items.first(), Some(&had), "the clip already in the project is reused: {seed}");
     assert_eq!(media_count(&s), before + 1, "only the new clip was imported");
-    assert_eq!(album.asked(), vec![AlbumPick { title: "Robot showcase".into(), videos_only: true, since: None }]);
+    assert_eq!(album.asked(), vec![AlbumPick { title: "Robot showcase".into(), videos_only: false, since: None }], "photos are kept");
     let report = s.execute("autocut.showcaseInspect", json!({"report": true})).unwrap()["report"].clone();
     let mut want = items.clone();
     want.sort_unstable();
@@ -163,6 +164,55 @@ fn a_prompt_names_the_subject_before_anything_is_picked() {
     let e = s.execute("autocut.analyze", json!({"prompt": "do something nice", "album": "Trips", "wait": true})).unwrap_err().to_string();
     assert!(e.contains("could not tell what the showcase is of"), "{e}");
     assert!(album.asked().is_empty(), "nothing was picked");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A photo in the album (drawn here, dated by its picker sidecar): a robot box on a dark ground.
+fn photo(path: &Path, created: &str) -> String {
+    let img = image::RgbaImage::from_fn(300, 400, |x, y| {
+        if (100..200).contains(&x) && (80..300).contains(&y) { image::Rgba([40, 200, 80, 255]) } else { image::Rgba([20, 30, 60, 255]) }
+    });
+    img.save(path).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    std::fs::write(format!("{path}.json"), json!({"created": created}).to_string()).unwrap();
+    path
+}
+
+#[test]
+fn the_albums_photos_are_kept_analysed_once_and_planned_as_photos() {
+    let dir = tmp_dir("photos");
+    let mut paths = album_clips(&dir);
+    paths.push(photo(&dir.join("IMG_0001.png"), "2021-02-03T10:00:00Z"));
+    let album = Arc::new(FixedAlbum::new(paths.clone()));
+    let mut s = session(album.clone(), Models::scripted());
+    let r = s.execute("autocut.makeShowcase", json!({"subject": "robot", "album": "Robot showcase", "title": "Robots", "voice": "", "wait": true})).unwrap();
+    let out = &r["showcase"];
+    assert!(!album.asked()[0].videos_only, "photos are kept");
+    assert_eq!(out["summary"]["clips"].as_u64(), Some(3), "two clips and a photo: {out}");
+    let report = s.execute("autocut.showcaseInspect", json!({"report": true})).unwrap()["report"].clone();
+    let photos: Vec<&Value> = report["clips"].as_array().unwrap().iter().filter(|c| c["photo"] == json!(true)).collect();
+    assert_eq!(photos.len(), 1, "{report}");
+    let p = photos[0];
+    assert_eq!(p["frames"].as_array().map(Vec::len), Some(1), "a photo is looked at once: {p}");
+    assert!(p["subject"].as_array().is_some_and(|b| b.len() == 4), "its robot's box is kept: {p}");
+    assert_eq!(p["created"], "2021-02-03T10:00:00Z", "dated by its sidecar");
+    // the robot only photographed is an entry of its photo, in time order between the clips
+    let entries = out["plan"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3, "{out}");
+    let shot = &entries[1]["shots"][0];
+    assert_eq!((shot["photo"].as_bool(), shot["clip_seconds"].as_f64()), (Some(true), Some(showcase::PHOTO_REACH)), "{shot}");
+    // and it builds: the photo held still-but-moving, silent, with the clips around it
+    let built = s.execute("autocut.showcaseBuild", json!({"wait": true})).unwrap();
+    let layout = built["showcase"]["built"]["layout"].as_array().cloned().unwrap_or_default();
+    assert_eq!(layout.len(), 3, "{built}");
+    let shots: Vec<&Value> = layout.iter().flat_map(|e| e["shots"].as_array().into_iter().flatten()).collect();
+    assert!(shots.iter().any(|s| s["photo"] == json!(true) && s.get("sound").is_none() && s["move"].is_string()), "{shots:?}");
+    // videos only: the photo is left out of the pick and the analysis
+    let album = Arc::new(FixedAlbum::new(paths));
+    let mut s = session(album.clone(), Models::scripted());
+    let r = s.execute("autocut.analyze", json!({"subject": "robot", "album": "Robot showcase", "photos": false, "wait": true})).unwrap();
+    assert!(album.asked()[0].videos_only, "videos only");
+    assert_eq!(r["showcase"]["summary"]["clips"].as_u64(), Some(2), "{r}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -100,7 +100,7 @@ fn base() -> Value {
 
 #[test]
 fn entries_change_split_go_and_come_in_time_order() {
-    let clips: Clips = [(9, ClipInfo { name: "new.mov".into(), seconds: 30.0 })].into();
+    let clips: Clips = [(9, ClipInfo { name: "new.mov".into(), seconds: 30.0, still: false })].into();
     let patch = json!({
         "timezone": "+04:00",
         "entries": {
@@ -255,10 +255,66 @@ fn another_language_needs_every_spoken_line() {
 }
 
 #[test]
+fn notes_add_photo_shots_and_entries_of_photos() {
+    // item 20: a photo the project holds (a still); 21: one the plan analysed already
+    let t = 254_016_000_000i64;
+    let clips = clips_from_inspect(&json!({"root": {"children": [
+        {"item": 20, "name": "IMG_4512.HEIC", "type": "Still Image", "duration": 5 * t},
+        {"item": 9, "name": "new.mov", "type": "Movie", "duration": 30 * t}
+    ]}}));
+    assert_eq!(clips.get(&20).map(|c| c.still), Some(true));
+    let mut plan = base();
+    plan["entries"][2]["shots"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"item": 21, "name": "dog.jpg", "clip_seconds": 20.0, "best": 0.0, "seen": [], "unseen": [], "largest": null, "photo": true, "subject": [0.1, 0.2, 0.3, 0.4]}));
+    let patch = json!({
+        "entries": {
+            // the arm: its video, then a photo of it held 4 s moving in
+            "Arm": {"shots": [{"item": 2}, {"item": 20, "hold": 4.0, "move": "in"}]},
+            // the dog's analysed photo: a pan across it, held 3 s
+            "Dog": {"shotEdits": {"21": {"hold": 3.0, "move": "pan"}}}
+        },
+        // a robot only photographed
+        "add": [{"label": "Toy robot", "unix": 250, "shots": [{"item": 20, "photo": true, "fit": "full"}], "line": "A toy."}]
+    });
+    let p = apply(&plan, &[patch], &clips).unwrap();
+    let e = p.plan["entries"].as_array().unwrap();
+    let labels: Vec<&str> = e.iter().map(|e| e["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, ["Hall", "Arm", "Toy robot", "Dog"]);
+    let arm = e[1]["shots"].as_array().unwrap();
+    assert_eq!(arm[0], shot(2, 3.0), "its video as analysed");
+    assert_eq!(
+        arm[1],
+        json!({"item": 20, "name": "IMG_4512.HEIC", "clip_seconds": crate::showcase::PHOTO_REACH, "best": 0.0, "seen": [], "unseen": [], "largest": null, "photo": true, "hold": 4.0, "move": "in"})
+    );
+    assert_eq!(e[2]["shots"][0]["fit"], "full");
+    assert_eq!(e[2]["shots"][0]["photo"], true);
+    let dog = &e[3]["shots"][1];
+    assert_eq!((dog["hold"].as_f64(), dog["move"].as_str(), dog["subject"].clone()), (Some(3.0), Some("pan"), json!([0.1, 0.2, 0.3, 0.4])), "{dog}");
+    // the plan as patched reads back into entries, and the photo controls check out
+    let entries: Vec<Entry> = serde_json::from_value(p.plan["entries"].clone()).unwrap();
+    let edits = crate::shot_edit::check(&entries).unwrap();
+    assert_eq!(edits[1][1].fixed(), Some((0.0, 4.0)));
+    // a photo has no window; a video is not a photo
+    for (spec, says) in [
+        (json!({"item": 20, "from": 1.0}), "no `from`"),
+        (json!({"item": 20, "photo": true, "plain": true}), "no `plain`"),
+        (json!({"item": 9, "photo": true}), "a video"),
+    ] {
+        let err = apply(&plan, &[json!({"entries": {"Arm": {"shots": [spec]}}})], &clips).unwrap_err().to_string();
+        assert!(err.contains(says), "{says}: {err}");
+    }
+    // without the project, a photo said to be one is taken as one
+    let p = apply(&plan, &[json!({"entries": {"Arm": {"shots": [{"item": 77, "photo": true, "name": "x.jpg"}]}}})], &Clips::new()).unwrap();
+    assert_eq!(p.plan["entries"][1]["shots"][0]["clip_seconds"], json!(crate::showcase::PHOTO_REACH));
+}
+
+#[test]
 fn project_clips_and_the_outro_logo() {
     let inv = json!({"bins": [{"items": [{"item": 5, "name": "a.mov", "duration": 254_016_000_000i64 * 3}, {"item": 6, "duration": -1}]}], "item": 7});
     let c = clips_from_inspect(&inv);
-    assert_eq!(c.get(&5), Some(&ClipInfo { name: "a.mov".into(), seconds: 3.0 }));
+    assert_eq!(c.get(&5), Some(&ClipInfo { name: "a.mov".into(), seconds: 3.0, still: false }));
     assert_eq!(c.len(), 1);
     // nesting deeper than the walk goes is left alone, not a stack overflow
     let mut deep = json!({"item": 1, "duration": 1});

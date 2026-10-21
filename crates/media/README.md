@@ -3,6 +3,19 @@
 Media sources, still-image and image-sequence import, generated media, audio streams, and decoded
 frame caching for FilmCraft.
 
+## Photos
+
+- A JPEG, PNG, WebP or TIFF is turned upright by its EXIF `Orientation` as it is decoded (a
+  portrait phone photo is stored sideways with a tag saying so); its media size is the upright one.
+- Decoding is bounded: the `image` decoders may allocate at most `MAX_DECODE_BYTES` (512 MiB) for a
+  picture and accept sides up to 65 535, so a header claiming more is refused before anything is
+  allocated; a picture larger than `MAX_STILL_SIDE` (8192 on its long side — a 48-megapixel phone
+  photo, 8064 × 6048, stays whole) is scaled down to it, since a still is held whole in memory.
+- `exif` reads, clean-room from the TIFF 6.0 structure EXIF is (CIPA DC-008), the orientation,
+  `DateTimeOriginal` with its `OffsetTimeOriginal`, and the GPS position; every offset is checked
+  and each directory read once. HEIF / HEIC photos are decoded by `filmcraft-codecs` (`heif`);
+  their extensions are importable here but never image sequences.
+
 ## Image-sequence filenames
 
 `sequence::Numbered` identifies the last run of 1–18 ASCII frame-number digits in a filename's

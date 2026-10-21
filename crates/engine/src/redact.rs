@@ -545,7 +545,10 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
             };
             let Some((w, h)) = filmcraft_render::source_size(&s.project, it.item).filter(|(w, h)| *w > 0 && *h > 0) else { continue };
             let n = (it.duration.0 / fd.0).max(1);
-            let times = grid_times(it, fd, step, n);
+            // a photo is one picture however long it is held: looked at once, and what is found
+            // there is hidden for the whole clip (seen once is seen: there is no second look)
+            let still = s.project.resolve_media(it.item).is_some_and(|(_, m, _)| m.info.kind == filmcraft_media::MediaKind::Still);
+            let times = if still { vec![it.source_time_at(it.start)] } else { grid_times(it, fd, step, n) };
             total = total.saturating_add(times.len());
             if total > MAX_FRAMES {
                 return Err(EngineError::Other(format!("too many frames to analyse (more than {MAX_FRAMES}); lower analysisFps or redact fewer clips")));
@@ -568,6 +571,7 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
             let keep = KeepParams {
                 min_face_height: (o.keep.min_face_height / mag_h).clamp(0.0, 1.0),
                 min_plate_width: (o.keep.min_plate_width / mag_w).clamp(0.0, 1.0),
+                min_hits: if still { 1 } else { o.keep.min_hits },
                 ..o.keep
             };
             // the smallest face to hide is at least 16 px where the detector looks (in steps, so

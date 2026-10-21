@@ -109,7 +109,7 @@ SUBCOMMANDS
                                 media info as JSON, with MXF / Ogg / BWF details; with
                                 --image-sequence <media> is the first numbered still of a sequence
   showcase --album '<Google Photos album>' --prompt '<the video to make>' | --subject S
-         [--since YYYY[-MM[-DD]]] [--frames N] [--screen N] [--compare N] [--report-out r.json] [--fresh]
+         [--since YYYY[-MM[-DD]]] [--videos-only] [--frames N] [--screen N] [--compare N] [--report-out r.json] [--fresh]
          [any option of `showcase --report` below] [--project p.fcproj --save]
                                 the whole video from one Google Photos album — the seed you fill
                                 in Google Photos — in one command: the local screen agent opens
@@ -117,7 +117,8 @@ SUBCOMMANDS
                                 all of it (Google lets apps read only albums they made, so the
                                 picker is the way in: `photos auth` once, `ollama pull
                                 qwen2.5vl:7b`, Screen Recording and Accessibility for this
-                                terminal), its videos are downloaded (cached) and imported — a
+                                terminal), its videos and photos are downloaded (cached; photos
+                                as Google's full-resolution originals) and imported — a
                                 file the project already holds is reused, not imported twice —
                                 the subject (and a date and a title, when it names them) is read
                                 from --prompt (built-in rules, else AUTOCUT_LLM_MODEL), only the
@@ -125,8 +126,10 @@ SUBCOMMANDS
                                 report for a later `showcase --report`), and the show is built,
                                 checked, exported and uploaded exactly as with --report (the
                                 title: --title, the prompt's, else \"Every <Subject> I've
-                                Filmed\"). The album's photos are skipped (not downloaded): a
-                                showcase is built from video clips. --since leaves out items
+                                Filmed\"). A robot that was only photographed is shown in its
+                                photos, each held with a slow pan and zoom towards it (a robot
+                                with video is shown in its video); --videos-only leaves the
+                                album's photos out (not downloaded). --since leaves out items
                                 created and clips filmed before it. Runs as the
                                 `autocut.analyze` job (`album`), so --bridge makes it in the
                                 running app. E.g. showcase --album \"Robot showcase\" --prompt
@@ -1200,7 +1203,7 @@ fn showcase_source(a: &Args) -> (ShowcaseSource, Option<String>) {
             usage("showcase --report analysis.json | --album '<Google Photos album>' --prompt '<the video>' [--title T] [--voice clone:name] [--plan] …")
         }
         (Some(r), None) => {
-            for k in ["--prompt", "--subject", "--since", "--frames", "--screen", "--compare", "--report-out", "--with-photos", "--fresh"] {
+            for k in ["--prompt", "--subject", "--since", "--frames", "--screen", "--compare", "--report-out", "--with-photos", "--videos-only", "--fresh"] {
                 if a.flag(k) {
                     usage(format!("showcase: {k} goes with --album (a --report already says what it found)"));
                 }
@@ -1221,10 +1224,14 @@ fn showcase_source(a: &Args) -> (ShowcaseSource, Option<String>) {
             if subject.is_none() && prompt.is_none() {
                 usage("showcase --album: say what the video is of: --prompt 'a video of every robot since 2020', or --subject robot");
             }
-            if a.flag("--with-photos") {
-                usage("showcase --album: a showcase is built from video clips, so the album's photos are skipped (not downloaded); there is no --with-photos");
+            if a.flag("--with-photos") && a.flag("--videos-only") {
+                usage("showcase --album: --with-photos (the default) or --videos-only, not both");
             }
             let mut params = json!({"album": title, "wait": false});
+            // the album's photos are kept unless asked not to (--with-photos says the default)
+            if a.flag("--videos-only") {
+                params["photos"] = json!(false);
+            }
             if let Some(t) = subject {
                 params["subject"] = json!(t);
             }

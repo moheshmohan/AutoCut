@@ -439,18 +439,23 @@ pub struct ShowcaseAnalyzeParams {
     /// rules, else the local classifier.
     #[serde(default)]
     pub prompt: Option<String>,
-    /// Only these media items (ids from project_inspect); default: every video item.
+    /// Only these media items (ids from project_inspect); default: every video and photo item.
     #[serde(default)]
     pub items: Option<Vec<u64>>,
     /// The clips come from this Google Photos album (its exact title) instead of the project:
     /// the album the user filled in Google Photos is picked whole (the local screen agent opens
     /// it in Google's picker and selects all of it — Google lets apps read only albums they
-    /// made, so the picker is the way in), its videos downloaded and imported (files the
+    /// made, so the picker is the way in), its videos and photos downloaded and imported (files the
     /// project already holds are reused, not imported twice), and only those are analysed. Not
     /// with `items`. Needs `filmcraft-cli photos auth` once, the grounding model
     /// (`ollama pull qwen2.5vl:7b`) and Screen Recording + Accessibility for this process.
     #[serde(default)]
     pub album: Option<String>,
+    /// Photos too (the default): an album's photos are downloaded (full resolution) and a robot
+    /// that was only photographed is shown in its photos, with a slow pan and zoom; `false`
+    /// leaves photos out (videos only).
+    #[serde(default)]
+    pub photos: Option<bool>,
     /// Only clips filmed on or after this date: "2020", "2020-06" or "2020-06-15" (clips without a
     /// capture date are left out).
     #[serde(default)]
@@ -711,6 +716,7 @@ fn showcase_analyze_params(p: ShowcaseAnalyzeParams) -> (&'static str, Value) {
     put("subject", text(p.subject));
     put("prompt", text(p.prompt));
     put("album", text(p.album));
+    put("photos", p.photos.map(Value::Bool));
     put("items", p.items.map(|i| json!(i)));
     put("since", p.since.map(Value::String));
     put("frames", p.frames.map(|n| json!(n)));
@@ -2459,7 +2465,11 @@ mod tests {
     #[test]
     fn showcase_tool_schemas_and_params() {
         let s = schema("showcase_analyze");
-        assert_eq!(props(&s), ["album", "compare", "frames", "fresh", "items", "plan", "prompt", "screen", "since", "subject", "title", "voice"], "{s}");
+        assert_eq!(
+            props(&s),
+            ["album", "compare", "frames", "fresh", "items", "photos", "plan", "prompt", "screen", "since", "subject", "title", "voice"],
+            "{s}"
+        );
         assert!(s["required"].as_array().is_none_or(|r| r.is_empty()), "a subject or a prompt: {s}");
         let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "since": "2020", "items": [5, 6]})).unwrap();
         assert_eq!(showcase_analyze_params(p), ("autocut.analyze", json!({"subject": "robot", "since": "2020", "items": [5, 6], "wait": true})));
@@ -2475,6 +2485,9 @@ mod tests {
         assert_eq!(showcase_analyze_params(p).1, json!({"subject": "robot", "fresh": true, "wait": true}));
         let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"subject": "robot", "fresh": false})).unwrap();
         assert!(showcase_analyze_params(p).1.get("fresh").is_none());
+        // videos only: the album's photos left out
+        let p: ShowcaseAnalyzeParams = serde_json::from_value(json!({"album": "Robots", "subject": "robot", "photos": false})).unwrap();
+        assert_eq!(showcase_analyze_params(p).1, json!({"album": "Robots", "subject": "robot", "photos": false, "wait": true}));
 
         let s = schema("showcase_plan");
         assert_eq!(props(&s), ["entries", "min_coverage", "mood", "subtitle", "title", "voice"], "{s}");

@@ -12,8 +12,13 @@
 //! that introduces it) spells it, or it is a well-known robot or maker (a 7B model otherwise
 //! invents brand names).
 //!
+//! A photo (a still image item) is one frame: located, read and described from that picture
+//! ([`ClipFacts::photo`]), its subject's box kept ([`ClipFacts::subject`]) for the slow pan and
+//! zoom a showcase gives it, and cached like a clip.
+//!
 //! Capture dates come from `media.captureDate` (sidecars from the Google Photos picker, or the
-//! file's own metadata), so results sort chronologically.
+//! file's own metadata: QuickTime keys, a photo's EXIF, with its position when it has one), so
+//! results sort chronologically.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -92,6 +97,17 @@ pub struct ClipFacts {
     /// reports from before identities, and for clips that do not show the subject.
     #[serde(default)]
     pub identity: Option<u32>,
+    /// A photo (a still image), not a video: looked at once, shown with a slow pan and zoom.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub photo: bool,
+    /// The subject's box where it is largest, `[x, y, w, h]` (0..1 of the picture): what a photo's
+    /// pan and zoom aims at. Absent in reports from before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<[f64; 4]>,
+    /// Where a photo was taken, from its EXIF: `[latitude, longitude]` (Google Photos' downloads
+    /// leave it out; a photo copied off the phone keeps it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gps: Option<[f64; 2]>,
 }
 
 /// Text a vision model read in a clip's best frames, by where it is: what is printed on the
@@ -283,22 +299,26 @@ pub fn model_frame(w: u32, h: u32) -> (f64, f64) {
 /// frame `(fw, fh)`. Hostile numbers mean "not present".
 pub fn frame_fact(seconds: f64, reply: &Value, fw: f64, fh: f64) -> FrameFact {
     let none = FrameFact { seconds, present: false, area: 0.0, center: [0.5, 0.5] };
+    let Some([x, y, w, h]) = reply_box(reply, fw, fh) else { return none };
+    let area = w * h;
+    FrameFact { seconds, present: area >= MIN_AREA, area, center: [x + w / 2.0, y + h / 2.0] }
+}
+
+/// The box of a grounding reply ([`frame_fact`]) as `[x, y, w, h]`, 0..1 of the frame; `None`
+/// when it says not present or its numbers make no sense.
+pub fn reply_box(reply: &Value, fw: f64, fh: f64) -> Option<[f64; 4]> {
     if reply.get("present").and_then(Value::as_bool) == Some(false) {
-        return none;
+        return None;
     }
-    let Some(b) = reply.get("bbox_2d").or_else(|| reply.get("box_2d")).and_then(Value::as_array) else { return none };
+    let b = reply.get("bbox_2d").or_else(|| reply.get("box_2d")).and_then(Value::as_array)?;
     let c: Vec<f64> = b.iter().filter_map(Value::as_f64).collect();
-    let [x1, y1, x2, y2] = c.as_slice() else { return none };
+    let [x1, y1, x2, y2] = c.as_slice() else { return None };
     if ![x1, y1, x2, y2].iter().all(|v| v.is_finite()) || fw <= 0.0 || fh <= 0.0 {
-        return none;
+        return None;
     }
     let (x1, x2) = ((x1 / fw).clamp(0.0, 1.0), (x2 / fw).clamp(0.0, 1.0));
     let (y1, y2) = ((y1 / fh).clamp(0.0, 1.0), (y2 / fh).clamp(0.0, 1.0));
-    if x2 <= x1 || y2 <= y1 {
-        return none;
-    }
-    let area = (x2 - x1) * (y2 - y1);
-    FrameFact { seconds, present: area >= MIN_AREA, area, center: [(x1 + x2) / 2.0, (y1 + y2) / 2.0] }
+    (x2 > x1 && y2 > y1).then_some([x1, y1, x2 - x1, y2 - y1])
 }
 
 /// The system prompt grounding requests are sent with.
@@ -344,17 +364,19 @@ fn text_note(subject: &str, read: &FrameText) -> String {
     s
 }
 
-fn describe_prompt(subject: &str, read: &FrameText) -> String {
+fn describe_prompt(subject: &str, read: &FrameText, photo: bool) -> String {
     let guide = if subject.to_lowercase().contains("robot") { ROBOT_GUIDE } else { "" };
     let text = text_note(subject, read);
+    let what = if photo { format!("This photo shows a {subject}.") } else { format!("These frames come from one video showing a {subject}.") };
     format!(
-        "These frames come from one video showing a {subject}.\n{guide}{text}Answer with JSON only: {{\"label\": \"what it is in 2-5 words: its name or model when that is printed on it, or a brand or model name ONLY if it clearly matches the guide or a logo is readable; otherwise a plain description such as 'floor-cleaning robot' or 'white robot dog'\", \"kind\": \"humanoid|quadruped|arm|wheeled|toy|drone|other\", \"description\": \"one plain sentence: what it looks like and what it is doing (and the text around it, when that says where it is)\"}}"
+        "{what}\n{guide}{text}Answer with JSON only: {{\"label\": \"what it is in 2-5 words: its name or model when that is printed on it, or a brand or model name ONLY if it clearly matches the guide or a logo is readable; otherwise a plain description such as 'floor-cleaning robot' or 'white robot dog'\", \"kind\": \"humanoid|quadruped|arm|wheeled|toy|drone|other\", \"description\": \"one plain sentence: what it looks like and what it is doing (and the text around it, when that says where it is)\"}}"
     )
 }
 
 /// Describe a clip from `imgs` (PNG, in time order) and the text read in it ([`ClipFacts::text`]).
 async fn describe(model: &dyn ChatModel, subject: &str, imgs: &[Vec<u8>], f: &mut ClipFacts) -> Result<(), AutoCutError> {
-    let v = model.complete_json("You describe videos for a video editor.", &describe_prompt(subject, &f.text), imgs).await?;
+    let system = if f.photo { "You describe photos for a video editor." } else { "You describe videos for a video editor." };
+    let v = model.complete_json(system, &describe_prompt(subject, &f.text, f.photo), imgs).await?;
     let text = |k: &str, n: usize| v.get(k).and_then(Value::as_str).map(|s| s.trim().chars().take(n).collect::<String>()).unwrap_or_default();
     f.kind = text("kind", 20).to_lowercase();
     f.description = text("description", 300);
@@ -599,7 +621,8 @@ pub fn sanitize_label_with(label: &str, kind: &str, subject: &str, read: &FrameT
 
 /// One clip: frames → grounding → text → description. The flag says every frame was read and
 /// every model call answered — only such an analysis is kept in the cache (one made while the
-/// model was down would say "not there" forever).
+/// model was down would say "not there" forever). A photo is one frame: located, read and
+/// described from that one picture.
 #[allow(clippy::too_many_arguments)]
 async fn analyze_clip(
     model: &dyn ChatModel,
@@ -608,6 +631,7 @@ async fn analyze_clip(
     item: u64,
     name: &str,
     seconds: f64,
+    photo: bool,
     frames_max: usize,
     screen: usize,
     progress: &mut dyn FnMut(&str),
@@ -615,7 +639,10 @@ async fn analyze_clip(
     let mut clean = true;
     let mut frames: Vec<FrameFact> = Vec::new();
     let mut pngs: Vec<(f64, f64, Vec<u8>)> = Vec::new(); // (area, seconds, png)
-    let (order, screened) = screening_order(&sample_times(seconds, frames_max), screen);
+    // the subject's box where it is largest
+    let mut largest: Option<(f64, [f64; 4])> = None;
+    let times = if photo { vec![0.0] } else { sample_times(seconds, frames_max) };
+    let (order, screened) = screening_order(&times, if photo { 0 } else { screen });
     for (k, t) in order.into_iter().enumerate() {
         // screening: the spread-out first frames show nothing, so the rest are not looked at
         if k == screened && !frames.iter().any(|f| f.present) {
@@ -637,7 +664,16 @@ async fn analyze_clip(
         let (fw, fh) = model_frame(w, h);
         let reply = model.complete_json(GROUND_SYSTEM, &ground_prompt(subject), std::slice::from_ref(&png)).await;
         let f = match reply {
-            Ok(v) => frame_fact(t, &v, fw, fh),
+            Ok(v) => {
+                let f = frame_fact(t, &v, fw, fh);
+                if f.present
+                    && largest.is_none_or(|(a, _)| f.area > a)
+                    && let Some(b) = reply_box(&v, fw, fh)
+                {
+                    largest = Some((f.area, b));
+                }
+                f
+            }
             Err(e) => {
                 progress(&format!("  {name} @ {t:.1}s: the model did not answer ({e})"));
                 clean = false;
@@ -668,6 +704,9 @@ async fn analyze_clip(
         best,
         frames,
         identity: None,
+        photo,
+        subject: largest.map(|(_, b)| b),
+        gps: None,
     };
     if facts.present {
         // the text it carries and that is around it, then a description that can use it
@@ -709,27 +748,38 @@ async fn identities(ex: &dyn Executor) -> std::collections::HashMap<u64, String>
 /// The media items of a project document (`project.inspect`): `(item, name, seconds)` for
 /// everything with video.
 pub fn video_items(project: &Value) -> Vec<(u64, String, f64)> {
+    media_items(project).into_iter().filter(|m| !m.3).map(|(i, n, s, _)| (i, n, s)).collect()
+}
+
+/// The project's type of a still image (`project.inspect`'s `type`).
+pub const STILL_TYPE: &str = "Still Image";
+
+/// The video and photo items of a project document (`project.inspect`): `(item, name, seconds,
+/// photo)`, in item order. Bins nest; the walk is bounded.
+pub fn media_items(project: &Value) -> Vec<(u64, String, f64, bool)> {
     let mut out = Vec::new();
-    fn walk(v: &Value, out: &mut Vec<(u64, String, f64)>) {
+    let mut stack: Vec<(&Value, usize)> = vec![(project, 0)];
+    while let Some((v, depth)) = stack.pop() {
+        if depth > 256 || out.len() >= 1_000_000 {
+            continue;
+        }
         match v {
             Value::Object(o) => {
-                if o.get("type").and_then(Value::as_str) == Some("Movie")
+                let kind = o.get("type").and_then(Value::as_str);
+                if matches!(kind, Some("Movie") | Some(STILL_TYPE))
                     && let (Some(item), Some(name), Some(d)) =
                         (o.get("item").and_then(Value::as_u64), o.get("name").and_then(Value::as_str), o.get("duration").and_then(Value::as_f64))
                 {
-                    out.push((item, name.to_string(), d / filmcraft_time::TICKS_PER_SECOND as f64));
+                    out.push((item, name.to_string(), d / filmcraft_time::TICKS_PER_SECOND as f64, kind == Some(STILL_TYPE)));
                 }
-                for x in o.values() {
-                    walk(x, out);
-                }
+                stack.extend(o.values().map(|x| (x, depth + 1)));
             }
-            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            Value::Array(a) => stack.extend(a.iter().map(|x| (x, depth + 1))),
             _ => {}
         }
     }
-    walk(project, &mut out);
-    out.sort_by_key(|(i, _, _)| *i);
-    out.dedup_by_key(|(i, _, _)| *i);
+    out.sort_by_key(|m| m.0);
+    out.dedup_by_key(|m| m.0);
     out
 }
 
@@ -753,17 +803,20 @@ pub async fn analyze(
         return Err(AutoCutError::Invalid("say what to look for (e.g. \"robot\")".into()));
     }
     let project = ex.execute("project.inspect", json!({})).await.map_err(AutoCutError::Executor)?;
-    let mut clips = video_items(&project);
+    let mut clips = media_items(&project);
     if let Some(want) = items {
-        clips.retain(|(i, _, _)| want.contains(i));
+        clips.retain(|c| want.contains(&c.0));
     }
     let dates = ex.execute("media.captureDate", json!({"items": clips.iter().map(|c| c.0).collect::<Vec<_>>()})).await.unwrap_or(Value::Null);
-    let date_of = |item: u64| -> (Option<String>, Option<i64>) {
+    let date_of = |item: u64| -> (Option<String>, Option<i64>, Option<[f64; 2]>) {
         dates["items"]
             .as_array()
             .and_then(|a| a.iter().find(|d| d["item"].as_u64() == Some(item)))
-            .map(|d| (d["created"].as_str().map(str::to_string), d["unix"].as_i64()))
-            .unwrap_or((None, None))
+            .map(|d| {
+                let gps = d["gps"].as_array().and_then(|g| Some([g.first()?.as_f64()?, g.get(1)?.as_f64()?])).filter(|g| g.iter().all(|v| v.is_finite()));
+                (d["created"].as_str().map(str::to_string), d["unix"].as_i64(), gps)
+            })
+            .unwrap_or((None, None, None))
     };
     let n = clips.len();
     let frames_max = frames_max.clamp(1, MAX_FRAMES);
@@ -771,24 +824,31 @@ pub async fn analyze(
     let model_id = model.id();
     let mut out = Vec::with_capacity(n);
     let mut cached = 0usize;
-    for (k, (item, name, secs)) in clips.into_iter().enumerate() {
-        let key = known.get(&item).map(|id| AnalysisCache::key(id, subject, &model_id, frames_max, screen));
+    for (k, (item, name, secs, photo)) in clips.into_iter().enumerate() {
+        // (a photo is looked at once, whatever the frames asked for)
+        let (fm, sc) = if photo { (1, 0) } else { (frames_max, screen) };
+        let key = known.get(&item).map(|id| AnalysisCache::key(id, subject, &model_id, fm, sc));
         let (mut f, from_cache) = match key.as_deref().and_then(|k| cache.get(k)) {
             Some(kept) => (ClipFacts { item, name: name.clone(), identity: None, ..kept }, true),
             None => {
-                let (f, clean) = analyze_clip(model, ex, subject, item, &name, secs, frames_max, screen, progress).await?;
+                let (f, clean) = analyze_clip(model, ex, subject, item, &name, secs, photo, frames_max, screen, progress).await?;
                 if let Some(key) = key.as_deref().filter(|_| clean) {
                     cache.put(key, &f);
                 }
                 (f, false)
             }
         };
-        (f.created, f.unix) = date_of(item);
+        (f.created, f.unix, f.gps) = date_of(item);
+        f.photo = photo;
         cached += usize::from(from_cache);
         progress(&format!(
             "[{}/{n}] {name}: {}{}",
             k + 1,
-            if f.present { format!("{} ({:.0}% of frames){}", f.label, f.coverage * 100.0, read_note(&f.text)) } else { format!("no {subject}") },
+            match (f.present, f.photo) {
+                (true, true) => format!("{} (a photo){}", f.label, read_note(&f.text)),
+                (true, false) => format!("{} ({:.0}% of frames){}", f.label, f.coverage * 100.0, read_note(&f.text)),
+                (false, _) => format!("no {subject}"),
+            },
             if from_cache { " (analysed before)" } else { "" }
         ));
         out.push(f);
@@ -837,11 +897,17 @@ pub(crate) mod testing {
         pub frames: Mutex<Vec<(u64, f64, u64)>>,
         /// The file behind an item, for `media.status` (none: it reports no files).
         pub files: Vec<(u64, std::path::PathBuf)>,
+        /// Items that are photos (still images), and the EXIF position `media.captureDate` gives
+        /// them.
+        pub stills: Vec<(u64, Option<[f64; 2]>)>,
     }
 
     impl FakeEx {
         pub fn new(clips: Vec<(u64, f64, i64)>) -> Self {
-            Self { clips, frames: Mutex::new(Vec::new()), files: Vec::new() }
+            Self { clips, frames: Mutex::new(Vec::new()), files: Vec::new(), stills: Vec::new() }
+        }
+        fn still(&self, item: u64) -> Option<Option<[f64; 2]>> {
+            self.stills.iter().find(|(i, _)| *i == item).map(|(_, g)| *g)
         }
     }
 
@@ -849,10 +915,13 @@ pub(crate) mod testing {
         fn execute(&self, id: &str, p: Value) -> ExecFuture {
             let tps = filmcraft_time::TICKS_PER_SECOND as f64;
             let r = match id {
-                "project.inspect" => Ok(
-                    json!({"root": {"children": self.clips.iter().map(|(i, s, _)| json!({"item": i, "name": format!("c{i}.mp4"), "type": "Movie", "duration": s * tps})).collect::<Vec<_>>()}}),
-                ),
-                "media.captureDate" => Ok(json!({"items": self.clips.iter().map(|(i, _, u)| json!({"item": i, "unix": u})).collect::<Vec<_>>()})),
+                "project.inspect" => Ok(json!({"root": {"children": self.clips.iter().map(|(i, s, _)| {
+                    let still = self.still(*i).is_some();
+                    json!({"item": i, "name": format!("c{i}.{}", if still { "jpg" } else { "mp4" }), "type": if still { super::STILL_TYPE } else { "Movie" }, "duration": s * tps})
+                }).collect::<Vec<_>>()}})),
+                "media.captureDate" => {
+                    Ok(json!({"items": self.clips.iter().map(|(i, _, u)| json!({"item": i, "unix": u, "gps": self.still(*i).flatten()})).collect::<Vec<_>>()}))
+                }
                 "media.status" => {
                     Ok(json!(self.files.iter().map(|(i, f)| json!({"item": i, "path": f.to_string_lossy(), "status": "online"})).collect::<Vec<_>>()))
                 }
@@ -1252,6 +1321,62 @@ mod tests {
         // no comparisons: each its own robot
         let facts = run(&FixedModel::new(vec![]), &ex, "robot", None, 2, 0, Some(earlier), 0, &AnalysisCache::off(), &mut |_| {}).await.unwrap();
         assert_eq!(facts.iter().map(|f| f.identity).collect::<Vec<_>>(), vec![Some(1), Some(2)]);
+    }
+
+    #[tokio::test]
+    async fn a_photo_is_looked_at_once_and_keeps_its_box_date_and_place() {
+        // a 10 s clip and a photo (a still, 5 s by default in the project)
+        let mut ex = testing::FakeEx::new(vec![(1, 10.0, 1_700_000_000), (2, 5.0, 1_700_000_100)]);
+        ex.stills = vec![(2, Some([25.2, 55.3]))];
+        let model = crate::llm::FnModel::new("scripted", |system, user, _| {
+            Ok(if system == GROUND_SYSTEM {
+                // the model frame of an 8 × 4 picture is 1288 × 644: the box is its right half
+                json!({"present": true, "bbox_2d": [644, 0, 1288, 644]})
+            } else if system.contains("describe") {
+                json!({"label": if user.starts_with("This photo") { "Ameca humanoid" } else { "white robot" }, "kind": "humanoid", "description": "A robot."})
+            } else {
+                json!({"on_subject": [], "nearby": []})
+            })
+        });
+        let facts = analyze(&model, &ex, "robot", None, 3, 0, &AnalysisCache::off(), &mut |_| {}).await.unwrap();
+        let (clip, photo) = (&facts[0], &facts[1]);
+        assert!(!clip.photo && clip.frames.len() == 3, "{clip:?}");
+        assert!(photo.photo && photo.present, "{photo:?}");
+        assert_eq!(photo.frames.len(), 1, "one look at a photo");
+        assert_eq!((photo.frames[0].seconds, photo.best), (0.0, 0.0));
+        assert_eq!(photo.label, "Ameca humanoid", "described as a photo");
+        let b = photo.subject.unwrap();
+        assert!((b[0] - 0.5).abs() < 1e-9 && (b[2] - 0.5).abs() < 1e-9 && (b[3] - 1.0).abs() < 1e-9, "{b:?}");
+        assert_eq!((photo.gps, photo.unix), (Some([25.2, 55.3]), Some(1_700_000_100)));
+        assert_eq!(clip.gps, None);
+        // the photo's frames: one to locate, one larger to read
+        let frames = ex.frames.lock().unwrap();
+        let of_photo: Vec<_> = frames.iter().filter(|f| f.0 == 2).collect();
+        assert_eq!(of_photo.len(), 2, "{of_photo:?}");
+        assert!(of_photo.iter().all(|f| f.1 == 0.0));
+        // a report written and read back keeps it all; an old report without them still loads
+        let back: ClipFacts = serde_json::from_value(serde_json::to_value(photo).unwrap()).unwrap();
+        assert_eq!(&back, photo);
+        let v = serde_json::to_value(clip).unwrap();
+        assert!(v.get("photo").is_none() && v.get("subject").is_some() && v.get("gps").is_none(), "{v}");
+    }
+
+    #[test]
+    fn photos_are_media_items_too() {
+        let t = filmcraft_time::TICKS_PER_SECOND as f64;
+        let p = json!({"root": {"children": [
+            {"item": 3, "name": "b.mp4", "type": "Movie", "duration": 2.0 * t},
+            {"item": 4, "name": "IMG_1.HEIC", "type": "Still Image", "duration": 5.0 * t},
+            {"children": [{"item": 9, "name": "music.wav", "type": "Audio", "duration": t}]}
+        ]}});
+        assert_eq!(media_items(&p), vec![(3, "b.mp4".into(), 2.0, false), (4, "IMG_1.HEIC".into(), 5.0, true)]);
+        assert_eq!(video_items(&p), vec![(3, "b.mp4".into(), 2.0)]);
+        // a hostile, deeply nested tree is walked within bounds
+        let mut deep = json!({"item": 1, "name": "x.mp4", "type": "Movie", "duration": t});
+        for _ in 0..1000 {
+            deep = json!({"children": [deep]});
+        }
+        assert!(media_items(&deep).is_empty(), "too deep to be a project");
     }
 
     #[test]

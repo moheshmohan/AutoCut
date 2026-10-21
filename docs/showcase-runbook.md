@@ -46,19 +46,50 @@ P="$R/Robot Showcase v6.fcproj"
 
 ## 1. The new material from the album
 
-Pick the album whole (the screen agent drives Google's picker), download its new videos and import
-them into the project; clips the project already holds are reused, not imported twice:
+Pick the album whole (the screen agent drives Google's picker), download its new videos and photos
+and import them into the project; items the project already holds are reused, not imported twice
+(`--videos-only` leaves the photos out):
 
 ```sh
-filmcraft-cli --project "$P" photos pick --album "Robot showcase" --videos-only --save
+filmcraft-cli --project "$P" photos pick --album "Robot showcase" --save
 ```
 
-Analyse the new clips (their item ids are in the pick's output; clips analysed before come from the
-analysis cache):
+Analyse the new items (their item ids are in the pick's output; items analysed before come from
+the analysis cache; a photo is looked at once):
 
 ```sh
-filmcraft-cli --project "$P" analyze robot --items 4841,2630,2631 --out "$R/report-new.json"
+filmcraft-cli --project "$P" analyze robot --items 4841,2630,2631,4977 --out "$R/report-new.json"
 ```
+
+### Photos of robots never filmed
+
+A robot you only photographed belongs in the show too: add the photo (JPEG, HEIC or PNG, as the
+phone took it) to the album. The pick downloads Google's original at full resolution (a HEIC is
+decoded by FilmCraft itself; anything over 8192 px on its long side is held at 8192), turned
+upright by its EXIF orientation and dated by Google's record of it (else its EXIF date; Google
+takes the position out, so its place comes from `photos locations` in step 2, as a clip's does).
+The analysis locates the robot in it once and keeps its box (`subject` in the report).
+
+- **An entry of photos.** A robot with video is shown in its video; one with only photos is an
+  entry of its photos (up to three), each held as long as its words need (at most 20 s) with a
+  slow pan and zoom that starts wide and ends framed on the robot (or the reverse) — eased in and
+  out, about 2.5 % closer a second, the next photo going the other way. A 4:3 or landscape photo
+  fills the 16:9 frame; a portrait photo is shown whole over its blurred copy (the pillars the
+  portrait clips get) when a crop would cut its robot (or none was found), else it fills the
+  frame with the move aimed at the robot. Photos have no sound; the narration is timed over them
+  like over a clip.
+- **In the notes** (step 4) a photo shot is `{"item": 4977, "photo": true, "hold": 4.0, "move":
+  "in"}` — `hold` in seconds (1–20; without it, its share of the entry), `move` one of `in`,
+  `out`, `pan`, `none` (without it, in and out in turn), `fit` (`full` for the pillars, `fill`) and
+  `focus: [x, y]` (the point to aim at, 0..1 of the photo) as for clips. An item the project holds
+  as a still is a photo without saying so. An entry may mix photos and clips:
+  `"Pepper": {"shots": [{"item": 2407}, {"item": 4977, "hold": 3, "move": "pan"}]}`; `add` makes an
+  entry of photos: `{"label": "Toy robot", "unix": "2021-02-03 10:00:00", "shots": [{"item":
+  4978, "photo": true}], "line": "…"}`.
+- **Checks:** `sheet` shows a photo as one tile; QA does not take a photo's silence for a dip in
+  the shots' sound; the privacy pass looks at a photo once and keeps the blur for its whole hold.
+- **Any still, by hand:** select it on the timeline and Clip ▸ Video Options ▸ Ken Burns
+  (`exec clip.kenBurns '{"clip": 812, "subject": [0.55, 0.2, 0.25, 0.5], "move": "out"}'`).
 
 ## 2. Where each clip was filmed
 
@@ -87,7 +118,7 @@ Google only guessed it). An entry's `place` ("Busan, South Korea") is what its l
 ## 3. Look at the clips
 
 Contact sheets of source clips, to choose windows and fits (`item:from-to` limits a row to a
-stretch; `--at` takes exact times; portrait clips get tall tiles):
+stretch; `--at` takes exact times; portrait clips get tall tiles; a photo is one tile):
 
 ```sh
 filmcraft-cli --project "$P" sheet --items 2407,2417:0-30,14 --n 8 --out "$R/sheet.jpg"
@@ -130,7 +161,8 @@ The notes are JSON keyed by entry **label** (numbers change; labels do not). The
 
 - A shot by `item` alone is the plan's analysed shot of that clip; with `plain` it is counted in
   view across its window (`plain: [a, b]` without fixing the window), its length read from the
-  project. `from`/`to`/`speed`/`fit`/`mute`/`volume`/`focus` are the shot's controls.
+  project. `from`/`to`/`speed`/`fit`/`mute`/`volume`/`focus` are the shot's controls; a photo's are
+  `hold`/`move`/`fit`/`focus` ([Photos of robots never filmed](#photos-of-robots-never-filmed)).
 - `split` makes a second entry from one (two robots in one entry); `add` brings new robots.
 - The outro's robot count ("Forty-three", or `{Count}`) follows the entries.
 - Top-level fields merge into the plan: the look (`outro`, `style`, `transitions`, …) and, for the

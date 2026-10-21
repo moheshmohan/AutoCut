@@ -73,7 +73,8 @@ fn menus_and_shortcuts_follow_premiere() {
             "Optical Flow",
             "Scale to Frame Size",
             "Fit to frame",
-            "Fill frame"
+            "Fill frame",
+            "Ken Burns"
         ]
     );
     let sc = |id: &str| crate::commands::find(id).unwrap().shortcut;
