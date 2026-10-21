@@ -341,6 +341,41 @@ fn frames_render_on_a_pool_of_the_exports_own() {
     });
     let threads = watched.threads.into_inner().unwrap();
     assert!(!threads.is_empty());
-    assert!(threads.iter().all(|t| t.starts_with("filmcraft-export-render-")), "frames rendered on {threads:?}");
+    // (the thread decoding the batch after next asks for sources too, and renders nothing)
+    assert!(threads.iter().all(|t| t.starts_with("filmcraft-export-render-") || t == "filmcraft-export-decode-ahead"), "frames rendered on {threads:?}");
+    assert!(threads.iter().any(|t| t.starts_with("filmcraft-export-render-")), "frames rendered on {threads:?}");
     assert!(std::fs::read(&s.path).unwrap() == reference, "the render pool changed the file");
+}
+
+/// Decoding the batch after next while the next one renders (job.rs, "Decoding ahead") asks the
+/// sources ahead of the render, and the file stays the same with it, without it, without overlap,
+/// at any batch size and core count.
+#[test]
+fn decoding_ahead_does_not_change_the_file() {
+    for (format, ext) in [(Format::ProRes, "mov"), (Format::H264, "mp4")] {
+        let settings = |name: &str| ExportSettings { format, path: tmp(&format!("{name}.{ext}")), ..Default::default() };
+        let (reference, _) = export_overlapped(3, 7, false, &settings(&format!("warm-{}-off", format.id())));
+        for (threads, batch, warm) in [(2, 1, true), (3, 3, true), (3, 3, false), (5, 7, true), (16, 24, true)] {
+            let (p, seq, m) = project();
+            let watched = Watched { inner: &m, threads: Default::default() };
+            let s = settings(&format!("warm-{}-{threads}-{batch}-{warm}", format.id()));
+            pool(threads).install(|| {
+                let prog = Progress::default();
+                let mut ex = Exporter::new(p, seq, &s, &prog).unwrap();
+                ex.set_batch(batch);
+                ex.set_warm_ahead(warm);
+                while !matches!(ex.step(&watched, &prog).unwrap(), Step::Done(_)) {}
+                assert_eq!(prog.done.load(Ordering::Relaxed), prog.total.load(Ordering::Relaxed));
+            });
+            let names = watched.threads.into_inner().unwrap();
+            // 24 frames: batches after the next one exist unless a batch holds (nearly) all of them
+            let ahead = names.contains("filmcraft-export-decode-ahead");
+            assert_eq!(ahead, warm && batch * 2 < 24, "{}: {threads} cores, {batch} per step: decoded ahead on {names:?}", format.label());
+            assert!(
+                std::fs::read(&s.path).unwrap() == reference,
+                "{}: decoding ahead ({threads} cores, {batch} per step) gives a different file",
+                format.label()
+            );
+        }
+    }
 }

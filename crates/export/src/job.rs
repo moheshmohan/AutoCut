@@ -69,6 +69,27 @@
 //!   own with as many threads (started with the first batch, gone with the exporter), which leaves
 //!   the caller's pool to the encoding side; the operating system shares the cores between the two.
 //!   The file does not change: where a frame is drawn does not change its pixels.
+//!
+//! # Decoding ahead
+//!
+//! A source decodes its pictures one after the other (its GOP cache holds its lock while it
+//! decodes), so the frames of a batch, rendered at once, waited for the decoder in turn, and the
+//! batch ended with the cores idle while its last frames composited; the next batch's decoding only
+//! began after that. Software decoding (iPhone HDR video as Google Photos serves it: VP9 profile 3,
+//! two pictures per frame at 60 fps) and the pre-roll of every new shot (from its keyframe to the
+//! clip's In) set the pace: a 4K showcase export kept 7 of 14 render threads busy. While batch
+//! *k+1* renders, a thread of its own now asks for the media pictures of batch *k+2*
+//! ([`Pipeline::warm`], [`filmcraft_render::prefetch`]), so they sit in the decoders' caches when
+//! that batch renders: the decoders work without pause, and a step takes about the longest of the
+//! encoding, the compositing and the decoding instead of their sum.
+//!
+//! * **Bytes do not change.** A cached picture is the one the decoder would have made for the
+//!   render (`determinism_tests`).
+//! * **Memory.** Two batches of decoded pictures, within the GOP caches' own budgets (at least 64
+//!   pictures per source).
+//! * **Joined every step**, within the step's scope; it stops at cancellation. A panic in a decoder
+//!   is caught (the render then meets the same picture and reports it); no thread means nothing is
+//!   decoded ahead. `Stage::DecodeAhead` times it (`perf.stats` `export.stages.decodeAheadMs`).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -167,6 +188,36 @@ fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider)
     (!pending.load(Ordering::Relaxed)).then_some(frames)
 }
 
+/// Decode the media pictures of frames `from..to` in order on a thread of its own (see "Decoding
+/// ahead" in the module docs), within scope `ts`, which joins it. No thread (the system refused
+/// one) or a panic in a decoder only means nothing was decoded ahead: the render decodes what it
+/// needs as before, and the panic hook has logged the panic.
+fn warm_ahead<'scope>(
+    ts: &'scope std::thread::Scope<'scope, '_>,
+    pipe: &'scope Pipeline,
+    from: i64,
+    to: i64,
+    sources: &'scope dyn SourceProvider,
+    pictures: &'scope Arc<crate::ahead::Pictures>,
+    cancel: &'scope AtomicBool,
+) {
+    let spawned = std::thread::Builder::new().name("filmcraft-export-decode-ahead".into()).spawn_scoped(ts, move || {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            for fi in from..to {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let recording = crate::ahead::Recording { inner: sources, pictures, frame: fi };
+                timed(Stage::DecodeAhead, || pipe.warm(fi, &recording));
+            }
+        }));
+        // (a web reader's pending flag is per thread; nothing native sets it, and this thread's goes with it)
+        let _ = filmcraft_media::pending::take();
+    });
+    // no thread: the render decodes as it always did
+    drop(spawned);
+}
+
 /// What encoding a batch came to.
 enum Encoded {
     Done,
@@ -196,6 +247,10 @@ pub struct Exporter {
     batch: i64,
     /// Render the next batch while this one is encoded (see the module docs).
     overlap: bool,
+    /// While doing so, decode the batch after it (see "Decoding ahead" in the module docs).
+    warm_ahead: bool,
+    /// The pictures decoded ahead, which the render takes from here.
+    pictures: Arc<crate::ahead::Pictures>,
     /// Bytes of frames the overlap may keep in flight ([`IN_FLIGHT_BUDGET`]; tests lower it).
     budget: u64,
     /// The batch starting at `next`, already rendered.
@@ -316,6 +371,8 @@ impl Exporter {
             next: f0,
             batch: rayon::current_num_threads().clamp(2, 16) as i64,
             overlap: true,
+            warm_ahead: true,
+            pictures: Arc::default(),
             budget: IN_FLIGHT_BUDGET,
             ahead: None,
             render_pool: None,
@@ -357,6 +414,12 @@ impl Exporter {
         if !on {
             self.ahead = None;
         }
+    }
+
+    /// Decode the batch after the next one while the next one renders (the default whenever steps
+    /// overlap). Off leaves each frame's decoding to its render; the file is the same.
+    pub fn set_warm_ahead(&mut self, on: bool) {
+        self.warm_ahead = on;
     }
 
     /// Lower the in-flight byte budget (tests make small frames hit the cap).
@@ -586,7 +649,9 @@ impl Exporter {
                 let (f, end) = (self.next, self.next.saturating_add(self.batch_len()).min(self.f1));
                 let render_pool = self.render_pool();
                 let pipe = &self.pipe;
-                match timed(Stage::Render, || on_render_pool(render_pool.as_deref(), || render_batch(pipe, f, end, sources))) {
+                self.pictures.drop_before(f);
+                let serving = crate::ahead::Serving { inner: sources, pictures: &self.pictures };
+                match timed(Stage::Render, || on_render_pool(render_pool.as_deref(), || render_batch(pipe, f, end, &serving))) {
                     Some(frames) => (f, frames),
                     None => return Ok(Step::Pending),
                 }
@@ -613,14 +678,27 @@ impl Exporter {
         let render_pool = self.render_pool();
         let mut slot: Option<std::thread::Result<Option<Vec<Frame>>>> = None;
         let mut encode_done: Option<web_time::Instant> = None;
-        // the render goes to its own pool, the encoding side's parallel work to the global one
-        let encoded = render_scope(render_pool.as_deref(), |s| {
-            s.spawn(|_| {
-                slot = Some(catch_unwind(AssertUnwindSafe(|| timed(Stage::Render, || render_batch(&pipe, a, b, sources)))));
-            });
-            let r = self.encode_batch(f, frames, sources);
-            encode_done = Some(web_time::Instant::now());
-            r
+        // the batch after that one, decoded meanwhile (none past the end of the pass)
+        let warm_to = b.saturating_add(self.batch_len()).min(self.f1);
+        let warm = (self.warm_ahead && b < warm_to).then_some((b, warm_to));
+        let cancel = &progress.cancel;
+        // what was decoded for the frames encoded by now is not needed any more
+        self.pictures.drop_before(a);
+        let pictures = self.pictures.clone();
+        let serving = crate::ahead::Serving { inner: sources, pictures: &pictures };
+        let encoded = std::thread::scope(|ts| {
+            if let Some((from, to)) = warm {
+                warm_ahead(ts, &pipe, from, to, sources, &pictures, cancel);
+            }
+            // the render goes to its own pool, the encoding side's parallel work to the global one
+            render_scope(render_pool.as_deref(), |s| {
+                s.spawn(|_| {
+                    slot = Some(catch_unwind(AssertUnwindSafe(|| timed(Stage::Render, || render_batch(&pipe, a, b, &serving)))));
+                });
+                let r = self.encode_batch(f, frames, sources);
+                encode_done = Some(web_time::Instant::now());
+                r
+            })
         });
         // the scope returned only now: what is left since the encoding ended is waiting for the render
         if let Some(t) = encode_done {

@@ -16,6 +16,7 @@
 use std::io::Write;
 
 mod aac_out;
+mod ahead;
 mod audio_out;
 mod captions_out;
 mod deflate;
@@ -859,13 +860,16 @@ pub enum Stage {
     /// Time the encoding side waited, after encoding a batch, for the next batch to finish rendering
     /// (only with overlap: large means the export is render-bound, near zero encode-bound).
     Wait,
+    /// Decoding the media pictures of the batch after the next one, on a thread of its own while
+    /// that one renders (only with overlap; it runs at the same time as the other stages).
+    DecodeAhead,
 }
 
-const STAGES: usize = 9;
+const STAGES: usize = 10;
 
 impl Stage {
     pub const ALL: [Stage; STAGES] =
-        [Stage::Setup, Stage::Loudness, Stage::Render, Stage::Encode, Stage::Convert, Stage::Audio, Stage::Mux, Stage::Finish, Stage::Wait];
+        [Stage::Setup, Stage::Loudness, Stage::Render, Stage::Encode, Stage::Convert, Stage::Audio, Stage::Mux, Stage::Finish, Stage::Wait, Stage::DecodeAhead];
 
     /// The name in `perf.stats`.
     pub fn name(self) -> &'static str {
@@ -879,6 +883,7 @@ impl Stage {
             Stage::Mux => "mux",
             Stage::Finish => "finish",
             Stage::Wait => "wait",
+            Stage::DecodeAhead => "decodeAhead",
         }
     }
 }

@@ -27,6 +27,7 @@ pub mod mixer;
 pub mod multicam;
 pub mod offline;
 pub mod plan;
+pub mod prefetch;
 pub mod preview;
 pub mod reframe;
 pub mod remix;

@@ -580,3 +580,75 @@ fn a_reversed_clip_shows_exactly_its_source_range() {
     let all: Vec<i64> = (0..20).flat_map(|f| shown(&p, f, false)).collect();
     assert_eq!(all, (10..=29).rev().collect::<Vec<_>>());
 }
+
+/// Records every picture asked of the sources underneath: (item, media time, scale bits).
+struct Asked {
+    inner: SourceMap,
+    log: Arc<std::sync::Mutex<Vec<(ItemId, i64, u32)>>>,
+}
+
+struct AskedSource {
+    inner: SharedSource,
+    item: ItemId,
+    log: Arc<std::sync::Mutex<Vec<(ItemId, i64, u32)>>>,
+}
+
+impl MediaSource for AskedSource {
+    fn info(&self) -> &filmcraft_media::MediaInfo {
+        self.inner.info()
+    }
+    fn video_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<filmcraft_frame::VideoFrame>> {
+        self.log.lock().unwrap().push((self.item, req.time.0, req.scale.to_bits()));
+        self.inner.video_frame(req)
+    }
+    fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<filmcraft_frame::AudioBuffer> {
+        self.inner.audio(start, frames, sample_rate)
+    }
+}
+
+impl SourceProvider for Asked {
+    fn source(&self, item: ItemId) -> Option<SharedSource> {
+        let inner = self.inner.source(item)?;
+        Some(Arc::new(AskedSource { inner, item, log: self.log.clone() }))
+    }
+}
+
+/// Decoding ahead (`prefetch::warm_frame`) asks the sources for exactly the pictures the render of
+/// the frame asks for: placed and scaled clips on several tracks, a speed-changed clip that blends
+/// two source frames, a hidden track, at full and half resolution.
+#[test]
+fn warming_a_frame_asks_for_the_pictures_its_render_asks_for() {
+    let (mut p, red, ocean, seq, map) = setup();
+    place(&mut p, seq, 0, ocean, 0, 48);
+    let top = place(&mut p, seq, 1, red, 10, 30);
+    {
+        let s = p.sequence_mut(seq).unwrap();
+        let (_, it) = s.find_item_mut(top).unwrap();
+        it.speed = 1.5;
+        it.time_interpolation = filmcraft_project::TimeInterpolation::FrameBlending;
+        it.effect_mut("motion").unwrap().params.get_mut("scale").unwrap().value = ParamValue::Float(40.0);
+    }
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let asked = Asked { inner: map, log: log.clone() };
+    let take = || {
+        let mut v = std::mem::take(&mut *log.lock().unwrap());
+        v.sort();
+        v.dedup();
+        v
+    };
+    for (t, scale) in [(Tick(1000), 1.0), (FrameRate::FPS_24.tick_of(15), 1.0), (FrameRate::FPS_24.tick_of(21), 0.5), (FrameRate::FPS_24.tick_of(45), 1.0)] {
+        let opts = RenderOptions { scale, ..Default::default() };
+        let n = prefetch::warm_frame(&p, seq, t, opts, &asked);
+        let warmed = take();
+        render_sequence(&p, seq, t, opts, &asked);
+        let rendered = take();
+        assert_eq!(warmed, rendered, "at {t:?}, scale {scale}");
+        assert_eq!(n, warmed.len(), "at {t:?}");
+    }
+    // a hidden track is neither rendered nor warmed
+    p.sequence_mut(seq).unwrap().video_tracks[1].enabled = false;
+    prefetch::warm_frame(&p, seq, FrameRate::FPS_24.tick_of(15), RenderOptions::default(), &asked);
+    assert!(take().iter().all(|(item, _, _)| *item == ocean));
+    // no such sequence: nothing asked
+    assert_eq!(prefetch::warm_frame(&p, ItemId(999_999), Tick(0), RenderOptions::default(), &asked), 0);
+}
