@@ -50,6 +50,8 @@ pub struct Pool {
 #[serde(rename_all = "camelCase")]
 pub struct Take {
     pub line: usize,
+    /// Which reading of the line (0 the first: every reference reads with the same seeds).
+    pub take: u32,
     pub text: String,
     pub seconds: f64,
     /// Tone-colour cosine to the held-out speech.
@@ -75,6 +77,7 @@ pub fn take(line: usize, text: &str, heard: &str, x: &[f32], rate: u32, colour: 
     let lufs = filmcraft_audio_dsp::loudness::measure(&[x], f64::from(rate.max(1))).integrated_lufs;
     Take {
         line,
+        take: 0,
         text: text.to_string(),
         seconds: x.len() as f64 / f64::from(rate.max(1)),
         similarity: cosine(colour, &pool.colour),

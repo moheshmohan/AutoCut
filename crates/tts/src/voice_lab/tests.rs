@@ -298,7 +298,10 @@ fn clean_up_and_joining_keep_the_speech() {
     let j = signal::join(&[&x, &y], RATE, 0.3);
     assert_eq!(j.len(), x.len() + y.len() + (0.3 * RATE as f64) as usize);
     let b = signal::balance(&x, RATE);
-    assert!(b.sub >= 0.0 && b.presence >= 0.0 && b.tilt_db.is_finite(), "{b:?}");
+    assert!(b.sub >= 0.0 && b.presence >= 0.0 && b.tilt_db.is_finite() && b.consonant_db < 0.0, "{b:?}");
+    // a lift at 3 kHz raises the consonant band
+    let bright: Vec<f32> = x.iter().enumerate().map(|(i, v)| v + 0.05 * (std::f32::consts::TAU * 3000.0 * i as f32 / RATE as f32).sin()).collect();
+    assert!(signal::balance(&bright, RATE).consonant_db > b.consonant_db + 3.0);
     assert_eq!(normalise_language("ta"), "ml");
     assert!(cosine(&[1.0], &[1.0, 2.0]) == 0.0 && cosine(&[0.0, 0.0], &[1.0, 0.0]) == 0.0);
 }

@@ -497,14 +497,17 @@ pub fn normalise(x: &mut [f32], rate: u32, lufs: f64) {
 }
 
 /// The long-term balance of speech: the share of its energy below 120 Hz and between 1 and
-/// 4 kHz, and its tilt (the mean level of the 1, 2 and 4 kHz octaves minus that of the 125 and
-/// 250 Hz ones, dB) — how the mix measures a voice for small speakers.
+/// 4 kHz, its tilt (the mean level of the 1, 2 and 4 kHz octaves minus that of the 125 and
+/// 250 Hz ones, dB) — how the mix measures a voice for small speakers — and the consonant band:
+/// the share of the 2 and 4 kHz octaves (1.4–5.7 kHz, where the consonants that make words
+/// understood are), dB.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Balance {
     pub sub: f64,
     pub presence: f64,
     pub tilt_db: f64,
+    pub consonant_db: f64,
 }
 
 /// [`Balance`] of `x` (mono at `rate`).
@@ -517,10 +520,12 @@ pub fn balance(x: &[f32], rate: u32) -> Balance {
     let hi = (oct(1000.0) + oct(2000.0) + oct(4000.0)) / 3.0;
     let lo = (oct(125.0) + oct(250.0)) / 2.0;
     let tilt = hi - lo;
+    let consonant = 10.0 * ((10f64.powf(oct(2000.0) / 10.0) + 10f64.powf(oct(4000.0) / 10.0)).max(1e-12)).log10();
     Balance {
         sub: b.shares.get(SUB).copied().unwrap_or(0.0),
         presence: b.shares.get(PRESENCE).copied().unwrap_or(0.0),
         tilt_db: if tilt.is_finite() { tilt } else { 0.0 },
+        consonant_db: if consonant.is_finite() { consonant } else { -120.0 },
     }
 }
 
