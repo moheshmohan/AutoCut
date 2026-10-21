@@ -69,22 +69,25 @@ a later `decode` call or `flush` (each carries the `pts` of the chunk that showe
 
 The calling thread parses the uncompressed and compressed headers and manages the eight reference
 slots, the four probability contexts, segmentation map and previous-frame motion vectors. Each tile
-column is decoded by one `TileDecoder` (rayon pool) into a private strip of samples and mode info
-(tile rows of a column are decoded in order: they share above contexts). Counts are then merged
-for backward adaptation, the mode info is assembled (the next frame reads it for motion vector
-prediction and segment ids) and the frame goes into the reference slots at once, while its
-**post stage** runs on a thread of its own: it assembles each superblock row ("band") from the
-strips, loop filters it superblock by superblock in raster order (so the result is the
-specification's), publishes the band above it once that can no longer change (`OnceLock` per
-band; the 16-wide filter of row r reads 8 and changes 7 rows of row r - 1, which travel in 8
-padding rows on top of each band) and copies it into the output picture. Motion compensation of
-later frames reads reference rows through `Frame::row` / `Frame::span`, which wait for exactly
-the bands a block reaches, so the next frames' tile columns decode while earlier frames are still
-being filtered. Probability adaptation needs only the counts, so even backward-adaptive streams
-start the next frame before the loop filter is done; frame-parallel / error-resilient streams
-(no backward adaptation) never wait at all. Results never depend on scheduling: the conformance
-suite decodes every fixture with 1, 3 and all threads. Samples are `u16` internally for every bit
-depth.
+column is decoded by one `TileDecoder` into a private strip of samples and mode info (tile rows of
+a column are decoded in order: they share above contexts); the calling thread decodes columns
+itself and helpers on the rayon pool take the others, so no column waits for a helper to wake up.
+Each frame's **post stage** runs on a thread of its own from the start of the frame (`Pipe`): as
+soon as a column has decoded a superblock row it hands the row's samples and loop filter mode info
+over, and once every column has, the post thread assembles the row ("band"), loop filters it
+superblock by superblock (rows in order, so the result is the specification's), publishes the band
+above it once that can no longer change (`OnceLock` per band; the 16-wide filter of row r reads 8
+and changes 7 rows of row r - 1, which travel in 8 padding rows on top of each band) and copies it
+into the output picture. A frame is thus mostly filtered by the time its last tile row is decoded.
+Counts are then merged for backward adaptation, the mode info is assembled (the next frame reads
+it for motion vector prediction and segment ids) and the frame goes into the reference slots at
+once. Motion compensation of later frames reads reference rows through `Frame::row` /
+`Frame::span`, which wait for exactly the bands a block reaches. Probability adaptation needs only
+the counts, so even backward-adaptive streams start the next frame before the loop filter is done;
+frame-parallel / error-resilient streams (no backward adaptation) never wait at all. With one
+thread the rows are filtered after the frame's tiles (each band built, filtered and copied out in
+one go, for locality). Results never depend on scheduling: the conformance suite decodes every
+fixture with 1, 3 and all threads. Samples are `u16` internally for every bit depth.
 
 Draft mode (`Decoder::set_draft(true)`; FilmCraft enables it with Settings ▸ Playback ▸ Draft
 decoding while the Program monitor plays at 1/2 or 1/4): frames with `refresh_frame_flags` 0 —

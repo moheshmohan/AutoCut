@@ -1,6 +1,6 @@
 //! Loop filter process (8.8).
 
-use crate::frame::{MiGrid, MiInfo};
+use crate::frame::{MiInfo, MiRows};
 use crate::header::{LoopFilterParams, Segmentation};
 use crate::tables::*;
 
@@ -64,6 +64,22 @@ impl LfFrame {
         let rf = mi.ref_frame[0].max(0) as usize;
         self.lvl[mi.seg_id as usize & 7][rf][mode_type]
     }
+
+    /// What the loop filter needs of the mode info of an 8x8 block.
+    pub fn lf_mi(&self, mi: &MiInfo) -> LfMi {
+        LfMi { sb_size: mi.sb_size, tx_size: mi.tx_size, level: self.level(mi), coded: mi.ref_frame[0] <= INTRA_FRAME || !mi.skip }
+    }
+}
+
+/// The mode info of an 8x8 block as the loop filter uses it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LfMi {
+    pub sb_size: u8,
+    pub tx_size: u8,
+    /// Filter level (8.8.1).
+    pub level: u8,
+    /// Intra, or inter with coefficients: the transform edges inside the block are filtered.
+    pub coded: bool,
 }
 
 /// A mutable view of one plane: sample (x, y) of the plane is `data[(y - oy) * stride + x - ox]`.
@@ -75,7 +91,7 @@ pub struct PlaneView<'a> {
 }
 
 /// Loop filter one superblock (all planes, both passes) at (`row`, `col`) in MI units (8.8.2).
-pub fn filter_superblock(views: &mut [PlaneView; 3], mi: &MiGrid, f: &LfFrame, row: usize, col: usize) {
+pub fn filter_superblock(views: &mut [PlaneView; 3], mi: &MiRows<LfMi>, f: &LfFrame, row: usize, col: usize) {
     for (plane, view) in views.iter_mut().enumerate() {
         for pass in 0..2 {
             filter_sb_plane(view, mi, f, plane, pass, row, col);
@@ -83,7 +99,7 @@ pub fn filter_superblock(views: &mut [PlaneView; 3], mi: &MiGrid, f: &LfFrame, r
     }
 }
 
-fn filter_sb_plane(v: &mut PlaneView, mi: &MiGrid, f: &LfFrame, plane: usize, pass: usize, row: usize, col: usize) {
+fn filter_sb_plane(v: &mut PlaneView, mi: &MiRows<LfMi>, f: &LfFrame, plane: usize, pass: usize, row: usize, col: usize) {
     let (sub_x, sub_y) = if plane > 0 { (f.ss_x, f.ss_y) } else { (0, 0) };
     let (sub, edge_len) = if pass == 0 { (sub_x, 64 >> sub_y) } else { (sub_y, 64 >> sub_x) };
     let (mi_rows, mi_cols) = (f.mi_rows, f.mi_cols);
@@ -102,22 +118,24 @@ fn filter_sb_plane(v: &mut PlaneView, mi: &MiGrid, f: &LfFrame, plane: usize, pa
             }
             let loop_col = ((x >> 3) >> sub_x) << sub_x;
             let loop_row = ((y >> 3) >> sub_y) << sub_y;
-            let m = mi.at(loop_row, loop_col);
+            let Some(m) = mi.at(loop_row, loop_col) else {
+                i += 8;
+                continue;
+            };
             let tx_sz = if plane > 0 {
                 if m.sb_size < BLOCK_8X8 { 0 } else { m.tx_size.min(MAX_TXSIZE[SS_SIZE_LOOKUP[m.sb_size as usize][f.ss_x][f.ss_y].min(12) as usize]) }
             } else {
                 m.tx_size
             };
             let sb_size = if sub == 0 { m.sb_size } else { m.sb_size.max(BLOCK_16X16) } as usize;
-            let is_intra = m.ref_frame[0] <= INTRA_FRAME;
             // Block sizes are powers of two, so the modulo is a mask.
             let is_block_edge = if pass == 0 { x & (8 * NUM_8X8_WIDE[sb_size] as usize - 1) == 0 } else { y & (8 * NUM_8X8_HIGH[sb_size] as usize - 1) == 0 };
-            let tx_ok = edge & ((1 << tx_sz) - 1) == 0 && (is_intra || !m.skip);
+            let tx_ok = edge & ((1 << tx_sz) - 1) == 0 && m.coded;
             if !is_block_edge && !tx_ok {
                 i += 8;
                 continue;
             }
-            let lvl = f.level(m);
+            let lvl = m.level;
             if lvl == 0 {
                 i += 8;
                 continue;

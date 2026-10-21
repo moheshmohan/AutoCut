@@ -35,6 +35,14 @@ pub struct FrameShared<'a> {
     /// Whether syntax elements need to be counted (backward adaptation enabled).
     pub counting: bool,
     pub pools: &'a crate::frame::Pools,
+    /// Receives each superblock row of a tile column once decoded (the loop filter pipeline).
+    pub rows: Option<&'a dyn RowSink>,
+}
+
+/// Takes the superblock rows of the tile columns as they are decoded.
+pub trait RowSink: Sync {
+    /// Superblock row `r` of `strip` is decoded.
+    fn deliver(&self, strip: &Strip, r: usize);
 }
 
 /// Output of one tile column: samples, mode info and segment ids of its columns.
@@ -200,6 +208,9 @@ impl<'a> TileDecoder<'a> {
             self.left_seg_pred[r..r + 8].fill(0);
             for c in (cs..ce).step_by(8) {
                 self.decode_partition(&mut bd, r, c, BLOCK_64X64);
+            }
+            if let Some(sink) = self.s.rows {
+                sink.deliver(&self.strip, r / 8);
             }
         }
         true
