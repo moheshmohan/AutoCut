@@ -279,7 +279,10 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   CDEF and loop restoration in parallel 64-row bands, bit-exact (#847; 1080p GOP 1.16–1.30×,
   low delay 1.28×, 2160p 1.14× at 16 threads). VP9 software decode loop-filters a frame as a
   wavefront over superblock rows on the decoder's pool instead of on one thread, bit-identical,
-  1.2–1.5× faster with 16 threads (#980).
+  1.2–1.5× faster with 16 threads (#980); since then each superblock row is filtered as soon as
+  its tile columns have decoded it, and 10/12-bit motion compensation multiplies 16-bit operands:
+  1080p 10-bit phone clips decode 1.7–1.9× faster with 14 threads and use 21–24 % fewer cycles
+  on one, bit-identical ([crates/vp9/README.md](../crates/vp9/README.md#high-bit-depth-2026-10-21)).
 - **Estimate:** 30–60 h. Doc: [performance.md](performance.md).
 
 ## G17. Audio device and playback reliability

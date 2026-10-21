@@ -353,7 +353,8 @@ section).
 
 AutoCut's Robot Showcase: 5:18 at 1920×1080 30 fps, exported with the YouTube 1080p preset. 56 shots
 on V2 from Google Photos downloads (1080p H.264 from Android and older iPhones; iPhone HDR video served
-as VP9 profile 3, 10-bit 4:4:4 HLG BT.2020, often at 60 fps), each portrait shot also on V1 filled,
+as VP9 10-bit HLG BT.2020, often at 60 fps: profile 2, 4:2:0, in all 239 cached VP9 clips checked on
+2026-10-21), each portrait shot also on V1 filled,
 blurred (Gaussian 60) at 45 % opacity, titles, names, years and a counter on V3-V5, 43 transitions,
 speed-changed shots with frame blending; 56 shot sounds with ducking, 25 narrations, music, SFX and a
 limiter on the Mix bus. 14-core Apple M-series Mac, 2026-10-16, release `filmcraft-cli run` of
@@ -401,12 +402,13 @@ frame) and, on macOS, `cargo test --release -p filmcraft-platform --test export_
 --nocapture` (8 s of it through the whole export: 53.6 fps before, 150 fps after with VideoToolbox, 81
 fps with the built-in encoder).
 
-Not done: the HLG sections are now the slowest (75 fps; software VP9 profile 3 decoding is serial per
+Not done: the HLG sections are now the slowest (75 fps; software VP9 decoding is serial per
 source, 2 samples per frame at 60 fps, and a batch's frames wait for it: decoding the next batch ahead
 would overlap it, but needs the GOP cache's per-source budget, 64 frames of 12 MB, raised to hold two
 batches); transitions with many taps (zoom blur, motion blur) are now the largest CPU cost of the
 frames they cover; GPU rendering (Auto) did not change the export's speed in a quick check and stays
-off by default.
+off by default. (VP9 decoding itself has since become 1.7–1.9× faster with 14 threads on these
+clips: [crates/vp9/README.md](../crates/vp9/README.md#high-bit-depth-2026-10-21).)
 
 ## Results (HW3: VideoToolbox hardware H.265 (HEVC) encoding, against hardware H.264)
 

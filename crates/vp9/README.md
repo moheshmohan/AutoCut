@@ -200,12 +200,70 @@ Single-threaded 4K time now splits into coefficient tokens (bool decoding) ~27 %
 ~25 % (two thirds of it the vertical-edge transposes and per-group decisions), motion
 compensation ~15 %, inverse transforms ~8 %, intra prediction ~6 %.
 
+### High bit depth (2026-10-21)
+
+Phone footage from Google Photos is mostly 1080p VP9 profile 2 (10-bit 4:2:0, 60 fps, 4 tile
+columns, backward adaptation, compound prediction in 80 % of the frames), where motion
+compensation was 46-50 % of single-threaded time: smooth content means large blocks with
+sub-sample vectors, i.e. the 2D 8-tap filter on 64x64 and 32x32 blocks. Same machine, shared
+with other lanes' builds (load average 20-50), 300 frames of three of the owner's clips (not in
+the repository), median of 3 interleaved runs. Instructions and cycles are counted by the kernel
+(`/usr/bin/time -l`, all threads); instructions do not depend on the load, wall-clock fps does.
+
+| clip (1080p 10-bit) | threads | M instructions / frame | M cycles / frame | fps (median, same load) |
+|---|---|---|---|---|
+| IMG_9626 | 1 | 211.0 → **127.6** (−40 %) | 50.9 → **39.3** (−23 %) | 56.2 → **69.5** |
+| IMG_9626 | 14 | 219.0 → **132.0** | 69.6 → **54.5** | 94.4 → **159.3** (1.7×) |
+| IMG_4820 | 1 | 221.7 → **136.0** (−39 %) | 51.6 → **39.3** (−24 %) | 53.4 → **64.2** |
+| IMG_4820 | 14 | 230.0 → **140.7** | 70.8 → **54.3** | 90.2 → **159.6** (1.8×) |
+| IMG_8489 (portrait) | 1 | 223.4 → **146.2** (−35 %) | 54.6 → **43.4** (−21 %) | 50.4 → **63.7** |
+| IMG_8489 (portrait) | 14 | 230.6 → **149.9** | 72.4 → **56.5** | 78.0 → **152.0** (1.9×) |
+
+With the machine quieter (load ~20) IMG_9626 decodes at 291 → 430 fps with 14 threads. The
+headless playback benchmark (`cargo xtask bench-playback`, GPU path, the `h264-1080` scenario
+with IMG_9626 as its clip: a 23.976 fps 1080p sequence, 2.5 decoded samples per shown frame)
+needs 63 → 41 ms of CPU per shown frame (1.5 → 1.0 cores) and its p95 frame latency drops from
+59-271 ms to 16-59 ms; with the clip in a 2160p sequence (`vp9-2160`), 58-61 → 39-40 ms.
+
+What changed:
+
+- **Motion compensation kernels.** High bit depth sums multiply sign-extended 16-bit samples
+  and taps into 32-bit lanes (widening multiply-accumulates, 8 products per instruction pair),
+  narrowing with a saturating shift; 16-bit sums stay for 8-bit (the range proofs are in
+  `inter.rs`: 10 / 12-bit sums span about 2^20). Rows are filtered whole (taps outer, samples
+  inner), the form the compiler vectorises without spilling the sums, and the sums start from
+  the first tap (a constant splat became a `memset_pattern16` call per row on Darwin). A 10-bit
+  2D filter went from 1.45 to 0.52 ns per sample (64x64) and from 3.9 to 1.6 (8x8).
+- **No copies around prediction.** Source rows are read in place from the reference bands also
+  when a block's window crosses a band boundary (they were copied into a window first), the
+  window copy for blocks past the left / right edge is a run copy with edge fills, and the
+  first prediction is written straight into the frame (compound blocks average the second one
+  into it).
+- **Loop filter pipelined with the tiles** (see Architecture): the post thread filters each
+  superblock row as soon as every tile column has decoded it. The next frame's columns used to
+  wait for reference rows 30 % of the time; the old wavefront woke a thread per superblock
+  (rows ran ~250 µs apart instead of ~10 µs) and its blocked helpers held pool threads the next
+  frame's columns needed.
+- **Tile columns start at once**: the calling thread decodes columns itself and pool helpers
+  take the rest.
+- **Loop filter decisions**: each superblock resolves the mode info of its 8x8 cells once per
+  plane type instead of once per 8-sample group, edge and pass (87 % of those lookups found no
+  edge).
+
+Single-threaded time now splits into motion compensation ~45 % (within about 1.5x of the
+multiply-accumulate throughput of this formulation), loop filter ~19 % (vertical-edge
+transposes, which safe Rust cannot express as vector permutes, and per-group decisions),
+coefficient tokens ~9 %, band and picture copies ~5 %, inverse transforms ~5 % (the 10-bit
+column pass is scalar 64-bit).
+
 ## Known gaps
 
 - A frame's tile decoding is still a barrier: the next frame starts once every tile column of
-  the current one is done (its post stage then runs alongside), so streams with a single tile
-  column decode their tiles on one thread at a time; the post stage (loop filter) of one frame
-  runs on one thread.
+  the current one is done (its loop filter runs alongside), so streams with a single tile column
+  decode their tiles on one thread at a time, and a 1080p frame (4 tile columns at most) waits
+  for its slowest column. Splitting entropy decoding from reconstruction would let the next
+  frame's parsing start while the current one is reconstructed. The loop filter of one frame
+  runs on one thread (on a quiet machine it takes about as long per frame as the tile phase).
 - Scaled references combined with compound prediction are not covered by a fixture (both are
   verified separately; libvpx through ffmpeg cannot change size mid-stream and the synthetic
   splice cannot keep the compound streams' probability contexts intact).
