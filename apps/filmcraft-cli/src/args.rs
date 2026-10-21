@@ -132,6 +132,20 @@ const VALUED: &[&str] = &[
     // locks hold
     "--minutes",
     "--note",
+    // the voice lab: voice refs, audition, promote, mix-check
+    "--max-minutes",
+    "--max-clip-seconds",
+    "--max-files",
+    "--min-similarity",
+    "--top",
+    "--per-clip",
+    "--held-out-seconds",
+    "--engines",
+    "--takes",
+    "--genuine",
+    "--chains",
+    "--lufs",
+    "--transcript",
     // natural spoken Malayalam: ml-lint, ml-script
     "--max-words",
     "--model",

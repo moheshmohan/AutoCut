@@ -37,6 +37,7 @@ mod ml_script;
 mod probe;
 mod publish;
 mod showcase_tools;
+mod voice;
 mod youtube;
 
 use args::{Args, parse_value};
@@ -285,6 +286,25 @@ SUBCOMMANDS
                                 (--language, default ml) beside --out as <out>-ml.json:
                                 {\"intro\", \"outro\", \"lines\": {\"<label>\": \"…\"}} read over it; it
                                 fails on any spoken entry without a line
+  voice refs --voice clone:<name> <media|folder|project.fcproj>… [--out DIR] [--max-minutes 240]
+         [--max-clip-seconds 600] [--min-similarity 0.85] [--top 6]
+                                the voice lab (docs/voice-recording.md): stretches of the voice's
+                                own speaker in their clips (tone-colour similarity to its
+                                reference), ranked as new references for VoxCPM (English,
+                                10–30 s) and IndicF5 (Malayalam, 6–12 s) on similarity, signal
+                                quality, whole sentences, length and language: refs.json and the
+                                candidates' WAVs (voice.findReferences)
+  voice audition --voice clone:<name> --report refs.json [--top 3] [--engines voxcpm,indicf5]
+                                the current reference and the best candidates speak a test set;
+                                scored on similarity to held-out genuine speech, CER and
+                                sentence-start CER, artefacts: audition.json, WAV/M4A, README.txt
+  voice promote --voice clone:<name> --report audition.json <id> | voice versions --voice …
+  voice rollback --voice clone:<name> <r0|r1|…>
+                                make a candidate the voice's reference (the old one kept as a
+                                version), list the versions, go back to one
+  voice mix-check --takes <wav|folder> (--genuine <wav> | --report refs.json) [--chains c.json]
+                                how far the showcase's narration chain moves a voice: speaker
+                                similarity of readings and genuine speech before and after it
   ml-lint <script-ml.json | plan-ml.json | script.txt> [--plan plan.json] [--max-words 14]
          [--fix --out fixed.json] [--hints] [--report-out report.json] [--strict]
                                 a Malayalam narration script checked for what makes it sound
@@ -2153,6 +2173,7 @@ async fn cli() {
         "showcase-remix" => showcase_tools::remix(&a).await,
         // natural spoken Malayalam: a script checked, a plan's English translated
         "ml-lint" => ml_script::lint(&a),
+        "voice" => voice::run(&a).await,
         "ml-script" => ml_script::translate(&a).await,
         "sheet" => showcase_tools::sheet(&a).await,
         "frames" => showcase_tools::frames(&a).await,
