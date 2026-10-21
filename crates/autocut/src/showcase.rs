@@ -26,6 +26,7 @@
 
 use std::collections::BTreeMap;
 
+use filmcraft_engine::ken_burns::Move as KenBurns;
 use filmcraft_engine::project::Delivery;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -199,7 +200,28 @@ pub struct Shot {
     /// This shot's privacy ([`crate::privacy::LocalRedact`]): `false`, or named targets to hide.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redact: Option<Value>,
+    /// A photo, not a video: held [`Shot::hold`] seconds (or as long as its entry's words
+    /// need), with a slow pan and zoom aimed at its subject ([`Shot::subject`]); no sound.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub photo: bool,
+    /// How long a photo is held, seconds ([`shot_edit::MIN_HOLD`]..[`PHOTO_REACH`]); absent: its
+    /// share of the entry's time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<f64>,
+    /// A photo's move: `"in"` (wide to its subject), `"out"`, `"pan"` (across it) or `"none"`;
+    /// absent: in and out in turn from one photo to the next.
+    #[serde(default, rename = "move", skip_serializing_if = "Option::is_none")]
+    pub motion: Option<String>,
+    /// The subject's box where it is largest, `[x, y, w, h]` (0..1 of the picture), from the
+    /// analysis: what a photo's move ends on (or starts from).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<[f64; 4]>,
 }
+
+/// Longest a photo is held, seconds: a still can be shown as long as the words need, within this
+/// (its shot's `clip_seconds` in a plan; the window machinery treats it as a clip of this length
+/// in which the subject is always in view).
+pub const PHOTO_REACH: f64 = 20.0;
 
 /// A sampled moment of a clip that shows the subject: seconds into the clip, the share of the
 /// frame its box covers, and the box's centre (0..1 of the frame, x right, y down).
@@ -221,6 +243,24 @@ impl Shot {
     fn of(f: &ClipFacts) -> Self {
         let (seen, unseen): (Vec<&crate::analyze::FrameFact>, Vec<&crate::analyze::FrameFact>) = f.frames.iter().partition(|x| x.present);
         let largest = seen.iter().filter(|x| x.seconds.is_finite() && x.area.is_finite() && x.area > 0.0).max_by(|a, b| a.area.total_cmp(&b.area));
+        let subject = f.subject.filter(|b| b.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) && b[2] > 0.0 && b[3] > 0.0);
+        let largest = largest.map(|x| Moment {
+            seconds: x.seconds,
+            area: x.area.min(1.0),
+            center: x.center.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.5 }),
+        });
+        if f.photo {
+            // a still: in view however long it is held, its one moment at 0 s
+            return Self {
+                item: f.item,
+                name: f.name.clone(),
+                clip_seconds: PHOTO_REACH,
+                photo: true,
+                subject,
+                largest: largest.map(|m| Moment { seconds: 0.0, ..m }),
+                ..Self::default()
+            };
+        }
         Self {
             item: f.item,
             name: f.name.clone(),
@@ -228,13 +268,25 @@ impl Shot {
             best: f.best,
             seen: seen.iter().map(|x| x.seconds).collect(),
             unseen: unseen.iter().map(|x| x.seconds).collect(),
-            largest: largest.map(|x| Moment {
-                seconds: x.seconds,
-                area: x.area.min(1.0),
-                center: x.center.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.5 }),
-            }),
+            largest,
+            subject,
             ..Self::default()
         }
+    }
+
+    /// The subject's box `[x, y, w, h]` (0..1): the analysis' own, else one the size of its
+    /// largest moment's share of the picture around that moment's centre (square in pixels for
+    /// a picture of shape `aspect`), else none.
+    pub fn subject_box(&self, aspect: f64) -> Option<[f64; 4]> {
+        if let Some(b) = self.subject.filter(|b| b.iter().all(|v| v.is_finite()) && b[2] > 0.0 && b[3] > 0.0) {
+            return Some(b);
+        }
+        let m = self.largest.filter(|m| m.area.is_finite() && m.area > 0.0)?;
+        let aspect = if aspect.is_finite() && aspect > 0.0 { aspect } else { 1.0 };
+        let (w, h) = ((m.area.min(1.0) / aspect).sqrt().clamp(0.02, 1.0), (m.area.min(1.0) * aspect).sqrt().clamp(0.02, 1.0));
+        let c = m.center.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.5 });
+        let (x, y) = ((c[0] - w / 2.0).clamp(0.0, 1.0 - w), (c[1] - h / 2.0).clamp(0.0, 1.0 - h));
+        Some([x, y, w, h])
     }
 
     /// The stretches of the clip where the subject is in view, `(start, end)` seconds in time
@@ -553,9 +605,10 @@ fn in_view(f: &ClipFacts) -> f64 {
 }
 
 /// One counted robot from its clips (oldest first): the (up to) [`MAX_SHOTS`] clips that show it
-/// longest, in time order; the most specific label among them all — a name read on the robot
-/// ([`crate::analyze::FrameText::names`]), then any specific label, the earliest among equals —
-/// with that clip's kind and description; the date it was first filmed.
+/// longest, in time order — its videos, or its photos when it has no video; the most specific
+/// label among them all — a name read on the robot ([`crate::analyze::FrameText::names`]), then
+/// any specific label, the earliest among equals — with that clip's kind and description; the
+/// date it was first filmed (or photographed).
 fn entry(number: usize, members: &[&ClipFacts], subject: &str) -> Option<Entry> {
     let first = members.first()?;
     let rank = |f: &ClipFacts| {
@@ -568,7 +621,9 @@ fn entry(number: usize, members: &[&ClipFacts], subject: &str) -> Option<Entry> 
         }
     };
     let named = members.iter().enumerate().max_by_key(|(i, f)| (rank(f), std::cmp::Reverse(*i))).map_or(*first, |(_, f)| *f);
-    let mut shown: Vec<(usize, &ClipFacts)> = members.iter().copied().enumerate().collect();
+    // its videos when it has any; a robot that was only photographed is shown in its photos
+    let any_video = members.iter().any(|f| !f.photo);
+    let mut shown: Vec<(usize, &ClipFacts)> = members.iter().copied().enumerate().filter(|(_, f)| !(any_video && f.photo)).collect();
     shown.sort_by(|(i, a), (j, b)| in_view(b).total_cmp(&in_view(a)).then(i.cmp(j)));
     shown.truncate(MAX_SHOTS);
     shown.sort_by_key(|(i, _)| *i);
@@ -932,6 +987,12 @@ pub struct PlacedShot {
     /// The plan's level for that sound, dB from the mix's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<f64>,
+    /// A photo, held with a slow pan and zoom (`clip.kenBurns`): its move (`in`, `out`, `pan`,
+    /// `none`). It has no sound, on purpose.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub photo: bool,
+    #[serde(default, rename = "move", skip_serializing_if = "Option::is_none")]
+    pub motion: Option<String>,
 }
 
 /// A chapter of the video.
@@ -1092,13 +1153,82 @@ struct Framing {
     focus: Option<[f64; 2]>,
     /// Its own sound is placed (a shot at another speed has none).
     sound: bool,
+    /// A photo: held with this pan and zoom ([`place_photo`]).
+    photo: Option<PhotoMove>,
+}
+
+/// A photo's pan and zoom (`clip.kenBurns`): which way, a pan's direction, and the subject's box
+/// it aims at (`[x, y, w, h]`, 0..1 of the picture; none: its middle).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PhotoMove {
+    motion: KenBurns,
+    reverse: bool,
+    subject: Option<[f64; 4]>,
+}
+
+/// The photos' moves so far in a show, so the next one goes the other way.
+#[derive(Clone, Copy, Debug, Default)]
+struct PhotoTurns {
+    last: Option<KenBurns>,
+    pans: usize,
+}
+
+impl PhotoTurns {
+    /// The next photo's move: the plan's, else the other way from the photo before (in after
+    /// out, out after in, in first); a pan crosses the other way from the pan before.
+    fn next(&mut self, shot: &Shot, edit: &ShotEdit) -> PhotoMove {
+        let motion = edit.motion.unwrap_or(if self.last == Some(KenBurns::In) { KenBurns::Out } else { KenBurns::In });
+        let reverse = motion == KenBurns::Pan && !self.pans.is_multiple_of(2);
+        if motion == KenBurns::Pan {
+            self.pans += 1;
+        }
+        self.last = Some(motion);
+        PhotoMove::of(shot, edit, motion, reverse)
+    }
+}
+
+impl PhotoMove {
+    /// A photo's `motion`, aimed at the plan's `focus` (with the box's size, or a third of the
+    /// picture), else the analysis' box.
+    fn of(shot: &Shot, edit: &ShotEdit, motion: KenBurns, reverse: bool) -> Self {
+        let found = shot.subject_box(1.0);
+        let subject = match edit.focus {
+            Some([x, y]) => {
+                let (w, h) = found.map_or((0.3, 0.3), |b| (b[2], b[3]));
+                Some([(x - w / 2.0).clamp(0.0, 1.0 - w), (y - h / 2.0).clamp(0.0, 1.0 - h), w, h])
+            }
+            None => found,
+        };
+        Self { motion, reverse, subject }
+    }
+}
+
+/// Whether a photo of shape `aspect` fills a frame of `frame` (cropped, the move aimed at its
+/// subject) rather than being shown whole over its blurred copy: when it is about the frame's
+/// shape, or its subject's box fits in what the crop shows (with a margin). A portrait photo with
+/// no subject found, or a tall robot, is shown whole.
+fn photo_fills(aspect: f64, frame: (f64, f64), subject: Option<[f64; 4]>) -> bool {
+    let (fw, fh) = frame;
+    if !(aspect.is_finite() && aspect > 0.0 && fw > 0.0 && fh > 0.0) {
+        return true;
+    }
+    let frame_aspect = fw / fh;
+    if (aspect - frame_aspect).abs() <= 0.05 {
+        return true;
+    }
+    // the share of the picture's width and height a filling crop shows
+    let vis = if aspect < frame_aspect { (1.0, aspect / frame_aspect) } else { (frame_aspect / aspect, 1.0) };
+    match subject {
+        Some(b) => b[2] <= vis.0 * 0.92 && b[3] <= vis.1 * 0.92,
+        None => aspect >= 1.0,
+    }
 }
 
 impl Framing {
     /// A shot of the show: stabilized when the show is, its analysis' moment, followed when
     /// `follow`, with the plan's controls `edit`, its sound unless it plays at another speed.
     fn of(shot: &Shot, edit: &ShotEdit, speed: f64, follow: bool) -> Self {
-        Self { stabilize: true, moment: shot.largest, follow, fit: edit.fit, focus: edit.focus, sound: speed == 1.0 && !edit.mute }
+        Self { stabilize: true, moment: shot.largest, follow, fit: edit.fit, focus: edit.focus, sound: speed == 1.0 && !edit.mute, photo: None }
     }
 
     /// A shot with only its analysis' moment (the montage, the outro, the thumbnail).
@@ -1222,6 +1352,9 @@ async fn follow_subject(ex: &dyn Executor, clip: u64, aspect: f64, src: f64, dur
 /// blurred, dimmed, enlarged copy filling V1 behind it — still, unless the whole picture was
 /// asked for: then the picture stays whole and the copy behind it pushes in.
 async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64, dur: f64, how: Framing) -> Result<Placed, AutoCutError> {
+    if let Some(ph) = how.photo {
+        return place_photo(ex, tr, item, t, dur, how, ph).await;
+    }
     let frame_aspect = tr.aspect;
     let t = on_frame(t, tr.fps);
     let end = on_frame(t + dur, tr.fps).max(t + 1.0 / tr.fps);
@@ -1270,30 +1403,68 @@ async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64,
     if how.stabilize && tr.stabilize {
         run(ex, "effects.apply", json!({"clips": [fg], "effect": "warp_stabilizer"})).await?;
     }
-    let mut bg = None;
-    if odd && !fill {
-        let r =
-            run(ex, "timeline.place", json!({"item": item, "track": tr.bg, "time": ticks(t), "sourceIn": ticks(src), "duration": ticks(dur), "audio": false}))
-                .await?;
-        if let Some(b) = r["clips"].as_array().and_then(|a| a.first()).and_then(Value::as_u64) {
-            let filled = run(ex, "clip.fillFrame", json!({"clips": [b]})).await?;
-            let scale = filled["clips"].as_array().and_then(|a| a.iter().find(|c| c["clip"].as_u64() == Some(b))).and_then(|c| c["scale"].as_f64());
-            run(ex, "effects.apply", json!({"clips": [b], "effect": "gaussian_blur"})).await?;
-            run(ex, "effects.setParam", json!({"clip": b, "effect": "gaussian_blur", "param": "blurriness", "value": 60.0})).await?;
-            // its edges blurred from its own pixels, not from black
-            run(ex, "effects.setParam", json!({"clip": b, "effect": "gaussian_blur", "param": "repeat_edge", "value": true})).await.ok();
-            run(ex, "effects.setParam", json!({"clip": b, "effect": "opacity", "param": "opacity", "value": BACKDROP_OPACITY})).await?;
-            if let Some(sc) = scale.filter(|s| s.is_finite() && *s > 0.0) {
-                if whole {
-                    push_in(ex, b, sc * BACKDROP_ZOOM, t, end, tr.fps).await.ok();
-                } else {
-                    run(ex, "effects.setParam", json!({"clip": b, "effect": "motion", "param": "scale", "value": sc * BACKDROP_ZOOM})).await.ok();
-                }
-            }
-            bg = Some(b);
+    let bg = if odd && !fill { backdrop(ex, tr, item, (t, end), src, whole).await? } else { None };
+    Ok(Placed { fg, bg, audio, end, fit: odd.then_some(if fill { Fit::Fill } else { Fit::Full }) })
+}
+
+/// The blurred, dimmed, enlarged copy of `item` (`[src, …)`) filling V1 behind a picture shown
+/// whole from `t0` to `t1`: the pillars around a portrait clip or photo. It pushes in when
+/// `moving` (the picture in front stays whole), else it is still.
+async fn backdrop(ex: &dyn Executor, tr: &Tracks, item: u64, (t0, t1): (f64, f64), src: f64, moving: bool) -> Result<Option<u64>, AutoCutError> {
+    let r =
+        run(ex, "timeline.place", json!({"item": item, "track": tr.bg, "time": ticks(t0), "sourceIn": ticks(src), "duration": ticks(t1 - t0), "audio": false}))
+            .await?;
+    let Some(b) = r["clips"].as_array().and_then(|a| a.first()).and_then(Value::as_u64) else { return Ok(None) };
+    let filled = run(ex, "clip.fillFrame", json!({"clips": [b]})).await?;
+    let scale = filled["clips"].as_array().and_then(|a| a.iter().find(|c| c["clip"].as_u64() == Some(b))).and_then(|c| c["scale"].as_f64());
+    run(ex, "effects.apply", json!({"clips": [b], "effect": "gaussian_blur"})).await?;
+    run(ex, "effects.setParam", json!({"clip": b, "effect": "gaussian_blur", "param": "blurriness", "value": 60.0})).await?;
+    // its edges blurred from its own pixels, not from black
+    run(ex, "effects.setParam", json!({"clip": b, "effect": "gaussian_blur", "param": "repeat_edge", "value": true})).await.ok();
+    run(ex, "effects.setParam", json!({"clip": b, "effect": "opacity", "param": "opacity", "value": BACKDROP_OPACITY})).await?;
+    if let Some(sc) = scale.filter(|s| s.is_finite() && *s > 0.0) {
+        if moving {
+            push_in(ex, b, sc * BACKDROP_ZOOM, t0, t1, tr.fps).await.ok();
+        } else {
+            run(ex, "effects.setParam", json!({"clip": b, "effect": "motion", "param": "scale", "value": sc * BACKDROP_ZOOM})).await.ok();
         }
     }
-    Ok(Placed { fg, bg, audio, end, fit: odd.then_some(if fill { Fit::Fill } else { Fit::Full }) })
+    Ok(Some(b))
+}
+
+/// Place photo `item` held `dur` seconds at `t` (both ends on frames) on V2, without sound, with
+/// its slow pan and zoom (`clip.kenBurns`, eased, as slow as its hold asks): filling the frame
+/// with the move aimed at its subject, or — the plan's `fit: "full"`, or a portrait photo whose
+/// subject the crop would cut ([`photo_fills`]) — whole over its blurred copy (the pillars), the
+/// picture breathing towards its subject and the copy pushing in. A move the engine refuses
+/// leaves the photo fitted and still (noted nowhere: it is cosmetic).
+async fn place_photo(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, dur: f64, how: Framing, ph: PhotoMove) -> Result<Placed, AutoCutError> {
+    let t = on_frame(t, tr.fps);
+    let end = on_frame(t + dur, tr.fps).max(t + 1.0 / tr.fps);
+    let r =
+        run(ex, "timeline.place", json!({"item": item, "track": tr.fg, "time": ticks(t), "sourceIn": 0, "duration": ticks(end - t), "audio": false})).await?;
+    let fg =
+        r["clips"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).ok_or_else(|| AutoCutError::Executor("timeline.place placed nothing".into()))?;
+    let size = media_size(ex, item).await.filter(|(w, h)| *w > 0.0 && *h > 0.0);
+    let aspect = size.map_or(tr.aspect, |(w, h)| w / h);
+    let odd = (aspect - tr.aspect).abs() > 0.05;
+    let fill = match how.fit {
+        Some(Fit::Fill) => true,
+        Some(Fit::Full) => false,
+        None => photo_fills(aspect, tr.frame, ph.subject),
+    };
+    let fitted = run(ex, if fill { "clip.fillFrame" } else { "clip.fitToFrame" }, json!({"clips": [fg]})).await?;
+    let mut p = json!({"clip": fg, "move": ph.motion.id(), "fit": if fill { "fill" } else { "full" }, "reverse": ph.reverse});
+    if let Some(b) = ph.subject {
+        p["subject"] = json!(b);
+    }
+    if run(ex, "clip.kenBurns", p).await.is_err()
+        && let Some(scale) = fitted["clips"].as_array().and_then(|a| a.first()).and_then(|c| c["scale"].as_f64())
+    {
+        push_in(ex, fg, scale, t, end, tr.fps).await.ok();
+    }
+    let bg = if odd && !fill { backdrop(ex, tr, item, (t, end), 0.0, true).await? } else { None };
+    Ok(Placed { fg, bg, audio: None, end, fit: odd.then_some(if fill { Fit::Fill } else { Fit::Full }) })
 }
 
 /// The blurred copy behind a whole picture: its opacity over black (dimmed), and how much larger
@@ -1316,7 +1487,7 @@ async fn fade_in(ex: &dyn Executor, audio: Option<u64>) {
 async fn match_colour(ex: &dyn Executor, shots: &[PlacedShot], full: &[bool], notes: &mut Vec<String>) {
     let Some(r) = shots.iter().zip(full).find(|(_, f)| **f).map(|(s, _)| s) else { return };
     let reference = (r.start + r.end) / 2.0;
-    for s in shots.iter().filter(|s| s.item != r.item) {
+    for s in shots.iter().filter(|s| s.item != r.item && !s.photo) {
         // the frame of the shot that is matched: its middle (the playhead's, pinned to the clip)
         let mid = (s.start + s.end) / 2.0;
         let matched = match run(ex, "playhead.set", json!({"time": ticks(mid)})).await {
@@ -1852,11 +2023,23 @@ fn edited_windows(e: &Entry, edits: &[ShotEdit], seconds: f64, must: f64, scene:
             break;
         }
     }
+    // a photo held to the plan's length is held longer, the last first (a still runs out of
+    // nothing; another window of it would start its move again)
+    let mut held = 0.0;
+    for w in wins.iter_mut().rev().filter(|w| w.fixed && w.shot.photo) {
+        let more = (PHOTO_REACH - w.len).max(0.0).min(short);
+        w.len += more;
+        short -= more;
+        held += more;
+        if short <= 1e-6 {
+            break;
+        }
+    }
     // the clip after the last window (half a second at least: no flash of a shot)
     let mut ran_on = 0.0;
     let mut ran_name = String::new();
     if short > 1e-6
-        && let Some(last) = wins.last().cloned()
+        && let Some(last) = wins.last().cloned().filter(|w| !w.shot.photo)
     {
         let from = last.start + last.len;
         let room = (last.shot.clip_seconds - 0.2 - from).max(0.0);
@@ -1883,6 +2066,9 @@ fn edited_windows(e: &Entry, edits: &[ShotEdit], seconds: f64, must: f64, scene:
     let mut said = Vec::new();
     if grown > 0.05 {
         said.push(format!("its other shots run {grown:.1} s longer"));
+    }
+    if held > 0.05 {
+        said.push(format!("its photos are held {held:.1} s longer than their hold"));
     }
     if ran_on > 0.05 {
         said.push(format!("{ran_name} runs on {ran_on:.1} s after its window"));
@@ -2019,7 +2205,7 @@ impl Beats {
 const MAX_MONTAGE: usize = 12;
 
 /// `n` shots for the intro montage: entries spread evenly over the whole show (first and last
-/// included), each one's first shot.
+/// included), each one's first video shot (its first photo when it has no video).
 pub fn montage(entries: &[Entry], n: usize) -> Vec<Shot> {
     let len = entries.len();
     if len == 0 || n == 0 {
@@ -2028,7 +2214,7 @@ pub fn montage(entries: &[Entry], n: usize) -> Vec<Shot> {
     let n = n.min(len);
     let mut picks: Vec<usize> = (0..n).map(|i| if n == 1 { 0 } else { i * (len - 1) / (n - 1) }).collect();
     picks.dedup();
-    picks.into_iter().filter_map(|i| entries.get(i).and_then(|e| e.shots.first()).cloned()).collect()
+    picks.into_iter().filter_map(|i| entries.get(i).and_then(|e| e.shots.iter().find(|s| !s.photo).or(e.shots.first())).cloned()).collect()
 }
 
 /// Furthest a cut moves to land on a beat, seconds (and never more than half a beat).
@@ -2640,6 +2826,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let cut = if beat * 2.0 >= 0.6 { 2.0 * beat } else { 4.0 * beat };
     let picks = montage(entries, ((intro_len / cut).floor() as usize).clamp(1, MAX_MONTAGE));
     let mut at = 0.0;
+    // photos move in and out in turn, one after the other, through the whole show
+    let mut photo_turns = PhotoTurns::default();
     // the picks in turn, the last one to the end of the intro; a clip too short for its turn
     // hands over to the next (round again if need be), so the intro has no black
     let mut i = 0;
@@ -2650,8 +2838,12 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let len = len.min((s.clip_seconds - 0.4).max(0.5));
         // the plan's framing, and its window's start when the turn fits after it
         let ed = ShotEdit::of(s, 0, 0).unwrap_or_default();
-        let start = ed.from.filter(|a| a + len <= s.clip_seconds - 0.2).unwrap_or_else(|| s.window_start(len));
-        let how = Framing { fit: ed.fit, focus: ed.focus, sound: !ed.mute, ..Framing::plain(s.largest, true) };
+        let start = if s.photo { 0.0 } else { ed.from.filter(|a| a + len <= s.clip_seconds - 0.2).unwrap_or_else(|| s.window_start(len)) };
+        let mut how = Framing { fit: ed.fit, focus: ed.focus, sound: !ed.mute, ..Framing::plain(s.largest, true) };
+        if s.photo {
+            how.photo = Some(photo_turns.next(s, &ed));
+            how.sound = false;
+        }
         let shot = place_shot(ex, &tr, s.item, at, start, len, how).await?;
         fade_in(ex, shot.audio).await;
         mix.sounds.extend(shot.audio);
@@ -2781,6 +2973,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 Some(end) if i + 1 == n_wins && slow >= 0.999 && !w.fixed => ((end - at) * w.speed).max(0.5).min(w.reach.max(0.5)),
                 _ => w.len,
             };
+            // a photo is never slowed: it is held as long as a slowed clip would play
+            let len = if s.photo && slow < 0.999 { len / slow.max(0.5) } else { len };
             // the plan's controls (checked before anything was built); a scene has no robot to
             // frame or follow
             let ed = entry_edits.iter().zip(&e.shots).find(|(_, x)| *x == s).map(|(ed, _)| *ed).unwrap_or_default();
@@ -2788,14 +2982,25 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             if scene {
                 how.moment = None;
             }
-            let Placed { fg, bg, audio, end, fit } = place_shot(ex, &tr, s.item, at, w.start, len, how).await?;
+            let motion = if s.photo {
+                let ph = photo_turns.next(s, &ed);
+                how = Framing { photo: Some(ph), sound: false, stabilize: false, ..how };
+                Some(ph.motion.id().to_string())
+            } else {
+                None
+            };
+            let src = if s.photo { 0.0 } else { w.start };
+            let Placed { fg, bg, audio, end, fit } = place_shot(ex, &tr, s.item, at, src, len, how).await?;
             mix.sounds.extend(audio);
             if let (Some(a), Some(db)) = (audio, ed.volume) {
                 gains.push((a, db));
             }
             let mut shot_end = end;
-            // slowed to carry the words, or the plan's speed (sped up: frames sampled, sharp)
-            let change = if slow < 0.999 {
+            // slowed to carry the words, or the plan's speed (sped up: frames sampled, sharp); a
+            // photo has neither
+            let change = if s.photo {
+                None
+            } else if slow < 0.999 {
                 Some((slow, "frameBlending"))
             } else if w.speed != 1.0 {
                 Some((w.speed, if w.speed > 1.0 { "frameSampling" } else { "frameBlending" }))
@@ -2847,7 +3052,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 item: s.item,
                 start: on_frame(at, tr.fps),
                 end: shot_end,
-                source: Some([w.start, w.start + len]),
+                source: Some([src, src + len]),
                 speed: change.map(|c| c.0),
                 fixed: w.fixed,
                 fit,
@@ -2855,8 +3060,11 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 background: bg,
                 sound: audio,
                 volume: audio.and(ed.volume),
+                photo: s.photo,
+                motion,
             });
-            full_frame.push(bg.is_none());
+            // (a photo is not colour-matched to footage, nor footage to it)
+            full_frame.push(bg.is_none() && !s.photo);
             // a slowed shot can end between frames: the next starts on the following frame
             at = (shot_end * tr.fps - 1e-6).ceil() / tr.fps;
         }
@@ -3472,6 +3680,107 @@ mod tests {
             frames: vec![FrameFact { seconds: 6.0, present: true, area: 0.3, center: [0.5, 0.5] }],
             ..ClipFacts::default()
         }
+    }
+
+    /// `fact` as a photo of a robot in the box `subject`.
+    fn photo(item: u64, label: &str, unix: i64, subject: [f64; 4]) -> ClipFacts {
+        let f = fact(item, label, "humanoid", unix, 1.0);
+        ClipFacts { photo: true, seconds: 5.0, best: 0.0, subject: Some(subject), frames: vec![FrameFact { seconds: 0.0, ..f.frames[0].clone() }], ..f }
+    }
+
+    #[test]
+    fn a_robot_only_photographed_is_shown_in_its_photos_one_filmed_in_its_video() {
+        let day = 1_665_446_400;
+        let facts = vec![
+            // Ameca: two photos and a video of it (the same identity)
+            ClipFacts { identity: Some(1), ..photo(1, "Ameca humanoid robot", day, [0.4, 0.1, 0.2, 0.6]) },
+            ClipFacts { identity: Some(1), ..fact(2, "Ameca humanoid robot", "humanoid", day + 60, 1.0) },
+            ClipFacts { identity: Some(1), ..photo(3, "Ameca humanoid robot", day + 120, [0.4, 0.1, 0.2, 0.6]) },
+            // a robot only photographed
+            ClipFacts { identity: Some(2), ..photo(4, "Small toy robot", day + 86_400, [0.1, 0.2, 0.3, 0.3]) },
+        ];
+        let e = group(&facts, "robot", 0.3);
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0].shots.iter().map(|s| (s.item, s.photo)).collect::<Vec<_>>(), vec![(2, false)], "its video, not its photos");
+        let s = &e[1].shots[0];
+        assert!(s.photo && s.item == 4, "{s:?}");
+        assert_eq!((s.clip_seconds, s.best, s.subject), (PHOTO_REACH, 0.0, Some([0.1, 0.2, 0.3, 0.3])));
+        assert!(s.seen.is_empty() && s.unseen.is_empty(), "a still is in view however long it is held");
+        assert_eq!(s.spans().len(), 1);
+        // the photo's box survives a plan written and read back
+        let back: Shot = serde_json::from_value(serde_json::to_value(s).unwrap()).unwrap();
+        assert_eq!(&back, s);
+        let v = serde_json::to_value(s).unwrap();
+        assert_eq!((v["photo"].as_bool(), v.get("hold"), v.get("move")), (Some(true), None, None), "{v}");
+        // the montage takes an entry's video before its photos
+        let mixed = Entry { shots: vec![Shot { item: 9, photo: true, ..Shot::default() }, Shot { item: 8, ..Shot::default() }], ..Entry::default() };
+        assert_eq!(montage(&[mixed], 1)[0].item, 8);
+    }
+
+    #[test]
+    fn a_portrait_photo_is_whole_unless_its_robot_fits_the_crop() {
+        let frame = (1920.0, 1080.0);
+        // a 3:4 portrait photo filling 16:9 shows 42 % of its height
+        assert!(!photo_fills(0.75, frame, None), "no robot found: the whole photo, over pillars");
+        assert!(!photo_fills(0.75, frame, Some([0.3, 0.05, 0.4, 0.9])), "a tall robot would be cut");
+        assert!(photo_fills(0.75, frame, Some([0.4, 0.3, 0.2, 0.3])), "a small robot fits the crop");
+        // landscape photos fill
+        assert!(
+            photo_fills(4.0 / 3.0, frame, None)
+                && photo_fills(1.5, frame, Some([0.0, 0.0, 0.5, 0.5]))
+                && photo_fills(16.0 / 9.0, frame, Some([0.0, 0.0, 1.0, 1.0]))
+        );
+        assert!(photo_fills(f64::NAN, frame, None) && photo_fills(1.0, (0.0, 0.0), None), "sizes that make no sense: as filled");
+    }
+
+    #[test]
+    fn photo_moves_take_turns() {
+        let mut turns = PhotoTurns::default();
+        let shot = Shot { photo: true, subject: Some([0.2, 0.2, 0.2, 0.2]), ..Shot::default() };
+        let plain = ShotEdit { photo: true, mute: true, ..ShotEdit::default() };
+        let pan = ShotEdit { motion: Some(KenBurns::Pan), ..plain };
+        let seq: Vec<(KenBurns, bool)> = [plain, plain, pan, plain, pan, plain]
+            .iter()
+            .map(|e| {
+                let m = turns.next(&shot, e);
+                (m.motion, m.reverse)
+            })
+            .collect();
+        assert_eq!(
+            seq,
+            vec![(KenBurns::In, false), (KenBurns::Out, false), (KenBurns::Pan, false), (KenBurns::In, false), (KenBurns::Pan, true), (KenBurns::In, false)]
+        );
+        assert_eq!(turns.next(&shot, &plain).subject, Some([0.2, 0.2, 0.2, 0.2]), "aimed at the analysis' box");
+        // the plan's focus moves the aim, keeping the box's size, inside the picture
+        let focused = turns.next(&shot, &ShotEdit { focus: Some([0.95, 0.5]), ..plain });
+        let b = focused.subject.unwrap();
+        assert!((b[0] - 0.8).abs() < 1e-9 && (b[1] - 0.4).abs() < 1e-9 && b[2] == 0.2, "{b:?}");
+        // a box from an older plan's moment alone
+        let old = Shot { largest: Some(Moment { seconds: 0.0, area: 0.04, center: [0.5, 0.5] }), ..Shot::default() };
+        let b = old.subject_box(1.0).unwrap();
+        assert!((b[2] - 0.2).abs() < 1e-9 && (b[0] - 0.4).abs() < 1e-9, "{b:?}");
+        assert_eq!(Shot::default().subject_box(1.0), None);
+    }
+
+    #[test]
+    fn a_photo_holds_as_long_as_the_words_need() {
+        let s = Shot { item: 1, name: "a.jpg".into(), photo: true, clip_seconds: PHOTO_REACH, hold: Some(3.0), ..Shot::default() };
+        let e = Entry { number: 1, shots: vec![s.clone()], ..Entry::default() };
+        let edits = shot_edit::check(std::slice::from_ref(&e)).unwrap();
+        assert_eq!((edits[0][0].from, edits[0][0].to, edits[0][0].mute), (Some(0.0), Some(3.0), true));
+        // the words fit in the hold: exactly the hold
+        let (w, note) = edited_windows(&e, &edits[0], 6.0, 2.5, false);
+        assert_eq!((w.len(), w[0].len, note), (1, 3.0, None));
+        // longer words: the photo is held on, never a second window of it (its move would restart)
+        let (w, note) = edited_windows(&e, &edits[0], 6.0, 8.0, false);
+        assert_eq!(w.len(), 1);
+        assert!((w[0].len - 8.0).abs() < 1e-9, "{w:?}");
+        assert!(note.is_some_and(|n| n.contains("held 5.0 s longer")));
+        // without a hold, its share of the entry
+        let e = Entry { number: 1, shots: vec![Shot { hold: None, ..s }], ..Entry::default() };
+        let w = in_view_windows(&e, 6.0);
+        assert_eq!(w.len(), 1);
+        assert!((w[0].len - 6.0).abs() < 1e-9 && w[0].reach > 6.0, "{w:?}");
     }
 
     #[test]

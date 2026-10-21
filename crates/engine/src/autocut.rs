@@ -4,7 +4,7 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `autocut.analyze` | job: which clips show `subject` (or what a `prompt` asks for; of `items`, or of the Google Photos `album`, filmed `since` a date), what it is, when; the report is kept in the session |
+//! | `autocut.analyze` | job: which clips and photos show `subject` (or what a `prompt` asks for; of `items`, or of the Google Photos `album`, filmed `since` a date; `photos: false` for videos only), what it is, when; the report is kept in the session |
 //! | `autocut.showcasePlan` | job: group the report's clips into entries (or take reviewed `entries`) and write the voice-over; the plan is kept |
 //! | `autocut.makeShowcase` | job: both, one after the other (Sequence ▸ Make a Showcase…, and AutoCut prompts like "make a video of every robot since 2020") |
 //! | `autocut.showcaseBuild` | job: build the plan (the kept one, or `plan`) into a new sequence; `export` it (YouTube 1080p, chapters and a QA report beside it) and `upload` the export to Google Photos (into `uploadAlbum` too) |
@@ -307,7 +307,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.analyze",
             "Find Every Clip of a Subject",
             &[],
-            r#"{"subject":str?,"prompt":str?,"items":[id]?,"album":str?,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"frames":1..8=6,"screen":0..8=0,"compare":u32=150,"fresh":bool=false,"wait":bool=false}"#,
+            r#"{"subject":str?,"prompt":str?,"items":[id]?,"album":str?,"photos":bool=true,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"frames":1..8=6,"screen":0..8=0,"compare":u32=150,"fresh":bool=false,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Analyze, p),
         ),
         job(
@@ -321,7 +321,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.makeShowcase",
             "Make a Showcase…",
             &["Sequence"],
-            r#"{"subject":str?,"prompt":str?,"items":[id]?,"album":str?,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"title":str?,"voice":str?,"mood":str?,"frames":1..8=6,"screen":0..8=0,"compare":u32=150,"fresh":bool=false,"wait":bool=false}"#,
+            r#"{"subject":str?,"prompt":str?,"items":[id]?,"album":str?,"photos":bool=true,"since":"YYYY|YYYY-MM|YYYY-MM-DD"?,"title":str?,"voice":str?,"mood":str?,"frames":1..8=6,"screen":0..8=0,"compare":u32=150,"fresh":bool=false,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Make, p),
         ),
         job(
@@ -477,6 +477,12 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
         put(&mut out, "compare", count_p(cmd, p, "compare", 0, MAX_COMPARE)?.map(|n| json!(n)));
         // analyse again every clip the analysis cache already knows
         put(&mut out, "fresh", bool_p(p, "fresh").filter(|f| *f).map(Value::Bool));
+        // photos are kept by default: only "videos only" is passed on
+        match p.get("photos") {
+            None | Some(Value::Null) | Some(Value::Bool(true)) => {}
+            Some(Value::Bool(false)) => put(&mut out, "photos", Some(Value::Bool(false))),
+            Some(_) => return Err(bad(cmd, "`photos` is true (photos too, the default) or false (videos only)")),
+        }
     }
     if kind == TaskKind::Plan {
         put(&mut out, "subject", text_p(cmd, p, "subject", MAX_SUBJECT_CHARS)?.map(Value::String));

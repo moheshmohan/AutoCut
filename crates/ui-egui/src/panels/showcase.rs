@@ -2,7 +2,8 @@
 //! built. "Analyze…" finds every clip that shows a subject (filmed since a date, or as a request
 //! in words; of the whole project, or only the clips of a Google Photos album) and writes a plan; the entries are listed in date order, each with a thumbnail, its
 //! label, description and the line the narrator says, a switch to leave it out, "Merge with
-//! previous" (the same robot again) and its shots (each plays in the Source monitor). Title,
+//! previous" (the same robot again) and its shots (each plays in the Source monitor; a photo says
+//! so, and its move). Title,
 //! voice (cloned voices included), mood, intro and outro are the plan's too. "Write script" has
 //! the script model write the words again for the entries as reviewed; "Build" and "Build and
 //! export" make the sequence (and the export, optionally uploaded to Google Photos).
@@ -863,7 +864,17 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 });
                 if e.open {
                     for (k, (item, name, best)) in shots(&e.entry).into_iter().enumerate() {
-                        let b = ui.small_button(format!("▶ {name} at {best:.1} s"));
+                        // a photo: held with a slow pan and zoom (its move, when the plan gives one)
+                        let shot = &e.entry["shots"][k];
+                        let text = if shot["photo"] == Value::Bool(true) {
+                            match shot["move"].as_str() {
+                                Some(m) => format!("▶ {name} (photo, {m})"),
+                                None => format!("▶ {name} (photo)"),
+                            }
+                        } else {
+                            format!("▶ {name} at {best:.1} s")
+                        };
+                        let b = ui.small_button(text);
                         add(auto, ui, &format!("showcase.entry.{i}.shot.{k}"), b.rect, "Play shot");
                         if b.clicked() {
                             actions.push(Action::Play { item, seconds: best });

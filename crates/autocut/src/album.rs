@@ -1,7 +1,9 @@
-//! A Google Photos album as the seed of a showcase: the user adds the clips to an album in
-//! Google Photos, and a showcase job given `album` (`autocut.analyze` / `autocut.makeShowcase`,
-//! `filmcraft-cli showcase --album`) picks all of it, imports it — reusing what the project
-//! already holds — and analyses exactly those clips.
+//! A Google Photos album as the seed of a showcase: the user adds the clips — and the photos of
+//! robots that were never filmed — to an album in Google Photos, and a showcase job given
+//! `album` (`autocut.analyze` / `autocut.makeShowcase`, `filmcraft-cli showcase --album`) picks
+//! all of it, imports it — reusing what the project already holds — and analyses exactly those
+//! items. Photos (JPEG, HEIC/HEIF, PNG: downloaded as Google's originals, full resolution) are
+//! kept unless the pick is `videos_only`; a showcase shows them with a slow pan and zoom.
 //!
 //! Why the picker: Google lets an app read back only the albums and items it created itself
 //! (the Library API's read scopes for everything else were retired on 2025-03-31), so clips a
@@ -24,7 +26,8 @@ use crate::{AutoCutError, Executor};
 pub struct AlbumPick {
     /// The album's exact title in Google Photos.
     pub title: String,
-    /// Download only its videos (a showcase is built from video clips).
+    /// Download only its videos, leaving its photos out (by default photos are kept: a robot
+    /// that was only photographed is shown as a photo).
     pub videos_only: bool,
     /// Skip items created before this date (`YYYY-MM-DD`): they are not downloaded.
     pub since: Option<String>,
@@ -40,7 +43,7 @@ pub struct AlbumFetched {
     pub cached: usize,
     /// `"<file>: <why>"` for items that could not be downloaded.
     pub failed: Vec<String>,
-    /// `"<file>: <why>"` for items left out (photos, items before `since`).
+    /// `"<file>: <why>"` for items left out (items before `since`; photos of a videos-only pick).
     pub skipped: Vec<String>,
     /// What the agent that drove the picker said, if one did.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,6 +86,20 @@ pub async fn import(ex: &dyn Executor, paths: &[String]) -> Result<Imported, Aut
     Ok(Imported { items: ids("items"), reused: ids("reused"), errors })
 }
 
+/// File extensions of the photos an album brings (as Google Photos names its originals).
+pub const PHOTO_EXTENSIONS: [&str; 7] = ["jpg", "jpeg", "png", "heic", "heif", "hif", "webp"];
+
+/// Whether `path` names a photo (by its extension, any case), not a video.
+pub fn is_photo(path: &str) -> bool {
+    std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| PHOTO_EXTENSIONS.iter().any(|p| e.eq_ignore_ascii_case(p)))
+}
+
+/// How many of `paths` are photos ([`is_photo`]) and how many videos.
+pub fn count_kinds(paths: &[String]) -> (usize, usize) {
+    let photos = paths.iter().filter(|p| is_photo(p)).count();
+    (photos, paths.len() - photos)
+}
+
 /// `YYYY-MM-DD` of a Unix time (UTC): the date a pick's `since` takes.
 pub fn day_of(unix: i64) -> String {
     let (y, m, d) = crate::showcase::ymd(unix);
@@ -123,6 +140,18 @@ impl AlbumSource for FixedAlbum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn photos_are_told_from_videos_by_name() {
+        for p in ["/c/IMG_20221102_193953.jpg", "/c/DSC00036.JPG", "/c/IMG_4512.HEIC", "/c/robot.png", "/c/x.heif"] {
+            assert!(is_photo(p), "{p}");
+        }
+        for v in ["/c/PXL_20240701.mp4", "/c/clip.MOV", "/c/noext", "/c/jpg"] {
+            assert!(!is_photo(v), "{v}");
+        }
+        let paths: Vec<String> = ["a.mp4", "b.HEIC", "c.jpg", "d.mov"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(count_kinds(&paths), (2, 2));
+    }
 
     #[test]
     fn days_for_the_picker() {

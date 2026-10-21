@@ -39,7 +39,11 @@
 //!   or when the plan has no shot of the item, it is a plain shot: the clip's name and length from
 //!   the project ([`clips_from_inspect`]; or the shot's own `name` / `clip_seconds`), the robot
 //!   counted in view across `from`..`to` (`plain: [a, b]`: across that stretch, the window left
-//!   automatic).
+//!   automatic). A **photo** (`"photo": true`, or an item the project holds as a still image) is
+//!   a shot held `hold` seconds with its slow pan and zoom (`move`: `in`, `out`, `pan`, `none`;
+//!   `fit`, `focus`): `{"item": 4977, "photo": true, "hold": 4.0, "move": "in"}`; without an
+//!   analysed shot of it, it aims at the picture's middle (or its `focus`). An entry may mix
+//!   photos and videos.
 //! - **`script`**: `intro`, `outro`, `pronounce` (merged, `null` removes a respelling) and
 //!   `delivery` (`intro`/`outro`). `{count}` / `{Count}` in the intro or outro become the robot
 //!   count in words, and the old count in words or digits ("Forty-three") is updated.
@@ -84,11 +88,12 @@ fn bad(m: impl std::fmt::Display) -> AutoCutError {
     AutoCutError::Other(format!("plan patch: {m}"))
 }
 
-/// A project clip's name and length (seconds), by item id.
-#[derive(Clone, Debug, PartialEq)]
+/// A project clip's name and length (seconds), by item id, and whether it is a photo (a still).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClipInfo {
     pub name: String,
     pub seconds: f64,
+    pub still: bool,
 }
 
 /// The clips of a project, by item id.
@@ -114,7 +119,8 @@ pub fn clips_from_inspect(v: &Value) -> Clips {
                     && d >= 0.0
                 {
                     let name = o.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
-                    out.insert(item, ClipInfo { name, seconds: d / TPS });
+                    let still = o.get("type").and_then(Value::as_str) == Some(crate::analyze::STILL_TYPE);
+                    out.insert(item, ClipInfo { name, seconds: d / TPS, still });
                 }
                 stack.extend(o.values().map(|c| (c, depth + 1)));
             }
@@ -592,6 +598,16 @@ fn shot(spec: &Value, own: &[Value], pool: &[Value], clips: &Clips) -> Result<Va
     let of = |list: &[Value]| list.iter().find(|s| s.get("item").and_then(Value::as_u64) == Some(item)).cloned();
     let analysed = of(own).or_else(|| of(pool));
     let num = |k: &str| fields.get(k).and_then(Value::as_f64).filter(|x| x.is_finite());
+    let known = clips.get(&item);
+    // a photo: said so, held as a still by the project, or the plan's shot of it is one
+    let said = fields.get("photo").and_then(Value::as_bool);
+    let photo = said.unwrap_or(false) || known.is_some_and(|c| c.still) || analysed.as_ref().is_some_and(|a| a.get("photo") == Some(&Value::Bool(true)));
+    if said == Some(true) && known.is_some_and(|c| !c.still) {
+        return Err(format!("item {item} is a video in the project, not a photo"));
+    }
+    if photo && said != Some(false) {
+        return photo_shot(item, fields, analysed, known);
+    }
     let plain = match fields.get("plain") {
         None | Some(Value::Null) | Some(Value::Bool(false)) => analysed.is_none().then_some(None),
         Some(Value::Bool(true)) => Some(None),
@@ -605,7 +621,6 @@ fn shot(spec: &Value, own: &[Value], pool: &[Value], clips: &Clips) -> Result<Va
         (None, Some(Value::Object(o))) => o,
         (None, _) => return Err(format!("item {item}: the plan has no shot of it")),
         (Some(window), analysed) => {
-            let known = clips.get(&item);
             let seconds = num("clip_seconds")
                 .or(known.map(|c| c.seconds))
                 .or_else(|| analysed.as_ref().and_then(|a| a.get("clip_seconds")).and_then(Value::as_f64))
@@ -636,6 +651,41 @@ fn shot(spec: &Value, own: &[Value], pool: &[Value], clips: &Clips) -> Result<Va
         }
     };
     set_fields(&mut out, fields)?;
+    Ok(Value::Object(out))
+}
+
+/// A photo shot from a patch's spec: the plan's analysed shot of it (its subject's box) with the
+/// spec's fields over it, else a plain one — its name from the project, held up to
+/// [`crate::showcase::PHOTO_REACH`], aimed at its middle.
+fn photo_shot(item: u64, fields: &Map<String, Value>, analysed: Option<Value>, known: Option<&ClipInfo>) -> Result<Value, String> {
+    for k in ["from", "to", "speed", "plain"] {
+        if fields.get(k).is_some_and(|v| !v.is_null() && *v != Value::Bool(false)) {
+            return Err(format!("item {item} is a photo: it has no `{k}`; give it a `hold` in seconds"));
+        }
+    }
+    let mut out = match analysed {
+        Some(Value::Object(o)) if o.get("photo") == Some(&Value::Bool(true)) => o,
+        other => {
+            let name = fields
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or(known.map(|c| c.name.clone()))
+                .or_else(|| other.as_ref().and_then(|a| a.get("name")).and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_default();
+            let mut o = Map::new();
+            o.insert("item".into(), json!(item));
+            o.insert("name".into(), json!(name));
+            o.insert("clip_seconds".into(), json!(crate::showcase::PHOTO_REACH));
+            o.insert("best".into(), json!(0.0));
+            o.insert("seen".into(), json!([]));
+            o.insert("unseen".into(), json!([]));
+            o.insert("largest".into(), Value::Null);
+            o
+        }
+    };
+    set_fields(&mut out, fields)?;
+    out.insert("photo".into(), Value::Bool(true));
     Ok(Value::Object(out))
 }
 

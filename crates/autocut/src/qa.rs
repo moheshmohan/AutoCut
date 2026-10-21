@@ -10,7 +10,7 @@
 //!
 //! | check | finds |
 //! |---|---|
-//! | `joins` | on the picture track (V2): gaps of a frame or more, gaps that hold a frame boundary (that frame renders black) and overlaps (errors), clips that do not quite touch (warnings); on the shots' sound track (A1): neighbours that do not touch, so their fades meet silence instead of crossfading (warnings); time where no video track has a clip (errors; a picture that ends before the sound: info) |
+//! | `joins` | on the picture track (V2): gaps of a frame or more, gaps that hold a frame boundary (that frame renders black) and overlaps (errors), clips that do not quite touch (warnings); on the shots' sound track (A1): neighbours that do not touch, so their fades meet silence instead of crossfading (warnings; not across a photo, which is silent on purpose); time where no video track has a clip (errors; a picture that ends before the sound: info) |
 //! | `black` | rendered frames whose picture is black or nearly (92 % of the frame darker than 5 % luma, so a counter or lower third over black still counts) — sampled every 2 s, at each picture clip's first frame and at the first frame after it — outside dips to black (errors) |
 //! | `mix` | the mix exported as 32-bit float WAV and metered (BS.1770): integrated loudness outside −16…−14 LUFS (±0.5 LU) and true peak above −1 dBTP (warnings); true peak above 0 dBTP or samples at full scale: clipping (error); the median short-term loudness during narration clips (A2) vs between them: the voice less than 4 dB louder (warning), or not louder at all (error); and per stem (`audio.analyzeMix`, [`mix_findings`]), for small speakers: the narration less than 12 LU above the music while it speaks, the Mix's limiter taking more than 2 dB off the peaks, more than a quarter of the mix's energy below 120 Hz, a narration clip with a clipped source (warnings) |
 //! | `subject` | shots where the grounding model (`AUTOCUT_ANALYSIS_MODEL`, the analysis' prompt) does not find the subject in a rendered frame (warnings); skipped when no model is reachable |
@@ -551,10 +551,16 @@ fn joins(seq: &Seq, opts: &Options, out: &mut Vec<Finding>) -> Check {
             }
         }
     }
+    // where a photo plays: silent on purpose (a still has no sound), not a join that dips
+    let photos: Vec<(f64, f64)> = opts.entries.iter().flat_map(|e| &e.shots).filter(|s| s.photo).map(|s| (s.start, s.end)).collect();
+    let in_photo = |a: f64, b: f64| photos.iter().any(|(s, e)| *s <= a + 1e-3 && *e >= b - 1e-3);
     match seq.track(&opts.sound_track) {
         None => notes.push(format!("no track {}", opts.sound_track)),
         Some(t) => {
             for (a, b, gap) in neighbours(t) {
+                if gap > 0 && in_photo(secs(a.end), secs(b.start)) {
+                    continue;
+                }
                 if gap < 0 {
                     out.push(
                         Finding::new(

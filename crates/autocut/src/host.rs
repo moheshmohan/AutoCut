@@ -676,11 +676,12 @@ impl ShowcaseHost {
 }
 
 impl ShowcaseHost {
-    /// Pick album `title` with the host's [`AlbumSource`] (videos only, none created before the
-    /// request's `since`) and import it over the port, reusing what the project already holds.
+    /// Pick album `title` with the host's [`AlbumSource`] (its videos and photos — videos only
+    /// with `photos: false` — none created before the request's `since`) and import it over the
+    /// port, reusing what the project already holds.
     async fn album_seed(&self, title: &str, req: &Request, ex: &PortExecutor, progress: &Arc<Progress>) -> Result<Seed, AutoCutError> {
         let source = self.albums.clone().ok_or_else(|| AutoCutError::Other(filmcraft_engine::autocut::NO_ALBUMS.into()))?;
-        let pick = AlbumPick { title: title.to_string(), videos_only: true, since: req.since.as_ref().map(|(_, t)| album::day_of(*t)) };
+        let pick = AlbumPick { title: title.to_string(), videos_only: !req.photos, since: req.since.as_ref().map(|(_, t)| album::day_of(*t)) };
         note(progress, &format!("picking the Google Photos album \"{title}\""));
         let prog = progress.clone();
         let fetched = tokio::task::spawn_blocking(move || source.pick(&pick, &mut |l| note(&prog, l), &|| prog.cancel.load(Ordering::Relaxed)))
@@ -692,15 +693,18 @@ impl ShowcaseHost {
         }
         if fetched.paths.is_empty() {
             let why = if !fetched.failed.is_empty() {
-                format!(": none of its {} video(s) could be downloaded ({})", fetched.failed.len(), fetched.failed.join("; "))
+                format!(": none of its {} item(s) could be downloaded ({})", fetched.failed.len(), fetched.failed.join("; "))
             } else if !fetched.skipped.is_empty() {
-                format!(" ({} item(s) left out: photos, or created before the date asked for)", fetched.skipped.len())
+                let left = if req.photos { "created before the date asked for" } else { "photos, or created before the date asked for" };
+                format!(" ({} item(s) left out: {left})", fetched.skipped.len())
             } else {
                 String::new()
             };
-            return Err(AutoCutError::Other(format!("the album \"{title}\" has no video to make a showcase from{why}")));
+            let what = if req.photos { "no video or photo" } else { "no video" };
+            return Err(AutoCutError::Other(format!("the album \"{title}\" has {what} to make a showcase from{why}")));
         }
-        note(progress, &format!("importing {} clip(s) from \"{title}\"", fetched.paths.len()));
+        let (photos, videos) = album::count_kinds(&fetched.paths);
+        note(progress, &format!("importing {videos} clip(s) and {photos} photo(s) from \"{title}\""));
         let imported = album::import(ex, &fetched.paths).await?;
         if imported.items.is_empty() {
             return Err(AutoCutError::Other(format!("nothing from the album \"{title}\" could be imported: {}", imported.errors.join("; "))));
@@ -774,6 +778,9 @@ struct Request {
     subject: String,
     since: Option<(Value, i64)>,
     title: Option<String>,
+    /// Photos are kept (picked, imported, analysed) as well as videos; `photos: false` leaves
+    /// them out.
+    photos: bool,
 }
 
 async fn request_of(p: &Value, model: &dyn ChatModel) -> Result<Request, AutoCutError> {
@@ -801,15 +808,13 @@ async fn request_of(p: &Value, model: &dyn ChatModel) -> Result<Request, AutoCut
             subject.to_string()
         }
     };
-    Ok(Request { subject, since, title })
+    Ok(Request { subject, since, title, photos: p["photos"].as_bool().unwrap_or(true) })
 }
 
-/// The clips of `items` (all video items without) filmed on or after `since`, and how many had no
-/// date (left out).
-async fn filmed_since(ex: &dyn Executor, items: Option<&[u64]>, since: i64) -> Result<(Vec<u64>, usize), AutoCutError> {
-    let project = ex.execute("project.inspect", json!({})).await.map_err(AutoCutError::Executor)?;
-    let want: Option<HashSet<u64>> = items.map(|i| i.iter().copied().collect());
-    let clips: Vec<u64> = analyze::video_items(&project).into_iter().map(|(i, _, _)| i).filter(|i| want.as_ref().is_none_or(|w| w.contains(i))).collect();
+/// The clips of `items` (all video items without; the photos too with `photos`) filmed on or
+/// after `since`, and how many had no date (left out).
+async fn filmed_since(ex: &dyn Executor, items: Option<&[u64]>, since: i64, photos: bool) -> Result<(Vec<u64>, usize), AutoCutError> {
+    let clips = media_of(ex, items, photos).await?;
     let dates = ex.execute("media.captureDate", json!({"items": clips})).await.map_err(AutoCutError::Executor)?;
     let unix_of = |item: u64| dates["items"].as_array().and_then(|a| a.iter().find(|d| d["item"].as_u64() == Some(item))).and_then(|d| d["unix"].as_i64());
     let (mut kept, mut undated) = (Vec::new(), 0);
@@ -821,6 +826,13 @@ async fn filmed_since(ex: &dyn Executor, items: Option<&[u64]>, since: i64) -> R
         }
     }
     Ok((kept, undated))
+}
+
+/// The video items of `items` (all of the project's without), and its photos with `photos`.
+async fn media_of(ex: &dyn Executor, items: Option<&[u64]>, photos: bool) -> Result<Vec<u64>, AutoCutError> {
+    let project = ex.execute("project.inspect", json!({})).await.map_err(AutoCutError::Executor)?;
+    let want: Option<HashSet<u64>> = items.map(|i| i.iter().copied().collect());
+    Ok(analyze::media_items(&project).into_iter().filter(|m| photos || !m.3).map(|m| m.0).filter(|i| want.as_ref().is_none_or(|w| w.contains(i))).collect())
 }
 
 /// Analyse the clips for the request's subject: the report (as `analyze --out` writes it) and a
@@ -837,7 +849,7 @@ async fn analyze_clips(
     let mut undated = 0;
     if let Some((text, t)) = &req.since {
         note(progress, &format!("looking for clips filmed since {}", text.as_str().map_or_else(|| text.to_string(), str::to_string)));
-        let (kept, no_date) = filmed_since(ex, items.as_deref(), *t).await?;
+        let (kept, no_date) = filmed_since(ex, items.as_deref(), *t, req.photos).await?;
         if kept.is_empty() {
             return Err(AutoCutError::Other(format!(
                 "no video clip was filmed since {}{}",
@@ -846,6 +858,9 @@ async fn analyze_clips(
             )));
         }
         (items, undated) = (Some(kept), no_date);
+    } else if !req.photos {
+        // videos only: the photos among the items (or the project's) are left out
+        items = Some(media_of(ex, items.as_deref(), false).await?);
     }
     note(progress, &format!("looking for a {} in {}", req.subject, if items.is_some() { "the clips" } else { "every clip" }));
     let frames = p["frames"].as_u64().map_or(6, |n| n.clamp(1, analyze::MAX_FRAMES as u64) as usize);
