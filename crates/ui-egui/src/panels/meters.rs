@@ -16,11 +16,12 @@ pub(crate) fn feed_loudness(app: &mut FilmcraftApp) {
     let sr = seq.settings.sample_rate as i64;
     let now = app.session.playhead().to_units_floor(sr);
     let fresh = match &app.loudness {
-        Some((_, next)) => now < *next || now - *next > sr,
+        Some((_, next, _)) => now < *next || now - *next > sr,
         None => true,
     };
     if fresh {
-        app.loudness = Some((filmcraft_audio_dsp::LoudnessMeter::new(sr as f64, 2), now));
+        // the meter renders in a stream of its own: it never continues (or disturbs) playback's
+        app.loudness = Some((filmcraft_audio_dsp::LoudnessMeter::new(sr as f64, 2), now, filmcraft_render::MixStream::new()));
         return;
     }
     let next = app.loudness.as_ref().map_or(now, |l| l.1);
@@ -29,16 +30,15 @@ pub(crate) fn feed_loudness(app: &mut FilmcraftApp) {
     }
     let provider = app.session.media.provider(app.session.project.clone(), app.session.services.clone());
     let Some(seq_id) = app.session.state.active_sequence else { return };
-    let buf = app.session.previews.mix(&app.session.project, seq_id, next, (now - next) as usize, &provider);
-    if let Some((m, n)) = app.loudness.as_mut() {
-        let chans: Vec<&[f32]> = buf.channels.iter().take(2).map(Vec::as_slice).collect();
-        if chans.len() == 2 {
-            m.process(&chans);
-        } else if let Some(c) = chans.first() {
-            m.process(&[c, c]);
-        }
-        *n = now;
+    let Some((m, n, stream)) = app.loudness.as_mut() else { return };
+    let buf = app.session.previews.mix(&app.session.project, seq_id, next, (now - next) as usize, &provider, stream);
+    let chans: Vec<&[f32]> = buf.channels.iter().take(2).map(Vec::as_slice).collect();
+    if chans.len() == 2 {
+        m.process(&chans);
+    } else if let Some(c) = chans.first() {
+        m.process(&[c, c]);
     }
+    *n = now;
 }
 
 fn lufs_text(v: f64) -> String {
@@ -147,7 +147,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let parts = parts(rect, names, |text, font| ui.painter().layout_no_wrap(text.to_string(), font, t.text).size());
     let area = parts.area;
     if let Some((lr, units)) = parts.readout {
-        let (m, s, i, tp) = app.loudness.as_ref().map_or((f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY), |(l, _)| {
+        let (m, s, i, tp) = app.loudness.as_ref().map_or((f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY), |(l, _, _)| {
             (l.momentary(), l.short_term(), l.integrated(), l.true_peak_dbtp())
         });
         ui.painter().rect_filled(lr, 2.0, t.meter_readout_bg);

@@ -19,7 +19,7 @@ fn a1_clip(s: &Session) -> u64 {
 
 fn render(s: &Session, frames: usize) -> filmcraft_frame::AudioBuffer {
     let provider = s.media.provider(s.project.clone(), s.services.clone());
-    filmcraft_render::audio::mix_sequence(&s.project, s.active_sequence().unwrap(), 0, frames, &provider)
+    filmcraft_render::audio::mix_sequence(&s.project, s.active_sequence().unwrap(), 0, frames, &provider, &filmcraft_render::MixStream::new())
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn parameters_are_set_by_id_and_change_the_sound() {
     let it = s.active_sequence().unwrap().find_item(ClipId(clip)).unwrap().1.clone();
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let a0 = it.start.to_units_floor(48000);
-    let sig = filmcraft_render::audio::clip_signal(&it, a0, 4800, 48000, &provider).unwrap();
+    let sig = filmcraft_render::audio::clip_signal(&it, a0, 4800, 48000, &provider, &filmcraft_render::MixStream::new()).unwrap();
     let pk = sig.iter().flatten().fold(0.0f32, |a, v| a.max(v.abs()));
     assert!(pk < 1e-6, "muted clip peak {pk}");
     s.execute("edit.undo", json!({})).unwrap();

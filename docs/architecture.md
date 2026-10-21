@@ -492,6 +492,16 @@ stereo / mono track ──5.1 panner───┼─► 5.1 submix / 5.1 Mix ─�
   `audio::mix_sequence` always returns stereo, `mix_sequence_layout` any layout and mixdown. Clips
   on 5.1 tracks play the source's first six channels (or the six picked with Modify ▸ Audio
   Channels), mono/stereo sources upmixed; clip effects run on all six channels.
+- **State.** Insert DSP, compensation delays, clip effect chains and time-stretch memos keep their
+  state between requests, keyed by the consumer's render stream (`render::MixStream`) and the
+  next sample they produce. Playback, the loudness meter, an export, an audio-preview render and
+  every measuring pass (`audio.normalizeLoudness`, `audio.analyzeMix`, Normalize Mix Track,
+  waveforms, Loudness Auto-Match, ducking) each own a stream and pass it with every chunk, so a
+  stream continues only its own state: two renders of the same graph from the same position (two
+  sessions, playback beside a measurement, parallel exports) never take each other's limiter
+  envelope, and what a measurement hears is what the export plays. A nested sequence mixes in a
+  sub-stream of its nesting clip. Dropping a stream drops its state; the caches stay bounded,
+  least recently used out first.
 - **Playback.** On a device with ≥ 6 output channels a 5.1 Mix plays as six channels; on a stereo
   device it is folded with Preferences ▸ Audio ▸ 5.1 Mixdown Type (Front Only, Front + Rear
   Surround = BS.775, Front + LFE, Front + Rear Surround + LFE; `PreviewStore::mix_layout`).

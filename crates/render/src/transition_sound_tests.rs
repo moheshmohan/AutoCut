@@ -31,7 +31,7 @@ fn rig(sound: Option<TransitionSound>) -> (Project, ItemId) {
 }
 
 fn mix(p: &Project, seq: ItemId, start: i64, n: usize) -> Vec<Vec<f32>> {
-    mix_graph(p, p.sequence(seq).unwrap(), start, n, &SourceMap::default(), None).channels
+    mix_graph(p, p.sequence(seq).unwrap(), start, n, &SourceMap::default(), None, &crate::MixStream::new()).channels
 }
 
 #[test]

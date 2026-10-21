@@ -9,7 +9,7 @@ use filmcraft_project::mixer::LANE_VOLUME;
 use filmcraft_project::{ItemId, ItemKind, Keyframe, Label, MediaClip, MediaRef, ParamValue, Project, SequenceSettings, Track, TrackId, TrackKind, TrackSend};
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 
-use super::{SourceMap, mixer};
+use super::{MixStream, SourceMap, mixer};
 use mixer::{LiveMix, mix_graph};
 
 pub(crate) const SR: i64 = 48_000;
@@ -38,6 +38,8 @@ pub(crate) struct Rig {
     pub(crate) p: Project,
     pub(crate) seq: ItemId,
     pub(crate) map: SourceMap,
+    /// The rig's render stream: its consecutive requests continue each other.
+    pub(crate) stream: MixStream,
 }
 
 impl Rig {
@@ -81,7 +83,7 @@ impl Rig {
             let ti = p.make_track_item(id, TrackKind::Audio, Tick::ZERO, TimeRange::new(Tick::ZERO, Tick(10 * TICKS_PER_SECOND)), FrameRate::FPS_24).unwrap();
             p.sequence_mut(seq).unwrap().audio_tracks[k].items.push(ti);
         }
-        Rig { p, seq, map }
+        Rig { p, seq, map, stream: MixStream::new() }
     }
     pub(crate) fn track(&mut self, k: usize) -> &mut Track {
         &mut self.p.sequence_mut(self.seq).unwrap().audio_tracks[k]
@@ -95,7 +97,7 @@ impl Rig {
         self.p.sequence_mut(self.seq).unwrap().mix_track_mut(id).unwrap()
     }
     pub(crate) fn mix(&self, start: i64, n: usize) -> [Vec<f32>; 2] {
-        let b = mix_graph(&self.p, self.p.sequence(self.seq).unwrap(), start, n, &self.map, None);
+        let b = mix_graph(&self.p, self.p.sequence(self.seq).unwrap(), start, n, &self.map, None, &self.stream);
         [b.channels[0].clone(), b.channels[1].clone()]
     }
     /// Mix `[start, start + n)` in consecutive requests of the given sizes (cycled).
@@ -104,7 +106,7 @@ impl Rig {
         let (mut pos, mut k) = (start, 0);
         while pos < start + n as i64 {
             let m = sizes[k % sizes.len()].min((start + n as i64 - pos) as usize);
-            let b = mix_graph(&self.p, self.p.sequence(self.seq).unwrap(), pos, m, &self.map, live);
+            let b = mix_graph(&self.p, self.p.sequence(self.seq).unwrap(), pos, m, &self.map, live, &self.stream);
             out[0].extend_from_slice(&b.channels[0]);
             out[1].extend_from_slice(&b.channels[1]);
             pos += m as i64;

@@ -376,7 +376,7 @@ fn the_narration_is_heard_in_the_mix() {
     }
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let sr = s.active_sequence().unwrap().settings.sample_rate as usize;
-    let mix = filmcraft_render::audio::mix_sequence(&s.project, s.active_sequence().unwrap(), 0, sr, &provider).channels;
+    let mix = filmcraft_render::audio::mix_sequence(&s.project, s.active_sequence().unwrap(), 0, sr, &provider, &filmcraft_render::MixStream::new()).channels;
     let rms = (mix[0].iter().map(|x| f64::from(x * x)).sum::<f64>() / sr as f64).sqrt();
     assert!(rms > 0.01, "narration audible, rms {rms}");
     let _ = std::fs::remove_dir_all(&dir);

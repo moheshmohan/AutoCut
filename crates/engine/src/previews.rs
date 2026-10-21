@@ -24,6 +24,7 @@
 //! decoded preview frame replaces the live render.
 
 use filmcraft_audio_dsp::channels::{Layout, Mixdown};
+use filmcraft_render::MixStream;
 use filmcraft_render::audio::to_layout;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -385,8 +386,17 @@ impl PreviewStore {
 
     /// Sequence audio for playback and meters, as stereo (a 5.1 Mix folded with the BS.775
     /// downmix): rendered audio previews where they are valid, the live mix everywhere else.
-    pub fn mix(&self, project: &Arc<Project>, seq: ItemId, start: i64, frames: usize, sources: &dyn filmcraft_render::SourceProvider) -> AudioBuffer {
-        self.mix_layout(project, seq, start, frames, sources, Layout::Stereo, Mixdown::FrontRear)
+    /// `stream` is the consumer's own (playback, a meter): its next request continues this one.
+    pub fn mix(
+        &self,
+        project: &Arc<Project>,
+        seq: ItemId,
+        start: i64,
+        frames: usize,
+        sources: &dyn filmcraft_render::SourceProvider,
+        stream: &MixStream,
+    ) -> AudioBuffer {
+        self.mix_layout(project, seq, start, frames, sources, Layout::Stereo, Mixdown::FrontRear, stream)
     }
 
     /// [`PreviewStore::mix`] in `layout`: a 5.1 Mix is folded to stereo with `mixdown` (Preferences ▸
@@ -403,6 +413,7 @@ impl PreviewStore {
         sources: &dyn filmcraft_render::SourceProvider,
         layout: Layout,
         mixdown: Mixdown,
+        stream: &MixStream,
     ) -> AudioBuffer {
         let Some(q) = project.sequence(seq) else { return AudioBuffer::silence(48_000, layout.channels(), frames) };
         let live = Some(&*self.live);
@@ -411,7 +422,7 @@ impl PreviewStore {
         let previews_ok = layout == Layout::Stereo && (!surround || mixdown == Mixdown::FrontRear);
         // held mixer controls are heard live (rendered previews don't know them)
         if !has_audio || self.live.is_active() || !previews_ok {
-            return to_layout(filmcraft_render::mixer::mix_graph(project, q, start, frames, sources, live), layout, mixdown);
+            return to_layout(filmcraft_render::mixer::mix_graph(project, q, start, frames, sources, live, stream), layout, mixdown);
         }
         let segs = self.audio_segments(project, seq);
         let mut out = AudioBuffer::silence(q.settings.sample_rate, 2, frames);
@@ -436,7 +447,7 @@ impl PreviewStore {
                     }
                 }
                 _ => {
-                    let b = to_layout(filmcraft_render::mixer::mix_graph(project, q, pos, n, sources, live), Layout::Stereo, mixdown);
+                    let b = to_layout(filmcraft_render::mixer::mix_graph(project, q, pos, n, sources, live, stream), Layout::Stereo, mixdown);
                     for c in 0..2 {
                         out.channels[c][off..off + n].copy_from_slice(&b.channels[c.min(b.channels.len() - 1)][..n]);
                     }
@@ -759,6 +770,8 @@ pub fn render_audio(s: &mut Session, p: &Value) -> Result<Value> {
         let mut bytes = 0u64;
         let mut outcome: std::result::Result<(), String> = Ok(());
         let Some(q) = project.sequence(seq) else { return };
+        // the job's own stream: a segment that starts where the last ended continues it
+        let stream = MixStream::new();
         'segs: for g in &todo {
             let mut inter = Vec::with_capacity(g.samples as usize * 2);
             let mut pos = g.first_sample;
@@ -768,7 +781,7 @@ pub fn render_audio(s: &mut Session, p: &Value) -> Result<Value> {
                     break 'segs;
                 }
                 let n = (g.first_sample + g.samples - pos).min(sr) as usize;
-                let buf = filmcraft_render::audio::mix_sequence(&project, q, pos, n, &provider);
+                let buf = filmcraft_render::audio::mix_sequence(&project, q, pos, n, &provider, &stream);
                 for i in 0..n {
                     inter.push(buf.channels[0][i]);
                     inter.push(buf.channels[buf.channels.len().min(2) - 1][i]);

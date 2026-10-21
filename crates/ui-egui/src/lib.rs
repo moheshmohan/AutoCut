@@ -317,8 +317,9 @@ pub struct FilmcraftApp {
     /// The mouse press in progress (its start time) and the undo history when it began, for Escape
     /// to take back what the press changed (#580).
     value_press: Option<(f64, filmcraft_engine::UndoMark)>,
-    /// BS.1770 loudness of the programme as it plays, and the next sample position to feed.
-    pub(crate) loudness: Option<(filmcraft_audio_dsp::LoudnessMeter, i64)>,
+    /// BS.1770 loudness of the programme as it plays, the next sample position to feed, and the
+    /// meter's own render stream (playback renders in another).
+    pub(crate) loudness: Option<(filmcraft_audio_dsp::LoudnessMeter, i64, filmcraft_render::MixStream)>,
     /// Status message last shown and when it first appeared (messages expire after a few seconds).
     status_seen: (String, f64),
     /// Screenshots waiting for their frame: (token, path, crop, reply, give-up time).
@@ -2294,6 +2295,9 @@ pub fn playback_mix(session: &Session, seq_id: filmcraft_project::ItemId, sr: u3
     let mixdown = filmcraft_audio_dsp::channels::Mixdown::from_id(&session.prefs.audio.mixdown_type).unwrap_or_default();
     let cues = panels::voiceover::cues(session, sr);
     previews.live.publish_project(project.clone());
+    // playback's own render stream: each callback continues the last one's mixer state, and no
+    // meter, export or analysis running meanwhile continues or disturbs it
+    let stream = filmcraft_render::MixStream::new();
     let mut resampler = None;
     move |cursor: i64, buf: &mut [f32], ch: usize| {
         // the newest project snapshot: mixer moves and other edits are heard while playing
@@ -2308,7 +2312,7 @@ pub fn playback_mix(session: &Session, seq_id: filmcraft_project::ItemId, sr: u3
         use filmcraft_audio_dsp::channels::Layout;
         let layout = if ch >= 6 && seq.settings.audio_master == filmcraft_project::AudioChannels::Surround51 { Layout::Surround51 } else { Layout::Stereo };
         let mix = if seq_sr == sr {
-            previews.mix_layout(&project, seq_id, cursor, n, &provider, layout, mixdown)
+            previews.mix_layout(&project, seq_id, cursor, n, &provider, layout, mixdown, &stream)
         } else {
             // Mix at the sequence rate as one continuous stream, interpolated to the device rate
             // (started afresh when the rate or the channel layout changes while playing).
@@ -2320,7 +2324,7 @@ pub fn playback_mix(session: &Session, seq_id: filmcraft_project::ItemId, sr: u3
                 buf.fill(0.0);
                 return;
             };
-            let channels = r.process(cursor, n, |s0, m| previews.mix_layout(&project, seq_id, s0, m, &provider, layout, mixdown).channels);
+            let channels = r.process(cursor, n, |s0, m| previews.mix_layout(&project, seq_id, s0, m, &provider, layout, mixdown, &stream).channels);
             filmcraft_frame::AudioBuffer { sample_rate: sr, channels }
         };
         if layout == Layout::Surround51 {

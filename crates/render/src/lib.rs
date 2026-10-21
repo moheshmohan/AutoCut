@@ -23,6 +23,7 @@ pub mod image;
 pub mod lumetri_presets;
 pub mod luts;
 pub mod mask;
+pub mod mix_stream;
 pub mod mixer;
 pub mod multicam;
 pub mod offline;
@@ -48,6 +49,7 @@ use filmcraft_time::{Tick, TimeDisplay, format_time};
 
 pub use blend::Blend;
 pub use image::Image;
+pub use mix_stream::MixStream;
 
 /// Resolves project items to media sources (the engine owns the media pool).
 pub trait SourceProvider: Sync {
@@ -855,3 +857,6 @@ mod par_tests;
 #[cfg(test)]
 #[path = "blur_tests.rs"]
 mod blur_tests;
+
+#[cfg(test)]
+mod mix_stream_tests;

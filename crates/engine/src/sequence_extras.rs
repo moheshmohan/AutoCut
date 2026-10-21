@@ -225,10 +225,11 @@ pub fn mix_peak_db(s: &Session) -> Result<f64> {
     let total = q.duration().to_units_floor(sr as i64);
     let provider = s.media.full_res_provider(s.project.clone(), s.services.clone());
     let mut peak = 0f32;
+    let stream = filmcraft_render::MixStream::new();
     let mut pos = 0i64;
     while pos < total {
         let n = (total - pos).min(sr as i64) as usize;
-        let b = filmcraft_render::audio::mix_sequence(&s.project, q, pos, n, &provider);
+        let b = filmcraft_render::audio::mix_sequence(&s.project, q, pos, n, &provider, &stream);
         peak = b.peaks().into_iter().fold(peak, f32::max);
         pos += n as i64;
     }

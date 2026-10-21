@@ -272,10 +272,11 @@ pub fn clip_loudness(item: &TrackItem, sr: u32, sources: &dyn SourceProvider) ->
     let a1 = item.end().to_units_floor(sr as i64);
     let mono = filmcraft_render::audio::clip_is_mono(item, sources)?;
     let mut meter = LoudnessMeter::new(sr as f64, if mono { 1 } else { 2 });
+    let stream = filmcraft_render::MixStream::new();
     let mut pos = a0;
     while pos < a1 {
         let n = (a1 - pos).min(sr as i64) as usize;
-        let [l, r] = filmcraft_render::audio::clip_signal(item, pos, n, sr, sources)?;
+        let [l, r] = filmcraft_render::audio::clip_signal(item, pos, n, sr, sources, &stream)?;
         if mono {
             let m: Vec<f32> = l.iter().zip(&r).map(|(a, b)| 0.5 * (a + b)).collect();
             meter.process(&[&m]);
@@ -346,12 +347,13 @@ pub(crate) fn trigger_envelope(triggers: &[&TrackItem], a0: i64, a1: i64, sr: u3
     let hops = ((a1 - a0).max(0) as usize).div_ceil(hop);
     let mut power = vec![0.0f64; hops];
     let chunk = hop * 100;
+    let stream = filmcraft_render::MixStream::new();
     let mut pos = a0;
     while pos < a1 {
         let n = ((a1 - pos) as usize).min(chunk);
         let mut sum = [vec![0.0f32; n], vec![0.0f32; n]];
         for t in triggers {
-            if let Some(b) = filmcraft_render::audio::clip_signal(t, pos, n, sr, sources) {
+            if let Some(b) = filmcraft_render::audio::clip_signal(t, pos, n, sr, sources, &stream) {
                 for c in 0..2 {
                     for (d, x) in sum[c].iter_mut().zip(&b[c]) {
                         *d += x;

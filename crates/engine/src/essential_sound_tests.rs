@@ -85,10 +85,11 @@ fn mix(s: &Session, a: i64, n: usize, chunk: usize) -> [Vec<f32>; 2] {
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let seq = s.active_sequence().unwrap();
     let mut out = [Vec::new(), Vec::new()];
+    let stream = filmcraft_render::MixStream::new();
     let mut pos = a;
     while pos < a + n as i64 {
         let m = chunk.min((a + n as i64 - pos) as usize);
-        let b = filmcraft_render::audio::mix_sequence(&s.project, seq, pos, m, &provider);
+        let b = filmcraft_render::audio::mix_sequence(&s.project, seq, pos, m, &provider, &stream);
         out[0].extend_from_slice(&b.channels[0]);
         out[1].extend_from_slice(&b.channels[1]);
         pos += m as i64;
@@ -109,10 +110,11 @@ fn clip_out(s: &Session, c: ClipId) -> [Vec<f32>; 2] {
     let a0 = it.start.to_units_floor(SR as i64);
     let n = (it.end().to_units_floor(SR as i64) - a0) as usize;
     let mut out = [Vec::new(), Vec::new()];
+    let stream = filmcraft_render::MixStream::new();
     let mut pos = a0;
     while pos < a0 + n as i64 {
         let m = 4800.min((a0 + n as i64 - pos) as usize);
-        let b = filmcraft_render::audio::clip_signal(&it, pos, m, SR, &provider).unwrap();
+        let b = filmcraft_render::audio::clip_signal(&it, pos, m, SR, &provider, &stream).unwrap();
         out[0].extend_from_slice(&b[0]);
         out[1].extend_from_slice(&b[1]);
         pos += m as i64;

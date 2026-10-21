@@ -108,7 +108,7 @@ fn submixes_sends_and_inserts() {
     assert_eq!(q.audio_tracks[0].effects[0].param("threshold").unwrap().value, ParamValue::Float(-30.0));
     // the mix renders through the graph (the demo has audio on A1)
     let provider = s.media.provider(s.project.clone(), s.services.clone());
-    let b = filmcraft_render::audio::mix_sequence(&s.project, q, 0, 4_800, &provider);
+    let b = filmcraft_render::audio::mix_sequence(&s.project, q, 0, 4_800, &provider, &filmcraft_render::MixStream::new());
     assert_eq!(b.frames(), 4_800);
     // deleting a submix re-routes and drops sends
     let s1 = q.submix_tracks[0].id.0;
@@ -271,9 +271,9 @@ fn recorded_pass_plays_back_through_the_mix() {
     let q = s.active_sequence().unwrap();
     let seq_id = s.state.active_sequence.unwrap();
     let provider = s.media.provider(s.project.clone(), s.services.clone());
-    let b = s.previews.mix(&s.project, seq_id, 48_000, 4_800, &provider);
+    let b = s.previews.mix(&s.project, seq_id, 48_000, 4_800, &provider, &filmcraft_render::MixStream::new());
     assert!(b.channels[0].iter().all(|x| x.abs() < 1e-6), "faded out by the recorded automation");
-    let before = filmcraft_render::audio::mix_sequence(&s.project, q, 0, 4_800, &provider);
+    let before = filmcraft_render::audio::mix_sequence(&s.project, q, 0, 4_800, &provider, &filmcraft_render::MixStream::new());
     assert!(before.channels[0].iter().any(|x| x.abs() > 1e-4), "audible before the move");
     // master strip automation
     s.execute("mixer.setKeyframe", json!({"strip": "Mix", "time": 0, "value": -6.0})).unwrap();
@@ -505,8 +505,8 @@ fn surround_sequence_settings_and_panner_lanes() {
     // the mix is six channels; mix_sequence folds it to stereo
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let q = s.active_sequence().unwrap();
-    assert_eq!(filmcraft_render::mixer::mix_graph(&s.project, q, 0, 480, &provider, None).channels.len(), 6);
-    assert_eq!(filmcraft_render::audio::mix_sequence(&s.project, q, 0, 480, &provider).channels.len(), 2);
+    assert_eq!(filmcraft_render::mixer::mix_graph(&s.project, q, 0, 480, &provider, None, &filmcraft_render::MixStream::new()).channels.len(), 6);
+    assert_eq!(filmcraft_render::audio::mix_sequence(&s.project, q, 0, 480, &provider, &filmcraft_render::MixStream::new()).channels.len(), 2);
     // a Write pass on a strip feeding 5.1 records the puck, not the stereo pan
     set_mode(&mut s, "A1", "Write");
     let r = s.execute("mixer.recordStart", json!({"time": 0})).unwrap();

@@ -194,7 +194,7 @@ fn mix_at(s: &Session, t: Tick, frames: usize) -> filmcraft_frame::AudioBuffer {
     let q = s.active_sequence().unwrap();
     let sr = q.settings.sample_rate as i64;
     let provider = s.media.full_res_provider(s.project.clone(), s.services.clone());
-    filmcraft_render::audio::mix_sequence(&s.project, q, t.to_units_floor(sr), frames, &provider)
+    filmcraft_render::audio::mix_sequence(&s.project, q, t.to_units_floor(sr), frames, &provider, &filmcraft_render::MixStream::new())
 }
 
 #[test]

@@ -67,7 +67,7 @@ fn heard(s: &Session, c: ClipId, a: f64, b: f64) -> f64 {
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let a0 = (a * SR as f64) as i64;
     let n = ((b - a) * SR as f64) as usize;
-    let x = filmcraft_render::audio::track_input(&s.project, track, a0, n, SR, &provider);
+    let x = filmcraft_render::audio::track_input(&s.project, track, a0, n, SR, &provider, &filmcraft_render::MixStream::new());
     let (mut re, mut im) = (0.0f64, 0.0f64);
     for (i, v) in x.channels[0].iter().enumerate() {
         let w = 2.0 * std::f64::consts::PI * 220.0 * (a0 + i as i64) as f64 / SR as f64;

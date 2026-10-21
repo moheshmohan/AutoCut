@@ -30,7 +30,7 @@ fn demo() -> (Session, String, usize) {
 
 fn mix(s: &Session, start: i64, n: usize) -> Vec<Vec<f32>> {
     let provider = s.media.provider(s.project.clone(), s.services.clone());
-    filmcraft_render::audio::mix_sequence(&s.project, s.active_sequence().unwrap(), start, n, &provider).channels
+    filmcraft_render::audio::mix_sequence(&s.project, s.active_sequence().unwrap(), start, n, &provider, &filmcraft_render::MixStream::new()).channels
 }
 
 fn track_clips(s: &Session, i: usize) -> Vec<filmcraft_project::TrackItem> {
