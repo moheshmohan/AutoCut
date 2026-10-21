@@ -420,7 +420,7 @@ effects (editable in the Audio Track Mixer):
 
 | stem | track effects | level |
 |---|---|---|
-| narration (A2) | Parametric EQ: high-pass 80 Hz (24 dB/oct); low shelf −3 dB at 200 Hz and, as far as the voice is dark, up to −3 dB more, −2 dB at 300 Hz, +5 dB at 1.2 kHz, +5 dB at 3 kHz, high shelf +3 dB from 6 kHz; DeEsser (6 kHz, −10 dB, at most 6 dB); compressor 3:1 from −20 dB, 1 ms attack, 120 ms release, +6 dB; Hard Limiter at −3.5 dB | each line matched to −16 LUFS; the track's fader makes up what the chain took (measured before and after it), so the voice keeps its level against the other stems |
+| narration (A2) | Parametric EQ: high-pass 80 Hz (24 dB/oct); low shelf −3 dB at 200 Hz; as far as the voice is dark, +5 dB at 2 kHz, +6 dB at 3.5 kHz, high shelf +3 dB from 6 kHz (voice-preserving, below); DeEsser (6 kHz, −10 dB, at most 6 dB); compressor 3:1 from −20 dB, 1 ms attack, 120 ms release, +6 dB; Hard Limiter at −3.5 dB | each line matched to −16 LUFS; the track's fader makes up what the chain took (measured before and after it), so the voice keeps its level against the other stems |
 | music (A3) | Parametric EQ: high-pass 40 Hz, low shelf −6 dB at 120 Hz, a band at 2.5 kHz that dips 4 dB while the narration speaks (track automation following the ducking's stretches) | −24 LUFS, ducked 18 dB under the narration |
 | shots' sound (A1) | Parametric EQ: high-pass 100 Hz, low shelf −3 dB at 150 Hz | −27 LUFS, ducked 15 dB |
 | effects (A4, A5) | Parametric EQ: high-pass 120 Hz (the impacts' sub booms out) | −26 LUFS; the transitions' own sounds at −10 dB |
@@ -428,11 +428,11 @@ effects (editable in the Audio Track Mixer):
 How much EQ the narration gets is measured: before treating it the mix renders the narration's
 track alone (`audio.analyzeMix {"only": ["A2"]}`) and takes its **tilt**, the mean level of its
 1, 2 and 4 kHz octaves minus that of its 125 and 250 Hz ones. The cloned voices (IndicF5's
-Malayalam and the English clone) measure −18 dB; a typical voice about −10. The EQ's cuts and
-lifts move a voice's tilt by 8.8 dB, so a voice at −17.8 dB or darker gets all of them, one at the
-target (−9 dB, a touch brighter than typical) or brighter gets only the high-pass and half the low
-shelf, and one in between its share (`mix.voice.tiltDb`, `eqAmount` in the output). A bright voice
-made brighter only gets harsher and peakier.
+Malayalam and the English clone) measure −18 dB; a typical voice about −10. The EQ's lifts move
+a voice's tilt by 7.8 dB, so a voice at −17.8 dB or darker gets all of them, one at the target
+(−10 dB, typical) or brighter gets only the high-pass and the low shelf, and one in between its
+share (`mix.voice.tiltDb`, `eqAmount` in the output). A bright voice made brighter only gets
+harsher and peakier.
 
 Measured on the Malayalam final (742 s, `--loudness social`), before → after:
 
@@ -449,6 +449,33 @@ Measured on the Malayalam final (742 s, `--loudness social`), before → after:
 
 The narration's own limiter catches its onsets (at most 5.3 dB, 0.8 dB at the 99th percentile,
 3.8 s over 1 dB in 536 s of speech), so the Mix's limiter has almost nothing left to do.
+
+**Voice-preserving (2026-10-21).** The author heard the cloned voice "a bit different" after
+this mix. Measured with `voice.mixCheck` (the narration chain run as the mixer runs it, and the
+OpenVoice tone colour of the readings against the speaker's own held-out speech, all at one
+loudness; `filmcraft-cli voice mix-check`), the first chain moved the Malayalam narration from
+0.921 to 0.856 and the English one from 0.861 to 0.759 — further than the clone itself is from
+the speaker — and the speaker's genuine speech as far (0.956 → 0.888). Per band, the low-mid
+cuts (the low shelf's extra −3 dB, −2 dB at 300 Hz) cost about twice the timbre a lift at
+2–3.5 kHz costs for the same rise in the 1–4 kHz share, and the lift at 1.2 kHz (the vowels'
+formants) half as much again; the consonants that make words understood on a TV are at
+1.4–5.7 kHz. So the low shelf stays at −3 dB, the 300 Hz cut goes, the lift moves to 2 and
+3.5 kHz, and the target tilt is −10 dB:
+
+| ten lines of the show's narration | none | first chain | voice-preserving |
+|---|---|---|---|
+| Malayalam (IndicF5): similarity to the speaker | 0.921 | 0.856 | **0.867** |
+| English (VoxCPM2): similarity to the speaker | 0.861 | 0.759 | **0.787** |
+| the speaker's genuine speech through the chain | 0.956 | 0.888 | 0.899 |
+| Malayalam: below 120 Hz / 1–4 kHz / the 2 and 4 kHz octaves | 36.9 % / 1.1 % / −20.4 dB | 15.2 % / 8.9 % / −11.0 dB | 19.0 % / 7.4 % / −11.0 dB |
+
+And the Malayalam final remixed (`showcase-remix --loudness social`), first chain → voice-
+preserving: −14.0 LUFS and −1.3 dBTP both; the narration over the music while it speaks 30.3 /
+25.2 → 30.3 / 25.3 LU (median / quietest tenth), over everything else 28.1 / 22.3 → 28.2 / 22.4;
+the mix's 2 and 4 kHz octaves −13.4 / −15.1 → −13.8 / −14.6 dB (its 1 kHz one −14.7 → −17.7);
+energy below 120 Hz 15.2 → 18.9 % and at 1–4 kHz 8.4 → 7.2 %; the Mix's limiter at most 0.86 →
+0.46 dB (0.43 → 0.01 at the 99th percentile). The narration's own limiter works a little harder
+on the brighter onsets (at most 5.3 → 7.1 dB; 3.8 → 6.7 s over 1 dB in 539 s of speech).
 Known limits: the transitions' sounds are synthesised on the Mix's input, so they cannot be
 high-passed (only made quieter); the EQ is fixed in shape (only its amount follows the voice).
 

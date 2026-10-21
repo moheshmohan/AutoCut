@@ -129,8 +129,9 @@ async fn cinematic_keeps_the_earlier_balance_and_a_remix_switches_between_them()
     let r = mix::remix(&ex, None, MixProfile::Speech, None, &mut notes).await.expect("the remix runs");
     assert_eq!(r["profile"], "speech");
     assert!(notes.is_empty(), "{notes:?}");
-    // measured dark: the EQ's correction, most of it
-    assert!(r["voice"]["tiltDb"].as_f64().is_some_and(|t| t < mix::VOICE_TILT - 4.0) && f(&r["voice"]["eqAmount"]) > 0.5, "{r}");
+    // measured dark (about 4 dB under the target): the share of the EQ that tilt calls for
+    let t = f(&r["voice"]["tiltDb"]);
+    assert!(t < mix::VOICE_TILT - 3.0 && (f(&r["voice"]["eqAmount"]) - mix::voice_eq_amount(Some(t))).abs() < 0.02 && f(&r["voice"]["eqAmount"]) > 0.4, "{r}");
     let once = ex.execute("audio.analyzeMix", json!({"speech": ["A2"], "music": ["A3"]})).await.unwrap();
     let r = mix::remix(&ex, None, MixProfile::Speech, None, &mut notes).await.unwrap();
     // four on the narration, an EQ on each of the others (the shots' sound, music, two effects)

@@ -208,6 +208,28 @@ clip behaviour: `crates/engine/src/narration.rs`.
 - `wav`: WAV reading (16/24/32-bit PCM, float, any channels; hostile files are errors) and
   writing for voice samples.
 
+- `voice_lab` (feature `kokoro`): **better references for a natural clone**, found in the
+  speaker's own clips and auditioned (the engine's `voice.*` commands and `filmcraft-cli voice`;
+  how to record a seed for a re-clone: [docs/voice-recording.md](../../docs/voice-recording.md)).
+  - `signal`: speech activity (10 ms frames, an adaptive threshold), phrases between pauses of at
+    least 0.25 s, and a stretch's quality: signal to noise against the pauses around it,
+    clipping (flat tops), a decay-time estimate after word ends (reverberation), clarity (the
+    level contrast of syllables and dips), tonal background in the pauses (narrow spectral peaks:
+    music or a hum), bandwidth; a light clean-up (70 Hz high-pass, optional noise reduction,
+    trimmed edges) and references joined with a pause.
+  - `scan` / `rank`: 6–12 s chunks checked against the speaker (OpenVoice tone colour, cosine ≥
+    0.85), the speaker's runs heard (Whisper's words and language), whole-phrase windows scored
+    per engine (VoxCPM 10–30 s, English preferred; IndicF5 6–12 s, Malayalam preferred) on
+    similarity, quality, whole sentences, length and language; at most two per recording.
+    `held_out`: genuine speech of the speaker that is no candidate and no current reference.
+  - `audition`: the fixed test lines (English and Malayalam, hard starts and loanwords), a
+    reading scored on similarity to the held-out speech, CER and sentence-start CER
+    ([`heard::score`]) and the signal scan; the ranking.
+  - `clone::promote` / `versions` / `rollback`: a reference replaced with the old one kept
+    (`<name>.versions/r<revision>/`), consent carried over, the profile's `revision` counted (and
+    in the prompt cache's key); the narration cache already keys on the reference's bytes.
+    `clone::audition_voice` / `audition_malayalam`: a voice speaking from any clip, no profile.
+
 - `cache`: the **narration cache** — synthesized speech kept on disk so a script is read by a
   voice once, across sessions and rebuilds (a cloned voice runs at about 2.6× real time: a
   25-line show is minutes per rebuild otherwise). The engine keeps it in
@@ -447,6 +469,45 @@ at most four readings, the best kept
 (start garble weighs double), every try reported with its seed, so one sentence can be read
 again alone and reproduced.
 
+## Better references: the author's library (measured 2026-10-21)
+
+`filmcraft-cli voice refs --voice clone:mohesh-natural <Google Photos cache> ~/Movies/AutoCut/*.fcproj`
+(Apple M3 Max): 765 files, 729 clips with sound read (569 minutes of audio) in 16 minutes; 499
+of FilmCraft's own sounds and one copy of a render (a review build cached back from Google
+Photos) skipped. 2711 speech chunks checked against the voice's reference: the author's own
+speech scored 0.85–0.95 (tone-colour cosine), everyone else at most 0.80, the cloned voice
+itself (in that render, before renders were skipped) 0.82–0.86. Only three clips hold the
+author's speech: `IMG_3337.MOV` (the clone's source), `IMG_3338.MOV` (the same session, 239 s,
+Malayalam) and an English clip (126 s, the cleanest at 29 dB signal to noise); the rest of the
+library is expo footage of other people and machines.
+
+`voice audition --takes 3`: the current references and the best three candidates per engine
+(and the variants) read the test lines three times each (12 readings), scored against 119 s of
+held-out speech from all three clips:
+
+| Engine | Reference | Similarity | CER | Start CER |
+|---|---|---|---|---|
+| VoxCPM2 | **current**: `IMG_3337.MOV` 56.1–80.7 s (24.5 s) | 0.878 | 0.039 | 0.106 |
+| VoxCPM2 | `IMG_3337.MOV` 49.1–63.7 s | **0.897** | **0.036** | **0.098** |
+| VoxCPM2 | it and `IMG_3338.MOV` 41.9–56.1 s joined | 0.886 | 0.059 | 0.094 |
+| VoxCPM2 | `IMG_3338.MOV` 41.9–56.1 s | 0.865 | 0.042 | 0.066 |
+| VoxCPM2 | the English clip, 0.3–27.7 s | 0.864 | 0.095 | 0.121 |
+| VoxCPM2 | the same, cleaned (70 Hz high-pass, 6 dB noise reduction) | 0.839 | 0.050 | 0.146 |
+| IndicF5 | **current**: `IMG_3337.MOV` 57.4–66.7 s, hand-typed words | 0.909 | 0.073 | 0.066 |
+| IndicF5 | `IMG_3337.MOV` 56.1–63.7 s, the speech model's words | **0.918** | **0.055** | **0.040** |
+| IndicF5 | `IMG_3338.MOV` 41.9–50.2 s | 0.913 | 0.055 | 0.093 |
+| IndicF5 | `IMG_3337.MOV` 102.0–110.1 s | 0.905 | 0.094 | 0.087 |
+| IndicF5 | the best, cleaned | 0.881 | 0.063 | 0.070 |
+
+From one take to the next the same reference moves by about 0.01 in similarity and 0.05–0.1 in
+start CER, so only the VoxCPM2 similarity gain (+0.02, in every take) stands clearly above the
+noise; the best cuts are other stretches of the clone's own session. Two references joined did
+not beat the better of them; a light clean-up made both engines' readings less like the speaker
+(it is not used). The English clip, the cleanest recording, scores lower partly because the
+held-out speech is mostly that session's microphone and room: similarity follows the recording
+as well as the voice. So the library holds no clearly better recording of the speaker: a
+purpose-made one is the way to a better clone ([docs/voice-recording.md](../../docs/voice-recording.md)).
+
 ## Limitations
 
 - The built-in voices are **robotic** and nearly unintelligible to a recogniser (above); they are
@@ -514,6 +575,15 @@ crores, years 1100–2099, money, decimals, codes), suffix sandhi after Malayala
 words, the hand-converted v5 script, `spell_numbers` keeping pauses, ranges, symbols, acronyms,
 canonical spelling, syllables, utterance splitting and hostile scripts. With a release in `FILMCRAFT_F5_DIR`: the oracle comparison (`F5_ORACLE`) and per-part
 timings (`live_f5_parts`).
+
+The voice lab (feature `kokoro`, synthetic speech, fake models): phrases cut at pauses; quality
+telling clean from noisy, clipped, reverberant and music-backed speech; windows within each
+engine's bounds that never cut a word; sentence edges by words and by pauses; a scan of two
+speakers finding only the one asked for (and hearing nothing when nobody matches); ranking spread
+over recordings; held-out speech away from every reference; audition order; hostile audio
+(empty, NaN, infinite, full scale). Versions: a promoted sample and Malayalam clip kept and
+rolled back (the narration cache's identity changing and coming back), consent and the
+Malayalam reference carried over, refused promotions changing nothing.
 
 Model-dependent tests run when `FILMCRAFT_KOKORO_DIR` names a downloaded package directory
 (determinism, whole frames, pace changes length, refusals); the loaders have hostile-input tests

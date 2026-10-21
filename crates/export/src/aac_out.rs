@@ -157,9 +157,74 @@ pub(crate) fn export(
     Ok((n, frames))
 }
 
+/// Most channels [`encode_m4a`] takes.
+const MAX_FILE_CHANNELS: usize = 8;
+
+/// Encode planar samples (`channels`, each at `sample_rate`) as AAC-LC at `bitrate_kbps` into an
+/// MPEG-4 audio file at `path` (`.m4a`, the encoder delay signalled by an edit list): a sound on
+/// its own to share or listen to (the voice lab's auditions). Returns the bytes written.
+pub fn encode_m4a(path: &str, channels: &[Vec<f32>], sample_rate: u32, bitrate_kbps: u32) -> Result<u64> {
+    if channels.is_empty() || channels.len() > MAX_FILE_CHANNELS {
+        return Err(ExportError::Unsupported(format!("AAC audio files take 1–{MAX_FILE_CHANNELS} channels, not {}", channels.len())));
+    }
+    if sample_rate == 0 {
+        return Err(ExportError::Unsupported("audio without a sample rate".into()));
+    }
+    let mut settings = ExportSettings { format: Format::Aac, path: path.to_string(), ..Default::default() };
+    settings.audio.bitrate_kbps = bitrate_kbps;
+    let mut enc: Box<dyn AudioEncoder> = audio_factories()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find_map(|f| f(Format::Aac, sample_rate, channels.len() as u32, &settings))
+        .ok_or_else(|| ExportError::Unsupported("AAC encoder not available".into()))??;
+    let entry = enc.sample_entry();
+    let mut mux = Mp4Writer::new(Out::create(&settings)?, WriterOptions::new(Brand::Mp4)).map_err(|e| ExportError::Io(e.to_string()))?;
+    let mut track = TrackConfig::new(entry, sample_rate);
+    track.media_start = Some(i64::from(enc.priming()));
+    let track = mux.add_track(track).map_err(|e| ExportError::Io(e.to_string()))?;
+    let mut sink = Sink::Mp4 { mux, track, frame: enc.frame_size() };
+    let n = channels.iter().map(Vec::len).min().unwrap_or(0);
+    let chunk = (sample_rate as usize).max(1);
+    let mut at = 0;
+    while at < n {
+        let end = (at + chunk).min(n);
+        let planar: Vec<Vec<f32>> =
+            channels.iter().map(|c| c.get(at..end).unwrap_or(&[]).iter().map(|v| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 }).collect()).collect();
+        sink.write(enc.encode(&planar)?)?;
+        at = end;
+    }
+    sink.write(enc.flush()?)?;
+    sink.finish(&settings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sound_on_its_own_becomes_an_m4a_that_reads_back() {
+        let dir = std::env::temp_dir().join(format!("filmcraft-m4a-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tone.m4a").to_string_lossy().into_owned();
+        let rate = 24_000u32;
+        let x: Vec<f32> = (0..rate * 2).map(|i| 0.3 * (std::f32::consts::TAU * 440.0 * i as f32 / rate as f32).sin()).collect();
+        let bytes = encode_m4a(&path, std::slice::from_ref(&x), rate, 64).unwrap();
+        assert!(bytes > 1000 && bytes < 64_000, "{bytes}");
+        let src = filmcraft_codecs::open_bytes("tone.m4a", std::fs::read(&path).unwrap().into()).unwrap();
+        let a = src.info().audio().cloned().unwrap();
+        assert_eq!((a.sample_rate, a.channels), (rate, 1));
+        let buf = src.audio(0, rate as usize, rate).unwrap();
+        let rms = (buf.channels[0].iter().map(|v| v * v).sum::<f32>() / rate as f32).sqrt();
+        assert!((rms - 0.212).abs() < 0.03, "{rms}");
+        // hostile input: refused or encoded, never a panic
+        assert!(encode_m4a(&path, &[], rate, 64).is_err());
+        assert!(encode_m4a(&path, std::slice::from_ref(&x), 0, 64).is_err());
+        assert!(encode_m4a(&path, &vec![vec![0.0; 10]; 9], rate, 64).is_err());
+        assert!(encode_m4a(&path, &[vec![f32::NAN; 3000]], rate, 64).is_ok());
+        assert!(encode_m4a(&path, &[vec![]], rate, 64).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn adts_header_fields_follow_the_asc() {

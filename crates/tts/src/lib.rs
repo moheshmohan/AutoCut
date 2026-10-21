@@ -11,6 +11,8 @@
 //! - [`wav`]: WAV reading and writing for voice samples.
 //! - [`heard`]: the strict heard-back check of Malayalam narration (character error rates of
 //!   what a recogniser heard, sentence starts scored on their own) and its retake policy.
+//! - `voice_lab` (feature `kokoro`): better references for a cloned voice, found in the
+//!   speaker's own clips and auditioned (signal quality, whole sentences, speaker similarity).
 //! - [`cache`]: synthesized narrations kept on disk (keyed by script, voice identity, pitch and
 //!   pace), so a script is read by a voice once across sessions.
 //!
@@ -34,6 +36,8 @@ pub mod neural;
 #[cfg(feature = "kokoro")]
 pub mod openvoice;
 pub mod script;
+#[cfg(feature = "kokoro")]
+pub mod voice_lab;
 #[cfg(feature = "voxcpm")]
 pub mod voxcpm;
 pub mod wav;
