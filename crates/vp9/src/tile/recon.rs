@@ -1,7 +1,7 @@
 //! Residual syntax (6.4.21 - 6.4.26) with the prediction and reconstruction processes it
 //! triggers (8.5, 8.6).
 
-use super::{Blk, TileDecoder};
+use super::{Blk, Strip, TileDecoder};
 use crate::boolcoder::BoolDecoder;
 use crate::error::Error;
 use crate::frame::Mv;
@@ -284,12 +284,16 @@ impl<'a> TileDecoder<'a> {
             let cmv_row = ((2 * mv.row as i32) >> sy).clamp(to_top - spel_top, (to_bottom + spel_bottom).max(to_top - spel_top));
             let cmv_col = ((2 * mv.col as i32) >> sx).clamp(to_left - spel_left, (to_right + spel_right).max(to_left - spel_left));
             let ri = (b.ref_frame[rl] - 1).clamp(0, 2) as usize;
-            let Some(rf) = &self.s.refs[ri] else {
+            let shared = self.s;
+            let Some(rf) = &shared.refs[ri] else {
                 if self.error.is_none() {
                     self.error = Some(Error::MissingReference(format!("block uses unusable reference {}", b.ref_frame[rl])));
                 }
-                let out = if rl == 0 { &mut self.pred } else { &mut self.pred2 };
-                out[..w * h].fill(1 << (self.bit_depth - 1));
+                let grey = 1 << (self.bit_depth - 1);
+                let (out, os) = pred_target(&mut self.strip, &mut self.pred2, plane, x, y, w, rl);
+                for row in out.chunks_mut(os).take(h) {
+                    row.iter_mut().take(w).for_each(|v| *v = grey);
+                }
                 continue;
             };
             // Motion vector scaling (8.5.2.3).
@@ -311,21 +315,34 @@ impl<'a> TileDecoder<'a> {
             let f = rf.frame;
             let rp =
                 RefPlane { frame: f, plane, last_x: ((f.info.width as i32 + sx as i32) >> sx) - 1, last_y: ((f.info.height as i32 + sy as i32) >> sy) - 1 };
-            let out = if rl == 0 { &mut self.pred } else { &mut self.pred2 };
-            inter::predict(&rp, start_x, start_y, step_x, step_y, w, h, b.interp_filter, self.bit_depth, out, &mut self.mc_tmp, &mut self.mc_win);
+            let (out, os) = pred_target(&mut self.strip, &mut self.pred2, plane, x, y, w, rl);
+            inter::predict(&rp, start_x, start_y, step_x, step_y, w, h, b.interp_filter, self.bit_depth, out, os, &mut self.mc_tmp, &mut self.mc_win);
         }
-        let (stride, x_off) = (self.strip.strides[plane], self.strip.x_off[plane]);
-        let dst = &mut self.strip.planes[plane];
-        for i in 0..h {
-            let o = (y + i) * stride + x - x_off;
-            let row = &mut dst[o..o + w];
-            if is_compound {
-                for ((d, &a), &bb) in row.iter_mut().zip(&self.pred[i * w..i * w + w]).zip(&self.pred2[i * w..i * w + w]) {
-                    *d = ((a as u32 + bb as u32 + 1) >> 1) as u16;
+        if is_compound {
+            // The first prediction is in place: average the second one into it.
+            let (dst, stride) = block_rows(&mut self.strip, plane, x, y);
+            for (row, p2) in dst.chunks_mut(stride).zip(self.pred2.chunks_exact(w)).take(h) {
+                for (d, &bb) in row.iter_mut().zip(p2) {
+                    *d = ((*d as u32 + bb as u32 + 1) >> 1) as u16;
                 }
-            } else {
-                row.copy_from_slice(&self.pred[i * w..i * w + w]);
             }
         }
+    }
+}
+
+/// Where the prediction from reference list `rl` of the `w`-wide block at (`x`, `y`) of `plane`
+/// goes, with its row stride: the first one straight into the frame, the second one (compound
+/// prediction) into `pred2`.
+fn pred_target<'b>(strip: &'b mut Strip, pred2: &'b mut [u16], plane: usize, x: usize, y: usize, w: usize, rl: usize) -> (&'b mut [u16], usize) {
+    if rl == 0 { block_rows(strip, plane, x, y) } else { (pred2, w.max(1)) }
+}
+
+/// The samples of `plane` from the block at (`x`, `y`) on, with the row stride.
+fn block_rows(strip: &mut Strip, plane: usize, x: usize, y: usize) -> (&mut [u16], usize) {
+    let (stride, x_off) = (strip.strides[plane], strip.x_off[plane]);
+    let o = (y * stride + x).saturating_sub(x_off);
+    match strip.planes[plane].get_mut(o..) {
+        Some(d) => (d, stride.max(1)),
+        None => (&mut [], 1),
     }
 }

@@ -63,6 +63,20 @@ impl MiGrid {
     }
 }
 
+/// Per-8x8 records of the MI rows `row0..` of a frame (MiCols wide), e.g. one superblock row.
+pub struct MiRows<'a, T> {
+    pub row0: usize,
+    pub cols: usize,
+    pub mi: &'a [T],
+}
+
+impl<T> MiRows<'_, T> {
+    #[inline]
+    pub fn at(&self, r: usize, c: usize) -> Option<&T> {
+        self.mi.get(r.checked_sub(self.row0)? * self.cols + c)
+    }
+}
+
 /// Scratch rows above the samples of every band: the loop filter of superblock row r reads 8
 /// and modifies up to 7 rows of row r - 1 (the 16-wide filter of the horizontal edges on top of
 /// row r), so those rows are copied there while row r is filtered (see `decoder::post`).

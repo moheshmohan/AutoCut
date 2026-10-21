@@ -1,6 +1,6 @@
 //! Loop filter process (8.8).
 
-use crate::frame::{MiGrid, MiInfo};
+use crate::frame::{MiInfo, MiRows};
 use crate::header::{LoopFilterParams, Segmentation};
 use crate::tables::*;
 
@@ -64,6 +64,22 @@ impl LfFrame {
         let rf = mi.ref_frame[0].max(0) as usize;
         self.lvl[mi.seg_id as usize & 7][rf][mode_type]
     }
+
+    /// What the loop filter needs of the mode info of an 8x8 block.
+    pub fn lf_mi(&self, mi: &MiInfo) -> LfMi {
+        LfMi { sb_size: mi.sb_size, tx_size: mi.tx_size, level: self.level(mi), coded: mi.ref_frame[0] <= INTRA_FRAME || !mi.skip }
+    }
+}
+
+/// The mode info of an 8x8 block as the loop filter uses it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LfMi {
+    pub sb_size: u8,
+    pub tx_size: u8,
+    /// Filter level (8.8.1).
+    pub level: u8,
+    /// Intra, or inter with coefficients: the transform edges inside the block are filtered.
+    pub coded: bool,
 }
 
 /// A mutable view of one plane: sample (x, y) of the plane is `data[(y - oy) * stride + x - ox]`.
@@ -75,15 +91,66 @@ pub struct PlaneView<'a> {
 }
 
 /// Loop filter one superblock (all planes, both passes) at (`row`, `col`) in MI units (8.8.2).
-pub fn filter_superblock(views: &mut [PlaneView; 3], mi: &MiGrid, f: &LfFrame, row: usize, col: usize) {
+pub fn filter_superblock(views: &mut [PlaneView; 3], mi: &MiRows<LfMi>, f: &LfFrame, row: usize, col: usize) {
+    // What the edges of each 8x8 cell of a plane depend on, looked up once per superblock (the
+    // chroma planes share theirs).
+    let luma = cells(mi, f, 0, row, col);
+    let chroma = cells(mi, f, 1, row, col);
     for (plane, view) in views.iter_mut().enumerate() {
+        let c = if plane == 0 { &luma } else { &chroma };
         for pass in 0..2 {
-            filter_sb_plane(view, mi, f, plane, pass, row, col);
+            filter_sb_plane(view, c, f, plane, pass, row, col);
         }
     }
 }
 
-fn filter_sb_plane(v: &mut PlaneView, mi: &MiGrid, f: &LfFrame, plane: usize, pass: usize, row: usize, col: usize) {
+/// The mode info of an 8x8 cell of a plane (8x8 samples) as its edges use it.
+#[derive(Clone, Copy, Default)]
+struct Cell {
+    /// Inside the MI grid.
+    valid: bool,
+    level: u8,
+    /// Transform size in this plane.
+    tx: u8,
+    /// Block width / height in luma samples minus 1 (the block containing the cell, at least
+    /// 16x16 in a subsampled direction): an edge at luma x is a block edge if `x & bw == 0`.
+    bw: u16,
+    bh: u16,
+    coded: bool,
+}
+
+/// The cells of plane type `plane` (0: luma, 1: chroma) of the superblock at (`row`, `col`): cell
+/// (cy, cx) at index cy * 8 + cx covers the samples (cx * 8, cy * 8) of the superblock in the plane.
+fn cells(mi: &MiRows<LfMi>, f: &LfFrame, plane: usize, row: usize, col: usize) -> [Cell; 64] {
+    let (sub_x, sub_y) = if plane > 0 { (f.ss_x, f.ss_y) } else { (0, 0) };
+    let mut out = [Cell::default(); 64];
+    for cy in 0..8 >> sub_y {
+        for cx in 0..8 >> sub_x {
+            let (r, c) = (row + (cy << sub_y), col + (cx << sub_x));
+            if r >= f.mi_rows || c >= f.mi_cols {
+                continue;
+            }
+            let Some(m) = mi.at(r, c) else { continue };
+            let tx = if plane > 0 {
+                if m.sb_size < BLOCK_8X8 { 0 } else { m.tx_size.min(MAX_TXSIZE[SS_SIZE_LOOKUP[m.sb_size as usize][f.ss_x][f.ss_y].min(12) as usize]) }
+            } else {
+                m.tx_size
+            };
+            let sb = |sub: usize| if sub == 0 { m.sb_size } else { m.sb_size.max(BLOCK_16X16) } as usize;
+            out[cy * 8 + cx] = Cell {
+                valid: true,
+                level: m.level,
+                tx,
+                bw: 8 * NUM_8X8_WIDE[sb(sub_x)] as u16 - 1,
+                bh: 8 * NUM_8X8_HIGH[sb(sub_y)] as u16 - 1,
+                coded: m.coded,
+            };
+        }
+    }
+    out
+}
+
+fn filter_sb_plane(v: &mut PlaneView, cells: &[Cell; 64], f: &LfFrame, plane: usize, pass: usize, row: usize, col: usize) {
     let (sub_x, sub_y) = if plane > 0 { (f.ss_x, f.ss_y) } else { (0, 0) };
     let (sub, edge_len) = if pass == 0 { (sub_x, 64 >> sub_y) } else { (sub_y, 64 >> sub_x) };
     let (mi_rows, mi_cols) = (f.mi_rows, f.mi_cols);
@@ -100,24 +167,21 @@ fn filter_sb_plane(v: &mut PlaneView, mi: &MiGrid, f: &LfFrame, plane: usize, pa
                 i += 8;
                 continue;
             }
-            let loop_col = ((x >> 3) >> sub_x) << sub_x;
-            let loop_row = ((y >> 3) >> sub_y) << sub_y;
-            let m = mi.at(loop_row, loop_col);
-            let tx_sz = if plane > 0 {
-                if m.sb_size < BLOCK_8X8 { 0 } else { m.tx_size.min(MAX_TXSIZE[SS_SIZE_LOOKUP[m.sb_size as usize][f.ss_x][f.ss_y].min(12) as usize]) }
-            } else {
-                m.tx_size
+            // The cell of the group (loopRow / loopCol of the specification).
+            let cell = ((((y >> 3) - row) >> sub_y) * 8) + (((x >> 3) - col) >> sub_x);
+            let Some(m) = cells.get(cell).filter(|c| c.valid) else {
+                i += 8;
+                continue;
             };
-            let sb_size = if sub == 0 { m.sb_size } else { m.sb_size.max(BLOCK_16X16) } as usize;
-            let is_intra = m.ref_frame[0] <= INTRA_FRAME;
+            let tx_sz = m.tx;
             // Block sizes are powers of two, so the modulo is a mask.
-            let is_block_edge = if pass == 0 { x & (8 * NUM_8X8_WIDE[sb_size] as usize - 1) == 0 } else { y & (8 * NUM_8X8_HIGH[sb_size] as usize - 1) == 0 };
-            let tx_ok = edge & ((1 << tx_sz) - 1) == 0 && (is_intra || !m.skip);
+            let is_block_edge = if pass == 0 { x & m.bw as usize == 0 } else { y & m.bh as usize == 0 };
+            let tx_ok = edge & ((1 << tx_sz) - 1) == 0 && m.coded;
             if !is_block_edge && !tx_ok {
                 i += 8;
                 continue;
             }
-            let lvl = f.level(m);
+            let lvl = m.level;
             if lvl == 0 {
                 i += 8;
                 continue;
