@@ -30,6 +30,7 @@ pub mod plan;
 pub mod preview;
 pub mod reframe;
 pub mod remix;
+pub mod safe_zones;
 pub mod scene;
 pub mod subject;
 pub mod track;

@@ -134,6 +134,9 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
         v.pan = [0.0, 0.0];
         return Some(Ok(json!({"monitor": pfx, "zoom": zoom})));
     }
+    if rest == "safeZones" || rest.starts_with("safeZones.") {
+        return Some(set_safe_zones(app, w, rest, params));
+    }
     let r = match rest {
         "highQualityPlayback" => {
             let v = view_mut(app, w);
@@ -262,6 +265,79 @@ fn set_display(app: &mut FilmcraftApp, w: Which, d: &str) -> Result<Value, Strin
     Ok(json!({"monitor": prefix(w), "display": d}))
 }
 
+/// `view.safeZones {platform, monitor}` (the engine command's parameters; the Program monitor
+/// unless `monitor` says otherwise) or a menu pick `view.safeZones.<platform|off>` (the monitor
+/// `w`): set the monitor's Platform Safe Zones. The Program monitor's is the engine's too.
+fn set_safe_zones(app: &mut FilmcraftApp, w: Which, rest: &str, params: &Value) -> Result<Value, String> {
+    use filmcraft_engine::safe_zones::{Platform, platform_p, zones_json};
+    let (w, next) = match rest.strip_prefix("safeZones.") {
+        Some("off") => (w, Some(None)),
+        Some(name) => (w, Some(Some(Platform::from_name(name).ok_or_else(|| format!("unknown platform `{name}`"))?))),
+        None => {
+            let w = match params.get("monitor").filter(|v| !v.is_null()) {
+                None => Which::Program,
+                Some(Value::String(m)) if m == "program" => Which::Program,
+                Some(Value::String(m)) if m == "source" => Which::Source,
+                Some(_) => return Err("view.safeZones: `monitor` is \"program\" or \"source\"".into()),
+            };
+            (w, platform_p("view.safeZones", params, "platform").map_err(|e| e.to_string())?)
+        }
+    };
+    if let Some(next) = next {
+        view_mut(app, w).safe_zones = next;
+        if w == Which::Program {
+            app.session.state.safe_zones = next;
+            app.seen_safe_zones = next;
+        }
+    }
+    let now = view(app, w).safe_zones;
+    let mut v = zones_json(now, frame_size(app, w).unwrap_or((1080, 1920)));
+    v["monitor"] = json!(prefix(w));
+    Ok(v)
+}
+
+/// Copy the engine's Platform Safe Zones to the Program monitor when something changed it (an
+/// agent's or a recipe's `view.safeZones` run on the session); called every frame.
+pub fn sync_safe_zones(app: &mut FilmcraftApp) {
+    let now = app.session.state.safe_zones;
+    if now != app.seen_safe_zones {
+        app.seen_safe_zones = now;
+        app.ui.program.safe_zones = now;
+    }
+}
+
+/// A platform's name in the menus: its own name, or "All Vertical Platforms".
+pub fn platform_label(p: filmcraft_engine::safe_zones::Platform) -> &'static str {
+    match p {
+        filmcraft_engine::safe_zones::Platform::Vertical => tl!("All Vertical Platforms"),
+        _ => p.label(),
+    }
+}
+
+/// Platform Safe Zones over the picture `pic` of a `frame`-sized frame: each part the platform's
+/// interface covers as a translucent rectangle, the safe area outlined, and the platform's name
+/// in small text at the top of the safe area. Plain shapes and text only (no logos, no mock-up of
+/// the interface).
+pub fn draw_safe_zones(ui: &egui::Ui, pic: Rect, p: filmcraft_engine::safe_zones::Platform) {
+    let painter = ui.painter_at(pic);
+    let at = |x: f64, y: f64| pos2(pic.min.x + pic.width() * x as f32, pic.min.y + pic.height() * y as f32);
+    let fill = Color32::from_rgba_unmultiplied(255, 64, 64, 46);
+    let edge = Color32::from_rgba_unmultiplied(255, 96, 96, 150);
+    for z in p.zones() {
+        let r = Rect::from_min_max(at(z.area.x0, z.area.y0), at(z.area.x1, z.area.y1));
+        painter.rect_filled(r, 0.0, fill);
+    }
+    let safe = p.safe_area();
+    let sr = Rect::from_min_max(at(safe.x0, safe.y0), at(safe.x1, safe.y1));
+    painter.rect_stroke(sr, 0.0, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+    let size = (pic.height() * 0.022).clamp(9.0, 14.0);
+    let label = platform_label(p);
+    let galley = painter.layout_no_wrap(label.to_string(), Tokens::ui(size), Color32::WHITE);
+    let tr = Rect::from_min_size(sr.min + vec2(4.0, 4.0), galley.size() + vec2(8.0, 4.0));
+    painter.rect_filled(tr, 3.0, Color32::from_black_alpha(150));
+    painter.galley(tr.min + vec2(4.0, 2.0), galley, Color32::WHITE);
+}
+
 fn save_template(app: &mut FilmcraftApp, w: Which, name: &str) -> Result<Value, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -300,6 +376,13 @@ pub fn checked(app: &FilmcraftApp, id: &str) -> Option<bool> {
     }
     if let Some(z) = rest.strip_prefix("magnification.") {
         return Some(if z == "fit" { v.zoom.is_none() } else { ZOOMS.iter().find(|(n, _)| *n == z).is_some_and(|(_, f)| v.zoom == Some(*f)) });
+    }
+    if let Some(p) = rest.strip_prefix("safeZones.") {
+        return Some(if p == "off" {
+            v.safe_zones.is_none()
+        } else {
+            filmcraft_engine::safe_zones::Platform::from_name(p).is_some_and(|p| v.safe_zones == Some(p))
+        });
     }
     match rest {
         "highQualityPlayback" => Some(v.high_quality),
@@ -761,6 +844,13 @@ pub fn wrench_items(app: &mut FilmcraftApp, ui: &mut egui::Ui, w: Which) {
     if w == Which::Program {
         pick(ui, &mut out, "snapInProgramMonitor", tl!("Snap in Program Monitor"), v.snap);
     }
+    let zones = ui.menu_button(tl!("Platform Safe Zones"), |ui| {
+        pick(ui, &mut out, "safeZones.off", tl!("Off"), v.safe_zones.is_none());
+        for p in filmcraft_engine::safe_zones::Platform::ALL {
+            pick(ui, &mut out, &format!("safeZones.{}", p.name()), platform_label(p), v.safe_zones == Some(p));
+        }
+    });
+    out.push(("safeZones".into(), zones.response.rect, tl!("Platform Safe Zones").into(), false));
     ui.separator();
     let pfx = prefix(w);
     for (key, r, label, clicked) in out {

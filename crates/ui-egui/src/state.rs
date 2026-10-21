@@ -316,6 +316,10 @@ pub struct MonitorView {
     /// length (start, end), set with the zoom bar under the ruler; None = all of it.
     pub time_zoom: Option<[f64; 2]>,
     pub safe_margins: bool,
+    /// Platform Safe Zones: the parts of a vertical picture this platform's interface covers,
+    /// drawn as translucent rectangles with its name (`"youtube"`, `"reels"`, `"tiktok"`,
+    /// `"vertical"`; None = off).
+    pub safe_zones: Option<filmcraft_engine::safe_zones::Platform>,
     pub show_transport: bool,
     /// Transport buttons hidden through the monitor's Button Editor. Stored per monitor.
     pub transport_hidden: Vec<String>,
@@ -342,6 +346,7 @@ impl Default for MonitorView {
             pan: [0.0, 0.0],
             time_zoom: None,
             safe_margins: false,
+            safe_zones: None,
             show_transport: true,
             // The optional Loop button is available from the editor without altering default layouts.
             transport_hidden: vec!["playback.loop".into()],
