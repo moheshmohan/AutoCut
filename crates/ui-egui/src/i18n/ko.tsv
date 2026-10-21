@@ -1243,6 +1243,12 @@
 	Frames per Still:	스틸당 프레임:
 	Framing	프레이밍
 	Free draw bezier	자유 그리기 베지어
+	Mask shape presets	마스크 모양 사전 설정
+	Rounded Rectangle	둥근 사각형
+	Cross	십자형
+	Arrow	화살표
+	Cinematic Bars ({aspect})	시네마 바 ({aspect})
+	Diagonal Split	대각선 분할
 	Freeform	자유형
 	Freeform View	자유형 보기
 	Freeform View Options	자유형 보기 옵션
@@ -2574,6 +2580,9 @@
 	Reveal in Finder	Finder에서 보기
 	Reveal in Project	프로젝트에서 표시
 	Reveal Log Files…	로그 파일 표시…
+	Save Feedback Bundle…	피드백 번들 저장…
+	Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.	로그, 충돌 보고서, 실행 취소 기록, 시스템 보고서를 하나의 폴더에 저장하고(비밀 정보와 홈 폴더 경로는 제외) 파일 관리자에서 보여 줍니다.
+	Feedback bundle saved in {path}	피드백 번들을 {path}에 저장했습니다
 	Reveal Nested Sequence	중첩 시퀀스 표시
 	Reveal Original Image	원본 이미지 표시
 	Reveal Project in Finder…	Finder에서 프로젝트 보기…

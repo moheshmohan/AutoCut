@@ -48,6 +48,9 @@ pub fn menu_hint(command: &str) -> Option<String> {
     Some(
         match command {
             "help.revealLogFiles" => tl!("Saves this session's log and shows it in your file manager."),
+            "help.saveFeedbackBundle" => {
+                tl!("Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.")
+            }
             "help.systemCompatibilityReport" => tl!("Shows a report on this computer."),
             "app.about" => tl!("Shows the version, community links and credits in a FilmCraft window."),
             _ => return None,

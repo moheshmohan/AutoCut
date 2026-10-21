@@ -182,7 +182,27 @@ Ctrl), `Ctrl` (macOS ⌃), `Alt`, `Shift`. The dialog (Edit ▸ Keyboard Shortcu
 or `--bridge 127.0.0.1:9876` to drive the running app. Tools: `command_list`, `command_run`,
 `command_batch`, `doc_inspect`, `render_preview`, `project_inspect`, `sequence_inspect`, `media_import`,
 `render_frame`, `ui_inspect`, `ui_elements`, `ui_click`, `ui_drag`, `ui_key`, `ui_type`, `ui_screenshot`,
-`ui_control`; resources `filmcraft://document` and `filmcraft://commands`. `.mcp.json` registers both.
+`ui_control`, `feedback_bundle` (and the AutoCut, template and recipe tools of
+[agents.md](agents.md#tools)); resources `filmcraft://document` and `filmcraft://commands`.
+`.mcp.json` registers both.
+
+**Feedback bundles.** `app.feedbackBundle {path?, qaReport?}` (MCP `feedback_bundle`,
+`filmcraft-cli feedback [folder]`, Help ▸ Save Feedback Bundle…) writes one folder to diagnose a
+problem from: `README.txt`, `manifest.json` (app version, build, OS, every file, what was cut or
+left out), `system.json`, `history.json` (undo / redo labels; `log`: when each step was made,
+undone or redone, also in `history.list`; the last commands), `events.json`, `jobs.json`,
+`perf.json`, `project.json` (`project.inspect`), `preferences.json`, `qa.json` (the last AutoCut
+QA report: `qaReport`, the latest showcase build's, or `<last export>.qa.json`), `logs/` (the last
+MiB of `filmcraft.log`, `filmcraft.1.log`, `filmcraft.2.log` and the newest session logs) and
+`crashes/` (the five newest `crash-<day>.log`). Through the app (`engine.execute`, the menu) the
+app's own `perf.stats` (playback, frame workers, UI) and system report (GPU) go in. Redaction:
+the home folder (and any `/Users/<name>`, `/home/<name>`, `C:\Users\<name>`) becomes `~`, e-mail
+addresses `[email]`, values of secret keys (`token`, `secret`, `password`, `apiKey`,
+`authorization`, `cookie`, `code`…) in JSON and in `key=value` / `key: value` text, `Bearer` /
+`Basic` credentials and OAuth-token / API-key / JWT-shaped strings `[redacted]`; token stores, the
+Keychain and sign-in files are never read. Each log keeps its last 1 MiB, each crash report its
+last 256 KiB; the bundle stays under 8 MiB. Default folder: `<data dir>/Feedback/FilmCraft
+Feedback <date>`.
 Annotations, argument checking, errors and export progress / cancellation:
 [agents.md § Conventions](agents.md#conventions).
 

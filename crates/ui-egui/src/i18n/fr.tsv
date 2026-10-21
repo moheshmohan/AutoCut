@@ -281,6 +281,9 @@
 	Reset to Saved Layout	Réinitialiser la disposition enregistrée
 	Restore Captions from Source Clip	Restaurer les sous-titres du clip source
 	Reveal Log Files…	Afficher les fichiers journaux…
+	Save Feedback Bundle…	Enregistrer le paquet de diagnostic…
+	Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.	Enregistre les journaux, les rapports de plantage, l'historique d'annulation et un rapport système dans un dossier, sans secrets ni votre dossier personnel, et l'affiche dans le gestionnaire de fichiers.
+	Feedback bundle saved in {path}	Paquet de diagnostic enregistré dans {path}
 	Reverse Match Frame	Correspondance d'image inverse
 	Revert	Revenir à la version enregistrée
 	Revert Remix	Annuler le remix
@@ -964,6 +967,12 @@
 	Create ellipse mask	Créer un masque elliptique
 	Create 4-point polygon mask	Créer un masque polygonal à 4 points
 	Free draw bezier	Bézier à main levée
+	Mask shape presets	Formes de masque prédéfinies
+	Rounded Rectangle	Rectangle arrondi
+	Cross	Croix
+	Arrow	Flèche
+	Cinematic Bars ({aspect})	Bandes cinéma ({aspect})
+	Diagonal Split	Partage en diagonale
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	Cliquez dans le moniteur programme pour placer les points du masque (faites glisser pour créer des courbes) ; cliquez sur le premier point ou appuyez sur Entrée pour fermer
 	Delete Mask	Supprimer le masque
 	Inverted	Inversé

@@ -305,6 +305,9 @@
 	Reset to Saved Layout	Auf gespeichertes Layout zurücksetzen
 	Restore Captions from Source Clip	Untertitel aus Quellclip wiederherstellen
 	Reveal Log Files…	Protokolldateien anzeigen…
+	Save Feedback Bundle…	Feedback-Paket speichern…
+	Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.	Speichert Protokolle, Absturzberichte, den Rückgängig-Verlauf und einen Systembericht in einem Ordner, ohne Geheimnisse und ohne deinen Benutzerordner, und zeigt ihn im Dateimanager.
+	Feedback bundle saved in {path}	Feedback-Paket gespeichert in {path}
 	Reverse Match Frame	Sequenzbild finden
 	Revert	Zurück zur gespeicherten Version
 	Revert Remix	Remix zurücksetzen
@@ -999,6 +1002,12 @@
 	Create ellipse mask	Ellipsenmaske erstellen
 	Create 4-point polygon mask	4-Punkt-Polygonmaske erstellen
 	Free draw bezier	Freihand-Bézier
+	Mask shape presets	Maskenform-Vorgaben
+	Rounded Rectangle	Abgerundetes Rechteck
+	Cross	Kreuz
+	Arrow	Pfeil
+	Cinematic Bars ({aspect})	Kinobalken ({aspect})
+	Diagonal Split	Diagonale Teilung
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	Klick in den Programmmonitor, um Maskenpunkte zu setzen (ziehen für Kurven); klick auf den ersten Punkt oder drück die Eingabetaste, um sie zu schließen
 	Delete Mask	Maske löschen
 	Inverted	Umgekehrt

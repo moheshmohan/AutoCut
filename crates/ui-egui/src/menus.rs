@@ -148,6 +148,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("help.github", "FilmCraft on GitHub", ["Help"], None),
     uic!("help.reportIssue", "Report an Issue…", ["Help"], None),
     uic!("help.revealLogFiles", "Reveal Log Files…", ["Help"], None),
+    uic!("help.saveFeedbackBundle", "Save Feedback Bundle…", ["Help"], None),
     uic!("help.systemCompatibilityReport", "System Compatibility Report…", ["Help"], None),
     uic!("app.about", "About FilmCraft", ["Help"], None),
     uic!("app.keyboardShortcuts", "Keyboard Shortcuts…", ["Edit"], Some("Cmd+Alt+K")),
@@ -255,6 +256,10 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
     if id == "perf.stats" {
         // the engine's counters plus playback, frame workers and UI timings
         return Ok(crate::perf::stats(app));
+    }
+    if id == "app.feedbackBundle" {
+        // the app's perf stats (playback, frame workers, UI) and system report (GPU) go in
+        return crate::panels::menu_dialogs::feedback_bundle(app, params);
     }
     if let Some(result) = crate::dock_ui::route(app, ctx, id, &params) {
         return result;

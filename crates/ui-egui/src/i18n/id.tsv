@@ -286,6 +286,9 @@
 	Reset to Saved Layout	Kembalikan ke Tata Letak Tersimpan
 	Restore Captions from Source Clip	Pulihkan Takarir dari Klip Sumber
 	Reveal Log Files…	Tampilkan Berkas Log…
+	Save Feedback Bundle…	Simpan Paket Umpan Balik…
+	Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.	Menyimpan log, laporan crash, riwayat urungkan, dan laporan sistem dalam satu folder, tanpa rahasia dan folder rumah Anda, lalu menampilkannya di pengelola berkas.
+	Feedback bundle saved in {path}	Paket umpan balik disimpan di {path}
 	Reverse Match Frame	Cocokkan Bingkai Terbalik
 	Revert	Kembalikan
 	Revert Remix	Kembalikan Remix
@@ -969,6 +972,12 @@
 	Create ellipse mask	Buat masker elips
 	Create 4-point polygon mask	Buat masker poligon 4 titik
 	Free draw bezier	Gambar bezier bebas
+	Mask shape presets	Preset bentuk masker
+	Rounded Rectangle	Persegi panjang membulat
+	Cross	Silang
+	Arrow	Panah
+	Cinematic Bars ({aspect})	Bilah sinema ({aspect})
+	Diagonal Split	Belah diagonal
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	Klik di monitor Program untuk menempatkan titik masker (seret untuk kurva); klik titik pertama atau tekan Enter untuk menutup
 	Delete Mask	Hapus Masker
 	Inverted	Terbalik

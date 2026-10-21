@@ -121,6 +121,43 @@ fn menu_items_toggles_and_help() {
     assert_eq!(d.call("ui.menu.invoke", json!({"id": "file.importFromMediaBrowser"}))["ok"], false);
 }
 
+/// Help ▸ Save Feedback Bundle… writes the bundle with the app's own perf stats and system report
+/// and shows the folder; `engine.execute app.feedbackBundle` gets them too.
+#[test]
+fn save_feedback_bundle_from_the_help_menu() {
+    let mut d = Driver::new();
+    let menus = d.ok("ui.menu.list", json!({}));
+    let item = menus.as_array().unwrap().iter().find(|m| m["id"] == "help.saveFeedbackBundle").cloned().expect("Help ▸ Save Feedback Bundle…");
+    assert_eq!((item["path"].clone(), item["label"].clone()), (json!(["Help"]), json!("Save Feedback Bundle…")));
+    // the menu item has an automation id
+    d.click("menu.Help");
+    assert!(d.has("menu.help.saveFeedbackBundle"));
+    d.ok("ui.key", json!({"key": "Escape"}));
+    d.frames(2);
+    let dir = std::env::temp_dir().join(format!("fc-ui-feedback-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = dir.join("bundle");
+    let r = d.ok("ui.menu.invoke", json!({"id": "help.saveFeedbackBundle", "params": {"path": out.to_string_lossy()}}));
+    d.frames(2);
+    let path = r["path"].as_str().unwrap().to_string();
+    assert_eq!(d.app().ui.extras.opened.last(), Some(&path), "the folder is shown");
+    assert!(d.app().ui.status.contains("Feedback bundle saved"), "{}", d.app().ui.status);
+    let perf: Value = serde_json::from_slice(&std::fs::read(out.join("perf.json")).unwrap()).unwrap();
+    assert!(perf.get("ui").is_some() && perf.get("frames").is_some(), "the app's perf stats: {perf}");
+    let system: Value = serde_json::from_slice(&std::fs::read(out.join("system.json")).unwrap()).unwrap();
+    assert!(system.get("gpu").is_some(), "the app's system report: {system}");
+    assert!(out.join("manifest.json").is_file() && out.join("history.json").is_file());
+    // over the control channel as an engine command
+    let out2 = dir.join("bundle2");
+    d.exec("app.feedbackBundle", json!({"path": out2.to_string_lossy()}));
+    let perf: Value = serde_json::from_slice(&std::fs::read(out2.join("perf.json")).unwrap()).unwrap();
+    assert!(perf.get("ui").is_some(), "{perf}");
+    // a bad path is an error in the status line, not a crash
+    let bad = d.call("ui.menu.invoke", json!({"id": "help.saveFeedbackBundle", "params": {"path": ""}}));
+    assert_eq!(bad["ok"], false, "{bad}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn import_image_sequence_from_the_file_menu_and_media_browser() {
     let dir = std::env::temp_dir().join(format!("fc-ui-imgseq-{}", std::process::id()));

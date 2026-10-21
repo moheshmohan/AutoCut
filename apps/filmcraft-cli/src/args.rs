@@ -118,6 +118,8 @@ const VALUED: &[&str] = &[
     "--cover-at",
     "--cover-url",
     "--video-url",
+    // feedback
+    "--qa-report",
     // narration numbers, photo locations (photos locations, showcase --places-from-locations)
     "--numbers",
     "--places-from-locations",

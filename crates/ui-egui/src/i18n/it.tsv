@@ -276,6 +276,9 @@
 	Reset to Saved Layout	Ripristina layout salvato
 	Restore Captions from Source Clip	Ripristina sottotitoli dalla clip sorgente
 	Reveal Log Files…	Mostra file di log…
+	Save Feedback Bundle…	Salva pacchetto di diagnostica…
+	Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.	Salva i log, i rapporti di arresto anomalo, la cronologia degli annullamenti e un rapporto di sistema in una cartella, senza segreti né la tua cartella personale, e la mostra nel gestore file.
+	Feedback bundle saved in {path}	Pacchetto di diagnostica salvato in {path}
 	Reverse Match Frame	Fotogramma corrispondente inverso
 	Revert	Ripristina
 	Revert Remix	Annulla remix
@@ -961,6 +964,12 @@
 	Create ellipse mask	Crea maschera ellittica
 	Create 4-point polygon mask	Crea maschera poligonale a 4 punti
 	Free draw bezier	Bezier a mano libera
+	Mask shape presets	Forme predefinite della maschera
+	Rounded Rectangle	Rettangolo arrotondato
+	Cross	Croce
+	Arrow	Freccia
+	Cinematic Bars ({aspect})	Bande cinema ({aspect})
+	Diagonal Split	Divisione diagonale
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	Fai clic nel monitor programma per posizionare i punti della maschera (trascina per le curve); fai clic sul primo punto o premi Invio per chiudere
 	Delete Mask	Elimina maschera
 	Inverted	Invertita

@@ -80,6 +80,13 @@ SUBCOMMANDS
   commands [filter] [--json]    list commands (id, label, shortcut, params)
   describe <id>                 one command as JSON (menu, shortcut, params, enabled now)
   inspect [project|sequence]    project tree or active sequence as JSON (default: both)
+  feedback [folder] [--qa-report r.qa.json]
+                                write a feedback bundle (`app.feedbackBundle`) for diagnosing a
+                                problem: version and OS, the end of the app's logs, recent crash
+                                reports, the undo history, perf.stats, project.inspect, the last
+                                AutoCut QA report (or --qa-report), with secrets and the home folder
+                                taken out; capped at 8 MiB. Default folder: <data dir>/Feedback/…
+                                With --bridge, the running app's bundle (its playback and GPU too)
   import <file>...              import media into the project
   export <out> [--preset name] [--format f] [--range r] [--start s --end s] [--settings json]
          [--gpu-rendering auto|off]
@@ -2521,6 +2528,21 @@ async fn cli() {
             if failed > 0 {
                 std::process::exit(1);
             }
+        }
+        "feedback" => {
+            let mut p = json!({});
+            if let Some(dir) = a.pos(1) {
+                p["path"] = json!(absolute(dir));
+            }
+            if let Some(qa) = a.opt("--qa-report") {
+                p["qaReport"] = json!(absolute(qa));
+            }
+            let mut b = Backend::open(&a);
+            match b.exec("app.feedbackBundle", p).await {
+                Ok(v) => print(&a, &v),
+                Err(e) => fail(format!("feedback: {e}")),
+            }
+            b.finish(&a).await;
         }
         "inspect" => {
             let mut b = Backend::open(&a);

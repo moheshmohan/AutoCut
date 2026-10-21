@@ -274,6 +274,9 @@
 	Reset to Saved Layout	重置为已保存的布局
 	Restore Captions from Source Clip	从源剪辑恢复字幕
 	Reveal Log Files…	显示日志文件…
+	Save Feedback Bundle…	保存反馈包…
+	Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.	将日志、崩溃报告、撤销历史和系统报告保存到一个文件夹中（去除机密信息和主文件夹路径），并在文件管理器中显示。
+	Feedback bundle saved in {path}	反馈包已保存到 {path}
 	Reverse Match Frame	反向匹配帧
 	Revert	还原
 	Revert Remix	还原重新混音
@@ -960,6 +963,12 @@
 	Create ellipse mask	创建椭圆蒙版
 	Create 4-point polygon mask	创建 4 点多边形蒙版
 	Free draw bezier	自由绘制贝塞尔
+	Mask shape presets	蒙版形状预设
+	Rounded Rectangle	圆角矩形
+	Cross	十字形
+	Arrow	箭头
+	Cinematic Bars ({aspect})	电影遮幅 ({aspect})
+	Diagonal Split	对角分割
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	在节目监视器中点击以放置蒙版点（拖动可绘制曲线）；点击第一个点或按 Enter 键闭合
 	Delete Mask	删除蒙版
 	Inverted	反相

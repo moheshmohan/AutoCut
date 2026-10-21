@@ -588,10 +588,23 @@ with different vertex counts hold). Feather, Opacity and Expansion are ordinary 
 - **GPU.** `filmcraft-gpu::GpuMask` evaluates the same coverage and mix in WGSL (compute), tested
   to agree with the CPU within 3·10⁻⁶. Layers with masks are CPU-rendered images in frame plans.
 - **Editing.** `masks.*` commands (add / remove / set / moveVertex / translate / addVertex /
-  removeVertex / toggleVertexSmooth / roundCorners / select / list; `masks.add` takes a
-  `cornerRadius` for a rounded rectangle); keyframe commands take `"mask": n`. The
-  Program monitor overlay drags vertices, Bézier handles, the whole mask and the feather /
-  expansion handles; drags merge into one undo step.
+  removeVertex / toggleVertexSmooth / roundCorners / select / list / presets; `masks.add` takes a
+  `cornerRadius` for a rounded rectangle); keyframe commands take `"mask": n`. The Program
+  monitor overlay drags vertices, Bézier handles, the whole mask and the feather / expansion
+  handles; drags merge into one undo step.
+- **Shape presets.** Besides ellipse, 4-point polygon and pen, `masks.add` `shape` makes
+  `roundedRectangle` (`cornerRadius`, default 15% of the smaller side), `star` (`points` 3–100,
+  `innerRatio`), `heart` (six vertices: smooth lobes, a cusp and a point, broken handles),
+  `triangle`, `regularPolygon` (`sides`; `hexagon`, `pentagon`, `octagon`), `cross`
+  (`thickness`), `arrow`, `cinematicBars` (`aspect`, e.g. `2.39` or `"2.39:1"`: the picture area
+  between the bars, a rectangle reaching 10% past the frame where there are no bars, feather 0;
+  on Opacity it cuts the bars out, on another effect it starts inverted so the effect fills the
+  bars; bars at the sides when the aspect is narrower than the frame) and `diagonalSplit`
+  (`corner`: the half kept; only the diagonal edge is inside the frame). They are ordinary paths
+  (`MaskPath::star`, `::heart`, `::letterbox`, `::diagonal_split`, …), sized by `center` / `size`
+  in clip pixels; out-of-range counts, ratios, aspects and coordinates are errors. `masks.presets`
+  lists them; Effect Controls has a ☆ button after the pen whose menu adds them
+  (`effectControls.<effect>.mask.presets`, `…mask.preset.<key>`).
 - **Tracking** (`render::track`, `masks.track`): Shi–Tomasi features inside the mask, pyramidal
   Lucas–Kanade (4 levels, 15×15 window) with a forward–backward check, then RANSAC + least squares
   for Position / Position & Rotation / Position, Scale & Rotation (2D Procrustes). Each frame's

@@ -79,6 +79,7 @@ only). "Tested" names the evidence.
 |---|---|---|---|---|---|
 | SRT, WebVTT, SCC | read + write | yes | yes | frame-exact, property-tested | 95% |
 | MCC (608 + 708), EBU STL, TTML / IMSC1, DFXP | read + write | yes | yes | frame-exact | 90% |
+| ASS / SSA (Advanced SubStation Alpha) | no | yes (styles, placement, `\b` `\i` `\u` `\an` `\pos`) | yes (ASS) | frame-exact at 25 fps, property-tested, hostile input | ahead |
 | 608 / 708 embedded in the video stream | write (MXF, H.264 SEI) | no | **no** | — | 0% |
 | Burn-in | yes | — | yes | golden tests | 95% |
 

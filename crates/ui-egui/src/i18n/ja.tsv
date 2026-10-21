@@ -280,6 +280,9 @@
 	Reset to Saved Layout	保存したレイアウトにリセット
 	Restore Captions from Source Clip	ソースクリップからキャプションを復元
 	Reveal Log Files…	ログファイルを表示…
+	Save Feedback Bundle…	フィードバックバンドルを保存…
+	Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.	ログ、クラッシュレポート、取り消し履歴、システムレポートを 1 つのフォルダーに保存し (秘密情報とホームフォルダーは除外)、ファイルマネージャーで表示します。
+	Feedback bundle saved in {path}	フィードバックバンドルを {path} に保存しました
 	Reverse Match Frame	逆マッチフレーム
 	Revert	保存済みの状態に戻す
 	Revert Remix	リミックスを元に戻す
@@ -966,6 +969,12 @@
 	Create ellipse mask	楕円マスクを作成
 	Create 4-point polygon mask	4 点の多角形マスクを作成
 	Free draw bezier	ベジェで自由に描画
+	Mask shape presets	マスクの図形プリセット
+	Rounded Rectangle	角丸長方形
+	Cross	十字
+	Arrow	矢印
+	Cinematic Bars ({aspect})	シネマバー ({aspect})
+	Diagonal Split	対角分割
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	プログラムモニターをクリックしてマスクのポイントを配置します (ドラッグで曲線)。最初のポイントをクリックするか Enter キーを押すと、マスクが閉じます
 	Delete Mask	マスクを削除
 	Inverted	反転

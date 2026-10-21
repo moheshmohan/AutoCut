@@ -399,3 +399,114 @@ fn path_json_round_trip_keeps_tangents() {
     // the serialized project form still parses
     assert_eq!(crate::masks::path_from_json(&serde_json::to_value(&path).unwrap()), Some(path));
 }
+
+/// The shape presets make ordinary masks: the expected vertex counts, one undo step each, listed
+/// by `masks.presets`.
+#[test]
+fn shape_presets_make_ordinary_editable_masks() {
+    let (mut s, clip) = demo();
+    let presets = s.execute("masks.presets", json!({})).unwrap();
+    let shapes: Vec<&str> = presets["presets"].as_array().unwrap().iter().map(|p| p["shape"].as_str().unwrap()).collect();
+    assert!(shapes.contains(&"star") && shapes.contains(&"heart") && shapes.contains(&"cinematicBars") && shapes.contains(&"diagonalSplit"), "{shapes:?}");
+    let cases = [
+        (json!({"shape": "star"}), 10),
+        (json!({"shape": "star", "points": 7, "innerRatio": 0.3}), 14),
+        (json!({"shape": "heart"}), 6),
+        (json!({"shape": "triangle"}), 3),
+        (json!({"shape": "regularPolygon", "sides": 8}), 8),
+        (json!({"shape": "hexagon"}), 6),
+        (json!({"shape": "pentagon"}), 5),
+        (json!({"shape": "cross"}), 12),
+        (json!({"shape": "arrow"}), 7),
+        (json!({"shape": "roundedRectangle"}), 8),
+        (json!({"shape": "rounded-rectangle", "cornerRadius": 0}), 4),
+        (json!({"shape": "cinematicBars"}), 4),
+        // the diagonal of a 16:9 frame leaves the frame (+10%) through its left and right sides
+        (json!({"shape": "diagonalSplit", "corner": "bottomLeft"}), 4),
+    ];
+    for (i, (params, vertices)) in cases.iter().enumerate() {
+        let undo = s.history.undo.len();
+        let mut p = params.clone();
+        p["clip"] = json!(clip.0);
+        let r = s.execute("masks.add", p).unwrap();
+        assert_eq!(r["mask"], i, "{params}");
+        assert_eq!(s.history.undo.len(), undo + 1, "{params}: one undo step");
+        let list = s.execute("masks.list", json!({"clip": clip.0})).unwrap();
+        let m = &list["masks"][i];
+        assert_eq!(m["path"]["vertices"].as_array().unwrap().len(), *vertices, "{params}");
+    }
+    // they edit like any mask: move a vertex of the star
+    s.execute("masks.moveVertex", json!({"clip": clip.0, "effect": "opacity", "mask": 0, "vertex": 0, "delta": [5, 5]})).unwrap();
+    // undo takes back each step, the last first
+    let before = s.execute("masks.list", json!({"clip": clip.0})).unwrap()["masks"].as_array().unwrap().len();
+    s.undo();
+    s.undo();
+    assert_eq!(s.execute("masks.list", json!({"clip": clip.0})).unwrap()["masks"].as_array().unwrap().len(), before - 1);
+}
+
+/// Cinematic bars: on Opacity the picture between the bars stays and the bars are cut out
+/// (sharp); on another effect the mask starts inverted so the effect fills the bars.
+#[test]
+fn cinematic_bars_cut_the_bars_out_of_opacity_and_fill_them_on_effects() {
+    let (mut s, clip) = demo();
+    s.execute("masks.add", json!({"clip": clip.0, "shape": "cinematicBars", "aspect": "2.39:1"})).unwrap();
+    let img = s.render_program(0.25).unwrap();
+    let top = px(&img, 0.5, 0.03);
+    assert!(top[0] + top[1] + top[2] < 1e-4, "the top bar is cut out: {top:?}");
+    let bottom = px(&img, 0.5, 0.97);
+    assert!(bottom[0] + bottom[1] + bottom[2] < 1e-4, "the bottom bar is cut out: {bottom:?}");
+    assert!(px(&img, 0.5, 0.5)[3] > 0.99, "the picture stays");
+    let list = s.execute("masks.list", json!({"clip": clip.0})).unwrap();
+    assert_eq!((list["masks"][0]["inverted"].as_bool(), list["masks"][0]["feather"].as_f64()), (Some(false), Some(0.0)), "{}", list["masks"][0]);
+    s.undo();
+    // on an effect: inverted, so Invert applies in the bars only
+    let plain = s.render_program(0.25).unwrap();
+    s.execute("effects.apply", json!({"effect": "invert"})).unwrap();
+    s.execute("masks.add", json!({"clip": clip.0, "effect": "invert", "shape": "bars", "aspect": 2.39})).unwrap();
+    let img = s.render_program(0.25).unwrap();
+    assert!(dist(px(&img, 0.5, 0.5), px(&plain, 0.5, 0.5)) < 1e-4, "the picture is untouched");
+    assert!(dist(px(&img, 0.5, 0.03), px(&plain, 0.5, 0.03)) > 0.05, "the bars are inverted");
+    // an explicit `inverted` wins
+    s.execute("masks.add", json!({"clip": clip.0, "effect": "invert", "shape": "bars", "inverted": false})).unwrap();
+    let list = s.execute("masks.list", json!({"clip": clip.0})).unwrap();
+    let inv: Vec<Option<bool>> = list["masks"].as_array().unwrap().iter().map(|m| m["inverted"].as_bool()).collect();
+    assert_eq!(inv, vec![Some(true), Some(false)]);
+}
+
+/// Hostile parameters are refused with an error (and change nothing), never a panic.
+#[test]
+fn shape_preset_params_are_validated() {
+    let (mut s, clip) = demo();
+    let undo = s.history.undo.len();
+    for p in [
+        json!({"shape": "star", "points": 2}),
+        json!({"shape": "star", "points": 1_000_000_000_000u64}),
+        json!({"shape": "star", "points": -5}),
+        json!({"shape": "star", "points": "five"}),
+        json!({"shape": "star", "innerRatio": 0}),
+        json!({"shape": "star", "innerRatio": 1e308}),
+        json!({"shape": "regularPolygon", "sides": 101}),
+        json!({"shape": "cross", "thickness": -1}),
+        json!({"shape": "cinematicBars", "aspect": 0}),
+        json!({"shape": "cinematicBars", "aspect": "1:0"}),
+        json!({"shape": "cinematicBars", "aspect": "wide"}),
+        json!({"shape": "cinematicBars", "aspect": 1e300}),
+        json!({"shape": "diagonalSplit", "corner": "middle"}),
+        json!({"shape": "heart", "center": [1e300, 0]}),
+        json!({"shape": "heart", "size": [1, "x"]}),
+        json!({"shape": "star", "size": [-1e308, 5]}),
+        json!({"shape": "roundedRectangle", "cornerRadius": -3}),
+        json!({"shape": "dodecahedron"}),
+        json!({"shape": "bezier"}),
+        json!({"shape": "star", "inverted": "yes"}),
+    ] {
+        let mut q = p.clone();
+        q["clip"] = json!(clip.0);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.execute("masks.add", q)));
+        assert!(matches!(r, Ok(Err(_))), "{p}: {r:?}");
+    }
+    assert_eq!(s.history.undo.len(), undo, "nothing changed");
+    // the error names the known shapes
+    let e = s.execute("masks.add", json!({"clip": clip.0, "shape": "blob"})).unwrap_err().to_string();
+    assert!(e.contains("star") && e.contains("diagonalSplit"), "{e}");
+}

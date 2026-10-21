@@ -87,8 +87,11 @@ claude mcp add filmcraft -- filmcraft-cli mcp
 | `recipe_list` | both | recipes: parameterised chains of engine commands and AutoCut intents (built in: talking-head clean-up, vertical short from a long clip, apply a template and publish privately to YouTube — publishing off unless asked) and the user's own from `<data dir>/Recipes`; `recipe` for one in full with its steps as they would run (`recipe.list`, `recipe.inspect`; format in [crates/engine/src/recipes.rs](../crates/engine/src/recipes.rs)) |
 | `recipe_run` | both | run a recipe with `params` as a job (progress, cancel): every step checked before it runs (intents planned by AutoCut's planner, commands checked against the registry and the recipe allowlist), jobs a step starts waited for, a failing step stops the run and says which; `dry_run` plans only (`recipe.run`). Saving and recording go through `command_run`: `recipe.save`, `recipe.delete`, `recipe.record` (`start`, then `stop` with a `name`: the edits made meanwhile become a recipe). In the app: Window ▸ Recipes (`ui.set {recipes: …}`) |
 
+| `feedback_bundle` | both | write one folder to diagnose a problem from (`app.feedbackBundle`; `path`, default `<data dir>/Feedback/FilmCraft Feedback <date>`; `qa_report`): `manifest.json` (app version, build, OS, every file with its size), `system.json`, `history.json` (undo / redo labels, when steps were made / undone / redone, the last 300 commands), `events.json`, `jobs.json`, `perf.json` (the running app's `perf.stats` in bridge mode), `project.json` (`project.inspect`), `preferences.json`, `qa.json` (the last AutoCut QA report), `logs/` (the last MiB of `filmcraft.log`, the two before it and session logs) and `crashes/` (the newest five crash reports). The home folder becomes `~`, e-mail addresses `[email]`, tokens, passwords, API keys, cookies and other secrets `[redacted]`; token stores and the Keychain are never read; at most 8 MiB. Also Help ▸ Save Feedback Bundle… (`help.saveFeedbackBundle`, `menu.help.saveFeedbackBundle`) and `filmcraft-cli feedback [folder]` |
+
 Typical loop: `project_inspect` / `sequence_inspect` → get ids → `command_run` → `render_frame` or
-`ui_screenshot` → look at the result → `edit.undo` if it's wrong.
+`ui_screenshot` → look at the result → `edit.undo` if it's wrong. When something goes wrong that
+you cannot explain, `feedback_bundle` and read its files.
 
 ### Conventions
 
@@ -258,6 +261,8 @@ filmcraft-cli export --list-presets prores       # built-in + user presets (--da
 filmcraft-cli --project p.fcproj exec export.queue.add preset="Apple ProRes 422 HQ" path=renders/ start=true wait=true
 echo '{"id":"file.newBin","params":{"name":"Selects"}}' | filmcraft-cli --project p.fcproj --save run -
 filmcraft-cli --bridge 127.0.0.1:9876 exec window.workspace.color   # the running app
+filmcraft-cli feedback /tmp/fc-feedback          # a redacted feedback bundle (logs, crashes, history…)
+filmcraft-cli --bridge 127.0.0.1:9876 feedback   # the running app's, with its playback and GPU stats
 ```
 
 `key=value` values are parsed as JSON when they can be (`3.5`, `true`, `[1,2]`), otherwise taken as
