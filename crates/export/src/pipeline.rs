@@ -224,6 +224,12 @@ impl Pipeline {
         })
     }
 
+    /// Have the decoders produce the media pictures output frame `f` shows, ahead of its render
+    /// ([`filmcraft_render::prefetch`]).
+    pub fn warm(&self, f: i64, sources: &dyn SourceProvider) -> usize {
+        filmcraft_render::prefetch::warm_frame(&self.project, self.seq, self.rate.tick_of(f), self.opts, sources)
+    }
+
     /// Output frame `f` as straight sRGB RGBA8 at the output size, or for HDR exports the encoded
     /// R'G'B' floats (3 per pixel).
     pub fn frame(&self, f: i64, sources: &dyn SourceProvider) -> (Vec<u8>, Vec<f32>) {

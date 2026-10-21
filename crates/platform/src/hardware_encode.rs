@@ -192,6 +192,31 @@ impl HardwareEncoder {
         }
         Ok(out)
     }
+
+    /// The size of picture `f`, which must be SDR and the size the encoder was made for.
+    fn picture_size(&self, f: &EncoderFrame) -> filmcraft_export::Result<(usize, usize)> {
+        let c = self.vt.config();
+        if f.hdr.is_some() {
+            return Err(ExportError::Unsupported("hardware encoding does not take HDR pictures".into()));
+        }
+        if (f.width, f.height) != (c.width, c.height) {
+            return Err(ExportError::Encode(format!("picture is {}x{}, the encoder was created for {}x{}", f.width, f.height, c.width, c.height)));
+        }
+        Ok((f.width as usize, f.height as usize))
+    }
+
+    /// The samples of picture `index`'s submission (`packets`: what came out meanwhile).
+    fn encoded(&mut self, index: u64, packets: Vec<VtPacket>) -> filmcraft_export::Result<Vec<EncodedPacket>> {
+        filmcraft_export::note_hw_encode_frame();
+        // the muxer needs the parameter sets after the first group of pictures
+        if index == 0 {
+            let params = self.vt.parameter_sets().ok_or_else(|| ExportError::Encode("VideoToolbox returned no parameter sets for the first frame".into()))?;
+            if self.vt.config().profile.codec() == VtCodec::Hevc {
+                hevc_config(&params).map_err(ExportError::Encode)?;
+            }
+        }
+        self.samples(packets)
+    }
 }
 
 impl VideoEncoder for HardwareEncoder {
@@ -213,29 +238,25 @@ impl VideoEncoder for HardwareEncoder {
     }
 
     fn encode(&mut self, f: &EncoderFrame) -> filmcraft_export::Result<Vec<EncodedPacket>> {
-        let c = self.vt.config();
-        let codec = c.profile.codec();
-        if f.hdr.is_some() {
-            return Err(ExportError::Unsupported("hardware encoding does not take HDR pictures".into()));
-        }
-        if (f.width, f.height) != (c.width, c.height) {
-            return Err(ExportError::Encode(format!("picture is {}x{}, the encoder was created for {}x{}", f.width, f.height, c.width, c.height)));
-        }
-        let (w, h) = (f.width as usize, f.height as usize);
+        let (w, h) = self.picture_size(f)?;
         if f.rgba.len() < w.saturating_mul(h).saturating_mul(4) {
             return Err(ExportError::Encode("the RGBA picture is smaller than its size".into()));
         }
         filmcraft_export::timed(filmcraft_export::Stage::Convert, || filmcraft_export::rgba_to_yuv420_8(f.rgba, w, h, &mut self.y, &mut self.u, &mut self.v));
         let packets = self.vt.encode(f.index, &self.y, &self.u, &self.v).map_err(ExportError::Encode)?;
-        filmcraft_export::note_hw_encode_frame();
-        // the muxer needs the parameter sets after the first group of pictures
-        if f.index == 0 {
-            let params = self.vt.parameter_sets().ok_or_else(|| ExportError::Encode("VideoToolbox returned no parameter sets for the first frame".into()))?;
-            if codec == VtCodec::Hevc {
-                hevc_config(&params).map_err(ExportError::Encode)?;
-            }
-        }
-        self.samples(packets)
+        self.encoded(f.index, packets)
+    }
+
+    /// The export converts the pictures on its render threads (`rgba_to_yuv420_8`, the conversion
+    /// [`Self::encode`] runs), so this thread only fills and submits them.
+    fn takes_yuv420(&self) -> bool {
+        true
+    }
+
+    fn encode_yuv420(&mut self, f: &EncoderFrame, y: &[u8], u: &[u8], v: &[u8]) -> filmcraft_export::Result<Vec<EncodedPacket>> {
+        self.picture_size(f)?;
+        let packets = self.vt.encode(f.index, y, u, v).map_err(ExportError::Encode)?;
+        self.encoded(f.index, packets)
     }
 
     fn flush(&mut self) -> filmcraft_export::Result<Vec<EncodedPacket>> {

@@ -27,6 +27,7 @@ pub mod mixer;
 pub mod multicam;
 pub mod offline;
 pub mod plan;
+pub mod prefetch;
 pub mod preview;
 pub mod reframe;
 pub mod remix;
@@ -248,6 +249,15 @@ pub(crate) fn render_seq_tracks(project: &Project, seq: &Sequence, t: Tick, opts
             Some(Layer::Full { image, opacity, blend: bl, opaque }) => {
                 if canvas.is_empty() && opaque && opacity == 1.0 && bl == Blend::Normal && (image.w, image.h) == (w, h) {
                     // mixing an opaque layer over transparent black gives the layer itself
+                    canvas.set(image);
+                } else if canvas.is_empty()
+                    && bl == Blend::Normal
+                    && (image.w, image.h) == (w, h)
+                    && w.checked_mul(h).and_then(|n| n.checked_mul(4)) == Some(image.px.len())
+                {
+                    // any other layer over transparent black: the mix worked out in place
+                    let mut image = image;
+                    blend::over_nothing(&mut image, opacity);
                     canvas.set(image);
                 } else {
                     blend::composite(canvas.get(), &image, opacity, bl);

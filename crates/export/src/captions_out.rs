@@ -108,4 +108,11 @@ impl VideoEncoder for CaptionSei {
     fn pass_stats(&self) -> Option<filmcraft_h264enc::PassStats> {
         self.inner.pass_stats()
     }
+    fn takes_yuv420(&self) -> bool {
+        self.inner.takes_yuv420()
+    }
+    fn encode_yuv420(&mut self, frame: &EncoderFrame, y: &[u8], u: &[u8], v: &[u8]) -> Result<Vec<EncodedPacket>> {
+        let p = self.inner.encode_yuv420(frame, y, u, v)?;
+        Ok(self.embed(p))
+    }
 }

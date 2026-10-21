@@ -1401,9 +1401,46 @@ fn yuv420_conversion_keeps_its_bits() {
         rgba_to_yuv420_8(&rgba, w, h, &mut y, &mut u, &mut v);
         assert_eq!((y, u, v), yuv420_reference(&rgba, w, h), "{w}x{h}");
     }
+    // every code value of every channel, against each of the others, even and odd sizes
+    for (w, h) in [(256, 256), (255, 257), (17, 3)] {
+        let rgba: Vec<u8> = (0..w * h).flat_map(|i| [(i % 256) as u8, (i / 256 % 256) as u8, ((i * 7 + i / 256 * 13) % 256) as u8, 255]).collect();
+        let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        rgba_to_yuv420_8(&rgba, w, h, &mut y, &mut u, &mut v);
+        assert_eq!((y, u, v), yuv420_reference(&rgba, w, h), "{w}x{h}");
+    }
+    // a picture with fewer bytes than its size: a row it lacks data for (even partly) is black
+    for (w, h, have) in [(7, 5, 61), (16, 9, 300), (9, 4, 0), (5, 3, 11), (4, 4, 32)] {
+        let rgba: Vec<u8> = (0..have).map(|i| ((i * 2_654_435_761usize) >> 9) as u8).collect();
+        let padded: Vec<u8> = (0..h).flat_map(|r| rgba.get(r * w * 4..(r + 1) * w * 4).map_or_else(|| [0, 0, 0, 255].repeat(w), <[u8]>::to_vec)).collect();
+        let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        rgba_to_yuv420_8(&rgba, w, h, &mut y, &mut u, &mut v);
+        assert_eq!((y, u, v), yuv420_reference(&padded, w, h), "{w}x{h} from {have} bytes");
+    }
     let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
     rgba_to_yuv420_8(&[255; 10], 8, 8, &mut y, &mut u, &mut v);
     assert_eq!((y.len(), u.len(), v.len()), (64, 16, 16));
     rgba_to_yuv420_8(&[], 0, 0, &mut y, &mut u, &mut v);
     assert!(y.is_empty() && u.is_empty() && v.is_empty());
+}
+
+/// Time of the hardware encoders' RGB → Y'CbCr conversion of a 4K frame, on one thread and on the
+/// pool (ignored; `cargo test --release -p filmcraft-export --lib perf_yuv420_conversion_4k --
+/// --ignored --nocapture`).
+#[test]
+#[ignore]
+fn perf_yuv420_conversion_4k() {
+    let (w, h) = (3840usize, 2160usize);
+    let rgba: Vec<u8> = (0..w * h * 4).map(|i| ((i * 2_654_435_761usize) >> 13) as u8).collect();
+    let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
+    for threads in [1, 0] {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| {
+            rgba_to_yuv420_8(&rgba, w, h, &mut y, &mut u, &mut v);
+            let t = std::time::Instant::now();
+            for _ in 0..20 {
+                rgba_to_yuv420_8(&rgba, w, h, &mut y, &mut u, &mut v);
+            }
+            println!("rgba_to_yuv420_8 3840x2160, {} threads: {:.2} ms", rayon::current_num_threads(), t.elapsed().as_secs_f64() * 1000.0 / 20.0);
+        });
+    }
 }

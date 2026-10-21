@@ -341,6 +341,115 @@ fn frames_render_on_a_pool_of_the_exports_own() {
     });
     let threads = watched.threads.into_inner().unwrap();
     assert!(!threads.is_empty());
-    assert!(threads.iter().all(|t| t.starts_with("filmcraft-export-render-")), "frames rendered on {threads:?}");
+    // (the thread decoding the batch after next asks for sources too, and renders nothing)
+    assert!(threads.iter().all(|t| t.starts_with("filmcraft-export-render-") || t == "filmcraft-export-decode-ahead"), "frames rendered on {threads:?}");
+    assert!(threads.iter().any(|t| t.starts_with("filmcraft-export-render-")), "frames rendered on {threads:?}");
     assert!(std::fs::read(&s.path).unwrap() == reference, "the render pool changed the file");
+}
+
+/// Decoding the batch after next while the next one renders (job.rs, "Decoding ahead") asks the
+/// sources ahead of the render, and the file stays the same with it, without it, without overlap,
+/// at any batch size and core count.
+#[test]
+fn decoding_ahead_does_not_change_the_file() {
+    for (format, ext) in [(Format::ProRes, "mov"), (Format::H264, "mp4")] {
+        let settings = |name: &str| ExportSettings { format, path: tmp(&format!("{name}.{ext}")), ..Default::default() };
+        let (reference, _) = export_overlapped(3, 7, false, &settings(&format!("warm-{}-off", format.id())));
+        for (threads, batch, warm) in [(2, 1, true), (3, 3, true), (3, 3, false), (5, 7, true), (16, 24, true)] {
+            let (p, seq, m) = project();
+            let watched = Watched { inner: &m, threads: Default::default() };
+            let s = settings(&format!("warm-{}-{threads}-{batch}-{warm}", format.id()));
+            pool(threads).install(|| {
+                let prog = Progress::default();
+                let mut ex = Exporter::new(p, seq, &s, &prog).unwrap();
+                ex.set_batch(batch);
+                ex.set_warm_ahead(warm);
+                while !matches!(ex.step(&watched, &prog).unwrap(), Step::Done(_)) {}
+                assert_eq!(prog.done.load(Ordering::Relaxed), prog.total.load(Ordering::Relaxed));
+            });
+            let names = watched.threads.into_inner().unwrap();
+            // 24 frames: batches after the next one exist unless a batch holds (nearly) all of them
+            let ahead = names.contains("filmcraft-export-decode-ahead");
+            assert_eq!(ahead, warm && batch * 2 < 24, "{}: {threads} cores, {batch} per step: decoded ahead on {names:?}", format.label());
+            assert!(
+                std::fs::read(&s.path).unwrap() == reference,
+                "{}: decoding ahead ({threads} cores, {batch} per step) gives a different file",
+                format.label()
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// encoders that take Y'CbCr (VideoEncoder::takes_yuv420): frames converted on the render threads
+// ---------------------------------------------------------------------------------------------
+
+/// An encoder for exports whose path names it: each packet is a digest of the Y'CbCr planes it was
+/// given (converted on the render threads with `takes`, by itself from the RGBA without), so two
+/// files are the same exactly when every frame's planes are.
+struct PlanesProbe {
+    takes: bool,
+    rate: FrameRate,
+    planes: (Vec<u8>, Vec<u8>, Vec<u8>),
+}
+
+fn digest(parts: [&[u8]; 3]) -> Vec<u8> {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut out = Vec::new();
+    for p in parts {
+        for b in p {
+            h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+        }
+        out.extend_from_slice(&h.to_be_bytes());
+        out.extend_from_slice(&(p.len() as u64).to_be_bytes());
+    }
+    out
+}
+
+impl VideoEncoder for PlanesProbe {
+    fn sample_entry(&self) -> filmcraft_isobmff::SampleEntry {
+        filmcraft_isobmff::SampleEntry::avc(filmcraft_isobmff::AvcConfig::new(vec![vec![0x67, 0x64, 0, 0x1f]], vec![vec![0x68, 0xee]], 4), 320, 180)
+    }
+    fn timescale(&self) -> u32 {
+        self.rate.num as u32
+    }
+    fn encode(&mut self, f: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
+        assert!(!self.takes, "the RGBA path is not used once the encoder takes Y'CbCr");
+        let (y, u, v) = &mut self.planes;
+        rgba_to_yuv420_8(f.rgba, f.width as usize, f.height as usize, y, u, v);
+        Ok(vec![EncodedPacket { data: digest([y, u, v]), key: true, duration: self.rate.den as u32, composition_offset: 0 }])
+    }
+    fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
+        Ok(Vec::new())
+    }
+    fn takes_yuv420(&self) -> bool {
+        self.takes
+    }
+    fn encode_yuv420(&mut self, f: &EncoderFrame, y: &[u8], u: &[u8], v: &[u8]) -> Result<Vec<EncodedPacket>> {
+        assert!(self.takes && f.rgba.is_empty());
+        Ok(vec![EncodedPacket { data: digest([y, u, v]), key: true, duration: self.rate.den as u32, composition_offset: 0 }])
+    }
+}
+
+fn planes_probe(format: Format, _w: u32, _h: u32, rate: FrameRate, s: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
+    let takes = match s.path.as_str() {
+        p if format == Format::H264 && p.contains("planes-probe-render") => true,
+        p if format == Format::H264 && p.contains("planes-probe-encode") => false,
+        _ => return None,
+    };
+    Some(Ok(Box::new(PlanesProbe { takes, rate, planes: Default::default() })))
+}
+
+/// An encoder that takes Y'CbCr gets, from the render threads, the planes it would have made from
+/// the RGBA itself: the same file with every core count, step size and overlap.
+#[test]
+fn frames_converted_on_the_render_threads_are_the_ones_the_encoder_converted() {
+    register_encoder(planes_probe);
+    let settings = |name: &str| ExportSettings { format: Format::H264, path: tmp(&format!("{name}.mp4")), ..Default::default() };
+    let (reference, _) = export_overlapped(3, 5, false, &settings("planes-probe-encode-ref"));
+    for (threads, batch, overlap) in [(2, 1, true), (3, 5, true), (3, 5, false), (5, 7, true), (16, 24, true)] {
+        let name = format!("planes-probe-render-{threads}-{batch}-{overlap}");
+        let (file, _) = export_overlapped(threads, batch, overlap, &settings(&name));
+        assert!(file == reference, "{threads} cores, {batch} per step, overlap {overlap}: the planes differ");
+    }
 }
