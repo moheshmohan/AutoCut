@@ -318,7 +318,7 @@ impl QaReport {
         format!("{} error(s), {} warning(s): {}", self.errors, self.warnings, parts.join("; "))
     }
 
-    fn tally(&mut self) {
+    pub(crate) fn tally(&mut self) {
         self.findings.sort_by(|a, b| a.seconds.total_cmp(&b.seconds).then(b.severity.cmp(&a.severity)));
         self.errors = self.findings.iter().filter(|f| f.severity == Severity::Error).count();
         self.warnings = self.findings.iter().filter(|f| f.severity == Severity::Warning).count();

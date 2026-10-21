@@ -904,7 +904,7 @@ pub(crate) async fn panel_text(
 
 /// Shrink text layer `layer` of `clip` (set at `size`, measured `b`) to fit `room` pixels
 /// across, when it is wider: a long title in a wide fallback family. Its bounds as they are now.
-async fn fit_width(ex: &dyn Executor, clip: u64, layer: usize, size: f64, b: Bounds, room: f64) -> Bounds {
+pub(crate) async fn fit_width(ex: &dyn Executor, clip: u64, layer: usize, size: f64, b: Bounds, room: f64) -> Bounds {
     let wide = b.right - b.left;
     if !(wide.is_finite() && wide > room && room > 0.0) {
         return b;

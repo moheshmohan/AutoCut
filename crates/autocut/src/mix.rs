@@ -293,7 +293,7 @@ impl MixTracks {
 
 /// Put `chain` on `strip` (after what is there); the slot of each effect, `None` for one that
 /// could not be added or set.
-async fn inserts(ex: &dyn Executor, strip: &str, chain: &[(&str, Value)], notes: &mut Vec<String>) -> Vec<Option<u64>> {
+pub(crate) async fn inserts(ex: &dyn Executor, strip: &str, chain: &[(&str, Value)], notes: &mut Vec<String>) -> Vec<Option<u64>> {
     let mut slots = Vec::new();
     for (effect, params) in chain {
         let slot = match run(ex, "mixer.addInsert", json!({"strip": strip, "effect": effect})).await {

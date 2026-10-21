@@ -39,6 +39,7 @@ pub const LONG_COMMANDS: &[&str] = &[
     "autocut.showcaseBuild",
     "autocut.shorts",
     "autocut.malayalamScript",
+    "autocut.trailer",
     "sequence.autoReframe",
     "clip.autoReframe",
     "sequence.autoRedact",
