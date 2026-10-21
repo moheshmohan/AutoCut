@@ -807,6 +807,7 @@ pub(super) fn audition(ap: &AuditionParams, media: &MediaPool, services: &dyn Se
         "voice": ap.voice,
         "summary": summary,
         "report": path,
+        "out": out,
         "refs": ap.report,
         "pool": pool,
         "lines": {"voxcpm": au::ENGLISH, "indicf5": au::MALAYALAM},
@@ -959,6 +960,20 @@ fn readme(v: &Value) -> String {
     s.push_str("and the files to listen to (readings) are every line's first reading.\n");
     s.push_str("Similarity is to held-out genuine speech of the speaker (OpenVoice tone colour, 1 = same);\n");
     s.push_str("CER is what the speech model heard against the line; start CER the first syllables of each sentence.\n\n");
+    // the short list: per engine the current reference and the best three others, small files
+    s.push_str("Listen to (M4A; the same readings as WAV beside them):\n");
+    for t in Target::ALL {
+        let rows: Vec<&Value> =
+            v["entries"].as_array().into_iter().flatten().filter(|e| e["target"].as_str() == Some(t.id()) && e["error"].is_null()).collect();
+        let current = rows.iter().find(|e| e["kind"] == "current");
+        let best = rows.iter().filter(|e| e["kind"] != "current").take(3);
+        for e in current.into_iter().chain(best) {
+            let file = e["files"]["readingsM4a"].as_str().or_else(|| e["files"]["readings"].as_str()).unwrap_or("");
+            let name = Path::new(file).strip_prefix(v["out"].as_str().unwrap_or("")).map_or_else(|_| file.to_string(), |p| p.to_string_lossy().into_owned());
+            s.push_str(&format!("  {:8} #{} {:24} {}  ({})\n", t.id(), e["rank"], e["id"].as_str().unwrap_or(""), name, e["source"].as_str().unwrap_or("")));
+        }
+    }
+    s.push('\n');
     for t in Target::ALL {
         let rows: Vec<&Value> = v["entries"].as_array().into_iter().flatten().filter(|e| e["target"].as_str() == Some(t.id())).collect();
         if rows.is_empty() {
@@ -1259,6 +1274,26 @@ mod tests {
         let nan = vec![ChainStep { effect: "parametric_eq".into(), params: json!({"hp_freq": "x"}).as_object().unwrap().clone() }];
         assert!(run_chain(&nan, &x, rate).is_err());
         assert!(run_chain(&[], &[], rate).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_readme_lists_the_current_reference_and_the_best_first() {
+        let e = |id: &str, kind: &str, t: &str, rank: u32| {
+            json!({"id": id, "kind": kind, "target": t, "rank": rank, "source": "IMG_1.MOV [0.0–10.0 s]", "similarity": 0.9, "cer": 0.05, "startCer": 0.02, "artefacts": 0, "score": 0.8,
+                   "files": {"readingsM4a": format!("/out/audition/{t}/{id}.m4a"), "readings": format!("/out/audition/{t}/{id}.wav")}})
+        };
+        let v = json!({"voice": "clone:me", "out": "/out", "takes": 2, "entries": [
+            e("voxcpm-2", "candidate", "voxcpm", 1), e("current", "current", "voxcpm", 2), e("voxcpm-1", "candidate", "voxcpm", 3),
+            {"id": "voxcpm-3", "kind": "candidate", "target": "voxcpm", "rank": 4, "error": "no words"},
+            e("current", "current", "indicf5", 1),
+        ]});
+        let r = readme(&v);
+        let listen: Vec<&str> = r.lines().skip_while(|l| !l.starts_with("Listen to")).skip(1).take_while(|l| !l.is_empty()).collect();
+        assert_eq!(listen.len(), 4, "{r}");
+        assert!(listen[0].contains("current") && listen[0].contains("audition/voxcpm/current.m4a"), "{r}");
+        assert!(listen[1].contains("voxcpm-2") && listen[2].contains("voxcpm-1") && listen[3].contains("indicf5"), "{r}");
+        assert!(r.contains("not auditioned: no words"), "{r}");
+        assert!(r.contains("2 reading(s)"), "{r}");
     }
 
     #[test]
