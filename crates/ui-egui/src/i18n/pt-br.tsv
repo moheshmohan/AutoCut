@@ -283,6 +283,9 @@
 	Reset to Saved Layout	Redefinir para o layout salvo
 	Restore Captions from Source Clip	Restaurar legendas do clipe de origem
 	Reveal Log Files…	Mostrar arquivos de log…
+	Save Feedback Bundle…	Salvar pacote de diagnóstico…
+	Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.	Salva os logs, os relatórios de falhas, o histórico de desfazer e um relatório do sistema em uma pasta, sem segredos nem sua pasta pessoal, e a mostra no gerenciador de arquivos.
+	Feedback bundle saved in {path}	Pacote de diagnóstico salvo em {path}
 	Reverse Match Frame	Quadro correspondente inverso
 	Revert	Reverter
 	Revert Remix	Reverter remixagem

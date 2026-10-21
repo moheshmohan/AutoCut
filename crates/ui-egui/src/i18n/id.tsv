@@ -286,6 +286,9 @@
 	Reset to Saved Layout	Kembalikan ke Tata Letak Tersimpan
 	Restore Captions from Source Clip	Pulihkan Takarir dari Klip Sumber
 	Reveal Log Files…	Tampilkan Berkas Log…
+	Save Feedback Bundle…	Simpan Paket Umpan Balik…
+	Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.	Menyimpan log, laporan crash, riwayat urungkan, dan laporan sistem dalam satu folder, tanpa rahasia dan folder rumah Anda, lalu menampilkannya di pengelola berkas.
+	Feedback bundle saved in {path}	Paket umpan balik disimpan di {path}
 	Reverse Match Frame	Cocokkan Bingkai Terbalik
 	Revert	Kembalikan
 	Revert Remix	Kembalikan Remix

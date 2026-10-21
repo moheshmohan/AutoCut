@@ -152,6 +152,23 @@ fn write_session_log(app: &FilmcraftApp) -> Result<std::path::PathBuf, String> {
     Ok(path)
 }
 
+/// `app.feedbackBundle` with the app's own perf stats (playback, frame workers, UI timings) and
+/// system report (the GPU adapter) unless the caller passed them.
+pub fn feedback_bundle(app: &mut FilmcraftApp, params: Value) -> Result<Value, String> {
+    let mut p = match params {
+        Value::Null => json!({}),
+        p @ Value::Object(_) => p,
+        _ => return Err("parameters must be an object".into()),
+    };
+    if p.get("perf").is_none_or(Value::is_null) {
+        p["perf"] = crate::perf::stats(app);
+    }
+    if p.get("system").is_none_or(Value::is_null) {
+        p["system"] = system_report(app);
+    }
+    app.session.execute("app.feedbackBundle", p).map_err(|e| e.to_string())
+}
+
 /// The engine's report plus the GPU adapter (wgpu) when the GPU compositor is on.
 pub fn system_report(app: &FilmcraftApp) -> Value {
     let mut r = filmcraft_engine::project_tools::system_report();
@@ -183,6 +200,27 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: &Val
                 let s = p.to_string_lossy().to_string();
                 open_path(app, ctx, &s, true).map(|_| json!({"path": s}))
             });
+            return Some(r);
+        }
+        "help.saveFeedbackBundle" => {
+            // Help ▸ Save Feedback Bundle…: the bundle in <data dir>/Feedback (or `path`), shown
+            // in the file manager (`reveal: false` leaves it closed)
+            let mut p = if params.is_object() { params.clone() } else { json!({}) };
+            let reveal = p.get("reveal").and_then(Value::as_bool).unwrap_or(true);
+            if let Some(o) = p.as_object_mut() {
+                o.remove("reveal");
+            }
+            let r = feedback_bundle(app, p).and_then(|v| {
+                let path = v["path"].as_str().unwrap_or_default().to_string();
+                if reveal {
+                    open_path(app, ctx, &path, true)?;
+                }
+                app.ui.status = tlf!("Feedback bundle saved in {path}", path);
+                Ok(v)
+            });
+            if let Err(e) = &r {
+                app.ui.status = e.clone();
+            }
             return Some(r);
         }
         "help.systemCompatibilityReport" => {

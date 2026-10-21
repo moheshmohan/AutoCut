@@ -281,6 +281,9 @@
 	Reset to Saved Layout	Réinitialiser la disposition enregistrée
 	Restore Captions from Source Clip	Restaurer les sous-titres du clip source
 	Reveal Log Files…	Afficher les fichiers journaux…
+	Save Feedback Bundle…	Enregistrer le paquet de diagnostic…
+	Saves the logs, crash reports, undo history and a system report in one folder, with secrets and your home folder taken out, and shows it in your file manager.	Enregistre les journaux, les rapports de plantage, l'historique d'annulation et un rapport système dans un dossier, sans secrets ni votre dossier personnel, et l'affiche dans le gestionnaire de fichiers.
+	Feedback bundle saved in {path}	Paquet de diagnostic enregistré dans {path}
 	Reverse Match Frame	Correspondance d'image inverse
 	Revert	Revenir à la version enregistrée
 	Revert Remix	Annuler le remix
