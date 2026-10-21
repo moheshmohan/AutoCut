@@ -52,8 +52,9 @@ against 793 s with our software encoder (SSIM 0.990). NVENC HEVC round trip 48.9
 | Compositing, blend modes, transforms | GPU | **GPU** (#32), CPU compositor is the oracle | 90% |
 | Accelerated video effects | ~82 of ~92 effects marked Accelerated (reference list `plan/premiere/10-effects-list.md`) | **34 effect ids** (`render::gpufx::GPU_EFFECTS`): colour, levels, blurs, sharpen, crop, transform, flips, vignette, video limiter, ASC CDL, channel mix, Lumetri basic / creative / vignette | ~40% |
 | Lumetri curves, wheels, HSL secondary | GPU | CPU | 0% |
-| Keys (Ultra Key), masks, distortions, transitions | GPU | CPU (masks have WGSL parity tests, not in the live path) | 10% |
-| Export rendering on the GPU | yes | **yes** (#421; Export ▸ GPU Rendering, Auto): 2.4× (1080p) to 3.2× (4K) faster on effects-heavy timelines | 80% |
+| Keys (Ultra Key), masks, distortions, transitions | GPU | effect and opacity masks **GPU** (2026-10-21); Push, the GL Transitions, luma wipes, blend dissolves, camera / light / flow engines GPU; keys, distortions, obsolete transitions CPU | 50% |
+| Export rendering on the GPU | yes, by default | **yes, by default since 2026-10-21** (#421; Export ▸ GPU Rendering, Auto; the CLI has a backend now): 2.4× (1080p) to 3.2× (4K) faster on effects-heavy timelines ([gpu.md](gpu.md)) | 90% |
+| On-device models on the GPU | — (cloud) | face / plate detection (WGSL), Whisper, Kokoro, OpenVoice, VoxCPM, IndicF5, ACE-Step on Metal (macOS); CPU elsewhere ([gpu.md](gpu.md)) | — |
 | Thumbnails on the GPU (26.0) | yes | CPU | 0% |
 | Software adapter fallback | warns | silently renders everything on the CPU (#632) | — |
 | Intel integrated graphics | supported | start-up crash on Intel UHD (#512) | — |
@@ -84,4 +85,5 @@ one encoder ~4–8 h ([target-app-parity.md](target-app-parity.md#calibration)).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-21 | minor | GPU export rendering on by default (and the CLI's missing wgpu backend), masks on the GPU, the on-device models' devices ([gpu.md](gpu.md)) |
 | 2026-10-10 | major | Created from ROADMAP.md's performance-and-hardware row and `crates/platform/README.md`; added Linux NVDEC (#549), GPU export and Lumetri on the GPU (#421), Premiere's per-platform hardware list, devices and I/O |

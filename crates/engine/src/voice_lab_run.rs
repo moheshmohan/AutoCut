@@ -80,7 +80,10 @@ impl Ears {
         }
         let conv = Arc::new(filmcraft_tts::openvoice::Converter::load(&filmcraft_tts::catalog::clone_package_dir(models)).map_err(|e| e.to_string())?);
         let base = if whisper {
-            Some(filmcraft_speech::load(models, "whisper-base").map_err(|e| format!("the speech model whisper-base: {e} (transcript.downloadModel)"))?)
+            Some(
+                filmcraft_speech::load_gpu_first(models, "whisper-base")
+                    .map_err(|e| format!("the speech model whisper-base: {e} (transcript.downloadModel)"))?,
+            )
         } else {
             None
         };

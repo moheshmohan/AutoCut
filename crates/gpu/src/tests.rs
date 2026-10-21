@@ -219,23 +219,27 @@ fn gpu_push_matches_cpu_with_alpha_and_surrounding_blends() {
     assert_eq!(c.gpu_transitions, 4 * 3 * 6);
     assert_eq!(c.cpu_transitions, 0);
     eprintln!("Push 72 cases: worst p99 {}, mean {}", worst.0, worst.1);
-    let fallback = FramePlan::Composite {
+    // a transition only the CPU draws (an obsolete one) falls back; a cross dissolve of clips
+    // that do not fill the frame is the same stage's linear mix
+    let two = |id: &str| FramePlan::Composite {
         width: w,
         height: h,
         steps: vec![PlanStep::Transition {
             inputs: [vec![layer(0)], vec![layer(1)]],
-            effect: filmcraft_project::find_effect("cross_dissolve").unwrap().instance(),
+            effect: filmcraft_project::find_effect(id).unwrap().instance(),
             progress: 0.37,
             scale: 1.0,
             content: None,
         }],
     };
-    c.composite(&fallback);
-    let (_, _, got) = c.read_output().expect("fallback readback");
-    let expected = execute_cpu(&fallback).over_black_rgba8();
-    assert!(got.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 1));
-    assert_eq!(c.cpu_transitions, 1);
-    assert_eq!(c.gpu_transitions, 4 * 3 * 6);
+    for (id, cpu, gpu) in [("page_turn", 1, 0), ("cross_dissolve", 1, 1)] {
+        let plan = two(id);
+        c.composite(&plan);
+        let (_, _, got) = c.read_output().expect("two-input readback");
+        let expected = execute_cpu(&plan).over_black_rgba8();
+        assert!(got.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 1), "{id}");
+        assert_eq!((c.cpu_transitions, c.gpu_transitions), (cpu, 4 * 3 * 6 + gpu), "{id}");
+    }
 
     // Reuse both input targets across ordered transitions; preparation advances past intervening layers.
     let transition = |progress| PlanStep::Transition {
@@ -257,7 +261,7 @@ fn gpu_push_matches_cpu_with_alpha_and_surrounding_blends() {
     let cpu = execute_cpu(&stacked).over_black_rgba8();
     // One byte level tolerates half-float resolve rounding.
     assert!(gpu.iter().zip(cpu).all(|(a, b)| a.abs_diff(b) <= 1), "stacked transitions exceed one byte level");
-    assert_eq!(c.gpu_transitions, 4 * 3 * 6 + 2);
+    assert_eq!(c.gpu_transitions, 4 * 3 * 6 + 3);
     assert_eq!(c.cpu_transitions, 1);
 }
 

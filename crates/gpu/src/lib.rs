@@ -944,7 +944,7 @@ impl GpuCompositor {
         let shaders = &mut self.shader_transitions;
         let mut on_gpu = |e: &filmcraft_project::EffectInstance, field: Option<&content::Field>| {
             let fits = |f: &content::Field| (f.w, f.h) == content::field_size(width, height);
-            e.effect == "push" || (shaders.ready(device, &e.effect) && (!shader::reads_content(&e.effect) || field.is_some_and(fits)))
+            transition::draws(&e.effect) || (shaders.ready(device, &e.effect) && (!shader::reads_content(&e.effect) || field.is_some_and(fits)))
         };
         !steps.iter().any(|s| matches!(s, PlanStep::Transition { effect, content, .. } if !on_gpu(effect, content.as_deref())))
     }
@@ -982,7 +982,7 @@ impl GpuCompositor {
                         views[index] = view;
                     }
                     let inputs = [&views[0], &views[1]];
-                    if effect.effect == "push" {
+                    if transition::draws(&effect.effect) {
                         self.transition.draw(&self.device, &self.queue, &canvas, inputs, dims, effect, *progress);
                     } else {
                         self.shader_transitions.draw(&self.device, &self.queue, &canvas, inputs, dims, effect, *progress, *scale, content.as_deref());
@@ -1008,6 +1008,14 @@ impl GpuCompositor {
         match plan {
             FramePlan::Composite { width, height, steps } => {
                 if !self.steps_on_gpu(*width, *height, steps) {
+                    let ids: Vec<&str> = steps
+                        .iter()
+                        .filter_map(|s| match s {
+                            PlanStep::Transition { effect, .. } => Some(effect.effect.as_str()),
+                            PlanStep::Layers(_) => None,
+                        })
+                        .collect();
+                    filmcraft_render::plan::cpu_work::note(format!("frame: transition {} not drawn by this GPU (or its flow field missing)", ids.join(", ")));
                     return None;
                 }
                 self.draw_steps(*width, *height, steps, prep, false);

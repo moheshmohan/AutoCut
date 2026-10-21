@@ -197,6 +197,34 @@ pub enum FxOp {
         aspect: f32,
         gpu_capable: bool,
     },
+    /// An effect limited to its masks ([`crate::mask::apply_effect`]): the effect, then
+    /// `lerp(original, effected, coverage)` with the masks' combined coverage (flattened in
+    /// working-image pixels, active masks only). The automatic redaction's blur is one.
+    Masked {
+        op: Box<FxOp>,
+        masks: Vec<crate::mask::FlatMask>,
+    },
+    /// The masks of the clip's Opacity effect ([`crate::mask::apply_opacity_masks`]): the
+    /// premultiplied pixels scaled by their coverage, after the effects.
+    OpacityMask {
+        masks: Vec<crate::mask::FlatMask>,
+    },
+}
+
+/// Most mask vertices (all masks of one op together) the GPU takes; more are drawn on the CPU.
+pub const GPU_MASK_POINTS: usize = 1 << 16;
+
+/// Whether the GPU's mask stage takes `masks`: finite numbers, a known mode, not too many
+/// vertices.
+pub fn gpu_masks_ok(masks: &[crate::mask::FlatMask]) -> bool {
+    let points: usize = masks.iter().map(|m| m.pts.len()).sum();
+    // (no active mask: the CPU applies the effect everywhere, a case the planner never asks for)
+    !masks.is_empty()
+        && masks.iter().all(|m| m.mode != filmcraft_project::MaskMode::None)
+        && points <= GPU_MASK_POINTS
+        && masks
+            .iter()
+            .all(|m| m.feather.is_finite() && m.expansion.is_finite() && m.opacity.is_finite() && m.pts.iter().all(|p| p[0].is_finite() && p[1].is_finite()))
 }
 
 /// Effect ids [`FxOp::eval`] understands (the GPU-capable standard effects).
@@ -628,6 +656,8 @@ impl FxOp {
                     && fin(ht)
                     && fin(&[*va, *vmid, *vround, *vfeather, *aspect])
             }
+            FxOp::Masked { op, masks } => !matches!(**op, FxOp::Masked { .. } | FxOp::OpacityMask { .. }) && op.gpu_ok() && gpu_masks_ok(masks),
+            FxOp::OpacityMask { masks } => gpu_masks_ok(masks),
         }
     }
 
@@ -1003,6 +1033,19 @@ impl FxOp {
                     }
                     dec(v)
                 });
+            }
+            FxOp::Masked { op, masks } => match crate::mask::coverage(masks, img.w, img.h) {
+                Some(cov) => {
+                    let original = img.clone();
+                    op.apply(img);
+                    crate::mask::mix(img, &original, &cov);
+                }
+                None => op.apply(img),
+            },
+            FxOp::OpacityMask { masks } => {
+                if let Some(cov) = crate::mask::coverage(masks, img.w, img.h) {
+                    crate::mask::scale_by(img, &cov);
+                }
             }
         }
     }

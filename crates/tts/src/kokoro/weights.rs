@@ -124,6 +124,17 @@ impl Weights {
         self.map.insert(name.to_string(), t);
     }
 
+    /// The device the weights are on (the CPU for none).
+    pub(crate) fn device(&self) -> Device {
+        self.map.values().next().map_or(Device::Cpu, |t| t.device().clone())
+    }
+
+    /// The same weights on `dev` (a copy).
+    pub(crate) fn to_device(&self, dev: &Device) -> Result<Weights, TtsError> {
+        let map = self.map.iter().map(|(k, t)| Ok((k.clone(), t.to_device(dev).map_err(err)?))).collect::<Result<_, TtsError>>()?;
+        Ok(Weights { map })
+    }
+
     pub(crate) fn get(&self, name: &str) -> Result<Tensor, TtsError> {
         self.map.get(name).cloned().ok_or_else(|| err(format!("missing weight `{name}`")))
     }

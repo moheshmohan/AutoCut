@@ -341,7 +341,7 @@ impl Model {
             text: TextEncoder::load(w)?,
             pred: Predictor::load(w)?,
             dec: Decoder::load(w)?,
-            dev: Device::Cpu,
+            dev: w.device(),
         })
     }
 

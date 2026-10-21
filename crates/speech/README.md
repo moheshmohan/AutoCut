@@ -18,8 +18,11 @@ crate without them).
   timestamps (`<|notimestamps|>`, the model's suppress tokens, the repetition guard), as models
   fine-tuned without timestamps read best; `Whisper::hear_tokens` gives the tokens.
 - `Whisper::load_on(dir, id, gpu)`: on the GPU (Metal on macOS; `FILMCRAFT_SPEECH_CPU` keeps the
-  CPU) for the strict check, which hears while narration holds the GPU; transcription stays on
-  the CPU. A PyTorch checkpoint (`pytorch_model.bin`) is read with candle's restricted pickle
+  CPU). `load_gpu_first` is what transcription uses: the GPU with the CPU as the fallback (a model
+  the GPU cannot load is loaded on the CPU; a transcription that fails or panics there runs again
+  on the CPU, which keeps the model). Whisper-base on an M3 Max: 58 s of narration in 4.4 s on the
+  GPU against 40.5 s on the CPU (load average about 20), the same words and word times
+  ([docs/gpu.md](../../docs/gpu.md)). A PyTorch checkpoint (`pytorch_model.bin`) is read with candle's restricted pickle
   reader when there is no `model.safetensors` (measurement only: the catalogue pins safetensors).
 - Large-v3's 128 mel bands go through the same front end (the filterbank is computed for any
   band count); checked against Hugging Face transformers: the same text on two clips.

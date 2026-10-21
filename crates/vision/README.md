@@ -30,6 +30,14 @@ trained on Chinese plates; it finds other countries' plates less reliably.
   the biases, the ReLU and the max pool into one parallel pass in plain Rust.
   Input: the RGBA frame fitted inside a longest side (area-averaged, never enlarged), BGR 0..255;
   YuNet's input is padded to multiples of 32 as OpenCV's `FaceDetectorYN` does.
+- `gpu` (feature `model`, used on macOS): the same layers as fused WGSL compute passes through
+  wgpu (`net.wgsl`: the 1×1 convolution with its bias; the depthwise convolution with its bias,
+  ReLU and pool; the pool; the upsampled sum), one command buffer a picture, the heads read back
+  once. The graphs are written once over a `Backend` (CPU or GPU). The CPU passes are the
+  reference and the fallback: a picture that fails or panics on the GPU is looked at again on the
+  CPU; after `MAX_GPU_FAILURES` (3) in a row, or a device error, the detectors keep to the CPU.
+  `FILMCRAFT_VISION_CPU` keeps the CPU; other platforms always use it. candle's Metal backend was
+  measured first and was five times slower than the CPU (a unit as generic tensor operations).
 - `post`: YuNet's anchor-free decoding (score √(class × objectness), centre offsets, log sizes,
   five landmarks) and LPD-YuNet's prior boxes (strides 8/16/32/64; 3, 2, 2, 3 sizes; four
   corner points; score √(softmax × IoU)), and greedy non-maximum suppression (IoU 0.3).
@@ -56,9 +64,17 @@ within 7e-6, and the six faces equal to OpenCV 5.0 `FaceDetectorYN`'s (IoU > 0.9
 YuNet 9.8 ms at 640 × 360, 3.6 ms at 320 × 180; LPD-YuNet 25.6 ms at 640 × 360, 16.2 ms at
 480 × 270 (`detection_speed`).
 
+On the GPU (M3 Max, 2026-10-21, a 1920 × 1080 frame, the machine loaded by parallel builds at a
+load average of about 35, fastest of three rounds): faces at a long side of 640 / 1280 / 1920 in
+11 / 19 / 29 ms (CPU at that load 81 / 115 / 235 ms; 42 ms at 1920 on a quiet machine), plates
+at 960 in 40 ms (CPU 281 ms; 94 ms quiet). On 16 frames of the showcase's footage the GPU finds
+the same 220 faces with boxes 0.000 px apart, and the plate network's outputs are within 9.3e-7
+(relative) of the CPU's (`gpu_detections_match_the_cpu`).
+
 ## Tests
 
-`cargo test -p filmcraft-vision --features model`. The live tests need the models and an oracle
+`cargo test -p filmcraft-vision --features model` (`gpu_layers_match_the_cpu` compares every
+layer on the GPU with the CPU's where there is one). The live tests need the models and an oracle
 directory: `FILMCRAFT_VISION_MODELS=<dir holding privacy-detectors/>
 FILMCRAFT_VISION_ORACLE=<dir with picture.png and oracle.py's outputs> cargo test -p
 filmcraft-vision --features model -- --ignored`. `tools/oracle.py` (ONNX Runtime and OpenCV in a

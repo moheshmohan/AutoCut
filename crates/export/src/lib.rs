@@ -379,7 +379,8 @@ pub struct ExportSettings {
     #[serde(default)]
     pub hardware_encoding: HardwareEncoding,
     /// Composite the exported frames on the GPU instead of the CPU reference renderer (Export ▸
-    /// GPU rendering: Auto / Off, Off by default). Off = the CPU reference renderer exactly.
+    /// GPU rendering: Auto / Off, Auto by default, also for settings saved without the field).
+    /// Off = the CPU reference renderer exactly.
     #[serde(default)]
     pub gpu_rendering: GpuRendering,
     /// VBR maximum bitrate (None = 1.5 × target).
@@ -583,7 +584,7 @@ impl Default for ExportSettings {
             bitrate_mode: BitrateMode::default(),
             crf: DEFAULT_CRF,
             hardware_encoding: HardwareEncoding::default(),
-            gpu_rendering: GpuRendering::Off,
+            gpu_rendering: GpuRendering::Auto,
             max_bitrate_kbps: None,
             adaptive_bitrate: None,
             keyframe_distance: None,
@@ -1030,9 +1031,21 @@ pub trait FrameRenderer: Send {
 /// Builds the frame renderer for one export, or `None` when this host cannot (no adapter).
 pub type FrameRendererFactory = fn() -> Option<Box<dyn FrameRenderer>>;
 
+#[cfg(not(test))]
 fn frame_renderer_factories() -> &'static RwLock<Vec<FrameRendererFactory>> {
     static F: OnceLock<RwLock<Vec<FrameRendererFactory>>> = OnceLock::new();
     F.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// Unit tests: a registry per test thread. GPU rendering is Auto by default, so a test that
+/// registers a stand-in renderer would otherwise hand it to the exports of the tests running
+/// beside it (an export builds its renderers on the calling thread).
+#[cfg(test)]
+fn frame_renderer_factories() -> &'static RwLock<Vec<FrameRendererFactory>> {
+    thread_local! {
+        static F: &'static RwLock<Vec<FrameRendererFactory>> = Box::leak(Box::new(RwLock::new(Vec::new())));
+    }
+    F.with(|f| *f)
 }
 
 /// Register a frame-renderer factory (tried before those registered earlier). Registering the

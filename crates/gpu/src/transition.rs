@@ -1,6 +1,16 @@
 use filmcraft_project::{EffectInstance, ParamValue};
 use wgpu::util::DeviceExt;
 
+/// A transition this stage draws: Push, and the cross dissolve (the linear mix of the two clips;
+/// planned as two inputs when they do not both fill the frame).
+pub(crate) fn draws(id: &str) -> bool {
+    id == "push" || is_dissolve(id)
+}
+
+fn is_dissolve(id: &str) -> bool {
+    id == "cross_dissolve"
+}
+
 pub(crate) struct PushStage {
     pipeline: wgpu::RenderPipeline,
 }
@@ -53,7 +63,9 @@ impl PushStage {
         let blur = effect.f64_at("motion_blur", Default::default()) as f32;
         let blur = if blur.is_finite() { (blur / 100.0).clamp(0.0, 1.0) } else { 0.0 };
         let progress = if progress.is_finite() { progress.clamp(0.0, 1.0) } else { 0.0 };
-        let values = [size.0 as f32, size.1 as f32, progress, blur, direction as f32, 0.0, 0.0, 0.0];
+        // the same stage mixes a cross dissolve between clips that do not fill the frame
+        let dissolve = if is_dissolve(&effect.effect) { 1.0 } else { 0.0 };
+        let values = [size.0 as f32, size.1 as f32, progress, blur, direction as f32, dissolve, 0.0, 0.0];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         let uniform =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("push-params"), contents: &bytes, usage: wgpu::BufferUsages::UNIFORM });

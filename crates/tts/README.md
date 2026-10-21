@@ -11,11 +11,14 @@ clip behaviour: `crates/engine/src/narration.rs`.
   formant synthesizer: spelling rules → phone targets → glottal pulse train through three two-pole
   resonators, plus filtered noise for fricatives and bursts. No download, works in the web build.
 
-- `kokoro` (feature `kokoro`): **Kokoro-82M neural voices** in pure Rust on candle (CPU): ALBERT
+- `kokoro` (feature `kokoro`): **Kokoro-82M neural voices** in pure Rust on candle (Metal on
+  macOS, the CPU elsewhere and as the fallback; `FILMCRAFT_KOKORO_CPU` keeps the CPU): ALBERT
   text encoder, StyleTTS 2 prosody predictor (durations, F0, energy) and decoder, iSTFTNet
   vocoder with a harmonic-plus-noise source. Weights are read from the official PyTorch
   checkpoint with candle's restricted pickle reader (no code from the file runs); voice packs from
   their zip archive. `config.json` is checked against the architecture this code implements.
+  A line that fails, panics or yields samples that are not finite on the GPU is spoken again on
+  the CPU, which keeps the voice from then on.
 - `neural` (feature `kokoro`): the natural voices as `Voice`s: script → `filmcraft-tts-text`
   (normalizer, CMUdict + letter-to-sound, ≤ 400-symbol chunks, pauses) → Kokoro per chunk → exact
   silence for pauses, 120 ms between sentences → vocal pitch with `filmcraft-audio-dsp`'s pitch
@@ -25,7 +28,7 @@ clip behaviour: `crates/engine/src/narration.rs`.
   engine (`tts.downloadVoices`) after the user confirms; never bundled or committed.
 
 - `openvoice` (feature `kokoro`): the **OpenVoice V2 tone-colour converter** in pure Rust on
-  candle — a VITS synthesizer without a text encoder: a reference encoder (six 3×3/2 conv2d →
+  candle (Metal on macOS with the CPU as the fallback, as Kokoro; `FILMCRAFT_OPENVOICE_CPU`) — a VITS synthesizer without a text encoder: a reference encoder (six 3×3/2 conv2d →
   GRU → 256-d *tone colour*), a posterior encoder, four mean-only affine couplings conditioned on
   the colour, and a HiFi-GAN decoder at 22.05 kHz. `tone_colour` reads a speaker's timbre from
   their speech; `convert` re-voices speech from one colour to another, keeping words, timing and
@@ -269,6 +272,12 @@ acronyms, names) spoken by each voice through the full pipeline, transcribed by 
 Speed: 2.2–2.3× real time on one desktop CPU (Linux x86-64, load average ≈ 15 from parallel
 builds), e.g. 186 s of speech in 84 s; model load 0.5 s. Reproduce with the `narrate` example and
 `filmcraft-speech`'s `transcribe` example.
+
+On Metal (M3 Max, 2026-10-21, load average about 20 from parallel lanes): a 36.7 s script in
+5.7 s against 43.6 s on the CPU (7.6×), the same words heard by Whisper (WER 4.1 % both), the
+waveforms 48.5 dB apart (float noise; `gpu_speaks_like_the_cpu`). OpenVoice converts 12 s in
+1.6 s against 12.0 s (7.4×), 96 dB apart (`live_openvoice_gpu_matches_the_cpu`). The narration
+cache keys do not name the device: a take sounds the same from either.
 
 ## Natural cloning: measured quality and speed (2026-10-16)
 
@@ -514,8 +523,8 @@ purpose-made one is the way to a better clone ([docs/voice-recording.md](../../d
   the no-download fallback and the test voice.
 - English (United States) only. Words outside CMUdict go through letter-to-sound rules and are
   often mispronounced (see `crates/tts-text/README.md`); homographs take the first pronunciation.
-- About 2× faster than real time on the CPU: a one-minute narration takes about 30 s. The UI runs
-  synthesis as a background job.
+- About 2× faster than real time on the CPU (a one-minute narration takes about 30 s), about 6×
+  on the GPU. The UI runs synthesis as a background job.
 - Kokoro's model card states the weights are Apache-2.0 but the repository has no LICENSE file.
 - Vocal pitch shifts the voice's base pitch (and its formants slightly); pace scales every duration.
 - A *timbre-only* cloned voice copies **timbre**, not accent or rhythm: those are still Kokoro's

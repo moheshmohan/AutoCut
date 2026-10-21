@@ -44,6 +44,11 @@ fn fs(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
     let p = params.image.z;
     if p <= 0.0 { return pixel(0u,vec2<u32>(at.xy)); }
     if p >= 1.0 { return pixel(1u,vec2<u32>(at.xy)); }
+    // cross dissolve (direction.y = 1): the linear mix of the premultiplied inputs, as the CPU's
+    if params.direction.y == 1.0 {
+        let va = pixel(0u,vec2<u32>(at.xy));
+        return va+(pixel(1u,vec2<u32>(at.xy))-va)*p;
+    }
     var direction = vec2(0.0,1.0);
     switch u32(params.direction.x) { case 1u: { direction=vec2(-1.0,0.0); } case 2u: { direction=vec2(0.0,-1.0); } case 3u: { direction=vec2(1.0,0.0); } default: {} }
     let travel = max(dot(abs(direction),params.image.xy),1.0);

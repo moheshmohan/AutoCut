@@ -58,7 +58,15 @@ pub fn export_json() -> Value {
     let hw = filmcraft_export::hw_encode_stats();
     let stages: serde_json::Map<String, Value> =
         filmcraft_export::stage_times().into_iter().map(|(s, ns)| (format!("{}Ms", s.name()), json!(ns as f64 / 1e6))).collect();
-    json!({"hardware": {"frames": hw.frames, "sessions": hw.sessions, "declined": hw.declined, "parallel": hw.parallel}, "stages": stages})
+    let gpu = filmcraft_export::gpu_render_stats();
+    json!({
+        "hardware": {"frames": hw.frames, "sessions": hw.sessions, "declined": hw.declined, "parallel": hw.parallel},
+        "stages": stages,
+        // Export ▸ GPU rendering (`docs/gpu.md`): frames composited by the GPU renderer, frames it
+        // left to the CPU reference, and what GPU plans (exports and the monitors) rendered on
+        // the CPU, by reason (whole frames, and layers handed to the GPU as images)
+        "gpu": {"frames": gpu.frames, "fallbacks": gpu.fallbacks, "cpuWork": filmcraft_render::plan::cpu_work::counts()},
+    })
 }
 
 /// The engine's `perf.stats`.
@@ -115,6 +123,10 @@ mod tests {
         for k in ["setupMs", "loudnessMs", "renderMs", "encodeMs", "convertMs", "audioMs", "muxMs", "finishMs", "waitMs"] {
             assert!(v["export"]["stages"][k].is_number(), "export.stages.{k} in {v}");
         }
+        for k in ["frames", "fallbacks"] {
+            assert!(v["export"]["gpu"][k].is_number(), "export.gpu.{k} in {v}");
+        }
+        assert!(v["export"]["gpu"]["cpuWork"].is_object(), "export.gpu.cpuWork in {v}");
         assert!(v["media"]["openSources"].is_number());
         assert_eq!(v["jobs"]["running"], json!(0));
         assert_eq!(s.history.undo.len(), undo, "a query adds no undo step");

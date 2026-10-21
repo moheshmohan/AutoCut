@@ -17,14 +17,14 @@ path = "src/main.rs"
 # so transcript- and narration-driven automation works out of the box (upstream leaves them off
 # in release builds); model weights still download on demand with consent.
 default = ["whisper", "neural-voices", "neural-music", "privacy-models"]
-# Speech-to-text (Text panel ▸ Transcribe) with Whisper on the CPU, and model downloads.
+# Speech-to-text (Text panel ▸ Transcribe) with Whisper (Metal on macOS, else the CPU), and model downloads.
 whisper = ["filmcraft-engine/whisper", "filmcraft-engine/speech-download"]
-# Natural Text to Speech voices (Kokoro-82M on the CPU, downloaded on first use).
+# Natural Text to Speech voices (Kokoro-82M; Metal on macOS, else the CPU; downloaded on first use).
 neural-voices = ["filmcraft-engine/neural-voices"]
 # Neural text to music (ACE-Step 1.5 on candle, Metal on macOS; the model downloads on demand with consent).
 neural-music = ["filmcraft-engine/neural-music"]
 # Automatic privacy blur (Clip ▸ Auto Redact Faces and Plates…): the YuNet and LPD-YuNet detectors
-# on candle (CPU; 4.4 MB, downloaded on demand with consent).
+# (the GPU on macOS, else the CPU; 4.4 MB, downloaded on demand with consent).
 privacy-models = ["filmcraft-engine/privacy-models"]
 
 [dependencies]
@@ -49,6 +49,17 @@ filmcraft-screenagent = { workspace = true }
 filmcraft-locks = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# The GPU export renderer (Export ▸ GPU rendering, Auto by default; `docs/gpu.md`) needs a wgpu
+# backend. `filmcraft-gpu` asks for none and the desktop app gets them through eframe, so a CLI
+# built on its own (`cargo build -p filmcraft-cli`) had no adapter and rendered every export on
+# the CPU. The platform's native backends, enabled here:
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["metal"] }
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan"] }
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }
 
 [dev-dependencies]
 filmcraft-testkit = { workspace = true }

@@ -106,12 +106,13 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   D3D11: H.264, HEVC, VP9, AV1) and Linux (VA-API and NVDEC: H.264, HEVC); hardware encode
   VideoToolbox H.264 / HEVC 8-bit, NVENC H.264 (Windows, Linux) and HEVC incl. Main 10 HDR
   (Windows); GPU compositing, blend modes, 34 effect ids incl. Lumetri basic / creative / vignette,
-  GPU export rendering (#421).
+  effect and opacity masks, GPU export rendering (#421; on by default since 2026-10-21), the
+  face / plate detectors, Whisper, Kokoro and OpenVoice on the GPU on macOS ([gpu.md](gpu.md)).
 - **Missing:** zero-copy decoded frames into wgpu (every frame is read back to the CPU and
   re-uploaded); VideoToolbox Main 10 / HDR HEVC encode and B-frames; ProRes hardware decode /
   encode on Apple silicon; Intel Quick Sync and AMD AMF encoders (and their 4:2:2 decode);
   VA-API VP9 / AV1 and VA-API encode; HEVC encode on Linux; AV1 hardware encode; ~48 of Premiere's
-  ~82 accelerated effects (keys, masks, Lumetri curves / wheels / HSL, distortions, transitions);
+  ~82 accelerated effects (keys, Lumetri curves / wheels / HSL and LUTs, distortions, Mosaic, obsolete transitions);
   external video I/O (DeckLink / AJA, Mercury Transmit), control surfaces (EUCON / Mackie);
   a CPU fallback adapter renders everything on the CPU (#632).
 - **Estimate:** 120–200 h (hardware we don't own needs a human). Doc:

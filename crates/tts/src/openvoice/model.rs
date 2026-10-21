@@ -325,7 +325,7 @@ pub(crate) struct Model {
 
 impl Model {
     pub(crate) fn load(wt: &Weights) -> R<Model> {
-        let dev = Device::Cpu;
+        let dev = wt.device();
         Ok(Model { ref_enc: RefEnc::load(wt)?, enc_q: Posterior::load(wt)?, flow: Flow::load(wt, &dev)?, dec: Generator::load(wt)?, dev })
     }
 
