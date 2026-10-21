@@ -74,6 +74,7 @@ impl AutoCutHost for Fake {
                 Ok(json!({"built": {"sequence": r["sequence"], "frame": frame.map(|(w, h, px)| json!([w, h, px.len()]))}, "status": "Built"}))
             }
             TaskKind::Shorts => Ok(json!({"shorts": [], "params": task.params, "status": "Made 0 shorts"})),
+            TaskKind::Trailer => Ok(json!({"shots": [], "params": task.params, "status": "Made a trailer"})),
             TaskKind::MalayalamScript => {
                 let plan = task.params.get("plan").cloned().or(task.plan).unwrap_or_default();
                 let n = plan["entries"].as_array().map_or(0, Vec::len);
@@ -472,4 +473,79 @@ fn shorts_parameters_are_checked_and_defaulted() {
     // uploads need a YouTube publisher: refused before the job starts here (there is none)
     let e = s.execute("autocut.shorts", json!({"export": "/tmp/x", "uploadYoutube": true})).unwrap_err().to_string();
     assert!(e.contains("uploadYoutube"), "{e}");
+}
+
+/// `autocut.trailer` checks its parameters before a job starts and hands the host the checked
+/// ones (defaults filled in, the last build as its report); hostile ones are refused, never a
+/// panic.
+#[test]
+fn trailer_parameters_are_checked_and_defaulted() {
+    let (mut s, _) = session(Fake::default());
+    let r = s
+        .execute(
+            "autocut.trailer",
+            json!({"sequence": 9, "seconds": 30, "robots": 12, "hook": " Ameca ", "exclude": ["Promobot"], "redact": "Faces, Plates", "platform": "Instagram", "at": {"My first robot": {"item": 1347, "seconds": 9}, " NAO ": 3}, "wait": true}),
+        )
+        .unwrap();
+    let p = &r["showcase"]["params"];
+    assert_eq!(
+        (p["sequence"].as_u64(), p["seconds"].as_f64(), p["robots"].as_u64(), p["hook"].as_str(), p["redact"].as_str(), p["platform"].as_str()),
+        (Some(9), Some(30.0), Some(12), Some("Ameca"), Some("faces,plates"), Some("reels")),
+        "{r}"
+    );
+    assert_eq!((p["aspect"].as_str(), p["fallback"].as_str(), p["bpm"].as_f64()), (Some("9:16"), Some("blur"), Some(124.0)));
+    assert_eq!(p["exclude"], json!(["Promobot"]));
+    assert_eq!(p["at"], json!({"My first robot": {"item": 1347, "seconds": 9.0}, "NAO": 3.0}));
+    assert!(p.get("report").is_none(), "nothing built yet: no report to hand over");
+    // the last build is the report when none is given
+    s.autocut.state.lock().unwrap().built = Some(json!({"layout": [], "sequence": 9}));
+    let r = s.execute("autocut.trailer", json!({"wait": true})).unwrap();
+    assert_eq!(r["showcase"]["params"]["report"]["sequence"], 9, "{r}");
+    assert_eq!(r["showcase"]["params"]["platform"], "reels", "Reels by default");
+    for bad in [
+        json!({"seconds": 5}),
+        json!({"seconds": 91}),
+        json!({"seconds": f64::MAX}),
+        json!({"seconds": "long"}),
+        json!({"robots": 2}),
+        json!({"robots": 31}),
+        json!({"robots": -4}),
+        json!({"bpm": 0}),
+        json!({"bpm": 1e9}),
+        json!({"seed": -1}),
+        json!({"aspect": "16:9"}),
+        json!({"aspect": 9}),
+        json!({"platform": "snapchat"}),
+        json!({"platform": null}),
+        json!({"fallback": "stretch"}),
+        json!({"redact": "elephants"}),
+        json!({"redact": true}),
+        json!({"redact": "faces,faces,plates"}),
+        json!({"hookVoice": "yes"}),
+        json!({"hookAt": -1}),
+        json!({"hookAt": "late"}),
+        json!({"at": [1]}),
+        json!({"at": {"Ameca": -2}}),
+        json!({"at": {"Ameca": {"item": "x", "seconds": 2}}}),
+        json!({"at": {"Ameca": {"item": 3}}}),
+        json!({"at": {"two\nlines": 3}}),
+        json!({"qa": 1}),
+        json!({"exclude": "Promobot"}),
+        json!({"exclude": [1]}),
+        json!({"exclude": ["two\nlines"]}),
+        json!({"include": vec!["x"; 101]}),
+        json!({"hook": "x".repeat(10_000)}),
+        json!({"title": "a\u{0}b"}),
+        json!({"export": "out\nfile.mp4"}),
+        json!({"sequence": "main"}),
+        json!({"plan": {"entries": 3}}),
+        json!({"plan": {}, "planPath": "/x.json"}),
+        json!({"report": [1]}),
+        json!({"report": {}, "reportPath": "/x.json"}),
+        json!({"reportPath": "/no/such/report.json"}),
+        json!([1]),
+    ] {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.execute("autocut.trailer", bad.clone())));
+        assert!(r.expect("no panic").is_err(), "{bad} was accepted");
+    }
 }

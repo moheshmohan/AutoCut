@@ -489,6 +489,118 @@ pub struct ShowcaseAnalyzeParams {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TrailerParams {
+    /// The finished show's sequence (its narration is taken from it; without a plan, its entries).
+    #[serde(default)]
+    pub sequence: Option<u64>,
+    /// The show's plan file (entries, shots, dates, redact targets; default: the kept plan).
+    #[serde(default)]
+    pub plan_path: Option<String>,
+    /// The show's build report file (what `filmcraft-cli showcase` prints: where each shot played,
+    /// what the privacy pass hid; default: the last build).
+    #[serde(default)]
+    pub report_path: Option<String>,
+    /// Length, 10–90 seconds (default 34).
+    #[serde(default)]
+    pub seconds: Option<f64>,
+    /// "9:16" (default), "1:1" or "4:5".
+    #[serde(default)]
+    pub aspect: Option<String>,
+    /// Whose safe zones the words keep inside: "reels" (default), "youtube", "tiktok", "vertical".
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Robots in the montage after the hook, 3–30 (default: 12–18 as the length allows).
+    #[serde(default)]
+    pub robots: Option<u32>,
+    /// The entry label of the hook's robot (default: the most striking).
+    #[serde(default)]
+    pub hook: Option<String>,
+    /// Where the hook starts in its clip, seconds (default: around its best moment).
+    #[serde(default)]
+    pub hook_at: Option<f64>,
+    /// Where robots' shots start: {"<entry label>": seconds into its clip, or {"item": another
+    /// clip of the entry, "seconds": …}}.
+    #[serde(default)]
+    pub at: Option<serde_json::Map<String, Value>>,
+    /// The hook's title (default "<N> robots · <first year> → <last year>"; " · " splits lines).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The show's first narration sentence over the hook (default: when the show is narrated).
+    #[serde(default)]
+    pub hook_voice: Option<bool>,
+    /// The end card's logo image (default: the plan's outro logo).
+    #[serde(default)]
+    pub logo: Option<String>,
+    /// The channel's handle on the end card (default: the plan's outro handle).
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// What the end card says (default "Full video on YouTube").
+    #[serde(default)]
+    pub end_text: Option<String>,
+    /// The full video's address, for the caption file (Reels' captions show no links).
+    #[serde(default)]
+    pub link: Option<String>,
+    /// Entry labels to leave out, and to keep in.
+    #[serde(default)]
+    pub exclude: Option<Vec<String>>,
+    #[serde(default)]
+    pub include: Option<Vec<String>>,
+    /// The music's tempo (default 124), mood (default "energetic") and seed (default 7).
+    #[serde(default)]
+    pub bpm: Option<f64>,
+    #[serde(default)]
+    pub mood: Option<String>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// "faces,plates", "faces", "plates", or "off" (default: as the show was redacted).
+    #[serde(default)]
+    pub redact: Option<String>,
+    /// Export the trailer here (MP4; a cover, caption, frame sheet and QA beside it).
+    #[serde(default)]
+    pub export: Option<String>,
+}
+
+/// `autocut.trailer` params for a `trailer_make` call (a long job).
+fn trailer_params(p: TrailerParams) -> Value {
+    let mut params = json!({"wait": true});
+    let mut put = |k: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            params[k] = v;
+        }
+    };
+    let text = |t: Option<String>| t.filter(|t| !t.trim().is_empty()).map(Value::String);
+    put("sequence", p.sequence.map(|v| json!(v)));
+    put("planPath", text(p.plan_path));
+    put("reportPath", text(p.report_path));
+    put("seconds", p.seconds.map(|v| json!(v)));
+    put("aspect", text(p.aspect));
+    put("platform", text(p.platform));
+    put("robots", p.robots.map(|v| json!(v)));
+    put("hook", text(p.hook));
+    put("hookAt", p.hook_at.map(|v| json!(v)));
+    put("at", p.at.filter(|a| !a.is_empty()).map(Value::Object));
+    put("title", text(p.title));
+    put("hookVoice", p.hook_voice.map(Value::Bool));
+    put("logo", text(p.logo));
+    put("channel", text(p.channel));
+    put("endText", text(p.end_text));
+    put("link", text(p.link));
+    put("exclude", p.exclude.map(|v| json!(v)));
+    put("include", p.include.map(|v| json!(v)));
+    put("bpm", p.bpm.map(|v| json!(v)));
+    put("mood", text(p.mood));
+    put("seed", p.seed.map(|v| json!(v)));
+    put(
+        "redact",
+        p.redact
+            .filter(|r| !r.trim().is_empty())
+            .map(|r| if matches!(r.trim().to_ascii_lowercase().as_str(), "off" | "none" | "false") { json!(false) } else { json!(r) }),
+    );
+    put("export", text(p.export));
+    params
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ShortsParams {
     /// A media item (video with speech) to make shorts of; it is put in a new sequence. Not with
     /// `sequence`.
@@ -1633,6 +1745,19 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Trailer: a vertical trailer of a finished showcase",
+        description = "A finished showcase → a vertical trailer for Instagram Reels (the `autocut.trailer` engine job: progress, cancellable). From the show's `sequence`, its plan (`plan_path`, default the kept plan) and build report (`report_path`, what `filmcraft-cli showcase` prints; default the last build): a hook — the most striking robot (or `hook`, an entry label) under a big title (\"48 robots · 2013 → 2025\", or `title`) with the show's first narration sentence over it (`hook_voice`) — then `robots` robots in date order (12–18 by default), each 1.3–2.4 s on its best moment inside the window the show played, reframed following the robot (`clip.autoReframe`, the analysis' box; the whole picture over a blurred copy where it is lost), its name and year inside the `platform`'s safe zone (reels by default), every cut on a beat of generated music (`bpm` 124, `mood` energetic, a fixed `seed`), and an end card on the music's final hit: the `logo`, `end_text` (\"Full video on YouTube\") and the `channel` handle (the plan's outro by default). The show's redaction is kept (faces hidden at the size the show hid them, the plan's named targets). Mixed speech first at −14 LUFS, −1 dBTP. With `export` (an .mp4 path, Social Vertical 1080×1920): the video, `<out>.cover.jpg`, `<out>.caption.txt` (hashtags, \"link in bio\"), `<out>.frames.jpg` and QA (`<out>.qa.json`). Returns the sequence, each shot (robot, year, window, followed), the cuts on the beat, the safe-zone check and QA's summary.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn trailer_make(
+        &self,
+        Parameters(p): Parameters<TrailerParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(self.run_long("autocut.trailer", trailer_params(p), &context).await)
+    }
+
+    #[tool(
         title = "Auto Reframe Sequence",
         description = "A copy of a sequence in another shape — `aspect` \"9:16\" (default), \"1:1\", \"4:5\" or \"16:9\" — whose clips follow their subject (`sequence.autoReframe`, one undo step): a pure-Rust tracker (Median Flow on pyramidal Lucas–Kanade, re-detection by template after occlusions and cuts) seeded from `subject` boxes (0..1 of the picture: {x, y, w, h, clip?, seconds?}, e.g. the vision model's) or the salient region, smoothed by a critically damped zero-phase follow (`motion`: smooth keeps a calm camera window, responsive follows closely) into Motion Position/Scale keyframes; clips with nobody to follow are letterboxed (`fallback: \"center\"` crops centred instead; `\"blur\"` fits them whole over a blurred, dimmed copy of themselves, and eases a followed clip out to that wherever its subject is lost for a second or more). `range` {startSeconds, endSeconds} reframes only that part. Runs as an engine job with progress; returns the new sequence and, per clip, whether its subject was followed.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
@@ -1930,7 +2055,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked); `trailer_make` cuts a finished showcase into a vertical trailer for Reels (a hook, robots in date order on the beat, an end card; the show's redaction kept). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -2425,6 +2550,28 @@ mod tests {
         assert!(crate::long_job::is_long("autocut.shorts", &json!({"wait": true})) && crate::long_job::is_long("sequence.autoReframe", &json!({"wait": true})));
     }
 
+    /// The trailer tool's arguments and the engine job it runs.
+    #[test]
+    fn trailer_tool_params() {
+        let s = schema("trailer_make");
+        for k in ["plan_path", "report_path", "hook", "robots", "exclude", "logo", "channel", "export"] {
+            assert!(props(&s).contains(&k.to_string()), "{k} in {s}");
+        }
+        let p: TrailerParams = serde_json::from_value(json!({
+            "sequence": 9755, "plan_path": "/v5/plan.json", "report_path": "/v5/build.json", "seconds": 34, "robots": 14,
+            "hook": "Ameca, again", "exclude": ["Promobot"], "hook_voice": false, "channel": "@H4hacks", "redact": "off", "title": " ", "export": "/m/reel.mp4"
+        }))
+        .unwrap();
+        assert_eq!(
+            trailer_params(p),
+            json!({"sequence": 9755, "planPath": "/v5/plan.json", "reportPath": "/v5/build.json", "seconds": 34.0, "robots": 14, "hook": "Ameca, again",
+                   "exclude": ["Promobot"], "hookVoice": false, "channel": "@H4hacks", "redact": false, "export": "/m/reel.mp4", "wait": true})
+        );
+        let p: TrailerParams = serde_json::from_value(json!({"redact": "faces"})).unwrap();
+        assert_eq!(trailer_params(p), json!({"redact": "faces", "wait": true}));
+        assert!(crate::long_job::is_long("autocut.trailer", &json!({"wait": true})));
+    }
+
     #[test]
     fn auto_redact_tool_params() {
         let s = schema("auto_redact");
@@ -2649,6 +2796,7 @@ mod tests {
             "showcase_build",
             "showcase_inspect",
             "shorts_make",
+            "trailer_make",
             "sequence_auto_reframe",
             "auto_redact",
             "template_list",

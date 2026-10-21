@@ -283,6 +283,58 @@ filmcraft-cli --project "$P" export "$R/Every Robot I've Met - v6 4K.mp4" --pres
 `--upload-youtube` on the build (or `filmcraft-cli publish run youtube <file>`) sends a video to
 YouTube with its chapters and thumbnail, private unless `--youtube-privacy` says otherwise.
 
+## 10. Trailer for a finished show
+
+A Reel (or Short) that sends viewers to the full video: about 34 s of 9:16, the most striking
+robot under "48 robots · 2013 → 2025" with the show's first narration sentence over it, then
+robots in date order cut on the beats of generated music, each with its name and year, and an end
+card with the logo, "Full video on YouTube" and the handle. Work on a copy of the project, and
+keep the build's output (`showcase … > "$R/build-v6-ml.json"`, the build report the trailer reads):
+
+```sh
+cp "$P" "$R/Robot Showcase v6 (trailer).fcproj"
+T="$R/Robot Showcase v6 (trailer).fcproj"
+filmcraft-cli --project "$T" trailer --sequence <final sequence id> \
+    --plan "$R/plan-v6-ml.json" --report "$R/build-v6-ml.json" \
+    --export "$R/Every Robot I've Met - Reel trailer.mp4" --save
+```
+
+It writes, beside the video: `.cover.jpg` (the hook's frame with its title, the Reel's cover),
+`.caption.txt` (a caption with hashtags; Reels' captions hold no links, so it says "link in
+bio"; `.caption.json` adds `--link` for the bio), `.frames.jpg` (16 frames from the file: the
+hook, the shots — all of them when they fit — and the end card) and `.qa.json` (with `.qa.png` and `.privacy.png`). Then:
+
+- **Look at `.frames.jpg`.** Every robot recognisable and in its frame (a robot the vertical crop
+  holds is followed by it, a wider one shown whole in a band over a blurred copy), every label
+  readable.
+- **Read the QA summary** the command prints: no errors; `safe_zones` ok (every word and the logo
+  inside Reels' safe area: 14 % top, 35 % bottom, 6 % each side); `privacy` — a warning names any
+  shot of footage the show hid faces in where the trailer hides none: look at that shot.
+- **Cuts on the beat**: the output's `cutsOnBeat` equals `cuts`.
+
+Change it with the options and run it again (each run makes a new sequence; the redaction cache
+makes it fast): `--hook "Ameca, again" --hook-at 41.6` (the opening robot, from that second of its
+clip: the analysis' best moment is a robot at its largest, not always its face), `--at "My first
+robot=1347@8.6"` (repeatable: a robot's shot from that second, here of its entry's other clip,
+1347; `--at "NAO=3"` keeps its own clip), `--exclude Promobot` (repeatable: an entry left out — one
+whose sponsor's logo is hidden, say), `--include "Boston Dynamics Spot"`, `--robots 14`,
+`--seconds 30`, `--title "…"`, `--no-hook-voice`, `--seed 8` (other music), `--bpm 128`,
+`--platform youtube` (Shorts' safe zones), `--aspect 4:5`. `sheet --items 1347:6-15` shows a clip's
+frames to choose a second from. The logo and handle come from the plan's `outro` unless `--logo` /
+`--channel` say otherwise; `--link` puts the full video's address in `<out>.caption.json` for the
+profile's bio.
+
+What the show blurred stays blurred: the show's own masks are carried onto the trailer's shots and
+the privacy pass runs again on them. A face the show left sharp is not hidden by policy, so look for
+visitors in `.frames.jpg` (and `filmcraft-cli frames <out> --at …` for any stretch).
+
+The reel of round 5 (2026-10-21; `--plan plan-v5-ml.json --report build-final2-ml.json --sequence
+9755 --hook "Ameca, again" --hook-at 41.6 --include "Boston Dynamics Spot" --at "My first
+robot=1347@8.6" --at "Reception robot=42@6.0" --at "Micropolis M02=49.3"`): 34 s, 17 robots after
+the hook, 18 of 18 cuts on the beat, QA clean. `filmcraft-cli help` lists every
+option; the design is in [crates/autocut/README.md](../crates/autocut/README.md#trailer-for-a-finished-show).
+Publishing stays a separate, deliberate step (`publish run instagramReel <file>` after review).
+
 ## Mix for small speakers
 
 The shows are watched on TVs, laptops and phones, often quietly. Their speakers play little below

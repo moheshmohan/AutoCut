@@ -669,6 +669,12 @@ impl ShowcaseHost {
                 let qa_model = models.analysis.as_ref().map(guard);
                 build_plan(ex, p, task.plan.as_ref(), qa_model.as_ref().map(|m| m as &dyn ChatModel), progress).await
             }
+            TaskKind::Trailer => {
+                // the vision model, when Ollama has it, grounds QA's subject check
+                let qa_model = models.analysis.as_ref().map(guard);
+                let mut lines = |l: &str| note(progress, l);
+                crate::trailer::make(ex, p, task.plan.as_ref(), qa_model.as_ref().map(|m| m as &dyn ChatModel), &mut lines).await
+            }
             // (handled above, without the showcase models)
             TaskKind::Shorts | TaskKind::MalayalamScript => Err(AutoCutError::Other("not a showcase step".into())),
         }

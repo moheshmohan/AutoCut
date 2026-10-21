@@ -1251,7 +1251,7 @@ const PUSH_MAX: f64 = 0.06;
 /// `scale` (as fitted) to [`PUSH_PER_SECOND`] larger a second, at most [`PUSH_MAX`], eased out
 /// of the first keyframe and into the last — keyframes on its Motion, which live in the media's
 /// time, so a shot slowed afterwards keeps the whole move.
-async fn push_in(ex: &dyn Executor, clip: u64, scale: f64, t0: f64, t1: f64, fps: f64) -> Result<(), AutoCutError> {
+pub(crate) async fn push_in(ex: &dyn Executor, clip: u64, scale: f64, t0: f64, t1: f64, fps: f64) -> Result<(), AutoCutError> {
     // the last keyframe on the last frame, where the move ends
     let last = on_frame(t1 - 1.0 / fps, fps);
     if !(scale.is_finite() && scale > 0.0) || last <= t0 {

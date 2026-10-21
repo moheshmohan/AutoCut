@@ -734,6 +734,80 @@ The showcase reuses the tracker: a filled (portrait or 4:3) shot calls `clip.aut
 `keepScale` (the push-in stays) seeded from the analysis' box, and keeps the tilt only where its
 subject is not found (`Options::follow_subject`, `--no-track`).
 
+## Trailer for a finished show
+
+`autocut.trailer` (job; `trailer.rs`; `filmcraft-cli trailer`, MCP `trailer_make`) cuts a finished
+showcase into a vertical trailer that sends viewers to the full video: 9:16 for Instagram Reels by
+default (also 1:1 and 4:5), about 34 s (`seconds`, 10–90).
+
+**What it reads.** The show's plan (entries: labels, kinds, dates, the shots with the analysis'
+best moment, each entry's `redact` targets, the `outro`'s logo and handle, the `style`) and its
+build report (the JSON `filmcraft-cli showcase` prints, or the last build's outcome: where every
+shot played — the window of its clip — what the privacy pass hid, the narration's lines), and the
+show's sequence for its narration clip. Without a plan the entries are read from the sequence
+(`entries_from_sequence`: the clips of its picture track, named by the lower thirds over them, no
+dates).
+
+**The cut** (`timing`): every length is a whole number of beats of the music, every cut on a beat
+to the frame.
+
+| part | what |
+|---|---|
+| hook (about 3 s) | the most striking robot (`striking`: a humanoid, then a robot dog, then arms and vehicles; how big it is in its picture; filmed upright — it fills a vertical frame; less for a photo, much less for an entry that hides a sponsor's logo), or `hook` (a label or `#number`; `hookAt`: from that second of its clip — the analysis' best moment is the robot at its largest, not always its face), filling the frame, under a big title: "48 robots" and "2013 → 2025" from the show's robot count and years (`title` replaces it; " · " splits its lines). The show's first narration sentence plays over it (`hookVoice`, on when the show is narrated): its first narration clip, cut at the pause (`media.pauses`) nearest where the sentence's share of the line's text ends — the owner's own voice, nothing synthesized |
+| montage | `robots` robots (12–18 by default, as many as fill the length at 1.3–2.4 s each), in date order so the years build up: the earliest and the latest always, `include` ones, and in between the most striking of each stretch of the show (`choose`); one shot per robot ("Pepper, again" is Pepper), none of `exclude`, nor the hook's robot again. The longer shots come first so the cutting quickens. Each shot plays its entry's best moment (the analysis' largest view of the robot, a little before it) inside the window the show played — or where `at` says: `{"<label>": seconds}`, or `{"item": another clip of the entry, "seconds": …}`. A robot the vertical crop holds (the analysis' box at most 0.8 of what a filling crop shows; portrait footage always) fills the frame and `clip.autoReframe` follows it (seeded with that box; `fallback` blur where it is lost); a wider one — a vehicle, an arm, a robot filmed up close in landscape — would be cut to a slice, so it is shown whole in a band (`band`: the picture as wide as puts the robot across 90 % of the frame, from the whole picture up to filling the frame, the robot centred as far as the picture covers the frame, pushing in slowly) over a blurred, dimmed copy of itself. Its name and year sit in a dark panel at the bottom of the platform's safe area |
+| end card (about 3 s) | from the music's final hit, a bar: the hook's footage blurred and dimmed, the channel's logo on a light badge popping in, `endText` ("Full video on YouTube") and the handle (`logo`, `channel`; from the plan's `outro` by default), all inside the safe area |
+
+**Sound.** Generated music (`music.suggest` → `audio.generate`, `mood` energetic, `bpm` 124, a fixed
+`seed`) arranged to the trailer's exact length: its final chord lands where the end card starts
+(a bed `hit + end card` long ends on the bar `hit`: `end_card_length`), with a riser into it, an
+impact on it and a whoosh into the montage. Mixed speech first (`mix::mix_down`, the plan's `mix`),
+then the music brought up 8 dB from the show's bed level (it carries a trailer; still ducked under
+the voice) with a limiter on its track at −3.5 dBFS, and the voice's fader 3.5 dB down (it stands
+over 20 LU above the ducked music), then normalised to −14 LUFS, −1 dBTP. Measured on the reel: the
+Mix's limiter takes at most 0.6 dB off (9 dB before these levels: the speech mix normalised a
+34 s trailer that is mostly music by +8 dB, straight into the voice's peaks).
+
+**Privacy.** Two layers, so no face the show blurred is shown sharp:
+
+1. The show's own blur, carried over (`carry_redaction`): for every shot of footage the show hid
+   something in (the report's `privacy`), its blur and mosaic effects — the masks of its privacy
+   pass, keyed in media time — are copied from the show's clip and pasted onto the trailer's clip
+   and its band's copy with `edit.pasteAttributes` `keepTimes` (the same moments of the same
+   media), whatever window and framing the trailer gives it.
+2. The privacy pass again on the trailer's clips (`privacy::redact_show`): faces and plates when the
+   show hid any (or `redact`), every entry's named targets (the DP World logo on the Promobot stays
+   hidden), each robot's own box left sharp — through the redaction cache. It runs with the shots
+   filling the frame, before the bands and the reframe (whose blurred copies keep the masks), and
+   hides a face at the size the show hid it: `face_threshold` scales `minFaceHeight` by how much
+   smaller the trailer shows the picture than the show did (a portrait clip that filled the 16:9
+   show was 3.2 times larger there, so its faces count from a third of the size).
+
+A face the show left sharp is not hidden by policy: the trailer hides what the show hid, so look at
+the frame sheet for visitors the show itself let through.
+
+**Out.** The sequence "<show> — Reel trailer"; with `export`: the video (Social Vertical 1080×1920:
+H.264, AAC 48 kHz, 12 Mb/s, GPU rendering as set; `preset` for another), `<out>.cover.jpg` (the
+hook's frame with its title, full size; inside the 3:4 the profile grid shows), `<out>.caption.txt`
+(the caption to paste: the title, three robots by name — the hook's and the most striking others —
+"Full video on YouTube: @handle, link in bio" — a Reel's caption shows no links — and hashtags from
+the robots' kinds, events, places, the channel and the narration's language), `<out>.caption.json`
+(the same with `link`, for the profile's bio, and the robots), `<out>.frames.jpg` (16 frames at most
+from the exported file, read in a session of its own: the hook, the shots — evenly spread when
+there are more — and the end card) and QA (`<out>.qa.json`, `.qa.png`,
+`.privacy.png`: joins, black frames, black sides of the bands, the robot in every shot, privacy, the
+platform's safe zones and the mix — the voice measured against the music while it speaks, not
+against the louder music after it — plus the trailer's own: cuts off the beat, text or the logo
+outside the safe area, and every shot of footage the show hid faces in where the trailer's own pass
+hides none: a warning, or a note when the show's blur was carried onto it). The outcome lists every
+shot (robot, year, clip window, inside the show's window, band or followed), the clips that got the
+show's blur, the cuts on the beat, the safe-zone check (each text's box) and QA's summary.
+
+Tests: `trailer_tests.rs` (the cut on the beat for 80–180 bpm and 10–90 s, the picks, the windows
+and `at`, bands, the face thresholds, redaction carried over, the boxes inside every platform's safe
+area, the caption, hostile plans and reports) and `tests/trailer_build.rs` (a synthetic show built
+from the demo footage gets a 9:16 trailer of the right length, on the beat, with its words in the
+safe zone, an end card, and the show's masked blur on its shot; hostile requests fail cleanly).
+
 ## Privacy: faces and plates hidden, robots left alone
 
 `privacy.rs` holds AutoCut's side of the engine's automatic blur (`clip.autoRedact`,

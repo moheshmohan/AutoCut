@@ -177,6 +177,17 @@ fn paste_attributes_with_scaled_keyframes_and_remove_attributes() {
     assert_eq!(kf, vec![got.source_in, got.source_in + (a_now.source_out() - a_now.source_in)]);
     assert!(got.effect("gaussian_blur").is_none(), "effects unticked");
     assert_eq!(f64_param(&got, "opacity", "opacity"), 40.0);
+    // keeping the media times: the keyframes stay on the same moments of the media (a privacy
+    // blur's masks onto another clip of the same footage)
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.pasteAttributes", json!({"keepTimes": true, "effects": false})).unwrap();
+    let got = clip(&s, b.id.0);
+    let kf: Vec<Tick> = got.effect("motion").unwrap().param("scale").unwrap().keyframes.iter().map(|k| k.time).collect();
+    assert_eq!(kf, vec![a_now.source_in, a_now.source_out()], "the same media times as on A");
+    assert!(s.execute("edit.pasteAttributes", json!({"keepTimes": "yes"})).is_ok(), "a malformed flag is the default, never a panic");
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.pasteAttributes", json!({"scaleTimes": false, "effects": false})).unwrap();
     // Remove Attributes: Motion back to defaults, effects gone, opacity kept when unticked
     s.execute("edit.pasteAttributes", json!({})).unwrap();
     s.execute("edit.removeAttributes", json!({"opacity": false})).unwrap();

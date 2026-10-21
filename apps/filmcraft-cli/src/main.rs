@@ -37,6 +37,7 @@ mod ml_script;
 mod probe;
 mod publish;
 mod showcase_tools;
+mod trailer;
 mod voice;
 mod youtube;
 
@@ -417,6 +418,32 @@ SUBCOMMANDS
                                 unless --youtube-privacy). A media file is imported first; a
                                 project's active sequence (or --sequence) is used. --save keeps
                                 the shorts in the --project
+  trailer (--project p.fcproj | --bridge addr) [--sequence id] [--plan plan.json]
+          [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5]
+          [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at S]]
+          [--at LABEL=[ITEM@]S]...
+          [--title T] [--no-hook-voice] [--logo logo.png] [--channel @handle] [--end-text T]
+          [--link URL] [--exclude LABEL]... [--include LABEL]... [--bpm 124] [--mood energetic]
+          [--seed 7] [--redact faces,plates|off] [--fallback blur|letterbox|center]
+          [--export out.mp4] [--preset P] [--no-qa]
+                                a finished showcase → a vertical trailer (autocut.trailer): the
+                                most striking robot (or --hook; --hook-at: from that second of
+                                its clip) under a big title ('48 robots · 2013 → 2025'), the
+                                show's first narration sentence over it, then --robots robots in
+                                date order cut on the beats of generated music, each on its best
+                                moment inside the window the show played (a robot the vertical
+                                crop holds is followed by it; a wider one is shown whole in a
+                                band over a blurred copy; --at: a robot's shot from that second,
+                                of another clip of its entry with ITEM@), its name and year inside
+                                the --platform's safe zone, and an end card (--logo, --end-text,
+                                --channel; from the plan's outro by default) on the music's final
+                                hit. The show is --sequence with its --plan and build --report
+                                (the JSON `showcase` prints); without a plan its entries are read
+                                from the sequence. Its redaction is kept (faces hidden at the size
+                                the show hid them, the plan's named targets). --export writes the
+                                video (Social Vertical 1080×1920) with <out>.cover.jpg,
+                                <out>.caption.txt (hashtags, 'link in bio'), <out>.frames.jpg and
+                                QA (<out>.qa.json). --save keeps the trailer's sequence
   autocut '<prompt>' [--dry-run] [--frames]
                                 plan (and run) a natural-language edit with AutoCut: a local
                                 model (Ollama) classifies the prompt and deterministic planners
@@ -2209,6 +2236,8 @@ async fn cli() {
         "ml-script" => ml_script::translate(&a).await,
         "sheet" => showcase_tools::sheet(&a).await,
         "frames" => showcase_tools::frames(&a).await,
+        // a finished show → a vertical trailer for Reels (autocut.trailer)
+        "trailer" => trailer::run(&a).await,
         "shorts" => {
             // long video → vertical shorts (autocut.shorts); every usage error before anything runs
             let src = a.pos(1).unwrap_or_else(|| usage("shorts <project.fcproj | media file> [--count N] [--aspect 9:16] [--export dir] [--upload-youtube]"));

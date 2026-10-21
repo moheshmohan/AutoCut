@@ -163,7 +163,11 @@ const VALUED: &[&str] = &[
 
 /// Options that take a value in one subcommand only: `showcase --plan` is a flag, while
 /// `ml-script --plan plan.json` names a file.
-const VALUED_IN: &[(&str, &[&str])] = &[("ml-script", &["--plan"]), ("ml-lint", &["--plan"])];
+const VALUED_IN: &[(&str, &[&str])] = &[
+    ("ml-script", &["--plan"]),
+    ("ml-lint", &["--plan"]),
+    ("trailer", &["--plan", "--robots", "--hook", "--hook-at", "--logo", "--end-text", "--link", "--include", "--seed"]),
+];
 
 fn valued_in(cmd: Option<&String>, opt: &str) -> bool {
     cmd.is_some_and(|c| VALUED_IN.iter().any(|(sub, opts)| sub == c && opts.contains(&opt)))

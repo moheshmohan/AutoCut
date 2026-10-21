@@ -11,6 +11,7 @@
 //! | `autocut.showcaseInspect` | the kept report (a summary, or all of it with `report: true`), plan and last build, and the latest job |
 //! | `autocut.showcaseSet` | keep a `report` or `plan` from elsewhere (or `reportPath` / `planPath`: the CLI's `analyze --out` and `showcase --script-out` files); `null` clears one |
 //! | `autocut.malayalamScript` | job: the plan's (the kept one, `plan` or `planPath`) English intro, lines and outro in natural spoken Malayalam, written by the local script model (or `model`) from `docs/malayalam-style.md`, its examples and the user's approved pairs; every line keeps its English's facts, gets the safe fixes and the lint (`script.lintMalayalam`) and goes back to the model once with what to fix (`revise: false`: not). The outcome's `malayalam` is the lines file (`{intro, outro, lines: {label: …}}`), written to `out` too, and `lines` what is left to look at |
+//! | `autocut.trailer` | job: a vertical trailer (9:16, also 1:1 / 4:5) of a finished showcase: the show `sequence`, its `plan` (or `planPath`, or the kept plan) and its build report (`report` / `reportPath`, or the last build). A hook (the most striking robot, or `hook`) under a big title ("48 robots · 2013 → 2025"), then a chronological montage of `robots` robots cut on the beats of generated music, each on its best moment, followed by the reframe, its name and year inside the `platform`'s safe zone; the show's first narration sentence over the hook (`hookVoice`); the show's redaction kept; an end card (`logo`, `endText`, `channel`). `export` writes it with the Social Vertical preset, with a cover, a caption, a frame sheet and QA beside it |
 //! | `autocut.shorts` | job: long video → shorts. The transcript of `sequence` (or of media `item`, put in a new sequence) is cut into sentences; runs of them `minSeconds`..`maxSeconds` long are scored for interest (and, with the local model, for the strength of their opening hook), and the best `count` that do not overlap each become a vertical sequence (`sequence.autoReframe` to `aspect`, following the speaker) with bold captions from the transcript (`captions`) and an optional `title` card; `export` (a folder) exports each with its captions burned in, and `uploadYoutube` sends each export to YouTube, private unless `youtube.privacy` says otherwise |
 //!
 //! A plan is `{subject, title, subtitle?, voice?, mood, entries, script: {intro, lines, outro}}`;
@@ -82,6 +83,8 @@ pub enum TaskKind {
     Shorts,
     /// The plan's English voice-over in natural spoken Malayalam (`autocut.malayalamScript`).
     MalayalamScript,
+    /// A vertical trailer of a finished showcase (`autocut.trailer`).
+    Trailer,
 }
 
 impl TaskKind {
@@ -93,6 +96,7 @@ impl TaskKind {
             TaskKind::Build => "autocut.showcaseBuild",
             TaskKind::Shorts => "autocut.shorts",
             TaskKind::MalayalamScript => "autocut.malayalamScript",
+            TaskKind::Trailer => "autocut.trailer",
         }
     }
 
@@ -105,6 +109,7 @@ impl TaskKind {
             TaskKind::Build => "Building the showcase".into(),
             TaskKind::Shorts => "Making shorts".into(),
             TaskKind::MalayalamScript => "Writing the Malayalam script".into(),
+            TaskKind::Trailer => "Making a trailer".into(),
         }
     }
 }
@@ -339,6 +344,13 @@ pub fn commands() -> Vec<CommandSpec> {
             |s, p| start(s, TaskKind::Shorts, p),
         ),
         job(
+            "autocut.trailer",
+            "Make a Trailer…",
+            &[],
+            r#"{"sequence":id?,"plan":Plan?,"planPath":str?,"report":obj?,"reportPath":str?,"seconds":10..90=34,"aspect":"9:16"|"1:1"|"4:5"="9:16","platform":"reels"|"youtube"|"tiktok"|"vertical"="reels","robots":3..30?,"hook":str?,"hookAt":seconds?,"at":{"<label>":seconds|{"item":id?,"seconds":seconds}}?,"title":str?,"hookVoice":bool?,"logo":str?,"channel":str?,"endText":str="Full video on YouTube","link":str?,"exclude":[str]?,"include":[str]?,"bpm":80..180=124,"mood":str="energetic","seed":u64=7,"redact":"faces,plates"|"faces"|"plates"|false?,"fallback":"blur"|"letterbox"|"center"="blur","export":str?,"preset":str?,"qa":bool?,"wait":bool=false}"#,
+            |s, p| start(s, TaskKind::Trailer, p),
+        ),
+        job(
             "autocut.malayalamScript",
             "Write Malayalam Script",
             &[],
@@ -527,6 +539,9 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
     if kind == TaskKind::Shorts {
         shorts_params(cmd, p, &mut out)?;
     }
+    if kind == TaskKind::Trailer {
+        trailer_params(cmd, p, &mut out)?;
+    }
     if kind == TaskKind::MalayalamScript {
         if let Some(plan) = p.get("plan").filter(|v| !v.is_null()) {
             check_plan(cmd, plan)?;
@@ -662,6 +677,146 @@ fn shorts_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>)
     Ok(())
 }
 
+/// Longest label, title or channel a trailer takes, and most labels in `exclude` / `include`.
+pub const MAX_TRAILER_TEXT: usize = 200;
+pub const MAX_TRAILER_LABELS: usize = 100;
+
+/// The checked parameters of `autocut.trailer` (see the module docs).
+fn trailer_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) -> Result<()> {
+    if let Some(q) = p.get("sequence").filter(|v| !v.is_null()) {
+        out.insert("sequence".into(), json!(q.as_u64().ok_or_else(|| bad(cmd, "`sequence` must be an id"))?));
+    }
+    if let Some(plan) = p.get("plan").filter(|v| !v.is_null()) {
+        check_plan(cmd, plan)?;
+        out.insert("plan".into(), plan.clone());
+    }
+    if p.get("plan").is_some_and(|v| !v.is_null()) && p.get("planPath").is_some_and(|v| !v.is_null()) {
+        return Err(bad(cmd, "give `plan` or `planPath`, not both"));
+    }
+    if let Some(report) = p.get("report").filter(|v| !v.is_null()) {
+        if !report.is_object() {
+            return Err(bad(cmd, "`report` is the showcase's build report (an object: what `showcase` prints, or a build's outcome)"));
+        }
+        out.insert("report".into(), report.clone());
+    }
+    if p.get("report").is_some_and(|v| !v.is_null()) && p.get("reportPath").is_some_and(|v| !v.is_null()) {
+        return Err(bad(cmd, "give `report` or `reportPath`, not both"));
+    }
+    // a path, a label or a line of text: one line each
+    let line = |key: &str, max: usize| -> Result<Option<String>> {
+        let t = text_p(cmd, p, key, max)?;
+        if t.as_deref().is_some_and(|t| t.chars().any(char::is_control)) {
+            return Err(bad(cmd, format!("`{key}` must be on one line")));
+        }
+        Ok(t)
+    };
+    for key in ["planPath", "reportPath", "logo", "export"] {
+        if let Some(v) = line(key, 4096)? {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    for key in ["hook", "title", "channel", "endText", "link", "preset"] {
+        if let Some(v) = line(key, MAX_TRAILER_TEXT)? {
+            out.insert(key.into(), json!(v));
+        }
+    }
+    if let Some(m) = line("mood", 40)? {
+        out.insert("mood".into(), json!(m));
+    }
+    let num = |key: &str, lo: f64, hi: f64, default: f64| -> Result<f64> {
+        match p.get(key).filter(|v| !v.is_null()) {
+            None => Ok(default),
+            Some(v) => v.as_f64().filter(|f| f.is_finite() && (lo..=hi).contains(f)).ok_or_else(|| bad(cmd, format!("`{key}` is a number from {lo} to {hi}"))),
+        }
+    };
+    out.insert("seconds".into(), json!(num("seconds", 10.0, 90.0, 34.0)?));
+    out.insert("bpm".into(), json!(num("bpm", 80.0, 180.0, 124.0)?));
+    if p.get("hookAt").is_some_and(|v| !v.is_null()) {
+        out.insert("hookAt".into(), json!(num("hookAt", 0.0, 86_400.0, 0.0)?));
+    }
+    // where robots' shots start: {"<label>": seconds | {"item": id, "seconds": s}}
+    if let Some(at) = p.get("at").filter(|v| !v.is_null()) {
+        let o = at.as_object().ok_or_else(|| bad(cmd, "`at` is {\"<entry label>\": seconds or {item, seconds}}"))?;
+        if o.len() > MAX_TRAILER_LABELS {
+            return Err(bad(cmd, format!("`at` names at most {MAX_TRAILER_LABELS} entries")));
+        }
+        let secs = |v: &Value| v.as_f64().filter(|s| s.is_finite() && (0.0..=86_400.0).contains(s));
+        let mut keep = serde_json::Map::new();
+        for (label, v) in o {
+            let l = label.trim();
+            if l.is_empty() || l.chars().count() > MAX_TRAILER_TEXT || l.chars().any(char::is_control) {
+                return Err(bad(cmd, "`at`'s keys are entry labels, each on one line"));
+            }
+            let ok = match v {
+                Value::Number(_) => secs(v).map(|s| json!(s)),
+                Value::Object(x) => match (x.get("seconds").and_then(secs), x.get("item")) {
+                    (Some(s), None | Some(Value::Null)) => Some(json!({"seconds": s})),
+                    (Some(s), Some(i)) => i.as_u64().map(|i| json!({"item": i, "seconds": s})),
+                    _ => None,
+                },
+                _ => None,
+            };
+            keep.insert(l.to_string(), ok.ok_or_else(|| bad(cmd, format!("`at.{l}` is seconds into the clip (0–86400), or {{item, seconds}}")))?);
+        }
+        out.insert("at".into(), Value::Object(keep));
+    }
+    if let Some(n) = count_p(cmd, p, "robots", 3, 30)? {
+        out.insert("robots".into(), json!(n));
+    }
+    if let Some(seed) = p.get("seed").filter(|v| !v.is_null()) {
+        out.insert("seed".into(), json!(seed.as_u64().ok_or_else(|| bad(cmd, "`seed` is a whole number"))?));
+    }
+    let aspect = text_p(cmd, p, "aspect", 16)?.unwrap_or_else(|| "9:16".into());
+    if !matches!(aspect.as_str(), "9:16" | "1:1" | "4:5") {
+        return Err(bad(cmd, format!("`aspect` is \"9:16\", \"1:1\" or \"4:5\", not \"{}\"", aspect.chars().take(16).collect::<String>())));
+    }
+    out.insert("aspect".into(), json!(aspect));
+    let platform = match crate::safe_zones::platform_p(cmd, p, "platform")? {
+        None => crate::safe_zones::Platform::Reels,
+        Some(Some(pl)) => pl,
+        Some(None) => return Err(bad(cmd, "`platform` is \"reels\", \"youtube\", \"tiktok\" or \"vertical\"")),
+    };
+    out.insert("platform".into(), json!(platform.name()));
+    let fallback = match text_p(cmd, p, "fallback", 32)? {
+        None => filmcraft_render::reframe::Fallback::Blur,
+        Some(f) => filmcraft_render::reframe::Fallback::from_name(&f).ok_or_else(|| bad(cmd, "`fallback` is \"blur\", \"letterbox\" or \"center\""))?,
+    };
+    out.insert("fallback".into(), json!(fallback.name()));
+    for key in ["hookVoice", "qa"] {
+        if let Some(v) = p.get(key).filter(|v| !v.is_null()) {
+            out.insert(key.into(), json!(v.as_bool().ok_or_else(|| bad(cmd, format!("`{key}` must be true or false")))?));
+        }
+    }
+    match p.get("redact") {
+        None | Some(Value::Null) => {}
+        Some(Value::Bool(false)) => {
+            out.insert("redact".into(), json!(false));
+        }
+        Some(Value::String(r)) => {
+            let kinds: Vec<String> = r.split(',').map(|k| k.trim().to_ascii_lowercase()).filter(|k| !k.is_empty()).collect();
+            if kinds.is_empty() || kinds.len() > 2 || !kinds.iter().all(|k| matches!(k.as_str(), "faces" | "plates")) {
+                return Err(bad(cmd, "`redact` is \"faces,plates\", \"faces\", \"plates\" or false"));
+            }
+            out.insert("redact".into(), json!(kinds.join(",")));
+        }
+        Some(_) => return Err(bad(cmd, "`redact` is \"faces,plates\", \"faces\", \"plates\" or false")),
+    }
+    for key in ["exclude", "include"] {
+        let Some(v) = p.get(key).filter(|v| !v.is_null()) else { continue };
+        let list = v.as_array().ok_or_else(|| bad(cmd, format!("`{key}` is a list of entry labels")))?;
+        if list.len() > MAX_TRAILER_LABELS {
+            return Err(bad(cmd, format!("`{key}` names at most {MAX_TRAILER_LABELS} entries")));
+        }
+        let mut labels = Vec::new();
+        for l in list {
+            let t = l.as_str().map(str::trim).filter(|t| !t.is_empty() && t.chars().count() <= MAX_TRAILER_TEXT && !t.chars().any(char::is_control));
+            labels.push(t.ok_or_else(|| bad(cmd, format!("`{key}` is a list of entry labels, each on one line")))?.to_string());
+        }
+        out.insert(key.into(), json!(labels));
+    }
+    Ok(())
+}
+
 /// Reviewed entries: a list of at most [`MAX_ENTRIES`] objects.
 fn entries_p(cmd: &str, v: &Value) -> Result<Value> {
     let list = v.as_array().ok_or_else(|| bad(cmd, "`entries` must be a list"))?;
@@ -717,6 +872,20 @@ fn start(s: &mut Session, kind: TaskKind, p: &Value) -> Result<Value> {
         let v = read_json(s, cmd, &path)?;
         check_plan(cmd, &v)?;
         params["plan"] = v;
+    }
+    // a trailer's build report from a file (what the CLI's `showcase` prints), else the last build
+    if kind == TaskKind::Trailer {
+        if let Some(path) = params.get("reportPath").and_then(Value::as_str).map(str::to_string) {
+            let v = read_json(s, cmd, &path)?;
+            if !v.is_object() {
+                return Err(bad(cmd, format!("{path}: not a showcase build report")));
+            }
+            params["report"] = v;
+        } else if params.get("report").is_none()
+            && let Some(built) = lock(&s.autocut.state).built.clone()
+        {
+            params["report"] = built;
+        }
     }
     match kind {
         TaskKind::MalayalamScript if plan.is_none() && params.get("plan").is_none() => {

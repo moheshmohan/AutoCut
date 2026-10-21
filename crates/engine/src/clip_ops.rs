@@ -85,7 +85,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             "Paste Attributes…",
             &["Edit"],
             Some("Cmd+Alt+V"),
-            r#"{"clips":[id]?,"motion":bool=true,"opacity":bool=true,"timeRemapping":bool=true,"volume":bool=true,"channelVolume":bool=true,"panner":bool=true,"effects":bool|[effectId]=true,"scaleTimes":bool=true}"#,
+            r#"{"clips":[id]?,"motion":bool=true,"opacity":bool=true,"timeRemapping":bool=true,"volume":bool=true,"channelVolume":bool=true,"panner":bool=true,"effects":bool|[effectId]=true,"scaleTimes":bool=true,"keepTimes":bool=false}"#,
             can_paste_attributes,
             paste_attributes,
         ),
@@ -1036,9 +1036,19 @@ fn wants_effect(sel: &AttrSel, e: &filmcraft_project::EffectInstance) -> bool {
     sel.effects.as_ref().is_none_or(|ids| ids.contains(&e.effect))
 }
 
+/// `edit.pasteAttributes`: the copied clip's attributes onto `clips` (default the selection). Its
+/// keyframes keep their place in the clip (`scaleTimes`: stretched to the target's length); with
+/// `keepTimes` they keep their media times instead — the same moments of the same media, as a
+/// redaction's masks must when a clip's privacy blur goes onto another clip of the same footage.
 fn paste_attributes(s: &mut Session, p: &Value) -> Result<Value> {
     let sel = attr_sel(p);
     let scale = bool_p(p, "scaleTimes").unwrap_or(true);
+    let keep = bool_p(p, "keepTimes").unwrap_or(false);
+    let retime = |e: &mut filmcraft_project::EffectInstance, from: &TrackItem, to: &TrackItem, scale: bool| {
+        if !keep {
+            retime_effect(e, from, to, scale);
+        }
+    };
     let src_v = s.state.clipboard.iter().find(|c| c.0 == TrackKind::Video).map(|c| c.2.clone());
     let src_a = s.state.clipboard.iter().find(|c| c.0 == TrackKind::Audio).map(|c| c.2.clone());
     let targets = with_links(s, &clips_p(s, p));
@@ -1053,7 +1063,7 @@ fn paste_attributes(s: &mut Session, p: &Value) -> Result<Value> {
             for id in &sel.intrinsic {
                 let Some(e) = src.effect(id) else { continue };
                 let mut e = e.clone();
-                retime_effect(&mut e, src, &before, scale);
+                retime(&mut e, src, &before, scale);
                 match dst.effects.iter_mut().find(|x| x.effect == *id) {
                     Some(slot) => *slot = e,
                     None => dst.effects.push(e),
@@ -1061,7 +1071,7 @@ fn paste_attributes(s: &mut Session, p: &Value) -> Result<Value> {
             }
             for e in src.effects.iter().filter(|e| is_standard(e) && wants_effect(&sel, e)) {
                 let mut e = e.clone();
-                retime_effect(&mut e, src, &before, scale);
+                retime(&mut e, src, &before, scale);
                 dst.effects.push(e);
             }
             if *dst != before {
