@@ -62,17 +62,21 @@ pub fn predict(
 /// Copy the (w + 7) x (h + 7) source window starting at (x0 - 3, y0 - 3) with edge clamping.
 fn fetch_window(r: &RefPlane, x0: i32, y0: i32, w: usize, h: usize, win: &mut [u16]) -> usize {
     let ws = w + 7;
+    let (xs, last_x) = (x0 - 3, r.last_x.max(0));
+    // Window columns [0, left) lie left of the picture (they repeat column 0), [right, ws) right
+    // of it (they repeat column last_x), [left, right) inside.
+    let left = (-xs).clamp(0, ws as i32) as usize;
+    let right = (last_x + 1 - xs).clamp(left as i32, ws as i32) as usize;
+    let first = (xs + left as i32).max(0) as usize;
     for (row, dst) in win.chunks_exact_mut(ws).take(h + 7).enumerate() {
         let yy = (y0 - 3 + row as i32).clamp(0, r.last_y.max(0)) as usize;
         let src = r.row(yy);
-        let xs = x0 - 3;
-        match src.get(xs.max(0) as usize..).and_then(|s| s.get(..ws)) {
-            Some(s) if xs >= 0 && xs + ws as i32 - 1 <= r.last_x => dst.copy_from_slice(s),
-            _ => {
-                for (c, d) in dst.iter_mut().enumerate() {
-                    *d = src.get((xs + c as i32).clamp(0, r.last_x.max(0)) as usize).copied().unwrap_or(0);
-                }
-            }
+        let Some((head, rest)) = dst.split_at_mut_checked(left) else { continue };
+        let Some((mid, tail)) = rest.split_at_mut_checked(right - left) else { continue };
+        head.fill(src.first().copied().unwrap_or(0));
+        tail.fill(src.get(last_x as usize).copied().unwrap_or(0));
+        if let Some(s) = src.get(first..first + mid.len()) {
+            mid.copy_from_slice(s);
         }
     }
     ws
