@@ -64,13 +64,15 @@ fn measure(project: &Project, seq: ItemId, sources: &dyn SourceProvider, cancel:
     let total = q.duration().to_units_floor(i64::from(sr)).max(0);
     let layout = filmcraft_render::audio::master_layout(q);
     let mut meter = LoudnessMeter::new(f64::from(sr), layout.channels());
+    // this pass's own stream: its stateful DSP (the limiter) starts fresh and continues only itself
+    let stream = filmcraft_render::MixStream::new();
     let mut pos = 0i64;
     while pos < total {
         if cancel() {
             return Err("cancelled".into());
         }
         let n = (total - pos).min(i64::from(sr)) as usize;
-        let b = filmcraft_render::audio::mix_sequence_layout(project, q, pos, n, sources, layout, filmcraft_audio_dsp::channels::Mixdown::FrontRear);
+        let b = filmcraft_render::audio::mix_sequence_layout(project, q, pos, n, sources, layout, filmcraft_audio_dsp::channels::Mixdown::FrontRear, &stream);
         let refs: Vec<&[f32]> = b.channels.iter().map(Vec::as_slice).collect();
         meter.process(&refs);
         pos += n as i64;

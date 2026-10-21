@@ -28,7 +28,7 @@ use filmcraft_audio_dsp::LoudnessMeter;
 use filmcraft_audio_dsp::mixcheck::{self, BAND_NAMES, BandMeter, Bands, ClipMeter, GainReductionMeter, Ratio};
 use filmcraft_project::essential::AudioType;
 use filmcraft_project::{ItemId, Project, Sequence, Track};
-use filmcraft_render::SourceProvider;
+use filmcraft_render::{MixStream, SourceProvider};
 use filmcraft_time::Tick;
 
 use crate::commands::{CommandSpec, bad, has_seq, u64_p};
@@ -152,20 +152,20 @@ fn ratio_json(r: Option<Ratio>) -> Value {
     }
 }
 
-/// Render `q` over samples `[a0, a1)` and feed `f` each stereo block (1 s at a time).
+/// Render `q` over samples `[a0, a1)` in `stream` and feed `f` each stereo block (1 s at a time).
 fn render(
     project: &Project,
     q: &Sequence,
-    a0: i64,
-    a1: i64,
+    (a0, a1): (i64, i64),
     sources: &dyn SourceProvider,
+    stream: &MixStream,
     f: &mut dyn FnMut(&[f32], &[f32]),
 ) -> std::result::Result<(), String> {
     let sr = i64::from(q.settings.sample_rate.max(1));
     let mut pos = a0;
     while pos < a1 {
         let n = usize::try_from((a1 - pos).min(sr)).map_err(|_| "internal: block size")?;
-        let b = filmcraft_render::audio::mix_sequence(project, q, pos, n, sources);
+        let b = filmcraft_render::audio::mix_sequence(project, q, pos, n, sources, stream);
         let (Some(l), Some(r)) = (b.channels.first(), b.channels.get(1).or(b.channels.first())) else {
             return Err("the mixer rendered no channels".into());
         };
@@ -176,8 +176,8 @@ fn render(
 }
 
 /// Render `a` over samples `[a0, a1)`, and `b` (a variant of it, e.g. without a limiter) beside
-/// it, one second at a time: `f` gets each block of both, time-aligned. Two variants whose
-/// mixer graphs differ (an insert more or less) keep their own state between blocks.
+/// it, one second at a time: `f` gets each block of both, time-aligned. Each variant renders in a
+/// stream of its own, so the two keep their own state between blocks.
 #[allow(clippy::type_complexity)]
 fn render_pair(
     project: &Project,
@@ -189,15 +189,16 @@ fn render_pair(
 ) -> std::result::Result<(), String> {
     let (a0, a1) = range;
     let step = i64::from(a.settings.sample_rate.max(1));
+    let (sa, sb) = (MixStream::new(), MixStream::new());
     let mut pos = a0;
     while pos < a1 {
         let end = (pos + step).min(a1);
         let mut x = (Vec::new(), Vec::new());
-        render(project, a, pos, end, sources, &mut |l, r| x = (l.to_vec(), r.to_vec()))?;
+        render(project, a, (pos, end), sources, &sa, &mut |l, r| x = (l.to_vec(), r.to_vec()))?;
         match b {
             Some(b) => {
                 let mut y = (Vec::new(), Vec::new());
-                render(project, b, pos, end, sources, &mut |l, r| y = (l.to_vec(), r.to_vec()))?;
+                render(project, b, (pos, end), sources, &sb, &mut |l, r| y = (l.to_vec(), r.to_vec()))?;
                 f([&x.0, &x.1], Some([&y.0, &y.1]));
             }
             None => f([&x.0, &x.1], None),
@@ -397,7 +398,7 @@ pub fn analyze(
         .any(|tr| tr.sound.is_some() && tr.start < span.1 && tr.start + tr.duration > span.0);
     if has_sounds {
         let mut m = Metered::new(sr);
-        render(project, &only(q, &[]), a0, a1, sources, &mut |l, r| m.feed(l, r, sub))?;
+        render(project, &only(q, &[]), (a0, a1), sources, &MixStream::new(), &mut |l, r| m.feed(l, r, sub))?;
         let mut v = m.json();
         v["track"] = json!("transitions");
         v["name"] = json!("Transition sounds");
@@ -413,7 +414,7 @@ pub fn analyze(
             return Ok((s.clone(), *i));
         }
         let mut m = Metered::new(sr);
-        render(project, &only(q, tracks), a0, a1, sources, &mut |l, r| m.feed(l, r, sub))?;
+        render(project, &only(q, tracks), (a0, a1), sources, &MixStream::new(), &mut |l, r| m.feed(l, r, sub))?;
         Ok((m.momentary, m.loud.integrated()))
     };
     let speech_json = if speech.is_empty() {
@@ -428,7 +429,7 @@ pub fn analyze(
             mixcheck::speech_ratio(&s, &m, gate, HOP_S)
         };
         let mut rest = Metered::new(sr);
-        render(project, &muting(q, &speech), a0, a1, sources, &mut |l, r| rest.feed(l, r, sub))?;
+        render(project, &muting(q, &speech), (a0, a1), sources, &MixStream::new(), &mut |l, r| rest.feed(l, r, sub))?;
         let to_rest = mixcheck::speech_ratio(&s, &rest.momentary, gate, HOP_S);
         // the mix (as it plays) while the speech is active, and in its pauses (between its first
         // and last word, where the music comes up)
@@ -469,10 +470,11 @@ pub fn analyze(
             let c0 = it.start.to_units_floor(i64::from(sr)).max(a0);
             let c1 = it.end().to_units_floor(i64::from(sr)).min(a1);
             let mut m = ClipMeter::new();
+            let stream = MixStream::new();
             let mut pos = c0;
             while pos < c1 {
                 let n = (c1 - pos).min(i64::from(sr)) as usize;
-                let Some([l, r]) = filmcraft_render::audio::clip_signal(it, pos, n, sr, sources) else { break };
+                let Some([l, r]) = filmcraft_render::audio::clip_signal(it, pos, n, sr, sources, &stream) else { break };
                 m.process(&[&l, &r]);
                 pos += n as i64;
             }

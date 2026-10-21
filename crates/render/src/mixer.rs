@@ -17,10 +17,12 @@
 //!   their strip; every route into a bus gets a compensation delay so all inputs of a bus line up,
 //!   and the whole graph is read ahead by its total latency, so the output is aligned with the
 //!   timeline. Automation is evaluated at *content* time (input time minus the latency so far).
-//! * **Stateful and pull-based.** Graph state (insert DSP, compensation delays) is cached per graph
-//!   structure and keyed by the next sample it will produce. Sequential consumers (playback, export,
-//!   meters) continue it; any other request starts fresh with a pre-roll long enough for effect
-//!   tails and the graph latency.
+//! * **Stateful and pull-based.** Graph state (insert DSP, compensation delays) is cached per render
+//!   stream ([`MixStream`]: playback, an export, a measuring pass… each owns one) and graph
+//!   structure, keyed by the next sample it will produce. A stream's sequential requests continue
+//!   its own state exactly; any other request starts fresh with a pre-roll long enough for effect
+//!   tails and the graph latency. Two streams never continue each other's state, however alike
+//!   their graphs.
 //! * **Solo.** When any strip is soloed, a strip stays audible if it is soloed or solo-safe, feeds
 //!   (directly or through submixes) a soloed or solo-safe strip, or is fed by one. Everything else
 //!   is solo-muted (silent, sends included). Track mute sits after the pre-fader sends, so
@@ -60,6 +62,7 @@ use rayon::prelude::*;
 use crate::SourceProvider;
 use crate::audio::{pan_gains, track_input_at};
 use crate::audio_fx::{Mapping, mapping};
+use crate::mix_stream::{Continues, MixStream, StateCache, StreamKey};
 
 /// Strip id of the Mix (master) track in [`LiveMix`] and commands.
 pub const MASTER: TrackId = filmcraft_project::mixer::MASTER_STRIP;
@@ -578,9 +581,32 @@ fn build_state(plan: &Plan, sr: u32) -> GraphState {
     GraphState { next_out: 0, strips, latency }
 }
 
-fn cache() -> &'static Mutex<HashMap<u64, Vec<GraphState>>> {
-    static C: OnceLock<Mutex<HashMap<u64, Vec<GraphState>>>> = OnceLock::new();
-    C.get_or_init(Default::default)
+impl Continues for GraphState {
+    fn next_out(&self) -> i64 {
+        self.next_out
+    }
+}
+
+/// Graph states waiting for their stream: by stream and graph structure.
+type GraphCache = StateCache<(StreamKey, u64), GraphState>;
+/// Graphs kept (stream × structure), and states per graph.
+const GRAPHS: usize = 64;
+const STATES_PER_GRAPH: usize = 4;
+
+fn cache() -> &'static Mutex<GraphCache> {
+    static C: OnceLock<Mutex<GraphCache>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(StateCache::new(GRAPHS, STATES_PER_GRAPH)))
+}
+
+/// Drop the graph states of stream `id` (it ended).
+pub(crate) fn forget_stream(id: u64) {
+    lock(cache()).forget(|(k, _)| k.id == id);
+}
+
+/// Graph states waiting for (sub-)stream `stream`.
+#[cfg(test)]
+pub(crate) fn graph_states_of(stream: StreamKey) -> usize {
+    lock(cache()).count(|(k, _)| *k == stream)
 }
 
 /// Total latency (samples) of the sequence's mixer graph: how far ahead of the timeline the graph
@@ -912,13 +938,23 @@ fn add_transition_sounds(seq: &Sequence, bus: &mut Bus, c0: i64, sr: u32) {
 
 /// Mix `frames` samples of the sequence starting at sample `start` through the mixer graph, at the
 /// Mix's width (2 channels, or 6 in L, R, C, LFE, Ls, Rs order for a 5.1 Mix). `live` adds the UI's
-/// held controls and receives the meters.
-pub fn mix_graph(project: &Project, seq: &Sequence, start: i64, frames: usize, sources: &dyn SourceProvider, live: Option<&LiveMix>) -> AudioBuffer {
-    mix_graph_at(project, seq, start, frames, sources, live, 0)
+/// held controls and receives the meters. `stream` is the consumer: its next request from
+/// `start + frames` continues this one's DSP state (see [`MixStream`]).
+pub fn mix_graph(
+    project: &Project,
+    seq: &Sequence,
+    start: i64,
+    frames: usize,
+    sources: &dyn SourceProvider,
+    live: Option<&LiveMix>,
+    stream: &MixStream,
+) -> AudioBuffer {
+    mix_graph_at(project, seq, start, frames, sources, live, stream.key(), 0)
 }
 
-/// [`mix_graph`] for a sequence `depth` nests down from the one being mixed (see
-/// [`crate::MAX_NEST_DEPTH`]).
+/// [`mix_graph`] in (sub-)stream `stream` for a sequence `depth` nests down from the one being
+/// mixed (see [`crate::MAX_NEST_DEPTH`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mix_graph_at(
     project: &Project,
     seq: &Sequence,
@@ -926,16 +962,14 @@ pub(crate) fn mix_graph_at(
     frames: usize,
     sources: &dyn SourceProvider,
     live: Option<&LiveMix>,
+    stream: StreamKey,
     depth: u32,
 ) -> AudioBuffer {
     let sr = seq.settings.sample_rate.max(1);
     let ovs = live.filter(|l| l.is_active()).map(LiveMix::overrides).unwrap_or_default();
     let plan = Plan::build(seq, &ovs);
-    let key = plan.structure_hash(sr);
-    let taken = {
-        let mut c = lock(cache());
-        c.get_mut(&key).and_then(|v| v.iter().position(|g| g.next_out == start).map(|i| v.swap_remove(i)))
-    };
+    let key = (stream, plan.structure_hash(sr));
+    let taken = lock(cache()).take(&key, start);
     let (mut st, skip) = match taken {
         Some(st) => (st, 0usize),
         None => {
@@ -968,7 +1002,7 @@ pub(crate) fn mix_graph_at(
                 return None;
             }
             let input = if has_clips {
-                let mut v = track_input_at(project, &s.track, x0, total, sr, sources, &ovs, depth).channels;
+                let mut v = track_input_at(project, &s.track, x0, total, sr, sources, &ovs, stream, depth).channels;
                 v.resize(s.width, vec![0.0; total]);
                 v
             } else {
@@ -1017,17 +1051,7 @@ pub(crate) fn mix_graph_at(
         }
     }
     st.next_out = start + frames as i64;
-    {
-        let mut c = lock(cache());
-        let v = c.entry(key).or_default();
-        v.push(st);
-        if v.len() > 4 {
-            v.remove(0);
-        }
-        if c.len() > 64 {
-            c.clear();
-        }
-    }
+    lock(cache()).put(key, st);
     if let Some(l) = live {
         l.post_meters(&meters);
     }

@@ -497,8 +497,8 @@ fn switch_audio_follows_video() {
     assert_eq!(on, q.multicam.as_ref().unwrap().cameras[1].audio_tracks);
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let edit_seq = s.active_sequence().unwrap().clone();
-    let mix = filmcraft_render::audio::mix_sequence(&s.project, &edit_seq, 24_000, 4_800, &provider);
-    let only_b = filmcraft_render::audio::mix_sequence(&s.project, &q.with_angle_audio(Some(1)), 24_000, 4_800, &provider);
+    let mix = filmcraft_render::audio::mix_sequence(&s.project, &edit_seq, 24_000, 4_800, &provider, &filmcraft_render::MixStream::new());
+    let only_b = filmcraft_render::audio::mix_sequence(&s.project, &q.with_angle_audio(Some(1)), 24_000, 4_800, &provider, &filmcraft_render::MixStream::new());
     let err = mix.channels[0].iter().zip(&only_b.channels[0]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     assert!(err < 1e-4, "multi-camera audio = camera 2's track ({err})");
     assert!(mix.channels[0].iter().any(|v| v.abs() > 1e-3), "audible");

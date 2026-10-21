@@ -130,7 +130,7 @@ fn mixed_audio_is_the_source_pieces() {
     let total = it.duration.to_units_floor(SR as i64) as usize;
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let q = s.active_sequence().unwrap();
-    let mix = filmcraft_render::audio::mix_sequence(&s.project, q, 0, total, &provider);
+    let mix = filmcraft_render::audio::mix_sequence(&s.project, q, 0, total, &provider, &filmcraft_render::MixStream::new());
     let mut d = 0usize;
     let mut checked = 0;
     let mut worst = 0f32;

@@ -177,7 +177,7 @@ fn audio_mix_bars_tone() {
     ti.effect_mut("volume").unwrap().params.get_mut("level").unwrap().value = ParamValue::Float(-6.0);
     p.sequence_mut(seq).unwrap().audio_tracks[0].items.push(ti);
     let s = p.sequence(seq).unwrap();
-    let buf = audio::mix_sequence(&p, s, 0, 4800, &map);
+    let buf = audio::mix_sequence(&p, s, 0, 4800, &map, &crate::MixStream::new());
     let peak = buf.peaks()[0];
     let expect = 10f32.powf(-26.0 / 20.0);
     assert!((peak - expect).abs() < 0.01, "{peak} vs {expect}");
@@ -372,15 +372,15 @@ fn tone_with(effects: &[(&str, &[(&str, f64)])]) -> (Project, ItemId, SourceMap)
     (p, seq, map)
 }
 
-fn mix(p: &Project, seq: ItemId, map: &SourceMap, start: i64, n: usize) -> Vec<f32> {
-    audio::mix_sequence(p, p.sequence(seq).unwrap(), start, n, map).channels[0].clone()
+fn mix(p: &Project, seq: ItemId, map: &SourceMap, start: i64, n: usize, stream: &crate::MixStream) -> Vec<f32> {
+    audio::mix_sequence(p, p.sequence(seq).unwrap(), start, n, map, stream).channels[0].clone()
 }
 
 #[test]
 fn audio_fx_limiter_holds_ceiling() {
     // +30 dB boost via Amplify (tone at +10 dBFS), then a −6 dB hard limiter.
     let (p, seq, map) = tone_with(&[("amplify", &[("gain", 30.0)]), ("hard_limiter", &[("max", -6.0)])]);
-    let out = mix(&p, seq, &map, 24_000, 48_000);
+    let out = mix(&p, seq, &map, 24_000, 48_000, &crate::MixStream::new());
     let peak = out.iter().fold(0f32, |m, s| m.max(s.abs()));
     let ceiling = 10f32.powf(-6.0 / 20.0);
     assert!(peak <= ceiling * 1.01 && peak > ceiling * 0.7, "peak {peak} vs ceiling {ceiling}");
@@ -391,21 +391,23 @@ fn audio_fx_chain_is_continuous_and_random_access_matches() {
     let (p, seq, map) = tone_with(&[("delay", &[("delay", 0.05), ("feedback", 50.0), ("mix", 50.0)])]);
     let start = 48_000;
     // one long call (fresh chain with pre-roll)
-    let whole = mix(&p, seq, &map, start, 9_600);
-    // the same range in consecutive blocks from a different position (continues a cached chain)
+    let whole = mix(&p, seq, &map, start, 9_600, &crate::MixStream::new());
+    // the same range in consecutive blocks from a different position (one stream: it continues
+    // its cached chain)
     let (p2, seq2, map2) = tone_with(&[("delay", &[("delay", 0.05), ("feedback", 50.0), ("mix", 50.0)])]);
+    let stream = crate::MixStream::new();
     let mut parts = Vec::new();
     let mut s = start - 4_800;
-    let _ = mix(&p2, seq2, &map2, s, 4_800);
+    let _ = mix(&p2, seq2, &map2, s, 4_800, &stream);
     s += 4_800;
     while s < start + 9_600 {
-        parts.extend(mix(&p2, seq2, &map2, s, 1_200));
+        parts.extend(mix(&p2, seq2, &map2, s, 1_200, &stream));
         s += 1_200;
     }
     let max = whole.iter().zip(&parts).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
     assert!(max < 1e-4, "sequential blocks differ from one call by {max}");
     // the delay changes the signal (wet echoes mixed in)
-    let dry = mix(&tone_with(&[]).0, tone_with(&[]).1, &tone_with(&[]).2, start, 9_600);
+    let dry = mix(&tone_with(&[]).0, tone_with(&[]).1, &tone_with(&[]).2, start, 9_600, &crate::MixStream::new());
     let diff = whole.iter().zip(&dry).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
     assert!(diff > 1e-3, "delay had no effect");
 }

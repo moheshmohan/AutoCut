@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use filmcraft_audio_dsp::LoudnessMeter;
+use filmcraft_render::MixStream;
 use serde_json::{Value, json};
 
 use crate::Session;
@@ -50,10 +51,11 @@ fn measured(s: &Session) -> (f64, f64) {
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let total = q.duration().to_units_floor(SR as i64);
     let mut m = LoudnessMeter::new(SR as f64, 2);
+    let stream = filmcraft_render::MixStream::new();
     let mut pos = 0;
     while pos < total {
         let n = (total - pos).min(4800) as usize;
-        let b = filmcraft_render::audio::mix_sequence(&s.project, q, pos, n, &provider);
+        let b = filmcraft_render::audio::mix_sequence(&s.project, q, pos, n, &provider, &stream);
         m.process(&[&b.channels[0], &b.channels[1]]);
         pos += n as i64;
     }
@@ -81,6 +83,68 @@ fn destinations_reach_their_targets_under_the_ceiling() {
         assert!(lim[0].post_fader && lim[0].enabled);
         assert!(lim[0].param("max").unwrap().value.as_f64().is_some_and(|m| m <= -1.0), "the limiter holds the ceiling");
     }
+}
+
+/// Chunk `k` (4800 samples) of the mix, left then right, rendered in `stream`.
+fn chunk(s: &Session, k: usize, stream: &MixStream) -> Vec<f32> {
+    let q = s.active_sequence().unwrap();
+    let provider = s.media.provider(s.project.clone(), s.services.clone());
+    filmcraft_render::audio::mix_sequence(&s.project, q, k as i64 * 4800, 4800, &provider, stream).channels.concat()
+}
+
+/// Two sessions with the same structure (one clip, the Mix's limiter) but different signals,
+/// measured chunk by chunk in turns (A B, then B A, …): each hears exactly its own mix, as alone.
+#[test]
+fn sessions_measured_in_turns_hear_their_own_mix() {
+    let mut a = session(&music(0.5));
+    let mut b = session(&voice(0.3));
+    for s in [&mut a, &mut b] {
+        s.execute("audio.normalizeLoudness", json!({"target": "social"})).unwrap();
+    }
+    const N: usize = 12;
+    let alone = |s: &Session| {
+        let stream = MixStream::new();
+        (0..N).flat_map(|k| chunk(s, k, &stream)).collect::<Vec<f32>>()
+    };
+    let (alone_a, alone_b) = (alone(&a), alone(&b));
+    // each measurement in its own stream, as every caller of the mixer does
+    let (sa, sb) = (MixStream::new(), MixStream::new());
+    let (mut turn_a, mut turn_b) = (Vec::new(), Vec::new());
+    for k in 0..N {
+        if k % 2 == 0 {
+            turn_a.extend(chunk(&a, k, &sa));
+            turn_b.extend(chunk(&b, k, &sb));
+        } else {
+            turn_b.extend(chunk(&b, k, &sb));
+            turn_a.extend(chunk(&a, k, &sa));
+        }
+    }
+    for (what, got, want) in [("music", &turn_a, &alone_a), ("voice", &turn_b, &alone_b)] {
+        let diff = got.iter().zip(want.iter()).position(|(x, y)| x.to_bits() != y.to_bits());
+        assert_eq!(diff, None, "{what}: measured in turns with another session, the mix differs from the mix alone");
+    }
+}
+
+/// Sessions with the same structure (one clip, the Mix's limiter) but different signals,
+/// normalised and measured at the same time on several threads: each command reports exactly
+/// what its own mix plays. The mixer's stateful DSP (the limiter's envelope) continues only the
+/// render it came from, never another session's.
+#[test]
+fn parallel_sessions_report_what_they_play() {
+    let jobs = [(json!("social"), music(0.1)), (json!("social"), music(0.5)), (json!("voice"), voice(0.05)), (json!(-9.0), music(0.3))];
+    std::thread::scope(|sc| {
+        for (target, signal) in &jobs {
+            sc.spawn(move || {
+                for _ in 0..2 {
+                    let mut s = session(signal);
+                    let r = s.execute("audio.normalizeLoudness", json!({"target": target})).unwrap();
+                    let (after, _) = measured(&s);
+                    let reported = r["loudnessLufs"].as_f64().unwrap();
+                    assert!((reported - after).abs() < 1e-3, "{target}: the command reports {reported:.4} LUFS, the mix plays {after:.4}: {r}");
+                }
+            });
+        }
+    });
 }
 
 #[test]

@@ -235,11 +235,11 @@ fn render_selection_and_audio_previews() {
     let seq = s.state.active_sequence.unwrap();
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let q = s.project.sequence(seq).unwrap();
-    let live = filmcraft_render::audio::mix_sequence(&s.project, q, 1000, 30_000, &provider);
+    let live = filmcraft_render::audio::mix_sequence(&s.project, q, 1000, 30_000, &provider, &filmcraft_render::MixStream::new());
     let v = s.execute("sequence.renderAudio", json!({"wait": true})).unwrap();
     job_ok(&s, &v);
     assert!(s.previews.audio_segments(&s.project, seq).iter().all(|g| s.previews.has_audio(&g.hash)));
-    let mixed = s.previews.mix(&s.project, seq, 1000, 30_000, &provider);
+    let mixed = s.previews.mix(&s.project, seq, 1000, 30_000, &provider, &filmcraft_render::MixStream::new());
     for c in 0..2 {
         for (x, y) in live.channels[c].iter().zip(&mixed.channels[c]) {
             assert!((x - y).abs() < 1e-6);

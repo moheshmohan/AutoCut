@@ -1,18 +1,21 @@
 //! Clip audio effects: project effect instances → `filmcraft-audio-dsp` processors.
 //!
 //! The mixer is pull-based (any sample range, any order), but most audio effects are stateful
-//! (filters, dynamics, delay/reverb tails). A small cache keeps processed effect chains per clip
-//! keyed by the next timeline sample they expect: sequential consumers (playback, export, meters)
-//! continue their chain; any other request starts a fresh chain with enough pre-roll for the
-//! chain's tails to build up. Latency (limiter look-ahead, STFT effects) is compensated by feeding
-//! the chain ahead of its output.
+//! (filters, dynamics, delay/reverb tails). A small cache keeps processed effect chains per render
+//! stream ([`crate::MixStream`]) and clip, keyed by the next timeline sample they expect: a
+//! stream's sequential requests (playback, an export, a measuring pass) continue its own chain;
+//! any other request starts a fresh chain with enough pre-roll for the chain's tails to build up.
+//! Clip ids repeat across projects, so a chain never continues another stream's, even of a clip
+//! with the same id. Latency (limiter look-ahead, STFT effects) is compensated by feeding the
+//! chain ahead of its output.
 
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use filmcraft_audio_dsp::AudioEffect;
 use filmcraft_project::{EffectInstance, TrackItem};
 use filmcraft_time::Tick;
+
+use crate::mix_stream::{Continues, StateCache, StreamKey};
 
 /// How a project effect maps onto a DSP effect.
 pub(crate) struct Mapping {
@@ -310,11 +313,26 @@ struct Chain {
     next_out: i64,
 }
 
-type Key = (u64, u64, u32, usize);
+impl Continues for Chain {
+    fn next_out(&self) -> i64 {
+        self.next_out
+    }
+}
 
-fn cache() -> &'static Mutex<HashMap<Key, Vec<Chain>>> {
-    static C: OnceLock<Mutex<HashMap<Key, Vec<Chain>>>> = OnceLock::new();
-    C.get_or_init(Default::default)
+/// Stream, clip id, effect structure, rate, width.
+type Key = (StreamKey, u64, u64, u32, usize);
+/// Chains kept (stream × clip × structure), and states per chain.
+const CHAINS: usize = 256;
+const STATES_PER_CHAIN: usize = 4;
+
+fn cache() -> &'static Mutex<StateCache<Key, Chain>> {
+    static C: OnceLock<Mutex<StateCache<Key, Chain>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(StateCache::new(CHAINS, STATES_PER_CHAIN)))
+}
+
+/// Drop the chains of stream `id` (it ended).
+pub(crate) fn forget_stream(id: u64) {
+    cache().lock().unwrap_or_else(|e| e.into_inner()).forget(|k| k.0.id == id);
 }
 
 fn structure_hash(item: &TrackItem) -> u64 {
@@ -351,16 +369,13 @@ fn run(chain: &mut Chain, item: &TrackItem, in0: i64, input: &mut [Vec<f32>], sr
     }
 }
 
-/// Process the item's audio for timeline samples `[a0, a0 + n)`. `read(x0, len)` returns the clip's
-/// raw planar audio (2 channels, or 6 on a 5.1 track) for timeline samples `[x0, x0 + len)`
-/// (silence outside the clip).
-pub fn process(item: &TrackItem, a0: i64, n: usize, sr: u32, read: &dyn Fn(i64, usize) -> Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+/// Process the item's audio for timeline samples `[a0, a0 + n)` in render stream `stream`.
+/// `read(x0, len)` returns the clip's raw planar audio (2 channels, or 6 on a 5.1 track) for
+/// timeline samples `[x0, x0 + len)` (silence outside the clip).
+pub(crate) fn process(item: &TrackItem, a0: i64, n: usize, sr: u32, read: &dyn Fn(i64, usize) -> Vec<Vec<f32>>, stream: StreamKey) -> Vec<Vec<f32>> {
     let width = read(a0, 0).len().max(1);
-    let key = (item.id.0, structure_hash(item), sr, width);
-    let taken = {
-        let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
-        c.get_mut(&key).and_then(|v| v.iter().position(|ch| ch.next_out == a0).map(|i| v.swap_remove(i)))
-    };
+    let key = (stream, item.id.0, structure_hash(item), sr, width);
+    let taken = cache().lock().unwrap_or_else(|e| e.into_inner()).take(&key, a0);
     let (mut chain, mut input, skip) = match taken {
         Some(chain) => {
             let l = chain.latency as i64;
@@ -387,15 +402,7 @@ pub fn process(item: &TrackItem, a0: i64, n: usize, sr: u32, read: &dyn Fn(i64, 
     run(&mut chain, item, in0, &mut input, sr);
     chain.next_out = a0 + n as i64;
     let out: Vec<Vec<f32>> = input.iter().map(|c| c[skip..].to_vec()).collect();
-    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
-    let v = c.entry(key).or_default();
-    v.push(chain);
-    if v.len() > 4 {
-        v.remove(0);
-    }
-    if c.len() > 256 {
-        c.clear();
-    }
+    cache().lock().unwrap_or_else(|e| e.into_inner()).put(key, chain);
     out
 }
 

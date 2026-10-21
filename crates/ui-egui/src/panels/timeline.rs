@@ -1106,10 +1106,11 @@ fn request_sequence_peaks(app: &mut FilmcraftApp, item: ItemId) -> Option<Arc<Ve
             let bucket = ((256u64 * sr as u64) / 48_000).max(1) as usize;
             let chunk = (bucket * 750).max(1);
             let mut out = Vec::with_capacity(total / bucket + 1);
+            let stream = filmcraft_render::MixStream::new();
             let mut s = 0usize;
             while s < total {
                 let n = chunk.min(total - s);
-                let buf = filmcraft_render::audio::mix_sequence(&project, seq, s as i64, n, &provider);
+                let buf = filmcraft_render::audio::mix_sequence(&project, seq, s as i64, n, &provider, &stream);
                 let ch = buf.channels.first()?;
                 for c in ch.chunks(bucket) {
                     let (lo, hi) = c.iter().fold((0f32, 0f32), |(l, h), v| (l.min(*v), h.max(*v)));

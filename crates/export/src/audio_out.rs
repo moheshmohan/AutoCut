@@ -11,7 +11,7 @@ use std::sync::Arc;
 use filmcraft_audio_dsp::AudioEffect;
 use filmcraft_audio_dsp::effects::Limiter;
 use filmcraft_project::{ItemId, Project, Sequence};
-use filmcraft_render::SourceProvider;
+use filmcraft_render::{MixStream, SourceProvider};
 use filmcraft_time::TimeRange;
 
 use crate::{ExportError, ExportSettings, Result};
@@ -40,6 +40,9 @@ pub(crate) struct AudioOut {
     /// End of the range (samples); input past it is silence.
     end: i64,
     pub loudness: Option<LoudnessReport>,
+    /// This export's render stream: its chunks continue each other's mixer and clip-effect state,
+    /// and nothing else (playback, another export, a measurement) continues or disturbs it.
+    stream: MixStream,
 }
 
 impl AudioOut {
@@ -61,7 +64,20 @@ impl AudioOut {
             l
         });
         let latency = limiter.as_ref().map(|l| l.latency() as i64).unwrap_or(0);
-        Ok(AudioOut { project, seq, sr, channels: r.channels as usize, gain: 1.0, limiter, latency, next_in: start, out: start, end, loudness: None })
+        Ok(AudioOut {
+            project,
+            seq,
+            sr,
+            channels: r.channels as usize,
+            gain: 1.0,
+            limiter,
+            latency,
+            next_in: start,
+            out: start,
+            end,
+            loudness: None,
+            stream: MixStream::new(),
+        })
     }
 
     /// The loudness pass: measure the integrated loudness of the whole range and set the gain
@@ -157,6 +173,7 @@ impl AudioOut {
                 sources,
                 layout,
                 filmcraft_audio_dsp::channels::Mixdown::FrontRear,
+                &self.stream,
             )
             .channels
         } else {

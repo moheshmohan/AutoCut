@@ -12,10 +12,10 @@ use filmcraft_project::{
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 
 use crate::mixer::{LiveMix, balance, graph_latency, mix_graph, pan_law_mono};
-use crate::{SourceMap, mixer};
+use crate::{MixStream, SourceMap, mixer};
 
 #[path = "../tests/support/mixer.rs"]
-mod support;
+pub(crate) mod support;
 use support::{Rig, SR, busy_rig, kf, noise};
 
 fn dc(_: i64, _: usize) -> f32 {
@@ -86,7 +86,7 @@ fn audio_clips_from_one_container_mix_distinct_streams() {
         clip.audio_stream = stream;
         p.sequence_mut(seq).unwrap().audio_tracks[stream].items.push(clip);
     }
-    let buffer = crate::audio::mix_sequence(&p, p.sequence(seq).unwrap(), 0, 32, &map);
+    let buffer = crate::audio::mix_sequence(&p, p.sequence(seq).unwrap(), 0, 32, &map, &MixStream::new());
     assert!(buffer.channels.iter().all(|c| c.iter().all(|&v| close(v, 0.125, 1e-6))));
 }
 
@@ -378,13 +378,13 @@ fn live_override_holds_and_ramps_back() {
     let id = r.track(0).id;
     let live = LiveMix::new();
     live.hold(id, LANE_VOLUME, -6.0);
-    let b = mix_graph(&r.p, r.p.sequence(r.seq).unwrap(), 0, 64, &r.map, Some(&live));
+    let b = mix_graph(&r.p, r.p.sequence(r.seq).unwrap(), 0, 64, &r.map, Some(&live), &r.stream);
     assert!(close(b.channels[0][0], 0.5 * 10f32.powf(-0.3), 1e-6));
     // released at sample 4800 with a 4800-sample ramp: halfway back at 7200
     live.release(id, LANE_VOLUME, Tick::from_units(4800, SR), Tick::from_units(4800, SR));
-    let b = mix_graph(&r.p, r.p.sequence(r.seq).unwrap(), 7200, 1, &r.map, Some(&live));
+    let b = mix_graph(&r.p, r.p.sequence(r.seq).unwrap(), 7200, 1, &r.map, Some(&live), &r.stream);
     assert!(close(b.channels[0][0], 0.5 * 10f32.powf(-3.0 / 20.0), 1e-6), "{}", b.channels[0][0]);
-    let b = mix_graph(&r.p, r.p.sequence(r.seq).unwrap(), 9600, 1, &r.map, Some(&live));
+    let b = mix_graph(&r.p, r.p.sequence(r.seq).unwrap(), 9600, 1, &r.map, Some(&live), &r.stream);
     assert!(close(b.channels[0][0], 0.5, 1e-6));
 }
 
@@ -463,7 +463,7 @@ fn set_master_51(r: &mut Rig) {
 }
 
 fn mix_all(r: &Rig, start: i64, n: usize) -> Vec<Vec<f32>> {
-    mix_graph(&r.p, r.p.sequence(r.seq).unwrap(), start, n, &r.map, None).channels
+    mix_graph(&r.p, r.p.sequence(r.seq).unwrap(), start, n, &r.map, None, &r.stream).channels
 }
 
 #[test]
@@ -522,7 +522,7 @@ fn a_51_track_passes_through_a_51_mix_and_folds_into_stereo() {
     assert!(close(st[0][9], 0.1 + k * 0.3 + k * 0.5, 1e-6) && close(st[1][9], 0.2 + k * 0.3 + k * 0.6, 1e-6));
     // mix_sequence of a 5.1 Mix is the BS.775 stereo fold of the 6-channel mix
     set_master_51(&mut r);
-    let folded = crate::audio::mix_sequence(&r.p, r.p.sequence(r.seq).unwrap(), 0, 256, &r.map);
+    let folded = crate::audio::mix_sequence(&r.p, r.p.sequence(r.seq).unwrap(), 0, 256, &r.map, &r.stream);
     assert_eq!(folded.channels.len(), 2);
     assert!(close(folded.channels[0][9], st[0][9], 1e-6) && close(folded.channels[1][9], st[1][9], 1e-6));
     // Front Only mixdown for playback devices drops the surrounds
@@ -534,11 +534,12 @@ fn a_51_track_passes_through_a_51_mix_and_folds_into_stereo() {
         &r.map,
         filmcraft_audio_dsp::channels::Layout::Stereo,
         filmcraft_audio_dsp::channels::Mixdown::Front,
+        &r.stream,
     );
     assert!(close(front.channels[0][9], 0.1 + k * 0.3, 1e-6));
     // meters: one per channel of the strip
     let live = LiveMix::new();
-    mix_graph(&r.p, r.p.sequence(r.seq).unwrap(), 0, 256, &r.map, Some(&live));
+    mix_graph(&r.p, r.p.sequence(r.seq).unwrap(), 0, 256, &r.map, Some(&live), &r.stream);
     let meters = live.take_meters();
     assert_eq!(meters.get(&crate::mixer::MASTER).map(Vec::len), Some(6));
     assert!(close(meters[&crate::mixer::MASTER][5], 0.6, 1e-6));
@@ -617,7 +618,7 @@ fn a_sequence_nested_in_itself_mixes_to_an_end() {
         p.sequence_mut(outer).unwrap().audio_tracks[0].items.push(it);
     }
     let seq = p.sequence(a).unwrap();
-    let out = mix_graph(&p, seq, 0, 4800, &SourceMap::default(), None);
+    let out = mix_graph(&p, seq, 0, 4800, &SourceMap::default(), None, &MixStream::new());
     assert_eq!(out.channels.len(), 2);
     assert!(out.channels.iter().all(|c| c.len() == 4800 && c.iter().all(|s| *s == 0.0)), "no source: silence");
 }
@@ -702,7 +703,7 @@ fn worst(mix: &AudioBuffer, start: i64, skip: usize, want: impl Fn(f64) -> f32) 
 fn a_nest_plays_its_sequence_as_it_sounds_there() {
     let (p, outer, map, tone) = nested_tone(48_000);
     let start = 48_000 * 2;
-    let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None);
+    let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None, &MixStream::new());
     assert!(worst(&mix, start, 0, |t| tone.at(t)) < 1e-4);
 }
 
@@ -713,7 +714,7 @@ fn a_nest_at_another_sample_rate_keeps_its_pitch_and_timing() {
     for rate in [44_100, 96_000, 32_000] {
         let (p, outer, map, tone) = nested_tone(rate);
         let start = 48_000 * 3 + 17;
-        let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None);
+        let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None, &MixStream::new());
         assert_eq!(mix.channels[0].len(), 4800);
         assert!(worst(&mix, start, 8, |t| tone.at(t)) < 0.01, "{rate} Hz nest: off by {}", worst(&mix, start, 8, |t| tone.at(t)));
     }
@@ -727,14 +728,14 @@ fn speed_and_reverse_on_a_nest_change_its_sound_like_a_clips() {
     nest.speed = 2.0;
     nest.duration = Tick(5 * TICKS_PER_SECOND);
     let start = 48_000 + 5;
-    let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None);
+    let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None, &MixStream::new());
     assert!(worst(&mix, start, 8, |t| tone.at(2.0 * t)) < 0.01, "double speed: twice as far into the sequence, an octave up");
     // reversed at normal speed: the 10 s nest plays from its end
     let nest = &mut p.sequence_mut(outer).unwrap().audio_tracks[0].items[0];
     nest.speed = 1.0;
     nest.duration = Tick(10 * TICKS_PER_SECOND);
     nest.reverse = true;
-    let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None);
+    let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None, &MixStream::new());
     // (a reversed clip reads its source a sample or two off, media and nests alike)
     let w = (0..4).map(|k| worst(&mix, start, 8, |t| tone.at(10.0 - t - k as f64 / 48_000.0))).fold(f32::MAX, f32::min);
     assert!(w < 0.01, "reversed: off by {w}");
@@ -747,7 +748,7 @@ fn a_nest_trimmed_in_starts_later_in_its_sequence() {
     nest.source_in = Tick(3 * TICKS_PER_SECOND);
     nest.duration = Tick(7 * TICKS_PER_SECOND);
     let start = 48_000;
-    let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None);
+    let mix = mix_graph(&p, p.sequence(outer).unwrap(), start, 4800, &map, None, &MixStream::new());
     assert!(worst(&mix, start, 8, |t| tone.at(t + 3.0)) < 0.01);
 }
 
@@ -861,7 +862,7 @@ fn a_nest_with_maintain_pitch_keeps_its_pitch() {
     nest.speed = 2.0;
     nest.duration = Tick(5 * TICKS_PER_SECOND);
     nest.maintain_pitch = true;
-    let mix = mix_graph(&p, p.sequence(outer).unwrap(), 48_000, 24_000, &map, None);
+    let mix = mix_graph(&p, p.sequence(outer).unwrap(), 48_000, 24_000, &map, None, &MixStream::new());
     assert!(amp_near(&mix.channels[0], tone.hz) > 0.45 && amp_near(&mix.channels[0], 2.0 * tone.hz) < 0.03);
 }
 
