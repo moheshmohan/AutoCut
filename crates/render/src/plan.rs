@@ -394,8 +394,22 @@ fn push_tracks(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, 
                         push_item(project, seq, it, t, opts, sources, k, Some(Blend::Normal), nest, layers);
                     }
                 }
+                _ if a.is_some() && b.is_some_and(|b| !covers_frame(project, seq, b, t, opts, sources)) => {
+                    // cross dissolve between clips that do not both fill the frame (scaled,
+                    // moved, transparent): the CPU's linear mix of the two, as a two-input step
+                    let mut inputs = [Vec::new(), Vec::new()];
+                    for (slot, item) in inputs.iter_mut().zip([a, b]) {
+                        if let Some(item) = item {
+                            let mut input = PlanStack::default();
+                            push_item(project, seq, item, t, opts, sources, 1.0, Some(Blend::Normal), nest, &mut input);
+                            *slot = input.into_layers(w, h);
+                        }
+                    }
+                    layers.0.push(PlanStep::Transition { inputs, effect: trn.effect.clone(), progress: p, scale: opts.scale, content: None });
+                }
                 _ => {
-                    // cross dissolve: A at full, B over it at p (premultiplied over == linear mix when A is opaque)
+                    // cross dissolve: A at full, B over it at p — premultiplied over is the CPU's
+                    // linear mix where B is opaque wherever A shows (it fills the frame)
                     if let Some(it) = a {
                         push_item(project, seq, it, t, opts, sources, 1.0 - if b.is_none() { p } else { 0.0 }, Some(Blend::Normal), nest, layers);
                     }
@@ -576,6 +590,35 @@ fn push_item(
     if let Some((img, op2, _)) = crate::item_layer(project, seq, item, t, opts, sources, &tc) {
         out.push(PlanLayer::new(cpu_frame(img), Affine::IDENTITY, op2 * extra_opacity, bl));
     }
+}
+
+/// Whether `item`'s layer is opaque over the whole output at `t`: a media clip without an alpha
+/// channel, fully opaque (no opacity masks), with no standard effects (they could make it
+/// transparent somewhere), placed unrotated to cover the frame.
+fn covers_frame(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, opts: RenderOptions, sources: &dyn SourceProvider) -> bool {
+    if !project.item(item.item).is_some_and(|p| matches!(p.kind, ItemKind::Media(_) | ItemKind::Subclip { .. }))
+        || item.has_opacity_masks()
+        || (opts.effects && item.has_standard_effects())
+    {
+        return false;
+    }
+    let mt = item.effect_time_at(t);
+    if crate::opacity_blend(item, mt).0 < 1.0 - 1e-6 {
+        return false;
+    }
+    let Some(src) = sources.source(item.item) else { return false };
+    if src.info().video.as_ref().is_none_or(|v| v.has_alpha) {
+        return false;
+    }
+    let Some(size) = crate::source_size(project, item.item) else { return false };
+    let m = Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion_matrix(seq, item, size, crate::source_par(project, item.item), mt));
+    if m.b.abs() > 1e-9 || m.c.abs() > 1e-9 {
+        return false;
+    }
+    let (w, h) = output_size(seq, opts.scale);
+    let (x0, x1) = (m.e.min(m.e + m.a * size.0 as f64), m.e.max(m.e + m.a * size.0 as f64));
+    let (y0, y1) = (m.f.min(m.f + m.d * size.1 as f64), m.f.max(m.f + m.d * size.1 as f64));
+    x0 <= 1e-6 && y0 <= 1e-6 && x1 >= w as f64 - 1e-6 && y1 >= h as f64 - 1e-6
 }
 
 fn near_identity(m: &Affine) -> bool {

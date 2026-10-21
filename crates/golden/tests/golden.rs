@@ -949,6 +949,13 @@ fn gpu_matches_cpu_on_golden_scenes() {
 /// GPU rasterises, and with blend modes those edge pixels are a visible share of a 320×180 frame.
 fn interior_diff(plan: &filmcraft_render::plan::FramePlan, a: &Rgba8, b: &Rgba8) -> (u32, f64) {
     let filmcraft_render::plan::FramePlan::Layers { width, layers, .. } = plan else { return (u32::MAX, f64::MAX) };
+    let (p99, mean, _) = layers_interior_diff(*width, &layers.iter().collect::<Vec<_>>(), a, b);
+    (p99, mean)
+}
+
+/// [`interior_diff`] away from the outlines of `layers` (the layers of every step of a plan), and
+/// the PSNR of the per-pixel max channel difference there (dB).
+fn layers_interior_diff(width: usize, layers: &[&filmcraft_render::plan::PlanLayer], a: &Rgba8, b: &Rgba8) -> (u32, f64, f64) {
     let inv: Vec<_> = layers.iter().filter_map(|l| Some((l.matrix.inverse()?, l.size().0 as f64, l.size().1 as f64))).collect();
     let mut d: Vec<u32> = Vec::new();
     for (i, (pa, pb)) in a.px.chunks(4).zip(b.px.chunks(4)).enumerate() {
@@ -965,7 +972,9 @@ fn interior_diff(plan: &filmcraft_render::plan::FramePlan, a: &Rgba8, b: &Rgba8)
         }
     }
     d.sort_unstable();
-    (d[d.len() * 99 / 100], d.iter().sum::<u32>() as f64 / d.len() as f64)
+    let mse = d.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / d.len() as f64;
+    let psnr = if mse > 0.0 { 10.0 * (255.0f64 * 255.0 / mse).log10() } else { f64::INFINITY };
+    (d[d.len() * 99 / 100], d.iter().sum::<u32>() as f64 / d.len() as f64, psnr)
 }
 
 /// Every blend mode composited by the GPU from `plan_frame` (no CPU fallback): two overlapping
@@ -1137,4 +1146,140 @@ fn gpu_effect_chains_match_cpu_render() {
         failures.push(format!("½ resolution: interior p99 {p99}, mean {mean}"));
     }
     assert!(failures.is_empty(), "GPU effect chains differ from the CPU render:\n{}", failures.join("\n"));
+}
+
+/// A cross dissolve is planned as layers (A, then B over it at the progress) only where that is
+/// the CPU's linear mix: B fills the frame opaquely. Between scaled clips it is a two-input step,
+/// and the plan run on the CPU is the CPU render.
+#[test]
+fn cross_dissolves_plan_as_the_cpu_mixes_them() {
+    for scaled in [false, true] {
+        let mut b = Builder::new(2);
+        let (bg, x, y) = (b.demo(DemoScene::Forest), b.demo(DemoScene::Aurora), b.demo(DemoScene::Dunes));
+        b.place(0, bg, 0, 48);
+        let ca = b.place(1, x, 0, 24);
+        let cb = b.place(1, y, 24, 24);
+        if scaled {
+            b.fixed(ca, "motion", &[("scale", fl(70.0))]);
+            b.fixed(cb, "motion", &[("scale", fl(50.0))]);
+        }
+        b.transition(1, "cross_dissolve", ca, cb, 24, 12);
+        let s = b.at(22);
+        let t = RATE.tick_of(s.frame);
+        let plan = filmcraft_render::plan::plan_frame(&s.project, s.seq, t, RenderOptions::default(), &s.sources);
+        let two_input = matches!(&plan, filmcraft_render::plan::FramePlan::Composite { steps, .. }
+            if steps.iter().any(|st| matches!(st, filmcraft_render::plan::PlanStep::Transition { .. })));
+        assert_eq!(two_input, scaled, "scaled {scaled}");
+        let cpu = render_cpu(&s);
+        let img = filmcraft_render::plan::execute_cpu(&plan);
+        let d = diff(&cpu, &Rgba8::new(img.w as u32, img.h as u32, img.over_black_rgba8())).unwrap();
+        eprintln!("cross dissolve (scaled {scaled}): the plan on the CPU vs the CPU render {d}");
+        assert!(d.p99 <= 1, "scaled {scaled}: {d}");
+    }
+}
+
+/// A showcase-like scene through the GPU — the default since 2026-10-21 (`docs/gpu.md`: GPU
+/// rendering is Auto): a blurred backdrop under scaled clips (the portrait fill), a redaction blur
+/// behind a tracked (keyframed) face mask, motion and opacity keyframes, cross dissolve, dip to
+/// black, Push and a whip pan, and a title fading in. Every frame plans for the GPU (the masked
+/// blur as a GPU effect, not a CPU layer image) and both GPU paths — the monitors' composite and
+/// the export renderer's linear read-back — match the CPU render with the GPU parity tolerance
+/// (p99 ≤ 6, mean < 1.5 and PSNR ≥ 45 dB away from layer outlines, as for the blend modes; the
+/// whole-frame numbers, outlines included, are printed).
+#[test]
+fn gpu_showcase_scene_matches_cpu() {
+    use filmcraft_project::graphic::new_text_layer;
+    let mut b = Builder::new(3);
+    let backdrop = b.demo(DemoScene::Forest);
+    let bg = b.place(0, backdrop, 0, 120);
+    b.effect(bg, "gaussian_blur", &[("blurriness", fl(60.0)), ("repeat_edge", ParamValue::Bool(true))]);
+    let scenes = [DemoScene::Aurora, DemoScene::CityNight, DemoScene::OceanSunset, DemoScene::Dunes, DemoScene::Plasma];
+    let mut clips = Vec::new();
+    for (k, s) in scenes.into_iter().enumerate() {
+        let item = b.demo(s);
+        let c = b.place(1, item, 24 * k as i64, 24);
+        b.fixed(c, "motion", &[("scale", fl(60.0))]);
+        clips.push(c);
+    }
+    // keyframed motion and opacity
+    let p = b.clip(clips[0]).effect_mut("motion").and_then(|e| e.params.get_mut("scale")).expect("scale");
+    p.put_keyframe(Tick::ZERO, fl(55.0));
+    p.put_keyframe(RATE.tick_of(24), fl(66.0));
+    let p = b.clip(clips[1]).effect_mut("opacity").and_then(|e| e.params.get_mut("opacity")).expect("opacity");
+    p.put_keyframe(Tick::ZERO, fl(100.0));
+    p.put_keyframe(RATE.tick_of(12), fl(55.0));
+    p.put_keyframe(RATE.tick_of(24), fl(100.0));
+    // the redaction: a blur behind a face mask that moves (a tracked path)
+    b.effect(clips[2], "gaussian_blur", &[("blurriness", fl(60.0)), ("repeat_edge", ParamValue::Bool(true))]);
+    b.mask(clips[2], "gaussian_blur", MaskPath::ellipse(Vec2::new(250.0, 150.0), Vec2::new(70.0, 90.0)), 12.0, |m| {
+        m.path.put_keyframe(Tick::ZERO, ParamValue::Path(MaskPath::ellipse(Vec2::new(250.0, 150.0), Vec2::new(70.0, 90.0))));
+        m.path.put_keyframe(RATE.tick_of(24), ParamValue::Path(MaskPath::ellipse(Vec2::new(390.0, 190.0), Vec2::new(80.0, 100.0))));
+    });
+    for (k, id) in ["cross_dissolve", "dip_to_black", "push", "cam_whip_pan"].into_iter().enumerate() {
+        b.transition(1, id, clips[k], clips[k + 1], 24 * (k as i64 + 1), 12);
+    }
+    // the title
+    let g = b.p.add_item("Title", Label::Rose, ItemKind::Graphic { width: W, height: H, rate: RATE }, None);
+    let mut title = b.p.make_track_item(g, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, RATE.tick_of(120)), RATE).expect("title");
+    title.effects.push(new_text_layer("Every Robot", Vec2::new(20.0, 40.0), 26.0));
+    for e in title.effects.iter_mut() {
+        filmcraft_project::resolve_auto_points(e, (W, H), (W, H));
+    }
+    let o = title.effect_mut("opacity").and_then(|e| e.params.get_mut("opacity")).expect("opacity");
+    o.put_keyframe(Tick::ZERO, fl(0.0));
+    o.put_keyframe(RATE.tick_of(18), fl(100.0));
+    b.p.sequence_mut(b.seq).expect("sequence").video_tracks[2].items.push(title);
+    let mut s = b.at(0);
+    let Some((dev, q)) = device("gpu showcase parity", true) else {
+        return;
+    };
+    let mut c = filmcraft_gpu::GpuCompositor::new(&dev, &q);
+    let mut export = filmcraft_gpu::ExportRenderer::new();
+    let mut failures = Vec::new();
+    for frame in [6, 21, 24, 27, 45, 48, 50, 60, 70, 72, 75, 93, 96, 99, 110] {
+        s.frame = frame;
+        let t = RATE.tick_of(frame);
+        let plan = filmcraft_render::plan::plan_frame(&s.project, s.seq, t, RenderOptions::default(), &s.sources);
+        let layers: Vec<&filmcraft_render::plan::PlanLayer> = match &plan {
+            filmcraft_render::plan::FramePlan::Layers { layers, .. } => layers.iter().collect(),
+            filmcraft_render::plan::FramePlan::Composite { steps, .. } => steps
+                .iter()
+                .flat_map(|st| match st {
+                    filmcraft_render::plan::PlanStep::Layers(l) => l.iter().collect::<Vec<_>>(),
+                    filmcraft_render::plan::PlanStep::Transition { inputs, .. } => inputs.iter().flatten().collect(),
+                })
+                .collect(),
+            filmcraft_render::plan::FramePlan::Image(_) => panic!("frame {frame}: planned as a CPU image"),
+        };
+        if (50..70).contains(&frame) {
+            let masked =
+                layers.iter().any(|l| l.fx.as_ref().is_some_and(|fx| fx.ops.iter().any(|o| matches!(o, filmcraft_render::gpufx::FxOp::Masked { .. }))));
+            assert!(masked, "frame {frame}: the masked blur runs on the GPU");
+        }
+        let cpu = render_cpu(&s);
+        c.composite(&plan);
+        let (gw, gh, mut px) = c.read_output().expect("GPU readback");
+        px.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
+        let mut outputs = vec![("monitor", Rgba8::new(gw, gh, px))];
+        if let Some(r) = export.as_mut() {
+            let img = r.render(&s.project, s.seq, t, RenderOptions::default(), &s.sources).expect("the export renderer draws the frame");
+            outputs.push(("export", Rgba8::new(img.w as u32, img.h as u32, img.over_black_rgba8())));
+        }
+        for (path, gpu) in outputs {
+            let d = diff(&cpu, &gpu).unwrap();
+            let (p99, mean, psnr) = layers_interior_diff(W as usize, &layers, &cpu, &gpu);
+            eprintln!("showcase @ {frame} ({path}): GPU vs CPU interior p99 {p99}, mean {mean:.3}, PSNR {psnr:.1} dB; whole frame {d}");
+            if p99 > 6 || mean >= 1.5 || psnr < 45.0 {
+                let dir = filmcraft_testkit::golden::failures_dir();
+                let _ = filmcraft_testkit::golden::write_png(&dir.join(format!("showcase_{frame}_{path}.gpu.png")), &gpu);
+                let _ = filmcraft_testkit::golden::write_png(&dir.join(format!("showcase_{frame}.cpu.png")), &cpu);
+                let _ = filmcraft_testkit::golden::write_png(
+                    &dir.join(format!("showcase_{frame}_{path}.diff.png")),
+                    &filmcraft_testkit::golden::diff_image(&cpu, &gpu),
+                );
+                failures.push(format!("frame {frame} ({path}): {d}; images in {}", dir.display()));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "the GPU differs from the CPU on the showcase scene:\n{}", failures.join("\n"));
 }
