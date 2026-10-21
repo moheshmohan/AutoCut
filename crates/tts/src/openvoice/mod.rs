@@ -1,5 +1,5 @@
 //! Voice cloning, part 1: the OpenVoice V2 tone-colour converter (feature `kokoro`), pure-Rust
-//! inference on candle (CPU).
+//! inference on candle — Metal on macOS ([`device`]), the CPU elsewhere and as the fallback.
 //!
 //! A speaker's *tone colour* is a 256-d embedding of their timbre, read from a few seconds of
 //! their speech by [`Converter::tone_colour`]. [`Converter::convert`] re-voices any speech from
@@ -55,15 +55,72 @@ const EXPECT: &[(&str, &str)] = &[
 
 /// A loaded converter.
 pub struct Converter {
+    /// On [`device`] (the GPU where there is one).
     model: model::Model,
+    dir: std::path::PathBuf,
+    /// The GPU failed once (an error, a panic, samples that are not finite): the CPU from then on.
+    gpu_failed: std::sync::atomic::AtomicBool,
+    /// The model on the CPU, loaded when the GPU failed.
+    cpu: std::sync::Mutex<Option<std::sync::Arc<model::Model>>>,
+}
+
+/// The device the converter runs on: as Kokoro's ([`crate::kokoro::device`]: Metal on macOS,
+/// else the CPU); `FILMCRAFT_OPENVOICE_CPU` keeps the CPU.
+pub fn device() -> candle_core::Device {
+    if std::env::var_os("FILMCRAFT_OPENVOICE_CPU").is_some() {
+        return candle_core::Device::Cpu;
+    }
+    crate::kokoro::device()
 }
 
 impl Converter {
-    /// Load `config.json` and `checkpoint.pth` from `dir`.
+    /// Load `config.json` and `checkpoint.pth` from `dir`, on [`device`] (the GPU where there is
+    /// one; weights it cannot hold leave the converter on the CPU).
     pub fn load(dir: &Path) -> Result<Converter, TtsError> {
+        Self::load_on(dir, &device())
+    }
+
+    /// [`Converter::load`] on `dev`.
+    pub fn load_on(dir: &Path, dev: &candle_core::Device) -> Result<Converter, TtsError> {
         check_config(&dir.join("config.json"))?;
         let w = Weights::load_key(&dir.join("checkpoint.pth"), "model")?;
-        Ok(Converter { model: model::Model::load(&w)? })
+        let model = match w.to_device(dev).and_then(|g| model::Model::load(&g)) {
+            Ok(m) => m,
+            Err(_) => model::Model::load(&w)?,
+        };
+        Ok(Converter { model, dir: dir.to_path_buf(), gpu_failed: std::sync::atomic::AtomicBool::new(false), cpu: std::sync::Mutex::new(None) })
+    }
+
+    /// Whether conversion runs on the GPU now.
+    pub fn on_gpu(&self) -> bool {
+        !self.model.device().is_cpu() && !self.gpu_failed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `f` with the GPU model, again with the CPU's (loaded then, kept from then on) when that
+    /// fails or panics; a refused input is refused on either.
+    fn with_model<T>(&self, f: impl Fn(&model::Model) -> Result<T, TtsError>) -> Result<T, TtsError> {
+        if self.model.device().is_cpu() {
+            return f(&self.model);
+        }
+        if self.on_gpu() {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&self.model))) {
+                Ok(Ok(v)) => return Ok(v),
+                Ok(Err(TtsError::Invalid(e))) => return Err(TtsError::Invalid(e)),
+                _ => self.gpu_failed.store(true, std::sync::atomic::Ordering::Relaxed),
+            }
+        }
+        let cpu = {
+            let mut g = self.cpu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match g.as_ref() {
+                Some(m) => m.clone(),
+                None => {
+                    let m = std::sync::Arc::new(model::Model::load(&Weights::load_key(&self.dir.join("checkpoint.pth"), "model")?)?);
+                    *g = Some(m.clone());
+                    m
+                }
+            }
+        };
+        f(&cpu)
     }
 
     /// The tone colour of mono speech at [`RATE`]: the mean over ~10 s pieces.
@@ -72,6 +129,11 @@ impl Converter {
         if speech.len() < min {
             return Err(TtsError::Invalid(format!("at least {MIN_REFERENCE_SECONDS} s of speech is needed")));
         }
+        self.with_model(|m| Self::tone_colour_with(m, speech))
+    }
+
+    fn tone_colour_with(m: &model::Model, speech: &[f32]) -> Result<Vec<f32>, TtsError> {
+        let min = (MIN_REFERENCE_SECONDS * f64::from(RATE)) as usize;
         let piece = (PIECE_SECONDS * f64::from(RATE)) as usize;
         let mut sum = vec![0f64; COLOUR];
         let mut count = 0usize;
@@ -80,8 +142,8 @@ impl Converter {
                 continue;
             }
             let (spec, frames) = spectrogram(chunk);
-            let t = Tensor::from_vec(spec, (1, BINS, frames), self.model.device()).map_err(err)?;
-            let c = self.model.tone_colour(&t)?;
+            let t = Tensor::from_vec(spec, (1, BINS, frames), m.device()).map_err(err)?;
+            let c = m.tone_colour(&t)?;
             for (s, v) in sum.iter_mut().zip(&c) {
                 *s += f64::from(*v);
             }
@@ -103,10 +165,14 @@ impl Converter {
             return Err(TtsError::Invalid(format!("tone colours have {COLOUR} values")));
         }
         let tau = if tau.is_finite() { tau.clamp(0.0, 1.0) } else { DEFAULT_TAU };
-        let n = speech.len();
-        if n < N_FFT {
+        if speech.len() < N_FFT {
             return Ok(speech.to_vec());
         }
+        self.with_model(|m| Self::convert_with(m, speech, src, tgt, tau, seed))
+    }
+
+    fn convert_with(m: &model::Model, speech: &[f32], src: &[f32], tgt: &[f32], tau: f64, seed: u64) -> Result<Vec<f32>, TtsError> {
+        let n = speech.len();
         let window = (WINDOW_SECONDS * f64::from(RATE)) as usize;
         let overlap = (OVERLAP_SECONDS * f64::from(RATE)) as usize;
         let mut out = vec![0f32; n];
@@ -115,7 +181,7 @@ impl Converter {
         while start < n {
             let end = (start + window).min(n);
             let piece = speech.get(start..end).unwrap_or(&[]);
-            let y = self.convert_piece(piece, src, tgt, tau, &mut rng)?;
+            let y = Self::convert_piece(m, piece, src, tgt, tau, &mut rng)?;
             // crossfade into what the previous window wrote
             for (i, v) in y.iter().enumerate() {
                 let k = start + i;
@@ -135,16 +201,16 @@ impl Converter {
         Ok(out)
     }
 
-    fn convert_piece(&self, piece: &[f32], src: &[f32], tgt: &[f32], tau: f64, rng: &mut crate::kokoro::dsp::Rng) -> Result<Vec<f32>, TtsError> {
+    fn convert_piece(m: &model::Model, piece: &[f32], src: &[f32], tgt: &[f32], tau: f64, rng: &mut crate::kokoro::dsp::Rng) -> Result<Vec<f32>, TtsError> {
         if piece.len() < N_FFT {
             return Ok(piece.to_vec());
         }
         let (spec, frames) = spectrogram(piece);
-        let dev = self.model.device();
+        let dev = m.device();
         let t = Tensor::from_vec(spec, (1, BINS, frames), dev).map_err(err)?;
         let noise: Vec<f32> = (0..192 * frames).map(|_| rng.normal() as f32).collect();
         let noise = Tensor::from_vec(noise, (1, 192, frames), dev).map_err(err)?;
-        let mut y = self.model.convert(&t, src, tgt, tau, &noise)?;
+        let mut y = m.convert(&t, src, tgt, tau, &noise)?;
         y.resize(piece.len(), 0.0);
         if y.iter().any(|x| !x.is_finite()) {
             return Err(TtsError::Model("the converted audio is not finite".into()));
@@ -281,5 +347,51 @@ mod tests {
         assert!(y.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
         let rms = (y.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / y.len() as f64).sqrt();
         assert!(rms > 1e-3, "not silent: {rms}");
+    }
+
+    /// The converter on the GPU gives the CPU's tone colour and conversion within float noise
+    /// (SNR printed with both times). Gated like [`live_openvoice_round_trip`]; skipped without
+    /// a GPU.
+    #[test]
+    fn live_openvoice_gpu_matches_the_cpu() {
+        let Some(dir) = std::env::var_os("FILMCRAFT_OPENVOICE_DIR") else {
+            eprintln!("skipped (FILMCRAFT_OPENVOICE_DIR unset)");
+            return;
+        };
+        let gpu_dev = device();
+        if gpu_dev.is_cpu() {
+            eprintln!("skipped (no GPU)");
+            return;
+        }
+        let cpu = Converter::load_on(Path::new(&dir), &candle_core::Device::Cpu).unwrap();
+        let gpu = Converter::load_on(Path::new(&dir), &gpu_dev).unwrap();
+        assert!(gpu.on_gpu() && !cpu.on_gpu());
+        let n = 12 * RATE as usize;
+        let x: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 / f64::from(RATE);
+                let f0 = 140.0 + 25.0 * (t * 1.3).sin();
+                (1..24).map(|h| (std::f64::consts::TAU * f0 * h as f64 * t).sin() / h as f64).sum::<f64>() as f32 * 0.15
+            })
+            .collect();
+        let _ = gpu.convert(&x[..RATE as usize * 2], &[0.1; COLOUR], &[0.1; COLOUR], DEFAULT_TAU, 1).unwrap();
+        let (ca, cb) = (cpu.tone_colour(&x).unwrap(), gpu.tone_colour(&x).unwrap());
+        let worst = ca.iter().zip(&cb).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst < 1e-3, "tone colours differ by {worst}");
+        let t0 = std::time::Instant::now();
+        let a = cpu.convert(&x, &ca, &[0.05; COLOUR], DEFAULT_TAU, 7).unwrap();
+        let t1 = std::time::Instant::now();
+        let b = gpu.convert(&x, &ca, &[0.05; COLOUR], DEFAULT_TAU, 7).unwrap();
+        let t2 = std::time::Instant::now();
+        assert!(gpu.on_gpu(), "the GPU did not fail");
+        let signal: f64 = a.iter().map(|v| f64::from(*v).powi(2)).sum();
+        let noise: f64 = a.iter().zip(&b).map(|(x, y)| f64::from(x - y).powi(2)).sum();
+        let snr = 10.0 * (signal / noise.max(1e-30)).log10();
+        eprintln!(
+            "OpenVoice 12 s: CPU {:.2}s, GPU {:.2}s; GPU vs CPU SNR {snr:.1} dB, tone colour within {worst:.1e}",
+            (t1 - t0).as_secs_f64(),
+            (t2 - t1).as_secs_f64()
+        );
+        assert!(snr > 30.0, "SNR {snr}");
     }
 }
