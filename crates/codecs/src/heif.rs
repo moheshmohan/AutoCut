@@ -421,20 +421,45 @@ impl<'a> Heif<'a> {
         if n > MAX_TILES || tiles.len() < n {
             return Err(bad(name, format!("a {rows} × {cols} grid with {} tiles", tiles.len())));
         }
-        let decoded: Vec<Result<Pic>> = tiles.par_iter().take(n).map(|t| self.picture(*t, colour, depth + 1)).collect();
-        let decoded: Vec<Pic> = decoded.into_iter().collect::<Result<_>>()?;
-        let (tw, th) = decoded.first().map(|p| (p.w as usize, p.h as usize)).ok_or_else(|| bad(name, "an empty grid"))?;
         let (ow, oh) = (ow as usize, oh as usize);
+        // a tile is at most what its share of the grid needs (ISO/IEC 23008-12: the tiles cover
+        // the output, the last row and column overhanging it): one claiming more is refused
+        // before anything is decoded, so a hostile grid cannot multiply its memory by its tiles
+        let share = |len: usize, parts: usize, out: usize| {
+            if parts == 1 { len <= out.saturating_mul(2).saturating_add(64) } else { len.saturating_mul(parts - 1) < out }
+        };
+        let fits = |w: usize, h: usize| w > 0 && h > 0 && share(w, cols, ow) && share(h, rows, oh);
+        let tiles = tiles.get(..n).ok_or_else(|| bad(name, "a grid without its tiles"))?;
+        for t in tiles {
+            if let Some((w, h)) = self.size(*t)
+                && !fits(w as usize, h as usize)
+            {
+                return Err(bad(name, format!("a {w} × {h} tile in a {ow} × {oh} grid of {rows} × {cols}")));
+            }
+        }
         let mut out = vec![0u8; ow * oh * 4];
-        for (k, tile) in decoded.iter().enumerate() {
-            let (x0, y0) = ((k % cols) * tw, (k / cols) * th);
-            let (w, h) = (tile.w as usize, tile.h as usize);
-            for y in 0..h.min(oh.saturating_sub(y0)) {
-                let n = w.min(ow.saturating_sub(x0)) * 4;
-                let src = tile.rgba.get(y * w * 4..y * w * 4 + n);
-                let at = ((y0 + y) * ow + x0) * 4;
-                if let (Some(src), Some(dst)) = (src, out.get_mut(at..at + n)) {
-                    dst.copy_from_slice(src);
+        let mut size: Option<(usize, usize)> = None;
+        // a few tiles at a time, in parallel, each laid in as soon as it is decoded
+        let per = rayon::current_num_threads().clamp(1, 16);
+        for (c, chunk) in tiles.chunks(per).enumerate() {
+            let decoded: Vec<Result<Pic>> = chunk.par_iter().map(|t| self.picture(*t, colour, depth + 1)).collect();
+            for (j, tile) in decoded.into_iter().enumerate() {
+                let tile = tile?;
+                let (w, h) = (tile.w as usize, tile.h as usize);
+                // every tile the first one's size, within its share
+                let (tw, th) = *size.get_or_insert((w, h));
+                if (w, h) != (tw, th) || !fits(w, h) {
+                    return Err(bad(name, format!("a {w} × {h} tile in a {ow} × {oh} grid of {tw} × {th} tiles")));
+                }
+                let k = c * per + j;
+                let (x0, y0) = ((k % cols) * tw, (k / cols) * th);
+                for y in 0..h.min(oh.saturating_sub(y0)) {
+                    let n = w.min(ow.saturating_sub(x0)) * 4;
+                    let src = tile.rgba.get(y * w * 4..y * w * 4 + n);
+                    let at = ((y0 + y) * ow + x0) * 4;
+                    if let (Some(src), Some(dst)) = (src, out.get_mut(at..at + n)) {
+                        dst.copy_from_slice(src);
+                    }
                 }
             }
         }

@@ -222,6 +222,12 @@ fn damaged_files_are_errors_not_crashes() {
     huge[at + 4..at + 8].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
     let e = decode("huge.heic", &huge).unwrap_err().to_string();
     assert!(e.contains("megapixels"), "{e}");
+    // …and so is a tile far larger than its share of the grid (8192 × 8 in a 16 × 12 grid of 2 × 2)
+    let mut wide = good.clone();
+    let at = wide.windows(12).position(|w| w == [b'i', b's', b'p', b'e', 0, 0, 0, 0, 0, 0, 0, 8]).unwrap();
+    wide[at + 8..at + 12].copy_from_slice(&8192u32.to_be_bytes());
+    let e = decode("wide-tile.heic", &wide).unwrap_err().to_string();
+    assert!(e.contains("8192 × 8 tile"), "{e}");
 }
 
 /// A real HEIC made by macOS's `sips` (an external fixture generator, like ffmpeg elsewhere; the
