@@ -125,7 +125,11 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      the robot's own picture and sound before the next; shots cut where the analysis saw the
      robot (a portrait or 4:3 clip fills the 16:9 frame, cropped on the robot's centre from the
      analysis with a slow 6 % tilt across it, so a tall robot is seen whole and the video never
-     looks vertical; `--no-fill` shows it whole over a blurred, dimmed copy instead; slowed only
+     looks vertical; `--no-fill` shows it whole over a blurred, dimmed copy instead — the pillars,
+     which stay under the picture through its transitions, reaching past the cut as far as the
+     transition does, cross-dissolving into the next picture's pillars, and dipping to black with
+     the picture into a new year (the dip goes on V1, the pictures fading out and in over it,
+     since a dip's black on V2 would cover the pillars at once); slowed only
      when the words would outrun the footage, its sound then slowed with it at its own pitch —
      Speed/Duration's Maintain Audio Pitch), each shot's sound faded in and crossfaded; a
      name/date lower third; a dramatic transition from a rotating set (cross zoom, whip, flash,
