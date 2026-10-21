@@ -8,6 +8,12 @@
 //! keyframe commands (`effects.addKeyframe`, `effects.toggleAnimation`, …) take `"mask": n` to
 //! address `path` / `feather` / `opacity` / `expansion`. Every edit is one undo step (`merge`: a
 //! key folds a continuous drag into one step).
+//!
+//! Besides ellipse, 4-point polygon (rectangle) and pen (`bezier` + `path`), `masks.add` makes
+//! the shape presets of [`PRESETS`] (`masks.presets` lists them): rounded rectangle, star, heart,
+//! triangle, regular polygon, cross, arrow, cinematic bars and diagonal split. Each is an ordinary
+//! path (`MaskPath::star`, `::heart`, `::letterbox`, …), edited, keyframed and tracked like any
+//! other mask; hostile counts, ratios and coordinates are refused with an error.
 
 use filmcraft_geom::{Affine, Vec2};
 use filmcraft_project::{ClipId, EffectInstance, Mask, MaskMode, MaskPath, MaskVertex, ParamValue, TrackKind, TrackMethod};
@@ -38,7 +44,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         spec(
             "masks.add",
             "Create Mask",
-            r#"{"clip":id?,"effect":index|id?="opacity","shape":"ellipse"|"polygon"|"rectangle"|"bezier","path":[[x,y]…]|{vertices}?,"center":[x,y]?,"size":[w,h]?,"cornerRadius":px?}"#,
+            r#"{"clip":id?,"effect":index|id?="opacity","shape":"ellipse"|"polygon"|"rectangle"|"bezier"|"roundedRectangle"|"star"|"heart"|"triangle"|"regularPolygon"|"cross"|"arrow"|"cinematicBars"|"diagonalSplit","path":[[x,y]…]|{vertices}?,"center":[x,y]?,"size":[w,h]?,"cornerRadius":px?,"points":3..100=5?,"innerRatio":0.05..1=0.5?,"sides":3..100=6?,"thickness":0.05..0.95=0.33?,"aspect":2.39|"2.39:1"?,"corner":"topRight|topLeft|bottomLeft|bottomRight"?,"inverted":bool?}"#,
             add,
         ),
         spec("masks.remove", "Delete Mask", r#"{"clip":id?,"effect":index|id?,"mask":n?}"#, remove),
@@ -73,6 +79,20 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             params: r#"{"clip":id,"effect":index|id,"mask":n}|{"none":true}"#,
             enabled: has_seq,
             run: select,
+            journal: false,
+        },
+        CommandSpec {
+            id: "masks.presets",
+            label: "List Mask Shape Presets",
+            menu: &[],
+            shortcut: None,
+            params: "{}",
+            enabled: crate::commands::always,
+            run: |_, _| {
+                Ok(
+                    json!({"presets": PRESETS.iter().map(|(shape, label, params)| json!({"shape": shape, "label": label, "params": params})).collect::<Vec<_>>()}),
+                )
+            },
             journal: false,
         },
         CommandSpec {
@@ -204,28 +224,175 @@ fn set_path_at(m: &mut Mask, t: Tick, path: MaskPath) {
     m.path.set_at(t, ParamValue::Path(path));
 }
 
+/// The mask shape presets of `masks.add` beyond ellipse, 4-point polygon and pen: `(shape, label,
+/// the parameters it takes besides clip / effect / center / size / inverted)`. Each makes an
+/// ordinary editable mask (`masks.presets` lists them).
+pub const PRESETS: [(&str, &str, &str); 9] = [
+    ("roundedRectangle", "Rounded Rectangle", r#"{"cornerRadius":px=15% of the smaller side}"#),
+    ("star", "Star", r#"{"points":3..100=5,"innerRatio":0.05..1=0.5}"#),
+    ("heart", "Heart", "{}"),
+    ("triangle", "Triangle", "{}"),
+    ("regularPolygon", "Regular Polygon", r#"{"sides":3..100=6}"#),
+    ("cross", "Cross", r#"{"thickness":0.05..0.95=0.33}"#),
+    ("arrow", "Arrow", "{}"),
+    (
+        "cinematicBars",
+        "Cinematic Bars",
+        r#"{"aspect":0.1..10|"W:H"=2.39 — the picture between the bars; on Opacity it cuts the bars out, on another effect it is inverted so the effect fills the bars}"#,
+    ),
+    ("diagonalSplit", "Diagonal Split", r#"{"corner":"topRight|topLeft|bottomLeft|bottomRight"="topRight" — the half kept}"#),
+];
+
+/// Largest center coordinate or size `masks.add` takes, in clip pixels.
+const MAX_COORD: f64 = 1e7;
+
+/// The canonical name of a `shape` (case, `-`, `_` and spaces ignored), or None.
+fn shape_name(s: &str) -> Option<&'static str> {
+    let n = s.to_ascii_lowercase().replace(['-', '_', ' '], "");
+    Some(match n.as_str() {
+        "ellipse" | "circle" | "oval" => "ellipse",
+        "polygon" | "rectangle" | "rect" | "4point" => "rectangle",
+        "roundedrectangle" | "roundedrect" | "rounded" => "roundedRectangle",
+        "bezier" | "pen" | "path" => "bezier",
+        "star" => "star",
+        "heart" => "heart",
+        "triangle" => "triangle",
+        "regularpolygon" | "ngon" => "regularPolygon",
+        "pentagon" | "hexagon" | "octagon" => "regularPolygon",
+        "cross" | "plus" => "cross",
+        "arrow" => "arrow",
+        "cinematicbars" | "bars" | "letterbox" => "cinematicBars",
+        "diagonalsplit" | "diagonal" => "diagonalSplit",
+        _ => return None,
+    })
+}
+
+/// An aspect ratio: a number (2.39) or `"W:H"` / `"W/H"` (`"2.39:1"`, `"16:9"`).
+fn aspect_p(v: &Value) -> Option<f64> {
+    let a = match v {
+        Value::Number(n) => n.as_f64()?,
+        Value::String(s) => match s.split_once([':', '/']) {
+            Some((a, b)) => a.trim().parse::<f64>().ok()? / b.trim().parse::<f64>().ok().filter(|b| *b != 0.0)?,
+            None => s.trim().parse::<f64>().ok()?,
+        },
+        _ => return None,
+    };
+    (a.is_finite() && (0.1..=10.0).contains(&a)).then_some(a)
+}
+
+/// A whole-number parameter in `lo..=hi` (default `def`), or an error naming the range.
+fn count_p(p: &Value, key: &str, lo: u64, hi: u64, def: u64) -> Result<usize> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(def as usize),
+        Some(v) => {
+            v.as_u64().filter(|n| (lo..=hi).contains(n)).map(|n| n as usize).ok_or_else(|| bad("masks.add", format!("`{key}` is a whole number {lo}–{hi}")))
+        }
+    }
+}
+
+/// A ratio parameter in `lo..=hi` (default `def`), or an error naming the range.
+fn ratio_p(p: &Value, key: &str, lo: f64, hi: f64, def: f64) -> Result<f64> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(def),
+        Some(v) => v.as_f64().filter(|r| r.is_finite() && (lo..=hi).contains(r)).ok_or_else(|| bad("masks.add", format!("`{key}` is a number {lo}–{hi}"))),
+    }
+}
+
+/// A point parameter: finite and within ±[`MAX_COORD`].
+fn coord_p(p: &Value, key: &str) -> Result<Option<Vec2>> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => pt(v)
+            .filter(|q| q.x.is_finite() && q.y.is_finite() && q.x.abs() <= MAX_COORD && q.y.abs() <= MAX_COORD)
+            .map(Some)
+            .ok_or_else(|| bad("masks.add", format!("`{key}` is [x, y] in clip pixels (at most {MAX_COORD:e})"))),
+    }
+}
+
+/// The path `masks.add` creates, and whether the mask starts inverted / without feather.
+fn add_path(p: &Value, w: f64, h: f64, opacity: bool) -> Result<(MaskPath, Option<bool>, bool)> {
+    if let Some(v) = p.get("path") {
+        return Ok((path_from_json(v).ok_or_else(|| bad("masks.add", "bad `path`"))?, None, false));
+    }
+    let raw = str_p(p, "shape").unwrap_or("ellipse");
+    let shape = shape_name(raw).ok_or_else(|| {
+        let known: Vec<&str> = ["ellipse", "rectangle", "bezier"].into_iter().chain(PRESETS.iter().map(|(s, _, _)| *s)).collect();
+        bad("masks.add", format!("unknown shape `{raw}` ({})", known.join(", ")))
+    })?;
+    let center = coord_p(p, "center")?.unwrap_or(Vec2::new(w / 2.0, h / 2.0));
+    let r = w.min(h) * 0.2;
+    let size = coord_p(p, "size")?.unwrap_or(Vec2::new(r * 2.0, r * 2.0));
+    let radius = size * 0.5;
+    let (x0, y0, x1, y1) = (center.x - size.x / 2.0, center.y - size.y / 2.0, center.x + size.x / 2.0, center.y + size.y / 2.0);
+    let corner_radius = |def: Option<f64>| -> Result<Option<f64>> {
+        match f64_p(p, "cornerRadius") {
+            Some(r) if !r.is_finite() || r < 0.0 => Err(bad("masks.add", "`cornerRadius` is pixels ≥ 0")),
+            Some(r) => Ok(Some(r)),
+            None => Ok(def),
+        }
+    };
+    let path = match shape {
+        "ellipse" => MaskPath::ellipse(center, radius),
+        "rectangle" => match corner_radius(None)? {
+            Some(r) => MaskPath::rounded_rect(x0, y0, x1, y1, r),
+            None => MaskPath::rect(x0, y0, x1, y1),
+        },
+        "roundedRectangle" => {
+            let def = 0.15 * size.x.abs().min(size.y.abs());
+            MaskPath::rounded_rect(x0, y0, x1, y1, corner_radius(Some(def))?.unwrap_or(def))
+        }
+        "star" => MaskPath::star(center, radius, count_p(p, "points", 3, 100, 5)?, ratio_p(p, "innerRatio", 0.05, 1.0, 0.5)?),
+        "heart" => MaskPath::heart(center, radius),
+        "triangle" => MaskPath::triangle(x0, y0, x1, y1),
+        "regularPolygon" => {
+            let def = match raw.to_ascii_lowercase().as_str() {
+                "pentagon" => 5,
+                "octagon" => 8,
+                _ => 6,
+            };
+            MaskPath::regular_polygon(center, radius, count_p(p, "sides", 3, 100, def)?)
+        }
+        "cross" => MaskPath::cross(center, radius, ratio_p(p, "thickness", 0.05, 0.95, 1.0 / 3.0)?),
+        "arrow" => MaskPath::arrow(center, radius),
+        "cinematicBars" => {
+            let aspect = match p.get("aspect") {
+                None | Some(Value::Null) => 2.39,
+                Some(v) => aspect_p(v).ok_or_else(|| bad("masks.add", "`aspect` is width / height, 0.1–10 (2.39 or \"2.39:1\")"))?,
+            };
+            let path = MaskPath::letterbox(w, h, aspect).ok_or_else(|| bad("masks.add", "the clip has no frame size"))?;
+            // on Opacity the mask keeps the picture between the bars; on another effect it is
+            // inverted so the effect fills the bars. Sharp edges, like real bars.
+            return Ok((path, Some(!opacity), true));
+        }
+        "diagonalSplit" => {
+            let corner = match str_p(p, "corner") {
+                None => filmcraft_project::SplitCorner::default(),
+                Some(c) => {
+                    filmcraft_project::SplitCorner::from_name(c).ok_or_else(|| bad("masks.add", "`corner` is topRight, topLeft, bottomLeft or bottomRight"))?
+                }
+            };
+            MaskPath::diagonal_split(w, h, corner).ok_or_else(|| bad("masks.add", "the clip has no frame size"))?
+        }
+        _ => return Err(bad("masks.add", "a bezier mask needs `path` (pen points)")),
+    };
+    Ok((path, None, false))
+}
+
 fn add(s: &mut Session, p: &Value) -> Result<Value> {
     let clip = target_clip(s, p)?;
     let (w, h) = source_size(s, clip);
-    let shape = str_p(p, "shape").unwrap_or("ellipse").to_ascii_lowercase();
-    let center = p.get("center").and_then(pt).unwrap_or(Vec2::new(w / 2.0, h / 2.0));
-    let r = w.min(h) * 0.2;
-    let size = p.get("size").and_then(pt).unwrap_or(Vec2::new(r * 2.0, r * 2.0));
-    let path = match p.get("path") {
-        Some(v) => path_from_json(v).ok_or_else(|| bad("masks.add", "bad `path`"))?,
-        None => match shape.as_str() {
-            "ellipse" => MaskPath::ellipse(center, size * 0.5),
-            "polygon" | "rectangle" | "rect" | "4-point" => {
-                let (x0, y0, x1, y1) = (center.x - size.x / 2.0, center.y - size.y / 2.0, center.x + size.x / 2.0, center.y + size.y / 2.0);
-                match f64_p(p, "cornerRadius") {
-                    Some(r) if !r.is_finite() || r < 0.0 => return Err(bad("masks.add", "`cornerRadius` is pixels ≥ 0")),
-                    Some(r) => MaskPath::rounded_rect(x0, y0, x1, y1, r),
-                    None => MaskPath::rect(x0, y0, x1, y1),
-                }
-            }
-            _ => return Err(bad("masks.add", "a bezier mask needs `path` (pen points)")),
-        },
+    let inverted = match p.get("inverted") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| bad("masks.add", "`inverted` is true or false"))?),
     };
+    // whether the mask goes on Opacity (the default effect): decides how preset bars start
+    let on_opacity = {
+        let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
+        let effects = seq.find_item(clip).map(|(_, it)| it.effects.as_slice()).unwrap_or_default();
+        effect_index(effects, p.get("effect"), None, clip).and_then(|i| effects.get(i)).is_none_or(|e| e.effect == "opacity")
+    };
+    let (path, preset_inverted, sharp) = add_path(p, w, h, on_opacity)?;
+    let inverted = inverted.or(preset_inverted).unwrap_or(false);
     if path.len() < 3 && path.closed {
         return Err(bad("masks.add", "a mask needs at least 3 vertices"));
     }
@@ -244,7 +411,12 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let n = e.masks.iter().filter_map(|m| m.name.strip_prefix("Mask (")?.strip_suffix(')')?.parse::<usize>().ok()).max().unwrap_or(0) + 1;
         let name = format!("Mask ({n})");
-        e.masks.push(Mask::new(name.clone(), path));
+        let mut mask = Mask::new(name.clone(), path);
+        mask.inverted = inverted;
+        if sharp {
+            mask.feather = filmcraft_project::Param::new(ParamValue::Float(0.0));
+        }
+        e.masks.push(mask);
         let mi = e.masks.len() - 1;
         st.selected_mask = Some(MaskSel { clip, effect: ei, mask: mi });
         st.selected_effect = None;
