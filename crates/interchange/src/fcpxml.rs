@@ -9,7 +9,8 @@
 //! - Rational times (`1001/24000s`) map exactly onto ticks.
 //! - `adjust-transform` (position in percent of frame height, FCP y-up, counter-clockwise
 //!   rotation), `adjust-blend` (opacity), `adjust-volume` (dB) and their keyframes are mapped;
-//!   constant speed, reverse and freeze frames use a two-point `timeMap`.
+//!   constant speed, reverse and freeze frames use a two-point `timeMap`, whose `preservesPitch`
+//!   is the clip's Maintain Audio Pitch (absent reads as 1, the DTD's default).
 //! - Markers on primary-storyline elements become sequence markers; markers on connected clips stay
 //!   clip markers. Transitions are supported on the primary storyline (and read from secondary
 //!   storylines); transitions elsewhere are reported.
@@ -431,6 +432,7 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 let mut ti = self.b.clip(item, kind, &name, t0, dur, src_in.max(Tick::ZERO));
                 ti.speed = speed;
                 ti.reverse = reverse;
+                ti.maintain_pitch = speed != 1.0 && !hold && preserves_pitch(el);
                 if hold {
                     ti.frame_hold = Some(src_in.max(Tick::ZERO));
                 }
@@ -612,6 +614,12 @@ fn parse_db(v: &str) -> f64 {
     let s = v.trim();
     let s = s.strip_suffix("dB").or_else(|| s.strip_suffix("db")).unwrap_or(s);
     s.trim().parse().unwrap_or(0.0)
+}
+
+/// Whether a retimed element's sound keeps its pitch: `timeMap`'s `preservesPitch` (1 when absent,
+/// as the FCPXML DTD declares it).
+fn preserves_pitch(el: Node) -> bool {
+    child(el, "timeMap").is_some_and(|tm| tm.attribute("preservesPitch").is_none_or(|v| v.trim() != "0"))
 }
 
 /// (speed, reverse, freeze, source time at the element's local start) from a `timeMap`.
@@ -1017,8 +1025,16 @@ impl Exp<'_, '_> {
             } else {
                 (v0, v0 + scaled(it.duration, it.speed))
             };
+            // the sound keeps its pitch or plays varispeed (the DTD's default is to keep it)
+            let pitch = if it.frame_hold.is_some() {
+                ""
+            } else if it.maintain_pitch {
+                " preservesPitch=\"1\""
+            } else {
+                " preservesPitch=\"0\""
+            };
             children.push(format!(
-                "<timeMap>\n  <timept time=\"{}\" value=\"{}\" interp=\"linear\"/>\n  <timept time=\"{}\" value=\"{}\" interp=\"linear\"/>\n</timeMap>",
+                "<timeMap{pitch}>\n  <timept time=\"{}\" value=\"{}\" interp=\"linear\"/>\n  <timept time=\"{}\" value=\"{}\" interp=\"linear\"/>\n</timeMap>",
                 fmt_time(local, rate),
                 fmt_time(a, rate),
                 fmt_time(local + it.duration, rate),

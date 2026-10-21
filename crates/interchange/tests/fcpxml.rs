@@ -122,6 +122,8 @@ fn golden_connected_clips() {
     assert_eq!(pier.effect("motion").unwrap().param("rotation").unwrap().value, ParamValue::Float(-90.0));
     // retimed clip: 2x, source in = 10 s into an asset whose timecode starts at 3600 s
     assert_eq!(boats.speed, 2.0);
+    assert!(boats.maintain_pitch, "a timeMap without preservesPitch keeps the pitch (the DTD's default)");
+    assert!(!pier.maintain_pitch, "not retimed");
     assert_eq!(boats.source_in, filmcraft_time::Tick(10 * filmcraft_time::TICKS_PER_SECOND));
     assert_eq!(media_key(p, boats.item), "/proj/boats.mov");
     let t = &v1.transitions[0];
@@ -251,6 +253,37 @@ fn roundtrip_all_versions() {
         assert_eq!(up.markers.iter().map(|m| (&m.name, m.start)).collect::<Vec<_>>(), vec![(&"in nest".to_string(), FrameRate::FPS_29_97.tick_of(10))]);
         let lvl = qs.audio_tracks[0].items[0].effect("volume").unwrap().param("level").unwrap().value.as_f64().unwrap();
         assert!((lvl + 3.5).abs() < 1e-9);
+    }
+}
+
+/// Maintain Audio Pitch is the `timeMap`'s `preservesPitch`, both ways, on video and audio.
+#[test]
+fn maintain_pitch_round_trips() {
+    let r = FrameRate::FPS_25;
+    let mut p = Project::new("Lib");
+    let a = media(&mut p, "/m/a.mov", true, true, r);
+    let s = sequence(&mut p, "Cut", r, false);
+    let mut pairs = Vec::new();
+    for (start, speed, keep) in [(0, 2.0, true), (100, 0.5, false), (200, 1.5, true)] {
+        let v = clip(&mut p, s, TrackKind::Video, 0, a, start, 50, 0);
+        let au = clip(&mut p, s, TrackKind::Audio, 0, a, start, 50, 0);
+        link(&mut p, s, &[v, au]);
+        let q = p.sequence_mut(s).unwrap();
+        for c in [v, au] {
+            let (_, it) = q.find_item_mut(c).unwrap();
+            it.speed = speed;
+            it.maintain_pitch = keep;
+        }
+        pairs.push((speed, keep));
+    }
+    let (imp, text, rep) = roundtrip(&p, s, Format::Fcpxml, &ExportOptions::default());
+    assert!(!rep.has_warnings(), "{rep}");
+    assert_eq!(text.matches("preservesPitch=\"1\"").count(), 2, "{text}");
+    assert_eq!(text.matches("preservesPitch=\"0\"").count(), 1, "{text}");
+    let q = imp.project.sequence(only_seq(&imp)).unwrap();
+    for items in [&q.video_tracks[0].items, &q.audio_tracks[0].items] {
+        let got: Vec<(f64, bool)> = items.iter().map(|i| (i.speed, i.maintain_pitch)).collect();
+        assert_eq!(got, pairs, "{text}");
     }
 }
 
