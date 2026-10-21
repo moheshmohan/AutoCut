@@ -355,11 +355,29 @@ impl<'a> Run<'a> {
             });
         }
         drop(tx);
+        // The mapping callbacks run in whichever thread polls the device: with several pictures
+        // looked at at once, another thread's poll may fire ours just after our own wait ends, so
+        // they are waited for (polling again meanwhile), not only collected.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let waited = d.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(10)) });
         let mut ok = vec![false; staging.len()];
-        for (i, r) in rx.try_iter() {
-            if let Some(o) = ok.get_mut(i) {
-                *o = r;
+        let mut received = 0;
+        while received < staging.len() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(left.min(std::time::Duration::from_millis(50))) {
+                Ok((i, r)) => {
+                    if let Some(o) = ok.get_mut(i) {
+                        *o = r;
+                    }
+                    received += 1;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = d.poll(wgpu::PollType::Poll);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
         if waited.is_err() || FAILED.load(Ordering::SeqCst) || ok.iter().any(|o| !o) {

@@ -980,6 +980,38 @@ mod tests {
         assert!(max_err(&got[1].v, &add_upsampled(&a, &s).unwrap().v) < 1e-6);
     }
 
+    /// The redaction looks at several pictures at once: runs on several threads all read their
+    /// maps back (a mapping callback fired by another thread's poll is waited for, not missed —
+    /// missing one took the detectors to the CPU for the session) and agree with the CPU.
+    #[test]
+    fn gpu_runs_on_several_threads_at_once() {
+        let Some(ctx) = gpu::Ctx::shared() else {
+            eprintln!("SKIPPED (vision GPU threads): no GPU");
+            return;
+        };
+        let mut next = noise(11);
+        let (cin, cout, h, w) = (16usize, 32usize, 64usize, 96usize);
+        let pw = Conv { w: (0..cout * cin).map(|_| next()).collect(), b: (0..cout).map(|_| next()).collect(), cin, cout, k: 1, stride: 1 };
+        let dw = Conv { w: (0..cout * 9).map(|_| next()).collect(), b: (0..cout).map(|_| next()).collect(), cin: cout, cout, k: 3, stride: 1 };
+        let mut u = PwDw::new(pw, dw, true).unwrap();
+        u.upload(&ctx).unwrap();
+        let x = Map { v: (0..cin * h * w).map(|_| next()).collect(), c: cin, h, w };
+        let cpu = Cpu.unit(&u, &x, true).unwrap();
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..12 {
+                        let r = gpu::Run::new(&ctx);
+                        let xs = r.upload_map(&x.v, x.c, x.h, x.w).unwrap();
+                        let got = Backend::unit(&r, &u, &xs, true).and_then(|m| Backend::read(&r, vec![m])).unwrap().remove(0);
+                        assert!(max_err(&got.v, &cpu.v) < 1e-4);
+                    }
+                });
+            }
+        });
+        assert!(!gpu::failed(), "the GPU is still in use");
+    }
+
     /// The detectors find the same faces and plates on the GPU as on the CPU: the same counts,
     /// boxes within a pixel of the fitted picture, scores within 1e-3. Pictures: the PNGs in
     /// `FILMCRAFT_VISION_PICTURES`, else the oracle's.
