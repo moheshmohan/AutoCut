@@ -1963,6 +1963,8 @@ pub async fn build(
             entries: layout.clone(),
             picture_track: shots_label,
             privacy: made.privacy.clone(),
+            // the faces the trailer still shows, when it hides faces
+            faces: redact.as_ref().is_some_and(|r| r.faces),
             platform: Some(opts.platform.name().into()),
             // a trailer's music is meant to come up after the voice: the voice is measured against
             // the music while it speaks (the mix check's speech over music), not against what follows

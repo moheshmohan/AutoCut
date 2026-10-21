@@ -200,6 +200,7 @@ pub fn meta_request(
         playlist: a.opt(playlist).map(|p| yt::check_ref("playlist", p)).transpose()?,
         thumbnail: a.opt("--thumbnail").map(crate::absolute),
         sidecars: !a.flag("--no-sidecars"),
+        allow_privacy_findings: a.flag("--allow-privacy-findings"),
     })
 }
 

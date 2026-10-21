@@ -146,6 +146,10 @@ pub struct UploadRequest {
     /// Take `<file>.chapters.txt` (appended to the description) and `<file>.thumbnail.jpg` (the
     /// thumbnail, unless one is given) from beside the file, as a showcase export leaves them.
     pub sidecars: bool,
+    /// Upload even when the QA report beside the file (`<file>.qa.json`) lists unblurred faces
+    /// of people (its privacy errors); otherwise the upload is refused before a byte is sent.
+    #[serde(default)]
+    pub allow_privacy_findings: bool,
 }
 
 /// What a sign-in asks for.
@@ -241,7 +245,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Upload to YouTube",
             menu: &[],
             shortcut: None,
-            params: r#"{"path":str,"title":str,"channel":str?,"description":str?,"tags":[str]?,"category":str?,"privacy":"private"|"unlisted"|"public"="private","madeForKids":bool=false,"publishAt":str?,"playlist":str?,"thumbnail":str?,"sidecars":bool=true,"notifySubscribers":bool=true,"wait":bool=false}"#,
+            params: r#"{"path":str,"title":str,"channel":str?,"description":str?,"tags":[str]?,"category":str?,"privacy":"private"|"unlisted"|"public"="private","madeForKids":bool=false,"publishAt":str?,"playlist":str?,"thumbnail":str?,"sidecars":bool=true,"notifySubscribers":bool=true,"allowPrivacyFindings":bool=false,"wait":bool=false}"#,
             enabled: can_upload,
             run: upload,
             journal: false,
@@ -502,6 +506,7 @@ pub fn parse_upload(cmd: &str, p: &Value) -> Result<UploadRequest> {
         playlist,
         thumbnail,
         sidecars: opt_bool(cmd, p, "sidecars", true)?,
+        allow_privacy_findings: opt_bool(cmd, p, "allowPrivacyFindings", false)?,
     })
 }
 

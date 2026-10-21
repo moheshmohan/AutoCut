@@ -318,14 +318,28 @@ fn the_vision_check_leaves_robots_alone() {
     let (mut s, clip, seq) = session();
     let judge = Arc::new(Judge(Ok(Some(false)), Default::default()));
     s.redacts.judge = Some(judge.clone());
-    let r = s.execute("clip.autoRedact", json!({"wait": true})).unwrap();
+    // the robot: the subject's box, where the face passes
+    let robot = json!({"wait": true, "exclude": {"x": 0.0, "y": 0.2, "w": 1.0, "h": 0.6}});
+    let r = s.execute("clip.autoRedact", robot).unwrap();
     let out = &r["redact"];
     assert_eq!(out["hidden"], json!(0), "{out}");
     assert_eq!(out["verify"]["state"], json!("done"));
     assert_eq!(out["verify"]["notPeople"], json!(1));
+    assert_eq!(out["verify"]["onSubject"], json!(1));
     assert_eq!(out["clips"][0]["skipped"]["notAPerson"], json!(1));
-    assert_eq!(judge.1.load(std::sync::atomic::Ordering::Relaxed), 1, "one crop per track");
+    assert_eq!(judge.1.load(std::sync::atomic::Ordering::Relaxed), 2, "one crop per track, and one more look at it alone");
     assert!(!clip_effects(&s, seq, clip).iter().any(is_auto_redaction));
+    // away from the subject, a face the detector is sure of (0.95) is hidden whatever the model
+    // says; one it is not sure of is left alone
+    let r = s.execute("clip.autoRedact", json!({"wait": true})).unwrap();
+    assert_eq!((r["redact"]["hidden"].as_u64(), r["redact"]["verify"]["overruled"].as_u64()), (Some(1), Some(1)), "{r}");
+    let sure = s
+        .redacts
+        .detector
+        .replace(Arc::new(|rgba: &[u8], w: usize, h: usize, _: usize| warm_disc(rgba, w, h).into_iter().map(|d| Detection { score: 0.7, ..d }).collect()));
+    let r = s.execute("clip.autoRedact", json!({"wait": true})).unwrap();
+    assert_eq!(r["redact"]["hidden"], json!(0), "{r}");
+    s.redacts.detector = sure;
     // a person is hidden; an unsure answer hides it too
     for a in [Some(true), None] {
         s.redacts.judge = Some(Arc::new(Judge(Ok(a), Default::default())));
@@ -342,6 +356,75 @@ fn the_vision_check_leaves_robots_alone() {
     let r = s.execute("clip.autoRedact", json!({"wait": true})).unwrap();
     assert_eq!(r["redact"]["verify"]["state"], json!("skipped"));
     assert_eq!(r["redact"]["hidden"], json!(1));
+}
+
+/// A judge whose grid answer (`first`) and second look (`second`) differ.
+struct TwoLooks(Option<bool>, Option<bool>, std::sync::atomic::AtomicUsize);
+
+impl VisionJudge for TwoLooks {
+    fn name(&self) -> String {
+        "two looks".into()
+    }
+    fn judge(&self, _: Kind, crops: &[Crop]) -> std::result::Result<Vec<Option<bool>>, String> {
+        Ok(vec![self.0; crops.len()])
+    }
+    fn confirm(&self, _: Kind, crop: &Crop) -> std::result::Result<Option<bool>, String> {
+        assert!(crop.rgba.as_chunks::<4>().0.contains(&[255, 0, 0, 255]), "the second look is outlined");
+        self.2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(self.1)
+    }
+}
+
+/// The bug of 2026-10-21 (Every Robot I've Met, Ameca at GITEX): visitors crowding round the
+/// robot stood inside its box (its largest analysed box, taken square: 57 % of the frame's width
+/// and all its height), and every face there was left sharp as the robot's, unasked. Two of them,
+/// at 0.92, filled a sixth of the frame for six seconds.
+#[test]
+fn a_visitor_inside_the_robots_box_is_hidden_when_the_model_sees_a_person() {
+    let (mut s, clip, seq) = session();
+    let robot = json!({"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "seconds": 0.5});
+    s.redacts.judge = Some(Arc::new(Judge(Ok(Some(true)), Default::default())));
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "exclude": robot})).unwrap();
+    let out = &r["redact"];
+    assert_eq!(out["hidden"], json!(1), "the visitor was left sharp as the robot's face: {out}");
+    assert_eq!((out["verify"]["onSubject"].as_u64(), out["clips"][0]["skipped"]["excluded"].as_u64()), (Some(1), Some(0)), "{out}");
+    assert!(clip_effects(&s, seq, clip).iter().any(is_auto_redaction));
+    // the robot's box is in the outcome, for the check of the finished video
+    assert_eq!(out["clips"][0]["robots"][0]["w"], json!(1.0), "{out}");
+    // the grid called the visitor a robot (a robot's head beside it), the second look a person
+    let two = Arc::new(TwoLooks(Some(false), Some(true), Default::default()));
+    s.redacts.judge = Some(two.clone());
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "exclude": robot})).unwrap();
+    assert_eq!(r["redact"]["hidden"], json!(1), "{r}");
+    assert_eq!((two.2.load(std::sync::atomic::Ordering::Relaxed), r["redact"]["verify"]["lookedAgain"].as_u64()), (1, Some(1)));
+    // an unclear answer hides it too
+    s.redacts.judge = Some(Arc::new(Judge(Ok(None), Default::default())));
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "exclude": robot})).unwrap();
+    assert_eq!(r["redact"]["hidden"], json!(1), "{r}");
+    // without a vision model the box alone decides, as before: the robot's face is left alone
+    s.redacts.judge = None;
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "exclude": robot})).unwrap();
+    assert_eq!((r["redact"]["hidden"].as_u64(), r["redact"]["clips"][0]["skipped"]["excluded"].as_u64()), (Some(0), Some(1)), "{r}");
+    // a model that fails leaves the robot's face to its box, too
+    s.redacts.judge = Some(Arc::new(Judge(Err("Ollama is unreachable".into()), Default::default())));
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "exclude": robot})).unwrap();
+    assert_eq!((r["redact"]["hidden"].as_u64(), r["redact"]["verify"]["state"].as_str()), (Some(0), Some("failed")), "{r}");
+}
+
+/// The second looks are kept in the cache like the first: a rebuilt show asks nothing again.
+#[test]
+fn second_looks_come_from_the_cache() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (mut s, _, _) = cached_session(calls);
+    let two = Arc::new(TwoLooks(Some(false), Some(false), Default::default()));
+    s.redacts.judge = Some(two.clone());
+    let p = json!({"wait": true, "dryRun": true, "exclude": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}});
+    let first = s.execute("clip.autoRedact", p.clone()).unwrap();
+    assert_eq!(first["redact"]["hidden"], json!(0), "{first}");
+    let second = s.execute("clip.autoRedact", p).unwrap();
+    assert_eq!(two.2.load(std::sync::atomic::Ordering::Relaxed), 1, "looked again once");
+    assert_eq!(second["redact"]["verify"]["lookedAgainFromCache"], json!(1), "{second}");
+    assert_eq!(tracks_of(&first), tracks_of(&second));
 }
 
 #[test]
@@ -435,6 +518,7 @@ fn masks_switch_on_and_off_with_their_track() {
         looks: 0,
         found: 0,
         look_errors: Vec::new(),
+        robots: Vec::new(),
     };
     let m = mask_for(&track, 1, &c, 0.2).unwrap();
     let at = |s: f64| m.opacity.f64_at(Tick::from_seconds_f64(s));

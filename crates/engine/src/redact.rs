@@ -16,16 +16,24 @@
 //! are not recognisable; Motion ▸ Scale and Scale to Frame Size count, so a clip zoomed in or a
 //! portrait clip filling a landscape frame has its faces counted larger, and the face detector
 //! looks at it closer), a plate when it is at least `minPlateWidth` of the frame's width
-//! (2.5 %); either must be seen twice, or once with a score of 0.9, and its centre must not be
-//! inside an `exclude` box.
+//! (2.5 %); either must be seen twice, or once with a score of 0.9. An `exclude` box is the
+//! subject's (a robot's: its face is not hidden): see below.
 //!
 //! **Not robots.** With `verify` (the default) every track still to be hidden is shown once,
 //! cropped with its surroundings, to a local vision model (the host's [`VisionJudge`]: AutoCut's
 //! Qwen2.5-VL through Ollama): a face is hidden only if it is a real person's (not a humanoid
 //! robot, mannequin, statue, poster or screen), a plate only if it is a vehicle's (not a sign or
-//! a robot's name badge); an unclear answer hides it. Without a judge the check is skipped and
-//! noted: everything detected is hidden. Plates must also have a plate's shape (wider than tall,
-//! not huge: `filmcraft_vision::post::plausible_plate`).
+//! a robot's name badge); an unclear answer hides it. Faces whose centre is inside an `exclude`
+//! box are shown too, and hidden if the model sees a person: a subject's box is coarse (the
+//! robot's largest analysed box, taken square), and the visitors crowding round a robot stand in
+//! it — on 2026-10-21 eight faces next to Ameca, two of them filling a sixth of the frame, were
+//! left sharp by the box alone. A face the model calls not a person is looked at a second time,
+//! alone and outlined in red ([`VisionJudge::confirm`]; its grid answer can carry a neighbour's
+//! over), and left sharp only if both agree; a face the detector is sure of (`sureFace`, 0.85)
+//! that is never inside a subject's box is hidden whatever the model says. Without a judge the
+//! check is skipped and noted: everything detected is hidden but the faces inside an `exclude`
+//! box (within a second of its `seconds`). Plates must also have a plate's shape (wider than
+//! tall, not huge: `filmcraft_vision::post::plausible_plate`).
 //!
 //! **Named targets.** `targets` names other things to hide in words — a logo, a brand, a sign
 //! ("DP World logo", "dpworld.com text"; a description, or `{text, clips}` for some clips only).
@@ -119,6 +127,13 @@ pub trait VisionJudge: Send + Sync {
     /// vehicle's number plate, `Some(false)` something else (a sign, a label or name on a
     /// machine). `None`: cannot tell. An error means the check could not run at all.
     fn judge(&self, kind: Kind, crops: &[Crop]) -> std::result::Result<Vec<Option<bool>>, String>;
+    /// A second look at one detection the first look called something else: `crop` shows it
+    /// alone, outlined in red (the first look's grid can carry a neighbour's answer over: a
+    /// visitor beside a robot's head was called a robot). The same answers as
+    /// [`VisionJudge::judge`]; by default, that with the one crop.
+    fn confirm(&self, kind: Kind, crop: &Crop) -> std::result::Result<Option<bool>, String> {
+        Ok(self.judge(kind, std::slice::from_ref(crop))?.into_iter().next().flatten())
+    }
     /// Where the things the user named (`targets`: "DP World logo", "the company's website
     /// on the floor") are in a frame: `(index into targets, [x, y, w, h])` per place, the box
     /// normalised to the frame. Hosts without a grounding model say so.
@@ -145,6 +160,9 @@ pub struct Options {
     /// Detector confidence a face (plate) needs.
     pub face_score: f32,
     pub plate_score: f32,
+    /// A face the detector is at least this sure of is hidden whatever the vision check says,
+    /// unless it is on the subject (inside an `exclude` box at some moment).
+    pub sure_face: f32,
     pub style: Style,
     /// 1..100.
     pub strength: f64,
@@ -168,6 +186,10 @@ pub struct Options {
     pub fresh: bool,
 }
 
+/// [`Options::sure_face`] by default: real visitors' faces scored 0.86–0.92 on the GITEX footage
+/// where the vision check called some of them robots (2026-10-21).
+pub const SURE_FACE: f32 = 0.85;
+
 /// A named target from the parameters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TargetP {
@@ -189,6 +211,7 @@ impl Default for Options {
             link: LinkParams::default(),
             face_score: 0.6,
             plate_score: 0.8,
+            sure_face: SURE_FACE,
             style: Style::Blur,
             strength: 60.0,
             padding: 0.2,
@@ -207,9 +230,9 @@ impl Default for Options {
 
 /// An exclusion box from the parameters, for one clip or all.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ExcludeP {
-    clip: Option<ClipId>,
-    ex: Exclude,
+pub(crate) struct ExcludeP {
+    pub(crate) clip: Option<ClipId>,
+    pub(crate) ex: Exclude,
 }
 
 /// One clip to analyse.
@@ -266,6 +289,8 @@ pub struct ClipRedact {
     pub looks: usize,
     pub found: usize,
     pub look_errors: Vec<String>,
+    /// The subject's boxes in this clip (`exclude`).
+    pub robots: Vec<Exclude>,
 }
 
 impl ClipRedact {
@@ -278,7 +303,21 @@ impl ClipRedact {
 #[derive(Clone, Debug, PartialEq)]
 enum Verified {
     Off,
-    Done { judge: String, asked: usize, cached: usize, not_people: usize, not_plates: usize, unsure: usize },
+    /// `on_subject`: faces inside the subject's box shown to the judge; `confirmed` (and
+    /// `confirmed_cached`): second looks at faces it called not a person; `overruled`: faces the
+    /// detector was sure of, away from the subject, hidden although it called them not a person.
+    Done {
+        judge: String,
+        asked: usize,
+        cached: usize,
+        not_people: usize,
+        not_plates: usize,
+        unsure: usize,
+        on_subject: usize,
+        confirmed: usize,
+        confirmed_cached: usize,
+        overruled: usize,
+    },
     Skipped(String),
     Failed(String),
 }
@@ -287,9 +326,10 @@ impl Verified {
     fn to_json(&self) -> Value {
         match self {
             Verified::Off => json!({"state": "off"}),
-            Verified::Done { judge, asked, cached, not_people, not_plates, unsure } => {
-                json!({"state": "done", "judge": judge, "asked": asked, "fromCache": cached, "notPeople": not_people, "notPlates": not_plates, "unsure": unsure})
-            }
+            Verified::Done { judge, asked, cached, not_people, not_plates, unsure, on_subject, confirmed, confirmed_cached, overruled } => json!({
+                "state": "done", "judge": judge, "asked": asked, "fromCache": cached, "notPeople": not_people, "notPlates": not_plates, "unsure": unsure,
+                "onSubject": on_subject, "lookedAgain": confirmed, "lookedAgainFromCache": confirmed_cached, "overruled": overruled,
+            }),
             Verified::Skipped(why) => json!({"state": "skipped", "reason": why}),
             Verified::Failed(why) => json!({"state": "failed", "reason": why}),
         }
@@ -325,6 +365,9 @@ pub struct Redacts {
     /// The redaction cache ([`crate::redact_cache`]; native frontends turn it on with
     /// [`Session::use_redaction_cache`]).
     pub cache: Option<Arc<crate::redact_cache::RedactCache>>,
+    /// The downloaded face detector alone, loaded once for `sequence.checkPrivacy`
+    /// ([`crate::privacy_check`]).
+    pub(crate) faces_only: Option<DetectFn>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -345,7 +388,7 @@ pub fn installed() -> bool {
 // parameters
 // ---------------------------------------------------------------------------------------------
 
-fn unit_p(cmd: &str, p: &Value, k: &str, lo: f64, hi: f64, d: f64) -> Result<f64> {
+pub(crate) fn unit_p(cmd: &str, p: &Value, k: &str, lo: f64, hi: f64, d: f64) -> Result<f64> {
     match p.get(k).filter(|v| !v.is_null()) {
         None => Ok(d),
         Some(v) => v.as_f64().filter(|f| f.is_finite() && (lo..=hi).contains(f)).ok_or_else(|| bad(cmd, format!("`{k}` is a number from {lo} to {hi}"))),
@@ -440,6 +483,7 @@ pub fn options_p(cmd: &str, p: &Value) -> Result<Options> {
         link: d.link,
         face_score: unit_p(cmd, p, "faceScore", 0.05, 1.0, f64::from(d.face_score))? as f32,
         plate_score: unit_p(cmd, p, "plateScore", 0.05, 1.0, f64::from(d.plate_score))? as f32,
+        sure_face: unit_p(cmd, p, "sureFace", 0.05, 1.0, f64::from(d.sure_face))? as f32,
         style,
         strength: unit_p(cmd, p, "strength", 1.0, 100.0, d.strength)?,
         padding: unit_p(cmd, p, "padding", 0.0, 1.0, d.padding)?,
@@ -460,7 +504,7 @@ pub fn options_p(cmd: &str, p: &Value) -> Result<Options> {
 
 /// `exclude`: a box `{x, y, w, h}` (0..1 of the clip's picture; `clip` and `seconds` of media
 /// time optional) or a list of them.
-fn exclude_p(cmd: &str, p: &Value) -> Result<Vec<ExcludeP>> {
+pub(crate) fn exclude_p(cmd: &str, p: &Value) -> Result<Vec<ExcludeP>> {
     let list: Vec<&Value> = match p.get("exclude").filter(|v| !v.is_null()) {
         None => return Ok(Vec::new()),
         Some(Value::Array(a)) => a.iter().collect(),
@@ -680,7 +724,7 @@ pub type DetectFn = Arc<dyn Fn(&[u8], usize, usize, usize) -> Vec<filmcraft_visi
 
 /// The downloaded detectors, for what `o` looks for.
 #[cfg(feature = "privacy-models")]
-fn load_detectors(o: &Options) -> std::result::Result<DetectFn, String> {
+pub(crate) fn load_detectors(o: &Options) -> std::result::Result<DetectFn, String> {
     let dir = crate::transcript::models_dir().ok_or("no data directory for the detectors")?;
     let det = filmcraft_vision::Detectors::load(&dir, o.faces, o.plates).map_err(|e| match e {
         filmcraft_vision::VisionError::NotInstalled => format!("the face and plate detectors are not downloaded yet ({DOWNLOAD_CMD})"),
@@ -700,7 +744,7 @@ fn load_detectors(o: &Options) -> std::result::Result<DetectFn, String> {
 }
 
 #[cfg(not(feature = "privacy-models"))]
-fn load_detectors(_: &Options) -> std::result::Result<DetectFn, String> {
+pub(crate) fn load_detectors(_: &Options) -> std::result::Result<DetectFn, String> {
     Err("automatic redaction is not available in this build (built without the `privacy-models` feature)".into())
 }
 
@@ -910,6 +954,7 @@ fn analyse(
         looks: followed.looks,
         found: followed.found,
         look_errors: followed.errors,
+        robots: w.exclude.clone(),
     })
 }
 
@@ -1037,40 +1082,74 @@ fn outline(c: &mut Crop, r: [f64; 4]) {
 /// cache entry and the moment's key and box).
 type Ask = (Kind, usize, usize, Crop, Option<(usize, (String, [f64; 4]))>);
 
+/// The vision check's answers kept for each media file: (cache key, kept, new).
+type Kept = Vec<(String, crate::redact_cache::Verdicts, crate::redact_cache::Verdicts)>;
+
+/// The cache entry (in `kept`) of the vision check's answers about work `wi`'s file under `what`
+/// (`judge` for the first look, `confirm` for the second): its index, loaded the first time.
+fn kept_slot(kept: &mut Kept, cached: Option<&Cached<'_>>, wi: usize, what: &str, name: &str) -> Option<usize> {
+    let cc = cached?;
+    let media = cc.media.get(wi)?.as_ref()?;
+    let key = format!("{what} v{}|{media}|{name}", crate::redact_cache::VERSION);
+    Some(match kept.iter().position(|k| k.0 == key) {
+        Some(i) => i,
+        None => {
+            let old = if cc.fresh { Default::default() } else { cc.cache.load(&key).unwrap_or_default() };
+            kept.push((key, old, Default::default()));
+            kept.len() - 1
+        }
+    })
+}
+
+/// A track's moment shown to the vision check: a face at its largest sighting, a plate at its
+/// widest.
+fn best_point(t: &Track) -> Option<&filmcraft_vision::track::TrackPoint> {
+    let size = |p: &&filmcraft_vision::track::TrackPoint| if t.kind == Kind::Plate { p.bbox[2] } else { p.bbox[3] };
+    t.points.iter().filter(|p| p.seen).max_by(|a, b| size(a).total_cmp(&size(b)))
+}
+
+/// The crop of work `w`'s frame around track `t` at [`best_point`] (`mark`: the box outlined in
+/// red), from the frame at most 1080 px a side.
+fn crop_of(w: &Work, t: &Track, mark: bool) -> Option<Crop> {
+    let best = best_point(t)?;
+    let scale = (1080.0 / w.size.0.max(w.size.1)).min(1.0) as f32;
+    let f = w.src.video_frame(filmcraft_media::FrameRequest { time: Tick::from_seconds_f64(best.t), scale }).ok()?;
+    crop_around(&f.to_rgba8(), f.width as usize, f.height as usize, &best.bbox, mark)
+}
+
 /// The vision check: one crop per track still to be hidden (a face at its largest sighting, a
 /// plate at its widest), shown to the judge [`JUDGE_BATCH`] at a time; tracks it calls
 /// something else (a robot's face, a sign) are left alone. Answers kept in the cache from an
 /// earlier run (the same track, at any of its moments) are not asked again.
-fn verify(made: &mut [ClipRedact], work: &[Work], judge: &dyn VisionJudge, sh: &Shared<'_>, cached: Option<&Cached<'_>>) -> Verified {
+///
+/// Faces inside the subject's box ([`Skip::Excluded`]: the robot's, going by the box alone) are
+/// shown too, and hidden unless the judge says they are not a person: the box is coarse, and
+/// visitors crowd around a robot (two of them were left sharp next to Ameca, 2026-10-21). A
+/// face the judge calls not a person is looked at again, alone and outlined
+/// ([`VisionJudge::confirm`]), and left sharp only if that agrees; a face the detector is sure
+/// of ([`Options::sure_face`]) is left sharp only on the subject (inside its box at some moment),
+/// whatever the judge says of it elsewhere.
+fn verify(made: &mut [ClipRedact], work: &[Work], judge: &dyn VisionJudge, o: &Options, sh: &Shared<'_>, cached: Option<&Cached<'_>>) -> Verified {
     let name = judge.name();
-    // the verdicts the cache keeps for each media file: (key, kept, new)
-    let mut kept: Vec<(String, crate::redact_cache::Verdicts, crate::redact_cache::Verdicts)> = Vec::new();
+    let mut kept: Kept = Vec::new();
     let mut asks: Vec<Ask> = Vec::new();
     // (kind, clip, track, answer) from the cache
     let mut known: Vec<(Kind, usize, usize, Option<bool>)> = Vec::new();
+    let mut on_subject = 0usize;
     for (ci, c) in made.iter().enumerate() {
         let Some(wi) = work.iter().position(|w| w.clip == c.clip) else { continue };
         let Some(w) = work.get(wi) else { continue };
-        let slot = cached.and_then(|cc| Some((cc, cc.media.get(wi)?.as_ref()?))).map(|(cc, media)| {
-            let key = format!("judge v{}|{media}|{name}", crate::redact_cache::VERSION);
-            match kept.iter().position(|k| k.0 == key) {
-                Some(i) => i,
-                None => {
-                    let old = if cc.fresh { Default::default() } else { cc.cache.load(&key).unwrap_or_default() };
-                    kept.push((key, old, Default::default()));
-                    kept.len() - 1
-                }
-            }
-        });
+        let slot = kept_slot(&mut kept, cached, wi, "judge", &name);
         for (ti, (t, skip)) in c.tracks.iter().enumerate() {
-            if skip.is_some() || t.kind == Kind::Target {
+            let subject = *skip == Some(Skip::Excluded) && t.kind == Kind::Face;
+            if (skip.is_some() && !subject) || t.kind == Kind::Target {
                 continue;
             }
             if sh.cancelled() {
                 return Verified::Skipped("stopped".into());
             }
-            let size = |p: &&filmcraft_vision::track::TrackPoint| if t.kind == Kind::Face { p.bbox[3] } else { p.bbox[2] };
-            let Some(best) = t.points.iter().filter(|p| p.seen).max_by(|a, b| size(a).total_cmp(&size(b))) else { continue };
+            on_subject += usize::from(subject);
+            let Some(best) = best_point(t) else { continue };
             let mt = Tick::from_seconds_f64(best.t);
             // the answer about this track kept from an earlier run, at any of its moments
             let moments = std::iter::once(best).chain(t.points.iter().filter(|p| p.seen)).map(|p| (Tick::from_seconds_f64(p.t), &p.bbox));
@@ -1080,46 +1159,26 @@ fn verify(made: &mut [ClipRedact], work: &[Work], judge: &dyn VisionJudge, sh: &
             }
             let vkey = (crate::redact_cache::verdict_key(t.kind, mt), best.bbox);
             *lock(&sh.prog.status) = format!("Checking what was found in {}", c.name);
-            let scale = (1080.0 / w.size.0.max(w.size.1)).min(1.0) as f32;
-            if let Ok(f) = w.src.video_frame(filmcraft_media::FrameRequest { time: mt, scale }) {
-                let rgba = f.to_rgba8();
-                if let Some(crop) = crop_around(&rgba, f.width as usize, f.height as usize, &best.bbox, t.kind == Kind::Plate) {
-                    asks.push((t.kind, ci, ti, crop, slot.map(|i| (i, vkey))));
-                }
+            if let Some(crop) = crop_of(w, t, t.kind == Kind::Plate) {
+                asks.push((t.kind, ci, ti, crop, slot.map(|i| (i, vkey))));
             }
         }
     }
     if let Some(cc) = cached {
         cc.verdicts.fetch_add(known.len(), Ordering::Relaxed);
     }
-    let (mut not_people, mut not_plates, mut unsure) = (0usize, 0usize, 0usize);
-    let mut decide = |made: &mut [ClipRedact], kind: Kind, ci: usize, ti: usize, a: Option<bool>| match a {
-        Some(false) => {
-            if let Some((_, skip)) = made.get_mut(ci).and_then(|c| c.tracks.get_mut(ti)) {
-                if kind == Kind::Face {
-                    *skip = Some(Skip::NotAPerson);
-                    not_people += 1;
-                } else {
-                    *skip = Some(Skip::NotAPlate);
-                    not_plates += 1;
-                }
-            }
-        }
-        None => unsure += 1,
-        Some(true) => {}
-    };
-    for (kind, ci, ti, a) in &known {
-        decide(made, *kind, *ci, *ti, *a);
-    }
-    // what the model answered is kept, also when a later batch fails
-    let save = |kept: &[(String, crate::redact_cache::Verdicts, crate::redact_cache::Verdicts)]| {
+    // what the model answered is kept, also when a later question fails
+    let save = |kept: &Kept| {
         for (key, _, new) in kept.iter().filter(|k| !k.2.is_empty()) {
             if let Some(cc) = cached {
                 cc.cache.update::<crate::redact_cache::Verdicts>(key, |e| crate::redact_cache::merge_verdicts(e, new));
             }
         }
     };
-    for kind in [Kind::Face, Kind::Plate] {
+    // the first looks: the cache's answers, then the grids
+    let mut answers = known.clone();
+    let mut failed: Option<String> = None;
+    'kinds: for kind in [Kind::Face, Kind::Plate] {
         let mine: Vec<&Ask> = asks.iter().filter(|a| a.0 == kind).collect();
         for batch in mine.chunks(JUDGE_BATCH) {
             if sh.cancelled() {
@@ -1128,15 +1187,15 @@ fn verify(made: &mut [ClipRedact], work: &[Work], judge: &dyn VisionJudge, sh: &
             }
             *lock(&sh.prog.status) = format!("Asking {name} which of {} {}s are real", mine.len(), kind.name());
             let crops: Vec<Crop> = batch.iter().map(|a| a.3.clone()).collect();
-            let answers = match judge.judge(kind, &crops) {
+            let got = match judge.judge(kind, &crops) {
                 Ok(a) => a,
                 Err(e) => {
-                    save(&kept);
-                    return Verified::Failed(format!("{e}; everything found is hidden"));
+                    failed = Some(e);
+                    break 'kinds;
                 }
             };
-            for ((_, ci, ti, _, slot), a) in batch.iter().copied().zip(answers.into_iter().chain(std::iter::repeat(None))) {
-                decide(made, kind, *ci, *ti, a);
+            for ((_, ci, ti, _, slot), a) in batch.iter().copied().zip(got.into_iter().chain(std::iter::repeat(None))) {
+                answers.push((kind, *ci, *ti, a));
                 if let Some((i, (vkey, b))) = slot
                     && let Some(k) = kept.get_mut(*i)
                 {
@@ -1145,8 +1204,91 @@ fn verify(made: &mut [ClipRedact], work: &[Work], judge: &dyn VisionJudge, sh: &
             }
         }
     }
+    // the second looks at the faces called not a person (where that would count)
+    let mut second: HashMap<(usize, usize), Option<bool>> = HashMap::new();
+    let mut overrule: Vec<(usize, usize)> = Vec::new();
+    let (mut confirmed, mut confirmed_cached) = (0usize, 0usize);
+    for (kind, ci, ti, a) in answers.iter().filter(|_| failed.is_none()) {
+        if *kind != Kind::Face || *a != Some(false) {
+            continue;
+        }
+        let Some(c) = made.get(*ci) else { continue };
+        let Some((t, _)) = c.tracks.get(*ti) else { continue };
+        let Some(wi) = work.iter().position(|w| w.clip == c.clip) else { continue };
+        let Some(w) = work.get(wi) else { continue };
+        // a face the detector is sure of, away from the subject: hidden whatever the model says
+        if t.best_score >= o.sure_face && !w.exclude.iter().any(|e| e.near(t)) {
+            overrule.push((*ci, *ti));
+            continue;
+        }
+        if sh.cancelled() {
+            save(&kept);
+            return Verified::Skipped("stopped".into());
+        }
+        let Some(best) = best_point(t) else { continue };
+        let slot = kept_slot(&mut kept, cached, wi, "confirm", &name);
+        let moments = std::iter::once(best).chain(t.points.iter().filter(|p| p.seen)).map(|p| (Tick::from_seconds_f64(p.t), &p.bbox));
+        if let Some(a) = slot.and_then(|i| kept.get(i)).and_then(|k| crate::redact_cache::verdict_for(&k.1, Kind::Face, moments)) {
+            confirmed_cached += 1;
+            second.insert((*ci, *ti), a);
+            continue;
+        }
+        *lock(&sh.prog.status) = format!("Looking again at a face {name} called not a person in {}", c.name);
+        let Some(crop) = crop_of(w, t, true) else { continue };
+        match judge.confirm(Kind::Face, &crop) {
+            Ok(a) => {
+                confirmed += 1;
+                second.insert((*ci, *ti), a);
+                if let Some(k) = slot.and_then(|i| kept.get_mut(i)) {
+                    k.2.entry(crate::redact_cache::verdict_key(Kind::Face, Tick::from_seconds_f64(best.t))).or_default().push((best.bbox, a));
+                }
+            }
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
     save(&kept);
-    Verified::Done { judge: name, asked: asks.len(), cached: known.len(), not_people, not_plates, unsure }
+    // the decisions
+    let (mut not_people, mut not_plates, mut unsure, mut overruled) = (0usize, 0usize, 0usize, 0usize);
+    for (kind, ci, ti, a) in answers {
+        let Some((_, skip)) = made.get_mut(ci).and_then(|c| c.tracks.get_mut(ti)) else { continue };
+        let subject = *skip == Some(Skip::Excluded);
+        let a = match (kind, a) {
+            (Kind::Face, Some(false)) if overrule.contains(&(ci, ti)) => {
+                overruled += 1;
+                Some(true)
+            }
+            (Kind::Face, Some(false)) => match second.get(&(ci, ti)) {
+                Some(again) => *again,
+                // not looked at again (the model failed): the subject's face keeps its box's
+                // answer, any other face is hidden
+                None if subject => Some(false),
+                None => Some(true),
+            },
+            (_, a) => a,
+        };
+        match a {
+            Some(false) if kind == Kind::Face => {
+                *skip = Some(Skip::NotAPerson);
+                not_people += 1;
+            }
+            Some(false) => {
+                *skip = Some(Skip::NotAPlate);
+                not_plates += 1;
+            }
+            None => {
+                *skip = None;
+                unsure += 1;
+            }
+            Some(true) => *skip = None,
+        }
+    }
+    if let Some(e) = failed {
+        return Verified::Failed(format!("{e}; everything found is hidden but the subject's face"));
+    }
+    Verified::Done { judge: name, asked: asks.len(), cached: known.len(), not_people, not_plates, unsure, on_subject, confirmed, confirmed_cached, overruled }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1400,6 +1542,8 @@ fn clip_json(c: &ClipRedact, dry: bool, masks: usize) -> Value {
         "masks": masks,
         "skipped": {"tooSmall": skipped(Skip::TooSmall), "tooBrief": skipped(Skip::TooBrief), "excluded": skipped(Skip::Excluded), "notAPerson": skipped(Skip::NotAPerson), "notAPlate": skipped(Skip::NotAPlate)},
         "tracks": c.tracks.iter().map(|(t, s)| track_json(t, *s, dry)).collect::<Vec<_>>(),
+        // the subject's boxes, for the check of the finished video ([`crate::privacy_check`])
+        "robots": c.robots.iter().map(|e| json!({"x": e.bbox[0], "y": e.bbox[1], "w": e.bbox[2], "h": e.bbox[3], "seconds": e.t})).collect::<Vec<_>>(),
     })
 }
 
@@ -1429,7 +1573,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Faces and Plates…",
             menu: &["Clip"],
             shortcut: None,
-            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"wait":bool=false}"#,
+            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"wait":bool=false}"#,
             enabled: has_video_selection,
             run: redact_clips,
             journal: true,
@@ -1439,7 +1583,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Sequence…",
             menu: &[],
             shortcut: None,
-            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"wait":bool=false}"#,
+            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"wait":bool=false}"#,
             enabled: has_seq,
             run: redact_sequence,
             journal: true,
@@ -1478,7 +1622,7 @@ fn preflight(s: &Session, cmd: &str, o: &Options) -> Result<()> {
 }
 
 /// The models must be there before a job starts.
-fn ready(cmd: &str) -> Result<()> {
+pub(crate) fn ready(cmd: &str) -> Result<()> {
     if !available() {
         return Err(bad(cmd, "automatic redaction is not available in this build (built without the `privacy-models` feature)"));
     }
@@ -1630,7 +1774,7 @@ fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipp
         let verified = match (&judge, verify_wanted) {
             (_, false) => Verified::Off,
             (None, true) => Verified::Skipped("no local vision model to tell people from robots and plates from signs: everything found is hidden".into()),
-            (Some(j), true) => verify(&mut made, &work, j.as_ref(), &sh, cached.as_ref()),
+            (Some(j), true) => verify(&mut made, &work, j.as_ref(), &opts, &sh, cached.as_ref()),
         };
         if sh.cancelled() {
             return finish(Err("stopped".into()), "Stopped: nothing was changed".into(), sh.done.load(Ordering::Relaxed));

@@ -992,6 +992,8 @@ async fn build_plan(
         }
     }
     let qa_on = p["qa"].as_bool().unwrap_or(written.is_some());
+    // a person's face shown unblurred stops the upload (`QaReport::publish_blocker`)
+    let mut blocked = None;
     if qa_on {
         let q = crate::qa::Options::for_showcase(&opts, &built);
         let mut report = crate::qa::check(ex, &q, qa_model, &mut |l| note(progress, l)).await;
@@ -1002,8 +1004,18 @@ async fn build_plan(
         }
         out["qaSummary"] = json!(report.summary());
         out["qa"] = serde_json::to_value(&report).unwrap_or_default();
+        blocked = report.publish_blocker();
+        if let Some(b) = &blocked {
+            note(progress, &format!("PRIVACY: {b}"));
+            out["privacyBlocked"] = json!(b);
+        }
     }
     if p["upload"].as_bool() == Some(true)
+        && written.is_some()
+        && let Some(b) = &blocked
+    {
+        out["uploadError"] = json!(format!("not uploaded: {b}"));
+    } else if p["upload"].as_bool() == Some(true)
         && let Some(path) = &written
     {
         let mut up = json!({"path": path, "description": opts.title});
@@ -1019,6 +1031,9 @@ async fn build_plan(
     let mut status = format!("Built {} entries ({}:{:02})", built.entries, secs / 60, secs % 60);
     if let Some(path) = &written {
         status.push_str(&format!(", exported to {path}"));
+    }
+    if let Some(b) = &blocked {
+        status.push_str(&format!(". PRIVACY: {b}"));
     }
     Ok(json!({"built": out, "status": status}))
 }

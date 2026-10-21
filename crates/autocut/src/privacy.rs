@@ -133,6 +133,22 @@ pub fn parse_answer(kind: Kind, v: &Value, n: usize) -> Vec<Option<bool>> {
     out
 }
 
+/// The second look at a face the grid called not a person ([`VisionJudge::confirm`]): the crop
+/// alone, the face outlined in red. Measured 2026-10-21 on nine faces from the Ameca clips of
+/// Every Robot I've Met (five visitors pressed round the robot, four views of its head): the
+/// grid, outlined or not, called a visitor half hidden behind the robot's head a robot (and in
+/// the build's own grid, a young man beside it); alone and outlined, all nine were right.
+const CONFIRM_PROMPT: &str = "This picture is cropped from a video filmed at a technology exhibition. A red rectangle marks something a face detector found; other people, robots or things may be around it. Say what is inside the red rectangle only: 'person' (the face or head of a real, living human being who is there in person), 'robot' (a humanoid robot's face or head, or any machine), 'mannequin', 'statue', 'poster' (a printed picture), 'screen' (a face shown on a phone, tablet or display), or 'none' (no face). Answer JSON: {\"what\": \"...\"}.";
+
+/// The second look's answer ([`CONFIRM_PROMPT`]): as [`parse_answer`] for one face.
+pub fn parse_confirm(v: &Value) -> Option<bool> {
+    let one = match v.get("what") {
+        Some(w) => json!({"tiles": [{"n": 1, "what": w}]}),
+        None => v.clone(),
+    };
+    parse_answer(Kind::Face, &one, 1).into_iter().next().flatten()
+}
+
 /// The vision check over a local Ollama.
 pub struct OllamaJudge {
     ollama: crate::ollama::Ollama,
@@ -163,6 +179,17 @@ impl VisionJudge for OllamaJudge {
             out.extend(parse_answer(kind, &v, part.len()));
         }
         Ok(out)
+    }
+
+    fn confirm(&self, kind: Kind, crop: &Crop) -> Result<Option<bool>, String> {
+        if kind != Kind::Face {
+            return Ok(self.judge(kind, std::slice::from_ref(crop))?.into_iter().next().flatten());
+        }
+        let img = image::RgbaImage::from_raw(crop.width, crop.height, crop.rgba.clone()).ok_or("the crop's pixels do not fit its size")?;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).to_rgb8().write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        let v = self.ollama.chat_json("You answer questions about pictures with JSON only.", CONFIRM_PROMPT, &[png.into_inner()]).map_err(|e| e.to_string())?;
+        Ok(parse_confirm(&v))
     }
 
     fn find(&self, frame: &Crop, targets: &[String]) -> Result<Vec<(usize, [f64; 4])>, String> {
@@ -555,6 +582,10 @@ pub struct Hidden {
     pub most_hidden: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub most_hidden_at: Option<f64>,
+    /// The robot's boxes in the clip (`[x, y, w, h]`, shares of its picture): where a face may be
+    /// the subject's, for the check of the finished video ([`crate::qa`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub robots: Vec<[f64; 4]>,
 }
 
 /// Most clips read from an outcome.
@@ -586,6 +617,17 @@ pub fn hidden_from(outcome: &Value) -> Vec<Hidden> {
                 largest_at: when(&cov["largestAt"]),
                 most_hidden: share(&cov["mostHidden"]),
                 most_hidden_at: when(&cov["mostHiddenAt"]),
+                robots: c["robots"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                    .iter()
+                    .take(64)
+                    .filter_map(|b| {
+                        let v = [b["x"].as_f64()?, b["y"].as_f64()?, b["w"].as_f64()?, b["h"].as_f64()?];
+                        (v.iter().all(|x| x.is_finite() && x.abs() <= 4.0) && v[2] > 0.0 && v[3] > 0.0).then_some(v)
+                    })
+                    .collect(),
             })
         })
         .collect()
@@ -681,6 +723,14 @@ mod tests {
         assert_eq!(parse_answer(Kind::Plate, &p, 3), vec![Some(true), Some(false), None]);
         assert_eq!(parse_answer(Kind::Face, &json!("garbage"), 2), vec![None, None]);
         assert_eq!(parse_answer(Kind::Face, &json!({"tiles": [{"what": "mannequin"}]}), 1), vec![Some(false)]);
+        // the second look's answer: one face
+        assert_eq!(parse_confirm(&json!({"what": "Person"})), Some(true));
+        assert_eq!(parse_confirm(&json!({"what": "robot"})), Some(false));
+        assert_eq!(parse_confirm(&json!({"tiles": [{"n": 1, "what": "statue"}]})), Some(false));
+        for unclear in [json!({"what": "maybe"}), json!({"what": 3}), json!("person"), json!({})] {
+            assert_eq!(parse_confirm(&unclear), None, "{unclear}");
+        }
+        assert!(CONFIRM_PROMPT.contains("red rectangle"));
     }
 
     #[test]
@@ -805,7 +855,8 @@ mod tests {
             {"clip": 7, "also": [9], "name": "a.mov", "faces": 2, "plates": 0, "targets": 1, "masks": 3,
              "coverage": {"largestMask": 0.34, "largestMaskName": "Redact logo 1", "largestAt": {"media": 3.0, "sequence": 12.5},
                           "mostHidden": 0.4, "mostHiddenAt": {"media": 3.0, "sequence": 12.5}}},
-            {"clip": 8, "faces": -1, "coverage": {"largestMask": 7.0, "mostHidden": "x", "largestAt": {"sequence": -3}}},
+            {"clip": 8, "faces": -1, "coverage": {"largestMask": 7.0, "mostHidden": "x", "largestAt": {"sequence": -3}},
+             "robots": [{"x": 0.1, "y": 0.0, "w": 0.5, "h": 1.0, "seconds": 2.0}, {"x": "a"}, {"x": 0.0, "y": 0.0, "w": -1.0, "h": 1.0}, {"x": 1e300, "y": 0.0, "w": 1.0, "h": 1.0}]},
             {"name": "no id"}
         ]});
         let h = hidden_from(&o);
@@ -814,6 +865,9 @@ mod tests {
         assert_eq!((h[0].largest_mask, h[0].largest_mask_name.as_deref(), h[0].largest_at), (0.34, Some("Redact logo 1"), Some(12.5)));
         // hostile numbers: shares clamped, counts and times dropped
         assert_eq!((h[1].largest_mask, h[1].most_hidden, h[1].faces, h[1].largest_at), (1.0, 0.0, 0, None));
+        // the robot's boxes: hostile ones dropped
+        assert_eq!(h[1].robots, vec![[0.1, 0.0, 0.5, 1.0]]);
+        assert!(h[0].robots.is_empty());
         assert!(hidden_from(&json!("nothing")).is_empty());
     }
 

@@ -535,6 +535,12 @@ impl YouTube {
         }
         let path = Path::new(&req.path);
         let video = media::check_video(path)?;
+        // a person's face the video shows unblurred, by its QA report: not uploaded
+        if !req.allow_privacy_findings
+            && let Some(why) = media::privacy_blocker(path)
+        {
+            return Err(YtError::Invalid(why));
+        }
         let mut notes = Vec::new();
         if let Some(s) = video.shape
             && s.seconds > media::LONG_UPLOAD_SECONDS

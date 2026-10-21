@@ -15,7 +15,7 @@
 //! | `sides` | rendered frames where a side of the frame — the left or right pillar, the bar above or below — is black while the picture in the middle still shows ([`black_sides`]): sampled around every transition (its first frames, either side of the cut, its last frames; over a dip its first and last quarters) and at the first and last frame of each picture shown whole over a blurred copy (the showcase's `fit: "full"`, a clip over Auto Reframe's Blur Fill track); flagged only where that side shows something in the frame just before or after the transition or in the middle of the picture shown whole, so letterboxing kept on purpose is not one (errors, with the time and the side) |
 //! | `mix` | the mix exported as 32-bit float WAV and metered (BS.1770): integrated loudness outside −16…−14 LUFS (±0.5 LU) and true peak above −1 dBTP (warnings); true peak above 0 dBTP or samples at full scale: clipping (error); the median short-term loudness during narration clips (A2) vs between them: the voice less than 4 dB louder (warning), or not louder at all (error); and per stem (`audio.analyzeMix`, [`mix_findings`]), for small speakers: the narration less than 12 LU above the music while it speaks, the Mix's limiter taking more than 2 dB off the peaks, more than a quarter of the mix's energy below 120 Hz, a narration clip with a clipped source (warnings) |
 //! | `subject` | shots where the grounding model (`AUTOCUT_ANALYSIS_MODEL`, the analysis' prompt) does not find the subject in a rendered frame (warnings); skipped when no model is reachable |
-//! | `privacy` | from what the privacy pass hid ([`Options::privacy`]): a redaction mask covering more than [`Options::max_mask`] (a fifth) of a clip's picture at any keyframe (warnings: a blur that size hides the shot, as one on a close-up of a tablet did); the faces, plates and named places hidden in each entry (`privacy` in the report) |
+//! | `privacy` | from what the privacy pass hid ([`Options::privacy`]): a redaction mask covering more than [`Options::max_mask`] (a fifth) of a clip's picture at any keyframe (warnings: a blur that size hides the shot, as one on a close-up of a tablet did); the faces, plates and named places hidden in each entry (`privacy` in the report). And, for a show that hides faces ([`Options::faces`]), the faces the finished picture still shows: frames every half second and at each shot's start rendered as they export, the face detector run on them (`sequence.checkPrivacy`), and every face at least [`Options::face_min_height`] of the frame tall that no redaction mask covers is an error — unless the vision model twice calls it not a person and it is on the robot (inside the shot's subject box) or the detector is not sure of it; a face on the robot no model could confirm is a warning. Each with its time and box (`unblurredFaces` in the report) and a crop on the privacy sheet; [`QaReport::publish_blocker`] stops an upload when there is one (the bug of 2026-10-21: two visitors next to Ameca, published unblurred, while this check said OK) |
 //! | `safe_zones` | captions, titles and lower thirds (`sequence.checkSafeZones`) that reach into the parts of the frame [`Options::platform`]'s own interface covers — YouTube Shorts, Instagram Reels, TikTok; a vertical sequence without one: all of them at once (warnings, with the zone and how much of it is in there); skipped on a horizontal sequence without a platform |
 //!
 //! The report ([`QaReport`], serde) also holds a contact sheet: one rendered frame per entry
@@ -112,6 +112,15 @@ pub struct Options {
     pub privacy: Vec<crate::privacy::Hidden>,
     /// The largest share of a clip's picture one redaction mask may cover.
     pub max_mask: f64,
+    /// Look for faces the finished picture shows that no redaction mask hides
+    /// (`sequence.checkPrivacy`): on for a show that hides faces.
+    pub faces: bool,
+    /// Seconds between the frames looked at for faces (each shot's first frames too).
+    pub face_every: f64,
+    /// Longest side of the frames the face detector sees.
+    pub face_side: u32,
+    /// The smallest face counted, as a share of the frame's height (the redaction's own rule).
+    pub face_min_height: f64,
     /// The platform whose interface captions, titles and lower thirds must keep clear of
     /// (`youtube`, `reels`, `tiktok`, `vertical`); None: all of them on a vertical sequence, the
     /// check skipped on a horizontal one.
@@ -142,6 +151,10 @@ impl Default for Options {
             max_low_share: MAX_LOW_SHARE,
             privacy: Vec::new(),
             max_mask: 0.2,
+            faces: false,
+            face_every: 0.5,
+            face_side: 1280,
+            face_min_height: 0.05,
             platform: None,
         }
     }
@@ -150,7 +163,14 @@ impl Default for Options {
 impl Options {
     /// The checks of a showcase built with `opts`.
     pub fn for_showcase(opts: &crate::showcase::Options, built: &Built) -> Self {
-        Self { subject: opts.subject.clone(), entries: built.layout.clone(), privacy: built.privacy.clone(), ..Self::default() }
+        Self {
+            subject: opts.subject.clone(),
+            entries: built.layout.clone(),
+            privacy: built.privacy.clone(),
+            faces: opts.redact.as_ref().is_some_and(|r| r.faces),
+            face_min_height: opts.redact.as_ref().and_then(|r| r.min_face_height).filter(|h| h.is_finite() && *h > 0.0).unwrap_or(0.05),
+            ..Self::default()
+        }
     }
 }
 
@@ -281,6 +301,10 @@ pub struct QaReport {
     /// The privacy sheet, PNG: a frame of each clip with masks, where most of it is hidden.
     #[serde(skip)]
     pub privacy_sheet_png: Option<Vec<u8>>,
+    /// Faces the finished picture shows that no redaction mask hides ([`Options::faces`]), with
+    /// when and where: what a platform's own blur tool needs if the video is already out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unblurred_faces: Vec<UnblurredFace>,
 }
 
 /// What the privacy pass hid in one entry: faces, number plates, places of named targets (logos,
@@ -316,6 +340,19 @@ impl QaReport {
             }
         }
         format!("{} error(s), {} warning(s): {}", self.errors, self.warnings, parts.join("; "))
+    }
+
+    /// Why this video must not be published as it is: the privacy check's errors (a person's
+    /// face shown unblurred), or none.
+    pub fn publish_blocker(&self) -> Option<String> {
+        let errors = self.of("privacy", Severity::Error);
+        let first = errors.first()?;
+        Some(format!(
+            "the privacy check found {} unblurred face(s) of people (the first at {}{}); not published: fix the blur (the faces and times are in the QA report's unblurredFaces and on the privacy sheet)",
+            errors.len(),
+            stamp(first.seconds),
+            first.entry.map(|e| format!(", entry {e}")).unwrap_or_default()
+        ))
     }
 
     pub(crate) fn tally(&mut self) {
@@ -1668,7 +1705,7 @@ fn entry_of_clips<'a>(opts: &'a Options, clips: &[u64]) -> Option<&'a PlacedEntr
 /// masks where most of it is hidden, for the privacy sheet: `(entry, PNG)`.
 async fn privacy(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport, progress: &mut dyn FnMut(&str)) -> (Check, Vec<(usize, Option<Vec<u8>>)>) {
     let name = "privacy";
-    if opts.privacy.is_empty() {
+    if opts.privacy.is_empty() && !opts.faces {
         return (Check::skipped(name, "nothing was redacted"), Vec::new());
     }
     let max = if opts.max_mask.is_finite() { opts.max_mask.clamp(0.0, 1.0) } else { 0.2 };
@@ -1730,7 +1767,7 @@ async fn privacy(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport,
     tiles.sort_by_key(|t| t.0);
     let total = |f: fn(&EntryPrivacy) -> usize| per.iter().map(f).sum::<usize>();
     let hiding = per.iter().filter(|p| p.faces + p.plates + p.named > 0).count();
-    let note = format!(
+    let mut note = format!(
         "{} face(s), {} plate(s), {} named place(s) hidden in {hiding} of the {} entries checked",
         total(|p| p.faces),
         total(|p| p.plates),
@@ -1738,7 +1775,354 @@ async fn privacy(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport,
         per.len()
     );
     r.privacy = per;
+    if opts.faces {
+        let (faces_note, face_tiles) = unblurred(ex, seq, opts, r, progress).await;
+        note.push_str("; ");
+        note.push_str(&faces_note);
+        // the faces shown first: they are what the sheet is for
+        tiles.splice(0..0, face_tiles);
+    }
     (Check::ran(name, &r.findings, Some(note)), tiles)
+}
+
+// ------------------------------------------------------------------ unblurred faces
+
+/// Most frames looked at for faces, and in one `sequence.checkPrivacy` call.
+const MAX_FACE_FRAMES: usize = 20_000;
+const FACE_CHUNK: usize = 30;
+/// Most unblurred faces drawn on the privacy sheet.
+const MAX_FACE_TILES: usize = 48;
+/// An unblurred face the detector scores at least this is an error (below: a warning).
+pub const FACE_ERROR_SCORE: f64 = 0.75;
+
+/// A face the finished picture shows that no redaction mask hides (`sequence.checkPrivacy`):
+/// when, where, and what the check made of it. The boxes drive a platform's own blur tool
+/// (YouTube Studio's custom blur) when a published video needs one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnblurredFace {
+    /// Seen from `start` to `end` (sequence seconds; looked at every [`Options::face_every`]).
+    pub start: f64,
+    pub end: f64,
+    /// Where it is largest: when, and its box `[x, y, w, h]` in shares of the frame.
+    pub seconds: f64,
+    #[serde(rename = "box")]
+    pub bbox: [f64; 4],
+    pub score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clip: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The media time of that clip there, seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<f64>,
+    /// Inside the robot's box (the shot's subject).
+    pub on_subject: bool,
+    /// What the vision model said: `person`, `notPerson`, `unsure` or `unchecked`.
+    pub verdict: String,
+    /// Left sharp as the rules allow: a robot's face (twice called not a person, on the subject
+    /// or not one the detector is sure of).
+    pub allowed: bool,
+    /// The finding it makes (none: allowed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    /// Its box where it was first and last seen (for joining it with the same face in the next
+    /// stretch looked at).
+    #[serde(skip)]
+    pub first_box: [f64; 4],
+    #[serde(skip)]
+    pub last_box: [f64; 4],
+}
+
+/// The faces of one `sequence.checkPrivacy` answer; hostile values are dropped.
+pub fn faces_of(v: &Value) -> Vec<UnblurredFace> {
+    let fin = |x: &Value| x.as_f64().filter(|v| v.is_finite());
+    v["unmasked"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .take(MAX_CLIPS)
+        .filter_map(|f| {
+            let b = &f["box"];
+            let bbox = [fin(&b["x"])?, fin(&b["y"])?, fin(&b["w"])?, fin(&b["h"])?];
+            let (start, end, seconds) = (fin(&f["start"])?, fin(&f["end"])?, fin(&f["seconds"])?);
+            if !(bbox[2] > 0.0 && bbox[3] > 0.0 && start >= 0.0 && end >= start) {
+                return None;
+            }
+            let verdict = f["verdict"].as_str().filter(|v| matches!(*v, "person" | "notPerson" | "unsure")).unwrap_or("unchecked");
+            let at = |k: &str| {
+                let b = &f[k];
+                let read = || Some([fin(&b["x"])?, fin(&b["y"])?, fin(&b["w"])?, fin(&b["h"])?]);
+                read().filter(|b| b[2] > 0.0 && b[3] > 0.0).unwrap_or(bbox)
+            };
+            Some(UnblurredFace {
+                start,
+                end,
+                seconds,
+                bbox,
+                score: fin(&f["score"]).unwrap_or(0.0).clamp(0.0, 1.0),
+                entry: None,
+                clip: f["clip"].as_u64(),
+                name: f["name"].as_str().map(|s| s.chars().take(200).collect()),
+                media: fin(&f["media"]),
+                on_subject: f["onSubject"].as_bool().unwrap_or(false),
+                verdict: verdict.to_string(),
+                allowed: f["allowed"].as_bool().unwrap_or(false),
+                severity: None,
+                first_box: at("first"),
+                last_box: at("last"),
+            })
+        })
+        .collect()
+}
+
+/// Two boxes `[x, y, w, h]` overlap or lie within a face of each other.
+fn same_face(a: &[f64; 4], b: &[f64; 4]) -> bool {
+    let (ax, ay, bx, by) = (a[0] + a[2] / 2.0, a[1] + a[3] / 2.0, b[0] + b[2] / 2.0, b[1] + b[3] / 2.0);
+    let reach = a[2].max(a[3]).max(b[2]).max(b[3]) * 1.5;
+    ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt() <= reach
+}
+
+/// One face seen in neighbouring calls (split at their boundary) as one: same clip, the second
+/// starting after the first ends and no more than `gap` seconds later, where the first was last
+/// seen (two faces seen at once are two faces). The merged face is what the worse of the two
+/// says.
+pub fn merge_faces(mut faces: Vec<UnblurredFace>, gap: f64) -> Vec<UnblurredFace> {
+    faces.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut out: Vec<UnblurredFace> = Vec::new();
+    let centre = |b: &[f64; 4]| (b[0] + b[2] / 2.0, b[1] + b[3] / 2.0);
+    for f in faces {
+        let (fx, fy) = centre(&f.first_box);
+        let near = |o: &UnblurredFace| {
+            let (ox, oy) = centre(&o.last_box);
+            (ox - fx).powi(2) + (oy - fy).powi(2)
+        };
+        let into = out
+            .iter_mut()
+            .filter(|o| o.clip == f.clip && f.start > o.end && f.start - o.end <= gap && same_face(&o.last_box, &f.first_box))
+            .min_by(|a, b| near(a).total_cmp(&near(b)));
+        if let Some(last) = into {
+            let rank = |v: &str| match v {
+                "person" => 3,
+                "unsure" | "unchecked" => 2,
+                "notPerson" => 1,
+                _ => 0,
+            };
+            if rank(&f.verdict) > rank(&last.verdict) {
+                last.verdict = f.verdict.clone();
+            }
+            if f.bbox[3] > last.bbox[3] {
+                (last.seconds, last.bbox, last.media) = (f.seconds, f.bbox, f.media);
+            }
+            last.end = last.end.max(f.end);
+            last.last_box = f.last_box;
+            last.score = last.score.max(f.score);
+            last.on_subject |= f.on_subject;
+            last.allowed &= f.allowed;
+            continue;
+        }
+        out.push(f);
+    }
+    out.sort_by(|a, b| a.start.total_cmp(&b.start));
+    out
+}
+
+/// What an unblurred face makes: none when it may stay sharp ([`UnblurredFace::allowed`]); a
+/// warning for a face on the robot no model said is the robot's; an error otherwise (a person,
+/// or one the detector is sure of away from the robot, or nobody could tell).
+pub fn face_severity(f: &UnblurredFace) -> Option<Severity> {
+    if f.allowed {
+        return None;
+    }
+    // what the detector is not sure of is worth a look, not a stop: on the v5 show the faces
+    // left sharp scored 0.80–0.93, the false finds (a shoe, a robot's base, the floor) 0.62–0.69
+    if f.score < FACE_ERROR_SCORE {
+        return Some(Severity::Warning);
+    }
+    match f.verdict.as_str() {
+        "person" | "notPerson" => Some(Severity::Error),
+        _ if f.on_subject => Some(Severity::Warning),
+        _ => Some(Severity::Error),
+    }
+}
+
+/// The finding of an unblurred face (with its severity).
+fn face_finding(f: &UnblurredFace, severity: Severity) -> Finding {
+    let what = f.name.as_deref().map(|n| format!(" in “{n}”")).unwrap_or_default();
+    let said = match f.verdict.as_str() {
+        "person" => "the vision model sees a person",
+        "notPerson" => "the detector is sure of it and it is not on the robot",
+        "unsure" => "the vision model could not tell what it is",
+        _ => "no vision model looked at it",
+    };
+    let [x, y, w, h] = f.bbox;
+    let message = match severity {
+        Severity::Error => format!(
+            "an unblurred face from {} to {}{what}: {:.0} % of the frame tall at x {:.0} %, y {:.0} % (largest at {}; {said}); it needs a blur",
+            stamp(f.start),
+            stamp(f.end),
+            h * 100.0,
+            (x + w / 2.0) * 100.0,
+            (y + h / 2.0) * 100.0,
+            stamp(f.seconds)
+        ),
+        _ if f.score < FACE_ERROR_SCORE => format!(
+            "something the face detector is not sure of ({:.2}) left unblurred from {} to {}{what} at x {:.0} %, y {:.0} % ({said}): check whether it is a face",
+            f.score,
+            stamp(f.start),
+            stamp(f.end),
+            (x + w / 2.0) * 100.0,
+            (y + h / 2.0) * 100.0
+        ),
+        _ => format!("a face on the robot left sharp from {} to {}{what} ({said}): check that it is the robot's", stamp(f.start), stamp(f.end)),
+    };
+    let mut out = Finding::new("privacy", severity, f.start, message).until(f.end).clip(f.clip);
+    out.entry = f.entry;
+    out
+}
+
+/// The times looked at for faces: every `face_every` seconds, and each video clip's first frame
+/// and a quarter second in (a shot's start is where a face in it shows first).
+fn face_times(seq: &Seq, opts: &Options) -> Vec<f64> {
+    let end = secs(seq.duration);
+    let every = if opts.face_every.is_finite() && opts.face_every >= 0.05 { opts.face_every } else { 0.5 };
+    let mut t: Vec<f64> = (0..MAX_FACE_FRAMES).map(|k| k as f64 * every).take_while(|t| *t < end).collect();
+    for c in seq.video.iter().filter(|tr| tr.enabled).flat_map(|tr| tr.clips.iter().filter(|c| c.enabled && c.end > c.start)) {
+        let first = secs(seq.frame_tick(seq.frame_ceil(c.start)));
+        t.push(first);
+        if first + 0.25 < secs(c.end) {
+            t.push(first + 0.25);
+        }
+    }
+    let half = 0.5 / seq.fps().max(1.0);
+    t.retain(|x| x.is_finite() && *x >= 0.0 && *x < end);
+    t.sort_by(f64::total_cmp);
+    t.dedup_by(|a, b| (*a - *b).abs() < half);
+    t.truncate(MAX_FACE_FRAMES);
+    t
+}
+
+/// The robot's boxes of every redacted clip and its copies, as `sequence.checkPrivacy`'s
+/// `exclude`.
+fn robot_boxes(opts: &Options) -> Vec<Value> {
+    let mut out = Vec::new();
+    for h in &opts.privacy {
+        for c in std::iter::once(h.clip).chain(h.also.iter().copied()) {
+            for b in &h.robots {
+                if out.len() < 10_000 {
+                    out.push(json!({"clip": c, "x": b[0], "y": b[1], "w": b[2], "h": b[3]}));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A crop of the frame at `f.seconds` around the face, the face outlined in red, in the frame's
+/// shape (for the privacy sheet).
+async fn face_tile(ex: &dyn Executor, seq: &Seq, f: &UnblurredFace, side: u32) -> Option<Vec<u8>> {
+    let t = secs(seq.frame_tick(seq.frame_floor((f.seconds * TPS_F).round() as i64)));
+    let png = ex.render(t, side.max(640)).await?;
+    let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png).ok()?.to_rgba8();
+    let (w, h) = (f64::from(img.width()), f64::from(img.height()));
+    let [bx, by, bw, bh] = f.bbox;
+    // four faces tall, the frame's shape, inside the frame
+    let ch = (bh * h * 4.0).clamp(h * 0.25, h);
+    let cw = (ch * w / h).min(w);
+    let (cx, cy) = ((bx + bw / 2.0) * w, (by + bh / 2.0) * h);
+    let (x0, y0) = ((cx - cw / 2.0).clamp(0.0, (w - cw).max(0.0)), (cy - ch / 2.0).clamp(0.0, (h - ch).max(0.0)));
+    let mut crop = image::imageops::crop_imm(&img, x0 as u32, y0 as u32, (cw as u32).max(1), (ch as u32).max(1)).to_image();
+    let (rx0, ry0, rx1, ry1) = (bx * w - x0, by * h - y0, (bx + bw) * w - x0, (by + bh) * h - y0);
+    let thick = (ch / 150.0).ceil().max(2.0) as i64;
+    let (cw_i, ch_i) = (i64::from(crop.width()), i64::from(crop.height()));
+    for k in 0..thick {
+        let (l, t, r, b) = (rx0 as i64 - k, ry0 as i64 - k, rx1 as i64 + k, ry1 as i64 + k);
+        for x in l..=r {
+            for y in [t, b] {
+                if (0..cw_i).contains(&x) && (0..ch_i).contains(&y) {
+                    crop.put_pixel(x as u32, y as u32, image::Rgba([255, 0, 0, 255]));
+                }
+            }
+        }
+        for y in t..=b {
+            for x in [l, r] {
+                if (0..cw_i).contains(&x) && (0..ch_i).contains(&y) {
+                    crop.put_pixel(x as u32, y as u32, image::Rgba([255, 0, 0, 255]));
+                }
+            }
+        }
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    crop.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(out.into_inner())
+}
+
+/// Faces the finished picture shows that no redaction mask hides ([`Options::faces`]): frames
+/// every [`Options::face_every`] seconds and at each shot's start, through
+/// `sequence.checkPrivacy` (the face detector on the rendered frame, the masks, the robot's
+/// boxes and the vision model); each face shown that should not be is a finding — an error for a
+/// person — with a crop of it on the privacy sheet. Returns the note and the sheet's tiles.
+async fn unblurred(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport, progress: &mut dyn FnMut(&str)) -> (String, Vec<(usize, Option<Vec<u8>>)>) {
+    let times = face_times(seq, opts);
+    let exclude = robot_boxes(opts);
+    let mut faces: Vec<UnblurredFace> = Vec::new();
+    let (mut frames, mut masked, mut asked) = (0u64, 0u64, None::<String>);
+    let n = times.len();
+    for (k, chunk) in times.chunks(FACE_CHUNK).enumerate() {
+        if k % 10 == 0 {
+            progress(&format!("QA: looking for unblurred faces ({} of {n} frames)", k * FACE_CHUNK));
+        }
+        let mut p = json!({"seconds": chunk, "maxSide": opts.face_side.clamp(160, 3840), "minFaceHeight": opts.face_min_height.clamp(0.0, 1.0)});
+        if !exclude.is_empty() {
+            p["exclude"] = Value::Array(exclude.clone());
+        }
+        match ex.execute("sequence.checkPrivacy", p).await {
+            Ok(v) => {
+                frames += v["frames"].as_u64().unwrap_or(0);
+                masked += v["masked"].as_u64().unwrap_or(0);
+                faces.extend(faces_of(&v));
+                if let Some(state) = v["verify"]["state"].as_str().filter(|s| *s != "done") {
+                    asked = Some(format!("{state}{}", v["verify"]["reason"].as_str().map(|r| format!(": {r}")).unwrap_or_default()));
+                }
+            }
+            Err(e) => {
+                let f = Finding::new("privacy", Severity::Warning, 0.0, format!("could not look for unblurred faces: {e}"));
+                r.findings.push(f);
+                return (format!("unblurred faces not looked for ({e})"), Vec::new());
+            }
+        }
+    }
+    let gap = if opts.face_every.is_finite() { (opts.face_every * 2.5).clamp(0.5, 5.0) } else { 1.25 };
+    let mut faces = merge_faces(faces, gap);
+    for f in &mut faces {
+        f.entry = entry_at(seq, opts, f.start);
+        f.severity = face_severity(f);
+        if let Some(sev) = f.severity {
+            r.findings.push(face_finding(f, sev));
+        }
+    }
+    let shown: Vec<&UnblurredFace> = faces.iter().filter(|f| f.severity == Some(Severity::Error)).collect();
+    let mut tiles = Vec::new();
+    for f in faces.iter().filter(|f| f.severity.is_some()).take(MAX_FACE_TILES) {
+        let png = face_tile(ex, seq, f, opts.face_side).await;
+        if png.is_some() {
+            r.frames_rendered += 1;
+        }
+        tiles.push((f.entry.unwrap_or(0), png));
+    }
+    let allowed = faces.iter().filter(|f| f.allowed).count();
+    let note = format!(
+        "{frames} frame(s) looked at for faces: {masked} sighting(s) under a mask, {} unblurred face(s) shown{}, {} on the robot to check, {allowed} left sharp as robots{}",
+        shown.len(),
+        shown.first().map(|f| format!(" (first at {})", stamp(f.start))).unwrap_or_default(),
+        faces.iter().filter(|f| f.severity == Some(Severity::Warning)).count(),
+        asked.map(|a| format!("; vision check {a}")).unwrap_or_default()
+    );
+    r.unblurred_faces = faces;
+    (note, tiles)
 }
 
 // ------------------------------------------------------------------ safe zones
@@ -2186,6 +2570,53 @@ mod tests {
         assert_eq!(safe_zones(&ex, &flat, &Options::default(), &mut QaReport::default()).await.status, "skipped");
         let bad = Options { platform: Some("snapchat".into()), ..Options::default() };
         assert_eq!(safe_zones(&ex, &seq, &bad, &mut QaReport::default()).await.status, "skipped");
+    }
+
+    #[test]
+    fn unblurred_faces_are_read_merged_and_judged() {
+        let face = |start: f64, end: f64, x: f64, verdict: &str, allowed: bool| {
+            json!({"start": start, "end": end, "seconds": start, "box": {"x": x, "y": 0.1, "w": 0.07, "h": 0.16}, "score": 0.92,
+                   "clip": 10347, "name": "VID_20221014_144910.mp4", "onSubject": true, "verdict": verdict, "allowed": allowed})
+        };
+        let v = json!({"unmasked": [
+            face(427.8, 428.9, 0.3, "notPerson", true),
+            // the same face in the next call: merged, the worse answer kept
+            face(429.2, 434.0, 0.31, "person", false),
+            face(430.0, 431.0, 0.9, "unsure", false),
+            // a face beside it at the same time: another face (the two women next to Ameca)
+            face(428.0, 433.0, 0.37, "person", false),
+            {"start": "x", "box": {}},
+            {"start": 1.0, "end": 0.5, "seconds": 1.0, "box": {"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1}},
+            {"start": 1.0, "end": 2.0, "seconds": 1.0, "box": {"x": 0.1, "y": 0.1, "w": 0.0, "h": 0.1}}
+        ]});
+        let faces = faces_of(&v);
+        assert_eq!(faces.len(), 4, "hostile entries dropped: {faces:?}");
+        let merged = merge_faces(faces, 1.25);
+        assert_eq!(merged.len(), 3, "{merged:?}");
+        let a = &merged[0];
+        assert_eq!((a.start, a.end, a.verdict.as_str(), a.allowed), (427.8, 434.0, "person", false));
+        assert_eq!(face_severity(a), Some(Severity::Error));
+        assert_eq!((merged[1].start, merged[1].bbox[0]), (428.0, 0.37));
+        // on the robot, nobody could tell: a warning; a robot's face: nothing
+        assert_eq!(face_severity(&merged[2]), Some(Severity::Warning));
+        assert_eq!(face_severity(&UnblurredFace { allowed: true, verdict: "notPerson".into(), ..UnblurredFace::default() }), None);
+        // away from the robot, unchecked: an error; what the detector is not sure of: a warning
+        let unchecked = UnblurredFace { verdict: "unchecked".into(), score: 0.9, ..UnblurredFace::default() };
+        assert_eq!(face_severity(&unchecked), Some(Severity::Error));
+        let unsure = UnblurredFace { verdict: "person".into(), score: 0.67, ..unchecked };
+        assert_eq!(face_severity(&unsure), Some(Severity::Warning));
+        assert!(face_finding(&unsure, Severity::Warning).message.contains("not sure of (0.67)"));
+        // far apart in time: two faces
+        let far = merge_faces(faces_of(&json!({"unmasked": [face(1.0, 2.0, 0.3, "person", false), face(9.0, 10.0, 0.3, "person", false)]})), 1.25);
+        assert_eq!(far.len(), 2);
+        assert!(faces_of(&json!("nothing")).is_empty());
+        // a report with one blocks publishing; warnings do not
+        let mut r = QaReport::default();
+        r.findings.push(face_finding(a, Severity::Error));
+        r.findings.push(Finding::new("privacy", Severity::Warning, 1.0, "a big mask".into()));
+        assert!(r.publish_blocker().is_some_and(|b| b.contains("1 unblurred face") && b.contains("7:07.8")), "{:?}", r.publish_blocker());
+        r.findings.remove(0);
+        assert!(r.publish_blocker().is_none());
     }
 
     #[test]
