@@ -157,3 +157,14 @@ VA-API's. The rules above hold: `libnvcuvid.so.1` and `libcuda.so.1` are loaded 
 the one `nvenc::device` already retains for encoding. Unlike VA-API, NVDEC parses the stream
 itself; its callbacks run inside our parse call and never unwind into C (they record the first
 error and return 0, and the decoder then fails over to software like any other backend).
+
+## Addendum (2026-10-21): two VideoToolbox encoding sessions at once
+
+On chips with two media engines a 4K H.264 export is encoded by two real-time VideoToolbox sessions
+side by side, each taking whole keyframe intervals in turn, joined into one stream
+(`hardware_encode::ParallelEncoder`). It added no `unsafe` module: the joining
+(`parallel_encode`) is safe, generic code tested with a stand-in encoder on every system, and each
+session is the existing `videotoolbox_encode` wrapper, which gained a forced-keyframe frame option
+and one more call, `sysctlbyname("machdep.cpu.brand_string")` to read the chip's name (how many
+engines it has), both with `// SAFETY:` comments. Each session runs on a thread of its own under
+`catch_unwind`; a session that fails stops the export with its error, as before.

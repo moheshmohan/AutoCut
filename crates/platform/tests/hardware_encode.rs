@@ -324,6 +324,7 @@ fn hostile_configurations_give_errors_not_crashes() {
         keyframe_interval: 30,
         profile: VtProfile::High,
         rate: VtRate::Vbr { target_kbps: 8000, max_kbps: 12_000 },
+        realtime: false,
     };
     let variants: Vec<(&str, VtConfig)> = vec![
         ("zero width", VtConfig { width: 0, ..base.clone() }),
@@ -615,6 +616,7 @@ fn hevc_hostile_configurations_give_errors_not_crashes() {
         keyframe_interval: 30,
         profile: VtProfile::HevcMain,
         rate: VtRate::Vbr { target_kbps: 6000, max_kbps: 9000 },
+        realtime: false,
     };
     let variants: Vec<(&str, VtConfig)> = vec![
         ("zero width", VtConfig { width: 0, ..base.clone() }),
@@ -755,6 +757,7 @@ fn the_sessions_run_on_the_hardware_encoder() {
         keyframe_interval: 30,
         profile,
         rate: VtRate::Vbr { target_kbps: 6000, max_kbps: 9000 },
+        realtime: false,
     };
     for (name, profile) in [("H.264", VtProfile::High), ("HEVC", VtProfile::HevcMain)] {
         match VtEncoder::new(config(profile)) {

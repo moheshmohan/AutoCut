@@ -41,8 +41,8 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_AllowOpenGOP, kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ColorPrimaries,
     kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime, kVTCompressionPropertyKey_TransferFunction,
-    kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, kVTCompressionPropertyKey_YCbCrMatrix, kVTProfileLevel_H264_Baseline_AutoLevel,
-    kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_H264_Main_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
+    kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, kVTCompressionPropertyKey_YCbCrMatrix, kVTEncodeFrameOptionKey_ForceKeyFrame,
+    kVTProfileLevel_H264_Baseline_AutoLevel, kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_H264_Main_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
 
@@ -102,6 +102,11 @@ pub struct VtConfig {
     /// The profile, which also says whether this is an H.264 or an HEVC session.
     pub profile: VtProfile,
     pub rate: VtRate,
+    /// Ask for a real-time session. On chips with two media engines (M-series Max and Ultra) an
+    /// offline session spreads its frames over both engines, and two offline sessions slow each
+    /// other down; a real-time session of a picture one engine can encode at the expected frame rate keeps
+    /// to one engine, so two of them run side by side (see `hardware_encode::ParallelEncoder`).
+    pub realtime: bool,
 }
 
 /// One compressed frame in decoding order, which is presentation order (times in the config's timescale).
@@ -423,6 +428,37 @@ fn set_bool(session: &VTCompressionSession, key: &CFString, on: bool) -> i32 {
 
 unsafe extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn sysctlbyname(name: *const c_char, oldp: *mut c_void, oldlenp: *mut usize, newp: *mut c_void, newlen: usize) -> c_int;
+}
+
+/// The processor's name (`machdep.cpu.brand_string`, e.g. "Apple M3 Max"), if the system says.
+pub fn cpu_brand() -> Option<String> {
+    const NAME: &CStr = c"machdep.cpu.brand_string";
+    let mut buf = [0u8; 256];
+    let mut len = buf.len();
+    // SAFETY: `NAME` is NUL-terminated; `buf` has `len` writable bytes and `len` is a valid
+    // in/out pointer; nothing is written to the system (`newp` null, `newlen` 0).
+    let status = unsafe { sysctlbyname(NAME.as_ptr(), buf.as_mut_ptr().cast(), &raw mut len, std::ptr::null_mut(), 0) };
+    if status != 0 {
+        return None;
+    }
+    let bytes = buf.get(..len.min(buf.len()))?;
+    let text = bytes.split(|b| *b == 0).next()?;
+    Some(String::from_utf8_lossy(text).trim().to_string())
+}
+
+/// Video encode engines of the chip, from its name: Apple's M-series Max and Ultra chips have two
+/// or more (each runs one encoding session at a time), the others one. Asked once.
+pub fn media_engines() -> usize {
+    static ENGINES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *ENGINES.get_or_init(|| engines_of(cpu_brand().as_deref().unwrap_or("")))
+}
+
+/// [`media_engines`] for a processor name.
+pub fn engines_of(brand: &str) -> usize {
+    let apple = brand.starts_with("Apple M");
+    let words: Vec<&str> = brand.split_whitespace().collect();
+    if apple && words.iter().any(|w| *w == "Max" || *w == "Ultra") { 2 } else { 1 }
 }
 
 /// `kVTCompressionPropertyKey_ConstantBitRate`, or `None` on a macOS that does not have it.
@@ -531,7 +567,11 @@ impl VtEncoder {
         // SAFETY: reading immutable framework constants.
         let (realtime, reorder, open_gop) =
             unsafe { (kVTCompressionPropertyKey_RealTime, kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP) };
-        require(set_bool(session, realtime, false), "offline encoding")?;
+        // Offline unless asked: one offline session is the fastest single session (4K H.264 on M3
+        // Max: 63 fps offline, 53 real-time; PrioritizeEncodingSpeedOverQuality and
+        // MaximizePowerEfficiency change nothing, MaxFrameDelayCount is not supported), and a
+        // real-time session keeps to one media engine (`VtConfig::realtime`).
+        require(set_bool(session, realtime, c.realtime), "real-time or offline encoding")?;
         // No B-frames: on real 1080p footage the hardware encoder's quality is the same with and
         // without them (±0.3 dB at equal bitrate), the bitrate lands closer to the target, and
         // decode and presentation order coincide, so the muxer needs no composition offsets or edit list.
@@ -545,6 +585,8 @@ impl VtEncoder {
         require(set_value(session, keyint_key, CFNumber::new_i32(keyint).as_ref()), "the keyframe interval")?;
         // SAFETY: reading an immutable framework constant.
         let fps_key = unsafe { kVTCompressionPropertyKey_ExpectedFrameRate };
+        // (the real rate: VideoToolbox picks the level from it, and with it decides whether a
+        // real-time session fits one media engine)
         let fps = f64::from(c.timescale) / f64::from(c.frame_duration);
         let _ = set_value(session, fps_key, CFNumber::new_f64(fps).as_ref());
 
@@ -639,13 +681,24 @@ impl VtEncoder {
     /// Submit picture number `index` (planar BT.709 limited-range Y'CbCr, tightly packed) and return
     /// the compressed frames that came out meanwhile.
     pub fn encode(&mut self, index: u64, y: &[u8], u: &[u8], v: &[u8]) -> Result<Vec<VtPacket>, String> {
+        self.encode_frame(index, y, u, v, false)
+    }
+
+    /// [`Self::encode`], and with `keyframe` the picture is coded as a keyframe (an IDR picture).
+    pub fn encode_frame(&mut self, index: u64, y: &[u8], u: &[u8], v: &[u8], keyframe: bool) -> Result<Vec<VtPacket>, String> {
         let buffer = self.new_buffer()?;
         fill(&buffer, self.config.width as usize, self.config.height as usize, y, u, v)?;
         let value = i64::try_from(index).ok().and_then(|i| i.checked_mul(i64::from(self.config.frame_duration))).ok_or("frame index out of range")?;
         let (pts, duration) = (cm_time(value, self.config.timescale), cm_time(i64::from(self.config.frame_duration), self.config.timescale));
+        // SAFETY: reading an immutable framework constant.
+        let force_key: &CFString = unsafe { kVTEncodeFrameOptionKey_ForceKeyFrame };
+        let options = keyframe.then(|| CFDictionary::<CFString, CFType>::from_slices(&[force_key], &[CFBoolean::new(true).as_ref()]));
         // SAFETY: the session and buffer are valid (VideoToolbox retains the buffer as long as it
-        // needs it); no frame properties, refcon or info-flags out-pointer.
-        let status = unsafe { self.session.session.encode_frame(&buffer, pts, duration, None, std::ptr::null_mut(), std::ptr::null_mut()) };
+        // needs it); the frame options, if any, are a live dictionary from CFString keys to CF
+        // values, as VideoToolbox expects; no refcon or info-flags out-pointer.
+        let status = unsafe {
+            self.session.session.encode_frame(&buffer, pts, duration, options.as_deref().map(|d| d.as_opaque()), std::ptr::null_mut(), std::ptr::null_mut())
+        };
         if status != 0 {
             return Err(format!("VTCompressionSessionEncodeFrame failed ({status})"));
         }
