@@ -109,6 +109,10 @@ async fn narration_never_overlaps_and_short_footage_is_slowed_to_fit() {
     // the shots of the short clips were slowed down (speed below 100 %)
     let v2 = seq["video"][1]["items"].as_array().cloned().unwrap_or_default();
     assert!(v2.iter().any(|c| c["speed"].as_f64().is_some_and(|s| s < 0.999)), "{v2:?}");
+    // their own sound, slowed with them, keeps its pitch (Maintain Audio Pitch)
+    let a1 = seq["audio"][0]["items"].as_array().cloned().unwrap_or_default();
+    let slowed: Vec<&serde_json::Value> = a1.iter().filter(|c| c["speed"].as_f64().is_some_and(|s| s < 0.999)).collect();
+    assert!(!slowed.is_empty() && slowed.iter().all(|c| c["maintainPitch"] == json!(true)), "{a1:?}");
     // shots meet on frames: no clip of V2 overlaps the next, and no gap is a frame or longer
     let frame = 254_016_000_000 / 30;
     for w in v2.windows(2) {

@@ -118,7 +118,8 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      robot (a portrait or 4:3 clip fills the 16:9 frame, cropped on the robot's centre from the
      analysis with a slow 6 % tilt across it, so a tall robot is seen whole and the video never
      looks vertical; `--no-fill` shows it whole over a blurred, dimmed copy instead; slowed only
-     when the words would outrun the footage), each shot's sound faded in and crossfaded; a
+     when the words would outrun the footage, its sound then slowed with it at its own pitch —
+     Speed/Duration's Maintain Audio Pitch), each shot's sound faded in and crossfaded; a
      name/date lower third; a dramatic transition from a rotating set (cross zoom, whip, flash,
      push, glitch, light leak, zoom blur; dip to black at a new year) with a whoosh; the year
      as a title card with an impact;
@@ -290,7 +291,7 @@ naming the entry and shot.
 | shot field | what it does |
 |---|---|
 | `"from": 12.0, "to": 18.5` | the source window, seconds into the clip, instead of the automatic one ("the part where it sprays the mist"); one end alone anchors the window and the entry picks its length. Never moved onto the beat |
-| `"speed": 4` | 0.25–16: the shot plays that fast (`clip.speedDuration`, frames sampled when faster), taking `(to − from) / speed` of the timeline; its own sound is dropped, never chipmunked under the narration |
+| `"speed": 4` | 0.25–16: the shot plays that fast (`clip.speedDuration`, frames sampled when faster), taking `(to − from) / speed` of the timeline; its own sound is dropped, never fast-forwarded under the narration (slowed shots keep theirs, at its own pitch) |
 | `"fit": "full"` / `"fill"` | `full`: the whole picture — a portrait clip at full height in the middle over a blurred (Gaussian Blur, edges repeated), dimmed (45 % over black), 8 % enlarged copy of itself filling the frame, the copy pushing in while the picture stays whole; `fill`: the frame filled (cropped around the subject), whatever `--no-fill` says |
 | `"focus": [0.5, 0.3]` | the point (0..1 of the clip, x right, y down) a fill crop keeps in view, instead of the analysis' box: held with a slow tilt, not tracked |
 | `"mute": true` | no sound of its own (a robot talking after the narration ends sounds like a garbled voice-over) |

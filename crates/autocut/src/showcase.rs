@@ -2804,7 +2804,10 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             };
             if let Some((speed, interpolation)) = change {
                 let clips: Vec<u64> = std::iter::once(fg).chain(bg).chain(audio).collect();
-                match run(ex, "clip.speedDuration", json!({"clips": clips, "speed": speed * 100.0, "interpolation": interpolation, "ripple": false})).await {
+                // a shot whose own sound plays along (slowed to carry the words) keeps its pitch:
+                // the room and the robot sound like themselves, not an octave down
+                let params = json!({"clips": clips, "speed": speed * 100.0, "interpolation": interpolation, "ripple": false, "maintainPitch": audio.is_some()});
+                match run(ex, "clip.speedDuration", params).await {
                     Ok(r) => {
                         // where the shot really ends (the engine rounds to frames)
                         let moved = r["clips"].as_array().and_then(|a| a.iter().find(|c| c["clip"].as_u64() == Some(fg))).and_then(|c| c["end"].as_f64());
