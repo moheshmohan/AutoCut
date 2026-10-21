@@ -18,6 +18,40 @@ and writes caption files, converts them to and from caption tracks, and draws ca
 | EBU STL `.stl` | yes | yes | EBU Tech 3264-E: GSI block + 128-byte TTI blocks, `STL25.01` (25 fps) or `STL30.01` (read/written as 29.97 fps, non-drop labels), ISO/IEC 6937 Latin text (accents as diacritic + letter), italics / underline codes as `<i>` / `<u>`, extension blocks for long subtitles, start-of-programme (TCP) subtracted. |
 | TTML `.ttml` (IMSC1) | yes | yes | Writes the IMSC1 Text profile (TTML2 namespaces): `<p>` per cue, `<br/>`, styled `<span>`s for `<i>` / `<b>` / `<u>`, `ttm:agent` speakers, exact frame times (`123f`) at the sequence rate. Reads any TTML (TTML1, TTML2, the 2006 `ttaf1` drafts): clock / frame / offset / tick times, `dur`, nested time containers (`body` / `div` begins offset and ends clip their contents; `seq` containers are read as `par` with a warning), timed spans, referenced styles. |
 | DFXP `.dfxp` | yes | yes | TTML1 with the DFXP presentation profile; clock times in milliseconds (frame-exact after `snap_to_frames`). |
+| Advanced SubStation Alpha `.ass`, SubStation Alpha `.ssa` | yes | `.ass` | See [ASS / SSA](#ass--ssa). Times in centiseconds (frame-exact up to 60 fps after `snap_to_frames`). |
+
+### ASS / SSA
+
+Reading maps the script, field by field through each section's `Format` line (the format's
+default order when it has none):
+
+- **`[Script Info]`:** `PlayResX` / `PlayResY` (384 × 288 when both are missing; one derived from
+  the other when only one is given). Sizes and margins are scaled from the script's height to the
+  1080-line units of the track style.
+- **`[V4+ Styles]` (ASS) / `[V4 Styles]` (SSA):** the style most dialogue lines use becomes the
+  track style: font, size, primary colour (`&HAABBGGRR`, or SSA's decimal; ASS alpha `00` is
+  opaque), alignment (numpad 1–9; SSA's legacy 1–3 / 5–7 / 9–11), vertical margin, outline width
+  and colour, and the opaque box of `BorderStyle=3` (drawn in the outline colour) as the
+  background box. Bold / italic / underline of a line's style become `<b>` / `<i>` / `<u>`.
+- **`[Events]`:** `Dialogue` lines (start, end, style, `Name` as the speaker, `MarginV`, text).
+  `Comment`, `Picture`, `Sound`, `Movie` and `Command` events and the `[Fonts]` / `[Graphics]` /
+  editor sections are skipped. Lines that share both times merge into one caption.
+- **Text:** `\N` and `\n` are line breaks, `\h` a no-break space; `{\b1}` / `{\b0}` (and weights),
+  `{\i…}`, `{\u…}` become tags and `{\r}` resets them; `{\an8}` / `{\a6}`, another style's
+  placement, a line's own `MarginV` and `{\pos(x,y)}` (or the start of `\move`) become WebVTT cue
+  settings (`line:N%[,center|end]`, `position:N%`, `align:`), which burn-in and WebVTT export
+  honour. Other overrides (colours, fades, `\t`, karaoke, clips) and `{comments}` are removed;
+  drawings (`{\p1}` … `{\p0}`) are dropped; an unterminated `{` stays as text.
+- **Hostile input:** a BOM, CRLF, missing sections or Format lines, malformed fields and huge
+  numbers never panic (play resolutions above 100 000, sizes, outlines, margins and positions are
+  bounded); a bad line is skipped with a warning (at most 64 kept, the rest counted); caption text
+  is capped at 16 KiB.
+
+Writing produces ASS v4.00+ at 1920 × 1080 with one `Default` style from the track style (its
+background box as `BorderStyle=3`), times in centiseconds, `<i>` / `<b>` / `<u>` as overrides,
+the speaker as `Name`, and `line` / `position` / `align` cue settings as `\an`, `MarginV` or
+`\pos`. Characters the format cannot carry change: `{` `}` become `(` `)`, a backslash before
+`N`, `n` or `h` becomes `＼`, commas in font and speaker names become spaces.
 
 All cue times are exact `Tick`s. Milliseconds convert exactly (1 ms = 254 016 000 ticks); SCC
 frames map through `FrameRate::FPS_29_97`. `Document::snap_to_frames` snaps cues to a sequence's
@@ -68,7 +102,8 @@ before its in point (for example a caption at 00:00:00:00), it appears as soon a
 
 `burn::render_caption` lays out a caption with the track style (font size relative to a 1080-line
 frame, colour, background box, outline, alignment, top/middle/bottom anchor and margin; WebVTT
-`line:N%` and `align:` settings override them), wraps lines to 90% of the frame width and
+`line:N%` (with the `,start` / `,center` / `,end` line alignment), `position:N%` and `align:`
+settings override them), wraps lines to 90% of the frame width and
 rasterises it to a small premultiplied linear-light RGBA overlay. `filmcraft-render` composites the
 overlays of visible caption tracks over the finished frame (Program monitor and export burn-in).
 
@@ -78,8 +113,10 @@ and drawn from its sub-pixel positioned glyph cache.
 
 Specifications used: SMPTE ST 334-2 (CDP structure), CEA-608 / CEA-708 (public descriptions of
 the caption commands), the MacCaption MCC format description (line syntax and abbreviations),
-EBU Tech 3264-E (1991), ISO/IEC 6937, W3C TTML1 (2nd ed.), TTML2 and IMSC 1.1. No other
-implementation's code was consulted.
+EBU Tech 3264-E (1991), ISO/IEC 6937, W3C TTML1 (2nd ed.), TTML2 and IMSC 1.1, the public
+SubStation Alpha v4.00+ script format description (sections, Format lines, styles, events,
+colours, alignment) and the published override-tag reference. No other implementation's code
+(libass, VSFilter, Aegisub…) was consulted.
 
 ## Tests
 
@@ -89,5 +126,11 @@ implementation's code was consulted.
   settings, STYLE blocks), SCC and MCC (drop-frame and non-drop, gaps and back-to-back captions;
   MCC also through CEA-708 alone), EBU STL (25 and 29.97 fps, accents, extension blocks), TTML
   (23.976 / 25 / 29.97 / 59.94, ids, speakers) round-trip frame-exactly; DFXP round-trips after
-  snapping to frames; readers never panic on random bytes (also a valid STL header followed by
-  random blocks, and random MCC lines); SRT → VTT → SCC keeps text and frames.
+  snapping to frames; ASS round-trips frame-exactly at 25 fps with speakers, italics, placements
+  and the track style; readers never panic on random bytes (also a valid STL header followed by
+  random blocks, random MCC lines and random ASS dialogue text); SRT → VTT → SCC keeps text and
+  frames.
+- `ass.rs` unit tests: real-world-shaped ASS and SSA scripts written in the test (styles, BOM +
+  CRLF, editor sections, comments, overrides, drawings, simultaneous lines), missing sections and
+  Format lines, hostile input (huge numbers, unterminated braces and parentheses, 1 MB lines,
+  10 000 bad lines) under `catch_unwind`, and the writer.

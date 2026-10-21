@@ -3,7 +3,8 @@
 //! - **Files:** [SubRip](srt) (`.srt`), [WebVTT](vtt) (`.vtt`), [Scenarist SCC](scc) (`.scc`,
 //!   CEA-608 pop-on, roll-up and paint-on on read; pop-on on write), [MacCaption MCC](mcc)
 //!   (`.mcc`, SMPTE ST 334-2 packets with CEA-608 and CEA-708), [EBU STL](stl) (`.stl`, EBU
-//!   Tech 3264) and [TTML](ttml) (`.ttml` IMSC1 Text profile, `.dfxp` DFXP) parse into a
+//!   Tech 3264), [TTML](ttml) (`.ttml` IMSC1 Text profile, `.dfxp` DFXP) and [Advanced
+//!   SubStation Alpha](ass) (`.ass`, and SSA `.ssa` on read) parse into a
 //!   [`Document`] of [`Cue`]s and write back. Readers are forgiving (BOM, UTF-16, Windows-1252 fallback, CRLF/CR,
 //!   missing SRT indexes, `,` or `.` milliseconds, missing hours, no blank line between cues);
 //!   writers are strict. WebVTT cue identifiers, cue settings, `<v Speaker>` voices and
@@ -20,6 +21,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+pub mod ass;
 pub mod burn;
 pub mod cea608;
 pub mod embed;
@@ -30,7 +32,7 @@ pub mod stl;
 pub mod ttml;
 pub mod vtt;
 
-use filmcraft_project::{Caption, CaptionFormat, CaptionTrack, ClipId, TrackId};
+use filmcraft_project::{Caption, CaptionFormat, CaptionStyle, CaptionTrack, ClipId, TrackId};
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
 /// A caption file format.
@@ -47,10 +49,12 @@ pub enum Format {
     Ttml,
     /// DFXP (TTML1).
     Dfxp,
+    /// Advanced SubStation Alpha (`.ass`; SubStation Alpha `.ssa` is read too).
+    Ass,
 }
 
 impl Format {
-    pub const ALL: [Format; 7] = [Format::Srt, Format::WebVtt, Format::Scc, Format::Mcc, Format::Stl, Format::Ttml, Format::Dfxp];
+    pub const ALL: [Format; 8] = [Format::Srt, Format::WebVtt, Format::Scc, Format::Mcc, Format::Stl, Format::Ttml, Format::Dfxp, Format::Ass];
     pub fn name(self) -> &'static str {
         match self {
             Format::Srt => "SubRip (SRT)",
@@ -60,6 +64,7 @@ impl Format {
             Format::Stl => "EBU STL",
             Format::Ttml => "TTML (IMSC1)",
             Format::Dfxp => "DFXP (TTML1)",
+            Format::Ass => "Advanced SubStation Alpha (ASS/SSA)",
         }
     }
     pub fn extension(self) -> &'static str {
@@ -71,6 +76,7 @@ impl Format {
             Format::Stl => "stl",
             Format::Ttml => "ttml",
             Format::Dfxp => "dfxp",
+            Format::Ass => "ass",
         }
     }
     pub fn from_name(s: &str) -> Option<Format> {
@@ -82,6 +88,7 @@ impl Format {
             "stl" | "ebu-stl" | "ebustl" | "ebu" => Some(Format::Stl),
             "ttml" | "imsc" | "imsc1" | "xml" => Some(Format::Ttml),
             "dfxp" => Some(Format::Dfxp),
+            "ass" | "ssa" | "substation" | "substationalpha" => Some(Format::Ass),
             _ => None,
         }
     }
@@ -133,6 +140,9 @@ pub struct Document {
     pub blocks: Vec<String>,
     /// Non-fatal problems found while reading (skipped cues…).
     pub warnings: Vec<String>,
+    /// The track style the file sets (ASS/SSA styles), or None to keep the track's. Writers that
+    /// carry a style (ASS) write it.
+    pub style: Option<CaptionStyle>,
 }
 
 impl Document {
@@ -190,6 +200,12 @@ pub fn detect(bytes: &[u8], ext: Option<&str>) -> Option<Format> {
         return Some(Format::Mcc);
     }
     let ext = ext.map(|e| e.trim_start_matches('.').to_ascii_lowercase());
+    if head.get(..13).is_some_and(|h| h.eq_ignore_ascii_case("[script info]"))
+        || (matches!(ext.as_deref(), Some("ass" | "ssa"))
+            && head.lines().take(400).any(|l| l.trim().eq_ignore_ascii_case("[events]") || l.trim_start().starts_with("Dialogue:")))
+    {
+        return Some(Format::Ass);
+    }
     if (head.starts_with('<') && (head.contains("<tt ") || head.contains("<tt>") || head.contains(":tt ")))
         && (head.contains("ns/ttml") || head.contains("ttaf1"))
     {
@@ -200,7 +216,7 @@ pub fn detect(bytes: &[u8], ext: Option<&str>) -> Option<Format> {
     match ext.as_deref() {
         Some("srt") if has_arrow_timing || head.is_empty() => Some(Format::Srt),
         Some("vtt") if has_arrow_timing => Some(Format::WebVtt),
-        Some("srt" | "vtt" | "scc" | "mcc" | "stl" | "ttml" | "dfxp" | "xml") => None,
+        Some("srt" | "vtt" | "scc" | "mcc" | "stl" | "ttml" | "dfxp" | "xml" | "ass" | "ssa") => None,
         _ if has_arrow_timing => Some(Format::Srt),
         _ => None,
     }
@@ -218,6 +234,7 @@ pub fn parse(bytes: &[u8], format: Format) -> Result<Document> {
         Format::Scc => scc::parse(&text),
         Format::Mcc => mcc::parse(&text),
         Format::Ttml | Format::Dfxp => ttml::parse(&text),
+        Format::Ass => ass::parse(&text),
         Format::Stl => stl::parse(bytes),
     }
 }
@@ -248,6 +265,7 @@ pub fn write(doc: &Document, format: Format, opts: WriteOptions) -> Vec<u8> {
         Format::Stl => stl::write(doc, opts.rate),
         Format::Ttml => ttml::write(doc, ttml::Flavor::Imsc1, opts.rate, "en").into_bytes(),
         Format::Dfxp => ttml::write(doc, ttml::Flavor::Dfxp, opts.rate, "en").into_bytes(),
+        Format::Ass => ass::write(doc).into_bytes(),
     }
 }
 
@@ -321,6 +339,9 @@ pub fn format_clock(t: Tick, sep: char) -> String {
 pub fn track_from_document(doc: &Document, id: TrackId, name: &str, format: CaptionFormat, alloc: &mut dyn FnMut() -> u64) -> CaptionTrack {
     let mut t = CaptionTrack::new(id, name.to_string(), format);
     t.vtt_blocks = doc.blocks.clone();
+    if let Some(style) = &doc.style {
+        t.style = style.clone();
+    }
     t.captions = doc
         .cues
         .iter()
@@ -358,6 +379,7 @@ pub fn document_from_track(t: &CaptionTrack, offset: Tick) -> Document {
             .collect(),
         blocks: t.vtt_blocks.clone(),
         warnings: Vec::new(),
+        style: Some(t.style.clone()),
     }
 }
 
@@ -398,6 +420,11 @@ mod tests {
         assert_eq!(detect(b"<tt xmlns=\"http://www.w3.org/2006/10/ttaf1\"></tt>", Some("xml")), Some(Format::Dfxp));
         let stl = stl::write(&Document::default(), None);
         assert_eq!(detect(&stl, Some("stl")), Some(Format::Stl));
+        assert_eq!(detect(b"\xef\xbb\xbf[Script Info]\r\nScriptType: v4.00+\r\n", None), Some(Format::Ass));
+        assert_eq!(detect(b"[script info]\n", Some("txt")), Some(Format::Ass));
+        assert_eq!(detect(b"[Events]\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,x\n", Some("ssa")), Some(Format::Ass));
+        assert_eq!(detect(b"hello", Some("ass")), None);
+        assert_eq!(Format::from_name("ssa"), Some(Format::Ass));
         for f in Format::ALL {
             assert_eq!(Format::from_name(f.extension()), Some(f));
         }

@@ -225,6 +225,51 @@ proptest! {
         prop_assert_eq!(&back.cues, &doc.cues);
     }
 
+    /// ASS: frame-exact at 25 fps (whole centiseconds), with speakers, italics, the placements the
+    /// reader produces, and the track style; stable on a second write.
+    #[test]
+    fn ass_roundtrip(
+        v in proptest::collection::vec((0i64..100, 1i64..200, proptest::collection::vec((line(), any::<bool>()), 1..4)), 0..10),
+        speakers in proptest::collection::vec(proptest::option::of("[A-Z][a-z]{1,6}( [A-Z][a-z]{1,6})?"), 10),
+        settings in proptest::collection::vec(prop_oneof![
+            Just(String::new()),
+            Just("line:10% align:start".to_string()),
+            Just("line:50%,center align:center".to_string()),
+            Just("line:92.04%,end align:end".to_string()),
+            Just("position:25% line:75%,end align:end".to_string()),
+        ], 10),
+        size in 12u32..200,
+        background in any::<bool>(),
+    ) {
+        let rate = FrameRate::FPS_25;
+        let mut f = 0i64;
+        let cues: Vec<Cue> = v
+            .into_iter()
+            .enumerate()
+            .map(|(i, (gap, dur, lines))| {
+                let start = f + gap;
+                f = start + dur;
+                let text = lines.into_iter().map(|(l, italic)| if italic { format!("<i>{l}</i>") } else { l }).collect::<Vec<_>>().join("\n");
+                Cue {
+                    start: rate.tick_of(start),
+                    end: rate.tick_of(f),
+                    text,
+                    speaker: speakers[i].clone(),
+                    settings: settings[i].clone(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let style = filmcraft_project::CaptionStyle { size: size as f32, background, ..Default::default() };
+        let doc = Document { cues, style: Some(style.clone()), ..Default::default() };
+        let bytes = write(&doc, Format::Ass, WriteOptions::default());
+        let back = parse(&bytes, Format::Ass).unwrap();
+        prop_assert_eq!(&back.cues, &doc.cues);
+        let bs = back.style.clone().unwrap();
+        prop_assert_eq!((bs.size, bs.background, bs.align, bs.anchor, bs.color), (style.size, style.background, style.align, style.anchor, style.color));
+        prop_assert_eq!(write(&back, Format::Ass, WriteOptions::default()), bytes);
+    }
+
     /// Readers never panic on arbitrary input.
     #[test]
     fn readers_are_total(bytes in proptest::collection::vec(any::<u8>(), 0..400)) {
@@ -235,6 +280,13 @@ proptest! {
 
     /// The binary STL reader never panics on a valid header followed by arbitrary blocks, and
     /// the MCC reader on arbitrary data lines.
+    #[test]
+    fn ass_reader_is_total(lines in proptest::collection::vec("[\\[\\]{}()\\\\:,&;0-9A-Za-z.\\- ]{0,120}", 0..20)) {
+        let src = format!("[Script Info]\nPlayResY: 360\n[V4+ Styles]\nStyle: Default,A,20,&H00FFFFFF,&H0,&H0,&H0,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n[Events]\n{}", lines.iter().map(|l| format!("Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{l}\n{l}\n")).collect::<String>());
+        let doc = parse(src.as_bytes(), Format::Ass).unwrap();
+        let _ = write(&doc, Format::Ass, WriteOptions::default());
+    }
+
     #[test]
     fn stl_and_mcc_readers_are_total(tail in proptest::collection::vec(any::<u8>(), 0..1200), line in "[0-9A-Za-z:;\t ]{0,200}") {
         let mut stl = write(&Document::default(), Format::Stl, WriteOptions::default());

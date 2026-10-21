@@ -3,7 +3,8 @@
 //! [`overlay`] lays out the caption showing on a track at a time with the track's
 //! [`CaptionStyle`] (size relative to a 1080-line frame — its short side, so portrait frames
 //! size like landscape ones —, colour, background box, outline,
-//! alignment, anchor and margin; WebVTT `line:N%` and `align:` cue settings override the style)
+//! alignment, anchor and margin; WebVTT `line:N%[,start|center|end]`, `position:N%` and `align:`
+//! cue settings override the style)
 //! and rasterises it into a small premultiplied linear-light RGBA [`Overlay`] positioned in the
 //! frame. Renderers composite overlays over the finished picture.
 
@@ -79,20 +80,40 @@ fn wrap(line: &str, ts: &TextStyle, max_w: f32) -> Vec<String> {
 }
 
 /// Placement overrides from WebVTT cue settings.
-fn vtt_overrides(settings: &str) -> (Option<f32>, Option<CaptionAlign>) {
-    let mut line = None;
-    let mut align = None;
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Overrides {
+    /// `line:N%` as a fraction of the frame height, and the part of the caption block placed
+    /// there (0 = its top, the default `start`; 0.5 = `center`; 1 = its bottom, `end`).
+    line: Option<(f32, f32)>,
+    /// `position:N%` as a fraction of the frame width: where the line's `align` edge (or centre)
+    /// sits.
+    position: Option<f32>,
+    align: Option<CaptionAlign>,
+}
+
+fn percent(v: &str) -> Option<f32> {
+    v.strip_suffix('%').and_then(|p| p.parse::<f32>().ok()).filter(|p| p.is_finite()).map(|p| (p / 100.0).clamp(0.0, 1.0))
+}
+
+fn vtt_overrides(settings: &str) -> Overrides {
+    let mut o = Overrides::default();
     for kv in settings.split_whitespace() {
         let Some((k, v)) = kv.split_once(':') else { continue };
         match k {
             "line" => {
-                let v = v.split(',').next().unwrap_or("");
-                if let Some(p) = v.strip_suffix('%').and_then(|p| p.parse::<f32>().ok()) {
-                    line = Some((p / 100.0).clamp(0.0, 1.0));
+                let mut parts = v.split(',');
+                if let Some(p) = parts.next().and_then(percent) {
+                    let at = match parts.next() {
+                        Some("center" | "middle") => 0.5,
+                        Some("end") => 1.0,
+                        _ => 0.0,
+                    };
+                    o.line = Some((p, at));
                 }
             }
+            "position" => o.position = v.split(',').next().and_then(percent),
             "align" => {
-                align = match v {
+                o.align = match v {
                     "start" | "left" => Some(CaptionAlign::Left),
                     "end" | "right" => Some(CaptionAlign::Right),
                     "center" | "middle" => Some(CaptionAlign::Center),
@@ -102,7 +123,7 @@ fn vtt_overrides(settings: &str) -> (Option<f32>, Option<CaptionAlign>) {
             _ => {}
         }
     }
-    (line, align)
+    o
 }
 
 /// Lay out and rasterise one caption for a `w`×`h` frame.
@@ -131,11 +152,11 @@ pub fn render_caption(c: &Caption, style: &CaptionStyle, w: usize, h: usize) -> 
     let lh = px * style.line_spacing.max(0.8);
     let pad_x = (px * 0.3).round();
     let block_h = lh * lines.len() as f32;
-    let (line_override, align_override) = vtt_overrides(&c.settings);
-    let align = align_override.unwrap_or(style.align);
+    let ov = vtt_overrides(&c.settings);
+    let align = ov.align.unwrap_or(style.align);
     let margin = style.margin.clamp(0.0, 0.45) * h as f32;
-    let top = match (line_override, style.anchor) {
-        (Some(f), _) => (f * h as f32).min(h as f32 - block_h),
+    let top = match (ov.line, style.anchor) {
+        (Some((f, at)), _) => (f * h as f32 - at * block_h).min(h as f32 - block_h),
         (None, CaptionAnchor::Top) => margin,
         (None, CaptionAnchor::Middle) => (h as f32 - block_h) / 2.0,
         (None, CaptionAnchor::Bottom) => h as f32 - margin - block_h,
@@ -146,10 +167,20 @@ pub fn render_caption(c: &Caption, style: &CaptionStyle, w: usize, h: usize) -> 
     let widths: Vec<f32> = lines.iter().map(|l| filmcraft_text::measure(l, &ts)).collect();
     let xs: Vec<f32> = widths
         .iter()
-        .map(|&lw| match align {
-            CaptionAlign::Left => side + pad_x,
-            CaptionAlign::Right => w as f32 - side - pad_x - lw,
-            CaptionAlign::Center => (w as f32 - lw) / 2.0,
+        .map(|&lw| match (ov.position, align) {
+            (Some(p), _) => {
+                let anchor = p * w as f32;
+                let x = match align {
+                    CaptionAlign::Left => anchor,
+                    CaptionAlign::Right => anchor - lw,
+                    CaptionAlign::Center => anchor - lw / 2.0,
+                };
+                // the box (the line plus its padding) stays inside the frame
+                x.min(w as f32 - lw - pad_x).max(pad_x)
+            }
+            (None, CaptionAlign::Left) => side + pad_x,
+            (None, CaptionAlign::Right) => w as f32 - side - pad_x - lw,
+            (None, CaptionAlign::Center) => (w as f32 - lw) / 2.0,
         })
         .collect();
     let outline = (style.outline * scale).max(0.0);
@@ -288,6 +319,39 @@ mod tests {
         let o = render_caption(&c, &CaptionStyle::default(), 1280, 720).unwrap();
         assert!((o.y - 360).abs() < 4, "{}", o.y);
         assert!(o.x < 120, "{}", o.x);
+    }
+
+    #[test]
+    fn vtt_line_alignment_and_position() {
+        let st = CaptionStyle::default();
+        let mut c = cap("Line");
+        c.settings = "line:50%,end".into();
+        let end = render_caption(&c, &st, 1280, 720).unwrap();
+        c.settings = "line:50%,center".into();
+        let mid = render_caption(&c, &st, 1280, 720).unwrap();
+        c.settings = "line:50%".into();
+        let start = render_caption(&c, &st, 1280, 720).unwrap();
+        // the block's bottom, middle and top sit at the line
+        assert!(((end.y as usize + end.h) as i32 - 360).abs() <= 3, "end {} {}", end.y, end.h);
+        assert!(((mid.y as f32 + mid.h as f32 / 2.0) - 360.0).abs() <= 3.0, "center {} {}", mid.y, mid.h);
+        assert!((start.y - 360).abs() <= 3, "start {}", start.y);
+        // position: the left edge, centre or right edge of the line at the position
+        c.settings = "position:25% align:start".into();
+        let left = render_caption(&c, &st, 1280, 720).unwrap();
+        c.settings = "position:25% align:center".into();
+        let centre = render_caption(&c, &st, 1280, 720).unwrap();
+        c.settings = "position:75% align:end".into();
+        let right = render_caption(&c, &st, 1280, 720).unwrap();
+        assert!(left.x < 320 && left.x + left.w as i32 > 320, "left {} {}", left.x, left.w);
+        assert!(((centre.x as f32 + centre.w as f32 / 2.0) - 320.0).abs() <= 3.0, "centre {} {}", centre.x, centre.w);
+        assert!(right.x + (right.w as i32) > 940 && right.x + (right.w as i32) < 990, "right {} {}", right.x, right.w);
+        // out of range and junk stay inside the frame
+        for s in ["position:900% line:-50%,end", "position:NaN% line:inf%", "position:% line:%,center"] {
+            c.settings = s.into();
+            let o = render_caption(&c, &st, 1280, 720).unwrap();
+            let (x0, y0, x1, y1) = (i64::from(o.x), i64::from(o.y), i64::from(o.x) + o.w as i64, i64::from(o.y) + o.h as i64);
+            assert!(x0 >= -2 && x1 <= 1282 && y0 >= -2 && y1 <= 722, "{s}: {:?}", (x0, y0, x1, y1));
+        }
     }
 
     #[test]
