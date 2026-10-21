@@ -866,15 +866,23 @@ safe zone, an end card, and the show's masked blur on its shot; hostile requests
     alone with the face outlined in red (`OllamaJudge::confirm`; in a grid a visitor beside the
     robot's head was called a robot), and left sharp only if both agree; a face the detector is
     sure of (0.85) that is never inside the robot's box is hidden whatever the model says
-    (`crates/engine/src/redact.rs`, *Not robots*);
-  - QA renders the finished sequence every half second and at every shot's start, runs the face
-    detector on the frames (`sequence.checkPrivacy`, `crates/engine/src/privacy_check.rs`), and
-    makes every face at least 5 % of the frame tall that no redaction mask covers an error —
-    unless the vision model twice calls it not a person and it is on the robot (its box from the
-    privacy pass, `Hidden::robots`) or the detector is not sure of it; a face on the robot no
-    model could confirm is a warning. Each face with its time and box goes into
-    `unblurredFaces` in `<out>.qa.json` (what YouTube Studio's custom blur needs if the video is
-    already out) and a crop of it, outlined, onto the privacy sheet;
+    (`crates/engine/src/redact.rs`, *Not robots*); the face detector looks at each frame a
+    second time twice as close (a visitor 7 % of the frame tall was missed at 640 px, found at
+    1280), and a mask stays on 0.4 s before and after its face is found (a smile under the
+    robot's head as the visitor went behind it);
+  - QA renders the finished sequence every half second and at every shot's start as it
+    exports, runs the face detector on the frames (`sequence.checkPrivacy`,
+    `crates/engine/src/privacy_check.rs`), and every face at least 5 % of the frame tall that
+    no redaction mask covers (in a transition, in either clip) is a finding unless the vision
+    model twice calls it not a person and it is on the robot (its box from the privacy pass,
+    `Hidden::robots`) or the detector is not sure of it. An error — a stop — when the detector
+    scores it 0.75 or more and the model sees a person (on the robot both looks must; away from
+    it, nobody could tell counts too); a warning to look at otherwise (a score under 0.75: the
+    false finds on the v5 show, a shoe, a robot's base, the floor, scored 0.60–0.69; two looks
+    that disagree on the robot; "not a person" away from it, a robot on a phone's screen or a
+    painting). Each face with its time and box goes into `unblurredFaces` in `<out>.qa.json`
+    (what YouTube Studio's custom blur needs if the video is already out) and a crop of it,
+    outlined, onto the privacy sheet;
   - such an error stops the uploads (`showcase --upload` / `--upload-youtube`, the app's
     `upload`: `QaReport::publish_blocker`, `privacyBlocked` in the build), and `youtube upload`
     refuses a file whose `<file>.qa.json` lists one (`--allow-privacy-findings` to override).

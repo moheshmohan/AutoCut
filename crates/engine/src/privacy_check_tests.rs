@@ -185,9 +185,13 @@ fn a_face_on_the_subject_stays_sharp_only_when_the_model_twice_says_it_is_not_a_
     assert_eq!((unmasked(&r)[0]["allowed"].as_bool(), r["shown"].as_u64()), (Some(false), Some(1)), "{r}");
     // a person in the robot's box
     s.redacts.judge = Some(Judge::new(Some(true), Some(true)));
-    let r = s.execute("sequence.checkPrivacy", p).unwrap();
+    let r = s.execute("sequence.checkPrivacy", p.clone()).unwrap();
     assert_eq!(unmasked(&r)[0]["verdict"], json!("person"));
     assert_eq!(r["shown"], json!(1));
+    // the robot's own face the grid called a person, alone a robot: unclear, not allowed
+    s.redacts.judge = Some(Judge::new(Some(true), Some(false)));
+    let r = s.execute("sequence.checkPrivacy", p).unwrap();
+    assert_eq!((unmasked(&r)[0]["verdict"].as_str(), unmasked(&r)[0]["allowed"].as_bool()), (Some("unsure"), Some(false)), "{r}");
     // away from the subject, a face the detector is sure of shows whatever the model says
     let j = Judge::new(Some(false), Some(false));
     s.redacts.judge = Some(j.clone());
@@ -232,4 +236,18 @@ fn hostile_parameters_are_refused() {
     // no sequence: refused
     assert!(Session::default().execute("sequence.checkPrivacy", json!({"seconds": [0.0]})).is_err());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn two_looks_make_one_answer() {
+    use super::both_looks;
+    // not a person only when both say so
+    assert_eq!(both_looks(Some(false), Some(false), true), Some(false));
+    assert_eq!(both_looks(Some(false), Some(true), true), Some(true));
+    assert_eq!(both_looks(Some(false), None, false), None);
+    // a person stays one away from the robot; on it, the second look must agree
+    assert_eq!(both_looks(Some(true), Some(false), false), Some(true));
+    assert_eq!(both_looks(Some(true), Some(false), true), None);
+    assert_eq!(both_looks(Some(true), Some(true), true), Some(true));
+    assert_eq!(both_looks(None, Some(false), true), None);
 }

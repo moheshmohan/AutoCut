@@ -411,6 +411,19 @@ fn a_visitor_inside_the_robots_box_is_hidden_when_the_model_sees_a_person() {
     assert_eq!((r["redact"]["hidden"].as_u64(), r["redact"]["verify"]["state"].as_str()), (Some(0), Some("failed")), "{r}");
 }
 
+/// The face detector looks again twice as close where the picture allows it (a visitor 7 % of
+/// the frame tall was missed at 640 px and found at 1280), never past 1920 or the picture.
+#[test]
+fn the_face_detector_looks_closer_where_the_picture_allows() {
+    assert_eq!(close_side(640, 1920), Some(1280));
+    assert_eq!(close_side(1280, 3840), Some(1920));
+    assert_eq!(close_side(640, 640), None, "no closer picture to look at");
+    assert_eq!(close_side(640, 760), None, "not enough closer to be worth it");
+    assert_eq!(close_side(1920, 4000), None);
+    assert_eq!(close_side(usize::MAX, usize::MAX), None);
+    assert_eq!(close_side(0, 1920), None, "a degenerate side is left alone");
+}
+
 /// The second looks are kept in the cache like the first: a rebuilt show asks nothing again.
 #[test]
 fn second_looks_come_from_the_cache() {
@@ -522,7 +535,9 @@ fn masks_switch_on_and_off_with_their_track() {
     };
     let m = mask_for(&track, 1, &c, 0.2).unwrap();
     let at = |s: f64| m.opacity.f64_at(Tick::from_seconds_f64(s));
-    assert_eq!((at(1.5), at(1.95), at(2.15), at(2.35)), (0.0, 100.0, 100.0, 0.0));
+    // on LINGER (0.4 s) before the first sighting and after the last: a face going behind
+    // something is lost before it is gone
+    assert_eq!((at(1.5), at(1.65), at(1.95), at(2.15), at(2.55), at(2.65)), (0.0, 100.0, 100.0, 100.0, 100.0, 0.0));
     // padded ellipse: 0.1 × 1000 px wide, plus a fifth each side
     let (lo, hi) = m.path_at(Tick::from_seconds_f64(2.0)).bounds();
     assert!(((hi.x - lo.x) - 140.0).abs() < 1.0 && ((hi.y - lo.y) - 140.0).abs() < 1.0, "{lo:?} {hi:?}");

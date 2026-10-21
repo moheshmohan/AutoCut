@@ -15,7 +15,9 @@
 //! sequence's frame tall at some point as the sequence shows it (5 %: smaller faces in the crowd
 //! are not recognisable; Motion ▸ Scale and Scale to Frame Size count, so a clip zoomed in or a
 //! portrait clip filling a landscape frame has its faces counted larger, and the face detector
-//! looks at it closer), a plate when it is at least `minPlateWidth` of the frame's width
+//! looks at it closer; it looks at every frame twice, the second time twice as close where the
+//! picture allows, [`close_side`]: at the first size a face of 5–8 % is 18–30 px, where YuNet
+//! misses some), a plate when it is at least `minPlateWidth` of the frame's width
 //! (2.5 %); either must be seen twice, or once with a score of 0.9. An `exclude` box is the
 //! subject's (a robot's: its face is not hidden): see below.
 //!
@@ -48,7 +50,8 @@
 //! effect, its strength from the largest face or plate, with one mask per track — an ellipse for
 //! a face, the plate's own quadrilateral for a plate — grown by `padding` (a fifth of the box
 //! on each side), feathered outward, with a Mask Path keyframe at every analysed frame and
-//! its Opacity switched on and off (hold keyframes) where the track starts and ends. Masks are in
+//! its Opacity switched on and off (hold keyframes) [`LINGER`] before the track starts and after
+//! it ends (a face going behind something is lost before it is gone). Masks are in
 //! clip pixels and the effect applies before Motion, so the blur follows the clip's own motion,
 //! scale, crop and reframing. The masks are named `Redact face 1`, `Redact plate 2`…; running
 //! it again replaces an earlier automatic redaction of the clip (`replace: false` keeps it).
@@ -627,7 +630,9 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
             let face_side = stepped.clamp(o.face_side, 1920.max(o.face_side)).min(long as usize).max(160);
             let targets: Vec<String> = o.targets.iter().filter(|t| t.clips.as_ref().is_none_or(|c| c.contains(&it.id))).map(|t| t.text.clone()).collect();
             let look = if targets.is_empty() { 0 } else { crate::redact_targets::LOOK_SIDE };
-            let side = (if o.faces { face_side } else { 0 }).max(if o.plates { o.plate_side } else { 0 }).max(look).max(64) as f64;
+            // the frames are decoded large enough for the face detector's closer look
+            let face_px = close_side(face_side, long as usize).unwrap_or(face_side);
+            let side = (if o.faces { face_px } else { 0 }).max(if o.plates { o.plate_side } else { 0 }).max(look).max(64) as f64;
             let scale = (side / long).min(1.0) as f32;
             let ex = exclude.iter().filter(|e| e.clip.is_none_or(|c| c == it.id)).map(|e| e.ex).collect();
             // the file the frames come from, for the cache (not a proxy playing instead)
@@ -673,6 +678,17 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
 
 /// The steps of the picture size the face detector sees (its long side, pixels).
 const FACE_SIDES: [usize; 6] = [640, 800, 960, 1280, 1600, 1920];
+
+/// The face detector's second look at a frame, twice as close (its long side, pixels), when the
+/// picture (`long`) allows one at least a quarter closer than `face_side`, at most 1920. At the
+/// first look's size a face of 5 to 8 % of the frame is 18 to 30 px, where YuNet often misses
+/// it (a visitor at 7 % next to Ameca was found at 1280 px and not at 640); a face filling the
+/// frame is past what it was trained on at the closer size, so both are kept (one suppression
+/// over the two).
+pub fn close_side(face_side: usize, long: usize) -> Option<usize> {
+    let close = face_side.saturating_mul(2).min(long).min(1920);
+    (close > face_side && close.saturating_mul(4) >= face_side.saturating_mul(5)).then_some(close)
+}
 
 /// The media times clip `it` (`n` sequence frames of `fd`) is analysed at: its first and last
 /// frame, and between them every multiple of the analysis step in media time (`step` sequence
@@ -734,7 +750,13 @@ pub(crate) fn load_detectors(o: &Options) -> std::result::Result<DetectFn, Strin
     Ok(Arc::new(move |rgba: &[u8], w: usize, h: usize, face_side: usize| {
         let mut out = Vec::new();
         if let Some(f) = det.face.as_ref().filter(|_| o.faces) {
-            out.extend(f.detect(rgba, w, h, face_side, o.face_score).unwrap_or_default());
+            let mut faces = f.detect(rgba, w, h, face_side, o.face_score).unwrap_or_default();
+            // and closer, where the picture allows ([`close_side`]): the faces of a crowd
+            if let Some(close) = close_side(face_side, w.max(h)) {
+                faces.extend(f.detect(rgba, w, h, close, o.face_score).unwrap_or_default());
+                faces = filmcraft_vision::post::nms(faces, 0.3, 750);
+            }
+            out.extend(faces);
         }
         if let Some(p) = det.plate.as_ref().filter(|_| o.plates) {
             out.extend(p.detect(rgba, w, h, o.plate_side, o.plate_score).unwrap_or_default());
@@ -777,7 +799,7 @@ impl Cached<'_> {
     fn detections_key(&self, media: &str, w: &Work, o: &Options) -> Option<String> {
         let d = self.detector.as_ref()?;
         Some(format!(
-            "det v{}|{media}|{d}|faces={} plates={} fs={:.3} ps={:.3} side={} pside={} scale={:.5}",
+            "det v{}|{media}|{d}|faces={} plates={} fs={:.3} ps={:.3} side={} pside={} scale={:.5} close={}",
             crate::redact_cache::VERSION,
             o.faces,
             o.plates,
@@ -785,7 +807,9 @@ impl Cached<'_> {
             o.plate_score,
             w.face_side,
             o.plate_side,
-            w.scale
+            w.scale,
+            // the face detector's closer look (none, or its size): its finds are in the entry
+            close_side(w.face_side, (w.size.0.max(w.size.1) * f64::from(w.scale)).round() as usize).unwrap_or(0)
         ))
     }
 }
@@ -1326,13 +1350,18 @@ fn hold(t: Tick, v: f64) -> Keyframe {
     k
 }
 
+/// How long, seconds, a mask stays on before a face is first found and after it is last found,
+/// where it was then (at least an analysed interval): the detector loses a face going behind
+/// something before it is gone (a visitor's smile under Ameca's head, 2026-10-21) and finds one
+/// coming out a little after it shows.
+pub const LINGER: f64 = 0.4;
+
 /// The mask hiding track `t` (number `n` of its kind): a Mask Path keyframe at every analysed
-/// moment, one analysed interval earlier and later at the ends (the detector may first see a
-/// face a few frames after it appears), the Opacity on only from then to then.
+/// moment, [`LINGER`] earlier and later at the ends, the Opacity on only from then to then.
 pub fn mask_for(t: &Track, n: usize, c: &ClipRedact, padding: f64) -> Option<Mask> {
     let first = t.points.first()?;
     let last = t.points.last()?;
-    let lead = Tick::from_seconds_f64(c.interval.max(0.0));
+    let lead = Tick::from_seconds_f64(if c.interval.is_finite() { c.interval.max(LINGER) } else { LINGER });
     let (lo, hi) = (c.media.0.min(c.media.1), c.media.0.max(c.media.1));
     let start = (Tick::from_seconds_f64(first.t) - lead).max(lo);
     let end = (Tick::from_seconds_f64(last.t) + lead).min(hi);

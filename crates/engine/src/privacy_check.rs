@@ -13,7 +13,10 @@
 //! A face may stay sharp (`allowed`) only when the vision model says it is not a person, twice
 //! (the grid of crops, then alone and outlined: [`crate::redact::VisionJudge::confirm`]), and it
 //! is on the subject or the detector is not sure of it (score under `sureFace`) — the same rule
-//! `clip.autoRedact` hides by. Without a vision model nothing unmasked is allowed. AutoCut's QA
+//! `clip.autoRedact` hides by. A face on the subject the grid calls a person is looked at alone
+//! too, and is a person only if that agrees (`verdict` `unsure` otherwise: the robot's own face
+//! is sometimes called a person in a grid, [`both_looks`]). Without a vision model nothing
+//! unmasked is allowed. AutoCut's QA
 //! (`crates/autocut/src/qa.rs`) samples a showcase every half second and at every shot's start
 //! with this, and stops its upload when a face is shown that should not be.
 
@@ -332,6 +335,18 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
+/// What two looks say together: not a person only when both say so; a person when the second
+/// says so, or (away from the robot) the first did; on the robot, a first "person" the second
+/// look does not confirm is unclear.
+pub fn both_looks(first: Option<bool>, second: Option<bool>, subject: bool) -> Option<bool> {
+    match (first, second) {
+        (Some(false), Some(false)) => Some(false),
+        (_, Some(true)) => Some(true),
+        (Some(true), _) if !subject => Some(true),
+        _ => None,
+    }
+}
+
 /// Ask `judge` about each unmasked face (at its best moment, rendered again): the grid first, then
 /// alone and outlined for a face it calls not a person where that would count.
 fn ask(s: &Session, seq: ItemId, scale: f32, judge: &dyn VisionJudge, found: &mut [Unmasked], sure: f32) -> Value {
@@ -362,24 +377,28 @@ fn ask(s: &Session, seq: ItemId, scale: f32, judge: &dyn VisionJudge, found: &mu
             }
         }
     }
+    // the second look: at a face called not a person where that would let it stay sharp, and at
+    // any face on the robot (its own face is often called a person in a grid: two looks that
+    // disagree make it one to check by eye, not a stop)
     let mut failed: Option<String> = None;
-    for f in found.iter_mut().filter(|f| f.checked && f.person == Some(false) && (f.subject || f.track.best_score < sure)) {
+    let second = |f: &Unmasked| f.checked && (f.subject || (f.person == Some(false) && f.track.best_score < sure));
+    for f in found.iter_mut().filter(|f| second(f)) {
         if failed.is_some() {
             // not looked at again: not allowed to stay sharp
-            f.person = None;
+            f.person = f.person.filter(|p| *p);
             continue;
         }
         let Some(c) = crop(f, true) else {
-            f.person = None;
+            f.person = f.person.filter(|p| *p);
             continue;
         };
         match judge.confirm(Kind::Face, &c) {
             Ok(a) => {
                 again += 1;
-                f.person = a;
+                f.person = both_looks(f.person, a, f.subject);
             }
             Err(e) => {
-                f.person = None;
+                f.person = f.person.filter(|p| *p);
                 failed = Some(e);
             }
         }
