@@ -76,8 +76,9 @@ The analysis locates the robot in it once and keeps its box (`subject` in the re
   out, about 2.5 % closer a second, the next photo going the other way. A 4:3 or landscape photo
   fills the 16:9 frame; a portrait photo is shown whole over its blurred copy (the pillars the
   portrait clips get) when a crop would cut its robot (or none was found), else it fills the
-  frame with the move aimed at the robot. Photos have no sound; the narration is timed over them
-  like over a clip.
+  frame with the move aimed at the robot. The pillars stay through the transitions into and out
+  of a picture shown whole, and dip to black with it into a new year. Photos have no sound; the
+  narration is timed over them like over a clip.
 - **In the notes** (step 4) a photo shot is `{"item": 4977, "photo": true, "hold": 4.0, "move":
   "in"}` — `hold` in seconds (1–20; without it, its share of the entry), `move` one of `in`,
   `out`, `pan`, `none` (without it, in and out in turn), `fit` (`full` for the pillars, `fill`) and
