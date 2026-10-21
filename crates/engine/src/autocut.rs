@@ -335,7 +335,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.shorts",
             "Make Shorts…",
             &[],
-            r#"{"item":id?,"sequence":id?,"count":1..20=3,"minSeconds":3..180=15,"maxSeconds":5..180=60,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","motion":"smooth"|"responsive"?,"fallback":"blur"|"letterbox"|"center"="blur","captions":bool=true,"title":bool=false,"topic":str?,"analysisFps":1..60=30,"export":dir?,"uploadYoutube":bool=false,"youtube":{"channel":str?,"privacy":"private"|"unlisted"|"public"="private","tags":[str]?,"playlist":str?,"description":str?}?,"wait":bool=false}"#,
+            r#"{"item":id?,"sequence":id?,"count":1..20=3,"minSeconds":3..180=15,"maxSeconds":5..180=60,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","motion":"smooth"|"responsive"?,"fallback":"blur"|"letterbox"|"center"="blur","platform":"youtube"|"reels"|"tiktok"|"vertical"="youtube","captions":bool=true,"title":bool=false,"topic":str?,"analysisFps":1..60=30,"export":dir?,"uploadYoutube":bool=false,"youtube":{"channel":str?,"privacy":"private"|"unlisted"|"public"="private","tags":[str]?,"playlist":str?,"description":str?}?,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Shorts, p),
         ),
         job(
@@ -596,6 +596,13 @@ fn shorts_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>)
         Some(f) => filmcraft_render::reframe::Fallback::from_name(&f).ok_or_else(|| bad(cmd, "`fallback` is \"blur\", \"letterbox\" or \"center\""))?,
     };
     out.insert("fallback".into(), json!(fallback.name()));
+    // whose interface the captions and the title keep clear of
+    let platform = match crate::safe_zones::platform_p(cmd, p, "platform")? {
+        None => crate::safe_zones::Platform::Youtube,
+        Some(Some(pl)) => pl,
+        Some(None) => return Err(bad(cmd, "`platform` is \"youtube\", \"reels\", \"tiktok\" or \"vertical\"")),
+    };
+    out.insert("platform".into(), json!(platform.name()));
     for (k, default) in [("captions", true), ("title", false), ("uploadYoutube", false)] {
         let v = match p.get(k).filter(|v| !v.is_null()) {
             None => default,

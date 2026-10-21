@@ -437,11 +437,15 @@ fn shorts_parameters_are_checked_and_defaulted() {
     );
     assert_eq!(p["youtube"]["privacy"], "unlisted");
     assert_eq!(p["fallback"], "blur", "nobody followed: a blurred fill by default");
-    let r = s.execute("autocut.shorts", json!({"fallback": "Letterbox", "wait": true})).unwrap();
-    assert_eq!(r["showcase"]["params"]["fallback"], "letterbox");
+    assert_eq!(p["platform"], "youtube", "captions and titles clear of YouTube Shorts' interface by default");
+    let r = s.execute("autocut.shorts", json!({"fallback": "Letterbox", "platform": "TikTok", "wait": true})).unwrap();
+    assert_eq!((r["showcase"]["params"]["fallback"].as_str(), r["showcase"]["params"]["platform"].as_str()), (Some("letterbox"), Some("tiktok")));
     for bad in [
         json!({"fallback": "stretch"}),
         json!({"fallback": 2}),
+        json!({"platform": "snapchat"}),
+        json!({"platform": null}),
+        json!({"platform": 1}),
         json!({"count": 0}),
         json!({"count": 21}),
         json!({"count": "three"}),

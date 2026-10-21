@@ -511,6 +511,10 @@ pub struct ShortsParams {
     /// of itself), "letterbox" (black bars) or "center" (a centred crop).
     #[serde(default)]
     pub fallback: Option<String>,
+    /// Whose interface the captions and the title keep clear of: "youtube" (default), "reels",
+    /// "tiktok" or "vertical" (all three).
+    #[serde(default)]
+    pub platform: Option<String>,
     /// Words that make a passage more interesting (e.g. "robots launch").
     #[serde(default)]
     pub topic: Option<String>,
@@ -553,6 +557,7 @@ fn shorts_params(p: ShortsParams) -> Value {
     put("aspect", p.aspect.map(Value::String));
     put("motion", p.motion.map(Value::String));
     put("fallback", p.fallback.map(Value::String));
+    put("platform", p.platform.map(Value::String));
     put("topic", p.topic.filter(|t| !t.trim().is_empty()).map(Value::String));
     put("captions", p.captions.map(Value::Bool));
     put("title", p.title.map(Value::Bool));
@@ -2352,6 +2357,8 @@ mod tests {
             serde_json::from_value(json!({"item": 4, "count": 2, "export": "/x", "upload_youtube": true, "youtube_privacy": "unlisted", "topic": " "}))
                 .unwrap();
         assert_eq!(shorts_params(p), json!({"item": 4, "count": 2, "export": "/x", "uploadYoutube": true, "youtube": {"privacy": "unlisted"}, "wait": true}));
+        let p: ShortsParams = serde_json::from_value(json!({"platform": "tiktok", "fallback": "letterbox"})).unwrap();
+        assert_eq!(shorts_params(p), json!({"platform": "tiktok", "fallback": "letterbox", "wait": true}));
         let p: AutoReframeParams =
             serde_json::from_value(json!({"aspect": "1:1", "start_seconds": 2.0, "end_seconds": 9.5, "subject": [{"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}]}))
                 .unwrap();

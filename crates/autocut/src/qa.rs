@@ -15,6 +15,7 @@
 //! | `mix` | the mix exported as 32-bit float WAV and metered (BS.1770): integrated loudness outside −16…−14 LUFS (±0.5 LU) and true peak above −1 dBTP (warnings); true peak above 0 dBTP or samples at full scale: clipping (error); the median short-term loudness during narration clips (A2) vs between them: the voice less than 4 dB louder (warning), or not louder at all (error); and per stem (`audio.analyzeMix`, [`mix_findings`]), for small speakers: the narration less than 12 LU above the music while it speaks, the Mix's limiter taking more than 2 dB off the peaks, more than a quarter of the mix's energy below 120 Hz, a narration clip with a clipped source (warnings) |
 //! | `subject` | shots where the grounding model (`AUTOCUT_ANALYSIS_MODEL`, the analysis' prompt) does not find the subject in a rendered frame (warnings); skipped when no model is reachable |
 //! | `privacy` | from what the privacy pass hid ([`Options::privacy`]): a redaction mask covering more than [`Options::max_mask`] (a fifth) of a clip's picture at any keyframe (warnings: a blur that size hides the shot, as one on a close-up of a tablet did); the faces, plates and named places hidden in each entry (`privacy` in the report) |
+//! | `safe_zones` | captions, titles and lower thirds (`sequence.checkSafeZones`) that reach into the parts of the frame [`Options::platform`]'s own interface covers — YouTube Shorts, Instagram Reels, TikTok; a vertical sequence without one: all of them at once (warnings, with the zone and how much of it is in there); skipped on a horizontal sequence without a platform |
 //!
 //! The report ([`QaReport`], serde) also holds a contact sheet: one rendered frame per entry
 //! under its number, the band red or amber when the entry has an error or a warning
@@ -110,6 +111,10 @@ pub struct Options {
     pub privacy: Vec<crate::privacy::Hidden>,
     /// The largest share of a clip's picture one redaction mask may cover.
     pub max_mask: f64,
+    /// The platform whose interface captions, titles and lower thirds must keep clear of
+    /// (`youtube`, `reels`, `tiktok`, `vertical`); None: all of them on a vertical sequence, the
+    /// check skipped on a horizontal one.
+    pub platform: Option<String>,
 }
 
 impl Default for Options {
@@ -136,6 +141,7 @@ impl Default for Options {
             max_low_share: MAX_LOW_SHARE,
             privacy: Vec::new(),
             max_mask: 0.2,
+            platform: None,
         }
     }
 }
@@ -160,7 +166,7 @@ pub enum Severity {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
-    /// `joins`, `black`, `mix`, `subject` or `sequence`.
+    /// `joins`, `black`, `mix`, `subject`, `privacy`, `safe_zones` or `sequence`.
     pub check: &'static str,
     pub severity: Severity,
     /// Where, in seconds of the sequence.
@@ -366,6 +372,8 @@ struct Seq {
     num: i64,
     den: i64,
     aspect: f64,
+    /// Taller than wide (a short).
+    portrait: bool,
     duration: i64,
     video: Vec<Track>,
     audio: Vec<Track>,
@@ -416,7 +424,16 @@ fn parse(v: &Value) -> Seq {
         Track { enabled: t["enabled"].as_bool().unwrap_or(true), clips, dips }
     };
     let tracks = |k: &str| v[k].as_array().map(|a| a.iter().take(MAX_TRACKS).map(track).collect()).unwrap_or_default();
-    Seq { id: v["id"].as_u64(), num, den, aspect, duration: v["duration"].as_i64().unwrap_or(0).max(0), video: tracks("video"), audio: tracks("audio") }
+    Seq {
+        id: v["id"].as_u64(),
+        num,
+        den,
+        aspect,
+        portrait: aspect < 1.0,
+        duration: v["duration"].as_i64().unwrap_or(0).max(0),
+        video: tracks("video"),
+        audio: tracks("audio"),
+    }
 }
 
 fn secs(t: i64) -> f64 {
@@ -1321,6 +1338,61 @@ async fn privacy(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport,
     (Check::ran(name, &r.findings, Some(note)), tiles)
 }
 
+// ------------------------------------------------------------------ safe zones
+
+/// The findings of a `sequence.checkSafeZones` answer: a warning for each caption, title or lower
+/// third that reaches into the platform's interface. Hostile answers give what can be read.
+pub fn safe_zone_findings(v: &Value) -> Vec<Finding> {
+    let label = v["label"].as_str().unwrap_or("the platform");
+    let finite = |x: &f64| x.is_finite();
+    let overlaps = v["overlaps"].as_array().map(Vec::as_slice).unwrap_or_default();
+    overlaps
+        .iter()
+        .take(MAX_CLIPS)
+        .filter_map(|o| {
+            let seconds = o["seconds"].as_f64().filter(finite)?;
+            let kind = match o["kind"].as_str() {
+                Some("caption") => "caption",
+                Some("graphic") => "title or lower third",
+                _ => "overlay",
+            };
+            let zones = o["zones"].as_array().map(|z| z.iter().filter_map(Value::as_str).take(5).collect::<Vec<_>>().join(" and ")).unwrap_or_default();
+            let share = o["share"].as_f64().filter(finite).unwrap_or(0.0).clamp(0.0, 1.0);
+            let text: String = o["text"].as_str().unwrap_or_default().chars().take(60).collect();
+            let message =
+                format!("{kind} \"{text}\" reaches into {label}'s {zones} zone ({:.0} % of it): the platform's own interface covers it there", share * 100.0);
+            let f = Finding::new("safe_zones", Severity::Warning, seconds, message).clip(o["clip"].as_u64());
+            Some(match o["until"].as_f64().filter(finite) {
+                Some(u) => f.until(u),
+                None => f,
+            })
+        })
+        .collect()
+}
+
+/// Captions, titles and lower thirds against the platform's safe zones ([`Options::platform`]; on
+/// a vertical sequence without one, every platform at once).
+async fn safe_zones(ex: &dyn Executor, seq: &Seq, opts: &Options, r: &mut QaReport) -> Check {
+    let name = "safe_zones";
+    let platform = match (&opts.platform, seq.portrait) {
+        (Some(p), _) => p.clone(),
+        (None, true) => "vertical".to_string(),
+        (None, false) => return Check::skipped(name, "not a vertical sequence, and no platform asked for"),
+    };
+    let mut p = json!({"platform": platform});
+    if let Some(id) = seq.id {
+        p["sequence"] = json!(id);
+    }
+    match ex.execute("sequence.checkSafeZones", p).await {
+        Ok(v) => {
+            let note = format!("{} caption(s) and graphic(s) checked against {}", v["checked"].as_u64().unwrap_or(0), v["label"].as_str().unwrap_or(&platform));
+            r.findings.extend(safe_zone_findings(&v));
+            Check::ran(name, &r.findings, Some(note))
+        }
+        Err(e) => Check::skipped(name, e),
+    }
+}
+
 // ------------------------------------------------------------------ the whole check
 
 /// Check the active sequence (see the module docs). `model`: a grounding vision model for the
@@ -1348,6 +1420,9 @@ pub async fn check(ex: &dyn Executor, opts: &Options, model: Option<&dyn ChatMod
     r.checks.push(c);
     progress("QA: privacy");
     let (c, privacy_tiles) = privacy(ex, &seq, opts, &mut r, progress).await;
+    r.checks.push(c);
+    progress("QA: safe zones");
+    let c = safe_zones(ex, &seq, opts, &mut r).await;
     r.checks.push(c);
     if opts.mix {
         progress("QA: the mix");
@@ -1554,6 +1629,72 @@ mod tests {
         assert!(contact_sheet(&[], &[], 160, 1.0).is_none());
         // hostile sizes stay bounded
         assert!(contact_sheet(&tiles, &[], u32::MAX, f64::MIN_POSITIVE).is_some());
+    }
+
+    /// A 1080×1920 short with one caption (1 s to 3 s) whose bottom is `margin` up the frame.
+    async fn short_with_caption(margin: f64) -> (crate::SessionExecutor, Seq) {
+        let mut s = filmcraft_engine::Session::default();
+        s.execute("file.newSequence", json!({"name": "Short", "width": 1080, "height": 1920, "fps": 30})).unwrap();
+        s.execute("captions.newTrack", json!({"format": "Subtitle"})).unwrap();
+        s.execute("captions.add", json!({"track": "C1", "text": "watch this part", "seconds": 1.0, "durationSeconds": 2.0})).unwrap();
+        s.execute("captions.setStyle", json!({"track": "C1", "size": 64, "background": false, "outline": 7, "anchor": "bottom", "margin": margin})).unwrap();
+        let ex = crate::SessionExecutor::from(s);
+        let seq = parse(&ex.execute("sequence.inspect", json!({})).await.unwrap());
+        (ex, seq)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_caption_in_the_bottom_unsafe_zone_is_flagged_and_a_safe_one_passes() {
+        // low in the frame, where the channel name and description sit
+        let (ex, seq) = short_with_caption(0.1).await;
+        assert!(seq.portrait);
+        let mut r = QaReport::default();
+        let c = safe_zones(&ex, &seq, &Options::default(), &mut r).await;
+        assert_eq!(c.status, "findings", "{c:?}");
+        let f = r.of("safe_zones", Severity::Warning);
+        assert_eq!(f.len(), 1, "{:?}", r.findings);
+        assert_eq!((f[0].seconds, f[0].until), (1.0, Some(3.0)));
+        assert!(
+            f[0].message.contains("bottom") && f[0].message.contains("All vertical platforms") && f[0].message.contains("watch this part"),
+            "{}",
+            f[0].message
+        );
+        assert!(f[0].clip.is_some());
+        let mut r = QaReport::default();
+        let yt = Options { platform: Some("youtube".into()), ..Options::default() };
+        safe_zones(&ex, &seq, &yt, &mut r).await;
+        assert!(r.findings[0].message.contains("YouTube Shorts"), "{:?}", r.findings);
+        // above the bottom zone and narrow enough: nothing to say
+        let (ex, seq) = short_with_caption(0.38).await;
+        for p in ["youtube", "reels", "tiktok", "vertical"] {
+            let mut r = QaReport::default();
+            let c = safe_zones(&ex, &seq, &Options { platform: Some(p.into()), ..Options::default() }, &mut r).await;
+            assert_eq!((c.status, r.findings.len()), ("ok", 0), "{p}: {:?} {c:?}", r.findings);
+        }
+        // a horizontal sequence without a platform is not checked; a platform that is not one is
+        // a check that could not run, not a failure
+        let flat = Seq { portrait: false, ..seq.clone() };
+        assert_eq!(safe_zones(&ex, &flat, &Options::default(), &mut QaReport::default()).await.status, "skipped");
+        let bad = Options { platform: Some("snapchat".into()), ..Options::default() };
+        assert_eq!(safe_zones(&ex, &seq, &bad, &mut QaReport::default()).await.status, "skipped");
+    }
+
+    #[test]
+    fn hostile_safe_zone_answers_give_what_can_be_read() {
+        let v = json!({"label": "TikTok", "overlaps": [
+            {"kind": "graphic", "seconds": 2.0, "until": f64::MAX, "zones": ["top", 3], "share": 7.5, "text": "x".repeat(500), "clip": 4},
+            {"kind": "caption", "seconds": "soon"},
+            {"seconds": 1.0, "share": -1.0},
+            "nothing",
+        ]});
+        let f = safe_zone_findings(&v);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f[0].message.contains("title or lower third") && f[0].message.contains("100 %") && f[0].message.chars().count() < 300, "{}", f[0].message);
+        assert_eq!(f[0].clip, Some(4));
+        assert!(f[1].message.contains("0 %"));
+        for v in [json!(null), json!({"overlaps": 3}), json!([1, 2])] {
+            assert!(safe_zone_findings(&v).is_empty(), "{v}");
+        }
     }
 
     #[test]
