@@ -775,6 +775,9 @@ pub struct Track {
     /// Audio: auto-duck under other tracks ([`auto_duck`]); `None` = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_duck: Option<auto_duck::AutoDuck>,
+    /// Colour label tinting the track's header and lane background (`None` = no colour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<Label>,
 }
 
 impl Track {
@@ -796,6 +799,7 @@ impl Track {
             effects: Vec::new(),
             mixer: MixerStrip::default(),
             auto_duck: None,
+            label: None,
         }
     }
     pub fn end(&self) -> Tick {

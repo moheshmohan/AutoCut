@@ -58,11 +58,23 @@ pub struct AutoSavePrefs {
     pub recovery_journal: bool,
     /// Longest time (s) unsaved changes may stay out of the journal while edits keep coming.
     pub recovery_interval_seconds: u32,
+    /// Folders chosen in Project Settings ▸ Scratch Disks on this computer. A project file may
+    /// name these, or folders inside its own folder; see
+    /// [`crate::project_tools::trusted_scratch`].
+    pub scratch_folders: Vec<String>,
 }
 
 impl Default for AutoSavePrefs {
     fn default() -> Self {
-        Self { enabled: true, interval_minutes: 5, max_versions: 20, save_current_project: false, recovery_journal: true, recovery_interval_seconds: 5 }
+        Self {
+            enabled: true,
+            interval_minutes: 5,
+            max_versions: 20,
+            save_current_project: false,
+            recovery_journal: true,
+            recovery_interval_seconds: 5,
+            scratch_folders: Vec::new(),
+        }
     }
 }
 
@@ -1225,21 +1237,18 @@ impl Worker {
         let Some(s) = &self.latest else { return Err("nothing to save".into()) };
         // (owned: saving the project below updates `self.latest`)
         let (project, revision, project_path) = (s.project.clone(), s.revision, s.path.clone());
-        let scratch = project.settings.scratch.auto_save.clone().filter(|d| !d.is_empty());
-        let (dir, name) = match &project_path {
+        let scratch = crate::project_tools::trusted_scratch(project.settings.scratch.auto_save.as_deref(), project_path.as_deref(), &self.prefs.scratch_folders);
+        let (dir, name) = match (&project_path, scratch) {
             // Project Settings ▸ Scratch Disks ▸ Project Auto Save
-            Some(p) if scratch.is_some() => {
+            (Some(p), Some(scratch)) => {
                 let p = Path::new(p);
-                (
-                    PathBuf::from(scratch.clone().unwrap_or_default()),
-                    p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| project.name.clone()),
-                )
+                (scratch, p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| project.name.clone()))
             }
-            Some(p) => {
+            (Some(p), None) => {
                 let p = Path::new(p);
                 (names::auto_save_dir(p), p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| project.name.clone()))
             }
-            None => (self.data_dir.join(names::AUTO_SAVE_DIR), project.name.clone()),
+            (None, _) => (self.data_dir.join(names::AUTO_SAVE_DIR), project.name.clone()),
         };
         let t0 = Instant::now();
         let bytes = filmcraft_format::encode(&project, false);

@@ -1277,6 +1277,7 @@
 	59.94 fps Non Drop-Frame	59.94 fps ノンドロップフレーム
 	ASC CDL	ASC CDL
 	Accessible color contrast	アクセシビリティに配慮したカラーコントラスト
+	Animate zoom, scrolling and menus	ズーム、スクロール、メニューをアニメーション表示
 	Action-Safe Margin	アクションセーフの余白
 	Active Monitor	アクティブなモニター
 	Add	加算
@@ -4051,3 +4052,9 @@
 	Photos	フォト
 	Apply Places to Project Items	場所をプロジェクトの項目に適用
 	Read Places from Google Photos	Google フォトから場所を読み込む
+# View ▸ Reset Interface Zoom (#2253).
+	Reset Interface Zoom	インターフェイスのズームをリセット
+	Track Color	トラックカラー
+	Open a sequence to search its graphics	シーケンスを開くとグラフィックスを検索できます
+	No text graphics in this sequence. Add text with the Type tool.	このシーケンスにはテキストのグラフィックスがありません。文字ツールでテキストを追加してください。
+	No matching text.	一致するテキストはありません。

@@ -22,6 +22,7 @@ pub mod color;
 pub mod commands;
 pub mod contact_sheet;
 pub mod demo;
+pub mod doc_path;
 pub mod elements;
 pub mod essential_sound;
 pub mod export_tools;
@@ -1462,6 +1463,8 @@ mod shortcuts_tests;
 mod soundfonts_tests;
 #[cfg(test)]
 mod split_edit_ripple_trim_tests;
+#[cfg(test)]
+mod stored_paths_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
