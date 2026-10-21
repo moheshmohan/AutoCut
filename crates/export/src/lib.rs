@@ -16,6 +16,7 @@
 use std::io::Write;
 
 mod aac_out;
+pub use aac_out::encode_m4a;
 mod audio_out;
 mod captions_out;
 mod deflate;
