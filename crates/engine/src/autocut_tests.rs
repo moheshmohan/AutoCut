@@ -436,7 +436,12 @@ fn shorts_parameters_are_checked_and_defaulted() {
         "{r}"
     );
     assert_eq!(p["youtube"]["privacy"], "unlisted");
+    assert_eq!(p["fallback"], "blur", "nobody followed: a blurred fill by default");
+    let r = s.execute("autocut.shorts", json!({"fallback": "Letterbox", "wait": true})).unwrap();
+    assert_eq!(r["showcase"]["params"]["fallback"], "letterbox");
     for bad in [
+        json!({"fallback": "stretch"}),
+        json!({"fallback": 2}),
         json!({"count": 0}),
         json!({"count": 21}),
         json!({"count": "three"}),

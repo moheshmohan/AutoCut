@@ -82,6 +82,7 @@ const VALUED: &[&str] = &[
     "--topic",
     "--analysis-fps",
     "--sequence",
+    "--fallback",
     // youtube upload, showcase --upload-youtube
     "--channel",
     "--tags",

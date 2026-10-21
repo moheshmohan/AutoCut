@@ -507,6 +507,10 @@ pub struct ShortsParams {
     /// How the crop follows the speaker: "smooth" (default) or "responsive".
     #[serde(default)]
     pub motion: Option<String>,
+    /// Where nobody is followed: "blur" (default: the whole picture over a blurred, dimmed copy
+    /// of itself), "letterbox" (black bars) or "center" (a centred crop).
+    #[serde(default)]
+    pub fallback: Option<String>,
     /// Words that make a passage more interesting (e.g. "robots launch").
     #[serde(default)]
     pub topic: Option<String>,
@@ -548,6 +552,7 @@ fn shorts_params(p: ShortsParams) -> Value {
     put("maxSeconds", p.max_seconds.map(|v| json!(v)));
     put("aspect", p.aspect.map(Value::String));
     put("motion", p.motion.map(Value::String));
+    put("fallback", p.fallback.map(Value::String));
     put("topic", p.topic.filter(|t| !t.trim().is_empty()).map(Value::String));
     put("captions", p.captions.map(Value::Bool));
     put("title", p.title.map(Value::Bool));
@@ -582,7 +587,9 @@ pub struct AutoReframeParams {
     /// "smooth" (default) or "responsive".
     #[serde(default)]
     pub motion: Option<String>,
-    /// Clips with nobody to follow: "letterbox" (default) or "center".
+    /// Clips with nobody to follow: "letterbox" (default), "center", or "blur" (the whole picture
+    /// over a blurred, dimmed copy of itself, also for the stretches of a followed clip where the
+    /// subject is lost).
     #[serde(default)]
     pub fallback: Option<String>,
     /// Only this part of the sequence, seconds.
@@ -1593,7 +1600,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Shorts: make vertical shorts from a long video",
-        description = "Long video → shorts (the `autocut.shorts` engine job: progress, cancellable). The transcript of `sequence` (default the active one) or of media `item` (put in a new sequence) — Whisper's, made first when there is none — is cut into sentences; runs of them `min_seconds`..`max_seconds` long are scored for interest and for the strength of their opening hook (the local Ollama model rates the best openings and titles them when it is there), and the best `count` that do not overlap each become a vertical sequence: `sequence.autoReframe` to `aspect` (the speaker followed by the subject tracker, Motion keyframes; letterboxed where nobody is found), big outlined captions from the transcript, an optional `title` card. With `export` (a folder) each is exported with the captions burned in; with `upload_youtube` each export goes to YouTube, private unless `youtube_privacy`. Returns each short's sequence, range, score, hook, title and export.",
+        description = "Long video → shorts (the `autocut.shorts` engine job: progress, cancellable). The transcript of `sequence` (default the active one) or of media `item` (put in a new sequence) — Whisper's, made first when there is none — is cut into sentences; runs of them `min_seconds`..`max_seconds` long are scored for interest and for the strength of their opening hook (the local Ollama model rates the best openings and titles them when it is there), and the best `count` that do not overlap each become a vertical sequence: `sequence.autoReframe` to `aspect` (the speaker followed by the subject tracker, Motion keyframes; where nobody is found, the whole picture over a blurred, dimmed copy of itself — `fallback` \"letterbox\" for black bars), big outlined captions from the transcript, an optional `title` card. With `export` (a folder) each is exported with the captions burned in; with `upload_youtube` each export goes to YouTube, private unless `youtube_privacy`. Returns each short's sequence, range, score, hook, title and export.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
     async fn shorts_make(
@@ -1606,7 +1613,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Auto Reframe Sequence",
-        description = "A copy of a sequence in another shape — `aspect` \"9:16\" (default), \"1:1\", \"4:5\" or \"16:9\" — whose clips follow their subject (`sequence.autoReframe`, one undo step): a pure-Rust tracker (Median Flow on pyramidal Lucas–Kanade, re-detection by template after occlusions and cuts) seeded from `subject` boxes (0..1 of the picture: {x, y, w, h, clip?, seconds?}, e.g. the vision model's) or the salient region, smoothed by a critically damped zero-phase follow (`motion`: smooth keeps a calm camera window, responsive follows closely) into Motion Position/Scale keyframes; clips with nobody to follow are letterboxed (`fallback: \"center\"` crops centred instead). `range` {startSeconds, endSeconds} reframes only that part. Runs as an engine job with progress; returns the new sequence and, per clip, whether its subject was followed.",
+        description = "A copy of a sequence in another shape — `aspect` \"9:16\" (default), \"1:1\", \"4:5\" or \"16:9\" — whose clips follow their subject (`sequence.autoReframe`, one undo step): a pure-Rust tracker (Median Flow on pyramidal Lucas–Kanade, re-detection by template after occlusions and cuts) seeded from `subject` boxes (0..1 of the picture: {x, y, w, h, clip?, seconds?}, e.g. the vision model's) or the salient region, smoothed by a critically damped zero-phase follow (`motion`: smooth keeps a calm camera window, responsive follows closely) into Motion Position/Scale keyframes; clips with nobody to follow are letterboxed (`fallback: \"center\"` crops centred instead; `\"blur\"` fits them whole over a blurred, dimmed copy of themselves, and eases a followed clip out to that wherever its subject is lost for a second or more). `range` {startSeconds, endSeconds} reframes only that part. Runs as an engine job with progress; returns the new sequence and, per clip, whether its subject was followed.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn sequence_auto_reframe(

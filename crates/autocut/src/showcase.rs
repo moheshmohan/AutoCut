@@ -1279,7 +1279,7 @@ async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64,
             let filled = run(ex, "clip.fillFrame", json!({"clips": [b]})).await?;
             let scale = filled["clips"].as_array().and_then(|a| a.iter().find(|c| c["clip"].as_u64() == Some(b))).and_then(|c| c["scale"].as_f64());
             run(ex, "effects.apply", json!({"clips": [b], "effect": "gaussian_blur"})).await?;
-            run(ex, "effects.setParam", json!({"clip": b, "effect": "gaussian_blur", "param": "blurriness", "value": 60.0})).await?;
+            run(ex, "effects.setParam", json!({"clip": b, "effect": "gaussian_blur", "param": "blurriness", "value": BACKDROP_BLURRINESS})).await?;
             // its edges blurred from its own pixels, not from black
             run(ex, "effects.setParam", json!({"clip": b, "effect": "gaussian_blur", "param": "repeat_edge", "value": true})).await.ok();
             run(ex, "effects.setParam", json!({"clip": b, "effect": "opacity", "param": "opacity", "value": BACKDROP_OPACITY})).await?;
@@ -1296,10 +1296,10 @@ async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64,
     Ok(Placed { fg, bg, audio, end, fit: odd.then_some(if fill { Fit::Fill } else { Fit::Full }) })
 }
 
-/// The blurred copy behind a whole picture: its opacity over black (dimmed), and how much larger
-/// than the frame it is (its blurred edges outside).
-const BACKDROP_OPACITY: f64 = 45.0;
-const BACKDROP_ZOOM: f64 = 1.08;
+// The blurred copy behind a whole picture: its blur, its opacity over black (dimmed), and how
+// much larger than the frame it is (its blurred edges outside) — the look Auto Reframe's `blur`
+// fallback gives a vertical short's fitted pictures too.
+use filmcraft_engine::reframe::{BACKDROP_BLURRINESS, BACKDROP_OPACITY, BACKDROP_ZOOM};
 
 /// Fade a shot's own sound in at its start (a crossfade when it follows another shot's sound).
 async fn fade_in(ex: &dyn Executor, audio: Option<u64>) {

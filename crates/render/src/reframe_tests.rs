@@ -143,6 +143,114 @@ fn a_clip_without_a_subject_is_letterboxed_or_centred() {
 }
 
 #[test]
+fn the_blur_fallback_fits_the_whole_picture_over_its_fill() {
+    let samples: Vec<Sample> = (0..60).map(|k| Sample { t: k as f64 / 30.0, bbox: None, confidence: 0.0, cut: false }).collect();
+    let p = plan(&samples, G, Follow::Smooth, Zoom::Track, Fallback::Blur);
+    assert!(p.letterbox && p.keys.len() == 1);
+    assert!((p.keys[0].scale - G.fit_scale()).abs() < 1e-9, "fitted to the width");
+    assert_eq!(p.keys[0].position, [540.0, 960.0]);
+    assert_eq!(p.fill, vec![(0, 59)], "the blurred copy under the whole clip");
+    assert!(!G.covers(p.keys[0].position, p.keys[0].scale));
+    // the other fallbacks leave nothing to fill; with the clip's own scale nothing is fitted
+    for f in [Fallback::Letterbox, Fallback::Center] {
+        assert!(plan(&samples, G, Follow::Smooth, Zoom::Track, f).fill.is_empty());
+    }
+    let keep = vec![G.fill_scale(); 60];
+    let k = plan(&samples, G, Follow::Smooth, Zoom::Keep(&keep), Fallback::Blur);
+    assert!(k.fill.is_empty() && (k.keys[0].scale - G.fill_scale()).abs() < 1e-9);
+    assert_eq!(Fallback::from_name(" Blur "), Some(Fallback::Blur));
+    assert_eq!(Fallback::Blur.name(), "blur");
+}
+
+/// Seen on the left for 2 s, lost for 3 s, seen on the right for 3 s (30 fps).
+fn lost_in_the_middle() -> Vec<Sample> {
+    (0..240)
+        .map(|k| {
+            let t = k as f64 / 30.0;
+            match k {
+                0..60 => sample(t, 0.3, 0.5),
+                60..150 => Sample { t, bbox: SubjectBox::new(0.5, 0.5, 0.1, 0.1), confidence: 0.05, cut: false },
+                _ => sample(t, 0.6, 0.5),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_lost_stretch_eases_out_to_the_blurred_fill_and_back() {
+    let samples = lost_in_the_middle();
+    let t = times(&samples);
+    for follow_mode in [Follow::Smooth, Follow::Responsive] {
+        let p = plan(&samples, G, follow_mode, Zoom::Track, Fallback::Blur);
+        assert!(!p.letterbox && p.animate_scale, "{follow_mode:?}: followed, with the fill in the middle");
+        assert_eq!(p.fill.len(), 1, "{follow_mode:?}: {:?}", p.fill);
+        let (a, b) = p.fill[0];
+        assert!((58..=60).contains(&a) && (149..=151).contains(&b), "{follow_mode:?}: the fill from the loss to the return: {a}..{b}");
+        let placed: Vec<([f64; 2], f64)> = (0..240).map(|i| placement_at(&p, &t, i).unwrap()).collect();
+        // tracked parts fill the frame; the middle of the loss is the whole picture, centred
+        for (i, pl) in placed.iter().enumerate() {
+            if !(a..=b).contains(&i) {
+                assert!(G.covers(pl.0, pl.1), "{follow_mode:?}: frame {i} tracked: {pl:?}");
+            }
+        }
+        for i in [80, 105, 130] {
+            let (pos, s) = placed[i];
+            assert!(
+                (s - G.fit_scale()).abs() < 1e-3 && (pos[0] - 540.0).abs() < 1.0 && (pos[1] - 960.0).abs() < 1.0,
+                "{follow_mode:?}: frame {i}: {pos:?} at {s}"
+            );
+        }
+        // no jumps: the zoom out (and back) takes the eased change's time, a few % a frame at most
+        // (the tracked crop is pushed in a little on this subject)
+        let total = (placed.iter().map(|p| p.1).fold(0.0, f64::max) / G.fit_scale()).ln();
+        let steps: Vec<f64> = placed.windows(2).map(|w| (w[1].1.ln() - w[0].1.ln()).abs()).collect();
+        let worst = steps.iter().copied().fold(0.0, f64::max);
+        let frames = EASE_SECONDS * 30.0;
+        assert!(worst < 1.6 * total / frames, "{follow_mode:?}: the scale changes by {worst:.3} (log) in a frame, of {total:.3}");
+        let moving = steps.iter().filter(|s| **s > 1e-4).count();
+        assert!(moving as f64 >= 1.5 * frames, "{follow_mode:?}: eased over {moving} frames");
+        let worst_px = placed.windows(2).map(|w| (w[1].0[0] - w[0].0[0]).abs()).fold(0.0, f64::max);
+        assert!(worst_px < 120.0, "{follow_mode:?}: the picture moves {worst_px:.0} px in a frame");
+    }
+    // the letterbox fallback bridges the same loss (the crop slides across, no fill)
+    let l = plan(&samples, G, Follow::Smooth, Zoom::Track, Fallback::Letterbox);
+    assert!(
+        l.fill.is_empty()
+            && (0..240).all(|i| {
+                let p = placement_at(&l, &t, i).unwrap();
+                G.covers(p.0, p.1)
+            })
+    );
+}
+
+#[test]
+fn a_short_loss_is_bridged_and_an_empty_shot_cuts_to_the_fill() {
+    // lost for half a second: bridged even with the blurred fill
+    let samples: Vec<Sample> = (0..120)
+        .map(|k| {
+            let t = k as f64 / 30.0;
+            if (50..65).contains(&k) { Sample { t, bbox: None, confidence: 0.0, cut: false } } else { sample(t, 0.4, 0.5) }
+        })
+        .collect();
+    let p = plan(&samples, G, Follow::Smooth, Zoom::Track, Fallback::Blur);
+    assert!(p.fill.is_empty(), "{:?}", p.fill);
+    // a second shot with nobody in it: the whole picture from its first frame (the cut is the change)
+    let mut cut: Vec<Sample> = (0..120).map(|k| sample(k as f64 / 30.0, 0.3, 0.5)).collect();
+    for s in cut.iter_mut().skip(80) {
+        *s = Sample { t: s.t, bbox: None, confidence: 0.0, cut: false };
+    }
+    cut[80].cut = true;
+    let p = plan(&cut, G, Follow::Smooth, Zoom::Track, Fallback::Blur);
+    assert_eq!(p.shots, 2);
+    let t = times(&cut);
+    let before = placement_at(&p, &t, 79).unwrap();
+    let after = placement_at(&p, &t, 80).unwrap();
+    assert!(G.covers(before.0, before.1), "{before:?}");
+    assert!((after.1 - G.fit_scale()).abs() < 1e-6, "{after:?}");
+    assert_eq!(p.fill, vec![(80, 119)], "from the cut");
+}
+
+#[test]
 fn gaps_are_bridged() {
     // seen, lost for a second, seen further right: the crop eases across, it does not snap back
     let samples: Vec<Sample> = (0..90)
@@ -212,14 +320,24 @@ fn hostile_samples_never_panic() {
     for s in &cases {
         for g in geometries {
             for z in [Zoom::Track, Zoom::Keep(&[f64::NAN, -1.0, 0.0])] {
-                let p = plan(s, g, Follow::Responsive, z, Fallback::Center);
-                assert!(!p.keys.is_empty());
-                for i in 0..s.len() + 2 {
-                    let _ = placement_at(&p, &times(s), i);
+                for f in [Fallback::Center, Fallback::Blur] {
+                    let p = plan(s, g, Follow::Responsive, z, f);
+                    assert!(!p.keys.is_empty());
+                    assert!(p.fill.iter().all(|(a, b)| a <= b && *b < s.len().max(1)), "{:?}", p.fill);
+                    for i in 0..s.len() + 2 {
+                        let _ = placement_at(&p, &times(s), i);
+                    }
                 }
             }
         }
     }
+    // lost stretches with hostile times
+    let lost = lost_weights(&[false, true, false, false], &[f64::NAN, f64::INFINITY, -1.0, 1e300]);
+    assert!(lost.iter().all(|w| (0.0..=1.0).contains(w)));
+    assert!(lost_weights(&[], &[]).is_empty() && lost_weights(&[false; 3], &[0.0]).len() == 1);
+    let mut out = Vec::new();
+    spans(&[0.0, f64::NAN, 1.0], usize::MAX - 1, &mut out);
+    assert!(towards(([0.0, 0.0], f64::NAN), ([1.0, 1.0], 2.0), f64::INFINITY).0 == [0.0, 0.0]);
     assert!(simplify(&[], &[], 1.0).is_empty());
     assert!(fill(&[None, None], &[0.0, 1.0]).is_none());
     assert_eq!(window(&[], &[]), Vec::<f64>::new());

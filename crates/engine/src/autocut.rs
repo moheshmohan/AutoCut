@@ -335,7 +335,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.shorts",
             "Make Shorts…",
             &[],
-            r#"{"item":id?,"sequence":id?,"count":1..20=3,"minSeconds":3..180=15,"maxSeconds":5..180=60,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","motion":"smooth"|"responsive"?,"captions":bool=true,"title":bool=false,"topic":str?,"analysisFps":1..60=30,"export":dir?,"uploadYoutube":bool=false,"youtube":{"channel":str?,"privacy":"private"|"unlisted"|"public"="private","tags":[str]?,"playlist":str?,"description":str?}?,"wait":bool=false}"#,
+            r#"{"item":id?,"sequence":id?,"count":1..20=3,"minSeconds":3..180=15,"maxSeconds":5..180=60,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","motion":"smooth"|"responsive"?,"fallback":"blur"|"letterbox"|"center"="blur","captions":bool=true,"title":bool=false,"topic":str?,"analysisFps":1..60=30,"export":dir?,"uploadYoutube":bool=false,"youtube":{"channel":str?,"privacy":"private"|"unlisted"|"public"="private","tags":[str]?,"playlist":str?,"description":str?}?,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Shorts, p),
         ),
         job(
@@ -590,6 +590,12 @@ fn shorts_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>)
         let f = filmcraft_render::reframe::Follow::from_name(&m).ok_or_else(|| bad(cmd, "`motion` is \"smooth\" or \"responsive\""))?;
         out.insert("motion".into(), json!(f.name()));
     }
+    // where nobody is followed: the whole picture over a blurred copy of itself, by default
+    let fallback = match text_p(cmd, p, "fallback", 32)? {
+        None => filmcraft_render::reframe::Fallback::Blur,
+        Some(f) => filmcraft_render::reframe::Fallback::from_name(&f).ok_or_else(|| bad(cmd, "`fallback` is \"blur\", \"letterbox\" or \"center\""))?,
+    };
+    out.insert("fallback".into(), json!(fallback.name()));
     for (k, default) in [("captions", true), ("title", false), ("uploadYoutube", false)] {
         let v = match p.get(k).filter(|v| !v.is_null()) {
             None => default,

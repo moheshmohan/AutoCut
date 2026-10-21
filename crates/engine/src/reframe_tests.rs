@@ -2,6 +2,7 @@ use filmcraft_project::{ItemId, ParamValue, SequenceSettings, TrackKind};
 use filmcraft_time::{Tick, TimeRange};
 use serde_json::{Value, json};
 
+use super::{BACKDROP_BLURRINESS, BACKDROP_OPACITY, BACKDROP_ZOOM, BLUR_FILL_TRACK, ClipReframe, add_blur_fill, trimmed_copy};
 use crate::Session;
 use crate::media_test_util::tmp_dir;
 
@@ -194,6 +195,119 @@ fn a_clip_without_a_subject_is_letterboxed() {
     assert_eq!(r["reframe"]["clips"][0]["letterbox"], json!(true));
 }
 
+/// The brightest channel of the active sequence's frame `k` at `(x, y)`.
+fn brightness_at(s: &mut Session, k: i64, x: usize, y: usize) -> u8 {
+    let (w, _, px) = crate::media_test_util::frame_rgba(s, k, 1.0);
+    let p = &px[(y * w + x) * 4..(y * w + x) * 4 + 4];
+    p[0].max(p[1]).max(p[2])
+}
+
+#[test]
+fn a_clip_without_a_subject_gets_a_blurred_fill_where_letterbox_is_black() {
+    let (mut s, _, src) = session(false);
+    let r = s.execute("sequence.autoReframe", json!({"wait": true})).unwrap();
+    let boxed = ItemId(r["reframe"]["sequence"].as_u64().unwrap());
+    assert_eq!(s.project.sequence(boxed).unwrap().video_tracks.len(), 1, "letterbox adds nothing");
+    let bars = brightness_at(&mut s, 10, 90, 8);
+    assert!(bars < 3, "letterboxed: black above the picture ({bars})");
+    let picture = brightness_at(&mut s, 10, 90, 160);
+    s.execute("sequence.open", json!({"item": src.0})).unwrap();
+    let r = s.execute("sequence.autoReframe", json!({"fallback": "blur", "wait": true})).unwrap();
+    let out = &r["reframe"];
+    assert_eq!((out["blurFill"].as_u64(), out["clips"][0]["fallback"].as_str()), (Some(1), Some("blur")), "{out}");
+    let seq = ItemId(out["sequence"].as_u64().unwrap());
+    let q = s.project.sequence(seq).unwrap();
+    // the clip fitted whole on V2, its blurred copy under it on V1 for the whole clip
+    assert_eq!(q.video_tracks.len(), 2);
+    assert_eq!(q.video_tracks[0].name, BLUR_FILL_TRACK);
+    let (fg, bg) = (&q.video_tracks[1].items[0], &q.video_tracks[0].items[0]);
+    assert_eq!((bg.start, bg.duration, bg.source_in), (fg.start, fg.duration, fg.source_in));
+    assert_ne!(bg.id, fg.id);
+    let fit = 180.0 / 320.0 * 100.0;
+    assert!((fg.effect("motion").unwrap().f64_at("scale", Tick::ZERO) - fit).abs() < 1e-6);
+    let fill = 320.0 / 180.0 * BACKDROP_ZOOM * 100.0;
+    assert!((bg.effect("motion").unwrap().f64_at("scale", Tick::ZERO) - fill).abs() < 1e-6);
+    assert_eq!(bg.effect("opacity").unwrap().f64_at("opacity", Tick::ZERO), BACKDROP_OPACITY);
+    assert_eq!(bg.effect("gaussian_blur").unwrap().f64_at("blurriness", Tick::ZERO), BACKDROP_BLURRINESS);
+    assert!(bg.link.is_none() && bg.name.ends_with("(blur fill)"));
+    // where the bars were black there is the dimmed, blurred picture; the picture is unchanged
+    let filled = brightness_at(&mut s, 10, 90, 8);
+    assert!(filled > 20 && filled < picture, "a dimmed fill above the picture: {filled} (picture {picture})");
+    assert_eq!(brightness_at(&mut s, 10, 90, 160), picture);
+    // reframing the reframed copy again leaves the copy alone and reuses its track
+    let r = s.execute("sequence.autoReframe", json!({"fallback": "blur", "aspect": "4:5", "wait": true})).unwrap();
+    let again = s.project.sequence(ItemId(r["reframe"]["sequence"].as_u64().unwrap())).unwrap();
+    assert_eq!(again.video_tracks.len(), 2, "one Blur Fill track");
+    assert_eq!(r["reframe"]["clips"].as_array().unwrap().len(), 1, "the copy is not reframed: {r}");
+    assert_eq!(again.video_tracks[0].items.len(), 1, "its old copy replaced");
+}
+
+#[test]
+fn clips_in_place_get_a_blurred_fill_track_once() {
+    let (mut s, _, seq) = session(false);
+    // a 9:16 sequence holding the 16:9 clip
+    let mut p = (*s.project).clone();
+    let q = p.sequence_mut(seq).unwrap();
+    (q.settings.width, q.settings.height) = (180, 320);
+    s.project = std::sync::Arc::new(p);
+    let clip = s.project.sequence(seq).unwrap().video_tracks[0].items[0].id;
+    for _ in 0..2 {
+        let r = s.execute("clip.autoReframe", json!({"clips": [clip.0], "fallback": "blur", "wait": true})).unwrap();
+        assert_eq!(r["reframe"]["blurFill"], json!(1), "{r}");
+        let q = s.project.sequence(seq).unwrap();
+        assert_eq!(q.video_tracks.len(), 2, "one Blur Fill track under the clip");
+        assert_eq!((q.video_tracks[0].name.as_str(), q.video_tracks[0].items.len()), (BLUR_FILL_TRACK, 1));
+        assert_eq!(q.video_tracks[1].items[0].id, clip);
+    }
+    // undo takes the fill away with the reframing
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.project.sequence(seq).unwrap().video_tracks.len(), 1);
+}
+
+#[test]
+fn a_lost_stretch_gets_a_trimmed_copy_under_it() {
+    let (s, _, seq) = session(true);
+    let mut q = s.project.sequence(seq).unwrap().clone();
+    let it = q.video_tracks[0].items[0].clone();
+    let rate = q.settings.frame_rate;
+    let (a, e) = (rate.tick_of(10), rate.tick_of(30));
+    let r = ClipReframe {
+        clip: it.id,
+        name: it.name.clone(),
+        keys: Vec::new(),
+        animate_position: true,
+        animate_scale: true,
+        letterbox: false,
+        found: 0.6,
+        shots: 1,
+        frames: 48,
+        anchor: filmcraft_geom::Vec2::new(160.0, 90.0),
+        keep_scale: false,
+        fallback: filmcraft_render::reframe::Fallback::Blur,
+        fill: vec![(a, e), (rate.tick_of(40), Tick(i64::MAX / 4))],
+        fill_position: filmcraft_geom::Vec2::new(160.0, 90.0),
+        fill_scale: 1.08,
+    };
+    let mut next = 10_000;
+    assert_eq!(add_blur_fill(&mut q, std::slice::from_ref(&r), &mut next), 2);
+    q.check().unwrap();
+    let fills = &q.video_tracks[0].items;
+    assert_eq!((fills[0].start, fills[0].duration), (a, e - a));
+    assert_eq!(fills[0].source_time_at(a), it.source_time_at(a), "the copy shows what the clip shows");
+    assert_eq!(fills[1].end(), it.end(), "clamped to the clip");
+    assert!(next > 10_000 && fills.iter().all(|f| f.id.0 >= 10_000));
+    // reversed and slowed clips stay in step
+    let mut rev = it.clone();
+    rev.reverse = true;
+    rev.speed = 0.5;
+    let c = trimmed_copy(&rev, a, e).unwrap();
+    for t in [a, a + rate.frame_duration(), e - rate.frame_duration()] {
+        assert!((c.source_time_at(t) - rev.source_time_at(t)).0.abs() <= 2, "{t:?}");
+    }
+    assert!(trimmed_copy(&it, e, a).is_none() && trimmed_copy(&it, it.end(), it.end() + Tick(5)).is_none());
+}
+
 #[test]
 fn a_seed_box_starts_the_tracker_on_the_subject() {
     let (mut s, _, _) = session(true);
@@ -253,6 +367,8 @@ fn hostile_parameters_are_refused() {
         json!({"motion": 7}),
         json!({"motion": "wobbly"}),
         json!({"fallback": "stretch"}),
+        json!({"fallback": "blurry-bars"}),
+        json!({"fallback": 3}),
         json!({"subject": "robot"}),
         json!({"subject": {"x": 0.1}}),
         json!({"subject": {"x": 0.1, "y": 0.1, "w": 0.0, "h": 0.5}}),

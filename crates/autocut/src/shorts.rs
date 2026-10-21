@@ -10,7 +10,9 @@
 //!    well they hook a viewer (0..10) and get a short title.
 //! 4. **Pick** — the best `count` that do not overlap (a second apart at least).
 //! 5. **Build** — each through ordinary engine commands: `sequence.autoReframe` of its range to
-//!    the vertical shape (the speaker followed), `transcript.createCaptions` and
+//!    the vertical shape (the speaker followed; where nobody is, for a whole clip or a stretch of
+//!    one, the whole picture over a blurred copy of itself — `fallback`, `"blur"` by default,
+//!    `"letterbox"` for black bars), `transcript.createCaptions` and
 //!    `captions.setStyle` for big outlined captions, `graphics.newText` for the title card; then
 //!    `file.exportMedia` (captions burned in) and `youtube.upload` (private unless asked).
 //!
@@ -330,8 +332,12 @@ pub struct Made {
     pub rating: Option<f64>,
     pub hook: String,
     pub text: String,
-    /// Whether the speaker was followed (else the picture was letterboxed).
+    /// Whether the speaker was followed (else the picture was fitted whole: over its blurred copy
+    /// with the `blur` fallback, the default).
     pub followed: bool,
+    /// Clips that got the blurred fill under a stretch (or all) of them.
+    #[serde(rename = "blurFill")]
+    pub blur_fill: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub export: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -413,7 +419,10 @@ pub async fn make(ex: &dyn Executor, p: &Value, rater: Option<Arc<dyn ChatModel>
         let name = format!("{src_name} — Short {number}: {}", clip_text(&title, 60));
         progress(&format!("[{number}/{n}] reframing \"{title}\""));
         let (a, b) = range_of(c, &words, &sents, length);
-        let mut rp = json!({"sequence": src, "aspect": aspect, "range": {"startSeconds": a, "endSeconds": b}, "name": name, "wait": true});
+        // nobody to follow: the whole picture over a blurred copy of itself (not black bars)
+        let fallback = p["fallback"].as_str().unwrap_or("blur");
+        let mut rp =
+            json!({"sequence": src, "aspect": aspect, "range": {"startSeconds": a, "endSeconds": b}, "name": name, "fallback": fallback, "wait": true});
         if let Some(m) = p["motion"].as_str() {
             rp["motion"] = json!(m);
         }
@@ -423,6 +432,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, rater: Option<Arc<dyn ChatModel>
         let r = run(ex, "sequence.autoReframe", rp).await?;
         let seq = r["reframe"]["sequence"].as_u64().ok_or_else(|| AutoCutError::Executor(format!("sequence.autoReframe made no sequence: {r}")))?;
         let followed = r["reframe"]["followed"].as_u64().is_some_and(|f| f > 0);
+        let blur_fill = r["reframe"]["blurFill"].as_u64().unwrap_or(0);
         let mut short = Made {
             number,
             sequence: seq,
@@ -435,6 +445,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, rater: Option<Arc<dyn ChatModel>
             hook: c.hook.clone(),
             text: c.text.clone(),
             followed,
+            blur_fill,
             export: None,
             youtube: None,
             notes: Vec::new(),
