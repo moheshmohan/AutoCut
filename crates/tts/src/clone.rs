@@ -1382,11 +1382,14 @@ impl Reading {
     }
 
     /// What of the reading decides the reference IndicF5 is given (keys the built references).
+    #[cfg(feature = "indicf5")]
     fn reference_key(&self) -> String {
         format!("tail {} room {} english {}", self.tail_ms, self.room_tone, self.english_transcript)
     }
 
     pub fn check(&self) -> Result<(), TtsError> {
+        // the sampler's ranges are IndicF5's: without it no reading is ever voiced
+        #[cfg(feature = "indicf5")]
         crate::f5::Settings { steps: self.steps, cfg: self.cfg, sway: self.sway, ..Default::default() }.check()?;
         if self.tail_ms > 2000 {
             return Err(TtsError::Invalid("the pause after the reference is at most 2 s".into()));
@@ -2756,6 +2759,7 @@ pub(crate) mod tests {
 
     /// The strict check's retakes: new seeds first, then more sampling steps; never the lead-in
     /// (measured harmful).
+    #[cfg(feature = "indicf5")]
     #[test]
     fn retakes_read_more_carefully() {
         let r = Reading::default();
