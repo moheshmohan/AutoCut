@@ -141,7 +141,8 @@ pub(crate) fn transcriber(s: &Session, p: &Value) -> Result<Arc<dyn Transcriber>
         return Err(EngineError::Other(NO_SPEECH.into()));
     }
     let dir = models_dir().ok_or_else(|| EngineError::Other("no data directory for speech models".into()))?;
-    filmcraft_speech::load(&dir, model).map_err(speech_err)
+    // on the GPU where there is one (Metal on macOS), the CPU being the fallback (`docs/gpu.md`)
+    filmcraft_speech::load_gpu_first(&dir, model).map_err(speech_err)
 }
 
 fn generate(s: &mut Session, p: &Value) -> Result<Value> {

@@ -148,6 +148,81 @@ pub fn load_on(models_dir: &std::path::Path, id: &str, gpu: bool) -> Result<std:
     }
 }
 
+/// [`load`] on the GPU where the machine has one (Metal on macOS; `FILMCRAFT_SPEECH_CPU` keeps
+/// the CPU), the CPU being the fallback: a model the GPU cannot load is loaded on the CPU, and a
+/// transcription that fails or panics on the GPU is run again on the CPU (which then keeps the
+/// model for the rest of the session). Whisper-base transcribes about 9× faster on an M3 Max GPU
+/// with the same words and word times (`docs/gpu.md`).
+pub fn load_gpu_first(models_dir: &std::path::Path, id: &str) -> Result<std::sync::Arc<dyn Transcriber>, SpeechError> {
+    let gpu = match load_on(models_dir, id, true) {
+        Ok(t) => Some(t),
+        Err(e @ (SpeechError::UnknownModel(_) | SpeechError::NotInstalled(_) | SpeechError::Unavailable(_))) => return Err(e),
+        Err(_) => None,
+    };
+    Ok(std::sync::Arc::new(GpuFirst {
+        id: id.to_string(),
+        dir: models_dir.to_path_buf(),
+        gpu,
+        failed: std::sync::atomic::AtomicBool::new(false),
+        cpu: std::sync::Mutex::new(None),
+    }))
+}
+
+/// A transcriber on the GPU with the CPU as its fallback ([`load_gpu_first`]).
+struct GpuFirst {
+    id: String,
+    dir: std::path::PathBuf,
+    gpu: Option<std::sync::Arc<dyn Transcriber>>,
+    /// The GPU failed once: the CPU from then on.
+    failed: std::sync::atomic::AtomicBool,
+    cpu: std::sync::Mutex<Option<std::sync::Arc<dyn Transcriber>>>,
+}
+
+impl GpuFirst {
+    fn cpu(&self) -> Result<std::sync::Arc<dyn Transcriber>, SpeechError> {
+        let mut g = self.cpu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(t) = g.as_ref() {
+            return Ok(t.clone());
+        }
+        let t = load_on(&self.dir, &self.id, false)?;
+        *g = Some(t.clone());
+        Ok(t)
+    }
+
+    /// `f` with the GPU model, or `None` for the caller to use the CPU's: no GPU model, it failed
+    /// before, or it fails (an error other than being stopped) or panics now.
+    fn on_gpu<T>(&self, f: impl FnOnce(&dyn Transcriber) -> Result<T, SpeechError>) -> Option<Result<T, SpeechError>> {
+        use std::sync::atomic::Ordering;
+        let g = self.gpu.as_ref().filter(|_| !self.failed.load(Ordering::Relaxed))?;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(g.as_ref()))) {
+            Ok(Ok(v)) => Some(Ok(v)),
+            Ok(Err(SpeechError::Cancelled)) => Some(Err(SpeechError::Cancelled)),
+            _ => {
+                self.failed.store(true, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+}
+
+impl Transcriber for GpuFirst {
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+    fn transcribe(&self, audio: &[f32], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError> {
+        if let Some(r) = self.on_gpu(|t| t.transcribe(audio, opts, &mut *progress)) {
+            return r;
+        }
+        self.cpu()?.transcribe(audio, opts, progress)
+    }
+    fn hear(&self, audio: &[f32], language: &str) -> Result<String, SpeechError> {
+        if let Some(r) = self.on_gpu(|t| t.hear(audio, language)) {
+            return r;
+        }
+        self.cpu()?.hear(audio, language)
+    }
+}
+
 /// Whether this build can run speech models.
 pub const fn available() -> bool {
     cfg!(feature = "whisper")
@@ -218,5 +293,48 @@ mod tests {
     #[test]
     fn downmix_averages() {
         assert_eq!(downmix(&[vec![1.0, 0.0], vec![0.0, 0.0, 9.0]]), vec![0.5, 0.0]);
+    }
+
+    /// A GPU transcriber that fails, panics or is stopped.
+    struct Broken(&'static str);
+
+    impl Transcriber for Broken {
+        fn id(&self) -> String {
+            "broken".into()
+        }
+        fn transcribe(&self, _: &[f32], _: &Options, _: ProgressFn) -> Result<Transcript, SpeechError> {
+            match self.0 {
+                "panic" => panic!("a GPU kernel went wrong"),
+                "stop" => Err(SpeechError::Cancelled),
+                _ => Err(SpeechError::Model("no kernel for this op on the GPU".into())),
+            }
+        }
+    }
+
+    /// The GPU-first transcriber falls back to the CPU's model when the GPU fails or panics (and
+    /// keeps to it), but a stop is a stop.
+    #[test]
+    fn gpu_failures_fall_back_to_the_cpu() {
+        let mut t = Transcript::default();
+        t.words.push(Word::new("hi", seconds_tick(0.1), seconds_tick(0.3)));
+        let cpu: std::sync::Arc<dyn Transcriber> = std::sync::Arc::new(FixedTranscriber { transcript: t, id: "cpu".into() });
+        for how in ["error", "panic", "stop"] {
+            let g = GpuFirst {
+                id: "whisper-base".into(),
+                dir: std::path::PathBuf::new(),
+                gpu: Some(std::sync::Arc::new(Broken(how))),
+                failed: std::sync::atomic::AtomicBool::new(false),
+                cpu: std::sync::Mutex::new(Some(cpu.clone())),
+            };
+            let got = g.transcribe(&vec![0.0; 16_000], &Options::default(), &mut |_, _| true);
+            if how == "stop" {
+                assert_eq!(got, Err(SpeechError::Cancelled));
+                assert!(!g.failed.load(std::sync::atomic::Ordering::Relaxed));
+                continue;
+            }
+            assert_eq!(got.map(|t| t.source), Ok("cpu".to_string()), "{how}");
+            assert!(g.failed.load(std::sync::atomic::Ordering::Relaxed), "{how}: the CPU from now on");
+            assert_eq!(g.hear(&vec![0.0; 16_000], "en"), Ok("hi".to_string()));
+        }
     }
 }
