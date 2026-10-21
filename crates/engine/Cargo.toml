@@ -35,6 +35,8 @@ filmcraft-codecs = { workspace = true }
 filmcraft-project = { workspace = true }
 filmcraft-edit = { workspace = true }
 filmcraft-render = { workspace = true }
+# the GPU lock the voice lab's big models run under
+filmcraft-locks = { workspace = true }
 filmcraft-scopes = { workspace = true }
 filmcraft-text = { workspace = true }
 filmcraft-audio-dsp = { workspace = true }
