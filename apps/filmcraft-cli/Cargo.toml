@@ -50,6 +50,17 @@ filmcraft-locks = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
+# The GPU export renderer (Export ▸ GPU rendering, Auto by default; `docs/gpu.md`) needs a wgpu
+# backend. `filmcraft-gpu` asks for none and the desktop app gets them through eframe, so a CLI
+# built on its own (`cargo build -p filmcraft-cli`) had no adapter and rendered every export on
+# the CPU. The platform's native backends, enabled here:
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["metal"] }
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan"] }
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }
+
 [dev-dependencies]
 filmcraft-testkit = { workspace = true }
 # music tests: a tiny SoundFont made in code
