@@ -1,4 +1,5 @@
-//! The two detector networks, written out by hand on candle (CPU).
+//! The two detector networks, written out by hand: on the CPU with candle and plain Rust, and on
+//! the GPU (macOS) as WGSL compute passes (`gpu.rs`).
 //!
 //! Both are YuNet-style networks of depthwise-separable units: a 1×1 convolution (no
 //! activation) followed by a 3×3 depthwise convolution and a ReLU, with 2×2 max pools between
@@ -17,18 +18,69 @@
 //! The 1×1 convolutions (almost all of the arithmetic) are candle matrix products; each is fused
 //! with the 3×3 depthwise convolution after it, its bias, the ReLU and (where the network has
 //! one) the max pool into one pass over the planes in plain Rust, in parallel.
+//!
+//! **GPU.** On macOS the same layers run as fused WGSL compute passes (the [`gpu::Run`] backend:
+//! the 1×1 convolution with its bias; the depthwise convolution with its bias, ReLU and pool; the
+//! pool; the upsampled sum), one command buffer a picture. The graphs are written once over a
+//! [`Backend`], so both devices run the same layers in the same order. The CPU passes stay the
+//! reference and the fallback: a picture that fails or panics on the GPU is looked at again on
+//! the CPU, and after [`MAX_GPU_FAILURES`] failures in a row the detector keeps to the CPU.
+//! `FILMCRAFT_VISION_CPU` keeps the networks on the CPU.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use candle_core::{Device, Tensor};
 use rayon::prelude::*;
 
+use crate::gpu;
 use crate::onnx::{self, Model, Node};
 use crate::post::{self, YunetLevel};
 use crate::{Detection, VisionError, catalog};
 
 fn err(e: impl std::fmt::Display) -> VisionError {
     VisionError::Model(e.to_string())
+}
+
+/// Failures in a row after which a detector stops trying its GPU and keeps to the CPU.
+pub const MAX_GPU_FAILURES: u32 = 3;
+
+/// A detector's GPU and how its runs there went.
+struct Gpu {
+    ctx: Arc<gpu::Ctx>,
+    failures: AtomicU32,
+}
+
+impl Gpu {
+    /// `f` on the GPU, or `None` for the caller to run the CPU path: no GPU, it failed
+    /// [`MAX_GPU_FAILURES`] times in a row, or this run failed or panicked.
+    fn run<T>(gpu: &Option<Gpu>, f: impl FnOnce(&gpu::Run<'_>) -> Result<T, VisionError>) -> Option<T> {
+        let g = gpu.as_ref()?;
+        if g.failures.load(Ordering::Relaxed) >= MAX_GPU_FAILURES || gpu::failed() {
+            return None;
+        }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&gpu::Run::new(&g.ctx)))) {
+            Ok(Ok(v)) => {
+                g.failures.store(0, Ordering::Relaxed);
+                Some(v)
+            }
+            _ => {
+                g.failures.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    fn active(gpu: &Option<Gpu>) -> bool {
+        !gpu::failed() && gpu.as_ref().is_some_and(|g| g.failures.load(Ordering::Relaxed) < MAX_GPU_FAILURES)
+    }
+}
+
+/// Whether this machine runs the detectors on its GPU (macOS with an adapter, and
+/// `FILMCRAFT_VISION_CPU` not set).
+pub fn gpu_available() -> bool {
+    gpu::Ctx::shared().is_some()
 }
 
 /// One convolution's checked weights.
@@ -102,11 +154,11 @@ impl<'a> Convs<'a> {
 
 /// A feature map: `c` planes of `h` × `w`, row-major (batch 1).
 #[derive(Clone)]
-struct Map {
-    v: Vec<f32>,
-    c: usize,
-    h: usize,
-    w: usize,
+pub(crate) struct Map {
+    pub(crate) v: Vec<f32>,
+    pub(crate) c: usize,
+    pub(crate) h: usize,
+    pub(crate) w: usize,
 }
 
 /// The 3×3/2 stem (a candle convolution) with its bias and ReLU.
@@ -114,6 +166,8 @@ struct Stem {
     w: Tensor,
     b: Vec<f32>,
     cout: usize,
+    /// The weights on the GPU.
+    dev: Option<gpu::StemW>,
 }
 
 impl Stem {
@@ -122,7 +176,13 @@ impl Stem {
             return Err(err("the stem is not a 3×3/2 convolution of the picture"));
         }
         let w = Tensor::from_vec(c.w, (c.cout, 3, 3, 3), &Device::Cpu).map_err(err)?;
-        Ok(Self { w, b: c.b, cout: c.cout })
+        Ok(Self { w, b: c.b, cout: c.cout, dev: None })
+    }
+
+    fn upload(&mut self, ctx: &gpu::Ctx) -> Result<(), VisionError> {
+        let w: Vec<f32> = self.w.flatten_all().map_err(err)?.to_vec1().map_err(err)?;
+        self.dev = Some(gpu::StemW { w: ctx.upload(&w), b: ctx.upload(&self.b) });
+        Ok(())
     }
 
     fn forward(&self, x: &Tensor) -> Result<Map, VisionError> {
@@ -152,6 +212,8 @@ struct PwDw {
     cin: usize,
     cout: usize,
     relu: bool,
+    /// The weights on the GPU.
+    dev: Option<gpu::UnitW>,
 }
 
 impl PwDw {
@@ -160,7 +222,13 @@ impl PwDw {
             return Err(err("a depthwise-separable unit's shapes do not chain"));
         }
         let t = Tensor::from_vec(pw.w, (pw.cout, pw.cin), &Device::Cpu).map_err(err)?;
-        Ok(Self { pw: t, pw_b: pw.b, dw_w: dw.w, dw_b: dw.b, cin: pw.cin, cout: pw.cout, relu })
+        Ok(Self { pw: t, pw_b: pw.b, dw_w: dw.w, dw_b: dw.b, cin: pw.cin, cout: pw.cout, relu, dev: None })
+    }
+
+    fn upload(&mut self, ctx: &gpu::Ctx) -> Result<(), VisionError> {
+        let pw: Vec<f32> = self.pw.flatten_all().map_err(err)?.to_vec1().map_err(err)?;
+        self.dev = Some(gpu::UnitW { pw: ctx.upload(&pw), pw_b: ctx.upload(&self.pw_b), dw: ctx.upload(&self.dw_w), dw_b: ctx.upload(&self.dw_b) });
+        Ok(())
     }
 
     fn forward(&self, x: &Map, pool: bool) -> Result<Map, VisionError> {
@@ -270,20 +338,86 @@ fn add_upsampled(a: &Map, b: &Map) -> Result<Map, VisionError> {
     Ok(Map { v, c: a.c, h, w })
 }
 
-fn run(units: &[PwDw], x: Map) -> Result<Map, VisionError> {
-    units.iter().try_fold(x, |x, u| u.forward(&x, false))
+/// The operations the networks are made of: on the CPU ([`Cpu`], the reference) or as WGSL
+/// passes on the GPU ([`gpu::Run`]). The graphs ([`FaceDetector::heads`], [`PlateDetector::raw`])
+/// are written once over it.
+trait Backend {
+    /// A feature map (`c` planes of `h` × `w`).
+    type X;
+    fn stem(&self, s: &Stem, pic: &Picture) -> Result<Self::X, VisionError>;
+    fn unit(&self, u: &PwDw, x: &Self::X, pool: bool) -> Result<Self::X, VisionError>;
+    fn max_pool(&self, x: &Self::X) -> Result<Self::X, VisionError>;
+    /// `a + nearest-neighbour 2× upsampling of b`.
+    fn add_upsampled(&self, a: &Self::X, b: &Self::X) -> Result<Self::X, VisionError>;
+    /// The maps on the CPU (the GPU's work is submitted and waited for here, once a picture).
+    fn read(&self, xs: Vec<Self::X>) -> Result<Vec<Map>, VisionError>;
+}
+
+/// The plain-Rust passes above (the reference).
+struct Cpu;
+
+impl Backend for Cpu {
+    type X = Map;
+    fn stem(&self, s: &Stem, pic: &Picture) -> Result<Map, VisionError> {
+        let t = Tensor::from_slice(&pic.data, (1, 3, pic.h, pic.w), &Device::Cpu).map_err(err)?;
+        s.forward(&t)
+    }
+    fn unit(&self, u: &PwDw, x: &Map, pool: bool) -> Result<Map, VisionError> {
+        u.forward(x, pool)
+    }
+    fn max_pool(&self, x: &Map) -> Result<Map, VisionError> {
+        Ok(max_pool(x))
+    }
+    fn add_upsampled(&self, a: &Map, b: &Map) -> Result<Map, VisionError> {
+        add_upsampled(a, b)
+    }
+    fn read(&self, xs: Vec<Map>) -> Result<Vec<Map>, VisionError> {
+        Ok(xs)
+    }
+}
+
+impl Backend for gpu::Run<'_> {
+    type X = gpu::GMap;
+    fn stem(&self, s: &Stem, pic: &Picture) -> Result<gpu::GMap, VisionError> {
+        let w = s.dev.as_ref().ok_or_else(|| err("the stem's weights are not on the GPU"))?;
+        gpu::Run::stem(self, w, s.cout, &pic.data, pic.h, pic.w)
+    }
+    fn unit(&self, u: &PwDw, x: &gpu::GMap, pool: bool) -> Result<gpu::GMap, VisionError> {
+        let w = u.dev.as_ref().ok_or_else(|| err("a unit's weights are not on the GPU"))?;
+        gpu::Run::unit(self, w, u.cin, u.cout, u.relu, x, pool)
+    }
+    fn max_pool(&self, x: &gpu::GMap) -> Result<gpu::GMap, VisionError> {
+        gpu::Run::max_pool(self, x)
+    }
+    fn add_upsampled(&self, a: &gpu::GMap, b: &gpu::GMap) -> Result<gpu::GMap, VisionError> {
+        gpu::Run::add_upsampled(self, a, b)
+    }
+    fn read(&self, xs: Vec<gpu::GMap>) -> Result<Vec<Map>, VisionError> {
+        gpu::Run::read(self, xs)
+    }
+}
+
+fn run<B: Backend>(b: &B, units: &[PwDw], x: B::X) -> Result<B::X, VisionError> {
+    units.iter().try_fold(x, |x, u| b.unit(u, &x, false))
 }
 
 /// Run `units`, max-pooling after the last one.
-fn run_pool(units: &[PwDw], x: Map) -> Result<Map, VisionError> {
-    let Some((last, rest)) = units.split_last() else { return Ok(max_pool(&x)) };
-    last.forward(&run(rest, x)?, true)
+fn run_pool<B: Backend>(b: &B, units: &[PwDw], x: B::X) -> Result<B::X, VisionError> {
+    let Some((last, rest)) = units.split_last() else { return b.max_pool(&x) };
+    b.unit(last, &run(b, rest, x)?, true)
+}
+
+/// A picture as the networks take it: 3 planes (B, G, R) of `h` × `w`, 0..255.
+struct Picture {
+    data: Vec<f32>,
+    h: usize,
+    w: usize,
 }
 
 /// An RGBA picture as the networks take it: fitted inside `max_side` (never enlarged), its sides
 /// padded with black up to a multiple of `multiple`, BGR channels in 0..255, `[1, 3, H, W]`.
-/// Returns the tensor and the fitted picture's size (detections are in its pixels).
-fn input(rgba: &[u8], w: usize, h: usize, max_side: usize, multiple: usize) -> Result<(Tensor, usize, usize), VisionError> {
+/// Returns the picture and the fitted picture's size (detections are in its pixels).
+fn input(rgba: &[u8], w: usize, h: usize, max_side: usize, multiple: usize) -> Result<(Picture, usize, usize), VisionError> {
     if w == 0 || h == 0 || w > 1 << 15 || h > 1 << 15 {
         return Err(VisionError::Invalid(format!("a {w} × {h} picture cannot be analysed")));
     }
@@ -331,8 +465,7 @@ fn input(rgba: &[u8], w: usize, h: usize, max_side: usize, multiple: usize) -> R
             data[2 * plane + i] = p[2];
         }
     }
-    let t = Tensor::from_vec(data, (1, 3, ph, pw), &Device::Cpu).map_err(err)?;
-    Ok((t, fw, fh))
+    Ok((Picture { data, h: ph, w: pw }, fw, fh))
 }
 
 /// A map's `h·w` cells of `c` interleaved values.
@@ -367,6 +500,7 @@ pub struct FaceDetector {
     bbox: Vec<PwDw>,
     obj: Vec<PwDw>,
     kps: Vec<PwDw>,
+    gpu: Option<Gpu>,
 }
 
 /// Longest side of the picture YuNet looks at by default: a face 5 % of the picture tall is
@@ -399,35 +533,68 @@ impl FaceDetector {
         let obj = head(1)?;
         let kps = head(10)?;
         c.finish()?;
-        Ok(Self { stem, stage0, stages, lateral: [l0, l1, l2], cls, bbox, obj, kps })
+        Ok(Self { stem, stage0, stages, lateral: [l0, l1, l2], cls, bbox, obj, kps, gpu: None })
     }
 
+    /// Load from an ONNX file, on the CPU.
     pub fn load(path: &Path) -> Result<Self, VisionError> {
         let m = onnx::read(path, &onnx::Limits::default())?;
         Self::from_model(&m)
     }
 
+    /// Run on `dev` from now on (the CPU stays the fallback); the CPU device changes nothing.
+    /// Run on this machine's GPU from now on (the CPU stays the fallback); `false` (and the CPU)
+    /// without one.
+    pub fn use_gpu(&mut self) -> bool {
+        let Some(ctx) = gpu::Ctx::shared() else { return false };
+        let units = std::iter::once(&mut self.stage0)
+            .chain(self.stages.iter_mut().flatten())
+            .chain(self.lateral.iter_mut())
+            .chain(self.cls.iter_mut())
+            .chain(self.bbox.iter_mut())
+            .chain(self.obj.iter_mut())
+            .chain(self.kps.iter_mut());
+        let mut ok = self.stem.upload(&ctx).is_ok();
+        for u in units {
+            ok = ok && u.upload(&ctx).is_ok();
+        }
+        self.gpu = ok.then(|| Gpu { ctx, failures: AtomicU32::new(0) });
+        ok
+    }
+
+    /// Whether detection runs on the GPU (it has one that has not failed repeatedly).
+    pub fn on_gpu(&self) -> bool {
+        Gpu::active(&self.gpu)
+    }
+
     /// The head outputs for a `[1, 3, H, W]` input (H and W multiples of 32), per level.
-    fn heads(&self, x: &Tensor) -> Result<Vec<YunetOut>, VisionError> {
-        let x = self.stem.forward(x)?;
-        let x = self.stage0.forward(&x, true)?;
-        let x = run(&self.stages[0], x)?;
-        let x = run_pool(&self.stages[1], x)?;
-        let p3 = run(&self.stages[2], x)?;
-        let p4 = run(&self.stages[3], max_pool(&p3))?;
-        let p5 = run(&self.stages[4], max_pool(&p4))?;
-        let n5 = self.lateral[2].forward(&p5, false)?;
-        let n4 = self.lateral[1].forward(&add_upsampled(&p4, &n5)?, false)?;
-        let n3 = self.lateral[0].forward(&add_upsampled(&p3, &n4)?, false)?;
+    fn heads<B: Backend>(&self, b: &B, x: &Picture) -> Result<Vec<YunetOut>, VisionError> {
+        let x = b.stem(&self.stem, x)?;
+        let x = b.unit(&self.stage0, &x, true)?;
+        let x = run(b, &self.stages[0], x)?;
+        let x = run_pool(b, &self.stages[1], x)?;
+        let p3 = run(b, &self.stages[2], x)?;
+        let p4 = run(b, &self.stages[3], b.max_pool(&p3)?)?;
+        let p5 = run(b, &self.stages[4], b.max_pool(&p4)?)?;
+        let n5 = b.unit(&self.lateral[2], &p5, false)?;
+        let n4 = b.unit(&self.lateral[1], &b.add_upsampled(&p4, &n5)?, false)?;
+        let n3 = b.unit(&self.lateral[0], &b.add_upsampled(&p3, &n4)?, false)?;
         let feats = [n3, n4, n5];
-        let mut out = Vec::with_capacity(3);
+        // per level: class, objectness, box, landmarks
+        let mut maps = Vec::with_capacity(12);
         for (lvl, f) in feats.iter().enumerate() {
-            let get = |v: &[PwDw]| -> Result<Map, VisionError> { v.get(lvl).ok_or_else(|| err("missing head"))?.forward(f, false) };
-            let (cls_m, obj_m) = (get(&self.cls)?, get(&self.obj)?);
-            let (mut cls, mut obj) = (cells(&cls_m), cells(&obj_m));
+            for head in [&self.cls, &self.obj, &self.bbox, &self.kps] {
+                maps.push(b.unit(head.get(lvl).ok_or_else(|| err("missing head"))?, f, false)?);
+            }
+        }
+        let maps = b.read(maps)?;
+        let mut out = Vec::with_capacity(3);
+        for (lvl, [cls_m, obj_m, bbox_m, kps_m]) in maps.as_chunks::<4>().0.iter().enumerate() {
+            let (mut cls, mut obj) = (cells(cls_m), cells(obj_m));
             sigmoid(&mut cls);
             sigmoid(&mut obj);
-            out.push((post::YUNET_STRIDES[lvl], cls_m.h, cls_m.w, cls, obj, cells(&get(&self.bbox)?), cells(&get(&self.kps)?)));
+            let stride = post::YUNET_STRIDES.get(lvl).copied().ok_or_else(|| err("missing level"))?;
+            out.push((stride, cls_m.h, cls_m.w, cls, obj, cells(bbox_m), cells(kps_m)));
         }
         Ok(out)
     }
@@ -436,7 +603,10 @@ impl FaceDetector {
     /// suppression (IoU 0.3), in shares of the picture.
     pub fn detect(&self, rgba: &[u8], w: usize, h: usize, max_side: usize, threshold: f32) -> Result<Vec<Detection>, VisionError> {
         let (x, fw, fh) = input(rgba, w, h, max_side, 32)?;
-        let heads = self.heads(&x)?;
+        let heads = match Gpu::run(&self.gpu, |r| self.heads(r, &x)) {
+            Some(heads) => heads,
+            None => self.heads(&Cpu, &x)?,
+        };
         let levels: Vec<YunetLevel<'_>> = heads
             .iter()
             .map(|(stride, rows, cols, cls, obj, bbox, kps)| YunetLevel { stride: *stride, rows: *rows, cols: *cols, cls, obj, bbox, kps })
@@ -453,6 +623,7 @@ pub struct PlateDetector {
     stages: [Vec<PwDw>; 6],
     /// Per level (strides 8, 16, 32, 64): a unit, then 1×1 and 3×3 depthwise to the priors' values.
     heads: Vec<(PwDw, PwDw)>,
+    gpu: Option<Gpu>,
 }
 
 /// Longest side of the picture LPD-YuNet looks at by default.
@@ -478,36 +649,58 @@ impl PlateDetector {
             heads.push((u, o));
         }
         c.finish()?;
-        Ok(Self { stem, stage0, stages, heads })
+        Ok(Self { stem, stage0, stages, heads, gpu: None })
     }
 
+    /// Load from an ONNX file, on the CPU.
     pub fn load(path: &Path) -> Result<Self, VisionError> {
         let m = onnx::read(path, &onnx::Limits::default())?;
         Self::from_model(&m)
     }
 
-    /// The raw head values for a `[1, 3, H, W]` input, in prior order ([`post::lpd_priors`]).
-    fn raw(&self, x: &Tensor) -> Result<Vec<f32>, VisionError> {
-        let x = self.stem.forward(x)?;
-        let x = self.stage0.forward(&x, true)?;
-        let x = run(&self.stages[0], x)?;
-        let x = run_pool(&self.stages[1], x)?;
-        let s8 = run(&self.stages[2], x)?;
-        let s16 = run(&self.stages[3], max_pool(&s8))?;
-        let s32 = run(&self.stages[4], max_pool(&s16))?;
-        let s64 = run(&self.stages[5], max_pool(&s32))?;
-        let mut out = Vec::new();
-        for ((u, o), f) in self.heads.iter().zip([&s8, &s16, &s32, &s64]) {
-            out.extend(cells(&o.forward(&u.forward(f, false)?, false)?));
+    /// Run on this machine's GPU from now on (the CPU stays the fallback); `false` (and the CPU)
+    /// without one.
+    pub fn use_gpu(&mut self) -> bool {
+        let Some(ctx) = gpu::Ctx::shared() else { return false };
+        let units = std::iter::once(&mut self.stage0).chain(self.stages.iter_mut().flatten()).chain(self.heads.iter_mut().flat_map(|(u, o)| [u, o]));
+        let mut ok = self.stem.upload(&ctx).is_ok();
+        for u in units {
+            ok = ok && u.upload(&ctx).is_ok();
         }
-        Ok(out)
+        self.gpu = ok.then(|| Gpu { ctx, failures: AtomicU32::new(0) });
+        ok
+    }
+
+    /// Whether detection runs on the GPU (it has one that has not failed repeatedly).
+    pub fn on_gpu(&self) -> bool {
+        Gpu::active(&self.gpu)
+    }
+
+    /// The raw head values for a `[1, 3, H, W]` input, in prior order ([`post::lpd_priors`]).
+    fn raw<B: Backend>(&self, b: &B, x: &Picture) -> Result<Vec<f32>, VisionError> {
+        let x = b.stem(&self.stem, x)?;
+        let x = b.unit(&self.stage0, &x, true)?;
+        let x = run(b, &self.stages[0], x)?;
+        let x = run_pool(b, &self.stages[1], x)?;
+        let s8 = run(b, &self.stages[2], x)?;
+        let s16 = run(b, &self.stages[3], b.max_pool(&s8)?)?;
+        let s32 = run(b, &self.stages[4], b.max_pool(&s16)?)?;
+        let s64 = run(b, &self.stages[5], b.max_pool(&s32)?)?;
+        let mut maps = Vec::with_capacity(4);
+        for ((u, o), f) in self.heads.iter().zip([&s8, &s16, &s32, &s64]) {
+            maps.push(b.unit(o, &b.unit(u, f, false)?, false)?);
+        }
+        Ok(b.read(maps)?.iter().flat_map(cells).collect())
     }
 
     /// Plates in an RGBA picture, fitted inside `max_side`: scores of at least `threshold`, after
     /// suppression (IoU 0.3), in shares of the picture.
     pub fn detect(&self, rgba: &[u8], w: usize, h: usize, max_side: usize, threshold: f32) -> Result<Vec<Detection>, VisionError> {
         let (x, fw, fh) = input(rgba, w, h, max_side, 1)?;
-        let raw = self.raw(&x)?;
+        let raw = match Gpu::run(&self.gpu, |r| self.raw(r, &x)) {
+            Some(raw) => raw,
+            None => self.raw(&Cpu, &x)?,
+        };
         let priors = post::lpd_priors(fw, fh);
         if raw.len() != priors.len() * post::LPD_STRIDE {
             return Err(err(format!("{} head values for {} priors", raw.len(), priors.len())));
@@ -525,16 +718,37 @@ pub struct Detectors {
 }
 
 impl Detectors {
-    /// Load the detectors that are wanted (`faces`, `plates`) from `models_dir`.
+    /// Load the detectors that are wanted (`faces`, `plates`) from `models_dir`, on the GPU where
+    /// there is one ([`gpu_available`]; the CPU is the fallback).
     pub fn load(models_dir: &Path, faces: bool, plates: bool) -> Result<Self, VisionError> {
+        Self::load_on(models_dir, faces, plates, true)
+    }
+
+    /// [`Detectors::load`], on the CPU only when `gpu` is false. Weights the GPU does not take
+    /// leave that detector on the CPU.
+    pub fn load_on(models_dir: &Path, faces: bool, plates: bool, gpu: bool) -> Result<Self, VisionError> {
         let dir = catalog::package_dir(models_dir);
         let need = |f: &catalog::ModelFile| std::fs::metadata(dir.join(f.name)).is_ok_and(|m| m.len() == f.size);
         if (faces && !need(&catalog::FACE)) || (plates && !need(&catalog::PLATE)) {
             return Err(VisionError::NotInstalled);
         }
-        let face = if faces { Some(FaceDetector::load(&dir.join(catalog::FACE.name))?) } else { None };
-        let plate = if plates { Some(PlateDetector::load(&dir.join(catalog::PLATE.name))?) } else { None };
+        let mut face = if faces { Some(FaceDetector::load(&dir.join(catalog::FACE.name))?) } else { None };
+        let mut plate = if plates { Some(PlateDetector::load(&dir.join(catalog::PLATE.name))?) } else { None };
+        if gpu {
+            if let Some(f) = face.as_mut() {
+                f.use_gpu();
+            }
+            if let Some(p) = plate.as_mut() {
+                p.use_gpu();
+            }
+        }
         Ok(Self { face, plate })
+    }
+
+    /// Where the detectors run now: `"gpu"` when every loaded one runs on the GPU, else `"cpu"`.
+    pub fn device_name(&self) -> &'static str {
+        let gpu = self.face.as_ref().is_none_or(FaceDetector::on_gpu) && self.plate.as_ref().is_none_or(PlateDetector::on_gpu);
+        if gpu && (self.face.is_some() || self.plate.is_some()) { "gpu" } else { "cpu" }
     }
 }
 
@@ -609,7 +823,7 @@ mod tests {
         let det = FaceDetector::load(&catalog::package_dir(&models).join(catalog::FACE.name)).unwrap();
         let (rgba, w, h) = picture(&oracle);
         let (x, ..) = input(&rgba, w, h, w.max(h), 32).unwrap();
-        let heads = det.heads(&x).unwrap();
+        let heads = det.heads(&Cpu, &x).unwrap();
         for (stride, _, _, cls, obj, bbox, kps) in &heads {
             for (name, ours) in [("cls", cls), ("obj", obj), ("bbox", bbox), ("kps", kps)] {
                 let theirs = f32s(&oracle.join(format!("yunet_{name}_{stride}.f32")));
@@ -639,7 +853,7 @@ mod tests {
         let det = PlateDetector::load(&catalog::package_dir(&models).join(catalog::PLATE.name)).unwrap();
         let (rgba, w, h) = picture(&oracle);
         let (x, ..) = input(&rgba, w, h, w.max(h), 1).unwrap();
-        let raw = det.raw(&x).unwrap();
+        let raw = det.raw(&Cpu, &x).unwrap();
         let (loc, conf, iou) = (f32s(&oracle.join("lpd_loc.f32")), f32s(&oracle.join("lpd_conf.f32")), f32s(&oracle.join("lpd_iou.f32")));
         let n = iou.len();
         assert_eq!(raw.len(), n * post::LPD_STRIDE);
@@ -658,24 +872,179 @@ mod tests {
         assert!(el < 1e-2 && ec < 1e-3 && ei < 1e-3);
     }
 
-    /// How long one detection takes on this machine (release builds give the real figure).
+    /// How long one detection takes on this machine (release builds give the real figure), on
+    /// the CPU and on the GPU where there is one; the engine looks at faces with a long side of
+    /// 640–1920 px and at plates with 960.
     #[test]
     #[ignore = "a timing, with the downloaded models (FILMCRAFT_VISION_MODELS, FILMCRAFT_VISION_ORACLE)"]
     fn detection_speed() {
         let Some((models, oracle)) = live() else { return };
-        let d = Detectors::load(&models, true, true).unwrap();
         let (rgba, w, h) = picture(&oracle);
-        for (side, label) in [(640usize, "face 640"), (320, "face 320"), (640, "plate 640"), (480, "plate 480")] {
-            let t0 = std::time::Instant::now();
-            let n = 10;
-            for _ in 0..n {
-                if label.starts_with("face") {
-                    d.face.as_ref().unwrap().detect(&rgba, w, h, side, 0.6).unwrap();
-                } else {
-                    d.plate.as_ref().unwrap().detect(&rgba, w, h, side, 0.8).unwrap();
+        let mut runs = vec![("cpu", Detectors::load_on(&models, true, true, false).unwrap())];
+        if gpu_available() {
+            runs.push(("gpu", Detectors::load_on(&models, true, true, true).unwrap()));
+        }
+        for (name, d) in &runs {
+            assert_eq!(d.device_name(), *name);
+            // the first runs compile the GPU's pipelines and fill its buffer pool
+            d.face.as_ref().unwrap().detect(&rgba, w, h, 640, 0.6).unwrap();
+            d.plate.as_ref().unwrap().detect(&rgba, w, h, 640, 0.8).unwrap();
+        }
+        for (side, face) in [(320usize, true), (640, true), (1280, true), (1920, true), (480, false), (640, false), (960, false)] {
+            // the devices in turn, three rounds, the fastest of each (the machine may be busy)
+            let mut best = vec![f64::INFINITY; runs.len()];
+            for _ in 0..3 {
+                for ((_, d), b) in runs.iter().zip(best.iter_mut()) {
+                    let t0 = std::time::Instant::now();
+                    let n = 5;
+                    for _ in 0..n {
+                        if face {
+                            d.face.as_ref().unwrap().detect(&rgba, w, h, side, 0.6).unwrap();
+                        } else {
+                            d.plate.as_ref().unwrap().detect(&rgba, w, h, side, 0.8).unwrap();
+                        }
+                    }
+                    *b = b.min(t0.elapsed().as_secs_f64() * 1000.0 / n as f64);
                 }
             }
-            eprintln!("{label}: {:.1} ms a picture", t0.elapsed().as_secs_f64() * 1000.0 / n as f64);
+            let what = if face { "face" } else { "plate" };
+            let times: Vec<String> = runs.iter().zip(&best).map(|((name, _), b)| format!("{name} {b:.1} ms")).collect();
+            eprintln!("{what} {side}: {} a picture", times.join(", "));
         }
+    }
+
+    /// A small random number generator for synthetic layers.
+    fn noise(seed: u32) -> impl FnMut() -> f32 {
+        let mut s = seed;
+        move || {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (s >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        }
+    }
+
+    /// Every layer on the GPU (the WGSL passes) gives the CPU passes' values: units with and
+    /// without ReLU and pooling (odd sizes, output channels not a multiple of four), the stem,
+    /// the max pool and the upsampled sum. Skipped without a GPU.
+    #[test]
+    fn gpu_layers_match_the_cpu() {
+        let Some(ctx) = gpu::Ctx::shared() else {
+            eprintln!("SKIPPED (vision GPU layers): no GPU");
+            return;
+        };
+        let mut next = noise(7);
+        for (cin, cout) in [(5usize, 7usize), (16, 16), (3, 1)] {
+            for (h, w) in [(9usize, 12usize), (8, 8), (3, 2)] {
+                for relu in [false, true] {
+                    for pool in [false, true] {
+                        let pw = Conv { w: (0..cout * cin).map(|_| next()).collect(), b: (0..cout).map(|_| next()).collect(), cin, cout, k: 1, stride: 1 };
+                        let dw = Conv { w: (0..cout * 9).map(|_| next()).collect(), b: (0..cout).map(|_| next()).collect(), cin: cout, cout, k: 3, stride: 1 };
+                        let mut u = PwDw::new(pw, dw, relu).unwrap();
+                        u.upload(&ctx).unwrap();
+                        let x = Map { v: (0..cin * h * w).map(|_| next() * 4.0).collect(), c: cin, h, w };
+                        let cpu = Cpu.unit(&u, &x, pool).unwrap();
+                        let r = gpu::Run::new(&ctx);
+                        // a map on the GPU: the unit's input through an identity unit would change
+                        // it, so the input goes up as a picture-sized buffer of the stem's kind
+                        let xs = r.upload_map(&x.v, x.c, x.h, x.w).unwrap();
+                        let gpu = Backend::unit(&r, &u, &xs, pool).and_then(|m| Backend::read(&r, vec![m]));
+                        let what = format!("{cin}→{cout} {h}×{w} relu {relu} pool {pool}");
+                        let gpu = gpu.unwrap_or_else(|e| panic!("{what}: {e}")).remove(0);
+                        assert_eq!((gpu.c, gpu.h, gpu.w), (cpu.c, cpu.h, cpu.w), "{what}");
+                        assert!(max_err(&gpu.v, &cpu.v) < 1e-4, "{what}: {}", max_err(&gpu.v, &cpu.v));
+                    }
+                }
+            }
+        }
+        // the stem
+        let stem = Conv { w: (0..16 * 27).map(|_| next()).collect(), b: (0..16).map(|_| next()).collect(), cin: 3, cout: 16, k: 3, stride: 2 };
+        let mut stem = Stem::new(stem).unwrap();
+        stem.upload(&ctx).unwrap();
+        for (h, w) in [(32usize, 64usize), (33, 17)] {
+            let pic = Picture { data: (0..3 * h * w).map(|_| (next() + 0.5) * 255.0).collect(), h, w };
+            let r = gpu::Run::new(&ctx);
+            let gpu = Backend::stem(&r, &stem, &pic).and_then(|m| Backend::read(&r, vec![m])).unwrap().remove(0);
+            let cpu = Cpu.stem(&stem, &pic).unwrap();
+            assert_eq!((gpu.c, gpu.h, gpu.w), (cpu.c, cpu.h, cpu.w));
+            assert!(max_err(&gpu.v, &cpu.v) < 1e-2, "stem {h}×{w}: {}", max_err(&gpu.v, &cpu.v));
+        }
+        // max pool and the upsampled sum
+        let a = Map { v: (0..3 * 8 * 6).map(|_| next()).collect(), c: 3, h: 8, w: 6 };
+        let s = Map { v: (0..3 * 4 * 3).map(|_| next()).collect(), c: 3, h: 4, w: 3 };
+        let r = gpu::Run::new(&ctx);
+        let (ga, gs) = (r.upload_map(&a.v, a.c, a.h, a.w).unwrap(), r.upload_map(&s.v, s.c, s.h, s.w).unwrap());
+        let pooled = Backend::max_pool(&r, &ga).unwrap();
+        let summed = Backend::add_upsampled(&r, &ga, &gs).unwrap();
+        assert!(Backend::add_upsampled(&r, &ga, &ga).is_err(), "sizes that do not pair");
+        let got = Backend::read(&r, vec![pooled, summed]).unwrap();
+        assert_eq!(got[0].v, max_pool(&a).v);
+        assert!(max_err(&got[1].v, &add_upsampled(&a, &s).unwrap().v) < 1e-6);
+    }
+
+    /// The detectors find the same faces and plates on the GPU as on the CPU: the same counts,
+    /// boxes within a pixel of the fitted picture, scores within 1e-3. Pictures: the PNGs in
+    /// `FILMCRAFT_VISION_PICTURES`, else the oracle's.
+    #[test]
+    #[ignore = "needs the downloaded models (FILMCRAFT_VISION_MODELS) and pictures (FILMCRAFT_VISION_PICTURES or FILMCRAFT_VISION_ORACLE)"]
+    fn gpu_detections_match_the_cpu() {
+        let Some(models) = std::env::var_os("FILMCRAFT_VISION_MODELS").map(std::path::PathBuf::from) else { return };
+        if !gpu_available() {
+            eprintln!("SKIPPED (vision GPU detections): no GPU");
+            return;
+        }
+        let pictures: Vec<std::path::PathBuf> = match std::env::var_os("FILMCRAFT_VISION_PICTURES") {
+            Some(d) => {
+                let mut v: Vec<_> =
+                    std::fs::read_dir(d).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "png")).collect();
+                v.sort();
+                v
+            }
+            None => vec![std::path::PathBuf::from(std::env::var_os("FILMCRAFT_VISION_ORACLE").unwrap()).join("picture.png")],
+        };
+        let cpu = Detectors::load_on(&models, true, true, false).unwrap();
+        let gpu = Detectors::load_on(&models, true, true, true).unwrap();
+        assert_eq!((cpu.device_name(), gpu.device_name()), ("cpu", "gpu"));
+        let (mut faces, mut plates, mut worst, mut raw_err) = (0usize, 0usize, 0f32, 0f32);
+        for p in &pictures {
+            let img = image::open(p).unwrap().to_rgba8();
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            let rgba = img.into_raw();
+            for side in [640usize, 1280, 1920] {
+                let (a, b) = (cpu.face.as_ref().unwrap(), gpu.face.as_ref().unwrap());
+                let (fa, fb) = (a.detect(&rgba, w, h, side, 0.6).unwrap(), b.detect(&rgba, w, h, side, 0.6).unwrap());
+                let fitted = side.min(w.max(h)) as f32;
+                worst = worst.max(same(&fa, &fb, fitted, &format!("{} faces at {side}", p.display())));
+                faces += fa.len();
+            }
+            let (a, b) = (cpu.plate.as_ref().unwrap(), gpu.plate.as_ref().unwrap());
+            let (pa, pb) = (a.detect(&rgba, w, h, PLATE_SIDE, 0.8).unwrap(), b.detect(&rgba, w, h, PLATE_SIDE, 0.8).unwrap());
+            worst = worst.max(same(&pa, &pb, PLATE_SIDE.min(w.max(h)) as f32, &format!("{} plates", p.display())));
+            plates += pa.len();
+            // the plate network's raw outputs (few frames hold a plate above the threshold)
+            let (x, ..) = input(&rgba, w, h, PLATE_SIDE, 1).unwrap();
+            let ra = a.raw(&Cpu, &x).unwrap();
+            let rb = Gpu::run(&b.gpu, |r| b.raw(r, &x)).expect("the GPU's raw outputs");
+            let scale = ra.iter().fold(0f32, |m, v| m.max(v.abs())).max(1.0);
+            raw_err = raw_err.max(max_err(&ra, &rb) / scale);
+        }
+        assert!(gpu.device_name() == "gpu", "the GPU failed and the CPU took over");
+        assert!(raw_err < 1e-4, "plate network outputs differ by {raw_err} (relative)");
+        eprintln!(
+            "{} pictures: {faces} faces, {plates} plates, the same on the GPU; largest box difference {worst:.3} px; plate outputs within {raw_err:.1e} (relative)",
+            pictures.len()
+        );
+    }
+    /// The largest corner difference between two detection lists (in pixels of a picture `side`
+    /// long), after checking they have the same length and scores.
+    fn same(a: &[Detection], b: &[Detection], side: f32, what: &str) -> f32 {
+        assert_eq!(a.len(), b.len(), "{what}: {a:?} vs {b:?}");
+        let mut worst = 0f32;
+        for (x, y) in a.iter().zip(b) {
+            assert!((x.score - y.score).abs() < 1e-3, "{what}: scores {} vs {}", x.score, y.score);
+            for k in 0..4 {
+                worst = worst.max((x.bbox[k] - y.bbox[k]).abs() * side);
+            }
+        }
+        assert!(worst < 1.0, "{what}: boxes {worst} px apart");
+        worst
     }
 }

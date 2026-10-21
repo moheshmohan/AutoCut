@@ -9,8 +9,9 @@
 //!   boxes) and non-maximum suppression.
 //! - [`track`]: linking detections into tracks, filling gaps, smoothing, and the rules for which
 //!   tracks are hidden (recognisable faces, legible plates, not excluded).
-//! - `net` and [`Detectors`] (feature `model`): the two networks written out by hand on candle
-//!   (pure Rust, CPU), checked layer by layer against the ONNX file.
+//! - `net` and [`Detectors`] (feature `model`): the two networks written out by hand, checked
+//!   layer by layer against the ONNX file: on the CPU (candle and plain Rust, the reference) and,
+//!   on macOS, as fused WGSL compute passes on the GPU (`gpu`, wgpu), the CPU being the fallback.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
@@ -20,9 +21,11 @@ pub mod post;
 pub mod track;
 
 #[cfg(feature = "model")]
+mod gpu;
+#[cfg(feature = "model")]
 mod net;
 #[cfg(feature = "model")]
-pub use net::{Detectors, FACE_SIDE, FaceDetector, PLATE_SIDE, PlateDetector};
+pub use net::{Detectors, FACE_SIDE, FaceDetector, MAX_GPU_FAILURES, PLATE_SIDE, PlateDetector, gpu_available};
 
 use serde::{Deserialize, Serialize};
 
