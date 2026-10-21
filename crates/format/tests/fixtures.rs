@@ -64,6 +64,28 @@ fn legacy_audio_field_becomes_primary_stream_and_clip_defaults_to_zero() {
     assert_eq!(again.project.item(ItemId(5)).unwrap().as_media().unwrap().info.audio_streams, media.info.audio_streams);
 }
 
+/// Maintain Audio Pitch: old files load with it off (they sound as they did), a clip without it is
+/// written as before (no new key), and a clip with it keeps it through save and load.
+#[test]
+fn maintain_pitch_defaults_off_and_round_trips() {
+    let mut p = decode(&fixture("v1-edit.fcproj")).unwrap().project;
+    let seq = ItemId(21);
+    assert!(p.sequence(seq).unwrap().all_tracks().flat_map(|t| &t.items).all(|c| !c.maintain_pitch));
+    let plain = String::from_utf8(encode(&p, false)).unwrap();
+    assert!(!plain.contains("maintain_pitch"), "an untouched clip writes what it wrote before");
+    {
+        let clip = &mut p.sequence_mut(seq).unwrap().audio_tracks[0].items[0];
+        clip.speed = 1.5;
+        clip.maintain_pitch = true;
+    }
+    let bytes = encode(&p, false);
+    assert!(String::from_utf8(bytes.clone()).unwrap().contains("\"maintain_pitch\":true"));
+    let again = decode(&bytes).unwrap().project;
+    let clip = &again.sequence(seq).unwrap().audio_tracks[0].items[0];
+    assert!(clip.maintain_pitch && clip.speed == 1.5);
+    assert_eq!(again, p);
+}
+
 /// Out-of-range audio stream data is repaired on load, never a reason to refuse the project.
 #[test]
 fn hostile_audio_stream_counts_and_indices_are_repaired_not_rejected() {

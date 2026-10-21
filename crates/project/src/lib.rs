@@ -558,6 +558,11 @@ pub struct TrackItem {
     /// Video Options ▸ Time Interpolation: how frames are made when the clip's speed is changed.
     #[serde(default, skip_serializing_if = "TimeInterpolation::is_default")]
     pub time_interpolation: TimeInterpolation,
+    /// Speed/Duration ▸ Maintain Audio Pitch: at a speed other than 100 % the clip's sound keeps
+    /// its pitch (time-stretched, `filmcraft_audio_dsp::stretch`) instead of playing varispeed.
+    /// Off when absent, so projects from before it existed sound as they did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maintain_pitch: bool,
     /// Frame Hold Options ▸ Hold Filters: effects are evaluated at the held frame's time instead
     /// of animating through the hold.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1643,6 +1648,7 @@ impl Project {
             essential: None,
             multicam,
             time_interpolation: TimeInterpolation::default(),
+            maintain_pitch: false,
             hold_filters: false,
             field_options: None,
             source_channels,
