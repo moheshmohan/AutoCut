@@ -311,6 +311,49 @@ pub fn is_cpu_frame(project: &Project, seq_id: ItemId, t: Tick) -> bool {
     project.sequence(seq_id).is_none_or(|seq| whole_frame_on_cpu(project, seq, t))
 }
 
+/// The largest output (pixels) [`cpu_is_quicker`] leaves to the CPU: 1920 × 1088 and a little.
+pub const CPU_QUICKER_PIXELS: usize = 2_200_000;
+
+/// Whether the CPU renders the frame at `t` at least as quickly as a GPU composite read back for
+/// an export: an output of at most [`CPU_QUICKER_PIXELS`] (1080p) showing one picture without
+/// standard effects or masks (placed and moved anyhow: a slow zoom), only titles and shapes over
+/// it, and no transition. The CPU does little more than convert and place the picture (one to one
+/// it simply becomes the canvas) and mix each title over its rectangle, on every core; the GPU
+/// path uploads the picture, composites the whole frame and reads it back as half floats on at
+/// most four renderers. Measured on the showcase (`docs/gpu.md`): a 10 s 1080p range of a zooming
+/// clip with titles took 4.1–4.7 s on the CPU and 7.0–8.3 s on the GPU; at 4K the GPU is as quick
+/// or quicker (a 15.6 s range 18.7–19.9 s against 25.3–29.3 s), so 4K frames stay on the GPU.
+/// Effects, masks, a second picture or a transition send the frame to the GPU. A misjudged frame
+/// costs time, never a different picture.
+pub fn cpu_is_quicker(project: &Project, seq_id: ItemId, t: Tick, opts: RenderOptions) -> bool {
+    let Some(seq) = project.sequence(seq_id) else { return false };
+    let (w, h) = output_size(seq, opts.scale);
+    if w.saturating_mul(h) > CPU_QUICKER_PIXELS {
+        return false;
+    }
+    let mut pictures = 0;
+    for tr in seq.video_tracks.iter().filter(|tr| tr.enabled) {
+        if tr.transitions.iter().any(|x| x.range().contains(t)) {
+            return false;
+        }
+        let Some(item) = tr.item_at(t).filter(|i| i.enabled) else { continue };
+        if item.has_opacity_masks() || (opts.effects && item.has_standard_effects()) {
+            return false;
+        }
+        match project.item(item.item).map(|p| &p.kind) {
+            Some(ItemKind::Graphic { .. }) => {}
+            Some(ItemKind::Media(_) | ItemKind::Subclip { .. }) => {
+                pictures += 1;
+                if pictures > 1 {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    pictures == 1
+}
+
 /// Count the frame at `t` in [`cpu_work`] with the reason [`is_cpu_frame`] holds for it (a caller
 /// that renders such a frame on the CPU without planning it).
 pub fn note_cpu_frame(project: &Project, seq_id: ItemId, t: Tick) {

@@ -55,7 +55,7 @@ fn project(width: u32, height: u32) -> (Arc<filmcraft_project::Project>, filmcra
         None,
     );
     let seq = p.new_sequence("s", SequenceSettings { width, height, frame_rate: filmcraft_time::FrameRate::FPS_24, ..Default::default() }, 1, 1, None);
-    let v = p
+    let mut v = p
         .make_track_item(
             red,
             TrackKind::Video,
@@ -64,6 +64,11 @@ fn project(width: u32, height: u32) -> (Arc<filmcraft_project::Project>, filmcra
             filmcraft_time::FrameRate::FPS_24,
         )
         .unwrap();
+    // an effect (Brightness & Contrast at its defaults): not one picture without effects, which an
+    // export leaves to the CPU (`plan::cpu_is_quicker`), so every frame goes to the GPU renderer
+    if let Some(fx) = filmcraft_project::find_effect("brightness_contrast") {
+        v.effects.push(fx.instance());
+    }
     p.sequence_mut(seq).unwrap().video_tracks[0].items.push(v);
     let mut m = SourceMap::default();
     m.0.insert(red, Arc::new(g));

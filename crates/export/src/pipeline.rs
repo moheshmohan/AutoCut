@@ -162,6 +162,24 @@ impl Pipeline {
         self.renderer.as_ref().map_or(requested, |pool| requested.min(i64::try_from(pool.capacity).unwrap_or(i64::MAX)))
     }
 
+    /// [`render_batch_limit`](Self::render_batch_limit) for the batch starting at frame `start`:
+    /// a batch whose every frame stays on the CPU ([`Pipeline::frame`]'s choice) takes no
+    /// renderer, so no frame task of it can wait for one, and it keeps the requested size (all
+    /// the export threads; capped at the renderers' count it ran a plain 1080p range 1.5× slower).
+    pub(crate) fn render_batch_limit_from(&self, start: i64, requested: i64) -> i64 {
+        let requested = requested.max(1);
+        if self.renderer.is_none() || (start..start.saturating_add(requested)).all(|f| self.cpu_frame(self.rate.tick_of(f))) {
+            return requested;
+        }
+        self.render_batch_limit(requested)
+    }
+
+    /// Whether the frame at `t` is rendered on the CPU without a renderer: one the planner hands
+    /// back as one CPU image, or one the CPU draws at least as quickly.
+    fn cpu_frame(&self, t: filmcraft_time::Tick) -> bool {
+        filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t) || filmcraft_render::plan::cpu_is_quicker(&self.project, self.seq, t, self.opts)
+    }
+
     pub fn new(project: Arc<Project>, seq: ItemId, settings: &ExportSettings, hdr_out: bool) -> Result<Self> {
         let q = project.sequence(seq).ok_or(ExportError::NoSequence)?;
         q.settings.validate().map_err(ExportError::Unsupported)?;
@@ -239,12 +257,18 @@ impl Pipeline {
         // planner hands back as one CPU image anyway (an adjustment layer, a complex transition,
         // HDR) does not take a pooled renderer: it would render on the CPU inside the pool, as
         // many frames at a time as there are renderers instead of one per export thread.
+        // A frame the CPU draws at least as quickly (one picture without effects, titles over
+        // it) is left to it too.
         let pool = self.renderer.as_ref().filter(|_| {
-            let cpu = filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t);
-            if cpu {
+            if filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t) {
                 filmcraft_render::plan::note_cpu_frame(&self.project, self.seq, t);
+                return false;
             }
-            !cpu
+            if filmcraft_render::plan::cpu_is_quicker(&self.project, self.seq, t, self.opts) {
+                filmcraft_render::plan::cpu_work::note("frame: one picture without effects, and titles (quicker on the CPU)".into());
+                return false;
+            }
+            true
         });
         let gpu = match pool {
             Some(pool) => {

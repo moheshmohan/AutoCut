@@ -67,7 +67,11 @@ fn project() -> (Arc<Project>, ItemId, SourceMap) {
             }),
             None,
         );
-        let item = project.make_track_item(id, kind, Tick::ZERO, TimeRange::new(Tick::ZERO, duration), rate).unwrap();
+        let mut item = project.make_track_item(id, kind, Tick::ZERO, TimeRange::new(Tick::ZERO, duration), rate).unwrap();
+        // an effect: not one picture without effects, which the CPU draws as quickly and keeps
+        if kind == TrackKind::Video {
+            item.effects.push(filmcraft_project::find_effect("brightness_contrast").unwrap().instance());
+        }
         let sequence = project.sequence_mut(seq).unwrap();
         match kind {
             TrackKind::Video => sequence.video_tracks[0].items.push(item),

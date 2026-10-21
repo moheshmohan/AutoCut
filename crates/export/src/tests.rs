@@ -42,6 +42,17 @@ pub(crate) fn project() -> (Arc<Project>, ItemId, SourceMap) {
     (Arc::new(p), seq, m)
 }
 
+/// [`project`] with an effect on the clip (Brightness & Contrast at its defaults): no longer one
+/// picture without effects, which the CPU draws as quickly (`plan::cpu_is_quicker`), so an
+/// export asks a registered renderer for its frames.
+fn hook_project() -> (Arc<Project>, ItemId, SourceMap) {
+    let (p, seq, m) = project();
+    let mut p = Arc::unwrap_or_clone(p);
+    let fx = filmcraft_project::find_effect("brightness_contrast").unwrap().instance();
+    p.sequence_mut(seq).unwrap().video_tracks[0].items[0].effects.push(fx);
+    (Arc::new(p), seq, m)
+}
+
 fn tmp(name: &str) -> String {
     let d = std::env::temp_dir().join(format!("fc-export-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
@@ -363,7 +374,7 @@ fn gpu_hook_scenarios() {
     // 1. Declining renderer: byte-equal to Off, and an empty registry too.
     crate::reset_frame_renderers_for_tests();
     crate::register_frame_renderer(|| None);
-    let (p, seq, m) = project();
+    let (p, seq, m) = hook_project();
     let mk = |path: &String, gpu: Option<bool>| {
         let mut s = ExportSettings { format: Format::PngSequence, path: path.clone(), ..Default::default() };
         s.range = Some(TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(2)));
@@ -434,7 +445,7 @@ fn gpu_hook_scenarios() {
     crate::reset_frame_renderers_for_tests();
     PANICS.store(0, std::sync::atomic::Ordering::SeqCst);
     crate::register_frame_renderer(|| Some(Box::new(PanickingRenderer) as Box<dyn FrameRenderer>));
-    let (p, seq, m) = project();
+    let (p, seq, m) = hook_project();
     let mk12 = |path: &String, gpu: crate::GpuRendering| {
         let mut s = ExportSettings { format: Format::PngSequence, path: path.clone(), ..Default::default() };
         s.range = Some(TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(12)));
@@ -458,7 +469,7 @@ fn gpu_hook_scenarios() {
     //    fallback, and the renderer's picture reaches only the frames before it.
     crate::reset_frame_renderers_for_tests();
     crate::register_frame_renderer(|| Some(Box::new(FakeRenderer) as Box<dyn FrameRenderer>));
-    let (p, seq, m) = project();
+    let (p, seq, m) = hook_project();
     let mut p = Arc::unwrap_or_clone(p);
     let r = FrameRate::FPS_24;
     let adj = p.add_item("adj", Label::Iris, ItemKind::AdjustmentLayer { width: 320, height: 180, rate: r, duration: Tick(TICKS_PER_SECOND) }, None);
@@ -482,6 +493,31 @@ fn gpu_hook_scenarios() {
         assert_eq!(frame("adj-off", f), frame("adj-auto", f), "frame {f}: an adjustment layer frame is the CPU's");
     }
     assert_eq!((gpu_render_stats().frames, gpu_render_stats().fallbacks), (12, 12), "{:?}", gpu_render_stats());
+
+    // 6. One picture without effects (and titles): the CPU draws it at least as quickly as a GPU
+    //    composite read back, so the renderer is not asked (`cpu_is_quicker`); the frames are
+    //    the CPU's, counted with their reason.
+    crate::reset_frame_renderers_for_tests();
+    crate::register_frame_renderer(|| Some(Box::new(FakeRenderer) as Box<dyn FrameRenderer>));
+    let (p, seq, m) = project();
+    let mk2 = |path: &String, gpu: crate::GpuRendering| {
+        let mut s = ExportSettings { format: Format::PngSequence, path: path.clone(), ..Default::default() };
+        s.range = Some(TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(2)));
+        s.gpu_rendering = gpu;
+        export(&p, seq, &s, &m, &Progress::default()).unwrap()
+    };
+    mk2(&tmp("plain-off.png"), crate::GpuRendering::Off);
+    mk2(&tmp("plain-auto.png"), crate::GpuRendering::Auto);
+    assert_eq!(std::fs::read(tmp("plain-off000.png")).unwrap(), std::fs::read(tmp("plain-auto000.png")).unwrap(), "the frame is the CPU's");
+    assert_eq!(gpu_render_stats().frames, 0, "{:?}", gpu_render_stats());
+    assert!(filmcraft_render::plan::cpu_work::counts().keys().any(|k| k.contains("one picture without effects")));
+    // such a batch takes no renderer, so it is not capped at the renderers' count
+    let png = ExportSettings { format: Format::PngSequence, ..Default::default() };
+    let plain = crate::pipeline::Pipeline::new(p.clone(), seq, &png, false).unwrap();
+    assert_eq!(plain.render_batch_limit_from(0, 14), 14);
+    let (hp, hseq, _) = hook_project();
+    let fx = crate::pipeline::Pipeline::new(hp, hseq, &png, false).unwrap();
+    assert!(fx.render_batch_limit_from(0, 14) <= 4, "frames for the renderer: at most one task per renderer");
     crate::reset_frame_renderers_for_tests();
 }
 

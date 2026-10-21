@@ -474,9 +474,9 @@ impl Exporter {
         self.render_pool.get_or_insert_with(build_render_pool).clone()
     }
 
-    /// Frames in the next batch, bounded before Rayon can steal nested frame tasks.
-    fn batch_len(&self) -> i64 {
-        let batch = self.pipe.render_batch_limit(self.batch);
+    /// Frames in the batch starting at `start`, bounded before Rayon can steal nested frame tasks.
+    fn batch_len(&self, start: i64) -> i64 {
+        let batch = self.pipe.render_batch_limit_from(start, self.batch);
         if self.overlapping() { overlap_batch(batch, frame_bytes(self.pipe.w, self.pipe.h, self.pipe.hdr_out), self.budget) } else { batch }
     }
 
@@ -673,7 +673,7 @@ impl Exporter {
         let (f, frames) = match self.ahead.take() {
             Some(a) if a.first == self.next => (a.first, a.frames),
             _ => {
-                let (f, end) = (self.next, self.next.saturating_add(self.batch_len()).min(self.f1));
+                let (f, end) = (self.next, self.next.saturating_add(self.batch_len(self.next)).min(self.f1));
                 let render_pool = self.render_pool();
                 let pipe = &self.pipe;
                 self.pictures.drop_before(f);
@@ -689,8 +689,8 @@ impl Exporter {
             return Err(ExportError::Encode("internal: an empty batch was rendered".into()));
         }
         // the batch after this one, when the pool can render it while this one is encoded
-        let plan =
-            (end < self.f1 && self.overlapping() && !progress.cancel.load(Ordering::Relaxed)).then(|| (end, end.saturating_add(self.batch_len()).min(self.f1)));
+        let plan = (end < self.f1 && self.overlapping() && !progress.cancel.load(Ordering::Relaxed))
+            .then(|| (end, end.saturating_add(self.batch_len(end)).min(self.f1)));
         let Some((a, b)) = plan else {
             return match self.encode_batch(f, frames, sources)? {
                 Encoded::Pending => Ok(Step::Pending),
@@ -706,7 +706,7 @@ impl Exporter {
         let mut slot: Option<std::thread::Result<Option<Vec<Frame>>>> = None;
         let mut encode_done: Option<web_time::Instant> = None;
         // the batch after that one, decoded meanwhile (none past the end of the pass)
-        let warm_to = b.saturating_add(self.batch_len()).min(self.f1);
+        let warm_to = b.saturating_add(self.batch_len(b)).min(self.f1);
         let warm = (self.warm_ahead && b < warm_to).then_some((b, warm_to));
         let cancel = &progress.cancel;
         // what was decoded for the frames encoded by now is not needed any more
