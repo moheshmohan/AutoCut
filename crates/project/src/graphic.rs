@@ -71,6 +71,20 @@ fn appearance() -> Vec<ParamDef> {
         co("stroke2_color", "Stroke 2 Color", [1.0, 0.85, 0.2, 1.0], A),
         fl("stroke2_width", "Stroke 2 Width", 10.0, (0.0, 1000.0), (0.0, 100.0), "", A),
         chc("stroke2_type", "Stroke 2 Type", STROKE_OPTS, 0, A),
+        bo("stroke3", "Stroke 3", false, A),
+        co("stroke3_color", "Stroke 3 Color", [0.0, 0.0, 0.0, 1.0], A),
+        fl("stroke3_width", "Stroke 3 Width", 16.0, (0.0, 1000.0), (0.0, 100.0), "", A),
+        chc("stroke3_type", "Stroke 3 Type", STROKE_OPTS, 0, A),
+        bo("glow", "Outer Glow", false, A),
+        co("glow_color", "Glow Color", [0.25, 0.85, 1.0, 1.0], A),
+        fl("glow_radius", "Glow Radius", 24.0, (0.0, 1000.0), (0.0, 200.0), "", A),
+        fl("glow_intensity", "Glow Intensity", 100.0, (0.0, 1000.0), (0.0, 400.0), "%", A),
+        bo("inner_shadow", "Inner Shadow", false, A),
+        co("inner_shadow_color", "Inner Shadow Color", [0.0, 0.0, 0.0, 1.0], A),
+        fl("inner_shadow_opacity", "Inner Shadow Opacity", 60.0, (0.0, 100.0), (0.0, 100.0), "%", A),
+        p("inner_shadow_angle", "Inner Shadow Angle", ParamKind::Angle, ParamValue::Float(135.0), true, A),
+        fl("inner_shadow_distance", "Inner Shadow Distance", 4.0, (0.0, 1000.0), (0.0, 100.0), "", A),
+        fl("inner_shadow_blur", "Inner Shadow Blur", 8.0, (0.0, 1000.0), (0.0, 200.0), "", A),
         bo("background", "Background", false, A),
         co("background_color", "Background Color", [0.0, 0.0, 0.0, 1.0], A),
         fl("background_opacity", "Background Opacity", 75.0, (0.0, 100.0), (0.0, 100.0), "%", A),
@@ -132,6 +146,8 @@ pub(crate) fn layer_defs() -> Vec<EffectDef> {
                 fl("box_width", "Text Box Width", 0.0, (0.0, 100_000.0), (0.0, 3840.0), "", X),
                 fl("box_height", "Text Box Height", 0.0, (0.0, 100_000.0), (0.0, 2160.0), "", X),
                 bo("vertical", "Vertical Text", false, X),
+                fl("curve", "Curve", 0.0, (-100.0, 100.0), (-100.0, 100.0), "%", X),
+                fl("curve_radius", "Curve Radius", 0.0, (0.0, 100_000.0), (0.0, 4000.0), "", X),
             ],
         ),
         layer_def(
@@ -170,6 +186,28 @@ pub struct Appearance {
     /// (colour with opacity in alpha, padding px, corner radius px).
     pub background: Option<([f32; 4], f32, f32)>,
     pub shadow: Option<Shadow>,
+    /// A soft light around the fill and strokes, under them.
+    pub glow: Option<Glow>,
+    /// A shadow cast inside the fill (as if the shape were cut into the picture).
+    pub inner_shadow: Option<Shadow>,
+}
+
+/// An outer glow: `color` spread `radius` layer pixels around the shape (a Gaussian falloff),
+/// brightened by `intensity` (1 = the plain falloff; more saturates near the edge, like neon).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Glow {
+    pub color: [f32; 4],
+    pub radius: f32,
+    pub intensity: f32,
+}
+
+/// Text set along a circular arc: `bend` −1..1 (positive arches up like a rainbow, negative sags
+/// like a smile; ±1 bends a line into a half circle) or a fixed `radius` (layer pixels; 0 = from
+/// the bend).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextCurve {
+    pub bend: f32,
+    pub radius: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -218,6 +256,14 @@ pub struct TextProps {
     pub vertical: bool,
     /// Per-character style overrides as *byte* ranges of `text` (sorted, non-overlapping).
     pub runs: Vec<(std::ops::Range<usize>, crate::graphic_design::CharStyle)>,
+    /// Set along an arc.
+    pub curve: Option<TextCurve>,
+    /// Letters, words or lines animating in, out or in a loop.
+    pub anim: Option<Box<crate::text_anim::TextAnimation>>,
+    /// The animation clock: clip time and clip length in seconds (`f64::INFINITY` when unknown).
+    /// Set while the animation moves; None at rest, so a still title is drawn (and cached) like a
+    /// title without animation.
+    pub clock: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -289,7 +335,16 @@ pub fn eval_layer(e: &EffectInstance, t: Tick, frame: (u32, u32)) -> Option<Laye
         TEXT_LAYER => LayerContent::Text({
             let text = ss(e, "text", t);
             let runs = byte_runs(&text, e.layer.as_ref().map_or(&[][..], |x| &x.runs[..]));
+            let bend = ff(e, "curve", t);
+            let curve = (bend.is_finite() && bend.abs() > 1e-3)
+                .then(|| TextCurve { bend: (bend / 100.0).clamp(-1.0, 1.0), radius: ff(e, "curve_radius", t).clamp(0.0, 1e6) });
+            let anim = e.layer.as_ref().and_then(|x| x.anim.as_ref()).map(crate::text_anim::TextAnimation::sanitized).filter(|a| !a.is_empty()).map(Box::new);
+            // without a clip, the clock is the layer's own time (template previews)
+            let clock = anim_clock(anim.as_deref(), &text, t.seconds(), f64::INFINITY);
             TextProps {
+                curve,
+                anim,
+                clock,
                 text,
                 runs,
                 font: ss(e, "font", t),
@@ -323,11 +378,27 @@ pub fn eval_layer(e: &EffectInstance, t: Tick, frame: (u32, u32)) -> Option<Laye
         _ => return None,
     };
     let mut strokes = Vec::new();
-    for (on, c, w, k) in [("stroke", "stroke_color", "stroke_width", "stroke_type"), ("stroke2", "stroke2_color", "stroke2_width", "stroke2_type")] {
+    for (on, c, w, k) in [
+        ("stroke", "stroke_color", "stroke_width", "stroke_type"),
+        ("stroke2", "stroke2_color", "stroke2_width", "stroke2_type"),
+        ("stroke3", "stroke3_color", "stroke3_width", "stroke3_type"),
+    ] {
         if bb(e, on, t) && ff(e, w, t) > 0.0 {
             strokes.push((cc(e, c, t), ff(e, w, t), ch(e, k, t)));
         }
     }
+    let glow = bb(e, "glow", t).then(|| Glow {
+        color: cc(e, "glow_color", t),
+        radius: ff(e, "glow_radius", t).clamp(0.0, 1000.0),
+        intensity: (ff(e, "glow_intensity", t) / 100.0).clamp(0.0, 10.0),
+    });
+    let inner_shadow = bb(e, "inner_shadow", t).then(|| {
+        let mut c = cc(e, "inner_shadow_color", t);
+        c[3] *= (ff(e, "inner_shadow_opacity", t) / 100.0).clamp(0.0, 1.0);
+        let a = (ff(e, "inner_shadow_angle", t) - 90.0).to_radians();
+        let d = ff(e, "inner_shadow_distance", t).clamp(0.0, 1000.0);
+        Shadow { color: c, offset: (a.cos() * d, a.sin() * d), size: 0.0, blur: ff(e, "inner_shadow_blur", t).clamp(0.0, 1000.0) }
+    });
     let background = bb(e, "background", t).then(|| {
         let mut c = cc(e, "background_color", t);
         c[3] *= (ff(e, "background_opacity", t) / 100.0).clamp(0.0, 1.0);
@@ -361,6 +432,8 @@ pub fn eval_layer(e: &EffectInstance, t: Tick, frame: (u32, u32)) -> Option<Laye
             strokes,
             background,
             shadow,
+            glow,
+            inner_shadow,
         },
         transform: LayerTransform {
             position,
@@ -380,6 +453,25 @@ pub fn byte_runs(text: &str, runs: &[crate::graphic_design::StyleRun]) -> Vec<(s
     let offs: Vec<usize> = text.char_indices().map(|(b, _)| b).chain(std::iter::once(text.len())).collect();
     let at = |c: usize| offs[c.min(offs.len() - 1)];
     runs.iter().map(|r| (at(r.start)..at(r.end), r.style.clone())).filter(|(r, s)| r.start < r.end && !s.is_empty()).collect()
+}
+
+/// The animation clock of a text with `anim` at clip time `u` of a clip `d` seconds long: None
+/// when there is no animation or every unit is at rest (judged for as many units as the text has
+/// characters, an upper bound for letters, words and lines).
+pub fn anim_clock(anim: Option<&crate::text_anim::TextAnimation>, text: &str, u: f64, d: f64) -> Option<(f64, f64)> {
+    let a = anim?;
+    let n = text.chars().count().max(1);
+    (!a.at_rest(n, u, d)).then_some((u, d))
+}
+
+/// Set a layer's animation clock to clip time `u` of a clip `d` seconds long (the renderer knows
+/// the clip; [`eval_layer`] alone does not).
+pub fn set_clip_clock(spec: &mut LayerSpec, u: f64, d: f64) {
+    if let LayerContent::Text(t) = &mut spec.content
+        && t.anim.is_some()
+    {
+        t.clock = anim_clock(t.anim.as_deref(), &t.text, u, d);
+    }
 }
 
 /// Character count of a text layer's source text at time `t` (for style-run commands).

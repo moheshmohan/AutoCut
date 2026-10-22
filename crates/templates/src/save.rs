@@ -774,6 +774,7 @@ pub fn save(p: &Project, seq: ItemId, opts: &SaveOptions, beat_grid: Option<Beat
                     speaker: None,
                     cue_id: None,
                     settings: String::new(),
+                    words: Vec::new(),
                 };
             }
         }

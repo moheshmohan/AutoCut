@@ -482,12 +482,136 @@ pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
             return f.id;
         }
     }
+    // then the installed fonts (a face made for the character's script before any other)
+    if let Some(id) = system_fallback(c, &p) {
+        return id;
+    }
     for f in faces.iter().filter(|f| f.info.origin != "bundled" && f.bytes.get().is_some()) {
         if f.has_char(c) {
             return f.id;
         }
     }
     prefer
+}
+
+/// Family-name words of system fonts for the scripts the bundled fonts lack, by code point range:
+/// the first faces tried for a character in the range.
+const SCRIPT_HINTS: &[(u32, u32, &[&str])] = &[
+    (0x0D00, 0x0D7F, &["Malayalam"]),
+    (0x0B80, 0x0BFF, &["Tamil"]),
+    (0x0900, 0x097F, &["Devanagari", "Hindi"]),
+    (0x0980, 0x09FF, &["Bangla", "Bengali"]),
+    (0x0A00, 0x0A7F, &["Gurmukhi"]),
+    (0x0A80, 0x0AFF, &["Gujarati"]),
+    (0x0B00, 0x0B7F, &["Oriya", "Odia"]),
+    (0x0C00, 0x0C7F, &["Telugu"]),
+    (0x0C80, 0x0CFF, &["Kannada"]),
+    (0x0D80, 0x0DFF, &["Sinhala"]),
+    (0x0E00, 0x0E7F, &["Thai"]),
+    (0x0E80, 0x0EFF, &["Lao"]),
+    (0x0F00, 0x0FFF, &["Tibetan", "Kailasa"]),
+    (0x1000, 0x109F, &["Myanmar"]),
+    (0x1780, 0x17FF, &["Khmer"]),
+    (0x1200, 0x139F, &["Ethiopic", "Kefa"]),
+    (0x0530, 0x058F, &["Armenian"]),
+    (0x10A0, 0x10FF, &["Georgian"]),
+    (0x0590, 0x05FF, &["Hebrew"]),
+    (0x0600, 0x06FF, &["Arabic", "Geeza", "Nastaliq"]),
+    (0xAC00, 0xD7AF, &["Gothic", "Hangul", "Gulim", "Myungjo"]),
+    (0x3040, 0x30FF, &["Hiragino", "Gothic", "Mincho", "PingFang"]),
+    (0x4E00, 0x9FFF, &["PingFang", "Hiragino", "Heiti", "Song", "CJK"]),
+    // emoji: colour fonts (drawn from their pictures, `render::color_glyph`)
+    (0x2600, 0x27BF, &["Emoji", "Symbol"]),
+    (0x1F000, 0x1FAFF, &["Emoji"]),
+];
+
+/// Largest font file probed for coverage when no face is known to cover a character.
+const MAX_PROBE_BYTES: u64 = 64 << 20;
+/// Most Unicode blocks every system face is probed for in one run.
+const MAX_FULL_PROBES: usize = 24;
+
+/// Faces found for characters by [`system_fallback`] (None = nothing installed covers it) by
+/// character, slant and weight (hundreds), and the Unicode blocks (128 code points) every system
+/// face was already probed for.
+struct FallbackCache {
+    chars: std::collections::HashMap<(char, bool, u16), Option<FaceId>>,
+    blocks: std::collections::HashMap<u32, Vec<FaceId>>,
+    probed: std::collections::HashSet<u32>,
+}
+
+fn fallback_cache() -> &'static std::sync::Mutex<FallbackCache> {
+    static C: OnceLock<std::sync::Mutex<FallbackCache>> = OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(FallbackCache { chars: Default::default(), blocks: Default::default(), probed: Default::default() }))
+}
+
+/// An installed face for `c` when no bundled or craft-fonts face covers it (Malayalam,
+/// Devanagari, Thai… with the fonts the system has): the font folders are scanned once; faces
+/// named for the character's script are tried first (nearest weight and slant to `prefer`; a
+/// font made for the script shapes it, a pan-Unicode one may not), then faces already in use, then
+/// faces that covered other characters of its block, then — once per block — every system face
+/// (files up to 64 MB, read and dropped). Answers are cached.
+fn system_fallback(c: char, prefer: &Face) -> Option<FaceId> {
+    if c.is_control() || c.is_whitespace() || cfg!(target_arch = "wasm32") {
+        return None;
+    }
+    let key = (c, prefer.info.italic, prefer.info.weight / 100);
+    if let Some(v) = fallback_cache().lock().unwrap_or_else(|e| e.into_inner()).chars.get(&key) {
+        return *v;
+    }
+    scan_system();
+    let faces = all_faces();
+    let system: Vec<&Arc<Face>> = faces.iter().filter(|f| f.info.origin == "system").collect();
+    // hidden system faces (".SF …") last: they are the system UI's own
+    let near = |f: &&Arc<Face>| (f.info.family.starts_with('.'), f.info.italic != prefer.info.italic, f.info.weight.abs_diff(prefer.info.weight));
+    let code = c as u32;
+    let block = code >> 7;
+    let covers = |f: &Arc<Face>| if f.bytes.get().is_some() { f.has_char(c) } else { f.covers_text(&c.to_string()) };
+    let mut found: Option<FaceId> = None;
+    // faces named for the script
+    if let Some((_, _, hints)) = SCRIPT_HINTS.iter().find(|(a, b, _)| (*a..=*b).contains(&code)) {
+        let mut named: Vec<&Arc<Face>> = system.iter().copied().filter(|f| hints.iter().any(|h| f.info.family.contains(h))).collect();
+        named.sort_by_key(near);
+        found = named.into_iter().find(|f| covers(f)).map(|f| f.id);
+    }
+    // faces in use already (a font the user picked, one found before)
+    if found.is_none() {
+        found = faces.iter().filter(|f| f.info.origin != "bundled" && f.bytes.get().is_some()).find(|f| f.has_char(c)).map(|f| f.id);
+    }
+    // faces that covered this block before
+    if found.is_none() {
+        let known = fallback_cache().lock().unwrap_or_else(|e| e.into_inner()).blocks.get(&block).cloned().unwrap_or_default();
+        found = known.into_iter().find(|id| face(*id).has_char(c));
+    }
+    // every face, once per block (not for symbols and emoji, which colour-bitmap fonts cover and
+    // outlines cannot draw; at most MAX_FULL_PROBES blocks a run)
+    let symbol = (0x2190..=0x2BFF).contains(&code) || code >= 0x1F000;
+    let first_probe = found.is_none() && !symbol && {
+        let mut cache = fallback_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache.probed.len() < MAX_FULL_PROBES && cache.probed.insert(block)
+    };
+    if first_probe {
+        let small = |f: &&Arc<Face>| match &f.info.data {
+            FaceData::File(p) => std::fs::metadata(p).is_ok_and(|m| m.len() <= MAX_PROBE_BYTES),
+            _ => true,
+        };
+        let mut all: Vec<&Arc<Face>> = system.iter().copied().filter(small).collect();
+        all.sort_by_key(near);
+        found = all.into_iter().find(|f| covers(f)).map(|f| f.id);
+    }
+    // the face is used now: keep its bytes, and remember it for the block
+    let found = found.filter(|id| face(*id).has_char(c));
+    let mut cache = fallback_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if cache.chars.len() > 50_000 {
+        cache.chars.clear();
+    }
+    cache.chars.insert(key, found);
+    if let Some(id) = found {
+        let v = cache.blocks.entry(block).or_default();
+        if !v.contains(&id) && v.len() < 8 {
+            v.push(id);
+        }
+    }
+    found
 }
 
 #[cfg(test)]

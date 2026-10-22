@@ -2516,6 +2516,7 @@ version = "0.10.0"
 dependencies = [
  "filmcraft-color",
  "harfrust",
+ "png",
  "skrifa",
  "unicode-bidi",
  "unicode-linebreak",

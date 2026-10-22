@@ -11,6 +11,7 @@
 
 pub mod auto_duck;
 pub mod caption;
+pub mod easing;
 pub mod effect;
 pub mod elements;
 pub mod essential;
@@ -25,6 +26,8 @@ pub mod mask;
 pub mod mixer;
 pub mod multicam;
 pub mod narration;
+pub mod safe_zones;
+pub mod text_anim;
 pub mod transcript;
 pub mod transition_catalog;
 pub mod transition_engines;
@@ -38,7 +41,10 @@ use filmcraft_media::{Generator, MediaInfo};
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 use serde::{Deserialize, Serialize};
 
-pub use caption::{Caption, CaptionAlign, CaptionAnchor, CaptionFormat, CaptionStyle, CaptionTrack, plain_text};
+pub use caption::{
+    AnimatedCaptions, Caption, CaptionAlign, CaptionAnchor, CaptionFormat, CaptionPreset, CaptionStyle, CaptionTrack, CaptionWord, TimedWord, WordEmoji,
+    plain_text,
+};
 pub use effect::{EffectDef, EffectInstance, EffectKind, ParamDef, ParamKind, effect_defs, find_effect};
 pub use essential::{AudioType, EssentialSound};
 pub use find::{FindOp, FindQuery, FindRow, SearchBin};
@@ -2040,6 +2046,7 @@ mod tests {
             speaker: Some("Ann".into()),
             cue_id: Some("1".into()),
             settings: "line:90%".into(),
+            words: vec![CaptionWord { text: "Hello".into(), start: Tick(0), end: Tick(100) }],
         });
         p.sequence_mut(seq).unwrap().caption_tracks.push(ct);
         let q = Project::from_json(&p.to_json()).unwrap();

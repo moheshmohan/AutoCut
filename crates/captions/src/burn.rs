@@ -57,7 +57,7 @@ fn caption_style(font: &str, px: f32) -> TextStyle {
     TextStyle { family: family.into(), style: "SemiBold".into(), size: px, ..Default::default() }
 }
 
-fn lin(c: [u8; 4]) -> [f32; 4] {
+pub(crate) fn lin(c: [u8; 4]) -> [f32; 4] {
     let a = c[3] as f32 / 255.0;
     [srgb_to_linear(c[0] as f32 / 255.0) * a, srgb_to_linear(c[1] as f32 / 255.0) * a, srgb_to_linear(c[2] as f32 / 255.0) * a, a]
 }
@@ -164,6 +164,7 @@ pub fn render_caption(c: &Caption, style: &CaptionStyle, w: usize, h: usize) -> 
     .max(0.0)
     .round();
     let side = w as f32 * 0.05;
+    let x_off = if style.x_offset.is_finite() { style.x_offset.clamp(-0.5, 0.5) * w as f32 } else { 0.0 };
     let widths: Vec<f32> = lines.iter().map(|l| filmcraft_text::measure(l, &ts)).collect();
     let xs: Vec<f32> = widths
         .iter()
@@ -178,9 +179,15 @@ pub fn render_caption(c: &Caption, style: &CaptionStyle, w: usize, h: usize) -> 
                 // the box (the line plus its padding) stays inside the frame
                 x.min(w as f32 - lw - pad_x).max(pad_x)
             }
-            (None, CaptionAlign::Left) => side + pad_x,
-            (None, CaptionAlign::Right) => w as f32 - side - pad_x - lw,
-            (None, CaptionAlign::Center) => (w as f32 - lw) / 2.0,
+            (None, a) => {
+                let x = match a {
+                    CaptionAlign::Left => side + pad_x,
+                    CaptionAlign::Right => w as f32 - side - pad_x - lw,
+                    CaptionAlign::Center => (w as f32 - lw) / 2.0,
+                };
+                // the style's x offset (centring on a platform's safe span), kept in the frame
+                if x_off == 0.0 { x } else { (x + x_off).min(w as f32 - lw - pad_x).max(pad_x.min(x)) }
+            }
         })
         .collect();
     let outline = (style.outline * scale).max(0.0);
@@ -264,13 +271,22 @@ fn dilate(m: &[f32], w: usize, h: usize, r: f32) -> Vec<f32> {
     out
 }
 
+/// Caption `c` as shown at timeline time `t`: word by word for an animated style
+/// ([`crate::animated`]), else the whole caption ([`render_caption`]).
+pub fn render_caption_at(c: &Caption, style: &CaptionStyle, w: usize, h: usize, t: Tick) -> Option<Overlay> {
+    match &style.animated {
+        Some(a) => crate::animated::render(c, style, a, w, h, t),
+        None => render_caption(c, style, w, h),
+    }
+}
+
 /// The overlay for a caption track at timeline time `t` (None when nothing shows).
 pub fn track_overlay(track: &CaptionTrack, t: Tick, w: usize, h: usize) -> Option<Overlay> {
     if !track.enabled {
         return None;
     }
     let c = track.caption_at(t)?;
-    render_caption(c, &track.style, w, h)
+    render_caption_at(c, &track.style, w, h, t)
 }
 
 /// Overlays of every visible caption track of a sequence at `t`, bottom track first.
@@ -284,7 +300,16 @@ mod tests {
     use filmcraft_project::{CaptionFormat, ClipId, TrackId};
 
     fn cap(text: &str) -> Caption {
-        Caption { id: ClipId(1), start: Tick(0), duration: Tick(100), text: text.into(), speaker: None, cue_id: None, settings: String::new() }
+        Caption {
+            id: ClipId(1),
+            start: Tick(0),
+            duration: Tick(100),
+            text: text.into(),
+            speaker: None,
+            cue_id: None,
+            settings: String::new(),
+            words: Vec::new(),
+        }
     }
 
     #[test]

@@ -407,20 +407,50 @@ pub fn caption_blocks(words: &[SeqWord], rules: &CaptionRules, rate: FrameRate) 
     out
 }
 
-/// Caption blocks as captions (ids from `ctx`).
-pub fn blocks_to_captions(blocks: &[CaptionBlock], ctx: &mut EditCtx) -> Vec<Caption> {
+/// Caption blocks as captions (ids from `ctx`), each with the timing of its `words` (the word
+/// list the blocks were made from), so animated captions highlight the word being spoken.
+pub fn blocks_to_captions(blocks: &[CaptionBlock], words: &[SeqWord], ctx: &mut EditCtx) -> Vec<Caption> {
     blocks
         .iter()
-        .map(|b| Caption {
-            id: ClipId(ctx.alloc()),
-            start: b.start,
-            duration: b.end - b.start,
-            text: b.text.clone(),
-            speaker: b.speaker.clone(),
-            cue_id: None,
-            settings: String::new(),
+        .map(|b| {
+            let mut c = Caption {
+                id: ClipId(ctx.alloc()),
+                start: b.start,
+                duration: b.end - b.start,
+                text: b.text.clone(),
+                speaker: b.speaker.clone(),
+                cue_id: None,
+                settings: String::new(),
+                words: Vec::new(),
+            };
+            let timed: Vec<(String, Tick, Tick)> = words.get(b.words.clone()).unwrap_or_default().iter().map(|w| (w.text.clone(), w.start, w.end)).collect();
+            c.set_word_times(&timed);
+            c
         })
         .collect()
+}
+
+/// Word timing for existing captions from the sequence transcript: each caption gets the words
+/// spoken inside it (a word belongs to the caption its middle falls in). Returns how many
+/// captions got words; captions nobody speaks in keep theirs.
+pub fn time_captions_from_words(captions: &mut [Caption], words: &[SeqWord]) -> usize {
+    let mut n = 0;
+    for c in captions.iter_mut() {
+        let (a, b) = (c.start, c.end());
+        let inside: Vec<(String, Tick, Tick)> = words
+            .iter()
+            .filter(|w| {
+                let mid = Tick(w.start.0 / 2 + w.end.0 / 2);
+                mid >= a && mid < b
+            })
+            .map(|w| (w.text.clone(), w.start, w.end))
+            .collect();
+        if !inside.is_empty() {
+            c.set_word_times(&inside);
+            n += 1;
+        }
+    }
+    n
 }
 
 #[cfg(test)]

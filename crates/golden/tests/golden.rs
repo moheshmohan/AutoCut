@@ -396,6 +396,86 @@ fn graphic_title() -> Scene {
     graphic_scene(DemoScene::CityNight, vec![bar, title, sub])
 }
 
+/// Word-timed animated captions (Bold): three words on a page, the second being spoken (yellow,
+/// popped 1.1×, the first pushed aside), with a keyword in green, over footage; the same overlay
+/// the preview and the export burn in.
+fn captions_animated() -> Scene {
+    use filmcraft_project::{AnimatedCaptions, Caption, CaptionPreset, CaptionStyle, CaptionTrack, CaptionWord, TrackId};
+    let mut b = Builder::new(1);
+    let bg = b.demo(DemoScene::CityNight);
+    b.place(0, bg, 0, 48);
+    let mut a = AnimatedCaptions::preset(CaptionPreset::Bold);
+    a.keywords = vec!["count".into()];
+    let mut t = CaptionTrack::new(TrackId(7001), "Captions".into(), filmcraft_project::CaptionFormat::Subtitle);
+    t.style = CaptionStyle { animated: Some(a), anchor: filmcraft_project::CaptionAnchor::Middle, ..CaptionPreset::Bold.base_style() };
+    let w = |text: &str, f0: i64, f1: i64| CaptionWord { text: text.into(), start: RATE.tick_of(f0), end: RATE.tick_of(f1) };
+    t.captions.push(Caption {
+        id: ClipId(7002),
+        start: Tick::ZERO,
+        duration: RATE.tick_of(48),
+        text: "make it count".into(),
+        speaker: None,
+        cue_id: None,
+        settings: String::new(),
+        words: vec![w("make", 0, 8), w("it", 9, 14), w("count", 15, 30)],
+    });
+    b.p.sequence_mut(b.seq).unwrap().caption_tracks.push(t);
+    // frame 12: "it" spoken (0.125 s in: popped and settled)
+    b.at(12)
+}
+
+/// Text styling and animation: a neon outer glow, an inner shadow, text on an arc, a third
+/// stroke, and a title popping in letter by letter, caught mid-animation.
+fn graphic_text_effects() -> Scene {
+    use filmcraft_project::graphic::new_text_layer;
+    use filmcraft_project::graphic_design::LayerExtra;
+    use filmcraft_project::text_anim::{AnimKind, Animator, TextAnimation};
+    let mut neon = new_text_layer("NEON", Vec2::new(160.0, 62.0), 40.0);
+    set(
+        &mut neon,
+        &[
+            ("font_style", ParamValue::Text("Bold".into())),
+            ("align", ParamValue::Choice(1)),
+            ("fill_color", ParamValue::Color([0.85, 1.0, 1.0, 1.0])),
+            ("glow", ParamValue::Bool(true)),
+            ("glow_color", ParamValue::Color([0.1, 0.9, 1.0, 1.0])),
+            ("glow_radius", fl(10.0)),
+            ("glow_intensity", fl(140.0)),
+        ],
+    );
+    let mut arc = new_text_layer("ON AN ARC", Vec2::new(160.0, 120.0), 26.0);
+    set(
+        &mut arc,
+        &[
+            ("font_style", ParamValue::Text("Bold".into())),
+            ("align", ParamValue::Choice(1)),
+            ("curve", fl(45.0)),
+            ("fill_color", ParamValue::Color([1.0, 0.8, 0.2, 1.0])),
+            ("inner_shadow", ParamValue::Bool(true)),
+            ("inner_shadow_distance", fl(2.0)),
+            ("inner_shadow_blur", fl(2.0)),
+            ("stroke", ParamValue::Bool(true)),
+            ("stroke_width", fl(1.5)),
+            ("stroke2", ParamValue::Bool(true)),
+            ("stroke2_width", fl(3.0)),
+            ("stroke2_color", ParamValue::Color([1.0, 0.3, 0.4, 1.0])),
+            ("stroke3", ParamValue::Bool(true)),
+            ("stroke3_width", fl(5.0)),
+        ],
+    );
+    let mut pop = new_text_layer("POP", Vec2::new(160.0, 168.0), 30.0);
+    set(
+        &mut pop,
+        &[("font_style", ParamValue::Text("Bold".into())), ("align", ParamValue::Choice(1)), ("fill_color", ParamValue::Color([1.0, 0.85, 0.1, 1.0]))],
+    );
+    let anim = TextAnimation { enter: Some(Animator { stagger: 0.1, ..Animator::preset(AnimKind::Pop) }), ..Default::default() };
+    pop.layer = Some(Box::new(LayerExtra { anim: Some(anim), ..Default::default() }));
+    // frame 6 = 0.25 s: P settled-ish, O overshooting, the last P just starting
+    let mut s = graphic_scene(DemoScene::CityNight, vec![neon, arc, pop]);
+    s.frame = 6;
+    s
+}
+
 /// Shapes: ellipse with centre stroke, rotated polygon with inner stroke, a pen path, rotated
 /// boxed text with a background and 2 strokes.
 fn graphic_shapes() -> Scene {
@@ -627,6 +707,8 @@ fn scenes() -> Vec<(&'static str, &'static str, fn() -> Scene)> {
         ("graphic_shapes", "Graphic clip: ellipse, polygon, path and rotated text with background", graphic_shapes),
         ("graphic_template", "Graphics template (Lower Third – Slab) with overridden properties", graphic_template),
         ("graphic_rich_text", "Per-character text styles and a box pinned around the text", graphic_rich_text),
+        ("captions_animated", "Word-timed animated captions (Bold): the spoken word highlighted and popped, a keyword coloured", captions_animated),
+        ("graphic_text_effects", "Text glow, inner shadow, arc, three strokes and a letter-by-letter pop mid-animation", graphic_text_effects),
         ("log_to_rec709", "Colour management: S-Log3/S-Gamut3.Cine footage to Rec. 709 (tone mapped)", log_to_rec709),
         ("hdr_tone_map", "Colour management: Rec. 2100 PQ footage tone mapped into a Rec. 709 sequence", hdr_tone_map),
         ("lumetri_hdr_pq", "Lumetri grading in a Rec. 2100 PQ sequence (HDR White, HDR Specular), tone mapped", lumetri_hdr_pq),
@@ -644,7 +726,8 @@ fn scenes() -> Vec<(&'static str, &'static str, fn() -> Scene)> {
 }
 
 fn render_cpu(s: &Scene) -> Rgba8 {
-    let img = render_sequence(&s.project, s.seq, RATE.tick_of(s.frame), RenderOptions::default(), &s.sources);
+    // captions burned in, as the export does (only the caption scenes have caption tracks)
+    let img = render_sequence(&s.project, s.seq, RATE.tick_of(s.frame), RenderOptions { captions: true, ..RenderOptions::default() }, &s.sources);
     Rgba8::new(img.w as u32, img.h as u32, img.over_black_rgba8())
 }
 
@@ -696,6 +779,8 @@ goldens!(
     graphic_shapes,
     graphic_template,
     graphic_rich_text,
+    captions_animated,
+    graphic_text_effects,
     log_to_rec709,
     hdr_tone_map,
     lumetri_hdr_pq,
@@ -924,7 +1009,7 @@ fn gpu_matches_cpu_on_golden_scenes() {
         let s = make();
         let t = RATE.tick_of(s.frame);
         let cpu = render_cpu(&s);
-        let plan = filmcraft_render::plan::plan_frame(&s.project, s.seq, t, RenderOptions::default(), &s.sources);
+        let plan = filmcraft_render::plan::plan_frame(&s.project, s.seq, t, RenderOptions { captions: true, ..RenderOptions::default() }, &s.sources);
         let kind = if matches!(plan, filmcraft_render::plan::FramePlan::Layers { .. }) { "layers" } else { "cpu image" };
         c.composite(&plan);
         let (gw, gh, mut px) = c.read_output().expect("GPU readback");
