@@ -1700,10 +1700,7 @@ mod malayalam_voice {
                                     let seed = Self::seed(params.take, i, attempt);
                                     Ok(heard::Read { samples: self.read_as(&self.reading.for_attempt(attempt), &u, params.pace, seed)?, seed })
                                 };
-                                let mut hear = |x: &[f32]| {
-                                    st.hearer.hear(x, rate).map_err(|e| TtsError::Model(format!("the strict check could not hear the reading: {e}")))
-                                };
-                                let (a, c) = heard::read_until_clear(&u, &st.policy, rate, &mut read, &mut hear)?;
+                                let (a, c) = st.read_until_clear(&u, rate, &mut read)?;
                                 checks.push(c);
                                 a
                             }
@@ -1785,6 +1782,7 @@ pub fn gender(p: &Profile) -> Gender {
 #[cfg(feature = "voxcpm")]
 mod natural {
     use super::*;
+    use crate::heard;
     use crate::voxcpm::{Prompt, Settings, Variant, VoxCpm, text};
 
     /// Silence between utterances, ms.
@@ -1928,6 +1926,21 @@ mod natural {
         }
 
         fn synthesize(&self, script: &str, params: &Params) -> Result<Audio, TtsError> {
+            Ok(self.speak(script, params, None)?.0)
+        }
+
+        /// The strict check of English narration: every utterance heard back (numbers compared as
+        /// words, [`heard::english_words`]) and read again with the next seed until it is clear.
+        fn synthesize_checked(&self, script: &str, params: &Params, strict: &heard::Strict) -> Result<(Audio, Vec<heard::Checked>), TtsError> {
+            self.speak(script, params, Some(strict))
+        }
+    }
+
+    impl NaturalVoice {
+        /// Seeds between attempts of one utterance (more than any script's utterances times takes).
+        const ATTEMPT_SEEDS: u64 = 104_729;
+
+        fn speak(&self, script: &str, params: &Params, strict: Option<&heard::Strict>) -> Result<(Audio, Vec<heard::Checked>), TtsError> {
             crate::check_text(script)?;
             params.check()?;
             let rate = self.model.output_rate();
@@ -1939,6 +1952,7 @@ mod natural {
             let style = params.style.filter(|_| self.model.variant() == Variant::V2 && !self.prompt.continues()).map(text::style_prefix).unwrap_or_default();
             let _gpu = gpu("VoxCPM narration")?;
             let mut out: Vec<f32> = Vec::new();
+            let mut checks = Vec::new();
             let mut spoke = false;
             for (i, piece) in text::pieces(script)?.into_iter().enumerate() {
                 match piece {
@@ -1948,10 +1962,46 @@ mod natural {
                             out.resize(out.len().saturating_add(gap), 0.0);
                         }
                         let said = format!("{style}{u}");
-                        // each take reads afresh: its own run of seeds
-                        let seed = s.seed.wrapping_add(u64::from(params.take).wrapping_mul(TAKE_SEEDS)).wrapping_add(i as u64);
-                        let a = self.model.speak(&said, Some(&self.prompt), &Settings { seed, ..s }, &mut |_, _| true)?;
-                        out.extend_from_slice(trim_silence(&a, rate));
+                        // each take reads afresh: its own run of seeds (and each retake of an
+                        // utterance its own after that)
+                        let seed = |attempt: u32| {
+                            s.seed
+                                .wrapping_add(u64::from(params.take).wrapping_mul(TAKE_SEEDS))
+                                .wrapping_add(i as u64)
+                                .wrapping_add(u64::from(attempt).wrapping_mul(Self::ATTEMPT_SEEDS))
+                        };
+                        let mut read = |attempt: u32| -> Result<heard::Read, TtsError> {
+                            let a = self.model.speak(&said, Some(&self.prompt), &Settings { seed: seed(attempt), ..s }, &mut |_, _| true)?;
+                            Ok(heard::Read { samples: trim_silence(&a, rate).to_vec(), seed: seed(attempt) })
+                        };
+                        let a = match strict {
+                            None => read(0)?.samples,
+                            Some(st) => {
+                                // what was heard goes through the same normaliser as the script (a
+                                // recogniser writes "2023" and "80%"; the voice read "twenty
+                                // twenty-three" and "eighty percent"), then any digit left is spelled
+                                let norm = |t: &str| heard::english_words(&text::sentences(t).map(|s| s.join(" ")).unwrap_or_else(|_| t.to_string()));
+                                let words = heard::english_words(&u);
+                                let mut hear = |x: &[f32]| {
+                                    st.hearer
+                                        .hear(x, rate)
+                                        .map(|h| norm(&h))
+                                        .map_err(|e| TtsError::Model(format!("the strict check could not hear the reading: {e}")))
+                                };
+                                let mut second = st.second.map(|h| move |x: &[f32]| h.hear(x, rate).map(|t| norm(&t)).map_err(TtsError::Model));
+                                let mut voice = st.voice.map(|v| move |x: &[f32]| v.similarity(x, rate).map_err(TtsError::Model));
+                                let mut judges = heard::Judges {
+                                    second: second.as_mut().map(|f| f as &mut dyn FnMut(&[f32]) -> Result<String, TtsError>),
+                                    agreement: st.agreement,
+                                    voice: voice.as_mut().map(|f| f as &mut dyn FnMut(&[f32]) -> Result<f64, TtsError>),
+                                    min_similarity: st.min_similarity,
+                                };
+                                let (a, c) = heard::read_until_clear_judged(&words, &st.policy, rate, &mut read, &mut hear, &mut judges)?;
+                                checks.push(c);
+                                a
+                            }
+                        };
+                        out.extend_from_slice(&a);
                         spoke = true;
                     }
                 }
@@ -1968,7 +2018,7 @@ mod natural {
                 let g = 0.98 / peak;
                 out.iter_mut().for_each(|v| *v *= g);
             }
-            Ok(Audio { samples: out, sample_rate: rate })
+            Ok((Audio { samples: out, sample_rate: rate }, checks))
         }
     }
 
@@ -2052,6 +2102,51 @@ mod natural {
                 assert_eq!(v.info().engine, "clone");
                 let _ = std::fs::remove_dir_all(&d);
             }
+        }
+
+        /// The English strict check on a tiny random VoxCPM: a recogniser that mishears the first
+        /// reading of every utterance gets each read twice, numbers compared as words.
+        #[test]
+        fn english_narration_is_heard_back_and_retaken() {
+            let d = std::env::temp_dir().join(format!("filmcraft-clone-natural-strict-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            crate::voxcpm::model::tests::fake_release(&d, true);
+            let m = Arc::new(crate::voxcpm::model::tests::load_fake(&d));
+            let rate = m.encode_rate() as usize;
+            let audio: Vec<f32> = (0..rate * 2).map(|i| (i as f32 * 0.07).sin() * 0.3).collect();
+            let prompt = Arc::new(m.prompt(&audio, None).unwrap());
+            let mut natural = super::super::tests::natural_profile().natural.unwrap();
+            natural.timesteps = 3;
+            let v = NaturalVoice { gender: Gender::Male, natural, model: m.clone(), prompt };
+            struct Ear(std::sync::atomic::AtomicU32, Vec<&'static str>);
+            impl heard::Hearer for Ear {
+                fn hear(&self, _: &[f32], _: u32) -> Result<String, String> {
+                    let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) as usize;
+                    // what Whisper writes: digits
+                    Ok(if n.is_multiple_of(2) { "mumble".into() } else { self.1[(n / 2) % self.1.len()].to_string() })
+                }
+                fn id(&self) -> String {
+                    "ear".into()
+                }
+            }
+            let ear = Ear(Default::default(), vec!["In 2023 it charged from 10 to 80%.", "Done"]);
+            let strict = heard::Strict::new(&ear, heard::Policy { max_takes: 2, ..heard::Policy::english() });
+            let (a, report) = v.synthesize_checked("In 2023 it charged from ten to eighty percent. [pause 300ms] Done.", &Params::default(), &strict).unwrap();
+            assert_eq!(report.len(), 2);
+            for c in &report {
+                // the tiny model's readings are too short for the signal scan, so every try is
+                // made; what matters: the misheard first reading was read again, and the
+                // second, heard with its numbers in digits, compared equal as words
+                assert!(c.tries.len() >= 2, "{c:?}");
+                assert!(c.tries[0].flagged.contains(&"first".to_string()), "{c:?}");
+                assert_eq!(c.tries[1].score.cer, 0.0, "{c:?}");
+                assert_eq!(c.kept, 1);
+                assert_ne!(c.tries[0].seed, c.tries[1].seed, "a retake reads with its own seed");
+            }
+            assert!(a.samples.iter().all(|x| x.is_finite()));
+            // unchecked synthesis still reads every utterance once, as before
+            assert_eq!(v.synthesize("Done.", &Params::default()).unwrap(), v.synthesize("Done.", &Params::default()).unwrap());
+            let _ = std::fs::remove_dir_all(&d);
         }
     }
 }
@@ -2716,7 +2811,7 @@ pub(crate) mod tests {
         let says: Vec<String> =
             v.pieces(script).unwrap().into_iter().filter_map(|p| if let crate::malayalam::Piece::Say(s) = p { Some(s) } else { None }).collect();
         let hearer = Fake(Default::default(), says);
-        let strict = crate::heard::Strict { hearer: &hearer, policy: crate::heard::Policy { max_takes: 3, max_cer: 0.2, max_start_cer: 0.2 } };
+        let strict = crate::heard::Strict::new(&hearer, crate::heard::Policy { max_takes: 3, max_cer: 0.2, max_start_cer: 0.2 });
         let (checked, report) = v.synthesize_checked(script, &Params::default(), &strict).unwrap();
         assert_eq!(report.len(), 2, "one report per utterance");
         for (c, i) in report.iter().zip([0usize, 2]) {

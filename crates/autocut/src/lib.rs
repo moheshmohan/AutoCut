@@ -37,6 +37,7 @@ pub mod planner;
 pub mod privacy;
 pub mod qa;
 pub mod recipes;
+pub mod rough_cut;
 pub mod runner;
 pub mod shorts;
 pub mod shot_edit;

@@ -82,6 +82,7 @@ pub mod shortcut_presets;
 pub mod shortcuts;
 pub mod soundfonts;
 pub mod source_monitor;
+pub mod speech_understand;
 pub mod sync;
 pub mod text_fx;
 pub mod transcript;
@@ -503,6 +504,9 @@ pub struct Session {
     /// Auto Reframe analyses whose keyframes are written when they finish (`sequence.autoReframe`,
     /// `clip.autoReframe`), and what the finished ones made.
     pub reframes: reframe::Reframes,
+    /// Speech understanding jobs (`media.understandSpeech`) whose transcripts and analyses are
+    /// stored when they finish, and what the finished ones found.
+    pub speech_jobs: speech_understand::Understandings,
     /// Automatic privacy blur jobs (`clip.autoRedact`, `sequence.autoRedact`) whose masks are
     /// written when they finish, what the finished ones made, and the host's vision check.
     pub redacts: redact::Redacts,
@@ -527,6 +531,12 @@ pub struct Session {
     /// Malayalam speech model, `filmcraft_speech::models::MALAYALAM_MODEL`, when downloaded).
     /// Hosts and tests install one here.
     pub narration_hearer: Option<Arc<dyn filmcraft_tts::heard::Hearer>>,
+    /// The strict check's second opinion on Malayalam narration (None = IndicWhisper,
+    /// `filmcraft_speech::models::INDICWHISPER_ML`, when downloaded). Hosts and tests install one.
+    pub narration_second: Option<Arc<dyn filmcraft_tts::heard::Hearer>>,
+    /// The strict check's voice gate (None = the speaker model against the cloned voice's
+    /// sample, when downloaded). Hosts and tests install one.
+    pub narration_voice: Option<Arc<dyn filmcraft_tts::heard::VoiceMatch>>,
     /// Uploads to Google Photos for `photos.upload` (None = not available: the command is
     /// disabled). Hosts install filmcraft-gphotos' uploader here; tests a fake.
     pub photos: Option<Arc<dyn photos::PhotosUploader>>,
@@ -647,6 +657,7 @@ impl Session {
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
             reframes: Default::default(),
+            speech_jobs: Default::default(),
             redacts: Default::default(),
             neural_music: Default::default(),
             soundfonts: Default::default(),
@@ -657,6 +668,8 @@ impl Session {
             stepped: Vec::new(),
             transcriber: None,
             narration_hearer: None,
+            narration_second: None,
+            narration_voice: None,
             photos: None,
             photo_uploads: Default::default(),
             photo_locations: Default::default(),
@@ -777,6 +790,7 @@ impl Session {
         masks::poll(self);
         scene_detect::poll(self);
         reframe::poll(self);
+        speech_understand::poll(self);
         redact::poll(self);
         music_neural::poll(self);
         export_tools::pump_queue(self, false);

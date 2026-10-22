@@ -108,6 +108,60 @@ fn rms_distance(a: &[f32], b: &[f32]) -> f32 {
     (a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f32>() / a.len().max(1) as f32).sqrt()
 }
 
+/// How speakers were labelled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Method {
+    /// ECAPA-TDNN embeddings over voice activity segments ([`crate::speakers`]).
+    Ecapa,
+    /// MFCC statistics and clustering ([`diarize`]): the fallback.
+    Mfcc,
+}
+
+impl Method {
+    pub fn id(self) -> &'static str {
+        match self {
+            Method::Ecapa => "ecapa",
+            Method::Mfcc => "mfcc",
+        }
+    }
+}
+
+/// Label the speakers of `t` with the best method at hand: speaker embeddings
+/// ([`crate::speakers`], ECAPA-TDNN from `models_dir`, feature `whisper`) over `speech` (voice
+/// activity segments; `None`: found here, Silero when downloaded), else MFCC clustering. Returns
+/// the speakers found and the method; an embedding failure falls back to MFCC.
+pub fn diarize_auto(
+    audio: &[f32],
+    t: &mut Transcript,
+    models_dir: Option<&std::path::Path>,
+    speech: Option<&[std::ops::Range<usize>]>,
+    max_speakers: usize,
+) -> (usize, Method) {
+    #[cfg(feature = "whisper")]
+    if let Some(m) = models_dir.and_then(crate::ecapa::load_cached) {
+        let owned;
+        let segs = match speech {
+            Some(s) => s,
+            None => {
+                let silero = models_dir.and_then(crate::vad::load_silero);
+                owned = crate::vad::speech_segments(audio, silero.as_deref(), &crate::silero::SegmentParams::default()).0;
+                &owned[..]
+            }
+        };
+        let p = crate::speakers::Params { max_speakers: max_speakers.max(1), ..Default::default() };
+        if let Ok(turns) = crate::speakers::turns(audio, segs, m.as_ref(), &p)
+            && !turns.is_empty()
+        {
+            return (crate::speakers::label_words(t, &turns), Method::Ecapa);
+        }
+    }
+    #[cfg(not(feature = "whisper"))]
+    let _ = (models_dir, speech);
+    let p = Params { max_speakers: max_speakers.max(1), ..Default::default() };
+    (diarize(audio, t, &p), Method::Mfcc)
+}
+
 /// Label the speakers of `t` from `audio` (mono 16 kHz, the transcript's time base). Replaces
 /// `t.speakers` and every word's speaker; returns the number of speakers found.
 pub fn diarize(audio: &[f32], t: &mut Transcript, p: &Params) -> usize {
@@ -242,14 +296,14 @@ pub fn diarize(audio: &[f32], t: &mut Transcript, p: &Params) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::seconds_tick;
     use filmcraft_project::Word;
 
     /// A synthetic "voice": a pulse train at `f0` through two resonances (formants), with a slow
     /// syllable envelope.
-    fn voice(f0: f32, formants: [(f32, f32); 2], secs: f32, seed: u32) -> Vec<f32> {
+    pub(crate) fn voice(f0: f32, formants: [(f32, f32); 2], secs: f32, seed: u32) -> Vec<f32> {
         let n = (secs * 16_000.0) as usize;
         let mut out = vec![0f32; n];
         let mut phase = 0f32;

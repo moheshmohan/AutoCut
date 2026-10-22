@@ -658,6 +658,106 @@ pub struct ShortsParams {
     pub youtube_tags: Option<Vec<String>>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct SpeechUnderstandParams {
+    /// Media items to understand (default: the Project panel selection, else the active
+    /// sequence's clips).
+    #[serde(default)]
+    pub items: Option<Vec<u64>>,
+    /// "en", "ml" or "auto" (default: detected). For "ml" the Malayalam model and for "en"
+    /// Whisper large-v3-turbo hear, when downloaded.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// A speech model id (`transcript.models`), instead of the language's.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Tell the speakers apart (default true).
+    #[serde(default)]
+    pub diarize: Option<bool>,
+    /// Look for a face on screen for the talking-head hint (default true).
+    #[serde(default)]
+    pub faces: Option<bool>,
+    /// Shortest pause reported, seconds (default 0.5).
+    #[serde(default)]
+    pub min_pause: Option<f64>,
+}
+
+/// `media.understandSpeech` params for a `speech_understand` call (a long job).
+fn speech_understand_params(p: SpeechUnderstandParams) -> Value {
+    let mut params = json!({"wait": true});
+    let mut put = |k: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            params[k] = v;
+        }
+    };
+    put("items", p.items.map(|v| json!(v)));
+    put("language", p.language.map(Value::String));
+    put("model", p.model.map(Value::String));
+    put("diarize", p.diarize.map(Value::Bool));
+    put("faces", p.faces.map(Value::Bool));
+    put("minPause", p.min_pause.map(|v| json!(v)));
+    params
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct RoughCutParams {
+    /// Media items (raw talking clips) to cut, in order. Or `paths`.
+    #[serde(default)]
+    pub items: Option<Vec<u64>>,
+    /// Files to import and cut, in order. Or `items`.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+    /// "en", "ml" or "auto" (default: detected).
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Cut silences longer than `min_pause` (default true).
+    #[serde(default)]
+    pub remove_pauses: Option<bool>,
+    /// Cut filler words (English um/uh…, Malayalam ആ/അതായത്/എന്ന് പറഞ്ഞാൽ…; default true).
+    #[serde(default)]
+    pub remove_fillers: Option<bool>,
+    /// Keep only the most fluent take of a line said more than once (default true).
+    #[serde(default)]
+    pub remove_retakes: Option<bool>,
+    /// Also cut hesitations: speech the recogniser wrote no word for (default false).
+    #[serde(default)]
+    pub remove_hesitations: Option<bool>,
+    /// Shortest silence cut, seconds (default 0.6).
+    #[serde(default)]
+    pub min_pause: Option<f64>,
+    /// Silence kept next to the words at each cut, seconds (default 0.12).
+    #[serde(default)]
+    pub keep_pause: Option<f64>,
+    /// The new sequence's name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Export the cut to this file (MP4).
+    #[serde(default)]
+    pub export: Option<String>,
+}
+
+/// `autocut.roughCut` params for a `rough_cut` call (a long job).
+fn rough_cut_params(p: RoughCutParams) -> Value {
+    let mut params = json!({"wait": true});
+    let mut put = |k: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            params[k] = v;
+        }
+    };
+    put("items", p.items.map(|v| json!(v)));
+    put("paths", p.paths.map(|v| json!(v)));
+    put("language", p.language.map(Value::String));
+    put("removePauses", p.remove_pauses.map(Value::Bool));
+    put("removeFillers", p.remove_fillers.map(Value::Bool));
+    put("removeRetakes", p.remove_retakes.map(Value::Bool));
+    put("removeHesitations", p.remove_hesitations.map(Value::Bool));
+    put("minPause", p.min_pause.map(|v| json!(v)));
+    put("keepPause", p.keep_pause.map(|v| json!(v)));
+    put("name", p.name.map(Value::String));
+    put("export", p.export.map(Value::String));
+    params
+}
+
 /// `autocut.shorts` params for a `shorts_make` call (a long job).
 fn shorts_params(p: ShortsParams) -> Value {
     let mut params = json!({"wait": true});
@@ -1794,6 +1894,32 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Speech: understand raw talking clips",
+        description = "Understand the speech of media clips (the `media.understandSpeech` engine job: progress, cancellable). Per clip: where speech is (Silero VAD, else an energy detector), the words with times and confidences (Whisper: the Malayalam model for language \"ml\", large-v3-turbo for \"en\", when downloaded), who speaks (ECAPA speaker embeddings, else MFCC clustering), segments (sentences) with speaker, text, words, confidence and fluency, pauses, filler words (English and Malayalam) and hesitations, retakes — a line said again or a start abandoned — with the take to keep, and a talking-head / voice / b-roll hint (a face on screen, when the face detector is downloaded). Stored with the project beside each clip's transcript (one undo step); `media.inspectSpeech` reads it back, `transcript.removeRetakes` and `sequence.roughCut` edit with it.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn speech_understand(
+        &self,
+        Parameters(p): Parameters<SpeechUnderstandParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(self.run_long("media.understandSpeech", speech_understand_params(p), &context).await)
+    }
+
+    #[tool(
+        title = "Rough cut: a clean talking edit from raw clips",
+        description = "Raw talking clips → a clean talking edit (the `autocut.roughCut` engine job: progress, cancellable). The clips (`items`, or `paths` to import) are understood (as `speech_understand`), then their kept speech goes on a new sequence back to back: silences longer than `min_pause` (0.6 s), filler words and abandoned takes (every take of a repeated line but the most fluent) are cut, every cut between words with `keep_pause` (0.12 s) of silence kept, no gaps. With `export` (an .mp4 path) the cut is rendered. Returns the analyses, the new sequence, the ranges kept and what was removed. One undo step undoes the cut.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn rough_cut(
+        &self,
+        Parameters(p): Parameters<RoughCutParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(self.run_long("autocut.roughCut", rough_cut_params(p), &context).await)
+    }
+
+    #[tool(
         title = "Trailer: a vertical trailer of a finished showcase",
         description = "A finished showcase → a vertical trailer for Instagram Reels (the `autocut.trailer` engine job: progress, cancellable). From the show's `sequence`, its plan (`plan_path`, default the kept plan) and build report (`report_path`, what `filmcraft-cli showcase` prints; default the last build): a hook — the most striking robot (or `hook`, an entry label) under a big title (\"48 robots · 2013 → 2025\", or `title`) with the show's first narration sentence over it (`hook_voice`) — then `robots` robots in date order (12–18 by default), each 1.3–2.4 s on its best moment inside the window the show played, reframed following the robot (`clip.autoReframe`, the analysis' box; the whole picture over a blurred copy where it is lost), its name and year inside the `platform`'s safe zone (reels by default), every cut on a beat of generated music (`bpm` 124, `mood` energetic, a fixed `seed`), and an end card on the music's final hit: the `logo`, `end_text` (\"Full video on YouTube\") and the `channel` handle (the plan's outro by default). The show's redaction is kept (faces hidden at the size the show hid them, the plan's named targets). Mixed speech first at −14 LUFS, −1 dBTP. With `export` (an .mp4 path, Social Vertical 1080×1920): the video, `<out>.cover.jpg`, `<out>.caption.txt` (hashtags, \"link in bio\"), `<out>.frames.jpg` and QA (`<out>.qa.json`). Returns the sequence, each shot (robot, year, window, followed), the cuts on the beat, the safe-zone check and QA's summary.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
@@ -2144,7 +2270,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked); `trailer_make` cuts a finished showcase into a vertical trailer for Reels (a hook, robots in date order on the beat, an end card; the show's redaction kept). Voice: `isolate_voice` keeps clips' speech and removes noise, crowds and music, `enhance_voice` is the one-knob voice boost for clips that keep their own speech (isolation, EQ, de-esser, compression, a loudness match), `enhance_audio_file` does either straight on a file (`audio.voiceModelStatus` says whether the neural model is installed; `audio.downloadVoiceModel` only after the user agreed). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked); `trailer_make` cuts a finished showcase into a vertical trailer for Reels (a hook, robots in date order on the beat, an end card; the show's redaction kept). Talking clips: `speech_understand` finds the words, speakers, pauses, fillers and retakes of raw clips (English or Malayalam), and `rough_cut` turns them into a clean talking edit (pauses, fillers and abandoned takes cut between words; exported when asked). Voice: `isolate_voice` keeps clips' speech and removes noise, crowds and music, `enhance_voice` is the one-knob voice boost for clips that keep their own speech (isolation, EQ, de-esser, compression, a loudness match), `enhance_audio_file` does either straight on a file (`audio.voiceModelStatus` says whether the neural model is installed; `audio.downloadVoiceModel` only after the user agreed). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -2886,6 +3012,8 @@ mod tests {
             "showcase_inspect",
             "shorts_make",
             "trailer_make",
+            "speech_understand",
+            "rough_cut",
             "sequence_auto_reframe",
             "auto_redact",
             "isolate_voice",

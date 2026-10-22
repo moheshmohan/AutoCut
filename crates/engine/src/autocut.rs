@@ -85,6 +85,8 @@ pub enum TaskKind {
     MalayalamScript,
     /// A vertical trailer of a finished showcase (`autocut.trailer`).
     Trailer,
+    /// A clean talking edit from raw clips (`autocut.roughCut`).
+    RoughCut,
 }
 
 impl TaskKind {
@@ -97,6 +99,7 @@ impl TaskKind {
             TaskKind::Shorts => "autocut.shorts",
             TaskKind::MalayalamScript => "autocut.malayalamScript",
             TaskKind::Trailer => "autocut.trailer",
+            TaskKind::RoughCut => "autocut.roughCut",
         }
     }
 
@@ -110,6 +113,7 @@ impl TaskKind {
             TaskKind::Shorts => "Making shorts".into(),
             TaskKind::MalayalamScript => "Writing the Malayalam script".into(),
             TaskKind::Trailer => "Making a trailer".into(),
+            TaskKind::RoughCut => "Making a rough cut".into(),
         }
     }
 }
@@ -351,6 +355,13 @@ pub fn commands() -> Vec<CommandSpec> {
             |s, p| start(s, TaskKind::Trailer, p),
         ),
         job(
+            "autocut.roughCut",
+            "Rough Cut Talking Clips…",
+            &[],
+            r#"{"items":[id]?,"paths":[str]?,"language":"en|ml|auto"?,"model":str?,"diarize":bool=true,"removePauses":bool=true,"removeFillers":bool=true,"removeRetakes":bool=true,"removeHesitations":bool=false,"minPause":0.1..30=0.6,"keepPause":0..2=0.12,"name":str?,"export":str?,"wait":bool=false}"#,
+            |s, p| start(s, TaskKind::RoughCut, p),
+        ),
+        job(
             "autocut.malayalamScript",
             "Write Malayalam Script",
             &[],
@@ -539,6 +550,9 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
     if kind == TaskKind::Shorts {
         shorts_params(cmd, p, &mut out)?;
     }
+    if kind == TaskKind::RoughCut {
+        rough_cut_params(cmd, p, &mut out)?;
+    }
     if kind == TaskKind::Trailer {
         trailer_params(cmd, p, &mut out)?;
     }
@@ -564,6 +578,73 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
         put(&mut out, "maxWords", count_p(cmd, p, "maxWords", 4, 60)?.map(|n| json!(n)));
     }
     Ok(Value::Object(out))
+}
+
+/// Most clips one rough cut takes.
+pub const MAX_ROUGH_CUT_CLIPS: usize = 200;
+
+/// The checked parameters of `autocut.roughCut`.
+fn rough_cut_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) -> Result<()> {
+    let items: Vec<u64> = match p.get("items").filter(|v| !v.is_null()) {
+        None => Vec::new(),
+        Some(Value::Array(a)) => a.iter().map(|v| v.as_u64().ok_or_else(|| bad(cmd, "`items` are item ids"))).collect::<Result<_>>()?,
+        Some(_) => return Err(bad(cmd, "`items` is a list of item ids")),
+    };
+    let paths: Vec<String> = match p.get("paths").filter(|v| !v.is_null()) {
+        None => Vec::new(),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| !s.trim().is_empty() && s.len() <= 4096)
+                    .map(|s| crate::export_tools::expand_home(s.trim()))
+                    .ok_or_else(|| bad(cmd, "`paths` are file paths"))
+            })
+            .collect::<Result<_>>()?,
+        Some(_) => return Err(bad(cmd, "`paths` is a list of file paths")),
+    };
+    if items.is_empty() && paths.is_empty() {
+        return Err(bad(cmd, "give the clips: `items` (media ids) or `paths` (files to import)"));
+    }
+    if items.len() + paths.len() > MAX_ROUGH_CUT_CLIPS {
+        return Err(bad(cmd, format!("at most {MAX_ROUGH_CUT_CLIPS} clips at once")));
+    }
+    if !items.is_empty() {
+        out.insert("items".into(), json!(items));
+    }
+    if !paths.is_empty() {
+        out.insert("paths".into(), json!(paths));
+    }
+    if let Some(l) = text_p(cmd, p, "language", 8)? {
+        if !l.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
+            return Err(bad(cmd, "`language` is an ISO 639-1 code (\"en\", \"ml\") or \"auto\""));
+        }
+        out.insert("language".into(), json!(l));
+    }
+    if let Some(m) = text_p(cmd, p, "model", 64)? {
+        out.insert("model".into(), json!(m));
+    }
+    for k in ["diarize", "removePauses", "removeFillers", "removeRetakes", "removeHesitations"] {
+        if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
+            out.insert(k.into(), json!(v.as_bool().ok_or_else(|| bad(cmd, format!("`{k}` must be true or false")))?));
+        }
+    }
+    for (k, lo, hi) in [("minPause", 0.1, 30.0), ("keepPause", 0.0, 2.0)] {
+        if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
+            let f = v
+                .as_f64()
+                .filter(|f| f.is_finite() && (lo..=hi).contains(f))
+                .ok_or_else(|| bad(cmd, format!("`{k}` is a number of seconds from {lo} to {hi}")))?;
+            out.insert(k.into(), json!(f));
+        }
+    }
+    if let Some(n) = text_p(cmd, p, "name", 200)? {
+        out.insert("name".into(), json!(n));
+    }
+    if let Some(e) = text_p(cmd, p, "export", 4096)? {
+        out.insert("export".into(), json!(crate::export_tools::expand_home(&e)));
+    }
+    Ok(())
 }
 
 /// Most shorts one job makes.

@@ -164,13 +164,34 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let mut done: Vec<(ItemId, Transcript)> = Vec::new();
     let mut skipped = Vec::new();
+    // the catalogue's models: speakers told apart by their voices (ECAPA) where the speaker model
+    // is downloaded, MFCC clustering otherwise; a host's recogniser labels speakers itself
+    let models = models_dir();
+    let neural = s.transcriber.is_none() && opts.diarize;
+    let hear = Options { diarize: opts.diarize && !neural, ..opts.clone() };
+    let chunked =
+        s.transcriber.is_none() && (filmcraft_speech::models::find(&t.id()).is_some_and(|m| m.language.is_some()) || opts.language.as_deref() == Some("ml"));
     for item in items {
         let Some(audio) = item_audio(s, item) else {
             skipped.push(item.0);
             continue;
         };
-        let mut tr = t.transcribe(&audio, &opts, &mut |_, _| true).map_err(speech_err)?;
+        // a model fine-tuned for one language (Malayalam's) reads best without timestamps: its
+        // speech is heard chunk by chunk (voice activity, 12 s at most), words timed by alignment
+        let mut tr = if chunked {
+            let silero = models.as_deref().and_then(filmcraft_speech::vad::load_silero);
+            let (segs, _) = filmcraft_speech::vad::speech_segments(&audio, silero.as_deref(), &filmcraft_speech::silero::SegmentParams::default());
+            let sr = filmcraft_speech::SAMPLE_RATE as usize;
+            let chunks = filmcraft_speech::vad::chunks(&audio, &segs, 12 * sr, sr / 5);
+            t.transcribe_chunks(&audio, &chunks, &hear, &mut |_, _| true).map_err(speech_err)?
+        } else {
+            t.transcribe(&audio, &hear, &mut |_, _| true).map_err(speech_err)?
+        };
         tr.normalize();
+        if neural && !tr.words.is_empty() {
+            filmcraft_speech::diarize::diarize_auto(&audio, &mut tr, models.as_deref(), None, opts.max_speakers);
+            tr.normalize();
+        }
         done.push((item, tr));
     }
     if done.is_empty() {
@@ -419,8 +440,8 @@ fn models(_: &mut Session, _: &Value) -> Result<Value> {
         "available": filmcraft_speech::available(),
         "default": filmcraft_speech::models::DEFAULT_MODEL,
         "dir": dir.as_ref().map(|d| d.to_string_lossy().to_string()),
-        "models": filmcraft_speech::models::catalogue().iter().map(|m| json!({
-            "id": m.id, "name": m.name, "multilingual": m.multilingual, "description": m.description,
+        "models": filmcraft_speech::models::catalogue().iter().chain(filmcraft_speech::models::support()).map(|m| json!({
+            "id": m.id, "name": m.name, "kind": m.kind, "multilingual": m.multilingual, "language": m.language, "description": m.description,
             "license": m.license, "source": m.source, "size": m.size(),
             "installed": dir.as_ref().is_some_and(|d| filmcraft_speech::models::installed(d, m)),
         })).collect::<Vec<_>>(),
@@ -431,7 +452,7 @@ fn models(_: &mut Session, _: &Value) -> Result<Value> {
 /// the size, source and licence (`transcript.models`) and ask before running this.
 fn download_model(_: &mut Session, p: &Value) -> Result<Value> {
     let id = str_p(p, "model").unwrap_or(filmcraft_speech::models::DEFAULT_MODEL);
-    let m = filmcraft_speech::models::find(id).ok_or_else(|| speech_err(SpeechError::UnknownModel(id.into())))?;
+    let m = filmcraft_speech::models::find_any(id).ok_or_else(|| speech_err(SpeechError::UnknownModel(id.into())))?;
     let dir = models_dir().ok_or_else(|| EngineError::Other("no data directory for speech models".into()))?;
     #[cfg(feature = "speech-download")]
     {
@@ -469,7 +490,15 @@ pub fn commands() -> Vec<CommandSpec> {
         spec("transcript.inspect", "Inspect Transcript", &[], r#"{"item":id?,"paragraphGapSeconds":f?}"#, always, inspect, false),
         spec("transcript.search", "Search Transcript", &[], r#"{"query":str}"#, always, search, false),
         spec("transcript.models", "List Speech Models", &[], "{}", always, models, false),
-        spec("transcript.downloadModel", "Download Speech Model", &[], r#"{"model":"whisper-base"?}"#, can_download, download_model, true),
+        spec(
+            "transcript.downloadModel",
+            "Download Speech Model",
+            &[],
+            r#"{"model":"whisper-base|whisper-large-v3-turbo|whisper-medium-ml|indicwhisper-ml|silero-vad|ecapa-voxceleb"?}"#,
+            can_download,
+            download_model,
+            true,
+        ),
         spec("transcript.select", "Mark Selected Text", &[], r#"{"from":word,"to":word?}"#, has_transcript, select, true),
         spec("transcript.extract", "Extract Selected Text", &[], r#"{"from":word,"to":word?}"#, has_transcript, |s, p| extract_or_lift(s, p, true), true),
         spec("transcript.lift", "Lift Selected Text", &[], r#"{"from":word,"to":word?}"#, has_transcript, |s, p| extract_or_lift(s, p, false), true),

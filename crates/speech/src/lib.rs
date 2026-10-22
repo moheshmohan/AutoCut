@@ -10,15 +10,24 @@
 //!   decoding, language detection and word-level timestamps from cross-attention alignment (DTW).
 //! - [`diarize`]: speaker labelling by clustering per-chunk MFCC statistics (classical, no model).
 //! - [`mel`]: the log-mel front end shared by Whisper and diarization.
-//! - [`vad`]: energy-based tightening of word bounds (keeps pauses out of words).
+//! - [`vad`]: where speech is (Silero VAD, [`silero`], with an energy fallback) and energy-based
+//!   tightening of word bounds (keeps pauses out of words).
+//! - [`ecapa`] (feature `whisper`): ECAPA-TDNN speaker embeddings on candle ([`fbank`] is its
+//!   front end): neural speaker labels and the narration voice gate.
 //!
 //! See `docs/transcripts.md` for the user-facing behaviour and accuracy numbers.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 pub mod diarize;
+#[cfg(feature = "whisper")]
+pub mod ecapa;
+pub mod fbank;
 pub mod mel;
 pub mod models;
+pub mod silero;
+pub mod speakers;
+pub mod understand;
 pub mod vad;
 #[cfg(feature = "whisper")]
 pub mod whisper;
@@ -34,7 +43,7 @@ pub const TICKS_PER_SAMPLE: i64 = TICKS_PER_SECOND / SAMPLE_RATE as i64;
 
 /// Media time of a 16 kHz sample index.
 pub fn sample_tick(n: i64) -> Tick {
-    Tick(n * TICKS_PER_SAMPLE)
+    Tick(n.saturating_mul(TICKS_PER_SAMPLE))
 }
 
 /// Media time of `s` seconds (rounded to the nearest 16 kHz sample).
@@ -92,6 +101,13 @@ pub trait Transcriber: Send + Sync {
     fn id(&self) -> String;
     /// Transcribe mono 16 kHz `audio`. Word times are relative to the first sample.
     fn transcribe(&self, audio: &[f32], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError>;
+    /// [`Transcriber::transcribe`] of the speech in `chunks` only (sample ranges of `audio`, each
+    /// at most 30 s: [`vad::chunks`]); word times stay times in `audio`. The default transcribes
+    /// the whole audio.
+    fn transcribe_chunks(&self, audio: &[f32], chunks: &[std::ops::Range<usize>], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError> {
+        let _ = chunks;
+        self.transcribe(audio, opts, progress)
+    }
     /// The words of mono 16 kHz `audio` as plain text in `language` (ISO 639-1; empty or `auto`:
     /// detected), for checking what a voice said: no word times, no speakers. Whisper decodes
     /// without timestamps, as models fine-tuned without them read best.
@@ -220,6 +236,12 @@ impl Transcriber for GpuFirst {
             return r;
         }
         self.cpu()?.hear(audio, language)
+    }
+    fn transcribe_chunks(&self, audio: &[f32], chunks: &[std::ops::Range<usize>], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError> {
+        if let Some(r) = self.on_gpu(|t| t.transcribe_chunks(audio, chunks, opts, &mut *progress)) {
+            return r;
+        }
+        self.cpu()?.transcribe_chunks(audio, chunks, opts, progress)
     }
 }
 

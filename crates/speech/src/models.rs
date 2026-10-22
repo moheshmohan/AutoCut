@@ -10,7 +10,12 @@
 //! (<https://github.com/openai/whisper/blob/main/LICENSE>); the safetensors conversions OpenAI
 //! publishes at `huggingface.co/openai/whisper-*` are labelled Apache-2.0. The Malayalam model
 //! ([`MALAYALAM_MODEL`]) is Thennal D K's fine-tune of Whisper medium, Apache-2.0. All are
-//! permissive (no NC/ND).
+//! permissive (no NC/ND). The English option ([`TURBO_MODEL`]) is OpenAI's large-v3-turbo (MIT);
+//! the Malayalam second opinion ([`INDICWHISPER_ML`]) is AI4Bharat's IndicWhisper (MIT).
+//!
+//! [`support`] lists the models that help understand speech without transcribing it: Silero VAD
+//! (MIT, where speech is) and SpeechBrain's ECAPA-TDNN (Apache-2.0, who speaks). They download
+//! and verify the same way.
 
 use std::path::{Path, PathBuf};
 
@@ -25,11 +30,24 @@ pub struct ModelFile {
     pub size: u64,
 }
 
+/// What a model does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelKind {
+    /// A speech recogniser (Whisper): `transcript.generate` and the narration checks hear with it.
+    Recogniser,
+    /// Voice activity detection: where speech is.
+    VoiceActivity,
+    /// Speaker embeddings: who is speaking (diarization, the narration voice gate).
+    Speaker,
+}
+
 /// A downloadable speech model.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct ModelInfo {
     pub id: &'static str,
     pub name: &'static str,
+    pub kind: ModelKind,
     /// Recognises languages other than English (and detects the language).
     pub multilingual: bool,
     /// Fine-tuned for this one language (ISO 639-1): ask it for that language only.
@@ -65,6 +83,7 @@ static CATALOGUE: &[ModelInfo] = &[
     ModelInfo {
         id: "whisper-tiny",
         name: "Whisper tiny (multilingual)",
+        kind: ModelKind::Recogniser,
         multilingual: true,
         language: None,
         description: "39 M parameters. Fastest; fine for clear speech, rough on noisy audio.",
@@ -106,6 +125,7 @@ static CATALOGUE: &[ModelInfo] = &[
     ModelInfo {
         id: "whisper-base",
         name: "Whisper base (multilingual)",
+        kind: ModelKind::Recogniser,
         multilingual: true,
         language: None,
         description: "74 M parameters. The default: a good balance of speed and accuracy.",
@@ -147,6 +167,7 @@ static CATALOGUE: &[ModelInfo] = &[
     ModelInfo {
         id: "whisper-small",
         name: "Whisper small (multilingual)",
+        kind: ModelKind::Recogniser,
         multilingual: true,
         language: None,
         description: "244 M parameters. Most accurate here; about 4× slower than base.",
@@ -193,6 +214,7 @@ static CATALOGUE: &[ModelInfo] = &[
     ModelInfo {
         id: MALAYALAM_MODEL,
         name: "Whisper medium, Malayalam (Thennal D K)",
+        kind: ModelKind::Recogniser,
         multilingual: true,
         language: Some("ml"),
         description: "769 M parameters fine-tuned on Malayalam speech (Common Voice, FLEURS, IMaSC, MSC, ULCA, Indic TTS). Checks what Malayalam narration said (the strict check) and transcribes Malayalam, English loanwords in Malayalam script.",
@@ -231,6 +253,142 @@ static CATALOGUE: &[ModelInfo] = &[
             ),
         ],
     },
+    // Whisper large-v3-turbo: large-v3's encoder with a 4-layer decoder (809 M parameters). The
+    // most accurate English recogniser here at about the speed of small; it writes Malayalam in
+    // other scripts (crate README), so it is the English option.
+    ModelInfo {
+        id: TURBO_MODEL,
+        name: "Whisper large-v3-turbo (multilingual; best for English)",
+        kind: ModelKind::Recogniser,
+        multilingual: true,
+        language: None,
+        description: "809 M parameters: large-v3's encoder with a 4-layer decoder. The most accurate English transcription here, about as fast as small on the GPU; checks English narration.",
+        license: "MIT (OpenAI Whisper weights)",
+        license_url: LICENSE_URL,
+        author: AUTHOR,
+        source: "https://huggingface.co/openai/whisper-large-v3-turbo",
+        files: &[
+            hf!(
+                "openai/whisper-large-v3-turbo",
+                "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+                "config.json",
+                "c5b526b3e3cd64cd8940dabb45e8ba726629e22d8ed389c29b552f9140daf04a",
+                1256
+            ),
+            hf!(
+                "openai/whisper-large-v3-turbo",
+                "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+                "generation_config.json",
+                "cce11bfe3aaa6ae9e072ea2637caaec8795e68d9b67e655a5af16ee509681a4c",
+                3772
+            ),
+            hf!(
+                "openai/whisper-large-v3-turbo",
+                "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+                "tokenizer.json",
+                "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd",
+                2710337
+            ),
+            hf!(
+                "openai/whisper-large-v3-turbo",
+                "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+                "model.safetensors",
+                "542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1",
+                1617824864
+            ),
+        ],
+    },
+    // IndicWhisper Malayalam (AI4Bharat's Vistaar benchmark release, MIT): the second opinion of
+    // the strict check of Malayalam narration. Best on FLEURS of the candidates measured (crate
+    // README) but writes spoken numbers as digits, so it never judges alone. The weights are
+    // Kavya Manohar's safetensors mirror of the release (the same tensors as AI4Bharat's
+    // `pytorch_model.bin`, also mirrored by VRCLC); the tokenizer is Whisper medium's own.
+    ModelInfo {
+        id: INDICWHISPER_ML,
+        name: "IndicWhisper Malayalam (AI4Bharat)",
+        kind: ModelKind::Recogniser,
+        multilingual: true,
+        language: Some("ml"),
+        description: "Whisper medium fine-tuned on Malayalam by AI4Bharat (Vistaar). The second opinion of the strict check of Malayalam narration: a line is retaken only when both Malayalam models disagree with the script.",
+        license: "MIT (AI4Bharat IndicWhisper); base model MIT (OpenAI Whisper)",
+        license_url: "https://github.com/AI4Bharat/vistaar/blob/master/LICENSE",
+        author: "AI4Bharat (fine-tune of OpenAI Whisper medium); mirror by Kavya Manohar",
+        source: "https://huggingface.co/kavyamanohar/AI4B-Indicwhisper-ml",
+        files: &[
+            hf!(
+                "kavyamanohar/AI4B-Indicwhisper-ml",
+                "3fc46dc7338c7737e1d4580a80f1f0ff697d017e",
+                "config.json",
+                "8de96b551ddff9ccf8df4379a84fe7e1cd79d7312bd16673082d1f71501388b7",
+                1007
+            ),
+            hf!(
+                "kavyamanohar/AI4B-Indicwhisper-ml",
+                "3fc46dc7338c7737e1d4580a80f1f0ff697d017e",
+                "generation_config.json",
+                "67f1d18ec3b85ef8d02cb72dada44bbdfb825cf21a64e1e82ab32fd2f3ed1525",
+                3491
+            ),
+            hf!(
+                "openai/whisper-medium",
+                "abdf7c39ab9d0397620ccaea8974cc764cd0953e",
+                "tokenizer.json",
+                "27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566",
+                2480466
+            ),
+            hf!(
+                "kavyamanohar/AI4B-Indicwhisper-ml",
+                "3fc46dc7338c7737e1d4580a80f1f0ff697d017e",
+                "model.safetensors",
+                "4732f2bc64b2f702d086c9ab25fc8f9334d3615e16214fa53e725286d53d97d6",
+                1527827760
+            ),
+        ],
+    },
+];
+
+/// Models that help understand speech without transcribing it: where speech is and who speaks.
+static SUPPORT: &[ModelInfo] = &[
+    // Silero VAD v5, the 16 kHz network as the authors publish it in safetensors (MIT).
+    ModelInfo {
+        id: SILERO_VAD,
+        name: "Silero VAD v5",
+        kind: ModelKind::VoiceActivity,
+        multilingual: true,
+        language: None,
+        description: "Voice activity detection (1.2 MB): where people speak, in 32 ms steps, robust to noise and music. The energy detector is the fallback.",
+        license: "MIT (Silero Team)",
+        license_url: "https://github.com/snakers4/silero-vad/blob/master/LICENSE",
+        author: "Silero Team",
+        source: "https://github.com/snakers4/silero-vad",
+        files: &[ModelFile {
+            name: "silero_vad_16k.safetensors",
+            url: "https://raw.githubusercontent.com/snakers4/silero-vad/fb7d7c7f5df63235f0afd037d8397593829aeb41/src/silero_vad/data/silero_vad_16k.safetensors",
+            sha256: "c59271c284ae9c8335d795d60e0bfdb71aaaceec578d9bd9ffc1b8153c319ea1",
+            size: 1239748,
+        }],
+    },
+    // SpeechBrain's ECAPA-TDNN trained on VoxCeleb 1+2 (Apache-2.0): 192-value speaker
+    // embeddings for diarization and the narration voice gate.
+    ModelInfo {
+        id: ECAPA_MODEL,
+        name: "ECAPA-TDNN speaker embeddings (SpeechBrain, VoxCeleb)",
+        kind: ModelKind::Speaker,
+        multilingual: true,
+        language: None,
+        description: "Speaker embeddings (83 MB): tells voices apart for speaker labels, and checks that a cloned narration still sounds like its speaker.",
+        license: "Apache-2.0 (SpeechBrain)",
+        license_url: "https://www.apache.org/licenses/LICENSE-2.0",
+        author: "SpeechBrain (Ravanelli et al.); ECAPA-TDNN by Desplanques, Thienpondt and Demuynck",
+        source: "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb",
+        files: &[hf!(
+            "speechbrain/spkrec-ecapa-voxceleb",
+            "0f99f2d0ebe89ac095bcc5903c4dd8f72b367286",
+            "embedding_model.ckpt",
+            "0575cb64845e6b9a10db9bcb74d5ac32b326b8dc90352671d345e2ee3d0126a2",
+            83316686
+        )],
+    },
 ];
 
 /// The default model.
@@ -239,12 +397,43 @@ pub const DEFAULT_MODEL: &str = "whisper-base";
 /// The Malayalam model: what the strict check of Malayalam narration hears with.
 pub const MALAYALAM_MODEL: &str = "whisper-medium-ml";
 
+/// The second Malayalam model: the strict check's second opinion.
+pub const INDICWHISPER_ML: &str = "indicwhisper-ml";
+
+/// The English option: the strict check of English narration hears with it when installed.
+pub const TURBO_MODEL: &str = "whisper-large-v3-turbo";
+
+/// The voice activity detector.
+pub const SILERO_VAD: &str = "silero-vad";
+
+/// The speaker embedding model.
+pub const ECAPA_MODEL: &str = "ecapa-voxceleb";
+
+/// The recognisers.
 pub fn catalogue() -> &'static [ModelInfo] {
     CATALOGUE
 }
 
+/// The voice activity and speaker models.
+pub fn support() -> &'static [ModelInfo] {
+    SUPPORT
+}
+
+/// A recogniser by id.
 pub fn find(id: &str) -> Option<&'static ModelInfo> {
     CATALOGUE.iter().find(|m| m.id == id)
+}
+
+/// Any model (recogniser or support model) by id.
+pub fn find_any(id: &str) -> Option<&'static ModelInfo> {
+    find(id).or_else(|| SUPPORT.iter().find(|m| m.id == id))
+}
+
+/// The installed file of single-file support model `id` (`None`: unknown or not downloaded).
+pub fn support_file(models_dir: &Path, id: &str) -> Option<PathBuf> {
+    let m = SUPPORT.iter().find(|m| m.id == id)?;
+    let f = m.files.first()?;
+    installed(models_dir, m).then(|| model_dir(models_dir, m).join(f.name))
 }
 
 /// Where model `m` lives under `models_dir`.
@@ -359,9 +548,12 @@ mod tests {
         assert!(find(DEFAULT_MODEL).is_some());
         for m in catalogue() {
             assert!(m.size() > 100_000_000, "{}", m.id);
+            assert_eq!(m.kind, ModelKind::Recogniser);
             for f in m.files {
                 assert!(
-                    f.url.starts_with("https://huggingface.co/openai/whisper-") || f.url.starts_with("https://huggingface.co/thennal/whisper-"),
+                    f.url.starts_with("https://huggingface.co/openai/whisper-")
+                        || f.url.starts_with("https://huggingface.co/thennal/whisper-")
+                        || f.url.starts_with("https://huggingface.co/kavyamanohar/AI4B-Indicwhisper-ml/"),
                     "{}",
                     f.url
                 );
@@ -371,11 +563,34 @@ mod tests {
                 assert!(f.url.contains("/resolve/") && f.url.ends_with(f.name));
                 assert_eq!(f.sha256.len(), 64);
                 assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
-                if f.name == "tokenizer.json" {
+                // large-v3's vocabulary has one more language (51 866 tokens): its own tokenizer
+                if f.name == "tokenizer.json" && m.id != TURBO_MODEL {
                     assert_eq!(f.sha256, shared_tokenizer_sha());
                 }
             }
         }
+    }
+
+    #[test]
+    fn support_models_are_pinned_and_permissive() {
+        for id in [SILERO_VAD, ECAPA_MODEL] {
+            let m = find_any(id).unwrap();
+            assert!(find(id).is_none(), "{id} is not a recogniser");
+            assert_ne!(m.kind, ModelKind::Recogniser);
+            assert!(!m.license.contains("NC") && !m.license.contains("ND") && !m.license.contains("GPL"), "{id}");
+            for f in m.files {
+                assert_eq!(f.sha256.len(), 64);
+                assert!(f.url.ends_with(f.name));
+                // a commit, never a branch
+                assert!(f.url.split('/').any(|p| p.len() == 40 && p.bytes().all(|b| b.is_ascii_hexdigit())), "{}", f.url);
+            }
+        }
+        assert_eq!(find_any(SILERO_VAD).unwrap().size(), 1239748);
+        assert!(support_file(std::path::Path::new("/nonexistent"), SILERO_VAD).is_none());
+        assert!(support_file(std::path::Path::new("/nonexistent"), "whisper-base").is_none());
+        // the new recognisers: turbo is the English option, IndicWhisper the Malayalam second opinion
+        assert_eq!(find(INDICWHISPER_ML).unwrap().language, Some("ml"));
+        assert!(find(TURBO_MODEL).unwrap().language.is_none());
     }
 
     #[test]
@@ -385,7 +600,7 @@ mod tests {
         assert!(m.license.starts_with("Apache-2.0") && !m.license.contains("NC"));
         assert_eq!(m.files.iter().map(|f| f.name).collect::<Vec<_>>(), ["config.json", "generation_config.json", "tokenizer.json", "model.safetensors"]);
         assert_eq!(m.size(), 1296 + 3504 + 2480466 + 3055544304);
-        assert!(catalogue().iter().filter(|m| m.id != MALAYALAM_MODEL).all(|m| m.language.is_none()));
+        assert!(catalogue().iter().filter(|m| m.id != MALAYALAM_MODEL && m.id != INDICWHISPER_ML).all(|m| m.language.is_none()));
     }
 
     #[test]

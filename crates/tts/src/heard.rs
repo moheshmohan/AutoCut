@@ -20,6 +20,15 @@
 //! - [`Policy`] and [`read_until_clear`]: an utterance is read, heard and scored; one that fails
 //!   is read again (the caller varies the seed and the settings per attempt) up to
 //!   [`Policy::max_takes`], the best kept ([`Score::badness`]), every try reported with its seed.
+//! - **A second opinion and a voice gate** ([`read_until_clear_judged`], [`Strict::second`],
+//!   [`Strict::voice`]): a second recogniser hears a reading the first rejects, and under
+//!   [`Agreement::Both`] (the default) the reading fails only when both hear it wrong — one
+//!   recogniser's own mistakes (a loanword, a number written as digits) no longer cost a retake.
+//!   The voice gate is a speaker model's similarity of the reading to the voice's own sample: a
+//!   reading under [`Strict::min_similarity`] has drifted from the speaker's sound and is read
+//!   again.
+//! - **English** ([`english_words`], [`Policy::english`]): numbers in digits are spelled as words
+//!   on both sides, `%` and `&` said, so "10 to 80%" and "ten to eighty percent" compare equal.
 //!
 //! Pure functions: no model here. The caller hears (a speech model fine-tuned for Malayalam: the
 //! engine's `check: "strict"`).
@@ -234,6 +243,14 @@ impl Policy {
         s.cer <= self.max_cer && s.start_cer <= self.max_start_cer
     }
 
+    /// English narration (cloned voices): the thresholds measured on the owner's cloned English
+    /// readings heard by Whisper large-v3-turbo (`crates/speech/README.md`, "English narration:
+    /// the strict check"): good readings stay under 0.09 overall; a sentence start may lose a
+    /// short word to the recogniser.
+    pub fn english() -> Self {
+        Policy { max_takes: 3, max_cer: 0.15, max_start_cer: 0.5 }
+    }
+
     pub fn check(&self) -> Result<(), TtsError> {
         if !(1..=MAX_TAKES).contains(&self.max_takes)
             || !(self.max_cer.is_finite() && self.max_cer >= 0.0)
@@ -260,11 +277,37 @@ pub struct Try {
     pub score: Score,
     /// What the signal scan found ([`signal`]): each fails the reading.
     pub signal: Vec<String>,
+    /// The second recogniser's hearing, when it was asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second: Option<Opinion>,
+    /// How alike the reading sounds to the voice (the voice gate), when measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f64>,
+    /// What failed the reading: `first`, `second` (the recognisers), `voice`, `signal`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flagged: Vec<String>,
+}
+
+/// A second recogniser's hearing of a reading.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Opinion {
+    pub heard: String,
+    pub cer: f64,
+    pub start_cer: f64,
+    pub passed: bool,
 }
 
 impl Try {
-    fn badness(&self) -> f64 {
-        self.score.badness() + 0.25 * self.signal.len() as f64
+    fn badness(&self, agreement: Agreement, min_similarity: f64) -> f64 {
+        let first = self.score.badness();
+        let text = match (&self.second, agreement) {
+            (Some(o), Agreement::Both) => first.min(2.0 * o.start_cer + o.cer.min(2.0)),
+            (Some(o), Agreement::Either) => first.max(2.0 * o.start_cer + o.cer.min(2.0)),
+            _ => first,
+        };
+        let voice = self.similarity.filter(|s| *s < min_similarity).map_or(0.0, |s| 0.5 + (min_similarity - s));
+        text + 0.25 * self.signal.len() as f64 + voice
     }
 }
 
@@ -282,10 +325,103 @@ pub trait Hearer: Send + Sync {
     fn id(&self) -> String;
 }
 
+/// How alike a reading sounds to the voice it should be (the voice gate).
+pub trait VoiceMatch: Send + Sync {
+    /// A speaker model's cosine similarity of mono `samples` at `rate` to the voice's own sample.
+    fn similarity(&self, samples: &[f32], rate: u32) -> Result<f64, String>;
+    /// The speaker model and the voice (the narration cache keys checked readings on it).
+    fn id(&self) -> String;
+}
+
+/// How two recognisers' opinions of a reading combine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Agreement {
+    /// A reading fails only when both recognisers hear it wrong (the second is asked only when
+    /// the first rejects it).
+    #[default]
+    Both,
+    /// A reading fails when either hears it wrong (both always asked).
+    Either,
+    /// Only the first recogniser counts.
+    First,
+}
+
+impl Agreement {
+    pub fn id(self) -> &'static str {
+        match self {
+            Agreement::Both => "both",
+            Agreement::Either => "either",
+            Agreement::First => "first",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Option<Self> {
+        Some(match s {
+            "both" => Agreement::Both,
+            "either" => Agreement::Either,
+            "first" => Agreement::First,
+            _ => return None,
+        })
+    }
+}
+
 /// The strict check a voice reads under ([`crate::Voice::synthesize_checked`]).
 pub struct Strict<'a> {
     pub hearer: &'a dyn Hearer,
     pub policy: Policy,
+    /// A second recogniser (Malayalam: IndicWhisper), combined by `agreement`.
+    pub second: Option<&'a dyn Hearer>,
+    pub agreement: Agreement,
+    /// The voice gate, and the least similarity that passes.
+    pub voice: Option<&'a dyn VoiceMatch>,
+    pub min_similarity: f64,
+}
+
+impl<'a> Strict<'a> {
+    /// One recogniser, no voice gate.
+    pub fn new(hearer: &'a dyn Hearer, policy: Policy) -> Self {
+        Strict { hearer, policy, second: None, agreement: Agreement::Both, voice: None, min_similarity: 0.0 }
+    }
+
+    /// What the check is, for cache keys and reports: the recogniser, then the second opinion
+    /// and the voice gate when there are.
+    pub fn id(&self) -> String {
+        let mut id = self.hearer.id();
+        if let Some(s) = self.second.filter(|_| self.agreement != Agreement::First) {
+            id = format!("{id} + {} ({})", s.id(), self.agreement.id());
+        }
+        if let Some(v) = self.voice {
+            id = format!("{id}, voice {} >= {:.2}", v.id(), self.min_similarity);
+        }
+        id
+    }
+
+    /// Read `text` until clear under this check ([`read_until_clear_judged`]): `hear_rate` is the
+    /// rate of the readings `read` makes.
+    pub fn read_until_clear(&self, text: &str, rate: u32, read: &mut dyn FnMut(u32) -> Result<Read, TtsError>) -> Result<(Vec<f32>, Checked), TtsError> {
+        let mut hear = |x: &[f32]| self.hearer.hear(x, rate).map_err(|e| TtsError::Model(format!("the strict check could not hear the reading: {e}")));
+        let mut second = self.second.map(|h| move |x: &[f32]| h.hear(x, rate).map_err(TtsError::Model));
+        let mut voice = self.voice.map(|v| move |x: &[f32]| v.similarity(x, rate).map_err(TtsError::Model));
+        let mut judges = Judges {
+            second: second.as_mut().map(|f| f as &mut dyn FnMut(&[f32]) -> Result<String, TtsError>),
+            agreement: self.agreement,
+            voice: voice.as_mut().map(|f| f as &mut dyn FnMut(&[f32]) -> Result<f64, TtsError>),
+            min_similarity: self.min_similarity,
+        };
+        read_until_clear_judged(text, &self.policy, rate, read, &mut hear, &mut judges)
+    }
+}
+
+/// The second opinion and the voice gate of [`read_until_clear_judged`].
+#[derive(Default)]
+pub struct Judges<'a> {
+    /// A second recogniser: what it hears in a reading (an error: no second opinion this time).
+    pub second: Option<&'a mut dyn FnMut(&[f32]) -> Result<String, TtsError>>,
+    pub agreement: Agreement,
+    /// The voice gate: a reading's similarity to the voice (an error: not measured).
+    pub voice: Option<&'a mut dyn FnMut(&[f32]) -> Result<f64, TtsError>>,
+    pub min_similarity: f64,
 }
 
 /// What the strict check found for one utterance.
@@ -308,6 +444,15 @@ pub struct Checked {
     pub passed: bool,
     /// What the signal scan found in the kept reading.
     pub signal: Vec<String>,
+    /// The second recogniser's hearing of the kept reading, when it was asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second: Option<Opinion>,
+    /// The kept reading's similarity to the voice (the voice gate), when measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f64>,
+    /// What failed the kept reading (empty when it passed).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flagged: Vec<String>,
     /// Every reading, in order.
     pub tries: Vec<Try>,
 }
@@ -325,24 +470,75 @@ pub fn read_until_clear(
     read: &mut dyn FnMut(u32) -> Result<Read, TtsError>,
     hear: &mut dyn FnMut(&[f32]) -> Result<String, TtsError>,
 ) -> Result<(Vec<f32>, Checked), TtsError> {
+    read_until_clear_judged(text, policy, rate, read, hear, &mut Judges::default())
+}
+
+/// [`read_until_clear`] with a second opinion and a voice gate (`judges`): a reading passes when
+/// its text passes (the first recogniser, or as `judges.agreement` combines it with the second),
+/// its similarity to the voice is at least `judges.min_similarity` (when measured) and its signal
+/// is clean. Each try reports what failed it (`flagged`).
+pub fn read_until_clear_judged(
+    text: &str,
+    policy: &Policy,
+    rate: u32,
+    read: &mut dyn FnMut(u32) -> Result<Read, TtsError>,
+    hear: &mut dyn FnMut(&[f32]) -> Result<String, TtsError>,
+    judges: &mut Judges,
+) -> Result<(Vec<f32>, Checked), TtsError> {
     policy.check()?;
-    let mut best: Option<(f64, Vec<f32>, Try)> = None;
+    let min_similarity = if judges.min_similarity.is_finite() { judges.min_similarity.clamp(-1.0, 1.0) } else { 0.0 };
+    let mut best: Option<(f64, Vec<f32>, Try, bool)> = None;
     let mut tries = Vec::new();
     for attempt in 0..policy.max_takes {
         let r = read(attempt)?;
         let heard = hear(&r.samples)?;
-        let t = Try { attempt, seed: r.seed, score: score(text, &heard), heard, signal: signal(&r.samples, rate) };
+        let sc = score(text, &heard);
+        let first_ok = policy.passes(&sc);
+        let ask = match judges.agreement {
+            Agreement::Both => !first_ok,
+            Agreement::Either => true,
+            Agreement::First => false,
+        };
+        let second = match (ask, judges.second.as_mut()) {
+            (true, Some(h)) => h(&r.samples).ok().map(|heard| {
+                let s = score(text, &heard);
+                Opinion { passed: policy.passes(&s), heard, cer: s.cer, start_cer: s.start_cer }
+            }),
+            _ => None,
+        };
+        let text_ok = match (judges.agreement, &second) {
+            (Agreement::Both, Some(o)) => first_ok || o.passed,
+            (Agreement::Either, Some(o)) => first_ok && o.passed,
+            _ => first_ok,
+        };
+        let similarity = judges.voice.as_mut().and_then(|v| v(&r.samples).ok()).filter(|s| s.is_finite());
+        let voice_ok = similarity.is_none_or(|s| s >= min_similarity);
+        let sig = signal(&r.samples, rate);
+        let mut flagged = Vec::new();
+        if !first_ok {
+            flagged.push("first".to_string());
+        }
+        if second.as_ref().is_some_and(|o| !o.passed) {
+            flagged.push("second".to_string());
+        }
+        if !voice_ok {
+            flagged.push("voice".to_string());
+        }
+        if !sig.is_empty() {
+            flagged.push("signal".to_string());
+        }
+        let passed = text_ok && voice_ok && sig.is_empty();
+        let t = Try { attempt, seed: r.seed, score: sc, heard, signal: sig, second, similarity, flagged: if passed { Vec::new() } else { flagged } };
         tries.push(t.clone());
-        let passed = policy.passes(&t.score) && t.signal.is_empty();
-        let bad = t.badness();
-        if passed || best.as_ref().is_none_or(|(b, _, _)| bad < *b) {
-            best = Some((bad, r.samples, t));
+        let bad = t.badness(judges.agreement, min_similarity);
+        if passed || best.as_ref().is_none_or(|(b, _, _, _)| bad < *b) {
+            best = Some((bad, r.samples, t, passed));
         }
         if passed {
             break;
         }
     }
-    let (_, audio, t) = best.ok_or_else(|| TtsError::Invalid("nothing was read".into()))?;
+    let (_, audio, t, passed) = best.ok_or_else(|| TtsError::Invalid("nothing was read".into()))?;
     let checked = Checked {
         text: text.to_string(),
         heard: t.heard.clone(),
@@ -351,11 +547,117 @@ pub fn read_until_clear(
         takes: tries.len() as u32,
         kept: t.attempt,
         seed: t.seed,
-        passed: policy.passes(&t.score) && t.signal.is_empty(),
+        passed,
         signal: t.signal.clone(),
+        second: t.second.clone(),
+        similarity: t.similarity,
+        flagged: t.flagged.clone(),
         tries,
     };
     Ok((audio, checked))
+}
+
+/// English text as it is compared: numbers written in digits spelled as words ("1,600" → "one
+/// thousand six hundred", "5.3" → "five point three"), `%` as "percent", `&` as "and". Both the
+/// script and what a recogniser heard go through it.
+pub fn english_words(text: &str) -> String {
+    const ONES: [&str; 20] = [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 10] = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+    fn below_1000(n: u64, out: &mut Vec<String>) {
+        let (h, r) = (n / 100, n % 100);
+        if h > 0 {
+            out.push(ONES[h as usize].to_string());
+            out.push("hundred".into());
+        }
+        if r >= 20 {
+            out.push(TENS[(r / 10) as usize].to_string());
+            if r % 10 > 0 {
+                out.push(ONES[(r % 10) as usize].to_string());
+            }
+        } else if r > 0 || h == 0 {
+            out.push(ONES[r as usize].to_string());
+        }
+    }
+    fn cardinal(n: u64) -> String {
+        if n == 0 {
+            return "zero".into();
+        }
+        let mut out = Vec::new();
+        for (scale, name) in [(1_000_000_000_000u64, "trillion"), (1_000_000_000, "billion"), (1_000_000, "million"), (1_000, "thousand")] {
+            if !(n / scale).is_multiple_of(1000) {
+                below_1000(n / scale % 1000, &mut out);
+                out.push(name.into());
+            }
+        }
+        if !n.is_multiple_of(1000) {
+            below_1000(n % 1000, &mut out);
+        }
+        out.join(" ")
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_digit() {
+            // digits, with thousands commas and one decimal point
+            let mut int = String::new();
+            while i < chars.len() && (chars[i].is_ascii_digit() || (chars[i] == ',' && chars.get(i + 1).is_some_and(char::is_ascii_digit) && !int.is_empty())) {
+                if chars[i] != ',' {
+                    int.push(chars[i]);
+                }
+                i += 1;
+            }
+            let mut frac = String::new();
+            if chars.get(i) == Some(&'.') && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+                i += 1;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    frac.push(chars[i]);
+                    i += 1;
+                }
+            }
+            out.push(' ');
+            match int.parse::<u64>() {
+                Ok(n) if int.len() <= 15 => out.push_str(&cardinal(n)),
+                // too long to say as one number: digit by digit
+                _ => out.push_str(&int.chars().filter_map(|d| d.to_digit(10)).map(|d| ONES[d as usize]).collect::<Vec<_>>().join(" ")),
+            }
+            if !frac.is_empty() {
+                out.push_str(" point ");
+                out.push_str(&frac.chars().filter_map(|d| d.to_digit(10)).map(|d| ONES[d as usize]).collect::<Vec<_>>().join(" "));
+            }
+            out.push(' ');
+            continue;
+        }
+        match c {
+            '%' => out.push_str(" percent "),
+            '&' => out.push_str(" and "),
+            _ => out.push(c),
+        }
+        i += 1;
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The longest stretch a recogniser hears at once, seconds: Whisper's decoder holds about 440
@@ -597,6 +899,129 @@ mod tests {
         for bad in [Policy { max_takes: 0, ..p }, Policy { max_takes: 99, ..p }, Policy { max_cer: f64::NAN, ..p }, Policy { max_start_cer: -1.0, ..p }] {
             assert!(read_until_clear(text, &bad, RATE, &mut |a| Ok(tone(a)), &mut |_| Ok(String::new())).is_err(), "{bad:?}");
         }
+    }
+
+    /// The second opinion: under `both` a reading the first recogniser rejects passes when the
+    /// second hears it right; under `either` it needs both; the second is asked only when needed.
+    #[test]
+    fn a_second_opinion_decides_with_the_first() {
+        let text = "ഇതാണ് ബോസ്റ്റൺ ഡൈനാമിക്സിന്റെ സ്പോട്ട്.";
+        let p = Policy { max_takes: 3, max_cer: 0.15, max_start_cer: 0.2 };
+        // the first recogniser mishears every reading; the second hears the second reading right
+        let mut asked = 0;
+        let mut read = |attempt| Ok(tone(attempt));
+        let mut first = |_: &[f32]| Ok("ഹ്മ് ബോസ്റ്റൺ".to_string());
+        let mut second = |x: &[f32]| {
+            asked += 1;
+            Ok(if attempt_of(x) >= 1 { text.to_string() } else { "ഹ്മ്".to_string() })
+        };
+        let mut j = Judges { second: Some(&mut second), ..Judges::default() };
+        let (audio, c) = read_until_clear_judged(text, &p, RATE, &mut read, &mut first, &mut j).unwrap();
+        assert_eq!((c.takes, c.kept, c.passed, attempt_of(&audio)), (2, 1, true, 1), "{c:?}");
+        assert_eq!(c.second.as_ref().map(|o| o.passed), Some(true));
+        assert_eq!(c.tries[0].flagged, vec!["first", "second"]);
+        assert!(c.flagged.is_empty());
+        assert_eq!(asked, 2);
+        // both clear on the first reading: the second is never asked
+        let mut asked = 0;
+        let mut clear = |_: &[f32]| Ok(text.to_string());
+        let mut second = |_: &[f32]| {
+            asked += 1;
+            Ok(String::new())
+        };
+        let mut j = Judges { second: Some(&mut second), ..Judges::default() };
+        let (_, c) = read_until_clear_judged(text, &p, RATE, &mut |a| Ok(tone(a)), &mut clear, &mut j).unwrap();
+        assert!(c.passed && c.second.is_none());
+        assert_eq!(asked, 0);
+        // `either`: the second's rejection fails a reading the first passes
+        let mut deaf_second = |_: &[f32]| Ok("ഹ്മ്".to_string());
+        let mut j = Judges { second: Some(&mut deaf_second), agreement: Agreement::Either, ..Judges::default() };
+        let (_, c) = read_until_clear_judged(text, &p, RATE, &mut |a| Ok(tone(a)), &mut clear, &mut j).unwrap();
+        assert!(!c.passed && c.takes == 3 && c.flagged == vec!["second"], "{c:?}");
+        // a second recogniser that fails gives no opinion: the first decides
+        let mut broken = |_: &[f32]| Err(TtsError::Model("out of memory".into()));
+        let mut j = Judges { second: Some(&mut broken), ..Judges::default() };
+        let (_, c) = read_until_clear_judged(text, &p, RATE, &mut |a| Ok(tone(a)), &mut first, &mut j).unwrap();
+        assert!(!c.passed && c.second.is_none());
+    }
+
+    /// The voice gate with stub similarities: a reading that drifted from the voice is read again
+    /// even when every word was heard, and the closest is kept when none is close enough.
+    #[test]
+    fn the_voice_gate_retakes_readings_that_drift() {
+        let text = "ഇതാണ് ബോസ്റ്റൺ ഡൈനാമിക്സിന്റെ സ്പോട്ട്.";
+        let p = Policy { max_takes: 4, max_cer: 0.15, max_start_cer: 0.2 };
+        let mut clear = |_: &[f32]| Ok(text.to_string());
+        // similarity rises with the attempt: 0.2, 0.4, 0.6…
+        let mut sim = |x: &[f32]| Ok(0.2 + 0.2 * f64::from(attempt_of(x)));
+        let mut j = Judges { voice: Some(&mut sim), min_similarity: 0.5, ..Judges::default() };
+        let (audio, c) = read_until_clear_judged(text, &p, RATE, &mut |a| Ok(tone(a)), &mut clear, &mut j).unwrap();
+        assert_eq!((c.takes, c.kept, c.passed, attempt_of(&audio)), (3, 2, true, 2), "{c:?}");
+        assert_eq!(c.tries[0].flagged, vec!["voice"]);
+        assert!((c.similarity.unwrap() - 0.6).abs() < 1e-9);
+        // never close enough: the closest kept, flagged
+        let mut low = |x: &[f32]| Ok(0.1 * f64::from(attempt_of(x)));
+        let mut j = Judges { voice: Some(&mut low), min_similarity: 0.9, ..Judges::default() };
+        let (_, c) = read_until_clear_judged(text, &p, RATE, &mut |a| Ok(tone(a)), &mut clear, &mut j).unwrap();
+        assert!(!c.passed && c.kept == 3 && c.flagged == vec!["voice"], "{c:?}");
+        // NaN similarity and a NaN threshold are no verdict, never a crash
+        let mut nan = |_: &[f32]| Ok(f64::NAN);
+        let mut j = Judges { voice: Some(&mut nan), min_similarity: f64::NAN, ..Judges::default() };
+        let (_, c) = read_until_clear_judged(text, &p, RATE, &mut |a| Ok(tone(a)), &mut clear, &mut j).unwrap();
+        assert!(c.passed && c.similarity.is_none());
+    }
+
+    /// The check's name changes with its judges, so a reading checked one way is not served for
+    /// another; one recogniser alone keeps the name it always had.
+    #[test]
+    fn the_check_is_named_by_its_judges() {
+        struct H(&'static str);
+        impl Hearer for H {
+            fn hear(&self, _: &[f32], _: u32) -> Result<String, String> {
+                Ok(String::new())
+            }
+            fn id(&self) -> String {
+                self.0.into()
+            }
+        }
+        struct V;
+        impl VoiceMatch for V {
+            fn similarity(&self, _: &[f32], _: u32) -> Result<f64, String> {
+                Ok(1.0)
+            }
+            fn id(&self) -> String {
+                "ecapa me".into()
+            }
+        }
+        let (a, b, v) = (H("a v1"), H("b v1"), V);
+        let one = Strict::new(&a, Policy::default());
+        assert_eq!(one.id(), "a v1");
+        let two = Strict { second: Some(&b), ..Strict::new(&a, Policy::default()) };
+        assert_eq!(two.id(), "a v1 + b v1 (both)");
+        let gated = Strict { voice: Some(&v), min_similarity: 0.3, ..Strict::new(&a, Policy::default()) };
+        assert_eq!(gated.id(), "a v1, voice ecapa me >= 0.30");
+        let first_only = Strict { second: Some(&b), agreement: Agreement::First, ..Strict::new(&a, Policy::default()) };
+        assert_eq!(first_only.id(), "a v1");
+        assert_eq!(Agreement::from_id("either"), Some(Agreement::Either));
+        assert_eq!(Agreement::from_id("most"), None);
+    }
+
+    #[test]
+    fn english_numbers_compare_as_words() {
+        assert_eq!(english_words("From 10 to 80% in 30 minutes."), "From ten to eighty percent in thirty minutes.");
+        assert_eq!(english_words("It costs $1,600 & ships in 2021."), "It costs $ one thousand six hundred and ships in two thousand twenty one .");
+        assert_eq!(english_words("version 5.3"), "version five point three");
+        assert_eq!(english_words("0"), "zero");
+        assert_eq!(english_words("100"), "one hundred");
+        assert_eq!(english_words("1000000"), "one million");
+        // hostile: a number too long to say is read digit by digit; nothing panics
+        assert_eq!(english_words("12345678901234567890").split(' ').count(), 20);
+        assert_eq!(english_words(""), "");
+        assert_eq!(english_words("1,"), "one ,");
+        let s = score(&english_words("Ten to 80% in half an hour."), &english_words("10 to eighty percent in half an hour"));
+        assert_eq!(s.cer, 0.0, "{s:?}");
+        let e = Policy::english();
+        assert!(e.check().is_ok());
     }
 
     /// Syllable-like bursts of tone, `on` seconds each with `off` seconds of near-silence after.

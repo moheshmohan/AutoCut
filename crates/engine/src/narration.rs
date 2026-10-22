@@ -225,23 +225,30 @@ pub(crate) fn strict_requested(cmd: &str, p: &Value) -> Result<bool> {
     }
 }
 
-/// The strict check applies to `n`: a cloned voice speaking Malayalam.
+/// The strict check applies to `n`: a cloned voice speaking Malayalam (IndicF5) or English
+/// (VoxCPM).
 fn checkable(n: &Narration) -> bool {
-    tts::malayalam::is_tag(&n.language) && n.voice.starts_with(tts::CLONE_PREFIX)
+    n.voice.starts_with(tts::CLONE_PREFIX)
 }
 
-/// The Malayalam speech model hearing narration (the strict check): resampled to 16 kHz, long
-/// readings heard in pieces cut at pauses.
+/// The language a check hears in (ISO 639-1).
+fn check_language(n: &Narration) -> &'static str {
+    if tts::malayalam::is_tag(&n.language) { "ml" } else { "en" }
+}
+
+/// A speech model hearing narration (the strict check): resampled to 16 kHz, long readings heard
+/// in pieces cut at pauses.
 struct Judge {
     t: Arc<dyn filmcraft_speech::Transcriber>,
     id: String,
+    language: &'static str,
 }
 
 impl tts::heard::Hearer for Judge {
     fn hear(&self, samples: &[f32], rate: u32) -> std::result::Result<String, String> {
         let mut each = |piece: &[f32]| {
             let x16 = filmcraft_audio_dsp::resample::resample_sinc(piece, rate, filmcraft_speech::SAMPLE_RATE);
-            self.t.hear(&x16, "ml").map_err(|e| tts::TtsError::Model(e.to_string()))
+            self.t.hear(&x16, self.language).map_err(|e| tts::TtsError::Model(e.to_string()))
         };
         tts::heard::hear_in_pieces(samples, rate, tts::heard::HEARD_SECONDS, &mut each).map_err(|e| e.to_string())
     }
@@ -252,90 +259,275 @@ impl tts::heard::Hearer for Judge {
 }
 
 /// The Malayalam speech model's check, as results and cache keys name it.
+#[cfg(test)]
 fn judge_id() -> String {
-    format!("{} check v{}", filmcraft_speech::models::MALAYALAM_MODEL, tts::heard::VERSION)
+    judge_id_for(filmcraft_speech::models::MALAYALAM_MODEL)
 }
 
-/// The Malayalam speech model in `dir`, loaded once per process (on the GPU where there is one).
-fn judge(dir: &std::path::Path) -> std::result::Result<Arc<Judge>, String> {
-    static JUDGE: OnceLock<Mutex<Option<(std::path::PathBuf, Arc<Judge>)>>> = OnceLock::new();
-    let mut g = JUDGE.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((d, j)) = g.as_ref()
-        && d == dir
-    {
+/// Speech model `model`'s check, as results and cache keys name it.
+fn judge_id_for(model: &str) -> String {
+    format!("{model} check v{}", tts::heard::VERSION)
+}
+
+/// Speech model `model` in `dir` hearing `language`, loaded once per process (on the GPU where
+/// there is one; the last few kept).
+fn judge(dir: &std::path::Path, model: &str, language: &'static str) -> std::result::Result<Arc<Judge>, String> {
+    type Judges = Vec<(std::path::PathBuf, String, Arc<Judge>)>;
+    static JUDGES: OnceLock<Mutex<Judges>> = OnceLock::new();
+    let mut g = JUDGES.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, _, j)) = g.iter().find(|(d, m, j)| d == dir && m == model && j.language == language) {
         return Ok(j.clone());
     }
-    let t = filmcraft_speech::load_on(dir, filmcraft_speech::models::MALAYALAM_MODEL, true).map_err(|e| e.to_string())?;
-    let j = Arc::new(Judge { t, id: judge_id() });
-    *g = Some((dir.to_path_buf(), j.clone()));
+    let t = filmcraft_speech::load_on(dir, model, true).map_err(|e| e.to_string())?;
+    let j = Arc::new(Judge { t, id: judge_id_for(model), language });
+    g.push((dir.to_path_buf(), model.to_string(), j.clone()));
+    // two Malayalam models and an English one at most
+    let extra = g.len().saturating_sub(3);
+    g.drain(..extra);
     Ok(j)
 }
 
-/// The Malayalam speech model, loaded when it first hears: a reading found in the cache needs
-/// only the check's name.
+/// A speech model, loaded when it first hears: a reading found in the cache needs only the
+/// check's name.
 struct LazyJudge {
     dir: std::path::PathBuf,
+    model: &'static str,
+    language: &'static str,
 }
 
 impl tts::heard::Hearer for LazyJudge {
     fn hear(&self, samples: &[f32], rate: u32) -> std::result::Result<String, String> {
-        judge(&self.dir)?.hear(samples, rate)
+        judge(&self.dir, self.model, self.language)?.hear(samples, rate)
     }
 
     fn id(&self) -> String {
-        judge_id()
+        judge_id_for(self.model)
     }
 }
 
-/// What hears Malayalam narration: the host's ([`Session::narration_hearer`]), else the
-/// Malayalam speech model. `Err`: why the strict check cannot run (said in the result; the
-/// narration is still read).
-fn hearer(s: &Session, models_dir: Option<&std::path::Path>) -> std::result::Result<Arc<dyn tts::heard::Hearer>, String> {
-    if let Some(h) = &s.narration_hearer {
-        return Ok(h.clone());
-    }
-    let id = filmcraft_speech::models::MALAYALAM_MODEL;
-    let m = filmcraft_speech::models::find(id).ok_or_else(|| format!("unknown speech model {id}"))?;
+/// The installed speech model of `candidates` (the first that is), lazily loaded.
+fn lazy_model(
+    models_dir: Option<&std::path::Path>,
+    candidates: &[&'static str],
+    language: &'static str,
+) -> std::result::Result<Arc<dyn tts::heard::Hearer>, String> {
     let dir = models_dir.ok_or("no data directory for speech models")?;
     if !filmcraft_speech::available() {
         return Err(crate::transcript::NO_SPEECH.to_string());
     }
-    if !filmcraft_speech::models::installed(dir, m) {
-        return Err(format!(
-            "the Malayalam speech model is not downloaded: transcript.downloadModel {{\"model\": \"{id}\"}} ({:.1} GB)",
-            m.size() as f64 / 1e9
-        ));
+    for &id in candidates {
+        if filmcraft_speech::models::find(id).is_some_and(|m| filmcraft_speech::models::installed(dir, m)) {
+            return Ok(Arc::new(LazyJudge { dir: dir.to_path_buf(), model: id, language }));
+        }
     }
-    Ok(Arc::new(LazyJudge { dir: dir.to_path_buf() }))
+    let first = candidates.first().copied().unwrap_or_default();
+    let size = filmcraft_speech::models::find(first).map_or(0.0, |m| m.size() as f64 / 1e9);
+    Err(format!(
+        "the {} speech model is not downloaded: transcript.downloadModel {{\"model\": \"{first}\"}} ({size:.1} GB)",
+        if language == "ml" { "Malayalam" } else { "English" }
+    ))
+}
+
+/// What hears narration in `language` (`ml`, `en`): the host's ([`Session::narration_hearer`]),
+/// else the Malayalam speech model, or for English Whisper large-v3-turbo (small when turbo is
+/// not downloaded). `Err`: why the strict check cannot run (said in the result; the narration is
+/// still read).
+fn hearer_for(s: &Session, models_dir: Option<&std::path::Path>, language: &'static str) -> std::result::Result<Arc<dyn tts::heard::Hearer>, String> {
+    if let Some(h) = &s.narration_hearer {
+        return Ok(h.clone());
+    }
+    match language {
+        "ml" => lazy_model(models_dir, &[filmcraft_speech::models::MALAYALAM_MODEL], "ml"),
+        _ => lazy_model(models_dir, &[filmcraft_speech::models::TURBO_MODEL, "whisper-small"], "en"),
+    }
+}
+
+/// The second opinion on Malayalam narration: the host's ([`Session::narration_second`]), else
+/// IndicWhisper when downloaded (none for English). IndicWhisper writes spoken numbers as digits;
+/// they are spelled the way the narration's script spells them before they are compared.
+fn second_for(s: &Session, models_dir: Option<&std::path::Path>, n: &Narration) -> Option<Arc<dyn tts::heard::Hearer>> {
+    if let Some(h) = &s.narration_second {
+        return Some(h.clone());
+    }
+    if s.narration_hearer.is_some() || check_language(n) != "ml" {
+        return None;
+    }
+    let inner = lazy_model(models_dir, &[filmcraft_speech::models::INDICWHISPER_ML], "ml").ok()?;
+    Some(Arc::new(SpelledNumbers { inner, style: number_style(n) }))
+}
+
+/// A recogniser whose digits are spelled in a narration's style (`tts::malayalam::spell_numbers`).
+struct SpelledNumbers {
+    inner: Arc<dyn tts::heard::Hearer>,
+    style: tts::malayalam::Numbers,
+}
+
+impl tts::heard::Hearer for SpelledNumbers {
+    fn hear(&self, samples: &[f32], rate: u32) -> std::result::Result<String, String> {
+        self.inner.hear(samples, rate).map(|t| tts::malayalam::spell_numbers(&t, self.style))
+    }
+
+    fn id(&self) -> String {
+        format!("{} (numbers spelled)", self.inner.id())
+    }
 }
 
 /// What the Malayalam speech model hears in `samples` (mono, `rate`), and which model heard it.
 /// `Err`: why it cannot hear (no model, this build).
 #[cfg(feature = "neural-voices")]
 pub(crate) fn hear_malayalam(s: &Session, models_dir: Option<&std::path::Path>, samples: &[f32], rate: u32) -> std::result::Result<(String, String), String> {
-    let h = hearer(s, models_dir)?;
+    let h = hearer_for(s, models_dir, "ml")?;
     Ok((h.hear(samples, rate)?, h.id()))
 }
 
-/// How `n` is checked: by `hearer`'s model, or not (and why).
+/// The least similarity of a reading to its voice's sample that passes the voice gate: the
+/// owner's cloned readings measured against his sample (crate README of `filmcraft-speech`,
+/// "The voice gate") sit well above it; a reading that came out as someone else falls under it.
+pub const MIN_VOICE_SIMILARITY: f64 = 0.3;
+
+/// The voice gate of a cloned voice: ECAPA embeddings of readings against the embedding of the
+/// voice's own sample (feature `whisper` and the speaker model downloaded).
+#[cfg(all(feature = "whisper", feature = "neural-voices"))]
+struct VoiceGate {
+    model: Arc<filmcraft_speech::ecapa::Ecapa>,
+    reference: Vec<f32>,
+    voice: String,
+}
+
+#[cfg(all(feature = "whisper", feature = "neural-voices"))]
+impl tts::heard::VoiceMatch for VoiceGate {
+    fn similarity(&self, samples: &[f32], rate: u32) -> std::result::Result<f64, String> {
+        let x16 = filmcraft_audio_dsp::resample::resample_sinc(samples, rate, filmcraft_speech::SAMPLE_RATE);
+        let e = self.model.embed(&x16).map_err(|e| e.to_string())?;
+        Ok(f64::from(filmcraft_speech::ecapa::cosine(&e, &self.reference)))
+    }
+
+    fn id(&self) -> String {
+        format!("{} {}", filmcraft_speech::models::ECAPA_MODEL, self.voice)
+    }
+}
+
+/// The voice gate for cloned voice `voice`: the host's ([`Session::narration_voice`]), else the
+/// speaker model against the voice's sample, embedded once per voice. None: no speaker model,
+/// no sample, or this build.
+fn voice_gate_for(s: &Session, models_dir: Option<&std::path::Path>, voice: &str) -> Option<Arc<dyn tts::heard::VoiceMatch>> {
+    if let Some(v) = &s.narration_voice {
+        return Some(v.clone());
+    }
+    #[cfg(all(feature = "whisper", feature = "neural-voices"))]
+    {
+        type Gates = Vec<(String, Arc<VoiceGate>)>;
+        static GATES: OnceLock<Mutex<Gates>> = OnceLock::new();
+        let dir = models_dir?;
+        if s.narration_hearer.is_some() {
+            // a host's own recogniser (tests): no models from the data directory
+            return None;
+        }
+        let model = filmcraft_speech::ecapa::load_cached(dir)?;
+        let voices = tts::clone::voices_dir(dir);
+        let profile = tts::clone::load_profile(&voices, voice).ok()?;
+        let key = format!("{voice}|{}|{}", profile.created, profile.revision);
+        let mut g = GATES.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, gate)) = g.iter().find(|(k, _)| *k == key) {
+            return Some(gate.clone() as Arc<dyn tts::heard::VoiceMatch>);
+        }
+        let path = tts::clone::sample_path(&voices, &profile).or_else(|| tts::clone::full_sample_path(&voices, &profile).ok())?;
+        let (x, rate) = tts::wav::read(&path).ok()?;
+        let x16 = filmcraft_audio_dsp::resample::resample_sinc(&x, rate, filmcraft_speech::SAMPLE_RATE);
+        let reference = model.embed(&x16).ok()?;
+        let gate = Arc::new(VoiceGate { model, reference, voice: voice.to_string() });
+        g.push((key, gate.clone()));
+        let extra = g.len().saturating_sub(8);
+        g.drain(..extra);
+        Some(gate as Arc<dyn tts::heard::VoiceMatch>)
+    }
+    #[cfg(not(all(feature = "whisper", feature = "neural-voices")))]
+    {
+        let _ = (models_dir, voice);
+        None
+    }
+}
+
+/// The strict check's judges: who hears, who gives a second opinion and how the two combine,
+/// and the voice gate.
+#[derive(Clone)]
+struct Judges {
+    hearer: Arc<dyn tts::heard::Hearer>,
+    second: Option<Arc<dyn tts::heard::Hearer>>,
+    agreement: tts::heard::Agreement,
+    voice: Option<Arc<dyn tts::heard::VoiceMatch>>,
+    min_similarity: f64,
+    policy: tts::heard::Policy,
+}
+
+impl Judges {
+    fn strict(&self) -> tts::heard::Strict<'_> {
+        tts::heard::Strict {
+            hearer: self.hearer.as_ref(),
+            policy: self.policy,
+            second: self.second.as_deref(),
+            agreement: self.agreement,
+            voice: self.voice.as_deref(),
+            min_similarity: self.min_similarity,
+        }
+    }
+
+    fn id(&self) -> String {
+        self.strict().id()
+    }
+
+    /// The same check with only its first recogniser: what readings were checked under before
+    /// the second opinion and the voice gate (their cache entries are adopted, see [`cached`]).
+    fn first_only(&self) -> Judges {
+        Judges { second: None, voice: None, ..self.clone() }
+    }
+}
+
+/// How `n` is checked: by its judges, or not (and why).
 #[derive(Clone)]
 enum Check {
-    /// Not a narration the strict check reads (English), or `check: "off"`.
+    /// Not a narration the strict check reads (a voice that is not cloned), or `check: "off"`.
     Off,
     /// Asked for but impossible: the reason.
     Skipped(String),
-    Strict(Arc<dyn tts::heard::Hearer>),
+    Strict(Judges),
 }
 
-/// The strict check `n` reads under, when `p` asks for it.
+/// The strict check `n` reads under, when `p` asks for it: `agreement` (`both`, the default:
+/// a line is read again only when both Malayalam models disagree with the script; `either`;
+/// `first`), `voiceGate` (default on when the speaker model is downloaded) and
+/// `minSimilarity` (default [`MIN_VOICE_SIMILARITY`]).
 fn check_for(s: &Session, cmd: &str, p: &Value, n: &Narration) -> Result<Check> {
     let on = strict_requested(cmd, p)?;
+    let agreement = match p.get("agreement").filter(|v| !v.is_null()) {
+        None => tts::heard::Agreement::Both,
+        Some(Value::String(a)) => {
+            tts::heard::Agreement::from_id(a).ok_or_else(|| bad(cmd, format!("`agreement` is \"both\", \"either\" or \"first\", not \"{a}\"")))?
+        }
+        Some(v) => return Err(bad(cmd, format!("`agreement` is \"both\", \"either\" or \"first\", not {v}"))),
+    };
+    let gate = match p.get("voiceGate").filter(|v| !v.is_null()) {
+        None => true,
+        Some(v) => v.as_bool().ok_or_else(|| bad(cmd, "`voiceGate` must be true or false"))?,
+    };
+    let min_similarity = match p.get("minSimilarity").filter(|v| !v.is_null()) {
+        None => MIN_VOICE_SIMILARITY,
+        Some(v) => v.as_f64().filter(|f| f.is_finite() && (-1.0..=1.0).contains(f)).ok_or_else(|| bad(cmd, "`minSimilarity` is a number from -1 to 1"))?,
+    };
     if !checkable(n) || !on {
         return Ok(Check::Off);
     }
     let models = crate::transcript::models_dir();
-    Ok(match hearer(s, models.as_deref()) {
-        Ok(h) => Check::Strict(h),
+    let language = check_language(n);
+    Ok(match hearer_for(s, models.as_deref(), language) {
+        Ok(hearer) => Check::Strict(Judges {
+            hearer,
+            second: if agreement == tts::heard::Agreement::First { None } else { second_for(s, models.as_deref(), n) },
+            agreement,
+            voice: if gate { voice_gate_for(s, models.as_deref(), &n.voice) } else { None },
+            min_similarity,
+            policy: if language == "ml" { tts::heard::Policy::default() } else { tts::heard::Policy::english() },
+        }),
         Err(why) => Check::Skipped(why),
     })
 }
@@ -346,10 +538,10 @@ fn check_json(n: &Narration, check: &Check, report: Option<&Value>) -> Value {
         Check::Off if !checkable(n) => Value::Null,
         Check::Off => json!({"status": "off"}),
         Check::Skipped(why) => json!({"status": "skipped", "reason": why}),
-        Check::Strict(h) => {
+        Check::Strict(j) => {
             let utterances = report.cloned().unwrap_or(Value::Null);
             let clear = utterances.as_array().is_some_and(|u| u.iter().all(|c| c["passed"].as_bool() == Some(true)));
-            json!({"status": if clear { "clear" } else { "unclear" }, "model": h.id(), "utterances": utterances})
+            json!({"status": if clear { "clear" } else { "unclear" }, "model": j.id(), "utterances": utterances})
         }
     }
 }
@@ -453,7 +645,7 @@ fn params(n: &Narration) -> tts::Params {
 fn disk_key(n: &Narration, models_dir: Option<&std::path::Path>, check: &Check) -> Option<String> {
     let identity = tts::cache::voice_identity_for(&n.voice, &n.language, models_dir)?;
     let identity = match check {
-        Check::Strict(h) => format!("{identity}|strict {}", h.id()),
+        Check::Strict(j) => format!("{identity}|strict {}", j.id()),
         _ => identity,
     };
     Some(tts::cache::DiskCache::key(&identity, &spoken_text(n), &params(n)))
@@ -462,7 +654,7 @@ fn disk_key(n: &Narration, models_dir: Option<&std::path::Path>, check: &Check) 
 /// The memory cache's key for `n` read under `check`.
 fn memory_key(n: &Narration, check: &Check) -> String {
     match check {
-        Check::Strict(h) => format!("{}\u{1f}strict\u{1f}{}", cache_key(n), h.id()),
+        Check::Strict(j) => format!("{}\u{1f}strict\u{1f}{}", cache_key(n), j.id()),
         _ => cache_key(n),
     }
 }
@@ -476,13 +668,83 @@ fn cached(s: &Session, n: &Narration, models_dir: Option<&std::path::Path>, chec
     }
     let disk = s.tts_disk.as_ref()?;
     let dk = disk_key(n, models_dir, check)?;
-    let a = Arc::new(disk.get(&dk)?);
-    let report = disk.note(&dk).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let (a, report) = match disk.get(&dk) {
+        Some(a) => (Arc::new(a), disk.note(&dk).and_then(|b| serde_json::from_slice::<Value>(&b).ok())),
+        None => {
+            let (a, report) = adopt(disk, n, models_dir, check)?;
+            if let Ok(bytes) = serde_json::to_vec(&report) {
+                disk.put(&dk, &a);
+                disk.put_note(&dk, &bytes);
+            }
+            (a, Some(report))
+        }
+    };
     if let Some(r) = &report {
         report_put(key.clone(), r.clone());
     }
     cache_put(&s.tts_cache, key, a.clone());
     Some((a, report))
+}
+
+/// A reading of `n` cached under an earlier check (its first recogniser alone, before the
+/// second opinion and the voice gate; or, for English, unchecked), heard now as a whole by
+/// `check`'s judges: when it passes it is kept under the new check (no voice reads it again),
+/// with a report of that hearing (`adopted`). `None`: nothing to adopt, or it does not pass.
+fn adopt(disk: &tts::cache::DiskCache, n: &Narration, models_dir: Option<&std::path::Path>, check: &Check) -> Option<(Arc<tts::Audio>, Value)> {
+    let Check::Strict(j) = check else { return None };
+    let first = Check::Strict(j.first_only());
+    let mut earlier = Vec::new();
+    if j.second.is_some() || j.voice.is_some() {
+        earlier.push(first);
+    }
+    if check_language(n) == "en" {
+        earlier.push(Check::Off);
+    }
+    let english = check_language(n) == "en";
+    let said = if english { tts::heard::english_words(&spoken_text(n)) } else { spoken_text(n).into_owned() };
+    for old in earlier {
+        let Some(k) = disk_key(n, models_dir, &old) else { continue };
+        let Some(a) = disk.get(&k) else { continue };
+        let note = disk.note(&k).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        // the first recogniser passed every utterance: the second opinion can only agree
+        let clear_before = note.as_ref().and_then(Value::as_array).is_some_and(|u| !u.is_empty() && u.iter().all(|c| c["passed"].as_bool() == Some(true)));
+        let mut heard = String::new();
+        let mut text_ok = clear_before;
+        let mut score = tts::heard::Score::default();
+        if !clear_before {
+            let norm = |t: String| if english { tts::heard::english_words(&t) } else { t };
+            heard = norm(j.hearer.hear(&a.samples, a.sample_rate).ok()?);
+            score = tts::heard::score(&said, &heard);
+            text_ok = j.policy.passes(&score);
+            if !text_ok
+                && j.agreement == tts::heard::Agreement::Both
+                && let Some(h2) = &j.second
+                && let Ok(h) = h2.hear(&a.samples, a.sample_rate)
+            {
+                text_ok = j.policy.passes(&tts::heard::score(&said, &norm(h)));
+            }
+        }
+        let similarity = j.voice.as_ref().and_then(|v| v.similarity(&a.samples, a.sample_rate).ok());
+        let voice_ok = similarity.is_none_or(|s| !s.is_finite() || s >= j.min_similarity);
+        if text_ok && voice_ok {
+            let report = match note.filter(|_| clear_before) {
+                Some(Value::Array(mut u)) => {
+                    for c in &mut u {
+                        c["adopted"] = json!(true);
+                    }
+                    if let (Some(s), Some(c)) = (similarity, u.first_mut()) {
+                        c["similarity"] = json!(s);
+                    }
+                    Value::Array(u)
+                }
+                _ => {
+                    json!([{"text": said, "heard": heard, "cer": score.cer, "startCer": score.start_cer, "passed": true, "adopted": true, "similarity": similarity}])
+                }
+            };
+            return Some((Arc::new(a), report));
+        }
+    }
+    None
 }
 
 /// Keep a fresh reading of `n` (and its strict check's report) in the caches.
@@ -521,7 +783,7 @@ fn synthesize(s: &Session, cmd: &str, p: &Value, n: &Narration) -> Result<(Arc<t
     }
     let transcriber = reference_transcriber(s, n, models.as_deref());
     let strict = match &check {
-        Check::Strict(h) => Some(tts::heard::Strict { hearer: h.as_ref(), policy: tts::heard::Policy::default() }),
+        Check::Strict(j) => Some(j.strict()),
         _ => None,
     };
     let (a, report) = render(n, models.as_deref(), transcriber.as_ref(), strict.as_ref()).map_err(|e| tts_err(cmd, e))?;
@@ -863,7 +1125,7 @@ fn render_job(s: &mut Session, p: &Value) -> Result<Value> {
         let t0 = web_time::Instant::now();
         *prog.status.lock().unwrap_or_else(PoisonError::into_inner) = "Synthesizing…".into();
         let strict = match &check {
-            Check::Strict(h) => Some(tts::heard::Strict { hearer: h.as_ref(), policy: tts::heard::Policy::default() }),
+            Check::Strict(j) => Some(j.strict()),
             _ => None,
         };
         let r = match render(&n, models.as_deref(), transcriber.as_ref(), strict.as_ref()) {
@@ -998,6 +1260,28 @@ mod tests {
         settings("t", &json!({"text": "ഇത് ശരിയാണ്.", "voice": "clone:me"}), None).unwrap()
     }
 
+    fn judges(h: Arc<dyn tts::heard::Hearer>) -> Judges {
+        Judges {
+            hearer: h,
+            second: None,
+            agreement: tts::heard::Agreement::Both,
+            voice: None,
+            min_similarity: MIN_VOICE_SIMILARITY,
+            policy: tts::heard::Policy::default(),
+        }
+    }
+
+    struct Gate;
+
+    impl tts::heard::VoiceMatch for Gate {
+        fn similarity(&self, _: &[f32], _: u32) -> std::result::Result<f64, String> {
+            Ok(0.9)
+        }
+        fn id(&self) -> String {
+            "gate".into()
+        }
+    }
+
     #[test]
     fn the_check_is_strict_unless_turned_off() {
         assert!(strict_requested("t", &json!({})).unwrap());
@@ -1009,23 +1293,45 @@ mod tests {
         for bad in [json!("loose"), json!(1), json!(["strict"]), json!({})] {
             assert!(strict_requested("t", &json!({"check": bad})).is_err(), "{bad}");
         }
-        // only a cloned voice speaking Malayalam is checked
+        // cloned voices are checked, in Malayalam and in English; the built-in voices are not
         assert!(checkable(&ml()));
         let en = settings("t", &json!({"text": "Hello.", "voice": "clone:me"}), None).unwrap();
-        assert!(!checkable(&en));
+        assert!(checkable(&en));
+        assert_eq!((check_language(&ml()), check_language(&en)), ("ml", "en"));
+        let basic = settings("t", &json!({"text": "Hello.", "voice": "basic-male"}), None).unwrap();
+        assert!(!checkable(&basic));
         let s = Session::default();
-        assert!(matches!(check_for(&s, "t", &json!({}), &en).unwrap(), Check::Off));
+        assert!(matches!(check_for(&s, "t", &json!({}), &basic).unwrap(), Check::Off));
+        assert!(!matches!(check_for(&s, "t", &json!({}), &en).unwrap(), Check::Off), "English cloned narration is heard back");
         assert!(matches!(check_for(&s, "t", &json!({"check": "off"}), &ml()).unwrap(), Check::Off));
         assert!(check_for(&s, "t", &json!({"check": 3}), &en).is_err(), "a hostile check is refused for English too");
-        // the host's recogniser hears
-        let s = Session { narration_hearer: Some(Arc::new(Ear)), ..Session::default() };
-        assert!(matches!(check_for(&s, "t", &json!({}), &ml()).unwrap(), Check::Strict(_)));
+        for bad in
+            [json!({"agreement": "most"}), json!({"agreement": 2}), json!({"voiceGate": "yes"}), json!({"minSimilarity": 5}), json!({"minSimilarity": "x"})]
+        {
+            assert!(check_for(&s, "t", &bad, &ml()).is_err(), "{bad}");
+        }
+        // the host's recogniser hears, with the host's second opinion and voice gate
+        let s = Session {
+            narration_hearer: Some(Arc::new(Ear)),
+            narration_second: Some(Arc::new(Ear)),
+            narration_voice: Some(Arc::new(Gate)),
+            ..Session::default()
+        };
+        let Check::Strict(j) = check_for(&s, "t", &json!({}), &ml()).unwrap() else { panic!("not strict") };
+        assert!(j.second.is_some() && j.voice.is_some() && j.agreement == tts::heard::Agreement::Both);
+        assert_eq!(j.id(), "ear v1 + ear v1 (both), voice gate >= 0.30");
+        assert_eq!(j.first_only().id(), "ear v1", "the earlier check's name: its cache entries are adopted");
+        let Check::Strict(j) = check_for(&s, "t", &json!({"agreement": "first", "voiceGate": false}), &ml()).unwrap() else { panic!("not strict") };
+        assert!(j.second.is_none() && j.voice.is_none());
+        // English reads under the English policy
+        let Check::Strict(j) = check_for(&s, "t", &json!({}), &en).unwrap() else { panic!("not strict") };
+        assert_eq!(j.policy, tts::heard::Policy::english());
     }
 
     #[test]
     fn checked_readings_have_their_own_keys_and_reports() {
         let n = ml();
-        let strict = Check::Strict(Arc::new(Ear));
+        let strict = Check::Strict(judges(Arc::new(Ear)));
         assert_eq!(memory_key(&n, &Check::Off), cache_key(&n), "unchecked readings keep their keys");
         assert_eq!(memory_key(&n, &Check::Skipped("x".into())), cache_key(&n));
         assert_ne!(memory_key(&n, &strict), cache_key(&n));
@@ -1043,7 +1349,7 @@ mod tests {
         assert_eq!(check_json(&n, &strict, None)["status"], "unclear", "a reading without its report is not called clear");
         // the model's check is named without loading it (a cached reading never loads it); a
         // model that cannot load is an error when it would hear, never a crash
-        let lazy = LazyJudge { dir: std::env::temp_dir().join("filmcraft-no-such-models") };
+        let lazy = LazyJudge { dir: std::env::temp_dir().join("filmcraft-no-such-models"), model: filmcraft_speech::models::MALAYALAM_MODEL, language: "ml" };
         assert_eq!(tts::heard::Hearer::id(&lazy), judge_id());
         assert!(judge_id().starts_with("whisper-medium-ml check v"));
         assert!(tts::heard::Hearer::hear(&lazy, &[0.0; 16_000], 16_000).is_err());
