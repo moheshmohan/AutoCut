@@ -24,9 +24,13 @@ const FRAME: f64 = 1.0 / FPS;
 /// The robot's colour (green: not the fake face detector's warm pixels).
 const ROBOT: [u8; 4] = [40, 200, 80, 255];
 
+/// A fresh folder per call: the clock alone is not enough (macOS ticks in microseconds, and two
+/// tests starting together shared one folder, one rewriting a photo while the other read it).
 fn tmp_dir(tag: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let d = std::env::temp_dir().join(format!("filmcraft-showcase-photos-{tag}-{}-{nanos}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("filmcraft-showcase-photos-{tag}-{}-{nanos}-{n}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }

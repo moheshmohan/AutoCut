@@ -18,9 +18,13 @@ const FPS: f64 = 30.0;
 /// The frame: 640 × 360.
 const SIDE: u32 = 640;
 
+/// A fresh folder per call: the clock alone is not enough (macOS ticks in microseconds, and two
+/// tests starting together shared one folder, one rewriting a photo while the other read it).
 fn tmp_dir(tag: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let d = std::env::temp_dir().join(format!("filmcraft-showcase-pillars-{tag}-{}-{nanos}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("filmcraft-showcase-pillars-{tag}-{}-{nanos}-{n}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
