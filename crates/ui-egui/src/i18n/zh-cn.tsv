@@ -3894,3 +3894,24 @@
 	Tracked object	跟踪的对象
 	Tracking… {n}%	正在跟踪… {n}%
 	Camera Track	摄像机跟踪
+
+# Quick Short (Sequence ▸ Quick Short…, the Templates panel)
+	Quick Short…	快速短视频…
+	Quick Short	快速短视频
+	Make a vertical Short or Reel: AutoCut picks a template and fills it from your clips.	制作竖屏短视频或 Reel：AutoCut 会选择模板并用你的片段填充。
+	Selected clips	所选剪辑
+	Template:	模板：
+	Length:	时长：
+	Platform:	平台：
+	Topic:	主题：
+	Look:	风格：
+	The template's	模板自带
+	Tech	科技
+	Make Short	制作短视频
+	What it is about (optional)	内容主题（可选）
+	{n} clip(s) selected in the Project panel	已在项目面板中选择 {n} 个剪辑
+	Nothing is selected in the Project panel: every video and photo of the project is used.	项目面板中未选择任何内容：将使用项目中的所有视频和照片。
+	Choose a folder of videos and photos	选择包含视频和照片的文件夹
+	Choose a folder first	请先选择文件夹
+	Making a quick short…	正在制作快速短视频…
+	Let AutoCut pick a template and fill it from your clips	让 AutoCut 选择模板并用你的片段填充

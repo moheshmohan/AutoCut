@@ -59,9 +59,9 @@ fn list_and_inspect_the_starters() {
     assert_eq!(count(&mut s, json!({"aspect": "9:16"})), ids.len(), "every starter has a vertical layout");
     let square = count(&mut s, json!({"aspect": "1:1"}));
     assert!(square >= 10 && square < ids.len(), "{square}");
-    assert_eq!(count(&mut s, json!({"kind": "captions"})), 4, "talking head, tutorial, podcast, Q&A");
+    assert_eq!(count(&mut s, json!({"kind": "captions"})), 5, "talking head, tutorial, podcast, Q&A, talking-head tip");
     assert_eq!(count(&mut s, json!({"maxMedia": 1})), 4, "talking head, lower-third kit, quote card, countdown");
-    assert_eq!(count(&mut s, json!({"minMedia": 7})), 2, "the slideshow and the event recap");
+    assert_eq!(count(&mut s, json!({"minMedia": 7})), 5, "the slideshow, the event recaps, the tech reveal and the day in 30 s");
     assert_eq!(count(&mut s, json!({"minMedia": 4, "maxMedia": 3})), 0);
     assert!(s.execute("template.list", json!({"kind": "sticker"})).is_err());
     let i = s.execute("template.inspect", json!({"template": "Photo Beat Slideshow"})).unwrap();
@@ -310,5 +310,60 @@ fn hostile_parameters_and_packages_are_refused() {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.execute("template.save", p.clone())));
         assert!(r.is_ok_and(|r| r.is_err()), "{p}");
     }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A bed the caller generated brings its exact beats (`musicBeats`): the cuts follow them, so a
+/// slower bed makes a longer show; hostile beats are refused.
+#[test]
+fn given_music_beats_retime_the_cuts() {
+    let dir = tmp_dir("vt-beats");
+    let mut s = session(&dir);
+    let bed = s.execute("audio.generate", json!({"kind": "music", "duration": 40.0, "bpm": 90.0, "mood": "energetic", "seed": 3, "place": false})).unwrap();
+    let item = bed["item"].as_u64().unwrap();
+    let beats = bed["beats"].clone();
+    assert!(beats.as_array().is_some_and(|b| b.len() > 20));
+    let r = s.execute("template.apply", json!({"template": "builtin:tech-reveal", "slots": {"music": item}, "musicBeats": beats})).unwrap();
+    assert_eq!(r["retimed"], true, "{r}");
+    // 120 bpm → 90 bpm, each cut on its beat number: a third longer
+    let secs = r["seconds"].as_f64().unwrap();
+    assert!((secs - 17.0 * 120.0 / 90.0).abs() < 0.6, "{secs}");
+    for bad in [json!([1, 1]), json!([5, 2]), json!("x"), json!([-3, 4]), json!((0..30_000).collect::<Vec<i64>>())] {
+        assert!(s.execute("template.apply", json!({"template": "builtin:tech-reveal", "slots": {"music": item}, "musicBeats": bad})).is_err(), "{bad}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The Shorts starters list as AI-ready and show their hints; Save as Template keeps the hints
+/// and takes the author's (checked).
+#[test]
+fn ai_hints_show_and_save() {
+    let dir = tmp_dir("vt-ai");
+    let mut s = session(&dir);
+    let l = s.execute("template.list", json!({})).unwrap();
+    let ready: Vec<&str> = l["templates"].as_array().unwrap().iter().filter(|t| t["aiReady"] == true).map(|t| t["id"].as_str().unwrap()).collect();
+    assert_eq!(ready, filmcraft_templates::builtin::AI_READY_IDS);
+    let i = s.execute("template.inspect", json!({"template": "builtin:tech-reveal"})).unwrap();
+    let slot = |id: &str| i["slots"].as_array().unwrap().iter().find(|x| x["id"] == id).cloned().unwrap();
+    assert_eq!(slot("hook")["ai"]["purpose"], "hook");
+    assert_eq!(slot("broll")["ai"]["energy"], "high");
+    assert_eq!(slot("title")["ai"]["about"], "reveal");
+    assert!(slot("music")["ai"].is_null());
+    // applied and saved again: the hints stay; the author's edit replaces one
+    s.execute("template.apply", json!({"template": "builtin:tech-reveal", "generateMusic": false})).unwrap();
+    let out = dir.join("Mine.fcvideo-template");
+    let edit = json!({"broll": {"ai": {"purpose": "reveal", "query": "robot arm"}}});
+    s.execute("template.save", json!({"path": out.to_string_lossy(), "name": "Mine", "author": "me", "slots": edit})).unwrap();
+    let saved = s.execute("template.inspect", json!({"template": out.to_string_lossy()})).unwrap();
+    let ss = |id: &str| saved["slots"].as_array().unwrap().iter().find(|x| x["id"] == id).cloned().unwrap();
+    assert_eq!(ss("hook")["ai"]["purpose"], "hook");
+    assert_eq!((ss("broll")["ai"]["purpose"].as_str(), ss("broll")["ai"]["query"].as_str()), (Some("reveal"), Some("robot arm")));
+    assert_eq!(ss("hook_line")["ai"]["about"], "hook");
+    // a picture hint on a text slot is refused, naming the field
+    let bad = json!({"title": {"ai": {"purpose": "hook"}}});
+    let e = s
+        .execute("template.save", json!({"path": dir.join("Bad.fcvideo-template").to_string_lossy(), "name": "Bad", "author": "me", "slots": bad}))
+        .unwrap_err();
+    assert!(e.to_string().contains("purpose"), "{e}");
     std::fs::remove_dir_all(&dir).ok();
 }

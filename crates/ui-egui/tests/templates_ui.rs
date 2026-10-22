@@ -26,7 +26,12 @@ impl Driver {
         session.execute("file.projectSettings.scratchDisks", json!({"captured": scratch})).expect("scratch disk");
         let (tx, rx) = channel();
         let app = FilmcraftApp::new(session).with_control(rx);
-        let harness = Harness::builder().with_size(egui::vec2(1600.0, 1200.0)).with_max_steps(10_000).build_eframe(move |_cc| app);
+        // FILMCRAFT_UI_SNAPSHOT_DIR: render with wgpu so `snapshot` can save what the test sees
+        let mut b = Harness::builder().with_size(egui::vec2(1600.0, 1200.0)).with_max_steps(10_000);
+        if std::env::var_os("FILMCRAFT_UI_SNAPSHOT_DIR").is_some() {
+            b = b.wgpu();
+        }
+        let harness = b.build_eframe(move |_cc| app);
         let mut d = Driver { harness, tx, statuses: Vec::new() };
         d.frames(4);
         d
@@ -52,6 +57,19 @@ impl Driver {
 
     fn app(&mut self) -> &mut FilmcraftApp {
         self.harness.state_mut()
+    }
+
+    /// Save the window as `<FILMCRAFT_UI_SNAPSHOT_DIR>/<name>.png` (nothing without the variable).
+    fn snapshot(&mut self, name: &str) {
+        let Some(dir) = std::env::var_os("FILMCRAFT_UI_SNAPSHOT_DIR").map(std::path::PathBuf::from) else { return };
+        self.frames(2);
+        match self.harness.render() {
+            Ok(img) => {
+                std::fs::create_dir_all(&dir).unwrap();
+                img.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+            Err(e) => eprintln!("snapshot {name} skipped: {e}"),
+        }
     }
 
     fn call(&mut self, method: &str, params: Value) -> Value {
@@ -379,5 +397,91 @@ fn hostile_template_drafts_are_refused() {
     d.click("templates.build");
     d.frames(2);
     assert!(d.app().ui.status.starts_with("Build:"), "{}", d.app().ui.status);
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// Records the jobs it is asked to run (instead of AutoCut's host).
+#[derive(Default)]
+struct Recorder(std::sync::Mutex<Vec<Value>>);
+
+impl filmcraft_engine::autocut::AutoCutHost for Recorder {
+    fn run(
+        &self,
+        task: filmcraft_engine::autocut::Task,
+        _port: &filmcraft_engine::autocut::CommandPort,
+        _progress: &std::sync::Arc<filmcraft_engine::export::Progress>,
+    ) -> Result<Value, String> {
+        self.0.lock().unwrap().push(json!({"command": task.kind.command(), "params": task.params}));
+        Ok(json!({"status": "Quick short made"}))
+    }
+}
+
+/// Quick Short… from the Templates panel: every widget of the dialog is agent-drivable, its
+/// draft is UI state, Make Short starts the `autocut.quick` job with the choices, and a folder
+/// source without a folder is refused in the dialog.
+#[test]
+fn quick_short_dialog_starts_the_job() {
+    let scratch = std::env::temp_dir().join(format!("filmcraft-quick-ui-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let mut d = Driver::demo(&scratch.to_string_lossy());
+    let host = std::sync::Arc::new(Recorder::default());
+    d.app().session.autocut.host = Some(host.clone());
+    d.ok("ui.panel.show", json!({"panel": "Templates"}));
+    d.frames(6);
+    d.wait_for("templates.quickShort");
+    d.click("templates.quickShort");
+    d.wait_for("quickShort.go");
+    for id in [
+        "quickShort.source.selection",
+        "quickShort.source.folder",
+        "quickShort.template",
+        "quickShort.seconds",
+        "quickShort.platform",
+        "quickShort.aspect",
+        "quickShort.topic",
+        "quickShort.look",
+        "quickShort.cancel",
+    ] {
+        assert!(d.ids(id).iter().any(|x| x == id), "{id}: {:?}", d.ids("quickShort."));
+    }
+    // the template and the look by clicks, the rest as UI state
+    d.click("quickShort.template");
+    d.wait_for("quickShort.template.builtin:tech-reveal");
+    d.click("quickShort.template.builtin:tech-reveal");
+    d.click("quickShort.look");
+    d.wait_for("quickShort.look.vhs");
+    d.click("quickShort.look.vhs");
+    d.ok("ui.set", json!({"quickShort": {"source": "selection", "topic": "robots", "seconds": 20, "platform": "shorts"}}));
+    d.frames(2);
+    d.snapshot("quick-short-dialog");
+    let draft = d.app().ui.quick_short.clone().unwrap();
+    assert_eq!((draft.template.as_str(), draft.look.as_str(), draft.topic.as_str()), ("builtin:tech-reveal", "vhs", "robots"));
+    d.click("quickShort.go");
+    for _ in 0..200 {
+        if !host.0.lock().unwrap().is_empty() {
+            break;
+        }
+        d.frames(2);
+    }
+    let jobs = host.0.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    let p = &jobs[0]["params"];
+    assert_eq!(jobs[0]["command"], "autocut.quick");
+    assert_eq!((p["template"].as_str(), p["look"].as_str(), p["topic"].as_str()), (Some("builtin:tech-reveal"), Some("vhs"), Some("robots")));
+    assert_eq!((p["seconds"].as_f64(), p["platform"].as_str(), p["aspect"].as_str()), (Some(20.0), Some("youtube"), Some("9:16")));
+    assert!(d.app().ui.quick_short.is_none(), "the dialog closes when the job starts");
+    // a folder source needs a folder: refused in the dialog, nothing started
+    d.ok("ui.set", json!({"quickShort": {"source": "folder", "folder": ""}}));
+    d.frames(2);
+    d.wait_for("quickShort.go");
+    d.click("quickShort.go");
+    d.frames(4);
+    assert!(d.app().ui.quick_short.as_ref().is_some_and(|q| !q.error.is_empty()), "{:?}", d.app().ui.quick_short);
+    assert_eq!(host.0.lock().unwrap().len(), 1);
+    d.ok("ui.set", json!({"quickShort": null}));
+    d.frames(2);
+    assert!(d.app().ui.quick_short.is_none());
+    assert!(d.call("ui.set", json!({"quickShort": 5}))["ok"] != json!(true), "hostile UI state is refused");
     let _ = std::fs::remove_dir_all(&scratch);
 }

@@ -5,7 +5,7 @@
 //! | command | does |
 //! |---|---|
 //! | `template.list` | the built-in starters and the user's templates (`<data dir>/Video Templates/`: `*.fcvideo-template` folders and `.zip` packages); `query`, `category`, `source`, `aspect` (a layout it has: `9:16`), `kind` (a slot kind it has: `captions`), `minMedia` / `maxMedia` (how many clips or photos it takes) filter; templates that fail to read are listed under `invalid` with why |
-//! | `template.inspect` | one template (`template`: id, name or path): slots with their placements, variants, beat grid, look, caption style, export preset, the manifest |
+//! | `template.inspect` | one template (`template`: id, name or path): slots with their placements and AI hints (`ai`: what each picture slot's shot is for, how lively, words to find it by, speech or not, the least quality, filming order; what each text slot's model text says), variants, beat grid, look, caption style, export preset, the manifest |
 //! | `template.validate` | check a package (`path`: folder, `.zip` or `template.json`): `valid`, and every problem with the field it is about |
 //! | `template.apply` | a new sequence from a template: `variant` (`16:9`, `9:16`…), `slots` (`{"photos": ["/a.jpg", 12, {"path": "/b.mov", "inSeconds": 3, "focus": [0.4, 0.5]}], "title": "Lisbon", "captions": [{"start": ticks, "end": ticks, "text": "…"}]}`), `name`, `captions: false` (no transcribing); one undo step |
 //! | `template.save` | Save as Template: clips flagged as slots (`template.markSlot`, or left by an earlier apply) become slots with neutral generated placeholders; other personal media is left out unless `bundle`d (with its attribution); the base template's (or the author's) slot details, captions slot, layouts and hints, poster, look and export presets carry over; written into the user templates folder (or `path`: a folder or a `.zip`), where the browser shows it |
@@ -17,7 +17,8 @@
 //!
 //! **Applying.** Files named in `slots` are imported (a file the project already holds is reused,
 //! and one file named for several placements is one item). A filled music slot is measured
-//! (`media.beats`' analysis) and the cuts re-quantized to its beats; an unfilled one with a
+//! (`media.beats`' analysis; or `musicBeats`, its beats in ticks from its start when the caller
+//! knows them, a bed it generated) and the cuts re-quantized to its beats; an unfilled one with a
 //! `generate` default gets a bed made with `audio.generate` at the template's tempo and length,
 //! and the cuts move to that bed's exact beats (its length kept). Music shorter than the show is
 //! Remixed to length (looped when Remix cannot). The template's Elements sounds (stand-ins naming
@@ -86,7 +87,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "template.apply",
             "Apply Video Template",
-            r#"{"template":id|name|path,"variant":"16:9"|"9:16"|…?,"slots":{"<slot>": path|itemId|text|{"path"|"item"|"text","in":ticks?,"inSeconds":f64?,"focus":[x,y]?,"focusByVariant":{"9:16":[x,y]}?}|[…], "<captions slot>": [{"start":ticks|"startSeconds":f64,"end":ticks|"endSeconds":f64,"text":str,"speaker":str?}]}?,"name":str?,"sequence":str (name)?,"requireAll":bool?,"generateMusic":bool=true,"look":bool=true,"sounds":bool=true,"captions":bool=true}"#,
+            r#"{"template":id|name|path,"variant":"16:9"|"9:16"|…?,"slots":{"<slot>": path|itemId|text|{"path"|"item"|"text","in":ticks?,"inSeconds":f64?,"focus":[x,y]?,"focusByVariant":{"9:16":[x,y]}?}|[…], "<captions slot>": [{"start":ticks|"startSeconds":f64,"end":ticks|"endSeconds":f64,"text":str,"speaker":str?}]}?,"name":str?,"sequence":str (name)?,"requireAll":bool?,"generateMusic":bool=true,"musicBeats":[ticks]?,"look":bool=true,"sounds":bool=true,"captions":bool=true}"#,
             always,
             apply,
             true,
@@ -116,7 +117,7 @@ pub fn commands() -> Vec<CommandSpec> {
 }
 
 /// `template.save`'s parameters.
-pub const SAVE_PARAMS: &str = r#"{"path":str (.fcvideo-template folder or .zip; default: the user templates folder)?,"zip":bool=false,"sequence":id?,"name":str?,"id":str?,"description":str?,"author":str?,"license":str="MIT OR Apache-2.0","category":str?,"version":str?,"tags":[str]?,"base":id|"none"?,"slots":{"<slot>":{"name","prompt","order","minCount","beatSync","fit","constraints","default"}}?,"captions":bool|{"id","name","source":[slot],"maxChars","lines"}?,"variants":["16:9"|"9:16"|"1:1"|"4:5"]?,"poster":ticks?,"posterSeconds":f64?,"look":{"lumetri":str}|{"preset":str}?,"exportPreset":str?,"bundle":[itemId]|true?,"overwrite":bool?}"#;
+pub const SAVE_PARAMS: &str = r#"{"path":str (.fcvideo-template folder or .zip; default: the user templates folder)?,"zip":bool=false,"sequence":id?,"name":str?,"id":str?,"description":str?,"author":str?,"license":str="MIT OR Apache-2.0","category":str?,"version":str?,"tags":[str]?,"base":id|"none"?,"slots":{"<slot>":{"name","prompt","order","minCount","beatSync","fit","constraints","default","ai":{"purpose","query","energy","speech","minQuality","chronological","prompt","maxChars","about"}}}?,"captions":bool|{"id","name","source":[slot],"maxChars","lines"}?,"variants":["16:9"|"9:16"|"1:1"|"4:5"]?,"poster":ticks?,"posterSeconds":f64?,"look":{"lumetri":str}|{"preset":str}?,"exportPreset":str?,"bundle":[itemId]|true?,"overwrite":bool?}"#;
 
 /// Bumped whenever a template is saved or installed in the user folder (the browser re-reads).
 static LIBRARY_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -306,6 +307,7 @@ fn slot_json(s: &Slot) -> Value {
         "constraints": serde_json::to_value(&s.constraints).unwrap_or_default(),
         "default": s.default.as_ref().map(|d| serde_json::to_value(d).unwrap_or_default()),
         "captions": s.captions.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default()),
+        "ai": s.ai.as_ref().map(|a| serde_json::to_value(a).unwrap_or_default()),
     })
 }
 
@@ -334,6 +336,7 @@ fn summary(e: &Entry) -> Value {
         "mediaSlots": m.media_slots(),
         "mediaCount": m.media_count(),
         "captions": m.captions_slot().is_some(),
+        "aiReady": m.ai_ready(),
         "poster": m.poster_time().0,
         "posterSeconds": m.poster_time().seconds(),
     })
@@ -689,6 +692,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     let require_all = bool_p(p, "requireAll").unwrap_or(false);
     let with_sounds = bool_p(p, "sounds").unwrap_or(true);
     let with_captions = bool_p(p, "captions").unwrap_or(true);
+    let given_beats = music_beats_p(p, CMD)?;
     let label = format!("Apply Template {}", m.name);
     let step = label.clone();
     s.edit_group(&step, move |s| {
@@ -733,7 +737,20 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                     let from = f.source_in.unwrap_or(Tick::ZERO);
                     let len = s.project.item(f.item).map(|i| i.duration()).unwrap_or_default();
                     let dur = (len - from).min(Tick(m.duration.0.saturating_mul(3)));
-                    match crate::remix::beat_ticks(s, f.item, from, dur) {
+                    // the caller's beats (a bed it generated: exact), else measured
+                    let known = given_beats.as_ref().map(|b| {
+                        let beats: Vec<Tick> = b.iter().filter(|t| **t >= from).map(|t| *t - from).collect();
+                        let bpm = match (beats.first(), beats.last()) {
+                            (Some(a), Some(z)) if beats.len() >= 2 && z > a => 60.0 * (beats.len() - 1) as f64 / (*z - *a).seconds(),
+                            _ => 0.0,
+                        };
+                        (bpm, beats)
+                    });
+                    let measured = match known.filter(|(_, b)| b.len() >= 2) {
+                        Some(k) => Ok(k),
+                        None => crate::remix::beat_ticks(s, f.item, from, dur),
+                    };
+                    match measured {
                         Ok((bpm, beats)) => {
                             music = json!({"item": f.item.0, "generated": false, "bpm": bpm, "beats": beats.len()});
                             music_beats = Some(MusicBeats { beats, mode: None });
@@ -852,6 +869,27 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
             "warnings": warnings,
         }))
     })
+}
+
+/// `musicBeats`: the filled music's beats, ticks from its start, increasing (at most 20 000).
+fn music_beats_p(p: &Value, cmd: &str) -> Result<Option<Vec<Tick>>> {
+    let Some(v) = p.get("musicBeats").filter(|v| !v.is_null()) else { return Ok(None) };
+    let a = v
+        .as_array()
+        .filter(|a| a.len() <= filmcraft_templates::manifest::MAX_BEATS)
+        .ok_or_else(|| bad(cmd, "`musicBeats` is a list of at most 20000 ticks"))?;
+    let mut out: Vec<Tick> = Vec::with_capacity(a.len());
+    for t in a {
+        let t = t
+            .as_i64()
+            .filter(|t| (0..=MAX_TEMPLATE_TICKS.saturating_mul(4)).contains(t))
+            .ok_or_else(|| bad(cmd, "`musicBeats` are ticks from the music's start"))?;
+        if out.last().is_some_and(|l| l.0 >= t) {
+            return Err(bad(cmd, "`musicBeats` must increase"));
+        }
+        out.push(Tick(t));
+    }
+    Ok(Some(out))
 }
 
 /// Synthesize the template's Elements sounds and swap them in for their stand-ins (part of the

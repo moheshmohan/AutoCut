@@ -4254,3 +4254,24 @@
 	Tracked object	Objeto seguido
 	Tracking… {n}%	Siguiendo… {n} %
 	Camera Track	Seguimiento de cámara
+
+# Quick Short (Sequence ▸ Quick Short…, the Templates panel)
+	Quick Short…	Short rápido…
+	Quick Short	Short rápido
+	Make a vertical Short or Reel: AutoCut picks a template and fills it from your clips.	Crea un Short o Reel vertical: AutoCut elige una plantilla y la rellena con tus clips.
+	Selected clips	Clips seleccionados
+	Template:	Plantilla:
+	Length:	Duración:
+	Platform:	Plataforma:
+	Topic:	Tema:
+	Look:	Aspecto:
+	The template's	El de la plantilla
+	Tech	Tecnológico
+	Make Short	Crear Short
+	What it is about (optional)	De qué trata (opcional)
+	{n} clip(s) selected in the Project panel	{n} clip(s) seleccionado(s) en el panel Proyecto
+	Nothing is selected in the Project panel: every video and photo of the project is used.	No hay nada seleccionado en el panel Proyecto: se usan todos los videos y fotos del proyecto.
+	Choose a folder of videos and photos	Elige una carpeta de videos y fotos
+	Choose a folder first	Elige primero una carpeta
+	Making a quick short…	Creando un Short rápido…
+	Let AutoCut pick a template and fill it from your clips	Deja que AutoCut elija una plantilla y la rellene con tus clips

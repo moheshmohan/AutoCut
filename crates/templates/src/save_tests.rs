@@ -80,6 +80,7 @@ fn every_starter_survives_apply_then_save() {
             );
             assert_eq!(g.captions, s.captions, "{id}: captions of {}", s.id);
             assert_eq!(g.default, s.default, "{id}: default of {}", s.id);
+            assert_eq!(g.ai, s.ai, "{id}: AI hints of {}", s.id);
         }
         let layouts = |m: &crate::Manifest| {
             let mut v = m.variants.iter().map(|v| (v.id.clone(), v.width, v.height, v.export_preset.clone())).collect::<Vec<_>>();

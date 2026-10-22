@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::apply::{ApplyOptions, MediaFill, MusicBeats, SlotFill, apply, parse_slot_marker};
 use crate::builtin::{BUILTIN_IDS, build_all, builtin_templates};
-use crate::manifest::{self, SlotKind};
+use crate::manifest::{self, Purpose, SlotKind};
 use crate::{Package, TemplateError};
 
 const S: i64 = TICKS_PER_SECOND;
@@ -685,4 +685,127 @@ fn save_turns_flagged_clips_back_into_slots() {
     }
     let bytes = filmcraft_format::encode(&saved.package.fragment, false);
     assert!(!bytes.windows(9).any(|w| w == b"short.mp4"));
+}
+
+/// Set `ai` on the slot `id` of a manifest's JSON.
+fn set_ai(v: &mut Value, id: &str, ai: Value) {
+    let slots = v["slots"].as_array_mut().unwrap();
+    let s = slots.iter_mut().find(|s| s["id"] == id).unwrap();
+    s["ai"] = ai;
+}
+
+#[test]
+fn ai_hints_are_optional_read_and_written() {
+    // templates without hints (every one before them) read as before
+    let plain = manifest::from_value(&manifest_json(BUILTIN_IDS[0])).unwrap();
+    assert!(plain.slots.iter().all(|s| s.ai.is_none()) && !plain.ai_ready());
+    let mut v = manifest_json(BUILTIN_IDS[0]);
+    set_ai(&mut v, "photos", json!({"purpose": "B-Roll", "energy": "high", "query": " a robot waving ", "minQuality": 0.4, "chronological": true}));
+    set_ai(&mut v, "title", json!({"prompt": "A short title", "maxChars": 20, "about": "photos"}));
+    set_ai(&mut v, "outro", json!({}));
+    let m = manifest::from_value(&v).unwrap();
+    let photos = m.slot("photos").and_then(|s| s.ai.clone()).unwrap();
+    assert_eq!(photos.purpose, Some(manifest::Purpose::Broll));
+    assert_eq!(photos.energy, Some(manifest::EnergyHint::High));
+    assert_eq!((photos.query.as_str(), photos.min_quality, photos.chronological), ("a robot waving", Some(0.4), true));
+    let title = m.slot("title").and_then(|s| s.ai.clone()).unwrap();
+    assert_eq!((title.prompt.as_str(), title.max_chars, title.about.as_str()), ("A short title", Some(20), "photos"));
+    assert!(m.slot("outro").unwrap().ai.is_none(), "empty hints are no hints");
+    assert!(m.ai_ready());
+    // written and read back the same
+    let back = manifest::parse(m.to_json().as_bytes()).unwrap();
+    assert_eq!(back, m);
+    let json: Value = serde_json::from_str(&m.to_json()).unwrap();
+    let pv = json["slots"].as_array().unwrap().iter().find(|s| s["id"] == "photos").unwrap();
+    assert_eq!(pv["ai"]["purpose"], "broll");
+    assert!(json["slots"].as_array().unwrap().iter().find(|s| s["id"] == "outro").unwrap().get("ai").is_none());
+    for p in Purpose::ALL {
+        assert_eq!(Purpose::from_id(p.id()), Some(p));
+    }
+    assert_eq!(Purpose::from_id("talking head"), Some(Purpose::TalkingHead));
+}
+
+#[test]
+fn ai_hints_are_checked_against_their_slot() {
+    let cases: Vec<(&str, Value, &str)> = vec![
+        ("title", json!({"purpose": "hook"}), "slots[2].ai.purpose: only video, photo and logo slots take `purpose`"),
+        ("title", json!({"energy": "low"}), "only video, photo and logo slots take `energy`"),
+        ("photos", json!({"speech": "want"}), "only video slots take `speech`"),
+        ("photos", json!({"prompt": "write"}), "only text slots take `prompt`"),
+        ("photos", json!({"purpose": "teleport"}), "`teleport` is not one of hook, broll, reveal, talking-head, establishing, outro"),
+        ("photos", json!({"energy": "wild"}), "`wild` is not one of low, medium, high"),
+        ("photos", json!({"minQuality": 2}), "2 is out of range (0 to 1)"),
+        ("photos", json!({"minQuality": "good"}), "expected a number"),
+        ("photos", json!({"mood": "happy"}), "ai.mood: unknown field"),
+        ("photos", json!("hook"), "ai: expected an object"),
+        ("title", json!({"about": "music"}), "`music` is a music slot"),
+        ("title", json!({"about": "nope"}), "the template has no slot `nope`"),
+        ("title", json!({"about": "Not An Id"}), "a slot id"),
+        ("title", json!({"prompt": "x", "maxChars": 5000}), "is more than the slot's maxChars"),
+        ("title", json!({"prompt": "x".repeat(2000)}), "ai.prompt: longer than 1000 bytes"),
+    ];
+    for (slot, ai, want) in cases {
+        let got = issues_after(|v| set_ai(v, slot, ai.clone()));
+        assert!(got.iter().any(|g| g.contains(want)), "{slot} {ai}: wanted {want:?}, got {got:?}");
+    }
+    // an author's edit is checked the same way
+    assert!(manifest::read_slot_edit(&json!({"ai": {"purpose": "hook"}}), SlotKind::Text, "slots.title").is_err());
+    let e = manifest::read_slot_edit(&json!({"ai": {"purpose": "reveal", "speech": "avoid"}}), SlotKind::Video, "slots.clips").unwrap();
+    assert_eq!(e.ai.and_then(|a| a.purpose), Some(Purpose::Reveal));
+}
+
+#[test]
+fn saving_keeps_and_edits_ai_hints() {
+    use crate::save::{SaveOptions, SlotEdit, save};
+    let b = builtin(BUILTIN_IDS[0]);
+    let mut m = b.manifest.clone();
+    for s in m.slots.iter_mut() {
+        match s.kind {
+            SlotKind::Photo => s.ai = Some(crate::AiHints { purpose: Some(Purpose::Hook), ..Default::default() }),
+            SlotKind::Text => s.ai = Some(crate::AiHints { prompt: "Say hi".into(), about: "photos".into(), ..Default::default() }),
+            _ => {}
+        }
+    }
+    let base = Package::new(m.clone(), b.fragment.clone()).unwrap();
+    let mut p = Project::new("p");
+    let a = apply(&mut p, &base, &ApplyOptions::default()).unwrap();
+    let mut o = SaveOptions { name: "Again".into(), author: "me".into(), license: "CC-BY-4.0".into(), base: Some(base.clone()), ..Default::default() };
+    let saved = save(&p, a.sequence, &o, m.beat_grid.clone()).unwrap();
+    for s in &m.slots {
+        assert_eq!(saved.package.manifest.slot(&s.id).unwrap().ai, s.ai, "{}", s.id);
+    }
+    // the author's hints win; an empty set removes the base's
+    o.slots.insert("photos".into(), SlotEdit { ai: Some(crate::AiHints { purpose: Some(Purpose::Reveal), ..Default::default() }), ..Default::default() });
+    o.slots.insert("title".into(), SlotEdit { ai: Some(crate::AiHints::default()), ..Default::default() });
+    let saved = save(&p, a.sequence, &o, m.beat_grid.clone()).unwrap();
+    assert_eq!(saved.package.manifest.slot("photos").unwrap().ai.as_ref().and_then(|a| a.purpose), Some(Purpose::Reveal));
+    assert!(saved.package.manifest.slot("title").unwrap().ai.is_none());
+}
+
+/// A caption style with animated captions and an x offset (what a track styled with
+/// `captions.setAnimatedStyle` has, and what Save as Template keeps) reads back; it was refused
+/// as unknown fields before.
+#[test]
+fn animated_caption_styles_read_back() {
+    let mut style = filmcraft_project::CaptionPreset::Bold.base_style();
+    style.x_offset = -0.04;
+    let mut a = filmcraft_project::AnimatedCaptions::preset(filmcraft_project::CaptionPreset::Bold);
+    a.platform = Some(filmcraft_project::safe_zones::Platform::Reels);
+    a.keywords = vec!["robot".into()];
+    style.animated = Some(a);
+    let mut v = manifest_json(BUILTIN_IDS[0]);
+    v["captionStyle"] = serde_json::to_value(&style).unwrap();
+    let m = manifest::from_value(&v).unwrap();
+    assert_eq!(m.caption_style.as_ref(), Some(&style));
+    assert_eq!(manifest::parse(m.to_json().as_bytes()).unwrap(), m);
+    // still checked
+    let bad = |f: &dyn Fn(&mut Value)| {
+        let mut v = manifest_json(BUILTIN_IDS[0]);
+        v["captionStyle"] = serde_json::to_value(&style).unwrap();
+        f(&mut v);
+        manifest::from_value(&v).unwrap_err().to_string()
+    };
+    assert!(bad(&|v| v["captionStyle"]["x_offset"] = json!(3.0)).contains("x_offset"));
+    assert!(bad(&|v| v["captionStyle"]["animated"]["wordsPerPage"] = json!(99)).contains("wordsPerPage"));
+    assert!(bad(&|v| v["captionStyle"]["animated"]["sparkle"] = json!(1)).contains("sparkle"));
 }

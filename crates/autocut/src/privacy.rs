@@ -447,7 +447,7 @@ impl Redact {
         v
     }
 
-    fn kinds_json(&self) -> Value {
+    pub fn kinds_json(&self) -> Value {
         let mut k = Vec::new();
         if self.faces {
             k.push("faces");

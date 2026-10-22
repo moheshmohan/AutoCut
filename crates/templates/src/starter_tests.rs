@@ -443,3 +443,54 @@ fn hostile_boxes_and_posters_in_a_package_are_refused() {
     m["poster"] = serde_json::json!(i64::MAX);
     assert!(crate::manifest::from_value(&m).is_err());
 }
+
+/// The Shorts and Reels starters fill themselves: vertical first, every picture and text slot
+/// with AI hints, text in every platform's safe zone in the vertical layout, Creator transitions
+/// and cuts on the beat; the tech and tape ones carry their look on an adjustment clip.
+#[test]
+fn shorts_starters_carry_ai_hints_and_keep_text_safe() {
+    use crate::builtin::{AI_READY_IDS, LOOK_CLIP_PREFIX};
+    let vertical = filmcraft_project::safe_zones::Platform::Vertical.safe_area();
+    for id in AI_READY_IDS {
+        let pkg = builtin(id);
+        let m = &pkg.manifest;
+        assert!(m.ai_ready(), "{id}");
+        assert_eq!(m.default_variant, "9:16", "{id}: vertical first");
+        for s in &m.slots {
+            match s.kind {
+                SlotKind::Video | SlotKind::Photo => {
+                    let ai = s.ai.as_ref().unwrap_or_else(|| panic!("{id}: {} has no hints", s.id));
+                    assert!(ai.purpose.is_some(), "{id}: {} says what its shot is for", s.id);
+                }
+                SlotKind::Text => {
+                    let ai = s.ai.as_ref().unwrap_or_else(|| panic!("{id}: {} has no hints", s.id));
+                    assert!(!ai.prompt.is_empty() && ai.max_chars.is_some_and(|n| n <= s.constraints.max_chars.unwrap_or(u32::MAX)), "{id}: {}", s.id);
+                }
+                _ => {}
+            }
+        }
+        let tall = m.variant(Some("9:16")).unwrap();
+        let q = pkg.sequence().unwrap();
+        // every text layer of a text slot sits in the vertical safe area
+        for s in m.slots.iter().filter(|s| s.kind == SlotKind::Text) {
+            for pl in &s.placements {
+                let layer = pl.layer.unwrap_or(1);
+                let hint = tall.hints.iter().find(|h| h.clip == pl.clip).and_then(|h| h.layers.iter().find(|l| l.layer == layer)).and_then(|l| l.position);
+                let [x, y] = hint.unwrap_or_else(|| panic!("{id}: {} has a place in the vertical layout", s.id));
+                assert!(x >= vertical.x0 && x <= vertical.x1 && y >= vertical.y0 && y <= vertical.y1, "{id}: {} at ({x}, {y}) is outside {vertical:?}", s.id);
+            }
+        }
+        // Creator transitions between the shots
+        let crt = q.video_tracks.iter().flat_map(|t| t.transitions.iter()).filter(|t| t.effect.effect.starts_with("crt_")).count();
+        assert!(crt >= 1, "{id}: Creator transitions");
+        let looks = q.video_tracks.iter().flat_map(|t| t.items.iter()).filter(|c| c.name.starts_with(LOOK_CLIP_PREFIX)).count();
+        let wants_look = ["builtin:tech-reveal", "builtin:gadget-showcase", "builtin:day-in-30s"].contains(&id);
+        assert_eq!(looks, usize::from(wants_look), "{id}: the creator look's adjustment clip");
+        // they apply in every layout they have, filled
+        for v in &m.variants {
+            let mut p = Project::new("p");
+            let fills = fill_all(&mut p, m);
+            apply(&mut p, &pkg, &ApplyOptions { variant: Some(v.id.clone()), fills, ..Default::default() }).unwrap_or_else(|e| panic!("{id} {}: {e}", v.id));
+        }
+    }
+}

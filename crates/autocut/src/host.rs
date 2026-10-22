@@ -57,6 +57,11 @@ const LONG_COMMANDS: &[&str] = &[
     "clip.autoReframe",
     "youtube.upload",
     "media.understandSpeech",
+    "media.analyzeScenes",
+    "scenes.downloadModel",
+    "clip.autoRedact",
+    "sequence.autoRedact",
+    "redact.downloadModels",
 ];
 /// How often a long command's job is looked at.
 const POLL: Duration = Duration::from_millis(if cfg!(test) { 20 } else { 100 });
@@ -346,7 +351,7 @@ fn long(port: &CommandPort, id: &str, mut params: Value) -> Result<Value, String
                 return Err(if id == "file.exportMedia" { format!("export failed: {e}") } else { format!("{id} failed: {e}") });
             }
             out["result"] = j["result"].clone();
-            for k in ["offlineMedia", "upload", "reframe", "youtube", "speech"] {
+            for k in ["offlineMedia", "upload", "reframe", "youtube", "speech", "scenes", "redact"] {
                 if let Some(v) = j.get(k) {
                     out[k] = v.clone();
                 }
@@ -565,6 +570,23 @@ impl ShowcaseHost {
         None
     }
 
+    /// The model that writes a quick short's text: the script model, else the classifier, when
+    /// Ollama has one; none otherwise (the text is written from the shots' descriptions).
+    async fn writer(&self) -> Option<Arc<dyn ChatModel>> {
+        let cfg = match &self.source {
+            Source::Fixed(m) => return Some(m.script.clone()),
+            Source::Config(cfg) => cfg.clone(),
+        };
+        for name in [cfg.script_model.clone(), cfg.llm_model.clone()] {
+            let o = Ollama::new(&cfg.ollama_host, &name, cfg.http_timeout);
+            let probe = o.clone();
+            if tokio::task::spawn_blocking(move || probe.available().unwrap_or(false)).await.unwrap_or(false) {
+                return Some(Arc::new(o));
+            }
+        }
+        None
+    }
+
     /// The model that writes Malayalam: `model` when given, else the script model, with room for
     /// Malayalam's many tokens. No fallback to the small classifier: its Malayalam is unusable.
     async fn translator(&self, p: &Value) -> Result<Arc<dyn ChatModel>, AutoCutError> {
@@ -639,6 +661,11 @@ impl ShowcaseHost {
             let mut lines = |l: &str| note(progress, l);
             return crate::rough_cut::make(ex, &task.params, &mut lines).await;
         }
+        if task.kind == TaskKind::Quick {
+            let writer = self.writer().await.map(|m| Cancellable { inner: m, progress: progress.clone() });
+            let mut lines = |l: &str| note(progress, l);
+            return crate::quick::make(ex, &task.params, writer.as_ref().map(|w| w as &dyn ChatModel), &mut lines).await;
+        }
         let models = self.models(task.kind, progress).await?;
         let guard = |m: &Arc<dyn ChatModel>| Cancellable { inner: m.clone(), progress: progress.clone() };
         let script_model = guard(&models.script);
@@ -693,7 +720,7 @@ impl ShowcaseHost {
                 crate::trailer::make(ex, p, task.plan.as_ref(), qa_model.as_ref().map(|m| m as &dyn ChatModel), &mut lines).await
             }
             // (handled above, without the showcase models)
-            TaskKind::Shorts | TaskKind::MalayalamScript | TaskKind::RoughCut => Err(AutoCutError::Other("not a showcase step".into())),
+            TaskKind::Shorts | TaskKind::MalayalamScript | TaskKind::RoughCut | TaskKind::Quick => Err(AutoCutError::Other("not a showcase step".into())),
         }
     }
 }

@@ -62,6 +62,8 @@ pub mod trim_monitor;
 pub mod tts;
 pub mod voiceover;
 pub mod workspaces;
+// Sequence ▸ Quick Short…: a Short or Reel from a template filled automatically
+pub mod quick_short;
 
 use egui::{Align2, Color32, Rect};
 use filmcraft_project::ItemId;

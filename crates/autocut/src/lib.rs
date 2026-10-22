@@ -37,6 +37,7 @@ pub mod plan_patch;
 pub mod planner;
 pub mod privacy;
 pub mod qa;
+pub mod quick;
 pub mod recipes;
 pub mod rough_cut;
 pub mod runner;

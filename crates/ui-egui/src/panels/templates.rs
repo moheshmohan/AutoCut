@@ -24,7 +24,9 @@
 //! `.go` — that writes into the user templates folder. `templates.install.path` and
 //! `templates.install.go` install a `.zip` or an https link. An open template's Share section:
 //! `templates.share.exportPath` / `.export`, `templates.share.otioPath` / `.otio`,
-//! `templates.share.link` and its QR code `templates.share.qr`.
+//! `templates.share.link` and its QR code `templates.share.qr`. Quick Short… (`templates.quickShort`)
+//! opens the dialog that lets AutoCut pick a template and fill it from the clips
+//! ([`crate::panels::quick_short`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -419,6 +421,8 @@ enum Action {
     Install,
     Export,
     ExportOtio,
+    /// Open the Quick Short dialog.
+    QuickShort,
 }
 
 /// The kinds the Mark buttons flag clips with: (kind, label).
@@ -820,6 +824,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 if b.on_hover_text(tl!("Make a template of the open sequence: mark its placeholders, choose what travels with it")).clicked() {
                     actions.push(Action::OpenSave);
                 }
+                let b = ui.button(tl!("Quick Short…"));
+                add(&mut app.auto, ui, "templates.quickShort", b.rect, tl!("Quick Short…"));
+                if b.on_hover_text(tl!("Let AutoCut pick a template and fill it from your clips")).clicked() {
+                    actions.push(Action::QuickShort);
+                }
                 let d = &mut app.ui.templates;
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut d.install)
@@ -1165,6 +1174,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
 fn run(app: &mut FilmcraftApp, ctx: &egui::Context, a: Action) {
     match a {
+        Action::QuickShort => {
+            if let Err(e) = crate::panels::quick_short::open(app) {
+                app.ui.status = e;
+            }
+        }
         Action::Refresh => {
             ctx.data_mut(|d| {
                 d.remove::<Library>(lib_id());

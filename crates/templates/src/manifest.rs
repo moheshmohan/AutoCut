@@ -272,6 +272,125 @@ impl Default for CaptionSpec {
     }
 }
 
+/// What a picture slot's shot is for: the scene index's purposes (`media.bestShots`) and the
+/// shot a video ends on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Purpose {
+    /// The first seconds: something that stops the scroll.
+    Hook,
+    /// Cutaways: steady, no one talking to the camera.
+    Broll,
+    /// The subject shown whole, the camera moving on it.
+    Reveal,
+    /// A person speaking to the camera.
+    TalkingHead,
+    /// Where it happens: wide, the place rather than the people.
+    Establishing,
+    /// The shot the video ends on.
+    Outro,
+}
+
+impl Purpose {
+    pub const ALL: [Purpose; 6] = [Purpose::Hook, Purpose::Broll, Purpose::Reveal, Purpose::TalkingHead, Purpose::Establishing, Purpose::Outro];
+    pub fn id(self) -> &'static str {
+        match self {
+            Purpose::Hook => "hook",
+            Purpose::Broll => "broll",
+            Purpose::Reveal => "reveal",
+            Purpose::TalkingHead => "talking-head",
+            Purpose::Establishing => "establishing",
+            Purpose::Outro => "outro",
+        }
+    }
+    /// From its id, or a spelling people use (`b-roll`, `talking head`), case-insensitively.
+    pub fn from_id(s: &str) -> Option<Purpose> {
+        let k: String = s.trim().chars().filter(|c| !matches!(c, '-' | '_' | ' ')).flat_map(char::to_lowercase).collect();
+        Purpose::ALL.into_iter().find(|p| p.id().replace('-', "") == k)
+    }
+}
+
+/// How lively a slot's shot should be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EnergyHint {
+    Low,
+    Medium,
+    High,
+}
+
+impl EnergyHint {
+    pub fn id(self) -> &'static str {
+        match self {
+            EnergyHint::Low => "low",
+            EnergyHint::Medium => "medium",
+            EnergyHint::High => "high",
+        }
+    }
+}
+
+/// Whether a video slot wants someone speaking in its shot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SpeechHint {
+    /// A shot with speech (a talking head, a voice): its sound is what the slot is for.
+    Want,
+    /// A shot without speech (a cutaway over someone else's words).
+    Avoid,
+}
+
+impl SpeechHint {
+    pub fn id(self) -> &'static str {
+        match self {
+            SpeechHint::Want => "want",
+            SpeechHint::Avoid => "avoid",
+        }
+    }
+}
+
+/// Hints for filling a slot automatically (`autocut.quick`): which shot a picture slot wants
+/// and what a text slot says. Every field is optional; a template without them still fills by
+/// hand, and an automatic fill falls back to the picture's quality.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiHints {
+    /// Picture slots: what the shot is for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<Purpose>,
+    /// Picture slots: words to find the shot by (`media.searchScenes`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub query: String,
+    /// Picture slots: how lively the shot should be.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub energy: Option<EnergyHint>,
+    /// Video slots: a shot with speech, or one without.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speech: Option<SpeechHint>,
+    /// Picture slots: the least picture quality (the scene index's score, 0..1) wanted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_quality: Option<f64>,
+    /// Picture slots: their shots, with the other chronological slots' in the template's order,
+    /// keep the order they were filmed in.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub chronological: bool,
+    /// Text slots: what the local model writes here.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
+    /// Text slots: the longest text the model may write (at most the slot's `maxChars`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_chars: Option<u32>,
+    /// Text slots: the picture slot whose shots the texts are about, one text per shot.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub about: String,
+}
+
+impl AiHints {
+    /// Whether no hint is given.
+    pub fn is_empty(&self) -> bool {
+        *self == AiHints::default()
+    }
+}
+
 /// A typed placeholder.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -300,6 +419,9 @@ pub struct Slot {
     /// Captions slots: what is captioned and how.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub captions: Option<CaptionSpec>,
+    /// Hints for filling the slot automatically (`autocut.quick`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiHints>,
 }
 
 /// A graphic layer's place in one variant.
@@ -491,6 +613,10 @@ impl Manifest {
     /// The captions slot, if the template has one.
     pub fn captions_slot(&self) -> Option<&Slot> {
         self.slots.iter().find(|s| s.kind == SlotKind::Captions)
+    }
+    /// Whether its slots carry hints for filling them automatically ([`AiHints`]).
+    pub fn ai_ready(&self) -> bool {
+        self.slots.iter().any(|s| s.ai.as_ref().is_some_and(|a| !a.is_empty()))
     }
 }
 
@@ -872,6 +998,67 @@ fn read_default(o: Option<Obj<'_>>, kind: SlotKind, is: &mut Issues) -> Option<S
     r
 }
 
+const ENERGIES: [(&str, EnergyHint); 3] = [("low", EnergyHint::Low), ("medium", EnergyHint::Medium), ("high", EnergyHint::High)];
+const SPEECH: [(&str, SpeechHint); 2] = [("want", SpeechHint::Want), ("avoid", SpeechHint::Avoid)];
+/// Longest search words of a slot's hints, bytes.
+const MAX_QUERY: usize = 200;
+/// Longest prompt of a text slot's hints, bytes.
+const MAX_AI_PROMPT: usize = 1000;
+
+/// A slot's `ai` hints, checked against its kind (and its `maxChars`). `None` without hints.
+pub(crate) fn read_ai(o: Option<Obj<'_>>, kind: SlotKind, max_chars: Option<u32>, is: &mut Issues) -> Option<AiHints> {
+    let mut o = o?;
+    let mut a = AiHints::default();
+    if let Some(p) = o.string(is, "purpose", 32, false) {
+        match Purpose::from_id(&p) {
+            Some(x) => a.purpose = Some(x),
+            None => {
+                let names: Vec<&str> = Purpose::ALL.iter().map(|p| p.id()).collect();
+                is.push(o.field("purpose"), format!("`{p}` is not one of {}", names.join(", ")));
+            }
+        }
+    }
+    a.query = o.string(is, "query", MAX_QUERY, false).map(|q| q.trim().to_string()).unwrap_or_default();
+    a.energy = o.choice(is, "energy", &ENERGIES);
+    a.speech = o.choice(is, "speech", &SPEECH);
+    a.min_quality = o.f64(is, "minQuality", 0.0, 1.0, false);
+    a.chronological = o.bool(is, "chronological").unwrap_or(false);
+    a.prompt = o.string(is, "prompt", MAX_AI_PROMPT, false).map(|p| p.trim().to_string()).unwrap_or_default();
+    a.max_chars = o.u32(is, "maxChars", 1, 10_000, false);
+    a.about = o.string(is, "about", 64, false).unwrap_or_default();
+    if !a.about.is_empty() && !is_slot_id(&a.about) {
+        is.push(o.field("about"), format!("`{}`: a slot id ([a-z0-9_-])", a.about));
+    }
+    let picture = kind.is_visual();
+    let text = kind == SlotKind::Text;
+    for (k, given) in [
+        ("purpose", a.purpose.is_some()),
+        ("query", !a.query.is_empty()),
+        ("energy", a.energy.is_some()),
+        ("minQuality", a.min_quality.is_some()),
+        ("chronological", a.chronological),
+    ] {
+        if given && !picture {
+            is.push(o.field(k), format!("only video, photo and logo slots take `{k}`"));
+        }
+    }
+    if a.speech.is_some() && kind != SlotKind::Video {
+        is.push(o.field("speech"), "only video slots take `speech`");
+    }
+    for (k, given) in [("prompt", !a.prompt.is_empty()), ("maxChars", a.max_chars.is_some()), ("about", !a.about.is_empty())] {
+        if given && !text {
+            is.push(o.field(k), format!("only text slots take `{k}`"));
+        }
+    }
+    if let (Some(m), Some(limit)) = (a.max_chars, max_chars)
+        && m > limit
+    {
+        is.push(o.field("maxChars"), format!("{m} is more than the slot's maxChars ({limit})"));
+    }
+    o.finish(is);
+    Some(a)
+}
+
 fn read_slot(v: &Value, path: &str, is: &mut Issues) -> Option<Slot> {
     let mut o = Obj::of(v, path, is)?;
     let id = o.string(is, "id", 64, true);
@@ -976,6 +1163,7 @@ fn read_slot(v: &Value, path: &str, is: &mut Issues) -> Option<Slot> {
         is.push(o.field("beatSync"), "only video, photo and logo slots cut on the beat");
     }
     let default = read_default(o.object(is, "default", false), kind, is);
+    let ai = read_ai(o.object(is, "ai", false), kind, constraints.max_chars, is).filter(|a| !a.is_empty());
     o.finish(is);
     Some(Slot {
         id: id?,
@@ -991,6 +1179,7 @@ fn read_slot(v: &Value, path: &str, is: &mut Issues) -> Option<Slot> {
         beat_sync,
         default,
         captions,
+        ai,
     })
 }
 
@@ -1050,7 +1239,17 @@ fn read_variant(v: &Value, path: &str, is: &mut Issues) -> Option<Variant> {
 }
 
 fn read_caption_style(v: &Value, path: &str, is: &mut Issues) -> Option<CaptionStyle> {
-    let known = serde_json::to_value(CaptionStyle::default()).ok()?;
+    // every field a style may have: the default leaves out its optional ones (an x offset,
+    // animated captions), which a saved style keeps
+    let animated = filmcraft_project::AnimatedCaptions {
+        keywords: vec![String::new()],
+        emoji: vec![filmcraft_project::WordEmoji::default()],
+        uppercase: Some(true),
+        platform: Some(filmcraft_project::safe_zones::Platform::Reels),
+        ..filmcraft_project::AnimatedCaptions::preset(filmcraft_project::CaptionPreset::Bold)
+    };
+    let probe = CaptionStyle { x_offset: 0.25, animated: Some(animated), ..CaptionStyle::default() };
+    let known = serde_json::to_value(probe).ok()?;
     let (Some(map), Some(known)) = (v.as_object(), known.as_object()) else {
         is.push(path, format!("expected an object, found {}", kind_of(v)));
         return None;
@@ -1058,6 +1257,13 @@ fn read_caption_style(v: &Value, path: &str, is: &mut Issues) -> Option<CaptionS
     for k in map.keys() {
         if !known.contains_key(k) {
             is.push(format!("{path}.{k}"), "unknown field");
+        }
+    }
+    if let (Some(a), Some(ka)) = (map.get("animated").and_then(Value::as_object), known.get("animated").and_then(Value::as_object)) {
+        for k in a.keys() {
+            if !ka.contains_key(k) {
+                is.push(format!("{path}.animated.{k}"), "unknown field");
+            }
         }
     }
     let st: CaptionStyle = match serde_json::from_value(v.clone()) {
@@ -1078,6 +1284,21 @@ fn read_caption_style(v: &Value, path: &str, is: &mut Issues) -> Option<CaptionS
     check("margin", st.margin, 0.0, 0.5);
     check("line_spacing", st.line_spacing, 0.5, 4.0);
     check("outline", st.outline, 0.0, 50.0);
+    check("x_offset", st.x_offset, -0.5, 0.5);
+    if let Some(a) = &st.animated {
+        if a.words_per_page > 8 {
+            is.push(format!("{path}.animated.wordsPerPage"), format!("{} is out of range (0 to 8)", a.words_per_page));
+            ok = false;
+        }
+        if !(a.pop.is_finite() && (0.0..=1.5).contains(&a.pop)) {
+            is.push(format!("{path}.animated.pop"), format!("{} is out of range (0 to 1.5)", a.pop));
+            ok = false;
+        }
+        if a.keywords.len() > 200 || a.emoji.len() > 200 || a.keywords.iter().chain(a.emoji.iter().map(|e| &e.word)).any(|w| w.len() > 64) {
+            is.push(format!("{path}.animated"), "at most 200 keywords and 200 emoji, each word at most 64 bytes");
+            ok = false;
+        }
+    }
     if st.font.len() > 128 {
         is.push(format!("{path}.font"), "longer than 128 bytes");
         ok = false;
@@ -1087,7 +1308,7 @@ fn read_caption_style(v: &Value, path: &str, is: &mut Issues) -> Option<CaptionS
 
 /// An author's edit of one slot of kind `kind` (`template.save`'s `slots`): the slot fields that
 /// are not about placements — `name`, `prompt`, `order`, `minCount`, `beatSync`, `fit`,
-/// `constraints`, `default` — read and checked like the manifest's; unknown fields are errors.
+/// `constraints`, `default`, `ai` — read and checked like the manifest's; unknown fields are errors.
 pub fn read_slot_edit(v: &Value, kind: SlotKind, path: &str) -> Result<crate::save::SlotEdit, TemplateError> {
     let mut is = Issues::default();
     let Some(mut o) = Obj::of(v, path, &mut is) else { return Err(TemplateError::Invalid(is.0)) };
@@ -1099,12 +1320,14 @@ pub fn read_slot_edit(v: &Value, kind: SlotKind, path: &str) -> Result<crate::sa
     let fit = o.object(&mut is, "fit", false).map(|f| read_fit(Some(f), kind, &mut is));
     let constraints = o.object(&mut is, "constraints", false).map(|c| read_constraints(Some(c), kind, &mut is));
     let default = o.object(&mut is, "default", false).and_then(|d| read_default(Some(d), kind, &mut is));
+    let max_chars = constraints.as_ref().and_then(|c| c.max_chars);
+    let ai = o.object(&mut is, "ai", false).map(|a| read_ai(Some(a), kind, max_chars, &mut is).unwrap_or_default());
     o.finish(&mut is);
     if name.as_deref().is_some_and(|n| n.trim().is_empty()) {
         is.push(format!("{path}.name"), "is empty");
     }
     is.into_result()?;
-    Ok(crate::save::SlotEdit { name, prompt, order, min_count, beat_sync, fit, constraints, default })
+    Ok(crate::save::SlotEdit { name, prompt, order, min_count, beat_sync, fit, constraints, default, ai })
 }
 
 /// Read and check a manifest. All problems are reported at once, each with its field.
@@ -1226,6 +1449,17 @@ pub fn from_value(v: &Value) -> Result<Manifest, TemplateError> {
                 }
                 None => is.push(format!("slots[{i}].captions.source[{k}]"), format!("the template has no slot `{src}`")),
             }
+        }
+    }
+    // a text slot's hints are about the shots of one of this template's picture slots
+    for (i, s) in slots.iter().enumerate() {
+        let Some(about) = s.ai.as_ref().map(|a| a.about.as_str()).filter(|a| !a.is_empty()) else { continue };
+        match slots.iter().find(|x| x.id == about) {
+            Some(x) if x.kind.is_visual() => {}
+            Some(x) => {
+                is.push(format!("slots[{i}].ai.about"), format!("`{about}` is a {} slot; texts are about the shots of video, photo or logo slots", x.kind.id()))
+            }
+            None => is.push(format!("slots[{i}].ai.about"), format!("the template has no slot `{about}`")),
         }
     }
     let poster = o.tick(&mut is, "poster", 0, MAX_TEMPLATE_TICKS, false);

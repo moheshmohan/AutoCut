@@ -76,6 +76,7 @@ impl AutoCutHost for Fake {
             TaskKind::Shorts => Ok(json!({"shorts": [], "params": task.params, "status": "Made 0 shorts"})),
             TaskKind::Trailer => Ok(json!({"shots": [], "params": task.params, "status": "Made a trailer"})),
             TaskKind::RoughCut => Ok(json!({"params": task.params, "status": "Rough cut"})),
+            TaskKind::Quick => Ok(json!({"params": task.params, "status": "Quick short"})),
             TaskKind::MalayalamScript => {
                 let plan = task.params.get("plan").cloned().or(task.plan).unwrap_or_default();
                 let n = plan["entries"].as_array().map_or(0, Vec::len);
@@ -505,6 +506,59 @@ fn rough_cut_parameters_are_checked() {
         json!([1]),
     ] {
         assert!(s.execute("autocut.roughCut", bad.clone()).is_err(), "{bad} was accepted");
+    }
+}
+
+/// `autocut.quick` checks its parameters before a job starts and hands the host the checked
+/// ones (defaults filled in, paths expanded); hostile ones are refused, never a panic.
+#[test]
+fn quick_parameters_are_checked_and_defaulted() {
+    let (mut s, fake) = session(Fake::default());
+    let r = s.execute("autocut.quick", json!({"wait": true})).unwrap();
+    let p = &r["showcase"]["params"];
+    assert_eq!((p["aspect"].as_str(), p["platform"].as_str(), p["seconds"].as_f64()), (Some("9:16"), Some("reels"), Some(30.0)), "{p}");
+    assert!(p.get("redact").is_none() && p.get("template").is_none(), "defaults are the host's: {p}");
+    let r = s
+        .execute(
+            "autocut.quick",
+            json!({"paths": ["~/Movies/Expo"], "items": [3], "template": "auto", "aspect": "4:5", "platform": "shorts", "seconds": 20,
+                   "topic": "Robots at the expo", "language": "ML", "look": "Tech", "music": "~/song.mp3", "redact": "faces",
+                   "captionStyle": "karaoke", "export": "~/out/short.mp4", "fullDetail": 4, "download": true, "qa": false, "wait": true}),
+        )
+        .unwrap();
+    let p = &r["showcase"]["params"];
+    assert!(p["paths"][0].as_str().is_some_and(|x| !x.starts_with('~')) && p["export"].as_str().is_some_and(|x| !x.starts_with('~')), "{p}");
+    assert_eq!(
+        (p["platform"].as_str(), p["language"].as_str(), p["look"].as_str(), p["redact"].as_str()),
+        (Some("youtube"), Some("ml"), Some("tech"), Some("faces"))
+    );
+    assert_eq!((p["captionStyle"].as_str(), p["fullDetail"].as_u64(), p["download"].as_bool()), (Some("karaoke"), Some(4), Some(true)));
+    assert_eq!(s.execute("autocut.quick", json!({"redact": "off", "music": "generate", "wait": true})).unwrap()["showcase"]["params"]["redact"], false);
+    assert_eq!(fake.tasks.lock().unwrap().last().map(|t| t.0), Some(TaskKind::Quick));
+    for bad in [
+        json!({"items": "1"}),
+        json!({"items": [-1]}),
+        json!({"items": (0..600).collect::<Vec<u64>>()}),
+        json!({"paths": [""]}),
+        json!({"paths": [3]}),
+        json!({"paths": ["a\nb"]}),
+        json!({"aspect": "2:1"}),
+        json!({"platform": "snapchat"}),
+        json!({"seconds": 0}),
+        json!({"seconds": f64::MAX}),
+        json!({"seconds": "long"}),
+        json!({"language": "m l"}),
+        json!({"look": "sparkly"}),
+        json!({"redact": "everything"}),
+        json!({"redact": 3}),
+        json!({"captionStyle": "comic"}),
+        json!({"topic": "x".repeat(5000)}),
+        json!({"fullDetail": 1000}),
+        json!({"download": "yes"}),
+        json!([1]),
+    ] {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.execute("autocut.quick", bad.clone())));
+        assert!(r.is_ok_and(|r| r.is_err()), "{bad} was accepted");
     }
 }
 

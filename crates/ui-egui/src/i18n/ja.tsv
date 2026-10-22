@@ -4253,3 +4253,24 @@
 	Tracked object	トラッキング中の対象
 	Tracking… {n}%	トラッキング中… {n}%
 	Camera Track	カメラトラッキング
+
+# Quick Short (Sequence ▸ Quick Short…, the Templates panel)
+	Quick Short…	クイックショート…
+	Quick Short	クイックショート
+	Make a vertical Short or Reel: AutoCut picks a template and fills it from your clips.	縦型のショートやリールを作成します。AutoCut がテンプレートを選び、クリップで埋めます。
+	Selected clips	選択したクリップ
+	Template:	テンプレート:
+	Length:	長さ:
+	Platform:	プラットフォーム:
+	Topic:	トピック:
+	Look:	ルック:
+	The template's	テンプレートのまま
+	Tech	テック
+	Make Short	ショートを作成
+	What it is about (optional)	内容（任意）
+	{n} clip(s) selected in the Project panel	プロジェクトパネルで {n} 個のクリップを選択中
+	Nothing is selected in the Project panel: every video and photo of the project is used.	プロジェクトパネルで何も選択されていません。プロジェクトのすべての動画と写真を使います。
+	Choose a folder of videos and photos	動画と写真のフォルダーを選択
+	Choose a folder first	先にフォルダーを選択してください
+	Making a quick short…	クイックショートを作成中…
+	Let AutoCut pick a template and fill it from your clips	AutoCut にテンプレートを選ばせ、クリップで埋めます

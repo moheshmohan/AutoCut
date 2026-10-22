@@ -609,6 +609,7 @@ review happens where the footage is:
 | `autocut.makeShowcase {subject \| prompt, since?, items? \| album?, title?, voice?, mood?}` | both in one job (Sequence ▸ Make a Showcase…, the `showcase` intent) |
 | `autocut.showcaseBuild {plan?, export?, upload?, uploadAlbum?, qa?}` | build the plan (the kept one, or `plan`); with `export`, the YouTube export, `<out>.chapters.txt` and the QA report beside it; with `upload`, a Google Photos upload job for the export (into `uploadAlbum` too) |
 | `autocut.showcaseInspect {report?}` / `autocut.showcaseSet {report?, plan?, reportPath?, planPath?}` | read what is kept / keep a report or plan from elsewhere (the CLI's `analyze --out` and `--script-out` files) |
+| `autocut.quick {items? \| paths?, template?, aspect?, platform?, seconds?, topic?, look?, music?, redact?, export?, download?}` | a vertical Short or Reel from a template filled automatically ([`quick.rs`](src/quick.rs), [docs/quick-templates.md](../../docs/quick-templates.md)): the scene index (full detail for the best shots), the speech, the template chosen and every slot filled by its AI hints, the text by the local model, the look, captions, privacy and the export with a report of every choice |
 
 A plan is the CLI's `plan.json` plus the review: per entry `include` (default true) and
 `mergePrevious` (its clips are the included entry before it: their shots join, the three longest in
