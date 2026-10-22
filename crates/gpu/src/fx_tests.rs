@@ -20,14 +20,14 @@ use filmcraft_render::gpufx::FxOp;
 use filmcraft_render::plan::{LayerFx, execute_cpu};
 use filmcraft_time::Tick;
 
-const EXACT: f32 = 1e-4;
-const FLIPS: f64 = 0.01;
+pub(super) const EXACT: f32 = 1e-4;
+pub(super) const FLIPS: f64 = 0.01;
 
 fn cx(t: Tick, px_scale: f32) -> FxCtx<'static> {
     FxCtx { t, px_scale, seconds: 0.0, timecode: "", clip_name: "", project: None, env: None, frame_rate: 24.0, working: filmcraft_color::WorkingSpace::Rec709 }
 }
 
-fn effect(id: &str, params: &[(&str, ParamValue)]) -> EffectInstance {
+pub(super) fn effect(id: &str, params: &[(&str, ParamValue)]) -> EffectInstance {
     let mut e = find_effect(id).unwrap_or_else(|| panic!("{id}")).instance();
     for (k, v) in params {
         e.params.get_mut(*k).unwrap_or_else(|| panic!("{id}.{k}")).value = v.clone();
@@ -35,16 +35,16 @@ fn effect(id: &str, params: &[(&str, ParamValue)]) -> EffectInstance {
     e
 }
 
-fn fl(v: f64) -> ParamValue {
+pub(super) fn fl(v: f64) -> ParamValue {
     ParamValue::Float(v)
 }
-fn col(r: f32, g: f32, b: f32) -> ParamValue {
+pub(super) fn col(r: f32, g: f32, b: f32) -> ParamValue {
     ParamValue::Color([r, g, b, 1.0])
 }
-fn ch(c: u32) -> ParamValue {
+pub(super) fn ch(c: u32) -> ParamValue {
     ParamValue::Choice(c)
 }
-fn pt(x: f64, y: f64) -> ParamValue {
+pub(super) fn pt(x: f64, y: f64) -> ParamValue {
     ParamValue::Vec2(Vec2::new(x, y))
 }
 
@@ -55,7 +55,7 @@ fn half(v: f32) -> f32 {
 /// Linear premultiplied test picture, every value representable in half floats: hue sweep along
 /// x, lightness along y, a grey ramp, black and white columns, super-whites (up to 1.6), and
 /// alpha 1 / partial / 0 bands.
-fn picture(w: u32, h: u32) -> Vec<f32> {
+pub(super) fn picture(w: u32, h: u32) -> Vec<f32> {
     let mut px = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         for x in 0..w {
@@ -84,7 +84,7 @@ fn picture(w: u32, h: u32) -> Vec<f32> {
 }
 
 /// Max |cpu − gpu| (finite values required) and the share of values off by more than 0.02.
-fn compare(cpu: &[f32], gpu: &[f32]) -> (f32, f64) {
+pub(super) fn compare(cpu: &[f32], gpu: &[f32]) -> (f32, f64) {
     assert_eq!(cpu.len(), gpu.len());
     let mut worst = 0f32;
     let mut flips = 0usize;

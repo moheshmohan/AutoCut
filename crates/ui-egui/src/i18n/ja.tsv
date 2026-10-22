@@ -4104,3 +4104,36 @@
 	Echo Voice	エコーの声
 	A voice repeating across a large space	広い空間で繰り返し響く声
 	Isolate and Enhance Voice	音声を分離して強調
+
+# Creator effects (Video Effects ▸ Creator)
+	VHS	VHS
+	Film Grain	フィルムグレイン
+	Directional Motion Blur	方向モーションブラー
+	Tech HUD	テック HUD
+	Chromatic Aberration	色収差
+	Duotone	デュオトーン
+	Halftone	ハーフトーン
+	Chroma Bleed	色にじみ
+	Tracking Lines	トラッキングノイズ
+	Tape Wobble	テープの揺れ
+	Color Grain	カラーグレイン
+	Midtone Response	中間調の反応
+	Animate	アニメーション
+	Scanline Jitter	走査線のジッター
+	Rate	レート
+	Rhythm	リズム
+	Constant	一定
+	Bursts	バースト
+	Shutter	シャッター
+	Centered	中央
+	Trailing	後方
+	Trail Falloff	残像の減衰
+	HUD Color	HUD のカラー
+	Scanlines	走査線
+	Line Spacing	線の間隔
+	Grid Size	グリッドサイズ
+	Corner Brackets	コーナーブラケット
+	Auto Sweep (secs)	自動スイープ（秒）
+	Dot Size	ドットサイズ
+	Ink Color	インクのカラー
+	Paper Color	用紙のカラー

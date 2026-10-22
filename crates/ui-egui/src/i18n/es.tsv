@@ -4105,3 +4105,36 @@
 	Echo Voice	Voz con eco
 	A voice repeating across a large space	Una voz que se repite en un espacio grande
 	Isolate and Enhance Voice	Aislar y realzar la voz
+
+# Creator effects (Video Effects ▸ Creator)
+	VHS	VHS
+	Film Grain	Grano de película
+	Directional Motion Blur	Desenfoque de movimiento direccional
+	Tech HUD	HUD tecnológico
+	Chromatic Aberration	Aberración cromática
+	Duotone	Duotono
+	Halftone	Semitono
+	Chroma Bleed	Sangrado de croma
+	Tracking Lines	Líneas de tracking
+	Tape Wobble	Vaivén de cinta
+	Color Grain	Grano de color
+	Midtone Response	Respuesta en medios tonos
+	Animate	Animar
+	Scanline Jitter	Temblor de líneas de barrido
+	Rate	Frecuencia
+	Rhythm	Ritmo
+	Constant	Constante
+	Bursts	Ráfagas
+	Shutter	Obturador
+	Centered	Centrado
+	Trailing	Estela
+	Trail Falloff	Atenuación de la estela
+	HUD Color	Color del HUD
+	Scanlines	Líneas de barrido
+	Line Spacing	Espaciado de líneas
+	Grid Size	Tamaño de cuadrícula
+	Corner Brackets	Esquinas de encuadre
+	Auto Sweep (secs)	Barrido automático (s)
+	Dot Size	Tamaño de punto
+	Ink Color	Color de tinta
+	Paper Color	Color del papel

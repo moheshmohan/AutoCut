@@ -209,6 +209,8 @@ pub enum FxOp {
     OpacityMask {
         masks: Vec<crate::mask::FlatMask>,
     },
+    /// One of the Creator effects ([`crate::creator_fx`]).
+    Creator(crate::creator_fx::CreatorOp),
 }
 
 /// Most mask vertices (all masks of one op together) the GPU takes; more are drawn on the CPU.
@@ -263,6 +265,18 @@ pub const GPU_EFFECTS: &[&str] = &[
     "vignette",
     "video_limiter",
     "lumetri",
+    // the Creator folder (`creator_fx`)
+    "cr_vhs",
+    "cr_film_grain",
+    "cr_kaleidoscope",
+    "cr_glitch",
+    "cr_zoom_blur",
+    "cr_motion_blur",
+    "cr_tech_hud",
+    "cr_chromatic_aberration",
+    "cr_light_sweep",
+    "cr_duotone",
+    "cr_halftone",
 ];
 
 /// `Image::transformed` without the mip path: the destination rectangle it writes and the inverse.
@@ -603,7 +617,7 @@ impl FxOp {
                     gpu_capable,
                 }
             }
-            _ => return None,
+            _ => return crate::creator_fx::eval(e, cx, w, h).map(FxOp::Creator),
         })
     }
 
@@ -658,6 +672,7 @@ impl FxOp {
             }
             FxOp::Masked { op, masks } => !matches!(**op, FxOp::Masked { .. } | FxOp::OpacityMask { .. }) && op.gpu_ok() && gpu_masks_ok(masks),
             FxOp::OpacityMask { masks } => gpu_masks_ok(masks),
+            FxOp::Creator(op) => op.gpu_ok(),
         }
     }
 
@@ -1047,6 +1062,7 @@ impl FxOp {
                     crate::mask::scale_by(img, &cov);
                 }
             }
+            FxOp::Creator(op) => op.apply(img),
         }
     }
 }
