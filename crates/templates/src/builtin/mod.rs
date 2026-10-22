@@ -573,6 +573,7 @@ pub(crate) fn slot(id: &str, kind: SlotKind, name: &str, prompt: &str, order: u3
         beat_sync: false,
         default: None,
         captions: None,
+        ai: None,
     }
 }
 

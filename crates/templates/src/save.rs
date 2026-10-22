@@ -35,7 +35,8 @@ use filmcraft_time::{TICKS_PER_SECOND, Tick};
 
 use crate::apply::parse_slot_marker;
 use crate::manifest::{
-    AssetEntry, BeatGrid, CaptionSpec, Constraints, Fit, Framing, Look, MAX_VARIANTS, Manifest, Placement, Slot, SlotDefault, SlotKind, Variant, default_fit,
+    AiHints, AssetEntry, BeatGrid, CaptionSpec, Constraints, Fit, Framing, Look, MAX_VARIANTS, Manifest, Placement, Slot, SlotDefault, SlotKind, Variant,
+    default_fit,
 };
 use crate::{ASSETS_DIR, FORMAT, FORMAT_VERSION, Package, SEQUENCE_FILE, TemplateError};
 
@@ -51,6 +52,8 @@ pub struct SlotEdit {
     pub fit: Option<Fit>,
     pub constraints: Option<Constraints>,
     pub default: Option<SlotDefault>,
+    /// Hints for filling the slot automatically; an empty set removes the base's.
+    pub ai: Option<AiHints>,
 }
 
 /// A captions slot the author asks for.
@@ -361,6 +364,34 @@ struct Found {
     area: Option<[f64; 4]>,
 }
 
+/// `a` as slot `sid` (of `kind`, texts of at most `max_chars`) can hold it: hints for another kind
+/// of slot are dropped with a warning; `None` when nothing is left.
+fn fit_ai(mut a: AiHints, kind: SlotKind, max_chars: Option<u32>, sid: &str, warnings: &mut Vec<String>) -> Option<AiHints> {
+    let before = a.clone();
+    if !kind.is_visual() {
+        a.purpose = None;
+        a.query.clear();
+        a.energy = None;
+        a.min_quality = None;
+        a.chronological = false;
+    }
+    if kind != SlotKind::Video {
+        a.speech = None;
+    }
+    if kind != SlotKind::Text {
+        a.prompt.clear();
+        a.max_chars = None;
+        a.about.clear();
+    }
+    if let (Some(m), Some(limit)) = (a.max_chars, max_chars) {
+        a.max_chars = Some(m.min(limit));
+    }
+    if a != before {
+        warnings.push(format!("slot `{sid}`: hints that do not fit a {} slot were dropped", kind.id()));
+    }
+    (!a.is_empty()).then_some(a)
+}
+
 /// Make a template from sequence `seq` of `p`. `beat_grid` is the music's beats on the
 /// sequence's timeline (the engine measures them), if any.
 pub fn save(p: &Project, seq: ItemId, opts: &SaveOptions, beat_grid: Option<BeatGrid>) -> Result<Saved, TemplateError> {
@@ -636,6 +667,7 @@ pub fn save(p: &Project, seq: ItemId, opts: &SaveOptions, beat_grid: Option<Beat
             beat_sync: bs.map_or(beats_ok && kind.is_visual(), |b| b.beat_sync),
             default: bs.and_then(|b| b.default.clone()),
             captions: None,
+            ai: bs.and_then(|b| b.ai.clone()),
         };
         if kind == SlotKind::Music {
             s.count = 1;
@@ -669,6 +701,13 @@ pub fn save(p: &Project, seq: ItemId, opts: &SaveOptions, beat_grid: Option<Beat
             if let Some(d) = &e.default {
                 s.default = Some(d.clone());
             }
+            if let Some(a) = &e.ai {
+                s.ai = (!a.is_empty()).then(|| a.clone());
+            }
+        }
+        // hints that no longer fit the slot (its kind, its text's length) are dropped
+        if let Some(a) = s.ai.take() {
+            s.ai = fit_ai(a, s.kind, s.constraints.max_chars, &sid, &mut warnings);
         }
         s.min_count = s.min_count.min(s.count);
         if s.beat_sync && (!beats_ok || !kind.is_visual()) {
@@ -752,7 +791,22 @@ pub fn save(p: &Project, seq: ItemId, opts: &SaveOptions, beat_grid: Option<Beat
                 beat_sync: false,
                 default: None,
                 captions: Some(CaptionSpec { source, max_chars: c.max_chars.clamp(8, 200), lines: c.lines.clamp(1, 2) }),
+                ai: None,
             });
+        }
+    }
+    // a text slot's hints are about a picture slot the template still has
+    let pictures: Vec<String> = manifest_slots.iter().filter(|s| s.kind.is_visual()).map(|s| s.id.clone()).collect();
+    for s in manifest_slots.iter_mut() {
+        if let Some(a) = s.ai.as_mut()
+            && !a.about.is_empty()
+            && !pictures.contains(&a.about)
+        {
+            warnings.push(format!("slot `{}`: its texts were about slot `{}`, which the template no longer has", s.id, a.about));
+            a.about.clear();
+        }
+        if s.ai.as_ref().is_some_and(AiHints::is_empty) {
+            s.ai = None;
         }
     }
     let has_captions_slot = manifest_slots.iter().any(|s| s.kind == SlotKind::Captions);

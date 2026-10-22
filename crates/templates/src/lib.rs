@@ -42,8 +42,8 @@ pub mod zip;
 
 pub use apply::{Applied, ApplyOptions, Cue, MediaFill, MusicBeats, SlotFill};
 pub use manifest::{
-    AssetEntry, BeatGrid, CaptionSpec, Constraints, Fit, Framing, Hint, LayerHint, Look, Manifest, Orientation, Placement, Portion, QuantizeMode, ShortFit,
-    Slot, SlotDefault, SlotKind, Variant,
+    AiHints, AssetEntry, BeatGrid, CaptionSpec, Constraints, EnergyHint, Fit, Framing, Hint, LayerHint, Look, Manifest, Orientation, Placement, Portion,
+    Purpose, QuantizeMode, ShortFit, Slot, SlotDefault, SlotKind, SpeechHint, Variant,
 };
 pub use package::Package;
 

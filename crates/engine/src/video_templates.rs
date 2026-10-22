@@ -5,7 +5,7 @@
 //! | command | does |
 //! |---|---|
 //! | `template.list` | the built-in starters and the user's templates (`<data dir>/Video Templates/`: `*.fcvideo-template` folders and `.zip` packages); `query`, `category`, `source`, `aspect` (a layout it has: `9:16`), `kind` (a slot kind it has: `captions`), `minMedia` / `maxMedia` (how many clips or photos it takes) filter; templates that fail to read are listed under `invalid` with why |
-//! | `template.inspect` | one template (`template`: id, name or path): slots with their placements, variants, beat grid, look, caption style, export preset, the manifest |
+//! | `template.inspect` | one template (`template`: id, name or path): slots with their placements and AI hints (`ai`: what each picture slot's shot is for, how lively, words to find it by, speech or not, the least quality, filming order; what each text slot's model text says), variants, beat grid, look, caption style, export preset, the manifest |
 //! | `template.validate` | check a package (`path`: folder, `.zip` or `template.json`): `valid`, and every problem with the field it is about |
 //! | `template.apply` | a new sequence from a template: `variant` (`16:9`, `9:16`…), `slots` (`{"photos": ["/a.jpg", 12, {"path": "/b.mov", "inSeconds": 3, "focus": [0.4, 0.5]}], "title": "Lisbon", "captions": [{"start": ticks, "end": ticks, "text": "…"}]}`), `name`, `captions: false` (no transcribing); one undo step |
 //! | `template.save` | Save as Template: clips flagged as slots (`template.markSlot`, or left by an earlier apply) become slots with neutral generated placeholders; other personal media is left out unless `bundle`d (with its attribution); the base template's (or the author's) slot details, captions slot, layouts and hints, poster, look and export presets carry over; written into the user templates folder (or `path`: a folder or a `.zip`), where the browser shows it |
@@ -116,7 +116,7 @@ pub fn commands() -> Vec<CommandSpec> {
 }
 
 /// `template.save`'s parameters.
-pub const SAVE_PARAMS: &str = r#"{"path":str (.fcvideo-template folder or .zip; default: the user templates folder)?,"zip":bool=false,"sequence":id?,"name":str?,"id":str?,"description":str?,"author":str?,"license":str="MIT OR Apache-2.0","category":str?,"version":str?,"tags":[str]?,"base":id|"none"?,"slots":{"<slot>":{"name","prompt","order","minCount","beatSync","fit","constraints","default"}}?,"captions":bool|{"id","name","source":[slot],"maxChars","lines"}?,"variants":["16:9"|"9:16"|"1:1"|"4:5"]?,"poster":ticks?,"posterSeconds":f64?,"look":{"lumetri":str}|{"preset":str}?,"exportPreset":str?,"bundle":[itemId]|true?,"overwrite":bool?}"#;
+pub const SAVE_PARAMS: &str = r#"{"path":str (.fcvideo-template folder or .zip; default: the user templates folder)?,"zip":bool=false,"sequence":id?,"name":str?,"id":str?,"description":str?,"author":str?,"license":str="MIT OR Apache-2.0","category":str?,"version":str?,"tags":[str]?,"base":id|"none"?,"slots":{"<slot>":{"name","prompt","order","minCount","beatSync","fit","constraints","default","ai":{"purpose","query","energy","speech","minQuality","chronological","prompt","maxChars","about"}}}?,"captions":bool|{"id","name","source":[slot],"maxChars","lines"}?,"variants":["16:9"|"9:16"|"1:1"|"4:5"]?,"poster":ticks?,"posterSeconds":f64?,"look":{"lumetri":str}|{"preset":str}?,"exportPreset":str?,"bundle":[itemId]|true?,"overwrite":bool?}"#;
 
 /// Bumped whenever a template is saved or installed in the user folder (the browser re-reads).
 static LIBRARY_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -306,6 +306,7 @@ fn slot_json(s: &Slot) -> Value {
         "constraints": serde_json::to_value(&s.constraints).unwrap_or_default(),
         "default": s.default.as_ref().map(|d| serde_json::to_value(d).unwrap_or_default()),
         "captions": s.captions.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default()),
+        "ai": s.ai.as_ref().map(|a| serde_json::to_value(a).unwrap_or_default()),
     })
 }
 
@@ -334,6 +335,7 @@ fn summary(e: &Entry) -> Value {
         "mediaSlots": m.media_slots(),
         "mediaCount": m.media_count(),
         "captions": m.captions_slot().is_some(),
+        "aiReady": m.ai_ready(),
         "poster": m.poster_time().0,
         "posterSeconds": m.poster_time().seconds(),
     })
