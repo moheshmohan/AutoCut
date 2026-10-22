@@ -89,6 +89,8 @@ const LAYERS: &[(&str, u8)] = &[
     ("acestep", 2),
     // privacy detection: face and plate detectors (candle), tracking
     ("vision", 2),
+    // the scene index: shot boundaries, descriptions, quality, embeddings (candle), rankings
+    ("scenes", 2),
     // SoundFont instruments for the music engine (rustysynth behind a structural SF2 check)
     ("soundfont", 2),
     ("interchange", 2),
