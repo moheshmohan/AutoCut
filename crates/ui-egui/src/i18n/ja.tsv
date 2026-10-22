@@ -4163,3 +4163,27 @@
 	Keeps the most of the frame, smooths less	フレームを最も多く残し、スムーズさは控えめ
 	The steadiest picture, crops more	最も安定した映像、クロップは多め
 	Warp Stabilizer is added to the selected video clips (or updated) at this level.	選択したビデオクリップにこのレベルでワープスタビライザーを追加（または更新）します。
+
+# Creator transitions (Video Transitions ▸ Creator)
+	Pull In	プルイン
+	Pull Out	プルアウト
+	Black Fade	ブラックフェード
+	White Flash	ホワイトフラッシュ
+	Flash Zoom	フラッシュズーム
+	Zoom Shake	ズームシェイク
+	Swipe Left	左へスワイプ
+	Swipe Right	右へスワイプ
+	Swipe Up	上へスワイプ
+	Swipe Down	下へスワイプ
+	Glitch Cut	グリッチカット
+	Light Leak Fade	光漏れフェード
+	Burn	バーン
+	Pixelate	ピクセル化
+	Ripple	波紋
+	Cube	キューブ
+	3D Flip	3D フリップ
+
+# Transition and beat commands
+	Transitions on Strong Beats	強拍にトランジション
+	Apply Transition to All Cuts	すべてのカットにトランジションを適用
+	Beat Pulse	ビートパルス

@@ -539,7 +539,8 @@ fn every_video_transition_applies_via_command() {
         .map(|f| filmcraft_project::effect_defs().iter().filter(|d| d.category == *f).count())
         .sum();
     assert_eq!(themed, 40 + 32 + 26 + 7 + 20);
-    assert_eq!(defs.len(), 84 + 21 + themed, "Premiere folders, Legacy, themed folders");
+    let creator = filmcraft_project::creator_transitions::CREATOR_TRANSITIONS.len();
+    assert_eq!(defs.len(), 84 + 21 + themed + creator, "Premiere folders, Legacy, themed folders, Creator presets");
     for (i, d) in defs.iter().enumerate() {
         // alternate id and display-name lookups
         let name = if i % 2 == 0 { d.id } else { d.name };

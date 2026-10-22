@@ -4164,3 +4164,27 @@
 	Keeps the most of the frame, smooths less	Conserva la mayor parte del cuadro, suaviza menos
 	The steadiest picture, crops more	La imagen más estable, recorta más
 	Warp Stabilizer is added to the selected video clips (or updated) at this level.	Se añade Estabilizador de deformación a los clips de video seleccionados (o se actualiza) con este nivel.
+
+# Creator transitions (Video Transitions ▸ Creator)
+	Pull In	Acercar
+	Pull Out	Alejar
+	Black Fade	Fundido a negro rápido
+	White Flash	Destello blanco
+	Flash Zoom	Zoom con destello
+	Zoom Shake	Zoom con sacudida
+	Swipe Left	Deslizar a la izquierda
+	Swipe Right	Deslizar a la derecha
+	Swipe Up	Deslizar hacia arriba
+	Swipe Down	Deslizar hacia abajo
+	Glitch Cut	Corte con glitch
+	Light Leak Fade	Fundido con fuga de luz
+	Burn	Quemado
+	Pixelate	Pixelar
+	Ripple	Onda
+	Cube	Cubo
+	3D Flip	Giro 3D
+
+# Transition and beat commands
+	Transitions on Strong Beats	Transiciones en los tiempos fuertes
+	Apply Transition to All Cuts	Aplicar transición a todos los cortes
+	Beat Pulse	Pulso al ritmo

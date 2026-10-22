@@ -214,6 +214,7 @@ fn folder_keywords(cat: &[&str]) -> &'static [&'static str] {
         "Particles & Patterns" => &["pattern", "particles", "shapes", "tiles", "grid"],
         "Luma Wipes" => &["wipe", "luma", "mask", "reveal", "shape"],
         "Blend Dissolves" => &["dissolve", "blend", "mix", "fade"],
+        "Creator" => &["creator", "quick", "social", "reels", "shorts", "trending"],
         "Animation" => &["animation", "motion", "move"],
         "Dissolve" => &["dissolve", "fade", "mix", "crossfade"],
         "Grunge & Distort" => &["grunge", "distort", "glitch"],
@@ -230,6 +231,9 @@ fn folder_keywords(cat: &[&str]) -> &'static [&'static str] {
 
 /// Words transition `id` itself is found by, besides its name.
 fn own_keywords(id: &str) -> &'static [&'static str] {
+    if let Some(c) = crate::creator_transitions::creator_transition(id) {
+        return c.keywords;
+    }
     match id {
         "flow_morph" => &["ai transition", "morph cut", "shape match", "liquid"],
         "flow_doppler_warp" => &["streak", "radial blur", "speed", "zoom"],
@@ -358,6 +362,7 @@ mod tests {
         assert!(keyword_match("flow_datamosh", "datamosh"));
         assert!(keyword_match("gl_cube", "3d"));
         assert!(keyword_match("pt_hearts", "love"));
+        assert!(keyword_match("crt_swipe_left", "whip") && keyword_match("crt_pull_in", "reels"));
         assert!(!keyword_match("pt_hearts", "zoom"));
         assert!(!keyword_match("pt_hearts", "  "));
         assert!(transition_keywords("gaussian_blur").is_empty() && transition_keywords("nope").is_empty());

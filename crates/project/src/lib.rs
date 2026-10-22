@@ -11,6 +11,7 @@
 
 pub mod auto_duck;
 pub mod caption;
+pub mod creator_transitions;
 pub mod effect;
 pub mod elements;
 pub mod essential;

@@ -32,8 +32,11 @@ fn frame_b() -> Image {
     })
 }
 
+/// Every video transition but the Creator presets: those draw their base transition with tuned
+/// defaults (`tests::creator_transitions_render_and_plan_as_their_base`), so the base's goldens and
+/// parameter checks cover them.
 fn transitions() -> impl Iterator<Item = &'static EffectDef> {
-    effect_defs().iter().filter(|d| d.kind == EffectKind::VideoTransition)
+    effect_defs().iter().filter(|d| d.kind == EffectKind::VideoTransition && filmcraft_project::creator_transitions::creator_transition(d.id).is_none())
 }
 
 fn mean_abs(a: &Image, b: &Image) -> f32 {

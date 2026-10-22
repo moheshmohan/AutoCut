@@ -61,6 +61,9 @@ pub fn apply_scaled(e: &EffectInstance, a: &Image, b: &Image, p: f32, scale: f32
 /// timeline's, computed once from the clips at the cut. Without one (or for one of another
 /// size) such a transition analyses `a` and `b` themselves.
 pub fn apply_with(e: &EffectInstance, a: &Image, b: &Image, p: f32, scale: f32, field: Option<&content::Field>) -> Image {
+    // a Creator preset is drawn by its base transition (`filmcraft_project::creator_transitions`)
+    let resolved = filmcraft_project::creator_transitions::resolve(e);
+    let e = resolved.as_ref();
     let p = if p.is_finite() { p.clamp(0.0, 1.0) } else { 0.0 };
     if a.w == 0 || a.h == 0 || (a.w, a.h) != (b.w, b.h) {
         return if p < 0.5 { a.clone() } else { b.clone() };

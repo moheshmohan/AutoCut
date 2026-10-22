@@ -654,3 +654,54 @@ fn warming_a_frame_asks_for_the_pictures_its_render_asks_for() {
     // no such sequence: nothing asked
     assert_eq!(prefetch::warm_frame(&p, ItemId(999_999), Tick(0), RenderOptions::default(), &asked), 0);
 }
+
+#[test]
+fn creator_transitions_render_and_plan_as_their_base() {
+    // every Creator preset draws exactly what its base transition draws with the same
+    // parameters, on the CPU and in the GPU plan (where every base is drawn by the GPU)
+    let (mut p, red, ocean, seq, map) = setup();
+    let a = place(&mut p, seq, 0, ocean, 0, 24);
+    let b = place(&mut p, seq, 0, red, 24, 24);
+    let rate = FrameRate::FPS_24;
+    let opts = RenderOptions { scale: 0.25, ..Default::default() };
+    for c in filmcraft_project::creator_transitions::CREATOR_TRANSITIONS {
+        let preset = filmcraft_project::find_effect(c.id).unwrap().instance();
+        let mut base = preset.clone();
+        base.effect = c.base.to_string();
+        let mut frames = Vec::new();
+        for effect in [&preset, &base] {
+            p.sequence_mut(seq).unwrap().video_tracks[0].transitions = vec![filmcraft_project::Transition {
+                id: filmcraft_project::TransitionId(990),
+                effect: effect.clone(),
+                start: rate.tick_of(18),
+                duration: rate.tick_of(12),
+                from: Some(a),
+                to: Some(b),
+                align: Default::default(),
+                reverse: false,
+                sound: None,
+            }];
+            let mut got = Vec::new();
+            for f in [20, 24, 28] {
+                let t = rate.tick_of(f);
+                assert!(!plan::is_cpu_frame(&p, seq, t), "{}: drawn by the GPU", c.id);
+                let reference = render_sequence(&p, seq, t, opts, &map);
+                let plan = plan::plan_frame(&p, seq, t, opts, &map);
+                if let plan::FramePlan::Composite { steps, .. } = &plan {
+                    for s in steps {
+                        if let plan::PlanStep::Transition { effect, .. } = s {
+                            assert_eq!(effect.effect, c.base, "{}: the plan carries the base", c.id);
+                        }
+                    }
+                }
+                let planned = plan::execute_cpu(&plan);
+                let max = planned.px.iter().zip(&reference.px).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
+                assert!(max < 1e-4, "{} frame {f}: plan vs reference {max}", c.id);
+                got.push(reference.px);
+            }
+            frames.push(got);
+        }
+        assert_eq!(frames[0], frames[1], "{}: the preset renders as its base", c.id);
+        assert_ne!(frames[0][0], frames[0][2], "{}: the transition moves", c.id);
+    }
+}

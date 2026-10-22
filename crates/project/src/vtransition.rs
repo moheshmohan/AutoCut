@@ -116,7 +116,7 @@ fn with(mut v: Vec<ParamDef>, extra: impl IntoIterator<Item = ParamDef>) -> Vec<
 pub(crate) fn video_transition_defs() -> Vec<EffectDef> {
     use Badges::*;
     let m = A32;
-    vec![
+    let v = vec![
         // ---- Animation ----
         tr("block_motion", "Block Motion", ANIMATION, m, vec![direction(), range("blocks", "Blocks", 6.0, 2.0, 32.0, ""), motion_blur()]),
         tr("flip_motion", "Flip Motion", ANIMATION, m, vec![direction(), num("perspective", "Perspective", 50.0, 100.0, "%"), motion_blur()]),
@@ -385,7 +385,12 @@ pub(crate) fn video_transition_defs() -> Vec<EffectDef> {
     // Camera, 3D & Spatial, Light & Film, Distortion, Glitch & Datamosh, Particles & Patterns,
     // Luma Wipes, Blend Dissolves ----
     .chain(crate::transition_catalog::defs())
-    .collect()
+    .collect::<Vec<EffectDef>>();
+    // ---- the Creator presets, over the transitions above ----
+    let mut v = v;
+    let creator = crate::creator_transitions::defs(&v);
+    v.extend(creator);
+    v
 }
 
 /// Case-insensitive lookup of a transition of `kind` by id or display name (names such as
@@ -397,7 +402,8 @@ pub fn find_transition(name: &str, kind: EffectKind) -> Option<&'static EffectDe
 
 /// The Effects panel folder tree for video transitions: `(folder path, transition ids)` in panel
 /// order (sub-folders as [`VIDEO_TRANSITION_FOLDERS`], then the themed folders of
-/// [`crate::transition_catalog::THEMED_FOLDERS`], then `Legacy/Video Transitions`); items are
+/// [`crate::transition_catalog::THEMED_FOLDERS`], then the Creator presets
+/// ([`crate::creator_transitions`]), then `Legacy/Video Transitions`); items are
 /// sorted by name as in the panel.
 pub fn video_transition_tree() -> Vec<(String, Vec<&'static str>)> {
     let defs = crate::effect::effect_defs();
@@ -411,6 +417,8 @@ pub fn video_transition_tree() -> Vec<(String, Vec<&'static str>)> {
     for f in crate::transition_catalog::THEMED_FOLDERS {
         out.push((f.join("/"), folder(f)));
     }
+    let creator = crate::creator_transitions::CREATOR_TRANSITIONS_FOLDER;
+    out.push((creator.join("/"), folder(creator)));
     out.push(("Legacy/Video Transitions".into(), folder(LEGACY_VIDEO_TRANSITIONS)));
     out
 }
@@ -423,7 +431,7 @@ mod tests {
     fn premiere_26_transition_tree() {
         let tree = video_transition_tree();
         let counts: Vec<usize> = tree.iter().map(|(_, v)| v.len()).collect();
-        assert_eq!(counts, vec![8, 11, 10, 8, 16, 8, 4, 2, 8, 9, 6, 10, 7, 10, 8, 7, 11, 40, 26, 21], "{tree:?}");
+        assert_eq!(counts, vec![8, 11, 10, 8, 16, 8, 4, 2, 8, 9, 6, 10, 7, 10, 8, 7, 11, 40, 26, 21, 21], "{tree:?}");
         assert_eq!(counts[..10].iter().sum::<usize>(), 84);
         // every transition is in a known folder, ids and names are unique per kind
         let mut names = std::collections::HashSet::new();
@@ -432,7 +440,8 @@ mod tests {
             let ok = (d.category.len() == 2 && d.category[0] == "Video Transitions" && VIDEO_TRANSITION_FOLDERS.contains(&d.category[1]))
                 || d.category == LEGACY_VIDEO_TRANSITIONS
                 || d.category == OBSOLETE_VIDEO_TRANSITIONS
-                || crate::transition_catalog::THEMED_FOLDERS.contains(&d.category);
+                || crate::transition_catalog::THEMED_FOLDERS.contains(&d.category)
+                || d.category == crate::creator_transitions::CREATOR_TRANSITIONS_FOLDER;
             assert!(ok, "{} in {:?}", d.id, d.category);
             assert!(d.params.iter().all(|p| !p.animatable), "{}: transition params are not animatable", d.id);
         }
