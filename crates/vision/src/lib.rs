@@ -18,7 +18,9 @@
 //!   layer by layer against the ONNX file: on the CPU (candle and plain Rust, the reference) and,
 //!   on macOS, as fused WGSL compute passes on the GPU (`gpu`, wgpu), the CPU being the fallback.
 //! - `dfine`, `rtmpose` and [`ProfileDetector`] (feature `model`): the profile pass's person
-//!   detector and pose network on the CPU (`layers`), finding the faces YuNet misses.
+//!   detector and pose network, finding the faces YuNet misses: on the CPU (`layers`, the
+//!   reference) and, on macOS, wholly on the GPU (`gpunn`: the frame resized, both networks, the
+//!   crops and the SimCC maxima as WGSL passes), the CPU being the fallback.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
@@ -36,6 +38,8 @@ mod dfine;
 mod gpu;
 #[cfg(feature = "model")]
 mod gpunn;
+#[cfg(all(test, feature = "model"))]
+mod gpunn_tests;
 #[cfg(feature = "model")]
 mod layers;
 #[cfg(feature = "model")]

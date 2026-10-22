@@ -25,16 +25,16 @@
 //! (2026-10-22: two visitors in profile behind a robot arm stayed sharp in a reel). With
 //! `profiles` (on by default once its models are downloaded, `redact.downloadModels`) every
 //! analysed frame also goes through the profile pass (`filmcraft_vision::ProfileDetector`: the
-//! D-FINE person detector, then RTMPose on each person, on the GPU on macOS): each person whose
+//! D-FINE person detector, then RTMPose on each person, wholly on the GPU on macOS): each person whose
 //! nose or an eye is found (the back of a head identifies nobody) and whose head no YuNet face
 //! covers adds a face, the head box from the nose, eyes and ears. Those faces are followed
 //! together with YuNet's (a visitor turning away stays one track), need two sightings, never
 //! count as "sure" (so the vision check's "a robot" is believed: Ameca keeps its face), and are
 //! reported (`fromPose`, `facesFromPose`). The job holds the machine's GPU lock while it runs
 //! (`filmcraft_locks`; waited for up to ten minutes, then run anyway). Measured 2026-10-22 on an
-//! M3 Max with the machine loaded by parallel builds (load average 30–60): 6–8 frames a second at
-//! 1080p for the people and their poses, and 57 ms more per analysed frame in the job; at a load
-//! of 60 on its 16 cores the CPU parts starve and it was about 0.4 s more per frame.
+//! M3 Max (14 cores) on a 1080p frame of 24 visitors: the people and their poses in 101 ms on an
+//! idle machine and 105 ms at a load average of 33–52 (9.5 frames a second); before the decoder,
+//! the pose head and the crops moved to the GPU, 118 ms and 973 ms (the CPU parts starved).
 //!
 //! **Not robots.** With `verify` (the default) every track still to be hidden is shown once,
 //! cropped with its surroundings, to a local vision model (the host's [`VisionJudge`]: AutoCut's

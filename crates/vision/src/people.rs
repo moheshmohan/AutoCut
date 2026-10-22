@@ -1,10 +1,15 @@
 //! The profile pass: the people in a picture (D-FINE, [`crate::dfine`]), their poses (RTMPose,
 //! [`crate::rtmpose`]), and from those the faces the face detector misses — in profile, half
 //! hidden — as face detections ([`crate::head::candidates`]).
+//!
+//! On the GPU (macOS) the whole pass runs there: the frame goes up once, is resized for the
+//! person detector, the people's crops are cut from it, and two small read-backs come down (the
+//! people, then their keypoints). The CPU is the fallback, network by network.
 
 use std::path::Path;
 
-use crate::dfine::{self, Dfine};
+use crate::dfine::{self, Dfine, Found};
+use crate::gpunn::{GpuUse, Run};
 use crate::head::{self, HeadParams, Person};
 use crate::rtmpose::RtmPose;
 use crate::{Detection, VisionError, catalog, post};
@@ -33,8 +38,8 @@ impl Default for ProfileParams {
 
 /// The person detector and the pose network.
 pub struct ProfileDetector {
-    person: Dfine,
-    pose: RtmPose,
+    pub(crate) person: Dfine,
+    pub(crate) pose: RtmPose,
     pub params: ProfileParams,
 }
 
@@ -66,11 +71,54 @@ impl ProfileDetector {
         if self.person.on_gpu() && self.pose.on_gpu() { "gpu" } else { "cpu" }
     }
 
-    /// The people in an RGBA picture with their poses, in its pixels, best first.
+    /// The people in an RGBA picture with their poses, in its pixels, best first: on the GPU
+    /// when both networks are there, else (or when that fails) as [`ProfileDetector::people_cpu`].
     pub fn people(&self, rgba: &[u8], w: usize, h: usize) -> Result<Vec<Person>, VisionError> {
+        // a picture that cannot be analysed is refused here, not counted as a GPU failure
+        let (ow, oh) = dfine::prepared_size(w, h, self.params.side)?;
+        if w.checked_mul(h).and_then(|n| n.checked_mul(4)).is_none_or(|n| rgba.len() < n) {
+            return Err(VisionError::Invalid(format!("{} bytes for a {w} × {h} RGBA picture", rgba.len())));
+        }
+        if self.person.on_gpu()
+            && self.pose.on_gpu()
+            && let Some(people) = GpuUse::run(&self.person.gpu, |r| self.people_gpu(r, rgba, w, h, (ow, oh)))
+        {
+            return Ok(people);
+        }
+        self.people_cpu(rgba, w, h)
+    }
+
+    /// [`ProfileDetector::people`] with the picture prepared on the CPU (each network on the GPU
+    /// where it is, else on the CPU).
+    pub fn people_cpu(&self, rgba: &[u8], w: usize, h: usize) -> Result<Vec<Person>, VisionError> {
         let p = &self.params;
         let x = dfine::prepare(rgba, w, h, p.side)?;
         let found = self.person.people(&x, p.person_score.clamp(0.01, 1.0))?;
+        let boxes = self.select(&found, w, h);
+        let rects: Vec<[f32; 4]> = boxes.iter().map(|d| d.bbox).collect();
+        let poses = self.pose.poses(rgba, w, h, &rects)?;
+        Ok(boxes.into_iter().zip(poses).map(|(d, keypoints)| Person { bbox: d.bbox, score: d.score, keypoints }).collect())
+    }
+
+    /// The whole pass on the GPU (`size`: the person detector's picture size).
+    fn people_gpu(&self, r: &Run<'_>, rgba: &[u8], w: usize, h: usize, size: (usize, usize)) -> Result<Vec<Person>, VisionError> {
+        let p = &self.params;
+        let img = r.upload_rgba(rgba, w, h)?;
+        let x = r.resize_area(&img, size.0, size.1)?;
+        let found = self.person.people_gpu(r, x, p.person_score.clamp(0.01, 1.0))?;
+        let boxes = self.select(&found, w, h);
+        let rects: Vec<[f32; 4]> = boxes.iter().map(|d| d.bbox).collect();
+        let poses = self.pose.poses_gpu(r, &img, &rects)?;
+        if poses.len() != boxes.len() {
+            return Err(VisionError::Model("the poses did not come back".into()));
+        }
+        Ok(boxes.into_iter().zip(poses).map(|(d, keypoints)| Person { bbox: d.bbox, score: d.score, keypoints }).collect())
+    }
+
+    /// The people whose poses are looked at: in the picture's pixels, tall enough, a box found
+    /// twice suppressed, at most `max_people`.
+    fn select(&self, found: &[Found], w: usize, h: usize) -> Vec<Detection> {
+        let p = &self.params;
         let (fw, fh) = (w as f32, h as f32);
         let boxes: Vec<Detection> = found
             .iter()
@@ -89,9 +137,7 @@ impl ProfileDetector {
         // a DETR rarely finds one person twice; when it does, the better box stays
         let mut boxes = post::nms(boxes, 0.7, 300);
         boxes.truncate(p.max_people.min(64));
-        let rects: Vec<[f32; 4]> = boxes.iter().map(|d| d.bbox).collect();
-        let poses = self.pose.poses(rgba, w, h, &rects)?;
-        Ok(boxes.into_iter().zip(poses).map(|(d, keypoints)| Person { bbox: d.bbox, score: d.score, keypoints }).collect())
+        boxes
     }
 
     /// The faces the face detector missed in an RGBA picture: the heads of the people whose

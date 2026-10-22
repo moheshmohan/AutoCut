@@ -1,7 +1,9 @@
 //! RTMPose (Jiang et al., "RTMPose: Real-Time Multi-Person Pose Estimation based on MMPose",
 //! arXiv 2303.07399; Apache-2.0, OpenMMLab), the pose network of the profile pass, written out by
-//! hand on the CPU ([`crate::layers`]). Top-down: each person's box, grown by a quarter and
-//! widened to 3:4, is warped to 192 × 256 and looked at on its own.
+//! hand on the CPU ([`crate::layers`], the reference) and on the GPU ([`crate::gpunn`]: the
+//! crops, the backbone, the head and the SimCC maxima, one read-back for every person of a frame).
+//! Top-down: each person's box, grown by a quarter and widened to 3:4, is warped to 192 × 256 and
+//! looked at on its own.
 //!
 //! The weights are the `end2end.onnx` file of OpenMMLab's deployment zip (batch norms already
 //! folded into the convolutions). The code takes the file's `Conv` nodes in graph order and
@@ -25,7 +27,7 @@ use std::path::Path;
 use rayon::prelude::*;
 
 use crate::VisionError;
-use crate::gpunn::{GpuUse, Nn};
+use crate::gpunn::{GImg, GM, GT, GpuUse, Nn, Run, TAct};
 use crate::head::{KEYPOINTS, Keypoint};
 use crate::layers::{Act, Backend, Conv, Cpu, Feat, Linear, err};
 use crate::onnx::{self, Data, Model, Node};
@@ -168,6 +170,8 @@ pub struct RtmPose {
     e: usize,
     s: usize,
     gpu: Option<GpuUse>,
+    /// The head's vectors on the GPU: gamma, beta, the residual's scale.
+    consts: Option<[wgpu::Buffer; 3]>,
 }
 
 fn silu(x: f32) -> f32 {
@@ -175,7 +179,7 @@ fn silu(x: f32) -> f32 {
 }
 
 /// Scale norm over each row of `x` (rows of `d`): `x / max(‖x‖·d^−½, 1e−5) · g`.
-fn scale_norm(x: &mut [f32], d: usize, g: f32) {
+pub(crate) fn scale_norm(x: &mut [f32], d: usize, g: f32) {
     let k = (d as f32).sqrt().recip();
     for r in x.chunks_exact_mut(d.max(1)) {
         let n = (r.iter().map(|v| v * v).sum::<f32>().sqrt() * k).max(1e-5);
@@ -290,12 +294,12 @@ impl RtmPose {
             e: e2,
             s: s_dim,
             gpu: None,
+            consts: None,
         })
     }
 
-    /// The SimCC logits for `n` normalised crops `[n, 3, 256, 192]`: `[n, 17, 384]` and
-    /// `[n, 17, 512]`.
-    /// Put the backbone on this machine's GPU (the CPU stays the fallback); `false` without one.
+    /// Put the network on this machine's GPU (the CPU stays the fallback); `false` without one
+    /// (or when a weight does not go up: the CPU then).
     pub fn use_gpu(&mut self) -> bool {
         let Some(nn) = Nn::shared() else { return false };
         for c in &mut self.stem {
@@ -310,6 +314,12 @@ impl RtmPose {
             st.csp.upload(&nn);
         }
         self.final_layer.upload(&nn);
+        for l in [&mut self.mlp, &mut self.uv, &mut self.o, &mut self.cls_x, &mut self.cls_y] {
+            if l.upload(&nn).is_err() {
+                return false;
+            }
+        }
+        self.consts = Some([nn.upload(&self.gamma), nn.upload(&self.beta), nn.upload(&self.res_scale)]);
         self.gpu = Some(GpuUse::new(nn));
         true
     }
@@ -319,10 +329,9 @@ impl RtmPose {
     }
 
     /// The backbone and the head's 7×7 convolution: one 8 × 6 map per keypoint and crop.
-    fn maps<B: Backend>(&self, be: &B, x: &Feat) -> Result<Feat, VisionError> {
+    fn maps<B: Backend>(&self, be: &B, xi: &B::T) -> Result<B::T, VisionError> {
         let [a, b, cc] = &self.stem;
-        let xi = be.input(x)?;
-        let mut y = be.conv(cc, &be.conv(b, &be.conv(a, &xi, None)?, None)?, None)?;
+        let mut y = be.conv(cc, &be.conv(b, &be.conv(a, xi, None)?, None)?, None)?;
         for st in &self.stages {
             y = be.conv(&st.down, &y, None)?;
             if let Some((c1, c2)) = &st.spp {
@@ -332,21 +341,39 @@ impl RtmPose {
             }
             y = st.csp.forward(be, &y)?;
         }
-        let f = be.conv(&self.final_layer, &y, None)?;
-        be.read(vec![f])?.pop().ok_or_else(|| err("the pose maps did not come back"))
+        be.conv(&self.final_layer, &y, None)
     }
 
+    /// The SimCC logits for `n` normalised crops `[n, 3, 256, 192]`: `[n, 17, 384]` and
+    /// `[n, 17, 512]`. On the GPU when it has one, else (or when that fails) on the CPU.
     pub(crate) fn raw(&self, x: &Feat) -> Result<(Vec<f32>, Vec<f32>), VisionError> {
         if x.c != 3 || x.h != INPUT_H || x.w != INPUT_W || x.n == 0 {
             return Err(err("the pose network takes 192 × 256 RGB crops"));
         }
-        let f = match GpuUse::run(&self.gpu, |r| self.maps(r, x)) {
-            Some(f) => f,
-            None => self.maps(&Cpu, x)?,
-        };
-        let n = x.n;
+        if let Some(v) = GpuUse::run(&self.gpu, |r| {
+            let (sx, sy) = self.head_gpu(r, &self.maps(r, &r.input(x)?)?)?;
+            let mut v = r.read_mats(&[&sx, &sy])?.into_iter();
+            v.next().zip(v.next()).ok_or_else(|| err("the pose head's outputs did not come back"))
+        }) {
+            return Ok(v);
+        }
+        self.raw_cpu(x)
+    }
+
+    /// [`RtmPose::raw`] on the CPU (the reference).
+    pub(crate) fn raw_cpu(&self, x: &Feat) -> Result<(Vec<f32>, Vec<f32>), VisionError> {
+        if x.c != 3 || x.h != INPUT_H || x.w != INPUT_W || x.n == 0 {
+            return Err(err("the pose network takes 192 × 256 RGB crops"));
+        }
+        let f = self.maps(&Cpu, x)?;
+        self.head_cpu(&f)
+    }
+
+    /// The head (on the CPU) over the keypoint maps `[n, 17, 8, 6]`: the SimCC logits.
+    pub(crate) fn head_cpu(&self, f: &Feat) -> Result<(Vec<f32>, Vec<f32>), VisionError> {
+        let n = f.n;
         let flat = f.h * f.w;
-        if flat != self.mlp.cin {
+        if flat != self.mlp.cin || f.c != KEYPOINTS {
             return Err(err(format!("the pose head takes {} values per keypoint, got {flat}", self.mlp.cin)));
         }
         // [n·17, 48]
@@ -360,45 +387,9 @@ impl RtmPose {
         for v in &mut uv {
             *v = silu(*v);
         }
-        let (e, s) = (self.e, self.s);
-        let row = 2 * e + s;
-        let k = KEYPOINTS;
-        let mut gated = vec![0f32; n * k * e];
-        gated.par_chunks_mut(k * e).enumerate().for_each(|(i, out)| {
-            let Some(rows) = uv.get(i * k * row..(i + 1) * k * row) else { return };
-            // q, k per keypoint from the shared base
-            let qk: Vec<(Vec<f32>, Vec<f32>)> = rows
-                .chunks_exact(row)
-                .map(|r| {
-                    let base = &r[2 * e..];
-                    let q = base.iter().enumerate().map(|(j, b)| b * self.gamma[j] + self.beta[j]).collect();
-                    let kk = base.iter().enumerate().map(|(j, b)| b * self.gamma[s + j] + self.beta[s + j]).collect();
-                    (q, kk)
-                })
-                .collect();
-            let sq = (s as f32).sqrt();
-            for (a, (qa, _)) in qk.iter().enumerate() {
-                let mut acc = vec![0f32; e];
-                for (bi, (_, kb)) in qk.iter().enumerate() {
-                    let dot: f32 = qa.iter().zip(kb).map(|(x, y)| x * y).sum::<f32>() / sq;
-                    let w = dot.max(0.0).powi(2);
-                    if w == 0.0 {
-                        continue;
-                    }
-                    let v = &rows[bi * row + e..bi * row + 2 * e];
-                    for (o, x) in acc.iter_mut().zip(v) {
-                        *o += w * x;
-                    }
-                }
-                let u = &rows[a * row..a * row + e];
-                if let Some(o) = out.get_mut(a * e..(a + 1) * e) {
-                    for ((o, u), x) in o.iter_mut().zip(u).zip(&acc) {
-                        *o = u * x;
-                    }
-                }
-            }
-        });
+        let gated = gau_cpu(&uv, &self.gamma, &self.beta, self.e, self.s, n);
         let o = self.o.forward(&gated)?;
+        let k = KEYPOINTS;
         let mut feat = vec![0f32; n * k * hid];
         for ((f, hh), oo) in feat.chunks_exact_mut(hid).zip(h.chunks_exact(hid)).zip(o.chunks_exact(hid)) {
             for j in 0..hid {
@@ -406,6 +397,60 @@ impl RtmPose {
             }
         }
         Ok((self.cls_x.forward(&feat)?, self.cls_y.forward(&feat)?))
+    }
+
+    /// The head on the GPU over the keypoint maps there: the SimCC logits `[n·17, 384]` and
+    /// `[n·17, 512]`, not read back.
+    pub(crate) fn head_gpu(&self, r: &Run<'_>, f: &GT) -> Result<(GM, GM), VisionError> {
+        let [gamma, beta, res_scale] = self.consts.as_ref().ok_or_else(|| err("the pose head is not on the GPU"))?;
+        let (_, c, h, w) = Run::shape(f);
+        if c != KEYPOINTS || h * w != self.mlp.cin {
+            return Err(err(format!("the pose head takes {} values per keypoint, got {}", self.mlp.cin, h * w)));
+        }
+        let rows = r.as_rows(f, h * w)?;
+        let hh = r.linear(&r.scalenorm(&rows, self.mlp_g)?, &self.mlp, TAct::None, None, None)?;
+        let uv = r.linear(&r.scalenorm(&hh, self.gau_g)?, &self.uv, TAct::Silu, None, None)?;
+        let gated = r.gau(&uv, gamma, beta, self.e, self.s, KEYPOINTS)?;
+        let o = r.linear(&gated, &self.o, TAct::None, None, None)?;
+        let feat = r.scale_add(&hh, &o, res_scale)?;
+        Ok((r.linear(&feat, &self.cls_x, TAct::None, None, None)?, r.linear(&feat, &self.cls_y, TAct::None, None, None)?))
+    }
+
+    /// The poses of the people in boxes `boxes` (`[x, y, w, h]`, pixels) of a frame already on
+    /// the GPU, in its pixels: crops, network and SimCC maxima there, one read-back for all.
+    pub(crate) fn poses_gpu(&self, r: &Run<'_>, img: &GImg, boxes: &[[f32; 4]]) -> Result<Vec<Vec<Keypoint>>, VisionError> {
+        if boxes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let affines: Vec<Affine> = boxes.iter().map(affine_of).collect::<Result<_, _>>()?;
+        let mut maxima: Vec<(GM, GM)> = Vec::new();
+        for chunk in affines.chunks(MAX_BATCH) {
+            let at: Vec<[f32; 3]> = chunk.iter().map(|a| [a.cx, a.cy, a.k]).collect();
+            let crops = r.crops(img, &at)?;
+            let (sx, sy) = self.head_gpu(r, &self.maps(r, &crops)?)?;
+            maxima.push((r.argmax(&sx)?, r.argmax(&sy)?));
+        }
+        let mats: Vec<&GM> = maxima.iter().flat_map(|(x, y)| [x, y]).collect();
+        let got = r.read_mats(&mats)?;
+        let mut out = Vec::with_capacity(boxes.len());
+        for (chunk, [mx, my]) in affines.chunks(MAX_BATCH).zip(got.as_chunks::<2>().0) {
+            for (i, a) in chunk.iter().enumerate() {
+                let kps = (0..KEYPOINTS)
+                    .map(|k| {
+                        let row = i * KEYPOINTS + k;
+                        let at = |m: &[f32]| (m.get(row * 2).copied().unwrap_or(0.0), m.get(row * 2 + 1).copied().unwrap_or(f32::NEG_INFINITY));
+                        let ((xi, xv), (yi, yv)) = (at(mx), at(my));
+                        // indices come back as exact f32 integers
+                        keypoint(a, xi.max(0.0) as usize, xv, yi.max(0.0) as usize, yv)
+                    })
+                    .collect();
+                out.push(kps);
+            }
+        }
+        if out.len() != boxes.len() {
+            return Err(err("the keypoints did not come back"));
+        }
+        Ok(out)
     }
 
     /// The poses of the people in boxes `boxes` (`[x, y, w, h]`, pixels) of an RGBA picture, in
@@ -428,13 +473,7 @@ impl RtmPose {
                         let row_y = sy.get((i * KEYPOINTS + k) * by..(i * KEYPOINTS + k + 1) * by).unwrap_or(&[]);
                         let (xi, xv) = argmax(row_x);
                         let (yi, yv) = argmax(row_y);
-                        let score = xv.min(yv);
-                        let (px, py) = (xi as f32 / SPLIT, yi as f32 / SPLIT);
-                        Keypoint {
-                            x: a.cx + (px - INPUT_W as f32 / 2.0) * a.k,
-                            y: a.cy + (py - INPUT_H as f32 / 2.0) * a.k,
-                            score: if score.is_finite() { score } else { 0.0 },
-                        }
+                        keypoint(a, xi, xv, yi, yv)
                     })
                     .collect();
                 out.push(kps);
@@ -444,7 +483,59 @@ impl RtmPose {
     }
 }
 
-fn argmax(v: &[f32]) -> (usize, f32) {
+/// A keypoint in the picture from its SimCC maxima (bins along x and y and their logits) in the
+/// crop `a`: scored by the smaller logit.
+fn keypoint(a: &Affine, xi: usize, xv: f32, yi: usize, yv: f32) -> Keypoint {
+    let score = xv.min(yv);
+    let (px, py) = (xi as f32 / SPLIT, yi as f32 / SPLIT);
+    Keypoint { x: a.cx + (px - INPUT_W as f32 / 2.0) * a.k, y: a.cy + (py - INPUT_H as f32 / 2.0) * a.k, score: if score.is_finite() { score } else { 0.0 } }
+}
+
+/// RTMPose's gated attention unit on the CPU over the uv rows of `n` crops (`[n·17, 2e + s]`:
+/// u, v, the shared base): per keypoint a query and key from the base (`gamma`, `beta`),
+/// squared-ReLU attention, `u ⊙ (A·v)`. `[n·17, e]`.
+pub(crate) fn gau_cpu(uv: &[f32], gamma: &[f32], beta: &[f32], e: usize, s: usize, n: usize) -> Vec<f32> {
+    let row = 2 * e + s;
+    let k = KEYPOINTS;
+    let mut gated = vec![0f32; n * k * e];
+    gated.par_chunks_mut((k * e).max(1)).enumerate().for_each(|(i, out)| {
+        let Some(rows) = uv.get(i * k * row..(i + 1) * k * row) else { return };
+        // q, k per keypoint from the shared base
+        let qk: Vec<(Vec<f32>, Vec<f32>)> = rows
+            .chunks_exact(row.max(1))
+            .map(|r| {
+                let base = r.get(2 * e..).unwrap_or(&[]);
+                let q = base.iter().enumerate().map(|(j, b)| b * gamma.get(j).copied().unwrap_or(0.0) + beta.get(j).copied().unwrap_or(0.0)).collect();
+                let kk = base.iter().enumerate().map(|(j, b)| b * gamma.get(s + j).copied().unwrap_or(0.0) + beta.get(s + j).copied().unwrap_or(0.0)).collect();
+                (q, kk)
+            })
+            .collect();
+        let sq = (s as f32).sqrt();
+        for (a, (qa, _)) in qk.iter().enumerate() {
+            let mut acc = vec![0f32; e];
+            for (bi, (_, kb)) in qk.iter().enumerate() {
+                let dot: f32 = qa.iter().zip(kb).map(|(x, y)| x * y).sum::<f32>() / sq;
+                let w = dot.max(0.0).powi(2);
+                if w == 0.0 {
+                    continue;
+                }
+                let v = rows.get(bi * row + e..bi * row + 2 * e).unwrap_or(&[]);
+                for (o, x) in acc.iter_mut().zip(v) {
+                    *o += w * x;
+                }
+            }
+            let u = rows.get(a * row..a * row + e).unwrap_or(&[]);
+            if let Some(o) = out.get_mut(a * e..(a + 1) * e) {
+                for ((o, u), x) in o.iter_mut().zip(u).zip(&acc) {
+                    *o = u * x;
+                }
+            }
+        }
+    });
+    gated
+}
+
+pub(crate) fn argmax(v: &[f32]) -> (usize, f32) {
     v.iter().enumerate().fold((0, f32::NEG_INFINITY), |(bi, bv), (i, x)| if *x > bv { (i, *x) } else { (bi, bv) })
 }
 
@@ -456,10 +547,10 @@ struct Affine {
     k: f32,
 }
 
-/// A person's box as the pose network takes it: grown by [`PADDING`], widened or heightened to
-/// 3:4, warped to 192 × 256 (bilinear, black outside), normalised, RGB planes.
-fn crop(rgba: &[u8], w: usize, h: usize, b: &[f32; 4]) -> Result<(Vec<f32>, Affine), VisionError> {
-    if !b.iter().all(|v| v.is_finite()) || b[2] <= 0.0 || b[3] <= 0.0 || w.checked_mul(h).and_then(|n| n.checked_mul(4)).is_none_or(|n| rgba.len() < n) {
+/// Where a person's box `[x, y, w, h]` is cropped from: grown by [`PADDING`], widened or
+/// heightened to 3:4.
+fn affine_of(b: &[f32; 4]) -> Result<Affine, VisionError> {
+    if !b.iter().all(|v| v.is_finite()) || b[2] <= 0.0 || b[3] <= 0.0 {
         return Err(VisionError::Invalid("a person's box cannot be cropped".into()));
     }
     let (cx, cy) = (b[0] + b[2] / 2.0, b[1] + b[3] / 2.0);
@@ -467,6 +558,19 @@ fn crop(rgba: &[u8], w: usize, h: usize, b: &[f32; 4]) -> Result<(Vec<f32>, Affi
     let aspect = INPUT_W as f32 / INPUT_H as f32;
     let sw = (b[2] * PADDING).max(b[3] * PADDING * aspect);
     let k = sw / INPUT_W as f32;
+    if !(k.is_finite() && k > 0.0) {
+        return Err(VisionError::Invalid("a person's box cannot be cropped".into()));
+    }
+    Ok(Affine { cx, cy, k })
+}
+
+/// A person's box as the pose network takes it: grown by [`PADDING`], widened or heightened to
+/// 3:4, warped to 192 × 256 (bilinear, black outside), normalised, RGB planes.
+fn crop(rgba: &[u8], w: usize, h: usize, b: &[f32; 4]) -> Result<(Vec<f32>, Affine), VisionError> {
+    if w.checked_mul(h).and_then(|n| n.checked_mul(4)).is_none_or(|n| rgba.len() < n) {
+        return Err(VisionError::Invalid("a person's box cannot be cropped".into()));
+    }
+    let Affine { cx, cy, k } = affine_of(b)?;
     let plane = INPUT_W * INPUT_H;
     let mut out = vec![0f32; 3 * plane];
     let px = |x: i64, y: i64, c: usize| -> f32 {
@@ -492,6 +596,13 @@ fn crop(rgba: &[u8], w: usize, h: usize, b: &[f32; 4]) -> Result<(Vec<f32>, Affi
         }
     }
     Ok((out, Affine { cx, cy, k }))
+}
+
+/// The CPU's crop of a person's box and where it came from (`[cx, cy, k]`), for the GPU's tests.
+#[cfg(test)]
+pub(crate) fn crop_for_test(rgba: &[u8], w: usize, h: usize, b: &[f32; 4]) -> Result<(Vec<f32>, [f32; 3]), VisionError> {
+    let (c, a) = crop(rgba, w, h, b)?;
+    Ok((c, [a.cx, a.cy, a.k]))
 }
 
 #[cfg(test)]
