@@ -18,6 +18,7 @@ pub mod album;
 pub mod analysis_cache;
 pub mod analyze;
 pub mod config;
+pub mod creator_look;
 pub mod describe;
 pub mod digest;
 pub mod highlight;

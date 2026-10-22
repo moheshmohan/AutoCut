@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::args::Args;
 use crate::{Backend, absolute, diag, fail, print, usage};
 
-const USAGE: &str = "trailer (--project p.fcproj | --bridge addr) [--sequence id] [--plan plan.json] [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5] [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at SECONDS]] [--at LABEL=[ITEM@]SECONDS]... [--title \"48 robots · 2013 → 2025\"] [--no-hook-voice] [--logo logo.png] [--channel @handle] [--end-text \"Full video on YouTube\"] [--link URL] [--exclude LABEL]... [--include LABEL]... [--bpm 124] [--mood energetic] [--seed 7] [--redact faces,plates|off] [--fallback blur|letterbox|center] [--export out.mp4] [--preset P] [--no-qa] [--save]";
+const USAGE: &str = "trailer (--project p.fcproj | --bridge addr) [--sequence id] [--plan plan.json] [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5] [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at SECONDS]] [--at LABEL=[ITEM@]SECONDS]... [--title \"48 robots · 2013 → 2025\"] [--no-hook-voice] [--logo logo.png] [--channel @handle] [--end-text \"Full video on YouTube\"] [--link URL] [--exclude LABEL]... [--include LABEL]... [--bpm 124] [--mood energetic] [--seed 7] [--redact faces,plates|off] [--fallback blur|letterbox|center] [--export out.mp4] [--preset P] [--no-qa] [--look tech|vhs|clean] [--beat-pulse] [--save]";
 
 const OPTIONS: &[&str] = &[
     "--project",
@@ -45,6 +45,8 @@ const OPTIONS: &[&str] = &[
     "--preset",
     "--qa",
     "--no-qa",
+    "--look",
+    "--beat-pulse",
 ];
 
 /// `trailer` options as `autocut.trailer` parameters (the job is followed, not waited on); a
@@ -111,6 +113,17 @@ pub fn trailer_params(a: &Args) -> Result<Value, String> {
         (true, false) => p["hookVoice"] = json!(true),
         (false, true) => p["hookVoice"] = json!(false),
         _ => {}
+    }
+    // opt-in creator tools: a look over the hook and the montage, zoom pulses on the beats
+    if let Some(l) = a.opt("--look") {
+        let l = l.trim().to_ascii_lowercase();
+        if !matches!(l.as_str(), "tech" | "vhs" | "clean") {
+            return Err(format!("--look is tech, vhs or clean, not `{l}`"));
+        }
+        p["look"] = json!(l);
+    }
+    if a.flag("--beat-pulse") {
+        p["beatPulse"] = json!(true);
     }
     match (a.flag("--qa"), a.flag("--no-qa")) {
         (true, true) => return Err("--qa or --no-qa, not both".into()),
@@ -283,6 +296,7 @@ mod tests {
             &["trailer", "--at", "NAO"],
             &["trailer", "--at", "NAO=x@3"],
             &["trailer", "--at", "NAO=-1"],
+            &["trailer", "--look", "sparkly"],
         ] {
             assert!(trailer_params(&args(bad)).is_err(), "{bad:?}");
         }
@@ -306,11 +320,28 @@ mod tests {
             entry(1, "Rover", "wheeled", 2014, 5, 18.0), entry(2, "Walker", "humanoid", 2017, 6, 16.0), entry(3, "Dog", "quadruped", 2020, 7, 14.0),
             entry(4, "Arm", "arm", 2023, 8, 15.0), entry(5, "Greeter", "humanoid", 2025, 9, 12.0)
         ], "script": {"intro": "", "lines": [], "outro": ""}});
-        let made = trailer_job(&mut b, json!({"plan": plan, "seconds": 14, "wait": false})).await.unwrap();
+        let made = trailer_job(&mut b, json!({"plan": plan.clone(), "seconds": 14, "wait": false})).await.unwrap();
         assert_eq!(made["frame"], json!([1080, 1920]), "{made}");
         assert!(made["shots"].as_array().is_some_and(|s| s.len() >= 3), "{made}");
         assert_eq!(made["cutsOnBeat"], made["cuts"]);
+        assert!(made.get("look").is_none() && made.get("beatPulses").is_none(), "no creator tools unless asked");
+        // the opt-in creator look and beat pulses
+        let looked = trailer_job(&mut b, json!({"plan": plan, "seconds": 14, "look": "tech", "beatPulse": true, "wait": false})).await.unwrap();
+        assert_eq!(looked["look"], json!("tech"), "{looked}");
+        assert!(looked["beatPulses"].as_u64().is_some_and(|n| n > 0), "{looked}");
+        let Backend::Local(s) = &b else { panic!("local") };
+        let q = s.active_sequence().unwrap();
+        let hud = q.video_tracks.iter().flat_map(|t| t.items.iter()).find(|i| i.effect("cr_tech_hud").is_some()).expect("the look's adjustment clip");
+        assert!(hud.start == filmcraft_time::Tick::ZERO && hud.duration.seconds() > 5.0, "over the hook and the montage");
         let empty = json!({"title": "Robots", "entries": [{"number": 1, "label": "Hall", "kind": "scene", "shots": []}]});
         assert!(trailer_job(&mut b, json!({"plan": empty, "wait": false})).await.unwrap_err().contains("trailer"));
+    }
+
+    #[test]
+    fn creator_tools_are_opt_in() {
+        let p = trailer_params(&args(&["trailer", "--project", "p.fcproj", "--look", "Tech", "--beat-pulse"])).unwrap();
+        assert_eq!((p["look"].as_str(), p["beatPulse"].as_bool()), (Some("tech"), Some(true)));
+        let d = trailer_params(&args(&["trailer", "--project", "p.fcproj"])).unwrap();
+        assert!(d.get("look").is_none() && d.get("beatPulse").is_none(), "off unless asked: the trailer as before");
     }
 }

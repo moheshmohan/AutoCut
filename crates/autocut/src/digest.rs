@@ -48,6 +48,9 @@ pub const ALLOWED_FAMILIES: &[&str] = &[
     // target, and the installed fonts its theme falls back from
     "transitions.snapToBeats",
     "transitions.addSound",
+    // the creator tools (opt-in looks and pulses; transitions on every cut or on strong beats)
+    "transitions.applyToAll",
+    "transitions.randomOnBeats",
     "audio.normalizeLoudness",
     "fonts.list",
 ];

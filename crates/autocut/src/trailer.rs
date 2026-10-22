@@ -154,6 +154,10 @@ pub struct Options {
     pub export: Option<String>,
     pub preset: Option<String>,
     pub qa: Option<bool>,
+    /// An opt-in creator look over the hook and the montage (`look`: tech, vhs, clean).
+    pub look: Option<crate::creator_look::CreatorLook>,
+    /// Zoom pulses on the montage's shots at every other beat (`beatPulse`).
+    pub beat_pulse: bool,
 }
 
 impl Default for Options {
@@ -183,6 +187,8 @@ impl Default for Options {
             export: None,
             preset: None,
             qa: None,
+            look: None,
+            beat_pulse: false,
         }
     }
 }
@@ -284,6 +290,8 @@ impl Options {
             export: text("export"),
             preset: text("preset"),
             qa: p["qa"].as_bool(),
+            look: crate::creator_look::look_of(p)?,
+            beat_pulse: p["beatPulse"].as_bool().unwrap_or(false),
         })
     }
 }
@@ -1314,6 +1322,12 @@ pub struct Made {
     pub frames: Option<String>,
     pub qa_summary: Option<String>,
     pub qa: Option<Value>,
+    /// The creator look put over the hook and the montage, if asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub look: Option<String>,
+    /// Zoom pulses keyframed on the montage (`beatPulse`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub beat_pulses: Option<u64>,
     pub notes: Vec<String>,
 }
 
@@ -1840,6 +1854,24 @@ pub async fn build(
                 None => notes.push("hook voice: the show's opening narration was not found; the hook plays with music only".into()),
             },
             None => notes.push("hook voice: no show sequence to take the narration from".into()),
+        }
+    }
+    // ---- opt-in: a creator look over the hook and the montage, zoom pulses on the montage's
+    // beats (off unless asked: the trailer is as before without them)
+    if let Some(l) = opts.look.filter(|l| *l != crate::creator_look::CreatorLook::Clean) {
+        progress(&format!("the {} look", l.name()));
+        match crate::creator_look::apply_look(ex, l, 0.0, tm.end_card[0], crate::creator_look::hex_color(&theme.accent)).await {
+            Ok(_) => made.look = Some(l.name().to_string()),
+            Err(e) => notes.push(format!("look {}: {e}", l.name())),
+        }
+    }
+    if opts.beat_pulse {
+        let clips: Vec<u64> = shots.iter().filter(|s| s.number >= 1).map(|s| s.clip).collect();
+        let from = tm.shots.first().map_or(tm.hook[1], |s| s[0]);
+        let on = beats.list(from, tm.end_card[0]);
+        match crate::creator_look::beat_pulse(ex, &clips, Some(&on)).await {
+            Ok(r) => made.beat_pulses = Some(r["clips"].as_array().map_or(0, |c| c.iter().filter_map(|x| x["pulses"].as_u64()).sum())),
+            Err(e) => notes.push(format!("beat pulse: {e}")),
         }
     }
     // ---- a whoosh into the montage, a riser into the end card and an impact on its hit

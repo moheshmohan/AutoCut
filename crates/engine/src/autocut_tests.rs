@@ -502,7 +502,14 @@ fn trailer_parameters_are_checked_and_defaulted() {
     let r = s.execute("autocut.trailer", json!({"wait": true})).unwrap();
     assert_eq!(r["showcase"]["params"]["report"]["sequence"], 9, "{r}");
     assert_eq!(r["showcase"]["params"]["platform"], "reels", "Reels by default");
+    assert!(r["showcase"]["params"].get("look").is_none() && r["showcase"]["params"].get("beatPulse").is_none(), "creator tools off by default");
+    // the opt-in creator look and beat pulses
+    let r = s.execute("autocut.trailer", json!({"look": "TECH", "beatPulse": true, "wait": true})).unwrap();
+    assert_eq!((r["showcase"]["params"]["look"].as_str(), r["showcase"]["params"]["beatPulse"].as_bool()), (Some("tech"), Some(true)), "{r}");
     for bad in [
+        json!({"look": "sparkly"}),
+        json!({"look": 3}),
+        json!({"beatPulse": "yes"}),
         json!({"seconds": 5}),
         json!({"seconds": 91}),
         json!({"seconds": f64::MAX}),
