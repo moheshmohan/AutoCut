@@ -2608,6 +2608,7 @@ version = "0.10.0"
 dependencies = [
  "candle-core",
  "image",
+ "miniz_oxide 0.8.9",
  "pollster 0.4.0",
  "rayon",
  "serde",

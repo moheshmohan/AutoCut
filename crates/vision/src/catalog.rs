@@ -50,12 +50,68 @@ pub const PLATE: ModelFile = ModelFile {
 
 pub static FILES: &[ModelFile] = &[FACE, PLATE];
 
+/// The profile pass's models (faces in profile and half hidden, which YuNet misses): a person
+/// detector and a pose network, in the same package directory, downloaded with the detectors.
+pub const PROFILE_NAME: &str = "Person and pose models for faces in profile (D-FINE-N, RTMPose-s)";
+pub const PROFILE_LICENSE: &str = "Apache-2.0 (D-FINE, Peng et al., USTC; RTMPose, OpenMMLab)";
+pub const PROFILE_SOURCE: &str = "https://huggingface.co/ustc-community/dfine-nano-coco (D-FINE's Transformers port), https://huggingface.co/Tau-J/RTMPose (RTMPose's author's mirror of download.openmmlab.com)";
+
+/// D-FINE-N (COCO): the person detector's weights (Apache-2.0).
+pub const PERSON_WEIGHTS: ModelFile = ModelFile {
+    name: "dfine_n_coco.safetensors",
+    url: "https://huggingface.co/ustc-community/dfine-nano-coco/resolve/066438d3d8f0da137a37b38fdf3368fd4afceced/model.safetensors",
+    sha256: "19e06bdc873da819920a8d373b879721a5b9759d822f8213220bb09abbdab58b",
+    size: 15_278_996,
+};
+
+/// D-FINE-N's configuration (the network's sizes).
+pub const PERSON_CONFIG: ModelFile = ModelFile {
+    name: "dfine_n_coco.json",
+    url: "https://huggingface.co/ustc-community/dfine-nano-coco/resolve/066438d3d8f0da137a37b38fdf3368fd4afceced/config.json",
+    sha256: "7edf2d96d3deb10aa4ec920be0e8e444b617454545bb58093e32bd8e2b96fa2f",
+    size: 6_557,
+};
+
+/// RTMPose-s (body7, 256 × 192): OpenMMLab's deployment zip holding `end2end.onnx` (Apache-2.0);
+/// the same bytes as on download.openmmlab.com.
+pub const POSE: ModelFile = ModelFile {
+    name: "rtmpose-s_simcc-body7_256x192.zip",
+    url: "https://huggingface.co/Tau-J/RTMPose/resolve/cd4d7095f5cfc9cfc4f46289bee91ea4a1e1d9fd/rtmposev1/onnx_sdk/rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.zip",
+    sha256: "7673922e531014906ca4f0f239b7e233b740146a10b632deaa2a28d45470d802",
+    size: 20_496_303,
+};
+
+pub static PROFILE_FILES: &[ModelFile] = &[PERSON_WEIGHTS, PERSON_CONFIG, POSE];
+
 pub fn package_dir(models_dir: &Path) -> PathBuf {
     models_dir.join(PACKAGE_ID)
 }
 
 fn present(dir: &Path, f: &ModelFile) -> bool {
     std::fs::metadata(dir.join(f.name)).is_ok_and(|m| m.len() == f.size)
+}
+
+/// The profile pass's files are present with their pinned sizes.
+pub fn profiles_installed(models_dir: &Path) -> bool {
+    let d = package_dir(models_dir);
+    PROFILE_FILES.iter().all(|f| present(&d, f))
+}
+
+/// Bytes of the profile pass's files still to download.
+pub fn profile_missing_bytes(models_dir: &Path) -> u64 {
+    let d = package_dir(models_dir);
+    PROFILE_FILES.iter().filter(|f| !present(&d, f)).map(|f| f.size).sum()
+}
+
+/// Total size of the profile pass's files.
+pub fn profile_total_bytes() -> u64 {
+    PROFILE_FILES.iter().map(|f| f.size).sum()
+}
+
+/// The profile models' identity (their names and pinned SHA-256s), for cache keys: another model
+/// is another key.
+pub fn profile_model_ids() -> String {
+    PROFILE_FILES.iter().map(|f| format!("{}={}", f.name, f.sha256.get(..16).unwrap_or(f.sha256))).collect::<Vec<_>>().join(",")
 }
 
 /// Both files are present with their pinned sizes (contents were verified when downloaded).
@@ -91,6 +147,21 @@ mod tests {
             assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
         }
         assert!(total_bytes() < 5_000_000);
+        for f in PROFILE_FILES {
+            assert!(f.url.starts_with("https://huggingface.co/") && f.url.contains("/resolve/"), "{}", f.url);
+            let rev = f.url.split("/resolve/").nth(1).and_then(|r| r.split('/').next()).unwrap();
+            assert_eq!(rev.len(), 40);
+            assert!(rev.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert_eq!(f.sha256.len(), 64);
+            assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+        assert!(profile_total_bytes() < 64_000_000);
+        // names distinct from the detectors' (one directory)
+        let mut names: Vec<&str> = FILES.iter().chain(PROFILE_FILES).map(|f| f.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), FILES.len() + PROFILE_FILES.len());
+        assert!(profile_model_ids().contains("dfine_n_coco.safetensors=19e06bdc873da819"));
     }
 
     #[test]
@@ -98,6 +169,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("filmcraft-vision-catalog-{}", std::process::id()));
         assert!(!installed(&dir));
         assert_eq!(missing_bytes(&dir), total_bytes());
+        assert!(!profiles_installed(&dir));
+        assert_eq!(profile_missing_bytes(&dir), profile_total_bytes());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

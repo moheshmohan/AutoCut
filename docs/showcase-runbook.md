@@ -14,7 +14,7 @@ whole pipeline, from the album to YouTube and Instagram, with this show as the w
 - Google Photos: `filmcraft-cli photos auth --albums` (`crates/gphotos/README.md`).
 - Local models: `ollama pull qwen2.5vl:7b` (analysis, the picker agent, the privacy check, QA) and
   `ollama pull qwen3:8b` (scripts).
-- The face and plate detectors: `filmcraft-cli exec redact.downloadModels wait=true` (4.4 MB).
+- The face and plate detectors and the profile pass's person and pose models (faces in profile and half hidden): `filmcraft-cli exec redact.downloadModels wait=true` (4.4 MB + 35.8 MB).
 - A cloned voice for both languages (`tts.cloneVoice`; Malayalam through IndicF5:
   `exec tts.downloadCloneModel model=indicf5`, with a Malayalam reference trimmed to a sentence
   end by `tts.voiceReference` — the steps are in [malayalam-narration.md](malayalam-narration.md)).

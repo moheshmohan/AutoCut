@@ -1,6 +1,6 @@
 [package]
 name = "filmcraft-vision"
-description = "FilmCraft privacy detection: the YuNet face (MIT) and LPD-YuNet licence-plate (Apache-2.0) detector catalogue, a strict ONNX weight reader, output decoding, tracking with gap filling and smoothing, and (feature model) both networks on candle and, on macOS, on the GPU"
+description = "FilmCraft privacy detection: the YuNet face (MIT), LPD-YuNet licence-plate, D-FINE person and RTMPose pose (Apache-2.0) model catalogue, strict ONNX, safetensors and zip readers, output decoding, head boxes from poses, tracking with gap filling and smoothing, and (feature model) the networks on candle and, on macOS, the detectors on the GPU"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,7 +17,11 @@ model = ["dep:candle-core", "dep:rayon", "dep:wgpu", "dep:pollster"]
 
 [dependencies]
 serde = { workspace = true }
+# the safetensors header and D-FINE's config.json
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+# the pose network's zip (pure Rust inflate)
+miniz_oxide = "0.8"
 candle-core = { version = "0.9", default-features = false, optional = true }
 rayon = { workspace = true, optional = true }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "std"], optional = true }
@@ -29,6 +33,5 @@ pollster = { version = "0.4", optional = true }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "std", "metal"], optional = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 # live tests read the oracle's picture
 image = { version = "0.25", default-features = false, features = ["png"] }

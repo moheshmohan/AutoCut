@@ -38,7 +38,7 @@ impl Driver {
         s.execute("file.openDemoProject", json!({})).unwrap();
         // a "face" in the middle of every frame
         s.redacts.detector = Some(Arc::new(|_: &[u8], _: usize, _: usize, _: usize| {
-            vec![Detection { kind: Kind::Face, score: 0.95, bbox: [0.45, 0.35, 0.1, 0.2], points: Vec::new() }]
+            vec![Detection { kind: Kind::Face, score: 0.95, bbox: [0.45, 0.35, 0.1, 0.2], points: Vec::new(), pose: false }]
         }));
         s.redacts.judge = Some(Arc::new(People));
         let (tx, rx) = channel();

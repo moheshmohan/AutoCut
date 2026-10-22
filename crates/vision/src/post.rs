@@ -50,7 +50,7 @@ pub fn decode_yunet(levels: &[YunetLevel<'_>], threshold: f32) -> Vec<Detection>
                 continue;
             }
             let points = (0..5).map(|p| [(k[2 * p] + col) * s, (k[2 * p + 1] + r) * s]).collect();
-            out.push(Detection { kind: Kind::Face, score, bbox: [cx - w / 2.0, cy - h / 2.0, w, h], points });
+            out.push(Detection { kind: Kind::Face, score, bbox: [cx - w / 2.0, cy - h / 2.0, w, h], points, pose: false });
         }
     }
     out
@@ -109,7 +109,7 @@ pub fn decode_lpd(raw: &[f32], priors: &[[f32; 4]], w: usize, h: usize, threshol
         }
         let (x0, y0, x1, y1) =
             points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |(a, b, c, d), q| (a.min(q[0]), b.min(q[1]), c.max(q[0]), d.max(q[1])));
-        out.push(Detection { kind: Kind::Plate, score, bbox: [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)], points });
+        out.push(Detection { kind: Kind::Plate, score, bbox: [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)], points, pose: false });
     }
     out
 }
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn plates_need_a_plates_shape() {
-        let p = |b: [f32; 4]| Detection { kind: Kind::Plate, score: 0.9, bbox: b, points: Vec::new() };
+        let p = |b: [f32; 4]| Detection { kind: Kind::Plate, score: 0.9, bbox: b, points: Vec::new(), pose: false };
         assert!(plausible_plate(&p([100.0, 100.0, 60.0, 20.0]), 640.0, 360.0));
         // square, tall, huge, outside, degenerate
         for b in [
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn nms_keeps_the_best_of_overlapping_boxes() {
-        let d = |s: f32, x: f32| Detection { kind: Kind::Face, score: s, bbox: [x, 0.0, 10.0, 10.0], points: Vec::new() };
+        let d = |s: f32, x: f32| Detection { kind: Kind::Face, score: s, bbox: [x, 0.0, 10.0, 10.0], points: Vec::new(), pose: false };
         let kept = nms(vec![d(0.7, 1.0), d(0.9, 0.0), d(0.8, 50.0)], 0.3, 10);
         assert_eq!(kept.iter().map(|k| k.score).collect::<Vec<_>>(), vec![0.9, 0.8]);
         assert_eq!(nms(vec![d(0.7, 1.0), d(0.9, 100.0)], 0.3, 1).len(), 1);

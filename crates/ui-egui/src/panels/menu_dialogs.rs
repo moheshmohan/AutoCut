@@ -979,8 +979,9 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
         }
         "clip.autoRedact" => {
             if d.info["installed"] != json!(true) {
-                // the user agreed to the download in the dialog (size, source and licence shown)
-                s.execute("redact.downloadModels", json!({})).map_err(|e| e.to_string())?;
+                // the user agreed to the download in the dialog (size, source and licence shown):
+                // the detectors the dialog names, not the profile pass's models
+                s.execute("redact.downloadModels", json!({"profiles": false})).map_err(|e| e.to_string())?;
                 app.ui.status = tl!("Downloading the face and plate detectors (see Progress); choose Auto Redact again when it finishes").into();
                 return Ok(None);
             }

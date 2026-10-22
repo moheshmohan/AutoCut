@@ -27,7 +27,7 @@ The revision round in more depth (review notes, photos, places, the Malayalam st
 |---|---|
 | Build | `cargo build --release -p filmcraft-cli` (or `packaging/macos/package.sh --arch aarch64` for the app) |
 | Local models (Ollama) | `ollama pull qwen2.5vl:7b` (analysis, picker agent, privacy check, QA) and `ollama pull qwen3:8b` (scripts) |
-| Face and plate detectors | `filmcraft-cli exec redact.downloadModels wait=true` (4.4 MB) |
+| Face and plate detectors, and the person and pose models for faces in profile | `filmcraft-cli exec redact.downloadModels wait=true` (4.4 MB + 35.8 MB; `profiles=false` for the detectors alone) |
 | Google Photos | `filmcraft-cli photos auth --albums` (needs `client_secret.json` from the Google Cloud project, see `crates/gphotos/README.md`) |
 | YouTube | `filmcraft-cli youtube auth --default`: pick the channel (H4hacks) in Google's account chooser |
 | Cloned voice (English) | `exec tts.cloneVoice` from the speaker's own clip, with consent; check and improve it with the voice lab (§3) |

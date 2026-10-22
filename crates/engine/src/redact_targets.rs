@@ -235,7 +235,7 @@ impl<'a> Follower<'a> {
             }
             let label = self.names.get(f.target).cloned();
             let hits = points.len();
-            let track = Track { kind: Kind::Target, label, points, hits, best_score: 1.0 };
+            let track = Track { kind: Kind::Target, label, points, hits, best_score: 1.0, pose_hits: 0 };
             out.tracks.push(filmcraft_vision::track::smoothed(track, smooth));
         }
         out.tracks.sort_by(|a, b| a.start().total_cmp(&b.start()));

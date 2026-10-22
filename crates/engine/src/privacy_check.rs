@@ -19,6 +19,14 @@
 //! unmasked is allowed. AutoCut's QA
 //! (`crates/autocut/src/qa.rs`) samples a showcase every half second and at every shot's start
 //! with this, and stops its upload when a face is shown that should not be.
+//!
+//! **Faces in profile.** With `profiles` (on by default once the person and pose models are
+//! downloaded) the check also runs the redaction's profile pass: the people in the frame, their
+//! poses, and the head of each one whose face shows (nose or an eye) that the face detector
+//! missed is a face too (`fromPose` in the answer), under the same rules and the same vision
+//! check. They have their own thresholds, so `faceScore` does not apply to them. (2026-10-22: two
+//! visitors in profile behind a robot arm stayed sharp in a reel, and this check, with the face
+//! detector alone, did not see them either.)
 
 use filmcraft_geom::Vec2;
 use filmcraft_project::{ClipId, ItemId, ItemKind, Sequence, TrackItem};
@@ -44,7 +52,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Check for Unblurred Faces",
         menu: &[],
         shortcut: None,
-        params: r#"{"seconds":[f64] (sequence seconds, 1..2000),"maxSide":160..3840=1280,"faceScore":0.05..1=0.6,"minFaceHeight":0..1=0.05,"sureFace":0.05..1=0.85,"exclude":{"clip":id,"x":0..1,"y":0..1,"w":0..1,"h":0..1}|[box]?,"verify":bool=true}"#,
+        params: r#"{"seconds":[f64] (sequence seconds, 1..2000),"maxSide":160..3840=1280,"faceScore":0.05..1=0.6,"minFaceHeight":0..1=0.05,"sureFace":0.05..1=0.85,"exclude":{"clip":id,"x":0..1,"y":0..1,"w":0..1,"h":0..1}|[box]?,"verify":bool=true,"profiles":bool=installed}"#,
         enabled: has_seq,
         run: check,
         journal: false,
@@ -90,19 +98,21 @@ fn times_p(p: &Value) -> Result<Vec<f64>> {
     Ok(out)
 }
 
-/// The face detector: the host's own, else the downloaded one (loaded once).
-fn detector(s: &mut Session) -> Result<DetectFn> {
+/// The face detector: the host's own, else the downloaded one (loaded once for each `profiles`
+/// setting: with the profile pass, the heads in profile the face detector misses are faces too).
+fn detector(s: &mut Session, profiles: Option<bool>) -> Result<DetectFn> {
     if let Some(d) = &s.redacts.detector {
         return Ok(d.clone());
     }
-    if let Some(d) = &s.redacts.faces_only {
+    // a low floor: the score asked for is applied here, so one detector serves every call
+    let o = crate::redact::Options { faces: true, plates: false, face_score: 0.3, profiles, ..crate::redact::Options::default() };
+    let on = crate::redact::profiles_on(&o);
+    if let Some((_, d)) = s.redacts.faces_only.iter().find(|(p, _)| *p == on) {
         return Ok(d.clone());
     }
     crate::redact::ready(CMD)?;
-    // a low floor: the score asked for is applied here, so one detector serves every call
-    let o = crate::redact::Options { faces: true, plates: false, face_score: 0.3, ..crate::redact::Options::default() };
-    let d = crate::redact::load_detectors(&o).map_err(|e| bad(CMD, e))?;
-    s.redacts.faces_only = Some(d.clone());
+    let d = crate::redact::load_detectors(&crate::redact::Options { profiles: Some(on), ..o }).map_err(|e| bad(CMD, e))?;
+    s.redacts.faces_only.push((on, d.clone()));
     Ok(d)
 }
 
@@ -210,7 +220,12 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
         Some(_) => return Err(bad(CMD, "`verify` is true or false")),
     };
     let exclude = crate::redact::exclude_p(CMD, p)?;
-    let det = detector(s)?;
+    let profiles = crate::redact::profiles_p(CMD, p)?;
+    let det = detector(s, profiles)?;
+    // the profile pass is heavy GPU work: the machine's GPU lock when it is free (the check runs
+    // anyway when another user has it; it does not wait)
+    let heavy = s.redacts.detector.is_none() && crate::redact::profiles_on(&crate::redact::Options { profiles, ..crate::redact::Options::default() });
+    let _gpu = heavy.then(|| filmcraft_locks::try_acquire(filmcraft_locks::Resource::Gpu, "privacy check (people and poses)").ok()).flatten();
     let q = s.project.sequence(seq).ok_or(EngineError::NoSequence)?.clone();
     let (sw, sh) = (f64::from(q.settings.width.max(1)), f64::from(q.settings.height.max(1)));
     let scale = (max_side / sw.max(sh)).min(1.0) as f32;
@@ -225,7 +240,8 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
         rendered += 1;
         let faces: Vec<Detection> = det(&rgba, w, h, w.max(h))
             .into_iter()
-            .filter(|d| d.kind == Kind::Face && d.score >= score && d.bbox.iter().all(|v| v.is_finite()))
+            // a head found from a pose has passed its own thresholds
+            .filter(|d| d.kind == Kind::Face && (d.pose || d.score >= score) && d.bbox.iter().all(|v| v.is_finite()))
             .take(MAX_FACES)
             .collect();
         for d in faces {
@@ -250,7 +266,13 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
     clips.sort_by_key(|c| c.map(|c| c.0));
     clips.dedup();
     let step = times.windows(2).filter_map(|w| w.get(1).zip(w.first()).map(|(b, a)| b - a)).fold(f64::INFINITY, f64::min);
-    let link = LinkParams { max_gap: if step.is_finite() { (step * 2.5).clamp(0.2, 5.0) } else { 1.0 }, min_iou: 0.1, max_jump: 1.5, smooth: 0.0 };
+    let link = LinkParams {
+        max_gap: if step.is_finite() { (step * 2.5).clamp(0.2, 5.0) } else { 1.0 },
+        min_iou: 0.1,
+        max_jump: 1.5,
+        smooth: 0.0,
+        ..LinkParams::default()
+    };
     let mut found: Vec<Unmasked> = Vec::new();
     for c in clips {
         let mine: Vec<&Seen> = seen.iter().filter(|x| x.under.as_ref().map(|u| u.clip) == c).collect();
@@ -317,6 +339,8 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
                 "media": f.best.under.as_ref().map(|u| r(u.media)),
                 "at": f.best.under.as_ref().map(|u| [r(u.at[0]), r(u.at[1])]),
                 "onSubject": f.subject,
+                // found (also) by the profile pass: a head in profile or half hidden
+                "fromPose": f.track.pose_hits > 0,
                 "person": f.person,
                 "verdict": verdict,
                 "allowed": allowed,
@@ -331,6 +355,7 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
         "tooSmall": small,
         "unmasked": list,
         "shown": list.iter().filter(|v| v["allowed"] != json!(true)).count(),
+        "profiles": heavy,
         "verify": verified,
     }))
 }

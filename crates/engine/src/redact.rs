@@ -4,8 +4,8 @@
 //! |---|---|
 //! | `clip.autoRedact` | job: find clearly recognisable faces and legible number plates in clips (`clips`, default the selected video clips) and hide each behind a tracked mask on a blur (or mosaic) effect; one undo step ("Auto Redact") |
 //! | `sequence.autoRedact` | the same on every video clip of `sequence` (default the active one) |
-//! | `redact.downloadModels` | download the two detectors (4.4 MB, SHA-256 checked) as a background job, after the user agreed |
-//! | `redact.status` | whether the detectors are installed (and their licences and sizes), and whether the vision check is available |
+//! | `redact.downloadModels` | download the two detectors (4.4 MB) and, unless `profiles: false`, the profile pass's person and pose models (35.8 MB), SHA-256 checked, as a background job, after the user agreed |
+//! | `redact.status` | whether the detectors and the profile models are installed (and their licences and sizes), and whether the vision check is available |
 //!
 //! **How.** In a background job (`jobs.list` progress; `jobs.cancel` stops it and nothing
 //! changes) each clip's used part is decoded and analysed `analysisFps` times a second (10 by
@@ -20,6 +20,21 @@
 //! misses some), a plate when it is at least `minPlateWidth` of the frame's width
 //! (2.5 %); either must be seen twice, or once with a score of 0.9. An `exclude` box is the
 //! subject's (a robot's: its face is not hidden): see below.
+//!
+//! **Faces in profile.** YuNet finds frontal faces; a face in profile or half hidden it misses
+//! (2026-10-22: two visitors in profile behind a robot arm stayed sharp in a reel). With
+//! `profiles` (on by default once its models are downloaded, `redact.downloadModels`) every
+//! analysed frame also goes through the profile pass (`filmcraft_vision::ProfileDetector`: the
+//! D-FINE person detector, then RTMPose on each person, on the GPU on macOS): each person whose
+//! nose or an eye is found (the back of a head identifies nobody) and whose head no YuNet face
+//! covers adds a face, the head box from the nose, eyes and ears. Those faces are followed
+//! together with YuNet's (a visitor turning away stays one track), need two sightings, never
+//! count as "sure" (so the vision check's "a robot" is believed: Ameca keeps its face), and are
+//! reported (`fromPose`, `facesFromPose`). The job holds the machine's GPU lock while it runs
+//! (`filmcraft_locks`; waited for up to ten minutes, then run anyway). Measured 2026-10-22 on an
+//! M3 Max with the machine loaded by parallel builds (load average 30–60): 6–8 frames a second at
+//! 1080p for the people and their poses, and 57 ms more per analysed frame in the job; at a load
+//! of 60 on its 16 cores the CPU parts starve and it was about 0.4 s more per frame.
 //!
 //! **Not robots.** With `verify` (the default) every track still to be hidden is shown once,
 //! cropped with its surroundings, to a local vision model (the host's [`VisionJudge`]: AutoCut's
@@ -62,8 +77,10 @@
 //! frames they overlap. With a redaction cache ([`crate::redact_cache`], `<data dir>/redact-cache`,
 //! on in the app and the CLI) the detections at each of those times, the vision check's answer
 //! for each track and the named targets' looks are kept by the file's content identity, the
-//! settings and the models: the same footage redacted again — a rebuilt showcase, the same show
-//! in another language — decodes and asks only what it has not seen. The outcome's `cache` says
+//! settings and the models (the profile pass's models' ids are in the detections' key when it
+//! runs, so entries made without it are analysed again once): the same footage redacted again —
+//! a rebuilt showcase, the same show in another language — decodes and asks only what it has not
+//! seen. The outcome's `cache` says
 //! what came from it; `fresh: true` reads none of it. Measured 2026-10-20 on 11 clips of Robot
 //! Showcase v5 (656 analysed frames, 64 vision checks; M-series Mac, load 5–10): 152 s the first
 //! time, 0.13 s the second, 34 s with every clip's window moved half a second (576 frames and 52
@@ -187,6 +204,9 @@ pub struct Options {
     /// Read nothing from the redaction cache ([`crate::redact_cache`]): analyse and ask again
     /// (what is found still replaces what was kept).
     pub fresh: bool,
+    /// The profile pass (people and their poses: the faces in profile or half hidden the face
+    /// detector misses); `None`: on when its models are downloaded ([`profiles_on`]).
+    pub profiles: Option<bool>,
 }
 
 /// [`Options::sure_face`] by default: real visitors' faces scored 0.86–0.92 on the GITEX footage
@@ -227,6 +247,7 @@ impl Default for Options {
             targets: Vec::new(),
             target_every: 1.0,
             fresh: false,
+            profiles: None,
         }
     }
 }
@@ -339,8 +360,9 @@ impl Verified {
     }
 }
 
-/// What a job found, how the vision check went, and how long the analysis and the check took (seconds).
-type Found = (Vec<ClipRedact>, Verified, [f64; 2], Value);
+/// What a job found, how the vision check went, how long the analysis and the check took
+/// (seconds), the cache's statistics, and whether the profile pass ran.
+type Found = (Vec<ClipRedact>, Verified, [f64; 2], Value, bool);
 type Results = Arc<Mutex<Option<std::result::Result<Found, String>>>>;
 
 /// A running analysis; applied by [`poll`] when it finishes.
@@ -369,8 +391,8 @@ pub struct Redacts {
     /// [`Session::use_redaction_cache`]).
     pub cache: Option<Arc<crate::redact_cache::RedactCache>>,
     /// The downloaded face detector alone, loaded once for `sequence.checkPrivacy`
-    /// ([`crate::privacy_check`]).
-    pub(crate) faces_only: Option<DetectFn>,
+    /// ([`crate::privacy_check`]), without and with the profile pass.
+    pub(crate) faces_only: Vec<(bool, DetectFn)>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -385,6 +407,17 @@ pub fn available() -> bool {
 /// Whether the detectors are downloaded.
 pub fn installed() -> bool {
     crate::transcript::models_dir().is_some_and(|d| filmcraft_vision::catalog::installed(&d))
+}
+
+/// Whether the profile pass's models (person detector, pose network) are downloaded.
+pub fn profiles_installed() -> bool {
+    crate::transcript::models_dir().is_some_and(|d| filmcraft_vision::catalog::profiles_installed(&d))
+}
+
+/// Whether the profile pass runs for `o`: faces are looked for, and it was asked for or (not
+/// said) its models are downloaded.
+pub fn profiles_on(o: &Options) -> bool {
+    o.faces && available() && o.profiles.unwrap_or_else(profiles_installed)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -457,6 +490,15 @@ fn targets_p(cmd: &str, p: &Value) -> Result<Vec<TargetP>> {
         .collect()
 }
 
+/// `profiles`: true, false, or absent / null (on when the models are downloaded).
+pub(crate) fn profiles_p(cmd: &str, p: &Value) -> Result<Option<bool>> {
+    match p.get("profiles").filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(bad(cmd, "`profiles` is true or false (the people-and-pose pass for faces in profile)")),
+    }
+}
+
 /// The options of a command's parameters.
 pub fn options_p(cmd: &str, p: &Value) -> Result<Options> {
     let d = Options::default();
@@ -499,6 +541,7 @@ pub fn options_p(cmd: &str, p: &Value) -> Result<Options> {
         targets: targets_p(cmd, p)?,
         target_every: unit_p(cmd, p, "targetEvery", 0.25, 10.0, d.target_every)?,
         fresh: flag("fresh", d.fresh)?,
+        profiles: profiles_p(cmd, p)?,
     })
     .and_then(|o| {
         if o.faces || o.plates || !o.targets.is_empty() { Ok(o) } else { Err(bad(cmd, "nothing to hide: `kinds` faces and/or plates, or `targets`")) }
@@ -738,7 +781,8 @@ impl Shared<'_> {
 /// the face detector looks at), normalised to it.
 pub type DetectFn = Arc<dyn Fn(&[u8], usize, usize, usize) -> Vec<filmcraft_vision::Detection> + Send + Sync>;
 
-/// The downloaded detectors, for what `o` looks for.
+/// The downloaded detectors, for what `o` looks for (with the profile pass when
+/// [`profiles_on`]: the heads of the people whose face shows and that the face detector missed).
 #[cfg(feature = "privacy-models")]
 pub(crate) fn load_detectors(o: &Options) -> std::result::Result<DetectFn, String> {
     let dir = crate::transcript::models_dir().ok_or("no data directory for the detectors")?;
@@ -746,6 +790,16 @@ pub(crate) fn load_detectors(o: &Options) -> std::result::Result<DetectFn, Strin
         filmcraft_vision::VisionError::NotInstalled => format!("the face and plate detectors are not downloaded yet ({DOWNLOAD_CMD})"),
         e => e.to_string(),
     })?;
+    let people = if profiles_on(o) {
+        Some(filmcraft_vision::ProfileDetector::load_on(&dir, true).map_err(|e| match e {
+            filmcraft_vision::VisionError::NotInstalled => {
+                format!("the person and pose models for faces in profile are not downloaded yet ({DOWNLOAD_CMD}; or `profiles: false`)")
+            }
+            e => e.to_string(),
+        })?)
+    } else {
+        None
+    };
     let o = o.clone();
     Ok(Arc::new(move |rgba: &[u8], w: usize, h: usize, face_side: usize| {
         let mut out = Vec::new();
@@ -756,7 +810,10 @@ pub(crate) fn load_detectors(o: &Options) -> std::result::Result<DetectFn, Strin
                 faces.extend(f.detect(rgba, w, h, close, o.face_score).unwrap_or_default());
                 faces = filmcraft_vision::post::nms(faces, 0.3, 750);
             }
+            // the heads the face detector missed: in profile, half hidden
+            let heads = people.as_ref().map(|p| p.heads(rgba, w, h, &faces).unwrap_or_default()).unwrap_or_default();
             out.extend(faces);
+            out.extend(heads);
         }
         if let Some(p) = det.plate.as_ref().filter(|_| o.plates) {
             out.extend(p.detect(rgba, w, h, o.plate_side, o.plate_score).unwrap_or_default());
@@ -795,23 +852,33 @@ impl Cached<'_> {
         })
     }
 
-    /// The key of `w`'s detections (media key `media`).
+    /// The key of `w`'s detections (media key `media`): with the profile pass, its models' ids
+    /// too (entries made without it, or with other models, are analysed again once).
     fn detections_key(&self, media: &str, w: &Work, o: &Options) -> Option<String> {
         let d = self.detector.as_ref()?;
-        Some(format!(
-            "det v{}|{media}|{d}|faces={} plates={} fs={:.3} ps={:.3} side={} pside={} scale={:.5} close={}",
-            crate::redact_cache::VERSION,
-            o.faces,
-            o.plates,
-            o.face_score,
-            o.plate_score,
-            w.face_side,
-            o.plate_side,
-            w.scale,
-            // the face detector's closer look (none, or its size): its finds are in the entry
-            close_side(w.face_side, (w.size.0.max(w.size.1) * f64::from(w.scale)).round() as usize).unwrap_or(0)
-        ))
+        // the face detector's closer look (none, or its size): its finds are in the entry
+        let close = close_side(w.face_side, (w.size.0.max(w.size.1) * f64::from(w.scale)).round() as usize).unwrap_or(0);
+        Some(detections_key(d, media, w.face_side, w.scale, close, o))
     }
+}
+
+/// The redaction cache's key of a file's detections (`media`) by detector `d` with these
+/// settings. With the profile pass, its models' ids too: entries made without it, or with other
+/// models, are analysed again once; without it the key is what it always was.
+fn detections_key(d: &str, media: &str, face_side: usize, scale: f32, close: usize, o: &Options) -> String {
+    let profiles = if o.profiles == Some(true) { format!(" profiles={}", filmcraft_vision::catalog::profile_model_ids()) } else { String::new() };
+    format!(
+        "det v{}|{media}|{d}{profiles}|faces={} plates={} fs={:.3} ps={:.3} side={} pside={} scale={:.5} close={}",
+        crate::redact_cache::VERSION,
+        o.faces,
+        o.plates,
+        o.face_score,
+        o.plate_score,
+        face_side,
+        o.plate_side,
+        scale,
+        close
+    )
 }
 
 /// The vision model's looks for named targets through the cache: a look at a media time asked
@@ -1549,6 +1616,10 @@ fn track_json(t: &Track, skip: Option<Skip>, with_path: bool) -> Value {
     if let Some(s) = skip {
         v["reason"] = serde_json::to_value(s).unwrap_or(Value::Null);
     }
+    if t.pose_hits > 0 {
+        // seen (also) by the profile pass: in profile or half hidden
+        v["fromPose"] = json!(t.pose_hits);
+    }
     if with_path {
         v["path"] = Value::Array(t.points.iter().map(|p| json!([r(p.t), r(p.bbox[0]), r(p.bbox[1]), r(p.bbox[2]), r(p.bbox[3])])).collect());
     }
@@ -1565,6 +1636,9 @@ fn clip_json(c: &ClipRedact, dry: bool, masks: usize) -> Value {
         "frames": c.frames,
         "missedFrames": c.missed,
         "faces": count(Kind::Face),
+        // hidden faces the profile pass found: at some moment, and only it
+        "facesFromPose": c.hidden().filter(|t| t.kind == Kind::Face && t.pose_hits > 0).count(),
+        "facesOnlyFromPose": c.hidden().filter(|t| t.kind == Kind::Face && t.pose_hits > 0 && t.pose_hits == t.hits).count(),
         "plates": count(Kind::Plate),
         "targets": count(Kind::Target),
         "looks": {"asked": c.looks, "found": c.found, "errors": c.look_errors},
@@ -1602,7 +1676,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Faces and Plates…",
             menu: &["Clip"],
             shortcut: None,
-            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"wait":bool=false}"#,
+            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"profiles":bool=installed,"wait":bool=false}"#,
             enabled: has_video_selection,
             run: redact_clips,
             journal: true,
@@ -1612,7 +1686,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Sequence…",
             menu: &[],
             shortcut: None,
-            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"wait":bool=false}"#,
+            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"profiles":bool=installed,"wait":bool=false}"#,
             enabled: has_seq,
             run: redact_sequence,
             journal: true,
@@ -1622,7 +1696,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Download Face and Plate Detectors",
             menu: &[],
             shortcut: None,
-            params: r#"{"wait":bool?}"#,
+            params: r#"{"profiles":bool=true,"wait":bool?}"#,
             enabled: always,
             run: download_models,
             journal: false,
@@ -1720,7 +1794,12 @@ fn redact_sequence(s: &mut Session, p: &Value) -> Result<Value> {
     start(s, cmd, seq, work, skipped, o, p)
 }
 
-fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipped: Vec<Value>, o: Options, p: &Value) -> Result<Value> {
+fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipped: Vec<Value>, mut o: Options, p: &Value) -> Result<Value> {
+    // the profile pass, decided now (the cache's keys and the outcome say which ran); a host's own
+    // detector is the whole detector. Asked for, its models must load; not said, a model that
+    // does not load leaves the face detector alone.
+    let asked = o.profiles == Some(true);
+    o.profiles = Some(s.redacts.detector.is_none() && profiles_on(&o));
     let total: usize = work.iter().map(|w| w.times.len()).sum();
     let clips = work.len();
     let n = clips;
@@ -1764,9 +1843,21 @@ fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipp
             *lock(&res) = Some(report);
             prog.finished.store(true, Ordering::Relaxed);
         };
+        // the person and pose networks are heavy GPU work: one user of the GPU at a time (waited
+        // for a while, then run anyway: the lock is advisory)
+        let _gpu = (opts.profiles == Some(true)).then(|| gpu_lock(&prog)).flatten();
         *lock(&prog.status) = "Loading the face and plate detectors".into();
+        let mut opts = opts;
         let det = match custom.map_or_else(|| load_detectors(&opts), Ok) {
             Ok(d) => d,
+            Err(e) if opts.profiles == Some(true) && !asked => {
+                log::warn!("auto redact: the profile pass's models did not load ({e}); the face detector looks alone");
+                opts.profiles = Some(false);
+                match load_detectors(&opts) {
+                    Ok(d) => d,
+                    Err(e) => return finish(Err(e.clone()), e, 0),
+                }
+            }
             Err(e) => return finish(Err(e.clone()), e, 0),
         };
         let sh = Shared { prog: &prog, done: AtomicU64::new(0), clips_done: AtomicUsize::new(0), clips: work.len(), stop: AtomicBool::new(false) };
@@ -1822,7 +1913,7 @@ fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipp
             v["enabled"] = json!(true);
             v
         });
-        finish(Ok((made, verified, [t_analysis, t_verify], stats)), status, frames);
+        finish(Ok((made, verified, [t_analysis, t_verify], stats, opts.profiles == Some(true))), status, frames);
     };
     s.redacts.pending.push(PendingRedact { job: id, cmd, seq, opts: o, skipped, results });
     let wait = bool_p(p, "wait").unwrap_or(false);
@@ -1838,6 +1929,20 @@ fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipp
         }
     }
     Ok(answer)
+}
+
+/// How long a redaction waits for another user of the GPU before running anyway.
+const GPU_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The machine's GPU lock for a redaction job ([`filmcraft_locks`]), waiting up to [`GPU_WAIT`]
+/// with the job's status saying who has it; `None` when it could not be taken (the job runs
+/// anyway).
+pub(crate) fn gpu_lock(prog: &filmcraft_export::Progress) -> Option<filmcraft_locks::Guard> {
+    *lock(&prog.status) = "Taking the GPU".into();
+    filmcraft_locks::acquire(filmcraft_locks::Resource::Gpu, "auto redaction (people and poses)", GPU_WAIT, &mut |e| {
+        *lock(&prog.status) = format!("Waiting for the GPU: {e}");
+    })
+    .ok()
 }
 
 /// Apply finished jobs (one undo step each) and keep what they made for `jobs.list`. Called each
@@ -1856,7 +1961,7 @@ pub fn poll(s: &mut Session) {
         let pj = s.redacts.pending.remove(i);
         let results = lock(&pj.results).take();
         let outcome = match results {
-            Some(Ok((clips, verified, secs, cache))) => match apply(s, &pj, &clips, &verified, secs, cache) {
+            Some(Ok((clips, verified, secs, cache, profiles))) => match apply(s, &pj, &clips, &verified, secs, cache, profiles) {
                 Ok(v) => v,
                 Err(e) => {
                     s.error_toast(pj.cmd, format!("{LABEL}: {e}"));
@@ -1875,7 +1980,7 @@ pub fn poll(s: &mut Session) {
     }
 }
 
-fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &Verified, secs: [f64; 2], cache: Value) -> Result<Value> {
+fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &Verified, secs: [f64; 2], cache: Value, profiles: bool) -> Result<Value> {
     let o = &pj.opts;
     let made: Vec<Option<EffectInstance>> = clips.iter().map(|c| effect_for(c, o)).collect();
     let hidden: usize = made.iter().flatten().map(|e| e.masks.len()).sum();
@@ -1938,6 +2043,7 @@ fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &V
         "applied": !o.dry_run,
         "clipsChanged": changed,
         "hidden": hidden,
+        "profiles": profiles,
         "verify": verified.to_json(),
         "seconds": {"analysis": (secs[0] * 10.0).round() / 10.0, "check": (secs[1] * 10.0).round() / 10.0},
         "cache": cache,
@@ -1961,41 +2067,73 @@ fn status(s: &mut Session, _: &Value) -> Result<Value> {
         "license": filmcraft_vision::catalog::LICENSE,
         "source": filmcraft_vision::catalog::SOURCE,
         "files": filmcraft_vision::catalog::FILES,
+        // the profile pass (faces in profile and half hidden): on by default once downloaded
+        "profiles": {
+            "installed": profiles_installed(),
+            "missingBytes": dir.as_deref().map_or(filmcraft_vision::catalog::profile_total_bytes(), filmcraft_vision::catalog::profile_missing_bytes),
+            "package": filmcraft_vision::catalog::PROFILE_NAME,
+            "license": filmcraft_vision::catalog::PROFILE_LICENSE,
+            "source": filmcraft_vision::catalog::PROFILE_SOURCE,
+            "files": filmcraft_vision::catalog::PROFILE_FILES,
+        },
         "judge": s.redacts.judge.as_ref().map(|j| j.name()),
     }))
 }
 
-/// Download the detectors in the background.
+/// The files `redact.downloadModels` fetches: the detectors, and (`profiles`) the profile pass's
+/// models.
+fn wanted_files(profiles: bool) -> Vec<filmcraft_vision::catalog::ModelFile> {
+    let mut v = filmcraft_vision::catalog::FILES.to_vec();
+    if profiles {
+        v.extend_from_slice(filmcraft_vision::catalog::PROFILE_FILES);
+    }
+    v
+}
+
+/// Download the detectors (and the profile pass's models) in the background.
 fn download_models(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = DOWNLOAD_CMD;
+    if !p.is_object() && !p.is_null() {
+        return Err(bad(cmd, "parameters must be an object"));
+    }
+    let profiles = profiles_p(cmd, p)?.unwrap_or(true);
+    let wait = match p.get("wait").filter(|v| !v.is_null()) {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(bad(cmd, "`wait` is true or false")),
+    };
     let dir = crate::transcript::models_dir().ok_or_else(|| bad(cmd, "no data directory for the detectors"))?;
-    if filmcraft_vision::catalog::installed(&dir) {
-        return Ok(json!({"job": null, "installed": true}));
+    let files = wanted_files(profiles);
+    let pkg = filmcraft_vision::catalog::package_dir(&dir);
+    let missing: u64 = files.iter().filter(|f| !std::fs::metadata(pkg.join(f.name)).is_ok_and(|m| m.len() == f.size)).map(|f| f.size).sum();
+    if missing == 0 {
+        return Ok(json!({"job": null, "installed": true, "profiles": profiles}));
     }
     if !cfg!(feature = "privacy-models") {
         return Err(bad(cmd, "automatic redaction is not available in this build (built without the `privacy-models` feature)"));
     }
-    let wait = p.get("wait").and_then(Value::as_bool).unwrap_or(false);
     let job = crate::narration::new_job(s, format!("Downloading {}", filmcraft_vision::catalog::PACKAGE_NAME));
-    job.progress.total.store(filmcraft_vision::catalog::missing_bytes(&dir), Ordering::Relaxed);
+    job.progress.total.store(missing, Ordering::Relaxed);
     let (prog, res) = (job.progress.clone(), job.result.clone());
     let id = crate::narration::spawn(s, job, wait, "filmcraft-redact-download", move || {
         let t0 = web_time::Instant::now();
-        let r = download_package(&dir, &prog);
-        crate::narration::finish(&prog, &res, r.map(|()| "Face and plate detectors installed".to_string()), t0);
+        let r = download_package(&dir, &files, &prog);
+        crate::narration::finish(&prog, &res, r.map(|()| "Privacy detectors installed".to_string()), t0);
     })?;
     if wait && let Some(e) = s.jobs.iter().find(|j| j.id == id).and_then(|j| lock(&j.progress.error).clone()) {
         return Err(EngineError::Other(format!("{cmd}: {e}")));
     }
-    Ok(json!({"job": id, "installed": false}))
+    Ok(json!({"job": id, "installed": false, "missingBytes": missing, "profiles": profiles}))
 }
 
 #[cfg(feature = "privacy-models")]
-fn download_package(dir: &std::path::Path, prog: &filmcraft_export::Progress) -> std::result::Result<(), String> {
-    let files: Vec<filmcraft_speech::models::ModelFile> = filmcraft_vision::catalog::FILES
-        .iter()
-        .map(|f| filmcraft_speech::models::ModelFile { name: f.name, url: f.url, sha256: f.sha256, size: f.size })
-        .collect();
+fn download_package(
+    dir: &std::path::Path,
+    wanted: &[filmcraft_vision::catalog::ModelFile],
+    prog: &filmcraft_export::Progress,
+) -> std::result::Result<(), String> {
+    let files: Vec<filmcraft_speech::models::ModelFile> =
+        wanted.iter().map(|f| filmcraft_speech::models::ModelFile { name: f.name, url: f.url, sha256: f.sha256, size: f.size }).collect();
     let mut progress = |done: u64, total: u64, file: &str| {
         prog.done.store(done, Ordering::Relaxed);
         prog.total.store(total, Ordering::Relaxed);
@@ -2006,7 +2144,7 @@ fn download_package(dir: &std::path::Path, prog: &filmcraft_export::Progress) ->
 }
 
 #[cfg(not(feature = "privacy-models"))]
-fn download_package(_: &std::path::Path, _: &filmcraft_export::Progress) -> std::result::Result<(), String> {
+fn download_package(_: &std::path::Path, _: &[filmcraft_vision::catalog::ModelFile], _: &filmcraft_export::Progress) -> std::result::Result<(), String> {
     Err("automatic redaction is not available in this build".into())
 }
 

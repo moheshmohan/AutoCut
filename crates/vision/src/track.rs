@@ -25,13 +25,22 @@ pub struct LinkParams {
     pub max_jump: f64,
     /// Gaussian smoothing of the boxes over time, seconds (σ); 0: none.
     pub smooth: f64,
+    /// A head found from a pose ([`Detection::pose`]) scoring under this is a weak sighting: it
+    /// may continue a track (matched after the other detections, ByteTrack's second
+    /// association) but never starts one. A profile head the pose network is unsure of in some
+    /// frames keeps its track and its mask instead of flickering into one-sighting tracks.
+    #[serde(default)]
+    pub weak_below: f32,
 }
 
 impl Default for LinkParams {
     fn default() -> Self {
-        Self { max_gap: 0.7, min_iou: 0.2, max_jump: 0.8, smooth: 0.08 }
+        Self { max_gap: 0.7, min_iou: 0.2, max_jump: 0.8, smooth: 0.08, weak_below: WEAK_POSE }
     }
 }
+
+/// [`LinkParams::weak_below`] by default.
+pub const WEAK_POSE: f32 = 0.35;
 
 /// Which tracks are hidden.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -83,6 +92,14 @@ pub struct Track {
     /// Detections linked to it.
     pub hits: usize,
     pub best_score: f32,
+    /// Of `hits`, the sightings found from a person's pose ([`Detection::pose`]: a head in
+    /// profile or half hidden), not by the face detector.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pose_hits: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl Track {
@@ -124,6 +141,8 @@ struct Open {
     kind: Kind,
     /// (frame index, box, corners, score) of each sighting.
     seen: Vec<(usize, BoxN, Vec<[f64; 2]>, f32)>,
+    /// Sightings found from a pose.
+    pose: usize,
 }
 
 impl Open {
@@ -178,11 +197,21 @@ pub fn link(frames: &[Frame], lp: &LinkParams) -> Vec<Track> {
             open.into_iter().partition(|o| o.seen.last().and_then(|(i, ..)| frames.get(*i)).is_some_and(|last| f.t - last.t <= lp.max_gap + 1e-9));
         open = keep;
         done.extend(closed);
-        let dets: Vec<(BoxN, Vec<[f64; 2]>, f32, Kind)> = f
+        let dets: Vec<(BoxN, Vec<[f64; 2]>, f32, Kind, bool)> = f
             .detections
             .iter()
             .filter(|d| d.bbox.iter().all(|v| v.is_finite()) && d.bbox[2] > 0.0 && d.bbox[3] > 0.0)
-            .map(|d| (to_box(&d.bbox), d.points.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect(), d.score, d.kind))
+            // a plate keeps its corners; a face's landmarks are not followed (a head found from a pose has
+            // other points than the face detector's face, and one track may hold both)
+            .map(|d| {
+                (
+                    to_box(&d.bbox),
+                    if d.kind == Kind::Plate { d.points.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect() } else { Vec::new() },
+                    d.score,
+                    d.kind,
+                    d.pose,
+                )
+            })
             .collect();
         let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
         for (oi, o) in open.iter().enumerate() {
@@ -196,7 +225,13 @@ pub fn link(frames: &[Frame], lp: &LinkParams) -> Vec<Track> {
                 }
             }
         }
-        pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // the sure detections first, then the weak sightings to the tracks still unmatched
+        // (ByteTrack's two associations)
+        let weak = |d: &(BoxN, Vec<[f64; 2]>, f32, Kind, bool)| d.4 && d.2 < lp.weak_below;
+        pairs.sort_by(|a, b| {
+            let (wa, wb) = (dets.get(a.2).is_some_and(weak), dets.get(b.2).is_some_and(weak));
+            wa.cmp(&wb).then(b.0.total_cmp(&a.0))
+        });
         let (mut used_o, mut used_d) = (vec![false; open.len()], vec![false; dets.len()]);
         for (_, oi, di) in pairs {
             if used_o.get(oi).copied().unwrap_or(true) || used_d.get(di).copied().unwrap_or(true) {
@@ -206,11 +241,12 @@ pub fn link(frames: &[Frame], lp: &LinkParams) -> Vec<Track> {
             used_d[di] = true;
             if let (Some(o), Some(d)) = (open.get_mut(oi), dets.get(di)) {
                 o.seen.push((fi, d.0, d.1.clone(), d.2));
+                o.pose += usize::from(d.4);
             }
         }
         for (di, d) in dets.into_iter().enumerate() {
-            if !used_d.get(di).copied().unwrap_or(true) {
-                open.push(Open { kind: d.3, seen: vec![(fi, d.0, d.1, d.2)] });
+            if !used_d.get(di).copied().unwrap_or(true) && !weak(&d) {
+                open.push(Open { kind: d.3, seen: vec![(fi, d.0, d.1, d.2)], pose: usize::from(d.4) });
             }
         }
     }
@@ -246,7 +282,7 @@ fn fill(frames: &[Frame], o: &Open) -> Option<Track> {
         points.push(TrackPoint { t, bbox, corners, seen: false });
     }
     let best_score = o.seen.iter().map(|s| s.3).fold(0.0f32, f32::max);
-    Some(Track { kind: o.kind, label: None, points, hits: o.seen.len(), best_score })
+    Some(Track { kind: o.kind, label: None, points, hits: o.seen.len(), best_score, pose_hits: o.pose })
 }
 
 /// [`link`]'s smoothing for a track made elsewhere (a followed target).
@@ -411,7 +447,7 @@ mod tests {
     use super::*;
 
     fn face(x: f32, y: f32, s: f32, score: f32) -> Detection {
-        Detection { kind: Kind::Face, score, bbox: [x, y, s, s], points: Vec::new() }
+        Detection { kind: Kind::Face, score, bbox: [x, y, s, s], points: Vec::new(), pose: false }
     }
 
     fn frames(n: usize, fps: f64, at: impl Fn(usize) -> Vec<Detection>) -> Vec<Frame> {
@@ -452,6 +488,66 @@ mod tests {
     }
 
     #[test]
+    fn a_face_turning_to_profile_stays_one_track() {
+        // YuNet sees the face for 6 frames; the visitor turns away into profile and only the pose
+        // pass finds the head (a slightly larger box, its own points) for 8 more, missing 2 of them
+        let head = |x: f32| Detection {
+            kind: Kind::Face,
+            score: 0.7,
+            bbox: [x - 0.01, 0.29, 0.12, 0.15],
+            points: vec![[x, 0.33], [x + 0.03, 0.32], [x + 0.08, 0.34]],
+            pose: true,
+        };
+        let f = frames(16, 10.0, |i| {
+            let x = 0.2 + 0.01 * i as f32;
+            match i {
+                0..6 => vec![face(x, 0.3, 0.1, 0.9)],
+                9 | 10 => vec![],
+                _ => vec![head(x)],
+            }
+        });
+        let t = link(&f, &LinkParams::default());
+        assert_eq!(t.len(), 1, "{t:?}");
+        let tr = &t[0];
+        assert_eq!((tr.hits, tr.pose_hits), (14, 8));
+        assert_eq!(tr.points.len(), 16);
+        assert!(!tr.points[9].seen && tr.points[11].seen);
+        // a plate keeps its corners; the faces' points are not followed
+        assert!(tr.points.iter().all(|p| p.corners.is_empty()));
+        // its best score is the face detector's
+        assert!((tr.best_score - 0.9).abs() < 1e-6);
+        // a pose head never seen twice is too brief to hide unless sure (and pose heads never are)
+        let once = frames(3, 10.0, |i| if i == 1 { vec![head(0.5)] } else { vec![] });
+        let t = link(&once, &LinkParams::default());
+        assert_eq!(verdict(&t[0], &KeepParams::default(), &[]), Some(Skip::TooBrief));
+    }
+
+    #[test]
+    fn weak_pose_sightings_continue_tracks_but_never_start_them() {
+        let head = |x: f32, score: f32| Detection { kind: Kind::Face, score, bbox: [x, 0.3, 0.1, 0.13], points: Vec::new(), pose: true };
+        // a profile head seen surely once, then only weakly: one track, every sighting counted
+        let f = frames(8, 10.0, |i| vec![head(0.2 + 0.005 * i as f32, if i == 0 { 0.6 } else { 0.28 })]);
+        let t = link(&f, &LinkParams::default());
+        assert_eq!(t.len(), 1, "{t:?}");
+        assert_eq!((t[0].hits, t[0].pose_hits), (8, 8));
+        assert_eq!(verdict(&t[0], &KeepParams::default(), &[]), None);
+        // weak sightings alone: nothing
+        let f = frames(8, 10.0, |i| vec![head(0.2 + 0.005 * i as f32, 0.28)]);
+        assert!(link(&f, &LinkParams::default()).is_empty());
+        // a weak sighting next to a sure one goes to the track the sure one does not take
+        let f = frames(2, 10.0, |i| if i == 0 { vec![head(0.2, 0.6), head(0.6, 0.6)] } else { vec![head(0.21, 0.28), head(0.205, 0.7)] });
+        let t = link(&f, &LinkParams::default());
+        let mut hits: Vec<usize> = t.iter().map(|tr| tr.hits).collect();
+        hits.sort_unstable();
+        assert_eq!(hits, vec![1, 2], "{t:?}");
+        let a = t.iter().find(|tr| tr.hits == 2).unwrap();
+        assert!((a.points[1].bbox[0] - 0.205).abs() < 1e-6, "the sure sighting continues it: {a:?}");
+        // with weak_below 0 (a face detector's own linking), every detection starts a track
+        let f = frames(3, 10.0, |i| vec![head(0.2 + 0.3 * i as f32, 0.28)]);
+        assert_eq!(link(&f, &LinkParams { weak_below: 0.0, ..LinkParams::default() }).len(), 3);
+    }
+
+    #[test]
     fn fast_motion_links_by_nearness() {
         // a face moving three quarters of its width every frame (overlapping too little)
         let f = frames(10, 10.0, |i| vec![face(0.05 + 0.045 * i as f32, 0.4, 0.06, 0.9)]);
@@ -486,6 +582,7 @@ mod tests {
             points: vec![TrackPoint { t: 1.0, bbox: [0.4, 0.4, h * 0.6, h], corners: vec![], seen: true }],
             hits,
             best_score: score,
+            pose_hits: 0,
         };
         assert_eq!(verdict(&mk(0.2, 5, 0.8), &kp, &[]), None);
         assert_eq!(verdict(&mk(0.03, 5, 0.99), &kp, &[]), Some(Skip::TooSmall));
