@@ -47,6 +47,7 @@ pub mod media_watch;
 pub mod mix_analysis;
 pub mod mixer;
 pub mod ml_script;
+pub mod motion_track;
 pub mod multicam;
 pub mod music;
 pub mod music_neural;
@@ -512,6 +513,9 @@ pub struct Session {
     /// Speech understanding jobs (`media.understandSpeech`) whose transcripts and analyses are
     /// stored when they finish, and what the finished ones found.
     pub speech_jobs: speech_understand::Understandings,
+    /// Motion tracking jobs (`track.create`, `track.refine`, `track.blurObject`…) whose tracks are
+    /// saved when they finish, and what the finished ones made.
+    pub motion_tracks: motion_track::MotionTracks,
     /// Automatic privacy blur jobs (`clip.autoRedact`, `sequence.autoRedact`) whose masks are
     /// written when they finish, what the finished ones made, and the host's vision check.
     pub redacts: redact::Redacts,
@@ -666,6 +670,7 @@ impl Session {
             scene_jobs: Vec::new(),
             reframes: Default::default(),
             speech_jobs: Default::default(),
+            motion_tracks: Default::default(),
             redacts: Default::default(),
             scenes: Default::default(),
             neural_music: Default::default(),
@@ -807,6 +812,7 @@ impl Session {
         scene_detect::poll(self);
         reframe::poll(self);
         speech_understand::poll(self);
+        motion_track::poll(self);
         redact::poll(self);
         scenes::poll(self);
         music_neural::poll(self);

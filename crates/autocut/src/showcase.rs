@@ -116,6 +116,11 @@ pub struct Options {
     /// compression; the level left to the mix). `--enhance-voice`, a plan's `"enhanceVoice":
     /// true`. Off by default, and never on the narration, which is synthetic.
     pub enhance_voice: bool,
+    /// An entry's spec chips become one callout that follows its robot (`track.label`: the
+    /// robot tracked from the analysis' box, a leader line to it) instead of sitting beside its
+    /// name; an entry whose robot cannot be tracked keeps the chips. `--follow-labels`, a plan's
+    /// `"followLabels": true`. Off by default.
+    pub follow_labels: bool,
 }
 
 impl Options {
@@ -154,6 +159,7 @@ impl Default for Options {
             skip_narration_check: false,
             redact: None,
             enhance_voice: false,
+            follow_labels: false,
         }
     }
 }
@@ -1133,6 +1139,91 @@ async fn sfx(ex: &dyn Executor, kind: &str, duration: f64, t: f64, track: &str, 
     };
     mix.effects.extend(r["clip"].as_u64());
     Ok(())
+}
+
+/// When the chips of an entry show, seconds: from just after its words start (or its lower
+/// third comes in) until they end (or it goes), within the entry. `when` is (spoken seconds,
+/// voice start, lower third start, lower third length, entry end).
+fn chip_window(when: (f64, f64, f64, f64, f64)) -> (f64, f64) {
+    let (spoken, voice_at, shown_at, shown_for, entry_end) = when;
+    let c0 = if spoken > 0.0 { voice_at + 0.5 } else { shown_at + 0.6 };
+    let c1 = (shown_at + shown_for).max(voice_at + spoken + 0.3).min(entry_end - 0.1);
+    (c0, c1)
+}
+
+/// With [`Options::follow_labels`]: the entry's chips as one callout (`track.label`) following
+/// its robot through the first of its shots on screen then whose analysed moment (where its box
+/// is) is in the part played, on the chips' first track, shown while the chips would be. Whether
+/// it was placed (a note says why not; the chips then go beside the name).
+#[allow(clippy::too_many_arguments)]
+async fn follow_label_placed(
+    ex: &dyn Executor,
+    opts: &Options,
+    e: &Entry,
+    placed: &mut PlacedEntry,
+    texts: &[String],
+    tracks: &[usize],
+    frame: (f64, f64),
+    when: (f64, f64, f64, f64, f64),
+    notes: &mut Vec<String>,
+) -> bool {
+    if !opts.follow_labels || placed.scene {
+        return false;
+    }
+    let (c0, c1) = chip_window(when);
+    match follow_label(ex, e, &placed.shots, texts, tracks.first().copied(), frame, (c0, c1)).await {
+        Ok(clip) => {
+            placed.chips = vec![clip];
+            true
+        }
+        Err(why) => {
+            notes.push(format!("chips of entry {}: not following the robot ({why}), shown beside its name", e.number));
+            false
+        }
+    }
+}
+
+/// The callout of [`follow_label_placed`]: its clip, or why there is none.
+async fn follow_label(
+    ex: &dyn Executor,
+    e: &Entry,
+    shots: &[PlacedShot],
+    texts: &[String],
+    track: Option<usize>,
+    frame: (f64, f64),
+    (c0, c1): (f64, f64),
+) -> Result<u64, String> {
+    let text = texts.iter().map(|t| t.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" · ");
+    if text.is_empty() {
+        return Err("no chip text".into());
+    }
+    if c1 - c0 < 1.2 {
+        return Err("the entry is too short to show them".into());
+    }
+    let aspect = frame.0 / frame.1.max(1.0);
+    for p in shots.iter().filter(|p| !p.photo && p.end > c0 && p.start < c1) {
+        let Some(s) = e.shots.iter().find(|s| s.item == p.item) else { continue };
+        let (Some(b), Some(m)) = (s.subject_box(aspect), s.largest) else { continue };
+        let [src, end] = p.source.unwrap_or([0.0, f64::INFINITY]);
+        let speed = p.speed.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(1.0);
+        if !(m.seconds.is_finite() && m.seconds >= src && m.seconds <= end) {
+            continue;
+        }
+        let at = (p.start + (m.seconds - src) / speed).clamp(p.start, (p.end - 0.05).max(p.start));
+        let (from, to) = (c0.max(p.start), c1.min(p.end));
+        if to - from < 1.0 {
+            continue;
+        }
+        let mut params = json!({"clip": p.clip, "box": b, "at": at, "text": text, "style": "callout", "from": from, "to": to, "wait": true});
+        if let Some(t) = track {
+            params["videoTrack"] = json!(t);
+        }
+        return match run(ex, "track.label", params).await {
+            Ok(r) => r["track"]["made"]["clip"].as_u64().ok_or_else(|| "the callout was not made".to_string()),
+            Err(err) => Err(err.to_string()),
+        };
+    }
+    Err("none of its shots shows the robot where the analysis boxed it while the chips show".into())
 }
 
 /// A placed shot: its foreground, background and sound clips, where it ends (seconds, on a
@@ -3313,15 +3404,18 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             // showed "ROBOT #28" over the 29th robot
             counter_times.push(t);
         }
-        // its spec chips beside it, one after the other while its words are said
-        if let Some(texts) = chips.get(&e.number) {
+        // its spec chips beside it, one after the other while its words are said (or, with
+        // `follow_labels`, one callout following the robot)
+        if let Some(texts) = chips.get(&e.number)
+            && !follow_label_placed(ex, opts, e, &mut placed, texts, &tr.chips, (w, h), (spoken, voice_at, t + lead, shown_for, entry_end), &mut built.notes)
+                .await
+        {
             let beside = match beside {
                 Some(b) => Some(b),
                 // the plain lower third (its background reaches 18 px, or 14 for a caption, past the text)
                 None => look::measure(ex, shown, Some(0)).await.map(|b| b.pad(if scene { 14.0 } else { 18.0 }, if scene { 14.0 } else { 18.0 })),
             };
-            let c0 = if spoken > 0.0 { voice_at + 0.5 } else { t + lead + 0.6 };
-            let c1 = (t + lead + shown_for).max(voice_at + spoken + 0.3).min(entry_end - 0.1);
+            let (c0, c1) = chip_window((spoken, voice_at, t + lead, shown_for, entry_end));
             match beside {
                 Some(b) if c1 - c0 >= 1.2 => match look::chips(ex, &overlay, &tr.chips, tr.fps, (w, h), texts, b, c0, c1).await {
                     Ok(c) => placed.chips = c,
@@ -4874,5 +4968,58 @@ mod tests {
         let v = serde_json::to_value(&plan).unwrap();
         assert_eq!(v["delivery"]["2"], "dramatic");
         assert!(serde_json::to_value(Script::default()).unwrap().get("delivery").is_none(), "none written when there are none");
+    }
+
+    /// Records the commands it is asked to run; `track.label` answers with a callout clip (or
+    /// fails).
+    struct Labels {
+        calls: std::sync::Mutex<Vec<(String, Value)>>,
+        fail: bool,
+    }
+
+    impl Executor for Labels {
+        fn execute(&self, id: &str, p: Value) -> crate::ExecFuture {
+            self.calls.lock().unwrap().push((id.to_string(), p));
+            let r = if self.fail { Err("no picture".to_string()) } else { Ok(json!({"track": {"id": 7, "made": {"kind": "label", "clip": 99}}})) };
+            Box::pin(async move { r })
+        }
+    }
+
+    #[tokio::test]
+    async fn follow_labels_turn_chips_into_a_tracked_callout() {
+        let shot =
+            Shot { item: 5, subject: Some([0.4, 0.3, 0.2, 0.3]), largest: Some(Moment { seconds: 3.0, area: 0.06, center: [0.5, 0.45] }), ..Shot::default() };
+        let entry = Entry { number: 2, label: "Spot".into(), shots: vec![shot], ..Entry::default() };
+        let placed_shot = PlacedShot { clip: 41, item: 5, start: 10.0, end: 16.0, source: Some([2.0, 8.0]), ..PlacedShot::default() };
+        let texts = vec!["32.5 kg".to_string(), " 1.6 m/s ".to_string()];
+        // (spoken, voice at, lower third at, shown for, entry end): the chips from 11 s to 15.3 s
+        let when = (4.5, 10.5, 10.5, 4.5, 16.0);
+        let mut opts = Options::default();
+        assert!(!opts.follow_labels, "off by default");
+        let ex = Labels { calls: Default::default(), fail: false };
+        let mut placed = PlacedEntry { number: 2, shots: vec![placed_shot.clone()], ..PlacedEntry::default() };
+        let mut notes = Vec::new();
+        assert!(!follow_label_placed(&ex, &opts, &entry, &mut placed, &texts, &[4, 5], (1920.0, 1080.0), when, &mut notes).await);
+        assert!(ex.calls.lock().unwrap().is_empty(), "nothing tracked without the option");
+        opts.follow_labels = true;
+        assert!(follow_label_placed(&ex, &opts, &entry, &mut placed, &texts, &[4, 5], (1920.0, 1080.0), when, &mut notes).await);
+        assert_eq!(placed.chips, vec![99]);
+        let calls = ex.calls.lock().unwrap().clone();
+        let (id, p) = calls.first().unwrap();
+        assert_eq!(id, "track.label");
+        assert_eq!(p["clip"], 41);
+        assert_eq!(p["text"], "32.5 kg · 1.6 m/s");
+        assert_eq!(p["box"], json!([0.4, 0.3, 0.2, 0.3]));
+        assert_eq!(p["videoTrack"], 4, "on the chips' track");
+        // the analysed moment (3 s into the clip, which plays from 2 s at 10 s on the timeline)
+        assert!((p["at"].as_f64().unwrap() - 11.0).abs() < 1e-9, "{p}");
+        assert!((p["from"].as_f64().unwrap() - 11.0).abs() < 1e-9 && (p["to"].as_f64().unwrap() - 15.3).abs() < 1e-9, "{p}");
+        // a scene, or a failed track: the chips go beside the name, with a note
+        let mut scene = PlacedEntry { scene: true, shots: vec![placed_shot.clone()], ..PlacedEntry::default() };
+        assert!(!follow_label_placed(&ex, &opts, &entry, &mut scene, &texts, &[4], (1920.0, 1080.0), when, &mut notes).await);
+        let failing = Labels { calls: Default::default(), fail: true };
+        let mut again = PlacedEntry { number: 2, shots: vec![placed_shot], ..PlacedEntry::default() };
+        assert!(!follow_label_placed(&failing, &opts, &entry, &mut again, &texts, &[4], (1920.0, 1080.0), when, &mut notes).await);
+        assert!(again.chips.is_empty() && notes.iter().any(|n| n.contains("not following the robot")), "{notes:?}");
     }
 }

@@ -74,6 +74,10 @@ impl Follow {
             Follow::Responsive => "responsive",
         }
     }
+    /// The numbers behind the mode.
+    pub fn tuning(self) -> Tuning {
+        Tuning { omega: self.omega(), zoom_omega: self.zoom_omega(), window: self.window(), max_zoom: self.max_zoom() }
+    }
     /// The position spring's natural frequency, rad/s.
     fn omega(self) -> f64 {
         match self {
@@ -100,6 +104,41 @@ impl Follow {
         match self {
             Follow::Smooth => 1.2,
             Follow::Responsive => 1.35,
+        }
+    }
+}
+
+/// How a crop follows, in numbers: what a [`Follow`] mode picks ([`Follow::tuning`]), or a camera
+/// track's own ([`Tuning::smoothness`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tuning {
+    /// The position spring's natural frequency, rad/s (lower is calmer).
+    pub omega: f64,
+    /// The zoom spring's.
+    pub zoom_omega: f64,
+    /// The camera window's half width, as a share of the visible picture.
+    pub window: f64,
+    /// The furthest push-in on a small subject ([`Zoom::Track`]).
+    pub max_zoom: f64,
+}
+
+impl Tuning {
+    /// A camera track's: `smooth` 0 follows closely (a fast spring, a small window), 1 floats
+    /// (a slow spring, a wide window); 0.5 is about [`Follow::Smooth`]. Out-of-range or NaN
+    /// values are clamped to 0..1 (NaN: 0.5).
+    pub fn smoothness(smooth: f64) -> Tuning {
+        let u = if smooth.is_finite() { smooth.clamp(0.0, 1.0) } else { 0.5 };
+        // geometric between the ends: 9 rad/s … 1.2 rad/s
+        let omega = 9.0 * (1.2f64 / 9.0).powf(u);
+        Tuning { omega, zoom_omega: (omega * 0.4).max(0.5), window: 0.01 + 0.09 * u, max_zoom: 1.35 }
+    }
+    fn sane(self) -> Tuning {
+        let pos = |v: f64, d: f64| if v.is_finite() && v > 0.0 { v } else { d };
+        Tuning {
+            omega: pos(self.omega, 2.6).clamp(0.05, 100.0),
+            zoom_omega: pos(self.zoom_omega, 1.0).clamp(0.05, 100.0),
+            window: if self.window.is_finite() { self.window.clamp(0.0, 0.4) } else { 0.06 },
+            max_zoom: pos(self.max_zoom, 1.2).clamp(1.0, 8.0),
         }
     }
 }
@@ -214,6 +253,9 @@ pub enum Zoom<'a> {
     /// The clip keeps its own scale (a share, one per sample: e.g. a push-in already keyframed);
     /// only the position follows.
     Keep(&'a [f64]),
+    /// A camera track's push-in: this many times the fill scale (1..4), less where the subject
+    /// would no longer fit across the frame, never under the fill scale.
+    Push(f64),
 }
 
 /// One keyframe of the plan, at sample `index`.
@@ -488,11 +530,22 @@ fn simplify(times: &[f64], values: &[[f64; 3]], tol: f64) -> Vec<usize> {
 
 /// Plan a clip's reframing from its samples (see the module docs).
 pub fn plan(samples: &[Sample], g: Geometry, follow_mode: Follow, zoom: Zoom, fallback: Fallback) -> Plan {
+    plan_tuned(samples, g, follow_mode.tuning(), zoom, fallback)
+}
+
+/// [`plan`] with the follow's numbers given (a camera track's [`Tuning::smoothness`]).
+pub fn plan_tuned(samples: &[Sample], g: Geometry, tuning: Tuning, zoom: Zoom, fallback: Fallback) -> Plan {
+    let tuning = tuning.sane();
     let n = samples.len().min(MAX_SAMPLES);
     let samples = samples.get(..n).unwrap_or_default();
     let keep = match zoom {
         Zoom::Keep(s) => Some(s),
-        Zoom::Track => None,
+        Zoom::Track | Zoom::Push(_) => None,
+    };
+    let push = match zoom {
+        Zoom::Push(f) if f.is_finite() => Some(f.clamp(1.0, 4.0)),
+        Zoom::Push(_) => Some(1.0),
+        _ => None,
     };
     let s0 = g.fill_scale();
     // the scale a sample sits at before any push-in
@@ -556,11 +609,14 @@ pub fn plan(samples: &[Sample], g: Geometry, follow_mode: Follow, zoom: Zoom, fa
                         // the subject's height as a share of the frame at fill
                         let share = h * g.picture.1 * s0 / g.frame.1;
                         let fits = 0.9 * g.frame.0 / (w * g.picture.0 * s0).max(1e-6);
-                        (0.45 / share.max(1e-6)).min(fits).clamp(1.0, follow_mode.max_zoom()).ln()
+                        match push {
+                            Some(f) => f.min(fits).max(1.0).ln(),
+                            None => (0.45 / share.max(1e-6)).min(fits).clamp(1.0, tuning.max_zoom).ln(),
+                        }
                     })
                     .collect();
                 let zone = vec![0.08; m];
-                let z = follow(&window(&want, &zone), t, follow_mode.zoom_omega());
+                let z = follow(&window(&want, &zone), t, tuning.zoom_omega);
                 let lo = z.iter().copied().fold(f64::INFINITY, f64::min);
                 let hi = z.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 // a barely changing push-in is no push-in
@@ -580,10 +636,10 @@ pub fn plan(samples: &[Sample], g: Geometry, follow_mode: Follow, zoom: Zoom, fa
             (Some(cx), Some(cy)) => {
                 let tx: Vec<f64> = (0..m).map(|k| clamp(0, k, cx.get(k).copied().unwrap_or(0.5))).collect();
                 let ty: Vec<f64> = (0..m).map(|k| clamp(1, k, cy.get(k).copied().unwrap_or(0.5))).collect();
-                let zx: Vec<f64> = (0..m).map(|k| follow_mode.window() * vis_at(k)[0]).collect();
-                let zy: Vec<f64> = (0..m).map(|k| follow_mode.window() * vis_at(k)[1]).collect();
-                let sx = follow(&window(&tx, &zx), t, follow_mode.omega());
-                let sy = follow(&window(&ty, &zy), t, follow_mode.omega());
+                let zx: Vec<f64> = (0..m).map(|k| tuning.window * vis_at(k)[0]).collect();
+                let zy: Vec<f64> = (0..m).map(|k| tuning.window * vis_at(k)[1]).collect();
+                let sx = follow(&window(&tx, &zx), t, tuning.omega);
+                let sy = follow(&window(&ty, &zy), t, tuning.omega);
                 (0..m).map(|k| [clamp(0, k, sx.get(k).copied().unwrap_or(0.5)), clamp(1, k, sy.get(k).copied().unwrap_or(0.5))]).collect()
             }
             // nobody in this shot: a centred crop

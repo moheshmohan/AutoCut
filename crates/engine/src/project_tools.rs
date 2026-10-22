@@ -787,6 +787,7 @@ pub fn project_subset(p: &Project, keep: &BTreeSet<ItemId>) -> Project {
     out.transcripts.retain(|id, _| keep.contains(id));
     out.speech.retain(|id, _| keep.contains(id));
     out.narrations.retain(|id, _| keep.contains(id));
+    out.motion_tracks.retain(|_, t| keep.contains(&t.item) && keep.contains(&t.sequence));
     out.search_bins.clear();
     out
 }

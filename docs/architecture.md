@@ -839,6 +839,16 @@ All of these dispatch the same command ids.
   `jobs.cancel`), Project Notes (`project.notes` / `project.setNotes`, plain text in
   `Project::notes`, schema v15; one typing session is one undo step). Timecode and Reference Monitor are frontend-only views. Their settings are
   `UiState::panels` (`ui.set {"panels": {...}}`).
+- **Motion tracking** (CapCut-style). `Project::motion_tracks` (schema v16) keeps named tracks of
+  objects through clips (`filmcraft_project::motion_track`: media-time samples in the source
+  picture, rotation, scale, confidence, lost frames) made by `track.create` in a background job
+  (`filmcraft_render::object_track`: subject tracking, or KLT points + RANSAC similarity anchored on
+  the object's look, re-detecting after occlusions). `track.attach` bakes keyframes on a clip's
+  Motion, a graphic layer, an effect's point or a mask (mapped through the tracked clip's speed,
+  trims and Motion into sequence pixels, then into the target's space) and keeps the link, so
+  `track.refine` re-writes them; `track.label`, `track.blurObject` and `track.spotlight` combine
+  both. `clip.cameraTrack` is Auto Reframe's planner with a fixed push-in (`reframe::Zoom::Push`,
+  `Tuning::smoothness`). The Program monitor's Track tool draws the box and the path.
 - **Project panel and Media Browser** (M12.7). View settings (List / Icon / Freeform, thumbnail
   and font size, Preview Area, Hover Scrub), the List view's columns, widths and sort, and ten view
   presets are preferences (`Preferences::project_panel`; `project.view.*`, `project.columns.*`,

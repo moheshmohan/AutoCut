@@ -233,6 +233,12 @@ impl PlanDoc {
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err(AutoCutError::Invalid("enhanceVoice: true or false".into())),
         };
+        // spec chips that follow the robot (`"followLabels": true`; off by default)
+        opts.follow_labels = match self.look.get("followLabels") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(AutoCutError::Invalid("followLabels: true or false".into())),
+        };
         let (entries, heads) = resolve(&self.entries);
         if entries.is_empty() {
             return Err(AutoCutError::Invalid("no entry is included: include at least one".into()));

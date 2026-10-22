@@ -304,6 +304,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         // them (the selected clip's transform handles cover it, #1023)
         if app.ui.eyedropper.is_some() {
             eyedropper(app, ui, &pic_resp, pic, target, rate, time);
+        } else if app.ui.track_tool.is_some() {
+            // the Track tool owns the picture while it is on
+            crate::panels::motion_track::monitor_overlay(app, ui, pic, frame_size);
         } else {
             crate::panels::graphics::monitor_overlay(app, ui, pic, frame_size);
             crate::panels::masks::monitor_overlay(app, ui, pic, frame_size);
@@ -940,6 +943,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
     let mut buttons = buttons;
     if !src {
         buttons.push((Icon::Loop, "playback.loop", tl!("Loop")));
+        buttons.push((Icon::TrackMaskFwd, "track.tool", tl!("Track Object")));
     }
     let hidden = monitor_view::view(app, which).transport_hidden.clone();
     let all_buttons = buttons.clone();
@@ -1030,6 +1034,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
                 let Some((_, command, label)) = buttons.get(*index) else { continue };
                 let selected = match *command {
                     "media.toggleProxies" => Some(app.session.media.use_proxies()),
+                    "track.tool" => Some(app.ui.track_tool.is_some()),
                     "playback.toggle" => Some(app.playback.playing),
                     "source.playback.toggle" => Some(app.source_playback.clock.playing),
                     _ => None,
@@ -1053,7 +1058,7 @@ fn transport_button(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, prefi
         ui.painter().rect_filled(rect, 4.0, t.hover);
     }
     let size = if matches!(command, "playback.toggle" | "source.playback.toggle") { 20.0 } else { 18.0 };
-    let color = if command == "media.toggleProxies" && app.session.media.use_proxies() {
+    let color = if (command == "media.toggleProxies" && app.session.media.use_proxies()) || (command == "track.tool" && app.ui.track_tool.is_some()) {
         t.accent
     } else if response.hovered() {
         t.tab_text_active
@@ -1074,6 +1079,7 @@ fn invoke_transport(app: &mut FilmcraftApp, ctx: &egui::Context, which: Which, c
             Ok(serde_json::Value::Null)
         }
         "exportFrame" => crate::menus::invoke(app, ctx, "file.exportFrame", json!({"monitor": if source { "source" } else { "program" }})),
+        "track.tool" => crate::panels::motion_track::toggle(app).map(|()| serde_json::Value::Null),
         command => crate::menus::invoke(app, ctx, command, json!({"monitor": if source { "source" } else { "program" }})),
     };
     if let Err(error) = result {

@@ -110,12 +110,12 @@ impl SubjectBox {
     }
 
     /// Corners in a `w`×`h` frame's pixels: `[x0, y0, x1, y1]`.
-    fn px(&self, w: usize, h: usize) -> [f64; 4] {
+    pub(crate) fn px(&self, w: usize, h: usize) -> [f64; 4] {
         let (w, h) = (w as f64, h as f64);
         [(self.cx - self.w / 2.0) * w, (self.cy - self.h / 2.0) * h, (self.cx + self.w / 2.0) * w, (self.cy + self.h / 2.0) * h]
     }
 
-    fn from_px(b: [f64; 4], w: usize, h: usize) -> Option<Self> {
+    pub(crate) fn from_px(b: [f64; 4], w: usize, h: usize) -> Option<Self> {
         let (fw, fh) = (w.max(1) as f64, h.max(1) as f64);
         Self::new((b[0] + b[2]) / 2.0 / fw, (b[1] + b[3]) / 2.0 / fh, (b[2] - b[0]) / fw, (b[3] - b[1]) / fh)
     }
@@ -155,17 +155,27 @@ pub struct Observation {
 
 /// The subject's look: a small zero-mean, unit-norm grey patch.
 #[derive(Clone, Debug)]
-struct Template {
-    w: usize,
-    h: usize,
-    px: Vec<f32>,
+pub(crate) struct Template {
+    pub(crate) w: usize,
+    pub(crate) h: usize,
+    pub(crate) px: Vec<f32>,
 }
 
 /// A frame ready for tracking.
-struct Frame {
-    prep: Prepared,
-    w: usize,
-    h: usize,
+pub(crate) struct Frame {
+    pub(crate) prep: Prepared,
+    pub(crate) w: usize,
+    pub(crate) h: usize,
+}
+
+impl Frame {
+    /// An RGBA8 frame `w`×`h` with its pyramid; `None` for a frame smaller than [`MIN_SIDE`], larger
+    /// than [`MAX_PIXELS`] or a buffer shorter than the frame.
+    pub(crate) fn new(rgba: &[u8], w: usize, h: usize) -> Option<Frame> {
+        let n = w.checked_mul(h).filter(|n| (MIN_SIDE * MIN_SIDE..=MAX_PIXELS).contains(n))?;
+        let pixels = rgba.get(..n.checked_mul(4)?)?;
+        (w >= MIN_SIDE && h >= MIN_SIDE).then(|| Frame { prep: pyramid(Gray::from_rgba8(w, h, pixels)), w, h })
+    }
 }
 
 /// Follows one subject through a clip; feed it the clip's frames in order ([`SubjectTracker::push`]).
@@ -178,6 +188,8 @@ pub struct SubjectTracker {
     /// When the subject was last seen for sure.
     seen_at: Option<f64>,
     confidence: f32,
+    /// How fast (box sizes a second) the search for a lost subject widens ([`Self::widening_search`]).
+    search_growth: f64,
 }
 
 impl Default for SubjectTracker {
@@ -188,7 +200,15 @@ impl Default for SubjectTracker {
 
 impl SubjectTracker {
     pub fn new() -> Self {
-        Self { prev: None, prev_sig: None, recent: Vec::new(), bbox: None, template: None, seen_at: None, confidence: 0.0 }
+        Self { prev: None, prev_sig: None, recent: Vec::new(), bbox: None, template: None, seen_at: None, confidence: 0.0, search_growth: 0.0 }
+    }
+
+    /// Widen the search for a lost subject by `per_second` box sizes a second it has been gone
+    /// (from 1.5 either side, at most 8) instead of keeping it near until the whole frame is
+    /// searched: for a user's box on something that moves on behind an occluder.
+    pub fn widening_search(mut self, per_second: f64) -> Self {
+        self.search_growth = if per_second.is_finite() { per_second.clamp(0.0, 100.0) } else { 0.0 };
+        self
     }
 
     /// The next frame: RGBA8, `w`×`h`, at time `t` (seconds), with the box the caller knows for it
@@ -300,8 +320,13 @@ impl SubjectTracker {
             return Observation { t, bbox: Some(b), confidence: self.confidence, state: TrackState::Tracked, cut: false };
         }
         // failed: look around where it was (everywhere once it has been gone a while)
-        let gone = self.seen_at.is_none_or(|s| (t - s).abs() > COAST_SECONDS);
-        if let Some((b, score)) = self.search(frame, &current, gone).filter(|(_, s)| *s >= REDETECT_NCC) {
+        let since = self.seen_at.map_or(f64::INFINITY, |s| (t - s).abs());
+        let reach = if since > COAST_SECONDS { None } else { Some((1.5 + self.search_growth * since).min(8.0)) };
+        let found = match reach {
+            Some(r) => self.template.as_ref().and_then(|tp| search(frame, tp, &current, Some(r))),
+            None => self.search(frame, &current, true),
+        };
+        if let Some((b, score)) = found.filter(|(_, s)| *s >= REDETECT_NCC) {
             return self.seed_keep_template(b, t, score);
         }
         self.hold(t, false, None)
@@ -331,27 +356,34 @@ impl SubjectTracker {
     /// Search the template around `near` (or the whole frame), at sizes around its size: the
     /// best box and its correlation.
     fn search(&self, frame: &Frame, near: &SubjectBox, everywhere: bool) -> Option<(SubjectBox, f32)> {
-        let tp = self.template.as_ref()?;
-        let b = near.px(frame.w, frame.h);
-        let (bw, bh) = (b[2] - b[0], b[3] - b[1]);
-        let area = if everywhere {
-            [0.0, 0.0, frame.w as f64, frame.h as f64]
-        } else {
-            let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
-            [(cx - bw * 1.5).max(0.0), (cy - bh * 1.5).max(0.0), (cx + bw * 1.5).min(frame.w as f64), (cy + bh * 1.5).min(frame.h as f64)]
-        };
-        let scales: &[f64] = if everywhere { &[0.85, 1.0, 1.18] } else { &[0.9, 1.0, 1.1] };
-        let mut best: Option<([f64; 4], f32)> = None;
-        for s in scales {
-            if let Some(hit) = search_scale(frame, tp, (bw * s, bh * s), area)
-                && best.as_ref().is_none_or(|(_, v)| hit.1 > *v)
-            {
-                best = Some(hit);
-            }
-        }
-        let (b, score) = best?;
-        Some((SubjectBox::from_px(b, frame.w, frame.h)?, score))
+        search(frame, self.template.as_ref()?, near, if everywhere { None } else { Some(1.5) })
     }
+}
+
+/// Search the template `tp` around `near` — `reach` box sizes either side of its centre, or the
+/// whole frame with `None` — at sizes around its size: the best box and its correlation.
+pub(crate) fn search(frame: &Frame, tp: &Template, near: &SubjectBox, reach: Option<f64>) -> Option<(SubjectBox, f32)> {
+    let b = near.px(frame.w, frame.h);
+    let (bw, bh) = (b[2] - b[0], b[3] - b[1]);
+    let area = match reach {
+        None => [0.0, 0.0, frame.w as f64, frame.h as f64],
+        Some(r) => {
+            let r = if r.is_finite() { r.clamp(0.5, 64.0) } else { 1.5 };
+            let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+            [(cx - bw * r).max(0.0), (cy - bh * r).max(0.0), (cx + bw * r).min(frame.w as f64), (cy + bh * r).min(frame.h as f64)]
+        }
+    };
+    let scales: &[f64] = if reach.is_none() { &[0.85, 1.0, 1.18] } else { &[0.9, 1.0, 1.1] };
+    let mut best: Option<([f64; 4], f32)> = None;
+    for s in scales {
+        if let Some(hit) = search_scale(frame, tp, (bw * s, bh * s), area)
+            && best.as_ref().is_none_or(|(_, v)| hit.1 > *v)
+        {
+            best = Some(hit);
+        }
+    }
+    let (b, score) = best?;
+    Some((SubjectBox::from_px(b, frame.w, frame.h)?, score))
 }
 
 /// Median of `v` (sorted in place); 0 when empty.
@@ -364,12 +396,12 @@ fn median(v: &mut [f32]) -> f32 {
 }
 
 /// Correlation of two equal-length zero-mean unit-norm vectors.
-fn dot(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Make `v` zero-mean and unit-norm; false when it is flat.
-fn normalize(v: &mut [f32]) -> bool {
+pub(crate) fn normalize(v: &mut [f32]) -> bool {
     if v.is_empty() {
         return false;
     }
@@ -386,7 +418,7 @@ fn normalize(v: &mut [f32]) -> bool {
 
 /// Template size for a box of `bw`×`bh` pixels: at most [`TEMPLATE_SIDE`] (never larger than the
 /// box, so a search never upsamples much), at least 6.
-fn template_size(bw: f64, bh: f64) -> (usize, usize) {
+pub(crate) fn template_size(bw: f64, bh: f64) -> (usize, usize) {
     let side = TEMPLATE_SIDE.min(bw.max(bh)).max(6.0);
     let (w, h) = if bw >= bh { (side, side * bh / bw.max(1e-6)) } else { (side * bw / bh.max(1e-6), side) };
     (w.round().clamp(6.0, TEMPLATE_SIDE) as usize, h.round().clamp(6.0, TEMPLATE_SIDE) as usize)
@@ -415,7 +447,7 @@ fn patch(frame: &Frame, b: &SubjectBox, tw: usize, th: usize) -> Option<Vec<f32>
     Some(out)
 }
 
-fn template(frame: &Frame, b: &SubjectBox) -> Option<Template> {
+pub(crate) fn template(frame: &Frame, b: &SubjectBox) -> Option<Template> {
     let p = b.px(frame.w, frame.h);
     let (w, h) = template_size(p[2] - p[0], p[3] - p[1]);
     let mut px = patch(frame, b, w, h)?;
@@ -423,7 +455,7 @@ fn template(frame: &Frame, b: &SubjectBox) -> Option<Template> {
 }
 
 /// How well the box `b` in `frame` matches the template.
-fn match_at(frame: &Frame, tp: &Template, b: &SubjectBox) -> Option<f32> {
+pub(crate) fn match_at(frame: &Frame, tp: &Template, b: &SubjectBox) -> Option<f32> {
     let mut px = patch(frame, b, tp.w, tp.h)?;
     if !normalize(&mut px) {
         return Some(0.0);

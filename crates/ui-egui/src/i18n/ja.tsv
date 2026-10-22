@@ -4235,3 +4235,21 @@
 	Transitions on Strong Beats	強拍にトランジション
 	Apply Transition to All Cuts	すべてのカットにトランジションを適用
 	Beat Pulse	ビートパルス
+# Motion tracking (the Program monitor's Track tool)
+	Attach	アタッチ
+	Box to track	トラッキング枠
+	Draw a box around the object to track	トラッキングする対象を枠で囲みます
+	Motion track	モーショントラッキング
+	Move the playhead over the clip to track	再生ヘッドをトラッキングするクリップの上に移動します
+	Object lost here	ここで対象を見失いました
+	Select a video clip to track	トラッキングするビデオクリップを選択します
+	Selected clip (sticker)	選択したクリップ（ステッカー）
+	Subject	被写体
+	Text callout	テキストの吹き出し
+	Track Object	オブジェクトをトラッキング
+	Track backward	逆方向にトラッキング
+	Track both ways	両方向にトラッキング
+	Track forward	順方向にトラッキング
+	Tracked object	トラッキング中の対象
+	Tracking… {n}%	トラッキング中… {n}%
+	Camera Track	カメラトラッキング

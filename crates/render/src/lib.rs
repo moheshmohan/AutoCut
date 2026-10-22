@@ -27,6 +27,7 @@ pub mod mask;
 pub mod mix_stream;
 pub mod mixer;
 pub mod multicam;
+pub mod object_track;
 pub mod offline;
 pub mod plan;
 pub mod prefetch;

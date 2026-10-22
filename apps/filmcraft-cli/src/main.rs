@@ -155,7 +155,7 @@ SUBCOMMANDS
                                 ~/Movies/robots.mp4 --upload --project robots.fcproj --save
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--language ml]
          [--numbers english|malayalam] [--no-narration-check] [--places-from-locations locations.json]
-         [--enhance-voice] [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
+         [--enhance-voice] [--follow-labels] [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N] [--resolution 1080p|4k|WxH]
          [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social] [--mix speech|gentle|cinematic]
          [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
@@ -209,7 +209,10 @@ SUBCOMMANDS
                                 docs/malayalam-narration.md. --enhance-voice (a plan's
                                 \"enhanceVoice\": true) runs Enhance Voice on the shots' own sound
                                 when people or robots talk in it (never on the narration, which is
-                                synthetic). --places-from-locations takes the
+                                synthetic). --follow-labels (a plan's \"followLabels\": true)
+                                turns an entry's spec chips into one callout that follows
+                                its robot (track.label, from the analysis' box) instead of
+                                sitting beside its name. --places-from-locations takes the
                                 file `photos locations` wrote and gives every entry without a
                                 \"place\" the place Google Photos shows for its first shot
                                 that has one (matched by file name), for its lower third;
@@ -2348,6 +2351,10 @@ async fn cli() {
             // talking clips: Enhance Voice on the shots' own sound (never the narration)
             if a.flag("--enhance-voice") {
                 opts.enhance_voice = true;
+            }
+            // spec chips that follow the robot (a tracked callout), off by default
+            if a.flag("--follow-labels") {
+                opts.follow_labels = true;
             }
             if languages.is_some() && opts.malayalam() {
                 fail("showcase: --languages builds every language from the English plan; this plan is Malayalam");

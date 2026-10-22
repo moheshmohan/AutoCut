@@ -4236,3 +4236,21 @@
 	Transitions on Strong Beats	Transiciones en los tiempos fuertes
 	Apply Transition to All Cuts	Aplicar transición a todos los cortes
 	Beat Pulse	Pulso al ritmo
+# Motion tracking (the Program monitor's Track tool)
+	Attach	Vincular
+	Box to track	Cuadro a seguir
+	Draw a box around the object to track	Dibuja un cuadro alrededor del objeto que quieres seguir
+	Motion track	Seguimiento de movimiento
+	Move the playhead over the clip to track	Mueve el cabezal sobre el clip que quieres seguir
+	Object lost here	Objeto perdido aquí
+	Select a video clip to track	Selecciona un clip de video para seguirlo
+	Selected clip (sticker)	Clip seleccionado (sticker)
+	Subject	Sujeto
+	Text callout	Rótulo de texto
+	Track Object	Seguir objeto
+	Track backward	Seguir hacia atrás
+	Track both ways	Seguir en ambos sentidos
+	Track forward	Seguir hacia delante
+	Tracked object	Objeto seguido
+	Tracking… {n}%	Siguiendo… {n} %
+	Camera Track	Seguimiento de cámara

@@ -1661,6 +1661,7 @@ fn build() -> Vec<CommandSpec> {
             crate::music_neural::poll(s);
             crate::reframe::poll(s);
             crate::speech_understand::poll(s);
+            crate::motion_track::poll(s);
             crate::redact::poll(s);
             crate::scenes::poll(s);
             Ok(Value::Array(s.jobs.iter().map(|j| crate::export_tools::job_json(s, j)).collect()))
@@ -3535,6 +3536,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::scopes::commands());
     v.extend(crate::reframe::commands());
     v.extend(crate::speech_understand::commands());
+    v.extend(crate::motion_track::commands());
     v.extend(crate::safe_zones::commands());
     v.extend(crate::redact::commands());
     v.extend(crate::scenes::commands());

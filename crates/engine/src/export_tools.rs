@@ -657,6 +657,9 @@ pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     if let Some(r) = crate::speech_understand::outcome_json(s, j.id) {
         v["speech"] = r;
     }
+    if let Some(r) = crate::motion_track::outcome_json(s, j.id) {
+        v["track"] = r;
+    }
     if let Some(r) = crate::redact::outcome_json(s, j.id) {
         v["redact"] = r;
     }
