@@ -2014,6 +2014,7 @@ dependencies = [
  "filmcraft-audio-dsp",
  "filmcraft-engine",
  "filmcraft-media",
+ "filmcraft-scenes",
  "filmcraft-time",
  "filmcraft-vision",
  "image",

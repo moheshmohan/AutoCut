@@ -220,42 +220,11 @@ pub enum AutoCutError {
     Other(String),
 }
 
-/// The first `{`-balanced JSON object in `s` (models wrap JSON in prose or code fences despite
-/// being asked not to); the whole string when it already parses.
-pub fn extract_json(s: &str) -> Option<Value> {
-    if let Ok(v) = serde_json::from_str::<Value>(s.trim()) {
-        return Some(v);
-    }
-    let start = s.find('{')?;
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, b) in s.as_bytes()[start..].iter().enumerate() {
-        let c = *b;
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if c == b'\\' {
-                escaped = true;
-            } else if c == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match c {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return serde_json::from_str::<Value>(&s[start..start + i + 1]).ok();
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
+/// The first `{`-balanced JSON object in a model's answer (models wrap JSON in prose or code
+/// fences despite being asked not to); the whole string when it already parses. Shared with the
+/// scene index's reading of Qwen3-VL's answers, which adds a lenient reader for broken JSON
+/// (`filmcraft_scenes::json::extract_or_repair`).
+pub use filmcraft_scenes::json::extract_json;
 
 #[cfg(test)]
 mod tests {

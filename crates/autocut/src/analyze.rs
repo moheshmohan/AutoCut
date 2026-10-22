@@ -619,6 +619,101 @@ pub fn sanitize_label_with(label: &str, kind: &str, subject: &str, read: &FrameT
     label.to_string()
 }
 
+/// What a clip's scene index (`media.scenes`, made by `media.analyzeScenes`) says about the
+/// subject: a moment at each shot's keyframes and edges, seen where the shot's description names
+/// the subject (in its subjects, caption or actions); the best moment — the keyframe of the
+/// best-scoring shot that shows it (sharp, exposed, steady, the aesthetic score), larger subject
+/// first; the subject's box there; the caption and setting; the text read in it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SceneFacts {
+    pub frames: Vec<FrameFact>,
+    pub best: f64,
+    pub subject: Option<[f64; 4]>,
+    pub label: String,
+    pub description: String,
+    pub text: Vec<String>,
+}
+
+/// Whether `words` name `subject` (a word of it, or its plural, starting a word: "robot" in
+/// "robotic arm", "robots", "Robot").
+fn names_subject(words: &str, subject: &str) -> bool {
+    let subject: Vec<String> = subject.split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 3).map(str::to_lowercase).collect();
+    let words: Vec<String> = words.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+    !subject.is_empty() && subject.iter().any(|s| words.iter().any(|w| w.starts_with(s.as_str()) || s.starts_with(w.as_str()) && w.len() >= 4))
+}
+
+/// Read a `media.scenes` answer for `subject`; `None` when the item has no described index or no
+/// shot of it names the subject (the vision model is asked then, as without an index).
+pub fn scene_facts(index: &Value, subject: &str) -> Option<SceneFacts> {
+    if index.get("analyzed") != Some(&Value::Bool(true)) || index["describer"].as_str().is_none_or(str::is_empty) {
+        return None;
+    }
+    let shots = index["shots"].as_array()?;
+    let num = |v: &Value| v.as_f64().filter(|x| x.is_finite());
+    let mut frames = Vec::new();
+    // (score, area, keyframe, box, shot)
+    let mut best: Option<(f64, f64, f64, Option<[f64; 4]>, &Value)> = None;
+    for sh in shots.iter().take(10_000) {
+        let (Some(a), Some(b)) = (num(&sh["start"]), num(&sh["end"])) else { continue };
+        if b <= a {
+            continue;
+        }
+        let d = &sh["description"];
+        let subjects: Vec<&Value> = d["subjects"].as_array().map(|v| v.iter().take(16).collect()).unwrap_or_default();
+        let named: Vec<&Value> = subjects.iter().copied().filter(|x| x["name"].as_str().is_some_and(|n| names_subject(n, subject))).collect();
+        let actions = d["actions"].as_array().map(|v| v.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+        let seen = !named.is_empty() || names_subject(&format!("{} {actions}", d["caption"].as_str().unwrap_or_default()), subject);
+        // the subject's box, `[x, y, w, h]` of the picture, as the describer gave it
+        let bbox = named.iter().find_map(|x| {
+            let v: Vec<f64> = x["box"].as_array()?.iter().filter_map(&num).collect();
+            let [x, y, w, h] = v.as_slice() else { return None };
+            ([*x, *y, *w, *h].iter().all(|c| (0.0..=1.0).contains(c)) && *w > 0.0 && *h > 0.0).then_some([*x, *y, *w, *h])
+        });
+        let area = bbox.map_or(if seen { 0.05 } else { 0.0 }, |b| b[2] * b[3]);
+        let center = bbox.map_or([0.5, 0.5], |b| [b[0] + b[2] / 2.0, b[1] + b[3] / 2.0]);
+        let key = sh["keyframes"].as_array().and_then(|k| k.first()).and_then(num).unwrap_or((a + b) / 2.0);
+        // the shot's edges (inside it) and its keyframes: the showcase cuts its windows there
+        let margin = ((b - a) * 0.1).min(0.2);
+        let mut times = vec![a + margin, key, b - margin];
+        times.extend(sh["keyframes"].as_array().map(|k| k.iter().filter_map(num).collect::<Vec<_>>()).unwrap_or_default());
+        times.sort_by(f64::total_cmp);
+        times.dedup_by(|x, y| (*x - *y).abs() < 0.05);
+        for t in times {
+            frames.push(FrameFact { seconds: t, present: seen && area >= MIN_AREA, area: if seen { area } else { 0.0 }, center });
+        }
+        if seen && area >= MIN_AREA {
+            let score = num(&sh["quality"]["score"]).unwrap_or(0.5).clamp(0.0, 1.0);
+            // a sharp, steady shot first, then the larger subject
+            let rank = score + 0.5 * bbox.map_or(0.0, |b| (b[2] * b[3]).min(0.5));
+            if best.is_none_or(|(r, ..)| rank > r) {
+                best = Some((rank, area, key, bbox, sh));
+            }
+        }
+    }
+    let (_, _, key, bbox, sh) = best?;
+    let d = &sh["description"];
+    let label = d["subjects"]
+        .as_array()
+        .and_then(|v| v.iter().filter_map(|x| x["name"].as_str()).find(|n| names_subject(n, subject)))
+        .unwrap_or(subject)
+        .chars()
+        .take(MAX_LABEL_CHARS)
+        .collect();
+    let caption = d["caption"].as_str().unwrap_or_default();
+    let setting = d["setting"].as_str().unwrap_or_default();
+    let description =
+        if setting.is_empty() || caption.to_lowercase().contains(&setting.to_lowercase()) { caption.to_string() } else { format!("{caption} ({setting})") };
+    let text = d["text"].as_array().map(|v| v.iter().filter_map(Value::as_str).filter_map(clean_line).collect()).unwrap_or_default();
+    frames.sort_by(|a, b| a.seconds.total_cmp(&b.seconds));
+    Some(SceneFacts { frames, best: key, subject: bbox, label, description: description.chars().take(300).collect(), text })
+}
+
+/// The scene index's facts for `item`, when there is one that names the subject.
+async fn scene_facts_of(ex: &dyn Executor, item: u64, subject: &str) -> Option<SceneFacts> {
+    let v = ex.execute("media.scenes", json!({"item": item})).await.ok()?;
+    scene_facts(&v, subject)
+}
+
 /// One clip: frames → grounding → text → description. The flag says every frame was read and
 /// every model call answered — only such an analysis is kept in the cache (one made while the
 /// model was down would say "not there" forever). A photo is one frame: located, read and
@@ -636,6 +731,12 @@ async fn analyze_clip(
     screen: usize,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(ClipFacts, bool), AutoCutError> {
+    // the scene index, when the clip has one that names the subject: its shots say where the
+    // subject is (no frame-by-frame grounding), the best shot where to look; the vision model
+    // still reads the text on it and names it
+    if !photo && let Some(sf) = scene_facts_of(ex, item, subject).await {
+        return Ok(from_scenes(model, ex, subject, item, name, seconds, sf, progress).await);
+    }
     let mut clean = true;
     let mut frames: Vec<FrameFact> = Vec::new();
     let mut pngs: Vec<(f64, f64, Vec<u8>)> = Vec::new(); // (area, seconds, png)
@@ -726,6 +827,59 @@ async fn analyze_clip(
         }
     }
     Ok((facts, clean))
+}
+
+/// A clip's facts from its scene index ([`SceneFacts`]): presence, moments, best moment and box
+/// from the index; then the vision model reads the text in the best frames and names the subject
+/// from them (as without an index). When it does not answer, the index's own words stand. The
+/// flag (cacheable) is true when the model answered.
+#[allow(clippy::too_many_arguments)]
+async fn from_scenes(
+    model: &dyn ChatModel,
+    ex: &dyn Executor,
+    subject: &str,
+    item: u64,
+    name: &str,
+    seconds: f64,
+    sf: SceneFacts,
+    progress: &mut dyn FnMut(&str),
+) -> (ClipFacts, bool) {
+    let shown = sf.frames.iter().filter(|f| f.present).count();
+    let coverage = if sf.frames.is_empty() { 0.0 } else { shown as f64 / sf.frames.len() as f64 };
+    let mut facts = ClipFacts {
+        item,
+        name: name.to_string(),
+        seconds,
+        present: true,
+        coverage,
+        label: sf.label.clone(),
+        description: sf.description.clone(),
+        text: FrameText { on_subject: Vec::new(), nearby: sf.text.iter().take(MAX_TEXT_LINES).cloned().collect() },
+        best: sf.best,
+        frames: sf.frames,
+        subject: sf.subject,
+        ..Default::default()
+    };
+    progress(&format!("  {name}: the scene index shows the {subject} ({shown} moment(s)); best at {:.1}s", facts.best));
+    let mut clean = true;
+    match read_clip_text(model, ex, subject, &facts, progress).await {
+        Some(read) => facts.text = read,
+        None => clean = false,
+    }
+    let mut imgs = Vec::new();
+    for t in best_times(&facts.frames, 3) {
+        if let Some(png) = frame_png(ex, item, t, 640).await {
+            imgs.push(png);
+        }
+    }
+    let (label, description) = (facts.label.clone(), facts.description.clone());
+    if imgs.is_empty() || describe(model, subject, &imgs, &mut facts).await.is_err() {
+        // the index's own words: a plain label (no invented names), its caption
+        facts.label = sanitize_label_with(&label, &facts.kind, subject, &facts.text);
+        facts.description = description;
+        clean = false;
+    }
+    (facts, clean)
 }
 
 /// The cache identity of each file-backed item (`media.status`): its Google Photos id or content
@@ -944,6 +1098,83 @@ pub(crate) mod testing {
 mod tests {
     use super::*;
     use crate::llm::FixedModel;
+
+    #[test]
+    fn scene_index_facts() {
+        let index = json!({
+            "analyzed": true, "describer": "qwen3-vl-2b",
+            "shots": [
+                {"start": 0.0, "end": 4.0, "keyframes": [2.0], "quality": {"score": 0.9},
+                 "description": {"caption": "A crowd in a hall.", "subjects": [{"name": "people", "box": [0, 0, 1, 1]}]}},
+                {"start": 4.0, "end": 10.0, "keyframes": [7.0], "quality": {"score": 0.6},
+                 "description": {"caption": "A white humanoid robot waves.", "setting": "an exhibition hall",
+                   "subjects": [{"name": "white humanoid robot", "box": [0.2, 0.1, 0.4, 0.8]}], "text": ["PEPPER"]}},
+                {"start": 10.0, "end": 12.0, "keyframes": [11.0], "quality": {"score": 0.5},
+                 "description": {"caption": "Robots line a stage.", "subjects": [{"name": "robots"}]}}
+            ]
+        });
+        let f = scene_facts(&index, "robot").unwrap();
+        // the best-scoring shot that shows the subject, its box's size counting in
+        assert_eq!(f.best, 7.0);
+        assert_eq!(f.subject, Some([0.2, 0.1, 0.4, 0.8]));
+        assert_eq!(f.label, "white humanoid robot");
+        assert_eq!(f.description, "A white humanoid robot waves. (an exhibition hall)");
+        assert_eq!(f.text, vec!["PEPPER"]);
+        // the crowd shot is unseen; moments at each shot's edges and keyframe
+        assert!(f.frames.iter().filter(|x| x.seconds < 4.0).all(|x| !x.present));
+        assert!(f.frames.iter().any(|x| x.present && (x.seconds - 7.0).abs() < 1e-9));
+        assert!(f.frames.windows(2).all(|w| w[0].seconds <= w[1].seconds));
+        // not described, not analysed, or the subject nowhere: the vision model is asked
+        assert!(scene_facts(&json!({"analyzed": true, "describer": "", "shots": []}), "robot").is_none());
+        assert!(scene_facts(&json!({"analyzed": false}), "robot").is_none());
+        assert!(scene_facts(&index, "giraffe").is_none());
+        // hostile shapes and numbers
+        let bad = json!({"analyzed": true, "describer": "x", "shots": [{"start": "a"}, {"start": 5, "end": 1}, {"start": 0, "end": 1e308,
+            "description": {"caption": "robot", "subjects": [{"name": "robot", "box": [2, -1, 0, 0]}]}}]});
+        let f = scene_facts(&bad, "robot").unwrap();
+        assert_eq!(f.subject, None);
+        assert!(f.frames.iter().all(|x| x.seconds.is_finite()));
+        assert!(names_subject("Robotic arm", "robot") && names_subject("two robots", "robots") && !names_subject("rob", "robot"));
+    }
+
+    #[tokio::test]
+    async fn a_scene_index_replaces_frame_by_frame_grounding() {
+        use crate::analyze::testing::FakeEx;
+        // an executor whose item 1 has a scene index showing a robot from 4 to 10 s
+        struct WithScenes(FakeEx);
+        impl Executor for WithScenes {
+            fn execute(&self, id: &str, p: Value) -> crate::ExecFuture {
+                if id == "media.scenes" {
+                    let v = json!({"analyzed": true, "describer": "qwen3-vl-2b", "shots": [
+                        {"start": 0.0, "end": 4.0, "keyframes": [2.0], "quality": {"score": 0.8}, "description": {"caption": "An empty hall."}},
+                        {"start": 4.0, "end": 10.0, "keyframes": [7.0], "quality": {"score": 0.8},
+                         "description": {"caption": "A robot dog walks.", "subjects": [{"name": "robot dog", "box": [0.3, 0.3, 0.4, 0.4]}]}}]});
+                    return Box::pin(async move { Ok(v) });
+                }
+                self.0.execute(id, p)
+            }
+        }
+        let ex = WithScenes(FakeEx::new(vec![(1, 10.0, 100)]));
+        // the model only reads text and describes: no grounding prompt reaches it
+        let model = crate::llm::FnModel::new("fake", |_, user, _| {
+            assert!(!user.starts_with("Is there a"), "no frame-by-frame grounding: {user}");
+            if user.starts_with("Read the text") {
+                Ok(json!({"on_subject": [], "nearby": []}))
+            } else {
+                Ok(json!({"label": "white robot dog", "kind": "quadruped", "description": "A white robot dog walks across a hall."}))
+            }
+        });
+        let facts = analyze(&model, &ex, "robot", None, 8, 0, &AnalysisCache::off(), &mut |_| {}).await.unwrap();
+        let f = &facts[0];
+        assert!(f.present);
+        assert_eq!(f.best, 7.0);
+        assert_eq!(f.subject, Some([0.3, 0.3, 0.4, 0.4]));
+        assert_eq!(f.label, "white robot dog");
+        assert!(f.frames.iter().any(|x| x.present) && f.frames.iter().any(|x| !x.present));
+        // the frames the model saw were the best ones, not a sweep of the clip
+        let asked: Vec<f64> = ex.0.frames.lock().unwrap().iter().map(|x| x.1).collect();
+        assert!(asked.iter().all(|t| *t > 4.0 && *t < 10.0), "{asked:?}");
+    }
 
     #[test]
     fn samples_skip_the_edges_and_are_capped() {
