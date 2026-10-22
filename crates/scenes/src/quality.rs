@@ -59,18 +59,23 @@ pub fn luma(rgba: &[u8], w: usize, h: usize, max_side: usize) -> Option<Luma> {
 
 /// The variance of the 4-neighbour Laplacian over the interior (0 for pictures under 3×3).
 pub fn laplacian_variance(l: &Luma) -> f32 {
-    if l.w < 3 || l.h < 3 || l.v.len() < l.w * l.h {
+    if l.w < 3 || l.h < 3 || l.w.checked_mul(l.h).is_none_or(|area| l.v.len() < area) {
         return 0.0;
     }
     let (mut s, mut s2, mut n) = (0f64, 0f64, 0f64);
-    for y in 1..l.h - 1 {
-        for x in 1..l.w - 1 {
-            let i = y * l.w + x;
-            let lap = f64::from(l.v[i - 1] + l.v[i + 1] + l.v[i - l.w] + l.v[i + l.w] - 4.0 * l.v[i]);
+    // each interior pixel with its neighbours: the row above, its own three, the row below
+    let rows = || l.v.chunks_exact(l.w).take(l.h);
+    for ((up, row), down) in rows().zip(rows().skip(1)).zip(rows().skip(2)) {
+        for ((three, u), d) in row.windows(3).zip(up.iter().skip(1)).zip(down.iter().skip(1)) {
+            let &[left, c, right] = three else { continue };
+            let lap = f64::from(left + right + u + d - 4.0 * c);
             s += lap;
             s2 += lap * lap;
             n += 1.0;
         }
+    }
+    if n == 0.0 {
+        return 0.0;
     }
     let mean = s / n;
     ((s2 / n - mean * mean).max(0.0)) as f32
@@ -119,18 +124,21 @@ pub fn global_shift(a: &Luma, b: &Luma, range: usize) -> Option<(f32, f32)> {
             let (x0, x1) = ((-dx).max(0), (w - dx).min(w));
             let (y0, y1) = ((-dy).max(0), (h - dy).min(h));
             let (mut sad, mut n) = (0f32, 0f32);
+            let len = usize::try_from(x1 - x0).unwrap_or(0);
             for y in y0..y1 {
-                let ra = (y * w) as usize;
-                let rb = ((y + dy) * w) as usize;
-                for x in x0..x1 {
-                    let va = a.v[ra + x as usize] - ma;
-                    let vb = b.v[rb + (x + dx) as usize] - mb;
-                    sad += (va - vb).abs();
+                // the overlapping parts of row y of a and row y + dy of b
+                let (Ok(ra), Ok(rb)) = (usize::try_from(y * w + x0), usize::try_from((y + dy) * w + x0 + dx)) else { continue };
+                let (Some(row_a), Some(row_b)) = (a.v.get(ra..ra + len), b.v.get(rb..rb + len)) else { continue };
+                for (va, vb) in row_a.iter().zip(row_b) {
+                    sad += ((va - ma) - (vb - mb)).abs();
                     n += 1.0;
                 }
             }
-            if n > 0.0 {
-                cost[((dy + r) as usize) * side + (dx + r) as usize] = sad / n;
+            let at = usize::try_from((dy + r) * side as isize + dx + r).ok();
+            if n > 0.0
+                && let Some(c) = at.and_then(|i| cost.get_mut(i))
+            {
+                *c = sad / n;
             }
         }
     }
@@ -146,7 +154,7 @@ pub fn global_shift(a: &Luma, b: &Luma, range: usize) -> Option<(f32, f32)> {
             _ => 0.0,
         }
     };
-    let c = cost[best];
+    let c = *cost.get(best)?;
     let fx = refine(if bx > 0 { cost.get(best - 1).copied() } else { None }, c, if bx + 1 < side { cost.get(best + 1).copied() } else { None });
     let fy = refine(if by > 0 { cost.get(best - side).copied() } else { None }, c, cost.get(best + side).copied().filter(|_| by + 1 < side));
     Some((bx as f32 - r as f32 + fx, by as f32 - r as f32 + fy))
@@ -166,11 +174,11 @@ pub fn camera_motion(shifts: &[(f32, f32)], fps: f64, width: usize) -> (CameraMo
     let speed = s.iter().map(|(x, y)| (x * x + y * y).sqrt()).sum::<f32>() / n * fps / w;
     // jitter about a 5-frame moving average
     let mut jitter = 0f32;
-    for i in 0..s.len() {
-        let (a, b) = (i.saturating_sub(2), (i + 3).min(s.len()));
-        let k = (b - a) as f32;
-        let (ax, ay) = (s[a..b].iter().map(|v| v.0).sum::<f32>() / k, s[a..b].iter().map(|v| v.1).sum::<f32>() / k);
-        jitter += ((s[i].0 - ax).powi(2) + (s[i].1 - ay).powi(2)).sqrt();
+    for (i, (x, y)) in s.iter().enumerate() {
+        let near = s.get(i.saturating_sub(2)..(i + 3).min(s.len())).unwrap_or_default();
+        let k = near.len().max(1) as f32;
+        let (ax, ay) = (near.iter().map(|v| v.0).sum::<f32>() / k, near.iter().map(|v| v.1).sum::<f32>() / k);
+        jitter += ((x - ax).powi(2) + (y - ay).powi(2)).sqrt();
     }
     jitter /= n;
     // a jitter of 1.2 % of the frame width each frame is as shaky as it gets

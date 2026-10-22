@@ -52,6 +52,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
+    if args.iter().any(|a| a == "--convs") {
+        // the two convolutions of TransNetV2's largest cell, timed alone
+        use candle_core::{DType, Tensor};
+        for dt in [DType::F32, DType::F16] {
+            let x = Tensor::randn(0f32, 1.0, (100, 64, 27, 48), &dev)?.to_dtype(dt)?;
+            let ws = Tensor::randn(0f32, 0.1, (32, 64, 3, 3), &dev)?.to_dtype(dt)?;
+            let wt = Tensor::randn(0f32, 0.1, (16, 32, 3), &dev)?.to_dtype(dt)?;
+            let s = x.conv2d(&ws, 1, 1, 1, 1)?;
+            dev.synchronize()?;
+            let t = Instant::now();
+            for _ in 0..10 {
+                let _ = x.conv2d(&ws, 1, 1, 1, 1)?;
+            }
+            dev.synchronize()?;
+            let spatial = t.elapsed().as_secs_f64() * 100.0;
+            let t = Instant::now();
+            for _ in 0..10 {
+                let series = s.reshape((100, 32, 27 * 48))?.permute((2, 1, 0))?.contiguous()?;
+                let y = series.conv1d(&wt, 4, 1, 4, 1)?;
+                let _ = y.permute((2, 1, 0))?.contiguous()?;
+            }
+            dev.synchronize()?;
+            let temporal = t.elapsed().as_secs_f64() * 100.0;
+            eprintln!("{dt:?}: spatial conv {spatial:.2} ms, temporal conv {temporal:.2} ms (one branch of 4)");
+        }
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--transnet") {
+        // TransNetV2 on 1000 synthetic frames: frames a second
+        let net = filmcraft_scenes::model::transnet::TransNet::load(&models.join(catalog::TRANSNET), &dev)?;
+        let frames: Vec<Vec<u8>> =
+            (0..1000u32).map(|k| (0..filmcraft_scenes::model::transnet::FRAME_BYTES).map(|i| ((i as u32 * 7 + k * 13) % 251) as u8).collect()).collect();
+        let _ = net.predict(&frames[..100], &|| false)?;
+        let t = Instant::now();
+        let p = net.predict(&frames, &|| false)?;
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!("transnet: {} frames in {secs:.2}s, {:.0} frames/s", p.len(), p.len() as f64 / secs);
+        return Ok(());
+    }
     let t = Instant::now();
     let mut vlm = Qwen3Vl::load(&models.join(&model), &model, &dev)?;
     eprintln!("{model} loaded in {:.1}s", t.elapsed().as_secs_f64());

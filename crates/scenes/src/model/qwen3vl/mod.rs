@@ -15,7 +15,6 @@ pub mod config;
 mod text;
 mod vision;
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use candle_core::{DType, Device, Tensor};
@@ -26,13 +25,37 @@ use super::{R, err};
 use crate::catalog;
 use config::Config;
 
-/// Take tensor `name` out of `w`, checking its shape.
-pub(crate) fn take(w: &mut HashMap<String, Tensor>, name: &str, shape: &[usize]) -> R<Tensor> {
-    let t = w.remove(name).ok_or_else(|| err(format!("Qwen3-VL: missing weight `{name}`")))?;
-    if t.dims() != shape {
-        return Err(err(format!("Qwen3-VL: weight `{name}` is {:?}, expected {shape:?}", t.dims())));
+/// The model's weights, read from its files one tensor at a time as the layers take them, so
+/// loading never holds a second copy of the model.
+pub(crate) struct Weights {
+    files: Vec<SafeTensors>,
+    dev: Device,
+    dtype: DType,
+}
+
+impl Weights {
+    /// Tensor `name` on `dev`, checked against `shape` before it is read.
+    fn read(&mut self, name: &str, shape: &[usize], dev: &Device) -> R<Tensor> {
+        let st = self.files.iter_mut().find(|f| f.contains(name)).ok_or_else(|| err(format!("Qwen3-VL: missing weight `{name}`")))?;
+        match st.shape(name) {
+            Some(s) if s == shape => st.load(name, dev, self.dtype),
+            s => Err(err(format!("Qwen3-VL: weight `{name}` is {s:?}, expected {shape:?}"))),
+        }
     }
-    Ok(t)
+}
+
+/// Tensor `name` of `w` on the model's device, checking its shape.
+pub(crate) fn take(w: &mut Weights, name: &str, shape: &[usize]) -> R<Tensor> {
+    let dev = w.dev.clone();
+    w.read(name, shape, &dev)
+}
+
+/// Weights of one input stacked into one matrix (`parts`: names and shapes): joined on the CPU
+/// before they go to the device, which then holds only the joined copy. (Joined there, candle's
+/// Metal buffer pool would keep the parts too: the model twice over while it loads.)
+pub(crate) fn take_stacked(w: &mut Weights, parts: &[(String, Vec<usize>)]) -> R<Tensor> {
+    let ts = parts.iter().map(|(n, s)| w.read(n, s, &Device::Cpu)).collect::<R<Vec<_>>>()?;
+    Tensor::cat(&ts, 0).and_then(|t| t.to_device(&w.dev)).map_err(err)
 }
 
 /// `l` applied to the rows of `x` as one matrix product. candle's `Linear` broadcasts its weight
@@ -59,6 +82,8 @@ const CACHE_LEN: usize = 1_024;
 /// Most shots decoded together, and keyframes per shot.
 pub const MAX_BATCH: usize = 16;
 pub const MAX_FRAMES: usize = 4;
+/// Patches the vision encoder takes in one pass.
+const VISION_PATCHES: usize = 4096;
 
 /// One frame: straight RGBA8, `w` × `h`.
 #[derive(Clone, Copy)]
@@ -159,11 +184,8 @@ impl Qwen3Vl {
             return Err(err(format!("{id}: the tokenizer and the config disagree on the picture tokens")));
         }
         let dtype = if dev.is_cpu() { DType::F32 } else { DType::BF16 };
-        let mut w = HashMap::new();
-        for f in m.files.iter().filter(|f| f.name.ends_with(".safetensors")) {
-            let mut st = SafeTensors::open(&dir.join(f.name))?;
-            st.load_prefixed(&["model.visual.", "model.language_model.", "lm_head."], dev, dtype, &mut w)?;
-        }
+        let files = m.files.iter().filter(|f| f.name.ends_with(".safetensors")).map(|f| SafeTensors::open(&dir.join(f.name))).collect::<R<Vec<_>>>()?;
+        let mut w = Weights { files, dev: dev.clone(), dtype };
         let vision = vision::Vision::load(&mut w, &cfg.vision, dtype, dev)?;
         let text = text::Text::load(&mut w, &cfg.text, CACHE_LEN, dtype, dev)?;
         Ok(Qwen3Vl { id: id.to_string(), cfg, vision, text, tok, dev: dev.clone(), special, prefix: None })
@@ -232,7 +254,26 @@ impl Qwen3Vl {
             vision::patchify(&img, vc.patch, vc.temporal, vc.merge, &mut px);
         }
         let patches = Tensor::from_vec(px, (b * nf * gh * gw, self.vision.patch_len()), &self.dev).map_err(err)?;
-        let enc = self.vision.forward(&patches, b * nf, gh, gw)?;
+        // the encoder's attention is per picture and quadratic in its patches: a few pictures at
+        // a time keep its memory bounded (about 4096 patches a pass)
+        let pics = b * nf;
+        let per_pass = (VISION_PATCHES / (gh * gw).max(1)).clamp(1, pics);
+        let mut toks = Vec::new();
+        let mut decks: Vec<Vec<Tensor>> = Vec::new();
+        let mut at = 0;
+        while at < pics {
+            let k = per_pass.min(pics - at);
+            let part = patches.narrow(0, at * gh * gw, k * gh * gw).map_err(err)?;
+            let e = self.vision.forward(&part, k, gh, gw)?;
+            toks.push(e.tokens);
+            decks.push(e.deepstack);
+            at += k;
+        }
+        let deepstack = (0..decks.first().map_or(0, Vec::len))
+            .map(|l| Tensor::cat(&decks.iter().filter_map(|d| d.get(l)).collect::<Vec<_>>(), 0))
+            .collect::<candle_core::Result<Vec<_>>>()
+            .map_err(err)?;
+        let enc = vision::Encoded { tokens: Tensor::cat(&toks, 0).map_err(err)?, deepstack };
         let hidden = self.cfg.text.hidden;
         let tokens = enc.tokens.reshape((b, nf, per_image, hidden)).map_err(err)?;
         let deep: Vec<Tensor> = enc.deepstack.iter().map(|d| d.reshape((b, nf, per_image, hidden))).collect::<candle_core::Result<_>>().map_err(err)?;
@@ -313,8 +354,7 @@ impl Qwen3Vl {
             t_wait += tw.elapsed().as_secs_f64();
             let th = std::time::Instant::now();
             let mut next = Vec::with_capacity(b);
-            for i in 0..b {
-                let so_far = out.get(i).map(Vec::as_slice).unwrap_or_default();
+            for (i, ((so_far, finished), state)) in out.iter_mut().zip(done.iter_mut()).zip(json.iter_mut()).enumerate() {
                 let best = top.get(i).copied().unwrap_or(sp.end_of_text);
                 let banned = banned_after(so_far, NO_REPEAT);
                 let id = if banned.contains(&best) {
@@ -323,21 +363,21 @@ impl Qwen3Vl {
                 } else {
                     best
                 };
-                if !done[i] {
+                if !*finished {
                     if id == sp.im_end || id == sp.end_of_text {
-                        done[i] = true;
+                        *finished = true;
                     } else {
-                        out[i].push(id);
+                        so_far.push(id);
                         generated += 1;
                         if let Some(piece) = self.tok.id_to_token(id) {
-                            json[i].feed(&piece);
+                            state.feed(&piece);
                         }
-                        if json[i].closed() || looping(&out[i]) {
-                            done[i] = true;
+                        if state.closed() || looping(so_far) {
+                            *finished = true;
                         }
                     }
                 }
-                next.push(if done[i] { sp.end_of_text } else { id });
+                next.push(if *finished { sp.end_of_text } else { id });
             }
             if done.iter().all(|d| *d) {
                 break;
@@ -382,14 +422,16 @@ fn pick(row: &[f32], so_far: &[u32], n: usize) -> u32 {
 
 /// The tokens that followed earlier occurrences of the answer's last `n - 1` tokens.
 fn banned_after(ids: &[u32], n: usize) -> Vec<u32> {
-    if n < 2 || ids.len() < n {
+    let Some(tail) = n.checked_sub(1).filter(|k| *k >= 1 && ids.len() >= n).and_then(|k| ids.len().checked_sub(k)).and_then(|s| ids.get(s..)) else {
         return Vec::new();
-    }
-    let tail = &ids[ids.len() - (n - 1)..];
+    };
     let mut out = Vec::new();
-    for i in 0..=ids.len() - n {
-        if ids[i..i + n - 1] == *tail && !out.contains(&ids[i + n - 1]) {
-            out.push(ids[i + n - 1]);
+    for w in ids.windows(n) {
+        if let Some((last, head)) = w.split_last()
+            && head == tail
+            && !out.contains(last)
+        {
+            out.push(*last);
         }
     }
     out
@@ -405,10 +447,20 @@ fn argmax(v: &[f32]) -> u32 {
     best.0 as u32
 }
 
-/// The answer is going round in circles: its last 24 tokens repeat the 24 before them.
+/// The answer is going round in circles: its last 24 tokens repeat the 24 before them, or its
+/// last three tokens came five times in its last 60 (a list of near-repeats: `"Woop", "Woot",
+/// "Wool", …`, which the n-gram ban does not catch). The answer is cut there; the JSON reader
+/// keeps what came before (the prompt asks for the lists last).
 fn looping(ids: &[u32]) -> bool {
     const N: usize = 24;
-    ids.len() >= 2 * N && ids[ids.len() - N..] == ids[ids.len() - 2 * N..ids.len() - N]
+    let last = ids.len().checked_sub(N).and_then(|i| ids.get(i..));
+    let before = ids.len().checked_sub(2 * N).and_then(|i| ids.get(i..i + N));
+    if last.is_some() && last == before {
+        return true;
+    }
+    let Some(tail) = ids.len().checked_sub(3).and_then(|i| ids.get(i..)) else { return false };
+    let recent = ids.get(ids.len().saturating_sub(60)..).unwrap_or_default();
+    recent.windows(3).filter(|w| *w == tail).count() >= 5
 }
 
 /// Whether a JSON object has been opened and closed again, following string quoting.
@@ -495,6 +547,14 @@ mod tests {
         v.extend(&cyc);
         v.extend(&cyc);
         assert!(looping(&v));
+        // near-repeats: `", "W` + something, five times
+        let mut w: Vec<u32> = (100..120).collect();
+        for k in 0..4 {
+            w.extend([7, 8, 9, 200 + k]);
+            assert!(!looping(&w), "{k}");
+        }
+        w.extend([7, 8, 9]);
+        assert!(looping(&w));
         assert_eq!(argmax(&[0.1, 3.0, f32::NAN, 2.0]), 1);
         assert_eq!(argmax(&[]), 0);
         // a repeated 3-gram is not completed again: [1 2 3] 1 2 → 3 is banned

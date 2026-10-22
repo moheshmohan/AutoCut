@@ -94,7 +94,9 @@ pub fn planar(img: &Rgb, mean: [f32; 3], std: [f32; 3]) -> Vec<f32> {
     for (i, p) in img.px.iter().enumerate().take(n) {
         for c in 0..3 {
             let s = if std[c].abs() > 1e-6 { std[c] } else { 1.0 };
-            out[c * n + i] = (p[c] / 255.0 - mean[c]) / s;
+            if let Some(o) = out.get_mut(c * n + i) {
+                *o = (p[c] / 255.0 - mean[c]) / s;
+            }
         }
     }
     out

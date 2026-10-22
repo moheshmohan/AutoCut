@@ -8,14 +8,12 @@
 //! Patches come in merge order — for each 2×2 block in raster order, its four patches in raster
 //! order — so the merger's 2×2 groups are four consecutive rows.
 
-use std::collections::HashMap;
-
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{LayerNorm, Linear, Module};
 
 use super::super::{R, err};
 use super::config::VisionConfig;
-use super::{apply, take};
+use super::{Weights, apply, take};
 
 const LN_EPS: f64 = 1e-6;
 const ROPE_THETA: f64 = 10_000.0;
@@ -50,15 +48,15 @@ pub struct Vision {
     dev: Device,
 }
 
-fn layer_norm(w: &mut HashMap<String, Tensor>, name: &str, n: usize) -> R<LayerNorm> {
+fn layer_norm(w: &mut Weights, name: &str, n: usize) -> R<LayerNorm> {
     Ok(LayerNorm::new(take(w, &format!("{name}.weight"), &[n])?, take(w, &format!("{name}.bias"), &[n])?, LN_EPS))
 }
 
-fn linear(w: &mut HashMap<String, Tensor>, name: &str, out: usize, inp: usize) -> R<Linear> {
+fn linear(w: &mut Weights, name: &str, out: usize, inp: usize) -> R<Linear> {
     Ok(Linear::new(take(w, &format!("{name}.weight"), &[out, inp])?, Some(take(w, &format!("{name}.bias"), &[out])?)))
 }
 
-fn merger(w: &mut HashMap<String, Tensor>, name: &str, c: &VisionConfig, post: bool) -> R<Merger> {
+fn merger(w: &mut Weights, name: &str, c: &VisionConfig, post: bool) -> R<Merger> {
     let wide = c.hidden * c.merge * c.merge;
     Ok(Merger {
         norm: layer_norm(w, &format!("{name}.norm"), if post { wide } else { c.hidden })?,
@@ -91,7 +89,7 @@ pub struct Encoded {
 
 impl Vision {
     /// Build from the weights named `model.visual.*` (taken out of `w`).
-    pub fn load(w: &mut HashMap<String, Tensor>, cfg: &VisionConfig, dtype: DType, dev: &Device) -> R<Vision> {
+    pub fn load(w: &mut Weights, cfg: &VisionConfig, dtype: DType, dev: &Device) -> R<Vision> {
         let p = "model.visual";
         let c = cfg;
         let k = 3 * c.temporal * c.patch * c.patch;
@@ -194,15 +192,17 @@ impl Vision {
             for (k, (yy, xx, w)) in
                 [(y0, x0, (1.0 - dy) * (1.0 - dx)), (y0, x1, (1.0 - dy) * dx), (y1, x0, dy * (1.0 - dx)), (y1, x1, dy * dx)].into_iter().enumerate()
             {
-                idx[k].push((yy * g + xx) as u32);
-                wt[k].push(w);
+                if let (Some(iv), Some(wv)) = (idx.get_mut(k), wt.get_mut(k)) {
+                    iv.push((yy * g + xx) as u32);
+                    wv.push(w);
+                }
             }
         }
         let s = gh * gw;
         let mut acc: Option<Tensor> = None;
-        for k in 0..4 {
-            let i = Tensor::from_vec(std::mem::take(&mut idx[k]), s, &self.dev).map_err(err)?;
-            let w = Tensor::from_vec(std::mem::take(&mut wt[k]), (s, 1), &self.dev).and_then(|w| w.to_dtype(self.dtype)).map_err(err)?;
+        for (iv, wv) in idx.iter_mut().zip(wt.iter_mut()) {
+            let i = Tensor::from_vec(std::mem::take(iv), s, &self.dev).map_err(err)?;
+            let w = Tensor::from_vec(std::mem::take(wv), (s, 1), &self.dev).and_then(|w| w.to_dtype(self.dtype)).map_err(err)?;
             let rows = self.pos.index_select(&i, 0).and_then(|r| r.broadcast_mul(&w)).map_err(err)?;
             acc = Some(match acc {
                 Some(a) => (a + rows).map_err(err)?,
@@ -235,7 +235,7 @@ impl Vision {
     }
 }
 
-fn merger_at(w: &mut HashMap<String, Tensor>, p: &str, i: usize, c: &VisionConfig) -> R<Merger> {
+fn merger_at(w: &mut Weights, p: &str, i: usize, c: &VisionConfig) -> R<Merger> {
     merger(w, &format!("{p}.deepstack_merger_list.{i}"), c, true)
 }
 

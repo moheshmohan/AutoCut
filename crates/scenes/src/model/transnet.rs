@@ -8,13 +8,17 @@
 //! concatenated and batch-normalised — each block with a residual connection and a 1×2×2 average
 //! pool; then the flattened features, a learned frame-similarity matrix of the blocks' mean
 //! features and an RGB-histogram similarity matrix (each read in a ±50-frame window) go through a
-//! dense layer to one transition probability per frame. The 3-D convolutions factorise: the
-//! spatial one is a per-frame `conv2d`, the temporal one a per-pixel dilated `conv1d`.
+//! dense layer to one transition probability per frame.
+//!
+//! Everything is kept channels-last (`[frames, height, width, channels]`, TensorFlow's layout),
+//! and both convolutions are one matrix product each over shifted copies of the input: the
+//! spatial one over the nine 3×3 neighbours, the temporal one over the frames `−d, 0, +d` away.
+//! TensorFlow's kernels are already in that order, so they are used as they are. (candle's own
+//! `conv2d` on Metal ran this network eight times slower.)
 
 use std::path::Path;
 
 use candle_core::{D, DType, Device, Tensor};
-use candle_nn::{Conv1dConfig, Conv2dConfig};
 
 use super::tfckpt::Checkpoint;
 use super::{R, err};
@@ -29,20 +33,18 @@ pub const FRAME_BYTES: usize = WIDTH * HEIGHT * 3;
 /// The similarity windows: ±50 frames.
 const LOOKUP: usize = 101;
 const BN_EPS: f64 = 1e-3;
-/// Frames a spatial convolution runs on at once (bounds its im2col buffer).
-const CONV_CHUNK: usize = 25;
 
 struct Branch {
-    /// `[2F, in, 3, 3]`
+    /// `[9 · in, 2F]`: the 3×3 neighbours (row by row) of every input channel.
     spatial: Tensor,
-    /// `[F, 2F, 3]`
+    /// `[3 · 2F, F]`: the frames `−d, 0, +d` away.
     temporal: Tensor,
     dilation: usize,
 }
 
 struct Cell {
     branches: Vec<Branch>,
-    /// Batch norm folded into a per-channel scale and shift, `[1, 4F, 1, 1]`.
+    /// Batch norm folded into a per-channel scale and shift, `[4F]`.
     scale: Tensor,
     shift: Tensor,
     relu: bool,
@@ -76,6 +78,7 @@ impl Dense {
 /// The network, loaded.
 pub struct TransNet {
     dev: Device,
+    dtype: DType,
     blocks: Vec<Block>,
     sim_proj: Dense,
     sim_fc: Dense,
@@ -94,12 +97,14 @@ impl TransNet {
         let m = catalog::find(catalog::TRANSNET).ok_or_else(|| err("TransNetV2 is not in the catalogue"))?;
         let (Some(index), Some(data)) = (m.files.first(), m.files.get(1)) else { return Err(err("TransNetV2's catalogue entry is incomplete")) };
         let c = Checkpoint::open(&dir.join(index.name), &dir.join(data.name))?;
+        // the convolutions in half precision on the GPU (they are memory-bound), f32 on the CPU
+        let dtype = if dev.is_cpu() { DType::F32 } else { DType::F16 };
         let mut blocks = Vec::new();
         let mut inp = 3;
         for b in 0..BLOCKS {
             let f = F << b;
-            let first = cell(&c, b + 1, 1, inp, f, true, dev)?;
-            let second = cell(&c, b + 1, 2, 4 * f, f, false, dev)?;
+            let first = cell(&c, b + 1, 1, inp, f, true, dev, dtype)?;
+            let second = cell(&c, b + 1, 2, 4 * f, f, false, dev, dtype)?;
             blocks.push(Block { first, second });
             inp = 4 * f;
         }
@@ -107,6 +112,7 @@ impl TransNet {
         let flat = 4 * (F << (BLOCKS - 1)) * 3 * 6;
         Ok(TransNet {
             dev: dev.clone(),
+            dtype,
             blocks,
             sim_proj: Dense::load(&c, "TransNet/FrameSimilarity/dense_3", feats, 128, dev)?,
             sim_fc: Dense::load(&c, "TransNet/FrameSimilarity/dense_4", LOOKUP, 128, dev)?,
@@ -149,24 +155,23 @@ impl TransNet {
         let t = frames.len();
         let mut px = Vec::with_capacity(t * FRAME_BYTES);
         for f in frames {
-            // HWC → CHW per frame, 0..1
-            for c in 0..3 {
-                for i in 0..WIDTH * HEIGHT {
-                    px.push(f32::from(f.get(i * 3 + c).copied().unwrap_or(0)) / 255.0);
-                }
-            }
+            px.extend(f.iter().map(|v| f32::from(*v) / 255.0));
         }
-        let mut x = Tensor::from_vec(px, (t, 3, HEIGHT, WIDTH), &self.dev).map_err(err)?;
+        // frames, height, width, channels
+        let mut x = Tensor::from_vec(px, (t, HEIGHT, WIDTH, 3), &self.dev).and_then(|x| x.to_dtype(self.dtype)).map_err(err)?;
         let mut feats = Vec::new();
+        let (mut h, mut w) = (HEIGHT, WIDTH);
         for b in &self.blocks {
-            let first = b.first.forward(&x, t)?;
-            let second = b.second.forward(&first, t)?;
+            let masks = edge_masks(t, h, w, self.dtype, &self.dev)?;
+            let first = b.first.forward(&x, &masks)?;
+            let second = b.second.forward(&first, &masks)?;
+            (h, w) = (h / 2, w / 2);
             let y = (second.relu().map_err(err)? + &first).map_err(err)?;
-            x = y.avg_pool2d(2).map_err(err)?;
-            feats.push(x.mean(D::Minus1).and_then(|m| m.mean(D::Minus1)).map_err(err)?);
+            x = avg_pool(&y)?;
+            feats.push(spatial_mean(&x)?);
         }
         // the learned frame similarity of the blocks' mean features
-        let f = Tensor::cat(&feats, 1).map_err(err)?;
+        let f = Tensor::cat(&feats, 1).and_then(|f| f.to_dtype(DType::F32)).map_err(err)?;
         let p = self.sim_proj.forward(&f)?;
         let norm = p.sqr().and_then(|s| s.sum_keepdim(1)).and_then(|s| s.clamp(1e-12, f64::MAX)).and_then(|s| s.sqrt()).map_err(err)?;
         let p = p.broadcast_div(&norm).map_err(err)?;
@@ -178,7 +183,7 @@ impl TransNet {
         let hist_w = Tensor::from_vec(windowed(&hist), (t, LOOKUP), &self.dev).map_err(err)?;
         let hist_f = self.hist_fc.forward(&hist_w)?.relu().map_err(err)?;
         // the last block's features, flattened channels last (as the TensorFlow model does)
-        let flat = x.permute((0, 2, 3, 1)).and_then(|v| v.contiguous()).and_then(|v| v.flatten_from(1)).map_err(err)?;
+        let flat = x.flatten_from(1).and_then(|f| f.to_dtype(DType::F32)).map_err(err)?;
         let all = Tensor::cat(&[&hist_f, &sim_f, &flat], 1).map_err(err)?;
         let h = self.fc1.forward(&all)?.relu().map_err(err)?;
         let logits = self.cls.forward(&h)?;
@@ -191,15 +196,17 @@ impl TransNet {
     }
 }
 
-fn cell(c: &Checkpoint, block: usize, cell: usize, inp: usize, f: usize, relu: bool, dev: &Device) -> R<Cell> {
+fn cell(c: &Checkpoint, block: usize, cell: usize, inp: usize, f: usize, relu: bool, dev: &Device, dtype: DType) -> R<Cell> {
     let base = format!("TransNet/SDDCNN_{block}/DDCNN_{cell}");
     let mut branches = Vec::new();
     for (k, dilation) in [(1usize, 1usize), (2, 2), (4, 4), (8, 8)] {
+        // TensorFlow's [1, 3, 3, in, out] and [3, 1, 1, in, out] are already rows of
+        // (neighbour, input channel): the matrices as they are
         let s = c.load(&format!("{base}/Conv3D_{k}/conv_spatial/kernel"), &[1, 3, 3, inp, 2 * f])?;
         let t = c.load(&format!("{base}/Conv3D_{k}/conv_temporal/kernel"), &[3, 1, 1, 2 * f, f])?;
         branches.push(Branch {
-            spatial: Tensor::from_vec(spatial_kernel(&s, inp, 2 * f), (2 * f, inp, 3, 3), dev).map_err(err)?,
-            temporal: Tensor::from_vec(temporal_kernel(&t, 2 * f, f), (f, 2 * f, 3), dev).map_err(err)?,
+            spatial: Tensor::from_vec(s, (9 * inp, 2 * f), dev).and_then(|w| w.to_dtype(dtype)).map_err(err)?,
+            temporal: Tensor::from_vec(t, (3 * 2 * f, f), dev).and_then(|w| w.to_dtype(dtype)).map_err(err)?,
             dilation,
         });
     }
@@ -210,85 +217,118 @@ fn cell(c: &Checkpoint, block: usize, cell: usize, inp: usize, f: usize, relu: b
     let v = c.load(&format!("{base}/bn/moving_variance"), &[n])?;
     let scale: Vec<f32> = g.iter().zip(&v).map(|(g, v)| (f64::from(*g) / (f64::from(*v) + BN_EPS).max(1e-12).sqrt()) as f32).collect();
     let shift: Vec<f32> = b.iter().zip(&m).zip(&scale).map(|((b, m), s)| b - m * s).collect();
-    Ok(Cell {
-        branches,
-        scale: Tensor::from_vec(scale, (1, n, 1, 1), dev).map_err(err)?,
-        shift: Tensor::from_vec(shift, (1, n, 1, 1), dev).map_err(err)?,
-        relu,
-    })
-}
-
-/// TensorFlow's `[1, 3, 3, in, out]` → candle's `[out, in, 3, 3]`.
-pub(crate) fn spatial_kernel(k: &[f32], inp: usize, out: usize) -> Vec<f32> {
-    let mut w = vec![0f32; out * inp * 9];
-    for ky in 0..3 {
-        for kx in 0..3 {
-            for i in 0..inp {
-                for o in 0..out {
-                    if let (Some(d), Some(s)) = (w.get_mut(((o * inp + i) * 3 + ky) * 3 + kx), k.get(((ky * 3 + kx) * inp + i) * out + o)) {
-                        *d = *s;
-                    }
-                }
-            }
-        }
-    }
-    w
-}
-
-/// TensorFlow's `[3, 1, 1, in, out]` → candle's `[out, in, 3]`.
-pub(crate) fn temporal_kernel(k: &[f32], inp: usize, out: usize) -> Vec<f32> {
-    let mut w = vec![0f32; out * inp * 3];
-    for t in 0..3 {
-        for i in 0..inp {
-            for o in 0..out {
-                if let (Some(d), Some(s)) = (w.get_mut((o * inp + i) * 3 + t), k.get((t * inp + i) * out + o)) {
-                    *d = *s;
-                }
-            }
-        }
-    }
-    w
+    let t = |v: Vec<f32>| Tensor::from_vec(v, n, dev).and_then(|t| t.to_dtype(dtype)).map_err(err);
+    Ok(Cell { branches, scale: t(scale)?, shift: t(shift)?, relu })
 }
 
 impl Cell {
-    /// `x [t, in, h, w]` → `[t, 4F, h, w]`.
-    fn forward(&self, x: &Tensor, t: usize) -> R<Tensor> {
+    /// `x [t, h, w, in]` → `[t, h, w, 4F]`.
+    fn forward(&self, x: &Tensor, masks: &[Tensor]) -> R<Tensor> {
         let mut outs = Vec::with_capacity(self.branches.len());
         for b in &self.branches {
-            let s = spatial(x, &b.spatial)?;
-            outs.push(temporal(&s, &b.temporal, b.dilation, t)?);
+            let s = spatial(x, &b.spatial, masks)?;
+            outs.push(temporal(&s, &b.temporal, b.dilation)?);
         }
-        let y = Tensor::cat(&outs, 1).and_then(|y| y.broadcast_mul(&self.scale)).and_then(|y| y.broadcast_add(&self.shift)).map_err(err)?;
+        let y = Tensor::cat(&outs, D::Minus1).and_then(|y| y.broadcast_mul(&self.scale)).and_then(|y| y.broadcast_add(&self.shift)).map_err(err)?;
         if self.relu { y.relu().map_err(err) } else { Ok(y) }
     }
 }
 
-/// The 1×3×3 convolution ("same" padding) of every frame.
-pub(crate) fn spatial(x: &Tensor, w: &Tensor) -> R<Tensor> {
-    let cfg = Conv2dConfig { padding: 1, stride: 1, dilation: 1, groups: 1, cudnn_fwd_algo: None };
-    let n = x.dim(0).map_err(err)?;
-    let mut parts = Vec::new();
-    let mut at = 0;
-    while at < n {
-        let k = CONV_CHUNK.min(n - at);
-        parts.push(x.narrow(0, at, k).and_then(|c| c.conv2d(w, cfg.padding, cfg.stride, cfg.dilation, cfg.groups)).map_err(err)?);
-        at += k;
+/// The nine 3×3 neighbour taps of a `t`×`h`×`w` grid of pixels: for each, a column `[t·h·w, 1]`
+/// that is 1 where the neighbour is inside the frame and 0 where it falls off an edge.
+pub(crate) fn edge_masks(t: usize, h: usize, w: usize, dtype: DType, dev: &Device) -> R<Vec<Tensor>> {
+    let mut out = Vec::with_capacity(9);
+    for ky in 0..3usize {
+        for kx in 0..3usize {
+            let mut m = Vec::with_capacity(t * h * w);
+            for _ in 0..t {
+                for y in 0..h {
+                    for x in 0..w {
+                        let inside = (y + ky >= 1) && (y + ky - 1 < h) && (x + kx >= 1) && (x + kx - 1 < w);
+                        m.push(if inside { 1f32 } else { 0.0 });
+                    }
+                }
+            }
+            out.push(Tensor::from_vec(m, (t * h * w, 1), dev).and_then(|m| m.to_dtype(dtype)).map_err(err)?);
+        }
     }
-    Tensor::cat(&parts, 0).map_err(err)
+    Ok(out)
 }
 
-/// The 3×1×1 convolution over time, dilated by `d` ("same" padding): `x [t, c, h, w]` →
-/// `[t, out, h, w]`, as a `conv1d` over each pixel's time series.
-pub(crate) fn temporal(x: &Tensor, w: &Tensor, d: usize, t: usize) -> R<Tensor> {
-    let (n, c, h, wd) = x.dims4().map_err(err)?;
-    let out = w.dim(0).map_err(err)?;
-    if n != t {
-        return Err(err("TransNetV2: frame count mismatch"));
+/// The 1×3×3 convolution ("same" padding) of every frame, channels last: `x [t, h, w, in]` and
+/// `k [9 · in, out]` → `[t, h, w, out]`. The frames are rows of `in` values; a neighbour is the
+/// same rows shifted by `±w ± 1`, so each tap is one matrix product over a shifted view of the
+/// (zero-padded) rows, its wrap across a frame's edge masked off ([`edge_masks`]): no copy of
+/// the input per tap.
+pub(crate) fn spatial(x: &Tensor, k: &Tensor, masks: &[Tensor]) -> R<Tensor> {
+    let (t, h, w, c) = x.dims4().map_err(err)?;
+    let out = k.dim(1).map_err(err)?;
+    let n = t * h * w;
+    if masks.len() != 9 {
+        return Err(err("TransNetV2: missing edge masks"));
     }
-    let cfg = Conv1dConfig { padding: d, stride: 1, dilation: d, groups: 1, cudnn_fwd_algo: None };
-    let series = x.reshape((t, c, h * wd)).and_then(|v| v.permute((2, 1, 0))).and_then(|v| v.contiguous()).map_err(err)?;
-    let y = series.conv1d(w, cfg.padding, cfg.stride, cfg.dilation, cfg.groups).map_err(err)?;
-    y.permute((2, 1, 0)).and_then(|v| v.contiguous()).and_then(|v| v.reshape((t, out, h, wd))).map_err(err)
+    let pad = w + 1;
+    let p = x.contiguous().and_then(|v| v.reshape((n, c))).and_then(|v| v.pad_with_zeros(0, pad, pad)).map_err(err)?;
+    let mut acc: Option<Tensor> = None;
+    for ky in 0..3 {
+        for kx in 0..3 {
+            let tap = ky * 3 + kx;
+            let y = p.narrow(0, ky * w + kx, n).and_then(|v| v.matmul(&k.narrow(0, tap * c, c)?)).map_err(err)?;
+            let y = if tap == 4 {
+                y
+            } else {
+                let mask = masks.get(tap).ok_or_else(|| err("TransNetV2: missing an edge mask"))?;
+                y.broadcast_mul(mask).map_err(err)?
+            };
+            acc = Some(match acc {
+                Some(a) => (a + y).map_err(err)?,
+                None => y,
+            });
+        }
+    }
+    acc.ok_or_else(|| err("TransNetV2: empty convolution"))?.reshape((t, h, w, out)).map_err(err)
+}
+
+/// The 3×1×1 convolution over time, dilated by `d` ("same" padding), channels last:
+/// `x [t, h, w, in]` and `k [3 · in, out]` → `[t, h, w, out]`; a frame `±d` away is the rows
+/// shifted by `±d · h · w` (zero past the ends), one matrix product a tap.
+pub(crate) fn temporal(x: &Tensor, k: &Tensor, d: usize) -> R<Tensor> {
+    let (t, h, w, c) = x.dims4().map_err(err)?;
+    let out = k.dim(1).map_err(err)?;
+    let (n, hw) = (t * h * w, h * w);
+    let p = x.contiguous().and_then(|v| v.reshape((n, c))).and_then(|v| v.pad_with_zeros(0, d * hw, d * hw)).map_err(err)?;
+    let mut acc: Option<Tensor> = None;
+    for tap in 0..3 {
+        let y = p.narrow(0, tap * d * hw, n).and_then(|v| v.matmul(&k.narrow(0, tap * c, c)?)).map_err(err)?;
+        acc = Some(match acc {
+            Some(a) => (a + y).map_err(err)?,
+            None => y,
+        });
+    }
+    acc.ok_or_else(|| err("TransNetV2: empty convolution"))?.reshape((t, h, w, out)).map_err(err)
+}
+
+/// The 1×2×2 average pool (a trailing odd row or column is dropped), channels last. Written with
+/// reshapes, slices and sums only: candle 0.9's Metal reductions over a middle axis of a
+/// many-axis tensor gave wrong sums.
+fn avg_pool(x: &Tensor) -> R<Tensor> {
+    let (t, h, w, c) = x.dims4().map_err(err)?;
+    let (h2, w2) = (h / 2, w / 2);
+    let x = x.narrow(1, 0, 2 * h2).and_then(|v| v.narrow(2, 0, 2 * w2)).and_then(|v| v.contiguous()).map_err(err)?;
+    // neighbouring columns are neighbouring runs of `c` values
+    let cols = x.reshape((t, 2 * h2, w2, 2 * c)).map_err(err)?;
+    let x = (cols.narrow(3, 0, c).map_err(err)? + cols.narrow(3, c, c).map_err(err)?).map_err(err)?;
+    // neighbouring rows are neighbouring runs of `w2 · c` values
+    let rows = x.contiguous().and_then(|v| v.reshape((t, h2, 2 * w2 * c))).map_err(err)?;
+    let x = (rows.narrow(2, 0, w2 * c).map_err(err)? + rows.narrow(2, w2 * c, w2 * c).map_err(err)?).map_err(err)?;
+    (x * 0.25).and_then(|v| v.reshape((t, h2, w2, c))).map_err(err)
+}
+
+/// The mean over height and width of `x [t, h, w, c]` → `[t, c]`, reduced along the last axis
+/// (see [`avg_pool`]).
+fn spatial_mean(x: &Tensor) -> R<Tensor> {
+    let (t, h, w, c) = x.dims4().map_err(err)?;
+    x.reshape((t, h * w, c)).and_then(|v| v.transpose(1, 2)).and_then(|v| v.contiguous()).and_then(|v| v.mean(D::Minus1)).map_err(err)
 }
 
 /// Each frame's similarities to the frames ±50 around it (0 past the ends), `[t · 101]`.
@@ -299,8 +339,11 @@ pub(crate) fn windowed(sim: &[Vec<f32>]) -> Vec<f32> {
     for i in 0..t {
         for l in 0..LOOKUP {
             let j = i + l;
-            if j >= half && j - half < t {
-                out[i * LOOKUP + l] = sim.get(i).and_then(|r| r.get(j - half)).copied().unwrap_or(0.0);
+            if j >= half
+                && j - half < t
+                && let Some(o) = out.get_mut(i * LOOKUP + l)
+            {
+                *o = sim.get(i).and_then(|r| r.get(j - half)).copied().unwrap_or(0.0);
             }
         }
     }
@@ -315,7 +358,9 @@ pub(crate) fn histogram_similarity(frames: &[&[u8]]) -> Vec<Vec<f32>> {
             let mut h = vec![0f32; 512];
             for p in f.as_chunks::<3>().0 {
                 let bin = (usize::from(p[0] >> 5) << 6) | (usize::from(p[1] >> 5) << 3) | usize::from(p[2] >> 5);
-                h[bin] += 1.0;
+                if let Some(v) = h.get_mut(bin) {
+                    *v += 1.0;
+                }
             }
             let n = h.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
             h.iter_mut().for_each(|v| *v /= n);
@@ -340,31 +385,18 @@ mod tests {
     }
 
     #[test]
-    fn kernels_reorder_like_the_reference() {
-        let (inp, out) = (2, 3);
-        let k = rnd(9 * inp * out, 1);
-        let w = spatial_kernel(&k, inp, out);
-        // TF [0, ky, kx, i, o] == candle [o, i, ky, kx]
-        let (o, i, ky, kx) = (2, 1, 2, 0);
-        assert_eq!(w[((o * inp + i) * 3 + ky) * 3 + kx], k[((ky * 3 + kx) * inp + i) * out + o]);
-        let k = rnd(3 * inp * out, 2);
-        let w = temporal_kernel(&k, inp, out);
-        let (o, i, tap) = (1, 0, 2);
-        assert_eq!(w[(o * inp + i) * 3 + tap], k[(tap * inp + i) * out + o]);
-    }
-
-    #[test]
     fn temporal_convolution_matches_loops() {
         let dev = super::super::device();
-        let (t, c, h, w, o, d) = (11, 3, 2, 3, 4, 2);
-        let x = rnd(t * c * h * w, 3);
-        let k = rnd(o * c * 3, 4);
-        let xt = Tensor::from_vec(x.clone(), (t, c, h, w), &dev).unwrap();
-        let kt = Tensor::from_vec(k.clone(), (o, c, 3), &dev).unwrap();
-        let y: Vec<f32> = temporal(&xt, &kt, d, t).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        let (t, h, w, c, o, d) = (11, 2, 3, 3, 4, 2);
+        let x = rnd(t * h * w * c, 3);
+        // TensorFlow's [3, 1, 1, in, out]
+        let k = rnd(3 * c * o, 4);
+        let xt = Tensor::from_vec(x.clone(), (t, h, w, c), &dev).unwrap();
+        let kt = Tensor::from_vec(k.clone(), (3 * c, o), &dev).unwrap();
+        let y: Vec<f32> = temporal(&xt, &kt, d).unwrap().flatten_all().unwrap().to_vec1().unwrap();
         for ti in 0..t {
-            for oi in 0..o {
-                for p in 0..h * w {
+            for p in 0..h * w {
+                for oi in 0..o {
                     let mut acc = 0f32;
                     for tap in 0..3 {
                         let src = ti as isize + (tap as isize - 1) * d as isize;
@@ -372,11 +404,11 @@ mod tests {
                             continue;
                         }
                         for ci in 0..c {
-                            acc += k[(oi * c + ci) * 3 + tap] * x[(src as usize * c + ci) * h * w + p];
+                            acc += k[(tap * c + ci) * o + oi] * x[(src as usize * h * w + p) * c + ci];
                         }
                     }
-                    let got = y[(ti * o + oi) * h * w + p];
-                    assert!((got - acc).abs() < 1e-4, "t{ti} o{oi} p{p}: {got} vs {acc}");
+                    let got = y[(ti * h * w + p) * o + oi];
+                    assert!((got - acc).abs() < 1e-4, "t{ti} p{p} o{oi}: {got} vs {acc}");
                 }
             }
         }
@@ -385,34 +417,45 @@ mod tests {
     #[test]
     fn spatial_convolution_matches_loops() {
         let dev = super::super::device();
-        let (t, c, h, w, o) = (30, 2, 4, 5, 3);
-        let x = rnd(t * c * h * w, 5);
-        let k = rnd(o * c * 9, 6);
-        let xt = Tensor::from_vec(x.clone(), (t, c, h, w), &dev).unwrap();
-        let kt = Tensor::from_vec(k.clone(), (o, c, 3, 3), &dev).unwrap();
-        let y: Vec<f32> = spatial(&xt, &kt).unwrap().flatten_all().unwrap().to_vec1().unwrap();
-        for ti in [0, 17, 29] {
-            for oi in 0..o {
-                for yy in 0..h {
-                    for xx in 0..w {
+        let (t, h, w, c, o) = (3, 4, 5, 2, 3);
+        let x = rnd(t * h * w * c, 5);
+        // TensorFlow's [1, 3, 3, in, out]
+        let k = rnd(9 * c * o, 6);
+        let xt = Tensor::from_vec(x.clone(), (t, h, w, c), &dev).unwrap();
+        let kt = Tensor::from_vec(k.clone(), (9 * c, o), &dev).unwrap();
+        let masks = edge_masks(t, h, w, DType::F32, &dev).unwrap();
+        let y: Vec<f32> = spatial(&xt, &kt, &masks).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        for ti in 0..t {
+            for yy in 0..h {
+                for xx in 0..w {
+                    for oi in 0..o {
                         let mut acc = 0f32;
-                        for ci in 0..c {
-                            for ky in 0..3 {
-                                for kx in 0..3 {
-                                    let (sy, sx) = (yy as isize + ky as isize - 1, xx as isize + kx as isize - 1);
-                                    if sy < 0 || sx < 0 || sy >= h as isize || sx >= w as isize {
-                                        continue;
-                                    }
-                                    acc += k[((oi * c + ci) * 3 + ky) * 3 + kx] * x[((ti * c + ci) * h + sy as usize) * w + sx as usize];
+                        for ky in 0..3 {
+                            for kx in 0..3 {
+                                let (sy, sx) = (yy as isize + ky as isize - 1, xx as isize + kx as isize - 1);
+                                if sy < 0 || sx < 0 || sy >= h as isize || sx >= w as isize {
+                                    continue;
+                                }
+                                for ci in 0..c {
+                                    acc += k[((ky * 3 + kx) * c + ci) * o + oi] * x[((ti * h + sy as usize) * w + sx as usize) * c + ci];
                                 }
                             }
                         }
-                        let got = y[((ti * o + oi) * h + yy) * w + xx];
+                        let got = y[((ti * h + yy) * w + xx) * o + oi];
                         assert!((got - acc).abs() < 1e-4, "{got} vs {acc}");
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn average_pool_drops_the_odd_edge() {
+        let dev = super::super::device();
+        let x = Tensor::from_vec((0..5 * 3).map(|v| v as f32).collect::<Vec<_>>(), (1, 3, 5, 1), &dev).unwrap();
+        let y: Vec<f32> = avg_pool(&x).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        // rows 0-1, columns 0-1 and 2-3 of [[0..5], [5..10], [10..15]]
+        assert_eq!(y, vec![3.0, 5.0]);
     }
 
     /// A synthetic shot's frame: a pattern chosen by `shot`, moving with time `t`, 48×27 RGB.

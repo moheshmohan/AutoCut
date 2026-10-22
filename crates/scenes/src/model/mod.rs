@@ -16,7 +16,7 @@ pub mod tfckpt;
 pub mod transnet;
 pub mod weights;
 
-use candle_core::Device;
+pub use candle_core::Device;
 
 use crate::SceneError;
 

@@ -440,7 +440,34 @@ pub fn parse_description(answer: &str, detail: bool) -> Result<ShotDescription, 
     if d.people == 0 && d.faces_prominent {
         d.people = 1;
     }
+    // "text" that only describes the picture again ("man and woman sitting on a couch") is not
+    // text in the frame: a small model fills the list when there is none
+    let said =
+        words_of(&format!("{} {} {} {}", d.caption, d.setting, d.actions.join(" "), d.subjects.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(" ")));
+    let echo = |line: &str| {
+        let w = words_of(line);
+        let known = w.iter().filter(|x| said.contains(*x)).count();
+        (w.len(), known)
+    };
+    // ...but a line that looks printed (a word in capitals, a number, a script without case) is
+    // kept even when the caption quotes it ("a robot named PROMOBOT ROBO-C 2021")
+    let printed = |line: &str| {
+        line.split(|c: char| !c.is_alphanumeric())
+            .any(|w| w.chars().any(|c| c.is_numeric()) || (w.chars().filter(|c| c.is_alphabetic()).count() >= 2 && !w.chars().any(char::is_lowercase)))
+    };
+    // several lines made only of the description's words ("robot dog", "white floor") is the
+    // description listed again
+    let listed = d.text.iter().filter(|l| !printed(l) && matches!(echo(l), (n, k) if n > 0 && k == n)).count() >= 2;
+    d.text.retain(|line| {
+        let (n, k) = echo(line);
+        printed(line) || (!(n >= 3 && k * 5 >= n * 4) && !(listed && n > 0 && k == n))
+    });
     Ok(d)
+}
+
+/// The lower-case words of `s`.
+fn words_of(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
 }
 
 #[cfg(test)]
@@ -548,6 +575,25 @@ mod tests {
         let d = parse_description(r#"{"description": "A dog runs. Then it sits.", "setting": "N/A", "mood": "none"}"#, false).unwrap();
         assert_eq!(d.caption, "A dog runs.");
         assert_eq!((d.setting.as_str(), d.mood.as_str()), ("", ""));
+        // text that repeats the description is not text in the frame; real text stays
+        let d = parse_description(
+            r#"{"caption": "A man and a woman sit on a green couch.", "text": ["man and woman sitting on green couch", "SUNNY", "Proud of the new project"]}"#,
+            false,
+        )
+        .unwrap();
+        assert_eq!(d.text, vec!["SUNNY", "Proud of the new project"]);
+        let d =
+            parse_description(r#"{"caption": "A yellow robot dog walks on a white floor.", "text": ["robot dog", "white floor", "ABDET"]}"#, false).unwrap();
+        assert_eq!(d.text, vec!["ABDET"], "the description listed again");
+        let d = parse_description(r#"{"caption": "A robot with ROBOT on its side.", "text": ["ROBOT"]}"#, false).unwrap();
+        assert_eq!(d.text, vec!["ROBOT"], "one line that the caption also says may well be real");
+        // a sign the caption quotes is still text in the frame
+        let d = parse_description(
+            r#"{"caption": "A person at a booth with a robot named PROMOBOT ROBO-C 2021.", "text": ["PROMOBOT ROBO-C", "2021", "person at booth"]}"#,
+            false,
+        )
+        .unwrap();
+        assert_eq!(d.text, vec!["PROMOBOT ROBO-C", "2021"]);
         // faces without a count: someone is there
         assert_eq!(parse_description(r#"{"faces_prominent": true}"#, false).unwrap().people, 1);
     }

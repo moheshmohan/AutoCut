@@ -56,9 +56,13 @@ head the quality score leaves it out.
   TransNetV2's TensorFlow checkpoint by a strict reader of its table (LevelDB-style blocks,
   `BundleEntryProto`s) and its object graph, which names every variable
   (`TransNet/SDDCNN_1/DDCNN_1/Conv3D_1/conv_spatial/kernel`), so nothing is taken by position.
-  - `transnet`: written from the paper and the authors' published architecture (MIT); the
-    (2+1)-D convolutions factorise into a per-frame `conv2d` and a per-pixel dilated `conv1d`,
-    batch norm folded. Finds the cuts of a synthetic clip exactly (live test).
+  - `transnet`: written from the paper and the authors' published architecture (MIT);
+    channels last, the (2+1)-D convolutions as matrix products over shifted rows (a 3×3
+    spatial kernel is nine shifted copies of the frame against the kernel's rows, edge masks for
+    the zero padding; the dilated temporal kernel three shifted copies of the clip), half floats
+    on the GPU, batch norm folded. candle's Metal `conv2d` was 8× slower and its `mean` over
+    middle axes wrong, so neither is used. Finds the cuts of a synthetic clip exactly (live
+    test).
   - `qwen3vl`: Qwen3-VL written for FilmCraft from the published configuration and
     architecture (Hugging Face `transformers`' `qwen3_vl`, `candle-transformers`' port): the
     vision encoder (16-px patches two frames deep, an interpolated 48×48 position table, 2-D
@@ -69,7 +73,9 @@ head the quality score leaves it out.
     so every prompt has its tokens in the same places and decodes in lockstep; the system and
     instruction tokens come before the picture, so their keys and values are worked out once and
     copied to every shot of every batch; no 10-gram repeats (greedy decoding loops); an answer
-    ends when its JSON object closes.
+    ends when its JSON object closes. Memory: weights read one tensor at a time as the layers
+    take them (the fused q/k/v and gate/up joined on the CPU first), the vision encoder at most
+    4096 patches a pass, a prefill's attention one shot at a time.
   - `siglip`: `candle-transformers`' SigLIP with SigLIP 2's 256 k vocabulary; text lower-cased,
     `<eos>`, padded to 64.
   - `aesthetic`: `candle-transformers`' CLIP vision tower, the projection, and the LAION linear

@@ -19,18 +19,20 @@ pub fn shot_prompt(frames: usize, detail: bool) -> String {
     };
     let paragraph = if detail { ", \"detail\": \"...\"" } else { "" };
     let paragraph_rule = if detail { " detail: 3 to 5 sentences on who and what is where, what happens, the light and the colours." } else { "" };
+    // the lists that can run on (subjects, actions, text) come last: an answer cut short keeps
+    // its caption and uses
     format!(
         "{what} Log the shot. Answer with JSON only, in this form:\n\
-{{\"shot_type\": \"...\", \"subjects\": [{{\"name\": \"...\", \"box\": [x1, y1, x2, y2]}}], \"actions\": [\"...\"], \
-\"setting\": \"...\", \"mood\": \"...\", \"energy\": \"...\", \"text\": [\"...\"], \"people\": 0, \"faces_prominent\": false, \
-\"caption\": \"...\"{paragraph}, \"uses\": [\"...\"]}}\n\
-Rules: shot_type is one of wide, medium, close-up, extreme close-up, insert, screen. \
-subjects: at most 4, the main one first, each box in 0-1000 coordinates of the frame. \
-actions: at most 3, what happens. setting: where. mood: one or two words. energy is one of low, medium, high. \
-text: at most 5 lines clearly legible in the frame, copied exactly, else []. people: how many people are visible. \
-faces_prominent: whether a face is large enough to recognise. caption: one sentence.{paragraph_rule} \
+{{\"shot_type\": \"...\", \"caption\": \"...\"{paragraph}, \"setting\": \"...\", \"mood\": \"...\", \"energy\": \"...\", \
+\"people\": 0, \"faces_prominent\": false, \"uses\": [\"...\"], \"subjects\": [{{\"name\": \"...\", \"box\": [x1, y1, x2, y2]}}], \
+\"actions\": [\"...\"], \"text\": [\"...\"]}}\n\
+Rules: shot_type is one of wide, medium, close-up, extreme close-up, insert, screen. caption: one sentence.{paragraph_rule} \
+setting: where. mood: one or two words. energy is one of low, medium, high. people: how many people are visible. \
+faces_prominent: whether a face is large enough to recognise. \
 uses: the ones that fit of hook (grabs attention at the start), b-roll (cutaway under narration), \
-reveal (shows the subject), talking-head (someone speaks to the camera), establishing (shows the place)."
+reveal (shows the subject), talking-head (someone speaks to the camera), establishing (shows the place). \
+subjects: at most 4, the main one first, each box in 0-1000 coordinates of the frame. \
+actions: at most 3, what happens. text: at most 5 lines clearly legible in the frame, copied exactly, else []."
     )
 }
 
