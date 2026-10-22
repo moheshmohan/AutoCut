@@ -4137,3 +4137,17 @@
 	Dot Size	ドットサイズ
 	Ink Color	インクのカラー
 	Paper Color	用紙のカラー
+
+# Speed ramps (Clip ▸ Speed Ramp…)
+	Speed Ramp…	速度ランプ…
+	Montage	モンタージュ
+	Hero	ヒーロー
+	Bullet	バレット
+	Jump Cut	ジャンプカット
+	Flash In	フラッシュイン
+	Flash Out	フラッシュアウト
+	Smooth In	スムーズイン
+	Smooth Out	スムーズアウト
+	None (remove the ramp)	なし（ランプを削除）
+	Intensity:	強度：
+	Optical Flow for the Slow Parts	スロー部分にオプティカルフロー

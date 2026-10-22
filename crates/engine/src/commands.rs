@@ -3538,6 +3538,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::audio_generate::commands());
     v.extend(crate::music::commands());
     v.extend(crate::transition_tools::commands());
+    v.extend(crate::speed_ramp::commands());
     v.extend(crate::music_preview::commands());
     v.extend(crate::soundfonts::commands());
     v.extend(crate::voice_clone::commands());

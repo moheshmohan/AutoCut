@@ -82,6 +82,7 @@ pub mod shortcut_presets;
 pub mod shortcuts;
 pub mod soundfonts;
 pub mod source_monitor;
+pub mod speed_ramp;
 pub mod sync;
 pub mod transcript;
 pub mod transition_tools;

@@ -3802,3 +3802,18 @@
 	Enhance Voice	增强人声
 	Voice Isolation	人声隔离
 	Voice Changer	变声器
+
+# Speed ramps (Clip ▸ Speed Ramp…)
+	Speed Ramp…	速度曲线…
+	Speed Ramp	速度曲线
+	Montage	蒙太奇
+	Hero	英雄
+	Bullet	子弹时间
+	Jump Cut	跳切
+	Flash In	闪入
+	Flash Out	闪出
+	Smooth In	平滑进入
+	Smooth Out	平滑退出
+	None (remove the ramp)	无（移除曲线）
+	Intensity:	强度：
+	Optical Flow for the Slow Parts	慢速部分使用光流

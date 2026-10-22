@@ -65,9 +65,16 @@ fn effects_list_reports_folders_and_badges() {
     assert_eq!(find("crop")["category"], json!(["Legacy", "Video Effects"]));
     assert_eq!(find("luma_key")["badges"], json!({"accelerated": true, "float32": true, "yuv": true}));
     assert_eq!(find("lens_flare")["folder"], "Lights & Glows");
-    let n =
-        arr.iter().filter(|e| e["kind"] == "Video" && e["category"][0] == "Video Effects" && e["folder"] != "Obsolete" && e["folder"] != Value::Null).count();
+    let n = arr
+        .iter()
+        .filter(|e| {
+            e["kind"] == "Video" && e["category"][0] == "Video Effects" && e["folder"] != "Obsolete" && e["folder"] != "Creator" && e["folder"] != Value::Null
+        })
+        .count();
     assert_eq!(n, 93, "Premiere 26's current Video Effects");
+    // FilmCraft's own Creator folder beside them
+    assert_eq!(arr.iter().filter(|e| e["folder"] == "Creator" && e["kind"] == "Video").count(), filmcraft_project::effect::CREATOR_EFFECTS.len());
+    assert_eq!(find("cr_vhs")["badges"]["accelerated"], json!(true));
 }
 
 #[test]

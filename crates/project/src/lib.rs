@@ -25,6 +25,7 @@ pub mod mask;
 pub mod mixer;
 pub mod multicam;
 pub mod narration;
+pub mod time_remap;
 pub mod transcript;
 pub mod transition_catalog;
 pub mod transition_engines;
@@ -660,15 +661,24 @@ impl TrackItem {
             None => self.source_time_at(t),
         }
     }
-    /// Media time at timeline time `t` ignoring any frame hold.
+    /// Media time at timeline time `t` ignoring any frame hold. A keyframed Time Remapping speed
+    /// re-times the clip inside its media span ([`time_remap`]).
     pub fn moving_source_time_at(&self, t: Tick) -> Tick {
         let rel = t - self.start;
+        if let Some(off) = time_remap::media_offset(self, rel.0 as f64) {
+            let span = (self.source_out() - self.source_in).0.max(0);
+            return self.source_in + Tick((off.round().max(0.0) as i64).min(span));
+        }
         let scaled = Tick((rel.0 as f64 * self.speed.abs()).round() as i64);
         if self.reverse {
             self.source_in + Tick((self.duration.0 as f64 * self.speed.abs()).round() as i64) - scaled - Tick(1)
         } else {
             self.source_in + scaled
         }
+    }
+    /// Whether a keyframed Time Remapping speed plays the clip ([`time_remap`]).
+    pub fn has_time_remap(&self) -> bool {
+        !self.reverse && time_remap::curve_of(self).is_some()
     }
     /// Media time consumed by the item (the source out point).
     pub fn source_out(&self) -> Tick {

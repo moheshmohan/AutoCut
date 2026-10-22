@@ -4138,3 +4138,17 @@
 	Dot Size	Tamaño de punto
 	Ink Color	Color de tinta
 	Paper Color	Color del papel
+
+# Speed ramps (Clip ▸ Speed Ramp…)
+	Speed Ramp…	Rampa de velocidad…
+	Montage	Montaje
+	Hero	Héroe
+	Bullet	Bala
+	Jump Cut	Corte de salto
+	Flash In	Destello de entrada
+	Flash Out	Destello de salida
+	Smooth In	Entrada suave
+	Smooth Out	Salida suave
+	None (remove the ramp)	Ninguna (quitar la rampa)
+	Intensity:	Intensidad:
+	Optical Flow for the Slow Parts	Flujo óptico en las partes lentas

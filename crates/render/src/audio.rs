@@ -449,6 +449,8 @@ fn raw_channels(item: &TrackItem, src: SourceAudio, key: SourceKey, x0: i64, len
     let remixed = crate::remix::read(item, &|m0, len| src(m0, len), a0 - item_s0, n, sr);
     let buf = if remixed.is_some() {
         remixed
+    } else if let Some(b) = remapped(item, src, a0, n, sr) {
+        Some(b)
     } else if let Some(b) = stretched(item, src, key, a0, n, sr, w, stream) {
         Some(b)
     } else if (speed - 1.0).abs() < 1e-9 && !item.reverse {
@@ -600,6 +602,85 @@ fn stretched(item: &TrackItem, src: SourceAudio, key: SourceKey, a0: i64, n: usi
     Some(AudioBuffer { sample_rate: sr, channels: out })
 }
 
+/// Most media samples a remapped clip reads per output sample (the 10 000 % speed cap, and the
+/// grains around it).
+const REMAP_READ_PER_SAMPLE: usize = 104;
+
+/// A Time Remapping clip's sound ([`filmcraft_project::time_remap`]) for timeline samples
+/// `[a0, a0 + n)`, as the source's channels; `None` for clips without a keyframed speed (or
+/// frame-held). Each output sample's media position follows the speed curve. Without Maintain
+/// Audio Pitch the media is resampled there (the pitch moves with the speed, as varispeed). With
+/// it, the sound is overlap-added from grains of about 46 ms read at the media's own rate (Hann
+/// windows half a grain apart, which sum to one), each grain taken where the curve is at its
+/// centre, so the pitch stays and the timing follows the curve. Grains sit on a fixed grid of
+/// timeline samples, so any chunking of a render gives the same samples.
+fn remapped(item: &TrackItem, src: SourceAudio, a0: i64, n: usize, sr: u32) -> Option<AudioBuffer> {
+    if item.frame_hold.is_some() || n == 0 || sr == 0 {
+        return None;
+    }
+    let table = filmcraft_project::time_remap::table_for(item)?;
+    let (tps, srf) = (TICKS_PER_SECOND as f64, sr as f64);
+    let start = item.start.0 as f64 / tps * srf;
+    let src_in = item.source_in.0 as f64 / tps * srf;
+    let span = item.duration.0 as f64 * item.speed.abs() / tps * srf;
+    if !(start.is_finite() && src_in.is_finite() && span.is_finite()) {
+        return None;
+    }
+    // media sample (fractional) the clip plays at timeline sample `a`
+    let pos = |a: f64| src_in + span * table.fraction((a - start) / srf * tps);
+    let cap = n.saturating_mul(REMAP_READ_PER_SAMPLE).saturating_add(1 << 16);
+    let lerp = |ch: &[f32], x: f64| {
+        let i0 = x.floor();
+        let fr = (x - i0) as f32;
+        let i0 = i0 as i64;
+        let at = |i: i64| usize::try_from(i).ok().and_then(|i| ch.get(i)).copied().unwrap_or(0.0);
+        let (a, b) = (at(i0), at(i0 + 1));
+        a + (b - a) * fr
+    };
+    if !item.maintain_pitch {
+        let (p0, p1) = (pos(a0 as f64), pos((a0 + n as i64 - 1) as f64));
+        let lo = p0.min(p1).floor() as i64 - 1;
+        let len = usize::try_from((p0.max(p1).ceil() as i64).saturating_sub(lo).saturating_add(3)).ok()?;
+        if len > cap {
+            return None;
+        }
+        let raw = src(lo, len)?;
+        let channels = raw.channels.iter().map(|ch| (0..n).map(|i| lerp(ch, pos((a0 + i as i64) as f64) - lo as f64)).collect()).collect();
+        return Some(AudioBuffer { sample_rate: sr, channels });
+    }
+    // grains of `g` samples every `hop`, centred on multiples of `hop`
+    let g = (((srf * 0.046).round() as i64) / 2 * 2).max(64);
+    let hop = g / 2;
+    let first = (a0 - hop).div_euclid(hop);
+    let last = (a0 + n as i64 + hop).div_euclid(hop) + 1;
+    let grains: Vec<(i64, f64)> = (first..=last).map(|j| (j * hop, pos((j * hop) as f64))).collect();
+    let lo = grains.iter().map(|g| g.1).fold(f64::INFINITY, f64::min).floor() as i64 - hop - 2;
+    let hi = grains.iter().map(|g| g.1).fold(f64::NEG_INFINITY, f64::max).ceil() as i64 + hop + 2;
+    let len = usize::try_from(hi.saturating_sub(lo)).ok()?;
+    if len > cap {
+        return None;
+    }
+    let raw = src(lo, len)?;
+    let mut channels = vec![vec![0f32; n]; raw.channel_count()];
+    for &(c, m) in &grains {
+        // the grain's samples inside [a0, a0 + n)
+        let from = (c - hop).max(a0);
+        let to = (c + hop).min(a0 + n as i64);
+        for a in from..to {
+            let k = (a - c + hop) as f64;
+            let w = (0.5 - 0.5 * (std::f64::consts::TAU * k / g as f64).cos()) as f32;
+            let x = m + (a - c) as f64 - lo as f64;
+            let i = (a - a0) as usize;
+            for (out, ch) in channels.iter_mut().zip(&raw.channels) {
+                if let Some(o) = out.get_mut(i) {
+                    *o += w * lerp(ch, x);
+                }
+            }
+        }
+    }
+    Some(AudioBuffer { sample_rate: sr, channels })
+}
+
 /// The source channels a clip on a 5.1 track plays: six picked channels (Modify ▸ Audio Channels),
 /// else the source's first six; a mono pick or source gives one channel (upmixed to C), a stereo
 /// pick or 2–5 channel source gives two (upmixed to L/R).
@@ -645,3 +726,7 @@ pub fn peaks(buf: &AudioBuffer, ch: usize, bucket: usize) -> Vec<(f32, f32)> {
     let Some(c) = buf.channels.get(ch) else { return Vec::new() };
     c.chunks(bucket.max(1)).map(|b| b.iter().fold((0f32, 0f32), |(lo, hi), s| (lo.min(*s), hi.max(*s)))).collect()
 }
+
+#[cfg(test)]
+#[path = "remap_audio_tests.rs"]
+mod remap_audio_tests;
