@@ -163,6 +163,28 @@ on the first reading (CER 0–0.09, the recogniser's own slips such as "busk" fo
 again after "an robot … working" for "a robot … walking" (CER 0.17); voice similarity 0.64–0.77.
 `heard::Policy::english()`: CER at most 0.15, sentence starts at most 0.5, three readings.
 
+## Understanding raw talking clips (2026-10-22)
+
+`media.understandSpeech` transcribes **speech only, chunk by chunk** (`Transcriber::
+transcribe_chunks`, `vad::chunks`): voice activity segments joined into chunks of at most 12 s
+for Malayalam (the decoder holds about 12 s of it: two tokens a character) and 28 s for English,
+each decoded without timestamps as `hear` does and its words timed by cross-attention alignment.
+The first live run used 30 s timestamp windows instead: the Malayalam fine-tune, trained without
+timestamps, wrote a few words a window (one "word" lasted 22 s); chunked, the same clips gave
+456 and 633 words at a mean confidence of 0.95.
+
+Live, the owner's two Malayalam talks (IMG_3337, 242 s; IMG_3338, 319 s; a phone filming a laptop
+screen while he talks), `filmcraft-cli rough-cut … --language ml` on the M3 Max with the GPU shared
+with other jobs: 13.7 min for both; one speaker each (ECAPA); shot hint `voice` (speech, no face:
+right); fillers 13 and 17 (ആ, എന്ന് പറഞ്ഞാൽ and hesitations); no retakes (none was said); the rough
+cut keeps 541.4 of 561.4 s (23 pauses and 3 fillers cut, 28 pieces, every cut between words).
+
+An English clip with known retakes (Kokoro, 34.5 s: a false start, a line said twice, a 2.5 s
+pause), large-v3-turbo: both retakes found and the complete takes kept; the cut is 16.7 s and
+heard back word for word ("…goes up to five times. The screen is really bright, even outside in
+the sun. …"), the last words the recogniser had missed in the clip ("thanks for watching") kept
+because voice activity runs on from the last word.
+
 ## References
 
 Implemented from the published description of the model: A. Radford et al., "Robust Speech

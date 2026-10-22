@@ -296,7 +296,16 @@ fn understand_one(
     *lock(&prog.status) = format!("{}: hearing the words ({} of {n})", w.name, i + 1);
     let opts = filmcraft_speech::Options { language: st.language.clone(), diarize: false, max_speakers: st.max_speakers };
     let mut stop = |_: f32, _: &str| !prog.cancel.load(Ordering::Relaxed);
-    let mut tr = t.transcribe(&audio, &opts, &mut stop).map_err(|e| format!("{}: {e}", w.name))?;
+    // speech only, in chunks a decoder holds: Malayalam takes about two tokens a character, so
+    // its chunks are 12 s; other languages' 28 s
+    let max = match st.language.as_deref() {
+        Some("en") => 28.0,
+        Some("ml") | None => tts_heard_seconds(),
+        Some(_) => 20.0,
+    };
+    let chunks =
+        filmcraft_speech::vad::chunks(&audio, &segs, (max * f64::from(filmcraft_speech::SAMPLE_RATE)) as usize, filmcraft_speech::SAMPLE_RATE as usize / 5);
+    let mut tr = t.transcribe_chunks(&audio, &chunks, &opts, &mut stop).map_err(|e| format!("{}: {e}", w.name))?;
     tr.normalize();
     // who speaks
     let diarization = if st.diarize && !tr.words.is_empty() {
@@ -335,6 +344,12 @@ fn understand_one(
     };
     a.check(tr.words.len())?;
     Ok(Made { item: w.item, transcript: tr, analysis: a })
+}
+
+/// The longest stretch a Malayalam chunk is heard in, seconds (what the narration check hears at
+/// once: the decoder holds about 12 s of Malayalam).
+fn tts_heard_seconds() -> f64 {
+    filmcraft_tts::heard::HEARD_SECONDS
 }
 
 /// Three moments of speech: a quarter, half and three quarters of the way through the segments.

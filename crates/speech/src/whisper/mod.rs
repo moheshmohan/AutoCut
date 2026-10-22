@@ -217,12 +217,19 @@ impl Whisper {
     /// Greedy decode of one window as plain text (`<|notimestamps|>`): text tokens only, up to
     /// what the decoder's context holds after the prompt.
     fn decode_text(&self, m: &mut Model, xa: &Tensor, prompt: &[u32]) -> Result<Vec<u32>, SpeechError> {
+        Ok(self.decode_text_probs(m, xa, prompt)?.0)
+    }
+
+    /// [`Whisper::decode_text`] with each token's probability (before suppression).
+    fn decode_text_probs(&self, m: &mut Model, xa: &Tensor, prompt: &[u32]) -> Result<(Vec<u32>, Vec<f32>), SpeechError> {
         m.decoder.reset();
         let mut seq: Vec<u32> = Vec::new();
+        let mut probs: Vec<f32> = Vec::new();
         let (logits, _) = m.decoder.forward(prompt, xa, true, None).map_err(merr)?;
         let mut cur = Model::last_logits(&logits).map_err(merr)?;
         let room = m.cfg.max_target_positions.saturating_sub(prompt.len() + 1);
         for _ in 0..room {
+            let raw = cur.clone();
             for &s in &self.suppress {
                 if let Some(v) = cur.get_mut(s as usize) {
                     *v = f32::NEG_INFINITY;
@@ -244,13 +251,14 @@ impl Whisper {
                 break;
             }
             seq.push(next);
+            probs.push(softmax_at(&raw, next as usize));
             if repeating(&seq, self.tok.timestamp_begin) {
                 break;
             }
             let (logits, _) = m.decoder.forward(&[next], xa, true, None).map_err(merr)?;
             cur = Model::last_logits(&logits).map_err(merr)?;
         }
-        Ok(seq)
+        Ok((seq, probs))
     }
 }
 
@@ -412,6 +420,79 @@ impl Transcriber for Whisper {
             if !progress(0.96, "Labelling speakers") {
                 return Err(SpeechError::Cancelled);
             }
+            let p = crate::diarize::Params { max_speakers: opts.max_speakers, ..Default::default() };
+            crate::diarize::diarize(audio, &mut t, &p);
+        }
+        progress(1.0, "Done");
+        Ok(t)
+    }
+
+    /// Speech chunk by chunk (each at most 30 s, from voice activity): every chunk decoded
+    /// without timestamps, as [`Transcriber::hear`] does (models fine-tuned without timestamps,
+    /// such as the Malayalam ones, read best this way, and nothing is decoded in silence), its
+    /// words timed by cross-attention alignment over the chunk.
+    fn transcribe_chunks(&self, audio: &[f32], chunks: &[std::ops::Range<usize>], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError> {
+        let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
+        let n_mels = m.cfg.num_mel_bins;
+        let window = N_FRAMES * SAMPLES_PER_FRAME;
+        let mut language = opts.language.clone().filter(|l| !l.is_empty() && l != "auto");
+        if language.as_deref().is_some_and(|l| self.tok.multilingual() && self.tok.language_token(l).is_none()) {
+            return Err(SpeechError::Model(format!("the model does not know the language `{}`", language.unwrap_or_default())));
+        }
+        let total: usize = chunks.iter().map(|c| c.len()).sum::<usize>().max(1);
+        let mut done = 0usize;
+        let mut words: Vec<Word> = Vec::new();
+        for c in chunks {
+            let frac = done as f32 / total as f32;
+            if !progress(frac * 0.95, &format!("Transcribing {:.0}%", frac * 100.0)) {
+                return Err(SpeechError::Cancelled);
+            }
+            done += c.len();
+            let a = c.start.min(audio.len());
+            let b = c.end.min(audio.len()).min(a + window);
+            if b <= a {
+                continue;
+            }
+            let mut padded = audio[a..b].to_vec();
+            padded.resize(window, 0.0);
+            let (frames, mel) = crate::mel::log_mel(&padded, n_mels);
+            let win = Self::window(&mel, n_mels, frames, 0);
+            let x = Tensor::from_vec(win, (1, n_mels, N_FRAMES), &m.device).map_err(merr)?;
+            let xa = m.encoder.forward(&x).map_err(merr)?;
+            let mut prompt = vec![self.tok.sot];
+            if self.tok.multilingual() {
+                if language.is_none() {
+                    language = Some(self.detect_language(&mut m, &xa)?);
+                }
+                let lang = language.as_deref().unwrap_or("en");
+                prompt.push(self.tok.language_token(lang).unwrap_or(self.tok.sot + 1));
+                prompt.push(self.tok.transcribe);
+            }
+            prompt.push(self.tok.no_timestamps);
+            let (toks, probs) = self.decode_text_probs(&mut m, &xa, &prompt)?;
+            let kept: Vec<(u32, f32)> = toks.iter().copied().zip(probs).filter(|(t, _)| *t < self.tok.eot).collect();
+            let text: Vec<u32> = kept.iter().map(|k| k.0).collect();
+            if text.is_empty() {
+                continue;
+            }
+            let seg_frames = ((b - a) / SAMPLES_PER_FRAME).max(1);
+            let times = align::align(&mut m, &xa, &prompt, &text, self.tok.eot, &self.alignment_heads, seg_frames).map_err(merr)?;
+            for (wtext, r) in tokenizer::group_words(&self.tok, &text) {
+                let (Some(first), Some(last)) = (times.get(r.start), r.end.checked_sub(1).and_then(|i| times.get(i))) else { continue };
+                let s = (a + first.0 * SAMPLES_PER_FRAME).min(b);
+                let e = (a + last.1 * SAMPLES_PER_FRAME).min(b).max(s);
+                let lps: Vec<f32> = kept.get(r.clone()).unwrap_or(&[]).iter().map(|k| k.1.max(1e-6).ln()).collect();
+                let conf = if lps.is_empty() { 1.0 } else { (lps.iter().sum::<f32>() / lps.len() as f32).exp() };
+                let mut w = Word::new(wtext, sample_tick(s as i64), sample_tick(e as i64));
+                w.confidence = if conf.is_finite() { conf.clamp(0.0, 1.0) } else { 0.0 };
+                words.push(w);
+            }
+        }
+        drop(m);
+        let mut t = Transcript { language: language.unwrap_or_else(|| "en".into()), source: self.id.clone(), speakers: Vec::new(), words };
+        t.normalize();
+        crate::vad::tighten_words(audio, &mut t.words);
+        if opts.diarize && !t.words.is_empty() {
             let p = crate::diarize::Params { max_speakers: opts.max_speakers, ..Default::default() };
             crate::diarize::diarize(audio, &mut t, &p);
         }

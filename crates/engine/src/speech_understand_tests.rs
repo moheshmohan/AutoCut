@@ -95,6 +95,8 @@ fn rough_cut_keeps_whole_words_without_gaps_and_undoes() {
             }
         }
     }
+    // no media is heard twice
+    assert!(clips.windows(2).all(|w| w[0].source_in + w[0].duration <= w[1].source_in), "overlapping source ranges");
     let heard = |w: &Word| clips.iter().any(|c| c.source_in <= w.start && w.end <= c.source_in + c.duration);
     let kept: Vec<&str> = t.words.iter().filter(|w| heard(w)).map(|w| w.text.as_str()).collect();
     assert_eq!(kept, ["Today", "we", "test", "it.", "It", "works."]);
@@ -107,7 +109,7 @@ fn rough_cut_keeps_whole_words_without_gaps_and_undoes() {
     // keeping everything but the pauses: the retake stays
     let r = s.execute("sequence.roughCut", json!({"items": [item.0], "removeRetakes": false, "removeFillers": false})).unwrap();
     assert_eq!(r["removed"]["retakes"], 0);
-    assert!(r["removed"]["pauses"].as_u64().unwrap() >= 1);
+    assert!(r["removed"]["fillers"] == 0 && r["removed"]["words"] == 0, "{r}");
 }
 
 #[test]

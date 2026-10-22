@@ -94,3 +94,34 @@ fn ecapa_matches_speechbrain() {
         }
     }
 }
+
+/// Neural speaker labels on a mix of known voices (`examples/diarize_lab.rs` writes one: copy its
+/// `<out>.wav` and `<out>.truth.json` into `target/fixtures` as `diarize-mix.wav` and
+/// `diarize-mix.truth.json`), when the models are downloaded: the right number of speakers and a
+/// low error rate.
+#[cfg(feature = "whisper")]
+#[test]
+fn speakers_are_told_apart_in_a_mix_when_present() {
+    let Some(dir) = models() else { return };
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let (Ok(truth), true) = (std::fs::read(fixtures.join("diarize-mix.truth.json")), fixtures.join("diarize-mix.wav").is_file()) else { return };
+    let (Some(vad), Some(ecapa)) = (filmcraft_speech::vad::load_silero(&dir), filmcraft_speech::ecapa::load_cached(&dir)) else { return };
+    let truth: Vec<serde_json::Value> = serde_json::from_slice(&truth).unwrap();
+    let truth: Vec<filmcraft_speech::speakers::Turn> = truth
+        .iter()
+        .map(|t| filmcraft_speech::speakers::Turn {
+            start: t["start"].as_u64().unwrap() as usize,
+            end: t["end"].as_u64().unwrap() as usize,
+            speaker: t["speaker"].as_u64().unwrap() as usize,
+        })
+        .collect();
+    let audio = wav(fixtures.join("diarize-mix.wav").to_str().unwrap());
+    let (segs, _) = filmcraft_speech::vad::speech_segments(&audio, Some(&vad), &filmcraft_speech::silero::SegmentParams::default());
+    let hyp = filmcraft_speech::speakers::turns(&audio, &segs, ecapa.as_ref(), &filmcraft_speech::speakers::Params::default()).unwrap();
+    let want = truth.iter().map(|t| t.speaker + 1).max().unwrap_or(0);
+    let found = hyp.iter().map(|t| t.speaker + 1).max().unwrap_or(0);
+    let der = filmcraft_speech::speakers::error_rate(&truth, &hyp, audio.len(), 0);
+    eprintln!("mix: {want} speakers, found {found}, DER {der:.3}");
+    assert_eq!(found, want);
+    assert!(der < 0.08, "DER {der}");
+}

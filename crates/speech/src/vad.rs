@@ -57,6 +57,59 @@ pub fn speech_segments(audio: &[f32], silero: Option<&Silero>, p: &SegmentParams
     }
 }
 
+/// Chunks to transcribe from speech `segments` of audio of `len` samples: consecutive segments
+/// joined while a chunk stays within `max` samples (at most 30 s), a longer segment cut at its
+/// quietest 10 ms near the middle (bounded), each chunk then padded by `pad` samples of what is
+/// around it (never into the next chunk).
+pub fn chunks(audio: &[f32], segments: &[Range<usize>], max: usize, pad: usize) -> Vec<Range<usize>> {
+    let max = max.clamp(SAMPLE_RATE as usize, 30 * SAMPLE_RATE as usize);
+    let len = audio.len();
+    // long segments first cut down to size
+    let mut pieces: Vec<Range<usize>> = Vec::new();
+    for s in segments {
+        let s = s.start.min(len)..s.end.min(len);
+        split(audio, s, max, 0, &mut pieces);
+    }
+    let mut out: Vec<Range<usize>> = Vec::new();
+    for p in pieces {
+        match out.last_mut() {
+            Some(l) if p.end.saturating_sub(l.start) <= max && p.start >= l.end => l.end = p.end,
+            _ => out.push(p),
+        }
+    }
+    let spans = out.clone();
+    for (i, c) in out.iter_mut().enumerate() {
+        let lo = if i > 0 { spans[i - 1].end } else { 0 };
+        let hi = spans.get(i + 1).map_or(len, |n| n.start);
+        let room = max.saturating_sub(c.len());
+        let before = pad.min(room / 2).min(c.start.saturating_sub(lo));
+        let after = pad.min(room.saturating_sub(before)).min(hi.saturating_sub(c.end));
+        *c = c.start - before..c.end + after;
+    }
+    out.retain(|c| !c.is_empty());
+    out
+}
+
+/// `s` in pieces of at most `max`, cut at the quietest frame of the middle half (bounded depth).
+fn split(audio: &[f32], s: Range<usize>, max: usize, depth: u32, out: &mut Vec<Range<usize>>) {
+    if s.len() <= max || depth > 12 {
+        // still too long at the depth limit: plain cuts
+        let mut a = s.start;
+        while a < s.end {
+            let b = (a + max).min(s.end);
+            out.push(a..b);
+            a = b;
+        }
+        return;
+    }
+    let lo = s.start + s.len() / 4;
+    let hi = s.start + s.len() * 3 / 4;
+    let level = |f: usize| audio.get(f..(f + FRAME).min(audio.len())).map_or(0.0, |c| c.iter().map(|v| v * v).sum::<f32>());
+    let cut = (lo..hi).step_by(FRAME).min_by(|a, b| level(*a).total_cmp(&level(*b))).unwrap_or(s.start + s.len() / 2);
+    split(audio, s.start..cut, max, depth + 1, out);
+    split(audio, cut..s.end, max, depth + 1, out);
+}
+
 /// The energy detector: 10 ms frames at or above [`threshold`] are speech, then the hysteresis of
 /// [`crate::silero::segments`] (a quiet clip of nothing but noise has no speech: its loud frames
 /// must stand 12 dB over the floor).
@@ -183,6 +236,25 @@ mod tests {
         // hostile audio: empty, NaN
         assert!(energy_segments(&[], &p).is_empty());
         let _ = energy_segments(&[f32::NAN; 4000], &p);
+    }
+
+    #[test]
+    fn chunks_join_short_segments_and_cut_long_ones() {
+        let sr = SAMPLE_RATE as usize;
+        let audio = vec![0.1f32; 100 * sr];
+        // three short segments join; a 50 s one is cut; padding never overlaps
+        let segs = vec![sr..2 * sr, 3 * sr..4 * sr, 5 * sr..6 * sr, 20 * sr..70 * sr];
+        let c = chunks(&audio, &segs, 12 * sr, sr / 5);
+        assert_eq!(c[0].start, sr - sr / 5);
+        assert!(c[0].end >= 6 * sr && c[0].end <= 6 * sr + sr / 5, "{c:?}");
+        assert!(c.iter().all(|r| r.len() <= 12 * sr), "{c:?}");
+        assert!(c.windows(2).all(|w| w[0].end <= w[1].start), "{c:?}");
+        let covered: usize = c.iter().map(|r| r.len()).sum();
+        assert!(covered >= 53 * sr);
+        // hostile: out of range, empty, absurd max
+        let all = 0..usize::MAX;
+        assert!(chunks(&audio, std::slice::from_ref(&all), usize::MAX, usize::MAX).iter().all(|r| r.end <= audio.len()));
+        assert!(chunks(&[], &[], 0, 0).is_empty());
     }
 
     /// Silero on real speech, when the model and the clip are present

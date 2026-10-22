@@ -10,6 +10,8 @@
 //!
 //! - it reaches `keep` into the silence on both sides, but never into a neighbouring word (kept
 //!   or not) or a hesitation being removed, so **every cut lands between words**;
+//! - speech the voice activity detector heard running on from its first or last word with no word
+//!   written (a word the recogniser missed, often a sentence's last) stays with it;
 //! - its start is snapped down to a frame (up when that would reach into the word before) and its
 //!   length is a whole number of frames that does not reach into the next word, so the clips
 //!   placed back to back leave no gaps.
@@ -94,11 +96,22 @@ pub fn keep_ranges(t: &Transcript, a: Option<&SpeechAnalysis>, o: &Options, rate
         }
     }
     stats.words = removed.iter().filter(|r| **r).count();
+    // voice activity (none without an analysis)
+    let speech: Vec<TimeRange> = a.map(|a| a.speech.iter().map(|s| s.range()).collect()).unwrap_or_default();
     let hesitations: Vec<TimeRange> = match a {
         Some(a) if o.remove_hesitations => {
             a.fillers.iter().filter(|f| f.is_hesitation()).map(|f| TimeRange::from_bounds(f.start, f.end.max(f.start))).collect()
         }
         _ => Vec::new(),
+    };
+    // a silence between words is a pause to cut when it is long enough and the voice activity
+    // detector (when there is one) heard speech in at most a fifth of it
+    let is_pause = |a: Tick, b: Tick| -> bool {
+        if b - a < o.min_pause {
+            return false;
+        }
+        let voiced = speech.iter().map(|s| (s.end().min(b) - s.start.max(a)).max(Tick::ZERO)).fold(Tick::ZERO, |x, y| x + y);
+        voiced.0.saturating_mul(5) <= (b - a).0
     };
     // runs of kept words
     let mut runs: Vec<Range<usize>> = Vec::new();
@@ -111,7 +124,7 @@ pub fn keep_ranges(t: &Transcript, a: Option<&SpeechAnalysis>, o: &Options, rate
             continue;
         }
         match cur.as_mut() {
-            Some(r) if r.end == i && !(o.remove_pauses && words[i].start - words[i - 1].end >= o.min_pause) => r.end = i + 1,
+            Some(r) if r.end == i && !(o.remove_pauses && is_pause(words[i - 1].end, words[i].start)) => r.end = i + 1,
             Some(r) => {
                 if o.remove_pauses && r.end == i {
                     stats.pauses += 1;
@@ -127,11 +140,13 @@ pub fn keep_ranges(t: &Transcript, a: Option<&SpeechAnalysis>, o: &Options, rate
     }
     let fd = rate.frame_duration().max(Tick(1));
     let keep = o.keep.max(Tick::ZERO);
-    let mut out = Vec::new();
+    let mut out: Vec<Kept> = Vec::new();
     for r in runs {
         let (first, last) = (&words[r.start], &words[r.end - 1]);
-        // the silence around the run, up to the neighbouring words (and removed hesitations)
-        let mut lo = r.start.checked_sub(1).and_then(|i| words.get(i)).map_or(Tick::ZERO, |w| w.end);
+        // the silence around the run, up to the neighbouring words (and removed hesitations),
+        // never back into the range before
+        let prev_end = out.last().map_or(Tick::ZERO, |k| k.range.end());
+        let mut lo = r.start.checked_sub(1).and_then(|i| words.get(i)).map_or(Tick::ZERO, |w| w.end).max(prev_end);
         let mut hi = words.get(r.end).map_or(media_end, |w| w.start).min(media_end);
         for h in &hesitations {
             if h.end() <= first.start {
@@ -141,7 +156,20 @@ pub fn keep_ranges(t: &Transcript, a: Option<&SpeechAnalysis>, o: &Options, rate
                 hi = hi.min(h.start);
             }
         }
-        let Some((s, frames)) = fit(first.start, last.end, lo, hi.max(lo), keep, rate) else { continue };
+        // speech the recogniser wrote no word for, running on from the run's first or last word
+        // (a word it missed, often a sentence's end): kept with the run, up to the neighbours
+        let tol = Tick::from_seconds_f64(0.3);
+        let mut a = first.start;
+        let mut b = last.end;
+        for s in &speech {
+            if s.start <= b + tol && s.end() > b && s.start < hi {
+                b = b.max(s.end().min(hi));
+            }
+            if s.end() + tol >= a && s.start < a && s.end() > lo {
+                a = a.min(s.start.max(lo));
+            }
+        }
+        let Some((s, frames)) = fit(a, b, lo, hi.max(lo), keep, rate) else { continue };
         out.push(Kept { range: TimeRange::new(s, Tick(frames.saturating_mul(fd.0))), words: r });
     }
     (out, stats)
@@ -262,6 +290,36 @@ mod tests {
         let (kept, _) = keep_ranges(&t, Some(&a), &none, rate, s(7.0));
         assert_eq!(kept.len(), 1);
         check(&t, &kept, &[]);
+    }
+
+    /// A long silence the voice activity detector heard speech in is not a pause, and ranges never
+    /// overlap.
+    #[test]
+    fn voiced_gaps_are_not_pauses_and_ranges_never_overlap() {
+        let t = transcript();
+        let mut a = analysis();
+        a.retakes.clear();
+        a.fillers.clear();
+        // speech all through 3.0–7.0: the 1.4 s gap before "It" is voiced
+        a.speech.push(filmcraft_project::speech::Span::new(s(3.0), s(7.0)));
+        let (kept, st) = keep_ranges(&t, Some(&a), &Options::default(), FrameRate::new(25, 1), s(8.0));
+        assert_eq!(st.pauses, 1, "only the silent gap before the second take");
+        assert!(kept.windows(2).all(|w| w[0].range.end() <= w[1].range.start), "{kept:?}");
+        check(&t, &kept, &[]);
+    }
+
+    /// Speech the recogniser missed at a sentence's end stays in the cut.
+    #[test]
+    fn unworded_speech_after_a_word_is_kept() {
+        let t = transcript();
+        let mut a = analysis();
+        // "It works." is followed by 1.4 s more speech that has no words
+        a.speech.push(filmcraft_project::speech::Span::new(s(5.2), s(7.3)));
+        let rate = FrameRate::new(25, 1);
+        let (kept, _) = keep_ranges(&t, Some(&a), &Options::default(), rate, s(8.0));
+        let last = kept.last().unwrap();
+        assert!(last.range.end() >= s(7.3), "{:?}", last.range);
+        check(&t, &kept, &[0, 1, 2, 3]);
     }
 
     #[test]

@@ -182,6 +182,10 @@ fn main() -> Result<(), String> {
     }
     let out = Path::new(out);
     write_wav(&out.with_extension("wav"), &mix).map_err(|e| e.to_string())?;
+    // the truth beside it (`tests/speech_models.rs` labels the mix again when both are in
+    // target/fixtures as diarize-mix.wav and diarize-mix.truth.json)
+    let truth_json = serde_json::to_vec(&truth).map_err(|e| e.to_string())?;
+    std::fs::write(out.with_extension("truth.json"), truth_json).map_err(|e| e.to_string())?;
     let secs = mix.len() as f64 / f64::from(SAMPLE_RATE);
     eprintln!("mix: {secs:.1} s, {} turns", truth.len());
     // label it

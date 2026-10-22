@@ -355,14 +355,13 @@ pub fn analyse(t: &Transcript, audio: &[f32], speech: &[Range<usize>], vad: &str
                 continue;
             }
             let ratio = ta.len().min(tb.len()) as f32 / ta.len().max(tb.len()) as f32;
+            // a shorter take that is how the next one starts was abandoned: a false start
+            let pre = if ta.len() >= 8 && ta.len() < tb.len() && ratio < 0.9 { prefix_similarity(ta, tb) } else { 0.0 };
             let full = similarity(ta, tb);
-            if ratio >= 0.6 && full >= p.repeat_similarity {
+            if pre >= p.false_start_similarity {
+                links.push((j, i, pre, true));
+            } else if ratio >= 0.6 && full >= p.repeat_similarity {
                 links.push((j, i, full, false));
-            } else if ta.len() >= 8 && ta.len() < tb.len() {
-                let pre = prefix_similarity(ta, tb);
-                if pre >= p.false_start_similarity {
-                    links.push((j, i, pre, true));
-                }
             }
         }
     }

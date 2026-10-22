@@ -101,6 +101,13 @@ pub trait Transcriber: Send + Sync {
     fn id(&self) -> String;
     /// Transcribe mono 16 kHz `audio`. Word times are relative to the first sample.
     fn transcribe(&self, audio: &[f32], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError>;
+    /// [`Transcriber::transcribe`] of the speech in `chunks` only (sample ranges of `audio`, each
+    /// at most 30 s: [`vad::chunks`]); word times stay times in `audio`. The default transcribes
+    /// the whole audio.
+    fn transcribe_chunks(&self, audio: &[f32], chunks: &[std::ops::Range<usize>], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError> {
+        let _ = chunks;
+        self.transcribe(audio, opts, progress)
+    }
     /// The words of mono 16 kHz `audio` as plain text in `language` (ISO 639-1; empty or `auto`:
     /// detected), for checking what a voice said: no word times, no speakers. Whisper decodes
     /// without timestamps, as models fine-tuned without them read best.
@@ -229,6 +236,12 @@ impl Transcriber for GpuFirst {
             return r;
         }
         self.cpu()?.hear(audio, language)
+    }
+    fn transcribe_chunks(&self, audio: &[f32], chunks: &[std::ops::Range<usize>], opts: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError> {
+        if let Some(r) = self.on_gpu(|t| t.transcribe_chunks(audio, chunks, opts, &mut *progress)) {
+            return r;
+        }
+        self.cpu()?.transcribe_chunks(audio, chunks, opts, progress)
     }
 }
 

@@ -14,6 +14,20 @@ async fn run(ex: &dyn Executor, id: &str, p: Value) -> Result<Value, AutoCutErro
     ex.execute(id, p).await.map_err(|e| AutoCutError::Executor(format!("{id}: {e}")))
 }
 
+/// The export format a file name asks for (the default, H.264 in MP4, otherwise).
+fn format_for(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "mp4" | "m4v" => "h264",
+        "mov" => "prores",
+        "wav" => "wav",
+        "aif" | "aiff" => "aiff",
+        "m4a" | "aac" => "aac",
+        "flac" => "flac",
+        _ => return None,
+    })
+}
+
 /// Make the rough cut (parameters as the engine checked them: `items` or `paths`, `language`,
 /// `diarize`, the cut's `removePauses`, `removeFillers`, `removeRetakes`, `removeHesitations`,
 /// `minPause`, `keepPause`, `name`, and `export`).
@@ -47,7 +61,11 @@ pub async fn make(ex: &dyn Executor, p: &Value, lines: &mut dyn FnMut(&str)) -> 
     let mut export = Value::Null;
     if let Some(path) = p["export"].as_str() {
         lines(&format!("[4/4] exporting {path}"));
-        export = run(ex, "file.exportMedia", json!({"path": path, "wait": true})).await?;
+        let mut e = json!({"path": path, "wait": true});
+        if let Some(f) = format_for(path) {
+            e["format"] = json!(f);
+        }
+        export = run(ex, "file.exportMedia", e).await?;
     }
     let removed = &made["removed"];
     let status = format!(
@@ -89,7 +107,7 @@ mod tests {
     #[test]
     fn imports_understands_cuts_and_exports() {
         let ex = Fake(Mutex::new(Vec::new()));
-        let p = json!({"paths": ["/a.mov", "/b.mov"], "language": "ml", "removeRetakes": true, "export": "/tmp/out.mp4"});
+        let p = json!({"paths": ["/a.mov", "/b.mov"], "language": "ml", "removeRetakes": true, "export": "/tmp/out.wav"});
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let mut said = Vec::new();
         let r = rt.block_on(make(&ex, &p, &mut |l| said.push(l.to_string()))).unwrap();
@@ -98,6 +116,7 @@ mod tests {
         let up = ex.0.lock().unwrap()[1].1.clone();
         assert_eq!((up["items"].clone(), up["language"].as_str(), up["wait"].as_bool()), (json!([7, 8]), Some("ml"), Some(true)));
         assert_eq!(ex.0.lock().unwrap()[2].1["removeRetakes"], true);
+        assert_eq!(ex.0.lock().unwrap()[3].1["format"], "wav", "the format the file name asks for");
         assert!(r["status"].as_str().unwrap().contains("2 retake(s)"), "{r}");
         assert_eq!(said.len(), 4);
         // nothing to cut is an error
