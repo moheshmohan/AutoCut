@@ -74,6 +74,8 @@ pub mod relink;
 pub mod remix;
 pub mod safe_zones;
 pub mod scene_detect;
+pub mod scene_models;
+pub mod scenes;
 pub mod scopes;
 pub mod sequence_extras;
 pub mod sequence_tools;
@@ -504,6 +506,9 @@ pub struct Session {
     /// Automatic privacy blur jobs (`clip.autoRedact`, `sequence.autoRedact`) whose masks are
     /// written when they finish, what the finished ones made, and the host's vision check.
     pub redacts: redact::Redacts,
+    /// Scene index jobs (`media.analyzeScenes`) whose indexes are stored when they finish, what
+    /// the finished ones made, the scene models and the scene cache.
+    pub scenes: scenes::Scenes,
     /// Neural music generations whose WAV is placed when their job finishes (`music.generateNeural`).
     pub neural_music: music_neural::NeuralMusic,
     /// The SoundFont generated music plays on, loaded once (`music.useSoundfont`, `soundfont`).
@@ -646,6 +651,7 @@ impl Session {
             scene_jobs: Vec::new(),
             reframes: Default::default(),
             redacts: Default::default(),
+            scenes: Default::default(),
             neural_music: Default::default(),
             soundfonts: Default::default(),
             music_preview: Default::default(),
@@ -713,6 +719,7 @@ impl Session {
         self.export_presets.set_dir(&cfg.data_dir);
         self.use_narration_cache(&cfg.data_dir);
         self.use_redaction_cache(&cfg.data_dir);
+        self.use_scene_cache(&cfg.data_dir);
         self.prefs_path = Some(prefs_path);
         self.apply_media_cache();
         self.persistence = Some(autosave::Persistence::start(&cfg, self.prefs.auto_save.clone())?);
@@ -731,6 +738,12 @@ impl Session {
     /// ([`redact_cache`]).
     pub fn use_redaction_cache(&mut self, data_dir: &std::path::Path) {
         self.redacts.cache = Some(Arc::new(redact_cache::RedactCache::in_data_dir(data_dir)));
+    }
+
+    /// Keep scene indexes in `<data_dir>/scene-cache` (by file content, settings and models), so
+    /// `media.analyzeScenes` indexes the same footage once ([`scenes`]).
+    pub fn use_scene_cache(&mut self, data_dir: &std::path::Path) {
+        self.scenes.cache = Some(Arc::new(scenes::cache_in(data_dir)));
     }
 
     /// Clean shutdown: flush and stop the worker. Unsaved changes stay in the journal (offered on
@@ -776,6 +789,7 @@ impl Session {
         scene_detect::poll(self);
         reframe::poll(self);
         redact::poll(self);
+        scenes::poll(self);
         music_neural::poll(self);
         export_tools::pump_queue(self, false);
         panels::log_jobs(self);

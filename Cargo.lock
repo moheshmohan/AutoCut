@@ -2220,6 +2220,7 @@ dependencies = [
  "filmcraft-mxf",
  "filmcraft-project",
  "filmcraft-render",
+ "filmcraft-scenes",
  "filmcraft-scopes",
  "filmcraft-soundfont",
  "filmcraft-speech",

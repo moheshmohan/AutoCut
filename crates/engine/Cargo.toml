@@ -24,6 +24,9 @@ neural-music = ["filmcraft-acestep/model", "speech-download"]
 # Automatic privacy blur: the YuNet face and LPD-YuNet plate detectors (the GPU on macOS, else
 # the CPU) and their download.
 privacy-models = ["filmcraft-vision/model", "speech-download"]
+# The scene index's networks: TransNetV2 shot boundaries, Qwen3-VL descriptions, SigLIP 2
+# embeddings and the CLIP aesthetic head (candle; Metal on macOS, else the CPU) and their download.
+scene-models = ["filmcraft-scenes/model", "speech-download"]
 
 [dependencies]
 filmcraft-time = { workspace = true }
@@ -51,6 +54,7 @@ filmcraft-templates = { workspace = true }
 filmcraft-acestep = { workspace = true }
 filmcraft-soundfont = { workspace = true }
 filmcraft-vision = { workspace = true }
+filmcraft-scenes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -389,6 +389,12 @@ impl Embedding {
         (dot / (na.sqrt() * nb.sqrt())) as f32
     }
 
+    /// Rounded to what is stored (half floats), so an index saved and read back is the same.
+    pub fn quantized(mut self) -> Self {
+        self.0.iter_mut().for_each(|v| *v = f16_to_f32(f32_to_f16(*v)));
+        self
+    }
+
     /// Unit length (left as is when zero or not finite).
     pub fn normalized(mut self) -> Self {
         let n: f64 = self.0.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>().sqrt();
