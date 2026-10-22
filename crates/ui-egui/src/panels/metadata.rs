@@ -4,7 +4,8 @@
 //! each committed edit is one `metadata.set` (undoable, saved in the project).
 //!
 //! Automation ids: `metadata.empty` (nothing selected), `metadata.header`, `metadata.field.<Name>` (spaces removed: `metadata.field.LogNote`),
-//! `metadata.label`, `metadata.section.<Clip|File>`.
+//! `metadata.label`, `metadata.section.<Clip|File|Scenes>`, `metadata.scene.<n>` (shot n of the item's scene index,
+//! `media.analyzeScenes`: its time, shot type and caption).
 
 use egui::{Rect, RichText, Sense, vec2};
 use filmcraft_engine::panels::{Field, metadata_fields};
@@ -106,6 +107,17 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             });
         }
+        // the item's scene index: one line a shot
+        if let Some(idx) = app.session.project.scenes.get(&item) {
+            ui.add_space(4.0);
+            let r = ui.label(RichText::new(tl!("Scenes")).color(t.text_dim).strong());
+            elems.push(("metadata.section.Scenes".into(), r.rect, "Scenes".into()));
+            for (i, sh) in idx.shots.iter().enumerate().take(500) {
+                let line = scene_line(sh);
+                let r = ui.add(egui::Label::new(RichText::new(&line).color(t.text)).truncate());
+                elems.push((format!("metadata.scene.{i}"), r.rect, line));
+            }
+        }
     });
     for (id, r, l) in elems {
         app.auto.add(&id, r, &l);
@@ -114,6 +126,16 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         && let Err(e) = app.session.execute("metadata.set", json!({"item": item.0, "field": field, "value": value}))
     {
         app.ui.status = e.to_string();
+    }
+}
+
+/// A shot as one line: `4.0–10.2s · wide · A robot waves.` (the caption, or the camera move and
+/// score when the shot was not described).
+pub fn scene_line(sh: &filmcraft_project::scenes::Shot) -> String {
+    let span = format!("{:.1}–{:.1}s", sh.start.seconds(), sh.end.seconds());
+    match &sh.description {
+        Some(d) => format!("{span} · {} · {}", d.shot_type.name(), d.caption),
+        None => format!("{span} · {} · {:.2}", sh.camera.name(), sh.quality.score),
     }
 }
 

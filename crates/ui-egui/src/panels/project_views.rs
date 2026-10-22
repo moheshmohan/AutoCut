@@ -76,7 +76,14 @@ fn paint_badges(ui: &egui::Ui, b: &Badge, at: egui::Pos2, t: &Tokens) {
 }
 
 fn matches_filter(app: &FilmcraftApp, id: ItemId, filter: &str) -> bool {
-    app.session.project.item(id).is_some_and(|i| pp::listed(&app.session.project, i) && (filter.is_empty() || i.name.to_ascii_lowercase().contains(filter)))
+    let p = &app.session.project;
+    p.item(id).is_some_and(|i| pp::listed(p, i) && (filter.is_empty() || i.name.to_ascii_lowercase().contains(filter) || in_scenes(p, id, filter)))
+}
+
+/// Whether the item's scene index (`media.analyzeScenes`) says `filter` about one of its shots:
+/// the search box finds clips by what they show, once they are indexed.
+fn in_scenes(p: &filmcraft_project::Project, id: ItemId, filter: &str) -> bool {
+    p.scenes.get(&id).is_some_and(|idx| idx.shots.iter().any(|s| s.text().contains(filter)))
 }
 
 fn label_color(app: &FilmcraftApp, l: filmcraft_project::Label) -> Color32 {
