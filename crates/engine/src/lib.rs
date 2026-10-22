@@ -16,6 +16,7 @@ pub mod audio_generate;
 pub mod auto_duck;
 pub mod autocut;
 pub mod autosave;
+pub mod beat_pulse;
 pub mod captions;
 pub mod clip_ops;
 pub mod color;
