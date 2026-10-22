@@ -340,14 +340,14 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.shorts",
             "Make Shorts…",
             &[],
-            r#"{"item":id?,"sequence":id?,"count":1..20=3,"minSeconds":3..180=15,"maxSeconds":5..180=60,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","motion":"smooth"|"responsive"?,"fallback":"blur"|"letterbox"|"center"="blur","platform":"youtube"|"reels"|"tiktok"|"vertical"="youtube","captions":bool=true,"title":bool=false,"topic":str?,"analysisFps":1..60=30,"export":dir?,"uploadYoutube":bool=false,"youtube":{"channel":str?,"privacy":"private"|"unlisted"|"public"="private","tags":[str]?,"playlist":str?,"description":str?}?,"wait":bool=false}"#,
+            r#"{"item":id?,"sequence":id?,"count":1..20=3,"minSeconds":3..180=15,"maxSeconds":5..180=60,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","motion":"smooth"|"responsive"?,"fallback":"blur"|"letterbox"|"center"="blur","platform":"youtube"|"reels"|"tiktok"|"vertical"="youtube","captions":bool=true,"captionStyle":"bold|clean|glow|box|karaoke|twoLine|plain"="bold","captionKeywords":bool=false,"title":bool=false,"topic":str?,"analysisFps":1..60=30,"export":dir?,"uploadYoutube":bool=false,"youtube":{"channel":str?,"privacy":"private"|"unlisted"|"public"="private","tags":[str]?,"playlist":str?,"description":str?}?,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Shorts, p),
         ),
         job(
             "autocut.trailer",
             "Make a Trailer…",
             &[],
-            r#"{"sequence":id?,"plan":Plan?,"planPath":str?,"report":obj?,"reportPath":str?,"seconds":10..90=34,"aspect":"9:16"|"1:1"|"4:5"="9:16","platform":"reels"|"youtube"|"tiktok"|"vertical"="reels","robots":3..30?,"hook":str?,"hookAt":seconds?,"at":{"<label>":seconds|{"item":id?,"seconds":seconds}}?,"title":str?,"hookVoice":bool?,"logo":str?,"channel":str?,"endText":str="Full video on YouTube","link":str?,"exclude":[str]?,"include":[str]?,"bpm":80..180=124,"mood":str="energetic","seed":u64=7,"redact":"faces,plates"|"faces"|"plates"|false?,"fallback":"blur"|"letterbox"|"center"="blur","export":str?,"preset":str?,"qa":bool?,"wait":bool=false}"#,
+            r#"{"sequence":id?,"plan":Plan?,"planPath":str?,"report":obj?,"reportPath":str?,"seconds":10..90=34,"aspect":"9:16"|"1:1"|"4:5"="9:16","platform":"reels"|"youtube"|"tiktok"|"vertical"="reels","robots":3..30?,"hook":str?,"hookAt":seconds?,"at":{"<label>":seconds|{"item":id?,"seconds":seconds}}?,"title":str?,"hookVoice":bool?,"captions":bool?,"captionStyle":"bold|clean|glow|box|karaoke|twoLine|plain"="bold","captionKeywords":bool=false,"logo":str?,"channel":str?,"endText":str="Full video on YouTube","link":str?,"exclude":[str]?,"include":[str]?,"bpm":80..180=124,"mood":str="energetic","seed":u64=7,"redact":"faces,plates"|"faces"|"plates"|false?,"fallback":"blur"|"letterbox"|"center"="blur","export":str?,"preset":str?,"qa":bool?,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Trailer, p),
         ),
         job(
@@ -569,6 +569,19 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
 /// Most shorts one job makes.
 pub const MAX_SHORTS: u64 = 20;
 
+/// `captionStyle`: an animated caption preset (`bold`, the default, `clean`, `glow`, `box`,
+/// `karaoke`, `twoLine`) or `plain` for the outlined whole captions of before; its normal name.
+fn caption_style_p(cmd: &str, p: &Value) -> Result<Option<String>> {
+    match p.get("captionStyle").filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(Value::String(s)) if matches!(s.trim().to_ascii_lowercase().as_str(), "plain" | "classic" | "old" | "off") => Ok(Some("plain".into())),
+        Some(Value::String(s)) if s.chars().count() <= 32 => filmcraft_project::CaptionPreset::from_name(s)
+            .map(|pr| Some(pr.name().to_string()))
+            .ok_or_else(|| bad(cmd, format!("`captionStyle` is bold, clean, glow, box, karaoke, twoLine or plain, not \"{s}\""))),
+        Some(_) => Err(bad(cmd, "`captionStyle` is bold, clean, glow, box, karaoke, twoLine or plain")),
+    }
+}
+
 /// The checked parameters of `autocut.shorts` (see the module docs).
 fn shorts_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) -> Result<()> {
     let id = |k: &str| -> Result<Option<u64>> {
@@ -624,13 +637,14 @@ fn shorts_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>)
         Some(None) => return Err(bad(cmd, "`platform` is \"youtube\", \"reels\", \"tiktok\" or \"vertical\"")),
     };
     out.insert("platform".into(), json!(platform.name()));
-    for (k, default) in [("captions", true), ("title", false), ("uploadYoutube", false)] {
+    for (k, default) in [("captions", true), ("title", false), ("uploadYoutube", false), ("captionKeywords", false)] {
         let v = match p.get(k).filter(|v| !v.is_null()) {
             None => default,
             Some(v) => v.as_bool().ok_or_else(|| bad(cmd, format!("`{k}` must be true or false")))?,
         };
         out.insert(k.into(), json!(v));
     }
+    out.insert("captionStyle".into(), json!(caption_style_p(cmd, p)?.unwrap_or_else(|| "bold".into())));
     if let Some(t) = text_p(cmd, p, "topic", MAX_TEXT_CHARS)? {
         out.insert("topic".into(), json!(t));
     }
@@ -782,10 +796,13 @@ fn trailer_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>
         Some(f) => filmcraft_render::reframe::Fallback::from_name(&f).ok_or_else(|| bad(cmd, "`fallback` is \"blur\", \"letterbox\" or \"center\""))?,
     };
     out.insert("fallback".into(), json!(fallback.name()));
-    for key in ["hookVoice", "qa"] {
+    for key in ["hookVoice", "qa", "captions", "captionKeywords"] {
         if let Some(v) = p.get(key).filter(|v| !v.is_null()) {
             out.insert(key.into(), json!(v.as_bool().ok_or_else(|| bad(cmd, format!("`{key}` must be true or false")))?));
         }
+    }
+    if let Some(cs) = caption_style_p(cmd, p)? {
+        out.insert("captionStyle".into(), json!(cs));
     }
     match p.get("redact") {
         None | Some(Value::Null) => {}

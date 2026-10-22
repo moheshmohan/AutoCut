@@ -209,13 +209,20 @@ fn shadow_color_drag_is_one_undo_step() {
     let sw = d.rect("graphics.prop.shadow_color");
     d.ok("ui.click", json!({"x": sw[0] + sw[2] / 2.0, "y": sw[1] + sw[3] / 2.0}));
     d.frames(3);
-    // the popup flips above the swatch (it does not fit below); find a point in its 2D picker
+    // the popup opens below the swatch, or flips above it where it does not fit (and leftwards
+    // near the panel's right edge); find a point in its 2D picker
     let undo0 = d.exec("history.list", json!({}))["undo"].as_array().unwrap().len();
     let mut hit = None;
-    for (dx, dy) in [(30.0, 30.0), (150.0, 30.0), (30.0, 150.0), (150.0, 150.0)] {
-        let (px, py) = (sw[0] + dx, sw[1] - dy);
+    let mut points = Vec::new();
+    for dy in [80.0, 160.0, 240.0] {
+        for dx in [-150.0, -60.0, 30.0] {
+            points.push((sw[0] + dx, sw[1] - dy));
+            points.push((sw[0] + dx, sw[1] + sw[3] + dy));
+        }
+    }
+    for (px, py) in points {
         let before = color(&mut d);
-        d.ok("ui.drag", json!({"from": {"x": px, "y": py}, "to": {"x": px + 60.0, "y": py + 40.0}, "steps": 4}));
+        d.ok("ui.drag", json!({"from": {"x": px, "y": py}, "to": {"x": px + 30.0, "y": py + 20.0}, "steps": 4}));
         d.frames(3);
         let after = color(&mut d);
         if after != before {

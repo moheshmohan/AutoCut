@@ -232,7 +232,10 @@ pub fn pages(c: &Caption, style: &CaptionStyle, anim: &AnimatedCaptions, w: usiz
     let lh_k = if style.line_spacing.is_finite() { style.line_spacing.clamp(0.8, 4.0) } else { 1.2 };
     // the space at the rows of a two-line block
     let sp = space(style, anim, wf, hf, 2.0 * px * lh_k);
-    let max_w = ((sp.right - sp.left) * 0.96).max(px);
+    // the widest a line may be: the space, less the outline on both sides and the room the spoken
+    // word takes when it pops (with its overshoot)
+    let outline_full = outline_px(style, scale, px);
+    let max_w = (((sp.right - sp.left) * 0.98 - 2.0 * outline_full) / pop_reach(anim)).max(px);
     let widths: Vec<f32> = shown.iter().map(|s| extent(&layout(s, &ts, &ParagraphStyle::default())).width()).collect();
     // a line's width leaves out trailing spaces: the space is the difference
     let space_w = (measure("n n", &ts) - measure("nn", &ts)).max(px * 0.2);
@@ -350,11 +353,20 @@ pub fn page_rects(c: &Caption, style: &CaptionStyle, anim: &AnimatedCaptions, w:
     pages(c, style, anim, w, h)
         .into_iter()
         .map(|p| {
-            let widest = p.words.iter().map(|w| w.width).fold(0.0f32, f32::max);
-            let grow = outline_px(style, scale, p.size) + (anim.pop_scale() - 1.0) * (p.size * 0.6 + widest * 0.55);
-            (p.start, p.end, [p.rect[0] - grow, p.rect[1] - grow, p.rect[2] + grow, p.rect[3] + grow])
+            // the spoken word grows about its middle and its neighbours move aside: a line grows
+            // by its growth, half on each side
+            let o = outline_px(style, scale, p.size);
+            let k = pop_reach(anim) - 1.0;
+            let gx = o + k * (p.rect[2] - p.rect[0]) / 2.0;
+            let gy = o + k * p.size * 0.6;
+            (p.start, p.end, [p.rect[0] - gx, p.rect[1] - gy, p.rect[2] + gx, p.rect[3] + gy])
         })
         .collect()
+}
+
+/// The largest scale the spoken word reaches: its pop with the easing's overshoot.
+fn pop_reach(anim: &AnimatedCaptions) -> f32 {
+    1.0 + (anim.pop_scale() - 1.0) * 1.12
 }
 
 /// The outline width of a page set at `page_px` (a page set smaller keeps it in proportion).
@@ -681,7 +693,7 @@ mod tests {
     fn the_active_word_at_given_times() {
         let (st, a) = bold();
         let c = timed("make it count");
-        let p = &pages(&c, &st, &a, 1080, 1920)[0];
+        let p = &pages(&c, &st, &a, 1920, 1080)[0];
         let active = |t: f64| p.words.iter().rposition(|w| w.start <= Tick::from_seconds_f64(t));
         assert_eq!(active(0.0), Some(0));
         assert_eq!(active(0.39), Some(0));
@@ -689,7 +701,7 @@ mod tests {
         assert_eq!(active(0.9), Some(2));
         // and the drawn colours follow: the spoken word in yellow, the others white
         let yellow_left = |t: f64| {
-            let o = render(&c, &st, &a, 1080, 1920, Tick::from_seconds_f64(t)).unwrap();
+            let o = render(&c, &st, &a, 1920, 1080, Tick::from_seconds_f64(t)).unwrap();
             let mut xs = Vec::new();
             for y in 0..o.h {
                 for x in 0..o.w {

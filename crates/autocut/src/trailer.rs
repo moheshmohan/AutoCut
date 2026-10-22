@@ -14,7 +14,10 @@
 //!    `"48 robots"` and `"2013 → 2025"`, from the show's robot count and years (or `title`). The
 //!    show's first narration sentence plays over it (`hookVoice`, on when the show is narrated):
 //!    its narration clip, cut at the pause after the first sentence (`media.pauses`), in the
-//!    owner's voice.
+//!    owner's voice. Its words show as Bold animated captions inside the platform's safe zone,
+//!    timed from the narration's script (`captions: false` leaves them out, `captionStyle` picks
+//!    another look or `plain`, `captionKeywords` has the local model colour keywords and add
+//!    emoji; [`crate::caption_style`]); the export burns them in.
 //! 2. *Montage*: `robots` robots (12–18 by default, as the length allows), chronological so the
 //!    years build up — the earliest and the latest always, and in between the most striking of
 //!    each stretch of the show ([`choose`]), one per robot (an "again" visit is the same robot) —
@@ -59,6 +62,7 @@ use filmcraft_engine::safe_zones::Platform;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::caption_style;
 use crate::host::ReviewEntry;
 use crate::llm::ChatModel;
 use crate::look::{self, Bounds, Role, Theme};
@@ -154,6 +158,12 @@ pub struct Options {
     pub export: Option<String>,
     pub preset: Option<String>,
     pub qa: Option<bool>,
+    /// The hook voice's line as captions; `None`: when there is a hook voice.
+    pub captions: Option<bool>,
+    /// How the captions look (Bold animated by default; [`caption_style::Look`]).
+    pub caption_look: caption_style::Look,
+    /// The local model colours keywords and adds emoji to the captions.
+    pub caption_keywords: bool,
 }
 
 impl Default for Options {
@@ -183,6 +193,9 @@ impl Default for Options {
             export: None,
             preset: None,
             qa: None,
+            captions: None,
+            caption_look: caption_style::Look::Animated("bold".into()),
+            caption_keywords: false,
         }
     }
 }
@@ -284,6 +297,9 @@ impl Options {
             export: text("export"),
             preset: text("preset"),
             qa: p["qa"].as_bool(),
+            captions: p["captions"].as_bool(),
+            caption_look: caption_style::Look::of(p),
+            caption_keywords: p["captionKeywords"].as_bool() == Some(true),
         })
     }
 }
@@ -1194,6 +1210,40 @@ async fn media_size(ex: &dyn Executor, item: u64) -> Option<(f64, f64)> {
     (w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()).then_some((w, h))
 }
 
+/// The hook voice's line (`sentence`, said from `at` for `secs` seconds) as captions on a new
+/// caption track of the trailer: Bold animated captions by default (`captionStyle`), inside the
+/// platform's safe zone, the words timed from the narration's script (or spread over the line);
+/// with `captionKeywords` the model colours keywords and adds emoji. Whether a track was made
+/// (the export then burns it in); a step that fails is noted.
+async fn hook_captions(ex: &dyn Executor, sentence: &str, at: f64, secs: f64, opts: &Options, model: Option<&dyn ChatModel>, notes: &mut Vec<String>) -> bool {
+    let track = match run(ex, "captions.newTrack", json!({"format": "Subtitle", "name": "Captions"})).await {
+        Ok(r) => r["track"].as_u64(),
+        Err(e) => {
+            notes.push(format!("captions: {e}"));
+            None
+        }
+    };
+    let Some(track) = track else { return false };
+    if let Err(e) = run(ex, "captions.add", json!({"track": track, "text": sentence, "time": ticks(at), "durationSeconds": secs})).await {
+        notes.push(format!("captions: {e}"));
+        return false;
+    }
+    if let Err(e) = run(ex, "captions.wordTiming", json!({"track": track, "from": "narration"})).await {
+        notes.push(format!("captions: word timing: {e}; the words are spread over the line"));
+    }
+    let extra = match (model, opts.caption_keywords, &opts.caption_look) {
+        (Some(m), true, caption_style::Look::Animated(_)) => Some(caption_style::keywords(m, sentence, notes).await),
+        _ => None,
+    };
+    match caption_style::style_track(ex, track, opts.platform, &opts.caption_look, extra.as_ref()).await {
+        Ok(_) => true,
+        Err(e) => {
+            notes.push(format!("captions: {e}"));
+            true
+        }
+    }
+}
+
 /// The show's narration clip that opens it, and how far its first sentence runs: `(item, source
 /// in, seconds, the sentence)`. From the show's voice track (A2, the showcase's), its first clip;
 /// cut at the pause nearest where the first sentence's share of the line's text ends
@@ -1813,6 +1863,7 @@ pub async fn build(
     }
     // ---- the hook's voice: the show's first sentence, in its narrator's voice
     let mut voice_clips: Vec<u64> = Vec::new();
+    let mut captioned = false;
     let has_narration = !show.narration.is_empty();
     if opts.hook_voice.unwrap_or(has_narration) {
         match show.sequence {
@@ -1833,6 +1884,10 @@ pub async fn build(
                                 voice_clips.push(c);
                             }
                             made.voice = Some(json!({"item": item, "from": src, "seconds": secs, "at": at, "text": sentence}));
+                            // the line it says, as Bold animated captions (or `captionStyle`)
+                            if opts.captions != Some(false) {
+                                captioned = hook_captions(ex, &sentence, at, secs, opts, qa_model, &mut notes).await;
+                            }
                         }
                         Err(e) => notes.push(format!("hook voice: {e}")),
                     }
@@ -1911,7 +1966,7 @@ pub async fn build(
     // ---- the files
     if let Some(out) = opts.export.clone() {
         progress(&format!("exporting {out}"));
-        let mut ep = json!({"sequence": seq, "path": out, "wait": true});
+        let mut ep = json!({"sequence": seq, "path": out, "wait": true, "burnCaptions": captioned});
         match opts.preset.clone().or_else(|| (opts.frame == (1080, 1920)).then(|| VERTICAL_PRESET.to_string())) {
             Some(pr) => ep["preset"] = json!(pr),
             None => ep["format"] = json!("h264"),

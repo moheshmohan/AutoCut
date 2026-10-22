@@ -152,12 +152,17 @@ fn ticks(s: f64) -> i64 {
 #[test]
 fn captions_shrink_to_fit_between_the_side_zones() {
     let check = |rect: [f64; 4]| json!({"frame": [1080, 1920], "overlaps": [{"kind": "caption", "rect": rect, "zones": ["right"]}]});
-    // 800 px wide at two thirds down: YouTube allows 2 × 0.32 of the width centred
-    let need = caption_shrink(&check([140.0, 1100.0, 940.0, 1190.0]), Platform::Youtube);
-    assert!((need - 0.64 * 1080.0 / 800.0).abs() < 1e-9, "{need}");
+    // 900 px wide at two thirds down: centred on the frame, YouTube allows 2 × 0.32 of the width
+    let need = caption_shrink(&check([90.0, 1100.0, 990.0, 1190.0]), Platform::Youtube, 0.0);
+    assert!((need - 0.64 * 1080.0 / 900.0).abs() < 1e-9, "{need}");
+    // centred on the safe span (5 % to 82 %), the whole span: 0.77 of the width
+    let offset = crate::caption_style::safe_offset(Platform::Youtube);
+    let need = caption_shrink(&check([90.0, 1100.0, 990.0, 1190.0]), Platform::Youtube, offset);
+    assert!((need - 0.77 * 1080.0 / 900.0).abs() < 1e-9, "{need}");
+    assert_eq!(caption_shrink(&check([140.0, 1100.0, 940.0, 1190.0]), Platform::Youtube, offset), 1.0, "800 px fit the span");
     // TikTok's button column narrows it low in the frame, not high
-    let low = caption_shrink(&check([90.0, 1100.0, 990.0, 1190.0]), Platform::TikTok);
-    let high = caption_shrink(&check([90.0, 400.0, 990.0, 490.0]), Platform::TikTok);
+    let low = caption_shrink(&check([90.0, 1100.0, 990.0, 1190.0]), Platform::TikTok, 0.0);
+    let high = caption_shrink(&check([90.0, 400.0, 990.0, 490.0]), Platform::TikTok, 0.0);
     assert!(low < high && high < 1.0, "{low} {high}");
     // nothing in the way, a title, hostile answers: no shrinking, no panic
     for v in [
@@ -166,7 +171,8 @@ fn captions_shrink_to_fit_between_the_side_zones() {
         json!(null),
         json!({"frame": [0, -1], "overlaps": [{"kind": "caption", "rect": [f64::MAX, 0, 1, "x"]}, {"kind": "caption", "rect": "wide"}]}),
     ] {
-        assert_eq!(caption_shrink(&v, Platform::Vertical), 1.0, "{v}");
+        assert_eq!(caption_shrink(&v, Platform::Vertical, 0.0), 1.0, "{v}");
+        assert_eq!(caption_shrink(&v, Platform::Vertical, f64::NAN), 1.0, "{v}");
     }
     // the title's box stays inside every platform's safe area
     for p in Platform::ALL {
@@ -204,14 +210,33 @@ async fn makes_vertical_shorts_with_captions_end_to_end() {
             assert!(cap.captions.len() >= 4, "{} captions", cap.captions.len());
             assert!(!cap.style.background && cap.style.outline > 0.0 && cap.style.size > 60.0, "the social style");
             assert!(cap.captions.iter().all(|c| c.text.chars().count() <= 24), "a few words at a time");
+            // Bold animated captions by default, word-timed, kept to YouTube's safe zone
+            let a = cap.style.animated.as_ref().expect("animated captions");
+            assert_eq!((a.preset, a.platform), (filmcraft_project::CaptionPreset::Bold, Some(Platform::Youtube)));
+            assert!(cap.captions.iter().all(|c| !c.words.is_empty()), "word timing from the transcript");
             assert!(q.video_tracks.iter().flat_map(|t| &t.items).count() >= 2, "the clip and the title card");
             // the captions and the title inside YouTube Shorts' safe zone: above its bottom zone
             let safe = filmcraft_engine::safe_zones::check(&g.project, q, Platform::Youtube);
             assert_eq!(safe["ok"], true, "{safe}");
             assert!(safe["checked"].as_u64().unwrap() >= 5, "the captions and the title were checked: {safe}");
-            assert!(cap.style.margin as f64 >= Platform::Youtube.margins().bottom, "{}", cap.style.margin);
+            assert!(cap.style.margin > 0.0, "{}", cap.style.margin);
             assert_eq!(sh["safeZones"], json!({"platform": "youtube", "ok": true, "overlaps": 0}), "{sh}");
         }
+    }
+    // the old look on request: outlined whole captions, centred on YouTube's safe span (an x
+    // offset), still inside
+    let p = json!({"item": item, "count": 1, "minSeconds": 8.0, "maxSeconds": 30.0, "captions": true, "captionStyle": "plain", "analysisFps": 1});
+    let out = make(&ex, &p, None, &mut |_| {}).await.unwrap();
+    let sh = &out["shorts"][0];
+    assert_eq!(sh["safeZones"]["ok"], true, "{sh}");
+    {
+        let g = ex.0.lock().unwrap();
+        let id = sh["sequence"].as_u64().unwrap();
+        let q = g.project.items.values().find(|i| i.id.0 == id).and_then(|i| i.as_sequence()).unwrap();
+        let cap = q.caption_tracks.first().expect("captions");
+        assert!(cap.style.animated.is_none(), "plain captions");
+        assert!((f64::from(cap.style.x_offset) - crate::caption_style::safe_offset(Platform::Youtube)).abs() < 1e-6, "{}", cap.style.x_offset);
+        assert!(cap.style.margin as f64 >= Platform::Youtube.margins().bottom, "{}", cap.style.margin);
     }
     // TikTok: its wider side margins and button column; still inside
     let p = json!({"item": item, "count": 1, "minSeconds": 8.0, "maxSeconds": 30.0, "captions": true, "title": true, "platform": "tiktok", "analysisFps": 1});

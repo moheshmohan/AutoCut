@@ -458,3 +458,39 @@ fn entries_come_from_the_sequence_when_there_is_no_plan() {
     let c = candidates(&entries, &layout);
     assert_eq!(c.len(), 2);
 }
+
+/// The hook voice's line becomes Bold animated captions inside the platform's safe zone (words
+/// spread over the line when the narration cannot time them), or plain captions on request.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hook_voice_line_gets_bold_captions_in_the_safe_zone() {
+    let mut s = filmcraft_engine::Session::default();
+    s.execute("file.newSequence", json!({"name": "Trailer", "width": 1080, "height": 1920, "fps": 30})).unwrap();
+    let ex = crate::SessionExecutor::from(s);
+    let opts = Options { platform: Platform::Reels, ..Default::default() };
+    let mut notes = Vec::new();
+    assert!(hook_captions(&ex, "Forty eight robots over twelve years of shows", 0.1, 3.0, &opts, None, &mut notes).await);
+    assert!(notes.iter().any(|n| n.contains("word timing")), "no narration to time the words: {notes:?}");
+    {
+        let g = ex.0.lock().unwrap();
+        let q = g.active_sequence().unwrap();
+        let t = &q.caption_tracks[0];
+        let a = t.style.animated.as_ref().expect("animated captions");
+        assert_eq!((a.preset.name(), a.platform), ("bold", Some(Platform::Reels)));
+        assert_eq!(t.captions.len(), 1);
+        let safe = filmcraft_engine::safe_zones::check(&g.project, q, Platform::Reels);
+        assert_eq!(safe["ok"], true, "{safe}");
+    }
+    // the old look, and the options as a job gives them
+    let mut s = filmcraft_engine::Session::default();
+    s.execute("file.newSequence", json!({"name": "Trailer", "width": 1080, "height": 1920, "fps": 30})).unwrap();
+    let ex = crate::SessionExecutor::from(s);
+    let plain = Options { platform: Platform::Youtube, caption_look: caption_style::Look::Plain, ..Default::default() };
+    assert!(hook_captions(&ex, "Twelve years", 0.0, 2.0, &plain, None, &mut notes).await);
+    {
+        let g = ex.0.lock().unwrap();
+        let t = &g.active_sequence().unwrap().caption_tracks[0];
+        assert!(t.style.animated.is_none() && t.style.x_offset < 0.0, "{:?}", t.style);
+    }
+    let o = Options::from_params(&json!({"captions": false, "captionStyle": "karaoke", "captionKeywords": true})).unwrap();
+    assert_eq!((o.captions, o.caption_look, o.caption_keywords), (Some(false), caption_style::Look::Animated("karaoke".into()), true));
+}

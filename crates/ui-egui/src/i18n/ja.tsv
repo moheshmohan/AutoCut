@@ -4074,3 +4074,44 @@
 	Open a sequence to search its graphics	シーケンスを開くとグラフィックスを検索できます
 	No text graphics in this sequence. Add text with the Type tool.	このシーケンスにはテキストのグラフィックスがありません。文字ツールでテキストを追加してください。
 	No matching text.	一致するテキストはありません。
+# Animated captions and text effects (lane TX)
+	   Intensity	   強度
+	   Radius	   半径
+	Animate Text	テキストのアニメーション
+	Caption Word Timing	キャプションの単語のタイミング
+	Curve Radius	カーブの半径
+	From the narration	ナレーションから
+	From the transcript	文字起こしから
+	Glow Intensity	グローの強度
+	Inner Shadow	内側のシャドウ
+	Inner Shadow Angle	内側のシャドウの角度
+	Inner Shadow Blur	内側のシャドウのぼかし
+	Inner Shadow Color	内側のシャドウの色
+	Inner Shadow Distance	内側のシャドウの距離
+	Inner Shadow Opacity	内側のシャドウの不透明度
+	Keep the captions inside this platform's safe zone	キャプションをこのプラットフォームのセーフゾーン内に収めます
+	Outer Glow	外側のグロー
+	Stroke 3	線 3
+	Stroke 3 Color	線 3 の色
+	Stroke 3 Type	線 3 の位置
+	Stroke 3 Width	線 3 の幅
+	Text Style	テキストスタイル
+	Time words…	単語のタイミング…
+	Whole frame	フレーム全体
+	Text Animation	テキストアニメーション
+	Pop	ポップ
+	Drop	ドロップ
+	Pulse	パルス
+	Scale Up	拡大
+	Slide from Left	左からスライド
+	Slide from Right	右からスライド
+	Slide from Top	上からスライド
+	Slide from Bottom	下からスライド
+	By Letter	文字ごと
+	By Word	単語ごと
+	By Line	行ごと
+	Bold	ボールド
+	Clean	クリーン
+	Karaoke	カラオケ
+	Two-Line Subtitle	2 行の字幕
+	All vertical platforms	すべての縦型プラットフォーム

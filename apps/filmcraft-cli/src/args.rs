@@ -84,6 +84,7 @@ const VALUED: &[&str] = &[
     "--sequence",
     "--fallback",
     "--platform",
+    "--caption-style",
     // youtube upload, showcase --upload-youtube
     "--channel",
     "--tags",
@@ -167,6 +168,7 @@ const VALUED_IN: &[(&str, &[&str])] = &[
     ("ml-script", &["--plan"]),
     ("ml-lint", &["--plan"]),
     ("trailer", &["--plan", "--robots", "--hook", "--hook-at", "--logo", "--end-text", "--link", "--include", "--seed"]),
+    ("captions", &["--track", "--words", "--active-color", "--keyword-color", "--keywords", "--emoji", "--position", "--font", "--from"]),
 ];
 
 fn valued_in(cmd: Option<&String>, opt: &str) -> bool {

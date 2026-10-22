@@ -30,3 +30,4 @@ rustls-rustcrypto = { version = "0.0.2-alpha" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+filmcraft-project = { workspace = true }

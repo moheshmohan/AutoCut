@@ -174,6 +174,8 @@ fn caption_json(s: &Session, c: &filmcraft_project::Caption) -> Value {
         "text": c.text,
         "speaker": c.speaker,
         "settings": c.settings,
+        // how many of its words have timing (animated captions highlight them as spoken)
+        "timedWords": c.words.len(),
     })
 }
 
@@ -192,6 +194,8 @@ fn track_json(s: &Session, t: &CaptionTrack, index: usize) -> Value {
             "background": t.style.background, "backgroundColor": hex(t.style.background_color),
             "align": format!("{:?}", t.style.align).to_lowercase(), "anchor": format!("{:?}", t.style.anchor).to_lowercase(),
             "margin": t.style.margin, "lineSpacing": t.style.line_spacing, "outline": t.style.outline, "outlineColor": hex(t.style.outline_color),
+            "xOffset": t.style.x_offset,
+            "animated": t.style.animated.as_ref().map(crate::text_fx::animated_json),
         },
         "captions": t.captions.iter().map(|c| caption_json(s, c)).collect::<Vec<_>>(),
     })
@@ -296,7 +300,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "Caption Track Style",
             &[],
             None,
-            r##"{"track":id|"C1","font":str?,"size":f32?,"color":"#rrggbb[aa]"?,"background":bool?,"backgroundColor":"#rrggbbaa"?,"align":"left|center|right"?,"anchor":"top|middle|bottom"?,"margin":0..0.45 (fraction of frame height)?,"lineSpacing":f32?,"outline":f32?,"outlineColor":str?,"reset":bool?}"##,
+            r##"{"track":id|"C1","font":str?,"size":f32?,"color":"#rrggbb[aa]"?,"background":bool?,"backgroundColor":"#rrggbbaa"?,"align":"left|center|right"?,"anchor":"top|middle|bottom"?,"margin":0..0.45 (fraction of frame height)?,"xOffset":-0.5..0.5 (fraction of frame width: centre on a safe span)?,"lineSpacing":f32?,"outline":f32?,"outlineColor":str?,"reset":bool?}"##,
             has_caption_track,
             |s, p| {
                 let tid = track_param(s, p).ok_or_else(|| {
@@ -339,6 +343,9 @@ pub fn commands() -> Vec<CommandSpec> {
                     }
                     if let Some(v) = f64_p(&p, "margin") {
                         y.margin = (v as f32).clamp(0.0, 0.45);
+                    }
+                    if let Some(v) = f64_p(&p, "xOffset").filter(|v| v.is_finite()) {
+                        y.x_offset = (v as f32).clamp(-0.5, 0.5);
                     }
                     if let Some(v) = f64_p(&p, "lineSpacing") {
                         y.line_spacing = (v as f32).clamp(0.8, 4.0);

@@ -1374,6 +1374,95 @@ impl Ctx<'_> {
     }
 }
 
+/// The Text Animation section: for each of In, Out and Loop a kind (or None) and, when set, its
+/// unit, easing, amount, stagger and duration. Every change is a `graphics.animateText`.
+fn text_animation(ui: &mut egui::Ui, cx: &mut Ctx) {
+    use filmcraft_project::gltransition::EASING_OPTS;
+    use filmcraft_project::text_anim::{AnimKind, AnimUnit, Animator};
+    let current = cx.e.layer.as_ref().and_then(|x| x.anim.clone()).unwrap_or_default();
+    for (slot, label, now) in [("in", tl!("In"), current.enter), ("out", tl!("Out"), current.out), ("loop", tl!("Loop"), current.repeat)] {
+        let kinds: &[AnimKind] = if slot == "loop" { &AnimKind::LOOP } else { &AnimKind::IN };
+        let (_, mut vui) = cx.row(ui, label);
+        let shown = now.as_ref().map_or(crate::i18n::t("None"), |a| crate::i18n::t(a.kind.label()));
+        let mut pick: Option<Option<AnimKind>> = None;
+        let r = egui::ComboBox::from_id_salt(("gfx-anim", cx.clip.0, cx.layer, slot)).selected_text(shown).width(150.0).show_ui(&mut vui, |ui| {
+            if ui.selectable_label(now.is_none(), crate::i18n::t("None")).clicked() {
+                pick = Some(None);
+            }
+            for k in kinds {
+                if ui.selectable_label(now.as_ref().is_some_and(|a| a.kind == *k), crate::i18n::t(k.label())).clicked() {
+                    pick = Some(Some(*k));
+                }
+            }
+        });
+        cx.autos.push((format!("graphics.anim.{slot}.kind"), r.response.rect, format!("{label} animation")));
+        match pick {
+            Some(None) => cx.actions.push(("graphics.animateText".into(), json!({"clip": cx.clip.0, "layer": cx.layer, slot: null}))),
+            Some(Some(k)) => {
+                // a new kind starts from its designed look, keeping the unit chosen before
+                let mut a = Animator::preset(k);
+                if let Some(prev) = &now {
+                    a.unit = prev.unit;
+                }
+                cx.actions.push(("graphics.animateText".into(), json!({"clip": cx.clip.0, "layer": cx.layer, slot: animator_json(&a)})));
+            }
+            None => {}
+        }
+        let Some(a) = now else { continue };
+        // unit and easing
+        let (_, mut vui) = cx.row(ui, "");
+        let mut unit = a.unit;
+        let r = egui::ComboBox::from_id_salt(("gfx-anim-unit", cx.clip.0, cx.layer, slot)).selected_text(crate::i18n::t(a.unit.label())).width(100.0).show_ui(
+            &mut vui,
+            |ui| {
+                for u in AnimUnit::ALL {
+                    ui.selectable_value(&mut unit, u, crate::i18n::t(u.label()));
+                }
+            },
+        );
+        cx.autos.push((format!("graphics.anim.{slot}.unit"), r.response.rect, "Animation unit".into()));
+        vui.add_space(6.0);
+        let mut easing = a.easing as usize;
+        let r = egui::ComboBox::from_id_salt(("gfx-anim-ease", cx.clip.0, cx.layer, slot))
+            .selected_text(EASING_OPTS.get(a.easing as usize).map_or("", |o| crate::i18n::t(o)))
+            .width(110.0)
+            .height(300.0)
+            .show_ui(&mut vui, |ui| {
+                for (i, o) in EASING_OPTS.iter().enumerate() {
+                    ui.selectable_value(&mut easing, i, crate::i18n::t(o));
+                }
+            });
+        cx.autos.push((format!("graphics.anim.{slot}.easing"), r.response.rect, "Animation easing".into()));
+        let mut changed = Animator { unit, easing: easing as u32, ..a.clone() };
+        // amount, stagger and duration
+        let (_, mut vui) = cx.row(ui, "");
+        for (key, value, speed, range, dec, unit_s) in [
+            ("amount", a.amount, 1.0, (0.0, 1000.0), 0, " %"),
+            ("stagger", a.stagger, 0.005, (0.0, 60.0), 2, " s"),
+            ("duration", a.duration, 0.01, (0.0, 60.0), 2, " s"),
+        ] {
+            let (resp, nv) =
+                crate::widgets::hot_number(&mut vui, egui::Id::new(("gfx-anim-num", cx.clip.0, cx.layer, slot, key)), value, speed, range, dec, unit_s, &cx.t);
+            cx.autos.push((format!("graphics.anim.{slot}.{key}"), resp.rect, format!("Animation {key}")));
+            if let Some(v) = nv {
+                match key {
+                    "amount" => changed.amount = v,
+                    "stagger" => changed.stagger = v,
+                    _ => changed.duration = v,
+                }
+            }
+            vui.add_space(6.0);
+        }
+        if changed != a {
+            cx.actions.push(("graphics.animateText".into(), json!({"clip": cx.clip.0, "layer": cx.layer, slot: animator_json(&changed)})));
+        }
+    }
+}
+
+fn animator_json(a: &filmcraft_project::text_anim::Animator) -> Value {
+    json!({"kind": a.kind.name(), "unit": a.unit.name(), "amount": a.amount, "stagger": a.stagger, "easing": a.easing, "duration": a.duration})
+}
+
 fn section(ui: &mut egui::Ui, app: &mut FilmcraftApp, name: &str, t: &Tokens) -> bool {
     section_header(ui, app, name, t).0
 }
@@ -1810,6 +1899,7 @@ pub fn properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             for (on, col, w, kind, label) in [
                 ("stroke", "stroke_color", "stroke_width", "stroke_type", tl!("Stroke")),
                 ("stroke2", "stroke2_color", "stroke2_width", "stroke2_type", tl!("Stroke 2")),
+                ("stroke3", "stroke3_color", "stroke3_width", "stroke3_type", tl!("Stroke 3")),
             ] {
                 let (_, mut vui) = cx.row(ui, label);
                 cx.check(&mut vui, on, "");
@@ -1837,6 +1927,31 @@ pub fn properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 cx.number(ui, tl!("   Size"), "shadow_size", 0.5, (0.0, 1000.0), 0, "");
                 cx.number(ui, tl!("   Blur"), "shadow_blur", 0.5, (0.0, 1000.0), 0, "");
             }
+            let (_, mut vui) = cx.row(ui, tl!("Outer Glow"));
+            let glow = cx.check(&mut vui, "glow", "");
+            cx.color(&mut vui, "glow_color");
+            if glow {
+                cx.number(ui, tl!("   Radius"), "glow_radius", 0.5, (0.0, 1000.0), 0, "");
+                cx.number(ui, tl!("   Intensity"), "glow_intensity", 1.0, (0.0, 1000.0), 0, " %");
+            }
+            let (_, mut vui) = cx.row(ui, tl!("Inner Shadow"));
+            let inner = cx.check(&mut vui, "inner_shadow", "");
+            cx.color(&mut vui, "inner_shadow_color");
+            if inner {
+                cx.number(ui, tl!("   Opacity"), "inner_shadow_opacity", 0.5, (0.0, 100.0), 0, " %");
+                cx.number(ui, tl!("   Angle"), "inner_shadow_angle", 0.5, (-36_000.0, 36_000.0), 0, " °");
+                cx.number(ui, tl!("   Distance"), "inner_shadow_distance", 0.5, (0.0, 1000.0), 0, "");
+                cx.number(ui, tl!("   Blur"), "inner_shadow_blur", 0.5, (0.0, 1000.0), 0, "");
+            }
+            if e.effect == graphic::TEXT_LAYER {
+                // text on an arc: the bend (positive arches up) and an optional fixed radius
+                cx.number(ui, tl!("Curve"), "curve", 0.5, (-100.0, 100.0), 0, " %");
+                cx.number(ui, tl!("Curve Radius"), "curve_radius", 2.0, (0.0, 100_000.0), 0, "");
+            }
+        }
+        // ---- text animation: in, out and loop animators (graphics.animateText)
+        if e.effect == graphic::TEXT_LAYER && section(ui, app, "Text Animation", &t) {
+            text_animation(ui, &mut cx);
         }
         actions.append(&mut cx.actions);
         autos.append(&mut cx.autos);
@@ -1851,7 +1966,7 @@ pub fn properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     for (cmd, mut p) in actions {
         // a drag of a property is one undo step: the first change of each press begins a new one,
         // the rest fold into it (like Effect Controls, #201 / #887)
-        if matches!(cmd.as_str(), "graphics.set" | "graphics.setCharStyle") && down {
+        if matches!(cmd.as_str(), "graphics.set" | "graphics.setCharStyle" | "graphics.animateText") && down {
             p["merge"] = json!(true);
             p["begin"] = json!(begun != press);
             wrote = true;

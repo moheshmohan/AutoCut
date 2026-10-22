@@ -430,20 +430,21 @@ pub fn blocks_to_captions(blocks: &[CaptionBlock], words: &[SeqWord], ctx: &mut 
         .collect()
 }
 
-/// Word timing for existing captions from the sequence transcript: each caption gets the words
-/// spoken inside it (a word belongs to the caption its middle falls in). Returns how many
-/// captions got words; captions nobody speaks in keep theirs.
-pub fn time_captions_from_words(captions: &mut [Caption], words: &[SeqWord]) -> usize {
+/// Word timing for existing captions from timed words `(text, start, end)` in sequence time (the
+/// transcript's, a narration's): each caption gets the words spoken inside it (a word belongs to
+/// the caption its middle falls in). Returns how many captions got words; captions nobody speaks
+/// in keep theirs.
+pub fn time_captions_from_words(captions: &mut [Caption], words: &[(String, Tick, Tick)]) -> usize {
     let mut n = 0;
     for c in captions.iter_mut() {
-        let (a, b) = (c.start, c.end());
+        let (a, b) = (c.start, Tick(c.start.0.saturating_add(c.duration.0)));
         let inside: Vec<(String, Tick, Tick)> = words
             .iter()
-            .filter(|w| {
-                let mid = Tick(w.start.0 / 2 + w.end.0 / 2);
+            .filter(|(_, s, e)| {
+                let mid = Tick(s.0 / 2 + e.0 / 2);
                 mid >= a && mid < b
             })
-            .map(|w| (w.text.clone(), w.start, w.end))
+            .cloned()
             .collect();
         if !inside.is_empty() {
             c.set_word_times(&inside);

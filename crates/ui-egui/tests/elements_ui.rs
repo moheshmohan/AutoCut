@@ -94,7 +94,7 @@ fn the_elements_folder_lists_searches_and_inserts() {
     assert!(rows.iter().all(|r| r.starts_with("effects.element.sticker.")), "{rows:?}");
     // a search opens every folder and keeps the matches
     d.search("pop");
-    assert_eq!(d.ids("effects.element."), ["effects.element.sound.pop", "effects.element.text.title-pop"]);
+    assert_eq!(d.ids("effects.element."), ["effects.element.sound.pop", "effects.element.text.title-pop", "effects.element.text.pop-letters"]);
     // right-click ▸ Insert at Playhead: the sound goes on a free audio track at the playhead
     let audio = d.clips("audio").len();
     d.ok("ui.click", json!({"id": "effects.element.sound.pop", "button": "right"}));

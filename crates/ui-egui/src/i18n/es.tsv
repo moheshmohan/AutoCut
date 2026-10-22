@@ -4075,3 +4075,44 @@
 	Open a sequence to search its graphics	Abre una secuencia para buscar en sus gráficos
 	No text graphics in this sequence. Add text with the Type tool.	Esta secuencia no tiene gráficos con texto. Añade texto con la herramienta Texto.
 	No matching text.	Ningún texto coincide.
+# Animated captions and text effects (lane TX)
+	   Intensity	   Intensidad
+	   Radius	   Radio
+	Animate Text	Animar texto
+	Caption Word Timing	Tiempo de las palabras de los subtítulos
+	Curve Radius	Radio de la curva
+	From the narration	Desde la narración
+	From the transcript	Desde la transcripción
+	Glow Intensity	Intensidad del resplandor
+	Inner Shadow	Sombra interior
+	Inner Shadow Angle	Ángulo de la sombra interior
+	Inner Shadow Blur	Desenfoque de la sombra interior
+	Inner Shadow Color	Color de la sombra interior
+	Inner Shadow Distance	Distancia de la sombra interior
+	Inner Shadow Opacity	Opacidad de la sombra interior
+	Keep the captions inside this platform's safe zone	Mantener los subtítulos dentro de la zona segura de esta plataforma
+	Outer Glow	Resplandor exterior
+	Stroke 3	Trazo 3
+	Stroke 3 Color	Color del trazo 3
+	Stroke 3 Type	Tipo del trazo 3
+	Stroke 3 Width	Anchura del trazo 3
+	Text Style	Estilo de texto
+	Time words…	Temporizar palabras…
+	Whole frame	Fotograma completo
+	Text Animation	Animación de texto
+	Pop	Aparición
+	Drop	Caída
+	Pulse	Pulso
+	Scale Up	Ampliar
+	Slide from Left	Deslizar desde la izquierda
+	Slide from Right	Deslizar desde la derecha
+	Slide from Top	Deslizar desde arriba
+	Slide from Bottom	Deslizar desde abajo
+	By Letter	Por letra
+	By Word	Por palabra
+	By Line	Por línea
+	Bold	Negrita
+	Clean	Limpio
+	Karaoke	Karaoke
+	Two-Line Subtitle	Subtítulo de dos líneas
+	All vertical platforms	Todas las plataformas verticales

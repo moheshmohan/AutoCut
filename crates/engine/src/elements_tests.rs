@@ -31,7 +31,7 @@ fn lists_every_element_with_its_provenance() {
     let mut s = Session::default();
     let all = s.execute("elements.list", json!({})).unwrap();
     let all = all.as_array().unwrap();
-    assert_eq!(all.len(), 12 + 10 + 6);
+    assert_eq!(all.len(), 12 + 10 + 12);
     let ids: std::collections::HashSet<&str> = all.iter().filter_map(|e| e["id"].as_str()).collect();
     assert_eq!(ids.len(), all.len(), "unique ids");
     for e in all {
@@ -43,7 +43,7 @@ fn lists_every_element_with_its_provenance() {
         let id = e["id"].as_str().unwrap();
         assert!(id.starts_with(&format!("{}.", e["kind"].as_str().unwrap())), "{id}");
     }
-    for (kind, n) in [("sound", 12), ("sticker", 10), ("text", 6), ("Stickers", 10), (" TEXT ", 6)] {
+    for (kind, n) in [("sound", 12), ("sticker", 10), ("text", 12), ("Stickers", 10), (" TEXT ", 12)] {
         assert_eq!(s.execute("elements.list", json!({"kind": kind})).unwrap().as_array().unwrap().len(), n, "{kind}");
     }
     let whooshes = s.execute("elements.list", json!({"query": "whoosh"})).unwrap();
