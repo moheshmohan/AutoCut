@@ -788,7 +788,7 @@ fn creator(op: u32, p: vec2<i32>) -> vec4<f32> {
             let bs = sample_clamped(sx - spl, pc.y);
             let a = max(max(rs.a, gs.a), bs.a);
             var o = vec4(rs.r, gs.g, bs.b, a);
-            if r > 1.0 - amount * 0.06 {
+            if r > 1.0 - amount * 0.03 {
                 o = vec4(max(vec3(a) - o.rgb, vec3(0.0)), a);
             }
             return o;

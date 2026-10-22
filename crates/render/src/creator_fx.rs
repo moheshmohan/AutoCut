@@ -484,7 +484,7 @@ impl CreatorOp {
                 let (rs, gs, bs) = (s.sample_bilinear_clamped(sx + spl, pcy), s.sample_bilinear_clamped(sx, pcy), s.sample_bilinear_clamped(sx - spl, pcy));
                 let a = rs[3].max(gs[3]).max(bs[3]);
                 let mut o = [rs[0], gs[1], bs[2], a];
-                if r > 1.0 - amount * 0.06 {
+                if r > 1.0 - amount * 0.03 {
                     for c in &mut o[..3] {
                         *c = (a - *c).max(0.0);
                     }
