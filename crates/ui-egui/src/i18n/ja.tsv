@@ -4077,4 +4077,71 @@
 
 # Voice Isolation, Enhance Voice and the Voice Changer (effects, Essential Sound, commands, presets)
 	Voice Isolation	ボイスアイソレーション
+	Enhance Voice	音声を強調
+	Voice Changer	ボイスチェンジャー
+	Pitch	ピッチ
+	Character	キャラクター
+	Robot	ロボット
+	Deep	低音
+	Radio	無線
+	Alien	エイリアン
+	Isolate Voice	音声を分離
+	Voice Isolation Model Status	音声分離モデルの状態
+	Download Voice Isolation Model	音声分離モデルをダウンロード
+	Enhance Voice in a File	ファイルの音声を強調
+	Keeps speech and removes noise, crowds, music and hum (neural model when downloaded)	音声を残し、ノイズ、人混み、音楽、ハムを取り除きます（ダウンロード済みならニューラルモデル）
+	Isolation, rumble cut, presence lift, de-esser, 3:1 compression and a limiter	分離、低域ノイズのカット、プレゼンスの強調、ディエッサー、3:1 のコンプレッション、リミッター
+	Robot Voice	ロボットの声
+	Ring-modulated through a metallic comb tuned to a note	音程に合わせた金属的なコムフィルターを通したリングモジュレーション
+	Deep Voice	低い声
+	Five semitones down with a fuller low end	5 半音下げて低域を豊かに
+	Chipmunk Voice	シマリスの声
+	Seven semitones up, thinner	7 半音上げて細めに
+	Walkie-Talkie	トランシーバー
+	Narrow band and overdriven, like a handheld radio	携帯無線機のような狭い帯域と歪み
+	Alien Voice	エイリアンの声
+	Pitched up, wobbling and ring-modulated	高めで揺らぎ、リングモジュレーションをかけた声
+	Echo Voice	エコーの声
+	A voice repeating across a large space	広い空間で繰り返し響く声
+	Isolate and Enhance Voice	音声を分離して強調
 # Animated captions and text effects (lane TX)
+	   Intensity	   強度
+	   Radius	   半径
+	Animate Text	テキストのアニメーション
+	Caption Word Timing	キャプションの単語のタイミング
+	Curve Radius	カーブの半径
+	From the narration	ナレーションから
+	From the transcript	文字起こしから
+	Glow Intensity	グローの強度
+	Inner Shadow	内側のシャドウ
+	Inner Shadow Angle	内側のシャドウの角度
+	Inner Shadow Blur	内側のシャドウのぼかし
+	Inner Shadow Color	内側のシャドウの色
+	Inner Shadow Distance	内側のシャドウの距離
+	Inner Shadow Opacity	内側のシャドウの不透明度
+	Keep the captions inside this platform's safe zone	キャプションをこのプラットフォームのセーフゾーン内に収めます
+	Outer Glow	外側のグロー
+	Stroke 3	線 3
+	Stroke 3 Color	線 3 の色
+	Stroke 3 Type	線 3 の位置
+	Stroke 3 Width	線 3 の幅
+	Text Style	テキストスタイル
+	Time words…	単語のタイミング…
+	Whole frame	フレーム全体
+	Text Animation	テキストアニメーション
+	Pop	ポップ
+	Drop	ドロップ
+	Pulse	パルス
+	Scale Up	拡大
+	Slide from Left	左からスライド
+	Slide from Right	右からスライド
+	Slide from Top	上からスライド
+	Slide from Bottom	下からスライド
+	By Letter	文字ごと
+	By Word	単語ごと
+	By Line	行ごと
+	Bold	ボールド
+	Clean	クリーン
+	Karaoke	カラオケ
+	Two-Line Subtitle	2 行の字幕
+	All vertical platforms	すべての縦型プラットフォーム

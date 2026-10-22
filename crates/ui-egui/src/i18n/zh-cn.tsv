@@ -3799,4 +3799,47 @@
 
 # Voice Isolation, Enhance Voice and the Voice Changer
 	Isolate Voice	隔离人声
+	Enhance Voice	增强人声
+	Voice Isolation	人声隔离
+	Voice Changer	变声器
 # Animated captions and text effects (lane TX)
+	   Intensity	强度
+	   Radius	半径
+	Animate Text	文本动画
+	Caption Word Timing	字幕逐词计时
+	Curve Radius	弯曲半径
+	From the narration	根据旁白
+	From the transcript	根据转录文本
+	Glow Intensity	发光强度
+	Inner Shadow	内阴影
+	Inner Shadow Angle	内阴影角度
+	Inner Shadow Blur	内阴影模糊
+	Inner Shadow Color	内阴影颜色
+	Inner Shadow Distance	内阴影距离
+	Inner Shadow Opacity	内阴影不透明度
+	Keep the captions inside this platform's safe zone	让字幕保持在此平台的安全区内
+	Outer Glow	外发光
+	Stroke 3	描边 3
+	Stroke 3 Color	描边 3 颜色
+	Stroke 3 Type	描边 3 类型
+	Stroke 3 Width	描边 3 宽度
+	Text Style	文本样式
+	Time words…	单词计时…
+	Whole frame	整个画面
+	Text Animation	文本动画
+	Pop	弹出
+	Drop	下落
+	Pulse	脉动
+	Scale Up	放大
+	Slide from Left	从左侧滑入
+	Slide from Right	从右侧滑入
+	Slide from Top	从顶部滑入
+	Slide from Bottom	从底部滑入
+	By Letter	按字母
+	By Word	按单词
+	By Line	按行
+	Bold	粗体
+	Clean	简洁
+	Karaoke	卡拉 OK
+	Two-Line Subtitle	双行字幕
+	All vertical platforms	所有竖屏平台
