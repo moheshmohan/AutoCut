@@ -10,15 +10,24 @@
 //!   decoding, language detection and word-level timestamps from cross-attention alignment (DTW).
 //! - [`diarize`]: speaker labelling by clustering per-chunk MFCC statistics (classical, no model).
 //! - [`mel`]: the log-mel front end shared by Whisper and diarization.
-//! - [`vad`]: energy-based tightening of word bounds (keeps pauses out of words).
+//! - [`vad`]: where speech is (Silero VAD, [`silero`], with an energy fallback) and energy-based
+//!   tightening of word bounds (keeps pauses out of words).
+//! - [`ecapa`] (feature `whisper`): ECAPA-TDNN speaker embeddings on candle ([`fbank`] is its
+//!   front end): neural speaker labels and the narration voice gate.
 //!
 //! See `docs/transcripts.md` for the user-facing behaviour and accuracy numbers.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 pub mod diarize;
+#[cfg(feature = "whisper")]
+pub mod ecapa;
+pub mod fbank;
 pub mod mel;
 pub mod models;
+pub mod silero;
+pub mod speakers;
+pub mod understand;
 pub mod vad;
 #[cfg(feature = "whisper")]
 pub mod whisper;
@@ -34,7 +43,7 @@ pub const TICKS_PER_SAMPLE: i64 = TICKS_PER_SECOND / SAMPLE_RATE as i64;
 
 /// Media time of a 16 kHz sample index.
 pub fn sample_tick(n: i64) -> Tick {
-    Tick(n * TICKS_PER_SAMPLE)
+    Tick(n.saturating_mul(TICKS_PER_SAMPLE))
 }
 
 /// Media time of `s` seconds (rounded to the nearest 16 kHz sample).

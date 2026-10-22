@@ -180,11 +180,13 @@ impl Whisper {
         }
     }
 
-    /// Greedy decode of one window. Returns sampled tokens (no prompt, no end-of-text), the mean
-    /// log-probability and the no-speech probability.
-    fn decode_window(&self, m: &mut Model, xa: &Tensor, prompt: &[u32]) -> Result<(Vec<u32>, f32, f32), SpeechError> {
+    /// Greedy decode of one window. Returns sampled tokens (no prompt, no end-of-text), each
+    /// token's probability (before the timestamp rules), the mean log-probability and the
+    /// no-speech probability.
+    fn decode_window(&self, m: &mut Model, xa: &Tensor, prompt: &[u32]) -> Result<(Vec<u32>, Vec<f32>, f32, f32), SpeechError> {
         m.decoder.reset();
         let mut seq: Vec<u32> = Vec::new();
+        let mut probs: Vec<f32> = Vec::new();
         let (logits, _) = m.decoder.forward(prompt, xa, true, None).map_err(merr)?;
         // no-speech probability from the start-of-transcript position
         let first = logits.get(0).and_then(|l| l.get(0)).and_then(|l| l.to_vec1::<f32>()).map_err(merr)?;
@@ -195,11 +197,13 @@ impl Whisper {
             let lp = log_softmax(&cur);
             self.constrain(&mut cur, &seq, Some(50));
             let next = argmax(&cur);
-            sum_lp += lp[next as usize];
+            let lpn = lp.get(next as usize).copied().unwrap_or(f32::NEG_INFINITY);
+            sum_lp += lpn;
             if next == self.tok.eot {
                 break;
             }
             seq.push(next);
+            probs.push(lpn.exp());
             if repeating(&seq, self.tok.timestamp_begin) {
                 break;
             }
@@ -207,7 +211,7 @@ impl Whisper {
             cur = Model::last_logits(&logits).map_err(merr)?;
         }
         let avg = sum_lp / (seq.len() + 1) as f32;
-        Ok((seq, avg, no_speech))
+        Ok((seq, probs, avg, no_speech))
     }
 
     /// Greedy decode of one window as plain text (`<|notimestamps|>`): text tokens only, up to
@@ -251,7 +255,7 @@ impl Whisper {
 }
 
 /// The device a model runs on: the GPU when asked and there is one, else the CPU.
-fn device(gpu: bool) -> candle_core::Device {
+pub(crate) fn device(gpu: bool) -> candle_core::Device {
     #[cfg(target_os = "macos")]
     {
         if gpu
@@ -350,7 +354,7 @@ impl Transcriber for Whisper {
                 prompt.push(self.tok.language_token(lang).unwrap_or(self.tok.sot + 1));
                 prompt.push(self.tok.transcribe);
             }
-            let (toks, avg_lp, no_speech) = self.decode_window(&mut m, &xa, &prompt)?;
+            let (toks, probs, avg_lp, no_speech) = self.decode_window(&mut m, &xa, &prompt)?;
             if trace {
                 eprintln!("decode {} tokens {:.3}s", toks.len(), clock.elapsed().as_secs_f64());
             }
@@ -370,17 +374,30 @@ impl Transcriber for Whisper {
                     Some(i) if !single_ending => i,
                     _ => toks.len(),
                 };
-                let text: Vec<u32> = toks[..upto].iter().copied().filter(|&t| t < self.tok.eot).collect();
+                let kept: Vec<(u32, f32)> = toks
+                    .iter()
+                    .zip(probs.iter().copied().chain(std::iter::repeat(1.0)))
+                    .take(upto)
+                    .map(|(t, p)| (*t, p))
+                    .filter(|(t, _)| *t < self.tok.eot)
+                    .collect();
+                let text: Vec<u32> = kept.iter().map(|k| k.0).collect();
                 let mut aprompt = prompt.clone();
                 aprompt.push(self.tok.no_timestamps);
                 let times = align::align(&mut m, &xa, &aprompt, &text, self.tok.eot, &self.alignment_heads, seg_frames).map_err(merr)?;
                 let offset = seek * SAMPLES_PER_FRAME;
                 let limit = (seek + advance) * SAMPLES_PER_FRAME;
                 for (wtext, r) in tokenizer::group_words(&self.tok, &text) {
-                    let (s, e) = (times[r.start].0, times[r.end - 1].1);
+                    let (Some(first), Some(last)) = (times.get(r.start), r.end.checked_sub(1).and_then(|i| times.get(i))) else { continue };
+                    let (s, e) = (first.0, last.1);
                     let a = (offset + s * SAMPLES_PER_FRAME).min(limit);
                     let b = (offset + e * SAMPLES_PER_FRAME).min(limit).max(a);
-                    words.push(Word::new(wtext, sample_tick(a as i64), sample_tick(b as i64)));
+                    // the word's confidence: the geometric mean of its tokens' probabilities
+                    let lps: Vec<f32> = kept.get(r.clone()).unwrap_or(&[]).iter().map(|k| k.1.max(1e-6).ln()).collect();
+                    let conf = if lps.is_empty() { 1.0 } else { (lps.iter().sum::<f32>() / lps.len() as f32).exp() };
+                    let mut w = Word::new(wtext, sample_tick(a as i64), sample_tick(b as i64));
+                    w.confidence = if conf.is_finite() { conf.clamp(0.0, 1.0) } else { 0.0 };
+                    words.push(w);
                 }
             }
             if trace {

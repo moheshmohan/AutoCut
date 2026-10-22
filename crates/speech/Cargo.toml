@@ -39,3 +39,7 @@ candle-nn = { version = "0.9", default-features = false, features = ["metal"], o
 [[example]]
 name = "transcribe"
 required-features = ["whisper"]
+
+[[example]]
+name = "diarize_lab"
+required-features = ["whisper"]

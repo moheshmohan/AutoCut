@@ -25,6 +25,7 @@ pub mod mask;
 pub mod mixer;
 pub mod multicam;
 pub mod narration;
+pub mod speech;
 pub mod transcript;
 pub mod transition_catalog;
 pub mod transition_engines;
@@ -48,6 +49,7 @@ pub use mask::{Mask, MaskMode, MaskPath, MaskVertex, SplitCorner, TrackMethod};
 pub use mixer::{AutomationMode, InputMap, MixerStrip, TrackSend};
 pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSource};
 pub use narration::{Delivery, Narration, NumberStyle, VocalPitch};
+pub use speech::SpeechAnalysis;
 pub use transcript::{Speaker, Transcript, Word};
 pub use transition_sound::{SoundKind, TransitionSound};
 
@@ -1266,6 +1268,11 @@ pub struct Project {
     /// are media time. Shared (`Arc`) so undo snapshots don't copy them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub transcripts: BTreeMap<ItemId, std::sync::Arc<Transcript>>,
+    /// What speech understanding found in media items (`media.understandSpeech`): segments,
+    /// pauses, fillers, retakes and a shot hint, in media time beside each item's transcript.
+    /// Derived data: no schema step (a build without it drops it, and the command remakes it).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub speech: BTreeMap<ItemId, std::sync::Arc<SpeechAnalysis>>,
     /// Search bins (File ▸ New ▸ Search Bin): saved Find queries listed in the Project panel.
     /// Schema v11.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1374,6 +1381,7 @@ impl Project {
             next_id: 1,
             luts: Vec::new(),
             transcripts: BTreeMap::new(),
+            speech: BTreeMap::new(),
             search_bins: Vec::new(),
             source_graphics: BTreeMap::new(),
             narrations: BTreeMap::new(),

@@ -82,6 +82,7 @@ pub mod shortcut_presets;
 pub mod shortcuts;
 pub mod soundfonts;
 pub mod source_monitor;
+pub mod speech_understand;
 pub mod sync;
 pub mod transcript;
 pub mod transition_tools;
@@ -501,6 +502,9 @@ pub struct Session {
     /// Auto Reframe analyses whose keyframes are written when they finish (`sequence.autoReframe`,
     /// `clip.autoReframe`), and what the finished ones made.
     pub reframes: reframe::Reframes,
+    /// Speech understanding jobs (`media.understandSpeech`) whose transcripts and analyses are
+    /// stored when they finish, and what the finished ones found.
+    pub speech_jobs: speech_understand::Understandings,
     /// Automatic privacy blur jobs (`clip.autoRedact`, `sequence.autoRedact`) whose masks are
     /// written when they finish, what the finished ones made, and the host's vision check.
     pub redacts: redact::Redacts,
@@ -645,6 +649,7 @@ impl Session {
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
             reframes: Default::default(),
+            speech_jobs: Default::default(),
             redacts: Default::default(),
             neural_music: Default::default(),
             soundfonts: Default::default(),
@@ -775,6 +780,7 @@ impl Session {
         masks::poll(self);
         scene_detect::poll(self);
         reframe::poll(self);
+        speech_understand::poll(self);
         redact::poll(self);
         music_neural::poll(self);
         export_tools::pump_queue(self, false);
