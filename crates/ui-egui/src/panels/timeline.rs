@@ -2073,7 +2073,13 @@ pub(crate) const CLIP_MENU: &[&[(&str, &str)]] = &[
     ],
     &[("Label", "edit.label")],
     &[("Add Marker", "markers.add")],
-    &[("Speed/Duration…", "clip.speedDuration"), ("Scene Edit Detection…", "clip.sceneEditDetection"), ("Auto Redact Faces and Plates…", "clip.autoRedact")],
+    &[
+        ("Speed/Duration…", "clip.speedDuration"),
+        ("Speed Ramp…", "clip.speedRamp"),
+        ("Stabilize…", "clip.stabilize"),
+        ("Scene Edit Detection…", "clip.sceneEditDetection"),
+        ("Auto Redact Faces and Plates…", "clip.autoRedact"),
+    ],
     &[
         ("Frame Hold Options…", "clip.frameHoldOptions"),
         ("Add Frame Hold", "clip.frameHold"),
@@ -2887,7 +2893,9 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             let _ = app.session.execute("timeline.select", json!({"clips": [clip.0]}));
         }
     }
-    resp.context_menu(|ui| {
+    // the menu bar's style (Premiere's menus are the system's, a row every 24 px): with egui's
+    // own spacing the clip menu ran past the bottom of a 980-pt laptop window
+    egui::Popup::context_menu(&resp).style(crate::theme::menu_style).show(|ui| {
         ui.set_min_width(220.0);
         if let Some(marker) = ctx.data(|d| d.get_temp::<Option<MarkerId>>(marker_menu_id)).flatten() {
             marker_menu(app, &ctx, ui, marker);

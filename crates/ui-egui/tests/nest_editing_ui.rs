@@ -133,3 +133,25 @@ fn the_clip_menu_offers_multi_camera_and_reveal_in_project() {
     d.click("timeline.clipMenu.clip.revealInProject");
     assert_eq!(d.app().session.state.project_selection, vec![item]);
 }
+
+/// The clip menu fits a 980-pt laptop window: with egui's own spacing it ran past the bottom,
+/// cutting off Join Through Edits and Template Slot. Speed Ramp… and Stabilize… are in it and
+/// open their dialogs.
+#[test]
+fn the_clip_menu_fits_the_window_and_offers_speed_ramp_and_stabilize() {
+    let mut d = Driver::new();
+    let clip = d.app().session.active_sequence().unwrap().video_tracks[0].items[0].id.0;
+    d.ok("ui.click", json!({"id": format!("timeline.clip.{clip}"), "button": "right"}));
+    d.frames(3);
+    let entries = d.ok("ui.elements", json!({"prefix": "timeline.clipMenu."}));
+    let entries = entries.as_array().unwrap();
+    assert!(entries.len() > 30, "{entries:?}");
+    for e in entries {
+        let r = &e["rect"];
+        let (top, bottom) = (r[1].as_f64().unwrap(), r[1].as_f64().unwrap() + r[3].as_f64().unwrap());
+        assert!(top >= 0.0 && bottom <= 980.0, "{} is off the window: {r}", e["id"]);
+    }
+    assert!(d.has("timeline.clipMenu.clip.stabilize"));
+    d.click("timeline.clipMenu.clip.speedRamp");
+    assert!(d.has("speedRamp.preset.montage"), "the Speed Ramp dialog");
+}
