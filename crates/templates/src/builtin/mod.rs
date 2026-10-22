@@ -29,12 +29,19 @@
 //! | `builtin:unboxing` | package, opening, the reveal, details and a verdict |
 //! | `builtin:qa-session` | three questions on cards, each answered on camera, with captions |
 //! | `builtin:robot-showcase` | five robots (or gadgets), each with a spec card, glitch cuts on the beat |
+//! | `builtin:tech-reveal` | a hook, eight b-roll shots on the beat, the reveal and its name, an end card (AI hints) |
+//! | `builtin:event-recap-short` | the place with the event's name, ten moments on the beat, a closing card (AI hints) |
+//! | `builtin:talking-head-tip` | three kept takes, b-roll cutaways over the joins, word captions (AI hints) |
+//! | `builtin:gadget-showcase` | a close-up hook, three features with spec cards, the hero shot (AI hints) |
+//! | `builtin:before-after-short` | the before, a swipe to the after, both stacked (AI hints) |
+//! | `builtin:day-in-30s` | twelve moments in the order they were filmed, on tape (AI hints) |
 //!
 //! Each comes in 16:9 (1920×1080) and 9:16 (1080×1920); the social ones also in 1:1
 //! (1080×1080) and 4:5 (1080×1350).
 
 mod classic;
 mod creator;
+mod shorts;
 mod social;
 mod stories;
 
@@ -53,8 +60,8 @@ use filmcraft_project::{
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 
 use crate::manifest::{
-    BeatGrid, CaptionSpec, Constraints, Fit, Framing, Hint, LayerHint, Manifest, Placement, Portion, ShortFit, Slot, SlotDefault, SlotKind, Variant,
-    default_fit,
+    AiHints, BeatGrid, CaptionSpec, Constraints, EnergyHint, Fit, Framing, Hint, LayerHint, Manifest, Placement, Portion, Purpose, ShortFit, Slot, SlotDefault,
+    SlotKind, Variant, default_fit,
 };
 use crate::{FORMAT, FORMAT_VERSION, Package, SEQUENCE_FILE, TemplateError};
 
@@ -352,6 +359,33 @@ impl Builder {
         });
     }
 
+    /// An adjustment clip named `name` on video track `track`: its effects (added with
+    /// [`Builder::effect`]) apply to the tracks under it.
+    pub(crate) fn adjustment(&mut self, name: &str, track: usize, start: Tick, dur: Tick) -> ClipId {
+        let item = self.p.add_item(name, Label::Lavender, ItemKind::AdjustmentLayer { width: W, height: H, rate: RATE, duration: dur }, None);
+        let c = self.clip(TrackKind::Video, track, item, start, dur);
+        self.with_clip(c, |it| it.name = name.to_string());
+        c
+    }
+
+    /// A zoom pulse on `clip` (`len` long) at every `every` from its start: Motion's scale
+    /// `100 + amount` on the beat, back to 100 six frames later.
+    pub(crate) fn pulse(&mut self, clip: ClipId, len: Tick, every: Tick, amount: f64) {
+        if every <= frames(7) {
+            return;
+        }
+        let mut keys = Vec::new();
+        let mut t = Tick::ZERO;
+        while t + frames(6) < len && keys.len() < 256 {
+            keys.push((t, 100.0 + amount));
+            keys.push((t + frames(6), 100.0));
+            t += every;
+        }
+        if !keys.is_empty() {
+            self.ramp(clip, "motion", "scale", &keys);
+        }
+    }
+
     /// An Elements sticker or animated text preset (`text.title-pop`) as a graphic clip.
     pub(crate) fn element(&mut self, track: usize, start: Tick, dur: Tick, id: &str) -> ClipId {
         let Some(t) = filmcraft_project::elements::all().into_iter().find(|t| filmcraft_project::elements::element_id(t) == id) else { return ClipId(0) };
@@ -577,6 +611,22 @@ pub(crate) fn slot(id: &str, kind: SlotKind, name: &str, prompt: &str, order: u3
     }
 }
 
+/// Picture-slot hints: what the shot is for, how lively, words to find it by.
+pub(crate) fn shot_ai(purpose: Purpose, energy: Option<EnergyHint>, query: &str) -> AiHints {
+    AiHints { purpose: Some(purpose), energy, query: query.into(), ..AiHints::default() }
+}
+
+/// Text-slot hints: what the local model writes (at most `max_chars`), about which picture slot.
+pub(crate) fn text_ai(prompt: &str, max_chars: u32, about: &str) -> AiHints {
+    AiHints { prompt: prompt.into(), max_chars: Some(max_chars), about: about.into(), ..AiHints::default() }
+}
+
+/// `s` with hints `ai`.
+pub(crate) fn with_ai(mut s: Slot, ai: AiHints) -> Slot {
+    s.ai = (!ai.is_empty()).then_some(ai);
+    s
+}
+
 /// A text slot of one or more placements (`(clip, layer)`, media index in turn), at most
 /// `max_chars` characters.
 pub(crate) fn text_slot(id: &str, name: &str, prompt: &str, order: u32, places: &[(ClipId, u64)], max_chars: u32) -> Slot {
@@ -701,7 +751,7 @@ pub(crate) fn steady_grid(bpm: f64, until: Tick) -> Option<BeatGrid> {
 
 /// Every starter, in library order: (id without `builtin:`, builder).
 type Make = fn() -> Result<Package, TemplateError>;
-const STARTERS: [(&str, Make); 21] = [
+const STARTERS: [(&str, Make); 27] = [
     ("photo-beat-slideshow", classic::photo_beat_slideshow),
     ("channel-intro", classic::channel_intro),
     ("top-3-listicle", classic::top_3_listicle),
@@ -723,6 +773,12 @@ const STARTERS: [(&str, Make); 21] = [
     ("unboxing", social::unboxing),
     ("qa-session", creator::qa_session),
     ("robot-showcase", stories::robot_showcase),
+    ("tech-reveal", shorts::tech_reveal),
+    ("event-recap-short", shorts::event_recap_short),
+    ("talking-head-tip", shorts::talking_head_tip),
+    ("gadget-showcase", shorts::gadget_showcase),
+    ("before-after-short", shorts::before_after_short),
+    ("day-in-30s", shorts::day_in_30s),
 ];
 
 /// The built-in templates (each checked like a file from disk; one that would fail is left out).
@@ -742,7 +798,7 @@ pub fn find(key: &str) -> Option<&'static Package> {
 }
 
 /// Ids of the built-in templates, in library order.
-pub const BUILTIN_IDS: [&str; 21] = [
+pub const BUILTIN_IDS: [&str; 27] = [
     "builtin:photo-beat-slideshow",
     "builtin:channel-intro",
     "builtin:top-3-listicle",
@@ -764,7 +820,27 @@ pub const BUILTIN_IDS: [&str; 21] = [
     "builtin:unboxing",
     "builtin:qa-session",
     "builtin:robot-showcase",
+    "builtin:tech-reveal",
+    "builtin:event-recap-short",
+    "builtin:talking-head-tip",
+    "builtin:gadget-showcase",
+    "builtin:before-after-short",
+    "builtin:day-in-30s",
 ];
+
+/// The built-in starters made to fill themselves (`autocut.quick`): every slot with AI hints.
+pub const AI_READY_IDS: [&str; 6] = [
+    "builtin:tech-reveal",
+    "builtin:event-recap-short",
+    "builtin:talking-head-tip",
+    "builtin:gadget-showcase",
+    "builtin:before-after-short",
+    "builtin:day-in-30s",
+];
+
+/// The name of the adjustment clip a starter's creator look sits on starts with this
+/// (`Look: tech`), so a fill can swap the look.
+pub const LOOK_CLIP_PREFIX: &str = shorts::LOOK_PREFIX;
 
 /// Build every built-in template, with the errors of any that does not validate (for tests).
 pub fn build_all() -> Vec<(&'static str, Result<Package, TemplateError>)> {

@@ -108,6 +108,30 @@ not one of loop, stretch, hold, remix, error`).
 | `beatSync` | the edges of this slot's placements are cuts on the beat grid |
 | `default` | `{"text": …}` for text slots, `{"generate": {"mood", "bpm", "seed", "genre"?}}` for music (a bed made with `audio.generate`; moods `epic`, `tense`, `uplifting`, `calm`, `happy`, `dark`, `dreamy`, `energetic`, `sad`; genres `cinematic`, `electronic`, `pop`, `ambient`, `lofi`, `piano`) |
 | `captions` | captions slots: `{"source": [slot ids], "maxChars": 32, "lines": 1}` |
+| `ai` | optional hints for filling the slot automatically (`autocut.quick`), below |
+
+### AI hints
+
+`"ai": {…}` on a slot says what an automatic fill should put there. Every field is optional,
+checked against the slot's kind (a picture hint on a text slot is an error), and a template
+without hints still fills by hand (the fill then goes by the pictures' quality).
+
+| field | slots | meaning |
+|---|---|---|
+| `purpose` | video, photo, logo | what the shot is for: `hook`, `broll`, `reveal`, `talking-head`, `establishing`, `outro` (the scene index's purposes, `media.bestShots`) |
+| `query` | video, photo, logo | words to find the shot by (`media.searchScenes`), ≤ 200 bytes |
+| `energy` | video, photo, logo | `low`, `medium` or `high` (the shot description's energy) |
+| `speech` | video | `want` (a shot with someone speaking: its sound is the point) or `avoid` (a cutaway) |
+| `minQuality` | video, photo, logo | the least picture quality wanted (the scene index's score, 0–1) |
+| `chronological` | video, photo, logo | the picks of every slot saying so, in the template's order, keep the order they were filmed in |
+| `prompt` | text | what the local model writes here (≤ 1000 bytes) |
+| `maxChars` | text | the longest text it may write (at most the slot's own `maxChars`) |
+| `about` | text | the picture slot whose shots the texts describe, one text per shot (`names` about `robots`) |
+
+```json
+{"id": "broll", "kind": "video", "count": 8, "ai": {"purpose": "broll", "energy": "high"}, …}
+{"id": "title", "kind": "text", "ai": {"prompt": "The name of what is revealed, 1 to 3 words", "maxChars": 16, "about": "reveal"}, …}
+```
 
 **Captions slots** (one per template) caption what is said in the `source` slots' media (video or
 music slots). They have no placements: the captions go on the template's first caption track, in its
@@ -219,6 +243,18 @@ Reels & Shorts, YouTube, Vlog, Business, Social, Events and Tech.
 | `builtin:unboxing` | 15 s, 120 bpm | `package`, `opening`, `reveal`, `details` ×2 (beat-synced, with their sound), `hook`, `reveal_text`, `verdict`, `music` |
 | `builtin:qa-session` | 24 s | `answers` ×3 (with their sound), `questions` ×3 (speech-bubble cards), `captions`, `music` |
 | `builtin:robot-showcase` | 26 s, 120 bpm | `intro`, `robots` ×5 (beat-synced, glitch transitions), `title`, `subtitle`, `names` ×5, `facts` ×5 (spec cards), `outro`, `outro_sub`, `music` |
+| `builtin:tech-reveal` | 17 s, 120 bpm | `hook`, `broll` ×8 (beat-synced, glitch and pull cuts, zoom pulses), `reveal`, `hook_line`, `title`, `outro`, `outro_sub`, `music`; tech look |
+| `builtin:event-recap-short` | 16 s, 120 bpm | `establishing`, `moments` ×10 (beat-synced, filming order, swipes), `event`, `when`, `closing`, `music` |
+| `builtin:talking-head-tip` | 24 s | `takes` ×3 (with their sound, filming order), `cutaways` ×2 (over the joins), `hook`, `cta`, `captions` (Bold animated), `music` (kept low) |
+| `builtin:gadget-showcase` | 16.5 s, 120 bpm | `hook`, `features` ×3 (spec cards), `hero`, `names` ×3, `facts` ×3, `name`, `question`, `question_sub`, `music`; tech look |
+| `builtin:before-after-short` | 10.5 s | `before`, `after` (filming order; full, a swipe, then stacked), `labels`, `title`, `music` |
+| `builtin:day-in-30s` | 28.8 s, 100 bpm | `moments` ×12 (beat-synced, filming order, dissolves and a light leak), `title`, `closing`, `music`; tape look |
+
+The last six are the **Shorts and Reels starters made to fill themselves** (`AI_READY_IDS`):
+vertical first, every picture and text slot with AI hints, Creator transitions (`crt_*`), cuts
+and zoom pulses on the beat, text inside the safe area every platform leaves in the vertical
+layout (15–65 % of the height, 12–82 % of the width), and the tech or tape look on an
+adjustment clip named `Look: tech` / `Look: vhs` (an automatic fill swaps it for another look).
 
 ## Saving (`save::save`)
 
