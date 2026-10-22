@@ -183,6 +183,10 @@ fn essential_sound_panel_by_id_and_by_drag() {
         "essentialSound.section.Creative",
         "essentialSound.repair.noise.on",
         "essentialSound.repair.noise.amount",
+        "essentialSound.repair.isolate.on",
+        "essentialSound.repair.isolate.amount",
+        "essentialSound.repair.enhanceVoice.on",
+        "essentialSound.repair.enhanceVoice.amount",
         "essentialSound.repair.humHz.1",
         "essentialSound.clarity.eqPreset",
         "essentialSound.creative.reverbPreset",
@@ -202,6 +206,15 @@ fn essential_sound_panel_by_id_and_by_drag() {
     let amt = es(&mut d, a1)["settings"]["repair"]["noise"]["amount"].as_f64().unwrap();
     assert!(amt > 8.0, "slider dragged to {amt}");
     assert_eq!(d.exec("history.list", json!({}))["undo"].as_array().unwrap().len(), undo0 + 1, "a drag is one undo step");
+    // Isolate Voice and Enhance Voice put their effects first and after the other repairs
+    d.click("essentialSound.repair.isolate.on");
+    d.click("essentialSound.repair.enhanceVoice.on");
+    let c = es(&mut d, a1);
+    let fx: Vec<String> = c["effects"].as_array().unwrap().iter().map(|e| e["effect"].as_str().unwrap_or("").to_string()).collect();
+    let pos = |id: &str| fx.iter().position(|e| e == id).unwrap_or_else(|| panic!("{id} not in {fx:?}"));
+    assert!(pos("voice_isolation") < pos("denoise") && pos("denoise") < pos("enhance_voice"), "{fx:?}");
+    d.click("essentialSound.repair.isolate.on");
+    d.click("essentialSound.repair.enhanceVoice.on");
     // the section switch bypasses the section's effects
     d.click("essentialSound.section.Repair.toggle");
     let c = es(&mut d, a1);

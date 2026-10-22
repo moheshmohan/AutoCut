@@ -89,6 +89,8 @@ const LAYERS: &[(&str, u8)] = &[
     ("acestep", 2),
     // privacy detection: face and plate detectors (candle), tracking
     ("vision", 2),
+    // voice isolation: DeepFilterNet 3 in plain Rust (weights through vision's ONNX reader)
+    ("voice", 2),
     // SoundFont instruments for the music engine (rustysynth behind a structural SF2 check)
     ("soundfont", 2),
     ("interchange", 2),
@@ -144,6 +146,7 @@ const SAME_LAYER: &[(&str, &str)] = &[
     ("youtube", "oauth"),
     ("instagram", "oauth"),
     ("automation", "screenagent"),
+    ("voice", "vision"),
 ];
 
 /// Crates that must not appear below L5 (UI toolkits, windowing, OS audio/menus).

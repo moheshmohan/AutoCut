@@ -52,6 +52,7 @@ filmcraft-captions = { path = "crates/captions" }
 filmcraft-speech = { path = "crates/speech" }
 filmcraft-tts = { path = "crates/tts" }
 filmcraft-vision = { path = "crates/vision" }
+filmcraft-voice = { path = "crates/voice" }
 filmcraft-tts-text = { path = "crates/tts-text" }
 filmcraft-acestep = { path = "crates/acestep" }
 filmcraft-soundfont = { path = "crates/soundfont" }
@@ -108,6 +109,10 @@ opt-level = 2
 opt-level = 1
 
 # Codec hot loops: debug-build tests (RFC/oracle vectors) are minutes slower below opt-level 3.
+# The voice model: its tests run the network on seconds of audio.
+[profile.dev.package.filmcraft-voice]
+opt-level = 3
+
 [profile.dev.package.filmcraft-h264]
 opt-level = 3
 

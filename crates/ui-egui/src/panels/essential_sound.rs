@@ -276,6 +276,9 @@ fn typed_body(ui: &mut egui::Ui, cx: &mut Ctx, st: &EssentialSound, items: &[Tra
             match sec {
                 Section::Loudness => loudness(ui, cx, st, items),
                 Section::Repair => {
+                    // the neural voice model when it is downloaded (audio.downloadVoiceModel)
+                    slot(ui, cx, tl!("Isolate Voice"), "repair.isolate", st.repair.isolate, on);
+                    slot(ui, cx, tl!("Enhance Voice"), "repair.enhanceVoice", st.repair.enhance_voice, on);
                     slot(ui, cx, tl!("Reduce Noise"), "repair.noise", st.repair.noise, on);
                     slot(ui, cx, tl!("Reduce Rumble"), "repair.rumble", st.repair.rumble, on);
                     slot(ui, cx, tl!("DeHum"), "repair.dehum", st.repair.dehum, on);

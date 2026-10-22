@@ -237,6 +237,10 @@ pub const DIRECT: &[(&str, &str, f64)] = &[
     ("multitap_delay", "multitap_delay", 0.0),
     ("convolution_reverb", "convolution_reverb", 0.0),
     ("surround_reverb", "surround_reverb", 0.0),
+    // the voice model's normalisation and memories settle over about a second
+    ("voice_isolation", "voice_isolation", 1.5),
+    ("enhance_voice", "enhance_voice", 1.5),
+    ("voice_changer", "voice_changer", 0.7),
 ];
 
 /// Pre-roll of a direct mapping: its own tail, and at least long enough for the DSP's
@@ -452,6 +456,15 @@ mod tests {
                     k => panic!("{pid}.{}: unsupported kind {k:?}", p.id),
                 }
             }
+        }
+    }
+
+    #[test]
+    fn voice_changer_modes_match_the_dsp() {
+        assert_eq!(filmcraft_project::effect::VOICE_CHANGER_MODES, filmcraft_audio_dsp::effects::voice_changer::MODES);
+        for id in ["voice_isolation", "enhance_voice", "voice_changer"] {
+            assert!(supported(id), "{id}");
+            assert!(latency(id, 48_000) > 0, "{id}");
         }
     }
 

@@ -122,6 +122,45 @@ fn interleaved_clips_with_the_same_item_id_keep_their_own_effect_chains() {
     assert_same("bursts", &got_b, &want_b);
 }
 
+/// One clip of `signal` on A1 with the speech effects: Voice Isolation, Enhance Voice, a Voice
+/// Changer (stateful STFTs, model memories, a pitch shifter, delay lines).
+fn voice_rig(signal: fn(i64, usize) -> f32) -> Rig {
+    let mut r = Rig::new(&[signal]);
+    let item = &mut r.track(0).items[0];
+    item.effects.push(effect("voice_isolation", &[("intensity", 90.0)], false));
+    item.effects.push(effect("enhance_voice", &[("amount", 60.0)], false));
+    let mut changer = effect("voice_changer", &[("character", 70.0)], false);
+    changer.param_mut("mode").unwrap().value = ParamValue::Choice(3);
+    item.effects.push(changer);
+    r
+}
+
+#[test]
+fn interleaved_clips_keep_their_own_voice_effects() {
+    let (a, b) = (voice_rig(loud), voice_rig(bursts));
+    assert_eq!(clip_id(&a), clip_id(&b));
+    let (want_a, want_b) = (solo(&a), solo(&b));
+    let (got_a, got_b) = interleaved(&a, &b);
+    assert_same("loud", &got_a, &want_a);
+    assert_same("bursts", &got_b, &want_b);
+}
+
+/// The speech effects' latency (40 ms and more) is compensated: with nothing mixed in (Voice
+/// Isolation at 0 %, Voice Changer at 0 % mix) the clip sounds exactly where it does without them.
+#[test]
+fn voice_effect_latency_is_compensated() {
+    let plain = solo(&Rig::new(&[bursts]));
+    let mut r = Rig::new(&[bursts]);
+    let item = &mut r.track(0).items[0];
+    item.effects.push(effect("voice_isolation", &[("intensity", 0.0)], false));
+    item.effects.push(effect("voice_changer", &[("mix", 0.0)], false));
+    let got = solo(&r);
+    assert!(crate::audio_fx::latency("voice_isolation", 48_000) >= 1920);
+    assert_eq!(got.len(), plain.len());
+    let worst = got.iter().zip(&plain).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(worst < 1e-5, "out of sync or changed: worst sample differs by {worst}");
+}
+
 /// Two projects whose stretched clips have the same media reference but different sound (a file
 /// replaced between sessions, two tests importing under one name): each stretches its own sound,
 /// exactly as when its media is named apart.

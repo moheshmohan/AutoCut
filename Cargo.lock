@@ -2613,6 +2613,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "filmcraft-voice"
+version = "0.10.0"
+dependencies = [
+ "filmcraft-audio-dsp",
+ "filmcraft-vision",
+ "miniz_oxide 0.8.9",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "filmcraft-vp8"
 version = "0.10.0"
 dependencies = [

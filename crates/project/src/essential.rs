@@ -152,6 +152,10 @@ pub struct Repair {
     pub hum_hz: u32,
     pub deess: Slot,
     pub reverb: Slot,
+    /// Isolate Voice (the Voice Isolation effect; `amount` × 10 = its intensity).
+    pub isolate: Slot,
+    /// Enhance Voice (the one-knob voice boost; `amount` × 10 = its amount).
+    pub enhance_voice: Slot,
 }
 
 impl Default for Repair {
@@ -164,6 +168,8 @@ impl Default for Repair {
             hum_hz: 60,
             deess: Slot::off(5.0),
             reverb: Slot::off(5.0),
+            isolate: Slot::off(8.0),
+            enhance_voice: Slot::off(7.0),
         }
     }
 }
@@ -360,6 +366,8 @@ impl EssentialSound {
             &mut self.repair.dehum,
             &mut self.repair.deess,
             &mut self.repair.reverb,
+            &mut self.repair.isolate,
+            &mut self.repair.enhance_voice,
             &mut self.clarity.dynamics,
             &mut self.clarity.eq,
             &mut self.clarity.enhance,
@@ -412,6 +420,9 @@ impl EssentialSound {
         let f = ParamValue::Float;
         if k.has(Section::Repair) {
             let r = &self.repair;
+            if r.isolate.on {
+                push("voice_isolation", r.enabled, &[("intensity", f(r.isolate.amount * 10.0))]);
+            }
             if r.rumble.on {
                 push("highpass", r.enabled, &[("cutoff", f(rumble_cutoff(r.rumble.amount)))]);
             }
@@ -427,6 +438,9 @@ impl EssentialSound {
             }
             if r.reverb.on {
                 push("dereverb", r.enabled, &[("amount", f(r.reverb.amount * 10.0))]);
+            }
+            if r.enhance_voice.on {
+                push("enhance_voice", r.enabled, &[("amount", f(r.enhance_voice.amount * 10.0))]);
             }
         }
         if k.has(Section::Clarity) {
@@ -503,8 +517,20 @@ pub fn rumble_cutoff(amount: f64) -> f64 {
 }
 
 /// Canonical processing order of the effects Essential Sound manages.
-pub const EFFECT_ORDER: &[&str] =
-    &["highpass", "denoise", "dehummer", "deesser", "dereverb", "dynamics", "parametric_eq", "speech_enhance", "stereo_width", "studio_reverb"];
+pub const EFFECT_ORDER: &[&str] = &[
+    "voice_isolation",
+    "highpass",
+    "denoise",
+    "dehummer",
+    "deesser",
+    "dereverb",
+    "enhance_voice",
+    "dynamics",
+    "parametric_eq",
+    "speech_enhance",
+    "stereo_width",
+    "studio_reverb",
+];
 
 fn rank(id: &str) -> usize {
     EFFECT_ORDER.iter().position(|e| *e == id).unwrap_or(EFFECT_ORDER.len())

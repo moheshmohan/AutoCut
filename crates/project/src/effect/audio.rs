@@ -58,6 +58,9 @@ fn geq(labels: &[&'static str]) -> Vec<ParamDef> {
 
 const SLOPES: &[&str] = &["12 dB/oct", "24 dB/oct", "36 dB/oct", "48 dB/oct"];
 
+/// The Voice Changer's modes (the DSP's `voice_changer::MODES`, same order).
+pub const VOICE_CHANGER_MODES: &[&str] = &["Robot", "Deep", "High", "Echo", "Radio", "Alien"];
+
 fn peq_band(p: [&'static str; 4], name: &'static str, freq: f64, q: f64) -> Vec<ParamDef> {
     group(name, vec![b(p[0], "On", true), hz(p[1], "Frequency", freq, 20.0, 20000.0), db(p[2], "Gain", 0.0, -30.0, 30.0), num(p[3], "Q", q, 0.1, 30.0, "", 2)])
 }
@@ -426,6 +429,9 @@ pub(super) fn defs() -> Vec<EffectDef> {
             vec![f("amount", "Amount", 50.0, 0.0, 100.0, "%"), fs("rt60", "Decay Time (RT60)", 0.8, (0.1, 5.0), (0.1, 3.0), "s", 2)],
         ),
         audio("speech_enhance", "Enhance Speech", A_NOISE, vec![f("mix", "Mix", 100.0, 0.0, 100.0, "%"), ch("tone", "Voice", &["Low Tone", "High Tone"], 0)]),
+        // speech: the neural voice model (DeepFilterNet 3) when it is downloaded, else DSP
+        audio("voice_isolation", "Voice Isolation", A_NOISE, vec![pct("intensity", "Intensity", 80.0, 0.0, 100.0)]),
+        audio("enhance_voice", "Enhance Voice", A_NOISE, vec![pct("amount", "Amount", 70.0, 0.0, 100.0), db("output", "Output Gain", 0.0, -24.0, 24.0)]),
         // ---- Reverb ----
         audio(
             "convolution_reverb",
@@ -541,6 +547,17 @@ pub(super) fn defs() -> Vec<EffectDef> {
         ),
         audio("swap_channels", "Swap Channels", A_SPECIAL, vec![]),
         audio("vocal_enhancer", "Vocal Enhancer", A_SPECIAL, vec![ch("mode", "Mode", &["Male", "Female", "Music"], 0)]),
+        audio(
+            "voice_changer",
+            "Voice Changer",
+            A_SPECIAL,
+            vec![
+                ch("mode", "Mode", VOICE_CHANGER_MODES, 0),
+                pct("mix", "Mix", 100.0, 0.0, 100.0),
+                fs("pitch", "Pitch", 0.0, (-12.0, 12.0), (-12.0, 12.0), "st", 1),
+                pct("character", "Character", 50.0, 0.0, 100.0),
+            ],
+        ),
         // ---- Stereo Imagery ----
         audio(
             "stereo_expander",

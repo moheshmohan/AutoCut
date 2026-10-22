@@ -3,6 +3,7 @@
 pub mod channel;
 pub mod declick;
 pub mod dynamics;
+pub mod enhance_voice;
 pub mod eq;
 pub mod essential;
 pub mod filters;
@@ -15,10 +16,13 @@ pub mod special;
 mod stft;
 pub mod time;
 pub(crate) mod util;
+pub mod voice;
+pub mod voice_changer;
 
 pub use channel::{Amplify, Balance, ChannelVolume, Invert, Route, Routing};
 pub use declick::ClickRemover;
 pub use dynamics::{Compressor, Gate, Limiter};
+pub use enhance_voice::EnhanceVoice;
 pub use eq::{ParametricEq, SimpleEq};
 pub use essential::{DeEsser, DeReverb, SpeechEnhance, StereoWidth};
 pub use filters::{FftFilter, FullParametricEq, GraphicEq, NotchFilter, ScientificFilter};
@@ -29,6 +33,8 @@ pub use restoration::{DeHum, DeNoise};
 pub use reverbs::{ConvolutionReverb, SurroundReverb};
 pub use special::{AmbisonicsPanner, Binauralizer, ChannelMixer, Distortion, GuitarSuite, LoudnessMeterFx, Mastering, Mute, StereoExpander, VocalEnhancer};
 pub use time::{Delay, Reverb};
+pub use voice::VoiceIsolation;
+pub use voice_changer::VoiceChanger;
 
 use crate::{AudioEffect, ParamSpec};
 
@@ -143,6 +149,10 @@ static REGISTRY: &[EffectInfo] = &[
     entry!("ambisonics_panner", "Panner - Ambisonics", Special, AmbisonicsPanner),
     entry!("loudness_meter", "Loudness Meter", Special, LoudnessMeterFx),
     entry!("mute", "Mute", Channel, Mute),
+    // speech (the neural model when the host installs one: `voice`)
+    entry!("voice_isolation", "Voice Isolation", Restoration, VoiceIsolation),
+    entry!("enhance_voice", "Enhance Voice", Restoration, EnhanceVoice),
+    entry!("voice_changer", "Voice Changer", Special, VoiceChanger),
 ];
 
 /// All registered effects.

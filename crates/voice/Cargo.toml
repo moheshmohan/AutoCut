@@ -1,0 +1,23 @@
+[package]
+name = "filmcraft-voice"
+description = "FilmCraft voice isolation: DeepFilterNet 3 (MIT/Apache-2.0) speech enhancement in plain Rust — its pinned download, a strict reader of the model archive, the network checked layer by layer against the ONNX files, and the model the audio effects run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# Layer L2. The network is plain Rust (no ML framework, no C): the weights come from the model's
+# ONNX files through filmcraft-vision's strict ONNX reader (a same-layer edge, default features
+# only: serde and thiserror), the archive is inflated with miniz_oxide (pure Rust).
+[dependencies]
+filmcraft-audio-dsp = { workspace = true }
+filmcraft-vision = { workspace = true }
+miniz_oxide = "0.8"
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[[example]]
+name = "voice_bench"
