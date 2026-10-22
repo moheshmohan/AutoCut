@@ -2175,7 +2175,7 @@ fn jpeg(png: &[u8], path: &Path) -> Result<(), String> {
 
 /// A sheet of the exported file's frames at `times` (`media.contactSheet` in a session of its
 /// own, so the project is not touched), time-labelled, at `out`.
-async fn frames_sheet(video: &str, times: &[f64], out: &Path) -> Result<(), String> {
+pub(crate) async fn frames_sheet(video: &str, times: &[f64], out: &Path) -> Result<(), String> {
     let (video, out, times) = (video.to_string(), out.display().to_string(), times.to_vec());
     tokio::task::spawn_blocking(move || {
         let mut s = filmcraft_engine::Session::default();
