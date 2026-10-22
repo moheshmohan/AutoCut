@@ -53,12 +53,24 @@ trained on Chinese plates; it finds other countries' plates less reliably.
   five landmarks) and LPD-YuNet's prior boxes (strides 8/16/32/64; 3, 2, 2, 3 sizes; four
   corner points; score √(softmax × IoU)), and greedy non-maximum suppression (IoU 0.3).
 - `track`: detections → tracks. Greedy linking by overlap with each track's predicted box, or
-  for fast motion by nearness (centres within 0.8 box sizes, sizes within 2×), the boxes
+  for fast motion by nearness (centres within 0.8 box sizes, sizes within 2×), then (`pan`,
+  camera-motion compensation) the tracks left over predicted moved with the picture — the
+  median shift of the tracks matched in that frame — and linked again (in a fast pan a small
+  face moves two of its widths between analysed frames: each sighting started a new track, too
+  brief to hide, and its mask stayed behind), the boxes
   compared grown by 15 % a side (`grow`: a head boxed as tightly as a face, moving its own width
-  between two frames in a crowd, keeps its track); gaps up to 0.7 s filled on straight lines;
-  Gaussian-weighted local linear smoothing (σ 0.08 s; no lag, ends included). A head from a pose
-  scoring under 0.35 (`WEAK_POSE`) is a weak sighting: matched after the other detections and
-  only to a track still unmatched, never starting one (ByteTrack's second association), so a
+  between two frames in a crowd, keeps its track); gaps up to 0.7 s filled on straight lines,
+  up to 1.5 s after an unsure sighting (`unsure_gap`, hysteresis: `unsure` — a box within 2 % of
+  the frame's edge, `EDGE_MARGIN`, or a pose head scoring under 0.5, `UNSURE_POSE`; a head cut
+  by the frame is lost and found again from frame to frame, and its mask must neither start on
+  one sighting nor drop on one miss; the prediction reaches at most `max_gap` ahead);
+  Gaussian-weighted local linear smoothing (σ 0.08 s for places, 0.2 s for sizes, `smooth_size`;
+  no lag, ends included; a sighting's centre moved at most 0.15 of its box, `SMOOTH_REACH`: a whip
+  pan bends the path faster than the smoothing follows), a sighting whose size is 1.6 times off
+  its neighbours' within 0.5 s taking theirs (`SIZE_SPIKE`: one frame's wrong keypoint does not
+  blow a mask up). A head from a
+  pose scoring under 0.35 (`WEAK_POSE`) is a weak sighting: matched after the other detections
+  and only to a track still unmatched, never starting one (ByteTrack's second association), so a
   profile head the pose network is unsure of in some frames keeps its track. YuNet's faces and
   pose heads link into the same tracks (a visitor turning into profile is one track; `pose_hits`
   counts the pose's sightings); a face's landmarks are not followed (only a plate's corners).
@@ -66,10 +78,10 @@ trained on Chinese plates; it finds other countries' plates less reliably.
   `SIZE_TOLERANCE`: detectors measure one face some 10 % differently at different picture sizes,
   and a face at the limit by one measure must be hidden by both) and plates at least 2.5 % of its
   width, seen twice or once with a score ≥ 0.9, and not inside an `Exclude` box (at its time ±
-  1 s). `padded` / `padded_corners` grow boxes and plate quads. `Kind::Target` tracks (named
-  logos and signs, followed by the engine from a vision model's boxes,
-  `crates/engine/src/redact_targets.rs`) carry their `label`, are smoothed the same way
-  (`smoothed`) and are hidden at any size, exclusions or not.
+  1 s). `padded` / `padded_corners` grow boxes and plate quads; `at_edge` says whether a box meets
+  the frame's edge. `Kind::Target` tracks (named logos and signs, followed by the engine from a
+  vision model's boxes, `crates/engine/src/redact_targets.rs`) carry their `label`, are smoothed
+  the same way (`smoothed`) and are hidden at any size, exclusions or not.
 - `post::plausible_plate`: LPD-YuNet also fires on text, badges and large shapes; a plate must be
   at least 1.4 times as wide as tall, at most 40 % of the picture wide and 25 % tall.
 - `safetensors`, `zip`: strict readers of the profile models' files (D-FINE's safetensors weights;

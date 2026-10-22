@@ -12,8 +12,10 @@
 //! default) with `filmcraft-vision`'s YuNet face and LPD-YuNet plate detectors (pure Rust on
 //! candle, CPU). Detections are linked into tracks, gaps filled and the paths smoothed
 //! (`filmcraft_vision::track`). A face is hidden when it is at least `minFaceHeight` of the
-//! sequence's frame tall at some point as the sequence shows it (5 %: smaller faces in the crowd
-//! are not recognisable; Motion ▸ Scale and Scale to Frame Size count, so a clip zoomed in or a
+//! sequence's frame tall at some point as the sequence shows it (5 %, measured within 15 %,
+//! `filmcraft_vision::track::SIZE_TOLERANCE`: smaller faces in the crowd are not recognisable,
+//! and one face measures some 10 % differently in the redaction's frames and the privacy check's;
+//! Motion ▸ Scale and Scale to Frame Size count, so a clip zoomed in or a
 //! portrait clip filling a landscape frame has its faces counted larger, and the face detector
 //! looks at it closer; it looks at every frame twice, the second time twice as close where the
 //! picture allows, [`close_side`]: at the first size a face of 5–8 % is 18–30 px, where YuNet
@@ -70,11 +72,18 @@
 //! more below and at least [`MIN_FACE_MASK`] tall), with a soft edge outward ([`FEATHER`]: 0.16 of
 //! the face's height; drawn in where another mask is near, so that two neighbours' blurs do not
 //! meet unless their shapes nearly touch: a sharp line between two faces instead of one blob,
-//! [`soft_edge`]), with a Mask Path keyframe at every analysed frame and its Opacity switched on
-//! and off (hold keyframes) [`LINGER`] before the track starts and after it ends (a face going
-//! behind something is lost before it is gone). (2026-10-22: the profile pass's head boxes were a
-//! median 1.17 times YuNet's faces, and one blur from the largest face smeared every face of a
-//! crowd into one blob; heads are now boxed like YuNet's faces,
+//! [`soft_edge`]), a Mask Path keyframe at every analysed frame (wider by half its move for a face
+//! moving fast between them, `motion_margin`; carried past the frame's edge for a face it cuts,
+//! [`EDGE_REACH`]: unseen, and where the detectors disagree) and its Opacity fully on from
+//! [`LINGER`] before the track starts to as long after it ends (a face going behind something is
+//! lost before it is gone; [`EDGE_LINGER`] at the frame's edge), fading in and out beyond
+//! ([`FADE`]) rather than switching. Within a track the mask stays on: its gaps are filled, longer
+//! ones after an unsure sighting (a head cut by the frame, a pose the network is unsure of:
+//! `filmcraft_vision::track::LinkParams::unsure_gap`), so such a head neither starts a mask on one
+//! sighting nor drops it on one miss; the tracks follow faces through camera pans
+//! (`filmcraft_vision::track::LinkParams::pan`). (2026-10-22: the profile pass's head boxes were a
+//! median 1.17 times YuNet's faces, one blur from the largest face smeared every face of a crowd
+//! into one blob, and heads cut by the frame flickered; heads are now boxed like YuNet's faces,
 //! `filmcraft_vision::head::FACE_BOX`.) Masks are in
 //! clip pixels and the effect applies before Motion, so the blur follows the clip's own motion,
 //! scale, crop and reframing. The masks are named `Redact face 1`, `Redact plate 2`…; running
@@ -104,7 +113,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use filmcraft_geom::Vec2;
-use filmcraft_project::{ClipId, EffectInstance, Interpolation, ItemId, ItemKind, Keyframe, Mask, MaskPath, MediaRef, Param, ParamValue, TrackKind};
+use filmcraft_project::{ClipId, EffectInstance, ItemId, ItemKind, Keyframe, Mask, MaskPath, MediaRef, Param, ParamValue, TrackKind};
 use filmcraft_time::Tick;
 use filmcraft_vision::track::{Exclude, KeepParams, LinkParams, Skip, Track};
 pub use filmcraft_vision::{Detection, Kind};
@@ -1424,8 +1433,9 @@ fn shape(t: &Track, p: &filmcraft_vision::track::TrackPoint, size: (f64, f64), p
 const TARGET_MARGIN: f64 = 0.1;
 
 /// The box (normalised) the mask of track `t` fills at point `p`: a face's padded box reaching
-/// [`CHIN`] further down, at least [`MIN_FACE_MASK`] tall (its ellipse is inscribed in it), a
-/// plate's or a named target's padded box.
+/// [`CHIN`] further down, at least [`MIN_FACE_MASK`] tall, wider for its motion
+/// (`motion_margin`) and carried past the frame's edges it reaches (its ellipse is inscribed in
+/// it), a plate's or a named target's padded box.
 fn shape_box(t: &Track, p: &filmcraft_vision::track::TrackPoint, padding: f64) -> [f64; 4] {
     let pad = if t.kind == Kind::Target { padding + TARGET_MARGIN } else { padding };
     let mut b = filmcraft_vision::track::padded(&p.bbox, pad);
@@ -1440,7 +1450,32 @@ fn shape_box(t: &Track, p: &filmcraft_vision::track::TrackPoint, padding: f64) -
     if b[3].is_finite() && b[3] < MIN_FACE_MASK {
         b[3] = MIN_FACE_MASK;
     }
-    b
+    let [mx, my] = motion_margin(t, p);
+    let b = [b[0] - mx, b[1] - my, b[2] + 2.0 * mx, b[3] + 2.0 * my];
+    past_edges(&b, &p.bbox)
+}
+
+/// How much wider (and taller) a face's mask is on each side at point `p` of track `t` for its
+/// motion: half the larger move of its centre to the analysed moment before or after, along
+/// each axis (at most half the face's size). The mask's shape is keyframed at the analysed
+/// moments and goes in a straight line between them, while a face in a whip pan moves in jerks:
+/// between two moments it is at most half a move off that line (2026-10-22, OnRobot at 86.25 s: a
+/// face moving 1.6 of its widths a tenth of a second beside its mask). A still face's mask stays
+/// as it is.
+fn motion_margin(t: &Track, p: &filmcraft_vision::track::TrackPoint) -> [f64; 2] {
+    let i = t.points.partition_point(|q| q.t < p.t);
+    let centre = |q: &filmcraft_vision::track::TrackPoint| [q.bbox[0] + q.bbox[2] / 2.0, q.bbox[1] + q.bbox[3] / 2.0];
+    let c = centre(p);
+    let (mut mx, mut my) = (0.0f64, 0.0f64);
+    for q in [i.checked_sub(1).and_then(|k| t.points.get(k)), t.points.get(i + 1)].into_iter().flatten() {
+        let d = centre(q);
+        let (dx, dy) = ((d[0] - c[0]).abs(), (d[1] - c[1]).abs());
+        if dx.is_finite() && dy.is_finite() {
+            (mx, my) = (mx.max(dx), my.max(dy));
+        }
+    }
+    let cap = |v: f64, size: f64| if size.is_finite() { (v / 2.0).clamp(0.0, size.abs() / 2.0) } else { 0.0 };
+    [cap(mx, p.bbox[2]), cap(my, p.bbox[3])]
 }
 
 /// How much further down than its padding a face's mask reaches, a share of the face's height:
@@ -1546,10 +1581,9 @@ fn reaches(t: &Track, c: &ClipRedact, padding: f64, feather: f64) -> Vec<f64> {
             let mut r = feather;
             for o in &others {
                 let (Some(first), Some(last)) = (o.points.first(), o.points.last()) else { continue };
-                // the neighbour's mask shows from LINGER before its first sighting to as long
-                // after its last
-                let l = if c.interval.is_finite() { c.interval.max(LINGER) } else { LINGER };
-                if !(p.t >= first.t - l - 1e-9 && p.t <= last.t + l + 1e-9) {
+                // the neighbour's mask shows from its linger and fade before its first sighting
+                // to as long after its last
+                if !(p.t >= first.t - linger(o, first) - FADE - 1e-9 && p.t <= last.t + linger(o, last) + FADE + 1e-9) {
                     continue;
                 }
                 let Some(q) = point_near(o, p.t) else { continue };
@@ -1591,6 +1625,35 @@ pub fn soft_edge(reach: f64, feather: f64) -> (f64, f64) {
 /// How long, seconds, a mask's soft edge stays drawn in around a moment a neighbour is near.
 pub const SOFT_EDGE_HOLD: f64 = 0.2;
 
+/// A face's padded box `b` (normalised) carried past each edge of the frame its box `face`
+/// reaches ([`EDGE_MARGIN`]) by half the face's size: a head cut by the frame is where its
+/// detectors disagree most (the check's head box ran past the edge while the redaction's stopped
+/// short of it, 2026-10-22), and what lies beyond the frame is never seen, so the mask is made
+/// generous there at almost no cost in the picture.
+fn past_edges(b: &[f64; 4], face: &[f64; 4]) -> [f64; 4] {
+    if !face.iter().chain(b).all(|v| v.is_finite()) {
+        return *b;
+    }
+    let (ew, eh) = (face[2].max(0.0) * EDGE_REACH, face[3].max(0.0) * EDGE_REACH);
+    let (mut x0, mut y0, mut x1, mut y1) = (b[0], b[1], b[0] + b[2], b[1] + b[3]);
+    if face[0] < EDGE_MARGIN {
+        x0 -= ew;
+    }
+    if face[0] + face[2] > 1.0 - EDGE_MARGIN {
+        x1 += ew;
+    }
+    if face[1] < EDGE_MARGIN {
+        y0 -= eh;
+    }
+    if face[1] + face[3] > 1.0 - EDGE_MARGIN {
+        y1 += eh;
+    }
+    [x0, y0, x1 - x0, y1 - y0]
+}
+
+/// How far a face's mask is carried past an edge of the frame it reaches, a share of the face.
+pub const EDGE_REACH: f64 = 0.5;
+
 /// A mask's soft edge, a share of its track's median box height: the blur fades out over it,
 /// beyond the padded shape (which stays wholly hidden).
 pub const FEATHER: f64 = 0.16;
@@ -1598,27 +1661,28 @@ pub const FEATHER: f64 = 0.16;
 /// [`Options::padding`] by default: a share of the box added on every side.
 pub const PADDING: f64 = 0.15;
 
-fn hold(t: Tick, v: f64) -> Keyframe {
-    let mut k = Keyframe::new(t, ParamValue::Float(v));
-    k.interp = Interpolation::Hold;
-    k
-}
-
-/// How long, seconds, a mask stays on before a face is first found and after it is last found,
-/// where it was then (at least an analysed interval): the detector loses a face going behind
-/// something before it is gone (a visitor's smile under Ameca's head, 2026-10-21) and finds one
-/// coming out a little after it shows.
+/// How long, seconds, a mask stays fully on before a face is first found and after it is last
+/// found, where it was then (at least an analysed interval): the detector loses a face going
+/// behind something before it is gone (a visitor's smile under Ameca's head, 2026-10-21) and
+/// finds one coming out a little after it shows. Longer at the frame's edge ([`EDGE_LINGER`]),
+/// and the mask fades in and out beyond ([`FADE`]).
 pub const LINGER: f64 = 0.4;
 
 /// The mask hiding track `t` (number `n` of its kind): a Mask Path keyframe at every analysed
-/// moment, [`LINGER`] earlier and later at the ends, the Opacity on only from then to then.
+/// moment, the ends held, the Opacity fully on from [`LINGER`] (or [`EDGE_LINGER`]) before the
+/// first sighting to as long after the last, fading in and out over [`FADE`] beyond.
 pub fn mask_for(t: &Track, n: usize, c: &ClipRedact, padding: f64) -> Option<Mask> {
     let first = t.points.first()?;
     let last = t.points.last()?;
-    let lead = Tick::from_seconds_f64(if c.interval.is_finite() { c.interval.max(LINGER) } else { LINGER });
+    let interval = if c.interval.is_finite() { c.interval.max(0.0) } else { 0.0 };
     let (lo, hi) = (c.media.0.min(c.media.1), c.media.0.max(c.media.1));
-    let start = (Tick::from_seconds_f64(first.t) - lead).max(lo);
-    let end = (Tick::from_seconds_f64(last.t) + lead).min(hi);
+    // fully on from a linger before the first sighting to one after the last, fading in and
+    // out beyond
+    let on0 = Tick::from_seconds_f64(first.t - linger(t, first).max(interval));
+    let on1 = Tick::from_seconds_f64(last.t + linger(t, last).max(interval));
+    let fade = Tick::from_seconds_f64(FADE);
+    let (f0, f1) = (on0 - fade, on1 + fade);
+    let (start, end) = (f0.max(lo), f1.min(hi));
     let mut keys: Vec<Keyframe> = Vec::with_capacity(t.points.len() + 2);
     let mut push = |time: Tick, path: MaskPath| {
         if keys.last().is_none_or(|k: &Keyframe| k.time < time) {
@@ -1658,19 +1722,48 @@ pub fn mask_for(t: &Track, n: usize, c: &ClipRedact, padding: f64) -> Option<Mas
         m.feather.keyframes = fk;
         m.expansion.keyframes = ek;
     }
-    let mut op = vec![hold(start, 100.0), hold(end, 0.0)];
-    if start > lo {
-        op.insert(0, hold(lo, 0.0));
-    }
-    if end >= hi {
-        op.pop();
-    }
-    m.opacity = Param::new(ParamValue::Float(if start > lo { 0.0 } else { 100.0 }));
-    if op.len() > 1 {
+    // the opacity: 0 until f0, up to 100 at on0, 100 until on1, down to 0 at f1 (linear), as the
+    // clip's media range shows it
+    let at = |time: Tick| -> f64 {
+        if time <= f0 || time >= f1 {
+            0.0
+        } else if time < on0 {
+            100.0 * (time - f0).0 as f64 / fade.0.max(1) as f64
+        } else if time > on1 {
+            100.0 * (f1 - time).0 as f64 / fade.0.max(1) as f64
+        } else {
+            100.0
+        }
+    };
+    let mut times: Vec<Tick> = [lo, f0, on0, on1, f1, hi].into_iter().filter(|x| *x >= lo && *x <= hi).collect();
+    times.sort();
+    times.dedup();
+    let op: Vec<Keyframe> = times.iter().map(|x| Keyframe::new(*x, ParamValue::Float(at(*x).clamp(0.0, 100.0)))).collect();
+    m.opacity = Param::new(ParamValue::Float(at(lo).clamp(0.0, 100.0)));
+    if op.iter().any(|k| k.value != ParamValue::Float(100.0)) && op.len() > 1 {
         m.opacity.keyframes = op;
     }
     Some(m)
 }
+
+/// How long a mask stays fully on before track `t` is first seen (at `p`, its first point) or
+/// after it is last seen (`p`, its last): [`EDGE_LINGER`] where the face is at the frame's edge
+/// (cut by it: the detectors are least sure there, and the person is likely still there, half
+/// in the frame), else [`LINGER`].
+fn linger(_t: &Track, p: &filmcraft_vision::track::TrackPoint) -> f64 {
+    if filmcraft_vision::track::at_edge(&p.bbox, EDGE_MARGIN) { EDGE_LINGER } else { LINGER }
+}
+
+/// [`LINGER`] for a face at the frame's edge (within [`EDGE_MARGIN`] of it): 2026-10-22, most of
+/// the faces the privacy check still saw on the Ameca clip were people cut by the frame whose
+/// pose came and went.
+pub const EDGE_LINGER: f64 = 1.0;
+/// A box this close to the frame's edge (a share of the frame) is at the edge.
+pub use filmcraft_vision::track::EDGE_MARGIN;
+/// How long, seconds, a mask fades in before it is fully on and out after: a face's blur comes
+/// and goes softly instead of switching (it is fully on whenever the face was seen, and
+/// [`LINGER`] around that).
+pub const FADE: f64 = 0.25;
 
 /// The sizes of the tracks one blur (or mosaic) effect hides are within this factor of each other:
 /// a clip gets one effect per band, so a small face is not smeared with a large face's blur.

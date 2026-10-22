@@ -6,6 +6,7 @@ use filmcraft_time::{Tick, TimeRange};
 use filmcraft_vision::{Detection, Kind};
 use serde_json::{Value, json};
 
+use super::visible_centre;
 use crate::Session;
 use crate::media_test_util::tmp_dir;
 use crate::redact::{Crop, VisionJudge};
@@ -33,9 +34,14 @@ fn picture(x: f64) -> image::RgbaImage {
 /// A session with one clip of the still face on V1 of a 320 × 180 sequence, and a detector that
 /// finds the warm disc (score `score`).
 fn session(name: &str, score: f32) -> (Session, ClipId, ItemId, std::path::PathBuf) {
+    session_at(name, score, 100.0)
+}
+
+/// [`session`] with the face at `x`.
+fn session_at(name: &str, score: f32, x: f64) -> (Session, ClipId, ItemId, std::path::PathBuf) {
     let dir = tmp_dir(name);
     for k in 0..FRAMES {
-        picture(100.0).save(dir.join(format!("shot{k:04}.png"))).unwrap();
+        picture(x).save(dir.join(format!("shot{k:04}.png"))).unwrap();
     }
     let mut s = Session::default();
     let r = s.execute("file.importImageSequence", json!({"path": dir.join("shot0000.png").to_string_lossy()})).unwrap();
@@ -243,6 +249,61 @@ fn an_unmasked_head_from_a_pose_is_shown_and_passes_once_masked() {
     let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
     assert!(unmasked(&r).is_empty(), "{r}");
     assert_eq!(r["shown"], json!(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A head found from a pose (0.4), cut by the frame's left edge (a third of it outside): the
+/// check shows it (a head at the edge is not let off) until the redaction hides it.
+#[test]
+fn a_head_cut_by_the_frame_is_shown_until_it_is_masked() {
+    let (mut s, _, _, dir) = session_at("privacy-check-edge", 0.95, 14.0);
+    let pose = |rgba: &[u8], w: usize, h: usize, _: usize| warm_disc(rgba, w, h, 0.4).into_iter().map(|d| Detection { pose: true, ..d }).collect();
+    s.redacts.detector = Some(Arc::new(pose));
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    let u = unmasked(&r);
+    assert_eq!((u.len(), r["shown"].as_u64()), (1, Some(1)), "{r}");
+    let b = &u[0]["box"];
+    assert!(b["x"].as_f64().unwrap() < 0.01, "at the edge: {b}");
+    assert_eq!((u[0]["fromPose"].as_bool(), u[0]["allowed"].as_bool()), (Some(true), Some(false)), "{r}");
+    let red = s.execute("clip.autoRedact", json!({"wait": true, "verify": false})).unwrap();
+    assert_eq!(red["redact"]["clips"][0]["faces"], json!(1), "{red}");
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert!(unmasked(&r).is_empty(), "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A head whose box runs past the frame's left edge, its centre outside the picture (a pose
+/// head's box does): flagged while its visible part is sharp, passed once the redaction's mask
+/// covers that part (the mask is carried past the edge). Its centre was under no clip, so it
+/// used to be flagged whatever the masks.
+#[test]
+fn a_head_with_its_centre_outside_the_frame_is_checked_where_it_shows() {
+    let (mut s, _, _, dir) = session("privacy-check-outside", 0.95);
+    // the detector sees the same head in every frame, blurred or not
+    let head = |_: &[u8], _: usize, _: usize, _: usize| {
+        vec![Detection { kind: Kind::Face, score: 0.95, bbox: [-0.05, 0.3, 0.08, 0.3], points: Vec::new(), pose: true }]
+    };
+    s.redacts.detector = Some(Arc::new(head));
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert_eq!((unmasked(&r).len(), r["shown"].as_u64()), (1, Some(1)), "{r}");
+    assert!(unmasked(&r)[0]["clip"].is_u64(), "the clip under its visible part: {r}");
+    let red = s.execute("clip.autoRedact", json!({"wait": true, "verify": false})).unwrap();
+    assert_eq!(red["redact"]["clips"][0]["faces"], json!(1), "{red}");
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert!(unmasked(&r).is_empty(), "{r}");
+    assert_eq!(r["masked"].as_u64(), Some(5), "{r}");
+    // the visible point: the centre when it shows, else the nearest point of the box that does
+    let v = visible_centre(&[-0.05, 0.3, 0.08, 0.3], 320.0, 180.0);
+    assert!((v.x - 0.5).abs() < 1e-9 && (v.y - 81.0).abs() < 1e-4, "{v:?}");
+    let v = visible_centre(&[0.4, 0.3, 0.1, 0.2], 320.0, 180.0);
+    assert!((v.x - 144.0).abs() < 1e-4 && (v.y - 72.0).abs() < 1e-4, "{v:?}");
+    let v = visible_centre(&[0.95, 0.9, 0.1, 0.2], 320.0, 180.0);
+    assert!((v.x - 319.5).abs() < 1e-9 && (v.y - 179.5).abs() < 1e-9, "{v:?}");
+    // wholly outside, or not a number: the centre as it is (under no clip: flagged)
+    let v = visible_centre(&[-0.5, 0.3, 0.1, 0.2], 320.0, 180.0);
+    assert!((v.x - (-0.45 * 320.0)).abs() < 1e-3, "{v:?}");
+    let v = visible_centre(&[f32::NAN, 0.3, 0.1, 0.2], 320.0, 180.0);
+    assert!(v.x.is_nan() || v.x.is_finite());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
