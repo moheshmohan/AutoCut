@@ -11,7 +11,9 @@ Every command below is `filmcraft-cli` (`cargo build --release -p filmcraft-cli`
 the packaged app, `target/macos-package/bin/filmcraft-cli`). Every flag: `filmcraft-cli help`.
 The revision round in more depth (review notes, photos, places, the Malayalam style):
 [showcase-runbook.md](showcase-runbook.md). How each piece works:
-[crates/autocut/README.md](../crates/autocut/README.md).
+[crates/autocut/README.md](../crates/autocut/README.md). For a quick vertical Short or Reel of
+any clips, without a showcase (`filmcraft-cli quick <folder>`: a template picked and filled from
+the scene index and the speech): [quick-templates.md](quick-templates.md).
 
 ```text
  album ─► pick ─► analyse ─► plan ─► script ─► voice ─► build (1080p review) ─► QA + privacy

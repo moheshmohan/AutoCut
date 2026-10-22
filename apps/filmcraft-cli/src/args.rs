@@ -175,6 +175,7 @@ const VALUED_IN: &[(&str, &[&str])] = &[
     ("trailer", &["--plan", "--robots", "--hook", "--hook-at", "--logo", "--end-text", "--link", "--include", "--seed"]),
     ("captions", &["--track", "--words", "--active-color", "--keyword-color", "--keywords", "--emoji", "--position", "--font", "--from"]),
     ("scenes", &["--detail", "--limit", "--purpose", "--count", "--sheet"]),
+    ("quick", &["--template", "--full-detail"]),
 ];
 
 fn valued_in(cmd: Option<&String>, opt: &str) -> bool {

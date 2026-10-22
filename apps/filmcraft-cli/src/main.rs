@@ -38,6 +38,7 @@ mod locations;
 mod ml_script;
 mod probe;
 mod publish;
+mod quick;
 mod scenes;
 mod showcase_tools;
 mod trailer;
@@ -481,6 +482,34 @@ SUBCOMMANDS
                                 grain; vhs: tape), --beat-pulse zoom pulses on its music's
                                 beats; both off by default. --save keeps the shorts in the
                                 --project
+  quick <folder | files… | project.fcproj> [--template auto|ID] [--aspect 9:16|1:1|4:5|16:9]
+        [--platform reels|shorts|tiktok|vertical] [--seconds 30] [--topic T] [--language en|ml]
+        [--look tech|vhs|clean] [--music file|generate] [--redact faces,plates|faces|plates|off]
+        [--caption-style bold|…|plain] [--name N] [--full-detail 12] [--no-qa] [--export out.mp4]
+        [--download] [--save | --save-as p.fcproj]
+                                an album, a folder or clips → a finished vertical Short or Reel
+                                (autocut.quick): the media (a folder's videos and photos, the
+                                files given, or the project's) is indexed shot by shot
+                                (media.analyzeScenes: cuts, quality, a local Qwen3-VL description;
+                                the most promising shots, --full-detail of them, described again
+                                in full), its speech understood (media.understandSpeech), a
+                                template chosen (--template auto: the AI-ready Shorts starters
+                                first, by the shots, whether someone talks to the camera, their
+                                energy, --seconds and --topic; or a template's id or name) and
+                                filled: each slot's shot by its AI hints (purpose, words, energy,
+                                speech, quality), no moment used twice, trimmed to its best
+                                moment and framed on its subject; the text written by the local
+                                model (Ollama) from the shots and what is said, or from the
+                                descriptions without one. The music is generated at the tempo that
+                                brings the template near --seconds (or --music). Then --look, Bold
+                                animated captions of the kept speech in the --platform's safe zone,
+                                faces and plates hidden (--redact; never the speaker's own face),
+                                and with --export the video, <out>.sheet.jpg (12 frames with their
+                                times), <out>.report.json (the template and why, each shot and why,
+                                the texts, the models used and what ran without them) and QA
+                                (<out>.qa.json). Missing models are never downloaded unless
+                                --download (the scene models, the speech models, the privacy
+                                detectors); everything runs without them
   trailer (--project p.fcproj | --bridge addr) [--sequence id] [--plan plan.json]
           [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5]
           [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at S]]
@@ -2506,6 +2535,9 @@ async fn cli() {
             b.finish(&a).await;
         }
         "rough-cut" => rough_cut(&a).await,
+        // an album, a folder or clips → a vertical Short or Reel from a template filled
+        // automatically (autocut.quick)
+        "quick" => quick::run(&a).await,
         "shorts" => {
             // long video → vertical shorts (autocut.shorts); every usage error before anything runs
             let src = a.pos(1).unwrap_or_else(|| usage("shorts <project.fcproj | media file> [--count N] [--aspect 9:16] [--export dir] [--upload-youtube]"));

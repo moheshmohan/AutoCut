@@ -19,7 +19,8 @@ CLI: `filmcraft-cli scenes analyze [media…] [--detail full] [--download] [--sh
 `scenes show <item>`, `scenes search "<query>"`, `scenes best --purpose hook`,
 `scenes sheet DIR` (an `index.html` of the keyframes with their captions, `scenes.json`,
 `sheet.jpg`), `scenes status`, `scenes download [fast|full|<model>]`. MCP: `scenes_analyze`
-(a long job), `scenes_search`.
+(a long job), `scenes_search`. Templates fill themselves from it: `filmcraft-cli quick`
+([quick-templates.md](quick-templates.md)).
 
 ## What is in a shot
 
