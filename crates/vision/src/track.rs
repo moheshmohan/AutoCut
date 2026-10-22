@@ -1,7 +1,8 @@
-//! From per-frame detections to tracks: linking (overlap, then nearness for fast motion), short
-//! gaps filled, sizes and positions smoothed, and the rules that decide which tracks are hidden
-//! (a face large enough to be recognised, a plate large enough to read, seen often enough or
-//! clearly enough, not inside an excluded box).
+//! From per-frame detections to tracks: linking (overlap, then nearness for fast motion, the
+//! boxes compared a little grown), short gaps filled, sizes and positions smoothed, and the rules
+//! that decide which tracks are hidden (a face large enough to be recognised, within a tolerance
+//! of the size rule, a plate large enough to read, seen often enough or clearly enough, not
+//! inside an excluded box).
 //!
 //! Everything here is in *normalised picture coordinates*: `x` and `w` are shares of the
 //! picture's width, `y` and `h` of its height, times are seconds of media time. Plain Rust, no
@@ -31,16 +32,32 @@ pub struct LinkParams {
     /// frames keeps its track and its mask instead of flickering into one-sighting tracks.
     #[serde(default)]
     pub weak_below: f32,
+    /// Boxes are compared grown by this share of their size on every side: a head boxed as
+    /// tightly as a face (the profile pass's heads since 2026-10-22) and moving its own width
+    /// between two analysed frames in a crowd still continues its track, as it did when heads
+    /// were boxed larger.
+    #[serde(default = "grow")]
+    pub grow: f64,
+}
+
+fn grow() -> f64 {
+    0.15
 }
 
 impl Default for LinkParams {
     fn default() -> Self {
-        Self { max_gap: 0.7, min_iou: 0.2, max_jump: 0.8, smooth: 0.08, weak_below: WEAK_POSE }
+        Self { max_gap: 0.7, min_iou: 0.2, max_jump: 0.8, smooth: 0.08, weak_below: WEAK_POSE, grow: grow() }
     }
 }
 
 /// [`LinkParams::weak_below`] by default.
 pub const WEAK_POSE: f32 = 0.35;
+
+/// A face counts as at least [`KeepParams::min_face_height`] tall when its largest box is within
+/// this share of it: detectors measure one face some 10 % differently at different picture
+/// sizes (2026-10-22: a visitor at 4.9 % of the frame in the redaction's frames was 5.4 % in the
+/// privacy check's), and a face that is at the limit by one measure must be hidden by both.
+pub const SIZE_TOLERANCE: f64 = 0.85;
 
 /// Which tracks are hidden.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -166,6 +183,7 @@ impl Open {
 /// nearness score below `min_iou` when the centres are within `max_jump` box sizes and the sizes
 /// within a factor of two; `None` when it does not.
 fn affinity(p: &BoxN, d: &BoxN, lp: &LinkParams) -> Option<f64> {
+    let (p, d) = (&padded(p, lp.grow), &padded(d, lp.grow));
     let o = iou64(p, d);
     if o >= f64::from(lp.min_iou) {
         return Some(o);
@@ -403,7 +421,7 @@ pub enum Skip {
 /// Whether `track` is hidden under `kp` and `exclude`: `None` hides it.
 pub fn verdict(track: &Track, kp: &KeepParams, exclude: &[Exclude]) -> Option<Skip> {
     let big = match track.kind {
-        Kind::Face => track.max_size() >= kp.min_face_height,
+        Kind::Face => track.max_size() >= kp.min_face_height * SIZE_TOLERANCE,
         Kind::Plate => track.max_size() >= kp.min_plate_width,
         // what the user named is hidden at any size, and is not checked against exclusions
         Kind::Target => return None,
@@ -548,6 +566,23 @@ mod tests {
     }
 
     #[test]
+    fn a_small_head_moving_its_width_a_frame_keeps_its_track() {
+        // a head 0.032 wide moving 0.031 a frame, a little down: no overlap, about its width
+        // apart (a visitor in a crowd, 2026-10-22)
+        let head = |i: usize| Detection {
+            kind: Kind::Face,
+            score: 0.8,
+            bbox: [0.044 + 0.031 * i as f32, 0.32 + 0.023 * i as f32, 0.032, 0.078],
+            points: Vec::new(),
+            pose: true,
+        };
+        let f = frames(6, 10.0, |i| vec![head(i)]);
+        assert_eq!(link(&f, &LinkParams::default()).len(), 1);
+        // compared as they are (the privacy check's linking), it breaks up
+        assert!(link(&f, &LinkParams { grow: 0.0, ..LinkParams::default() }).len() > 1);
+    }
+
+    #[test]
     fn fast_motion_links_by_nearness() {
         // a face moving three quarters of its width every frame (overlapping too little)
         let f = frames(10, 10.0, |i| vec![face(0.05 + 0.045 * i as f32, 0.4, 0.06, 0.9)]);
@@ -586,6 +621,10 @@ mod tests {
         };
         assert_eq!(verdict(&mk(0.2, 5, 0.8), &kp, &[]), None);
         assert_eq!(verdict(&mk(0.03, 5, 0.99), &kp, &[]), Some(Skip::TooSmall));
+        // a face just under the limit by one measure is hidden ([`SIZE_TOLERANCE`]), one well
+        // under is not
+        assert_eq!(verdict(&mk(0.046, 5, 0.8), &kp, &[]), None);
+        assert_eq!(verdict(&mk(0.04, 5, 0.8), &kp, &[]), Some(Skip::TooSmall));
         assert_eq!(verdict(&mk(0.2, 1, 0.7), &kp, &[]), Some(Skip::TooBrief));
         assert_eq!(verdict(&mk(0.2, 1, 0.95), &kp, &[]), None, "one sure sighting is enough");
         // an excluded box at the track's time, and one that is too far away in time

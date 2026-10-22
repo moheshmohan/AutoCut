@@ -53,18 +53,22 @@ trained on Chinese plates; it finds other countries' plates less reliably.
   five landmarks) and LPD-YuNet's prior boxes (strides 8/16/32/64; 3, 2, 2, 3 sizes; four
   corner points; score √(softmax × IoU)), and greedy non-maximum suppression (IoU 0.3).
 - `track`: detections → tracks. Greedy linking by overlap with each track's predicted box, or
-  for fast motion by nearness (centres within 0.8 box sizes, sizes within 2×); gaps up to 0.7 s
-  filled on straight lines; Gaussian-weighted local linear smoothing (σ 0.08 s; no lag, ends
-  included). A head from a pose scoring under 0.35 (`WEAK_POSE`) is a weak sighting: matched
-  after the other detections and only to a track still unmatched, never starting one (ByteTrack's
-  second association), so a profile head the pose network is unsure of in some frames keeps its
-  track. YuNet's faces and pose heads link into the same tracks (a visitor turning into profile
-  is one track; `pose_hits` counts the pose's sightings); a face's landmarks are not followed
-  (only a plate's corners). `verdict` keeps faces at least 5 % of the picture tall at some point and plates at
-  least 2.5 % of its width, seen twice or once with a score ≥ 0.9, and not inside an `Exclude`
-  box (at its time ± 1 s). `padded` / `padded_corners` grow boxes and plate quads.
-  `Kind::Target` tracks (named logos and signs, followed by the engine from a vision model's
-  boxes, `crates/engine/src/redact_targets.rs`) carry their `label`, are smoothed the same way
+  for fast motion by nearness (centres within 0.8 box sizes, sizes within 2×), the boxes
+  compared grown by 15 % a side (`grow`: a head boxed as tightly as a face, moving its own width
+  between two frames in a crowd, keeps its track); gaps up to 0.7 s filled on straight lines;
+  Gaussian-weighted local linear smoothing (σ 0.08 s; no lag, ends included). A head from a pose
+  scoring under 0.35 (`WEAK_POSE`) is a weak sighting: matched after the other detections and
+  only to a track still unmatched, never starting one (ByteTrack's second association), so a
+  profile head the pose network is unsure of in some frames keeps its track. YuNet's faces and
+  pose heads link into the same tracks (a visitor turning into profile is one track; `pose_hits`
+  counts the pose's sightings); a face's landmarks are not followed (only a plate's corners).
+  `verdict` keeps faces at least 5 % of the picture tall at some point (within 15 %,
+  `SIZE_TOLERANCE`: detectors measure one face some 10 % differently at different picture sizes,
+  and a face at the limit by one measure must be hidden by both) and plates at least 2.5 % of its
+  width, seen twice or once with a score ≥ 0.9, and not inside an `Exclude` box (at its time ±
+  1 s). `padded` / `padded_corners` grow boxes and plate quads. `Kind::Target` tracks (named
+  logos and signs, followed by the engine from a vision model's boxes,
+  `crates/engine/src/redact_targets.rs`) carry their `label`, are smoothed the same way
   (`smoothed`) and are hidden at any size, exclusions or not.
 - `post::plausible_plate`: LPD-YuNet also fires on text, badges and large shapes; a plate must be
   at least 1.4 times as wide as tall, at most 40 % of the picture wide and 25 % tall.
@@ -81,11 +85,14 @@ trained on Chinese plates; it finds other countries' plates less reliably.
   the same people in the OnRobot and Ameca clips), from the sure keypoints (≥ 0.5) when two are
   sure, else the middle estimate with outlying keypoints dropped; at most 3.5 times the face
   keypoints' spread, and the shoulders' distance over 2.6 only without two face keypoints. The
-  box is one width wide, centred between the outermost face keypoints (ears for a frontal face,
-  ear and nose in profile), 1.3 widths tall with its centre 0.17 widths below the eyes, grown to
-  cover those keypoints; keypoints outside the person's box (grown by a quarter) are ignored.
-  Against those faces (299 pairs) the head box is a median 1.16 times as tall (90 % under 1.5;
-  a few junk people's, under the weak score, up to 4). `candidates` makes the heads that no
+  box is the face as YuNet boxes it (`FACE_BOX`): 0.88 × 1.14 head widths from the front, 0.98 ×
+  1.34 turned (the turn shortens the distances that measure the width), centred between the
+  outermost face keypoints (ears for a frontal face, ear and nose in profile), its centre 0.13
+  widths below the eyes, grown to keep the nose and eyes inside with a margin; keypoints outside
+  the person's box (grown by a quarter) are ignored. Against YuNet's faces of the same people
+  (808 pairs on 174 frames, 2026-10-22; ignored test `head_boxes_match_the_face_detectors`) the
+  head box is a median 1.05 times as tall and 1.06 as wide (90 % under 1.40); the earlier box
+  (a head wide, 1.3 tall: hair and ears) was 1.17 and 1.26. `candidates` makes the heads that no
   YuNet face matches (one face to one head, the nearest: its centre inside the head box grown by
   a tenth, heights within 3×; a neighbour's face must not hide a head, which shows once the
   neighbour is blurred) into face detections marked `pose`, scored at most 0.84
@@ -186,8 +193,12 @@ numpy pillow`; `python -I tools/profile_oracle.py <D-FINE onnx> <RTMPose end2end
 test). `profile_on_pictures` (`FILMCRAFT_PROFILE_PICTURES=<dir of PNGs>`) draws what YuNet and
 the profile pass see into `annotated/` and prints each person's keypoint scores and the head
 box against YuNet's face (the calibration above); `profile_dump` writes what both find on every
-picture as JSON (`FILMCRAFT_PROFILE_DUMP`) for the calibration and flicker analyses.
+picture as JSON (`FILMCRAFT_PROFILE_DUMP`) for the calibration and flicker analyses;
+`head_boxes_match_the_face_detectors` measures the head boxes against YuNet's faces (the
+calibration of `FACE_BOX`) and `blurred_faces_defeat_the_face_detector` how strong a blur inside
+the redaction's mask keeps YuNet from finding a face again (the engine's `BLUR_PER_HEIGHT`).
 `profile_gpu_matches_the_cpu` and `profile_pass_speed` take a 1080p frame from
 `FILMCRAFT_PROFILE_PICTURE` (and the whole pass's parity every PNG of
-`FILMCRAFT_PROFILE_PICTURES`) when there is no oracle directory. The live check of the whole redaction is
-AutoCut's example `profile_redact` (`crates/autocut/examples/profile_redact.rs`).
+`FILMCRAFT_PROFILE_PICTURES`) when there is no oracle directory. The live checks of the whole
+redaction are AutoCut's examples `profile_redact` and `redact_stage` (a window of a clip redacted
+and checked, the masks' area, merging and flicker measured; `crates/autocut/examples/`).

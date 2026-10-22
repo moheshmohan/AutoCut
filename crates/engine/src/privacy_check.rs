@@ -277,6 +277,8 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
         min_iou: 0.1,
         max_jump: 1.5,
         smooth: 0.0,
+        // the faces as seen: boxes compared as they are
+        grow: 0.0,
         ..LinkParams::default()
     };
     let mut found: Vec<Unmasked> = Vec::new();

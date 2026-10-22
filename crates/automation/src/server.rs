@@ -964,7 +964,7 @@ pub struct AutoRedactParams {
     /// 1..100 (default 60).
     #[serde(default)]
     pub strength: Option<f64>,
-    /// Share of the box added on every side, 0..1 (default 0.2).
+    /// Share of the box added on every side, 0..1 (default 0.15).
     #[serde(default)]
     pub padding: Option<f64>,
     /// Smallest face hidden, share of the picture height (default 0.05).

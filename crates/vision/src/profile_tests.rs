@@ -307,7 +307,7 @@ fn profile_dump() {
                     "bbox": person.bbox,
                     "score": person.score,
                     "keypoints": person.keypoints.iter().map(|k| [k.x, k.y, k.score]).collect::<Vec<_>>(),
-                    "head": hd.map(|h| serde_json::json!({"bbox": h.bbox, "view": format!("{:?}", h.view), "faceScore": h.face_score})),
+                    "head": hd.map(|h| serde_json::json!({"bbox": h.bbox, "view": format!("{:?}", h.view), "faceScore": h.face_score, "width": h.width})),
                 })
             })
             .collect();
@@ -323,6 +323,212 @@ fn profile_dump() {
     }
     std::fs::write(&out, serde_json::to_vec(&frames).unwrap()).unwrap();
     eprintln!("{} frames written to {}", frames.len(), out.display());
+}
+
+/// The head boxes against YuNet's faces of the same people on every PNG of
+/// `FILMCRAFT_PROFILE_PICTURES` (the calibration of `head::FACE_BOX`): one face to one head, the
+/// nearest (as `head::candidates` pairs them). The heads are about the faces' size (a median
+/// within 0.95–1.15 of their height and width) and the faces' centres are inside the masks
+/// (the head box grown by the redaction's padding, 0.1 a side) for at least 98 % of the pairs.
+#[test]
+#[ignore = "needs the models and pictures (FILMCRAFT_VISION_MODELS, FILMCRAFT_PROFILE_PICTURES)"]
+fn head_boxes_match_the_face_detectors() {
+    let (Some(_), Some(dir)) = (models(), std::env::var_os("FILMCRAFT_PROFILE_PICTURES").map(PathBuf::from)) else { return };
+    let models_dir = PathBuf::from(std::env::var_os("FILMCRAFT_VISION_MODELS").unwrap());
+    let det = crate::ProfileDetector::load_on(&models_dir, true).unwrap();
+    let faces = crate::Detectors::load(&models_dir, true, false).unwrap();
+    let f = faces.face.as_ref().unwrap();
+    let mut paths: Vec<PathBuf> =
+        std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "png")).collect();
+    paths.sort();
+    let (mut rh, mut rw, mut covered) = (Vec::new(), Vec::new(), 0usize);
+    for p in paths {
+        let img = image::open(&p).unwrap().to_rgba8();
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let rgba = img.into_raw();
+        let mut found = f.detect(&rgba, w, h, 640, 0.6).unwrap();
+        found.extend(f.detect(&rgba, w, h, 1280.min(w.max(h)), 0.6).unwrap());
+        let yunet: Vec<[f32; 4]> = crate::post::nms(found, 0.3, 750)
+            .iter()
+            .map(|d| [d.bbox[0] * w as f32, d.bbox[1] * h as f32, d.bbox[2] * w as f32, d.bbox[3] * h as f32])
+            .collect();
+        let heads: Vec<[f32; 4]> = det
+            .people(&rgba, w, h)
+            .unwrap()
+            .iter()
+            .filter_map(|person| crate::head::head_of(person, &det.params.head))
+            .filter(|hd| hd.shows_face())
+            .map(|hd| hd.bbox)
+            .collect();
+        let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
+        for (hi, hb) in heads.iter().enumerate() {
+            for (fi, fb) in yunet.iter().enumerate() {
+                if crate::head::same_face(hb, fb) {
+                    let d = ((hb[0] + hb[2] / 2.0 - fb[0] - fb[2] / 2.0).powi(2) + (hb[1] + hb[3] / 2.0 - fb[1] - fb[3] / 2.0).powi(2)).sqrt();
+                    pairs.push((d / hb[2].max(1e-6), hi, fi));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (mut hu, mut fu) = (vec![false; heads.len()], vec![false; yunet.len()]);
+        for (_, hi, fi) in pairs {
+            if hu[hi] || fu[fi] {
+                continue;
+            }
+            hu[hi] = true;
+            fu[fi] = true;
+            let (hb, fb) = (heads[hi], yunet[fi]);
+            rh.push(hb[3] / fb[3]);
+            rw.push(hb[2] / fb[2]);
+            // the face's centre inside the mask's ellipse (the head box grown by 0.1 a side)
+            let (ex, ey, ax, ay) = (hb[0] + hb[2] / 2.0, hb[1] + hb[3] / 2.0, hb[2] * 0.6, hb[3] * 0.6);
+            let (fx, fy) = (fb[0] + fb[2] / 2.0, fb[1] + fb[3] / 2.0);
+            covered += usize::from(((fx - ex) / ax).powi(2) + ((fy - ey) / ay).powi(2) <= 1.0);
+        }
+    }
+    let q = |v: &mut Vec<f32>, p: f32| {
+        v.sort_by(f32::total_cmp);
+        v.get(((v.len() as f32 * p) as usize).min(v.len().saturating_sub(1))).copied().unwrap_or(f32::NAN)
+    };
+    let n = rh.len();
+    let (mh, h90, mw) = (q(&mut rh, 0.5), q(&mut rh, 0.9), q(&mut rw, 0.5));
+    eprintln!("{n} pairs: head height / face height median {mh:.3} (90 % under {h90:.3}), width median {mw:.3}; face centres inside the mask {covered} of {n}");
+    assert!(n >= 50, "too few pairs to calibrate");
+    assert!((0.95..=1.15).contains(&mh) && (0.95..=1.15).contains(&mw), "{mh} {mw}");
+    assert!(covered * 100 >= n * 98, "{covered} of {n}");
+}
+
+/// `rgba` (`w` × `h`) blurred by a Gaussian of about `sigma` pixels (three box blurs) inside the
+/// ellipse inscribed in box `b` (pixels), the rest as it is: the redaction's mask over a face,
+/// hard-edged.
+fn blur_ellipse(rgba: &mut [u8], w: usize, h: usize, b: [f32; 4], sigma: f32) {
+    // three boxes of width 2r + 1 have the variance of a Gaussian of sigma
+    let r = ((((4.0 * sigma * sigma + 1.0).sqrt() - 1.0) / 2.0).round().max(1.0)) as i64;
+    let m = 3 * r + 1;
+    let (x0, y0) = (((b[0] as i64) - m).max(0) as usize, ((b[1] as i64) - m).max(0) as usize);
+    let (x1, y1) = (((b[0] + b[2]) as i64 + m).min(w as i64 - 1).max(0) as usize, ((b[1] + b[3]) as i64 + m).min(h as i64 - 1).max(0) as usize);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
+    let mut buf: Vec<[f32; 3]> = (0..cw * ch)
+        .map(|i| {
+            let (x, y) = (i % cw, i / cw);
+            let o = ((y0 + y) * w + x0 + x) * 4;
+            [f32::from(rgba[o]), f32::from(rgba[o + 1]), f32::from(rgba[o + 2])]
+        })
+        .collect();
+    // one box pass along rows (step 1) or columns (step cw), edges repeated
+    let pass = |buf: &mut Vec<[f32; 3]>, lines: usize, len: usize, at: &dyn Fn(usize, usize) -> usize| {
+        let mut line = vec![[0f32; 3]; len];
+        for l in 0..lines {
+            for (i, v) in line.iter_mut().enumerate() {
+                *v = buf[at(l, i)];
+            }
+            // a running sum over the window, the line's ends repeated
+            let get = |j: i64| line[j.clamp(0, len as i64 - 1) as usize];
+            let mut s = [0f32; 3];
+            for d in -r..=r {
+                let v = get(d);
+                for c in 0..3 {
+                    s[c] += v[c];
+                }
+            }
+            for i in 0..len {
+                buf[at(l, i)] = s.map(|v| v / (2 * r + 1) as f32);
+                let (add, sub) = (get(i as i64 + r + 1), get(i as i64 - r));
+                for c in 0..3 {
+                    s[c] += add[c] - sub[c];
+                }
+            }
+        }
+    };
+    for _ in 0..3 {
+        pass(&mut buf, ch, cw, &|l, i| l * cw + i);
+        pass(&mut buf, cw, ch, &|l, i| i * cw + l);
+    }
+    let (cx, cy, rx, ry) = (b[0] + b[2] / 2.0, b[1] + b[3] / 2.0, b[2] / 2.0, b[3] / 2.0);
+    for y in 0..ch {
+        for x in 0..cw {
+            let (fx, fy) = ((x0 + x) as f32 + 0.5, (y0 + y) as f32 + 0.5);
+            if ((fx - cx) / rx).powi(2) + ((fy - cy) / ry).powi(2) > 1.0 {
+                continue;
+            }
+            let o = ((y0 + y) * w + x0 + x) * 4;
+            for c in 0..3 {
+                rgba[o + c] = buf[y * cw + x][c].round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+/// How strong a blur defeats the face detector (the privacy check's proxy for a face that
+/// shows): every face YuNet finds (score ≥ 0.6, at least 5 % of the picture tall) in the PNGs of
+/// `FILMCRAFT_PROFILE_PICTURES` is blurred inside its redaction mask (the box grown by 0.15 a side
+/// and 0.15 more below, an ellipse) by a Gaussian of σ = k × the face's height, and YuNet looks
+/// again: how many faces it still finds there (a detection whose box overlaps the face's), and
+/// how many of those the check would flag (their centre outside the mask). Printed for each k;
+/// the redaction's blur is chosen from it (`BLUR_PER_HEIGHT` in the engine).
+#[test]
+#[ignore = "needs the models and pictures (FILMCRAFT_VISION_MODELS, FILMCRAFT_PROFILE_PICTURES)"]
+fn blurred_faces_defeat_the_face_detector() {
+    let (Some(_), Some(dir)) = (models(), std::env::var_os("FILMCRAFT_PROFILE_PICTURES").map(PathBuf::from)) else { return };
+    let models_dir = PathBuf::from(std::env::var_os("FILMCRAFT_VISION_MODELS").unwrap());
+    let faces = crate::Detectors::load(&models_dir, true, false).unwrap();
+    let f = faces.face.as_ref().unwrap();
+    let detect = |rgba: &[u8], w: usize, h: usize| -> Vec<[f32; 4]> {
+        let mut found = f.detect(rgba, w, h, 640, 0.6).unwrap();
+        found.extend(f.detect(rgba, w, h, 1280.min(w.max(h)), 0.6).unwrap());
+        crate::post::nms(found, 0.3, 750).iter().map(|d| [d.bbox[0] * w as f32, d.bbox[1] * h as f32, d.bbox[2] * w as f32, d.bbox[3] * h as f32]).collect()
+    };
+    let mut paths: Vec<PathBuf> =
+        std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "png")).collect();
+    paths.sort();
+    let ks = [0.05f32, 0.075, 0.1, 0.125, 0.15, 0.2];
+    let (mut n, mut again, mut flagged) = (0usize, vec![0usize; ks.len()], vec![0usize; ks.len()]);
+    for p in paths {
+        let img = image::open(&p).unwrap().to_rgba8();
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let rgba = img.into_raw();
+        let found: Vec<[f32; 4]> = detect(&rgba, w, h).into_iter().filter(|b| b[3] >= 0.05 * h as f32).collect();
+        if found.is_empty() {
+            continue;
+        }
+        n += found.len();
+        let masks: Vec<[f32; 4]> = found.iter().map(|b| [b[0] - 0.15 * b[2], b[1] - 0.15 * b[3], 1.3 * b[2], 1.45 * b[3]]).collect();
+        for (ki, k) in ks.iter().enumerate() {
+            let mut blurred = rgba.clone();
+            for (b, m) in found.iter().zip(&masks) {
+                blur_ellipse(&mut blurred, w, h, *m, (k * b[3]).max(0.5));
+            }
+            let seen = detect(&blurred, w, h);
+            for b in &found {
+                let near: Vec<&[f32; 4]> = seen.iter().filter(|d| crate::post::iou(d, b) > 0.1).collect();
+                if near.is_empty() {
+                    continue;
+                }
+                again[ki] += 1;
+                let inside = |d: &&[f32; 4]| {
+                    let (cx, cy) = (d[0] + d[2] / 2.0, d[1] + d[3] / 2.0);
+                    masks.iter().any(|m| ((cx - m[0] - m[2] / 2.0) / (m[2] / 2.0)).powi(2) + ((cy - m[1] - m[3] / 2.0) / (m[3] / 2.0)).powi(2) <= 1.0)
+                };
+                if near.iter().any(|d| !inside(d)) {
+                    flagged[ki] += 1;
+                }
+            }
+        }
+    }
+    eprintln!("{n} faces");
+    for (ki, k) in ks.iter().enumerate() {
+        eprintln!(
+            "sigma {k:.3} x height: found again {} ({:.1} %), of them flagged (centre outside the mask) {} ({:.1} %)",
+            again[ki],
+            100.0 * again[ki] as f32 / n.max(1) as f32,
+            flagged[ki],
+            100.0 * flagged[ki] as f32 / n.max(1) as f32
+        );
+    }
+    assert!(n >= 50, "too few faces");
 }
 
 /// The GPU passes against the CPU's: the person detector (its encoder, its decoder on the same

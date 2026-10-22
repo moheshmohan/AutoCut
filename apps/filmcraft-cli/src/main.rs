@@ -418,7 +418,7 @@ SUBCOMMANDS
                                 is not analysed again (`cached` counts them); --fresh analyses
                                 every clip again (also for showcase --album)
   redact [--clips 1,2 | --sequence id] [--kinds faces,plates] [--style blur|mosaic]
-         [--strength 1-100] [--padding 0.2] [--min-face-height 0.05] [--min-plate-width 0.025]
+         [--strength 1-100] [--padding 0.15] [--min-face-height 0.05] [--min-plate-width 0.025]
          [--face-score 0.7] [--plate-score 0.8] [--analysis-fps 10] [--exclude '<json boxes>']
          [--no-verify] [--dry-run] [--keep] [--target T]... [--target-every 1] [--fresh]
          [--download] [--save | --save-as p.fcproj]

@@ -61,12 +61,21 @@
 //! box excludes its face, not the logo on its chest), under a rectangle with a wider margin.
 //! Without a vision model the command refuses targets.
 //!
-//! **The edit.** Each clip with something to hide gets one Gaussian Blur (or Mosaic, `style`)
-//! effect, its strength from the largest face or plate, with one mask per track — an ellipse for
-//! a face, the plate's own quadrilateral for a plate — grown by `padding` (a fifth of the box
-//! on each side), feathered outward, with a Mask Path keyframe at every analysed frame and
-//! its Opacity switched on and off (hold keyframes) [`LINGER`] before the track starts and after
-//! it ends (a face going behind something is lost before it is gone). Masks are in
+//! **The edit.** Each clip with something to hide gets a Gaussian Blur (or Mosaic, `style`) effect
+//! for each band of sizes ([`SIZE_BAND`]: within a factor of two), its strength from the band's
+//! largest face or plate ([`blurriness`]: σ 0.15 of a face's height at the default strength, as
+//! light as still hides who it is, proportional to each face so a small face is not smeared with a
+//! large one's blur), with one mask per track — an ellipse for a face, the plate's own
+//! quadrilateral for a plate — grown by `padding` (0.15 of the box on each side, a face [`CHIN`]
+//! more below and at least [`MIN_FACE_MASK`] tall), with a soft edge outward ([`FEATHER`]: 0.16 of
+//! the face's height; drawn in where another mask is near, so that two neighbours' blurs do not
+//! meet unless their shapes nearly touch: a sharp line between two faces instead of one blob,
+//! [`soft_edge`]), with a Mask Path keyframe at every analysed frame and its Opacity switched on
+//! and off (hold keyframes) [`LINGER`] before the track starts and after it ends (a face going
+//! behind something is lost before it is gone). (2026-10-22: the profile pass's head boxes were a
+//! median 1.17 times YuNet's faces, and one blur from the largest face smeared every face of a
+//! crowd into one blob; heads are now boxed like YuNet's faces,
+//! `filmcraft_vision::head::FACE_BOX`.) Masks are in
 //! clip pixels and the effect applies before Motion, so the blur follows the clip's own motion,
 //! scale, crop and reframing. The masks are named `Redact face 1`, `Redact plate 2`…; running
 //! it again replaces an earlier automatic redaction of the clip (`replace: false` keeps it).
@@ -237,7 +246,7 @@ impl Default for Options {
             sure_face: SURE_FACE,
             style: Style::Blur,
             strength: 60.0,
-            padding: 0.2,
+            padding: PADDING,
             verify: true,
             dry_run: false,
             analysis_fps: 10.0,
@@ -1399,7 +1408,10 @@ fn shape(t: &Track, p: &filmcraft_vision::track::TrackPoint, size: (f64, f64), p
             MaskPath::polygon(&q.iter().map(|c| Vec2::new(c[0] * size.0, c[1] * size.1)).collect::<Vec<_>>())
         }
         Kind::Plate => MaskPath::rect(b[0], b[1], b[0] + b[2], b[1] + b[3]),
-        Kind::Face => MaskPath::ellipse(Vec2::new(b[0] + b[2] / 2.0, b[1] + b[3] / 2.0), Vec2::new(b[2] / 2.0, b[3] / 2.0)),
+        Kind::Face => {
+            let b = px_box(&shape_box(t, p, padding), size);
+            MaskPath::ellipse(Vec2::new(b[0] + b[2] / 2.0, b[1] + b[3] / 2.0), Vec2::new(b[2] / 2.0, b[3] / 2.0))
+        }
         // a named target's box is the vision model's, looser than a detector's: a wider margin
         Kind::Target => {
             let b = px_box(&filmcraft_vision::track::padded(&p.bbox, padding + TARGET_MARGIN), size);
@@ -1410,6 +1422,181 @@ fn shape(t: &Track, p: &filmcraft_vision::track::TrackPoint, size: (f64, f64), p
 
 /// What a named target's mask adds to `padding` on every side.
 const TARGET_MARGIN: f64 = 0.1;
+
+/// The box (normalised) the mask of track `t` fills at point `p`: a face's padded box reaching
+/// [`CHIN`] further down, at least [`MIN_FACE_MASK`] tall (its ellipse is inscribed in it), a
+/// plate's or a named target's padded box.
+fn shape_box(t: &Track, p: &filmcraft_vision::track::TrackPoint, padding: f64) -> [f64; 4] {
+    let pad = if t.kind == Kind::Target { padding + TARGET_MARGIN } else { padding };
+    let mut b = filmcraft_vision::track::padded(&p.bbox, pad);
+    if t.kind != Kind::Face {
+        return b;
+    }
+    let chin = p.bbox[3] * CHIN;
+    if chin.is_finite() && chin > 0.0 {
+        b[3] += chin;
+    }
+    // a face at the size limit: reaching further down, to MIN_FACE_MASK tall
+    if b[3].is_finite() && b[3] < MIN_FACE_MASK {
+        b[3] = MIN_FACE_MASK;
+    }
+    b
+}
+
+/// How much further down than its padding a face's mask reaches, a share of the face's height:
+/// a face box ends at the chin, and the jaw and beard below it, sharp under a blurred face, are
+/// what a face detector finds again on the redacted picture (2026-10-22, OnRobot at 87 s: the
+/// privacy check's face there was the blur, the chin and the neck, its centre under the mask's
+/// lower edge).
+pub const CHIN: f64 = 0.15;
+
+/// The least height of a face's mask, a share of the picture's height, reached by extending it
+/// further down: a face at the size limit (5 % of the picture, some 50 px in 1080p) has the least
+/// sure box, and what a face detector finds again around its blur is the head with its scarf,
+/// chin, neck or the hand at its mouth, a box twice the face's height reaching below it
+/// (2026-10-22, OnRobot at 90.75 s: a face 4.5 % tall masked, the privacy check's face there 9.7 %
+/// tall, its centre under the mask's lower edge). Larger faces' masks are taller anyway.
+pub const MIN_FACE_MASK: f64 = 0.09;
+
+/// Points along the outline of a mask's shape filling box `b` (pixels): an ellipse (a face's),
+/// else the box's sides.
+fn outline_points(b: &[f64; 4], ellipse: bool) -> Vec<(f64, f64)> {
+    const N: u32 = 48;
+    let (cx, cy, rx, ry) = (b[0] + b[2] / 2.0, b[1] + b[3] / 2.0, b[2] / 2.0, b[3] / 2.0);
+    (0..N)
+        .map(|k| {
+            let u = f64::from(k) / f64::from(N);
+            if ellipse {
+                let a = u * std::f64::consts::TAU;
+                (cx + rx * a.cos(), cy + ry * a.sin())
+            } else {
+                let (side, f) = ((u * 4.0).floor(), (u * 4.0).fract());
+                match side as u8 {
+                    0 => (b[0] + f * b[2], b[1]),
+                    1 => (b[0] + b[2], b[1] + f * b[3]),
+                    2 => (b[0] + b[2] - f * b[2], b[1] + b[3]),
+                    _ => (b[0], b[1] + b[3] - f * b[3]),
+                }
+            }
+        })
+        .collect()
+}
+
+/// Whether point `(x, y)` is inside the shape filling box `b` (an ellipse, else the box).
+fn inside_shape(b: &[f64; 4], ellipse: bool, (x, y): (f64, f64)) -> bool {
+    if !ellipse {
+        return x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3];
+    }
+    let (rx, ry) = (b[2] / 2.0, b[3] / 2.0);
+    if !(rx > 0.0 && ry > 0.0) {
+        return false;
+    }
+    let (dx, dy) = ((x - b[0] - rx) / rx, (y - b[1] - ry) / ry);
+    dx * dx + dy * dy <= 1.0
+}
+
+/// The distance between boxes `a` and `b` (0 where they meet).
+fn box_gap(a: &[f64; 4], b: &[f64; 4]) -> f64 {
+    let dx = (b[0] - (a[0] + a[2])).max(a[0] - (b[0] + b[2])).max(0.0);
+    let dy = (b[1] - (a[1] + a[3])).max(a[1] - (b[1] + b[3])).max(0.0);
+    let d = dx.hypot(dy);
+    if d.is_finite() { d } else { 0.0 }
+}
+
+/// The gap, pixels, between the shapes filling boxes `a` and `b` (ellipses or boxes): 0 where
+/// they touch or overlap, else the nearest two points of their outlines.
+fn shape_gap(a: &[f64; 4], ea: bool, b: &[f64; 4], eb: bool) -> f64 {
+    if !a.iter().chain(b).all(|v| v.is_finite()) {
+        return 0.0;
+    }
+    let (pa, pb) = (outline_points(a, ea), outline_points(b, eb));
+    if pa.iter().any(|p| inside_shape(b, eb, *p)) || pb.iter().any(|p| inside_shape(a, ea, *p)) {
+        return 0.0;
+    }
+    let best = pa.iter().flat_map(|p| pb.iter().map(move |q| (p.0 - q.0).hypot(p.1 - q.1))).fold(f64::INFINITY, f64::min);
+    if best.is_finite() { best } else { 0.0 }
+}
+
+/// The point of `t` nearest time `s` (its points are in time order).
+fn point_near(t: &Track, s: f64) -> Option<&filmcraft_vision::track::TrackPoint> {
+    let i = t.points.partition_point(|q| q.t < s);
+    let after = t.points.get(i);
+    let before = i.checked_sub(1).and_then(|k| t.points.get(k));
+    match (before, after) {
+        (Some(a), Some(b)) => Some(if (s - a.t).abs() <= (b.t - s).abs() { a } else { b }),
+        (a, b) => a.or(b),
+    }
+}
+
+/// How far (pixels) the blur of the mask of track `t` reaches beyond its shape at each of its
+/// points: `feather` (its soft edge wholly outside the shape), less where another mask of the
+/// clip is near, so that each reaches at most half way across the gap between the two shapes
+/// ([`SOFT_EDGE_HOLD`] before and after) and neighbouring faces are blurred apart, a sharp line
+/// between them, not smeared into one blob — unless their shapes nearly touch, where it keeps a
+/// quarter of `feather` ([`soft_edge`] makes it a soft edge).
+fn reaches(t: &Track, c: &ClipRedact, padding: f64, feather: f64) -> Vec<f64> {
+    let feather = if feather.is_finite() { feather.max(1.0) } else { 1.0 };
+    let least = feather / 4.0;
+    let others: Vec<&Track> = c.hidden().filter(|o| !std::ptr::eq(*o, t) && *o != t).collect();
+    let raw: Vec<f64> = t
+        .points
+        .iter()
+        .map(|p| {
+            let a = px_box(&shape_box(t, p, padding), c.size);
+            let mut r = feather;
+            for o in &others {
+                let (Some(first), Some(last)) = (o.points.first(), o.points.last()) else { continue };
+                // the neighbour's mask shows from LINGER before its first sighting to as long
+                // after its last
+                let l = if c.interval.is_finite() { c.interval.max(LINGER) } else { LINGER };
+                if !(p.t >= first.t - l - 1e-9 && p.t <= last.t + l + 1e-9) {
+                    continue;
+                }
+                let Some(q) = point_near(o, p.t) else { continue };
+                let b = px_box(&shape_box(o, q, padding), c.size);
+                if box_gap(&a, &b) >= 2.0 * r {
+                    continue;
+                }
+                r = r.min(shape_gap(&a, t.kind == Kind::Face, &b, o.kind == Kind::Face) / 2.0);
+            }
+            if r.is_finite() { r.clamp(least, feather) } else { least }
+        })
+        .collect();
+    // each the least within SOFT_EDGE_HOLD: it draws in before a neighbour comes near and
+    // reaches out again after it has gone, not frame by frame
+    let mut out = Vec::with_capacity(raw.len());
+    for (i, p) in t.points.iter().enumerate() {
+        let mut r = raw.get(i).copied().unwrap_or(feather);
+        for (q, x) in t.points.iter().zip(&raw).skip(i.saturating_sub(64)).take(129) {
+            if (q.t - p.t).abs() <= SOFT_EDGE_HOLD {
+                r = r.min(*x);
+            }
+        }
+        out.push(r);
+    }
+    out
+}
+
+/// A mask's soft edge (feather, expansion; pixels) for its blur to reach `reach` beyond its shape
+/// (at most `feather`, at least a quarter of it): the whole `feather` wide and wholly outside the
+/// shape while it reaches `feather`; drawn in as it reaches less, down to centred on the shape's
+/// outline; then narrower, down to half `feather`. The face inside the padded shape stays wholly
+/// hidden (the padding is wider than half the narrowest soft edge's ramp inside the outline).
+pub fn soft_edge(reach: f64, feather: f64) -> (f64, f64) {
+    let feather = if feather.is_finite() { feather.max(1.0) } else { 1.0 };
+    let r = if reach.is_finite() { reach.clamp(feather / 4.0, feather) } else { feather / 4.0 };
+    if r >= feather / 2.0 { (feather, r - feather / 2.0) } else { (2.0 * r, 0.0) }
+}
+
+/// How long, seconds, a mask's soft edge stays drawn in around a moment a neighbour is near.
+pub const SOFT_EDGE_HOLD: f64 = 0.2;
+
+/// A mask's soft edge, a share of its track's median box height: the blur fades out over it,
+/// beyond the padded shape (which stays wholly hidden).
+pub const FEATHER: f64 = 0.16;
+
+/// [`Options::padding`] by default: a share of the box added on every side.
+pub const PADDING: f64 = 0.15;
 
 fn hold(t: Tick, v: f64) -> Keyframe {
     let mut k = Keyframe::new(t, ParamValue::Float(v));
@@ -1450,12 +1637,27 @@ pub fn mask_for(t: &Track, n: usize, c: &ClipRedact, padding: f64) -> Option<Mas
         m.path.keyframes = keys;
     }
     // a soft edge outside the shape: the whole padded shape is hidden, the blur fades out beyond
-    let mut heights: Vec<f64> = t.points.iter().map(|p| p.bbox[3] * c.size.1).collect();
+    let mut heights: Vec<f64> = t.points.iter().map(|p| p.bbox[3] * c.size.1).filter(|h| h.is_finite()).collect();
     heights.sort_by(f64::total_cmp);
     let median = heights.get(heights.len() / 2).copied().unwrap_or(0.0);
-    let feather = (median * 0.12).clamp(1.0, 200.0);
+    let feather = (median * FEATHER).clamp(1.0, 300.0);
     m.feather = Param::new(ParamValue::Float(feather));
     m.expansion = Param::new(ParamValue::Float(feather / 2.0));
+    // drawn in where a neighbour's mask is near (keyframed at the analysed moments)
+    let reach = reaches(t, c, padding, feather);
+    if reach.iter().any(|r| *r < feather - 1e-6) {
+        let (mut fk, mut ek): (Vec<Keyframe>, Vec<Keyframe>) = (Vec::new(), Vec::new());
+        for (p, r) in t.points.iter().zip(&reach) {
+            let time = Tick::from_seconds_f64(p.t);
+            if fk.last().is_none_or(|k: &Keyframe| k.time < time) {
+                let (f, e) = soft_edge(*r, feather);
+                fk.push(Keyframe::new(time, ParamValue::Float(f)));
+                ek.push(Keyframe::new(time, ParamValue::Float(e)));
+            }
+        }
+        m.feather.keyframes = fk;
+        m.expansion.keyframes = ek;
+    }
     let mut op = vec![hold(start, 100.0), hold(end, 0.0)];
     if start > lo {
         op.insert(0, hold(lo, 0.0));
@@ -1470,21 +1672,58 @@ pub fn mask_for(t: &Track, n: usize, c: &ClipRedact, padding: f64) -> Option<Mas
     Some(m)
 }
 
-/// The effect hiding a clip's tracks, or `None` when nothing in it is hidden.
-pub fn effect_for(c: &ClipRedact, o: &Options) -> Option<EffectInstance> {
-    let hidden: Vec<&Track> = c.hidden().collect();
-    if hidden.is_empty() {
-        return None;
+/// The sizes of the tracks one blur (or mosaic) effect hides are within this factor of each other:
+/// a clip gets one effect per band, so a small face is not smeared with a large face's blur.
+pub const SIZE_BAND: f64 = 2.0;
+
+/// The blur's blurriness (twice its σ, clip pixels) per pixel of a face's height at the default
+/// strength (60): σ 0.15 of the face's height, the lightest blur that defeats the face detector
+/// itself (the privacy check's proxy for a face that shows). Measured on the 687 faces of 174
+/// frames of the OnRobot and Ameca clips, each blurred inside its mask (2026-10-22, ignored test
+/// `blurred_faces_defeat_the_face_detector` in `filmcraft-vision`): at σ 0.10 h YuNet still found
+/// 21 % of them and 4 with their centre outside the mask (a face the check would flag); at 0.15 h
+/// 12 %, none outside; 0.20 h 10 %. (A face's identity lives in the details from about 4 to 16
+/// cycles across it, which σ = 0.15 h removes entirely; what the detector still finds is the
+/// blob of a head.) Proportional to each face (by its band), so the blur is as light as it can be
+/// at any size and at any output resolution; before, every face of a clip had its largest face's
+/// σ (0.15 of it), several times what a small one needed.
+pub const BLUR_PER_HEIGHT: f64 = 0.3;
+
+/// The size a track is hidden for, clip pixels: a face's (or named target's) largest height, a
+/// plate's largest width counting for less.
+fn hide_size(t: &Track, c: &ClipRedact) -> f64 {
+    let s = if t.kind == Kind::Plate { t.max_size() * c.size.0 * 0.6 } else { t.max_size() * c.size.1 };
+    if s.is_finite() { s.max(8.0) } else { 8.0 }
+}
+
+/// The blurriness for a face (or plate) `size` px tall at `strength` (1..100):
+/// [`BLUR_PER_HEIGHT`] at 60, proportional to the strength, at least 6.
+pub fn blurriness(size: f64, strength: f64) -> f64 {
+    let s = if strength.is_finite() { strength.clamp(1.0, 100.0) } else { 60.0 };
+    let b = size * BLUR_PER_HEIGHT * s / 60.0;
+    if b.is_finite() { b.clamp(6.0, 2000.0) } else { 6.0 }
+}
+
+/// The effects hiding a clip's tracks: one per size band ([`SIZE_BAND`], smallest first), its
+/// strength from the band's largest face or plate ([`blurriness`]), with one mask per track. None
+/// when nothing in it is hidden.
+pub fn effects_for(c: &ClipRedact, o: &Options) -> Vec<EffectInstance> {
+    let mut bands: std::collections::BTreeMap<i64, Vec<(&Track, usize)>> = std::collections::BTreeMap::new();
+    for (t, n) in numbered(c) {
+        let band = ((hide_size(t, c) / 8.0).ln() / SIZE_BAND.ln()).floor();
+        bands.entry(if band.is_finite() { band.clamp(0.0, 64.0) as i64 } else { 0 }).or_default().push((t, n));
     }
-    // the size to hide: the largest face's height, a plate's width counting for less
-    let size =
-        hidden.iter().map(|t| if t.kind == Kind::Plate { t.max_size() * c.size.0 * 0.6 } else { t.max_size() * c.size.1 }).fold(0.0f64, f64::max).max(8.0);
+    bands.into_values().filter_map(|tracks| effect_of(c, o, &tracks)).collect()
+}
+
+/// One effect hiding `tracks` of `c` (each with its number).
+fn effect_of(c: &ClipRedact, o: &Options, tracks: &[(&Track, usize)]) -> Option<EffectInstance> {
+    let size = tracks.iter().map(|(t, _)| hide_size(t, c)).fold(8.0f64, f64::max);
     let s = (o.strength / 100.0).clamp(0.01, 1.0);
     let mut e = match o.style {
         Style::Blur => {
             let mut e = filmcraft_project::effect::find_effect("gaussian_blur")?.instance();
-            let blur = (size * 0.5 * s).clamp(6.0, 2000.0);
-            *e.param_mut("blurriness")? = Param::new(ParamValue::Float(blur));
+            *e.param_mut("blurriness")? = Param::new(ParamValue::Float(blurriness(size, o.strength)));
             if let Some(r) = e.param_mut("repeat_edge") {
                 *r = Param::new(ParamValue::Bool(true));
             }
@@ -1492,7 +1731,7 @@ pub fn effect_for(c: &ClipRedact, o: &Options) -> Option<EffectInstance> {
         }
         Style::Mosaic => {
             let mut e = filmcraft_project::effect::find_effect("mosaic")?.instance();
-            // 16 blocks down the largest face at the lowest strength, 5 at the highest
+            // 16 blocks down the band's largest face at the lowest strength, 5 at the highest
             let block = (size / (16.0 - 11.0 * s)).max(2.0);
             *e.param_mut("horizontal")? = Param::new(ParamValue::Float((c.size.0 / block).round().clamp(1.0, 4000.0)));
             *e.param_mut("vertical")? = Param::new(ParamValue::Float((c.size.1 / block).round().clamp(1.0, 4000.0)));
@@ -1502,8 +1741,8 @@ pub fn effect_for(c: &ClipRedact, o: &Options) -> Option<EffectInstance> {
             e
         }
     };
-    for (t, n) in numbered(c) {
-        if let Some(m) = mask_for(t, n, c, o.padding) {
+    for (t, n) in tracks {
+        if let Some(m) = mask_for(t, *n, c, o.padding) {
             e.masks.push(m);
         }
     }
@@ -1547,8 +1786,7 @@ pub struct Coverage {
 
 /// The share of the frame the mask of track `t` covers at point `p`.
 fn share(t: &Track, p: &filmcraft_vision::track::TrackPoint, padding: f64) -> f64 {
-    let pad = if t.kind == Kind::Target { padding + TARGET_MARGIN } else { padding };
-    let b = filmcraft_vision::track::padded(&p.bbox, pad);
+    let b = shape_box(t, p, padding);
     let w = ((b[0] + b[2]).min(1.0) - b[0].max(0.0)).max(0.0);
     let h = ((b[1] + b[3]).min(1.0) - b[1].max(0.0)).max(0.0);
     let a = w * h * if t.kind == Kind::Face { std::f64::consts::FRAC_PI_4 } else { 1.0 };
@@ -1676,7 +1914,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Faces and Plates…",
             menu: &["Clip"],
             shortcut: None,
-            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"profiles":bool=installed,"wait":bool=false}"#,
+            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.15,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"profiles":bool=installed,"wait":bool=false}"#,
             enabled: has_video_selection,
             run: redact_clips,
             journal: true,
@@ -1686,7 +1924,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Sequence…",
             menu: &[],
             shortcut: None,
-            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.2,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"profiles":bool=installed,"wait":bool=false}"#,
+            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.15,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"profiles":bool=installed,"wait":bool=false}"#,
             enabled: has_seq,
             run: redact_sequence,
             journal: true,
@@ -1982,12 +2220,12 @@ pub fn poll(s: &mut Session) {
 
 fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &Verified, secs: [f64; 2], cache: Value, profiles: bool) -> Result<Value> {
     let o = &pj.opts;
-    let made: Vec<Option<EffectInstance>> = clips.iter().map(|c| effect_for(c, o)).collect();
+    let made: Vec<Vec<EffectInstance>> = clips.iter().map(|c| effects_for(c, o)).collect();
     let hidden: usize = made.iter().flatten().map(|e| e.masks.len()).sum();
-    // every clip of an analysis, and its copies, with the effect hiding what it shows
-    let effects: Vec<(ClipId, Option<EffectInstance>)> =
+    // every clip of an analysis, and its copies, with the effects hiding what it shows
+    let effects: Vec<(ClipId, Vec<EffectInstance>)> =
         clips.iter().zip(&made).flat_map(|(c, e)| std::iter::once(c.clip).chain(c.also.iter().copied()).map(move |id| (id, e.clone()))).collect();
-    let masks = |id: ClipId| effects.iter().find(|(c, _)| *c == id).and_then(|(_, e)| e.as_ref()).map_or(0, |e| e.masks.len());
+    let masks = |id: ClipId| effects.iter().find(|(c, _)| *c == id).map_or(0, |(_, e)| e.iter().map(|e| e.masks.len()).sum());
     let placed = s.project.sequence(pj.seq);
     let summary: Vec<Value> = clips
         .iter()
@@ -2015,11 +2253,13 @@ fn apply(s: &mut Session, pj: &PendingRedact, clips: &[ClipRedact], verified: &V
                     if o.replace {
                         it.effects.retain(|x| !is_auto_redaction(x));
                     }
-                    if let Some(e) = e {
+                    if !e.is_empty() {
                         // ahead of the clip's other standard effects: the masks are in the
                         // source's own pixels, before anything moves them (Warp Stabilizer)
                         let at = it.effects.iter().position(|x| x.def().is_some_and(|d| !d.intrinsic)).unwrap_or(it.effects.len());
-                        it.effects.insert(at, e.clone());
+                        for (k, fx) in e.iter().enumerate() {
+                            it.effects.insert(at + k, fx.clone());
+                        }
                         n += 1;
                     }
                 }

@@ -375,7 +375,7 @@ fn defaults(app: &mut FilmcraftApp, cmd: &str, id: &str) -> Result<(Value, Value
         "clip.autoRedact" => {
             let st = s.execute("redact.status", json!({})).map_err(|e| e.to_string())?;
             (
-                json!({"faces": true, "plates": true, "targets": "", "style": "blur", "strength": 60.0, "minFaceHeight": 5.0, "padding": 20.0, "verify": true}),
+                json!({"faces": true, "plates": true, "targets": "", "style": "blur", "strength": 60.0, "minFaceHeight": 5.0, "padding": 15.0, "verify": true}),
                 st,
             )
         }
@@ -1001,7 +1001,7 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
                 "style": p["style"],
                 "strength": p["strength"],
                 "minFaceHeight": p["minFaceHeight"].as_f64().unwrap_or(5.0) / 100.0,
-                "padding": p["padding"].as_f64().unwrap_or(20.0) / 100.0,
+                "padding": p["padding"].as_f64().unwrap_or(15.0) / 100.0,
                 "verify": p["verify"],
                 "targets": targets,
             });
