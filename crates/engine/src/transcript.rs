@@ -169,12 +169,24 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let models = models_dir();
     let neural = s.transcriber.is_none() && opts.diarize;
     let hear = Options { diarize: opts.diarize && !neural, ..opts.clone() };
+    let chunked =
+        s.transcriber.is_none() && (filmcraft_speech::models::find(&t.id()).is_some_and(|m| m.language.is_some()) || opts.language.as_deref() == Some("ml"));
     for item in items {
         let Some(audio) = item_audio(s, item) else {
             skipped.push(item.0);
             continue;
         };
-        let mut tr = t.transcribe(&audio, &hear, &mut |_, _| true).map_err(speech_err)?;
+        // a model fine-tuned for one language (Malayalam's) reads best without timestamps: its
+        // speech is heard chunk by chunk (voice activity, 12 s at most), words timed by alignment
+        let mut tr = if chunked {
+            let silero = models.as_deref().and_then(filmcraft_speech::vad::load_silero);
+            let (segs, _) = filmcraft_speech::vad::speech_segments(&audio, silero.as_deref(), &filmcraft_speech::silero::SegmentParams::default());
+            let sr = filmcraft_speech::SAMPLE_RATE as usize;
+            let chunks = filmcraft_speech::vad::chunks(&audio, &segs, 12 * sr, sr / 5);
+            t.transcribe_chunks(&audio, &chunks, &hear, &mut |_, _| true).map_err(speech_err)?
+        } else {
+            t.transcribe(&audio, &hear, &mut |_, _| true).map_err(speech_err)?
+        };
         tr.normalize();
         if neural && !tr.words.is_empty() {
             filmcraft_speech::diarize::diarize_auto(&audio, &mut tr, models.as_deref(), None, opts.max_speakers);

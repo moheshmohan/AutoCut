@@ -104,7 +104,9 @@ revision of OpenAI's Hugging Face repositories and checked against its SHA-256:
 
 `whisper-medium-ml` is what hears Malayalam narration back (the strict check, see
 [malayalam-narration.md](malayalam-narration.md)); it also transcribes Malayalam, English
-loanwords written in Malayalam script. Its file list pins Thennal D K's repository (the
+loanwords written in Malayalam script. Trained without timestamps, it hears speech chunk by chunk
+(voice activity, at most 12 s: its decoder holds about that much Malayalam), each chunk's words
+timed by alignment, in `transcript.generate` as in `media.understandSpeech`. Its file list pins Thennal D K's repository (the
 safetensors conversion, pull request 2) and Whisper medium's own `tokenizer.json`. The survey that
 chose it is in [`crates/speech/README.md`](../crates/speech/README.md).
 
