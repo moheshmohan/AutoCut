@@ -613,7 +613,7 @@ fn audio_stream_info(t: &filmcraft_isobmff::Track, bytes: &crate::Src) -> Option
             if a.channels() > 0 { a.channels() } else { ap.channels },
             None,
         ),
-        CodecConfig::Pcm(p) => (p.sample_rate as u32, p.channels, Some(p.bits as u32)),
+        CodecConfig::Pcm(p) => (p.sample_rate as u32, p.channels.clamp(1, crate::audio::MAX_PCM_CHANNELS as u32), Some(p.bits as u32)),
         CodecConfig::Opus(o) => (crate::audio::OPUS_RATE, (o.output_channels as u32).max(1), None),
         _ => (if ap.sample_rate > 0.0 { ap.sample_rate as u32 } else { t.timescale }, ap.channels.max(1), None),
     };

@@ -727,23 +727,29 @@ pub fn decode_dvd_lpcm(data: &[u8], channels: usize, bits: u32) -> Vec<Vec<f32>>
     out
 }
 
-/// Decode interleaved PCM bytes into planar f32.
+/// The most channels PCM decodes to: more than any real layout (7th-order ambisonics is 64). A
+/// damaged QuickTime v2 sound entry declares up to `u32::MAX`, which made [`decode_pcm`] allocate a
+/// buffer per declared channel; the channels past this are skipped (their bytes still stride).
+pub const MAX_PCM_CHANNELS: usize = 64;
+
+/// Decode interleaved PCM bytes into planar f32 (at most [`MAX_PCM_CHANNELS`] channels).
 pub fn decode_pcm(data: &[u8], cfg: &filmcraft_isobmff::PcmConfig) -> Vec<Vec<f32>> {
-    let ch = cfg.channels.max(1) as usize;
+    let declared = usize::try_from(cfg.channels.max(1)).unwrap_or(usize::MAX);
+    let ch = declared.min(MAX_PCM_CHANNELS);
     // #2064: an `ipcm`/`fpcm` entry may declare `bits == 0`, which would make `bps` 0 and
     // `data.len() / 0` panic. The other arms (`sowt`/`twos`/`raw`) already default a 0 sample size
     // to 16/8, and MXF's `decode_pcm` rejects `bps == 0`; this is the path that fell through.
     // Return silence of the right channel count so the worker doesn't crash.
     // (The frame size is checked too: a hostile channel count overflows it on a 32-bit target.)
     let bps = (cfg.bits as usize).div_ceil(8);
-    let Some(frame) = bps.checked_mul(ch).filter(|&f| f > 0) else {
+    let Some(frame) = bps.checked_mul(declared).filter(|&f| f > 0) else {
         return vec![Vec::new(); ch];
     };
     let n = data.len() / frame;
     let mut out = vec![Vec::with_capacity(n); ch];
     for i in 0..n {
         for (c, o) in out.iter_mut().enumerate() {
-            let off = (i * ch + c) * bps;
+            let off = (i * declared + c) * bps;
             let b = &data[off..off + bps];
             let v = match (cfg.bits, cfg.float, cfg.big_endian) {
                 (32, true, false) => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
@@ -788,6 +794,29 @@ mod decode_pcm_tests {
         for ch in &out {
             assert!(ch.is_empty(), "no samples decoded: {ch:?}");
         }
+    }
+
+    /// A QuickTime v2 sound entry can declare `u32::MAX` channels; decoding allocated a buffer per
+    /// declared channel (about 100 GB of empty `Vec`s). Now at most [`MAX_PCM_CHANNELS`].
+    #[test]
+    fn a_hostile_channel_count_is_capped() {
+        let cfg = PcmConfig { bits: 16, channels: u32::MAX, signed: true, ..Default::default() };
+        let out = decode_pcm(&[0u8; 64], &cfg);
+        assert_eq!(out.len(), MAX_PCM_CHANNELS);
+        assert!(out.iter().all(Vec::is_empty), "a frame is larger than the data");
+    }
+
+    /// More channels than the cap: the first ones decode, the rest are skipped but still stride.
+    #[test]
+    fn channels_past_the_cap_are_skipped() {
+        let declared = MAX_PCM_CHANNELS + 2;
+        let cfg = PcmConfig { bits: 8, channels: declared as u32, signed: true, ..Default::default() };
+        // two frames: channel c of frame f holds f * 100 + c (as i8, small enough to fit)
+        let bytes: Vec<u8> = (0..2).flat_map(|f| (0..declared).map(move |c| ((f * 100 + c) % 128) as u8)).collect();
+        let out = decode_pcm(&bytes, &cfg);
+        assert_eq!(out.len(), MAX_PCM_CHANNELS);
+        assert_eq!(out[1], vec![1.0 / 128.0, 101.0 / 128.0]);
+        assert_eq!(out[MAX_PCM_CHANNELS - 1].len(), 2);
     }
 
     /// Sanity check: a normal 16-bit little-endian mono frame round-trips through the matcher.
