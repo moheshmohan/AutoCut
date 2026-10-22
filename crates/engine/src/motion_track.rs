@@ -12,7 +12,7 @@
 //! | `track.detach` | stop an attachment (`clear: true` also removes the keyframes it wrote) |
 //! | `track.rebake` | re-write a track's attachments (after the clips were trimmed, moved or sped up) |
 //! | `track.blurObject` | track (as `track.create`), then a blurred (`style: "blur"`) or pixelated (`"mosaic"`) mask follows the object: privacy for one object or logo; one undo step ("Blur Object") |
-//! | `track.label` | track, then a callout follows the object: `text` on a graphic clip over it with a leader line and a dot (`style` `callout` / `tag` / `plain`, `side` `auto` / `left` / `right`); one undo step ("Label Object") |
+//! | `track.label` | track, then a callout follows the object: `text` on a graphic clip over it with a leader line and a dot (`style` `callout` / `tag` / `plain`, `side` `auto` — where it stays in the frame the longest as the object moves — / `above` / `right` / `left` / `below`); one undo step ("Label Object") |
 //! | `track.spotlight` | track, then the surroundings are darkened (`dim` %) outside a soft ellipse following the object; one undo step ("Spotlight Object") |
 //! | `track.add` | the same on a track already made (`track`): `what` `label` (with `text`, `style`, `side`, `size`, `accent`), `blur`, `mosaic` or `spotlight` (with `dim`); one undo step |
 //!
@@ -149,7 +149,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             ADD,
             "Add to Motion Track",
-            r##"{"track":id,"what":"label"|"blur"|"mosaic"|"spotlight","text":str?,"style":str?,"side":"auto"|"left"|"right"?,"size":px?,"accent":"#rrggbb"?,"amount":0..100?,"shape":"ellipse"|"rectangle"?,"feather":px?,"dim":0..100?,"at":seconds?}"##,
+            r##"{"track":id,"what":"label"|"blur"|"mosaic"|"spotlight","text":str?,"style":str?,"side":"auto"|"above"|"right"|"left"|"below"?,"size":px?,"accent":"#rrggbb"?,"amount":0..100?,"shape":"ellipse"|"rectangle"?,"feather":px?,"dim":0..100?,"at":seconds?}"##,
             add,
         ),
         spec(
@@ -168,7 +168,7 @@ pub fn commands() -> Vec<CommandSpec> {
             concat!(
                 "{",
                 r#""clip":id?,"box":[x,y,w,h]|{"x","y","w","h"},"space":"picture"|"frame"="picture","at":seconds?,"direction":"forward"|"backward"|"both"="both","method":"subject"|"points"="subject","name":str?,"wait":bool=false"#,
-                r##","text":str,"style":"callout"|"tag"|"plain"="callout","side":"auto"|"left"|"right"="auto","size":px?,"accent":"#rrggbb"?,"videoTrack":index?,"from":seconds?,"to":seconds?}"##
+                r##","text":str,"style":"callout"|"tag"|"plain"="callout","side":"auto"|"above"|"right"|"left"|"below"="auto","size":px?,"accent":"#rrggbb"?,"videoTrack":index?,"from":seconds?,"to":seconds?}"##
             ),
             label,
         ),
@@ -912,7 +912,7 @@ struct BlurSpec {
 struct LabelSpec {
     text: String,
     style: LabelStyle,
-    side: Option<bool>,
+    side: Option<Side>,
     size: Option<f64>,
     accent: [f32; 4],
     at: Tick,
@@ -921,6 +921,15 @@ struct LabelSpec {
     /// Shown only from / until these sequence times (inside the tracked clip).
     from: Option<Tick>,
     to: Option<Tick>,
+}
+
+/// Where a callout sits from its object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    Above,
+    Right,
+    Left,
+    Below,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -989,9 +998,11 @@ fn label_spec(cmd: &str, p: &Value, at: Tick) -> Result<LabelSpec> {
     };
     let side = match opt_str(cmd, p, "side")?.unwrap_or("auto") {
         "auto" => None,
-        "right" => Some(true),
-        "left" => Some(false),
-        o => return Err(bad(cmd, format!("`side` is \"auto\", \"left\" or \"right\", not \"{o}\""))),
+        "right" => Some(Side::Right),
+        "left" => Some(Side::Left),
+        "above" => Some(Side::Above),
+        "below" => Some(Side::Below),
+        o => return Err(bad(cmd, format!("`side` is \"auto\", \"left\", \"right\", \"above\" or \"below\", not \"{o}\""))),
     };
     let accent = match opt_str(cmd, p, "accent")? {
         None => [1.0, 0.78, 0.18, 1.0],
@@ -1183,15 +1194,74 @@ fn add_label(pr: &mut Project, st: &mut crate::EditorState, t: &mut MotionTrack,
     let size = pr.source_size(t.item).ok_or_else(|| EngineError::Other("the tracked clip has no picture".into()))?;
     let view = View::new(pr, q, &clip, t, size);
     let shown = view.at(l.at).ok_or_else(|| EngineError::Other("the object is not on screen there".into()))?;
-    let u = f64::from(fh) / 1080.0;
+    // laid out for a 1080-pixel short side, scaled with the frame
+    let u = f64::from(fw.min(fh)) / 1080.0;
     let text_size = l.size.unwrap_or(44.0 * u);
-    // to the side with more room (right when the object is left of centre), up unless near the top
-    let right = l.side.unwrap_or(shown.pos.x < f64::from(fw) / 2.0);
-    let up = shown.pos.y - shown.size.y / 2.0 > f64::from(fh) * 0.25;
-    let (sx, sy) = (if right { 1.0 } else { -1.0 }, if up { -1.0 } else { 1.0 });
-    let reach = (shown.size.y * 0.55).max(70.0 * u) + 40.0 * u;
-    let centre = Vec2::new(f64::from(fw) / 2.0, f64::from(fh) / 2.0);
-    let end = centre + Vec2::new(sx * reach * 0.8, sy * reach);
+    let pad = 14.0 * u;
+    let (fwf, fhf) = (f64::from(fw), f64::from(fh));
+    // where the object shows over the clip (every few frames), to keep the label in the frame
+    let fd = rate.sane().frame_duration().max(Tick(1));
+    let step = Tick(fd.0.saturating_mul(((clip.duration.0 / fd.0.max(1)) / 200).max(1)));
+    let mut path: Vec<Vec2> = Vec::new();
+    let mut tt = clip.start;
+    while tt < clip.end() && path.len() < 400 {
+        if let Some(o) = view.at(tt) {
+            path.push(o.pos);
+        }
+        let Some(next) = tt.0.checked_add(step.0) else { break };
+        tt = Tick(next);
+    }
+    if path.is_empty() {
+        path.push(shown.pos);
+    }
+    // the text's box, estimated (a bold sans is about 0.58 em a character)
+    let chars = l.text.lines().map(|x| x.chars().count()).max().unwrap_or(1).max(1) as f64;
+    let lines = l.text.lines().count().max(1) as f64;
+    let (tw, th) = ((chars * 0.58 * text_size + 2.0 * pad).min(fwf * 0.95), lines * text_size * 1.25 + 2.0 * pad);
+    let reach = (shown.size.y * 0.35).max(60.0 * u) + 30.0 * u;
+    // per side: the leader's end and the label box (left, top, right, bottom), from the object
+    let layout = |side: Side| -> (Vec2, [f64; 4]) {
+        match side {
+            Side::Above => {
+                let end = Vec2::new(0.0, -(shown.size.y / 2.0).max(reach * 0.6) - 20.0 * u);
+                (end, [-tw / 2.0, end.y - th, tw / 2.0, end.y])
+            }
+            Side::Below => {
+                let end = Vec2::new(0.0, (shown.size.y / 2.0).max(reach * 0.6) + 20.0 * u);
+                (end, [-tw / 2.0, end.y, tw / 2.0, end.y + th])
+            }
+            Side::Right => {
+                let end = Vec2::new(reach * 0.8, -reach);
+                (end, [end.x + 6.0 * u, end.y - th / 2.0, end.x + 6.0 * u + tw, end.y + th / 2.0])
+            }
+            Side::Left => {
+                let end = Vec2::new(-reach * 0.8, -reach);
+                (end, [end.x - 6.0 * u - tw, end.y - th / 2.0, end.x - 6.0 * u, end.y + th / 2.0])
+            }
+        }
+    };
+    let margin = 8.0 * u;
+    let inside = |side: Side| -> usize {
+        let (_, b) = layout(side);
+        path.iter().filter(|p| p.x + b[0] >= margin && p.x + b[2] <= fwf - margin && p.y + b[1] >= margin && p.y + b[3] <= fhf - margin).count()
+    };
+    // asked for, else the side that keeps it in the frame the longest (above first on ties:
+    // it reads best on a tall frame; then the side with more room)
+    let roomier = if shown.pos.x < fwf / 2.0 { [Side::Right, Side::Left] } else { [Side::Left, Side::Right] };
+    let side = l.side.unwrap_or_else(|| {
+        let order = [Side::Above, roomier[0], roomier[1], Side::Below];
+        let mut best = (0usize, Side::Above);
+        for sd in order {
+            let n = inside(sd);
+            if n > best.0 {
+                best = (n, sd);
+            }
+        }
+        best.1
+    });
+    let (end_off, bx) = layout(side);
+    let centre = Vec2::new(fwf / 2.0, fhf / 2.0);
+    let end = centre + end_off;
     let mut layers: Vec<EffectInstance> = Vec::new();
     let accent = l.accent;
     if l.style != LabelStyle::Tag {
@@ -1212,21 +1282,14 @@ fn add_label(pr: &mut Project, st: &mut crate::EditorState, t: &mut MotionTrack,
         set(&mut dot, "name", ParamValue::Text("Dot".into()));
         layers.push(dot);
     }
-    let pad = 14.0 * u;
-    let pos = if l.style == LabelStyle::Tag {
-        // a tag sits just above (or below) the object, centred
-        Vec2::new(centre.x, centre.y + sy * (shown.size.y / 2.0 + text_size * 0.9))
-    } else {
-        Vec2::new(end.x + sx * (pad + 6.0 * u), end.y + text_size * 0.36)
+    // the text's anchor: on its first baseline, at its alignment point
+    let first_baseline = bx[1] + pad + text_size * 0.95;
+    let (pos, align) = match side {
+        Side::Above | Side::Below => (Vec2::new(centre.x, centre.y + first_baseline), 1),
+        Side::Right => (Vec2::new(centre.x + bx[0] + pad, centre.y + first_baseline), 0),
+        Side::Left => (Vec2::new(centre.x + bx[2] - pad, centre.y + first_baseline), 2),
     };
     let mut text = filmcraft_project::graphic::new_text_layer(&l.text, pos, text_size);
-    let align = if l.style == LabelStyle::Tag {
-        1
-    } else if right {
-        0
-    } else {
-        2
-    };
     set(&mut text, "align", ParamValue::Choice(align));
     set(&mut text, "font_style", ParamValue::Text("Bold".into()));
     set(&mut text, "name", ParamValue::Text("Label".into()));

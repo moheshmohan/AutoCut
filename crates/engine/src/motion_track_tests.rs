@@ -471,3 +471,35 @@ fn add_to_an_existing_track() {
         assert!(s.execute("track.add", bad.clone()).is_err(), "accepted {bad}");
     }
 }
+
+/// An effect's point (a Lens Flare's centre, in the clip's own pixels) follows the object, and a
+/// graphic layer's position lands on it through its clip's Motion.
+#[test]
+fn effect_points_and_layers_follow_the_object() {
+    let (mut s, seq, clip, rate) = session();
+    let id = create(&mut s, clip, secs(rate, 0), truth_box(0), "points");
+    s.execute("timeline.select", json!({"clips": [clip.0]})).unwrap();
+    s.execute("effects.apply", json!({"effect": "lens_flare"})).unwrap();
+    let q = s.project.sequence(seq).unwrap().clone();
+    let fx = q.find_item(clip).unwrap().1.effects.iter().position(|e| e.effect == "lens_flare").unwrap();
+    let r = s.execute("track.attach", json!({"track": id, "target": {"clip": clip.0, "effect": fx, "param": "center"}, "offset": "center"})).unwrap();
+    assert!(r["keyframes"].as_u64().unwrap() >= 2, "{r}");
+    let txt = s.execute("graphics.newText", json!({"text": "Spot", "time": 0, "seconds": 2.0})).unwrap();
+    let label = ClipId(txt["clip"].as_u64().unwrap());
+    // the graphic clip itself moved and scaled: the layer still lands on the object
+    s.execute("effects.setParam", json!({"clip": label.0, "effect": "motion", "param": "scale", "value": 50.0})).unwrap();
+    s.execute("track.attach", json!({"track": id, "target": {"clip": label.0, "layer": 0}, "offset": "center"})).unwrap();
+    let q = s.project.sequence(seq).unwrap().clone();
+    let (_, it) = q.find_item(clip).unwrap();
+    let (_, l) = q.find_item(label).unwrap();
+    for k in [3i64, 20, 44] {
+        let t = rate.tick_of(k);
+        let c = it.effects[fx].vec2_at("center", it.effect_time_at(t));
+        assert!((c - truth(k as u32).0).length() < 2.0, "flare centre at {k}: {c:?}");
+        let layer = l.effects.iter().find(|e| filmcraft_project::graphic::is_layer(e)).unwrap();
+        let local = layer.vec2_at("position", l.effect_time_at(t));
+        let m = filmcraft_render::motion_matrix(&q, l, (W, H), None, l.effect_time_at(t));
+        let shown = m.apply(local);
+        assert!((shown - truth(k as u32).0).length() < 2.0, "layer at {k}: {shown:?}");
+    }
+}
