@@ -99,3 +99,55 @@ Captions are set in Inter SemiBold (OFL, bundled) by the text engine (`crates/te
 kerning, bidi); italics/bold markup is not yet drawn differently. The captions of a nested sequence
 are part of the nest's picture: they are drawn wherever the nest is shown, in the Program monitor
 and in every export, whether or not the outer sequence shows or burns in its own.
+
+A track style's `xOffset` (`captions.setStyle`, a share of the frame width) moves the captions
+sideways, e.g. onto the middle of a platform's safe span (YouTube Shorts' right margin is wider
+than its left).
+
+## Word timing
+
+A caption can know when each of its words is spoken (`Caption::words`, relative to the caption,
+so moving a caption moves its words; trims, splits, merges and extracts keep them where they are
+spoken). `transcript.createCaptions` fills it from the transcript's word timestamps;
+`captions.wordTiming {track, from: "transcript" | "narration"}` times existing captions from the
+sequence transcript or from the narration clips' scripts (spread over each clip's speech by the
+words' lengths, pauses kept: an estimate). ASS karaoke (`\k`, `\K`, `\kf`, `\ko`) imports into it
+and a caption whose words still match its text exports as karaoke. `captions.list` reports
+`timedWords`. Without timing, a caption's time is spread over its words by length.
+
+## Animated captions
+
+`captions.setAnimatedStyle {track, preset, options}` draws a track word by word (in the Program
+monitor and the burn-in alike, `filmcraft_captions::animated`):
+
+| preset | look |
+|---|---|
+| `bold` | uppercase heavy sans with a black stroke and a hard shadow, 2–4 words a page, the spoken word in the active colour popping to 1.1× with an overshoot; the page pops in |
+| `clean` | sentence case with a soft shadow, the spoken word coloured |
+| `glow` | a neon glow around the spoken word |
+| `box` | the spoken word on a rounded box of the active colour |
+| `karaoke` | the active colour sweeps through each word as it is spoken |
+| `twoLine` | classic subtitles: the whole caption on up to two lines, a soft shadow |
+| `off` | whole captions again |
+
+Options: `wordsPerPage` (1–8), `activeColor`, `keywordColor` and `keywords` (drawn in it),
+`emoji` (`{"word": "🔥"}`, shown after the word; colour emoji are drawn from the system's emoji
+font), `uppercase`, `platform` (`youtube`, `reels`, `tiktok`, `vertical`: the block is centred on
+the middle of that platform's safe span at its rows, at most as wide as it, and the margin counts
+from its safe area), `pop`, `position`, `margin`, `xOffset`, `size`, `font`, `keepStyle`. A page
+breaks at a sentence end or a pause of 0.6 s; a word too wide for the space gets a smaller page of
+its own. `sequence.checkSafeZones` checks every page of an animated track. The Text panel's
+Captions tab has a live preview tile of each style, the platform and **Time words…**
+(`text.captions.animated.*`); the CLI has `filmcraft-cli captions style <preset> …` and
+`captions timing --from transcript|narration`. AutoCut's shorts and trailers use Bold by default
+(`captionStyle` picks another look or `plain`; `captionKeywords` lets the local model colour
+keywords and add emoji).
+
+**Malayalam and other scripts** are shaped word by word like any other text: characters the
+bundled fonts lack fall back to an installed font made for their script (Malayalam Sangam MN /
+Malayalam MN on macOS, Noto Sans Malayalam where installed on Linux), so conjuncts and vowel
+signs join, and the highlight moves word by word. To have Malayalam everywhere (the web,
+machines without such a font), add Noto Sans Malayalam (SIL OFL 1.1) to
+[craft-fonts](https://github.com/storytold/craft-fonts) with script `Mlym` and build with
+`CRAFT_FONTS_DIR`: craft-fonts faces are tried before system ones. No font files go in this
+repository.

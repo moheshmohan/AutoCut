@@ -103,7 +103,7 @@ pub fn parse(text: &str) -> Result<Document> {
         }
         let raw = b[timing_idx + 1..].iter().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n");
         let (speaker, text) = split_voice(&raw);
-        doc.cues.push(Cue { start, end, text, speaker, id, settings: settings.to_string() });
+        doc.cues.push(Cue { start, end, text, speaker, id, settings: settings.to_string(), words: Vec::new() });
     }
     if !has_sig && doc.cues.is_empty() && !text.trim().is_empty() {
         return Err(Error::NotFormat("WebVTT"));

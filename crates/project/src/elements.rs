@@ -9,8 +9,10 @@
 //!   `assets/elements/stickers/*.svg` are previews of the same vectors, exported by the engine.
 //! - **Animated text presets** ([`text_presets`]): a lower third that slides in, a title that
 //!   pops, kinetic word-by-word text, a caption box, a 3-2-1 countdown and an end card, animated
-//!   with keyframes. Intros and outros are protected by Responsive Design – Time, so trimming or
-//!   lengthening a clip keeps them whole.
+//!   with keyframes; and titles animated letter, word or line at a time by text animators
+//!   ([`crate::text_anim`], saved in the template): a typewriter, letters popping in, a wave, a
+//!   flickering neon glow, words sliding up, and a title on an arc dropping in. Intros and outros
+//!   are protected by Responsive Design – Time, so trimming or lengthening a clip keeps them whole.
 //!
 //! Every design is original work by FilmCraft contributors (MIT OR Apache-2.0), drawn from
 //! generic conventions (an arrow, a speech bubble, a star) without reference to anyone's
@@ -24,6 +26,7 @@ use crate::graphic::{new_shape_layer, new_text_layer};
 use crate::graphic_design::{LayerExtra, Pin, PinTarget};
 use crate::gtemplate::{ControlKind, GraphicsTemplate, TemplateControl};
 use crate::keyframe::{Interpolation, Keyframe, ParamValue};
+use crate::text_anim::{AnimKind, AnimUnit, Animator, TextAnimation};
 
 /// Template ids of elements start with this (`element:sticker.arrow`).
 pub const TEMPLATE_PREFIX: &str = "element:";
@@ -824,9 +827,183 @@ fn end_card() -> GraphicsTemplate {
     t
 }
 
+/// Give text layer `e` animators (in, out, loop) — drawn letter, word or line at a time by the
+/// renderer ([`crate::text_anim`]), saved with the template.
+fn animators(e: &mut EffectInstance, enter: Option<Animator>, out: Option<Animator>, repeat: Option<Animator>) {
+    e.layer.get_or_insert_with(Default::default).anim = Some(TextAnimation { enter, out, repeat });
+}
+
+fn anim(kind: AnimKind) -> Animator {
+    Animator::preset(kind)
+}
+
+/// Controls of a one-layer animated title (layer 1): text, colour, font, size.
+fn title_controls() -> Vec<TemplateControl> {
+    vec![
+        ctl("title", "Title", 1, "text"),
+        ctl("title_color", "Title Color", 1, "fill_color"),
+        ctl("font", "Font", 1, "font"),
+        slider("size", "Size", 1, "scale", 10.0, 400.0),
+    ]
+}
+
+/// A title typed letter by letter, erased the same way at the end.
+fn typewriter() -> GraphicsTemplate {
+    let mut t = text(1, "Title", "Once upon a time…", (CX, CY), 110.0, "SemiBold", 1, WHITE, true);
+    shadow(&mut t, 4.0, 16.0, 50.0);
+    animators(&mut t, Some(Animator { stagger: 0.07, ..anim(AnimKind::Typewriter) }), Some(Animator { stagger: 0.03, ..anim(AnimKind::Typewriter) }), None);
+    let mut g = template(
+        "text.typewriter",
+        "Title – Typewriter",
+        ANIMATED_TEXT,
+        "A line typed letter by letter, then erased the same way.",
+        5000,
+        vec![t],
+        title_controls(),
+    );
+    responsive(&mut g, 1500, 700);
+    g
+}
+
+/// Each letter pops in with an overshoot; they shrink away in turn at the end.
+fn pop_letters() -> GraphicsTemplate {
+    let mut t = text(1, "Title", "POP IT", (CX, CY), 180.0, "Bold", 1, YELLOW, true);
+    outline(&mut t, INK, 10.0);
+    shadow(&mut t, 8.0, 10.0, 60.0);
+    animators(&mut t, Some(anim(AnimKind::Pop)), Some(Animator { duration: 0.3, ..anim(AnimKind::Pop) }), None);
+    let mut g = template(
+        "text.pop-letters",
+        "Title – Pop by Letter",
+        ANIMATED_TEXT,
+        "Each letter pops in with a little overshoot, and shrinks away in turn at the end.",
+        4000,
+        vec![t],
+        title_controls(),
+    );
+    responsive(&mut g, 900, 600);
+    g
+}
+
+/// Letters rising and falling in a travelling wave.
+fn wave() -> GraphicsTemplate {
+    let mut t = text(1, "Title", "Good vibes", (CX, CY), 150.0, "Bold", 1, WHITE, true);
+    outline(&mut t, PINK, 6.0);
+    animators(
+        &mut t,
+        Some(Animator { unit: AnimUnit::Word, ..anim(AnimKind::Fade) }),
+        Some(Animator { unit: AnimUnit::Word, ..anim(AnimKind::Fade) }),
+        Some(anim(AnimKind::Wave)),
+    );
+    let mut g = template(
+        "text.wave",
+        "Title – Wave",
+        ANIMATED_TEXT,
+        "A title whose letters ride a wave the whole time it is on screen.",
+        5000,
+        vec![t],
+        title_controls(),
+    );
+    responsive(&mut g, 500, 500);
+    g
+}
+
+/// A neon sign: a glowing title that flickers on and keeps a faint flicker.
+fn neon() -> GraphicsTemplate {
+    let mut t = text(1, "Title", "OPEN LATE", (CX, CY), 160.0, "Bold", 1, 0xe0fbff, true);
+    set(&mut t, "glow", ParamValue::Bool(true));
+    set(&mut t, "glow_color", rgb(0x22d3ee));
+    set(&mut t, "glow_radius", f(40.0));
+    set(&mut t, "glow_intensity", f(150.0));
+    animators(
+        &mut t,
+        Some(Animator { stagger: 0.04, ..anim(AnimKind::Glitch) }),
+        Some(Animator { unit: AnimUnit::Line, ..anim(AnimKind::Fade) }),
+        Some(Animator { amount: 40.0, ..anim(AnimKind::Flicker) }),
+    );
+    let mut g = template(
+        "text.neon-glow",
+        "Neon Glow Title",
+        ANIMATED_TEXT,
+        "A glowing neon title that flickers on, keeps a faint flicker and fades at the end.",
+        5000,
+        vec![t],
+        vec![
+            ctl("title", "Title", 1, "text"),
+            ctl("glow_color", "Glow Color", 1, "glow_color"),
+            ctl("title_color", "Title Color", 1, "fill_color"),
+            slider("glow_radius", "Glow Radius", 1, "glow_radius", 0.0, 200.0),
+            ctl("font", "Font", 1, "font"),
+        ],
+    );
+    responsive(&mut g, 800, 500);
+    g
+}
+
+/// Words sliding up into place one after another, and down out at the end.
+fn slide_words() -> GraphicsTemplate {
+    let mut t = text(1, "Title", "Here is the thing", (CX, CY), 130.0, "Bold", 1, WHITE, true);
+    shadow(&mut t, 6.0, 18.0, 55.0);
+    animators(&mut t, Some(anim(AnimKind::SlideUp)), Some(Animator { stagger: 0.05, ..anim(AnimKind::SlideDown) }), None);
+    let mut g = template(
+        "text.slide-words",
+        "Words – Slide Up",
+        ANIMATED_TEXT,
+        "Words slide up into place one after another, and drop away at the end.",
+        4000,
+        vec![t],
+        title_controls(),
+    );
+    responsive(&mut g, 900, 700);
+    g
+}
+
+/// A title on an arc that drops in letter by letter and bounces gently.
+fn arc_badge() -> GraphicsTemplate {
+    let mut t = text(1, "Title", "SUBSCRIBE FOR MORE", (CX, CY + 60.0), 96.0, "Bold", 1, WHITE, true);
+    set(&mut t, "curve", f(55.0));
+    outline(&mut t, RED, 8.0);
+    set(&mut t, "inner_shadow", ParamValue::Bool(true));
+    animators(
+        &mut t,
+        Some(Animator { stagger: 0.03, ..anim(AnimKind::Drop) }),
+        Some(anim(AnimKind::Fade)),
+        Some(Animator { amount: 60.0, unit: AnimUnit::Line, ..anim(AnimKind::Bounce) }),
+    );
+    let mut g = template(
+        "text.arc-badge",
+        "Arc Title – Drop In",
+        ANIMATED_TEXT,
+        "A title set on an arc whose letters drop in and bounce gently.",
+        4000,
+        vec![t],
+        vec![
+            ctl("title", "Title", 1, "text"),
+            ctl("title_color", "Title Color", 1, "fill_color"),
+            ctl("outline_color", "Outline Color", 1, "stroke_color"),
+            slider("curve", "Curve", 1, "curve", -100.0, 100.0),
+            ctl("font", "Font", 1, "font"),
+        ],
+    );
+    responsive(&mut g, 1100, 500);
+    g
+}
+
 /// The animated text presets (see the module docs).
 pub fn text_presets() -> Vec<GraphicsTemplate> {
-    vec![lower_third_slide(), title_pop(), kinetic_words(), caption_box(), countdown(), end_card()]
+    vec![
+        lower_third_slide(),
+        title_pop(),
+        kinetic_words(),
+        caption_box(),
+        countdown(),
+        end_card(),
+        typewriter(),
+        pop_letters(),
+        wave(),
+        neon(),
+        slide_words(),
+        arc_badge(),
+    ]
 }
 
 /// Every graphic element: stickers, then text presets.
@@ -844,7 +1021,7 @@ mod tests {
     fn every_element_is_a_valid_template_that_round_trips() {
         let all = all();
         assert_eq!(stickers().len(), 10);
-        assert_eq!(text_presets().len(), 6);
+        assert_eq!(text_presets().len(), 12);
         let mut ids: Vec<&str> = all.iter().map(|t| t.id.as_str()).collect();
         ids.sort();
         ids.dedup();
@@ -868,7 +1045,9 @@ mod tests {
     #[test]
     fn text_presets_animate_and_protect_their_intro_and_outro() {
         for t in text_presets() {
-            assert!(t.layers.iter().any(|l| l.params.values().any(|p| p.is_animated())), "{} is animated", t.id);
+            // keyframes, or text animators (letters, words or lines)
+            let animators = t.layers.iter().any(|l| l.layer.as_ref().and_then(|x| x.anim.as_ref()).is_some_and(|a| !a.is_empty()));
+            assert!(animators || t.layers.iter().any(|l| l.params.values().any(|p| p.is_animated())), "{} is animated", t.id);
             for l in &t.layers {
                 for p in l.params.values() {
                     assert!(p.keyframes.windows(2).all(|w| w[0].time < w[1].time), "{}: keyframes in order", t.id);

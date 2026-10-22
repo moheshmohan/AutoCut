@@ -230,6 +230,7 @@ fn authored(p: &mut Project) -> (ItemId, ClipId, ClipId, ClipId, ItemId) {
             speaker: Some("Me".into()),
             cue_id: None,
             settings: String::new(),
+            words: Vec::new(),
         }],
         vtt_blocks: Vec::new(),
     });

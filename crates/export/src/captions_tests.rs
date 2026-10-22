@@ -50,6 +50,7 @@ fn captioned(rate: FrameRate, frames: i64, captions: &[(i64, i64, &str)]) -> (Ar
             speaker: None,
             cue_id: None,
             settings: String::new(),
+            words: Vec::new(),
         });
     }
     let q = p.sequence_mut(seq).unwrap();

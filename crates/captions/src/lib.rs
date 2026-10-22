@@ -21,6 +21,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+pub mod animated;
 pub mod ass;
 pub mod burn;
 pub mod cea608;
@@ -130,6 +131,9 @@ pub struct Cue {
     pub id: Option<String>,
     /// WebVTT cue settings, verbatim.
     pub settings: String,
+    /// Per-word timing (ASS karaoke `\k` syllables): `(start, end, text)` in file time; empty
+    /// when the file has none.
+    pub words: Vec<(Tick, Tick, String)>,
 }
 
 /// A parsed caption file.
@@ -346,14 +350,20 @@ pub fn track_from_document(doc: &Document, id: TrackId, name: &str, format: Capt
         .cues
         .iter()
         .filter(|c| c.end > c.start)
-        .map(|c| Caption {
-            id: ClipId(alloc()),
-            start: c.start,
-            duration: c.end - c.start,
-            text: c.text.clone(),
-            speaker: c.speaker.clone(),
-            cue_id: c.id.clone(),
-            settings: c.settings.clone(),
+        .map(|c| {
+            let mut cap = Caption {
+                id: ClipId(alloc()),
+                start: c.start,
+                duration: c.end - c.start,
+                text: c.text.clone(),
+                speaker: c.speaker.clone(),
+                cue_id: c.id.clone(),
+                settings: c.settings.clone(),
+                words: Vec::new(),
+            };
+            let words: Vec<(String, Tick, Tick)> = c.words.iter().map(|(s, e, w)| (w.clone(), *s, *e)).collect();
+            cap.set_word_times(&words);
+            cap
         })
         .collect();
     t.sort();
@@ -375,6 +385,11 @@ pub fn document_from_track(t: &CaptionTrack, offset: Tick) -> Document {
                 speaker: c.speaker.clone(),
                 id: c.cue_id.clone(),
                 settings: c.settings.clone(),
+                words: c
+                    .words
+                    .iter()
+                    .map(|w| (Tick(c.start.0.saturating_add(w.start.0)) - offset, Tick(c.start.0.saturating_add(w.end.0)) - offset, w.text.clone()))
+                    .collect(),
             })
             .collect(),
         blocks: t.vtt_blocks.clone(),

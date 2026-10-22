@@ -1857,6 +1857,7 @@ dependencies = [
  "filmcraft-audio-dsp",
  "filmcraft-engine",
  "filmcraft-media",
+ "filmcraft-project",
  "filmcraft-time",
  "filmcraft-vision",
  "image",
@@ -2517,6 +2518,7 @@ version = "0.10.0"
 dependencies = [
  "filmcraft-color",
  "harfrust",
+ "png",
  "skrifa",
  "unicode-bidi",
  "unicode-linebreak",
@@ -2568,6 +2570,7 @@ dependencies = [
  "egui_kittest",
  "filmcraft-audio-dsp",
  "filmcraft-autocut",
+ "filmcraft-captions",
  "filmcraft-codecs",
  "filmcraft-color",
  "filmcraft-edit",

@@ -35,6 +35,7 @@ pub mod remix;
 pub mod safe_zones;
 pub mod scene;
 pub mod subject;
+pub mod text_units;
 pub mod track;
 pub mod transitions;
 pub mod vfx;

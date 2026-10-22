@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::args::Args;
 use crate::{Backend, absolute, diag, fail, print, usage};
 
-const USAGE: &str = "trailer (--project p.fcproj | --bridge addr) [--sequence id] [--plan plan.json] [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5] [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at SECONDS]] [--at LABEL=[ITEM@]SECONDS]... [--title \"48 robots · 2013 → 2025\"] [--no-hook-voice] [--logo logo.png] [--channel @handle] [--end-text \"Full video on YouTube\"] [--link URL] [--exclude LABEL]... [--include LABEL]... [--bpm 124] [--mood energetic] [--seed 7] [--redact faces,plates|off] [--fallback blur|letterbox|center] [--export out.mp4] [--preset P] [--no-qa] [--save]";
+const USAGE: &str = "trailer (--project p.fcproj | --bridge addr) [--sequence id] [--plan plan.json] [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5] [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at SECONDS]] [--at LABEL=[ITEM@]SECONDS]... [--title \"48 robots · 2013 → 2025\"] [--no-hook-voice] [--no-captions] [--caption-style bold|plain|…] [--caption-keywords] [--logo logo.png] [--channel @handle] [--end-text \"Full video on YouTube\"] [--link URL] [--exclude LABEL]... [--include LABEL]... [--bpm 124] [--mood energetic] [--seed 7] [--redact faces,plates|off] [--fallback blur|letterbox|center] [--export out.mp4] [--preset P] [--no-qa] [--save]";
 
 const OPTIONS: &[&str] = &[
     "--project",
@@ -30,6 +30,9 @@ const OPTIONS: &[&str] = &[
     "--title",
     "--hook-voice",
     "--no-hook-voice",
+    "--no-captions",
+    "--caption-style",
+    "--caption-keywords",
     "--logo",
     "--channel",
     "--end-text",
@@ -112,6 +115,10 @@ pub fn trailer_params(a: &Args) -> Result<Value, String> {
         (false, true) => p["hookVoice"] = json!(false),
         _ => {}
     }
+    if a.flag("--no-captions") {
+        p["captions"] = json!(false);
+    }
+    crate::caption_style_opts(a, &mut p)?;
     match (a.flag("--qa"), a.flag("--no-qa")) {
         (true, true) => return Err("--qa or --no-qa, not both".into()),
         (true, false) => p["qa"] = json!(true),

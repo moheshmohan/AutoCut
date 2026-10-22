@@ -83,6 +83,7 @@ pub mod shortcuts;
 pub mod soundfonts;
 pub mod source_monitor;
 pub mod sync;
+pub mod text_fx;
 pub mod transcript;
 pub mod transition_tools;
 pub mod trim;

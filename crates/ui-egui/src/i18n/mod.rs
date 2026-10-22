@@ -778,6 +778,7 @@ mod tests {
             "Text",
             "Shape",
             "Appearance",
+            "Text Animation",
         ];
         sections.iter().for_each(|s| push(&mut out, s));
         for p in filmcraft_render::lumetri_presets::presets() {
@@ -820,6 +821,12 @@ mod tests {
         filmcraft_project::TrackMethod::ALL.iter().for_each(|m| push(&mut out, m.label()));
         filmcraft_project::AutomationMode::ALL.iter().for_each(|m| push(&mut out, m.label()));
         filmcraft_project::graphic_design::RollMode::ALL.iter().for_each(|m| push(&mut out, m.label()));
+        // text animators, their units, animated caption styles and the platforms captions keep to
+        use filmcraft_project::text_anim::{AnimKind, AnimUnit};
+        AnimKind::IN.iter().chain(AnimKind::LOOP.iter()).for_each(|k| push(&mut out, k.label()));
+        AnimUnit::ALL.iter().for_each(|u| push(&mut out, u.label()));
+        filmcraft_project::CaptionPreset::ALL.iter().for_each(|p| push(&mut out, p.label()));
+        filmcraft_project::safe_zones::Platform::ALL.iter().for_each(|p| push(&mut out, p.label()));
         filmcraft_project::InputMap::ALL.iter().for_each(|m| push(&mut out, m.label()));
         filmcraft_engine::panels::LOG_FIELDS.iter().for_each(|f| push(&mut out, f));
         filmcraft_engine::project_panel::BUILTIN_COLUMNS.iter().for_each(|c| push(&mut out, c));

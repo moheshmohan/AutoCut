@@ -171,9 +171,12 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let style_h = 30.0;
     let style_rect = Rect::from_min_max(pos2(rect.min.x + 10.0, rect.max.y - style_h), pos2(rect.max.x - 10.0, rect.max.y - 2.0));
     style_strip(app, ui, style_rect, track_idx, &mut actions);
+    // ---- animated caption styles: a live preview of each, the platform, word timing
+    let anim_rect = Rect::from_min_max(pos2(rect.min.x + 10.0, style_rect.min.y - ANIM_STRIP_H), pos2(rect.max.x - 10.0, style_rect.min.y - 4.0));
+    animated_strip(app, ui, anim_rect, track_idx, &mut actions);
 
     // ---- segment list
-    let list = Rect::from_min_max(pos2(rect.min.x + 6.0, bar.max.y + 8.0), pos2(rect.max.x - 6.0, style_rect.min.y - 6.0));
+    let list = Rect::from_min_max(pos2(rect.min.x + 6.0, bar.max.y + 8.0), pos2(rect.max.x - 6.0, anim_rect.min.y - 6.0));
     ui.painter().rect_filled(list, 3.0, t.app_bg);
     let q = app.ui.caption_search.to_lowercase();
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list.shrink(4.0)).id_salt("caption-list"));
@@ -698,6 +701,141 @@ fn style_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, track_idx: us
             if resp.clicked() {
                 actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "anchor": name})));
             }
+        }
+    });
+}
+
+/// Height of the animated caption style strip.
+const ANIM_STRIP_H: f32 = 94.0;
+/// Size of a style preview tile, and of the frame it is rendered from.
+const TILE: egui::Vec2 = vec2(96.0, 54.0);
+const PREVIEW_FRAME: (usize, usize) = (320, 180);
+
+/// A preview of caption style `preset` (None: plain captions) at animation step `step` (0.2 s
+/// each): "make it pop" with the words spoken 0.4 s apart, drawn by the same burn-in the preview
+/// and the export use, over a dark tile. Cached per preset, colour and step.
+fn preset_preview(ctx: &egui::Context, preset: Option<filmcraft_project::CaptionPreset>, active: [u8; 4], step: usize) -> Option<egui::TextureHandle> {
+    use filmcraft_project::{AnimatedCaptions, Caption, CaptionStyle, CaptionWord, ClipId};
+    let key = egui::Id::new(("caption-style-preview", preset.map(|p| p.name()), active, step));
+    if let Some(t) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(key)) {
+        return Some(t);
+    }
+    let s = filmcraft_time::TICKS_PER_SECOND;
+    let words = [("make", 0), ("it", 4), ("pop", 8)];
+    let cap = Caption {
+        id: ClipId(1),
+        start: filmcraft_time::Tick::ZERO,
+        duration: filmcraft_time::Tick(2 * s),
+        text: "make it pop".into(),
+        speaker: None,
+        cue_id: None,
+        settings: String::new(),
+        words: words
+            .iter()
+            .map(|(w, at)| CaptionWord { text: (*w).into(), start: filmcraft_time::Tick(at * s / 10), end: filmcraft_time::Tick((at + 3) * s / 10) })
+            .collect(),
+    };
+    let style = match preset {
+        Some(p) => CaptionStyle {
+            animated: Some(AnimatedCaptions { active_color: active, ..AnimatedCaptions::preset(p) }),
+            anchor: CaptionAnchor::Middle,
+            size: p.base_style().size * 2.6,
+            outline: p.base_style().outline * 2.6,
+            ..p.base_style()
+        },
+        None => CaptionStyle { anchor: CaptionAnchor::Middle, size: 150.0, ..Default::default() },
+    };
+    let (w, h) = PREVIEW_FRAME;
+    let o = filmcraft_captions::burn::render_caption_at(&cap, &style, w, h, filmcraft_time::Tick(step as i64 * s / 5));
+    let bg = filmcraft_color::srgb_to_linear(34.0 / 255.0);
+    let mut lin = vec![[bg, bg, bg * 1.15]; w * h];
+    if let Some(o) = &o {
+        for y in 0..o.h {
+            for x in 0..o.w {
+                let (fx, fy) = (o.x + x as i32, o.y + y as i32);
+                if fx < 0 || fy < 0 || fx >= w as i32 || fy >= h as i32 {
+                    continue;
+                }
+                let (Some(p), Some(d)) = (o.px.get((y * o.w + x) * 4..(y * o.w + x) * 4 + 4), lin.get_mut(fy as usize * w + fx as usize)) else { continue };
+                for c in 0..3 {
+                    d[c] = p[c] + d[c] * (1.0 - p[3]);
+                }
+            }
+        }
+    }
+    let to8 = |v: f32| (filmcraft_color::linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as u8;
+    let rgb: Vec<u8> = lin.iter().flat_map(|p| [to8(p[0]), to8(p[1]), to8(p[2])]).collect();
+    let tex = ctx.load_texture("caption-style-preview", egui::ColorImage::from_rgb([w, h], &rgb), egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(key, tex.clone()));
+    Some(tex)
+}
+
+/// The animated caption styles of a caption track: a live preview tile of each (Off draws whole
+/// captions), the platform whose safe zone they keep to, and word timing from the transcript or
+/// the narration.
+fn animated_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, track_idx: usize, actions: &mut Vec<(String, Value)>) {
+    use filmcraft_engine::safe_zones::Platform;
+    use filmcraft_project::CaptionPreset;
+    let Some(tr) = app.session.active_sequence().and_then(|q| q.caption_tracks.get(track_idx)).cloned() else { return };
+    let t = app.tokens;
+    let anim = tr.style.animated.clone();
+    let now = ui.input(|i| i.time);
+    let step = ((now * 5.0) as usize) % 8;
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+    // the tiles, in a row that scrolls sideways when the panel is narrow
+    let row = Rect::from_min_max(r.min, pos2(r.max.x, r.min.y + TILE.y + 10.0));
+    let mut tiles_ui = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Min)).id_salt("caption-anim-tiles"));
+    let mut autos: Vec<(String, Rect, String)> = Vec::new();
+    egui::ScrollArea::horizontal().id_salt("caption-anim-tiles-scroll").auto_shrink([false, true]).show(&mut tiles_ui, |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let tiles: Vec<Option<CaptionPreset>> = std::iter::once(None).chain(CaptionPreset::ALL.into_iter().map(Some)).collect();
+        for p in tiles {
+            let (tile, resp) = ui.allocate_exact_size(TILE, Sense::click());
+            let selected = anim.as_ref().map(|a| a.preset) == p;
+            let active = p.map_or([255, 255, 255, 255], |p| anim.as_ref().filter(|a| a.preset == p).map_or(p.active_color(), |a| a.active_color));
+            if let Some(tex) = preset_preview(ui.ctx(), p, active, if resp.hovered() || selected { step } else { 1 }) {
+                ui.painter().image(tex.id(), tile, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            let name = p.map_or(tl!("Off"), |p| crate::i18n::t(p.label()));
+            ui.painter().text(pos2(tile.min.x + 4.0, tile.max.y - 3.0), Align2::LEFT_BOTTOM, name, Tokens::ui(10.0), t.text_dim);
+            let stroke =
+                if selected { egui::Stroke::new(2.0, t.accent) } else { egui::Stroke::new(1.0, if resp.hovered() { t.text_dim } else { t.separator }) };
+            ui.painter().rect_stroke(tile, 3.0, stroke, egui::StrokeKind::Inside);
+            autos.push((format!("text.captions.animated.{}", p.map_or("off", |p| p.name())), tile, name.to_string()));
+            if resp.on_hover_text(name).clicked() && !selected {
+                actions.push(("captions.setAnimatedStyle".into(), json!({"track": tr.id.0, "preset": p.map_or("off", |p| p.name())})));
+            }
+        }
+    });
+    for (id, rect, label) in autos {
+        app.auto.add(&id, rect, &label);
+    }
+    // the platform and word timing, under the tiles
+    let side = Rect::from_min_max(pos2(r.min.x, row.max.y + 2.0), r.max);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(side).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("caption-anim-side"));
+    if let Some(a) = &anim {
+        let shown = a.platform.map_or(tl!("Whole frame"), |p| crate::i18n::t(p.label()));
+        let r = egui::ComboBox::from_id_salt(("caption-anim-platform", tr.id.0)).selected_text(shown).width(130.0).show_ui(&mut child, |ui| {
+            if ui.selectable_label(a.platform.is_none(), tl!("Whole frame")).clicked() {
+                actions.push(("captions.setAnimatedStyle".into(), json!({"track": tr.id.0, "preset": a.preset.name(), "options": {"platform": null}})));
+            }
+            for p in Platform::ALL {
+                if ui.selectable_label(a.platform == Some(p), crate::i18n::t(p.label())).clicked() {
+                    actions.push(("captions.setAnimatedStyle".into(), json!({"track": tr.id.0, "preset": a.preset.name(), "options": {"platform": p.name()}})));
+                }
+            }
+        });
+        app.auto.add("text.captions.animated.platform", r.response.rect, "Safe zone of");
+        r.response.on_hover_text(tl!("Keep the captions inside this platform's safe zone"));
+    }
+    let resp = child.button(tl!("Time words…"));
+    app.auto.add("text.captions.animated.wordTiming", resp.rect, "Word timing");
+    egui::Popup::menu(&resp).show(|ui| {
+        if ui.button(tl!("From the transcript")).clicked() {
+            actions.push(("captions.wordTiming".into(), json!({"track": tr.id.0, "from": "transcript"})));
+        }
+        if ui.button(tl!("From the narration")).clicked() {
+            actions.push(("captions.wordTiming".into(), json!({"track": tr.id.0, "from": "narration"})));
         }
     });
 }

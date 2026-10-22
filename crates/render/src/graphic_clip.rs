@@ -152,7 +152,7 @@ pub struct LayerRaster {
     pub img: Image,
 }
 
-fn stroke_kind(k: u32) -> StrokeKind {
+pub(crate) fn stroke_kind(k: u32) -> StrokeKind {
     match k {
         1 => StrokeKind::Center,
         2 => StrokeKind::Inner,
@@ -160,7 +160,7 @@ fn stroke_kind(k: u32) -> StrokeKind {
     }
 }
 
-fn bbox_of(m: &Xform, b: [f32; 4], pad: f32) -> [f32; 4] {
+pub(crate) fn bbox_of(m: &Xform, b: [f32; 4], pad: f32) -> [f32; 4] {
     let pts = [(b[0] - pad, b[1] - pad), (b[2] + pad, b[1] - pad), (b[0] - pad, b[3] + pad), (b[2] + pad, b[3] + pad)];
     let mut o = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
     for (x, y) in pts {
@@ -170,7 +170,7 @@ fn bbox_of(m: &Xform, b: [f32; 4], pad: f32) -> [f32; 4] {
     o
 }
 
-fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+pub(crate) fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
 }
 
@@ -191,7 +191,7 @@ fn over_mask(px: &mut [f32], m: &Mask, c: [f32; 4]) {
     });
 }
 
-fn invert_xform(m: &Xform) -> Option<Xform> {
+pub(crate) fn invert_xform(m: &Xform) -> Option<Xform> {
     let det = m[0] * m[3] - m[1] * m[2];
     if det.abs() < 1e-8 {
         return None;
@@ -206,7 +206,7 @@ fn invert_xform(m: &Xform) -> Option<Xform> {
 
 /// Paint `grad` through `msk`. 0° runs left to right across `lb` in layer space; the angle is
 /// clockwise on screen and turns with `inv` (the device→layer transform).
-fn over_linear_gradient(px: &mut [f32], msk: &Mask, grad: &LinearGradient, lb: [f32; 4], inv: &Xform, origin: (i32, i32)) {
+pub(crate) fn over_linear_gradient(px: &mut [f32], msk: &Mask, grad: &LinearGradient, lb: [f32; 4], inv: &Xform, origin: (i32, i32)) {
     if msk.w == 0 {
         return;
     }
@@ -294,10 +294,47 @@ fn paint_mixed_gradient(
     }
 }
 
+/// The outer glow of the shape in `u` (coverage): a Gaussian falloff `radius` device pixels wide,
+/// brightened by `intensity` (near the edge it saturates, like neon).
+pub(crate) fn glow_mask(u: &Mask, radius: f32, intensity: f32) -> Mask {
+    let mut g = mask::blur(u, (radius / 2.5).max(0.5));
+    let k = intensity * 1.8;
+    g.a.iter_mut().for_each(|v| *v = (*v * k).min(1.0));
+    g
+}
+
+/// An inner shadow of the shape in `cover`: the part of the shape the shape moved by `off` and
+/// blurred by `blur` does not cover (the inside of the edges facing away from the offset).
+pub(crate) fn inner_shadow_mask(cover: &Mask, off: (f32, f32), blur: f32) -> Mask {
+    let moved = mask::blur(&mask::offset(cover, off.0.round() as i32, off.1.round() as i32), (blur / 3.0).max(0.0));
+    let a = cover.a.iter().zip(&moved.a).map(|(c, s)| c * (1.0 - s).clamp(0.0, 1.0)).collect();
+    Mask { w: cover.w, h: cover.h, a }
+}
+
+/// How far (device pixels) a layer's appearance reaches past its shape: strokes, glow.
+pub(crate) fn appearance_reach(ap: &filmcraft_project::graphic::Appearance, s: f32) -> f32 {
+    let stroke_out = ap
+        .strokes
+        .iter()
+        .map(|(_, w, k)| match k {
+            2 => 0.0,
+            1 => w / 2.0,
+            _ => *w,
+        })
+        .fold(0.0f32, f32::max);
+    let glow = ap.glow.as_ref().map_or(0.0, |g| g.radius * 1.6);
+    (stroke_out + glow) * s
+}
+
 /// Rasterise one layer with layer→device transform `m`, clipped to a `cw`×`ch` canvas.
 pub fn raster_layer(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option<LayerRaster> {
     if !spec.enabled || spec.transform.opacity <= 0.0 {
         return None;
+    }
+    if let LayerContent::Text(t) = &spec.content
+        && (t.clock.is_some() || (t.curve.is_some() && !t.vertical))
+    {
+        return crate::text_units::raster_text_units(spec, t, m, cw, ch);
     }
     let s = xform_scale(m).max(1e-6);
     let ap = &spec.appearance;
@@ -319,21 +356,9 @@ pub fn raster_layer(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option
         LayerContent::Shape(sh) => Some(shape_path(sh).transformed(m)),
         _ => None,
     };
-    let stroke_out = ap
-        .strokes
-        .iter()
-        .map(|(_, w, k)| {
-            if *k == 2 {
-                0.0
-            } else if *k == 1 {
-                w / 2.0
-            } else {
-                *w
-            }
-        })
-        .fold(0.0f32, f32::max);
+    let reach = appearance_reach(ap, 1.0);
     let overhang = text.as_ref().map_or(0.0, |l| l.glyphs.iter().map(|g| g.size).fold(0.0f32, f32::max) * 0.35);
-    let mut bb = bbox_of(m, lb, overhang + stroke_out + 2.0 / s);
+    let mut bb = bbox_of(m, lb, overhang + reach + 2.0 / s);
     if let Some((_, pad, _)) = ap.background {
         bb = union(bb, bbox_of(m, lb, pad + 1.0 / s));
     }
@@ -345,7 +370,8 @@ pub fn raster_layer(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option
         bb = union(bb, [bb[0] + shadow_dev.0 - grow, bb[1] + shadow_dev.1 - grow, bb[2] + shadow_dev.0 + grow, bb[3] + shadow_dev.1 + grow]);
     }
     // clip to the canvas, keeping enough margin for blur to read content just outside it
-    let margin = ap.shadow.as_ref().map_or(2.0, |sh| (sh.blur + sh.size) * s + shadow_dev.0.abs().max(shadow_dev.1.abs()) + 2.0);
+    let margin = ap.shadow.as_ref().map_or(2.0, |sh| (sh.blur + sh.size) * s + shadow_dev.0.abs().max(shadow_dev.1.abs()) + 2.0)
+        + ap.glow.as_ref().map_or(0.0, |g| g.radius * s * 1.6);
     let x0 = bb[0].floor().max(-margin) as i32;
     let y0 = bb[1].floor().max(-margin) as i32;
     let x1 = bb[2].ceil().min(cw as f32 + margin) as i32;
@@ -400,6 +426,13 @@ pub fn raster_layer(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option
     if let Some((bm, c)) = &bg {
         over_mask(&mut px, bm, premul_linear(*c));
     }
+    if let Some(gl) = &ap.glow {
+        let mut u = if ap.fill.is_some() { cover.clone() } else { Mask::new(w, h) };
+        for (sm, _) in &strokes {
+            u.max_with(sm);
+        }
+        over_mask(&mut px, &glow_mask(&u, gl.radius * s, gl.intensity), premul_linear(gl.color));
+    }
     // outer strokes sit under the fill; centre and inner strokes are drawn over it
     for ((sm, c), (_, _, k)) in strokes.iter().zip(&ap.strokes).rev() {
         if outer(*k) {
@@ -422,6 +455,12 @@ pub fn raster_layer(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option
         }
     } else if let Some(c) = ap.fill {
         paint_solid(&mut px, &cover, c, text.as_deref(), m, &run_fills, (x0, y0));
+    }
+    if let Some(is) = &ap.inner_shadow
+        && (ap.fill.is_some() || ap.gradient.is_some())
+    {
+        let off = (m[0] * is.offset.0 + m[2] * is.offset.1, m[1] * is.offset.0 + m[3] * is.offset.1);
+        over_mask(&mut px, &inner_shadow_mask(&cover, off, is.blur * s), premul_linear(is.color));
     }
     for ((sm, c), (_, _, k)) in strokes.iter().zip(&ap.strokes).rev() {
         if !outer(*k) {
@@ -580,8 +619,10 @@ pub fn item_layer_specs(item: &TrackItem, mt: Tick, canvas: (u32, u32)) -> Vec<(
     let mut specs = Vec::new();
     for (i, e) in item.effects.iter().enumerate() {
         if filmcraft_project::graphic::is_layer(e)
-            && let Some(s) = eval_layer(e, t, canvas)
+            && let Some(mut s) = eval_layer(e, t, canvas)
         {
+            // text animators run on the clip's own clock: in from its start, out to its end
+            filmcraft_project::graphic::set_clip_clock(&mut s, u.seconds(), d.seconds());
             idx.push(i);
             specs.push(s);
         }

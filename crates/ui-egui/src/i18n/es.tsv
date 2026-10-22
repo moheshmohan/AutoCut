@@ -4078,30 +4078,4 @@
 
 # Voice Isolation, Enhance Voice and the Voice Changer (effects, Essential Sound, commands, presets)
 	Voice Isolation	Aislamiento de voz
-	Enhance Voice	Realzar voz
-	Voice Changer	Cambiador de voz
-	Pitch	Tono
-	Character	Carácter
-	Robot	Robot
-	Deep	Grave
-	Radio	Radio
-	Alien	Alienígena
-	Isolate Voice	Aislar voz
-	Voice Isolation Model Status	Estado del modelo de aislamiento de voz
-	Download Voice Isolation Model	Descargar el modelo de aislamiento de voz
-	Enhance Voice in a File	Realzar la voz de un archivo
-	Keeps speech and removes noise, crowds, music and hum (neural model when downloaded)	Conserva la voz y elimina el ruido, el público, la música y el zumbido (modelo neuronal si está descargado)
-	Isolation, rumble cut, presence lift, de-esser, 3:1 compression and a limiter	Aislamiento, corte de retumbo, realce de presencia, de-esser, compresión 3:1 y un limitador
-	Robot Voice	Voz de robot
-	Ring-modulated through a metallic comb tuned to a note	Modulación en anillo a través de un peine metálico afinado en una nota
-	Deep Voice	Voz grave
-	Five semitones down with a fuller low end	Cinco semitonos más grave y con graves más llenos
-	Chipmunk Voice	Voz de ardilla
-	Seven semitones up, thinner	Siete semitonos más aguda y más fina
-	Walkie-Talkie	Walkie-talkie
-	Narrow band and overdriven, like a handheld radio	Banda estrecha y saturada, como una radio portátil
-	Alien Voice	Voz alienígena
-	Pitched up, wobbling and ring-modulated	Más aguda, ondulante y con modulación en anillo
-	Echo Voice	Voz con eco
-	A voice repeating across a large space	Una voz que se repite en un espacio grande
-	Isolate and Enhance Voice	Aislar y realzar la voz
+# Animated captions and text effects (lane TX)

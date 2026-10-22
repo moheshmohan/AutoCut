@@ -34,7 +34,11 @@
 //!   WebVTT export honour: `\an` / `\a` alignment overrides, another style's alignment or margin,
 //!   or a line's own `MarginV` give `line:N%[,center|end] align:…`; `\pos(x,y)` (or the start of
 //!   `\move`) gives `position:X% line:Y%,… align:…`.
-//! - Other override tags (colours, fades, transforms, karaoke, clips…) and `{comments}` are
+//! - Karaoke (`\k`, `\K`, `\kf`, `\ko`: the syllable after the tag lasts N centiseconds, one
+//!   after another from the line's start) becomes the caption's word timing
+//!   ([`Cue::words`](crate::Cue)): syllables join into words at spaces, a syllable of only
+//!   spaces is a pause. Animated captions highlight the words at those times.
+//! - Other override tags (colours, fades, transforms, clips…) and `{comments}` are
 //!   removed; drawings (`\p1` … `\p0`) are dropped. An unterminated `{` is kept as text.
 //! - Lines that share both times are merged into one caption (a caption track shows one caption
 //!   at a time; other overlaps are cut on import, as for every format).
@@ -47,7 +51,9 @@
 //! keep their 1080-line values), times in centiseconds, `<i>` / `<b>` / `<u>` as overrides, the
 //! speaker as `Name`, and WebVTT `line` / `position` / `align` settings as `\an`, `MarginV` or
 //! `\pos`. Text the format cannot hold changes: `{` `}` become `(` `)`, a backslash before `N`,
-//! `n` or `h` becomes `＼`, commas in names become spaces.
+//! `n` or `h` becomes `＼`, commas in names become spaces. A cue with word timing that still
+//! matches its text word for word is written as karaoke (`{\k…}` before every word, pauses as
+//! empty syllables), so the timing round-trips to the centisecond.
 //!
 //! Written from the public SubStation Alpha v4.00+ script format description; no other
 //! implementation's code was consulted.
@@ -476,7 +482,8 @@ pub fn parse(text: &str) -> Result<Document> {
             String::new()
         };
         let speaker = Some(short(&e.name)).filter(|n| !n.is_empty());
-        doc.cues.push(Cue { start: e.start, end: e.end, text: conv.text, speaker, id: None, settings });
+        let words = karaoke_words(&conv.text, &conv.karaoke, e.start);
+        doc.cues.push(Cue { start: e.start, end: e.end, text: conv.text, speaker, id: None, settings, words });
     }
     if empty > 0 {
         warn.push(format!("{empty} line(s) without text (drawings or empty) skipped"));
@@ -496,6 +503,7 @@ fn merge_simultaneous(cues: &mut Vec<Cue>) {
                 if prev.text.len().saturating_add(c.text.len()) < MAX_TEXT_BYTES {
                     prev.text.push('\n');
                     prev.text.push_str(&c.text);
+                    prev.words.extend(c.words);
                 }
                 if prev.speaker != c.speaker {
                     prev.speaker = None;
@@ -593,6 +601,52 @@ struct Converted {
     /// Any character drawn (not only tags, drawings and spaces).
     visible: bool,
     truncated: bool,
+    /// Karaoke syllables: where each starts in `text` (bytes) and its `\k` length in
+    /// centiseconds.
+    karaoke: Vec<(usize, i64)>,
+}
+
+/// Most karaoke syllables kept from one event.
+const MAX_SYLLABLES: usize = 2000;
+
+/// Karaoke syllables → words with their times (`(start, end, word)`), the line starting at
+/// `start`: syllables run on from each other; a syllable that begins with a space starts a new
+/// word, one of only spaces is a pause. Text before the first `\k` is not timed.
+fn karaoke_words(text: &str, syllables: &[(usize, i64)], start: Tick) -> Vec<(Tick, Tick, String)> {
+    let mut words: Vec<(Tick, Tick, String)> = Vec::new();
+    let mut cur: Option<(Tick, Tick, String)> = None;
+    let mut cs = 0i64;
+    for (k, &(at, len)) in syllables.iter().enumerate() {
+        let end = syllables.get(k + 1).map_or(text.len(), |n| n.0);
+        let slice = text.get(at.min(end)..end).unwrap_or("");
+        let plain = filmcraft_project::plain_text(slice);
+        let (s, e) = (cs, cs.saturating_add(len.max(0)));
+        cs = e;
+        let at_tick = |c: i64| Tick(start.0.saturating_add(c.saturating_mul(TICKS_PER_CS)));
+        let pieces: Vec<&str> = plain.split_whitespace().collect();
+        if pieces.is_empty() {
+            words.extend(cur.take());
+            continue;
+        }
+        let starts_space = plain.starts_with(char::is_whitespace);
+        for (i, piece) in pieces.iter().enumerate() {
+            match cur.as_mut() {
+                Some(c) if i == 0 && !starts_space => {
+                    c.1 = at_tick(e);
+                    c.2.push_str(piece);
+                }
+                _ => {
+                    words.extend(cur.take());
+                    cur = Some((at_tick(s), at_tick(e), (*piece).to_string()));
+                }
+            }
+        }
+        if plain.ends_with(char::is_whitespace) {
+            words.extend(cur.take());
+        }
+    }
+    words.extend(cur);
+    words
 }
 
 /// Output text with `<b>` / `<i>` / `<u>` kept properly nested.
@@ -756,6 +810,12 @@ fn apply_block(block: &str, out: &mut Out, drawing: &mut bool, base: Fmt, style_
         } else if let Some(d) = digits("u") {
             if let Some(on) = toggle(d, base.u, false) {
                 out.want.u = on;
+            }
+        } else if let Some(d) = ["kf", "ko", "K", "k"].iter().find_map(|p| digits(p)).filter(|d| !d.is_empty() && d.len() <= 7) {
+            // karaoke: the syllable that follows lasts d centiseconds
+            if out.c.karaoke.len() < MAX_SYLLABLES {
+                let at = out.c.text.len();
+                out.c.karaoke.push((at, d.parse().unwrap_or(0)));
             }
         } else if let Some(d) = digits("p") {
             *drawing = d.parse::<u32>().is_ok_and(|n| n > 0);
@@ -940,6 +1000,42 @@ fn ass_text(text: &str) -> String {
     out
 }
 
+/// The event text of a cue with word timing: every word after a `\k` tag holding its length in
+/// centiseconds (a pause before a word is an empty `\k` syllable), the caption's lines kept.
+/// None when the words do not match the text word for word (it was edited since): then the
+/// plain text is written.
+fn karaoke_text(c: &Cue) -> Option<String> {
+    let plain = filmcraft_project::plain_text(&c.text);
+    let lines: Vec<Vec<&str>> = plain.lines().map(|l| l.split_whitespace().collect()).collect();
+    if c.words.is_empty() || lines.iter().map(Vec::len).sum::<usize>() != c.words.len() {
+        return None;
+    }
+    let cs = |t: Tick| (i128::from(t.0.max(0)) + i128::from(TICKS_PER_CS) / 2) / i128::from(TICKS_PER_CS);
+    let mut cursor = cs(c.start);
+    let mut out = String::new();
+    let mut words = c.words.iter();
+    for (li, line) in lines.iter().enumerate() {
+        if li > 0 {
+            out.push_str("\\N");
+        }
+        for (wi, w) in line.iter().enumerate() {
+            let (s, e, _) = words.next()?;
+            let (s, e) = (cs(*s).max(cursor), cs(*e));
+            if s > cursor {
+                out.push_str(&format!("{{\\k{}}}", s - cursor));
+            }
+            let len = (e - s).max(0);
+            if wi > 0 {
+                out.push(' ');
+            }
+            out.push_str(&format!("{{\\k{len}}}"));
+            out.push_str(&ass_text(w));
+            cursor = s + len;
+        }
+    }
+    Some(out)
+}
+
 /// Write an ASS v4.00+ script (one `Default` style from `doc.style`).
 pub fn write(doc: &Document) -> String {
     let st = doc.style.clone().unwrap_or_default();
@@ -982,7 +1078,12 @@ pub fn write(doc: &Document) -> String {
     for c in doc.cues.iter().filter(|c| c.end > c.start) {
         let (prefix, mv) = placement(&c.settings, &st);
         let name: String = c.speaker.as_deref().unwrap_or("").replace([',', '\n', '\r'], " ").trim().chars().take(MAX_NAME_CHARS).collect();
-        out.push_str(&format!("Dialogue: 0,{},{},Default,{name},0,0,{mv},,{prefix}{}\n", clock(c.start), clock(c.end), ass_text(&c.text)));
+        out.push_str(&format!(
+            "Dialogue: 0,{},{},Default,{name},0,0,{mv},,{prefix}{}\n",
+            clock(c.start),
+            clock(c.end),
+            karaoke_text(c).unwrap_or_else(|| ass_text(&c.text))
+        ));
     }
     out
 }
@@ -1163,5 +1264,60 @@ mod tests {
         assert_eq!(clock(ms(3_723_456)), "1:02:03.46");
         assert!(clock(Tick(i64::MAX)).len() > 8);
         assert_eq!(clock(Tick(-5)), "0:00:00.00");
+    }
+
+    const KARAOKE: &str = "[Script Info]\nPlayResY: 1080\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,{\\k50}Hel{\\kf30}lo {\\k40}big{\\k20} {\\K60}world\\N{\\ko25}{\\i1}again{\\i0}\n";
+
+    #[test]
+    fn karaoke_becomes_word_timing() {
+        let doc = parse(KARAOKE).unwrap();
+        let c = &doc.cues[0];
+        assert_eq!(c.text, "Hello big world\n<i>again</i>");
+        let w: Vec<(i64, i64, &str)> = c.words.iter().map(|(s, e, t)| (s.0 / TICKS_PER_MS, e.0 / TICKS_PER_MS, t.as_str())).collect();
+        // syllables run on from the line start (1 s): Hel 0.5 + lo 0.3, big 0.4, a 0.2 s pause, world 0.6
+        assert_eq!(w, vec![(1000, 1800, "Hello"), (1800, 2200, "big"), (2400, 3000, "world"), (3000, 3250, "again")]);
+        // into a caption track: the caption carries the timing relative to its start
+        let mut n = 0;
+        let t = crate::track_from_document(&doc, filmcraft_project::TrackId(1), "K", filmcraft_project::CaptionFormat::Subtitle, &mut || {
+            n += 1;
+            n
+        });
+        let cap = &t.captions[0];
+        assert_eq!(cap.words.len(), 4);
+        assert_eq!((cap.words[2].start, cap.words[2].end), (ms(1400), ms(2000)));
+        let tw = cap.timed_words();
+        assert_eq!((tw[3].text.as_str(), tw[3].line, tw[3].start), ("again", 1, ms(3000)));
+    }
+
+    #[test]
+    fn karaoke_round_trips() {
+        let doc = parse(KARAOKE).unwrap();
+        let t = crate::track_from_document(&doc, filmcraft_project::TrackId(1), "K", filmcraft_project::CaptionFormat::Subtitle, &mut || 7);
+        let out = write(&crate::document_from_track(&t, Tick::ZERO));
+        assert!(out.contains("{\\k80}Hello {\\k40}big{\\k20} {\\k60}world\\N{\\k25}again"), "{out}");
+        let back = parse(&out).unwrap();
+        assert_eq!(back.cues[0].words, doc.cues[0].words, "the timing survives to the centisecond");
+        // an edited caption whose words no longer match is written as plain text
+        let mut edited = crate::document_from_track(&t, Tick::ZERO);
+        edited.cues[0].text = "Hello there".into();
+        let plain = write(&edited);
+        assert!(plain.contains(",,Hello there\n") && !plain.contains("\\k"), "{plain}");
+    }
+
+    #[test]
+    fn hostile_karaoke_never_panics() {
+        for text in
+            ["{\\k}x", "{\\k99999999999999}x {\\k-5}y", "{\\k10}{\\k10}{\\k10}", "{\\kf}{\\K", "a{\\k5}", "{\\k1}\\N\\N{\\k2} ", &"{\\k1}é".repeat(5000)]
+        {
+            let s = format!("[Events]\nDialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{text}\n");
+            let r = std::panic::catch_unwind(|| parse(&s));
+            assert!(r.is_ok(), "{text}");
+            if let Ok(Ok(d)) = r {
+                for c in &d.cues {
+                    assert!(c.words.len() <= MAX_SYLLABLES);
+                    assert!(c.words.iter().all(|(s, e, _)| e >= s), "{text}");
+                }
+            }
+        }
     }
 }

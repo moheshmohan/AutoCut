@@ -310,6 +310,11 @@ struct Item {
     style: usize,
 }
 
+/// Zero-width joiners and variation selectors: shaped with the character before them.
+fn is_joiner(c: char) -> bool {
+    matches!(c as u32, 0x200C | 0x200D | 0x034F | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)
+}
+
 fn upper_single(c: char) -> char {
     let mut u = c.to_uppercase();
     match (u.next(), u.next()) {
@@ -398,6 +403,7 @@ fn paragraph(text: &str, base: usize, sty: &Styles, para: &ParagraphStyle) -> Ve
     let pinfo = &bidi.paragraphs[0];
     let base_rtl = pinfo.level.is_rtl();
     // per char: (byte, char, shaped char), face, level, small, style
+    let mut prev_face: Option<FaceId> = None;
     let chars: Vec<(usize, char, char, FaceId, bool, bool, usize)> = text
         .char_indices()
         .map(|(b, c)| {
@@ -409,7 +415,14 @@ fn paragraph(text: &str, base: usize, sty: &Styles, para: &ParagraphStyle) -> Ve
                 Caps::Small => (c, false),
             };
             let pf = sty.prim[si].face;
-            let face = if sc.is_whitespace() { pf } else { fonts::fallback_for(sc, pf) };
+            // joiners and variation selectors stay with the character before them (a Malayalam
+            // chillu's ZWJ, an emoji's VS16), so its face shapes them together
+            let face = match prev_face {
+                Some(f) if is_joiner(sc) => f,
+                _ if sc.is_whitespace() => pf,
+                _ => fonts::fallback_for(sc, pf),
+            };
+            prev_face = Some(face);
             (b, c, sc, face, bidi.levels[b].is_rtl(), small, si)
         })
         .collect();
@@ -926,6 +939,38 @@ mod tests {
         let gap = l.lines[1].baseline - l.lines[0].baseline;
         let l2 = layout("one\ntwo", &st(30.0), &ParagraphStyle { leading: 10.0, ..Default::default() });
         assert!((l2.lines[1].baseline - l2.lines[0].baseline - gap - 10.0).abs() < 1e-3);
+    }
+
+    /// Malayalam in a text set in Inter (which has no Malayalam) falls back to an installed
+    /// Malayalam font (macOS: Malayalam Sangam MN / Malayalam MN; Linux: Noto Sans Malayalam)
+    /// and is shaped: a consonant, virama and consonant become one conjunct, a vowel sign goes
+    /// with its consonant. Skipped where no Malayalam font is installed (bundle Noto Sans
+    /// Malayalam through craft-fonts to have one everywhere).
+    #[test]
+    fn malayalam_falls_back_to_an_installed_font_and_shapes() {
+        fonts::scan_system();
+        if !fonts::all_faces().iter().any(|f| f.info.origin == "system" && f.covers_text("മലയാളം")) {
+            eprintln!("SKIPPED: no Malayalam font installed");
+            return;
+        }
+        let l = layout_uncached("മലയാളം വാക്ക്", &st(48.0), &ParagraphStyle::default());
+        assert!(l.glyphs.iter().all(|g| g.id != 0), "no missing glyphs: {:?}", l.glyphs);
+        let fam = fonts::face(l.glyphs[0].face).info.family.clone();
+        let text = "മലയാളം വാക്ക്";
+        let letters = l.glyphs.iter().filter(|g| !text.get(g.cluster..).and_then(|s| s.chars().next()).is_some_and(char::is_whitespace));
+        assert!(letters.clone().all(|g| fonts::face(g.face).has_char('മ')), "one Malayalam face: {fam}");
+        assert!(!fam.starts_with('.'), "an ordinary installed face, not the system UI's own: {fam}");
+        // ക്ക (ka, virama, ka) is a conjunct: fewer glyphs than characters
+        let k = layout_uncached("ക്ക", &st(48.0), &ParagraphStyle::default());
+        assert!(k.glyphs.len() < 3, "{fam}: ക്ക shaped into {} glyphs", k.glyphs.len());
+        // bold Malayalam text takes a heavier face when the family has one
+        let b = layout_uncached("മലയാളം", &TextStyle { style: "Bold".into(), ..st(48.0) }, &ParagraphStyle::default());
+        assert!(b.glyphs.iter().all(|g| g.id != 0));
+        // a mixed line keeps Latin in Inter and Malayalam in the fallback face
+        let m = layout_uncached("AI ഇപ്പോൾ", &st(48.0), &ParagraphStyle::default());
+        assert_eq!(fonts::face(m.glyphs[0].face).info.family, "Inter");
+        assert!(m.glyphs.iter().all(|g| g.id != 0));
+        eprintln!("Malayalam shaped with {fam}");
     }
 
     #[test]

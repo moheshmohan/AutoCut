@@ -109,6 +109,18 @@ SUBCOMMANDS
   export --list-presets [query] list export presets (name, category, format) as JSON
   render --seconds S --out f.png [--scale 0.5] [--allow-offline]
                                 render one Program frame to PNG (offline media: as for export)
+  captions style <bold|clean|glow|box|karaoke|twoLine|off> [--track C1]
+         [--platform youtube|reels|tiktok|vertical] [--words N] [--active-color #rrggbb]
+         [--keyword-color #rrggbb] [--keywords a,b] [--emoji word=🔥,…]
+         [--position top|middle|bottom] [--font F] [--keep-style]
+                                word-by-word animated captions on a caption track
+                                (captions.setAnimatedStyle): Bold is uppercase heavy text with a
+                                black stroke, 2–4 words at a time, the spoken word in the active
+                                colour popping 1.1×; --platform keeps them in its safe zone,
+                                centred on its safe span; off draws whole captions again
+  captions timing [--from transcript|narration] [--track C1]
+                                when each caption word is spoken (captions.wordTiming): from the
+                                transcript's word timestamps, or the narration clips' scripts
   probe <media> [--image-sequence]
                                 media info as JSON, with MXF / Ogg / BWF details; with
                                 --image-sequence <media> is the first numbered still of a sequence
@@ -410,6 +422,7 @@ SUBCOMMANDS
   shorts <project.fcproj | media file> [--count 3] [--aspect 9:16] [--min-seconds 15]
          [--max-seconds 60] [--motion smooth|responsive] [--fallback blur|letterbox|center]
          [--platform youtube|reels|tiktok|vertical] [--topic T] [--title-card] [--no-captions]
+         [--caption-style bold|clean|glow|box|karaoke|twoLine|plain] [--caption-keywords]
          [--analysis-fps 30] [--sequence id]
          [--export dir [--upload-youtube
          [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P] [--youtube-tags a,b]]]
@@ -422,8 +435,10 @@ SUBCOMMANDS
                                 followed (sequence.autoReframe: the subject tracker, Motion
                                 keyframes; where nobody is found, for a clip or a stretch of
                                 one, the whole picture over a blurred, dimmed copy of itself —
-                                --fallback letterbox for black bars), big outlined
-                                captions from the transcript and a title card with
+                                --fallback letterbox for black bars), Bold animated
+                                captions from the transcript (--caption-style: another look, or
+                                plain outlined ones; --caption-keywords: the local model colours
+                                keywords and adds emoji) and a title card with
                                 --title-card, both inside the --platform's safe zone (the
                                 parts its own interface does not cover; youtube by default,
                                 vertical for all three; what still overlaps is noted);
@@ -436,14 +451,16 @@ SUBCOMMANDS
           [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5]
           [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at S]]
           [--at LABEL=[ITEM@]S]...
-          [--title T] [--no-hook-voice] [--logo logo.png] [--channel @handle] [--end-text T]
+          [--title T] [--no-hook-voice] [--no-captions] [--caption-style S] [--caption-keywords]
+          [--logo logo.png] [--channel @handle] [--end-text T]
           [--link URL] [--exclude LABEL]... [--include LABEL]... [--bpm 124] [--mood energetic]
           [--seed 7] [--redact faces,plates|off] [--fallback blur|letterbox|center]
           [--export out.mp4] [--preset P] [--no-qa]
                                 a finished showcase → a vertical trailer (autocut.trailer): the
                                 most striking robot (or --hook; --hook-at: from that second of
                                 its clip) under a big title ('48 robots · 2013 → 2025'), the
-                                show's first narration sentence over it, then --robots robots in
+                                show's first narration sentence over it (its words as Bold
+                                animated captions; --caption-style, --no-captions), then --robots robots in
                                 date order cut on the beats of generated music, each on its best
                                 moment inside the window the show played (a robot the vertical
                                 crop holds is followed by it; a wider one is shown whole in a
@@ -923,6 +940,79 @@ async fn redact(a: &Args) {
 
 /// `shorts` options as `autocut.shorts` parameters (with `wait: true`); a usage error says what
 /// is wrong.
+/// `--caption-style bold|clean|glow|box|karaoke|twoLine|plain` and `--caption-keywords` (shorts,
+/// trailer) as job parameters.
+pub(crate) fn caption_style_opts(a: &Args, p: &mut Value) -> Result<(), String> {
+    if let Some(cs) = a.opt("--caption-style") {
+        let plain = matches!(cs.to_ascii_lowercase().as_str(), "plain" | "classic" | "old");
+        if !plain && filmcraft_project::CaptionPreset::from_name(cs).is_none() {
+            return Err(format!("--caption-style is bold, clean, glow, box, karaoke, twoLine or plain, not `{cs}`"));
+        }
+        p["captionStyle"] = json!(if plain { "plain" } else { cs });
+    }
+    if a.flag("--caption-keywords") {
+        p["captionKeywords"] = json!(true);
+    }
+    Ok(())
+}
+
+/// `captions style <preset> …` → `captions.setAnimatedStyle`, `captions timing …` →
+/// `captions.wordTiming`.
+fn captions_params(a: &Args) -> Result<(&'static str, Value), String> {
+    let mut p = json!({});
+    if let Some(t) = a.opt("--track") {
+        p["track"] = t.parse::<u64>().map(|n| json!(n)).unwrap_or_else(|_| json!(t));
+    }
+    match a.pos(1) {
+        Some("style") => {
+            let preset = a.pos(2).ok_or("style <bold|clean|glow|box|karaoke|twoLine|off>")?;
+            if !matches!(preset.to_ascii_lowercase().as_str(), "off" | "none") && filmcraft_project::CaptionPreset::from_name(preset).is_none() {
+                return Err(format!("unknown preset `{preset}`: bold, clean, glow, box, karaoke, twoLine or off"));
+            }
+            p["preset"] = json!(preset);
+            let mut o = json!({});
+            if let Some(pl) = a.opt("--platform") {
+                let pl = filmcraft_engine::safe_zones::Platform::from_name(pl)
+                    .ok_or_else(|| format!("--platform is youtube, reels, tiktok or vertical, not `{pl}`"))?;
+                o["platform"] = json!(pl.name());
+            }
+            if let Some(n) = a.opt("--words") {
+                o["wordsPerPage"] = json!(n.parse::<u32>().map_err(|_| format!("--words wants a number of words, not `{n}`"))?);
+            }
+            for (flag, key) in [("--active-color", "activeColor"), ("--keyword-color", "keywordColor"), ("--position", "position"), ("--font", "font")] {
+                if let Some(v) = a.opt(flag) {
+                    o[key] = json!(v);
+                }
+            }
+            if let Some(k) = a.opt("--keywords") {
+                o["keywords"] = json!(k.split(',').map(str::trim).filter(|w| !w.is_empty()).collect::<Vec<_>>());
+            }
+            if let Some(e) = a.opt("--emoji") {
+                let mut m = serde_json::Map::new();
+                for pair in e.split(',') {
+                    let (w, em) = pair.split_once('=').ok_or_else(|| format!("--emoji wants word=emoji pairs, not `{pair}`"))?;
+                    m.insert(w.trim().to_string(), json!(em.trim()));
+                }
+                o["emoji"] = Value::Object(m);
+            }
+            if a.flag("--keep-style") {
+                o["keepStyle"] = json!(true);
+            }
+            p["options"] = o;
+            Ok(("captions.setAnimatedStyle", p))
+        }
+        Some("timing") => {
+            let from = a.opt("--from").unwrap_or("transcript");
+            if !matches!(from, "transcript" | "narration") {
+                return Err(format!("--from is transcript or narration, not `{from}`"));
+            }
+            p["from"] = json!(from);
+            Ok(("captions.wordTiming", p))
+        }
+        _ => Err("captions style <preset> [options] | captions timing [--from transcript|narration]".into()),
+    }
+}
+
 fn shorts_params(a: &Args) -> Result<Value, String> {
     let num = |k: &str| -> Result<Option<f64>, String> {
         a.opt(k).map(|v| v.parse::<f64>().ok().filter(|f| f.is_finite()).ok_or_else(|| format!("{k} wants a number, not `{v}`"))).transpose()
@@ -955,6 +1045,7 @@ fn shorts_params(a: &Args) -> Result<Value, String> {
         p["sequence"] = json!(q.parse::<u64>().map_err(|_| format!("--sequence wants a sequence id, not `{q}`"))?);
     }
     p["captions"] = json!(!a.flag("--no-captions"));
+    caption_style_opts(a, &mut p)?;
     p["title"] = json!(a.flag("--title-card"));
     if let Some(d) = a.opt("--export") {
         p["export"] = json!(absolute(d));
@@ -2262,6 +2353,16 @@ async fn cli() {
         "frames" => showcase_tools::frames(&a).await,
         // a finished show → a vertical trailer for Reels (autocut.trailer)
         "trailer" => trailer::run(&a).await,
+        "captions" => {
+            // animated caption styles and word timing on the project's caption tracks
+            let (id, params) = captions_params(&a).unwrap_or_else(|e| usage(format!("captions: {e}")));
+            let mut b = Backend::open(&a);
+            match b.exec(id, params).await {
+                Ok(v) => print(&a, &v),
+                Err(e) => fail(format!("captions: {e}")),
+            }
+            b.finish(&a).await;
+        }
         "shorts" => {
             // long video → vertical shorts (autocut.shorts); every usage error before anything runs
             let src = a.pos(1).unwrap_or_else(|| usage("shorts <project.fcproj | media file> [--count N] [--aspect 9:16] [--export dir] [--upload-youtube]"));
@@ -2859,10 +2960,53 @@ mod album_tests {
 
 #[cfg(test)]
 mod shorts_tests {
-    use super::{Args, shorts_params};
+    use super::{Args, captions_params, shorts_params};
+    use serde_json::json;
 
     fn args(v: &[&str]) -> Args {
         Args::parse(v.iter().map(|s| s.to_string()))
+    }
+
+    /// `captions style` / `captions timing` become the caption commands; bad values are usage
+    /// errors.
+    #[test]
+    fn captions_subcommands_become_commands() {
+        let (id, p) = captions_params(&args(&[
+            "captions",
+            "style",
+            "bold",
+            "--platform",
+            "shorts",
+            "--words",
+            "3",
+            "--keywords",
+            "money, time",
+            "--emoji",
+            "fire=🔥,cash=💰",
+            "--track",
+            "C2",
+        ]))
+        .unwrap();
+        assert_eq!(id, "captions.setAnimatedStyle");
+        assert_eq!(p["preset"], "bold");
+        assert_eq!(p["track"], "C2");
+        assert_eq!(p["options"]["platform"], "youtube");
+        assert_eq!(p["options"]["wordsPerPage"], 3);
+        assert_eq!(p["options"]["keywords"], json!(["money", "time"]));
+        assert_eq!(p["options"]["emoji"]["cash"], "💰");
+        let (id, p) = captions_params(&args(&["captions", "timing", "--from", "narration", "--track", "7"])).unwrap();
+        assert_eq!((id, p["from"].as_str(), p["track"].as_u64()), ("captions.wordTiming", Some("narration"), Some(7)));
+        for bad in [
+            vec!["captions"],
+            vec!["captions", "style"],
+            vec!["captions", "style", "sparkly"],
+            vec!["captions", "style", "bold", "--platform", "myspace"],
+            vec!["captions", "style", "bold", "--words", "many"],
+            vec!["captions", "style", "bold", "--emoji", "fire"],
+            vec!["captions", "timing", "--from", "dreams"],
+        ] {
+            assert!(captions_params(&args(&bad)).is_err(), "{bad:?}");
+        }
     }
 
     /// `shorts` options become `autocut.shorts` parameters; bad values are usage errors.

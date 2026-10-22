@@ -28,7 +28,7 @@ fn elements_from_the_shell() {
     let data = dir.join("data");
     let data = data.to_str().unwrap();
     let all = json_out(&cli(&["--data-dir", data, "exec", "elements.list"]));
-    assert_eq!(all.as_array().unwrap().len(), 28, "{all}");
+    assert_eq!(all.as_array().unwrap().len(), 34, "{all}");
     let stickers = json_out(&cli(&["--data-dir", data, "exec", "elements.list", "kind=sticker"]));
     assert_eq!(stickers.as_array().unwrap().len(), 10);
     // a sound and a text preset into the demo project, saved, then read back

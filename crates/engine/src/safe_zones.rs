@@ -137,6 +137,17 @@ pub fn overlays(project: &Project, q: &Sequence) -> Vec<Overlay> {
             if out.len() >= MAX_CHECKED {
                 return out;
             }
+            // animated captions: every page where it is drawn (the spoken word's pop included)
+            if let Some(a) = &style.animated {
+                for (start, end, r) in filmcraft_captions::animated::page_rects(c, &style, a, w, h) {
+                    let rect = r.map(f64::from);
+                    if rect.iter().all(|v| v.is_finite()) && out.len() < MAX_CHECKED {
+                        let text = c.plain_lines().join(" ");
+                        out.push(Overlay { kind: "caption", clip: c.id.0, track: format!("C{}", ti + 1), text, start, end, rect });
+                    }
+                }
+                continue;
+            }
             let Some(o) = filmcraft_captions::burn::render_caption(c, &style, w, h) else { continue };
             let (x0, x1) = (o.x as f64, o.x as f64 + o.w as f64);
             let (x0, x1) = if x1 - x0 > 2.0 * pad { (x0 + pad, x1 - pad) } else { (x0, x1) };

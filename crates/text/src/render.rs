@@ -242,6 +242,162 @@ pub fn draw_run(l: &Layout, m: &Xform, out: &mut Mask, origin: (i32, i32), run: 
     }
 }
 
+/// Glyphs drawn larger than this (device pixels) are filled from their outline straight into the
+/// output instead of through the glyph-mask cache.
+const MAX_CACHED_PX: f32 = 2048.0;
+
+/// Add the coverage of one glyph into `out` (whose pixel (0,0) is device pixel `origin`): `m`
+/// maps the glyph's own pixels (origin at its pen position on the baseline, y down) to the
+/// device. Animated and curved text draw each glyph with a transform of its own; an axis-aligned
+/// uniform `m` uses the glyph-mask cache like [`draw`].
+pub fn draw_glyph(g: &Glyph, m: &Xform, out: &mut Mask, origin: (i32, i32)) {
+    if !m.iter().all(|v| v.is_finite()) {
+        return;
+    }
+    let (ox, oy) = origin;
+    let px = g.size * m[0];
+    if is_axis_uniform(m) && px <= MAX_CACHED_PX {
+        if px < 0.5 {
+            return;
+        }
+        let (x, y) = (m[4], m[5]);
+        let xi = x.floor();
+        if let Some(gm) = glyph_mask(g, px, x - xi) {
+            out.add(&gm.mask, xi as i32 + gm.left - ox, y.round() as i32 + gm.top - oy);
+        }
+    } else {
+        let p = glyph_path(g, m);
+        fill_into(&p, out, -ox as f32, -oy as f32);
+    }
+}
+
+/// A colour glyph (an emoji of an `sbix` or `CBDT` font, which have pictures, not outlines):
+/// premultiplied linear-light RGBA scaled to the requested size, its top-left corner at
+/// (`left`, `top`) from the pen position on the baseline.
+#[derive(Debug)]
+pub struct ColorGlyph {
+    pub w: usize,
+    pub h: usize,
+    pub rgba: Vec<f32>,
+    pub left: f32,
+    pub top: f32,
+}
+
+type CKey = (FaceId, u32, u32);
+
+fn color_cache() -> &'static Mutex<HashMap<CKey, Option<Arc<ColorGlyph>>>> {
+    static C: OnceLock<Mutex<HashMap<CKey, Option<Arc<ColorGlyph>>>>> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// Decode a PNG to straight-alpha RGBA8 (`w`, `h`, pixels), at most 1024 × 1024.
+fn decode_png(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let mut dec = png::Decoder::new_with_limits(std::io::Cursor::new(bytes), png::Limits { bytes: 16 << 20 });
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut r = dec.read_info().ok()?;
+    let mut buf = vec![0; r.output_buffer_size()?];
+    let info = r.next_frame(&mut buf).ok()?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    if w == 0 || h == 0 || w > 1024 || h > 1024 {
+        return None;
+    }
+    let n = w * h;
+    let px: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => buf.get(..n * 4)?.to_vec(),
+        png::ColorType::Rgb => buf.get(..n * 3)?.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => buf.get(..n * 2)?.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Grayscale => buf.get(..n)?.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::Indexed => return None,
+    };
+    Some((w, h, px))
+}
+
+/// The colour picture of glyph `g` drawn `px` pixels tall (an em), if its face has one (emoji).
+/// Cached per face, glyph and half pixel; None for outline glyphs, hostile sizes and broken data.
+pub fn color_glyph(g: &Glyph, px: f32) -> Option<Arc<ColorGlyph>> {
+    use skrifa::bitmap::{BitmapData, BitmapStrikes, Origin};
+    if !px.is_finite() || !(2.0..=1024.0).contains(&px) {
+        return None;
+    }
+    let key = (g.face, g.id, (px * 2.0).round() as u32);
+    if let Some(v) = color_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return v.clone();
+    }
+    let face = fonts::face(g.face);
+    let make = || -> Option<Arc<ColorGlyph>> {
+        let font = face.font()?;
+        let strikes = BitmapStrikes::new(&font);
+        if strikes.is_empty() {
+            return None;
+        }
+        let bg = strikes.glyph_for_size(Size::new(px), GlyphId::new(g.id))?;
+        let (sw, sh, src) = match bg.data {
+            BitmapData::Png(bytes) => decode_png(bytes)?,
+            BitmapData::Bgra(bytes) => {
+                let (w, h) = (bg.width as usize, bg.height as usize);
+                let v: Vec<u8> = bytes
+                    .get(..w.checked_mul(h)?.checked_mul(4)?)?
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|p| {
+                        // premultiplied BGRA → straight RGBA
+                        let a = p[3];
+                        let un = |c: u8| if a == 0 { 0 } else { ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8 };
+                        [un(p[2]), un(p[1]), un(p[0]), a]
+                    })
+                    .collect();
+                (w, h, v)
+            }
+            BitmapData::Mask(_) => return None,
+        };
+        let ppem = if bg.ppem_y.is_finite() && bg.ppem_y >= 1.0 { bg.ppem_y } else { px };
+        let scale = px / ppem;
+        let (w, h) = (((sw as f32 * scale).round() as usize).clamp(1, 2048), ((sh as f32 * scale).round() as usize).clamp(1, 2048));
+        // area-weighted resample in linear light, premultiplied
+        let lin = |c: u8| filmcraft_color::srgb_to_linear(f32::from(c) / 255.0);
+        let mut rgba = vec![0.0f32; w * h * 4];
+        let (fx, fy) = (sw as f32 / w as f32, sh as f32 / h as f32);
+        for y in 0..h {
+            let (y0, y1) = ((y as f32 * fy) as usize, (((y + 1) as f32 * fy).ceil() as usize).clamp(1, sh));
+            for x in 0..w {
+                let (x0, x1) = ((x as f32 * fx) as usize, (((x + 1) as f32 * fx).ceil() as usize).clamp(1, sw));
+                let mut acc = [0.0f32; 4];
+                let mut n = 0.0f32;
+                for sy in y0.min(sh - 1)..y1.max(y0 + 1).min(sh) {
+                    for sx in x0.min(sw - 1)..x1.max(x0 + 1).min(sw) {
+                        let Some(p) = src.get((sy * sw + sx) * 4..(sy * sw + sx) * 4 + 4) else { continue };
+                        let a = f32::from(p[3]) / 255.0;
+                        acc = [acc[0] + lin(p[0]) * a, acc[1] + lin(p[1]) * a, acc[2] + lin(p[2]) * a, acc[3] + a];
+                        n += 1.0;
+                    }
+                }
+                if n > 0.0 {
+                    let o = (y * w + x) * 4;
+                    if let Some(d) = rgba.get_mut(o..o + 4) {
+                        d.copy_from_slice(&[acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n]);
+                    }
+                }
+            }
+        }
+        let k = px / face.units_per_em();
+        let left = bg.bearing_x * k + bg.inner_bearing_x * scale;
+        let top = match bg.placement_origin {
+            Origin::BottomLeft => -(bg.bearing_y * k + bg.inner_bearing_y * scale) - h as f32,
+            Origin::TopLeft => -(bg.bearing_y * k + bg.inner_bearing_y * scale),
+        };
+        let (left, top) = (if left.is_finite() { left } else { 0.0 }, if top.is_finite() { top } else { -(h as f32) });
+        Some(Arc::new(ColorGlyph { w, h, rgba, left, top }))
+    };
+    let v = make();
+    let mut m = color_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() > 2048 {
+        m.clear();
+    }
+    m.insert(key, v.clone());
+    v
+}
+
 /// Rasterise a layout into a tight mask; returns `(mask, x, y)` with the mask's device position.
 pub fn rasterize(l: &Layout, m: &Xform) -> (Mask, i32, i32) {
     let b = device_bounds(l, m);
@@ -307,6 +463,27 @@ mod tests {
         };
         let rows: Vec<usize> = (0..mi.h).filter(|&y| (0..mi.w).any(|x| mi.get(x, y) > 0.5)).collect();
         assert!(row_centre(rows[2]) > row_centre(rows[rows.len() - 3]) + 3.0);
+    }
+
+    #[test]
+    fn one_glyph_at_a_time_matches_the_whole_layout() {
+        let l = layout("Wave", &TextStyle { size: 40.0, ..Default::default() }, &ParagraphStyle::default());
+        let m = at(10.25, 50.0);
+        let (whole, x0, y0) = rasterize(&l, &m);
+        let mut each = Mask::new(whole.w, whole.h);
+        for g in &l.glyphs {
+            draw_glyph(g, &compose(&m, &at(g.x, g.y)), &mut each, (x0, y0));
+        }
+        assert!((ink(&whole) - ink(&each)).abs() < 1e-3, "{} {}", ink(&whole), ink(&each));
+        // a turned glyph draws through its outline; a hostile transform draws nothing
+        let a = 0.4f32;
+        let mut turned = Mask::new(200, 200);
+        draw_glyph(&l.glyphs[0], &[a.cos() * 3.0, a.sin() * 3.0, -a.sin() * 3.0, a.cos() * 3.0, 60.0, 150.0], &mut turned, (0, 0));
+        assert!(ink(&turned) > 100.0);
+        let mut none = Mask::new(10, 10);
+        draw_glyph(&l.glyphs[0], &[f32::NAN, 0.0, 0.0, 1.0, 0.0, 0.0], &mut none, (0, 0));
+        draw_glyph(&l.glyphs[0], &[1e6, 0.0, 0.0, 1e6, 0.0, 0.0], &mut none, (0, 0));
+        assert!(ink(&none) <= 100.0);
     }
 
     #[test]

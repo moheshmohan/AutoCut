@@ -261,7 +261,47 @@ screen; 0° runs left to right across the layer's own bounds, and the ramp turns
 as a solid; the rest of the text keeps the ramp. A singular layer transform falls back to the
 solid fill colour.
 
+## Text animation
+
+A text layer can animate letter by letter, word by word or line by line
+([`filmcraft_project::text_anim`](../crates/project/src/text_anim.rs)), with up to three
+animators stored on the layer (so they copy with the clip and are saved inside `.fcgt` templates):
+
+| slot | kinds |
+|---|---|
+| `in` | `fade`, `typewriter`, `pop` (grows past its size and settles), `slideLeft` / `slideRight` / `slideDown` / `slideUp` (from that side), `blurIn`, `scaleUp`, `drop` (falls and bounces), `glitch` |
+| `out` | the same kinds, played backwards: the units leave in order, the last finishing as the clip ends |
+| `loop` | `wave`, `bounce`, `shake`, `pulse`, `flicker` |
+
+Each animator has a `unit` (`letter` — a shaped cluster, so a Malayalam conjunct with its vowel
+sign moves as one —, `word`, `line`), an `amount` (percent of the kind's designed strength), a
+`stagger` (seconds between units; a loop's phase lag), an `easing` (the Penner curves and custom
+Bézier of the transitions, with overshoot kept) and a `duration` (a loop's period). The in
+animation runs from the clip's start and the out animation ends at its end (`graphic_clip` gives
+the clip's clock); at rest the layer draws exactly as without animation.
+
+`graphics.animateText {clip, layer, in?, out?, loop?, preset?, clear?}` sets them (a kind name or
+`{kind, unit, amount, stagger, easing, duration}`; `null` removes one). The Properties panel's
+**Text Animation** section has In / Out / Loop pickers with their unit, easing, amount, stagger
+and duration (`graphics.anim.<slot>.<field>`). The Elements library's animated text presets
+include a typewriter, letters popping in, a wave, a flickering neon glow, words sliding up and an
+arched title dropping in.
+
+## Glow, inner shadow, curve, third stroke
+
+Appearance also has **Outer Glow** (`glow`, `glow_color`, `glow_radius`, `glow_intensity`: a
+Gaussian falloff around the fill and strokes, saturating near the edge like neon), **Inner
+Shadow** (`inner_shadow`, `…_color`, `…_opacity`, `…_angle`, `…_distance`, `…_blur`: cast inside
+the fill), a **Stroke 3** (`stroke3`, `…_color`, `…_width`, `…_type`) and, for text,
+**Curve** (`curve`: the bend in percent, positive arches up like a rainbow, ±100 bends a line into
+a half circle; `curve_radius`: a fixed radius instead). They are ordinary keyframeable layer
+parameters (`graphics.set`); `graphics.textStyle {clip, layer, glow, innerShadow, curve, stroke3}`
+sets them in groups (`false` turns one off). Animated and curved text is drawn glyph by glyph
+(`filmcraft_render::text_units`), each unit with the layer's whole appearance, composed pass by
+pass so one letter's stroke never covers its neighbour's fill.
+
 ## Not yet
 
 Mask-with-text, per-layer blend modes, Bézier curves in the pen tool (paths are polygons), media
-layers inside graphics, and template controls grouped into folders.
+layers inside graphics, template controls grouped into folders, text along a free path (arcs
+only), and animators on keyframes of their own.

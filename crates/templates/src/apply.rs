@@ -1226,6 +1226,7 @@ fn write_cues(seq: &mut Sequence, p: &mut Project, cues: &[Cue], style: Option<&
             speaker: c.speaker.clone(),
             cue_id: None,
             settings: String::new(),
+            words: Vec::new(),
         });
     }
     let n = out.len();

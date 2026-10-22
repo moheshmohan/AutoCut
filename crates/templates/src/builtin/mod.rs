@@ -495,7 +495,7 @@ impl Builder {
             .map(|((a, b, text), id)| {
                 let start = secs(*a);
                 let end = secs(*b).max(start + frames(1));
-                Caption { id, start, duration: end - start, text: (*text).into(), speaker: None, cue_id: None, settings: String::new() }
+                Caption { id, start, duration: end - start, text: (*text).into(), speaker: None, cue_id: None, settings: String::new(), words: Vec::new() }
             })
             .collect();
         q.caption_tracks.push(t);
