@@ -513,7 +513,10 @@ fn estimate_cost(project: &Project, seq: &Sequence, layers: &[Layer]) -> f64 {
         total += match l {
             Layer::Item(_, it) => layer_cost(project, it, px, false),
             Layer::Transition(_, x, a, b) => {
-                let simple = matches!(x.effect.effect.as_str(), "cross_dissolve" | "dip_to_black" | "dip_to_white" | "non_additive_dissolve");
+                let simple = matches!(
+                    filmcraft_project::creator_transitions::base_id(&x.effect.effect),
+                    "cross_dissolve" | "dip_to_black" | "dip_to_white" | "non_additive_dissolve"
+                );
                 let sides: f64 = [a, b].iter().filter_map(|s| s.map(|it| layer_cost(project, it, px, !simple))).sum();
                 sides + if simple { 1.0 } else { 12.0 * px }
             }

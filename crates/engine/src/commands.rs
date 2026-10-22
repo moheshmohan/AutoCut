@@ -3185,6 +3185,8 @@ fn build() -> Vec<CommandSpec> {
                             }
                         }
                     }
+                    // a stabilisation level writes its settings; a setting changed by hand makes it Custom
+                    crate::stabilize::after_set_param(e, &pid, &v);
                     Ok(keyframes)
                 })?;
                 // 0 keyframes: the value is static (`time` was not used)
@@ -3543,6 +3545,9 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::audio_generate::commands());
     v.extend(crate::music::commands());
     v.extend(crate::transition_tools::commands());
+    v.extend(crate::speed_ramp::commands());
+    v.extend(crate::stabilize::commands());
+    v.extend(crate::beat_pulse::commands());
     v.extend(crate::music_preview::commands());
     v.extend(crate::soundfonts::commands());
     v.extend(crate::voice_clone::commands());

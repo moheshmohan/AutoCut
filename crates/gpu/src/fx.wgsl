@@ -625,6 +625,344 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
     return dec(v);
 }
 
+// ---- the Creator effects (`filmcraft_render::creator_fx`, the same arithmetic step by step)
+
+const OP_CR_FILM_GRAIN: u32 = 40u;
+const OP_CR_VHS: u32 = 41u;
+const OP_CR_KALEIDOSCOPE: u32 = 42u;
+const OP_CR_GLITCH: u32 = 43u;
+const OP_CR_ZOOM_BLUR: u32 = 44u;
+const OP_CR_MOTION_BLUR: u32 = 45u;
+const OP_CR_TECH_HUD: u32 = 46u;
+const OP_CR_CHROMATIC: u32 = 47u;
+const OP_CR_LIGHT_SWEEP: u32 = 48u;
+const OP_CR_DUOTONE: u32 = 49u;
+const OP_CR_HALFTONE: u32 = 50u;
+
+fn pcg(v: u32) -> u32 {
+    let state = v * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn hash3(x: u32, y: u32, z: u32) -> u32 {
+    return pcg(x ^ pcg(y ^ pcg(z)));
+}
+
+fn h01(x: u32, y: u32, z: u32) -> f32 {
+    return f32(hash3(x, y, z) >> 8u) * (1.0 / 16777216.0);
+}
+
+fn ifloor(v: f32) -> u32 {
+    return bitcast<u32>(i32(floor(v)));
+}
+
+fn straight(o: vec4<f32>) -> vec3<f32> {
+    return select(o.rgb / o.a, vec3(0.0), o.a <= 1e-6);
+}
+
+fn value_noise(qx: f32, qy: f32, seed: u32) -> f32 {
+    let fx0 = floor(qx);
+    let fy0 = floor(qy);
+    let ix = ifloor(qx);
+    let iy = ifloor(qy);
+    let fx = qx - fx0;
+    let fy = qy - fy0;
+    let sx = fx * fx * (3.0 - 2.0 * fx);
+    let sy = fy * fy * (3.0 - 2.0 * fy);
+    let a = h01(ix, iy, seed);
+    let b = h01(ix + 1u, iy, seed);
+    let c = h01(ix, iy + 1u, seed);
+    let d = h01(ix + 1u, iy + 1u, seed);
+    let top = a + (b - a) * sx;
+    let bot = c + (d - c) * sx;
+    return top + (bot - top) * sy;
+}
+
+fn creator(op: u32, p: vec2<i32>) -> vec4<f32> {
+    let s = size();
+    let wf = f32(s.x);
+    let hf = f32(s.y);
+    let pc = vec2<f32>(p) + 0.5;
+    switch op {
+        case OP_CR_FILM_GRAIN: {
+            let o = ld(p);
+            if o.a <= 1e-6 {
+                return o;
+            }
+            let amount = u.p0.x;
+            let gsize = u.p0.y;
+            let response = u.p0.z;
+            let seed = u.i1.y;
+            let qx = pc.x / gsize;
+            let qy = pc.y / gsize;
+            let e = enc(straight(o));
+            let l = clamp(luma709(e), 0.0, 1.0);
+            let k = amount * 0.5 * (1.0 - response + response * 4.0 * l * (1.0 - l));
+            let g0 = value_noise(qx, qy, seed) - 0.5;
+            var g = vec3(g0);
+            if u.i1.x != 0u {
+                g = vec3(g0, value_noise(qx, qy, seed ^ 0x9E3779B9u) - 0.5, value_noise(qx, qy, seed ^ 0x7F4A7C15u) - 0.5);
+            }
+            return vec4(dec(e + g * k) * o.a, o.a);
+        }
+        case OP_CR_VHS: {
+            let amount = u.p0.x;
+            let bleed = u.p0.y;
+            let tracking = u.p0.z;
+            let noise = u.p0.w;
+            let wobble = u.p1.x;
+            let sat = u.p1.y;
+            let phase = u.p1.z;
+            let band_y = u.p1.w;
+            let band_h = u.p2.x;
+            let frame = u.i1.x;
+            let seed = u.i1.y;
+            let row = u32(p.y);
+            let rowh = h01(row, frame, seed);
+            let wob = wobble * (0.65 * sin(pc.y * 0.031 + phase * 6.0) + 0.35 * (rowh * 2.0 - 1.0));
+            let tl = tracking * clamp(1.0 - abs(pc.y - band_y) / band_h, 0.0, 1.0);
+            let sx = pc.x - (wob + tl * (rowh - 0.5) * 0.08 * wf);
+            let s0 = sample_clamped(sx, pc.y);
+            let e0 = enc(straight(s0));
+            let yl = luma709(e0);
+            var chroma = vec3(0.0);
+            for (var k = 0; k < 8; k++) {
+                let xk = sx - bleed * (f32(k) / 7.0) - bleed * 0.25;
+                let ek = enc(straight(sample_clamped(xk, pc.y)));
+                chroma += ek - vec3(luma709(ek));
+            }
+            let nz = (h01(u32(p.x), row ^ frame, seed ^ 0x51EDu) - 0.5) * (noise * 0.35 + tl * 0.6);
+            let e = (vec3(yl) + chroma * 0.125 * sat + vec3(nz)) * 0.94 + 0.03;
+            let o = ld(p);
+            let eo = enc(straight(o));
+            let a = o.a + (s0.a - o.a) * amount;
+            return vec4(dec(eo + (e - eo) * amount) * a, a);
+        }
+        case OP_CR_KALEIDOSCOPE: {
+            let amount = u.p0.x;
+            let segments = u.p0.y;
+            let rot = u.p0.z;
+            let cx = u.p0.w;
+            let cy = u.p1.x;
+            let zoom = u.p1.y;
+            let seg = 6.283185307179586 / segments;
+            let dx = pc.x - cx;
+            let dy = pc.y - cy;
+            let r = sqrt(dx * dx + dy * dy) / zoom;
+            let th = atan2(dy, dx) - rot;
+            var m = th - seg * floor(th / seg);
+            if m > seg * 0.5 {
+                m = seg - m;
+            }
+            let th2 = m + rot;
+            let k = sample_clamped(cx + r * cos(th2), cy + r * sin(th2));
+            let o = ld(p);
+            return o + (k - o) * amount;
+        }
+        case OP_CR_GLITCH: {
+            let amount = u.p0.x;
+            let blk = u.p0.y;
+            let split = u.p0.z;
+            let jitter = u.p0.w;
+            let gstep = u.i1.x;
+            let seed = u.i1.y;
+            let bw = blk * 2.0;
+            let bh = max(blk * 0.5, 1.0);
+            let bx = ifloor(pc.x / bw);
+            let by = ifloor(pc.y / bh);
+            let st = gstep ^ seed;
+            let r = h01(bx, by, st);
+            var dx = 0.0;
+            if r < amount * 0.4 {
+                dx = (h01(by, bx ^ 0x2C1Bu, st ^ 0x5BD1u) - 0.5) * 4.0 * blk * amount;
+            }
+            let row = u32(p.y);
+            if h01(row, gstep, seed ^ 0x1234u) < jitter * amount * 0.5 {
+                dx += (h01(row ^ 0x3C6Eu, gstep, seed ^ 0x77u) - 0.5) * jitter * blk;
+            }
+            let spl = split * amount * (0.5 + h01(by, gstep, seed ^ 0xABCu));
+            let sx = pc.x - dx;
+            let rs = sample_clamped(sx + spl, pc.y);
+            let gs = sample_clamped(sx, pc.y);
+            let bs = sample_clamped(sx - spl, pc.y);
+            let a = max(max(rs.a, gs.a), bs.a);
+            var o = vec4(rs.r, gs.g, bs.b, a);
+            if r > 1.0 - amount * 0.03 {
+                o = vec4(max(vec3(a) - o.rgb, vec3(0.0)), a);
+            }
+            return o;
+        }
+        case OP_CR_ZOOM_BLUR: {
+            let amount = u.p0.x;
+            let cx = u.p0.y;
+            let cy = u.p0.z;
+            let steps = u.i1.x;
+            let spin = u.i1.y != 0u;
+            let dx = pc.x - cx;
+            let dy = pc.y - cy;
+            var acc = vec4(0.0);
+            for (var i = 0u; i < steps; i++) {
+                let t = f32(i) / f32(steps - 1u);
+                var q: vec2<f32>;
+                if spin {
+                    let ang = (t - 0.5) * amount * 0.5235987755982988;
+                    let sn = sin(ang);
+                    let cs = cos(ang);
+                    q = vec2(cx + dx * cs - dy * sn, cy + dx * sn + dy * cs);
+                } else {
+                    let k = 1.0 - amount * 0.5 * t;
+                    q = vec2(cx + dx * k, cy + dy * k);
+                }
+                acc += sample_clamped(q.x, q.y);
+            }
+            return acc / f32(steps);
+        }
+        case OP_CR_MOTION_BLUR: {
+            let dx = u.p0.x;
+            let dy = u.p0.y;
+            let falloff = u.p0.z;
+            let steps = u.i1.x;
+            let trail = u.i1.y != 0u;
+            var acc = vec4(0.0);
+            var wsum = 0.0;
+            for (var i = 0u; i < steps; i++) {
+                let t = f32(i) / f32(steps - 1u);
+                var off = t - 0.5;
+                var far = abs(t - 0.5) * 2.0;
+                if trail {
+                    off = -t;
+                    far = t;
+                }
+                let wt = 1.0 - falloff * 0.95 * far;
+                acc += sample_clamped(pc.x + dx * off, pc.y + dy * off) * wt;
+                wsum += wt;
+            }
+            return acc / wsum;
+        }
+        case OP_CR_TECH_HUD: {
+            let o = ld(p);
+            if o.a <= 1e-6 {
+                return o;
+            }
+            let amount = u.p0.x;
+            let scan = u.p0.y;
+            let spacing = u.p0.z;
+            let grid = u.p0.w;
+            let grid_size = u.p1.x;
+            let brackets = u.p1.y;
+            let vignette = u.p1.z;
+            let tint = u.p1.w;
+            let flicker = u.p2.x;
+            let lw = u.p2.y;
+            let col = u.p3.xyz;
+            let cmax = max(max(max(col.x, col.y), col.z), 1e-4);
+            let mn = min(wf, hf);
+            let m = 0.06 * mn;
+            let arm = 0.09 * mn;
+            let th = max(0.006 * mn, 1.0);
+            let e0 = enc(straight(o));
+            let l = luma709(e0);
+            let sl = 0.5 - 0.5 * cos(6.283185307179586 * pc.y / spacing);
+            let vx = (pc.x / wf - 0.5) * 2.0;
+            let vy = (pc.y / hf - 0.5) * 2.0;
+            let v = smoothstep_fx(0.45, 1.0, sqrt(vx * vx + vy * vy) / 1.4142135623730951);
+            let shade = (1.0 - scan * 0.45 * sl) * (1.0 + flicker) * (1.0 - vignette * 0.75 * v);
+            let tinted = e0 + (vec3(l) * col / cmax - e0) * tint * 0.6;
+            var e = tinted * shade;
+            let gx = abs(fract(pc.x / grid_size + 0.5) - 0.5) * grid_size;
+            let gy = abs(fract(pc.y / grid_size + 0.5) - 0.5) * grid_size;
+            let gl = max(clamp(1.0 - gx / lw, 0.0, 1.0), clamp(1.0 - gy / lw, 0.0, 1.0)) * grid * 0.35;
+            let fx = min(pc.x, wf - pc.x) - m;
+            let fy = min(pc.y, hf - pc.y) - m;
+            let cov_h = clamp(min(min(fx + 0.5, arm - fx + 0.5), min(fy + 0.5, th - fy + 0.5)), 0.0, 1.0);
+            let cov_v = clamp(min(min(fx + 0.5, th - fx + 0.5), min(fy + 0.5, arm - fy + 0.5)), 0.0, 1.0);
+            let cov = clamp(gl + max(cov_h, cov_v) * brackets, 0.0, 1.0);
+            e = e + (col - e) * cov;
+            return vec4(dec(e0 + (e - e0) * amount) * o.a, o.a);
+        }
+        case OP_CR_CHROMATIC: {
+            let k = u.p0.x;
+            let dx = u.p0.y;
+            let dy = u.p0.z;
+            let cx = u.p0.w;
+            let cy = u.p1.x;
+            var rs: vec4<f32>;
+            var bs: vec4<f32>;
+            if u.i1.x != 0u {
+                let ox = pc.x - cx;
+                let oy = pc.y - cy;
+                rs = sample_clamped(cx + ox * (1.0 + k), cy + oy * (1.0 + k));
+                bs = sample_clamped(cx + ox * (1.0 - k), cy + oy * (1.0 - k));
+            } else {
+                rs = sample_clamped(pc.x + dx, pc.y + dy);
+                bs = sample_clamped(pc.x - dx, pc.y - dy);
+            }
+            let g = ld(p);
+            return vec4(rs.r, g.g, bs.b, max(max(rs.a, g.a), bs.a));
+        }
+        case OP_CR_LIGHT_SWEEP: {
+            let o = ld(p);
+            if o.a <= 1e-6 {
+                return o;
+            }
+            let intensity = u.p0.x;
+            let nx = u.p0.y;
+            let ny = u.p0.z;
+            let s0 = u.p0.w;
+            let halfw = u.p1.x;
+            let inner = u.p1.y;
+            let col = u.p2.xyz;
+            let d = (pc.x - wf * 0.5) * nx + (pc.y - hf * 0.5) * ny - s0;
+            let band = 1.0 - smoothstep_fx(inner, halfw, abs(d));
+            let k = band * intensity * o.a;
+            return vec4(o.rgb + col * k, o.a);
+        }
+        case OP_CR_DUOTONE: {
+            let o = ld(p);
+            if o.a <= 1e-6 {
+                return o;
+            }
+            let amount = u.p0.x;
+            let contrast = u.p0.y;
+            let e = enc(straight(o));
+            let l = clamp((clamp(luma709(e), 0.0, 1.0) - 0.5) * (1.0 + contrast) + 0.5, 0.0, 1.0);
+            let t = u.p1.xyz + (u.p2.xyz - u.p1.xyz) * l;
+            return vec4(dec(e + (t - e) * amount) * o.a, o.a);
+        }
+        case OP_CR_HALFTONE: {
+            let o = ld(p);
+            if o.a <= 1e-6 {
+                return o;
+            }
+            let amount = u.p0.x;
+            let dsize = u.p0.y;
+            let cs = u.p0.z;
+            let sn = u.p0.w;
+            let ink = u.p1.xyz;
+            let paper = u.p2.xyz;
+            let uu = cs * pc.x + sn * pc.y;
+            let vv = -sn * pc.x + cs * pc.y;
+            let cu = (floor(uu / dsize) + 0.5) * dsize;
+            let cvv = (floor(vv / dsize) + 0.5) * dsize;
+            let es = enc(straight(sample_clamped(cs * cu - sn * cvv, sn * cu + cs * cvv)));
+            let d = sqrt((uu - cu) * (uu - cu) + (vv - cvv) * (vv - cvv));
+            var t: vec3<f32>;
+            if u.i1.x != 0u {
+                t = clamp(sqrt(clamp(es, vec3(0.0), vec3(1.0))) * dsize * 0.7071068 - vec3(d) + 0.5, vec3(0.0), vec3(1.0));
+            } else {
+                let r = sqrt(1.0 - clamp(luma709(es), 0.0, 1.0)) * dsize * 0.7071068;
+                t = paper + (ink - paper) * clamp(r - d + 0.5, 0.0, 1.0);
+            }
+            let e = enc(straight(o));
+            return vec4(dec(e + (t - e) * amount) * o.a, o.a);
+        }
+        default: {
+            return ld(p);
+        }
+    }
+}
+
 // One output pixel of every op but the running-sum box blur.
 fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
     let s = size();
@@ -808,6 +1146,9 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
             }
             let res = vec3(enc_to_linear_limiter(out_enc.x), enc_to_linear_limiter(out_enc.y), enc_to_linear_limiter(out_enc.z));
             return vec4(res * a, a);
+        }
+        case OP_CR_FILM_GRAIN, OP_CR_VHS, OP_CR_KALEIDOSCOPE, OP_CR_GLITCH, OP_CR_ZOOM_BLUR, OP_CR_MOTION_BLUR, OP_CR_TECH_HUD, OP_CR_CHROMATIC, OP_CR_LIGHT_SWEEP, OP_CR_DUOTONE, OP_CR_HALFTONE: {
+            return creator(op, p);
         }
         case OP_LUMETRI: {
             let o = ld(p);

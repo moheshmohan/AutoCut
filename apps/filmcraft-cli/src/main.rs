@@ -32,6 +32,7 @@ macro_rules! out {
 
 mod args;
 mod audio;
+mod creator_demo;
 mod instagram;
 mod locations;
 mod ml_script;
@@ -453,7 +454,7 @@ SUBCOMMANDS
          [--max-seconds 60] [--motion smooth|responsive] [--fallback blur|letterbox|center]
          [--platform youtube|reels|tiktok|vertical] [--topic T] [--title-card] [--no-captions]
          [--caption-style bold|clean|glow|box|karaoke|twoLine|plain] [--caption-keywords]
-         [--analysis-fps 30] [--sequence id]
+         [--analysis-fps 30] [--sequence id] [--look tech|vhs|clean] [--beat-pulse]
          [--export dir [--upload-youtube
          [--youtube-channel C] [--youtube-privacy P] [--youtube-playlist P] [--youtube-tags a,b]]]
                                 long video → shorts (autocut.shorts): the transcript (Whisper's,
@@ -475,8 +476,11 @@ SUBCOMMANDS
                                 --export writes each to <dir>/NN-<title>.mp4 with the captions
                                 burned in and --upload-youtube sends each to YouTube (private
                                 unless --youtube-privacy). A media file is imported first; a
-                                project's active sequence (or --sequence) is used. --save keeps
-                                the shorts in the --project
+                                project's active sequence (or --sequence) is used. --look puts
+                                a creator look over each short (tech: a HUD, scanlines and
+                                grain; vhs: tape), --beat-pulse zoom pulses on its music's
+                                beats; both off by default. --save keeps the shorts in the
+                                --project
   trailer (--project p.fcproj | --bridge addr) [--sequence id] [--plan plan.json]
           [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5]
           [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at S]]
@@ -485,7 +489,7 @@ SUBCOMMANDS
           [--logo logo.png] [--channel @handle] [--end-text T]
           [--link URL] [--exclude LABEL]... [--include LABEL]... [--bpm 124] [--mood energetic]
           [--seed 7] [--redact faces,plates|off] [--fallback blur|letterbox|center]
-          [--export out.mp4] [--preset P] [--no-qa]
+          [--export out.mp4] [--preset P] [--no-qa] [--look tech|vhs|clean] [--beat-pulse]
                                 a finished showcase → a vertical trailer (autocut.trailer): the
                                 most striking robot (or --hook; --hook-at: from that second of
                                 its clip) under a big title ('48 robots · 2013 → 2025'), the
@@ -504,7 +508,10 @@ SUBCOMMANDS
                                 the show hid them, the plan's named targets). --export writes the
                                 video (Social Vertical 1080×1920) with <out>.cover.jpg,
                                 <out>.caption.txt (hashtags, 'link in bio'), <out>.frames.jpg and
-                                QA (<out>.qa.json). --save keeps the trailer's sequence
+                                QA (<out>.qa.json). --look puts a creator look over the hook and
+                                the montage (tech: a HUD in the theme's accent, scanlines and
+                                grain; vhs: tape), --beat-pulse zoom pulses on the montage's
+                                beats; both off by default. --save keeps the trailer's sequence
   autocut '<prompt>' [--dry-run] [--frames]
                                 plan (and run) a natural-language edit with AutoCut: a local
                                 model (Ollama) classifies the prompt and deterministic planners
@@ -1169,6 +1176,17 @@ fn shorts_params(a: &Args) -> Result<Value, String> {
     p["captions"] = json!(!a.flag("--no-captions"));
     caption_style_opts(a, &mut p)?;
     p["title"] = json!(a.flag("--title-card"));
+    // opt-in creator tools: a look over each short, zoom pulses on its music's beats
+    if let Some(l) = a.opt("--look") {
+        let l = l.trim().to_ascii_lowercase();
+        if !matches!(l.as_str(), "tech" | "vhs" | "clean") {
+            return Err(format!("--look is tech, vhs or clean, not `{l}`"));
+        }
+        p["look"] = json!(l);
+    }
+    if a.flag("--beat-pulse") {
+        p["beatPulse"] = json!(true);
+    }
     if let Some(d) = a.opt("--export") {
         p["export"] = json!(absolute(d));
     }
@@ -3148,6 +3166,9 @@ mod shorts_tests {
             "10",
             "--title-card",
             "--no-captions",
+            "--look",
+            "VHS",
+            "--beat-pulse",
             "--export",
             "out",
             "--upload-youtube",
@@ -3162,7 +3183,9 @@ mod shorts_tests {
         assert!(p["export"].as_str().is_some_and(|e| e.ends_with("out") && std::path::Path::new(e).is_absolute()), "{p}");
         assert_eq!(p["youtube"], serde_json::json!({"privacy": "unlisted", "tags": ["a", "b"]}));
         assert_eq!(p["wait"], true);
+        assert_eq!((p["look"].as_str(), p["beatPulse"].as_bool()), (Some("vhs"), Some(true)), "the opt-in creator tools");
         let defaults = shorts_params(&args(&["shorts", "talk.mp4"])).unwrap();
+        assert!(defaults.get("look").is_none() && defaults.get("beatPulse").is_none(), "off unless asked");
         assert_eq!((defaults["count"].as_u64(), defaults["captions"].as_bool()), (Some(3), Some(true)));
         assert!(defaults.get("fallback").is_none() && defaults.get("platform").is_none(), "the job's defaults (blur, youtube)");
         let bars = shorts_params(&args(&["shorts", "talk.mp4", "--fallback", "Letterbox", "--platform", "tik-tok"])).unwrap();
@@ -3175,6 +3198,7 @@ mod shorts_tests {
             &["shorts", "x", "--min-seconds", "NaN"],
             &["shorts", "x", "--sequence", "main"],
             &["shorts", "x", "--upload-youtube"],
+            &["shorts", "x", "--look", "sparkly"],
         ] {
             assert!(shorts_params(&args(bad)).is_err(), "{bad:?}");
         }

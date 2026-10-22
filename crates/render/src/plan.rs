@@ -223,11 +223,12 @@ fn cpu_layer_reason(project: &Project, item: &TrackItem, opts: RenderOptions) ->
 }
 
 fn simple_transition(id: &str) -> bool {
-    matches!(id, "cross_dissolve" | "dip_to_black" | "dip_to_white")
+    matches!(filmcraft_project::creator_transitions::base_id(id), "cross_dissolve" | "dip_to_black" | "dip_to_white")
 }
 
 /// A transition planned as a two-input [`PlanStep::Transition`] (Push, the shader transitions).
 fn two_input_transition(id: &str) -> bool {
+    let id = filmcraft_project::creator_transitions::base_id(id);
     id == "push" || crate::transitions::shader::is_shader(id)
 }
 
@@ -410,7 +411,9 @@ fn push_tracks(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, 
             let p = trn.progress(t) as f32;
             let a = trn.from.and_then(|id| tr.item(id)).filter(|i| i.enabled);
             let b = trn.to.and_then(|id| tr.item(id)).filter(|i| i.enabled);
-            match trn.effect.effect.as_str() {
+            // (a Creator preset as its base transition)
+            let effect = filmcraft_project::creator_transitions::resolve(&trn.effect);
+            match effect.effect.as_str() {
                 id if two_input_transition(id) => {
                     let mut inputs = [Vec::new(), Vec::new()];
                     for (slot, item) in inputs.iter_mut().zip([a, b]) {
@@ -427,10 +430,10 @@ fn push_tracks(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, 
                         p
                     };
                     let content = crate::transition_content(project, seq, tr, trn, opts, sources);
-                    layers.0.push(PlanStep::Transition { inputs, effect: trn.effect.clone(), progress, scale: opts.scale, content });
+                    layers.0.push(PlanStep::Transition { inputs, effect: effect.clone().into_owned(), progress, scale: opts.scale, content });
                 }
                 "dip_to_black" | "dip_to_white" => {
-                    let col = if trn.effect.effect == "dip_to_black" { [0.0, 0.0, 0.0, 1.0] } else { [1.0, 1.0, 1.0, 1.0] };
+                    let col = if effect.effect == "dip_to_black" { [0.0, 0.0, 0.0, 1.0] } else { [1.0, 1.0, 1.0, 1.0] };
                     layers.push(PlanLayer::new(Arc::new(VideoFrame::rgba_f32(1, 1, col.to_vec())), Affine::scale(w as f64, h as f64), 1.0, Blend::Normal));
                     let (it, k) = if p < 0.5 { (a, 1.0 - p * 2.0) } else { (b, (p - 0.5) * 2.0) };
                     if let Some(it) = it {
@@ -448,7 +451,7 @@ fn push_tracks(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, 
                             *slot = input.into_layers(w, h);
                         }
                     }
-                    layers.0.push(PlanStep::Transition { inputs, effect: trn.effect.clone(), progress: p, scale: opts.scale, content: None });
+                    layers.0.push(PlanStep::Transition { inputs, effect: effect.clone().into_owned(), progress: p, scale: opts.scale, content: None });
                 }
                 _ => {
                     // cross dissolve: A at full, B over it at p — premultiplied over is the CPU's

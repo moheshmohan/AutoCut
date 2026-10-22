@@ -3850,3 +3850,29 @@
 	Understand Speech…	分析语音…
 	Scenes	场景
 	Analyze Scenes	分析场景
+
+# Speed ramps (Clip ▸ Speed Ramp…)
+	Speed Ramp…	速度曲线…
+	Speed Ramp	速度曲线
+	Montage	蒙太奇
+	Hero	英雄
+	Bullet	子弹时间
+	Jump Cut	跳切
+	Flash In	闪入
+	Flash Out	闪出
+	Smooth In	平滑进入
+	Smooth Out	平滑退出
+	None (remove the ramp)	无（移除曲线）
+	Intensity:	强度：
+	Optical Flow for the Slow Parts	慢速部分使用光流
+
+# Stabilization levels (Clip ▸ Stabilize…, Warp Stabilizer)
+	Stabilize…	稳定…
+	Stabilize	稳定
+	Recommended	推荐
+	Minimum Crop	最少裁剪
+	Most Stable	最稳定
+	Smooth motion, a moderate crop	运动平滑，裁剪适中
+	Keeps the most of the frame, smooths less	保留最多画面，平滑较少
+	The steadiest picture, crops more	画面最稳定，裁剪较多
+	Warp Stabilizer is added to the selected video clips (or updated) at this level.	以此级别为所选视频剪辑添加（或更新）变形稳定器。

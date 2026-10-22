@@ -380,6 +380,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, rater: Option<Arc<dyn ChatModel>
     let max = p["maxSeconds"].as_f64().filter(|v| v.is_finite()).unwrap_or(60.0);
     let aspect = p["aspect"].as_str().unwrap_or("9:16").to_string();
     let topic = p["topic"].as_str();
+    let look = crate::creator_look::look_of(p)?;
     let mut notes: Vec<String> = Vec::new();
     progress("finding the source");
     let (src, info) = source(ex, p).await?;
@@ -469,6 +470,23 @@ pub async fn make(ex: &dyn Executor, p: &Value, rater: Option<Arc<dyn ChatModel>
         let frame = run(ex, "sequence.inspect", json!({"item": seq})).await.ok();
         let size = |k: &str, or: f64| frame.as_ref().and_then(|f| f["settings"][k].as_f64()).filter(|v| v.is_finite() && *v >= 16.0).unwrap_or(or);
         let (fw, fh) = (size("width", 1080.0), size("height", 1920.0));
+        // opt-in: a creator look over the whole short, zoom pulses on its music's beats
+        if let Some(l) = look.filter(|l| *l != crate::creator_look::CreatorLook::Clean) {
+            let secs = frame.as_ref().and_then(|f| f["duration"].as_i64()).map_or(b - a, |t| t as f64 / filmcraft_time::TICKS_PER_SECOND as f64);
+            if let Err(e) = crate::creator_look::apply_look(ex, l, 0.0, secs, filmcraft_engine::project::effect::HUD_COLOR).await {
+                short.notes.push(format!("look {}: {e}", l.name()));
+            }
+        }
+        if p["beatPulse"].as_bool() == Some(true) {
+            let clips: Vec<u64> = frame
+                .as_ref()
+                .and_then(|f| f["video"].as_array())
+                .map(|t| t.iter().flat_map(|tr| tr["items"].as_array().into_iter().flatten()).filter_map(|c| c["clip"].as_u64()).collect())
+                .unwrap_or_default();
+            if let Err(e) = crate::creator_look::beat_pulse(ex, &clips, None).await {
+                short.notes.push(format!("beat pulse: {e}"));
+            }
+        }
         if p["captions"].as_bool() != Some(false) {
             progress(&format!("[{number}/{n}] captions"));
             let look = caption_style::Look::of(p);

@@ -11,8 +11,8 @@
 //! | `autocut.showcaseInspect` | the kept report (a summary, or all of it with `report: true`), plan and last build, and the latest job |
 //! | `autocut.showcaseSet` | keep a `report` or `plan` from elsewhere (or `reportPath` / `planPath`: the CLI's `analyze --out` and `showcase --script-out` files); `null` clears one |
 //! | `autocut.malayalamScript` | job: the plan's (the kept one, `plan` or `planPath`) English intro, lines and outro in natural spoken Malayalam, written by the local script model (or `model`) from `docs/malayalam-style.md`, its examples and the user's approved pairs; every line keeps its English's facts, gets the safe fixes and the lint (`script.lintMalayalam`) and goes back to the model once with what to fix (`revise: false`: not). The outcome's `malayalam` is the lines file (`{intro, outro, lines: {label: …}}`), written to `out` too, and `lines` what is left to look at |
-//! | `autocut.trailer` | job: a vertical trailer (9:16, also 1:1 / 4:5) of a finished showcase: the show `sequence`, its `plan` (or `planPath`, or the kept plan) and its build report (`report` / `reportPath`, or the last build). A hook (the most striking robot, or `hook`) under a big title ("48 robots · 2013 → 2025"), then a chronological montage of `robots` robots cut on the beats of generated music, each on its best moment, followed by the reframe, its name and year inside the `platform`'s safe zone; the show's first narration sentence over the hook (`hookVoice`); the show's redaction kept; an end card (`logo`, `endText`, `channel`). `export` writes it with the Social Vertical preset, with a cover, a caption, a frame sheet and QA beside it |
-//! | `autocut.shorts` | job: long video → shorts. The transcript of `sequence` (or of media `item`, put in a new sequence) is cut into sentences; runs of them `minSeconds`..`maxSeconds` long are scored for interest (and, with the local model, for the strength of their opening hook), and the best `count` that do not overlap each become a vertical sequence (`sequence.autoReframe` to `aspect`, following the speaker) with bold captions from the transcript (`captions`) and an optional `title` card; `export` (a folder) exports each with its captions burned in, and `uploadYoutube` sends each export to YouTube, private unless `youtube.privacy` says otherwise |
+//! | `autocut.trailer` | job: a vertical trailer (9:16, also 1:1 / 4:5) of a finished showcase: the show `sequence`, its `plan` (or `planPath`, or the kept plan) and its build report (`report` / `reportPath`, or the last build). A hook (the most striking robot, or `hook`) under a big title ("48 robots · 2013 → 2025"), then a chronological montage of `robots` robots cut on the beats of generated music, each on its best moment, followed by the reframe, its name and year inside the `platform`'s safe zone; the show's first narration sentence over the hook (`hookVoice`); the show's redaction kept; an end card (`logo`, `endText`, `channel`). `export` writes it with the Social Vertical preset, with a cover, a caption, a frame sheet and QA beside it; opt-in `look` (tech, vhs, clean: a creator look over the hook and the montage) and `beatPulse` (zoom pulses on the montage's beats) |
+//! | `autocut.shorts` | job: long video → shorts. The transcript of `sequence` (or of media `item`, put in a new sequence) is cut into sentences; runs of them `minSeconds`..`maxSeconds` long are scored for interest (and, with the local model, for the strength of their opening hook), and the best `count` that do not overlap each become a vertical sequence (`sequence.autoReframe` to `aspect`, following the speaker) with bold captions from the transcript (`captions`) and an optional `title` card; `export` (a folder) exports each with its captions burned in, and `uploadYoutube` sends each export to YouTube, private unless `youtube.privacy` says otherwise; opt-in `look` and `beatPulse` as for the trailer |
 //!
 //! A plan is `{subject, title, subtitle?, voice?, mood, entries, script: {intro, lines, outro}}`;
 //! each entry is the CLI plan's entry (`number`, `label`, `kind`, `description`, `unix`, `shots`)
@@ -344,14 +344,14 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.shorts",
             "Make Shorts…",
             &[],
-            r#"{"item":id?,"sequence":id?,"count":1..20=3,"minSeconds":3..180=15,"maxSeconds":5..180=60,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","motion":"smooth"|"responsive"?,"fallback":"blur"|"letterbox"|"center"="blur","platform":"youtube"|"reels"|"tiktok"|"vertical"="youtube","captions":bool=true,"captionStyle":"bold|clean|glow|box|karaoke|twoLine|plain"="bold","captionKeywords":bool=false,"title":bool=false,"topic":str?,"analysisFps":1..60=30,"export":dir?,"uploadYoutube":bool=false,"youtube":{"channel":str?,"privacy":"private"|"unlisted"|"public"="private","tags":[str]?,"playlist":str?,"description":str?}?,"wait":bool=false}"#,
+            r#"{"item":id?,"sequence":id?,"count":1..20=3,"minSeconds":3..180=15,"maxSeconds":5..180=60,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","motion":"smooth"|"responsive"?,"fallback":"blur"|"letterbox"|"center"="blur","platform":"youtube"|"reels"|"tiktok"|"vertical"="youtube","captions":bool=true,"captionStyle":"bold|clean|glow|box|karaoke|twoLine|plain"="bold","captionKeywords":bool=false,"title":bool=false,"topic":str?,"analysisFps":1..60=30,"export":dir?,"uploadYoutube":bool=false,"youtube":{"channel":str?,"privacy":"private"|"unlisted"|"public"="private","tags":[str]?,"playlist":str?,"description":str?}?,"look":"tech"|"vhs"|"clean"?,"beatPulse":bool=false,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Shorts, p),
         ),
         job(
             "autocut.trailer",
             "Make a Trailer…",
             &[],
-            r#"{"sequence":id?,"plan":Plan?,"planPath":str?,"report":obj?,"reportPath":str?,"seconds":10..90=34,"aspect":"9:16"|"1:1"|"4:5"="9:16","platform":"reels"|"youtube"|"tiktok"|"vertical"="reels","robots":3..30?,"hook":str?,"hookAt":seconds?,"at":{"<label>":seconds|{"item":id?,"seconds":seconds}}?,"title":str?,"hookVoice":bool?,"captions":bool?,"captionStyle":"bold|clean|glow|box|karaoke|twoLine|plain"="bold","captionKeywords":bool=false,"logo":str?,"channel":str?,"endText":str="Full video on YouTube","link":str?,"exclude":[str]?,"include":[str]?,"bpm":80..180=124,"mood":str="energetic","seed":u64=7,"redact":"faces,plates"|"faces"|"plates"|false?,"fallback":"blur"|"letterbox"|"center"="blur","export":str?,"preset":str?,"qa":bool?,"wait":bool=false}"#,
+            r#"{"sequence":id?,"plan":Plan?,"planPath":str?,"report":obj?,"reportPath":str?,"seconds":10..90=34,"aspect":"9:16"|"1:1"|"4:5"="9:16","platform":"reels"|"youtube"|"tiktok"|"vertical"="reels","robots":3..30?,"hook":str?,"hookAt":seconds?,"at":{"<label>":seconds|{"item":id?,"seconds":seconds}}?,"title":str?,"hookVoice":bool?,"captions":bool?,"captionStyle":"bold|clean|glow|box|karaoke|twoLine|plain"="bold","captionKeywords":bool=false,"logo":str?,"channel":str?,"endText":str="Full video on YouTube","link":str?,"exclude":[str]?,"include":[str]?,"bpm":80..180=124,"mood":str="energetic","seed":u64=7,"redact":"faces,plates"|"faces"|"plates"|false?,"fallback":"blur"|"letterbox"|"center"="blur","export":str?,"preset":str?,"qa":bool?,"look":"tech"|"vhs"|"clean"?,"beatPulse":bool=false,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Trailer, p),
         ),
         job(
@@ -663,6 +663,22 @@ fn caption_style_p(cmd: &str, p: &Value) -> Result<Option<String>> {
     }
 }
 
+/// The opt-in creator tools of the trailer and the shorts: `look` (tech, vhs, clean) and
+/// `beatPulse` (zoom pulses on the beats). Absent: off.
+fn creator_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) -> Result<()> {
+    if let Some(l) = text_p(cmd, p, "look", 16)? {
+        let l = l.to_ascii_lowercase();
+        if !matches!(l.as_str(), "tech" | "vhs" | "clean") {
+            return Err(bad(cmd, "`look` is \"tech\", \"vhs\" or \"clean\""));
+        }
+        out.insert("look".into(), json!(l));
+    }
+    if let Some(v) = p.get("beatPulse").filter(|v| !v.is_null()) {
+        out.insert("beatPulse".into(), json!(v.as_bool().ok_or_else(|| bad(cmd, "`beatPulse` must be true or false"))?));
+    }
+    Ok(())
+}
+
 /// The checked parameters of `autocut.shorts` (see the module docs).
 fn shorts_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) -> Result<()> {
     let id = |k: &str| -> Result<Option<u64>> {
@@ -729,6 +745,7 @@ fn shorts_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>)
     if let Some(t) = text_p(cmd, p, "topic", MAX_TEXT_CHARS)? {
         out.insert("topic".into(), json!(t));
     }
+    creator_params(cmd, p, out)?;
     if let Some(f) = p.get("analysisFps").filter(|v| !v.is_null()) {
         let f = f
             .as_f64()
@@ -877,6 +894,7 @@ fn trailer_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>
         Some(f) => filmcraft_render::reframe::Fallback::from_name(&f).ok_or_else(|| bad(cmd, "`fallback` is \"blur\", \"letterbox\" or \"center\""))?,
     };
     out.insert("fallback".into(), json!(fallback.name()));
+    creator_params(cmd, p, out)?;
     for key in ["hookVoice", "qa", "captions", "captionKeywords"] {
         if let Some(v) = p.get(key).filter(|v| !v.is_null()) {
             out.insert(key.into(), json!(v.as_bool().ok_or_else(|| bad(cmd, format!("`{key}` must be true or false")))?));

@@ -4152,3 +4152,86 @@
 	Understand Speech…	音声を解析…
 	Scenes	シーン
 	Analyze Scenes	シーンを分析
+
+# Creator effects (Video Effects ▸ Creator)
+	VHS	VHS
+	Film Grain	フィルムグレイン
+	Directional Motion Blur	方向モーションブラー
+	Tech HUD	テック HUD
+	Chromatic Aberration	色収差
+	Duotone	デュオトーン
+	Halftone	ハーフトーン
+	Chroma Bleed	色にじみ
+	Tracking Lines	トラッキングノイズ
+	Tape Wobble	テープの揺れ
+	Color Grain	カラーグレイン
+	Midtone Response	中間調の反応
+	Animate	アニメーション
+	Scanline Jitter	走査線のジッター
+	Rate	レート
+	Rhythm	リズム
+	Constant	一定
+	Bursts	バースト
+	Shutter	シャッター
+	Centered	中央
+	Trailing	後方
+	Trail Falloff	残像の減衰
+	HUD Color	HUD のカラー
+	Scanlines	走査線
+	Line Spacing	線の間隔
+	Grid Size	グリッドサイズ
+	Corner Brackets	コーナーブラケット
+	Auto Sweep (secs)	自動スイープ（秒）
+	Dot Size	ドットサイズ
+	Ink Color	インクのカラー
+	Paper Color	用紙のカラー
+
+# Speed ramps (Clip ▸ Speed Ramp…)
+	Speed Ramp…	速度ランプ…
+	Montage	モンタージュ
+	Hero	ヒーロー
+	Bullet	バレット
+	Jump Cut	ジャンプカット
+	Flash In	フラッシュイン
+	Flash Out	フラッシュアウト
+	Smooth In	スムーズイン
+	Smooth Out	スムーズアウト
+	None (remove the ramp)	なし（ランプを削除）
+	Intensity:	強度：
+	Optical Flow for the Slow Parts	スロー部分にオプティカルフロー
+
+# Stabilization levels (Clip ▸ Stabilize…, Warp Stabilizer)
+	Stabilize…	スタビライズ…
+	Stabilize	スタビライズ
+	Stabilization Level	スタビライズのレベル
+	Recommended	推奨
+	Minimum Crop	最小クロップ
+	Most Stable	最も安定
+	Smooth motion, a moderate crop	滑らかな動き、適度なクロップ
+	Keeps the most of the frame, smooths less	フレームを最も多く残し、スムーズさは控えめ
+	The steadiest picture, crops more	最も安定した映像、クロップは多め
+	Warp Stabilizer is added to the selected video clips (or updated) at this level.	選択したビデオクリップにこのレベルでワープスタビライザーを追加（または更新）します。
+
+# Creator transitions (Video Transitions ▸ Creator)
+	Pull In	プルイン
+	Pull Out	プルアウト
+	Black Fade	ブラックフェード
+	White Flash	ホワイトフラッシュ
+	Flash Zoom	フラッシュズーム
+	Zoom Shake	ズームシェイク
+	Swipe Left	左へスワイプ
+	Swipe Right	右へスワイプ
+	Swipe Up	上へスワイプ
+	Swipe Down	下へスワイプ
+	Glitch Cut	グリッチカット
+	Light Leak Fade	光漏れフェード
+	Burn	バーン
+	Pixelate	ピクセル化
+	Ripple	波紋
+	Cube	キューブ
+	3D Flip	3D フリップ
+
+# Transition and beat commands
+	Transitions on Strong Beats	強拍にトランジション
+	Apply Transition to All Cuts	すべてのカットにトランジションを適用
+	Beat Pulse	ビートパルス

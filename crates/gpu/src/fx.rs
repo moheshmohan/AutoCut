@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use filmcraft_render::creator_fx::CreatorOp;
 use filmcraft_render::gpufx::FxOp;
 use filmcraft_render::plan::LayerFx;
 
@@ -56,6 +57,18 @@ const OP_VIDEO_LIMITER: u32 = 30;
 const OP_LUMETRI: u32 = 31;
 const OP_MASK_MIX: u32 = 32;
 const OP_MASK_SCALE: u32 = 33;
+// the Creator effects (`filmcraft_render::creator_fx`)
+const OP_CR_FILM_GRAIN: u32 = 40;
+const OP_CR_VHS: u32 = 41;
+const OP_CR_KALEIDOSCOPE: u32 = 42;
+const OP_CR_GLITCH: u32 = 43;
+const OP_CR_ZOOM_BLUR: u32 = 44;
+const OP_CR_MOTION_BLUR: u32 = 45;
+const OP_CR_TECH_HUD: u32 = 46;
+const OP_CR_CHROMATIC: u32 = 47;
+const OP_CR_LIGHT_SWEEP: u32 = 48;
+const OP_CR_DUOTONE: u32 = 49;
+const OP_CR_HALFTONE: u32 = 50;
 /// 32-bit words of one mask's header in the mask buffer (`fx.wgsl` `mask_value`).
 const MASK_HEADER: usize = 12;
 
@@ -214,6 +227,11 @@ fn steps(op: &FxOp) -> Vec<Step> {
             }
         }
         FxOp::OpacityMask { masks } => out.push(mask_step(OP_MASK_SCALE, masks)),
+        FxOp::Creator(op) => {
+            if !op.is_identity() {
+                out.push(creator_step(op));
+            }
+        }
         FxOp::Crop { x0, x1, y0, y1, feather } => out.push(step(OP_CROP, [0; 4], &[*x0, *x1, *y0, *y1, *feather])),
         FxOp::Resample(r) => {
             let op = if (r.opacity - 1.0).abs() < 1e-6 { 1.0 } else { r.opacity };
@@ -308,6 +326,35 @@ fn steps(op: &FxOp) -> Vec<Step> {
         }
     }
     out
+}
+
+/// The pass of a Creator effect (`fx.wgsl` `creator`; parameter layout per op there).
+fn creator_step(op: &CreatorOp) -> Step {
+    match *op {
+        CreatorOp::FilmGrain { amount, size, response, color, seed } => step(OP_CR_FILM_GRAIN, [color as u32, seed, 0, 0], &[amount, size, response]),
+        CreatorOp::Vhs { amount, bleed, tracking, noise, wobble, sat, phase, band_y, band_h, frame, seed } => {
+            step(OP_CR_VHS, [frame, seed, 0, 0], &[amount, bleed, tracking, noise, wobble, sat, phase, band_y, band_h])
+        }
+        CreatorOp::Kaleidoscope { amount, segments, rot, cx, cy, zoom } => step(OP_CR_KALEIDOSCOPE, [0; 4], &[amount, segments, rot, cx, cy, zoom]),
+        CreatorOp::Glitch { amount, block, split, jitter, step: st, seed } => step(OP_CR_GLITCH, [st, seed, 0, 0], &[amount, block, split, jitter]),
+        CreatorOp::ZoomBlur { amount, cx, cy, spin, steps } => step(OP_CR_ZOOM_BLUR, [steps, spin as u32, 0, 0], &[amount, cx, cy]),
+        CreatorOp::MotionBlur { dx, dy, steps, trail, falloff } => step(OP_CR_MOTION_BLUR, [steps, trail as u32, 0, 0], &[dx, dy, falloff]),
+        CreatorOp::TechHud { amount, color, scan, spacing, grid, grid_size, brackets, vignette, tint, flicker, line } => step(
+            OP_CR_TECH_HUD,
+            [0; 4],
+            &[amount, scan, spacing, grid, grid_size, brackets, vignette, tint, flicker, line, 0.0, 0.0, color[0], color[1], color[2]],
+        ),
+        CreatorOp::Chromatic { radial, k, dx, dy, cx, cy } => step(OP_CR_CHROMATIC, [radial as u32, 0, 0, 0], &[k, dx, dy, cx, cy]),
+        CreatorOp::LightSweep { intensity, color, nx, ny, s0, half, inner } => {
+            step(OP_CR_LIGHT_SWEEP, [0; 4], &[intensity, nx, ny, s0, half, inner, 0.0, 0.0, color[0], color[1], color[2]])
+        }
+        CreatorOp::Duotone { amount, shadows: sh, highlights: hi, contrast } => {
+            step(OP_CR_DUOTONE, [0; 4], &[amount, contrast, 0.0, 0.0, sh[0], sh[1], sh[2], 0.0, hi[0], hi[1], hi[2]])
+        }
+        CreatorOp::Halftone { amount, size, cs, sn, color, ink, paper } => {
+            step(OP_CR_HALFTONE, [color as u32, 0, 0, 0], &[amount, size, cs, sn, ink[0], ink[1], ink[2], 0.0, paper[0], paper[1], paper[2]])
+        }
+    }
 }
 
 impl FxStage {

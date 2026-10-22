@@ -1,6 +1,6 @@
 # GPU use
 
-> **Last reviewed:** 2026-10-21 · **Last updated:** 2026-10-21 · **Change:** major (new file: what runs where, the fallbacks and how to force the CPU; GPU export on by default; masked effects, dissolves of clips that do not fill the frame, the detectors, Whisper, Kokoro and OpenVoice on the GPU) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (the 11 Creator effects run on the GPU) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 The owner's decision (2026-10-21): **the GPU wherever it is supported.** GPU output does not have
 to be bit-identical to the CPU's, only within the golden / parity tolerances (8-bit p99 ≤ 6, mean
@@ -20,7 +20,7 @@ about compositing, effects and the on-device models.
 | Export rendering | CPU (GPU opt-in) → **GPU by default** (`GpuRendering::Auto`: export settings, every built-in preset, settings saved without the field, `file.exportMedia`, the CLI, AutoCut's showcase and shorts) | per frame: no adapter, a device error or loss (the CPU for the rest of the session), a renderer panic, a frame the plan hands back as one CPU image, and, up to 1080p, a frame of one picture without effects or masks with only titles over it and no transition (`plan::cpu_is_quicker`: the CPU draws it at least as quickly as a GPU composite read back; such batches keep every export thread; at 4K the GPU is quicker and keeps them); per layer as below | `gpuRendering: "off"`, `--gpu-rendering off`, Export ▸ "Composite on the GPU when available" |
 | Render previews (render in to out) | CPU → **GPU** (an export, `GpuRendering` default) | as export | as export (`FILMCRAFT_CPU_COMPOSITE` does not apply) |
 | The CLI's GPU export | none: `cargo build -p filmcraft-cli` had no wgpu backend, `--gpu-rendering auto` rendered on the CPU → **Metal** (macOS), DX12 / Vulkan (Windows), Vulkan / GL (Linux) | as export | as export |
-| Standard effects on media clips | GPU: 34 effect ids (`render::gpufx::GPU_EFFECTS`: colour, levels, Lumetri basic / creative / vignette, Gaussian / directional / camera blur, sharpen, unsharp, crop, transform, flips, mirror, offset, vignette, video limiter, ASC CDL, channel mix…) | an effect outside the list, a non-finite parameter or a Transform that minifies → the clip's layer is rendered on the CPU and drawn by the GPU | — |
+| Standard effects on media clips | GPU: 45 effect ids (`render::gpufx::GPU_EFFECTS`: colour, levels, Lumetri basic / creative / vignette, Gaussian / directional / camera blur, sharpen, unsharp, crop, transform, flips, mirror, offset, vignette, video limiter, ASC CDL, channel mix…, and the 11 Creator effects: VHS, Film Grain, Kaleidoscope, Glitch, Zoom Blur, Directional Motion Blur, Tech HUD, Chromatic Aberration, Light Sweep, Duotone, Halftone, `render::creator_fx`) | an effect outside the list, a non-finite parameter or a Transform that minifies → the clip's layer is rendered on the CPU and drawn by the GPU | — |
 | Masked effects (the redaction blur), opacity masks | CPU layer → **GPU** (`FxOp::Masked`, `FxOp::OpacityMask`) | more than 65 536 mask vertices or non-finite mask values → CPU layer | — |
 | Blurs behind portraits (blur fill), redaction blur | GPU (box passes, running sums for large radii) | — | — |
 | Opacity and motion keyframes | GPU (evaluated on the CPU at the frame's time, drawn by the GPU) | — | — |
@@ -131,4 +131,5 @@ Before the plain frames went back to the CPU, the 1080p range took 7.0–8.3 s.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | The Creator effects (VHS, Film Grain, Kaleidoscope, Glitch, Zoom Blur, Directional Motion Blur, Tech HUD, Chromatic Aberration, Light Sweep, Duotone, Halftone) on the GPU with CPU references: 45 GPU effect ids |
 | 2026-10-21 | major | Created: inventory of every compute-heavy path and its device, fallbacks, switches; GPU export on by default; masked effects, dissolves of clips that do not fill the frame, the detectors, Whisper transcription, Kokoro and OpenVoice moved to the GPU |
