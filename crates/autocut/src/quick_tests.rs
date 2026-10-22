@@ -140,6 +140,26 @@ fn shots_read_from_the_scene_index_and_without_one() {
     assert_eq!(got[0].keyframe, 1.0, "a keyframe outside the shot is its middle");
 }
 
+/// What a recogniser writes for a crowd or music (the expo clips of the first live run: "Thank
+/// you.", "mga mga mga mga mga", a lone "The") is not someone talking to the camera.
+#[test]
+fn hallucinated_speech_is_not_talking() {
+    let seg = |a: f64, b: f64, text: &str| SpeechSegment { start: t(a), end: t(b), text: text.into(), fluency: 0.6, confidence: 0.6, ..Default::default() };
+    let a = SpeechAnalysis {
+        duration: t(24.0),
+        speech: vec![Span::new(t(0.3), t(20.0))],
+        segments: vec![seg(0.3, 6.0, "Thank you."), seg(6.5, 12.0, "mga mga mga mga mga"), seg(12.5, 20.0, "The")],
+        shot: ShotHint::TalkingHead,
+        ..Default::default()
+    };
+    let v = json!({"items": [filmcraft_engine::speech_understand::analysis_json(filmcraft_engine::project::ItemId(9), &Default::default(), &a)]});
+    let sp = parse_speech(&v).remove(0);
+    assert!(sp.kept.is_empty() && !sp.talking(), "{sp:?}");
+    assert!(believable("Charge it before you leave the house.", 0.9));
+    assert!(!believable("Charge it before you leave the house.", 0.1), "not confident");
+    assert!(!believable("पार पार पार पार", 0.9));
+}
+
 #[test]
 fn speech_keeps_the_kept_takes() {
     let sp = talking_speech(4);
@@ -282,7 +302,7 @@ fn the_model_writes_and_bad_answers_fall_back() {
     let model = FnModel::new("writer", |system, user, _| {
         assert!(system.contains("on-screen text") && user.contains("humanoid robot"), "{user}");
         Ok(json!({"texts": [
-            {"slot": "hook_line", "n": 1, "text": "\"meet ameca\""},
+            {"slot": "HOOK_LINE", "n": "1", "text": "\"meet ameca\""},
             {"slot": "title", "n": 1, "text": "THE ROBOT DOG THAT WALKS ON ITS OWN ALL DAY"},
             {"slot": "nope", "n": 1, "text": "x"},
             {"slot": "outro", "n": 0, "text": "x"},

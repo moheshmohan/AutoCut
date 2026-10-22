@@ -302,10 +302,38 @@ impl ItemSpeech {
     pub fn kept_seconds(&self) -> f64 {
         self.kept.iter().map(|s| (s.end - s.start).max(0.0)).sum()
     }
-    /// Someone talking to the camera, with something to say.
-    pub fn talking(&self) -> bool {
-        (self.shot == "talkingHead" || (self.shot == "voice" && self.share > 0.5)) && self.kept_seconds() >= 3.0
+    /// Words of the kept speech.
+    pub fn words(&self) -> usize {
+        self.kept.iter().map(|s| s.text.split_whitespace().count()).sum()
     }
+    /// Someone talking to the camera (a face on screen) with something to say: at least
+    /// [`TALK_SECONDS`] and [`TALK_WORDS`] of believable speech.
+    pub fn talking(&self) -> bool {
+        self.shot == "talkingHead" && self.kept_seconds() >= TALK_SECONDS && self.words() >= TALK_WORDS
+    }
+}
+
+/// The least believable speech that makes a clip someone talking, seconds and words.
+pub const TALK_SECONDS: f64 = 6.0;
+pub const TALK_WORDS: usize = 12;
+
+/// What a recogniser writes for noise, music or a crowd: never speech to build on.
+const HALLUCINATIONS: &[&str] =
+    &["thank you", "thanks for watching", "thank you for watching", "thank you so much", "you", "bye", "the", "so", "okay", "please subscribe", "subscribe"];
+
+/// Whether a recognised segment is believable speech: confident enough, not one of the phrases a
+/// recogniser writes for noise, not one word over and over ("mga mga mga").
+pub fn believable(text: &str, confidence: f64) -> bool {
+    let words: Vec<String> =
+        text.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).filter(|w| !w.is_empty()).take(2000).collect();
+    if words.is_empty() || confidence < 0.35 {
+        return false;
+    }
+    if HALLUCINATIONS.contains(&words.join(" ").as_str()) {
+        return false;
+    }
+    let distinct: BTreeSet<&String> = words.iter().collect();
+    !(words.len() >= 3 && (distinct.len() as f64) < 0.5 * words.len() as f64)
 }
 
 /// The analyses of a `media.inspectSpeech` answer.
@@ -322,6 +350,10 @@ pub fn parse_speech(v: &Value) -> Vec<ItemSpeech> {
             }
             let (Some(x), Some(y)) = (finite(&s["start"]), finite(&s["end"])) else { continue };
             if x < 0.0 || y <= x {
+                continue;
+            }
+            let text = s["text"].as_str().unwrap_or_default();
+            if !believable(text, finite(&s["confidence"]).unwrap_or(1.0)) {
                 continue;
             }
             kept.push(Said {
@@ -773,6 +805,12 @@ pub struct Pick {
     /// A stretch of kept speech (a talking slot).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub said: Option<String>,
+    /// The subject's box in the picture (`[x, y, w, h]`, fractions) as the description saw it at
+    /// `keyframe` (media seconds): kept sharp by the privacy pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<[f64; 4]>,
+    #[serde(skip)]
+    pub keyframe: f64,
     #[serde(skip)]
     pub still: bool,
     #[serde(skip)]
@@ -951,6 +989,19 @@ fn speech_moments<'a>(shots: &'a [ShotInfo], speech: &[ItemSpeech], need: f64) -
     out
 }
 
+/// The order picks choose in: those a single shot stands for (a hook, a reveal, a place, an ending,
+/// someone talking) before the many cutaways.
+fn rank(p: &PickSpec) -> u8 {
+    let key = matches!(p.hints.purpose.as_deref(), Some("hook" | "reveal" | "establishing" | "outro" | "talking-head")) || p.hints.wants_speech();
+    if key { 0 } else { 1 }
+}
+
+/// The first subject's box of a shot's description, when it has one.
+fn subject_box(s: &ShotInfo) -> Option<[f64; 4]> {
+    let b = s.description()?.subjects.iter().find_map(|x| x.bbox)?.map(f64::from);
+    (b.iter().all(|v| v.is_finite()) && b[2] > 0.0 && b[3] > 0.0 && b[2] <= 1.5 && b[3] <= 1.5).then(|| b.map(|v| (v.clamp(-1.0, 2.0) * 1e4).round() / 1e4))
+}
+
 /// Whether moment `[a, b]` of item `item` clashes with a pick already made.
 fn clashes(picked: &[Pick], item: u64, still: bool, a: f64, b: f64) -> bool {
     picked.iter().any(|p| p.item == item && (still || (b.min(p.out_seconds) - a.max(p.in_seconds)) > OVERLAP))
@@ -991,16 +1042,23 @@ pub fn assign(
     let mut done = vec![false; specs.len()];
     while picked.len() < specs.len() {
         let mut best: Option<(usize, usize, f64)> = None;
+        // the picks one shot stands for (a hook, a reveal, someone talking…) choose first
+        let first = specs.iter().enumerate().filter(|(i, _)| !done.get(*i).copied().unwrap_or(true)).map(|(_, s)| rank(s)).min().unwrap_or(1);
         for (pi, list) in cands.iter().enumerate() {
-            if done.get(pi).copied().unwrap_or(true) {
+            if done.get(pi).copied().unwrap_or(true) || specs.get(pi).is_none_or(|s| rank(s) != first) {
                 continue;
             }
             for (ci, c) in list.iter().enumerate() {
                 if clashes(&picked, c.shot.item, c.shot.still, c.from, c.to) {
                     continue;
                 }
-                // a few picks of one clip at most, and not the same picture twice
-                let same_item = picked.iter().filter(|p| p.item == c.shot.item).count() as f64;
+                // a few picks of one clip at most (none after the hook or the reveal showed it), and
+                // not the same picture twice
+                let same_item: f64 = picked
+                    .iter()
+                    .filter(|p| p.item == c.shot.item)
+                    .map(|p| if specs.iter().find(|s| s.slot == p.slot).is_some_and(|s| rank(s) == 0) { 2.5 } else { 1.0 })
+                    .sum();
                 let caption = c.shot.caption();
                 let same_caption = picked.iter().any(|p| !caption.is_empty() && p.caption == caption && p.item != c.shot.item);
                 let v = c.score - 0.12 * same_item - if same_caption { 0.1 } else { 0.0 };
@@ -1030,6 +1088,8 @@ pub fn assign(
             why: c.why.clone(),
             caption: s.caption(),
             said: c.said.clone(),
+            subject: subject_box(s),
+            keyframe: s.keyframe,
             still: s.still,
             order: spec.order,
         });
@@ -1182,7 +1242,7 @@ pub fn fallback_text(t: &TextSpec, picks: &[Pick], shots: &[ShotInfo], topic: Op
     Some(tidy_text(&line, t.max_chars, t.capitals))
 }
 
-const WRITE_SYSTEM: &str = "You write the on-screen text of a short vertical video (YouTube Shorts, Instagram Reels, TikTok). Each text is short, concrete and natural, like a creator would write it: no hashtags, no emoji, no quotation marks. Use only what the shots, the speech and the topic say: never invent names, numbers, prices or claims. Keep every text within its character limit. Answer with JSON only.";
+const WRITE_SYSTEM: &str = "You write the on-screen text of a short vertical video (YouTube Shorts, Instagram Reels, TikTok). Each text is short, concrete and natural, like a creator would write it: no hashtags, no emoji, no quotation marks. Use only what the shots, the speech and the topic say: never invent names, numbers, prices or claims. Name things by what the shots show (their subjects, the text read on them) in the topic's words, not by objects in the background. Keep every text within its character limit. Answer with JSON only.";
 
 /// What the writer is told about the video.
 fn context(picks: &[Pick], shots: &[ShotInfo], speech: &[ItemSpeech], topic: Option<&str>, language: Option<&str>) -> String {
@@ -1197,6 +1257,10 @@ fn context(picks: &[Pick], shots: &[ShotInfo], speech: &[ItemSpeech], topic: Opt
         let d = s.and_then(ShotInfo::description);
         let mut line = format!("{}. [{}] {}", k + 1, p.slot, chars(&p.caption, 200));
         if let Some(d) = d {
+            let subjects: Vec<&str> = d.subjects.iter().map(|x| x.name.trim()).filter(|n| !n.is_empty()).take(4).collect();
+            if !subjects.is_empty() {
+                line.push_str(&format!("; shows: {}", chars(&subjects.join(", "), 120)));
+            }
             if !d.setting.is_empty() {
                 line.push_str(&format!(" (at {})", chars(&d.setting, 80)));
             }
@@ -1247,9 +1311,14 @@ pub async fn write_texts(
         match m.complete_json(WRITE_SYSTEM, &user, &[]).await {
             Ok(v) => {
                 for x in v["texts"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(256) {
-                    let (Some(slot), Some(n), Some(text)) = (x["slot"].as_str(), x["n"].as_u64(), x["text"].as_str()) else { continue };
+                    // models change the slot's case and write numbers as text: both are read
+                    let (Some(slot), Some(text)) = (x["slot"].as_str(), x["text"].as_str()) else { continue };
+                    let n = x["n"].as_u64().or_else(|| x["n"].as_str().and_then(|n| n.trim().parse().ok())).unwrap_or(1);
                     let Some(i) = usize::try_from(n).ok().and_then(|n| n.checked_sub(1)) else { continue };
-                    let Some(t) = specs.iter().find(|t| t.slot == slot && t.index == i) else { continue };
+                    let same = |a: &str| {
+                        a.trim().eq_ignore_ascii_case(slot.trim()) || a.replace(['_', '-'], "").eq_ignore_ascii_case(&slot.replace(['_', '-', ' '], ""))
+                    };
+                    let Some(t) = specs.iter().find(|t| same(&t.slot) && t.index == i) else { continue };
                     let tidy = tidy_text(text, t.max_chars, t.capitals);
                     if !tidy.is_empty() {
                         written.insert((t.slot.clone(), i), tidy);
@@ -1475,7 +1544,9 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
     // ---- 2. the index: fast for all, full for the best few
     lines(&format!("[2/8] indexing the scenes of {} item(s)", items.len()));
     let status = run(ex, "scenes.status", json!({})).await.ok();
-    let missing = |set: &str| status.as_ref().and_then(|s| s[set]["missingBytes"].as_f64()).unwrap_or(f64::MAX);
+    // the models can run here (this build has them, or the host's): otherwise they count as missing
+    let runnable = status.as_ref().is_some_and(|s| s["available"] == true);
+    let missing = |set: &str| if runnable { status.as_ref().and_then(|s| s[set]["missingBytes"].as_f64()).unwrap_or(f64::MAX) } else { f64::MAX };
     if missing("fast") > 0.0 {
         report.fallbacks.push(if missing("fast") < f64::MAX {
             format!(
@@ -1508,6 +1579,9 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
         |indexes: &HashMap<u64, Value>| -> Vec<ShotInfo> { media.iter().flat_map(|m| parse_shots(m, indexes.get(&m.item))).take(MAX_SHOTS).collect() };
     let mut shots = shots_now(&indexes);
     let described = shots.iter().any(|s| s.description().is_some());
+    if !described && missing("fast") <= 0.0 {
+        report.fallbacks.push("scene index: no shot was described: shots ranked by the picture's quality alone".into());
+    }
     if opts.full_detail > 0 && described && missing("full") <= 0.0 {
         // the items of the most promising shots, at most `full_detail` shots in all
         let mut ranked: Vec<(f64, u64)> = shots
@@ -1686,6 +1760,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
     // the music: a file, or a bed at the tempo that brings the template to the length asked
     let music_slot = t.slots.iter().find(|s| s.kind == "music").map(|s| s.id.clone());
     let mut generate_music = true;
+    let mut music_beats: Option<Value> = None;
     if let (Some(ms), Some(file)) = (&music_slot, &opts.music) {
         slots.insert(ms.clone(), json!(filmcraft_engine::export_tools::expand_home(file)));
     } else if let (Some(ms), Some(bpm)) = (&music_slot, t.bpm) {
@@ -1697,6 +1772,8 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
                 Ok(r) => match r["item"].as_u64() {
                     Some(item) => {
                         slots.insert(ms.clone(), json!(item));
+                        // its exact beats: measuring a slow bed may hear twice the tempo
+                        music_beats = r["beats"].as_array().filter(|b| b.len() >= 2).map(|b| Value::Array(b.clone()));
                         notes.push(format!("music: generated at {want} bpm (the template's {bpm}) for about {length:.0} s"));
                     }
                     None => notes.push("music: the generated bed made no item; the template's own is used".into()),
@@ -1708,11 +1785,13 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
         generate_music = false;
     }
     let name = opts.name.clone().unwrap_or_else(|| format!("{} — Quick Short", opts.topic.as_deref().map(title_case).unwrap_or_else(|| t.name.clone())));
-    let applied = run(
-        ex,
-        "template.apply",
-        json!({"template": chosen_id, "variant": opts.aspect, "slots": Value::Object(slots), "name": name, "generateMusic": generate_music}),
-    )
+    let applied = run(ex, "template.apply", {
+        let mut ap = json!({"template": chosen_id, "variant": opts.aspect, "slots": Value::Object(slots), "name": name, "generateMusic": generate_music});
+        if let Some(b) = music_beats {
+            ap["musicBeats"] = b;
+        }
+        ap
+    })
     .await?;
     let seq = applied["sequence"].as_u64().ok_or_else(|| AutoCutError::Executor("template.apply made no sequence".into()))?;
     report.sequence = Some(seq);
@@ -1838,6 +1917,18 @@ async fn finish(
         let talking = |s: &SlotInfo| s.ai.as_ref().is_some_and(Hints::wants_speech);
         let others = clips_of(&|s: &SlotInfo| s.picture() && !talking(s), Some(true));
         let speakers = clips_of(&|s: &SlotInfo| s.picture() && talking(s), Some(true));
+        // each pick's subject (a robot's face, a screen) stays sharp: its box, where it was seen
+        let mut exclude: Vec<Value> = Vec::new();
+        for x in placed.iter().filter(|x| !x["media"].is_null()) {
+            let (Some(slot), Some(m)) = (x["slot"].as_str(), x["media"].as_u64()) else { continue };
+            let Some(pick) = picks.iter().find(|p| p.slot == slot && p.media as u64 == m) else { continue };
+            let Some([bx, by, bw, bh]) = pick.subject else { continue };
+            for clip in x["clips"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(Value::as_u64).take(16) {
+                if exclude.len() < 1000 {
+                    exclude.push(json!({"x": bx, "y": by, "w": bw, "h": bh, "clip": clip, "seconds": pick.keyframe.max(0.0)}));
+                }
+            }
+        }
         let mut runs: Vec<(Vec<u64>, Value)> = Vec::new();
         if !others.is_empty() {
             runs.push((others, r.kinds_json()));
@@ -1849,7 +1940,11 @@ async fn finish(
         let mut hidden = json!({"faces": 0, "plates": 0, "clips": 0, "verify": null});
         for (clips, kinds) in runs {
             lines(&format!("privacy: looking for {} in {} clip(s)", kinds, clips.len()));
-            match run(ex, "clip.autoRedact", json!({"clips": clips, "kinds": kinds, "verify": r.verify, "wait": true})).await {
+            let mut rp = json!({"clips": clips, "kinds": kinds, "verify": r.verify, "wait": true});
+            if !exclude.is_empty() {
+                rp["exclude"] = json!(exclude);
+            }
+            match run(ex, "clip.autoRedact", rp).await {
                 Ok(v) => {
                     let o = &v["redact"];
                     let list = o["clips"].as_array().map(Vec::as_slice).unwrap_or_default();
@@ -1874,6 +1969,10 @@ async fn finish(
             }
         }
         report.privacy = Some(hidden);
+    }
+    // the mix at the social loudness (−14 LUFS), its peaks under −1 dBTP
+    if let Err(e) = run(ex, "audio.normalizeLoudness", json!({"target": "social", "truePeak": crate::look::TRUE_PEAK})).await {
+        notes.push(format!("loudness: {e}"));
     }
     // what still reaches into the platform's interface is said, not hidden
     match run(ex, "sequence.checkSafeZones", json!({"platform": opts.platform.name(), "sequence": seq})).await {
@@ -1924,9 +2023,15 @@ async fn finish(
     if opts.qa.unwrap_or(true) {
         lines("QA");
         run(ex, "sequence.open", json!({"item": seq})).await.ok();
+        // the template's sound: someone talking on A1 and the music on A2, else the music on A1
+        let talks = t.slots.iter().any(|s| s.picture() && s.ai.as_ref().is_some_and(Hints::wants_speech));
+        let (voice, music) = if talks { ("A1", "A2") } else { ("", "A1") };
         let q = crate::qa::Options {
             subject: opts.topic.clone().unwrap_or_else(|| "subject".into()),
             picture_track: "V1".into(),
+            sound_track: String::new(),
+            voice_track: voice.into(),
+            music_track: music.into(),
             faces: opts.redact.as_ref().is_some_and(|r| r.faces) && !picks.iter().any(|p| p.said.is_some()),
             platform: Some(opts.platform.name().into()),
             ..crate::qa::Options::default()

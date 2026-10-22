@@ -313,6 +313,27 @@ fn hostile_parameters_and_packages_are_refused() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A bed the caller generated brings its exact beats (`musicBeats`): the cuts follow them, so a
+/// slower bed makes a longer show; hostile beats are refused.
+#[test]
+fn given_music_beats_retime_the_cuts() {
+    let dir = tmp_dir("vt-beats");
+    let mut s = session(&dir);
+    let bed = s.execute("audio.generate", json!({"kind": "music", "duration": 40.0, "bpm": 90.0, "mood": "energetic", "seed": 3, "place": false})).unwrap();
+    let item = bed["item"].as_u64().unwrap();
+    let beats = bed["beats"].clone();
+    assert!(beats.as_array().is_some_and(|b| b.len() > 20));
+    let r = s.execute("template.apply", json!({"template": "builtin:tech-reveal", "slots": {"music": item}, "musicBeats": beats})).unwrap();
+    assert_eq!(r["retimed"], true, "{r}");
+    // 120 bpm → 90 bpm, each cut on its beat number: a third longer
+    let secs = r["seconds"].as_f64().unwrap();
+    assert!((secs - 17.0 * 120.0 / 90.0).abs() < 0.6, "{secs}");
+    for bad in [json!([1, 1]), json!([5, 2]), json!("x"), json!([-3, 4]), json!((0..30_000).collect::<Vec<i64>>())] {
+        assert!(s.execute("template.apply", json!({"template": "builtin:tech-reveal", "slots": {"music": item}, "musicBeats": bad})).is_err(), "{bad}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The Shorts starters list as AI-ready and show their hints; Save as Template keeps the hints
 /// and takes the author's (checked).
 #[test]

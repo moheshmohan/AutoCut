@@ -182,8 +182,9 @@ outside the box.
 
 `beatGrid.beats` are the music's beats as timeline ticks (`media.beats`, or a steady tempo). When the
 template is applied its beat-synced cuts snap to them. When the music slot gets a different track,
-the engine measures that track's beats (the Remix analysis behind `media.beats`, in exact ticks) and
-the cuts are re-quantized: with `"mode": "beats"` each cut keeps its beat number (a slower song makes
+the engine measures that track's beats (the Remix analysis behind `media.beats`, in exact ticks; or
+takes `template.apply`'s `musicBeats` when the caller knows them, a bed it generated) and the cuts
+are re-quantized: with `"mode": "beats"` each cut keeps its beat number (a slower song makes
 a longer video), with `"nearest"` each moves to the nearest beat (the length stays), always within
 the placements' `minDuration` / `maxDuration`. The old → new cuts form a piecewise-linear time map
 that re-times the whole sequence — titles, transitions, markers, captions and the music clip move
