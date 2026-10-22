@@ -295,3 +295,34 @@ fn mp4_variable_rate_and_on_grid_frame_times_stay_put() {
     }
     assert!(failures.is_empty(), "{}", failures[..failures.len().min(8)].join("\n"));
 }
+
+/// #1276: an MP4 whose video edit list starts with an empty edit (a start offset, as
+/// `-output_ts_offset` writes it) starts at its first picture. Its 53 ms delay is not a whole
+/// frame, and every picture showed one frame early against the clip's start: frame `k`'s midpoint
+/// presented frame `k - 1`. The clip also lasted the delay longer than its pictures.
+#[test]
+fn mp4_with_a_leading_empty_edit_starts_at_its_first_picture() {
+    use filmcraft_isobmff::Edit;
+    let (rate, n) = (FrameRate::FPS_25, 50usize);
+    let mut w = Mp4Writer::new(Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+    let mut cfg = TrackConfig::new(SampleEntry::jpeg((BITS * BLOCK) as u16, BLOCK as u16), 12_800);
+    // segment durations in the movie timescale: milliseconds
+    cfg.edits =
+        vec![Edit { segment_duration: 53, media_time: -1, media_rate: 0x10000 }, Edit { segment_duration: n as u64 * 40, media_time: 0, media_rate: 0x10000 }];
+    let t = w.add_track(cfg).unwrap();
+    for k in 0..n {
+        w.write_sample(t, WriteSample { data: &picture(k), duration: 512, composition_offset: 0, is_sync: true }).unwrap();
+    }
+    let src = crate::open_bytes("delayed.mov", w.finish().unwrap().into_inner().into()).unwrap();
+    // (to within a track unit: 53 ms is 678.4 units of 12800 per second, and the shift is whole units)
+    let off = (src.info().duration - rate.tick_of(n as i64)).0.abs();
+    assert!(off <= Tick::from_rational(1, 1, 12_800).0, "the clip lasts its pictures: {:?}", src.info().duration);
+    let half = Tick(rate.tick_of(1).0 / 2);
+    let wrong: Vec<String> = (0..n)
+        .filter_map(|k| {
+            let got = index_of(&src.video_frame(FrameRequest::full(rate.tick_of(k as i64) + half)).unwrap());
+            (got != k).then(|| format!("frame {k}'s midpoint shows frame {got}"))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
