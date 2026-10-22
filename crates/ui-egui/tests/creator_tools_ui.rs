@@ -143,3 +143,25 @@ fn stabilize_dialog_adds_warp_stabilizer_at_a_level() {
     d.exec("edit.undo", json!({}));
     assert!(!d.last_v1().effects.iter().any(|e| e.effect == "warp_stabilizer"));
 }
+
+#[test]
+fn the_effects_panel_finds_the_creator_effects_and_transitions() {
+    let mut d = Driver::new();
+    d.ok("ui.panel.show", json!({"panel": "Effects"}));
+    for (query, id) in
+        [("vhs", "cr_vhs"), ("film grain", "cr_film_grain"), ("halftone", "cr_halftone"), ("pull in", "crt_pull_in"), ("swipe left", "crt_swipe_left")]
+    {
+        d.ok("ui.set", json!({"effectsSearch": query}));
+        d.frames(3);
+        assert!(d.has(&format!("effects.item.{id}")), "{query}: effects.item.{id}");
+    }
+    // a transition found by its keywords
+    d.ok("ui.set", json!({"effectsSearch": "whip"}));
+    d.frames(3);
+    assert!(d.has("effects.item.crt_swipe_up"), "Swipe Up is a whip pan");
+    // applying a Creator effect from the panel's id lands on the selected clip
+    let c = d.last_v1();
+    d.exec("timeline.select", json!({"clips": [c.id.0]}));
+    d.exec("effects.apply", json!({"effect": "cr_glitch"}));
+    assert!(d.last_v1().effects.iter().any(|e| e.effect == "cr_glitch"));
+}
