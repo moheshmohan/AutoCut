@@ -16,7 +16,7 @@ path = "src/main.rs"
 # AutoCut build: speech-to-text (Whisper) and natural narration voices (Kokoro) ship by default,
 # so transcript- and narration-driven automation works out of the box (upstream leaves them off
 # in release builds); model weights still download on demand with consent.
-default = ["whisper", "neural-voices", "neural-music", "privacy-models"]
+default = ["whisper", "neural-voices", "neural-music", "privacy-models", "scene-models"]
 # Speech-to-text (Text panel ▸ Transcribe) with Whisper (Metal on macOS, else the CPU), and model downloads.
 whisper = ["filmcraft-engine/whisper", "filmcraft-engine/speech-download"]
 # Natural Text to Speech voices (Kokoro-82M; Metal on macOS, else the CPU; downloaded on first use).
@@ -26,6 +26,9 @@ neural-music = ["filmcraft-engine/neural-music"]
 # Automatic privacy blur (Clip ▸ Auto Redact Faces and Plates…): the YuNet and LPD-YuNet detectors
 # (the GPU on macOS, else the CPU; 4.4 MB, downloaded on demand with consent).
 privacy-models = ["filmcraft-engine/privacy-models"]
+# The scene index (media.analyzeScenes): TransNetV2 cuts, Qwen3-VL shot descriptions, SigLIP 2
+# search, the LAION aesthetic score (Metal on macOS, else the CPU; downloaded on demand with consent).
+scene-models = ["filmcraft-engine/scene-models"]
 
 [dependencies]
 filmcraft-engine = { workspace = true }

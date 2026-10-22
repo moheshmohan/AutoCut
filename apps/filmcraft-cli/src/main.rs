@@ -36,6 +36,7 @@ mod locations;
 mod ml_script;
 mod probe;
 mod publish;
+mod scenes;
 mod showcase_tools;
 mod trailer;
 mod voice;
@@ -299,6 +300,22 @@ SUBCOMMANDS
                                 (--language, default ml) beside --out as <out>-ml.json:
                                 {\"intro\", \"outro\", \"lines\": {\"<label>\": \"…\"}} read over it; it
                                 fails on any spoken entry without a line
+  scenes analyze [media…] [--items 1,2] [--detail fast|full] [--fresh] [--download] [--sheet DIR]
+                                index clips (media.analyzeScenes, docs/scenes.md): the shots
+                                (TransNetV2, else the luma/histogram detector), each shot's
+                                sharpness, exposure, camera move and shake, a LAION aesthetic
+                                score, a SigLIP 2 embedding and a structured description from
+                                Qwen3-VL (2B; 4B with --detail full) — shot type, subjects with
+                                boxes, actions, setting, mood, text, people, a caption, uses.
+                                Local, on the GPU on macOS; models download with --download
+                                (7.5 GB fast, SHA-256 checked; MIT and Apache-2.0); kept in
+                                <data dir>/scene-cache by file content. --sheet writes
+                                index.html, scenes.json and sheet.jpg there
+  scenes show <item> | search \"<query>\" [--limit 20] | best [--purpose hook|broll|reveal] [--count 5]
+         | sheet DIR | status | download [fast|full|<model>]
+                                an item's shots; shots ranked for words (what they look like,
+                                what their descriptions say, what is said in them); the best
+                                shots for a purpose; the models
   voice refs --voice clone:<name> <media|folder|project.fcproj>… [--out DIR] [--max-minutes 240]
          [--max-clip-seconds 600] [--min-similarity 0.85] [--top 6]
                                 the voice lab (docs/voice-recording.md): stretches of the voice's
@@ -719,6 +736,8 @@ impl Backend {
             s.use_narration_cache(&dir);
             // and the redaction cache: the same footage redacted again is not analysed again
             s.use_redaction_cache(&dir);
+            // and the scene cache: footage indexed once is not decoded or described again
+            s.use_scene_cache(&dir);
         }
         // `photos.upload` (also over MCP): the Google Photos sign-in of `photos auth --upload`
         s.photos = Some(filmcraft_gphotos::engine_uploader());
@@ -2236,6 +2255,8 @@ async fn cli() {
         // natural spoken Malayalam: a script checked, a plan's English translated
         "ml-lint" => ml_script::lint(&a),
         "voice" => voice::run(&a).await,
+        // the scene index: shots, descriptions, quality, search (media.analyzeScenes…)
+        "scenes" => scenes::run(&a).await,
         "ml-script" => ml_script::translate(&a).await,
         "sheet" => showcase_tools::sheet(&a).await,
         "frames" => showcase_tools::frames(&a).await,

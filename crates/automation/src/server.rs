@@ -658,6 +658,54 @@ pub struct ShortsParams {
     pub youtube_tags: Option<Vec<String>>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ScenesAnalyzeParams {
+    /// Media items to index (default: the Project panel's selection, else every video and photo
+    /// item of the project).
+    #[serde(default)]
+    pub items: Option<Vec<u64>>,
+    /// "fast" (the default: Qwen3-VL 2B, one keyframe a shot) or "full" (Qwen3-VL 4B, two or
+    /// three keyframes a shot, a paragraph of detail).
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Describe the shots with the vision-language model (default true).
+    #[serde(default)]
+    pub describe: Option<bool>,
+    /// Analyse again, ignoring the scene cache.
+    #[serde(default)]
+    pub fresh: Option<bool>,
+}
+
+/// `media.analyzeScenes` params for a `scenes_analyze` call (a long job).
+fn scenes_analyze_params(p: ScenesAnalyzeParams) -> Value {
+    let mut params = json!({"wait": true});
+    if let Some(i) = p.items {
+        params["items"] = json!(i);
+    }
+    if let Some(d) = p.detail.filter(|d| !d.trim().is_empty()) {
+        params["detail"] = json!(d);
+    }
+    if let Some(d) = p.describe {
+        params["describe"] = json!(d);
+    }
+    if let Some(f) = p.fresh {
+        params["fresh"] = json!(f);
+    }
+    params
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScenesSearchParams {
+    /// What to find, in words: "a robot waving at the camera", "crowd at a booth", "sunset".
+    pub query: String,
+    /// Most shots returned (default 20).
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Only these media items (default: every indexed item).
+    #[serde(default)]
+    pub items: Option<Vec<u64>>,
+}
+
 /// `autocut.shorts` params for a `shorts_make` call (a long job).
 fn shorts_params(p: ShortsParams) -> Value {
     let mut params = json!({"wait": true});
@@ -1729,6 +1777,38 @@ impl FilmcraftMcp {
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         Ok(self.run_long("autocut.showcaseBuild", showcase_build_params(p), &context).await)
+    }
+
+    #[tool(
+        title = "Scenes: index clips shot by shot",
+        description = "Build the scene index of media items (the `media.analyzeScenes` engine job: progress notifications, cancellable; one undo step): each clip's shots (TransNetV2 cuts, else the luma/histogram detector), per shot its sharpness, exposure, camera move and shake, a LAION aesthetic score, a SigLIP 2 embedding for search, and a structured description from a local Qwen3-VL — shot type, subjects with boxes, actions, setting, mood, energy, legible text, people and prominent faces, a caption, a paragraph with detail \"full\", and uses (hook, b-roll, reveal, talking-head, establishing). Everything runs locally (the GPU on macOS); models missing are skipped — `scenes.status` lists them with sizes and licences and `scenes.downloadModel` fetches them after the user agreed (command_run). Indexes are kept with the project and in a cache by file content, so footage is indexed once. Read them with `media.scenes`, `scenes_search`, `media.bestShots` (command_run).",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn scenes_analyze(
+        &self,
+        Parameters(p): Parameters<ScenesAnalyzeParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(self.run_long("media.analyzeScenes", scenes_analyze_params(p), &context).await)
+    }
+
+    #[tool(
+        title = "Scenes: find shots by what they show",
+        description = "Search the scene index (`scenes_analyze` first) for shots matching words: ranked by how much they look like it (SigLIP 2 image–text similarity), what their descriptions say and what is said in them (transcripts). Returns {hits: [{item, name, shot, start, end, keyframe, caption, camera, quality, score, visual, text, speech}]}, times in media seconds: put a hit on the timeline with its item and range.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn scenes_search(&self, Parameters(p): Parameters<ScenesSearchParams>) -> Result<CallToolResult, McpError> {
+        if p.query.trim().is_empty() {
+            return Ok(fail("`query` is empty: say what to find"));
+        }
+        let mut params = json!({"query": p.query});
+        if let Some(l) = p.limit {
+            params["limit"] = json!(l);
+        }
+        if let Some(i) = p.items {
+            params["items"] = json!(i);
+        }
+        wrap(self.run("media.searchScenes", params).await)
     }
 
     #[tool(

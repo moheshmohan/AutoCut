@@ -167,6 +167,7 @@ const VALUED_IN: &[(&str, &[&str])] = &[
     ("ml-script", &["--plan"]),
     ("ml-lint", &["--plan"]),
     ("trailer", &["--plan", "--robots", "--hook", "--hook-at", "--logo", "--end-text", "--link", "--include", "--seed"]),
+    ("scenes", &["--detail", "--limit", "--purpose", "--count", "--sheet"]),
 ];
 
 fn valued_in(cmd: Option<&String>, opt: &str) -> bool {

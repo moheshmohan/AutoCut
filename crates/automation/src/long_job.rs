@@ -54,7 +54,7 @@ pub const LONG_COMMANDS: &[&str] = &[
 /// what an Instagram job did (the account connected, the Reel published), a fixed copy's file and checks,
 /// what an Auto Reframe made (the new sequence, the clips followed), what an Auto Redact hid
 /// (per clip, and why the rest was not), what a recipe ran.
-pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload", "showcase", "music", "youtube", "instagram", "publish", "reframe", "redact", "recipe"];
+pub const JOB_EXTRAS: &[&str] = &["offlineMedia", "upload", "showcase", "music", "youtube", "instagram", "publish", "reframe", "redact", "recipe", "scenes"];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);
