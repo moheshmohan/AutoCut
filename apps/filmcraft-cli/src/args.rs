@@ -32,6 +32,8 @@ const VALUED: &[&str] = &[
     "--relabel",
     "--compare",
     "--export",
+    "--min-pause",
+    "--keep-pause",
     "--script-out",
     "--script-in",
     "--min-coverage",

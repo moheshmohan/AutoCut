@@ -67,3 +67,7 @@ image = { version = "0.25", default-features = false, features = ["png", "gif"] 
 [[example]]
 name = "clone_eval"
 required-features = ["neural-voices", "whisper"]
+
+[[example]]
+name = "narration_recheck"
+required-features = ["whisper"]

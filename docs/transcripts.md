@@ -33,15 +33,42 @@ the control channel and MCP agents can do the same.
 | `transcript.removeFillers` | Ripple-delete filler words (`fillers`, default um/uh/erm/…; phrases such as "you know" allowed). |
 | `transcript.removePauses` | Ripple-delete pauses longer than `minSeconds`, keeping `keepSeconds` of air on both sides. |
 | `transcript.createCaptions` | Lay the words out as captions on a new caption track (`maxChars`, `lines`, `minSeconds`, `maxSeconds`, `gapFrames`). |
-| `transcript.models` / `transcript.downloadModel` | List the speech models (size, licence, installed) / download one. |
+| `transcript.models` / `transcript.downloadModel` | List the speech models (size, licence, installed; recognisers and the support models `silero-vad` and `ecapa-voxceleb`) / download one. |
+| `transcript.removeRetakes` | Ripple-delete every take that a retake drops (needs `media.understandSpeech`). |
+
+## Understanding raw talking clips
+
+| Command | What it does |
+|---|---|
+| `media.understandSpeech` | A background job (`wait: true` blocks; `jobs.list` reports it under `speech`) that, per media item, finds where speech is (Silero VAD, else the energy detector), the words (Whisper: the Malayalam model for `language: "ml"`, large-v3-turbo for `"en"`, when downloaded, else `model` or the preferences' model), who speaks (ECAPA embeddings, else MFCC), sentences with speaker, text, words, confidence and fluency, pauses, filler words and hesitations, retakes with the take to keep, and a talking-head / voice / b-roll hint (a face seen while someone speaks, when the face detector is downloaded). Stored with the project beside the transcript (`Project::speech`; one undo step). Params: `items`, `language`, `model`, `diarize`, `maxSpeakers`, `faces`, `minPause`, `fillers`. Holds the GPU lock while it hears. |
+| `media.inspectSpeech` | The stored analyses (times in seconds and ticks). |
+| `sequence.roughCut` | A new sequence of the items' kept speech, back to back: pauses longer than `minPause` (0.6 s), fillers and dropped takes cut, `keepPause` (0.12 s) of silence kept at each cut, every cut between words, whole frames, V1 and A1 linked. One undo step. |
+| `sequence.speakerTrack` | Colour each clip of the active sequence by the speaker who talks most in it. |
+| `autocut.roughCut` | The AutoCut job: import `paths` (or take `items`), understand, rough-cut, and `export` when given. `filmcraft-cli rough-cut <files…> [--language ml] [--export out.mp4]` and the MCP tools `speech_understand` / `rough_cut` drive it. |
+
+**Fillers.** English: um, uh, umm, uhm, erm, er, ah, hmm, mm, mhm. Malayalam: the hesitation sounds
+ആ, ആആ, ആഹ്, ഉം, ഹ്മ്മ് and the discourse fillers എന്ന് പറഞ്ഞാൽ ("that is to say") and അതായത്
+("that is"), and their Manglish spellings (aa, ennu paranjaal, athayath…). Sounds that are also
+words (ആ is also "that", "ah", "er", "mm") count only when a pause of at least 0.25 s sets them
+apart. Whisper writes few hesitations, so speech the voice activity detector heard between words
+(0.15–1.2 s) with no word written is reported as a **hesitation**; `removeHesitations` cuts them.
+
+**Retakes.** A sentence that repeats one of the three before it (character similarity of the texts
+without fillers ≥ 0.6, lengths within 60 %), or a short one whose words are how the next starts
+(prefix similarity ≥ 0.75), within 30 s, by the same speaker. A chain of takes is one retake; the
+take kept is the most fluent (the words' mean confidence, less 0.08 a filler, 0.12 a restart, 0.25
+for clipping; an abandoned start never wins; the later take wins a near tie).
 
 ## Speech recognition
 
 Recognition goes through the `Transcriber` trait (`crates/speech`). The built-in recogniser is
-OpenAI's Whisper, run in pure Rust on [candle](https://github.com/huggingface/candle) on the CPU,
-with timestamp decoding, language detection and word times from cross-attention alignment (see the
-`filmcraft_speech::whisper` module docs). Speakers are labelled by clustering per-chunk MFCC
-statistics (`filmcraft_speech::diarize`); no model is involved.
+OpenAI's Whisper, run in pure Rust on [candle](https://github.com/huggingface/candle) (Metal on
+macOS, else the CPU), with timestamp decoding, language detection, word times from cross-attention
+alignment and word confidences from the decoder (see the `filmcraft_speech::whisper` module docs).
+Speakers are told apart by ECAPA-TDNN speaker embeddings over the voice activity segments
+(`filmcraft_speech::speakers`) when the speaker model is downloaded, else by clustering per-chunk
+MFCC statistics (`filmcraft_speech::diarize`, no model). Measurements:
+[`crates/speech/README.md`](../crates/speech/README.md).
 
 Both are **optional features**, off by default and never built for the web:
 
@@ -70,6 +97,10 @@ revision of OpenAI's Hugging Face repositories and checked against its SHA-256:
 | `whisper-base` (default) | multilingual | MIT (OpenAI); HF conversion Apache-2.0 |
 | `whisper-small` | multilingual | MIT (OpenAI); HF conversion Apache-2.0 |
 | `whisper-medium-ml` | Malayalam (fine-tune of Whisper medium by Thennal D K; 3.06 GB) | Apache-2.0; base model MIT (OpenAI) |
+| `whisper-large-v3-turbo` | multilingual, the English option (809 M parameters, 1.6 GB) | MIT (OpenAI) |
+| `indicwhisper-ml` | Malayalam, the narration check's second opinion (AI4Bharat Vistaar; 1.5 GB) | MIT |
+| `silero-vad` | voice activity (Silero VAD v5, 1.2 MB) | MIT |
+| `ecapa-voxceleb` | speaker embeddings (SpeechBrain ECAPA-TDNN, 83 MB) | Apache-2.0 |
 
 `whisper-medium-ml` is what hears Malayalam narration back (the strict check, see
 [malayalam-narration.md](malayalam-narration.md)); it also transcribes Malayalam, English
@@ -89,6 +120,9 @@ Apple-silicon laptop CPU).
 
 ## Limits
 
-- Transcription runs synchronously inside the command (no background job or progress bar yet).
+- `transcript.generate` runs synchronously inside the command; `media.understandSpeech` is the
+  background job (progress, cancellable).
+- Overlapping speech is labelled with one speaker; two very similar voices (two of Kokoro's male
+  voices, cosine up to 0.73) can merge into one.
 - Track items that refer to a subclip are looked up by the subclip's id, so a transcript made for
   the parent media is not shown through subclip clips yet.

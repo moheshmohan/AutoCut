@@ -529,6 +529,12 @@ pub struct Session {
     /// Malayalam speech model, `filmcraft_speech::models::MALAYALAM_MODEL`, when downloaded).
     /// Hosts and tests install one here.
     pub narration_hearer: Option<Arc<dyn filmcraft_tts::heard::Hearer>>,
+    /// The strict check's second opinion on Malayalam narration (None = IndicWhisper,
+    /// `filmcraft_speech::models::INDICWHISPER_ML`, when downloaded). Hosts and tests install one.
+    pub narration_second: Option<Arc<dyn filmcraft_tts::heard::Hearer>>,
+    /// The strict check's voice gate (None = the speaker model against the cloned voice's
+    /// sample, when downloaded). Hosts and tests install one.
+    pub narration_voice: Option<Arc<dyn filmcraft_tts::heard::VoiceMatch>>,
     /// Uploads to Google Photos for `photos.upload` (None = not available: the command is
     /// disabled). Hosts install filmcraft-gphotos' uploader here; tests a fake.
     pub photos: Option<Arc<dyn photos::PhotosUploader>>,
@@ -660,6 +666,8 @@ impl Session {
             stepped: Vec::new(),
             transcriber: None,
             narration_hearer: None,
+            narration_second: None,
+            narration_voice: None,
             photos: None,
             photo_uploads: Default::default(),
             photo_locations: Default::default(),

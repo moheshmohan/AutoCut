@@ -56,6 +56,7 @@ const LONG_COMMANDS: &[&str] = &[
     "sequence.autoReframe",
     "clip.autoReframe",
     "youtube.upload",
+    "media.understandSpeech",
 ];
 /// How often a long command's job is looked at.
 const POLL: Duration = Duration::from_millis(if cfg!(test) { 20 } else { 100 });
@@ -333,7 +334,7 @@ fn long(port: &CommandPort, id: &str, mut params: Value) -> Result<Value, String
                 return Err(if id == "file.exportMedia" { format!("export failed: {e}") } else { format!("{id} failed: {e}") });
             }
             out["result"] = j["result"].clone();
-            for k in ["offlineMedia", "upload", "reframe", "youtube"] {
+            for k in ["offlineMedia", "upload", "reframe", "youtube", "speech"] {
                 if let Some(v) = j.get(k) {
                     out[k] = v.clone();
                 }
@@ -622,6 +623,10 @@ impl ShowcaseHost {
         if task.kind == TaskKind::MalayalamScript {
             return self.malayalam_script(&task, progress).await;
         }
+        if task.kind == TaskKind::RoughCut {
+            let mut lines = |l: &str| note(progress, l);
+            return crate::rough_cut::make(ex, &task.params, &mut lines).await;
+        }
         let models = self.models(task.kind, progress).await?;
         let guard = |m: &Arc<dyn ChatModel>| Cancellable { inner: m.clone(), progress: progress.clone() };
         let script_model = guard(&models.script);
@@ -676,7 +681,7 @@ impl ShowcaseHost {
                 crate::trailer::make(ex, p, task.plan.as_ref(), qa_model.as_ref().map(|m| m as &dyn ChatModel), &mut lines).await
             }
             // (handled above, without the showcase models)
-            TaskKind::Shorts | TaskKind::MalayalamScript => Err(AutoCutError::Other("not a showcase step".into())),
+            TaskKind::Shorts | TaskKind::MalayalamScript | TaskKind::RoughCut => Err(AutoCutError::Other("not a showcase step".into())),
         }
     }
 }

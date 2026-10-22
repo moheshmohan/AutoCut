@@ -393,6 +393,19 @@ SUBCOMMANDS
                                 content, the settings and the models; 512 MB, least recently used
                                 out first): the same footage again, or another window of the same
                                 clips, is not decoded or asked about again; --fresh reads none of it
+  rough-cut <files… | project.fcproj> [--language ml|en|auto] [--export out.mp4] [--keep-retakes]
+         [--keep-fillers] [--keep-pauses] [--cut-hesitations] [--min-pause 0.6] [--keep-pause 0.12]
+         [--name N] [--no-speakers] [--project p.fcproj --save]
+                                raw talking clips → a clean talking edit (autocut.roughCut): each
+                                clip's speech is understood (media.understandSpeech: Silero VAD,
+                                Whisper — the Malayalam model for --language ml, large-v3-turbo
+                                for en, when downloaded —, ECAPA speaker labels, pauses, fillers
+                                and retakes with the most fluent take kept), then the kept speech
+                                goes on a new sequence back to back (sequence.roughCut): pauses
+                                longer than --min-pause, fillers and abandoned takes cut, every cut
+                                between words, --keep-pause of silence kept at each cut. The
+                                analysis is printed as JSON and kept with the project; --export
+                                renders the cut. Given a project, its movies and audio clips are cut.
   shorts <project.fcproj | media file> [--count 3] [--aspect 9:16] [--min-seconds 15]
          [--max-seconds 60] [--motion smooth|responsive] [--fallback blur|letterbox|center]
          [--platform youtube|reels|tiktok|vertical] [--topic T] [--title-card] [--no-captions]
@@ -907,6 +920,96 @@ async fn redact(a: &Args) {
 
 /// `shorts` options as `autocut.shorts` parameters (with `wait: true`); a usage error says what
 /// is wrong.
+/// `rough-cut`: raw talking clips → a clean talking edit (`autocut.roughCut`).
+async fn rough_cut(a: &Args) {
+    let sources: Vec<String> = a.positionals.get(1..).map(<[String]>::to_vec).unwrap_or_default();
+    if sources.is_empty() {
+        usage("rough-cut <files… | project.fcproj> [--language ml|en] [--export out.mp4]");
+    }
+    let num = |k: &str| -> Option<f64> {
+        a.opt(k).map(|v| {
+            v.parse::<f64>()
+                .ok()
+                .filter(|f| f.is_finite() && *f >= 0.0)
+                .unwrap_or_else(|| usage(format!("rough-cut: {k} wants a number of seconds, not `{v}`")))
+        })
+    };
+    let mut params = json!({
+        "wait": true,
+        "removeRetakes": !a.flag("--keep-retakes"),
+        "removeFillers": !a.flag("--keep-fillers"),
+        "removePauses": !a.flag("--keep-pauses"),
+        "removeHesitations": a.flag("--cut-hesitations"),
+        "diarize": !a.flag("--no-speakers"),
+    });
+    if let Some(l) = a.opt("--language") {
+        params["language"] = json!(l);
+    }
+    if let Some(v) = num("--min-pause") {
+        params["minPause"] = json!(v);
+    }
+    if let Some(v) = num("--keep-pause") {
+        params["keepPause"] = json!(v);
+    }
+    if let Some(n) = a.opt("--name") {
+        params["name"] = json!(n);
+    }
+    if let Some(e) = a.opt("--export") {
+        params["export"] = json!(absolute(e));
+    }
+    let project = sources.iter().find(|s| std::path::Path::new(s).extension().is_some_and(|x| x.eq_ignore_ascii_case("fcproj")));
+    if a.opt("--bridge").is_none() {
+        for s in &sources {
+            if !std::path::Path::new(s).exists() {
+                fail(format!("rough-cut: {s}: no such file"));
+            }
+        }
+    }
+    let mut b = Backend::open(a);
+    match project {
+        Some(p) => {
+            b.exec("file.open", json!({"path": absolute(p)})).await.unwrap_or_else(|e| fail(format!("rough-cut: {p}: {e}")));
+            // the project's movies and audio clips
+            let tree = b.exec("project.inspect", json!({})).await.unwrap_or_else(|e| fail(format!("rough-cut: {e}")));
+            let mut items = Vec::new();
+            fn walk(v: &Value, out: &mut Vec<u64>) {
+                if matches!(v["type"].as_str(), Some("Movie" | "Audio"))
+                    && let Some(i) = v["item"].as_u64()
+                {
+                    out.push(i);
+                }
+                for c in v["children"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                    walk(c, out);
+                }
+            }
+            walk(&tree["root"], &mut items);
+            if items.is_empty() {
+                fail(format!("rough-cut: {p}: no movie or audio clip in the project"));
+            }
+            params["items"] = json!(items);
+        }
+        None => params["paths"] = json!(sources.iter().map(|s| absolute(s)).collect::<Vec<_>>()),
+    }
+    diag(format_args!("rough-cut: understanding the speech of {} source(s)", sources.len()));
+    match b.exec("autocut.roughCut", params).await {
+        Ok(r) => {
+            let made = &r["showcase"];
+            diag(format_args!("rough-cut: {}", made["status"].as_str().unwrap_or("done")));
+            for it in made["speech"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                for rt in it["retakes"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                    diag(format_args!("rough-cut:   retake ({}), kept take {}: {}", rt["reason"].as_str().unwrap_or(""), rt["keep"], rt["texts"]));
+                }
+            }
+            if let Some(p) = made["export"]["path"].as_str() {
+                diag(format_args!("rough-cut: exported {p}"));
+            }
+            print(a, made);
+            b.finish(a).await;
+        }
+        Err(e) => fail(format!("rough-cut: {e}")),
+    }
+}
+
 fn shorts_params(a: &Args) -> Result<Value, String> {
     let num = |k: &str| -> Result<Option<f64>, String> {
         a.opt(k).map(|v| v.parse::<f64>().ok().filter(|f| f.is_finite()).ok_or_else(|| format!("{k} wants a number, not `{v}`"))).transpose()
@@ -2241,6 +2344,7 @@ async fn cli() {
         "frames" => showcase_tools::frames(&a).await,
         // a finished show → a vertical trailer for Reels (autocut.trailer)
         "trailer" => trailer::run(&a).await,
+        "rough-cut" => rough_cut(&a).await,
         "shorts" => {
             // long video → vertical shorts (autocut.shorts); every usage error before anything runs
             let src = a.pos(1).unwrap_or_else(|| usage("shorts <project.fcproj | media file> [--count N] [--aspect 9:16] [--export dir] [--upload-youtube]"));

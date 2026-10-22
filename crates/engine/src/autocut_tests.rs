@@ -75,6 +75,7 @@ impl AutoCutHost for Fake {
             }
             TaskKind::Shorts => Ok(json!({"shorts": [], "params": task.params, "status": "Made 0 shorts"})),
             TaskKind::Trailer => Ok(json!({"shots": [], "params": task.params, "status": "Made a trailer"})),
+            TaskKind::RoughCut => Ok(json!({"params": task.params, "status": "Rough cut"})),
             TaskKind::MalayalamScript => {
                 let plan = task.params.get("plan").cloned().or(task.plan).unwrap_or_default();
                 let n = plan["entries"].as_array().map_or(0, Vec::len);
@@ -473,6 +474,38 @@ fn shorts_parameters_are_checked_and_defaulted() {
     // uploads need a YouTube publisher: refused before the job starts here (there is none)
     let e = s.execute("autocut.shorts", json!({"export": "/tmp/x", "uploadYoutube": true})).unwrap_err().to_string();
     assert!(e.contains("uploadYoutube"), "{e}");
+}
+
+/// `autocut.roughCut` checks its parameters before a job starts; hostile ones are refused.
+#[test]
+fn rough_cut_parameters_are_checked() {
+    let (mut s, _) = session(Fake::default());
+    let r = s
+        .execute(
+            "autocut.roughCut",
+            json!({"paths": ["~/clip.mov"], "language": "ml", "removeRetakes": false, "minPause": 0.8, "export": "~/out.mp4", "wait": true}),
+        )
+        .unwrap();
+    let p = &r["showcase"]["params"];
+    assert!(p["paths"][0].as_str().is_some_and(|x| !x.starts_with('~')), "home expanded: {p}");
+    assert_eq!((p["language"].as_str(), p["removeRetakes"].as_bool(), p["minPause"].as_f64()), (Some("ml"), Some(false), Some(0.8)), "{p}");
+    for bad in [
+        json!({}),
+        json!({"items": []}),
+        json!({"items": "1"}),
+        json!({"items": [-1]}),
+        json!({"paths": [""]}),
+        json!({"paths": [3]}),
+        json!({"items": [1], "language": "m l"}),
+        json!({"items": [1], "removePauses": "yes"}),
+        json!({"items": [1], "minPause": 0}),
+        json!({"items": [1], "keepPause": f64::MAX}),
+        json!({"items": [1], "name": "x".repeat(500)}),
+        json!({"items": (0..300).collect::<Vec<u64>>()}),
+        json!([1]),
+    ] {
+        assert!(s.execute("autocut.roughCut", bad.clone()).is_err(), "{bad} was accepted");
+    }
 }
 
 /// `autocut.trailer` checks its parameters before a job starts and hands the host the checked
