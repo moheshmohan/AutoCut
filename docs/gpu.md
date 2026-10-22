@@ -83,6 +83,8 @@ VideoToolbox encoding).
 |---|---|---|---|---|
 | YuNet faces, long side 1920 / 1280 / 640 | 235 / 115 / 81 ms (42 ms at 1920 on a quiet machine) | 29 / 19 / 11 ms | 5–8× (1.5× against a quiet CPU) | the same 220 faces on 16 frames of the showcase's footage, boxes 0.000 px apart |
 | LPD-YuNet plates, 960 | 281 ms (94 quiet) | 40 ms | 7× (2.4× quiet) | raw outputs within 9.3e-7 (relative) |
+| D-FINE-N people, 640 × 352 (convolutions on the GPU, the decoder on the CPU; load 30–60) | 240–325 ms | 85–115 ms (encoder 24 ms) | 2.5–3× | boxes within 8e-6, logits within 3e-4 |
+| People and their poses (D-FINE-N + RTMPose-s, 2 people), 1080p | 480–665 ms | 150–160 ms | 3–4× | SimCC within 6e-6 |
 | Whisper-base, 58 s of narration in 7 clips | 40.5 s | 4.4 s | 9.1× | the same words and word times in all 7 |
 | Kokoro (Heart), a 36.7 s script | 43.6 s | 5.7 s | 7.6× | Whisper hears the same words (WER 4.1 % both); waveforms 48.5 dB apart |
 | OpenVoice conversion, 12 s | 12.0 s | 1.6 s | 7.4× | 96 dB apart; tone colours within 9e-6 |

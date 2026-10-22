@@ -128,6 +128,60 @@ impl Ctx {
         Some(Ctx { device, queue, layout, stem, pointwise, depthwise, maxpool, upadd, dummy, pool: Mutex::new(HashMap::new()) })
     }
 
+    pub(crate) fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub(crate) fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// Submit `enc` and map `staging` (read-back buffers it copies into) for reading. `Ok(false)`
+    /// when the device failed or a mapping did not come in time: the passes may still be running
+    /// on buffers a pool would hand out again, so the device is not used again this session.
+    pub(crate) fn submit_and_map(&self, enc: wgpu::CommandEncoder, staging: &[wgpu::Buffer]) -> Result<bool, VisionError> {
+        let d = &self.device;
+        self.queue.submit([enc.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        for (i, s) in staging.iter().enumerate() {
+            let tx = tx.clone();
+            s.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send((i, r.is_ok()));
+            });
+        }
+        drop(tx);
+        // The mapping callbacks run in whichever thread polls the device: with several pictures
+        // looked at at once, another thread's poll may fire ours just after our own wait ends, so
+        // they are waited for (polling again meanwhile), not only collected.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let waited = d.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(10)) });
+        let mut ok = vec![false; staging.len()];
+        let mut received = 0;
+        while received < staging.len() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(left.min(std::time::Duration::from_millis(50))) {
+                Ok((i, r)) => {
+                    if let Some(o) = ok.get_mut(i) {
+                        *o = r;
+                    }
+                    received += 1;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = d.poll(wgpu::PollType::Poll);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        if waited.is_err() || FAILED.load(Ordering::SeqCst) || ok.iter().any(|o| !o) {
+            FAILED.store(true, Ordering::SeqCst);
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     /// Weights in a storage buffer.
     pub(crate) fn upload(&self, data: &[f32]) -> wgpu::Buffer {
         let bytes: Vec<u8> = if data.is_empty() { vec![0; 4] } else { data.iter().flat_map(|v| v.to_le_bytes()).collect() };
@@ -346,44 +400,9 @@ impl<'a> Run<'a> {
             enc.copy_buffer_to_buffer(&m.buf, 0, &s, 0, size);
             staging.push(s);
         }
-        self.ctx.queue.submit([enc.finish()]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        for (i, s) in staging.iter().enumerate() {
-            let tx = tx.clone();
-            s.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                let _ = tx.send((i, r.is_ok()));
-            });
-        }
-        drop(tx);
-        // The mapping callbacks run in whichever thread polls the device: with several pictures
-        // looked at at once, another thread's poll may fire ours just after our own wait ends, so
-        // they are waited for (polling again meanwhile), not only collected.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let waited = d.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(10)) });
-        let mut ok = vec![false; staging.len()];
-        let mut received = 0;
-        while received < staging.len() {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                break;
-            }
-            match rx.recv_timeout(left.min(std::time::Duration::from_millis(50))) {
-                Ok((i, r)) => {
-                    if let Some(o) = ok.get_mut(i) {
-                        *o = r;
-                    }
-                    received += 1;
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    let _ = d.poll(wgpu::PollType::Poll);
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        if waited.is_err() || FAILED.load(Ordering::SeqCst) || ok.iter().any(|o| !o) {
+        if !self.ctx.submit_and_map(enc, &staging)? {
             // the passes may still be running on buffers the pool would hand out again: the CPU
             // for the rest of the session
-            FAILED.store(true, Ordering::SeqCst);
             return Err(err("the device failed or the read-back did not come"));
         }
         let mut out = Vec::with_capacity(maps.len());

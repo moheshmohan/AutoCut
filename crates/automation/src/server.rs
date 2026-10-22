@@ -914,6 +914,10 @@ pub struct AutoRedactParams {
     /// Seconds between the vision model's looks for the targets (default 1).
     #[serde(default)]
     pub target_every: Option<f64>,
+    /// The profile pass: people and their poses find the faces in profile or half hidden that the
+    /// face detector misses (default: on once its models are downloaded).
+    #[serde(default)]
+    pub profiles: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -989,6 +993,7 @@ fn auto_redact_params(p: AutoRedactParams) -> (&'static str, Value) {
     put("dryRun", p.dry_run.map(Value::Bool));
     put("targets", p.targets.map(Value::Array));
     put("targetEvery", p.target_every.map(|v| json!(v)));
+    put("profiles", p.profiles.map(Value::Bool));
     (id, params)
 }
 
@@ -2027,7 +2032,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Auto Redact Faces and Plates",
-        description = "Hide clearly recognisable faces and legible vehicle number plates behind a tracked blur (`clip.autoRedact` with `clips`, else `sequence.autoRedact`; one undo step). Local detectors (YuNet faces, LPD-YuNet plates; download them once with `redact.downloadModels` after the user agrees: 4.4 MB, MIT / Apache-2.0) run on every analysed frame; detections become smoothed tracks, faces smaller than `min_face_height` of the picture (5 %) are left alone, and with `verify` the local vision model sees one crop per track so humanoid robots, mannequins, posters, screens and signs stay sharp. `exclude` boxes are never hidden. `targets` names logos, brands or signs to hide too: the vision model looks for them every `target_every` seconds and at shot changes, a tracker follows them between looks, a rectangle mask each. Each clip gets one Gaussian Blur (or Mosaic) with a keyframed ellipse / quad mask per track, ahead of its other effects, so it follows the clip's motion, scale and crop. `dry_run` reports the tracks only. Runs as an engine job with progress; returns per clip what was hidden and why the rest was not.",
+        description = "Hide clearly recognisable faces and legible vehicle number plates behind a tracked blur (`clip.autoRedact` with `clips`, else `sequence.autoRedact`; one undo step). Local detectors (YuNet faces, LPD-YuNet plates, and for faces in profile or half hidden the D-FINE person detector with RTMPose poses, `profiles`, on by default once downloaded; download them once with `redact.downloadModels` after the user agrees: 4.4 MB + 35.8 MB, MIT / Apache-2.0) run on every analysed frame; detections become smoothed tracks, faces smaller than `min_face_height` of the picture (5 %) are left alone, and with `verify` the local vision model sees one crop per track so humanoid robots, mannequins, posters, screens and signs stay sharp. `exclude` boxes are never hidden. `targets` names logos, brands or signs to hide too: the vision model looks for them every `target_every` seconds and at shot changes, a tracker follows them between looks, a rectangle mask each. Each clip gets one Gaussian Blur (or Mosaic) with a keyframed ellipse / quad mask per track, ahead of its other effects, so it follows the clip's motion, scale and crop. `dry_run` reports the tracks only. Runs as an engine job with progress; returns per clip what was hidden and why the rest was not.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn auto_redact(
@@ -2887,15 +2892,18 @@ mod tests {
                 json!({"clips": [1], "kinds": [], "targets": ["DP World logo", {"text": "a sign", "clips": [1]}], "targetEvery": 0.5, "wait": true})
             )
         );
-        let p: AutoRedactParams =
-            serde_json::from_value(json!({"sequence": 9, "style": "mosaic", "verify": false, "exclude": [{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}]})).unwrap();
+        let p: AutoRedactParams = serde_json::from_value(
+            json!({"sequence": 9, "style": "mosaic", "verify": false, "exclude": [{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}], "profiles": false}),
+        )
+        .unwrap();
         assert_eq!(
             auto_redact_params(p),
             (
                 "sequence.autoRedact",
-                json!({"sequence": 9, "style": "mosaic", "verify": false, "exclude": [{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}], "wait": true})
+                json!({"sequence": 9, "style": "mosaic", "verify": false, "exclude": [{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}], "profiles": false, "wait": true})
             )
         );
+        assert!(props(&s).contains(&"profiles".to_string()), "{s}");
         assert_eq!(auto_redact_params(AutoRedactParams::default()), ("sequence.autoRedact", json!({"wait": true})));
         for id in ["clip.autoRedact", "sequence.autoRedact", "redact.downloadModels"] {
             assert!(crate::long_job::is_long(id, &json!({"wait": true})), "{id}");

@@ -168,7 +168,8 @@ fn warm_disc(rgba: &[u8], w: usize, h: usize) -> Vec<Detection> {
     if x1 < x0 {
         return Vec::new();
     }
-    let d = Detection { kind: Kind::Face, score: 0.95, bbox: [x0 as f32, y0 as f32, (x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32], points: Vec::new() };
+    let d =
+        Detection { kind: Kind::Face, score: 0.95, bbox: [x0 as f32, y0 as f32, (x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32], points: Vec::new(), pose: false };
     vec![d.normalized(w as f32, h as f32)]
 }
 
@@ -493,6 +494,64 @@ fn hostile_parameters_are_refused() {
     assert!(s.execute("clip.autoRedact", json!({"clips": [987_654]})).is_err());
     assert!(!options_p("t", &json!({"kinds": "faces"})).unwrap().plates);
     assert!(!options_p("t", &json!({"kinds": ["plates"]})).unwrap().faces);
+    // the profile pass: true, false or not said
+    for bad in [json!("yes"), json!(1), json!([true]), json!({"on": true})] {
+        let p = json!({"profiles": bad});
+        assert!(s.execute("clip.autoRedact", p.clone()).is_err(), "{p}");
+        assert!(s.execute("sequence.autoRedact", p.clone()).is_err(), "{p}");
+        assert!(s.execute("redact.downloadModels", p.clone()).is_err(), "{p}");
+        assert!(s.execute("sequence.checkPrivacy", json!({"seconds": [0.0], "profiles": bad})).is_err(), "{p}");
+    }
+    assert!(s.execute("redact.downloadModels", json!({"wait": "soon"})).is_err());
+    assert!(s.execute("redact.downloadModels", json!(7)).is_err());
+    assert_eq!(options_p("t", &json!({})).unwrap().profiles, None);
+    assert_eq!(options_p("t", &json!({"profiles": null})).unwrap().profiles, None);
+    assert_eq!(options_p("t", &json!({"profiles": false})).unwrap().profiles, Some(false));
+    // not looking for faces: no profile pass whatever is asked
+    assert!(!profiles_on(&options_p("t", &json!({"kinds": "plates", "profiles": true})).unwrap()));
+    assert!(!profiles_on(&options_p("t", &json!({"profiles": false})).unwrap()));
+}
+
+/// The profile pass's models are in the detections' cache key: entries made without it (or with
+/// other models) are analysed again once; without it, the key is the one entries always had.
+#[test]
+fn the_profile_models_are_in_the_cache_key() {
+    let off = Options { profiles: Some(false), ..Options::default() };
+    let unset = Options::default();
+    let on = Options { profiles: Some(true), ..Options::default() };
+    let key = |o: &Options| detections_key("models:abc", "file:1:2|1920x1080", 640, 0.5, 1280, o);
+    assert_eq!(key(&off), key(&unset));
+    assert_eq!(
+        key(&off),
+        format!(
+            "det v{}|file:1:2|1920x1080|models:abc|faces=true plates=true fs=0.600 ps=0.800 side=640 pside=640 scale=0.50000 close=1280",
+            crate::redact_cache::VERSION
+        )
+    );
+    let k = key(&on);
+    assert_ne!(k, key(&off));
+    for f in filmcraft_vision::catalog::PROFILE_FILES {
+        assert!(k.contains(f.name) && k.contains(&f.sha256[..16]), "{k}");
+    }
+}
+
+/// Faces the profile pass found (a head from a pose: in profile, half hidden) are followed,
+/// checked and hidden like the face detector's, and the outcome says which they were.
+#[test]
+fn heads_found_from_poses_are_hidden_and_reported() {
+    let (mut s, clip, seq) = session();
+    s.redacts.detector = Some(Arc::new(|rgba: &[u8], w: usize, h: usize, _: usize| {
+        warm_disc(rgba, w, h).into_iter().map(|d| Detection { pose: true, score: 0.6, ..d }).collect()
+    }));
+    let r = s.execute("clip.autoRedact", json!({"wait": true, "verify": false})).unwrap();
+    let out = &r["redact"];
+    assert_eq!(out["hidden"], json!(1), "{out}");
+    let c = &out["clips"][0];
+    assert_eq!((c["faces"].as_u64(), c["facesFromPose"].as_u64(), c["facesOnlyFromPose"].as_u64()), (Some(1), Some(1), Some(1)), "{c}");
+    assert!(c["tracks"][0]["fromPose"].as_u64().unwrap() >= 2, "{c}");
+    // a host's own detector is the whole detector: no profile pass of the engine's
+    assert_eq!(out["profiles"], json!(false));
+    assert_eq!(clip_effects(&s, seq, clip).iter().filter(|e| is_auto_redaction(e)).count(), 1);
 }
 
 #[test]
@@ -505,6 +564,10 @@ fn needs_a_selection_and_says_how_to_get_the_models() {
     let st = s.execute("redact.status", json!({})).unwrap();
     assert_eq!(st["judge"], Value::Null);
     assert!(st["license"].as_str().unwrap().contains("MIT"));
+    // the profile pass's models: their licence, sizes and files before any download
+    let pr = &st["profiles"];
+    assert!(pr["license"].as_str().unwrap().contains("Apache-2.0") && pr["files"].as_array().unwrap().len() == 3, "{pr}");
+    assert!(pr["missingBytes"].as_u64().unwrap() <= filmcraft_vision::catalog::profile_total_bytes());
     // without the test detector and without downloaded models, the command says what to run
     s.redacts.detector = None;
     if !installed() {
@@ -517,7 +580,7 @@ fn needs_a_selection_and_says_how_to_get_the_models() {
 fn masks_switch_on_and_off_with_their_track() {
     use filmcraft_vision::track::TrackPoint;
     let pt = |t: f64, x: f64| TrackPoint { t, bbox: [x, 0.4, 0.1, 0.2], corners: vec![], seen: true };
-    let track = Track { kind: Kind::Face, label: None, points: vec![pt(2.0, 0.1), pt(2.1, 0.2), pt(2.2, 0.3)], hits: 3, best_score: 0.9 };
+    let track = Track { kind: Kind::Face, label: None, points: vec![pt(2.0, 0.1), pt(2.1, 0.2), pt(2.2, 0.3)], hits: 3, best_score: 0.9, pose_hits: 0 };
     let c = ClipRedact {
         clip: ClipId(1),
         also: Vec::new(),
@@ -622,7 +685,7 @@ fn coverage_reports_the_largest_mask_and_when_it_plays() {
     assert!((sequence - media - 1.0).abs() < 0.01, "{cov}");
     // a detector that boxes most of the picture
     s.redacts.detector = Some(Arc::new(|_: &[u8], _: usize, _: usize, _: usize| {
-        vec![Detection { kind: Kind::Face, score: 0.95, bbox: [0.1, 0.05, 0.8, 0.9], points: Vec::new() }]
+        vec![Detection { kind: Kind::Face, score: 0.95, bbox: [0.1, 0.05, 0.8, 0.9], points: Vec::new(), pose: false }]
     }));
     let r = s.execute("clip.autoRedact", json!({"wait": true, "verify": false})).unwrap();
     let cov = &r["redact"]["clips"][0]["coverage"];

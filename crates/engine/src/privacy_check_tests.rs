@@ -75,7 +75,7 @@ fn warm_disc(rgba: &[u8], w: usize, h: usize, score: f32) -> Vec<Detection> {
     if x1 < x0 || n < 20 {
         return Vec::new();
     }
-    let d = Detection { kind: Kind::Face, score, bbox: [x0 as f32, y0 as f32, (x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32], points: Vec::new() };
+    let d = Detection { kind: Kind::Face, score, bbox: [x0 as f32, y0 as f32, (x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32], points: Vec::new(), pose: false };
     vec![d.normalized(w as f32, h as f32)]
 }
 
@@ -152,14 +152,20 @@ fn a_mask_over_the_face_counts_as_hidden_even_where_the_detector_still_sees_it()
     let (mut s, _, _, dir) = session("privacy-check-weak", 0.95);
     s.execute("clip.autoRedact", json!({"wait": true, "verify": false, "strength": 1})).unwrap();
     s.redacts.detector = Some(Arc::new(|_: &[u8], _: usize, _: usize, _: usize| {
-        vec![Detection { kind: Kind::Face, score: 0.9, bbox: [76.0 / W as f32, 66.0 / H as f32, 48.0 / W as f32, 48.0 / H as f32], points: Vec::new() }]
+        vec![Detection {
+            kind: Kind::Face,
+            score: 0.9,
+            bbox: [76.0 / W as f32, 66.0 / H as f32, 48.0 / W as f32, 48.0 / H as f32],
+            points: Vec::new(),
+            pose: false,
+        }]
     }));
     let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
     assert!(unmasked(&r).is_empty(), "{r}");
     assert_eq!(r["masked"], json!(5), "{r}");
     // elsewhere in the frame, not under a mask: shown
     s.redacts.detector = Some(Arc::new(|_: &[u8], _: usize, _: usize, _: usize| {
-        vec![Detection { kind: Kind::Face, score: 0.9, bbox: [0.7, 0.3, 0.12, 0.25], points: Vec::new() }]
+        vec![Detection { kind: Kind::Face, score: 0.9, bbox: [0.7, 0.3, 0.12, 0.25], points: Vec::new(), pose: false }]
     }));
     let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
     assert_eq!(unmasked(&r).len(), 1, "{r}");
@@ -205,6 +211,38 @@ fn a_face_on_the_subject_stays_sharp_only_when_the_model_twice_says_it_is_not_a_
     // without asking the model, nothing unmasked may stay sharp
     let r = s.execute("sequence.checkPrivacy", json!({"seconds": times(), "verify": false, "exclude": robot})).unwrap();
     assert_eq!((r["shown"].as_u64(), r["verify"]["state"].as_str()), (Some(1), Some("off")), "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A head the profile pass found (in profile, half hidden: the face detector missed it) is a face
+/// to the check: unmasked it is shown (its own thresholds: `faceScore` does not drop it), masked by
+/// the redaction it passes, and on the robot the vision check's two "not a person" leave it sharp.
+#[test]
+fn an_unmasked_head_from_a_pose_is_shown_and_passes_once_masked() {
+    let (mut s, clip, _, dir) = session("privacy-check-pose", 0.95);
+    let pose = |rgba: &[u8], w: usize, h: usize, _: usize| warm_disc(rgba, w, h, 0.45).into_iter().map(|d| Detection { pose: true, ..d }).collect();
+    s.redacts.detector = Some(Arc::new(pose));
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    let u = unmasked(&r);
+    assert_eq!((u.len(), r["shown"].as_u64()), (1, Some(1)), "{r}");
+    assert_eq!((u[0]["fromPose"].as_bool(), u[0]["allowed"].as_bool()), (Some(true), Some(false)), "{r}");
+    // the face detector's face that weak would not count
+    s.redacts.detector = Some(Arc::new(|rgba: &[u8], w: usize, h: usize, _: usize| warm_disc(rgba, w, h, 0.45)));
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert!(unmasked(&r).is_empty(), "{r}");
+    // on the robot, called not a person twice: sharp, as a face would be
+    s.redacts.detector = Some(Arc::new(pose));
+    s.redacts.judge = Some(Judge::new(Some(false), Some(false)));
+    let robot = json!({"clip": clip.0, "x": 0.1, "y": 0.1, "w": 0.5, "h": 0.8});
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times(), "exclude": robot})).unwrap();
+    assert_eq!((unmasked(&r)[0]["allowed"].as_bool(), r["shown"].as_u64()), (Some(true), Some(0)), "{r}");
+    // a person: hidden by the redaction, then nothing is left to show
+    s.redacts.judge = None;
+    let red = s.execute("clip.autoRedact", json!({"wait": true, "verify": false})).unwrap();
+    assert_eq!(red["redact"]["clips"][0]["facesFromPose"], json!(1), "{red}");
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert!(unmasked(&r).is_empty(), "{r}");
+    assert_eq!(r["shown"], json!(0));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

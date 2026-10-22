@@ -955,7 +955,8 @@ fn camera_track(s: &mut Session, p: &Value) -> Result<Value> {
         "face" => {
             let detect = match s.redacts.detector.clone() {
                 Some(d) => d,
-                None => crate::privacy_check::face_detector(s, cmd)?,
+                // faces only: framing needs the faces it can see, not the slower profile pass
+                None => crate::privacy_check::face_detector(s, cmd, Some(false))?,
             };
             faces = Some(detect);
         }

@@ -15,7 +15,7 @@
 //! | `sides` | rendered frames where a side of the frame — the left or right pillar, the bar above or below — is black while the picture in the middle still shows ([`black_sides`]): sampled around every transition (its first frames, either side of the cut, its last frames; over a dip its first and last quarters) and at the first and last frame of each picture shown whole over a blurred copy (the showcase's `fit: "full"`, a clip over Auto Reframe's Blur Fill track); flagged only where that side shows something in the frame just before or after the transition or in the middle of the picture shown whole, so letterboxing kept on purpose is not one (errors, with the time and the side) |
 //! | `mix` | the mix exported as 32-bit float WAV and metered (BS.1770): integrated loudness outside −16…−14 LUFS (±0.5 LU) and true peak above −1 dBTP (warnings); true peak above 0 dBTP or samples at full scale: clipping (error); the median short-term loudness during narration clips (A2) vs between them: the voice less than 4 dB louder (warning), or not louder at all (error); and per stem (`audio.analyzeMix`, [`mix_findings`]), for small speakers: the narration less than 12 LU above the music while it speaks, the Mix's limiter taking more than 2 dB off the peaks, more than a quarter of the mix's energy below 120 Hz, a narration clip with a clipped source (warnings) |
 //! | `subject` | shots where the grounding model (`AUTOCUT_ANALYSIS_MODEL`, the analysis' prompt) does not find the subject in a rendered frame (warnings); skipped when no model is reachable |
-//! | `privacy` | from what the privacy pass hid ([`Options::privacy`]): a redaction mask covering more than [`Options::max_mask`] (a fifth) of a clip's picture at any keyframe (warnings: a blur that size hides the shot, as one on a close-up of a tablet did); the faces, plates and named places hidden in each entry (`privacy` in the report). And, for a show that hides faces ([`Options::faces`]), the faces the finished picture still shows: frames every half second and at each shot's start rendered as they export, the face detector run on them (`sequence.checkPrivacy`), and every face at least [`Options::face_min_height`] of the frame tall that no redaction mask covers is a finding unless the vision model twice calls it not a person and it is on the robot (inside the shot's subject box) or the detector is not sure of it ([`face_severity`]): an error for a person the detector scores [`FACE_ERROR_SCORE`] or more (on the robot, both looks must say so; away from it, a face nobody could tell counts too), a warning to look at otherwise. Each with its time and box (`unblurredFaces` in the report) and a crop on the privacy sheet; [`QaReport::publish_blocker`] stops an upload when there is one (the bug of 2026-10-21: two visitors next to Ameca, published unblurred, while this check said OK) |
+//! | `privacy` | from what the privacy pass hid ([`Options::privacy`]): a redaction mask covering more than [`Options::max_mask`] (a fifth) of a clip's picture at any keyframe (warnings: a blur that size hides the shot, as one on a close-up of a tablet did); the faces, plates and named places hidden in each entry (`privacy` in the report). And, for a show that hides faces ([`Options::faces`]), the faces the finished picture still shows: frames every half second and at each shot's start rendered as they export, the face detector run on them (`sequence.checkPrivacy`), and every face at least [`Options::face_min_height`] of the frame tall that no redaction mask covers is a finding unless the vision model twice calls it not a person and it is on the robot (inside the shot's subject box) or the detector is not sure of it ([`face_severity`]): an error for a person the detector scores [`FACE_ERROR_SCORE`] or more, or that the profile pass found from a pose (a head in profile or half hidden; with its models downloaded `sequence.checkPrivacy` runs it) (on the robot, both looks must say so; away from it, a face nobody could tell counts too), a warning to look at otherwise. Each with its time and box (`unblurredFaces` in the report) and a crop on the privacy sheet; [`QaReport::publish_blocker`] stops an upload when there is one (the bug of 2026-10-21: two visitors next to Ameca, published unblurred, while this check said OK) |
 //! | `safe_zones` | captions, titles and lower thirds (`sequence.checkSafeZones`) that reach into the parts of the frame [`Options::platform`]'s own interface covers — YouTube Shorts, Instagram Reels, TikTok; a vertical sequence without one: all of them at once (warnings, with the zone and how much of it is in there); skipped on a horizontal sequence without a platform |
 //!
 //! The report ([`QaReport`], serde) also holds a contact sheet: one rendered frame per entry
@@ -1820,6 +1820,11 @@ pub struct UnblurredFace {
     pub media: Option<f64>,
     /// Inside the robot's box (the shot's subject).
     pub on_subject: bool,
+    /// Found (also) by the profile pass: a head in profile or half hidden, from a person's pose.
+    /// Its score is the pose's (at most 0.84 by design), so the score bar of [`face_severity`]
+    /// does not apply to it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub from_pose: bool,
     /// What the vision model said: `person`, `notPerson`, `unsure` or `unchecked`.
     pub verdict: String,
     /// Left sharp as the rules allow: a robot's face (twice called not a person, on the subject
@@ -1869,6 +1874,7 @@ pub fn faces_of(v: &Value) -> Vec<UnblurredFace> {
                 name: f["name"].as_str().map(|s| s.chars().take(200).collect()),
                 media: fin(&f["media"]),
                 on_subject: f["onSubject"].as_bool().unwrap_or(false),
+                from_pose: f["fromPose"].as_bool().unwrap_or(false),
                 verdict: verdict.to_string(),
                 allowed: f["allowed"].as_bool().unwrap_or(false),
                 severity: None,
@@ -1921,6 +1927,7 @@ pub fn merge_faces(mut faces: Vec<UnblurredFace>, gap: f64) -> Vec<UnblurredFace
             last.last_box = f.last_box;
             last.score = last.score.max(f.score);
             last.on_subject |= f.on_subject;
+            last.from_pose |= f.from_pose;
             last.allowed = face_allowed(last);
             continue;
         }
@@ -1940,8 +1947,9 @@ pub fn face_severity(f: &UnblurredFace) -> Option<Severity> {
         return None;
     }
     // on the v5 show the faces left sharp scored 0.75–0.93, the false finds (a shoe, a robot's
-    // base, the floor) 0.60–0.69
-    if f.score < FACE_ERROR_SCORE {
+    // base, the floor) 0.60–0.69; a head the profile pass found has passed its own thresholds
+    // (nose or eyes seen, not facing away), and its score is the pose's
+    if f.score < FACE_ERROR_SCORE && !f.from_pose {
         return Some(Severity::Warning);
     }
     match f.verdict.as_str() {
@@ -1978,7 +1986,7 @@ fn face_finding(f: &UnblurredFace, severity: Severity) -> Finding {
             (y + h / 2.0) * 100.0,
             stamp(f.seconds)
         ),
-        _ if f.score < FACE_ERROR_SCORE => format!(
+        _ if f.score < FACE_ERROR_SCORE && !f.from_pose => format!(
             "something the face detector is not sure of ({:.2}) left unblurred from {} to {}{what} at x {:.0} %, y {:.0} % ({said}): check whether it is a face",
             f.score,
             stamp(f.start),
@@ -2624,6 +2632,13 @@ mod tests {
         let unsure = UnblurredFace { verdict: "person".into(), score: 0.67, ..unchecked.clone() };
         assert_eq!(face_severity(&unsure), Some(Severity::Warning));
         assert!(face_finding(&unsure, Severity::Warning).message.contains("not sure of (0.67)"));
+        // a head in profile the pose pass found (its score is the pose's): a person is an error,
+        // on the robot the same exemption as a face
+        let profile = UnblurredFace { from_pose: true, ..unsure.clone() };
+        assert_eq!(face_severity(&profile), Some(Severity::Error));
+        let robot_head = UnblurredFace { from_pose: true, verdict: "notPerson".into(), on_subject: true, score: 0.5, ..unsure.clone() };
+        assert!(face_allowed(&robot_head));
+        assert!(faces_of(&json!({"unmasked": [{"start": 1.0, "end": 2.0, "seconds": 1.5, "box": {"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1}, "score": 0.5, "fromPose": true}]}))[0].from_pose);
         // called not a person twice: on the robot it may stay; away from it, sure, a warning
         // (a robot on a phone's screen, a painting)
         let robot = UnblurredFace { verdict: "notPerson".into(), on_subject: true, ..unchecked.clone() };

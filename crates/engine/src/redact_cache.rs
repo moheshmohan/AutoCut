@@ -258,7 +258,8 @@ mod tests {
         let dir = tmp("roundtrip");
         let c = RedactCache::in_data_dir(&dir);
         assert!(c.load::<Detections>("a").is_none());
-        let d = filmcraft_vision::Detection { kind: filmcraft_vision::Kind::Face, score: 0.9, bbox: [0.1, 0.2, 0.3, 0.4], points: vec![[0.5, 0.5]] };
+        let d =
+            filmcraft_vision::Detection { kind: filmcraft_vision::Kind::Face, score: 0.9, bbox: [0.1, 0.2, 0.3, 0.4], points: vec![[0.5, 0.5]], pose: false };
         c.update::<Detections>("a", |e| {
             e.insert(100, vec![d.clone()]);
         });

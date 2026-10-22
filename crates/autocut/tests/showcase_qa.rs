@@ -373,6 +373,7 @@ fn warm_disc(rgba: &[u8], w: usize, h: usize) -> Vec<filmcraft_vision::Detection
         score: 0.92,
         bbox: [x0 as f32, y0 as f32, (x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32],
         points: Vec::new(),
+        pose: false,
     };
     vec![d.normalized(w as f32, h as f32)]
 }
