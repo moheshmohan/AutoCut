@@ -1,5 +1,5 @@
-//! Headless UI tests of the creator tools: Clip ▸ Speed Ramp… (and the clip's right-click menu)
-//! by automation id.
+//! Headless UI tests of the creator tools by automation id: Clip ▸ Speed Ramp… and Clip ▸
+//! Stabilize….
 
 use std::sync::mpsc::{Sender, channel};
 
@@ -85,14 +85,12 @@ impl Driver {
 }
 
 #[test]
-fn speed_ramp_dialog_from_the_clip_menu_and_the_menu_bar() {
+fn speed_ramp_dialog_from_the_clip_menu() {
     let mut d = Driver::new();
     let c = d.last_v1();
     d.exec("timeline.select", json!({"clips": [c.id.0]}));
-    // the clip's right-click menu opens the dialog; Cancel leaves the clip
-    d.ok("ui.click", json!({"id": format!("timeline.clip.{}", c.id.0), "button": "right"}));
-    d.frames(3);
-    d.click("timeline.clipMenu.clip.speedRamp");
+    // Clip ▸ Speed Ramp… opens the dialog; Cancel leaves the clip
+    d.menu("clip.speedRamp");
     let dlg = d.app().ui.clip_dialog.clone().expect("the dialog opened");
     assert_eq!(dlg.command, "clip.speedRamp");
     for id in ["montage", "hero", "bullet", "jumpCut", "flashIn", "flashOut", "smoothIn", "smoothOut", "none"] {
@@ -119,4 +117,29 @@ fn speed_ramp_dialog_from_the_clip_menu_and_the_menu_bar() {
     // one undo step
     d.exec("edit.undo", json!({}));
     assert_eq!(d.last_v1(), c);
+}
+
+#[test]
+fn stabilize_dialog_adds_warp_stabilizer_at_a_level() {
+    let mut d = Driver::new();
+    d.ok("ui.set", json!({"workspace": "Effects"}));
+    let c = d.last_v1();
+    d.exec("playhead.set", json!({"time": c.start.0}));
+    d.exec("timeline.select", json!({"clips": [c.id.0]}));
+    d.menu("clip.stabilize");
+    assert_eq!(d.app().ui.clip_dialog.as_ref().map(|g| g.command.clone()).as_deref(), Some("clip.stabilize"));
+    for id in ["recommended", "minimumCrop", "mostStable"] {
+        assert!(d.has(&format!("stabilize.level.{id}")), "{id}");
+    }
+    d.click("stabilize.level.mostStable");
+    d.click("stabilize.ok");
+    let got = d.last_v1();
+    let e = got.effects.iter().find(|e| e.effect == "warp_stabilizer").expect("Warp Stabilizer added");
+    assert_eq!(e.param("level").map(|p| p.value.clone()), Some(filmcraft_project::ParamValue::Choice(3)));
+    assert_eq!(e.param("smoothness").and_then(|p| p.value.as_f64()), Some(120.0));
+    // Effect Controls lists it
+    d.frames(4);
+    assert!(d.has("effectControls.effect.warp_stabilizer"), "Effect Controls shows the stabilizer");
+    d.exec("edit.undo", json!({}));
+    assert!(!d.last_v1().effects.iter().any(|e| e.effect == "warp_stabilizer"));
 }

@@ -28,6 +28,7 @@
 //!   `interpolation.<frameSampling|frameBlending|opticalFlow>`;
 //! - Speed Ramp `speedRamp.*`: `preset.<montage|hero|bullet|jumpCut|flashIn|flashOut|smoothIn|smoothOut|none>`,
 //!   `intensity`, `opticalFlow`, `maintainPitch`, `ripple`;
+//! - Stabilize `stabilize.*`: `level.<recommended|minimumCrop|mostStable>`;
 //! - Close Project `closeProject.save`, `closeProject.dontSave`, `closeProject.cancel`;
 //! - Quit (asked when the window is closed with unsaved changes, see [`intercept_quit`])
 //!   `quit.save`, `quit.dontSave`, `quit.cancel`.
@@ -61,6 +62,7 @@ fn meta(command: &str) -> Option<(&'static str, &'static str)> {
         "clip.fieldOptions" => (tl!("Field Options"), "fieldOptions"),
         "clip.speedDuration" => (tl!("Clip Speed / Duration"), "speedDuration"),
         "clip.speedRamp" => (tl!("Speed Ramp"), "speedRamp"),
+        "clip.stabilize" => (tl!("Stabilize"), "stabilize"),
         "file.closeProject" => (tl!("Save Project"), "closeProject"),
         "app.quit" => (tl!("Save Project"), "quit"),
         _ => return None,
@@ -238,8 +240,18 @@ fn defaults(app: &FilmcraftApp, id: &str) -> (Value, Value) {
             let keep_pitch = it.as_ref().is_some_and(|i| i.maintain_pitch);
             (json!({"preset": "montage", "intensity": 1.0, "opticalFlow": true, "maintainPitch": keep_pitch, "ripple": true}), Value::Null)
         }
+        "clip.stabilize" => (json!({"level": "recommended"}), Value::Null),
         _ => (json!({}), Value::Null),
     }
+}
+
+/// The stabilisation levels as Clip ▸ Stabilize… lists them (`stabilize.level.<id>`).
+fn stabilize_levels() -> [(&'static str, &'static str, &'static str); 3] {
+    [
+        ("recommended", tl!("Recommended"), tl!("Smooth motion, a moderate crop")),
+        ("minimumCrop", tl!("Minimum Crop"), tl!("Keeps the most of the frame, smooths less")),
+        ("mostStable", tl!("Most Stable"), tl!("The steadiest picture, crops more")),
+    ]
 }
 
 /// The speed-ramp presets as the dialog lists them (`speedRamp.preset.<id>`), then None.
@@ -562,6 +574,16 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     push(&mut elems, format!("{pre}.interpolation.{}", m.name()), &r, m.label());
                     if r.clicked() {
                         p["interpolation"] = json!(m.name());
+                    }
+                }
+            }
+            "clip.stabilize" => {
+                ui.label(tl!("Warp Stabilizer is added to the selected video clips (or updated) at this level."));
+                for (k, l, hint) in stabilize_levels() {
+                    let r = ui.radio(p["level"].as_str() == Some(k), l).on_hover_text(hint);
+                    push(&mut elems, format!("{pre}.level.{k}"), &r, l);
+                    if r.clicked() {
+                        p["level"] = json!(k);
                     }
                 }
             }

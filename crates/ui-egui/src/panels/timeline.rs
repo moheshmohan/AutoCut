@@ -2073,12 +2073,7 @@ pub(crate) const CLIP_MENU: &[&[(&str, &str)]] = &[
     ],
     &[("Label", "edit.label")],
     &[("Add Marker", "markers.add")],
-    &[
-        ("Speed/Duration…", "clip.speedDuration"),
-        ("Speed Ramp…", "clip.speedRamp"),
-        ("Scene Edit Detection…", "clip.sceneEditDetection"),
-        ("Auto Redact Faces and Plates…", "clip.autoRedact"),
-    ],
+    &[("Speed/Duration…", "clip.speedDuration"), ("Scene Edit Detection…", "clip.sceneEditDetection"), ("Auto Redact Faces and Plates…", "clip.autoRedact")],
     &[
         ("Frame Hold Options…", "clip.frameHoldOptions"),
         ("Add Frame Hold", "clip.frameHold"),

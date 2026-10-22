@@ -20,7 +20,9 @@ mod creator;
 pub use creator::{CHROMA_KINDS, CREATOR, CREATOR_EFFECTS, GLITCH_RHYTHMS, HALFTONE_MODES, HUD_COLOR, MOTION_SHUTTERS, ZOOM_BLUR_KINDS};
 
 mod vfx;
-pub use vfx::{EASINGS, ECHO_OPERATORS, FRAME_LAYOUTS, LIGHT_IDS, SIMPLE_BLEND, TRACK_CHOICES, auto_point, ultra_key_setting};
+pub use vfx::{
+    EASINGS, ECHO_OPERATORS, FRAME_LAYOUTS, LIGHT_IDS, SIMPLE_BLEND, STABILIZER_LEVELS, TRACK_CHOICES, auto_point, stabilizer_level, ultra_key_setting,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectKind {

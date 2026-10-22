@@ -4151,3 +4151,15 @@
 	None (remove the ramp)	なし（ランプを削除）
 	Intensity:	強度：
 	Optical Flow for the Slow Parts	スロー部分にオプティカルフロー
+
+# Stabilization levels (Clip ▸ Stabilize…, Warp Stabilizer)
+	Stabilize…	スタビライズ…
+	Stabilize	スタビライズ
+	Stabilization Level	スタビライズのレベル
+	Recommended	推奨
+	Minimum Crop	最小クロップ
+	Most Stable	最も安定
+	Smooth motion, a moderate crop	滑らかな動き、適度なクロップ
+	Keeps the most of the frame, smooths less	フレームを最も多く残し、スムーズさは控えめ
+	The steadiest picture, crops more	最も安定した映像、クロップは多め
+	Warp Stabilizer is added to the selected video clips (or updated) at this level.	選択したビデオクリップにこのレベルでワープスタビライザーを追加（または更新）します。

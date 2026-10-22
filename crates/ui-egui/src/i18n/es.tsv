@@ -4152,3 +4152,15 @@
 	None (remove the ramp)	Ninguna (quitar la rampa)
 	Intensity:	Intensidad:
 	Optical Flow for the Slow Parts	Flujo óptico en las partes lentas
+
+# Stabilization levels (Clip ▸ Stabilize…, Warp Stabilizer)
+	Stabilize…	Estabilizar…
+	Stabilize	Estabilizar
+	Stabilization Level	Nivel de estabilización
+	Recommended	Recomendado
+	Minimum Crop	Recorte mínimo
+	Most Stable	Máxima estabilidad
+	Smooth motion, a moderate crop	Movimiento suave, recorte moderado
+	Keeps the most of the frame, smooths less	Conserva la mayor parte del cuadro, suaviza menos
+	The steadiest picture, crops more	La imagen más estable, recorta más
+	Warp Stabilizer is added to the selected video clips (or updated) at this level.	Se añade Estabilizador de deformación a los clips de video seleccionados (o se actualiza) con este nivel.

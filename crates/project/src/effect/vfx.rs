@@ -372,6 +372,7 @@ pub(super) fn defs() -> Vec<EffectDef> {
             "Warp Stabilizer",
             DISTORT,
             vec![
+                grp(ch("level", "Stabilization Level", STABILIZER_LEVELS, 1), "Stabilization"),
                 grp(ch("result", "Result", &["Smooth Motion", "No Motion"], 0), "Stabilization"),
                 grp(fs("smoothness", "Smoothness", 50.0, (0.0, 1000.0), (0.0, 200.0), "%", 0), "Stabilization"),
                 grp(ch("method", "Method", &["Position", "Position, Scale, Rotation", "Perspective", "Subspace Warp"], 1), "Stabilization"),
@@ -1014,6 +1015,33 @@ pub(super) fn defs() -> Vec<EffectDef> {
     v
 }
 
+/// Warp Stabilizer ▸ Stabilization Level. Choosing one writes its settings
+/// ([`stabilizer_level`]); changing one of them by hand makes it Custom. Indices are stored in
+/// projects and never change.
+pub const STABILIZER_LEVELS: &[&str] = &["Custom", "Recommended", "Minimum Crop", "Most Stable"];
+
+/// The settings of stabilisation level `level` (None for Custom and unknown levels): Recommended
+/// is the effect's defaults; Minimum Crop smooths less with position only and a low auto-scale
+/// ceiling; Most Stable smooths most, with detailed analysis and room to scale.
+pub fn stabilizer_level(level: u32) -> Option<Vec<(&'static str, ParamValue)>> {
+    let (smooth, method, max_scale, crop_less, detailed) = match level {
+        1 => (50.0, 1, 150.0, 50.0, false),
+        2 => (20.0, 0, 112.0, 20.0, false),
+        3 => (120.0, 1, 200.0, 90.0, true),
+        _ => return None,
+    };
+    Some(vec![
+        ("result", ParamValue::Choice(0)),
+        ("smoothness", ParamValue::Float(smooth)),
+        ("method", ParamValue::Choice(method)),
+        ("framing", ParamValue::Choice(2)),
+        ("max_scale", ParamValue::Float(max_scale)),
+        ("additional_scale", ParamValue::Float(100.0)),
+        ("crop_less", ParamValue::Float(crop_less)),
+        ("detailed", ParamValue::Bool(detailed)),
+    ])
+}
+
 /// Parameter values written when Ultra Key's Setting is Default, Relaxed or Aggressive.
 /// Custom (index 3) leaves the current values. Aggressive matches the matte that cleans
 /// light and dark clothing on a typical green screen.
@@ -1282,6 +1310,16 @@ mod tests {
         assert_eq!(b("Black & White"), (true, false, true));
         assert_eq!(b("Glint"), (true, true, false));
         assert_eq!(b("Sharpen"), (true, false, false));
+    }
+
+    #[test]
+    fn recommended_stabilization_is_the_defaults() {
+        let d = find_effect("warp_stabilizer").unwrap();
+        for (id, v) in stabilizer_level(1).unwrap() {
+            assert_eq!(d.param(id).map(|p| p.default.clone()), Some(v), "{id}");
+        }
+        assert!(stabilizer_level(0).is_none() && stabilizer_level(9).is_none());
+        assert_eq!(d.param("level").map(|p| p.default.clone()), Some(ParamValue::Choice(1)));
     }
 
     #[test]
