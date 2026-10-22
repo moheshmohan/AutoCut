@@ -16,7 +16,7 @@
 //! | `builtin:day-in-30s` | twelve moments of a day in the order they were filmed |
 
 use filmcraft_media::DemoScene;
-use filmcraft_project::{AnimatedCaptions, CaptionPreset, ClipId, ParamValue, TrackKind, TransitionAlign};
+use filmcraft_project::{AnimatedCaptions, CaptionPreset, ClipId, ItemId, ParamValue, TrackKind, TransitionAlign};
 use filmcraft_time::Tick;
 
 use super::{
@@ -117,10 +117,17 @@ fn in_order(mut a: AiHints) -> AiHints {
     a
 }
 
-/// A dark end card on track 0 from `at` for `len`, dipping to black at its end.
-fn end_card(b: &mut Builder, after: Option<ClipId>, at: Tick, len: Tick, transition: &str) -> ClipId {
-    let ink = b.matte("End Background", rgb(0x05070d));
-    let card = b.clip(TrackKind::Video, 0, ink, at, len);
+/// An end card from `at` for `len`: a blurred, darkened copy of `item` (a slot's placeholder: the
+/// card's clip becomes another placement of that slot's media, so the end shows the same footage)
+/// on track 0, pushing in slowly, a shade over it on track 1, dipping to black at its end. Returns
+/// the card's clip.
+fn end_card(b: &mut Builder, after: Option<ClipId>, at: Tick, len: Tick, transition: &str, item: ItemId) -> ClipId {
+    let card = b.clip(TrackKind::Video, 0, item, at, len);
+    b.effect(card, "gaussian_blur", &[("blurriness", F(40.0)), ("repeat_edge", ParamValue::Bool(true))]);
+    b.ramp(card, "motion", "scale", &[(Tick::ZERO, 106.0), (len, 114.0)]);
+    let ink = b.matte("Shade", rgb(0x05070d));
+    let shade = b.clip(TrackKind::Video, 1, ink, at, len);
+    b.opacity(shade, 55.0);
     if let Some(prev) = after {
         b.transition(TrackKind::Video, 0, transition, Some(prev), Some(card), frames(12), TransitionAlign::CenterAtCut);
     }
@@ -165,7 +172,7 @@ pub(super) fn tech_reveal() -> Result<Package, TemplateError> {
     let reveal_at = at;
     at += reveal_len;
     let end_at = at;
-    end_card(&mut b, Some(reveal), end_at, end_len, "crt_black_fade");
+    let end_bg = end_card(&mut b, Some(reveal), end_at, end_len, "crt_blur", reveal_item);
     let total = end_at + end_len;
     creator_look(&mut b, 4, Tick::ZERO, end_at, "tech");
     let hook_line = title(&mut b, 1, Tick::ZERO, hook_len, "WAIT FOR IT", 110.0, -250.0);
@@ -211,16 +218,29 @@ pub(super) fn tech_reveal() -> Result<Package, TemplateError> {
             shot_ai(Purpose::Broll, Some(EnergyHint::High), ""),
         ),
         with_ai(
-            beat_slot(slot("reveal", SlotKind::Video, "Reveal", "The thing itself, shown whole", 2, 1, 1, vec![place(reveal, 0)]), secs(2.0), secs(8.0)),
+            beat_slot(
+                slot(
+                    "reveal",
+                    SlotKind::Video,
+                    "Reveal",
+                    "The thing itself, shown whole (blurred again under the end card)",
+                    2,
+                    1,
+                    1,
+                    vec![place(reveal, 0), place(end_bg, 0)],
+                ),
+                secs(2.0),
+                secs(8.0),
+            ),
             shot_ai(Purpose::Reveal, None, ""),
         ),
         with_ai(
             text_slot("hook_line", "Hook line", "Over the first shot", 3, &[(hook_line, 1)], 18),
-            text_ai("A punchy hook of 2 to 4 words that makes people keep watching, in capitals", 18, "hook"),
+            text_ai("A punchy hook of 2 to 4 words about the topic and what the first shot shows, that makes people keep watching, in capitals", 18, "hook"),
         ),
         with_ai(
             text_slot("title", "Name", "What is revealed", 4, &[(name, 1)], 16),
-            text_ai("The name of what is revealed (a product, a robot, a place), 1 to 3 words, in capitals", 16, "reveal"),
+            text_ai("What the reveal shows, by its name or what it is (a product, a robot, a place), 1 to 3 words, in capitals", 16, "reveal"),
         ),
         with_ai(text_slot("outro", "Call to action", "On the end card", 5, &[(outro, 1)], 22), text_ai("A short call to action, 2 to 5 words", 22, "")),
         with_ai(
@@ -272,7 +292,7 @@ pub(super) fn event_recap_short() -> Result<Package, TemplateError> {
         at += shot_len;
     }
     let end_at = at;
-    end_card(&mut b, Some(prev), end_at, end_len, "crt_light_leak");
+    let end_bg = end_card(&mut b, Some(prev), end_at, end_len, "crt_light_leak", open_item);
     let total = end_at + end_len;
     let event = title(&mut b, 1, frames(6), open_len - frames(6), "SUMMIT 2026", 120.0, 0.0);
     let g = b.graphic("Template Graphics");
@@ -296,7 +316,20 @@ pub(super) fn event_recap_short() -> Result<Package, TemplateError> {
     );
     m.slots = vec![
         with_ai(
-            beat_slot(slot("establishing", SlotKind::Video, "Opening shot", "A wide shot of the place", 0, 1, 1, vec![place(open, 0)]), secs(1.5), secs(6.0)),
+            beat_slot(
+                slot(
+                    "establishing",
+                    SlotKind::Video,
+                    "Opening shot",
+                    "A wide shot of the place (blurred again under the end card)",
+                    0,
+                    1,
+                    1,
+                    vec![place(open, 0), place(end_bg, 0)],
+                ),
+                secs(1.5),
+                secs(6.0),
+            ),
             shot_ai(Purpose::Establishing, None, ""),
         ),
         with_ai(
@@ -340,10 +373,12 @@ pub(super) fn talking_head_tip() -> Result<Package, TemplateError> {
     let mut b = Builder::new("Talking-head Tip", 4, 3);
     let take_len = secs(7.0);
     let mut takes = Vec::new();
+    let mut last_item = None;
     for k in 0..3usize {
         let item = b.scene(&format!("Take {}", k + 1), DemoScene::Forest);
         let c = b.av(0, 0, item, Tick(take_len.0 * k as i64), take_len);
         takes.push(c);
+        last_item = Some(item);
     }
     let talk = Tick(take_len.0 * 3);
     let end_len = secs(3.0);
@@ -359,7 +394,8 @@ pub(super) fn talking_head_tip() -> Result<Package, TemplateError> {
         cutaways.push(c);
     }
     let last = takes.last().copied();
-    end_card(&mut b, last, talk, end_len, "crt_blur");
+    let end_item = last_item.ok_or_else(|| TemplateError::Apply("no take".into()))?;
+    let end_bg = end_card(&mut b, last, talk, end_len, "crt_blur", end_item);
     let hook = title(&mut b, 2, Tick::ZERO, secs(3.0), "THE ONE TIP", 110.0, -300.0);
     let g = b.graphic("Template Graphics");
     let cta = b.clip(TrackKind::Video, 2, g, talk + frames(6), end_len - frames(6));
@@ -385,7 +421,7 @@ pub(super) fn talking_head_tip() -> Result<Package, TemplateError> {
         0,
         3,
         1,
-        takes.iter().enumerate().map(|(i, c)| place(*c, i as u32)).collect(),
+        takes.iter().enumerate().map(|(i, c)| place(*c, i as u32)).chain(std::iter::once(place(end_bg, 2))).collect(),
     ));
     takes_slot.ai = Some(AiHints { purpose: Some(Purpose::TalkingHead), speech: Some(SpeechHint::Want), chronological: true, ..AiHints::default() });
     let mut cut_slot = slot(
@@ -471,7 +507,7 @@ pub(super) fn gadget_showcase() -> Result<Package, TemplateError> {
     let hero_at = at;
     at += hero_len;
     let end_at = at;
-    end_card(&mut b, Some(hero), end_at, end_len, "crt_black_fade");
+    let end_bg = end_card(&mut b, Some(hero), end_at, end_len, "crt_blur", hero_item);
     let total = end_at + end_len;
     creator_look(&mut b, 4, Tick::ZERO, end_at, "tech");
     let name = title(&mut b, 2, hero_at + frames(8), hero_len - frames(8), "MEET IT", 120.0, -200.0);
@@ -515,7 +551,20 @@ pub(super) fn gadget_showcase() -> Result<Package, TemplateError> {
             shot_ai(Purpose::Broll, Some(EnergyHint::Medium), ""),
         ),
         with_ai(
-            beat_slot(slot("hero", SlotKind::Video, "Hero shot", "The whole thing at its best", 2, 1, 1, vec![place(hero, 0)]), secs(1.5), secs(6.0)),
+            beat_slot(
+                slot(
+                    "hero",
+                    SlotKind::Video,
+                    "Hero shot",
+                    "The whole thing at its best (blurred again under the end card)",
+                    2,
+                    1,
+                    1,
+                    vec![place(hero, 0), place(end_bg, 0)],
+                ),
+                secs(1.5),
+                secs(6.0),
+            ),
             shot_ai(Purpose::Reveal, None, ""),
         ),
         with_ai(
