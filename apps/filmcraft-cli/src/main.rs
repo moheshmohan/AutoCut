@@ -32,6 +32,7 @@ macro_rules! out {
 
 mod args;
 mod audio;
+mod creator_demo;
 mod instagram;
 mod locations;
 mod ml_script;
