@@ -475,6 +475,10 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
         "autocut.makeShowcase" if params.get("subject").is_none() && params.get("prompt").is_none() => {
             return crate::panels::showcase::open(app);
         }
+        // Sequence ▸ Quick Short… opens its dialog; with parameters the job starts directly.
+        "autocut.quick" if params.as_object().is_none_or(|m| m.is_empty()) => {
+            return crate::panels::quick_short::open(app);
+        }
         // File ▸ Export ▸ Media… opens the Export mode, like ⌘M (#382); with a path it exports directly.
         "file.exportMedia" if params.get("path").is_none() => {
             filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;

@@ -160,6 +160,12 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
             {
                 return err(e);
             }
+            // Quick Short dialog: its choices merged into the draft (opening it); null closes it
+            if let Some(patch) = p.get("quickShort")
+                && let Err(e) = crate::panels::quick_short::patch(app, patch)
+            {
+                return err(e);
+            }
             // Recipes panel: the recipe open, its parameters, the recording's name, the steps editor
             if let Some(patch) = p.get("recipes")
                 && let Err(e) = crate::panels::recipes::patch(app, patch)

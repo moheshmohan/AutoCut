@@ -366,7 +366,7 @@ pub fn commands() -> Vec<CommandSpec> {
             r#"{"items":[id]?,"paths":[str]?,"language":"en|ml|auto"?,"model":str?,"diarize":bool=true,"removePauses":bool=true,"removeFillers":bool=true,"removeRetakes":bool=true,"removeHesitations":bool=false,"minPause":0.1..30=0.6,"keepPause":0..2=0.12,"name":str?,"export":str?,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::RoughCut, p),
         ),
-        job("autocut.quick", "Quick Short…", &[], QUICK_PARAMS, |s, p| start(s, TaskKind::Quick, p)),
+        job("autocut.quick", "Quick Short…", &["Sequence"], QUICK_PARAMS, |s, p| start(s, TaskKind::Quick, p)),
         job(
             "autocut.malayalamScript",
             "Write Malayalam Script",

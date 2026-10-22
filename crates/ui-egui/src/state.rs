@@ -627,6 +627,9 @@ pub struct UiState {
     /// Media Browser view state (tree, path field, Edit Columns…). See `panels::media_browser`.
     #[serde(default)]
     pub media_browser: crate::panels::media_browser::MediaBrowserUi,
+    /// Quick Short… dialog (open when Some): the source, template, length, platform, topic, look.
+    #[serde(default)]
+    pub quick_short: Option<crate::panels::quick_short::QuickShortDraft>,
 }
 
 /// An open Edit / Clip / File menu dialog: the engine command it runs on OK and the parameters
@@ -1047,6 +1050,7 @@ impl Default for UiState {
             keys: Default::default(),
             project_panel: Default::default(),
             media_browser: Default::default(),
+            quick_short: None,
         }
     }
 }
