@@ -158,10 +158,13 @@ stays above it.
 English cloned narration (VoxCPM) is heard back by Whisper large-v3-turbo (small when turbo is
 not downloaded) and read again with the next seed until clear, as Malayalam is. What was heard
 goes through the same text normaliser as the script (a recogniser writes "2023" and "80 %"; the
-voice read "twenty twenty-three" and "eighty percent"). Ten lines of the owner's clone: nine clear
-on the first reading (CER 0–0.09, the recogniser's own slips such as "busk" for "box"), one read
-again after "an robot … working" for "a robot … walking" (CER 0.17); voice similarity 0.64–0.77.
-`heard::Policy::english()`: CER at most 0.15, sentence starts at most 0.5, three readings.
+voice read "twenty twenty-three" and "eighty percent"). Ten lines of the owner's clone: all clear
+on the first reading, CER 0–0.09 (the recogniser's own slips such as "busk" for "box"); voice
+similarity 0.64–0.77. Before the heard text went through the script's normaliser, "2023" against
+"twenty twenty-three" alone cost 0.13 and one line was read again. `heard::Policy::english()`:
+CER at most 0.15, sentence starts at most 0.5, three readings: it catches garbled, truncated and
+wrong-voice readings; a slip of one or two words ("an robot … working", CER 0.04) passes, as the
+recogniser's own slips do.
 
 ## Understanding raw talking clips (2026-10-22)
 

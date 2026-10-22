@@ -244,9 +244,9 @@ impl Policy {
     }
 
     /// English narration (cloned voices): the thresholds measured on the owner's cloned English
-    /// readings heard by Whisper large-v3-turbo (crate README, "English: the strict check"):
-    /// good readings stay under 0.12 overall; a sentence start may lose a short word to the
-    /// recogniser.
+    /// readings heard by Whisper large-v3-turbo (`crates/speech/README.md`, "English narration:
+    /// the strict check"): good readings stay under 0.09 overall; a sentence start may lose a
+    /// short word to the recogniser.
     pub fn english() -> Self {
         Policy { max_takes: 3, max_cer: 0.15, max_start_cer: 0.5 }
     }
