@@ -46,6 +46,7 @@ pub mod media_watch;
 pub mod mix_analysis;
 pub mod mixer;
 pub mod ml_script;
+pub mod motion_track;
 pub mod multicam;
 pub mod music;
 pub mod music_neural;
@@ -503,6 +504,9 @@ pub struct Session {
     /// Auto Reframe analyses whose keyframes are written when they finish (`sequence.autoReframe`,
     /// `clip.autoReframe`), and what the finished ones made.
     pub reframes: reframe::Reframes,
+    /// Motion tracking jobs (`track.create`, `track.refine`, `track.blurObject`…) whose tracks are
+    /// saved when they finish, and what the finished ones made.
+    pub motion_tracks: motion_track::MotionTracks,
     /// Automatic privacy blur jobs (`clip.autoRedact`, `sequence.autoRedact`) whose masks are
     /// written when they finish, what the finished ones made, and the host's vision check.
     pub redacts: redact::Redacts,
@@ -647,6 +651,7 @@ impl Session {
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
             reframes: Default::default(),
+            motion_tracks: Default::default(),
             redacts: Default::default(),
             neural_music: Default::default(),
             soundfonts: Default::default(),
@@ -777,6 +782,7 @@ impl Session {
         masks::poll(self);
         scene_detect::poll(self);
         reframe::poll(self);
+        motion_track::poll(self);
         redact::poll(self);
         music_neural::poll(self);
         export_tools::pump_queue(self, false);

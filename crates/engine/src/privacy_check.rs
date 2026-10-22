@@ -92,16 +92,22 @@ fn times_p(p: &Value) -> Result<Vec<f64>> {
 
 /// The face detector: the host's own, else the downloaded one (loaded once).
 fn detector(s: &mut Session) -> Result<DetectFn> {
+    face_detector(s, CMD)
+}
+
+/// The face detector for command `cmd` (its errors name it): the host's own, else the
+/// downloaded one (loaded once, shared with `sequence.checkPrivacy`).
+pub(crate) fn face_detector(s: &mut Session, cmd: &str) -> Result<DetectFn> {
     if let Some(d) = &s.redacts.detector {
         return Ok(d.clone());
     }
     if let Some(d) = &s.redacts.faces_only {
         return Ok(d.clone());
     }
-    crate::redact::ready(CMD)?;
+    crate::redact::ready(cmd)?;
     // a low floor: the score asked for is applied here, so one detector serves every call
     let o = crate::redact::Options { faces: true, plates: false, face_score: 0.3, ..crate::redact::Options::default() };
-    let d = crate::redact::load_detectors(&o).map_err(|e| bad(CMD, e))?;
+    let d = crate::redact::load_detectors(&o).map_err(|e| bad(cmd, e))?;
     s.redacts.faces_only = Some(d.clone());
     Ok(d)
 }

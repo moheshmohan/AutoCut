@@ -4,6 +4,7 @@
 //! |---|---|
 //! | `sequence.autoReframe` | a copy of a sequence (`sequence`, default the active one) in another shape — `aspect` `"9:16"` (the default), `"1:1"`, `"4:5"` or `"16:9"` — whose clips follow their subject with Motion ▸ Position and Scale keyframes; with `range` only that part of it, starting at zero; one undo step ("Auto Reframe Sequence") |
 //! | `clip.autoReframe` | the same on clips (`clips`, default the selection, else every video clip) where they are, in the frame they are in, one undo step ("Auto Reframe"); `keepScale` keeps each clip's own Scale (a push-in already keyframed) and moves only its position |
+//! | `clip.cameraTrack` | a virtual camera on one clip (`clip`, default the selected one) in its own frame: a gentle push-in (`zoom` `subtle` 115 % / `medium` 130 % / `close` 160 % of the fill scale, less where the target would no longer fit) that keeps the `target` framed — `subject` (what stands out), `box` (`box` `[x, y, w, h]` of the picture drawn at `at`, tracked both ways from there) or `face` (the face detector every half second; the largest face) — with `smooth` 0 (close) … 1 (floaty) zero-phase smoothing of the crop path; one undo step ("Camera Track") |
 //!
 //! Both analyse in a background job (`jobs.list` shows its progress; `jobs.cancel` stops it and
 //! nothing changes): every analysed frame of each clip is decoded small (at most
@@ -41,7 +42,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use filmcraft_geom::Vec2;
 use filmcraft_project::{ClipId, Interpolation, ItemId, ItemKind, Label, Param, ParamValue, Sequence, TrackId, TrackItem};
-use filmcraft_render::reframe::{Fallback, Follow, Geometry, Plan, Sample, Zoom};
+use filmcraft_render::reframe::{Fallback, Follow, Geometry, Plan, Sample, Tuning, Zoom};
 use filmcraft_render::subject::{SubjectBox, SubjectTracker, downscale_rgba};
 use filmcraft_time::{Tick, TimeRange};
 use serde_json::{Value, json};
@@ -66,6 +67,9 @@ const MAX_OUTCOMES: usize = 256;
 
 const SEQ_CMD: &str = "sequence.autoReframe";
 const CLIP_CMD: &str = "clip.autoReframe";
+const CAMERA_CMD: &str = "clip.cameraTrack";
+/// How often a camera track on a face looks for it again, seconds.
+const FACE_EVERY_SECONDS: f64 = 0.5;
 
 /// The look of the blurred copy behind a picture that does not fill the frame — Auto Reframe's
 /// `blur` fallback and the showcase's whole portrait shots share it: Gaussian Blur at this
@@ -102,6 +106,16 @@ pub fn commands() -> Vec<CommandSpec> {
             run: auto_reframe_clips,
             journal: true,
         },
+        CommandSpec {
+            id: CAMERA_CMD,
+            label: "Camera Track",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"clip":id?,"target":"subject"|"box"|"face"="subject","box":[x,y,w,h]?,"at":seconds?,"zoom":"subtle"|"medium"|"close"="medium","smooth":0..1=0.5,"analysisFps":1..60=30,"wait":bool=false}"#,
+            enabled: has_seq,
+            run: camera_track,
+            journal: true,
+        },
     ]
 }
 
@@ -130,6 +144,12 @@ struct Work {
     /// One sequence frame.
     fd: Tick,
     anchor: Vec2,
+    /// A camera track's push-in ([`Zoom::Push`]).
+    push: Option<f64>,
+    /// Track both ways from this analysed frame (a box drawn there) instead of from the first.
+    seed_at: Option<usize>,
+    /// A camera track on a face: the detector, run every few analysed frames for hints.
+    faces: Option<(crate::redact::DetectFn, usize)>,
 }
 
 /// What the analysis made of one clip, in media time.
@@ -177,8 +197,8 @@ impl ClipReframe {
 enum Target {
     /// A new sequence: `seq` (prepared when the command ran) with the keyframes added.
     Copy { seq: Box<Sequence>, name: String, next_id: u64, label: Label, bin: Option<filmcraft_project::BinId>, aspect: String },
-    /// The clips of sequence `seq`, where they are.
-    InPlace { seq: ItemId },
+    /// The clips of sequence `seq`, where they are, as one undo step `undo`.
+    InPlace { seq: ItemId, undo: &'static str },
 }
 
 type Results = Arc<Mutex<Option<std::result::Result<Vec<ClipReframe>, String>>>>;
@@ -426,40 +446,89 @@ fn build_work(s: &Session, q: &Sequence, only: Option<&[ClipId]>, hints: &[Hint]
                 item: it.clone(),
                 fd,
                 anchor: Vec2::new(w as f64 / 2.0, h as f64 / 2.0),
+                push: None,
+                seed_at: None,
+                faces: None,
             });
         }
     }
     Ok(work)
 }
 
-/// Follow one clip's subject and plan its keyframes.
-fn analyse(w: &Work, follow: Follow, fallback: Fallback, progress: &mut dyn FnMut(usize) -> bool) -> Option<ClipReframe> {
+/// Follow one clip's subject through its analysed frames `order` (indices into `w.frames`).
+fn follow_frames(w: &Work, order: &[usize], progress: &mut dyn FnMut(usize) -> bool) -> Option<Vec<(usize, Sample)>> {
     let mut tr = SubjectTracker::new();
-    let mut samples = Vec::with_capacity(w.frames.len());
-    for (k, (st, mt)) in w.frames.iter().enumerate() {
+    let mut out = Vec::with_capacity(order.len());
+    for &k in order {
         if !progress(k) {
             return None;
         }
-        let hint = w.hints.get(&k).copied();
+        let Some((st, mt)) = w.frames.get(k) else { continue };
+        let mut hint = w.hints.get(&k).copied();
         let t = st.seconds();
         let obs = match w.src.video_frame(filmcraft_media::FrameRequest { time: *mt, scale: w.scale }) {
             Ok(f) => {
                 let rgba = f.to_rgba8();
                 match downscale_rgba(&rgba, f.width as usize, f.height as usize, ANALYSIS_SIDE) {
-                    Some((small, sw, sh)) => tr.push(&small, sw, sh, t, hint),
+                    Some((small, sw, sh)) => {
+                        if let Some((detect, every)) = &w.faces
+                            && k.is_multiple_of((*every).max(1))
+                        {
+                            hint = largest_face(detect, &small, sw, sh).or(hint);
+                        }
+                        tr.push(&small, sw, sh, t, hint)
+                    }
                     None => tr.push(&[], 0, 0, t, hint),
                 }
             }
             // a frame that does not decode is a frame where the subject is not seen
             Err(_) => tr.push(&[], 0, 0, t, hint),
         };
-        samples.push(Sample { t, bbox: obs.bbox, confidence: obs.confidence, cut: obs.cut });
+        out.push((k, Sample { t, bbox: obs.bbox, confidence: obs.confidence, cut: obs.cut }));
     }
-    let zoom = match &w.keep {
-        Some(k) => Zoom::Keep(k),
-        None => Zoom::Track,
+    Some(out)
+}
+
+/// The largest face the detector finds in an RGBA frame, as a subject box (with a little room
+/// around it).
+fn largest_face(detect: &crate::redact::DetectFn, rgba: &[u8], w: usize, h: usize) -> Option<SubjectBox> {
+    let faces = detect(rgba, w, h, w.max(h));
+    let best = faces.iter().filter(|d| d.kind == filmcraft_vision::Kind::Face).max_by(|a, b| (a.bbox[2] * a.bbox[3]).total_cmp(&(b.bbox[2] * b.bbox[3])))?;
+    let [x, y, bw, bh] = best.bbox;
+    SubjectBox::new(f64::from(x + bw / 2.0), f64::from(y + bh / 2.0), f64::from(bw) * 1.4, f64::from(bh) * 1.4)
+}
+
+/// Follow one clip's subject and plan its keyframes.
+fn analyse(w: &Work, tuning: Tuning, fallback: Fallback, progress: &mut dyn FnMut(usize) -> bool) -> Option<ClipReframe> {
+    let n = w.frames.len();
+    let samples: Vec<Sample> = match w.seed_at.filter(|k| *k < n) {
+        // from the frame the box was drawn on, back to the start, then on to the end
+        Some(k) => {
+            let back: Vec<usize> = (0..=k).rev().collect();
+            let fwd: Vec<usize> = (k..n).collect();
+            let mut b = follow_frames(w, &back, progress)?;
+            let f = follow_frames(w, &fwd, progress)?;
+            b.reverse();
+            // the backward run's cuts are on the frame after the change: one earlier going forward
+            let mut cuts: Vec<bool> = b.iter().map(|(_, s)| s.cut).collect();
+            let len = cuts.len();
+            cuts.rotate_left(1.min(len));
+            if let Some(last) = cuts.last_mut() {
+                *last = false;
+            }
+            let mut all: Vec<Sample> = b.into_iter().zip(cuts).map(|((_, s), cut)| Sample { cut, ..s }).collect();
+            all.pop();
+            all.extend(f.into_iter().map(|(_, s)| s));
+            all
+        }
+        None => follow_frames(w, &(0..n).collect::<Vec<_>>(), progress)?.into_iter().map(|(_, s)| s).collect(),
     };
-    let plan = filmcraft_render::reframe::plan(&samples, w.geometry, follow, zoom, fallback);
+    let zoom = match (&w.keep, w.push) {
+        (Some(k), _) => Zoom::Keep(k),
+        (None, Some(f)) => Zoom::Push(f),
+        (None, None) => Zoom::Track,
+    };
+    let plan = filmcraft_render::reframe::plan_tuned(&samples, w.geometry, tuning, zoom, fallback);
     Some(result_of(w, &plan, fallback))
 }
 
@@ -775,7 +844,7 @@ fn auto_reframe_sequence(s: &mut Session, p: &Value) -> Result<Value> {
     let bin = s.project.root.parent_of(seq_id).filter(|b| b.0 != 0);
     let label_text = format!("Auto Reframe {aspect_label}: {}", item.name);
     let target = Target::Copy { seq: Box::new(target), name, next_id, label: item.label, bin, aspect: aspect_label };
-    start(s, cmd, label_text, target, work, follow, fallback, p)
+    start(s, cmd, label_text, target, work, follow.tuning(), fallback, p)
 }
 
 fn auto_reframe_clips(s: &mut Session, p: &Value) -> Result<Value> {
@@ -808,11 +877,106 @@ fn auto_reframe_clips(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let n = work.len();
     let label = format!("Auto Reframe ({n} clip{})", if n == 1 { "" } else { "s" });
-    start(s, cmd, label, Target::InPlace { seq: seq_id }, work, follow, fallback, p)
+    let undo = if n == 1 { "Auto Reframe" } else { "Auto Reframe Clips" };
+    start(s, cmd, label, Target::InPlace { seq: seq_id, undo }, work, follow.tuning(), fallback, p)
+}
+
+/// `clip.cameraTrack`: one clip's Motion keeps its target framed with a gentle push-in.
+fn camera_track(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = CAMERA_CMD;
+    if !p.is_object() && !p.is_null() {
+        return Err(bad(cmd, "parameters must be an object"));
+    }
+    let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    let q = s.active_sequence().ok_or(EngineError::NoSequence)?.clone();
+    let push = match p.get("zoom").filter(|v| !v.is_null()) {
+        None => 1.3,
+        Some(Value::String(z)) => match z.trim().to_ascii_lowercase().as_str() {
+            "subtle" => 1.15,
+            "medium" => 1.3,
+            "close" => 1.6,
+            _ => return Err(bad(cmd, format!("`zoom` is \"subtle\", \"medium\" or \"close\", not \"{z}\""))),
+        },
+        Some(_) => return Err(bad(cmd, "`zoom` is \"subtle\", \"medium\" or \"close\"")),
+    };
+    let smooth = match p.get("smooth").filter(|v| !v.is_null()) {
+        None => 0.5,
+        Some(v) => {
+            v.as_f64().filter(|x| x.is_finite() && (0.0..=1.0).contains(x)).ok_or_else(|| bad(cmd, "`smooth` is a number from 0 (close) to 1 (floaty)"))?
+        }
+    };
+    let fps = analysis_fps_p(cmd, p)?;
+    let clip = match u64_p(p, "clip") {
+        Some(c) => ClipId(c),
+        None => s
+            .state
+            .selection
+            .iter()
+            .copied()
+            .find(|c| q.video_tracks.iter().any(|t| t.item(*c).is_some()))
+            .ok_or_else(|| bad(cmd, "select the video clip to camera-track (or pass `clip`)"))?,
+    };
+    let it = q.video_tracks.iter().find_map(|t| t.item(clip)).cloned().ok_or_else(|| bad(cmd, "no such video clip in the active sequence"))?;
+    let target = match p.get("target").filter(|v| !v.is_null()) {
+        None => "subject".to_string(),
+        Some(Value::String(t)) => t.trim().to_ascii_lowercase(),
+        Some(_) => return Err(bad(cmd, "`target` is \"subject\", \"box\" or \"face\"")),
+    };
+    let at = match p.get("at").filter(|v| !v.is_null()) {
+        None => s.playhead().clamp(it.start, (it.end() - Tick(1)).max(it.start)),
+        Some(v) => {
+            let t = Tick::from_seconds_f64(
+                v.as_f64().filter(|x| x.is_finite() && x.abs() <= 1e7).ok_or_else(|| bad(cmd, "`at` is a time in seconds on the sequence"))?,
+            );
+            if t < it.start || t >= it.end() {
+                return Err(bad(cmd, "`at` is outside the clip"));
+            }
+            t
+        }
+    };
+    let mut hints = Vec::new();
+    let mut faces = None;
+    match target.as_str() {
+        "subject" => {}
+        "box" => {
+            let b = p
+                .get("box")
+                .and_then(Value::as_array)
+                .filter(|a| a.len() == 4)
+                .ok_or_else(|| bad(cmd, "`target: \"box\"` needs `box` [x, y, w, h] (0..1 of the picture)"))?;
+            let v: Vec<f64> = b.iter().filter_map(Value::as_f64).filter(|x| x.is_finite()).collect();
+            let [x, y, w, h] = v.as_slice() else { return Err(bad(cmd, "`box` is four finite numbers")) };
+            if !(*w > 0.0 && *h > 0.0 && *w <= 1.0 && *h <= 1.0 && (-1.0..=2.0).contains(x) && (-1.0..=2.0).contains(y)) {
+                return Err(bad(cmd, "`box` w and h are 0..1 of the picture, and x and y near it"));
+            }
+            let bbox = SubjectBox::from_corner(*x, *y, *w, *h).ok_or_else(|| bad(cmd, "`box` is outside the picture"))?;
+            hints.push(Hint { clip: Some(clip), media: Some(it.source_time_at(at)), bbox });
+        }
+        "face" => {
+            let detect = match s.redacts.detector.clone() {
+                Some(d) => d,
+                None => crate::privacy_check::face_detector(s, cmd)?,
+            };
+            faces = Some(detect);
+        }
+        other => return Err(bad(cmd, format!("`target` is \"subject\", \"box\" or \"face\", not \"{other}\""))),
+    }
+    let mut work = build_work(s, &q, Some(&[clip]), &hints, fps, false)?;
+    let Some(w) = work.first_mut() else { return Err(bad(cmd, "the clip has no picture to track")) };
+    w.push = Some(push);
+    if target == "box" {
+        w.seed_at = w.hints.keys().min().copied();
+    }
+    if let Some(d) = faces {
+        let every = ((FACE_EVERY_SECONDS * fps).round() as usize).max(1);
+        w.faces = Some((d, every));
+    }
+    let label = format!("Camera Track: {}", it.name);
+    start(s, cmd, label, Target::InPlace { seq: seq_id, undo: "Camera Track" }, work, Tuning::smoothness(smooth), Fallback::Center, p)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start(s: &mut Session, cmd: &'static str, label: String, target: Target, work: Vec<Work>, follow: Follow, fallback: Fallback, p: &Value) -> Result<Value> {
+fn start(s: &mut Session, cmd: &'static str, label: String, target: Target, work: Vec<Work>, tuning: Tuning, fallback: Fallback, p: &Value) -> Result<Value> {
     let total: usize = work.iter().map(|w| w.frames.len()).sum();
     let clips = work.len();
     let job = crate::narration::new_job(s, label);
@@ -838,7 +1002,7 @@ fn start(s: &mut Session, cmd: &'static str, label: String, target: Target, work
                 }
                 true
             };
-            match analyse(w, follow, fallback, &mut tick) {
+            match analyse(w, tuning, fallback, &mut tick) {
                 Some(r) => made.push(r),
                 None => {
                     stopped = true;
@@ -954,12 +1118,11 @@ fn apply(s: &mut Session, target: Target, clips: &[ClipReframe]) -> Result<Value
             s.toast(format!("Auto Reframe: \"{name}\" ({aspect}), the subject followed in {followed} of {} clip(s)", clips.len()));
             Ok(json!({"sequence": id.0, "name": name, "aspect": aspect, "width": w, "height": h, "followed": followed, "blurFill": filled, "clips": summary}))
         }
-        Target::InPlace { seq } => {
+        Target::InPlace { seq, undo } => {
             if s.project.sequence(seq).is_none() {
                 return Err(EngineError::Other("the sequence is gone".into()));
             }
-            let label = if clips.len() == 1 { "Auto Reframe" } else { "Auto Reframe Clips" };
-            s.edit(label, |pr, _| {
+            s.edit(undo, |pr, _| {
                 let mut next_id = pr.next_id;
                 let media = media_spans(pr, &pool, pr.sequence(seq).ok_or(EngineError::NoSequence)?);
                 let q = pr.sequence_mut(seq).ok_or(EngineError::NoSequence)?;
