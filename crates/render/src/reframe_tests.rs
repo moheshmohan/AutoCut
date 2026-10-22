@@ -342,3 +342,34 @@ fn hostile_samples_never_panic() {
     assert!(fill(&[None, None], &[0.0, 1.0]).is_none());
     assert_eq!(window(&[], &[]), Vec::<f64>::new());
 }
+
+/// A camera track in the clip's own frame (16:9 into 16:9): a constant push-in that keeps the
+/// moving subject near the middle, smoother with more `smooth`, and never off the picture.
+#[test]
+fn camera_track_pushes_in_and_follows() {
+    let g = Geometry { picture: (1920.0, 1080.0), frame: (1920.0, 1080.0) };
+    let s: Vec<Sample> =
+        (0..150).map(|k| Sample { t: k as f64 / 30.0, bbox: SubjectBox::new(0.3 + 0.002 * k as f64, 0.5, 0.1, 0.25), confidence: 0.9, cut: false }).collect();
+    let ts = times(&s);
+    for (push, smooth) in [(1.15, 0.2), (1.35, 0.5), (1.6, 0.9)] {
+        let p = plan_tuned(&s, g, Tuning::smoothness(smooth), Zoom::Push(push), Fallback::Center);
+        assert!(!p.letterbox && p.animate_position, "{push}: {p:?}");
+        for k in (0..s.len()).step_by(10) {
+            let at = placement_at(&p, &ts, k).unwrap();
+            assert!((at.1 - push).abs() < 0.02, "{push}: the scale holds the push-in, got {}", at.1);
+            assert!(covers(&g, at), "{push}: the picture covers the frame at {k}");
+        }
+        // the subject stays near the middle (in the window, eased)
+        let b = s[100].bbox.unwrap();
+        let x = on_screen(&g, placement_at(&p, &ts, 100).unwrap(), [b.cx, b.cy])[0];
+        assert!((x - 960.0).abs() < 200.0, "{push}: subject at {x}");
+    }
+    // a subject too big for the push-in: no further than it fits
+    let big: Vec<Sample> = (0..60).map(|k| Sample { t: k as f64 / 30.0, bbox: SubjectBox::new(0.5, 0.5, 0.8, 0.8), confidence: 0.9, cut: false }).collect();
+    let p = plan_tuned(&big, g, Tuning::smoothness(0.5), Zoom::Push(1.6), Fallback::Center);
+    assert!(p.keys.iter().all(|k| k.scale < 1.2), "{:?}", p.keys.first());
+    // hostile numbers
+    let p = plan_tuned(&s, g, Tuning { omega: f64::NAN, zoom_omega: -1.0, window: f64::INFINITY, max_zoom: 0.0 }, Zoom::Push(f64::NAN), Fallback::Center);
+    assert!(p.keys.iter().all(|k| k.scale.is_finite() && k.position.iter().all(|v| v.is_finite())));
+    assert!(Tuning::smoothness(0.0).omega > Tuning::smoothness(1.0).omega);
+}

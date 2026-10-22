@@ -24,6 +24,7 @@ pub mod gtemplate;
 pub mod keyframe;
 pub mod mask;
 pub mod mixer;
+pub mod motion_track;
 pub mod multicam;
 pub mod narration;
 pub mod safe_zones;
@@ -52,6 +53,7 @@ pub use graphic_design::{CharStyle, GraphicMeta, LayerExtra, Pin, PinTarget, Rol
 pub use keyframe::{Interpolation, Keyframe, Param, ParamValue};
 pub use mask::{Mask, MaskMode, MaskPath, MaskVertex, SplitCorner, TrackMethod};
 pub use mixer::{AutomationMode, InputMap, MixerStrip, TrackSend};
+pub use motion_track::{AttachTarget, Attachment, FollowMode, MotionTrack, MotionTrackId, Pose, TrackDirection, TrackSample, TrackingMethod};
 pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSource};
 pub use narration::{Delivery, Narration, NumberStyle, VocalPitch};
 pub use transcript::{Speaker, Transcript, Word};
@@ -1288,6 +1290,10 @@ pub struct Project {
     /// instructions for whoever opens it next, frame numbers and the like. Schema v15.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Motion tracks (`track.*`): objects followed through clips, and what follows them
+    /// ([`motion_track`]). Shared (`Arc`) so undo snapshots don't copy them. Schema v16.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub motion_tracks: BTreeMap<MotionTrackId, std::sync::Arc<MotionTrack>>,
 }
 
 /// How a sequence is shown in the Timeline panel: its zoom, scroll position and track heights.
@@ -1384,6 +1390,7 @@ impl Project {
             source_graphics: BTreeMap::new(),
             narrations: BTreeMap::new(),
             notes: String::new(),
+            motion_tracks: BTreeMap::new(),
         }
     }
 
