@@ -529,6 +529,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 super::timeline_volume::paint(&p, body, it);
             }
             app.auto.add(&format!("timeline.clip.{}", it.id.0), body.intersect(content), &it.name);
+            // a motion tracking job on it: its progress along the bottom
+            super::motion_track::clip_progress(app, &p, body.intersect(content), it.id);
             // a nest that runs past the end of its sequence's contents: that part is empty
             if !previews.contains_key(&it.id)
                 && let Some(empty) = app.session.project.nest_overhang(it)

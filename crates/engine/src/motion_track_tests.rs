@@ -428,3 +428,46 @@ fn camera_track_keeps_the_box_framed() {
         assert!(s.execute("clip.cameraTrack", bad.clone()).is_err(), "{bad}");
     }
 }
+
+/// `track.add` puts a blur, mosaic, spotlight or callout on a track already made, at once; a
+/// callout can be limited in time and put on a given video track.
+#[test]
+fn add_to_an_existing_track() {
+    let (mut s, seq, clip, rate) = session();
+    let id = create(&mut s, clip, secs(rate, 0), truth_box(0), "subject");
+    let undo = s.history.undo.len();
+    let r = s.execute("track.add", json!({"track": id, "what": "blur"})).unwrap();
+    assert_eq!(r["kind"], "blur", "{r}");
+    assert_eq!(s.history.undo.len(), undo + 1);
+    s.execute("track.add", json!({"track": id, "what": "mosaic", "shape": "rectangle"})).unwrap();
+    s.execute("track.add", json!({"track": id, "what": "spotlight", "dim": 40})).unwrap();
+    let r = s
+        .execute(
+            "track.add",
+            json!({"track": id, "what": "label", "text": "Go2", "style": "tag", "from": secs(rate, 10), "to": secs(rate, 30), "videoTrack": 2}),
+        )
+        .unwrap();
+    let lid = ClipId(r["clip"].as_u64().unwrap_or_else(|| panic!("{r}")));
+    assert_eq!(r["track"], "V3");
+    let q = s.project.sequence(seq).unwrap().clone();
+    let (tid, l) = q.find_item(lid).unwrap();
+    assert_eq!(tid, q.video_tracks[2].id);
+    assert_eq!(l.start, rate.tick_of(10));
+    assert_eq!(l.end(), rate.tick_of(30));
+    assert_eq!(l.graphic_layers().count(), 1, "a tag has no leader");
+    let p = l.effect("motion").unwrap().vec2_at("position", l.effect_time_at(rate.tick_of(20)));
+    assert!((p - truth(20).0).length() < 3.0, "{p:?}");
+    assert_eq!(s.project.motion_tracks.values().next().unwrap().attachments.len(), 4);
+    for bad in [
+        json!({"track": id}),
+        json!({"track": id, "what": "fireworks"}),
+        json!({"track": id, "what": "label"}),
+        json!({"track": id, "what": "label", "text": "a", "from": 3.0, "to": 1.0}),
+        json!({"track": id, "what": "label", "text": "a", "videoTrack": 99}),
+        json!({"track": id, "what": "label", "text": "a", "videoTrack": 2, "from": secs(rate, 12), "to": secs(rate, 20)}),
+        json!({"track": id, "what": "blur", "amount": -1}),
+        json!({"track": 4242, "what": "blur"}),
+    ] {
+        assert!(s.execute("track.add", bad.clone()).is_err(), "accepted {bad}");
+    }
+}

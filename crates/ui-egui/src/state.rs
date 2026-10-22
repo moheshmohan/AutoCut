@@ -576,6 +576,9 @@ pub struct UiState {
     /// Free-draw (pen) mask being placed on the Program monitor (Effect Controls ▸ pen icon).
     #[serde(default)]
     pub mask_pen: Option<MaskPenDraft>,
+    /// The Program monitor's Track tool (open when Some; `panels::motion_track`).
+    #[serde(default)]
+    pub track_tool: Option<TrackToolState>,
     /// Effect presets: the preset being renamed / the Save Preset dialog (open when Some).
     #[serde(default)]
     pub save_preset: Option<SavePresetDraft>,
@@ -640,6 +643,19 @@ pub struct ClipDialogDraft {
     pub info: serde_json::Value,
     #[serde(default)]
     pub error: String,
+}
+
+/// The Track tool on the Program monitor: the clip it tracks, the box drawn (shares of the
+/// sequence frame: x, y, w, h), the method (`subject` or `points`), the tracking job running and
+/// the track shown (its path, and what Attach attaches to).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrackToolState {
+    pub clip: u64,
+    pub rect: Option<[f64; 4]>,
+    pub method: String,
+    pub job: Option<u64>,
+    pub track: Option<u64>,
 }
 
 /// A pen mask in progress: vertices placed so far, in clip pixels (`[x, y, tangent x, tangent y]`).
@@ -1032,6 +1048,7 @@ impl Default for UiState {
             make_offline: None,
             color_dialog: None,
             mask_pen: None,
+            track_tool: None,
             save_preset: None,
             audio_fx_editors: Vec::new(),
             sync_dialog: None,

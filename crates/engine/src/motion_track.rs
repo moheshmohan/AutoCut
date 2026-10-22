@@ -14,6 +14,7 @@
 //! | `track.blurObject` | track (as `track.create`), then a blurred (`style: "blur"`) or pixelated (`"mosaic"`) mask follows the object: privacy for one object or logo; one undo step ("Blur Object") |
 //! | `track.label` | track, then a callout follows the object: `text` on a graphic clip over it with a leader line and a dot (`style` `callout` / `tag` / `plain`, `side` `auto` / `left` / `right`); one undo step ("Label Object") |
 //! | `track.spotlight` | track, then the surroundings are darkened (`dim` %) outside a soft ellipse following the object; one undo step ("Spotlight Object") |
+//! | `track.add` | the same on a track already made (`track`): `what` `label` (with `text`, `style`, `side`, `size`, `accent`), `blur`, `mosaic` or `spotlight` (with `dim`); one undo step |
 //!
 //! **Baked keyframes, linked.** An attachment writes ordinary keyframes on its target in the
 //! target's media time (one a sequence frame where the track and the target overlap, reduced with
@@ -81,6 +82,7 @@ const ATTACH: &str = "track.attach";
 const BLUR: &str = "track.blurObject";
 const LABEL: &str = "track.label";
 const SPOTLIGHT: &str = "track.spotlight";
+const ADD: &str = "track.add";
 
 type Run = fn(&mut Session, &Value) -> Result<Value>;
 
@@ -145,6 +147,12 @@ pub fn commands() -> Vec<CommandSpec> {
         spec("track.detach", "Detach from Motion Track", r#"{"track":id,"attachment":id,"clear":bool=false}"#, detach),
         spec("track.rebake", "Update Motion Track Attachments", r#"{"track":id}"#, rebake),
         spec(
+            ADD,
+            "Add to Motion Track",
+            r##"{"track":id,"what":"label"|"blur"|"mosaic"|"spotlight","text":str?,"style":str?,"side":"auto"|"left"|"right"?,"size":px?,"accent":"#rrggbb"?,"amount":0..100?,"shape":"ellipse"|"rectangle"?,"feather":px?,"dim":0..100?,"at":seconds?}"##,
+            add,
+        ),
+        spec(
             BLUR,
             "Blur Tracked Object",
             concat!(
@@ -160,7 +168,7 @@ pub fn commands() -> Vec<CommandSpec> {
             concat!(
                 "{",
                 r#""clip":id?,"box":[x,y,w,h]|{"x","y","w","h"},"space":"picture"|"frame"="picture","at":seconds?,"direction":"forward"|"backward"|"both"="both","method":"subject"|"points"="subject","name":str?,"wait":bool=false"#,
-                r##","text":str,"style":"callout"|"tag"|"plain"="callout","side":"auto"|"left"|"right"="auto","size":px?,"accent":"#rrggbb"?}"##
+                r##","text":str,"style":"callout"|"tag"|"plain"="callout","side":"auto"|"left"|"right"="auto","size":px?,"accent":"#rrggbb"?,"videoTrack":index?,"from":seconds?,"to":seconds?}"##
             ),
             label,
         ),
@@ -908,6 +916,11 @@ struct LabelSpec {
     size: Option<f64>,
     accent: [f32; 4],
     at: Tick,
+    /// The video track (0-based) the label goes on; `None`: the first free one above the clip.
+    video_track: Option<usize>,
+    /// Shown only from / until these sequence times (inside the tracked clip).
+    from: Option<Tick>,
+    to: Option<Tick>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -932,20 +945,24 @@ fn opt_range(cmd: &str, p: &Value, key: &str, lo: f64, hi: f64) -> Result<Option
     }
 }
 
-fn blur_object(s: &mut Session, p: &Value) -> Result<Value> {
-    let req = request(s, BLUR, p)?;
-    let mosaic = match opt_str(BLUR, p, "style")?.unwrap_or("blur") {
-        "blur" => false,
-        "mosaic" | "pixelate" => true,
-        o => return Err(bad(BLUR, format!("`style` is \"blur\" or \"mosaic\", not \"{o}\""))),
+fn blur_spec(cmd: &str, p: &Value, mosaic: Option<bool>, at: Tick) -> Result<BlurSpec> {
+    let mosaic = match (mosaic, opt_str(cmd, p, "style")?.unwrap_or("blur")) {
+        (Some(m), _) => m,
+        (None, "blur") => false,
+        (None, "mosaic" | "pixelate") => true,
+        (None, o) => return Err(bad(cmd, format!("`style` is \"blur\" or \"mosaic\", not \"{o}\""))),
     };
-    let rectangle = match opt_str(BLUR, p, "shape")?.unwrap_or("ellipse") {
+    let rectangle = match opt_str(cmd, p, "shape")?.unwrap_or("ellipse") {
         "ellipse" => false,
         "rectangle" | "rect" => true,
-        o => return Err(bad(BLUR, format!("`shape` is \"ellipse\" or \"rectangle\", not \"{o}\""))),
+        o => return Err(bad(cmd, format!("`shape` is \"ellipse\" or \"rectangle\", not \"{o}\""))),
     };
-    let spec =
-        BlurSpec { mosaic, amount: opt_range(BLUR, p, "amount", 0.0, 100.0)?, rectangle, feather: opt_range(BLUR, p, "feather", 0.0, 1000.0)?, at: req.at };
+    Ok(BlurSpec { mosaic, amount: opt_range(cmd, p, "amount", 0.0, 100.0)?, rectangle, feather: opt_range(cmd, p, "feather", 0.0, 1000.0)?, at })
+}
+
+fn blur_object(s: &mut Session, p: &Value) -> Result<Value> {
+    let req = request(s, BLUR, p)?;
+    let spec = blur_spec(BLUR, p, None, req.at)?;
     let track = Box::new(new_track(&req));
     start(s, BLUR, req, Action::Create { track, then: Then::Blur(spec) }, p)
 }
@@ -959,38 +976,115 @@ fn hex_color(s: &str) -> Option<[f32; 4]> {
     Some([c(0)?, c(2)?, c(4)?, 1.0])
 }
 
-fn label(s: &mut Session, p: &Value) -> Result<Value> {
+fn label_spec(cmd: &str, p: &Value, at: Tick) -> Result<LabelSpec> {
     let text = match p.get("text") {
         Some(Value::String(t)) if !t.trim().is_empty() && t.chars().count() <= MAX_TEXT_CHARS => t.trim().to_string(),
-        _ => return Err(bad(LABEL, format!("`text` is the label, 1 to {MAX_TEXT_CHARS} characters"))),
+        _ => return Err(bad(cmd, format!("`text` is the label, 1 to {MAX_TEXT_CHARS} characters"))),
     };
-    let style = match opt_str(LABEL, p, "style")?.unwrap_or("callout") {
+    let style = match opt_str(cmd, p, "style")?.unwrap_or("callout") {
         "callout" => LabelStyle::Callout,
         "tag" => LabelStyle::Tag,
         "plain" => LabelStyle::Plain,
-        o => return Err(bad(LABEL, format!("`style` is \"callout\", \"tag\" or \"plain\", not \"{o}\""))),
+        o => return Err(bad(cmd, format!("`style` is \"callout\", \"tag\" or \"plain\", not \"{o}\""))),
     };
-    let side = match opt_str(LABEL, p, "side")?.unwrap_or("auto") {
+    let side = match opt_str(cmd, p, "side")?.unwrap_or("auto") {
         "auto" => None,
         "right" => Some(true),
         "left" => Some(false),
-        o => return Err(bad(LABEL, format!("`side` is \"auto\", \"left\" or \"right\", not \"{o}\""))),
+        o => return Err(bad(cmd, format!("`side` is \"auto\", \"left\" or \"right\", not \"{o}\""))),
     };
-    let accent = match opt_str(LABEL, p, "accent")? {
+    let accent = match opt_str(cmd, p, "accent")? {
         None => [1.0, 0.78, 0.18, 1.0],
-        Some(c) => hex_color(c).ok_or_else(|| bad(LABEL, "`accent` is a colour \"#rrggbb\""))?,
+        Some(c) => hex_color(c).ok_or_else(|| bad(cmd, "`accent` is a colour \"#rrggbb\""))?,
     };
-    let size = opt_range(LABEL, p, "size", 4.0, 1000.0)?;
+    let size = opt_range(cmd, p, "size", 4.0, 1000.0)?;
+    let video_track = match p.get("videoTrack").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(
+            v.as_u64().and_then(|n| usize::try_from(n).ok()).filter(|n| *n < 1000).ok_or_else(|| bad(cmd, "`videoTrack` is a video track index (0 = V1)"))?,
+        ),
+    };
+    let secs = |k: &str| -> Result<Option<Tick>> {
+        match p.get(k).filter(|v| !v.is_null()) {
+            None => Ok(None),
+            Some(v) => v
+                .as_f64()
+                .filter(|x| x.is_finite() && x.abs() <= 1e7)
+                .map(|x| Some(Tick::from_seconds_f64(x)))
+                .ok_or_else(|| bad(cmd, format!("`{k}` is a time in seconds on the sequence"))),
+        }
+    };
+    let (from, to) = (secs("from")?, secs("to")?);
+    if let (Some(a), Some(b)) = (from, to)
+        && b <= a
+    {
+        return Err(bad(cmd, "`to` must come after `from`"));
+    }
+    Ok(LabelSpec { text, style, side, size, accent, at, video_track, from, to })
+}
+
+fn label(s: &mut Session, p: &Value) -> Result<Value> {
+    // checked before the (slower) tracking request
+    label_spec(LABEL, p, Tick::ZERO)?;
     let req = request(s, LABEL, p)?;
-    let spec = LabelSpec { text, style, side, size, accent, at: req.at };
+    let spec = label_spec(LABEL, p, req.at)?;
     let track = Box::new(new_track(&req));
     start(s, LABEL, req, Action::Create { track, then: Then::Label(spec) }, p)
 }
 
+fn spot_spec(cmd: &str, p: &Value, at: Tick) -> Result<SpotSpec> {
+    Ok(SpotSpec { dim: opt_range(cmd, p, "dim", 0.0, 100.0)?.unwrap_or(60.0), feather: opt_range(cmd, p, "feather", 0.0, 2000.0)?, at })
+}
+
+/// `track.add`: a label, blur, mosaic or spotlight on a track already made, at once.
+fn add(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = track_id_p(ADD, p)?;
+    let t = get_track(s, ADD, id)?;
+    if t.attachments.len() >= MAX_ATTACHMENTS {
+        return Err(bad(ADD, format!("a track drives at most {MAX_ATTACHMENTS} things")));
+    }
+    // when: `at`, else the playhead where the tracked clip shows, else the seed's moment
+    let clip = s
+        .project
+        .sequence(t.sequence)
+        .and_then(|q| q.find_item(t.clip))
+        .map(|(_, c)| c.clone())
+        .ok_or_else(|| bad(ADD, "the tracked clip is no longer in its sequence"))?;
+    let at = match at_p(ADD, p)? {
+        Some(a) => a,
+        None if s.playhead() >= clip.start && s.playhead() < clip.end() => s.playhead(),
+        None => sequence_time_of(&clip, t.seed.t).unwrap_or(clip.start),
+    };
+    let then = match opt_str(ADD, p, "what")? {
+        Some("label" | "text" | "callout") => Then::Label(label_spec(ADD, p, at)?),
+        Some("blur") => Then::Blur(blur_spec(ADD, p, Some(false), at)?),
+        Some("mosaic") => Then::Blur(blur_spec(ADD, p, Some(true), at)?),
+        Some("spotlight") => Then::Spotlight(spot_spec(ADD, p, at)?),
+        Some(w) => return Err(bad(ADD, format!("`what` is \"label\", \"blur\", \"mosaic\" or \"spotlight\", not \"{w}\""))),
+        None => return Err(bad(ADD, "need `what`: \"label\", \"blur\", \"mosaic\" or \"spotlight\"")),
+    };
+    let label = match then {
+        Then::Label(_) => "Label Object",
+        Then::Blur(_) => "Blur Object",
+        _ => "Spotlight Object",
+    };
+    let made = s.edit(label, |pr, st| {
+        let mut t = (*t).clone();
+        let v = match then {
+            Then::Label(l) => add_label(pr, st, &mut t, &l)?,
+            Then::Blur(b) => add_blur(pr, &mut t, &b)?,
+            Then::Spotlight(sp) => add_spotlight(pr, &mut t, &sp)?,
+            Then::Nothing => Value::Null,
+        };
+        pr.motion_tracks.insert(t.id, Arc::new(t));
+        Ok(v)
+    })?;
+    Ok(made)
+}
+
 fn spotlight(s: &mut Session, p: &Value) -> Result<Value> {
     let req = request(s, SPOTLIGHT, p)?;
-    let spec =
-        SpotSpec { dim: opt_range(SPOTLIGHT, p, "dim", 0.0, 100.0)?.unwrap_or(60.0), feather: opt_range(SPOTLIGHT, p, "feather", 0.0, 2000.0)?, at: req.at };
+    let spec = spot_spec(SPOTLIGHT, p, req.at)?;
     let track = Box::new(new_track(&req));
     start(s, SPOTLIGHT, req, Action::Create { track, then: Then::Spotlight(spec) }, p)
 }
@@ -1163,10 +1257,17 @@ fn add_label(pr: &mut Project, st: &mut crate::EditorState, t: &mut MotionTrack,
         }
     }
     layers.push(text);
-    // the graphic clip over the tracked one, on the first free video track above it
+    // the graphic clip over the tracked one (or the part of it asked for), on the first free
+    // video track above it (or the one asked for)
+    let fd = rate.sane().frame_duration().max(Tick(1));
+    let start = rate.sane().snap(l.from.map_or(clip.start, |f| f.max(clip.start)));
+    let end = l.to.map_or(clip.end(), |t| t.min(clip.end()));
+    if end <= start {
+        return Err(EngineError::Other("the label's `from`..`to` is not inside the tracked clip".into()));
+    }
     let src = crate::graphics::graphic_source(pr, fw, fh, rate);
     let mut gi = pr
-        .make_track_item(src, TrackKind::Video, clip.start, TimeRange::new(Tick::ZERO, clip.duration), rate)
+        .make_track_item(src, TrackKind::Video, start, TimeRange::new(Tick::ZERO, (end - start).max(fd)), rate)
         .ok_or_else(|| EngineError::Other("can't make the label clip".into()))?;
     gi.name = format!("Label: {}", l.text.chars().take(40).collect::<String>());
     gi.effects.extend(layers);
@@ -1179,13 +1280,18 @@ fn add_label(pr: &mut Project, st: &mut crate::EditorState, t: &mut MotionTrack,
     let range = gi.range();
     let above = q.video_tracks.iter().position(|tr| tr.items.iter().any(|i| i.id == t.clip)).map_or(0, |k| k + 1);
     let free = |tr: &filmcraft_project::Track| !tr.locked && !tr.items.iter().any(|i| i.range().overlaps(&range));
-    let idx = match (above..q.video_tracks.len()).find(|&k| q.video_tracks.get(k).is_some_and(free)) {
-        Some(k) => k,
-        None => {
-            let n = q.video_tracks.len() + 1;
-            q.video_tracks.push(filmcraft_project::Track::new(track_id, TrackKind::Video, format!("Video {n}")));
-            q.video_tracks.len() - 1
-        }
+    let idx = match l.video_track {
+        Some(k) if q.video_tracks.get(k).is_some_and(free) => k,
+        Some(k) if k < q.video_tracks.len() => return Err(EngineError::Other(format!("V{} is not free for the label", k + 1))),
+        Some(k) => return Err(EngineError::Other(format!("there is no V{}", k + 1))),
+        None => match (above..q.video_tracks.len()).find(|&k| q.video_tracks.get(k).is_some_and(free)) {
+            Some(k) => k,
+            None => {
+                let n = q.video_tracks.len() + 1;
+                q.video_tracks.push(filmcraft_project::Track::new(track_id, TrackKind::Video, format!("Video {n}")));
+                q.video_tracks.len() - 1
+            }
+        },
     };
     let tr = q.video_tracks.get_mut(idx).ok_or_else(|| EngineError::Other("no track for the label".into()))?;
     tr.items.push(gi);

@@ -3843,3 +3843,21 @@
 	Karaoke	卡拉 OK
 	Two-Line Subtitle	双行字幕
 	All vertical platforms	所有竖屏平台
+# Motion tracking (the Program monitor's Track tool)
+	Attach	附加
+	Box to track	跟踪框
+	Draw a box around the object to track	在要跟踪的对象周围画一个框
+	Motion track	运动跟踪
+	Move the playhead over the clip to track	将播放头移到要跟踪的剪辑上
+	Object lost here	此处丢失对象
+	Select a video clip to track	选择要跟踪的视频剪辑
+	Selected clip (sticker)	所选剪辑（贴纸）
+	Subject	主体
+	Text callout	文字标注
+	Track Object	跟踪对象
+	Track backward	向后跟踪
+	Track both ways	双向跟踪
+	Track forward	向前跟踪
+	Tracked object	跟踪的对象
+	Tracking… {n}%	正在跟踪… {n}%
+	Camera Track	摄像机跟踪
