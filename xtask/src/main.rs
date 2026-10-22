@@ -91,6 +91,8 @@ const LAYERS: &[(&str, u8)] = &[
     ("vision", 2),
     // voice isolation: DeepFilterNet 3 in plain Rust (weights through vision's ONNX reader)
     ("voice", 2),
+    // the scene index: shot boundaries, descriptions, quality, embeddings (candle), rankings
+    ("scenes", 2),
     // SoundFont instruments for the music engine (rustysynth behind a structural SF2 check)
     ("soundfont", 2),
     ("interchange", 2),

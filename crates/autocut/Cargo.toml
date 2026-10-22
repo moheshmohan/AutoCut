@@ -17,6 +17,8 @@ filmcraft-media = { workspace = true }
 filmcraft-audio-dsp = { workspace = true }
 # the privacy pass names what it hides (faces, plates)
 filmcraft-vision = { workspace = true }
+# the balanced-JSON reading of model answers, shared with the scene index
+filmcraft-scenes = { workspace = true }
 serde = { workspace = true }
 # float_roundtrip: a plan read and written back (showcase-plan) keeps every number exactly
 serde_json = { workspace = true, features = ["float_roundtrip"] }

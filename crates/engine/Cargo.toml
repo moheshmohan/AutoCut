@@ -26,6 +26,9 @@ neural-music = ["filmcraft-acestep/model", "speech-download"]
 privacy-models = ["filmcraft-vision/model", "speech-download"]
 # Voice isolation: the DeepFilterNet 3 download (the network itself is plain Rust and always built).
 voice-model = ["speech-download"]
+# The scene index's networks: TransNetV2 shot boundaries, Qwen3-VL descriptions, SigLIP 2
+# embeddings and the CLIP aesthetic head (candle; Metal on macOS, else the CPU) and their download.
+scene-models = ["filmcraft-scenes/model", "speech-download"]
 
 [dependencies]
 filmcraft-time = { workspace = true }
@@ -55,6 +58,7 @@ filmcraft-soundfont = { workspace = true }
 filmcraft-vision = { workspace = true }
 # voice isolation (DeepFilterNet 3, plain Rust) behind the Voice Isolation and Enhance Voice effects
 filmcraft-voice = { workspace = true }
+filmcraft-scenes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

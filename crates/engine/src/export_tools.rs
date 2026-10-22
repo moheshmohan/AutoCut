@@ -660,6 +660,9 @@ pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     if let Some(r) = crate::redact::outcome_json(s, j.id) {
         v["redact"] = r;
     }
+    if let Some(r) = crate::scenes::outcome_json(s, j.id) {
+        v["scenes"] = r;
+    }
     if crate::recipes::is_job(s, j.id) {
         v["recipe"] = crate::recipes::outcome_json(s, j.id);
     }

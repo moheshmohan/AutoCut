@@ -27,6 +27,7 @@ pub mod mixer;
 pub mod multicam;
 pub mod narration;
 pub mod safe_zones;
+pub mod scenes;
 pub mod speech;
 pub mod text_anim;
 pub mod transcript;
@@ -55,6 +56,7 @@ pub use mask::{Mask, MaskMode, MaskPath, MaskVertex, SplitCorner, TrackMethod};
 pub use mixer::{AutomationMode, InputMap, MixerStrip, TrackSend};
 pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSource};
 pub use narration::{Delivery, Narration, NumberStyle, VocalPitch};
+pub use scenes::{SceneIndex, Shot};
 pub use speech::SpeechAnalysis;
 pub use transcript::{Speaker, Transcript, Word};
 pub use transition_sound::{SoundKind, TransitionSound};
@@ -1295,6 +1297,12 @@ pub struct Project {
     /// instructions for whoever opens it next, frame numbers and the like. Schema v15.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Scene indexes of media items (`media.analyzeScenes`): shots, descriptions, quality and
+    /// embeddings, keyed by the media item, in media time. Shared (`Arc`) so undo snapshots don't
+    /// copy them. Derived data that can be made again (and is cached by file content in the data
+    /// directory), so no schema bump: builds without it drop it when saving.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scenes: BTreeMap<ItemId, std::sync::Arc<scenes::SceneIndex>>,
 }
 
 /// How a sequence is shown in the Timeline panel: its zoom, scroll position and track heights.
@@ -1392,6 +1400,7 @@ impl Project {
             source_graphics: BTreeMap::new(),
             narrations: BTreeMap::new(),
             notes: String::new(),
+            scenes: BTreeMap::new(),
         }
     }
 

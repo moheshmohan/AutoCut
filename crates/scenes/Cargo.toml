@@ -1,0 +1,42 @@
+[package]
+name = "filmcraft-scenes"
+description = "FilmCraft scene index: shot boundaries (TransNetV2, MIT), per-shot descriptions from Qwen3-VL (Apache-2.0), quality measures, LAION aesthetic scores on CLIP ViT-L/14 (MIT), SigLIP 2 embeddings (Apache-2.0) and the search and best-shot rankings over them; the networks (feature model) on candle, Metal on macOS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The networks on candle (pure Rust): TransNetV2, Qwen3-VL, SigLIP 2 and CLIP with the LAION
+# aesthetic head. Off by default and in wasm builds; on macOS candle comes with its Metal backend
+# (below) and the models run on the GPU, falling back to the CPU.
+model = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:filmcraft-locks"]
+
+[dependencies]
+filmcraft-time = { workspace = true }
+filmcraft-project = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+filmcraft-locks = { workspace = true, optional = true }
+candle-core = { version = "0.9", default-features = false, optional = true }
+candle-nn = { version = "0.9", default-features = false, optional = true }
+candle-transformers = { version = "0.9", default-features = false, optional = true }
+# Qwen3-VL's and SigLIP 2's tokenizer.json, without the C/C++ parts (onig, esaxx's C++ build)
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.9", default-features = false, features = ["metal"], optional = true }
+candle-nn = { version = "0.9", default-features = false, features = ["metal"], optional = true }
+
+[dev-dependencies]
+# the probe example and the live tests read pictures
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[[example]]
+name = "scenes_probe"
+required-features = ["model"]

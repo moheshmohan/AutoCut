@@ -1662,6 +1662,7 @@ fn build() -> Vec<CommandSpec> {
             crate::reframe::poll(s);
             crate::speech_understand::poll(s);
             crate::redact::poll(s);
+            crate::scenes::poll(s);
             Ok(Value::Array(s.jobs.iter().map(|j| crate::export_tools::job_json(s, j)).collect()))
         }),
         query!("perf.stats", "Performance Statistics", "{}", |s, _| Ok(crate::perf::stats(s))),
@@ -3534,6 +3535,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::speech_understand::commands());
     v.extend(crate::safe_zones::commands());
     v.extend(crate::redact::commands());
+    v.extend(crate::scenes::commands());
     v.extend(crate::privacy_check::commands());
     v.extend(crate::remix::commands());
     v.extend(crate::voiceover::commands());

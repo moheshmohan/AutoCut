@@ -14,7 +14,7 @@ workspace = true
 # AutoCut build: speech-to-text (Text panel ▸ Transcribe) with Whisper, and model
 # downloads, on by default so transcript-driven automation works out of the box (upstream
 # leaves them off in release builds).
-default = ["whisper", "neural-voices", "neural-music", "privacy-models", "voice-model"]
+default = ["whisper", "neural-voices", "neural-music", "privacy-models", "voice-model", "scene-models"]
 # Speech-to-text (Text panel ▸ Transcribe) with Whisper (Metal on macOS, else the CPU), and model downloads.
 whisper = ["filmcraft-engine/whisper", "filmcraft-engine/speech-download"]
 # Natural Text to Speech voices (Kokoro-82M; Metal on macOS, else the CPU; downloaded on first use).
@@ -27,6 +27,9 @@ privacy-models = ["filmcraft-engine/privacy-models"]
 # Voice isolation (Voice Isolation and Enhance Voice effects, Essential Sound ▸ Isolate Voice): the
 # DeepFilterNet 3 download (8 MB, MIT/Apache-2.0, on demand with consent); the network is plain Rust.
 voice-model = ["filmcraft-engine/voice-model"]
+# The scene index (media.analyzeScenes): TransNetV2 cuts, Qwen3-VL shot descriptions, SigLIP 2
+# search, the LAION aesthetic score (Metal on macOS, else the CPU; downloaded on demand with consent).
+scene-models = ["filmcraft-engine/scene-models"]
 
 [dependencies]
 filmcraft-engine = { workspace = true }
