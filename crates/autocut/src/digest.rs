@@ -50,6 +50,8 @@ pub const ALLOWED_FAMILIES: &[&str] = &[
     "transitions.addSound",
     "audio.normalizeLoudness",
     "fonts.list",
+    // spec chips that follow the robot (`follow_labels`): a motion track and its callout
+    "track.label",
 ];
 
 /// Whether a command id is in an allowed family.
