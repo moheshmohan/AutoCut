@@ -111,6 +111,11 @@ pub struct Options {
     pub skip_narration_check: bool,
     /// Hide visitors' faces and number plates in the footage, robots excluded ([`crate::privacy`]).
     pub redact: Option<crate::privacy::Redact>,
+    /// The shots' own sound carries speech worth hearing (people or robots talking to the
+    /// camera): Enhance Voice on it (`audio.enhanceVoice`: voice isolation, EQ, de-esser,
+    /// compression; the level left to the mix). `--enhance-voice`, a plan's `"enhanceVoice":
+    /// true`. Off by default, and never on the narration, which is synthetic.
+    pub enhance_voice: bool,
 }
 
 impl Options {
@@ -148,6 +153,7 @@ impl Default for Options {
             numbers: None,
             skip_narration_check: false,
             redact: None,
+            enhance_voice: false,
         }
     }
 }
@@ -2887,7 +2893,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let voice = opts.voice.as_deref();
     let mut narrations =
         Narrations { malayalam: opts.malayalam(), numbers: opts.numbers.clone(), unchecked: opts.skip_narration_check, ..Narrations::default() };
-    let mut mix = Mix::default();
+    let mut mix = Mix { enhance_voice: opts.enhance_voice, ..Mix::default() };
     let mut fg_firsts: Vec<(u64, Option<u64>)> = Vec::new();
     // pictures shown whole and their blurred copies: (picture, copy), every one in the show
     let mut backdrops: Vec<(u64, u64)> = Vec::new();

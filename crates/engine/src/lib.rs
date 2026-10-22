@@ -90,6 +90,7 @@ pub mod video_template_frames;
 pub mod video_template_share;
 pub mod video_templates;
 pub mod voice_clone;
+pub mod voice_fx;
 pub mod voice_lab;
 pub mod voiceover;
 pub mod youtube;

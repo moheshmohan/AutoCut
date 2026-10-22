@@ -3509,6 +3509,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::ml_script::commands());
     v.extend(crate::multicam::commands());
     v.extend(crate::essential_sound::commands());
+    v.extend(crate::voice_fx::commands());
     v.extend(crate::auto_duck::commands());
     v.extend(crate::adjustment_clip::commands());
     v.extend(crate::loudness::commands());

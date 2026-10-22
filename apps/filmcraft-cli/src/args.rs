@@ -166,6 +166,7 @@ const VALUED: &[&str] = &[
 const VALUED_IN: &[(&str, &[&str])] = &[
     ("ml-script", &["--plan"]),
     ("ml-lint", &["--plan"]),
+    ("audio", &["--amount", "--bitrate"]),
     ("trailer", &["--plan", "--robots", "--hook", "--hook-at", "--logo", "--end-text", "--link", "--include", "--seed"]),
 ];
 

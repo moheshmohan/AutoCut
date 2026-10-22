@@ -231,11 +231,12 @@ impl HopStft {
 
 // ------------------------------------------------------------------------------- DSP fallback
 
-/// The DSP fallback: a Wiener filter on the model's frames — the noise tracked per bin while
-/// no speech is there (a posteriori SNR below 2.5), the gain from a decision-directed a priori
-/// SNR (Ephraim–Malah, which keeps musical noise down) with a −20 dB floor, smoothed over
-/// neighbouring bins, and the look-ahead used to open it before onsets. It has the neural
-/// model's latency and hop.
+/// The DSP fallback: a Wiener filter on the model's frames — the noise floor per bin by minimum
+/// statistics (the smallest smoothed power over the last 1.6 s, bias-compensated; digital
+/// silence ignored, so it holds through pauses and a clip's pre-roll), the gain from a
+/// decision-directed a priori SNR (Ephraim–Malah, which keeps musical noise down) with a −20 dB
+/// floor, smoothed over neighbouring bins, and the look-ahead used to open it before onsets. It
+/// has the neural model's latency and hop.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SpectralGate;
 
@@ -256,8 +257,15 @@ const RING: usize = 3;
 const GATE_FLOOR: f32 = 0.1;
 /// Decision-directed smoothing of the a priori SNR.
 const DD_ALPHA: f32 = 0.98;
-/// A posteriori SNR below which a bin counts as noise (and updates the noise estimate).
-const NOISE_GATE: f32 = 2.5;
+/// Smoothing of the power the noise floor is tracked on.
+const PS_ALPHA: f32 = 0.85;
+/// Minimum statistics: the floor is the smallest smoothed power over `SUBS` windows of `SUB`
+/// frames (1.6 s), times the bias of taking a minimum.
+const SUB: u32 = 20;
+const SUBS: usize = 8;
+const MIN_BIAS: f32 = 2.0;
+/// Frames quieter than this (digital silence, a clip's pre-roll) leave the floor alone.
+const SILENT_POWER: f32 = 1e-12;
 
 struct GateStream {
     stft: Vec<HopStft>,
@@ -266,8 +274,14 @@ struct GateStream {
     im: Vec<Vec<Vec<f32>>>,
     gains: Vec<Vec<f32>>,
     noise: Vec<f32>,
+    /// Smoothed power, the minimum in the running window, and the last windows' minima.
+    ps: Vec<f32>,
+    cur_min: Vec<f32>,
+    mins: Vec<Vec<f32>>,
+    sub_count: u32,
+    slot: usize,
     /// Last frame's power and gain (the decision-directed estimate).
-    smooth: Vec<f32>,
+    last_power: Vec<f32>,
     last_gain: Vec<f32>,
     power: Vec<f32>,
     cur: usize,
@@ -285,12 +299,42 @@ impl GateStream {
             im: vec![vec![vec![0.0; BINS]; ch]; RING],
             gains: vec![vec![1.0; BINS]; RING],
             noise: vec![0.0; BINS],
-            smooth: vec![0.0; BINS],
+            ps: vec![0.0; BINS],
+            cur_min: vec![f32::MAX; BINS],
+            mins: vec![vec![f32::MAX; BINS]; SUBS],
+            sub_count: 0,
+            slot: 0,
+            last_power: vec![0.0; BINS],
             last_gain: vec![1.0; BINS],
             power: vec![0.0; BINS],
             cur: 0,
             started: false,
             ok,
+        }
+    }
+
+    /// Follow the noise floor (minimum statistics) with this frame's power.
+    fn track(&mut self, total: f32) {
+        if total < SILENT_POWER {
+            return;
+        }
+        let a = if self.started { PS_ALPHA } else { 0.0 };
+        self.started = true;
+        for k in 0..BINS {
+            self.ps[k] = crate::flush32(a * self.ps[k] + (1.0 - a) * self.power[k]);
+            self.cur_min[k] = self.cur_min[k].min(self.ps[k]);
+        }
+        self.sub_count += 1;
+        if self.sub_count >= SUB {
+            self.sub_count = 0;
+            let slot = self.slot;
+            self.mins[slot].copy_from_slice(&self.cur_min);
+            self.cur_min.copy_from_slice(&self.ps);
+            self.slot = (slot + 1) % SUBS;
+        }
+        for k in 0..BINS {
+            let m = self.mins.iter().fold(self.cur_min[k], |m, w| m.min(w[k]));
+            self.noise[k] = (MIN_BIAS * m).max(1e-14);
         }
     }
 }
@@ -315,26 +359,20 @@ impl VoiceStream for GateStream {
                 i += self.im[cur][c][k];
             }
             let p = (r * r + i * i) * inv * inv;
-            self.power[k] = p;
-            total += p;
+            self.power[k] = if p.is_finite() { p } else { 0.0 };
+            total += self.power[k];
         }
-        if !self.started && total > 1e-12 {
-            self.noise.copy_from_slice(&self.power);
-            self.started = true;
-        }
+        self.track(total);
         let g = &mut self.gains[cur];
         for k in 0..BINS {
             let p = self.power[k];
             let n = self.noise[k].max(1e-14);
             let post = p / n;
-            // the noise follows the bins that hold none of the voice, and creeps up (≈0.9 dB a
-            // second) so an estimate taken in the middle of a word comes back down
-            self.noise[k] = if post < NOISE_GATE { 0.92 * n + 0.08 * p } else { n * 1.002 }.max(1e-14);
-            let prior = DD_ALPHA * self.last_gain[k] * self.last_gain[k] * self.smooth[k] / n + (1.0 - DD_ALPHA) * (post - 1.0).max(0.0);
+            let prior = DD_ALPHA * self.last_gain[k] * self.last_gain[k] * self.last_power[k] / n + (1.0 - DD_ALPHA) * (post - 1.0).max(0.0);
             let gk = (prior / (1.0 + prior)).max(GATE_FLOOR);
             g[k] = if gk.is_finite() { gk } else { 1.0 };
             self.last_gain[k] = g[k];
-            self.smooth[k] = crate::flush32(p);
+            self.last_power[k] = crate::flush32(p);
         }
         // across neighbouring bins
         let mut prev = g[0];
@@ -366,7 +404,12 @@ impl VoiceStream for GateStream {
         }
         self.gains.iter_mut().for_each(|g| g.fill(1.0));
         self.noise.fill(0.0);
-        self.smooth.fill(0.0);
+        self.ps.fill(0.0);
+        self.cur_min.fill(f32::MAX);
+        self.mins.iter_mut().for_each(|m| m.fill(f32::MAX));
+        self.sub_count = 0;
+        self.slot = 0;
+        self.last_power.fill(0.0);
         self.last_gain.fill(1.0);
         self.cur = 0;
         self.started = false;

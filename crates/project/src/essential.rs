@@ -697,6 +697,10 @@ pub fn builtin_presets() -> Vec<Preset> {
             s.clarity.eq_preset = "Presence Lift".into();
             s.clarity.enhance = Slot::at(7.0);
         }),
+        mk(Dialogue, "Isolate and Enhance Voice", &|s| {
+            // Enhance Voice isolates the voice itself (the neural model when downloaded)
+            s.repair.enhance_voice = Slot::at(7.0);
+        }),
         mk(Dialogue, "Dry Up a Roomy Voice", &|s| {
             s.repair.reverb = Slot::at(6.0);
             s.repair.rumble = Slot::at(4.0);

@@ -24,6 +24,8 @@ neural-music = ["filmcraft-acestep/model", "speech-download"]
 # Automatic privacy blur: the YuNet face and LPD-YuNet plate detectors (the GPU on macOS, else
 # the CPU) and their download.
 privacy-models = ["filmcraft-vision/model", "speech-download"]
+# Voice isolation: the DeepFilterNet 3 download (the network itself is plain Rust and always built).
+voice-model = ["speech-download"]
 
 [dependencies]
 filmcraft-time = { workspace = true }
@@ -51,6 +53,8 @@ filmcraft-templates = { workspace = true }
 filmcraft-acestep = { workspace = true }
 filmcraft-soundfont = { workspace = true }
 filmcraft-vision = { workspace = true }
+# voice isolation (DeepFilterNet 3, plain Rust) behind the Voice Isolation and Enhance Voice effects
+filmcraft-voice = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

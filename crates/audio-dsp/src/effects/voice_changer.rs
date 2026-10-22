@@ -4,10 +4,10 @@
 //! | mode | sound | `character` (0–100 %) |
 //! |---|---|---|
 //! | Robot | ring modulation (30–90 Hz carrier) of the voice through a comb resonator tuned to a pitch quantised to the nearest semitone (a metallic, monotone formant), band-limited to 200 Hz–5 kHz | the comb's pitch (80–200 Hz, snapped to semitones) and the carrier |
-//! | Deep | −5 semitones, +4 dB low shelf at 150 Hz, 7 kHz low-pass | how far the low shelf lifts (0–8 dB) |
-//! | High | +7 semitones, 250 Hz high-pass, +2 dB high shelf at 5 kHz | the high shelf (0–6 dB) |
+//! | Deep | −5 semitones, a low shelf at 150 Hz, 7 kHz low-pass | how far the low shelf lifts (0–8 dB) |
+//! | High | +7 semitones, 250 Hz high-pass, a high shelf at 5 kHz | the high shelf (0–6 dB) |
 //! | Echo | a feedback delay (120–520 ms, 45 % feedback) mixed in at 40 % | the delay time |
-//! | Radio | walkie-talkie: 400 Hz–2.8 kHz band (two high-pass and two low-pass sections), +4 dB at 1.5 kHz, tanh drive | the drive (1–9×) |
+//! | Radio | walkie-talkie: 400 Hz–2.8 kHz band (two high-pass sections and a low-pass), +4 dB at 1.5 kHz, tanh drive | the drive (1–9×) |
 //! | Alien | +4 semitones, a 300–1500 Hz ring modulator mixed in at 40 %, 5.5 Hz vibrato (1.5 ms) | the ring frequency |
 //!
 //! `pitch` adds semitones to the mode's own shift (the sum is clamped to ±12); `mix` blends with
@@ -126,7 +126,6 @@ impl VoiceChanger {
             4 => [d(HighPass, 400.0, q, 0.0), d(HighPass, 400.0, q, 0.0), d(LowPass, 2800.0, q, 0.0), d(Peaking, 1500.0, 1.2, 4.0)],
             _ => [d(BandPass, 1200.0, 0.3, 0.0), id, id, id],
         };
-        // the radio's second low-pass section rides on the drive stage (see process)
         self.mode = mode;
         let robot = quantise(80.0 + 120.0 * ch);
         self.comb_d = (self.sr / robot).max(1.0);

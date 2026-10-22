@@ -226,6 +226,12 @@ impl PlanDoc {
             Some(_) => return Err(AutoCutError::Invalid("numbers: english or malayalam".into())),
         };
         opts.redact = crate::privacy::Redact::from_plan(self.look.get("redact"))?;
+        // talking clips: Enhance Voice on the shots' own sound (`"enhanceVoice": true`)
+        opts.enhance_voice = match self.look.get("enhanceVoice") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return Err(AutoCutError::Invalid("enhanceVoice: true or false".into())),
+        };
         let (entries, heads) = resolve(&self.entries);
         if entries.is_empty() {
             return Err(AutoCutError::Invalid("no entry is included: include at least one".into()));

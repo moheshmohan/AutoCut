@@ -1864,7 +1864,7 @@ pub async fn build(
     // ---- the mix: speech first, then the platform's loudness
     progress("mixing");
     let profile = MixProfile::from_plan(&show.mix).unwrap_or_default();
-    let mix = Mix { sounds: Vec::new(), effects: fx, narrations: voice_clips, music: music_clip.into_iter().collect() };
+    let mix = Mix { sounds: Vec::new(), effects: fx, narrations: voice_clips, music: music_clip.into_iter().collect(), enhance_voice: false };
     let stems = mix::MixTracks { sounds: "A1".into(), voice: "A2".into(), music: "A3".into(), effects: vec!["A4".into(), "A5".into()] };
     made.mix = Some(mix::mix_down(ex, &mix, &stems, profile, false, &mut notes).await);
     // the music carries a trailer: up from the bed level the show's mix gives it (still ducked

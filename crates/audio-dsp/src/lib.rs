@@ -9,7 +9,10 @@
 //!   dynamic-programming beats with a local tempo that follows drift; Ellis 2007).
 //! * [`effects`] — clip/track audio effects behind the common [`AudioEffect`] trait, with a
 //!   registry ([`effects()`]) describing every effect's parameters (range, unit, default) so the
-//!   engine and UI can build controls generically.
+//!   engine and UI can build controls generically. Voice Isolation and Enhance Voice
+//!   ([`effects::voice`], [`effects::enhance_voice`]) run a speech model the host installs
+//!   process-wide (DeepFilterNet 3 in `filmcraft-voice`), a DSP fallback until then; the Voice
+//!   Changer ([`effects::voice_changer`]) is DSP.
 //! * [`biquad`] — RBJ-cookbook biquads (TDF-II) with analytic magnitude response.
 //! * [`sync`] — offset between two recordings of one event (GCC-PHAT, sample-accurate).
 //! * [`resample`] — streaming, block-invariant rate conversion for playback on a device at another rate.

@@ -26,7 +26,7 @@ Design principles:
  L5  ui-egui · automation · autocut · gphotos · oauth · youtube · instagram · screenagent · platform
  L4  engine
  L3  render · gpu · export · templates · golden (test-only)
- L2  edit · codecs · interchange · captions · speech · tts · tts-text · acestep · soundfont · vision
+ L2  edit · codecs · interchange · captions · speech · tts · tts-text · acestep · soundfont · vision · voice
  L1  frame · media · project · audio-dsp · text
  L0  foundation: time · geom · color · bitstream · locks · testkit (dev-dependency only)
      codecs/containers: isobmff · matroska · mxf · cfb · mpegts · ogg · h264 · h264enc · hevc · vp9 · av1 · mpeg2v · prores · dnx · apv · dng · aac · ac3 · mpa · opus
@@ -71,6 +71,7 @@ and `filmcraft-cli`.
 | `tts-text` | L2 | text front end for narration: normalizer (numbers, money, dates, acronyms, pauses) and English pronunciation (CMUdict + letter-to-sound) to Kokoro phonemes |
 | `soundfont` | L2 | SoundFont instruments for the procedural music: a structural check of `.sf2` files (every chunk, record list, zone and sample range in bounds, even sizes) in front of rustysynth (MIT, pure Rust; every call under `catch_unwind`), a General MIDI `InstrumentBank` level-matched to the oscillator voices with them as the fallback, and the GeneralUser GS download pin (never bundled) ([README](../crates/soundfont/README.md)) |
 | `vision` | L2 | privacy detection for the automatic blur (`clip.autoRedact`): the YuNet face (MIT) and LPD-YuNet plate (Apache-2.0) detector catalogue (pinned, SHA-256), a strict ONNX weight reader, output decoding and suppression, linking detections into smoothed tracks and the rules for which are hidden; (feature `model`) both networks on candle, checked layer by layer against the file, and on macOS on the GPU as fused WGSL passes (wgpu), the CPU as the fallback ([README](../crates/vision/README.md), [gpu.md](gpu.md)). Wasm builds compile it without the feature |
+| `voice` | L2 | voice isolation: DeepFilterNet 3 (MIT/Apache-2.0) in plain Rust — the pinned model archive (SHA-256), a strict `.tar.gz` reader, the weights out of the ONNX files through `vision`'s reader, every layer checked, and the model the Voice Isolation and Enhance Voice effects run (one state per stream; the DSP fallback without it) ([README](../crates/voice/README.md)). Same-layer edge to `vision` |
 | `acestep` | L2 | neural text to music: ACE-Step 1.5 (MIT) model catalogue (pinned, SHA-256), request checks and prompt layout; (feature `model`) the Qwen3 text encoder and byte-level BPE tokenizer, the turbo DiT, the 8-step flow-matching sampler and the Oobleck VAE on candle, Metal on macOS ([README](../crates/acestep/README.md)). Wasm builds compile it without the feature |
 | `codecs` | L2 | container + codec hub: MP4/MOV, MKV, MXF, Ogg and MPEG TS / PS / video elementary stream sources, GOP-aware seeking, decoder registry, audio decoding |
 | `interchange` | L2 | EDL, FCP7 XML, FCPXML, OTIO, AAF (on `cfb`) and OMF 2.0 import/export (no file I/O; the engine supplies rendered audio essence) ([README](../crates/interchange/README.md)) |
@@ -104,7 +105,7 @@ are exempt):
 |---|---|
 | Every crate has a layer | A new crate fails the check until it is added to `LAYERS`. |
 | Only downward edges | A crate may not depend on a crate in a higher layer. |
-| Same-layer edges are listed | From L1 up, a same-layer edge must be in `SAME_LAYER`: `media→frame`, `project→media`, `project→frame`, `gpu→render`, `export→render`, `cli→filmcraft`, `gphotos→oauth`, `youtube→oauth`, `instagram→oauth`, plus a few reserved for planned crates. |
+| Same-layer edges are listed | From L1 up, a same-layer edge must be in `SAME_LAYER`: `media→frame`, `project→media`, `project→frame`, `gpu→render`, `export→render`, `cli→filmcraft`, `gphotos→oauth`, `youtube→oauth`, `instagram→oauth`, `voice→vision`, plus a few reserved for planned crates. |
 | L0 codecs stay standalone | L0 crates other than `time`, `geom`, `color`, `bitstream`, `locks`, `testkit` may depend on no workspace crate except `filmcraft-bitstream`. External crates such as `thiserror` and `rayon` are allowed. |
 | No UI/OS crates below L5 | `egui`, `eframe`, `egui-wgpu`, `winit`, `rfd`, `cpal`, `muda` are allowed only in L5 and L6. |
 
@@ -582,9 +583,18 @@ track.setAutoDuck                the same per clip of a track, under chosen trac
 - **Presets** (our own names and values) per type; user presets are saved in preferences
   (`essentialSound.userPresets`). Music remixing to a duration is Clip ▸ Remix (§5.1.3).
 - **Enhance Speech** is a DSP chain (high-pass, de-mud, presence and air EQ, expander, compressor), not a
-  model: no speech-enhancement model with an open licence that we could ship and verify is bundled.
-  DeepFilterNet (MIT/Apache-2.0, Rust inference via tract) is the candidate for a future optional
-  integration behind a trait.
+  model.
+- **Isolate Voice / Enhance Voice** (Repair, ahead of every other essential effect / after the other
+  repairs) put the **Voice Isolation** and **Enhance Voice** effects on the clip. Voice Isolation runs
+  DeepFilterNet 3 (MIT/Apache-2.0) in plain Rust (`filmcraft-voice`; libDF's `tract` runtime builds
+  assembly with `cc`, so it is not used) once the user downloaded it (`audio.downloadVoiceModel`, 8 MB,
+  pinned and SHA-256 checked); the host installs it process-wide (`audio_dsp::effects::voice::
+  set_voice_model_loader`), every effect instance keeps its own state, and without it the effect runs a
+  DSP Wiener filter with the same 40 ms latency. Enhance Voice is the one-knob voice boost (isolation,
+  rumble high-pass, presence and consonant lift, de-esser, expander, 3:1 compressor, limiter);
+  `audio.enhanceVoice` also matches each clip's loudness through its effects (−16 LUFS by default).
+  Measured: matches libDF to 92.6 dB, real-time factor 0.03 at 48 kHz stereo (M3 Max;
+  [crates/voice/README.md](../crates/voice/README.md)).
 
 ### 5.3 Masks
 

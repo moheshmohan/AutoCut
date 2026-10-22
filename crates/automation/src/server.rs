@@ -768,6 +768,55 @@ pub struct AutoRedactParams {
     pub target_every: Option<f64>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct VoiceParams {
+    /// These audio clips (a video clip's linked audio counts; default: the selection).
+    #[serde(default)]
+    pub clips: Option<Vec<u64>>,
+    /// 0..100 (default: 80 for isolate_voice, 70 for enhance_voice).
+    #[serde(default)]
+    pub amount: Option<f64>,
+    /// enhance_voice: the loudness each clip is matched to, measured through its effects: a
+    /// number (-60..0), "mix" (the Dialogue target in Preferences) or "none" (default -16).
+    #[serde(default)]
+    pub lufs: Option<Value>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct VoiceFileParams {
+    /// The media file whose sound is processed.
+    pub path: String,
+    /// Where the result goes: a .wav (24-bit) or .m4a (AAC) file.
+    pub out: String,
+    /// "enhance" (default: Enhance Voice) or "isolate" (Voice Isolation alone).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// 0..100 (default 70 for enhance, 80 for isolate).
+    #[serde(default)]
+    pub amount: Option<f64>,
+    /// The loudness of the result: a number (-60..0), "mix" or "none" (default -16).
+    #[serde(default)]
+    pub lufs: Option<Value>,
+    /// AAC bitrate for .m4a, 32..512 kbps (default 160).
+    #[serde(default)]
+    pub bitrate: Option<u64>,
+}
+
+/// Engine params of a voice tool call.
+fn voice_params(p: VoiceParams) -> Value {
+    let mut v = json!({});
+    if let Some(c) = p.clips {
+        v["clips"] = json!(c);
+    }
+    if let Some(a) = p.amount {
+        v["amount"] = json!(a);
+    }
+    if let Some(l) = p.lufs {
+        v["lufs"] = l;
+    }
+    v
+}
+
 /// `clip.autoRedact` (with `clips`) or `sequence.autoRedact` params for an `auto_redact` call.
 fn auto_redact_params(p: AutoRedactParams) -> (&'static str, Value) {
     let mut params = json!({"wait": true});
@@ -1785,6 +1834,46 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Isolate Voice",
+        description = "Keep the speech of audio clips and remove the rest — noise, crowds, music, hum, room (`audio.isolateVoice`; one undo step). Puts a Voice Isolation effect first in each clip's chain (or sets the one it has) at `amount` 0..100 (80): at 0 the clip is unchanged, at 100 it is the model's output alone. Runs DeepFilterNet 3 (pure Rust, MIT/Apache-2.0) once `audio.downloadVoiceModel` installed it after the user agreed (8 MB; `audio.voiceModelStatus` says), else a DSP noise reduction; the result says which (`neural`). 40 ms of latency, compensated.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn isolate_voice(&self, Parameters(p): Parameters<VoiceParams>) -> Result<CallToolResult, McpError> {
+        wrap(self.run("audio.isolateVoice", voice_params(p)).await)
+    }
+
+    #[tool(
+        title = "Enhance Voice",
+        description = "The one-knob voice boost for clips that keep their own speech (`audio.enhanceVoice`; one undo step): an Enhance Voice effect at `amount` 0..100 (70) — voice isolation, a rumble high-pass, a gentle presence and consonant lift, a de-esser, an expander between words, a 3:1 compressor and a -1 dBFS limiter — then each clip's gain set so it measures `lufs` through its effects (-16 LUFS; \"mix\": the Dialogue target; \"none\": leave the level). Not for synthetic narration, which needs none of it.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn enhance_voice(&self, Parameters(p): Parameters<VoiceParams>) -> Result<CallToolResult, McpError> {
+        wrap(self.run("audio.enhanceVoice", voice_params(p)).await)
+    }
+
+    #[tool(
+        title = "Enhance Voice in a File",
+        description = "Process a media file's sound straight to a .wav or .m4a file (`audio.enhanceFile`): `mode` \"enhance\" (Enhance Voice, default) or \"isolate\" (Voice Isolation alone), `amount`, the level to `lufs` (-16) under a -1 dBFS true-peak limiter. Returns the loudness, noise floor (between words) and 1-4 kHz share before and after, which model ran and how fast. Files of at most 30 minutes.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn enhance_audio_file(&self, Parameters(p): Parameters<VoiceFileParams>) -> Result<CallToolResult, McpError> {
+        let mut v = json!({"path": p.path, "out": p.out});
+        if let Some(m) = p.mode {
+            v["mode"] = json!(m);
+        }
+        if let Some(a) = p.amount {
+            v["amount"] = json!(a);
+        }
+        if let Some(l) = p.lufs {
+            v["lufs"] = l;
+        }
+        if let Some(b) = p.bitrate {
+            v["bitrate"] = json!(b);
+        }
+        wrap(self.run("audio.enhanceFile", v).await)
+    }
+
+    #[tool(
         title = "Showcase: inspect",
         description = "What the session keeps of the showcase: the analysis report (a summary, or every clip with report: true), the plan, the last build, and the latest showcase job (running or done).",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -2055,7 +2144,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked); `trailer_make` cuts a finished showcase into a vertical trailer for Reels (a hook, robots in date order on the beat, an end card; the show's redaction kept). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked); `trailer_make` cuts a finished showcase into a vertical trailer for Reels (a hook, robots in date order on the beat, an end card; the show's redaction kept). Voice: `isolate_voice` keeps clips' speech and removes noise, crowds and music, `enhance_voice` is the one-knob voice boost for clips that keep their own speech (isolation, EQ, de-esser, compression, a loudness match), `enhance_audio_file` does either straight on a file (`audio.voiceModelStatus` says whether the neural model is installed; `audio.downloadVoiceModel` only after the user agreed). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -2799,6 +2888,9 @@ mod tests {
             "trailer_make",
             "sequence_auto_reframe",
             "auto_redact",
+            "isolate_voice",
+            "enhance_voice",
+            "enhance_audio_file",
             "template_list",
             "template_apply",
             "recipe_list",

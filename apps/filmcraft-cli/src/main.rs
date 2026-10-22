@@ -31,6 +31,7 @@ macro_rules! out {
 }
 
 mod args;
+mod audio;
 mod instagram;
 mod locations;
 mod ml_script;
@@ -140,7 +141,7 @@ SUBCOMMANDS
                                 ~/Movies/robots.mp4 --upload --project robots.fcproj --save
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--language ml]
          [--numbers english|malayalam] [--no-narration-check] [--places-from-locations locations.json]
-         [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
+         [--enhance-voice] [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N] [--resolution 1080p|4k|WxH]
          [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social] [--mix speech|gentle|cinematic]
          [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
@@ -191,7 +192,10 @@ SUBCOMMANDS
                                 (transcript.downloadModel {\"model\": \"whisper-medium-ml\"}) and read
                                 again until clear, what was heard written to
                                 <out>.narration-check.json (--no-narration-check: off); see
-                                docs/malayalam-narration.md. --places-from-locations takes the
+                                docs/malayalam-narration.md. --enhance-voice (a plan's
+                                \"enhanceVoice\": true) runs Enhance Voice on the shots' own sound
+                                when people or robots talk in it (never on the narration, which is
+                                synthetic). --places-from-locations takes the
                                 file `photos locations` wrote and gives every entry without a
                                 \"place\" the place Google Photos shows for its first shot
                                 that has one (matched by file name), for its lower third;
@@ -299,6 +303,16 @@ SUBCOMMANDS
                                 (--language, default ml) beside --out as <out>-ml.json:
                                 {\"intro\", \"outro\", \"lines\": {\"<label>\": \"…\"}} read over it; it
                                 fails on any spoken entry without a line
+  audio enhance|isolate <media file> --out <file.wav|file.m4a> [--amount 0-100]
+         [--lufs -16|mix|none] [--bitrate 160] [--download]
+                                a file's sound straight to a file (audio.enhanceFile): `enhance`
+                                runs Enhance Voice (voice isolation, rumble cut, presence lift,
+                                de-esser, 3:1 compressor, limiter; --amount 70), `isolate` Voice
+                                Isolation alone (--amount 80); then the level to --lufs (−16;
+                                `mix`: the Dialogue target; `none`). The neural model
+                                (DeepFilterNet 3, 8 MB, MIT/Apache-2.0, SHA-256 checked) comes with
+                                --download, else a DSP fallback runs. Prints loudness, noise floor
+                                and 1–4 kHz share before and after. `audio model` says which runs
   voice refs --voice clone:<name> <media|folder|project.fcproj>… [--out DIR] [--max-minutes 240]
          [--max-clip-seconds 600] [--min-similarity 0.85] [--top 6]
                                 the voice lab (docs/voice-recording.md): stretches of the voice's
@@ -711,6 +725,8 @@ impl Backend {
             }
             return Backend::Bridge(BridgeClient::new(addr).unwrap_or_else(|e| usage(e)));
         }
+        // the voice model (Voice Isolation, Enhance Voice) from <data dir>/models, on first use
+        filmcraft_engine::voice_fx::install_loader();
         let mut s = Session::default();
         // user export presets (and other per-user libraries) from the data directory, and the
         // narration cache there (a rebuilt showcase re-reads no line it has read before)
@@ -2098,6 +2114,10 @@ async fn cli() {
             }
             // a Malayalam narration is heard back utterance by utterance unless turned off
             opts.skip_narration_check = a.flag("--no-narration-check");
+            // talking clips: Enhance Voice on the shots' own sound (never the narration)
+            if a.flag("--enhance-voice") {
+                opts.enhance_voice = true;
+            }
             if languages.is_some() && opts.malayalam() {
                 fail("showcase: --languages builds every language from the English plan; this plan is Malayalam");
             }
@@ -2236,6 +2256,7 @@ async fn cli() {
         // natural spoken Malayalam: a script checked, a plan's English translated
         "ml-lint" => ml_script::lint(&a),
         "voice" => voice::run(&a).await,
+        "audio" => audio::run(&a).await,
         "ml-script" => ml_script::translate(&a).await,
         "sheet" => showcase_tools::sheet(&a).await,
         "frames" => showcase_tools::frames(&a).await,

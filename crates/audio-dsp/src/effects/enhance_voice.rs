@@ -8,16 +8,18 @@
 //!    are understood by at low volume), +2.5 dB high shelf from 6.5 kHz (consonants), all scaled by
 //!    `amount`;
 //! 4. a de-esser at 6 kHz (up to 6 dB of reduction) for the lift it just gave the sibilants;
-//! 5. a compressor, 3:1 at 100 % (1:1 at 0 %) from −20 dB, RMS detector, 3 ms / 120 ms, with
+//! 5. a downward expander below −50 dBFS (up to 1:4 and 15 dB), so what is left between words
+//!    stays down when the compressor's make-up lifts the rest;
+//! 6. a compressor, 3:1 at 100 % (1:1 at 0 %) from −20 dB, RMS detector, 3 ms / 120 ms, with
 //!    make-up gain;
-//! 6. `output` gain, then a true-peak limiter at −1 dBFS.
+//! 7. `output` gain, then a true-peak limiter at −1 dBFS.
 //!
 //! The loudness target (−16 LUFS per clip, or the mix's dialogue target) is not part of the
 //! effect: it needs the whole clip measured, so `audio.enhanceVoice` sets it as the clip's gain
 //! after measuring the processed clip. At 0 % the chain is transparent but for the limiter
 //! (which only touches peaks above −1 dBFS) and a 20 Hz high-pass.
 
-use super::dynamics::{Compressor, Limiter};
+use super::dynamics::{Compressor, Gate, Limiter};
 use super::essential::DeEsser;
 use super::voice::{MAX_RATE, MIN_RATE, VoiceIsolation, VoiceModel};
 use crate::biquad::{Biquad, Coeffs, FilterType};
@@ -53,6 +55,7 @@ pub struct EnhanceVoice {
     coeffs: [Coeffs; STAGES],
     filters: Vec<[Biquad; STAGES]>,
     deess: DeEsser,
+    gate: Gate,
     comp: Compressor,
     limiter: Limiter,
     amount: Smoothed,
@@ -81,6 +84,11 @@ impl EnhanceVoice {
         let mut deess = DeEsser::new(sr, ch);
         deess.set_param("frequency", 6000.0);
         deess.set_param("threshold", -10.0);
+        let mut gate = Gate::new(sr, ch);
+        gate.set_param("threshold", -50.0);
+        gate.set_param("attack", 2.0);
+        gate.set_param("hold", 60.0);
+        gate.set_param("release", 150.0);
         let mut comp = Compressor::new(sr, ch);
         comp.set_param("threshold", -20.0);
         comp.set_param("knee", 6.0);
@@ -98,6 +106,7 @@ impl EnhanceVoice {
             coeffs: [Coeffs::IDENTITY; STAGES],
             filters: vec![[Biquad::new(); STAGES]; ch],
             deess,
+            gate,
             comp,
             limiter,
             amount: Smoothed::with_ms(0.0, sr, 50.0),
@@ -125,6 +134,8 @@ impl EnhanceVoice {
         let a = amount / 100.0;
         self.iso.set_param("intensity", amount);
         self.deess.set_param("reduction", 6.0 * a);
+        self.gate.set_param("ratio", 1.0 + 3.0 * a);
+        self.gate.set_param("range", 15.0 * a);
         self.comp.set_param("ratio", 1.0 + 2.0 * a);
         self.comp.set_param("makeup", 4.0 * a);
         self.amount.set(a);
@@ -145,12 +156,13 @@ impl EnhanceVoice {
 impl AudioEffect for EnhanceVoice {
     param_plumbing!("enhance_voice");
     fn latency(&self) -> usize {
-        if self.active { self.iso.latency() + self.deess.latency() + self.comp.latency() + self.limiter.latency() } else { 0 }
+        if self.active { self.iso.latency() + self.deess.latency() + self.gate.latency() + self.comp.latency() + self.limiter.latency() } else { 0 }
     }
     fn reset(&mut self) {
         self.iso.reset();
         self.filters.iter_mut().for_each(|f| f.iter_mut().for_each(Biquad::reset));
         self.deess.reset();
+        self.gate.reset();
         self.comp.reset();
         self.limiter.reset();
         self.amount.snap();
@@ -181,6 +193,7 @@ impl AudioEffect for EnhanceVoice {
             }
         }
         self.deess.process(channels);
+        self.gate.process(channels);
         self.comp.process(channels);
         for i in 0..n {
             let g = self.out_gain.tick();

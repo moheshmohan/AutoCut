@@ -233,6 +233,32 @@ pub fn builtin_presets() -> Vec<EffectPreset> {
         preset("Warm Tint", "Warm highlights, brown shadows", KeyframeMode::Scale, 10.0, vec![warm]),
         preset("PiP 35% Upper Right", "Picture-in-picture: 35 % scale in the upper right", KeyframeMode::Scale, 10.0, vec![pip]),
     ]
+    .into_iter()
+    .chain(voice_presets())
+    .collect()
+}
+
+/// Speech presets (audio clips): voice isolation, the voice boost and the Voice Changer's characters.
+fn voice_presets() -> Vec<EffectPreset> {
+    let f = ParamValue::Float;
+    let changer = |mode: u32, pitch: f64, character: f64, mix: f64| {
+        effect("voice_changer", &[("mode", ParamValue::Choice(mode)), ("pitch", f(pitch)), ("character", f(character)), ("mix", f(mix))])
+    };
+    let p = |name: &str, desc: &str, e: EffectInstance| preset(name, desc, KeyframeMode::Scale, 10.0, vec![e]);
+    vec![
+        p(
+            "Isolate Voice",
+            "Keeps speech and removes noise, crowds, music and hum (neural model when downloaded)",
+            effect("voice_isolation", &[("intensity", f(80.0))]),
+        ),
+        p("Enhance Voice", "Isolation, rumble cut, presence lift, de-esser, 3:1 compression and a limiter", effect("enhance_voice", &[("amount", f(70.0))])),
+        p("Robot Voice", "Ring-modulated through a metallic comb tuned to a note", changer(0, 0.0, 50.0, 100.0)),
+        p("Deep Voice", "Five semitones down with a fuller low end", changer(1, 0.0, 60.0, 100.0)),
+        p("Chipmunk Voice", "Seven semitones up, thinner", changer(2, 0.0, 40.0, 100.0)),
+        p("Walkie-Talkie", "Narrow band and overdriven, like a handheld radio", changer(4, 0.0, 45.0, 100.0)),
+        p("Alien Voice", "Pitched up, wobbling and ring-modulated", changer(5, 0.0, 50.0, 100.0)),
+        p("Echo Voice", "A voice repeating across a large space", changer(3, 0.0, 55.0, 100.0)),
+    ]
 }
 
 // ---------------------------------------------------------------- save / apply
@@ -493,6 +519,8 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("presets.apply", "select clips first"));
     }
     let audio = preset.effects.iter().all(|e| e.def().is_some_and(|d| d.kind == filmcraft_project::EffectKind::Audio));
+    // an audio preset on a video clip goes to its linked audio, as `effects.apply` does
+    let clips = if audio { crate::commands::audio_effect_targets(s, &clips) } else { clips };
     let sizes: Vec<(ClipId, (u32, u32))> = {
         let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
         clips.iter().filter_map(|c| seq.find_item(*c).map(|(_, it)| (*c, clip_size(s, it)))).collect()

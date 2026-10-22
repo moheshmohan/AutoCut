@@ -20,7 +20,13 @@ Downloaded by `audio.downloadVoiceModel` after the user agrees, pinned to a comm
 It goes into `<data dir>/models/deepfilternet3/`. Hosts call `install_loader(models_dir)` once;
 the first effect that needs the model loads it (46 ms) and every later one shares the weights.
 Without it the effects run their DSP fallback (a decision-directed Wiener filter on the same
-frames, with the same 40 ms latency).
+frames, its noise floor by minimum statistics, with the same 40 ms latency: SI-SDR 5.0 → 11.9 dB
+on speech-like sound in white noise).
+
+Engine commands (`crates/engine/src/voice_fx.rs`): `audio.isolateVoice`, `audio.enhanceVoice`
+(and the loudness match to −16 LUFS), `audio.enhanceFile`, `audio.voiceModelStatus`,
+`audio.downloadVoiceModel`; MCP tools `isolate_voice`, `enhance_voice`, `enhance_audio_file`;
+`filmcraft-cli audio enhance|isolate <file> --out <wav|m4a> [--download]`, `audio model`.
 
 ## Why not libDF
 
@@ -56,4 +62,10 @@ crate on `deep_filter` with `tract`, as an external oracle only: never linked or
 
 - Speech isolation is speech against everything else: DeepFilterNet keeps every voice, so it
   does not separate one speaker from a crowd talking.
-- De-reverberation by weighted prediction error (WPE) as a DeReverb mode is not done yet.
+- De-reverberation by weighted prediction error (WPE) as a DeReverb mode: tried on 2026-10-22 as
+  an online (RLS) single-channel WPE inside DeReverb's STFT (2048 / hop 512 at 48 kHz, prediction
+  delay 4 frames, 8–24 taps, power weighting smoothed over bins and frames). The core recovers an
+  autoregressive bin (17.6 dB), but on a synthetic room (RT60 0.6 s, random-phase tail) it took
+  only 1.2–2.6 dB off the late tail where the spectral model takes 15 dB, so it was not shipped.
+  WPE needs a finer hop (≈8 ms), a longer prediction than one channel can estimate quickly, or
+  several microphones; DeepFilterNet already removes much of a room's tail on speech.

@@ -170,6 +170,9 @@ fn builtins_apply_and_user_presets_persist() {
         let name = p["name"].as_str().unwrap();
         s.execute("presets.apply", json!({"preset": name, "clips": [clips[0].0]})).unwrap_or_else(|e| panic!("{name}: {e}"));
     }
+    // the speech presets went to the video clip's linked audio
+    let a = crate::commands::audio_effect_targets(&s, &[clips[0]]);
+    assert!(a.iter().any(|c| item(&s, *c).effects.iter().any(|e| e.effect == "voice_changer" || e.effect == "enhance_voice")), "{a:?}");
     // Fade Out anchors to the out point
     let it = item(&s, clips[0]);
     let op = it.effect("opacity").unwrap().param("opacity").unwrap();

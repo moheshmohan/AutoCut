@@ -215,12 +215,15 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 ## G12. AI features
 
 - **Missing:** Object Mask (Premiere 26.0, #406, #694), Generative Extend (needs a large video
-  model; not reachable locally), media-intelligence search, caption translation, model-based
-  Enhance Speech, Auto Reframe beyond heuristics, auto colour, Auto-Tag Audio Types.
+  model; not reachable locally), media-intelligence search, caption translation, Auto Reframe beyond heuristics,
+  auto colour, Auto-Tag Audio Types, speaker separation (voice isolation keeps every voice), WPE
+  de-reverberation.
 - **Have:** local Whisper transcription (off in releases, G19), Kokoro-82M text-to-speech
   narration (#278), scene edit detection, colour match, automatic privacy blur (Clip ▸ Auto
   Redact Faces and Plates…: YuNet / LPD-YuNet on candle, tracked masks, robots and screens told
-  apart by the local vision model, named logos and signs found by it).
+  apart by the local vision model, named logos and signs found by it), neural voice isolation
+  (Voice Isolation, Enhance Voice, Essential Sound ▸ Isolate Voice: DeepFilterNet 3 in plain Rust,
+  downloaded on consent; a DSP fallback without it).
 - **Privacy blur limits (measured 2026-10-19 on GITEX footage):** YuNet misses faces in
   profile and half-hidden ones; LPD-YuNet was trained on Chinese plates and fired only on
   badges and signs there (no vehicles to measure recall on); named targets depend on a 7B vision

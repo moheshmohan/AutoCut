@@ -204,6 +204,8 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
                 }
             }),
         );
+        // the voice model (Voice Isolation, Enhance Voice) from <data dir>/models, on first use
+        filmcraft_engine::voice_fx::install_loader();
         let mut session = Session::default();
         if let Some(dir) = data_dir.clone().or_else(default_data_dir) {
             let mut cfg = AutosaveConfig::new(dir);

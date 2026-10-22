@@ -271,6 +271,9 @@ pub struct Mix {
     /// The narration.
     pub narrations: Vec<u64>,
     pub music: Vec<u64>,
+    /// Enhance Voice on the shots' own sound (talking clips): `audio.enhanceVoice` before it is
+    /// levelled, the level left to the mix.
+    pub enhance_voice: bool,
 }
 
 /// Where the stems are (audio track labels).
@@ -332,6 +335,9 @@ pub async fn mix_down(ex: &dyn Executor, mix: &Mix, tracks: &MixTracks, profile:
         step("essentialSound.autoMatch", json!({"clips": mix.narrations, "target": VOICE_LUFS}), notes).await;
     }
     if !mix.sounds.is_empty() {
+        if mix.enhance_voice {
+            step("audio.enhanceVoice", json!({"clips": mix.sounds, "lufs": "none"}), notes).await;
+        }
         step("essentialSound.applyPreset", json!({"clips": mix.sounds, "preset": "Duck Under Dialogue", "type": "ambience"}), notes).await;
         if speech {
             step("essentialSound.set", json!({"clips": mix.sounds, "key": "ducking.reduceDb", "value": lv.sound_duck}), notes).await;
@@ -464,6 +470,7 @@ pub async fn remix(
         effects: tracks.effects.iter().flat_map(|t| clips_on(t)).collect(),
         narrations: clips_on(&tracks.voice),
         music: clips_on(&tracks.music),
+        enhance_voice: false,
     };
     if mix.narrations.is_empty() && mix.music.is_empty() && mix.sounds.is_empty() {
         return Err(AutoCutError::Invalid("remix: the sequence has no showcase sound (A1 the shots, A2 the narration, A3 the music)".into()));
