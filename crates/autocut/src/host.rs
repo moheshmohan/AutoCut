@@ -58,6 +58,7 @@ const LONG_COMMANDS: &[&str] = &[
     "youtube.upload",
     "media.understandSpeech",
     "media.analyzeScenes",
+    "media.checkText",
     "scenes.downloadModel",
     "clip.autoRedact",
     "sequence.autoRedact",

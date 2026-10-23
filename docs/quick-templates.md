@@ -1,6 +1,6 @@
 # Quick templates: a Short or Reel in one command
 
-> **Last updated:** 2026-10-22 · **Change:** new (`autocut.quick`, the AI hints on template slots, six Shorts starters)
+> **Last updated:** 2026-10-23 · **Change:** text checked against its frames (`media.checkText`); the mix for small speakers; no moment twice, holds capped
 
 An album, a folder or the selected clips → a finished vertical Short or Reel. AutoCut indexes
 the clips shot by shot, listens to what is said, picks a template and fills it: every slot's
@@ -48,26 +48,93 @@ The engine command: `autocut.quick` ([`crates/engine/src/autocut.rs`](../crates/
    and the reasons, with the runners-up.
 4. **Shots** — each picture slot's media gets the moment that suits its AI hints: the scene
    index's score for the slot's purpose (the rules of `media.bestShots`), its words
-   (`media.searchScenes`), energy, speech, the least quality and the shot's length. No moment
-   is used twice (a long shot gives several), a clip gives few picks, slots that ask for it keep
-   the filming order (capture dates), and a talking slot takes stretches of kept speech.
+   (`media.searchScenes`), energy, speech, the least quality and the shot's length. Slots that
+   ask for it keep the filming order (capture dates), and a talking slot takes stretches of kept
+   speech. No moment is shown twice:
+   - two picks of one clip are at least 3 s apart (two stretches of someone talking only may not
+     overlap: their words differ), and a clip gives few picks;
+   - the picks' frames, cut to the vertical frame, are compared (SigLIP 2, `media.checkText`'s
+     `similar`): two that look alike (cosine 0.9 or more — on the robot clips neighbouring seconds
+     of one shot measured 0.95, moments 4 s apart 0.83, different robots 0.57–0.84) are one
+     moment twice, and the cutaway of the pair (rather than a hook or a reveal) is picked again
+     elsewhere, up to three times; without the model a shot whose camera stands still gives one
+     moment;
+   - with fewer distinct moments than a slot's places, the template would show them again in
+     turn: those places are taken out instead (`sequence.extract`, the time closed on every
+     track) and the generated music made again for the new length — the video is shorter and
+     the report says so (`shotsSpread.shortened`). The automatic choice counts distinct moments,
+     not shots, so a template that would be cut short is ranked down.
+
+   **Holds.** A beat template is re-timed by its music's tempo to reach the length asked, but
+   never so slow that one shot (each picture's first placement; an end card's blurred reprise is
+   the template's own) holds longer than 5 s, unless its slot's `maxHold` says more or the
+   template made it longer itself; talking slots are not capped. The Tech Reveal's reveal
+   (8 beats) would hold 6.7 s at the 72 bpm that makes it 28 s, so it stops at 96 bpm and is
+   21 s long (the choice and the report say so). Each pick is as long as its place will play
+   at that tempo. The report's `shotsSpread` has the tempo, the moments that looked alike, the
+   longest hold and what was shortened.
 5. **Trim and frame** — each pick plays from its best moment (the keyframe, or the start of the
    kept speech), framed on the subject's box for the vertical crop.
-6. **Text** — the text slots are written by the local model (Ollama: the script model, else the
-   classifier) from the shots' descriptions (the full ones' paragraphs, the text read on
-   screen), the kept speech and the topic, each within its length; without a model, from the
-   descriptions (the subject, the text read) and the topic.
+6. **Text** — each text says only what is on screen while it shows, and is checked
+   ([`crates/autocut/src/quick_text.rs`](../crates/autocut/src/quick_text.rs)):
+   - *its window*: the picture placements its own placement overlaps in the template (a title
+     over the reveal, a call to action over the end card), else the pick its `about` names;
+   - *the writer* (Ollama: the script model, else the classifier) is given, for each text, only
+     the Qwen3-VL descriptions of the shots under it (subjects, what happens, the text read on
+     screen, the full paragraph), the kept speech and the topic, and asked for three options;
+   - *the words*: every word that names something (not a creator's stock word: "meet",
+     "follow", "new"…) must come from those descriptions, the topic or the speech — "drone"
+     over a serving robot is rejected without looking further; a number nobody gave too;
+   - *the frames* (`media.checkText`): an option naming what only the descriptions say is
+     checked against two frames of its exact window, cut to what the vertical frame shows of
+     them (the slot's crop around the pick's focus). Qwen3-VL (in process, the 4B when
+     installed) is asked about each thing it names, one at a time — is the "boy" it mentions
+     visible here? — which it answers far more reliably than whether a whole title is true (on
+     the robot clips it called "BOY MEETS ROBOT" true over the moment after the boy left, and
+     answered "boy" no there and yes two seconds earlier). SigLIP 2 scores the option against
+     those frames, the other clips' and a plain alternative made from the descriptions; without
+     the describer SigLIP decides (it must match its own frames at least as well as another
+     clip's, and not much worse than the plain alternative);
+   - a text whose options all fail is asked for once more, with what was rejected and why;
+     then the first deterministic text that passes: the subject's name (its noun kept), the
+     text read on screen, the caption, the topic, the slot's own line.
+
+   The report's `texts[]` has each text's window (`under`) and every candidate with its
+   verdict (`candidates[]`: `ok`, `why`, the words, the SigLIP scores `own` / `elsewhere` /
+   `alternative`, the describer's `answer`); `textCheck` says what checked them (and, in `how`, whether any text needed the describer at all: `asked`), how many
+   were rejected.
 7. **Apply and finish** — `template.apply`; placeholders of optional slots nothing suited are
    removed; the look; Bold animated captions of the kept speech in the platform's safe zone;
    faces and plates blurred (`clip.autoRedact`, the robot check by the local vision model); the
-   safe zones checked; the export, a 12-frame contact sheet with times, the report and QA.
+   mix (below); the safe zones checked; the export, a 12-frame contact sheet with times, the
+   report and QA.
+
+**The mix** (`quick_mix` in [`crates/autocut/src/quick.rs`](../crates/autocut/src/quick.rs),
+the report's `mix`). Every sound clip is typed by its slot: the music slot's bed, the talking
+slots' own sound, the other pictures' own sound, and the rest — the template's whooshes, risers
+and impacts — as effects. With someone talking it is the showcase's speech mix (the voice first,
+the music ducked under it). Otherwise the music carries the video, made for small speakers and
+for the −14 LUFS target with its −1 dBTP ceiling:
+
+| stem | level | track effects |
+|---|---|---|
+| music | each clip −16 LUFS | Parametric EQ: high-pass 40 Hz, low shelf at 110 Hz from −4 dB, deeper (to −10 dB) as far as this bed needs for 18 % of its energy below 120 Hz (measured through its chain, `audio.analyzeMix`; the kick and the bass line stay); a 2:1 compressor from 4 dB over its loudness; a Hard Limiter 11 dB over it (the generated beds' drums peak about 18 dB over their loudness) |
+| effects | each clip −22 LUFS | Parametric EQ: high-pass 120 Hz (no sub-bass booms) |
+| the pictures' own sound | −27 LUFS | high-pass 100 Hz, low shelf −3 dB |
+
+Then `audio.normalizeLoudness` brings the mix to −14 LUFS. On the first real run's settings
+(the Tech Reveal, its energetic electronic bed at 72 bpm) the Mix's limiter went from taking
+5.9 dB off the peaks to under 1 dB, and the energy below 120 Hz from 77 % to 17 % of the mix
+(the impacts' sub-bass had been most of it), while the bed's 63 and 125 Hz octaves stay within
+2 dB of its 1 kHz one.
 
 ## AI hints on template slots
 
 Any template can say what its slots want (`"ai"` on a slot; see
 [`crates/templates/README.md`](../crates/templates/README.md#ai-hints)): a picture slot's
 `purpose` (hook, broll, reveal, talking-head, establishing, outro), `query`, `energy`, `speech`
-(want / avoid), `minQuality` and `chronological`; a text slot's `prompt`, `maxChars` and `about`
+(want / avoid), `minQuality`, `chronological` and `maxHold` (the longest one of its shots may be
+held when re-timed); a text slot's `prompt`, `maxChars` and `about`
 (the picture slot its texts describe). `template.inspect` shows them, Save as Template keeps
 them. A template without hints is still filled, by the pictures' quality.
 
@@ -90,6 +157,8 @@ The six starters made for it (Templates ▸ Reels & Shorts, Tech, Events, Social
 | the 4B describer | the fast descriptions everywhere |
 | Whisper / speech | no talking-head template, no captions |
 | Ollama | the text comes from the descriptions and the topic |
+| Qwen3-VL (to ask) | SigLIP 2 alone checks the texts against their frames |
+| SigLIP 2 and Qwen3-VL | each text's words are checked against the descriptions of the shots under it, not its frames |
 | face and plate detectors | nothing is blurred (the report says so) |
 
 Each is listed in the report's `fallbacks`. The scene index and speech understanding take the

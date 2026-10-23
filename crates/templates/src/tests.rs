@@ -700,14 +700,18 @@ fn ai_hints_are_optional_read_and_written() {
     let plain = manifest::from_value(&manifest_json(BUILTIN_IDS[0])).unwrap();
     assert!(plain.slots.iter().all(|s| s.ai.is_none()) && !plain.ai_ready());
     let mut v = manifest_json(BUILTIN_IDS[0]);
-    set_ai(&mut v, "photos", json!({"purpose": "B-Roll", "energy": "high", "query": " a robot waving ", "minQuality": 0.4, "chronological": true}));
+    set_ai(
+        &mut v,
+        "photos",
+        json!({"purpose": "B-Roll", "energy": "high", "query": " a robot waving ", "minQuality": 0.4, "chronological": true, "maxHold": 7.5}),
+    );
     set_ai(&mut v, "title", json!({"prompt": "A short title", "maxChars": 20, "about": "photos"}));
     set_ai(&mut v, "outro", json!({}));
     let m = manifest::from_value(&v).unwrap();
     let photos = m.slot("photos").and_then(|s| s.ai.clone()).unwrap();
     assert_eq!(photos.purpose, Some(manifest::Purpose::Broll));
     assert_eq!(photos.energy, Some(manifest::EnergyHint::High));
-    assert_eq!((photos.query.as_str(), photos.min_quality, photos.chronological), ("a robot waving", Some(0.4), true));
+    assert_eq!((photos.query.as_str(), photos.min_quality, photos.chronological, photos.max_hold), ("a robot waving", Some(0.4), true, Some(7.5)));
     let title = m.slot("title").and_then(|s| s.ai.clone()).unwrap();
     assert_eq!((title.prompt.as_str(), title.max_chars, title.about.as_str()), ("A short title", Some(20), "photos"));
     assert!(m.slot("outro").unwrap().ai.is_none(), "empty hints are no hints");
@@ -736,6 +740,10 @@ fn ai_hints_are_checked_against_their_slot() {
         ("photos", json!({"energy": "wild"}), "`wild` is not one of low, medium, high"),
         ("photos", json!({"minQuality": 2}), "2 is out of range (0 to 1)"),
         ("photos", json!({"minQuality": "good"}), "expected a number"),
+        ("photos", json!({"maxHold": 0.1}), "out of range"),
+        ("photos", json!({"maxHold": f64::MAX}), "out of range"),
+        ("photos", json!({"maxHold": "long"}), "expected a number"),
+        ("title", json!({"maxHold": 3}), "only video, photo and logo slots take `maxHold`"),
         ("photos", json!({"mood": "happy"}), "ai.mood: unknown field"),
         ("photos", json!("hook"), "ai: expected an object"),
         ("title", json!({"about": "music"}), "`music` is a music slot"),

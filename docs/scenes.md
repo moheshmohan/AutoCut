@@ -1,6 +1,6 @@
 # The scene index
 
-> **Last updated:** 2026-10-22 · **Change:** new (the scene index, `media.analyzeScenes`)
+> **Last updated:** 2026-10-23 · **Change:** `media.checkText` (words against the frames they will be shown over)
 
 What is in a clip, shot by shot, so an edit can be planned from it and a template can fill
 itself: where the cuts are, what each shot shows, how good it looks, what it is good for, and an
@@ -12,6 +12,7 @@ embedding to find it by. Everything runs locally (on the GPU on macOS); every mo
 | `media.scenes {item, embeddings?}` | an item's index: each shot's start, end and keyframes (media seconds), camera move, quality, description |
 | `media.searchScenes {query, limit, items?}` | shots ranked for words: what they look like (SigLIP 2), what their descriptions say, what is said in them (transcripts) |
 | `media.bestShots {items?, purpose, count}` | the best shots for a `purpose` — hook, broll, reveal, talking-head, establishing — diverse |
+| `media.checkText {windows, aspect?, texts?, asks?, frames?, wait}` | a background job: words against the frames they will be shown over — each window (`{item, from, to, focus?}`, media seconds) looked at in `frames` (1–4) frames, cut to what an edit of frame shape `aspect` (width / height) filled around `focus` shows; SigLIP 2's `cosine` and calibrated `match` of every text with every window, the windows' `similar`ity, and for each ask (`{window, text, about?}`) Qwen3-VL's `yes` / `no` / `unclear`: is the thing the text names (`about`: one at a time, which it answers far more reliably), or everything it names, visible? ([`crates/engine/src/scene_check.rs`](../crates/engine/src/scene_check.rs)) |
 | `scenes.status` | the models: installed, sizes, licences, what `fast` and `full` still need |
 | `scenes.downloadModel {model: "fast"\|"full"\|<id>, wait}` | download them (pinned, SHA-256 checked) after the user agreed |
 
