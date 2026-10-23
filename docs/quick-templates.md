@@ -1,6 +1,6 @@
 # Quick templates: a Short or Reel in one command
 
-> **Last updated:** 2026-10-23 · **Change:** each text checked against its frames (`media.checkText`); the mix made for small speakers
+> **Last updated:** 2026-10-23 · **Change:** text checked against its frames (`media.checkText`); the mix for small speakers; no moment twice, holds capped
 
 An album, a folder or the selected clips → a finished vertical Short or Reel. AutoCut indexes
 the clips shot by shot, listens to what is said, picks a template and fills it: every slot's
@@ -48,9 +48,31 @@ The engine command: `autocut.quick` ([`crates/engine/src/autocut.rs`](../crates/
    and the reasons, with the runners-up.
 4. **Shots** — each picture slot's media gets the moment that suits its AI hints: the scene
    index's score for the slot's purpose (the rules of `media.bestShots`), its words
-   (`media.searchScenes`), energy, speech, the least quality and the shot's length. No moment
-   is used twice (a long shot gives several), a clip gives few picks, slots that ask for it keep
-   the filming order (capture dates), and a talking slot takes stretches of kept speech.
+   (`media.searchScenes`), energy, speech, the least quality and the shot's length. Slots that
+   ask for it keep the filming order (capture dates), and a talking slot takes stretches of kept
+   speech. No moment is shown twice:
+   - two picks of one clip are at least 3 s apart (two stretches of someone talking only may not
+     overlap: their words differ), and a clip gives few picks;
+   - the picks' frames, cut to the vertical frame, are compared (SigLIP 2, `media.checkText`'s
+     `similar`): two that look alike (cosine 0.9 or more — on the robot clips neighbouring seconds
+     of one shot measured 0.95, moments 4 s apart 0.83, different robots 0.57–0.84) are one
+     moment twice, and the cutaway of the pair (rather than a hook or a reveal) is picked again
+     elsewhere, up to three times; without the model a shot whose camera stands still gives one
+     moment;
+   - with fewer distinct moments than a slot's places, the template would show them again in
+     turn: those places are taken out instead (`sequence.extract`, the time closed on every
+     track) and the generated music made again for the new length — the video is shorter and
+     the report says so (`shotsSpread.shortened`). The automatic choice counts distinct moments,
+     not shots, so a template that would be cut short is ranked down.
+
+   **Holds.** A beat template is re-timed by its music's tempo to reach the length asked, but
+   never so slow that one shot (each picture's first placement; an end card's blurred reprise is
+   the template's own) holds longer than 5 s, unless its slot's `maxHold` says more or the
+   template made it longer itself; talking slots are not capped. The Tech Reveal's reveal
+   (8 beats) would hold 6.7 s at the 72 bpm that makes it 28 s, so it stops at 96 bpm and is
+   21 s long (the choice and the report say so). Each pick is as long as its place will play
+   at that tempo. The report's `shotsSpread` has the tempo, the moments that looked alike, the
+   longest hold and what was shortened.
 5. **Trim and frame** — each pick plays from its best moment (the keyframe, or the start of the
    kept speech), framed on the subject's box for the vertical crop.
 6. **Text** — each text says only what is on screen while it shows, and is checked
@@ -96,7 +118,7 @@ for the −14 LUFS target with its −1 dBTP ceiling:
 
 | stem | level | track effects |
 |---|---|---|
-| music | each clip −16 LUFS | Parametric EQ: high-pass 40 Hz, low shelf −4 dB at 110 Hz (the kick and the bass line stay); a 2:1 compressor from 4 dB over its loudness; a Hard Limiter 11 dB over it (the generated beds' drums peak about 18 dB over their loudness) |
+| music | each clip −16 LUFS | Parametric EQ: high-pass 40 Hz, low shelf at 110 Hz from −4 dB, deeper (to −10 dB) as far as this bed needs for 18 % of its energy below 120 Hz (measured through its chain, `audio.analyzeMix`; the kick and the bass line stay); a 2:1 compressor from 4 dB over its loudness; a Hard Limiter 11 dB over it (the generated beds' drums peak about 18 dB over their loudness) |
 | effects | each clip −22 LUFS | Parametric EQ: high-pass 120 Hz (no sub-bass booms) |
 | the pictures' own sound | −27 LUFS | high-pass 100 Hz, low shelf −3 dB |
 
@@ -111,7 +133,8 @@ Then `audio.normalizeLoudness` brings the mix to −14 LUFS. On the first real r
 Any template can say what its slots want (`"ai"` on a slot; see
 [`crates/templates/README.md`](../crates/templates/README.md#ai-hints)): a picture slot's
 `purpose` (hook, broll, reveal, talking-head, establishing, outro), `query`, `energy`, `speech`
-(want / avoid), `minQuality` and `chronological`; a text slot's `prompt`, `maxChars` and `about`
+(want / avoid), `minQuality`, `chronological` and `maxHold` (the longest one of its shots may be
+held when re-timed); a text slot's `prompt`, `maxChars` and `about`
 (the picture slot its texts describe). `template.inspect` shows them, Save as Template keeps
 them. A template without hints is still filled, by the pictures' quality.
 

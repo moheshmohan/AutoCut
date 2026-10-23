@@ -212,6 +212,15 @@ pub fn fallback_options(t: &TextSpec, picks: &[Pick], shots: &[ShotInfo], topic:
         let subject = d.subjects.iter().map(|s| s.name.trim()).find(|s| !s.is_empty()).map(str::to_string);
         let read = d.text.iter().map(|x| x.trim()).find(|x| x.chars().count() >= 3).map(str::to_string);
         let caption = Some(d.caption.trim().to_string()).filter(|c| !c.is_empty());
+        // a subject's name that says nothing the topic does not ("robot" for "robots at the
+        // expo") comes after the topic
+        let topic_words: Vec<String> = topic.map(filmcraft_scenes::search::terms).unwrap_or_default();
+        let plain = |x: &str| content_words(x).iter().all(|w| topic_words.iter().any(|t| same_word(t, w)));
+        if let (Some(x), Some(tp)) = (&subject, topic.map(|x| title_case(x.trim())).filter(|x| !x.is_empty() && x.chars().count() <= t.max_chars))
+            && plain(x)
+        {
+            put(tp);
+        }
         if short {
             if let Some(x) = &subject {
                 put(fit_name(&title_case(x), t.max_chars, t.capitals));
@@ -482,6 +491,8 @@ pub const GENERIC: &[&str] = &[
     "blow",
     "mind",
     "mindblowing",
+    "event",
+    "showcase",
     "ahead",
     "close",
     "closer",

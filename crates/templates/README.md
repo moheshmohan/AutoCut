@@ -124,6 +124,7 @@ without hints still fills by hand (the fill then goes by the pictures' quality).
 | `speech` | video | `want` (a shot with someone speaking: its sound is the point) or `avoid` (a cutaway) |
 | `minQuality` | video, photo, logo | the least picture quality wanted (the scene index's score, 0–1) |
 | `chronological` | video, photo, logo | the picks of every slot saying so, in the template's order, keep the order they were filmed in |
+| `maxHold` | video, photo, logo | the longest one of its shots may be held when the template is re-timed, seconds (0.5–600; an automatic fill keeps it there with a faster tempo or a shorter video; without it `autocut.quick` holds a shot 5 s at most, or as long as the template made it) |
 | `prompt` | text | what the local model writes here (≤ 1000 bytes) |
 | `maxChars` | text | the longest text it may write (at most the slot's own `maxChars`) |
 | `about` | text | the picture slot whose shots the texts describe, one text per shot (`names` about `robots`) |

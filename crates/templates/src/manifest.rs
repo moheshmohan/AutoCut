@@ -373,6 +373,11 @@ pub struct AiHints {
     /// keep the order they were filmed in.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub chronological: bool,
+    /// Picture slots: the longest one of its shots may be held when the template is re-timed
+    /// (seconds; an automatic fill keeps it there — a faster tempo, a shorter video — and holds
+    /// the slots without one to its own cap).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_hold: Option<f64>,
     /// Text slots: what the local model writes here.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub prompt: String,
@@ -1023,6 +1028,7 @@ pub(crate) fn read_ai(o: Option<Obj<'_>>, kind: SlotKind, max_chars: Option<u32>
     a.speech = o.choice(is, "speech", &SPEECH);
     a.min_quality = o.f64(is, "minQuality", 0.0, 1.0, false);
     a.chronological = o.bool(is, "chronological").unwrap_or(false);
+    a.max_hold = o.f64(is, "maxHold", 0.5, 600.0, false);
     a.prompt = o.string(is, "prompt", MAX_AI_PROMPT, false).map(|p| p.trim().to_string()).unwrap_or_default();
     a.max_chars = o.u32(is, "maxChars", 1, 10_000, false);
     a.about = o.string(is, "about", 64, false).unwrap_or_default();
@@ -1037,6 +1043,7 @@ pub(crate) fn read_ai(o: Option<Obj<'_>>, kind: SlotKind, max_chars: Option<u32>
         ("energy", a.energy.is_some()),
         ("minQuality", a.min_quality.is_some()),
         ("chronological", a.chronological),
+        ("maxHold", a.max_hold.is_some()),
     ] {
         if given && !picture {
             is.push(o.field(k), format!("only video, photo and logo slots take `{k}`"));

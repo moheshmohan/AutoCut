@@ -117,7 +117,7 @@ pub fn commands() -> Vec<CommandSpec> {
 }
 
 /// `template.save`'s parameters.
-pub const SAVE_PARAMS: &str = r#"{"path":str (.fcvideo-template folder or .zip; default: the user templates folder)?,"zip":bool=false,"sequence":id?,"name":str?,"id":str?,"description":str?,"author":str?,"license":str="MIT OR Apache-2.0","category":str?,"version":str?,"tags":[str]?,"base":id|"none"?,"slots":{"<slot>":{"name","prompt","order","minCount","beatSync","fit","constraints","default","ai":{"purpose","query","energy","speech","minQuality","chronological","prompt","maxChars","about"}}}?,"captions":bool|{"id","name","source":[slot],"maxChars","lines"}?,"variants":["16:9"|"9:16"|"1:1"|"4:5"]?,"poster":ticks?,"posterSeconds":f64?,"look":{"lumetri":str}|{"preset":str}?,"exportPreset":str?,"bundle":[itemId]|true?,"overwrite":bool?}"#;
+pub const SAVE_PARAMS: &str = r#"{"path":str (.fcvideo-template folder or .zip; default: the user templates folder)?,"zip":bool=false,"sequence":id?,"name":str?,"id":str?,"description":str?,"author":str?,"license":str="MIT OR Apache-2.0","category":str?,"version":str?,"tags":[str]?,"base":id|"none"?,"slots":{"<slot>":{"name","prompt","order","minCount","beatSync","fit","constraints","default","ai":{"purpose","query","energy","speech","minQuality","chronological","maxHold","prompt","maxChars","about"}}}?,"captions":bool|{"id","name","source":[slot],"maxChars","lines"}?,"variants":["16:9"|"9:16"|"1:1"|"4:5"]?,"poster":ticks?,"posterSeconds":f64?,"look":{"lumetri":str}|{"preset":str}?,"exportPreset":str?,"bundle":[itemId]|true?,"overwrite":bool?}"#;
 
 /// Bumped whenever a template is saved or installed in the user folder (the browser re-reads).
 static LIBRARY_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

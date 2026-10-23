@@ -252,18 +252,36 @@ pub fn effects_eq() -> Value {
 
 /// The music's EQ when it carries a video alone (a quick short nobody speaks in): the sub-bass
 /// under [`BED_HP_HZ`] out — no small speaker plays it, and it fills the headroom the Mix's
-/// limiter then has to make — and the low end [`BED_SHELF_DB`] lower below 110 Hz; the kick and
-/// the bass line stay.
-pub fn bed_eq() -> Value {
+/// limiter then has to make — and the low end `shelf_db` lower below 110 Hz (from
+/// [`BED_SHELF_DB`], deeper as far as the bed needs: [`bed_shelf`]); the kick and the bass line
+/// stay.
+pub fn bed_eq(shelf_db: f64) -> Value {
+    let shelf = if shelf_db.is_finite() { shelf_db.clamp(BED_SHELF_MIN_DB, 0.0) } else { BED_SHELF_DB };
     eq(json!({
         "hp_on": true, "hp_freq": BED_HP_HZ, "hp_slope": 1,
-        "low_on": true, "low_freq": 110.0, "low_gain": BED_SHELF_DB, "low_q": 0.71,
+        "low_on": true, "low_freq": 110.0, "low_gain": (shelf * 100.0).round() / 100.0, "low_q": 0.71,
     }))
 }
 
-/// The bed's high-pass (Hz) and its low shelf (dB).
+/// The bed's high-pass (Hz), its low shelf to start from and the deepest it goes (dB).
 pub const BED_HP_HZ: f64 = 40.0;
 pub const BED_SHELF_DB: f64 = -4.0;
+pub const BED_SHELF_MIN_DB: f64 = -10.0;
+/// The share of the bed's energy below 120 Hz its EQ aims for (the QA warns over 25 % of the
+/// mix's; the generated electronic beds measured 30–35 % through the starting shelf).
+pub const BED_LOW_SHARE: f64 = 0.18;
+
+/// The low shelf that brings a bed measuring `share` of its energy below 120 Hz (through a shelf
+/// of `shelf_db`) to [`BED_LOW_SHARE`]: the energy down there scaled so the share is the aim,
+/// never above the starting shelf nor below [`BED_SHELF_MIN_DB`].
+pub fn bed_shelf(shelf_db: f64, share: f64) -> f64 {
+    if !(shelf_db.is_finite() && share.is_finite() && share > 0.0 && share < 1.0) {
+        return if shelf_db.is_finite() { shelf_db.clamp(BED_SHELF_MIN_DB, BED_SHELF_DB) } else { BED_SHELF_DB };
+    }
+    let t = BED_LOW_SHARE;
+    let k = t * (1.0 - share) / (share * (1.0 - t));
+    (shelf_db + 10.0 * k.log10()).clamp(BED_SHELF_MIN_DB, BED_SHELF_DB)
+}
 /// The bed's peaks held this far over its loudness (dB, short of the −1 dBTP the Mix's limiter
 /// keeps at −14 LUFS: 13 dB), so the limiter has (almost) nothing to do.
 pub const BED_PEAK_OVER_LUFS: f64 = 11.0;

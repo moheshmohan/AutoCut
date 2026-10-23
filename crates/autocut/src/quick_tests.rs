@@ -213,7 +213,8 @@ fn slots_get_the_shots_that_suit_them() {
     let specs = pick_specs(&t);
     assert_eq!(specs.len(), 10, "hook, eight b-roll, reveal");
     let picks = assign(&specs, &shots, &[], &HashMap::new(), Some("robots"));
-    assert_eq!(picks.len(), 10);
+    // nine shots for ten places: the long ones' second moments would come within 3 s of their first
+    assert_eq!(picks.len(), 9);
     let of = |slot: &str| picks.iter().filter(|p| p.slot == slot).collect::<Vec<_>>();
     assert_eq!(of("hook")[0].item, 1, "the striking close-up opens: {:?}", of("hook"));
     assert!([2, 3].contains(&of("reveal")[0].item), "a wide moving shot reveals: {:?}", of("reveal"));
@@ -230,10 +231,15 @@ fn slots_get_the_shots_that_suit_them() {
         assert!(!p.why.is_empty(), "{p:?}");
     }
     assert_eq!(fill_value(of("hook")[0])["focus"], json!([0.75, 0.45]));
-    // more places than shots: long shots give more moments, nothing is reused
+    // more places than shots: a long moving shot gives several moments, 3 s apart; nothing is
+    // reused (shots of 6–9 s give one each: a second would come within 3 s of the first)
+    let mut long = shots[2].clone();
+    (long.end, long.keyframe) = (30.0, 15.0);
+    long.shot.end = Tick::from_seconds_f64(30.0);
+    let picks = assign(&specs, &[long], &[], &HashMap::new(), None);
+    assert!(picks.len() >= 4, "{} picks from one 30 s pan", picks.len());
     let few: Vec<ShotInfo> = shots.iter().take(3).cloned().collect();
-    let picks = assign(&specs, &few, &[], &HashMap::new(), None);
-    assert!(picks.len() >= 6, "{} picks from three long shots", picks.len());
+    assert_eq!(assign(&specs, &few, &[], &HashMap::new(), None).len(), 3);
 }
 
 #[test]
@@ -779,11 +785,11 @@ fn stems_are_typed_by_their_slots() {
         "video": [{"items": [{"clip": 10, "link": 7}]}],
         "audio": [{"items": [{"clip": 40}]}, {"items": [{"clip": 41}, {"clip": 42, "link": 7}]}, {"items": [{"clip": 43}]}],
     });
-    let st = Stems::of(&t, &applied, &seq);
+    let st = Stems::of(&t, &applied, &seq, &[]);
     assert_eq!((st.music.as_slice(), st.sound.as_slice(), st.effects.as_slice()), (&[40][..], &[42][..], &[41, 43][..]));
     assert!(st.talk.is_empty());
     for junk in [json!(null), json!({"audio": 3}), json!({"audio": [{"items": [{"clip": "x"}, 5]}], "video": [[]]})] {
-        let st = Stems::of(&t, &json!({"slots": "x"}), &junk);
+        let st = Stems::of(&t, &json!({"slots": "x"}), &junk, &[]);
         assert!(st.music.is_empty() && st.effects.is_empty());
     }
     // the bed's chain keeps its ceiling under the loudness target's peak, whatever level it is given
@@ -792,4 +798,234 @@ fn stems_are_typed_by_their_slots() {
         let max = chain.iter().find(|(e, _)| *e == "hard_limiter").unwrap().1["max"].as_f64().unwrap();
         assert!(max.is_finite() && max <= -1.0, "{lufs} → {max}");
     }
+}
+
+/// The tempo is never slowed so far that one shot holds longer than its cap: the Tech Reveal's
+/// reveal (8 beats) would hold 6.7 s at the 72 bpm that makes it 28 s, so it stops at 96 bpm
+/// (5 s) and the video is 21 s; a slot asking for a longer hold (`maxHold`) gets it.
+#[test]
+fn holds_are_capped_when_the_tempo_is_moved() {
+    let t = inspected("builtin:tech-reveal");
+    let tp = tempo(&t, 30.0).unwrap();
+    let held = tp.held.as_ref().expect("held");
+    assert_eq!(held.slot, "reveal");
+    assert!(held.would > 6.5 && (held.cap - MAX_HOLD).abs() < 1e-9, "{held:?}");
+    assert!((tp.bpm - 96.0).abs() < 0.05 && (tp.seconds - 21.25).abs() < 0.1, "{tp:?}");
+    // every shot within its cap at that tempo (the end card's reprise is the template's own)
+    for s in t.slots.iter().filter(|s| s.picture()) {
+        for p in s.placements.iter().take(1) {
+            assert!(p.seconds * t.bpm.unwrap() / tp.bpm <= hold_cap(s, p).unwrap() + 1e-6, "{} {p:?}", s.id);
+        }
+    }
+    // shorter than the template: faster, nothing held
+    let fast = tempo(&t, 12.0).unwrap();
+    assert!(fast.held.is_none() && fast.bpm > 120.0);
+    // the template asks for a longer reveal: it may hold 8 s
+    let mut long = t.clone();
+    for s in long.slots.iter_mut().filter(|s| s.id == "reveal") {
+        s.ai.get_or_insert_with(Hints::default).max_hold = Some(8.0);
+    }
+    let tp = tempo(&long, 30.0).unwrap();
+    assert!(tp.held.is_none() && (tp.bpm - 72.0).abs() < 0.05, "{tp:?}");
+    // the choice knows: the Tech Reveal says it stops short of the length asked
+    let (m, shots) = library();
+    let f = facts(&m, &shots, &[], Some("robots"));
+    let s = score_template(&t, &f, 30.0);
+    assert!(s.reasons.iter().any(|r| r.contains("no slower")) && (s.seconds - 21.3).abs() < 0.2, "{s:?}");
+    // talking slots are not capped; no beat grid, no tempo; hostile numbers are no tempo
+    let tip = inspected("builtin:talking-head-tip");
+    assert!(tip.slots.iter().filter(|s| s.ai.as_ref().is_some_and(|h| h.speech.as_deref() == Some("want"))).all(|s| hold_cap(s, &s.placements[0]).is_none()));
+    assert!(tempo(&tip, 30.0).is_none());
+    let mut bad = t.clone();
+    bad.bpm = Some(f64::NAN);
+    assert!(tempo(&bad, 30.0).is_none());
+    bad.bpm = Some(120.0);
+    for s in &mut bad.slots {
+        for p in &mut s.placements {
+            p.seconds = 0.0;
+        }
+    }
+    assert!(tempo(&bad, f64::INFINITY).is_some_and(|x| x.seconds.is_finite()));
+}
+
+/// Two picks of one clip are at least [`MIN_GAP`] apart; a measured shot whose camera stands
+/// still gives one moment when frames can't be compared; a moment that looked like another is
+/// not used again.
+#[test]
+fn picks_of_one_clip_are_kept_apart() {
+    let (_, shots) = library();
+    let t = inspected("builtin:tech-reveal");
+    let specs = pick_specs(&t);
+    let few: Vec<ShotInfo> = shots.iter().take(3).cloned().collect();
+    let gap = |a: &Pick, b: &Pick| a.in_seconds.max(b.in_seconds) - a.out_seconds.min(b.out_seconds);
+    let picks = assign(&specs, &few, &[], &HashMap::new(), None);
+    for (i, a) in picks.iter().enumerate() {
+        for b in picks.iter().skip(i + 1).filter(|b| b.item == a.item) {
+            assert!(gap(a, b) >= MIN_GAP - 1e-9, "{a:?} {b:?}");
+        }
+    }
+    assert!(picks.len() < specs.len(), "three shots do not give ten distinct moments");
+    assert!(facts(&[], &few, &[], None).moments >= picks.len(), "the moments the choice counted");
+    // a still camera: one moment each when the frames can't tell
+    let mut still = few.clone();
+    for s in &mut still {
+        s.shot.camera = CameraMove::Static;
+        s.shot.quality.motion = 0.0;
+    }
+    let once = assign_spread(&specs, &still, &[], &HashMap::new(), None, &Spread { still_once: true, ..Spread::default() });
+    assert_eq!(once.len(), 3, "{once:?}");
+    // a moment to avoid is not used, nor anything near it
+    let first = picks[0].clone();
+    let spread = Spread { avoid: vec![(first.item, first.in_seconds, first.out_seconds)], ..Spread::default() };
+    let again = assign_spread(&specs, &few, &[], &HashMap::new(), None, &spread);
+    assert!(again.iter().all(|p| p.item != first.item || gap(p, &first) >= MIN_GAP - 1e-9), "{again:?}");
+    // someone talking: takes of one clip may follow each other (their words differ)
+    let (_, broll) = library();
+    let mut talk = parse_shots(&media(4, "talk.mov", 40.0, false, 0), None);
+    let sp = vec![talking_speech(4)];
+    mark_speech(&mut talk, &sp);
+    talk.extend(broll.into_iter().skip(1));
+    let tip = inspected("builtin:talking-head-tip");
+    assert_eq!(assign(&pick_specs(&tip), &talk, &sp, &HashMap::new(), None).iter().filter(|p| p.slot == "takes").count(), 3);
+}
+
+/// A fake `media.checkText` for the moments' frames: each window looks like `looks[item]`.
+struct Frames(HashMap<u64, Vec<f32>>);
+
+impl crate::Executor for Frames {
+    fn execute(&self, id: &str, p: Value) -> crate::ExecFuture {
+        assert_eq!(id, "media.checkText");
+        let items: Vec<u64> = p["windows"].as_array().unwrap().iter().map(|w| w["item"].as_u64().unwrap()).collect();
+        let v = |i: &u64| self.0.get(i).cloned().unwrap_or_else(|| vec![0.0, 0.0, 1.0]);
+        let cos = |a: &[f32], b: &[f32]| {
+            let d: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+            let n = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>().sqrt();
+            f64::from(d / (n(a) * n(b)))
+        };
+        let similar: Vec<Vec<f64>> = items.iter().map(|a| items.iter().map(|b| cos(&v(a), &v(b))).collect()).collect();
+        let out = json!({"job": 1, "scenes": {"similar": similar, "embedder": "fake"}});
+        Box::pin(async move { Ok(out) })
+    }
+}
+
+/// Picks that look alike: the cutaway is replaced, not the hook; without an embedding model the
+/// frames can't be compared (`None`).
+#[test]
+fn moments_that_look_alike_are_found() {
+    let (_, shots) = library();
+    let t = inspected("builtin:tech-reveal");
+    let specs = pick_specs(&t);
+    let picks = assign(&specs, &shots, &[], &HashMap::new(), None);
+    let hook = picks.iter().position(|p| p.slot == "hook").unwrap();
+    let broll = picks.iter().position(|p| p.slot == "broll").unwrap();
+    // the hook's clip and the first cutaway's look the same; everything else differs
+    let mut looks: HashMap<u64, Vec<f32>> = HashMap::new();
+    for (k, p) in picks.iter().enumerate() {
+        let mut v = vec![0.0; picks.len()];
+        v[k] = 1.0;
+        looks.insert(p.item, v);
+    }
+    looks.insert(picks[broll].item, looks[&picks[hook].item].clone());
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let mut notes = Vec::new();
+    let pairs = rt.block_on(look_alike(&Frames(looks), &picks, &specs, Some(0.5625), &mut notes)).unwrap();
+    assert_eq!(pairs.len(), 1, "{pairs:?}");
+    assert_eq!((pairs[0].0, pairs[0].1), (broll, hook), "the cutaway goes, the hook stays");
+    // no embedding model: the frames can't be compared
+    struct NoSim;
+    impl crate::Executor for NoSim {
+        fn execute(&self, _: &str, _: Value) -> crate::ExecFuture {
+            Box::pin(async { Ok(json!({"scenes": {"similar": null}})) })
+        }
+    }
+    assert!(rt.block_on(look_alike(&NoSim, &picks, &specs, None, &mut notes)).is_none());
+}
+
+/// Fewer distinct moments than the b-roll's places: the places that would show a moment again
+/// are taken out and the music made again for the new length; no clip is shown twice near the
+/// same moment, and no shot holds past its cap.
+#[test]
+fn too_few_moments_shorten_the_video_instead_of_repeating() {
+    let (s, movies) = clips_session(3);
+    let ex = SessionExecutor::from(s);
+    let p = json!({"items": movies, "template": "builtin:tech-reveal", "seconds": 28, "topic": "robots", "redact": "off"});
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let out = rt.block_on(make(&ex, &p, None, &mut |_| {})).unwrap();
+    let spread = &out["shotsSpread"];
+    assert!(spread["filled"].as_u64().unwrap() < spread["places"].as_u64().unwrap(), "{spread}");
+    let short = &spread["shortened"];
+    assert!(short["to"].as_f64().unwrap() < short["from"].as_f64().unwrap(), "{spread}");
+    assert_eq!(short["musicAgain"], true, "{short}");
+    assert!(spread["longestHold"]["seconds"].as_f64().unwrap() <= MAX_HOLD + 0.05, "{spread}");
+    assert!(out["warnings"].as_array().unwrap().iter().any(|w| w.as_str().is_some_and(|w| w.contains("shortened"))), "{}", out["warnings"]);
+    // the picture: each moment once (the end card's blurred reprise of the reveal is the template's)
+    let seq = rt.block_on(ex.execute("sequence.inspect", json!({"item": out["sequence"]}))).unwrap();
+    let v1: Vec<&Value> = seq["video"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| movies.contains(&c["item"].as_u64().unwrap()))
+        .filter(|c| !c["effects"].as_array().unwrap().iter().any(|e| e["effect"] == "gaussian_blur"))
+        .collect();
+    let tps = TICKS_PER_SECOND as f64;
+    for (i, a) in v1.iter().enumerate() {
+        for b in v1.iter().skip(i + 1).filter(|b| b["item"] == a["item"]) {
+            let (a0, a1) = (a["sourceIn"].as_i64().unwrap() as f64 / tps, a["sourceOut"].as_i64().unwrap() as f64 / tps);
+            let (b0, b1) = (b["sourceIn"].as_i64().unwrap() as f64 / tps, b["sourceOut"].as_i64().unwrap() as f64 / tps);
+            assert!(a0.max(b0) - a1.min(b1) >= MIN_GAP - 0.6, "one moment twice: {a} {b}");
+        }
+    }
+    // the new bed is the music, and it is as long as the video
+    let music: Vec<&Value> = seq["audio"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|t| t["items"].as_array().unwrap())
+        .filter(|c| out["mix"]["stems"]["music"].as_array().unwrap().contains(&c["clip"]))
+        .collect();
+    assert_eq!(music.len(), 1, "{}", out["mix"]);
+    assert!((music[0]["end"].as_i64().unwrap() - seq["duration"].as_i64().unwrap()).abs() <= TICKS_PER_SECOND / 10);
+}
+
+/// Every frame of one clip looks alike; the others differ (a fake `media.checkText` over a real
+/// session).
+struct AlikeFrames {
+    inner: SessionExecutor,
+    same: u64,
+}
+
+impl crate::Executor for AlikeFrames {
+    fn execute(&self, id: &str, p: Value) -> crate::ExecFuture {
+        if id != "media.checkText" {
+            return self.inner.execute(id, p);
+        }
+        let items: Vec<u64> = p["windows"].as_array().unwrap().iter().map(|w| w["item"].as_u64().unwrap()).collect();
+        let sim: Vec<Vec<f64>> = (0..items.len())
+            .map(|a| (0..items.len()).map(|b| if a == b || (items[a] == self.same && items[b] == self.same) { 1.0 } else { 0.3 }).collect())
+            .collect();
+        let v = json!({"job": 1, "scenes": {"similar": sim, "embedder": "fake"}});
+        Box::pin(async move { Ok(v) })
+    }
+}
+
+/// Two moments of one clip that look alike: the clip gives one moment, the others go elsewhere.
+#[test]
+fn a_clip_whose_moments_look_alike_gives_one() {
+    let mut s = Session::default();
+    let mut movies = Vec::new();
+    for (k, (scene, secs)) in
+        [(DemoScene::Forest, 40.0), (DemoScene::CityNight, 14.0), (DemoScene::Dunes, 14.0), (DemoScene::Plasma, 14.0)].into_iter().enumerate()
+    {
+        let src = GeneratorSource::new(Generator::Demo(scene), 192, 108, FrameRate::FPS_30, Tick::from_seconds_f64(secs));
+        let pool = s.media.clone();
+        movies.push(filmcraft_engine::demo::add_generator(std::sync::Arc::make_mut(&mut s.project), &pool, src, &format!("clip{k}.mov"), Label::Iris, None).0);
+    }
+    let ex = AlikeFrames { inner: SessionExecutor::from(s), same: movies[0] };
+    let p = json!({"items": movies, "template": "builtin:tech-reveal", "seconds": 20, "redact": "off"});
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let out = rt.block_on(make(&ex, &p, None, &mut |_| {})).unwrap();
+    let of_same = out["picks"].as_array().unwrap().iter().filter(|p| p["item"] == movies[0]).count();
+    assert_eq!(of_same, 1, "{}", out["picks"]);
+    let alike = out["shotsSpread"]["lookAlike"].as_array().unwrap();
+    assert!(!alike.is_empty() && alike.iter().all(|a| a["replaced"]["name"] == "clip0.mov"), "{alike:?}");
 }

@@ -199,6 +199,8 @@ pub struct ShotInfo {
     pub talking: bool,
     /// Described in full detail.
     pub full: bool,
+    /// Measured by the scene index (its camera and motion are known).
+    pub measured: bool,
 }
 
 impl ShotInfo {
@@ -252,6 +254,7 @@ pub fn parse_shots(m: &MediaItem, scenes: Option<&Value>) -> Vec<ShotInfo> {
             speech: 0.0,
             talking: false,
             full,
+            measured: true,
         });
     }
     if out.is_empty() {
@@ -270,6 +273,7 @@ pub fn parse_shots(m: &MediaItem, scenes: Option<&Value>) -> Vec<ShotInfo> {
             speech: 0.0,
             talking: false,
             full: false,
+            measured: false,
         });
     }
     out
@@ -412,6 +416,8 @@ pub struct Hints {
     pub speech: Option<String>,
     pub min_quality: Option<f64>,
     pub chronological: bool,
+    /// The longest one of its shots may be held when re-timed, seconds.
+    pub max_hold: Option<f64>,
     pub prompt: String,
     pub max_chars: Option<u32>,
     pub about: String,
@@ -428,6 +434,7 @@ impl Hints {
             speech: s("speech"),
             min_quality: o.get("minQuality").and_then(finite).map(|q| q.clamp(0.0, 1.0)),
             chronological: o.get("chronological").and_then(Value::as_bool).unwrap_or(false),
+            max_hold: o.get("maxHold").and_then(finite).filter(|h| (0.5..=600.0).contains(h)),
             prompt: s("prompt").unwrap_or_default(),
             max_chars: o.get("maxChars").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()),
             about: s("about").unwrap_or_default(),
@@ -577,6 +584,8 @@ pub struct Facts {
     pub videos: usize,
     pub stills: usize,
     pub shots: usize,
+    /// Distinct moments they give ([`moments_of`]).
+    pub moments: usize,
     /// Shots with a description.
     pub described: usize,
     /// Someone talks to the camera (with this much kept speech, seconds).
@@ -607,6 +616,7 @@ pub fn facts(media: &[MediaItem], shots: &[ShotInfo], speech: &[ItemSpeech], top
         videos: media.iter().filter(|m| !m.still).count(),
         stills: media.iter().filter(|m| m.still).count(),
         shots: shots.len(),
+        moments: shots.iter().map(moments_of).sum(),
         described: shots.iter().filter(|s| s.description().is_some()).count(),
         talking: !talkers.is_empty(),
         speech_seconds: talkers.iter().map(|s| s.kept_seconds()).sum(),
@@ -654,6 +664,71 @@ pub fn stretch(bpm: f64, seconds: f64, target: f64) -> (f64, f64) {
     (want, seconds * bpm / want)
 }
 
+/// The longest one shot is held when a beat template is re-timed (seconds), unless its slot asks
+/// for more (`maxHold`) or the template itself made it longer.
+pub const MAX_HOLD: f64 = 5.0;
+
+/// The tempo a beat template plays at and the length it gives.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Tempo {
+    pub bpm: f64,
+    pub seconds: f64,
+    /// What kept it from slowing further: a shot that would have been held too long.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held: Option<Held>,
+}
+
+/// A shot the tempo was kept up for.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Held {
+    pub slot: String,
+    /// How long it would have played at the tempo for the length asked, and the most it may.
+    pub would: f64,
+    pub cap: f64,
+}
+
+/// The longest placement `p` of slot `s` may become when re-timed (seconds): its `maxHold`, else
+/// [`MAX_HOLD`], never less than the template made it; none for a talking slot (its takes are as
+/// long as what is said) or a slot that is not a picture.
+pub fn hold_cap(s: &SlotInfo, p: &Place) -> Option<f64> {
+    if !s.picture() || s.ai.as_ref().is_some_and(Hints::wants_speech) {
+        return None;
+    }
+    let cap = s.ai.as_ref().and_then(|h| h.max_hold).unwrap_or(MAX_HOLD);
+    Some(cap.max(p.seconds))
+}
+
+/// The tempo bringing beat template `t` nearest `target` seconds ([`stretch`]), but never so slow
+/// that a shot — each picture media's first placement; later ones reprise it, like an end card's
+/// blurred copy — is held longer than its [`hold_cap`]: then the video is shorter than asked.
+pub fn tempo(t: &TemplateInfo, target: f64) -> Option<Tempo> {
+    let bpm = t.bpm.filter(|b| b.is_finite() && *b > 0.0)?;
+    let (want, seconds) = stretch(bpm, t.seconds, target);
+    let mut floor: Option<(f64, &str, f64, f64)> = None;
+    for s in t.slots.iter().filter(|s| s.picture()) {
+        let mut seen = BTreeSet::new();
+        for p in &s.placements {
+            if !seen.insert(p.media) {
+                continue;
+            }
+            let Some(cap) = hold_cap(s, p).filter(|c| *c > 0.0) else { continue };
+            let min = bpm * p.seconds / cap;
+            if min.is_finite() && floor.is_none_or(|f| min > f.0) {
+                floor = Some((min, s.id.as_str(), p.seconds, cap));
+            }
+        }
+    }
+    match floor {
+        Some((min, slot, secs, cap)) if want + 1e-9 < min => {
+            let b = ((min * 10.0).ceil() / 10.0).clamp(BPM_RANGE.0, BPM_RANGE.1.max(bpm));
+            let would = if want > 0.0 { secs * bpm / want } else { secs };
+            let held = Held { slot: slot.to_string(), would: (would * 10.0).round() / 10.0, cap };
+            Some(Tempo { bpm: b, seconds: t.seconds * bpm / b, held: Some(held) })
+        }
+        _ => Some(Tempo { bpm: want, seconds, held: None }),
+    }
+}
+
 /// Score template `t` for media `f` (see the module docs): higher is better.
 pub fn score_template(t: &TemplateInfo, f: &Facts, target: f64) -> Scored {
     let mut score = 0.0;
@@ -664,20 +739,20 @@ pub fn score_template(t: &TemplateInfo, f: &Facts, target: f64) -> Scored {
     }
     // enough shots for its places
     let need = t.needs().max(1);
-    let r = f.shots as f64 / need as f64;
+    let r = f.moments as f64 / need as f64;
     if r >= 1.0 {
         score += 0.6;
-        why.push(format!("{} shot(s) for its {need} place(s)", f.shots));
+        why.push(format!("{} distinct moment(s) in {} shot(s) for its {need} place(s)", f.moments, f.shots));
         if need <= 2 && f.shots >= 10 && !t.wants_speech() {
             score -= 0.4;
             why.push(format!("uses only {need} of {} shots", f.shots));
         }
     } else if r >= 0.5 {
-        score += 0.6 * r - 0.1;
-        why.push(format!("{} shot(s) for {need} places: some come from one long shot", f.shots));
+        score += 0.6 * r - 0.4;
+        why.push(format!("{} distinct moment(s) for {need} places: it would be shorter, without the rest", f.moments));
     } else {
-        score -= 0.5;
-        why.push(format!("only {} shot(s) for {need} places", f.shots));
+        score -= 0.8;
+        why.push(format!("only {} distinct moment(s) for {need} places", f.moments));
     }
     // someone talking
     match (t.wants_speech(), f.talking) {
@@ -704,10 +779,8 @@ pub fn score_template(t: &TemplateInfo, f: &Facts, target: f64) -> Scored {
         }
     }
     // length
-    let seconds = match t.bpm {
-        Some(b) => stretch(b, t.seconds, target).1,
-        None => t.seconds,
-    };
+    let tp = tempo(t, target);
+    let seconds = tp.as_ref().map_or(t.seconds, |x| x.seconds);
     let off = ((seconds - target).abs() / target.max(1.0)).min(1.0);
     score += 0.4 * (1.0 - off) - 0.2;
     why.push(if t.bpm.is_some() && (seconds - t.seconds).abs() > 0.5 {
@@ -715,6 +788,9 @@ pub fn score_template(t: &TemplateInfo, f: &Facts, target: f64) -> Scored {
     } else {
         format!("{seconds:.0} s ({target:.0} s asked)")
     });
+    if let Some(h) = tp.as_ref().and_then(|x| x.held.as_ref()) {
+        why.push(format!("no slower: its {} would hold one shot {:.1} s (at most {:.1})", h.slot, h.would, h.cap));
+    }
     // the topic and the subjects
     let mine: BTreeSet<String> = t
         .tags
@@ -856,9 +932,10 @@ fn purpose_use(p: &str) -> ShotUse {
     }
 }
 
-/// The moments of `s` for a pick `need` seconds long: its best moment, and in a long shot a few
-/// more spread over it.
-fn windows(s: &ShotInfo, need: f64) -> Vec<(f64, f64, bool)> {
+/// The moments of `s` for a pick `need` seconds long: its best moment, and in a shot long enough
+/// for two picks [`MIN_GAP`] apart, more along it, every half of `need` + [`MIN_GAP`] (at most
+/// `max` in all), so picks of one shot can keep their distance.
+fn windows(s: &ShotInfo, need: f64, max: usize) -> Vec<(f64, f64, bool)> {
     if s.still {
         return vec![(0.0, 0.0, true)];
     }
@@ -875,12 +952,13 @@ fn windows(s: &ShotInfo, need: f64) -> Vec<(f64, f64, bool)> {
         let (a, b) = place(s.keyframe);
         (a, b, true)
     }];
-    if len >= 3.0 * need && need > 0.0 {
-        let k = ((len / (1.5 * need)).floor() as usize).clamp(2, 4);
-        for j in 0..k {
-            let c = s.start + len * (j as f64 + 0.5) / k as f64;
-            let (a, b) = place(c);
-            if out.iter().all(|(x, y, _)| (b.min(*y) - a.max(*x)) <= OVERLAP) {
+    if need > 0.0 && len >= 2.0 * need + MIN_GAP {
+        let step = ((need + MIN_GAP) / 2.0).max(0.5);
+        let n = (((len - need) / step).floor() as usize).saturating_add(1).min(max.saturating_sub(1));
+        for j in 0..n {
+            let a = s.start + step * j as f64;
+            let b = a + need;
+            if b <= s.end + 1e-9 && out.iter().all(|(x, y, _)| (b.min(*y) - a.max(*x)) <= OVERLAP) {
                 out.push((a, b, false));
             }
         }
@@ -1021,13 +1099,66 @@ fn subject_box(s: &ShotInfo) -> Option<[f64; 4]> {
     (b.iter().all(|v| v.is_finite()) && b[2] > 0.0 && b[3] > 0.0 && b[2] <= 1.5 && b[3] <= 1.5).then(|| b.map(|v| (v.clamp(-1.0, 2.0) * 1e4).round() / 1e4))
 }
 
-/// Whether moment `[a, b]` of item `item` clashes with a pick already made.
-fn clashes(picked: &[Pick], item: u64, still: bool, a: f64, b: f64) -> bool {
-    picked.iter().any(|p| p.item == item && (still || (b.min(p.out_seconds) - a.max(p.in_seconds)) > OVERLAP))
+/// Two picks of one clip are at least this far apart (seconds between their spans), unless both
+/// are someone talking (their words differ).
+pub const MIN_GAP: f64 = 3.0;
+/// Two moments whose frames look at least this alike are one moment shown twice (SigLIP 2's
+/// cosine of their frames, cut to the edit's frame). Measured on the robot clips: neighbouring
+/// seconds of one shot 0.95, moments of one clip 4 s apart 0.83, different robots 0.57–0.84.
+pub const SAME_LOOK: f64 = 0.9;
+/// What each earlier pick of a clip takes off another moment of it (a hook's or a reveal's 2.5
+/// times): a clip not shown yet comes first, unless it is much worse.
+const SAME_CLIP_PENALTY: f64 = 0.2;
+/// Times the picks are compared and the look-alikes picked again; still alike after the last,
+/// they are left out.
+const LOOK_ROUNDS: usize = 4;
+/// A measured shot this still (a static camera moving less than this) gives one moment when the
+/// frames cannot be compared.
+const STILL_MOTION: f32 = 0.08;
+
+/// What keeps the picks apart, beyond [`MIN_GAP`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Spread {
+    /// Moments not to use again (`(item, from, to)`): they looked like another pick.
+    pub avoid: Vec<(u64, f64, f64)>,
+    /// A still shot gives one moment (set when the frames cannot be compared).
+    pub still_once: bool,
+    /// Clips that give one moment: two of their moments looked alike, so the rest will too.
+    pub once: Vec<u64>,
 }
 
-/// Fill `specs` from `shots` (see the module docs): each pick the best moment not used yet, the
-/// best pairs first. `search` holds each slot query's scores per `(item, shot)`.
+/// A measured shot whose camera did not move (its moments look alike unless something moves in
+/// it, which only the frames can tell).
+fn still_shot(s: &ShotInfo) -> bool {
+    s.measured && !s.still && s.shot.camera == CameraMove::Static && s.shot.quality.motion < STILL_MOTION
+}
+
+/// Distinct moments a shot gives: one, and in a long shot that is not still one more every
+/// [`MIN_GAP`] + 1.5 s past its first 1.5 s (four at most).
+pub fn moments_of(s: &ShotInfo) -> usize {
+    if s.still || still_shot(s) {
+        return 1;
+    }
+    let extra = ((s.seconds() - 1.5) / (MIN_GAP + 1.5)).floor();
+    1 + if extra.is_finite() && extra > 0.0 { (extra as usize).min(3) } else { 0 }
+}
+
+/// Whether candidate `c` is too near a pick already made or a moment to avoid: the same photo,
+/// less than [`MIN_GAP`] from another moment of the same clip (two moments of someone talking
+/// only may not overlap), or a second moment of a still shot when frames can't be compared.
+fn clashes(picked: &[Pick], spread: &Spread, c: &Candidate<'_>) -> bool {
+    let (item, photo, a, b, talk) = (c.shot.item, c.shot.still, c.from, c.to, c.said.is_some());
+    let near = |x: f64, y: f64, both_talk: bool| {
+        let gap = a.max(x) - b.min(y);
+        if both_talk { gap < -OVERLAP } else { gap < MIN_GAP }
+    };
+    picked.iter().any(|p| p.item == item && (photo || near(p.in_seconds, p.out_seconds, talk && p.said.is_some())))
+        || spread.avoid.iter().any(|(i, x, y)| *i == item && (photo || near(*x, *y, false)))
+        || ((spread.once.contains(&item) || spread.still_once && still_shot(c.shot)) && !talk && picked.iter().any(|p| p.item == item && p.said.is_none()))
+}
+
+/// Fill `specs` from `shots` (see the module docs) with the picks kept apart by [`MIN_GAP`] only
+/// ([`assign_spread`]).
 pub fn assign(
     specs: &[PickSpec],
     shots: &[ShotInfo],
@@ -1035,8 +1166,24 @@ pub fn assign(
     search: &HashMap<String, HashMap<(u64, usize), f64>>,
     topic: Option<&str>,
 ) -> Vec<Pick> {
+    assign_spread(specs, shots, speech, search, topic, &Spread::default())
+}
+
+/// Fill `specs` from `shots` (see the module docs): each pick the best moment not used yet and
+/// not near one used ([`clashes`]), the best pairs first. `search` holds each slot query's scores
+/// per `(item, shot)`.
+pub fn assign_spread(
+    specs: &[PickSpec],
+    shots: &[ShotInfo],
+    speech: &[ItemSpeech],
+    search: &HashMap<String, HashMap<(u64, usize), f64>>,
+    topic: Option<&str>,
+    spread: &Spread,
+) -> Vec<Pick> {
     let topic_words = topic.map(words_of).unwrap_or_default();
     let empty = HashMap::new();
+    // moments a shot gives: many in a small library, few in a big one (candidates stay bounded)
+    let per_shot = (4000 / shots.len().max(1)).clamp(3, 12);
     // every pick's candidates, scored on their own
     let mut cands: Vec<Vec<Candidate<'_>>> = Vec::with_capacity(specs.len());
     for p in specs {
@@ -1047,7 +1194,7 @@ pub fn assign(
         }
         for s in shots {
             let (score, why) = suit(p, s, q, &topic_words);
-            for (a, b, main) in windows(s, p.need) {
+            for (a, b, main) in windows(s, p.need, per_shot) {
                 let mut why = why.clone();
                 if !main {
                     why.push("another moment of a long shot".into());
@@ -1068,7 +1215,7 @@ pub fn assign(
                 continue;
             }
             for (ci, c) in list.iter().enumerate() {
-                if clashes(&picked, c.shot.item, c.shot.still, c.from, c.to) {
+                if clashes(&picked, spread, c) {
                     continue;
                 }
                 // a few picks of one clip at most (none after the hook or the reveal showed it), and
@@ -1080,7 +1227,7 @@ pub fn assign(
                     .sum();
                 let caption = c.shot.caption();
                 let same_caption = picked.iter().any(|p| !caption.is_empty() && p.caption == caption && p.item != c.shot.item);
-                let v = c.score - 0.12 * same_item - if same_caption { 0.1 } else { 0.0 };
+                let v = c.score - SAME_CLIP_PENALTY * same_item - if same_caption { 0.1 } else { 0.0 };
                 if best.is_none_or(|(_, _, b)| v > b) {
                     best = Some((pi, ci, v));
                 }
@@ -1278,6 +1425,10 @@ pub struct Report {
     pub safe_zones: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privacy: Option<Value>,
+    /// How the shots were kept apart and how long they hold: the moments that looked alike and
+    /// were replaced, the longest hold, the tempo, a video shortened instead of repeating.
+    #[serde(rename = "shotsSpread", skip_serializing_if = "Option::is_none")]
+    pub shots_spread: Option<Value>,
     /// How the sound was mixed: each stem's role, level and track effects.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mix: Option<Value>,
@@ -1372,6 +1523,214 @@ async fn download(ex: &dyn Executor, opts: &Options, lines: &mut dyn FnMut(&str)
     {
         notes.push(format!("download: the face and plate detectors: {e}"));
     }
+}
+
+/// Pairs of picks whose frames look alike (at least [`SAME_LOOK`]): `(the pick to replace, the
+/// pick it looks like, their cosine)` — of a pair, the cutaway rather than the shot a slot stands
+/// for (a hook, a reveal), else the one that scored lower. Someone talking is left out (the words
+/// differ). `None` when the frames cannot be compared (no embedding model).
+pub async fn look_alike(
+    ex: &dyn Executor,
+    picks: &[Pick],
+    specs: &[PickSpec],
+    aspect: Option<f64>,
+    notes: &mut Vec<String>,
+) -> Option<Vec<(usize, usize, f64)>> {
+    let idx: Vec<usize> =
+        (0..picks.len()).filter(|i| picks.get(*i).is_some_and(|p| p.said.is_none())).take(filmcraft_engine::scene_check::MAX_WINDOWS).collect();
+    if idx.len() < 2 {
+        return Some(Vec::new());
+    }
+    let windows: Vec<Value> = idx
+        .iter()
+        .filter_map(|i| picks.get(*i))
+        .map(|p| {
+            let mut w = json!({"item": p.item, "from": p.in_seconds, "to": p.out_seconds.max(p.in_seconds)});
+            if let Some(f) = p.focus {
+                w["focus"] = json!(f);
+            }
+            w
+        })
+        .collect();
+    let mut q = json!({"windows": windows, "frames": 2, "wait": true});
+    if let Some(a) = aspect {
+        q["aspect"] = json!(a);
+    }
+    let v = match run(ex, "media.checkText", q).await {
+        Ok(v) => v,
+        Err(e) => {
+            notes.push(format!("shots: their frames could not be compared ({})", chars(&e.to_string(), 200)));
+            return None;
+        }
+    };
+    let v = if v["scenes"].is_object() { &v["scenes"] } else { &v };
+    let sim = v["similar"].as_array()?;
+    let rank_of = |i: usize| picks.get(i).and_then(|p| specs.iter().find(|s| s.slot == p.slot && s.media == p.media)).map_or(1, rank);
+    let score_of = |i: usize| picks.get(i).map_or(0.0, |p| p.score);
+    let mut out = Vec::new();
+    let mut dropped: BTreeSet<usize> = BTreeSet::new();
+    for (a, &ia) in idx.iter().enumerate() {
+        for (b, &ib) in idx.iter().enumerate().skip(a + 1) {
+            let Some(c) = sim.get(a).and_then(|r| r.get(b)).and_then(finite) else { continue };
+            if c < SAME_LOOK || dropped.contains(&ia) || dropped.contains(&ib) {
+                continue;
+            }
+            let drop = match rank_of(ia).cmp(&rank_of(ib)) {
+                std::cmp::Ordering::Greater => ia,
+                std::cmp::Ordering::Less => ib,
+                std::cmp::Ordering::Equal if score_of(ia) < score_of(ib) => ia,
+                std::cmp::Ordering::Equal => ib,
+            };
+            let keep = if drop == ia { ib } else { ia };
+            dropped.insert(drop);
+            out.push((drop, keep, (c * 1e4).round() / 1e4));
+        }
+    }
+    Some(out)
+}
+
+/// The longest one shot plays in the applied template (seconds) and its slot: each picture
+/// media's first placement (a reprise — an end card's blurred copy — is the template's own).
+pub fn longest_hold(t: &TemplateInfo, applied: &Value) -> Option<(String, f64)> {
+    let mut best: Option<(String, f64)> = None;
+    for x in applied["slots"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(4096) {
+        let (Some(slot), Some(k), Some(d)) = (x["slot"].as_str(), x["placement"].as_u64(), x["duration"].as_i64()) else { continue };
+        let Some(s) = t.slots.iter().find(|s| s.id == slot && s.picture()) else { continue };
+        let Some(k) = usize::try_from(k).ok() else { continue };
+        let Some(pl) = s.placements.get(k) else { continue };
+        if s.placements.iter().position(|p| p.media == pl.media) != Some(k) || x["media"].is_null() {
+            continue;
+        }
+        let secs = d as f64 / TICKS_PER_SECOND as f64;
+        if secs.is_finite() && best.as_ref().is_none_or(|b| secs > b.1) {
+            best = Some((slot.to_string(), (secs * 100.0).round() / 100.0));
+        }
+    }
+    best
+}
+
+/// The music bed the job generated: its item, tempo and style, to make it again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bed {
+    pub item: u64,
+    pub bpm: f64,
+    pub mood: String,
+    pub genre: String,
+}
+
+/// The placements a slot would show again — it was given fewer distinct picks than its places,
+/// and the template reuses them in turn — taken out of the sequence, the time closed on every
+/// track (`sequence.extract`, the latest first), and the generated `bed` made again for the new
+/// length (its beats where the cuts are: each placement taken out was whole beats long). Returns
+/// what was done and the new bed's item; `None` when nothing repeated.
+pub async fn drop_repeats(
+    ex: &dyn Executor,
+    t: &TemplateInfo,
+    applied: &Value,
+    seq: u64,
+    picks: &[Pick],
+    bed: Option<&Bed>,
+    notes: &mut Vec<String>,
+) -> Option<(Value, Vec<u64>, Option<u64>)> {
+    let mut spans: Vec<(i64, i64, String, usize, Vec<u64>)> = Vec::new();
+    let mut clear: Vec<u64> = Vec::new();
+    for x in applied["slots"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(4096) {
+        let Some(slot) = x["slot"].as_str() else { continue };
+        let Some(s) = t.slots.iter().find(|s| s.id == slot && s.picture()) else { continue };
+        let given = picks.iter().filter(|p| p.slot == slot).count();
+        let Some(k) = x["placement"].as_u64().and_then(|k| usize::try_from(k).ok()) else { continue };
+        let Some(pl) = s.placements.get(k) else { continue };
+        let first = s.placements.iter().position(|p| p.media == pl.media) == Some(k);
+        let clips: Vec<u64> = x["clips"].as_array().map(|c| c.iter().filter_map(Value::as_u64).take(64).collect()).unwrap_or_default();
+        // a slot nothing suited: its placeholder would show; a reprise of it (an end card's
+        // background) is cleared, the card stays
+        if given == 0 && !first {
+            clear.extend(clips);
+            continue;
+        }
+        if pl.media < given || !first {
+            continue;
+        }
+        let (Some(a), Some(d)) = (x["start"].as_i64(), x["duration"].as_i64()) else { continue };
+        if a < 0 || d <= 0 {
+            continue;
+        }
+        spans.push((a, a.saturating_add(d), slot.to_string(), pl.media, clips));
+    }
+    if spans.is_empty() && clear.is_empty() {
+        return None;
+    }
+    run(ex, "sequence.open", json!({"item": seq})).await.ok();
+    if !clear.is_empty() {
+        match remove(ex, &clear).await {
+            Ok(()) => notes.push(format!("{} reprise(s) of a slot nothing suited cleared", clear.len())),
+            Err(e) => notes.push(format!("shorten: {e}")),
+        }
+    }
+    let info = run(ex, "sequence.inspect", json!({"item": seq})).await.ok()?;
+    let before = secs_of_ticks(&info["duration"]).unwrap_or(0.0);
+    let frames = info["durationFrames"].as_i64().filter(|f| *f > 0)?;
+    let frame = info["duration"].as_i64().filter(|d| *d > 0).map(|d| (d / frames).max(1))?;
+    spans.sort_by_key(|x| std::cmp::Reverse(x.0));
+    let mut taken = Vec::new();
+    let mut removed: Vec<u64> = Vec::new();
+    for (a, b, slot, media, clips) in &spans {
+        let steps = [("markers.markIn", json!({"time": a})), ("markers.markOut", json!({"time": (b - frame).max(*a)})), ("sequence.extract", json!({}))];
+        let mut ok = true;
+        for (id, p) in steps {
+            if let Err(e) = run(ex, id, p).await {
+                notes.push(format!("shorten: {e}"));
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            break;
+        }
+        removed.extend(clips);
+        taken.push(json!({"slot": slot, "n": media + 1, "seconds": ((b - a) as f64 / TICKS_PER_SECOND as f64 * 100.0).round() / 100.0}));
+    }
+    removed.extend(&clear);
+    if taken.is_empty() {
+        return (!clear.is_empty()).then(|| (json!({"taken": [], "cleared": clear.len()}), removed, None));
+    }
+    let info = run(ex, "sequence.inspect", json!({"item": seq})).await.ok();
+    let after = info.as_ref().and_then(|v| secs_of_ticks(&v["duration"])).unwrap_or(before);
+    // the bed again, for the new length: the old one is cut where the time was taken out
+    let mut new_bed = None;
+    if let (Some(bed), Some(info)) = (bed, &info) {
+        let mut on: Option<(usize, Vec<u64>)> = None;
+        for (k, tr) in info["audio"].as_array().map(Vec::as_slice).unwrap_or_default().iter().enumerate().take(64) {
+            let clips: Vec<u64> = tr["items"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .filter(|c| c["item"].as_u64() == Some(bed.item))
+                .filter_map(|c| c["clip"].as_u64())
+                .collect();
+            if !clips.is_empty() {
+                on = Some((k, clips));
+                break;
+            }
+        }
+        if let Some((k, clips)) = on {
+            let ticks = info["duration"].as_i64().unwrap_or(0);
+            let made = match remove(ex, &clips).await {
+                Ok(()) => {
+                    let g = json!({"kind": "music", "durationTicks": ticks, "bpm": bed.bpm, "mood": bed.mood, "genre": bed.genre, "seed": 7, "time": 0, "track": format!("A{}", k + 1), "place": true});
+                    run(ex, "audio.generate", g).await
+                }
+                Err(e) => Err(e),
+            };
+            match made {
+                Ok(r) => new_bed = r["item"].as_u64(),
+                Err(e) => notes.push(format!("shorten: the music was not made again ({e}); it jumps where the time was taken out")),
+            }
+        }
+    }
+    let report = json!({"from": (before * 100.0).round() / 100.0, "to": (after * 100.0).round() / 100.0, "taken": taken, "musicAgain": new_bed.is_some()});
+    Some((report, removed, new_bed))
 }
 
 /// Make the short (the `autocut.quick` job; parameters as the engine checked them). `writer`
@@ -1524,7 +1883,17 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
     // ---- 4. the template
     lines("[4/8] choosing the template");
     let list = run(ex, "template.list", json!({})).await?;
-    let templates: Vec<TemplateInfo> = list["templates"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(parse_template).collect();
+    let mut templates: Vec<TemplateInfo> = list["templates"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(parse_template).collect();
+    if opts.template.is_none() {
+        // how long each shot of a beat template would hold at the tempo asked: their placements
+        for t in templates.iter_mut().filter(|t| t.bpm.is_some() && t.aspects.contains(&opts.aspect)).take(32) {
+            if let Ok(v) = run(ex, "template.inspect", json!({"template": t.id})).await
+                && let Some(full) = parse_template(&v)
+            {
+                *t = full;
+            }
+        }
+    }
     let choice = match &opts.template {
         Some(key) => {
             let t = run(ex, "template.inspect", json!({"template": key})).await?;
@@ -1548,7 +1917,23 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
     }
     // ---- 5. shots for the slots
     lines("[5/8] picking a shot for every slot");
-    let specs = pick_specs(&t);
+    let mut specs = pick_specs(&t);
+    // the tempo the bed is made at: each pick as long as its place will play (a slower bed makes
+    // them longer), no shot held past its cap ([`tempo`])
+    let music_slot = t.slots.iter().find(|s| s.kind == "music").map(|s| s.id.clone());
+    let tempo_now = if music_slot.is_some() && opts.music.is_none() { tempo(&t, opts.seconds).filter(|x| (x.seconds - t.seconds).abs() > 0.5) } else { None };
+    if let (Some(tp), Some(bpm)) = (&tempo_now, t.bpm) {
+        let factor = if tp.bpm > 0.0 { bpm / tp.bpm } else { 1.0 };
+        for s in &mut specs {
+            s.need = (s.need * factor).clamp(0.1, 3600.0);
+        }
+        if let Some(h) = &tp.held {
+            notes.push(format!(
+                "length: {:.0} s instead of {:.0} s: at the tempo for {:.0} s its {} would hold one shot {:.1} s (at most {:.1})",
+                tp.seconds, opts.seconds, opts.seconds, h.slot, h.would, h.cap
+            ));
+        }
+    }
     let mut search: HashMap<String, HashMap<(u64, usize), f64>> = HashMap::new();
     for q in specs.iter().map(|s| s.hints.query.clone()).filter(|q| !q.is_empty()).collect::<BTreeSet<_>>() {
         if let Ok(v) = run(ex, "media.searchScenes", json!({"query": q, "items": items, "limit": 500})).await {
@@ -1559,10 +1944,66 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
             search.insert(q, map);
         }
     }
-    let picks = assign(&specs, &shots, &speech, &search, opts.topic.as_deref());
-    if picks.len() < specs.len() {
-        notes.push(format!("{} of {} places filled: the template repeats the others in turn", picks.len(), specs.len()));
+    // moments that look alike (their frames, as the vertical frame shows them): one is replaced
+    let aspect = aspect_ratio(&opts.aspect);
+    let mut spread = Spread::default();
+    let mut picks = assign_spread(&specs, &shots, &speech, &search, opts.topic.as_deref(), &spread);
+    let mut alike: Vec<Value> = Vec::new();
+    for round in 0..LOOK_ROUNDS {
+        match look_alike(ex, &picks, &specs, aspect, &mut notes).await {
+            None => {
+                if round == 0 {
+                    spread.still_once = true;
+                    picks = assign_spread(&specs, &shots, &speech, &search, opts.topic.as_deref(), &spread);
+                    report.fallbacks.push(
+                        "shots: no embedding model (SigLIP 2) to compare their frames: picks of one clip are 3 s apart and a shot whose camera stands still gives one"
+                            .into(),
+                    );
+                }
+                break;
+            }
+            Some(pairs) if pairs.is_empty() => break,
+            Some(pairs) => {
+                let last = round + 1 == LOOK_ROUNDS;
+                let mut gone: BTreeSet<usize> = BTreeSet::new();
+                for (drop, keep, cos) in pairs {
+                    let (Some(d), Some(k)) = (picks.get(drop), picks.get(keep)) else { continue };
+                    // two moments of one clip alike: its others will be too
+                    if d.item == k.item {
+                        spread.once.push(d.item);
+                    } else {
+                        spread.avoid.push((d.item, d.in_seconds, d.out_seconds));
+                    }
+                    gone.insert(drop);
+                    alike.push(json!({
+                        "replaced": {"slot": d.slot, "n": d.media + 1, "name": d.name, "from": d.in_seconds, "to": d.out_seconds},
+                        "like": {"slot": k.slot, "n": k.media + 1, "name": k.name, "from": k.in_seconds, "to": k.out_seconds},
+                        "cosine": cos,
+                        "then": if last { "left out" } else { "picked again" },
+                    }));
+                }
+                if last {
+                    // still alike after the last try: left out (the video is shortened instead)
+                    picks = picks.into_iter().enumerate().filter(|(i, _)| !gone.contains(i)).map(|(_, p)| p).collect();
+                    break;
+                }
+                picks = assign_spread(&specs, &shots, &speech, &search, opts.topic.as_deref(), &spread);
+            }
+        }
     }
+    if picks.len() < specs.len() {
+        notes.push(format!("{} of {} places have a distinct moment: the places without one are left out", picks.len(), specs.len()));
+    }
+    report.shots_spread = Some(json!({
+        "minGapSeconds": MIN_GAP,
+        "sameLook": SAME_LOOK,
+        "maxHoldSeconds": MAX_HOLD,
+        "moments": report.facts.moments,
+        "places": specs.len(),
+        "filled": picks.len(),
+        "lookAlike": alike,
+        "tempo": tempo_now,
+    }));
     report.picks = picks.clone();
     // ---- 6. the text
     lines("[6/8] writing the text");
@@ -1626,20 +2067,21 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
         slots.insert(slot, Value::Array(vals));
     }
     // the music: a file, or a bed at the tempo that brings the template to the length asked
-    let music_slot = t.slots.iter().find(|s| s.kind == "music").map(|s| s.id.clone());
     let mut generate_music = true;
     let mut music_beats: Option<Value> = None;
+    let mut bed: Option<Bed> = None;
     if let (Some(ms), Some(file)) = (&music_slot, &opts.music) {
         slots.insert(ms.clone(), json!(filmcraft_engine::export_tools::expand_home(file)));
     } else if let (Some(ms), Some(bpm)) = (&music_slot, t.bpm) {
-        let (want, length) = stretch(bpm, t.seconds, opts.seconds);
-        if (length - t.seconds).abs() > 0.5 {
+        if let Some(tp) = &tempo_now {
+            let (want, length) = (tp.bpm, tp.seconds);
             let (mood, genre) = mood_of(&inspected, ms);
-            let gp = json!({"kind": "music", "duration": length + 1.5, "bpm": want, "mood": mood, "genre": genre, "seed": 7, "place": false});
+            let gp = json!({"kind": "music", "duration": length + 1.5, "bpm": want, "mood": &mood, "genre": &genre, "seed": 7, "place": false});
             match run(ex, "audio.generate", gp).await {
                 Ok(r) => match r["item"].as_u64() {
                     Some(item) => {
                         slots.insert(ms.clone(), json!(item));
+                        bed = Some(Bed { item, bpm: want, mood: mood.clone(), genre: genre.clone() });
                         // its exact beats: measuring a slow bed may hear twice the tempo
                         music_beats = r["beats"].as_array().filter(|b| b.len() >= 2).map(|b| Value::Array(b.clone()));
                         notes.push(format!("music: generated at {want} bpm (the template's {bpm}) for about {length:.0} s"));
@@ -1671,7 +2113,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
     }
     // ---- 8. finish
     lines("[8/8] finishing");
-    finish(ex, &opts, &t, &applied, seq, &picks, &mut report, &mut notes, lines).await;
+    finish(ex, &opts, &t, &applied, seq, &picks, bed.as_ref(), &mut report, &mut notes, lines).await;
     report.warnings.extend(notes);
     if let Some(path) = report.export.clone() {
         let file = crate::trailer::beside(&path, "report.json");
@@ -1720,7 +2162,7 @@ pub struct Stems {
 
 impl Stems {
     /// The roles of the audio clips of `seq` (`sequence.inspect`), from `applied`'s placements.
-    pub fn of(t: &TemplateInfo, applied: &Value, seq: &Value) -> Stems {
+    pub fn of(t: &TemplateInfo, applied: &Value, seq: &Value, music_items: &[u64]) -> Stems {
         let placed = applied["slots"].as_array().map(Vec::as_slice).unwrap_or_default();
         let clips_of = |pred: &dyn Fn(&SlotInfo) -> bool| -> Vec<u64> {
             placed
@@ -1751,7 +2193,7 @@ impl Stems {
             for c in tr["items"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(4096) {
                 let Some(clip) = c["clip"].as_u64() else { continue };
                 let link = c["link"].as_u64();
-                let role = if music.contains(&clip) {
+                let role = if music.contains(&clip) || c["item"].as_u64().is_some_and(|i| music_items.contains(&i)) {
                     out.music.push(clip);
                     "music"
                 } else if link.is_some_and(|l| talk_links.contains(&l)) {
@@ -1791,7 +2233,7 @@ impl Stems {
 /// the bass a little lower ([`crate::mix::bed_eq`]), its peaks held near its loudness
 /// ([`crate::mix::bed_dynamics`]) — and the whooshes, risers and impacts [`EFFECTS_LUFS`] with no
 /// sub-bass booms. The Mix's loudness normalisation follows. Steps that fail are noted.
-pub async fn quick_mix(ex: &dyn Executor, t: &TemplateInfo, applied: &Value, seq: u64, notes: &mut Vec<String>) -> Value {
+pub async fn quick_mix(ex: &dyn Executor, t: &TemplateInfo, applied: &Value, seq: u64, music_items: &[u64], notes: &mut Vec<String>) -> Value {
     let info = match run(ex, "sequence.inspect", json!({"item": seq})).await {
         Ok(v) => v,
         Err(e) => {
@@ -1799,7 +2241,7 @@ pub async fn quick_mix(ex: &dyn Executor, t: &TemplateInfo, applied: &Value, seq
             return json!({"error": e.to_string()});
         }
     };
-    let stems = Stems::of(t, applied, &info);
+    let stems = Stems::of(t, applied, &info, music_items);
     let mut report = json!({"stems": stems, "tracks": stems.tracks});
     let first = |v: Vec<String>| v.into_iter().next();
     if !stems.talk.is_empty() {
@@ -1831,12 +2273,33 @@ pub async fn quick_mix(ex: &dyn Executor, t: &TemplateInfo, applied: &Value, seq
     if !stems.music.is_empty() {
         step("essentialSound.setType", json!({"clips": stems.music, "type": "music"}), notes).await;
         step("essentialSound.autoMatch", json!({"clips": stems.music, "target": BED_LUFS}), notes).await;
+        let mut shelves = Vec::new();
         for tr in stems.tracks_of("music") {
-            let mut chain = vec![("parametric_eq", crate::mix::bed_eq())];
+            let mut chain = vec![("parametric_eq", crate::mix::bed_eq(crate::mix::BED_SHELF_DB))];
             chain.extend(crate::mix::bed_dynamics(BED_LUFS));
-            crate::mix::inserts(ex, &tr, &chain, notes).await;
+            let slots = crate::mix::inserts(ex, &tr, &chain, notes).await;
+            // the low end as far down as this bed needs: measured through its chain, twice at most
+            let mut shelf = crate::mix::BED_SHELF_DB;
+            let mut share = None;
+            if let Some(Some(eq_slot)) = slots.first() {
+                for _ in 0..3 {
+                    let Ok(a) = run(ex, "audio.analyzeMix", json!({"sequence": seq, "only": [tr]})).await else { break };
+                    share = finite(&a["stems"][0]["bands"]["sub"]);
+                    let Some(s) = share else { break };
+                    let next = crate::mix::bed_shelf(shelf, s);
+                    if s <= crate::mix::BED_LOW_SHARE + 0.02 || (next - shelf).abs() < 0.25 {
+                        break;
+                    }
+                    shelf = next;
+                    if let Err(e) = run(ex, "mixer.setInsert", json!({"strip": tr, "slot": eq_slot, "params": crate::mix::bed_eq(shelf)})).await {
+                        notes.push(format!("mix: {tr}: {e}"));
+                        break;
+                    }
+                }
+            }
+            shelves.push(json!({"track": tr, "lowShelfDb": (shelf * 100.0).round() / 100.0, "lowShare": share.map(|s| (s * 1000.0).round() / 1000.0)}));
         }
-        report["music"] = json!({"lufs": BED_LUFS, "eq": {"highPassHz": crate::mix::BED_HP_HZ, "lowShelfDb": crate::mix::BED_SHELF_DB}, "peakOverLufs": crate::mix::BED_PEAK_OVER_LUFS});
+        report["music"] = json!({"lufs": BED_LUFS, "eq": {"highPassHz": crate::mix::BED_HP_HZ, "shelves": shelves, "lowShareAim": crate::mix::BED_LOW_SHARE}, "peakOverLufs": crate::mix::BED_PEAK_OVER_LUFS});
     }
     if !stems.effects.is_empty() {
         step("essentialSound.setType", json!({"clips": stems.effects, "type": "sfx"}), notes).await;
@@ -1874,11 +2337,44 @@ async fn finish(
     applied: &Value,
     seq: u64,
     picks: &[Pick],
+    bed: Option<&Bed>,
     report: &mut Report,
     notes: &mut Vec<String>,
     lines: &mut dyn FnMut(&str),
 ) {
-    let placed = applied["slots"].as_array().map(Vec::as_slice).unwrap_or_default();
+    // a slot with fewer distinct moments than places: the repeats taken out, the time closed
+    let mut gone: Vec<u64> = Vec::new();
+    let mut music_items: Vec<u64> = Vec::new();
+    if let Some((r, removed, new_bed)) = drop_repeats(ex, t, applied, seq, picks, bed, notes).await {
+        notes.push(format!(
+            "length: shortened from {} s to {} s rather than show a moment twice ({} place(s) without a distinct moment taken out)",
+            r["from"],
+            r["to"],
+            r["taken"].as_array().map_or(0, Vec::len)
+        ));
+        gone = removed;
+        music_items.extend(new_bed);
+        if let Some(s) = report.shots_spread.as_mut() {
+            s["shortened"] = r;
+        }
+    }
+    if let (Some(s), Some((slot, secs))) = (report.shots_spread.as_mut(), longest_hold(t, applied)) {
+        s["longestHold"] = json!({"slot": slot, "seconds": secs});
+    }
+    let placed: Vec<Value> = applied["slots"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|x| {
+            let mut x = x.clone();
+            if let Some(c) = x["clips"].as_array() {
+                x["clips"] = Value::Array(c.iter().filter(|c| c.as_u64().is_none_or(|c| !gone.contains(&c))).cloned().collect());
+            }
+            x
+        })
+        .collect();
+    let placed = placed.as_slice();
     let clips_of = |pred: &dyn Fn(&SlotInfo) -> bool, filled: Option<bool>| -> Vec<u64> {
         placed
             .iter()
@@ -1997,7 +2493,7 @@ async fn finish(
     }
     // each stem levelled and filtered for small speakers, then the mix at the social loudness
     // (−14 LUFS), its peaks under −1 dBTP
-    report.mix = Some(quick_mix(ex, t, applied, seq, notes).await);
+    report.mix = Some(quick_mix(ex, t, applied, seq, &music_items, notes).await);
     if let Err(e) = run(ex, "audio.normalizeLoudness", json!({"target": "social", "truePeak": crate::look::TRUE_PEAK})).await {
         notes.push(format!("loudness: {e}"));
     }

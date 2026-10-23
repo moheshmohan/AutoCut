@@ -374,6 +374,7 @@ fn fit_ai(mut a: AiHints, kind: SlotKind, max_chars: Option<u32>, sid: &str, war
         a.energy = None;
         a.min_quality = None;
         a.chronological = false;
+        a.max_hold = None;
     }
     if kind != SlotKind::Video {
         a.speech = None;
