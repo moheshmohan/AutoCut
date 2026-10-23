@@ -1,6 +1,6 @@
 # Quick templates: a Short or Reel in one command
 
-> **Last updated:** 2026-10-23 · **Change:** each text says only what is on screen under it, and is checked against its frames (`media.checkText`)
+> **Last updated:** 2026-10-23 · **Change:** each text checked against its frames (`media.checkText`); the mix made for small speakers
 
 An album, a folder or the selected clips → a finished vertical Short or Reel. AutoCut indexes
 the clips shot by shot, listens to what is said, picks a template and fills it: every slot's
@@ -84,7 +84,27 @@ The engine command: `autocut.quick` ([`crates/engine/src/autocut.rs`](../crates/
 7. **Apply and finish** — `template.apply`; placeholders of optional slots nothing suited are
    removed; the look; Bold animated captions of the kept speech in the platform's safe zone;
    faces and plates blurred (`clip.autoRedact`, the robot check by the local vision model); the
-   safe zones checked; the export, a 12-frame contact sheet with times, the report and QA.
+   mix (below); the safe zones checked; the export, a 12-frame contact sheet with times, the
+   report and QA.
+
+**The mix** (`quick_mix` in [`crates/autocut/src/quick.rs`](../crates/autocut/src/quick.rs),
+the report's `mix`). Every sound clip is typed by its slot: the music slot's bed, the talking
+slots' own sound, the other pictures' own sound, and the rest — the template's whooshes, risers
+and impacts — as effects. With someone talking it is the showcase's speech mix (the voice first,
+the music ducked under it). Otherwise the music carries the video, made for small speakers and
+for the −14 LUFS target with its −1 dBTP ceiling:
+
+| stem | level | track effects |
+|---|---|---|
+| music | each clip −16 LUFS | Parametric EQ: high-pass 40 Hz, low shelf −4 dB at 110 Hz (the kick and the bass line stay); a 2:1 compressor from 4 dB over its loudness; a Hard Limiter 11 dB over it (the generated beds' drums peak about 18 dB over their loudness) |
+| effects | each clip −22 LUFS | Parametric EQ: high-pass 120 Hz (no sub-bass booms) |
+| the pictures' own sound | −27 LUFS | high-pass 100 Hz, low shelf −3 dB |
+
+Then `audio.normalizeLoudness` brings the mix to −14 LUFS. On the first real run's settings
+(the Tech Reveal, its energetic electronic bed at 72 bpm) the Mix's limiter went from taking
+5.9 dB off the peaks to under 1 dB, and the energy below 120 Hz from 77 % to 17 % of the mix
+(the impacts' sub-bass had been most of it), while the bed's 63 and 125 Hz octaves stay within
+2 dB of its 1 kHz one.
 
 ## AI hints on template slots
 

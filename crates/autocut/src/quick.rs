@@ -1278,6 +1278,9 @@ pub struct Report {
     pub safe_zones: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privacy: Option<Value>,
+    /// How the sound was mixed: each stem's role, level and track effects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mix: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub export: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1695,6 +1698,163 @@ fn mood_of(inspected: &Value, slot: &str) -> (String, String) {
     (g["mood"].as_str().unwrap_or("energetic").to_string(), g["genre"].as_str().unwrap_or("electronic").to_string())
 }
 
+/// The level of a quick short's stems (LUFS, each clip matched): the music carries the video;
+/// whooshes, risers and impacts sit well under it; with someone talking, the voice leads and the
+/// music goes under it ([`crate::mix::mix_down`]).
+pub const BED_LUFS: f64 = -16.0;
+pub const EFFECTS_LUFS: f64 = -22.0;
+
+/// The sound clips of an applied template by role, and the tracks they are on.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Stems {
+    pub music: Vec<u64>,
+    /// The talking slots' own sound.
+    pub talk: Vec<u64>,
+    /// The other picture slots' own sound.
+    pub sound: Vec<u64>,
+    /// Whooshes, risers, impacts (the template's Elements sounds).
+    pub effects: Vec<u64>,
+    #[serde(skip)]
+    pub tracks: BTreeMap<String, Vec<&'static str>>,
+}
+
+impl Stems {
+    /// The roles of the audio clips of `seq` (`sequence.inspect`), from `applied`'s placements.
+    pub fn of(t: &TemplateInfo, applied: &Value, seq: &Value) -> Stems {
+        let placed = applied["slots"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let clips_of = |pred: &dyn Fn(&SlotInfo) -> bool| -> Vec<u64> {
+            placed
+                .iter()
+                .filter(|x| t.slots.iter().any(|s| x["slot"] == s.id.as_str() && pred(s)))
+                .flat_map(|x| x["clips"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(Value::as_u64))
+                .take(4096)
+                .collect()
+        };
+        let music = clips_of(&|s| s.kind == "music");
+        let talking = |s: &SlotInfo| s.picture() && s.ai.as_ref().is_some_and(Hints::wants_speech);
+        let talk_video = clips_of(&talking);
+        let other_video = clips_of(&|s| s.picture() && !talking(s));
+        // a picture's own sound is linked to it
+        let mut links: HashMap<u64, u64> = HashMap::new();
+        for tr in seq["video"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            for c in tr["items"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(4096) {
+                if let (Some(clip), Some(link)) = (c["clip"].as_u64(), c["link"].as_u64()) {
+                    links.insert(clip, link);
+                }
+            }
+        }
+        let group = |clips: &[u64]| -> BTreeSet<u64> { clips.iter().filter_map(|c| links.get(c).copied()).collect() };
+        let (talk_links, sound_links) = (group(&talk_video), group(&other_video));
+        let mut out = Stems::default();
+        for (k, tr) in seq["audio"].as_array().map(Vec::as_slice).unwrap_or_default().iter().enumerate().take(64) {
+            let label = format!("A{}", k + 1);
+            for c in tr["items"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(4096) {
+                let Some(clip) = c["clip"].as_u64() else { continue };
+                let link = c["link"].as_u64();
+                let role = if music.contains(&clip) {
+                    out.music.push(clip);
+                    "music"
+                } else if link.is_some_and(|l| talk_links.contains(&l)) {
+                    out.talk.push(clip);
+                    "talk"
+                } else if link.is_some_and(|l| sound_links.contains(&l)) {
+                    out.sound.push(clip);
+                    "sound"
+                } else {
+                    out.effects.push(clip);
+                    "effects"
+                };
+                let roles = out.tracks.entry(label.clone()).or_default();
+                if !roles.contains(&role) {
+                    roles.push(role);
+                }
+            }
+        }
+        out
+    }
+
+    /// The tracks holding `role` (a track shared with the music or a voice counts as theirs).
+    fn tracks_of(&self, role: &str) -> Vec<String> {
+        let rank = |r: &str| match r {
+            "music" => 0,
+            "talk" => 1,
+            "sound" => 2,
+            _ => 3,
+        };
+        self.tracks.iter().filter(|(_, roles)| roles.iter().copied().min_by_key(|r| rank(r)) == Some(role)).map(|(k, _)| k.clone()).collect()
+    }
+}
+
+/// Mix a quick short for small speakers (the QA's mix checks): every clip typed by its role and
+/// levelled to it; with someone talking, the showcase's speech mix ([`crate::mix::mix_down`]:
+/// the voice first, the music ducked under it); else the music carries it — the sub-bass out and
+/// the bass a little lower ([`crate::mix::bed_eq`]), its peaks held near its loudness
+/// ([`crate::mix::bed_dynamics`]) — and the whooshes, risers and impacts [`EFFECTS_LUFS`] with no
+/// sub-bass booms. The Mix's loudness normalisation follows. Steps that fail are noted.
+pub async fn quick_mix(ex: &dyn Executor, t: &TemplateInfo, applied: &Value, seq: u64, notes: &mut Vec<String>) -> Value {
+    let info = match run(ex, "sequence.inspect", json!({"item": seq})).await {
+        Ok(v) => v,
+        Err(e) => {
+            notes.push(format!("mix: {e}"));
+            return json!({"error": e.to_string()});
+        }
+    };
+    let stems = Stems::of(t, applied, &info);
+    let mut report = json!({"stems": stems, "tracks": stems.tracks});
+    let first = |v: Vec<String>| v.into_iter().next();
+    if !stems.talk.is_empty() {
+        let tracks = crate::mix::MixTracks {
+            sounds: first(stems.tracks_of("sound")).unwrap_or_default(),
+            voice: first(stems.tracks_of("talk")).unwrap_or_else(|| "A1".into()),
+            music: first(stems.tracks_of("music")).unwrap_or_default(),
+            effects: stems.tracks_of("effects"),
+        };
+        let mix = crate::mix::Mix {
+            sounds: stems.sound.clone(),
+            effects: stems.effects.clone(),
+            narrations: stems.talk.clone(),
+            music: stems.music.clone(),
+            enhance_voice: false,
+        };
+        report["speech"] = crate::mix::mix_down(ex, &mix, &tracks, crate::mix::MixProfile::Speech, false, notes).await;
+        report["profile"] = json!("speech");
+        return report;
+    }
+    report["profile"] = json!("music");
+    let step = async |id: &str, p: Value, notes: &mut Vec<String>| match run(ex, id, p).await {
+        Ok(v) => Some(v),
+        Err(e) => {
+            notes.push(format!("mix: {e}"));
+            None
+        }
+    };
+    if !stems.music.is_empty() {
+        step("essentialSound.setType", json!({"clips": stems.music, "type": "music"}), notes).await;
+        step("essentialSound.autoMatch", json!({"clips": stems.music, "target": BED_LUFS}), notes).await;
+        for tr in stems.tracks_of("music") {
+            let mut chain = vec![("parametric_eq", crate::mix::bed_eq())];
+            chain.extend(crate::mix::bed_dynamics(BED_LUFS));
+            crate::mix::inserts(ex, &tr, &chain, notes).await;
+        }
+        report["music"] = json!({"lufs": BED_LUFS, "eq": {"highPassHz": crate::mix::BED_HP_HZ, "lowShelfDb": crate::mix::BED_SHELF_DB}, "peakOverLufs": crate::mix::BED_PEAK_OVER_LUFS});
+    }
+    if !stems.effects.is_empty() {
+        step("essentialSound.setType", json!({"clips": stems.effects, "type": "sfx"}), notes).await;
+        step("essentialSound.autoMatch", json!({"clips": stems.effects, "target": EFFECTS_LUFS}), notes).await;
+        for tr in stems.tracks_of("effects") {
+            crate::mix::inserts(ex, &tr, &[("parametric_eq", crate::mix::effects_eq())], notes).await;
+        }
+        report["effects"] = json!({"lufs": EFFECTS_LUFS, "eq": {"highPassHz": 120.0}});
+    }
+    if !stems.sound.is_empty() {
+        step("essentialSound.autoMatch", json!({"clips": stems.sound, "target": -27.0}), notes).await;
+        for tr in stems.tracks_of("sound") {
+            crate::mix::inserts(ex, &tr, &[("parametric_eq", crate::mix::sound_eq())], notes).await;
+        }
+    }
+    report
+}
+
 /// Select `clips` and remove them (`edit.clear`).
 async fn remove(ex: &dyn Executor, clips: &[u64]) -> Result<(), AutoCutError> {
     if clips.is_empty() {
@@ -1835,7 +1995,9 @@ async fn finish(
         }
         report.privacy = Some(hidden);
     }
-    // the mix at the social loudness (−14 LUFS), its peaks under −1 dBTP
+    // each stem levelled and filtered for small speakers, then the mix at the social loudness
+    // (−14 LUFS), its peaks under −1 dBTP
+    report.mix = Some(quick_mix(ex, t, applied, seq, notes).await);
     if let Err(e) = run(ex, "audio.normalizeLoudness", json!({"target": "social", "truePeak": crate::look::TRUE_PEAK})).await {
         notes.push(format!("loudness: {e}"));
     }

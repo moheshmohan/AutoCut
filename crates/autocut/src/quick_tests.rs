@@ -708,3 +708,88 @@ fn a_quick_short_without_any_model() {
     drop(g);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Three generated clips (no sound of their own) in a session, and their items.
+fn clips_session(n: usize) -> (Session, Vec<u64>) {
+    let mut s = Session::default();
+    let mut movies = Vec::new();
+    let scenes = [DemoScene::Forest, DemoScene::CityNight, DemoScene::Dunes, DemoScene::Plasma];
+    for k in 0..n {
+        let scene = scenes[k % scenes.len()];
+        let src = GeneratorSource::new(Generator::Demo(scene), 192, 108, FrameRate::FPS_30, Tick::from_seconds_f64(6.0 + k as f64));
+        let pool = s.media.clone();
+        movies.push(filmcraft_engine::demo::add_generator(std::sync::Arc::make_mut(&mut s.project), &pool, src, &format!("clip{k}.mov"), Label::Iris, None).0);
+    }
+    (s, movies)
+}
+
+/// The music bed carries a quick short nobody speaks in: with the stems levelled and filtered
+/// (`quick_mix`) and the mix at −14 LUFS, the Mix's limiter has (almost) nothing to do and little
+/// of the energy is below 120 Hz — the QA's two mix warnings of the first real run — while the
+/// bed keeps its low end (not thin) and the whooshes and impacts sit under it.
+#[test]
+fn the_bed_and_the_effects_are_mixed_for_small_speakers() {
+    let (s, movies) = clips_session(4);
+    let ex = SessionExecutor::from(s);
+    let p = json!({"items": movies, "template": "builtin:tech-reveal", "seconds": 28, "topic": "robots", "redact": "off"});
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let out = rt.block_on(make(&ex, &p, None, &mut |_| {})).unwrap();
+    let seq = out["sequence"].as_u64().unwrap();
+    let mix = &out["mix"];
+    assert_eq!(mix["profile"], "music", "{mix}");
+    assert!(!mix["stems"]["music"].as_array().unwrap().is_empty() && !mix["stems"]["effects"].as_array().unwrap().is_empty(), "{mix}");
+    let a = rt.block_on(ex.execute("audio.analyzeMix", json!({"sequence": seq}))).unwrap();
+    let findings = crate::qa::mix_findings(&a, &crate::qa::Options::default());
+    let sub = a["mix"]["bands"]["sub"].as_f64().unwrap();
+    let limiter = a["limiter"]["maxGainReductionDb"].as_f64().unwrap_or(0.0);
+    let lufs = a["mix"]["integratedLufs"].as_f64().unwrap();
+    eprintln!("mix: {lufs:.2} LUFS, sub {sub:.3}, limiter {limiter:.2} dB, bands {}, octaves {}", a["mix"]["bands"], a["mix"]["octavesDb"]);
+    for st in a["stems"].as_array().unwrap() {
+        eprintln!(
+            "  {} {}: {} LUFS, peak {} dBTP, sub {}, limiter {}",
+            st["track"], st["role"], st["integratedLufs"], st["truePeakDbtp"], st["bands"]["sub"], st["limiter"]
+        );
+    }
+    assert!(findings.is_empty(), "{findings:?}");
+    assert!((lufs + 14.0).abs() < 0.6, "at the social loudness: {lufs}");
+    assert!(sub <= crate::qa::MAX_LOW_SHARE && limiter <= crate::qa::MAX_LIMITER_DB, "sub {sub}, limiter {limiter}");
+    // not thin: the bed keeps its low end — its 63 and 125 Hz octaves within a few dB of its mids
+    let music = a["stems"].as_array().unwrap().iter().find(|s| s["track"] == "A1").unwrap();
+    let oct = |hz: &str| music["octavesDb"][hz].as_f64().unwrap();
+    assert!(oct("63").max(oct("125")) > oct("1000") - 6.0, "the bed's low end: {}", music["octavesDb"]);
+    assert!(music["bands"]["sub"].as_f64().unwrap() + music["bands"]["lowMid"].as_f64().unwrap() > 0.2, "{}", music["bands"]);
+    // the effects sit under the music
+    let louder = a["stems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["track"] != "A1" && s["track"] != "transitions")
+        .filter_map(|s| s["integratedLufs"].as_f64())
+        .fold(f64::MIN, f64::max);
+    assert!(louder < music["integratedLufs"].as_f64().unwrap() - 4.0, "effects {louder} vs music {}", music["integratedLufs"]);
+}
+
+/// The roles of an applied template's sound: the music slot's clip, the talking slots' own sound,
+/// and the rest (the Elements sounds) as effects; hostile answers give no roles, never a panic.
+#[test]
+fn stems_are_typed_by_their_slots() {
+    let t = inspected("builtin:tech-reveal");
+    let applied = json!({"slots": [{"slot": "music", "clips": [40]}, {"slot": "hook", "clips": [10]}]});
+    let seq = json!({
+        "video": [{"items": [{"clip": 10, "link": 7}]}],
+        "audio": [{"items": [{"clip": 40}]}, {"items": [{"clip": 41}, {"clip": 42, "link": 7}]}, {"items": [{"clip": 43}]}],
+    });
+    let st = Stems::of(&t, &applied, &seq);
+    assert_eq!((st.music.as_slice(), st.sound.as_slice(), st.effects.as_slice()), (&[40][..], &[42][..], &[41, 43][..]));
+    assert!(st.talk.is_empty());
+    for junk in [json!(null), json!({"audio": 3}), json!({"audio": [{"items": [{"clip": "x"}, 5]}], "video": [[]]})] {
+        let st = Stems::of(&t, &json!({"slots": "x"}), &junk);
+        assert!(st.music.is_empty() && st.effects.is_empty());
+    }
+    // the bed's chain keeps its ceiling under the loudness target's peak, whatever level it is given
+    for lufs in [-16.0, f64::NAN, -1e9, 0.0] {
+        let chain = crate::mix::bed_dynamics(lufs);
+        let max = chain.iter().find(|(e, _)| *e == "hard_limiter").unwrap().1["max"].as_f64().unwrap();
+        assert!(max.is_finite() && max <= -1.0, "{lufs} → {max}");
+    }
+}
