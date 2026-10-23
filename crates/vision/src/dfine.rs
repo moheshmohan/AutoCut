@@ -1,6 +1,8 @@
 //! D-FINE (Peng et al., "D-FINE: Redefine Regression Task in DETRs as Fine-grained Distribution
 //! Refinement", arXiv 2410.13842; Apache-2.0), the person detector of the profile pass, written
-//! out by hand on the CPU ([`crate::layers`]).
+//! out by hand on the CPU ([`crate::layers`], the reference) and on the GPU ([`crate::gpunn`]:
+//! the convolutions over the shared `Backend`, the transformer layer and the decoder as the
+//! CPU code's operations one by one).
 //!
 //! The weights are the Hugging Face Transformers port's safetensors file and its `config.json`
 //! (`ustc-community/dfine-*`); batch norms are folded into the convolutions when loading, and a
@@ -34,7 +36,7 @@ use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::VisionError;
-use crate::gpunn::{GpuUse, Nn};
+use crate::gpunn::{GM, GT, GpuUse, Nn, Run, TAct};
 use crate::layers::{Act, Attention, Backend, Conv, Cpu, Feat, Linear, Mlp, Norm, err, fold_bn, sample_add, sigmoid, softmax_rows};
 use crate::safetensors::SafeTensors;
 
@@ -569,14 +571,45 @@ struct DecLayer {
 }
 
 /// The encoder's memory as the decoder samples it.
-struct Memory<'a> {
+pub(crate) struct Memory<'a> {
     /// `[tokens, d]`, levels in order.
-    tokens: &'a [f32],
+    pub(crate) tokens: &'a [f32],
     /// Per level: first token, rows, columns.
-    levels: &'a [(usize, usize, usize)],
+    pub(crate) levels: &'a [(usize, usize, usize)],
 }
 
 impl DecLayer {
+    /// [`DecLayer::forward`] on the GPU (`points`: each sampling point's scale, then its level).
+    #[allow(clippy::too_many_arguments)]
+    fn forward_gpu(
+        &self,
+        r: &Run<'_>,
+        x: &GM,
+        refs: &GM,
+        pos: &GM,
+        tokens: &GM,
+        levels: &GM,
+        points: &wgpu::Buffer,
+        s: &Shape,
+        total: usize,
+    ) -> Result<GM, VisionError> {
+        let heads = s.dec_heads;
+        let qk = r.add(x, pos)?;
+        let h1 = r.layernorm(&r.mha(&self.self_attn, &qk, x, Some(x))?, &self.norm1)?;
+        let q = r.add(&h1, pos)?;
+        let offsets = r.linear(&q, &self.offsets, TAct::None, None, None)?;
+        let w = r.linear(&q, &self.weights, TAct::None, None, None)?;
+        let w = r.softmax(&r.reshape(&w, total)?)?;
+        let w = r.reshape(&w, heads * total)?;
+        let cross = r.deform(tokens, &offsets, &w, refs, points, levels, heads, total, s.offset_scale)?;
+        // the gate in place of the residual
+        let g = r.linear(&r.concat2(&h1, &cross)?, &self.gate, TAct::None, None, None)?;
+        let h2 = r.layernorm(&r.gate(&g, &h1, &cross)?, &self.gate_norm)?;
+        let f = r.linear(&h2, &self.fc1, TAct::Relu, None, None)?;
+        let y = r.linear(&f, &self.fc2, TAct::None, Some(&h2), Some(65504.0))?;
+        r.layernorm(&y, &self.norm3)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn forward(&self, x: &[f32], refs: &[[f32; 4]], pos: &[f32], mem: &Memory<'_>, s: &Shape) -> Result<Vec<f32>, VisionError> {
         let d = s.d;
@@ -590,35 +623,13 @@ impl DecLayer {
         let total: usize = s.points.iter().sum();
         let heads = s.dec_heads;
         softmax_rows(&mut weights, total);
-        let hd = d / heads;
         // the level of each sampling point
         let level_of: Vec<usize> = s.points.iter().enumerate().flat_map(|(l, n)| std::iter::repeat_n(l, *n)).collect();
         let nq = refs.len();
         if offsets.len() != nq * heads * total * 2 || weights.len() != nq * heads * total || h1.len() != nq * d {
             return Err(err("decoder sampling shapes"));
         }
-        let mut cross = vec![0f32; nq * d];
-        cross.par_chunks_mut(d).enumerate().for_each(|(qi, out)| {
-            let Some(r) = refs.get(qi) else { return };
-            for hh in 0..heads {
-                let Some(o) = out.get_mut(hh * hd..(hh + 1) * hd) else { continue };
-                for p in 0..total {
-                    let at = (qi * heads + hh) * total + p;
-                    let (Some(&ox), Some(&oy), Some(&wgt), Some(&lvl), Some(&ps)) =
-                        (offsets.get(at * 2), offsets.get(at * 2 + 1), weights.get(at), level_of.get(p), self.point_scale.get(p))
-                    else {
-                        continue;
-                    };
-                    let Some(&(start, lh, lw)) = mem.levels.get(lvl) else { continue };
-                    let lx = r[0] + ox * ps * r[2] * s.offset_scale;
-                    let ly = r[1] + oy * ps * r[3] * s.offset_scale;
-                    // grid_sample, align_corners = false: pixel centres at (i + 0.5) / size
-                    let (px, py) = (lx * lw as f32 - 0.5, ly * lh as f32 - 0.5);
-                    let vals = mem.tokens.get(start * d..).unwrap_or(&[]);
-                    sample_add(vals, d, hh * hd, hd, lh, lw, px, py, wgt, o);
-                }
-            }
-        });
+        let cross = deform_cpu(mem, d, &offsets, &weights, refs, &self.point_scale, &level_of, heads, total, s.offset_scale);
         // the gate in place of the residual
         let mut both = Vec::with_capacity(nq * 2 * d);
         for (a, b) in h1.chunks_exact(d).zip(cross.chunks_exact(d)) {
@@ -642,6 +653,85 @@ impl DecLayer {
         self.norm3.apply(&mut y);
         Ok(y)
     }
+}
+
+/// D-FINE's deformable cross-attention on the CPU: for each query (its box in `refs`) and head,
+/// the bilinear samples of the memory's levels around the box (`offsets` `[q, heads, total, 2]`
+/// scaled by each point's `point_scale`, the box size and `offset_scale`), weighted by
+/// `weights` (softmaxed over each head's points). `[q, d]`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn deform_cpu(
+    mem: &Memory<'_>,
+    d: usize,
+    offsets: &[f32],
+    weights: &[f32],
+    refs: &[[f32; 4]],
+    point_scale: &[f32],
+    level_of: &[usize],
+    heads: usize,
+    total: usize,
+    offset_scale: f32,
+) -> Vec<f32> {
+    let nq = refs.len();
+    let hd = d / heads.max(1);
+    let mut cross = vec![0f32; nq * d];
+    cross.par_chunks_mut(d.max(1)).enumerate().for_each(|(qi, out)| {
+        let Some(r) = refs.get(qi) else { return };
+        for hh in 0..heads {
+            let Some(o) = out.get_mut(hh * hd..(hh + 1) * hd) else { continue };
+            for p in 0..total {
+                let at = (qi * heads + hh) * total + p;
+                let (Some(&ox), Some(&oy), Some(&wgt), Some(&lvl), Some(&ps)) =
+                    (offsets.get(at * 2), offsets.get(at * 2 + 1), weights.get(at), level_of.get(p), point_scale.get(p))
+                else {
+                    continue;
+                };
+                let Some(&(start, lh, lw)) = mem.levels.get(lvl) else { continue };
+                let lx = r[0] + ox * ps * r[2] * offset_scale;
+                let ly = r[1] + oy * ps * r[3] * offset_scale;
+                // grid_sample, align_corners = false: pixel centres at (i + 0.5) / size
+                let (px, py) = (lx * lw as f32 - 0.5, ly * lh as f32 - 0.5);
+                let vals = mem.tokens.get(start * d..).unwrap_or(&[]);
+                sample_add(vals, d, hh * hd, hd, lh, lw, px, py, wgt, o);
+            }
+        }
+    });
+    cross
+}
+
+/// FDR on the CPU: a query's box from its first layer's box `p` and its four distance
+/// distributions (`corners`, `bins` each) over the bin positions `project`.
+pub(crate) fn fdr_box(project: &[f32], reg_scale: f32, bins: usize, p: [f32; 4], corners: &[f32]) -> [f32; 4] {
+    let mut dist = [0f32; 4];
+    for (k, c) in corners.chunks_exact(bins.max(1)).take(4).enumerate() {
+        let mut pr = c.to_vec();
+        softmax_rows(&mut pr, bins);
+        dist[k] = pr.iter().zip(project).map(|(a, b)| a * b).sum();
+    }
+    let r = reg_scale.max(1e-6);
+    let x1 = p[0] - (0.5 * r + dist[0]) * (p[2] / r);
+    let y1 = p[1] - (0.5 * r + dist[1]) * (p[3] / r);
+    let x2 = p[0] + (0.5 * r + dist[2]) * (p[2] / r);
+    let y2 = p[1] + (0.5 * r + dist[3]) * (p[3] / r);
+    [(x1 + x2) / 2.0, (y1 + y2) / 2.0, x2 - x1, y2 - y1]
+}
+
+/// The localisation-quality statistics on the CPU: per query (`4 · bins` values of `corners`)
+/// and side, the `top` largest probabilities, largest first, and their mean.
+pub(crate) fn lqe_stats_cpu(corners: &[f32], bins: usize, top: usize) -> Vec<f32> {
+    let side = 4 * bins;
+    let mut stats = Vec::with_capacity(corners.len() / side.max(1) * 4 * (top + 1));
+    for row in corners.chunks_exact(side.max(1)) {
+        for side_bins in row.chunks_exact(bins.max(1)) {
+            let mut p = side_bins.to_vec();
+            softmax_rows(&mut p, bins);
+            p.sort_by(|a, b| b.total_cmp(a));
+            let t = p.get(..top).unwrap_or(&[]);
+            stats.extend_from_slice(t);
+            stats.push(t.iter().sum::<f32>() / top.max(1) as f32);
+        }
+    }
+    stats
 }
 
 /// A person (class 0) found by D-FINE: `[cx, cy, w, h]` shares of the picture and the score.
@@ -674,6 +764,7 @@ pub struct Dfine {
     project: Vec<f32>,
     reg_scale: f32,
     pub(crate) gpu: Option<GpuUse>,
+    consts: Option<DfineGpu>,
 }
 
 /// Longest side of the picture D-FINE looks at by default (it was trained at 640 × 640).
@@ -782,54 +873,85 @@ impl Dfine {
             project,
             reg_scale,
             gpu: None,
+            consts: None,
             s,
         })
     }
 
-    /// The raw outputs for a `[1, 3, H, W]` RGB picture (0..1; sides multiples of 32): every
-    /// query's class logits (`[queries, classes]`) and box (`[cx, cy, w, h]`, shares).
-    /// Put the convolutional parts on this machine's GPU (the CPU stays the fallback); `false`
-    /// without one.
+    /// Put the network on this machine's GPU (the CPU stays the fallback); `false` without one
+    /// (or when a weight does not go up: the CPU then).
     pub fn use_gpu(&mut self) -> bool {
         let Some(nn) = Nn::shared() else { return false };
-        self.backbone.upload(&nn);
-        for c in self.input_proj.iter_mut().chain(self.lateral.iter_mut()) {
-            c.upload(&nn);
+        match self.upload(&nn) {
+            Ok(consts) => {
+                self.consts = Some(consts);
+                self.gpu = Some(GpuUse::new(nn));
+                true
+            }
+            Err(_) => false,
         }
-        for (a, b) in &mut self.down {
-            a.upload(&nn);
-            b.upload(&nn);
-        }
-        for e in self.fpn.iter_mut().chain(self.pan.iter_mut()) {
-            e.upload(&nn);
-        }
-        self.gpu = Some(GpuUse::new(nn));
-        true
     }
 
-    /// Whether the convolutional parts run on the GPU (it has one that has not failed repeatedly).
+    fn upload(&mut self, nn: &Nn) -> Result<DfineGpu, VisionError> {
+        self.backbone.upload(nn);
+        for c in self.input_proj.iter_mut().chain(self.lateral.iter_mut()) {
+            c.upload(nn);
+        }
+        for (a, b) in &mut self.down {
+            a.upload(nn);
+            b.upload(nn);
+        }
+        for e in self.fpn.iter_mut().chain(self.pan.iter_mut()) {
+            e.upload(nn);
+        }
+        self.aifi.attn.upload(nn)?;
+        for l in [&mut self.aifi.fc1, &mut self.aifi.fc2, &mut self.enc_output, &mut self.enc_score, &mut self.class_last] {
+            l.upload(nn)?;
+        }
+        for n in [&mut self.aifi.norm1, &mut self.aifi.norm2, &mut self.enc_norm] {
+            n.upload(nn);
+        }
+        for m in [&mut self.enc_bbox, &mut self.query_pos, &mut self.pre_bbox, &mut self.lqe_last] {
+            m.upload(nn)?;
+        }
+        for m in &mut self.bbox_embed {
+            m.upload(nn)?;
+        }
+        // each point's level, after its scale
+        let level_of: Vec<f32> = self.s.points.iter().enumerate().flat_map(|(l, n)| std::iter::repeat_n(l as f32, *n)).collect();
+        let mut points = Vec::with_capacity(self.layers.len());
+        for l in &mut self.layers {
+            l.self_attn.upload(nn)?;
+            for x in [&mut l.offsets, &mut l.weights, &mut l.gate, &mut l.fc1, &mut l.fc2] {
+                x.upload(nn)?;
+            }
+            for n in [&mut l.norm1, &mut l.gate_norm, &mut l.norm3] {
+                n.upload(nn);
+            }
+            let meta: Vec<f32> = l.point_scale.iter().copied().chain(level_of.iter().copied()).collect();
+            points.push(nn.upload(&meta));
+        }
+        Ok(DfineGpu { project: nn.upload(&self.project), points })
+    }
+
+    /// Whether it runs on the GPU (it has one that has not failed repeatedly).
     pub fn on_gpu(&self) -> bool {
         GpuUse::active(&self.gpu)
     }
 
-    /// The hybrid encoder's outputs (one map per level) for a `[1, 3, H, W]` picture: the
-    /// convolutions on `b`, the transformer layer on the CPU.
-    pub(crate) fn encode<B: Backend>(&self, b: &B, x: &Feat) -> Result<Vec<Feat>, VisionError> {
+    /// The hybrid encoder's outputs (one map per level) for a `[1, 3, H, W]` picture `xi` on
+    /// `b`, the transformer layer on the coarsest level done by `aifi`.
+    fn encoder<B: Backend>(&self, b: &B, xi: B::T, aifi: &dyn Fn(B::T) -> Result<B::T, VisionError>) -> Result<Vec<B::T>, VisionError> {
         let s = &self.s;
-        let d = s.d;
-        let xi = b.input(x)?;
         let feats = self.backbone.forward(b, &xi)?;
         let mut proj: Vec<B::T> = feats.iter().zip(&self.input_proj).map(|(f, p)| b.conv(p, f, None)).collect::<Result<_, _>>()?;
-        // the transformer layer on the coarsest level, on the CPU
+        // the transformer layer on the coarsest level
         let al = s.aifi_level;
         if al >= proj.len() {
             return Err(err("missing level"));
         }
-        let top = b.read(vec![proj.remove(al)])?.pop().ok_or_else(|| err("missing level"))?;
-        let (th, tw) = (top.h, top.w);
-        let pos = positions(th, tw, d, s.temperature);
-        let enc = self.aifi.forward(&top.tokens(0), &pos)?;
-        proj.insert(al, b.input(&Feat::from_tokens(&enc, d, th, tw)?)?);
+        let top = aifi(proj.remove(al))?;
+        proj.insert(al, top);
         // top-down
         let n = s.levels;
         let mut inner: Vec<B::T> = vec![proj.pop().ok_or_else(|| err("no levels"))?];
@@ -856,20 +978,182 @@ impl Dfine {
             let high = inner.get(idx).ok_or_else(|| err("pan"))?;
             outs.push(pan.forward(b, &b.concat(&[&low, high])?)?);
         }
-        b.read(outs)
+        Ok(outs)
+    }
+
+    /// The hybrid encoder on the CPU (the reference).
+    pub(crate) fn encode_cpu(&self, x: &Feat) -> Result<Vec<Feat>, VisionError> {
+        let (d, temperature) = (self.s.d, self.s.temperature);
+        self.encoder(&Cpu, x.clone(), &|top: Feat| {
+            let pos = positions(top.h, top.w, d, temperature);
+            let enc = self.aifi.forward(&top.tokens(0), &pos)?;
+            Feat::from_tokens(&enc, d, top.h, top.w)
+        })
+    }
+
+    /// The hybrid encoder on the GPU, its transformer layer too (nothing read back).
+    pub(crate) fn encode_gpu(&self, r: &Run<'_>, x: GT) -> Result<Vec<GT>, VisionError> {
+        self.encoder(r, x, &|top: GT| self.aifi_gpu(r, &top))
+    }
+
+    /// The transformer encoder layer ([`EncLayer::forward`]) on the GPU, on one map.
+    fn aifi_gpu(&self, r: &Run<'_>, top: &GT) -> Result<GT, VisionError> {
+        let d = self.s.d;
+        let (n, c, th, tw) = Run::shape(top);
+        if n != 1 || c != d {
+            return Err(err("the coarsest level's shape"));
+        }
+        let x = r.mat(th * tw, d)?;
+        r.planes_into_rows(top, &x, 0)?;
+        let pos = r.upload_mat(&positions(th, tw, d, self.s.temperature), th * tw, d)?;
+        let a = &self.aifi;
+        let qk = r.add(&x, &pos)?;
+        let h = r.layernorm(&r.mha(&a.attn, &qk, &x, Some(&x))?, &a.norm1)?;
+        let f = r.linear(&h, &a.fc1, TAct::Gelu, None, None)?;
+        let y = r.layernorm(&r.linear(&f, &a.fc2, TAct::None, Some(&h), None)?, &a.norm2)?;
+        r.rows_to_planes(&y, 0, th, tw)
     }
 
     /// The raw outputs for a `[1, 3, H, W]` RGB picture (0..1; sides multiples of 32): every
-    /// query's class logits (`[queries, classes]`) and box (`[cx, cy, w, h]`, shares).
+    /// query's class logits (`[queries, classes]`) and box (`[cx, cy, w, h]`, shares). On the
+    /// GPU when it has one, else (or when that fails) on the CPU.
     pub(crate) fn raw(&self, x: &Feat) -> Result<(Vec<f32>, Vec<[f32; 4]>), VisionError> {
-        if x.n != 1 || x.c != 3 || x.h == 0 || x.w == 0 || !x.h.is_multiple_of(32) || !x.w.is_multiple_of(32) {
-            return Err(err(format!("D-FINE takes one RGB picture with sides multiples of 32, got {}×{}", x.w, x.h)));
+        check_input(x.n, x.c, x.h, x.w)?;
+        if let Some(v) = GpuUse::run(&self.gpu, |r| {
+            let xi = r.input(x)?;
+            self.raw_gpu(r, xi)
+        }) {
+            return Ok(v);
         }
-        let outs = match GpuUse::run(&self.gpu, |r| self.encode(r, x)) {
-            Some(o) => o,
-            None => self.encode(&Cpu, x)?,
-        };
+        self.raw_cpu(x)
+    }
+
+    /// [`Dfine::raw`] on the CPU.
+    pub(crate) fn raw_cpu(&self, x: &Feat) -> Result<(Vec<f32>, Vec<[f32; 4]>), VisionError> {
+        check_input(x.n, x.c, x.h, x.w)?;
+        let outs = self.encode_cpu(x)?;
         self.decode(&outs)
+    }
+
+    /// [`Dfine::raw`] on the GPU for a picture already there: the whole network, one read-back.
+    pub(crate) fn raw_gpu(&self, r: &Run<'_>, xi: GT) -> Result<(Vec<f32>, Vec<[f32; 4]>), VisionError> {
+        let (n, c, h, w) = Run::shape(&xi);
+        check_input(n, c, h, w)?;
+        let outs = self.encode_gpu(r, xi)?;
+        let (logits, boxes) = self.decode_gpu(r, &outs)?;
+        let mut v = r.read_mats(&[&logits, &boxes])?.into_iter();
+        let (Some(l), Some(b)) = (v.next(), v.next()) else { return Err(err("the decoder's outputs did not come back")) };
+        let boxes: Vec<[f32; 4]> = b.as_chunks::<4>().0.to_vec();
+        if l.len() != boxes.len() * self.enc_score.cout {
+            return Err(err("the decoder's outputs"));
+        }
+        Ok((l, boxes))
+    }
+
+    /// The decoder on the GPU (as [`Dfine::decode`]) over the encoder's outputs there: the
+    /// logits `[queries, classes]` and boxes `[queries, 4]`, not read back.
+    pub(crate) fn decode_gpu(&self, r: &Run<'_>, outs: &[GT]) -> Result<(GM, GM), VisionError> {
+        let s = &self.s;
+        let d = s.d;
+        let consts = self.consts.as_ref().ok_or_else(|| err("the decoder is not on the GPU"))?;
+        // the levels, anchors and valid tokens (from the maps' sizes alone)
+        let mut levels: Vec<f32> = Vec::new();
+        let mut anchors: Vec<f32> = Vec::new();
+        let mut valid: Vec<f32> = Vec::new();
+        let mut len = 0usize;
+        for (l, f) in outs.iter().enumerate() {
+            let (n, c, h, w) = Run::shape(f);
+            if n != 1 || c != d {
+                return Err(err("the encoder's outputs"));
+            }
+            levels.extend([len as f32, h as f32, w as f32]);
+            let wh = 0.05 * 2f32.powi(l as i32);
+            for y in 0..h {
+                for x in 0..w {
+                    let a = [(x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32, wh, wh];
+                    let ok = a.iter().all(|v| *v > 0.01 && *v < 0.99);
+                    valid.push(if ok { 1.0 } else { 0.0 });
+                    anchors.extend(if ok { a.map(|v| (v / (1.0 - v)).ln()) } else { [f32::MAX; 4] });
+                }
+            }
+            len = len.checked_add(h * w).ok_or_else(|| err("too many tokens"))?;
+        }
+        if len == 0 || len >= 1 << 24 {
+            return Err(err("the encoder's outputs"));
+        }
+        let tokens = r.mat(len, d)?;
+        let mut at = 0usize;
+        for f in outs {
+            let (_, _, h, w) = Run::shape(f);
+            r.planes_into_rows(f, &tokens, at)?;
+            at += h * w;
+        }
+        let levels = r.upload_mat(&levels, outs.len(), 3)?;
+        let anchors = r.upload_mat(&anchors, len, 4)?;
+        let valid = r.upload_mat(&valid, len, 1)?;
+        let masked = r.mask_rows(&tokens, &valid)?;
+        let memory = r.layernorm(&r.linear(&masked, &self.enc_output, TAct::None, None, None)?, &self.enc_norm)?;
+        let scores = r.linear(&memory, &self.enc_score, TAct::None, None, None)?;
+        let order = r.top(&r.rowmax(&scores)?, s.queries)?;
+        let picked = r.gather(&memory, &order)?;
+        let reg = r.mlp(&picked, &self.enc_bbox)?;
+        let mut refs = r.refs_init(&reg, &anchors, &order)?;
+        // the decoder
+        let total: usize = s.points.iter().sum();
+        let bins = s.bins + 1;
+        let mut x = picked;
+        let mut prev_out: Option<GM> = None;
+        let mut corners: Option<GM> = None;
+        let mut init: Option<GM> = None;
+        let [qp0, qp1] = &self.query_pos.layers[..] else { return Err(err("the query position head")) };
+        for (i, layer) in self.layers.iter().enumerate() {
+            let pos = r.linear(&r.linear(&refs, qp0, TAct::Relu, None, None)?, qp1, TAct::None, None, Some(10.0))?;
+            let points = consts.points.get(i).ok_or_else(|| err("decoder layer"))?;
+            let out = layer.forward_gpu(r, &x, &refs, &pos, &tokens, &levels, points, s, total)?;
+            if i == 0 {
+                let pre = r.mlp(&out, &self.pre_bbox)?;
+                init = Some(r.init_box(&pre, &refs)?);
+            }
+            let sum = match &prev_out {
+                Some(p) => r.add(&out, p)?,
+                None => out.clone(),
+            };
+            let delta = r.mlp(&sum, self.bbox_embed.get(i).ok_or_else(|| err("bbox head"))?)?;
+            let c = match &corners {
+                Some(c) => r.add(c, &delta)?,
+                None => delta,
+            };
+            refs = r.to_box(init.as_ref().ok_or_else(|| err("first boxes"))?, &c, &consts.project, bins, self.reg_scale)?;
+            corners = Some(c);
+            prev_out = Some(out.clone());
+            x = out;
+        }
+        let logits = r.linear(&x, &self.class_last, TAct::None, None, None)?;
+        let corners = corners.ok_or_else(|| err("no decoder layers"))?;
+        // localisation quality from the last distributions' sharpness
+        let quality = r.mlp(&r.lqe_stats(&corners, bins, s.topk)?, &self.lqe_last)?;
+        Ok((r.add_rowscalar(&logits, &quality)?, refs))
+    }
+
+    /// The people (class 0) among D-FINE's outputs, best first: scores of at least `threshold`.
+    fn found(&self, logits: &[f32], boxes: &[[f32; 4]], threshold: f32) -> Vec<Found> {
+        let classes = self.enc_score.cout;
+        let mut out: Vec<Found> = logits
+            .chunks_exact(classes.max(1))
+            .zip(boxes)
+            .filter_map(|(l, b)| {
+                let score = sigmoid(*l.first()?);
+                (score >= threshold && b.iter().all(|v| v.is_finite()) && b[2] > 0.0 && b[3] > 0.0).then_some(Found { cxcywh: *b, score })
+            })
+            .collect();
+        out.sort_by(|a, b| b.score.total_cmp(&a.score));
+        out
+    }
+
+    /// [`Dfine::people`] on the GPU for a picture already there (`[1, 3, H, W]`).
+    pub(crate) fn people_gpu(&self, r: &Run<'_>, xi: GT, threshold: f32) -> Result<Vec<Found>, VisionError> {
+        let (logits, boxes) = self.raw_gpu(r, xi)?;
+        Ok(self.found(&logits, &boxes, threshold))
     }
 
     /// The decoder over the encoder's outputs (on the CPU).
@@ -953,18 +1237,7 @@ impl Dfine {
         }
         let mut logits = self.class_last.forward(&x)?;
         // localisation quality from the last distributions' sharpness
-        let bins = s.bins + 1;
-        let mut stats = Vec::with_capacity(nq * 4 * (s.topk + 1));
-        for row in corners.chunks_exact(side) {
-            for side_bins in row.chunks_exact(bins) {
-                let mut p = side_bins.to_vec();
-                softmax_rows(&mut p, bins);
-                p.sort_by(|a, b| b.total_cmp(a));
-                let top = p.get(..s.topk).unwrap_or(&[]);
-                stats.extend_from_slice(top);
-                stats.push(top.iter().sum::<f32>() / s.topk as f32);
-            }
-        }
+        let stats = lqe_stats_cpu(&corners, s.bins + 1, s.topk);
         let quality = self.lqe_last.forward(&stats)?;
         for (row, q) in logits.chunks_exact_mut(classes).zip(&quality) {
             for v in row {
@@ -976,37 +1249,31 @@ impl Dfine {
 
     /// A query's box from its first layer's box and its distance distributions (FDR).
     fn to_box(&self, p: [f32; 4], corners: &[f32]) -> [f32; 4] {
-        let bins = self.s.bins + 1;
-        let mut dist = [0f32; 4];
-        for (k, c) in corners.chunks_exact(bins).take(4).enumerate() {
-            let mut pr = c.to_vec();
-            softmax_rows(&mut pr, bins);
-            dist[k] = pr.iter().zip(&self.project).map(|(a, b)| a * b).sum();
-        }
-        let r = self.reg_scale.max(1e-6);
-        let x1 = p[0] - (0.5 * r + dist[0]) * (p[2] / r);
-        let y1 = p[1] - (0.5 * r + dist[1]) * (p[3] / r);
-        let x2 = p[0] + (0.5 * r + dist[2]) * (p[2] / r);
-        let y2 = p[1] + (0.5 * r + dist[3]) * (p[3] / r);
-        [(x1 + x2) / 2.0, (y1 + y2) / 2.0, x2 - x1, y2 - y1]
+        fdr_box(&self.project, self.reg_scale, self.s.bins + 1, p, corners)
     }
 
     /// The people (class 0) in an RGB picture prepared by [`prepare`], best first: scores of at
     /// least `threshold`.
     pub fn people(&self, x: &Feat, threshold: f32) -> Result<Vec<Found>, VisionError> {
         let (logits, boxes) = self.raw(x)?;
-        let classes = self.enc_score.cout;
-        let mut out: Vec<Found> = logits
-            .chunks_exact(classes)
-            .zip(&boxes)
-            .filter_map(|(l, b)| {
-                let score = sigmoid(*l.first()?);
-                (score >= threshold && b.iter().all(|v| v.is_finite()) && b[2] > 0.0 && b[3] > 0.0).then_some(Found { cxcywh: *b, score })
-            })
-            .collect();
-        out.sort_by(|a, b| b.score.total_cmp(&a.score));
-        Ok(out)
+        Ok(self.found(&logits, &boxes, threshold))
     }
+}
+
+/// D-FINE takes one RGB picture with sides multiples of 32.
+fn check_input(n: usize, c: usize, h: usize, w: usize) -> Result<(), VisionError> {
+    if n != 1 || c != 3 || h == 0 || w == 0 || !h.is_multiple_of(32) || !w.is_multiple_of(32) {
+        return Err(err(format!("D-FINE takes one RGB picture with sides multiples of 32, got {w}×{h}")));
+    }
+    Ok(())
+}
+
+/// The decoder's constants on the GPU.
+struct DfineGpu {
+    /// The bin positions.
+    project: wgpu::Buffer,
+    /// Per decoder layer: each sampling point's scale, then its level.
+    points: Vec<wgpu::Buffer>,
 }
 
 fn inverse_sigmoid(x: f32) -> f32 {
@@ -1043,12 +1310,18 @@ fn weighting(bins: usize, up: f32, reg_scale: f32) -> Result<Vec<f32>, VisionErr
 /// An RGBA picture as D-FINE takes it: area-averaged to fit inside `side` (never enlarged), each
 /// side rounded to a multiple of 32, RGB in 0..1, `[1, 3, H, W]`.
 pub fn prepare(rgba: &[u8], w: usize, h: usize, side: usize) -> Result<Feat, VisionError> {
+    let (ow, oh) = prepared_size(w, h, side)?;
+    prepare_exact(rgba, w, h, ow, oh)
+}
+
+/// The size [`prepare`] makes of a `w` × `h` picture.
+pub fn prepared_size(w: usize, h: usize, side: usize) -> Result<(usize, usize), VisionError> {
     if w == 0 || h == 0 || w > 1 << 15 || h > 1 << 15 {
         return Err(VisionError::Invalid(format!("a {w} × {h} picture cannot be analysed")));
     }
     let k = (side.clamp(64, 4096) as f64 / w.max(h) as f64).min(1.0);
     let round = |v: f64| ((v / 32.0).round() as usize).max(1) * 32;
-    prepare_exact(rgba, w, h, round(w as f64 * k), round(h as f64 * k))
+    Ok((round(w as f64 * k), round(h as f64 * k)))
 }
 
 /// An RGBA picture resampled to exactly `ow` × `oh` (area average when shrinking, nearest

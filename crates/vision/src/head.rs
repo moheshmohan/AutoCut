@@ -22,11 +22,15 @@
 //! sure; else the middle estimate, unsure keypoints far from the others dropped (a wrong guess
 //! blew a head up to four faces tall). Three face keypoints or more cap it at 3.5 times their
 //! spread; with fewer than two, the shoulders' distance over 2.6 measures it (their width varies
-//! with posture: only then). The box is one head width wide, centred between the outermost face
-//! keypoints (the ears for a frontal face, ear and nose in profile), and 1.3 widths tall from the
-//! hairline to the chin, its centre 0.17 widths below the eyes. Against those faces the head box
-//! is a median 1.16 times as tall (90 % under 1.5; a few junk people's, under the weak score,
-//! up to 4).
+//! with posture: only then). The box is the face as the face detector boxes it ([`FACE_BOX`]):
+//! from the front 0.88 head widths wide and 1.14 tall, turned (the turn shortens the distances
+//! that measure the width) 0.98 × 1.34, centred between the outermost face keypoints (the ears
+//! for a frontal face, ear and nose in profile), its centre 0.13 widths below the eyes, grown to
+//! keep the nose and eyes inside with a margin. Calibrated against YuNet's faces of the same
+//! people on 174 frames of the OnRobot and Ameca clips (808 pairs, 2026-10-22): a median 1.05
+//! times their height and 1.06 their width (90 % under 1.40); the earlier box, a head width wide
+//! and 1.3 tall (hair and ears), was 1.17 and 1.26, and its masks were larger and heavier than
+//! the face detector's.
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +51,32 @@ pub const KEYPOINTS: usize = 17;
 /// "sure face" (0.85) and the tracker's "seen once surely" (0.9), so such a face is always seen
 /// twice before it is hidden and the vision check's "not a person" (a robot) is believed.
 pub const HEAD_SCORE_MAX: f32 = 0.84;
+
+/// A face box in head widths (the width the keypoints measure): its width, height, and how far
+/// its centre is below the eyes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceShape {
+    pub width: f32,
+    pub height: f32,
+    pub below_eyes: f32,
+}
+
+/// The face boxes of a head seen from the front (nose and both eyes sure) and turned (profile,
+/// three quarters: the keypoints' distances shorten as the head turns, so a turned face is
+/// larger for the width they measure).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceBoxes {
+    pub front: FaceShape,
+    pub turned: FaceShape,
+}
+
+/// The face box of a head, calibrated against YuNet's faces of the same people (2026-10-22: 812
+/// pairs on 174 frames of the OnRobot and Ameca clips, every 0.1 s): YuNet's faces are a median
+/// 0.84 × 1.09 head widths from the front, 0.94 × 1.28 turned, their centres 0.13 widths below
+/// the eyes. A little more than the median, so a head box is about the face detector's box and
+/// a little more (the mask's padding and feather do the rest).
+pub const FACE_BOX: FaceBoxes =
+    FaceBoxes { front: FaceShape { width: 0.88, height: 1.14, below_eyes: 0.13 }, turned: FaceShape { width: 0.98, height: 1.34, below_eyes: 0.14 } };
 
 /// One keypoint, in the picture's pixels, with its confidence.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -107,6 +137,8 @@ pub struct Head {
     pub view: View,
     /// The best of the nose's and eyes' scores.
     pub face_score: f32,
+    /// The head's width estimated from the keypoints, picture pixels.
+    pub width: f32,
 }
 
 impl Head {
@@ -234,15 +266,21 @@ pub fn head_of(p: &Person, hp: &HeadParams) -> Option<Head> {
     } else {
         ears.iter().map(|q| q.y).sum::<f32>() / ears.len().max(1) as f32 - 0.05 * width
     };
-    let cy = eye_y + 0.17 * width;
-    let (bw, bh) = (width, 1.3 * width);
+    // the face as the face detector boxes it (FACE_BOX: calibrated against YuNet's faces of the
+    // same people)
+    let fb = if view == View::Front { FACE_BOX.front } else { FACE_BOX.turned };
+    let cy = eye_y + fb.below_eyes * width;
+    let (bw, bh) = (fb.width * width, fb.height * width);
     let mut b = [cx - bw / 2.0, cy - bh / 2.0, bw, bh];
-    // and around every face keypoint, with a margin (a tilted head)
+    // and around the nose and eyes, with a margin (a tilted head, a face in profile: the box is
+    // centred between the nose and the ear)
     let m = 0.1 * width;
-    let (ux0, uy0) = (b[0].min(x0 - m), b[1].min(y0 - m));
-    let (ux1, uy1) = ((b[0] + b[2]).max(x1 + m), (b[1] + b[3]).max(y1 + m));
-    b = [ux0, uy0, ux1 - ux0, uy1 - uy0];
-    b.iter().all(|v| v.is_finite()).then_some(Head { bbox: b, view, face_score })
+    for q in [NOSE, LEFT_EYE, RIGHT_EYE].into_iter().filter_map(k).filter(|q| face_kps.contains(q)) {
+        let (ux0, uy0) = (b[0].min(q.x - m), b[1].min(q.y - m));
+        let (ux1, uy1) = ((b[0] + b[2]).max(q.x + m), (b[1] + b[3]).max(q.y + m));
+        b = [ux0, uy0, ux1 - ux0, uy1 - uy0];
+    }
+    b.iter().all(|v| v.is_finite()).then_some(Head { bbox: b, view, face_score, width })
 }
 
 /// Whether the pose faces away from the camera: its left eyes, ears or shoulders on the picture's
@@ -544,6 +582,49 @@ mod tests {
         // two faces found: nothing to add
         let lower_face = Detection { bbox: [(hl[0] + 10.0) / w, (hl[1] + 30.0) / h, (hl[2] - 20.0) / w, (hl[3] - 30.0) / h], ..face.clone() };
         assert!(candidates(&[lower, upper], &[face, lower_face], &hp, w, h).is_empty());
+    }
+
+    /// The head box is the face detector's box of that face ([`FACE_BOX`]): from the front a
+    /// face box 0.88 × 1.14 head widths, its centre 0.13 widths below the eyes and between the
+    /// ears; turned 0.98 × 1.34 (the turn shortens the distances that measure the width); the
+    /// nose and eyes always inside with a margin. (Against YuNet's faces of the same people on
+    /// real frames: `head_boxes_match_the_face_detectors`, ignored.)
+    #[test]
+    fn head_boxes_are_the_size_of_the_face_detectors_faces() {
+        let hp = HeadParams::default();
+        for width in [40.0f32, 100.0, 400.0] {
+            let p = person(800.0, 300.0, width, 0.0);
+            let h = head_of(&p, &hp).unwrap();
+            assert_eq!(h.view, View::Front);
+            let w = h.width;
+            assert!(w > 0.0 && (w / width - 1.0).abs() < 0.35, "the width measured: {w} for {width}");
+            let fb = FACE_BOX.front;
+            assert!((h.bbox[2] - fb.width * w).abs() < 1e-3 * w, "{:?}", h.bbox);
+            assert!((h.bbox[3] - fb.height * w).abs() < 1e-3 * w, "{:?}", h.bbox);
+            let (cx, cy) = centre(&h.bbox);
+            assert!((cx - 800.0).abs() < 0.02 * w && (cy - (300.0 + fb.below_eyes * w)).abs() < 1e-3 * w, "{:?}", h.bbox);
+            // a face box about as tall as wide × 1.3, smaller than the old head box (1.3 widths
+            // tall, a width wide)
+            assert!((h.bbox[3] / h.bbox[2] - 1.3).abs() < 0.05);
+            assert!(h.bbox[3] < 1.3 * w && h.bbox[2] < w);
+        }
+        // turned: the turned shape, still round the nose and the eye
+        let p = person(800.0, 300.0, 100.0, 80.0);
+        let h = head_of(&p, &hp).unwrap();
+        assert_eq!(h.view, View::Profile);
+        assert!(h.bbox[3] >= FACE_BOX.turned.height * h.width - 1e-3, "{:?} {}", h.bbox, h.width);
+        for i in [NOSE, LEFT_EYE] {
+            let q = p.keypoints[i];
+            if q.score >= hp.sure {
+                assert!(q.x > h.bbox[0] && q.x < h.bbox[0] + h.bbox[2] && q.y > h.bbox[1] && q.y < h.bbox[1] + h.bbox[3], "{i}: {q:?} {:?}", h.bbox);
+            }
+        }
+        // the turned face is larger per measured width than the frontal one, and both are
+        // finite
+        const { assert!(FACE_BOX.turned.width > FACE_BOX.front.width && FACE_BOX.turned.height > FACE_BOX.front.height) };
+        for f in [FACE_BOX.front, FACE_BOX.turned] {
+            assert!([f.width, f.height, f.below_eyes].iter().all(|v| v.is_finite() && *v > 0.0 && *v < 2.0));
+        }
     }
 
     #[test]

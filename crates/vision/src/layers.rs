@@ -373,8 +373,6 @@ pub(crate) trait Backend {
     fn chan_attn(&self, x: &Self::T, fc: &Conv) -> Result<Self::T, VisionError>;
     /// `(n, c, h, w)`.
     fn shape(t: &Self::T) -> (usize, usize, usize, usize);
-    /// The tensors on the CPU (the GPU's recorded work is submitted and waited for here).
-    fn read(&self, xs: Vec<Self::T>) -> Result<Vec<Feat>, VisionError>;
 }
 
 /// The plain-Rust passes (the reference).
@@ -432,9 +430,6 @@ impl Backend for Cpu {
     fn shape(t: &Feat) -> (usize, usize, usize, usize) {
         (t.n, t.c, t.h, t.w)
     }
-    fn read(&self, xs: Vec<Feat>) -> Result<Vec<Feat>, VisionError> {
-        Ok(xs)
-    }
 }
 
 /// A batch norm (`gamma`, `beta`, running mean and variance) folded into a convolution's weights
@@ -467,6 +462,8 @@ pub(crate) struct Linear {
     b: Option<Vec<f32>>,
     pub(crate) cin: usize,
     pub(crate) cout: usize,
+    /// The weights on the GPU (`gpunn`).
+    pub(crate) dev: Option<crate::gpunn::LinW>,
 }
 
 impl Linear {
@@ -479,7 +476,7 @@ impl Linear {
             return Err(err("a linear layer's weights are not finite"));
         }
         let wt = Tensor::from_slice(w, (cout, cin), &Device::Cpu).map_err(err)?.t().map_err(err)?.contiguous().map_err(err)?;
-        Ok(Self { wt, b, cin, cout })
+        Ok(Self { wt, b, cin, cout, dev: None })
     }
 
     /// `w` already `[in, out]` (ONNX MatMul weights).
@@ -487,7 +484,13 @@ impl Linear {
         if w.len() != cin * cout || cin == 0 || cout == 0 || w.iter().any(|v| !v.is_finite()) {
             return Err(err(format!("a linear layer's weights do not fit {cin} → {cout}")));
         }
-        Ok(Self { wt: Tensor::from_slice(w, (cin, cout), &Device::Cpu).map_err(err)?, b: None, cin, cout })
+        Ok(Self { wt: Tensor::from_slice(w, (cin, cout), &Device::Cpu).map_err(err)?, b: None, cin, cout, dev: None })
+    }
+
+    /// The weights `[in, out]` and the bias.
+    pub(crate) fn weights(&self) -> Result<(Vec<f32>, Option<&[f32]>), VisionError> {
+        let w: Vec<f32> = self.wt.flatten_all().map_err(err)?.to_vec1().map_err(err)?;
+        Ok((w, self.b.as_deref()))
     }
 
     /// `x`: `[rows, in]` → `[rows, out]`.
@@ -514,9 +517,11 @@ impl Linear {
 
 /// Layer normalisation over the last dimension (`c`), in place.
 pub(crate) struct Norm {
-    g: Vec<f32>,
-    b: Vec<f32>,
-    eps: f32,
+    pub(crate) g: Vec<f32>,
+    pub(crate) b: Vec<f32>,
+    pub(crate) eps: f32,
+    /// The gain and bias on the GPU (`gpunn`).
+    pub(crate) dev: Option<crate::gpunn::NormW>,
 }
 
 impl Norm {
@@ -524,7 +529,7 @@ impl Norm {
         if g.is_empty() || g.len() != b.len() || g.iter().chain(&b).any(|v| !v.is_finite()) {
             return Err(err("a layer norm's weights do not fit"));
         }
-        Ok(Self { g, b, eps })
+        Ok(Self { g, b, eps, dev: None })
     }
 
     pub(crate) fn apply(&self, x: &mut [f32]) {

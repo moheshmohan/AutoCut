@@ -8,7 +8,9 @@
 //! redaction never found, a mask that does not cover the face it was made for, a face left sharp
 //! for the robot's (the bug of 2026-10-21: visitors next to Ameca were left sharp because they
 //! stood inside the robot's box). A face the frame shows is *masked* when the top-most media clip
-//! there has an automatic redaction mask (`Redact …`) over that point at that moment.
+//! there has an automatic redaction mask (`Redact …`) over that point at that moment — its
+//! centre, or for a face cut by the frame whose centre lies outside the picture, the visible point
+//! of its box nearest the centre (`visible_centre`).
 //!
 //! A face may stay sharp (`allowed`) only when the vision model says it is not a person, twice
 //! (the grid of crops, then alone and outlined: [`crate::redact::VisionJudge::confirm`]), and it
@@ -181,6 +183,22 @@ fn under(s: &Session, q: &Sequence, t: Tick, c: Vec2) -> Option<Under> {
     found
 }
 
+/// The point of face box `b` (normalised) the check looks under, sequence pixels (`sw` × `sh`):
+/// its centre, or for a face cut by the frame whose centre lies outside it, the visible point of
+/// its box nearest the centre (half a pixel inside the frame). A head half outside the frame (a
+/// pose head's box runs past the edge) is masked when the part the frame shows is, and flagged
+/// when it is not; its centre outside the picture was under no clip, so it was always flagged,
+/// masked or not (2026-10-22).
+fn visible_centre(b: &[f32; 4], sw: f64, sh: f64) -> Vec2 {
+    let b = b.map(f64::from);
+    let (cx, cy) = ((b[0] + b[2] / 2.0) * sw, (b[1] + b[3] / 2.0) * sh);
+    let inside = |v: f64, lo: f64, hi: f64, size: f64| {
+        let (lo, hi) = ((lo * size).max(0.5), (hi * size).min(size - 0.5));
+        if lo <= hi { v.clamp(lo, hi) } else { v }
+    };
+    Vec2::new(inside(cx, b[0], b[0] + b[2], sw), inside(cy, b[1], b[1] + b[3], sh))
+}
+
 /// A clip of video footage (not a title, a colour matte, a nested sequence).
 fn is_footage(s: &Session, it: &TrackItem) -> bool {
     match s.project.item(it.item).map(|i| &i.kind) {
@@ -255,7 +273,7 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
                 small += 1;
                 continue;
             }
-            let c = Vec2::new(f64::from(d.bbox[0] + d.bbox[2] / 2.0) * sw, f64::from(d.bbox[1] + d.bbox[3] / 2.0) * sh);
+            let c = visible_centre(&d.bbox, sw, sh);
             let u = under(s, &q, Tick::from_seconds_f64(t), c);
             if u.as_ref().is_some_and(|u| u.masked) {
                 masked += 1;
@@ -277,6 +295,13 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
         min_iou: 0.1,
         max_jump: 1.5,
         smooth: 0.0,
+        // the faces as seen, each sighting reported: boxes compared as they are, no size
+        // smoothing or spike removal, no longer gaps after an unsure sighting and no camera
+        // motion compensation (a face the frame shows is reported where it shows, as before)
+        grow: 0.0,
+        smooth_size: 0.0,
+        unsure_gap: 0.0,
+        pan: false,
         ..LinkParams::default()
     };
     let mut found: Vec<Unmasked> = Vec::new();

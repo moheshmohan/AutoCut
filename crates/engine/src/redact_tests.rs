@@ -577,16 +577,53 @@ fn needs_a_selection_and_says_how_to_get_the_models() {
 }
 
 #[test]
-fn masks_switch_on_and_off_with_their_track() {
+fn masks_fade_in_and_out_round_their_track() {
     use filmcraft_vision::track::TrackPoint;
     let pt = |t: f64, x: f64| TrackPoint { t, bbox: [x, 0.4, 0.1, 0.2], corners: vec![], seen: true };
     let track = Track { kind: Kind::Face, label: None, points: vec![pt(2.0, 0.1), pt(2.1, 0.2), pt(2.2, 0.3)], hits: 3, best_score: 0.9, pose_hits: 0 };
-    let c = ClipRedact {
+    let c = clip_redact(vec![(track.clone(), None)]);
+    let m = mask_for(&track, 1, &c, 0.2).unwrap();
+    let at = |s: f64| m.opacity.f64_at(Tick::from_seconds_f64(s));
+    // fully on LINGER (0.4 s) before the first sighting and after the last (a face going behind
+    // something is lost before it is gone), fading in and out over FADE (0.25 s) beyond
+    assert_eq!((at(1.0), at(1.3), at(1.6), at(1.95), at(2.15), at(2.6), at(2.9), at(3.5)), (0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 0.0, 0.0));
+    assert!((at(1.475) - 50.0).abs() < 1.0 && (at(2.725) - 50.0).abs() < 1.0, "{} {}", at(1.475), at(2.725));
+    // the blur is on (over half) exactly from the linger's start to its end and half the fades
+    let on: Vec<f64> = (0..400).map(|k| 1.0 + f64::from(k) * 0.01).filter(|t| at(*t) > 50.0).collect();
+    assert!((on[0] - 1.48).abs() < 0.015 && (on[on.len() - 1] - 2.72).abs() < 0.015, "{} {}", on[0], on[on.len() - 1]);
+    // padded ellipse: 0.1 × 1000 px wide, plus a fifth each side, CHIN (15 px) further down, and
+    // half its move to the next moment (0.1: 50 px) each side for its motion
+    let (lo, hi) = m.path_at(Tick::from_seconds_f64(2.0)).bounds();
+    assert!(((hi.x - lo.x) - 240.0).abs() < 1.0 && ((hi.y - lo.y) - 155.0).abs() < 1.0, "{lo:?} {hi:?}");
+    // the path holds its first and last shape through the fades
+    assert_eq!(m.path_at(Tick::from_seconds_f64(1.4)).bounds(), m.path_at(Tick::from_seconds_f64(2.0)).bounds());
+    // a soft edge, a share of the height (100 px × FEATHER), the shape itself wholly hidden
+    assert!((m.feather.f64_at(Tick::from_seconds_f64(2.0)) - 100.0 * FEATHER).abs() < 1e-6);
+    assert!((m.expansion.f64_at(Tick::from_seconds_f64(2.0)) - 50.0 * FEATHER).abs() < 1e-6);
+    // a track from the clip's first frame is on from the start, one to its end stays on
+    let early = Track { points: vec![pt(1.0, 0.1), pt(1.1, 0.1)], ..track.clone() };
+    let m = mask_for(&early, 1, &c, 0.2).unwrap();
+    assert_eq!(m.opacity.f64_at(Tick::from_seconds_f64(1.0)), 100.0);
+    let late = Track { points: vec![pt(5.9, 0.1), pt(6.0, 0.1)], ..track.clone() };
+    let m = mask_for(&late, 1, &c, 0.2).unwrap();
+    assert_eq!(m.opacity.f64_at(Tick::from_seconds_f64(6.0)), 100.0);
+    assert_eq!(m.opacity.f64_at(Tick::from_seconds_f64(5.0)), 0.0);
+    // a track fading in as the clip starts begins part way into its fade
+    let soon = Track { points: vec![pt(1.5, 0.1), pt(1.6, 0.1)], ..track };
+    let m = mask_for(&soon, 1, &c, 0.2).unwrap();
+    let v = m.opacity.f64_at(Tick::from_seconds_f64(1.0));
+    assert!(v > 0.0 && v < 100.0, "{v}");
+    assert_eq!(m.opacity.f64_at(Tick::from_seconds_f64(1.1)), 100.0);
+}
+
+/// A clip of 1000 × 500 px analysed from 1 s to 6 s every 0.1 s, with `tracks`.
+fn clip_redact(tracks: Vec<(Track, Option<filmcraft_vision::track::Skip>)>) -> ClipRedact {
+    ClipRedact {
         clip: ClipId(1),
         also: Vec::new(),
         name: "a".into(),
         size: (1000.0, 500.0),
-        tracks: vec![(track.clone(), None)],
+        tracks,
         frames: 50,
         interval: 0.1,
         media: (Tick::from_seconds_f64(1.0), Tick::from_seconds_f64(6.0)),
@@ -595,23 +632,304 @@ fn masks_switch_on_and_off_with_their_track() {
         found: 0,
         look_errors: Vec::new(),
         robots: Vec::new(),
-    };
-    let m = mask_for(&track, 1, &c, 0.2).unwrap();
+    }
+}
+
+/// How many times the mask's blur switches between on (over half) and off, sampled every 10 ms.
+fn switches(m: &filmcraft_project::Mask) -> usize {
+    let on: Vec<bool> = (0..600).map(|k| m.opacity.f64_at(Tick::from_seconds_f64(1.0 + f64::from(k) * 0.01)) > 50.0).collect();
+    on.windows(2).filter(|w| w[0] != w[1]).count()
+}
+
+#[test]
+fn a_flickering_head_at_the_frames_edge_is_one_steady_mask() {
+    use filmcraft_vision::track::{Frame, LinkParams, link};
+    // a visitor cut by the frame's left edge: the pose network finds the head in some frames
+    // (0.4: unsure, over the weak score) and misses it in others
+    let seen = [true, false, true, true, false, false, true, false, true, true, false, true, false, false, true, true, true, false, true, true];
+    let head = |x: f32| Detection { kind: Kind::Face, score: 0.4, bbox: [x, 0.4, 0.06, 0.15], points: Vec::new(), pose: true };
+    let frames: Vec<Frame> = seen
+        .iter()
+        .enumerate()
+        .map(|(i, s)| Frame { t: 2.5 + i as f64 * 0.1, detections: if *s { vec![head(-0.02 + 0.001 * i as f32)] } else { vec![] } })
+        .collect();
+    let tracks = link(&frames, &LinkParams::default());
+    assert_eq!(tracks.len(), 1, "one track, not one a sighting: {tracks:?}");
+    let t = &tracks[0];
+    assert_eq!(t.hits, seen.iter().filter(|s| **s).count());
+    assert_eq!(filmcraft_vision::track::verdict(t, &KeepParams::default(), &[]), None, "hidden");
+    let c = clip_redact(vec![(t.clone(), None)]);
+    let m = mask_for(t, 1, &c, 0.1).unwrap();
+    // on once, off once: no flicker
+    assert_eq!(switches(&m), 2);
+    // at the frame's edge it stays on a second before and after (EDGE_LINGER), not 0.4 s
     let at = |s: f64| m.opacity.f64_at(Tick::from_seconds_f64(s));
-    // on LINGER (0.4 s) before the first sighting and after the last: a face going behind
-    // something is lost before it is gone
-    assert_eq!((at(1.5), at(1.65), at(1.95), at(2.15), at(2.55), at(2.65)), (0.0, 100.0, 100.0, 100.0, 100.0, 0.0));
-    // padded ellipse: 0.1 × 1000 px wide, plus a fifth each side
-    let (lo, hi) = m.path_at(Tick::from_seconds_f64(2.0)).bounds();
-    assert!(((hi.x - lo.x) - 140.0).abs() < 1.0 && ((hi.y - lo.y) - 140.0).abs() < 1.0, "{lo:?} {hi:?}");
-    // a track from the clip's first frame is on from the start, one to its end stays on
-    let early = Track { points: vec![pt(1.0, 0.1), pt(1.1, 0.1)], ..track.clone() };
-    let m = mask_for(&early, 1, &c, 0.2).unwrap();
-    assert_eq!(m.opacity.f64_at(Tick::from_seconds_f64(1.0)), 100.0);
-    let late = Track { points: vec![pt(5.9, 0.1), pt(6.0, 0.1)], ..track };
-    let m = mask_for(&late, 1, &c, 0.2).unwrap();
-    assert_eq!(m.opacity.f64_at(Tick::from_seconds_f64(6.0)), 100.0);
-    assert_eq!(m.opacity.f64_at(Tick::from_seconds_f64(5.0)), 0.0);
+    assert_eq!((at(1.55), at(4.4 + 0.95)), (100.0, 100.0));
+    assert_eq!((at(1.1), at(5.8)), (0.0, 0.0));
+    // two unsure sightings 1.2 s apart are one track (the hysteresis, `unsure_gap`), hidden
+    let twice = |a: usize, b: usize| -> Vec<Frame> {
+        (0..30).map(|i| Frame { t: 2.0 + i as f64 * 0.1, detections: if i == a || i == b { vec![head(-0.02)] } else { vec![] } }).collect()
+    };
+    let t = link(&twice(3, 15), &LinkParams::default());
+    assert_eq!(t.len(), 1);
+    assert_eq!(filmcraft_vision::track::verdict(&t[0], &KeepParams::default(), &[]), None);
+    // two sightings further apart are two brief tracks, neither hidden: one sighting starts no
+    // mask
+    let t = link(&twice(3, 22), &LinkParams::default());
+    assert_eq!(t.len(), 2);
+    assert!(t.iter().all(|t| filmcraft_vision::track::verdict(t, &KeepParams::default(), &[]).is_some()));
+}
+
+#[test]
+fn a_fast_face_has_a_wider_mask_for_its_motion() {
+    use filmcraft_vision::track::TrackPoint;
+    let width_at = |m: &filmcraft_project::Mask, s: f64| {
+        let (lo, hi) = m.path_at(Tick::from_seconds_f64(s)).bounds();
+        hi.x - lo.x
+    };
+    // a face 0.1 of a 1000 px clip wide (100 px), still, then whipped 0.06 (60 px) a tenth of a
+    // second: its mask is the padded box (130 px) while it is still and 60 px wider (half the move
+    // each side) while it moves
+    let x = |k: i32| if k < 10 { 0.3 } else { 0.3 + 0.06 * f64::from(k - 10) };
+    let t = Track {
+        kind: Kind::Face,
+        label: None,
+        points: (0..15).map(|k| TrackPoint { t: 2.0 + f64::from(k) * 0.1, bbox: [x(k), 0.4, 0.1, 0.2], corners: vec![], seen: true }).collect(),
+        hits: 15,
+        best_score: 0.9,
+        pose_hits: 0,
+    };
+    let c = clip_redact(vec![(t.clone(), None)]);
+    let m = mask_for(&c.tracks[0].0, 1, &c, 0.15).unwrap();
+    assert!((width_at(&m, 2.5) - 130.0).abs() < 1.0, "{}", width_at(&m, 2.5));
+    assert!((width_at(&m, 3.2) - 190.0).abs() < 1.0, "{}", width_at(&m, 3.2));
+    // a face that jumps further than its size: at most half its size each side
+    let mut far = t.clone();
+    far.points[12].bbox[0] = 0.8;
+    let c = clip_redact(vec![(far, None)]);
+    let m = mask_for(&c.tracks[0].0, 1, &c, 0.15).unwrap();
+    assert!((width_at(&m, 3.2) - (130.0 + 100.0)).abs() < 1.0, "{}", width_at(&m, 3.2));
+    // hostile points: finite shapes
+    let mut odd = t;
+    odd.points[11].bbox = [f64::NAN, f64::INFINITY, 0.1, f64::NAN];
+    let c = clip_redact(vec![(odd, None)]);
+    let m = mask_for(&c.tracks[0].0, 1, &c, 0.15).unwrap();
+    assert!(width_at(&m, 3.3).is_finite());
+}
+
+#[test]
+fn a_face_away_from_the_edge_lingers_briefly_and_one_at_the_edge_long() {
+    use filmcraft_vision::track::TrackPoint;
+    let pt = |t: f64| TrackPoint { t, bbox: [0.45, 0.4, 0.1, 0.2], corners: vec![], seen: true };
+    let face = Track { kind: Kind::Face, label: None, points: vec![pt(3.0), pt(3.1), pt(3.2)], hits: 3, best_score: 0.9, pose_hits: 1 };
+    let c = clip_redact(vec![(face.clone(), None)]);
+    let at = |m: &filmcraft_project::Mask, s: f64| m.opacity.f64_at(Tick::from_seconds_f64(s));
+    let m = mask_for(&face, 1, &c, 0.1).unwrap();
+    assert_eq!((at(&m, 2.65), at(&m, 2.3)), (100.0, 0.0), "LINGER");
+    // found only from poses, it lingers as long
+    let pose_only = Track { pose_hits: 3, ..face.clone() };
+    let m = mask_for(&pose_only, 1, &c, 0.1).unwrap();
+    assert_eq!((at(&m, 2.65), at(&m, 2.3)), (100.0, 0.0), "LINGER");
+    // at the right edge
+    let edge = Track { points: face.points.iter().map(|p| TrackPoint { bbox: [0.93, 0.4, 0.1, 0.2], ..p.clone() }).collect(), ..face };
+    let m = mask_for(&edge, 1, &c, 0.1).unwrap();
+    assert_eq!((at(&m, 2.05), at(&m, 4.15)), (100.0, 100.0), "EDGE_LINGER");
+    assert_eq!(switches(&m), 2);
+}
+
+#[test]
+fn a_face_cut_by_the_frame_is_masked_past_the_edge() {
+    use filmcraft_vision::track::TrackPoint;
+    let pt = |x: f64, y: f64| TrackPoint { t: 2.0, bbox: [x, y, 0.1, 0.2], corners: vec![], seen: true };
+    let face = |x: f64, y: f64| Track { kind: Kind::Face, label: None, points: vec![pt(x, y)], hits: 2, best_score: 0.9, pose_hits: 0 };
+    let c = clip_redact(Vec::new());
+    let bounds = |t: &Track| mask_for(t, 1, &c, 0.1).unwrap().path_at(Tick::from_seconds_f64(2.0)).bounds();
+    // inside: the padded box (0.1 of 1000 px wide, 0.2 of 500 tall, a tenth more each side, and
+    // CHIN more below)
+    let (lo, hi) = bounds(&face(0.4, 0.4));
+    assert!((lo.x - 390.0).abs() < 1.0 && (hi.x - 510.0).abs() < 1.0 && (lo.y - 190.0).abs() < 1.0 && (hi.y - 325.0).abs() < 1.0, "{lo:?} {hi:?}");
+    // at the left edge: half a face further left, the right side as it was
+    let (lo, hi) = bounds(&face(-0.02, 0.4));
+    assert!((lo.x - (-30.0 - 50.0)).abs() < 1.0 && (hi.x - 90.0).abs() < 1.0, "{lo:?} {hi:?}");
+    // at the bottom right corner: further right and down
+    let (lo, hi) = bounds(&face(0.95, 0.85));
+    assert!((hi.x - (1060.0 + 50.0)).abs() < 1.0 && (hi.y - (535.0 + 15.0 + 50.0)).abs() < 1.0 && (lo.x - 940.0).abs() < 1.0, "{lo:?} {hi:?}");
+    // hostile boxes are left as they are
+    assert_eq!(past_edges(&[0.1, 0.1, 0.2, 0.2], &[f64::NAN, 0.0, 0.1, 0.1]), [0.1, 0.1, 0.2, 0.2]);
+}
+
+/// The blur's coverage of mask `m` at clip pixel `(x, y)` at `s` seconds (the renderer's
+/// falloff of the signed distance to its shape).
+fn cover(m: &filmcraft_project::Mask, s: f64, (x, y): (f64, f64)) -> f64 {
+    let t = Tick::from_seconds_f64(s);
+    let poly: Vec<(f64, f64)> = m.path_at(t).flatten(0.5).iter().map(|p| (p.x, p.y)).collect();
+    let n = poly.len();
+    let (mut inside, mut best) = (false, f64::INFINITY);
+    for i in 0..n {
+        let ((ax, ay), (bx, by)) = (poly[i], poly[(i + n - 1) % n]);
+        if (ay > y) != (by > y) && x < ax + (y - ay) * (bx - ax) / (by - ay) {
+            inside = !inside;
+        }
+        let (dx, dy) = (bx - ax, by - ay);
+        let u = (((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy).max(1e-12)).clamp(0.0, 1.0);
+        best = best.min((ax + u * dx - x).hypot(ay + u * dy - y));
+    }
+    let sd = if inside { best } else { -best };
+    let (f, e) = (m.feather.f64_at(t), m.expansion.f64_at(t));
+    f64::from(filmcraft_render::mask::falloff((sd + e) as f32, f as f32)) * m.opacity.f64_at(t) / 100.0
+}
+
+#[test]
+fn neighbouring_faces_are_blurred_apart_unless_they_overlap() {
+    use filmcraft_vision::track::TrackPoint;
+    let face = |x: f64, from: f64, to: f64| Track {
+        kind: Kind::Face,
+        label: None,
+        points: (0..)
+            .map(|k| from + f64::from(k) * 0.1)
+            .take_while(|t| *t <= to + 1e-9)
+            .map(|t| TrackPoint { t, bbox: [x, 0.4, 0.1, 0.2], corners: vec![], seen: true })
+            .collect(),
+        hits: 10,
+        best_score: 0.9,
+        pose_hits: 0,
+    };
+    let at = |m: &filmcraft_project::Mask, s: f64| (m.feather.f64_at(Tick::from_seconds_f64(s)), m.expansion.f64_at(Tick::from_seconds_f64(s)));
+    // two faces 100 px square in a 1000 × 500 clip, side by side from 2 s to 3 s, their padded
+    // ellipses 10 px apart (290–410 and 420–540); alone each one's blur would reach 16 px out
+    let c = clip_redact(vec![(face(0.3, 2.0, 3.0), None), (face(0.43, 2.0, 3.0), None)]);
+    let ms: Vec<filmcraft_project::Mask> = c.tracks.iter().map(|(t, _)| mask_for(t, 1, &c, 0.1).unwrap()).collect();
+    for m in &ms {
+        // reaching 5 px, half the gap: a soft edge 10 px wide centred on the outline
+        let (f, e) = at(m, 2.5);
+        assert!((f - 10.0).abs() < 0.2 && e.abs() < 1e-9, "{f} {e}");
+    }
+    // a sharp line between them: no blur half way; each face (300–400, 430–530) wholly hidden
+    let mid = (415.0, 250.0);
+    assert!(ms.iter().map(|m| cover(m, 2.5, mid)).sum::<f64>() < 0.01, "{:?}", ms.iter().map(|m| cover(m, 2.5, mid)).collect::<Vec<_>>());
+    for x in [300.0, 350.0, 400.0] {
+        assert!(cover(&ms[0], 2.5, (x, 250.0)) > 0.999 && cover(&ms[1], 2.5, (x + 130.0, 250.0)) > 0.999);
+    }
+    // alone: the full soft edge (16 px, wholly outside), not keyframed, and the middle blurred
+    let alone = clip_redact(vec![(face(0.3, 2.0, 3.0), None)]);
+    let m = mask_for(&alone.tracks[0].0, 1, &alone, 0.1).unwrap();
+    assert_eq!(at(&m, 2.5), (100.0 * FEATHER, 50.0 * FEATHER));
+    assert!(m.feather.keyframes.is_empty() && m.expansion.keyframes.is_empty());
+    assert!(cover(&m, 2.5, mid) > 0.1, "{}", cover(&m, 2.5, mid));
+    // far apart: as alone
+    let c = clip_redact(vec![(face(0.1, 2.0, 3.0), None), (face(0.7, 2.0, 3.0), None)]);
+    let m = mask_for(&c.tracks[0].0, 1, &c, 0.1).unwrap();
+    assert!(m.feather.keyframes.is_empty() && at(&m, 2.5) == (16.0, 8.0));
+    // shapes 30 px apart: drawn in a little (reaching 15 px); 50 px apart: room for both
+    let c = clip_redact(vec![(face(0.3, 2.0, 3.0), None), (face(0.45, 2.0, 3.0), None)]);
+    let m = mask_for(&c.tracks[0].0, 1, &c, 0.1).unwrap();
+    assert_eq!(at(&m, 2.5), (16.0, 7.0));
+    let c = clip_redact(vec![(face(0.3, 2.0, 3.0), None), (face(0.47, 2.0, 3.0), None)]);
+    let m = mask_for(&c.tracks[0].0, 1, &c, 0.1).unwrap();
+    assert_eq!(at(&m, 2.5), (16.0, 8.0));
+    // overlapping faces truly merge, each still softly edged (half the feather, centred)
+    let c = clip_redact(vec![(face(0.3, 2.0, 3.0), None), (face(0.36, 2.0, 3.0), None)]);
+    let m = mask_for(&c.tracks[0].0, 1, &c, 0.1).unwrap();
+    assert_eq!(at(&m, 2.5), (8.0, 0.0));
+    // a neighbour there only from 3.5 s on draws the edge in from just before it shows (its
+    // linger and fade) and not at 2 s
+    let c = clip_redact(vec![(face(0.3, 2.0, 5.0), None), (face(0.43, 3.5, 5.0), None)]);
+    let m = mask_for(&c.tracks[0].0, 1, &c, 0.1).unwrap();
+    assert_eq!(at(&m, 2.0), (16.0, 8.0));
+    assert!(at(&m, 3.2).0 <= 10.2 && at(&m, 4.0).0 <= 10.2, "{:?} {:?}", at(&m, 3.2), at(&m, 4.0));
+    // the soft edge for each reach: wholly outside, drawn in, narrowed, never under half
+    assert_eq!(soft_edge(16.0, 16.0), (16.0, 8.0));
+    assert_eq!(soft_edge(12.0, 16.0), (16.0, 4.0));
+    assert_eq!(soft_edge(8.0, 16.0), (16.0, 0.0));
+    assert_eq!(soft_edge(5.0, 16.0), (10.0, 0.0));
+    assert_eq!(soft_edge(0.0, 16.0), (8.0, 0.0));
+    for (r, f) in [(f64::NAN, 16.0), (5.0, f64::NAN), (f64::INFINITY, 16.0), (-3.0, -3.0), (1e12, 1e12)] {
+        let (a, b) = soft_edge(r, f);
+        assert!(a.is_finite() && b.is_finite() && a >= 0.5 && b >= 0.0, "{r} {f}: {a} {b}");
+    }
+    // hostile neighbours: finite edges
+    let mut odd = face(0.43, 2.0, 3.0);
+    odd.points[3].bbox = [f64::NAN, f64::INFINITY, -1.0, f64::NAN];
+    let c = clip_redact(vec![(face(0.3, 2.0, 3.0), None), (odd, None)]);
+    let m = mask_for(&c.tracks[0].0, 1, &c, 0.1).unwrap();
+    for k in 0..40 {
+        let s = 1.8 + f64::from(k) * 0.04;
+        let (f, e) = at(&m, s);
+        assert!(f.is_finite() && (8.0..=16.0).contains(&f) && e.is_finite() && (0.0..=8.0).contains(&e), "{s}: {f} {e}");
+    }
+    assert_eq!(shape_gap(&[0.0, 0.0, 10.0, 10.0], true, &[f64::NAN, 0.0, 1.0, 1.0], true), 0.0);
+    assert!((shape_gap(&[0.0, 0.0, 10.0, 10.0], false, &[20.0, 0.0, 10.0, 10.0], false) - 10.0).abs() < 1e-9);
+    assert_eq!(shape_gap(&[0.0, 0.0, 10.0, 10.0], true, &[2.0, 2.0, 4.0, 4.0], true), 0.0, "one inside the other");
+}
+
+#[test]
+fn a_small_faces_mask_reaches_down_to_the_least_height() {
+    use filmcraft_vision::track::TrackPoint;
+    let face = |h: f64| Track {
+        kind: Kind::Face,
+        label: None,
+        points: vec![TrackPoint { t: 2.0, bbox: [0.4, 0.4, h / 2.0, h], corners: vec![], seen: true }],
+        hits: 2,
+        best_score: 0.9,
+        pose_hits: 0,
+    };
+    let c = clip_redact(Vec::new());
+    let bounds = |t: &Track| mask_for(t, 1, &c, 0.1).unwrap().path_at(Tick::from_seconds_f64(2.0)).bounds();
+    // a face 4 % of the 500 px picture tall (20 px): its mask starts 0.1 of the face above it and
+    // reaches down to MIN_FACE_MASK (45 px), as wide as padding makes it
+    let (lo, hi) = bounds(&face(0.04));
+    assert!((lo.y - 198.0).abs() < 1.0 && (hi.y - (198.0 + MIN_FACE_MASK * 500.0)).abs() < 1.0, "{lo:?} {hi:?}");
+    assert!(((hi.x - lo.x) - 24.0).abs() < 1.0, "{lo:?} {hi:?}");
+    // a larger face's mask is taller anyway: padding and CHIN only
+    let (lo, hi) = bounds(&face(0.2));
+    assert!(((hi.y - lo.y) - 0.2 * 500.0 * (1.2 + CHIN)).abs() < 1.0, "{lo:?} {hi:?}");
+}
+
+#[test]
+fn faces_are_blurred_by_their_own_size() {
+    use filmcraft_vision::track::TrackPoint;
+    let track = |h: f64, x: f64| Track {
+        kind: Kind::Face,
+        label: None,
+        points: vec![
+            TrackPoint { t: 2.0, bbox: [x, 0.3, h / 2.0, h], corners: vec![], seen: true },
+            TrackPoint { t: 2.1, bbox: [x, 0.3, h / 2.0, h], corners: vec![], seen: true },
+        ],
+        hits: 2,
+        best_score: 0.9,
+        pose_hits: 0,
+    };
+    // faces 40, 50 and 200 px tall (in a 500 px tall clip): the two small ones share an effect,
+    // the large one has its own, each blurred for its band's largest face
+    let c = clip_redact(vec![(track(0.08, 0.1), None), (track(0.1, 0.3), None), (track(0.4, 0.6), None)]);
+    let o = Options::default();
+    let fx = effects_for(&c, &o);
+    assert_eq!(fx.len(), 2, "{:?}", fx.iter().map(|e| e.masks.len()).collect::<Vec<_>>());
+    assert!(fx.iter().all(is_auto_redaction));
+    assert_eq!(fx.iter().map(|e| e.masks.len()).collect::<Vec<_>>(), vec![2, 1]);
+    let blur = |e: &EffectInstance| e.params["blurriness"].value.as_f64().unwrap();
+    assert!((blur(&fx[0]) - 50.0 * BLUR_PER_HEIGHT).abs() < 1e-9, "{}", blur(&fx[0]));
+    assert!((blur(&fx[1]) - 200.0 * BLUR_PER_HEIGHT).abs() < 1e-9, "{}", blur(&fx[1]));
+    // σ 0.15 of the face's height at the default strength; lighter and heavier with it
+    assert!((blurriness(100.0, 60.0) - 30.0).abs() < 1e-9);
+    assert!(blurriness(100.0, 30.0) < blurriness(100.0, 60.0) && blurriness(100.0, 60.0) < blurriness(100.0, 100.0));
+    // hostile sizes and strengths stay finite and in range
+    for (size, strength) in [(f64::NAN, 60.0), (f64::INFINITY, 60.0), (100.0, f64::NAN), (-5.0, 60.0), (1e12, 1e12)] {
+        let b = blurriness(size, strength);
+        assert!(b.is_finite() && (6.0..=2000.0).contains(&b), "{size} {strength}: {b}");
+    }
+    let mut odd = track(0.1, 0.3);
+    odd.points[0].bbox = [f64::NAN, f64::INFINITY, -1.0, f64::NAN];
+    let c = clip_redact(vec![(odd, None)]);
+    let _ = effects_for(&c, &o);
+    // the mosaic too, one effect per band
+    let c = clip_redact(vec![(track(0.08, 0.1), None), (track(0.4, 0.6), None)]);
+    let fx = effects_for(&c, &Options { style: Style::Mosaic, ..Options::default() });
+    assert_eq!(fx.len(), 2);
+    assert!(fx.iter().all(|e| e.effect == "mosaic"));
+    // nothing hidden: no effect
+    let c = clip_redact(vec![(track(0.1, 0.3), Some(filmcraft_vision::track::Skip::TooSmall))]);
+    assert!(effects_for(&c, &o).is_empty());
 }
 
 #[test]
