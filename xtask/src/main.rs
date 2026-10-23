@@ -16,7 +16,9 @@
 //!   lists, against a reference list (default: the local `plan/premiere/<area>.json`), presence and
 //!   placement reported separately (`parity.rs`, docs/gaps.md G7).
 //! - `ico <out.ico> <in.png>…`: pack PNGs into a Windows `.ico` (used by `packaging/icons.sh`).
-//! - `ci`: fmt check, clippy -D warnings, tests, layers, assets, wasm.
+//! - `i18n-report`: print the interface strings each language's catalog lacks (they show in
+//!   English). It never fails.
+//! - `ci`: fmt check, clippy -D warnings, tests, the i18n report, layers, assets, wasm.
 //! - `ci --changed [--base REF]`: the same for what changed since REF (default: the branch's
 //!   upstream, else `main`): clippy on the changed crates and their dependents, the changed
 //!   crates' tests, wasm only when a web-built crate is affected (`changed.rs`). For iterating;
@@ -536,10 +538,22 @@ fn ci() -> Result<(), String> {
     run(Command::new(cargo).args(["fmt", "--check"]))?;
     run(Command::new(cargo).args(["clippy", "--workspace", "--all-targets", "--release", "--", "-D", "warnings"]))?;
     // --no-fail-fast: one (long) run reports every failing suite, not just the first
-    run(Command::new(cargo).args(["test", "--workspace", "--release", "--no-fail-fast"]))?;
+    let tested = run(Command::new(cargo).args(["test", "--workspace", "--release", "--no-fail-fast"]));
+    i18n_report();
+    tested?;
     layers()?;
     assets()?;
     wasm()
+}
+
+/// The missing-translations report (`i18n::tests::missing_translations_report` in
+/// `filmcraft-ui-egui`), printed to the log. A missing translation never fails a build, so
+/// neither does this.
+fn i18n_report() {
+    let args = ["test", "--release", "-p", "filmcraft-ui-egui", "--lib", "--", "--exact", "i18n::tests::missing_translations_report", "--nocapture"];
+    if let Err(e) = run(Command::new(env!("CARGO")).args(args)) {
+        eprintln!("i18n report not printed: {e}");
+    }
 }
 
 /// The headless playback benchmark (`crates/ui-egui/examples/bench_playback.rs`); extra
@@ -573,6 +587,10 @@ fn main() -> ExitCode {
         "ci" => ci(),
         "sweep" => sweep::run_sweep(&std::env::args().skip(2).collect::<Vec<_>>()),
         "live" => live::run_live(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "i18n-report" => {
+            i18n_report();
+            Ok(())
+        }
         "bench" => bench(),
         "bench-playback" => bench_playback(),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -589,7 +607,7 @@ fn main() -> ExitCode {
             ico::run(&rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
         _ => Err(
-            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci [--changed [--base REF]]|sweep [--days N] [--dev] [--dry-run]|live [--only a,b] [--google] [--picker] [--youtube] [--instagram [--instagram-publish]] [--voice V] [--clip F]|bench [args]|bench-playback [args]>"
+            "usage: cargo xtask <layers|assets|wasm|web [--dev] [--serve PORT]|fixtures [crate…]|parity [--area menus|effects|transitions] [--reference FILE] [--out FILE] [--min PERCENT]|ico OUT IN…|version [set X.Y.Z]|ci [--changed [--base REF]]|i18n-report|sweep [--days N] [--dev] [--dry-run]|live [--only a,b] [--google] [--picker] [--youtube] [--instagram [--instagram-publish]] [--voice V] [--clip F]|bench [args]|bench-playback [args]>"
                 .into(),
         ),
     };
