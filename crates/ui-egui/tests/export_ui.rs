@@ -609,3 +609,32 @@ fn captions_can_be_embedded_in_h26x_exports() {
     d.click("export.captions.mode");
     assert!(d.has("export.captions.mode.option.2") && !d.has("export.captions.mode.option.3"));
 }
+
+/// AutoCut: Quick Export names the file after the sequence as it is written: a Malayalam name
+/// keeps its vowel signs, virama and joiners (upstream's cleaner made them `_`), an English one its
+/// apostrophe; the file is written under that name. A hostile name is still one safe component.
+#[test]
+fn quick_export_keeps_malayalam_and_apostrophes_in_the_sequence_name() {
+    let names = [
+        ("എല്ലാ റോബോട്ടുകളും", "എല്ലാ റോബോട്ടുകളും"),
+        ("അവന്\u{200D} വന്നു", "അവന്\u{200D} വന്നു"),
+        ("Every Robot I've Met", "Every Robot I've Met"),
+        ("../../escape/CON", "_.._escape_CON"),
+    ];
+    for (k, (name, file)) in names.into_iter().enumerate() {
+        let mut d = Driver::new(&format!("quick-name-{k}"));
+        let seq = d.app().session.state.active_sequence.unwrap();
+        d.exec("clip.rename", json!({"item": seq.0, "name": name}));
+        d.exec("markers.markIn", json!({"seconds": 0.0}));
+        d.exec("markers.markOut", json!({"seconds": 0.2}));
+        d.click("header.quickExport");
+        d.ok("ui.set", json!({"export": {"quickPreset": "Waveform Audio 48 kHz 16-bit", "quickPath": format!("{}/", d.dir.display())}}));
+        d.frames(2);
+        let path = PathBuf::from(&d.app().ui.export.quick_path);
+        assert_eq!(path, d.dir.join(format!("{file}.wav")), "{name:?}");
+        d.click("quickExport.go");
+        d.wait_until("quick export", |d| d.app().session.jobs.iter().all(|j| j.progress.finished.load(std::sync::atomic::Ordering::Relaxed)));
+        assert!(path.exists(), "{name:?}: {}", d.app().ui.status);
+        let _ = std::fs::remove_dir_all(&d.dir);
+    }
+}

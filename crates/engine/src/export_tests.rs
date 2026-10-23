@@ -19,6 +19,78 @@ fn project_names_become_one_export_filename_component() {
     }
 }
 
+/// AutoCut: names in any script keep their letters and the marks and joiners that belong to them
+/// (Malayalam vowel signs, virama, chillu with ZWJ); an apostrophe stays; hostile names are still
+/// one safe component.
+#[test]
+fn export_names_keep_their_script_and_stay_one_safe_component() {
+    use crate::export_tools::{FILE_SAFE_MAX_BYTES, file_safe};
+    for kept in [
+        "എല്ലാ റോബോട്ടുകളും",
+        "അവന്\u{200D} വന്നു",
+        "ക്\u{200C}ക",
+        "Every Robot I've Met",
+        "Every Robot I’ve Met (v2)",
+        "हिन्दी नाम",
+        "Café crème",
+        "日本語の名前",
+        "2026-10-23 Final_cut",
+    ] {
+        assert_eq!(file_safe(kept), kept);
+    }
+    for (hostile, safe) in [
+        ("../../outside", "_.._outside"),
+        ("a/b\\c:d", "a_b_c_d"),
+        ("..", "Export"),
+        (".", "Export"),
+        (" .. ", "Export"),
+        ("", "Export"),
+        (".hidden", "hidden"),
+        ("trailing. . ", "trailing"),
+        ("bell\u{7}\ttab\nline\u{0}nul", "bell__tab_line_nul"),
+        ("<a>\"b\"|c?*", "_a__b__c__"),
+        ("right\u{202E}to-left", "right_to-left"),
+        // a mark or joiner with nothing to attach to
+        ("\u{0D4D}start", "_start"),
+        ("a \u{200D}b", "a _b"),
+        ("ab\u{200D}\u{200D}c", "ab\u{200D}_c"),
+        ("CON", "CON_"),
+        ("con.backup", "con_.backup"),
+        ("Lpt9 ", "Lpt9_"),
+        ("CONSOLE", "CONSOLE"),
+    ] {
+        assert_eq!(file_safe(hostile), safe, "{hostile:?}");
+    }
+    // long names are cut to a whole character within the limit
+    for long in ["a".repeat(10_000), "ല്ലാ".repeat(5_000)] {
+        let safe = file_safe(&long);
+        assert!(safe.len() <= FILE_SAFE_MAX_BYTES && safe.len() > FILE_SAFE_MAX_BYTES - 4, "{} bytes", safe.len());
+        assert!(long.starts_with(&safe));
+    }
+    let safe = file_safe(&format!("CON.{}", "x".repeat(400)));
+    assert!(safe.starts_with("CON_.x") && safe.len() == FILE_SAFE_MAX_BYTES, "{safe}");
+}
+
+/// The default export name (`file.exportMedia` to a folder) is the sequence's name as written.
+#[test]
+fn a_malayalam_sequence_name_is_the_default_export_name() {
+    let mut s = demo();
+    let dir = Scratch::new("malayalam-name");
+    let seq = s.state.active_sequence.unwrap();
+    for name in ["എല്ലാ റോബോട്ടുകളും", "Every Robot I've Met"] {
+        s.execute("clip.rename", json!({"item": seq.0, "name": name})).unwrap();
+        let r = s
+            .execute(
+                "file.exportMedia",
+                json!({"path": format!("{}/", dir.0.display()), "format": "wav", "range": "custom", "startSeconds": 0, "endSeconds": 0.2, "wait": true}),
+            )
+            .unwrap();
+        let path = PathBuf::from(r["path"].as_str().unwrap());
+        assert_eq!(path, dir.0.join(format!("{name}.wav")), "{r}");
+        assert!(path.exists());
+    }
+}
+
 #[test]
 fn hostile_export_ranges_are_rejected_without_panicking() {
     let mut session = demo();
