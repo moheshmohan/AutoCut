@@ -388,9 +388,58 @@ pub fn default_export_dir(s: &Session) -> PathBuf {
     crate::temp_dir()
 }
 
-fn file_safe(n: &str) -> String {
-    let s: String = n.chars().map(|c| if c.is_alphanumeric() || " -_().".contains(c) { c } else { '_' }).collect();
-    let s = s.trim().to_string();
+/// Longest [`file_safe`] name, in UTF-8 bytes: file systems allow 255 per name, and the extension,
+/// a `_2` suffix and AutoCut's sidecars (`.narration-check.json`, …) are added to it.
+pub const FILE_SAFE_MAX_BYTES: usize = 200;
+
+/// Names Windows reserves for devices, with any extension (`CON.mp4` too), in any case.
+const RESERVED_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7",
+    "LPT8", "LPT9",
+];
+
+/// Convert project-derived display text into exactly one safe output filename component.
+///
+/// Letters and digits of any script are kept, with the combining marks (Mn, Mc, Me) that follow
+/// them and a zero-width joiner or non-joiner after them (Malayalam vowel signs, virama, chillu
+/// and conjunct forms: "എല്ലാ റോബോട്ടുകളും" stays as it is), and space, `-`, `_`, `(`, `)`, `.` and
+/// the apostrophe (`'`, `’`: "Every Robot I've Met"), which every desktop file system allows.
+/// Anything else becomes `_`: separators (`/`, `\`, `:`), control and format characters
+/// (bidi overrides), a mark or joiner with no letter before it, and the characters Windows
+/// refuses (`<>"|?*`). Dots and spaces at either end are dropped (so no `.`/`..`, no hidden
+/// file, nothing Windows would strip), a Windows device name gets a `_`, the result is at most
+/// [`FILE_SAFE_MAX_BYTES`], and an empty one is `Export`.
+pub fn file_safe(n: &str) -> String {
+    use unicode_general_category::{GeneralCategory, get_general_category};
+    let is_mark = |c: char| matches!(get_general_category(c), GeneralCategory::NonspacingMark | GeneralCategory::SpacingMark | GeneralCategory::EnclosingMark);
+    let is_joiner = |c: char| matches!(c, '\u{200C}' | '\u{200D}');
+    let edge = |c: char| c == '.' || c.is_whitespace();
+    let mut out = String::new();
+    // the last character kept is a letter, digit or mark: a mark or joiner may follow it
+    let mut attached = false;
+    for c in n.trim_start_matches(edge).chars() {
+        // a joiner keeps its letter's word going but takes no mark after it
+        let (c, attaches) = if c.is_alphanumeric() || (attached && is_mark(c)) {
+            (c, true)
+        } else if (attached && is_joiner(c)) || " -_().'’".contains(c) {
+            (c, false)
+        } else {
+            ('_', false)
+        };
+        if out.len() + c.len_utf8() > FILE_SAFE_MAX_BYTES {
+            break;
+        }
+        out.push(c);
+        attached = attaches;
+    }
+    let mut s = out.trim_end_matches(edge).to_string();
+    let stem = s.split('.').next().unwrap_or_default().trim_end();
+    if RESERVED_NAMES.iter().any(|r| stem.eq_ignore_ascii_case(r)) {
+        s.insert(stem.len(), '_');
+        while s.len() > FILE_SAFE_MAX_BYTES {
+            s.pop();
+        }
+    }
     if s.is_empty() { "Export".into() } else { s }
 }
 

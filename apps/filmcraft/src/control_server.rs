@@ -4,17 +4,23 @@
 //! (an HTTP request line from a browser's cross-origin `fetch`, a stray `nc`, binary junk) gets
 //! one error reply and the connection is closed, so nothing after it is executed. Lines are
 //! bounded ([`MAX_LINE`]) and so is the number of open connections ([`MAX_CONNECTIONS`]); junk
-//! never reaches the UI thread. See `docs/control-protocol.md`.
+//! never reaches the UI thread. Every request must carry the session credential: the one in
+//! `FILMCRAFT_CONTROL_TOKEN`, or (AutoCut) without one, a fresh token written to an owner-only file
+//! for local clients ([`start`]). A request without it is refused before it is dispatched.
+//! See `docs/control-protocol.md`.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use filmcraft_automation::control_token;
 use filmcraft_ui_egui::ControlRequest;
 use serde_json::{Value, json};
+use subtle::ConstantTimeEq;
 
 /// Longest accepted request line (bytes, without the newline). Requests are small JSON objects;
 /// anything longer is refused and the connection closed.
@@ -22,8 +28,44 @@ pub const MAX_LINE: usize = 4 * 1024 * 1024;
 /// Connections served at once; further ones get an error line and are closed.
 pub const MAX_CONNECTIONS: usize = 16;
 
+/// Start the server on `port`. Its token is `FILMCRAFT_CONTROL_TOKEN` when that is set; otherwise
+/// (AutoCut) a fresh one is made for this run and written to the owner-only token file of the
+/// port ([`control_token::path`]), where the owner's local clients find it, so a launch with just
+/// `FILMCRAFT_CONTROL_PORT` needs no token step.
 pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+    if let Some(token) = control_token::from_env() {
+        return start_with_token(port, ctx, Some(token));
+    }
+    let token = match control_token::generate() {
+        Ok(token) => token,
+        Err(e) => {
+            eprintln!("filmcraft: control server disabled: no token: {e}");
+            return channel::<ControlRequest>().1;
+        }
+    };
+    let file = control_token::path(port);
+    if file.is_none() {
+        eprintln!("filmcraft: no folder for the control token (no home folder); clients need FILMCRAFT_CONTROL_TOKEN");
+    }
+    start_listener(port, ctx, Some(token), file)
+}
+
+fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> Receiver<ControlRequest> {
+    start_listener(port, ctx, token, None)
+}
+
+/// Bind `port` and serve it with `token`; then, when `publish` names a file, write the token there
+/// for local clients. The file is written only once the port is this app's, so a second app on a
+/// port in use never replaces the first one's token.
+fn start_listener(port: u16, ctx: egui::Context, token: Option<String>, publish: Option<PathBuf>) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
+    // An inherited environment variable shares the credential with the owner's bridge process
+    // without exposing it in command-line arguments or logs; a generated one goes to a file only
+    // the owner can read.
+    let Some(token) = token.filter(|t| control_token::is_valid(t)) else {
+        eprintln!("filmcraft: control server disabled: FILMCRAFT_CONTROL_TOKEN must contain 64 random hex characters (see docs/control-protocol.md)");
+        return rx;
+    };
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
@@ -31,12 +73,32 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
             return rx;
         }
     };
+    if let Some(file) = publish {
+        match control_token::publish(&file, &token) {
+            Ok(()) => {
+                eprintln!("filmcraft: control token for local clients in {}", file.display());
+                *PUBLISHED.lock().unwrap_or_else(PoisonError::into_inner) = Some((file, token.clone()));
+            }
+            Err(e) => eprintln!("filmcraft: could not write the control token to {} ({e}); clients need FILMCRAFT_CONTROL_TOKEN", file.display()),
+        }
+    }
     eprintln!("filmcraft: control server listening on 127.0.0.1:{port}");
-    std::thread::spawn(move || accept_loop(listener, tx, ctx));
+    std::thread::spawn(move || accept_loop(listener, tx, ctx, token));
     rx
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context) {
+/// The token file this run wrote, and its token.
+static PUBLISHED: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
+
+/// Remove the token file this run wrote, unless another app on the port has replaced it. Called
+/// when the app quits; after a crash the file stays, holding a token nothing accepts any more.
+pub fn withdraw_token() {
+    if let Some((file, token)) = PUBLISHED.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        control_token::withdraw(&file, &token);
+    }
+}
+
+fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: String) {
     let open = Arc::new(AtomicUsize::new(0));
     for mut stream in listener.incoming().flatten() {
         if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
@@ -46,12 +108,13 @@ fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Con
         }
         let tx = tx.clone();
         let ctx = ctx.clone();
+        let token = token.clone();
         // The slot is given back when the guard drops: after `serve` returns, if it panics, or if
         // the thread can't be started (the closure, and with it the guard, is dropped).
         let slot = Slot(Arc::clone(&open));
         let spawned = std::thread::Builder::new().name("control-conn".into()).spawn(move || {
             let _slot = slot;
-            serve(stream, &tx, &ctx);
+            serve(stream, &tx, &ctx, &token);
         });
         if let Err(e) = spawned {
             eprintln!("filmcraft: control server could not start a connection thread: {e}");
@@ -68,9 +131,9 @@ impl Drop for Slot {
     }
 }
 
-fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context) {
+fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context, token: &str) {
     let Ok(read) = stream.try_clone() else { return };
-    serve_lines(read, stream, |method, params| {
+    serve_lines(read, stream, token, |method, params| {
         let (req, rrx) = ControlRequest::new(method, params);
         tx.send(req).ok()?;
         ctx.request_repaint();
@@ -90,7 +153,7 @@ enum Line {
     Reject(String),
 }
 
-fn parse_line(bytes: &[u8]) -> Line {
+fn parse_line(bytes: &[u8], token: &str) -> Line {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return Line::Reject("not a control request (invalid UTF-8); closing the connection".into());
     };
@@ -108,6 +171,12 @@ fn parse_line(bytes: &[u8]) -> Line {
     let Some(method) = obj.get("method").and_then(Value::as_str) else {
         return Line::Reject("not a control request (missing string `method`); closing the connection".into());
     };
+    // Authenticate every request before constructing or enqueueing a ControlRequest. A valid
+    // earlier request must not authorize a later one with a missing or incorrect credential.
+    let authenticated = obj.get("token").and_then(Value::as_str).is_some_and(|supplied| bool::from(supplied.as_bytes().ct_eq(token.as_bytes())));
+    if !authenticated {
+        return Line::Reject("control authentication failed; closing the connection".into());
+    }
     Line::Request { id: obj.get("id").cloned().unwrap_or(Value::Null), method: method.to_string(), params: obj.get("params").cloned().unwrap_or(json!({})) }
 }
 
@@ -138,14 +207,14 @@ fn read_bounded_line(reader: &mut impl BufRead, buf: &mut Vec<u8>, max: usize) -
 /// Serve requests from `read`, answering on `out`, until the peer closes, sends something that is
 /// not a request, or `handle` returns `None` (app gone). `handle` gets `(method, params)` and
 /// returns the reply object (the request's `id` is added here).
-fn serve_lines<R: Read, W: Write>(read: R, mut out: W, mut handle: impl FnMut(String, Value) -> Option<Value>) {
+fn serve_lines<R: Read, W: Write>(read: R, mut out: W, token: &str, mut handle: impl FnMut(String, Value) -> Option<Value>) {
     let mut reader = BufReader::new(read);
     let mut buf = Vec::new();
     loop {
         let reject = match read_bounded_line(&mut reader, &mut buf, MAX_LINE) {
             Ok(false) => return,
             Err(e) => e,
-            Ok(true) => match parse_line(&buf) {
+            Ok(true) => match parse_line(&buf, token) {
                 Line::Blank => continue,
                 Line::Reject(e) => e,
                 Line::Request { id, method, params } => {
@@ -169,10 +238,12 @@ fn serve_lines<R: Read, W: Write>(read: R, mut out: W, mut handle: impl FnMut(St
 mod tests {
     use super::*;
 
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn run(input: &[u8]) -> (Vec<Value>, Vec<String>) {
         let mut out = Vec::new();
         let mut calls = Vec::new();
-        serve_lines(input, &mut out, |m, _p| {
+        serve_lines(input, &mut out, TOKEN, |m, _p| {
             calls.push(m);
             Some(json!({"ok": true, "result": null}))
         });
@@ -182,7 +253,10 @@ mod tests {
 
     #[test]
     fn requests_are_answered_in_order_with_ids() {
-        let (r, calls) = run(b"{\"id\":1,\"method\":\"a\"}\n\n{\"id\":2,\"method\":\"b\",\"params\":{}}\r\n{\"method\":\"c\"}");
+        let input = format!(
+            "{{\"token\":\"{TOKEN}\",\"id\":1,\"method\":\"a\"}}\n\n{{\"token\":\"{TOKEN}\",\"id\":2,\"method\":\"b\",\"params\":{{}}}}\r\n{{\"token\":\"{TOKEN}\",\"method\":\"c\"}}"
+        );
+        let (r, calls) = run(input.as_bytes());
         assert_eq!(calls, ["a", "b", "c"]);
         assert_eq!(r.len(), 3);
         assert_eq!(r[0]["id"], 1);
@@ -220,7 +294,8 @@ mod tests {
 
     #[test]
     fn a_request_before_junk_still_runs() {
-        let (r, calls) = run(b"{\"method\":\"a\"}\nGET / HTTP/1.1\n{\"method\":\"b\"}\n");
+        let input = format!("{{\"token\":\"{TOKEN}\",\"method\":\"a\"}}\nGET / HTTP/1.1\n{{\"token\":\"{TOKEN}\",\"method\":\"b\"}}\n");
+        let (r, calls) = run(input.as_bytes());
         assert_eq!(calls, ["a"]);
         assert_eq!(r.len(), 2);
         assert_eq!(r[1]["ok"], false);
@@ -256,11 +331,11 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (s, _) = listener.accept().unwrap();
             let read = s.try_clone().unwrap();
-            serve_lines(read, s, |_, _| Some(json!({"ok": true})));
+            serve_lines(read, s, TOKEN, |_, _| Some(json!({"ok": true})));
         });
         let mut c = TcpStream::connect(addr).unwrap();
         c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        c.write_all(b"{\"id\":7,\"method\":\"x\"}\nhello\n{\"method\":\"y\"}\n").unwrap();
+        c.write_all(format!("{{\"token\":\"{TOKEN}\",\"id\":7,\"method\":\"x\"}}\nhello\n{{\"token\":\"{TOKEN}\",\"method\":\"y\"}}\n").as_bytes()).unwrap();
         let mut text = String::new();
         c.read_to_string(&mut text).unwrap(); // returns at EOF: the server closed the connection
         server.join().unwrap();
@@ -275,7 +350,7 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, _rx) = channel::<ControlRequest>();
-        std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default()));
+        std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default(), TOKEN.into()));
         // Idle connections are accepted in order and held open.
         let held: Vec<TcpStream> = (0..16).map(|_| TcpStream::connect(addr).unwrap()).collect();
         let mut extra = TcpStream::connect(addr).unwrap();
@@ -284,5 +359,132 @@ mod tests {
         BufReader::new(&mut extra).read_line(&mut line).unwrap();
         assert!(line.contains("too many control connections"), "{line}");
         drop(held);
+    }
+
+    #[test]
+    fn missing_or_invalid_token_leaves_the_listener_closed() {
+        for token in [None, Some(String::new()), Some("a".repeat(63)), Some("a".repeat(65)), Some("z".repeat(64))] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            let rx = start_with_token(port, egui::Context::default(), token);
+            assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)));
+            let _still_available = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        }
+    }
+
+    #[test]
+    fn unauthenticated_save_as_closes_before_any_command_runs() {
+        for token in
+            [Value::Null, json!(false), json!(42), json!([]), json!({}), json!(""), json!("a".repeat(64)), json!(&TOKEN[..63]), json!(format!("{TOKEN}0"))]
+        {
+            let mut request = json!({"id": 1, "method": "engine.execute", "params": {"command": "file.saveAs", "params": {"path": "/owner/project.fcproj"}}});
+            if !token.is_null() {
+                request["token"] = token;
+            }
+            // A valid request after a rejected one must never execute, either.
+            let input = format!("{request}\n{}\n", json!({"token": TOKEN, "method": "ui.inspect"}));
+            let (replies, calls) = run(input.as_bytes());
+            assert!(calls.is_empty());
+            assert_eq!(replies, [json!({"ok": false, "error": "control authentication failed; closing the connection"})]);
+        }
+    }
+
+    #[test]
+    fn authentication_is_required_on_every_request() {
+        let input = format!(
+            "{}\n{}\n{}\n",
+            json!({"token": TOKEN, "method": "ui.inspect"}),
+            json!({"method": "app.quit"}),
+            json!({"token": TOKEN, "method": "app.quit"})
+        );
+        let (replies, calls) = run(input.as_bytes());
+        assert_eq!(calls, ["ui.inspect"]);
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[1]["ok"], false);
+    }
+
+    #[test]
+    fn tcp_authentication_happens_before_enqueueing() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = channel::<ControlRequest>();
+        let server = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            serve(s, &tx, &egui::Context::default(), TOKEN);
+        });
+        let mut c = TcpStream::connect(addr).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        c.write_all(b"{\"method\":\"engine.execute\",\"params\":{\"command\":\"file.saveAs\",\"params\":{\"path\":\"/owner/project.fcproj\"}}}\n").unwrap();
+        c.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut reply = String::new();
+        c.read_to_string(&mut reply).unwrap();
+        server.join().unwrap();
+        assert!(reply.contains("control authentication failed"));
+        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)));
+    }
+
+    #[test]
+    fn authenticated_tcp_request_reaches_the_ui_queue() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = channel::<ControlRequest>();
+        let server = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            serve(s, &tx, &egui::Context::default(), TOKEN);
+        });
+        let params = json!({"command": "file.saveAs", "params": {"path": "/owner/project.fcproj"}});
+        let mut c = TcpStream::connect(addr).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        writeln!(c, "{}", json!({"id": 7, "token": TOKEN, "method": "engine.execute", "params": params})).unwrap();
+        c.shutdown(std::net::Shutdown::Write).unwrap();
+        let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(request.method, "engine.execute");
+        assert_eq!(request.params, params);
+        request.reply.send(json!({"ok": true})).unwrap();
+        let mut reply = String::new();
+        c.read_to_string(&mut reply).unwrap();
+        server.join().unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&reply).unwrap(), json!({"id": 7, "ok": true}));
+    }
+
+    /// AutoCut: a token made for the run is written for local clients once the port is the app's;
+    /// a request with it is served and one without it is refused; a second app that cannot have
+    /// the port leaves the first one's token alone; quitting removes it.
+    #[test]
+    fn a_generated_token_is_published_once_the_port_is_ours() {
+        let dir = std::env::temp_dir().join(format!("fc-control-token-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let port = TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let file = dir.join(format!("{port}.token"));
+        let token = control_token::generate().unwrap();
+        let rx = start_listener(port, egui::Context::default(), Some(token.clone()), Some(file.clone()));
+        assert_eq!(control_token::read(&file).as_deref(), Some(token.as_str()));
+        let second = start_listener(port, egui::Context::default(), Some(control_token::generate().unwrap()), Some(file.clone()));
+        assert!(matches!(second.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)), "the port is taken");
+        assert_eq!(control_token::read(&file).as_deref(), Some(token.as_str()), "the first app's token stays");
+        // the app's side: answer whatever reaches the queue
+        let ui = std::thread::spawn(move || {
+            let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let method = request.method.clone();
+            request.reply.send(json!({"ok": true, "result": method})).unwrap();
+        });
+        let ask = |line: Value| {
+            let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            writeln!(c, "{line}").unwrap();
+            c.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut reply = String::new();
+            c.read_to_string(&mut reply).unwrap();
+            serde_json::from_str::<Value>(reply.trim()).unwrap()
+        };
+        let refused = ask(json!({"id": 1, "method": "ui.inspect"}));
+        assert_eq!(refused["error"], "control authentication failed; closing the connection");
+        let read = control_token::read(&file).unwrap();
+        assert_eq!(ask(json!({"id": 2, "token": read, "method": "ui.inspect"})), json!({"id": 2, "ok": true, "result": "ui.inspect"}));
+        ui.join().unwrap();
+        withdraw_token();
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

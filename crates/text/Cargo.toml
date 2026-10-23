@@ -23,3 +23,6 @@ unicode-linebreak = "0.1.5"
 unicode-segmentation = "1.13"
 # PNG decoding of colour bitmap glyphs (emoji in sbix / CBDT fonts) (MIT OR Apache-2.0).
 png = "0.18"
+
+[dev-dependencies]
+tempfile = "3.27"

@@ -730,15 +730,12 @@ fn clip(s: &str) -> String {
 // ---------------------------------------------------------------------------------------------
 // dates
 
-/// Days from 1970-01-01 to the civil date `y-m-d` (proleptic Gregorian).
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = i64::from((m + 9) % 12);
-    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+/// Days from 1970-01-01 to the civil date `y-m-d` (proleptic Gregorian, by chrono). A day past
+/// the month's last runs on into the next month (`02-31` is March 3rd or 2nd), as it always has.
+fn days_from_civil(y: i64, m: u32, d: u32) -> Option<i64> {
+    let first = chrono::NaiveDate::from_ymd_opt(i32::try_from(y).ok()?, m, 1)?;
+    let days = first.signed_duration_since(chrono::DateTime::UNIX_EPOCH.date_naive()).num_days();
+    Some(days + i64::from(d) - 1)
 }
 
 /// A UTC offset in seconds: `Z`, `UTC`, `+04:00`, `+0400`, `-5`.
@@ -795,7 +792,7 @@ fn date(s: &str, tz: i64) -> Option<i64> {
         Some(z) => offset(z)?,
         None => tz,
     };
-    Some(days_from_civil(y, m, dd) * 86_400 + hh * 3600 + mm * 60 + ss - tz)
+    Some(days_from_civil(y, m, dd)? * 86_400 + hh * 3600 + mm * 60 + ss - tz)
 }
 
 // ---------------------------------------------------------------------------------------------

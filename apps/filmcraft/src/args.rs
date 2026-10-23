@@ -9,7 +9,9 @@ Usage: filmcraft [options] [project.fcproj | media files...]
 
 Options:
   --control <port>   start the localhost JSON-lines control server
-                     (also: FILMCRAFT_CONTROL_PORT)
+                     (also: FILMCRAFT_CONTROL_PORT); every request needs its token:
+                     FILMCRAFT_CONTROL_TOKEN (64 hex characters) if set, else a fresh
+                     one written for local clients (see docs/control-protocol.md)
   --control-input-only  accept widget input only from the control server
                      (requires --control or FILMCRAFT_CONTROL_PORT)
   --demo             open the demo project

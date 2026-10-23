@@ -17,8 +17,22 @@ dimensions; the element type is the narrowest of u8/i8/u16/i16/i32 that holds ev
 import os
 import re
 import sys
+from pathlib import Path
 
-root = sys.argv[1]
+
+def _spec_dir(arg):
+    """Resolve the CLI argument and require it to be an existing directory."""
+    path = Path(arg).resolve()
+    if not path.is_dir():
+        sys.exit(f"not a directory: {arg}")
+    return path
+
+
+if len(sys.argv) != 2:
+    sys.exit("usage: extract_tables.py <av1-spec checkout>")
+# The argument is the operator's own spec checkout; _spec_dir requires it to be an existing
+# directory before anything is read from it.
+root = _spec_dir(sys.argv[1])  # NOSONAR
 files = sorted(f for f in os.listdir(root) if f.endswith(".md"))
 texts = {f: open(os.path.join(root, f), encoding="utf-8").read() for f in files}
 

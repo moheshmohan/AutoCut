@@ -16,6 +16,8 @@ filmcraft-oauth = { workspace = true }
 filmcraft-isobmff = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The quota day's Pacific dates (AGENTS.md: time goes through chrono).
+chrono = { workspace = true }
 thiserror = { workspace = true }
 # HTTPS to the YouTube Data API: pure-Rust TLS (rustls + RustCrypto), OS certificate
 # verification, the same stack as filmcraft-oauth and filmcraft-gphotos.

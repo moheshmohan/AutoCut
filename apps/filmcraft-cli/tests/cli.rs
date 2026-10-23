@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(args).output().expect("spawn filmcraft-cli")
@@ -428,6 +428,23 @@ fn showcase_qa_and_the_narration_cache() {
             .unwrap();
         assert_eq!(o.status.code(), Some(2), "{bad}: {}", String::from_utf8_lossy(&o.stderr));
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn run_waits_for_an_export_on_its_last_line() {
+    // #2342: `file.exportMedia` as the last line of a script is written before `run` exits
+    let dir = std::env::temp_dir().join(format!("fc-cli-run-x-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("last.wav");
+    // `"wait": null` waits too: only an explicit `false` doesn't
+    let script = json!({"id": "file.exportMedia", "params": {"path": out.to_str().unwrap(), "format": "wav", "wait": null}}).to_string();
+    let mut child =
+        Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(["--demo", "run", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(format!("{script}\n").as_bytes()).unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    assert!(std::fs::metadata(&out).map(|m| m.len() > 44).unwrap_or(false), "{}", String::from_utf8_lossy(&o.stdout));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -945,5 +962,58 @@ fn feedback_writes_a_redacted_bundle() {
             }
         }
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AutoCut: `--bridge` with no token in the environment sends the token the app wrote for its
+/// port (here a stand-in app that checks it, its token file in `FILMCRAFT_CONTROL_DIR`), for
+/// `exec` and for `call`; without the file the app's refusal says where the token is looked for.
+#[test]
+fn the_bridge_sends_the_token_the_app_wrote() {
+    use std::io::{BufRead, BufReader};
+    let dir = std::env::temp_dir().join(format!("fc-cli-token-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let token = "0123456789abcdef".repeat(4);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let expected = token.clone();
+    std::thread::spawn(move || {
+        for s in listener.incoming().flatten() {
+            let mut w = s.try_clone().unwrap();
+            for line in BufReader::new(s).lines().map_while(Result::ok) {
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let reply = if req["token"] == json!(expected) {
+                    json!({"id": req["id"], "ok": true, "result": {"method": req["method"], "command": req["params"]["command"]}})
+                } else {
+                    json!({"ok": false, "error": "control authentication failed; closing the connection"})
+                };
+                writeln!(w, "{reply}").unwrap();
+                if reply["ok"] == json!(false) {
+                    break;
+                }
+            }
+        }
+    });
+    let addr = format!("127.0.0.1:{port}");
+    let run = |args: &[&str], control_dir: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))
+            .args(["--compact", "--bridge", &addr])
+            .args(args)
+            .env_remove("FILMCRAFT_CONTROL_TOKEN")
+            .env("FILMCRAFT_CONTROL_DIR", control_dir)
+            .output()
+            .unwrap()
+    };
+    // no file yet: refused, and the error names the file
+    let o = run(&["call", "ui.inspect"], &dir);
+    assert_eq!(o.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("no control token") && err.contains(&format!("{port}.token")), "{err}");
+    std::fs::write(dir.join(format!("{port}.token")), format!("{token}\n")).unwrap();
+    assert_eq!(json_out(&run(&["call", "ui.elements", "prefix=tools."], &dir)), json!({"method": "ui.elements", "command": null}));
+    assert_eq!(json_out(&run(&["exec", "project.inspect"], &dir)), json!({"method": "engine.execute", "command": "project.inspect"}));
+    // `call` is for the running app only
+    assert_eq!(cli(&["call", "ui.inspect"]).status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&dir);
 }

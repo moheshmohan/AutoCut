@@ -61,8 +61,11 @@ filmcraft-voice = { workspace = true }
 filmcraft-scenes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# export_tools::file_safe keeps the combining marks of a name's letters (Apache-2.0).
+unicode-general-category = "1.1"
 thiserror = { workspace = true }
 log = { workspace = true }
+chrono = { workspace = true }
 craft-docpath = { workspace = true }
 web-time = "1"
 filmcraft-isobmff = { workspace = true }

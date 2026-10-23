@@ -5,21 +5,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
-use crate::AutomationError;
+use crate::{AutomationError, control_token};
 
 /// How often a blocking export's app job is polled.
 const JOB_POLL: Duration = Duration::from_millis(250);
 /// Idle connections kept for reuse; the app serves at most 16 at once.
 const MAX_IDLE: usize = 4;
+/// How the app's reply to a request without its token begins (`apps/filmcraft/src/control_server.rs`).
+const AUTH_FAILED: &str = "control authentication failed";
 
 type Conn = (BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf);
 
 pub struct BridgeClient {
     addr: String,
+    /// Inherited from the same owner-controlled environment as the desktop app.
+    token: Option<String>,
+    /// Without [`Self::token`], the owner-only file the app wrote its token to
+    /// ([`crate::control_token`]); read for each request, so a restarted app's new token is used.
+    token_file: Option<std::path::PathBuf>,
     /// Connections with no request in flight. A request takes one (or opens one) for its whole
     /// round trip and puts it back only once the reply is read, so a slow or abandoned request
     /// never holds up the others or leaves its late reply for the next one to read (#1538).
@@ -28,14 +35,48 @@ pub struct BridgeClient {
 }
 
 impl BridgeClient {
-    /// `addr` such as `127.0.0.1:9876` (loopback only).
+    /// `addr` such as `127.0.0.1:9876` (loopback only). The desktop app requires its token on
+    /// every request: `FILMCRAFT_CONTROL_TOKEN` from the environment, else the token the app
+    /// wrote for its port ([`crate::control_token::path`]).
     pub fn new(addr: impl Into<String>) -> Result<Self, AutomationError> {
         let addr = addr.into();
         let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
         if !matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
             return Err(AutomationError::BadRequest(format!("bridge address must be loopback, got `{addr}`")));
         }
-        Ok(Self { addr, idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) })
+        let token_file = control_token::port_of(&addr).and_then(control_token::path);
+        Ok(Self { addr, token: control_token::from_env(), token_file, idle: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) })
+    }
+
+    /// The token sent with each request: the environment's, else the one in the app's file.
+    async fn credential(&self) -> Option<String> {
+        if let Some(t) = &self.token {
+            return Some(t.clone());
+        }
+        let file = tokio::fs::File::open(self.token_file.as_ref()?).await.ok()?;
+        let mut text = String::new();
+        file.take(256).read_to_string(&mut text).await.ok()?;
+        control_token::parse(&text)
+    }
+
+    /// The app's refusal of a request's token, saying where the token came from and what to do.
+    fn refused(&self, sent: bool, error: &str) -> AutomationError {
+        let file = self.token_file.as_ref().map_or_else(|| "the app's token file".to_string(), |p| p.display().to_string());
+        let source = match (&self.token, sent) {
+            (Some(_), _) => format!("{} from the environment", control_token::ENV),
+            (None, true) => file,
+            (None, false) => {
+                return AutomationError::Bridge(format!(
+                    "{error}: no control token (no {} in the environment, none in {file}); start the app with `--control <port>` or FILMCRAFT_CONTROL_PORT, which writes it there",
+                    control_token::ENV
+                ));
+            }
+        };
+        AutomationError::Bridge(format!(
+            "{error}: the app at {} refused the token ({source}); restart the app, or unset a stale {}",
+            self.addr,
+            control_token::ENV
+        ))
     }
 
     /// Run engine command `id` in the app. A blocking export (`file.exportMedia` with
@@ -89,7 +130,8 @@ impl BridgeClient {
                 None => self.connect().await?,
             };
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let line = format!("{}\n", json!({"id": id, "method": method, "params": params}));
+            let token = self.credential().await;
+            let line = format!("{}\n", json!({"id": id, "token": token, "method": method, "params": params}));
             let res: Result<Value, AutomationError> = async {
                 conn.1.write_all(line.as_bytes()).await.map_err(|e| AutomationError::Bridge(e.to_string()))?;
                 let mut buf = String::new();
@@ -102,6 +144,11 @@ impl BridgeClient {
             .await;
             match res {
                 Ok(v) => {
+                    let error = v.get("error").and_then(Value::as_str).unwrap_or("error");
+                    // the app closes a connection whose token it refused: it is not kept
+                    if v.get("ok").and_then(Value::as_bool) != Some(true) && error.starts_with(AUTH_FAILED) {
+                        return Err(self.refused(token.is_some(), error));
+                    }
                     let mut idle = self.idle.lock().await;
                     if idle.len() < MAX_IDLE {
                         idle.push(conn);
@@ -110,7 +157,7 @@ impl BridgeClient {
                     return if v.get("ok").and_then(Value::as_bool) == Some(true) {
                         Ok(v.get("result").cloned().unwrap_or(Value::Null))
                     } else {
-                        Err(AutomationError::App(v.get("error").and_then(Value::as_str).unwrap_or("error").to_string()))
+                        Err(AutomationError::App(error.to_string()))
                     };
                 }
                 Err(_) if attempt == 0 => {}
@@ -296,5 +343,93 @@ mod tests {
         let seen = seen.lock().await;
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[1]["params"]["command"], "sequence.inspect");
+    }
+
+    #[tokio::test]
+    async fn credential_is_sent_on_every_request() {
+        let (addr, seen) = fake_app(Value::Null).await;
+        let mut b = BridgeClient::new(addr).unwrap();
+        // Inject directly to avoid mutating the process environment in parallel tests.
+        let token = "0123456789abcdef".repeat(4);
+        b.token = Some(token.clone());
+        b.call("ui.inspect", json!({})).await.unwrap();
+        b.execute("file.saveAs", json!({"path": "/owner/project.fcproj"})).await.unwrap();
+        let seen = seen.lock().await;
+        assert_eq!(seen.len(), 2);
+        assert!(seen.iter().all(|request| request["token"] == token));
+        assert_eq!(seen[1]["params"]["params"]["path"], "/owner/project.fcproj");
+    }
+
+    /// A stand-in for the app's control server with its token check: a request with `token`
+    /// is answered, any other gets the app's refusal and its connection is closed.
+    async fn guarded_app(token: Arc<std::sync::Mutex<String>>) -> (String, Arc<Mutex<Vec<Value>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                let (log, token) = (log.clone(), token.clone());
+                tokio::spawn(async move {
+                    let (r, mut w) = s.into_split();
+                    let mut lines = BufReader::new(r).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let req: Value = serde_json::from_str(&line).unwrap();
+                        log.lock().await.push(req.clone());
+                        let expected = token.lock().unwrap().clone();
+                        if req["token"].as_str() != Some(expected.as_str()) {
+                            let _ = w
+                                .write_all(format!("{}\n", json!({"ok": false, "error": "control authentication failed; closing the connection"})).as_bytes())
+                                .await;
+                            return;
+                        }
+                        let _ = w.write_all(format!("{}\n", json!({"id": req["id"], "ok": true, "result": req["method"]})).as_bytes()).await;
+                    }
+                });
+            }
+        });
+        (addr, seen)
+    }
+
+    /// Without a token in the environment the client sends the one the app wrote for its port, and
+    /// after the app restarts with a new token (and a new file) the new one.
+    #[tokio::test]
+    async fn the_token_comes_from_the_apps_file_and_follows_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("9877.token");
+        let first = control_token::generate().unwrap();
+        control_token::publish(&file, &first).unwrap();
+        let token = Arc::new(std::sync::Mutex::new(first.clone()));
+        let (addr, seen) = guarded_app(token.clone()).await;
+        let mut b = BridgeClient::new(addr).unwrap();
+        b.token = None;
+        b.token_file = Some(file.clone());
+        assert_eq!(b.call("ui.inspect", json!({})).await.unwrap(), json!("ui.inspect"));
+        let second = control_token::generate().unwrap();
+        *token.lock().unwrap() = second.clone();
+        control_token::publish(&file, &second).unwrap();
+        assert_eq!(b.call("ui.elements", json!({})).await.unwrap(), json!("ui.elements"));
+        let seen = seen.lock().await;
+        assert_eq!(seen[0]["token"], first);
+        assert_eq!(seen.last().unwrap()["token"], second);
+    }
+
+    /// No token anywhere: the app refuses the request, and the error says where the token is
+    /// looked for and how the app puts it there; a wrong one says it was refused.
+    #[tokio::test]
+    async fn a_missing_or_refused_token_says_what_to_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("9877.token");
+        let token = Arc::new(std::sync::Mutex::new(control_token::generate().unwrap()));
+        let (addr, seen) = guarded_app(token).await;
+        let mut b = BridgeClient::new(addr).unwrap();
+        b.token = None;
+        b.token_file = Some(file.clone());
+        let e = b.call("ui.inspect", json!({})).await.unwrap_err().to_string();
+        assert!(e.contains("control authentication failed") && e.contains("no control token") && e.contains(&file.display().to_string()), "{e}");
+        assert_eq!(seen.lock().await[0]["token"], Value::Null, "nothing to send");
+        control_token::publish(&file, &control_token::generate().unwrap()).unwrap();
+        let e = b.call("ui.inspect", json!({})).await.unwrap_err().to_string();
+        assert!(e.contains("refused the token"), "{e}");
     }
 }

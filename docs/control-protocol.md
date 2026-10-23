@@ -2,6 +2,47 @@
 
 ## Desktop control channel
 `filmcraft --control 9876` (or `FILMCRAFT_CONTROL_PORT`) listens on `127.0.0.1:<port>` (loopback only).
+Every request must carry the session's token, 64 random hex characters; missing or incorrect
+credentials get an error and close the connection before any request is dispatched. Loopback alone
+does not restrict clients to the desktop owner's OS account; the token does. It comes from one of two
+places:
+
+- **No setup (AutoCut).** Without `FILMCRAFT_CONTROL_TOKEN`, the app makes a fresh token each time
+  its control server starts and, once the port is its own, writes it to `<port>.token` in the
+  per-user FilmCraft folder's `control/` (macOS `~/Library/Application Support/FilmCraft/control/`,
+  Windows `%APPDATA%\FilmCraft\control\`, elsewhere `$XDG_DATA_HOME/filmcraft/control/` or
+  `~/.local/share/filmcraft/control/`; `FILMCRAFT_CONTROL_DIR` overrides the folder). Only its owner
+  can read the file (0600 in a 0700 folder on Unix); it is replaced at every launch and removed when
+  the app quits. The CLI and MCP bridge read it for the port they are given, at each request, so a
+  restarted app's new token is picked up:
+
+  ```sh
+  open -n --env FILMCRAFT_CONTROL_PORT=9876 AutoCut.app     # or: filmcraft --control 9876 &
+  filmcraft-cli --bridge 127.0.0.1:9876 exec project.inspect
+  filmcraft-cli --bridge 127.0.0.1:9876 call ui.screenshot path=/tmp/app.png   # any method below
+  filmcraft-cli mcp --bridge 127.0.0.1:9876
+  ```
+
+- **A token you choose.** With `FILMCRAFT_CONTROL_TOKEN` set (64 hex characters) the app uses it
+  and writes no file; clients started from the same environment send it. Without a valid value the
+  desktop leaves the listener closed. Keep it private: don't put the value in command-line
+  arguments, logs, checked-in MCP configuration, or shared files.
+
+  ```sh
+  export FILMCRAFT_CONTROL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  filmcraft --control 9876 &
+  filmcraft-cli mcp --bridge 127.0.0.1:9876
+  ```
+
+A client takes `FILMCRAFT_CONTROL_TOKEN` when it is set, else the file (`filmcraft_automation::control_token`).
+Every raw JSON request includes the token as a top-level `token` string; a script reads it the same
+way (Python):
+
+```python
+import os, pathlib
+token = os.environ.get("FILMCRAFT_CONTROL_TOKEN") or (pathlib.Path.home() / "Library/Application Support/FilmCraft/control/9876.token").read_text().strip()
+```
+
 One JSON request per line → one JSON reply per line. The app opts out of macOS App Nap
 (`apps/filmcraft/src/app_nap.rs`): a hidden window would otherwise drop the whole process to
 background priority, and on a busy machine it would stop answering.
@@ -13,11 +54,11 @@ nothing sent after it on that connection runs. That covers text that isn't JSON,
 an object without `method`, invalid UTF-8, and a line longer than 4 MiB. An HTTP request (for example a
 web page's cross-origin `fetch` to `127.0.0.1:<port>`) therefore can't smuggle a command in its body:
 its request line is rejected first. At most 16 connections are served at once; further ones get an error
-line and are closed. Clients that get an error reply should reconnect. The port has no authentication,
-so only enable it while you use it. Transport: `apps/filmcraft/src/control_server.rs`.
+line and are closed. Clients that get an error reply should reconnect. Transport:
+`apps/filmcraft/src/control_server.rs`.
 
 ```json
-{"id": 1, "method": "engine.execute", "params": {"command": "sequence.addEdit", "params": {"seconds": 3}}}
+{"id": 1, "token": "<FILMCRAFT_CONTROL_TOKEN>", "method": "engine.execute", "params": {"command": "sequence.addEdit", "params": {"seconds": 3}}}
 {"id": 1, "ok": true, "result": {"cuts": 2}}
 ```
 

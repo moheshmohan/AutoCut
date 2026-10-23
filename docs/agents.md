@@ -27,6 +27,10 @@ cargo build --release -p filmcraft-cli -p filmcraft
 claude                                           # approve the project MCP servers when asked
 ```
 
+The app writes its control token for the port to an owner-only file that the bridge reads, so
+there is no token to pass around; to choose one yourself, export `FILMCRAFT_CONTROL_TOKEN` for both
+([control-protocol.md](control-protocol.md)).
+
 To register the server by hand, or for another MCP client, use the absolute binary path:
 
 ```sh
@@ -184,29 +188,34 @@ progress and stop it:
 ## 2. Control channel
 
 `filmcraft --control 9876` (or `FILMCRAFT_CONTROL_PORT=9876`) listens on `127.0.0.1` only. Send one
-JSON request per line and get one JSON reply per line. Full method table:
-[control-protocol.md](control-protocol.md).
+JSON request per line and get one JSON reply per line. Every request carries the app's token as
+`token` (replace the placeholders below): `FILMCRAFT_CONTROL_TOKEN` when you set one, else the one
+the app wrote to `control/<port>.token` in the per-user FilmCraft folder. The CLI and MCP bridge
+send it for you (`filmcraft-cli --bridge 127.0.0.1:9876 call <method> key=value…` reaches any
+method without a script). Full setup and method table: [control-protocol.md](control-protocol.md).
 
 ```jsonc
-{"id":1,"method":"engine.commands"}
-{"id":2,"method":"engine.execute","params":{"command":"file.openDemoProject"}}
-{"id":3,"method":"engine.execute","params":{"command":"playhead.set","params":{"seconds":2}}}
-{"id":4,"method":"engine.execute","params":{"command":"sequence.addEdit"}}
-{"id":5,"method":"engine.execute","params":{"command":"effects.apply","params":{"effect":"Gaussian Blur"}}}
-{"id":6,"method":"ui.elements","params":{"prefix":"tools."}}
-{"id":7,"method":"ui.click","params":{"id":"tools.Razor"}}
-{"id":8,"method":"ui.key","params":{"key":"Cmd+Z"}}
-{"id":9,"method":"ui.screenshot","params":{"path":"/tmp/timeline.png","panel":"Timeline"}}
+{"id":1,"token":"<FILMCRAFT_CONTROL_TOKEN>","method":"engine.commands"}
+{"id":2,"token":"<FILMCRAFT_CONTROL_TOKEN>","method":"engine.execute","params":{"command":"file.openDemoProject"}}
+{"id":3,"token":"<FILMCRAFT_CONTROL_TOKEN>","method":"engine.execute","params":{"command":"playhead.set","params":{"seconds":2}}}
+{"id":4,"token":"<FILMCRAFT_CONTROL_TOKEN>","method":"engine.execute","params":{"command":"sequence.addEdit"}}
+{"id":5,"token":"<FILMCRAFT_CONTROL_TOKEN>","method":"engine.execute","params":{"command":"effects.apply","params":{"effect":"Gaussian Blur"}}}
+{"id":6,"token":"<FILMCRAFT_CONTROL_TOKEN>","method":"ui.elements","params":{"prefix":"tools."}}
+{"id":7,"token":"<FILMCRAFT_CONTROL_TOKEN>","method":"ui.click","params":{"id":"tools.Razor"}}
+{"id":8,"token":"<FILMCRAFT_CONTROL_TOKEN>","method":"ui.key","params":{"key":"Cmd+Z"}}
+{"id":9,"token":"<FILMCRAFT_CONTROL_TOKEN>","method":"ui.screenshot","params":{"path":"/tmp/timeline.png","panel":"Timeline"}}
 ```
 
 Replies look like `{"id":4,"ok":true,"result":{"cuts":2}}` or `{"id":7,"ok":false,"error":"…"}`.
 Minimal client:
 
 ```python
-import json, socket
+import json, os, pathlib, socket
+# the token you set, else the app's file (macOS path shown; see control-protocol.md for the others)
+token = os.environ.get("FILMCRAFT_CONTROL_TOKEN") or (pathlib.Path.home() / "Library/Application Support/FilmCraft/control/9876.token").read_text().strip()
 s = socket.create_connection(("127.0.0.1", 9876)); f = s.makefile("rw")
 def call(method, **params):
-    f.write(json.dumps({"id": 1, "method": method, "params": params}) + "\n"); f.flush()
+    f.write(json.dumps({"id": 1, "token": token, "method": method, "params": params}) + "\n"); f.flush()
     return json.loads(f.readline())
 print(call("engine.execute", command="sequence.inspect"))
 ```
