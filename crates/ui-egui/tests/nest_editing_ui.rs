@@ -17,11 +17,15 @@ struct Driver {
 
 impl Driver {
     fn new() -> Self {
+        Self::with_height(980.0)
+    }
+
+    fn with_height(height: f32) -> Self {
         let mut s = Session::default();
         s.execute("file.openDemoProject", json!({})).unwrap();
         let (tx, rx) = channel();
         let app = FilmcraftApp::new(s).with_control(rx);
-        let harness = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000).build_eframe(move |_cc| app);
+        let harness = Harness::builder().with_size(egui::vec2(1600.0, height)).with_max_steps(10_000).build_eframe(move |_cc| app);
         let mut d = Driver { harness, tx };
         d.frames(4);
         d
@@ -72,6 +76,32 @@ impl Driver {
 
     fn app(&mut self) -> &mut FilmcraftApp {
         self.harness.state_mut()
+    }
+
+    /// [x, y, width, height]
+    fn rect(&mut self, id: &str) -> [f64; 4] {
+        let v = self.ok("ui.elements", json!({"prefix": id}));
+        let e = v.as_array().unwrap().iter().find(|e| e["id"] == json!(id)).unwrap_or_else(|| panic!("no element {id}"));
+        let r: Vec<f64> = e["rect"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+        [r[0], r[1], r[2], r[3]]
+    }
+
+    /// With `FILMCRAFT_UI_SNAPSHOT_DIR=<dir>`, render the window offscreen (wgpu) to `<dir>/<name>.png`
+    /// to look at; without it no GPU is needed.
+    fn snapshot(&mut self, name: &str) {
+        let Some(dir) = std::env::var_os("FILMCRAFT_UI_SNAPSHOT_DIR").map(std::path::PathBuf::from) else { return };
+        self.frames(2);
+        let img = match self.harness.render() {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("snapshot {name} skipped: {e}");
+                return;
+            }
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.png"));
+        img.save(&path).unwrap();
+        eprintln!("snapshot: {}", path.display());
     }
 }
 
@@ -152,6 +182,29 @@ fn the_clip_menu_fits_the_window_and_offers_speed_ramp_and_stabilize() {
         assert!(top >= 0.0 && bottom <= 980.0, "{} is off the window: {r}", e["id"]);
     }
     assert!(d.has("timeline.clipMenu.clip.stabilize"));
+    d.snapshot("clip-menu-980");
     d.click("timeline.clipMenu.clip.speedRamp");
     assert!(d.has("speedRamp.preset.montage"), "the Speed Ramp dialog");
+}
+
+/// #2852 with AutoCut's entries: on a screen shorter than the menu it scrolls (in the menu bar's
+/// style), and its last entry, Template Slot, can be scrolled into view.
+#[test]
+fn the_clip_menu_scrolls_to_template_slot_on_a_short_screen() {
+    let height = 600.0;
+    let mut d = Driver::with_height(height as f32);
+    let clip = d.app().session.active_sequence().unwrap().video_tracks[0].items[0].id.0;
+    d.ok("ui.click", json!({"id": format!("timeline.clip.{clip}"), "button": "right"}));
+    d.frames(3);
+    let first = d.rect("timeline.clipMenu.edit.cut");
+    assert!(first[1] >= 0.0, "the menu starts on the screen: {first:?}");
+    let last = "timeline.clipMenu.template.markSlot";
+    assert!(d.rect(last)[1] > height, "the menu is taller than the screen");
+    d.snapshot("clip-menu-600-top");
+    d.ok("ui.scroll", json!({"id": "timeline.clipMenu.edit.cut", "dy": -2000.0}));
+    d.frames(10);
+    let r = d.rect(last);
+    assert!(r[1] >= 0.0 && r[1] + r[3] <= height, "Template Slot scrolled into view: {r:?}");
+    assert!(d.has("timeline.clipMenu.clip.speedRamp") && d.has("timeline.clipMenu.clip.stabilize"));
+    d.snapshot("clip-menu-600-bottom");
 }
