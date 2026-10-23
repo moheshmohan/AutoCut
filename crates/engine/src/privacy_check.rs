@@ -2,15 +2,27 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `sequence.checkPrivacy` | renders the active sequence at each of `seconds` (as it exports: effects, masks, titles), runs the face detector on each frame, and says which faces no redaction mask hides: each followed across the frames it is seen in, with when, where (shares of the frame), the clip under it and where in that clip, whether it is on the subject (inside one of the clip's `exclude` boxes, at any moment), and — with `verify` and the host's vision model — whether it is a person |
+//! | `sequence.checkPrivacy` | renders the active sequence at each of `seconds` (as it exports: effects, masks, titles), runs the face detector on each frame, and says which faces no redaction mask hides: each followed across the frames it is seen in, with when, where (shares of the frame), the clip under it and where in that clip, how much blur covers it there (`blur`), whether it is on the subject (inside one of the clip's `exclude` boxes, at any moment), whether it is an unsure head seen in one frame alone (`brief`: not shown), and — with `verify` and the host's vision model — whether it is a person |
 //!
 //! It checks what [`crate::redact`] made, on the picture as a viewer sees it: a face the
 //! redaction never found, a mask that does not cover the face it was made for, a face left sharp
 //! for the robot's (the bug of 2026-10-21: visitors next to Ameca were left sharp because they
 //! stood inside the robot's box). A face the frame shows is *masked* when the top-most media clip
-//! there has an automatic redaction mask (`Redact …`) over that point at that moment — its
-//! centre, or for a face cut by the frame whose centre lies outside the picture, the visible point
-//! of its box nearest the centre (`visible_centre`).
+//! there has an automatic redaction blur (`Redact …` masks) over it at that moment, as the mask
+//! is drawn — its path, soft edge and expansion: covered at least [`HIDDEN`] (`blur_at`) — at
+//! its centre (for a face cut by the frame whose centre lies outside the picture, the visible
+//! point of its box nearest the centre, `visible_centre`), or at every one of its features (eyes,
+//! nose and mouth corners; a head found from a pose: its nose and eyes), two at least: a face is
+//! who it is by those (`hidden_by`; 2026-10-23, a head in profile whose face was blurred,
+//! flagged for the back of its head beside the blur).
+//!
+//! **Seen once.** An unsure head found from a pose (under
+//! `filmcraft_vision::track::UNSURE_POSE`) that the check sees in one of its frames alone is
+//! looked for again a tenth, two and three tenths of a second before and after (`persists`):
+//! unmasked and linked to it as the redaction links its sightings, it is shown; else it is
+//! `brief` — the pose network's guess at a blur, a hand or a scarf, which the redaction (it hides
+//! a face it saw twice) leaves too — reported, not shown and not asked about (2026-10-23: OnRobot
+//! at 87 s, QA's only error there).
 //!
 //! A face may stay sharp (`allowed`) only when the vision model says it is not a person, twice
 //! (the grid of crops, then alone and outlined: [`crate::redact::VisionJudge::confirm`]), and it
@@ -33,7 +45,7 @@
 use filmcraft_geom::Vec2;
 use filmcraft_project::{ClipId, ItemId, ItemKind, Sequence, TrackItem};
 use filmcraft_time::Tick;
-use filmcraft_vision::track::{Exclude, Frame, LinkParams, Track};
+use filmcraft_vision::track::{Exclude, Frame, LinkParams, Track, UNSURE_POSE};
 use filmcraft_vision::{Detection, Kind};
 use serde_json::{Value, json};
 
@@ -71,8 +83,10 @@ struct Under {
     media: f64,
     /// The face's centre in the clip's picture (shares).
     at: [f64; 2],
-    /// An automatic redaction mask of the clip covers it.
+    /// The clip's automatic redaction hides it ([`hidden_by`]).
     masked: bool,
+    /// How much the blur covers its point, 0..1 ([`blur_at`]).
+    blur: f64,
 }
 
 /// One face seen in one frame.
@@ -124,26 +138,52 @@ pub(crate) fn face_detector(s: &mut Session, cmd: &str, profiles: Option<bool>) 
     Ok(d)
 }
 
-/// Whether point `p` (clip pixels) is inside mask path `poly` (flattened), by the even-odd rule.
-fn inside(poly: &[Vec2], p: Vec2) -> bool {
-    let mut odd = false;
-    let n = poly.len();
-    for i in 0..n {
-        let (Some(a), Some(b)) = (poly.get(i), poly.get((i + n - 1) % n)) else { continue };
-        if (a.y > p.y) != (b.y > p.y) {
-            let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
-            if p.x < x {
-                odd = !odd;
-            }
+/// A point of a face is hidden when the automatic redaction's blur covers it at least this much
+/// ([`blur_at`]): inside the drawn mask's half-way line, where the blurred picture is mixed in
+/// at half or more (a mask's padded shape is wholly covered; its soft edge falls off beyond).
+pub const HIDDEN: f64 = 0.5;
+
+/// How much the automatic redaction's blur covers clip pixel `p` of `it` at media time `mt`,
+/// 0..1: each redaction effect's masks as the renderer draws them (their path, feather,
+/// expansion, opacity and modes: `filmcraft_render::mask`), the effects over each other. The
+/// check used to test the mask's path alone, a point just past it counting as sharp although
+/// the blur's soft edge covered it (2026-10-23: a blurred head, its box a little lower than its
+/// mask, flagged).
+fn blur_at(it: &TrackItem, mt: Tick, p: Vec2) -> f64 {
+    if !(p.x.is_finite() && p.y.is_finite()) {
+        return 0.0;
+    }
+    let mut sharp = 1.0f64;
+    for e in it.effects.iter().filter(|e| e.enabled && crate::redact::is_auto_redaction(e)) {
+        let flat = filmcraft_render::mask::prepare(&e.masks, mt, 1.0);
+        if let Some(c) = filmcraft_render::mask::coverage_at(&flat, p.x as f32, p.y as f32).filter(|c| c.is_finite()) {
+            sharp *= 1.0 - f64::from(c).clamp(0.0, 1.0);
         }
     }
-    odd
+    (1.0 - sharp).clamp(0.0, 1.0)
 }
 
-/// The top-most media clip of `q` at `t` whose picture is at sequence pixel `c`, and where. In a
-/// transition both its clips are drawn: a face hidden in either (the outgoing clip's visitor
-/// seen through a whip into the next shot) counts as masked.
-fn under(s: &Session, q: &Sequence, t: Tick, c: Vec2) -> Option<Under> {
+/// Whether a face is hidden by the blur of a clip: its point `c` (clip pixels) covered at least
+/// [`HIDDEN`], or every one of its features that the clip shows (`features`, clip pixels: a face
+/// detector's eyes, nose and mouth corners, or the nose and eyes of a head found from a pose),
+/// two at least. A face is who it is by its eyes, nose and mouth: a head in profile whose face is
+/// under the blur and the back of its head beside it is hidden, though the middle of its box (between the
+/// ear and the nose) is not (2026-10-23, IMG_9625 in the Quick Short: the face detector's face,
+/// the front of a turned head, masked; the head found from the pose on the blurred frame flagged).
+fn hidden_by(it: &TrackItem, mt: Tick, c: Vec2, features: &[Vec2]) -> (bool, f64) {
+    let at = blur_at(it, mt, c);
+    if at >= HIDDEN {
+        return (true, at);
+    }
+    let all = features.len() >= 2 && features.iter().all(|f| blur_at(it, mt, *f) >= HIDDEN);
+    (all, at)
+}
+
+/// The top-most media clip of `q` at `t` whose picture is at sequence pixel `c`, and where; its
+/// face is masked when the clip's automatic redaction hides it there ([`hidden_by`], the face's
+/// `features` in sequence pixels). In a transition both its clips are drawn: a face hidden in
+/// either (the outgoing clip's visitor seen through a whip into the next shot) counts as masked.
+fn under(s: &Session, q: &Sequence, t: Tick, c: Vec2, features: &[Vec2]) -> Option<Under> {
     let mut found: Option<Under> = None;
     for track in q.video_tracks.iter().rev().filter(|tr| tr.enabled) {
         let mut ids: Vec<ClipId> = track.items.iter().filter(|it| it.enabled && it.start <= t && t < it.end()).map(|it| it.id).collect();
@@ -165,12 +205,14 @@ fn under(s: &Session, q: &Sequence, t: Tick, c: Vec2) -> Option<Under> {
             if !(sp.x.is_finite() && sp.y.is_finite() && (0.0..w).contains(&sp.x) && (0.0..h).contains(&sp.y)) {
                 continue;
             }
-            let masked = it
-                .effects
+            // the face's features this clip shows, in its pixels
+            let shown: Vec<Vec2> = features
                 .iter()
-                .filter(|e| e.enabled && crate::redact::is_auto_redaction(e))
-                .any(|e| e.masks.iter().any(|mk| mk.opacity.f64_at(mt) > 50.0 && inside(&mk.path_at(mt).flatten(1.0), sp) != mk.inverted));
-            let u = Under { clip: it.id, item: it.item, name: it.name.clone(), media: mt.seconds(), at: [sp.x / w, sp.y / h], masked };
+                .map(|f| inv.apply(*f))
+                .filter(|f| f.x.is_finite() && f.y.is_finite() && (0.0..w).contains(&f.x) && (0.0..h).contains(&f.y))
+                .collect();
+            let (masked, blur) = hidden_by(it, mt, sp, &shown);
+            let u = Under { clip: it.id, item: it.item, name: it.name.clone(), media: mt.seconds(), at: [sp.x / w, sp.y / h], masked, blur };
             if masked {
                 return Some(u);
             }
@@ -219,6 +261,72 @@ fn frame(s: &Session, seq: ItemId, scale: f32, t: f64) -> Option<(Vec<u8>, usize
     (img.w > 0 && img.h > 0).then(|| (img.over_black_rgba8(), img.w, img.h))
 }
 
+/// The faces the detector finds in a frame (RGBA, `w` × `h`): the face detector's scoring at
+/// least `score`, and the heads found from poses (they have passed their own thresholds).
+fn faces_in(det: &DetectFn, rgba: &[u8], w: usize, h: usize, score: f32) -> Vec<Detection> {
+    det(rgba, w, h, w.max(h))
+        .into_iter()
+        .filter(|d| d.kind == Kind::Face && (d.pose || d.score >= score) && d.bbox.iter().all(|v| v.is_finite()))
+        .take(MAX_FACES)
+        .collect()
+}
+
+/// The features of face `d` (its landmarks, normalised) in sequence pixels (`sw` × `sh`), those
+/// inside the frame.
+fn features(d: &Detection, sw: f64, sh: f64) -> Vec<Vec2> {
+    d.points
+        .iter()
+        .map(|p| Vec2::new(f64::from(p[0]) * sw, f64::from(p[1]) * sh))
+        .filter(|p| p.x.is_finite() && p.y.is_finite() && (0.0..sw).contains(&p.x) && (0.0..sh).contains(&p.y))
+        .collect()
+}
+
+/// The step, seconds, of the frames looked at again around a head found from a pose seen once
+/// ([`persists`]: the redaction's analysis step), and how many steps each way (within the reach
+/// the redaction links sightings over, `filmcraft_vision::track::LinkParams::max_gap`).
+const AGAIN_STEP: f64 = 0.1;
+const AGAIN_STEPS: usize = 3;
+
+/// Whether head `x`, found from a pose and seen once, is seen again unmasked in the same clip:
+/// the frames [`AGAIN_STEP`] apart before and after it, out to [`AGAIN_STEPS`] steps each way
+/// (nearest first), rendered and looked at as `x`'s was, their unmasked faces linked with it as
+/// the redaction links its sightings (`LinkParams::default()`), until its track has the
+/// sightings the redaction hides a face on (`KeepParams::min_hits`; a head from a pose is never
+/// sure enough for one). The redaction leaves a head it saw once, and the check agrees with it:
+/// an unsure head seen in one frame alone is the pose network's guess at the blur (2026-10-23,
+/// OnRobot at 87 s: a head of 0.37 on a blurred face and a dark scarf, QA's only error there),
+/// not a face shown.
+fn persists(s: &Session, seq: ItemId, q: &Sequence, scale: f32, det: &DetectFn, x: &Seen, score: f32, (sw, sh): (f64, f64)) -> bool {
+    let Some(clip) = x.under.as_ref().map(|u| u.clip) else { return true };
+    let end = q.duration().seconds();
+    let keep = filmcraft_vision::track::KeepParams::default();
+    let mut frames: Vec<Frame> = vec![Frame { t: x.t, detections: vec![x.det.clone()] }];
+    for k in 1..=AGAIN_STEPS {
+        for dir in [-1.0, 1.0] {
+            let t = x.t + dir * k as f64 * AGAIN_STEP;
+            let at = Tick::from_seconds_f64(t);
+            // the same clip there (not the next shot)
+            if !(t >= 0.0 && t < end) || under(s, q, at, visible_centre(&x.det.bbox, sw, sh), &[]).is_none_or(|u| u.clip != clip) {
+                continue;
+            }
+            let Some((rgba, w, h)) = frame(s, seq, scale, t) else { continue };
+            let unmasked: Vec<Detection> = faces_in(det, &rgba, w, h, score)
+                .into_iter()
+                .filter(|d| under(s, q, at, visible_centre(&d.bbox, sw, sh), &features(d, sw, sh)).is_some_and(|u| u.clip == clip && !u.masked))
+                .collect();
+            frames.push(Frame { t, detections: unmasked });
+        }
+        frames.sort_by(|a, b| a.t.total_cmp(&b.t));
+        // `x` is the only sighting at its moment: its track is the one seen then
+        let tracks = filmcraft_vision::track::link(&frames, &LinkParams::default());
+        let mine = tracks.iter().find(|tr| tr.points.iter().any(|p| p.seen && (p.t - x.t).abs() < 1e-9));
+        if mine.is_some_and(|tr| tr.hits >= keep.min_hits.max(2) || tr.best_score >= keep.sure_score) {
+            return true;
+        }
+    }
+    false
+}
+
 /// An unmasked face followed across the frames it is seen in, and what the check made of it.
 struct Unmasked {
     track: Track,
@@ -226,6 +334,8 @@ struct Unmasked {
     subject: bool,
     person: Option<bool>,
     checked: bool,
+    /// An unsure head found from a pose seen in one frame alone ([`persists`]): not shown.
+    brief: bool,
 }
 
 fn check(s: &mut Session, p: &Value) -> Result<Value> {
@@ -262,19 +372,13 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
             continue;
         };
         rendered += 1;
-        let faces: Vec<Detection> = det(&rgba, w, h, w.max(h))
-            .into_iter()
-            // a head found from a pose has passed its own thresholds
-            .filter(|d| d.kind == Kind::Face && (d.pose || d.score >= score) && d.bbox.iter().all(|v| v.is_finite()))
-            .take(MAX_FACES)
-            .collect();
-        for d in faces {
+        for d in faces_in(&det, &rgba, w, h, score) {
             if f64::from(d.bbox[3]) < min_h {
                 small += 1;
                 continue;
             }
             let c = visible_centre(&d.bbox, sw, sh);
-            let u = under(s, &q, Tick::from_seconds_f64(t), c);
+            let u = under(s, &q, Tick::from_seconds_f64(t), c, &features(&d, sw, sh));
             if u.as_ref().is_some_and(|u| u.masked) {
                 masked += 1;
                 continue;
@@ -328,10 +432,14 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
                 .iter()
                 .filter(|p| p.seen)
                 .any(|p| mine.iter().any(|x| (x.t - p.t).abs() < 1e-9 && x.subject && (f64::from(x.det.bbox[0]) - p.bbox[0]).abs() < 1e-3));
-            found.push(Unmasked { track, best, subject: on_subject, person: None, checked: false });
+            found.push(Unmasked { track, best, subject: on_subject, person: None, checked: false, brief: false });
         }
     }
     found.sort_by(|a, b| a.track.start().total_cmp(&b.track.start()));
+    // an unsure head found from a pose and seen once: shown only if it is seen again
+    for f in found.iter_mut().filter(|f| f.track.hits < 2 && f.track.pose_hits == f.track.hits && f.track.best_score < UNSURE_POSE) {
+        f.brief = !persists(s, seq, &q, scale, &det, &f.best, score, (sw, sh));
+    }
     // what the vision model makes of them
     let judge = if verify { s.redacts.judge.clone() } else { None };
     let verified = match &judge {
@@ -345,6 +453,7 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
         .map(|f| {
             let b = &f.best.det.bbox;
             let allowed = f.person == Some(false) && (f.subject || f.track.best_score < sure);
+            let blur = f.best.under.as_ref().map_or(0.0, |u| u.blur);
             let verdict = match (f.checked, f.person) {
                 (false, _) => "unchecked",
                 (true, Some(true)) => "person",
@@ -375,6 +484,10 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
                 "person": f.person,
                 "verdict": verdict,
                 "allowed": allowed,
+                // an unsure head from a pose seen in one frame alone: not shown (`persists`)
+                "brief": f.brief,
+                // how much the blur covers its point there (under HIDDEN: not hidden)
+                "blur": r(blur),
             })
         })
         .collect();
@@ -385,7 +498,7 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
         "masked": masked,
         "tooSmall": small,
         "unmasked": list,
-        "shown": list.iter().filter(|v| v["allowed"] != json!(true)).count(),
+        "shown": list.iter().filter(|v| v["allowed"] != json!(true) && v["brief"] != json!(true)).count(),
         "profiles": heavy,
         "verify": verified,
     }))
@@ -411,7 +524,8 @@ fn ask(s: &Session, seq: ItemId, scale: f32, judge: &dyn VisionJudge, found: &mu
         let b = f.best.det.bbox.map(f64::from);
         crate::redact::crop_around(&rgba, w, h, &b, mark)
     };
-    let picked: Vec<usize> = (0..found.len()).take(MAX_ASKED).collect();
+    // a head seen in one frame alone is not shown: not asked about
+    let picked: Vec<usize> = (0..found.len()).filter(|i| found.get(*i).is_some_and(|f| !f.brief)).take(MAX_ASKED).collect();
     let mut crops: Vec<(usize, Crop)> = Vec::new();
     for i in picked {
         if let Some(c) = found.get(i).and_then(|f| crop(f, false)) {

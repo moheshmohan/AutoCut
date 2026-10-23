@@ -3,7 +3,8 @@
 //! as it is), the privacy QA on it (`sequence.checkPrivacy` every quarter second, with the profile
 //! pass), the masks measured, and its frames and video written:
 //!
-//! - `<stage>.json`: the redaction's outcome, the QA's answer, and the masks' measures — the share
+//! - `<stage>.json`: the redaction's outcome, the QA's answer (and the errors and warnings
+//!   AutoCut's QA makes of it, `filmcraft_autocut::qa::face_severity`), and the masks' measures — the share
 //!   of the frame they cover (inside their 50 % edge, and fully), neighbouring masks whose soft
 //!   edges join although their shapes do not touch, and flicker: dropouts (a part of the frame
 //!   blurred, sharp for under half a second and blurred again) in the whole frame and at its
@@ -380,6 +381,12 @@ fn qa(s: &mut Session, len: f64, exclude: &Option<Value>) -> Value {
     let from_pose = shown.iter().filter(|u| u["fromPose"].as_bool() == Some(true)).count();
     r["shownAtEdge"] = json!(at_edge);
     r["shownFromPose"] = json!(from_pose);
+    // what AutoCut's QA makes of them: errors (which stop publishing) and warnings
+    let faces = filmcraft_autocut::qa::faces_of(&r);
+    let severity = |s: filmcraft_autocut::qa::Severity| faces.iter().filter(|f| filmcraft_autocut::qa::face_severity(f) == Some(s)).count();
+    r["errors"] = json!(severity(filmcraft_autocut::qa::Severity::Error));
+    r["warnings"] = json!(severity(filmcraft_autocut::qa::Severity::Warning));
+    r["brief"] = json!(faces.iter().filter(|f| f.brief).count());
     r
 }
 
@@ -620,6 +627,9 @@ fn main() {
         "qaUnmasked": qa["unmasked"].as_array().map_or(0, Vec::len),
         "qaShownAtEdge": qa["shownAtEdge"],
         "qaShownFromPose": qa["shownFromPose"],
+        "qaErrors": qa["errors"],
+        "qaWarnings": qa["warnings"],
+        "qaBrief": qa["brief"],
         "masks": metrics,
         "seconds": {"redaction": redact_s, "analysis": outcome["seconds"]["analysis"], "check": outcome["seconds"]["check"]},
     });

@@ -94,8 +94,8 @@ pub struct Detection {
     /// `[x, y, w, h]`: top-left corner and size.
     pub bbox: [f32; 4],
     /// A face's five landmarks (right eye, left eye, nose tip, right and left mouth corners);
-    /// a plate's four corners, clockwise from the top left; a head found from a pose: its nose,
-    /// eyes and ears that were found.
+    /// a plate's four corners, clockwise from the top left; a head found from a pose: its nose
+    /// and eyes that were found.
     pub points: Vec<[f32; 2]>,
     /// A face found from a person's pose (the profile pass: a head in profile or half hidden that
     /// the face detector missed), not by the face detector.

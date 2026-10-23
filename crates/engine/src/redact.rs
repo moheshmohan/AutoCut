@@ -28,8 +28,9 @@
 //! `profiles` (on by default once its models are downloaded, `redact.downloadModels`) every
 //! analysed frame also goes through the profile pass (`filmcraft_vision::ProfileDetector`: the
 //! D-FINE person detector, then RTMPose on each person, wholly on the GPU on macOS): each person whose
-//! nose or an eye is found (the back of a head identifies nobody) and whose head no YuNet face
-//! covers adds a face, the head box from the nose, eyes and ears. Those faces are followed
+//! nose or an eye is found (the back of a head identifies nobody; an unsure face the person's own
+//! body puts at the hips is a head outside the picture, `filmcraft_vision::head::below_the_hips`)
+//! and whose head no YuNet face covers adds a face, the head box from the nose, eyes and ears. Those faces are followed
 //! together with YuNet's (a visitor turning away stays one track), need two sightings, never
 //! count as "sure" (so the vision check's "a robot" is believed: Ameca keeps its face), and are
 //! reported (`fromPose`, `facesFromPose`). The job holds the machine's GPU lock while it runs
@@ -885,10 +886,15 @@ impl Cached<'_> {
 }
 
 /// The redaction cache's key of a file's detections (`media`) by detector `d` with these
-/// settings. With the profile pass, its models' ids too: entries made without it, or with other
-/// models, are analysed again once; without it the key is what it always was.
+/// settings. With the profile pass, its models' ids and the rules that make faces of poses
+/// (`filmcraft_vision::head::RULES`) too: entries made without it, with other models or under
+/// other rules, are analysed again once; without it the key is what it always was.
 fn detections_key(d: &str, media: &str, face_side: usize, scale: f32, close: usize, o: &Options) -> String {
-    let profiles = if o.profiles == Some(true) { format!(" profiles={}", filmcraft_vision::catalog::profile_model_ids()) } else { String::new() };
+    let profiles = if o.profiles == Some(true) {
+        format!(" profiles={} heads=v{}", filmcraft_vision::catalog::profile_model_ids(), filmcraft_vision::head::RULES)
+    } else {
+        String::new()
+    };
     format!(
         "det v{}|{media}|{d}{profiles}|faces={} plates={} fs={:.3} ps={:.3} side={} pside={} scale={:.5} close={}",
         crate::redact_cache::VERSION,

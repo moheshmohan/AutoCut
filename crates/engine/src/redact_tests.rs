@@ -512,8 +512,9 @@ fn hostile_parameters_are_refused() {
     assert!(!profiles_on(&options_p("t", &json!({"profiles": false})).unwrap()));
 }
 
-/// The profile pass's models are in the detections' cache key: entries made without it (or with
-/// other models) are analysed again once; without it, the key is the one entries always had.
+/// The profile pass's models and the rules that make faces of poses are in the detections' cache
+/// key: entries made without it (or with other models, under other rules) are analysed again
+/// once; without it, the key is the one entries always had.
 #[test]
 fn the_profile_models_are_in_the_cache_key() {
     let off = Options { profiles: Some(false), ..Options::default() };
@@ -533,6 +534,8 @@ fn the_profile_models_are_in_the_cache_key() {
     for f in filmcraft_vision::catalog::PROFILE_FILES {
         assert!(k.contains(f.name) && k.contains(&f.sha256[..16]), "{k}");
     }
+    // 2026-10-23: a face at the hips is no head; what was kept before is analysed again
+    assert!(k.contains(&format!(" heads=v{}", filmcraft_vision::head::RULES)) && filmcraft_vision::head::RULES >= 2, "{k}");
 }
 
 /// Faces the profile pass found (a head from a pose: in profile, half hidden) are followed,

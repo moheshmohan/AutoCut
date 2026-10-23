@@ -14,6 +14,17 @@
 //! under [`crate::track::WEAK_POSE`] (0.35; its person or its face that unsure) is a weak
 //! sighting: it continues a track, never starts one.
 //!
+//! **Where the body says no face can be.** The pose network names all 17 keypoints of every
+//! person it is shown, a head outside the picture too, and puts that head's face on something
+//! it can see: 2026-10-23, DJI_0495, a person cut by the frame's top at the waist had a "face" on
+//! their hands at hip height, and the privacy check called it an unblurred face. A face shown
+//! only less surely (under [`HeadParams::face`]) whose nose and eyes are less than half a thigh
+//! above the hips, the hips and knees found at least as surely ([`BODY_SURE`]) and the knees
+//! clearly below them (standing, walking), is no head ([`below_the_hips`]); an upright person's
+//! face is some 1.3 thighs above the hips. On 2,146 heads whose face shows in 172 frames of the
+//! OnRobot and Ameca crowds it refuses none; on the Quick Short's DJI_0495 frames, the six
+//! "faces" on hands.
+//!
 //! **The box.** Its size comes from the distances between the keypoints found, each divided by
 //! that distance's share of a head's width (ear to ear 1.05, eye to eye 0.41, nose to ear 0.79,
 //! eye to ear 0.56, nose to eye 0.31; calibrated against the faces YuNet also found of the same
@@ -44,8 +55,17 @@ pub const LEFT_EAR: usize = 3;
 pub const RIGHT_EAR: usize = 4;
 pub const LEFT_SHOULDER: usize = 5;
 pub const RIGHT_SHOULDER: usize = 6;
+pub const LEFT_HIP: usize = 11;
+pub const RIGHT_HIP: usize = 12;
+pub const LEFT_KNEE: usize = 13;
+pub const RIGHT_KNEE: usize = 14;
 /// Keypoints of a COCO pose.
 pub const KEYPOINTS: usize = 17;
+
+/// The version of the rules that make faces of poses ([`head_of`], [`candidates`]): the
+/// redaction cache keeps the profile pass's faces under it, so footage analysed under other
+/// rules is analysed again (2: [`below_the_hips`], and a head's points without its ears).
+pub const RULES: u32 = 2;
 
 /// The highest score a head found from a pose gets as a face detection: under the engine's
 /// "sure face" (0.85) and the tracker's "seen once surely" (0.9), so such a face is always seen
@@ -189,6 +209,11 @@ pub fn head_of(p: &Person, hp: &HeadParams) -> Option<Head> {
     } else {
         View::Back
     };
+    // an unsure face the person's own body says cannot be there: the network's guess at a head
+    // the picture does not show
+    if view != View::Back && face_score < hp.face && below_the_hips(p, hp, face_score) {
+        return None;
+    }
     // the head's width: each pair's distance over its share of a head's width (each only shrinks
     // as the head turns, so the largest is kept; measured against YuNet's faces of the same
     // people, 2026-10-22)
@@ -283,6 +308,29 @@ pub fn head_of(p: &Person, hp: &HeadParams) -> Option<Head> {
     b.iter().all(|v| v.is_finite()).then_some(Head { bbox: b, view, face_score, width })
 }
 
+/// The hips and knees that refuse an unsure face ([`below_the_hips`]) are found at least this
+/// surely (and at least as surely as the face).
+pub const BODY_SURE: f32 = 0.4;
+
+/// Whether pose `p`'s body says its face, shown only as surely as `face_score`, cannot be where
+/// its nose and eyes are: less than half a thigh above the hips (an upright person's face is some
+/// 1.3 thighs above them), the hips and knees found at least [`BODY_SURE`] and `face_score`
+/// surely, the knees below the hips by a tenth of the person's height or more (standing or
+/// walking: a person sitting, crouching or lying has the knees beside the hips, and is never
+/// refused). A head outside the picture gets its face from the network on what it can see
+/// there: a person's hands at the hips (2026-10-23, DJI_0495).
+pub fn below_the_hips(p: &Person, hp: &HeadParams, face_score: f32) -> bool {
+    let mean_y = |ids: &[usize], min: f32| -> Option<f32> {
+        let ys: Vec<f32> = ids.iter().filter_map(|i| found(&p.keypoints, *i, min)).map(|k| k.y).collect();
+        (!ys.is_empty()).then(|| ys.iter().sum::<f32>() / ys.len() as f32)
+    };
+    let Some(face) = mean_y(&[NOSE, LEFT_EYE, RIGHT_EYE], hp.keypoint) else { return false };
+    let need = if face_score.is_finite() { face_score.max(BODY_SURE) } else { BODY_SURE };
+    let (Some(hips), Some(knees)) = (mean_y(&[LEFT_HIP, RIGHT_HIP], need), mean_y(&[LEFT_KNEE, RIGHT_KNEE], need)) else { return false };
+    let thigh = knees - hips;
+    thigh > 0.1 * p.bbox[3].max(0.0) && face > hips - 0.5 * thigh
+}
+
 /// Whether the pose faces away from the camera: its left eyes, ears or shoulders on the picture's
 /// left of the right ones (a person facing the camera shows their left on the picture's right),
 /// by at least a tenth (eyes), 15 % (ears) or 30 % (shoulders) of the person's width, and none of
@@ -353,7 +401,9 @@ pub fn candidates(people: &[Person], faces: &[Detection], hp: &HeadParams, w: f3
         }
         let score = p.score.min(head.face_score).clamp(0.0, HEAD_SCORE_MAX);
         let b = head.bbox;
-        let points = [NOSE, LEFT_EYE, RIGHT_EYE, LEFT_EAR, RIGHT_EAR]
+        // the face's own features (the privacy check tests them against the blur); the ears
+        // identify nobody
+        let points = [NOSE, LEFT_EYE, RIGHT_EYE]
             .into_iter()
             .filter_map(|i| found(&p.keypoints, i, hp.keypoint))
             .filter(|q| inside(&b, q.x, q.y))
@@ -489,6 +539,78 @@ mod tests {
         assert!(!head_of(&p, &hp).unwrap().shows_face());
     }
 
+    /// `p` with hips at `hip_y` and knees at `knee_y` (picture pixels), found `score` surely.
+    fn with_legs(mut p: Person, hip_y: f32, knee_y: f32, score: f32) -> Person {
+        let cx = p.bbox[0] + p.bbox[2] / 2.0;
+        p.keypoints[LEFT_HIP] = kp(cx + 20.0, hip_y, score);
+        p.keypoints[RIGHT_HIP] = kp(cx - 20.0, hip_y, score);
+        p.keypoints[LEFT_KNEE] = kp(cx + 18.0, knee_y, score);
+        p.keypoints[RIGHT_KNEE] = kp(cx - 18.0, knee_y, score);
+        p
+    }
+
+    #[test]
+    fn a_face_at_the_hips_is_no_head() {
+        let hp = HeadParams::default();
+        // DJI_0495 at 0:09.5 of the Quick Short (2026-10-23): a person cut by the frame's top at
+        // the waist, the network's "face" on their hands at the hips (its keypoints as found)
+        let mut kps = vec![Keypoint::default(); KEYPOINTS];
+        for (i, (x, y, s)) in [
+            (452.0, 102.0, 0.42),
+            (452.0, 103.0, 0.34),
+            (450.0, 71.0, 0.32),
+            (441.0, 5.0, 0.24),
+            (444.0, 81.0, 0.20),
+            (433.0, 44.0, 0.31),
+            (431.0, 88.0, 0.29),
+            (449.0, 65.0, 0.36),
+            (430.0, 66.0, 0.32),
+            (446.0, 96.0, 0.51),
+            (444.0, 98.0, 0.50),
+            (450.0, 83.0, 0.52),
+            (445.0, 83.0, 0.52),
+            (443.0, 192.0, 0.46),
+            (442.0, 193.0, 0.49),
+            (436.0, 278.0, 0.45),
+            (436.0, 280.0, 0.48),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            kps[i] = kp(x, y, s);
+        }
+        let hands = Person { bbox: [408.0, 39.0, 61.0, 269.0], score: 0.457, keypoints: kps };
+        assert!(below_the_hips(&hands, &hp, 0.42));
+        assert!(head_of(&hands, &hp).is_none());
+        assert!(candidates(std::slice::from_ref(&hands), &[], &hp, 720.0, 1280.0).is_empty());
+        // a nose the network is sure of is a face wherever the body is
+        let mut sure = hands.clone();
+        sure.keypoints[NOSE].score = 0.6;
+        assert!(head_of(&sure, &hp).unwrap().shows_face());
+        // hips or knees less sure than the face say nothing
+        let mut unsure_legs = hands.clone();
+        for i in [LEFT_HIP, RIGHT_HIP] {
+            unsure_legs.keypoints[i].score = 0.38;
+        }
+        assert!(head_of(&unsure_legs, &hp).unwrap().shows_face());
+        // a half hidden face (0.42) of a person standing: far above the hips, a face
+        let mut standing = person(500.0, 300.0, 100.0, 0.0);
+        for i in [NOSE, LEFT_EYE, RIGHT_EYE] {
+            standing.keypoints[i].score = 0.42;
+        }
+        let standing = with_legs(standing, 660.0, 840.0, 0.8);
+        assert!(!below_the_hips(&standing, &hp, 0.42));
+        assert!(head_of(&standing, &hp).unwrap().shows_face());
+        // sitting (knees beside the hips) or lying: never refused, wherever the face is
+        let sitting = with_legs(hands.clone(), 83.0, 95.0, 0.8);
+        assert!(head_of(&sitting, &hp).unwrap().shows_face());
+        // hostile keypoints refuse nothing
+        let mut nan = hands;
+        nan.keypoints[LEFT_HIP] = kp(f32::NAN, f32::NAN, 0.9);
+        nan.keypoints[RIGHT_HIP] = kp(445.0, f32::INFINITY, 0.9);
+        assert!(!below_the_hips(&nan, &hp, f32::NAN));
+    }
+
     #[test]
     fn unsure_keypoints_do_not_blow_the_head_up() {
         // sure eyes and nose; an unsure ear far off (a wrong guess): the sure keypoints measure
@@ -536,7 +658,9 @@ mod tests {
         let hp = HeadParams::default();
         let all = candidates(&[a.clone(), b.clone()], &[], &hp, w, h);
         assert_eq!(all.len(), 2);
-        assert!(all.iter().all(|d| d.pose && d.kind == Kind::Face && d.score <= HEAD_SCORE_MAX && d.points.len() >= 3));
+        assert!(all.iter().all(|d| d.pose && d.kind == Kind::Face && d.score <= HEAD_SCORE_MAX && d.points.len() >= 2));
+        // the face's own features, the nose and eyes (from the front all three), not the ears
+        assert_eq!(all.iter().map(|d| d.points.len()).max(), Some(3));
         // YuNet found a's face (a box a little smaller than the head's): only b is added
         let ha = head_of(&a, &hp).unwrap().bbox;
         let face = Detection {

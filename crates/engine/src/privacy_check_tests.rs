@@ -39,9 +39,14 @@ fn session(name: &str, score: f32) -> (Session, ClipId, ItemId, std::path::PathB
 
 /// [`session`] with the face at `x`.
 fn session_at(name: &str, score: f32, x: f64) -> (Session, ClipId, ItemId, std::path::PathBuf) {
+    session_of(name, score, |_| picture(x))
+}
+
+/// [`session`] with frame `k` of the clip `frame(k)`.
+fn session_of(name: &str, score: f32, frame: impl Fn(u32) -> image::RgbaImage) -> (Session, ClipId, ItemId, std::path::PathBuf) {
     let dir = tmp_dir(name);
     for k in 0..FRAMES {
-        picture(x).save(dir.join(format!("shot{k:04}.png"))).unwrap();
+        frame(k).save(dir.join(format!("shot{k:04}.png"))).unwrap();
     }
     let mut s = Session::default();
     let r = s.execute("file.importImageSequence", json!({"path": dir.join("shot0000.png").to_string_lossy()})).unwrap();
@@ -304,6 +309,138 @@ fn a_head_with_its_centre_outside_the_frame_is_checked_where_it_shows() {
     assert!((v.x - (-0.45 * 320.0)).abs() < 1e-3, "{v:?}");
     let v = visible_centre(&[f32::NAN, 0.3, 0.1, 0.2], 320.0, 180.0);
     assert!(v.x.is_nan() || v.x.is_finite());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The clip's automatic redaction made one round mask at `(cx, cy)` of radius `r` (clip pixels)
+/// with soft edge `feather` and `expansion`, fully on: the blur covers half at `r + expansion`.
+fn one_round_mask(s: &mut Session, clip: ClipId, (cx, cy): (f64, f64), r: f64, feather: f64, expansion: f64) {
+    s.execute("clip.autoRedact", json!({"wait": true, "verify": false})).unwrap();
+    let mut p = (*s.project).clone();
+    let it = p.sequence_mut(s.state.active_sequence.unwrap()).unwrap().video_tracks[0].items.iter_mut().find(|it| it.id == clip).unwrap();
+    let e = it.effects.iter_mut().find(|e| crate::redact::is_auto_redaction(e)).unwrap();
+    let mut m =
+        filmcraft_project::Mask::new("Redact face 1", filmcraft_project::MaskPath::ellipse(filmcraft_geom::Vec2::new(cx, cy), filmcraft_geom::Vec2::new(r, r)));
+    m.feather = filmcraft_project::Param::new(filmcraft_project::ParamValue::Float(feather));
+    m.expansion = filmcraft_project::Param::new(filmcraft_project::ParamValue::Float(expansion));
+    e.masks = vec![m];
+    s.project = Arc::new(p);
+}
+
+/// A face 48 px across centred at `(x, 90)` (sequence pixels; the clip fills the frame), with
+/// landmarks `points` (pixels), found in every frame whatever the blur.
+fn face_at(s: &mut Session, x: f64, points: &[(f64, f64)], pose: bool, score: f32) {
+    let points: Vec<[f32; 2]> = points.iter().map(|(px, py)| [(*px / f64::from(W)) as f32, (*py / f64::from(H)) as f32]).collect();
+    let d = Detection { kind: Kind::Face, score, bbox: [((x - 24.0) / f64::from(W)) as f32, 66.0 / H as f32, 48.0 / W as f32, 48.0 / H as f32], points, pose };
+    s.redacts.detector = Some(Arc::new(move |_: &[u8], _: usize, _: usize, _: usize| vec![d.clone()]));
+}
+
+/// The check tests a face against the blur as it is drawn, soft edge and expansion too (where
+/// the blurred picture is mixed in at half or more): a face just past the mask's path is under
+/// the blur; one past its soft edge is not.
+#[test]
+fn a_face_under_the_soft_edge_of_its_blur_is_masked_and_one_past_it_is_not() {
+    let (mut s, clip, _, dir) = session("privacy-check-soft-edge", 0.95);
+    // the path a radius of 30 around (100, 90), its soft edge 16 wide, 8 out: half the blur at 38
+    one_round_mask(&mut s, clip, (100.0, 90.0), 30.0, 16.0, 8.0);
+    let q = s.active_sequence().unwrap().clone();
+    let it = &q.video_tracks[0].items[0];
+    let blur = |x: f64| super::blur_at(it, Tick::ZERO, filmcraft_geom::Vec2::new(x, 90.0));
+    assert!(blur(100.0) > 0.999 && blur(130.0) > 0.999, "wholly covered inside: {}", blur(130.0));
+    assert!((blur(138.0) - 0.5).abs() < 0.02, "half at the expanded outline: {}", blur(138.0));
+    assert!(blur(150.0) < 1e-3, "{}", blur(150.0));
+    // 35 px out: past the path (the old test flagged it), under the blur
+    face_at(&mut s, 135.0, &[], false, 0.95);
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert!(unmasked(&r).is_empty(), "{r}");
+    assert_eq!(r["masked"], json!(5), "{r}");
+    // 43 px out: past the soft edge's half-way line, shown
+    face_at(&mut s, 143.0, &[], false, 0.95);
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert_eq!(unmasked(&r).len(), 1, "{r}");
+    let b = unmasked(&r)[0]["blur"].as_f64().unwrap();
+    assert!(b > 0.0 && b < super::HIDDEN, "{r}");
+    // a mask turned off covers nothing
+    let mut p = (*s.project).clone();
+    let it = p.sequence_mut(s.state.active_sequence.unwrap()).unwrap().video_tracks[0].items.iter_mut().find(|it| it.id == clip).unwrap();
+    for m in it.effects.iter_mut().flat_map(|e| e.masks.iter_mut()) {
+        m.opacity = filmcraft_project::Param::new(filmcraft_project::ParamValue::Float(0.0));
+    }
+    s.project = Arc::new(p);
+    face_at(&mut s, 100.0, &[], false, 0.95);
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert_eq!(unmasked(&r).len(), 1, "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A face whose eyes, nose (and mouth) are all under the blur is hidden though the middle of its
+/// box is not (a head in profile: its box runs from the ear to the nose, the back of the head
+/// beside the blur); one of them sharp, or a single one, and the box's middle decides.
+#[test]
+fn a_face_whose_features_are_all_blurred_is_masked() {
+    let (mut s, clip, _, dir) = session("privacy-check-features", 0.95);
+    one_round_mask(&mut s, clip, (100.0, 90.0), 30.0, 16.0, 8.0);
+    // the box's middle 50 px out of the mask's centre: sharp there
+    let eyes_nose = [(78.0, 84.0), (92.0, 84.0), (84.0, 96.0)];
+    face_at(&mut s, 50.0, &eyes_nose, true, 0.62);
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert!(unmasked(&r).is_empty(), "the eyes and nose blurred: {r}");
+    // an eye outside the blur: shown
+    face_at(&mut s, 50.0, &[(48.0, 84.0), (92.0, 84.0), (84.0, 96.0)], true, 0.62);
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert_eq!(unmasked(&r).len(), 1, "{r}");
+    // one feature is not enough to say the face is hidden
+    face_at(&mut s, 50.0, &[(84.0, 96.0)], true, 0.62);
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert_eq!(unmasked(&r).len(), 1, "{r}");
+    // features outside the frame are not shown and say nothing
+    face_at(&mut s, 50.0, &[(84.0, 96.0), (-30.0, 90.0), (f64::NAN, 1.0)], true, 0.62);
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": times()})).unwrap();
+    assert_eq!(unmasked(&r).len(), 1, "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An unsure head found from a pose (0.37) in one frame alone, not seen again within three tenths
+/// of a second: brief, not shown and not asked about (the redaction leaves it too); seen again a
+/// tenth of a second later it is shown. A surer head, or the face detector's face, seen once
+/// is shown as before.
+#[test]
+fn an_unsure_head_seen_in_one_frame_alone_is_not_shown() {
+    // the frames the warm disc shows in (of 30, a second): only frame `at`, or `from..=to`
+    let only = |from: u32, to: u32| move |k: u32| if (from..=to).contains(&k) { picture(100.0) } else { picture(-100.0) };
+    let pose = |score: f32| {
+        move |rgba: &[u8], w: usize, h: usize, _: usize| -> Vec<Detection> {
+            warm_disc(rgba, w, h, score).into_iter().map(|d| Detection { pose: true, ..d }).collect()
+        }
+    };
+    let (mut s, _, _, dir) = session_of("privacy-check-brief", 0.95, only(12, 12));
+    let rate = s.active_sequence().unwrap().settings.frame_rate.sane().as_f64();
+    let t = 12.0 / rate;
+    let judge = Judge::new(Some(true), Some(true));
+    s.redacts.judge = Some(judge.clone());
+    s.redacts.detector = Some(Arc::new(pose(0.37)));
+    let p = json!({"seconds": [0.0, t, 0.9]});
+    let r = s.execute("sequence.checkPrivacy", p.clone()).unwrap();
+    let u = unmasked(&r);
+    assert_eq!((u.len(), r["shown"].as_u64()), (1, Some(0)), "{r}");
+    assert_eq!((u[0]["brief"].as_bool(), u[0]["verdict"].as_str()), (Some(true), Some("unchecked")), "{r}");
+    assert_eq!(judge.asked.load(Ordering::Relaxed), 0, "not asked about");
+    // a surer head seen once: shown
+    s.redacts.detector = Some(Arc::new(pose(0.6)));
+    let r = s.execute("sequence.checkPrivacy", p.clone()).unwrap();
+    assert_eq!((unmasked(&r)[0]["brief"].as_bool(), r["shown"].as_u64()), (Some(false), Some(1)), "{r}");
+    // the face detector's face seen once: shown
+    s.redacts.detector = Some(Arc::new(|rgba: &[u8], w: usize, h: usize, _: usize| warm_disc(rgba, w, h, 0.9)));
+    let r = s.execute("sequence.checkPrivacy", p).unwrap();
+    assert_eq!(r["shown"], json!(1), "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+    // the same head showing from frame 12 to 15: seen again, shown
+    let (mut s, _, _, dir) = session_of("privacy-check-brief-again", 0.95, only(12, 15));
+    s.redacts.detector = Some(Arc::new(pose(0.37)));
+    let r = s.execute("sequence.checkPrivacy", json!({"seconds": [0.0, t, 0.9]})).unwrap();
+    let u = unmasked(&r);
+    assert_eq!((u.len(), r["shown"].as_u64()), (1, Some(1)), "{r}");
+    assert_eq!(u[0]["brief"], json!(false), "{r}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
