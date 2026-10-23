@@ -218,6 +218,21 @@ fn dates_read_in_the_patch_timezone_or_their_own() {
     assert_eq!(offset("4"), None);
 }
 
+/// The dates chrono computes are the ones the hand-rolled conversion gave: the ends of the years a
+/// patch may use, a leap second, and a day past the month's end running on into the next month.
+#[test]
+fn dates_through_chrono_keep_their_old_values() {
+    assert_eq!(days_from_civil(1970, 1, 1), Some(0));
+    assert_eq!(days_from_civil(2000, 3, 1), Some(11_017));
+    assert_eq!(date("0001-01-01", 0), Some(-62_135_596_800));
+    assert_eq!(date("9999-12-31 23:59:59", 0), Some(253_402_300_799));
+    assert_eq!(date("2016-12-31 23:59:60", 0), date("2017-01-01", 0));
+    assert_eq!(date("2022-02-31", 0), date("2022-03-03", 0));
+    assert_eq!(date("2024-02-30 12:00", 0), date("2024-03-01 12:00", 0));
+    assert_eq!(date("0000-01-01", 0), None);
+    assert_eq!(date("10000-01-01", 0), None);
+}
+
 #[test]
 fn places_from_a_locations_file_fill_entries_without_one() {
     let mut plan = apply(&base(), &[], &Clips::new()).unwrap().plan;

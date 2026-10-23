@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
+use chrono::{Datelike, Days, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 /// The general daily quota of a project (Google's default).
@@ -165,36 +166,42 @@ pub fn describe_wait(secs: u64) -> String {
 // the first Sunday of November at 02:00, the US rule since 2007)
 // -------------------------------------------------------------------------------------------
 
-/// Days since 1970-01-01 of a proleptic Gregorian date (H. Hinnant's `days_from_civil`).
+/// Days in 400 Gregorian years, after which the calendar (weekdays too: 146 097 = 7 × 20 871)
+/// repeats. Dates are computed by chrono; a day number or year beyond chrono's range is moved
+/// into it by whole cycles and the cycles are carried back in the year (AGENTS.md).
+const CYCLE_DAYS: i64 = 146_097;
+const CYCLE_YEARS: i64 = 400;
+
+fn epoch() -> NaiveDate {
+    chrono::DateTime::UNIX_EPOCH.date_naive()
+}
+
+/// The date of day `rem` of the cycle that starts on 1970-01-01 (`rem` in `0..CYCLE_DAYS`).
+fn in_cycle(rem: i64) -> NaiveDate {
+    u64::try_from(rem).ok().and_then(|r| epoch().checked_add_days(Days::new(r))).unwrap_or_else(epoch)
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date. A month past 12 (or before 1) runs on into
+/// the next (previous) year and a day past the month's last into the next month.
 pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let m = i64::from(m);
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + i64::from(d) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    let months = y.saturating_mul(12).saturating_add(i64::from(m)).saturating_sub(1);
+    let (y, m) = (months.div_euclid(12), months.rem_euclid(12) as u32 + 1);
+    let cycles = y.saturating_sub(1970).div_euclid(CYCLE_YEARS);
+    let first = i32::try_from(y.saturating_sub(cycles.saturating_mul(CYCLE_YEARS))).ok().and_then(|y| NaiveDate::from_ymd_opt(y, m, 1)).unwrap_or_else(epoch);
+    first.signed_duration_since(epoch()).num_days().saturating_add(cycles.saturating_mul(CYCLE_DAYS)).saturating_add(i64::from(d) - 1)
 }
 
 /// The date of a day number (the inverse of [`days_from_civil`]).
 pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
+    let date = in_cycle(z.rem_euclid(CYCLE_DAYS));
+    (i64::from(date.year()).saturating_add(z.div_euclid(CYCLE_DAYS).saturating_mul(CYCLE_YEARS)), date.month(), date.day())
 }
 
 /// The day number of the `n`th Sunday of a month.
 fn nth_sunday(y: i64, m: u32, n: i64) -> i64 {
     let first = days_from_civil(y, m, 1);
-    // 1970-01-01 was a Thursday: weekday 4 with Sunday 0
-    let weekday = (first + 4).rem_euclid(7);
-    first + (7 - weekday) % 7 + 7 * (n - 1)
+    let weekday = i64::from(in_cycle(first.rem_euclid(CYCLE_DAYS)).weekday().num_days_from_sunday());
+    first.saturating_add((7 - weekday) % 7).saturating_add(n.saturating_sub(1).saturating_mul(7))
 }
 
 /// Pacific time's offset from UTC at Unix second `t`, in seconds.
@@ -244,6 +251,23 @@ mod tests {
         assert_eq!(civil_from_days(nth_sunday(2026, 3, 2)), (2026, 3, 8));
         assert_eq!(civil_from_days(nth_sunday(2026, 11, 1)), (2026, 11, 1));
         assert_eq!(civil_from_days(nth_sunday(2025, 3, 2)), (2025, 3, 9));
+        // chrono's dates, with the old conversion's values at the edges: the first day of the
+        // common era, a month past 12 or before 1, a day past the month's end
+        assert_eq!(days_from_civil(1, 1, 1), -719_162);
+        assert_eq!(days_from_civil(2370, 1, 1), 146_097);
+        assert_eq!(days_from_civil(2026, 13, 1), days_from_civil(2027, 1, 1));
+        assert_eq!(days_from_civil(2026, 0, 1), days_from_civil(2025, 12, 1));
+        assert_eq!(days_from_civil(2026, 2, 31), days_from_civil(2026, 3, 3));
+        // years past chrono's range move by whole 400-year cycles (AGENTS.md)
+        assert_eq!(civil_from_days(10_000_000_000_000_i64.div_euclid(86_400)), (318_857, 5, 20));
+        assert_eq!(civil_from_days(i64::MAX.div_euclid(86_400)), (292_277_026_596, 12, 4));
+        for z in [-53_375_995_583 * 146_097, 9_000_000_000_000, i64::MAX.div_euclid(86_400)] {
+            let (y, m, d) = civil_from_days(z);
+            assert_eq!(days_from_civil(y, m, d), z, "{z}");
+        }
+        assert_eq!(civil_from_days(nth_sunday(318_857, 3, 2)).1, 3);
+        // extreme inputs give an answer, never a panic
+        let _ = (days_from_civil(i64::MAX, u32::MAX, u32::MAX), days_from_civil(i64::MIN, 0, 0), civil_from_days(i64::MIN), nth_sunday(i64::MAX, 3, i64::MAX));
     }
 
     #[test]
