@@ -1909,7 +1909,8 @@ async fn heard(ex: &dyn Executor, item: u64, language: &str) -> Option<String> {
 }
 
 /// Narrate a part of the script at `t` on the voice track — the voice reads `say`, the
-/// subtitles show `shown` — and return its length in seconds (0 without a voice).
+/// subtitles show `shown` — and return its length in seconds (0 without a voice, or for a part
+/// with no words: an intro that is only the title over the montage, say).
 async fn narrate(
     ex: &dyn Executor,
     tr: &Tracks,
@@ -1921,6 +1922,9 @@ async fn narrate(
     narrations: &mut Narrations,
 ) -> Result<f64, AutoCutError> {
     let Some(voice) = voice else { return Ok(0.0) };
+    if say.trim().is_empty() {
+        return Ok(0.0);
+    }
     // a Malayalam show reads its Malayalam parts in Malayalam (anything left in English stays so)
     let malayalam = narrations.malayalam && is_malayalam_text(say);
     let max_takes = if malayalam { MAX_TAKES_ML } else { MAX_TAKES };
@@ -4697,6 +4701,20 @@ mod tests {
             };
             Box::pin(async move { r })
         }
+    }
+
+    /// A plan whose intro (or outro) has no words: the title plays over the montage and music,
+    /// and nothing asks the voice to read an empty line (`tts.create` refuses one).
+    #[tokio::test]
+    async fn a_part_with_no_words_is_not_narrated() {
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
+        let mut n = Narrations { malayalam: true, ..Narrations::default() };
+        for say in ["", "  \n "] {
+            let spoken = narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+            assert_eq!(spoken, 0.0);
+        }
+        assert!(ex.calls.lock().unwrap().is_empty(), "nothing read");
+        assert!(n.lines.is_empty() && n.clips.is_empty(), "no subtitle, no clip");
     }
 
     #[tokio::test]
