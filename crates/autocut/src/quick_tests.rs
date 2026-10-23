@@ -499,6 +499,7 @@ fn texts_are_checked_against_their_frames() {
     assert_eq!(of("outro_sub").text.as_deref(), Some("More robots every week"));
     assert_eq!(summary["how"], "words, the describer's answers and SigLIP", "the describer answered in the first round: {summary}");
     assert_eq!(summary["asker"], "vlm-fake");
+    assert!(summary["asked"].as_u64().unwrap() >= 2, "{summary}");
     assert!(summary["rejected"].as_u64().unwrap() >= 3, "{summary}");
     // the report's entry: what was under it and every candidate
     let j = hook.to_json(&picks);
@@ -509,6 +510,27 @@ fn texts_are_checked_against_their_frames() {
     let asks = calls[0]["asks"].as_array().unwrap();
     let texts: Vec<&str> = asks.iter().map(|a| calls[0]["texts"][a["text"].as_u64().unwrap() as usize].as_str().unwrap()).collect();
     assert!(texts.contains(&"BOY MEETS ROBOT") && !texts.contains(&"DRONE DELIVERY") && !texts.contains(&"ROBOTS!"), "{texts:?}");
+}
+
+/// Texts that name only the topic's words need no question: the report says so rather than that
+/// the describer is missing.
+#[test]
+fn nothing_to_ask_is_not_a_missing_describer() {
+    let shots = expo_library();
+    let t = inspected("builtin:tech-reveal");
+    let picks = assign(&pick_specs(&t), &shots, &[], &HashMap::new(), None);
+    let specs = text_specs(&t, &picks);
+    let checker = Checker::new(&[(1, &["robot"])], true);
+    let (model, _) = expo_writer(vec![json!({"texts": [
+        {"slot": "hook_line", "n": 1, "options": ["ROBOTS!"]},
+        {"slot": "title", "n": 1, "options": ["THE ROBOT"]},
+        {"slot": "outro", "n": 1, "options": ["Follow for more"]},
+        {"slot": "outro_sub", "n": 1, "options": ["More robots soon"]},
+    ]})]);
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let mut notes = Vec::new();
+    let (_, summary) = rt.block_on(write_texts(Some(&checker), Some(9.0 / 16.0), Some(&model), &specs, &picks, &shots, &[], Some("robots"), None, &mut notes));
+    assert_eq!((summary["how"].as_str(), summary["asked"].as_u64()), (Some("words and SigLIP (nothing to ask the describer)"), Some(0)), "{summary}");
 }
 
 /// The same words twice on screen read as a mistake: the second text takes its next option.

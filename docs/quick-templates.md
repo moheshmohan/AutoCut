@@ -101,7 +101,7 @@ The engine command: `autocut.quick` ([`crates/engine/src/autocut.rs`](../crates/
 
    The report's `texts[]` has each text's window (`under`) and every candidate with its
    verdict (`candidates[]`: `ok`, `why`, the words, the SigLIP scores `own` / `elsewhere` /
-   `alternative`, the describer's `answer`); `textCheck` says what checked them and how many
+   `alternative`, the describer's `answer`); `textCheck` says what checked them (and, in `how`, whether any text needed the describer at all: `asked`), how many
    were rejected.
 7. **Apply and finish** — `template.apply`; placeholders of optional slots nothing suited are
    removed; the look; Bold animated captions of the kept speech in the platform's safe zone;

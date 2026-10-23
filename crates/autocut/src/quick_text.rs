@@ -627,6 +627,8 @@ pub struct Looked {
     pub embedder: Option<String>,
     pub asker: Option<String>,
     pub notes: Vec<String>,
+    /// Questions sent to the describer (none: no text named what only the descriptions say).
+    pub asked: usize,
 }
 
 impl Looked {
@@ -645,7 +647,7 @@ impl Looked {
         }
         let s = |k: &str| v[k].as_str().map(|x| chars(x, 120));
         let notes = v["notes"].as_array().map(|a| a.iter().filter_map(Value::as_str).take(10).map(|n| chars(n, 200)).collect()).unwrap_or_default();
-        Looked { cosine, answers, embedder: s("embedder"), asker: s("asker"), notes }
+        Looked { cosine, answers, embedder: s("embedder"), asker: s("asker"), notes, asked: 0 }
     }
 
     fn cos(&self, text: usize, window: usize) -> Option<f64> {
@@ -980,7 +982,7 @@ async fn look(ex: &dyn Executor, wins: &[Window], aspect: Option<f64>, texts: &[
         p["aspect"] = json!(a);
     }
     match ex.execute("media.checkText", p).await {
-        Ok(v) => Some(Looked::parse(&v)),
+        Ok(v) => Some(Looked { asked: asks.len(), ..Looked::parse(&v) }),
         Err(e) => {
             notes.push(format!("text check: the frames could not be looked at ({}); the words alone were checked", chars(&e, 200)));
             None
@@ -1080,6 +1082,7 @@ async fn round(
     if let Some(mut l) = looked {
         if let Some(prev) = looked_any.take() {
             l.asker = l.asker.or(prev.asker);
+            l.asked = l.asked.saturating_add(prev.asked);
             l.embedder = l.embedder.or(prev.embedder);
             for n in prev.notes {
                 if !l.notes.contains(&n) {
@@ -1197,6 +1200,7 @@ pub async fn write_texts(
     let how = match &looked {
         Some(l) if l.asker.is_some() && l.embedder.is_some() => "words, the describer's answers and SigLIP",
         Some(l) if l.asker.is_some() => "words and the describer's answers",
+        Some(l) if l.embedder.is_some() && l.asked == 0 => "words and SigLIP (nothing to ask the describer)",
         Some(l) if l.embedder.is_some() => "words and SigLIP",
         _ => "words only",
     };
@@ -1204,6 +1208,7 @@ pub async fn write_texts(
         "how": how,
         "embedder": looked.as_ref().and_then(|l| l.embedder.clone()),
         "asker": looked.as_ref().and_then(|l| l.asker.clone()),
+        "asked": looked.as_ref().map_or(0, |l| l.asked),
         "rejected": out.iter().map(|w| w.tried.iter().filter(|v| !v.ok).count()).sum::<usize>(),
         "notes": looked.as_ref().map(|l| l.notes.clone()).unwrap_or_default(),
         "margins": {"elsewhere": ELSEWHERE_MARGIN, "alternative": ALTERNATIVE_MARGIN},
