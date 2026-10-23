@@ -52,6 +52,8 @@ pub const ALLOWED_FAMILIES: &[&str] = &[
     "transitions.applyToAll",
     "transitions.randomOnBeats",
     "audio.normalizeLoudness",
+    // talking clips' own sound cleaned before the mix (`--enhance-voice`, `"enhanceVoice": true`)
+    "audio.enhanceVoice",
     "fonts.list",
     // spec chips that follow the robot (`follow_labels`): a motion track and its callout
     "track.label",
@@ -165,6 +167,15 @@ mod tests {
         assert!(allowed("essentialSound.autoMatch"));
         assert!(allowed("tts.create"));
         assert!(allowed("lumetri.applyMatch") && !allowed("lumetri.setInputLut"));
+        // the mix's Enhance Voice step (`--enhance-voice`) was refused as outside the families
+        assert!(allowed("audio.enhanceVoice"));
+        // every step the mix runs through the validator is in a family
+        let mix = include_str!("mix.rs");
+        let steps: Vec<&str> = mix.split("step(\"").skip(1).filter_map(|rest| rest.split('"').next()).collect();
+        assert!(steps.len() >= 10, "{steps:?}");
+        for id in steps {
+            assert!(allowed(id), "the mix runs `{id}`, which AutoCut's families refuse");
+        }
         assert!(!allowed("app.quit"));
         assert!(!allowed("prefs.set"));
     }
