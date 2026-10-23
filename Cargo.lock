@@ -2040,6 +2040,7 @@ dependencies = [
  "filmcraft-locks",
  "filmcraft-screenagent",
  "filmcraft-time",
+ "getrandom 0.3.4",
  "image",
  "rmcp",
  "schemars",

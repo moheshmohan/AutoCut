@@ -2,21 +2,46 @@
 
 ## Desktop control channel
 `filmcraft --control 9876` (or `FILMCRAFT_CONTROL_PORT`) listens on `127.0.0.1:<port>` (loopback only).
-The listener requires `FILMCRAFT_CONTROL_TOKEN`: 64 random hex characters shared with authorized
-clients through their inherited environment. Generate a fresh token for each desktop session, then
-start the desktop and bridge from that environment:
+Every request must carry the session's token, 64 random hex characters; missing or incorrect
+credentials get an error and close the connection before any request is dispatched. Loopback alone
+does not restrict clients to the desktop owner's OS account; the token does. It comes from one of two
+places:
 
-```sh
-export FILMCRAFT_CONTROL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
-filmcraft --control 9876 &
-filmcraft-cli mcp --bridge 127.0.0.1:9876
+- **No setup (AutoCut).** Without `FILMCRAFT_CONTROL_TOKEN`, the app makes a fresh token each time
+  its control server starts and, once the port is its own, writes it to `<port>.token` in the
+  per-user FilmCraft folder's `control/` (macOS `~/Library/Application Support/FilmCraft/control/`,
+  Windows `%APPDATA%\FilmCraft\control\`, elsewhere `$XDG_DATA_HOME/filmcraft/control/` or
+  `~/.local/share/filmcraft/control/`; `FILMCRAFT_CONTROL_DIR` overrides the folder). Only its owner
+  can read the file (0600 in a 0700 folder on Unix); it is replaced at every launch and removed when
+  the app quits. The CLI and MCP bridge read it for the port they are given, at each request, so a
+  restarted app's new token is picked up:
+
+  ```sh
+  open -n --env FILMCRAFT_CONTROL_PORT=9876 AutoCut.app     # or: filmcraft --control 9876 &
+  filmcraft-cli --bridge 127.0.0.1:9876 exec project.inspect
+  filmcraft-cli --bridge 127.0.0.1:9876 call ui.screenshot path=/tmp/app.png   # any method below
+  filmcraft-cli mcp --bridge 127.0.0.1:9876
+  ```
+
+- **A token you choose.** With `FILMCRAFT_CONTROL_TOKEN` set (64 hex characters) the app uses it
+  and writes no file; clients started from the same environment send it. Without a valid value the
+  desktop leaves the listener closed. Keep it private: don't put the value in command-line
+  arguments, logs, checked-in MCP configuration, or shared files.
+
+  ```sh
+  export FILMCRAFT_CONTROL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  filmcraft --control 9876 &
+  filmcraft-cli mcp --bridge 127.0.0.1:9876
+  ```
+
+A client takes `FILMCRAFT_CONTROL_TOKEN` when it is set, else the file (`filmcraft_automation::control_token`).
+Every raw JSON request includes the token as a top-level `token` string; a script reads it the same
+way (Python):
+
+```python
+import os, pathlib
+token = os.environ.get("FILMCRAFT_CONTROL_TOKEN") or (pathlib.Path.home() / "Library/Application Support/FilmCraft/control/9876.token").read_text().strip()
 ```
-
-The CLI / MCP bridge reads this variable automatically. Keep it private: don't put the value in
-command-line arguments, logs, checked-in MCP configuration, or shared files. Without a valid value,
-the desktop leaves the listener closed. Every raw JSON request must include the same top-level
-`token` string; missing or incorrect credentials get an error and close the connection before any
-request is dispatched. Loopback alone does not restrict clients to the desktop owner's OS account.
 
 One JSON request per line → one JSON reply per line. The app opts out of macOS App Nap
 (`apps/filmcraft/src/app_nap.rs`): a hidden window would otherwise drop the whole process to

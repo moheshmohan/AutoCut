@@ -4,17 +4,20 @@
 //! (an HTTP request line from a browser's cross-origin `fetch`, a stray `nc`, binary junk) gets
 //! one error reply and the connection is closed, so nothing after it is executed. Lines are
 //! bounded ([`MAX_LINE`]) and so is the number of open connections ([`MAX_CONNECTIONS`]); junk
-//! never reaches the UI thread. Every request must carry the session credential from
-//! `FILMCRAFT_CONTROL_TOKEN`; without a configured credential the listener stays closed.
+//! never reaches the UI thread. Every request must carry the session credential: the one in
+//! `FILMCRAFT_CONTROL_TOKEN`, or (AutoCut) without one, a fresh token written to an owner-only file
+//! for local clients ([`start`]). A request without it is refused before it is dispatched.
 //! See `docs/control-protocol.md`.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use filmcraft_automation::control_token;
 use filmcraft_ui_egui::ControlRequest;
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
@@ -25,15 +28,41 @@ pub const MAX_LINE: usize = 4 * 1024 * 1024;
 /// Connections served at once; further ones get an error line and are closed.
 pub const MAX_CONNECTIONS: usize = 16;
 
+/// Start the server on `port`. Its token is `FILMCRAFT_CONTROL_TOKEN` when that is set; otherwise
+/// (AutoCut) a fresh one is made for this run and written to the owner-only token file of the
+/// port ([`control_token::path`]), where the owner's local clients find it, so a launch with just
+/// `FILMCRAFT_CONTROL_PORT` needs no token step.
 pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
-    start_with_token(port, ctx, std::env::var("FILMCRAFT_CONTROL_TOKEN").ok())
+    if let Some(token) = control_token::from_env() {
+        return start_with_token(port, ctx, Some(token));
+    }
+    let token = match control_token::generate() {
+        Ok(token) => token,
+        Err(e) => {
+            eprintln!("filmcraft: control server disabled: no token: {e}");
+            return channel::<ControlRequest>().1;
+        }
+    };
+    let file = control_token::path(port);
+    if file.is_none() {
+        eprintln!("filmcraft: no folder for the control token (no home folder); clients need FILMCRAFT_CONTROL_TOKEN");
+    }
+    start_listener(port, ctx, Some(token), file)
 }
 
 fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> Receiver<ControlRequest> {
+    start_listener(port, ctx, token, None)
+}
+
+/// Bind `port` and serve it with `token`; then, when `publish` names a file, write the token there
+/// for local clients. The file is written only once the port is this app's, so a second app on a
+/// port in use never replaces the first one's token.
+fn start_listener(port: u16, ctx: egui::Context, token: Option<String>, publish: Option<PathBuf>) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
     // An inherited environment variable shares the credential with the owner's bridge process
-    // without exposing it in command-line arguments, logs, or a shared discovery file.
-    let Some(token) = token.filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())) else {
+    // without exposing it in command-line arguments or logs; a generated one goes to a file only
+    // the owner can read.
+    let Some(token) = token.filter(|t| control_token::is_valid(t)) else {
         eprintln!("filmcraft: control server disabled: FILMCRAFT_CONTROL_TOKEN must contain 64 random hex characters (see docs/control-protocol.md)");
         return rx;
     };
@@ -44,9 +73,29 @@ fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> Rec
             return rx;
         }
     };
+    if let Some(file) = publish {
+        match control_token::publish(&file, &token) {
+            Ok(()) => {
+                eprintln!("filmcraft: control token for local clients in {}", file.display());
+                *PUBLISHED.lock().unwrap_or_else(PoisonError::into_inner) = Some((file, token.clone()));
+            }
+            Err(e) => eprintln!("filmcraft: could not write the control token to {} ({e}); clients need FILMCRAFT_CONTROL_TOKEN", file.display()),
+        }
+    }
     eprintln!("filmcraft: control server listening on 127.0.0.1:{port}");
     std::thread::spawn(move || accept_loop(listener, tx, ctx, token));
     rx
+}
+
+/// The token file this run wrote, and its token.
+static PUBLISHED: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
+
+/// Remove the token file this run wrote, unless another app on the port has replaced it. Called
+/// when the app quits; after a crash the file stays, holding a token nothing accepts any more.
+pub fn withdraw_token() {
+    if let Some((file, token)) = PUBLISHED.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        control_token::withdraw(&file, &token);
+    }
 }
 
 fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: String) {
@@ -397,5 +446,45 @@ mod tests {
         c.read_to_string(&mut reply).unwrap();
         server.join().unwrap();
         assert_eq!(serde_json::from_str::<Value>(&reply).unwrap(), json!({"id": 7, "ok": true}));
+    }
+
+    /// AutoCut: a token made for the run is written for local clients once the port is the app's;
+    /// a request with it is served and one without it is refused; a second app that cannot have
+    /// the port leaves the first one's token alone; quitting removes it.
+    #[test]
+    fn a_generated_token_is_published_once_the_port_is_ours() {
+        let dir = std::env::temp_dir().join(format!("fc-control-token-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let port = TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let file = dir.join(format!("{port}.token"));
+        let token = control_token::generate().unwrap();
+        let rx = start_listener(port, egui::Context::default(), Some(token.clone()), Some(file.clone()));
+        assert_eq!(control_token::read(&file).as_deref(), Some(token.as_str()));
+        let second = start_listener(port, egui::Context::default(), Some(control_token::generate().unwrap()), Some(file.clone()));
+        assert!(matches!(second.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)), "the port is taken");
+        assert_eq!(control_token::read(&file).as_deref(), Some(token.as_str()), "the first app's token stays");
+        // the app's side: answer whatever reaches the queue
+        let ui = std::thread::spawn(move || {
+            let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let method = request.method.clone();
+            request.reply.send(json!({"ok": true, "result": method})).unwrap();
+        });
+        let ask = |line: Value| {
+            let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            writeln!(c, "{line}").unwrap();
+            c.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut reply = String::new();
+            c.read_to_string(&mut reply).unwrap();
+            serde_json::from_str::<Value>(reply.trim()).unwrap()
+        };
+        let refused = ask(json!({"id": 1, "method": "ui.inspect"}));
+        assert_eq!(refused["error"], "control authentication failed; closing the connection");
+        let read = control_token::read(&file).unwrap();
+        assert_eq!(ask(json!({"id": 2, "token": read, "method": "ui.inspect"})), json!({"id": 2, "ok": true, "result": "ui.inspect"}));
+        ui.join().unwrap();
+        withdraw_token();
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

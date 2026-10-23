@@ -81,6 +81,9 @@ USAGE
 SUBCOMMANDS
   exec <id> [key=value ...]     run one command; prints its result as JSON
   exec <id> '<json params>'     same, params as one JSON object
+  call <method> [key=value ...] with --bridge: one control method of the running app (ui.elements,
+                                ui.click, ui.screenshot, project.inspect, …; docs/control-protocol.md),
+                                its result as JSON; the app's token is sent for you
   run <script.jsonl | ->        run commands, one {\"id\",\"params\"} per line (# comments ok), in
                                 order: file.exportMedia waits for its file before the next line
                                 (and before exit) unless its params say \"wait\": false
@@ -763,7 +766,8 @@ OPTIONS
   --demo                        open the built-in demo project (headless)
   --save                        save the project back to --project when done
   --save-as <p.fcproj>          save the project to this path when done
-  --bridge <127.0.0.1:PORT>     send commands to the running app (`filmcraft --control PORT`)
+  --bridge <127.0.0.1:PORT>     send commands to the running app (`filmcraft --control PORT`); its
+                                token is FILMCRAFT_CONTROL_TOKEN, else the one the app wrote for PORT
   --data-dir <dir>              FilmCraft data directory for user export presets (headless;
                                 default: the app's data directory)
   --keep-going                  `run`: report failing lines and continue
@@ -2868,6 +2872,18 @@ async fn cli() {
                 Err(e) => fail(format!("{id}: {e}")),
             }
             b.finish(&a).await;
+        }
+        "call" => {
+            let method = a.pos(1).unwrap_or_else(|| usage("call <method> [key=value ...] --bridge 127.0.0.1:PORT"));
+            let params = a.params_from(2).unwrap_or_else(|e| usage(e));
+            let Some(addr) = a.opt("--bridge") else {
+                usage("call sends a control method to the running app: add --bridge 127.0.0.1:PORT (engine commands work headless with exec)")
+            };
+            let client = BridgeClient::new(addr).unwrap_or_else(|e| usage(e));
+            match client.call(method, params).await {
+                Ok(v) => print(&a, &v),
+                Err(e) => fail(format!("{method}: {e}")),
+            }
         }
         "exec" => {
             let id = a.pos(1).unwrap_or_else(|| usage("exec <id> [key=value ...]"));

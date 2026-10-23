@@ -8,8 +8,9 @@
 //! (the demo project), Open Most Recent, or an empty project.
 //!
 //! `--control <port>` (or `FILMCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server;
-//! `FILMCRAFT_CONTROL_TOKEN` is required (see `docs/control-protocol.md`).
-//! see `filmcraft_ui_egui::control` for the methods. A port that is not a number is an error from
+//! every request carries its token, `FILMCRAFT_CONTROL_TOKEN` or one the server makes and writes to
+//! an owner-only file for local clients (see `docs/control-protocol.md`); see
+//! `filmcraft_ui_egui::control` for the methods. A port that is not a number is an error from
 //! either source.
 //!
 //! Auto-save and the crash-recovery journal run in every session (data in `--data-dir`, else
@@ -153,6 +154,8 @@ fn main() -> eframe::Result {
     };
     // However it ended, this start no longer counts as one that died.
     graphics.finish();
+    // The control token this run wrote for local clients is no use once it has quit.
+    control_server::withdraw_token();
     // The window could not be created (no usable GPU / graphics driver, no display): say so
     // instead of exiting silently, and keep the reason in the crash log.
     if let Err(e) = &started {

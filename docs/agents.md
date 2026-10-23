@@ -23,10 +23,13 @@ and write wherever the user can.
 
 ```sh
 cargo build --release -p filmcraft-cli -p filmcraft
-export FILMCRAFT_CONTROL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 ./target/release/filmcraft --control 9876 &      # only for the bridge server
 claude                                           # approve the project MCP servers when asked
 ```
+
+The app writes its control token for the port to an owner-only file that the bridge reads, so
+there is no token to pass around; to choose one yourself, export `FILMCRAFT_CONTROL_TOKEN` for both
+([control-protocol.md](control-protocol.md)).
 
 To register the server by hand, or for another MCP client, use the absolute binary path:
 
@@ -185,10 +188,11 @@ progress and stop it:
 ## 2. Control channel
 
 `filmcraft --control 9876` (or `FILMCRAFT_CONTROL_PORT=9876`) listens on `127.0.0.1` only. Send one
-JSON request per line and get one JSON reply per line. Set a fresh `FILMCRAFT_CONTROL_TOKEN` for the
-desktop session as above; the CLI / MCP bridge must inherit the same variable. Raw requests must
-include it as `token` on every line (replace the placeholders below). Full setup and method table:
-[control-protocol.md](control-protocol.md).
+JSON request per line and get one JSON reply per line. Every request carries the app's token as
+`token` (replace the placeholders below): `FILMCRAFT_CONTROL_TOKEN` when you set one, else the one
+the app wrote to `control/<port>.token` in the per-user FilmCraft folder. The CLI and MCP bridge
+send it for you (`filmcraft-cli --bridge 127.0.0.1:9876 call <method> key=value…` reaches any
+method without a script). Full setup and method table: [control-protocol.md](control-protocol.md).
 
 ```jsonc
 {"id":1,"token":"<FILMCRAFT_CONTROL_TOKEN>","method":"engine.commands"}
@@ -206,10 +210,12 @@ Replies look like `{"id":4,"ok":true,"result":{"cuts":2}}` or `{"id":7,"ok":fals
 Minimal client:
 
 ```python
-import json, os, socket
+import json, os, pathlib, socket
+# the token you set, else the app's file (macOS path shown; see control-protocol.md for the others)
+token = os.environ.get("FILMCRAFT_CONTROL_TOKEN") or (pathlib.Path.home() / "Library/Application Support/FilmCraft/control/9876.token").read_text().strip()
 s = socket.create_connection(("127.0.0.1", 9876)); f = s.makefile("rw")
 def call(method, **params):
-    f.write(json.dumps({"id": 1, "token": os.environ["FILMCRAFT_CONTROL_TOKEN"], "method": method, "params": params}) + "\n"); f.flush()
+    f.write(json.dumps({"id": 1, "token": token, "method": method, "params": params}) + "\n"); f.flush()
     return json.loads(f.readline())
 print(call("engine.execute", command="sequence.inspect"))
 ```
