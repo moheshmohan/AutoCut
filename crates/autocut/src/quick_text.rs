@@ -1075,8 +1075,19 @@ async fn round(
         }
         out.insert(si, verdicts);
     }
-    if looked.is_some() {
-        *looked_any = looked;
+    // what checked the texts in any round: a later round that asked nothing still had the answers
+    // of an earlier one
+    if let Some(mut l) = looked {
+        if let Some(prev) = looked_any.take() {
+            l.asker = l.asker.or(prev.asker);
+            l.embedder = l.embedder.or(prev.embedder);
+            for n in prev.notes {
+                if !l.notes.contains(&n) {
+                    l.notes.push(n);
+                }
+            }
+        }
+        *looked_any = Some(l);
     }
     out
 }

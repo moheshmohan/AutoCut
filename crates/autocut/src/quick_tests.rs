@@ -402,7 +402,9 @@ impl crate::Executor for Checker {
         } else {
             Vec::new()
         };
-        let v = json!({"job": 1, "scenes": {"cosine": cosine, "answers": answers, "embedder": "siglip-fake", "asker": if self.asker { json!("vlm-fake") } else { Value::Null }}});
+        // like the engine: a describer is named only when it was asked something
+        let asked = p["asks"].as_array().is_some_and(|a| !a.is_empty());
+        let v = json!({"job": 1, "scenes": {"cosine": cosine, "answers": answers, "embedder": "siglip-fake", "asker": if self.asker && asked { json!("vlm-fake") } else { Value::Null }}});
         Box::pin(async move { Ok(v) })
     }
 }
@@ -495,7 +497,8 @@ fn texts_are_checked_against_their_frames() {
     // "2" is said nowhere: the call to action falls back to its own line
     assert_eq!(of("outro").text.as_deref(), Some("Follow for more"), "{:?}", of("outro").tried);
     assert_eq!(of("outro_sub").text.as_deref(), Some("More robots every week"));
-    assert_eq!(summary["how"], "words, the describer's answers and SigLIP");
+    assert_eq!(summary["how"], "words, the describer's answers and SigLIP", "the describer answered in the first round: {summary}");
+    assert_eq!(summary["asker"], "vlm-fake");
     assert!(summary["rejected"].as_u64().unwrap() >= 3, "{summary}");
     // the report's entry: what was under it and every candidate
     let j = hook.to_json(&picks);
