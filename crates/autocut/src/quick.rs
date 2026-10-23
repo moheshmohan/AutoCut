@@ -71,8 +71,6 @@ const MEDIA_EXTENSIONS: &[&str] =
 const BPM_RANGE: (f64, f64) = (72.0, 168.0);
 /// Frames on the review sheet.
 pub const SHEET_FRAMES: usize = 12;
-/// Kept speech quoted to the writer, characters.
-const SPEECH_QUOTE: usize = 700;
 
 fn invalid(m: impl Into<String>) -> AutoCutError {
     AutoCutError::Invalid(format!("quick: {}", m.into()))
@@ -93,6 +91,13 @@ fn secs_of_ticks(v: &Value) -> Option<f64> {
 /// At most `n` characters of `s`.
 fn chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+/// A layout's frame shape, width / height (`9:16` → 0.5625), when it reads as one.
+pub fn aspect_ratio(aspect: &str) -> Option<f64> {
+    let (w, h) = aspect.split_once(':')?;
+    let (w, h) = (w.trim().parse::<f64>().ok()?, h.trim().parse::<f64>().ok()?);
+    (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then(|| w / h).filter(|r| (0.1..=10.0).contains(r))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -444,8 +449,18 @@ pub struct SlotInfo {
     pub min_count: usize,
     pub max_chars: Option<u32>,
     pub ai: Option<Hints>,
-    /// `template.inspect`: each placement's media index and length, seconds.
-    pub placements: Vec<(usize, f64)>,
+    /// `template.inspect`: each placement's media index, where it starts in the template and how
+    /// long it is (seconds, at the template's own tempo).
+    pub placements: Vec<Place>,
+}
+
+/// Where one placement of a slot is in the template.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Place {
+    pub media: usize,
+    /// Seconds into the template (None when the template did not say).
+    pub start: Option<f64>,
+    pub seconds: f64,
 }
 
 impl SlotInfo {
@@ -457,7 +472,7 @@ impl SlotInfo {
     }
     /// The longest placement of media `m`, seconds.
     pub fn need(&self, m: usize) -> f64 {
-        self.placements.iter().filter(|(k, _)| *k == m).map(|(_, s)| *s).fold(0.0, f64::max)
+        self.placements.iter().filter(|p| p.media == m).map(|p| p.seconds).fold(0.0, f64::max)
     }
 }
 
@@ -519,7 +534,11 @@ pub fn parse_template(t: &Value) -> Option<TemplateInfo> {
                 .map(|a| {
                     a.iter()
                         .take(256)
-                        .map(|p| (p["media"].as_u64().map_or(0, |m| m.min(255) as usize), finite(&p["seconds"]).unwrap_or(0.0).clamp(0.0, 3600.0)))
+                        .map(|p| Place {
+                            media: p["media"].as_u64().map_or(0, |m| m.min(255) as usize),
+                            start: secs_of_ticks(&p["start"]).filter(|s| (0.0..=86_400.0).contains(s)),
+                            seconds: finite(&p["seconds"]).unwrap_or(0.0).clamp(0.0, 3600.0),
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1151,194 +1170,13 @@ pub fn fill_value(p: &Pick) -> Value {
 // text
 // ---------------------------------------------------------------------------------------------
 
-/// A text slot's place to write.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct TextSpec {
-    pub slot: String,
-    pub index: usize,
-    pub prompt: String,
-    pub max_chars: usize,
-    /// The pick it is about, when the slot says.
-    pub about: Option<usize>,
-    pub capitals: bool,
-}
-
-/// The texts a template's text slots take.
-pub fn text_specs(t: &TemplateInfo, picks: &[Pick]) -> Vec<TextSpec> {
-    let mut out = Vec::new();
-    for s in t.slots.iter().filter(|s| s.kind == "text") {
-        let h = s.hints();
-        let limit = s.max_chars.unwrap_or(40).clamp(1, 400) as usize;
-        let max_chars = h.max_chars.map_or(limit, |m| (m as usize).min(limit)).max(1);
-        let prompt = [h.prompt.as_str(), s.prompt.as_str(), s.name.as_str()].into_iter().find(|p| !p.trim().is_empty()).unwrap_or("A short line").to_string();
-        let capitals = prompt.to_lowercase().contains("capital");
-        for i in 0..s.count.min(64) {
-            let about = (!h.about.is_empty()).then(|| picks.iter().position(|p| p.slot == h.about && p.media == i)).flatten();
-            out.push(TextSpec { slot: s.id.clone(), index: i, prompt: prompt.clone(), max_chars, about, capitals });
-        }
-    }
-    out
-}
-
-/// `t` on one line, without quotes, at most `max` characters (cut at a word when it can be).
-pub fn tidy_text(t: &str, max: usize, capitals: bool) -> String {
-    let t: String = t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
-    let t = t.trim().trim_matches(['"', '\'', '“', '”', '«', '»']).trim().trim_end_matches(['.', ';', ':']).to_string();
-    let t = if capitals { t.to_uppercase() } else { t };
-    if t.chars().count() <= max {
-        return t;
-    }
-    let cut: String = t.chars().take(max).collect();
-    match cut.rfind(' ') {
-        Some(i) if i >= max / 2 => cut.get(..i).unwrap_or(&cut).trim_end_matches([',', '-', '–']).trim().to_string(),
-        _ => cut.trim().to_string(),
-    }
-}
-
-/// Title case of `s`.
-fn title_case(s: &str) -> String {
-    s.split_whitespace()
-        .map(|w| {
-            let mut c = w.chars();
-            c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// A text without a model: what the shot it is about shows (its subject, the text read on it, its
-/// caption), else the topic, else a line for what the slot is (a call to action, a label).
-pub fn fallback_text(t: &TextSpec, picks: &[Pick], shots: &[ShotInfo], topic: Option<&str>) -> Option<String> {
-    let short = t.max_chars <= 20;
-    let about = t.about.and_then(|i| picks.get(i));
-    if let Some(p) = about {
-        let d = shots.iter().find(|s| s.item == p.item && s.index == p.shot).and_then(ShotInfo::description);
-        let subject = d.and_then(|d| d.subjects.first()).map(|s| s.name.trim().to_string()).filter(|s| !s.is_empty());
-        let read = d.and_then(|d| d.text.iter().find(|x| x.chars().count() >= 3)).map(|s| s.trim().to_string());
-        let pick = if short { subject.or(read) } else { d.map(|d| d.caption.trim().to_string()).filter(|c| !c.is_empty()).or(subject) };
-        if let Some(x) = pick {
-            return Some(tidy_text(&title_case(&x), t.max_chars, t.capitals));
-        }
-    }
-    let id = t.slot.to_lowercase();
-    let p = t.prompt.to_lowercase();
-    let pick = |a: &str, b: &str| if t.index == 0 { a.to_string() } else { b.to_string() };
-    let line = if id.contains("label") {
-        pick("Before", "After")
-    } else if id.contains("cta") || id.contains("outro") && !id.contains("sub") || p.contains("call to action") {
-        "Follow for more".into()
-    } else if id.contains("question") && !id.contains("sub") {
-        "Which one is your favourite?".into()
-    } else if id.ends_with("_sub") || p.contains("closing line") || id.contains("closing") {
-        "See you in the next one".into()
-    } else if let Some(topic) = topic.filter(|t| !t.trim().is_empty()) {
-        title_case(topic.trim())
-    } else if id.contains("hook") {
-        "Watch this".into()
-    } else {
-        return None;
-    };
-    Some(tidy_text(&line, t.max_chars, t.capitals))
-}
-
-const WRITE_SYSTEM: &str = "You write the on-screen text of a short vertical video (YouTube Shorts, Instagram Reels, TikTok). Each text is short, concrete and natural, like a creator would write it: no hashtags, no emoji, no quotation marks. Use only what the shots, the speech and the topic say: never invent names, numbers, prices or claims. Name things by what the shots show (their subjects, the text read on them) in the topic's words, not by objects in the background. Keep every text within its character limit. Answer with JSON only.";
-
-/// What the writer is told about the video.
-fn context(picks: &[Pick], shots: &[ShotInfo], speech: &[ItemSpeech], topic: Option<&str>, language: Option<&str>) -> String {
-    let mut c = String::new();
-    c.push_str(&format!("Topic: {}\n", topic.filter(|t| !t.trim().is_empty()).unwrap_or("(not given)")));
-    if let Some(l) = language.filter(|l| !l.is_empty() && *l != "en" && *l != "auto") {
-        c.push_str(&format!("Write the texts in the language with ISO code \"{l}\".\n"));
-    }
-    c.push_str("The shots, in the order they play:\n");
-    for (k, p) in picks.iter().enumerate().take(40) {
-        let s = shots.iter().find(|s| s.item == p.item && s.index == p.shot);
-        let d = s.and_then(ShotInfo::description);
-        let mut line = format!("{}. [{}] {}", k + 1, p.slot, chars(&p.caption, 200));
-        if let Some(d) = d {
-            let subjects: Vec<&str> = d.subjects.iter().map(|x| x.name.trim()).filter(|n| !n.is_empty()).take(4).collect();
-            if !subjects.is_empty() {
-                line.push_str(&format!("; shows: {}", chars(&subjects.join(", "), 120)));
-            }
-            if !d.setting.is_empty() {
-                line.push_str(&format!(" (at {})", chars(&d.setting, 80)));
-            }
-            let read: Vec<&str> = d.text.iter().map(String::as_str).filter(|t| !t.trim().is_empty()).take(4).collect();
-            if !read.is_empty() {
-                line.push_str(&format!("; text on screen: {}", chars(&read.join(", "), 120)));
-            }
-            if !d.detail.is_empty() {
-                line.push_str(&format!("; in detail: {}", chars(&d.detail, 400)));
-            }
-        }
-        if let Some(said) = &p.said {
-            line.push_str(&format!("; said: \"{}\"", chars(said, 200)));
-        }
-        c.push_str(&line);
-        c.push('\n');
-    }
-    let kept: String = speech.iter().filter(|s| s.talking()).flat_map(|s| s.kept.iter().map(|k| k.text.as_str())).collect::<Vec<_>>().join(" ");
-    if !kept.trim().is_empty() {
-        c.push_str(&format!("What is said (kept takes): \"{}\"\n", chars(kept.trim(), SPEECH_QUOTE)));
-    }
-    c
-}
-
-/// Write the texts with `model` (one request); what it leaves out or gets wrong falls back
-/// ([`fallback_text`]). Returns each text and who wrote it (`model` or `fallback`).
-pub async fn write_texts(
-    model: Option<&dyn ChatModel>,
-    specs: &[TextSpec],
-    picks: &[Pick],
-    shots: &[ShotInfo],
-    speech: &[ItemSpeech],
-    topic: Option<&str>,
-    language: Option<&str>,
-    notes: &mut Vec<String>,
-) -> Vec<(TextSpec, Option<String>, &'static str)> {
-    let mut written: HashMap<(String, usize), String> = HashMap::new();
-    if let (Some(m), false) = (model, specs.is_empty()) {
-        let mut asks = String::new();
-        for t in specs.iter().take(64) {
-            let about = t.about.map(|i| format!(" — about shot {}", i + 1)).unwrap_or_default();
-            asks.push_str(&format!("- slot \"{}\" n {}: {} (at most {} characters){about}\n", t.slot, t.index + 1, chars(&t.prompt, 300), t.max_chars));
-        }
-        let user = format!(
-            "{}\nWrite these texts:\n{asks}Answer: {{\"texts\": [{{\"slot\": \"…\", \"n\": 1, \"text\": \"…\"}}, …]}} with one entry per text.",
-            context(picks, shots, speech, topic, language)
-        );
-        match m.complete_json(WRITE_SYSTEM, &user, &[]).await {
-            Ok(v) => {
-                for x in v["texts"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(256) {
-                    // models change the slot's case and write numbers as text: both are read
-                    let (Some(slot), Some(text)) = (x["slot"].as_str(), x["text"].as_str()) else { continue };
-                    let n = x["n"].as_u64().or_else(|| x["n"].as_str().and_then(|n| n.trim().parse().ok())).unwrap_or(1);
-                    let Some(i) = usize::try_from(n).ok().and_then(|n| n.checked_sub(1)) else { continue };
-                    let same = |a: &str| {
-                        a.trim().eq_ignore_ascii_case(slot.trim()) || a.replace(['_', '-'], "").eq_ignore_ascii_case(&slot.replace(['_', '-', ' '], ""))
-                    };
-                    let Some(t) = specs.iter().find(|t| same(&t.slot) && t.index == i) else { continue };
-                    let tidy = tidy_text(text, t.max_chars, t.capitals);
-                    if !tidy.is_empty() {
-                        written.insert((t.slot.clone(), i), tidy);
-                    }
-                }
-                if written.is_empty() {
-                    notes.push(format!("text: {} answered no usable text; written from the descriptions instead", m.id()));
-                }
-            }
-            Err(e) => notes.push(format!("text: {} did not answer ({e}); written from the descriptions instead", m.id())),
-        }
-    }
-    specs
-        .iter()
-        .map(|t| match written.remove(&(t.slot.clone(), t.index)) {
-            Some(x) => (t.clone(), Some(x), "model"),
-            None => (t.clone(), fallback_text(t, picks, shots, topic), "fallback"),
-        })
-        .collect()
-}
+#[path = "quick_text.rs"]
+pub mod text;
+use text::title_case;
+pub use text::{
+    GENERIC, Grounds, Looked, Spot, TextSpec, Verdict, WordCheck, Written, check_words, content_words, fallback_options, fallback_text, judge, text_specs,
+    tidy_text, write_texts,
+};
 
 // ---------------------------------------------------------------------------------------------
 // the job
@@ -1414,6 +1252,8 @@ pub struct ModelsUsed {
     pub speech: BTreeSet<String>,
     pub vad: BTreeSet<String>,
     pub writer: Option<String>,
+    /// What checked the texts against their frames (SigLIP 2, Qwen3-VL).
+    pub checker: Vec<String>,
     pub redaction: Option<String>,
 }
 
@@ -1428,6 +1268,9 @@ pub struct Report {
     pub facts: Facts,
     pub picks: Vec<Pick>,
     pub texts: Vec<Value>,
+    /// How the texts were checked: by what, how many candidates were rejected.
+    #[serde(rename = "textCheck", skip_serializing_if = "Option::is_none")]
+    pub text_check: Option<Value>,
     pub models: ModelsUsed,
     pub fallbacks: Vec<String>,
     pub warnings: Vec<String>,
@@ -1725,7 +1568,29 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
         report.fallbacks.push("text: no local model (Ollama): written from the shots' descriptions and the topic".into());
     }
     let tspecs = text_specs(&t, &picks);
-    let texts = write_texts(writer, &tspecs, &picks, &shots, &speech, opts.topic.as_deref(), opts.language.as_deref(), &mut notes).await;
+    let (texts, checked) = write_texts(
+        Some(ex),
+        aspect_ratio(&opts.aspect),
+        writer,
+        &tspecs,
+        &picks,
+        &shots,
+        &speech,
+        opts.topic.as_deref(),
+        opts.language.as_deref(),
+        &mut notes,
+    )
+    .await;
+    match checked["how"].as_str() {
+        Some("words only") if !tspecs.is_empty() => report.fallbacks.push(
+            "text check: no vision model (SigLIP 2, Qwen3-VL): each text's words were checked against the descriptions of the shots under it, not its frames"
+                .into(),
+        ),
+        Some("words and SigLIP") => report.fallbacks.push("text check: no describer (Qwen3-VL) to ask: SigLIP 2's scores decided what the words name".into()),
+        _ => {}
+    }
+    report.models.checker = [checked["embedder"].as_str(), checked["asker"].as_str()].into_iter().flatten().map(str::to_string).collect();
+    report.text_check = Some(checked);
     // ---- 7. apply
     lines("[7/8] building the short");
     let mut slots = serde_json::Map::new();
@@ -1737,13 +1602,13 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
         }
     }
     let mut by_slot: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
-    for (spec, text, who) in &texts {
-        let Some(text) = text else {
-            notes.push(format!("text: nothing to put in `{}` {}: the template's own text stays", spec.slot, spec.index + 1));
+    for w in &texts {
+        report.texts.push(w.to_json(&picks));
+        let Some(text) = &w.text else {
+            notes.push(format!("text: nothing to put in `{}` {}: the template's own text stays", w.spec.slot, w.spec.index + 1));
             continue;
         };
-        by_slot.entry(spec.slot.clone()).or_default().push((spec.index, text.clone()));
-        report.texts.push(json!({"slot": spec.slot, "n": spec.index + 1, "text": text, "by": who}));
+        by_slot.entry(w.spec.slot.clone()).or_default().push((w.spec.index, text.clone()));
     }
     for (slot, mut list) in by_slot {
         list.sort_by_key(|(i, _)| *i);

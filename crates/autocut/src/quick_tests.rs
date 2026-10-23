@@ -291,6 +291,287 @@ fn text_is_tidy_and_falls_back() {
     assert_eq!(fallback_text(cta, &picks, &shots, None).as_deref(), Some("Follow for more"));
     let hook = specs.iter().find(|s| s.slot == "hook_line").unwrap();
     assert!(fallback_text(hook, &picks, &shots, Some("robots")).is_some());
+    // a subject's name too long for its place keeps its noun
+    let mut long = library().1;
+    if let Some(d) = long.iter_mut().find(|s| s.item == 1).and_then(|s| s.shot.description.as_mut()) {
+        d.subjects[0].name = "bright orange humanoid robot".into();
+    }
+    let picks = assign(&pick_specs(&t), &long, &[], &HashMap::new(), None);
+    let hook = text_specs(&t, &picks).into_iter().find(|s| s.slot == "hook_line").unwrap();
+    assert_eq!(fallback_options(&hook, &picks, &long, None).first().map(String::as_str), Some("HUMANOID ROBOT"));
+}
+
+/// Each text knows what plays under it: the picture placements its own placement overlaps in the
+/// template.
+#[test]
+fn texts_know_what_is_shown_under_them() {
+    let (_, shots) = library();
+    let t = inspected("builtin:tech-reveal");
+    let picks = assign(&pick_specs(&t), &shots, &[], &HashMap::new(), None);
+    let specs = text_specs(&t, &picks);
+    let under = |slot: &str| specs.iter().find(|s| s.slot == slot).unwrap().under.iter().map(|i| picks[*i].slot.as_str()).collect::<Vec<_>>();
+    assert_eq!(under("hook_line"), ["hook"]);
+    assert_eq!(under("title"), ["reveal"]);
+    assert_eq!(under("outro"), ["reveal"], "the end card is the reveal, blurred");
+    // the event recap's closing card is over its opening shot, again
+    let t = inspected("builtin:event-recap-short");
+    let picks = assign(&pick_specs(&t), &shots, &[], &HashMap::new(), None);
+    let specs = text_specs(&t, &picks);
+    let closing = specs.iter().find(|s| s.slot == "closing").unwrap();
+    assert_eq!(closing.under.iter().map(|i| picks[*i].slot.as_str()).collect::<Vec<_>>(), ["establishing"]);
+    // a template without timing: the pick it is about
+    let mut t2 = inspected("builtin:tech-reveal");
+    for s in &mut t2.slots {
+        for p in &mut s.placements {
+            p.start = None;
+        }
+    }
+    let picks = assign(&pick_specs(&t2), &shots, &[], &HashMap::new(), None);
+    let title = text_specs(&t2, &picks).into_iter().find(|s| s.slot == "title").unwrap();
+    assert_eq!(title.under, title.about.into_iter().collect::<Vec<_>>());
+}
+
+#[test]
+fn words_must_come_from_what_is_shown_the_topic_or_the_speech() {
+    assert!(content_words("DON'T MISS IT — FOLLOW FOR MORE").is_empty(), "{:?}", content_words("DON'T MISS IT — FOLLOW FOR MORE"));
+    assert_eq!(content_words("Boy meets robot"), ["boy", "robot"]);
+    let g = Grounds { told: vec!["robot".into(), "expo".into()], shown: vec!["serving".into(), "tray".into(), "bottle".into(), "delivery".into()] };
+    let w = check_words("DRONE DELIVERY", &g);
+    assert_eq!((w.unknown.as_slice(), w.shown.as_slice()), (&["drone".to_string()][..], &["delivery".to_string()][..]));
+    assert_eq!(check_words("Robotic expo", &g), WordCheck::default(), "robotic is the topic's robot");
+    assert_eq!(check_words("TOP 5 ROBOTS", &g).unknown, ["5"], "no invented numbers");
+    assert!(check_words("", &g).unknown.is_empty());
+    // the shots under a text, the topic and the speech
+    let (_, shots) = library();
+    let t = inspected("builtin:tech-reveal");
+    let picks = assign(&pick_specs(&t), &shots, &[], &HashMap::new(), None);
+    let specs = text_specs(&t, &picks);
+    let title = specs.iter().find(|s| s.slot == "title").unwrap();
+    let g = Grounds::of(title, &picks, &shots, &[], Some("robots at the expo"));
+    assert!(g.told.contains(&"expo".to_string()) && g.shown.iter().any(|w| w == "dog"), "{g:?}");
+    assert!(!g.shown.iter().any(|w| w == "humanoid"), "the hook's subject is not under the title: {g:?}");
+}
+
+/// A fake `media.checkText`: each window's item shows `truth[item]`; the describer says no when a
+/// text names anything else; SigLIP's cosine is higher the more of a text a window shows.
+struct Checker {
+    truth: HashMap<u64, Vec<&'static str>>,
+    asker: bool,
+    calls: std::sync::Mutex<Vec<Value>>,
+}
+
+impl Checker {
+    fn new(truth: &[(u64, &[&'static str])], asker: bool) -> Self {
+        Checker { truth: truth.iter().map(|(i, w)| (*i, w.to_vec())).collect(), asker, calls: Default::default() }
+    }
+    fn sees(&self, item: u64, text: &str) -> (usize, usize) {
+        let words = content_words(text);
+        let shown = self.truth.get(&item).cloned().unwrap_or_default();
+        (words.iter().filter(|w| shown.contains(&w.as_str())).count(), words.len())
+    }
+}
+
+impl crate::Executor for Checker {
+    fn execute(&self, id: &str, p: Value) -> crate::ExecFuture {
+        assert_eq!(id, "media.checkText");
+        self.calls.lock().unwrap().push(p.clone());
+        let items: Vec<u64> = p["windows"].as_array().unwrap().iter().map(|w| w["item"].as_u64().unwrap()).collect();
+        let texts: Vec<String> = p["texts"].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
+        let cosine: Vec<Vec<f64>> =
+            texts.iter().map(|t| items.iter().map(|i| self.sees(*i, t)).map(|(hit, n)| 0.05 + 0.1 * hit as f64 / n.max(1) as f64).collect()).collect();
+        let answers: Vec<Value> = if self.asker {
+            p["asks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| {
+                    let (w, t) = (a["window"].as_u64().unwrap() as usize, a["text"].as_u64().unwrap() as usize);
+                    // one thing of the text at a time
+                    let about = a["about"].as_str().unwrap();
+                    assert!(texts[t].to_lowercase().contains(about), "{about} is a word of {}", texts[t]);
+                    let (hit, n) = self.sees(items[w], about);
+                    json!({"window": w, "text": t, "about": about, "answer": if hit == n { "yes" } else { "no" }})
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let v = json!({"job": 1, "scenes": {"cosine": cosine, "answers": answers, "embedder": "siglip-fake", "asker": if self.asker { json!("vlm-fake") } else { Value::Null }}});
+        Box::pin(async move { Ok(v) })
+    }
+}
+
+/// The library with a boy in the hook shot's description (he walks out before the moment used)
+/// and a serving robot as the reveal.
+fn expo_library() -> Vec<ShotInfo> {
+    let (_, mut shots) = library();
+    for s in &mut shots {
+        let Some(d) = s.shot.description.as_mut() else { continue };
+        match s.item {
+            1 => d.caption = "A humanoid robot waves as a young boy approaches it".into(),
+            3 => {
+                d.caption = "A white serving robot carries bottles on its trays across the stage".into();
+                d.subjects[0].name = "serving robot".into();
+            }
+            _ => {}
+        }
+    }
+    shots
+}
+
+type Asked = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A writer that answers `answers` in turn (the last one again), keeping what it was asked.
+fn expo_writer(answers: Vec<Value>) -> (FnModel, Asked) {
+    let asked: Asked = Default::default();
+    let seen = asked.clone();
+    let answers = std::sync::Mutex::new(answers);
+    let m = FnModel::new("writer", move |system, user, _| {
+        assert!(system.contains("only what those shots show"), "{system}");
+        seen.lock().unwrap().push(user.to_string());
+        let mut a = answers.lock().unwrap();
+        if a.len() > 1 { Ok(a.remove(0)) } else { Ok(a[0].clone()) }
+    });
+    (m, asked)
+}
+
+#[test]
+fn the_writer_sees_only_the_shots_under_each_text() {
+    let shots = expo_library();
+    let t = inspected("builtin:tech-reveal");
+    let picks = assign(&pick_specs(&t), &shots, &[], &HashMap::new(), None);
+    let specs = text_specs(&t, &picks);
+    let (model, asked) = expo_writer(vec![json!({"texts": [{"slot": "title", "n": 1, "options": ["SERVING ROBOT"]}]})]);
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let mut notes = Vec::new();
+    rt.block_on(write_texts(None, None, Some(&model), &specs, &picks, &shots, &[], Some("robots"), None, &mut notes));
+    let user = asked.lock().unwrap()[0].clone();
+    let block = |slot: &str| {
+        let at = user.find(&format!("slot \"{slot}\"")).unwrap();
+        let rest = &user[at..];
+        rest[..rest[1..].find("slot \"").map_or(rest.len(), |k| k + 1)].to_string()
+    };
+    assert!(block("hook_line").contains("humanoid robot") && !block("hook_line").contains("serving robot"), "{}", block("hook_line"));
+    assert!(block("title").contains("serving robot") && !block("title").contains("humanoid"), "{}", block("title"));
+    assert!(user.contains("options"), "three options are asked for");
+}
+
+/// "DRONE DELIVERY" over a serving robot: a word from nowhere. "BOY MEETS ROBOT" over the hook
+/// once the boy has left: the describer does not see him. Both are rejected, with why, and the
+/// next option is used.
+#[test]
+fn texts_are_checked_against_their_frames() {
+    let shots = expo_library();
+    let t = inspected("builtin:tech-reveal");
+    let picks = assign(&pick_specs(&t), &shots, &[], &HashMap::new(), None);
+    let specs = text_specs(&t, &picks);
+    let checker = Checker::new(&[(1, &["humanoid", "robot", "wave"]), (3, &["serving", "robot", "bottle", "tray", "stage", "white"])], true);
+    let (model, _) = expo_writer(vec![json!({"texts": [
+        {"slot": "hook_line", "n": 1, "options": ["BOY MEETS ROBOT", "HUMANOID SAYS HI", "ROBOTS!"]},
+        {"slot": "title", "n": 1, "options": ["DRONE DELIVERY", "SERVING ROBOT"]},
+        {"slot": "outro", "n": 1, "options": ["FOLLOW FOR PART 2"]},
+        {"slot": "outro_sub", "n": 1, "text": "More robots every week"},
+    ]})]);
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let mut notes = Vec::new();
+    let (got, summary) =
+        rt.block_on(write_texts(Some(&checker), Some(9.0 / 16.0), Some(&model), &specs, &picks, &shots, &[], Some("robots at the expo"), None, &mut notes));
+    let of = |slot: &str| got.iter().find(|w| w.spec.slot == slot).unwrap();
+    let hook = of("hook_line");
+    assert_eq!((hook.text.as_deref(), hook.by.as_str()), (Some("HUMANOID SAYS HI"), "model"), "{:?}", hook.tried);
+    assert_eq!(hook.tried[0].answer.as_deref(), Some("no"));
+    assert!(hook.tried[0].why[0].contains("boy"), "{:?}", hook.tried[0]);
+    assert_eq!(hook.tried[1].answer.as_deref(), Some("yes"));
+    let title = of("title");
+    assert_eq!(title.text.as_deref(), Some("SERVING ROBOT"));
+    assert!(!title.tried[0].ok && title.tried[0].words.unknown.contains(&"drone".to_string()), "{:?}", title.tried[0]);
+    assert_eq!(title.tried[0].answer, None, "a word from nowhere is not even asked about");
+    // "2" is said nowhere: the call to action falls back to its own line
+    assert_eq!(of("outro").text.as_deref(), Some("Follow for more"), "{:?}", of("outro").tried);
+    assert_eq!(of("outro_sub").text.as_deref(), Some("More robots every week"));
+    assert_eq!(summary["how"], "words, the describer's answers and SigLIP");
+    assert!(summary["rejected"].as_u64().unwrap() >= 3, "{summary}");
+    // the report's entry: what was under it and every candidate
+    let j = hook.to_json(&picks);
+    assert_eq!(j["under"][0]["slot"], "hook");
+    assert_eq!(j["candidates"].as_array().unwrap().len(), 2);
+    // the describer was asked only about what the descriptions alone name, over the text's own shot
+    let calls = checker.calls.lock().unwrap();
+    let asks = calls[0]["asks"].as_array().unwrap();
+    let texts: Vec<&str> = asks.iter().map(|a| calls[0]["texts"][a["text"].as_u64().unwrap() as usize].as_str().unwrap()).collect();
+    assert!(texts.contains(&"BOY MEETS ROBOT") && !texts.contains(&"DRONE DELIVERY") && !texts.contains(&"ROBOTS!"), "{texts:?}");
+}
+
+/// The same words twice on screen read as a mistake: the second text takes its next option.
+#[test]
+fn no_two_texts_say_the_same() {
+    let shots = expo_library();
+    let t = inspected("builtin:tech-reveal");
+    let picks = assign(&pick_specs(&t), &shots, &[], &HashMap::new(), None);
+    let specs = text_specs(&t, &picks);
+    let (model, _) = expo_writer(vec![json!({"texts": [
+        {"slot": "outro", "n": 1, "options": ["Follow for more"]},
+        {"slot": "outro_sub", "n": 1, "options": ["FOLLOW FOR MORE", "More robots every week"]},
+    ]})]);
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let mut notes = Vec::new();
+    let (got, _) = rt.block_on(write_texts(None, None, Some(&model), &specs, &picks, &shots, &[], Some("robots"), None, &mut notes));
+    let sub = got.iter().find(|w| w.spec.slot == "outro_sub").unwrap();
+    assert_eq!(sub.text.as_deref(), Some("More robots every week"), "{:?}", sub.tried);
+    assert!(sub.tried[0].why.iter().any(|w| w.contains("the same as another text")), "{:?}", sub.tried[0]);
+    let mut all: Vec<String> = got.iter().filter_map(|w| w.text.clone()).map(|x| x.to_lowercase()).collect();
+    let n = all.len();
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), n, "{all:?}");
+}
+
+/// Without the describer, SigLIP decides: a text that matches another shot's frames better than
+/// its own is rejected.
+#[test]
+fn siglip_alone_rejects_a_text_about_another_shot() {
+    let shots = expo_library();
+    let t = inspected("builtin:tech-reveal");
+    let picks = assign(&pick_specs(&t), &shots, &[], &HashMap::new(), None);
+    let specs = text_specs(&t, &picks);
+    // the reveal's description says "white", but only the hall shows it
+    let checker = Checker::new(&[(1, &["humanoid", "robot"]), (3, &["serving", "robot"]), (2, &["white", "stage", "hall"])], false);
+    let (model, _) = expo_writer(vec![json!({"texts": [{"slot": "title", "n": 1, "options": ["WHITE STAGE", "SERVING ROBOT"]}]})]);
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let mut notes = Vec::new();
+    let (got, summary) =
+        rt.block_on(write_texts(Some(&checker), Some(9.0 / 16.0), Some(&model), &specs, &picks, &shots, &[], Some("robots"), None, &mut notes));
+    let title = got.iter().find(|w| w.spec.slot == "title").unwrap();
+    assert_eq!(title.text.as_deref(), Some("SERVING ROBOT"), "{:?}", title.tried);
+    assert!(title.tried[0].why[0].contains("another shot"), "{:?}", title.tried[0]);
+    assert!(title.tried[0].own.unwrap() < title.tried[0].elsewhere.unwrap());
+    assert_eq!(summary["how"], "words and SigLIP");
+}
+
+/// Options that all fail: the writer is asked once more with what was rejected and why; when
+/// that fails too, the deterministic text from the descriptions.
+#[test]
+fn rejected_texts_are_asked_again_then_written_by_rule() {
+    let shots = expo_library();
+    let t = inspected("builtin:tech-reveal");
+    let picks = assign(&pick_specs(&t), &shots, &[], &HashMap::new(), None);
+    let specs = text_specs(&t, &picks);
+    let checker = Checker::new(&[(1, &["humanoid", "robot"]), (3, &["serving", "robot", "bottle"])], true);
+    let (model, asked) = expo_writer(vec![
+        json!({"texts": [{"slot": "title", "n": 1, "options": ["DRONE DELIVERY", "CAR WASH"]}, {"slot": "hook_line", "n": 1, "options": ["BOY MEETS ROBOT"]}]}),
+        json!({"texts": [{"slot": "title", "n": 1, "options": ["BOTTLE ROBOT"]}, {"slot": "hook_line", "n": 1, "options": ["A BOY AND A ROBOT"]}]}),
+    ]);
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let mut notes = Vec::new();
+    let (got, _) = rt.block_on(write_texts(Some(&checker), Some(9.0 / 16.0), Some(&model), &specs, &picks, &shots, &[], Some("robots"), None, &mut notes));
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 2, "asked once more");
+    assert!(asked[1].contains("Rejected, do not repeat") && asked[1].contains("DRONE DELIVERY") && asked[1].contains("drone"), "{}", asked[1]);
+    assert!(!asked[1].contains("slot \"outro\""), "only the texts that failed are asked again");
+    let of = |slot: &str| got.iter().find(|w| w.spec.slot == slot).unwrap();
+    assert_eq!((of("title").text.as_deref(), of("title").by.as_str()), (Some("BOTTLE ROBOT"), "model, asked again"));
+    // the hook failed twice: the subject's name, which the describer sees
+    assert_eq!((of("hook_line").text.as_deref(), of("hook_line").by.as_str()), (Some("HUMANOID ROBOT"), "fallback"), "{:?}", of("hook_line").tried);
 }
 
 #[test]
@@ -302,25 +583,52 @@ fn the_model_writes_and_bad_answers_fall_back() {
     let model = FnModel::new("writer", |system, user, _| {
         assert!(system.contains("on-screen text") && user.contains("humanoid robot"), "{user}");
         Ok(json!({"texts": [
-            {"slot": "HOOK_LINE", "n": "1", "text": "\"meet ameca\""},
+            {"slot": "HOOK_LINE", "n": "1", "text": "\"meet the humanoid\""},
             {"slot": "title", "n": 1, "text": "THE ROBOT DOG THAT WALKS ON ITS OWN ALL DAY"},
             {"slot": "nope", "n": 1, "text": "x"},
             {"slot": "outro", "n": 0, "text": "x"},
             {"slot": "outro", "n": 1, "text": 42},
+            {"slot": "outro_sub", "n": 1, "options": "junk"},
         ]}))
     });
     let mut notes = Vec::new();
     let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-    let got = rt.block_on(write_texts(Some(&model), &specs, &picks, &shots, &[], Some("robots"), None, &mut notes));
-    let of = |slot: &str| got.iter().find(|(s, _, _)| s.slot == slot).cloned().unwrap();
-    assert_eq!((of("hook_line").1.as_deref(), of("hook_line").2), (Some("MEET AMECA"), "model"));
-    assert!(of("title").1.unwrap().chars().count() <= 16);
-    assert_eq!(of("outro").2, "fallback");
+    let (got, summary) = rt.block_on(write_texts(None, None, Some(&model), &specs, &picks, &shots, &[], Some("robots"), None, &mut notes));
+    let of = |slot: &str| got.iter().find(|w| w.spec.slot == slot).unwrap();
+    assert_eq!((of("hook_line").text.as_deref(), of("hook_line").by.as_str()), (Some("MEET THE HUMANOID"), "model"));
+    assert!(of("title").text.as_ref().unwrap().chars().count() <= 16);
+    assert_eq!(of("outro").by, "fallback");
+    assert_eq!(summary["how"], "words only", "no checker: the words alone");
     // a model that fails: every text falls back, with a note
     let broken = FnModel::new("broken", |_, _, _| Err(AutoCutError::Llm("down".into())));
-    let got = rt.block_on(write_texts(Some(&broken), &specs, &picks, &shots, &[], None, None, &mut notes));
-    assert!(got.iter().all(|(_, _, by)| *by == "fallback"));
+    let (got, _) = rt.block_on(write_texts(None, None, Some(&broken), &specs, &picks, &shots, &[], None, None, &mut notes));
+    assert!(got.iter().all(|w| w.by == "fallback"));
     assert!(notes.iter().any(|n| n.contains("did not answer")));
+    // no model, no checker: the descriptions
+    let (got, _) = rt.block_on(write_texts(None, None, None, &specs, &picks, &shots, &[], None, None, &mut notes));
+    assert!(got.iter().all(|w| w.by == "fallback" && w.text.is_some()), "{got:?}");
+}
+
+/// What a checker answers is read defensively: junk is no answer, never a panic.
+#[test]
+fn hostile_check_answers_are_read_defensively() {
+    for v in [
+        json!(null),
+        json!({"scenes": 3}),
+        json!({"cosine": [[1e300, "x"], 7], "answers": [{"window": -1, "text": 0, "answer": "yes"}, {"window": 0}]}),
+        json!([1, 2]),
+    ] {
+        let l = Looked::parse(&v);
+        assert!(l.answers.is_empty(), "{v}");
+    }
+    let l = Looked::parse(&json!({"cosine": [[0.1]], "answers": [{"window": 0, "text": 0, "answer": "no"}]}));
+    let g = Grounds { told: vec![], shown: vec!["dog".into()] };
+    // rows and windows out of range are no scores
+    let v = judge("DOG", "model", &g, Some(&l), &Spot { row: Some(99), under: &[5, 7], others: &[usize::MAX], alternative: Some(1000) });
+    assert!(v.ok && v.own.is_none(), "{v:?}");
+    let v = judge("DOG", "model", &g, Some(&l), &Spot { row: Some(0), under: &[0], others: &[], alternative: None });
+    assert!(!v.ok && v.answer.as_deref() == Some("no"));
+    assert!(!judge("", "model", &g, None, &Spot::default()).ok);
 }
 
 #[test]

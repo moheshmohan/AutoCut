@@ -3540,6 +3540,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::safe_zones::commands());
     v.extend(crate::redact::commands());
     v.extend(crate::scenes::commands());
+    v.extend(crate::scene_check::commands());
     v.extend(crate::privacy_check::commands());
     v.extend(crate::remix::commands());
     v.extend(crate::voiceover::commands());

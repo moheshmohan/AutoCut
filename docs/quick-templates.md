@@ -1,6 +1,6 @@
 # Quick templates: a Short or Reel in one command
 
-> **Last updated:** 2026-10-22 · **Change:** new (`autocut.quick`, the AI hints on template slots, six Shorts starters)
+> **Last updated:** 2026-10-23 · **Change:** each text says only what is on screen under it, and is checked against its frames (`media.checkText`)
 
 An album, a folder or the selected clips → a finished vertical Short or Reel. AutoCut indexes
 the clips shot by shot, listens to what is said, picks a template and fills it: every slot's
@@ -53,10 +53,34 @@ The engine command: `autocut.quick` ([`crates/engine/src/autocut.rs`](../crates/
    the filming order (capture dates), and a talking slot takes stretches of kept speech.
 5. **Trim and frame** — each pick plays from its best moment (the keyframe, or the start of the
    kept speech), framed on the subject's box for the vertical crop.
-6. **Text** — the text slots are written by the local model (Ollama: the script model, else the
-   classifier) from the shots' descriptions (the full ones' paragraphs, the text read on
-   screen), the kept speech and the topic, each within its length; without a model, from the
-   descriptions (the subject, the text read) and the topic.
+6. **Text** — each text says only what is on screen while it shows, and is checked
+   ([`crates/autocut/src/quick_text.rs`](../crates/autocut/src/quick_text.rs)):
+   - *its window*: the picture placements its own placement overlaps in the template (a title
+     over the reveal, a call to action over the end card), else the pick its `about` names;
+   - *the writer* (Ollama: the script model, else the classifier) is given, for each text, only
+     the Qwen3-VL descriptions of the shots under it (subjects, what happens, the text read on
+     screen, the full paragraph), the kept speech and the topic, and asked for three options;
+   - *the words*: every word that names something (not a creator's stock word: "meet",
+     "follow", "new"…) must come from those descriptions, the topic or the speech — "drone"
+     over a serving robot is rejected without looking further; a number nobody gave too;
+   - *the frames* (`media.checkText`): an option naming what only the descriptions say is
+     checked against two frames of its exact window, cut to what the vertical frame shows of
+     them (the slot's crop around the pick's focus). Qwen3-VL (in process, the 4B when
+     installed) is asked about each thing it names, one at a time — is the "boy" it mentions
+     visible here? — which it answers far more reliably than whether a whole title is true (on
+     the robot clips it called "BOY MEETS ROBOT" true over the moment after the boy left, and
+     answered "boy" no there and yes two seconds earlier). SigLIP 2 scores the option against
+     those frames, the other clips' and a plain alternative made from the descriptions; without
+     the describer SigLIP decides (it must match its own frames at least as well as another
+     clip's, and not much worse than the plain alternative);
+   - a text whose options all fail is asked for once more, with what was rejected and why;
+     then the first deterministic text that passes: the subject's name (its noun kept), the
+     text read on screen, the caption, the topic, the slot's own line.
+
+   The report's `texts[]` has each text's window (`under`) and every candidate with its
+   verdict (`candidates[]`: `ok`, `why`, the words, the SigLIP scores `own` / `elsewhere` /
+   `alternative`, the describer's `answer`); `textCheck` says what checked them and how many
+   were rejected.
 7. **Apply and finish** — `template.apply`; placeholders of optional slots nothing suited are
    removed; the look; Bold animated captions of the kept speech in the platform's safe zone;
    faces and plates blurred (`clip.autoRedact`, the robot check by the local vision model); the
@@ -90,6 +114,8 @@ The six starters made for it (Templates ▸ Reels & Shorts, Tech, Events, Social
 | the 4B describer | the fast descriptions everywhere |
 | Whisper / speech | no talking-head template, no captions |
 | Ollama | the text comes from the descriptions and the topic |
+| Qwen3-VL (to ask) | SigLIP 2 alone checks the texts against their frames |
+| SigLIP 2 and Qwen3-VL | each text's words are checked against the descriptions of the shots under it, not its frames |
 | face and plate detectors | nothing is blurred (the report says so) |
 
 Each is listed in the report's `fallbacks`. The scene index and speech understanding take the

@@ -80,6 +80,8 @@ pub struct Scenes {
     local: Option<Arc<dyn SceneModels>>,
     /// The scene cache (native frontends turn it on with [`Session::use_scene_cache`]).
     pub cache: Option<Arc<crate::redact_cache::RedactCache>>,
+    /// `media.checkText` jobs not yet collected ([`crate::scene_check`]).
+    pub(crate) checks: Vec<crate::scene_check::PendingCheck>,
 }
 
 impl Scenes {
@@ -92,6 +94,21 @@ impl Scenes {
             self.local = crate::transcript::models_dir().and_then(crate::scene_models::local);
         }
         self.local.clone()
+    }
+
+    /// The models `media.checkText` uses (the same as the index's).
+    pub(crate) fn check_models(&mut self) -> Option<Arc<dyn SceneModels>> {
+        self.models()
+    }
+
+    /// Keep what a finished job made for `jobs.list` (the oldest goes past [`MAX_OUTCOMES`]).
+    pub(crate) fn put_outcome(&mut self, job: u64, outcome: Value) {
+        if self.outcomes.len() >= MAX_OUTCOMES
+            && let Some(old) = self.outcomes.keys().min().copied()
+        {
+            self.outcomes.remove(&old);
+        }
+        self.outcomes.insert(job, outcome);
     }
 }
 
@@ -783,6 +800,7 @@ fn analyze(s: &mut Session, p: &Value) -> Result<Value> {
 /// Apply finished jobs (one undo step each) and keep what they made for `jobs.list`. Called each
 /// UI frame (through [`Session::poll_persistence`]), by `jobs.list` and after a `wait: true` run.
 pub fn poll(s: &mut Session) {
+    crate::scene_check::poll(s);
     let mut i = 0;
     while i < s.scenes.pending.len() {
         let job = s.scenes.pending[i].job;
@@ -813,12 +831,7 @@ pub fn poll(s: &mut Session) {
             Some(Err(e)) => json!({"error": e}),
             None => json!({"error": "the job ended without a result"}),
         };
-        if s.scenes.outcomes.len() >= MAX_OUTCOMES
-            && let Some(old) = s.scenes.outcomes.keys().min().copied()
-        {
-            s.scenes.outcomes.remove(&old);
-        }
-        s.scenes.outcomes.insert(job, outcome);
+        s.scenes.put_outcome(job, outcome);
     }
 }
 

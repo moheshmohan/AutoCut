@@ -89,6 +89,16 @@ pub trait SceneModels: Send + Sync {
         let _ = pics;
         Err("no aesthetic model".into())
     }
+    /// Which model answers questions about pictures ([`SceneModels::ask`]), when one can.
+    fn asker_id(&self) -> Option<String> {
+        None
+    }
+    /// A short answer (at most `max_tokens` tokens) to `question` about `frames`: one moment of a
+    /// video, 1 to 4 pictures of one size. `system` sets how to answer.
+    fn ask(&self, frames: &[Pic], system: &str, question: &str, max_tokens: usize) -> Result<String, String> {
+        let _ = (frames, system, question, max_tokens);
+        Err("no vision-language model".into())
+    }
     /// Let go of the big models after a job (the embedder may stay, for search).
     fn release(&self) {}
     /// Hold the GPU for a job (none where there is no GPU or no lock).
@@ -297,6 +307,29 @@ mod local {
             let m = g.as_ref().ok_or("the aesthetic model did not load")?;
             let refs: Vec<(&[u8], usize, usize)> = pics.iter().map(|p| (p.rgba.as_slice(), p.w, p.h)).collect();
             m.score(&refs).map_err(|e| e.to_string())
+        }
+
+        fn asker_id(&self) -> Option<String> {
+            self.describer(Detail::Full).and_then(pinned)
+        }
+
+        fn ask(&self, frames: &[Pic], system: &str, question: &str, max_tokens: usize) -> Result<String, String> {
+            // the larger describer when it is installed: it reads small things the 2B misses
+            let id = self.describer(Detail::Full).ok_or("no describer is downloaded")?;
+            let first = frames.first().ok_or("no frame to look at")?;
+            if frames.len() > filmcraft_scenes::model::qwen3vl::MAX_FRAMES || frames.iter().any(|p| (p.w, p.h) != (first.w, first.h)) {
+                return Err("1 to 4 frames of one size".into());
+            }
+            let mut g = lock(&self.vlm);
+            if g.as_ref().is_none_or(|m| m.id != id) {
+                *g = None;
+                *g = Some(Qwen3Vl::load(&self.dir.join(id), id, &self.dev).map_err(|e| e.to_string())?);
+            }
+            let vlm = g.as_mut().ok_or("the describer did not load")?;
+            let shot: Vec<Frame> = frames.iter().map(|p| Frame { rgba: &p.rgba, w: p.w, h: p.h }).collect();
+            let o = Options { max_pixels: options(Detail::Full).max_pixels, max_new: max_tokens.clamp(1, 64) };
+            let (answers, _) = vlm.generate(&[shot], system, question, "", &o, &|| false).map_err(|e| e.to_string())?;
+            answers.into_iter().next().ok_or_else(|| "no answer".into())
         }
 
         fn release(&self) {
