@@ -1255,6 +1255,33 @@ mod tests {
         set_current(Language::En);
     }
 
+    /// Quick Short (Sequence ▸ Quick Short…) is in every catalog: its menu label everywhere (the
+    /// menus-only Russian and Ukrainian catalogs too), and its dialog in every whole-interface one.
+    #[test]
+    fn quick_short_is_translated_everywhere() {
+        for lang in [
+            Language::Es,
+            Language::PtBr,
+            Language::Ja,
+            Language::ZhCn,
+            Language::De,
+            Language::Fr,
+            Language::Ru,
+            Language::Uk,
+            Language::Id,
+            Language::It,
+            Language::Ko,
+        ] {
+            assert!(lang.has("Quick Short…") && lang.tr("Quick Short…") != "Quick Short…", "{}: Quick Short…", lang.code());
+        }
+        let dialog = tl_literals(include_str!("../panels/quick_short.rs"));
+        assert!(dialog.len() >= 20, "{dialog:?}");
+        for lang in [Language::De, Language::Fr, Language::Id, Language::It, Language::Ko] {
+            let missing: Vec<&String> = dialog.iter().filter(|s| translatable(s) && Language::Es.has(s) && !lang.has(s)).collect();
+            assert!(missing.is_empty(), "{}: {missing:?}", lang.code());
+        }
+    }
+
     /// Italian covers the whole interface (the Spanish catalog's entries and the native macOS
     /// Settings menu); like Indonesian, the tests require only the core menus, so strings added
     /// later show in English until they are translated, and every entry must have a Spanish

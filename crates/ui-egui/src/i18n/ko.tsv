@@ -3752,3 +3752,24 @@
 	No matching text.	일치하는 텍스트가 없습니다.
 	Scenes	장면
 	Analyze Scenes	장면 분석
+# Quick Short (Sequence ▸ Quick Short…, the Templates panel)
+	Quick Short…	빠른 쇼츠…
+	Quick Short	빠른 쇼츠
+	Make a vertical Short or Reel: AutoCut picks a template and fills it from your clips.	세로형 쇼츠나 릴스를 만듭니다: AutoCut이 템플릿을 고르고 클립으로 채웁니다.
+	Selected clips	선택한 클립
+	Template:	템플릿:
+	Length:	길이:
+	Platform:	플랫폼:
+	Topic:	주제:
+	Look:	룩:
+	The template's	템플릿 기본값
+	Tech	테크
+	Clean	클린
+	Make Short	쇼츠 만들기
+	What it is about (optional)	무엇에 관한 영상인지 (선택 사항)
+	{n} clip(s) selected in the Project panel	프로젝트 패널에서 클립 {n}개 선택됨
+	Nothing is selected in the Project panel: every video and photo of the project is used.	프로젝트 패널에서 선택한 항목이 없습니다: 프로젝트의 모든 비디오와 사진을 사용합니다.
+	Choose a folder of videos and photos	비디오와 사진이 있는 폴더를 선택하세요
+	Choose a folder first	먼저 폴더를 선택하세요
+	Making a quick short…	빠른 쇼츠를 만드는 중…
+	Let AutoCut pick a template and fill it from your clips	AutoCut이 템플릿을 고르고 클립으로 채우게 하기
