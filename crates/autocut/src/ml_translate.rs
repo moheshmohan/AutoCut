@@ -452,13 +452,16 @@ async fn single(model: &dyn ChatModel, examples: &str, english: &English, lock: 
 
 /// The parts of a showcase script by entry label: the intro, each entry with words, the outro.
 pub fn script_parts(script: &crate::showcase::Script, entries: &[crate::showcase::Entry]) -> Vec<Part> {
-    let mut parts = vec![Part { key: "intro".into(), text: script.intro.clone() }];
+    // what the voice reads: a part's `say` when the plan has one (English on screen, Malayalam
+    // spoken), else its text
+    let said = |key: &str, text: &str| script.say.get(key).filter(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| text.to_string());
+    let mut parts = vec![Part { key: "intro".into(), text: said("intro", &script.intro) }];
     for (e, l) in entries.iter().zip(&script.lines) {
         if !l.trim().is_empty() && !parts.iter().any(|p| p.key == e.label) {
-            parts.push(Part { key: e.label.clone(), text: l.clone() });
+            parts.push(Part { key: e.label.clone(), text: said(&e.number.to_string(), l) });
         }
     }
-    parts.push(Part { key: "outro".into(), text: script.outro.clone() });
+    parts.push(Part { key: "outro".into(), text: said("outro", &script.outro) });
     parts.retain(|p| !p.text.trim().is_empty());
     parts
 }
@@ -474,6 +477,26 @@ pub fn check_script(script: &crate::showcase::Script, entries: &[crate::showcase
 mod tests {
     use super::*;
     use crate::llm::FnModel;
+
+    /// English on screen, Malayalam spoken (`say`): the lint checks what the voice reads, so
+    /// the English subtitles raised a "latin" warning for every word and --strict-script refused.
+    #[test]
+    fn a_script_spoken_through_say_is_checked_as_spoken() {
+        let entries: Vec<crate::showcase::Entry> =
+            vec![serde_json::from_value(serde_json::json!({"number": 1, "label": "Toy", "kind": "scene", "description": "", "unix": 1, "shots": []})).unwrap()];
+        let script: crate::showcase::Script = serde_json::from_value(serde_json::json!({
+            "intro": "", "lines": ["This is Akku's Tesla."], "outro": "Like and subscribe!",
+            "say": {"1": "ഇത് അക്കുവിന്റെ ടെസ്‌ലയാണ്.", "outro": "ലൈക്ക് ചെയ്യണേ!"}
+        }))
+        .unwrap();
+        let parts = script_parts(&script, &entries);
+        let texts: Vec<&str> = parts.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, ["ഇത് അക്കുവിന്റെ ടെസ്‌ലയാണ്.", "ലൈക്ക് ചെയ്യണേ!"]);
+        assert_eq!(check_script(&script, &entries)["warnings"], serde_json::json!(0), "no Latin warnings for the English subtitles");
+        // without `say`, the lines themselves are what is read
+        let plain: crate::showcase::Script = serde_json::from_value(serde_json::json!({"intro": "", "lines": ["ഇത്."], "outro": ""})).unwrap();
+        assert_eq!(script_parts(&plain, &entries).iter().map(|p| p.text.as_str()).collect::<Vec<_>>(), ["ഇത്."]);
+    }
 
     #[test]
     fn a_showcase_script_is_checked_by_entry() {
