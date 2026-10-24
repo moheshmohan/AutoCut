@@ -161,6 +161,45 @@ pub fn focus(shell: &dyn Shell, tab: &Tab) -> Result<bool, ScreenError> {
     on_tab(shell, tab, "set active tab index of w to k\nset index of w to 1\nactivate")
 }
 
+/// The longest page script [`run_js`] sends, and the longest answer it reads back (bytes).
+const MAX_JS: usize = 16 * 1024;
+const MAX_JS_ANSWER: usize = 4 * 1024 * 1024;
+
+/// What a tab whose browser runs no page scripts from Apple Events says, and what to do.
+pub const JS_OFF: &str = "Chrome runs no JavaScript from Apple Events (turn it on in Chrome: View ▸ Developer ▸ Allow JavaScript from Apple Events)";
+
+/// Run the page script `js` (one expression; its value is answered as text) in that picker
+/// tab, through Chrome's `execute javascript` — found by window id, tab id and its address now,
+/// which must still be Google's picker: no other page ever runs a script. Chrome refuses it
+/// until "Allow JavaScript from Apple Events" is ticked (View ▸ Developer): that refusal is
+/// [`ScreenError::Unsupported`] ([`JS_OFF`]), so a caller can go on with its eyes.
+pub fn run_js(shell: &dyn Shell, tab: &Tab, js: &str) -> Result<String, ScreenError> {
+    if js.len() > MAX_JS {
+        return Err(ScreenError::Other(format!("a page script of {} bytes is more than the {MAX_JS} sent", js.len())));
+    }
+    let Some(url) = tab_url(shell, tab)? else { return Err(ScreenError::Other("the picker tab is gone".into())) };
+    if !is_picker_url(&url) {
+        return Err(ScreenError::Other(format!("refusing to run a script in a tab that is not the Google Photos picker: {url}")));
+    }
+    let now = Tab { url, ..tab.clone() };
+    let body = format!("set r to (execute t javascript \"{}\")\nreturn \"js\" & (character id 9) & (r as text)", escape_applescript(js)?);
+    let out = shell.run("osascript", &["-e", &with_tab_script(CHROME, &now, &body)?]).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("Allow JavaScript from Apple Events") || (msg.contains("JavaScript") && msg.contains("turned off")) {
+            ScreenError::Unsupported(JS_OFF.into())
+        } else {
+            ScreenError::Other(format!("cannot run a script in the picker tab: {msg}"))
+        }
+    })?;
+    if out.len() > MAX_JS_ANSWER {
+        return Err(ScreenError::Other(format!("the picker tab answered {} bytes, more than the {MAX_JS_ANSWER} read", out.len())));
+    }
+    match out.trim_end_matches(['\n', '\r']).strip_prefix("js\t") {
+        Some(answer) => Ok(answer.to_string()),
+        None => Err(ScreenError::Other("the picker tab is gone".into())),
+    }
+}
+
 /// Answer the "Leave site?" dialog on `actor`'s front window: list its buttons by their text
 /// and click the one that reads "Leave". Anything not labelled "Leave" (and button-sized) is
 /// refused, so nothing else is ever clicked. `Ok(false)`: no Leave button showed.
@@ -900,5 +939,51 @@ mod tests {
         let mut b = Named::new(vec![driven.clone(), tab(1, 11, PHOTO)], (1, 11));
         assert!(!close_driven_picker(&mut b, &leave_button(), None, &mut |_| {}).unwrap());
         assert_eq!((b.ids(), b.cmd_w), (vec![10, 11], 0), "a photo tab in front: nothing closed");
+    }
+
+    /// Chrome answering page scripts: the tab's address, then either the script's value or the
+    /// refusal it gives while "Allow JavaScript from Apple Events" is off.
+    struct Pages {
+        url: String,
+        js_on: bool,
+        scripts: Mutex<Vec<String>>,
+    }
+    impl Shell for Pages {
+        fn run(&self, _program: &str, args: &[&str]) -> Result<String, ScreenError> {
+            let s = args.last().copied().unwrap_or_default().to_string();
+            self.scripts.lock().unwrap_or_else(PoisonError::into_inner).push(s.clone());
+            if s.contains("return \"url\"") {
+                return Ok(format!("url\t{}\n", self.url));
+            }
+            if !self.js_on {
+                return Err(ScreenError::Other(
+                    "osascript: execution error: Google Chrome got an error: Executing JavaScript through AppleScript is turned off. To turn it on, from the menu bar, go to View > Developer > Allow JavaScript from Apple Events. (12)".into(),
+                ));
+            }
+            Ok("js\t{\"tiles\":[]}\n".into())
+        }
+    }
+
+    #[test]
+    fn page_scripts_run_only_in_the_picker_and_say_when_chrome_refuses_them() {
+        let t = tab(1, 10, P1);
+        let session = "https://photos.google.com/integration/picker/session/abc?x=1";
+        let pages = Pages { url: session.into(), js_on: true, scripts: Mutex::default() };
+        assert_eq!(run_js(&pages, &t, r#"JSON.stringify({a:"b\\c"})"#).unwrap(), "{\"tiles\":[]}");
+        let sent = pages.scripts.lock().unwrap().last().cloned().unwrap();
+        // found by its ids and its address now (auth → session), the script quoted for AppleScript
+        assert!(sent.contains(&format!("(URL of t) is \"{session}\"")) && sent.contains("execute t javascript"), "{sent}");
+        assert!(sent.contains(r#"JSON.stringify({a:\"b\\\\c\"})"#), "{sent}");
+        // Chrome's refusal is Unsupported, with what to tick
+        let off = Pages { url: session.into(), js_on: false, scripts: Mutex::default() };
+        let err = run_js(&off, &t, "1").unwrap_err();
+        assert!(matches!(err, ScreenError::Unsupported(_)) && err.to_string().contains("Allow JavaScript from Apple Events"), "{err}");
+        // a tab that is not the picker any more runs nothing
+        let photo = Pages { url: "https://photos.google.com/photo/AF1Qip".into(), js_on: true, scripts: Mutex::default() };
+        assert!(run_js(&photo, &t, "1").unwrap_err().to_string().contains("not the Google Photos picker"));
+        assert!(!photo.scripts.lock().unwrap().iter().any(|s| s.contains("execute")), "only its address was read");
+        // a script with a control character, or too long, is refused before Chrome sees it
+        assert!(run_js(&pages, &t, "a\nb").is_err());
+        assert!(run_js(&pages, &t, &"x".repeat(MAX_JS + 1)).unwrap_err().to_string().contains("page script"));
     }
 }

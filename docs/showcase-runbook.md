@@ -26,6 +26,8 @@ whole pipeline, from the album to YouTube and Instagram, with this show as the w
   `CLAUDE.md`).
 - The browser is shared: check `filmcraft-cli locks` first. The picker agent takes the `chrome`
   lock itself; a session that drives Chrome by hand holds it (`locks hold chrome`).
+- Chrome ▸ View ▸ Developer ▸ **Allow JavaScript from Apple Events** (once): the album pick
+  then ticks each tile by its checkbox in the picker's page instead of by eyes (below).
 
 ## The files of a round
 
@@ -55,6 +57,18 @@ and import them into the project; items the project already holds are reused, no
 ```sh
 filmcraft-cli --project "$P" photos pick --album "Robot showcase" --save
 ```
+
+How the album is picked: the picker has no Albums view, but its search for the album's exact
+title shows the album's items — after a delay (the 52-item album "akku tesla toy" answered after
+the agent's two looks 2.5 s apart had given up, 2026-10-24). The agent now waits up to 30 s for
+them. With Chrome's "Allow JavaScript from Apple Events" on, it ticks every tile in the page:
+each tile is a checkbox labelled like `Video - Landscape - Jul 28, 2025, 7:18:02 PM` (the day
+checkboxes, `Select all photos from …`, are left alone), the grid holds about 29 of them at a
+time, so it walks the grid to its end and again until none is left unticked and the header's
+"N selected" agrees. Without it, the eyes' range gesture does it (`crates/screenagent/README.md`).
+If a pick still says the search "showed nothing new", run it again; by hand, hold the lock
+(`locks hold chrome`), start `photos pick --no-browser --save`, open its link, search the exact
+title, Return, and tick the tiles.
 
 Analyse the new items (their item ids are in the pick's output; items analysed before come from
 the analysis cache; a photo is looked at once):

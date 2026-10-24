@@ -128,15 +128,32 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
     The guards come from the live failure, in which the model took the typed title in the search
     field for "the album" and for "the album's heading", and the agent range-selected the
     unfiltered library until its budget ran out:
-    - the search must visibly have run: the view moved after Return (`verify::moved`, looked at
-      once more while results load) and the grid's first screen — its date headings and its
-      tiles — is not the library's as the picker opened; otherwise "searching the picker for
-      `<title>` showed nothing new; nothing was selected";
+    - the search must visibly have run, and Google answers an album after a delay (live,
+      2026-10-24: "akku tesla toy", 52 items, missed by two looks 2.5 s apart): the view moved
+      after Return (`verify::moved`, looked at up to 8 times, 20 s) and the grid's first screen —
+      its date headings and its tiles — is not the library's as the picker opened; otherwise
+      "searching the picker for `<title>` showed nothing new; nothing was selected";
     - nothing inside the search field's box is ever a result, a tile or a heading
       (`picker::in_field`: every grounding answer of an album pick is filtered through it);
     - a runaway is never confirmed: a grid that does not end within the budget, or a count
       above the run's `max_items`, ends the pick without Done (the agent closes the tab, and
       the caller deletes the session).
+
+    **In the page, where Chrome allows it** (`dom.rs`; Chrome ▸ View ▸ Developer ▸ Allow
+    JavaScript from Apple Events): the agent reads the picker tab it drives (by its window and
+    tab id, only while its address is the picker) instead of its pixels. Each media tile is a
+    `[role=checkbox]` labelled `<kind> - <shape> - <date, time>` (`Video - Landscape - Jul 28,
+    2025, 7:18:02 PM`, a U+202F before PM; `aria-checked` says whether it is ticked); `Select`
+    and the days' `Select all photos from Tue, Jul 29, 2025` are other checkboxes, never clicked.
+    The grid is virtual (about 29 checkboxes at a time). So after Return the agent looks at the
+    page every second, up to 30 s, until its tiles are not the library's and are the same twice
+    in a row (`dom::wait_for_results`); then it walks the grid from the top, a scroll of 4/5 of
+    the grid's scroller at a time to its end, clicking every tile not ticked yet, and walks again
+    until nothing is left unticked and the header's "N selected" is not below the tiles seen
+    (`dom::tick_all`). More tiles than the run's maximum, or a tile that will not tick, end the
+    pick without Done. When Chrome refuses the scripts the agent says how to allow them and
+    selects by eyes, as above. Each step is one fixed script; nothing from the page, the title or
+    the model is ever put into one.
 
     The picker cannot select by type, so `--videos-only` takes the album whole and its photos
     are skipped when downloading (`filmcraft_gphotos::keep_picked`); the CLI and the album
@@ -144,6 +161,8 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
   - **Done is checked**: after the press the agent re-captures; the press took when the
     window closed, the button is gone, or "N selected" is gone. Otherwise it presses again
     (at most twice more, from the budget), then reports that the picker did not accept Done.
+- `dom.rs` — the picker's page (above): the scripts of each step (`dom::script`), what a media
+  tile's label is (`dom::tile_label`), waiting for an album's results and ticking every tile.
 - `picker.rs` — the picker's visual semantics (the tile-enumeration prompts, what a video
   tile looks like, where to click one — its left third, since grounded boxes start where
   the tile starts but can run on into the next — what the confirm button is called, what a
