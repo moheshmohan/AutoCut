@@ -110,6 +110,12 @@ one. If a step fails, the temp file is removed and the old file is untouched.
 
 In the UI, Save / Save As / Save a Copy without a `path` show a file dialog.
 
+From the shell, `filmcraft-cli new <p.fcproj>` makes an empty project there (its folder too),
+named after the file, and saves it; it never writes over a file. `--project <p.fcproj>` naming a
+`.fcproj` that does not exist yet does the same before its command (`filmcraft-cli --project
+"Akku Tesla.fcproj" --save photos pick --album …`). A missing path that is not a `.fcproj` is an
+error, as an open of any missing file is.
+
 ## Auto Save
 
 Preferences ▸ Auto Save (Edit ▸ Preferences ▸ Auto Save…, ⌘,; FilmCraft ▸ Settings… on macOS) works

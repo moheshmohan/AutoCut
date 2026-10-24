@@ -79,6 +79,9 @@ USAGE
   filmcraft-cli [OPTIONS] <SUBCOMMAND> [ARGS]
 
 SUBCOMMANDS
+  new <p.fcproj>                make an empty project there (its folder too), named after the
+                                file, and save it. `--project` with a .fcproj that does not exist
+                                yet makes it the same way before the command
   exec <id> [key=value ...]     run one command; prints its result as JSON
   exec <id> '<json params>'     same, params as one JSON object
   call <method> [key=value ...] with --bridge: one control method of the running app (ui.elements,
@@ -762,7 +765,8 @@ SUBCOMMANDS
   --version                     print the version
 
 OPTIONS
-  --project <p.fcproj>          open this project first (headless)
+  --project <p.fcproj>          open this project first (headless); a .fcproj that does not
+                                exist yet is made there, empty, and saved
   --demo                        open the built-in demo project (headless)
   --save                        save the project back to --project when done
   --save-as <p.fcproj>          save the project to this path when done
@@ -869,8 +873,17 @@ impl Backend {
         // `recipe.run` (also over MCP): intent steps planned by AutoCut's planner
         s.recipes.planner = Some(filmcraft_autocut::recipes::planner());
         if let Some(p) = a.opt("--project") {
-            if let Err(e) = s.execute("file.open", json!({"path": p})) {
-                fail(e);
+            match missing_project(p) {
+                // a project file that does not exist yet is made there, empty
+                Some(name) => {
+                    create_project(&mut s, p, &name).unwrap_or_else(|e| fail(e));
+                    diag(format_args!("filmcraft-cli: {p} did not exist: made a new, empty project “{name}” there"));
+                }
+                None => {
+                    if let Err(e) = s.execute("file.open", json!({"path": p})) {
+                        fail(e);
+                    }
+                }
             }
         } else if a.flag("--demo") {
             let _ = s.execute("file.openDemoProject", json!({}));
@@ -914,6 +927,29 @@ impl Backend {
             fail(format!("saving: {e}"));
         }
     }
+}
+
+/// The name a project made at `path` gets — its file name without `.fcproj` — when `path` names
+/// a project file that does not exist yet (`~/` is the home folder); `None` for anything else (an
+/// existing file, or a path that is no `.fcproj`: a typo is not made into a project).
+fn missing_project(path: &str) -> Option<String> {
+    let full = std::path::PathBuf::from(filmcraft_engine::export_tools::expand_home(path));
+    if full.exists() || !full.extension().is_some_and(|e| e.eq_ignore_ascii_case("fcproj")) {
+        return None;
+    }
+    full.file_stem().map(|s| s.to_string_lossy().trim().to_string()).filter(|n| !n.is_empty())
+}
+
+/// Make an empty project named `name` and save it at `path` (its folder made when missing): what
+/// `file.newProject` then `file.saveAs` did by hand.
+fn create_project(s: &mut Session, path: &str, name: &str) -> Result<(), String> {
+    let full = std::path::PathBuf::from(filmcraft_engine::export_tools::expand_home(path));
+    if let Some(dir) = full.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    s.execute("file.newProject", json!({"name": name})).map_err(|e| format!("file.newProject: {e}"))?;
+    s.execute("file.saveAs", json!({"path": path})).map_err(|e| format!("{path}: {e}"))?;
+    Ok(())
 }
 
 /// `redact` options as `clip.autoRedact` / `sequence.autoRedact` parameters (with `wait: true`);
@@ -2884,6 +2920,19 @@ async fn cli() {
                 Ok(v) => print(&a, &v),
                 Err(e) => fail(format!("{method}: {e}")),
             }
+        }
+        "new" => {
+            let path = a.pos(1).unwrap_or_else(|| usage("new <p.fcproj>"));
+            if a.opt("--bridge").is_some() || a.opt("--project").is_some() || a.flag("--demo") {
+                usage("new makes a project file by itself: `filmcraft-cli new p.fcproj`, then `--project p.fcproj …`");
+            }
+            if !std::path::Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("fcproj")) {
+                usage(format!("new: `{path}` is not a .fcproj path"));
+            }
+            let Some(name) = missing_project(path) else { fail(format!("new: {path} exists already (open it with --project)")) };
+            let mut s = Session::default();
+            create_project(&mut s, path, &name).unwrap_or_else(|e| fail(format!("new: {e}")));
+            print(&a, &json!({"path": path, "name": s.project.name}));
         }
         "exec" => {
             let id = a.pos(1).unwrap_or_else(|| usage("exec <id> [key=value ...]"));
