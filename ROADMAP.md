@@ -5,7 +5,7 @@
 
 **Stage: alpha** · next: beta, ~19 points of ready-for-real-work and ~400–700 h away, plus opening Premiere's `.prproj` ([why](docs/target-app-parity.md#stage); passes the [core-workflow gate](docs/roadmap.md#alpha-gate))
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (language table: German covers the whole interface) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** minor (ProRes alpha final-run conformance and native macOS validation) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Progress toward parity with Adobe Premiere Pro. This page is the summary; the detail is in
 [docs/target-app-parity.md](docs/target-app-parity.md) (assessment, methodology, calibration),
@@ -112,6 +112,8 @@ Ranked; detail and "done when" in [docs/roadmap.md](docs/roadmap.md) and [docs/g
 - **2026-10-21 (mask shape presets):** `masks.add` makes shape presets as ordinary editable masks: rounded rectangle, star (points, inner ratio), heart (smooth lobes with Bézier handles), triangle, regular polygon / hexagon, cross, arrow, cinematic bars at any aspect (2.39:1 by default; on Opacity it cuts the bars out, on another effect it starts inverted so the effect fills them) and diagonal split. Effect Controls' ☆ button after the pen lists them; `masks.presets` for agents; hostile counts, ratios, aspects and coordinates are refused.
 - **2026-10-21 (ASS/SSA captions):** Advanced SubStation Alpha subtitles: `.ass` and SSA `.ssa` import (File ▸ Import, `captions.import`, `filmcraft-cli import`) and `.ass` export (`captions.export`). The style most lines use becomes the caption track's style (font, size scaled from the script's PlayResY, colour, alignment, margin, outline, opaque box); `\b` / `\i` / `\u` become tags, `\N` line breaks, the actor the speaker; `\an`, `\a`, `\pos` and other styles' placement become WebVTT cue settings, which burn-in now honours with line alignment (`line:N%,end`) and `position:N%`; other overrides and drawings are dropped. Written from the public format description; property-tested round trip, hostile-input tests (1 MB lines, unterminated braces, huge numbers).
 - **2026-10-21 (Maintain Audio Pitch):** Clip ▸ Speed/Duration ▸ Maintain Audio Pitch: a sped-up or slowed clip (0.25–4×, accepted 1/16–16×; reversed too) plays at its own pitch instead of varispeed — a WSOLA time stretch (`audio-dsp` `stretch`, one set of splice points for every channel, the same samples however playback or export cuts the timeline), per clip (`maintain_pitch`, off in older projects), on `clip.speedDuration` / `timeline.rateStretch` (`maintainPitch`), the dialog and FCPXML's `preservesPitch`; AutoCut's showcase keeps the pitch of shots it slows with their sound. A 440 Hz tone stays within 1 Hz at 0.25–4×; 150–320× real time on 60 s of 48 kHz stereo.
+- **2026-10-22:** ProRes 4444 / XQ alpha slices include the final singleton run code required by RDD 36:2022. Six HD fixtures rejected by native macOS decoding now pass; syntax regression tests cover final runs and slice widths ([details](crates/prores/README.md#alpha-bitstream-conformance), EffectCraft #293).
+
 - **2026-10-12:** Transform's motion-blur shutter on adjustment layers uses the sequence frame rate instead of 24 fps, so a 360° shutter in a 60 fps sequence spans one frame, not 2.5 (#1088)
 - **2026-10-10 (changed media):** Settings ▸ Media ▸ Automatically refresh growing files works: media files that change on disk while the project is open (a recording still being written, a render written over the file a clip uses) are read again every *Refresh growing files every* seconds and as soon as the window comes back to the front: the new length, picture and identity, without an undo step (`media.refreshChanged`, `media_watch`).
 - **2026-10-10 (re-measure):** full parity re-measure against Premiere Pro 26.5.2: menu label diff 338 / 366 (92%), installed bundle listings (10 UI languages, exporter and codec frameworks), 188 open issues. Breadth ~86% (file formats now counted), ready ~55%, stage **alpha**; progress docs reorganized per the craftrules standard ([target-app-parity](docs/target-app-parity.md), [gaps](docs/gaps.md), [roadmap](docs/roadmap.md), [codec](docs/codec-parity.md), [file-format](docs/file-format-parity.md), [hardware](docs/hardware-parity.md), [UI](docs/ui-parity.md), [localization](docs/localization-parity.md)).
@@ -172,6 +174,7 @@ Ranked; detail and "done when" in [docs/roadmap.md](docs/roadmap.md) and [docs/g
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-21 | trivial | Progress log: Maintain Audio Pitch |
+| 2026-10-22 | minor | ProRes alpha: write the final singleton run code; 4444/XQ HD clips that failed native macOS decoding now decode, with syntax regression tests (EffectCraft #293) |
 | 2026-10-13 | minor | Language table: German covers the whole interface (~100%) |
 | 2026-10-12 | trivial | Progress log: Transform shutter on adjustment layers (#1088) |
 | 2026-10-11 | minor | Language table: German ships the menus (#630, 10.6%) |
