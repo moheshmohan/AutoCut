@@ -2,7 +2,7 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `captions.setAnimatedStyle` | word-by-word animated captions on a caption track: `preset` `bold` (uppercase heavy sans, black stroke, 2–4 words a page, the spoken word in the active colour popping 1.1×), `clean`, `glow`, `box`, `karaoke`, `twoLine` (classic two-line subtitles), or `off` for whole captions again; `options`: `wordsPerPage`, `activeColor`, `keywordColor`, `keywords`, `emoji` (`{"word": "🔥"}`), `uppercase`, `platform` (keep to `youtube` / `reels` / `tiktok` / `vertical`'s safe zone, centred on its safe span), `pop`, `position` (`top` / `middle` / `bottom`), `margin`, `xOffset`, `size`, `font`, `keepStyle` (keep the track's size, outline and box instead of the preset's) |
+//! | `captions.setAnimatedStyle` | word-by-word animated captions on a caption track: `preset` `bold` (uppercase heavy sans, black stroke, 2–4 words a page, the spoken word in the active colour popping 1.1×), `clean`, `glow`, `box`, `karaoke`, `twoLine` (classic two-line subtitles), or `off` for whole captions again; `options`: `wordsPerPage`, `activeColor`, `keywordColor`, `keywords`, `emoji` (`{"word": "🔥"}`), `uppercase`, `platform` (keep to `youtube` / `reels` / `tiktok` / `vertical`'s safe zone, centred on its safe span), `pop`, `position` (`top` / `middle` / `bottom`), `margin`, `xOffset`, `size`, `font`, `panel` (a backing panel behind each line: `true` for black at 60 %, a colour `#rrggbbaa`, or `false`), `keepStyle` (keep the track's size, outline and box instead of the preset's) |
 //! | `captions.wordTiming` | when each word of the track's captions is spoken, `from` the sequence `transcript` (Whisper's word timestamps) or the `narration` clips (their scripts spread over each clip's speech by the words' lengths, pauses kept) |
 //! | `graphics.animateText` | a text layer's animators: `in`, `out`, `loop` — each `{kind, unit, amount, stagger, easing, duration}` (or a kind name; `null` / `"none"` removes it); `clear` removes all |
 //! | `graphics.textStyle` | a layer's `glow` (`{color, radius, intensity}`), `innerShadow` (`{color, opacity, angle, distance, blur}`), `curve` (`{bend, radius}` or the bend in percent) and `stroke3` (`{color, width, type}`); `false` turns one off |
@@ -48,6 +48,9 @@ const MAX_LIST: usize = 200;
 const MAX_WORD_CHARS: usize = 64;
 
 /// A colour: `"#rrggbb[aa]"` or `[r, g, b(, a)]` (0–255).
+/// The backing panel `"panel": true` puts behind animated captions: black at 60 %.
+const PANEL: [u8; 4] = [0, 0, 0, 153];
+
 pub(crate) fn color_p(v: &Value) -> Option<[u8; 4]> {
     if let Some(a) = v.as_array() {
         let c: Vec<u8> = a.iter().filter_map(|x| x.as_f64().filter(|f| f.is_finite()).map(|n| n.clamp(0.0, 255.0) as u8)).collect();
@@ -197,9 +200,26 @@ fn set_animated_style(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(f) = str_p(&o, "font") {
         style.font = short(f);
     }
+    // a backing panel behind each line, so the words read over bright footage (live: white
+    // "box" captions over a white toy car)
+    match o.get("panel") {
+        None => {}
+        Some(Value::Null | Value::Bool(false)) => style.background = false,
+        Some(Value::Bool(true)) => {
+            style.background = true;
+            style.background_color = PANEL;
+        }
+        Some(v) => {
+            let c = color_p(v).ok_or_else(|| bad(CMD, "`panel`: true, false or a colour (\"#rrggbbaa\")"))?;
+            style.background = c[3] > 0;
+            style.background_color = c;
+        }
+    }
+    let panel = style.background.then(|| hex(style.background_color));
     let answer = json!({
         "track": tid.0,
         "animated": style.animated.as_ref().map(animated_json),
+        "panel": panel,
         "size": style.size,
         "outline": style.outline,
         "anchor": format!("{:?}", style.anchor).to_lowercase(),
@@ -554,7 +574,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "captions.setAnimatedStyle",
             "Animated Caption Style",
-            r##"{"track":id|"C1"?,"preset":"bold|clean|glow|box|karaoke|twoLine|off","options":{"wordsPerPage":1..8?,"activeColor":"#rrggbb"?,"keywordColor":"#rrggbb"?,"keywords":[str]?,"emoji":{"word":"🔥"}?,"uppercase":bool?,"platform":"youtube|reels|tiktok|vertical|null"?,"pop":1..1.5?,"position":"top|middle|bottom"?,"margin":0..0.45?,"xOffset":-0.5..0.5?,"size":f32?,"outline":f32?,"font":str?,"keepStyle":bool?}?}"##,
+            r##"{"track":id|"C1"?,"preset":"bold|clean|glow|box|karaoke|twoLine|off","options":{"wordsPerPage":1..8?,"activeColor":"#rrggbb"?,"keywordColor":"#rrggbb"?,"keywords":[str]?,"emoji":{"word":"🔥"}?,"uppercase":bool?,"platform":"youtube|reels|tiktok|vertical|null"?,"pop":1..1.5?,"position":"top|middle|bottom"?,"margin":0..0.45?,"xOffset":-0.5..0.5?,"size":f32?,"outline":f32?,"font":str?,"panel":bool|"#rrggbbaa"?,"keepStyle":bool?}?}"##,
             has_caption_track,
             set_animated_style,
         ),

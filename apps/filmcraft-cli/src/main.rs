@@ -123,12 +123,14 @@ SUBCOMMANDS
   captions style <bold|clean|glow|box|karaoke|twoLine|off> [--track C1]
          [--platform youtube|reels|tiktok|vertical] [--words N] [--active-color #rrggbb]
          [--keyword-color #rrggbb] [--keywords a,b] [--emoji word=🔥,…]
-         [--position top|middle|bottom] [--font F] [--keep-style]
+         [--position top|middle|bottom] [--font F] [--panel | --panel=#rrggbbaa] [--keep-style]
                                 word-by-word animated captions on a caption track
                                 (captions.setAnimatedStyle): Bold is uppercase heavy text with a
                                 black stroke, 2–4 words at a time, the spoken word in the active
                                 colour popping 1.1×; --platform keeps them in its safe zone,
-                                centred on its safe span; off draws whole captions again
+                                centred on its safe span; --panel backs each line with a panel
+                                (black at 60 %) to read over bright footage; off draws whole
+                                captions again
   captions timing [--from transcript|narration] [--track C1]
                                 when each caption word is spoken (captions.wordTiming): from the
                                 transcript's word timestamps, or the narration clips' scripts
@@ -1141,6 +1143,12 @@ fn captions_params(a: &Args) -> Result<(&'static str, Value), String> {
             }
             if a.flag("--keep-style") {
                 o["keepStyle"] = json!(true);
+            }
+            // a backing panel behind each line: `--panel` (black at 60 %) or `--panel '#rrggbbaa'`
+            match a.opt("--panel") {
+                Some(c) => o["panel"] = json!(c),
+                None if a.flag("--panel") => o["panel"] = json!(true),
+                None => {}
             }
             p["options"] = o;
             Ok(("captions.setAnimatedStyle", p))
@@ -3284,6 +3292,12 @@ mod shorts_tests {
         assert_eq!(p["options"]["wordsPerPage"], 3);
         assert_eq!(p["options"]["keywords"], json!(["money", "time"]));
         assert_eq!(p["options"]["emoji"]["cash"], "💰");
+        assert!(p["options"].get("panel").is_none());
+        // a backing panel: black at 60 %, or a colour of its own
+        let (_, p) = captions_params(&args(&["captions", "style", "box", "--panel"])).unwrap();
+        assert_eq!(p["options"]["panel"], true);
+        let (_, p) = captions_params(&args(&["captions", "style", "box", "--panel=#10203080", "--track", "C1"])).unwrap();
+        assert_eq!((p["options"]["panel"].as_str(), p["track"].as_str()), (Some("#10203080"), Some("C1")));
         let (id, p) = captions_params(&args(&["captions", "timing", "--from", "narration", "--track", "7"])).unwrap();
         assert_eq!((id, p["from"].as_str(), p["track"].as_u64()), ("captions.wordTiming", Some("narration"), Some(7)));
         for bad in [
