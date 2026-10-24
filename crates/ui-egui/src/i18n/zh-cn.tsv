@@ -3987,3 +3987,5 @@
 	Nothing to download	没有可下载的内容
 	Downloading {name} (see Progress); choose {what} again when it finishes	正在下载 {name}（参见进度）；完成后请再次选择{what}
 	Remove Object	移除对象
+	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) 需要硬件编码器（NVIDIA GPU 上的 NVENC、macOS 上的 VideoToolbox）；本机未找到，且 FilmCraft 尚无软件 H.265 编码器。请改选 H.264 或 ProRes。
+	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 需要硬件编码器；本机未找到，且 FilmCraft 尚无软件 AV1 编码器。
