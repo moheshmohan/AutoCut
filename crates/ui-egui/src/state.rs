@@ -320,6 +320,8 @@ pub struct MonitorView {
     /// drawn as translucent rectangles with its name (`"youtube"`, `"reels"`, `"tiktok"`,
     /// `"vertical"`; None = off).
     pub safe_zones: Option<filmcraft_engine::safe_zones::Platform>,
+    /// Transparency Grid: a checkerboard behind the picture shows its transparent areas.
+    pub transparency_grid: bool,
     pub show_transport: bool,
     /// Transport buttons hidden through the monitor's Button Editor. Stored per monitor.
     pub transport_hidden: Vec<String>,
@@ -350,6 +352,7 @@ impl Default for MonitorView {
             time_zoom: None,
             safe_margins: false,
             safe_zones: None,
+            transparency_grid: false,
             show_transport: true,
             // The optional Loop button is available from the editor without altering default layouts.
             transport_hidden: vec!["playback.loop".into()],
