@@ -73,6 +73,9 @@ const LOUDNESS_TOLERANCE: f64 = 0.5;
 pub struct Options {
     /// What every shot should show ("robot").
     pub subject: String,
+    /// Look for it ([`Self::subject`]) in every shot: `false` for a subject no frame shows (a
+    /// plan's `"subjectCheck": false`); the contact sheet is made all the same.
+    pub subject_check: bool,
     /// The entries as built ([`Built::layout`]); empty: each clip on the picture track is an
     /// entry of its own.
     pub entries: Vec<PlacedEntry>,
@@ -131,6 +134,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             subject: "robot".into(),
+            subject_check: true,
             entries: Vec::new(),
             picture_track: "V2".into(),
             sound_track: "A1".into(),
@@ -165,6 +169,7 @@ impl Options {
     pub fn for_showcase(opts: &crate::showcase::Options, built: &Built) -> Self {
         Self {
             subject: opts.subject.clone(),
+            subject_check: opts.subject_check,
             entries: built.layout.clone(),
             privacy: built.privacy.clone(),
             faces: opts.redact.as_ref().is_some_and(|r| r.faces),
@@ -1239,6 +1244,8 @@ async fn subject(
 ) -> (Check, Vec<(usize, Option<Vec<u8>>)>) {
     let name = "subject";
     let list = shots(seq, opts);
+    // a subject no frame shows is not looked for: only the contact sheet's tiles are made
+    let model = model.filter(|_| opts.subject_check);
     let mut tiles: Vec<(usize, Option<Vec<u8>>)> = Vec::new();
     let (mut asked, mut failed, mut first_error) = (0usize, 0usize, None);
     if model.is_some() {
@@ -1287,6 +1294,7 @@ async fn subject(
         }
     }
     let check = match model {
+        None if !opts.subject_check => Check::skipped(name, format!("the plan does not look for the {} (subjectCheck: false)", opts.subject)),
         None => Check::skipped(name, "model unavailable"),
         Some(_) if asked == 0 => Check::skipped(name, "no frames rendered"),
         Some(m) if failed == asked => Check::skipped(name, format!("{} did not answer: {}", m.id(), first_error.unwrap_or_default())),
@@ -2596,6 +2604,43 @@ mod tests {
         assert_eq!(safe_zones(&ex, &flat, &Options::default(), &mut QaReport::default()).await.status, "skipped");
         let bad = Options { platform: Some("snapchat".into()), ..Options::default() };
         assert_eq!(safe_zones(&ex, &seq, &bad, &mut QaReport::default()).await.status, "skipped");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_subject_no_frame_shows_is_looked_for_only_when_the_plan_says_so() {
+        // the Akku Tesla show counted "VERSION #1/#2/#3": no frame shows a version, and the check
+        // said so for every shot
+        let mut s = filmcraft_engine::Session::default();
+        s.execute("file.newSequence", json!({"name": "Show", "width": 320, "height": 180, "fps": 30, "video": 3, "audio": 1})).unwrap();
+        s.execute("graphics.newText", json!({"text": "VERSION #1", "seconds": 2.0, "track": 1, "time": 0})).unwrap();
+        let ex = crate::SessionExecutor::from(s);
+        let seq = parse(&ex.execute("sequence.inspect", json!({})).await.unwrap());
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = std::sync::Arc::clone(&asked);
+        let eyes = crate::llm::FnModel::new("eyes", move |_, _, _| {
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"present": false}))
+        });
+        let looking = Options { subject: "version".into(), ..Options::default() };
+        let mut r = QaReport::default();
+        let (c, tiles) = subject(&ex, &seq, &looking, Some(&eyes), &mut r, &mut |_| {}).await;
+        assert_eq!(c.status, "findings", "{c:?}");
+        let f = r.of("subject", Severity::Warning);
+        assert!(f.len() == 1 && f[0].message.starts_with("no version found at"), "{:?}", r.findings);
+        assert_eq!(tiles.len(), 1);
+        // the plan turns it off: nothing asked, nothing found, the contact sheet's tile all the same
+        let before = asked.load(std::sync::atomic::Ordering::SeqCst);
+        let off = Options { subject_check: false, ..looking };
+        let mut r = QaReport::default();
+        let (c, tiles) = subject(&ex, &seq, &off, Some(&eyes), &mut r, &mut |_| {}).await;
+        assert_eq!(c.status, "skipped");
+        assert!(c.note.as_deref().is_some_and(|n| n.contains("subjectCheck: false")), "{c:?}");
+        assert!(r.findings.is_empty() && tiles.len() == 1 && tiles[0].1.is_some());
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), before, "the model was not asked");
+        // a showcase's QA takes it from the show's options
+        let show = crate::showcase::Options { subject: "toy car".into(), counter: Some("version".into()), subject_check: false, ..Default::default() };
+        let q = Options::for_showcase(&show, &Built::default());
+        assert_eq!((q.subject.as_str(), q.subject_check), ("toy car", false));
     }
 
     #[test]

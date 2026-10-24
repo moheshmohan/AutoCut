@@ -273,7 +273,7 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    | `black` (`Executor::render`) | frames whose picture is black or nearly (92 % of the frame darker than 5 % luma, so the counter or a lower third over black still counts), sampled every 2 s, at each shot's first frame and at the first frame after it, outside dip-to-black transitions — errors |
    | `sides` (`Executor::render`) | frames where a side of the frame — the left or right pillar, the bar above or below — is black while a picture still shows in the middle (`qa::black_sides`), sampled around every transition (its first frames, either side of the cut, its last frames) and at the first and last frame of each picture shown whole over a blurred copy (a shot with `fit: "full"`, a clip over Auto Reframe's Blur Fill track); only where that side shows something in the frame just before or after the transition or in the middle of the picture shown whole, so letterboxing kept on purpose and titles over black are not findings — errors, with the time and the side |
    | `mix` (`file.exportMedia` to a temporary 32-bit float WAV, metered with `filmcraft-audio-dsp`'s BS.1770 `LoudnessMeter`) | integrated loudness outside −16…−14 LUFS (±0.5 LU) — warning; true peak above −1 dBTP — warning; above 0 dBTP or any sample at full scale — error (clipping, with the time of the first); the median short-term loudness (3 s windows wholly inside narration clips on A2 vs wholly between them; 400 ms windows when lines or pauses are too short) — the voice less than 4 dB louder: warning, not louder at all: error. Then per stem (`audio.analyzeMix`, `qa::mix_findings`), each a warning: the narration (A2) less than 12 LU above the music (A3) while it speaks (median), the Mix's limiter taking more than 2 dB off the peaks, more than 25 % of the mix's energy below 120 Hz (naming the stem that brings most of it), a narration clip whose source is clipped (flat tops). The analysis is `mix_analysis` in the report and its headline numbers are in `loudness` (`speechOverMusicLu`, `speechOverRestLu`, `limiterDb`, `lowShare`, `presenceShare`) |
-   | `subject` (`AUTOCUT_ANALYSIS_MODEL`) | the middle frame of every shot, rendered and grounded with the analysis' prompt (`analyze::ground_prompt`) — a shot where the subject is not found: warning; without a reachable model the check is recorded as skipped (model unavailable) |
+   | `subject` (`AUTOCUT_ANALYSIS_MODEL`) | the middle frame of every shot, rendered and grounded with the analysis' prompt (`analyze::ground_prompt`) — a shot where the subject is not found: warning; without a reachable model the check is recorded as skipped (model unavailable), and so it is when the plan says `"subjectCheck": false` (a subject no frame shows) |
    | `safe_zones` (`sequence.checkSafeZones`) | a caption, title or lower third reaching into the platform's interface (`Options::platform`; a vertical sequence without one: every platform at once, `vertical`) — warning, with the zone and how much of it is in there; a horizontal sequence without a platform: skipped |
 
    QA never edits the project and never fails the build: a check that cannot run (no frames
@@ -296,6 +296,14 @@ of an entry's facts into its line, told to use those and nothing else.
 
 A reviewed plan may hold `entries` alone (drop, merge or relabel robots, fix a shot's `best`
 moment or `seen` times): the model then writes the words for exactly those.
+
+**What the counter counts.** The counter, the closing card ("3 ROBOTS"), the thumbnail's tag and
+the template words count the subject — unless the plan's top-level `"counter"` names something
+else: a maker's build video counts `"counter": "version"` ("VERSION #2") over shots of a toy
+car, and QA still looks for the subject (the report's or the plan's `"subject": "toy car"`).
+Where the subject is nothing a frame shows, `"subjectCheck": false` leaves QA's subject check out
+(recorded as skipped; the contact sheet is made all the same). Built with the counter word as
+the subject, the Akku Tesla show got "no version found" for every shot (2026-10-24).
 
 ### Per-shot controls
 

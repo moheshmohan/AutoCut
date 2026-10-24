@@ -481,3 +481,33 @@ async fn a_bigger_frame_draws_every_title_and_the_counter_bigger() {
         assert!((b / a - 2.0).abs() < 1e-6, "title {a} → {b}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plans_counter_counts_versions_over_a_subject_qa_still_looks_for() {
+    // the Akku Tesla show counted "VERSION #1/#2/#3" over a toy car: the counter word came from
+    // the subject, so QA looked for a "version" in every shot
+    let ex = demo();
+    let opts = Options { subject: "toy car".into(), counter: Some("version".into()), ..tech(Look::default()) };
+    let built = showcase::build(&ex, &opts, &gitex(), &gitex_script(), &mut |_| {}).await.expect("the showcase builds");
+    let spot = built.layout[2].clone();
+    with_seq(&ex, &built, |seq| {
+        let all: Vec<&TrackItem> = seq.video_tracks.iter().flat_map(|t| t.items.iter()).collect();
+        let counter = all.iter().find(|c| c.name == "Counter").expect("the counter");
+        let text = counter.effects.iter().find(|e| e.effect == "graphic_text").and_then(|e| e.param("text")).unwrap();
+        assert_eq!(text.value_at(counter.source_time_at(Tick::from_seconds_f64(spot.start + 0.1))), ParamValue::Text("VERSION #2".into()));
+        let texts: Vec<String> = all
+            .iter()
+            .flat_map(|c| c.effects.iter())
+            .filter(|e| e.effect == "graphic_text")
+            .filter_map(|e| match &e.param("text")?.value {
+                ParamValue::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "3 VERSIONS"), "the closing card counts versions: {texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("TOY CAR")), "{texts:?}");
+    });
+    // QA looks for the toy car
+    let q = filmcraft_autocut::qa::Options::for_showcase(&opts, &built);
+    assert_eq!((q.subject.as_str(), q.subject_check), ("toy car", true));
+}

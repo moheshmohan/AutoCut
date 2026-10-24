@@ -2415,6 +2415,16 @@ async fn cli() {
                     Some(_) => fail(format!("showcase: {path}: numbers: english or malayalam")),
                 };
                 opts.redact = filmcraft_autocut::privacy::Redact::from_plan(sv.get("redact")).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
+                // what the counter counts, apart from the subject QA looks for
+                let (counter, check) = filmcraft_autocut::showcase::counting_from_plan(&sv).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
+                if let Some(c) = counter {
+                    look_fields.insert("counter".into(), json!(c));
+                    opts.counter = Some(c);
+                }
+                if let Some(b) = check {
+                    look_fields.insert("subjectCheck".into(), json!(b));
+                    opts.subject_check = b;
+                }
                 if let Some(es) = sv.get("entries") {
                     entries = serde_json::from_value(es.clone()).unwrap_or_else(|e| fail(format!("showcase: {path}: bad entries ({e})")));
                     for (i, e) in entries.iter_mut().enumerate() {

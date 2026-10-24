@@ -60,8 +60,15 @@ pub struct Options {
     pub title: String,
     /// Under the title ("2020 – 2026"); default: the years the entries span.
     pub subtitle: Option<String>,
-    /// What the counter counts ("robot" → "ROBOT #3").
+    /// What the shots show, and what QA looks for in them; also what the counter counts
+    /// ("robot" → "ROBOT #3") unless [`Self::counter`] says otherwise.
     pub subject: String,
+    /// What the counter counts when that is not what the shots show (a plan's `"counter"`:
+    /// "version" → "VERSION #2" over shots of a toy car); `None`: the subject.
+    pub counter: Option<String>,
+    /// QA looks for the subject in every shot; a plan's `"subjectCheck": false` turns that off
+    /// (a subject no frame shows).
+    pub subject_check: bool,
     /// Narration voice (`clone:<name>` for a cloned voice); `None`: no narration.
     pub voice: Option<String>,
     pub mood: String,
@@ -124,6 +131,12 @@ pub struct Options {
 }
 
 impl Options {
+    /// What the counter, the closing card, the thumbnail and the words count: the plan's
+    /// counter, else the subject.
+    pub fn counted(&self) -> &str {
+        self.counter.as_deref().map(str::trim).filter(|c| !c.is_empty()).unwrap_or(&self.subject)
+    }
+
     /// The show is narrated in Malayalam.
     pub fn malayalam(&self) -> bool {
         self.language.as_deref().is_some_and(|l| {
@@ -139,6 +152,8 @@ impl Default for Options {
             title: "My Robot Showcase".into(),
             subtitle: None,
             subject: "robot".into(),
+            counter: None,
+            subject_check: true,
             voice: None,
             mood: "epic".into(),
             bpm: 100.0,
@@ -162,6 +177,34 @@ impl Default for Options {
             follow_labels: false,
         }
     }
+}
+
+/// The longest counter word a plan gives (characters).
+const MAX_COUNTER_CHARS: usize = 40;
+
+/// A plan's counting fields: `"counter"` (what the counter counts, a word or a few — `None`
+/// when the plan gives none) and `"subjectCheck"` (whether QA looks for the subject; `None`
+/// when the plan does not say). A show that counts versions of one toy car says `"counter":
+/// "version"` and keeps `toy car` the subject QA looks for, or turns the look off with
+/// `"subjectCheck": false`.
+pub fn counting_from_plan(plan: &Value) -> Result<(Option<String>, Option<bool>), AutoCutError> {
+    let counter = match plan.get("counter") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(c)) => {
+            let c = c.split_whitespace().collect::<Vec<_>>().join(" ");
+            if c.is_empty() || c.chars().count() > MAX_COUNTER_CHARS || c.chars().any(|ch| ch.is_control() || ch == '#') {
+                return Err(AutoCutError::Invalid(format!("counter: a word or a few (up to {MAX_COUNTER_CHARS} characters, no `#`), such as \"version\"")));
+            }
+            Some(c)
+        }
+        Some(_) => return Err(AutoCutError::Invalid("counter: a word, such as \"version\"".into())),
+    };
+    let check = match plan.get("subjectCheck") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return Err(AutoCutError::Invalid("subjectCheck: true or false".into())),
+    };
+    Ok((counter, check))
 }
 
 /// A plan's or flag's number style (`english`, `malayalam`, any case), as `tts.create` takes it.
@@ -770,7 +813,7 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
     let video = format!(
         "The video: \"{}\" — every {} I have filmed{}, in the order I met them ({} in all). A counter on screen numbers them, so do not say the numbers.",
         opts.title,
-        opts.subject,
+        opts.counted(),
         if years.is_empty() { String::new() } else { format!(" ({years})") },
         robots.len()
     );
@@ -840,12 +883,12 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
     if intro.split_whitespace().count() < 4 {
         intro = format!(
             "This is every {} I have filmed{}, in order. Let's count them.",
-            opts.subject,
+            opts.counted(),
             if years.is_empty() { String::new() } else { format!(" from {years}") }
         );
     }
     if outro.split_whitespace().count() < 4 {
-        outro = format!("That's {} {}s so far. Thanks for watching, and see you at the next one.", robots.len(), opts.subject);
+        outro = format!("That's {} {}s so far. Thanks for watching, and see you at the next one.", robots.len(), opts.counted());
     }
     Script { intro, lines, outro, templated, delivery, ..Script::default() }
 }
@@ -3480,7 +3523,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     if look.outro.is_none() {
         sfx(ex, "impact", 3.0, t, &tr.hits, 0.7, &mut mix).await?;
     }
-    let closing = format!("{robots} {}S", opts.subject.to_uppercase());
+    let closing = format!("{robots} {}S", opts.counted().to_uppercase());
     match &theme {
         _ if look.outro.is_some() => {}
         Some(th) => look::outro_card(ex, th, [tr.titles_index, tr.over_index], tr.fps, (w, h), &closing, "and counting", t, outro_len).await?,
@@ -3509,7 +3552,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     }
 
     // ---- the counter, across the entries
-    let counter_prefix = format!("{} #", opts.subject.to_uppercase());
+    let counter_prefix = format!("{} #", opts.counted().to_uppercase());
     let counter = run(
         ex,
         "graphics.counter",
@@ -3869,7 +3912,7 @@ async fn compose_thumbnail(
     let props =
         json!({"font_style": "Bold", "align": "center", "fill_color": "#ffffff", "stroke": true, "stroke_width": (size / 11.0).round(), "shadow": true});
     title(ex, tr.titles_index, fps, &lines.join("\n"), 0.0, 1.0, size, (w / 2.0, first_baseline), props).await?;
-    let tag = format!("{count} {}S", opts.subject.to_uppercase());
+    let tag = format!("{count} {}S", opts.counted().to_uppercase());
     let tag_props = json!({"font_style": "Bold", "align": "left", "fill_color": "#ffcc00", "stroke": true, "stroke_width": 6, "shadow": true});
     title(ex, tr.over_index, fps, &tag, 0.0, 1.0, 64.0, (48.0, if low { 100.0 } else { h - 48.0 }), tag_props).await?;
     let format = if path.to_ascii_lowercase().ends_with(".png") { "png" } else { "jpeg" };
@@ -4857,6 +4900,22 @@ mod tests {
         assert_eq!(tidy(&format!("{two} Done.")), "First part of it here.");
     }
 
+    #[test]
+    fn the_counter_counts_what_the_plan_says_and_the_subject_stays_what_qa_looks_for() {
+        assert_eq!(counting_from_plan(&json!({})).unwrap(), (None, None));
+        assert_eq!(counting_from_plan(&json!({"counter": "  version ", "subjectCheck": false})).unwrap(), (Some("version".into()), Some(false)));
+        assert_eq!(counting_from_plan(&json!({"counter": null, "subjectCheck": true})).unwrap(), (None, Some(true)));
+        for bad in
+            [json!({"counter": ""}), json!({"counter": "VERSION #"}), json!({"counter": "x".repeat(41)}), json!({"counter": ["a"]}), json!({"subjectCheck": 0})]
+        {
+            assert!(counting_from_plan(&bad).is_err(), "{bad}");
+        }
+        let o = Options { subject: "toy car".into(), counter: Some("version".into()), ..Options::default() };
+        assert_eq!(o.counted(), "version");
+        assert_eq!(Options { counter: Some(" ".into()), ..Options::default() }.counted(), "robot");
+        assert!(Options::default().subject_check);
+    }
+
     #[tokio::test]
     async fn the_script_falls_back_to_templates() {
         let day = 1_665_741_668;
@@ -4881,6 +4940,10 @@ mod tests {
         let none = crate::llm::FixedModel::new(vec![]);
         let s = write_script(&none, &Options::default(), &entries, &mut |_| {}).await;
         assert_eq!((s.lines.len(), s.templated), (2, 2));
+        // a show counting versions says versions, not the subject the shots show
+        let versions = Options { subject: "toy car".into(), counter: Some("version".into()), ..Options::default() };
+        let s = write_script(&crate::llm::FixedModel::new(vec![]), &versions, &entries, &mut |_| {}).await;
+        assert!(s.intro.contains("every version") && s.outro.contains("2 versions"), "{} / {}", s.intro, s.outro);
     }
 
     #[test]
