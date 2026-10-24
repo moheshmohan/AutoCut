@@ -335,6 +335,22 @@ impl History {
             self.log.drain(..extra);
         }
     }
+    /// The History panel's Delete Redoable Actions: removes every step that Redo would bring
+    /// back. The project and the undo steps stay as they are. Returns how many steps were removed.
+    pub fn delete_redoable(&mut self) -> usize {
+        let n = self.redo.len();
+        self.redo.clear();
+        n
+    }
+    /// The History panel's Clear History: removes every undo and redo step. The project stays as
+    /// it is. Returns how many steps were removed.
+    pub fn clear(&mut self) -> usize {
+        let n = self.undo.len() + self.redo.len();
+        self.undo.clear();
+        self.redo.clear();
+        self.merge_key = None;
+        n
+    }
 }
 
 /// Source patching / track targeting (the track header "V1/A1" source buttons + target toggles).
@@ -1550,6 +1566,8 @@ mod file_tests;
 mod gap_selection_tests;
 #[cfg(test)]
 mod home_paths_tests;
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod image_sequence_tests;
 #[cfg(test)]
