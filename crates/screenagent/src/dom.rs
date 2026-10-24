@@ -138,6 +138,24 @@ pub fn run<A: Act + ?Sized>(actor: &mut A, tab: &Tab, step: Step) -> Result<Look
 
 /// How long the grid gets between two looks while a search's results load.
 const RESULT_POLL_MS: u64 = 1000;
+/// Looks at the library's grid, a second apart, for it to settle before a search.
+const LIBRARY_LOOKS: u32 = 8;
+
+/// The tiles the grid shows once it has settled — the same on two looks a second apart, within
+/// [`LIBRARY_LOOKS`] looks — so a search's results are never told from a library still loading;
+/// `None` when it shows no tiles or does not settle.
+pub fn settled_tiles<A: Act + ?Sized>(actor: &mut A, tab: &Tab) -> Result<Option<Vec<String>>, ScreenError> {
+    let mut last = run(actor, tab, Step::Look)?.labels();
+    for _ in 1..LIBRARY_LOOKS {
+        actor.sleep(RESULT_POLL_MS);
+        let now = run(actor, tab, Step::Look)?.labels();
+        if !now.is_empty() && now == last {
+            return Ok(Some(now));
+        }
+        last = now;
+    }
+    Ok(None)
+}
 /// Looks at a grid that shows no tiles before that is taken for "no results" (it empties
 /// while it loads).
 const EMPTY_LOOKS: u32 = 5;

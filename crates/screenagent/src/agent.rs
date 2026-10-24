@@ -341,8 +341,8 @@ fn drive_inner<A: Act, G: Ground>(
     // anything in the search field, which holds its title; or the searches — for videos always,
     // so Google's own filter leaves only videos in the grid
     if let Some(title) = plan.album.as_deref() {
-        let page = open_page(actor, driven, progress);
-        let field = search_album(actor, grounder, plan, &mut summary, &mut cap, title, started, page.as_ref(), progress)?;
+        let mut page = open_page(actor, driven, progress);
+        let field = search_album(actor, grounder, plan, &mut summary, &mut cap, title, started, &mut page, progress)?;
         let eyes = OutsideField { eyes: grounder, field };
         let by_page = match &page {
             Some(p) => tick_album(actor, plan, &mut summary, p, title, started, progress)?,
@@ -997,7 +997,7 @@ const ALBUM_PAGE_LOOKS: u32 = 30;
 const ALBUM_EYE_LOOKS: u32 = 8;
 
 /// The picker's page, where the browser runs scripts in it: the tab, and the tiles the library
-/// showed before the search.
+/// showed before the search (read once the picker has loaded, [`crate::dom::settled_tiles`]).
 struct Page {
     tab: crate::tabs::Tab,
     library: Vec<String>,
@@ -1008,9 +1008,9 @@ struct Page {
 fn open_page<A: Act>(actor: &mut A, driven: Option<&crate::tabs::Tab>, progress: &mut dyn FnMut(&str)) -> Option<Page> {
     let tab = driven?;
     match crate::dom::run(actor, tab, crate::dom::Step::Look) {
-        Ok(look) => {
+        Ok(_) => {
             progress("screenagent: reading the picker's page: its tiles are ticked by their checkboxes");
-            Some(Page { tab: tab.clone(), library: look.labels() })
+            Some(Page { tab: tab.clone(), library: Vec::new() })
         }
         Err(ScreenError::Unsupported(why)) => {
             progress(&format!("screenagent: {why}; selecting by eyes"));
@@ -1098,7 +1098,7 @@ fn search_album<A: Act, G: Ground>(
     cap: &mut crate::capture::Capture,
     title: &str,
     started: Instant,
-    page: Option<&Page>,
+    page: &mut Option<Page>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Element, ScreenError> {
     if picker::normalize_title(title).is_empty() {
@@ -1114,8 +1114,22 @@ fn search_album<A: Act, G: Ground>(
         )));
     };
     let eyes = OutsideField { eyes: grounder, field: field.clone() };
-    // the unfiltered library, as the picker opened on it
+    // the unfiltered library, as the picker opened on it — in the page once its grid has loaded
+    // and settled (a library still loading must not pass for the search's results)
     let library = GridLook::of(&eyes, cap)?;
+    if let Some(p) = page.as_mut() {
+        match crate::dom::settled_tiles(actor, &p.tab) {
+            Ok(Some(tiles)) => p.library = tiles,
+            Ok(None) => {
+                progress("screenagent: the picker's page shows no settled grid; selecting by eyes");
+                *page = None;
+            }
+            Err(e) => {
+                progress(&format!("screenagent: cannot read the picker's page ({e}); selecting by eyes"));
+                *page = None;
+            }
+        }
+    }
     progress(&format!("screenagent: searching the picker for the album `{title}`"));
     let (px, py) = field.center();
     actor.click_png(cap, px, py)?;
@@ -1130,7 +1144,7 @@ fn search_album<A: Act, G: Ground>(
     }
     actor.key_return()?;
     let nothing_new = |why: &str| ScreenError::Other(format!("searching the picker for `{title}` showed nothing new ({why}); nothing was selected"));
-    if let Some(p) = page {
+    if let Some(p) = page.as_ref() {
         progress("screenagent: waiting for the search's results in the picker's page");
         match crate::dom::wait_for_results(actor, &p.tab, &p.library, ALBUM_PAGE_LOOKS) {
             Ok(crate::dom::Results::Shown(look)) => {
@@ -3331,6 +3345,8 @@ mod tests {
         dom_top: usize,
         wont_tick: std::collections::BTreeSet<usize>,
         scripts: u32,
+        /// Looks at the page that find its grid still empty (the picker loading).
+        loading: u32,
     }
 
     /// Checkboxes a [`Shelf`]'s page holds at a time (live: 29), and items a scroll moves on.
@@ -3367,6 +3383,7 @@ mod tests {
                 dom_top: 0,
                 wont_tick: Default::default(),
                 scripts: 0,
+                loading: 0,
             }))
         }
 
@@ -3409,7 +3426,11 @@ mod tests {
                 serde_json::json!({"label": "Select", "checked": false}),
                 serde_json::json!({"label": "Select all photos from Tue, Jul 29, 2025", "checked": false}),
             ];
-            tiles.extend(self.in_page().into_iter().map(|i| serde_json::json!({"label": self.aria(i), "checked": self.selected.contains(&i)})));
+            if self.loading > 0 {
+                self.loading -= 1;
+            } else {
+                tiles.extend(self.in_page().into_iter().map(|i| serde_json::json!({"label": self.aria(i), "checked": self.selected.contains(&i)})));
+            }
             let n = self.selected.len();
             let header = (n > 0 && !self.done).then(|| format!("{n} selected"));
             Ok(serde_json::json!({"tiles": tiles, "header": header, "top": self.dom_top, "height": 9000, "moved": moved, "clicked": clicked}).to_string())
@@ -3793,6 +3814,33 @@ mod tests {
         let s = s.unwrap_or_else(|e| panic!("{e} {lines:#?}"));
         assert!(s.done_pressed && s.selected == 52 && w.borrow().selected.len() == 52, "{s:?}");
         assert!(lines.iter().any(|l| l.contains("waiting for the results")), "{lines:#?}");
+    }
+
+    #[test]
+    fn the_library_is_read_from_the_page_once_it_has_loaded() {
+        // the grid still loading when the agent starts: its library is read once it has settled,
+        // and the album is ticked in the page all the same
+        let w = Shelf::new(300, &[(AKKU, akku())]);
+        {
+            let mut w = w.borrow_mut();
+            w.js = Some(true);
+            w.loading = 3;
+            w.delay = 4;
+        }
+        let (s, lines) = drive_shelf(&w, &album_plan(AKKU, true));
+        let s = s.unwrap_or_else(|e| panic!("{e} {lines:#?}"));
+        assert!(s.done_pressed && s.selected == 52 && w.borrow().shift_clicks == 0, "in the page: {s:?} {lines:#?}");
+        // a grid that never settles in the page: the eyes do it
+        let w = Shelf::new(300, &[(AKKU, akku())]);
+        {
+            let mut w = w.borrow_mut();
+            w.js = Some(true);
+            w.loading = 1000;
+        }
+        let (s, lines) = drive_shelf(&w, &album_plan(AKKU, true));
+        let s = s.unwrap_or_else(|e| panic!("{e} {lines:#?}"));
+        assert!(s.done_pressed && s.selected == 52 && w.borrow().shift_clicks == 1, "by eyes: {s:?}");
+        assert!(lines.iter().any(|l| l.contains("no settled grid; selecting by eyes")), "{lines:#?}");
     }
 
     #[test]
