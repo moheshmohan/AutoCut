@@ -43,6 +43,11 @@ import os, pathlib
 token = os.environ.get("FILMCRAFT_CONTROL_TOKEN") or (pathlib.Path.home() / "Library/Application Support/FilmCraft/control/9876.token").read_text().strip()
 ```
 
+Socket reads and writes time out after two minutes without progress, releasing the connection slot.
+Expiration closes the connection without an unsolicited reply; reconnect before the next request
+(the CLI / MCP bridge does this automatically). Waiting for a UI reply has its separate 60-second
+limit. A partial request that times out is not dispatched.
+
 One JSON request per line → one JSON reply per line. The app opts out of macOS App Nap
 (`apps/filmcraft/src/app_nap.rs`): a hidden window would otherwise drop the whole process to
 background priority, and on a busy machine it would stop answering.
