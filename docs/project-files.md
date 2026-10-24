@@ -177,6 +177,8 @@ Premiere's auto-save can lose up to one interval of work. FilmCraft also keeps a
   A file that is gone (`missing`) also warns, with **Not Now** as the primary button. Only
   `unchanged` (and `untitled`, a never-saved project) keep **Recover** as the primary choice. None of
   this ever deletes recovery data.
+- If discarding a recovery session fails, FilmCraft reports the error and keeps that session and
+  the remaining candidates in the recovery list for retry. Sessions already deleted stay removed.
 - Recovering loads the snapshot as an **unsaved** project with its original path, so Save writes
   over the original file. The recovered state goes into the new session's own journal before the old
   journal is deleted; it keeps the old `basedOn`, so a project file saved in between still counts
