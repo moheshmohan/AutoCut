@@ -7,7 +7,8 @@ and exported in 4K. Everything below is `filmcraft-cli` (build it with `cargo bu
 filmcraft-cli`; the binary is `target/release/filmcraft-cli`). How each piece works:
 [crates/autocut/README.md](../crates/autocut/README.md); every flag: `filmcraft-cli help`. The
 whole pipeline, from the album to YouTube and Instagram, with this show as the worked example:
-[video-pipeline.md](video-pipeline.md).
+[video-pipeline.md](video-pipeline.md); a maker's build video (his own takes, a version counter,
+graphics after the build) is its [§10](video-pipeline.md#10-recipe-a-makers-build-video-akku-tesla).
 
 ## Before the first round (once)
 

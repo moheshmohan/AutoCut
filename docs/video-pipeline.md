@@ -10,7 +10,8 @@ Google Photos and AutoCut's cache).
 Every command below is `filmcraft-cli` (`cargo build --release -p filmcraft-cli`, or the copy in
 the packaged app, `target/macos-package/bin/filmcraft-cli`). Every flag: `filmcraft-cli help`.
 The revision round in more depth (review notes, photos, places, the Malayalam style):
-[showcase-runbook.md](showcase-runbook.md). How each piece works:
+[showcase-runbook.md](showcase-runbook.md). A different kind of video — a maker's build, with his
+own takes, a version counter and graphics after the build — is §10. How each piece works:
 [crates/autocut/README.md](../crates/autocut/README.md). For a quick vertical Short or Reel of
 any clips, without a showcase (`filmcraft-cli quick <folder>`: a template picked and filled from
 the scene index and the speech): [quick-templates.md](quick-templates.md).
@@ -267,7 +268,104 @@ Business* (an Instagram account linked to a Facebook Page). Until AutoCut stages
 temporary link or signs in with Facebook Login, post the Reel from the phone (the file is in the
 Google Photos album) or pass `--video-url`.
 
-## 10. Where everything is
+## 10. Recipe: a maker's build video ("Akku Tesla")
+
+Another kind of video, built with the same tools on 2026-10-24: **"Akku Tesla"**, a toy Tesla
+Model 3 given working lights by an ESP32 board, in three versions (a web page, car-shaped
+controls, a touch remote), 5:51, Malayalam. What makes it different from the robots show: the
+maker speaks in some clips (his own takes are kept, not narrated over), the cloned voice narrates
+the B-roll, the counter counts *versions* of one car, and graphics, callouts and effects go on
+after the build. The files of that build are in `~/Movies/AutoCut/Akku Tesla/`.
+
+**The project and the album.** One album holds every clip and photo ("akku tesla toy", 52 items).
+
+```sh
+D="$HOME/Movies/AutoCut/Akku Tesla"; P="$D/Akku Tesla.fcproj"
+filmcraft-cli new "$P"                                   # or let --project make it
+filmcraft-cli --project "$P" photos pick --album "akku tesla toy" --save
+```
+
+The picker answers the album's exact title after a few seconds; the agent waits for it (up to
+30 s) and, with Chrome ▸ View ▸ Developer ▸ Allow JavaScript from Apple Events on, ticks each tile
+in the page ([showcase-runbook.md §1](showcase-runbook.md#1-the-new-material-from-the-album)).
+
+**What is in the clips.** Who speaks, in which language, where the words and pauses are, and a
+scene index with contact sheets to choose windows from:
+
+```sh
+filmcraft-cli --project "$P" --save exec media.understandSpeech '{"language": "auto", "wait": true}' > "$D/speech-auto.json"
+filmcraft-cli --project "$P" --save exec media.understandSpeech '{"items": [50, 51, 52], "language": "ml", "wait": true}' > "$D/speech-ml.json"
+filmcraft-cli --project "$P" --save scenes analyze --detail full --sheet "$D/scenes" > "$D/scenes.json"
+filmcraft-cli --project "$P" sheet --items 50:0-60,52 --n 8 --out "$D/sheets/build.jpg"
+```
+
+**The plan.** No analysis is needed when you choose the shots yourself: an empty report names the
+subject, and the plan's entries carry the shots (`showcase-plan --patch` with `add` entries makes
+them from item numbers, [showcase-runbook.md](showcase-runbook.md)). The Akku Tesla plan
+(`plan-v1-ml.json`) has twelve entries:
+
+- **Scene entries** for everything that is not a version — the opening montage, the maker's
+  intro, the board, opening the toy, the pins, the LEDs, the first code, the finale:
+  `{"label": "XIAO ESP32-C3", "kind": "scene", "event": "XIAO ESP32-C3", "caption": "Seeed Studio
+  XIAO ESP32-C3", "shots": [...]}`. A scene is not counted, gets its `caption` instead of a name
+  lower third, and opens its `event`'s chapter.
+- **The maker's own takes**: a shot whose sound is the maker talking keeps it, raised with
+  `"volume": 9` (dB over the level the mix gives the shots; 7 for shorter remarks), and its entry's
+  script line is `""` — no narration over him. Every other shot is `"mute": true`.
+- **Cloned narration** for the other entries: the Malayalam lines in `script.lines` (spoken,
+  checked line by line by the Malayalam speech model; listen to samples first,
+  [malayalam-narration.md](malayalam-narration.md)), an empty `intro` when the show opens on the
+  maker's own words, and the `outro`'s call to action.
+- **The version counter**: the three version entries have `"kind": "toy car"`, and the plan says
+  `"counter": "version"`, so the counter reads "VERSION #1/#2/#3", the closing card "3 VERSIONS",
+  while QA looks for the subject the report names (`{"subject": "toy car", "clips": []}`); or
+  `"subjectCheck": false` where no frame shows the subject. (Built with `version` as the subject,
+  QA warned "no version found" for each of the ten version shots.)
+- **Spec chips** per version in `script.chips` (`"9": ["XIAO ESP32-C3", "4 LEDs", "Web page"]`), and
+  photos as shots (`"photo": true, "hold": 5`).
+
+```sh
+echo '{"subject": "toy car", "clips": []}' > "$D/report-empty.json"
+filmcraft-cli --project "$P" --save showcase --report "$D/report-empty.json" --script-in "$D/plan-v1-ml.json" \
+    --title "AKKU TESLA" --subtitle "ESP32 · LEDs · Wi-Fi" --voice clone:mohesh-natural --language ml \
+    --strict-script --mood uplifting --style tech --mix speech --loudness social --soundfont generaluser-gs \
+    --enhance-voice --stabilize --match-color --export "$D/Akku Tesla - review 1 (1080p).mp4" --qa > "$D/build1.json"
+```
+
+`--enhance-voice` cleans the maker's takes (never the narration); `--stabilize` and
+`--match-color` suit phone footage of a workbench.
+
+**After the build: the extras.** One `run` file of commands on the built project (keep a copy of
+the project first: `cp "$P" "$D/Akku Tesla (before extras).fcproj"`), then export again. The
+Akku Tesla extras, with what they needed:
+
+| what | command |
+|---|---|
+| the maker's takes a little lower in the final mix | `{"id": "clip.audioGain", "params": {"clips": [356, 382], "mode": "adjust", "db": -5}}` |
+| the music ducks under his voice | `{"id": "track.setAutoDuck", "params": {"track": "A3", "under": ["A1"], "amount": 10, "attack": 0.2, "release": 0.6}}` |
+| callouts that follow the board, the phone page, the remote | `{"id": "track.label", "params": {"clip": 392, "box": [0.42, 0.24, 0.15, 0.38], "at": 79.4, "text": "XIAO ESP32-C3", "style": "callout", "accent": "#29E0FF", "wait": true}}` (`"style": "tag"` for a short one); `track.spotlight` dims around one |
+| effects on the opening shots and the hero shot | `{"id": "effects.apply", "params": {"clips": [369], "effect": "cr_light_sweep"}}` (also `cr_glitch`, `cr_chromatic_aberration`, `cr_tech_hud`) |
+| a speed ramp that keeps the shot's length | `{"id": "clip.speedRamp", "params": {"clips": [472], "preset": "hero", "fit": "length"}}` — `fit: "length"` plays more of the source (or eases the curve) instead of halving the clip and leaving a gap; `"preset": "none"` puts the speed back |
+| the finale pulses on the beat | `{"id": "sequence.beatPulse", "params": {"range": {"start": 324, "end": 339}, "effect": "zoomPulse", "strength": 0.6}}` |
+| pin labels, a code card, a diagram | `{"id": "graphics.newText", "params": {"text": "D0  ◀  LEFT BLINKER", "position": [1220, 300], "size": 60, "font": "DIN Alternate", "fontStyle": "Bold", "seconds": 6.1, "track": "auto", "time": 46992960000000, "newClip": true}}`, then `graphics.set` (`fill_color`, `background`), `graphics.animateText` (`slideLeft` by line, `typewriter`), `graphics.textStyle` (`glow`) — `"track": "auto"` puts labels that overlap in time on tracks of their own; a `newText` that fails leaves nothing for the styling after it to restyle |
+| captions that read over a white car | `{"id": "captions.setAnimatedStyle", "params": {"track": "C1", "preset": "box", "options": {"wordsPerPage": 5, "activeColor": "#29E0FF", "keywords": ["വൈഫൈ"], "position": "bottom", "margin": 0.28, "panel": true}}}` |
+| the loudness again, last | `{"id": "audio.normalizeLoudness", "params": {"target": "social", "truePeak": -1.0}}` |
+
+```sh
+cp "$P" "$D/Akku Tesla (before extras).fcproj"
+filmcraft-cli --project "$P" --save --keep-going run "$D/post2.jsonl" > "$D/post2.out"
+filmcraft-cli --project "$P" export "$D/Akku Tesla - review 2 (1080p).mp4" --preset "YouTube 1080p Full HD"
+filmcraft-cli frames "$D/Akku Tesla - review 2 (1080p).mp4" --at 182,188.5,234.7 --out "$D/check3/sheet.jpg"
+filmcraft-cli photos upload "$D/Akku Tesla - review 2 (1080p).mp4" --description "Akku Tesla — review 2 (1080p)"
+```
+
+Clip ids come from the build's output (`layout`: each entry's shots and their clips) or
+`inspect sequence`. Read `post2.out` line by line (`"ok": false` lines say what failed), and look
+at frames of the moments you changed. The upload goes to the library (into an album only one that
+FilmCraft made: `--album`, [§6](#6-review-and-the-next-round)). Review at 1080p, the final in 4K
+(§7).
+
+## 11. Where everything is
 
 | What | Where |
 |---|---|
@@ -291,3 +389,14 @@ Google Photos album) or pass `--video-url`.
   one at a time.
 - The narration mix that sounds best on headphones is not the one that is clear on a TV at low
   volume: listen on the TV (the speech-first mix is the default for that reason).
+- (Akku Tesla) Google's picker shows an album's search results only after a few seconds; the album
+  pick waits up to 30 s, and with Chrome's "Allow JavaScript from Apple Events" ticks every tile
+  in the page instead of by eyes.
+- (Akku Tesla) A counter that counts something no frame shows (versions) belongs in the plan's
+  `"counter"`, not in the subject: QA looks for the subject in every shot.
+- (Akku Tesla) Graphics that overlap in time need tracks of their own: `"track": "auto"`. A
+  `graphics.newText` that fails no longer lets the styling after it restyle the previous title,
+  but read the run's output for `"ok": false` all the same.
+- (Akku Tesla) `clip.speedRamp` with `ripple: false` used to halve a shot (a mean speed of 2×) and
+  leave a gap; `fit: "length"` keeps its length, and `preset: "none"` puts its speed back.
+- (Akku Tesla) Animated captions over white footage need `"panel": true`.
