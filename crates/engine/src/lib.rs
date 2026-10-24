@@ -1686,6 +1686,8 @@ mod video_templates_tests;
 mod voiceover_tests;
 #[cfg(test)]
 mod youtube_tests;
+#[cfg(test)]
+mod work_area_tests;
 
 #[cfg(test)]
 mod source_placement_tests;
