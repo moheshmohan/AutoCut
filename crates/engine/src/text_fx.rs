@@ -40,7 +40,7 @@ fn has_caption_track(s: &Session) -> std::result::Result<(), String> {
 
 fn has_graphic(s: &Session) -> std::result::Result<(), String> {
     has_seq(s)?;
-    target_clip(s, &Value::Null).map(|_| ()).ok_or_else(|| "select a graphic clip".into())
+    target_clip(s, &Value::Null).map(|_| ()).ok_or_else(|| crate::graphics::no_graphic_why(s))
 }
 
 /// Most keywords and emoji kept, and their longest text.

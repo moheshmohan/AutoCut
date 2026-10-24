@@ -85,7 +85,7 @@ Timecode and Clip Name effects also draw with the text engine.
 
 | Command | Menu / shortcut | Params |
 |---|---|---|
-| `graphics.newText` | Graphics and Titles ▸ New Layer ▸ Text (⌘T) | `text`, `position`, `box` (`[w, h]`: paragraph text in a box, `position` is its top-left corner), `clip` (add to this graphic), `vertical`, `size`, `font`, `fontStyle`, `seconds` (5), `track`, `time` |
+| `graphics.newText` | Graphics and Titles ▸ New Layer ▸ Text (⌘T) | `text`, `position`, `box` (`[w, h]`: paragraph text in a box, `position` is its top-left corner), `clip` (add to this graphic), `vertical`, `size`, `font`, `fontStyle`, `seconds` (5), `track` (an index, `"V17"`, or `"auto"`: the first free track above the clips at the time — the default), `time` |
 | `graphics.newVerticalText` | New Layer ▸ Vertical Text | as `graphics.newText`; characters stack top to bottom, paragraphs are columns right to left |
 | `graphics.newRectangle`, `graphics.newEllipse`, `graphics.newPolygon` | New Layer ▸ Rectangle (⌥⌘R), Ellipse (⌥⌘E), Polygon | `position` (the shape's centre), `size`, `clip`, `seconds` (5), `track`, `time`; polygon `sides` (6) |
 | `graphics.newFromFile` | New Layer ▸ From file… | `path` — imports the image or video and places it above the clips at the playhead (a separate clip; graphics have no media layers yet) |
@@ -108,6 +108,12 @@ Timecode and Clip Name effects also draw with the text engine.
 | `graphics.resetDuration` | Reset Duration | `seconds` (5), limited by the next clip on the track |
 | `graphics.list` | (query) | `clip` — layers with names, kinds, text, `textType` (point / paragraph), `box`, `overflow` (the box hides text), position, anchor, scale and on-canvas quads |
 | `fonts.list` | (query) | `system` (scan system font folders, default true) — families and styles |
+
+A new graphic placed on a `track` that is not free there is an error (`V17 is not free here`), and
+it leaves nothing selected: until a graphic is made or the selection changes, `graphics.set`,
+`graphics.animateText`, `graphics.textStyle` and the other commands that style a graphic take only
+the `clip` they are given — not the clip selected before, nor the one under the playhead. A
+script's styling after a failed `graphics.newText` used to restyle the previous title.
 
 Without `clip`, commands use the selected graphic clip, else the topmost graphic clip under the
 playhead. Without `layer`, they use the selected layer, else the front one. New graphic clips are

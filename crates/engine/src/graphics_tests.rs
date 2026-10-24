@@ -95,6 +95,63 @@ fn graphic_placement_takes_a_track_and_a_time() {
     }
 }
 
+/// The fill colour of a graphic clip's first layer, as written.
+fn fill(s: &Session, clip: ClipId) -> filmcraft_project::ParamValue {
+    let (_, it) = s.active_sequence().unwrap().find_item(clip).unwrap();
+    let e = &it.effects[layer_indices(&it.effects)[0]];
+    e.param("fill_color").map(|p| p.value.clone()).unwrap()
+}
+
+/// Live (the Akku Tesla extras): `graphics.newText` on a track that was not free failed, and the
+/// script's next `graphics.set`, `graphics.animateText` and `graphics.textStyle` — without `clip`
+/// — restyled the title made before it. A failed new graphic now leaves nothing to fall back to.
+#[test]
+fn styling_after_a_failed_new_text_refuses_instead_of_restyling_the_last_title() {
+    let mut s = Session::default();
+    s.execute("file.newSequence", json!({"name": "Pins", "fps": 30, "width": 640, "height": 360, "video": 3, "audio": 1})).unwrap();
+    let first = ClipId(s.execute("graphics.newText", json!({"text": "D0 LEFT", "track": 1, "time": 0, "seconds": 5})).unwrap()["clip"].as_u64().unwrap());
+    s.execute("graphics.set", json!({"props": {"fill_color": "#ffb020"}})).unwrap();
+    let amber = fill(&s, first);
+    // the next one overlaps it on V2: no clip, and the styling after it finds nothing to style
+    let e = s.execute("graphics.newText", json!({"text": "D1 RIGHT", "track": 1, "time": 254_016_000_000u64, "seconds": 5})).unwrap_err().to_string();
+    assert!(e.contains("V2 is not free here") && e.contains("\"auto\""), "{e}");
+    assert!(s.state.selection.is_empty(), "the clip selected before is not the one to style");
+    for (id, p) in [
+        ("graphics.set", json!({"props": {"fill_color": "#ff3b30"}})),
+        ("graphics.animateText", json!({"in": "fade"})),
+        ("graphics.textStyle", json!({"glow": {"color": "#ff3b30", "radius": 14, "intensity": 60}})),
+    ] {
+        let e = s.execute(id, p).unwrap_err().to_string();
+        assert!(e.contains("`graphics.newText` made no clip") && e.contains("pass `clip`"), "{id}: {e}");
+    }
+    assert_eq!(fill(&s, first), amber, "the first title kept its colour");
+    // the playhead over the first title does not stand in for it either
+    s.execute("playhead.set", json!({"frame": 30})).unwrap();
+    assert!(s.execute("graphics.set", json!({"props": {"fill_color": "#ff3b30"}})).is_err());
+    // naming the clip still works
+    s.execute("graphics.set", json!({"clip": first.0, "props": {"stroke": true}})).unwrap();
+    assert_eq!(fill(&s, first), amber);
+    // `track: "auto"` takes the first free track above: V3 here, and it is the one styled next
+    let r = s.execute("graphics.newText", json!({"text": "D1 RIGHT", "track": "auto", "time": 254_016_000_000u64, "seconds": 5})).unwrap();
+    let second = ClipId(r["clip"].as_u64().unwrap());
+    let q = s.active_sequence().unwrap();
+    assert_eq!(q.find_item(second).unwrap().0, q.video_tracks[2].id);
+    s.execute("graphics.set", json!({"props": {"fill_color": "#ff3b30"}})).unwrap();
+    assert_eq!(fill(&s, first), amber);
+    assert_ne!(fill(&s, second), amber);
+    // after another failure, selecting a graphic makes styling without `clip` work again
+    assert!(s.execute("graphics.newText", json!({"text": "x", "track": "V3", "time": 254_016_000_000u64})).is_err());
+    assert!(s.execute("graphics.set", json!({"props": {"stroke": true}})).is_err());
+    s.execute("timeline.select", json!({"clips": [first.0]})).unwrap();
+    s.execute("graphics.set", json!({"props": {"fill_color": "#29e0ff"}})).unwrap();
+    assert_ne!(fill(&s, first), amber);
+    // a track that is no track is said
+    for bad in [json!("top"), json!("V0"), json!(true), json!([1])] {
+        let e = s.execute("graphics.newText", json!({"text": "x", "track": bad})).unwrap_err().to_string();
+        assert!(e.contains("`track` is an index"), "{bad}: {e}");
+    }
+}
+
 #[test]
 fn new_text_makes_a_graphic_clip_above_the_footage() {
     let mut s = demo();
