@@ -21,11 +21,11 @@ filmcraft-time = { workspace = true }
 # scopes (wgpu panics on that). The desktop app got `std` through eframe, the CLI did not.
 wgpu = { version = "30", default-features = false, features = ["wgsl", "std"] }
 log = { workspace = true }
-pollster = "0.4"
+pollster = "1"
 rayon = { workspace = true }
 
 [dev-dependencies]
-pollster = "0.4"
+pollster = "1"
 filmcraft-export = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 wgpu = { version = "30", features = ["wgsl", "metal", "vulkan", "dx12", "gles"] }
