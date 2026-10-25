@@ -92,7 +92,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("view.clearGuides", "Clear Guides", ["View"], None),
     uic!("view.snapInProgramMonitor", "Snap in Program Monitor", ["View"], None),
     uic!("view.aim360", "Aim 360° Camera", ["View"], None),
-    uic!("view.transparencyGrid", "Transparency Grid", ["View"], None),
+    // the monitors' wrench menus only, as in the reference app
+    uic!("view.transparencyGrid", "Transparency Grid", [], None),
     uic!("view.safeMargins", "Safe Margins", ["View", "Guide Templates"], None),
     uic!("view.safeZones.off", "Off", ["View", "Platform Safe Zones"], None),
     uic!("view.safeZones.youtube", "YouTube Shorts", ["View", "Platform Safe Zones"], None),
