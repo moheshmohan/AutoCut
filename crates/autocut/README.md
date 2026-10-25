@@ -120,7 +120,7 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    copied item heading is dropped so it is not read out). The build runs ordinary engine
    commands into a new 16:9 sequence, every cut on a frame:
    - **cold open**: a montage of robots from across the years, cut on the music's beat, the
-     title over it, a riser into an impact;
+     title over it, a soft swish into an impact;
    - **per entry**: the narration (any voice — `clone:<name>` included), then a few seconds of
      the robot's own picture and sound before the next; shots cut where the analysis saw the
      robot (a portrait or 4:3 clip fills the 16:9 frame, cropped on the robot's centre from the
@@ -133,7 +133,7 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      when the words would outrun the footage, its sound then slowed with it at its own pitch —
      Speed/Duration's Maintain Audio Pitch), each shot's sound faded in and crossfaded; a
      name/date lower third; a dramatic transition from a rotating set (cross zoom, whip, flash,
-     push, glitch, light leak, zoom blur; dip to black at a new year) with a whoosh; the year
+     push, glitch, light leak, zoom blur; dip to black at a new year) with a soft swish; the year
      as a title card with an impact;
    - **polish**: every shot pushes in slowly — Motion scale keyframes from as fitted to 1.5 %
      larger a second (6 % at most), eased out of the first and into the last, in media time
@@ -397,7 +397,7 @@ not there, years beyond 1900–2200) is an `invalid plan:` error saying which an
 | `"timeline": true`, `"events": [{"name": "GITEX 2022", "from": "2022-10-10", "to": "2022-10-14"}]` | `--timeline` | a thin timeline along the bottom from the first entry to the outro (not over the title or the outro; fading in and out): a tick at each year's start and the years between, event bands (the plan's `events` — dates `YYYY-MM-DD`, `YYYY-MM` or `YYYY` — else each entry `event` from its first date to its last) with their names, and a marker that glides to each entry's date as the entry starts (Motion position keyframes, leaving on the entry's first frame and arriving 0.6 s later, eased out and in); the current year and event are picked out (accent, on a panel). Lower thirds sit a little higher above it |
 | `script.chips`: `{"3": ["32.5 kg", "1.6 m/s", "14 kg payload"]}` | | spec chips beside entry 3's lower third (above it when the row would leave the frame): up to three of up to 32 characters, in the number font on a rounded panel, rising and fading in 0.3 s apart from half a second into its narration, leaving together with the lower third; renumbered with their entries on review like `say` |
 | entries with `"kind": "scene"` and `"caption": "GITEX 2022 · Dubai World Trade Centre"` | | a scene shot: footage without a robot (a hall, a stage) that opens its event's chapter — its chapter card over it, full frame, a one-line caption (its `caption`, else its label) instead of a name lower third; not counted, never in the thumbnail, no subject check in QA, no words unless its script line has some (an empty line: none, and a scene without words plays 4.5 s with the bed's energy lifted under it and nothing to duck it) |
-| `"transitions": true` or `{"within": [ids], "between": [ids], "chapter": [ids]}` | | transitions from the catalogue (`effects.list`), each list in turn: `within` an entry's shots (default none: straight cuts, moved onto the beat), `between` entries (default `cam_punch_in`, `flow_morph`, `gl_crosswarp`, `cam_whip_pan`, `gl_directionalwarp`, `flow_doppler_warp` — Zooms & Camera, Flow & Morph, GL; about a beat long) with a whoosh, into a `chapter` (default `lf_light_leak`, `gl_filmburn`; about two beats) with a riser into the card's impact — the sounds coupled to the transitions (`transitions.addSound`), replacing the whoosh clips; then `transitions.snapToBeats` on the music's beat map puts each midpoint on a beat and makes each a musical length. An empty list means cuts |
+| `"transitions": true` or `{"within": [ids], "between": [ids], "chapter": [ids]}` | | transitions from the catalogue (`effects.list`), each list in turn: `within` an entry's shots (default none: straight cuts, moved onto the beat), `between` entries (default `cam_punch_in`, `flow_morph`, `gl_crosswarp`, `cam_whip_pan`, `gl_directionalwarp`, `flow_doppler_warp` — Zooms & Camera, Flow & Morph, GL; about a beat long) with a swish, into a `chapter` (default `lf_light_leak`, `gl_filmburn`; about two beats) with a chime ringing from the swap before the card's impact — the sounds coupled to the transitions (`transitions.addSound`), replacing the swish clips (the soft swish and chime replaced the whoosh and riser, whose swept noise sounded like a rocket); then `transitions.snapToBeats` on the music's beat map puts each midpoint on a beat and makes each a musical length. An empty list means cuts |
 | `"loudness": "social"` | `--loudness social\|voice\|broadcast\|<LUFS>` | `audio.normalizeLoudness` on the finished mix (social −14 LUFS, voice −16, broadcast −23) with a −1 dBTP true-peak limiter, instead of the mix's own limiter alone; `loudness` in the output |
 | `"mix": "speech"` (default) or `"cinematic"` | `--mix speech\|cinematic` | how the stems are balanced and treated ([`mix.rs`](src/mix.rs), "Mix for small speakers" below); `mix` in the output says what was done (the narration's measured tilt, how much EQ it got, its fader) |
 | `"embedCaptions": true` | `--embed-captions` | the export carries the narration's captions as CEA-608/708 closed captions (besides `.srt` / `.vtt`) |
@@ -425,7 +425,7 @@ it needs a `logo` or a `channel`.
    impact lands with it. The `cta` button pops in under it, a cursor glides in and clicks it (a
    ripple), and it turns into `ctaDone`.
 2. **End screen** (the rest: at least 5 s, at most 20): the button goes, the logo glides up (a
-   whoosh) into a lockup with the `channel` name (title font, capitals, the logo's purple-to-blue)
+   swish) into a lockup with the `channel` name (title font, capitals, the logo's purple-to-blue)
    and the `handle` (number font, the theme's accent), a ring pulsing as it lands; the `tagline`
    rises in along the bottom and the `terminal` line types itself out under it (a monospaced font
    when one is installed) with a blinking cursor. The last half second fades to black.
@@ -760,8 +760,8 @@ to the frame.
 
 **Sound.** Generated music (`music.suggest` → `audio.generate`, `mood` energetic, `bpm` 124, a fixed
 `seed`) arranged to the trailer's exact length: its final chord lands where the end card starts
-(a bed `hit + end card` long ends on the bar `hit`: `end_card_length`), with a riser into it, an
-impact on it and a whoosh into the montage. Mixed speech first (`mix::mix_down`, the plan's `mix`),
+(a bed `hit + end card` long ends on the bar `hit`: `end_card_length`), with a swish into it, an
+impact on it and a swish into the montage. Mixed speech first (`mix::mix_down`, the plan's `mix`),
 then the music brought up 8 dB from the show's bed level (it carries a trailer; still ducked under
 the voice) with a limiter on its track at −3.5 dBFS, and the voice's fader 3.5 dB down (it stands
 over 20 LU above the ducked music), then normalised to −14 LUFS, −1 dBTP. Measured on the reel: the

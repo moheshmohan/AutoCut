@@ -14,7 +14,7 @@
 //! | narration | Parametric EQ: high-pass 80 Hz (24 dB/oct), low shelf −6 dB at 200 Hz, −2 dB at 300 Hz, +5 dB at 1.2 kHz, +5 dB at 3 kHz, high shelf +3 dB from 6 kHz (the cuts and lifts as far as the voice needs: measured, [`voice_eq_amount`]); DeEsser (6 kHz, light); compressor 3:1 from −20 dB, 1 ms attack (4–6 dB on speech), +6 dB out; Hard Limiter at −3.5 dB (the onsets the compressor lets through); the track's fader makes up the level the chain took, measured | each line matched to −16 LUFS |
 //! | music | Parametric EQ: high-pass 40 Hz, low shelf −6 dB at 120 Hz, and a 4 dB dip around 2.5 kHz while the narration speaks (automation that follows the ducking) | −24 LUFS, ducked 18 dB under the narration |
 //! | shots' own sound | Parametric EQ: high-pass 100 Hz, low shelf −3 dB at 150 Hz | −27 LUFS, ducked 15 dB |
-//! | whooshes, impacts, risers | Parametric EQ: high-pass 120 Hz (no sub-bass booms) | −26 LUFS; the transitions' own sounds at −10 dB |
+//! | swishes, chimes, impacts | Parametric EQ: high-pass 120 Hz, 36 dB/oct (no sub-bass booms) | −26 LUFS; the transitions' own sounds at −10 dB |
 //!
 //! The Mix keeps its loudness target (`--loudness`) and its true-peak limiter, which then has
 //! little to do. `gentle` is the same mix with a voice-preserving narration EQ
@@ -247,7 +247,7 @@ pub fn sound_eq() -> Value {
 
 /// The effects' EQ (speech profile): no sub-bass booms.
 pub fn effects_eq() -> Value {
-    eq(json!({"hp_on": true, "hp_freq": 120.0, "hp_slope": 1}))
+    eq(json!({"hp_on": true, "hp_freq": 120.0, "hp_slope": 2}))
 }
 
 /// The music's EQ when it carries a video alone (a quick short nobody speaks in): the sub-bass

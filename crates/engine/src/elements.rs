@@ -155,7 +155,7 @@ const fn sfx_sound(id: &'static str, name: &'static str, file: &'static str, des
 }
 
 /// The sound elements.
-pub const SOUNDS: [Sound; 12] = [
+pub const SOUNDS: [Sound; 14] = [
     synth_sound("sound.whoosh-short", "Whoosh – Short", "Whoosh Short", "A quick air pass for a fast cut or move.", synth::Kind::Whoosh, 0.6, 0.6, 11),
     synth_sound("sound.whoosh-long", "Whoosh – Long", "Whoosh Long", "A slower, fuller pass for a transition.", synth::Kind::Whoosh, 1.8, 0.75, 12),
     synth_sound("sound.impact-soft", "Impact – Soft", "Impact Soft", "A gentle low hit with a short tail.", synth::Kind::Impact, 2.0, 0.25, 21),
@@ -180,6 +180,8 @@ pub const SOUNDS: [Sound; 12] = [
         31,
     ),
     synth_sound("sound.riser-4s", "Riser – 4 s", "Riser 4s", "A longer build to a cut.", synth::Kind::Riser, 4.0, 0.8, 32),
+    synth_sound("sound.swish", "Swish", "Swish", "A soft, short brush of air: a gentle transition.", synth::Kind::Swish, 0.5, 0.6, 33),
+    synth_sound("sound.chime", "Chime", "Chime", "A soft bell ringing out, for a new chapter or a reveal.", synth::Kind::Chime, 1.8, 0.6, 34),
     sfx_sound("sound.swoosh-up", "Swoosh – Up", "Swoosh Up", "An airy pass rising in pitch, left to right.", Sfx::SwooshUp, 0.7, 41),
     sfx_sound("sound.swoosh-down", "Swoosh – Down", "Swoosh Down", "An airy pass falling in pitch, right to left.", Sfx::SwooshDown, 0.7, 42),
     sfx_sound("sound.click", "Click", "Click", "A dry interface click for taps and pop-ups.", Sfx::Click, 0.12, 51),

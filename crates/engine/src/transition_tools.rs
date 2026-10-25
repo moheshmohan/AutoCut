@@ -74,7 +74,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "transitions.addSound",
             "Add Transition Sound",
-            r#"{"transitions":[id]?,"kind":"whoosh|riser|impact"=whoosh,"gain":dB=-6,"intensity":0..1=0.7,"seed":u64?,"seconds":f64?}"#,
+            r#"{"transitions":[id]?,"kind":"whoosh|riser|impact|swish|chime"=whoosh,"gain":dB=-6,"intensity":0..1=0.7,"seed":u64?,"seconds":f64?}"#,
             add_sound,
         ),
         spec("transitions.removeSound", "Remove Transition Sound", r#"{"transitions":[id]?}"#, remove_sound),

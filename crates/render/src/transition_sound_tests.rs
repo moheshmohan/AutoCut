@@ -41,9 +41,9 @@ fn a_transition_sound_is_mixed_to_the_sample() {
         let (first, len) = snd.samples(Tick(2 * TICKS_PER_SECOND), Tick(TICKS_PER_SECOND), SR).unwrap();
         // the midpoint is sample 120 000: whoosh centred, riser ending, impact starting there
         match kind {
-            SoundKind::Whoosh => assert_eq!(first + len as i64 / 2, 120_000),
+            SoundKind::Whoosh | SoundKind::Swish => assert_eq!(first + len as i64 / 2, 120_000),
             SoundKind::Riser => assert_eq!(first + len as i64, 120_000),
-            SoundKind::Impact => assert_eq!(first, 120_000),
+            SoundKind::Impact | SoundKind::Chime => assert_eq!(first, 120_000),
         }
         let (p, seq) = rig(Some(snd.clone()));
         let out = mix(&p, seq, 0, 6 * SR as usize);

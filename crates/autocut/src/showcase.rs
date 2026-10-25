@@ -10,7 +10,7 @@
 //! 3. [`build`]: a new sequence (1920×1080 by default) — intro title, then per entry: narration
 //!    (any voice, cloned voices included), shots around each clip's best moment (portrait and 4:3
 //!    clips filling the frame around their robot), a name/date lower third, a transition from a
-//!    rotating set of dramatic ones with a whoosh, the year as a title card with an impact
+//!    rotating set of dramatic ones with a soft swish, the year as a title card with an impact
 //!    whenever it changes; the counter (`graphics.counter`) across the whole show; the music —
 //!    a generated bed (`audio.generate`) or the user's track ([`Options::music`], fitted to the
 //!    show's length) — ducked under the narration, the cuts on its beat ([`Beats`]); an outro
@@ -3021,7 +3021,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let mut cuts: Vec<f64> = Vec::new();
 
     // ---- intro: a cold open — a montage of robots from across the years cut on the beat,
-    // the title over it, a riser into an impact
+    // the title over it, a swish into an impact
     let intro_voice_at = 2.2;
     let intro_spoken =
         narrate(ex, &tr, voice, &script.spoken("intro", &script.intro), &script.intro, script.delivery_of("intro"), intro_voice_at, &mut narrations).await?;
@@ -3063,9 +3063,11 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         }
         i += 1;
     }
-    // the title lands with an impact on a beat, a riser into it
+    // the title lands with an impact on a beat, a soft swish into it (not a riser: its rising
+    // noise sounded like a rocket to the owner)
     let hit = beats.as_ref().and_then(|b| b.nearest(1.8, 1.3, 2.4)).map_or(1.8, |x| on_frame(x, tr.fps));
-    sfx(ex, "riser", hit.min(1.8), (hit - 1.8).max(0.0), &tr.hits, 0.7, &mut mix).await?;
+    // (ending where the impact starts, on the same track)
+    sfx(ex, "swish", hit.min(0.5), (hit - 0.5).max(0.0), &tr.hits, 0.6, &mut mix).await?;
     sfx(ex, "impact", 3.0, hit, &tr.hits, 0.8, &mut mix).await?;
     let subtitle = opts.subtitle.clone().unwrap_or_else(|| years(entries));
     match &theme {
@@ -3307,15 +3309,16 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                     }
                     // (a blurred copy behind the picture follows the transition at the end:
                     // pillars_through_transitions)
-                    sfx(ex, "whoosh", 1.2, (t - 0.55).max(0.0), &tr.sfx, 0.6, &mut mix).await?;
+                    sfx(ex, "swish", 0.5, (t - 0.25).max(0.0), &tr.sfx, 0.6, &mut mix).await?;
                 }
-                // from the catalogue, each with its sound (a whoosh between entries, a riser
-                // into a chapter, whose card brings the impact)
+                // from the catalogue, each with its sound (a soft swish between entries, a chime
+                // into a chapter, whose card brings the impact; the whoosh and riser they had
+                // sounded like a rocket)
                 Some(tp) => {
                     let (list, where_, sound, frames, counter) = if new_year {
-                        (&tp.chapter, "chapter", "riser", frames_of(2.0, 12.0, 40.0), &mut n_chapter)
+                        (&tp.chapter, "chapter", "chime", frames_of(2.0, 12.0, 40.0), &mut n_chapter)
                     } else {
-                        (&tp.between, "between", "whoosh", frames_of(1.0, 8.0, 24.0), &mut n_between)
+                        (&tp.between, "between", "swish", frames_of(1.0, 8.0, 24.0), &mut n_between)
                     };
                     if let Some(effect) = in_turn(list, counter) {
                         match run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "in", "effect": effect, "frames": frames})).await {

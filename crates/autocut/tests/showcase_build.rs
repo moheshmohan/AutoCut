@@ -74,7 +74,8 @@ async fn builds_a_counted_showcase_on_the_demo_media() {
         .filter_map(|c| c["name"].as_str().map(str::to_string))
         .collect();
     assert!(audio.iter().any(|n| n.starts_with("Music")), "a music bed: {audio:?}");
-    assert!(audio.iter().filter(|n| n.starts_with("Whoosh")).count() >= 2, "whooshes at the cuts: {audio:?}");
+    assert!(audio.iter().filter(|n| n.starts_with("Swish")).count() >= 2, "swishes at the cuts: {audio:?}");
+    assert!(!audio.iter().any(|n| n.starts_with("Whoosh") || n.starts_with("Riser")), "no rocket-like whoosh or riser: {audio:?}");
     assert!(audio.iter().any(|n| n.starts_with("Impact")), "impacts: {audio:?}");
     // a frame renders mid-show
     let png = ex.render(built.seconds / 2.0, 320).await;

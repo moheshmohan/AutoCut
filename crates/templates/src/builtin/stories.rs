@@ -37,7 +37,7 @@ pub(super) fn travel_vlog_intro() -> Result<Package, TemplateError> {
             let gl = gls.get(k - 1).copied().unwrap_or("gl_crosszoom");
             let d = if k == 5 { frames(12) } else { frames(8) };
             b.transition_ex(TrackKind::Video, 0, gl, Some(prev), Some(c), d, TransitionAlign::CenterAtCut, &[("easing", ParamValue::Choice(9))]);
-            b.sfx(1, at - frames(9), "sound.whoosh-short");
+            b.sfx(1, at - frames(9), "sound.swish");
         }
         clips.push(c);
         at += len;
@@ -216,7 +216,7 @@ pub(super) fn event_recap() -> Result<Package, TemplateError> {
             };
             if let Some((gl, d)) = t {
                 b.transition(TrackKind::Video, 0, gl, Some(prev), Some(c), d, TransitionAlign::CenterAtCut);
-                b.sfx(2, at - frames(9), "sound.whoosh-short");
+                b.sfx(2, at - frames(9), "sound.swish");
             }
         }
         clips.push(c);

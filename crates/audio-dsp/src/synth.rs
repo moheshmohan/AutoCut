@@ -1,4 +1,4 @@
-//! Procedural audio for edits: sound effects (whoosh, impact, riser, drone) and music beds,
+//! Procedural audio for edits: sound effects (whoosh, impact, riser, swish, chime, drone) and music beds,
 //! synthesized from oscillators, noise, envelopes and filters. No samples, no models: the same
 //! parameters and seed always give the same audio, so a generated cue is reproducible from the
 //! project alone.
@@ -34,6 +34,12 @@ pub enum Kind {
     Impact,
     /// Tension building to a cut: rising noise and pitch, ending abruptly.
     Riser,
+    /// A soft, short brush of air: high noise only, no sweep or rumble — a gentler transition
+    /// sound than the whoosh.
+    Swish,
+    /// A soft bell: a few glassy partials on the key's tonic and fifth, ringing out — a gentle
+    /// mark for a new chapter.
+    Chime,
     /// A sustained, slowly moving low chord.
     Drone,
     /// A cinematic bed: chord progression, pads, bass, drums, pulse and arpeggio in sections.
@@ -41,13 +47,15 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [Kind::Whoosh, Kind::Impact, Kind::Riser, Kind::Drone, Kind::Music];
+    pub const ALL: [Kind; 7] = [Kind::Whoosh, Kind::Impact, Kind::Riser, Kind::Swish, Kind::Chime, Kind::Drone, Kind::Music];
 
     pub fn id(self) -> &'static str {
         match self {
             Kind::Whoosh => "whoosh",
             Kind::Impact => "impact",
             Kind::Riser => "riser",
+            Kind::Swish => "swish",
+            Kind::Chime => "chime",
             Kind::Drone => "drone",
             Kind::Music => "music",
         }
@@ -63,6 +71,8 @@ impl Kind {
             Kind::Whoosh => 1.2,
             Kind::Impact => 3.0,
             Kind::Riser => 3.0,
+            Kind::Swish => 0.5,
+            Kind::Chime => 1.8,
             Kind::Drone => 20.0,
             Kind::Music => 60.0,
         }
@@ -181,6 +191,8 @@ pub fn generate(p: &Params, sample_rate: u32) -> Result<Stereo, SynthError> {
         Kind::Whoosh => whoosh(&q, &mut left, &mut right),
         Kind::Impact => impact(&q, &mut left, &mut right),
         Kind::Riser => riser(&q, &mut left, &mut right),
+        Kind::Swish => swish(&q, &mut left, &mut right),
+        Kind::Chime => chime(&q, &mut left, &mut right),
         Kind::Drone | Kind::Music => drone(&q, &mut left, &mut right),
     }
     match p.kind {
@@ -453,6 +465,70 @@ fn riser(q: &Clamped, left: &mut [f32], right: &mut [f32]) {
     reverb(left, right, q.sr, 1.5, 60.0, 15.0);
 }
 
+fn swish(q: &Clamped, left: &mut [f32], right: &mut [f32]) {
+    let n = left.len().max(1);
+    let mut rng = Rng::new(q.seed);
+    let mut bp = Sweep::new(FilterType::BandPass, 0.7);
+    let mut hp = Sweep::new(FilterType::HighPass, 0.7);
+    // where the band sits: the seed nudges it, the intensity brightens it
+    let centre = 3200.0 + 1200.0 * rng.unit() + 1600.0 * q.intensity;
+    let peak_at = 0.3;
+    for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+        let x = i as f64 / n as f64;
+        // quick in, longer out: a brush, not a swell
+        let env = if x < peak_at { smoothstep(x / peak_at) } else { (1.0 - smoothstep((x - peak_at) / (1.0 - peak_at))).powf(2.5) };
+        // the band drifts a little (up, then back), never the whoosh's octaves-long sweep
+        let freq = centre * (1.0 + 0.25 * (x * PI).sin());
+        let s = rng.white();
+        let v = hp.tick(bp.tick(s, freq, q.sr), 1500.0, q.sr) * env;
+        let (gl, gr) = pan_gains(-0.4 + 0.8 * x);
+        *l = (v * gl) as f32;
+        *r = (v * gr) as f32;
+    }
+    reverb(left, right, q.sr, 0.6, 25.0, 10.0);
+}
+
+fn chime(q: &Clamped, left: &mut [f32], right: &mut [f32]) {
+    // the key's tonic in the fifth octave (A5 = 880 Hz for key 0) and its fifth, quieter
+    let root = 81.0 + f64::from(q.key);
+    let mut rng = Rng::new(q.seed);
+    // glassy partials: (ratio, level, decay seconds)
+    const PARTIALS: [(f64, f64, f64); 4] = [(1.0, 1.0, 0.55), (2.0, 0.4, 0.35), (3.01, 0.18, 0.2), (4.2, 0.07, 0.12)];
+    let ring = 0.8 + 0.5 * q.intensity;
+    let notes = [(root, 1.0, -0.2), (root + 7.0, 0.55, 0.2)];
+    // the seed detunes each note by a few cents and offsets its phases
+    let tunes: Vec<(f64, f64, f64, f64)> = notes.iter().map(|&(note, level, pan)| (hz(note) * (1.0 + 0.002 * rng.white()), level, pan, rng.unit())).collect();
+    let mut mallet = Sweep::new(FilterType::BandPass, 1.2);
+    let attack = q.sr * 0.003;
+    for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+        let t = i as f64 / q.sr;
+        let soft = (i as f64 / attack).min(1.0);
+        let (mut sl, mut sr) = (0.0, 0.0);
+        for &(f, level, pan, phase) in &tunes {
+            let mut v = 0.0;
+            for (ratio, amp, decay) in PARTIALS {
+                v += amp * ((f * ratio * t + phase) * TAU).sin() * (-t / (decay * ring)).exp();
+            }
+            let (gl, gr) = pan_gains(pan);
+            sl += v * level * gl;
+            sr += v * level * gr;
+        }
+        // a soft mallet: a few milliseconds of filtered noise
+        let tick = mallet.tick(rng.white(), 4000.0, q.sr) * (-t / 0.004).exp() * 0.3;
+        *l = ((sl + tick) * soft) as f32;
+        *r = ((sr + tick) * soft) as f32;
+    }
+    reverb(left, right, q.sr, 2.2, 60.0, 25.0);
+    // however short it is cut, it (and its reverb) fades out over its last tenth, never stops
+    let n = left.len();
+    let fade_from = n - n / 10;
+    for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate().skip(fade_from) {
+        let g = 1.0 - smoothstep((i - fade_from) as f64 / (n - fade_from).max(1) as f64);
+        *l *= g as f32;
+        *r *= g as f32;
+    }
+}
+
 fn drone(q: &Clamped, left: &mut [f32], right: &mut [f32]) {
     let root = 33.0 + f64::from(q.key); // A1 = 33
     let notes = [root, root + 7.0, root + 12.0, root + if q.mood.minor() { 15.0 } else { 16.0 }];
@@ -555,6 +631,49 @@ mod tests {
         let q = s.left.len() / 4;
         assert!(rms(&s.left[3 * q..]) > 4.0 * rms(&s.left[..q]));
         assert!(s.left.last().is_some_and(|x| x.abs() < 0.05), "ends quietly, no click");
+    }
+
+    #[test]
+    fn swish_is_short_bright_and_has_no_rumble() {
+        let p = Params::new(Kind::Swish);
+        let s = generate(&p, SR).unwrap();
+        sane(&s, 0.5);
+        // over in its first half: a brush, not a swell
+        let half = s.left.len() / 2;
+        assert!(rms(&s.left[..half]) > 2.0 * rms(&s.left[half..]), "front-loaded");
+        // high noise only: many zero crossings (the whoosh's low body and rumble are not there)
+        let crossings = |x: &[f32]| x.windows(2).filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0)).count() as f64 / x.len() as f64;
+        let w = generate(&Params::new(Kind::Whoosh), SR).unwrap();
+        assert!(crossings(&s.left) > 2.0 * crossings(&w.left), "swish {} whoosh {}", crossings(&s.left), crossings(&w.left));
+    }
+
+    #[test]
+    fn chime_rings_on_the_key_and_dies_away() {
+        let mut p = Params::new(Kind::Chime);
+        let s = generate(&p, SR).unwrap();
+        sane(&s, 1.8);
+        let q = s.left.len() / 6;
+        assert!(rms(&s.left[..q]) > 4.0 * rms(&s.left[5 * q..]), "it decays");
+        assert!(s.left.first().is_some_and(|x| x.abs() < 0.05), "starts without a click");
+        assert!(s.left.last().is_some_and(|x| x.abs() < 1e-3), "and ends without one");
+        // tonal: the strongest of a few candidate pitches is the tonic (A5, 880 Hz, for key 0)…
+        let power = |x: &[f32], f: f64| {
+            let (mut c, mut s) = (0.0, 0.0);
+            for (i, v) in x.iter().enumerate() {
+                let a = TAU * f * i as f64 / f64::from(SR);
+                c += f64::from(*v) * a.cos();
+                s += f64::from(*v) * a.sin();
+            }
+            c * c + s * s
+        };
+        let head = &s.left[..SR as usize / 4];
+        let best = [660.0, 784.0, 880.0, 988.0, 1046.5].into_iter().max_by(|a, b| power(head, *a).total_cmp(&power(head, *b)));
+        assert_eq!(best, Some(880.0));
+        // …and moves with the key (C: three semitones up)
+        p.key = 3;
+        let c = generate(&p, SR).unwrap();
+        let head = &c.left[..SR as usize / 4];
+        assert!(power(head, 1046.5) > 10.0 * power(head, 880.0));
     }
 
     #[test]

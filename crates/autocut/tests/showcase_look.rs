@@ -244,10 +244,10 @@ async fn a_tech_show_with_its_timeline_chips_scene_and_catalogue_transitions() {
     assert_eq!(
         at,
         vec![
-            ("lf_light_leak", "chapter", Some("riser")),
-            ("gl_filmburn", "chapter", Some("riser")),
-            ("cam_punch_in", "between", Some("whoosh")),
-            ("flow_morph", "between", Some("whoosh")),
+            ("lf_light_leak", "chapter", Some("chime")),
+            ("gl_filmburn", "chapter", Some("chime")),
+            ("cam_punch_in", "between", Some("swish")),
+            ("flow_morph", "between", Some("swish")),
         ],
         "{:#?}",
         built.transitions
@@ -268,7 +268,7 @@ async fn a_tech_show_with_its_timeline_chips_scene_and_catalogue_transitions() {
         let beats = dur / beat;
         assert!([0.25, 0.5, 1.0, 2.0, 4.0].iter().any(|b| (beats - b).abs() * beat <= 1.0 / FPS + 1e-6), "{} lasts {beats} beats", t.effect);
     }
-    // no whoosh clips of its own: the transitions carry their sounds
+    // no swish clips of its own: the transitions carry their sounds
     let audio: Vec<String> = seq["audio"]
         .as_array()
         .unwrap()
@@ -276,7 +276,8 @@ async fn a_tech_show_with_its_timeline_chips_scene_and_catalogue_transitions() {
         .flat_map(|t| t["items"].as_array().cloned().unwrap_or_default())
         .filter_map(|c| c["name"].as_str().map(str::to_string))
         .collect();
-    assert!(!audio.iter().any(|n| n.starts_with("Whoosh")), "{audio:?}");
+    assert!(!audio.iter().any(|n| n.starts_with("Whoosh") || n.starts_with("Riser")), "{audio:?}");
+    assert!(audio.iter().filter(|n| n.starts_with("Swish")).count() <= 1, "only the title's swish: {audio:?}");
     // within entries: cuts (no transitions by default), on the beat too
     for e in &built.layout {
         for s in e.shots.iter().skip(1) {
@@ -348,7 +349,7 @@ async fn without_a_look_the_show_is_as_before() {
         .flat_map(|t| t["items"].as_array().cloned().unwrap_or_default())
         .filter_map(|c| c["name"].as_str().map(str::to_string))
         .collect();
-    assert!(names.iter().filter(|n| n.starts_with("Whoosh")).count() >= 2, "the whooshes as before: {names:?}");
+    assert!(names.iter().filter(|n| n.starts_with("Swish")).count() >= 2, "the swishes between entries: {names:?}");
     // the rotating set of transitions, a dip to black into each new year
     let effects: Vec<String> = seq["video"][1]["transitions"].as_array().unwrap().iter().filter_map(|x| x["effect"].as_str().map(str::to_string)).collect();
     assert!(effects.iter().filter(|e| *e == "dip_to_black").count() >= 2, "{effects:?}");

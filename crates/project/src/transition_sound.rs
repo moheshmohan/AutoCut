@@ -1,4 +1,4 @@
-//! Sounds coupled to video transitions (roadmap C4): a whoosh, riser or impact that belongs to a
+//! Sounds coupled to video transitions (roadmap C4): a whoosh, riser, impact, swish or chime that belongs to a
 //! transition, synthesised when the sequence is mixed (`filmcraft-render`'s mixer, with
 //! `filmcraft_audio_dsp::synth`), so it moves, resizes and goes away with its transition.
 //!
@@ -9,6 +9,8 @@
 //! | whoosh | the transition + ½ s (0.6–4 s) | centred on the midpoint (it swells in its middle) |
 //! | riser | 2 s | ends on the midpoint (it builds to the swap and stops) |
 //! | impact | 2.5 s | starts on the midpoint (it hits on the swap and decays) |
+//! | swish | the transition + ⅕ s (0.35–1 s) | centred on the midpoint (a soft, short brush) |
+//! | chime | 1.8 s | starts on the midpoint (it rings from the swap) |
 //!
 //! The span is in exact ticks and is turned into whole samples at the sequence's rate by
 //! [`TransitionSound::samples`] (rounded to the nearest sample), the same numbers the mixer and
@@ -33,16 +35,22 @@ pub enum SoundKind {
     Riser,
     /// A hit on the swap.
     Impact,
+    /// A soft, short brush of air on the swap (gentler than the whoosh).
+    Swish,
+    /// A soft bell from the swap.
+    Chime,
 }
 
 impl SoundKind {
-    pub const ALL: [SoundKind; 3] = [SoundKind::Whoosh, SoundKind::Riser, SoundKind::Impact];
+    pub const ALL: [SoundKind; 5] = [SoundKind::Whoosh, SoundKind::Riser, SoundKind::Impact, SoundKind::Swish, SoundKind::Chime];
 
     pub fn id(self) -> &'static str {
         match self {
             SoundKind::Whoosh => "whoosh",
             SoundKind::Riser => "riser",
             SoundKind::Impact => "impact",
+            SoundKind::Swish => "swish",
+            SoundKind::Chime => "chime",
         }
     }
 
@@ -51,6 +59,8 @@ impl SoundKind {
             SoundKind::Whoosh => "Whoosh",
             SoundKind::Riser => "Riser",
             SoundKind::Impact => "Impact",
+            SoundKind::Swish => "Swish",
+            SoundKind::Chime => "Chime",
         }
     }
 
@@ -100,6 +110,8 @@ impl TransitionSound {
                 SoundKind::Whoosh => (duration.max(Tick::ZERO) + Tick(TICKS_PER_SECOND / 2)).clamp(Tick::from_seconds_f64(0.6), Tick::from_seconds_f64(4.0)),
                 SoundKind::Riser => Tick(TICKS_PER_SECOND * 2),
                 SoundKind::Impact => Tick(TICKS_PER_SECOND * 5 / 2),
+                SoundKind::Swish => (duration.max(Tick::ZERO) + Tick(TICKS_PER_SECOND / 5)).clamp(Tick::from_seconds_f64(0.35), Tick::from_seconds_f64(1.0)),
+                SoundKind::Chime => Tick(TICKS_PER_SECOND * 9 / 5),
             },
         };
         len.clamp(least, most)
@@ -111,9 +123,9 @@ impl TransitionSound {
         let mid = start + duration.max(Tick::ZERO).mul_ratio(1, 2);
         let len = self.length_for(duration);
         let at = match self.kind {
-            SoundKind::Whoosh => mid - len.mul_ratio(1, 2),
+            SoundKind::Whoosh | SoundKind::Swish => mid - len.mul_ratio(1, 2),
             SoundKind::Riser => mid - len,
-            SoundKind::Impact => mid,
+            SoundKind::Impact | SoundKind::Chime => mid,
         };
         (at, len)
     }
@@ -168,6 +180,12 @@ mod tests {
         assert_eq!(s(SoundKind::Riser).samples(start, dur, 48_000), Some((504_000 - 96_000, 96_000)));
         assert_eq!(s(SoundKind::Whoosh).samples(start, dur, 48_000), Some((504_000 - 36_000, 72_000)));
         assert_eq!(s(SoundKind::Whoosh).samples(start, dur, 0), None);
+        // the soft pair: a short swish centred on the swap, a chime ringing from it
+        let (at, len) = s(SoundKind::Swish).span(start, dur);
+        assert_eq!(len, Tick::from_seconds_f64(1.0));
+        assert_eq!(at + len.mul_ratio(1, 2), mid);
+        assert_eq!(s(SoundKind::Swish).span(start, Tick::ZERO).1, Tick::from_seconds_f64(0.35));
+        assert_eq!(s(SoundKind::Chime).samples(start, dur, 48_000), Some((504_000, 86_400)));
     }
 
     #[test]

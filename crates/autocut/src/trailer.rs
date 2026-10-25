@@ -32,7 +32,7 @@
 //!
 //! **Sound.** Generated music (`music.suggest` → `audio.generate`, `mood` energetic, `bpm` 124, a
 //! fixed `seed`), arranged to end on a bar with its final chord where the end card starts (a
-//! riser into it, an impact on it); the hook voice over its opening; mixed speech first
+//! swish into it, an impact on it); the hook voice over its opening; mixed speech first
 //! ([`crate::mix::mix_down`]), the music brought up from a bed's level and limited on its track,
 //! the voice's fader down a little, normalised to −14 LUFS, −1 dBTP.
 //!
@@ -1929,12 +1929,12 @@ pub async fn build(
             Err(e) => notes.push(format!("beat pulse: {e}")),
         }
     }
-    // ---- a whoosh into the montage, a riser into the end card and an impact on its hit
+    // ---- a swish into the montage, another into the end card and an impact on its hit
     let mut fx: Vec<u64> = Vec::new();
     let hit = tm.end_card[0];
     for (kind, dur, at, track, intensity) in [
-        ("whoosh", 0.7, tm.hook[1] - 0.35, "A4", 0.5),
-        ("riser", 1.6_f64.min(hit), hit - 1.6_f64.min(hit), "A5", 0.6),
+        ("swish", 0.5, tm.hook[1] - 0.25, "A4", 0.5),
+        ("swish", 0.5_f64.min(hit), hit - 0.5_f64.min(hit), "A5", 0.6),
         ("impact", end_len.clamp(1.0, 3.0), hit, "A5", 0.8),
     ] {
         match run(

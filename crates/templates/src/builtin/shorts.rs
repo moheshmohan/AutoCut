@@ -91,11 +91,11 @@ fn two_lines(clip: ClipId, first: (f64, f64), second: (f64, f64)) -> Hint {
     layers_hint(clip, &[(1, [SAFE_X, first.0], first.1), (2, [SAFE_X, second.0], second.1)])
 }
 
-/// A whoosh just before each cut of `cuts` on audio track `track`.
+/// A soft swish just before each cut of `cuts` on audio track `track`.
 fn whooshes(b: &mut Builder, track: usize, cuts: &[Tick]) {
     for &c in cuts {
         if c > frames(9) {
-            b.sfx(track, c - frames(9), "sound.whoosh-short");
+            b.sfx(track, c - frames(9), "sound.swish");
         }
     }
 }
@@ -629,7 +629,7 @@ pub(super) fn before_after_short() -> Result<Package, TemplateError> {
     let head = b.clip(TrackKind::Video, 3, g, split_at + frames(8), total - split_at - frames(8));
     b.tag(head, 1, "What a difference", (960.0, 540.0), 60.0, "Bold", rgb(0x111827), white(), 92.0);
     b.ramp(head, "opacity", "opacity", &[(Tick::ZERO, 0.0), (frames(8), 100.0)]);
-    b.sfx(1, cut - frames(9), "sound.whoosh-short");
+    b.sfx(1, cut - frames(9), "sound.swish");
     b.sfx(1, split_at, "sound.pop");
     let music = music(&mut b, 0, total, -6.0);
 

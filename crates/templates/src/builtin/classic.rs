@@ -112,8 +112,8 @@ pub(super) fn channel_intro() -> Result<Package, TemplateError> {
     let music_item = b.music_placeholder();
     let music = b.clip(TrackKind::Audio, 0, music_item, Tick::ZERO, total);
     b.transition(TrackKind::Audio, 0, "constant_power", Some(music), None, frames(15), TransitionAlign::EndAtCut);
-    // the logo lands with a whoosh and a soft hit
-    b.sfx(1, Tick::ZERO, "sound.whoosh-short");
+    // the logo lands with a swish and a soft hit
+    b.sfx(1, Tick::ZERO, "sound.swish");
     b.sfx(2, logo_start, "sound.impact-soft");
 
     let mut m = manifest(

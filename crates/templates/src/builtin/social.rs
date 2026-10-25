@@ -51,7 +51,7 @@ pub(super) fn product_promo_15() -> Result<Package, TemplateError> {
         let gl = ["gl_circleopen", "gl_directionalwarp", "gl_simplezoom", "gl_crosszoom"].get(k).copied().unwrap_or("gl_crosszoom");
         b.transition_ex(TrackKind::Video, 0, gl, Some(prev), Some(c), frames(8), TransitionAlign::CenterAtCut, &[("easing", ParamValue::Choice(9))]);
         if k > 0 {
-            b.sfx(2, at - frames(9), "sound.whoosh-short");
+            b.sfx(2, at - frames(9), "sound.swish");
         }
         let cap = b.element(2, at + frames(6), secs(1.8), "text.caption-box");
         b.layer_text(cap, 1, features.get(k).copied().unwrap_or(""));

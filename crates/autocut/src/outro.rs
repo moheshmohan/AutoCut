@@ -686,7 +686,7 @@ pub(crate) async fn build(
         animate(ex, land, "opacity", "opacity", &[(p, json!(80.0), "linear"), (p + 0.85, json!(0.0), "linear")], fps).await?;
         el("ring", land, p, p + 0.9, Some(around(st.small * 0.75 + 4.0 * u)));
     }
-    let cues = vec![("impact", t + 0.25, 2.5, 0.65), ("whoosh", (glide - 0.25).max(t), 1.0, 0.45)];
+    let cues = vec![("impact", t + 0.25, 2.5, 0.65), ("swish", (glide - 0.25).max(t), 0.5, 0.45)];
 
     // ---- the button: pops in under the logo, a cursor clicks it, it turns to `ctaDone`
     let click = t + 2.3;

@@ -892,6 +892,8 @@ pub fn transition_sound_samples(snd: &TransitionSound, n: usize, sr: u32) -> Opt
         SoundKind::Whoosh => synth::Kind::Whoosh,
         SoundKind::Riser => synth::Kind::Riser,
         SoundKind::Impact => synth::Kind::Impact,
+        SoundKind::Swish => synth::Kind::Swish,
+        SoundKind::Chime => synth::Kind::Chime,
     };
     let mut q = synth::Params::new(kind);
     q.seconds = n as f64 / f64::from(sr.max(1));
