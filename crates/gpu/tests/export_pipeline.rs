@@ -64,8 +64,7 @@ fn project(width: u32, height: u32) -> (Arc<filmcraft_project::Project>, filmcra
             filmcraft_time::FrameRate::FPS_24,
         )
         .unwrap();
-    // an effect (Brightness & Contrast at its defaults): not one picture without effects, which an
-    // export leaves to the CPU (`plan::cpu_is_quicker`), so every frame goes to the GPU renderer
+    // an effect (Brightness & Contrast at its defaults): the GPU effect stage runs too
     if let Some(fx) = filmcraft_project::find_effect("brightness_contrast") {
         v.effects.push(fx.instance());
     }

@@ -175,9 +175,9 @@ impl Pipeline {
     }
 
     /// Whether the frame at `t` is rendered on the CPU without a renderer: one the planner hands
-    /// back as one CPU image, or one the CPU draws at least as quickly.
+    /// back as one CPU image (the GPU cannot draw it).
     fn cpu_frame(&self, t: filmcraft_time::Tick) -> bool {
-        filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t) || filmcraft_render::plan::cpu_is_quicker(&self.project, self.seq, t, self.opts)
+        filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t)
     }
 
     pub fn new(project: Arc<Project>, seq: ItemId, settings: &ExportSettings, hdr_out: bool) -> Result<Self> {
@@ -252,20 +252,16 @@ impl Pipeline {
     /// R'G'B' floats (3 per pixel).
     pub fn frame(&self, f: i64, sources: &dyn SourceProvider) -> (Vec<u8>, Vec<f32>) {
         let t = self.rate.tick_of(f);
-        // The registered GPU renderer goes first; `None` (no adapter, a plan the GPU cannot
-        // draw, any internal error) falls back to the CPU reference renderer below. A frame the
-        // planner hands back as one CPU image anyway (an adjustment layer, a complex transition,
-        // HDR) does not take a pooled renderer: it would render on the CPU inside the pool, as
-        // many frames at a time as there are renderers instead of one per export thread.
-        // A frame the CPU draws at least as quickly (one picture without effects, titles over
-        // it) is left to it too.
+        // The registered GPU renderer draws every frame it can — a plain one too, even where the
+        // CPU would be about as quick: the GPU is the renderer, the CPU the fallback. `None` (no
+        // adapter, a plan the GPU cannot draw, any internal error) falls back to the CPU reference
+        // renderer below. A frame the planner hands back as one CPU image anyway (an adjustment
+        // layer, a complex transition, HDR) does not take a pooled renderer: it would render on
+        // the CPU inside the pool, as many frames at a time as there are renderers instead of one
+        // per export thread.
         let pool = self.renderer.as_ref().filter(|_| {
             if filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t) {
                 filmcraft_render::plan::note_cpu_frame(&self.project, self.seq, t);
-                return false;
-            }
-            if filmcraft_render::plan::cpu_is_quicker(&self.project, self.seq, t, self.opts) {
-                filmcraft_render::plan::cpu_work::note("frame: one picture without effects, and titles (quicker on the CPU)".into());
                 return false;
             }
             true

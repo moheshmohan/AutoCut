@@ -376,49 +376,6 @@ pub fn is_cpu_frame(project: &Project, seq_id: ItemId, t: Tick) -> bool {
     project.sequence(seq_id).is_none_or(|seq| whole_frame_on_cpu(project, seq, t))
 }
 
-/// The largest output (pixels) [`cpu_is_quicker`] leaves to the CPU: 1920 × 1088 and a little.
-pub const CPU_QUICKER_PIXELS: usize = 2_200_000;
-
-/// Whether the CPU renders the frame at `t` at least as quickly as a GPU composite read back for
-/// an export: an output of at most [`CPU_QUICKER_PIXELS`] (1080p) showing one picture without
-/// standard effects or masks (placed and moved anyhow: a slow zoom), only titles and shapes over
-/// it, and no transition. The CPU does little more than convert and place the picture (one to one
-/// it simply becomes the canvas) and mix each title over its rectangle, on every core; the GPU
-/// path uploads the picture, composites the whole frame and reads it back as half floats on at
-/// most four renderers. Measured on the showcase (`docs/gpu.md`): a 10 s 1080p range of a zooming
-/// clip with titles took 4.1–4.7 s on the CPU and 7.0–8.3 s on the GPU; at 4K the GPU is as quick
-/// or quicker (a 15.6 s range 18.7–19.9 s against 25.3–29.3 s), so 4K frames stay on the GPU.
-/// Effects, masks, a second picture or a transition send the frame to the GPU. A misjudged frame
-/// costs time, never a different picture.
-pub fn cpu_is_quicker(project: &Project, seq_id: ItemId, t: Tick, opts: RenderOptions) -> bool {
-    let Some(seq) = project.sequence(seq_id) else { return false };
-    let (w, h) = output_size(seq, opts.scale);
-    if w.saturating_mul(h) > CPU_QUICKER_PIXELS {
-        return false;
-    }
-    let mut pictures = 0;
-    for tr in seq.video_tracks.iter().filter(|tr| tr.enabled) {
-        if tr.transitions.iter().any(|x| x.range().contains(t)) {
-            return false;
-        }
-        let Some(item) = tr.item_at(t).filter(|i| i.enabled) else { continue };
-        if item.has_opacity_masks() || (opts.effects && item.has_standard_effects()) {
-            return false;
-        }
-        match project.item(item.item).map(|p| &p.kind) {
-            Some(ItemKind::Graphic { .. }) => {}
-            Some(ItemKind::Media(_) | ItemKind::Subclip { .. }) => {
-                pictures += 1;
-                if pictures > 1 {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-    }
-    pictures == 1
-}
-
 /// Count the frame at `t` in [`cpu_work`] with the reason [`is_cpu_frame`] holds for it (a caller
 /// that renders such a frame on the CPU without planning it).
 pub fn note_cpu_frame(project: &Project, seq_id: ItemId, t: Tick) {
@@ -662,15 +619,23 @@ fn push_item(
         // a 360° clip: its virtual camera's picture at `want`, from the source as sharp as it needs
         let reframe = crate::reframing(project, item, t, &src, want);
         let time = crate::video_source_time(item, t, src.info().frame_rate());
-        let Ok(frame) = src.video_frame(FrameRequest { time, scale: reframe.as_ref().map_or(want, |r| r.scale) }) else { return };
-        let cs = crate::colorman::source_space(project, item.item, &frame);
+        let scale = reframe.as_ref().map_or(want, |r| r.scale);
+        let Ok(frame) = src.video_frame(FrameRequest { time, scale }) else { return };
         // HDR and wide-gamut media on a Rec. 709 sequence is converted on the GPU too (#965); log
-        // media and other pipelines are converted on the CPU (below), and so are blended
-        // in-between frames (Frame Blending / Optical Flow on speed-changed clips)
+        // media and other pipelines are converted on the CPU (below), and so are Optical Flow's
+        // in-between frames. A Frame Blending in-between frame is the two pictures mixed here
+        // (`blended_frame`), the rest of the layer drawn by the GPU.
         let pipe = &seq.settings.color;
-        let input = if crate::colorman::needs_management(pipe, cs, &frame) { crate::colorman::gpu_input(project, item.item, pipe, cs, &frame) } else { None };
-        let plain =
-            (input.is_some() || !crate::colorman::needs_management(pipe, cs, &frame)) && crate::interpolation_blend(item, t, src.info().frame_rate()).is_none();
+        let (frame, input, plain) = match blended_frame(project, seq, item, t, &src, &frame, scale) {
+            Some(mixed) => (mixed, None, true),
+            None => {
+                let cs = crate::colorman::source_space(project, item.item, &frame);
+                let managed = crate::colorman::needs_management(pipe, cs, &frame);
+                let input = if managed { crate::colorman::gpu_input(project, item.item, pipe, cs, &frame) } else { None };
+                let plain = (input.is_some() || !managed) && crate::interpolation_blend(item, t, src.info().frame_rate()).is_none();
+                (frame, input, plain)
+            }
+        };
         if let Some(r) = reframe {
             // the GPU draws the virtual camera's picture straight from the source's planes; its
             // effects then run on that picture, as `item_layer` runs them
@@ -752,6 +717,33 @@ fn push_item(
     if let Some((img, op2, _)) = crate::item_layer(project, seq, item, t, opts, sources, &tc) {
         out.push(PlanLayer::new(cpu_frame(img), Affine::IDENTITY, op2 * extra_opacity, bl));
     }
+}
+
+/// A Frame Blending clip's in-between frame at timeline `t` for the GPU route: the source frame
+/// shown (`frame`, read at `scale`) and the next one mixed in linear light by the clip's weight,
+/// both colour managed first — what the CPU reference mixes (`media_image`; the GPU then
+/// decimates, places and runs the effects on it, all linear, so the order does not change the
+/// picture). `None` when the clip shows one source frame here, uses Frame Sampling or Optical
+/// Flow (motion interpolation stays on the CPU), or the next frame cannot be read at that size.
+fn blended_frame(
+    project: &Project,
+    seq: &Sequence,
+    item: &TrackItem,
+    t: Tick,
+    src: &filmcraft_media::SharedSource,
+    frame: &Arc<VideoFrame>,
+    scale: f32,
+) -> Option<Arc<VideoFrame>> {
+    if item.time_interpolation != filmcraft_project::TimeInterpolation::FrameBlending {
+        return None;
+    }
+    let (next, wgt) = crate::interpolation_blend(item, t, src.info().frame_rate())?;
+    let f2 = src.video_frame(FrameRequest { time: next, scale }).ok().filter(|f| f.width == frame.width && f.height == frame.height)?;
+    let pipe = &seq.settings.color;
+    let a = crate::colorman::decode(project, item.item, frame, 1, pipe);
+    let b = crate::colorman::decode(project, item.item, &f2, 1, pipe);
+    let mixed = a.lerp(&b, wgt);
+    Some(Arc::new(VideoFrame { pts: frame.pts, ..VideoFrame::rgba_f32(mixed.w as u32, mixed.h as u32, mixed.px) }))
 }
 
 /// Whether `item`'s layer is opaque over the whole output at `t`: a media clip without an alpha
@@ -903,5 +895,97 @@ mod tests {
         }
         assert!(stack.exhausted);
         assert_eq!(stack.layer_count(), MAX_PLAN_LAYERS);
+    }
+
+    /// A 4 × 2 source whose frame `k` (24 fps) is grey `k / 10`.
+    struct Ramp {
+        info: filmcraft_media::MediaInfo,
+    }
+
+    impl filmcraft_media::MediaSource for Ramp {
+        fn info(&self) -> &filmcraft_media::MediaInfo {
+            &self.info
+        }
+        fn video_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
+            let k = filmcraft_time::FrameRate::FPS_24.frame_at(req.time) as f32;
+            let v = (k / 10.0).clamp(0.0, 1.0);
+            Ok(Arc::new(VideoFrame { pts: req.time, ..VideoFrame::rgba_f32(4, 2, [v, v, v, 1.0].repeat(8)) }))
+        }
+        fn audio(&self, _start: i64, frames: usize, rate: u32) -> filmcraft_media::Result<filmcraft_frame::AudioBuffer> {
+            Ok(filmcraft_frame::AudioBuffer::silence(rate, 2, frames))
+        }
+    }
+
+    #[test]
+    fn a_frame_blended_frame_is_planned_for_the_gpu_and_matches_the_cpu() {
+        let rate = filmcraft_time::FrameRate::FPS_24;
+        let video = filmcraft_media::VideoStreamInfo {
+            width: 4,
+            height: 2,
+            frame_rate: rate,
+            par: (1, 1),
+            codec: "test".into(),
+            pixel_format: "rgba".into(),
+            color: filmcraft_color::ColorInfo::REC709,
+            has_alpha: false,
+            bitrate: None,
+            hdr: None,
+        };
+        let info = filmcraft_media::MediaInfo {
+            name: "ramp".into(),
+            kind: filmcraft_media::MediaKind::Movie,
+            duration: rate.tick_of(48),
+            video: Some(video),
+            audio_streams: vec![],
+            container: "test".into(),
+            start_timecode: None,
+            file_size: None,
+        };
+        let mut p = Project::new("t");
+        let clip = filmcraft_project::MediaClip {
+            media: filmcraft_project::MediaRef::File { path: "/ramp.mov".into() },
+            info: info.clone(),
+            interpret: Default::default(),
+            mark_in: None,
+            mark_out: None,
+            markers: vec![],
+            offline: false,
+            proxy: None,
+            identity: None,
+        };
+        let item = p.add_item("ramp", filmcraft_project::Label::Iris, ItemKind::Media(clip), None);
+        let seq = p.new_sequence("s", filmcraft_project::SequenceSettings { width: 4, height: 2, frame_rate: rate, ..Default::default() }, 1, 1, None);
+        let mut it = p
+            .make_track_item(item, filmcraft_project::TrackKind::Video, Tick::ZERO, filmcraft_time::TimeRange::new(Tick::ZERO, rate.tick_of(24)), rate)
+            .unwrap();
+        it.speed = 0.5;
+        it.duration = rate.tick_of(48);
+        it.time_interpolation = filmcraft_project::TimeInterpolation::FrameBlending;
+        p.sequence_mut(seq).unwrap().video_tracks[0].items.push(it);
+        let mut sources = crate::SourceMap::default();
+        sources.0.insert(item, Arc::new(Ramp { info }) as filmcraft_media::SharedSource);
+        // timeline frame 3 at half speed: media frame 1.5, the two frames half and half
+        let t = rate.tick_of(3);
+        let opts = RenderOptions::default();
+        let plan = plan_frame(&p, seq, t, opts, &sources);
+        let FramePlan::Layers { layers, .. } = &plan else { panic!("a layered plan, not one CPU image") };
+        assert_eq!(layers.len(), 1);
+        let l = &layers[0];
+        assert!(l.fx.is_none() && l.input.is_none());
+        let expected = crate::render_sequence(&p, seq, t, opts, &sources);
+        let got = execute_cpu(&plan);
+        assert_eq!((got.w, got.h), (expected.w, expected.h));
+        for (a, b) in got.px.iter().zip(&expected.px) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+        // between frame 1 (0.1) and 2 (0.2), mixed in linear light (float frames are linear)
+        let one = |k: f32| k / 10.0;
+        let mid = got.px[0];
+        assert!(mid > one(1.0) + 1e-4 && mid < one(2.0) - 1e-4, "{mid}");
+        // Frame Sampling shows frame 1 itself, with no mix
+        let mut q = p.clone();
+        q.sequence_mut(seq).unwrap().video_tracks[0].items[0].time_interpolation = filmcraft_project::TimeInterpolation::FrameSampling;
+        let sampled = execute_cpu(&plan_frame(&q, seq, t, opts, &sources));
+        assert!((sampled.px[0] - one(1.0)).abs() < 1e-4, "{}", sampled.px[0]);
     }
 }

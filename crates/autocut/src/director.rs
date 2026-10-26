@@ -1570,7 +1570,7 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
                     Camera::PushIn => out.push(step("clip.vrMove", json!({"move": "pushIn", "amount": 0.12}), me, On::Clips)),
                 }
                 if s.camera == Camera::SpeedRamp {
-                    out.push(step("clip.speedRamp", json!({"preset": "smoothIn", "fit": "length", "ripple": false}), me, On::Clips));
+                    out.push(step("clip.speedRamp", json!({"preset": "smoothIn", "fit": "length", "ripple": false, "opticalFlow": false}), me, On::Clips));
                 }
                 // a whip out of this shot into the next 360° one
                 if plan.shots.get(k + 1).is_some_and(|nx| nx.enter == Enter::Whip) && !matches!(s.camera, Camera::PlanetOut) && len > 2.0 * WHIP_HALF {
@@ -1608,7 +1608,7 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
                     }
                 }
                 if s.camera == Camera::SpeedRamp {
-                    out.push(step("clip.speedRamp", json!({"preset": "smoothIn", "fit": "length", "ripple": false}), me, On::Clips));
+                    out.push(step("clip.speedRamp", json!({"preset": "smoothIn", "fit": "length", "ripple": false, "opticalFlow": false}), me, On::Clips));
                 }
             }
         }

@@ -42,9 +42,8 @@ pub(crate) fn project() -> (Arc<Project>, ItemId, SourceMap) {
     (Arc::new(p), seq, m)
 }
 
-/// [`project`] with an effect on the clip (Brightness & Contrast at its defaults): no longer one
-/// picture without effects, which the CPU draws as quickly (`plan::cpu_is_quicker`), so an
-/// export asks a registered renderer for its frames.
+/// [`project`] with an effect on the clip (Brightness & Contrast at its defaults): a picture with
+/// an effect, as tests of the renderer's effect stage want it.
 fn hook_project() -> (Arc<Project>, ItemId, SourceMap) {
     let (p, seq, m) = project();
     let mut p = Arc::unwrap_or_clone(p);
@@ -495,9 +494,9 @@ fn gpu_hook_scenarios() {
     }
     assert_eq!((gpu_render_stats().frames, gpu_render_stats().fallbacks), (12, 12), "{:?}", gpu_render_stats());
 
-    // 6. One picture without effects (and titles): the CPU draws it at least as quickly as a GPU
-    //    composite read back, so the renderer is not asked (`cpu_is_quicker`); the frames are
-    //    the CPU's, counted with their reason.
+    // 6. One picture without effects (and titles): the GPU draws it too — the GPU is the
+    //    renderer wherever it can draw a frame, the CPU the fallback; `gpuRendering: off` keeps
+    //    it on the CPU.
     crate::reset_frame_renderers_for_tests();
     crate::register_frame_renderer(|| Some(Box::new(FakeRenderer) as Box<dyn FrameRenderer>));
     let (p, seq, m) = project();
@@ -507,18 +506,18 @@ fn gpu_hook_scenarios() {
         s.gpu_rendering = gpu;
         export(&p, seq, &s, &m, &Progress::default()).unwrap()
     };
+    let before = gpu_render_stats().frames;
     mk2(&tmp("plain-off.png"), crate::GpuRendering::Off);
+    assert_eq!(gpu_render_stats().frames, before, "off: the CPU's");
     mk2(&tmp("plain-auto.png"), crate::GpuRendering::Auto);
-    assert_eq!(std::fs::read(tmp("plain-off000.png")).unwrap(), std::fs::read(tmp("plain-auto000.png")).unwrap(), "the frame is the CPU's");
-    assert_eq!(gpu_render_stats().frames, 0, "{:?}", gpu_render_stats());
-    assert!(filmcraft_render::plan::cpu_work::counts().keys().any(|k| k.contains("one picture without effects")));
-    // such a batch takes no renderer, so it is not capped at the renderers' count
+    assert_ne!(std::fs::read(tmp("plain-off000.png")).unwrap(), std::fs::read(tmp("plain-auto000.png")).unwrap(), "the frame is the renderer's");
+    assert_eq!(gpu_render_stats().frames, before + 2, "{:?}", gpu_render_stats());
+    // its batches are the renderers' like any other
     let png = ExportSettings { format: Format::PngSequence, ..Default::default() };
     let plain = crate::pipeline::Pipeline::new(p.clone(), seq, &png, false).unwrap();
-    assert_eq!(plain.render_batch_limit_from(0, 14), 14);
-    let (hp, hseq, _) = hook_project();
-    let fx = crate::pipeline::Pipeline::new(hp, hseq, &png, false).unwrap();
-    assert!(fx.render_batch_limit_from(0, 14) <= 4, "frames for the renderer: at most one task per renderer");
+    assert!(plain.render_batch_limit_from(0, 14) <= 4, "frames for the renderer: at most one task per renderer");
+    let off = ExportSettings { gpu_rendering: crate::GpuRendering::Off, ..png.clone() };
+    assert_eq!(crate::pipeline::Pipeline::new(p.clone(), seq, &off, false).unwrap().render_batch_limit_from(0, 14), 14, "no renderer: every thread");
     crate::reset_frame_renderers_for_tests();
 }
 

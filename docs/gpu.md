@@ -1,6 +1,6 @@
 # GPU use
 
-> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (the 11 Creator effects run on the GPU) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-26 · **Change:** minor (every plannable export frame on the GPU; Frame Blending layers on the GPU) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 The owner's decision (2026-10-21): **the GPU wherever it is supported.** GPU output does not have
 to be bit-identical to the CPU's, only within the golden / parity tolerances (8-bit p99 ≤ 6, mean
@@ -17,7 +17,7 @@ about compositing, effects and the on-device models.
 | Path | Device (before 2026-10-21 → now) | Fallback | Force the CPU |
 |---|---|---|---|
 | Program monitor playback (desktop) | GPU (`GpuCompositor`, wgpu) | per layer / frame: what the plan leaves to the CPU (below); WebGL2-class devices without compute shaders render effects on the CPU | `FILMCRAFT_CPU_COMPOSITE=1` |
-| Export rendering | CPU (GPU opt-in) → **GPU by default** (`GpuRendering::Auto`: export settings, every built-in preset, settings saved without the field, `file.exportMedia`, the CLI, AutoCut's showcase and shorts) | per frame: no adapter, a device error or loss (the CPU for the rest of the session), a renderer panic, a frame the plan hands back as one CPU image, and, up to 1080p, a frame of one picture without effects or masks with only titles over it and no transition (`plan::cpu_is_quicker`: the CPU draws it at least as quickly as a GPU composite read back; such batches keep every export thread; at 4K the GPU is quicker and keeps them); per layer as below | `gpuRendering: "off"`, `--gpu-rendering off`, Export ▸ "Composite on the GPU when available" |
+| Export rendering | CPU (GPU opt-in) → **GPU by default** (`GpuRendering::Auto`: export settings, every built-in preset, settings saved without the field, `file.exportMedia`, the CLI, AutoCut's showcase and shorts) | per frame: no adapter, a device error or loss (the CPU for the rest of the session), a renderer panic, a frame the plan hands back as one CPU image (HDR, an adjustment layer, a complex transition); per layer as below. Every other frame is the GPU's — a plain one too (one picture without effects, titles over it), which the CPU would draw about as quickly up to 1080p (measured below): the GPU is the renderer, the CPU the fallback | `gpuRendering: "off"`, `--gpu-rendering off`, Export ▸ "Composite on the GPU when available" |
 | Render previews (render in to out) | CPU → **GPU** (an export, `GpuRendering` default) | as export | as export (`FILMCRAFT_CPU_COMPOSITE` does not apply) |
 | The CLI's GPU export | none: `cargo build -p filmcraft-cli` had no wgpu backend, `--gpu-rendering auto` rendered on the CPU → **Metal** (macOS), DX12 / Vulkan (Windows), Vulkan / GL (Linux) | as export | as export |
 | Standard effects on media clips | GPU: 45 effect ids (`render::gpufx::GPU_EFFECTS`: colour, levels, Lumetri basic / creative / vignette, Gaussian / directional / camera blur, sharpen, unsharp, crop, transform, flips, mirror, offset, vignette, video limiter, ASC CDL, channel mix…, and the 11 Creator effects: VHS, Film Grain, Kaleidoscope, Glitch, Zoom Blur, Directional Motion Blur, Tech HUD, Chromatic Aberration, Light Sweep, Duotone, Halftone, `render::creator_fx`) | an effect outside the list, a non-finite parameter or a Transform that minifies → the clip's layer is rendered on the CPU and drawn by the GPU | — |
@@ -34,7 +34,7 @@ about compositing, effects and the on-device models.
 | HDR / wide-gamut media on a Rec. 709 sequence | GPU (input transform in WGSL) | log media: CPU layer | — |
 | Colour LUTs (Lumetri Input / Creative LUT, curves, wheels, HSL) | CPU layer (`GpuLut` exists with parity tests, not in the live path) | — | — |
 | Nested sequences | plain ones inlined into the GPU plan; others rendered on the CPU as a layer | — | — |
-| Frame blending / optical-flow speed changes | CPU layer | — | — |
+| Frame blending / optical-flow speed changes | Frame Blending: the two pictures mixed on the CPU (colour managed, a linear-light lerp: as the CPU reference mixes them), the layer — virtual camera, effects, placement — on the **GPU** | Optical Flow's motion interpolation: CPU layer | — |
 | Source monitor, item thumbnails, media browser, multicam grid | CPU (`render_item`: decode and scale one frame) | — | — |
 | Scopes, Reference monitor, Export-mode preview | CPU (`render_sequence` at 250–1000 px, scope maths on the CPU) | — | — |
 | Audio waveforms, meters, mixing, audio effects | CPU | — | — |
@@ -105,7 +105,7 @@ build before this work, whose defaults rendered on the CPU):
 | 4K, 6 s (180 frames) | a redacted clip (blur behind tracked face masks), titles | 12.3–12.7 s, 21 s CPU | **7.7–8.2 s**, 17.7 s CPU (1.55×) |
 | 4K, 15.6 s (468 frames) | scaled clips, blur fills, transitions, titles | 23.2–25.1 s, 55 s CPU | **18.4–18.6 s**, 52 s CPU (1.3×) |
 | 4K, 10 s (300 frames) | one 1080p clip zoomed to 4K, titles | 15.2–20.2 s (load 37–47) | 16.0–19.9 s (the same) |
-| 1080p, 10 s (300 frames) | one 1080p clip with a slow zoom, titles: left to the CPU (`cpu_is_quicker`) | 3.7–4.1 s, 9.0 s CPU | 2.9–3.8 s, 9.1 s CPU (+1.4 s of GPU start-up before the export) |
+| 1080p, 10 s (300 frames) | one 1080p clip with a slow zoom, titles (measured when such frames were left to the CPU; they are the GPU's now) | 3.7–4.1 s, 9.0 s CPU | 2.9–3.8 s, 9.1 s CPU (+1.4 s of GPU start-up before the export) |
 
 Before the masked blur moved to the GPU, the 6 s 4K range took 11.8 s on the GPU (39 s of CPU)
 against 3.4–5.1 s on the CPU at the time: the redaction was a 4K CPU layer uploaded every frame.
@@ -121,11 +121,13 @@ Before the plain frames went back to the CPU, the 1080p range took 7.0–8.3 s.
 - Thumbnails, the Source monitor, scopes and the Reference monitor render on the CPU.
 - Decoded frames are uploaded from CPU memory (no zero-copy from VideoToolbox into wgpu), and the
   GPU export reads every frame back as half floats, converted to f32 and then to 8 bits on the
-  CPU, on at most four renderers: the read-back and conversions are why one picture without
-  effects is as quick on the CPU. Converting to the encoder's 8-bit (or Y'CbCr) format on the GPU
-  would cut the read-back by four.
+  CPU, on at most four renderers: the read-back and conversions make one picture without effects
+  about as quick on the CPU up to 1080p, though the owner chose the GPU for every frame
+  (2026-10-26). Converting to the encoder's 8-bit (or Y'CbCr) format on the GPU would cut the
+  read-back by four.
 - An export with GPU rendering creates its four renderers (shaders and pipelines) before its first
-  frame, about 1.4 s, even when every frame then stays on the CPU.
+  frame, about 1.4 s.
+- Frame Blending mixes its two pictures on the CPU before the GPU draws the layer.
 - Mosaic (the redaction's other style) is not a GPU effect.
 - The models run on the GPU only on macOS.
 
@@ -133,5 +135,6 @@ Before the plain frames went back to the CPU, the 1080p range took 7.0–8.3 s.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | The owner's call: export frames of one picture without effects (titles over it) go to the GPU too, no longer left to the CPU as quicker; Frame Blending layers are drawn by the GPU (their two pictures mixed first), Optical Flow stays a CPU layer; the director's speed ramps use Frame Blending |
 | 2026-10-22 | minor | The Creator effects (VHS, Film Grain, Kaleidoscope, Glitch, Zoom Blur, Directional Motion Blur, Tech HUD, Chromatic Aberration, Light Sweep, Duotone, Halftone) on the GPU with CPU references: 45 GPU effect ids |
 | 2026-10-21 | major | Created: inventory of every compute-heavy path and its device, fallbacks, switches; GPU export on by default; masked effects, dissolves of clips that do not fill the frame, the detectors, Whisper transcription, Kokoro and OpenVoice moved to the GPU |
