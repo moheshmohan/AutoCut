@@ -213,6 +213,9 @@ pub fn apply_measure(c: &mut Candidate, m: &Value) {
     if let Some(v) = finite(&m["motion"]) {
         sc.motion = v.max(0.0);
     }
+    if let Ok(cam) = serde_json::from_value(m["camera"].clone()) {
+        c.pan = cam;
+    }
     if let Some(n) = m["faces"].as_u64().filter(|n| *n > 0) {
         let size = get("largestFace").unwrap_or(0.0);
         sc.people = sc.people.max(unit(0.6 + 0.05 * n.min(4) as f64 + 0.3 * (size / 0.2).min(1.0)));
@@ -263,7 +266,8 @@ pub struct Verdict {
     pub why: String,
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> Option<f64> {
+/// The cosine similarity of two embeddings (`None`: empty or of other lengths).
+pub fn cosine(a: &[f32], b: &[f32]) -> Option<f64> {
     if a.is_empty() || a.len() != b.len() {
         return None;
     }

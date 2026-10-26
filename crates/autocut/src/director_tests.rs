@@ -37,6 +37,8 @@ fn cand(id: &str, item: u64, kind: Kind, start: f64, secs: f64, media: f64, orde
         aspect: 16.0 / 9.0,
         order,
         shot: 0,
+        pan: CameraMove::Static,
+        captured: None,
         scores: rank::Scores { sharp: 0.8, exposure: 0.8, steady: 0.8, energy: 0.6, brightness: 0.45, ..rank::Scores::default() },
         rank: 0.6,
         embedding: Vec::new(),
@@ -427,4 +429,132 @@ fn speech_faces_and_smiles_raise_a_moment() {
     // hostile numbers stay in range
     rank::apply_measure(&mut d, &json!({"measured": true, "sharpness": 1e9, "exposure": -5, "shake": "x", "faces": 1, "largestFace": f64::MAX}));
     assert!([d.scores.sharp, d.scores.exposure, d.scores.steady, d.scores.people, d.rank].iter().all(|v| (0.0..=1.0).contains(v)), "{:?}", d.scores);
+}
+
+/// A shot of the plan: candidate `id` from `from` for `beats`, with `camera`.
+fn planned(id: &str, from: f64, beats: u32, camera: Camera) -> PlannedShot {
+    PlannedShot {
+        clip: id.into(),
+        from,
+        beats,
+        camera,
+        look: None,
+        to: None,
+        enter: Enter::Cut,
+        align: None,
+        lead: 0.0,
+        tail: 0.0,
+        cut: String::new(),
+        text: None,
+        why: String::new(),
+    }
+}
+
+fn speech_of_item(item: u64, segments: &[(f64, f64)]) -> crate::quick::ItemSpeech {
+    crate::quick::ItemSpeech {
+        item,
+        language: "en".into(),
+        kept: segments.iter().map(|(a, b)| crate::quick::Said { start: *a, end: *b, text: "and there it is".into(), fluency: 1.0 }).collect(),
+        ..Default::default()
+    }
+}
+
+/// A trip: a planet hook, an orbit, a talking phone clip, a fast pan, a clip five hours later, a
+/// 360° ending; c2 starts talking as its shot begins, c4's sentence runs past its end.
+fn trip() -> (Vec<Candidate>, Plan, Vec<crate::quick::ItemSpeech>) {
+    let mut lib = library();
+    let day = 1_760_000_000i64;
+    for (c, t) in lib.iter_mut().zip([0, 60, 120, 180, 5 * 3600 + 200, 5 * 3600 + 300]) {
+        c.captured = Some(day + t);
+    }
+    lib[3].pan = CameraMove::PanRight;
+    lib[3].scores.motion = 0.4;
+    let plan = Plan {
+        title: "Trip".into(),
+        mood: "happy".into(),
+        bpm: 120.0,
+        shots: vec![
+            planned("c1", 4.0, 6, Camera::PlanetIn),
+            planned("c3", 6.0, 6, Camera::Orbit),
+            planned("c2", 1.0, 4, Camera::PushIn),
+            planned("c4", 2.0, 4, Camera::PushIn),
+            planned("c5", 0.0, 4, Camera::Hold),
+            planned("c6", 2.0, 6, Camera::PlanetOut),
+        ],
+        by: "test".into(),
+        notes: Vec::new(),
+    };
+    let speech = vec![speech_of_item(2, &[(1.2, 3.0)]), speech_of_item(4, &[(3.5, 4.3)])];
+    (lib, plan, speech)
+}
+
+#[test]
+fn each_cut_is_picked_from_what_the_shots_show_and_say() {
+    let beat = beat_of(120.0);
+    let (lib, mut plan, speech) = trip();
+    cuts::joins(&mut plan, &lib, &speech, beat, &cuts::Style::default());
+    let enters: Vec<Enter> = plan.shots.iter().map(|s| s.enter).collect();
+    assert_eq!(enters, [Enter::Cut, Enter::Whip, Enter::Cut, Enter::Swipe, Enter::Dissolve, Enter::Dissolve], "{:#?}", plan.shots);
+    assert!(plan.shots[4].cut.contains("jump in time"), "{}", plan.shots[4].cut);
+    assert!(plan.shots[5].cut.contains("ending"));
+    // a J cut into c2's voice, an L cut out of c4's sentence
+    assert_eq!(plan.shots[2].lead, 0.25);
+    assert!(plan.shots[2].cut.contains("J cut"));
+    assert!((plan.shots[3].tail - 0.45).abs() < 1e-9, "{}", plan.shots[3].tail);
+    assert!(plan.shots.iter().all(|s| !s.cut.is_empty()));
+    // a 360° shot after a framed subject lines its subject up with it
+    let mut lib2 = lib.clone();
+    lib2[1].subject = Some([0.2, 0.3, 0.2, 0.5]);
+    let mut p2 = Plan { shots: vec![planned("c2", 1.0, 4, Camera::Hold), planned("c3", 6.0, 6, Camera::PushIn)], ..plan.clone() };
+    cuts::joins(&mut p2, &lib2, &[], beat, &cuts::Style::default());
+    assert_eq!((p2.shots[1].enter, p2.shots[1].align), (Enter::Match, Some(0.3)), "{:?}", p2.shots[1]);
+    // the energetic style punches across time (a light leak when light effects are allowed);
+    // the cinematic dips to black across days and whips at most once
+    let style = |p: Value| cuts::Style::from_params(&p, &cuts::Style::default()).unwrap();
+    let mut p3 = plan.clone();
+    cuts::joins(&mut p3, &lib, &speech, beat, &style(json!({"style": "energetic"})));
+    assert_eq!(p3.shots[4].enter, Enter::Punch);
+    cuts::joins(&mut p3, &lib, &speech, beat, &style(json!({"style": "energetic", "lightEffects": true})));
+    assert_eq!(p3.shots[4].enter, Enter::LightLeak);
+    let mut lib4 = lib.clone();
+    lib4[4].captured = lib4[4].captured.map(|t| t + 2 * 86_400);
+    let mut p4 = plan.clone();
+    cuts::joins(&mut p4, &lib4, &speech, beat, &style(json!({"style": "cinematic"})));
+    assert_eq!(p4.shots[4].enter, Enter::DipToBlack);
+    assert!(p4.shots.iter().filter(|s| matches!(s.enter, Enter::Whip | Enter::Swipe)).count() <= 1);
+    for bad in [json!({"style": "loud"}), json!({"sounds": ["laser"]}), json!({"soundLevel": 2})] {
+        assert!(cuts::Style::from_params(&bad, &cuts::Style::default()).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn the_cuts_compile_to_transitions_split_edits_and_the_styles_sounds() {
+    let beat = beat_of(120.0);
+    let (lib, mut plan, speech) = trip();
+    cuts::joins(&mut plan, &lib, &speech, beat, &cuts::Style::default());
+    plan.shots[0].text = Some("Trip".into());
+    let wins = windows(&plan, &Beats::grid(120.0));
+    let o = opts(json!({"seconds": 15}));
+    let steps = compile(&plan, &lib, &wins, &o, (1080.0, 1920.0), beat);
+    let trans: Vec<(&str, Option<usize>)> =
+        steps.iter().filter(|s| s.id == "sequence.applyVideoTransition").map(|s| (s.params["effect"].as_str().unwrap(), s.shot)).collect();
+    assert_eq!(trans, [("cam_whip_pan", Some(3)), ("cross_dissolve", Some(4)), ("cross_dissolve", Some(5))], "{trans:?}");
+    let whip = steps.iter().find(|s| s.params["effect"] == "cam_whip_pan").unwrap();
+    assert_eq!(whip.params["params"]["direction"], 1, "panning right: the next picture comes from the east");
+    // the J cut on c2 after it is placed; the L cut on c4 once c5 is placed
+    let at = |pred: &dyn Fn(&Step) -> bool| steps.iter().position(pred).unwrap();
+    let j = at(&|s| s.id == "clip.splitEdit" && s.params["lead"].is_number());
+    let l = at(&|s| s.id == "clip.splitEdit" && s.params["tail"].is_number());
+    assert_eq!((steps[j].shot, steps[l].shot), (Some(2), Some(3)));
+    assert!(j > at(&|s| s.id == "timeline.place" && s.shot == Some(2)));
+    assert!(l > at(&|s| s.id == "timeline.place" && s.shot == Some(4)));
+    // the subtle style: swishes and the chime, quiet
+    let kinds = |st: &[Step]| st.iter().filter(|s| s.id == "audio.generate").map(|s| s.params["kind"].as_str().unwrap().to_string()).collect::<BTreeSet<_>>();
+    assert_eq!(kinds(&steps), BTreeSet::from(["chime".to_string(), "swish".to_string()]));
+    assert!(steps.iter().filter(|s| s.id == "audio.generate").all(|s| s.params["intensity"].as_f64().unwrap() <= 0.4));
+    // an energetic style asking for whooshes and an impact gets them; a style with no sounds none
+    let loud = opts(json!({"seconds": 15, "style": "energetic", "soundLevel": 0.7}));
+    assert_eq!(kinds(&compile(&plan, &lib, &wins, &loud, (1080.0, 1920.0), beat)), BTreeSet::from(["impact".to_string(), "whoosh".to_string()]));
+    let quiet = opts(json!({"seconds": 15, "sounds": []}));
+    assert!(kinds(&compile(&plan, &lib, &wins, &quiet, (1080.0, 1920.0), beat)).is_empty());
 }

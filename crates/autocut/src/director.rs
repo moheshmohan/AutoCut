@@ -22,11 +22,13 @@
 //! 4. **Commands.** The plan compiles to engine commands ([`compile`]); a shot's own commands run
 //!    on its clip once it is placed. `dryRun` returns them with the plan, building nothing.
 //! 5. **Build.** A sequence of the `aspect`; the music first (generated, or `music`), its beats
-//!    the grid every cut lands on; the shots placed and moved; a swish on each whip and roll and a
-//!    soft chime under the title — never a whoosh or a riser; a cross dissolve into the ending;
-//!    the title in English inside the platform's safe zone; captions of English speech; each
-//!    sound levelled and the mix at −14 LUFS; with `export` the video, a frame sheet, the report
-//!    and QA beside it. No colour looks, light leaks or flashes: the footage as shot.
+//!    the grid every cut lands on; the shots placed and moved; each cut made from what its two
+//!    shots show and say ([`cuts`]: match cuts, whips where the camera is already moving, J and L
+//!    cuts under speech, dissolves across time) in the edit's style, with the style's sounds
+//!    (the subtle default: a quiet swish under whips and rolls and a chime under the title, no
+//!    light effects); the title in English inside the platform's safe zone; captions of English
+//!    speech; each sound levelled and the mix at −14 LUFS; with `export` the video, a frame
+//!    sheet, the report and QA beside it.
 //!
 //! Everything works without the models; the report's `fallbacks` say what ran instead.
 
@@ -80,6 +82,8 @@ const MOODS: &[&str] = &["epic", "tense", "uplifting", "calm", "happy", "dark", 
 const BED_LUFS: f64 = -16.0;
 const SOUND_LUFS: f64 = -27.0;
 const EFFECTS_LUFS: f64 = -24.0;
+/// J and L cuts.
+const SPLIT_CMD: &str = filmcraft_engine::split_edit::SPLIT_CMD;
 
 fn invalid(m: impl Into<String>) -> AutoCutError {
     AutoCutError::Invalid(format!("direct: {}", m.into()))
@@ -130,6 +134,8 @@ pub struct Options {
     pub full_detail: usize,
     pub download: bool,
     pub seed: u64,
+    /// How the cuts are made and what is heard on them ([`cuts::Style`]).
+    pub style: cuts::Style,
 }
 
 /// The layout a brief asks for, from its words ("16:9 recap", "vertical reel").
@@ -338,6 +344,7 @@ impl Options {
             full_detail: p["fullDetail"].as_u64().map_or(8, |n| n.min(64) as usize),
             download: p["download"].as_bool().unwrap_or(false),
             seed: p["seed"].as_u64().unwrap_or(7),
+            style: cuts::Style::from_params(p, &cuts::Style::default()).map_err(invalid)?,
         })
     }
 
@@ -417,6 +424,11 @@ pub struct Candidate {
     pub order: usize,
     /// Its shot in its item's scene index (moments of one shot are not copies of each other).
     pub shot: usize,
+    /// How its camera moves (a pan is carried across a match cut, or whipped).
+    pub pan: CameraMove,
+    /// When it was filmed (Unix seconds), when known: a jump in time is dissolved across.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captured: Option<i64>,
     /// What its picture and sound score ([`rank::Scores`]), and its rank from them.
     pub scores: rank::Scores,
     pub rank: f64,
@@ -631,6 +643,8 @@ fn candidate(
             aspect: aspects.get(&s.item).copied().filter(|a| a.is_finite() && *a > 0.0).unwrap_or(16.0 / 9.0),
             order: s.order,
             shot: s.index,
+            pan: s.shot.camera,
+            captured: None,
             rank: scores.rank(kind),
             scores,
             embedding: s.shot.embedding.0.clone(),
@@ -787,16 +801,26 @@ impl Camera {
     }
 }
 
-/// How a shot comes in.
+/// How a shot comes in ([`cuts::joins`] picks it).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Enter {
     #[default]
     Cut,
-    /// A cross dissolve (into the ending).
+    /// A cut lined up with the shot before (the subject's place, the pan, the framing).
+    Match,
+    /// A cross dissolve (into the ending, across a jump in time).
     Dissolve,
-    /// A whip between two 360° shots: the one before turns away, this one turns in (a swish).
+    /// A whip between two 360° shots: the one before turns away, this one turns in.
     Whip,
+    /// A whip-pan transition, the way the camera moves.
+    Swipe,
+    /// A zoom punch across a jump in time (energetic).
+    Punch,
+    /// A light leak across a jump in time (energetic, light effects allowed).
+    LightLeak,
+    /// A dip to black across days (cinematic).
+    DipToBlack,
 }
 
 /// One shot of the edit.
@@ -814,10 +838,27 @@ pub struct PlannedShot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
     pub enter: Enter,
+    /// A match cut: where its subject sits across the frame (shares), lined up with the shot
+    /// before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub align: Option<f64>,
+    /// Its sound starts this many seconds before its picture (a J cut), runs on this long after
+    /// it (an L cut).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub lead: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub tail: f64,
+    /// Why it comes in as it does.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cut: String,
     /// Text over it (English).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     pub why: String,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// The edit as directed.
@@ -1024,7 +1065,21 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
         last_kind = c.kind;
         last_item = c.item;
         room = room.saturating_sub(beats);
-        body.push(PlannedShot { clip: c.id.clone(), from, beats, camera: cam, look, to, enter, text: None, why: format!("{} in filming order", c.caption) });
+        body.push(PlannedShot {
+            clip: c.id.clone(),
+            from,
+            beats,
+            camera: cam,
+            look,
+            to,
+            enter,
+            align: None,
+            lead: 0.0,
+            tail: 0.0,
+            cut: String::new(),
+            text: None,
+            why: format!("{} in filming order", c.caption),
+        });
     }
     // beats left over: the longest-held shots take them, two at a time
     let mut k = 0usize;
@@ -1056,6 +1111,10 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
         look: hook_look,
         to: None,
         enter: Enter::Cut,
+        align: None,
+        lead: 0.0,
+        tail: 0.0,
+        cut: String::new(),
         text: Some(title),
         why: format!("the hook: {}", hook.caption),
     });
@@ -1071,6 +1130,10 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
                 look: c.looks.first().map(|l| l.id.clone()),
                 to: None,
                 enter: Enter::Dissolve,
+                align: None,
+                lead: 0.0,
+                tail: 0.0,
+                cut: String::new(),
                 text: None,
                 why: format!("the ending: {}", c.caption),
             });
@@ -1407,15 +1470,8 @@ pub fn validate(v: &Value, cands: &[Candidate], o: &Options, beat: f64, bpm: f64
         };
         *cams.entry(cam).or_insert(0) += 1;
         used_ids.insert(c.id.clone());
-        let prev_vr = shots.last().and_then(|p| cands.iter().find(|x| x.id == p.clip)).is_some_and(|x| x.kind == Kind::Vr);
-        let whips = shots.iter().filter(|s| s.enter == Enter::Whip).count();
-        let enter = if last && n > 2 {
-            Enter::Dissolve
-        } else if k > 0 && prev_vr && c.kind == Kind::Vr && whips < 3 && s["enter"].as_str() != Some("cut") {
-            Enter::Whip
-        } else {
-            Enter::Cut
-        };
+        // (how each cut is made is picked once the plan is set: [`cuts::joins`])
+        let enter = if last && n > 2 { Enter::Dissolve } else { Enter::Cut };
         let why = s["why"].as_str().map(|w| chars(w, 160)).unwrap_or_else(|| if s.is_null() { format!("{} (rules)", c.caption) } else { String::new() });
         shots.push(PlannedShot {
             clip: c.id.clone(),
@@ -1425,6 +1481,10 @@ pub fn validate(v: &Value, cands: &[Candidate], o: &Options, beat: f64, bpm: f64
             look: if c.kind == Kind::Vr { look } else { None },
             to,
             enter,
+            align: None,
+            lead: 0.0,
+            tail: 0.0,
+            cut: String::new(),
             text,
             why,
         });
@@ -1558,8 +1618,9 @@ pub fn title_layout(o: &Options, frame: (f64, f64), text: &str) -> ([f64; 2], f6
 }
 
 /// The commands of a plan on `windows` (timeline seconds of each shot), for a `frame`: each
-/// shot placed on V1 with its sound on A1, its camera set and moved, its way in; the title and
-/// other text on V2; the swishes and the chime on A4. `beat` the music's beat, seconds.
+/// shot placed on V1 with its sound on A1 (a J or L cut moving it across the cut), its camera
+/// set and moved, its way in; the title and other text on V2; the style's sounds on A4. `beat`
+/// the music's beat, seconds.
 pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Options, frame: (f64, f64), beat: f64) -> Vec<Step> {
     let mut out: Vec<Step> = Vec::new();
     let frame_aspect = if frame.1 > 0.0 { frame.0 / frame.1 } else { 16.0 / 9.0 };
@@ -1577,6 +1638,13 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
         }
         out.push(step("timeline.place", place, Some(k), On::Place));
         let me = Some(k);
+        // the sound across the cut: a J cut leads into this shot, an L cut runs the last one on
+        if s.lead > 0.0 {
+            out.push(step(SPLIT_CMD, json!({"lead": round2(s.lead)}), me, On::Clip));
+        }
+        if let Some(prev) = k.checked_sub(1).and_then(|j| plan.shots.get(j)).filter(|p| p.tail > 0.0) {
+            out.push(step(SPLIT_CMD, json!({"tail": round2(prev.tail)}), Some(k - 1), On::Clip));
+        }
         let look = s.look.as_deref().and_then(|l| c.look(l));
         match c.kind {
             Kind::Vr => {
@@ -1588,9 +1656,11 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
                 if let Some(l) = look {
                     let (fov, distance) = filmcraft_engine::project::vr::subject_framing(l.size, frame_aspect);
                     let pitch = filmcraft_engine::project::vr::subject_aim(l.pitch, l.size);
+                    // a match cut puts the subject where the last shot's was
+                    let yaw = l.yaw - s.align.map_or(0.0, |a| (a - 0.5) * fov);
                     out.push(step(
                         "clip.reframe360",
-                        json!({"yaw": l.yaw.round(), "pitch": pitch.round(), "fov": fov.round(), "distance": round2(distance)}),
+                        json!({"yaw": yaw.round(), "pitch": pitch.round(), "fov": fov.round(), "distance": round2(distance)}),
                         me,
                         On::Clips,
                     ));
@@ -1699,20 +1769,46 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
                 }
             }
         }
-        if s.enter == Enter::Dissolve && k > 0 {
-            let frames = ((beat * FPS).round() as i64).clamp(8, 24);
-            out.push(step("sequence.applyVideoTransition", json!({"edge": "in", "effect": "cross_dissolve", "frames": frames}), me, On::Clip));
+        // the way in: a transition on the cut (its middle on the beat)
+        let frames = |beats: f64| ((beat * beats * FPS).round() as i64).clamp(6, 36);
+        let transition = match s.enter {
+            Enter::Dissolve => Some(json!({"effect": "cross_dissolve", "frames": frames(o.style.dissolve_beats())})),
+            Enter::Swipe => {
+                // the new picture comes from the side the camera turns to
+                let prev = k.checked_sub(1).and_then(|j| plan.shots.get(j)).and_then(|p| cands.iter().find(|x| x.id == p.clip));
+                let faster = [prev, Some(c)]
+                    .into_iter()
+                    .flatten()
+                    .filter(|x| matches!(x.pan, CameraMove::PanLeft | CameraMove::PanRight))
+                    .max_by(|a, b| a.scores.motion.total_cmp(&b.scores.motion));
+                let from_east = faster.is_none_or(|x| x.pan == CameraMove::PanRight);
+                Some(json!({"effect": "cam_whip_pan", "frames": frames(0.5), "params": {"direction": if from_east { 1 } else { 3 }}}))
+            }
+            Enter::Punch => Some(json!({"effect": "cam_punch_in", "frames": frames(0.5)})),
+            Enter::LightLeak => Some(json!({"effect": "lf_light_leak", "frames": frames(1.0)})),
+            Enter::DipToBlack => Some(json!({"effect": "dip_to_black", "frames": frames(1.5)})),
+            Enter::Cut | Enter::Match | Enter::Whip => None,
+        };
+        if let Some(mut t) = transition.filter(|_| k > 0) {
+            t["edge"] = json!("in");
+            out.push(step("sequence.applyVideoTransition", t, me, On::Clip));
         }
-        // a swish under each whip and roll, quiet
-        let swish = |at: f64| json!({"kind": "swish", "duration": 0.5, "time": ticks((at - 0.25).max(0.0)), "track": "A4", "intensity": 0.4, "seed": o.seed + k as u64});
-        if s.enter == Enter::Whip {
-            out.push(step("audio.generate", swish(t0), None, On::Nothing));
+        // the style's sound under each whip and roll, quiet unless it asks for more
+        let sound = |kind: &str, at: f64, secs: f64| json!({"kind": kind, "duration": secs, "time": ticks((at - secs / 2.0).max(0.0)), "track": "A4", "intensity": round2(o.style.sound_level), "seed": o.seed + k as u64});
+        if let Some(kind) = o.style.whip_sound() {
+            if matches!(s.enter, Enter::Whip | Enter::Swipe) {
+                out.push(step("audio.generate", sound(kind, t0, 0.5), None, On::Nothing));
+            }
+            if matches!(s.camera, Camera::BarrelRoll | Camera::WhipPan) {
+                out.push(step("audio.generate", sound(kind, t0 + len / 2.0, 0.5), None, On::Nothing));
+            }
         }
-        if s.camera == Camera::BarrelRoll {
-            out.push(step("audio.generate", swish(t0 + len / 2.0), None, On::Nothing));
-        }
-        if s.camera == Camera::WhipPan {
-            out.push(step("audio.generate", swish(t0 + len / 2.0), None, On::Nothing));
+        if k + 1 == plan.shots.len()
+            && k > 0
+            && let Some(kind) = o.style.ending_sound()
+        {
+            // rising into the ending, done as it begins
+            out.push(step("audio.generate", sound(kind, (t0 - 0.6).max(0.0), 1.6), None, On::Nothing));
         }
         // the text over the shot: in from 0.3 s, gone 0.3 s before its end
         if let Some(text) = &s.text {
@@ -1738,10 +1834,12 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
                     On::Text,
                 ));
             }
-            if k == 0 {
+            if k == 0
+                && let Some(kind) = o.style.title_sound()
+            {
                 out.push(step(
                     "audio.generate",
-                    json!({"kind": "chime", "duration": 1.2, "time": ticks(a), "track": "A4", "intensity": 0.3, "seed": o.seed}),
+                    json!({"kind": kind, "duration": 1.2, "time": ticks(a), "track": "A4", "intensity": round2(o.style.sound_level * 0.75), "seed": o.seed}),
                     None,
                     On::Nothing,
                 ));
@@ -1813,7 +1911,12 @@ pub struct Report {
 
 /// The media: `items`, `paths`' files imported, `insta360` recordings imported (downloaded from
 /// the cloud when not on disk), else the project's; in filming order.
-async fn gather(ex: &dyn Executor, p: &Value, notes: &mut Vec<String>, lines: &mut dyn FnMut(&str)) -> Result<Vec<MediaItem>, AutoCutError> {
+async fn gather(
+    ex: &dyn Executor,
+    p: &Value,
+    notes: &mut Vec<String>,
+    lines: &mut dyn FnMut(&str),
+) -> Result<(Vec<MediaItem>, HashMap<u64, i64>), AutoCutError> {
     let mut want: Vec<u64> = p["items"].as_array().map(|a| a.iter().filter_map(Value::as_u64).take(crate::quick::MAX_MEDIA).collect()).unwrap_or_default();
     let paths: Vec<String> =
         p["paths"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).take(crate::quick::MAX_MEDIA).collect()).unwrap_or_default();
@@ -1859,9 +1962,9 @@ async fn gather(ex: &dyn Executor, p: &Value, notes: &mut Vec<String>, lines: &m
     if media.is_empty() {
         return Err(invalid("no video or photo to direct (give items, files, a folder or Insta360 recordings)"));
     }
+    let mut when: HashMap<u64, i64> = HashMap::new();
     if let Ok(d) = run(ex, "media.captureDate", json!({"items": media.iter().map(|m| m.item).collect::<Vec<_>>()})).await {
-        let when: HashMap<u64, i64> =
-            d["items"].as_array().map(|a| a.iter().filter_map(|x| Some((x["item"].as_u64()?, x["unix"].as_i64()?))).collect()).unwrap_or_default();
+        when = d["items"].as_array().map(|a| a.iter().filter_map(|x| Some((x["item"].as_u64()?, x["unix"].as_i64()?))).collect()).unwrap_or_default();
         let mut keyed: Vec<(Option<i64>, usize, u64)> = media.iter().enumerate().map(|(k, m)| (when.get(&m.item).copied(), k, m.item)).collect();
         keyed.sort_by(|a, b| match (a.0, b.0) {
             (Some(x), Some(y)) => x.cmp(&y).then(a.1.cmp(&b.1)),
@@ -1873,7 +1976,7 @@ async fn gather(ex: &dyn Executor, p: &Value, notes: &mut Vec<String>, lines: &m
             }
         }
     }
-    Ok(media)
+    Ok((media, when))
 }
 
 /// The scene index of `media` (fast, then full detail for the items of the most promising shots
@@ -2000,7 +2103,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         }
     }
     // ---- the media and what is 360°
-    let media = gather(ex, p, &mut notes, lines).await?;
+    let (media, filmed) = gather(ex, p, &mut notes, lines).await?;
     report.media = media.len();
     let items: Vec<u64> = media.iter().map(|m| m.item).collect();
     let props = run(ex, "media.vrProperties", json!({"items": items})).await.unwrap_or(Value::Null);
@@ -2048,6 +2151,9 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         }
     }
     let mut cands = candidates(&shots, &media, &vr, &salience, &aspects, &speech);
+    for c in cands.iter_mut() {
+        c.captured = filmed.get(&c.item).map(|t| t.saturating_add(c.start as i64));
+    }
     // ---- which moments: each ranked (on its own frames where it can be measured), the unusable
     // and the near-duplicates left out
     report.measured = rank::measure(ex, &mut cands, lines).await;
@@ -2104,6 +2210,9 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     if plan.shots.is_empty() {
         return Err(invalid("no shot could be planned from these clips"));
     }
+    // ---- how each cut is made: from what the shots show and say, in the edit's style
+    let mut plan = plan;
+    cuts::joins(&mut plan, &cands, &speech, beat, &o.style);
     report.director = plan.by.clone();
     let (fw, fh) = o.frame();
     let frame = (f64::from(fw), f64::from(fh));
@@ -2147,7 +2256,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         }
     }
     // ---- the mix
-    report.mix = Some(mix(ex, &built, music_clip, &plan, &cands, &mut notes).await);
+    report.mix = Some(mix(ex, &built, music_clip, &plan, &cands, &o.style, &mut notes).await);
     if let Err(e) = run(ex, "audio.normalizeLoudness", json!({"target": "social", "truePeak": crate::look::TRUE_PEAK})).await {
         notes.push(format!("loudness: {e}"));
     }
@@ -2353,7 +2462,9 @@ async fn captions(
 
 /// The mix: the music carries the edit, each shot's own sound well under it (someone talking
 /// over it: the speech mix, the voice first), the swishes and chime under the music.
-async fn mix(ex: &dyn Executor, b: &Built, music: Option<u64>, plan: &Plan, cands: &[Candidate], notes: &mut Vec<String>) -> Value {
+async fn mix(ex: &dyn Executor, b: &Built, music: Option<u64>, plan: &Plan, cands: &[Candidate], style: &cuts::Style, notes: &mut Vec<String>) -> Value {
+    // the cuts' sounds as loud as the style asks (the subtle style's −24 LUFS at its 0.4)
+    let effects_lufs = (EFFECTS_LUFS + 10.0 * (style.sound_level - 0.4)).clamp(-32.0, -16.0);
     let sounds: Vec<u64> = b.sounds.iter().flatten().copied().collect();
     let talking: Vec<u64> = plan
         .shots
@@ -2393,10 +2504,10 @@ async fn mix(ex: &dyn Executor, b: &Built, music: Option<u64>, plan: &Plan, cand
     }
     if !b.effects.is_empty() {
         step("essentialSound.setType", json!({"clips": b.effects, "type": "sfx"}), notes).await;
-        step("essentialSound.autoMatch", json!({"clips": b.effects, "target": EFFECTS_LUFS}), notes).await;
+        step("essentialSound.autoMatch", json!({"clips": b.effects, "target": effects_lufs}), notes).await;
         crate::mix::inserts(ex, "A4", &[("parametric_eq", crate::mix::effects_eq())], notes).await;
     }
-    json!({"profile": "music", "music": BED_LUFS, "sounds": SOUND_LUFS, "effects": EFFECTS_LUFS})
+    json!({"profile": "music", "music": BED_LUFS, "sounds": SOUND_LUFS, "effects": effects_lufs})
 }
 
 /// Export the edit (captions burned in), a frame sheet and QA beside it.
@@ -2485,6 +2596,9 @@ async fn export(ex: &dyn Executor, o: &Options, seq: u64, out: &str, report: &mu
         report.qa_summary = Some(qa.summary());
     }
 }
+
+#[path = "director_cuts.rs"]
+pub mod cuts;
 
 #[path = "director_rank.rs"]
 pub mod rank;

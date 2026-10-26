@@ -12,7 +12,9 @@ direct [folder | files… | project.fcproj] [--brief \"a 30 s reel of our trip\"
        [--insta360 VID_093,VID_096] [--album TITLE] [--mood happy] [--bpm 110]
        [--music file|generate] [--title T] [--no-captions] [--caption-style clean]
        [--redact faces,plates|faces|plates|off] [--name N] [--full-detail 8] [--seed N]
-       [--dry-run] [--no-qa] [--export out.mp4] [--download] [--save | --save-as p.fcproj]";
+       [--style subtle|energetic|cinematic] [--light-effects] [--sounds swish,chime|none]
+       [--sound-level 0.4] [--dry-run] [--no-qa] [--export out.mp4] [--download]
+       [--save | --save-as p.fcproj]";
 
 /// `direct`'s options as `autocut.direct` parameters (with `wait: true`); a usage error says
 /// what is wrong.
@@ -28,6 +30,7 @@ pub fn params(a: &Args) -> Result<Value, String> {
         ("--caption-style", "captionStyle"),
         ("--redact", "redact"),
         ("--name", "name"),
+        ("--style", "style"),
     ] {
         if let Some(v) = a.opt(opt) {
             p[key] = json!(v);
@@ -48,6 +51,14 @@ pub fn params(a: &Args) -> Result<Value, String> {
     if let Some(v) = a.opt("--seed") {
         p["seed"] = json!(v.parse::<u64>().map_err(|_| format!("--seed wants a whole number, not `{v}`"))?);
     }
+    if let Some(v) = a.opt("--sounds") {
+        let kinds: Vec<&str> = if v.trim().eq_ignore_ascii_case("none") { Vec::new() } else { v.split(',').map(str::trim).filter(|k| !k.is_empty()).collect() };
+        p["sounds"] = json!(kinds);
+    }
+    if let Some(v) = a.opt("--sound-level") {
+        let l = v.parse::<f64>().ok().filter(|f| f.is_finite() && (0.0..=1.0).contains(f)).ok_or_else(|| format!("--sound-level wants 0 to 1, not `{v}`"))?;
+        p["soundLevel"] = json!(l);
+    }
     if let Some(v) = a.opt("--insta360") {
         let names: Vec<&str> = v.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
         if names.is_empty() {
@@ -61,7 +72,13 @@ pub fn params(a: &Args) -> Result<Value, String> {
     if let Some(e) = a.opt("--export") {
         p["export"] = json!(absolute(e));
     }
-    for (flag, key, v) in [("--no-captions", "captions", false), ("--dry-run", "dryRun", true), ("--no-qa", "qa", false), ("--download", "download", true)] {
+    for (flag, key, v) in [
+        ("--no-captions", "captions", false),
+        ("--dry-run", "dryRun", true),
+        ("--no-qa", "qa", false),
+        ("--download", "download", true),
+        ("--light-effects", "lightEffects", true),
+    ] {
         if a.flag(flag) {
             p[key] = json!(v);
         }
@@ -88,6 +105,10 @@ pub async fn run(a: &Args) {
         "--name",
         "--full-detail",
         "--seed",
+        "--style",
+        "--light-effects",
+        "--sounds",
+        "--sound-level",
         "--dry-run",
         "--no-qa",
         "--export",
@@ -137,13 +158,14 @@ pub async fn run(a: &Args) {
             ));
             for s in plan["shots"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(MAX_LISTED) {
                 diag(format_args!(
-                    "direct:   {} {} beats, {}{}{}{}",
+                    "direct:   {} {} beats, {}{}{}{} — {}",
                     s["clip"].as_str().unwrap_or("?"),
                     s["beats"],
                     s["camera"].as_str().unwrap_or("?"),
                     s["look"].as_str().map(|l| format!(" at {l}")).unwrap_or_default(),
                     s["to"].as_str().map(|l| format!(" to {l}")).unwrap_or_default(),
-                    s["text"].as_str().map(|t| format!(" \"{t}\"")).unwrap_or_default()
+                    s["text"].as_str().map(|t| format!(" \"{t}\"")).unwrap_or_default(),
+                    s["cut"].as_str().unwrap_or("a cut")
                 ));
             }
             for m in made["moments"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter(|m| m["kept"] == false).take(MAX_LISTED) {
@@ -207,6 +229,14 @@ mod tests {
         assert_eq!(p["insta360"], json!(["VID_093", "VID_096"]));
         assert_eq!((p["bpm"].as_f64(), p["captions"].as_bool(), p["dryRun"].as_bool(), p["seed"].as_u64()), (Some(100.0), Some(false), Some(true), Some(3)));
         assert_eq!(p["wait"], json!(true));
+        // the cutting style
+        let p = params(&args(&["direct", "x", "--style", "energetic", "--sounds", "whoosh,impact", "--sound-level", "0.6", "--light-effects"])).unwrap();
+        assert_eq!(
+            (p["style"].as_str(), p["sounds"].clone(), p["soundLevel"].as_f64(), p["lightEffects"].as_bool()),
+            (Some("energetic"), json!(["whoosh", "impact"]), Some(0.6), Some(true))
+        );
+        assert_eq!(params(&args(&["direct", "x", "--sounds", "none"])).unwrap()["sounds"], json!([]));
+        assert!(params(&args(&["direct", "x", "--sound-level", "3"])).is_err());
         // the brief is a value, not a file
         let a = args(&["direct", "clip.mp4", "--brief", "a 30 s reel", "--full-detail", "4"]);
         assert_eq!(a.positionals, vec!["direct".to_string(), "clip.mp4".to_string()]);

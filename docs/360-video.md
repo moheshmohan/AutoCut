@@ -154,9 +154,20 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    **tracked** (`clip.follow360`); a normal clip of another shape than the frame is cropped with
    its subject tracked (`clip.autoReframe`, keeping the push in).
 5. **The build**: generated music first (its tempo `bpm`, mood from the brief or the model), its
-   exact beats the grid every cut lands on; between two 360° shots a whip out of one and into the
-   next; a soft swish under each whip and roll and a chime under the title — never a whoosh or a
-   riser, no light leaks, flashes or colour tints; a cross dissolve into the ending; the English
+   exact beats the grid every cut lands on; **each cut picked from its two shots** — a dissolve
+   into the ending and across a jump in time (filmed 3 h or more apart); a whip where the camera
+   is already moving fast (between two 360° shots their cameras whip out and in; else a whip-pan
+   transition the way the faster shot pans); a match cut where the subject can sit where the last
+   one was (a 360° camera turns to put it there), a pan carries on, or two pictures are framed
+   alike; a J cut into someone who starts talking as their shot begins (heard half a beat
+   early) and an L cut out of a sentence that runs past its shot (`clip.splitEdit`); otherwise a
+   plain cut — every one on its beat, each an ordinary edit to change afterwards, and the plan's
+   `cut` says why. How lively the cuts are, whether light effects are used and which sounds are
+   heard on them is the edit's **style** (`--style subtle|energetic|cinematic`, `--light-effects`,
+   `--sounds`, `--sound-level`): the subtle default makes a few whips with a quiet swish, a chime
+   under the title and no light effects (one viewer's taste for their trip videos); energetic
+   whips more, punches in across time (a light leak where allowed) with whooshes and an impact;
+   cinematic dissolves longer, dips to black across days, whips at most once. The English
    title in the platform's safe zone; captions of English speech; each sound levelled (the
    music −16 LUFS, the clips' own sound under it, someone talking ducks it) and −14 LUFS.
    `--export` writes the video, `<out>.sheet.jpg`, `<out>.report.json` (the plan, the

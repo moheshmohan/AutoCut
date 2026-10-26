@@ -816,6 +816,21 @@ pub struct DirectParams {
     /// Download the missing scene models first — only after the user agreed (several GB).
     #[serde(default)]
     pub download: Option<bool>,
+    /// How the cuts are made: "subtle" (the default: cuts, match cuts, a few whips, dissolves
+    /// across time), "energetic" (more whips, punch-ins) or "cinematic" (long dissolves, dips to
+    /// black). Ask the user or follow their taste; don't assume.
+    #[serde(default)]
+    pub style: Option<String>,
+    /// Light effects (light leaks) allowed in the energetic style (default false).
+    #[serde(default)]
+    pub light_effects: Option<bool>,
+    /// The sounds heard on the cuts: any of "swish", "chime", "whoosh", "impact", "riser"
+    /// (default: the style's; the subtle style's are a swish and a chime). An empty list: none.
+    #[serde(default)]
+    pub sounds: Option<Vec<String>>,
+    /// How loud those sounds are, 0..1 (default 0.4, quiet).
+    #[serde(default)]
+    pub sound_level: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -919,6 +934,10 @@ fn direct_params(p: DirectParams) -> Value {
     put("dryRun", p.dry_run.map(Value::Bool));
     put("export", p.export.map(Value::String));
     put("download", p.download.map(Value::Bool));
+    put("style", p.style.map(Value::String));
+    put("lightEffects", p.light_effects.map(Value::Bool));
+    put("sounds", p.sounds.map(|v| json!(v)));
+    put("soundLevel", p.sound_level.map(|v| json!(v)));
     params
 }
 

@@ -546,9 +546,13 @@ SUBCOMMANDS
                                 planet outro, a follow or a hyperlapse; for a normal one a push
                                 in, a follow or a speed ramp — its plan checked and repaired, and
                                 rules direct without a model (the report says which). Built on
-                                generated music's beats (or --music) with a soft swish on each
-                                whip and roll, a chime under the English title, captions of
-                                English speech and the mix at −14 LUFS; --dry-run prints the plan
+                                generated music's beats (or --music), each cut picked from its
+                                shots (match cuts, whips where the camera moves fast, J and L
+                                cuts under speech, dissolves across time) in --style (subtle by
+                                default: a quiet swish under whips and a chime under the English
+                                title, no light effects; energetic; cinematic; --light-effects,
+                                --sounds, --sound-level), captions of English speech and the mix
+                                at −14 LUFS; --dry-run prints the plan
                                 and its engine commands and builds nothing; with --export the
                                 video, <out>.sheet.jpg, <out>.report.json and QA. Privacy is off
                                 unless --redact asks for it
