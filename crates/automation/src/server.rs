@@ -1299,6 +1299,15 @@ pub struct ShowcasePlanParams {
     /// is written for exactly these. Default: the kept analysis, grouped afresh.
     #[serde(default)]
     pub entries: Option<Vec<Value>>,
+    /// A long, narrated show: the share of entries the voice-over speaks over, 0..1 (default
+    /// 1); the rest play under the music with their labels, as a storyteller leaves many shots
+    /// alone.
+    #[serde(default)]
+    pub narrate: Option<f64>,
+    /// Use the person's own voice: clips where they talk over their own footage give short
+    /// bites, heard and captioned in English, telling their entries instead of the voice-over.
+    #[serde(default)]
+    pub bites: Option<bool>,
 }
 
 fn showcase_plan_params(p: ShowcasePlanParams) -> Value {
@@ -1313,6 +1322,12 @@ fn showcase_plan_params(p: ShowcasePlanParams) -> Value {
     }
     if let Some(e) = p.entries {
         params["entries"] = json!(e);
+    }
+    if let Some(n) = p.narrate {
+        params["narrate"] = json!(n);
+    }
+    if let Some(b) = p.bites {
+        params["bites"] = json!(b);
     }
     params
 }
@@ -1337,6 +1352,10 @@ pub struct ShowcaseBuildParams {
     /// with an export.
     #[serde(default)]
     pub qa: Option<bool>,
+    /// Check the exported narration for breaths in the middle of a phrase (default true: its
+    /// transcript, `media.checkPauses`; the result's `pauses`).
+    #[serde(default)]
+    pub check_pauses: Option<bool>,
 }
 
 fn showcase_build_params(p: ShowcaseBuildParams) -> Value {
@@ -1352,6 +1371,9 @@ fn showcase_build_params(p: ShowcaseBuildParams) -> Value {
     }
     if let Some(q) = p.qa {
         params["qa"] = json!(q);
+    }
+    if let Some(c) = p.check_pauses {
+        params["checkPauses"] = json!(c);
     }
     params
 }
@@ -3257,13 +3279,18 @@ mod tests {
         assert_eq!(showcase_analyze_params(p).1, json!({"album": "Robots", "subject": "robot", "photos": false, "wait": true}));
 
         let s = schema("showcase_plan");
-        assert_eq!(props(&s), ["entries", "min_coverage", "mood", "subtitle", "title", "voice"], "{s}");
+        assert_eq!(props(&s), ["bites", "entries", "min_coverage", "mood", "narrate", "subtitle", "title", "voice"], "{s}");
         assert!(s["required"].as_array().is_none_or(|r| r.is_empty()), "{s}");
         let p: ShowcasePlanParams = serde_json::from_value(json!({"title": "T", "min_coverage": 0.5, "entries": [{"label": "x"}]})).unwrap();
         assert_eq!(showcase_plan_params(p), json!({"title": "T", "minCoverage": 0.5, "entries": [{"label": "x"}], "wait": true}));
+        // a long, narrated show
+        let p: ShowcasePlanParams = serde_json::from_value(json!({"narrate": 0.5, "bites": true})).unwrap();
+        assert_eq!(showcase_plan_params(p), json!({"narrate": 0.5, "bites": true, "wait": true}));
 
         let s = schema("showcase_build");
-        assert_eq!(props(&s), ["export", "plan", "qa", "upload", "upload_album"], "{s}");
+        assert_eq!(props(&s), ["check_pauses", "export", "plan", "qa", "upload", "upload_album"], "{s}");
+        let p: ShowcaseBuildParams = serde_json::from_value(json!({"export": "/x/robots.mp4", "check_pauses": false})).unwrap();
+        assert_eq!(showcase_build_params(p), json!({"export": "/x/robots.mp4", "checkPauses": false, "upload": false, "wait": true}));
         let p: ShowcaseBuildParams = serde_json::from_value(json!({"export": "/x/robots.mp4", "upload": true})).unwrap();
         assert_eq!(showcase_build_params(p), json!({"export": "/x/robots.mp4", "upload": true, "wait": true}));
         let p: ShowcaseBuildParams = serde_json::from_value(json!({"export": "/x/robots.mp4", "upload": true, "upload_album": "Showcases"})).unwrap();

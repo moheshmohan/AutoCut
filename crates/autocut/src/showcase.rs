@@ -120,6 +120,9 @@ pub struct Options {
     /// every utterance is heard back by the Malayalam speech model and read again until clear,
     /// and what was heard goes into [`Built::narration_check`].
     pub skip_narration_check: bool,
+    /// After the export, its transcript is checked for breaths in the middle of a phrase
+    /// (`media.checkPauses`; [`Built::pauses`]); `false` skips it (a plan's `"checkPauses"`).
+    pub check_pauses: bool,
     /// Hide visitors' faces and number plates in the footage, robots excluded ([`crate::privacy`]).
     pub redact: Option<crate::privacy::Redact>,
     /// The shots' own sound carries speech worth hearing (people or robots talking to the
@@ -177,6 +180,7 @@ impl Default for Options {
             language: None,
             numbers: None,
             skip_narration_check: false,
+            check_pauses: true,
             redact: None,
             enhance_voice: false,
             follow_labels: false,
@@ -277,6 +281,10 @@ pub struct Shot {
     /// analysis: what a photo's move ends on (or starts from).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<[f64; 4]>,
+    /// The person's own words in this shot's window ([`crate::narrated`]'s bites), in English:
+    /// heard as a voice (the music ducks under it) and captioned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub says: Option<String>,
 }
 
 /// Longest a photo is held, seconds: a still can be shown as long as the words need, within this
@@ -942,6 +950,10 @@ pub struct Built {
     /// was heard, character error rate, sentence-start error rate, readings, seeds).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub narration_check: Option<NarrationCheck>,
+    /// Breaths in the middle of a phrase in the exported narration (`media.checkPauses` on the
+    /// export's transcript): where, how long, the words around.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pauses: Option<Value>,
     /// Where each part starts: the intro, each year, the outro.
     pub chapters: Vec<Chapter>,
     pub notes: Vec<String>,
@@ -3240,6 +3252,9 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let frames_of = |beats: f64, lo: f64, hi: f64| (beat * beats * tr.fps).round().clamp(lo, hi) as i64;
     // scenes that play without words: the music comes up under them
     let mut quiet_scenes: Vec<(f64, f64)> = Vec::new();
+    // the person's own words (bites): captioned, and mixed as a voice
+    let mut bite_cues: Vec<crate::subtitles::Cue> = Vec::new();
+    let mut bite_voices: Vec<u64> = Vec::new();
 
     // ---- the entries
     for (k, e) in entries.iter().enumerate() {
@@ -3268,7 +3283,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 let rest: Vec<Stretch> = std::iter::once(here).chain(planned.iter().skip(k + 1).copied()).collect();
                 here.at(breathe_for(&rest, target - t - outro_estimate))
             }
-            None if scene && spoken <= 0.0 => (lead + SCENE_SECONDS).clamp(MIN_ENTRY, MAX_ENTRY),
+            // (an entry without words, a scene's or one left to the music, plays like a scene)
+            None if spoken <= 0.0 => (lead + SCENE_SECONDS).clamp(MIN_ENTRY, MAX_ENTRY),
             None => (voice_at - t + spoken + BREATHE).clamp(MIN_ENTRY, MAX_ENTRY),
         };
         let must = voice_at - t + spoken + 0.7;
@@ -3332,7 +3348,10 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             let src = if s.photo { 0.0 } else { w.start };
             let Placed { fg, bg, audio, end, fit } = place_shot(ex, &tr, s.item, at, src, len, how).await?;
             backdrops.extend(bg.map(|b| (fg, b)));
-            mix.sounds.extend(audio);
+            match (&s.says, audio) {
+                (Some(_), Some(a)) => bite_voices.push(a),
+                _ => mix.sounds.extend(audio),
+            }
             if let (Some(a), Some(db)) = (audio, ed.volume) {
                 gains.push((a, db));
             }
@@ -3407,6 +3426,11 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                 photo: s.photo,
                 motion,
             });
+            if let Some(text) = s.says.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                // (the bite's window has a breath of room either side of its words)
+                let (a, b) = (on_frame(at + 0.2, tr.fps), on_frame((shot_end - 0.3).max(at + 0.5), tr.fps));
+                bite_cues.push(crate::subtitles::Cue { start: a, end: b, text: text.to_string() });
+            }
             // (a photo is not colour-matched to footage, nor footage to it)
             full_frame.push(bg.is_none() && !s.photo);
             // a slowed shot can end between frames: the next starts on the following frame
@@ -3417,7 +3441,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             match_colour(ex, &shots, &full_frame, &mut built.notes).await;
         }
         let entry_end = on_frame(at.max(t + 2.0), tr.fps);
-        if scene && spoken <= 0.0 {
+        if spoken <= 0.0 && !e.shots.iter().any(|x| x.says.is_some()) {
             quiet_scenes.push((t, entry_end));
         }
         let mut placed = PlacedEntry { number: e.number, label: e.label.clone(), start: t, end: entry_end, shots, scene, ..PlacedEntry::default() };
@@ -3791,6 +3815,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // ---- the mix
     progress("mixing");
     mix.narrations.clone_from(&narrations.clips);
+    mix.narrations.extend(bite_voices);
     mix.music.clone_from(&music);
     let stems =
         mix::MixTracks { sounds: tr.clip_audio.clone(), voice: tr.voice.clone(), music: tr.music.clone(), effects: vec![tr.sfx.clone(), tr.hits.clone()] };
@@ -3829,6 +3854,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     built.notes.append(&mut narrations.notes);
     // ---- subtitles: what the narration says, as written, on a caption track
     built.subtitles = crate::subtitles::cues(&narrations.lines, tr.fps);
+    built.subtitles.extend(bite_cues);
+    built.subtitles.sort_by(|a, b| a.start.total_cmp(&b.start));
     built.narration = narrations.lines;
     let captions =
         if built.subtitles.is_empty() { None } else { caption_track(ex, &built.subtitles, if opts.malayalam() { "ml" } else { "en" }, &mut built.notes).await };
@@ -3856,6 +3883,22 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             }
         }
         built.export = Some(run(ex, "file.exportMedia", p).await?);
+        // the narration as a listener hears it: breaths in the middle of a phrase
+        if opts.check_pauses && (!narrations.clips.is_empty() || !built.subtitles.is_empty()) {
+            progress("checking the narration for pauses in the middle of a phrase");
+            let language = if opts.malayalam() { "ml" } else { "en" };
+            match crate::narrated::check_pauses(path, language).await {
+                Ok(v) if v.get("skipped").is_some() => built.pauses = Some(v),
+                Ok(v) => {
+                    let n = v["pauses"].as_array().map_or(0, Vec::len);
+                    if n > 0 {
+                        built.notes.push(format!("narration: {n} pause(s) in the middle of a phrase (see `pauses`)"));
+                    }
+                    built.pauses = Some(v);
+                }
+                Err(e) => built.notes.push(format!("pauses: not checked ({e})")),
+            }
+        }
         // the subtitles next to the export, for YouTube (SubRip) and the web (WebVTT)
         if let Some(track) = captions {
             for ext in ["srt", "vtt"] {

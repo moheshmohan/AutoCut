@@ -90,6 +90,7 @@ pub mod shortcut_presets;
 pub mod shortcuts;
 pub mod soundfonts;
 pub mod source_monitor;
+pub mod speech_pauses;
 pub mod speech_understand;
 pub mod speed_ramp;
 pub mod split_edit;

@@ -31,6 +31,7 @@ pub mod llm;
 pub mod look;
 pub mod mix;
 pub mod ml_translate;
+pub mod narrated;
 pub mod ollama;
 pub mod outro;
 pub mod places;

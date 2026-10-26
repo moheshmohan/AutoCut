@@ -3568,6 +3568,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::split_edit::commands());
     v.extend(crate::auto_color::commands());
     v.extend(crate::taste::commands());
+    v.extend(crate::speech_pauses::commands());
     v.extend(crate::vr_moves::commands());
     v.extend(crate::insta360::commands());
     v.extend(crate::speech_understand::commands());

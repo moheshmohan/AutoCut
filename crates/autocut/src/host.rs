@@ -743,13 +743,13 @@ impl ShowcaseHost {
                     plan_params["title"] = json!(request.title.clone().unwrap_or_else(|| default_title(&request.subject)));
                 }
                 let taste = crate::taste::resolve(ex).await;
-                let plan = write_plan(&script_model, &plan_params, Some(&report), None, &taste, progress).await?;
+                let plan = write_plan(ex, &script_model, &plan_params, Some(&report), None, &taste, progress).await?;
                 let status = format!("{} entries planned from {} clip(s) showing a {}", plan.entries.len(), summary["showing"], request.subject);
                 Ok(json!({"report": report, "summary": summary, "plan": plan, "status": status}))
             }
             TaskKind::Plan => {
                 let taste = crate::taste::resolve(ex).await;
-                let plan = write_plan(&script_model, p, task.report.as_ref(), task.plan.as_ref(), &taste, progress).await?;
+                let plan = write_plan(ex, &script_model, p, task.report.as_ref(), task.plan.as_ref(), &taste, progress).await?;
                 let status = format!("Script written for {} entries", plan.entries.iter().filter(|e| e.include && !e.merge_previous).count());
                 Ok(json!({"plan": plan, "status": status}))
             }
@@ -979,7 +979,9 @@ async fn analyze_clips(
 /// Group a report into entries (or take reviewed ones) and write the voice-over: a [`PlanDoc`]
 /// whose entries keep the review's choices and whose lines follow them one to one. Options not
 /// given come from the plan kept before, then the defaults.
+#[allow(clippy::too_many_arguments)]
 async fn write_plan(
+    ex: &dyn Executor,
     model: &dyn ChatModel,
     p: &Value,
     report: Option<&Value>,
@@ -1029,7 +1031,32 @@ async fn write_plan(
         }));
     }
     note(progress, &format!("writing the voice-over for {} entries", shown.len()));
-    let script = showcase::write_script(model, &opts, &shown, &mut |l| note(progress, l)).await;
+    let mut script = showcase::write_script(model, &opts, &shown, &mut |l| note(progress, l)).await;
+    // a long, narrated show: the person's own voice, the words left to some entries, the shots
+    // ordered by their lines ([`crate::narrated`])
+    let mut shaped = shown.clone();
+    let mut shaped_lines = script.lines.clone();
+    shaped_lines.resize(shaped.len(), String::new());
+    let said = crate::narrated::shape(ex, Some(model), p, &mut shaped, &mut shaped_lines, &mut |l| note(progress, l)).await?;
+    for s in &said {
+        note(progress, s);
+    }
+    script.lines = shaped_lines;
+    let mut review = review;
+    for (k, &h) in heads.iter().enumerate() {
+        let (Some(new), Some(r)) = (shaped.get(k), review.get_mut(h)) else { continue };
+        let own: Vec<u64> = r.entry.shots.iter().map(|s| s.item).collect();
+        if new.shots.len() == r.entry.shots.len() && new.shots.iter().all(|s| own.contains(&s.item)) {
+            // (an entry of its own: its shots as shaped)
+            r.entry.shots = new.shots.clone();
+        } else if let Some(bite) = new.shots.iter().find(|s| s.says.is_some()) {
+            // (merged with the next: only its own shot of the bite changes, and comes first)
+            if let Some(i) = r.entry.shots.iter().position(|s| s.item == bite.item) {
+                r.entry.shots.remove(i);
+                r.entry.shots.insert(0, bite.clone());
+            }
+        }
+    }
     let mut lines = vec![String::new(); review.len()];
     for (k, &h) in heads.iter().enumerate() {
         if let (Some(slot), Some(line)) = (lines.get_mut(h), script.lines.get(k)) {
@@ -1066,6 +1093,8 @@ async fn build_plan(
     let plan: PlanDoc = serde_json::from_value(plan.clone()).map_err(|e| AutoCutError::Invalid(format!("not a showcase plan ({e})")))?;
     let (mut opts, entries, script) = plan.resolve()?;
     opts.export = p["export"].as_str().map(str::to_string);
+    // (the export's narration is checked for breaths in the middle of a phrase unless asked not to)
+    opts.check_pauses = p["checkPauses"].as_bool().unwrap_or(true);
     // a Malayalam script is checked before it is voiced (docs/malayalam-style.md)
     let script_check = opts.malayalam().then(|| crate::ml_translate::check_script(&script, &entries));
     if let Some(c) = &script_check {

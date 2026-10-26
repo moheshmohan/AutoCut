@@ -5,9 +5,9 @@
 //! | command | does |
 //! |---|---|
 //! | `autocut.analyze` | job: which clips and photos show `subject` (or what a `prompt` asks for; of `items`, or of the Google Photos `album`, filmed `since` a date; `photos: false` for videos only), what it is, when; the report is kept in the session |
-//! | `autocut.showcasePlan` | job: group the report's clips into entries (or take reviewed `entries`) and write the voice-over; the plan is kept |
+//! | `autocut.showcasePlan` | job: group the report's clips into entries (or take reviewed `entries`) and write the voice-over; a long, narrated show leaves the words to `narrate` of the entries and, with `bites`, tells entries in the person's own voice (short clean sentences of their own clips, captioned in English); the plan is kept |
 //! | `autocut.makeShowcase` | job: both, one after the other (Sequence ▸ Make a Showcase…, and AutoCut prompts like "make a video of every robot since 2020") |
-//! | `autocut.showcaseBuild` | job: build the plan (the kept one, or `plan`) into a new sequence; `export` it (YouTube 1080p, chapters and a QA report beside it) and `upload` the export to Google Photos (into `uploadAlbum` too) |
+//! | `autocut.showcaseBuild` | job: build the plan (the kept one, or `plan`) into a new sequence; `export` it (YouTube 1080p, chapters and a QA report beside it; its narration checked for breaths in the middle of a phrase, `media.checkPauses`, unless `checkPauses` is false) and `upload` the export to Google Photos (into `uploadAlbum` too) |
 //! | `autocut.showcaseInspect` | the kept report (a summary, or all of it with `report: true`), plan and last build, and the latest job |
 //! | `autocut.showcaseSet` | keep a `report` or `plan` from elsewhere (or `reportPath` / `planPath`: the CLI's `analyze --out` and `showcase --script-out` files); `null` clears one |
 //! | `autocut.malayalamScript` | job: the plan's (the kept one, `plan` or `planPath`) English intro, lines and outro in natural spoken Malayalam, written by the local script model (or `model`) from `docs/malayalam-style.md`, its examples and the user's approved pairs; every line keeps its English's facts, gets the safe fixes and the lint (`script.lintMalayalam`) and goes back to the model once with what to fix (`revise: false`: not). The outcome's `malayalam` is the lines file (`{intro, outro, lines: {label: …}}`), written to `out` too, and `lines` what is left to look at |
@@ -334,7 +334,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.showcasePlan",
             "Write Showcase Script",
             &[],
-            r#"{"subject":str?,"title":str?,"subtitle":str?,"voice":str?,"mood":str?,"minCoverage":0..1=0.3,"entries":[Entry]?,"wait":bool=false}"#,
+            r#"{"subject":str?,"title":str?,"subtitle":str?,"voice":str?,"mood":str?,"minCoverage":0..1=0.3,"entries":[Entry]?,"narrate":0..1=1,"bites":bool=false,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Plan, p),
         ),
         job(
@@ -348,7 +348,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "autocut.showcaseBuild",
             "Build Showcase",
             &[],
-            r#"{"plan":Plan?,"export":str?,"upload":bool=false,"uploadAlbum":str?,"qa":bool?,"wait":bool=false}"#,
+            r#"{"plan":Plan?,"export":str?,"upload":bool=false,"uploadAlbum":str?,"qa":bool?,"checkPauses":bool=true,"wait":bool=false}"#,
             |s, p| start(s, TaskKind::Build, p),
         ),
         job(
@@ -538,6 +538,17 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
         if let Some(e) = p.get("entries").filter(|v| !v.is_null()) {
             put(&mut out, "entries", Some(entries_p(cmd, e)?));
         }
+        // a long, narrated show: the share of entries narrated, the person's own voice
+        if let Some(n) = p.get("narrate").filter(|v| !v.is_null()) {
+            let n = n
+                .as_f64()
+                .filter(|n| n.is_finite() && (0.0..=1.0).contains(n))
+                .ok_or_else(|| bad(cmd, "`narrate` is the share of entries narrated, 0 to 1"))?;
+            put(&mut out, "narrate", Some(json!(n)));
+        }
+        if let Some(b) = p.get("bites").filter(|v| !v.is_null()) {
+            put(&mut out, "bites", Some(json!(b.as_bool().ok_or_else(|| bad(cmd, "`bites` must be true or false"))?)));
+        }
     }
     if kind == TaskKind::Build {
         if let Some(plan) = p.get("plan").filter(|v| !v.is_null()) {
@@ -558,6 +569,9 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
         put(&mut out, "uploadAlbum", upload_album.map(Value::String));
         if let Some(q) = p.get("qa").filter(|v| !v.is_null()) {
             put(&mut out, "qa", Some(json!(q.as_bool().ok_or_else(|| bad(cmd, "`qa` must be true or false"))?)));
+        }
+        if let Some(c) = p.get("checkPauses").filter(|v| !v.is_null()) {
+            put(&mut out, "checkPauses", Some(json!(c.as_bool().ok_or_else(|| bad(cmd, "`checkPauses` must be true or false"))?)));
         }
     }
     if kind == TaskKind::Shorts {

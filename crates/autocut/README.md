@@ -678,6 +678,22 @@ reproduces the `plan-v5.json` and `plan-v5-ml.json` the round's Python script wr
 value; a trimmed copy is the test fixture (`tests/data/plan_patch`). The steps of a whole round:
 [docs/showcase-runbook.md](../../docs/showcase-runbook.md).
 
+### Long, narrated shows (`narrated`)
+
+The steps once done by hand for a long, narrated show (a series about one's own 3D printers)
+are options of the plan and the build ([`narrated.rs`](src/narrated.rs)):
+
+| option | does |
+|---|---|
+| `narrate` (`autocut.showcasePlan`, 0..1, default 1) | the share of entries the voice-over speaks over: the first and the last keep their words, then the ones with checked facts, then others spread through the show; the rest play under the music with their labels on screen (their line left empty, timed like a scene, the music up under them) — a storyteller leaves many shots alone |
+| `bites` (`autocut.showcasePlan`, default false) | the person's own voice: their clips are understood (`media.understandSpeech`) and the best whole sentence of 1.5–8 s said cleanly over their own footage (an off-screen voice or a talking head) becomes the entry's first shot — its window set to the bite, heard 6 dB over the shots' sound and mixed as a voice (the music ducks), captioned in English (the script model translates Malayalam) — and the entry needs no voice-over of its own; the plan shows each bite's shot (`from`, `to`, `volume`, `says`) to review |
+| B-roll for each line | always: a narrated entry's shots are ordered by how well each shows what its line says (`media.searchScenes` with the line over the entry's clips) |
+| `checkPauses` (`autocut.showcaseBuild`, default true) | after the export, its narration is transcribed (in a session of its own) and checked for breaths in the middle of a phrase (`media.checkPauses`: a silence of 0.45 s or more after a word that ends no phrase); the result's `pauses` lists each with the words around it |
+
+The narration's own taste — tell the story with feeling, don't describe what is on screen, keep
+brand names on screen rather than in the voice, "our son" — is the taste profile's `narration`
+and `words` (above), which the script writers follow.
+
 ### Malayalam lines in natural spoken Malayalam (`ml_translate`)
 
 [`ml_translate::translate`](src/ml_translate.rs) (`filmcraft-cli ml-script`, the

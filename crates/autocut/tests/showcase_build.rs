@@ -569,3 +569,37 @@ async fn clips_of_another_shape_fill_the_frame_around_their_robot() {
         assert_eq!(keyframes(&c, "motion", "position"), 0, "{c}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entry_told_in_the_persons_own_voice_and_one_left_to_the_music() {
+    let ex = demo();
+    let facts = vec![
+        fact(5, "Pepper humanoid robot", 1_600_000_000, 18.0),
+        fact(6, "Boston Dynamics Spot", 1_665_741_668, 16.0),
+        fact(7, "red toy robot", 1_665_841_668, 14.0),
+    ];
+    let mut entries = showcase::group(&facts, "robot", 0.3);
+    let mut lines = vec!["The first one I ever met.".to_string(), "Not narrated: the bite tells it.".into(), "Not narrated: music only.".into()];
+    let bites = vec![filmcraft_autocut::narrated::Bite {
+        entry: entries[1].number,
+        item: 6,
+        from: 3.0,
+        to: 7.0,
+        text: "ഇവൻ ഡാൻസ് ചെയ്യുന്നു".into(),
+        english: "Look, he's dancing!".into(),
+        language: "ml".into(),
+    }];
+    assert_eq!(filmcraft_autocut::narrated::apply_bites(&mut entries, &mut lines, &bites), 1);
+    lines[2].clear();
+    let script = Script { intro: "Every robot I have filmed.".into(), lines, outro: "Thanks for watching.".into(), templated: 0, ..Script::default() };
+    let opts = Options { title: "Robots".into(), voice: Some("basic-male".into()), ..Options::default() };
+    let built = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
+    // the intro, one line and the outro are narrated; the bite is heard and captioned
+    assert_eq!(built.narration_lines, 3, "{built:?}");
+    let cue = built.subtitles.iter().find(|c| c.text == "Look, he's dancing!").expect("the bite is captioned");
+    assert!(cue.end - cue.start > 3.0, "{cue:?}");
+    // the bite's shot plays its window, louder than the shots' own sound
+    let s = &entries[1].shots[0];
+    assert_eq!((s.item, s.from, s.to, s.volume), (6, Some(2.8), Some(7.3), Some(filmcraft_autocut::narrated::BITE_GAIN)));
+    assert!(built.pauses.is_none(), "no export: no pause check");
+}
