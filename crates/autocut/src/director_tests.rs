@@ -8,7 +8,7 @@ fn opts(p: Value) -> Options {
 }
 
 fn look(id: &str, yaw: f64, what: &str, named: bool) -> Look {
-    Look { id: id.into(), yaw, pitch: 0.0, what: what.into(), named }
+    Look { id: id.into(), yaw, pitch: 0.0, what: what.into(), named, size: named.then_some((20.0, 50.0)) }
 }
 
 /// A candidate: `kind`, its shot from `start` for `secs` of a clip `media` seconds long.
@@ -254,6 +254,25 @@ fn a_plan_compiles_to_commands_on_its_beats() {
             assert!(placed.contains(&s.shot), "{s:?}");
         }
     }
+    // every 360° shot framed for the frame's shape: the subject's box (50° tall) in a 9:16 frame
+    let (fov, _) = filmcraft_engine::project::vr::subject_framing(Some((20.0, 50.0)), 1080.0 / 1920.0);
+    let aims: Vec<&Step> = steps.iter().filter(|s| s.id == "clip.reframe360").collect();
+    assert!(!aims.is_empty() && aims.iter().all(|s| s.params["fov"].as_f64() == Some(fov.round())), "{aims:?}");
+    // a named subject under a still or pushing camera is tracked
+    for (k, s) in plan.shots.iter().enumerate() {
+        let c = lib.iter().find(|c| c.id == s.clip).unwrap();
+        if c.kind == Kind::Vr && matches!(s.camera, Camera::Hold | Camera::PushIn | Camera::SpeedRamp | Camera::Follow) {
+            assert!(steps.iter().any(|x| x.shot == Some(k) && x.id == "clip.follow360"), "shot {k}: {s:?}");
+        }
+    }
+    // the same plan in 16:9: wider views for the same subject
+    let landscape = opts(json!({"brief": "a 30 s recap of our trip", "seconds": 30, "aspect": "16:9"}));
+    let wide = compile(&plan, &lib, &wins, &landscape, (1920.0, 1080.0), beat);
+    let fov_of = |steps: &[Step]| steps.iter().find(|s| s.id == "clip.reframe360").and_then(|s| s.params["fov"].as_f64()).unwrap();
+    assert!(fov_of(&wide) > fov_of(&steps), "16:9 {} vs 9:16 {}", fov_of(&wide), fov_of(&steps));
+    // a 16:9 clip in the 9:16 frame is tracked as it is cropped
+    let flat_k = plan.shots.iter().position(|s| lib.iter().any(|c| c.id == s.clip && c.kind == Kind::Flat)).unwrap();
+    assert!(steps.iter().any(|x| x.shot == Some(flat_k) && x.id == "clip.autoReframe"), "{:?}", plan.shots[flat_k]);
     // the steps are engine commands
     let ids: BTreeSet<&str> = steps.iter().map(|s| s.id.as_str()).collect();
     for id in ids {

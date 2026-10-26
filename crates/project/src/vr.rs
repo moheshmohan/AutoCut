@@ -51,14 +51,64 @@ pub fn reframe_size(item: &TrackItem) -> Option<(u32, u32)> {
     effect_size(reframe_of(item)?)
 }
 
+/// The field of view across (degrees) a virtual camera making a frame `aspect` (width / height)
+/// wide sees by default: the same coverage whatever the frame's shape — 100° across (67° down) in
+/// 16:9, 68° across (100° down) in 9:16, 84° in a square — so a person near the camera fits a
+/// vertical frame and a landscape one alike. (Coverage is kept as tan(across/2) · tan(down/2).)
+pub fn natural_fov(aspect: f64) -> f64 {
+    let a = if aspect.is_finite() && aspect > 0.0 { aspect.clamp(0.1, 10.0) } else { 16.0 / 9.0 };
+    let wide = 50.0f64.to_radians().tan();
+    let c = wide * wide / (16.0 / 9.0);
+    (2.0 * (c * a).sqrt().atan().to_degrees()).clamp(40.0, 120.0)
+}
+
+/// The tallest subject framed whole, degrees: a taller box (someone right by the camera, a
+/// selfie) is framed by its upper part — the face — instead ([`subject_aim`]).
+pub const MAX_SUBJECT_DEGREES: f64 = 75.0;
+/// The widest a view's long side gets, degrees: past it a little lens distance takes in the rest
+/// instead of stretching the edges.
+pub const MAX_VIEW_DEGREES: f64 = 110.0;
+
+/// The framing of a subject `size` degrees across and down (its box on the sphere; a box taller
+/// than [`MAX_SUBJECT_DEGREES`] counts as that tall) in a frame `aspect` wide: the field of view
+/// across and the lens distance that show it — about 65 % of the frame's height and at most 80 %
+/// of its width — never narrower than half the natural view (a far subject is not blown up), the
+/// view's long side at most [`MAX_VIEW_DEGREES`]. Without a size, the natural view.
+pub fn subject_framing(size: Option<(f64, f64)>, aspect: f64) -> (f64, f64) {
+    let a = if aspect.is_finite() && aspect > 0.0 { aspect.clamp(0.1, 10.0) } else { 16.0 / 9.0 };
+    let natural = natural_fov(a);
+    let Some((w, h)) = size.filter(|(w, h)| w.is_finite() && h.is_finite() && *w > 0.0 && *h > 0.0) else { return (natural, 0.0) };
+    let tan_half = |deg: f64| (deg.clamp(1.0, 179.0).to_radians() / 2.0).tan();
+    // across, in tangent terms, from the height wanted (down = across / aspect) and the width
+    let need = (tan_half(h.min(MAX_SUBJECT_DEGREES) / 0.65) * a).max(tan_half(w.min(90.0) / 0.8));
+    let need = need.max(tan_half(natural / 2.0));
+    // the long side within its limit; what is cut, lens distance takes in
+    let long = 2.0 * need.max(need / a).atan().to_degrees();
+    if long <= MAX_VIEW_DEGREES {
+        return (2.0 * need.atan().to_degrees(), 0.0);
+    }
+    let capped = if a >= 1.0 { tan_half(MAX_VIEW_DEGREES) } else { tan_half(MAX_VIEW_DEGREES) * a };
+    (2.0 * capped.atan().to_degrees(), ((long - MAX_VIEW_DEGREES) / MAX_VIEW_DEGREES).clamp(0.0, 0.35))
+}
+
+/// Where a camera framing a subject looks up or down (degrees): the middle of its box, or for a
+/// box taller than [`MAX_SUBJECT_DEGREES`] the middle of its top part that tall (a person by the
+/// camera is framed by the face, not the knees). `pitch` the box's middle, `size` its extent.
+pub fn subject_aim(pitch: f64, size: Option<(f64, f64)>) -> f64 {
+    let lift = size.map_or(0.0, |(_, h)| if h.is_finite() { ((h - MAX_SUBJECT_DEGREES) / 2.0).max(0.0) } else { 0.0 });
+    (pitch + lift).clamp(-85.0, 85.0)
+}
+
 /// A clip's virtual camera, added first in its chain (the other effects work on what it sees)
-/// making a `frame` picture when it has none; enabled. Motion is left as it is.
+/// making a `frame` picture when it has none, at the frame's natural view ([`natural_fov`]);
+/// enabled. Motion is left as it is.
 pub fn add_camera(item: &mut TrackItem, frame: (u32, u32)) -> Option<&mut EffectInstance> {
     if !item.effects.iter().any(|e| e.effect == REFRAME) {
         let mut e = crate::find_effect(REFRAME)?.instance();
         let side = |v: u32| ParamValue::Float(f64::from(v.clamp(MIN_SIDE, MAX_SIDE)));
         e.params.insert("width".into(), Param::new(side(frame.0)));
         e.params.insert("height".into(), Param::new(side(frame.1)));
+        e.params.insert("fov".into(), Param::new(ParamValue::Float(natural_fov(f64::from(frame.0.max(1)) / f64::from(frame.1.max(1))).round())));
         item.effects.insert(0, e);
     }
     let e = item.effects.iter_mut().find(|e| e.effect == REFRAME)?;
@@ -144,6 +194,40 @@ mod tests {
             assert!(def.param(id).is_some_and(|p| p.animatable), "{id}");
         }
         assert!(def.param("width").is_some_and(|p| !p.animatable));
+    }
+
+    #[test]
+    fn the_natural_view_covers_alike_in_every_shape() {
+        assert!((natural_fov(16.0 / 9.0) - 100.0).abs() < 1e-9);
+        let v = natural_fov(9.0 / 16.0);
+        assert!((v - 67.6).abs() < 0.2, "{v}");
+        // as much down in 9:16 as across in 16:9
+        let down = 2.0 * ((v.to_radians() / 2.0).tan() * 16.0 / 9.0).atan().to_degrees();
+        assert!((down - 100.0).abs() < 0.2, "{down}");
+        assert!((natural_fov(1.0) - 83.6).abs() < 0.3);
+        assert!((natural_fov(f64::NAN) - 100.0).abs() < 1e-9);
+        let down_of = |across: f64, a: f64| 2.0 * ((across.to_radians() / 2.0).tan() / a).atan().to_degrees();
+        // a person 45° tall near the camera fits a 16:9 frame: 45° is 65 % of the view's height
+        let (across, d) = subject_framing(Some((20.0, 45.0)), 16.0 / 9.0);
+        assert!(d == 0.0 && (down_of(across, 16.0 / 9.0) - 45.0 / 0.65).abs() < 0.5, "{across}");
+        // closer still: the long side stays within its limit, lens distance takes in the rest
+        for (size, a) in [((30.0, 70.0), 16.0 / 9.0), ((40.0, 74.0), 9.0 / 16.0), ((150.0, 150.0), 9.0 / 16.0)] {
+            let (across, d) = subject_framing(Some(size), a);
+            let long = across.max(down_of(across, a));
+            assert!(long <= MAX_VIEW_DEGREES + 1e-6 && d > 0.0 && d <= 0.35, "{size:?} {a}: {across} {d}");
+        }
+        // 70° tall in 9:16: 108° top to bottom, within the limit, no lens distance
+        let (across, d) = subject_framing(Some((40.0, 70.0)), 9.0 / 16.0);
+        assert!(d == 0.0 && (down_of(across, 9.0 / 16.0) - 70.0 / 0.65).abs() < 0.5, "{across}");
+        // a selfie-close subject is aimed by its top part
+        assert_eq!(subject_aim(-10.0, Some((40.0, 115.0))), 10.0);
+        assert_eq!(subject_aim(-10.0, Some((40.0, 50.0))), -10.0);
+        assert_eq!(subject_aim(80.0, Some((40.0, 175.0))), 85.0);
+        // a far subject: not narrower than half the natural view
+        assert_eq!(subject_framing(None, 9.0 / 16.0).1, 0.0);
+        assert_eq!(subject_framing(Some((f64::NAN, 1.0)), 1.0), (natural_fov(1.0), 0.0));
+        let (far, _) = subject_framing(Some((2.0, 3.0)), 16.0 / 9.0);
+        assert!((far - 50.0).abs() < 1e-9, "{far}");
     }
 
     #[test]

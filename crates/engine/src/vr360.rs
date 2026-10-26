@@ -244,14 +244,14 @@ pub fn reshape_camera(it: &mut TrackItem, from: (u32, u32), to: (u32, u32)) -> b
     true
 }
 
-/// A preset's values: (yaw, pitch, fov, distance, sphere).
-fn preset(name: &str) -> Option<(Option<f64>, Option<f64>, f64, f64, bool)> {
+/// A preset's values: (yaw, pitch, fov — none: the frame's natural view — distance, sphere).
+fn preset(name: &str) -> Option<(Option<f64>, Option<f64>, Option<f64>, f64, bool)> {
     Some(match name {
-        "natural" => (None, None, 90.0, 0.0, false),
-        "wide" => (None, None, 120.0, 0.3, false),
-        "tinyPlanet" | "tiny_planet" | "planet" => (None, Some(-90.0), 120.0, 1.0, false),
-        "rabbitHole" | "rabbit_hole" | "tunnel" => (None, Some(90.0), 120.0, 1.0, false),
-        "sphere" | "equirectangular" => (Some(0.0), Some(0.0), 90.0, 0.0, true),
+        "natural" => (None, None, None, 0.0, false),
+        "wide" => (None, None, Some(120.0), 0.3, false),
+        "tinyPlanet" | "tiny_planet" | "planet" => (None, Some(-90.0), Some(120.0), 1.0, false),
+        "rabbitHole" | "rabbit_hole" | "tunnel" => (None, Some(90.0), Some(120.0), 1.0, false),
+        "sphere" | "equirectangular" => (Some(0.0), Some(0.0), Some(90.0), 0.0, true),
         _ => return None,
     })
 }
@@ -409,7 +409,8 @@ fn reframe(s: &mut Session, p: &Value) -> Result<Value> {
                     set_static(e, "pitch", pt);
                 }
                 set_static(e, "roll", 0.0);
-                set_static(e, "fov", fov);
+                let (w, h) = filmcraft_project::vr::effect_size(e).unwrap_or(frame);
+                set_static(e, "fov", fov.unwrap_or_else(|| filmcraft_project::vr::natural_fov(f64::from(w.max(1)) / f64::from(h.max(1))).round()));
                 set_static(e, "distance", distance);
                 e.params.insert("output".into(), Param::new(ParamValue::Choice(u32::from(sphere))));
             }

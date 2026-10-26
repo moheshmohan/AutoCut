@@ -374,6 +374,9 @@ pub struct Look {
     pub what: String,
     /// A named subject the describer saw (else where the motion or detail is).
     pub named: bool,
+    /// How big it is on the sphere, degrees across and down (a named subject's box).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<(f64, f64)>,
 }
 
 /// One shot the director may use.
@@ -568,7 +571,8 @@ fn candidate(
                 if kind == Kind::Vr {
                     let (yaw, pitch) = direction_of(b);
                     if looks.iter().all(|l| angle_between(l.yaw, yaw) >= 20.0) {
-                        looks.push(Look { id: String::new(), yaw, pitch: pitch.clamp(-60.0, 60.0), what: chars(&sub.name, 60), named: true });
+                        let size = (f64::from(b[2]) * 360.0, f64::from(b[3]) * 180.0);
+                        looks.push(Look { id: String::new(), yaw, pitch: pitch.clamp(-60.0, 60.0), what: chars(&sub.name, 60), named: true, size: Some(size) });
                     }
                 } else if subject.is_none() {
                     subject = Some(b.map(f64::from));
@@ -578,11 +582,11 @@ fn candidate(
         if kind == Kind::Vr {
             for (yaw, pitch, what) in salience.get(&(s.item, s.index, part)).map(Vec::as_slice).unwrap_or_default() {
                 if looks.iter().all(|l| angle_between(l.yaw, *yaw) >= 30.0) {
-                    looks.push(Look { id: String::new(), yaw: *yaw, pitch: pitch.clamp(-45.0, 45.0), what: what.clone(), named: false });
+                    looks.push(Look { id: String::new(), yaw: *yaw, pitch: pitch.clamp(-45.0, 45.0), what: what.clone(), named: false, size: None });
                 }
             }
             if looks.is_empty() {
-                looks.push(Look { id: String::new(), yaw: 0.0, pitch: 0.0, what: "straight ahead".into(), named: false });
+                looks.push(Look { id: String::new(), yaw: 0.0, pitch: 0.0, what: "straight ahead".into(), named: false, size: None });
             }
             for (k, l) in looks.iter_mut().enumerate() {
                 l.id = format!("{id}{}", char::from(b'a' + (k.min(25) as u8)));
@@ -889,7 +893,8 @@ fn rules_camera(c: &Candidate, secs: f64, used: &HashMap<Camera, usize>, last: O
                 (c.wide && !c.indoor && n(Camera::Reveal) < 2 && secs >= Camera::Reveal.min_seconds(), Camera::Reveal),
                 (c.wide && secs >= Camera::Orbit.min_seconds() && n(Camera::Orbit) < 2, Camera::Orbit),
                 (c.energy >= 0.75 && n(Camera::BarrelRoll) == 0 && secs >= Camera::BarrelRoll.min_seconds(), Camera::BarrelRoll),
-                (true, if n(Camera::Drift) <= n(Camera::PushIn) { Camera::Drift } else { Camera::PushIn }),
+                // a named subject is kept in view (a push in, tracked: `compile`); a view without one drifts
+                (true, if c.looks.first().is_some_and(|l| l.named) || n(Camera::Drift) > n(Camera::PushIn) { Camera::PushIn } else { Camera::Drift }),
             ];
             options.iter().find(|(ok, m)| *ok && fresh(*m)).map_or(Camera::Drift, |(_, m)| *m)
         }
@@ -1386,10 +1391,9 @@ pub fn validate(v: &Value, cands: &[Candidate], o: &Options, beat: f64, bpm: f64
             title_from_brief(&o.brief).unwrap_or_else(|| "Highlights".into())
         }
     };
-    if let Some(first) = shots.first_mut()
-        && first.text.is_none()
-    {
-        first.text = Some(title.clone());
+    if let Some(first) = shots.first_mut() {
+        // the hook's text is the title, set as a title
+        first.text = Some(first.text.as_deref().map_or_else(|| title.clone(), title_case));
     }
     let mood = o
         .mood
@@ -1508,6 +1512,7 @@ pub fn title_layout(o: &Options, frame: (f64, f64), text: &str) -> ([f64; 2], f6
 /// other text on V2; the swishes and the chime on A4. `beat` the music's beat, seconds.
 pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Options, frame: (f64, f64), beat: f64) -> Vec<Step> {
     let mut out: Vec<Step> = Vec::new();
+    let frame_aspect = if frame.1 > 0.0 { frame.0 / frame.1 } else { 16.0 / 9.0 };
     for (k, (s, w)) in plan.shots.iter().zip(wins).enumerate() {
         let Some(c) = cands.iter().find(|c| c.id == s.clip) else { continue };
         let (t0, t1) = *w;
@@ -1528,14 +1533,32 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
                 if s.camera == Camera::Hyperlapse {
                     out.push(step("clip.hyperlapse360", json!({"speed": speed * 100.0, "mode": "strong", "wait": true}), me, On::Clips));
                 }
+                // framed for this frame's shape: the subject's whole box in view (its centre
+                // mid-frame, the field of view sized to it), else the shape's natural view
                 if let Some(l) = look {
-                    out.push(step("clip.reframe360", json!({"yaw": l.yaw.round(), "pitch": l.pitch.round()}), me, On::Clips));
+                    let (fov, distance) = filmcraft_engine::project::vr::subject_framing(l.size, frame_aspect);
+                    let pitch = filmcraft_engine::project::vr::subject_aim(l.pitch, l.size);
+                    out.push(step(
+                        "clip.reframe360",
+                        json!({"yaw": l.yaw.round(), "pitch": pitch.round(), "fov": fov.round(), "distance": round2(distance)}),
+                        me,
+                        On::Clips,
+                    ));
                 }
                 if c.handheld && !matches!(s.camera, Camera::Hyperlapse | Camera::PlanetIn | Camera::PlanetOut) {
                     out.push(step("clip.stabilize360", json!({"mode": "smooth", "wait": true}), me, On::Clips));
                 }
                 // where the shot's own clip time is: the hyperlapse plays its media faster
                 let at = |secs: f64| round2(secs.max(0.0));
+                // a named subject is tracked under a camera that does not turn by itself
+                if look.is_some_and(|l| l.named) && matches!(s.camera, Camera::Hold | Camera::PushIn | Camera::SpeedRamp) {
+                    out.push(step(
+                        "clip.follow360",
+                        json!({"target": "subject", "at": at((c.key - s.from) / speed), "smooth": 0.7, "wait": true}),
+                        me,
+                        On::Clip,
+                    ));
+                }
                 match s.camera {
                     Camera::Follow => {
                         out.push(step(
@@ -1589,22 +1612,36 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
             }
             Kind::Flat | Kind::Photo => {
                 let subject = c.subject.map(|b| json!(b));
+                // a picture of another shape than the frame is cropped: its subject tracked
+                // through the shot (Auto Reframe, keeping a push in's scale) so it stays in view
+                let reshaped = c.kind == Kind::Flat && (c.aspect - frame_aspect).abs() / frame_aspect > 0.05;
+                let track = || {
+                    let mut p = json!({"keepScale": true, "motion": "smooth", "fallback": "center", "analysisFps": 8, "wait": true});
+                    if let Some(b) = c.subject {
+                        p["subject"] = json!({"x": b[0], "y": b[1], "w": b[2], "h": b[3], "seconds": round2(c.key)});
+                    }
+                    step("clip.autoReframe", p, me, On::Clips)
+                };
                 match s.camera {
                     Camera::Follow => {
                         out.push(step("clip.fillFrame", json!({}), me, On::Clips));
-                        let mut p = json!({"keepScale": true, "motion": "smooth", "fallback": "center", "analysisFps": 8, "wait": true});
-                        if let Some(b) = c.subject {
-                            p["subject"] = json!({"x": b[0], "y": b[1], "w": b[2], "h": b[3], "seconds": round2(c.key)});
-                        }
-                        out.push(step("clip.autoReframe", p, me, On::Clips));
+                        out.push(track());
                     }
-                    Camera::Hold => out.push(step("clip.fillFrame", json!({}), me, On::Clips)),
+                    Camera::Hold => {
+                        out.push(step("clip.fillFrame", json!({}), me, On::Clips));
+                        if reshaped {
+                            out.push(track());
+                        }
+                    }
                     _ => {
                         let mut p = json!({"move": "in", "fit": "fill"});
                         if let Some(b) = subject {
                             p["subject"] = b;
                         }
                         out.push(step("clip.kenBurns", p, me, On::Clips));
+                        if reshaped {
+                            out.push(track());
+                        }
                     }
                 }
                 if s.camera == Camera::SpeedRamp {

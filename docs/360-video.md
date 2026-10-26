@@ -60,8 +60,11 @@ a flat clip of the camera's frame for everything after it — Motion, masks, eve
 Reframe, tracking, export. Its parameters keyframe in Effect Controls like any others.
 
 **Placing** 360° media (`timeline.place`, insert, overwrite, drag) gives the clip its camera at
-once: a natural 90° view framing the sequence (in a 2:1 sequence, the whole sphere), Motion at
-its defaults; `timeline.place` lists such clips in `reframed360`. Analyses read 360° media as
+once, framing the sequence (in a 2:1 sequence, the whole sphere), Motion at its defaults;
+`timeline.place` lists such clips in `reframed360`. A new camera (and the `natural` preset)
+sees the frame's **natural view**, the same coverage whatever its shape: 100° across (67° down)
+in 16:9, 68° across (100° down) in 9:16, 84° in a square — so a person near the camera fits a
+vertical frame and a landscape one alike. Analyses read 360° media as
 it is seen:
 
 - scene detection, descriptions and subject boxes (`scenes.*`, `media.frame`, the showcase's
@@ -118,6 +121,15 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    `clip.stabilize360`, `clip.vrMove`, `clip.follow360`, `clip.hyperlapse360`, `clip.kenBurns`,
    `clip.autoReframe`, `clip.speedRamp`, `graphics.newText`, `audio.generate`… — each shot's own
    run on its clip once it is placed. `--dry-run` prints the plan and its commands.
+   **Framing for the frame's shape.** Every 360° shot is framed for the edit's own aspect: the
+   camera turns to the subject's box (a person right by the camera, taller than 75°, by the
+   upper part — the face) and its field of view is sized so the box takes about 65 % of the
+   frame's height and at most 80 % of its width — a 16:9 cut and a 9:16 reel of the same shot
+   both show the whole person — never narrower than half the natural view, its long side at most
+   110° (past that a little lens distance takes in the rest rather than stretching the edges).
+   A named subject under a camera that does not turn by itself (hold, push in, speed ramp) is
+   **tracked** (`clip.follow360`); a normal clip of another shape than the frame is cropped with
+   its subject tracked (`clip.autoReframe`, keeping the push in).
 5. **The build**: generated music first (its tempo `bpm`, mood from the brief or the model), its
    exact beats the grid every cut lands on; between two 360° shots a whip out of one and into the
    next; a soft swish under each whip and roll and a chime under the title — never a whoosh or a
