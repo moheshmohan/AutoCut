@@ -36,6 +36,7 @@ pub mod mxf;
 pub mod ogg;
 mod stream_color;
 pub mod video;
+mod vr;
 mod webm_alpha;
 pub mod y4m;
 

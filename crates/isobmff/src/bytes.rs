@@ -187,7 +187,6 @@ pub(crate) fn parse_box_header(buf: &[u8]) -> Result<BoxHeader> {
 pub(crate) struct RawBox<'a> {
     pub kind: FourCc,
     pub payload: &'a [u8],
-    #[allow(dead_code)]
     pub uuid: Option<[u8; 16]>,
 }
 

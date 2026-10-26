@@ -19,6 +19,7 @@ pub mod generators;
 pub mod pending;
 pub mod reader;
 pub mod sequence;
+pub mod spherical;
 pub mod still;
 pub mod tga;
 pub mod wav;
@@ -34,6 +35,7 @@ use serde::{Deserialize, Serialize};
 pub use cache::{AudioCache, FrameCache};
 pub use generators::{DemoScene, Generator};
 pub use reader::{ByteReader, ReaderOpener, SharedReader};
+pub use spherical::Spherical;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
@@ -168,6 +170,11 @@ pub trait MediaSource: Send + Sync {
     fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer> {
         if stream == 0 { self.audio(start, frames, sample_rate) } else { Err(MediaError::NoStream("audio")) }
     }
+    /// How the picture maps onto the sphere, when the file says it is 360° video (spherical
+    /// metadata, an Insta360 camera's trailer). `None` for flat pictures.
+    fn spherical(&self) -> Option<Spherical> {
+        None
+    }
 }
 
 pub type SharedSource = Arc<dyn MediaSource>;
@@ -180,6 +187,8 @@ pub const HEIF_EXTENSIONS: &[&str] = &["heic", "heif", "hif"];
 pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "wave", "bwf", "aif", "aiff", "mp3", "mp2", "m4a", "aac", "flac", "ogg", "opus"];
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "m4v", "mov", "mkv", "webm", "avi", "mxf", "mts", "m2ts", "m2t", "ts", "mpg", "mpeg", "vob", "mod", "tod", "m2v", "m1v", "mpv", "3gp", "y4m", "apv",
+    // Insta360 360° recordings and their low-resolution proxies (MP4 inside)
+    "insv", "lrv",
 ];
 
 pub fn is_importable(path: &Path) -> bool {

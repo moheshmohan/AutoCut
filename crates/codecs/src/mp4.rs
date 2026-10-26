@@ -88,6 +88,11 @@ pub struct Mp4Source {
     file: Mp4File,
     vtrack: Option<usize>,
     video: GopCache,
+    /// An Insta360 recording's second lens: its video track and decoder cache. Its pictures are
+    /// shown to the left of the first lens's, one dual-fisheye frame twice as wide.
+    lens2: Option<(usize, GopCache)>,
+    /// What the file says about its picture of the sphere.
+    spherical: Option<filmcraft_media::Spherical>,
     /// The playable audio tracks in file order: `info.audio_streams[k]` describes `audios[k]`.
     audios: Vec<Mp4Audio>,
 }
@@ -273,6 +278,13 @@ impl Mp4Source {
         // files can lack them: indexing `entries[0]` or dividing by the timescale used to panic).
         let playable = |t: &&filmcraft_isobmff::Track, kind| t.kind == kind && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0;
         let vtrack = file.tracks.iter().position(|t| playable(&t, TrackKind::Video));
+        // An Insta360 camera records one video track a lens (and says so in its trailer): both
+        // are decoded and shown side by side.
+        let insta = vtrack.and_then(|_| filmcraft_isobmff::insta360::read_info(&bytes));
+        let lens2 = match (&insta, vtrack) {
+            (Some(_), Some(v)) => crate::vr::second_lens(&file, v),
+            _ => None,
+        };
         // every audio track is a stream (the track count comes from the file: capped)
         let atracks: Vec<usize> =
             file.tracks.iter().enumerate().filter(|(_, t)| playable(t, TrackKind::Audio)).map(|(i, _)| i).take(filmcraft_media::MAX_AUDIO_STREAMS).collect();
@@ -325,6 +337,10 @@ impl Mp4Source {
             if rotation % 2 == 1 {
                 (info.width, info.height) = (info.height, info.width);
                 info.par = (info.par.1, info.par.0);
+            }
+            if lens2.is_some() {
+                info.width = info.width.saturating_mul(2);
+                info.bitrate = info.bitrate.map(|b| b.saturating_mul(2));
             }
             if matches!(entry.codec, CodecConfig::Dnx { .. }) {
                 // the sample entry doesn't say which VC-3 compression ID it is: read the first frame header
@@ -397,7 +413,16 @@ impl Mp4Source {
             })
             .collect();
         snap_to_frame_grid(&mut file, vtrack);
-        if let (Some(shift), Some(ti)) = (rebase_unedited_video(&mut file, vtrack, &mut audios), vtrack) {
+        snap_to_frame_grid(&mut file, lens2);
+        let offset_before = vtrack.and_then(|i| file.tracks.get(i)).map(|t| t.edit_offset);
+        let rebased = rebase_unedited_video(&mut file, vtrack, &mut audios);
+        // the second lens moves with the first (both tracks share a timescale)
+        if let (Some(before), Some(after), Some(t2)) =
+            (offset_before, vtrack.and_then(|i| file.tracks.get(i)).map(|t| t.edit_offset), lens2.and_then(|j| file.tracks.get_mut(j)))
+        {
+            t2.edit_offset = t2.edit_offset.saturating_add(after.saturating_sub(before));
+        }
+        if let (Some(shift), Some(ti)) = (rebased, vtrack) {
             // The edit-list duration counted the leading empty edit; the content now starts at its
             // first presented picture, so the clip ends one shift earlier (review on #1289). Only
             // the edit-list duration is affected: the media duration already excludes the delay,
@@ -407,7 +432,12 @@ impl Mp4Source {
                 info.duration = Tick(info.duration.0.saturating_sub(shift.0).max(0));
             }
         }
-        Ok(Self { info, bytes, file, vtrack, video: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture), audios })
+        let spherical = match (&insta, &info.video) {
+            (Some(i), Some(v)) => crate::vr::insta360_spherical(i, (v.width, v.height)),
+            _ => vtrack.and_then(|i| file.tracks.get(i)).and_then(crate::vr::track_spherical),
+        };
+        let lens2 = lens2.map(|j| (j, GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture)));
+        Ok(Self { info, bytes, file, vtrack, video: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture), lens2, spherical, audios })
     }
 
     fn read(&self, track: usize, i: usize) -> crate::Result<Vec<u8>> {
@@ -420,7 +450,13 @@ impl Mp4Source {
         // Nearest, not floor: with a coarse timescale (1000) sample times are rounded, and a
         // floored lookup lands one unit short of every frame whose time was rounded up.
         let late = filmcraft_media::cancel::catch_up().map(|m| (t - m).to_rational_round(1, ts));
-        self.video.frame_late(&Mp4Video { src: self, track: ti }, t.to_rational_round(1, ts), late)
+        let a = self.video.frame_late(&Mp4Video { src: self, track: ti }, t.to_rational_round(1, ts), late)?;
+        let Some((tj, cache)) = &self.lens2 else { return Ok(a) };
+        // the same instant of the second lens (same timescale). The second track is the lens on
+        // the left of the camera's own side-by-side layout (its `.lrv` proxy and its calibration
+        // canvas), so it goes on the left.
+        let b = cache.frame_late(&Mp4Video { src: self, track: *tj }, t.to_rational_round(1, ts), late)?;
+        crate::vr::side_by_side(&b, &a).map(Arc::new)
     }
 
     /// Decoded packet `i` of audio stream `a` (`ainfo` is its `AudioStreamInfo`; `st` its decoder state).
@@ -510,6 +546,10 @@ impl MediaSource for Mp4Source {
     fn video_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>, MediaError> {
         let f = self.video_at(req.time.max(Tick::ZERO))?;
         Ok(f)
+    }
+
+    fn spherical(&self) -> Option<filmcraft_media::Spherical> {
+        self.spherical.clone()
     }
 
     fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer, MediaError> {

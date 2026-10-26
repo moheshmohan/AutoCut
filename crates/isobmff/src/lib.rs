@@ -14,8 +14,10 @@ mod bytes;
 mod codec;
 mod demux;
 mod error;
+pub mod insta360;
 mod mux;
 mod source;
+pub mod spherical;
 
 pub use bytes::FourCc;
 pub use codec::{

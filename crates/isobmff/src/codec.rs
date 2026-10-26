@@ -45,6 +45,10 @@ pub struct VideoParams {
     pub mastering_display: Option<MasteringDisplay>,
     /// `clli`: content light level (MaxCLL, MaxFALL in cd/m²; 0 = unknown).
     pub content_light: Option<(u16, u16)>,
+    /// `st3d`: how stereoscopic video shares the frame (Spherical Video V2).
+    pub stereo: Option<crate::spherical::StereoMode>,
+    /// `sv3d`: spherical (360°) video (Spherical Video V2).
+    pub spherical: Option<crate::spherical::SphericalBox>,
 }
 
 /// SMPTE ST 2086 mastering display metadata, in the units of the `mdcv` box and the H.264/HEVC
@@ -972,6 +976,8 @@ pub(crate) fn parse_sample_entry(format: FourCc, payload: &[u8], handler: FourCc
                     v.field_info = Some(FieldInfo { fields: c.u8()?, detail: c.u8()? });
                 }
                 b"gama" => v.gamma = Some(Cur::new(p, "gama").u32()?),
+                b"st3d" => v.stereo = crate::spherical::parse_st3d(p).ok(),
+                b"sv3d" => v.spherical = crate::spherical::SphericalBox::parse(p).ok(),
                 b"btrt" => bitrate = Some(parse_btrt(p)?),
                 _ => {}
             }
@@ -1448,6 +1454,12 @@ impl SampleEntry {
                 b.i32(c.vert_offset.0);
                 b.u32(c.vert_offset.1);
                 b.end(m);
+            }
+            if let Some(mode) = v.stereo {
+                crate::spherical::write_st3d(b, mode);
+            }
+            if let Some(s) = &v.spherical {
+                s.write(b);
             }
             if let Some(br) = self.bitrate {
                 write_btrt(b, br);

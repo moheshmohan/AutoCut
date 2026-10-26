@@ -95,6 +95,8 @@ pub struct Track {
     pub sample_groups: Vec<SampleGroup>,
     /// True if uncompressed audio samples were merged into one [`Sample`] per chunk.
     pub pcm_chunked: bool,
+    /// The Spherical Video V1 `uuid` box of the track, read.
+    pub spherical_v1: Option<crate::spherical::SphericalV1>,
     sync_index: Vec<u32>,
     pts_order: Vec<u32>,
 }
@@ -411,6 +413,7 @@ fn parse_trak(p: &[u8], file: &Mp4File, file_len: u64) -> Result<Track> {
         sdtp: Vec::new(),
         sample_groups: Vec::new(),
         pcm_chunked: false,
+        spherical_v1: None,
         sync_index: Vec::new(),
         pts_order: Vec::new(),
     };
@@ -462,6 +465,7 @@ fn parse_trak(p: &[u8], file: &Mp4File, file_len: u64) -> Result<Track> {
                 }
             }
             b"mdia" => mdia = Some(b.payload),
+            b"uuid" if b.uuid == Some(crate::spherical::SPHERICAL_V1_UUID) => t.spherical_v1 = crate::spherical::SphericalV1::parse(b.payload),
             _ => {}
         }
     }
