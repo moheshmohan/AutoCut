@@ -37,6 +37,7 @@ pub mod transcript;
 pub mod transition_catalog;
 pub mod transition_engines;
 pub mod transition_sound;
+pub mod vr;
 pub mod vtransition;
 
 use std::collections::BTreeMap;
@@ -200,6 +201,10 @@ pub struct Interpretation {
     /// is edited into a sequence. None = one stereo clip of the first two channels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_channels: Option<AudioChannelMap>,
+    /// VR Properties: how the picture maps onto the sphere when it is 360° video (set at import
+    /// from the file's metadata; see [`vr`]). None = a flat picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vr: Option<filmcraft_media::Spherical>,
 }
 
 /// Modify ▸ Audio Channels: the clip channel format and, per audio clip, the source channels it

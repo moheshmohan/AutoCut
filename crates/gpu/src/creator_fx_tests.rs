@@ -169,6 +169,7 @@ fn creator_chains_composite_like_the_cpu() {
                 blend: Blend::Normal,
                 fx: Some(std::sync::Arc::new(LayerFx { size: (320, 180), decimation: 2, ops })),
                 input: None,
+                vr: None,
             }],
         };
         let cpu = execute_cpu(&plan).over_black_rgba8();

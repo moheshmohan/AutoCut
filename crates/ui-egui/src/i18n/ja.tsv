@@ -4274,3 +4274,12 @@
 	Choose a folder first	先にフォルダーを選択してください
 	Making a quick short…	クイックショートを作成中…
 	Let AutoCut pick a template and fill it from your clips	AutoCut にテンプレートを選ばせ、クリップで埋めます
+	360 Reframe	360 リフレーム
+	VR Properties…	VR プロパティ…
+	Align 360 Lenses	360 レンズを揃える
+	Field of View	視野角
+	Flat (Virtual Camera)	フラット (仮想カメラ)
+	Lens Distance	レンズ距離
+	Pan (Yaw)	パン (ヨー)
+	Sphere (Equirectangular)	球面 (正距円筒)
+	Tilt (Pitch)	チルト (ピッチ)

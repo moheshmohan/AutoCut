@@ -41,6 +41,7 @@ pub mod text_units;
 pub mod track;
 pub mod transitions;
 pub mod vfx;
+pub mod vr;
 
 use std::sync::Arc;
 
@@ -440,6 +441,23 @@ pub fn source_size(project: &Project, item: ItemId) -> Option<(u32, u32)> {
     project.source_size(item)
 }
 
+/// Size of the picture a clip shows before Motion, at full resolution: its source's, or a 360°
+/// clip's virtual camera frame ([`filmcraft_project::vr`]).
+pub fn clip_size(project: &Project, item: &TrackItem) -> Option<(u32, u32)> {
+    project.clip_source_size(item)
+}
+
+/// [`source_par`] of what a clip shows (square pixels through a virtual camera).
+pub fn clip_par(project: &Project, item: &TrackItem) -> Option<(u32, u32)> {
+    project.clip_source_par(item)
+}
+
+/// Whether an effect of a clip runs in its effect chain: an enabled standard effect that is not
+/// a graphic layer or the virtual camera (which makes the clip's picture, [`vr`]).
+pub(crate) fn in_chain(e: &filmcraft_project::EffectInstance) -> bool {
+    e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e) && e.effect != vr::REFRAME
+}
+
 /// Pixel aspect ratio of an item's source, for [`motion_matrix`]: Interpret Footage's override,
 /// else the media's; `None` for items drawn in sequence pixels (graphics, adjustment layers).
 pub fn source_par(project: &Project, item: ItemId) -> Option<(u32, u32)> {
@@ -538,8 +556,8 @@ pub(crate) fn item_layer_ex(
     // `mt`: where effects and Motion/Opacity are evaluated (differs from the shown frame's media
     // time inside a frame hold without Hold Filters).
     let mt = item.effect_time_at(t);
-    let src_size = source_size(project, item.item)?;
-    let motion = motion_matrix(seq, item, src_size, source_par(project, item.item), mt);
+    let src_size = clip_size(project, item)?;
+    let motion = motion_matrix(seq, item, src_size, clip_par(project, item), mt);
     // How many output pixels one source pixel covers → request a reduced frame when possible.
     let lin = ((motion.a * motion.a + motion.b * motion.b).sqrt()).max((motion.c * motion.c + motion.d * motion.d).sqrt());
     let want = effects_scale(item, mt, (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32, opts);
@@ -557,6 +575,7 @@ pub(crate) fn item_layer_ex(
     }
     // plain media: nothing but the frame itself reaches the output
     let plain_media = matches!(pi.kind, ItemKind::Media(_) | ItemKind::Subclip { .. })
+        && filmcraft_project::vr::reframe_of(item).is_none()
         && !(opts.effects && item.has_standard_effects())
         && !item.effect("opacity").is_some_and(|e| e.enabled && !e.masks.is_empty());
     let mut fetched = None;
@@ -596,7 +615,7 @@ pub(crate) fn item_layer_ex(
             frame_rate: seq.settings.frame_rate.as_f64(),
             working: seq.settings.color.working,
         };
-        for e in item.effects.iter().filter(|e| e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e)) {
+        for e in item.effects.iter().filter(|e| in_chain(e)) {
             if filmcraft_media::cancel::cancelled() {
                 return None;
             }
@@ -678,9 +697,12 @@ pub(crate) fn base_layer(
     // `ft`: the media time of the frame shown
     let ft = item.source_time_at(t);
     let mt = item.effect_time_at(t);
-    let src_size = source_size(project, item.item)?;
+    let src_size = clip_size(project, item)?;
     let pi = project.item(item.item)?;
     Some(match &pi.kind {
+        ItemKind::Media(_) | ItemKind::Subclip { .. } if filmcraft_project::vr::reframe_of(item).is_some() => {
+            return reframed_layer(project, seq, item, t, sources, want);
+        }
         ItemKind::Media(_) | ItemKind::Subclip { .. } => {
             let (src, frame, n) = media_frame(item, t, sources, want, src_size)?;
             media_image(project, seq, item, t, &src, &frame, n, want)
@@ -710,6 +732,43 @@ pub(crate) fn base_layer(
             img
         }
     })
+}
+
+/// How a 360° clip seen through its virtual camera at timeline `t`, at `want` of the camera's
+/// frame, reads its source: the view, the frame's size at `want`, the source's model at full size
+/// and the scale to ask the source for (as sharp as the view needs, no sharper).
+pub(crate) struct Reframing {
+    pub view: vr::View,
+    pub out: (usize, usize),
+    pub spherical: filmcraft_media::Spherical,
+    pub scale: f32,
+}
+
+pub(crate) fn reframing(project: &Project, item: &TrackItem, t: Tick, src: &SharedSource, want: f32) -> Option<Reframing> {
+    let (view, size) = vr::item_view(item, item.effect_time_at(t))?;
+    let want = if want.is_finite() { want.clamp(1.0 / 64.0, 1.0) } else { 1.0 };
+    let out = (((size.0 as f32 * want).round() as usize).max(1), ((size.1 as f32 * want).round() as usize).max(1));
+    // a picture without VR Properties is taken as a whole equirectangular sphere (as Premiere's
+    // Immersive Video effects take every picture)
+    let spherical = project.vr_of(item.item).cloned().unwrap_or_else(filmcraft_media::Spherical::equirect);
+    let v = src.info().video.as_ref()?;
+    let model = vr::SourceModel::new(&spherical, (v.width as usize, v.height as usize));
+    let scale = vr::source_scale(&model, &view, out.0) as f32;
+    Some(Reframing { view, out, spherical, scale })
+}
+
+/// A 360° clip's picture at timeline `t`: what its virtual camera sees, at `want` of the camera's
+/// frame (decoded, colour managed and frame blended as any clip, then projected; [`vr`]).
+fn reframed_layer(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, sources: &dyn SourceProvider, want: f32) -> Option<Image> {
+    let src = sources.source(item.item)?;
+    let r = reframing(project, item, t, &src, want)?;
+    let full_w = src.info().video.as_ref().map_or(1, |v| v.width.max(1));
+    let frame = src.video_frame(FrameRequest { time: video_source_time(item, t, src.info().frame_rate()), scale: r.scale }).ok()?;
+    let n = decimation(frame.width as f32, full_w as f32 * r.scale);
+    let img = media_image(project, seq, item, t, &src, &frame, n, r.scale);
+    let model = vr::SourceModel::new(&r.spherical, (img.w, img.h));
+    let taps = vr::taps(&model, &r.view, r.out.0);
+    Some(vr::reframe(&img, &model, &r.view, r.out.0, r.out.1, taps))
 }
 
 /// The layer of one clip at timeline `t` with its effects applied, on a canvas the size of the

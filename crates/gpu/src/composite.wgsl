@@ -1,6 +1,8 @@
 // FilmCraft GPU compositor.
 // Layers are drawn as transformed quads; the fragment shader samples the source (YUV planes or
-// RGBA) with manual bilinear filtering (textureLoad, so any float format works) and N×N
+// RGBA) with manual bilinear filtering (textureLoad, so any float format works) — or, for a 360°
+// layer, the ray each pixel of its virtual camera sees, into an equirectangular or dual-fisheye
+// source (`filmcraft_render::vr`, the CPU reference) — and N×N
 // supersampling over the pixel footprint when minifying, converts to linear light, premultiplies
 // and scales by opacity. Normal layers blend into the Rgba16Float accumulator with fixed-function
 // premultiplied "over"; Dissolve does too (each pixel is either dropped or drawn opaque). The other
@@ -22,6 +24,15 @@ struct U {
     q3: vec4<f32>,   // gamut matrix row 1, tone-mapping source peak cd/m²
     q4: vec4<f32>,   // gamut matrix row 2, tone-mapping target peak cd/m²
     q5: vec4<f32>,   // desaturation luma weights, desaturation on
+    // A 360° layer's virtual camera (`filmcraft_render::plan::VrLayer`; all zero otherwise):
+    // [0] on, output (0 flat, 1 sphere), source (0 equirect, 1 fisheye), lenses
+    // [1] tan_x, tan_y, distance, blend half-width (radians)
+    // [2] view width, view height (layer pixels), chroma / luma texture size
+    // [3..5] camera-to-world rotation rows
+    // [6] equirect view rectangle x, y, w, h (texels); [7] span across, down (radians), wraps
+    // [8 + 7k ..] lens k: rect x0 y0 x1 y1; cx cy radius half_fov; rotation rows (.w of the
+    //            first: polynomial terms); polynomial coefficients (two vec4)
+    vr: array<vec4<f32>, 22>,
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -51,6 +62,12 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
 }
 
 fn load4(t: texture_2d<f32>, p: vec2<f32>) -> vec4<f32> {
+    return load4w(t, p, vec3(0.0));
+}
+
+// `load4` that wraps horizontally inside texels [wrap.y, wrap.z) when wrap.x is 1 (the ±180°
+// seam of an equirectangular picture).
+fn load4w(t: texture_2d<f32>, p: vec2<f32>, wrap: vec3<f32>) -> vec4<f32> {
     let d = vec2<i32>(textureDimensions(t));
     var q = p - 0.5;
     let rq = round(q);
@@ -58,10 +75,22 @@ fn load4(t: texture_2d<f32>, p: vec2<f32>) -> vec4<f32> {
     if abs(q.y - rq.y) < 1e-4 { q.y = rq.y; }
     let i = vec2<i32>(floor(q));
     let f = q - floor(q);
-    let a = textureLoad(t, clamp(i, vec2(0), d - 1), 0);
-    let b = textureLoad(t, clamp(i + vec2(1, 0), vec2(0), d - 1), 0);
-    let cc = textureLoad(t, clamp(i + vec2(0, 1), vec2(0), d - 1), 0);
-    let dd = textureLoad(t, clamp(i + vec2(1, 1), vec2(0), d - 1), 0);
+    var x0 = i.x;
+    var x1 = i.x + 1;
+    if wrap.x > 0.5 {
+        let a = i32(wrap.y);
+        let n = max(i32(wrap.z) - a, 1);
+        x0 = a + ((x0 - a) % n + n) % n;
+        x1 = a + ((x1 - a) % n + n) % n;
+    }
+    x0 = clamp(x0, 0, d.x - 1);
+    x1 = clamp(x1, 0, d.x - 1);
+    let y0 = clamp(i.y, 0, d.y - 1);
+    let y1 = clamp(i.y + 1, 0, d.y - 1);
+    let a = textureLoad(t, vec2(x0, y0), 0);
+    let b = textureLoad(t, vec2(x1, y0), 0);
+    let cc = textureLoad(t, vec2(x0, y1), 0);
+    let dd = textureLoad(t, vec2(x1, y1), 0);
     return mix(mix(a, b, f.x), mix(cc, dd, f.x), f.y);
 }
 
@@ -170,23 +199,30 @@ fn managed(rgb: vec3<f32>) -> vec3<f32> {
 
 // One linear premultiplied sample at source position p.
 fn sample(p: vec2<f32>) -> vec4<f32> {
+    return sample_ex(p, u.src.zw / u.src.xy, vec3(0.0));
+}
+
+// `sample` with the chroma / luma texel ratio `cr` and horizontal wrapping `wrap` (`load4w`,
+// in luma texels).
+fn sample_ex(p: vec2<f32>, cr: vec2<f32>, wrap: vec3<f32>) -> vec4<f32> {
     let kind = u32(u.p0.y);
     if kind == 0u {
         // rgba8 sRGB texture: loads are already linear, straight alpha
-        let c = load4(tex0, p);
+        let c = load4w(tex0, p, wrap);
         return vec4(c.rgb * c.a, c.a);
     }
     if kind == 1u {
-        return load4(tex0, p);
+        return load4w(tex0, p, wrap);
     }
     let cs = u.p2.z;
-    let yc = load4(tex0, p).r * cs;
-    let cp = p * u.src.zw / u.src.xy;
-    let cb = load4(tex1, cp).r * cs;
-    let cr = load4(tex2, cp).r * cs;
+    let yc = load4w(tex0, p, wrap).r * cs;
+    let cp = p * cr;
+    let cwrap = vec3(wrap.x, wrap.y * cr.x, wrap.z * cr.x);
+    let cb = load4w(tex1, cp, cwrap).r * cs;
+    let cr2 = load4w(tex2, cp, cwrap).r * cs;
     let y = (yc - u.p1.x) / u.p1.y;
     let b = (cb - u.p1.z) / u.p1.w;
-    let r = (cr - u.p1.z) / u.p1.w;
+    let r = (cr2 - u.p1.z) / u.p1.w;
     let kr = u.p2.x; let kb = u.p2.y; let kg = 1.0 - kr - kb;
     let R = y + 2.0 * (1.0 - kr) * r;
     let B = y + 2.0 * (1.0 - kb) * b;
@@ -194,11 +230,139 @@ fn sample(p: vec2<f32>) -> vec4<f32> {
     // straight alpha from the alpha plane (full resolution, like luma), premultiplied here
     var a = 1.0;
     if u.p3.y > 0.0 {
-        a = clamp(load4(tex3, p).r * u.p3.y, 0.0, 1.0);
+        a = clamp(load4w(tex3, p, wrap).r * u.p3.y, 0.0, 1.0);
     }
     var lin = to_linear(vec3(R, G, B));
     if u.q0.x > 0.5 { lin = managed(vec3(R, G, B)); }
     return vec4(lin * a, a);
+}
+
+// ---- 360° layers: the virtual camera (`filmcraft_render::vr`)
+
+const VR_PI: f32 = 3.14159265358979;
+
+// m · v for a rotation given by its rows
+fn rows_mul(r0: vec3<f32>, r1: vec3<f32>, r2: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    return vec3(dot(r0, v), dot(r1, v), dot(r2, v));
+}
+
+// mᵀ · v (the inverse rotation)
+fn rows_tmul(r0: vec3<f32>, r1: vec3<f32>, r2: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    return r0 * v.x + r1 * v.y + r2 * v.z;
+}
+
+// The world direction the view point uv (0..1 across and down) sees (`View::ray`).
+fn vr_ray(uv: vec2<f32>) -> vec3<f32> {
+    var c: vec3<f32>;
+    if u.vr[0].y < 0.5 {
+        let n = normalize(vec3((2.0 * uv.x - 1.0) * u.vr[1].x, (1.0 - 2.0 * uv.y) * u.vr[1].y, 1.0));
+        let d = u.vr[1].z;
+        if d <= 0.0 {
+            c = n;
+        } else {
+            let b = -d * n.z;
+            let t = -b + sqrt(max(b * b - (d * d - 1.0), 0.0));
+            c = normalize(vec3(t * n.x, t * n.y, t * n.z - d));
+        }
+    } else {
+        let lon = (2.0 * uv.x - 1.0) * VR_PI;
+        let lat = (1.0 - 2.0 * uv.y) * 0.5 * VR_PI;
+        c = vec3(cos(lat) * sin(lon), sin(lat), cos(lat) * cos(lon));
+    }
+    return rows_mul(u.vr[3].xyz, u.vr[4].xyz, u.vr[5].xyz, c);
+}
+
+fn vr_sample(p: vec2<f32>, wrap: vec3<f32>) -> vec4<f32> {
+    return sample_ex(p, u.vr[2].zw, wrap);
+}
+
+fn vr_equirect(d: vec3<f32>) -> vec4<f32> {
+    let lon = atan2(d.x, d.z);
+    let lat = asin(clamp(d.y, -1.0, 1.0));
+    let r = u.vr[6];
+    let sp = u.vr[7];
+    let x = r.x + (lon / sp.x + 0.5) * r.z;
+    let y = r.y + (0.5 - lat / sp.y) * r.w;
+    if sp.z > 0.5 {
+        return vr_sample(vec2(x, clamp(y, r.y, r.y + r.w)), vec3(1.0, r.x, r.x + r.z));
+    }
+    if x < r.x || x > r.x + r.z || y < r.y || y > r.y + r.w {
+        return vec4(0.0);
+    }
+    return vr_sample(vec2(x, y), vec3(0.0));
+}
+
+// Where lens k saw direction d: (x, y) in texels, θ from its axis, 1 if inside its picture.
+fn vr_lens(k: u32, d: vec3<f32>) -> vec4<f32> {
+    let b = 8u + 7u * k;
+    let rect = u.vr[b];
+    let p = u.vr[b + 1u];
+    let l = rows_tmul(u.vr[b + 2u].xyz, u.vr[b + 3u].xyz, u.vr[b + 4u].xyz, d);
+    let theta = acos(clamp(l.z, -1.0, 1.0));
+    if theta > p.w {
+        return vec4(0.0, 0.0, theta, 0.0);
+    }
+    let t = theta / max(p.w, 1e-6);
+    let terms = u32(u.vr[b + 2u].w);
+    var r = t;
+    if terms > 0u {
+        let c0 = u.vr[b + 5u];
+        let c1 = u.vr[b + 6u];
+        let cs = array<f32, 8>(c0.x, c0.y, c0.z, c0.w, c1.x, c1.y, c1.z, c1.w);
+        var acc = 0.0;
+        var pw = t;
+        for (var i = 0u; i < min(terms, 8u); i++) {
+            acc += cs[i] * pw;
+            pw *= t;
+        }
+        r = acc;
+    }
+    r *= p.z;
+    let s = length(l.xy);
+    var dirn = vec2(1.0, 0.0);
+    if s > 1e-7 {
+        dirn = l.xy / s;
+    }
+    let x = p.x + r * dirn.x;
+    let y = p.y - r * dirn.y;
+    let inside = x >= rect.x && x <= rect.z && y >= rect.y && y <= rect.w;
+    return vec4(x, y, theta, select(0.0, 1.0, inside));
+}
+
+fn vr_fisheye(d: vec3<f32>) -> vec4<f32> {
+    let lenses = u32(u.vr[0].w);
+    if lenses == 0u {
+        return vec4(0.0);
+    }
+    let a = vr_lens(0u, d);
+    if lenses == 1u {
+        if a.w > 0.5 { return vr_sample(a.xy, vec3(0.0)); }
+        return vec4(0.0);
+    }
+    let b = vr_lens(1u, d);
+    if a.w > 0.5 && b.w > 0.5 {
+        // nearer the first lens's axis: its picture, cross-faded over the blend band
+        let bl = max(u.vr[1].w, 1e-6);
+        let w0 = smoothstep(-bl, bl, b.z - a.z);
+        if w0 >= 1.0 { return vr_sample(a.xy, vec3(0.0)); }
+        if w0 <= 0.0 { return vr_sample(b.xy, vec3(0.0)); }
+        return vr_sample(a.xy, vec3(0.0)) * w0 + vr_sample(b.xy, vec3(0.0)) * (1.0 - w0);
+    }
+    if a.w > 0.5 { return vr_sample(a.xy, vec3(0.0)); }
+    if b.w > 0.5 { return vr_sample(b.xy, vec3(0.0)); }
+    return vec4(0.0);
+}
+
+// The source's colour at layer position p: the frame, or what the virtual camera sees there.
+fn source_at(p: vec2<f32>) -> vec4<f32> {
+    if u.vr[0].x < 0.5 {
+        return sample(p);
+    }
+    let d = vr_ray(p / max(u.vr[2].xy, vec2(1.0)));
+    if u.vr[0].z < 0.5 {
+        return vr_equirect(d);
+    }
+    return vr_fisheye(d);
 }
 
 // The layer's premultiplied linear colour at this pixel, opacity applied.
@@ -209,7 +373,7 @@ fn layer_color(sp: vec2<f32>) -> vec4<f32> {
     for (var j = 0u; j < n; j++) {
         for (var i = 0u; i < n; i++) {
             let off = (vec2(f32(i), f32(j)) + 0.5) / f32(n) - 0.5;
-            acc += sample(sp + off * fp);
+            acc += source_at(sp + off * fp);
         }
     }
     return acc / f32(n * n) * u.p0.x;

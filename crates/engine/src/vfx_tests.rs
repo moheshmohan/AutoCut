@@ -68,7 +68,12 @@ fn effects_list_reports_folders_and_badges() {
     let n = arr
         .iter()
         .filter(|e| {
-            e["kind"] == "Video" && e["category"][0] == "Video Effects" && e["folder"] != "Obsolete" && e["folder"] != "Creator" && e["folder"] != Value::Null
+            e["kind"] == "Video"
+                && e["category"][0] == "Video Effects"
+                && e["folder"] != "Obsolete"
+                && e["folder"] != "Creator"
+                && e["folder"] != Value::Null
+                && !e["id"].as_str().is_some_and(|id| filmcraft_project::effect::FILMCRAFT_OWN.contains(&id))
         })
         .count();
     assert_eq!(n, 93, "Premiere 26's current Video Effects");

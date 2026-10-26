@@ -123,7 +123,7 @@ fn gpu_matches_cpu_plan() {
         width: w,
         height: h,
         layers: vec![
-            PlanLayer { frame: yuv_frame(640, 360), matrix: Affine::scale(0.5, 0.5), opacity: 1.0, blend: Blend::Normal, fx: None, input: None },
+            PlanLayer { frame: yuv_frame(640, 360), matrix: Affine::scale(0.5, 0.5), opacity: 1.0, blend: Blend::Normal, fx: None, input: None, vr: None },
             PlanLayer {
                 frame: rgba,
                 matrix: Affine::motion(Vec2::new(200.0, 100.0), Vec2::new(0.4, 0.4), 12.0, Vec2::new(160.0, 90.0)),
@@ -131,6 +131,7 @@ fn gpu_matches_cpu_plan() {
                 blend: Blend::Normal,
                 fx: None,
                 input: None,
+                vr: None,
             },
         ],
     };
@@ -295,8 +296,8 @@ fn prepared_upload_matches_inline_conversion() {
         width: w as usize,
         height: h as usize,
         layers: vec![
-            PlanLayer { frame: yuv16, matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None },
-            PlanLayer { frame: rgbaf, matrix: Affine::scale(0.5, 0.5), opacity: 0.8, blend: Blend::Normal, fx: None, input: None },
+            PlanLayer { frame: yuv16, matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None, vr: None },
+            PlanLayer { frame: rgbaf, matrix: Affine::scale(0.5, 0.5), opacity: 0.8, blend: Blend::Normal, fx: None, input: None, vr: None },
         ],
     };
     let image = FramePlan::Image(filmcraft_render::Image { w: w as usize, h: h as usize, px: f32_layer });
@@ -328,7 +329,7 @@ fn upload_cache_keeps_buffers_alive() {
     let plan = FramePlan::Layers {
         width: 16,
         height: 8,
-        layers: vec![PlanLayer { frame, matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None }],
+        layers: vec![PlanLayer { frame, matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None, vr: None }],
     };
     c.composite(&plan);
     drop(plan);
@@ -478,8 +479,16 @@ fn gpu_draws_yuv_alpha_plane_like_the_cpu() {
             width: w,
             height: h,
             layers: vec![
-                PlanLayer { frame: background.clone(), matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None },
-                PlanLayer { frame: yuv_alpha_frame(320, 180, bits), matrix: Affine::IDENTITY, opacity: 0.9, blend: Blend::Normal, fx: None, input: None },
+                PlanLayer { frame: background.clone(), matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None, vr: None },
+                PlanLayer {
+                    frame: yuv_alpha_frame(320, 180, bits),
+                    matrix: Affine::IDENTITY,
+                    opacity: 0.9,
+                    blend: Blend::Normal,
+                    fx: None,
+                    input: None,
+                    vr: None,
+                },
             ],
         };
         let cpu = execute_cpu(&plan).over_black_rgba8();
@@ -495,7 +504,15 @@ fn gpu_draws_yuv_alpha_plane_like_the_cpu() {
         let bg = execute_cpu(&FramePlan::Layers {
             width: w,
             height: h,
-            layers: vec![PlanLayer { frame: background.clone(), matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None }],
+            layers: vec![PlanLayer {
+                frame: background.clone(),
+                matrix: Affine::IDENTITY,
+                opacity: 1.0,
+                blend: Blend::Normal,
+                fx: None,
+                input: None,
+                vr: None,
+            }],
         })
         .over_black_rgba8();
         let (l, r, b0) = (at(&gpu, 1), at(&gpu, w - 2), at(&bg, 1));

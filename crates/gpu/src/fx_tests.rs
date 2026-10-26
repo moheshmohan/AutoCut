@@ -701,6 +701,7 @@ fn gpu_effect_layers_match_cpu_plan() {
                     blend: Blend::Normal,
                     fx: Some(Arc::new(LayerFx { size: (320, 180), decimation: 2, ops: ops(&chain_c, 320, 180, 0.5) })),
                     input: None,
+                    vr: None,
                 },
                 PlanLayer {
                     frame: ramp.clone(),
@@ -709,6 +710,7 @@ fn gpu_effect_layers_match_cpu_plan() {
                     blend: mode,
                     fx: Some(Arc::new(LayerFx { size: (160, 120), decimation: 1, ops: ops(&chain_a, 160, 120, 1.0) })),
                     input: None,
+                    vr: None,
                 },
                 PlanLayer::new(ramp.clone(), Affine::translate(10.0, 20.0), 0.5, Blend::Normal),
                 PlanLayer {
@@ -718,6 +720,7 @@ fn gpu_effect_layers_match_cpu_plan() {
                     blend: mode,
                     fx: Some(Arc::new(LayerFx { size: (320, 180), decimation: 1, ops: ops(&chain_b, 320, 180, 1.0) })),
                     input: None,
+                    vr: None,
                 },
             ],
         };

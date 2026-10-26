@@ -176,6 +176,10 @@ pub const BLEND_MODES: &[&str] = &[
     "Luminosity",
 ];
 
+/// FilmCraft's own video effects that sit in one of Premiere's folders (beside its effects there,
+/// not in Premiere's list): the 360° virtual camera in Immersive Video.
+pub const FILMCRAFT_OWN: &[&str] = &[crate::vr::REFRAME];
+
 pub(crate) fn f(id: &'static str, label: &'static str, def: f64, min: f64, max: f64, unit: &'static str) -> ParamDef {
     ParamDef {
         id,

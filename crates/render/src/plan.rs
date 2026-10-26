@@ -49,6 +49,19 @@ pub struct PlanLayer {
     /// P3 media on a Rec. 709 sequence; [`crate::colorman::gpu_input`]): run on the GPU as on the
     /// CPU. None: the default decode.
     pub input: Option<Arc<filmcraft_color::InputTransform>>,
+    /// A 360° clip: the frame is a picture of the sphere, drawn through a virtual camera (`matrix`
+    /// then places the camera's picture, or the effect stage works on it).
+    pub vr: Option<Arc<VrLayer>>,
+}
+
+/// A 360° layer's virtual camera ([`crate::vr`]): what it looks at, the frame's model in its own
+/// pixels, the size of the picture it makes and the rays a pixel (supersampling taps a side).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VrLayer {
+    pub view: crate::vr::View,
+    pub model: crate::vr::SourceModel,
+    pub out: (u32, u32),
+    pub taps: u32,
 }
 
 /// The GPU effect stage of a layer: the frame is decoded into a working image of `size` (the
@@ -64,14 +77,16 @@ pub struct LayerFx {
 impl PlanLayer {
     /// A layer drawing `frame` directly.
     pub fn new(frame: Arc<VideoFrame>, matrix: Affine, opacity: f32, blend: Blend) -> Self {
-        Self { frame, matrix, opacity, blend, fx: None, input: None }
+        Self { frame, matrix, opacity, blend, fx: None, input: None, vr: None }
     }
 
-    /// Size of the picture the matrix places: the working image with effects, else the frame.
+    /// Size of the picture the matrix places: the working image with effects, else the virtual
+    /// camera's picture, else the frame.
     pub fn size(&self) -> (u32, u32) {
-        match &self.fx {
-            Some(fx) => fx.size,
-            None => (self.frame.width, self.frame.height),
+        match (&self.fx, &self.vr) {
+            (Some(fx), _) => fx.size,
+            (None, Some(v)) => v.out,
+            (None, None) => (self.frame.width, self.frame.height),
         }
     }
 }
@@ -291,7 +306,7 @@ fn gpu_chain<'a>(project: &Project, item: &'a TrackItem, opts: RenderOptions) ->
     let opacity_masks = item.has_opacity_masks();
     let mut effects = Vec::new();
     if opts.effects {
-        for e in item.effects.iter().filter(|e| e.enabled && e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e)) {
+        for e in item.effects.iter().filter(|e| e.enabled && crate::in_chain(e)) {
             if !crate::gpufx::GPU_EFFECTS.contains(&e.effect.as_str()) {
                 return Err(format!("layer: effect {}", e.effect));
             }
@@ -639,13 +654,15 @@ fn push_item(
     }
     if let Ok(chain) = gpu_chain(project, item, opts) {
         let Some(src) = sources.source(item.item) else { return };
-        let Some(size) = crate::source_size(project, item.item) else { return };
-        let motion = motion_matrix(seq, item, size, crate::source_par(project, item.item), mt);
+        let Some(size) = crate::clip_size(project, item) else { return };
+        let motion = motion_matrix(seq, item, size, crate::clip_par(project, item), mt);
         let lin = ((motion.a * motion.a + motion.b * motion.b).sqrt()).max((motion.c * motion.c + motion.d * motion.d).sqrt());
         // the working scale `item_layer` gives the effects (lowered under a large blur)
         let want = crate::effects_scale(item, mt, (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32, opts);
+        // a 360° clip: its virtual camera's picture at `want`, from the source as sharp as it needs
+        let reframe = crate::reframing(project, item, t, &src, want);
         let time = crate::video_source_time(item, t, src.info().frame_rate());
-        let Ok(frame) = src.video_frame(FrameRequest { time, scale: want }) else { return };
+        let Ok(frame) = src.video_frame(FrameRequest { time, scale: reframe.as_ref().map_or(want, |r| r.scale) }) else { return };
         let cs = crate::colorman::source_space(project, item.item, &frame);
         // HDR and wide-gamut media on a Rec. 709 sequence is converted on the GPU too (#965); log
         // media and other pipelines are converted on the CPU (below), and so are blended
@@ -654,7 +671,40 @@ fn push_item(
         let input = if crate::colorman::needs_management(pipe, cs, &frame) { crate::colorman::gpu_input(project, item.item, pipe, cs, &frame) } else { None };
         let plain =
             (input.is_some() || !crate::colorman::needs_management(pipe, cs, &frame)) && crate::interpolation_blend(item, t, src.info().frame_rate()).is_none();
-        if plain && !(chain.effects.is_empty() && !chain.opacity_masks) {
+        if let Some(r) = reframe {
+            // the GPU draws the virtual camera's picture straight from the source's planes; its
+            // effects then run on that picture, as `item_layer` runs them
+            if plain {
+                let model = crate::vr::SourceModel::new(&r.spherical, (frame.width as usize, frame.height as usize));
+                let taps = crate::vr::taps(&model, &r.view, r.out.0) as u32;
+                let out_size = (r.out.0 as u32, r.out.1 as u32);
+                let vr = Some(Arc::new(VrLayer { view: r.view, model, out: out_size, taps }));
+                let px_scale = r.out.0 as f32 / size.0.max(1) as f32;
+                let m = Affine::scale(opts.scale as f64, opts.scale as f64)
+                    .then_apply(&motion)
+                    .then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
+                if chain.effects.is_empty() && !chain.opacity_masks {
+                    out.push(PlanLayer { input, vr, ..PlanLayer::new(frame, m, op * extra_opacity, bl) });
+                    return;
+                }
+                let cx = crate::effects::FxCtx {
+                    t: mt,
+                    px_scale,
+                    seconds: (t - item.start).seconds(),
+                    timecode: "",
+                    clip_name: &item.name,
+                    project: Some(project),
+                    env: None,
+                    frame_rate: seq.settings.frame_rate.as_f64(),
+                    working: seq.settings.color.working,
+                };
+                if let Some(ops) = gpu_ops(&chain, item, &cx, r.out.0, r.out.1) {
+                    let fx = Some(Arc::new(LayerFx { size: out_size, decimation: 1, ops }));
+                    out.push(PlanLayer { fx, input, vr, ..PlanLayer::new(frame, m, op * extra_opacity, bl) });
+                    return;
+                }
+            }
+        } else if plain && !(chain.effects.is_empty() && !chain.opacity_masks) {
             // GPU effect stage: the working image the CPU would decode (`base_layer`), the
             // effects evaluated for it, placed as `item_layer` places it
             let n = crate::decimation(frame.width as f32, size.0 as f32 * want);
@@ -677,7 +727,7 @@ fn push_item(
                     .then_apply(&motion)
                     .then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
                 let fx = LayerFx { size: (lw as u32, lh as u32), decimation: n as u32, ops };
-                out.push(PlanLayer { frame, matrix: m, opacity: op * extra_opacity, blend: bl, fx: Some(Arc::new(fx)), input });
+                out.push(PlanLayer { frame, matrix: m, opacity: op * extra_opacity, blend: bl, fx: Some(Arc::new(fx)), input, vr: None });
                 return;
             }
         } else if plain {
@@ -722,8 +772,8 @@ fn covers_frame(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, op
     if src.info().video.as_ref().is_none_or(|v| v.has_alpha) {
         return false;
     }
-    let Some(size) = crate::source_size(project, item.item) else { return false };
-    let m = Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion_matrix(seq, item, size, crate::source_par(project, item.item), mt));
+    let Some(size) = crate::clip_size(project, item) else { return false };
+    let m = Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion_matrix(seq, item, size, crate::clip_par(project, item), mt));
     if m.b.abs() > 1e-9 || m.c.abs() > 1e-9 {
         return false;
     }
@@ -741,6 +791,23 @@ fn near_identity(m: &Affine) -> bool {
 /// effect stage).
 pub fn effect_image(frame: &VideoFrame, fx: &LayerFx) -> crate::Image {
     effect_image_with(frame, fx, None)
+}
+
+/// The picture a layer's matrix places, on the CPU: its frame decoded (and colour managed),
+/// seen through its virtual camera when it is a 360° layer, with its effects applied.
+pub fn layer_image(l: &PlanLayer) -> crate::Image {
+    let Some(v) = &l.vr else {
+        return match &l.fx {
+            Some(fx) => effect_image_with(&l.frame, fx, l.input.as_deref()),
+            None => linear_image(&l.frame, 1, l.input.as_deref()),
+        };
+    };
+    let src = linear_image(&l.frame, 1, l.input.as_deref());
+    let mut img = crate::vr::reframe(&src, &v.model, &v.view, v.out.0 as usize, v.out.1 as usize, v.taps as usize);
+    for op in l.fx.iter().flat_map(|fx| &fx.ops) {
+        op.apply(&mut img);
+    }
+    img
 }
 
 /// [`effect_image`] of a colour-managed layer ([`PlanLayer::input`]).
@@ -796,10 +863,7 @@ fn linear_image(frame: &VideoFrame, n: usize, input: Option<&filmcraft_color::In
 fn execute_layers(canvas: &mut crate::Image, layers: &[PlanLayer]) {
     let (width, height) = (canvas.w, canvas.h);
     for l in layers {
-        let src = match &l.fx {
-            Some(fx) => effect_image_with(&l.frame, fx, l.input.as_deref()),
-            None => linear_image(&l.frame, 1, l.input.as_deref()),
-        };
+        let src = layer_image(l);
         let placed = if l.matrix == Affine::scale(width as f64, height as f64) && src.w == 1 && src.h == 1 {
             crate::Image::filled(width, height, src.get(0, 0))
         } else {

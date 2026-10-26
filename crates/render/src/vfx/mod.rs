@@ -94,7 +94,7 @@ impl FxEnv for ItemEnv<'_> {
         let t2 = self.t + Tick::from_seconds_f64(dt);
         let base = crate::base_layer(self.project, self.seq, self.item, t2, self.opts, self.sources, self.want)?;
         let mut img = resize(base, self.layer_size.0, self.layer_size.1);
-        let src = crate::source_size(self.project, self.item.item).unwrap_or((1, 1));
+        let src = crate::clip_size(self.project, self.item).unwrap_or((1, 1));
         let cx = FxCtx {
             t: self.item.effect_time_at(t2),
             px_scale: img.w as f32 / src.0.max(1) as f32,
@@ -110,7 +110,7 @@ impl FxEnv for ItemEnv<'_> {
             if std::ptr::eq(e, upto) {
                 break;
             }
-            if e.def().is_some_and(|d| !d.intrinsic) && !filmcraft_project::graphic::is_layer(e) && !is_temporal(&e.effect) {
+            if crate::in_chain(e) && !is_temporal(&e.effect) {
                 crate::mask::apply_effect(&mut img, e, &cx);
             }
         }
@@ -158,7 +158,7 @@ impl FxEnv for ItemEnv<'_> {
         (self.seq.settings.width, self.seq.settings.height)
     }
     fn source_size(&self) -> (u32, u32) {
-        crate::source_size(self.project, self.item.item).unwrap_or((self.seq.settings.width, self.seq.settings.height))
+        crate::clip_size(self.project, self.item).unwrap_or((self.seq.settings.width, self.seq.settings.height))
     }
     fn clip_key(&self) -> u64 {
         let mut h = 0xcbf2_9ce4_8422_2325u64;

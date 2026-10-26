@@ -20,7 +20,7 @@ use filmcraft_media::FrameRequest;
 use filmcraft_project::{ItemKind, Project, Sequence, TrackItem};
 use filmcraft_time::Tick;
 
-use crate::{RenderOptions, SourceProvider, effects_scale, interpolation_blend, motion_matrix, source_par, source_size, video_source_time};
+use crate::{RenderOptions, SourceProvider, effects_scale, interpolation_blend, motion_matrix, video_source_time};
 
 /// Ask the media sources of sequence `seq_id` for the pictures its frame at `t` shows (at the
 /// scale the render asks them for), so they are decoded and cached before the frame is rendered.
@@ -57,13 +57,15 @@ fn warm_item(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, opts:
     if !matches!(pi.kind, ItemKind::Media(_) | ItemKind::Subclip { .. }) {
         return 0;
     }
-    let Some(src_size) = source_size(project, item.item) else { return 0 };
+    let Some(src_size) = crate::clip_size(project, item) else { return 0 };
     let Some(src) = sources.source(item.item) else { return 0 };
     // the scale `item_layer_ex` asks for (sources that decode reduced pictures cache them by it)
     let mt = item.effect_time_at(t);
-    let motion = motion_matrix(seq, item, src_size, source_par(project, item.item), mt);
+    let motion = motion_matrix(seq, item, src_size, crate::clip_par(project, item), mt);
     let lin = (motion.a * motion.a + motion.b * motion.b).sqrt().max((motion.c * motion.c + motion.d * motion.d).sqrt());
     let want = effects_scale(item, mt, (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32, opts);
+    // a 360° clip asks for its source as sharp as its virtual camera's view needs
+    let want = crate::reframing(project, item, t, &src, want).map_or(want, |r| r.scale);
     let rate = src.info().frame_rate();
     let mut asked = 1;
     let _ = src.video_frame(FrameRequest { time: video_source_time(item, t, rate), scale: want });

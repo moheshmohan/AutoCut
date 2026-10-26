@@ -199,6 +199,23 @@ fn immersive() -> Vec<EffectDef> {
                 b("stretch", "Stretch to Fit Frame", true),
             ],
         ),
+        // the virtual camera of a 360° clip (`crate::vr`): not one of Premiere's, so no frame
+        // layout of its own (the media's VR Properties say how the picture maps onto the sphere)
+        video(
+            crate::vr::REFRAME,
+            "360 Reframe",
+            IMMERSIVE,
+            vec![
+                fs("yaw", "Pan (Yaw)", 0.0, (-3600.0, 3600.0), (-180.0, 180.0), "°", 1),
+                fs("pitch", "Tilt (Pitch)", 0.0, (-90.0, 90.0), (-90.0, 90.0), "°", 1),
+                fs("roll", "Roll", 0.0, (-180.0, 180.0), (-180.0, 180.0), "°", 1),
+                fs("fov", "Field of View", 90.0, (5.0, 175.0), (20.0, 150.0), "°", 1),
+                fs("distance", "Lens Distance", 0.0, (0.0, 1.0), (0.0, 1.0), "", 2),
+                ch("output", "Output", crate::vr::OUTPUTS, 0),
+                ParamDef { animatable: false, ..fs("width", "Width", 1920.0, (16.0, 16384.0), (16.0, 7680.0), "px", 0) },
+                ParamDef { animatable: false, ..fs("height", "Height", 1080.0, (16.0, 16384.0), (16.0, 7680.0), "px", 0) },
+            ],
+        ),
         vr("vr_rotate_sphere", "VR Rotate Sphere", vec![ang("tilt", "Tilt (X Axis)", 0.0), ang("pan", "Pan (Y Axis)", 0.0), ang("roll", "Roll (Z Axis)", 0.0)]),
         vr("vr_sharpen", "VR Sharpen", vec![fs("amount", "Sharpen Amount", 0.0, (0.0, 500.0), (0.0, 100.0), "", 0)]),
     ]
@@ -1292,8 +1309,9 @@ mod tests {
         // nothing else sits in the current folders
         for d in effect_defs().iter().filter(|d| d.kind == EffectKind::Video && d.category.first() == Some(&"Video Effects")) {
             let f = d.category[1];
-            // (Creator is FilmCraft's own folder, beyond Premiere's list)
-            if f == "Obsolete" || f == "Creator" {
+            // (Creator is FilmCraft's own folder, beyond Premiere's list; FILMCRAFT_OWN its own
+            // effects in Premiere's folders)
+            if f == "Obsolete" || f == "Creator" || crate::effect::FILMCRAFT_OWN.contains(&d.id) {
                 continue;
             }
             let listed = CATALOGUE.iter().any(|(cf, names)| *cf == f && names.contains(&d.name));

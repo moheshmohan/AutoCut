@@ -687,7 +687,27 @@ impl GpuCompositor {
         ];
         let mut u = [0.0; UNIFORM_FLOATS];
         u[..28].copy_from_slice(&base);
-        u[28..].copy_from_slice(&q);
+        u[28..52].copy_from_slice(&q);
+        u
+    }
+
+    /// [`uniforms`](Self::uniforms) of a layer, with its virtual camera when it is a 360° layer:
+    /// the quad is then the camera's picture (`size` its size), and every pixel samples the ray it
+    /// sees (at least the camera's own supersampling taps).
+    fn layer_uniforms(
+        src: &SrcInfo,
+        vr: Option<&filmcraft_render::plan::VrLayer>,
+        m: &filmcraft_geom::Affine,
+        opacity: f32,
+        blend: Blend,
+        out: (u32, u32),
+    ) -> [f32; UNIFORM_FLOATS] {
+        let Some(v) = vr else { return Self::uniforms(src, m, opacity, blend, out) };
+        let mut u = Self::uniforms(&SrcInfo { size: v.out, ..*src }, m, opacity, blend, out);
+        let taps = u[14].max(v.taps.clamp(1, filmcraft_render::vr::MAX_TAPS as u32) as f32);
+        u[14] = taps;
+        u[23] = u[23].max(1.0);
+        u[52..].copy_from_slice(&vr_block(v, src.size, src.chroma));
         u
     }
 
@@ -729,8 +749,15 @@ impl GpuCompositor {
                     },
                     None => VideoFrame::rgba_f32(img.w as u32, img.h as u32, img.px.clone()),
                 };
-                owned =
-                    [PlanLayer { frame: Arc::new(frame), matrix: filmcraft_geom::Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None }];
+                owned = [PlanLayer {
+                    frame: Arc::new(frame),
+                    matrix: filmcraft_geom::Affine::IDENTITY,
+                    opacity: 1.0,
+                    blend: Blend::Normal,
+                    fx: None,
+                    input: None,
+                    vr: None,
+                }];
                 (img.w as u32, img.h as u32, &owned[..])
             }
             FramePlan::Composite { width, height, steps } => return self.composite_steps(*width, *height, steps, prep),
@@ -746,14 +773,16 @@ impl GpuCompositor {
         // Layers whose effects the GPU stage can't run (no stage on this device, or a working image
         // larger than a texture) are rendered on the CPU here and drawn as plain RGBA layers.
         let max_side = self.device.limits().max_texture_dimension_2d;
+        // A 360° frame larger than a texture is seen through its virtual camera on the CPU too.
         let cpu_fx: Vec<Option<PlanLayer>> = layers
             .iter()
             .map(|l| {
-                let lfx = l.fx.as_ref()?;
-                if self.fx.is_some() && lfx.size.0.max(lfx.size.1) <= max_side {
+                let fx_ok = l.fx.as_ref().is_none_or(|lfx| self.fx.is_some() && lfx.size.0.max(lfx.size.1) <= max_side);
+                let vr_ok = l.vr.is_none() || l.frame.width.max(l.frame.height) <= max_side;
+                if fx_ok && vr_ok {
                     return None;
                 }
-                let img = filmcraft_render::plan::effect_image(&l.frame, lfx);
+                let img = filmcraft_render::plan::layer_image(l);
                 Some(PlanLayer::new(Arc::new(VideoFrame::rgba_f32(img.w as u32, img.h as u32, img.px)), l.matrix, l.opacity, l.blend))
             })
             .collect();
@@ -795,9 +824,15 @@ impl GpuCompositor {
             let job = match &l.fx {
                 Some(lfx) => {
                     // the source drawn onto the working image (box-decimated by n, as the CPU decodes)
-                    let n = lfx.decimation.max(1) as f64;
-                    let mut su =
-                        Self::uniforms(&src, &filmcraft_geom::Affine::scale(1.0 / n, 1.0 / n), 1.0, Blend::Normal, (lfx.size.0.max(1), lfx.size.1.max(1)));
+                    let n = if l.vr.is_some() { 1.0 } else { lfx.decimation.max(1) as f64 };
+                    let mut su = Self::layer_uniforms(
+                        &src,
+                        l.vr.as_deref(),
+                        &filmcraft_geom::Affine::scale(1.0 / n, 1.0 / n),
+                        1.0,
+                        Blend::Normal,
+                        (lfx.size.0.max(1), lfx.size.1.max(1)),
+                    );
                     // Effect sources use the working pixel center, avoiding interpolated vertex coordinates.
                     su[26] = n as f32;
                     let sbuf = self.uniform_buffer(&su);
@@ -831,13 +866,13 @@ impl GpuCompositor {
                     // fallback above rules out; it is then drawn without them, where the working
                     // image would be)
                     let m = match &l.fx {
-                        Some(lfx) => {
+                        Some(lfx) if l.vr.is_none() => {
                             let n = 1.0 / lfx.decimation.max(1) as f64;
                             l.matrix.then_apply(&filmcraft_geom::Affine::scale(n, n))
                         }
-                        None => l.matrix,
+                        _ => l.matrix,
                     };
-                    (Self::uniforms(&src, &m, l.opacity, l.blend, (w, h)), views)
+                    (Self::layer_uniforms(&src, l.vr.as_deref(), &m, l.opacity, l.blend, (w, h)), views)
                 }
             };
             jobs.push(job);
@@ -1223,8 +1258,63 @@ struct SrcInfo {
     input: Option<filmcraft_color::GpuInputParams>,
 }
 
-/// Floats in a layer's uniform block (`U` in `composite.wgsl`: 13 vec4).
-const UNIFORM_FLOATS: usize = 52;
+/// Floats in a layer's uniform block (`U` in `composite.wgsl`: 13 vec4, then the 22 of a 360°
+/// layer's virtual camera).
+const UNIFORM_FLOATS: usize = 52 + VR_FLOATS;
+const VR_FLOATS: usize = 88;
+
+/// The virtual camera block of a 360° layer's uniforms (`U.vr` in `composite.wgsl`) for a
+/// source texture of `tex` texels with chroma planes of `chroma`.
+fn vr_block(v: &filmcraft_render::plan::VrLayer, tex: (u32, u32), chroma: (u32, u32)) -> [f32; VR_FLOATS] {
+    use filmcraft_render::vr::{Output, SourceModel};
+    let mut b = [0.0f32; VR_FLOATS];
+    let mut put = |at: usize, vals: &[f64]| {
+        for (k, x) in vals.iter().enumerate() {
+            if let Some(slot) = b.get_mut(at + k) {
+                *slot = if x.is_finite() { *x as f32 } else { 0.0 };
+            }
+        }
+    };
+    let (out_kind, tan_x, tan_y, distance) = match v.view.output {
+        Output::Flat { tan_x, tan_y, distance } => (0.0, tan_x, tan_y, distance),
+        Output::Sphere => (1.0, 0.0, 0.0, 0.0),
+    };
+    let (src_kind, lenses) = match &v.model {
+        SourceModel::Equirect { .. } => (0.0, 0.0),
+        SourceModel::DualFisheye { lenses, .. } => (1.0, lenses.len().min(2) as f64),
+    };
+    let blend = match &v.model {
+        SourceModel::DualFisheye { blend, .. } => *blend,
+        SourceModel::Equirect { .. } => 0.0,
+    };
+    let (tw, th) = (f64::from(tex.0.max(1)), f64::from(tex.1.max(1)));
+    put(0, &[1.0, out_kind, src_kind, lenses]);
+    put(4, &[tan_x, tan_y, distance, blend]);
+    put(8, &[f64::from(v.out.0.max(1)), f64::from(v.out.1.max(1)), f64::from(chroma.0) / tw, f64::from(chroma.1) / th]);
+    for (i, row) in v.view.rotation.iter().enumerate() {
+        put(12 + 4 * i, row);
+    }
+    match &v.model {
+        SourceModel::Equirect { rect, span, wrap } => {
+            put(24, rect);
+            put(28, &[span.0, span.1, if *wrap { 1.0 } else { 0.0 }, 0.0]);
+        }
+        SourceModel::DualFisheye { lenses, .. } => {
+            for (k, l) in lenses.iter().take(2).enumerate() {
+                let at = 32 + 28 * k;
+                put(at, &l.rect);
+                put(at + 4, &[l.cx, l.cy, l.radius, l.half_fov]);
+                for (i, row) in l.rotation.iter().enumerate() {
+                    put(at + 8 + 4 * i, row);
+                }
+                put(at + 11, &[l.poly.len().min(8) as f64]);
+                let poly: Vec<f64> = l.poly.iter().copied().take(8).collect();
+                put(at + 20, &poly);
+            }
+        }
+    }
+    b
+}
 
 /// Poll a future once: wgpu's native error scopes resolve immediately. `None` if it is still
 /// pending (then the caller assumes the worst).
@@ -1283,3 +1373,5 @@ mod fx_tests;
 mod shader_transition_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vr_tests;
