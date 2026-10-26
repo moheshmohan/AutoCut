@@ -204,14 +204,16 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
 
    The report keeps the plan (each shot's file, moment, camera and beats) and the options it was
    made with; a revision starts from them (new options win; the export becomes
-   `<name>-revised.mp4` unless one is given), finds each shot again in the footage, and asks the
-   local model to turn the notes into changes — a shot shorter or longer, removed, another
+   `<name>-revised.mp4` unless one is given), finds each shot again in the footage, reads the
+   common notes by rules and takes them literally, and asks the local model to turn the rest
+   into changes — a shot shorter or longer, removed, another
    camera, fewer of a move, a stretch warmer, cooler, brighter or more vivid over the colour pass,
    a text or the title, the cutting style or the look, another moment in a shot's place — each
    checked before it is made (a camera its clip cannot use, or footage too short, is refused and
-   said). Without a model, rules read the common notes (times like `1:10`, "too long", "remove",
-   "fewer / no <move>", "warmer / cooler / brighter / darker at the end / start / 1:10",
-   "punchier", "calmer", `title: …`). The cuts are picked again for the changed shots and the
+   said). The rules read times like `1:10`, "too long", "remove", "fewer / no <move>",
+   "warmer / cooler / brighter / darker at the end / start / 1:10", "punchier", "calmer",
+   `title: …` (given the whole notes, the model added changes nobody asked for: "warmer" came
+   back warmer, brighter and more vivid). The cuts are picked again for the changed shots and the
    edit is rebuilt; the report's `changes` lists what changed and what was not understood.
 
 Seen on the Insta360 samples: a 30 s 9:16 reel of four X5 recordings and two phone clips directed

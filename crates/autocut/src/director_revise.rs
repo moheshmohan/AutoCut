@@ -1,7 +1,7 @@
 //! Revising a directed edit from notes ("1:10 is too long", "warmer at the end", "fewer barrel
-//! rolls"): the notes become changes to the saved plan — by the local model, else by rules that
-//! read the common ones — each checked and applied, and the edit is rebuilt from the changed
-//! plan, not planned again. The report's `changes` lists what changed and what was not
+//! rolls"): the notes become changes to the saved plan — the common ones read by rules and taken
+//! literally, the local model reading only what the rules could not — each checked and applied,
+//! and the edit is rebuilt from the changed plan, not planned again. The report's `changes` lists what changed and what was not
 //! understood.
 //!
 //! A change ([`Op`]) names its shot by number (`shot`, from 1) or by a time in the last cut

@@ -2254,31 +2254,27 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         let (mut revised, lost) = revise::remap(&pr.plan, &cands);
         let last_cut = windows(&pr.plan, &Beats::grid(pr.plan.bpm));
         let length = last_cut.last().map_or(o.seconds, |w| w.1);
-        let (ops, unread) = match model {
-            Some(m) => {
-                lines(&format!("revising with {}", m.id()));
-                match revise::model_ops(m, &notes_text, &revised, &last_cut, &cands).await {
-                    Ok(x) if !x.0.is_empty() => x,
-                    Ok(_) | Err(_) => {
-                        report.fallbacks.push(format!("revise: {} gave no usable change: the notes were read by rules", m.id()));
-                        revise::rules_ops(&notes_text, length)
-                    }
+        // the notes the rules read are taken literally; the model reads only the rest (left
+        // the whole notes, it added changes nobody asked for: "warmer" became warmer, brighter
+        // and more vivid)
+        let (mut ops, mut unread) = revise::rules_ops(&notes_text, length);
+        let mut by_model = false;
+        if let Some(m) = model.filter(|_| !unread.is_empty()) {
+            lines(&format!("revising with {}", m.id()));
+            match revise::model_ops(m, &unread.join(". "), &revised, &last_cut, &cands).await {
+                Ok((more, bad)) if !more.is_empty() => {
+                    ops.extend(more);
+                    unread = bad;
+                    by_model = true;
                 }
+                Ok(_) | Err(_) => report.fallbacks.push(format!("revise: {} gave no usable change for the notes the rules could not read", m.id())),
             }
-            None => revise::rules_ops(&notes_text, length),
-        };
+        }
         report.changes = revise::apply(&mut revised, &ops, &cands, &last_cut, beat, &mut o);
         report.changes.extend(unread.into_iter().map(|u| format!("not understood: {u}")));
         report.changes.extend(lost);
         report.revised_from = pr.path.clone();
-        revised.by = format!(
-            "revised ({})",
-            if model.is_some() && !report.fallbacks.iter().any(|f| f.starts_with("revise:")) {
-                model.map_or_else(String::new, |m| m.id())
-            } else {
-                "rules".into()
-            }
-        );
+        revised.by = format!("revised ({})", if by_model { format!("rules and {}", model.map_or_else(String::new, |m| m.id())) } else { "rules".into() });
         lines(&format!("{} change(s) to the saved plan", report.changes.len()));
         plan = Some(revised);
     }

@@ -722,3 +722,23 @@ async fn an_edit_is_revised_from_notes_not_made_again() {
         .count();
     assert!(warm >= 1, "{r}");
 }
+
+#[tokio::test]
+async fn notes_the_rules_read_are_taken_literally_and_the_model_reads_the_rest() {
+    let ex = demo_session();
+    let mut lines = |_: &str| {};
+    let first = make(&ex, &json!({"brief": "a 10 s reel", "seconds": 10, "bpm": 120, "captions": false, "color": false}), None, &mut lines).await.unwrap();
+    // a model that would turn "warmer" into warmer, brighter and more vivid
+    let model = crate::llm::FixedModel::new(vec![json!({"ops": [{"op": "title", "text": "Sea And Sky"}]})]);
+    let r = make(&ex, &json!({"revise": "warmer at the end. call it something about the sea", "previous": first, "captions": false}), Some(&model), &mut lines)
+        .await
+        .unwrap();
+    let changes: Vec<&str> = r["changes"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(changes.iter().any(|c| c.ends_with(": warmer")), "only warmer, as written: {changes:?}");
+    assert!(changes.iter().any(|c| c.contains("Sea And Sky")), "{changes:?}");
+    // the model was asked only about what the rules could not read
+    let asked = model.asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].1.contains("call it something about the sea") && !asked[0].1.contains("Notes: \"warmer"), "{}", asked[0].1);
+    assert!(r["director"].as_str().unwrap().contains("rules and fixed"), "{r}");
+}
