@@ -202,6 +202,19 @@ fn the_models_picks_fill_the_rhythm_and_are_repaired() {
     let items: Vec<u64> = p.shots.iter().map(|s| same.iter().find(|c| c.id == s.clip).unwrap().item).collect();
     assert!(items.windows(3).all(|w| !(w[0] == w[1] && w[1] == w[2])), "{items:?} {:?}", p.notes);
     assert!(p.notes.iter().any(|n| n.contains("third shot")), "{:?}", p.notes);
+    // the moments run out (the recap that came out 3 s short): a third moment of one file in a
+    // row, then the shot before playing on — the edit keeps its length
+    let few = vec![
+        cand("c1", 1, Kind::Vr, 0.0, 12.0, 40.0, 0),
+        cand("c2", 2, Kind::Flat, 0.0, 6.0, 6.0, 1),
+        cand("c3", 2, Kind::Flat, 6.0, 6.0, 20.0, 2),
+        cand("c4", 2, Kind::Flat, 12.0, 6.0, 20.0, 3),
+    ];
+    let six = rhythm(40, beat, 6);
+    let p = validate(&json!({"shots": [{"clip": "c1"}, {"clip": "c2"}, {"clip": "c3"}]}), &few, &o, beat, 120.0, &six).unwrap();
+    assert_eq!(p.beats(), 40, "{:?} {:?}", p.shots, p.notes);
+    assert!(p.notes.iter().any(|n| n.contains("a third of it in a row")), "{:?}", p.notes);
+    assert!(p.notes.iter().any(|n| n.contains("plays on")), "{:?}", p.notes);
     // indoors, no reveal from the sky
     let mut inside = lib.clone();
     inside[2].indoor = true;

@@ -1269,8 +1269,9 @@ fn fit_camera(
 /// place in the list) kept when its clip exists, has the footage and is not the same moment
 /// again or a third shot of one file in a row — its camera fitted ([`fit_camera`]) and its looks
 /// checked — else the slot is filled by rules (the next unused clip in filming order, the kinds
-/// taking turns). The text must be English. The notes say every repair. `Err` when the answer
-/// has no shots at all.
+/// taking turns; a third moment of one file in a row when nothing else is left; with no moment
+/// left at all, the shot before plays on through it). The text must be English. The notes say
+/// every repair. `Err` when the answer has no shots at all.
 pub fn validate(v: &Value, cands: &[Candidate], o: &Options, beat: f64, bpm: f64, slots: &[Slot]) -> Result<Plan, String> {
     let v = plan_body(v);
     let list = shots_in(v).ok_or_else(|| {
@@ -1324,9 +1325,31 @@ pub fn validate(v: &Value, cands: &[Candidate], o: &Options, beat: f64, bpm: f64
                 later.sort_by(|a, b| (b.kind == Kind::Vr).cmp(&(a.kind == Kind::Vr)).then((b.hook + b.energy).total_cmp(&(a.hook + a.energy))));
             }
             pick = later.first().map(|c| (*c, None, Value::Null));
+            if pick.is_none() {
+                // only one file's moments left: a third of it in a row rather than a short edit
+                let mut rest: Vec<&Candidate> = cands.iter().filter(|c| !used_ids.contains(&c.id) && window_from(c, need(Camera::Hold)).is_some()).collect();
+                rest.sort_by_key(|c| (c.order, c.start.to_bits()));
+                if let Some(c) = rest.first() {
+                    notes.push(format!("slot {} ({}): only one file's moments left: a third of it in a row", k + 1, c.id));
+                    pick = Some((*c, None, Value::Null));
+                }
+            }
         }
         let Some((c, asked_cam, s)) = pick else {
-            notes.push(format!("slot {}: nothing left to fill it", k + 1));
+            // nothing new to show: the shot before plays on through the slot's beats when its
+            // footage lasts, so the edit keeps its length
+            let longer = shots.last_mut().and_then(|p| {
+                let c = cands.iter().find(|c| c.id == p.clip)?;
+                let beats = p.beats.saturating_add(slot.beats);
+                let from = window_from(c, f64::from(beats) * beat * p.camera.speed())?;
+                p.beats = beats;
+                p.from = round2(from);
+                Some(())
+            });
+            notes.push(match longer {
+                Some(()) => format!("slot {}: nothing left to fill it: the shot before plays on", k + 1),
+                None => format!("slot {}: nothing left to fill it", k + 1),
+            });
             continue;
         };
         if !s.is_null() {
