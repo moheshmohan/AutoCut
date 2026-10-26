@@ -51,10 +51,78 @@ fn a_ramp_keeps_the_media_and_changes_the_length_by_the_mean_speed() {
     assert_eq!(undone, before);
     s.execute("edit.redo", json!({})).unwrap();
     assert_eq!(clip(&s, before.id), after);
-    // none takes it off and keeps the length
-    s.execute("clip.speedRamp", json!({"clips": [before.id.0], "preset": "none"})).unwrap();
+    // none takes it off and puts back the speed from before it: the clip's length again
+    let r = s.execute("clip.speedRamp", json!({"clips": [before.id.0], "preset": "none"})).unwrap();
+    assert_eq!(r["clips"][0]["removed"], true, "{r}");
     let off = clip(&s, before.id);
-    assert!(!off.has_time_remap() && off.duration == after.duration);
+    assert!(!off.has_time_remap() && off.speed == before.speed, "{off:?}");
+    assert!((off.duration.0 - before.duration.0).abs() <= frame.0, "{:?} vs {:?}", off.duration, before.duration);
+    assert!(off.effect("time_remap").is_none_or(|e| e.param(crate::speed_ramp::RAMP_BASE).is_none()), "nothing remembered");
+    // none on a clip without a ramp changes nothing
+    let r = s.execute("clip.speedRamp", json!({"clips": [before.id.0], "preset": "none"})).unwrap();
+    assert_eq!(r["clips"][0]["removed"], false, "{r}");
+    assert_eq!(clip(&s, before.id), off);
+}
+
+/// Live (the Akku Tesla hero shot): `ripple: false` with a ramp averaging 2× halved the clip and
+/// left a gap, and `none` kept the 204 %. `fit: "length"` keeps the clip's place and length.
+#[test]
+fn a_ramp_that_keeps_the_length_plays_more_media_or_eases_to_the_source() {
+    let mut s = demo();
+    let before = last_v1(&s);
+    let end = crate::media_duration(&s.project, &s.media, before.item).expect("demo media has a length");
+    let frame = s.active_sequence().unwrap().settings.frame_rate.frame_duration();
+    // room after In for the whole ramp: the clip plays on into the source's handle
+    let r = s.execute("clip.speedRamp", json!({"clips": [before.id.0], "preset": "hero", "fit": "length", "ripple": false})).unwrap();
+    assert_eq!(r["fit"], "length");
+    let after = clip(&s, before.id);
+    let mean = r["clips"][0]["meanSpeed"].as_f64().unwrap();
+    assert!(mean > 1.1, "hero is faster on average: {mean}");
+    assert_eq!((after.start, after.duration), (before.start, before.duration), "its place and length");
+    // more of the source than before, never past its end (the demo's handle is short: eased)
+    assert!(after.source_out() > before.source_out() && after.source_out() <= end + frame, "{:?} {:?} {end:?}", after.source_out(), before.source_out());
+    match r["clips"][0].get("eased").and_then(|e| e.as_f64()) {
+        None => assert!((after.speed - before.speed * mean).abs() < 1e-6, "{} vs {}", after.speed, before.speed * mean),
+        Some(k) => assert!((0.0..1.0).contains(&k) && (end - after.source_out()).0.abs() <= frame.0, "eased to the source's end: {r}"),
+    }
+    assert!(after.has_time_remap());
+    // a ramp on the ramped clip replaces it: the same curve, not one on top of the other
+    s.execute("clip.speedRamp", json!({"clips": [before.id.0], "preset": "hero", "fit": "length"})).unwrap();
+    let again = clip(&s, before.id);
+    assert_eq!((again.start, again.duration, again.source_in), (after.start, after.duration, after.source_in));
+    assert!((again.speed - after.speed).abs() < 1e-9, "{} vs {}", again.speed, after.speed);
+    let keys = |it: &TrackItem| filmcraft_project::time_remap::curve_of(it).map(|p| p.keyframes.len());
+    assert_eq!(keys(&again), keys(&after));
+    // and none with fit: length puts the clip back as it was
+    s.execute("clip.speedRamp", json!({"clips": [before.id.0], "preset": "none", "fit": "length"})).unwrap();
+    let off = clip(&s, before.id);
+    assert!(!off.has_time_remap() && off.speed == before.speed && off.duration == before.duration && off.source_in == before.source_in, "{off:?}");
+
+    // no room after Out (its Out at the media's end): the curve is eased until it fits
+    let seq_id = s.state.active_sequence.unwrap();
+    let tight = {
+        let q = std::sync::Arc::make_mut(&mut s.project).sequence_mut(seq_id).unwrap();
+        let (_, it) = q.find_item_mut(before.id).unwrap();
+        it.source_in = end - Tick((it.duration.0 as f64 * it.speed.abs() * 1.2) as i64);
+        it.clone()
+    };
+    let r = s.execute("clip.speedRamp", json!({"clips": [before.id.0], "preset": "hero", "fit": "length"})).unwrap();
+    let eased = r["clips"][0]["eased"].as_f64().expect("eased");
+    assert!((0.0..1.0).contains(&eased), "{r}");
+    let after = clip(&s, before.id);
+    assert_eq!((after.start, after.duration), (tight.start, tight.duration));
+    assert!(after.source_out() <= end + frame, "{:?} past {end:?}", after.source_out());
+    assert!(after.speed > tight.speed * 1.1, "still a ramp faster on average: {}", after.speed);
+    // media over the clip still runs forward
+    let mut last = Tick(i64::MIN);
+    for i in 0..=200 {
+        let m = after.source_time_at(after.start + Tick(after.duration.0 * i / 200));
+        assert!(m >= last);
+        last = m;
+    }
+    // a bad fit is refused
+    assert!(s.execute("clip.speedRamp", json!({"clips": [before.id.0], "preset": "hero", "fit": "stretch"})).is_err());
+    assert!(s.execute("clip.speedRamp", json!({"clips": [before.id.0], "preset": "hero", "fit": 1})).is_err());
 }
 
 #[test]

@@ -303,7 +303,7 @@ pub fn drive<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, progre
     // the picker tab it drives, named by its ids now while it is in front (Chrome), so that the
     // close at the end is that tab's, whatever tab is in front by then
     let driven = actor.front_tab().ok().flatten().filter(|t| crate::tabs::is_picker_url(&t.url));
-    let result = drive_inner(actor, grounder, plan, progress);
+    let result = drive_inner(actor, grounder, plan, driven.as_ref(), progress);
     if let Err(e) = &result {
         // every exit is spoken: a silent agent thread is undebuggable from outside
         progress(&format!("screenagent: giving up: {e}"));
@@ -322,7 +322,13 @@ pub fn drive<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, progre
 const SEARCH_TRIES: usize = 4;
 const SEARCH_RETRY_MS: u64 = 1500;
 
-fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, progress: &mut dyn FnMut(&str)) -> Result<Summary, ScreenError> {
+fn drive_inner<A: Act, G: Ground>(
+    actor: &mut A,
+    grounder: &G,
+    plan: &Plan,
+    driven: Option<&crate::tabs::Tab>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Summary, ScreenError> {
     let started = Instant::now();
     let mut summary = Summary::default();
 
@@ -330,14 +336,22 @@ fn drive_inner<A: Act, G: Ground>(actor: &mut A, grounder: &G, plan: &Plan, prog
     actor.sleep(600);
     let mut cap = actor.capture()?;
 
-    // 1–2. the album's search result, selected whole (or an error with nothing selected) by eyes
-    // that never see anything in the search field, which holds its title; or the searches — for
-    // videos always, so Google's own filter leaves only videos in the grid
+    // 1–2. the album's search result, selected whole (or an error with nothing selected): tile by
+    // tile in the picker's page where the browser runs scripts in it, else by eyes that never see
+    // anything in the search field, which holds its title; or the searches — for videos always,
+    // so Google's own filter leaves only videos in the grid
     if let Some(title) = plan.album.as_deref() {
-        let field = search_album(actor, grounder, plan, &mut summary, &mut cap, title, started, progress)?;
+        let mut page = open_page(actor, driven, progress);
+        let field = search_album(actor, grounder, plan, &mut summary, &mut cap, title, started, &mut page, progress)?;
         let eyes = OutsideField { eyes: grounder, field };
-        if select_everything(actor, &eyes, plan, &mut summary, &mut cap, started, progress)?.is_none() {
-            summary.note = format!("searching the picker for `{title}` showed no item to select; nothing was selected");
+        let by_page = match &page {
+            Some(p) => tick_album(actor, plan, &mut summary, p, title, started, progress)?,
+            None => false,
+        };
+        if by_page {
+            cap = actor.capture()?;
+        } else if select_everything(actor, &eyes, plan, &mut summary, &mut cap, started, progress)?.is_none() {
+            summary.note = no_item_note(title);
         }
         return finish(actor, &eyes, plan, summary, cap, started, progress);
     }
@@ -975,15 +989,106 @@ impl GridLook {
     }
 }
 
+/// Looks at the grid after Return before an album's search counts as showing nothing new: in the
+/// page a second apart ([`crate::dom::wait_for_results`]), by eyes [`SEARCH_SETTLE_MS`] apart.
+/// Live (2026-10-24), the album "akku tesla toy" showed its items only after the two looks 2.5 s
+/// apart the agent then made had given up on it.
+const ALBUM_PAGE_LOOKS: u32 = 30;
+const ALBUM_EYE_LOOKS: u32 = 8;
+
+/// The picker's page, where the browser runs scripts in it: the tab, and the tiles the library
+/// showed before the search (read once the picker has loaded, [`crate::dom::settled_tiles`]).
+struct Page {
+    tab: crate::tabs::Tab,
+    library: Vec<String>,
+}
+
+/// The page of the picker tab the agent drives, when the browser runs scripts in it (Chrome with
+/// View ▸ Developer ▸ Allow JavaScript from Apple Events); `None`: the eyes do it all.
+fn open_page<A: Act>(actor: &mut A, driven: Option<&crate::tabs::Tab>, progress: &mut dyn FnMut(&str)) -> Option<Page> {
+    let tab = driven?;
+    match crate::dom::run(actor, tab, crate::dom::Step::Look) {
+        Ok(_) => {
+            progress("screenagent: reading the picker's page: its tiles are ticked by their checkboxes");
+            Some(Page { tab: tab.clone(), library: Vec::new() })
+        }
+        Err(ScreenError::Unsupported(why)) => {
+            progress(&format!("screenagent: {why}; selecting by eyes"));
+            None
+        }
+        Err(e) => {
+            progress(&format!("screenagent: cannot read the picker's page ({e}); selecting by eyes"));
+            None
+        }
+    }
+}
+
+fn no_item_note(title: &str) -> String {
+    format!("searching the picker for `{title}` showed no item to select; nothing was selected")
+}
+
+/// Tick every tile of the album's search result in the page ([`crate::dom::tick_all`]).
+/// `Ok(false)`: the page stopped answering or its clicks selected nothing — the eyes go on.
+/// More tiles than this run's maximum, or tiles that would not tick, end the pick unconfirmed.
+fn tick_album<A: Act>(
+    actor: &mut A,
+    plan: &Plan,
+    summary: &mut Summary,
+    page: &Page,
+    title: &str,
+    started: Instant,
+    progress: &mut dyn FnMut(&str),
+) -> Result<bool, ScreenError> {
+    let cap_items = plan.max_items.clamp(1, MAX_PICK);
+    let out_of_time = || started.elapsed() >= plan.timeout;
+    let ticked = match crate::dom::tick_all(actor, &page.tab, cap_items, &out_of_time, progress) {
+        Ok(t) => t,
+        Err(e @ ScreenError::Stalled(_)) => return Err(e),
+        Err(e) => {
+            progress(&format!("screenagent: the picker's page stopped answering ({e}); selecting by eyes instead"));
+            return Ok(false);
+        }
+    };
+    if ticked.tiles == 0 {
+        summary.selected = 0;
+        summary.note = no_item_note(title);
+        return Ok(true);
+    }
+    if ticked.runaway {
+        return Err(ScreenError::Stalled(format!(
+            "the search for the album `{title}` showed more than this run's {cap_items}-item maximum — more than the album can be (is `{title}` an album's exact title? Google answers any other text with ordinary search results); Done was not pressed, nothing was picked"
+        )));
+    }
+    let Some(n) = ticked.selected else {
+        progress("screenagent: ticking the tiles in the page selected nothing; selecting by eyes instead");
+        return Ok(false);
+    };
+    summary.selected = n;
+    if !ticked.unticked.is_empty() {
+        let shown: Vec<&str> = ticked.unticked.iter().take(3).map(String::as_str).collect();
+        return Err(ScreenError::Stalled(format!(
+            "{} of the album's {} tile(s) would not tick after {} walk(s) of the grid ({}); Done was not pressed, nothing was picked",
+            ticked.unticked.len(),
+            ticked.tiles,
+            ticked.walks,
+            shown.join("; ")
+        )));
+    }
+    progress(&format!("screenagent: ticked all {} tile(s) of the album in the page; the picker shows {n} selected", ticked.tiles));
+    Ok(true)
+}
+
 /// Search the picker for the album titled `title`, and check the search visibly ran. Google's
 /// picker has no Albums view and never suggests an album by name (live, 2026-10-19: generic
 /// suggestions and people only); Return on the album's exact title shows the album's items,
 /// newest first, under date headings — the grid of any search result. So that grid is the album.
-/// The search must visibly have run — the view moved after Return ([`verify::moved`], looked at
-/// once more while results load) and its first screen is not the unfiltered library's
-/// ([`GridLook`]) — else nothing is selected: live, the model took the typed title for the album
-/// and for its heading, and the agent selected the library. Nothing inside the search field ever
-/// counts ([`OutsideField`]). Returns the field.
+/// The search must visibly have run, and it answers after a delay: with the picker's `page`, its
+/// tiles are no longer the library's and have settled ([`crate::dom::wait_for_results`], up to
+/// [`ALBUM_PAGE_LOOKS`] s); by eyes, the view moved after Return ([`verify::moved`], looked at up
+/// to [`ALBUM_EYE_LOOKS`] times while results load) and its first screen is not the unfiltered
+/// library's ([`GridLook`]) — else nothing is selected: live, the model took the typed title for
+/// the album and for its heading, and the agent selected the library. Nothing inside the search
+/// field ever counts ([`OutsideField`]). Returns the field.
 #[allow(clippy::too_many_arguments)]
 fn search_album<A: Act, G: Ground>(
     actor: &mut A,
@@ -993,6 +1098,7 @@ fn search_album<A: Act, G: Ground>(
     cap: &mut crate::capture::Capture,
     title: &str,
     started: Instant,
+    page: &mut Option<Page>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Element, ScreenError> {
     if picker::normalize_title(title).is_empty() {
@@ -1008,8 +1114,22 @@ fn search_album<A: Act, G: Ground>(
         )));
     };
     let eyes = OutsideField { eyes: grounder, field: field.clone() };
-    // the unfiltered library, as the picker opened on it
+    // the unfiltered library, as the picker opened on it — in the page once its grid has loaded
+    // and settled (a library still loading must not pass for the search's results)
     let library = GridLook::of(&eyes, cap)?;
+    if let Some(p) = page.as_mut() {
+        match crate::dom::settled_tiles(actor, &p.tab) {
+            Ok(Some(tiles)) => p.library = tiles,
+            Ok(None) => {
+                progress("screenagent: the picker's page shows no settled grid; selecting by eyes");
+                *page = None;
+            }
+            Err(e) => {
+                progress(&format!("screenagent: cannot read the picker's page ({e}); selecting by eyes"));
+                *page = None;
+            }
+        }
+    }
     progress(&format!("screenagent: searching the picker for the album `{title}`"));
     let (px, py) = field.center();
     actor.click_png(cap, px, py)?;
@@ -1023,16 +1143,46 @@ fn search_album<A: Act, G: Ground>(
         return Err(budget(summary));
     }
     actor.key_return()?;
+    let nothing_new = |why: &str| ScreenError::Other(format!("searching the picker for `{title}` showed nothing new ({why}); nothing was selected"));
+    if let Some(p) = page.as_ref() {
+        progress("screenagent: waiting for the search's results in the picker's page");
+        match crate::dom::wait_for_results(actor, &p.tab, &p.library, ALBUM_PAGE_LOOKS) {
+            Ok(crate::dom::Results::Shown(look)) => {
+                summary.album_shown = true;
+                progress(&format!(
+                    "screenagent: the search for `{title}` shows {} tile(s) so far; taking them for the album and ticking all of them",
+                    look.tiles.len()
+                ));
+                *cap = actor.capture()?;
+                return Ok(field);
+            }
+            Ok(crate::dom::Results::Empty) => {
+                summary.album_shown = true;
+                *cap = actor.capture()?;
+                return Ok(field);
+            }
+            Ok(crate::dom::Results::Unchanged) => {
+                return Err(nothing_new(&format!("the grid showed the library's tiles for {ALBUM_PAGE_LOOKS} s after Return")));
+            }
+            Err(e) => progress(&format!("screenagent: the picker's page stopped answering ({e}); looking by eyes")),
+        }
+    }
     actor.sleep(SEARCH_SETTLE_MS);
     *cap = actor.capture()?;
-    let nothing_new = |why: &str| ScreenError::Other(format!("searching the picker for `{title}` showed nothing new ({why}); nothing was selected"));
-    if !verify::moved(&typed.png, &cap.png)? {
-        progress("screenagent: the view has not moved since Return; looking once more");
+    let mut looks = 1u32;
+    while !verify::moved(&typed.png, &cap.png)? {
+        if looks >= ALBUM_EYE_LOOKS {
+            return Err(nothing_new(&format!("the view did not move in the {} s after Return", u64::from(looks) * SEARCH_SETTLE_MS / 1000)));
+        }
+        if looks == 1 {
+            progress("screenagent: the view has not moved since Return; waiting for the results");
+        }
+        if out_of_time() {
+            return Err(budget(summary));
+        }
         actor.sleep(SEARCH_SETTLE_MS);
         *cap = actor.capture()?;
-        if !verify::moved(&typed.png, &cap.png)? {
-            return Err(nothing_new("the view did not move after Return"));
-        }
+        looks += 1;
     }
     if GridLook::of(&eyes, cap)?.same_as(&library) {
         return Err(nothing_new("the grid is the library's, as it was before the search"));
@@ -3185,7 +3335,23 @@ mod tests {
         asks: Vec<String>,
         url: Option<String>,
         tabs_closed: u32,
+        /// The picker's page: `None` the hands run no scripts (another browser), `Some(false)`
+        /// Chrome refuses them (Apple Events JavaScript off), `Some(true)` they run.
+        js: Option<bool>,
+        /// Sleeps after Return before its results show (Google answers an album after a delay).
+        delay: u32,
+        pending: Option<Vec<usize>>,
+        /// The first item the page holds (its grid is virtual), and the items that never tick.
+        dom_top: usize,
+        wont_tick: std::collections::BTreeSet<usize>,
+        scripts: u32,
+        /// Looks at the page that find its grid still empty (the picker loading).
+        loading: u32,
     }
+
+    /// Checkboxes a [`Shelf`]'s page holds at a time (live: 29), and items a scroll moves on.
+    const DOM_WINDOW: usize = 29;
+    const DOM_STEP: usize = 20;
 
     impl Shelf {
         fn new(items: usize, albums: &[(&'static str, Vec<usize>)]) -> Rc<RefCell<Self>> {
@@ -3211,7 +3377,63 @@ mod tests {
                 asks: Vec::new(),
                 url: Some(PICKER_TAB.into()),
                 tabs_closed: 0,
+                js: None,
+                delay: 0,
+                pending: None,
+                dom_top: 0,
+                wont_tick: Default::default(),
+                scripts: 0,
+                loading: 0,
             }))
+        }
+
+        /// A tile's checkbox label in the page, as Google writes it (U+202F before PM).
+        fn aria(&self, item: usize) -> String {
+            let kind = if self.library[item] { "Video" } else { "Photo" };
+            format!("{kind} - Landscape - {}, {}:{:02}:{:02}\u{202f}PM", Shelf::day_label(item), 1 + item % 12, (item / 60) % 60, item % 60)
+        }
+
+        /// The items whose checkboxes are in the page now.
+        fn in_page(&self) -> Vec<usize> {
+            self.shown.iter().skip(self.dom_top).take(DOM_WINDOW).copied().collect()
+        }
+
+        /// What the page answers to one of [`crate::dom::script`]'s steps.
+        fn page_script(&mut self, js: &str) -> Result<String, ScreenError> {
+            use crate::dom::{Step, script};
+            self.scripts += 1;
+            let mut clicked = 0u32;
+            let mut moved = false;
+            if js == script(Step::Tick) {
+                for item in self.in_page() {
+                    if !self.selected.contains(&item) && !self.wont_tick.contains(&item) {
+                        self.selected.insert(item);
+                        clicked += 1;
+                    }
+                }
+            } else if js == script(Step::Top) {
+                self.dom_top = 0;
+            } else if js == script(Step::Next) {
+                let end = self.shown.len().saturating_sub(DOM_WINDOW);
+                let next = (self.dom_top + DOM_STEP).min(end);
+                moved = next != self.dom_top;
+                self.dom_top = next;
+            } else if js != script(Step::Look) {
+                return Err(ScreenError::Other(format!("unexpected page script: {js}")));
+            }
+            // the other checkboxes are there too: "Select" and a day's
+            let mut tiles = vec![
+                serde_json::json!({"label": "Select", "checked": false}),
+                serde_json::json!({"label": "Select all photos from Tue, Jul 29, 2025", "checked": false}),
+            ];
+            if self.loading > 0 {
+                self.loading -= 1;
+            } else {
+                tiles.extend(self.in_page().into_iter().map(|i| serde_json::json!({"label": self.aria(i), "checked": self.selected.contains(&i)})));
+            }
+            let n = self.selected.len();
+            let header = (n > 0 && !self.done).then(|| format!("{n} selected"));
+            Ok(serde_json::json!({"tiles": tiles, "header": header, "top": self.dom_top, "height": 9000, "moved": moved, "clicked": clicked}).to_string())
         }
 
         /// The date heading over library item `item`.
@@ -3295,9 +3517,14 @@ mod tests {
             match w.on_return {
                 OnReturn::Search => {
                     let typed = w.typed.clone();
-                    w.shown = w.albums.iter().find(|(t, _)| *t == typed).map(|(_, items)| items.clone()).unwrap_or_else(|| w.results.clone());
-                    (w.page, w.anchor) = (0, None);
-                    w.view += 1;
+                    let found = w.albums.iter().find(|(t, _)| *t == typed).map(|(_, items)| items.clone()).unwrap_or_else(|| w.results.clone());
+                    if w.delay > 0 {
+                        w.pending = Some(found);
+                    } else {
+                        w.shown = found;
+                        (w.page, w.anchor, w.dom_top) = (0, None, 0);
+                        w.view += 1;
+                    }
                 }
                 OnReturn::Nothing => {}
                 OnReturn::CloseOnly => w.view += 1,
@@ -3316,7 +3543,19 @@ mod tests {
             }
             Ok(())
         }
-        fn sleep(&mut self, _ms: u64) {}
+        fn sleep(&mut self, _ms: u64) {
+            let mut w = self.0.borrow_mut();
+            if w.pending.is_some() {
+                w.delay = w.delay.saturating_sub(1);
+                if w.delay == 0
+                    && let Some(found) = w.pending.take()
+                {
+                    w.shown = found;
+                    (w.page, w.anchor, w.dom_top) = (0, None, 0);
+                    w.view += 1;
+                }
+            }
+        }
         fn capture(&mut self) -> Result<Capture, ScreenError> {
             // a view apart from the last differs by 45 or more everywhere (moved); a hover by 5–15
             // (changed, not moved)
@@ -3335,6 +3574,23 @@ mod tests {
             w.tabs_closed += 1;
             w.url = None;
             Ok(())
+        }
+        fn front_tab(&mut self) -> Result<Option<crate::tabs::Tab>, ScreenError> {
+            let w = self.0.borrow();
+            Ok(w.js.and(w.url.clone()).map(|url| crate::tabs::Tab { window: 1, id: 10, url }))
+        }
+        fn tab_url(&mut self, _tab: &crate::tabs::Tab) -> Result<Option<String>, ScreenError> {
+            Ok(self.0.borrow().url.clone())
+        }
+        fn close_that_tab(&mut self, _tab: &crate::tabs::Tab) -> Result<bool, ScreenError> {
+            self.close_tab().map(|()| true)
+        }
+        fn run_js(&mut self, _tab: &crate::tabs::Tab, js: &str) -> Result<String, ScreenError> {
+            let mut w = self.0.borrow_mut();
+            match w.js {
+                Some(true) => w.page_script(js),
+                _ => Err(ScreenError::Unsupported(crate::tabs::JS_OFF.into())),
+            }
         }
     }
 
@@ -3439,7 +3695,8 @@ mod tests {
         let (s, lines) = drive_shelf(&w, &album_plan(ROBOTS, true));
         let err = s.unwrap_err().to_string();
         assert!(err.contains(&format!("searching the picker for `{ROBOTS}` showed nothing new")) && err.contains("nothing was selected"), "{err}");
-        assert!(lines.iter().any(|l| l.contains("looking once more")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("waiting for the results")), "{lines:#?}");
+        assert!(err.contains(&format!("did not move in the {} s after Return", u64::from(ALBUM_EYE_LOOKS) * SEARCH_SETTLE_MS / 1000)), "{err}");
         let w = w.borrow();
         assert_eq!(w.clicks, [SHELF_FIELD_AT], "the field only");
         assert!(w.shift_clicks == 0 && w.selected.is_empty() && w.dones == 0 && w.tabs_closed == 1);
@@ -3522,5 +3779,121 @@ mod tests {
         let (s, _) = drive_shelf(&w, &album_plan(" !! ", true));
         assert!(s.unwrap_err().to_string().contains("no letters or digits"));
         assert!(w.borrow().clicks.is_empty() && w.borrow().asks.is_empty());
+    }
+
+    /// The album of the live failure (2026-10-24): "akku tesla toy", 52 items, its results
+    /// shown a few seconds after Return.
+    const AKKU: &str = "akku tesla toy";
+    fn akku() -> Vec<usize> {
+        (0..52).map(|k| 40 + 3 * k).collect()
+    }
+
+    #[test]
+    fn an_album_that_answers_late_is_waited_for_and_ticked_in_the_page() {
+        // live: two looks 2.5 s apart missed the results; the page shows them after a delay
+        let w = Shelf::new(300, &[(AKKU, akku())]);
+        {
+            let mut w = w.borrow_mut();
+            w.js = Some(true);
+            w.delay = 6;
+        }
+        let (s, lines) = drive_shelf(&w, &album_plan(AKKU, true));
+        let s = s.unwrap_or_else(|e| panic!("{e} {lines:#?}"));
+        let w = w.borrow();
+        assert_eq!(w.selected.iter().copied().collect::<Vec<_>>(), akku(), "exactly the album: {lines:#?}");
+        assert!(s.album_shown && s.done_pressed && w.done && w.dones == 1 && s.selected == 52, "{s:?}");
+        // no range gesture and no tile clicked by eyes: the field, then Done
+        assert_eq!((w.clicks.as_slice(), w.shift_clicks), ([SHELF_FIELD_AT, DONE_AT].as_slice(), 0), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("ticked all 52 tile(s) of the album in the page")), "{lines:#?}");
+        // neither the day's checkbox nor "Select" was clicked: only the 52 tiles are selected
+        assert!(s.tab_closed && w.tabs_closed == 1);
+        // by eyes (no page) the late results are waited for too
+        let w = Shelf::new(300, &[(AKKU, akku())]);
+        w.borrow_mut().delay = 4;
+        let (s, lines) = drive_shelf(&w, &album_plan(AKKU, true));
+        let s = s.unwrap_or_else(|e| panic!("{e} {lines:#?}"));
+        assert!(s.done_pressed && s.selected == 52 && w.borrow().selected.len() == 52, "{s:?}");
+        assert!(lines.iter().any(|l| l.contains("waiting for the results")), "{lines:#?}");
+    }
+
+    #[test]
+    fn the_library_is_read_from_the_page_once_it_has_loaded() {
+        // the grid still loading when the agent starts: its library is read once it has settled,
+        // and the album is ticked in the page all the same
+        let w = Shelf::new(300, &[(AKKU, akku())]);
+        {
+            let mut w = w.borrow_mut();
+            w.js = Some(true);
+            w.loading = 3;
+            w.delay = 4;
+        }
+        let (s, lines) = drive_shelf(&w, &album_plan(AKKU, true));
+        let s = s.unwrap_or_else(|e| panic!("{e} {lines:#?}"));
+        assert!(s.done_pressed && s.selected == 52 && w.borrow().shift_clicks == 0, "in the page: {s:?} {lines:#?}");
+        // a grid that never settles in the page: the eyes do it
+        let w = Shelf::new(300, &[(AKKU, akku())]);
+        {
+            let mut w = w.borrow_mut();
+            w.js = Some(true);
+            w.loading = 1000;
+        }
+        let (s, lines) = drive_shelf(&w, &album_plan(AKKU, true));
+        let s = s.unwrap_or_else(|e| panic!("{e} {lines:#?}"));
+        assert!(s.done_pressed && s.selected == 52 && w.borrow().shift_clicks == 1, "by eyes: {s:?}");
+        assert!(lines.iter().any(|l| l.contains("no settled grid; selecting by eyes")), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_page_that_refuses_scripts_is_picked_by_eyes() {
+        let w = Shelf::new(300, &[(AKKU, akku())]);
+        w.borrow_mut().js = Some(false);
+        let (s, lines) = drive_shelf(&w, &album_plan(AKKU, true));
+        let s = s.unwrap();
+        assert!(s.done_pressed && s.selected == 52 && w.borrow().shift_clicks == 1, "the range gesture: {s:?}");
+        assert!(lines.iter().any(|l| l.contains("Allow JavaScript from Apple Events") && l.contains("selecting by eyes")), "{lines:#?}");
+    }
+
+    #[test]
+    fn the_page_never_confirms_a_runaway_a_stuck_tile_or_the_library() {
+        // more tiles than this run's maximum: stopped, not confirmed
+        let w = Shelf::new(300, &[]);
+        {
+            let mut w = w.borrow_mut();
+            w.js = Some(true);
+            w.results = (7..107).collect();
+        }
+        let plan = plan_for(Request { album: Some("robots".into()), videos_only: true, queries: vec![], max_items: 50, select_all: true });
+        let (s, lines) = drive_shelf(&w, &plan);
+        let err = s.unwrap_err().to_string();
+        assert!(err.contains("more than this run's 50-item maximum") && err.contains("Done was not pressed"), "{err} {lines:#?}");
+        assert_eq!(w.borrow().dones, 0);
+        // a tile that never ticks: said, not confirmed
+        let w = Shelf::new(300, &[(AKKU, akku())]);
+        {
+            let mut w = w.borrow_mut();
+            w.js = Some(true);
+            w.wont_tick = [43].into();
+        }
+        let (s, lines) = drive_shelf(&w, &album_plan(AKKU, true));
+        let err = s.unwrap_err().to_string();
+        assert!(err.contains("1 of the album's 52 tile(s) would not tick") && err.contains("Done was not pressed"), "{err} {lines:#?}");
+        assert!(w.borrow().dones == 0 && w.borrow().tabs_closed == 1);
+        // Return did nothing: the library's tiles stay, nothing is ticked
+        let w = Shelf::new(300, &[(AKKU, akku())]);
+        {
+            let mut w = w.borrow_mut();
+            w.js = Some(true);
+            w.on_return = OnReturn::Nothing;
+        }
+        let (s, _) = drive_shelf(&w, &album_plan(AKKU, true));
+        let err = s.unwrap_err().to_string();
+        assert!(err.contains(&format!("showed the library's tiles for {ALBUM_PAGE_LOOKS} s after Return")), "{err}");
+        assert!(w.borrow().selected.is_empty() && w.borrow().dones == 0);
+        // a title that is no album's and has no results: nothing to select, nothing confirmed
+        let w = Shelf::new(300, &[(AKKU, akku())]);
+        w.borrow_mut().js = Some(true);
+        let (s, _) = drive_shelf(&w, &album_plan("akku tesla", true));
+        let s = s.unwrap();
+        assert!(s.album_shown && !s.done_pressed && s.selected == 0 && s.note.contains("showed no item to select"), "{s:?}");
     }
 }

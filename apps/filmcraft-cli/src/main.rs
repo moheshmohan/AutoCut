@@ -79,6 +79,9 @@ USAGE
   filmcraft-cli [OPTIONS] <SUBCOMMAND> [ARGS]
 
 SUBCOMMANDS
+  new <p.fcproj>                make an empty project there (its folder too), named after the
+                                file, and save it. `--project` with a .fcproj that does not exist
+                                yet makes it the same way before the command
   exec <id> [key=value ...]     run one command; prints its result as JSON
   exec <id> '<json params>'     same, params as one JSON object
   call <method> [key=value ...] with --bridge: one control method of the running app (ui.elements,
@@ -120,12 +123,14 @@ SUBCOMMANDS
   captions style <bold|clean|glow|box|karaoke|twoLine|off> [--track C1]
          [--platform youtube|reels|tiktok|vertical] [--words N] [--active-color #rrggbb]
          [--keyword-color #rrggbb] [--keywords a,b] [--emoji word=🔥,…]
-         [--position top|middle|bottom] [--font F] [--keep-style]
+         [--position top|middle|bottom] [--font F] [--panel | --panel=#rrggbbaa] [--keep-style]
                                 word-by-word animated captions on a caption track
                                 (captions.setAnimatedStyle): Bold is uppercase heavy text with a
                                 black stroke, 2–4 words at a time, the spoken word in the active
                                 colour popping 1.1×; --platform keeps them in its safe zone,
-                                centred on its safe span; off draws whole captions again
+                                centred on its safe span; --panel backs each line with a panel
+                                (black at 60 %) to read over bright footage; off draws whole
+                                captions again
   captions timing [--from transcript|narration] [--track C1]
                                 when each caption word is spoken (captions.wordTiming): from the
                                 transcript's word timestamps, or the narration clips' scripts
@@ -762,7 +767,8 @@ SUBCOMMANDS
   --version                     print the version
 
 OPTIONS
-  --project <p.fcproj>          open this project first (headless)
+  --project <p.fcproj>          open this project first (headless); a .fcproj that does not
+                                exist yet is made there, empty, and saved
   --demo                        open the built-in demo project (headless)
   --save                        save the project back to --project when done
   --save-as <p.fcproj>          save the project to this path when done
@@ -869,8 +875,17 @@ impl Backend {
         // `recipe.run` (also over MCP): intent steps planned by AutoCut's planner
         s.recipes.planner = Some(filmcraft_autocut::recipes::planner());
         if let Some(p) = a.opt("--project") {
-            if let Err(e) = s.execute("file.open", json!({"path": p})) {
-                fail(e);
+            match missing_project(p) {
+                // a project file that does not exist yet is made there, empty
+                Some(name) => {
+                    create_project(&mut s, p, &name).unwrap_or_else(|e| fail(e));
+                    diag(format_args!("filmcraft-cli: {p} did not exist: made a new, empty project “{name}” there"));
+                }
+                None => {
+                    if let Err(e) = s.execute("file.open", json!({"path": p})) {
+                        fail(e);
+                    }
+                }
             }
         } else if a.flag("--demo") {
             let _ = s.execute("file.openDemoProject", json!({}));
@@ -914,6 +929,29 @@ impl Backend {
             fail(format!("saving: {e}"));
         }
     }
+}
+
+/// The name a project made at `path` gets — its file name without `.fcproj` — when `path` names
+/// a project file that does not exist yet (`~/` is the home folder); `None` for anything else (an
+/// existing file, or a path that is no `.fcproj`: a typo is not made into a project).
+fn missing_project(path: &str) -> Option<String> {
+    let full = std::path::PathBuf::from(filmcraft_engine::export_tools::expand_home(path));
+    if full.exists() || !full.extension().is_some_and(|e| e.eq_ignore_ascii_case("fcproj")) {
+        return None;
+    }
+    full.file_stem().map(|s| s.to_string_lossy().trim().to_string()).filter(|n| !n.is_empty())
+}
+
+/// Make an empty project named `name` and save it at `path` (its folder made when missing): what
+/// `file.newProject` then `file.saveAs` did by hand.
+fn create_project(s: &mut Session, path: &str, name: &str) -> Result<(), String> {
+    let full = std::path::PathBuf::from(filmcraft_engine::export_tools::expand_home(path));
+    if let Some(dir) = full.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    s.execute("file.newProject", json!({"name": name})).map_err(|e| format!("file.newProject: {e}"))?;
+    s.execute("file.saveAs", json!({"path": path})).map_err(|e| format!("{path}: {e}"))?;
+    Ok(())
 }
 
 /// `redact` options as `clip.autoRedact` / `sequence.autoRedact` parameters (with `wait: true`);
@@ -1105,6 +1143,12 @@ fn captions_params(a: &Args) -> Result<(&'static str, Value), String> {
             }
             if a.flag("--keep-style") {
                 o["keepStyle"] = json!(true);
+            }
+            // a backing panel behind each line: `--panel` (black at 60 %) or `--panel '#rrggbbaa'`
+            match a.opt("--panel") {
+                Some(c) => o["panel"] = json!(c),
+                None if a.flag("--panel") => o["panel"] = json!(true),
+                None => {}
             }
             p["options"] = o;
             Ok(("captions.setAnimatedStyle", p))
@@ -2379,6 +2423,16 @@ async fn cli() {
                     Some(_) => fail(format!("showcase: {path}: numbers: english or malayalam")),
                 };
                 opts.redact = filmcraft_autocut::privacy::Redact::from_plan(sv.get("redact")).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
+                // what the counter counts, apart from the subject QA looks for
+                let (counter, check) = filmcraft_autocut::showcase::counting_from_plan(&sv).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
+                if let Some(c) = counter {
+                    look_fields.insert("counter".into(), json!(c));
+                    opts.counter = Some(c);
+                }
+                if let Some(b) = check {
+                    look_fields.insert("subjectCheck".into(), json!(b));
+                    opts.subject_check = b;
+                }
                 if let Some(es) = sv.get("entries") {
                     entries = serde_json::from_value(es.clone()).unwrap_or_else(|e| fail(format!("showcase: {path}: bad entries ({e})")));
                     for (i, e) in entries.iter_mut().enumerate() {
@@ -2885,6 +2939,19 @@ async fn cli() {
                 Err(e) => fail(format!("{method}: {e}")),
             }
         }
+        "new" => {
+            let path = a.pos(1).unwrap_or_else(|| usage("new <p.fcproj>"));
+            if a.opt("--bridge").is_some() || a.opt("--project").is_some() || a.flag("--demo") {
+                usage("new makes a project file by itself: `filmcraft-cli new p.fcproj`, then `--project p.fcproj …`");
+            }
+            if !std::path::Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("fcproj")) {
+                usage(format!("new: `{path}` is not a .fcproj path"));
+            }
+            let Some(name) = missing_project(path) else { fail(format!("new: {path} exists already (open it with --project)")) };
+            let mut s = Session::default();
+            create_project(&mut s, path, &name).unwrap_or_else(|e| fail(format!("new: {e}")));
+            print(&a, &json!({"path": path, "name": s.project.name}));
+        }
         "exec" => {
             let id = a.pos(1).unwrap_or_else(|| usage("exec <id> [key=value ...]"));
             let params = a.params_from(2).unwrap_or_else(|e| usage(e));
@@ -3225,6 +3292,12 @@ mod shorts_tests {
         assert_eq!(p["options"]["wordsPerPage"], 3);
         assert_eq!(p["options"]["keywords"], json!(["money", "time"]));
         assert_eq!(p["options"]["emoji"]["cash"], "💰");
+        assert!(p["options"].get("panel").is_none());
+        // a backing panel: black at 60 %, or a colour of its own
+        let (_, p) = captions_params(&args(&["captions", "style", "box", "--panel"])).unwrap();
+        assert_eq!(p["options"]["panel"], true);
+        let (_, p) = captions_params(&args(&["captions", "style", "box", "--panel=#10203080", "--track", "C1"])).unwrap();
+        assert_eq!((p["options"]["panel"].as_str(), p["track"].as_str()), (Some("#10203080"), Some("C1")));
         let (id, p) = captions_params(&args(&["captions", "timing", "--from", "narration", "--track", "7"])).unwrap();
         assert_eq!((id, p["from"].as_str(), p["track"].as_u64()), ("captions.wordTiming", Some("narration"), Some(7)));
         for bad in [

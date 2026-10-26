@@ -328,6 +328,42 @@ fn exec_save_as_then_reopen() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A project is made in one step: `new <p.fcproj>`, or `--project` naming a .fcproj that does not
+/// exist yet (it took `file.newProject` then `file.saveAs` through `run`).
+#[test]
+fn a_new_project_is_made_by_new_or_by_a_missing_project_path() {
+    let dir = std::env::temp_dir().join(format!("fc-cli-new-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).to_string();
+    // `new`, its folder made too, named after the file
+    let made = dir.join("Akku Tesla").join("Akku Tesla.fcproj");
+    let p = made.to_str().unwrap();
+    let v = json_out(&cli(&["new", p]));
+    assert_eq!((v["path"].as_str(), v["name"].as_str()), (Some(p), Some("Akku Tesla")), "{v}");
+    assert!(made.is_file());
+    let tree = json_out(&cli(&["--project", p, "inspect", "project"]));
+    assert!(tree.to_string().contains("Akku Tesla"), "{tree}");
+    // never over an existing file; only a .fcproj
+    let again = cli(&["new", p]);
+    assert_eq!(again.status.code(), Some(1));
+    assert!(err(&again).contains("exists already"), "{}", err(&again));
+    assert_eq!(cli(&["new", dir.join("notes.txt").to_str().unwrap()]).status.code(), Some(2));
+    assert_eq!(cli(&["new"]).status.code(), Some(2));
+    // --project with a missing .fcproj: made there before the command, the edit saved into it
+    let fresh = dir.join("round 2").join("Show v2.fcproj");
+    let q = fresh.to_str().unwrap();
+    let o = cli(&["--project", q, "--save", "exec", "file.newBin", "name=Selects"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(err(&o).contains("did not exist: made a new, empty project “Show v2”"), "{}", err(&o));
+    let tree = json_out(&cli(&["--project", q, "inspect", "project"]));
+    assert!(tree.to_string().contains("Selects"), "{tree}");
+    // a missing path that is no .fcproj is an error, as before: nothing is made
+    let typo = dir.join("Show v2.fcprj");
+    assert_eq!(cli(&["--project", typo.to_str().unwrap(), "inspect", "project"]).status.code(), Some(1));
+    assert!(!typo.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn run_keep_going_reports_failures() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_filmcraft-cli"))

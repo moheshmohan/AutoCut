@@ -58,6 +58,11 @@ pub trait Act {
     fn close_that_tab(&mut self, _tab: &crate::tabs::Tab) -> Result<bool, ScreenError> {
         Err(ScreenError::Unsupported("closing a tab by its id".into()))
     }
+    /// Run the page script `js` in that picker tab and answer its value as text
+    /// ([`crate::tabs::run_js`]); [`ScreenError::Unsupported`] when the browser runs none.
+    fn run_js(&mut self, _tab: &crate::tabs::Tab, _js: &str) -> Result<String, ScreenError> {
+        Err(ScreenError::Unsupported("page scripts".into()))
+    }
 }
 
 /// The most wheel lines one scroll may post.
@@ -233,6 +238,13 @@ impl Act for MacActor {
 
     fn close_that_tab(&mut self, tab: &crate::tabs::Tab) -> Result<bool, ScreenError> {
         crate::tabs::close(self.shell.as_ref(), tab)
+    }
+
+    fn run_js(&mut self, tab: &crate::tabs::Tab, js: &str) -> Result<String, ScreenError> {
+        if self.app != crate::tabs::CHROME {
+            return Err(ScreenError::Unsupported(format!("page scripts in {}", self.app)));
+        }
+        crate::tabs::run_js(self.shell.as_ref(), tab, js)
     }
 }
 

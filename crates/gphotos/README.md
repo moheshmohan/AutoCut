@@ -100,8 +100,9 @@ filmcraft-cli photos add <id>… --bridge 127.0.0.1:9876  # import cached items 
 filmcraft-cli photos pick --auto "beach sunset videos" --max-items 5 --bridge 127.0.0.1:9876
 
 # a whole album as the seed: the agent searches the picker for the exact title "Robot
-# showcase" (the result is the album's items) and selects all of it (--videos-only downloads
-# only its videos)
+# showcase" (the result is the album's items, after a delay it waits for) and selects all of
+# it — tile by tile in the page when Chrome allows JavaScript from Apple Events (View ▸
+# Developer), else by eyes (--videos-only downloads only its videos)
 filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9876
 
 # many searches, ONE picking session and ONE tab: each typed in turn, every result selected

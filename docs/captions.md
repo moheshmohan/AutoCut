@@ -134,11 +134,15 @@ Options: `wordsPerPage` (1–8), `activeColor`, `keywordColor` and `keywords` (d
 `emoji` (`{"word": "🔥"}`, shown after the word; colour emoji are drawn from the system's emoji
 font), `uppercase`, `platform` (`youtube`, `reels`, `tiktok`, `vertical`: the block is centred on
 the middle of that platform's safe span at its rows, at most as wide as it, and the margin counts
-from its safe area), `pop`, `position`, `margin`, `xOffset`, `size`, `font`, `keepStyle`. A page
+from its safe area), `pop`, `position`, `margin`, `xOffset`, `size`, `font`, `panel` (a backing
+panel behind each line, as tall as its ink: `true` is black at 60 %, or a colour `#rrggbbaa`,
+`false` none — for words over bright footage: white `box` captions over a white toy car could not
+be read; the Captions tab's **Background box** is the same panel), `keepStyle`. A page
 breaks at a sentence end or a pause of 0.6 s; a word too wide for the space gets a smaller page of
 its own. `sequence.checkSafeZones` checks every page of an animated track. The Text panel's
 Captions tab has a live preview tile of each style, the platform and **Time words…**
-(`text.captions.animated.*`); the CLI has `filmcraft-cli captions style <preset> …` and
+(`text.captions.animated.*`); the CLI has `filmcraft-cli captions style <preset> … [--panel |
+--panel=#rrggbbaa]` and
 `captions timing --from transcript|narration`. AutoCut's shorts and trailers use Bold by default
 (`captionStyle` picks another look or `plain`; `captionKeywords` lets the local model colour
 keywords and add emoji).

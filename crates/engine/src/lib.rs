@@ -605,6 +605,10 @@ pub struct Session {
     pub browser: media_browser::BrowserState,
     /// Nesting depth of [`Session::execute`] (commands that run other commands).
     exec_depth: u32,
+    /// Why the last command that was to make a graphic clip made none (`graphics.newText` on a
+    /// track that is not free): until a clip is made or the selection changes, commands that
+    /// style a graphic take only the `clip` they are given — never the clip under the playhead.
+    pub(crate) lost_graphic: Option<String>,
     /// Each media file's size and modification time when last seen (Settings ▸ Media ▸
     /// Automatically refresh growing files, [`media_watch`]).
     pub media_stamps: std::collections::HashMap<String, media_watch::Stamp>,
@@ -722,6 +726,7 @@ impl Session {
             log: Default::default(),
             browser: Default::default(),
             exec_depth: 0,
+            lost_graphic: None,
             media_stamps: Default::default(),
             media_scan: None,
         }
@@ -920,6 +925,9 @@ impl Session {
             }
             return Err(e);
         }
+        // a graphic that was not made stops standing in for the selection once the selection
+        // changes
+        let lost_with = self.lost_graphic.is_some().then(|| self.state.selection.clone());
         self.exec_depth += 1;
         // Last-resort guard: a panic in a command (a bug that escaped the never-crash rules)
         // becomes an error for the caller (UI, CLI, control channel, MCP) instead of taking the
@@ -927,6 +935,12 @@ impl Session {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, &params)))
             .unwrap_or_else(|_| Err(EngineError::Other(format!("internal error in `{id}` (see the crash log); the command did not complete"))));
         self.exec_depth -= 1;
+        if r.is_ok()
+            && let Some(before) = lost_with
+            && before != self.state.selection
+        {
+            self.lost_graphic = None;
+        }
         if self.exec_depth == 0 {
             source_monitor::track_history(self);
         }

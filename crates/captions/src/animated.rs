@@ -523,24 +523,29 @@ pub fn render(c: &Caption, style: &CaptionStyle, anim: &AnimatedCaptions, w: usi
     }
     let stroke = (outline > 0.05).then(|| mask::stroke(&cover, outline, StrokeKind::Outer));
     let mut out = vec![0.0f32; ow * oh * 4];
-    // background boxes behind each line (the track's box)
+    // background boxes behind each line (the track's box, `panel`): as tall as the line's ink
+    // reaches (Malayalam's vowel signs go well below the baseline), at least an em
     if style.background && style.background_color[3] > 0 {
         let bgc = lin(style.background_color);
-        let mut lines: Vec<(f32, f32, f32)> = Vec::new();
+        // (baseline, left, right, ink above, ink below)
+        let mut lines: Vec<(f32, f32, f32, f32, f32)> = Vec::new();
         for wd in &page.words {
-            match lines.iter_mut().find(|(b, _, _)| (*b - wd.baseline).abs() < 0.5) {
+            let e = extent(&wd.layout);
+            match lines.iter_mut().find(|l| (l.0 - wd.baseline).abs() < 0.5) {
                 Some(l) => {
                     l.1 = l.1.min(wd.x);
                     l.2 = l.2.max(wd.x + wd.width);
+                    l.3 = l.3.max(e.ascent);
+                    l.4 = l.4.max(e.descent);
                 }
-                None => lines.push((wd.baseline, wd.x, wd.x + wd.width)),
+                None => lines.push((wd.baseline, wd.x, wd.x + wd.width, e.ascent, e.descent)),
             }
         }
         let mut bm = Mask::new(ow, oh);
-        for (b, x0, x1) in lines {
+        for (b, x0, x1, up, down) in lines {
             let p = 0.25 * px;
-            let path =
-                filmcraft_text::Path::round_rect(x0 - p - ox as f32, b - 0.95 * px - oy as f32, x1 + p - ox as f32, b + 0.35 * px - oy as f32, 0.18 * px);
+            let (top, bottom) = (b - (0.95 * px).max(up + 0.2 * px), b + (0.35 * px).max(down + 0.2 * px));
+            let path = filmcraft_text::Path::round_rect(x0 - p - ox as f32, top - oy as f32, x1 + p - ox as f32, bottom - oy as f32, 0.18 * px);
             filmcraft_text::raster::fill_into(&path, &mut bm, 0.0, 0.0);
         }
         for (p, a) in out.as_chunks_mut::<4>().0.iter_mut().zip(&bm.a) {
@@ -785,6 +790,24 @@ mod tests {
         let st = CaptionStyle { animated: Some(a.clone()), ..CaptionPreset::Glow.base_style() };
         let o = render(&c, &st, &a, 1080, 1920, Tick(S / 10)).unwrap();
         assert!(o.px.chunks(4).any(|q| q[3] > 0.2 && q[3] < 0.9 && q[1] > q[0] * 3.0 && q[2] > q[0] * 3.0), "cyan glow pixels");
+    }
+
+    #[test]
+    fn a_panel_backs_each_line_and_reaches_below_the_ink() {
+        let a = AnimatedCaptions::preset(CaptionPreset::Box);
+        let plain = CaptionStyle { animated: Some(a.clone()), ..CaptionPreset::Box.base_style() };
+        let panel = CaptionStyle { background: true, background_color: [0, 0, 0, 153], ..plain.clone() };
+        let c = timed("over a white car");
+        let dark = |o: &Overlay| o.px.chunks(4).filter(|q| q[3] > 0.5 && q[3] < 0.7 && q[0] < 0.01 && q[1] < 0.01 && q[2] < 0.01).count();
+        let without = render(&c, &plain, &a, 1080, 1920, Tick(S / 2)).unwrap();
+        let with = render(&c, &panel, &a, 1080, 1920, Tick(S / 2)).unwrap();
+        assert!(dark(&with) > dark(&without) + 5000, "a see-through dark panel: {} vs {}", dark(&with), dark(&without));
+        // it reaches below the lowest ink of the line (Malayalam vowel signs hang well below)
+        let p = &pages(&c, &panel, &a, 1080, 1920)[0];
+        let lowest = p.words.iter().map(|w| w.baseline + extent(&w.layout).descent).fold(f32::MIN, f32::max);
+        let row = (lowest + 0.1 * p.size).round() as i32 - with.y;
+        let covered = (0..with.w).any(|x| with.px.get((row.max(0) as usize * with.w + x) * 4 + 3).is_some_and(|a| *a > 0.5));
+        assert!(covered, "the panel covers the row under the ink");
     }
 
     #[test]

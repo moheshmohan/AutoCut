@@ -73,6 +73,30 @@ fn animated_caption_style_presets_options_and_off() {
     assert!(track(&s).style.animated.is_some());
 }
 
+/// Live (the Akku Tesla captions): the "box" preset's white words over a white toy car could not
+/// be read. `panel` puts a backing panel behind each line.
+#[test]
+fn animated_captions_take_a_backing_panel() {
+    let mut s = captioned();
+    let r = s.execute("captions.setAnimatedStyle", json!({"preset": "box", "options": {"panel": true, "position": "bottom"}})).unwrap();
+    assert_eq!(r["panel"], "#00000099", "{r}");
+    let st = track(&s).style.clone();
+    assert!(st.background && st.background_color == [0, 0, 0, 153], "{st:?}");
+    // the same preset again keeps it; a colour of its own; off
+    s.execute("captions.setAnimatedStyle", json!({"preset": "box", "options": {"activeColor": "#29e0ff"}})).unwrap();
+    assert!(track(&s).style.background);
+    s.execute("captions.setAnimatedStyle", json!({"preset": "box", "panel": "#10203080"})).unwrap();
+    assert_eq!(track(&s).style.background_color, [16, 32, 48, 128]);
+    let r = s.execute("captions.setAnimatedStyle", json!({"preset": "box", "panel": false})).unwrap();
+    assert!(!track(&s).style.background && r["panel"].is_null(), "{r}");
+    // a fully clear colour is no panel; nonsense is refused
+    s.execute("captions.setAnimatedStyle", json!({"preset": "box", "panel": "#00000000"})).unwrap();
+    assert!(!track(&s).style.background);
+    for bad in [json!("dark"), json!(3), json!({"a": 1})] {
+        assert!(s.execute("captions.setAnimatedStyle", json!({"preset": "box", "panel": bad})).is_err(), "{bad}");
+    }
+}
+
 #[test]
 fn animated_caption_style_refuses_bad_params() {
     let mut s = captioned();

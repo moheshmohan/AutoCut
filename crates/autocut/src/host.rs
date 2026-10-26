@@ -233,6 +233,11 @@ impl PlanDoc {
             Some(_) => return Err(AutoCutError::Invalid("numbers: english or malayalam".into())),
         };
         opts.redact = crate::privacy::Redact::from_plan(self.look.get("redact"))?;
+        // what the counter counts, apart from the subject QA looks for (`"counter"`,
+        // `"subjectCheck"`)
+        let (counter, check) = showcase::counting_from_plan(&Value::Object(self.look.clone()))?;
+        opts.counter = counter;
+        opts.subject_check = check.unwrap_or(true);
         // talking clips: Enhance Voice on the shots' own sound (`"enhanceVoice": true`)
         opts.enhance_voice = match self.look.get("enhanceVoice") {
             None | Some(Value::Null) => false,
@@ -255,9 +260,9 @@ impl PlanDoc {
             .zip(&heads)
             .map(|(e, &h)| script.lines.get(h).map(|l| l.trim()).filter(|l| !l.is_empty()).map_or_else(|| plain_line(e), str::to_string))
             .collect();
-        let intro = if script.intro.trim().is_empty() { format!("This is every {} I have filmed, in order.", opts.subject) } else { script.intro.clone() };
+        let intro = if script.intro.trim().is_empty() { format!("This is every {} I have filmed, in order.", opts.counted()) } else { script.intro.clone() };
         let outro = if script.outro.trim().is_empty() {
-            format!("That's {} {}s so far. Thanks for watching.", entries.len(), opts.subject)
+            format!("That's {} {}s so far. Thanks for watching.", entries.len(), opts.counted())
         } else {
             script.outro.clone()
         };
@@ -1184,6 +1189,23 @@ mod tests {
             let mut v = serde_json::to_value(&ml).unwrap();
             v["numbers"] = bad;
             assert!(serde_json::from_value::<PlanDoc>(v).unwrap().resolve().is_err());
+        }
+        // what the counter counts, apart from what QA looks for: a show of versions of one toy
+        // car counts "VERSION #n" and looks for the car (or not at all)
+        assert_eq!((opts.counted(), opts.counter.as_deref(), opts.subject_check), ("robot", None, true));
+        let mut versions = serde_json::to_value(&plan).unwrap();
+        versions["subject"] = json!("toy car");
+        versions["counter"] = json!(" version ");
+        versions["subjectCheck"] = json!(false);
+        let versions: PlanDoc = serde_json::from_value(versions).unwrap();
+        let (o, entries, script) = versions.resolve().unwrap();
+        assert_eq!((o.subject.as_str(), o.counted(), o.subject_check), ("toy car", "version", false));
+        assert!(script.outro.contains(&format!("{} versions", entries.len())), "{}", script.outro);
+        assert_eq!(serde_json::to_value(&versions).unwrap()["counter"], " version ", "kept as written");
+        for (k, bad) in [("counter", json!(3)), ("counter", json!("VERSION #")), ("counter", json!("  ")), ("subjectCheck", json!("no"))] {
+            let mut v = serde_json::to_value(&plan).unwrap();
+            v[k] = bad;
+            assert!(serde_json::from_value::<PlanDoc>(v).unwrap().resolve().is_err(), "{k}");
         }
         // the review's fields round-trip
         let mut v = serde_json::to_value(&plan).unwrap();
