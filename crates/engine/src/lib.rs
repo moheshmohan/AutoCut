@@ -48,6 +48,7 @@ pub mod media_watch;
 pub mod mix_analysis;
 pub mod mixer;
 pub mod ml_script;
+pub mod moments;
 pub mod motion_track;
 pub mod multicam;
 pub mod music;

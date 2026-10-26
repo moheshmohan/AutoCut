@@ -36,6 +36,10 @@ fn cand(id: &str, item: u64, kind: Kind, start: f64, secs: f64, media: f64, orde
         subject: None,
         aspect: 16.0 / 9.0,
         order,
+        shot: 0,
+        scores: rank::Scores { sharp: 0.8, exposure: 0.8, steady: 0.8, energy: 0.6, brightness: 0.45, ..rank::Scores::default() },
+        rank: 0.6,
+        embedding: Vec::new(),
     }
 }
 
@@ -337,6 +341,13 @@ async fn the_model_directs_a_whole_edit() {
     let r = make(&ex, &json!({"brief": "a 10 s reel", "seconds": 10, "bpm": 120, "captions": false}), Some(&model), &mut lines).await.unwrap();
     assert_eq!(r["director"], "model:fixed", "{r}");
     assert_eq!(r["plan"]["title"], "Demo Day");
+    // every moment measured on its own frames, and judged with a reason
+    let moments = r["moments"].as_array().unwrap();
+    assert!(!moments.is_empty() && r["measured"].as_u64().unwrap() as usize == moments.len(), "{r}");
+    assert!(
+        moments.iter().all(|m| m["why"].as_str().is_some_and(|w| w.starts_with("kept") || w.starts_with("dropped")) && m["scores"]["measured"] == true),
+        "{r}"
+    );
     assert!(r["plan"]["notes"][0].as_str().unwrap().contains("asked again"), "{r}");
     let seq = r["sequence"].as_u64().expect("a sequence");
     let s = ex.0.lock().unwrap();
@@ -351,4 +362,69 @@ async fn the_model_directs_a_whole_edit() {
     // the 360° shots look through a camera
     let vr: Vec<_> = pictures.iter().filter(|c| s.project.vr_of(c.item).is_some()).collect();
     assert!(vr.iter().all(|c| filmcraft_engine::project::vr::reframe_of(c).is_some()));
+}
+
+#[test]
+fn moments_are_ranked_the_unusable_and_copies_left_out_with_reasons() {
+    let mut lib = library();
+    // c2: out of focus; c4: a copy of c5 (another shot, the same picture) that ranks lower
+    lib[1].scores.sharp = 0.05;
+    lib[1].scores.motion = 0.0;
+    lib[3].embedding = vec![1.0, 0.0, 0.2];
+    lib[4].embedding = vec![1.0, 0.01, 0.2];
+    lib[3].rank = 0.4;
+    lib[4].rank = 0.7;
+    for c in lib.iter_mut() {
+        c.shot = c.item as usize;
+    }
+    let (kept, verdicts) = rank::choose(lib.clone(), 3);
+    let ids: Vec<&str> = kept.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["c1", "c3", "c5", "c6"], "{verdicts:?}");
+    let why = |id: &str| verdicts.iter().find(|v| v.clip == id).unwrap().why.clone();
+    assert!(why("c2").starts_with("dropped: out of focus"), "{}", why("c2"));
+    assert!(why("c4").contains("near-duplicate of c5"), "{}", why("c4"));
+    assert!(why("c1").starts_with("kept: rank"), "{}", why("c1"));
+    assert_eq!(verdicts.len(), lib.len());
+    // too few moments to drop them: kept, and the verdict says so
+    let (kept, verdicts) = rank::choose(lib.clone(), 6);
+    assert_eq!(kept.len(), 6);
+    assert!(verdicts.iter().any(|v| v.why.starts_with("kept though out of focus")), "{verdicts:?}");
+    // moments of one shot are not copies of each other
+    let mut one = lib.clone();
+    for c in one.iter_mut() {
+        c.item = 9;
+        c.shot = 0;
+        c.embedding = vec![1.0, 0.0];
+        c.scores.sharp = 0.8;
+    }
+    assert_eq!(rank::choose(one, 2).0.len(), 6);
+}
+
+#[test]
+fn speech_faces_and_smiles_raise_a_moment() {
+    assert_eq!(rank::speech_score(None, 0.0), 0.0);
+    assert_eq!(rank::speech_score(None, 0.5), 0.35);
+    assert_eq!(rank::speech_score(Some("we are on the train"), 0.5), 0.5);
+    assert_eq!(rank::speech_score(Some("Wow, look at that!"), 0.5), 1.0);
+    let plain = rank::Scores { sharp: 0.8, exposure: 0.8, steady: 0.8, energy: 0.5, ..rank::Scores::default() };
+    let lively = rank::Scores { people: 0.9, expression: 1.0, speech: 1.0, ..plain.clone() };
+    assert!(lively.rank(Kind::Flat) > plain.rank(Kind::Flat) + 0.2);
+    assert!(plain.rank(Kind::Vr) > plain.rank(Kind::Flat));
+    // a moment measured on its own frames: its picture scores and faces count
+    let mut c = library().remove(1);
+    rank::apply_measure(
+        &mut c,
+        &json!({"measured": true, "sharpness": 0.1, "exposure": 0.9, "shake": 0.5, "dark": 0.0, "blown": 0.0, "brightness": 0.5, "motion": 0.0, "faces": 2, "largestFace": 0.25}),
+    );
+    assert!(c.scores.measured && c.scores.sharp == 0.1 && c.scores.steady == 0.5 && c.scores.people >= 0.9, "{:?}", c.scores);
+    assert_eq!(c.rank, c.scores.rank(c.kind));
+    assert!(c.scores.flaw(Kind::Flat).is_some_and(|f| f.contains("out of focus")));
+    // a measurement that failed changes nothing
+    let mut d = library().remove(1);
+    let before = d.scores.clone();
+    rank::apply_measure(&mut d, &json!({"measured": false}));
+    assert_eq!(d.scores, before);
+    // hostile numbers stay in range
+    rank::apply_measure(&mut d, &json!({"measured": true, "sharpness": 1e9, "exposure": -5, "shake": "x", "faces": 1, "largestFace": f64::MAX}));
+    assert!([d.scores.sharp, d.scores.exposure, d.scores.steady, d.scores.people, d.rank].iter().all(|v| (0.0..=1.0).contains(v)), "{:?}", d.scores);
 }

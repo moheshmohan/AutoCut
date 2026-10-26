@@ -146,6 +146,14 @@ pub async fn run(a: &Args) {
                     s["text"].as_str().map(|t| format!(" \"{t}\"")).unwrap_or_default()
                 ));
             }
+            for m in made["moments"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter(|m| m["kept"] == false).take(MAX_LISTED) {
+                diag(format_args!(
+                    "direct: left out {} ({}): {}",
+                    m["clip"].as_str().unwrap_or("?"),
+                    m["name"].as_str().unwrap_or("?"),
+                    m["why"].as_str().unwrap_or_default()
+                ));
+            }
             for n in plan["notes"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(30) {
                 diag(format_args!("direct: repaired: {}", n.as_str().unwrap_or_default()));
             }

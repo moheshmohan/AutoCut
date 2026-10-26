@@ -41,7 +41,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use filmcraft_engine::project::scenes::{CameraMove, Energy, Shot, ShotDescription, ShotQuality, ShotUse};
+use filmcraft_engine::project::scenes::{CameraMove, Embedding, Energy, Shot, ShotDescription, ShotQuality, ShotUse};
 use filmcraft_engine::safe_zones::Platform;
 use filmcraft_time::{TICKS_PER_SECOND, Tick};
 use serde::Serialize;
@@ -216,6 +216,9 @@ impl ShotInfo {
     }
 }
 
+/// Longest image embedding read from a scene index (SigLIP 2's is 768 values).
+const MAX_EMBEDDING: usize = 4096;
+
 /// The shots of one `media.scenes` answer for `m` (a shot without a sane span is left out; an
 /// item that has no index is one shot, its whole length).
 pub fn parse_shots(m: &MediaItem, scenes: Option<&Value>) -> Vec<ShotInfo> {
@@ -231,6 +234,12 @@ pub fn parse_shots(m: &MediaItem, scenes: Option<&Value>) -> Vec<ShotInfo> {
         let quality: ShotQuality = serde_json::from_value(s["quality"].clone()).unwrap_or_default();
         let camera: CameraMove = serde_json::from_value(s["camera"].clone()).unwrap_or_default();
         let description: Option<ShotDescription> = s.get("description").filter(|d| d.is_object()).and_then(|d| serde_json::from_value(d.clone()).ok());
+        // (the image embedding, when the index was asked for it: near-duplicates are found by it)
+        let embedding: Vec<f32> = s["embedding"]
+            .as_array()
+            .filter(|a| a.len() <= MAX_EMBEDDING)
+            .map(|a| a.iter().filter_map(Value::as_f64).filter(|v| v.is_finite()).map(|v| v as f32).collect())
+            .unwrap_or_default();
         let shot = Shot {
             start: Tick::from_seconds_f64(a),
             end: Tick::from_seconds_f64(b),
@@ -238,7 +247,7 @@ pub fn parse_shots(m: &MediaItem, scenes: Option<&Value>) -> Vec<ShotInfo> {
             quality,
             camera,
             description,
-            ..Shot::default()
+            embedding: Embedding(embedding),
         };
         let index = s["shot"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(k);
         out.push(ShotInfo {

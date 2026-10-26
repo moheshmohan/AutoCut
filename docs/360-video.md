@@ -111,11 +111,23 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    motion sensor, so a box is a direction and every shot's horizon is level), the
    speech, and for every 360° moment where the action is (`media.salience360`). A shot longer
    than 12 s offers several moments.
+   **Which moments.** Each moment is measured on its own frames (`media.measureMoments`:
+   sharpness, exposure, the camera's shake and the faces in it — a long take is not one score)
+   and ranked: sharpness, exposure, steadiness and the aesthetic score first, then faces,
+   expressions (the describer's words: smiling, laughing, waving — there is no expression
+   model), speech worth hearing (English said in it, an exclamation, a word like *wow* or
+   *look*) and energy. The unusable are left out (out of focus, too dark, blown out, a shaky
+   normal clip), then near-duplicates of a better moment (SigLIP 2 image embeddings at least
+   0.93 alike; different rooms of one trip measure 0.6–0.86), as long as enough moments stay to
+   fill the edit; the rest keep filming order. The report's `moments` gives every moment's
+   scores, whether it was kept and why ("kept: rank 0.81 — sharp, well exposed, faces in view;
+   says "wow look at that"", "dropped: a near-duplicate of c4 (0.96 alike), which ranks
+   higher"). The model sees each moment's rank; without a model the rules use it too.
 3. **The plan**: the rhythm is set first — a hook long enough for a tiny planet to open, body
    shots alternating about 2.4 s and 1.8 s, an ending, every length a whole number of beats
    adding up to the length asked. The local model (the script model, `qwen3:8b`, else
    `phi4-mini`) fills each slot from the brief and the shots' facts (what each shows, its file,
-   energy, quality, a 360° shot's *looks* — the subjects and action directions it can point at —
+   energy, rank, faces, smiles and speech, a 360° shot's *looks* — the subjects and action directions it can point at —
    and the cameras that clip may use): a clip, its camera, where a 360° camera looks (and turns
    to), any English text. Every pick is checked and repaired — an unknown clip, the same moment
    twice or a third shot of one file in a row is replaced by the rules' next clip in filming

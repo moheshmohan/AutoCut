@@ -7,7 +7,8 @@
 //! 2. **Analysis.** The scene index (`media.analyzeScenes`: cuts, quality, the camera's move, the
 //!    describer's subjects and their boxes — 360° media is indexed as its stitched panorama, so a
 //!    box is a direction), the speech (`media.understandSpeech`), and for each 360° shot where
-//!    things happen round the sphere (`media.salience360`).
+//!    things happen round the sphere (`media.salience360`). Every moment is measured on its own
+//!    frames and ranked; the unusable and the near-duplicates are left out ([`rank`]).
 //! 3. **Plan.** A shot list on the music's beats ([`Plan`]): a hook, the story in filming order
 //!    (flat and 360° shots taking turns where both exist), an ending. Each shot is a moment of a
 //!    clip, its length in beats and its camera ([`Camera`]): for a 360° shot a move of the 360
@@ -414,6 +415,14 @@ pub struct Candidate {
     /// Flat: width over height of the picture.
     pub aspect: f64,
     pub order: usize,
+    /// Its shot in its item's scene index (moments of one shot are not copies of each other).
+    pub shot: usize,
+    /// What its picture and sound score ([`rank::Scores`]), and its rank from them.
+    pub scores: rank::Scores,
+    pub rank: f64,
+    /// Its shot's image embedding (near-duplicates are told by it).
+    #[serde(skip)]
+    pub embedding: Vec<f32>,
 }
 
 impl Candidate {
@@ -594,6 +603,9 @@ fn candidate(
         }
         let uses = d.map(|d| d.uses.clone()).unwrap_or_default();
         let media_seconds = media.iter().find(|m| m.item == s.item).map_or(s.end, |m| m.seconds.max(s.end));
+        let said = if s.speech > 0.2 { said_in(speech, s.item, start, end) } else { None };
+        let energy = energy_of(s);
+        let scores = rank::scores_of(s, said.as_deref(), s.speech, energy);
         let caption = if many { format!("{} (moment {} of the shot)", chars(&s.caption(), 140), part + 1) } else { chars(&s.caption(), 160) };
         Candidate {
             id,
@@ -605,27 +617,31 @@ fn candidate(
             key,
             media_seconds,
             caption,
-            energy: energy_of(s),
-            quality: f64::from(s.shot.quality.score.clamp(0.0, 1.0)),
+            energy,
+            quality: scores.quality(),
             hook: f64::from(filmcraft_scenes::best::score(&s.shot, ShotUse::Hook).0.clamp(0.0, 1.0)),
             wide: d.is_some_and(|d| d.shot_type == ShotType::Wide) || uses.contains(&ShotUse::Establishing),
             indoor: indoors(&format!("{} {}", s.caption(), d.map(|d| d.setting.as_str()).unwrap_or_default())),
             moving: s.shot.camera != CameraMove::Static || d.is_some_and(|d| !d.actions.is_empty()),
             handheld: s.shot.camera == CameraMove::Handheld || s.shot.quality.shake > 0.35,
             talking: s.talking,
-            said: if s.speech > 0.2 { said_in(speech, s.item, start, end) } else { None },
+            said,
             looks,
             subject,
             aspect: aspects.get(&s.item).copied().filter(|a| a.is_finite() && *a > 0.0).unwrap_or(16.0 / 9.0),
             order: s.order,
+            shot: s.index,
+            rank: scores.rank(kind),
+            scores,
+            embedding: s.shot.embedding.0.clone(),
         }
     }
 }
 
-/// The candidates worth telling the model about: the best by quality and hook, at most `n`,
-/// in filming order (every clip keeps at least its best shot).
+/// The candidates worth telling the model about: the best by rank and hook, at most `n`, in
+/// filming order (every clip keeps at least its best shot).
 pub fn shortlist(cands: &[Candidate], n: usize) -> Vec<&Candidate> {
-    let worth = |c: &Candidate| 0.45 * c.quality + 0.35 * c.hook + 0.2 * c.energy + if c.kind == Kind::Vr { 0.1 } else { 0.0 };
+    let worth = |c: &Candidate| 0.6 * c.rank + 0.25 * c.hook + 0.15 * c.energy;
     let mut best_of_item: HashMap<u64, (f64, usize)> = HashMap::new();
     for (i, c) in cands.iter().enumerate() {
         let w = worth(c);
@@ -1152,7 +1168,9 @@ pub fn director_prompt(cands: &[&Candidate], o: &Options, beat: f64, slots: &[Sl
     for c in Camera::ALL {
         out.push_str(&format!("- {} {} — {}\n", c.id(), beats_for(c.min_seconds(), beat), c.meaning()));
     }
-    out.push_str("Clips (id | kind | file | energy | quality | notes | what it shows | looks | cameras it may use):\n");
+    out.push_str(
+        "Clips in filming order (id | kind | file | energy | rank: how good the moment is, 0..1 | notes | what it shows | looks | cameras it may use):\n",
+    );
     for c in cands {
         let mut notes: Vec<&str> = Vec::new();
         if c.wide {
@@ -1163,6 +1181,15 @@ pub fn director_prompt(cands: &[&Candidate], o: &Options, beat: f64, slots: &[Sl
         }
         if c.moving {
             notes.push("moving");
+        }
+        if c.scores.people >= 0.6 {
+            notes.push("faces");
+        }
+        if c.scores.expression >= 0.5 {
+            notes.push("smiles");
+        }
+        if c.scores.speech >= 0.5 {
+            notes.push("speech");
         }
         let looks = if c.kind == Kind::Vr {
             c.looks.iter().take(4).map(|l| format!("{} {}", l.id, one_line(&l.what))).collect::<Vec<_>>().join("; ")
@@ -1177,7 +1204,7 @@ pub fn director_prompt(cands: &[&Candidate], o: &Options, beat: f64, slots: &[Sl
             kind_word(c.kind),
             chars(&c.name, 32),
             c.energy,
-            c.quality,
+            c.rank,
             if notes.is_empty() { "-".to_string() } else { notes.join(",") },
             one_line(&c.caption),
             says,
@@ -1742,6 +1769,10 @@ pub struct Report {
     pub levelled: usize,
     pub max_tilt: f64,
     pub shots_indexed: usize,
+    /// Moments measured on their own frames, and every moment's verdict: its scores, kept or
+    /// dropped, and why.
+    pub measured: usize,
+    pub moments: Vec<rank::Verdict>,
     /// The shots the director chose from: what each shows, and a 360° shot's looks.
     pub candidates: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1868,7 +1899,8 @@ async fn index(
     }
     let mut indexes: HashMap<u64, Value> = HashMap::new();
     for m in media {
-        if let Ok(v) = run(ex, "media.scenes", json!({"item": m.item})).await
+        // (with the shots' image embeddings: near-duplicates are found by them)
+        if let Ok(v) = run(ex, "media.scenes", json!({"item": m.item, "embeddings": true})).await
             && v["analyzed"] == true
         {
             indexes.insert(m.item, v);
@@ -1906,7 +1938,7 @@ async fn index(
             match run(ex, "media.analyzeScenes", json!({"items": chosen, "detail": "full", "wait": true})).await {
                 Ok(_) => {
                     for item in &chosen {
-                        if let Ok(v) = run(ex, "media.scenes", json!({"item": item})).await
+                        if let Ok(v) = run(ex, "media.scenes", json!({"item": item, "embeddings": true})).await
                             && v["analyzed"] == true
                         {
                             indexes.insert(*item, v);
@@ -2015,17 +2047,27 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
             aspects.insert(m.item, w / h);
         }
     }
-    let cands = candidates(&shots, &media, &vr, &salience, &aspects, &speech);
-    // ---- the plan
+    let mut cands = candidates(&shots, &media, &vr, &salience, &aspects, &speech);
+    // ---- which moments: each ranked (on its own frames where it can be measured), the unusable
+    // and the near-duplicates left out
+    report.measured = rank::measure(ex, &mut cands, lines).await;
     let bpm = o.bpm.unwrap_or(DEFAULT_BPM);
     let beat = beat_of(bpm);
     let total = ((o.seconds / beat).round() as u32).max(4);
+    let need = rhythm(total, beat, cands.len()).len() + 2;
+    let (cands, verdicts) = rank::choose(cands, need);
+    let dropped = verdicts.iter().filter(|v| !v.kept).count();
+    if dropped > 0 {
+        lines(&format!("{dropped} moment(s) left out (blurred, dark, shaky or a near-duplicate)"));
+    }
+    report.moments = verdicts;
+    // ---- the plan
     let short = shortlist(&cands, MAX_CANDIDATES);
     let slots = rhythm(total, beat, cands.len());
     report.candidates = short
         .iter()
         .map(|c| {
-            let mut v = json!({"clip": c.id, "name": c.name, "kind": c.kind, "from": round2(c.start), "to": round2(c.end), "what": c.caption, "energy": round2(c.energy), "quality": round2(c.quality)});
+            let mut v = json!({"clip": c.id, "name": c.name, "kind": c.kind, "from": round2(c.start), "to": round2(c.end), "what": c.caption, "energy": round2(c.energy), "quality": round2(c.quality), "rank": c.rank});
             if c.kind == Kind::Vr {
                 v["looks"] = json!(c.looks.iter().map(|l| json!({"look": l.id, "what": l.what, "yaw": l.yaw.round(), "pitch": l.pitch.round()})).collect::<Vec<_>>());
             }
@@ -2443,6 +2485,9 @@ async fn export(ex: &dyn Executor, o: &Options, seq: u64, out: &str, report: &mu
         report.qa_summary = Some(qa.summary());
     }
 }
+
+#[path = "director_rank.rs"]
+pub mod rank;
 
 #[cfg(test)]
 #[path = "director_tests.rs"]

@@ -327,7 +327,7 @@ fn rgb_48x27(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
 /// A decoded frame as RGBA8, reduced first while it is still Y'CbCr (box-averaged by a power of
 /// two, keeping its long side at least `long`): converting a whole 4K frame to RGBA to look at a
 /// 96-pixel copy of it cost most of the analysis.
-fn small_rgba(vf: &filmcraft_frame::VideoFrame, long: u32) -> (Vec<u8>, u32, u32) {
+pub(crate) fn small_rgba(vf: &filmcraft_frame::VideoFrame, long: u32) -> (Vec<u8>, u32, u32) {
     let side = vf.width.max(vf.height);
     let mut n = 1u32;
     while n < 64 && side / (n * 2) >= long.max(1) {

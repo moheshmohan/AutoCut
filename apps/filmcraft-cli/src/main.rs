@@ -535,7 +535,10 @@ SUBCOMMANDS
                                 by name — imported from Studio's download folder, else fetched
                                 from the Insta360 cloud — a Google Photos --album, or the
                                 project's) is indexed shot by shot, its speech understood and each
-                                360° shot looked round for its action (media.salience360); the
+                                360° shot looked round for its action (media.salience360); each
+                                moment is measured on its own frames and ranked (sharpness,
+                                exposure, shake, faces, expressions, speech), the unusable and
+                                near-duplicates left out (the report's moments say why); the
                                 local model (Ollama) directs from --brief: the hook, the shots in
                                 filming order, each one's length in beats and its camera — for a
                                 360° shot a tiny-planet intro, an orbit, a barrel roll, a whip pan
