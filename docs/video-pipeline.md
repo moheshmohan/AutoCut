@@ -15,8 +15,9 @@ own takes, a version counter and graphics after the build — is §10. How each 
 [crates/autocut/README.md](../crates/autocut/README.md). For a quick vertical Short or Reel of
 any clips, without a showcase (`filmcraft-cli quick <folder>`: a template picked and filled from
 the scene index and the speech): [quick-templates.md](quick-templates.md). 360° footage (an
-Insta360 camera or its cloud) goes through the same steps, each shot framed by a virtual camera:
-[360-video.md](360-video.md).
+Insta360 camera or its cloud) goes through the same steps, each shot framed by a virtual camera,
+and `filmcraft-cli direct` has the local model direct normal and 360° clips into one edit on the
+beat: [360-video.md](360-video.md).
 
 ```text
  album ─► pick ─► analyse ─► plan ─► script ─► voice ─► build (1080p review) ─► QA + privacy

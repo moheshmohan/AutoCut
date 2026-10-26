@@ -33,6 +33,7 @@ macro_rules! out {
 mod args;
 mod audio;
 mod creator_demo;
+mod direct;
 mod instagram;
 mod locations;
 mod ml_script;
@@ -523,6 +524,31 @@ SUBCOMMANDS
                                 (<out>.qa.json). Missing models are never downloaded unless
                                 --download (the scene models, the speech models, the privacy
                                 detectors); everything runs without them
+  direct [folder | files… | project.fcproj] [--brief \"a 30 s reel of our trip\"]
+         [--aspect 9:16|16:9|1:1|4:5] [--seconds 30] [--platform reels|shorts|tiktok|vertical]
+         [--insta360 VID_093,VID_096] [--album TITLE] [--mood M] [--bpm 110] [--music file]
+         [--title T] [--no-captions] [--caption-style S] [--redact faces,plates|…|off]
+         [--name N] [--full-detail 8] [--seed N] [--dry-run] [--no-qa] [--export out.mp4]
+         [--download] [--save | --save-as p.fcproj]
+                                normal and 360° clips → one catchy edit on the beat
+                                (autocut.direct): the media (files, a folder, Insta360 recordings
+                                by name — imported from Studio's download folder, else fetched
+                                from the Insta360 cloud — a Google Photos --album, or the
+                                project's) is indexed shot by shot, its speech understood and each
+                                360° shot looked round for its action (media.salience360); the
+                                local model (Ollama) directs from --brief: the hook, the shots in
+                                filming order, each one's length in beats and its camera — for a
+                                360° shot a tiny-planet intro, an orbit, a barrel roll, a whip pan
+                                between two things it saw, a reveal from the sky, a drift, a
+                                planet outro, a follow or a hyperlapse; for a normal one a push
+                                in, a follow or a speed ramp — its plan checked and repaired, and
+                                rules direct without a model (the report says which). Built on
+                                generated music's beats (or --music) with a soft swish on each
+                                whip and roll, a chime under the English title, captions of
+                                English speech and the mix at −14 LUFS; --dry-run prints the plan
+                                and its engine commands and builds nothing; with --export the
+                                video, <out>.sheet.jpg, <out>.report.json and QA. Privacy is off
+                                unless --redact asks for it
   trailer (--project p.fcproj | --bridge addr) [--sequence id] [--plan plan.json]
           [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5]
           [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at S]]
@@ -2715,6 +2741,7 @@ async fn cli() {
         // an album, a folder or clips → a vertical Short or Reel from a template filled
         // automatically (autocut.quick)
         "quick" => quick::run(&a).await,
+        "direct" => direct::run(&a).await,
         "shorts" => {
             // long video → vertical shorts (autocut.shorts); every usage error before anything runs
             let src = a.pos(1).unwrap_or_else(|| usage("shorts <project.fcproj | media file> [--count N] [--aspect 9:16] [--export dir] [--upload-youtube]"));
