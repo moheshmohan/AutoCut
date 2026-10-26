@@ -1745,6 +1745,10 @@ pub async fn drop_repeats(
 /// Make the short (the `autocut.quick` job; parameters as the engine checked them). `writer`
 /// writes the text slots (none: from the descriptions).
 pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, lines: &mut dyn FnMut(&str)) -> Result<Value, AutoCutError> {
+    // the taste profile: its privacy unless the job asks otherwise, its wording on screen
+    let taste = crate::taste::resolve(ex).await;
+    let with_taste = crate::taste::under(p, &json!({"redact": taste.redact}));
+    let p = if taste.redact.is_some() { &with_taste } else { p };
     let opts = Options::from_params(p)?;
     let mut report = Report { seconds: opts.seconds, ..Report::default() };
     let mut notes: Vec<String> = Vec::new();
@@ -2104,6 +2108,11 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
         generate_music = false;
     }
     let name = opts.name.clone().unwrap_or_else(|| format!("{} — Quick Short", opts.topic.as_deref().map(title_case).unwrap_or_else(|| t.name.clone())));
+    for v in slots.values_mut() {
+        if let Value::String(text) = v {
+            *text = taste.apply_words(text);
+        }
+    }
     let applied = run(ex, "template.apply", {
         let mut ap = json!({"template": chosen_id, "variant": opts.aspect, "slots": Value::Object(slots), "name": name, "generateMusic": generate_music});
         if let Some(b) = music_beats {

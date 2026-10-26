@@ -24,6 +24,7 @@
 //! Everything goes through engine commands on the [`Executor`], so the same build drives the
 //! headless CLI and the live app.
 
+use filmcraft_engine::project::taste::Taste;
 use std::collections::BTreeMap;
 
 use filmcraft_engine::ken_burns::Move as KenBurns;
@@ -103,6 +104,9 @@ pub struct Options {
     /// The look: a theme, the timeline, transitions from the catalogue, loudness, embedded
     /// captions, the SoundFont ([`crate::look`]); the default is today's look.
     pub look: Look,
+    /// The taste profile (`autocut.taste`): its wording and narration rules for the script, its
+    /// sounds and light effects for the build; empty: the build reads it itself.
+    pub taste: filmcraft_engine::project::taste::Taste,
     /// The narration's language (`--language`, a plan's `"language"`): `ml` (or `ml-IN`) reads
     /// the script's Malayalam parts in Malayalam (a cloned voice through IndicF5), heard back
     /// in Malayalam, with Malayalam subtitles; `None` or anything else: English.
@@ -169,6 +173,7 @@ impl Default for Options {
             fill_frame: true,
             follow_subject: true,
             look: Look::default(),
+            taste: Default::default(),
             language: None,
             numbers: None,
             skip_narration_check: false,
@@ -823,10 +828,11 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
         names.join(", ")
     );
     let (mut intro, mut outro) = (String::new(), String::new());
-    match model.complete_json(SCRIPT_SYSTEM, &user, &[]).await {
+    let system = crate::taste::with_rules(SCRIPT_SYSTEM, &opts.taste);
+    match model.complete_json(&system, &user, &[]).await {
         Ok(v) => {
-            intro = v.get("intro").and_then(Value::as_str).map(tidy).unwrap_or_default();
-            outro = v.get("outro").and_then(Value::as_str).map(tidy).unwrap_or_default();
+            intro = v.get("intro").and_then(Value::as_str).map(tidy).map(|t| opts.taste.apply_words(&t)).unwrap_or_default();
+            outro = v.get("outro").and_then(Value::as_str).map(tidy).map(|t| opts.taste.apply_words(&t)).unwrap_or_default();
         }
         Err(e) => progress(&format!("the script model did not write the intro ({e}); using a plain one")),
     }
@@ -846,12 +852,18 @@ pub async fn write_script(model: &dyn ChatModel, opts: &Options, entries: &[Entr
             batch.len(),
             moods.join(", ")
         );
-        match model.complete_json(SCRIPT_SYSTEM, &user, &[]).await {
+        match model.complete_json(&system, &user, &[]).await {
             Ok(v) => {
                 let lines = v.get("lines").and_then(Value::as_array).cloned().unwrap_or_default();
                 let said = v.get("deliveries").and_then(Value::as_array).cloned().unwrap_or_default();
                 for (i, (at, e)) in batch.iter().enumerate() {
-                    let line = lines.get(i).and_then(Value::as_str).map(tidy).map(|l| strip_heading(&l, e)).filter(|l| l.split_whitespace().count() >= 3);
+                    let line = lines
+                        .get(i)
+                        .and_then(Value::as_str)
+                        .map(tidy)
+                        .map(|l| strip_heading(&l, e))
+                        .map(|l| opts.taste.apply_words(&l))
+                        .filter(|l| l.split_whitespace().count() >= 3);
                     // only a delivery the model may choose, and only for a line it wrote
                     let mood = said.get(i).and_then(Value::as_str).and_then(Delivery::from_id).filter(|d| SCRIPT_DELIVERIES.contains(d));
                     if let (Some(_), Some(d)) = (&line, mood) {
@@ -1174,7 +1186,12 @@ struct Tracks {
 
 /// A generated sound effect at `t` on `track`, or on any free audio track when that one is busy
 /// there (two cues can overlap when entries are short).
-async fn sfx(ex: &dyn Executor, kind: &str, duration: f64, t: f64, track: &str, intensity: f64, mix: &mut Mix) -> Result<(), AutoCutError> {
+#[allow(clippy::too_many_arguments)]
+async fn sfx(ex: &dyn Executor, kind: &str, duration: f64, t: f64, track: &str, intensity: f64, mix: &mut Mix, taste: &Taste) -> Result<(), AutoCutError> {
+    // (a sound the taste profile leaves out is not made)
+    if !crate::taste::allows_sound(taste, kind) {
+        return Ok(());
+    }
     let p = json!({"kind": kind, "duration": duration, "time": ticks(t), "track": track, "intensity": intensity});
     let r = match run(ex, "audio.generate", p).await {
         Ok(r) => r,
@@ -3005,7 +3022,17 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     if entries.is_empty() {
         return Err(AutoCutError::Invalid(format!("no clip shows a {} clearly enough to count", opts.subject)));
     }
-    let look = &opts.look;
+    // the taste profile: the one the plan was written in, else the project's now
+    let taste = if opts.taste.is_empty() { crate::taste::resolve(ex).await } else { opts.taste.clone() };
+    let mut own_look = opts.look.clone();
+    if let Some(tp) = own_look.transitions.as_mut() {
+        tp.within = crate::taste::light_free(&taste, &tp.within, "cross_dissolve");
+        tp.between = crate::taste::light_free(&taste, &tp.between, "cross_dissolve");
+        tp.chapter = crate::taste::light_free(&taste, &tp.chapter, "dip_to_black");
+    }
+    let rotating: Vec<(&str, Option<(&str, &str)>)> =
+        TRANSITIONS.iter().copied().filter(|(id, _)| taste.light_effects != Some(false) || !crate::taste::is_light_effect(id)).collect();
+    let look = &own_look;
     let robots = entries.iter().filter(|e| !e.is_scene()).count();
     if robots == 0 {
         return Err(AutoCutError::Invalid(format!("only scene entries: a showcase needs at least one {}", opts.subject)));
@@ -3168,8 +3195,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // noise sounded like a rocket to the owner)
     let hit = beats.as_ref().and_then(|b| b.nearest(1.8, 1.3, 2.4)).map_or(1.8, |x| on_frame(x, tr.fps));
     // (ending where the impact starts, on the same track)
-    sfx(ex, "swish", hit.min(0.5), (hit - 0.5).max(0.0), &tr.hits, 0.6, &mut mix).await?;
-    sfx(ex, "impact", 3.0, hit, &tr.hits, 0.8, &mut mix).await?;
+    sfx(ex, "swish", hit.min(0.5), (hit - 0.5).max(0.0), &tr.hits, 0.6, &mut mix, &taste).await?;
+    sfx(ex, "impact", 3.0, hit, &tr.hits, 0.8, &mut mix, &taste).await?;
     let subtitle = opts.subtitle.clone().unwrap_or_else(|| years(entries));
     match &theme {
         Some(th) => look::title_card(ex, th, [tr.titles_index, tr.over_index], tr.fps, (w, h), &opts.title, &subtitle, hit, intro_len).await?,
@@ -3400,7 +3427,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             match &look.transitions {
                 None => {
                     let (effect, param) =
-                        if new_year { ("dip_to_black", None) } else { TRANSITIONS.get(k % TRANSITIONS.len()).copied().unwrap_or(("cross_dissolve", None)) };
+                        if new_year { ("dip_to_black", None) } else { rotating.get(k % rotating.len().max(1)).copied().unwrap_or(("cross_dissolve", None)) };
                     let mut p = json!({"clip": fg, "edge": "in", "effect": effect, "frames": if new_year { 18 } else { 12 }});
                     if let Some((name, value)) = param {
                         p["params"] = json!({name: value});
@@ -3410,7 +3437,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                     }
                     // (a blurred copy behind the picture follows the transition at the end:
                     // pillars_through_transitions)
-                    sfx(ex, "swish", 0.5, (t - 0.25).max(0.0), &tr.sfx, 0.6, &mut mix).await?;
+                    sfx(ex, "swish", 0.5, (t - 0.25).max(0.0), &tr.sfx, 0.6, &mut mix, &taste).await?;
                 }
                 // from the catalogue, each with its sound (a soft swish between entries, a chime
                 // into a chapter, whose card brings the impact; the whoosh and riser they had
@@ -3424,7 +3451,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                     if let Some(effect) = in_turn(list, counter) {
                         match run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "in", "effect": effect, "frames": frames})).await {
                             Ok(r) => {
-                                if let Some(id) = r["transition"].as_u64() {
+                                if let Some(id) = r["transition"].as_u64().filter(|_| crate::taste::allows_sound(&taste, sound)) {
                                     let intensity = if new_year { 0.75 } else { 0.6 };
                                     let p = json!({"transitions": [id], "kind": sound, "intensity": intensity, "gain": look.mix.transition_gain_db()});
                                     let with_sound = match run(ex, "transitions.addSound", p).await {
@@ -3456,7 +3483,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                     title(ex, tr.over_index, tr.fps, &text, t, CARD_LEAD, size, (w / 2.0, h * 0.55), title_props.clone()).await?;
                 }
             }
-            sfx(ex, "impact", 2.0, t, &tr.hits, 0.6, &mut mix).await?;
+            sfx(ex, "impact", 2.0, t, &tr.hits, 0.6, &mut mix, &taste).await?;
         }
         // the name, and when and where, bottom left, while the narration introduces it (a
         // scene: its caption)
@@ -3556,7 +3583,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let tracks = outro::Tracks { picture: tr.fg.clone(), picture_index: 1, wash: tr.titles_index, glow: tr.over_index, burst: tr.counter_index, own };
         let made = outro::build(ex, th, &tracks, tr.fps, (w, h), o, t, outro_len, &mut built.notes).await?;
         for (kind, at, dur, intensity) in &made.cues {
-            sfx(ex, kind, *dur, *at, &tr.hits, *intensity, &mut mix).await?;
+            sfx(ex, kind, *dur, *at, &tr.hits, *intensity, &mut mix, &taste).await?;
         }
         progress(&format!(
             "outro: {} ({:.1}s), the end screen's regions clear from {:.1}s",
@@ -3582,7 +3609,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "out", "effect": "dip_to_black", "frames": 30})).await.ok();
     }
     if look.outro.is_none() {
-        sfx(ex, "impact", 3.0, t, &tr.hits, 0.7, &mut mix).await?;
+        sfx(ex, "impact", 3.0, t, &tr.hits, 0.7, &mut mix, &taste).await?;
     }
     let closing = format!("{robots} {}S", opts.counted().to_uppercase());
     match &theme {
@@ -4975,6 +5002,27 @@ mod tests {
         assert_eq!(o.counted(), "version");
         assert_eq!(Options { counter: Some(" ".into()), ..Options::default() }.counted(), "robot");
         assert!(Options::default().subject_check);
+    }
+
+    #[tokio::test]
+    async fn the_script_follows_the_taste_profiles_rules() {
+        use filmcraft_engine::project::taste::{Taste, Wording};
+        let day = 1_665_741_668;
+        let entries = group(&[fact(1, "Boston Dynamics Spot", "quadruped", day, 1.0)], "robot", 0.3);
+        let model = crate::llm::FixedModel::new(vec![
+            json!({"intro": "My son and I filmed every robot we met.", "outro": "That is all for now, thanks for watching!"}),
+            json!({"lines": ["My son met Spot at an expo and it danced."]}),
+        ]);
+        let taste = Taste {
+            words: Some(vec![Wording { say: "our son".into(), not: "my son".into() }]),
+            narration: Some(vec!["Tell the story with feeling; do not describe what is on screen.".into()]),
+            ..Taste::default()
+        };
+        let s = write_script(&model, &Options { taste, ..Options::default() }, &entries, &mut |_| {}).await;
+        assert!(s.intro.starts_with("Our son and I"), "{}", s.intro);
+        assert!(s.lines[0].starts_with("Our son met Spot"), "{}", s.lines[0]);
+        let asked = model.asked.lock().unwrap();
+        assert!(asked.iter().all(|(system, _)| system.contains("never \"my son\"") && system.contains("with feeling")), "{asked:?}");
     }
 
     #[tokio::test]

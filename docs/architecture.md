@@ -840,6 +840,11 @@ All of these dispatch the same command ids.
   `jobs.cancel`), Project Notes (`project.notes` / `project.setNotes`, plain text in
   `Project::notes`, schema v15; one typing session is one undo step). Timecode and Reference Monitor are frontend-only views. Their settings are
   `UiState::panels` (`ui.set {"panels": {...}}`).
+- **Taste profile.** `Project::taste` (schema v17, `filmcraft_project::taste::Taste`) is how the
+  project's videos are made — cutting style, light effects, sounds, colour pass, text language,
+  wording and narration rules, privacy — laid over the user's default (`taste.json` in the data
+  directory) by `autocut.taste`; AutoCut's director, Quick Short, showcase and Malayalam writer
+  read the two together under each video's own options.
 - **Motion tracking** (CapCut-style). `Project::motion_tracks` (schema v16) keeps named tracks of
   objects through clips (`filmcraft_project::motion_track`: media-time samples in the source
   picture, rotation, scale, confidence, lost frames) made by `track.create` in a background job

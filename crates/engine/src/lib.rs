@@ -95,6 +95,7 @@ pub mod speed_ramp;
 pub mod split_edit;
 pub mod stabilize;
 pub mod sync;
+pub mod taste;
 pub mod text_fx;
 pub mod transcript;
 pub mod transition_tools;

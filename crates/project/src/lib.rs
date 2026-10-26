@@ -31,6 +31,7 @@ pub mod narration;
 pub mod safe_zones;
 pub mod scenes;
 pub mod speech;
+pub mod taste;
 pub mod text_anim;
 pub mod time_remap;
 pub mod transcript;
@@ -1325,6 +1326,10 @@ pub struct Project {
     /// ([`motion_track`]). Shared (`Arc`) so undo snapshots don't copy them. Schema v16.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub motion_tracks: BTreeMap<MotionTrackId, std::sync::Arc<MotionTrack>>,
+    /// The project's taste profile (`autocut.taste`): how its videos are made, over the user's
+    /// default ([`taste::Taste`]). Schema v17.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taste: Option<taste::Taste>,
 }
 
 /// How a sequence is shown in the Timeline panel: its zoom, scroll position and track heights.
@@ -1429,6 +1434,7 @@ impl Project {
             notes: String::new(),
             scenes: BTreeMap::new(),
             motion_tracks: BTreeMap::new(),
+            taste: None,
         }
     }
 

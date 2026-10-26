@@ -911,6 +911,37 @@ missed half-turned faces in a crowd at 0.6–0.7. The plate detector's 33 hits w
 name badges, signs or machines (no vehicle in the footage): the shape check removed most, the
 vision check the last 5.
 
+## Taste profile: how this person likes their videos
+
+A taste profile (`autocut.taste`, [`taste.rs`](src/taste.rs),
+`filmcraft_project::taste::Taste`) says how one person likes their videos made: how lively the
+cuts are (`style`: subtle, energetic, cinematic), whether light effects are used
+(`lightEffects`), which sounds are heard on cuts and titles (`sounds`: swish, chime, whoosh,
+impact, riser) and how loud (`soundLevel`), the colour pass (`color`, `colorStrength`, `look`,
+`lookStrength`), the language of on-screen text (`textLanguage`), wording rules (`words`:
+`{"say": "our son", "not": "my son"}`), how narration is written (`narration`: rules in the
+person's own words, "tell the story with feeling; don't describe what is on screen; brand names
+on screen, not in the voice"), and privacy (`redact`).
+
+There are two layers: the user's default (`taste.json` in the data directory: `scope:
+"default"`) and the project's own (kept in the project file, schema v17; one undo step), the
+project's over the default. A video's own options win over both, and what none of them says is
+each pipeline's default — so a preference given for one video ("swish and chime only, no light
+leaks") stays with that video or project unless it is made the default.
+
+```text
+filmcraft-cli exec autocut.taste '{"scope":"default","set":{"style":"subtle","sounds":["swish","chime"],"lightEffects":false,"textLanguage":"en","words":[{"say":"our son","not":"my son"}],"narration":["Tell the story with feeling.","Do not describe what is on screen.","Keep brand names on screen, not in the voice."],"redact":"off"}}'
+filmcraft-cli exec autocut.taste '{"set":{"style":"energetic","lightEffects":true}}'   # this project only
+filmcraft-cli exec autocut.taste '{}'                                                  # what is set: default, project, resolved
+```
+
+Who reads it: the director (its style, light effects, sounds, colour pass, look and privacy
+fill what the video's options leave out; the wording rules on every text on screen; the report's
+`taste`); Quick Short (privacy, the wording on screen); the showcase (its transitions without
+light effects when they are off, only the sounds the profile allows, the wording and narration
+rules in the voice-over writer's instructions and on its lines); the Malayalam script writer
+(the wording and narration rules in its instructions; `ml-script` reads the user's default).
+
 ## Configuration (environment)
 
 | Variable | Default | Meaning |

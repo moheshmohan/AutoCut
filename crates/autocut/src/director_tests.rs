@@ -302,6 +302,10 @@ fn a_plan_compiles_to_commands_on_its_beats() {
 /// The demo project with its first clip's media taken as 360°.
 fn demo_session() -> crate::SessionExecutor {
     let mut s = filmcraft_engine::Session::default();
+    // (a data directory of its own: the user's default taste profile is not read)
+    let dir = std::env::temp_dir().join(format!("filmcraft-director-tests-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    s.prefs_path = Some(dir.join("preferences.json"));
     s.execute("file.openDemoProject", json!({})).unwrap();
     let item = s.active_sequence().unwrap().video_tracks[0].items[0].item;
     s.execute("media.vrProperties", json!({"items": [item.0], "projection": "equirectangular"})).unwrap();
@@ -671,6 +675,27 @@ fn a_saved_edit_is_found_again_and_its_options_kept() {
     assert_eq!(lost.len(), 1);
     assert!(revise::load(&json!({"plan": {"title": "x", "bpm": 120, "shots": []}})).is_err());
     assert!(revise::load(&json!("/no/such/report.json")).is_err());
+}
+
+#[tokio::test]
+async fn the_taste_profile_fills_what_a_video_leaves_out() {
+    let ex = demo_session();
+    {
+        let mut s = ex.0.lock().unwrap();
+        s.execute(
+            "autocut.taste",
+            json!({"set": {"style": "cinematic", "redact": "off", "color": false, "words": [{"say": "Our Days", "not": "Highlights"}]}}),
+        )
+        .unwrap();
+    }
+    let mut lines = |_: &str| {};
+    let r = make(&ex, &json!({"brief": "a 10 s reel", "seconds": 10, "bpm": 120, "captions": false, "dryRun": true}), None, &mut lines).await.unwrap();
+    assert_eq!(r["taste"]["style"], "cinematic", "{r}");
+    // the profile's wording in the title; its style under the video's own options
+    assert_eq!(r["plan"]["title"], "Our Days", "{r}");
+    assert!(r["options"].get("style").is_none(), "the report keeps the video's own options: {r}");
+    let own = make(&ex, &json!({"seconds": 10, "bpm": 120, "captions": false, "dryRun": true, "style": "energetic"}), None, &mut lines).await.unwrap();
+    assert_eq!(own["options"]["style"], "energetic");
 }
 
 #[tokio::test]

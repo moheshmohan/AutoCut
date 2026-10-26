@@ -2356,7 +2356,11 @@ async fn cli() {
             // analyze --out), or of a Google Photos album's clips (`--album`: picked, imported
             // and analysed first); every usage error comes before anything is read
             let (source, album) = showcase_source(&a);
-            let mut opts = filmcraft_autocut::showcase::Options::default();
+            // the user's default taste profile: its wording, narration rules, sounds and light
+            let mut opts = filmcraft_autocut::showcase::Options {
+                taste: filmcraft_engine::taste::default_taste(&filmcraft_engine::Session::default()),
+                ..Default::default()
+            };
             if let Some(t) = a.opt("--title") {
                 opts.title = t.to_string();
             }

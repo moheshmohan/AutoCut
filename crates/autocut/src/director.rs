@@ -1911,6 +1911,9 @@ pub struct Report {
     /// The options it was made with (a revision starts from them), and, revised, from which
     /// report and what changed.
     pub options: Value,
+    /// The taste profile it was made in (`autocut.taste`), when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taste: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revised_from: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2148,10 +2151,15 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         Some(pr) => revise::merge(&pr.options, p, pr.plan.bpm),
         None => p.clone(),
     };
+    // the taste profile fills what the video's own options leave out
+    let taste = crate::taste::resolve(ex).await;
+    let own = revise::saved_options(&merged);
+    let merged = crate::taste::under(&merged, &crate::taste::director_options(&taste));
     let p = &merged;
     let mut o = Options::from_params(p)?;
     let mut report = Report { brief: o.brief.clone(), aspect: o.aspect.clone(), seconds: o.seconds, models: json!({}), ..Report::default() };
-    report.options = revise::saved_options(p);
+    report.options = own;
+    report.taste = (!taste.is_empty()).then(|| json!(taste));
     let mut notes: Vec<String> = Vec::new();
     if o.download {
         for set in ["fast", "full"] {
@@ -2309,7 +2317,10 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     cuts::joins(&mut plan, &cands, &speech, beat, &o.style);
     for s in plan.shots.iter_mut() {
         s.file = cands.iter().find(|c| c.id == s.clip).map(|c| c.name.clone()).unwrap_or_default();
+        // the profile's wording ("our son", never "my son") in every text on screen
+        s.text = s.text.as_deref().map(|t| taste.apply_words(t));
     }
+    plan.title = taste.apply_words(&plan.title);
     report.director = plan.by.clone();
     let (fw, fh) = o.frame();
     let frame = (f64::from(fw), f64::from(fh));

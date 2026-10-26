@@ -190,6 +190,10 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    `--export` writes the video, `<out>.sheet.jpg`, `<out>.report.json` (the plan, the
    candidates, who directed, the GPU frames rendered, the fallbacks) and QA. Faces stay sharp
    unless `--redact` asks: in a trip video the people are the subject.
+   **Taste.** What the video's options leave out comes from the taste profile (`autocut.taste`:
+   the user's default under the project's own): the cutting style, light effects, sounds, the
+   colour pass and look, privacy, and wording rules on every text ("our son", never "my son").
+   See [the AutoCut README](../crates/autocut/README.md#taste-profile-how-this-person-likes-their-videos).
 6. **Revising**: notes on a finished edit — "1:10 is too long; warmer at the end; fewer barrel
    rolls" — become changes to its saved plan rather than a new edit:
 

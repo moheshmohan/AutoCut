@@ -632,8 +632,10 @@ impl ShowcaseHost {
     }
 
     /// `autocut.malayalamScript`: the plan's English voice-over in natural spoken Malayalam.
-    async fn malayalam_script(&self, task: &Task, progress: &Arc<Progress>) -> Result<Value, AutoCutError> {
+    async fn malayalam_script(&self, task: &Task, ex: &PortExecutor, progress: &Arc<Progress>) -> Result<Value, AutoCutError> {
         let p = &task.params;
+        // the taste profile's wording and narration rules ("our son", "tell it with feeling")
+        let taste = crate::taste::resolve(ex).await;
         let plan = p.get("plan").cloned().or_else(|| task.plan.clone()).ok_or_else(|| AutoCutError::Invalid("no plan to translate".into()))?;
         let model = Cancellable { inner: self.translator(p).await?, progress: progress.clone() };
         let examples_path = p["examples"]
@@ -654,6 +656,7 @@ impl ShowcaseHost {
             revise: p["revise"].as_bool().unwrap_or(true),
             batch: defaults.batch,
             examples,
+            rules: taste.writing_rules(),
         };
         let t = crate::ml_translate::translate(&model, &plan, &settings, &mut |l| note(progress, l)).await?;
         let script = t.script();
@@ -679,7 +682,7 @@ impl ShowcaseHost {
             return crate::shorts::make(ex, &task.params, rater, &mut lines).await;
         }
         if task.kind == TaskKind::MalayalamScript {
-            return self.malayalam_script(&task, progress).await;
+            return self.malayalam_script(&task, ex, progress).await;
         }
         if task.kind == TaskKind::RoughCut {
             let mut lines = |l: &str| note(progress, l);
@@ -739,12 +742,14 @@ impl ShowcaseHost {
                 if plan_params.get("title").is_none() {
                     plan_params["title"] = json!(request.title.clone().unwrap_or_else(|| default_title(&request.subject)));
                 }
-                let plan = write_plan(&script_model, &plan_params, Some(&report), None, progress).await?;
+                let taste = crate::taste::resolve(ex).await;
+                let plan = write_plan(&script_model, &plan_params, Some(&report), None, &taste, progress).await?;
                 let status = format!("{} entries planned from {} clip(s) showing a {}", plan.entries.len(), summary["showing"], request.subject);
                 Ok(json!({"report": report, "summary": summary, "plan": plan, "status": status}))
             }
             TaskKind::Plan => {
-                let plan = write_plan(&script_model, p, task.report.as_ref(), task.plan.as_ref(), progress).await?;
+                let taste = crate::taste::resolve(ex).await;
+                let plan = write_plan(&script_model, p, task.report.as_ref(), task.plan.as_ref(), &taste, progress).await?;
                 let status = format!("Script written for {} entries", plan.entries.iter().filter(|e| e.include && !e.merge_previous).count());
                 Ok(json!({"plan": plan, "status": status}))
             }
@@ -974,7 +979,14 @@ async fn analyze_clips(
 /// Group a report into entries (or take reviewed ones) and write the voice-over: a [`PlanDoc`]
 /// whose entries keep the review's choices and whose lines follow them one to one. Options not
 /// given come from the plan kept before, then the defaults.
-async fn write_plan(model: &dyn ChatModel, p: &Value, report: Option<&Value>, kept: Option<&Value>, progress: &Arc<Progress>) -> Result<PlanDoc, AutoCutError> {
+async fn write_plan(
+    model: &dyn ChatModel,
+    p: &Value,
+    report: Option<&Value>,
+    kept: Option<&Value>,
+    taste: &filmcraft_engine::project::taste::Taste,
+    progress: &Arc<Progress>,
+) -> Result<PlanDoc, AutoCutError> {
     let kept: PlanDoc = kept.and_then(|k| serde_json::from_value(k.clone()).ok()).unwrap_or_default();
     let text = |k: &str| p[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     let subject = text("subject")
@@ -989,6 +1001,7 @@ async fn write_plan(model: &dyn ChatModel, p: &Value, report: Option<&Value>, ke
         mood: text("mood").or_else(|| non_empty(&kept.mood)).unwrap_or(d.mood.clone()),
         min_coverage: p["minCoverage"].as_f64().or(kept.min_coverage).unwrap_or(d.min_coverage).clamp(0.0, 1.0),
         subject: subject.clone(),
+        taste: taste.clone(),
         ..d
     };
     let review: Vec<ReviewEntry> = match p.get("entries").and_then(Value::as_array) {

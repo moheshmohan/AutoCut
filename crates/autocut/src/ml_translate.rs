@@ -142,11 +142,14 @@ pub struct Settings {
     pub batch: usize,
     /// The user's approved pairs ([`load_examples`]).
     pub examples: Vec<Pair>,
+    /// The taste profile's wording and narration rules ("say our son, never my son", "tell the
+    /// story with feeling"), told to the model after the style.
+    pub rules: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { max_words: ml_script::DEFAULT_MAX_WORDS, revise: true, batch: DEFAULT_BATCH, examples: Vec::new() }
+        Self { max_words: ml_script::DEFAULT_MAX_WORDS, revise: true, batch: DEFAULT_BATCH, examples: Vec::new(), rules: Vec::new() }
     }
 }
 
@@ -353,6 +356,11 @@ fn fix_points(line: &Line) -> String {
 
 /// Translate `plan`'s English voice-over (see the module docs).
 pub async fn translate(model: &dyn ChatModel, plan: &Value, settings: &Settings, progress: &mut dyn FnMut(&str)) -> Result<Translated, AutoCutError> {
+    let system = if settings.rules.is_empty() {
+        STYLE.to_string()
+    } else {
+        format!("{STYLE}\n\nThe narrator's own rules, which come first: {}", settings.rules.join(" "))
+    };
     let english = english_of_plan(plan).map_err(AutoCutError::Invalid)?;
     if english.parts.is_empty() {
         return Err(AutoCutError::Invalid("the plan has no English words to translate".into()));
@@ -377,7 +385,7 @@ pub async fn translate(model: &dyn ChatModel, plan: &Value, settings: &Settings,
             sounds_block(&english, &texts),
             chunk.len()
         );
-        let answer = model.complete_json(STYLE, &user, &[]).await;
+        let answer = model.complete_json(&system, &user, &[]).await;
         let got = match &answer {
             Ok(v) => answer_lines(v, chunk.len()),
             Err(_) => vec![None; chunk.len()],
@@ -386,7 +394,7 @@ pub async fn translate(model: &dyn ChatModel, plan: &Value, settings: &Settings,
             let line = match raw {
                 Some(raw) => checked(p, &p.text, &raw, &lock, &opts),
                 // one more try, alone
-                None => match single(model, &examples, &english, &lock, p).await {
+                None => match single(model, &system, &examples, &english, &lock, p).await {
                     Ok(raw) => checked(p, &p.text, &raw, &lock, &opts),
                     Err(e) => Line {
                         part: p.key.clone(),
@@ -421,7 +429,7 @@ pub async fn translate(model: &dyn ChatModel, plan: &Value, settings: &Settings,
                 "Examples (English, then how it is said):\n\n{examples}\n\nThese Malayalam lines need fixing. Rewrite each one: fix every point listed, keep it natural spoken Malayalam, keep every fact of its English.\n\n{items}\n\nJSON: {{\"lines\": [\"<new Malayalam of 1>\", …]}} with exactly {} lines, in order.",
                 chunk.len()
             );
-            let Ok(v) = model.complete_json(STYLE, &user, &[]).await else { continue };
+            let Ok(v) = model.complete_json(&system, &user, &[]).await else { continue };
             for (at, raw) in chunk.iter().zip(answer_lines(&v, chunk.len())) {
                 let (Some(raw), Some(old)) = (raw, lines.get(*at)) else { continue };
                 let part = Part { key: old.part.clone(), text: old.english.clone() };
@@ -439,14 +447,14 @@ pub async fn translate(model: &dyn ChatModel, plan: &Value, settings: &Settings,
 }
 
 /// One part translated alone.
-async fn single(model: &dyn ChatModel, examples: &str, english: &English, lock: &FactLock, p: &Part) -> Result<String, AutoCutError> {
+async fn single(model: &dyn ChatModel, system: &str, examples: &str, english: &English, lock: &FactLock, p: &Part) -> Result<String, AutoCutError> {
     let user = format!(
         "Examples (English, then how it is said):\n\n{examples}\n\n{}Translate this line into spoken Malayalam. Keep: {}.\n\n\"{}\"\n\nJSON: {{\"lines\": [\"<Malayalam>\"]}}",
         sounds_block(english, &[p.text.as_str()]),
         keep_list(lock, &p.text),
         p.text
     );
-    let v = model.complete_json(STYLE, &user, &[]).await?;
+    let v = model.complete_json(system, &user, &[]).await?;
     answer_lines(&v, 1).into_iter().next().flatten().ok_or_else(|| AutoCutError::Llm(format!("{} wrote no Malayalam for {}", model.id(), p.key)))
 }
 

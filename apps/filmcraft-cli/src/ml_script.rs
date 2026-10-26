@@ -161,6 +161,8 @@ pub async fn translate(a: &Args) {
         revise: !a.flag("--no-revise"),
         batch: batch.unwrap_or(defaults.batch),
         examples,
+        // the user's default taste profile: its wording and narration rules
+        rules: filmcraft_engine::taste::default_taste(&filmcraft_engine::Session::default()).writing_rules(),
     };
     let t0 = std::time::Instant::now();
     let t = ml_translate::translate(&model, &plan, &settings, &mut |l| diag(format_args!("ml-script: {l}")))

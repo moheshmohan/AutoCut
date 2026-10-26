@@ -46,6 +46,7 @@ pub mod shorts;
 pub mod shot_edit;
 pub mod showcase;
 pub mod subtitles;
+pub mod taste;
 pub mod trailer;
 pub mod validate;
 
