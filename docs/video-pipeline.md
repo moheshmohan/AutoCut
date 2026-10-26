@@ -14,7 +14,9 @@ The revision round in more depth (review notes, photos, places, the Malayalam st
 own takes, a version counter and graphics after the build — is §10. How each piece works:
 [crates/autocut/README.md](../crates/autocut/README.md). For a quick vertical Short or Reel of
 any clips, without a showcase (`filmcraft-cli quick <folder>`: a template picked and filled from
-the scene index and the speech): [quick-templates.md](quick-templates.md).
+the scene index and the speech): [quick-templates.md](quick-templates.md). 360° footage (an
+Insta360 camera or its cloud) goes through the same steps, each shot framed by a virtual camera:
+[360-video.md](360-video.md).
 
 ```text
  album ─► pick ─► analyse ─► plan ─► script ─► voice ─► build (1080p review) ─► QA + privacy
@@ -377,6 +379,7 @@ FilmCraft made: `--album`, [§6](#6-review-and-the-next-round)). Review at 1080p
 | Revision rounds in depth | [showcase-runbook.md](showcase-runbook.md) |
 | Malayalam narration | [malayalam-narration.md](malayalam-narration.md), [malayalam-style.md](malayalam-style.md) |
 | GPU and performance | [gpu.md](gpu.md), [performance.md](performance.md) |
+| 360° footage (Insta360) | [360-video.md](360-video.md); downloads in `~/Downloads/Insta360 Download/` |
 
 ## Gotchas the example ran into
 

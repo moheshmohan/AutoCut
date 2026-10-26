@@ -1,6 +1,6 @@
 # Where FilmCraft falls short of Premiere Pro
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (new file: ROADMAP's "Where we are lacking" re-measured against Premiere Pro 26.5.2 and the open issue list) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-26 · **Change:** minor (G10: 360° video) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Every known shortfall, one entry each, ranked by what most stops an editor using FilmCraft for real
 work. This is the work list: agents should prefer it over adding checklist items. Numbers are in
@@ -204,6 +204,12 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   [file-format-parity.md](file-format-parity.md).
 - **Have:** Matroska AAC / MP3 / AC-3 / E-AC-3 sample-aligned with the signal the encoder was
   given (the exact `CodecDelay` is trimmed, not the 1 ms-rounded one; #790).
+- **Have:** 360° video ([360-video.md](360-video.md)): Insta360 `.insv` (both lens tracks, the
+  `.lrv` as proxy, the camera's trailer) and equirectangular MP4s with Spherical Video V1 / V2
+  metadata import as 360° media; the 360 Reframe virtual camera (GPU, CPU fallback),
+  stabilisation and subject following; 360° export with the metadata. **Missing:** optical-flow
+  stitching, the gyro stream for levelling, `.insp` photos, cube-map / mesh projections, writing
+  stereoscopic 360°.
 
 ## G11. No plugin hosting
 
@@ -334,3 +340,4 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | 2026-10-10 | major | Created from ROADMAP.md's "Where we are lacking" (2026-10-05); re-ranked against Premiere 26.5.2 and the 188 open issues; added `.prproj`, 10-bit / 4:2:2 camera decode, launch crashes and missing PR CI, localization, delivery formats |
 | 2026-10-12 | minor | G10: MP1 (`A_MPEG/L1`) in Matroska imports (#1402) |
 | 2026-10-12 | minor | G10: OpenEXR PXR24 import |
+| 2026-10-26 | minor | G10: 360° video (Insta360, Spherical Video V1 / V2, the 360 Reframe virtual camera, 360° export) |

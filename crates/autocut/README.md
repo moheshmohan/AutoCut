@@ -140,7 +140,11 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
      so a slowed shot keeps the whole move; a filled shot's tilt is Motion position keyframes
      eased the same way (with `--no-fill`, the blurred copy behind it stays still). Lower thirds slide in from the left (3 % of the width, 0.4 s, decelerating) while
      fading in (0.25 s), and leave the same way (Motion position and Opacity keyframes on the
-     graphic clip). `--stabilize` (`Options::stabilize`) puts Warp Stabilizer
+     graphic clip). A 360° shot (an Insta360 recording, an equirectangular MP4) is framed by
+     its virtual camera instead (`place_360`, [docs/360-video.md](../../docs/360-video.md)):
+     turned to the plan's `focus` or the analysis' subject, steadied with `clip.stabilize360`
+     under `--stabilize`, following the subject with `clip.follow360`, its push-in a narrowing
+     field of view; no fill, tilt or blurred copy. `--stabilize` (`Options::stabilize`) puts Warp Stabilizer
      (`warp_stabilizer`: smooth motion, position/scale/rotation, crop and auto-scale) on every
      shot but the blurred outro — the analysis has no camera-motion measure, so all footage is
      treated as handheld; the stabilizer decodes each shot once at 480 px wide and tracks it
