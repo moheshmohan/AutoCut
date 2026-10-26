@@ -5,10 +5,16 @@
 //! | `clip.reframe360` | looks at 360° clips (`clips`, default the selection, else every clip of 360° media) through a virtual camera (the `vr_reframe` effect, added when missing, framing the sequence's frame): `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across) and `distance` (0 flat … 1 tiny planet) set, or keyframed `at` a clip time, or a whole camera move as `keys`; a `preset` (`natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`) first; one undo step |
 //! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` |
 //! | `media.align360` | lines the two lenses of dual-fisheye media up along their seam (a few frames across the clip, [`filmcraft_render::vr::align_lenses`]) and keeps the result in its VR Properties |
+//! | `clip.stabilize360` | holds the virtual camera steady: the camera's turn measured from the pictures frame to frame (`filmcraft_render::vr_motion`: points on cube faces, a robust rotation fit), then `mode` `smooth` / `light` / `strong` (the operator's own turns kept, the shake gone) or `lock` (the first frame's direction throughout), written as the effect's Stabilization keyframes; a job; `off` |
+//! | `clip.follow360` | turns the virtual camera to follow a subject (`target` `subject`, `box` in the clip's frame at `at`, or `face`): a wide tracking camera kept on it while the subject tracker follows it both ways from `at`, the path smoothed (`smooth` 0 close … 1 floaty) into yaw and pitch keyframes; a job |
 //!
 //! A clip of 360° media shows its raw picture (an equirectangular panorama, or the two fisheye
 //! circles of an Insta360 recording) until it is reframed; reframed, it is a flat clip of the
 //! virtual camera's frame for everything else (Motion, effects, tracking, Auto Reframe, export).
+
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 
@@ -16,6 +22,7 @@ use filmcraft_media::Spherical;
 use filmcraft_media::spherical::{Projection, StereoLayout};
 use filmcraft_project::vr::{MAX_SIDE, MIN_SIDE, REFRAME};
 use filmcraft_project::{ClipId, EffectInstance, ItemId, ItemKind, Param, ParamValue, TrackItem, TrackKind};
+use filmcraft_render::vr::M3;
 use filmcraft_time::Tick;
 
 use crate::commands::{CommandSpec, bad, bool_p, checked_u32_p, clips_p, f64_p, has_seq, item_p, str_p, u64_p};
@@ -28,6 +35,24 @@ const ALIGN_CMD: &str = "media.align360";
 const MAX_KEYS: usize = 10_000;
 /// Most frames `media.align360` looks at.
 const MAX_ALIGN_FRAMES: u64 = 9;
+const STAB_CMD: &str = "clip.stabilize360";
+const FOLLOW_CMD: &str = "clip.follow360";
+/// The virtual camera's stabilisation parameters.
+const STAB_PARAMS: [&str; 3] = ["stab_yaw", "stab_pitch", "stab_roll"];
+/// Side of the cube faces the stabiliser tracks on, pixels.
+const STAB_FACE: usize = 160;
+/// How closely the stabilisation keyframes redraw the measured correction, degrees.
+const STAB_TOLERANCE_DEGREES: f64 = 0.05;
+/// The follow's tracking camera picture (16:9).
+const FOLLOW_SIZE: (u32, u32) = (384, 216);
+/// Frames a second the follow analyses by default.
+const FOLLOW_FPS: f64 = 10.0;
+/// How closely the follow's keyframes redraw the smoothed path, degrees.
+const FOLLOW_TOLERANCE_DEGREES: f64 = 0.25;
+/// Most frames one clip's analysis looks at (a longer clip is analysed at a lower rate).
+const MAX_360_FRAMES: usize = 60_000;
+/// Finished analyses' outcomes kept for `jobs.list`.
+const MAX_OUTCOMES: usize = 256;
 
 pub fn commands() -> Vec<CommandSpec> {
     vec![
@@ -49,6 +74,26 @@ pub fn commands() -> Vec<CommandSpec> {
             params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"="auto","layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?}"#,
             enabled: |_| Ok(()),
             run: vr_properties,
+            journal: true,
+        },
+        CommandSpec {
+            id: STAB_CMD,
+            label: "360 Stabilize",
+            menu: &["Clip"],
+            shortcut: None,
+            params: r#"{"clips":[id]?,"mode":"smooth"|"light"|"strong"|"lock"="smooth","off":bool=false,"wait":bool=false}"#,
+            enabled: has_seq,
+            run: stabilize,
+            journal: true,
+        },
+        CommandSpec {
+            id: FOLLOW_CMD,
+            label: "360 Follow Subject",
+            menu: &["Clip"],
+            shortcut: None,
+            params: r#"{"clip":id?,"target":"subject"|"box"|"face"="subject","box":[x,y,w,h]?,"at":seconds?,"smooth":0..1=0.5,"analysisFps":1..30=10,"wait":bool=false}"#,
+            enabled: has_seq,
+            run: follow,
             journal: true,
         },
         CommandSpec {
@@ -450,6 +495,546 @@ fn align(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"items": report}))
 }
 
+// ---------------------------------------------------------------------------------------------
+// analyses that end as virtual-camera keyframes: stabilising and following
+// ---------------------------------------------------------------------------------------------
+
+/// Keyframes an analysis made for one clip: per parameter of the virtual camera, (media time,
+/// value) — written from scratch over the clip's old keys of that parameter.
+#[derive(Clone, Debug)]
+pub struct ClipKeys {
+    pub clip: ClipId,
+    pub keys: Vec<(&'static str, Vec<(Tick, f64)>)>,
+    pub summary: Value,
+}
+
+type KeyResults = Arc<Mutex<Option<std::result::Result<Vec<ClipKeys>, String>>>>;
+
+struct PendingKeys {
+    job: u64,
+    cmd: &'static str,
+    undo: &'static str,
+    seq: ItemId,
+    frame: (u32, u32),
+    results: KeyResults,
+}
+
+/// The session's 360° analyses and what the finished ones made (for `jobs.list`).
+#[derive(Default)]
+pub struct Vr360Jobs {
+    pending: Vec<PendingKeys>,
+    outcomes: HashMap<u64, Value>,
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Runs `analyse` as a job (`jobs.list`; `jobs.cancel` stops it and nothing changes) and writes
+/// its keyframes into the active sequence's clips when it finishes — before answering with `wait`.
+fn start_keys(
+    s: &mut Session,
+    cmd: &'static str,
+    undo: &'static str,
+    label: String,
+    frames: usize,
+    wait: bool,
+    analyse: impl FnOnce(&filmcraft_export::Progress) -> std::result::Result<Vec<ClipKeys>, String> + Send + 'static,
+) -> Result<Value> {
+    let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    let frame = s.active_sequence().map_or((1920, 1080), |q| (q.settings.width, q.settings.height));
+    let job = crate::narration::new_job(s, label);
+    job.progress.total.store(frames as u64, Ordering::Relaxed);
+    let id = job.id;
+    let results: KeyResults = Arc::default();
+    let (prog, res, out) = (job.progress.clone(), job.result.clone(), results.clone());
+    let run = move || {
+        let t0 = web_time::Instant::now();
+        let r = analyse(&prog);
+        let secs = t0.elapsed().as_secs_f64();
+        let done = prog.done.load(Ordering::Relaxed);
+        let report = match &r {
+            Ok(_) => Ok(filmcraft_export::Report {
+                path: String::new(),
+                frames: done,
+                seconds: secs,
+                bytes: 0,
+                render_fps: done as f64 / secs.max(1e-6),
+                extra_files: Vec::new(),
+            }),
+            Err(e) => {
+                *lock(&prog.status) = e.clone();
+                Err(e.clone())
+            }
+        };
+        // the results before `finished`: whoever sees the job finished can apply them
+        *lock(&out) = Some(r);
+        *lock(&res) = Some(report);
+        prog.finished.store(true, Ordering::Relaxed);
+    };
+    s.vr360.pending.push(PendingKeys { job: id, cmd, undo, seq, frame, results });
+    crate::narration::spawn(s, job, wait, "filmcraft-360-analysis", run)?;
+    let mut answer = json!({"job": id, "frames": frames});
+    if wait || cfg!(target_arch = "wasm32") {
+        poll(s);
+        if let Some(o) = s.vr360.outcomes.get(&id) {
+            if let Some(e) = o.get("error").and_then(Value::as_str) {
+                return Err(EngineError::Other(format!("{cmd}: {e}")));
+            }
+            answer["result"] = o.clone();
+        }
+    }
+    Ok(answer)
+}
+
+/// Applies finished analyses (one undo step each). Called each UI frame, by `jobs.list` and after
+/// a `wait: true` run.
+pub fn poll(s: &mut Session) {
+    let mut i = 0;
+    while i < s.vr360.pending.len() {
+        let Some(pj) = s.vr360.pending.get(i) else { break };
+        let ready = lock(&pj.results).is_some();
+        let job = s.jobs.iter().find(|j| j.id == pj.job);
+        let finished = job.is_none_or(|j| j.progress.finished.load(Ordering::Relaxed));
+        let cancelled = job.is_some_and(|j| j.progress.cancel.load(Ordering::Relaxed));
+        if !ready && !finished {
+            i += 1;
+            continue;
+        }
+        let pj = s.vr360.pending.remove(i);
+        let results = lock(&pj.results).take();
+        let outcome = match results {
+            Some(Ok(clips)) if !cancelled => match apply_keys(s, &pj, &clips) {
+                Ok(v) => v,
+                Err(e) => {
+                    s.error_toast(pj.cmd, format!("360: {e}"));
+                    json!({"error": e.to_string()})
+                }
+            },
+            Some(Err(e)) => json!({"error": e}),
+            _ => json!({"error": "stopped: nothing was changed"}),
+        };
+        s.vr360.outcomes.insert(pj.job, outcome);
+        if s.vr360.outcomes.len() > MAX_OUTCOMES
+            && let Some(old) = s.vr360.outcomes.keys().min().copied()
+        {
+            s.vr360.outcomes.remove(&old);
+        }
+    }
+}
+
+/// What a finished 360° analysis made (`vr360` in `jobs.list`).
+pub fn outcome_json(s: &Session, job: u64) -> Option<Value> {
+    s.vr360.outcomes.get(&job).cloned()
+}
+
+fn apply_keys(s: &mut Session, pj: &PendingKeys, clips: &[ClipKeys]) -> Result<Value> {
+    let (seq_id, frame) = (pj.seq, pj.frame);
+    let summary: Vec<Value> = clips.iter().map(|c| c.summary.clone()).collect();
+    s.edit(pj.undo, |pr, _| {
+        let q = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
+        for c in clips {
+            // (a clip deleted, or moved off the video tracks, while the job ran is skipped)
+            if q.find_item(c.clip).and_then(|(t, _)| q.track(t)).is_none_or(|t| t.kind != TrackKind::Video) {
+                continue;
+            }
+            let Some((_, it)) = q.find_item_mut(c.clip) else { continue };
+            let Some(e) = ensure_reframe(it, frame) else { continue };
+            for (id, keys) in &c.keys {
+                if keys.is_empty() {
+                    continue;
+                }
+                if let Some(p) = e.param_mut(id) {
+                    p.keyframes.clear();
+                }
+                for (t, v) in keys {
+                    set_key(e, id, *t, *v);
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"clips": summary}))
+}
+
+/// The clips a 360° command acts on: `clips` / `clip`, else the selection, else every clip of
+/// 360° media in the active sequence; each must be 360°.
+fn clips_360(s: &Session, p: &Value, cmd: &str) -> Result<Vec<TrackItem>> {
+    let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let mut ids = clips_p(s, p);
+    if ids.is_empty() && p.get("clips").is_none_or(Value::is_null) && p.get("clip").is_none_or(Value::is_null) {
+        ids = seq.video_tracks.iter().flat_map(|t| &t.items).filter(|it| s.project.vr_of(it.item).is_some()).map(|it| it.id).collect();
+    }
+    let mut out = Vec::new();
+    for c in ids {
+        let Some((track, it)) = seq.find_item(c) else { return Err(bad(cmd, format!("no clip {} in the active sequence", c.0))) };
+        // (a selection holds a clip's linked sound too: only pictures are looked at)
+        if seq.track(track).is_none_or(|t| t.kind != TrackKind::Video) {
+            continue;
+        }
+        if s.project.vr_of(it.item).is_none() {
+            return Err(bad(cmd, format!("clip {} is not 360° media (media.vrProperties says how a picture maps onto the sphere)", c.0)));
+        }
+        out.push(it.clone());
+    }
+    if out.is_empty() {
+        return Err(bad(cmd, "no 360° clip given, selected or in the sequence"));
+    }
+    Ok(out)
+}
+
+/// The analysis source of a 360° item: its proxy when one is attached (an `.lrv`: the same
+/// lenses, small and quick to decode), else the media.
+fn analysis_source(s: &Session, item: ItemId) -> Option<filmcraft_media::SharedSource> {
+    let proxy = s.project.resolve_media(item).and_then(|(_, m, _)| match &m.proxy {
+        Some(filmcraft_project::MediaRef::File { path }) => Some(path.clone()),
+        _ => None,
+    });
+    if let Some(p) = proxy
+        && let Ok(src) = s.media.open_file(&p, &*s.services)
+    {
+        return Some(src);
+    }
+    s.media.full_res_source(&s.project, item, &*s.services)
+}
+
+/// The analysed frames of a clip: every `fps`-th of a second of it (at most [`MAX_360_FRAMES`]),
+/// as (seconds from the clip's start, media time).
+fn clip_frames(it: &TrackItem, rate: filmcraft_time::FrameRate, fps: f64) -> Vec<(f64, Tick)> {
+    let fd = rate.frame_duration().max(Tick(1));
+    let n = (it.duration.0 / fd.0).max(1);
+    let step = ((rate.as_f64() / fps.clamp(1.0, 120.0)).round() as i64).max(1);
+    let mut stride = usize::try_from(step).unwrap_or(1).max(1);
+    while usize::try_from(n).unwrap_or(usize::MAX) / stride > MAX_360_FRAMES {
+        stride = stride.saturating_mul(2);
+    }
+    (0..n)
+        .step_by(stride)
+        .map(|k| {
+            let st = it.start + Tick(fd.0.saturating_mul(k));
+            ((st - it.start).seconds(), it.source_time_at(st))
+        })
+        .collect()
+}
+
+/// A linear picture of `src` at media time `t`, small (analysis).
+fn analysis_picture(src: &filmcraft_media::SharedSource, t: Tick) -> Option<filmcraft_render::Image> {
+    let f = src.video_frame(filmcraft_media::FrameRequest { time: t, scale: 0.5 }).ok()?;
+    let dec = if f.width > 2048 { 2 } else { 1 };
+    let (w, h, px) = f.to_linear_f32_decimated(dec);
+    Some(filmcraft_render::Image { w, h, px })
+}
+
+/// How the stabiliser holds the view: the Gaussian σ (seconds) of the camera motion kept, or
+/// `None` to keep the first frame's direction throughout.
+fn stab_mode(name: &str) -> Option<Option<f64>> {
+    Some(match name {
+        "smooth" => Some(1.0),
+        "light" => Some(0.35),
+        "strong" => Some(2.5),
+        "lock" | "lockDirection" => None,
+        _ => return None,
+    })
+}
+
+/// The camera's orientation at every analysed frame (camera → the first frame's camera), chained
+/// from frame-to-frame rotations; a pair that cannot be measured holds the orientation. `None`
+/// when cancelled; else with the count of unmeasured pairs.
+fn orientations(src: &filmcraft_media::SharedSource, spherical: &Spherical, times: &[Tick], prog: &filmcraft_export::Progress) -> Option<(Vec<M3>, usize)> {
+    use filmcraft_render::vr::{mmul, transpose};
+    use filmcraft_render::vr_motion::{Faces, rotation_between};
+    let mut orient = Vec::with_capacity(times.len());
+    let mut prev: Option<Faces> = None;
+    let mut r = filmcraft_render::vr::camera_rotation(0.0, 0.0, 0.0);
+    let mut lost = 0usize;
+    for t in times {
+        if prog.cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        prog.done.fetch_add(1, Ordering::Relaxed);
+        let faces = analysis_picture(src, *t).map(|img| {
+            let model = filmcraft_render::vr::SourceModel::new(spherical, (img.w, img.h));
+            Faces::new(&img, &model, STAB_FACE)
+        });
+        match (prev.as_ref(), faces.as_ref()) {
+            // b ≈ ΔR·a for the camera's directions: Rₖ = Rₖ₋₁ · ΔRᵀ
+            (Some(a), Some(b)) => match rotation_between(a, b) {
+                Some((dr, _)) => r = mmul(&r, &transpose(&dr)),
+                None => lost += 1,
+            },
+            (Some(_), None) => lost += 1,
+            _ => {}
+        }
+        orient.push(r);
+        if faces.is_some() {
+            prev = faces;
+        }
+    }
+    Some((orient, lost))
+}
+
+fn stabilize(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = STAB_CMD;
+    let mode = match str_p(p, "mode") {
+        None => Some(1.0),
+        Some(m) => stab_mode(m).ok_or_else(|| bad(cmd, format!("unknown mode `{m}` (smooth, light, strong, lock)")))?,
+    };
+    let clips = clips_360(s, p, cmd)?;
+    if bool_p(p, "off").unwrap_or(false) {
+        let ids: Vec<ClipId> = clips.iter().map(|c| c.id).collect();
+        s.edit_sequence("360 Stabilize Off", |q, _, _| {
+            for c in &ids {
+                if let Some((_, it)) = q.find_item_mut(*c)
+                    && let Some(e) = it.effect_mut(REFRAME)
+                {
+                    for id in STAB_PARAMS {
+                        set_static(e, id, 0.0);
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        return Ok(json!({"clips": ids.iter().map(|c| c.0).collect::<Vec<_>>(), "stabilized": false}));
+    }
+    let rate = s.sequence_rate().sane();
+    let mut work = Vec::new();
+    for it in &clips {
+        let Some(sph) = s.project.vr_of(it.item).cloned() else { continue };
+        let Some(src) = analysis_source(s, it.item) else { return Err(bad(cmd, format!("clip {}'s media is offline", it.id.0))) };
+        // every frame: shake lives between frames
+        work.push((it.id, src, sph, clip_frames(it, rate, rate.as_f64())));
+    }
+    let total: usize = work.iter().map(|w| w.3.len()).sum();
+    let wait = bool_p(p, "wait").unwrap_or(false);
+    let label = format!("Stabilizing {} 360° clip(s)", work.len());
+    start_keys(s, cmd, "360 Stabilize", label, total, wait, move |prog| {
+        let mut made = Vec::new();
+        for (clip, src, sph, frames) in &work {
+            let times: Vec<Tick> = frames.iter().map(|f| f.1).collect();
+            let Some((orient, lost)) = orientations(src, sph, &times, prog) else { return Err("stopped: nothing was changed".into()) };
+            let secs: Vec<f64> = frames.iter().map(|f| f.0).collect();
+            let target: Vec<M3> = match mode {
+                Some(sigma) => filmcraft_render::vr_motion::smooth(&orient, &secs, sigma),
+                None => vec![filmcraft_render::vr::camera_rotation(0.0, 0.0, 0.0); orient.len()],
+            };
+            let corr = filmcraft_render::vr_motion::corrections(&orient, &target);
+            let angles: Vec<(f64, f64, f64)> = corr.iter().map(filmcraft_render::vr::rotation_angles).collect();
+            let ys = filmcraft_render::vr_motion::unwrap_degrees(&angles.iter().map(|a| a.0).collect::<Vec<_>>());
+            let ps: Vec<f64> = angles.iter().map(|a| a.1).collect();
+            let rs = filmcraft_render::vr_motion::unwrap_degrees(&angles.iter().map(|a| a.2).collect::<Vec<_>>());
+            let keep = filmcraft_render::vr_motion::reduce(&secs, &[&ys, &ps, &rs], STAB_TOLERANCE_DEGREES);
+            let key = |v: &[f64]| keep.iter().filter_map(|&i| Some((frames.get(i)?.1, *v.get(i)?))).collect::<Vec<_>>();
+            let biggest = angles.iter().map(|a| a.0.abs().max(a.1.abs()).max(a.2.abs())).fold(0.0, f64::max);
+            made.push(ClipKeys {
+                clip: *clip,
+                keys: vec![("stab_yaw", key(&ys)), ("stab_pitch", key(&ps)), ("stab_roll", key(&rs))],
+                summary: json!({"clip": clip.0, "frames": frames.len(), "unmeasured": lost, "keyframes": keep.len(), "largestCorrection": (biggest * 10.0).round() / 10.0}),
+            });
+        }
+        Ok(made)
+    })
+}
+
+/// What to follow.
+#[derive(Clone, Copy, Debug)]
+enum FollowTarget {
+    /// A box (shares of the virtual camera's frame at the seed time).
+    Box(filmcraft_render::subject::SubjectBox),
+    /// What stands out where the camera looks at the seed time.
+    Subject,
+    /// The largest face, looked for every half second.
+    Face,
+}
+
+/// Where the subject was seen at one analysed frame: the virtual camera's yaw and pitch that
+/// centre it (NaN where it was not seen).
+struct Seen {
+    yaw: f64,
+    pitch: f64,
+}
+
+/// Follows the subject through frames `order` (indices into `frames`), starting where the
+/// clip's camera looks at the first of them. `None` when cancelled.
+#[allow(clippy::too_many_arguments)]
+fn follow_run(
+    src: &filmcraft_media::SharedSource,
+    spherical: &Spherical,
+    frames: &[(f64, Tick)],
+    views: &[(filmcraft_render::vr::View, M3)],
+    order: &[usize],
+    target: FollowTarget,
+    faces: Option<&crate::redact::DetectFn>,
+    prog: &filmcraft_export::Progress,
+) -> Option<Vec<(usize, Seen)>> {
+    use filmcraft_render::subject::{SubjectBox, SubjectTracker};
+    use filmcraft_render::vr_motion::{TRACK_FOV, TrackingCamera};
+    let first = *order.first()?;
+    let (start_view, _) = views.get(first)?;
+    let (lon, lat) = filmcraft_render::vr::lonlat(start_view.ray(0.5, 0.5));
+    let mut cam = TrackingCamera::new(lon.to_degrees(), lat.to_degrees(), FOLLOW_SIZE);
+    // a box drawn in the clip's own frame: the same directions, seen by the tracking camera
+    let mut hint: Option<SubjectBox> = match target {
+        FollowTarget::Box(b) => {
+            cam = cam.recentred(start_view.ray(b.cx, b.cy));
+            let scale = (view_fov(start_view) / TRACK_FOV).clamp(0.05, 20.0);
+            SubjectBox::new(0.5, 0.5, b.w * scale, b.h * scale)
+        }
+        _ => None,
+    };
+    let (fw, fh) = (FOLLOW_SIZE.0 as usize, FOLLOW_SIZE.1 as usize);
+    let every = (FOLLOW_FPS / 2.0).round().max(1.0) as usize;
+    let mut tr = SubjectTracker::new();
+    let mut out = Vec::with_capacity(order.len());
+    for (n, &k) in order.iter().enumerate() {
+        if prog.cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        prog.done.fetch_add(1, Ordering::Relaxed);
+        let Some(&(t, mt)) = frames.get(k) else { continue };
+        let Some(img) = analysis_picture(src, mt) else {
+            let _ = tr.push(&[], 0, 0, t, None);
+            out.push((k, Seen { yaw: f64::NAN, pitch: f64::NAN }));
+            continue;
+        };
+        let model = filmcraft_render::vr::SourceModel::new(spherical, (img.w, img.h));
+        let pic = filmcraft_render::vr::reframe(&img, &model, &cam.view, fw, fh, 1).over_black_rgba8();
+        if let (FollowTarget::Face, Some(detect)) = (target, faces)
+            && n.is_multiple_of(every)
+        {
+            hint = crate::reframe::largest_face(detect, &pic, fw, fh).or(hint);
+        }
+        let obs = tr.push(&pic, fw, fh, t, hint.take());
+        let Some(b) = obs.bbox.filter(|_| obs.confidence >= filmcraft_render::reframe::MIN_CONFIDENCE) else {
+            out.push((k, Seen { yaw: f64::NAN, pitch: f64::NAN }));
+            continue;
+        };
+        let d = cam.direction(b.cx, b.cy);
+        // the clip's stabilisation turns its rays first (final = C · view): aim the view at Cᵀ·d
+        let aim = views.get(k).map_or(d, |(_, c)| filmcraft_render::vr::mtvec(c, d));
+        let (lon, lat) = filmcraft_render::vr::lonlat(aim);
+        out.push((k, Seen { yaw: lon.to_degrees(), pitch: lat.to_degrees() }));
+        if cam.should_recentre(b.cx, b.cy) {
+            // the tracking camera turned onto the subject, the tracker started again on its box
+            cam = cam.recentred(d);
+            tr = SubjectTracker::new();
+            hint = SubjectBox::new(0.5, 0.5, b.w, b.h);
+        }
+    }
+    Some(out)
+}
+
+/// A flat view's field of view, degrees across (90 for the sphere).
+fn view_fov(v: &filmcraft_render::vr::View) -> f64 {
+    match v.output {
+        filmcraft_render::vr::Output::Flat { tan_x, .. } => (2.0 * tan_x.atan()).to_degrees(),
+        filmcraft_render::vr::Output::Sphere => 90.0,
+    }
+}
+
+fn follow(s: &mut Session, p: &Value) -> Result<Value> {
+    use filmcraft_render::subject::SubjectBox;
+    let cmd = FOLLOW_CMD;
+    let clips = clips_360(s, p, cmd)?;
+    let [it] = clips.as_slice() else { return Err(bad(cmd, "follow one clip at a time (`clip`)")) };
+    let at = match p.get("at") {
+        None | Some(Value::Null) => 0.0,
+        Some(v) => v.as_f64().filter(|x| x.is_finite() && *x >= 0.0).ok_or_else(|| bad(cmd, "`at` is seconds from the clip's start"))?,
+    };
+    let smooth = match f64_p(p, "smooth") {
+        None => 0.5,
+        Some(v) if (0.0..=1.0).contains(&v) => v,
+        Some(_) => return Err(bad(cmd, "`smooth` is 0 (close) … 1 (floaty)")),
+    };
+    let fps = match f64_p(p, "analysisFps") {
+        None => FOLLOW_FPS,
+        Some(v) if (1.0..=30.0).contains(&v) => v,
+        Some(_) => return Err(bad(cmd, "`analysisFps` is 1..30")),
+    };
+    let mut faces = None;
+    let target = match str_p(p, "target").unwrap_or("subject") {
+        "subject" => FollowTarget::Subject,
+        "box" => {
+            let b =
+                p.get("box").and_then(Value::as_array).filter(|a| a.len() == 4).ok_or_else(|| bad(cmd, "`box` is [x, y, w, h], shares of the clip's frame"))?;
+            let v: Vec<f64> =
+                b.iter().map(|x| x.as_f64().filter(|x| x.is_finite()).ok_or_else(|| bad(cmd, "`box` values are numbers"))).collect::<Result<_>>()?;
+            let bx = SubjectBox::from_corner(v[0], v[1], v[2], v[3])
+                .filter(|_| (0.0..=1.0).contains(&v[2]) && (0.0..=1.0).contains(&v[3]))
+                .ok_or_else(|| bad(cmd, "`box` is outside the frame"))?;
+            FollowTarget::Box(bx)
+        }
+        "face" => {
+            let detect = match s.redacts.detector.clone() {
+                Some(d) => d,
+                None => crate::privacy_check::face_detector(s, cmd, Some(false))?,
+            };
+            faces = Some(detect);
+            FollowTarget::Face
+        }
+        o => return Err(bad(cmd, format!("`target` is subject, box or face, not `{o}`"))),
+    };
+    let rate = s.sequence_rate().sane();
+    let frames = clip_frames(it, rate, fps);
+    let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let frame = (seq.settings.width, seq.settings.height);
+    // the clip's camera at each analysed frame (its own keyframes, its stabilisation), or the
+    // natural view of a clip not reframed yet
+    let views: Vec<(filmcraft_render::vr::View, M3)> = frames
+        .iter()
+        .map(|(_, mt)| match filmcraft_project::vr::reframe_of(it) {
+            Some(e) => (
+                filmcraft_render::vr::clip_view(e, *mt).map_or_else(|| filmcraft_render::vr::View::flat(0.0, 0.0, 0.0, 90.0, 0.0, frame.0, frame.1), |v| v.0),
+                filmcraft_render::vr::stabilization(e, *mt),
+            ),
+            None => (filmcraft_render::vr::View::flat(0.0, 0.0, 0.0, 90.0, 0.0, frame.0, frame.1), filmcraft_render::vr::camera_rotation(0.0, 0.0, 0.0)),
+        })
+        .collect();
+    let seed = frames.iter().position(|f| f.0 >= at - 1e-9).unwrap_or(0);
+    let Some(sph) = s.project.vr_of(it.item).cloned() else { return Err(bad(cmd, "not 360° media")) };
+    let Some(src) = analysis_source(s, it.item) else { return Err(bad(cmd, "the clip's media is offline")) };
+    let clip = it.id;
+    let wait = bool_p(p, "wait").unwrap_or(false);
+    let n = frames.len();
+    // a calm operator at 1, a close one at 0 (the spring's angular frequency, rad/s)
+    let omega = 6.0 * (1.0 - smooth) + 0.8 * smooth;
+    start_keys(s, cmd, "360 Follow Subject", format!("Following the subject in {}", it.name), n, wait, move |prog| {
+        // from the seed back to the start, then on to the end
+        let back: Vec<usize> = (0..=seed.min(n.saturating_sub(1))).rev().collect();
+        let fwd: Vec<usize> = (seed..n).collect();
+        let mut seen: Vec<Option<Seen>> = (0..n).map(|_| None).collect();
+        for order in [back, fwd] {
+            if order.is_empty() {
+                continue;
+            }
+            let run =
+                follow_run(&src, &sph, &frames, &views, &order, target, faces.as_ref(), prog).ok_or_else(|| "stopped: nothing was changed".to_string())?;
+            for (k, sn) in run {
+                if let Some(slot) = seen.get_mut(k)
+                    && slot.as_ref().is_none_or(|old| old.yaw.is_nan())
+                {
+                    *slot = Some(sn);
+                }
+            }
+        }
+        let secs: Vec<f64> = frames.iter().map(|f| f.0).collect();
+        let found = seen.iter().filter(|x| x.as_ref().is_some_and(|x| x.yaw.is_finite())).count();
+        if found * 10 < n * 3 {
+            return Err(format!("the subject was seen in only {found} of {n} analysed frames: try `target: \"box\"` around it"));
+        }
+        let yaws = filmcraft_render::vr_motion::unwrap_degrees(&seen.iter().map(|x| x.as_ref().map_or(f64::NAN, |x| x.yaw)).collect::<Vec<_>>());
+        let pitches: Vec<f64> = seen.iter().map(|x| x.as_ref().map_or(f64::NAN, |x| x.pitch)).collect();
+        let ys = filmcraft_render::vr_motion::smooth_path(&secs, &yaws, omega);
+        let ps: Vec<f64> = filmcraft_render::vr_motion::smooth_path(&secs, &pitches, omega).into_iter().map(|v| v.clamp(-85.0, 85.0)).collect();
+        let keep = filmcraft_render::vr_motion::reduce(&secs, &[&ys, &ps], FOLLOW_TOLERANCE_DEGREES);
+        let key = |v: &[f64]| keep.iter().filter_map(|&i| Some((frames.get(i)?.1, *v.get(i)?))).collect::<Vec<_>>();
+        Ok(vec![ClipKeys {
+            clip,
+            keys: vec![("yaw", key(&ys)), ("pitch", key(&ps))],
+            summary: json!({"clip": clip.0, "frames": n, "found": (found as f64 / n.max(1) as f64 * 1000.0).round() / 1000.0, "keyframes": keep.len()}),
+        }])
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,6 +1110,51 @@ mod tests {
         assert_eq!(r["items"][0]["aligned"], false);
     }
 
+    /// The demo's first clip, its media taken as an equirectangular panorama, and its sequence's
+    /// clips selected (the linked sound with the picture).
+    fn demo_360() -> (Session, ClipId) {
+        let mut s = demo();
+        let (c, item) = first_clip(&s);
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "equirectangular"})).unwrap();
+        let linked: Vec<ClipId> = s.active_sequence().unwrap().all_tracks().flat_map(|t| &t.items).filter(|i| i.item == item).map(|i| i.id).collect();
+        s.state.selection = linked;
+        (s, c)
+    }
+
+    #[test]
+    fn stabilising_writes_the_cameras_steadying_turn() {
+        let (mut s, c) = demo_360();
+        let r = s.execute(STAB_CMD, json!({"mode": "light", "wait": true})).unwrap();
+        let clips = r["result"]["clips"].as_array().unwrap();
+        // the picture only: the selection's linked sound is not looked at
+        assert_eq!(clips.len(), 1, "{r}");
+        assert_eq!(clips[0]["clip"], c.0);
+        let it = clip(&s, c);
+        let e = it.effect(REFRAME).expect("the virtual camera was added");
+        assert!(STAB_PARAMS.iter().all(|id| e.param(id).is_some_and(|p| !p.keyframes.is_empty())));
+        assert!(s.active_sequence().unwrap().audio_tracks.iter().flat_map(|t| &t.items).all(|a| a.effect(REFRAME).is_none()));
+        // one undo step; off clears it
+        s.execute(STAB_CMD, json!({"clips": [c.0], "off": true})).unwrap();
+        assert!(clip(&s, c).effect(REFRAME).unwrap().param("stab_yaw").unwrap().keyframes.is_empty());
+        s.execute("edit.undo", json!({})).unwrap();
+        assert!(!clip(&s, c).effect(REFRAME).unwrap().param("stab_yaw").unwrap().keyframes.is_empty());
+        let job = r["job"].as_u64().unwrap();
+        assert!(outcome_json(&s, job).is_some());
+    }
+
+    #[test]
+    fn following_turns_the_camera_or_says_why_not() {
+        let (mut s, c) = demo_360();
+        let r = s.execute(FOLLOW_CMD, json!({"clip": c.0, "target": "box", "box": [0.35, 0.3, 0.3, 0.4], "at": 1.0, "analysisFps": 5, "wait": true}));
+        match r {
+            Ok(v) => {
+                assert_eq!(v["result"]["clips"][0]["clip"], c.0);
+                assert!(clip(&s, c).effect(REFRAME).unwrap().param("yaw").is_some_and(|p| !p.keyframes.is_empty()));
+            }
+            Err(e) => assert!(e.to_string().contains("seen in only"), "{e}"),
+        }
+    }
+
     #[test]
     fn hostile_parameters_are_refused() {
         let mut s = demo();
@@ -556,5 +1186,22 @@ mod tests {
             assert!(s.execute(PROPS_CMD, bad.clone()).is_err(), "{bad}");
         }
         assert!(s.execute(ALIGN_CMD, json!({"items": [424_242]})).is_err());
+        // the demo clip is not 360° until its VR Properties say so
+        assert!(s.execute(STAB_CMD, json!({"clips": [c.0]})).is_err());
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "equirectangular"})).unwrap();
+        for bad in [json!({"clips": [c.0], "mode": "shaky"}), json!({"clips": [999_999]})] {
+            assert!(s.execute(STAB_CMD, bad.clone()).is_err(), "{bad}");
+        }
+        for bad in [
+            json!({"clip": c.0, "target": "dog"}),
+            json!({"clip": c.0, "target": "box"}),
+            json!({"clip": c.0, "target": "box", "box": [0.1, 0.1, 2.0, 0.2]}),
+            json!({"clip": c.0, "target": "box", "box": ["a", 0, 0, 0]}),
+            json!({"clip": c.0, "smooth": 3.0}),
+            json!({"clip": c.0, "analysisFps": 0}),
+            json!({"clip": c.0, "at": -2.0}),
+        ] {
+            assert!(s.execute(FOLLOW_CMD, bad.clone()).is_err(), "{bad}");
+        }
     }
 }

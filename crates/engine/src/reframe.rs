@@ -491,7 +491,7 @@ fn follow_frames(w: &Work, order: &[usize], progress: &mut dyn FnMut(usize) -> b
 
 /// The largest face the detector finds in an RGBA frame, as a subject box (with a little room
 /// around it).
-fn largest_face(detect: &crate::redact::DetectFn, rgba: &[u8], w: usize, h: usize) -> Option<SubjectBox> {
+pub(crate) fn largest_face(detect: &crate::redact::DetectFn, rgba: &[u8], w: usize, h: usize) -> Option<SubjectBox> {
     let faces = detect(rgba, w, h, w.max(h));
     let best = faces.iter().filter(|d| d.kind == filmcraft_vision::Kind::Face).max_by(|a, b| (a.bbox[2] * a.bbox[3]).total_cmp(&(b.bbox[2] * b.bbox[3])))?;
     let [x, y, bw, bh] = best.bbox;

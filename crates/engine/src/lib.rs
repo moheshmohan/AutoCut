@@ -538,6 +538,9 @@ pub struct Session {
     /// Auto Reframe analyses whose keyframes are written when they finish (`sequence.autoReframe`,
     /// `clip.autoReframe`), and what the finished ones made.
     pub reframes: reframe::Reframes,
+    /// 360° analyses (`clip.stabilize360`, `clip.follow360`) whose keyframes are written when they
+    /// finish, and what the finished ones made.
+    pub vr360: vr360::Vr360Jobs,
     /// Speech understanding jobs (`media.understandSpeech`) whose transcripts and analyses are
     /// stored when they finish, and what the finished ones found.
     pub speech_jobs: speech_understand::Understandings,
@@ -704,6 +707,7 @@ impl Session {
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
             reframes: Default::default(),
+            vr360: Default::default(),
             speech_jobs: Default::default(),
             motion_tracks: Default::default(),
             redacts: Default::default(),
@@ -848,6 +852,7 @@ impl Session {
         masks::poll(self);
         scene_detect::poll(self);
         reframe::poll(self);
+        vr360::poll(self);
         speech_understand::poll(self);
         motion_track::poll(self);
         redact::poll(self);

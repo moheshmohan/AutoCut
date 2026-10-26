@@ -1661,6 +1661,7 @@ fn build() -> Vec<CommandSpec> {
             // finished neural music lands before it is reported (headless callers poll this)
             crate::music_neural::poll(s);
             crate::reframe::poll(s);
+            crate::vr360::poll(s);
             crate::speech_understand::poll(s);
             crate::motion_track::poll(s);
             crate::redact::poll(s);

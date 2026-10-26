@@ -703,6 +703,9 @@ pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     if let Some(r) = crate::reframe::outcome_json(s, j.id) {
         v["reframe"] = r;
     }
+    if let Some(r) = crate::vr360::outcome_json(s, j.id) {
+        v["vr360"] = r;
+    }
     if let Some(r) = crate::speech_understand::outcome_json(s, j.id) {
         v["speech"] = r;
     }

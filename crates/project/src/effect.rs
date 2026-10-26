@@ -233,7 +233,7 @@ fn wheel(id: &'static str, label: &'static str) -> ParamDef {
 pub(crate) fn txt(id: &'static str, label: &'static str) -> ParamDef {
     ParamDef { id, label, kind: ParamKind::Text, default: ParamValue::Text(String::new()), animatable: false, group: None }
 }
-fn grp(mut p: ParamDef, g: &'static str) -> ParamDef {
+pub(crate) fn grp(mut p: ParamDef, g: &'static str) -> ParamDef {
     p.group = Some(g);
     p
 }

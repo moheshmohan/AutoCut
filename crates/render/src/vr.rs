@@ -588,8 +588,19 @@ pub fn align_lenses(frames: &[Image], s: &Spherical) -> Option<Alignment> {
     Some(Alignment { spherical: apply(&x).sanitized(), before, after: best })
 }
 
-/// The virtual camera of a clip at media time `t`: the `vr_reframe` effect's view and its frame
-/// size ([`filmcraft_project::vr::reframe_size`]).
+/// The turn a clip's stabilisation (`clip.stabilize360`: the `stab_yaw` / `stab_pitch` /
+/// `stab_roll` keyframes) gives its camera's rays at media time `t`, before they are looked up in
+/// the frame; none without it.
+pub fn stabilization(e: &EffectInstance, t: Tick) -> M3 {
+    let f = |id: &str| {
+        let v = e.f64_at(id, t);
+        if v.is_finite() { v } else { 0.0 }
+    };
+    camera_rotation(f("stab_yaw"), f("stab_pitch"), f("stab_roll"))
+}
+
+/// The virtual camera of a clip at media time `t`: the `vr_reframe` effect's view (its
+/// stabilisation applied) and its frame size ([`filmcraft_project::vr::reframe_size`]).
 pub fn clip_view(e: &EffectInstance, t: Tick) -> Option<(View, (u32, u32))> {
     let size = filmcraft_project::vr::effect_size(e)?;
     let f = |id: &str, d: f64| {
@@ -598,7 +609,8 @@ pub fn clip_view(e: &EffectInstance, t: Tick) -> Option<(View, (u32, u32))> {
     };
     let (yaw, pitch, roll) = (f("yaw", 0.0), f("pitch", 0.0), f("roll", 0.0));
     let sphere = matches!(e.param("output").map(|p| &p.value), Some(ParamValue::Choice(1)));
-    let view = if sphere { View::sphere(yaw, pitch, roll) } else { View::flat(yaw, pitch, roll, f("fov", 90.0), f("distance", 0.0), size.0, size.1) };
+    let mut view = if sphere { View::sphere(yaw, pitch, roll) } else { View::flat(yaw, pitch, roll, f("fov", 90.0), f("distance", 0.0), size.0, size.1) };
+    view.rotation = mmul(&stabilization(e, t), &view.rotation);
     Some((view, size))
 }
 
