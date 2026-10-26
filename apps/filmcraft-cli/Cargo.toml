@@ -49,6 +49,7 @@ filmcraft-ogg = { workspace = true }
 filmcraft-automation = { workspace = true }
 filmcraft-autocut = { workspace = true }
 filmcraft-gphotos = { workspace = true }
+filmcraft-insta360 = { workspace = true }
 filmcraft-youtube = { workspace = true }
 filmcraft-instagram = { workspace = true }
 filmcraft-screenagent = { workspace = true }

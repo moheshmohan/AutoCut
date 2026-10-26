@@ -236,6 +236,26 @@ pub struct PhotosAddParams {
     pub ids: Vec<String>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct Insta360Params {
+    /// Recordings by name: full stems (`VID_20260913_114003_00_093`), Studio's short names
+    /// (`VID_093`) or file names. For `insta360_list` and `insta360_import` optional.
+    #[serde(default)]
+    pub names: Vec<String>,
+    /// Only recordings shot on or after this date (YYYY-MM-DD, camera time).
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Only recordings shot on or before this date (YYYY-MM-DD).
+    #[serde(default)]
+    pub until: Option<String>,
+    /// Folders to look in (default: Insta360 Studio's download folder and mounted camera cards).
+    #[serde(default)]
+    pub folders: Vec<String>,
+    /// `insta360_import`: every recording found (when no names or dates are given).
+    #[serde(default)]
+    pub all: bool,
+}
+
 /// The most ids one googlephotos_add call takes.
 const MAX_ADD_IDS: usize = 2000;
 
@@ -1317,6 +1337,26 @@ fn picked_items(picked: &filmcraft_gphotos::Picked) -> (Vec<String>, Vec<Value>,
     (paths, items, picked.fetched.iter().filter(|f| f.was_cached).count())
 }
 
+fn insta360_params(p: &Insta360Params) -> Value {
+    let mut m = serde_json::Map::new();
+    if !p.names.is_empty() {
+        m.insert("names".into(), json!(p.names));
+    }
+    if !p.folders.is_empty() {
+        m.insert("folders".into(), json!(p.folders));
+    }
+    if let Some(s) = &p.since {
+        m.insert("since".into(), json!(s));
+    }
+    if let Some(u) = &p.until {
+        m.insert("until".into(), json!(u));
+    }
+    if p.all {
+        m.insert("all".into(), json!(true));
+    }
+    Value::Object(m)
+}
+
 fn ok_json(v: &Value) -> CallToolResult {
     CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(v).unwrap_or_default())])
 }
@@ -1854,6 +1894,38 @@ impl FilmcraftMcp {
             "autopick": autopick,
         });
         Ok(if ok { ok_json(&v) } else { CallToolResult::error(vec![Content::text(v.to_string())]) })
+    }
+
+    #[tool(
+        title = "Insta360: list recordings",
+        description = "The user's Insta360 360° recordings on disk — where Insta360 Studio downloads its cloud files (~/Downloads/Insta360 Download) and any mounted camera card — newest first: stem (VID_20260913_114003_00_093), when it was shot (camera time), path, size, the camera's .lrv proxy, whether it has finished downloading, the camera model. Filter with names, since/until.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn insta360_list(&self, Parameters(p): Parameters<Insta360Params>) -> Result<CallToolResult, McpError> {
+        wrap(self.run("insta360.list", insta360_params(&p)).await)
+    }
+
+    #[tool(
+        title = "Insta360: import recordings",
+        description = "Import Insta360 recordings (names, or since/until, or all) as 360° media: VR Properties from the file (dual fisheye: both lenses decoded side by side), the camera's .lrv attached as the proxy, the two lenses aligned along their seam. Files the project already holds are reused. Then `clip.reframe360` (command_run) looks into them with a virtual camera: yaw/pitch/roll/fov/distance, keyframes, presets natural|wide|tinyPlanet|rabbitHole|sphere; `clip.stabilize360` steadies the view; `clip.follow360` follows a subject.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn insta360_import(&self, Parameters(p): Parameters<Insta360Params>) -> Result<CallToolResult, McpError> {
+        wrap(self.run("insta360.import", insta360_params(&p)).await)
+    }
+
+    #[tool(
+        title = "Insta360: download from the cloud",
+        description = "Download recordings (names: full stems like VID_20260913_114003_00_093, or Studio's short VID_093) from the user's Insta360 cloud through Insta360 Studio, which must be open and signed in: the local screen agent (Qwen2.5-VL via Ollama, Screen Recording and Accessibility granted) opens Studio's Cloud Media in List View, right-clicks each recording, chooses Download, checks the dialog's file name and presses OK (Studio's own download folder); then it waits for each file to finish and imports it as insta360_import does. It moves the mouse in Studio's window (the `chrome` lock: one agent at a time) — tell the user before running it. Long: progress comes as MCP progress notifications.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn insta360_download(&self, Parameters(p): Parameters<Insta360Params>) -> Result<CallToolResult, McpError> {
+        if p.names.is_empty() {
+            return Ok(fail("no names given: the recordings to download (insta360_list shows what is already here)"));
+        }
+        let mut v = insta360_params(&p);
+        v["wait"] = json!(true);
+        wrap(self.run("insta360.download", v).await)
     }
 
     #[tool(
@@ -2449,7 +2521,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Motion tracking (command_run): `track.create` follows an object boxed on a clip (`subject` or flat-surface `points` tracking, both ways, kept in the project), `track.attach` makes a clip, graphic layer, effect point or mask follow it (keyframes, re-written by `track.refine`), and `track.label` / `track.blurObject` / `track.spotlight` track and add a callout, a privacy blur or a spotlight in one step; `clip.cameraTrack` keeps a subject, box or face framed with a gentle push-in. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked); `trailer_make` cuts a finished showcase into a vertical trailer for Reels (a hook, robots in date order on the beat, an end card; the show's redaction kept). Talking clips: `speech_understand` finds the words, speakers, pauses, fillers and retakes of raw clips (English or Malayalam), and `rough_cut` turns them into a clean talking edit (pauses, fillers and abandoned takes cut between words; exported when asked). Quick templates: `quick_short` turns an album, a folder or the selected clips into a finished vertical Short or Reel — it indexes the scenes, understands the speech, picks a template (the AI-ready Shorts starters, or `template`), fills every slot from the scene index and the speech, writes the text with the local model and exports with a report of every choice; it runs without any model (and says what it fell back on), and downloads models only with `download` after the user agreed. Voice: `isolate_voice` keeps clips' speech and removes noise, crowds and music, `enhance_voice` is the one-knob voice boost for clips that keep their own speech (isolation, EQ, de-esser, compression, a loudness match), `enhance_audio_file` does either straight on a file (`audio.voiceModelStatus` says whether the neural model is installed; `audio.downloadVoiceModel` only after the user agreed). Scenes: `scenes_analyze` indexes clips shot by shot (cuts, sharpness, exposure, camera move, an aesthetic score and a local Qwen3-VL description of each shot; `scenes.status` lists the models, `scenes.downloadModel` only after the user agreed), and `scenes_search` finds shots by what they show or what is said in them (`media.bestShots` and `media.scenes` via command_run). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. 360° video: `insta360_list` / `insta360_import` bring the user's Insta360 recordings (from Insta360 Studio's download folder or a camera card) in as 360° media (the camera's .lrv attached as the proxy, the two lenses aligned), and `insta360_download` fetches named recordings from their Insta360 cloud by driving Insta360 Studio with the local vision agent (tell the user first: it moves the mouse); `clip.reframe360` (command_run) looks into a 360° clip through a keyframable virtual camera (yaw, pitch, roll, fov, distance; presets natural, wide, tinyPlanet, rabbitHole, sphere), and `media.vrProperties` / `media.align360` set and refine how a picture maps onto the sphere. `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Motion tracking (command_run): `track.create` follows an object boxed on a clip (`subject` or flat-surface `points` tracking, both ways, kept in the project), `track.attach` makes a clip, graphic layer, effect point or mask follow it (keyframes, re-written by `track.refine`), and `track.label` / `track.blurObject` / `track.spotlight` track and add a callout, a privacy blur or a spotlight in one step; `clip.cameraTrack` keeps a subject, box or face framed with a gentle push-in. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked); `trailer_make` cuts a finished showcase into a vertical trailer for Reels (a hook, robots in date order on the beat, an end card; the show's redaction kept). Talking clips: `speech_understand` finds the words, speakers, pauses, fillers and retakes of raw clips (English or Malayalam), and `rough_cut` turns them into a clean talking edit (pauses, fillers and abandoned takes cut between words; exported when asked). Quick templates: `quick_short` turns an album, a folder or the selected clips into a finished vertical Short or Reel — it indexes the scenes, understands the speech, picks a template (the AI-ready Shorts starters, or `template`), fills every slot from the scene index and the speech, writes the text with the local model and exports with a report of every choice; it runs without any model (and says what it fell back on), and downloads models only with `download` after the user agreed. Voice: `isolate_voice` keeps clips' speech and removes noise, crowds and music, `enhance_voice` is the one-knob voice boost for clips that keep their own speech (isolation, EQ, de-esser, compression, a loudness match), `enhance_audio_file` does either straight on a file (`audio.voiceModelStatus` says whether the neural model is installed; `audio.downloadVoiceModel` only after the user agreed). Scenes: `scenes_analyze` indexes clips shot by shot (cuts, sharpness, exposure, camera move, an aesthetic score and a local Qwen3-VL description of each shot; `scenes.status` lists the models, `scenes.downloadModel` only after the user agreed), and `scenes_search` finds shots by what they show or what is said in them (`media.bestShots` and `media.scenes` via command_run). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";

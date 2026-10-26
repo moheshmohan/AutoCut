@@ -3544,6 +3544,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::scopes::commands());
     v.extend(crate::reframe::commands());
     v.extend(crate::vr360::commands());
+    v.extend(crate::insta360::commands());
     v.extend(crate::speech_understand::commands());
     v.extend(crate::motion_track::commands());
     v.extend(crate::safe_zones::commands());

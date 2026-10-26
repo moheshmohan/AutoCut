@@ -22,6 +22,11 @@ pub trait Act {
     /// The same click with Shift held: in the picker it selects the whole range from the last
     /// clicked tile ("Hold Shift and click to select many items at once").
     fn shift_click_png(&mut self, cap: &Capture, px: u32, py: u32) -> Result<(), ScreenError>;
+    /// A right-click at a PNG-pixel coordinate of the last [`Self::capture`] (a context menu),
+    /// clamped into the window.
+    fn right_click_png(&mut self, _cap: &Capture, _px: u32, _py: u32) -> Result<(), ScreenError> {
+        Err(ScreenError::Unsupported("right-clicking".into()))
+    }
     fn type_text(&mut self, text: &str) -> Result<(), ScreenError>;
     fn key_return(&mut self) -> Result<(), ScreenError>;
     fn key_escape(&mut self) -> Result<(), ScreenError>;
@@ -143,6 +148,17 @@ impl Act for MacActor {
         };
         self.jxa(&format!(
             "var p = {{x: {x}, y: {y}}};\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 5, p, 0));\ndelay(0.08);\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 1, p, 0));\ndelay(0.05);\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 2, p, 0));"
+        ))
+        .map(|_| ())
+    }
+
+    fn right_click_png(&mut self, cap: &Capture, px: u32, py: u32) -> Result<(), ScreenError> {
+        let Some((x, y)) = cap.click_point(px, py) else {
+            return Err(ScreenError::Other(format!("refusing to click outside the window: png ({px},{py})")));
+        };
+        // right mouse down and up (event types 3 and 4) with the right button (1)
+        self.jxa(&format!(
+            "var p = {{x: {x}, y: {y}}};\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 5, p, 0));\ndelay(0.08);\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 3, p, 1));\ndelay(0.05);\n$.CGEventPost(0, $.CGEventCreateMouseEvent(null, 4, p, 1));"
         ))
         .map(|_| ())
     }

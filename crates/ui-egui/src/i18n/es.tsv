@@ -4284,3 +4284,11 @@
 	Pan (Yaw)	Panorámica (guiñada)
 	Sphere (Equirectangular)	Esfera (equirrectangular)
 	Tilt (Pitch)	Inclinación (cabeceo)
+	360 Stabilize	Estabilizar 360
+	360 Follow Subject	Seguir sujeto 360
+	Steady Pan	Panorámica estable
+	Steady Tilt	Inclinación estable
+	Steady Roll	Giro estable
+	Import Insta360 Recordings…	Importar grabaciones de Insta360…
+	Download from Insta360 Cloud…	Descargar de la nube de Insta360…
+	Insta360 Recordings	Grabaciones de Insta360

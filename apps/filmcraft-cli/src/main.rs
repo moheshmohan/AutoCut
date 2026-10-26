@@ -565,6 +565,22 @@ SUBCOMMANDS
                                 handed-off document. Config: AUTOCUT_LLM_MODEL,
                                 AUTOCUT_VLM_MODEL, AUTOCUT_OLLAMA_HOST,
                                 AUTOCUT_CONFIDENCE_THRESHOLD
+  insta360 list [--since D] [--until D] [--folder F] [--json]
+                                 your Insta360 360° recordings on disk — where Insta360 Studio
+                                 downloads its cloud files (~/Downloads/Insta360 Download) and
+                                 every mounted camera card — newest first: name, when shot
+                                 (camera time), size, +lrv (the camera's proxy), (downloading)
+  insta360 import <name>... | --since D [--until D] | --all [--folder F] [--no-proxies] [--no-align]
+                                 import recordings (VID_20260913_114003_00_093, Studio's short
+                                 VID_093, or a date range) as 360° media: VR Properties from the
+                                 file, the .lrv attached as the proxy, the lenses aligned; then
+                                 `exec clip.reframe360` frames them (docs/360-video.md)
+  insta360 download <name>...    download recordings from your Insta360 cloud: the local screen
+                                 agent drives Insta360 Studio (open and signed in) — Cloud Media,
+                                 List View, right-click, Download, the dialog's name checked, OK —
+                                 waits for each file and imports it. Needs `ollama pull
+                                 qwen2.5vl:7b`, Screen Recording and Accessibility for this
+                                 terminal; takes the `chrome` lock (the mouse) while it drives
   photos auth [--upload | --albums | --sign-out]
                                  sign in to Google Photos (browser consent, one time; needs
                                  client_secret.json from Google Cloud — see crates/gphotos/README.md);
@@ -857,6 +873,8 @@ impl Backend {
         }
         // `photos.upload` (also over MCP): the Google Photos sign-in of `photos auth --upload`
         s.photos = Some(filmcraft_gphotos::engine_uploader());
+        // `insta360.*` (also over MCP): recordings on disk, cloud downloads through Insta360 Studio
+        s.insta360 = Some(filmcraft_insta360::engine_host());
         // `photos.locations` (also over MCP): places read from the Google Photos page by the
         // screen agent (Chrome, the local vision model, the `chrome` lock)
         s.photo_locations.locator = Some(filmcraft_automation::locations::locator());
@@ -1832,6 +1850,67 @@ async fn cli() {
             }
             Some(other) => usage(format!("locks: unknown `{other}` (locks [--json] | locks hold <chrome|gpu>)")),
         },
+        "insta360" => {
+            // the user's Insta360 360° recordings: on disk (Studio's downloads, the camera's card)
+            // and, through Insta360 Studio, from their Insta360 cloud
+            let what = a.pos(1).unwrap_or_else(|| usage("insta360 list | import <name>... | download <name>... [--since D] [--until D] [--folder F] [--all]"));
+            let names: Vec<String> = a.positionals.get(2..).map(|p| p.to_vec()).unwrap_or_default();
+            let mut params = serde_json::Map::new();
+            if !names.is_empty() {
+                params.insert("names".into(), json!(names));
+            }
+            for (flag, key) in [("--since", "since"), ("--until", "until")] {
+                if let Some(v) = a.opt(flag) {
+                    params.insert(key.into(), json!(v));
+                }
+            }
+            if let Some(f) = a.opt("--folder") {
+                params.insert("folders".into(), json!([absolute(f)]));
+            }
+            if a.flag("--all") {
+                params.insert("all".into(), json!(true));
+            }
+            if a.flag("--no-proxies") {
+                params.insert("proxies".into(), json!(false));
+            }
+            if a.flag("--no-align") {
+                params.insert("align".into(), json!(false));
+            }
+            let cmd = match what {
+                "list" => "insta360.list",
+                "import" => "insta360.import",
+                "download" => {
+                    if names.is_empty() {
+                        usage("insta360 download <name>... (full stems VID_20260913_114003_00_093, or Studio's short VID_093)");
+                    }
+                    params.insert("wait".into(), json!(true));
+                    "insta360.download"
+                }
+                o => usage(format!("insta360: unknown `{o}` (list, import, download)")),
+            };
+            let mut b = Backend::open(&a);
+            match b.exec(cmd, Value::Object(params)).await {
+                Ok(r) => {
+                    if what == "list" && !a.flag("--json") {
+                        for rec in r["recordings"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                            outln!(
+                                "{}  {}  {:>7.1} MB{}{}  {}",
+                                rec["stem"].as_str().unwrap_or_default(),
+                                rec["shot"].as_str().unwrap_or_default(),
+                                rec["bytes"].as_f64().unwrap_or(0.0) / 1e6,
+                                if rec["proxy"].is_string() { "  +lrv" } else { "" },
+                                if rec["complete"] == json!(true) { "" } else { "  (downloading)" },
+                                rec["path"].as_str().unwrap_or_default()
+                            );
+                        }
+                    } else {
+                        print(&a, &r);
+                    }
+                    b.finish(&a).await;
+                }
+                Err(e) => fail(format!("insta360 {what}: {e}")),
+            }
+        }
         "photos" => {
             let what =
                 a.pos(1).unwrap_or_else(|| usage("photos auth | pick | locations | tidy | upload <file> | album create|add | albums | cached | add <id>..."));

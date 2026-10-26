@@ -31,6 +31,7 @@ pub mod feedback;
 pub mod graphic_templates;
 pub mod graphics;
 pub mod graphics_counter;
+pub mod insta360;
 pub mod instagram;
 pub mod interchange;
 pub mod ken_burns;
@@ -579,6 +580,9 @@ pub struct Session {
     /// Uploads to Google Photos for `photos.upload` (None = not available: the command is
     /// disabled). Hosts install filmcraft-gphotos' uploader here; tests a fake.
     pub photos: Option<Arc<dyn photos::PhotosUploader>>,
+    /// Insta360 footage (`insta360.*`): the host's finder and Insta360 Studio driver (None = not
+    /// available: the commands are disabled; hosts install filmcraft-insta360's, tests a fake).
+    pub insta360: Option<Arc<dyn insta360::Insta360Host>>,
     /// Upload job → its new media item, filled when the job finishes (`upload` in `jobs.list`).
     pub photo_uploads: std::collections::HashMap<u64, photos::UploadOutcome>,
     /// Places from Google Photos (`photos.locations`): the host's locator (None = not
@@ -716,6 +720,7 @@ impl Session {
             narration_second: None,
             narration_voice: None,
             photos: None,
+            insta360: None,
             photo_uploads: Default::default(),
             photo_locations: Default::default(),
             youtube: Default::default(),

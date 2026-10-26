@@ -119,6 +119,8 @@ const LAYERS: &[(&str, u8)] = &[
     ("instagram", 5),
     // desktop OS automation (osascript, screencapture, HTTP to Ollama): not WASM-portable
     ("screenagent", 5),
+    // Insta360 footage: recordings on disk, cloud downloads by driving Insta360 Studio (screenagent)
+    ("insta360", 5),
     ("filmcraft", 6),
     ("cli", 6),
     ("web", 6),
@@ -148,6 +150,7 @@ const SAME_LAYER: &[(&str, &str)] = &[
     ("youtube", "oauth"),
     ("instagram", "oauth"),
     ("automation", "screenagent"),
+    ("insta360", "screenagent"),
     ("voice", "vision"),
 ];
 

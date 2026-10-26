@@ -42,6 +42,7 @@ filmcraft-ui-egui = { workspace = true }
 filmcraft-platform = { workspace = true }
 # Export ▸ Upload to Google Photos (`photos.upload`): the uploader the session gets.
 filmcraft-gphotos = { workspace = true }
+filmcraft-insta360 = { workspace = true }
 filmcraft-youtube = { workspace = true }
 filmcraft-instagram = { workspace = true }
 # Sequence ▸ Make a Showcase… / the Showcase panel (`autocut.*`): the showcase jobs' host.

@@ -222,6 +222,9 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         session.voiceover.input = Some(Box::new(audio_in::CpalIn::new(&session.prefs.audio_hardware.device_class)));
         // Export ▸ Upload to Google Photos, over the sign-in of `filmcraft-cli photos auth --upload`
         session.photos = Some(filmcraft_gphotos::engine_uploader());
+        // File ▸ Import Insta360 Recordings / Download from Insta360 Cloud: recordings on disk,
+        // and cloud downloads through Insta360 Studio driven by the screen agent
+        session.insta360 = Some(filmcraft_insta360::engine_host());
         // photos.locations: places read from the Google Photos page by the screen agent
         session.photo_locations.locator = Some(filmcraft_automation::locations::locator());
         // Export ▸ Upload to YouTube, over the channels connected with `filmcraft-cli youtube auth`

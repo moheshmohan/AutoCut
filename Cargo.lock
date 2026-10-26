@@ -1932,6 +1932,7 @@ dependencies = [
  "filmcraft-export",
  "filmcraft-gphotos",
  "filmcraft-gpu",
+ "filmcraft-insta360",
  "filmcraft-instagram",
  "filmcraft-platform",
  "filmcraft-project",
@@ -2106,6 +2107,7 @@ dependencies = [
  "filmcraft-export",
  "filmcraft-gphotos",
  "filmcraft-gpu",
+ "filmcraft-insta360",
  "filmcraft-instagram",
  "filmcraft-locks",
  "filmcraft-media",
@@ -2400,6 +2402,19 @@ dependencies = [
  "filmcraft-testkit",
  "rayon",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "filmcraft-insta360"
+version = "0.12.0"
+dependencies = [
+ "chrono",
+ "filmcraft-engine",
+ "filmcraft-export",
+ "filmcraft-isobmff",
+ "filmcraft-locks",
+ "filmcraft-screenagent",
+ "serde",
 ]
 
 [[package]]

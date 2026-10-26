@@ -1,0 +1,19 @@
+[package]
+name = "filmcraft-insta360"
+description = "Insta360 footage for the editor: recordings found where Insta360 Studio downloads its cloud files (and on the camera's card), and cloud downloads by driving Insta360 Studio with the local screen agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+filmcraft-engine = { workspace = true }
+filmcraft-export = { workspace = true }
+filmcraft-isobmff = { workspace = true }
+filmcraft-locks = { workspace = true }
+filmcraft-screenagent = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }

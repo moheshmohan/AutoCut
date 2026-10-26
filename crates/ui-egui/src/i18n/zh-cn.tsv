@@ -3924,3 +3924,11 @@
 	Pan (Yaw)	平移（偏航）
 	Sphere (Equirectangular)	球面（等距柱状）
 	Tilt (Pitch)	倾斜（俯仰）
+	360 Stabilize	360 稳定
+	360 Follow Subject	360 跟随主体
+	Steady Pan	稳定平移
+	Steady Tilt	稳定倾斜
+	Steady Roll	稳定滚转
+	Import Insta360 Recordings…	导入 Insta360 录像…
+	Download from Insta360 Cloud…	从 Insta360 云下载…
+	Insta360 Recordings	Insta360 录像

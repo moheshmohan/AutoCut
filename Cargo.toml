@@ -72,6 +72,7 @@ filmcraft-oauth = { path = "crates/oauth" }
 filmcraft-youtube = { path = "crates/youtube" }
 filmcraft-instagram = { path = "crates/instagram" }
 filmcraft-screenagent = { path = "crates/screenagent" }
+filmcraft-insta360 = { path = "crates/insta360" }
 filmcraft-platform = { path = "crates/platform" }
 filmcraft-testkit = { path = "crates/testkit" }
 

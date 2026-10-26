@@ -4283,3 +4283,11 @@
 	Pan (Yaw)	パン (ヨー)
 	Sphere (Equirectangular)	球面 (正距円筒)
 	Tilt (Pitch)	チルト (ピッチ)
+	360 Stabilize	360 安定化
+	360 Follow Subject	360 被写体を追う
+	Steady Pan	安定パン
+	Steady Tilt	安定チルト
+	Steady Roll	安定ロール
+	Import Insta360 Recordings…	Insta360 の録画を読み込む…
+	Download from Insta360 Cloud…	Insta360 クラウドからダウンロード…
+	Insta360 Recordings	Insta360 の録画
