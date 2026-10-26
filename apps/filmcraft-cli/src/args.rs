@@ -176,7 +176,23 @@ const VALUED_IN: &[(&str, &[&str])] = &[
     ("captions", &["--track", "--words", "--active-color", "--keyword-color", "--keywords", "--emoji", "--position", "--font", "--from"]),
     ("scenes", &["--detail", "--limit", "--purpose", "--count", "--sheet"]),
     ("quick", &["--template", "--full-detail"]),
-    ("direct", &["--brief", "--insta360", "--full-detail", "--seed", "--style", "--sounds", "--sound-level", "--color-strength", "--look", "--look-strength"]),
+    (
+        "direct",
+        &[
+            "--brief",
+            "--insta360",
+            "--full-detail",
+            "--seed",
+            "--style",
+            "--sounds",
+            "--sound-level",
+            "--color-strength",
+            "--look",
+            "--look-strength",
+            "--revise",
+            "--from",
+        ],
+    ),
 ];
 
 fn valued_in(cmd: Option<&String>, opt: &str) -> bool {

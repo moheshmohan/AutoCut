@@ -15,6 +15,7 @@ direct [folder | files… | project.fcproj] [--brief \"a 30 s reel of our trip\"
        [--style subtle|energetic|cinematic] [--light-effects] [--sounds swish,chime|none]
        [--sound-level 0.4] [--no-color] [--color-strength 0.7]
        [--look none|punchy|soft|warm|cool|golden|teal] [--look-strength 25]
+       [--revise \"1:10 is too long; warmer at the end\" --from out.report.json]
        [--dry-run] [--no-qa] [--export out.mp4] [--download]
        [--save | --save-as p.fcproj]";
 
@@ -34,6 +35,7 @@ pub fn params(a: &Args) -> Result<Value, String> {
         ("--name", "name"),
         ("--style", "style"),
         ("--look", "look"),
+        ("--revise", "revise"),
     ] {
         if let Some(v) = a.opt(opt) {
             p[key] = json!(v);
@@ -77,6 +79,12 @@ pub fn params(a: &Args) -> Result<Value, String> {
     }
     if let Some(m) = a.opt("--music") {
         p["music"] = json!(if m.eq_ignore_ascii_case("generate") { m.to_string() } else { absolute(m) });
+    }
+    if let Some(f) = a.opt("--from") {
+        p["previous"] = json!(absolute(f));
+    }
+    if p.get("revise").is_some() != p.get("previous").is_some() {
+        return Err("--revise takes the notes and --from the report of the edit they are about".into());
     }
     if let Some(e) = a.opt("--export") {
         p["export"] = json!(absolute(e));
@@ -123,6 +131,8 @@ pub async fn run(a: &Args) {
         "--color-strength",
         "--look",
         "--look-strength",
+        "--revise",
+        "--from",
         "--dry-run",
         "--no-qa",
         "--export",
@@ -140,7 +150,11 @@ pub async fn run(a: &Args) {
     let mut p = params(a).unwrap_or_else(|e| usage(format!("direct: {e}\n{USAGE}")));
     let project = sources.iter().find(|s| std::path::Path::new(s).extension().is_some_and(|x| x.eq_ignore_ascii_case("fcproj"))).cloned();
     let files: Vec<String> = sources.iter().filter(|s| Some(*s) != project.as_ref()).map(|s| absolute(s)).collect();
-    let elsewhere = a.opt("--insta360").is_some() || a.opt("--album").is_some() || a.opt("--project").is_some() || a.opt("--bridge").is_some();
+    let elsewhere = a.opt("--insta360").is_some()
+        || a.opt("--album").is_some()
+        || a.opt("--project").is_some()
+        || a.opt("--bridge").is_some()
+        || a.opt("--revise").is_some();
     if sources.is_empty() && !elsewhere {
         usage(format!("direct: what to make it of? a folder, files, a project, --insta360 recordings or an --album\n{USAGE}"));
     }
@@ -181,6 +195,9 @@ pub async fn run(a: &Args) {
                     s["text"].as_str().map(|t| format!(" \"{t}\"")).unwrap_or_default(),
                     s["cut"].as_str().unwrap_or("a cut")
                 ));
+            }
+            for c in made["changes"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(MAX_LISTED) {
+                diag(format_args!("direct: changed: {}", c.as_str().unwrap_or_default()));
             }
             for m in made["moments"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter(|m| m["kept"] == false).take(MAX_LISTED) {
                 diag(format_args!(
@@ -264,6 +281,10 @@ mod tests {
         );
         assert_eq!(params(&args(&["direct", "x", "--sounds", "none"])).unwrap()["sounds"], json!([]));
         assert!(params(&args(&["direct", "x", "--sound-level", "3"])).is_err());
+        // a revision: the notes and the report they are about, both or neither
+        let p = params(&args(&["direct", "--revise", "warmer at the end", "--from", "/tmp/r.report.json"])).unwrap();
+        assert_eq!((p["revise"].as_str(), p["previous"].as_str()), (Some("warmer at the end"), Some("/tmp/r.report.json")));
+        assert!(params(&args(&["direct", "--revise", "warmer"])).is_err());
         // the colour pass
         let p = params(&args(&["direct", "x", "--no-color", "--look", "warm", "--look-strength", "20", "--color-strength", "0.5"])).unwrap();
         assert_eq!(

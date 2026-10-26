@@ -19,6 +19,9 @@
 //!   shadows crushed, the correction is halved, then its white balance dropped, then dropped
 //!   altogether — and the report says why.
 //!
+//! An `offset` (`temperature`, `exposure`, `saturation`) is added to what was measured — a
+//! revision's "warmer at the end" — and checked like the rest.
+//!
 //! The correction is a Lumetri Color of its own at the end of the clip's effects, marked with an
 //! `auto_color` parameter, so the clip's own grading is never touched and the pass is easy to
 //! switch off (`off`: removed; or the effect's switch in Effect Controls) or to change by hand.
@@ -62,7 +65,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Auto Color",
         menu: &["Clip"],
         shortcut: None,
-        params: r#"{"clips":[id]?,"strength":0..1=0.7,"match":bool=true,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"="none","lookStrength":0..100=25,"frames":1..5=3,"sheet":path?,"off":bool=false}"#,
+        params: r#"{"clips":[id]?,"strength":0..1=0.7,"match":bool=true,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"="none","lookStrength":0..100=25,"offset":{"temperature":-25..25,"exposure":-0.8..0.8,"saturation":-25..25}?,"offsets":{"<clip id>":{…as offset}}?,"frames":1..5=3,"sheet":path?,"off":bool=false}"#,
         enabled: has_seq,
         run: auto_color,
         journal: true,
@@ -190,6 +193,36 @@ fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
     let look = *LOOKS.iter().find(|l| l.0 == look_name).ok_or_else(|| bad(cmd, "`look` is none, punchy, soft, warm, cool, golden or teal"))?;
     let look_strength = number("lookStrength", 25.0, 100.0, "0 to 100 (%)")?;
     let frames = u64_p(p, "frames").unwrap_or(3).clamp(1, 5) as usize;
+    // an offset asked for over what is measured: for every clip, or `offsets` per clip
+    let offset_of = |o: &Value, what: &str| -> Result<Correction> {
+        if !o.is_object() {
+            return Err(bad(cmd, format!("`{what}` is {{temperature, exposure, saturation}}")));
+        }
+        let get = |k: &str, max: f64| -> Result<f64> {
+            match o.get(k).filter(|v| !v.is_null()) {
+                None => Ok(0.0),
+                Some(v) => v.as_f64().filter(|x| x.is_finite() && x.abs() <= max).ok_or_else(|| bad(cmd, format!("`{what}.{k}` is −{max} to {max}"))),
+            }
+        };
+        Ok(Correction {
+            temperature: get("temperature", 25.0)?,
+            exposure: get("exposure", 0.8)?,
+            saturation: 100.0 + get("saturation", 25.0)?,
+            ..Correction::default()
+        })
+    };
+    let offset = match p.get("offset").filter(|v| !v.is_null()) {
+        None => Correction::default(),
+        Some(o) => offset_of(o, "offset")?,
+    };
+    let mut offsets: std::collections::HashMap<u64, Correction> = std::collections::HashMap::new();
+    if let Some(m) = p.get("offsets").filter(|v| !v.is_null()) {
+        let m = m.as_object().ok_or_else(|| bad(cmd, "`offsets` maps clip ids to {temperature, exposure, saturation}"))?;
+        for (k, v) in m.iter().take(MAX_CLIPS) {
+            let id: u64 = k.parse().map_err(|_| bad(cmd, format!("`offsets`: `{k}` is not a clip id")))?;
+            offsets.insert(id, offset_of(v, "offsets")?);
+        }
+    }
     let matching = bool_p(p, "match").unwrap_or(true);
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
     // the clips: given, else selected, else every picture clip of the sequence
@@ -244,7 +277,19 @@ fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
         let pics: Vec<filmcraft_render::Image> = times.iter().map(|t| renderer.render(&before_project, seq_id, *t, scale, &provider)).collect();
         let Some(all) = stack(&pics) else { continue };
         let before = color_balance::measure(&all);
-        let (correction, said) = color_balance::balance(&before, strength);
+        let (mut correction, mut said) = color_balance::balance(&before, strength);
+        let offset = offsets.get(&c.0).copied().unwrap_or(offset);
+        if !offset.is_none() {
+            correction.temperature = (correction.temperature + offset.temperature).clamp(-50.0, 50.0);
+            correction.exposure = (correction.exposure + offset.exposure).clamp(-1.5, 1.5);
+            correction.saturation = (correction.saturation + offset.saturation - 100.0).clamp(60.0, 140.0);
+            said.push(format!(
+                "asked for: temperature {:+.0}, exposure {:+.2}, saturation {:+.0}",
+                offset.temperature,
+                offset.exposure,
+                offset.saturation - 100.0
+            ));
+        }
         clips.push(Clip {
             id: *c,
             times,
@@ -267,8 +312,9 @@ fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
         let target_c = median(clips.iter().map(|c| c.before.contrast).collect());
         for c in clips.iter_mut() {
             let (sat, con) = color_balance::match_to(&c.before, target_s, target_c, MATCH);
+            let asked = offsets.get(&c.id.0).copied().unwrap_or(offset);
             if (sat - 100.0).abs() >= 1.0 || con.abs() >= 1.0 {
-                c.correction.saturation = sat;
+                c.correction.saturation = (sat + asked.saturation - 100.0).clamp(60.0, 140.0);
                 c.correction.contrast = con;
                 c.said.push(format!("matched to the edit: saturation {sat:.0}, contrast {con:+.0}"));
             }
@@ -433,6 +479,12 @@ mod tests {
             assert!((88.0..=112.0).contains(&sat), "{sat}");
         }
         assert!(sheet.exists() && r["sheet"]["width"].as_u64().unwrap() > 0, "{r}");
+        // warmer, as a revision asks: the offset over what was measured
+        let one = clips[0];
+        let before = float(&passes(&s, one)[0], "temperature");
+        s.execute(AUTO_COLOR_CMD, json!({"clips": [one.0], "match": false, "offset": {"temperature": 10}})).unwrap();
+        let after = passes(&s, one);
+        assert!(float(&after[0], "temperature") > before.min(0.0), "{before} → {}", float(&after[0], "temperature"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -441,6 +493,8 @@ mod tests {
         let mut s = demo();
         for bad in [
             json!({"strength": 2}),
+            json!({"offset": {"temperature": 90}}),
+            json!({"offset": "warm"}),
             json!({"strength": "x"}),
             json!({"look": "sepia"}),
             json!({"lookStrength": 300}),

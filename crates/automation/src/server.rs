@@ -845,6 +845,14 @@ pub struct DirectParams {
     /// The look's strength, % (default 25).
     #[serde(default)]
     pub look_strength: Option<f64>,
+    /// Revise an edit already made: the viewer's notes ("1:10 is too long", "warmer at the end",
+    /// "fewer barrel rolls"), turned into changes to its saved plan and rebuilt (the report lists
+    /// the changes). Needs `previous`.
+    #[serde(default)]
+    pub revise: Option<String>,
+    /// The report of the edit to revise (`<out>.report.json` of the earlier export).
+    #[serde(default)]
+    pub previous: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -956,6 +964,8 @@ fn direct_params(p: DirectParams) -> Value {
     put("colorStrength", p.color_strength.map(|v| json!(v)));
     put("look", p.look.map(Value::String));
     put("lookStrength", p.look_strength.map(|v| json!(v)));
+    put("revise", p.revise.map(Value::String));
+    put("previous", p.previous.map(Value::String));
     params
 }
 

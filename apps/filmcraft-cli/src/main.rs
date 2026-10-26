@@ -556,7 +556,9 @@ SUBCOMMANDS
                                 cameras matched, checked on skin and greys; --no-color,
                                 --color-strength, --look, --look-strength; <out>.color.jpg shows
                                 before and after), captions of English speech and the mix at
-                                −14 LUFS; --dry-run prints the plan
+                                −14 LUFS; --revise NOTES --from <out>.report.json changes a
+                                finished edit's saved plan from notes (1:10 too long, warmer at
+                                the end, fewer barrel rolls) and rebuilds it; --dry-run prints the plan
                                 and its engine commands and builds nothing; with --export the
                                 video, <out>.sheet.jpg, <out>.report.json and QA. Privacy is off
                                 unless --redact asks for it

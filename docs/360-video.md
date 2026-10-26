@@ -190,6 +190,25 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    `--export` writes the video, `<out>.sheet.jpg`, `<out>.report.json` (the plan, the
    candidates, who directed, the GPU frames rendered, the fallbacks) and QA. Faces stay sharp
    unless `--redact` asks: in a trip video the people are the subject.
+6. **Revising**: notes on a finished edit — "1:10 is too long; warmer at the end; fewer barrel
+   rolls" — become changes to its saved plan rather than a new edit:
+
+   ```text
+   filmcraft-cli direct --revise "1:10 is too long; warmer at the end; no barrel rolls" \
+       --from ~/Movies/AutoCut/weekend-reel.report.json
+   ```
+
+   The report keeps the plan (each shot's file, moment, camera and beats) and the options it was
+   made with; a revision starts from them (new options win; the export becomes
+   `<name>-revised.mp4` unless one is given), finds each shot again in the footage, and asks the
+   local model to turn the notes into changes — a shot shorter or longer, removed, another
+   camera, fewer of a move, a stretch warmer, cooler, brighter or more vivid over the colour pass,
+   a text or the title, the cutting style or the look, another moment in a shot's place — each
+   checked before it is made (a camera its clip cannot use, or footage too short, is refused and
+   said). Without a model, rules read the common notes (times like `1:10`, "too long", "remove",
+   "fewer / no <move>", "warmer / cooler / brighter / darker at the end / start / 1:10",
+   "punchier", "calmer", `title: …`). The cuts are picked again for the changed shots and the
+   edit is rebuilt; the report's `changes` lists what changed and what was not understood.
 
 Seen on the Insta360 samples: a 30 s 9:16 reel of four X5 recordings and two phone clips directed
 by `qwen3:8b` and built in about 70 s once the scene index was cached (3–4 minutes the first time).

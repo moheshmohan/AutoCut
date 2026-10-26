@@ -455,6 +455,8 @@ fn speech_faces_and_smiles_raise_a_moment() {
 fn planned(id: &str, from: f64, beats: u32, camera: Camera) -> PlannedShot {
     PlannedShot {
         clip: id.into(),
+        file: String::new(),
+        grade: None,
         from,
         beats,
         camera,
@@ -577,4 +579,121 @@ fn the_cuts_compile_to_transitions_split_edits_and_the_styles_sounds() {
     assert_eq!(kinds(&compile(&plan, &lib, &wins, &loud, (1080.0, 1920.0), beat)), BTreeSet::from(["impact".to_string(), "whoosh".to_string()]));
     let quiet = opts(json!({"seconds": 15, "sounds": []}));
     assert!(kinds(&compile(&plan, &lib, &wins, &quiet, (1080.0, 1920.0), beat)).is_empty());
+}
+
+#[test]
+fn notes_are_read_into_changes_by_rules_and_from_a_model() {
+    use revise::{Op, Where};
+    let (ops, unread) =
+        revise::rules_ops("1:10 is too long; warmer at the end and fewer barrel rolls.\nNo whip pans. Title: \"Weekend Away\". Make it sparkle", 100.0);
+    assert!(ops.contains(&Op::Shorter(Where::At(70.0), 2)), "{ops:?}");
+    assert!(ops.iter().any(|o| matches!(o, Op::Grade(Some(f), None, g) if (*f - 75.0).abs() < 1e-9 && g.warmth > 0.0)), "{ops:?}");
+    assert!(ops.contains(&Op::Fewer(Camera::BarrelRoll, None)) && ops.contains(&Op::Fewer(Camera::WhipPan, Some(0))), "{ops:?}");
+    assert!(ops.contains(&Op::Title("Weekend Away".into())), "{ops:?}");
+    assert_eq!(unread, ["Make it sparkle"]);
+    // a model's answer: the usable kept, the rest said
+    let (ops, bad) = revise::ops_from(&json!({"ops": [
+        {"op": "remove", "shot": 3},
+        {"op": "camera", "at": "0:04", "camera": "orbit"},
+        {"op": "grade", "from": "0:20", "warmth": 99},
+        {"op": "fly"},
+        {"op": "camera", "shot": 2, "camera": "teleport"}
+    ]}));
+    assert_eq!(ops.len(), 3, "{ops:?}");
+    assert!(matches!(ops[2], Op::Grade(Some(f), None, g) if f == 20.0 && g.warmth == revise::MAX_WARMTH));
+    assert_eq!(bad.len(), 2);
+    assert_eq!(revise::time_of(&json!("1:02:03")), Some(3723.0));
+    assert_eq!(revise::time_of(&json!("x")), None);
+}
+
+#[test]
+fn changes_apply_to_the_shots_of_the_last_cut() {
+    use revise::{Grade, Op, Where};
+    let beat = beat_of(120.0);
+    let (lib, plan, _) = trip();
+    let wins = windows(&plan, &Beats::grid(120.0));
+    let mut o = opts(json!({}));
+    let mut p = plan.clone();
+    let ops = vec![
+        Op::Remove(Where::Shot(2)),
+        Op::Shorter(Where::Shot(3), 2),
+        Op::Camera(Where::Shot(4), Camera::Orbit),
+        Op::Camera(Where::Shot(4), Camera::Hold),
+        Op::Grade(Some(wins[4].0), None, Grade { warmth: 8.0, ..Grade::default() }),
+        Op::Title("Our Weekend".into()),
+        Op::Style("cinematic".into()),
+        Op::Look("warm".into()),
+        Op::Swap(Where::Shot(1), "c5".into()),
+        Op::Remove(Where::At(999.0)),
+    ];
+    let said = revise::apply(&mut p, &ops, &lib, &wins, beat, &mut o);
+    assert_eq!(p.shots.len(), plan.shots.len() - 1, "{said:#?}");
+    // (shot 3 of the last cut is c2, now the second)
+    assert_eq!((p.shots[1].clip.as_str(), p.shots[1].beats), ("c2", 2));
+    assert!(said.iter().any(|s| s.contains("orbit does not fit")), "an orbit on a normal clip: {said:#?}");
+    assert_eq!(p.shots[2].camera, Camera::Hold);
+    assert!(p.shots[3..].iter().all(|s| s.grade.is_some_and(|g| g.warmth == 8.0)) && p.shots[2].grade.is_none(), "{:?}", p.shots);
+    assert_eq!((p.title.as_str(), p.shots[0].text.as_deref()), ("Our Weekend", Some("Our Weekend")));
+    assert_eq!((o.style.pace, o.look.as_str()), (cuts::Pace::Cinematic, "warm"));
+    // every moment is in the edit already: the swap is refused; a time past the end names no shot
+    assert!(p.shots[0].clip == "c1" && said.iter().any(|s| s.contains("already in the edit")), "{said:#?}");
+    assert!(said.iter().any(|s| s.contains("no shot there")), "{said:#?}");
+    // fewer: half of them, or none
+    let mut q = plan.clone();
+    for s in q.shots.iter_mut() {
+        s.camera = Camera::PushIn;
+    }
+    revise::apply(&mut q, &[Op::Fewer(Camera::PushIn, Some(0))], &lib, &wins, beat, &mut o);
+    assert!(q.shots.iter().all(|s| s.camera != Camera::PushIn), "{:?}", q.shots);
+}
+
+#[test]
+fn a_saved_edit_is_found_again_and_its_options_kept() {
+    let (lib, mut plan, _) = trip();
+    for s in plan.shots.iter_mut() {
+        s.file = lib.iter().find(|c| c.id == s.clip).unwrap().name.clone();
+    }
+    let report = json!({"plan": plan, "options": {"brief": "a reel", "seconds": 15, "export": "/tmp/reel.mp4", "style": "energetic"}});
+    let pr = revise::load(&report).unwrap();
+    let merged = revise::merge(&pr.options, &json!({"revise": "warmer", "seconds": 20, "previous": "x"}), 120.0);
+    assert_eq!((merged["seconds"].as_f64(), merged["style"].as_str(), merged["bpm"].as_f64()), (Some(20.0), Some("energetic"), Some(120.0)));
+    assert_eq!(merged["export"], "/tmp/reel-revised.mp4");
+    assert!(revise::saved_options(&merged).get("revise").is_none());
+    // the moments' ids changed with the footage: the shots are found by file and time
+    let mut renumbered = lib.clone();
+    for (k, c) in renumbered.iter_mut().enumerate() {
+        c.id = format!("m{}", 10 + k);
+    }
+    let (again, lost) = revise::remap(&pr.plan, &renumbered);
+    assert!(lost.is_empty(), "{lost:?}");
+    assert_eq!(again.shots[0].clip, "m10");
+    let (_, lost) = revise::remap(&pr.plan, &renumbered[1..]);
+    assert_eq!(lost.len(), 1);
+    assert!(revise::load(&json!({"plan": {"title": "x", "bpm": 120, "shots": []}})).is_err());
+    assert!(revise::load(&json!("/no/such/report.json")).is_err());
+}
+
+#[tokio::test]
+async fn an_edit_is_revised_from_notes_not_made_again() {
+    let ex = demo_session();
+    let mut lines = |_: &str| {};
+    let first =
+        make(&ex, &json!({"brief": "a 10 s reel", "seconds": 10, "bpm": 120, "captions": false, "style": "energetic"}), None, &mut lines).await.unwrap();
+    let before = first["plan"]["shots"].as_array().unwrap().len();
+    assert!(first["options"]["style"] == "energetic" && first["plan"]["shots"][0]["file"].is_string(), "{first}");
+    let r = make(&ex, &json!({"revise": "warmer at the end; no push ins", "previous": first, "captions": false}), None, &mut lines).await.unwrap();
+    assert!(r["director"].as_str().unwrap().starts_with("revised"), "{r}");
+    let changes: Vec<&str> = r["changes"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(changes.iter().any(|c| c.contains("warmer")), "{changes:?}");
+    assert_eq!(r["plan"]["shots"].as_array().unwrap().len(), before, "the same shots: {r}");
+    assert!(r["plan"]["shots"].as_array().unwrap().iter().all(|s| s["camera"] != "pushIn"), "{r}");
+    // the options came with it, and the graded shots were warmed over the colour pass
+    assert_eq!(r["options"]["style"], "energetic");
+    let warm = r["color"]["clips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["did"].as_array().is_some_and(|d| d.iter().any(|x| x.as_str().is_some_and(|x| x.starts_with("asked for")))))
+        .count();
+    assert!(warm >= 1, "{r}");
 }

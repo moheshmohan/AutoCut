@@ -843,36 +843,44 @@ pub enum Enter {
 }
 
 /// One shot of the edit.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlannedShot {
     /// Its candidate's id.
     pub clip: String,
+    /// Its media's name (a saved plan's shots are found again by it when it is revised).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file: String,
     /// Where it starts in the media, seconds.
     pub from: f64,
     pub beats: u32,
     pub camera: Camera,
     /// 360°: where it looks, and where a whip pan goes.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    #[serde(default)]
     pub enter: Enter,
     /// A match cut: where its subject sits across the frame (shares), lined up with the shot
     /// before.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<f64>,
     /// Its sound starts this many seconds before its picture (a J cut), runs on this long after
     /// it (an L cut).
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub lead: f64,
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub tail: f64,
     /// Why it comes in as it does.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cut: String,
     /// Text over it (English).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Its colour as a revision asked for it, over the colour pass ([`revise::Grade`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<revise::Grade>,
+    #[serde(default)]
     pub why: String,
 }
 
@@ -881,15 +889,18 @@ fn is_zero(v: &f64) -> bool {
 }
 
 /// The edit as directed.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     pub title: String,
+    #[serde(default)]
     pub mood: String,
     pub bpm: f64,
     pub shots: Vec<PlannedShot>,
     /// `model:<id>` or `rules`.
+    #[serde(default)]
     pub by: String,
     /// What was repaired or decided, and why.
+    #[serde(default)]
     pub notes: Vec<String>,
 }
 
@@ -1086,6 +1097,8 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
         room = room.saturating_sub(beats);
         body.push(PlannedShot {
             clip: c.id.clone(),
+            file: String::new(),
+            grade: None,
             from,
             beats,
             camera: cam,
@@ -1124,6 +1137,8 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
     let hook_look = hook.looks.first().map(|l| l.id.clone());
     plan.shots.push(PlannedShot {
         clip: hook.id.clone(),
+        file: String::new(),
+        grade: None,
         from: hook_from,
         beats: hook_beats,
         camera: hook_cam,
@@ -1143,6 +1158,8 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
         if let Some(from) = window_from(c, need) {
             plan.shots.push(PlannedShot {
                 clip: c.id.clone(),
+                file: String::new(),
+                grade: None,
                 from,
                 beats: end_beats,
                 camera: end_cam,
@@ -1494,6 +1511,8 @@ pub fn validate(v: &Value, cands: &[Candidate], o: &Options, beat: f64, bpm: f64
         let why = s["why"].as_str().map(|w| chars(w, 160)).unwrap_or_else(|| if s.is_null() { format!("{} (rules)", c.caption) } else { String::new() });
         shots.push(PlannedShot {
             clip: c.id.clone(),
+            file: String::new(),
+            grade: None,
             from: round2(from),
             beats: slot.beats,
             camera: cam,
@@ -1889,6 +1908,13 @@ pub struct Report {
     /// The colour pass: each shot's correction and any backing off, and the before/after sheet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<Value>,
+    /// The options it was made with (a revision starts from them), and, revised, from which
+    /// report and what changed.
+    pub options: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revised_from: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
     /// Moments measured on their own frames, and every moment's verdict: its scores, kept or
     /// dropped, and why.
     pub measured: usize,
@@ -2113,8 +2139,19 @@ async fn speech_of(ex: &dyn Executor, media: &[MediaItem], shots: &mut [ShotInfo
 /// Direct the edit (the `autocut.direct` job; parameters as the engine checked them). `model`
 /// directs it; none: rules.
 pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, lines: &mut dyn FnMut(&str)) -> Result<Value, AutoCutError> {
-    let o = Options::from_params(p)?;
+    // a revision: the saved edit's options under the ones given now, its plan changed by the notes
+    let previous = match p["revise"].as_str().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(_) => Some(revise::load(&p["previous"]).map_err(invalid)?),
+        None => None,
+    };
+    let merged = match &previous {
+        Some(pr) => revise::merge(&pr.options, p, pr.plan.bpm),
+        None => p.clone(),
+    };
+    let p = &merged;
+    let mut o = Options::from_params(p)?;
     let mut report = Report { brief: o.brief.clone(), aspect: o.aspect.clone(), seconds: o.seconds, models: json!({}), ..Report::default() };
+    report.options = revise::saved_options(p);
     let mut notes: Vec<String> = Vec::new();
     if o.download {
         for set in ["fast", "full"] {
@@ -2203,7 +2240,42 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         })
         .collect();
     let mut plan = None;
+    if let Some(pr) = &previous {
+        // ---- the saved plan, its shots found again, changed by the notes
+        let notes_text = p["revise"].as_str().unwrap_or_default().to_string();
+        let (mut revised, lost) = revise::remap(&pr.plan, &cands);
+        let last_cut = windows(&pr.plan, &Beats::grid(pr.plan.bpm));
+        let length = last_cut.last().map_or(o.seconds, |w| w.1);
+        let (ops, unread) = match model {
+            Some(m) => {
+                lines(&format!("revising with {}", m.id()));
+                match revise::model_ops(m, &notes_text, &revised, &last_cut, &cands).await {
+                    Ok(x) if !x.0.is_empty() => x,
+                    Ok(_) | Err(_) => {
+                        report.fallbacks.push(format!("revise: {} gave no usable change: the notes were read by rules", m.id()));
+                        revise::rules_ops(&notes_text, length)
+                    }
+                }
+            }
+            None => revise::rules_ops(&notes_text, length),
+        };
+        report.changes = revise::apply(&mut revised, &ops, &cands, &last_cut, beat, &mut o);
+        report.changes.extend(unread.into_iter().map(|u| format!("not understood: {u}")));
+        report.changes.extend(lost);
+        report.revised_from = pr.path.clone();
+        revised.by = format!(
+            "revised ({})",
+            if model.is_some() && !report.fallbacks.iter().any(|f| f.starts_with("revise:")) {
+                model.map_or_else(String::new, |m| m.id())
+            } else {
+                "rules".into()
+            }
+        );
+        lines(&format!("{} change(s) to the saved plan", report.changes.len()));
+        plan = Some(revised);
+    }
     match model {
+        _ if plan.is_some() => {}
         Some(m) => {
             lines(&format!("directing with {}", m.id()));
             match model_plan(m, &short, &o, beat, &slots).await {
@@ -2235,6 +2307,9 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     // ---- how each cut is made: from what the shots show and say, in the edit's style
     let mut plan = plan;
     cuts::joins(&mut plan, &cands, &speech, beat, &o.style);
+    for s in plan.shots.iter_mut() {
+        s.file = cands.iter().find(|c| c.id == s.clip).map(|c| c.name.clone()).unwrap_or_default();
+    }
     report.director = plan.by.clone();
     let (fw, fh) = o.frame();
     let frame = (f64::from(fw), f64::from(fh));
@@ -2264,11 +2339,24 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     lines(&format!("building {} shot(s), {} command(s)", plan.shots.len(), steps.len()));
     let built = execute(ex, &steps, &mut notes, lines).await;
     // ---- the colour pass: each shot measured and gently balanced, the cameras brought together
-    if o.color {
+    let grades: serde_json::Map<String, Value> = plan
+        .shots
+        .iter()
+        .zip(&built.pictures)
+        .filter_map(|(s, pic)| {
+            let g = s.grade?;
+            Some((pic.as_ref()?.to_string(), json!({"temperature": g.warmth, "exposure": g.brightness, "saturation": g.saturation})))
+        })
+        .collect();
+    if o.color || !grades.is_empty() {
         let clips: Vec<u64> = built.pictures.iter().flatten().copied().collect();
         if !clips.is_empty() {
             lines("balancing the colour of each shot");
-            let mut cp = json!({"clips": clips, "strength": o.color_strength, "look": o.look, "lookStrength": o.look_strength});
+            let strength = if o.color { o.color_strength } else { 0.0 };
+            let mut cp = json!({"clips": clips, "strength": strength, "match": o.color, "look": o.look, "lookStrength": o.look_strength});
+            if !grades.is_empty() {
+                cp["offsets"] = Value::Object(grades);
+            }
             if let Some(out) = &o.export {
                 cp["sheet"] = json!(crate::trailer::beside(&filmcraft_engine::export_tools::expand_home(out), "color.jpg").display().to_string());
             }
@@ -2652,6 +2740,9 @@ pub mod cuts;
 
 #[path = "director_rank.rs"]
 pub mod rank;
+
+#[path = "director_revise.rs"]
+pub mod revise;
 
 #[cfg(test)]
 #[path = "director_tests.rs"]
