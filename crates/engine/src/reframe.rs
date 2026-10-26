@@ -382,7 +382,9 @@ fn build_work(s: &Session, q: &Sequence, only: Option<&[ClipId]>, hints: &[Hint]
                 ItemKind::Subclip { .. } => s.project.resolve_media(it.item).is_some_and(|(_, m, _)| m.info.has_video()),
                 _ => false,
             };
-            if !is_media {
+            // a 360° clip seen through its virtual camera is framed by turning the camera
+            // (`clip.follow360`), not by moving its picture
+            if !is_media || filmcraft_project::vr::reframe_of(it).is_some() {
                 continue;
             }
             let Some(src) = s.source(it.item) else { continue };
@@ -831,6 +833,13 @@ fn auto_reframe_sequence(s: &mut Session, p: &Value) -> Result<Value> {
     let mut target = (**src).clone();
     target.settings.width = fw;
     target.settings.height = fh;
+    // 360° clips keep their camera's direction, re-shaped to the new frame
+    let mut cameras = 0usize;
+    for t in &mut target.video_tracks {
+        for it in &mut t.items {
+            cameras += usize::from(crate::vr360::reshape_camera(it, (src.settings.width, src.settings.height), (fw, fh)));
+        }
+    }
     let mut next_id = s.project.next_id;
     if let Some((a, b)) = range {
         if a >= target.duration() {
@@ -844,7 +853,11 @@ fn auto_reframe_sequence(s: &mut Session, p: &Value) -> Result<Value> {
     let bin = s.project.root.parent_of(seq_id).filter(|b| b.0 != 0);
     let label_text = format!("Auto Reframe {aspect_label}: {}", item.name);
     let target = Target::Copy { seq: Box::new(target), name, next_id, label: item.label, bin, aspect: aspect_label };
-    start(s, cmd, label_text, target, work, follow.tuning(), fallback, p)
+    let mut out = start(s, cmd, label_text, target, work, follow.tuning(), fallback, p)?;
+    if cameras > 0 && out.is_object() {
+        out["cameras360"] = json!(cameras);
+    }
+    Ok(out)
 }
 
 fn auto_reframe_clips(s: &mut Session, p: &Value) -> Result<Value> {
@@ -873,7 +886,7 @@ fn auto_reframe_clips(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let work = build_work(s, &q, only.as_deref(), &hints, fps, keep_scale)?;
     if work.is_empty() {
-        return Err(bad(cmd, "no video clip to reframe (select video clips of media, or pass `clips`)"));
+        return Err(bad(cmd, "no video clip to reframe (select video clips of media, or pass `clips`; a 360° clip follows its subject with `clip.follow360`)"));
     }
     let n = work.len();
     let label = format!("Auto Reframe ({n} clip{})", if n == 1 { "" } else { "s" });
@@ -963,7 +976,12 @@ fn camera_track(s: &mut Session, p: &Value) -> Result<Value> {
         other => return Err(bad(cmd, format!("`target` is \"subject\", \"box\" or \"face\", not \"{other}\""))),
     }
     let mut work = build_work(s, &q, Some(&[clip]), &hints, fps, false)?;
-    let Some(w) = work.first_mut() else { return Err(bad(cmd, "the clip has no picture to track")) };
+    let Some(w) = work.first_mut() else {
+        if filmcraft_project::vr::reframe_of(&it).is_some() {
+            return Err(bad(cmd, "a 360° clip keeps its subject framed by turning its camera: clip.follow360"));
+        }
+        return Err(bad(cmd, "the clip has no picture to track"));
+    };
     w.push = Some(push);
     if target == "box" {
         w.seed_at = w.hints.keys().min().copied();

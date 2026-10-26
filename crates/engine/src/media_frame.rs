@@ -103,7 +103,8 @@ pub(crate) fn decode(s: &Session, cmd: &str, item: ItemId, secs: Option<f64>, ma
         None => dur.seconds() / 2.0,
     };
     let max_side = max_side.clamp(16, MAX_SIDE);
-    let src = s.source(item).ok_or_else(|| bad(cmd, "the item's media is offline or unreadable"))?;
+    // (360° media as its stitched panorama: what the camera saw, all round)
+    let src = crate::vr360::analysis_view(s, item).ok_or_else(|| bad(cmd, "the item's media is offline or unreadable"))?;
     let info = src.info().video.clone().ok_or_else(|| bad(cmd, "the item has no video"))?;
     // the last frame starts one frame before the end
     let last = (dur - info.frame_rate.frame_duration()).max(Tick::ZERO);

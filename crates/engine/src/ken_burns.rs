@@ -261,7 +261,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let mut work = Vec::new();
     for c in &clips {
         let Some((_, it)) = q.find_item(*c) else { continue };
-        let (Some(storage), Some(display)) = (filmcraft_render::source_size(&s.project, it.item), s.project.conformed_source_size(it.item, frame_par)) else {
+        let (Some(storage), Some(display)) = (filmcraft_render::clip_size(&s.project, it), s.project.conformed_clip_size(it, frame_par)) else {
             continue;
         };
         let last = it.start + (it.duration - fd).max(Tick::ZERO);

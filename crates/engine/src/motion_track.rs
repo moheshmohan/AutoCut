@@ -364,14 +364,14 @@ fn tracked_clip(s: &Session, cmd: &str, p: &Value) -> Result<(ItemId, TrackItem)
 /// A box in shares of the clip's picture from `box` and `space`, at sequence time `at`.
 fn seed_box(s: &Session, cmd: &str, p: &Value, q: &Sequence, it: &TrackItem, at: Tick) -> Result<TrackSample> {
     let [x, y, w, h] = box_p(cmd, p)?;
-    let size = s.project.source_size(it.item).ok_or_else(|| bad(cmd, "the clip has no picture"))?;
+    let size = s.project.clip_source_size(it).ok_or_else(|| bad(cmd, "the clip has no picture"))?;
     let (sw, sh) = (f64::from(size.0.max(1)), f64::from(size.1.max(1)));
     let mt = it.source_time_at(at);
     let corners = match opt_str(cmd, p, "space")?.unwrap_or("picture") {
         "picture" => [x, y, w, h],
         "frame" => {
             // the frame as shown → the clip's pixels through the inverse of its Motion
-            let m = filmcraft_render::motion_matrix(q, it, size, s.project.source_par(it.item), it.effect_time_at(at));
+            let m = filmcraft_render::motion_matrix(q, it, size, s.project.clip_source_par(it), it.effect_time_at(at));
             let inv = m.inverse().ok_or_else(|| bad(cmd, "the clip is scaled to nothing: no box can be drawn on it"))?;
             let (fw, fh) = (f64::from(q.settings.width), f64::from(q.settings.height));
             let pts = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)].map(|(a, b)| inv.apply(Vec2::new(a * fw, b * fh)));
@@ -468,8 +468,9 @@ fn request(s: &Session, cmd: &str, p: &Value) -> Result<Request> {
     let direction = direction_p(cmd, p)?.unwrap_or_default();
     let n = s.project.motion_tracks.values().filter(|t| t.clip == clip.id).count() + 1;
     let name = name_p(cmd, p)?.unwrap_or_else(|| format!("{} track {n}", clip.name));
-    let src = s.source(clip.item).ok_or_else(|| EngineError::Other(format!("{cmd}: the clip's media is not available")))?;
-    let (w, h) = s.project.source_size(clip.item).ok_or_else(|| bad(cmd, "the clip has no picture"))?;
+    // (a reframed 360° clip is tracked in its virtual camera's picture)
+    let src = crate::vr360::clip_source(s, &clip).ok_or_else(|| EngineError::Other(format!("{cmd}: the clip's media is not available")))?;
+    let (w, h) = s.project.clip_source_size(&clip).ok_or_else(|| bad(cmd, "the clip has no picture"))?;
     let scale = (ANALYSIS_SIDE as f64 / f64::from(w.max(h).max(1))).min(1.0) as f32;
     let (forward, backward) = frames_for(&s.project, &clip, seed.t, direction);
     if forward.is_empty() && backward.is_empty() {
@@ -1110,7 +1111,7 @@ fn insert_effect(it: &mut TrackItem, e: EffectInstance) -> usize {
 
 /// The object at the seed in the tracked clip's pixels: centre, half size, rotation.
 fn seed_in_pixels(pr: &Project, t: &MotionTrack) -> Option<(Vec2, Vec2, f64)> {
-    let (w, h) = pr.source_size(t.item)?;
+    let (w, h) = pr.track_picture_size(t)?;
     let pose = t.pose_at(t.seed.t)?;
     let (w, h) = (f64::from(w), f64::from(h));
     Some((Vec2::new(pose.cx * w, pose.cy * h), Vec2::new(pose.w * w / 2.0, pose.h * h / 2.0), pose.rotation))
@@ -1151,7 +1152,7 @@ fn add_blur(pr: &mut Project, t: &mut MotionTrack, b: &BlurSpec) -> Result<Value
     let size = (half.x.min(half.y) * 2.0).max(4.0);
     let amount = b.amount.unwrap_or(60.0) / 100.0;
     let e = if b.mosaic {
-        let (w, _) = pr.source_size(t.item).unwrap_or((1920, 1080));
+        let (w, _) = pr.track_picture_size(t).unwrap_or((1920, 1080));
         // blocks about a sixth of the object across, whatever the picture's size
         let block = (size / (6.0 + 18.0 * (1.0 - amount))).max(2.0);
         let mut e = filmcraft_project::effect::find_effect("mosaic").ok_or_else(|| EngineError::Other("no Mosaic effect".into()))?.instance();
@@ -1191,7 +1192,7 @@ fn add_label(pr: &mut Project, st: &mut crate::EditorState, t: &mut MotionTrack,
     let (_, clip) = q.find_item(t.clip).ok_or_else(|| EngineError::Other("the tracked clip is gone".into()))?;
     let clip = clip.clone();
     let (fw, fh, rate) = (q.settings.width, q.settings.height, q.settings.frame_rate);
-    let size = pr.source_size(t.item).ok_or_else(|| EngineError::Other("the tracked clip has no picture".into()))?;
+    let size = pr.track_picture_size(t).ok_or_else(|| EngineError::Other("the tracked clip has no picture".into()))?;
     let view = View::new(pr, q, &clip, t, size);
     let shown = view.at(l.at).ok_or_else(|| EngineError::Other("the object is not on screen there".into()))?;
     // laid out for a 1080-pixel short side, scaled with the frame
@@ -1397,7 +1398,7 @@ pub struct Shown {
 
 impl<'a> View<'a> {
     fn new(pr: &Project, seq: &'a Sequence, clip: &'a TrackItem, track: &'a MotionTrack, size: (u32, u32)) -> Self {
-        View { seq, clip, track, size, par: pr.source_par(clip.item) }
+        View { seq, clip, track, size, par: pr.clip_source_par(clip) }
     }
 
     fn at(&self, t: Tick) -> Option<Shown> {
@@ -1435,7 +1436,7 @@ fn sequence_time_of(clip: &TrackItem, mt: Tick) -> Option<Tick> {
 pub fn shown_path(project: &Project, track: &MotionTrack) -> Vec<(Tick, Shown)> {
     let Some(q) = project.sequence(track.sequence) else { return Vec::new() };
     let Some((_, clip)) = q.find_item(track.clip) else { return Vec::new() };
-    let Some(size) = project.source_size(clip.item) else { return Vec::new() };
+    let Some(size) = project.clip_source_size(clip) else { return Vec::new() };
     let view = View::new(project, q, clip, track, size);
     track.samples.iter().filter_map(|s| sequence_time_of(clip, s.t)).filter_map(|t| view.at(t).map(|o| (t, o))).collect()
 }
@@ -1447,7 +1448,7 @@ pub fn shown_at(project: &Project, track: &MotionTrack, t: Tick) -> Option<Shown
     if t < clip.start || t >= clip.end() {
         return None;
     }
-    let size = project.source_size(clip.item)?;
+    let size = project.clip_source_size(clip)?;
     View::new(project, q, clip, track, size).at(t)
 }
 
@@ -1485,7 +1486,7 @@ fn track_json(s: &Session, id: MotionTrackId, samples: bool) -> Result<Value> {
         let shown: HashMap<i64, Shown> = match &clip {
             Some(c) => {
                 let q = s.project.sequence(t.sequence);
-                let size = s.project.source_size(t.item);
+                let size = s.project.track_picture_size(t);
                 match (q, size) {
                     (Some(q), Some(size)) => {
                         let view = View::new(&s.project, q, c, t, size);
@@ -1530,8 +1531,8 @@ struct TargetNow {
 
 /// The clip's Motion matrix (source pixels → sequence pixels) at sequence time `t`.
 fn clip_matrix(pr: &Project, q: &Sequence, it: &TrackItem, t: Tick) -> Option<Affine> {
-    let size = pr.source_size(it.item).unwrap_or((q.settings.width, q.settings.height));
-    let m = filmcraft_render::motion_matrix(q, it, size, pr.source_par(it.item), it.effect_time_at(t));
+    let size = pr.clip_source_size(it).unwrap_or((q.settings.width, q.settings.height));
+    let m = filmcraft_render::motion_matrix(q, it, size, pr.clip_source_par(it), it.effect_time_at(t));
     m.inverse().map(|_| m)
 }
 
@@ -1603,12 +1604,12 @@ fn attach_in(pr: &mut Project, t: &mut MotionTrack, spec: &TargetSpec, follow: F
         return Err(bad(cmd, "the target and the tracked clip are never on screen together"));
     }
     let at = at.clamp(a, b - Tick(1));
-    let size = pr.source_size(clip.item).ok_or_else(|| bad(cmd, "the tracked clip has no picture"))?;
+    let size = pr.clip_source_size(clip).ok_or_else(|| bad(cmd, "the tracked clip has no picture"))?;
     let shown = View::new(pr, q, clip, t, size).at(at).ok_or_else(|| bad(cmd, "the track has no samples"))?;
     let m = clip_matrix(pr, q, target, at).ok_or_else(|| bad(cmd, "the target is scaled to nothing"))?;
     let tmt = target.effect_time_at(at);
     let centre_of = |it: &TrackItem| -> Vec2 {
-        let (w, h) = pr.source_size(it.item).unwrap_or((q.settings.width, q.settings.height));
+        let (w, h) = pr.clip_source_size(it).unwrap_or((q.settings.width, q.settings.height));
         Vec2::new(f64::from(w) / 2.0, f64::from(h) / 2.0)
     };
     let (kind, now) = match spec {
@@ -1757,7 +1758,7 @@ fn bake(pr: &mut Project, t: &MotionTrack, a: &Attachment) -> Result<usize> {
     if end <= start {
         return Err(bad(cmd, "the attached clip and the tracked clip are no longer on screen together"));
     }
-    let size = pr.source_size(clip.item).ok_or_else(|| bad(cmd, "the tracked clip has no picture"))?;
+    let size = pr.clip_source_size(clip).ok_or_else(|| bad(cmd, "the tracked clip has no picture"))?;
     let fd = q.settings.frame_rate.sane().frame_duration().max(Tick(1));
     let view = View::new(pr, q, clip, t, size);
     let off = Vec2::new(a.offset[0], a.offset[1]);

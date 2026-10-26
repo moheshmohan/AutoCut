@@ -1515,6 +1515,10 @@ async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64,
     let ids: Vec<u64> = r["clips"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
     let fg = *ids.first().ok_or_else(|| AutoCutError::Executor("timeline.place placed nothing".into()))?;
     let audio = if how.sound { ids.get(1).copied() } else { None };
+    if r["reframed360"].as_array().is_some_and(|a| a.iter().any(|c| c.as_u64() == Some(fg))) {
+        place_360(ex, tr, fg, (t, end), src, dur, how).await;
+        return Ok(Placed { fg, bg: None, audio, end, fit: None });
+    }
     let size = media_size(ex, item).await;
     let aspect = size.map(|(w, h)| w / h.max(1.0)).unwrap_or(frame_aspect);
     let odd = (aspect - frame_aspect).abs() > 0.05;
@@ -1551,6 +1555,60 @@ async fn place_shot(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, src: f64,
     }
     let bg = if odd && !fill { backdrop(ex, tr, item, (t, end), src, whole).await? } else { None };
     Ok(Placed { fg, bg, audio, end, fit: odd.then_some(if fill { Fit::Fill } else { Fit::Full }) })
+}
+
+/// Pitch a 360° shot's camera turns to at most to face its subject, degrees up or down (the
+/// horizon stays in a showcase's frame).
+const AIM_PITCH_MAX: f64 = 45.0;
+
+/// Frame a 360° shot (placed with its virtual camera framing the sequence, `timeline.place`'s
+/// `reframed360`; the clip's media `[src, src + dur)` from `t0` to `t1`): the camera turned to
+/// the plan's `focus` or the analysis' subject (points of the item's panorama, `media.frame`),
+/// held steady with `clip.stabilize360` when the show is stabilized, following the subject with
+/// `clip.follow360` (as a filled shot follows it with Auto Reframe), and pushing in by narrowing
+/// its field of view. Cosmetic, like the transitions: a step the engine refuses leaves the shot
+/// as it is.
+async fn place_360(ex: &dyn Executor, tr: &Tracks, clip: u64, (t0, t1): (f64, f64), src: f64, dur: f64, how: Framing) {
+    let point = how.focus.or(how.moment.map(|m| m.center));
+    let mut fov = 90.0;
+    if let Some([x, y]) = point.filter(|c| c.iter().all(|v| v.is_finite())) {
+        let (yaw, pitch) = ((x.clamp(0.0, 1.0) - 0.5) * 360.0, ((0.5 - y.clamp(0.0, 1.0)) * 180.0).clamp(-AIM_PITCH_MAX, AIM_PITCH_MAX));
+        if let Ok(r) = run(ex, "clip.reframe360", json!({"clips": [clip], "yaw": yaw, "pitch": pitch})).await
+            && let Some(f) = r["clips"].as_array().and_then(|a| a.first()).and_then(|c| c["fov"].as_f64())
+        {
+            fov = f;
+        }
+    }
+    if how.stabilize && tr.stabilize {
+        run(ex, "clip.stabilize360", json!({"clips": [clip], "mode": "smooth", "wait": true})).await.ok();
+    }
+    if how.focus.is_none() && tr.follow && how.follow && dur > FOLLOW_MIN_SECONDS {
+        let mut p = json!({"clip": clip, "target": "subject", "analysisFps": FOLLOW_FPS, "wait": true});
+        if let Some(m) = how.moment.filter(|m| m.seconds.is_finite() && m.seconds >= src && m.seconds <= src + dur) {
+            p["at"] = json!(m.seconds - src);
+        }
+        run(ex, "clip.follow360", p).await.ok();
+    }
+    push_in_360(ex, clip, fov, t0, t1, tr.fps).await.ok();
+}
+
+/// [`push_in`] for a 360° shot: its camera's field of view (`fov`, degrees across) narrowed so
+/// the picture grows as much, eased the same way (the camera makes every frame sharp, where
+/// scaling would soften it).
+async fn push_in_360(ex: &dyn Executor, clip: u64, fov: f64, t0: f64, t1: f64, fps: f64) -> Result<(), AutoCutError> {
+    let last = on_frame(t1 - 1.0 / fps, fps);
+    if !(fov.is_finite() && fov > 1.0 && fov < 179.0) || last <= t0 {
+        return Ok(());
+    }
+    let grow = (PUSH_PER_SECOND * (t1 - t0)).min(PUSH_MAX);
+    let narrow = 2.0 * ((fov.to_radians() / 2.0).tan() / (1.0 + grow)).atan().to_degrees();
+    for (at, value) in [(t0, fov), (last, narrow)] {
+        run(ex, "effects.setParam", json!({"clip": clip, "effect": "vr_reframe", "param": "fov", "value": value, "time": ticks(at), "keyframe": true})).await?;
+    }
+    for (at, ease) in [(t0, "easeOut"), (last, "easeIn")] {
+        run(ex, "effects.setInterpolation", json!({"clip": clip, "effect": "vr_reframe", "param": "fov", "time": ticks(at), "interpolation": ease})).await?;
+    }
+    Ok(())
 }
 
 /// The blurred, dimmed, enlarged copy of `item` (`[src, …)`) filling V1 behind a picture shown
@@ -5105,5 +5163,56 @@ mod tests {
         let mut again = PlacedEntry { number: 2, shots: vec![placed_shot], ..PlacedEntry::default() };
         assert!(!follow_label_placed(&failing, &opts, &entry, &mut again, &texts, &[4], (1920.0, 1080.0), when, &mut notes).await);
         assert!(again.chips.is_empty() && notes.iter().any(|n| n.contains("not following the robot")), "{notes:?}");
+    }
+
+    /// Answers `timeline.place` with a 360° clip placed through its camera, and records the rest.
+    struct Places360(std::sync::Mutex<Vec<(String, Value)>>);
+
+    impl crate::Executor for Places360 {
+        fn execute(&self, id: &str, p: Value) -> crate::ExecFuture {
+            self.0.lock().unwrap().push((id.to_string(), p.clone()));
+            let r = match id {
+                "timeline.place" => Ok(json!({"clips": [7, 8], "reframed360": [7]})),
+                "clip.reframe360" => Ok(json!({"clips": [{"clip": 7, "fov": 90.0}]})),
+                "clip.stabilize360" | "clip.follow360" | "effects.setParam" | "effects.setInterpolation" => Ok(json!({})),
+                other => Err(format!("unexpected {other}")),
+            };
+            Box::pin(async move { r })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_360_shot_is_framed_by_turning_its_camera() {
+        let ex = Places360(Default::default());
+        let mut tr = voice_tracks();
+        (tr.stabilize, tr.follow) = (true, true);
+        // the subject a quarter turn right and a little up in the panorama, mid-shot
+        let moment = Moment { seconds: 12.0, area: 0.02, center: [0.75, 0.4] };
+        let placed = place_shot(&ex, &tr, 3, 2.0, 10.0, 4.0, Framing::plain(Some(moment), true)).await.unwrap();
+        assert_eq!((placed.fg, placed.bg, placed.audio, placed.fit), (7, None, Some(8), None), "no backdrop, no fit");
+        let calls = ex.0.lock().unwrap().clone();
+        let ids: Vec<&str> = calls.iter().map(|(c, _)| c.as_str()).collect();
+        assert!(!ids.iter().any(|c| matches!(*c, "clip.fillFrame" | "clip.fitToFrame" | "clip.autoReframe" | "effects.apply")), "{ids:?}");
+        let aim = &calls.iter().find(|(c, _)| c == "clip.reframe360").unwrap().1;
+        assert_eq!((aim["yaw"].as_f64(), aim["pitch"].as_f64().map(|p| p.round())), (Some(90.0), Some(18.0)));
+        let follow = &calls.iter().find(|(c, _)| c == "clip.follow360").unwrap().1;
+        assert_eq!((follow["at"].as_f64(), follow["wait"].as_bool()), (Some(2.0), Some(true)), "the tracker starts where the subject was seen");
+        let stab = ids.iter().position(|c| *c == "clip.stabilize360").unwrap();
+        assert!(stab < ids.iter().position(|c| *c == "clip.follow360").unwrap(), "steadied before it follows");
+        // the push-in narrows the camera instead of scaling its picture
+        let fovs: Vec<f64> =
+            calls.iter().filter(|(c, p)| c == "effects.setParam" && p["effect"] == "vr_reframe").filter_map(|(_, p)| p["value"].as_f64()).collect();
+        assert_eq!(fovs.len(), 2);
+        assert!(fovs[0] == 90.0 && fovs[1] < 90.0 && fovs[1] > 85.0, "{fovs:?}");
+        assert!(!calls.iter().any(|(c, p)| c == "effects.setParam" && p["effect"] == "motion"));
+
+        // the plan's own point: aimed there (the pitch kept near the horizon), not followed
+        let ex = Places360(Default::default());
+        let how = Framing { focus: Some([0.5, 0.02]), ..Framing::plain(Some(moment), false) };
+        place_shot(&ex, &tr, 3, 2.0, 10.0, 4.0, how).await.unwrap();
+        let calls = ex.0.lock().unwrap().clone();
+        let aim = &calls.iter().find(|(c, _)| c == "clip.reframe360").unwrap().1;
+        assert_eq!((aim["yaw"].as_f64(), aim["pitch"].as_f64()), (Some(0.0), Some(AIM_PITCH_MAX)));
+        assert!(!calls.iter().any(|(c, _)| c == "clip.follow360" || c == "clip.stabilize360"));
     }
 }

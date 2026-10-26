@@ -114,15 +114,43 @@ pub fn is_360(s: &Session, item: ItemId) -> bool {
     s.project.vr_of(item).is_some()
 }
 
+/// The source an analysis reads an item through: 360° media as its whole-sphere
+/// equirectangular panorama (dual fisheye stitched, one eye of stereo, a partial view placed on
+/// the sphere), so scene detection, descriptions and subject boxes see every direction and a
+/// box's centre is a direction ([`filmcraft_project::vr::panorama_direction`]); anything else as it
+/// is.
+pub fn analysis_view(s: &Session, item: ItemId) -> Option<filmcraft_media::SharedSource> {
+    let src = s.source(item)?;
+    let plain = |v: &Spherical| v.is_equirect() && v.layout == StereoLayout::Mono && v.captured == [360.0, 180.0];
+    match s.project.vr_of(item).filter(|v| !plain(v)) {
+        Some(v) => Some(filmcraft_render::vr_source::PanoramaSource::new(src.clone(), v).map_or(src, |p| Arc::new(p) as filmcraft_media::SharedSource)),
+        None => Some(src),
+    }
+}
+
+/// A stable fingerprint of a virtual camera (its parameters and keyframes): caches of what a
+/// reframed clip shows key on it, as on the file.
+pub(crate) fn camera_key(e: &EffectInstance) -> String {
+    let bytes = serde_json::to_vec(e).unwrap_or_default();
+    // FNV-1a: the same on every machine and build, unlike std's hasher
+    let h = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
+    format!("{h:016x}")
+}
+
+/// The source of a clip's own picture, for analyses in its pixels (tracking, masks, redaction):
+/// a reframed 360° clip's virtual camera view at its keyframes, anything else its media.
+pub fn clip_source(s: &Session, it: &TrackItem) -> Option<filmcraft_media::SharedSource> {
+    let src = s.source(it.item)?;
+    match filmcraft_render::vr_source::ReframedSource::new(src.clone(), s.project.vr_of(it.item), it) {
+        Some(r) => Some(Arc::new(r)),
+        None => Some(src),
+    }
+}
+
 /// A clip's virtual camera, added (framing `frame`, Motion back to its defaults so the camera's
 /// frame fills the sequence's) when it has none; enabled.
 pub fn ensure_reframe(it: &mut TrackItem, frame: (u32, u32)) -> Option<&mut EffectInstance> {
     if !it.effects.iter().any(|e| e.effect == REFRAME) {
-        let def = filmcraft_project::find_effect(REFRAME)?;
-        let mut e = def.instance();
-        let side = |v: u32| ParamValue::Float(f64::from(v.clamp(MIN_SIDE, MAX_SIDE)));
-        e.params.insert("width".into(), Param::new(side(frame.0)));
-        e.params.insert("height".into(), Param::new(side(frame.1)));
         // the camera's picture is the clip's: Motion places it like any picture of that size
         if let (Some(m), Some(mdef)) = (it.effect_mut("motion"), filmcraft_project::find_effect("motion")) {
             for id in ["position", "anchor", "scale", "scale_width", "rotation"] {
@@ -131,14 +159,72 @@ pub fn ensure_reframe(it: &mut TrackItem, frame: (u32, u32)) -> Option<&mut Effe
                     p.value = d.default.clone();
                 }
             }
+            filmcraft_project::resolve_auto_points(m, frame, frame);
         }
         it.scale_to_frame = false;
-        // first in the chain: the other effects work on what the camera sees
-        it.effects.insert(it.effects.iter().position(|e| e.def().is_some_and(|d| !d.intrinsic)).unwrap_or(it.effects.len()), e);
     }
-    let e = it.effects.iter_mut().find(|e| e.effect == REFRAME)?;
-    e.enabled = true;
-    Some(e)
+    filmcraft_project::vr::add_camera(it, frame)
+}
+
+/// The angle a flat view of field of view `fov` (degrees across) sees along the short side of
+/// a `frame`.
+fn short_side_fov(fov: f64, frame: (u32, u32)) -> f64 {
+    let (w, h) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
+    if w <= h { fov } else { 2.0 * ((fov.to_radians() / 2.0).tan() * h / w).atan().to_degrees() }
+}
+
+/// The field of view across a `frame` that sees `short` degrees along its short side.
+fn fov_across(short: f64, frame: (u32, u32)) -> f64 {
+    let (w, h) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
+    let fov = if w <= h { short } else { 2.0 * ((short.to_radians() / 2.0).tan() * w / h).atan().to_degrees() };
+    if fov.is_finite() { fov.clamp(5.0, 175.0) } else { 90.0 }
+}
+
+/// Re-shapes a reframed clip's virtual camera from the frame `from` to the frame `to` (Auto
+/// Reframe's copy): the camera makes a `to` picture and sees as much along its short side as
+/// before (a 16:9 view's height becomes a 9:16 view's width), a whole-sphere camera outside a 2:1
+/// frame becomes a natural flat view, and Motion's position and anchor move with the frame.
+/// `false` for a clip without a virtual camera.
+pub fn reshape_camera(it: &mut TrackItem, from: (u32, u32), to: (u32, u32)) -> bool {
+    let Some(e) = it.effects.iter_mut().find(|e| e.enabled && e.effect == REFRAME) else { return false };
+    let old = filmcraft_project::vr::effect_size(e).unwrap_or(from);
+    let side = |v: u32| ParamValue::Float(f64::from(v.clamp(MIN_SIDE, MAX_SIDE)));
+    e.params.insert("width".into(), Param::new(side(to.0)));
+    e.params.insert("height".into(), Param::new(side(to.1)));
+    let sphere = matches!(e.param("output").map(|p| &p.value), Some(ParamValue::Choice(1)));
+    if sphere && to.0 != to.1.saturating_mul(2) {
+        e.params.insert("output".into(), Param::new(ParamValue::Choice(0)));
+        set_static(e, "fov", fov_across(short_side_fov(90.0, (16, 9)), to));
+    } else if !sphere && let Some(p) = e.param_mut("fov") {
+        let turn = |v: &mut ParamValue| {
+            if let ParamValue::Float(f) = v {
+                *f = fov_across(short_side_fov(*f, old), to);
+            }
+        };
+        turn(&mut p.value);
+        for k in &mut p.keyframes {
+            turn(&mut k.value);
+        }
+    }
+    let (sx, sy) = (f64::from(to.0) / f64::from(from.0.max(1)), f64::from(to.1) / f64::from(from.1.max(1)));
+    let (px, py) = (f64::from(to.0) / f64::from(old.0.max(1)), f64::from(to.1) / f64::from(old.1.max(1)));
+    if let Some(m) = it.effect_mut("motion") {
+        for (id, (fx, fy)) in [("position", (sx, sy)), ("anchor", (px, py))] {
+            if let Some(p) = m.param_mut(id) {
+                let mv = |v: &mut ParamValue| {
+                    if let ParamValue::Vec2(v) = v {
+                        v.x *= fx;
+                        v.y *= fy;
+                    }
+                };
+                mv(&mut p.value);
+                for k in &mut p.keyframes {
+                    mv(&mut k.value);
+                }
+            }
+        }
+    }
+    true
 }
 
 /// A preset's values: (yaw, pitch, fov, distance, sphere).
@@ -1203,5 +1289,98 @@ mod tests {
         ] {
             assert!(s.execute(FOLLOW_CMD, bad.clone()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn placing_360_media_frames_it_through_a_camera() {
+        let mut s = demo();
+        let (_, item) = first_clip(&s);
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "equirectangular"})).unwrap();
+        let r = s.execute("timeline.place", json!({"item": item.0, "track": "V1", "seconds": 0.0, "audio": false})).unwrap();
+        let c = ClipId(r["clips"][0].as_u64().unwrap());
+        assert_eq!(r["reframed360"], json!([c.0]), "{r}");
+        let it = clip(&s, c);
+        let seq = s.active_sequence().unwrap();
+        let frame = (seq.settings.width, seq.settings.height);
+        assert_eq!(filmcraft_project::vr::reframe_size(&it), Some(frame));
+        assert_eq!(it.effects.first().map(|e| e.effect.as_str()), Some(REFRAME), "first in the chain");
+        assert_eq!(it.effect("motion").unwrap().f64_at("scale", Tick::ZERO), 100.0, "the camera's picture is the frame: no media scaling");
+        // analyses in the clip's pixels see the camera's picture
+        let v = clip_source(&s, &it).unwrap().info().video.clone().unwrap();
+        assert_eq!((v.width, v.height), frame);
+        // a dual-fisheye recording is analysed as its stitched panorama
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "dualFisheye"})).unwrap();
+        let pano = analysis_view(&s, item).unwrap().info().video.clone().unwrap();
+        assert_eq!(pano.width, 2 * pano.height);
+        // a flat picture is placed as it always was
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "none"})).unwrap();
+        let r = s.execute("timeline.place", json!({"item": item.0, "track": "V1", "seconds": 0.0, "audio": false})).unwrap();
+        assert!(r.get("reframed360").is_none(), "{r}");
+        assert!(clip(&s, ClipId(r["clips"][0].as_u64().unwrap())).effect(REFRAME).is_none());
+    }
+
+    #[test]
+    fn a_cameras_key_changes_with_what_it_shows() {
+        let def = filmcraft_project::find_effect(REFRAME).unwrap();
+        let (a, mut b) = (def.instance(), def.instance());
+        assert_eq!(camera_key(&a), camera_key(&b));
+        assert_eq!(camera_key(&a).len(), 16);
+        set_static(&mut b, "yaw", 10.0);
+        assert_ne!(camera_key(&a), camera_key(&b));
+    }
+
+    #[test]
+    fn a_camera_is_reshaped_for_another_frame() {
+        let mut s = demo();
+        let (c, item) = first_clip(&s);
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "equirectangular"})).unwrap();
+        s.execute(REFRAME_CMD, json!({"clips": [c.0], "yaw": 30.0, "fov": 90.0})).unwrap();
+        let mut it = clip(&s, c);
+        assert!(reshape_camera(&mut it, (1920, 1080), (1080, 1920)));
+        let e = it.effect(REFRAME).unwrap();
+        assert_eq!(filmcraft_project::vr::effect_size(e), Some((1080, 1920)));
+        // a 16:9 view's height (58.7°) becomes the vertical view's width; the direction is kept
+        assert!((e.f64_at("fov", Tick::ZERO) - 58.72).abs() < 0.05, "{}", e.f64_at("fov", Tick::ZERO));
+        assert_eq!(e.f64_at("yaw", Tick::ZERO), 30.0);
+        // and back
+        assert!(reshape_camera(&mut it, (1080, 1920), (1920, 1080)));
+        assert!((it.effect(REFRAME).unwrap().f64_at("fov", Tick::ZERO) - 90.0).abs() < 1e-6);
+        // a whole-sphere camera outside a 2:1 frame becomes a natural flat view
+        s.execute(REFRAME_CMD, json!({"clips": [c.0], "preset": "sphere"})).unwrap();
+        let mut it = clip(&s, c);
+        assert!(reshape_camera(&mut it, (1920, 1080), (1080, 1920)));
+        let e = it.effect(REFRAME).unwrap();
+        assert!(matches!(e.param("output").map(|p| &p.value), Some(ParamValue::Choice(0))));
+        assert!((e.f64_at("fov", Tick::ZERO) - 58.72).abs() < 0.05);
+        let mut flat = it.clone();
+        flat.effects.retain(|e| e.effect != REFRAME);
+        assert!(!reshape_camera(&mut flat, (1920, 1080), (1080, 1920)));
+    }
+
+    #[test]
+    fn auto_reframe_keeps_360_cameras_and_reshapes_them() {
+        let mut s = demo();
+        let (c, item) = first_clip(&s);
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "equirectangular"})).unwrap();
+        s.execute(REFRAME_CMD, json!({"clips": [c.0], "yaw": -40.0})).unwrap();
+        let (src, before) = (s.state.active_sequence.unwrap(), filmcraft_project::vr::reframe_size(&clip(&s, c)));
+        let r = s.execute("sequence.autoReframe", json!({"aspect": "9:16", "analysisFps": 1, "wait": true})).unwrap();
+        assert_eq!(r["cameras360"], json!(1), "{r}");
+        let out = &r["reframe"];
+        let seq = ItemId(out["sequence"].as_u64().unwrap_or_else(|| panic!("{r}")));
+        let q = s.project.sequence(seq).unwrap();
+        let frame = (q.settings.width, q.settings.height);
+        let it = q.find_item(c).map(|(_, it)| it.clone()).unwrap_or_else(|| panic!("the copy keeps clip ids: {r}"));
+        let e = it.effect(REFRAME).unwrap();
+        assert_eq!(filmcraft_project::vr::effect_size(e), Some(frame));
+        assert_eq!(e.f64_at("yaw", Tick::ZERO), -40.0);
+        // not followed by moving its picture: Motion stays centred on the new frame
+        let m = it.effect("motion").unwrap();
+        assert!(m.param("position").unwrap().keyframes.is_empty());
+        let pos = m.param("position").unwrap().value.as_vec2().unwrap();
+        assert!((pos.x - f64::from(frame.0) / 2.0).abs() < 1.0 && (pos.y - f64::from(frame.1) / 2.0).abs() < 1.0, "{pos:?} in {frame:?}");
+        // the source sequence's camera is untouched
+        let kept = s.project.sequence(src).and_then(|q| q.find_item(c)).map(|(_, it)| filmcraft_project::vr::reframe_size(it));
+        assert_eq!(kept, Some(before));
     }
 }

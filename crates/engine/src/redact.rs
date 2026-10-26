@@ -647,11 +647,12 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
                 }
                 continue;
             }
-            let Some(src) = s.source(it.item) else {
+            // (a reframed 360° clip is looked at through its virtual camera: what is shown)
+            let Some(src) = crate::vr360::clip_source(s, it) else {
                 skipped.push(skip("its media is offline"));
                 continue;
             };
-            let Some((w, h)) = filmcraft_render::source_size(&s.project, it.item).filter(|(w, h)| *w > 0 && *h > 0) else { continue };
+            let Some((w, h)) = filmcraft_render::clip_size(&s.project, it).filter(|(w, h)| *w > 0 && *h > 0) else { continue };
             let n = (it.duration.0 / fd.0).max(1);
             // a photo is one picture however long it is held: looked at once, and what is found
             // there is hidden for the whole clip (seen once is seen: there is no second look)
@@ -664,7 +665,7 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
             let media = (times.first().copied().unwrap_or(it.source_in), times.last().copied().unwrap_or(it.source_in));
             let size = (f64::from(w), f64::from(h));
             // how large the picture is shown: the rules are about the sequence's frame
-            let display = s.project.conformed_source_size(it.item, q.settings.par).filter(|d| d.0 > 0.0 && d.1 > 0.0).unwrap_or(size);
+            let display = s.project.conformed_clip_size(it, q.settings.par).filter(|d| d.0 > 0.0 && d.1 > 0.0).unwrap_or(size);
             let (seq_w, seq_h) = (f64::from(q.settings.width.max(1)), f64::from(q.settings.height.max(1)));
             let fit = if it.scale_to_frame { (seq_w / display.0).min(seq_h / display.1) } else { 1.0 };
             let zoom = (0..n)
@@ -702,7 +703,11 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
                 MediaRef::File { path } if !(s.media.use_proxies() && m.proxy.is_some()) => Some(path.clone()),
                 _ => None,
             });
-            let desc = resolved.map_or_else(String::new, |(_, m, _)| format!("{w}x{h}|{}|{:?}", m.duration().0, m.interpret.frame_rate));
+            let mut desc = resolved.map_or_else(String::new, |(_, m, _)| format!("{w}x{h}|{}|{:?}", m.duration().0, m.interpret.frame_rate));
+            // a reframed 360° clip's frames are its camera's view: the camera decides them too
+            if let Some(cam) = filmcraft_project::vr::reframe_of(it) {
+                desc.push_str(&format!("|camera {}", crate::vr360::camera_key(cam)));
+            }
             let w = Work {
                 clip: it.id,
                 also: Vec::new(),
@@ -720,12 +725,11 @@ fn build_work(s: &Session, seq: ItemId, only: Option<&[ClipId]>, o: &Options, ex
                 file,
                 desc,
             };
-            // a copy of a clip already listed (same media, same frames, same exclusions) is
-            // analysed once
-            match work
-                .iter_mut()
-                .find(|o: &&mut Work| o.item == w.item && o.times == w.times && o.exclude == w.exclude && o.keep == w.keep && o.targets == w.targets)
-            {
+            // a copy of a clip already listed (same media, same frames, same exclusions, the same
+            // camera on 360° media) is analysed once
+            match work.iter_mut().find(|o: &&mut Work| {
+                o.item == w.item && o.times == w.times && o.exclude == w.exclude && o.keep == w.keep && o.targets == w.targets && o.desc == w.desc
+            }) {
                 Some(o) => {
                     o.also.push(w.clip);
                     total = total.saturating_sub(w.times.len());

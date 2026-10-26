@@ -43,6 +43,7 @@ pub mod transitions;
 pub mod vfx;
 pub mod vr;
 pub mod vr_motion;
+pub mod vr_source;
 
 use std::sync::Arc;
 

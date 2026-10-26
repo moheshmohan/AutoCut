@@ -237,7 +237,8 @@ fn targets(s: &Session, cmd: &str, p: &Value) -> Result<Vec<ItemId>> {
 fn work_for(s: &Session, item: ItemId) -> std::result::Result<Work, String> {
     let pi = s.project.item(item).ok_or("no such item")?;
     let ItemKind::Media(m) = &pi.kind else { return Err("not media".into()) };
-    let src = s.source(item).ok_or("its media is offline or unreadable")?;
+    // (360° media is indexed as its stitched panorama)
+    let src = crate::vr360::analysis_view(s, item).ok_or("its media is offline or unreadable")?;
     let still = matches!(m.info.kind, filmcraft_media::MediaKind::Still);
     let rate = m.frame_rate().sane();
     let frame = rate.frame_duration().max(Tick(1));

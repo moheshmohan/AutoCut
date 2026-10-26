@@ -1089,7 +1089,7 @@ fn remove_attributes(s: &mut Session, p: &Value) -> Result<Value> {
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
     let frame = (seq.settings.width, seq.settings.height);
     let sizes: BTreeMap<ClipId, (u32, u32)> =
-        targets.iter().filter_map(|c| seq.find_item(*c).map(|(_, i)| (*c, filmcraft_render::source_size(&s.project, i.item).unwrap_or(frame)))).collect();
+        targets.iter().filter_map(|c| seq.find_item(*c).map(|(_, i)| (*c, filmcraft_render::clip_size(&s.project, i).unwrap_or(frame)))).collect();
     let n = s.edit_sequence("Remove Attributes", |q, _, _| {
         let mut n = 0;
         for c in &targets {
@@ -1537,7 +1537,7 @@ fn fit_fill(s: &mut Session, p: &Value, fill: bool) -> Result<Value> {
         .iter()
         .filter_map(|c| {
             let (_, i) = q.find_item(*c)?;
-            Some((*c, filmcraft_render::source_size(&s.project, i.item)?, s.project.conformed_source_size(i.item, frame_par)?))
+            Some((*c, filmcraft_render::clip_size(&s.project, i)?, s.project.conformed_clip_size(i, frame_par)?))
         })
         .collect();
     if sizes.is_empty() {

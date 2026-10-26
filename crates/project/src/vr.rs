@@ -10,7 +10,7 @@
 
 use filmcraft_media::Spherical;
 
-use crate::{EffectInstance, ItemId, ParamValue, Project, TrackItem};
+use crate::{EffectInstance, ItemId, Param, ParamValue, Project, TrackItem};
 
 /// The virtual camera's effect id.
 pub const REFRAME: &str = "vr_reframe";
@@ -45,6 +45,29 @@ pub fn reframe_size(item: &TrackItem) -> Option<(u32, u32)> {
     effect_size(reframe_of(item)?)
 }
 
+/// A clip's virtual camera, added first in its chain (the other effects work on what it sees)
+/// making a `frame` picture when it has none; enabled. Motion is left as it is.
+pub fn add_camera(item: &mut TrackItem, frame: (u32, u32)) -> Option<&mut EffectInstance> {
+    if !item.effects.iter().any(|e| e.effect == REFRAME) {
+        let mut e = crate::find_effect(REFRAME)?.instance();
+        let side = |v: u32| ParamValue::Float(f64::from(v.clamp(MIN_SIDE, MAX_SIDE)));
+        e.params.insert("width".into(), Param::new(side(frame.0)));
+        e.params.insert("height".into(), Param::new(side(frame.1)));
+        item.effects.insert(0, e);
+    }
+    let e = item.effects.iter_mut().find(|e| e.effect == REFRAME)?;
+    e.enabled = true;
+    Some(e)
+}
+
+/// The direction — yaw and pitch, degrees right of and up from forward — of the point (`x`, `y`,
+/// 0..1 across and down) of a whole-sphere equirectangular picture: where a virtual camera looks
+/// to centre what an analysis found there.
+pub fn panorama_direction(x: f64, y: f64) -> (f64, f64) {
+    let at = |v: f64| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.5 };
+    ((at(x) - 0.5) * 360.0, (0.5 - at(y)) * 180.0)
+}
+
 impl Project {
     /// The 360° description of an item's media (Interpret Footage ▸ VR Properties; subclips their
     /// parent's), if it is 360°.
@@ -64,6 +87,19 @@ impl Project {
     /// The pixel aspect ratio of what a clip shows (square for a virtual camera's frame).
     pub fn clip_source_par(&self, item: &TrackItem) -> Option<(u32, u32)> {
         if reframe_of(item).is_some() { Some((1, 1)) } else { self.source_par(item.item) }
+    }
+
+    /// [`Project::conformed_source_size`] of what a clip shows: its picture's size at its display
+    /// aspect in pixels of `frame_par`.
+    pub fn conformed_clip_size(&self, item: &TrackItem, frame_par: (u32, u32)) -> Option<(f64, f64)> {
+        let size = self.clip_source_size(item)?;
+        Some(crate::conformed_size(size, self.clip_source_par(item).unwrap_or(frame_par), frame_par))
+    }
+
+    /// The size of the picture a motion track was made on: its clip's (a reframed clip's camera
+    /// frame), else its media's.
+    pub fn track_picture_size(&self, t: &crate::MotionTrack) -> Option<(u32, u32)> {
+        self.sequence(t.sequence).and_then(|q| q.find_item(t.clip)).and_then(|(_, it)| self.clip_source_size(it)).or_else(|| self.source_size(t.item))
     }
 }
 
@@ -86,5 +122,13 @@ mod tests {
             assert!(def.param(id).is_some_and(|p| p.animatable), "{id}");
         }
         assert!(def.param("width").is_some_and(|p| !p.animatable));
+    }
+
+    #[test]
+    fn panorama_points_are_directions() {
+        assert_eq!(panorama_direction(0.5, 0.5), (0.0, 0.0));
+        assert_eq!(panorama_direction(0.75, 0.25), (90.0, 45.0));
+        assert_eq!(panorama_direction(0.0, 1.0), (-180.0, -90.0));
+        assert_eq!(panorama_direction(f64::NAN, 9.0), (0.0, -90.0));
     }
 }

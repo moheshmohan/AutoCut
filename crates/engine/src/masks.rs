@@ -790,8 +790,9 @@ fn track(s: &mut Session, p: &Value) -> Result<Value> {
     if steps == 0 {
         return Err(bad("masks.track", if backward { "already at the clip's first frame" } else { "already at the clip's last frame" }));
     }
-    let src = s.source(it.item).ok_or_else(|| EngineError::Other("the clip has no media to track".into()))?;
-    let size = filmcraft_render::source_size(&s.project, it.item).ok_or_else(|| bad("masks.track", "the clip has no picture"))?;
+    // (a reframed 360° clip's picture is its virtual camera's)
+    let src = crate::vr360::clip_source(s, &it).ok_or_else(|| EngineError::Other("the clip has no media to track".into()))?;
+    let size = filmcraft_render::clip_size(&s.project, &it).ok_or_else(|| bad("masks.track", "the clip has no picture"))?;
     let scale = (TRACK_MAX_WIDTH / size.0.max(1) as f64).min(1.0) as f32;
     let id = s.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
     let label = format!("Track {} ({})", mask.name, if backward { "backward" } else { "forward" });

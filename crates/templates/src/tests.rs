@@ -502,6 +502,35 @@ fn variants_reframe_the_same_media() {
 }
 
 #[test]
+fn a_360_picture_fills_a_slot_through_a_camera_looking_at_its_focus() {
+    let pkg = builtin("builtin:photo-beat-slideshow");
+    for (variant, size) in [("16:9", (1920u32, 1080u32)), ("9:16", (1080, 1920))] {
+        let mut p = Project::new("p");
+        let mut fills = slideshow_fills(&mut p, 1);
+        let pano = media(&mut p, "pano.insp", MediaKind::Still, 5.0, (4000, 2000), false);
+        if let Some(ItemKind::Media(m)) = p.item_mut(pano).map(|i| &mut i.kind) {
+            m.interpret.vr = Some(filmcraft_media::Spherical::equirect());
+        }
+        // a quarter turn right, half way up
+        fills.insert("photos".into(), SlotFill::Media(vec![MediaFill { focus: Some([0.75, 0.25]), ..MediaFill::new(pano) }]));
+        let a = apply(&mut p, &pkg, &ApplyOptions { fills, variant: Some(variant.into()), ..Default::default() }).unwrap();
+        let q = seq(&p, a.sequence);
+        let first = clip(q, a.placed.iter().find(|x| x.slot == "photos").unwrap().clips[0]);
+        let cam = filmcraft_project::vr::reframe_of(first).unwrap_or_else(|| panic!("{variant}: no camera"));
+        assert_eq!(filmcraft_project::vr::effect_size(cam), Some(size), "{variant}: the camera makes the frame");
+        assert_eq!((cam.f64_at("yaw", Tick::ZERO), cam.f64_at("pitch", Tick::ZERO)), (90.0, 45.0), "{variant}");
+        // the camera's picture is the frame's shape: the slot's push-in from exactly filling it,
+        // centred (the focus is where the camera looks)
+        let m = first.effect("motion").unwrap();
+        let keys: Vec<f64> = m.param("scale").unwrap().keyframes.iter().map(|k| k.value.as_f64().unwrap()).collect();
+        assert!((keys[0] - 100.0).abs() < 1e-6 && (keys[1] - 108.0).abs() < 1e-6, "{variant}: {keys:?}");
+        let pos = m.param("position").unwrap().value.as_vec2().unwrap();
+        assert!((pos.x - f64::from(size.0) / 2.0).abs() < 1e-6 && (pos.y - f64::from(size.1) / 2.0).abs() < 1e-6, "{variant}: {pos:?}");
+        q.check().unwrap();
+    }
+}
+
+#[test]
 fn cuts_follow_the_beats_of_new_music() {
     let pkg = builtin("builtin:photo-beat-slideshow");
     let mut p = Project::new("p");

@@ -156,9 +156,9 @@ fn under(s: &Session, q: &Sequence, t: Tick, c: Vec2) -> Option<Under> {
             if !is_footage(s, it) {
                 continue;
             }
-            let Some(size) = filmcraft_render::source_size(&s.project, it.item).filter(|(w, h)| *w > 0 && *h > 0) else { continue };
+            let Some(size) = filmcraft_render::clip_size(&s.project, it).filter(|(w, h)| *w > 0 && *h > 0) else { continue };
             let mt = it.effect_time_at(t);
-            let m = filmcraft_render::motion_matrix(q, it, size, filmcraft_render::source_par(&s.project, it.item), mt);
+            let m = filmcraft_render::motion_matrix(q, it, size, filmcraft_render::clip_par(&s.project, it), mt);
             let Some(inv) = m.inverse() else { continue };
             let sp = inv.apply(c);
             let (w, h) = (f64::from(size.0), f64::from(size.1));

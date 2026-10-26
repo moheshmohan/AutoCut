@@ -929,7 +929,16 @@ fn place_one(s: &mut Session, p: &Value) -> Result<Value> {
     let at = rate.snap_nearest(at);
     let dur = end - at;
     let ids = place_item(s, item, TimeRange::new(sin, dur), at, v, a, bool_p(p, "insert").unwrap_or(false), "Place Clip", None)?;
-    Ok(json!({"clips": ids.iter().map(|c| c.0).collect::<Vec<_>>()}))
+    let mut out = json!({"clips": ids.iter().map(|c| c.0).collect::<Vec<_>>()});
+    // the clips placed with a virtual camera (360° media): pictures of the frame's size
+    let reframed: Vec<u64> = s
+        .active_sequence()
+        .map(|q| ids.iter().filter(|c| q.find_item(**c).is_some_and(|(_, it)| filmcraft_project::vr::reframe_of(it).is_some())).map(|c| c.0).collect())
+        .unwrap_or_default();
+    if !reframed.is_empty() {
+        out["reframed360"] = json!(reframed);
+    }
+    Ok(out)
 }
 
 /// Most items one `timeline.place` with `items` takes: a larger list is refused, not cut.
@@ -1035,12 +1044,22 @@ pub(crate) fn place_item(
         if let Some(vdest) = vdest.filter(|_| has_v) {
             let mut v = p.make_track_item(item, TrackKind::Video, at, range, rate).ok_or_else(|| bad(label, "bad item"))?;
             v.link = link;
+            // A 360° clip is edited flat: a virtual camera framing the sequence (the whole
+            // stitched sphere in a 2:1 sequence) makes its picture, of the frame's size.
+            let vr = is_media && p.vr_of(item).is_some();
+            if vr
+                && let Some(e) = crate::vr360::ensure_reframe(&mut v, frame)
+                && frame.0 == frame.1.saturating_mul(2)
+            {
+                e.params.insert("output".into(), filmcraft_project::Param::new(filmcraft_project::ParamValue::Choice(1)));
+            }
+            let picture = if vr { frame } else { src_size };
             for e in &mut v.effects {
-                resolve_auto_points(e, frame, src_size);
+                resolve_auto_points(e, frame, picture);
             }
             // the picture's size at its display aspect, in sequence pixels
             let shown = filmcraft_project::conformed_size(src_size, src_par.unwrap_or(seq_par), seq_par);
-            if is_media && shown != (f64::from(frame.0), f64::from(frame.1)) {
+            if is_media && !vr && shown != (f64::from(frame.0), f64::from(frame.1)) {
                 crate::settings::apply_media_scaling(&mut v, &scaling, frame, shown);
             }
             placements.push((vdest, v));

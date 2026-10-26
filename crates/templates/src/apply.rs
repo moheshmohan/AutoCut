@@ -15,6 +15,7 @@ use filmcraft_geom::Vec2;
 use filmcraft_media::MediaKind;
 use filmcraft_project::graphic::{self, TEXT_LAYER};
 use filmcraft_project::gtemplate::layer_uid;
+use filmcraft_project::vr;
 use filmcraft_project::{
     CaptionFormat, CaptionTrack, ClipId, EffectInstance, ItemId, ItemKind, Label, Marker, MarkerId, MarkerKind, MediaRef, Param, ParamValue, Project, Sequence,
     TrackId, TrackItem, TrackKind, TransitionAlign, TransitionId,
@@ -71,6 +72,7 @@ pub struct MediaFill {
     /// Where in the media to start (media time); else the slot's `portion`.
     pub source_in: Option<Tick>,
     /// The point of the picture to keep in view (fractions of its width and height), all variants.
+    /// For 360° media, a point of its whole-sphere panorama: the virtual camera looks there.
     pub focus: Option<[f64; 2]>,
     /// The same per variant id (the same photo re-framed for 16:9 and 9:16).
     pub focus_by_variant: BTreeMap<String, [f64; 2]>,
@@ -714,6 +716,21 @@ fn map_f64(prm: &mut Param, f: impl Fn(f64) -> f64) {
     });
 }
 
+/// Give a clip of 360° media its virtual camera: one making a picture of the slot's box (`area`,
+/// fractions of the frame; the whole `frame` without one), looking at `focus` (a point of the
+/// media's panorama). The camera's picture then fills the box exactly, as a flat clip's would.
+fn frame_360(it: &mut TrackItem, frame: (f64, f64), area: Option<[f64; 4]>, focus: [f64; 2]) {
+    let side = |v: f64| if v.is_finite() { v.round().clamp(f64::from(vr::MIN_SIDE), f64::from(vr::MAX_SIDE)) as u32 } else { vr::MIN_SIDE };
+    let (w, h) = area.filter(|b| b.iter().all(|x| x.is_finite())).map_or(frame, |b| (b[2] * frame.0, b[3] * frame.1));
+    let (yaw, pitch) = vr::panorama_direction(focus[0], focus[1]);
+    if let Some(e) = vr::add_camera(it, (side(w), side(h))) {
+        for (id, v) in [("yaw", yaw), ("pitch", pitch)] {
+            e.params.insert(id.into(), Param::new(ParamValue::Float(v)));
+        }
+        it.scale_to_frame = false;
+    }
+}
+
 /// Frame a picture clip in a `frame`-sized frame designed at `design`: the template's Motion
 /// values are relative to the slot's framing (scale 100 = exactly filling / fitting; position in
 /// the design frame), and the focus point of the picture lands where the hint or the template
@@ -1089,16 +1106,20 @@ pub fn apply(p: &mut Project, pkg: &Package, opts: &ApplyOptions) -> Result<Appl
                     let slot = placement.map(|(s, _)| s);
                     let area = hint.and_then(|h| h.area).or_else(|| placement.and_then(|(s, i)| s.placements.get(i)).and_then(|pl| pl.area));
                     let framing = slot.map_or(Framing::Fill, |s| s.fit.frame);
-                    let focus = match (origin.get(&it.id), slot) {
+                    let mut focus = match (origin.get(&it.id), slot) {
                         (Some((_, Some(sid), mi)), Some(_)) => match opts.fills.get(sid) {
                             Some(SlotFill::Media(list)) => list.get(*mi).map_or([0.5, 0.5], |f| f.focus_for(&variant.id)),
                             _ => [0.5, 0.5],
                         },
                         _ => [0.5, 0.5],
                     };
-                    if let Some(src) = p.conformed_source_size(it.item, par) {
+                    if p.vr_of(it.item).is_some() && vr::reframe_of(it).is_none() {
+                        frame_360(it, frame, area, focus);
+                        focus = [0.5, 0.5];
+                    }
+                    if let Some(src) = p.conformed_clip_size(it, par) {
                         match area {
-                            Some(b) => frame_box(it, src, p.source_size(it.item), design, frame, framing, focus, hint, b),
+                            Some(b) => frame_box(it, src, p.clip_source_size(it), design, frame, framing, focus, hint, b),
                             None => frame_clip(it, src, design, frame, framing, focus, hint),
                         }
                     }
