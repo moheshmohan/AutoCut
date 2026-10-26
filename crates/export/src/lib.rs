@@ -1093,6 +1093,12 @@ pub(crate) fn reset_frame_renderers_for_tests() {
     GPU_FALLBACKS.store(0, Ordering::Relaxed);
 }
 
+/// A frame renderer for pictures outside an export (a colour pass measuring a clip): the
+/// registered GPU renderer where this host can build one, else `None` (the CPU renders).
+pub fn frame_renderer() -> Option<Box<dyn FrameRenderer>> {
+    build_frame_renderer()
+}
+
 /// Pick the first registered factory that can build a renderer for this host.
 pub(crate) fn build_frame_renderer() -> Option<Box<dyn FrameRenderer>> {
     let g = frame_renderer_factories().read().unwrap_or_else(|e| e.into_inner());

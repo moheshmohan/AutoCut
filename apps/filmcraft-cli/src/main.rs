@@ -551,8 +551,12 @@ SUBCOMMANDS
                                 cuts under speech, dissolves across time) in --style (subtle by
                                 default: a quiet swish under whips and a chime under the English
                                 title, no light effects; energetic; cinematic; --light-effects,
-                                --sounds, --sound-level), captions of English speech and the mix
-                                at −14 LUFS; --dry-run prints the plan
+                                --sounds, --sound-level), a careful colour pass (each shot's
+                                exposure and white balance measured and gently corrected, the
+                                cameras matched, checked on skin and greys; --no-color,
+                                --color-strength, --look, --look-strength; <out>.color.jpg shows
+                                before and after), captions of English speech and the mix at
+                                −14 LUFS; --dry-run prints the plan
                                 and its engine commands and builds nothing; with --export the
                                 video, <out>.sheet.jpg, <out>.report.json and QA. Privacy is off
                                 unless --redact asks for it

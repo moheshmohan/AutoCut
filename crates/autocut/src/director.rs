@@ -26,9 +26,12 @@
 //!    shots show and say ([`cuts`]: match cuts, whips where the camera is already moving, J and L
 //!    cuts under speech, dissolves across time) in the edit's style, with the style's sounds
 //!    (the subtle default: a quiet swish under whips and rolls and a chime under the title, no
-//!    light effects); the title in English inside the platform's safe zone; captions of English
-//!    speech; each sound levelled and the mix at −14 LUFS; with `export` the video, a frame
-//!    sheet, the report and QA beside it.
+//!    light effects); a careful colour pass (`clip.autoColor`: each shot's exposure and white
+//!    balance measured and gently corrected, the cameras matched by saturation and contrast, a
+//!    look only when asked, backed off where skin or greys got worse); the title in English
+//!    inside the platform's safe zone; captions of English speech; each sound levelled and the
+//!    mix at −14 LUFS; with `export` the video, a frame sheet, a colour before/after sheet, the
+//!    report and QA beside it.
 //!
 //! Everything works without the models; the report's `fallbacks` say what ran instead.
 
@@ -76,6 +79,8 @@ const MAX_PIECES: usize = 4;
 /// Two looks of one 360° shot are different subjects this far apart, degrees.
 const LOOKS_APART: f64 = 50.0;
 /// The moods generated music knows.
+/// The colour pass's looks (`clip.autoColor`): ours, none by default.
+const LOOKS: &[&str] = &["none", "punchy", "soft", "warm", "cool", "golden", "teal"];
 const MOODS: &[&str] = &["epic", "tense", "uplifting", "calm", "happy", "dark", "dreamy", "energetic", "sad"];
 /// Sound levels: the music carries the edit, the clips' own sound under it, the swishes and
 /// chimes under that.
@@ -136,6 +141,12 @@ pub struct Options {
     pub seed: u64,
     /// How the cuts are made and what is heard on them ([`cuts::Style`]).
     pub style: cuts::Style,
+    /// The careful colour pass (`clip.autoColor`): on unless switched off; its strength (0..1),
+    /// and a look of our own (`none` by default) at a strength (%).
+    pub color: bool,
+    pub color_strength: f64,
+    pub look: String,
+    pub look_strength: f64,
 }
 
 /// The layout a brief asks for, from its words ("16:9 recap", "vertical reel").
@@ -320,6 +331,10 @@ impl Options {
         if title.as_deref().is_some_and(|t| !english(t)) {
             return Err(invalid("title: the on-screen text is English"));
         }
+        let look = text("look").map_or_else(|| "none".to_string(), |l| l.to_ascii_lowercase());
+        if !LOOKS.contains(&look.as_str()) {
+            return Err(invalid(format!("look: one of {}", LOOKS.join(", "))));
+        }
         let redact = match &p["redact"] {
             Value::Null | Value::Bool(false) => None,
             Value::String(s) if matches!(s.trim().to_ascii_lowercase().as_str(), "off" | "none" | "false" | "") => None,
@@ -345,6 +360,10 @@ impl Options {
             download: p["download"].as_bool().unwrap_or(false),
             seed: p["seed"].as_u64().unwrap_or(7),
             style: cuts::Style::from_params(p, &cuts::Style::default()).map_err(invalid)?,
+            color: p["color"].as_bool().unwrap_or(true),
+            color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
+            look,
+            look_strength: finite(&p["lookStrength"]).map_or(25.0, |v| v.clamp(0.0, 100.0)),
         })
     }
 
@@ -1867,6 +1886,9 @@ pub struct Report {
     pub levelled: usize,
     pub max_tilt: f64,
     pub shots_indexed: usize,
+    /// The colour pass: each shot's correction and any backing off, and the before/after sheet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<Value>,
     /// Moments measured on their own frames, and every moment's verdict: its scores, kept or
     /// dropped, and why.
     pub measured: usize,
@@ -2241,6 +2263,21 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     // ---- the shots
     lines(&format!("building {} shot(s), {} command(s)", plan.shots.len(), steps.len()));
     let built = execute(ex, &steps, &mut notes, lines).await;
+    // ---- the colour pass: each shot measured and gently balanced, the cameras brought together
+    if o.color {
+        let clips: Vec<u64> = built.pictures.iter().flatten().copied().collect();
+        if !clips.is_empty() {
+            lines("balancing the colour of each shot");
+            let mut cp = json!({"clips": clips, "strength": o.color_strength, "look": o.look, "lookStrength": o.look_strength});
+            if let Some(out) = &o.export {
+                cp["sheet"] = json!(crate::trailer::beside(&filmcraft_engine::export_tools::expand_home(out), "color.jpg").display().to_string());
+            }
+            match run(ex, "clip.autoColor", cp).await {
+                Ok(v) => report.color = Some(color_summary(&v)),
+                Err(e) => report.fallbacks.push(format!("colour: left as shot ({})", chars(&e.to_string(), 160))),
+            }
+        }
+    }
     // ---- captions of English speech
     if o.captions {
         report.captions = Some(captions(ex, &plan, &cands, &wins, &speech, &o, &mut notes).await);
@@ -2293,6 +2330,19 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         }
     }
     Ok(finish_json(&report, &status))
+}
+
+/// What the colour pass did, for the report: per shot its correction, what it said and any
+/// backing off; whether the GPU measured; the before/after sheet.
+fn color_summary(v: &Value) -> Value {
+    let clips: Vec<Value> = v["clips"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|c| json!({"clip": c["clip"], "applied": c["applied"], "did": c["did"], "backedOff": c["backedOff"], "before": c["before"], "after": c["after"]}))
+        .collect();
+    json!({"clips": clips, "gpu": v["gpu"], "look": v["look"], "strength": v["strength"], "sheet": v["sheet"]["path"]})
 }
 
 fn finish_json(report: &Report, status: &str) -> Value {

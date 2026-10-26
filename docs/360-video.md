@@ -167,8 +167,25 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    `--sounds`, `--sound-level`): the subtle default makes a few whips with a quiet swish, a chime
    under the title and no light effects (one viewer's taste for their trip videos); energetic
    whips more, punches in across time (a light leak where allowed) with whooshes and an impact;
-   cinematic dissolves longer, dips to black across days, whips at most once. The English
-   title in the platform's safe zone; captions of English speech; each sound levelled (the
+   cinematic dissolves longer, dips to black across days, whips at most once.
+   **A careful colour pass** (`clip.autoColor`, on unless `--no-color`): each shot is rendered
+   small on the GPU and measured — its near-neutral greys (the least coloured pixels, even a
+   white wall under warm light), its skin and its median brightness — and given a gentle
+   Lumetri Basic Correction 70 % of the way (`--color-strength`): white balance as far as the
+   greys are sure (less with little grey, half as far in a colourful picture, whose greys pick
+   up the colour around them), capped at ±20 temperature and ±10 tint; exposure only outside a
+   wide middle band (a dim room may stay dim), at most ±0.5 stops, never pushing highlights past
+   white; left alone where there is no grey to judge the light by (a close-up of a face). The cameras are
+   brought together by how vivid and contrasty they look (saturation and contrast half way to
+   the edit's middle) — never by copying a hue from a reference shot, which once turned a set of
+   clips sepia. A look of our own is optional (`--look punchy|soft|warm|cool|golden|teal`, at
+   25 % by default; no LUT or preset from anyone else). Each shot is then rendered again with
+   its correction and checked: greys more coloured, skin moved off the skin-tone line,
+   highlights clipped or shadows crushed, and the correction is halved, then its white balance
+   dropped, then dropped altogether — the report says which. The correction is a Lumetri Color
+   of its own at the end of the clip's effects, so it is easy to switch off or change, and
+   `<out>.color.jpg` shows each shot before and after. The English title in the platform's
+   safe zone; captions of English speech; each sound levelled (the
    music −16 LUFS, the clips' own sound under it, someone talking ducks it) and −14 LUFS.
    `--export` writes the video, `<out>.sheet.jpg`, `<out>.report.json` (the plan, the
    candidates, who directed, the GPU frames rendered, the fallbacks) and QA. Faces stay sharp

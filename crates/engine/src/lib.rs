@@ -13,6 +13,7 @@
 pub mod aaf_omf;
 pub mod adjustment_clip;
 pub mod audio_generate;
+pub mod auto_color;
 pub mod auto_duck;
 pub mod autocut;
 pub mod autosave;

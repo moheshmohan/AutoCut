@@ -212,6 +212,30 @@ fn sheet(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(out)
 }
 
+/// Pictures (rows of labelled images, premultiplied linear as rendered) in one sheet at `path`
+/// (JPEG by its extension, else PNG), for `cmd`: its path and size.
+pub(crate) fn write_images(s: &Session, cmd: &str, rows: &[Vec<(filmcraft_render::Image, String)>], path: &str) -> Result<Value> {
+    let made: Vec<Vec<Tile>> = rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|(img, label)| Tile { rgba: img.over_black_rgba8(), w: img.w as u32, h: img.h as u32, label: label.clone(), ok: img.w > 0 && img.h > 0 })
+                .collect()
+        })
+        .collect();
+    let (rgba, w, h) = compose(&made).ok_or_else(|| bad(cmd, "the sheet could not be drawn"))?;
+    let l = path.to_ascii_lowercase();
+    let bytes = if l.ends_with(".jpg") || l.ends_with(".jpeg") {
+        filmcraft_export::encode_still_with_quality(filmcraft_export::Format::JpegSequence, rgba, w, h, false, 88)
+    } else {
+        filmcraft_export::encode_png(rgba, w, h)
+    }
+    .map_err(|e| bad(cmd, e.to_string()))?;
+    let path = crate::export_tools::expand_home(path);
+    s.services.write_file(&path, &bytes).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
+    Ok(json!({"path": path, "width": w, "height": h}))
+}
+
 /// The rows of tiles in one RGBA picture: rows top to bottom, each as tall as its tallest tile.
 fn compose(rows: &[Vec<Tile>]) -> Option<(Vec<u8>, u32, u32)> {
     let width = rows.iter().map(|r| r.iter().map(|t| t.w + GAP).sum::<u32>() + GAP).max()?.max(1);

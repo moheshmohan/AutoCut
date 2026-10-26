@@ -831,6 +831,20 @@ pub struct DirectParams {
     /// How loud those sounds are, 0..1 (default 0.4, quiet).
     #[serde(default)]
     pub sound_level: Option<f64>,
+    /// The careful colour pass: each shot's exposure and white balance measured and gently
+    /// corrected, the cameras matched (default true; false leaves the footage as shot).
+    #[serde(default)]
+    pub color: Option<bool>,
+    /// How far the colour pass corrects, 0..1 (default 0.7).
+    #[serde(default)]
+    pub color_strength: Option<f64>,
+    /// A look of our own over the balance: "none" (the default), "punchy", "soft", "warm",
+    /// "cool", "golden", "teal". Only when the user asks for one.
+    #[serde(default)]
+    pub look: Option<String>,
+    /// The look's strength, % (default 25).
+    #[serde(default)]
+    pub look_strength: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -938,6 +952,10 @@ fn direct_params(p: DirectParams) -> Value {
     put("lightEffects", p.light_effects.map(Value::Bool));
     put("sounds", p.sounds.map(|v| json!(v)));
     put("soundLevel", p.sound_level.map(|v| json!(v)));
+    put("color", p.color.map(Value::Bool));
+    put("colorStrength", p.color_strength.map(|v| json!(v)));
+    put("look", p.look.map(Value::String));
+    put("lookStrength", p.look_strength.map(|v| json!(v)));
     params
 }
 

@@ -364,6 +364,17 @@ async fn the_model_directs_a_whole_edit() {
     // the 360° shots look through a camera
     let vr: Vec<_> = pictures.iter().filter(|c| s.project.vr_of(c.item).is_some()).collect();
     assert!(vr.iter().all(|c| filmcraft_engine::project::vr::reframe_of(c).is_some()));
+    // the colour pass measured every shot; its corrections are Lumetri of their own, marked
+    let colour = r["color"]["clips"].as_array().expect("a colour pass");
+    assert_eq!(colour.len(), pictures.len(), "{r}");
+    let passes = pictures.iter().filter(|c| c.effects.iter().any(filmcraft_engine::auto_color::is_pass)).count();
+    let changed = colour
+        .iter()
+        .filter(|c| {
+            c["applied"]["temperature"] != 0.0 || c["applied"]["exposure"] != 0.0 || c["applied"]["saturation"] != 100.0 || c["applied"]["contrast"] != 0.0
+        })
+        .count();
+    assert_eq!(passes, changed, "{r}");
 }
 
 #[test]
@@ -400,6 +411,15 @@ fn moments_are_ranked_the_unusable_and_copies_left_out_with_reasons() {
         c.scores.sharp = 0.8;
     }
     assert_eq!(rank::choose(one, 2).0.len(), 6);
+}
+
+#[test]
+fn the_colour_pass_is_on_unless_switched_off_and_a_look_is_asked_for() {
+    let o = opts(json!({}));
+    assert!(o.color && o.look == "none" && o.color_strength == 0.7 && o.look_strength == 25.0);
+    let o = opts(json!({"color": false, "look": "Punchy", "lookStrength": 400}));
+    assert!(!o.color && o.look == "punchy" && o.look_strength == 100.0);
+    assert!(Options::from_params(&json!({"look": "sepia"})).is_err());
 }
 
 #[test]

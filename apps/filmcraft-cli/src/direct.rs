@@ -13,7 +13,9 @@ direct [folder | files… | project.fcproj] [--brief \"a 30 s reel of our trip\"
        [--music file|generate] [--title T] [--no-captions] [--caption-style clean]
        [--redact faces,plates|faces|plates|off] [--name N] [--full-detail 8] [--seed N]
        [--style subtle|energetic|cinematic] [--light-effects] [--sounds swish,chime|none]
-       [--sound-level 0.4] [--dry-run] [--no-qa] [--export out.mp4] [--download]
+       [--sound-level 0.4] [--no-color] [--color-strength 0.7]
+       [--look none|punchy|soft|warm|cool|golden|teal] [--look-strength 25]
+       [--dry-run] [--no-qa] [--export out.mp4] [--download]
        [--save | --save-as p.fcproj]";
 
 /// `direct`'s options as `autocut.direct` parameters (with `wait: true`); a usage error says
@@ -31,6 +33,7 @@ pub fn params(a: &Args) -> Result<Value, String> {
         ("--redact", "redact"),
         ("--name", "name"),
         ("--style", "style"),
+        ("--look", "look"),
     ] {
         if let Some(v) = a.opt(opt) {
             p[key] = json!(v);
@@ -55,6 +58,12 @@ pub fn params(a: &Args) -> Result<Value, String> {
         let kinds: Vec<&str> = if v.trim().eq_ignore_ascii_case("none") { Vec::new() } else { v.split(',').map(str::trim).filter(|k| !k.is_empty()).collect() };
         p["sounds"] = json!(kinds);
     }
+    for (opt, key, max) in [("--color-strength", "colorStrength", 1.0), ("--look-strength", "lookStrength", 100.0)] {
+        if let Some(v) = a.opt(opt) {
+            let x = v.parse::<f64>().ok().filter(|f| f.is_finite() && (0.0..=max).contains(f)).ok_or_else(|| format!("{opt} wants 0 to {max}, not `{v}`"))?;
+            p[key] = json!(x);
+        }
+    }
     if let Some(v) = a.opt("--sound-level") {
         let l = v.parse::<f64>().ok().filter(|f| f.is_finite() && (0.0..=1.0).contains(f)).ok_or_else(|| format!("--sound-level wants 0 to 1, not `{v}`"))?;
         p["soundLevel"] = json!(l);
@@ -78,6 +87,7 @@ pub fn params(a: &Args) -> Result<Value, String> {
         ("--no-qa", "qa", false),
         ("--download", "download", true),
         ("--light-effects", "lightEffects", true),
+        ("--no-color", "color", false),
     ] {
         if a.flag(flag) {
             p[key] = json!(v);
@@ -109,6 +119,10 @@ pub async fn run(a: &Args) {
         "--light-effects",
         "--sounds",
         "--sound-level",
+        "--no-color",
+        "--color-strength",
+        "--look",
+        "--look-strength",
         "--dry-run",
         "--no-qa",
         "--export",
@@ -179,6 +193,19 @@ pub async fn run(a: &Args) {
             for n in plan["notes"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(30) {
                 diag(format_args!("direct: repaired: {}", n.as_str().unwrap_or_default()));
             }
+            for c in made["color"]["clips"].as_array().map(Vec::as_slice).unwrap_or_default().iter().take(MAX_LISTED) {
+                let k = &c["applied"];
+                diag(format_args!(
+                    "direct: colour: clip {}: temperature {}, tint {}, exposure {}, saturation {}, contrast {}{}",
+                    c["clip"],
+                    k["temperature"],
+                    k["tint"],
+                    k["exposure"],
+                    k["saturation"],
+                    k["contrast"],
+                    c["backedOff"].as_str().map(|w| format!(" (backed off: {w})")).unwrap_or_default()
+                ));
+            }
             for f in made["fallbacks"].as_array().map(Vec::as_slice).unwrap_or_default() {
                 diag(format_args!("direct: fallback: {}", f.as_str().unwrap_or_default()));
             }
@@ -237,6 +264,13 @@ mod tests {
         );
         assert_eq!(params(&args(&["direct", "x", "--sounds", "none"])).unwrap()["sounds"], json!([]));
         assert!(params(&args(&["direct", "x", "--sound-level", "3"])).is_err());
+        // the colour pass
+        let p = params(&args(&["direct", "x", "--no-color", "--look", "warm", "--look-strength", "20", "--color-strength", "0.5"])).unwrap();
+        assert_eq!(
+            (p["color"].as_bool(), p["look"].as_str(), p["lookStrength"].as_f64(), p["colorStrength"].as_f64()),
+            (Some(false), Some("warm"), Some(20.0), Some(0.5))
+        );
+        assert!(params(&args(&["direct", "x", "--color-strength", "1.5"])).is_err());
         // the brief is a value, not a file
         let a = args(&["direct", "clip.mp4", "--brief", "a 30 s reel", "--full-detail", "4"]);
         assert_eq!(a.positionals, vec!["direct".to_string(), "clip.mp4".to_string()]);
