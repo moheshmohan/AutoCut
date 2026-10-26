@@ -143,6 +143,7 @@ fn every_schema_key_exists_with_a_valid_default() {
 
 #[test]
 fn prefs_persist_through_the_data_directory() {
+    let _hw = crate::HW_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tmp_dir("prefs-persist");
     let mut s = Session::default();
     s.start_autosave(crate::autosave::AutosaveConfig::new(&dir)).unwrap();
@@ -432,6 +433,7 @@ fn recent_projects_are_remembered() {
 
 #[test]
 fn media_cache_location_policy_and_clean() {
+    let _hw = crate::HW_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tmp_dir("prefs-cache");
     let mut s = Session::default();
     s.start_autosave(crate::autosave::AutosaveConfig::new(dir.join("data"))).unwrap();
@@ -574,6 +576,7 @@ fn transcription_without_speech_to_text_says_so() {
 
 #[test]
 fn hardware_decoding_setting_drives_the_decoder_switch() {
+    let _hw = crate::HW_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut s = Session::default();
     assert_eq!(s.prefs.playback.hardware_decoding, "auto", "Auto by default");
     set(&mut s, "playback.hardwareDecoding", json!("off"));
@@ -582,6 +585,24 @@ fn hardware_decoding_setting_drives_the_decoder_switch() {
     set(&mut s, "playback.hardwareDecoding", json!("auto"));
     assert!(filmcraft_codecs::hw::hardware_decoding());
     assert!(settings::field("playback.hardwareDecoding").is_some_and(|f| f.wired && matches!(f.kind, Kind::Choice(_))));
+}
+
+/// Changing another preference — in this session or another one in the same process — leaves the
+/// decoder switch as Hardware decoding set it (it used to put it back to the other session's
+/// Auto: the flaky failure of the test above when tests ran in parallel).
+#[test]
+fn other_preferences_leave_the_decoder_switch_alone() {
+    let _hw = crate::HW_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut off = Session::default();
+    set(&mut off, "playback.hardwareDecoding", json!("off"));
+    assert!(!filmcraft_codecs::hw::hardware_decoding());
+    let mut other = Session::default();
+    set(&mut other, "timeline.stillImageDuration", json!(4));
+    assert!(!filmcraft_codecs::hw::hardware_decoding(), "another session's unrelated preference left it off");
+    set(&mut off, "timeline.stillImageDuration", json!(3));
+    assert!(!filmcraft_codecs::hw::hardware_decoding(), "an unrelated preference left it off");
+    set(&mut off, "playback.hardwareDecoding", json!("auto"));
+    assert!(filmcraft_codecs::hw::hardware_decoding());
 }
 
 /// Settings ▸ Timeline ▸ "Place files dropped onto the Timeline directly on the Timeline": on by default.

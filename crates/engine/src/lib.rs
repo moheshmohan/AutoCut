@@ -883,8 +883,13 @@ impl Session {
     /// Replace preferences (persisting them and updating the worker).
     pub fn set_prefs(&mut self, p: autosave::Preferences) -> std::io::Result<()> {
         let cache_changed = self.prefs.media_cache != p.media_cache;
+        // the decoder switch is process-wide: set only when this setting changed, so another
+        // preference changing never undoes it
+        let decoding_changed = self.prefs.playback.hardware_decoding != p.playback.hardware_decoding;
         self.prefs = p;
-        self.prefs.apply_hardware_decoding();
+        if decoding_changed {
+            self.prefs.apply_hardware_decoding();
+        }
         if cache_changed {
             self.apply_media_cache();
         }
@@ -1463,6 +1468,12 @@ pub fn media_duration(p: &Project, _pool: &MediaPool, id: ItemId) -> Option<Tick
 
 /// Subclips of subclips followed before giving up (real projects nest one or two deep).
 const MAX_SUBCLIP_CHAIN: usize = 16;
+
+/// Tests that set or read the process-wide hardware-decoding switch
+/// (`filmcraft_codecs::hw::set_hardware_decoding`: a setting changed, preferences loaded at
+/// start-up) hold this, so tests running in parallel do not flip it under each other.
+#[cfg(test)]
+pub(crate) static HW_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod aaf_omf_tests;

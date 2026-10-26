@@ -27,6 +27,8 @@ fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
 fn start(s: &mut Session, data: &std::path::Path) {
     let mut cfg = autosave::AutosaveConfig::new(data);
     cfg.journal_debounce = std::time::Duration::from_millis(20);
+    // loading the preferences sets the process-wide decoder switch
+    let _hw = crate::HW_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     s.start_autosave(cfg).unwrap();
 }
 
