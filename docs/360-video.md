@@ -34,7 +34,17 @@ stabilisation and following decode that instead of the two 2.9K HEVC tracks), an
 - **`.lrv`**: the camera's low-resolution copy, H.264, both lenses side by side in one track.
 - **The trailer** (no public specification; read from the files): the camera model, serial,
   firmware, the lens calibration (each lens's image circle), the recording's start, a 1 kHz
-  motion-sensor stream and exposure times. Details: `crates/isobmff/src/insta360.rs`.
+  motion-sensor stream (accelerometer and gyroscope) and each picture's exposure time on the
+  sensor's clock. Details: `crates/isobmff/src/insta360.rs`.
+- **The horizon**: an Insta360 recording is **levelled automatically** from its motion sensor.
+  When it is imported, the gyroscope and accelerometer are fused (a complementary filter run
+  forwards and backwards in time, so a turn is followed without lag and a shove is ignored) into
+  which way was up, ten times a second from the first picture; the sphere is then turned at every
+  frame so that up is up — in the Program monitor and exports (GPU and CPU), the analysis
+  panorama, stabilising and following alike. A camera held 40° off upright on an escalator comes
+  out with a level horizon. VR Properties ▸ Level Horizon (`media.vrProperties` `level`) turns it
+  off and on; the samples are kept in the project (`horizon` in VR Properties, summed up when
+  asked: seconds, samples, the largest tilt).
 - **Lens model**: equidistant fisheye, 97.5° from the axis to the image circle's edge (measured
   on X5 footage: where the two lenses' pictures agree best), image circles from the calibration;
   `media.align360` refines the angle and the lenses' relative turn per clip.
@@ -46,7 +56,7 @@ stabilisation and following decode that instead of the two 2.9K HEVC tracks), an
 
 | Command | Does |
 |---|---|
-| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
+| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; `level` levels the horizon by the camera's motion sensor (on by itself for Insta360 recordings) or stops; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
 | `media.align360` | aligns the two lenses of dual-fisheye media along their seam |
 | `clip.reframe360` | the virtual camera: `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across), `distance` (0 flat … 1 tiny planet), `output` `flat`/`sphere`, `width`/`height` (default: the sequence frame); `at` keyframes them at a clip time; `keys` writes a whole camera move; presets `natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`; `off` |
 | `clip.stabilize360` | holds the view steady: the camera's turn measured from the pictures (points tracked on cube faces, a robust rotation fit), then `smooth`/`light`/`strong` (keep the operator's turns, drop the shake) or `lock` (look one way the whole clip) |
@@ -97,7 +107,8 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    download folder, else fetched from the cloud by driving Studio), a Google Photos `--album`,
    or the project's.
 2. **Analysis**: the scene index (cuts, quality, the camera's move, the describer's subjects with
-   their boxes — a 360° clip is indexed as its stitched panorama, so a box is a direction), the
+   their boxes — a 360° clip is indexed as its stitched panorama, levelled by its camera's
+   motion sensor, so a box is a direction and every shot's horizon is level), the
    speech, and for every 360° moment where the action is (`media.salience360`). A shot longer
    than 12 s offers several moments.
 3. **The plan**: the rhythm is set first — a hook long enough for a tiny planet to open, body
@@ -166,10 +177,12 @@ sphere camera can still turn the panorama (`yaw`, `pitch`, `roll`): a re-centred
 
 - Stitching is a cross-fade over the overlap, not an optical-flow stitch: things near the camera
   (closer than about a metre) show their parallax along the seam.
-- Stabilisation is measured from the pictures (the camera's motion-sensor stream is read but its
-  axes and scale are not documented); the horizon is the clip's first frame's unless the view is
-  levelled by hand (`roll`, `pitch`). A camera held tilted keeps its tilted horizon in the
-  director's shots too.
+- Levelling turns the picture about a level axis only: the camera's heading (where its front
+  lens looked) is kept, and stabilisation (`clip.stabilize360`) is still measured from the
+  pictures, not the gyroscope. Recordings without a motion-sensor record (other cameras, stitched
+  equirectangular exports) keep the horizon they have; `roll` and `pitch` level them by hand.
+  The sensor's axes and scale were matched on X5 footage; other Insta360 models are assumed to
+  share them.
 - 360° exports are monoscopic equirectangular; stereoscopic 360° is read (the left eye shown)
   but not written.
 - Cube maps and meshes (`cbmp`, `mshp`) are recognised but shown flat; `.insp` photos are not

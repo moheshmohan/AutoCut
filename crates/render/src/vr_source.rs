@@ -75,7 +75,7 @@ impl MediaSource for PanoramaSource {
         let iv = self.inner.info().video.as_ref().ok_or(MediaError::NoStream("video"))?;
         let full = SourceModel::new(&self.spherical, (iv.width as usize, iv.height as usize));
         let src = inner_image(&self.inner, req.time, source_scale(&full, &view, w) as f32)?;
-        let model = SourceModel::new(&self.spherical, (src.w, src.h));
+        let model = SourceModel::at(&self.spherical, (src.w, src.h), req.time);
         let pano = reframe(&src, &model, &view, w, h, 1);
         Ok(Arc::new(VideoFrame { pts: req.time, ..VideoFrame::rgba_f32(w as u32, h as u32, pano.px) }))
     }
@@ -132,7 +132,7 @@ impl MediaSource for ReframedSource {
         let iv = self.inner.info().video.as_ref().ok_or(MediaError::NoStream("video"))?;
         let full = SourceModel::new(&self.spherical, (iv.width as usize, iv.height as usize));
         let src = inner_image(&self.inner, req.time, source_scale(&full, &view, w) as f32)?;
-        let model = SourceModel::new(&self.spherical, (src.w, src.h));
+        let model = SourceModel::at(&self.spherical, (src.w, src.h), req.time);
         let pic = reframe(&src, &model, &view, w, h, taps(&model, &view, w));
         Ok(Arc::new(VideoFrame { pts: req.time, ..VideoFrame::rgba_f32(w as u32, h as u32, pic.px) }))
     }

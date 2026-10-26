@@ -640,7 +640,7 @@ fn push_item(
             // the GPU draws the virtual camera's picture straight from the source's planes; its
             // effects then run on that picture, as `item_layer` runs them
             if plain {
-                let model = crate::vr::SourceModel::new(&r.spherical, (frame.width as usize, frame.height as usize));
+                let model = crate::vr::SourceModel::at(&r.spherical, (frame.width as usize, frame.height as usize), time);
                 let taps = crate::vr::taps(&model, &r.view, r.out.0) as u32;
                 let out_size = (r.out.0 as u32, r.out.1 as u32);
                 let vr = Some(Arc::new(VrLayer { view: r.view, model, out: out_size, taps }));

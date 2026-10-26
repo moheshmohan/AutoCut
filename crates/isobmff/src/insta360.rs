@@ -15,9 +15,12 @@
 //!   3 firmware, 5 and 17 the lens calibration ("offset"), 7 the recording's start as the number
 //!   yyyymmddhhmmss, 19 the recorded picture size of one lens ({1 width, 2 height}), 20 the frame
 //!   rate, 22 the shooting mode, 27 the sensor's size, 54 and 56 fuller per-lens models.
-//! - Record 2 is a thumbnail, record 3 a 1 kHz motion-sensor stream (a u64 microsecond
-//!   timestamp and six offset-binary u16 values a sample), record 4 exposure times; the others
-//!   are not described here.
+//! - Record 2 is a thumbnail. Record 3 is the motion sensor, about 1000 samples a second of 20
+//!   bytes: a u64 timestamp in microseconds, then six u16 values, offset-binary (32768 is zero),
+//!   all little-endian — the accelerometer's three axes (1024 a g) and the gyroscope's same three
+//!   (16.4 a degree a second). Record 4 has one 16-byte entry a picture: when its exposure
+//!   started on the same microsecond clock (u64) and how long it was (f64 seconds). The others are
+//!   not described here.
 //!
 //! Every number is from a file, so every one is checked: lengths against the file, offsets against
 //! the trailer, varints to ten bytes, strings capped. A file without a valid trailer simply has
@@ -117,6 +120,86 @@ pub fn read_record(src: &dyn ByteSource, r: Record, cap: u32) -> Option<Vec<u8>>
     let mut buf = vec![0u8; usize::try_from(r.len).ok()?];
     src.read_at(r.offset, &mut buf).ok()?;
     Some(buf)
+}
+
+/// Bytes of one motion-sensor sample.
+pub const MOTION_SAMPLE: usize = 20;
+/// Most motion samples kept (after averaging; nearly three hours at 200 a second).
+pub const MAX_MOTION_SAMPLES: usize = 2_000_000;
+/// Motion bytes read at a time.
+const MOTION_CHUNK: usize = MOTION_SAMPLE * 32_768;
+
+/// One reading of the motion sensor (or the mean of a few), in the sensor's counts with the
+/// offset removed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Motion {
+    /// Microseconds, on the clock the exposure times use.
+    pub us: u64,
+    /// Accelerometer, 1024 a g (at rest it measures gravity).
+    pub accel: [f32; 3],
+    /// Gyroscope about the same axes, 16.4 a degree a second.
+    pub gyro: [f32; 3],
+}
+
+/// The motion-sensor stream, every `mean` consecutive samples averaged into one (1: all of them),
+/// in the camera's order. `None` without a trailer or a motion record.
+pub fn read_motion(src: &dyn ByteSource, mean: usize) -> Option<Vec<Motion>> {
+    let r = read_trailer(src)?.record(RECORD_MOTION)?;
+    let mean = mean.clamp(1, 1000);
+    let total = usize::try_from(r.len).ok()? / MOTION_SAMPLE * MOTION_SAMPLE;
+    let mut out = Vec::with_capacity((total / MOTION_SAMPLE / mean).min(MAX_MOTION_SAMPLES));
+    let mut group: Vec<Motion> = Vec::with_capacity(mean);
+    let mut buf = vec![0u8; MOTION_CHUNK.min(total)];
+    let mut at = 0usize;
+    while at < total && out.len() < MAX_MOTION_SAMPLES {
+        let n = MOTION_CHUNK.min(total - at);
+        let chunk = buf.get_mut(..n)?;
+        src.read_at(r.offset.checked_add(u64::try_from(at).ok()?)?, chunk).ok()?;
+        at += n;
+        for s in chunk.as_chunks::<MOTION_SAMPLE>().0 {
+            let us = u64::from_le_bytes(s[..8].try_into().ok()?);
+            let v = |k: usize| f32::from(u16::from_le_bytes([s[8 + 2 * k], s[9 + 2 * k]])) - 32768.0;
+            group.push(Motion { us, accel: [v(0), v(1), v(2)], gyro: [v(3), v(4), v(5)] });
+            if group.len() == mean {
+                out.push(average(&group));
+                group.clear();
+            }
+        }
+    }
+    if !group.is_empty() && out.len() < MAX_MOTION_SAMPLES {
+        out.push(average(&group));
+    }
+    Some(out)
+}
+
+fn average(g: &[Motion]) -> Motion {
+    let n = g.len().max(1) as f32;
+    let mut m = Motion { us: g.first().map_or(0, |s| s.us), accel: [0.0; 3], gyro: [0.0; 3] };
+    for s in g {
+        for c in 0..3 {
+            m.accel[c] += s.accel[c] / n;
+            m.gyro[c] += s.gyro[c] / n;
+        }
+    }
+    // the middle of the group
+    if let (Some(a), Some(b)) = (g.first(), g.last()) {
+        m.us = a.us.saturating_add(b.us.saturating_sub(a.us) / 2);
+    }
+    m
+}
+
+/// When the first picture's exposure started (microseconds, the motion sensor's clock) and how
+/// long it was (seconds), from the exposure record. `None` without one.
+pub fn first_exposure(src: &dyn ByteSource) -> Option<(u64, f64)> {
+    let r = read_trailer(src)?.record(RECORD_EXPOSURE)?;
+    if r.len < 16 {
+        return None;
+    }
+    let mut b = [0u8; 16];
+    src.read_at(r.offset, &mut b).ok()?;
+    let us = u64::from_le_bytes(b[..8].try_into().ok()?);
+    let secs = f64::from_le_bytes(b[8..].try_into().ok()?);
+    Some((us, if secs.is_finite() { secs.clamp(0.0, 1.0) } else { 0.0 }))
 }
 
 /// What the metadata record says.
@@ -362,6 +445,56 @@ mod tests {
         assert!(parse_offset("2.5_1_2_3_4_5_6_1_2_3_4_5_6_7_8").is_none());
         assert!(parse_offset("2_nan_2_3_4_5_6_1_2_3_4_5_6_7_8").is_none());
         assert!(parse_offset("2_0_2_3_4_5_6_1_2_3_4_5_6_7_8").is_none());
+    }
+
+    fn motion_bytes(samples: &[(u64, [i32; 6])]) -> Vec<u8> {
+        let mut b = Vec::new();
+        for (us, v) in samples {
+            b.extend_from_slice(&us.to_le_bytes());
+            for x in v {
+                b.extend_from_slice(&((x + 32768) as u16).to_le_bytes());
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn reads_the_motion_sensor_and_exposure_times() {
+        let samples: Vec<(u64, [i32; 6])> = (0..7).map(|k| (1_000_000 + 1000 * k, [k as i32, -1024, 3, 16, -16, 0])).collect();
+        let mut exposure = 999_000u64.to_le_bytes().to_vec();
+        exposure.extend_from_slice(&0.01f64.to_le_bytes());
+        exposure.extend_from_slice(&[0u8; 16]);
+        let f = file_with(b"body", &[(RECORD_MOTION, motion_bytes(&samples)), (RECORD_EXPOSURE, exposure)]);
+        let all = read_motion(&f.as_slice(), 1).unwrap();
+        assert_eq!(all.len(), 7);
+        assert_eq!(all[2], Motion { us: 1_002_000, accel: [2.0, -1024.0, 3.0], gyro: [16.0, -16.0, 0.0] });
+        // averaged in threes: the last group has one sample
+        let mean = read_motion(&f.as_slice(), 3).unwrap();
+        assert_eq!(mean.len(), 3);
+        assert_eq!((mean[0].us, mean[0].accel[0]), (1_001_000, 1.0));
+        assert_eq!((mean[2].us, mean[2].accel[0]), (1_006_000, 6.0));
+        assert_eq!(first_exposure(&f.as_slice()), Some((999_000, 0.01)));
+        // no motion record: none
+        let g = file_with(b"body", &[(RECORD_THUMBNAIL, vec![1; 4])]);
+        assert!(read_motion(&g.as_slice(), 1).is_none() && first_exposure(&g.as_slice()).is_none());
+    }
+
+    #[test]
+    fn damaged_motion_records_never_panic() {
+        let samples: Vec<(u64, [i32; 6])> = (0..5).map(|k| (u64::MAX - 10 + k, [32767, -32768, 0, 1, 2, 3])).collect();
+        let mut m = motion_bytes(&samples);
+        m.extend_from_slice(&[9; 7]);
+        let f = file_with(b"body", &[(RECORD_MOTION, m), (RECORD_EXPOSURE, f64::NAN.to_le_bytes().repeat(2))]);
+        for n in 0..f.len() {
+            let _ = read_motion(&&f[n..], 2);
+            let _ = first_exposure(&&f[n..]);
+            let mut g = f.clone();
+            g[n] ^= 0xa5;
+            let _ = read_motion(&g.as_slice(), 0);
+            let _ = first_exposure(&g.as_slice());
+        }
+        assert_eq!(read_motion(&f.as_slice(), 1).unwrap().len(), 5);
+        assert_eq!(first_exposure(&f.as_slice()).map(|e| e.1), Some(0.0));
     }
 
     #[test]

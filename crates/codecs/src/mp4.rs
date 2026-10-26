@@ -93,6 +93,9 @@ pub struct Mp4Source {
     lens2: Option<(usize, GopCache)>,
     /// What the file says about its picture of the sphere.
     spherical: Option<filmcraft_media::Spherical>,
+    /// An Insta360 recording's horizon from its motion sensor, read the first time the sphere is
+    /// asked for.
+    horizon: Option<std::sync::OnceLock<Option<filmcraft_media::spherical::Horizon>>>,
     /// The playable audio tracks in file order: `info.audio_streams[k]` describes `audios[k]`.
     audios: Vec<Mp4Audio>,
 }
@@ -437,7 +440,18 @@ impl Mp4Source {
             _ => vtrack.and_then(|i| file.tracks.get(i)).and_then(crate::vr::track_spherical),
         };
         let lens2 = lens2.map(|j| (j, GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture)));
-        Ok(Self { info, bytes, file, vtrack, video: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture), lens2, spherical, audios })
+        let horizon = (insta.is_some() && spherical.as_ref().is_some_and(|s| !s.is_equirect())).then(std::sync::OnceLock::new);
+        Ok(Self {
+            info,
+            bytes,
+            file,
+            vtrack,
+            video: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture),
+            lens2,
+            spherical,
+            horizon,
+            audios,
+        })
     }
 
     fn read(&self, track: usize, i: usize) -> crate::Result<Vec<u8>> {
@@ -549,7 +563,16 @@ impl MediaSource for Mp4Source {
     }
 
     fn spherical(&self) -> Option<filmcraft_media::Spherical> {
-        self.spherical.clone()
+        let mut s = self.spherical.clone()?;
+        if let Some(h) = &self.horizon {
+            s.horizon = h
+                .get_or_init(|| {
+                    let motion = filmcraft_isobmff::insta360::read_motion(&self.bytes, crate::vr::MOTION_MEAN)?;
+                    crate::vr::insta360_horizon(&motion, filmcraft_isobmff::insta360::first_exposure(&self.bytes))
+                })
+                .clone();
+        }
+        Some(s)
     }
 
     fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer, MediaError> {

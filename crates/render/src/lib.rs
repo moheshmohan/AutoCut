@@ -765,10 +765,12 @@ fn reframed_layer(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, 
     let src = sources.source(item.item)?;
     let r = reframing(project, item, t, &src, want)?;
     let full_w = src.info().video.as_ref().map_or(1, |v| v.width.max(1));
-    let frame = src.video_frame(FrameRequest { time: video_source_time(item, t, src.info().frame_rate()), scale: r.scale }).ok()?;
+    let time = video_source_time(item, t, src.info().frame_rate());
+    let frame = src.video_frame(FrameRequest { time, scale: r.scale }).ok()?;
     let n = decimation(frame.width as f32, full_w as f32 * r.scale);
     let img = media_image(project, seq, item, t, &src, &frame, n, r.scale);
-    let model = vr::SourceModel::new(&r.spherical, (img.w, img.h));
+    // (levelled by the recording's horizon at the frame's own time)
+    let model = vr::SourceModel::at(&r.spherical, (img.w, img.h), time);
     let taps = vr::taps(&model, &r.view, r.out.0);
     Some(vr::reframe(&img, &model, &r.view, r.out.0, r.out.1, taps))
 }

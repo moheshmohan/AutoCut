@@ -207,9 +207,10 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 - **Have:** 360° video ([360-video.md](360-video.md)): Insta360 `.insv` (both lens tracks, the
   `.lrv` as proxy, the camera's trailer) and equirectangular MP4s with Spherical Video V1 / V2
   metadata import as 360° media; the 360 Reframe virtual camera (GPU, CPU fallback),
-  stabilisation and subject following; 360° export with the metadata. **Missing:** optical-flow
-  stitching, the gyro stream for levelling, `.insp` photos, cube-map / mesh projections, writing
-  stereoscopic 360°.
+  stabilisation and subject following; the horizon levelled automatically from the camera's
+  motion sensor; 360° export with the metadata. **Missing:** optical-flow stitching,
+  gyroscope-based stabilisation (it is measured from the pictures), `.insp` photos, cube-map /
+  mesh projections, writing stereoscopic 360°.
 
 ## G11. No plugin hosting
 

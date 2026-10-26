@@ -250,7 +250,10 @@ fn work_for(s: &Session, item: ItemId) -> std::result::Result<Work, String> {
         }
         _ => None,
     };
-    let media_key = identity.map(|(size, fp)| format!("file:{size}:{fp:016x}|{w}x{h}|{}|{}/{}", m.duration().0, rate.num, rate.den));
+    // (a 360° picture is indexed as its panorama: how it maps onto the sphere and its horizon
+    // decide what the panorama shows)
+    let sphere = s.project.vr_of(item).map(|v| format!("|sphere:{}", crate::vr360::sphere_key(v))).unwrap_or_default();
+    let media_key = identity.map(|(size, fp)| format!("file:{size}:{fp:016x}|{w}x{h}|{}|{}/{}{sphere}", m.duration().0, rate.num, rate.den));
     Ok(Work { item, name: pi.name.clone(), src, still, duration: m.duration(), frame, step, media_key })
 }
 

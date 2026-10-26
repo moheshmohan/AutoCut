@@ -1714,6 +1714,10 @@ pub struct Report {
     pub seconds: f64,
     pub media: usize,
     pub vr_media: usize,
+    /// 360° recordings levelled by their camera's motion sensor, and the largest tilt taken out
+    /// (degrees).
+    pub levelled: usize,
+    pub max_tilt: f64,
     pub shots_indexed: usize,
     /// The shots the director chose from: what each shows, and a 360° shot's looks.
     pub candidates: Vec<Value>,
@@ -1944,13 +1948,17 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     let media = gather(ex, p, &mut notes, lines).await?;
     report.media = media.len();
     let items: Vec<u64> = media.iter().map(|m| m.item).collect();
-    let vr: BTreeSet<u64> = match run(ex, "media.vrProperties", json!({"items": items})).await {
-        Ok(v) => {
-            v["items"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter(|x| !x["vr"].is_null()).filter_map(|x| x["item"].as_u64()).collect()
-        }
-        Err(_) => BTreeSet::new(),
-    };
+    let props = run(ex, "media.vrProperties", json!({"items": items})).await.unwrap_or(Value::Null);
+    let rows = props["items"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let vr: BTreeSet<u64> = rows.iter().filter(|x| !x["vr"].is_null()).filter_map(|x| x["item"].as_u64()).collect();
     report.vr_media = vr.len();
+    // (an Insta360 recording is levelled by its motion sensor when it is imported)
+    let tilts: Vec<f64> = rows.iter().filter(|x| x["vr"]["horizon"]["level"] == true).map(|x| finite(&x["vr"]["horizon"]["maxTilt"]).unwrap_or(0.0)).collect();
+    report.levelled = tilts.len();
+    report.max_tilt = tilts.iter().copied().fold(0.0, f64::max);
+    if !tilts.is_empty() {
+        lines(&format!("{} 360° recording(s) levelled by their camera's motion sensor (tilted up to {:.0}°)", tilts.len(), report.max_tilt));
+    }
     // ---- the index and the speech
     let mut shots = index(ex, &media, &o, &mut report, &mut notes, lines).await;
     let speech = speech_of(ex, &media, &mut shots, &mut report, lines).await;

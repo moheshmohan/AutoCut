@@ -108,6 +108,22 @@ pub fn rotation_angles(m: &M3) -> (f64, f64, f64) {
     (yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees())
 }
 
+/// The smallest turn that takes `up` (the camera's own directions) to +Y: what levels a picture
+/// whose up was measured to be `up` (a turn about a level axis — the camera's heading kept; upside
+/// down, half a turn about the forward axis).
+pub fn level_rotation(up: V3) -> M3 {
+    let u = normalize(up);
+    let (s, c) = ((u[0] * u[0] + u[2] * u[2]).sqrt(), u[1]);
+    if s < 1e-9 {
+        return if c >= 0.0 { camera_rotation(0.0, 0.0, 0.0) } else { [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]] };
+    }
+    // about k = u × Y / |u × Y| by the angle between them (sin s, cos c): I + s·K + (1 − c)·K²
+    let k = [-u[2] / s, 0.0, u[0] / s];
+    let kk = [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]];
+    let k2 = mmul(&kk, &kk);
+    std::array::from_fn(|i| std::array::from_fn(|j| f64::from(u8::from(i == j)) + s * kk[i][j] + (1.0 - c) * k2[i][j]))
+}
+
 /// What the virtual camera makes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Output {
@@ -294,6 +310,19 @@ impl SourceModel {
                 SourceModel::DualFisheye { lenses: lenses.iter().map(|l| LensPx::new(l, w, h)).collect(), blend: BLEND_DEGREES.to_radians() }
             }
         }
+    }
+
+    /// The model of the picture at media time `t`: levelled by the recording's horizon when it
+    /// has one ([`Spherical::up_at`]; dual fisheye — its lenses turned so that up is up).
+    pub fn at(s: &Spherical, size: (usize, usize), t: Tick) -> Self {
+        let mut m = Self::new(s, size);
+        if let (SourceModel::DualFisheye { lenses, .. }, Some(up)) = (&mut m, s.up_at(t.seconds())) {
+            let level = level_rotation(up);
+            for l in lenses.iter_mut() {
+                l.rotation = mmul(&level, &l.rotation);
+            }
+        }
+        m
     }
 
     /// Where the source saw direction `d`.
@@ -708,6 +737,46 @@ mod tests {
             roll: 0.0,
         };
         Spherical::dual_fisheye(vec![lens(0, 180.0), lens(1, 0.0)], "test")
+    }
+
+    #[test]
+    fn levelling_turns_measured_up_to_up_about_a_level_axis() {
+        let close6 = |a: V3, b: V3| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-6);
+        for up in [[0.0, 1.0, 0.0], [0.5, 0.8, 0.1], [-0.3, 0.2, -0.9], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0], [1e-12, -1.0, 0.0]] {
+            let r = level_rotation(up);
+            assert!(close6(mvec(&r, normalize(up)), [0.0, 1.0, 0.0]), "{up:?}");
+            // a rotation: orthonormal, not a mirror
+            let rt = mmul(&transpose(&r), &r);
+            assert!(close6(rt[0], [1.0, 0.0, 0.0]) && close6(rt[1], [0.0, 1.0, 0.0]) && close6(rt[2], [0.0, 0.0, 1.0]));
+            let det = dot(r[0], [r[1][1] * r[2][2] - r[1][2] * r[2][1], r[1][2] * r[2][0] - r[1][0] * r[2][2], r[1][0] * r[2][1] - r[1][1] * r[2][0]]);
+            assert!((det - 1.0).abs() < 1e-9);
+        }
+        // a camera leaning right is turned about the forward axis only: forward stays forward
+        let r = level_rotation([0.5, 0.866, 0.0]);
+        assert!(close6(mvec(&r, [0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]));
+        assert!(close(mvec(&level_rotation([0.0, 1.0, 0.0]), [0.3, 0.4, 0.5]), [0.3, 0.4, 0.5]));
+        assert!(mvec(&level_rotation([f64::NAN, 0.0, 0.0]), [0.0, 1.0, 0.0]).iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn a_levelled_source_sees_up_where_the_camera_measured_it() {
+        let up = normalize([0.4, 0.8, -0.3]);
+        let mut s = two_lenses();
+        s.horizon = Some(filmcraft_media::spherical::Horizon { level: true, step: 1.0, up: vec![[0.0, 1.0, 0.0], [up[0] as f32, up[1] as f32, up[2] as f32]] });
+        let raw = SourceModel::new(&s, (2000, 1000));
+        let at = |secs: f64| SourceModel::at(&s, (2000, 1000), Tick::from_seconds_f64(secs));
+        // a second in, the world's up is the pixel where the camera saw its measured up
+        let px = |l: Located| match l {
+            Located::One(x, y) => (x, y),
+            Located::Two((x, y, _), _) => (x, y),
+            o => panic!("{o:?}"),
+        };
+        let (a, b) = (px(at(1.0).locate([0.0, 1.0, 0.0])), px(raw.locate(up)));
+        assert!((a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05, "{a:?} {b:?}");
+        // at the start the camera was upright; without levelling nothing turns
+        assert_eq!(at(0.0), raw);
+        s.horizon.as_mut().unwrap().level = false;
+        assert_eq!(SourceModel::at(&s, (2000, 1000), Tick::from_seconds_f64(1.0)), raw);
     }
 
     /// A dual-fisheye picture made from a coded equirect through the lens model itself.

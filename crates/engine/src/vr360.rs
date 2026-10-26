@@ -78,7 +78,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "VR Properties…",
             menu: &["Clip", "Modify"],
             shortcut: None,
-            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?}"#,
+            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?,"level":bool?}"#,
             enabled: |_| Ok(()),
             run: vr_properties,
             journal: true,
@@ -148,7 +148,16 @@ pub fn analysis_view(s: &Session, item: ItemId) -> Option<filmcraft_media::Share
 /// A stable fingerprint of a virtual camera (its parameters and keyframes): caches of what a
 /// reframed clip shows key on it, as on the file.
 pub(crate) fn camera_key(e: &EffectInstance) -> String {
-    let bytes = serde_json::to_vec(e).unwrap_or_default();
+    fnv_key(&serde_json::to_vec(e).unwrap_or_default())
+}
+
+/// A stable fingerprint of how a 360° picture maps onto the sphere (VR Properties, its horizon
+/// included): caches of what its panorama shows key on it.
+pub(crate) fn sphere_key(v: &Spherical) -> String {
+    fnv_key(&serde_json::to_vec(v).unwrap_or_default())
+}
+
+fn fnv_key(bytes: &[u8]) -> String {
     // FNV-1a: the same on every machine and build, unlike std's hasher
     let h = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
     format!("{h:016x}")
@@ -489,9 +498,10 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
         Some(_) => return Err(bad(cmd, "`halfFov` must be within 30..135°")),
         None => None,
     };
+    let level = bool_p(p, "level");
     // nothing to change: what the items' VR Properties are
-    if projection.is_none() && layout.is_none() && captured.is_none() && half_fov.is_none() {
-        return Ok(json!({"items": items.iter().map(|id| json!({"item": id.0, "vr": s.project.vr_of(*id)})).collect::<Vec<_>>()}));
+    if projection.is_none() && layout.is_none() && captured.is_none() && half_fov.is_none() && level.is_none() {
+        return Ok(json!({"items": items.iter().map(|id| json!({"item": id.0, "vr": vr_json(s.project.vr_of(*id))})).collect::<Vec<_>>()}));
     }
     // what each item gets (decided before the edit: `auto` opens the file)
     let mut new: Vec<(ItemId, Option<Spherical>)> = Vec::new();
@@ -523,6 +533,22 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
                     l.half_fov = h;
                 }
             }
+            match level {
+                // the recording's own horizon, levelling
+                Some(true) => {
+                    let h = v.horizon.clone().filter(|h| !h.up.is_empty()).or_else(|| from_file().and_then(|f| f.horizon));
+                    let Some(h) = h else { return Err(bad(cmd, format!("item {} has no motion-sensor record to level its horizon by", id.0))) };
+                    v.horizon = Some(filmcraft_media::spherical::Horizon { level: true, ..h });
+                }
+                Some(false) => {
+                    if let Some(h) = v.horizon.as_mut() {
+                        h.level = false;
+                    }
+                }
+                None => {}
+            }
+        } else if level == Some(true) {
+            return Err(bad(cmd, format!("item {} is not 360° media", id.0)));
         }
         new.push((*id, v.map(|v| v.sanitized())));
     }
@@ -531,12 +557,24 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
         for (id, v) in &new {
             if let Some(ItemKind::Media(m)) = pr.item_mut(*id).map(|i| &mut i.kind) {
                 m.interpret.vr = v.clone();
-                out.push(json!({"item": id.0, "vr": v}));
+                out.push(json!({"item": id.0, "vr": vr_json(v.as_ref())}));
             }
         }
         Ok(out)
     })?;
     Ok(json!({"items": report}))
+}
+
+/// VR Properties as JSON, a horizon summed up (whether it levels, how long it runs, how many
+/// samples, the largest tilt) rather than listed.
+fn vr_json(v: Option<&Spherical>) -> Value {
+    let Some(v) = v else { return Value::Null };
+    let mut j = serde_json::to_value(v).unwrap_or(Value::Null);
+    if let (Some(h), Some(o)) = (&v.horizon, j.as_object_mut()) {
+        let r1 = |x: f64| (x * 10.0).round() / 10.0;
+        o.insert("horizon".into(), json!({"level": h.level, "seconds": r1(h.seconds()), "samples": h.up.len(), "maxTilt": r1(h.max_tilt())}));
+    }
+    j
 }
 
 /// Two circular fisheye pictures side by side, the left looking back, filling their halves.
@@ -911,7 +949,8 @@ fn orientations(src: &filmcraft_media::SharedSource, spherical: &Spherical, time
         }
         prog.done.fetch_add(1, Ordering::Relaxed);
         let faces = analysis_picture(src, *t).map(|img| {
-            let model = filmcraft_render::vr::SourceModel::new(spherical, (img.w, img.h));
+            // (the picture levelled by the recording's horizon, as it is shown)
+            let model = filmcraft_render::vr::SourceModel::at(spherical, (img.w, img.h), *t);
             Faces::new(&img, &model, STAB_FACE)
         });
         match (prev.as_ref(), faces.as_ref()) {
@@ -1054,7 +1093,7 @@ fn follow_run(
             out.push((k, Seen { yaw: f64::NAN, pitch: f64::NAN }));
             continue;
         };
-        let model = filmcraft_render::vr::SourceModel::new(spherical, (img.w, img.h));
+        let model = filmcraft_render::vr::SourceModel::at(spherical, (img.w, img.h), mt);
         let pic = filmcraft_render::vr::reframe(&img, &model, &cam.view, fw, fh, 1).over_black_rgba8();
         if let (FollowTarget::Face, Some(detect)) = (target, faces)
             && n.is_multiple_of(every)
@@ -1287,6 +1326,40 @@ mod tests {
         assert!(s.project.vr_of(item).is_none());
         let r = s.execute(ALIGN_CMD, json!({"items": [item.0]})).unwrap();
         assert_eq!(r["items"][0]["aligned"], false);
+    }
+
+    #[test]
+    fn the_horizon_is_switched_and_summed_up() {
+        let mut s = demo();
+        let (_, item) = first_clip(&s);
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "dualFisheye"})).unwrap();
+        // the demo footage has no motion sensor to level by
+        let e = s.execute(PROPS_CMD, json!({"items": [item.0], "level": true})).unwrap_err().to_string();
+        assert!(e.contains("motion-sensor"), "{e}");
+        let before = s.project.vr_of(item).cloned().unwrap();
+        let key = sphere_key(&before);
+        // (as an Insta360 recording brings it)
+        let h = filmcraft_media::spherical::Horizon { level: true, step: 0.1, up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]] };
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "none"})).unwrap();
+        s.edit("Horizon", |pr, _| {
+            if let Some(ItemKind::Media(m)) = pr.item_mut(item).map(|i| &mut i.kind) {
+                m.interpret.vr = Some(Spherical { horizon: Some(h), ..before });
+            }
+            Ok(())
+        })
+        .unwrap();
+        let q = s.execute(PROPS_CMD, json!({"items": [item.0]})).unwrap();
+        assert_eq!(q["items"][0]["vr"]["horizon"], json!({"level": true, "seconds": 0.1, "samples": 2, "maxTilt": 30.0}));
+        let on = sphere_key(s.project.vr_of(item).unwrap());
+        assert_ne!(on, key, "the panorama's caches change with the horizon");
+        s.execute(PROPS_CMD, json!({"items": [item.0], "level": false})).unwrap();
+        assert!(s.project.vr_of(item).unwrap().up_at(0.1).is_none());
+        assert_ne!(sphere_key(s.project.vr_of(item).unwrap()), on);
+        // back on: the samples it kept
+        s.execute(PROPS_CMD, json!({"items": [item.0], "level": true})).unwrap();
+        assert!(s.project.vr_of(item).unwrap().up_at(0.1).is_some());
+        s.undo().unwrap();
+        assert!(s.project.vr_of(item).unwrap().up_at(0.1).is_none());
     }
 
     /// The demo's first clip, its media taken as an equirectangular panorama, and its sequence's
