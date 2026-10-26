@@ -593,6 +593,24 @@ impl ShowcaseHost {
         None
     }
 
+    /// The model that directs an edit: the script model, else the classifier, with room for the
+    /// shots' facts (a long library's prompt runs past Ollama's default context, and a prompt cut
+    /// short gets a garbled plan back).
+    async fn director(&self) -> Option<Arc<dyn ChatModel>> {
+        let cfg = match &self.source {
+            Source::Fixed(m) => return Some(m.script.clone()),
+            Source::Config(cfg) => cfg.clone(),
+        };
+        for name in [cfg.script_model.clone(), cfg.llm_model.clone()] {
+            let o = Ollama::new(&cfg.ollama_host, &name, cfg.http_timeout).with_context(crate::director::CONTEXT_TOKENS);
+            let probe = o.clone();
+            if tokio::task::spawn_blocking(move || probe.available().unwrap_or(false)).await.unwrap_or(false) {
+                return Some(Arc::new(o));
+            }
+        }
+        None
+    }
+
     /// The model that writes Malayalam: `model` when given, else the script model, with room for
     /// Malayalam's many tokens. No fallback to the small classifier: its Malayalam is unusable.
     async fn translator(&self, p: &Value) -> Result<Arc<dyn ChatModel>, AutoCutError> {
@@ -683,7 +701,7 @@ impl ShowcaseHost {
                 p["items"] = Value::Array(items);
             }
             // the director: the script model (it plans in JSON well), else the small one
-            let director = self.writer().await.map(|m| Cancellable { inner: m, progress: progress.clone() });
+            let director = self.director().await.map(|m| Cancellable { inner: m, progress: progress.clone() });
             let mut lines = |l: &str| note(progress, l);
             return crate::director::make(ex, &p, director.as_ref().map(|w| w as &dyn ChatModel), &mut lines).await;
         }

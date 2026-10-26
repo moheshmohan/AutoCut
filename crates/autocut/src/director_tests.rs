@@ -2,7 +2,6 @@
 //! project (one clip taken as 360°) through a session.
 
 use super::*;
-use crate::llm::FixedModel;
 
 fn opts(p: Value) -> Options {
     Options::from_params(&p).unwrap()
@@ -65,6 +64,7 @@ fn briefs_say_the_layout_length_title_and_mood() {
     assert_eq!(title_from_brief("a 60 s reel of our trip to Dubai").as_deref(), Some("Our Trip To Dubai"));
     assert_eq!(title_from_brief("make a catchy reel").as_deref(), None);
     assert!(english("Our Trip") && !english("ഞങ്ങളുടെ യാത്ര"));
+    assert_eq!((title_case("weekend in motion").as_str(), title_case("iPhone Days").as_str()), ("Weekend In Motion", "iPhone Days"));
     assert!(indoors("Three men inside an elevator") && indoors("a luxurious hotel lobby") && !indoors("a car drives down a busy street"));
     assert_eq!(mood_from_brief("a calm sunset recap"), "calm");
     let o = opts(json!({"brief": "a 16:9 recap of the weekend, 45 seconds"}));
@@ -139,52 +139,80 @@ fn rules_open_on_a_planet_alternate_and_close_on_one() {
 }
 
 #[test]
-fn the_models_plan_is_checked_and_repaired() {
+fn the_rhythm_adds_up_and_opens_and_closes() {
+    let beat = beat_of(120.0);
+    for (total, available) in [(40u32, 6usize), (60, 16), (12, 3), (8, 1), (5, 10)] {
+        let r = rhythm(total, beat, available);
+        assert_eq!(r.iter().map(|s| s.beats).sum::<u32>(), total, "{total} {available}: {r:?}");
+        assert_eq!(r[0].role, Role::Hook);
+        assert!(r.len() <= available.max(2), "{r:?}");
+        if r.len() > 1 {
+            assert_eq!(r.last().unwrap().role, Role::Ending);
+        }
+    }
+}
+
+#[test]
+fn the_models_picks_fill_the_rhythm_and_are_repaired() {
     let o = opts(json!({"brief": "a 20 s reel", "seconds": 20}));
     let beat = beat_of(120.0);
     let lib = library();
+    let slots = rhythm(40, beat, lib.len());
     let answer = json!({
         "title": "Weekend Away",
         "mood": "happy",
         "shots": [
-            {"clip": "c1", "beats": 2, "camera": "planetIn", "look": "c1a", "enter": "whip"},
-            {"clip": "c9", "beats": 4, "camera": "hold"},
-            {"clip": "c2", "beats": 4, "camera": "orbit"},
-            {"clip": "c3", "beats": 6, "camera": "whipPan", "look": "c3a", "to": "c3a"},
-            {"clip": "c3", "beats": 6, "camera": "barrelRoll", "look": "c3b"},
-            {"clip": "c6", "beats": 6, "camera": "barrelRoll", "text": "ഹായ്"},
-            {"clip": "c5", "beats": 99, "camera": "pushIn", "enter": "dissolve"}
+            {"slot": 1, "clip": "c1", "camera": "planetIn", "look": "c1a"},
+            {"slot": 2, "clip": "c9", "camera": "hold"},
+            {"slot": 3, "clip": "c2", "camera": "orbit"},
+            {"slot": 4, "clip": "c3", "camera": "whipPan", "look": "c3a", "to": "c3a"},
+            {"slot": 5, "clip": "c3", "camera": "barrelRoll"},
+            {"slot": 6, "clip": "c6", "camera": "planetIn", "text": "ഹായ്"}
         ]
     });
-    let plan = validate(&answer, &lib, &o, beat, 120.0).unwrap();
+    let plan = validate(&answer, &lib, &o, beat, 120.0, &slots).unwrap();
     assert_eq!(plan.title, "Weekend Away");
-    assert_eq!(plan.beats(), 40, "20 s at 120 bpm: {:?}", plan.shots);
-    assert!(plan.shots.iter().all(|s| s.clip != "c9"), "an unknown clip is left out");
-    let first = &plan.shots[0];
-    assert!(first.beats >= beats_for(Camera::PlanetIn.min_seconds(), beat), "a planet needs its beats");
-    assert_eq!(first.enter, Enter::Cut, "nothing to whip from before the first shot");
-    let c2 = plan.shots.iter().find(|s| s.clip == "c2").unwrap();
-    assert!(c2.camera.for_kind(Kind::Flat), "no orbit on a flat clip: {c2:?}");
-    let whip = plan.shots.iter().find(|s| s.camera == Camera::WhipPan).unwrap();
-    assert_ne!(whip.look, whip.to, "a whip turns between two things");
-    assert_eq!(plan.shots.iter().filter(|s| s.camera == Camera::BarrelRoll).count(), 1, "one barrel roll");
-    assert!(plan.shots.iter().all(|s| s.text.as_deref().is_none_or(english)), "English text only");
+    assert_eq!(plan.shots.len(), slots.len(), "{:?}", plan.notes);
+    assert_eq!(plan.beats(), 40);
+    assert_eq!((plan.shots[0].camera, plan.shots[0].text.as_deref()), (Camera::PlanetIn, Some("Weekend Away")));
+    for (k, s) in plan.shots.iter().enumerate() {
+        let c = lib.iter().find(|c| c.id == s.clip).unwrap();
+        assert!(s.camera.for_kind(c.kind), "{s:?}");
+        assert!(s.camera != Camera::PlanetIn || k == 0, "{s:?}");
+        assert!(s.camera != Camera::PlanetOut || k + 1 == plan.shots.len(), "{s:?}");
+        assert!(f64::from(s.beats) * beat + 1e-9 >= s.camera.min_seconds(), "{s:?}");
+        if s.camera == Camera::WhipPan {
+            assert!(s.look.is_some() && s.look != s.to, "{s:?}");
+        }
+        assert!(s.text.as_deref().is_none_or(english), "{s:?}");
+    }
+    let ids: BTreeSet<&str> = plan.shots.iter().map(|s| s.clip.as_str()).collect();
+    assert_eq!(ids.len(), plan.shots.len(), "each moment once");
     assert!(plan.notes.iter().any(|n| n.contains("c9")), "{:?}", plan.notes);
+    // the plan wrapped as the example was, or under another name
+    for wrapped in [json!({"answer": {"shots": [{"clip": "c1", "camera": "orbit"}]}}), json!({"shot_list": [{"clip": "c1"}]})] {
+        assert_eq!(validate(&wrapped, &lib, &o, beat, 120.0, &slots).unwrap().shots[0].clip, "c1", "{wrapped}");
+    }
+    // three moments of one file in a row: the third is another clip
+    let mut same = lib.clone();
+    for c in same.iter_mut().take(3) {
+        c.item = 1;
+    }
+    let p = validate(&json!({"shots": [{"clip": "c1"}, {"clip": "c2"}, {"clip": "c3"}, {"clip": "c4"}]}), &same, &o, beat, 120.0, &slots).unwrap();
+    let items: Vec<u64> = p.shots.iter().map(|s| same.iter().find(|c| c.id == s.clip).unwrap().item).collect();
+    assert!(items.windows(3).all(|w| !(w[0] == w[1] && w[1] == w[2])), "{items:?} {:?}", p.notes);
+    assert!(p.notes.iter().any(|n| n.contains("third shot")), "{:?}", p.notes);
     // indoors, no reveal from the sky
     let mut inside = lib.clone();
     inside[2].indoor = true;
-    let p = validate(&json!({"shots": [{"clip": "c3", "beats": 40, "camera": "reveal"}]}), &inside, &o, beat, 120.0).unwrap();
-    assert_eq!(p.shots[0].camera, Camera::Drift, "{:?}", p.notes);
-    // the plan wrapped as the example was, or under another name
-    for wrapped in [json!({"answer": {"shots": [{"clip": "c1", "beats": 40, "camera": "orbit"}]}}), json!({"shot_list": [{"clip": "c1", "beats": 40}]})] {
-        assert_eq!(validate(&wrapped, &lib, &o, beat, 120.0).unwrap().shots[0].clip, "c1", "{wrapped}");
-    }
+    let p = validate(&json!({"shots": [{"slot": 2, "clip": "c3", "camera": "reveal"}]}), &inside, &o, beat, 120.0, &slots).unwrap();
+    assert!(p.shots.iter().all(|s| s.camera != Camera::Reveal), "{:?}", p.notes);
     // nothing usable
-    let e = validate(&json!({"title": "x", "cuts": 3}), &lib, &o, beat, 120.0).unwrap_err();
+    let e = validate(&json!({"title": "x", "cuts": 3}), &lib, &o, beat, 120.0, &slots).unwrap_err();
     assert!(e.contains("title") && e.contains("cuts"), "{e}");
-    assert!(validate(&json!({"shots": []}), &lib, &o, beat, 120.0).is_err());
-    assert!(validate(&json!({"shots": [{"clip": "nope"}]}), &lib, &o, beat, 120.0).is_err());
-    assert!(validate(&json!("garbage"), &lib, &o, beat, 120.0).is_err());
+    assert!(validate(&json!({"shots": []}), &lib, &o, beat, 120.0, &slots).is_err());
+    assert!(validate(&json!({"shots": [{"clip": "nope"}]}), &lib, &o, beat, 120.0, &slots).is_err());
+    assert!(validate(&json!("garbage"), &lib, &o, beat, 120.0, &slots).is_err());
 }
 
 #[test]
@@ -262,11 +290,19 @@ async fn the_model_directs_a_whole_edit() {
         r["plan"]["shots"].as_array().unwrap().iter().filter_map(|s| s["clip"].as_str().map(str::to_string)).collect()
     };
     let shots: Vec<Value> = short_ids.iter().map(|c| json!({"clip": c, "beats": 4, "camera": "pushIn"})).collect();
-    let model = FixedModel::new(vec![json!({"title": "Demo Day", "mood": "happy", "shots": shots})]);
+    // (the first answer fails, as a reply cut short would: the model is asked again)
+    let model = crate::llm::FnModel::new("fixed", {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let answer = json!({"title": "Demo Day", "mood": "happy", "shots": shots});
+        move |_, _, _| {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 { Err(AutoCutError::Llm("not JSON".into())) } else { Ok(answer.clone()) }
+        }
+    });
     let mut lines = |_: &str| {};
     let r = make(&ex, &json!({"brief": "a 10 s reel", "seconds": 10, "bpm": 120, "captions": false}), Some(&model), &mut lines).await.unwrap();
     assert_eq!(r["director"], "model:fixed", "{r}");
     assert_eq!(r["plan"]["title"], "Demo Day");
+    assert!(r["plan"]["notes"][0].as_str().unwrap().contains("asked again"), "{r}");
     let seq = r["sequence"].as_u64().expect("a sequence");
     let s = ex.0.lock().unwrap();
     let q = s.project.sequence(filmcraft_engine::project::ItemId(seq)).unwrap();

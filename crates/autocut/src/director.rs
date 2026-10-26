@@ -48,6 +48,9 @@ pub const MIN_SECONDS: f64 = 6.0;
 pub const MAX_SECONDS: f64 = 300.0;
 /// Frames a second of the edit.
 pub const FPS: f64 = 30.0;
+/// The context the directing model is given, tokens: the shots' facts of a long library and the
+/// plan fit.
+pub const CONTEXT_TOKENS: u32 = 16_384;
 /// Shots the model is told about, at most (the best of a long library).
 pub const MAX_CANDIDATES: usize = 48;
 /// 360° shots looked round for action, at most.
@@ -254,6 +257,21 @@ pub fn title_from_brief(brief: &str) -> Option<String> {
         .collect();
     let t = words.join(" ");
     (!t.trim().is_empty() && english(&t)).then(|| chars(&t, MAX_TITLE_CHARS))
+}
+
+/// A title as titles are set: an all-lower-case one gets capitals ("weekend in motion" →
+/// "Weekend In Motion"); one with capitals of its own stays as written.
+pub fn title_case(s: &str) -> String {
+    if s.chars().any(char::is_uppercase) {
+        return s.to_string();
+    }
+    s.split(' ')
+        .map(|w| {
+            let mut cs = w.chars();
+            cs.next().map(|f| f.to_uppercase().chain(cs).collect()).unwrap_or_default()
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
 }
 
 /// Whether `s` is written in the Latin alphabet (the on-screen text is English).
@@ -808,6 +826,10 @@ fn beats_for(secs: f64, beat: f64) -> u32 {
     if n > 2 && n % 2 == 1 { n + 1 } else { n }
 }
 
+/// The longest a shot holds, seconds (an orbit, a hyperlapse a little longer): a reel keeps
+/// moving.
+pub const MAX_SHOT_SECONDS: f64 = 6.0;
+
 /// The beat of a tempo, seconds.
 pub fn beat_of(bpm: f64) -> f64 {
     60.0 / bpm.clamp(BPM_RANGE.0, BPM_RANGE.1)
@@ -1045,273 +1067,317 @@ fn whips(shots: &[PlannedShot]) -> usize {
 // the model's plan
 // ---------------------------------------------------------------------------------------------
 
-const DIRECTOR_SYSTEM: &str = "You are a film director and editor cutting a short, catchy social video from the user's own clips: normal clips and 360° clips (a 360° clip films every direction at once; you choose where its virtual camera looks and how it moves). Cut on the beat of the music. Open with a hook — a 360° clip's tiny planet intro (planetIn) when there is a good one — then tell the story in filming order, alternating 360° and normal clips, and end on a closer (a 360° planetOut, or a wide shot). Keep it tasteful: each 360° move at most twice, a barrel roll at most once, no gimmicks for their own sake. Vary shot lengths with the energy. Use the clip ids, look ids and camera names you are given, and nothing else. The title and any text are short English. Answer with JSON only.";
+const DIRECTOR_SYSTEM: &str = "You are a film director cutting a short, catchy social video from the user's own clips: normal clips and 360° clips (a 360° clip films every direction at once; you choose where its virtual camera looks and how it moves). The edit's rhythm is set: a list of slots, each a number of beats of the music. Fill every slot with one clip and a camera. Open with a hook — a 360° clip's tiny planet intro (planetIn) when there is a good one — tell the story in filming order, alternate 360° and normal clips, and close the last slot (a 360° planetOut, or a calm wide shot). Keep it tasteful: each move at most twice, a barrel roll at most once. Use only the clip ids, look ids and camera names you are given. The title and any text are short English. Answer with JSON only.";
 
-/// What the model is told: the brief, the length in beats, the cameras, the clips.
-pub fn director_prompt(cands: &[&Candidate], o: &Options, beat: f64, total: u32) -> String {
-    let cams: Vec<Value> = Camera::ALL.iter().map(|c| json!({"camera": c.id(), "means": c.meaning(), "minBeats": beats_for(c.min_seconds(), beat)})).collect();
-    let clips: Vec<Value> = cands
-        .iter()
-        .map(|c| {
-            let mut v = json!({
-                "clip": c.id,
-                "kind": c.kind,
-                "seconds": round2(c.seconds()),
-                "what": c.caption,
-                "energy": round2(c.energy),
-                "quality": round2(c.quality),
-                "hook": round2(c.hook),
-            });
-            if c.wide {
-                v["wide"] = json!(true);
-            }
-            if c.indoor {
-                v["indoors"] = json!(true);
-            }
-            if c.moving {
-                v["moving"] = json!(true);
-            }
-            if let Some(s) = &c.said {
-                v["says"] = json!(chars(s, 100));
-            }
-            if c.kind == Kind::Vr {
-                v["looks"] = json!(c.looks.iter().take(4).map(|l| json!({"look": l.id, "what": l.what, "yaw": l.yaw.round()})).collect::<Vec<_>>());
-            }
-            v
-        })
-        .collect();
-    let answer = json!({
-        "title": "a short English title (at most 5 words)",
-        "mood": MOODS.join("|"),
-        "shots": [{"clip": "c1", "beats": 8, "camera": "planetIn", "look": "c1a", "to": null, "enter": "cut|dissolve|whip", "text": "optional short English text, or null", "why": "one short reason"}],
-    });
-    json!({
-        "brief": o.brief,
-        "seconds": o.seconds,
-        "aspect": o.aspect,
-        "beatSeconds": round2(beat),
-        "totalBeats": total,
-        "rules": [
-            format!("the shots' beats add up to exactly {total}"),
-            "a shot's beats are at least its camera's minBeats",
-            "360 cameras only on 360 clips; a normal clip uses hold, pushIn, follow or speedRamp",
-            "whipPan needs `look` and `to`: two different looks of that clip",
-            "a clip may be used twice only if it is long and the two shots look at different things",
-            "enter `whip` only between two 360 shots; `dissolve` into the last shot at most",
-        ],
-        "cameras": cams,
-        "clips": clips,
-        "answer": answer,
-    })
-    .to_string()
+/// What a slot of the rhythm is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Role {
+    Hook,
+    Body,
+    Ending,
 }
 
-/// Ask the model for a plan (its raw answer).
-pub async fn model_plan(model: &dyn ChatModel, cands: &[&Candidate], o: &Options, beat: f64, total: u32) -> Result<Value, AutoCutError> {
-    model.complete_json(DIRECTOR_SYSTEM, &director_prompt(cands, o, beat, total), &[]).await
+/// One slot of the edit's rhythm: its length in beats and what it is for.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Slot {
+    pub beats: u32,
+    pub role: Role,
 }
 
-/// The model's plan made sound: unknown clips dropped, cameras fitted to the clip, lengths at
-/// least what their camera needs and inside the clip's media, looks checked, a barrel roll at
-/// most once, the text English, the total brought to the length asked (shots shortened or
-/// dropped from the end, or the longest held for longer, else rules' shots added). The notes
-/// say every repair. `Err` when nothing usable is left.
-pub fn validate(v: &Value, cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Result<Plan, String> {
-    let total = ((o.seconds / beat).round() as u32).max(4);
+/// The rhythm of an edit `total` beats long at a beat of `beat` seconds: a hook long enough for
+/// a tiny planet to open, body shots alternating about 2.4 s and 1.8 s, an ending; never more
+/// slots than `available` moments.
+pub fn rhythm(total: u32, beat: f64, available: usize) -> Vec<Slot> {
+    let hook = beats_for(2.8, beat);
+    let end = beats_for(2.2, beat);
+    let pattern = [beats_for(2.4, beat), beats_for(1.8, beat)];
+    let mut out = vec![Slot { beats: hook.min(total.max(1)), role: Role::Hook }];
+    let mut left = total.saturating_sub(out.iter().map(|s| s.beats).sum::<u32>());
+    if left == 0 {
+        return out;
+    }
+    if left <= end || available < 2 {
+        out.push(Slot { beats: left, role: Role::Ending });
+        return out;
+    }
+    left -= end;
+    let mut k = 0usize;
+    let room = available.saturating_sub(2).max(1);
+    while left > 0 && k < room.min(MAX_SHOTS) {
+        let b = pattern.get(k % 2).copied().unwrap_or(4);
+        if left < b + pattern[1].min(pattern[0]) / 2 {
+            // the remainder joins this slot rather than making a stub
+            out.push(Slot { beats: left, role: Role::Body });
+            left = 0;
+            break;
+        }
+        out.push(Slot { beats: b, role: Role::Body });
+        left -= b;
+        k += 1;
+    }
+    // more beats than moments: the body slots take them, up to their ceiling
+    let mut i = 1usize;
+    let mut guard = 0usize;
+    while left > 0 && guard < 4096 && out.len() > 1 {
+        if let Some(s) = out.get_mut(i)
+            && s.beats < beats_for(MAX_SHOT_SECONDS, beat)
+        {
+            s.beats += 1;
+            left -= 1;
+        }
+        i = if i + 1 >= out.len() { 1 } else { i + 1 };
+        guard += 1;
+    }
+    out.push(Slot { beats: end + left, role: Role::Ending });
+    out
+}
+
+/// What the model is told, as compact lines rather than one JSON object (a small model given a
+/// large JSON input tends to echo it back instead of answering): the brief, the slots, the
+/// cameras, one line a clip, the rules and the reply's shape.
+pub fn director_prompt(cands: &[&Candidate], o: &Options, beat: f64, slots: &[Slot]) -> String {
+    let one_line = |t: &str| t.replace(['\n', '\r', '|'], " ");
+    let mut out = String::new();
+    out.push_str(&format!("Brief: \"{}\"\n", one_line(&o.brief)));
+    out.push_str(&format!("The video: {:.0} s, {}, {} slots, a beat is {:.2} s.\n", o.seconds, o.aspect, slots.len(), beat));
+    let sl: Vec<String> = slots.iter().enumerate().map(|(k, s)| format!("{}:{}", k + 1, s.beats)).collect();
+    out.push_str(&format!("Slots (number:beats; slot 1 is the hook, slot {} the ending): {}\n", slots.len(), sl.join(" ")));
+    out.push_str("Cameras (name, minimum beats, what it does):\n");
+    for c in Camera::ALL {
+        out.push_str(&format!("- {} {} — {}\n", c.id(), beats_for(c.min_seconds(), beat), c.meaning()));
+    }
+    out.push_str("Clips (id | kind | file | energy | quality | notes | what it shows | looks | cameras it may use):\n");
+    for c in cands {
+        let mut notes: Vec<&str> = Vec::new();
+        if c.wide {
+            notes.push("wide");
+        }
+        if c.indoor {
+            notes.push("indoors");
+        }
+        if c.moving {
+            notes.push("moving");
+        }
+        let looks = if c.kind == Kind::Vr {
+            c.looks.iter().take(4).map(|l| format!("{} {}", l.id, one_line(&l.what))).collect::<Vec<_>>().join("; ")
+        } else {
+            "-".into()
+        };
+        let cams: Vec<&str> = Camera::ALL.iter().filter(|m| m.for_kind(c.kind) && !(**m == Camera::Reveal && c.indoor)).map(|m| m.id()).collect();
+        let says = c.said.as_deref().map(|s| format!(" (says: \"{}\")", chars(&one_line(s), 80))).unwrap_or_default();
+        out.push_str(&format!(
+            "{} | {} | {} | {:.1} | {:.1} | {} | {}{} | {} | {}\n",
+            c.id,
+            kind_word(c.kind),
+            chars(&c.name, 32),
+            c.energy,
+            c.quality,
+            if notes.is_empty() { "-".to_string() } else { notes.join(",") },
+            one_line(&c.caption),
+            says,
+            looks,
+            cams.join(",")
+        ));
+    }
+    out.push_str("Rules: one shot per slot, in slot order; a clip id at most once; never the same file in two slots in a row; a slot's camera is one its clip may use, and its minimum beats fit the slot; planetIn only in slot 1, planetOut only in the last slot; a whipPan names `look` and `to`, two different looks of its clip; text is short English, usually only in slot 1.\n");
+    out.push_str(&format!(
+        "Reply with only this JSON, one entry per slot:\n{{\"title\": \"at most 5 English words\", \"mood\": \"{}\", \"shots\": [{{\"slot\": 1, \"clip\": \"c1\", \"camera\": \"planetIn\", \"look\": \"c1a\", \"to\": null, \"text\": \"the title\"}}]}}\n",
+        MOODS.join("|")
+    ));
+    out
+}
+
+/// Ask the model to fill the slots: its raw answer, and how many times it was asked (a reply
+/// that is not JSON — cut short, or malformed — is asked for once more).
+pub async fn model_plan(model: &dyn ChatModel, cands: &[&Candidate], o: &Options, beat: f64, slots: &[Slot]) -> Result<(Value, usize), AutoCutError> {
+    let prompt = director_prompt(cands, o, beat, slots);
+    match model.complete_json(DIRECTOR_SYSTEM, &prompt, &[]).await {
+        Ok(v) => Ok((v, 1)),
+        Err(first) => match model.complete_json(DIRECTOR_SYSTEM, &prompt, &[]).await {
+            Ok(v) => Ok((v, 2)),
+            Err(_) => Err(first),
+        },
+    }
+}
+
+/// A camera for candidate `c` in a shot of `beats`: `asked` when it fits — the clip's kind, the
+/// slot's length, a planet only at the ends, no sky reveal indoors, one barrel roll, a whip with
+/// two looks — else the rules' choice that fits, else a push in. The notes say each change.
+#[allow(clippy::too_many_arguments)]
+fn fit_camera(
+    asked: Option<Camera>,
+    c: &Candidate,
+    beats: u32,
+    beat: f64,
+    slot: usize,
+    last: bool,
+    used: &HashMap<Camera, usize>,
+    frame_aspect: f64,
+    notes: &mut Vec<String>,
+) -> Camera {
+    let secs = f64::from(beats) * beat;
+    let ok = |m: Camera| -> Result<(), String> {
+        if !m.for_kind(c.kind) {
+            return Err(format!("{} is not for a {} clip", m.id(), kind_word(c.kind)));
+        }
+        if beats_for(m.min_seconds(), beat) > beats {
+            return Err(format!("{} needs more than the slot's {beats} beats", m.id()));
+        }
+        if m == Camera::PlanetIn && slot != 0 {
+            return Err("a tiny planet opens the edit only".into());
+        }
+        if m == Camera::PlanetOut && !last {
+            return Err("a planet outro closes the edit only".into());
+        }
+        if m == Camera::Reveal && c.indoor {
+            return Err("indoors a reveal from the sky shows the ceiling".into());
+        }
+        if m == Camera::BarrelRoll && used.get(&Camera::BarrelRoll).copied().unwrap_or(0) >= 1 {
+            return Err("one barrel roll is enough".into());
+        }
+        if m == Camera::WhipPan && c.second_look().is_none() {
+            return Err("a whip pan needs two things to turn between".into());
+        }
+        if m == Camera::Hyperlapse && window_from(c, secs * m.speed()).is_none() {
+            return Err("not enough footage for a hyperlapse".into());
+        }
+        Ok(())
+    };
+    if let Some(m) = asked {
+        match ok(m) {
+            Ok(()) => return m,
+            Err(why) => {
+                let r = [rules_camera(c, secs, used, None, frame_aspect), Camera::PushIn, Camera::Hold]
+                    .into_iter()
+                    .find(|r| ok(*r).is_ok())
+                    .unwrap_or(Camera::Hold);
+                notes.push(format!("slot {} ({}): {why}: {}", slot + 1, c.id, r.id()));
+                return r;
+            }
+        }
+    }
+    [rules_camera(c, secs, used, None, frame_aspect), Camera::PushIn, Camera::Hold].into_iter().find(|r| ok(*r).is_ok()).unwrap_or(Camera::Hold)
+}
+
+/// The model's answer made into a plan on `slots`: each slot's pick (by its `slot`, else its
+/// place in the list) kept when its clip exists, has the footage and is not the same moment
+/// again or a third shot of one file in a row — its camera fitted ([`fit_camera`]) and its looks
+/// checked — else the slot is filled by rules (the next unused clip in filming order, the kinds
+/// taking turns). The text must be English. The notes say every repair. `Err` when the answer
+/// has no shots at all.
+pub fn validate(v: &Value, cands: &[Candidate], o: &Options, beat: f64, bpm: f64, slots: &[Slot]) -> Result<Plan, String> {
     let v = plan_body(v);
     let list = shots_in(v).ok_or_else(|| {
         let keys: Vec<&str> = v.as_object().map(|o| o.keys().map(String::as_str).take(8).collect()).unwrap_or_default();
         format!("the plan has no shots (it answered with {})", if keys.is_empty() { "no object".to_string() } else { keys.join(", ") })
     })?;
-    let mut notes: Vec<String> = Vec::new();
-    let mut shots: Vec<PlannedShot> = Vec::new();
-    let mut used_windows: Vec<(String, f64, f64, Option<String>)> = Vec::new();
-    let mut rolls = 0usize;
-    let mut cams: HashMap<Camera, usize> = HashMap::new();
     let frame_aspect = {
         let (w, h) = o.frame();
         f64::from(w) / f64::from(h.max(1))
     };
-    for (k, s) in list.iter().enumerate().take(MAX_SHOTS) {
-        let Some(c) = s["clip"].as_str().and_then(|id| cands.iter().find(|c| c.id == id)) else {
-            notes.push(format!("shot {}: no clip `{}`: left out", k + 1, chars(s["clip"].as_str().unwrap_or("?"), 20)));
+    let mut notes: Vec<String> = Vec::new();
+    let mut shots: Vec<PlannedShot> = Vec::new();
+    let mut used_ids: BTreeSet<String> = BTreeSet::new();
+    let mut cams: HashMap<Camera, usize> = HashMap::new();
+    let mut from_model = 0usize;
+    let n = slots.len();
+    let item_of = |id: &str| cands.iter().find(|c| c.id == id).map(|c| c.item);
+    for (k, slot) in slots.iter().enumerate() {
+        let last = k + 1 == n;
+        let asked = list.iter().find(|s| s["slot"].as_u64() == Some(k as u64 + 1)).or_else(|| list.get(k)).filter(|s| s.is_object());
+        let third = |item: u64, shots: &[PlannedShot]| {
+            let m = shots.len();
+            m >= 2 && shots.get(m - 1).and_then(|s| item_of(&s.clip)) == Some(item) && shots.get(m - 2).and_then(|s| item_of(&s.clip)) == Some(item)
+        };
+        let need = |m: Camera| f64::from(slot.beats) * beat * m.speed();
+        // the model's pick
+        let mut pick: Option<(&Candidate, Option<Camera>, Value)> = None;
+        if let Some(s) = asked {
+            match s["clip"].as_str().and_then(|id| cands.iter().find(|c| c.id == id)) {
+                None => notes.push(format!("slot {}: no clip `{}`: filled by rules", k + 1, chars(s["clip"].as_str().unwrap_or("?"), 20))),
+                Some(c) if used_ids.contains(&c.id) => notes.push(format!("slot {} ({}): the same moment again: filled by rules", k + 1, c.id)),
+                Some(c) if third(c.item, &shots) => notes.push(format!("slot {} ({}): a third shot of one file in a row: filled by rules", k + 1, c.id)),
+                Some(c) if window_from(c, need(Camera::Hold)).is_none() => {
+                    notes.push(format!("slot {} ({}): the clip is too short for the slot: filled by rules", k + 1, c.id))
+                }
+                Some(c) => pick = Some((c, s["camera"].as_str().and_then(Camera::from_id), s.clone())),
+            }
+        }
+        // else rules: the next unused clip in filming order, the kinds taking turns
+        if pick.is_none() {
+            let after = shots.last().and_then(|s| cands.iter().find(|c| c.id == s.clip)).map_or((0, 0.0), |c| (c.order, c.start));
+            let last_kind = shots.last().and_then(|s| cands.iter().find(|c| c.id == s.clip)).map(|c| c.kind);
+            let fits = |c: &&Candidate| !used_ids.contains(&c.id) && !third(c.item, &shots) && window_from(c, need(Camera::Hold)).is_some();
+            let mut later: Vec<&Candidate> = cands.iter().filter(fits).collect();
+            later.sort_by(|a, b| {
+                let ka = ((a.order, a.start) < after, Some(a.kind) == last_kind, a.order, a.start.to_bits());
+                let kb = ((b.order, b.start) < after, Some(b.kind) == last_kind, b.order, b.start.to_bits());
+                ka.cmp(&kb)
+            });
+            if slot.role == Role::Hook {
+                later.sort_by(|a, b| (b.kind == Kind::Vr).cmp(&(a.kind == Kind::Vr)).then((b.hook + b.energy).total_cmp(&(a.hook + a.energy))));
+            }
+            pick = later.first().map(|c| (*c, None, Value::Null));
+        }
+        let Some((c, asked_cam, s)) = pick else {
+            notes.push(format!("slot {}: nothing left to fill it", k + 1));
             continue;
         };
-        let asked = s["camera"].as_str().and_then(Camera::from_id);
-        let mut cam = match asked {
-            Some(m) if m.for_kind(c.kind) => m,
-            Some(m) => {
-                let r = rules_camera(c, 2.0, &cams, None, frame_aspect);
-                notes.push(format!("shot {} ({}): {} is not for a {} clip: {}", k + 1, c.id, m.id(), kind_word(c.kind), r.id()));
-                r
-            }
-            None => rules_camera(c, 2.0, &cams, None, frame_aspect),
-        };
-        if cam == Camera::Reveal && c.indoor {
-            notes.push(format!("shot {} ({}): indoors a reveal from the sky shows the ceiling: a drift instead", k + 1, c.id));
-            cam = Camera::Drift;
+        if !s.is_null() {
+            from_model += 1;
         }
-        if cam == Camera::BarrelRoll {
-            rolls += 1;
-            if rolls > 1 {
-                notes.push(format!("shot {} ({}): a second barrel roll: a drift instead", k + 1, c.id));
-                cam = Camera::Drift;
-            }
-        }
-        let mut look = s["look"].as_str().filter(|l| c.look(l).is_some()).map(str::to_string);
-        let mut to = s["to"].as_str().filter(|l| c.look(l).is_some()).map(str::to_string);
-        if c.kind == Kind::Vr && look.is_none() {
-            look = c.looks.first().map(|l| l.id.clone());
-        }
+        let cam = fit_camera(asked_cam, c, slot.beats, beat, k, last, &cams, frame_aspect, &mut notes);
+        let Some(from) = window_from(c, need(cam)) else { continue };
+        let mut look = s["look"].as_str().filter(|l| c.look(l).is_some()).map(str::to_string).or_else(|| c.looks.first().map(|l| l.id.clone()));
+        let mut to = None;
         if cam == Camera::WhipPan {
-            let far = |a: &Option<String>, b: &Option<String>| match (a.as_deref().and_then(|x| c.look(x)), b.as_deref().and_then(|x| c.look(x))) {
+            let far = |a: Option<&str>, b: Option<&str>| match (a.and_then(|x| c.look(x)), b.and_then(|x| c.look(x))) {
                 (Some(x), Some(y)) => angle_between(x.yaw, y.yaw) >= LOOKS_APART,
                 _ => false,
             };
-            if !far(&look, &to) {
-                match c.second_look() {
-                    Some(l2) => {
-                        look = c.looks.first().map(|l| l.id.clone());
-                        to = Some(l2.id.clone());
-                    }
-                    None => {
-                        notes.push(format!("shot {} ({}): a whip pan needs two things to turn between: a drift instead", k + 1, c.id));
-                        cam = Camera::Drift;
-                        to = None;
-                    }
-                }
+            to = s["to"].as_str().filter(|t| far(look.as_deref(), Some(t))).map(str::to_string);
+            if to.is_none() {
+                look = c.looks.first().map(|l| l.id.clone());
+                to = c.second_look().map(|l| l.id.clone());
             }
-        } else {
-            to = None;
         }
-        let min = beats_for(cam.min_seconds(), beat);
-        let asked_beats = s["beats"].as_u64().map_or(min, |b| u32::try_from(b.min(64)).unwrap_or(64).max(1));
-        let mut beats = asked_beats.max(min);
-        if beats != asked_beats {
-            notes.push(format!("shot {} ({}): {} needs {min} beats, not {asked_beats}", k + 1, c.id, cam.id()));
-        }
-        // inside the media: shorter, else another camera, else out
-        let mut from = None;
-        while beats >= 1 {
-            let need = f64::from(beats) * beat * cam.speed();
-            let at = finite(&s["from"]).filter(|f| *f >= 0.0 && *f + need <= c.media_seconds + 1e-6 && c.kind != Kind::Photo);
-            from = at.or_else(|| window_from(c, need));
-            if from.is_some() || beats <= min {
-                break;
-            }
-            beats -= 1;
-        }
-        let Some(from) = from.or_else(|| {
-            if cam == Camera::Hyperlapse {
-                cam = Camera::Drift;
-                beats = beats_for(Camera::Drift.min_seconds(), beat);
-                window_from(c, f64::from(beats) * beat)
-            } else {
-                None
-            }
-        }) else {
-            notes.push(format!("shot {} ({}): the clip is too short for {} beats: left out", k + 1, c.id, beats));
-            continue;
-        };
-        // the same moment of one clip, looking the same way, once
-        let span = (from, from + f64::from(beats) * beat * cam.speed());
-        if used_windows.iter().any(|(id, a, b, l)| *id == c.id && span.0 < *b && span.1 > *a && (c.kind != Kind::Vr || *l == look)) {
-            notes.push(format!("shot {} ({}): the same moment again: left out", k + 1, c.id));
-            continue;
-        }
-        used_windows.push((c.id.clone(), span.0, span.1, look.clone()));
-        *cams.entry(cam).or_insert(0) += 1;
         let text = s["text"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(|t| chars(t, MAX_TITLE_CHARS));
         let text = match text {
             Some(t) if !english(&t) => {
-                notes.push(format!("shot {} ({}): its text is not English: left out", k + 1, c.id));
+                notes.push(format!("slot {} ({}): its text is not English: left out", k + 1, c.id));
                 None
             }
             t => t,
         };
-        let enter = match s["enter"].as_str().unwrap_or("cut") {
-            "whip" => Enter::Whip,
-            "dissolve" => Enter::Dissolve,
-            _ => Enter::Cut,
+        *cams.entry(cam).or_insert(0) += 1;
+        used_ids.insert(c.id.clone());
+        let prev_vr = shots.last().and_then(|p| cands.iter().find(|x| x.id == p.clip)).is_some_and(|x| x.kind == Kind::Vr);
+        let whips = shots.iter().filter(|s| s.enter == Enter::Whip).count();
+        let enter = if last && n > 2 {
+            Enter::Dissolve
+        } else if k > 0 && prev_vr && c.kind == Kind::Vr && whips < 3 && s["enter"].as_str() != Some("cut") {
+            Enter::Whip
+        } else {
+            Enter::Cut
         };
+        let why = s["why"].as_str().map(|w| chars(w, 160)).unwrap_or_else(|| if s.is_null() { format!("{} (rules)", c.caption) } else { String::new() });
         shots.push(PlannedShot {
             clip: c.id.clone(),
             from: round2(from),
-            beats,
+            beats: slot.beats,
             camera: cam,
-            look,
+            look: if c.kind == Kind::Vr { look } else { None },
             to,
             enter,
             text,
-            why: chars(s["why"].as_str().unwrap_or_default(), 160),
+            why,
         });
     }
-    if shots.is_empty() {
+    if from_model == 0 {
         return Err("none of the plan's shots could be used".into());
     }
-    // entering shots: a whip only between two 360° shots, a dissolve only into the last
-    let kinds: Vec<Kind> = shots.iter().map(|s| cands.iter().find(|c| c.id == s.clip).map_or(Kind::Flat, |c| c.kind)).collect();
-    let n = shots.len();
-    for i in 0..n {
-        let prev = i.checked_sub(1).and_then(|j| kinds.get(j)).copied();
-        let me = kinds.get(i).copied();
-        if let Some(s) = shots.get_mut(i) {
-            let whip_ok = prev == Some(Kind::Vr) && me == Some(Kind::Vr);
-            let wrong = i == 0 || (s.enter == Enter::Whip && !whip_ok) || (s.enter == Enter::Dissolve && i + 1 != n);
-            if wrong {
-                s.enter = Enter::Cut;
-            }
-        }
-    }
-    // the length asked
-    let mut sum: u32 = shots.iter().map(|s| s.beats).sum();
-    while sum > total && shots.len() > 1 {
-        // shorten the longest body shot that may be shorter, else drop the last body shot
-        let mins: Vec<u32> = shots.iter().map(|s| beats_for(s.camera.min_seconds(), beat)).collect();
-        let body = 1..shots.len().saturating_sub(1).max(1);
-        let longest =
-            body.clone().filter(|&i| shots.get(i).zip(mins.get(i)).is_some_and(|(s, m)| s.beats > *m)).max_by_key(|&i| shots.get(i).map_or(0, |s| s.beats));
-        match longest {
-            Some(i) => {
-                if let Some(s) = shots.get_mut(i) {
-                    s.beats -= 1;
-                    sum -= 1;
-                }
-            }
-            None => {
-                let i = if shots.len() > 2 { shots.len() - 2 } else { shots.len() - 1 };
-                let gone = shots.remove(i);
-                sum = sum.saturating_sub(gone.beats);
-                notes.push(format!("{} left out: the shots ran past {total} beats", gone.clip));
-            }
-        }
-    }
-    if sum > total
-        && let Some(s) = shots.first_mut()
-    {
-        s.beats = s.beats.saturating_sub(sum - total).max(1);
-        sum = total;
-    }
-    if sum < total {
-        let mut k = 0usize;
-        while sum < total && k < 512 {
-            let i = k % shots.len();
-            if let Some(s) = shots.get_mut(i)
-                && let Some(c) = cands.iter().find(|c| c.id == s.clip)
-            {
-                let need = f64::from(s.beats + 1) * beat * s.camera.speed();
-                if s.from + need <= c.media_seconds + 1e-6 || c.kind == Kind::Photo {
-                    s.beats += 1;
-                    sum += 1;
-                }
-            }
-            k += 1;
-        }
-        if sum < total {
-            notes.push(format!("{} beat(s) short: the clips the plan chose have no more footage", total - sum));
-        }
-    }
-    let title = v["title"].as_str().map(str::trim).filter(|t| !t.is_empty() && english(t)).map(|t| chars(t, MAX_TITLE_CHARS));
+    let title = v["title"].as_str().map(str::trim).filter(|t| !t.is_empty() && english(t)).map(|t| title_case(&chars(t, MAX_TITLE_CHARS)));
     let title = match (&o.title, title) {
         (Some(t), _) => t.clone(),
         (None, Some(t)) => t,
@@ -1618,6 +1684,9 @@ pub struct Report {
     pub commands: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
+    /// A dry run's: what the directing model was asked (system and user).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
     pub director: String,
@@ -1883,6 +1952,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     let beat = beat_of(bpm);
     let total = ((o.seconds / beat).round() as u32).max(4);
     let short = shortlist(&cands, MAX_CANDIDATES);
+    let slots = rhythm(total, beat, cands.len());
     report.candidates = short
         .iter()
         .map(|c| {
@@ -1897,10 +1967,13 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     match model {
         Some(m) => {
             lines(&format!("directing with {}", m.id()));
-            match model_plan(m, &short, &o, beat, total).await {
-                Ok(v) => match validate(&v, &cands, &o, beat, bpm) {
+            match model_plan(m, &short, &o, beat, &slots).await {
+                Ok((v, asked)) => match validate(&v, &cands, &o, beat, bpm, &slots) {
                     Ok(mut pl) => {
                         pl.by = format!("model:{}", m.id());
+                        if asked > 1 {
+                            pl.notes.insert(0, "the model's first answer was not JSON: it was asked again".into());
+                        }
                         plan = Some(pl);
                     }
                     Err(why) => report.fallbacks.push(format!("director: {}'s plan was unusable ({why}): rules directed", m.id())),
@@ -1925,6 +1998,9 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     let frame = (f64::from(fw), f64::from(fh));
     // ---- dry run: the plan and its commands on the beat grid
     if o.dry_run {
+        if model.is_some() {
+            report.prompt = Some(json!({"system": DIRECTOR_SYSTEM, "user": director_prompt(&short, &o, beat, &slots)}));
+        }
         let wins = windows(&plan, &Beats::grid(bpm));
         report.steps = compile(&plan, &cands, &wins, &o, frame, beat);
         report.commands = report.steps.len();

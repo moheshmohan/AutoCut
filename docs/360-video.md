@@ -97,19 +97,23 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    their boxes — a 360° clip is indexed as its stitched panorama, so a box is a direction), the
    speech, and for every 360° moment where the action is (`media.salience360`). A shot longer
    than 12 s offers several moments.
-3. **The plan**: the brief, the shots' facts (what each shows, energy, quality, a 360° shot's
-   *looks*: the subjects and action directions it can point at) and the camera vocabulary go to
-   the local model (the script model, `qwen3:8b`, else `phi4-mini`), which answers with a shot
-   list: each shot a clip, its length in beats, its camera, where a 360° camera looks (and turns
-   to), how it comes in, any English text. Every answer is checked and repaired — unknown clips
-   out, a 360° move on a normal clip replaced, lengths at least what the move needs and inside
-   the media, a whip pan between two different things, one barrel roll at most, English text
-   only, the total brought to the length asked — and `plan.notes` lists each repair. Without a
-   model (or with an unusable plan) rules direct: a tiny-planet hook, the story in filming order
-   with normal and 360° shots taking turns, each 360° shot's move chosen by what it shows (a whip
-   pan between two subjects, a follow of a named one that moves, a reveal or orbit of a wide
-   view, one barrel roll at most, a hyperlapse of a long quiet stretch, else a drift or push in),
-   and a planet outro. The report's `director` says who directed.
+3. **The plan**: the rhythm is set first — a hook long enough for a tiny planet to open, body
+   shots alternating about 2.4 s and 1.8 s, an ending, every length a whole number of beats
+   adding up to the length asked. The local model (the script model, `qwen3:8b`, else
+   `phi4-mini`) fills each slot from the brief and the shots' facts (what each shows, its file,
+   energy, quality, a 360° shot's *looks* — the subjects and action directions it can point at —
+   and the cameras that clip may use): a clip, its camera, where a 360° camera looks (and turns
+   to), any English text. Every pick is checked and repaired — an unknown clip, the same moment
+   twice or a third shot of one file in a row is replaced by the rules' next clip in filming
+   order; a camera that does not fit (a 360° move on a normal clip, too long for its slot, a
+   planet anywhere but the ends, a sky reveal indoors, a second barrel roll, a whip pan without
+   two things to turn between) is replaced by one that does — and `plan.notes` lists each repair.
+   A reply that is not JSON is asked for once more. Without a model (or with an unusable plan)
+   rules direct: a tiny-planet hook, the story in filming order with normal and 360° shots taking
+   turns, each 360° shot's move chosen by what it shows (a whip pan between two subjects, a
+   follow of a named one that moves, a reveal or orbit of a wide outdoor view, one barrel roll at
+   most, a hyperlapse of a long quiet stretch, else a drift or push in), and a planet outro. The
+   report's `director` says who directed.
 4. **Commands**: the plan compiles to engine commands — `timeline.place`, `clip.reframe360`,
    `clip.stabilize360`, `clip.vrMove`, `clip.follow360`, `clip.hyperlapse360`, `clip.kenBurns`,
    `clip.autoReframe`, `clip.speedRamp`, `graphics.newText`, `audio.generate`… — each shot's own
