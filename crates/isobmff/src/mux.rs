@@ -46,11 +46,14 @@ pub struct TrackConfig {
     pub media_start: Option<i64>,
     /// `hdlr` name; a sensible default is used when `None`.
     pub handler_name: Option<String>,
+    /// `uuid` boxes written at the end of the track's `trak` (user type, payload): Spherical
+    /// Video V1 metadata ([`crate::spherical::SPHERICAL_V1_UUID`]).
+    pub uuid_boxes: Vec<([u8; 16], Vec<u8>)>,
 }
 
 impl TrackConfig {
     pub fn new(entry: SampleEntry, timescale: u32) -> Self {
-        TrackConfig { entry, timescale, language: "und".into(), edits: Vec::new(), media_start: None, handler_name: None }
+        TrackConfig { entry, timescale, language: "und".into(), edits: Vec::new(), media_start: None, handler_name: None, uuid_boxes: Vec::new() }
     }
 }
 
@@ -457,6 +460,12 @@ fn write_trak(b: &mut BoxBuf, t: &WTrack, movie_ts: u32, qt: bool, shift: u64, f
     b.end(stbl);
     b.end(minf);
     b.end(mdia);
+    for (user_type, payload) in &t.cfg.uuid_boxes {
+        let u = b.start(b"uuid");
+        b.bytes(user_type);
+        b.bytes(payload);
+        b.end(u);
+    }
     b.end(trak);
     Ok(())
 }

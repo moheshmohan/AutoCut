@@ -406,6 +406,12 @@ pub struct ExportSettings {
     pub embed_captions: bool,
     pub effects: ExportEffects,
     pub metadata: ExportMetadata,
+    /// Video is VR: the picture is a whole-sphere monoscopic equirectangular panorama (a 2:1
+    /// frame), and an MP4 or QuickTime movie says so — Spherical Video V2 (`st3d`, `sv3d`) in its
+    /// sample entry and V1 (`uuid` XML) in its track — so players and video sites show it as 360°
+    /// video. Unset: on for a 360° sequence exported at 2:1 ([`Project::is_360_sequence`]).
+    #[serde(default)]
+    pub vr: Option<bool>,
     /// Two-pass state (set by the exporter).
     #[serde(skip)]
     pub h264_pass: H264Pass,
@@ -610,6 +616,7 @@ impl Default for ExportSettings {
             embed_captions: false,
             effects: ExportEffects::default(),
             metadata: ExportMetadata::default(),
+            vr: None,
             h264_pass: H264Pass::Single,
             signal: ColorSignal::default(),
             sink: None,
@@ -2193,3 +2200,5 @@ mod hdr_tests;
 
 #[cfg(test)]
 mod captions_tests;
+#[cfg(test)]
+mod vr_tests;

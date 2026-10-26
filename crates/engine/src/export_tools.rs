@@ -280,6 +280,13 @@ pub fn settings_from_params(s: &Session, p: &Value, cmd: &str) -> Result<(Option
     if let Some(v) = bool_p(p, "embedCaptions") {
         settings.embed_captions = v;
     }
+    if let Some(v) = p.get("vr").filter(|v| !v.is_null()) {
+        settings.vr = match v {
+            Value::Bool(on) => Some(*on),
+            Value::String(a) if a == "auto" => None,
+            _ => return Err(bad(cmd, "vr: true | false | \"auto\" (Video is VR; auto: as the sequence is)")),
+        };
+    }
     if let Some(v) = str_p(p, "proresProfile") {
         settings.prores_profile = v.to_string();
     }

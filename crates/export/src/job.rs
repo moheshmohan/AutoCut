@@ -95,6 +95,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use filmcraft_isobmff::spherical::{SPHERICAL_V1_UUID, SphericalBox, SphericalV1, StereoMode};
 use filmcraft_isobmff::{Brand, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use filmcraft_project::{ItemId, Project};
 use filmcraft_render::SourceProvider;
@@ -307,6 +308,20 @@ pub struct Exporter {
     t0: web_time::Instant,
 }
 
+/// Whether an export is marked as 360° video ([`ExportSettings::vr`]): as asked, or — unset — when
+/// the sequence is 360° (`sequence_360`); only a 2:1 frame (`size`) is (asking for it on another
+/// shape is an error).
+pub(crate) fn video_is_vr(asked: Option<bool>, sequence_360: bool, size: (u32, u32)) -> Result<bool> {
+    let two_to_one = (i64::from(size.0) - 2 * i64::from(size.1)).abs() <= 2;
+    match asked {
+        Some(true) if !two_to_one => {
+            Err(ExportError::Unsupported(format!("Video is VR needs a 2:1 frame (a whole-sphere equirectangular picture), not {}×{}", size.0, size.1)))
+        }
+        Some(on) => Ok(on),
+        None => Ok(sequence_360 && two_to_one),
+    }
+}
+
 /// Whether [`Exporter`] handles a format.
 pub fn stepped(format: Format) -> bool {
     matches!(
@@ -368,6 +383,7 @@ impl Exporter {
         settings.h264_pass = if two_pass { H264Pass::First } else { H264Pass::Single };
         let range = export_range(&project, seq, &settings)?;
         let pipe = Arc::new(Pipeline::new(project.clone(), seq, &settings, hdr_out)?);
+        settings.vr = Some(video_is_vr(settings.vr, project.is_360_sequence(seq), (pipe.w, pipe.h))?);
         let (f0, f1) = frame_span(pipe.rate, range);
         let nframes = (f1 - f0) as u64;
         if !settings.part_of_batch {
@@ -550,8 +566,19 @@ impl Exporter {
         let mut opts = WriterOptions::new(self.brand);
         opts.metadata = self.settings.metadata.udta();
         let mut mux = Mp4Writer::new(file, opts).map_err(|e| ExportError::Io(e.to_string()))?;
-        let mut vcfg = TrackConfig::new(self.venc.sample_entry(), self.venc.timescale());
+        let mut entry = self.venc.sample_entry();
+        let mut uuid_boxes = Vec::new();
+        if self.settings.vr == Some(true)
+            && let Some(v) = entry.video.as_mut()
+        {
+            let software = format!("FilmCraft {}", env!("CARGO_PKG_VERSION"));
+            v.stereo = Some(StereoMode::Mono);
+            v.spherical = Some(SphericalBox::equirect(&software));
+            uuid_boxes.push((SPHERICAL_V1_UUID, SphericalV1::equirect_xml(&software, "mono").into_bytes()));
+        }
+        let mut vcfg = TrackConfig::new(entry, self.venc.timescale());
         vcfg.media_start = self.venc.media_start();
+        vcfg.uuid_boxes = uuid_boxes;
         self.vt = mux.add_track(vcfg).map_err(|e| ExportError::Io(e.to_string()))?;
         self.at = match (&self.audio, &self.aenc) {
             (None, _) => None,

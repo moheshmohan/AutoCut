@@ -1320,6 +1320,20 @@ mod tests {
     }
 
     #[test]
+    fn the_export_says_video_is_vr_as_asked() {
+        let s = demo();
+        let vr = |p: Value| crate::export_tools::settings_from_params(&s, &p, "file.exportMedia").map(|(_, st)| st.vr);
+        assert_eq!(vr(json!({"format": "h264"})).unwrap(), None, "unset: as the sequence is");
+        assert_eq!(vr(json!({"format": "h264", "vr": true})).unwrap(), Some(true));
+        assert_eq!(vr(json!({"format": "h264", "vr": false})).unwrap(), Some(false));
+        assert_eq!(vr(json!({"format": "h264", "vr": "auto"})).unwrap(), None);
+        assert_eq!(vr(json!({"format": "h264", "settings": {"vr": true}})).unwrap(), Some(true));
+        assert!(vr(json!({"format": "h264", "vr": "yes"})).is_err());
+        // the demo is not a 360° sequence
+        assert!(!s.project.is_360_sequence(s.state.active_sequence.unwrap()));
+    }
+
+    #[test]
     fn a_cameras_key_changes_with_what_it_shows() {
         let def = filmcraft_project::find_effect(REFRAME).unwrap();
         let (a, mut b) = (def.instance(), def.instance());

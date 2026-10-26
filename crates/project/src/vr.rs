@@ -40,6 +40,12 @@ pub fn effect_size(e: &EffectInstance) -> Option<(u32, u32)> {
     Some((side("width", 1920), side("height", 1080)))
 }
 
+/// Whether a `vr_reframe` effect shows the whole sphere (its `output` is the equirectangular
+/// sphere) rather than a flat view.
+pub fn shows_sphere(e: &EffectInstance) -> bool {
+    matches!(e.param("output").map(|p| &p.value), Some(ParamValue::Choice(1)))
+}
+
 /// The frame a clip's virtual camera makes, if it has one.
 pub fn reframe_size(item: &TrackItem) -> Option<(u32, u32)> {
     effect_size(reframe_of(item)?)
@@ -73,6 +79,22 @@ impl Project {
     /// parent's), if it is 360°.
     pub fn vr_of(&self, item: ItemId) -> Option<&Spherical> {
         self.resolve_media(item).and_then(|(_, m, _)| m.interpret.vr.as_ref())
+    }
+
+    /// Whether a sequence is 360° video — a 2:1 frame showing the whole sphere: clips seen through
+    /// whole-sphere virtual cameras, or whole-sphere monoscopic equirectangular media not reframed
+    /// — so its export says so (Export ▸ Video is VR, on unless set).
+    pub fn is_360_sequence(&self, seq: ItemId) -> bool {
+        let Some(q) = self.sequence(seq) else { return false };
+        if q.settings.width != q.settings.height.saturating_mul(2) {
+            return false;
+        }
+        q.video_tracks.iter().flat_map(|t| &t.items).filter(|it| it.enabled).any(|it| match reframe_of(it) {
+            Some(e) => shows_sphere(e),
+            None => self
+                .vr_of(it.item)
+                .is_some_and(|v| v.is_equirect() && v.layout == filmcraft_media::spherical::StereoLayout::Mono && v.captured == [360.0, 180.0]),
+        })
     }
 
     /// The size of the picture a clip shows before Motion: its source's, or — a clip seen
