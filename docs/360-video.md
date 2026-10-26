@@ -46,7 +46,7 @@ stabilisation and following decode that instead of the two 2.9K HEVC tracks), an
 
 | Command | Does |
 |---|---|
-| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none` |
+| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
 | `media.align360` | aligns the two lenses of dual-fisheye media along their seam |
 | `clip.reframe360` | the virtual camera: `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across), `distance` (0 flat … 1 tiny planet), `output` `flat`/`sphere`, `width`/`height` (default: the sequence frame); `at` keyframes them at a clip time; `keys` writes a whole camera move; presets `natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`; `off` |
 | `clip.stabilize360` | holds the view steady: the camera's turn measured from the pictures (points tracked on cube faces, a robust rotation fit), then `smooth`/`light`/`strong` (keep the operator's turns, drop the shake) or `lock` (look one way the whole clip) |

@@ -555,6 +555,9 @@ impl MediaSource for UnsupportedAsSlate {
     fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
         self.inner.audio_stream(stream, start, frames, sample_rate)
     }
+    fn spherical(&self) -> Option<filmcraft_media::Spherical> {
+        self.inner.spherical()
+    }
 }
 
 /// Consecutive failed video frames after which a monitor treats a source as damaged. A single
@@ -602,6 +605,9 @@ impl MediaSource for DamagedAsSlate {
     }
     fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
         self.inner.audio_stream(stream, start, frames, sample_rate)
+    }
+    fn spherical(&self) -> Option<filmcraft_media::Spherical> {
+        self.inner.spherical()
     }
 }
 

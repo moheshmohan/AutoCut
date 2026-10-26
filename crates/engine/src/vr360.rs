@@ -3,7 +3,7 @@
 //! | command | does |
 //! |---|---|
 //! | `clip.reframe360` | looks at 360° clips (`clips`, default the selection, else every clip of 360° media) through a virtual camera (the `vr_reframe` effect, added when missing, framing the sequence's frame): `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across) and `distance` (0 flat … 1 tiny planet) set, or keyframed `at` a clip time, or a whole camera move as `keys`; a `preset` (`natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`) first; one undo step |
-//! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` |
+//! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` (alone, they change the item's own); with nothing to change, what the items' VR Properties are |
 //! | `media.align360` | lines the two lenses of dual-fisheye media up along their seam (a few frames across the clip, [`filmcraft_render::vr::align_lenses`]) and keeps the result in its VR Properties |
 //! | `clip.stabilize360` | holds the virtual camera steady: the camera's turn measured from the pictures frame to frame (`filmcraft_render::vr_motion`: points on cube faces, a robust rotation fit), then `mode` `smooth` / `light` / `strong` (the operator's own turns kept, the shake gone) or `lock` (the first frame's direction throughout), written as the effect's Stabilization keyframes; a job; `off` |
 //! | `clip.follow360` | turns the virtual camera to follow a subject (`target` `subject`, `box` in the clip's frame at `at`, or `face`): a wide tracking camera kept on it while the subject tracker follows it both ways from `at`, the path smoothed (`smooth` 0 close … 1 floaty) into yaw and pitch keyframes; a job |
@@ -71,7 +71,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "VR Properties…",
             menu: &["Clip", "Modify"],
             shortcut: None,
-            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"="auto","layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?}"#,
+            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?}"#,
             enabled: |_| Ok(()),
             run: vr_properties,
             journal: true,
@@ -449,7 +449,7 @@ fn media_items(s: &Session, items: &[ItemId], cmd: &str) -> Result<Vec<ItemId>> 
 fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = PROPS_CMD;
     let items = media_items(s, &items_p(s, p), cmd)?;
-    let projection = str_p(p, "projection").unwrap_or("auto");
+    let projection = str_p(p, "projection");
     let layout = match str_p(p, "layout") {
         None => None,
         Some("mono") => Some(StereoLayout::Mono),
@@ -471,19 +471,27 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
         Some(_) => return Err(bad(cmd, "`halfFov` must be within 30..135°")),
         None => None,
     };
+    // nothing to change: what the items' VR Properties are
+    if projection.is_none() && layout.is_none() && captured.is_none() && half_fov.is_none() {
+        return Ok(json!({"items": items.iter().map(|id| json!({"item": id.0, "vr": s.project.vr_of(*id)})).collect::<Vec<_>>()}));
+    }
     // what each item gets (decided before the edit: `auto` opens the file)
     let mut new: Vec<(ItemId, Option<Spherical>)> = Vec::new();
     for id in &items {
         let from_file = || s.media.full_res_source(&s.project, *id, &*s.services).and_then(|src| src.spherical());
         let mut v = match projection {
-            "auto" => from_file(),
-            "none" => None,
-            "equirectangular" => Some(Spherical::equirect()),
-            "dualFisheye" => Some(match from_file().filter(|f| !f.is_equirect()).or_else(|| s.project.vr_of(*id).filter(|v| !v.is_equirect()).cloned()) {
-                Some(f) => f,
-                None => default_dual(),
-            }),
-            o => return Err(bad(cmd, format!("`projection` is auto, equirectangular, dualFisheye or none, not `{o}`"))),
+            // only the layout, captured view or lens angle given: the item's own, changed
+            None => s.project.vr_of(*id).cloned(),
+            Some("auto") => from_file(),
+            Some("none") => None,
+            Some("equirectangular") => Some(Spherical::equirect()),
+            Some("dualFisheye") => {
+                Some(match from_file().filter(|f| !f.is_equirect()).or_else(|| s.project.vr_of(*id).filter(|v| !v.is_equirect()).cloned()) {
+                    Some(f) => f,
+                    None => default_dual(),
+                })
+            }
+            Some(o) => return Err(bad(cmd, format!("`projection` is auto, equirectangular, dualFisheye or none, not `{o}`"))),
         };
         if let Some(v) = v.as_mut() {
             if let Some(l) = layout {
@@ -1331,6 +1339,44 @@ mod tests {
         assert!(vr(json!({"format": "h264", "vr": "yes"})).is_err());
         // the demo is not a 360° sequence
         assert!(!s.project.is_360_sequence(s.state.active_sequence.unwrap()));
+    }
+
+    #[test]
+    fn a_360_export_imports_as_360_and_asking_changes_nothing() {
+        let mut s = demo();
+        let (_, item) = first_clip(&s);
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "equirectangular"})).unwrap();
+        s.execute("file.newSequence", json!({"name": "pano", "width": 320, "height": 160, "fps": 24.0})).unwrap();
+        s.execute("timeline.place", json!({"item": item.0, "track": "V1", "seconds": 0.0, "audio": false})).unwrap();
+        let dir = std::env::temp_dir().join(format!("fc-vr360-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pano.mp4").to_string_lossy().to_string();
+        let r = s
+            .execute(
+                "file.exportMedia",
+                json!({"path": path, "format": "h264", "audio": false, "range": "custom", "startSeconds": 0.0, "endSeconds": 0.25, "wait": true}),
+            )
+            .unwrap();
+        let path = r["path"].as_str().unwrap().to_string();
+        // a 360° sequence exports as 360° video by itself, and imports as 360° media
+        let mut t = Session::default();
+        let pano = ItemId(t.execute("file.import", json!({"paths": [path]})).unwrap()["items"][0].as_u64().unwrap());
+        assert_eq!(t.project.vr_of(pano), Some(&Spherical { camera: format!("FilmCraft {}", env!("CARGO_PKG_VERSION")), ..Spherical::equirect() }));
+        // asking is not changing: the properties stay, and nothing is undone
+        let undo = t.history.undo.len();
+        let r = t.execute(PROPS_CMD, json!({"items": [pano.0]})).unwrap();
+        assert_eq!(r["items"][0]["vr"]["projection"]["kind"], json!("equirectangular"), "{r}");
+        assert!(t.project.vr_of(pano).is_some());
+        assert_eq!(t.history.undo.len(), undo);
+        // `none` clears them; `auto` reads the file again (through the media pool)
+        t.execute(PROPS_CMD, json!({"items": [pano.0], "projection": "none"})).unwrap();
+        assert!(t.project.vr_of(pano).is_none());
+        t.execute(PROPS_CMD, json!({"items": [pano.0], "projection": "auto"})).unwrap();
+        assert!(t.project.vr_of(pano).is_some_and(Spherical::is_equirect));
+        // a layout alone changes the item's own properties
+        t.execute(PROPS_CMD, json!({"items": [pano.0], "layout": "overUnder"})).unwrap();
+        assert!(t.project.vr_of(pano).is_some_and(|v| v.is_equirect() && v.layout == StereoLayout::OverUnder));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
