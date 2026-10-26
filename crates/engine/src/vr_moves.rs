@@ -4,7 +4,7 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `clip.vrMove` | one `move` on 360° clips (`clips`, default the selection, else every 360° clip), over `seconds` from `at` (clip seconds; each move has its own default place and length): `planetIn` (a tiny planet spinning open into the view), `planetOut` (the view folding into a tiny planet), `orbit` (a turn all the way round, `degrees`), `barrelRoll` (a roll about the view's axis), `whipPan` (a fast turn to `yaw`/`pitch`, or `degrees` along, with a little motion blur), `reveal` (from the sky — `from: "ground"`: the ground — down to the view), `pushIn` (the view narrowing by `amount`), `crashZoom` (the same, fast), `drift` (a slow turn of `degrees`); `direction` `right` or `left`; the view a move ends on is the camera's own there unless `yaw` / `pitch` / `fov` say; one undo step |
+//! | `clip.vrMove` | one `move` on 360° clips (`clips`, default the selection, else every 360° clip), over `seconds` from `at` (clip seconds; each move has its own default place and length): `planetIn` (a tiny planet spinning open into the view), `planetOut` (the view folding into a tiny planet), `orbit` (a turn all the way round, `degrees`), `barrelRoll` (a roll about the view's axis), `whipPan` (a fast turn to `yaw`/`pitch`, or `degrees` along, from `fromYaw`/`fromPitch` when given — a whip in — else from the view there, with a little motion blur), `reveal` (from the sky — `from: "ground"`: the ground — down to the view), `pushIn` (the view narrowing by `amount`), `crashZoom` (the same, fast), `drift` (a slow turn of `degrees`); `direction` `right` or `left`; the view a move ends on is the camera's own there unless `yaw` / `pitch` / `fov` say; one undo step |
 //! | `clip.hyperlapse360` | a 360° hyperlapse: the clip plays at `speed` % with frame blending, and its camera is held steady by `clip.stabilize360` (`mode`, `strong` by default; a job) |
 //!
 //! A move replaces the keyframes its parameters had inside its window and keeps those outside:
@@ -156,6 +156,9 @@ pub struct MoveOptions {
     pub amount: Option<f64>,
     /// The whip's motion blur, 0..1.
     pub strength: f64,
+    /// Where a whip starts (a whip in from off to the side), else the camera's view there.
+    pub from_yaw: Option<f64>,
+    pub from_pitch: Option<f64>,
 }
 
 /// One keyframe of a move: clip seconds and the values set there.
@@ -226,13 +229,14 @@ pub fn keys(m: Move, a: f64, b: f64, start: Cam, end: Cam, o: &MoveOptions) -> V
             ]
         }
         Move::WhipPan => {
+            let (y0, p0) = (o.from_yaw.unwrap_or(start.yaw), o.from_pitch.unwrap_or(start.pitch).clamp(-90.0, 90.0));
             let to = match (o.yaw, o.degrees) {
-                (Some(y), _) => nearest_turn(start.yaw, y),
-                (None, Some(d)) => start.yaw + d,
-                (None, None) => start.yaw + 90.0 * dir,
+                (Some(y), _) => nearest_turn(y0, y),
+                (None, Some(d)) => y0 + d,
+                (None, None) => y0 + 90.0 * dir,
             };
             vec![
-                Key { seconds: a, values: vec![("yaw", start.yaw), ("pitch", start.pitch)] },
+                Key { seconds: a, values: vec![("yaw", y0), ("pitch", p0)] },
                 Key { seconds: b, values: vec![("yaw", to), ("pitch", o.pitch.unwrap_or(start.pitch).clamp(-90.0, 90.0))] },
             ]
         }
@@ -300,7 +304,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "360 Camera Move",
             menu: &[],
             shortcut: None,
-            params: r#"{"clips":[id]?,"move":"planetIn"|"planetOut"|"orbit"|"barrelRoll"|"whipPan"|"reveal"|"pushIn"|"crashZoom"|"drift","at":seconds?,"seconds":f64?,"yaw":deg?,"pitch":-90..90?,"fov":5..175?,"degrees":deg?,"direction":"right"|"left"="right","from":"sky"|"ground"="sky","amount":0..4?,"strength":0..1=0.5}"#,
+            params: r#"{"clips":[id]?,"move":"planetIn"|"planetOut"|"orbit"|"barrelRoll"|"whipPan"|"reveal"|"pushIn"|"crashZoom"|"drift","at":seconds?,"seconds":f64?,"yaw":deg?,"pitch":-90..90?,"fov":5..175?,"degrees":deg?,"direction":"right"|"left"="right","from":"sky"|"ground"="sky","fromYaw":deg?,"fromPitch":-90..90?,"amount":0..4?,"strength":0..1=0.5}"#,
             enabled: has_seq,
             run: camera_move,
             journal: true,
@@ -354,6 +358,8 @@ fn camera_move(s: &mut Session, p: &Value) -> Result<Value> {
         from_ground,
         amount: num(cmd, p, "amount", 0.0, 4.0)?,
         strength: num(cmd, p, "strength", 0.0, 1.0)?.unwrap_or(0.5),
+        from_yaw: num(cmd, p, "fromYaw", -100_000.0, 100_000.0)?,
+        from_pitch: num(cmd, p, "fromPitch", -90.0, 90.0)?,
     };
     let clips: Vec<ClipId> = clips_360(s, p, cmd)?.iter().map(|it| it.id).take(MAX_CLIPS).collect();
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
@@ -477,6 +483,9 @@ mod tests {
         // a whip to a direction takes the short way round
         let whip = keys(Move::WhipPan, 0.0, 0.4, cam(), cam(), &MoveOptions { yaw: Some(350.0), ..o });
         assert_eq!(value(&whip[1], "yaw"), Some(-10.0));
+        // a whip in: from off to the side onto the view
+        let whip_in = keys(Move::WhipPan, 0.0, 0.3, cam(), cam(), &MoveOptions { from_yaw: Some(-80.0), yaw: Some(10.0), ..o });
+        assert_eq!((value(&whip_in[0], "yaw"), value(&whip_in[1], "yaw")), (Some(-80.0), Some(10.0)));
         // a reveal from the sky down to the view
         let r = keys(Move::Reveal, 0.0, 1.5, cam(), cam(), &o);
         assert_eq!((value(&r[0], "pitch"), value(&r[1], "pitch")), (Some(80.0), Some(5.0)));

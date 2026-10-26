@@ -13,6 +13,7 @@
 //! | `autocut.malayalamScript` | job: the plan's (the kept one, `plan` or `planPath`) English intro, lines and outro in natural spoken Malayalam, written by the local script model (or `model`) from `docs/malayalam-style.md`, its examples and the user's approved pairs; every line keeps its English's facts, gets the safe fixes and the lint (`script.lintMalayalam`) and goes back to the model once with what to fix (`revise: false`: not). The outcome's `malayalam` is the lines file (`{intro, outro, lines: {label: …}}`), written to `out` too, and `lines` what is left to look at |
 //! | `autocut.trailer` | job: a vertical trailer (9:16, also 1:1 / 4:5) of a finished showcase: the show `sequence`, its `plan` (or `planPath`, or the kept plan) and its build report (`report` / `reportPath`, or the last build). A hook (the most striking robot, or `hook`) under a big title ("48 robots · 2013 → 2025"), then a chronological montage of `robots` robots cut on the beats of generated music, each on its best moment, followed by the reframe, its name and year inside the `platform`'s safe zone; the show's first narration sentence over the hook (`hookVoice`); the show's redaction kept; an end card (`logo`, `endText`, `channel`). `export` writes it with the Social Vertical preset, with a cover, a caption, a frame sheet and QA beside it; opt-in `look` (tech, vhs, clean: a creator look over the hook and the montage) and `beatPulse` (zoom pulses on the montage's beats) |
 //! | `autocut.quick` | job: an album, a folder or the selected clips → a finished vertical Short or Reel (Quick Short…). The media (`items`, `paths`: files or folders, none: the project's) is indexed (`media.analyzeScenes`, fast, then full detail for the most promising shots), its speech understood, a template chosen (`template` `auto`: by the shots, the speech, the energy, `seconds` and `topic`; or an id or name) and filled — each slot's shot by its AI hints, trimmed to its best moment and framed on its subject, the text written by the local model (or from the descriptions) — then applied in `aspect` with the `look`, animated captions in the `platform`'s safe zone, faces and plates hidden (`redact`), and with `export` the video, `<out>.sheet.jpg`, `<out>.report.json` and QA beside it. `download` fetches missing scene, speech and privacy models first (never otherwise). The outcome is the report: the template and why, each pick and why, the texts, the models used and the fallbacks |
+//! | `autocut.direct` | job: normal and 360° clips → one catchy edit on the beat (Direct an Edit…). The media (`items`, `paths`, Insta360 recordings by name in `insta360`, a Google Photos `album`; none: the project's) is indexed, its speech understood and each 360° shot looked round for its action (`media.salience360`); the local model directs from the `brief` — the hook, the shots in filming order, each one's length in beats and its camera (360° moves: `clip.vrMove`, `clip.follow360`, `clip.hyperlapse360`; flat: push in, follow, speed ramp) — its plan checked and repaired, rules directing without a model; then built on generated music's beats (or `music`) in `aspect` with a swish on each whip, a soft chime under the English title, captions of English speech and the mix; `dryRun` returns the plan and its engine commands, building nothing; `export` writes the video, a frame sheet, the report and QA. The outcome is the report: the plan and who directed it, the models used and the fallbacks |
 //! | `autocut.shorts` | job: long video → shorts. The transcript of `sequence` (or of media `item`, put in a new sequence) is cut into sentences; runs of them `minSeconds`..`maxSeconds` long are scored for interest (and, with the local model, for the strength of their opening hook), and the best `count` that do not overlap each become a vertical sequence (`sequence.autoReframe` to `aspect`, following the speaker) with bold captions from the transcript (`captions`) and an optional `title` card; `export` (a folder) exports each with its captions burned in, and `uploadYoutube` sends each export to YouTube, private unless `youtube.privacy` says otherwise; opt-in `look` and `beatPulse` as for the trailer |
 //!
 //! A plan is `{subject, title, subtitle?, voice?, mood, entries, script: {intro, lines, outro}}`;
@@ -90,6 +91,8 @@ pub enum TaskKind {
     RoughCut,
     /// A vertical Short or Reel from a template filled automatically (`autocut.quick`).
     Quick,
+    /// Normal and 360° clips directed into one edit on the beat (`autocut.direct`).
+    Direct,
 }
 
 impl TaskKind {
@@ -104,6 +107,7 @@ impl TaskKind {
             TaskKind::Trailer => "autocut.trailer",
             TaskKind::RoughCut => "autocut.roughCut",
             TaskKind::Quick => "autocut.quick",
+            TaskKind::Direct => "autocut.direct",
         }
     }
 
@@ -119,6 +123,7 @@ impl TaskKind {
             TaskKind::Trailer => "Making a trailer".into(),
             TaskKind::RoughCut => "Making a rough cut".into(),
             TaskKind::Quick => "Making a quick short".into(),
+            TaskKind::Direct => "Directing an edit".into(),
         }
     }
 }
@@ -367,6 +372,7 @@ pub fn commands() -> Vec<CommandSpec> {
             |s, p| start(s, TaskKind::RoughCut, p),
         ),
         job("autocut.quick", "Quick Short…", &["Sequence"], QUICK_PARAMS, |s, p| start(s, TaskKind::Quick, p)),
+        job("autocut.direct", "Direct an Edit…", &["Sequence"], DIRECT_PARAMS, |s, p| start(s, TaskKind::Direct, p)),
         job(
             "autocut.malayalamScript",
             "Write Malayalam Script",
@@ -562,6 +568,9 @@ fn job_params(cmd: &str, kind: TaskKind, p: &Value) -> Result<Value> {
     if kind == TaskKind::Quick {
         quick_params(cmd, p, &mut out)?;
     }
+    if kind == TaskKind::Direct {
+        direct_params(cmd, p, &mut out)?;
+    }
     if kind == TaskKind::Trailer {
         trailer_params(cmd, p, &mut out)?;
     }
@@ -661,8 +670,15 @@ pub const QUICK_PARAMS: &str = r#"{"items":[id]?,"paths":[file|folder]?,"templat
 /// Most media one quick short takes.
 pub const MAX_QUICK_MEDIA: usize = 500;
 
-/// The checked parameters of `autocut.quick`.
-fn quick_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) -> Result<()> {
+/// `autocut.direct`'s parameters.
+pub const DIRECT_PARAMS: &str = r#"{"brief":str?,"items":[id]?,"paths":[file|folder]?,"insta360":[name]?,"album":str?,"aspect":"9:16"|"16:9"|"1:1"|"4:5"?,"seconds":6..300?,"platform":"reels"|"shorts"|"tiktok"|"vertical"="reels","mood":"epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad"?,"bpm":70..150?,"music":"generate"|file="generate","title":str?,"captions":bool=true,"captionStyle":"bold|clean|glow|box|karaoke|twoLine|plain"="clean","redact":"faces,plates"|"faces"|"plates"|false=false,"name":str?,"export":file?,"dryRun":bool=false,"qa":bool?,"fullDetail":0..64=8,"download":bool=false,"seed":u64=7,"wait":bool=false}"#;
+/// Longest brief, characters.
+pub const MAX_BRIEF_CHARS: usize = 600;
+/// Most Insta360 recordings one edit names.
+pub const MAX_INSTA360: usize = 100;
+
+/// The checked parameters of `autocut.direct`.
+fn direct_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) -> Result<()> {
     let line = |key: &str, max: usize| -> Result<Option<String>> {
         let t = text_p(cmd, p, key, max)?;
         if t.as_deref().is_some_and(|t| t.chars().any(char::is_control)) {
@@ -670,6 +686,97 @@ fn quick_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) 
         }
         Ok(t)
     };
+    media_params(cmd, p, out)?;
+    if let Some(b) = text_p(cmd, p, "brief", MAX_BRIEF_CHARS)? {
+        out.insert("brief".into(), json!(b));
+    }
+    match p.get("insta360").filter(|v| !v.is_null()) {
+        None => {}
+        Some(Value::Array(a)) if a.len() <= MAX_INSTA360 => {
+            let names: Vec<String> = a
+                .iter()
+                .map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 200 && !s.chars().any(char::is_control)).map(str::to_string))
+                .collect::<Option<_>>()
+                .ok_or_else(|| bad(cmd, "`insta360` names recordings (VID_20260913_114003_00_093, or Studio's VID_093)"))?;
+            out.insert("insta360".into(), json!(names));
+        }
+        Some(_) => return Err(bad(cmd, format!("`insta360` is a list of at most {MAX_INSTA360} recording names"))),
+    }
+    if let Some(album) = line("album", crate::photos::MAX_ALBUM_TITLE_CHARS)? {
+        out.insert("album".into(), json!(album));
+    }
+    if let Some(a) = text_p(cmd, p, "aspect", 16)? {
+        if !matches!(a.as_str(), "9:16" | "1:1" | "4:5" | "16:9") {
+            return Err(bad(cmd, "`aspect` is \"9:16\", \"16:9\", \"1:1\" or \"4:5\""));
+        }
+        out.insert("aspect".into(), json!(a));
+    }
+    if let Some(v) = p.get("seconds").filter(|v| !v.is_null()) {
+        let s = v.as_f64().filter(|f| f.is_finite() && (6.0..=300.0).contains(f)).ok_or_else(|| bad(cmd, "`seconds` is a length from 6 to 300"))?;
+        out.insert("seconds".into(), json!(s));
+    }
+    match crate::safe_zones::platform_p(cmd, p, "platform")? {
+        None => {}
+        Some(Some(pl)) => {
+            out.insert("platform".into(), json!(pl.name()));
+        }
+        Some(None) => return Err(bad(cmd, "`platform` is \"reels\", \"shorts\", \"tiktok\" or \"vertical\"")),
+    }
+    if let Some(m) = text_p(cmd, p, "mood", 16)? {
+        let m = m.to_ascii_lowercase();
+        if !matches!(m.as_str(), "epic" | "tense" | "uplifting" | "calm" | "happy" | "dark" | "dreamy" | "energetic" | "sad") {
+            return Err(bad(cmd, "`mood` is epic, tense, uplifting, calm, happy, dark, dreamy, energetic or sad"));
+        }
+        out.insert("mood".into(), json!(m));
+    }
+    if let Some(v) = p.get("bpm").filter(|v| !v.is_null()) {
+        let b = v.as_f64().filter(|f| f.is_finite() && (70.0..=150.0).contains(f)).ok_or_else(|| bad(cmd, "`bpm` is a tempo from 70 to 150"))?;
+        out.insert("bpm".into(), json!(b));
+    }
+    if let Some(m) = line("music", 4096)? {
+        let m = if m.eq_ignore_ascii_case("generate") { "generate".to_string() } else { crate::export_tools::expand_home(&m) };
+        out.insert("music".into(), json!(m));
+    }
+    if let Some(t) = line("title", 40)? {
+        out.insert("title".into(), json!(t));
+    }
+    match p.get("redact") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => {}
+        Some(Value::String(r)) if matches!(r.trim().to_ascii_lowercase().as_str(), "off" | "none" | "false") => {}
+        Some(Value::String(r)) => {
+            let kinds: Vec<String> = r.split(',').map(|k| k.trim().to_ascii_lowercase()).filter(|k| !k.is_empty()).collect();
+            if kinds.is_empty() || kinds.len() > 2 || !kinds.iter().all(|k| matches!(k.as_str(), "faces" | "plates")) {
+                return Err(bad(cmd, "`redact` is \"faces,plates\", \"faces\", \"plates\" or false"));
+            }
+            out.insert("redact".into(), json!(kinds.join(",")));
+        }
+        Some(_) => return Err(bad(cmd, "`redact` is \"faces,plates\", \"faces\", \"plates\" or false")),
+    }
+    if let Some(cs) = caption_style_p(cmd, p)? {
+        out.insert("captionStyle".into(), json!(cs));
+    }
+    if let Some(n) = line("name", 200)? {
+        out.insert("name".into(), json!(n));
+    }
+    if let Some(e) = line("export", 4096)? {
+        out.insert("export".into(), json!(crate::export_tools::expand_home(&e)));
+    }
+    for key in ["captions", "dryRun", "qa", "download"] {
+        if let Some(v) = p.get(key).filter(|v| !v.is_null()) {
+            out.insert(key.into(), json!(v.as_bool().ok_or_else(|| bad(cmd, format!("`{key}` must be true or false")))?));
+        }
+    }
+    if let Some(n) = count_p(cmd, p, "fullDetail", 0, 64)? {
+        out.insert("fullDetail".into(), json!(n));
+    }
+    if let Some(v) = p.get("seed").filter(|v| !v.is_null()) {
+        out.insert("seed".into(), json!(v.as_u64().ok_or_else(|| bad(cmd, "`seed` is a whole number"))?));
+    }
+    Ok(())
+}
+
+/// `items` (media item ids) and `paths` (files or folders), checked.
+fn media_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) -> Result<()> {
     match p.get("items").filter(|v| !v.is_null()) {
         None => {}
         Some(Value::Array(a)) if a.len() <= MAX_QUICK_MEDIA => {
@@ -695,6 +802,19 @@ fn quick_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) 
         }
         Some(_) => return Err(bad(cmd, format!("`paths` is a list of at most {MAX_QUICK_MEDIA} files or folders"))),
     }
+    Ok(())
+}
+
+/// The checked parameters of `autocut.quick`.
+fn quick_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) -> Result<()> {
+    let line = |key: &str, max: usize| -> Result<Option<String>> {
+        let t = text_p(cmd, p, key, max)?;
+        if t.as_deref().is_some_and(|t| t.chars().any(char::is_control)) {
+            return Err(bad(cmd, format!("`{key}` must be on one line")));
+        }
+        Ok(t)
+    };
+    media_params(cmd, p, out)?;
     if let Some(t) = line("template", 4096)? {
         out.insert("template".into(), json!(t));
     }

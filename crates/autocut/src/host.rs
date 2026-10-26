@@ -672,6 +672,21 @@ impl ShowcaseHost {
             let mut lines = |l: &str| note(progress, l);
             return crate::quick::make(ex, &task.params, writer.as_ref().map(|w| w as &dyn ChatModel), &mut lines).await;
         }
+        if task.kind == TaskKind::Direct {
+            let mut p = task.params.clone();
+            // a Google Photos album seeds the clips: picked and imported first
+            if let Some(title) = p["album"].as_str().map(str::to_string) {
+                let req = Request { subject: String::new(), since: None, title: None, photos: true };
+                let seed = self.album_seed(&title, &req, ex, progress).await?;
+                let mut items: Vec<Value> = p["items"].as_array().cloned().unwrap_or_default();
+                items.extend(seed.imported.items.iter().map(|i| json!(i)));
+                p["items"] = Value::Array(items);
+            }
+            // the director: the script model (it plans in JSON well), else the small one
+            let director = self.writer().await.map(|m| Cancellable { inner: m, progress: progress.clone() });
+            let mut lines = |l: &str| note(progress, l);
+            return crate::director::make(ex, &p, director.as_ref().map(|w| w as &dyn ChatModel), &mut lines).await;
+        }
         let models = self.models(task.kind, progress).await?;
         let guard = |m: &Arc<dyn ChatModel>| Cancellable { inner: m.clone(), progress: progress.clone() };
         let script_model = guard(&models.script);
@@ -726,7 +741,9 @@ impl ShowcaseHost {
                 crate::trailer::make(ex, p, task.plan.as_ref(), qa_model.as_ref().map(|m| m as &dyn ChatModel), &mut lines).await
             }
             // (handled above, without the showcase models)
-            TaskKind::Shorts | TaskKind::MalayalamScript | TaskKind::RoughCut | TaskKind::Quick => Err(AutoCutError::Other("not a showcase step".into())),
+            TaskKind::Shorts | TaskKind::MalayalamScript | TaskKind::RoughCut | TaskKind::Quick | TaskKind::Direct => {
+                Err(AutoCutError::Other("not a showcase step".into()))
+            }
         }
     }
 }

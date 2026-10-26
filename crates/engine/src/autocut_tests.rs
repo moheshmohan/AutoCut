@@ -77,6 +77,7 @@ impl AutoCutHost for Fake {
             TaskKind::Trailer => Ok(json!({"shots": [], "params": task.params, "status": "Made a trailer"})),
             TaskKind::RoughCut => Ok(json!({"params": task.params, "status": "Rough cut"})),
             TaskKind::Quick => Ok(json!({"params": task.params, "status": "Quick short"})),
+            TaskKind::Direct => Ok(json!({"params": task.params, "status": "Directed"})),
             TaskKind::MalayalamScript => {
                 let plan = task.params.get("plan").cloned().or(task.plan).unwrap_or_default();
                 let n = plan["entries"].as_array().map_or(0, Vec::len);

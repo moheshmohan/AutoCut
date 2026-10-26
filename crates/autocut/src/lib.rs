@@ -22,6 +22,7 @@ pub mod config;
 pub mod creator_look;
 pub mod describe;
 pub mod digest;
+pub mod director;
 pub mod highlight;
 pub mod host;
 pub mod identity;
