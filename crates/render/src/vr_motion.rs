@@ -437,6 +437,121 @@ pub fn reduce(times: &[f64], series: &[&[f64]], tolerance: f64) -> Vec<usize> {
     (0..n).filter(|&i| keep[i]).collect()
 }
 
+/// A direction worth looking at in a 360° panorama: degrees right of and up from forward, how
+/// much stands out there against the rest of the sphere (1: as much as a typical direction), and
+/// whether that is motion (else detail).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Salient {
+    pub yaw: f64,
+    pub pitch: f64,
+    pub score: f64,
+    pub motion: bool,
+}
+
+/// Longitude sectors the sphere is scored in.
+const SECTORS: usize = 36;
+/// Latitudes left out: the sky straight up and the ground (and a selfie stick) straight down.
+const MAX_LATITUDE: f64 = 70.0;
+/// How much more the most moving sector must move than a typical one for motion to decide (a
+/// camera shaking moves every sector alike: then detail decides).
+const MOTION_CONTRAST: f64 = 1.6;
+
+fn luma(img: &Image) -> Vec<f32> {
+    img.px.as_chunks::<4>().0.iter().map(|p| (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]).max(0.0).sqrt()).collect()
+}
+
+/// Where most happens in equirectangular panorama `frames` (one size, in time order): each
+/// sector of longitude scored by the frames' differences (motion) — by the first picture's detail
+/// when nothing moves more in one direction than [`MOTION_CONTRAST`] times a typical one (a
+/// camera's own shake moves every direction alike) — weighted by the area each row covers, the poles left out; peaks at least
+/// `separation` degrees apart, strongest first, at most `max`. The first is the strongest
+/// direction whatever its score; the others stand out at least 1.15 times a typical sector.
+pub fn salient_directions(frames: &[Image], separation: f64, max: usize) -> Vec<Salient> {
+    let Some(first) = frames.first() else { return Vec::new() };
+    let (w, h) = (first.w, first.h);
+    if w < SECTORS || h < 4 || max == 0 || frames.iter().any(|f| f.w != w || f.h != h || f.px.len() != w * h * 4) {
+        return Vec::new();
+    }
+    let lumas: Vec<Vec<f32>> = frames.iter().map(luma).collect();
+    let lat_of = |y: usize| 90.0 - (y as f64 + 0.5) * 180.0 / h as f64;
+    let rows: Vec<(usize, f64, f64)> = (0..h).map(|y| (y, lat_of(y), lat_of(y).to_radians().cos())).filter(|(_, lat, _)| lat.abs() <= MAX_LATITUDE).collect();
+    // per sector: energy and its latitude moment, motion then detail
+    let score = |field: &dyn Fn(usize, usize) -> f64| -> (Vec<f64>, Vec<f64>) {
+        let mut e = vec![0.0f64; SECTORS];
+        let mut lat = vec![0.0f64; SECTORS];
+        let mut area = vec![0.0f64; SECTORS];
+        for &(y, l, wgt) in &rows {
+            for x in 0..w {
+                let s = (x * SECTORS / w).min(SECTORS - 1);
+                let v = field(x, y) * wgt;
+                if let (Some(es), Some(ls), Some(a)) = (e.get_mut(s), lat.get_mut(s), area.get_mut(s)) {
+                    *es += v;
+                    *ls += v * l;
+                    *a += wgt;
+                }
+            }
+        }
+        let lats = e.iter().zip(&lat).map(|(es, ls)| if *es > 0.0 { ls / es } else { 0.0 }).collect();
+        (e.iter().zip(&area).map(|(es, a)| if *a > 0.0 { es / a } else { 0.0 }).collect(), lats)
+    };
+    let at = |l: &[f32], x: usize, y: usize| f64::from(l.get(y * w + x).copied().unwrap_or(0.0));
+    let motion =
+        |x: usize, y: usize| -> f64 { lumas.windows(2).map(|p| (at(&p[1], x, y) - at(&p[0], x, y)).abs()).sum::<f64>() / (lumas.len().max(2) - 1) as f64 };
+    let (mut e, mut lats) = score(&motion);
+    let mut ranked = e.clone();
+    ranked.sort_by(f64::total_cmp);
+    let (top, median) = (ranked.last().copied().unwrap_or(0.0), ranked.get(SECTORS / 2).copied().unwrap_or(0.0));
+    let moving = frames.len() >= 2 && top > 1e-6 && top >= MOTION_CONTRAST * median;
+    if !moving {
+        let l0 = &lumas[0];
+        let detail = |x: usize, y: usize| -> f64 {
+            let (xr, yd) = ((x + 1) % w, (y + 1).min(h - 1));
+            (at(l0, xr, y) - at(l0, x, y)).abs() + (at(l0, x, yd) - at(l0, x, y)).abs()
+        };
+        (e, lats) = score(&detail);
+    }
+    // smoothed round the circle, then each sector against a typical one (the median)
+    let sm: Vec<f64> = (0..SECTORS)
+        .map(|i| {
+            let g = |k: usize| e.get(k % SECTORS).copied().unwrap_or(0.0);
+            (g(i + SECTORS - 1) + 2.0 * g(i) + g(i + 1)) / 4.0
+        })
+        .collect();
+    let mut sorted = sm.clone();
+    sorted.sort_by(f64::total_cmp);
+    let typical = sorted.get(SECTORS / 2).copied().unwrap_or(0.0).max(1e-9);
+    let mut peaks: Vec<(usize, f64)> = (0..SECTORS)
+        .filter(|&i| {
+            let v = sm.get(i).copied().unwrap_or(0.0);
+            v >= sm.get((i + SECTORS - 1) % SECTORS).copied().unwrap_or(0.0) && v >= sm.get((i + 1) % SECTORS).copied().unwrap_or(0.0)
+        })
+        .map(|i| (i, sm.get(i).copied().unwrap_or(0.0) / typical))
+        .collect();
+    peaks.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut out: Vec<Salient> = Vec::new();
+    let sector_deg = 360.0 / SECTORS as f64;
+    for (i, sc) in peaks {
+        let yaw = -180.0 + (i as f64 + 0.5) * sector_deg;
+        let apart = |o: &Salient| {
+            let d = (o.yaw - yaw).rem_euclid(360.0);
+            d.min(360.0 - d) >= separation
+        };
+        if !out.iter().all(apart) || (!out.is_empty() && sc < 1.15) {
+            continue;
+        }
+        out.push(Salient {
+            yaw,
+            pitch: lats.get(i).copied().unwrap_or(0.0).clamp(-MAX_LATITUDE, MAX_LATITUDE),
+            score: (sc * 100.0).round() / 100.0,
+            motion: moving,
+        });
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,5 +679,49 @@ mod tests {
         let next = cam.recentred(d);
         let mid = next.direction(0.5, 0.5);
         assert!((dot(mid, d) - 1.0).abs() < 1e-9);
+    }
+
+    /// A grey panorama `w` × `h` with a bright square at longitude `lon` (degrees), latitude `lat`.
+    fn pano(w: usize, h: usize, lon: f64, lat: f64, bright: f32) -> Image {
+        let mut px = vec![0.2f32; w * h * 4];
+        let cx = ((lon + 180.0) / 360.0 * w as f64) as i64;
+        let cy = ((90.0 - lat) / 180.0 * h as f64) as i64;
+        for y in (cy - 4).max(0)..(cy + 4).min(h as i64) {
+            for x in cx - 4..cx + 4 {
+                let xi = x.rem_euclid(w as i64) as usize;
+                let i = (y as usize * w + xi) * 4;
+                px[i..i + 3].copy_from_slice(&[bright; 3]);
+            }
+        }
+        Image { w, h, px }
+    }
+
+    #[test]
+    fn the_salient_direction_is_where_something_moves() {
+        // a square moving a little at 90° right and 20° up; a still bright square at −90°
+        let frames: Vec<Image> = (0..4)
+            .map(|k| {
+                let mut a = pano(360, 180, 90.0 + k as f64 * 3.0, 20.0, 0.9);
+                let b = pano(360, 180, -90.0, 0.0, 0.9);
+                for (p, q) in a.px.iter_mut().zip(&b.px) {
+                    *p = p.max(*q);
+                }
+                a
+            })
+            .collect();
+        let s = salient_directions(&frames, 45.0, 3);
+        let top = s.first().expect("a direction");
+        assert!(top.motion);
+        assert!((top.yaw - 95.0).abs() < 15.0, "{s:?}");
+        assert!(top.pitch > 5.0 && top.pitch < 35.0, "{s:?}");
+        assert!(top.score > 2.0, "{s:?}");
+        // nothing moving: the detail decides (the square at −90°)
+        let still = vec![pano(360, 180, -90.0, 0.0, 0.9); 3];
+        let d = salient_directions(&still, 45.0, 3);
+        assert!(!d[0].motion && (d[0].yaw + 90.0).abs() < 15.0, "{d:?}");
+        // hostile: nothing, mismatched sizes, too small
+        assert!(salient_directions(&[], 45.0, 3).is_empty());
+        assert!(salient_directions(&[pano(360, 180, 0.0, 0.0, 0.9), pano(180, 90, 0.0, 0.0, 0.9)], 45.0, 3).is_empty());
+        assert!(salient_directions(&[Image { w: 8, h: 4, px: vec![0.0; 128] }], 45.0, 3).is_empty());
     }
 }

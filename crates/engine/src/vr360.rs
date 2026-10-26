@@ -6,6 +6,7 @@
 //! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` (alone, they change the item's own); with nothing to change, what the items' VR Properties are |
 //! | `media.align360` | lines the two lenses of dual-fisheye media up along their seam (a few frames across the clip, [`filmcraft_render::vr::align_lenses`]) and keeps the result in its VR Properties |
 //! | `clip.stabilize360` | holds the virtual camera steady: the camera's turn measured from the pictures frame to frame (`filmcraft_render::vr_motion`: points on cube faces, a robust rotation fit), then `mode` `smooth` / `light` / `strong` (the operator's own turns kept, the shake gone) or `lock` (the first frame's direction throughout), written as the effect's Stabilization keyframes; a job; `off` |
+//! | `media.salience360` | where things happen in a 360° item: around `seconds` (default the middle of `from`..`to`, else of the item), a few frames of its panorama 0.2 s apart scored by motion (else detail) in each direction ([`filmcraft_render::vr_motion::salient_directions`]): up to `max` directions (yaw, pitch, score), strongest first, at least 45° apart |
 //! | `clip.follow360` | turns the virtual camera to follow a subject (`target` `subject`, `box` in the clip's frame at `at`, or `face`): a wide tracking camera kept on it while the subject tracker follows it both ways from `at`, the path smoothed (`smooth` 0 close … 1 floaty) into yaw and pitch keyframes; a job |
 //!
 //! A clip of 360° media shows its raw picture (an equirectangular panorama, or the two fisheye
@@ -36,6 +37,12 @@ const MAX_KEYS: usize = 10_000;
 /// Most frames `media.align360` looks at.
 const MAX_ALIGN_FRAMES: u64 = 9;
 pub(crate) const STAB_CMD: &str = "clip.stabilize360";
+const SALIENCE_CMD: &str = "media.salience360";
+/// The panorama width salience reads, pixels.
+const SALIENCE_WIDTH: f64 = 480.0;
+/// The frames salience compares, and how far apart, seconds.
+const SALIENCE_FRAMES: u64 = 6;
+const SALIENCE_STEP: f64 = 0.2;
 const FOLLOW_CMD: &str = "clip.follow360";
 /// The virtual camera's stabilisation parameters.
 const STAB_PARAMS: [&str; 3] = ["stab_yaw", "stab_pitch", "stab_roll"];
@@ -95,6 +102,16 @@ pub fn commands() -> Vec<CommandSpec> {
             enabled: has_seq,
             run: follow,
             journal: true,
+        },
+        CommandSpec {
+            id: SALIENCE_CMD,
+            label: "Find 360 Action",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"item":id,"seconds":f64?,"from":f64?,"to":f64?,"frames":2..24=6,"max":1..8=4}"#,
+            enabled: |_| Ok(()),
+            run: salience,
+            journal: false,
         },
         CommandSpec {
             id: ALIGN_CMD,
@@ -550,6 +567,52 @@ pub fn sample_frames(src: &filmcraft_media::SharedSource, frames: u64) -> Vec<fi
             Some(filmcraft_render::Image { w, h, px })
         })
         .collect()
+}
+
+fn salience(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = SALIENCE_CMD;
+    let item = item_p(p, "item").ok_or_else(|| bad(cmd, "need `item`"))?;
+    if s.project.vr_of(item).is_none() {
+        return Err(bad(cmd, "not 360° media (media.vrProperties says how a picture maps onto the sphere)"));
+    }
+    let src = analysis_view(s, item).ok_or_else(|| bad(cmd, "the item's media is offline"))?;
+    let v = src.info().video.clone().ok_or_else(|| bad(cmd, "the item has no video"))?;
+    let dur = src.info().duration.seconds().max(0.0);
+    let secs = |k: &str| -> Result<Option<f64>> {
+        match f64_p(p, k) {
+            None => Ok(None),
+            Some(x) if x.is_finite() && x >= 0.0 => Ok(Some(x.min(dur))),
+            Some(_) => Err(bad(cmd, format!("`{k}` is seconds of the media"))),
+        }
+    };
+    let (from, to) = (secs("from")?.unwrap_or(0.0), secs("to")?.unwrap_or(dur));
+    let mid = secs("seconds")?.unwrap_or((from + to.max(from)) / 2.0);
+    let n = u64_p(p, "frames").unwrap_or(SALIENCE_FRAMES).clamp(2, 24);
+    let max = u64_p(p, "max").unwrap_or(4).clamp(1, 8) as usize;
+    let scale = (SALIENCE_WIDTH / f64::from(v.width.max(1))).clamp(1.0 / 64.0, 1.0) as f32;
+    let fd = v.frame_rate.sane().frame_duration().seconds().max(1e-3);
+    let step = SALIENCE_STEP.max(fd);
+    let first = (mid - step * (n as f64 - 1.0) / 2.0).clamp(0.0, (dur - fd).max(0.0));
+    let mut frames: Vec<filmcraft_render::Image> = Vec::new();
+    let mut times: Vec<f64> = Vec::new();
+    for k in 0..n {
+        let t = (first + step * k as f64).min((dur - fd).max(0.0));
+        let Ok(f) = src.video_frame(filmcraft_media::FrameRequest { time: Tick::from_seconds_f64(t), scale }) else { continue };
+        let dec = (f.width as usize / SALIENCE_WIDTH as usize).max(1);
+        let (w, h, px) = f.to_linear_f32_decimated(dec);
+        if frames.first().is_some_and(|a| a.w != w || a.h != h) {
+            continue;
+        }
+        frames.push(filmcraft_render::Image { w, h, px });
+        times.push(t);
+    }
+    let found = filmcraft_render::vr_motion::salient_directions(&frames, 45.0, max);
+    let r = |x: f64| (x * 10.0).round() / 10.0;
+    Ok(json!({
+        "item": item.0,
+        "seconds": times.iter().map(|t| (t * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
+        "directions": found.iter().map(|d| json!({"yaw": r(d.yaw), "pitch": r(d.pitch), "score": d.score, "by": if d.motion { "motion" } else { "detail" }})).collect::<Vec<_>>(),
+    }))
 }
 
 fn align(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1398,6 +1461,22 @@ mod tests {
         t.execute(PROPS_CMD, json!({"items": [pano.0], "layout": "overUnder"})).unwrap();
         assert!(t.project.vr_of(pano).is_some_and(|v| v.is_equirect() && v.layout == StereoLayout::OverUnder));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn salience_points_at_where_things_happen() {
+        let mut s = demo();
+        let (_, item) = first_clip(&s);
+        assert!(s.execute(SALIENCE_CMD, json!({"item": item.0})).is_err(), "not 360° yet");
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "equirectangular"})).unwrap();
+        let r = s.execute(SALIENCE_CMD, json!({"item": item.0, "frames": 4, "max": 3})).unwrap();
+        let dirs = r["directions"].as_array().unwrap();
+        assert!(!dirs.is_empty() && dirs.len() <= 3, "{r}");
+        assert!(dirs.iter().all(|d| d["yaw"].as_f64().is_some_and(|y| (-180.0..=180.0).contains(&y))), "{r}");
+        assert_eq!(r["seconds"].as_array().unwrap().len(), 4);
+        for bad in [json!({}), json!({"item": item.0, "from": -1}), json!({"item": 424_242})] {
+            assert!(s.execute(SALIENCE_CMD, bad.clone()).is_err(), "{bad}");
+        }
     }
 
     #[test]
