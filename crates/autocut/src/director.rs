@@ -1496,9 +1496,10 @@ pub fn title_layout(o: &Options, frame: (f64, f64), text: &str) -> ([f64; 2], f6
     };
     let room = (x1 - x0).max(1.0);
     let u = h.min(w * 16.0 / 9.0) / 1080.0;
-    // about as wide as the room at most: a long title is set smaller
+    // inside the room with a margin (bold capitals run wider than an average letter): a long
+    // title is set smaller
     let n = text.chars().count().max(1) as f64;
-    let size = (120.0 * u).min(room / (0.55 * n)).max(48.0 * u.min(1.0));
+    let size = (110.0 * u).min(0.9 * room / (0.62 * n)).max(40.0 * u.min(1.0));
     ([(x0 + x1) / 2.0, y0 + 0.55 * (y1 - y0)], size, room)
 }
 
@@ -2091,7 +2092,7 @@ async fn music(ex: &dyn Executor, o: &Options, plan: &Plan, secs: f64, report: &
             notes.push(format!("music: {file} could not be imported: generated instead"));
             return generate_music(ex, o, plan, secs, report, notes).await;
         };
-        let placed = run(ex, "timeline.place", json!({"item": item, "audioTrack": "A3", "video": false, "time": 0, "duration": ticks(secs + 0.5)})).await;
+        let placed = run(ex, "timeline.place", json!({"item": item, "audioTrack": "A3", "video": false, "time": 0, "duration": ticks(secs)})).await;
         let clip = placed.ok().and_then(|r| r["clips"].as_array().and_then(|a| a.first()).and_then(Value::as_u64));
         let beats = match run(ex, "media.beats", json!({"item": item})).await {
             Ok(b) => {
@@ -2112,7 +2113,8 @@ async fn music(ex: &dyn Executor, o: &Options, plan: &Plan, secs: f64, report: &
 
 async fn generate_music(ex: &dyn Executor, o: &Options, plan: &Plan, secs: f64, report: &mut Report, notes: &mut Vec<String>) -> (Beats, Option<u64>) {
     let grid = Beats::grid(plan.bpm);
-    let p = json!({"kind": "music", "duration": secs + 0.5, "mood": plan.mood, "bpm": plan.bpm, "seed": o.seed, "time": 0, "track": "A3"});
+    // exactly the edit's length: generated music ends on a bar with its final chord there
+    let p = json!({"kind": "music", "duration": secs, "mood": plan.mood, "bpm": plan.bpm, "seed": o.seed, "time": 0, "track": "A3"});
     match run(ex, "audio.generate", p).await {
         Ok(m) => {
             let map: Vec<i64> = m["beats"].as_array().map(|a| a.iter().filter_map(Value::as_i64).take(100_000).collect()).unwrap_or_default();

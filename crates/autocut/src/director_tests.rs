@@ -242,6 +242,9 @@ fn a_plan_compiles_to_commands_on_its_beats() {
     let sounds: Vec<&str> = steps.iter().filter(|s| s.id == "audio.generate").filter_map(|s| s.params["kind"].as_str()).collect();
     assert!(sounds.iter().all(|k| matches!(*k, "swish" | "chime")), "never a whoosh or a riser: {sounds:?}");
     assert!(sounds.contains(&"chime"));
+    // the title fits its safe room with a margin
+    let (_, size, room) = title_layout(&o, (1080.0, 1920.0), "Weekend Moments Together");
+    assert!(size * 0.62 * 24.0 <= 0.9 * room + 1e-6, "{size} in {room}");
     // every shot's own step comes after its placement
     let mut placed = BTreeSet::new();
     for s in &steps {
