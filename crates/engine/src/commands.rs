@@ -737,7 +737,8 @@ fn import_source(
             ItemKind::Media(MediaClip {
                 media: MediaRef::File { path: path_s },
                 info,
-                interpret: Default::default(),
+                // 360° video says so in its metadata: VR Properties start from it
+                interpret: filmcraft_project::Interpretation { vr: src.spherical(), ..Default::default() },
                 mark_in: None,
                 mark_out: None,
                 markers: vec![],
@@ -3542,6 +3543,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::panels::commands());
     v.extend(crate::scopes::commands());
     v.extend(crate::reframe::commands());
+    v.extend(crate::vr360::commands());
     v.extend(crate::speech_understand::commands());
     v.extend(crate::motion_track::commands());
     v.extend(crate::safe_zones::commands());
