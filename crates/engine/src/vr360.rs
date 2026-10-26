@@ -35,7 +35,7 @@ const ALIGN_CMD: &str = "media.align360";
 const MAX_KEYS: usize = 10_000;
 /// Most frames `media.align360` looks at.
 const MAX_ALIGN_FRAMES: u64 = 9;
-const STAB_CMD: &str = "clip.stabilize360";
+pub(crate) const STAB_CMD: &str = "clip.stabilize360";
 const FOLLOW_CMD: &str = "clip.follow360";
 /// The virtual camera's stabilisation parameters.
 const STAB_PARAMS: [&str; 3] = ["stab_yaw", "stab_pitch", "stab_roll"];
@@ -263,7 +263,7 @@ fn camera_values(p: &Value, cmd: &str) -> Result<Vec<(&'static str, f64)>> {
     Ok(out)
 }
 
-fn set_static(e: &mut EffectInstance, id: &str, v: f64) {
+pub(crate) fn set_static(e: &mut EffectInstance, id: &str, v: f64) {
     match e.param_mut(id) {
         Some(p) => {
             p.keyframes.clear();
@@ -275,7 +275,7 @@ fn set_static(e: &mut EffectInstance, id: &str, v: f64) {
     }
 }
 
-fn set_key(e: &mut EffectInstance, id: &str, t: Tick, v: f64) {
+pub(crate) fn set_key(e: &mut EffectInstance, id: &str, t: Tick, v: f64) {
     if e.param(id).is_none() {
         e.params.insert(id.to_string(), Param::new(ParamValue::Float(v)));
     }
@@ -285,12 +285,12 @@ fn set_key(e: &mut EffectInstance, id: &str, t: Tick, v: f64) {
 }
 
 /// The media time of clip time `seconds` (from the clip's start on the timeline).
-fn media_time(it: &TrackItem, seconds: f64) -> Tick {
+pub(crate) fn media_time(it: &TrackItem, seconds: f64) -> Tick {
     let st = it.start + Tick::from_seconds_f64(seconds.clamp(0.0, it.duration.seconds().max(0.0)));
     it.effect_time_at(st)
 }
 
-fn view_json(c: ClipId, it: &TrackItem) -> Value {
+pub(crate) fn view_json(c: ClipId, it: &TrackItem) -> Value {
     let Some(e) = it.effect(REFRAME) else { return json!({"clip": c.0, "reframed": false}) };
     let t = it.effect_time_at(it.start);
     let animated: Vec<&str> =
@@ -753,7 +753,7 @@ fn apply_keys(s: &mut Session, pj: &PendingKeys, clips: &[ClipKeys]) -> Result<V
 
 /// The clips a 360° command acts on: `clips` / `clip`, else the selection, else every clip of
 /// 360° media in the active sequence; each must be 360°.
-fn clips_360(s: &Session, p: &Value, cmd: &str) -> Result<Vec<TrackItem>> {
+pub(crate) fn clips_360(s: &Session, p: &Value, cmd: &str) -> Result<Vec<TrackItem>> {
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
     let mut ids = clips_p(s, p);
     if ids.is_empty() && p.get("clips").is_none_or(Value::is_null) && p.get("clip").is_none_or(Value::is_null) {
@@ -1127,6 +1127,27 @@ fn follow(s: &mut Session, p: &Value) -> Result<Value> {
             summary: json!({"clip": clip.0, "frames": n, "found": (found as f64 / n.max(1) as f64 * 1000.0).round() / 1000.0, "keyframes": keep.len()}),
         }])
     })
+}
+
+/// Sessions with 360° media for the tests of the modules that build on this one.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    /// The demo project, its first clip's media taken as a whole equirectangular panorama.
+    pub fn demo_360() -> Session {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        s.state.selection.clear();
+        let (_, item) = first_clip(&s);
+        s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "equirectangular"})).unwrap();
+        s
+    }
+
+    pub fn first_clip(s: &Session) -> (ClipId, ItemId) {
+        let it = &s.active_sequence().unwrap().video_tracks[0].items[0];
+        (it.id, it.item)
+    }
 }
 
 #[cfg(test)]

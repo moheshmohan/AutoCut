@@ -104,6 +104,7 @@ pub mod voice_fx;
 pub mod voice_lab;
 pub mod voiceover;
 pub mod vr360;
+pub mod vr_moves;
 pub mod youtube;
 
 use std::sync::Arc;
