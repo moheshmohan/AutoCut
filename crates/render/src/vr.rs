@@ -313,11 +313,16 @@ impl SourceModel {
     }
 
     /// The model of the picture at media time `t`: levelled by the recording's horizon when it
-    /// has one ([`Spherical::up_at`]; dual fisheye — its lenses turned so that up is up).
+    /// has one ([`Spherical::up_at`]; dual fisheye — its lenses turned so that up is up), then its
+    /// heading steadied ([`Spherical::heading_at`]: turned about the vertical, the swing of the
+    /// camera taken out).
     pub fn at(s: &Spherical, size: (usize, usize), t: Tick) -> Self {
         let mut m = Self::new(s, size);
         if let (SourceModel::DualFisheye { lenses, .. }, Some(up)) = (&mut m, s.up_at(t.seconds())) {
-            let level = level_rotation(up);
+            let mut level = level_rotation(up);
+            if let Some(turn) = s.heading_at(t.seconds()) {
+                level = mmul(&camera_rotation(turn, 0.0, 0.0), &level);
+            }
             for l in lenses.iter_mut() {
                 l.rotation = mmul(&level, &l.rotation);
             }
@@ -762,7 +767,13 @@ mod tests {
     fn a_levelled_source_sees_up_where_the_camera_measured_it() {
         let up = normalize([0.4, 0.8, -0.3]);
         let mut s = two_lenses();
-        s.horizon = Some(filmcraft_media::spherical::Horizon { level: true, step: 1.0, up: vec![[0.0, 1.0, 0.0], [up[0] as f32, up[1] as f32, up[2] as f32]] });
+        s.horizon = Some(filmcraft_media::spherical::Horizon {
+            level: true,
+            steady: true,
+            step: 1.0,
+            up: vec![[0.0, 1.0, 0.0], [up[0] as f32, up[1] as f32, up[2] as f32]],
+            heading: Vec::new(),
+        });
         let raw = SourceModel::new(&s, (2000, 1000));
         let at = |secs: f64| SourceModel::at(&s, (2000, 1000), Tick::from_seconds_f64(secs));
         // a second in, the world's up is the pixel where the camera saw its measured up
@@ -776,6 +787,29 @@ mod tests {
         // at the start the camera was upright; without levelling nothing turns
         assert_eq!(at(0.0), raw);
         s.horizon.as_mut().unwrap().level = false;
+        assert_eq!(SourceModel::at(&s, (2000, 1000), Tick::from_seconds_f64(1.0)), raw);
+    }
+
+    #[test]
+    fn a_steadied_source_turns_back_the_swing_of_the_camera() {
+        // upright, the camera swung 10° right a second in: the turn back puts what it saw straight
+        // ahead 10° to the right, where it was before the swing
+        let mut s = two_lenses();
+        s.horizon = Some(filmcraft_media::spherical::Horizon { level: true, steady: true, step: 1.0, up: vec![[0.0, 1.0, 0.0]; 2], heading: vec![0.0, 10.0] });
+        let raw = SourceModel::new(&s, (2000, 1000));
+        let at = |secs: f64| SourceModel::at(&s, (2000, 1000), Tick::from_seconds_f64(secs));
+        let px = |l: Located| match l {
+            Located::One(x, y) => (x, y),
+            Located::Two((x, y, _), _) => (x, y),
+            o => panic!("{o:?}"),
+        };
+        let right = dir(10f64.to_radians(), 0.0);
+        let (a, b) = (px(at(1.0).locate(right)), px(raw.locate([0.0, 0.0, 1.0])));
+        assert!((a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05, "{a:?} {b:?}");
+        // half way, half the turn; not steadied: not turned
+        let (a, b) = (px(at(0.5).locate(dir(5f64.to_radians(), 0.0))), px(raw.locate([0.0, 0.0, 1.0])));
+        assert!((a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05, "{a:?} {b:?}");
+        s.horizon.as_mut().unwrap().steady = false;
         assert_eq!(SourceModel::at(&s, (2000, 1000), Tick::from_seconds_f64(1.0)), raw);
     }
 

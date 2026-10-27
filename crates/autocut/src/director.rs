@@ -453,7 +453,6 @@ pub struct Candidate {
     /// Indoors, by its description: a reveal from the sky would show the ceiling.
     pub indoor: bool,
     pub moving: bool,
-    pub handheld: bool,
     /// Someone talking to the camera; English kept speech in it.
     pub talking: bool,
     pub said: Option<String>,
@@ -677,7 +676,6 @@ fn candidate(
             wide: d.is_some_and(|d| d.shot_type == ShotType::Wide) || uses.contains(&ShotUse::Establishing),
             indoor: indoors(&format!("{} {}", s.caption(), d.map(|d| d.setting.as_str()).unwrap_or_default())),
             moving: s.shot.camera != CameraMove::Static || d.is_some_and(|d| !d.actions.is_empty()),
-            handheld: s.shot.camera == CameraMove::Handheld || s.shot.quality.shake > 0.35,
             talking: s.talking,
             said,
             looks,
@@ -1740,7 +1738,10 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
                         On::Clips,
                     ));
                 }
-                if c.handheld && !matches!(s.camera, Camera::Hyperlapse | Camera::PlanetIn | Camera::PlanetOut) {
+                // every 360° shot steadied from its pictures: a walk sways and bounces though the
+                // analysis seldom calls it handheld, and the camera's motion sensor takes out only
+                // part of the sway (a planet is all sky and ground; a hyperlapse steadies itself)
+                if !matches!(s.camera, Camera::Hyperlapse | Camera::PlanetIn | Camera::PlanetOut) {
                     out.push(step("clip.stabilize360", json!({"mode": "smooth", "wait": true}), me, On::Clips));
                 }
                 // where the shot's own clip time is: the hyperlapse plays its media faster

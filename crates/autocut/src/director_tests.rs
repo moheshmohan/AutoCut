@@ -29,7 +29,6 @@ fn cand(id: &str, item: u64, kind: Kind, start: f64, secs: f64, media: f64, orde
         wide: false,
         indoor: false,
         moving: true,
-        handheld: false,
         talking: false,
         said: None,
         looks: if kind == Kind::Vr { vec![look(&format!("{id}a"), 0.0, "a person", true), look(&format!("{id}b"), 120.0, "a dog", true)] } else { Vec::new() },
@@ -277,6 +276,13 @@ fn a_plan_compiles_to_commands_on_its_beats() {
     let (fov, _) = filmcraft_engine::project::vr::subject_framing(Some((20.0, 50.0)), 1080.0 / 1920.0);
     let aims: Vec<&Step> = steps.iter().filter(|s| s.id == "clip.reframe360").collect();
     assert!(!aims.is_empty() && aims.iter().all(|s| s.params["fov"].as_f64() == Some(fov.round())), "{aims:?}");
+    // every 360° shot steadied from its pictures, walked or not, but a planet or a hyperlapse
+    for (k, s) in plan.shots.iter().enumerate() {
+        let c = lib.iter().find(|c| c.id == s.clip).unwrap();
+        let steadied = steps.iter().any(|x| x.shot == Some(k) && x.id == "clip.stabilize360");
+        let own = matches!(s.camera, Camera::PlanetIn | Camera::PlanetOut | Camera::Hyperlapse);
+        assert_eq!(steadied, c.kind == Kind::Vr && !own, "shot {k}: {s:?}");
+    }
     // a named subject under a still or pushing camera is tracked
     for (k, s) in plan.shots.iter().enumerate() {
         let c = lib.iter().find(|c| c.id == s.clip).unwrap();

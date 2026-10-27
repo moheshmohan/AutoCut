@@ -93,8 +93,8 @@ pub struct Mp4Source {
     lens2: Option<(usize, GopCache)>,
     /// What the file says about its picture of the sphere.
     spherical: Option<filmcraft_media::Spherical>,
-    /// An Insta360 recording's horizon from its motion sensor, read the first time the sphere is
-    /// asked for.
+    /// An Insta360 recording's horizon and steadying from its motion sensor, read the first time
+    /// the sphere is asked for.
     horizon: Option<std::sync::OnceLock<Option<filmcraft_media::spherical::Horizon>>>,
     /// The playable audio tracks in file order: `info.audio_streams[k]` describes `audios[k]`.
     audios: Vec<Mp4Audio>,

@@ -3,7 +3,7 @@
 //! | command | does |
 //! |---|---|
 //! | `clip.reframe360` | looks at 360° clips (`clips`, default the selection, else every clip of 360° media) through a virtual camera (the `vr_reframe` effect, added when missing, framing the sequence's frame): `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across) and `distance` (0 flat … 1 tiny planet) set, or keyframed `at` a clip time, or a whole camera move as `keys`; a `preset` (`natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`) first; one undo step |
-//! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` (alone, they change the item's own); with nothing to change, what the items' VR Properties are |
+//! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` (alone, they change the item's own); `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings); with nothing to change, what the items' VR Properties are |
 //! | `media.align360` | lines the two lenses of dual-fisheye media up along their seam (a few frames across the clip, [`filmcraft_render::vr::align_lenses`]) and keeps the result in its VR Properties |
 //! | `clip.stabilize360` | holds the virtual camera steady: the camera's turn measured from the pictures frame to frame (`filmcraft_render::vr_motion`: points on cube faces, a robust rotation fit), then `mode` `smooth` / `light` / `strong` (the operator's own turns kept, the shake gone) or `lock` (the first frame's direction throughout), written as the effect's Stabilization keyframes; a job; `off` |
 //! | `media.salience360` | where things happen in a 360° item: around `seconds` (default the middle of `from`..`to`, else of the item), a few frames of its panorama 0.2 s apart scored by motion (else detail) in each direction ([`filmcraft_render::vr_motion::salient_directions`]): up to `max` directions (yaw, pitch, score), strongest first, at least 45° apart |
@@ -78,7 +78,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "VR Properties…",
             menu: &["Clip", "Modify"],
             shortcut: None,
-            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?,"level":bool?}"#,
+            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?,"level":bool?,"steady":bool?}"#,
             enabled: |_| Ok(()),
             run: vr_properties,
             journal: true,
@@ -499,8 +499,9 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
         None => None,
     };
     let level = bool_p(p, "level");
+    let steady = bool_p(p, "steady");
     // nothing to change: what the items' VR Properties are
-    if projection.is_none() && layout.is_none() && captured.is_none() && half_fov.is_none() && level.is_none() {
+    if projection.is_none() && layout.is_none() && captured.is_none() && half_fov.is_none() && level.is_none() && steady.is_none() {
         return Ok(json!({"items": items.iter().map(|id| json!({"item": id.0, "vr": vr_json(s.project.vr_of(*id))})).collect::<Vec<_>>()}));
     }
     // what each item gets (decided before the edit: `auto` opens the file)
@@ -547,7 +548,25 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
                 }
                 None => {}
             }
-        } else if level == Some(true) {
+            match steady {
+                // the heading steadied by the camera's turning (a horizon kept from before the
+                // steadying has none: the file's, levelled as it was)
+                Some(true) => {
+                    // (levelled as `level` left it)
+                    let levelled = v.horizon.as_ref().is_none_or(|h| h.level);
+                    let h =
+                        v.horizon.clone().filter(|h| !h.heading.is_empty()).or_else(|| from_file().and_then(|f| f.horizon).filter(|h| !h.heading.is_empty()));
+                    let Some(h) = h else { return Err(bad(cmd, format!("item {} has no motion-sensor record to steady its heading by", id.0))) };
+                    v.horizon = Some(filmcraft_media::spherical::Horizon { steady: true, level: levelled, ..h });
+                }
+                Some(false) => {
+                    if let Some(h) = v.horizon.as_mut() {
+                        h.steady = false;
+                    }
+                }
+                None => {}
+            }
+        } else if level == Some(true) || steady == Some(true) {
             return Err(bad(cmd, format!("item {} is not 360° media", id.0)));
         }
         new.push((*id, v.map(|v| v.sanitized())));
@@ -572,7 +591,12 @@ fn vr_json(v: Option<&Spherical>) -> Value {
     let mut j = serde_json::to_value(v).unwrap_or(Value::Null);
     if let (Some(h), Some(o)) = (&v.horizon, j.as_object_mut()) {
         let r1 = |x: f64| (x * 10.0).round() / 10.0;
-        o.insert("horizon".into(), json!({"level": h.level, "seconds": r1(h.seconds()), "samples": h.up.len(), "maxTilt": r1(h.max_tilt())}));
+        let mut sum = json!({"level": h.level, "seconds": r1(h.seconds()), "samples": h.up.len(), "maxTilt": r1(h.max_tilt())});
+        if !h.heading.is_empty() {
+            sum["steady"] = json!(h.steady);
+            sum["maxSteady"] = json!(r1(h.max_steady()));
+        }
+        o.insert("horizon".into(), sum);
     }
     j
 }
@@ -1339,7 +1363,8 @@ mod tests {
         let before = s.project.vr_of(item).cloned().unwrap();
         let key = sphere_key(&before);
         // (as an Insta360 recording brings it)
-        let h = filmcraft_media::spherical::Horizon { level: true, step: 0.1, up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]] };
+        let h =
+            filmcraft_media::spherical::Horizon { level: true, steady: true, step: 0.1, up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]], heading: vec![0.0, 3.0] };
         s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "none"})).unwrap();
         s.edit("Horizon", |pr, _| {
             if let Some(ItemKind::Media(m)) = pr.item_mut(item).map(|i| &mut i.kind) {
@@ -1349,7 +1374,12 @@ mod tests {
         })
         .unwrap();
         let q = s.execute(PROPS_CMD, json!({"items": [item.0]})).unwrap();
-        assert_eq!(q["items"][0]["vr"]["horizon"], json!({"level": true, "seconds": 0.1, "samples": 2, "maxTilt": 30.0}));
+        assert_eq!(q["items"][0]["vr"]["horizon"], json!({"level": true, "seconds": 0.1, "samples": 2, "maxTilt": 30.0, "steady": true, "maxSteady": 3.0}));
+        // the heading steadied, or not
+        s.execute(PROPS_CMD, json!({"items": [item.0], "steady": false})).unwrap();
+        assert!(s.project.vr_of(item).unwrap().heading_at(0.1).is_none() && s.project.vr_of(item).unwrap().up_at(0.1).is_some());
+        s.execute(PROPS_CMD, json!({"items": [item.0], "steady": true})).unwrap();
+        assert_eq!(s.project.vr_of(item).unwrap().heading_at(0.1), Some(3.0));
         let on = sphere_key(s.project.vr_of(item).unwrap());
         assert_ne!(on, key, "the panorama's caches change with the horizon");
         s.execute(PROPS_CMD, json!({"items": [item.0], "level": false})).unwrap();

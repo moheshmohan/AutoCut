@@ -45,6 +45,17 @@ stabilisation and following decode that instead of the two 2.9K HEVC tracks), an
   out with a level horizon. VR Properties ▸ Level Horizon (`media.vrProperties` `level`) turns it
   off and on; the samples are kept in the project (`horizon` in VR Properties, summed up when
   asked: seconds, samples, the largest tilt).
+- **Steady heading**: the same recording's **heading is steadied** from its gyroscope too. The
+  camera's turning about the vertical is added up and smoothed (a Gaussian of half a second, run
+  both ways); what is left — the sway of a walk, a step or two a second, 9–18° from side to side
+  on X5 footage walked with — is turned back, at most 20°, so a quick turn of the camera is let
+  through and every slow one (the way the person walks) kept. It takes out about a third of the
+  sway as a view shows it (the time between the sensor and the pictures differs by up to five
+  frames from recording to recording, so the samples stay a tenth of a second apart and the quick
+  jolts are not chased); `clip.stabilize360`, measuring from the pictures themselves, takes out
+  the rest and the bounce of the steps (a walked shot's wobble 6.6 → 2.1 px and 4.7 → 0.2 px in a
+  135 px wide view), and Direct an Edit runs it on every 360° shot. VR Properties ▸ Steady
+  (`media.vrProperties` `steady`) turns the heading's steadying off and on.
 - **Lens model**: equidistant fisheye, 97.5° from the axis to the image circle's edge (measured
   on X5 footage: where the two lenses' pictures agree best), image circles from the calibration;
   `media.align360` refines the angle and the lenses' relative turn per clip.
@@ -56,7 +67,7 @@ stabilisation and following decode that instead of the two 2.9K HEVC tracks), an
 
 | Command | Does |
 |---|---|
-| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; `level` levels the horizon by the camera's motion sensor (on by itself for Insta360 recordings) or stops; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
+| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings) or stop; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
 | `media.align360` | aligns the two lenses of dual-fisheye media along their seam |
 | `clip.reframe360` | the virtual camera: `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across), `distance` (0 flat … 1 tiny planet), `output` `flat`/`sphere`, `width`/`height` (default: the sequence frame); `at` keyframes them at a clip time; `keys` writes a whole camera move; presets `natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`; `off` |
 | `clip.stabilize360` | holds the view steady: the camera's turn measured from the pictures (points tracked on cube faces, a robust rotation fit), then `smooth`/`light`/`strong` (keep the operator's turns, drop the shake) or `lock` (look one way the whole clip) |
@@ -164,7 +175,9 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
 4. **Commands**: the plan compiles to engine commands — `timeline.place`, `clip.reframe360`,
    `clip.stabilize360`, `clip.vrMove`, `clip.follow360`, `clip.hyperlapse360`, `clip.kenBurns`,
    `clip.autoReframe`, `clip.speedRamp`, `graphics.newText`, `audio.generate`… — each shot's own
-   run on its clip once it is placed. `--dry-run` prints the plan and its commands.
+   run on its clip once it is placed. Every 360° shot but a planet or a hyperlapse is steadied
+   from its pictures (`clip.stabilize360` `smooth`): a walk sways and bounces however the analysis
+   judged it. `--dry-run` prints the plan and its commands.
    **Framing for the frame's shape.** Every 360° shot is framed for the edit's own aspect: the
    camera turns to the subject's box (a person right by the camera, taller than 75°, by the
    upper part — the face) and its field of view is sized so the box takes about 65 % of the

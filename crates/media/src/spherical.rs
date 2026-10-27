@@ -14,6 +14,8 @@ pub const MAX_LENSES: usize = 2;
 pub const MAX_POLY: usize = 8;
 /// Most samples of a horizon (nearly seven hours at ten a second).
 pub const MAX_HORIZON: usize = 250_000;
+/// Largest turn a horizon's steadying makes, degrees (a project file is not trusted).
+pub const MAX_STEADY: f32 = 45.0;
 
 /// A picture of the sphere.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -36,8 +38,8 @@ pub struct Spherical {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub camera: String,
     /// Which way was up through the recording, from the camera's own motion sensor: the sphere
-    /// is turned at every moment so that up is up (a dual-fisheye picture; a stitched one was
-    /// levelled when it was stitched).
+    /// is turned at every moment so that up is up, and its heading steadied (a dual-fisheye
+    /// picture; a stitched one was levelled when it was stitched).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub horizon: Option<Horizon>,
 }
@@ -85,6 +87,12 @@ impl Spherical {
         self.horizon.as_ref()?.up_at(seconds)
     }
 
+    /// The turn about the vertical that steadies the levelled picture `seconds` into the
+    /// recording, degrees to the right ([`Horizon::heading_at`]).
+    pub fn heading_at(&self, seconds: f64) -> Option<f64> {
+        self.horizon.as_ref()?.heading_at(seconds)
+    }
+
     /// The description with every number made usable: lenses capped and their values finite and
     /// in range, the captured view within the sphere. A project file or a camera can say anything.
     pub fn sanitized(&self) -> Self {
@@ -104,18 +112,27 @@ impl Spherical {
 }
 
 /// Which way was up through a recording, measured by the camera's motion sensor (an Insta360
-/// recording's gravity and turning, `filmcraft_codecs`), which levels its horizon.
+/// recording's gravity and turning, `filmcraft_codecs`), which levels its horizon — and how the
+/// camera swung about the vertical, which steadies its heading: the sway of a walk and the jolts of
+/// a selfie stick taken out, the turns of the person holding it kept.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Horizon {
     /// Whether the picture is levelled by it (VR Properties ▸ Level Horizon).
     #[serde(default = "yes")]
     pub level: bool,
+    /// Whether the levelled picture's heading is steadied by it (VR Properties ▸ Steady).
+    #[serde(default = "yes")]
+    pub steady: bool,
     /// Seconds between samples, the first at the recording's first picture.
     pub step: f64,
     /// Up in the camera's own directions (+Z through the front lens, +Y up its body), a unit
     /// vector a sample.
     pub up: Vec<[f32; 3]>,
+    /// The turn about the vertical that steadies the levelled picture, degrees to the right, a
+    /// sample (as many as `up`; none: not steadied).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heading: Vec<f32>,
 }
 
 fn yes() -> bool {
@@ -140,6 +157,27 @@ impl Horizon {
         (n > 1e-6 && n.is_finite()).then(|| v.map(|c| c / n))
     }
 
+    /// The steadying turn `seconds` into the recording, degrees to the right, blended and held
+    /// like [`Horizon::up_at`]; `None` when levelling or steadying is off or there are no samples.
+    pub fn heading_at(&self, seconds: f64) -> Option<f64> {
+        if !(self.level && self.steady) || !(self.step.is_finite() && self.step > 0.0) {
+            return None;
+        }
+        let last = self.heading.len().checked_sub(1)?;
+        let x = if seconds.is_finite() { (seconds / self.step).clamp(0.0, last as f64) } else { 0.0 };
+        let i = (x.floor() as usize).min(last);
+        let f = x - i as f64;
+        let a = f64::from(*self.heading.get(i)?);
+        let b = f64::from(*self.heading.get((i + 1).min(last))?);
+        let v = a * (1.0 - f) + b * f;
+        v.is_finite().then_some(v)
+    }
+
+    /// The largest steadying turn, degrees.
+    pub fn max_steady(&self) -> f64 {
+        self.heading.iter().map(|h| f64::from(h.abs())).fold(0.0, f64::max)
+    }
+
     /// How long the samples run, seconds.
     pub fn seconds(&self) -> f64 {
         self.step * self.up.len().saturating_sub(1) as f64
@@ -151,7 +189,8 @@ impl Horizon {
     }
 
     /// Usable values: a step of a millisecond to a minute, at most [`MAX_HORIZON`] samples, each
-    /// a finite unit vector (upright where it was not).
+    /// a finite unit vector (upright where it was not), and steadying turns finite and within
+    /// [`MAX_STEADY`] (none where it was not).
     pub fn sanitized(&self) -> Self {
         let step = if self.step.is_finite() { self.step.clamp(0.001, 60.0) } else { 0.1 };
         let up = self
@@ -163,7 +202,8 @@ impl Horizon {
                 if n.is_finite() && n > 1e-6 { u.map(|c| c / n) } else { [0.0, 1.0, 0.0] }
             })
             .collect();
-        Horizon { level: self.level, step, up }
+        let heading = self.heading.iter().take(MAX_HORIZON).map(|h| if h.is_finite() { h.clamp(-MAX_STEADY, MAX_STEADY) } else { 0.0 }).collect();
+        Horizon { level: self.level, steady: self.steady, step, up, heading }
     }
 }
 
@@ -257,17 +297,18 @@ mod tests {
         let e: Spherical = serde_json::from_str(r#"{"projection":{"kind":"equirectangular"}}"#).unwrap();
         assert_eq!(e, Spherical::equirect());
         // a horizon goes with it; levelling is on unless it says otherwise
-        let h = Horizon { level: true, step: 0.1, up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]] };
+        let h = Horizon { level: true, steady: true, step: 0.1, up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]], heading: vec![0.0, -2.5] };
         let lev = Spherical { horizon: Some(h.clone()), ..s };
         let j = serde_json::to_string(&lev).unwrap();
         assert_eq!(serde_json::from_str::<Spherical>(&j).unwrap(), lev);
+        // (a project saved before steadying: levelled, and nothing to steady by)
         let on: Horizon = serde_json::from_str(r#"{"step":0.1,"up":[[0,1,0]]}"#).unwrap();
-        assert!(on.level);
+        assert!(on.level && on.steady && on.heading.is_empty() && on.heading_at(0.0).is_none());
     }
 
     #[test]
     fn up_is_blended_between_samples_and_held_at_the_ends() {
-        let h = Horizon { level: true, step: 0.5, up: vec![[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]] };
+        let h = Horizon { level: true, steady: true, step: 0.5, up: vec![[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]], heading: vec![0.0, 4.0] };
         let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|c| (a[c] - b[c]).abs() < 1e-6);
         assert!(close(h.up_at(-3.0).unwrap(), [0.0, 1.0, 0.0]));
         assert!(close(h.up_at(0.25).unwrap(), [0.5f64.sqrt(), 0.5f64.sqrt(), 0.0]));
@@ -276,6 +317,9 @@ mod tests {
         assert_eq!((h.seconds(), h.max_tilt().round()), (0.5, 90.0));
         assert!(Horizon { level: false, ..h.clone() }.up_at(0.0).is_none());
         assert!(Horizon { up: vec![], ..h.clone() }.up_at(0.0).is_none());
+        // the steadying turn the same way; only with levelling
+        assert_eq!((h.heading_at(-1.0), h.heading_at(0.25), h.heading_at(7.0), h.max_steady()), (Some(0.0), Some(2.0), Some(4.0), 4.0));
+        assert!(Horizon { steady: false, ..h.clone() }.heading_at(0.25).is_none() && Horizon { level: false, ..h.clone() }.heading_at(0.25).is_none());
         let s = Spherical { horizon: Some(h), ..Spherical::equirect() };
         assert!(s.up_at(0.0).is_some() && Spherical::equirect().up_at(0.0).is_none());
     }
@@ -295,12 +339,19 @@ mod tests {
         };
         let mut s = Spherical::dual_fisheye(vec![bad.clone(), bad.clone(), bad], "");
         s.captured = [f64::NAN, -5.0];
-        s.horizon = Some(Horizon { level: true, step: f64::NAN, up: [[f32::NAN, 0.0, 1.0], [0.0; 3], [0.0, 2.0, 0.0]].repeat(MAX_HORIZON / 3 + 5) });
+        s.horizon = Some(Horizon {
+            level: true,
+            steady: true,
+            step: f64::NAN,
+            up: [[f32::NAN, 0.0, 1.0], [0.0; 3], [0.0, 2.0, 0.0]].repeat(MAX_HORIZON / 3 + 5),
+            heading: [f32::NAN, 1e9, -3.0].repeat(MAX_HORIZON / 3 + 5),
+        });
         let s = s.sanitized();
         assert_eq!(s.captured, [360.0, 1.0]);
         let h = s.horizon.as_ref().unwrap();
         assert_eq!((h.step, h.up.len()), (0.1, MAX_HORIZON));
         assert_eq!(&h.up[..3], &[[0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]]);
+        assert_eq!((h.heading.len(), &h.heading[..3]), (MAX_HORIZON, &[0.0, MAX_STEADY, -3.0][..]));
         let Projection::DualFisheye { lenses } = &s.projection else { panic!() };
         assert_eq!(lenses.len(), MAX_LENSES);
         for l in lenses {

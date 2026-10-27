@@ -135,6 +135,11 @@ const GYRO_PER_DEGREE: f64 = 16.4;
 pub const MOTION_MEAN: usize = 5;
 /// Seconds between the samples of a horizon.
 pub const HORIZON_STEP: f64 = 0.1;
+/// How long the heading is smoothed over, seconds (a Gaussian's σ): turns slower than this are
+/// the operator's and kept; the sway of a walk (a step or two a second) is taken out.
+const STEADY_SECONDS: f64 = 0.5;
+/// Largest turn the steadying makes, degrees: past it a quick turn of the camera is let through.
+pub const MAX_STEADY: f64 = 20.0;
 /// How long the accelerometer takes to pull the gyroscope's estimate of down back to what it
 /// measures, seconds: the gyroscope follows quick turns, the accelerometer stops its drift.
 const ACCEL_TRUST_SECONDS: f64 = 1.0;
@@ -211,16 +216,68 @@ fn pass(motion: &[Motion], order: impl Iterator<Item = usize>, start: V3, out: &
     }
 }
 
-/// Which way was up through an Insta360 recording, from its motion sensor (`motion`, in the
-/// camera's order, as [`filmcraft_isobmff::insta360::read_motion`] gives it) and the time its
-/// first picture's exposure started and lasted (`first`, microseconds and seconds; the first
-/// sample's time without one): a sample every [`HORIZON_STEP`] seconds of the recording.
+/// Where the straight line fitted to `v` is at its first sample (`v` in reverse: at its last).
+fn line_at_start(v: impl Iterator<Item = f64> + Clone) -> f64 {
+    let n = v.clone().count() as f64;
+    let (sx, sy) = v.clone().enumerate().fold((0.0, 0.0), |(sx, sy), (i, y)| (sx + i as f64, sy + y));
+    let (mx, my) = (sx / n.max(1.0), sy / n.max(1.0));
+    let (sxy, sxx) = v.enumerate().fold((0.0, 0.0), |(sxy, sxx), (i, y)| (sxy + (i as f64 - mx) * (y - my), sxx + (i as f64 - mx).powi(2)));
+    let slope = if sxx > 0.0 { sxy / sxx } else { 0.0 };
+    let at = my - slope * mx;
+    if at.is_finite() { at } else { 0.0 }
+}
+
+/// The Gaussian smoothing of `v` with σ `sigma` samples. Past its ends it is mirrored about the
+/// line fitted to the last four σ of them, so a steady turn stays a turn up to the end and a sway
+/// there is still taken out.
+fn smoothed(v: &[f64], sigma: f64) -> Vec<f64> {
+    let n = v.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if !(sigma.is_finite() && sigma > 0.0) {
+        return v.to_vec();
+    }
+    let fit = ((4.0 * sigma).ceil() as usize).saturating_add(1).max(2).min(n);
+    let a = line_at_start(v.iter().take(fit).copied());
+    let z = line_at_start(v.iter().rev().take(fit).copied());
+    let r = (3.0 * sigma).ceil().min(1000.0) as usize;
+    let kernel: Vec<f64> = (0..=2 * r).map(|k| (-0.5 * ((k as f64 - r as f64) / sigma).powi(2)).exp()).collect();
+    let total: f64 = kernel.iter().sum();
+    let last = n - 1;
+    let at = |j: isize| -> f64 {
+        if j < 0 {
+            2.0 * a - v.get(j.unsigned_abs().min(last)).copied().unwrap_or(a)
+        } else if j as usize > last {
+            2.0 * z - v.get((2 * last).saturating_sub(j as usize)).copied().unwrap_or(z)
+        } else {
+            v.get(j as usize).copied().unwrap_or(z)
+        }
+    };
+    (0..n).map(|i| kernel.iter().enumerate().map(|(k, w)| w * at(i as isize + k as isize - r as isize)).sum::<f64>() / total).collect()
+}
+
+/// Which way was up through an Insta360 recording, and how to steady its heading, from its motion
+/// sensor (`motion`, in the camera's order, as [`filmcraft_isobmff::insta360::read_motion`] gives
+/// it) and the time its first picture's exposure started and lasted (`first`, microseconds and
+/// seconds; the first sample's time without one): a sample every [`HORIZON_STEP`] seconds of the
+/// recording.
 ///
 /// The gyroscope and accelerometer are fused (a complementary filter) forwards and backwards in
 /// time and the two averaged, so a turn is followed without lag; each sample is the average over
 /// its step. The sensor's axes were matched to the camera's directions on X5 footage by levelling
 /// its panoramas (a lounge, a hotel lobby, an escalator): the camera's +X, +Y and +Z are the
 /// sensor's −third, first and −second axes, along which the accelerometer measures down.
+///
+/// The heading is the gyroscope's turning about that down, added up; smoothed over
+/// [`STEADY_SECONDS`], what is left is the swing to take out (at most [`MAX_STEADY`]). Its sign
+/// was measured, not derived: on X5 footage walked with, turning the picture back the way the
+/// derivation says doubled the sway (a 24 px swing in a 135 px wide view became 41), the other
+/// way it shrank to 16 px, and the pictures' own frame-to-frame turning (`clip.stabilize360`'s
+/// measurement) agreed with it (0.86 correlated, 0.89 of its size). The time between the sensor
+/// and the pictures differs from recording to recording by up to five frames, so the samples
+/// stay a tenth of a second apart: the sway (a step or two a second) is followed, the jolts
+/// between are left to `clip.stabilize360`.
 pub fn insta360_horizon(motion: &[Motion], first: Option<(u64, f64)>) -> Option<Horizon> {
     let (t0, t_last) = (motion.first()?.us, motion.last()?.us);
     let n = motion.len();
@@ -233,22 +290,42 @@ pub fn insta360_horizon(motion: &[Motion], first: Option<(u64, f64)>) -> Option<
     pass(motion, 0..n, start_f, &mut fwd);
     pass(motion, (0..n).rev(), start_b, &mut bwd);
     let down: Vec<V3> = fwd.iter().zip(&bwd).map(|(a, b)| unit([a[0] + b[0], a[1] + b[1], a[2] + b[2]]).unwrap_or(*a)).collect();
+    // the heading, degrees to the right: the gyroscope's turning about the accelerometer's axis
+    // (the sign measured on footage)
+    let mut heading = Vec::with_capacity(n);
+    let mut psi = 0.0f64;
+    let mut prev_us: Option<u64> = None;
+    for (m, d) in motion.iter().zip(&down) {
+        if let Some(us) = prev_us {
+            let dt = (m.us.saturating_sub(us) as f64 / 1e6).clamp(0.0, 0.1);
+            let w = m.gyro.map(|c| f64::from(c) / GYRO_PER_DEGREE);
+            let rate = w[0] * d[0] + w[1] * d[1] + w[2] * d[2];
+            if rate.is_finite() {
+                psi += rate.clamp(-3600.0, 3600.0) * dt;
+            }
+        }
+        heading.push(psi);
+        prev_us = Some(m.us);
+    }
     // the middle of the first picture's exposure is the recording's time zero
     let zero = match first {
         Some((us, exposure)) => us.saturating_add((exposure.clamp(0.0, 1.0) * 5e5) as u64),
         None => t0,
     };
     let span = t_last.saturating_sub(zero) as f64 / 1e6;
-    let count = ((span / HORIZON_STEP).floor() as usize).saturating_add(1).min(filmcraft_media::spherical::MAX_HORIZON);
+    let step = HORIZON_STEP;
+    let count = ((span / step).floor() as usize).saturating_add(1).min(filmcraft_media::spherical::MAX_HORIZON);
     let mut up = Vec::with_capacity(count);
+    let mut turned = Vec::with_capacity(count);
     let mut lo = 0usize;
     for j in 0..count {
-        let mid = zero as f64 + j as f64 * HORIZON_STEP * 1e6;
-        let (a, b) = (mid - HORIZON_STEP * 5e5, mid + HORIZON_STEP * 5e5);
+        let mid = zero as f64 + j as f64 * step * 1e6;
+        let (a, b) = (mid - step * 5e5, mid + step * 5e5);
         while lo < n && motion.get(lo).is_some_and(|m| (m.us as f64) < a) {
             lo += 1;
         }
         let mut sum = [0.0; 3];
+        let (mut psi_sum, mut psi_n) = (0.0, 0usize);
         let mut hi = lo;
         while motion.get(hi).is_some_and(|m| (m.us as f64) < b) {
             if let Some(d) = down.get(hi) {
@@ -256,15 +333,24 @@ pub fn insta360_horizon(motion: &[Motion], first: Option<(u64, f64)>) -> Option<
                     sum[c] += d[c];
                 }
             }
+            if let Some(p) = heading.get(hi) {
+                psi_sum += p;
+                psi_n += 1;
+            }
             hi += 1;
         }
         // (no sample in the step: the nearest one)
-        let d = unit(sum).or_else(|| down.get(lo.min(n.saturating_sub(1))).copied()).unwrap_or([0.0, -1.0, 0.0]);
+        let near = lo.min(n.saturating_sub(1));
+        let d = unit(sum).or_else(|| down.get(near).copied()).unwrap_or([0.0, -1.0, 0.0]);
         // sensor → camera directions, and up is the other way from down
         let u = [d[2], -d[0], d[1]];
         up.push(u.map(|c| ((c * 1000.0).round() / 1000.0) as f32));
+        turned.push(if psi_n > 0 { psi_sum / psi_n as f64 } else { heading.get(near).copied().unwrap_or(0.0) });
     }
-    (!up.is_empty()).then_some(Horizon { level: true, step: HORIZON_STEP, up })
+    // the swing about the smoothed heading, turned back
+    let smooth = smoothed(&turned, STEADY_SECONDS / step);
+    let heading = turned.iter().zip(&smooth).map(|(t, s)| (((t - s).clamp(-MAX_STEADY, MAX_STEADY) * 100.0).round() / 100.0) as f32).collect();
+    (!up.is_empty()).then_some(Horizon { level: true, steady: true, step, up, heading })
 }
 
 /// The spherical metadata of a stitched video track: V2 (`sv3d`, `st3d`) first, then V1. Only
@@ -453,6 +539,55 @@ mod tests {
         let h = insta360_horizon(&m, None).unwrap();
         assert!((h.up.len() as i64 - 30).abs() <= 1);
         assert!(tilt(h.up[9]) < 2.0 && (tilt(h.up[16]) - 90.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn a_walk_is_steadied_and_its_turn_kept() {
+        // upright, swaying 6° either way once a second, and turning 90° between 4 and 6 s
+        let sway = |t: f64| 6.0 * (std::f64::consts::TAU * t).sin();
+        let turn = |t: f64| {
+            let x = ((t - 4.0) / 2.0).clamp(0.0, 1.0);
+            90.0 * x * x * (3.0 - 2.0 * x)
+        };
+        let heading = |t: f64| sway(t) + turn(t);
+        let down = sensor_down([0.0, 1.0, 0.0]);
+        let raw: Vec<Motion> = (0..10_000u64)
+            .map(|k| {
+                let t = k as f64 / 1000.0;
+                // (about the vertical: the sensor's first axis, as footage measured it)
+                let rate = (heading(t + 0.0005) - heading(t - 0.0005)) / 0.001;
+                Motion { us: k * 1000, accel: down.map(|c| (c * ACCEL_PER_G) as f32), gyro: [(-rate * GYRO_PER_DEGREE) as f32, 0.0, 0.0] }
+            })
+            .collect();
+        let h = insta360_horizon(&averaged(&raw), None).unwrap();
+        assert!(h.steady && h.heading.len() == h.up.len() && (h.up.len() as i64 - 100).abs() <= 1, "{}", h.up.len());
+        for (j, d) in h.heading.iter().enumerate() {
+            let t = j as f64 * h.step;
+            let d = f64::from(*d);
+            assert!(d.abs() <= MAX_STEADY);
+            // the steadied heading (the camera's, less the turn back) does not sway ...
+            let steadied = heading(t) - d;
+            if (1.5..3.0).contains(&t) {
+                assert!((d - sway(t)).abs() < 0.6 && steadied.abs() < 0.6, "{t}s: turned back {d}, the sway was {}", sway(t));
+            }
+            // ... and still makes the turn
+            if (7.5..8.5).contains(&t) {
+                assert!((d - sway(t)).abs() < 0.6 && (steadied - 90.0).abs() < 0.6, "{t}s: {steadied}");
+            }
+            // (the first and last second and a half, smoothed with what their ends mirror, sway
+            // less than half as much)
+            if t < 1.5 || t >= 8.5 {
+                assert!((steadied - turn(t)).abs() < 2.5, "{t}s: {steadied}");
+            }
+        }
+        // a steady camera is not turned at all
+        let still = recording(0, 3.0, down, [0.0; 3], 0.0, 0.0, None);
+        assert!(insta360_horizon(&averaged(&still), None).unwrap().heading.iter().all(|d| *d == 0.0));
+        // the smoothing: nothing to smooth, no width, a steady turn kept up to its ends
+        assert_eq!(smoothed(&[], 3.0), Vec::<f64>::new());
+        assert_eq!(smoothed(&[1.0, 2.0, 3.0], f64::NAN), vec![1.0, 2.0, 3.0]);
+        let ramp: Vec<f64> = (0..50).map(f64::from).collect();
+        assert!(smoothed(&ramp, 5.0).iter().zip(&ramp).all(|(a, b)| (a - b).abs() < 1e-9));
     }
 
     #[test]
