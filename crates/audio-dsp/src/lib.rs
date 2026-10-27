@@ -14,6 +14,10 @@
 //!   process-wide (DeepFilterNet 3 in `filmcraft-voice`), a DSP fallback until then; the Voice
 //!   Changer ([`effects::voice_changer`]) is DSP.
 //! * [`biquad`] — RBJ-cookbook biquads (TDF-II) with analytic magnitude response.
+//! * [`prosody`] — speech prosody: an F0 tracker (YIN's normalised difference via the FFT, a
+//!   path over candidates against octave errors), pitch-contour reshaping (TD-PSOLA: range,
+//!   shift, a question's rise, emphasis) and expressiveness features (F0 range and movement,
+//!   energy variation, syllable rate, voiced fraction, final contour).
 //! * [`sync`] — offset between two recordings of one event (GCC-PHAT, sample-accurate).
 //! * [`resample`] — streaming, block-invariant rate conversion for playback on a device at another rate.
 //! * [`stretch`] — time stretch that keeps pitch (WSOLA, renderable from any position): Speed/Duration's
@@ -45,6 +49,7 @@ pub mod loudness;
 pub mod mixcheck;
 pub mod music;
 pub mod oversample;
+pub mod prosody;
 pub mod remix;
 pub mod resample;
 pub mod sfx;
