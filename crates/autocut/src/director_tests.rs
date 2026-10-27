@@ -640,6 +640,54 @@ fn the_director_chooses_the_style_from_the_shots_unless_one_is_named() {
 }
 
 #[test]
+fn a_travel_video_shows_the_places_and_its_person_now_and_then() {
+    let (mut lib, mut plan, _) = trip();
+    // every 360° shot: the camera's holder first, a mosque or the street behind them
+    for c in lib.iter_mut().filter(|c| c.kind == Kind::Vr) {
+        c.looks = vec![
+            Look { id: format!("{}a", c.id), yaw: 10.0, pitch: -10.0, what: "a man in a patterned shirt".into(), named: true, size: Some((60.0, 80.0)) },
+            Look { id: format!("{}b", c.id), yaw: 170.0, pitch: 0.0, what: "a mosque".into(), named: true, size: Some((30.0, 30.0)) },
+        ];
+        c.scores.people = 1.0;
+        c.indoor = false;
+    }
+    lib[0].looks.truncate(1);
+    let (about, why) = focus::focus_of(None, "a reel of our trip", &lib);
+    assert_eq!(about, focus::Focus::Places, "{why}");
+    assert_eq!(focus::focus_of(None, "", &lib).0, focus::Focus::Places, "outdoors, nobody talking");
+    assert_eq!(focus::focus_of(Some(focus::Focus::People), "a trip", &lib).0, focus::Focus::People);
+    let before: Vec<f64> = lib.iter().map(|c| c.rank).collect();
+    focus::for_places(&mut lib);
+    // places first, ids kept; c1 had only its holder: the view the other way round
+    assert_eq!(lib[2].looks[0].id, "c3b");
+    assert_eq!((lib[0].looks[0].id.as_str(), lib[0].looks[0].yaw.round()), ("c1b", -170.0));
+    assert!(lib[0].looks[0].what.contains("away from the camera's holder"));
+    assert!(lib.iter().zip(&before).all(|(c, b)| c.rank.is_finite() && (c.rank - b).abs() < 1.0));
+    // the plan looking at the holder in its three 360° shots (of six): two kept (a third), the
+    // last turned to its place; a whip with no second place pushes in
+    for s in plan.shots.iter_mut() {
+        if lib.iter().any(|c| c.id == s.clip && c.kind == Kind::Vr) {
+            s.look = Some(format!("{}a", s.clip));
+        }
+    }
+    plan.shots[5].camera = Camera::WhipPan;
+    plan.shots[5].to = Some("c6b".into());
+    let changed = focus::limit_people(&mut plan, &lib);
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    let looks: Vec<Option<&str>> = plan.shots.iter().map(|s| s.look.as_deref()).collect();
+    assert_eq!((looks[0], looks[1], looks[5]), (Some("c1a"), Some("c3a"), Some("c6b")));
+    assert_eq!((plan.shots[5].camera, plan.shots[5].to.as_deref()), (Camera::PushIn, None));
+    assert!(changed[0].starts_with("shot 6: looks at c6b"), "{changed:?}");
+    // the model is told, the person looks marked
+    let mut o = opts(json!({"brief": "our trip"}));
+    o.focus = Some(focus::Focus::Places);
+    let refs: Vec<&Candidate> = lib.iter().collect();
+    let prompt = director_prompt(&refs, &o, 0.5, &rhythm(20, 0.5, lib.len()));
+    assert!(prompt.contains("This is a travel video") && prompt.contains("a man in a patterned shirt (a person)"), "{prompt}");
+    assert!(Options::from_params(&json!({"focus": "dogs"})).is_err());
+}
+
+#[test]
 fn notes_are_read_into_changes_by_rules_and_from_a_model() {
     use revise::{Op, Where};
     let (ops, unread) =

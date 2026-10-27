@@ -123,6 +123,16 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    scores, whether it was kept and why ("kept: rank 0.81 — sharp, well exposed, faces in view;
    says "wow look at that"", "dropped: a near-duplicate of c4 (0.96 alike), which ranks
    higher"). The model sees each moment's rank; without a model the rules use it too.
+   **Places or people.** What the edit is about (`--focus auto|places|people`): a brief about a
+   trip, travel, a vlog, a holiday, a tour or a city is about **places**, one about a birthday, a
+   wedding, a party or the family about **people**; with neither, most moments outdoors and few
+   people talking is places. A places edit ranks moments by how they look, how wide and whether
+   outdoors (faces, smiles and speech count for little), points each 360° shot at what is not a
+   person first (a crowd or people walking are the street; where only a person was found, the
+   view the other way round, away from the camera's holder), and keeps the person holding the
+   camera in at most a third of the shots: past that, a 360° shot turns to its place (a follow
+   becomes a drift, a whip with no second place a push in), the plan's notes saying which. The
+   model is told the same, the person looks marked. The report's `focus` says which and why.
 3. **The plan**: the rhythm is set first — a hook long enough for a tiny planet to open, body
    shots alternating about 2.4 s and 1.8 s, an ending, every length a whole number of beats
    adding up to the length asked. The local model (the script model, `qwen3:8b`, else

@@ -822,6 +822,11 @@ pub struct DirectParams {
     /// planned (the report's `style` says which and why).
     #[serde(default)]
     pub style: Option<String>,
+    /// What the edit is about: "places" (a travel video: the places first, the person holding
+    /// the camera in at most a third of the shots) or "people". Left out (or "auto"), read from
+    /// the brief and the footage.
+    #[serde(default)]
+    pub focus: Option<String>,
     /// Light effects (light leaks) allowed in the energetic style (default: the style's; a style
     /// the director chooses allows them when most shots are not at night).
     #[serde(default)]
@@ -959,6 +964,7 @@ fn direct_params(p: DirectParams) -> Value {
     put("export", p.export.map(Value::String));
     put("download", p.download.map(Value::Bool));
     put("style", p.style.map(Value::String));
+    put("focus", p.focus.map(Value::String));
     put("lightEffects", p.light_effects.map(Value::Bool));
     put("sounds", p.sounds.map(|v| json!(v)));
     put("soundLevel", p.sound_level.map(|v| json!(v)));

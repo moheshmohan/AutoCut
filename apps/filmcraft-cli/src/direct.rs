@@ -12,7 +12,7 @@ direct [folder | files… | project.fcproj] [--brief \"a 30 s reel of our trip\"
        [--insta360 VID_093,VID_096] [--album TITLE] [--mood happy] [--bpm 110]
        [--music file|generate] [--title T] [--no-captions] [--caption-style clean]
        [--redact faces,plates|faces|plates|off] [--name N] [--full-detail 8] [--seed N]
-       [--style auto|subtle|energetic|cinematic] [--light-effects] [--sounds swish,chime|none]
+       [--style auto|subtle|energetic|cinematic] [--focus auto|places|people] [--light-effects] [--sounds swish,chime|none]
        [--sound-level 0.4] [--no-color] [--color-strength 0.7]
        [--look none|punchy|soft|warm|cool|golden|teal] [--look-strength 25]
        [--revise \"1:10 is too long; warmer at the end\" --from out.report.json]
@@ -34,6 +34,7 @@ pub fn params(a: &Args) -> Result<Value, String> {
         ("--redact", "redact"),
         ("--name", "name"),
         ("--style", "style"),
+        ("--focus", "focus"),
         ("--look", "look"),
         ("--revise", "revise"),
     ] {
@@ -124,6 +125,7 @@ pub async fn run(a: &Args) {
         "--full-detail",
         "--seed",
         "--style",
+        "--focus",
         "--light-effects",
         "--sounds",
         "--sound-level",

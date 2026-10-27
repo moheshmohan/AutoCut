@@ -74,6 +74,24 @@ impl Scores {
         round2(unit(r))
     }
 
+    /// The moment's rank for an edit about places, 0..1: how it looks, how wide and whether
+    /// outdoors first; faces, smiles and speech count for little.
+    pub fn rank_for_places(&self, kind: Kind, wide: bool, indoor: bool) -> f64 {
+        let looks = self.looks.unwrap_or((self.sharp + self.exposure) / 2.0);
+        let r = 0.22 * self.sharp
+            + 0.18 * self.exposure
+            + 0.12 * self.steady
+            + 0.20 * looks
+            + 0.04 * self.people
+            + 0.02 * self.expression
+            + 0.02 * self.speech
+            + 0.08 * self.energy
+            + if wide { 0.06 } else { 0.0 }
+            + if indoor { 0.0 } else { 0.04 }
+            + if kind == Kind::Vr { 0.02 } else { 0.0 };
+        round2(unit(r))
+    }
+
     /// The picture's quality alone, 0..1.
     pub fn quality(&self) -> f64 {
         let base = 0.4 * self.sharp + 0.3 * self.exposure + 0.3 * self.steady;

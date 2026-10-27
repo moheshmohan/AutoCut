@@ -146,6 +146,9 @@ pub struct Options {
     /// (kept in `style_given`) over it.
     pub auto_style: bool,
     pub style_given: Value,
+    /// What the edit is about (`focus`): the places or the people; none (`auto`) — the director
+    /// reads it from the brief and the footage ([`focus::focus_of`]).
+    pub focus: Option<focus::Focus>,
     /// The careful colour pass (`clip.autoColor`): on unless switched off; its strength (0..1),
     /// and a look of our own (`none` by default) at a strength (%).
     pub color: bool,
@@ -347,6 +350,7 @@ impl Options {
                 style_given[k] = p[k].clone();
             }
         }
+        let focus = focus::Focus::parse(p["focus"].as_str().unwrap_or_default()).map_err(invalid)?;
         let style =
             if auto_style { cuts::Style::from_params(&style_given, &cuts::Style::default()) } else { cuts::Style::from_params(p, &cuts::Style::default()) };
         let redact = match &p["redact"] {
@@ -376,6 +380,7 @@ impl Options {
             style: style.map_err(invalid)?,
             auto_style,
             style_given,
+            focus,
             color: p["color"].as_bool().unwrap_or(true),
             color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
             look,
@@ -1277,8 +1282,15 @@ pub fn rhythm(total: u32, beat: f64, available: usize) -> Vec<Slot> {
 /// cameras, one line a clip, the rules and the reply's shape.
 pub fn director_prompt(cands: &[&Candidate], o: &Options, beat: f64, slots: &[Slot]) -> String {
     let one_line = |t: &str| t.replace(['\n', '\r', '|'], " ");
+    let places = o.focus == Some(focus::Focus::Places);
     let mut out = String::new();
     out.push_str(&format!("Brief: \"{}\"\n", one_line(&o.brief)));
+    if places {
+        let most = ((slots.len() as f64 * focus::MAX_PEOPLE).floor() as usize).max(1);
+        out.push_str(&format!(
+            "This is a travel video: show the places — streets, buildings, views, the crowd. The person holding the camera is in many 360° shots: frame a person (a look marked \"a person\") in at most {most} of the slots, and for the rest choose looks that are places.\n"
+        ));
+    }
     out.push_str(&format!("The video: {:.0} s, {}, {} slots, a beat is {:.2} s.\n", o.seconds, o.aspect, slots.len(), beat));
     let sl: Vec<String> = slots.iter().enumerate().map(|(k, s)| format!("{}:{}", k + 1, s.beats)).collect();
     out.push_str(&format!("Slots (number:beats; slot 1 is the hook, slot {} the ending): {}\n", slots.len(), sl.join(" ")));
@@ -1310,7 +1322,8 @@ pub fn director_prompt(cands: &[&Candidate], o: &Options, beat: f64, slots: &[Sl
             notes.push("speech");
         }
         let looks = if c.kind == Kind::Vr {
-            c.looks.iter().take(4).map(|l| format!("{} {}", l.id, one_line(&l.what))).collect::<Vec<_>>().join("; ")
+            let mark = |l: &Look| if places && focus::is_person(&l.what) { " (a person)" } else { "" };
+            c.looks.iter().take(4).map(|l| format!("{} {}{}", l.id, one_line(&l.what), mark(l))).collect::<Vec<_>>().join("; ")
         } else {
             "-".into()
         };
@@ -1936,6 +1949,9 @@ pub struct Report {
     /// The cutting style: which, whether it was asked for or the director chose it, and why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<Value>,
+    /// What the edit is about (the places or the people), and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revised_from: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2246,6 +2262,14 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     // ---- which moments: each ranked (on its own frames where it can be measured), the unusable
     // and the near-duplicates left out
     report.measured = rank::measure(ex, &mut cands, lines).await;
+    // ---- what it is about: a travel video shows the places, its people now and then
+    let (about, why) = focus::focus_of(o.focus, &o.brief, &cands);
+    o.focus = Some(about);
+    if about == focus::Focus::Places {
+        focus::for_places(&mut cands);
+    }
+    lines(&format!("about: {why}"));
+    report.focus = Some(json!({"focus": about.name(), "why": why}));
     let bpm = o.bpm.unwrap_or(DEFAULT_BPM);
     let beat = beat_of(bpm);
     let total = ((o.seconds / beat).round() as u32).max(4);
@@ -2330,9 +2354,16 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     if plan.shots.is_empty() {
         return Err(invalid("no shot could be planned from these clips"));
     }
+    // ---- a travel video: the person holding the camera in a third of the shots at most
+    let mut plan = plan;
+    if o.focus == Some(focus::Focus::Places) {
+        for change in focus::limit_people(&mut plan, &cands) {
+            lines(&format!("repaired: {change}"));
+            plan.notes.push(change);
+        }
+    }
     // ---- the style: when the edit leaves it to the director, chosen from the shots it planned
     // (a revision keeps the one its edit was made in)
-    let mut plan = plan;
     if o.auto_style {
         let kept =
             previous.as_ref().and_then(|pr| pr.plan.style.clone()).and_then(|st| cuts::Style::from_params(&json!({"style": st}), &cuts::Style::default()).ok());
@@ -2786,6 +2817,9 @@ async fn export(ex: &dyn Executor, o: &Options, seq: u64, out: &str, report: &mu
 
 #[path = "director_cuts.rs"]
 pub mod cuts;
+
+#[path = "director_focus.rs"]
+pub mod focus;
 
 #[path = "director_rank.rs"]
 pub mod rank;
