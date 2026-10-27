@@ -28,7 +28,7 @@ fn elements_from_the_shell() {
     let data = dir.join("data");
     let data = data.to_str().unwrap();
     let all = json_out(&cli(&["--data-dir", data, "exec", "elements.list"]));
-    assert_eq!(all.as_array().unwrap().len(), 36, "{all}");
+    assert_eq!(all.as_array().unwrap().len(), 39, "{all}");
     let stickers = json_out(&cli(&["--data-dir", data, "exec", "elements.list", "kind=sticker"]));
     assert_eq!(stickers.as_array().unwrap().len(), 10);
     // a sound and a text preset into the demo project, saved, then read back
@@ -116,7 +116,7 @@ fn elements_over_mcp() {
     let mut m = Mcp::start(dir.join("data").to_str().unwrap());
     let (err, sounds) = m.run("elements.list", json!({"kind": "sound"}));
     assert!(!err, "{sounds}");
-    assert_eq!(sounds.as_array().unwrap().len(), 14);
+    assert_eq!(sounds.as_array().unwrap().len(), 17);
     let (err, r) = m.run("elements.insert", json!({"id": "sound.boom", "seconds": 2.0, "dir": dir.join("audio")}));
     assert!(!err, "{r}");
     assert!(r["clip"].is_u64() && r["track"].as_str().is_some_and(|t| t.starts_with('A')), "{r}");

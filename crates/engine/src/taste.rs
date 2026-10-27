@@ -22,7 +22,7 @@ const MAX_BYTES: u64 = 256 * 1024;
 
 /// What the fields may be.
 const STYLES: &[&str] = &["subtle", "energetic", "cinematic"];
-const SOUNDS: &[&str] = &["swish", "chime", "whoosh", "impact", "riser"];
+const SOUNDS: &[&str] = &["swish", "chime", "whoosh", "impact", "riser", "shutter", "pop", "thump"];
 const LOOKS: &[&str] = &["none", "punchy", "soft", "warm", "cool", "golden", "teal"];
 const REDACT: &[&str] = &["off", "faces", "plates", "faces,plates"];
 
@@ -32,7 +32,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Taste Profile",
         menu: &[],
         shortcut: None,
-        params: r#"{"scope":"project"|"default"="project","set":{"style":"subtle"|"energetic"|"cinematic"?,"lightEffects":bool?,"sounds":["swish"|"chime"|"whoosh"|"impact"|"riser"]?,"soundLevel":0..1?,"color":bool?,"colorStrength":0..1?,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"?,"lookStrength":0..100?,"textLanguage":str?,"words":[{"say":str,"not":str}]?,"narration":[str]?,"redact":"off"|"faces"|"plates"|"faces,plates"?}?,"clear":bool=false}"#,
+        params: r#"{"scope":"project"|"default"="project","set":{"style":"subtle"|"energetic"|"cinematic"?,"lightEffects":bool?,"sounds":["swish"|"chime"|"whoosh"|"impact"|"riser"|"shutter"|"pop"|"thump"]?,"soundLevel":0..1?,"color":bool?,"colorStrength":0..1?,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"?,"lookStrength":0..100?,"textLanguage":str?,"words":[{"say":str,"not":str}]?,"narration":[str]?,"redact":"off"|"faces"|"plates"|"faces,plates"?}?,"clear":bool=false}"#,
         enabled: always,
         run: taste,
         journal: true,

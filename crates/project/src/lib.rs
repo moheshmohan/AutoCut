@@ -760,8 +760,9 @@ pub struct Transition {
     pub align: TransitionAlign,
     #[serde(default)]
     pub reverse: bool,
-    /// A whoosh, riser or impact that plays with it ([`transition_sound`]); mixed into the
-    /// sequence's Mix, so it moves and goes away with the transition.
+    /// A sound that plays with it (a whoosh, riser, impact, swish, chime, shutter, pop or thump:
+    /// [`transition_sound`]); mixed into the sequence's Mix, so it moves and goes away with the
+    /// transition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sound: Option<TransitionSound>,
 }

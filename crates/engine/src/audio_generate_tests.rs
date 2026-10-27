@@ -74,7 +74,7 @@ fn music_bed_takes_mood_key_and_tempo() {
     assert_eq!(r["kind"], "music");
     assert!((r["seconds"].as_f64().unwrap() - 6.0).abs() < 1e-6);
     let kinds = s.execute("audio.generateKinds", json!({})).unwrap();
-    assert_eq!(kinds["kinds"].as_array().unwrap().len(), 7);
+    assert_eq!(kinds["kinds"].as_array().unwrap().len(), 10);
 }
 
 #[test]

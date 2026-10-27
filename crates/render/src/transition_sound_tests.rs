@@ -39,11 +39,13 @@ fn a_transition_sound_is_mixed_to_the_sample() {
     for kind in SoundKind::ALL {
         let snd = TransitionSound::new(kind, 3);
         let (first, len) = snd.samples(Tick(2 * TICKS_PER_SECOND), Tick(TICKS_PER_SECOND), SR).unwrap();
-        // the midpoint is sample 120 000: whoosh centred, riser ending, impact starting there
+        // the midpoint is sample 120 000: whoosh centred, riser ending, impact starting there,
+        // the shutter's first click (2 ms in) on it
         match kind {
             SoundKind::Whoosh | SoundKind::Swish => assert_eq!(first + len as i64 / 2, 120_000),
             SoundKind::Riser => assert_eq!(first + len as i64, 120_000),
-            SoundKind::Impact | SoundKind::Chime => assert_eq!(first, 120_000),
+            SoundKind::Impact | SoundKind::Chime | SoundKind::Pop | SoundKind::Thump => assert_eq!(first, 120_000),
+            SoundKind::Shutter => assert_eq!(first + i64::from(SR) / 500, 120_000),
         }
         let (p, seq) = rig(Some(snd.clone()));
         let out = mix(&p, seq, 0, 6 * SR as usize);

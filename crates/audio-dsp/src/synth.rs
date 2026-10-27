@@ -1,4 +1,5 @@
-//! Procedural audio for edits: sound effects (whoosh, impact, riser, swish, chime, drone) and music beds,
+//! Procedural audio for edits: sound effects (whoosh, impact, riser, swish, chime, shutter, pop,
+//! thump, drone) and music beds,
 //! synthesized from oscillators, noise, envelopes and filters. No samples, no models: the same
 //! parameters and seed always give the same audio, so a generated cue is reproducible from the
 //! project alone.
@@ -24,6 +25,9 @@ pub const MAX_MUSIC_SECONDS: f64 = 900.0;
 pub const MUSIC_LUFS: f64 = -20.0;
 /// Peak of a normalised sound effect (dBFS ≈ −1).
 const SFX_PEAK: f32 = 0.89;
+/// How far into a [`Kind::Shutter`] its first click is, seconds: a transition places the sound
+/// this much before the swap, so the click lands on it.
+pub const SHUTTER_LEAD: f64 = 0.002;
 
 /// What to synthesize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +44,14 @@ pub enum Kind {
     /// A soft bell: a few glassy partials on the key's tonic and fifth, ringing out — a gentle
     /// mark for a new chapter.
     Chime,
+    /// A camera shutter: two short mechanical clicks 40–70 ms apart with a tiny metallic ring;
+    /// the first click [`SHUTTER_LEAD`] in.
+    Shutter,
+    /// A soft bubble pop: a rising note, soft-edged, over in a fraction of a second.
+    Pop,
+    /// A soft, warm low hit: a felt beater on a big drum, shorter than the impact and with no
+    /// sub-bass boom.
+    Thump,
     /// A sustained, slowly moving low chord.
     Drone,
     /// A cinematic bed: chord progression, pads, bass, drums, pulse and arpeggio in sections.
@@ -47,7 +59,8 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [Kind::Whoosh, Kind::Impact, Kind::Riser, Kind::Swish, Kind::Chime, Kind::Drone, Kind::Music];
+    pub const ALL: [Kind; 10] =
+        [Kind::Whoosh, Kind::Impact, Kind::Riser, Kind::Swish, Kind::Chime, Kind::Shutter, Kind::Pop, Kind::Thump, Kind::Drone, Kind::Music];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -56,6 +69,9 @@ impl Kind {
             Kind::Riser => "riser",
             Kind::Swish => "swish",
             Kind::Chime => "chime",
+            Kind::Shutter => "shutter",
+            Kind::Pop => "pop",
+            Kind::Thump => "thump",
             Kind::Drone => "drone",
             Kind::Music => "music",
         }
@@ -73,6 +89,9 @@ impl Kind {
             Kind::Riser => 3.0,
             Kind::Swish => 0.5,
             Kind::Chime => 1.8,
+            Kind::Shutter => 0.25,
+            Kind::Pop => 0.25,
+            Kind::Thump => 0.8,
             Kind::Drone => 20.0,
             Kind::Music => 60.0,
         }
@@ -193,6 +212,9 @@ pub fn generate(p: &Params, sample_rate: u32) -> Result<Stereo, SynthError> {
         Kind::Riser => riser(&q, &mut left, &mut right),
         Kind::Swish => swish(&q, &mut left, &mut right),
         Kind::Chime => chime(&q, &mut left, &mut right),
+        Kind::Shutter => shutter(&q, &mut left, &mut right),
+        Kind::Pop => pop(&q, &mut left, &mut right),
+        Kind::Thump => thump(&q, &mut left, &mut right),
         Kind::Drone | Kind::Music => drone(&q, &mut left, &mut right),
     }
     match p.kind {
@@ -519,7 +541,109 @@ fn chime(q: &Clamped, left: &mut [f32], right: &mut [f32]) {
         *r = ((sr + tick) * soft) as f32;
     }
     reverb(left, right, q.sr, 2.2, 60.0, 25.0);
-    // however short it is cut, it (and its reverb) fades out over its last tenth, never stops
+    fade_tail(left, right);
+}
+
+fn shutter(q: &Clamped, left: &mut [f32], right: &mut [f32]) {
+    let mut rng = Rng::new(q.seed);
+    // the curtain opening on the swap, then the mirror or the second curtain 40–70 ms later (the
+    // seed sets the gap): (seconds in, level, pan, pitch), the second a little quieter and higher
+    let gap = 0.04 + 0.03 * rng.unit();
+    let clicks = [(SHUTTER_LEAD, 1.0, -0.15, 1.0), (SHUTTER_LEAD + gap, 0.75, 0.15, 1.15)];
+    // the body's tiny metallic ring: inharmonic partials (ratio, level, decay seconds)
+    const RING: [(f64, f64, f64); 3] = [(1.0, 1.0, 0.03), (1.73, 0.55, 0.022), (2.91, 0.3, 0.015)];
+    let ring_hz = 2400.0 + 600.0 * rng.unit();
+    let ring_level = 0.08 + 0.08 * q.intensity;
+    let tick_hz = 3000.0 + 2000.0 * q.intensity;
+    let mut bands = [Sweep::new(FilterType::BandPass, 1.6), Sweep::new(FilterType::BandPass, 1.6)];
+    for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+        let t = i as f64 / q.sr;
+        let w = rng.white();
+        let (mut a, mut b) = (0.0, 0.0);
+        for ((at, level, pan, pitch), band) in clicks.into_iter().zip(bands.iter_mut()) {
+            let dt = t - at;
+            if dt < 0.0 {
+                continue;
+            }
+            // in over a fraction of a millisecond, out in a few: a click, not a pop
+            let edge = (dt / 0.0003).min(1.0);
+            let tick = band.tick(w, tick_hz * pitch, q.sr) * (-dt / 0.003).exp() * 2.2;
+            // the mechanism's knock: a damped mode around 1.1 kHz
+            let knock = (TAU * 1150.0 * pitch * dt).sin() * (-dt / 0.005).exp() * 0.5;
+            let mut ring = 0.0;
+            for (ratio, amp, decay) in RING {
+                ring += amp * (TAU * ring_hz * pitch * ratio * dt).sin() * (-dt / decay).exp();
+            }
+            let v = (tick + knock + ring * ring_level) * edge * level;
+            let (gl, gr) = pan_gains(pan);
+            a += v * gl;
+            b += v * gr;
+        }
+        *l = a as f32;
+        *r = b as f32;
+    }
+    reverb(left, right, q.sr, 0.4, 15.0, 8.0);
+    fade_tail(left, right);
+}
+
+fn pop(q: &Clamped, left: &mut [f32], right: &mut [f32]) {
+    let mut rng = Rng::new(q.seed);
+    // a bubble's note rises as it closes: from 330–410 Hz to 2.4–3.2 times that within ~30 ms
+    let base = 330.0 + 80.0 * rng.unit();
+    let rise = 1.4 + 0.5 * rng.unit() + 0.3 * q.intensity;
+    let (gl, gr) = pan_gains(-0.2 + 0.4 * rng.unit());
+    let mut puff = Sweep::new(FilterType::LowPass, 0.7);
+    let mut phase = 0.0f64;
+    for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+        let t = i as f64 / q.sr;
+        let f = base * (1.0 + rise * (1.0 - (-t / 0.012).exp()));
+        phase = wrap(phase + f / q.sr);
+        // soft-edged: in over 2.5 ms, gone in about a tenth of a second
+        let edge = smoothstep(t / 0.0025);
+        let body = (phase * TAU).sin() * (-t / 0.045).exp();
+        let overtone = (2.0 * phase * TAU).sin() * (-t / 0.015).exp() * 0.12;
+        // the little puff of air as it breaks
+        let air = puff.tick(rng.white(), 1600.0, q.sr) * (-t / 0.004).exp() * 0.3;
+        let v = (body + overtone + air) * edge;
+        *l = (v * gl) as f32;
+        *r = (v * gr) as f32;
+    }
+    reverb(left, right, q.sr, 0.5, 20.0, 12.0);
+    fade_tail(left, right);
+}
+
+fn thump(q: &Clamped, left: &mut [f32], right: &mut [f32]) {
+    let mut rng = Rng::new(q.seed);
+    // a felt beater on a big drum: the body settles from ~200–235 Hz to ~135–160 Hz (above the
+    // speech mix's 120 Hz high-pass, no sub-bass), a warm second mode, a soft knock
+    let low = 135.0 + 25.0 * rng.unit();
+    let drop = 60.0 + 15.0 * rng.unit();
+    let ring = 0.16 + 0.08 * q.intensity;
+    let drive = 1.2 + 0.8 * q.intensity;
+    let mut felt = Sweep::new(FilterType::LowPass, 0.7);
+    // nothing under it: what is below ~80 Hz would only rumble
+    let mut clean = Sweep::new(FilterType::HighPass, 0.7);
+    let (mut p1, mut p2) = (0.0f64, 0.0f64);
+    for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+        let t = i as f64 / q.sr;
+        let f = low + drop * (-t / 0.035).exp();
+        p1 = wrap(p1 + f / q.sr);
+        p2 = wrap(p2 + 2.3 * f / q.sr);
+        let edge = smoothstep(t / 0.002);
+        let body = (p1 * TAU).sin() * (-t / ring).exp();
+        let warm = (p2 * TAU).sin() * (-t / (ring * 0.5)).exp() * 0.35;
+        let knock = felt.tick(rng.white(), 900.0 + 500.0 * q.intensity, q.sr) * (-t / 0.008).exp() * 0.6;
+        let v = ((body + warm) * drive).tanh() / drive.tanh() + knock;
+        let v = clean.tick(v * edge, 80.0, q.sr);
+        *l = v as f32;
+        *r = (v * 0.96) as f32;
+    }
+    reverb(left, right, q.sr, 0.9, 40.0, 14.0);
+    fade_tail(left, right);
+}
+
+/// However short it is cut, a sound (and its reverb) fades out over its last tenth, never stops.
+fn fade_tail(left: &mut [f32], right: &mut [f32]) {
     let n = left.len();
     let fade_from = n - n / 10;
     for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate().skip(fade_from) {
@@ -674,6 +798,103 @@ mod tests {
         let c = generate(&p, SR).unwrap();
         let head = &c.left[..SR as usize / 4];
         assert!(power(head, 1046.5) > 10.0 * power(head, 880.0));
+    }
+
+    /// The share of `x`'s energy below (`low`) or above `hz`: two cascaded biquads.
+    fn share(x: &[f32], hz: f64, low: bool) -> f64 {
+        let kind = if low { FilterType::LowPass } else { FilterType::HighPass };
+        let c = Coeffs::design(kind, f64::from(SR), hz, 0.707, 0.0);
+        let (mut a, mut b) = (Biquad::default(), Biquad::default());
+        let e: f64 = x.iter().map(|v| f64::from(*v).powi(2)).sum();
+        let f: f64 = x.iter().map(|v| b.tick(&c, a.tick(&c, f64::from(*v))).powi(2)).sum();
+        f / e.max(1e-12)
+    }
+
+    /// The level of `x` in 1 ms windows.
+    fn envelope(x: &[f32]) -> Vec<f64> {
+        x.chunks(SR as usize / 1000).map(rms).collect()
+    }
+
+    fn crossings_per_ms(x: &[f32]) -> f64 {
+        x.windows(2).filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0)).count() as f64 / (x.len() as f64 / (f64::from(SR) / 1000.0))
+    }
+
+    #[test]
+    fn shutter_clicks_twice_from_the_swap() {
+        let p = Params::new(Kind::Shutter);
+        let s = generate(&p, SR).unwrap();
+        sane(&s, 0.25);
+        assert!(s.left.first().is_some_and(|x| x.abs() < 0.05), "starts without a click of its own");
+        assert!(s.left.last().is_some_and(|x| x.abs() < 1e-3), "and ends without one");
+        let env = envelope(&s.left);
+        // the first click: within a few milliseconds of the start (SHUTTER_LEAD)
+        let loudest = |from: usize, to: usize| (from..to.min(env.len())).max_by(|a, b| env[*a].total_cmp(&env[*b])).unwrap_or(from);
+        let first = loudest(0, 20);
+        assert!(first <= 4, "first click at {first} ms");
+        // the second 40–70 ms after it, with quiet between
+        let second = loudest(first + 25, first + 90);
+        let gap = second - first;
+        assert!((38..=72).contains(&gap), "second click {gap} ms later");
+        assert!(env[second] > 0.3 * env[first], "a click, not a ring: {} vs {}", env[second], env[first]);
+        let between = env[first + 15..second - 8].iter().copied().fold(0.0, f64::max);
+        assert!(between < 0.35 * env[second], "quiet between: {between} vs {}", env[second]);
+        // then it is over: a tiny ring, no tail
+        let tail = rms(&s.left[s.left.len() - SR as usize / 20..]);
+        assert!(rms(&s.left[..SR as usize / 10]) > 8.0 * tail, "dies away");
+        // bright and mechanical: next to nothing below 200 Hz
+        assert!(share(&s.left, 200.0, true) < 0.03, "low share {}", share(&s.left, 200.0, true));
+        // the seed moves the second click
+        let gaps: std::collections::BTreeSet<usize> = (1..6)
+            .map(|seed| {
+                let s = generate(&Params { seed, ..p }, SR).unwrap();
+                let env = envelope(&s.left);
+                let first = (0..20).max_by(|a, b| env[*a].total_cmp(&env[*b])).unwrap_or(0);
+                (first + 25..first + 90).max_by(|a, b| env[*a].total_cmp(&env[*b])).unwrap_or(0) - first
+            })
+            .collect();
+        assert!(gaps.len() > 1, "{gaps:?}");
+    }
+
+    #[test]
+    fn pop_is_a_soft_rising_bubble_from_the_swap() {
+        let s = generate(&Params::new(Kind::Pop), SR).unwrap();
+        sane(&s, 0.25);
+        assert!(s.left.first().is_some_and(|x| x.abs() < 0.05) && s.left.last().is_some_and(|x| x.abs() < 1e-3), "no clicks");
+        let env = envelope(&s.left);
+        let peak = (0..env.len()).max_by(|a, b| env[*a].total_cmp(&env[*b])).unwrap_or(0);
+        assert!(peak <= 15, "it pops on the swap: loudest at {peak} ms");
+        // soft-edged: its first half millisecond is far below its peak
+        let top = s.left.iter().fold(0f32, |m, x| m.max(x.abs()));
+        let edge = s.left[..SR as usize / 2000].iter().fold(0f32, |m, x| m.max(x.abs()));
+        assert!(edge < 0.3 * top, "edge {edge} top {top}");
+        // a bubble's note rises as it closes
+        let ms = SR as usize / 1000;
+        let (early, late) = (crossings_per_ms(&s.left[ms..11 * ms]), crossings_per_ms(&s.left[30 * ms..60 * ms]));
+        assert!(late > 1.25 * early, "early {early}/ms late {late}/ms");
+        // short and gone, with no rumble
+        assert!(rms(&s.left[..60 * ms]) > 5.0 * rms(&s.left[s.left.len() - 60 * ms..]), "dies away");
+        assert!(share(&s.left, 120.0, true) < 0.03, "low share {}", share(&s.left, 120.0, true));
+    }
+
+    #[test]
+    fn thump_is_a_short_warm_hit_without_a_rumble() {
+        let s = generate(&Params::new(Kind::Thump), SR).unwrap();
+        sane(&s, 0.8);
+        assert!(s.left.first().is_some_and(|x| x.abs() < 0.05) && s.left.last().is_some_and(|x| x.abs() < 1e-3), "no clicks");
+        let env = envelope(&s.left);
+        let peak = (0..env.len()).max_by(|a, b| env[*a].total_cmp(&env[*b])).unwrap_or(0);
+        assert!(peak <= 30, "it hits on the swap: loudest at {peak} ms");
+        // short: most of it is over in its first 0.3 s (the impact rings for seconds)
+        let head = rms(&s.left[..SR as usize / 10]);
+        let tail = rms(&s.left[s.left.len() - SR as usize / 5..]);
+        assert!(head > 8.0 * tail, "head {head} tail {tail}");
+        // low and warm: mostly under 400 Hz, little over 2 kHz…
+        assert!(share(&s.left, 400.0, true) > 0.5, "low share {}", share(&s.left, 400.0, true));
+        let impact = generate(&Params::new(Kind::Impact), SR).unwrap();
+        assert!(share(&s.left, 2000.0, false) < share(&impact.left, 2000.0, false), "warmer than the impact");
+        // …but no sub-bass: next to nothing under 70 Hz, where the impact's boom is
+        let (thump_sub, impact_sub) = (share(&s.left, 70.0, true), share(&impact.left, 70.0, true));
+        assert!(thump_sub < 0.05 && impact_sub > 4.0 * thump_sub, "thump {thump_sub} impact {impact_sub}");
     }
 
     #[test]

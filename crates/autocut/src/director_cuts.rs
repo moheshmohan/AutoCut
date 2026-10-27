@@ -63,7 +63,7 @@ pub enum Pace {
 }
 
 /// The sounds a cut may make.
-pub const SOUNDS: [&str; 5] = ["swish", "chime", "whoosh", "impact", "riser"];
+pub const SOUNDS: [&str; 8] = ["swish", "chime", "whoosh", "impact", "riser", "shutter", "pop", "thump"];
 
 /// The edit's style of cutting: how lively, whether light effects are used, which sounds are
 /// heard on the cuts and how loud (0..1).

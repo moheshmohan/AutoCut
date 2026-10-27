@@ -294,15 +294,15 @@ async fn a_tech_show_with_its_timeline_chips_scene_and_catalogue_transitions() {
 async fn the_plan_picks_the_sounds_of_its_cuts() {
     use filmcraft_autocut::look::{Cue, Sounds};
     use filmcraft_engine::project::transition_sound::SoundKind;
-    // a chime between entries, nothing into the chapters, an impact into the title
+    // a camera shutter between entries, nothing into the chapters, an impact into the title
     let ex = demo();
-    let sounds = Sounds::from_plan(&json!({"between": "chime", "chapter": "none", "title": "Impact"})).unwrap();
-    assert_eq!(sounds, Sounds { between: Some(Cue::Kind(SoundKind::Chime)), chapter: Some(Cue::Silent), title: Some(Cue::Kind(SoundKind::Impact)) });
+    let sounds = Sounds::from_plan(&json!({"between": "shutter", "chapter": "none", "title": "Impact"})).unwrap();
+    assert_eq!(sounds, Sounds { between: Some(Cue::Kind(SoundKind::Shutter)), chapter: Some(Cue::Silent), title: Some(Cue::Kind(SoundKind::Impact)) });
     let look = Look { transitions: Some(TransitionPlan::catalog()), sounds, ..Look::default() };
     let built = showcase::build(&ex, &tech(look), &gitex(), &gitex_script(), &mut |_| {}).await.expect("the showcase builds");
     assert!(built.notes.iter().all(|n| !n.starts_with("sounds")), "{:?}", built.notes);
     let at: Vec<(&str, Option<&str>)> = built.transitions.iter().map(|t| (t.at, t.sound)).collect();
-    assert_eq!(at, vec![("chapter", None), ("chapter", None), ("between", Some("chime")), ("between", Some("chime"))], "{:#?}", built.transitions);
+    assert_eq!(at, vec![("chapter", None), ("chapter", None), ("between", Some("shutter")), ("between", Some("shutter"))], "{:#?}", built.transitions);
     // every transition is still snapped to the beat, silent or not
     assert_eq!(built.beat_snap.clone().expect("snapped")["snapped"], 4);
     let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
@@ -319,7 +319,7 @@ async fn the_plan_picks_the_sounds_of_its_cuts() {
     // without the catalogue: the between sound in place of the swish clips, and a chapter sound
     // the plan names on the dips into a new year
     let ex = demo();
-    let look = Look { sounds: Sounds::from_plan(&json!({"between": "chime", "chapter": "impact"})).unwrap(), ..Look::default() };
+    let look = Look { sounds: Sounds::from_plan(&json!({"between": "pop", "chapter": "thump"})).unwrap(), ..Look::default() };
     let built = showcase::build(&ex, &tech(look), &gitex(), &gitex_script(), &mut |_| {}).await.expect("the showcase builds");
     let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
     let names: Vec<String> = seq["audio"]
@@ -329,7 +329,7 @@ async fn the_plan_picks_the_sounds_of_its_cuts() {
         .flat_map(|t| t["items"].as_array().cloned().unwrap_or_default())
         .filter_map(|c| c["name"].as_str().map(str::to_string))
         .collect();
-    assert!(names.iter().any(|n| n.starts_with("Chime")), "{names:?}");
+    assert!(names.iter().any(|n| n.starts_with("Pop")) && names.iter().any(|n| n.starts_with("Thump")), "{names:?}");
     assert_eq!(names.iter().filter(|n| n.starts_with("Swish")).count(), 1, "only the title's swish: {names:?}");
     assert!(built.transitions.is_empty());
 

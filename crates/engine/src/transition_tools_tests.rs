@@ -204,13 +204,15 @@ fn transition_sounds_are_placed_to_the_sample_and_go_with_their_transition() {
     let mid = tr.start + tr.duration.mul_ratio(1, 2);
     let mid_sample = mid.to_rational_round(1, sr);
     let undo0 = s.history.undo.len();
-    for (kind, len_s) in [("riser", 2.0), ("impact", 2.5), ("whoosh", 0.0)] {
+    for (kind, len_s) in [("riser", 2.0), ("impact", 2.5), ("shutter", 0.25), ("pop", 0.25), ("thump", 0.8), ("whoosh", 0.0)] {
         let r = s.execute("transitions.addSound", json!({"transitions": [tr.id.0], "kind": kind, "gain": -3})).unwrap();
         let snd = &r["sounds"][0];
         let (first, n) = (snd["startSample"].as_i64().unwrap(), snd["samples"].as_i64().unwrap());
         match kind {
             "riser" => assert_eq!((first + n, n), (mid_sample, (len_s * sr as f64) as i64)),
-            "impact" => assert_eq!((first, n), (mid_sample, (len_s * sr as f64) as i64)),
+            "impact" | "pop" | "thump" => assert_eq!((first, n), (mid_sample, (len_s * sr as f64) as i64)),
+            // its first click, 2 ms in, on the swap
+            "shutter" => assert!((first + sr / 500 - mid_sample).abs() <= 1 && n == (len_s * sr as f64) as i64, "{snd}"),
             _ => assert!((first + n / 2 - mid_sample).abs() <= 1, "{snd}"),
         }
         assert_eq!(snd["gain"].as_f64(), Some(-3.0));
@@ -218,7 +220,7 @@ fn transition_sounds_are_placed_to_the_sample_and_go_with_their_transition() {
         assert_eq!(stored.kind.id(), kind);
         assert_eq!(stored.seed, tr.id.0, "a stable seed of its own");
     }
-    assert_eq!(s.history.undo.len(), undo0 + 3, "one undo step each");
+    assert_eq!(s.history.undo.len(), undo0 + 6, "one undo step each");
     // the sequence reports it
     let q = s.execute("sequence.inspect", json!({})).unwrap();
     let js = q["video"][0]["transitions"].as_array().unwrap().iter().find(|t| t["id"] == tr.id.0).unwrap().clone();

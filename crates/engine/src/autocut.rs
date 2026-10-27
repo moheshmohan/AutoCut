@@ -686,7 +686,7 @@ pub const QUICK_PARAMS: &str = r#"{"items":[id]?,"paths":[file|folder]?,"templat
 pub const MAX_QUICK_MEDIA: usize = 500;
 
 /// `autocut.direct`'s parameters.
-pub const DIRECT_PARAMS: &str = r#"{"brief":str?,"items":[id]?,"paths":[file|folder]?,"insta360":[name]?,"album":str?,"aspect":"9:16"|"16:9"|"1:1"|"4:5"?,"seconds":6..300?,"platform":"reels"|"shorts"|"tiktok"|"vertical"="reels","mood":"epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad"?,"bpm":70..150?,"music":"generate"|file="generate","title":str?,"captions":bool=true,"captionStyle":"bold|clean|glow|box|karaoke|twoLine|plain"="clean","redact":"faces,plates"|"faces"|"plates"|false=false,"name":str?,"export":file?,"dryRun":bool=false,"qa":bool?,"fullDetail":0..64=8,"download":bool=false,"seed":u64=7,"style":"auto"|"subtle"|"energetic"|"cinematic"="auto","focus":"auto"|"places"|"people"="auto","lightEffects":bool?,"sounds":["swish"|"chime"|"whoosh"|"impact"|"riser"]?,"soundLevel":0..1=0.4,"color":bool=true,"colorStrength":0..1=0.7,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"="none","lookStrength":0..100=25,"revise":str?,"previous":file|{report}?,"wait":bool=false}"#;
+pub const DIRECT_PARAMS: &str = r#"{"brief":str?,"items":[id]?,"paths":[file|folder]?,"insta360":[name]?,"album":str?,"aspect":"9:16"|"16:9"|"1:1"|"4:5"?,"seconds":6..300?,"platform":"reels"|"shorts"|"tiktok"|"vertical"="reels","mood":"epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad"?,"bpm":70..150?,"music":"generate"|file="generate","title":str?,"captions":bool=true,"captionStyle":"bold|clean|glow|box|karaoke|twoLine|plain"="clean","redact":"faces,plates"|"faces"|"plates"|false=false,"name":str?,"export":file?,"dryRun":bool=false,"qa":bool?,"fullDetail":0..64=8,"download":bool=false,"seed":u64=7,"style":"auto"|"subtle"|"energetic"|"cinematic"="auto","focus":"auto"|"places"|"people"="auto","lightEffects":bool?,"sounds":["swish"|"chime"|"whoosh"|"impact"|"riser"|"shutter"|"pop"|"thump"]?,"soundLevel":0..1=0.4,"color":bool=true,"colorStrength":0..1=0.7,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"="none","lookStrength":0..100=25,"revise":str?,"previous":file|{report}?,"wait":bool=false}"#;
 /// Longest brief, characters.
 pub const MAX_BRIEF_CHARS: usize = 600;
 /// Most Insta360 recordings one edit names.
@@ -825,15 +825,19 @@ fn style_params(cmd: &str, p: &Value, out: &mut serde_json::Map<String, Value>) 
     }
     match p.get("sounds").filter(|v| !v.is_null()) {
         None => {}
-        Some(Value::Array(a)) if a.len() <= 5 => {
+        Some(Value::Array(a)) if a.len() <= 8 => {
             let kinds: Vec<String> = a
                 .iter()
-                .map(|v| v.as_str().map(|k| k.trim().to_ascii_lowercase()).filter(|k| matches!(k.as_str(), "swish" | "chime" | "whoosh" | "impact" | "riser")))
+                .map(|v| {
+                    v.as_str()
+                        .map(|k| k.trim().to_ascii_lowercase())
+                        .filter(|k| matches!(k.as_str(), "swish" | "chime" | "whoosh" | "impact" | "riser" | "shutter" | "pop" | "thump"))
+                })
                 .collect::<Option<_>>()
-                .ok_or_else(|| bad(cmd, "`sounds` are swish, chime, whoosh, impact or riser"))?;
+                .ok_or_else(|| bad(cmd, "`sounds` are swish, chime, whoosh, impact, riser, shutter, pop or thump"))?;
             out.insert("sounds".into(), json!(kinds));
         }
-        Some(_) => return Err(bad(cmd, "`sounds` is a list of swish, chime, whoosh, impact or riser")),
+        Some(_) => return Err(bad(cmd, "`sounds` is a list of swish, chime, whoosh, impact, riser, shutter, pop or thump")),
     }
     if let Some(v) = p.get("soundLevel").filter(|v| !v.is_null()) {
         let l = v.as_f64().filter(|f| f.is_finite() && (0.0..=1.0).contains(f)).ok_or_else(|| bad(cmd, "`soundLevel` is 0 to 1"))?;

@@ -1,5 +1,5 @@
-//! Sounds coupled to video transitions (roadmap C4): a whoosh, riser, impact, swish or chime that belongs to a
-//! transition, synthesised when the sequence is mixed (`filmcraft-render`'s mixer, with
+//! Sounds coupled to video transitions (roadmap C4): a whoosh, riser, impact, swish, chime, camera
+//! shutter, bubble pop or thump that belongs to a transition, synthesised when the sequence is mixed (`filmcraft-render`'s mixer, with
 //! `filmcraft_audio_dsp::synth`), so it moves, resizes and goes away with its transition.
 //!
 //! Where it plays is fixed relative to the transition's midpoint (the moment the picture swaps):
@@ -11,6 +11,9 @@
 //! | impact | 2.5 s | starts on the midpoint (it hits on the swap and decays) |
 //! | swish | the transition + ⅕ s (0.35–1 s) | centred on the midpoint (a soft, short brush) |
 //! | chime | 1.8 s | starts on the midpoint (it rings from the swap) |
+//! | shutter | ¼ s | starts [`SHUTTER_LEAD`] (2 ms) before the midpoint (its first click lands on the swap) |
+//! | pop | ¼ s | starts on the midpoint (a soft bubble pop on the swap) |
+//! | thump | 0.8 s | starts on the midpoint (a soft, warm low hit on the swap) |
 //!
 //! The span is in exact ticks and is turned into whole samples at the sequence's rate by
 //! [`TransitionSound::samples`] (rounded to the nearest sample), the same numbers the mixer and
@@ -23,6 +26,9 @@ use serde::{Deserialize, Serialize};
 pub const MAX_SECONDS: f64 = 30.0;
 /// Quietest and loudest gain (dB).
 pub const GAIN_RANGE: (f64, f64) = (-60.0, 12.0);
+/// How far into a shutter its first click is (`filmcraft_audio_dsp::synth::SHUTTER_LEAD`, 2 ms):
+/// it starts this much before the swap.
+pub const SHUTTER_LEAD: Tick = Tick(TICKS_PER_SECOND / 500);
 
 /// What a transition sounds like.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -39,10 +45,17 @@ pub enum SoundKind {
     Swish,
     /// A soft bell from the swap.
     Chime,
+    /// A camera shutter: two quick mechanical clicks, the first on the swap.
+    Shutter,
+    /// A soft bubble pop on the swap.
+    Pop,
+    /// A soft, warm low hit on the swap (shorter than the impact, no sub-bass).
+    Thump,
 }
 
 impl SoundKind {
-    pub const ALL: [SoundKind; 5] = [SoundKind::Whoosh, SoundKind::Riser, SoundKind::Impact, SoundKind::Swish, SoundKind::Chime];
+    pub const ALL: [SoundKind; 8] =
+        [SoundKind::Whoosh, SoundKind::Riser, SoundKind::Impact, SoundKind::Swish, SoundKind::Chime, SoundKind::Shutter, SoundKind::Pop, SoundKind::Thump];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -51,6 +64,9 @@ impl SoundKind {
             SoundKind::Impact => "impact",
             SoundKind::Swish => "swish",
             SoundKind::Chime => "chime",
+            SoundKind::Shutter => "shutter",
+            SoundKind::Pop => "pop",
+            SoundKind::Thump => "thump",
         }
     }
 
@@ -61,6 +77,9 @@ impl SoundKind {
             SoundKind::Impact => "Impact",
             SoundKind::Swish => "Swish",
             SoundKind::Chime => "Chime",
+            SoundKind::Shutter => "Shutter",
+            SoundKind::Pop => "Pop",
+            SoundKind::Thump => "Thump",
         }
     }
 
@@ -112,6 +131,8 @@ impl TransitionSound {
                 SoundKind::Impact => Tick(TICKS_PER_SECOND * 5 / 2),
                 SoundKind::Swish => (duration.max(Tick::ZERO) + Tick(TICKS_PER_SECOND / 5)).clamp(Tick::from_seconds_f64(0.35), Tick::from_seconds_f64(1.0)),
                 SoundKind::Chime => Tick(TICKS_PER_SECOND * 9 / 5),
+                SoundKind::Shutter | SoundKind::Pop => Tick(TICKS_PER_SECOND / 4),
+                SoundKind::Thump => Tick(TICKS_PER_SECOND * 4 / 5),
             },
         };
         len.clamp(least, most)
@@ -125,7 +146,8 @@ impl TransitionSound {
         let at = match self.kind {
             SoundKind::Whoosh | SoundKind::Swish => mid - len.mul_ratio(1, 2),
             SoundKind::Riser => mid - len,
-            SoundKind::Impact | SoundKind::Chime => mid,
+            SoundKind::Impact | SoundKind::Chime | SoundKind::Pop | SoundKind::Thump => mid,
+            SoundKind::Shutter => mid - SHUTTER_LEAD,
         };
         (at, len)
     }
@@ -186,6 +208,16 @@ mod tests {
         assert_eq!(at + len.mul_ratio(1, 2), mid);
         assert_eq!(s(SoundKind::Swish).span(start, Tick::ZERO).1, Tick::from_seconds_f64(0.35));
         assert_eq!(s(SoundKind::Chime).samples(start, dur, 48_000), Some((504_000, 86_400)));
+        // the shutter's first click on the swap (2 ms in), the pop and the thump from it; their
+        // length is their own, whatever the transition's
+        assert_eq!(s(SoundKind::Shutter).samples(start, dur, 48_000), Some((504_000 - 96, 12_000)));
+        assert_eq!(s(SoundKind::Pop).samples(start, dur, 48_000), Some((504_000, 12_000)));
+        assert_eq!(s(SoundKind::Thump).samples(start, dur, 48_000), Some((504_000, 38_400)));
+        assert_eq!(s(SoundKind::Thump).span(start, Tick::from_seconds_f64(4.0)).1, Tick::from_seconds_f64(0.8));
+        for k in SoundKind::ALL {
+            assert_eq!(SoundKind::from_id(k.id()), Some(k));
+            assert_eq!(SoundKind::from_id(k.label()), Some(k));
+        }
     }
 
     #[test]

@@ -84,7 +84,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "audio.generate",
             "Generate Audio",
-            r#"{"kind":"whoosh|impact|riser|swish|chime|drone|music"=music,"duration":seconds?|"durationTicks":ticks?,"seed":u64?,"intensity":0..1=0.7,"bpm":40..200?,"key":"A|C#|Eb…"="A","mood":"epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad"="epic","genre":"cinematic|electronic|pop|ambient|lofi|piano"?,"energy":0..1|[0..1 ×1..64]?,"stems":bool=false,"levels":{"drums|bass|melody|pad":dB|"mute"}?,"mute":["drums"…]?,"soundfont":"auto|oscillators|generaluser-gs"|path?,"time":ticks?|"seconds":f64?,"track":"A2"|id?,"place":bool=true,"dir":str?}"#,
+            r#"{"kind":"whoosh|impact|riser|swish|chime|shutter|pop|thump|drone|music"=music,"duration":seconds?|"durationTicks":ticks?,"seed":u64?,"intensity":0..1=0.7,"bpm":40..200?,"key":"A|C#|Eb…"="A","mood":"epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad"="epic","genre":"cinematic|electronic|pop|ambient|lofi|piano"?,"energy":0..1|[0..1 ×1..64]?,"stems":bool=false,"levels":{"drums|bass|melody|pad":dB|"mute"}?,"mute":["drums"…]?,"soundfont":"auto|oscillators|generaluser-gs"|path?,"time":ticks?|"seconds":f64?,"track":"A2"|id?,"place":bool=true,"dir":str?}"#,
             always,
             generate,
             true,
@@ -100,6 +100,9 @@ fn label(kind: synth::Kind) -> &'static str {
         synth::Kind::Riser => "Riser",
         synth::Kind::Swish => "Swish",
         synth::Kind::Chime => "Chime",
+        synth::Kind::Shutter => "Shutter",
+        synth::Kind::Pop => "Pop",
+        synth::Kind::Thump => "Thump",
         synth::Kind::Drone => "Drone",
         synth::Kind::Music => "Music",
     }
@@ -173,7 +176,10 @@ pub fn write_wav_f32_stereo_tagged(left: &[f32], right: &[f32], rate: u32, tags:
 /// The kind a call asks for.
 fn kind_p(p: &Value) -> Result<synth::Kind> {
     match str_p(p, "kind") {
-        Some(k) => synth::Kind::from_id(k).ok_or_else(|| bad("audio.generate", format!("unknown kind `{k}` (whoosh, impact, riser, drone, music)"))),
+        Some(k) => synth::Kind::from_id(k).ok_or_else(|| {
+            let kinds: Vec<&str> = synth::Kind::ALL.iter().map(|k| k.id()).collect();
+            bad("audio.generate", format!("unknown kind `{k}` ({})", kinds.join(", ")))
+        }),
         None => Ok(synth::Kind::Music),
     }
 }

@@ -831,8 +831,9 @@ pub struct DirectParams {
     /// the director chooses allows them when most shots are not at night).
     #[serde(default)]
     pub light_effects: Option<bool>,
-    /// The sounds heard on the cuts: any of "swish", "chime", "whoosh", "impact", "riser"
-    /// (default: the style's; the subtle style's are a swish and a chime). An empty list: none.
+    /// The sounds heard on the cuts: any of "swish", "chime", "whoosh", "impact", "riser",
+    /// "shutter", "pop", "thump" (default: the style's; the subtle style's are a swish and a
+    /// chime). An empty list: none.
     #[serde(default)]
     pub sounds: Option<Vec<String>>,
     /// How loud those sounds are, 0..1 (default 0.4, quiet).

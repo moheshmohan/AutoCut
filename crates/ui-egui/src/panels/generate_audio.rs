@@ -252,6 +252,9 @@ fn kind_name(k: Kind) -> &'static str {
         Kind::Riser => "Riser",
         Kind::Swish => "Swish",
         Kind::Chime => "Chime",
+        Kind::Shutter => "Shutter",
+        Kind::Pop => "Pop",
+        Kind::Thump => "Thump",
         Kind::Drone => "Drone",
         Kind::Music => "Music",
     }
@@ -264,6 +267,9 @@ fn kind_hint(k: Kind) -> &'static str {
         Kind::Riser => "Tension that builds to a cut and stops dead.",
         Kind::Swish => "A soft, short brush of air: a gentler transition sound than the whoosh.",
         Kind::Chime => "A soft bell on the key's tonic and fifth, for a new chapter or a reveal.",
+        Kind::Shutter => "A camera shutter: two quick mechanical clicks with a tiny metallic ring, for a snap cut or a photo.",
+        Kind::Pop => "A soft bubble pop, for a quick cut, a sticker or a reveal.",
+        Kind::Thump => "A soft, warm low hit: shorter than the impact, with no sub-bass boom.",
         Kind::Drone => "A low, slowly moving chord under a scene.",
         Kind::Music => {
             "Music arranged to the exact length and ending on a bar: drums, bass, melody and pads in sections, at -20 LUFS so it sits under a voice. Find it by feel, preview it, then add it."

@@ -80,7 +80,7 @@ pub const CATEGORIES: [&str; 7] = ["Reels & Shorts", "YouTube", "Vlog", "Busines
 
 /// The Elements sound effects a template may use and their length in seconds (as the engine's
 /// `elements::SOUNDS` makes them; an engine test keeps the two in step).
-pub const SOUND_SECONDS: [(&str, f64); 14] = [
+pub const SOUND_SECONDS: [(&str, f64); 17] = [
     ("sound.whoosh-short", 0.6),
     ("sound.whoosh-long", 1.8),
     ("sound.impact-soft", 2.0),
@@ -89,6 +89,9 @@ pub const SOUND_SECONDS: [(&str, f64); 14] = [
     ("sound.riser-4s", 4.0),
     ("sound.swish", 0.5),
     ("sound.chime", 1.8),
+    ("sound.shutter", 0.25),
+    ("sound.pop-soft", 0.25),
+    ("sound.thump", 0.8),
     ("sound.swoosh-up", 0.7),
     ("sound.swoosh-down", 0.7),
     ("sound.click", 0.12),

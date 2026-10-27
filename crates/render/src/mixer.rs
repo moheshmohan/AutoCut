@@ -38,10 +38,11 @@
 //!   BS.775 matrices. [`mix_graph`] returns the Mix's width; [`crate::audio::mix_sequence`] always
 //!   returns stereo.
 //!
-//! **Transition sounds.** A whoosh, riser or impact coupled to a video transition
-//! (`Transition::sound`) is synthesised with [`filmcraft_audio_dsp::synth`] (cached) and added to
-//! the Mix's input to the sample, at its gain (`add_transition_sounds`); it is silent while any
-//! strip is soloed and on a switched-off video track.
+//! **Transition sounds.** A sound coupled to a video transition (whoosh, riser, impact, swish,
+//! chime, shutter, pop or thump; `Transition::sound`) is synthesised with
+//! [`filmcraft_audio_dsp::synth`] (cached) and added to the Mix's input to the sample, at its gain
+//! (`add_transition_sounds`); it is silent while any strip is soloed and on a switched-off video
+//! track.
 //!
 //! [`LiveMix`] carries what the UI does while playing: control overrides while a fader is held
 //! (with Touch's ramp back to the automation), per-strip meters, and the newest project snapshot.
@@ -894,6 +895,9 @@ pub fn transition_sound_samples(snd: &TransitionSound, n: usize, sr: u32) -> Opt
         SoundKind::Impact => synth::Kind::Impact,
         SoundKind::Swish => synth::Kind::Swish,
         SoundKind::Chime => synth::Kind::Chime,
+        SoundKind::Shutter => synth::Kind::Shutter,
+        SoundKind::Pop => synth::Kind::Pop,
+        SoundKind::Thump => synth::Kind::Thump,
     };
     let mut q = synth::Params::new(kind);
     q.seconds = n as f64 / f64::from(sr.max(1));

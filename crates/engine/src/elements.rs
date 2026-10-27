@@ -6,8 +6,8 @@
 //! | `elements.list` | the elements, optionally one `kind` (`sound`, `sticker`, `text`) or matching a `query`: id, name, category, description, length, licence and how each was made |
 //! | `elements.insert` | put element `id` on the timeline at `time` (ticks; or `seconds`, `frame`, `timecode`; default: the playhead), on `track` (`"A2"`, `"V3"`, a track name or id; default: the first free track) — one undo step |
 //!
-//! - **Sounds** are synthesized when inserted, never stored: whooshes, impacts and risers by the
-//!   synth ([`filmcraft_audio_dsp::synth`]), the click, pop, swooshes, sweep and boom by
+//! - **Sounds** are synthesized when inserted, never stored: whooshes, impacts, risers, the swish,
+//!   chime, shutter, soft pop and thump by the synth ([`filmcraft_audio_dsp::synth`]), the click, pop, swooshes, sweep and boom by
 //!   [`filmcraft_audio_dsp::sfx`]. Each element has fixed parameters and a fixed seed, so it is
 //!   the same sound every time. The WAV (48 kHz stereo float) goes in the `Generated Audio`
 //!   folder (or `dir`); inserting an element again reuses its file and project item.
@@ -82,7 +82,7 @@ impl Kind {
 /// How a sound element is made.
 #[derive(Clone, Copy, Debug)]
 pub enum Recipe {
-    /// The synth's whoosh / impact / riser.
+    /// One of the synth's sound effects (whoosh, impact, riser, swish, chime, shutter, pop, thump).
     Synth { kind: synth::Kind, seconds: f64, intensity: f64, seed: u64 },
     /// One of [`filmcraft_audio_dsp::sfx`]'s effects.
     Sfx { kind: Sfx, seconds: f64, seed: u64 },
@@ -155,7 +155,7 @@ const fn sfx_sound(id: &'static str, name: &'static str, file: &'static str, des
 }
 
 /// The sound elements.
-pub const SOUNDS: [Sound; 14] = [
+pub const SOUNDS: [Sound; 17] = [
     synth_sound("sound.whoosh-short", "Whoosh – Short", "Whoosh Short", "A quick air pass for a fast cut or move.", synth::Kind::Whoosh, 0.6, 0.6, 11),
     synth_sound("sound.whoosh-long", "Whoosh – Long", "Whoosh Long", "A slower, fuller pass for a transition.", synth::Kind::Whoosh, 1.8, 0.75, 12),
     synth_sound("sound.impact-soft", "Impact – Soft", "Impact Soft", "A gentle low hit with a short tail.", synth::Kind::Impact, 2.0, 0.25, 21),
@@ -182,6 +182,18 @@ pub const SOUNDS: [Sound; 14] = [
     synth_sound("sound.riser-4s", "Riser – 4 s", "Riser 4s", "A longer build to a cut.", synth::Kind::Riser, 4.0, 0.8, 32),
     synth_sound("sound.swish", "Swish", "Swish", "A soft, short brush of air: a gentle transition.", synth::Kind::Swish, 0.5, 0.6, 33),
     synth_sound("sound.chime", "Chime", "Chime", "A soft bell ringing out, for a new chapter or a reveal.", synth::Kind::Chime, 1.8, 0.6, 34),
+    synth_sound(
+        "sound.shutter",
+        "Shutter",
+        "Shutter",
+        "A camera shutter: two quick mechanical clicks, for a snap cut or a photo.",
+        synth::Kind::Shutter,
+        0.25,
+        0.6,
+        35,
+    ),
+    synth_sound("sound.pop-soft", "Pop – Soft", "Pop Soft", "A soft bubble pop on a cut or a reveal.", synth::Kind::Pop, 0.25, 0.5, 36),
+    synth_sound("sound.thump", "Thump", "Thump", "A soft, warm low hit: a gentler, shorter impact.", synth::Kind::Thump, 0.8, 0.6, 37),
     sfx_sound("sound.swoosh-up", "Swoosh – Up", "Swoosh Up", "An airy pass rising in pitch, left to right.", Sfx::SwooshUp, 0.7, 41),
     sfx_sound("sound.swoosh-down", "Swoosh – Down", "Swoosh Down", "An airy pass falling in pitch, right to left.", Sfx::SwooshDown, 0.7, 42),
     sfx_sound("sound.click", "Click", "Click", "A dry interface click for taps and pop-ups.", Sfx::Click, 0.12, 51),

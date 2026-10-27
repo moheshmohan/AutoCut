@@ -74,7 +74,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "transitions.addSound",
             "Add Transition Sound",
-            r#"{"transitions":[id]?,"kind":"whoosh|riser|impact|swish|chime"=whoosh,"gain":dB=-6,"intensity":0..1=0.7,"seed":u64?,"seconds":f64?}"#,
+            r#"{"transitions":[id]?,"kind":"whoosh|riser|impact|swish|chime|shutter|pop|thump"=whoosh,"gain":dB=-6,"intensity":0..1=0.7,"seed":u64?,"seconds":f64?}"#,
             add_sound,
         ),
         spec("transitions.removeSound", "Remove Transition Sound", r#"{"transitions":[id]?}"#, remove_sound),
@@ -335,13 +335,18 @@ fn sound_report(s: &Session, ids: &[TransitionId]) -> Vec<Value> {
         .collect()
 }
 
+/// The transition sounds, as a refusal lists them.
+fn sound_kinds() -> String {
+    SoundKind::ALL.iter().map(|k| k.id()).collect::<Vec<_>>().join(", ")
+}
+
 /// `transitions.addSound`.
 fn add_sound(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "transitions.addSound";
     // (no kind: each transition's own pairing, a whoosh for those without one)
     let kind = match str_p(p, "kind") {
-        Some(k) => Some(SoundKind::from_id(k).ok_or_else(|| bad(CMD, format!("unknown kind `{k}` (whoosh, riser, impact)")))?),
-        None if p.get("kind").is_some_and(|v| !v.is_null()) => return Err(bad(CMD, "`kind` is whoosh, riser or impact")),
+        Some(k) => Some(SoundKind::from_id(k).ok_or_else(|| bad(CMD, format!("unknown kind `{k}` ({})", sound_kinds())))?),
+        None if p.get("kind").is_some_and(|v| !v.is_null()) => return Err(bad(CMD, format!("`kind` is one of {}", sound_kinds()))),
         None => None,
     };
     let gain = match p.get("gain") {

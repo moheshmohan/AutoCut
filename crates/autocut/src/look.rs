@@ -1721,9 +1721,9 @@ mod tests {
     fn the_cuts_sounds_are_kinds_or_none() {
         assert_eq!(Sounds::from_plan(&Value::Null).unwrap(), Sounds::default());
         assert!(Sounds::default().is_default());
-        let s = Sounds::from_plan(&json!({"between": "Chime", "chapter": "none", "title": null})).unwrap();
-        assert_eq!(s, Sounds { between: Some(Cue::Kind(SoundKind::Chime)), chapter: Some(Cue::Silent), title: None });
-        assert_eq!(serde_json::to_value(s).unwrap(), json!({"between": "chime", "chapter": "none"}));
+        let s = Sounds::from_plan(&json!({"between": "Shutter", "chapter": "none", "title": null})).unwrap();
+        assert_eq!(s, Sounds { between: Some(Cue::Kind(SoundKind::Shutter)), chapter: Some(Cue::Silent), title: None });
+        assert_eq!(serde_json::to_value(s).unwrap(), json!({"between": "shutter", "chapter": "none"}));
         // every transition sound is one
         for k in SoundKind::ALL {
             assert_eq!(Sounds::from_plan(&json!({"title": k.id()})).unwrap().title, Some(Cue::Kind(k)));

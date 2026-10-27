@@ -29,7 +29,8 @@ pub struct Taste {
     /// Light effects (light leaks, sweeps, flares, flashes) allowed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub light_effects: Option<bool>,
-    /// The sounds heard on cuts and titles (`swish`, `chime`, `whoosh`, `impact`, `riser`).
+    /// The sounds heard on cuts and titles (`swish`, `chime`, `whoosh`, `impact`, `riser`,
+    /// `shutter`, `pop`, `thump`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sounds: Option<Vec<String>>,
     /// How loud they are, 0..1.

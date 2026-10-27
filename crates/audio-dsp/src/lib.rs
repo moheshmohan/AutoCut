@@ -19,7 +19,8 @@
 //! * [`stretch`] — time stretch that keeps pitch (WSOLA, renderable from any position): Speed/Duration's
 //!   Maintain Audio Pitch.
 //! * [`channels`] — channel layouts, ITU-R BS.775 up/downmix, 5.1 mixdown types, the 5.1 panner.
-//! * [`synth`] — procedural sound effects (whoosh, impact, riser, drone) and music beds.
+//! * [`synth`] — procedural sound effects (whoosh, impact, riser, swish, chime, shutter, pop,
+//!   thump, drone) and music beds.
 //! * [`music`] — the soundtrack engine: block-arranged music of an exact length ending on a bar,
 //!   in stems, with a mood → genre → tempo → energy → use-case taxonomy and an exact beat map.
 //! * [`sfx`] — short procedural effects for the Elements library (click, pop, swooshes, sweep, boom).
