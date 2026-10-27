@@ -19,10 +19,11 @@
 //!   finishes over the next picture. Never over the other shot's own speech.
 //! - **Cut** otherwise.
 //!
-//! What is heard on the cuts, and whether light effects are used, is the style's: by default the
-//! subtle style — a quiet swish under each whip and a chime under the title, no light effects —
-//! which was one viewer's taste for their trip videos; a taste profile or the brief can ask for
-//! another (`style`, `lightEffects`, `sounds`, `soundLevel`).
+//! What is heard on the cuts, and whether light effects are used, is the style's. A video's
+//! options or the taste profile can name one (`style`, `lightEffects`, `sounds`, `soundLevel`);
+//! otherwise the director chooses it from the shots it planned ([`style_from_shots`]): lively
+//! footage is cut energetically, calm wide footage spread over days cinematically, the rest
+//! (and footage full of people talking) subtly.
 
 use filmcraft_engine::project::scenes::CameraMove;
 use serde::{Deserialize, Serialize};
@@ -82,7 +83,27 @@ impl Default for Style {
     }
 }
 
+impl Pace {
+    pub fn name(self) -> &'static str {
+        match self {
+            Pace::Subtle => "subtle",
+            Pace::Energetic => "energetic",
+            Pace::Cinematic => "cinematic",
+        }
+    }
+}
+
 impl Style {
+    /// A pace with its own sounds (light effects as `light` says).
+    pub fn of_pace(pace: Pace, light: bool) -> Style {
+        let sounds: &[&str] = match pace {
+            Pace::Subtle => &["swish", "chime"],
+            Pace::Energetic => &["whoosh", "impact", "swish"],
+            Pace::Cinematic => &["riser", "chime"],
+        };
+        Style { pace, light_effects: light, sounds: sounds.iter().map(|k| (*k).to_string()).collect(), sound_level: Style::default().sound_level }
+    }
+
     /// The style of `p` (`style`, `lightEffects`, `sounds`, `soundLevel`), over `base`.
     pub fn from_params(p: &Value, base: &Style) -> Result<Style, String> {
         let mut s = base.clone();
@@ -97,11 +118,7 @@ impl Style {
                 };
                 // a livelier style brings its own sounds unless they are given
                 if p["sounds"].is_null() {
-                    s.sounds = match s.pace {
-                        Pace::Subtle => vec!["swish".into(), "chime".into()],
-                        Pace::Energetic => vec!["whoosh".into(), "impact".into(), "swish".into()],
-                        Pace::Cinematic => vec!["riser".into(), "chime".into()],
-                    };
+                    s.sounds = Style::of_pace(s.pace, false).sounds;
                 }
             }
         }
@@ -183,6 +200,83 @@ impl Style {
     fn fast(&self) -> f64 {
         if self.pace == Pace::Energetic { 0.15 } else { FAST }
     }
+}
+
+/// Lively: this share of the shots moving fast (or high energy on average, 0..1).
+const LIVELY_SHARE: f64 = 0.3;
+const LIVELY_ENERGY: f64 = 0.65;
+/// Calm: energy at most this on average, and almost nothing moving fast.
+const CALM_ENERGY: f64 = 0.4;
+const CALM_SHARE: f64 = 0.15;
+/// Shots of people talking from this share are cut plainly, so they are heard.
+const TALKING_SHARE: f64 = 0.4;
+/// A moment this dark (mean brightness, 0..1) is night or a dim room.
+const NIGHT: f64 = 0.25;
+
+/// The words of a brief that name a style.
+fn brief_pace(brief: &str) -> Option<Pace> {
+    let b = brief.to_lowercase();
+    let words: Vec<&str> = b.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let has = |list: &[&str]| words.iter().any(|w| list.contains(w));
+    if has(&["cinematic", "filmic"]) {
+        Some(Pace::Cinematic)
+    } else if has(&["energetic", "hype", "punchy", "lively"]) {
+        Some(Pace::Energetic)
+    } else if has(&["calm", "gentle", "quiet", "subtle", "relaxed"]) {
+        Some(Pace::Subtle)
+    } else {
+        None
+    }
+}
+
+/// The style the planned shots ask for, when the edit leaves it to the director: a style the
+/// brief names; else, by the shots, plain cuts where many of them have people talking, lively
+/// cuts where many move fast or their energy is high (light effects too when they are mostly
+/// not at night), long dissolves where they are calm and either wide or filmed over days, and
+/// the subtle style otherwise. Returns the style and why.
+pub fn style_from_shots(plan: &Plan, cands: &[Candidate], brief: &str) -> (Style, String) {
+    let used: Vec<&Candidate> = plan.shots.iter().filter_map(|s| cands.iter().find(|c| c.id == s.clip)).collect();
+    if let Some(pace) = brief_pace(brief) {
+        return (Style::of_pace(pace, false), format!("{}: the brief asks for it", pace.name()));
+    }
+    if used.is_empty() {
+        return (Style::default(), "subtle: no planned shots to judge by".into());
+    }
+    let n = used.len() as f64;
+    let share = |f: &dyn Fn(&Candidate) -> bool| used.iter().filter(|c| f(c)).count() as f64 / n;
+    let energy = used.iter().map(|c| if c.energy.is_finite() { c.energy.clamp(0.0, 1.0) } else { 0.0 }).sum::<f64>() / n;
+    let fast = share(&|c| c.scores.motion >= FAST);
+    let talking = share(&|c| c.talking);
+    let night = share(&|c| c.scores.measured && c.scores.brightness < NIGHT);
+    let wide = share(&|c| c.wide);
+    let times: Vec<i64> = used.iter().filter_map(|c| c.captured).collect();
+    let span = match (times.iter().min(), times.iter().max()) {
+        (Some(a), Some(b)) => b.saturating_sub(*a),
+        _ => 0,
+    };
+    let of = |x: f64| (x * n).round() as usize;
+    let all = used.len();
+    if talking >= TALKING_SHARE {
+        return (Style::of_pace(Pace::Subtle, false), format!("subtle: people talk in {} of {all} shots, and plain cuts keep them heard", of(talking)));
+    }
+    if fast >= LIVELY_SHARE || energy >= LIVELY_ENERGY {
+        let light = night < 0.5;
+        let why = format!(
+            "energetic: {} of {all} shots move fast and their energy is {energy:.2}{}",
+            of(fast),
+            if light { "; light effects, as most are not at night" } else { "; no light effects, as most are at night" }
+        );
+        return (Style::of_pace(Pace::Energetic, light), why);
+    }
+    if energy <= CALM_ENERGY && fast < CALM_SHARE && (span >= DAY || wide >= 0.5) {
+        let why = if span >= DAY {
+            format!("cinematic: calm shots (energy {energy:.2}) filmed over {:.0} days", span as f64 / DAY as f64)
+        } else {
+            format!("cinematic: calm, wide shots ({} of {all} wide, energy {energy:.2})", of(wide))
+        };
+        return (Style::of_pace(Pace::Cinematic, false), why);
+    }
+    (Style::of_pace(Pace::Subtle, false), format!("subtle: {} of {all} shots move fast and their energy is {energy:.2}, neither lively nor calm", of(fast)))
 }
 
 /// Where the subject of a shot sits across the frame, 0..1 (a normal shot's subject box; a

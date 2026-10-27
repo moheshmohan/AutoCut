@@ -509,6 +509,7 @@ fn trip() -> (Vec<Candidate>, Plan, Vec<crate::quick::ItemSpeech>) {
         ],
         by: "test".into(),
         notes: Vec::new(),
+        style: None,
     };
     let speech = vec![speech_of_item(2, &[(1.2, 3.0)]), speech_of_item(4, &[(3.5, 4.3)])];
     (lib, plan, speech)
@@ -583,6 +584,59 @@ fn the_cuts_compile_to_transitions_split_edits_and_the_styles_sounds() {
     assert_eq!(kinds(&compile(&plan, &lib, &wins, &loud, (1080.0, 1920.0), beat)), BTreeSet::from(["impact".to_string(), "whoosh".to_string()]));
     let quiet = opts(json!({"seconds": 15, "sounds": []}));
     assert!(kinds(&compile(&plan, &lib, &wins, &quiet, (1080.0, 1920.0), beat)).is_empty());
+}
+
+#[test]
+fn the_director_chooses_the_style_from_the_shots_unless_one_is_named() {
+    let (mut lib, plan, _) = trip();
+    let pace = |lib: &[Candidate], brief: &str| {
+        let (st, why) = cuts::style_from_shots(&plan, lib, brief);
+        (st.pace, st.light_effects, why)
+    };
+    // the trip: middling energy, one shot of six moving fast, filmed over five hours
+    let (p, light, why) = pace(&lib, "");
+    assert_eq!((p, light), (cuts::Pace::Subtle, false), "{why}");
+    // lively: most shots move fast; light effects by day, none at night
+    for c in lib.iter_mut().take(4) {
+        c.scores.motion = 0.4;
+        c.scores.measured = true;
+    }
+    let (p, light, why) = pace(&lib, "");
+    assert_eq!((p, light), (cuts::Pace::Energetic, true), "{why}");
+    assert!(why.contains("4 of 6 shots move fast"), "{why}");
+    for c in lib.iter_mut() {
+        c.scores.brightness = 0.1;
+        c.scores.measured = true;
+    }
+    assert!(!pace(&lib, "").1, "at night: no light leaks");
+    // people talking in many of them: plain cuts
+    for c in lib.iter_mut().take(3) {
+        c.talking = true;
+    }
+    assert_eq!(pace(&lib, "").0, cuts::Pace::Subtle);
+    // calm shots filmed over days: cinematic; a brief that names a style comes first
+    let (mut calm, plan2, _) = trip();
+    for (k, c) in calm.iter_mut().enumerate() {
+        c.energy = 0.3;
+        c.scores.motion = 0.01;
+        c.captured = Some(1_760_000_000 + k as i64 * 86_400);
+    }
+    let (st, why) = cuts::style_from_shots(&plan2, &calm, "");
+    assert_eq!(st.pace, cuts::Pace::Cinematic, "{why}");
+    assert_eq!(st.sounds, ["riser", "chime"]);
+    assert_eq!(cuts::style_from_shots(&plan2, &calm, "a calm recap").0.pace, cuts::Pace::Subtle);
+    // the options: no style (or auto) leaves it to the director, the video's sounds kept over it
+    let o = opts(json!({"sounds": ["chime"], "soundLevel": 0.2}));
+    assert!(o.auto_style);
+    assert_eq!(o.style_given, json!({"sounds": ["chime"], "soundLevel": 0.2}));
+    let chosen = cuts::Style::from_params(&o.style_given, &cuts::Style::of_pace(cuts::Pace::Energetic, true)).unwrap();
+    assert_eq!((chosen.pace, chosen.sounds.clone(), chosen.sound_level), (cuts::Pace::Energetic, vec!["chime".to_string()], 0.2));
+    assert!(opts(json!({"style": "auto"})).auto_style);
+    let named = opts(json!({"style": "cinematic"}));
+    assert!(!named.auto_style && named.style.pace == cuts::Pace::Cinematic);
+    // a hostile options object never panics
+    assert!(Options::from_params(&json!({"style": "loud"})).is_err());
+    assert!(Options::from_params(&json!([1, 2])).is_ok_and(|o| o.auto_style));
 }
 
 #[test]

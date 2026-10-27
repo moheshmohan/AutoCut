@@ -163,11 +163,16 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    early) and an L cut out of a sentence that runs past its shot (`clip.splitEdit`); otherwise a
    plain cut — every one on its beat, each an ordinary edit to change afterwards, and the plan's
    `cut` says why. How lively the cuts are, whether light effects are used and which sounds are
-   heard on them is the edit's **style** (`--style subtle|energetic|cinematic`, `--light-effects`,
-   `--sounds`, `--sound-level`): the subtle default makes a few whips with a quiet swish, a chime
-   under the title and no light effects (one viewer's taste for their trip videos); energetic
-   whips more, punches in across time (a light leak where allowed) with whooshes and an impact;
-   cinematic dissolves longer, dips to black across days, whips at most once.
+   heard on them is the edit's **style** (`--style auto|subtle|energetic|cinematic`,
+   `--light-effects`, `--sounds`, `--sound-level`): subtle makes a few whips with a quiet swish,
+   a chime under the title and no light effects; energetic whips more, punches in across time (a
+   light leak where allowed) with whooshes and an impact; cinematic dissolves longer, dips to
+   black across days, whips at most once. Unless the video or the taste profile names one, the
+   director chooses it from the shots it planned (`auto`): a style the brief names; plain cuts
+   when many shots have people talking; energetic when many move fast or their energy is high
+   (light effects too when most are not at night); cinematic when they are calm and wide or
+   filmed over days; subtle otherwise. The report's `style` says which and why, and a revision
+   keeps it.
    **A careful colour pass** (`clip.autoColor`, on unless `--no-color`): each shot is rendered
    small on the GPU and measured — its near-neutral greys (the least coloured pixels, even a
    white wall under warm light), its skin and its median brightness — and given a gentle

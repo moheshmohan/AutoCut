@@ -816,12 +816,14 @@ pub struct DirectParams {
     /// Download the missing scene models first — only after the user agreed (several GB).
     #[serde(default)]
     pub download: Option<bool>,
-    /// How the cuts are made: "subtle" (the default: cuts, match cuts, a few whips, dissolves
-    /// across time), "energetic" (more whips, punch-ins) or "cinematic" (long dissolves, dips to
-    /// black). Ask the user or follow their taste; don't assume.
+    /// How the cuts are made: "subtle" (cuts, match cuts, a few whips, dissolves across time),
+    /// "energetic" (more whips, punch-ins) or "cinematic" (long dissolves, dips to black). Left
+    /// out (or "auto"), the taste profile's, else the director chooses it from the shots it
+    /// planned (the report's `style` says which and why).
     #[serde(default)]
     pub style: Option<String>,
-    /// Light effects (light leaks) allowed in the energetic style (default false).
+    /// Light effects (light leaks) allowed in the energetic style (default: the style's; a style
+    /// the director chooses allows them when most shots are not at night).
     #[serde(default)]
     pub light_effects: Option<bool>,
     /// The sounds heard on the cuts: any of "swish", "chime", "whoosh", "impact", "riser"

@@ -141,6 +141,11 @@ pub struct Options {
     pub seed: u64,
     /// How the cuts are made and what is heard on them ([`cuts::Style`]).
     pub style: cuts::Style,
+    /// No style named (or `auto`): the director chooses it from the shots it planned
+    /// ([`cuts::style_from_shots`]), the video's own `lightEffects`, `sounds` and `soundLevel`
+    /// (kept in `style_given`) over it.
+    pub auto_style: bool,
+    pub style_given: Value,
     /// The careful colour pass (`clip.autoColor`): on unless switched off; its strength (0..1),
     /// and a look of our own (`none` by default) at a strength (%).
     pub color: bool,
@@ -335,6 +340,15 @@ impl Options {
         if !LOOKS.contains(&look.as_str()) {
             return Err(invalid(format!("look: one of {}", LOOKS.join(", "))));
         }
+        let auto_style = p["style"].as_str().is_none_or(|v| v.trim().is_empty() || v.trim().eq_ignore_ascii_case("auto"));
+        let mut style_given = json!({});
+        for k in ["lightEffects", "sounds", "soundLevel"] {
+            if !p[k].is_null() {
+                style_given[k] = p[k].clone();
+            }
+        }
+        let style =
+            if auto_style { cuts::Style::from_params(&style_given, &cuts::Style::default()) } else { cuts::Style::from_params(p, &cuts::Style::default()) };
         let redact = match &p["redact"] {
             Value::Null | Value::Bool(false) => None,
             Value::String(s) if matches!(s.trim().to_ascii_lowercase().as_str(), "off" | "none" | "false" | "") => None,
@@ -359,7 +373,9 @@ impl Options {
             full_detail: p["fullDetail"].as_u64().map_or(8, |n| n.min(64) as usize),
             download: p["download"].as_bool().unwrap_or(false),
             seed: p["seed"].as_u64().unwrap_or(7),
-            style: cuts::Style::from_params(p, &cuts::Style::default()).map_err(invalid)?,
+            style: style.map_err(invalid)?,
+            auto_style,
+            style_given,
             color: p["color"].as_bool().unwrap_or(true),
             color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
             look,
@@ -902,6 +918,9 @@ pub struct Plan {
     /// What was repaired or decided, and why.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// The cutting style it was made in (`subtle`, `energetic`, `cinematic`): a revision keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 impl Plan {
@@ -1005,7 +1024,7 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
     let mut notes = Vec::new();
     let title = o.title.clone().or_else(|| title_from_brief(&o.brief)).unwrap_or_else(|| "Highlights".into());
     let mood = o.mood.clone().unwrap_or_else(|| mood_from_brief(&o.brief).to_string());
-    let mut plan = Plan { title: title.clone(), mood, bpm, shots: Vec::new(), by: "rules".into(), notes: Vec::new() };
+    let mut plan = Plan { title: title.clone(), mood, bpm, shots: Vec::new(), by: "rules".into(), notes: Vec::new(), style: None };
     if good.is_empty() {
         return plan;
     }
@@ -1548,7 +1567,7 @@ pub fn validate(v: &Value, cands: &[Candidate], o: &Options, beat: f64, bpm: f64
         .clone()
         .or_else(|| v["mood"].as_str().map(str::to_ascii_lowercase).filter(|m| MOODS.contains(&m.as_str())))
         .unwrap_or_else(|| mood_from_brief(&o.brief).to_string());
-    Ok(Plan { title, mood, bpm, shots, by: String::new(), notes })
+    Ok(Plan { title, mood, bpm, shots, by: String::new(), notes, style: None })
 }
 
 /// The plan in a model's answer: the answer itself, or what it wrapped it in (`answer`, `plan`,
@@ -1914,6 +1933,9 @@ pub struct Report {
     /// The taste profile it was made in (`autocut.taste`), when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub taste: Option<Value>,
+    /// The cutting style: which, whether it was asked for or the director chose it, and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revised_from: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2308,8 +2330,28 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     if plan.shots.is_empty() {
         return Err(invalid("no shot could be planned from these clips"));
     }
-    // ---- how each cut is made: from what the shots show and say, in the edit's style
+    // ---- the style: when the edit leaves it to the director, chosen from the shots it planned
+    // (a revision keeps the one its edit was made in)
     let mut plan = plan;
+    if o.auto_style {
+        let kept =
+            previous.as_ref().and_then(|pr| pr.plan.style.clone()).and_then(|st| cuts::Style::from_params(&json!({"style": st}), &cuts::Style::default()).ok());
+        let (base, why) = match kept {
+            Some(s) => {
+                let why = format!("{}: as the edit was made", s.pace.name());
+                (s, why)
+            }
+            None => cuts::style_from_shots(&plan, &cands, &o.brief),
+        };
+        o.style = cuts::Style::from_params(&o.style_given, &base).unwrap_or(base);
+        lines(&format!("style: {why}"));
+        report.style =
+            Some(json!({"style": o.style.pace.name(), "by": "director", "why": why, "lightEffects": o.style.light_effects, "sounds": o.style.sounds}));
+    } else {
+        report.style = Some(json!({"style": o.style.pace.name(), "by": "asked", "lightEffects": o.style.light_effects, "sounds": o.style.sounds}));
+    }
+    plan.style = Some(o.style.pace.name().into());
+    // ---- how each cut is made: from what the shots show and say, in the edit's style
     cuts::joins(&mut plan, &cands, &speech, beat, &o.style);
     for s in plan.shots.iter_mut() {
         s.file = cands.iter().find(|c| c.id == s.clip).map(|c| c.name.clone()).unwrap_or_default();

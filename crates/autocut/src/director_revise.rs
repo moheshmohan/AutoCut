@@ -455,6 +455,7 @@ pub fn apply(plan: &mut Plan, ops: &[Op], cands: &[Candidate], wins: &[(f64, f64
                 Ok(s) => {
                     said.push(format!("style: {st}"));
                     o.style = s;
+                    o.auto_style = false;
                 }
                 Err(e) => said.push(format!("style: {e}")),
             },
