@@ -127,12 +127,23 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
    trip, travel, a vlog, a holiday, a tour or a city is about **places**, one about a birthday, a
    wedding, a party or the family about **people**; with neither, most moments outdoors and few
    people talking is places. A places edit ranks moments by how they look, how wide and whether
-   outdoors (faces, smiles and speech count for little), points each 360° shot at what is not a
-   person first (a crowd or people walking are the street; where only a person was found, the
-   view the other way round, away from the camera's holder), and keeps the person holding the
-   camera in at most a third of the shots: past that, a 360° shot turns to its place (a follow
-   becomes a drift, a whip with no second place a push in), the plan's notes saying which. The
-   model is told the same, the person looks marked. The report's `focus` says which and why.
+   outdoors (faces, smiles and speech count for little) and plans from outdoor moments, keeping
+   indoor ones (a shop, a lift) only as many as the outdoors cannot fill; points each 360° shot
+   at what is not a person first, the farthest from the camera's holder first (a crowd or people
+   walking are the street; the holder is the person below the lens or right by it; with no
+   place clear of them, the view the other way round); covers every part of the trip (moments
+   hours apart — a morning walk, the night out, the next day — each with its share of the
+   shots, and one recording in two at most, a shot over going to a part that is short or to
+   another recording; the shots between the opener and the ending in filming order and the
+   ending from the last part — Insta360 recordings are dated by their movie header like any
+   MP4); never points a shot at the camera's holder (in 360° they are at its edges often
+   enough), and anyone else in at most a third of the shots, where a whip ends counting as well
+   as where it starts: past that, a 360° shot turns to its place (a follow drifts, a whip with
+   no second place pushes in), and orbits drift, as they sweep past the holder. A voice is heard
+   over the music, and captioned in whole sentences, only where the shot shows who speaks; an
+   edit has two reveals at most (each starts on the sky). The model is told the same, the
+   person looks marked; the plan's notes say what was repaired and the report's `focus` which
+   and why.
 3. **The plan**: the rhythm is set first — a hook long enough for a tiny planet to open, body
    shots alternating about 2.4 s and 1.8 s, an ending, every length a whole number of beats
    adding up to the length asked. The local model (the script model, `qwen3:8b`, else

@@ -213,6 +213,13 @@ const TALKING_SHARE: f64 = 0.4;
 /// A moment this dark (mean brightness, 0..1) is night or a dim room.
 const NIGHT: f64 = 0.25;
 
+/// Whether a moment's description says it is night (a lit street at night measures brighter
+/// than [`NIGHT`]).
+fn at_night(caption: &str) -> bool {
+    let c = caption.to_lowercase();
+    c.split(|ch: char| !ch.is_alphanumeric()).any(|w| matches!(w, "night" | "nighttime" | "evening" | "dusk" | "nightlife"))
+}
+
 /// The words of a brief that name a style.
 fn brief_pace(brief: &str) -> Option<Pace> {
     let b = brief.to_lowercase();
@@ -247,7 +254,7 @@ pub fn style_from_shots(plan: &Plan, cands: &[Candidate], brief: &str) -> (Style
     let energy = used.iter().map(|c| if c.energy.is_finite() { c.energy.clamp(0.0, 1.0) } else { 0.0 }).sum::<f64>() / n;
     let fast = share(&|c| c.scores.motion >= FAST);
     let talking = share(&|c| c.talking);
-    let night = share(&|c| c.scores.measured && c.scores.brightness < NIGHT);
+    let night = share(&|c| (c.scores.measured && c.scores.brightness < NIGHT) || at_night(&c.caption));
     let wide = share(&|c| c.wide);
     let times: Vec<i64> = used.iter().filter_map(|c| c.captured).collect();
     let span = match (times.iter().min(), times.iter().max()) {

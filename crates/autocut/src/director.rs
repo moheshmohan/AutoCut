@@ -59,6 +59,8 @@ pub const FPS: f64 = 30.0;
 pub const CONTEXT_TOKENS: u32 = 16_384;
 /// Shots the model is told about, at most (the best of a long library).
 pub const MAX_CANDIDATES: usize = 48;
+/// Reveals an edit has at most: each starts on the sky.
+const MAX_REVEALS: usize = 2;
 /// 360° shots looked round for action, at most.
 const MAX_SALIENCE: usize = 40;
 /// Longest brief, title and on-screen text, characters.
@@ -1288,7 +1290,7 @@ pub fn director_prompt(cands: &[&Candidate], o: &Options, beat: f64, slots: &[Sl
     if places {
         let most = ((slots.len() as f64 * focus::MAX_PEOPLE).floor() as usize).max(1);
         out.push_str(&format!(
-            "This is a travel video: show the places — streets, buildings, views, the crowd. The person holding the camera is in many 360° shots: frame a person (a look marked \"a person\") in at most {most} of the slots, and for the rest choose looks that are places.\n"
+            "This is a travel video: show the places — streets, buildings, views, the crowd. The person holding the camera is in many 360° shots: never choose a look at them; frame other people (a look marked \"a person\") in at most {most} of the slots, and for the rest choose looks that are places. Use moments from every part of the trip, in filming order.\n"
         ));
     }
     out.push_str(&format!("The video: {:.0} s, {}, {} slots, a beat is {:.2} s.\n", o.seconds, o.aspect, slots.len(), beat));
@@ -1398,6 +1400,9 @@ fn fit_camera(
         }
         if m == Camera::BarrelRoll && used.get(&Camera::BarrelRoll).copied().unwrap_or(0) >= 1 {
             return Err("one barrel roll is enough".into());
+        }
+        if m == Camera::Reveal && used.get(&Camera::Reveal).copied().unwrap_or(0) >= MAX_REVEALS {
+            return Err(format!("{MAX_REVEALS} reveals are enough (each starts on the sky)"));
         }
         if m == Camera::WhipPan && c.second_look().is_none() {
             return Err("a whip pan needs two things to turn between".into());
@@ -2274,7 +2279,13 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     let beat = beat_of(bpm);
     let total = ((o.seconds / beat).round() as u32).max(4);
     let need = rhythm(total, beat, cands.len()).len() + 2;
-    let (cands, verdicts) = rank::choose(cands, need);
+    let (mut cands, verdicts) = rank::choose(cands, need);
+    if o.focus == Some(focus::Focus::Places) {
+        let aside = focus::places_pool(&mut cands, need, need.saturating_sub(2));
+        if aside > 0 {
+            lines(&format!("{aside} indoor moment(s) set aside: a travel video is outdoors"));
+        }
+    }
     let dropped = verdicts.iter().filter(|v| !v.kept).count();
     if dropped > 0 {
         lines(&format!("{dropped} moment(s) left out (blurred, dark, shaky or a near-duplicate)"));
@@ -2357,7 +2368,10 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     // ---- a travel video: the person holding the camera in a third of the shots at most
     let mut plan = plan;
     if o.focus == Some(focus::Focus::Places) {
-        for change in focus::limit_people(&mut plan, &cands) {
+        let mut changes = focus::cover_parts(&mut plan, &cands, beat);
+        changes.extend(focus::in_time_order(&mut plan, &cands, beat));
+        changes.extend(focus::limit_people(&mut plan, &cands));
+        for change in changes {
             lines(&format!("repaired: {change}"));
             plan.notes.push(change);
         }
@@ -2461,7 +2475,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         }
     }
     // ---- the mix
-    report.mix = Some(mix(ex, &built, music_clip, &plan, &cands, &o.style, &mut notes).await);
+    report.mix = Some(mix(ex, &built, music_clip, &plan, &cands, &o.style, o.focus, &mut notes).await);
     if let Err(e) = run(ex, "audio.normalizeLoudness", json!({"target": "social", "truePeak": crate::look::TRUE_PEAK})).await {
         notes.push(format!("loudness: {e}"));
     }
@@ -2640,9 +2654,12 @@ async fn captions(
     notes: &mut Vec<String>,
 ) -> usize {
     let mut cues: Vec<(f64, f64, String)> = Vec::new();
+    let places = o.focus == Some(focus::Focus::Places);
     for (s, (t0, t1)) in plan.shots.iter().zip(wins) {
         let Some(c) = cands.iter().find(|c| c.id == s.clip) else { continue };
-        if s.camera == Camera::Hyperlapse || c.kind == Kind::Photo {
+        // (a travel video under music: only someone talking on screen is captioned, not words
+        // caught in passing)
+        if s.camera == Camera::Hyperlapse || c.kind == Kind::Photo || (places && !focus::voiced(o.focus, c, s)) {
             continue;
         }
         let Some(sp) = speech.iter().find(|x| x.item == c.item && x.language.starts_with("en")) else { continue };
@@ -2650,7 +2667,9 @@ async fn captions(
         for k in sp.kept.iter().filter(|k| k.end > a && k.start < b && !k.text.trim().is_empty()) {
             let start = t0 + (k.start - a).max(0.0);
             let end = (t0 + (k.end - a)).min(*t1);
-            if end - start >= 0.4 && english(&k.text) {
+            // (a travel video: whole sentences only, not words caught in passing)
+            let whole = !places || k.text.trim_end_matches(['"', '\'', '”', ')']).ends_with(['.', '!', '?', '…']);
+            if end - start >= 0.4 && english(&k.text) && whole {
                 cues.push((start, end, chars(k.text.trim(), 120)));
             }
         }
@@ -2680,7 +2699,17 @@ async fn captions(
 
 /// The mix: the music carries the edit, each shot's own sound well under it (someone talking
 /// over it: the speech mix, the voice first), the swishes and chime under the music.
-async fn mix(ex: &dyn Executor, b: &Built, music: Option<u64>, plan: &Plan, cands: &[Candidate], style: &cuts::Style, notes: &mut Vec<String>) -> Value {
+#[allow(clippy::too_many_arguments)]
+async fn mix(
+    ex: &dyn Executor,
+    b: &Built,
+    music: Option<u64>,
+    plan: &Plan,
+    cands: &[Candidate],
+    style: &cuts::Style,
+    about: Option<focus::Focus>,
+    notes: &mut Vec<String>,
+) -> Value {
     // the cuts' sounds as loud as the style asks (the subtle style's −24 LUFS at its 0.4)
     let effects_lufs = (EFFECTS_LUFS + 10.0 * (style.sound_level - 0.4)).clamp(-32.0, -16.0);
     let sounds: Vec<u64> = b.sounds.iter().flatten().copied().collect();
@@ -2688,7 +2717,7 @@ async fn mix(ex: &dyn Executor, b: &Built, music: Option<u64>, plan: &Plan, cand
         .shots
         .iter()
         .zip(&b.sounds)
-        .filter(|(s, _)| cands.iter().find(|c| c.id == s.clip).is_some_and(|c| c.talking || c.said.is_some()))
+        .filter(|(s, _)| cands.iter().find(|c| c.id == s.clip).is_some_and(|c| focus::voiced(about, c, s)))
         .filter_map(|(_, a)| *a)
         .collect();
     if !talking.is_empty() {

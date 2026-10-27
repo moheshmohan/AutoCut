@@ -663,8 +663,8 @@ fn a_travel_video_shows_the_places_and_its_person_now_and_then() {
     assert_eq!((lib[0].looks[0].id.as_str(), lib[0].looks[0].yaw.round()), ("c1b", -170.0));
     assert!(lib[0].looks[0].what.contains("away from the camera's holder"));
     assert!(lib.iter().zip(&before).all(|(c, b)| c.rank.is_finite() && (c.rank - b).abs() < 1.0));
-    // the plan looking at the holder in its three 360° shots (of six): two kept (a third), the
-    // last turned to its place; a whip with no second place pushes in
+    // the plan looking at the holder in its three 360° shots (of six): each turned to its place
+    // (the holder is never the subject), the orbit drifting; a whip with no second place pushes in
     for s in plan.shots.iter_mut() {
         if lib.iter().any(|c| c.id == s.clip && c.kind == Kind::Vr) {
             s.look = Some(format!("{}a", s.clip));
@@ -673,11 +673,26 @@ fn a_travel_video_shows_the_places_and_its_person_now_and_then() {
     plan.shots[5].camera = Camera::WhipPan;
     plan.shots[5].to = Some("c6b".into());
     let changed = focus::limit_people(&mut plan, &lib);
-    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert_eq!(changed.len(), 4, "{changed:?}");
     let looks: Vec<Option<&str>> = plan.shots.iter().map(|s| s.look.as_deref()).collect();
-    assert_eq!((looks[0], looks[1], looks[5]), (Some("c1a"), Some("c3a"), Some("c6b")));
+    assert_eq!((looks[0], looks[1], looks[5]), (Some("c1b"), Some("c3b"), Some("c6b")));
+    assert_eq!(plan.shots[1].camera, Camera::Drift, "an orbit sweeps past the holder");
     assert_eq!((plan.shots[5].camera, plan.shots[5].to.as_deref()), (Camera::PushIn, None));
-    assert!(changed[0].starts_with("shot 6: looks at c6b"), "{changed:?}");
+    assert!(changed[3].starts_with("shot 6: looks at c6b"), "{changed:?}");
+    // the holder's voice over a street is not heard over the music; on screen it is
+    let mut talker = lib[2].clone();
+    talker.talking = true;
+    assert!(!focus::voiced(Some(focus::Focus::Places), &talker, &plan.shots[1]));
+    let mut on = plan.shots[1].clone();
+    on.look = Some("c3a".into());
+    assert!(focus::voiced(Some(focus::Focus::Places), &talker, &on) && focus::voiced(None, &talker, &plan.shots[1]));
+    // a whip ending on the holder counts too
+    let mut p2 = plan.clone();
+    p2.shots[1].look = Some("c3b".into());
+    p2.shots[1].to = Some("c3a".into());
+    p2.shots[1].camera = Camera::WhipPan;
+    focus::limit_people(&mut p2, &lib);
+    assert_ne!(p2.shots[1].to.as_deref(), Some("c3a"));
     // the model is told, the person looks marked
     let mut o = opts(json!({"brief": "our trip"}));
     o.focus = Some(focus::Focus::Places);
@@ -685,6 +700,65 @@ fn a_travel_video_shows_the_places_and_its_person_now_and_then() {
     let prompt = director_prompt(&refs, &o, 0.5, &rhythm(20, 0.5, lib.len()));
     assert!(prompt.contains("This is a travel video") && prompt.contains("a man in a patterned shirt (a person)"), "{prompt}");
     assert!(Options::from_params(&json!({"focus": "dogs"})).is_err());
+}
+
+#[test]
+fn two_reveals_are_enough() {
+    let c = cand("c1", 1, Kind::Vr, 0.0, 12.0, 40.0, 0);
+    let mut notes = Vec::new();
+    let mut used = HashMap::new();
+    assert_eq!(fit_camera(Some(Camera::Reveal), &c, 8, 0.5, 3, false, &used, 9.0 / 16.0, &mut notes), Camera::Reveal);
+    used.insert(Camera::Reveal, 2);
+    assert_ne!(fit_camera(Some(Camera::Reveal), &c, 8, 0.5, 3, false, &used, 9.0 / 16.0, &mut notes), Camera::Reveal);
+    assert!(notes.iter().any(|n| n.contains("reveals are enough")), "{notes:?}");
+}
+
+#[test]
+fn a_travel_video_covers_every_part_of_the_trip_and_stays_outdoors() {
+    let (mut lib, mut plan, _) = trip();
+    let day = 1_760_000_000i64;
+    // a third part, the next day, that the plan left out
+    let mut next = cand("c7", 7, Kind::Vr, 0.0, 10.0, 20.0, 6);
+    next.captured = Some(day + 30 * 3600);
+    next.rank = 0.7;
+    lib.push(next);
+    let changed = focus::cover_parts(&mut plan, &lib, 0.5);
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert!(changed[0].starts_with("shot 4: c4 → c7"), "{changed:?}");
+    assert_eq!((plan.shots[3].clip.as_str(), plan.shots[3].camera), ("c7", Camera::PushIn));
+    assert!(plan.shots[3].look.is_some());
+    // every part already in: nothing changes
+    assert!(focus::cover_parts(&mut plan, &lib, 0.5).is_empty());
+    // told in filming order (c2 was filmed before c3); the next day's only moment, c7, is in the
+    // body already, so the ending stays
+    plan.shots.swap(1, 2);
+    let changed = focus::in_time_order(&mut plan, &lib, 0.5);
+    let order: Vec<&str> = plan.shots.iter().map(|s| s.clip.as_str()).collect();
+    assert_eq!(order, ["c1", "c2", "c3", "c5", "c7", "c6"], "{changed:?}");
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    // at most two shots of one recording: c2, c4 and c5 are one walk; the third goes to c8
+    let (mut walk, mut p3, _) = trip();
+    for c in walk.iter_mut().filter(|c| ["c2", "c4", "c5"].contains(&c.id.as_str())) {
+        c.item = 9;
+        c.captured = Some(day + 100);
+    }
+    let mut other = cand("c8", 8, Kind::Vr, 0.0, 10.0, 20.0, 7);
+    other.captured = Some(day + 150);
+    walk.push(other);
+    let changed = focus::cover_parts(&mut p3, &walk, 0.5);
+    let nine = p3.shots.iter().filter(|s| walk.iter().any(|c| c.id == s.clip && c.item == 9)).count();
+    assert_eq!(nine, 2, "{changed:?}");
+    assert!(p3.shots.iter().any(|s| s.clip == "c8") && changed.iter().all(|c| c.ends_with("at most two shots of one recording")), "{changed:?}");
+    // indoor moments: only as many as the outdoors cannot fill
+    for (k, c) in lib.iter_mut().enumerate() {
+        c.indoor = k < 3;
+        c.rank = 0.5 + k as f64 / 100.0;
+    }
+    let mut pool = lib.clone();
+    assert_eq!(focus::places_pool(&mut pool, 4, 6), 2);
+    assert_eq!(pool.iter().filter(|c| c.indoor).map(|c| c.id.as_str()).collect::<Vec<_>>(), ["c3"], "the best indoor one kept");
+    let mut short = lib.clone();
+    assert_eq!(focus::places_pool(&mut short, 6, 6), 1, "two kept: the outdoors fill only four of six");
 }
 
 #[test]

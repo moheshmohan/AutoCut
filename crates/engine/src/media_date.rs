@@ -4,7 +4,8 @@
 //! |---|---|
 //! | `media.captureDate` | the capture date of media items (all, or `items`): a metadata sidecar (`<file>.json` from the Google Photos picker or Google Takeout), else QuickTime `com.apple.quicktime.creationdate` / `©day` (with the camera's time zone), else the `mvhd` creation time, else (a photo) its EXIF `DateTimeOriginal` (with `OffsetTimeOriginal`) — as RFC 3339 UTC plus Unix seconds; a photo's EXIF position as `gps` `[latitude, longitude]` |
 //!
-//! Sidecars are read for any file; embedded metadata for MP4 / MOV / M4V / 3GP and for photos
+//! Sidecars are read for any file; embedded metadata for MP4 / MOV / M4V / 3GP (and Insta360's
+//! `.insv` recordings and `.lrv` proxies, which are MP4s) and for photos
 //! (JPEG, TIFF, HEIF; other files report `null`). Google's video downloads are re-encoded without
 //! the camera's metadata, which is why the picker writes the sidecar; its photo downloads keep
 //! their EXIF but not its position (Google takes it out). A photo whose EXIF has no zone is read
@@ -190,7 +191,8 @@ pub fn file_capture_date(path: &str) -> Option<(i64, &'static str)> {
         return Some((t, "exif"));
     }
     let ext = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
-    if !matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "3gp" | "qt") {
+    // (an Insta360 recording and its proxy are MP4s too)
+    if !matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "3gp" | "qt" | "insv" | "lrv") {
         return None;
     }
     let f = std::fs::File::open(path).ok()?;
@@ -326,6 +328,31 @@ mod tests {
         heic.extend(b"ftypheic\0\0\0\0mif1heic");
         std::fs::write(&c, &heic).unwrap();
         assert_eq!(file_capture_date(&c), None);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn an_insta360_recording_dates_from_its_movie_header() {
+        // an MP4's ftyp and a moov holding only its mvhd, created 2026-09-12T20:48:19Z
+        let created = u32::try_from(parse_iso("2026-09-12T20:48:19Z").unwrap() + MP4_EPOCH_OFFSET).unwrap();
+        let mut mvhd = vec![0u8; 4];
+        for v in [created, created, 1000, 5000, 0x0001_0000] {
+            mvhd.extend(v.to_be_bytes());
+        }
+        mvhd.extend(0x0100u16.to_be_bytes());
+        mvhd.extend([0u8; 10]);
+        for v in [0x0001_0000u32, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000] {
+            mvhd.extend(v.to_be_bytes());
+        }
+        mvhd.extend([0u8; 24]);
+        mvhd.extend(2u32.to_be_bytes());
+        let boxed = |kind: &[u8], body: &[u8]| [u32::try_from(body.len() + 8).unwrap().to_be_bytes().as_slice(), kind, body].concat();
+        let file = [boxed(b"ftyp", b"isom\0\0\0\0isom"), boxed(b"moov", &boxed(b"mvhd", &mvhd))].concat();
+        let d = std::env::temp_dir().join(format!("filmcraft-insv-date-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        let insv = d.join("VID_20260912_204819_00_085.insv").to_string_lossy().into_owned();
+        std::fs::write(&insv, &file).unwrap();
+        assert_eq!(file_capture_date(&insv), Some((i64::from(created) - MP4_EPOCH_OFFSET, "mvhd")));
         std::fs::remove_dir_all(&d).ok();
     }
 
