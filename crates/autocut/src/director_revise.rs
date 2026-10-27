@@ -1,8 +1,9 @@
 //! Revising a directed edit from notes ("1:10 is too long", "warmer at the end", "fewer barrel
 //! rolls"): the notes become changes to the saved plan — the common ones read by rules and taken
 //! literally, the local model reading only what the rules could not — each checked and applied,
-//! and the edit is rebuilt from the changed plan, not planned again. The report's `changes` lists what changed and what was not
-//! understood.
+//! and the edit is rebuilt from the changed plan, not planned again: its moments and 360° looks
+//! found again in the footage as it is analysed now ([`remap`]). The report's `changes` lists what
+//! changed and what was not understood.
 //!
 //! A change ([`Op`]) names its shot by number (`shot`, from 1) or by a time in the last cut
 //! (`at`, `"1:10"` or seconds):
@@ -21,7 +22,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Camera, Candidate, Kind, Options, Plan, beats_for, chars, english, finite, title_case, window_from};
+use super::{Camera, Candidate, Kind, Look, Options, Plan, beats_for, chars, english, finite, title_case, window_from};
 use crate::AutoCutError;
 use crate::llm::ChatModel;
 
@@ -524,17 +525,33 @@ fn describe(op: &Op) -> String {
     }
 }
 
-/// The edit a revision starts from: its plan, the options it was made with, and its report's
-/// file.
+/// The edit a revision starts from: its plan, the options it was made with, its report's file and
+/// which way its 360° moments' looks were.
 #[derive(Clone, Debug)]
 pub struct Previous {
     pub plan: Plan,
     pub options: Value,
     pub path: Option<String>,
+    pub looks: Vec<SavedLook>,
+}
+
+/// A look of the saved edit's shortlist, as its report lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedLook {
+    /// The moment's id then.
+    pub clip: String,
+    pub look: String,
+    pub yaw: f64,
+    pub pitch: f64,
+    pub what: String,
 }
 
 /// Largest report read, bytes.
 const MAX_REPORT_BYTES: u64 = 32 << 20;
+/// Most saved looks read from a report.
+const MAX_SAVED_LOOKS: usize = 4096;
+/// A look this close (degrees on the sphere) to a saved one is it, found again.
+const LOOK_AGAIN: f64 = 20.0;
 
 /// The saved edit: a report (`<out>.report.json`, or its JSON) with its `plan` and `options`.
 pub fn load(v: &Value) -> Result<Previous, String> {
@@ -556,7 +573,49 @@ pub fn load(v: &Value) -> Result<Previous, String> {
         return Err("previous: the report's plan has no shots".into());
     }
     let options = if report["options"].is_object() { report["options"].clone() } else { json!({}) };
-    Ok(Previous { plan, options, path })
+    let mut looks = Vec::new();
+    for c in report["candidates"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let Some(clip) = c["clip"].as_str() else { continue };
+        for l in c["looks"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            let (Some(look), Some(yaw), Some(pitch)) = (l["look"].as_str(), finite(&l["yaw"]), finite(&l["pitch"])) else { continue };
+            if looks.len() < MAX_SAVED_LOOKS {
+                looks.push(SavedLook {
+                    clip: chars(clip, 40),
+                    look: chars(look, 40),
+                    yaw,
+                    pitch: pitch.clamp(-90.0, 90.0),
+                    what: chars(l["what"].as_str().unwrap_or_default(), 60),
+                });
+            }
+        }
+    }
+    Ok(Previous { plan, options, path, looks })
+}
+
+/// Degrees between two directions (yaw, pitch).
+fn apart(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let d = |(yaw, pitch): (f64, f64)| {
+        let (y, p) = (yaw.to_radians(), pitch.to_radians());
+        [p.cos() * y.sin(), p.sin(), p.cos() * y.cos()]
+    };
+    let (u, v) = (d(a), d(b));
+    (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+/// The look of `c` that saved look `saved` was: the nearest within [`LOOK_AGAIN`], else the saved
+/// direction added to `c` as a look of its own. Its id.
+fn look_again(c: &mut Candidate, saved: &SavedLook) -> String {
+    let near =
+        c.looks.iter().map(|l| (apart((l.yaw, l.pitch), (saved.yaw, saved.pitch)), l)).filter(|(d, _)| *d <= LOOK_AGAIN).min_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((_, l)) = near {
+        return l.id.clone();
+    }
+    let id = (b'a'..=b'z')
+        .map(|ch| format!("{}{}", c.id, char::from(ch)))
+        .find(|id| !c.looks.iter().any(|l| &l.id == id))
+        .unwrap_or_else(|| format!("{}-saved", c.id));
+    c.looks.push(Look { id: id.clone(), yaw: saved.yaw, pitch: saved.pitch, what: saved.what.clone(), named: false, size: None });
+    id
 }
 
 /// The options a report keeps for a revision: what was asked, without the revision's own keys.
@@ -598,24 +657,55 @@ pub fn merge(old: &Value, new: &Value, bpm: f64) -> Value {
 }
 
 /// The saved plan on this run's moments: each shot found again by its file and where it starts
-/// (a moment's ids can change with the footage); the shots whose moment is gone, in words.
-pub fn remap(plan: &Plan, cands: &[Candidate]) -> (Plan, Vec<String>) {
+/// (a moment's ids can change with the footage) — among the moments kept this time (`cands`),
+/// else among all those `measured`, put back into `cands` (this run's ranking may call a moment a
+/// near-duplicate the saved edit chose: a revision changes what its notes ask, not its moments) —
+/// and its 360° looks by the direction they had ([`look_again`]); the shots whose moment is gone
+/// and the moments put back, in words.
+pub fn remap(prev: &Previous, cands: &mut Vec<Candidate>, measured: &[Candidate]) -> (Plan, Vec<String>) {
+    let plan = &prev.plan;
     let mut out = plan.clone();
     let mut lost = Vec::new();
     out.shots.clear();
+    let holds =
+        |c: &Candidate, s: &super::PlannedShot| !s.file.is_empty() && c.name == s.file && (c.id == s.clip || (s.from >= c.start - 0.05 && s.from <= c.end));
     for (k, s) in plan.shots.iter().enumerate() {
-        let same_file: Vec<&Candidate> = cands.iter().filter(|c| !s.file.is_empty() && c.name == s.file).collect();
-        // the same moment (the footage as it was), else the one holding its start, else the nearest
-        let found = same_file
-            .iter()
-            .find(|c| c.id == s.clip)
-            .or_else(|| same_file.iter().find(|c| s.from >= c.start - 0.05 && s.from <= c.end))
-            .or_else(|| same_file.iter().min_by(|a, b| (a.start - s.from).abs().total_cmp(&(b.start - s.from).abs())))
-            .copied()
-            .or_else(|| cands.iter().find(|c| s.file.is_empty() && c.id == s.clip));
-        match found {
+        // the same moment (the footage as it was, else the one holding its start), else one of
+        // all measured put back, else the nearest of its file
+        let mut found = cands.iter().position(|c| holds(c, s));
+        if found.is_none()
+            && let Some(m) = measured.iter().position(|c| holds(c, s))
+            && let Some(c) = measured.get(m)
+            && !cands.iter().any(|x| x.id == c.id)
+        {
+            // in filming order, as the moments are kept
+            let at = cands.iter().position(|x| measured.iter().position(|y| y.id == x.id).is_none_or(|p| p > m)).unwrap_or(cands.len());
+            cands.insert(at, c.clone());
+            lost.push(format!("shot {}: its moment ({} at {:.1} s) kept for the saved edit, though this run's ranking left it out", k + 1, s.file, s.from));
+            found = Some(at);
+        }
+        let found = found
+            .or_else(|| {
+                cands
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| !s.file.is_empty() && c.name == s.file)
+                    .min_by(|a, b| (a.1.start - s.from).abs().total_cmp(&(b.1.start - s.from).abs()))
+                    .map(|(i, _)| i)
+            })
+            .or_else(|| cands.iter().position(|c| s.file.is_empty() && c.id == s.clip));
+        match found.and_then(|i| cands.get_mut(i)) {
             Some(c) => {
                 let mut s = s.clone();
+                // its looks where they were (a look's id can change with the footage too)
+                let saved = |id: &Option<String>| id.as_ref().and_then(|id| prev.looks.iter().find(|l| l.clip == s.clip && &l.look == id)).cloned();
+                let (look, to) = (saved(&s.look), saved(&s.to));
+                if let Some(l) = look {
+                    s.look = Some(look_again(c, &l));
+                }
+                if let Some(l) = to {
+                    s.to = Some(look_again(c, &l));
+                }
                 s.clip = c.id.clone();
                 out.shots.push(s);
             }

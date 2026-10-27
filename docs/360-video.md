@@ -243,7 +243,11 @@ filmcraft-cli direct --insta360 VID_093,VID_096 --brief "a 45 s 16:9 recap" --dr
 
    The report keeps the plan (each shot's file, moment, camera and beats) and the options it was
    made with; a revision starts from them (new options win; the export becomes
-   `<name>-revised.mp4` unless one is given), finds each shot again in the footage, reads the
+   `<name>-revised.mp4` unless one is given), finds each shot again in the footage — its moment
+   by file and time, put back if this run's ranking would leave it out (the footage analysed
+   again can make it a near-duplicate), and a 360° shot's look by the direction it had (the
+   nearest look within 20°, else that direction itself; the report lists every moment the plan
+   uses with its looks) — keeps the travel rules' choices the plan was made with, reads the
    common notes by rules and takes them literally, and asks the local model to turn the rest
    into changes — a shot shorter or longer, removed, another
    camera, fewer of a move, a stretch warmer, cooler, brighter or more vivid over the colour pass,

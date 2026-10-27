@@ -839,7 +839,9 @@ fn a_saved_edit_is_found_again_and_its_options_kept() {
     for s in plan.shots.iter_mut() {
         s.file = lib.iter().find(|c| c.id == s.clip).unwrap().name.clone();
     }
-    let report = json!({"plan": plan, "options": {"brief": "a reel", "seconds": 15, "export": "/tmp/reel.mp4", "style": "energetic"}});
+    let vr = plan.shots.iter().position(|s| lib.iter().any(|c| c.id == s.clip && c.kind == Kind::Vr)).unwrap();
+    plan.shots[vr].look = Some(format!("{}b", plan.shots[vr].clip));
+    let report = json!({"plan": plan, "options": {"brief": "a reel", "seconds": 15, "export": "/tmp/reel.mp4", "style": "energetic"}, "candidates": lib.iter().map(candidate_json).collect::<Vec<_>>()});
     let pr = revise::load(&report).unwrap();
     let merged = revise::merge(&pr.options, &json!({"revise": "warmer", "seconds": 20, "previous": "x"}), 120.0);
     assert_eq!((merged["seconds"].as_f64(), merged["style"].as_str(), merged["bpm"].as_f64()), (Some(20.0), Some("energetic"), Some(120.0)));
@@ -850,11 +852,39 @@ fn a_saved_edit_is_found_again_and_its_options_kept() {
     for (k, c) in renumbered.iter_mut().enumerate() {
         c.id = format!("m{}", 10 + k);
     }
-    let (again, lost) = revise::remap(&pr.plan, &renumbered);
+    let mut kept = renumbered.clone();
+    let (again, lost) = revise::remap(&pr, &mut kept, &renumbered);
     assert!(lost.is_empty(), "{lost:?}");
     assert_eq!(again.shots[0].clip, "m10");
-    let (_, lost) = revise::remap(&pr.plan, &renumbered[1..]);
+    // a moment this run's ranking left out is put back from all those measured, in filming order
+    let mut kept = renumbered[1..].to_vec();
+    let (again, said) = revise::remap(&pr, &mut kept, &renumbered);
+    assert_eq!((again.shots[0].clip.as_str(), kept[0].id.as_str(), said.len()), ("m10", "m10", 1), "{said:?}");
+    assert!(said[0].contains("kept for the saved edit"), "{said:?}");
+    // gone from the footage: left out
+    let mut kept = renumbered[1..].to_vec();
+    let (_, lost) = revise::remap(&pr, &mut kept, &renumbered[1..]);
     assert_eq!(lost.len(), 1);
+    // a 360° shot's look found again by where it looked: its ids swapped and nudged by the new
+    // analysis, or gone (then the saved direction itself)
+    let k = pr.plan.shots.iter().position(|s| s.look.is_some() && lib.iter().any(|c| c.id == s.clip && c.kind == Kind::Vr)).unwrap();
+    let saved = pr.looks.iter().find(|l| l.clip == pr.plan.shots[k].clip && Some(&l.look) == pr.plan.shots[k].look.as_ref()).unwrap().clone();
+    let i = lib.iter().position(|c| c.id == pr.plan.shots[k].clip).unwrap();
+    let mut moved = renumbered.clone();
+    let ids: Vec<String> = moved[i].looks.iter().map(|l| l.id.clone()).rev().collect();
+    for (l, id) in moved[i].looks.iter_mut().zip(ids) {
+        l.id = id;
+        l.yaw += 5.0;
+    }
+    let mut kept = moved.clone();
+    let (again, _) = revise::remap(&pr, &mut kept, &moved);
+    let look = kept[i].looks.iter().find(|l| Some(&l.id) == again.shots[k].look.as_ref()).unwrap();
+    assert!((look.yaw - (saved.yaw + 5.0)).abs() < 1e-9 && look.what == saved.what, "{look:?} for {saved:?}");
+    moved[i].looks.retain(|l| (l.yaw - saved.yaw - 5.0).abs() > 1e-9);
+    let mut kept = moved.clone();
+    let (again, _) = revise::remap(&pr, &mut kept, &moved);
+    let look = kept[i].looks.iter().find(|l| Some(&l.id) == again.shots[k].look.as_ref()).unwrap();
+    assert!((look.yaw, look.pitch, look.what.as_str()) == (saved.yaw, saved.pitch, saved.what.as_str()) && !look.named, "{look:?}");
     assert!(revise::load(&json!({"plan": {"title": "x", "bpm": 120, "shots": []}})).is_err());
     assert!(revise::load(&json!("/no/such/report.json")).is_err());
 }

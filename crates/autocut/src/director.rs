@@ -1647,6 +1647,15 @@ fn step(id: &str, params: Value, shot: Option<usize>, on: On) -> Step {
     Step { id: id.to_string(), params, shot, on }
 }
 
+/// A moment as the report lists it (a 360° one with its looks).
+fn candidate_json(c: &Candidate) -> Value {
+    let mut v = json!({"clip": c.id, "name": c.name, "kind": c.kind, "from": round2(c.start), "to": round2(c.end), "what": c.caption, "energy": round2(c.energy), "quality": round2(c.quality), "rank": c.rank});
+    if c.kind == Kind::Vr {
+        v["looks"] = json!(c.looks.iter().map(|l| json!({"look": l.id, "what": l.what, "yaw": l.yaw.round(), "pitch": l.pitch.round()})).collect::<Vec<_>>());
+    }
+    v
+}
+
 /// Where each shot sits on the timeline, seconds on frames: back to back from 0, each boundary
 /// on its beat.
 pub fn windows(plan: &Plan, beats: &Beats) -> Vec<(f64, f64)> {
@@ -2280,6 +2289,8 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     let beat = beat_of(bpm);
     let total = ((o.seconds / beat).round() as u32).max(4);
     let need = rhythm(total, beat, cands.len()).len() + 2;
+    // (a revision finds its saved moments among all of them: this run may rank them otherwise)
+    let measured = previous.as_ref().map(|_| cands.clone()).unwrap_or_default();
     let (mut cands, verdicts) = rank::choose(cands, need);
     if o.focus == Some(focus::Focus::Places) {
         let aside = focus::places_pool(&mut cands, need, need.saturating_sub(2));
@@ -2292,24 +2303,16 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         lines(&format!("{dropped} moment(s) left out (blurred, dark, shaky or a near-duplicate)"));
     }
     report.moments = verdicts;
-    // ---- the plan
+    // ---- the plan (a revision's saved shots found again first: a moment put back is one of
+    // this run's)
+    let remapped = previous.as_ref().map(|pr| revise::remap(pr, &mut cands, &measured));
     let short = shortlist(&cands, MAX_CANDIDATES);
     let slots = rhythm(total, beat, cands.len());
-    report.candidates = short
-        .iter()
-        .map(|c| {
-            let mut v = json!({"clip": c.id, "name": c.name, "kind": c.kind, "from": round2(c.start), "to": round2(c.end), "what": c.caption, "energy": round2(c.energy), "quality": round2(c.quality), "rank": c.rank});
-            if c.kind == Kind::Vr {
-                v["looks"] = json!(c.looks.iter().map(|l| json!({"look": l.id, "what": l.what, "yaw": l.yaw.round(), "pitch": l.pitch.round()})).collect::<Vec<_>>());
-            }
-            v
-        })
-        .collect();
+    report.candidates = short.iter().map(|c| candidate_json(c)).collect();
     let mut plan = None;
-    if let Some(pr) = &previous {
+    if let (Some(pr), Some((mut revised, lost))) = (&previous, remapped) {
         // ---- the saved plan, its shots found again, changed by the notes
         let notes_text = p["revise"].as_str().unwrap_or_default().to_string();
-        let (mut revised, lost) = revise::remap(&pr.plan, &cands);
         let last_cut = windows(&pr.plan, &Beats::grid(pr.plan.bpm));
         let length = last_cut.last().map_or(o.seconds, |w| w.1);
         // the notes the rules read are taken literally; the model reads only the rest (left
@@ -2366,9 +2369,10 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     if plan.shots.is_empty() {
         return Err(invalid("no shot could be planned from these clips"));
     }
-    // ---- a travel video: the person holding the camera in a third of the shots at most
+    // ---- a travel video: the person holding the camera in a third of the shots at most (a
+    // revision's plan was made so: its notes change it, not these rules again)
     let mut plan = plan;
-    if o.focus == Some(focus::Focus::Places) {
+    if o.focus == Some(focus::Focus::Places) && previous.is_none() {
         let mut changes = focus::cover_parts(&mut plan, &cands, beat);
         changes.extend(focus::in_time_order(&mut plan, &cands, beat));
         changes.extend(focus::limit_people(&mut plan, &cands));
@@ -2397,6 +2401,14 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         report.style = Some(json!({"style": o.style.pace.name(), "by": "asked", "lightEffects": o.style.light_effects, "sounds": o.style.sounds}));
     }
     plan.style = Some(o.style.pace.name().into());
+    // (the report lists every moment the plan uses and its looks: a revision finds them again)
+    for s in &plan.shots {
+        if !report.candidates.iter().any(|v| v["clip"] == s.clip.as_str())
+            && let Some(c) = cands.iter().find(|c| c.id == s.clip)
+        {
+            report.candidates.push(candidate_json(c));
+        }
+    }
     // ---- how each cut is made: from what the shots show and say, in the edit's style
     cuts::joins(&mut plan, &cands, &speech, beat, &o.style);
     for s in plan.shots.iter_mut() {
