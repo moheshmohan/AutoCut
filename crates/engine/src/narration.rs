@@ -55,12 +55,16 @@
 //! (`filmcraft_speech::models::MALAYALAM_MODEL`, `transcript.downloadModel {"model":
 //! "whisper-medium-ml"}`), scored ([`tts::heard`]: the character error rate, and the first six
 //! syllables of every sentence on their own — where IndicF5's garble is) and read again with
-//! another seed until it is clear, at most four readings, the best kept. Results carry `check`:
-//! `status` (`clear`, `unclear`: an utterance never passed, `skipped`: no speech model, with
-//! `reason`, `off`), `model` and per utterance its text, what was heard, `cer`, `startCer`,
-//! `takes`, the `seed` kept and every try. Checked readings are cached under their own key, the
-//! report beside them, so a rebuild reads nothing twice and still reports. English narrations
-//! are not checked (`check` is null).
+//! another seed until it is clear, at most four readings, the best kept. `checkPolicy`
+//! (`{"readings": 1..=8, "cer": 0..1, "startCer": 0..1}`, each optional) asks for a stricter
+//! (or looser) check than the language's own (Malayalam 4 readings, 0.25, 0.3; English 3,
+//! 0.15, 0.5). Results carry `check`: `status` (`clear`, `unclear`: an utterance never passed,
+//! `skipped`: no speech model, with `reason`, `off`), `model`, `policy` and per utterance its
+//! text, what was heard, `cer`, `startCer`, `takes`, the `seed` kept and every try. Checked
+//! readings are cached under their own key (a policy other than the language's own is part of
+//! it, so a stricter check reads again instead of reusing a reading checked more leniently;
+//! one that is heard clearly enough for it is kept), the report beside them, so a rebuild reads
+//! nothing twice and still reports. Built-in voices are not checked (`check` is null).
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
@@ -448,8 +452,67 @@ fn voice_gate_for(s: &Session, models_dir: Option<&std::path::Path>, voice: &str
     }
 }
 
+/// Most readings of one utterance a `checkPolicy` may ask for.
+pub const MAX_READINGS: u32 = tts::heard::MAX_TAKES;
+
+/// The language's own policy: Malayalam's measured thresholds, or English's.
+fn default_policy(language: &str) -> tts::heard::Policy {
+    if language == "ml" { tts::heard::Policy::default() } else { tts::heard::Policy::english() }
+}
+
+/// The policy `p` asks for over `base` (the language's own): `checkPolicy` is `{"readings":
+/// 1..=MAX_READINGS, "cer": 0..1, "startCer": 0..1}`, each field optional (left out: `base`'s).
+/// A stricter check reads an utterance again when it is heard less clearly than that.
+fn policy_from(cmd: &str, p: &Value, base: tts::heard::Policy) -> Result<tts::heard::Policy> {
+    let what = || format!("`checkPolicy` is {{\"readings\": 1–{MAX_READINGS}, \"cer\": 0–1, \"startCer\": 0–1}}, each optional");
+    let o = match p.get("checkPolicy") {
+        None | Some(Value::Null) => return Ok(base),
+        Some(Value::Object(o)) => o,
+        Some(_) => return Err(bad(cmd, what())),
+    };
+    let rate = |k: &str, v: &Value| {
+        v.as_f64()
+            .filter(|x| x.is_finite() && (0.0..=1.0).contains(x))
+            .ok_or_else(|| bad(cmd, format!("`checkPolicy.{k}` is an error rate from 0 to 1, not {}", short_json(v))))
+    };
+    let mut policy = base;
+    for (k, v) in o {
+        match k.as_str() {
+            _ if v.is_null() => {}
+            "readings" => {
+                policy.max_takes = v
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| (1..=MAX_READINGS).contains(n))
+                    .ok_or_else(|| bad(cmd, format!("`checkPolicy.readings` is a whole number from 1 to {MAX_READINGS}, not {}", short_json(v))))?;
+            }
+            "cer" => policy.max_cer = rate(k, v)?,
+            "startCer" => policy.max_start_cer = rate(k, v)?,
+            other => return Err(bad(cmd, format!("{}: unknown field `{}`", what(), other.chars().take(40).collect::<String>()))),
+        }
+    }
+    policy.check().map_err(|e| bad(cmd, e.to_string()))?;
+    Ok(policy)
+}
+
+/// `v` written briefly, for a refusal.
+fn short_json(v: &Value) -> String {
+    let s = v.to_string();
+    if s.chars().count() > 40 { format!("{}…", s.chars().take(40).collect::<String>()) } else { s }
+}
+
+/// A policy as cache keys and reports name it.
+fn policy_id(p: &tts::heard::Policy) -> String {
+    format!("{} readings, cer <= {}, start <= {}", p.max_takes, p.max_cer, p.max_start_cer)
+}
+
+/// The policy as results report it.
+fn policy_json(p: &tts::heard::Policy) -> Value {
+    json!({"readings": p.max_takes, "cer": p.max_cer, "startCer": p.max_start_cer})
+}
+
 /// The strict check's judges: who hears, who gives a second opinion and how the two combine,
-/// and the voice gate.
+/// the voice gate, and the policy (with the language's own, which keeps the cache keys it had).
 #[derive(Clone)]
 struct Judges {
     hearer: Arc<dyn tts::heard::Hearer>,
@@ -458,6 +521,7 @@ struct Judges {
     voice: Option<Arc<dyn tts::heard::VoiceMatch>>,
     min_similarity: f64,
     policy: tts::heard::Policy,
+    default_policy: tts::heard::Policy,
 }
 
 impl Judges {
@@ -472,8 +536,12 @@ impl Judges {
         }
     }
 
+    /// What the check is, for cache keys and reports: the recognisers and the voice gate, and a
+    /// policy other than the language's own (a stricter check reads again instead of reusing
+    /// readings checked more leniently).
     fn id(&self) -> String {
-        self.strict().id()
+        let id = self.strict().id();
+        if self.policy == self.default_policy { id } else { format!("{id}, {}", policy_id(&self.policy)) }
     }
 
     /// The same check with only its first recogniser: what readings were checked under before
@@ -481,6 +549,29 @@ impl Judges {
     fn first_only(&self) -> Judges {
         Judges { second: None, voice: None, ..self.clone() }
     }
+
+    /// The same check under the language's own policy.
+    fn default_policy(&self) -> Judges {
+        Judges { policy: self.default_policy, ..self.clone() }
+    }
+}
+
+/// Whether utterance `c` of a checked reading's report (a [`tts::heard::Checked`]) passed and
+/// passes `policy` too: its first recogniser's scores, or as `agreement` combines them with the
+/// second's.
+fn passes_now(c: &Value, policy: &tts::heard::Policy, agreement: tts::heard::Agreement) -> bool {
+    let ok = |o: &Value| {
+        o["cer"].as_f64().is_some_and(|x| x.is_finite() && x <= policy.max_cer)
+            && o["startCer"].as_f64().is_some_and(|x| x.is_finite() && x <= policy.max_start_cer)
+    };
+    let first = ok(c);
+    let second = c.get("second").filter(|s| s.is_object()).map(ok);
+    let text = match (agreement, second) {
+        (tts::heard::Agreement::Both, Some(s)) => first || s,
+        (tts::heard::Agreement::Either, Some(s)) => first && s,
+        _ => first,
+    };
+    c["passed"].as_bool() == Some(true) && text
 }
 
 /// How `n` is checked: by its judges, or not (and why).
@@ -495,10 +586,14 @@ enum Check {
 
 /// The strict check `n` reads under, when `p` asks for it: `agreement` (`both`, the default:
 /// a line is read again only when both Malayalam models disagree with the script; `either`;
-/// `first`), `voiceGate` (default on when the speaker model is downloaded) and
-/// `minSimilarity` (default [`MIN_VOICE_SIMILARITY`]).
+/// `first`), `voiceGate` (default on when the speaker model is downloaded),
+/// `minSimilarity` (default [`MIN_VOICE_SIMILARITY`]) and `checkPolicy` (the readings and
+/// thresholds, default the language's own: [`policy_from`]).
 fn check_for(s: &Session, cmd: &str, p: &Value, n: &Narration) -> Result<Check> {
     let on = strict_requested(cmd, p)?;
+    let language = check_language(n);
+    let default = default_policy(language);
+    let policy = policy_from(cmd, p, default)?;
     let agreement = match p.get("agreement").filter(|v| !v.is_null()) {
         None => tts::heard::Agreement::Both,
         Some(Value::String(a)) => {
@@ -518,7 +613,6 @@ fn check_for(s: &Session, cmd: &str, p: &Value, n: &Narration) -> Result<Check> 
         return Ok(Check::Off);
     }
     let models = crate::transcript::models_dir();
-    let language = check_language(n);
     Ok(match hearer_for(s, models.as_deref(), language) {
         Ok(hearer) => Check::Strict(Judges {
             hearer,
@@ -526,7 +620,8 @@ fn check_for(s: &Session, cmd: &str, p: &Value, n: &Narration) -> Result<Check> 
             agreement,
             voice: if gate { voice_gate_for(s, models.as_deref(), &n.voice) } else { None },
             min_similarity,
-            policy: if language == "ml" { tts::heard::Policy::default() } else { tts::heard::Policy::english() },
+            policy,
+            default_policy: default,
         }),
         Err(why) => Check::Skipped(why),
     })
@@ -541,7 +636,7 @@ fn check_json(n: &Narration, check: &Check, report: Option<&Value>) -> Value {
         Check::Strict(j) => {
             let utterances = report.cloned().unwrap_or(Value::Null);
             let clear = utterances.as_array().is_some_and(|u| u.iter().all(|c| c["passed"].as_bool() == Some(true)));
-            json!({"status": if clear { "clear" } else { "unclear" }, "model": j.id(), "utterances": utterances})
+            json!({"status": if clear { "clear" } else { "unclear" }, "model": j.id(), "policy": policy_json(&j.policy), "utterances": utterances})
         }
     }
 }
@@ -687,15 +782,23 @@ fn cached(s: &Session, n: &Narration, models_dir: Option<&std::path::Path>, chec
 }
 
 /// A reading of `n` cached under an earlier check (its first recogniser alone, before the
-/// second opinion and the voice gate; or, for English, unchecked), heard now as a whole by
-/// `check`'s judges: when it passes it is kept under the new check (no voice reads it again),
-/// with a report of that hearing (`adopted`). `None`: nothing to adopt, or it does not pass.
+/// second opinion and the voice gate; the language's own policy, when `check` asks for another;
+/// or, for English, unchecked), heard now as a whole by `check`'s judges: when it passes it is
+/// kept under the new check (no voice reads it again), with a report of that hearing
+/// (`adopted`). `None`: nothing to adopt, or it does not pass.
 fn adopt(disk: &tts::cache::DiskCache, n: &Narration, models_dir: Option<&std::path::Path>, check: &Check) -> Option<(Arc<tts::Audio>, Value)> {
     let Check::Strict(j) = check else { return None };
-    let first = Check::Strict(j.first_only());
     let mut earlier = Vec::new();
+    let mut judged = vec![j.clone()];
+    if j.policy != j.default_policy {
+        // a stricter (or looser) check than the language's own: a reading checked under that one
+        // is kept when it is heard clearly enough for this one
+        let d = j.default_policy();
+        earlier.push(Check::Strict(d.clone()));
+        judged.push(d);
+    }
     if j.second.is_some() || j.voice.is_some() {
-        earlier.push(first);
+        earlier.extend(judged.iter().map(|x| Check::Strict(x.first_only())));
     }
     if check_language(n) == "en" {
         earlier.push(Check::Off);
@@ -706,8 +809,9 @@ fn adopt(disk: &tts::cache::DiskCache, n: &Narration, models_dir: Option<&std::p
         let Some(k) = disk_key(n, models_dir, &old) else { continue };
         let Some(a) = disk.get(&k) else { continue };
         let note = disk.note(&k).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-        // the first recogniser passed every utterance: the second opinion can only agree
-        let clear_before = note.as_ref().and_then(Value::as_array).is_some_and(|u| !u.is_empty() && u.iter().all(|c| c["passed"].as_bool() == Some(true)));
+        // the first recogniser passed every utterance (by this policy's thresholds too): the
+        // second opinion can only agree
+        let clear_before = note.as_ref().and_then(Value::as_array).is_some_and(|u| !u.is_empty() && u.iter().all(|c| passes_now(c, &j.policy, j.agreement)));
         let mut heard = String::new();
         let mut text_ok = clear_before;
         let mut score = tts::heard::Score::default();
@@ -1207,7 +1311,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.preview",
             "Preview Narration",
-            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"? (Malayalam: how digits are said; english = years, money and numbers from 100 up in English),"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"?,"sample":bool?,"clip":id?,"check":"strict|off"? (Malayalam: hear every utterance back and read unclear ones again; strict is the default),"path":str?}"#,
+            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"? (Malayalam: how digits are said; english = years, money and numbers from 100 up in English),"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"?,"sample":bool?,"clip":id?,"check":"strict|off"? (cloned voices: hear every utterance back and read unclear ones again; strict is the default),"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}? (readings of an utterance at most and the error rates that pass, over the language's own),"path":str?}"#,
             always,
             preview,
             false,
@@ -1215,7 +1319,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.create",
             "New Narration",
-            r#"{"text":str,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"check":"strict|off"?,"dir":str?}"#,
+            r#"{"text":str,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"check":"strict|off"?,"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}?,"dir":str?}"#,
             has_seq,
             create,
             true,
@@ -1223,7 +1327,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.edit",
             "Edit Narration",
-            r#"{"clip":id?,"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"take":0..99?,"check":"strict|off"?,"dir":str?}"#,
+            r#"{"clip":id?,"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"take":0..99?,"check":"strict|off"?,"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}?,"dir":str?}"#,
             has_narration_clip,
             edit,
             true,
@@ -1232,7 +1336,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.render",
             "Synthesize Narration",
-            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"sample":bool?,"clip":id?,"check":"strict|off"?,"wait":bool?}"#,
+            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"sample":bool?,"clip":id?,"check":"strict|off"?,"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}?,"wait":bool?}"#,
             always,
             render_job,
             false,
@@ -1268,6 +1372,7 @@ mod tests {
             voice: None,
             min_similarity: MIN_VOICE_SIMILARITY,
             policy: tts::heard::Policy::default(),
+            default_policy: tts::heard::Policy::default(),
         }
     }
 
@@ -1326,6 +1431,87 @@ mod tests {
         // English reads under the English policy
         let Check::Strict(j) = check_for(&s, "t", &json!({}), &en).unwrap() else { panic!("not strict") };
         assert_eq!(j.policy, tts::heard::Policy::english());
+    }
+
+    #[test]
+    fn a_check_policy_overrides_the_language_default() {
+        use tts::heard::Policy;
+        let s = Session { narration_hearer: Some(Arc::new(Ear)), ..Session::default() };
+        let strict = |p: Value, n: &Narration| match check_for(&s, "t", &p, n).unwrap() {
+            Check::Strict(j) => j,
+            _ => panic!("not strict"),
+        };
+        let en = settings("t", &json!({"text": "Hello.", "voice": "clone:me"}), None).unwrap();
+        // stricter Malayalam: six readings, tighter thresholds
+        let j = strict(json!({"checkPolicy": {"readings": 6, "cer": 0.12, "startCer": 0.2}}), &ml());
+        assert_eq!(j.policy, Policy { max_takes: 6, max_cer: 0.12, max_start_cer: 0.2 });
+        assert_eq!(j.default_policy, Policy::default());
+        // a field left out (or null) keeps the language's own
+        assert_eq!(strict(json!({"checkPolicy": {"readings": 6}}), &ml()).policy, Policy { max_takes: 6, ..Policy::default() });
+        assert_eq!(strict(json!({"checkPolicy": {"cer": 0.1, "startCer": null}}), &en).policy, Policy { max_cer: 0.1, ..Policy::english() });
+        assert_eq!(strict(json!({"checkPolicy": null}), &ml()).policy, Policy::default());
+        assert_eq!(strict(json!({"checkPolicy": {"readings": MAX_READINGS, "cer": 0, "startCer": 1}}), &ml()).policy.max_takes, MAX_READINGS);
+        // its own cache key and name: a stricter check reads again instead of reusing a lenient
+        // reading; the language's own policy keeps the keys readings were cached under
+        let plain = strict(json!({}), &ml());
+        assert_eq!(plain.id(), "ear v1");
+        assert_eq!(j.id(), "ear v1, 6 readings, cer <= 0.12, start <= 0.2");
+        assert_eq!(strict(json!({"checkPolicy": {"readings": 4, "cer": 0.25, "startCer": 0.3}}), &ml()).id(), "ear v1", "the default, said");
+        assert_ne!(memory_key(&ml(), &Check::Strict(j.clone())), memory_key(&ml(), &Check::Strict(plain.clone())));
+        assert_eq!(j.default_policy().id(), plain.id(), "the default-policy entry it may adopt");
+        // results say which policy they were heard under
+        let r = check_json(&ml(), &Check::Strict(j), Some(&json!([{"passed": true}])));
+        assert_eq!(r["policy"], json!({"readings": 6, "cer": 0.12, "startCer": 0.2}));
+        // hostile policies are refused before anything is read, whatever the voice or the check
+        let basic = settings("t", &json!({"text": "Hello.", "voice": "basic-male"}), None).unwrap();
+        for bad in [
+            json!("strict"),
+            json!([6]),
+            json!(6),
+            json!({"readings": 0}),
+            json!({"readings": MAX_READINGS + 1}),
+            json!({"readings": 2.5}),
+            json!({"readings": "6"}),
+            json!({"readings": -1}),
+            json!({"readings": u64::MAX}),
+            json!({"cer": 1.5}),
+            json!({"cer": -0.1}),
+            json!({"cer": "low"}),
+            json!({"startCer": 2}),
+            json!({"start_cer": 0.2}),
+        ] {
+            let p = json!({"checkPolicy": bad});
+            for n in [ml(), en.clone(), basic.clone()] {
+                let e = check_for(&s, "t", &p, &n).err().map(|e| e.to_string()).unwrap_or_default();
+                assert!(e.contains("checkPolicy"), "{p}: {e}");
+            }
+            let off = json!({"checkPolicy": p["checkPolicy"], "check": "off"});
+            assert!(check_for(&s, "t", &off, &ml()).is_err(), "{off}");
+        }
+    }
+
+    #[test]
+    fn cached_utterances_are_judged_by_the_new_policy() {
+        use tts::heard::{Agreement, Policy};
+        let strict = Policy { max_takes: 6, max_cer: 0.12, max_start_cer: 0.2 };
+        let u = |cer: f64, start: f64| json!({"text": "x", "cer": cer, "startCer": start, "passed": true});
+        // clear under the default policy, and clear enough for the stricter one too
+        assert!(passes_now(&u(0.1, 0.1), &strict, Agreement::Both));
+        // clear under the default, not the stricter one: heard again (or read again)
+        assert!(!passes_now(&u(0.2, 0.1), &strict, Agreement::Both));
+        assert!(!passes_now(&u(0.1, 0.25), &strict, Agreement::Both));
+        assert!(passes_now(&u(0.2, 0.25), &Policy::default(), Agreement::Both));
+        // the second recogniser's hearing counts as the agreement combines them
+        let mut two = u(0.2, 0.1);
+        two["second"] = json!({"heard": "x", "cer": 0.05, "startCer": 0.0, "passed": true});
+        assert!(passes_now(&two, &strict, Agreement::Both));
+        assert!(!passes_now(&two, &strict, Agreement::Either));
+        assert!(!passes_now(&two, &strict, Agreement::First));
+        // a reading that failed (its signal, its voice) never passes now; hostile notes neither
+        assert!(!passes_now(&json!({"cer": 0.0, "startCer": 0.0, "passed": false}), &strict, Agreement::Both));
+        for bad in [json!(null), json!([]), json!({"passed": true}), json!({"cer": "0", "startCer": 0.0, "passed": true})] {
+            assert!(!passes_now(&bad, &strict, Agreement::Both), "{bad}");
+        }
     }
 
     #[test]

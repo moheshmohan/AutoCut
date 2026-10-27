@@ -476,7 +476,9 @@ words score 0.4–1. A failing utterance is read again with its own seed
 (`MalayalamVoice::seed(take, utterance, attempt)`), from the third reading with 64 sampling steps;
 at most four readings, the best kept
 (start garble weighs double), every try reported with its seed, so one sentence can be read
-again alone and reproduced.
+again alone and reproduced. These are `Policy::default()`; the engine's `checkPolicy` (`tts.create`
+and the other narration commands: up to `MAX_TAKES` = 8 readings, thresholds 0–1) asks for a
+stricter one per narration, and caches its readings under a key that names it.
 
 ## Better references: the author's library (measured 2026-10-21)
 

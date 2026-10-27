@@ -232,6 +232,8 @@ impl PlanDoc {
             Some(Value::String(n)) => Some(showcase::number_style(n)?),
             Some(_) => return Err(AutoCutError::Invalid("numbers: english or malayalam".into())),
         };
+        // how strictly the Malayalam lines are heard back: the plan's `"narrationCheck"`
+        opts.narration_policy = showcase::CheckPolicy::from_plan(self.look.get("narrationCheck").unwrap_or(&Value::Null))?;
         opts.redact = crate::privacy::Redact::from_plan(self.look.get("redact"))?;
         // what the counter counts, apart from the subject QA looks for (`"counter"`,
         // `"subjectCheck"`)
@@ -371,7 +373,8 @@ fn long(port: &CommandPort, id: &str, mut params: Value) -> Result<Value, String
 /// it, so placing it takes the cached audio. A failure is left for `tts.create` to report.
 fn prerender(port: &CommandPort, params: &Value) {
     let mut p = json!({"wait": true});
-    for k in ["text", "voice", "pitch", "pace"] {
+    // everything that decides the reading (and its cache key), so `tts.create` finds it
+    for k in ["text", "voice", "language", "numbers", "pitch", "pace", "delivery", "take", "check", "checkPolicy", "agreement", "voiceGate", "minSimilarity"] {
         if let Some(v) = params.get(k) {
             p[k] = v.clone();
         }
@@ -1265,6 +1268,19 @@ mod tests {
         for bad in [json!("roman"), json!(3)] {
             let mut v = serde_json::to_value(&ml).unwrap();
             v["numbers"] = bad;
+            assert!(serde_json::from_value::<PlanDoc>(v).unwrap().resolve().is_err());
+        }
+        // and how strictly its lines are heard back: the plan's `narrationCheck`, checked
+        assert_eq!(ml.resolve().unwrap().0.narration_policy, None);
+        let mut strict = serde_json::to_value(&ml).unwrap();
+        strict["narrationCheck"] = json!({"readings": 6, "cer": 0.12, "startCer": 0.2});
+        let strict: PlanDoc = serde_json::from_value(strict).unwrap();
+        let policy = strict.resolve().unwrap().0.narration_policy.expect("a policy");
+        assert_eq!(policy.params(), json!({"readings": 6, "cer": 0.12, "startCer": 0.2}));
+        assert_eq!(serde_json::to_value(&strict).unwrap()["narrationCheck"]["readings"], 6, "kept as written");
+        for bad in [json!({"readings": 99}), json!({"cer": 2}), json!("strict")] {
+            let mut v = serde_json::to_value(&ml).unwrap();
+            v["narrationCheck"] = bad;
             assert!(serde_json::from_value::<PlanDoc>(v).unwrap().resolve().is_err());
         }
         // what the counter counts, apart from what QA looks for: a show of versions of one toy

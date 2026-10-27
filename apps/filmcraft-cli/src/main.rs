@@ -166,7 +166,8 @@ SUBCOMMANDS
                                 \"a video of every robot since 2020\" --voice clone:me --export
                                 ~/Movies/robots.mp4 --upload --project robots.fcproj --save
   showcase --report analysis.json [--title T] [--subtitle S] [--voice clone:name] [--language ml]
-         [--numbers english|malayalam] [--no-narration-check] [--places-from-locations locations.json]
+         [--numbers english|malayalam] [--no-narration-check | --narration-check readings=6,cer=0.12,startCer=0.2]
+         [--places-from-locations locations.json]
          [--enhance-voice] [--follow-labels] [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N] [--resolution 1080p|4k|WxH]
          [--no-fill] [--no-track] [--style tech] [--timeline] [--loudness social] [--mix speech|gentle|cinematic]
@@ -217,7 +218,11 @@ SUBCOMMANDS
                                 utterance is heard back by the Malayalam speech model
                                 (transcript.downloadModel {\"model\": \"whisper-medium-ml\"}) and read
                                 again until clear, what was heard written to
-                                <out>.narration-check.json (--no-narration-check: off); see
+                                <out>.narration-check.json (--no-narration-check: off;
+                                --narration-check, or the plan's \"narrationCheck\", makes it
+                                stricter: up to that many readings of an unclear utterance, 1–8,
+                                and the error rates that pass, overall and at a sentence start,
+                                0–1; the engine's own are 4, 0.25, 0.3); see
                                 docs/malayalam-narration.md. --enhance-voice (a plan's
                                 \"enhanceVoice\": true) runs Enhance Voice on the shots' own sound
                                 when people or robots talk in it (never on the narration, which is
@@ -2375,6 +2380,13 @@ async fn cli() {
             // how a Malayalam narration says numbers (over the plan's `numbers`), checked now
             let numbers_flag =
                 a.opt("--numbers").map(|n| filmcraft_autocut::showcase::number_style(n).unwrap_or_else(|e| usage(format!("showcase: --numbers: {e}"))));
+            // how strictly the Malayalam lines are heard back (over the plan's `narrationCheck`)
+            let narration_check_flag = a
+                .opt("--narration-check")
+                .map(|c| filmcraft_autocut::showcase::CheckPolicy::parse(c).unwrap_or_else(|e| usage(format!("showcase: --narration-check: {e}"))));
+            if narration_check_flag.is_some() && a.flag("--no-narration-check") {
+                usage("showcase: give --narration-check or --no-narration-check, not both");
+            }
             // --languages en,ml: the show in each language from one reviewed plan (--lines-ml:
             // the Malayalam lines by entry label), checked now
             let languages = a.opt("--languages").map(|l| showcase_tools::parse_languages(l).unwrap_or_else(|e| usage(format!("showcase: --languages: {e}"))));
@@ -2544,6 +2556,8 @@ async fn cli() {
                     Some(Value::String(n)) => Some(filmcraft_autocut::showcase::number_style(n).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")))),
                     Some(_) => fail(format!("showcase: {path}: numbers: english or malayalam")),
                 };
+                opts.narration_policy = filmcraft_autocut::showcase::CheckPolicy::from_plan(sv.get("narrationCheck").unwrap_or(&Value::Null))
+                    .unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
                 opts.redact = filmcraft_autocut::privacy::Redact::from_plan(sv.get("redact")).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
                 // what the counter counts, apart from the subject QA looks for
                 let (counter, check) = filmcraft_autocut::showcase::counting_from_plan(&sv).unwrap_or_else(|e| fail(format!("showcase: {path}: {e}")));
@@ -2588,8 +2602,12 @@ async fn cli() {
             if numbers_flag.is_some() {
                 opts.numbers = numbers_flag;
             }
-            // a Malayalam narration is heard back utterance by utterance unless turned off
+            // a Malayalam narration is heard back utterance by utterance unless turned off, as
+            // strictly as --narration-check (or the plan) asks
             opts.skip_narration_check = a.flag("--no-narration-check");
+            if let Some(c) = narration_check_flag {
+                opts.narration_policy = c;
+            }
             // talking clips: Enhance Voice on the shots' own sound (never the narration)
             if a.flag("--enhance-voice") {
                 opts.enhance_voice = true;
@@ -2659,6 +2677,9 @@ async fn cli() {
                 }
                 if let Some(n) = &opts.numbers {
                     o.insert("numbers".into(), json!(n));
+                }
+                if let Some(c) = &opts.narration_policy {
+                    o.insert("narrationCheck".into(), c.params());
                 }
             }
             if let Some(out) = a.opt("--script-out") {

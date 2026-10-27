@@ -248,7 +248,11 @@ step 6); the build prints `narration check: N of M Malayalam lines heard clearly
 character error rate (`cer`), the worst sentence start (`startCer`), the readings made, and per
 utterance the seed kept and every try. Listen to every line with `"passed": false` (the build
 notes them too); read one again with another take by editing it (`tts.edit … take=1`), or
-rewrite it. `--no-narration-check` builds without the check.
+rewrite it. `--no-narration-check` builds without the check. When the voice mispronounces
+lines the check let through, make it stricter: a plan's `"narrationCheck": {"readings": 6,
+"cer": 0.12, "startCer": 0.2}` (or `--narration-check readings=6,cer=0.12,startCer=0.2`) reads
+an unclear utterance up to six times and passes only readings heard that clearly; lines already
+cached that pass it are kept, the rest are read again.
 
 ## 6. QA
 

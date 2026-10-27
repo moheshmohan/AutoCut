@@ -120,6 +120,10 @@ pub struct Options {
     /// every utterance is heard back by the Malayalam speech model and read again until clear,
     /// and what was heard goes into [`Built::narration_check`].
     pub skip_narration_check: bool,
+    /// A stricter (or looser) strict check of the Malayalam lines than the engine's own
+    /// (`--narration-check`, a plan's `"narrationCheck"`): more readings of an unclear utterance,
+    /// lower error rates to pass. `None`: the engine's (4 readings, 0.25, 0.3).
+    pub narration_policy: Option<CheckPolicy>,
     /// After the export, its transcript is checked for breaths in the middle of a phrase
     /// (`media.checkPauses`; [`Built::pauses`]); `false` skips it (a plan's `"checkPauses"`).
     pub check_pauses: bool,
@@ -180,6 +184,7 @@ impl Default for Options {
             language: None,
             numbers: None,
             skip_narration_check: false,
+            narration_policy: None,
             check_pauses: true,
             redact: None,
             enhance_voice: false,
@@ -214,6 +219,90 @@ pub fn counting_from_plan(plan: &Value) -> Result<(Option<String>, Option<bool>)
         Some(_) => return Err(AutoCutError::Invalid("subjectCheck: true or false".into())),
     };
     Ok((counter, check))
+}
+
+/// How strictly the Malayalam lines are heard back (`tts.create`'s `checkPolicy`): readings of
+/// an unclear utterance at most, and the highest character error rate over an utterance and at
+/// a sentence's start that pass. A field left out keeps the engine's own (4 readings, 0.25,
+/// 0.3). A plan's `"narrationCheck": {"readings": 6, "cer": 0.12, "startCer": 0.2}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readings: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cer: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_cer: Option<f64>,
+}
+
+impl CheckPolicy {
+    /// `tts.create`'s `checkPolicy` (and the plan's `narrationCheck` as written out).
+    pub fn params(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+
+    /// A plan's `"narrationCheck"` (`None`: not given, or nothing in it), checked before anything
+    /// is built: `readings` 1 to [`filmcraft_engine::narration::MAX_READINGS`], `cer` and
+    /// `startCer` from 0 to 1.
+    pub fn from_plan(v: &Value) -> Result<Option<Self>, AutoCutError> {
+        let max = filmcraft_engine::narration::MAX_READINGS;
+        let what = || format!("narrationCheck: {{\"readings\": 1–{max}, \"cer\": 0–1, \"startCer\": 0–1}}, each optional");
+        let o = match v {
+            Value::Null => return Ok(None),
+            Value::Object(o) => o,
+            _ => return Err(AutoCutError::Invalid(what())),
+        };
+        let shown = |v: &Value| v.to_string().chars().take(40).collect::<String>();
+        let rate = |k: &str, v: &Value| {
+            v.as_f64()
+                .filter(|x| x.is_finite() && (0.0..=1.0).contains(x))
+                .ok_or_else(|| AutoCutError::Invalid(format!("narrationCheck.{k}: an error rate from 0 to 1, not {}", shown(v))))
+        };
+        let mut c = Self::default();
+        for (k, v) in o {
+            match k.as_str() {
+                _ if v.is_null() => {}
+                "readings" => {
+                    let n = v.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| (1..=max).contains(n));
+                    let n = n.ok_or_else(|| AutoCutError::Invalid(format!("narrationCheck.readings: a whole number from 1 to {max}, not {}", shown(v))))?;
+                    c.readings = Some(n);
+                }
+                "cer" => c.cer = Some(rate(k, v)?),
+                "startCer" => c.start_cer = Some(rate(k, v)?),
+                other => return Err(AutoCutError::Invalid(format!("{}: unknown field `{}`", what(), other.chars().take(40).collect::<String>()))),
+            }
+        }
+        Ok((c != Self::default()).then_some(c))
+    }
+
+    /// The CLI's `--narration-check readings=6,cer=0.12,startCer=0.2` (or the plan's JSON).
+    pub fn parse(s: &str) -> Result<Option<Self>, AutoCutError> {
+        let s = s.trim();
+        if s.starts_with('{') {
+            let v: Value = serde_json::from_str(s).map_err(|e| AutoCutError::Invalid(format!("narrationCheck: {e}")))?;
+            return Self::from_plan(&v);
+        }
+        let mut o = serde_json::Map::new();
+        for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()).take(8) {
+            let clipped = |x: &str| x.chars().take(40).collect::<String>();
+            let (k, v) = part.split_once('=').ok_or_else(|| AutoCutError::Invalid(format!("narrationCheck: `{}` is not key=value", clipped(part))))?;
+            let key = match k.trim().to_ascii_lowercase().replace(['-', '_'], "").as_str() {
+                "readings" | "takes" => "readings".to_string(),
+                "cer" => "cer".to_string(),
+                "startcer" | "start" => "startCer".to_string(),
+                _ => clipped(k.trim()),
+            };
+            let v = v.trim();
+            // a whole number of readings stays whole (2.5 is refused as such)
+            let n = match v.parse::<u64>() {
+                Ok(n) => json!(n),
+                Err(_) => v.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| json!(x)).unwrap_or_else(|| json!(v)),
+            };
+            o.insert(key, n);
+        }
+        Self::from_plan(&Value::Object(o))
+    }
 }
 
 /// A plan's or flag's number style (`english`, `malayalam`, any case), as `tts.create` takes it.
@@ -1912,6 +2001,8 @@ struct Narrations {
     numbers: Option<String>,
     /// The strict check of the Malayalam lines is off ([`Options::skip_narration_check`]).
     unchecked: bool,
+    /// How strict it is, when not the engine's own ([`Options::narration_policy`]).
+    policy: Option<CheckPolicy>,
     /// What the strict check found in each Malayalam line ([`Built::narration_check`]).
     check: NarrationCheck,
 }
@@ -2060,12 +2151,17 @@ async fn narrate(
     let max_takes = if malayalam { MAX_TAKES_ML } else { MAX_TAKES };
     let numbers = narrations.numbers.clone();
     let check = if narrations.unchecked { "off" } else { "strict" };
+    let policy = narrations.policy.filter(|_| !narrations.unchecked);
     let create = async |take: u32| {
         let mut p = json!({"text": say, "voice": voice, "delivery": delivery.id(), "take": take, "time": ticks(t), "track": tr.voice});
         if malayalam {
             p["language"] = json!("ml-IN");
-            // every utterance heard back and read again until clear (the engine's default, said)
+            // every utterance heard back and read again until clear (the engine's default, said),
+            // as strictly as the plan asks
             p["check"] = json!(check);
+            if let Some(c) = &policy {
+                p["checkPolicy"] = c.params();
+            }
             if let Some(n) = &numbers {
                 p["numbers"] = json!(n);
             }
@@ -3126,8 +3222,13 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // what the new overlays (the timeline, chips, scene captions) wear without a theme
     let overlay = theme.clone().unwrap_or_else(|| look::Style::classic().resolve(None));
     let voice = opts.voice.as_deref();
-    let mut narrations =
-        Narrations { malayalam: opts.malayalam(), numbers: opts.numbers.clone(), unchecked: opts.skip_narration_check, ..Narrations::default() };
+    let mut narrations = Narrations {
+        malayalam: opts.malayalam(),
+        numbers: opts.numbers.clone(),
+        unchecked: opts.skip_narration_check,
+        policy: opts.narration_policy,
+        ..Narrations::default()
+    };
     let mut mix = Mix { enhance_voice: opts.enhance_voice, ..Mix::default() };
     let mut fg_firsts: Vec<(u64, Option<u64>)> = Vec::new();
     // pictures shown whole and their blurred copies: (picture, copy), every one in the show
@@ -4942,12 +5043,70 @@ mod tests {
         assert_eq!(number_style(" English ").unwrap(), "english");
         assert_eq!(number_style("ml").unwrap(), "malayalam");
         assert!(number_style("roman").is_err() && number_style("").is_err());
+        // the plan's stricter check goes to every Malayalam reading as `checkPolicy` (none
+        // without one, and none when the check is off)
+        let strict = CheckPolicy::from_plan(&json!({"readings": 6, "cer": 0.12, "startCer": 0.2})).unwrap();
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
+        let mut n = Narrations { malayalam: true, policy: strict, ..Narrations::default() };
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        let creates: Vec<Value> = ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").map(|(_, p)| p.clone()).collect();
+        assert!(!creates.is_empty());
+        assert!(creates.iter().all(|p| p["checkPolicy"] == json!({"readings": 6, "cer": 0.12, "startCer": 0.2}) && p["check"] == "strict"), "{creates:?}");
+        assert!(calls.iter().all(|(_, p)| p.get("checkPolicy").is_none()), "the engine's own policy unless the plan says");
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
+        let mut n = Narrations { malayalam: true, unchecked: true, policy: strict, ..Narrations::default() };
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        assert!(ex.calls.lock().unwrap().iter().all(|(_, p)| p.get("checkPolicy").is_none() && p["check"] != "strict"));
+        // an English part of a Malayalam show is not given it
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
+        let mut n = Narrations { malayalam: true, policy: strict, ..Narrations::default() };
+        narrate(&ex, &voice_tracks(), Some("clone:me"), "Thanks for watching.", "Thanks for watching.", Delivery::Plain, 0.0, &mut n).await.unwrap();
+        assert!(ex.calls.lock().unwrap().iter().all(|(_, p)| p.get("checkPolicy").is_none()));
         // an English part of a Malayalam show stays English (no language, no check given)
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, ..Narrations::default() };
         narrate(&ex, &voice_tracks(), Some("basic-male"), "Thanks for watching.", "Thanks for watching.", Delivery::Plain, 0.0, &mut n).await.unwrap();
         assert!(ex.calls.lock().unwrap().iter().all(|(c, p)| c == "tts.create" && p.get("language").is_none() && p.get("check").is_none()));
         assert!(n.check.lines.is_empty());
+    }
+
+    #[test]
+    fn a_plan_asks_for_a_stricter_narration_check() {
+        let c = CheckPolicy::from_plan(&json!({"readings": 6, "cer": 0.12, "startCer": 0.2})).unwrap().unwrap();
+        assert_eq!(c, CheckPolicy { readings: Some(6), cer: Some(0.12), start_cer: Some(0.2) });
+        assert_eq!(c.params(), json!({"readings": 6, "cer": 0.12, "startCer": 0.2}));
+        // a field left out is the engine's; nothing given is no policy
+        assert_eq!(CheckPolicy::from_plan(&json!({"readings": 8})).unwrap().unwrap().params(), json!({"readings": 8}));
+        assert_eq!(CheckPolicy::from_plan(&json!(null)).unwrap(), None);
+        assert_eq!(CheckPolicy::from_plan(&json!({})).unwrap(), None);
+        assert_eq!(CheckPolicy::from_plan(&json!({"cer": null})).unwrap(), None);
+        // the CLI's form, and the plan's JSON on the command line
+        assert_eq!(CheckPolicy::parse("readings=6, cer=0.12 ,startCer=0.2").unwrap(), Some(c));
+        assert_eq!(CheckPolicy::parse("takes=6,cer=0.12,start-cer=0.2").unwrap(), Some(c));
+        assert_eq!(CheckPolicy::parse(r#"{"readings": 6, "cer": 0.12, "startCer": 0.2}"#).unwrap(), Some(c));
+        // hostile values are refused, saying which
+        let max = filmcraft_engine::narration::MAX_READINGS;
+        for bad in [
+            json!(true),
+            json!("strict"),
+            json!([6]),
+            json!({"readings": 0}),
+            json!({"readings": max + 1}),
+            json!({"readings": 2.5}),
+            json!({"readings": "6"}),
+            json!({"readings": -3}),
+            json!({"cer": 1.2}),
+            json!({"cer": -0.01}),
+            json!({"startCer": "low"}),
+            json!({"start_cer": 0.2}),
+        ] {
+            let e = CheckPolicy::from_plan(&bad).unwrap_err().to_string();
+            assert!(e.contains("narrationCheck"), "{bad}: {e}");
+        }
+        for bad in ["readings", "readings=lots", "readings=9", "cer=2", "loud=1", "readings=2.5", "{not json", "cer=NaN", "cer=inf"] {
+            assert!(CheckPolicy::parse(bad).is_err(), "{bad}");
+        }
+        assert_eq!(CheckPolicy::parse("").unwrap(), None);
     }
 
     /// A hostile `check` (not an object, missing numbers, NaN) never fails a line.

@@ -245,7 +245,13 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    off): the Malayalam speech model (`whisper-medium-ml`) hears each utterance, the character
    error rate and the first six syllables of every sentence are scored, and an unclear
    utterance is read again with its own seed, the best of four kept (see
-   `crates/tts/README.md`, "The strict check"). The build keeps what was heard line by line in
+   `crates/tts/README.md`, "The strict check"). A plan's top-level `"narrationCheck":
+   {"readings": 6, "cer": 0.12, "startCer": 0.2}` (or `--narration-check
+   readings=6,cer=0.12,startCer=0.2`) makes it stricter for every Malayalam line: up to that many
+   readings of an unclear utterance (1–8) and the character error rates that pass, over the
+   utterance and at a sentence start (0–1); a field left out keeps the engine's (4, 0.25, 0.3).
+   It goes to `tts.create` as `checkPolicy`; cached readings that pass it are kept, the others
+   read again. The build keeps what was heard line by line in
    `narration_check` (text, heard, `cer`, `startCer`, readings, and per utterance its seed and
    every try), written next to the export as `<out>.narration-check.json`, and notes every line
    never heard clearly. Without the speech model the lines are still read, and that is noted
@@ -414,6 +420,7 @@ not there, years beyond 1900–2200) is an `invalid plan:` error saying which an
 | `"mix": "speech"` (default) or `"cinematic"` | `--mix speech\|cinematic` | how the stems are balanced and treated ([`mix.rs`](src/mix.rs), "Mix for small speakers" below); `mix` in the output says what was done (the narration's measured tilt, how much EQ it got, its fader) |
 | `"embedCaptions": true` | `--embed-captions` | the export carries the narration's captions as CEA-608/708 closed captions (besides `.srt` / `.vtt`) |
 | `"soundfont": "generaluser-gs"` | `--soundfont generaluser-gs\|oscillators\|auto\|<file.sf2>` | the instruments of the generated bed (`audio.generate`'s `soundfont`; Preferences are not changed); one that cannot play is noted and the bed played without it; `music.instruments` in the output |
+| `"narrationCheck": {"readings": 6, "cer": 0.12, "startCer": 0.2}` | `--narration-check readings=6,cer=0.12,startCer=0.2` | how strictly the Malayalam lines are heard back (`tts.create`'s `checkPolicy`; the Malayalam paragraph above): readings of an unclear utterance at most (1–8) and the character error rates that pass over an utterance and at a sentence start (0–1); a field left out keeps the engine's 4, 0.25, 0.3 |
 | `"outro": {"logo", "channel", "handle", "tagline", "cta", "ctaDone", "terminal", "background", "seconds"}` | `--outro-logo f.png --outro-channel C --outro-handle @h --outro-tagline T --outro-cta S --outro-cta-done S --outro-terminal L --outro-seconds 12 --outro-background item[:from[:to]]` (repeatable; the flags go over the plan's fields) | a branded channel outro instead of the count card ([`outro.rs`](src/outro.rs)), below |
 
 The output says what was made: `theme` (fonts as resolved), `timeline` (its scale, bands, the

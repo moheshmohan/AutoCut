@@ -161,10 +161,28 @@ error rate over the utterance, and the error rate of the first six syllables of 
 sentences on their own — where IndicF5's garble was. An utterance over the thresholds (0.25
 overall, 0.3 at a sentence start), or whose signal is broken (empty, clipped, a long silence
 mid-reading, a burst of level at the start), is read again with its own seed, up to four
-readings, and the best is kept. Results carry `check`:
+readings, and the best is kept.
+
+**A stricter check.** When readings that passed still sound wrong (a mispronounced word costs
+little of a long utterance's character error rate), ask for a stricter check with `checkPolicy`:
+
+```sh
+filmcraft-cli exec tts.create '{"text": "…", "voice": "clone:me", "language": "ml-IN",
+  "checkPolicy": {"readings": 6, "cer": 0.12, "startCer": 0.2}}'
+```
+
+`readings` (1–8) is how many times an unclear utterance is read at most, `cer` (0–1) the highest
+character error rate over an utterance that passes and `startCer` (0–1) the highest at the start
+of a sentence; a field left out keeps the default (Malayalam 4, 0.25, 0.3; English 3, 0.15, 0.5),
+anything else is refused with what it should be. A policy other than the default is part of
+the cache key, so a stricter check never reuses a reading that only passed a lenient one: a
+reading cached under the default whose every utterance was heard clearly enough for the stricter
+policy is kept as it is; another is heard once more as a whole and kept only if it passes;
+the rest are read again. More readings take longer: each is a full IndicF5 generation and a
+hearing. Results carry `check`:
 
 ```json
-{"status": "clear", "model": "whisper-medium-ml check v1", "utterances": [
+{"status": "clear", "model": "whisper-medium-ml check v1", "policy": {"readings": 4, "cer": 0.25, "startCer": 0.3}, "utterances": [
   {"text": "ഇതാണ് ബോസ്റ്റൺ ഡൈനാമിക്സിന്റെ സ്പോട്ട്.", "heard": "ഇതാണ് ബോസ്റ്റൺ ഡൈനാമിക്സിന്റെ സ്പോട്ട്",
    "cer": 0.0, "startCer": 0.0, "takes": 1, "kept": 0, "seed": 1, "passed": true, "signal": [],
    "tries": [{"attempt": 0, "seed": 1, "heard": "…", "cer": 0.0, "startCer": 0.0, "starts": [0.0], "signal": []}]}]}
@@ -183,8 +201,11 @@ A showcase plan with `"language": "ml"` narrates its Malayalam `intro`, `lines` 
 Malayalam under the strict check and makes Malayalam subtitles; what was heard, line by line
 (text, heard, `cer`, `startCer`, readings, the seeds kept), goes into the build's
 `narration_check` and next to the export as `<out>.narration-check.json`, and every line never
-heard clearly is noted (`--no-narration-check` turns the check off). `"numbers": "malayalam"`
-(or `--numbers malayalam`) changes how digits are said:
+heard clearly is noted (`--no-narration-check` turns the check off). `"narrationCheck":
+{"readings": 6, "cer": 0.12, "startCer": 0.2}` (or `--narration-check
+readings=6,cer=0.12,startCer=0.2`) makes the check stricter for every Malayalam line (`tts.create`'s
+`checkPolicy`, above). `"numbers": "malayalam"` (or `--numbers malayalam`) changes how digits are
+said:
 
 ```sh
 filmcraft-cli showcase --report analysis.json --script-in plan-ml.json --language ml \
