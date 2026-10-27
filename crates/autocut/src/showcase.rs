@@ -25,6 +25,8 @@
 //! headless CLI and the live app.
 
 use filmcraft_engine::project::taste::Taste;
+use filmcraft_engine::project::transition_sound::{SoundKind, TransitionSound};
+use filmcraft_engine::time::Tick;
 use std::collections::BTreeMap;
 
 use filmcraft_engine::ken_burns::Move as KenBurns;
@@ -3094,6 +3096,25 @@ fn in_turn<'a>(list: &'a [String], counter: &mut usize) -> Option<&'a String> {
     pick
 }
 
+/// The transition a cut's own sound is placed for, seconds ([`cue_span`]): a swish half a second
+/// long, centred on the cut.
+const CUE_AROUND: f64 = 0.3;
+
+/// Where a cut's sound of `kind` plays around the swap at `swap` seconds, as a transition
+/// [`CUE_AROUND`] long places its own (`TransitionSound::span`: a swish or whoosh centred on it, a
+/// riser ending on it, a chime, impact, pop or thump starting on it, a shutter's first click on
+/// it): (start, length), never before 0; `None` when too little of it is left.
+fn cue_span(kind: SoundKind, swap: f64) -> Option<(f64, f64)> {
+    if !swap.is_finite() {
+        return None;
+    }
+    let around = Tick::from_seconds_f64(CUE_AROUND);
+    let start = Tick::from_seconds_f64(swap.max(0.0)) - around.mul_ratio(1, 2);
+    let (at, len) = TransitionSound::new(kind, 0).span(start, around);
+    let (a, b) = (at.seconds().max(0.0), (at + len).seconds());
+    (b - a >= 0.05).then_some((a, b - a))
+}
+
 /// Within-entry cuts with transitions from the catalogue: each cut between an entry's windows
 /// (starting at `t`, played at full speed) moved to the nearest beat within [`BEAT_SNAP`] (half a
 /// beat at most) — the window before it a little longer (only as far as its reach, the robot
@@ -3162,6 +3183,29 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         look::Scale::new(&dates, (w, h))?;
     }
     let mut built = Built { entries: entries.len(), scenes: entries.len() - robots, ..Built::default() };
+    // the cuts' sounds: the plan's (`sounds`), else a swish between entries and into the title
+    // and a chime into a chapter; one the taste profile leaves out is not made (and, when the
+    // plan chose it, said)
+    let mut pick = |slot: &str, cue: Option<look::Cue>, default: SoundKind| -> Option<SoundKind> {
+        let kind = match cue {
+            None => default,
+            Some(look::Cue::Silent) => return None,
+            Some(look::Cue::Kind(k)) => k,
+        };
+        if crate::taste::allows_sound(&taste, kind.id()) {
+            return Some(kind);
+        }
+        if cue.is_some() {
+            built.notes.push(format!("sounds.{slot}: the taste profile leaves out the {} sound, so there is none", kind.id()));
+        }
+        None
+    };
+    let title_sound = pick("title", look.sounds.title, look::Sounds::TITLE);
+    let between_sound = pick("between", look.sounds.between, look::Sounds::BETWEEN);
+    let chapter_sound = pick("chapter", look.sounds.chapter, look::Sounds::CHAPTER);
+    // without the catalogue's transitions, a new year dips to black under the between sound
+    // unless the plan names one for chapters
+    let dip_sound = if look.sounds.chapter.is_some() { chapter_sound } else { between_sound };
     // the overlays get tracks of their own, above the show's five
     let mut video = 5;
     let timeline_tracks = if look.timeline {
@@ -3305,10 +3349,20 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         i += 1;
     }
     // the title lands with an impact on a beat, a soft swish into it (not a riser: its rising
-    // noise sounded like a rocket to the owner)
+    // noise sounded like a rocket to the owner), or the plan's sound
     let hit = beats.as_ref().and_then(|b| b.nearest(1.8, 1.3, 2.4)).map_or(1.8, |x| on_frame(x, tr.fps));
-    // (ending where the impact starts, on the same track)
-    sfx(ex, "swish", hit.min(0.5), (hit - 0.5).max(0.0), &tr.hits, 0.6, &mut mix, &taste).await?;
+    match title_sound {
+        // (ending where the impact starts, on the same track)
+        Some(SoundKind::Swish) => sfx(ex, "swish", hit.min(0.5), (hit - 0.5).max(0.0), &tr.hits, 0.6, &mut mix, &taste).await?,
+        // another where a transition would put it, the hit being the swap (on the other effects
+        // track: it may ring over the impact)
+        Some(k) => {
+            if let Some((at, len)) = cue_span(k, hit) {
+                sfx(ex, k.id(), len, at, &tr.sfx, 0.6, &mut mix, &taste).await?;
+            }
+        }
+        None => {}
+    }
     sfx(ex, "impact", 3.0, hit, &tr.hits, 0.8, &mut mix, &taste).await?;
     let subtitle = opts.subtitle.clone().unwrap_or_else(|| years(entries));
     match &theme {
@@ -3562,30 +3616,33 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
                     }
                     // (a blurred copy behind the picture follows the transition at the end:
                     // pillars_through_transitions)
-                    sfx(ex, "swish", 0.5, (t - 0.25).max(0.0), &tr.sfx, 0.6, &mut mix, &taste).await?;
+                    let sound = if new_year { dip_sound } else { between_sound };
+                    if let Some((k, (at, len))) = sound.and_then(|k| Some((k, cue_span(k, t)?))) {
+                        sfx(ex, k.id(), len, at, &tr.sfx, 0.6, &mut mix, &taste).await?;
+                    }
                 }
-                // from the catalogue, each with its sound (a soft swish between entries, a chime
-                // into a chapter, whose card brings the impact; the whoosh and riser they had
-                // sounded like a rocket)
+                // from the catalogue, each with its sound (by default a soft swish between
+                // entries, a chime into a chapter, whose card brings the impact; the whoosh and
+                // riser they had sounded like a rocket)
                 Some(tp) => {
-                    let (list, where_, sound, frames, counter) = if new_year {
-                        (&tp.chapter, "chapter", "chime", frames_of(2.0, 12.0, 40.0), &mut n_chapter)
+                    let (list, where_, sound, frames, counter, intensity) = if new_year {
+                        (&tp.chapter, "chapter", chapter_sound, frames_of(2.0, 12.0, 40.0), &mut n_chapter, 0.75)
                     } else {
-                        (&tp.between, "between", "swish", frames_of(1.0, 8.0, 24.0), &mut n_between)
+                        (&tp.between, "between", between_sound, frames_of(1.0, 8.0, 24.0), &mut n_between, 0.6)
                     };
                     if let Some(effect) = in_turn(list, counter) {
                         match run(ex, "sequence.applyVideoTransition", json!({"clip": fg, "edge": "in", "effect": effect, "frames": frames})).await {
                             Ok(r) => {
-                                if let Some(id) = r["transition"].as_u64().filter(|_| crate::taste::allows_sound(&taste, sound)) {
-                                    let intensity = if new_year { 0.75 } else { 0.6 };
-                                    let p = json!({"transitions": [id], "kind": sound, "intensity": intensity, "gain": look.mix.transition_gain_db()});
-                                    let with_sound = match run(ex, "transitions.addSound", p).await {
-                                        Ok(_) => Some(sound),
-                                        Err(err) => {
-                                            built.notes.push(format!("transition sound at entry {}: {err}", e.number));
-                                            None
+                                // (kept without a sound too: it still goes on the beat)
+                                if let Some(id) = r["transition"].as_u64() {
+                                    let mut with_sound = None;
+                                    if let Some(kind) = sound {
+                                        let p = json!({"transitions": [id], "kind": kind.id(), "intensity": intensity, "gain": look.mix.transition_gain_db()});
+                                        match run(ex, "transitions.addSound", p).await {
+                                            Ok(_) => with_sound = Some(kind.id()),
+                                            Err(err) => built.notes.push(format!("transition sound at entry {}: {err}", e.number)),
                                         }
-                                    };
+                                    }
                                     built.transitions.push(PlacedTransition { id, effect: effect.clone(), at: where_, sound: with_sound, entry: e.number });
                                 }
                             }
@@ -5107,6 +5164,23 @@ mod tests {
             assert!(CheckPolicy::parse(bad).is_err(), "{bad}");
         }
         assert_eq!(CheckPolicy::parse("").unwrap(), None);
+    }
+
+    #[test]
+    fn a_cuts_sound_sits_where_a_transition_would_put_it() {
+        let near = |a: Option<(f64, f64)>, b: (f64, f64)| a.is_some_and(|(x, y)| (x - b.0).abs() < 1e-6 && (y - b.1).abs() < 1e-6);
+        // a swish half a second long centred on the cut (as the showcase always had), a chime
+        // ringing from it, a riser ending on it
+        assert!(near(cue_span(SoundKind::Swish, 10.0), (9.75, 0.5)), "{:?}", cue_span(SoundKind::Swish, 10.0));
+        assert!(near(cue_span(SoundKind::Chime, 10.0), (10.0, 1.8)));
+        assert!(near(cue_span(SoundKind::Riser, 10.0), (8.0, 2.0)));
+        // never before the start of the show; nothing when too little is left
+        assert!(near(cue_span(SoundKind::Riser, 1.0), (0.0, 1.0)));
+        assert_eq!(cue_span(SoundKind::Riser, 0.01), None);
+        for t in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(cue_span(SoundKind::Chime, t), None);
+        }
+        assert!(cue_span(SoundKind::Chime, -5.0).is_some_and(|(a, _)| a == 0.0));
     }
 
     /// A hostile `check` (not an object, missing numbers, NaN) never fails a line.

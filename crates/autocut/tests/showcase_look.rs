@@ -291,6 +291,60 @@ async fn a_tech_show_with_its_timeline_chips_scene_and_catalogue_transitions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_plan_picks_the_sounds_of_its_cuts() {
+    use filmcraft_autocut::look::{Cue, Sounds};
+    use filmcraft_engine::project::transition_sound::SoundKind;
+    // a chime between entries, nothing into the chapters, an impact into the title
+    let ex = demo();
+    let sounds = Sounds::from_plan(&json!({"between": "chime", "chapter": "none", "title": "Impact"})).unwrap();
+    assert_eq!(sounds, Sounds { between: Some(Cue::Kind(SoundKind::Chime)), chapter: Some(Cue::Silent), title: Some(Cue::Kind(SoundKind::Impact)) });
+    let look = Look { transitions: Some(TransitionPlan::catalog()), sounds, ..Look::default() };
+    let built = showcase::build(&ex, &tech(look), &gitex(), &gitex_script(), &mut |_| {}).await.expect("the showcase builds");
+    assert!(built.notes.iter().all(|n| !n.starts_with("sounds")), "{:?}", built.notes);
+    let at: Vec<(&str, Option<&str>)> = built.transitions.iter().map(|t| (t.at, t.sound)).collect();
+    assert_eq!(at, vec![("chapter", None), ("chapter", None), ("between", Some("chime")), ("between", Some("chime"))], "{:#?}", built.transitions);
+    // every transition is still snapped to the beat, silent or not
+    assert_eq!(built.beat_snap.clone().expect("snapped")["snapped"], 4);
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let names: Vec<String> = seq["audio"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|t| t["items"].as_array().cloned().unwrap_or_default())
+        .filter_map(|c| c["name"].as_str().map(str::to_string))
+        .collect();
+    assert!(!names.iter().any(|n| n.starts_with("Swish")), "no swish into the title: {names:?}");
+    assert!(names.iter().filter(|n| n.starts_with("Impact")).count() >= 2, "the title's impact and its own: {names:?}");
+
+    // without the catalogue: the between sound in place of the swish clips, and a chapter sound
+    // the plan names on the dips into a new year
+    let ex = demo();
+    let look = Look { sounds: Sounds::from_plan(&json!({"between": "chime", "chapter": "impact"})).unwrap(), ..Look::default() };
+    let built = showcase::build(&ex, &tech(look), &gitex(), &gitex_script(), &mut |_| {}).await.expect("the showcase builds");
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let names: Vec<String> = seq["audio"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|t| t["items"].as_array().cloned().unwrap_or_default())
+        .filter_map(|c| c["name"].as_str().map(str::to_string))
+        .collect();
+    assert!(names.iter().any(|n| n.starts_with("Chime")), "{names:?}");
+    assert_eq!(names.iter().filter(|n| n.starts_with("Swish")).count(), 1, "only the title's swish: {names:?}");
+    assert!(built.transitions.is_empty());
+
+    // the taste profile still decides: a sound it leaves out is not made, and said
+    let ex = demo();
+    let taste = filmcraft_engine::project::taste::Taste { sounds: Some(vec!["swish".into(), "impact".into()]), ..Default::default() };
+    let look = Look { transitions: Some(TransitionPlan::catalog()), sounds: Sounds::from_plan(&json!({"between": "chime"})).unwrap(), ..Look::default() };
+    let opts = Options { taste, ..tech(look) };
+    let built = showcase::build(&ex, &opts, &gitex(), &gitex_script(), &mut |_| {}).await.expect("the showcase builds");
+    assert!(built.notes.iter().any(|n| n.starts_with("sounds.between") && n.contains("chime")), "{:?}", built.notes);
+    assert!(built.transitions.iter().all(|t| t.sound.is_none()), "{:#?}", built.transitions);
+    assert_eq!(built.transitions.len(), 4, "the transitions are kept, without their sounds");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_short_scene_keeps_its_caption_inside_it() {
     // a 2.5-second scene with no words between two robots: its caption used to be held for at
     // least 1.5 s after a lead-in, spilling into the next entry's lower third on the same track
@@ -431,6 +485,11 @@ async fn hostile_plans_are_refused_before_anything_is_built() {
         json!({"loudness": 12}),
         json!({"embedCaptions": "yes"}),
         json!({"soundfont": 5}),
+        json!({"sounds": {"between": "laser"}}),
+        json!({"sounds": {"between": 3}}),
+        json!({"sounds": {"outro": "chime"}}),
+        json!({"sounds": ["chime"]}),
+        json!({"sounds": "none"}),
     ] {
         let r = std::panic::catch_unwind(|| Look::from_plan(&plan));
         let err = r.expect("no panic").expect_err(&plan.to_string()).to_string();

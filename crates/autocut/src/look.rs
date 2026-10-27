@@ -9,6 +9,7 @@
 //! | `script.chips: {"3": ["32.5 kg", "1.6 m/s"]}` | | up to three spec chips beside an entry's lower third, in one after the other while its narration plays ([`chips_by_entry`]) |
 //! | entries with `"kind": "scene"` (and `caption`) | | scene shots: footage without a robot, full frame, with a caption instead of a name lower third, opening their chapter; no counter, no ducking without words |
 //! | `transitions: {within, between, chapter}` (or `true`) | | transitions from the catalogue ([`TransitionPlan`]) with a sound each (`transitions.addSound`), snapped to the music's beats (`transitions.snapToBeats`) |
+//! | `sounds: {between, chapter, title}` | | the sound of each cut between entries, into a new chapter and into the title ([`Sounds`]): a transition sound kind or `"none"`; one left out keeps today's (a swish, a chime, a swish); the taste profile still leaves out the sounds it does not allow |
 //! | `loudness: "social"` | `--loudness social` | `audio.normalizeLoudness` on the mix (−14 LUFS, −1 dBTP) |
 //! | `mix: "speech"` (the default), `"gentle"` or `"cinematic"` | `--mix gentle`, `--mix cinematic` | how the stems are balanced and treated ([`crate::mix::MixProfile`]): speech first for small speakers, the same with a voice-preserving narration EQ, or the earlier full-range balance |
 //! | `embedCaptions: true` | `--embed-captions` | the export carries the narration's captions (CEA-608/708) |
@@ -20,6 +21,7 @@
 
 use std::collections::BTreeMap;
 
+use filmcraft_engine::project::transition_sound::SoundKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -31,7 +33,7 @@ fn invalid(msg: impl Into<String>) -> AutoCutError {
 }
 
 /// The fields of a plan this module reads.
-pub const PLAN_KEYS: &[&str] = &["style", "timeline", "events", "transitions", "loudness", "mix", "embedCaptions", "soundfont", "outro"];
+pub const PLAN_KEYS: &[&str] = &["style", "timeline", "events", "transitions", "sounds", "loudness", "mix", "embedCaptions", "soundfont", "outro"];
 
 // ---------------------------------------------------------------------------------------------
 // Colours and fonts
@@ -540,6 +542,83 @@ fn transition_ids(k: &str, v: &Value) -> Result<Vec<String>, AutoCutError> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Sounds
+
+/// A sound a plan chose for one kind of cut: a transition sound, or silence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cue {
+    /// `"none"`: no sound there.
+    Silent,
+    Kind(SoundKind),
+}
+
+impl Serialize for Cue {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            Cue::Silent => "none",
+            Cue::Kind(k) => k.id(),
+        })
+    }
+}
+
+/// The sounds of a showcase's cuts (a plan's `"sounds"`): `between` entries, into a new
+/// `chapter` and into the `title`, each a transition sound kind (`transitions.addSound`'s) or
+/// `"none"`; one left out keeps today's sound ([`Sounds::BETWEEN`], [`Sounds::CHAPTER`],
+/// [`Sounds::TITLE`]). The taste profile still decides which sounds may be heard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct Sounds {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub between: Option<Cue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chapter: Option<Cue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<Cue>,
+}
+
+impl Sounds {
+    /// Nothing chosen: today's sounds.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Between entries, when the plan names none: a soft swish.
+    pub const BETWEEN: SoundKind = SoundKind::Swish;
+    /// Into a new chapter: a chime from the swap (with the catalogue's transitions).
+    pub const CHAPTER: SoundKind = SoundKind::Chime;
+    /// Into the title: a swish ending on its impact.
+    pub const TITLE: SoundKind = SoundKind::Swish;
+
+    /// The plan's `sounds`: `{between, chapter, title}`, each a kind or `"none"` (any case).
+    pub fn from_plan(v: &Value) -> Result<Self, AutoCutError> {
+        let kinds = || SoundKind::ALL.iter().map(|k| k.id()).collect::<Vec<_>>().join(", ");
+        let o = match v {
+            Value::Null => return Ok(Self::default()),
+            Value::Object(o) => o,
+            other => return Err(invalid(format!("sounds: {{between, chapter, title}}, not {}", kind(other)))),
+        };
+        let mut s = Self::default();
+        for (k, v) in o {
+            let cue = match v {
+                Value::Null => None,
+                Value::String(id) if id.trim().eq_ignore_ascii_case("none") => Some(Cue::Silent),
+                Value::String(id) => Some(Cue::Kind(
+                    SoundKind::from_id(id)
+                        .ok_or_else(|| invalid(format!("sounds.{}: unknown sound `{}` ({}, or none)", clip_chars(k, 40), clip_chars(id, 40), kinds())))?,
+                )),
+                other => return Err(invalid(format!("sounds.{}: a sound ({}, or none), not {}", clip_chars(k, 40), kinds(), short(other)))),
+            };
+            match k.as_str() {
+                "between" => s.between = cue,
+                "chapter" => s.chapter = cue,
+                "title" => s.title = cue,
+                other => return Err(invalid(format!("sounds: unknown field `{}` (between, chapter, title)", clip_chars(other, 40)))),
+            }
+        }
+        Ok(s)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Finishing
 
 /// Where the mix is normalised to (`audio.normalizeLoudness`).
@@ -611,6 +690,9 @@ pub struct Look {
     /// Transitions from the catalogue; `None`: today's rotating set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transitions: Option<TransitionPlan>,
+    /// The sounds of the cuts between entries, into chapters and into the title; default: today's.
+    #[serde(skip_serializing_if = "Sounds::is_default")]
+    pub sounds: Sounds,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loudness: Option<Loudness>,
     /// How the stems are mixed (speech first unless the plan or the CLI says `gentle` or `cinematic`).
@@ -640,6 +722,7 @@ impl Look {
             timeline: flag("timeline")?,
             events: events_from_plan(get("events"))?,
             transitions: TransitionPlan::from_plan(get("transitions"))?,
+            sounds: Sounds::from_plan(get("sounds"))?,
             loudness: Loudness::from_plan(get("loudness"))?,
             mix: crate::mix::MixProfile::from_plan(get("mix"))?,
             embed_captions: flag("embedCaptions")?,
@@ -1632,6 +1715,28 @@ mod tests {
         assert_eq!(Style::tech().resolve(None).title.family, "DIN Condensed");
         let p = t.text_props(Role::Title, "#ffffff", "left");
         assert_eq!((p["font"].as_str(), p["font_style"].as_str()), (Some("Inter"), Some("Bold")));
+    }
+
+    #[test]
+    fn the_cuts_sounds_are_kinds_or_none() {
+        assert_eq!(Sounds::from_plan(&Value::Null).unwrap(), Sounds::default());
+        assert!(Sounds::default().is_default());
+        let s = Sounds::from_plan(&json!({"between": "Chime", "chapter": "none", "title": null})).unwrap();
+        assert_eq!(s, Sounds { between: Some(Cue::Kind(SoundKind::Chime)), chapter: Some(Cue::Silent), title: None });
+        assert_eq!(serde_json::to_value(s).unwrap(), json!({"between": "chime", "chapter": "none"}));
+        // every transition sound is one
+        for k in SoundKind::ALL {
+            assert_eq!(Sounds::from_plan(&json!({"title": k.id()})).unwrap().title, Some(Cue::Kind(k)));
+        }
+        // the plan's field is read with the look, and kept when a plan is written out again
+        let plan = json!({"sounds": {"chapter": "impact"}, "entries": []});
+        assert_eq!(Look::from_plan(&plan).unwrap().sounds.chapter, Some(Cue::Kind(SoundKind::Impact)));
+        assert_eq!(Look::plan_fields(&plan).get("sounds"), Some(&json!({"chapter": "impact"})));
+        assert_eq!(serde_json::to_value(Look::default()).unwrap().get("sounds"), None, "nothing said when it is today's");
+        for bad in [json!("chime"), json!(["chime"]), json!({"between": "laser"}), json!({"between": 2}), json!({"outro": "chime"}), json!({"between": ""})] {
+            let e = Sounds::from_plan(&bad).unwrap_err().to_string();
+            assert!(e.contains("sounds"), "{bad}: {e}");
+        }
     }
 
     #[test]
