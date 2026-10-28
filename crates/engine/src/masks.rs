@@ -747,6 +747,11 @@ pub struct PendingTrack {
     applied: usize,
 }
 
+/// A tracking job's keyframes to write into `target` as they come (`keys`: media time, path).
+pub(crate) fn pending_track(job: u64, target: MaskSel, seq: filmcraft_project::ItemId, keys: Arc<Mutex<Vec<(Tick, MaskPath)>>>) -> PendingTrack {
+    PendingTrack { job, target, seq, keys, applied: 0 }
+}
+
 /// Longest side of the frames the tracker works on (speed; the result is in clip pixels).
 const TRACK_MAX_WIDTH: f64 = 960.0;
 

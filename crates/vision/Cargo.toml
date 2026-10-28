@@ -1,6 +1,6 @@
 [package]
 name = "filmcraft-vision"
-description = "FilmCraft privacy detection: the YuNet face (MIT), LPD-YuNet licence-plate, D-FINE person and RTMPose pose (Apache-2.0) model catalogue, strict ONNX, safetensors and zip readers, output decoding, head boxes from poses, tracking with gap filling and smoothing, and (feature model) the networks on candle and, on macOS, the detectors on the GPU"
+description = "FilmCraft privacy detection: the YuNet face (MIT), LPD-YuNet licence-plate, D-FINE person, RTMPose pose and MobileSAM segmenter (Apache-2.0) model catalogue, people cut out as outlines, strict ONNX, safetensors and zip readers, output decoding, head boxes from poses, tracking with gap filling and smoothing, and (feature model) the networks on candle and, on macOS, the detectors on the GPU"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,7 +13,7 @@ workspace = true
 default = []
 # The two networks: on the CPU with candle (pure Rust), and on macOS on the GPU as WGSL compute
 # passes through wgpu (the CPU being the fallback). Off by default and in wasm builds.
-model = ["dep:candle-core", "dep:rayon", "dep:wgpu", "dep:pollster"]
+model = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:rayon", "dep:wgpu", "dep:pollster"]
 
 [dependencies]
 serde = { workspace = true }
@@ -23,6 +23,9 @@ thiserror = { workspace = true }
 # the pose network's zip (pure Rust inflate)
 miniz_oxide = "0.8"
 candle-core = { version = "0.9", default-features = false, optional = true }
+# MobileSAM (`segment`): candle's Segment Anything with the TinyViT encoder
+candle-nn = { version = "0.9", default-features = false, optional = true }
+candle-transformers = { version = "0.9", default-features = false, optional = true }
 rayon = { workspace = true, optional = true }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "std"], optional = true }
 pollster = { version = "0.4", optional = true }
@@ -31,6 +34,9 @@ pollster = { version = "0.4", optional = true }
 # platforms keep the CPU.
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["wgsl", "std", "metal"], optional = true }
+# MobileSAM on the GPU through candle's Metal backend
+candle-core = { version = "0.9", default-features = false, features = ["metal"], optional = true }
+candle-nn = { version = "0.9", default-features = false, features = ["metal"], optional = true }
 
 [dev-dependencies]
 # live tests read the oracle's picture

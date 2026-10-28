@@ -21,11 +21,16 @@
 //!   detector and pose network, finding the faces YuNet misses: on the CPU (`layers`, the
 //!   reference) and, on macOS, wholly on the GPU (`gpunn`: the frame resized, both networks, the
 //!   crops and the SimCC maxima as WGSL passes), the CPU being the fallback.
+//! - [`matte`]: a person cut out of a picture as the editor uses it — the points that tell the
+//!   segmenter who, and the cut-out's outline as a polygon a keyframed mask can follow — and
+//!   `segment` (feature `model`): **MobileSAM** (Apache-2.0) making the cut-out, on candle, on the
+//!   GPU (Metal) on macOS.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 pub mod catalog;
 pub mod head;
+pub mod matte;
 pub mod onnx;
 pub mod post;
 pub mod safetensors;
@@ -50,6 +55,8 @@ mod people;
 mod profile_tests;
 #[cfg(feature = "model")]
 mod rtmpose;
+#[cfg(feature = "model")]
+pub mod segment;
 #[cfg(feature = "model")]
 pub use net::{Detectors, FACE_SIDE, FaceDetector, MAX_GPU_FAILURES, PLATE_SIDE, PlateDetector, gpu_available};
 #[cfg(feature = "model")]

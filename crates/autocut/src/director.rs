@@ -156,6 +156,9 @@ pub struct Options {
     pub color: bool,
     pub color_strength: f64,
     pub look: String,
+    /// The opening's title behind its person (`clip.cutOut`, `clip.personInFront`) when a person
+    /// is its subject: on unless switched off.
+    pub cutouts: bool,
     pub look_strength: f64,
 }
 
@@ -384,6 +387,7 @@ impl Options {
             style_given,
             focus,
             color: p["color"].as_bool().unwrap_or(true),
+            cutouts: p["cutouts"].as_bool().unwrap_or(true),
             color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
             look,
             look_strength: finite(&p["lookStrength"]).map_or(25.0, |v| v.clamp(0.0, 100.0)),
@@ -1636,6 +1640,21 @@ pub enum On {
     Text,
 }
 
+/// Whether a person is a shot's subject, big enough to cut out well: a 360° shot's look at a
+/// named person at least 30° tall, a flat shot's subject a third of the picture tall and its
+/// caption about a person.
+pub fn person_subject(c: &Candidate, look: Option<&Look>) -> bool {
+    let person = |w: &str| {
+        let w = format!(" {} ", w.to_ascii_lowercase());
+        [" person", " man ", " woman", " boy", " girl", " child", " people", " he ", " she ", " couple", " kid"].iter().any(|k| w.contains(k))
+    };
+    match c.kind {
+        Kind::Vr => look.is_some_and(|l| l.named && person(&l.what) && l.size.is_some_and(|(_, h)| h >= 30.0)),
+        Kind::Flat => c.subject.is_some_and(|b| b[3] >= 0.33) && person(&c.caption),
+        Kind::Photo => false,
+    }
+}
+
 /// One engine command of the edit.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Step {
@@ -2002,6 +2021,9 @@ pub struct Report {
     pub mix: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privacy: Option<Value>,
+    /// The opening's person cut out in front of its title (`clip.cutOut`'s outlines).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cutout: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safe_zones: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2488,6 +2510,25 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
                 Ok(v) => report.privacy = Some(v["redact"]["clipsChanged"].clone()),
                 Err(e) => report.fallbacks.push(format!("privacy: nothing was hidden ({})", chars(&e.to_string(), 160))),
             }
+        }
+    }
+    // ---- the opening's title behind its person: cut out once the shot is finished (its colour,
+    // its blur), in front of the title; people's videos, not a travel video's places
+    if o.cutouts
+        && o.focus != Some(focus::Focus::Places)
+        && let (Some(first), Some(Some(pic))) = (plan.shots.first(), built.pictures.first())
+        && first.text.is_some()
+        && let Some(c) = cands.iter().find(|c| c.id == first.clip)
+        && person_subject(c, first.look.as_deref().and_then(|l| c.look(l)))
+    {
+        lines("putting the opening's person in front of its title");
+        let r = match run(ex, "clip.cutOut", json!({"clip": pic, "wait": true})).await {
+            Ok(v) => run(ex, "clip.personInFront", json!({"clip": pic})).await.map(|_| v),
+            Err(e) => Err(e),
+        };
+        match r {
+            Ok(v) => report.cutout = Some(json!({"clip": pic, "outlines": v["outlines"]})),
+            Err(e) => report.fallbacks.push(format!("the title stays in front of the opening's person ({})", chars(&e.to_string(), 160))),
         }
     }
     // ---- the mix

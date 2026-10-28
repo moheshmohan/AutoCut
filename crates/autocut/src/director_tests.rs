@@ -982,3 +982,24 @@ async fn notes_the_rules_read_are_taken_literally_and_the_model_reads_the_rest()
     assert!(asked[0].1.contains("call it something about the sea") && !asked[0].1.contains("Notes: \"warmer"), "{}", asked[0].1);
     assert!(r["director"].as_str().unwrap().contains("rules and fixed"), "{r}");
 }
+
+#[test]
+fn a_person_big_in_the_opening_is_put_in_front_of_its_title() {
+    let mut c = cand("c1", 1, Kind::Vr, 0.0, 6.0, 20.0, 0);
+    let big = Look { id: "c1a".into(), yaw: 0.0, pitch: 0.0, what: "a man waving".into(), named: true, size: Some((24.0, 48.0)) };
+    assert!(person_subject(&c, Some(&big)));
+    assert!(!person_subject(&c, Some(&Look { size: Some((10.0, 18.0)), ..big.clone() })), "too small to cut out well");
+    assert!(!person_subject(&c, Some(&Look { what: "a fountain".into(), ..big.clone() })));
+    assert!(!person_subject(&c, Some(&Look { named: false, ..big.clone() })));
+    assert!(!person_subject(&c, None));
+    c.kind = Kind::Flat;
+    c.caption = "A woman laughs by the sea".into();
+    c.subject = Some([0.3, 0.1, 0.3, 0.7]);
+    assert!(person_subject(&c, None));
+    c.caption = "Waves break on the rocks".into();
+    assert!(!person_subject(&c, None), "\"manage\" or \"rocks\" are not people");
+    c.caption = "The manager's desk".into();
+    c.subject = Some([0.3, 0.1, 0.3, 0.7]);
+    assert!(!person_subject(&c, None));
+    assert!(opts(json!({"brief": "x"})).cutouts && !opts(json!({"brief": "x", "cutouts": false})).cutouts);
+}

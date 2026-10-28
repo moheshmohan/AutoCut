@@ -83,6 +83,41 @@ pub const POSE: ModelFile = ModelFile {
 
 pub static PROFILE_FILES: &[ModelFile] = &[PERSON_WEIGHTS, PERSON_CONFIG, POSE];
 
+/// The segmenter's package (its own directory under the models directory): MobileSAM, which cuts a
+/// person out of a picture given points on them (the cut-outs, `crate::segment`).
+pub const SEGMENT_PACKAGE_ID: &str = "mobile-sam";
+pub const SEGMENT_NAME: &str = "MobileSAM (people and objects cut out of a picture)";
+pub const SEGMENT_LICENSE: &str = "Apache-2.0 (MobileSAM, Chaoning Zhang et al., Kyung Hee University; distilled from Meta's Segment Anything on 1% of SA-1B)";
+pub const SEGMENT_SOURCE: &str = "https://github.com/ChaoningZhang/MobileSAM (weights/mobile_sam.pt)";
+
+/// MobileSAM's weights: a TinyViT image encoder with Segment Anything's prompt encoder and mask
+/// decoder, as the authors' repository holds them (a PyTorch state dict, read by candle's pickle
+/// reader, which runs nothing). Pinned to commit f706ad9c; the SHA-256 checked 2026-10-28 by
+/// `shasum -a 256` and against an independent mirror's LFS record.
+pub const SEGMENTER: ModelFile = ModelFile {
+    name: "mobile_sam.pt",
+    url: "https://raw.githubusercontent.com/ChaoningZhang/MobileSAM/f706ad9c4eb7f219c00d9050e46328518ffb65d2/weights/mobile_sam.pt",
+    sha256: "6dbb90523a35330fedd7f1d3dfc66f995213d81b29a5ca8108dbcdd4e37d6c2f",
+    size: 40_728_226,
+};
+
+pub static SEGMENT_FILES: &[ModelFile] = &[SEGMENTER];
+
+pub fn segment_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(SEGMENT_PACKAGE_ID)
+}
+
+/// The segmenter's file is present with its pinned size.
+pub fn segmenter_installed(models_dir: &Path) -> bool {
+    let d = segment_dir(models_dir);
+    SEGMENT_FILES.iter().all(|f| present(&d, f))
+}
+
+/// The segmenter's identity, for cache keys.
+pub fn segmenter_id() -> String {
+    format!("{}={}", SEGMENTER.name, SEGMENTER.sha256.get(..16).unwrap_or(SEGMENTER.sha256))
+}
+
 pub fn package_dir(models_dir: &Path) -> PathBuf {
     models_dir.join(PACKAGE_ID)
 }

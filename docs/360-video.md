@@ -105,8 +105,35 @@ it is seen:
 - scene detection, descriptions and subject boxes (`scenes.*`, `media.frame`, the showcase's
   analysis) see the stitched whole-sphere panorama (of the proxy when there is one), so a box's
   centre is a direction (x → yaw −180…180°, y → pitch 90…−90°);
-- tracking, masks, redaction and the privacy check (`track.*`, masks, `redact.*`) work in the
-  clip's own pixels, the camera's picture at each frame.
+- tracking, masks, redaction, the privacy check and cut-outs (`track.*`, masks, `redact.*`,
+  `clip.cutOut`) work in the clip's own pixels, the camera's picture at each frame.
+
+### People cut out (Shot Lab's ideas)
+
+`clip.cutOut` outlines the person in a clip — flat or 360° — every 0.2 s: the person detector
+(D-FINE, with RTMPose's keypoints) finds them, **MobileSAM** (Apache-2.0; `cutout.downloadModel`,
+40.7 MB) cuts them out from points on their body and beside them, on the GPU (Metal; about 0.5 s
+a frame, 0.7 s with finding the person), and the largest piece is traced into a 96-point outline
+kept as the clip's Opacity mask **Person**, switched off. The effects are then ordinary clips,
+masks and titles above it, so they render on the GPU and stay editable:
+
+| command | what it makes |
+|---|---|
+| `clip.cloneTrail` | frozen copies of the person left where they were along their path (Frame Hold with Hold Filters, the mask held too), each until the clip ends |
+| `clip.shadowClone` | see-through copies following the person (the same media, later), the person in front |
+| `clip.timeFreeze` | the person frozen at `at` while the world goes on: a clean plate (each pixel's median over 24 frames where the person is elsewhere) over the moving person, the frozen copy above; refused when the background behind them is not seen clear and still (they stay in place, or the camera moves with them) |
+| `clip.textBehind` | a title behind the person (centred, fitted to the frame) |
+| `clip.personInFront` | the person above everything over the clip, so titles there go behind them |
+| `clip.personGlow` | a glow of a colour round the person (a copy tinted to it, its mask grown and feathered, Screen) |
+
+A copy in step with the clip (the glow, the person in front) lines up whatever the camera does;
+frozen and following copies need a still camera — a 360° clip's virtual camera may not move (its
+stabilisation is kept; `clip.stabilize360` `mode: "lock"` holds a walk still). Measured on a 6 s
+360° selfie shot from Istanbul: the person found and outlined in 30 of 30 frames in 21 s; the GPU
+export with two shadow clones ran at 21 frames a second. The director puts the opening's title
+behind its person when a person is its subject (a named look at least 30° tall, or a flat shot's
+subject a third of the picture), after the colour pass, in people's videos (not a travel video's
+places); `--no-cutouts` switches it off.
 
 ## 4. Pipelines
 

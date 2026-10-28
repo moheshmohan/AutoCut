@@ -533,8 +533,8 @@ SUBCOMMANDS
          [--aspect 9:16|16:9|1:1|4:5] [--seconds 30] [--platform reels|shorts|tiktok|vertical]
          [--insta360 VID_093,VID_096] [--album TITLE] [--mood M] [--bpm 110] [--music file]
          [--title T] [--no-captions] [--caption-style S] [--redact faces,plates|…|off]
-         [--name N] [--full-detail 8] [--seed N] [--dry-run] [--no-qa] [--export out.mp4]
-         [--download] [--save | --save-as p.fcproj]
+         [--name N] [--full-detail 8] [--seed N] [--no-cutouts] [--dry-run] [--no-qa]
+         [--export out.mp4] [--download] [--save | --save-as p.fcproj]
                                 normal and 360° clips → one catchy edit on the beat
                                 (autocut.direct): the media (files, a folder, Insta360 recordings
                                 by name — imported from Studio's download folder, else fetched
@@ -560,8 +560,9 @@ SUBCOMMANDS
                                 exposure and white balance measured and gently corrected, the
                                 cameras matched, checked on skin and greys; --no-color,
                                 --color-strength, --look, --look-strength; <out>.color.jpg shows
-                                before and after), captions of English speech and the mix at
-                                −14 LUFS; --revise NOTES --from <out>.report.json changes a
+                                before and after), the opening's title behind its person when a
+                                person is its subject (--no-cutouts), captions of English
+                                speech and the mix at −14 LUFS; --revise NOTES --from <out>.report.json changes a
                                 finished edit's saved plan from notes (1:10 too long, warmer at
                                 the end, fewer barrel rolls) and rebuilds it; --dry-run prints the plan
                                 and its engine commands and builds nothing; with --export the

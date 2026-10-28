@@ -23,6 +23,7 @@ pub mod clip_ops;
 pub mod color;
 pub mod commands;
 pub mod contact_sheet;
+pub mod cutout;
 pub mod demo;
 pub mod doc_path;
 pub mod elements;
@@ -547,6 +548,8 @@ pub struct Session {
     /// 360° analyses (`clip.stabilize360`, `clip.follow360`) whose keyframes are written when they
     /// finish, and what the finished ones made.
     pub vr360: vr360::Vr360Jobs,
+    /// People cut out of clips (`clip.cutOut` and its effects): a stand-in cutter for tests.
+    pub cutouts: cutout::Cutouts,
     /// Speech understanding jobs (`media.understandSpeech`) whose transcripts and analyses are
     /// stored when they finish, and what the finished ones found.
     pub speech_jobs: speech_understand::Understandings,
@@ -714,6 +717,7 @@ impl Session {
             scene_jobs: Vec::new(),
             reframes: Default::default(),
             vr360: Default::default(),
+            cutouts: Default::default(),
             speech_jobs: Default::default(),
             motion_tracks: Default::default(),
             redacts: Default::default(),

@@ -25,6 +25,15 @@ public pose datasets (COCO, AI Challenger, CrowdPose, Halpe, MPII, PoseTrack18, 
 Detectors not used for their licences: SCRFD / InsightFace weights (non-commercial), Ultralytics
 YOLO-face (AGPL), YOLO5Face (GPL).
 
+**MobileSAM** (`segment`, the cut-outs of `clip.cutOut`), downloaded by `cutout.downloadModel`
+into its own folder: `mobile_sam.pt` (40,728,226 B, the authors' repository
+`ChaoningZhang/MobileSAM` at commit `f706ad9c`, SHA-256 `6dbb9052…`), Apache-2.0; a TinyViT
+image encoder distilled from Meta's Segment Anything on 1% of SA-1B (whose images are licensed for
+research), read by candle's pickle reader (which runs nothing) and run on candle — Metal on macOS.
+`matte` turns its cut-out into the editor's outline: the person's keypoints and the sides of their
+box as the points it is given, and the largest piece traced round its edge and spaced into a
+fixed number of points that a keyframed mask follows.
+
 Licences checked 2026-10-19 in each model's directory (`LICENSE`, `README.md`). LPD-YuNet was
 trained on Chinese plates; it finds other countries' plates less reliably.
 
