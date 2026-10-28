@@ -86,7 +86,7 @@ a sudden change; an equirectangular 360° file may be an edit and is looked at l
 | `clip.reframe360` | the virtual camera: `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across), `distance` (0 flat … 1 tiny planet), `output` `flat`/`sphere`, `width`/`height` (default: the sequence frame); `at` keyframes them at a clip time; `keys` writes a whole camera move; presets `natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`; `off` |
 | `clip.stabilize360` | holds the view steady: the camera's turn measured from the pictures (points tracked on cube faces, a robust rotation fit), then `smooth`/`light`/`strong` (keep the operator's turns, drop the shake) or `lock` (look one way the whole clip) |
 | `clip.follow360` | turns the virtual camera to follow a subject (`subject`, `box`, `face`) |
-| `clip.vrMove` | a camera move as Bézier keyframes, editable in Effect Controls: `planetIn` (a tiny planet spinning open onto the view), `planetOut`, `orbit` (`degrees`, default a full turn), `barrelRoll`, `whipPan` (the short way to `yaw`/`pitch`, from `fromYaw` for a whip in, with a Directional Blur peak), `reveal` (from the sky, or `from: "ground"`), `pushIn`, `crashZoom`, `drift`; each has its default place and length (`at`, `seconds` move it); a move replaces its parameters' keyframes inside its window only, so moves, a follow and stabilisation add up |
+| `clip.vrMove` | a camera move as Bézier keyframes, editable in Effect Controls: `planetIn` (a tiny planet spinning open onto the view), `planetOut`, `orbit` (`degrees`, default a full turn), `barrelRoll`, `whipPan` (the short way to `yaw`/`pitch`, from `fromYaw` for a whip in, with a Directional Blur peak), `reveal` (from the sky, or `from: "ground"`), `pushIn`, `crashZoom`, `drift`, `drone` (a high stick read as a drone: rising and pulling back, tipping down to −50° and widening), `thirdPerson` (looking down at the person holding the camera from above and behind, `yaw` their way, for the rest of the clip), `spin` (a fast full turn, blurred), `flip` (a somersault forwards through the ground and the sky, blurred up and down), `wobble` (a playful shake dying away, `amount` its size) — GoPro's CameraFX and Insta360's invisible-stick shots as moves; each has its default place and length (`at`, `seconds` move it); a move replaces its parameters' keyframes inside its window only, so moves, a follow and stabilisation add up |
 | `clip.hyperlapse360` | a long stretch at `speed` % (frame blending) held steady by `clip.stabilize360` (`strong`) |
 | `media.salience360` | where things happen round the sphere around `seconds`: a few panorama frames 0.2 s apart scored by direction — by motion when one direction moves clearly more than the rest, else by detail — the strongest directions (yaw, pitch) at least 45° apart |
 
@@ -142,9 +142,9 @@ patches it within `nadirSize` degrees (22) of straight down — the sphere is le
 stays on the ground as the view turns: `mirror` shows the ground round it mirrored in across its
 edge (texture that meets it without a seam), `smooth` draws the colour at its edge in to the middle,
 `off` shows it as it is. Every view of the clip draws it, on the GPU and the CPU alike (tested
-against each other). A tiny planet looks straight down, so `clip.vrMove` `planetIn` / `planetOut`
-and `clip.reframe360` `preset: "tinyPlanet"` patch it (mirrored) wherever it was never set — the
-director's planets get it this way. `clip.nadirLogo` lays one of the user's pictures round the
+against each other). A tiny planet looks straight down and a drone far down, so `clip.vrMove`
+`planetIn` / `planetOut` / `drone` and `clip.reframe360` `preset: "tinyPlanet"` patch it (mirrored)
+wherever it was never set — the director's planets get it this way. `clip.nadirLogo` lays one of the user's pictures round the
 bottom instead (`size` 24°): a whole-sphere picture, transparent elsewhere, above the clip and seen
 through its camera. The patch does not change the analyses' key (`sphere_key`): what is there to
 see is the same.
