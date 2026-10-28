@@ -1689,16 +1689,7 @@ const AIM_PITCH_MAX: f64 = 45.0;
 /// its field of view. Cosmetic, like the transitions: a step the engine refuses leaves the shot
 /// as it is.
 async fn place_360(ex: &dyn Executor, tr: &Tracks, clip: u64, (t0, t1): (f64, f64), src: f64, dur: f64, how: Framing) {
-    let point = how.focus.or(how.moment.map(|m| m.center));
-    let mut fov = 90.0;
-    if let Some([x, y]) = point.filter(|c| c.iter().all(|v| v.is_finite())) {
-        let (yaw, pitch) = ((x.clamp(0.0, 1.0) - 0.5) * 360.0, ((0.5 - y.clamp(0.0, 1.0)) * 180.0).clamp(-AIM_PITCH_MAX, AIM_PITCH_MAX));
-        if let Ok(r) = run(ex, "clip.reframe360", json!({"clips": [clip], "yaw": yaw, "pitch": pitch})).await
-            && let Some(f) = r["clips"].as_array().and_then(|a| a.first()).and_then(|c| c["fov"].as_f64())
-        {
-            fov = f;
-        }
-    }
+    let fov = aim_360(ex, clip, &how).await;
     if how.stabilize && tr.stabilize {
         run(ex, "clip.stabilize360", json!({"clips": [clip], "mode": "smooth", "wait": true})).await.ok();
     }
@@ -1711,6 +1702,24 @@ async fn place_360(ex: &dyn Executor, tr: &Tracks, clip: u64, (t0, t1): (f64, f6
     }
     push_in_360(ex, clip, fov, t0, t1, tr.fps).await.ok();
 }
+
+/// A 360° shot's camera turned to the plan's `focus` or the analysis' subject (a point of the
+/// item's panorama); its field of view (90° when it was not turned).
+async fn aim_360(ex: &dyn Executor, clip: u64, how: &Framing) -> f64 {
+    let point = how.focus.or(how.moment.map(|m| m.center));
+    if let Some([x, y]) = point.filter(|c| c.iter().all(|v| v.is_finite())) {
+        let (yaw, pitch) = ((x.clamp(0.0, 1.0) - 0.5) * 360.0, ((0.5 - y.clamp(0.0, 1.0)) * 180.0).clamp(-AIM_PITCH_MAX, AIM_PITCH_MAX));
+        if let Ok(r) = run(ex, "clip.reframe360", json!({"clips": [clip], "yaw": yaw, "pitch": pitch})).await
+            && let Some(f) = r["clips"].as_array().and_then(|a| a.first()).and_then(|c| c["fov"].as_f64())
+        {
+            return f;
+        }
+    }
+    90.0
+}
+
+/// The shortest 360° photo shot that opens as a tiny planet, seconds (shorter ones pan).
+const PLANET_PHOTO_SECONDS: f64 = 3.0;
 
 /// [`push_in`] for a 360° shot: its camera's field of view (`fov`, degrees across) narrowed so
 /// the picture grows as much, eased the same way (the camera makes every frame sharp, where
@@ -1860,8 +1869,10 @@ async fn pillars_through_transitions(ex: &dyn Executor, backdrops: &[(u64, u64)]
 /// its slow pan and zoom (`clip.kenBurns`, eased, as slow as its hold asks): filling the frame
 /// with the move aimed at its subject, or — the plan's `fit: "full"`, or a portrait photo whose
 /// subject the crop would cut ([`photo_fills`]) — whole over its blurred copy (the pillars), the
-/// picture breathing towards its subject and the copy pushing in. A move the engine refuses
-/// leaves the photo fitted and still (noted nowhere: it is cosmetic).
+/// picture breathing towards its subject and the copy pushing in. A 360° photo (an Insta360
+/// `.insp`) is looked round instead: turned to its subject, a tiny planet opening onto it or a
+/// slow pan across it. A move the engine refuses leaves the photo fitted and still (noted
+/// nowhere: it is cosmetic).
 async fn place_photo(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, dur: f64, how: Framing, ph: PhotoMove) -> Result<Placed, AutoCutError> {
     let t = on_frame(t, tr.fps);
     let end = on_frame(t + dur, tr.fps).max(t + 1.0 / tr.fps);
@@ -1869,6 +1880,18 @@ async fn place_photo(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, dur: f64
         run(ex, "timeline.place", json!({"item": item, "track": tr.fg, "time": ticks(t), "sourceIn": 0, "duration": ticks(end - t), "audio": false})).await?;
     let fg =
         r["clips"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).ok_or_else(|| AutoCutError::Executor("timeline.place placed nothing".into()))?;
+    if r["reframed360"].as_array().is_some_and(|a| a.iter().any(|c| c.as_u64() == Some(fg))) {
+        // a 360° photo is looked round: turned to its subject, then a tiny planet opening onto it
+        // or a slow pan across it, by turns (the photos' moves alternate)
+        aim_360(ex, fg, &how).await;
+        let mv = if !ph.reverse && end - t >= PLANET_PHOTO_SECONDS {
+            json!({"clips": [fg], "move": "planetIn"})
+        } else {
+            json!({"clips": [fg], "move": "drift", "direction": if ph.reverse { "left" } else { "right" }, "at": 0, "seconds": end - t})
+        };
+        run(ex, "clip.vrMove", mv).await.ok();
+        return Ok(Placed { fg, bg: None, audio: None, end, fit: None });
+    }
     let size = media_size(ex, item).await.filter(|(w, h)| *w > 0.0 && *h > 0.0);
     let aspect = size.map_or(tr.aspect, |(w, h)| w / h);
     let odd = (aspect - tr.aspect).abs() > 0.05;
@@ -5498,7 +5521,7 @@ mod tests {
             let r = match id {
                 "timeline.place" => Ok(json!({"clips": [7, 8], "reframed360": [7]})),
                 "clip.reframe360" => Ok(json!({"clips": [{"clip": 7, "fov": 90.0}]})),
-                "clip.stabilize360" | "clip.follow360" | "effects.setParam" | "effects.setInterpolation" => Ok(json!({})),
+                "clip.stabilize360" | "clip.follow360" | "clip.vrMove" | "effects.setParam" | "effects.setInterpolation" => Ok(json!({})),
                 other => Err(format!("unexpected {other}")),
             };
             Box::pin(async move { r })
@@ -5538,5 +5561,31 @@ mod tests {
         let aim = &calls.iter().find(|(c, _)| c == "clip.reframe360").unwrap().1;
         assert_eq!((aim["yaw"].as_f64(), aim["pitch"].as_f64()), (Some(0.0), Some(AIM_PITCH_MAX)));
         assert!(!calls.iter().any(|(c, _)| c == "clip.follow360" || c == "clip.stabilize360"));
+    }
+
+    #[tokio::test]
+    async fn a_360_photo_opens_as_a_planet_or_pans_by_turns() {
+        async fn shot(reverse: bool, dur: f64) -> (Placed, Vec<(String, Value)>) {
+            let tr = voice_tracks();
+            let moment = Moment { seconds: 0.0, area: 0.02, center: [0.25, 0.5] };
+            let ex = Places360(Default::default());
+            let ph = PhotoMove { motion: KenBurns::In, reverse, subject: None };
+            let placed = place_shot(&ex, &tr, 3, 2.0, 0.0, dur, Framing { photo: Some(ph), ..Framing::plain(Some(moment), true) }).await.unwrap();
+            let calls = ex.0.lock().unwrap().clone();
+            (placed, calls)
+        }
+        let (placed, calls) = shot(false, 4.0).await;
+        assert_eq!((placed.bg, placed.fit), (None, None), "no backdrop, no fit");
+        let ids: Vec<&str> = calls.iter().map(|(c, _)| c.as_str()).collect();
+        assert!(!ids.iter().any(|c| matches!(*c, "clip.kenBurns" | "clip.fillFrame" | "clip.fitToFrame" | "clip.stabilize360" | "clip.follow360")), "{ids:?}");
+        let aim = &calls.iter().find(|(c, _)| c == "clip.reframe360").unwrap().1;
+        assert_eq!(aim["yaw"].as_f64(), Some(-90.0), "turned to its subject");
+        assert_eq!(calls.iter().find(|(c, _)| c == "clip.vrMove").unwrap().1["move"], "planetIn");
+        // the next one, or a short one, pans
+        let (_, calls) = shot(true, 4.0).await;
+        let mv = &calls.iter().find(|(c, _)| c == "clip.vrMove").unwrap().1;
+        assert_eq!((mv["move"].as_str(), mv["direction"].as_str()), (Some("drift"), Some("left")));
+        let (_, calls) = shot(false, 2.0).await;
+        assert_eq!(calls.iter().find(|(c, _)| c == "clip.vrMove").unwrap().1["move"], "drift");
     }
 }

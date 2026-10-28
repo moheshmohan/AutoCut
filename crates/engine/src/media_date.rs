@@ -154,13 +154,14 @@ const PHOTO_HEAD: u64 = 1 << 20;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_HEIF_READ: u64 = 64 << 20;
 
-/// The EXIF of a photo file (JPEG, TIFF or HEIF, by extension); `None` for anything else.
+/// The EXIF of a photo file (JPEG — an Insta360 `.insp` too — TIFF or HEIF, by extension); `None`
+/// for anything else.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn photo_exif(path: &str) -> Option<filmcraft_media::exif::Exif> {
     use std::io::Read;
     let ext = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
     let heif = filmcraft_media::HEIF_EXTENSIONS.contains(&ext.as_str());
-    if !heif && !matches!(ext.as_str(), "jpg" | "jpeg" | "jpe" | "tif" | "tiff") {
+    if !heif && !matches!(ext.as_str(), "jpg" | "jpeg" | "jpe" | "tif" | "tiff" | "insp") {
         return None;
     }
     let f = std::fs::File::open(path).ok()?;

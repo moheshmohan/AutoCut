@@ -384,7 +384,7 @@ pub fn joins(plan: &mut Plan, cands: &[Candidate], speech: &[ItemSpeech], beat: 
         let prev_talking_at_end = segments(speech, pc.item).iter().any(|(a, b)| *b > p_end - lead && *a < p_end);
         let runs_on = segments(speech, pc.item).iter().filter(|(a, b)| *a < p_end && *b > p_end).map(|(_, b)| b - p_end).fold(0.0, f64::max);
         let cur_talking_at_start = segments(speech, cc.item).iter().any(|(a, b)| *a < c_start + MAX_TAIL && *b > c_start);
-        let photo = pc.kind == Kind::Photo || cc.kind == Kind::Photo;
+        let photo = pc.photo || cc.photo;
         let mut sound = String::new();
         let whip = matches!(enter, Enter::Whip | Enter::Swipe);
         if !photo && !whip && starts_talking && !prev_talking_at_end && c_start >= lead {

@@ -448,6 +448,9 @@ pub struct Candidate {
     pub item: u64,
     pub name: String,
     pub kind: Kind,
+    /// A still picture (a photo; a 360° photo is a 360° candidate too): nothing in it moves, and
+    /// its shot can be any length.
+    pub photo: bool,
     /// Media seconds of the shot, and its best moment.
     pub start: f64,
     pub end: f64,
@@ -493,6 +496,11 @@ pub struct Candidate {
 impl Candidate {
     pub fn seconds(&self) -> f64 {
         (self.end - self.start).max(0.0)
+    }
+    /// Whether camera `m` suits it: its kind's cameras, and for a photo none that needs the
+    /// picture to move (a follow, a hyperlapse, a speed ramp).
+    pub fn fits(&self, m: Camera) -> bool {
+        m.for_kind(self.kind) && !(self.photo && matches!(m, Camera::Follow | Camera::Hyperlapse | Camera::SpeedRamp))
     }
     fn look(&self, id: &str) -> Option<&Look> {
         self.looks.iter().find(|l| l.id == id)
@@ -628,10 +636,11 @@ fn candidate(
     speech: &[ItemSpeech],
 ) -> Candidate {
     {
-        let kind = if s.still {
-            Kind::Photo
-        } else if vr.contains(&s.item) {
+        // (a 360° photo is looked round like a 360° video: planets, orbits, pans)
+        let kind = if vr.contains(&s.item) {
             Kind::Vr
+        } else if s.still {
+            Kind::Photo
         } else {
             Kind::Flat
         };
@@ -677,6 +686,7 @@ fn candidate(
             item: s.item,
             name: s.name.clone(),
             kind,
+            photo: s.still,
             start,
             end,
             key,
@@ -687,7 +697,7 @@ fn candidate(
             hook: f64::from(filmcraft_scenes::best::score(&s.shot, ShotUse::Hook).0.clamp(0.0, 1.0)),
             wide: d.is_some_and(|d| d.shot_type == ShotType::Wide) || uses.contains(&ShotUse::Establishing),
             indoor: indoors(&format!("{} {}", s.caption(), d.map(|d| d.setting.as_str()).unwrap_or_default())),
-            moving: s.shot.camera != CameraMove::Static || d.is_some_and(|d| !d.actions.is_empty()),
+            moving: !s.still && (s.shot.camera != CameraMove::Static || d.is_some_and(|d| !d.actions.is_empty())),
             talking: s.talking,
             said,
             looks,
@@ -982,7 +992,7 @@ pub fn mood_from_brief(brief: &str) -> &'static str {
 /// Where a shot of `need` media seconds starts in candidate `c`: its best moment a third in,
 /// inside the media.
 fn window_from(c: &Candidate, need: f64) -> Option<f64> {
-    if c.kind == Kind::Photo {
+    if c.photo {
         return Some(0.0);
     }
     if !(need.is_finite() && need > 0.0) || need > c.media_seconds + 1e-6 {
@@ -1019,7 +1029,7 @@ fn rules_camera(c: &Candidate, secs: f64, used: &HashMap<Camera, usize>, last: O
                 // a named subject is kept in view (a push in, tracked: `compile`); a view without one drifts
                 (true, if c.looks.first().is_some_and(|l| l.named) || n(Camera::Drift) > n(Camera::PushIn) { Camera::PushIn } else { Camera::Drift }),
             ];
-            options.iter().find(|(ok, m)| *ok && fresh(*m)).map_or(Camera::Drift, |(_, m)| *m)
+            options.iter().find(|(ok, m)| *ok && fresh(*m) && c.fits(*m)).map_or(Camera::Drift, |(_, m)| *m)
         }
     }
 }
@@ -1342,7 +1352,7 @@ pub fn director_prompt(cands: &[&Candidate], o: &Options, beat: f64, slots: &[Sl
         } else {
             "-".into()
         };
-        let cams: Vec<&str> = Camera::ALL.iter().filter(|m| m.for_kind(c.kind) && !(**m == Camera::Reveal && c.indoor)).map(|m| m.id()).collect();
+        let cams: Vec<&str> = Camera::ALL.iter().filter(|m| c.fits(**m) && !(**m == Camera::Reveal && c.indoor)).map(|m| m.id()).collect();
         let says = c.said.as_deref().map(|s| format!(" (says: \"{}\")", chars(&one_line(s), 80))).unwrap_or_default();
         out.push_str(&format!(
             "{} | {} | {} | {:.1} | {:.1} | {} | {}{} | {} | {}\n",
@@ -1396,8 +1406,8 @@ fn fit_camera(
 ) -> Camera {
     let secs = f64::from(beats) * beat;
     let ok = |m: Camera| -> Result<(), String> {
-        if !m.for_kind(c.kind) {
-            return Err(format!("{} is not for a {} clip", m.id(), kind_word(c.kind)));
+        if !c.fits(m) {
+            return Err(format!("{} is not for a {} clip", m.id(), if c.photo { "photo" } else { kind_word(c.kind) }));
         }
         if beats_for(m.min_seconds(), beat) > beats {
             return Err(format!("{} needs more than the slot's {beats} beats", m.id()));
@@ -1742,7 +1752,7 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
         let len = (t1 - t0).max(1.0 / FPS);
         let speed = s.camera.speed();
         let mut place = json!({"item": c.item, "track": "V1", "time": ticks(t0), "duration": ticks(len * speed)});
-        if c.kind == Kind::Photo {
+        if c.photo {
             place["audio"] = json!(false);
         } else {
             place["sourceIn"] = json!(ticks(s.from));
@@ -1780,13 +1790,13 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
                 // every 360° shot steadied from its pictures: a walk sways and bounces though the
                 // analysis seldom calls it handheld, and the camera's motion sensor takes out only
                 // part of the sway (a planet is all sky and ground; a hyperlapse steadies itself)
-                if !matches!(s.camera, Camera::Hyperlapse | Camera::PlanetIn | Camera::PlanetOut) {
+                if !c.photo && !matches!(s.camera, Camera::Hyperlapse | Camera::PlanetIn | Camera::PlanetOut) {
                     out.push(step("clip.stabilize360", json!({"mode": "smooth", "wait": true}), me, On::Clips));
                 }
                 // where the shot's own clip time is: the hyperlapse plays its media faster
                 let at = |secs: f64| round2(secs.max(0.0));
                 // a named subject is tracked under a camera that does not turn by itself
-                if look.is_some_and(|l| l.named) && matches!(s.camera, Camera::Hold | Camera::PushIn | Camera::SpeedRamp) {
+                if !c.photo && look.is_some_and(|l| l.named) && matches!(s.camera, Camera::Hold | Camera::PushIn | Camera::SpeedRamp) {
                     out.push(step(
                         "clip.follow360",
                         json!({"target": "subject", "at": at((c.key - s.from) / speed), "smooth": 0.7, "wait": true}),
@@ -2767,7 +2777,7 @@ async fn captions(
         let Some(c) = cands.iter().find(|c| c.id == s.clip) else { continue };
         // (a travel video under music: only someone talking on screen is captioned, not words
         // caught in passing)
-        if s.camera == Camera::Hyperlapse || c.kind == Kind::Photo || (places && !focus::voiced(o.focus, c, s)) {
+        if s.camera == Camera::Hyperlapse || c.photo || (places && !focus::voiced(o.focus, c, s)) {
             continue;
         }
         let Some(sp) = speech.iter().find(|x| x.item == c.item && x.language.starts_with("en")) else { continue };

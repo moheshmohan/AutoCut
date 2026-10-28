@@ -45,6 +45,15 @@ a sudden change; an equirectangular 360° file may be an edit and is looked at l
   FilmCraft decodes both tracks and shows them side by side (the selfie lens left, as the
   camera's own `.lrv` and calibration do): one dual-fisheye picture twice as wide as high.
 - **`.lrv`**: the camera's low-resolution copy, H.264, both lenses side by side in one track.
+- **`.insp`** (photos): a JPEG of both lenses side by side, the camera's trailer after it. Opened
+  as a 360° still (`filmcraft_codecs::insp`): the image circles from the trailer's calibration,
+  as for its videos; scaled to the still limit of 8192 × 4096. Imported by File ▸ Import and with
+  the recordings (`insta360.import`, lenses aligned); the camera's `.jpg` and `.dng` exports are
+  read as flat pictures. The director looks round a 360° photo as it does a 360° video — a tiny
+  planet, an orbit, a whip, a reveal, a drift, a push in — never a follow, a hyperlapse or a
+  speed ramp (nothing in it moves), and does not steady it; its shot can be any length. A
+  showcase turns one to its subject and opens it as a tiny planet or pans slowly across it, by
+  turns.
 - **The trailer** (no public specification; read from the files): the camera model, serial,
   firmware, the lens calibration (each lens's image circle), the recording's start, a 1 kHz
   motion-sensor stream (accelerometer and gyroscope) and each picture's exposure time on the
@@ -452,6 +461,5 @@ sphere camera can still turn the panorama (`yaw`, `pitch`, `roll`): a re-centred
   share them.
 - 360° exports are monoscopic equirectangular; stereoscopic 360° is read (the left eye shown)
   but not written.
-- Cube maps and meshes (`cbmp`, `mshp`) are recognised but shown flat; `.insp` photos are not
-  imported yet; two-file cameras (ONE X: `_00_` and `_10_` files) are found but only their first
+- Cube maps and meshes (`cbmp`, `mshp`) are recognised but shown flat; two-file cameras (ONE X: `_00_` and `_10_` files) are found but only their first
   lens is shown.

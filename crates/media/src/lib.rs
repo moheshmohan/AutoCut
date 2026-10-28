@@ -186,10 +186,14 @@ pub trait MediaSource: Send + Sync {
 pub type SharedSource = Arc<dyn MediaSource>;
 
 /// File extensions we recognise at import (the media browser filters on these).
-pub const STILL_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "dpx", "exr", "hdr", "dng", "heic", "heif", "hif"];
+pub const STILL_EXTENSIONS: &[&str] =
+    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "dpx", "exr", "hdr", "dng", "heic", "heif", "hif", "insp"];
 /// Still formats decoded by `filmcraft-codecs` (HEIF: HEVC pictures in an ISO BMFF file), not by
 /// this crate's still decoders: they are imported as stills but never as image sequences.
 pub const HEIF_EXTENSIONS: &[&str] = &["heic", "heif", "hif"];
+/// Insta360 360° photos (a JPEG and the camera's trailer, `filmcraft-codecs`): stills, never an
+/// image sequence.
+pub const INSP_EXTENSIONS: &[&str] = &["insp"];
 pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "wave", "bwf", "aif", "aiff", "mp3", "mp2", "m4a", "aac", "flac", "ogg", "opus"];
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "m4v", "mov", "mkv", "webm", "avi", "mxf", "mts", "m2ts", "m2t", "ts", "mpg", "mpeg", "vob", "mod", "tod", "m2v", "m1v", "mpv", "3gp", "y4m", "apv",

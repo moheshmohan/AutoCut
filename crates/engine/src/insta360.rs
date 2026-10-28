@@ -193,8 +193,8 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"folders": folders, "recordings": recs, "missing": missing}))
 }
 
-/// Imports `recs` (finished videos; one `file.import` each, reusing what the project holds), the
-/// proxies attached and the lenses aligned when asked. Every edit folds into one undo step.
+/// Imports `recs` (finished videos and `.insp` photos; one `file.import` each, reusing what the
+/// project holds), the proxies attached and the lenses aligned when asked. Every edit folds into one undo step.
 fn import_recordings(s: &mut Session, recs: &[Recording], p: &Value, cmd: &str) -> Result<Vec<Value>> {
     let proxies = bool_p(p, "proxies").unwrap_or(true);
     let align = bool_p(p, "align").unwrap_or(true);
@@ -206,8 +206,9 @@ fn import_recordings(s: &mut Session, recs: &[Recording], p: &Value, cmd: &str) 
             out.push(json!({"stem": r.stem, "imported": false, "why": "still downloading (or not a finished recording)"}));
             continue;
         }
-        if r.kind != "video" {
-            out.push(json!({"stem": r.stem, "imported": false, "why": "360° photos are not imported yet"}));
+        // (360° photos: the camera's `.insp`; its `.jpg` and `.dng` exports are not read as 360°)
+        if r.kind != "video" && !r.path.to_ascii_lowercase().ends_with(".insp") {
+            out.push(json!({"stem": r.stem, "imported": false, "why": "only the camera's .insp photos are imported as 360°"}));
             continue;
         }
         let mut params = serde_json::Map::new();
