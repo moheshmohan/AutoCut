@@ -259,6 +259,17 @@ clip behaviour: `crates/engine/src/narration.rs`.
   - `audition`: the fixed test lines (English and Malayalam, hard starts and loanwords), a
     reading scored on similarity to the held-out speech, CER and sentence-start CER
     ([`heard::score`]) and the signal scan; the ranking.
+  - `styles`: the style finder. IndicF5 candidates ending at a sentence end
+    (`Candidate::ends_sentence`, from `sentence_edges`) measured for prosody
+    (`filmcraft_audio_dsp::prosody::expressiveness`: pitch level, range and movement, energy
+    variation, syllable rate, final contour), placed on the speaker's own scale (`norms`: robust
+    median and spread over his candidates, pulled towards `PRIORS` — his measured speech — with
+    the weight of four candidates), scored per delivery (`scores`: calm, plain, conversational,
+    warm, excited, amazed, curious; the rules in the module docs) and shared out by a softmax
+    (`assess`: the style and its confidence); `pick` lists the best per style (share × the
+    reference score), never two overlapping stretches of a clip, none under a 0.2 share. The
+    engine's `voice.findStyles` (CLI `voice styles`) hears the picks with both Malayalam models;
+    `voice.prosody` (CLI `voice prosody`) measures and reshapes any recording.
   - `clone::promote` / `versions` / `rollback`: a reference replaced with the old one kept
     (`<name>.versions/r<revision>/`), consent carried over, the profile's `revision` counted (and
     in the prompt cache's key); the narration cache already keys on the reference's bytes.
@@ -550,6 +561,59 @@ held-out speech is mostly that session's microphone and room: similarity follows
 as well as the voice. So the library holds no clearly better recording of the speaker: a
 purpose-made one is the way to a better clone ([docs/voice-recording.md](../../docs/voice-recording.md)).
 
+## Delivery styles: the author's clips and his narrations (measured 2026-10-28)
+
+**How flat is the synthesis?** `filmcraft-cli voice prosody` (`filmcraft_audio_dsp::prosody`,
+24 kHz) on five IndicF5 narrations of the 3D Printing Saga (`Narration 1, 2, 3, 10, 20.wav`) and
+five stretches of the author's own Malayalam (`IMG_3337.MOV` 56.1–63.7 s, `IMG_3338.MOV`
+41.9–50.2 s, the current reference's region of `20250729-124548.mov` 132.4–141.2 s, the voice-overs
+`IMG_4184.MOV` 26.4–34.7 s and `IMG_4188.MOV` 0.1–10.1 s), medians:
+
+| | pitch | range (10–90 %) | movement | energy variation | syllable rate | voiced |
+|---|---|---|---|---|---|---|
+| narrations | 91 Hz | **3.0 st** (2.5–3.8) | 12.4 st/s | 4.7 dB | 4.4 /s | 0.60 |
+| his speech | 92 Hz | **4.0 st** (3.1–4.4) | 9.9 st/s | 4.1 dB | 4.4 /s | 0.66 |
+
+The narrations' intonation is about a quarter narrower than his speech — and than the very clip
+they continue (4.2 st) — at the same pace, while their pitch wobbles more from one 50 ms to the
+next (movement) and their syllables vary more in level: flat phrasing over a busier surface. Over
+all 29 of his candidates (run 2 below) the range centre is 4.05 st.
+
+**Reshaped** (`--range 1.3,1.6 --hear`, `target/agent-prosody/samples/`): `Narration 1.wav`
+3.0 → 3.5 (1.3) and 4.4 st (1.6), `Narration 3.wav` 3.8 → 4.7 and 5.9 st; the words heard again
+by both Malayalam models differ from what they heard in the original by a character error rate
+of 0.02–0.07 (the same model hearing two readings of one line differs by about as much), so the
+words survive; the length is unchanged.
+
+**His clips, sorted by delivery** (`voice styles` over the Google Photos cache and the AutoCut
+projects' media: 1046 files, 1012 clips with sound, 744 minutes, 24 minutes on an M3 Max with the
+hearing). Against the voice's reference alone, his 3D-printing voice-overs and the current
+reference's own source clip scored only 0.72–0.84 (another room and microphone), so five
+stretches of them were given as `--speaker-ref` and the check kept at 0.80: his Malayalam clips
+then scored 0.84–0.94 at best; the other clips over 0.80 were English (English recordings of
+his, and `Every Robot I_ve Met - Pro.mp4`, a copy of an AutoCut render — the cloned voice — that
+the render check does not know), and English is not taken. His Malayalam turned up in eight clips — `IMG_3337.MOV` and `IMG_3338.MOV` (the clone's
+session), `20250729-124548.mov` (the current reference's), the voice-overs `IMG_4184.MOV`,
+`IMG_4185.MOV` and `IMG_4188.MOV`, a 3D-printing walk-through `copy_FAA0F66C-….mov` (273 s) and
+`IMG_5479.MOV` (15 s: its words do not say whose voice it is — listen); `IMG_4189.MOV` (0.78 at best) and `20250729-122424.mov` (no whole phrase ending at
+a sentence end) gave none. 34 candidates (whole phrases, 6–12 s, ending at a sentence end; 29
+more did not end at one) on his scale — range 3.9 ± 1.0 st, movement 9.4 ± 2.0 st/s, energy
+variation 4.2 ± 1.2 dB, 4.8 ± 0.6 syllables/s — the best per style:
+
+| style | clip | seconds | confidence | the two models agree | why |
+|---|---|---|---|---|---|
+| excited | `IMG_3338.MOV` | 149.9–158.0 | 0.95 | 0.80 | range 4.6 st, energy variation 5.8 dB, 5.5 syllables/s |
+| amazed | `20250729-124548.mov` | 44.0–51.2 | 0.95 | 0.84 | range 5.1 st at 99 Hz, 3.4 syllables/s |
+| curious | `IMG_4184.MOV` | 34.9–42.4 | 0.97 | 0.63 | ends 8.9 st up (a continuation rise as much as a question: listen) |
+| conversational | `copy_FAA0F66C-….mov` | 165.1–174.0 | 0.86 | 0.63 | everything near his middle |
+| plain | `IMG_4185.MOV` | 26.7–33.9 | 0.81 | 0.80 | range 2.2 st at an ordinary 5 syllables/s |
+| calm | `IMG_3338.MOV` | 41.9–50.2 | 0.64 | 0.72 | range 3.1 st, movement 7.1 st/s, 4.0 syllables/s |
+| warm | none good | — | 0.34 at best | — | his clips are tech talk and walk-throughs: nothing lower, slower and melodic |
+
+The two Malayalam models agree on 0.6–0.8 of the characters of most picks (both stumble on his
+English loanwords); where they agree under 0.5 the pick says `check` — one calm pick's Malayalam
+Whisper heard a single word for 12 s, so its transcript is IndicWhisper's.
+
 ## Limitations
 
 - The built-in voices are **robotic** and nearly unintelligible to a recogniser (above); they are
@@ -623,7 +687,11 @@ telling clean from noisy, clipped, reverberant and music-backed speech; windows 
 engine's bounds that never cut a word; sentence edges by words and by pauses; a scan of two
 speakers finding only the one asked for (and hearing nothing when nobody matches); ranking spread
 over recordings; held-out speech away from every reference; audition order; hostile audio
-(empty, NaN, infinite, full scale). Versions: a promoted sample and Malayalam clip kept and
+(empty, NaN, infinite, full scale). Styles: each archetype (z-scores a spread or two out) gets
+its style, a slight rise is no question, the scale is the speaker's own (one speaker's wide is
+another's narrow; few candidates lean on the priors; the spread never collapses), picks ranked
+and never overlapping, empty styles left empty, hostile features harmless, and synthetic lively
+speech (wide, fast, punchy) told from flat speech end to end through the prosody measures. Versions: a promoted sample and Malayalam clip kept and
 rolled back (the narration cache's identity changing and coming back), consent and the
 Malayalam reference carried over, refused promotions changing nothing.
 

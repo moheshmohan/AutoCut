@@ -382,6 +382,18 @@ SUBCOMMANDS
   voice mix-check --takes <wav|folder> (--genuine <wav> | --report refs.json) [--chains c.json]
                                 how far the showcase's narration chain moves a voice: speaker
                                 similarity of readings and genuine speech before and after it
+  voice styles --voice clone:<name> [<media|folder|project.fcproj>…] [--items ID,… --project P]
+         [--top 3] [--language ml|any] [--no-hear] [--speaker-ref file@start-end]… [--out DIR]
+                                the style finder: the speaker's IndicF5 references (whole
+                                phrases ending at a sentence end) sorted by delivery from their
+                                prosody on his own scale — calm, plain, conversational, warm,
+                                excited, amazed, curious — the best per style heard by both
+                                Malayalam speech models: styles.json and WAVs (voice.findStyles)
+  voice prosody [<wav|media>…] [--segment file@start-end]… [--range 1.3,1.6] [--shift ST]
+         [--question ST] [--emphasis DB] [--out DIR] [--hear]
+                                pitch median, range and movement, final contour, energy
+                                variation, syllable rate of recordings; with shapes, each
+                                reshaped (TD-PSOLA) into --out, heard again (voice.prosody)
   ml-lint <script-ml.json | plan-ml.json | script.txt> [--plan plan.json] [--max-words 14]
          [--fix --out fixed.json] [--hints] [--report-out report.json] [--strict]
                                 a Malayalam narration script checked for what makes it sound

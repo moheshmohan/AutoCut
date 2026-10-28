@@ -155,6 +155,11 @@ fn sentences_are_whole_by_the_words_or_the_pauses() {
     // no words: long pauses still count
     assert_eq!(sentence_fit(&[], Span::new(0.0, 2.0), 0.8, 0.9), 0.7);
     assert_eq!(sentence_fit(&[], Span::new(0.0, 2.0), 0.3, 0.3), 0.0);
+    // the edges apart: whether a stretch ends a sentence (the style finder's need)
+    assert_eq!(sentence_edges(&words, Span::new(1.4, 2.8), 0.6, 0.4), (0.5, 0.5));
+    assert_eq!(sentence_edges(&words, Span::new(1.4, 3.25), 0.6, 0.05), (0.5, 0.0));
+    assert_eq!(sentence_edges(&words, Span::new(2.1, 2.8), 0.1, 0.4), (0.0, 0.5));
+    assert_eq!(sentence_edges(&[], Span::new(0.0, 2.0), 0.3, 0.9), (0.0, 0.35));
 }
 
 /// Fake models: the "embedding" is the signal's pitch (two speakers apart), the words one per
@@ -222,6 +227,7 @@ fn cand(clip: &str, t: Target, start: f64, len: f64, score: f64) -> Candidate {
         similarity: 0.9,
         quality: Quality::default(),
         sentence: 1.0,
+        ends_sentence: true,
         length_fit: 1.0,
         language_fit: 1.0,
         score,

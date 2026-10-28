@@ -207,7 +207,7 @@ generation does:
 filmcraft-cli voice style set --voice clone:me --style excited --file ~/Movies/IMG_4184.MOV \
   --start 41.2 --end 52.8 --transcript "അത് ശരിക്കും ഒരു മാജിക് പോലെ തോന്നി! …"
 # or a project item: --project p.fcproj --item 1666
-filmcraft-cli voice styles --voice clone:me             # what it has, and what each emotion reads after
+filmcraft-cli voice style list --voice clone:me         # what it has, and what each emotion reads after
 filmcraft-cli voice style remove --voice clone:me --style calm
 ```
 

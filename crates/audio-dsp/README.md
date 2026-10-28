@@ -249,6 +249,67 @@ supplies planar input (any position; silence outside the media is the caller's).
   0.5× → 120 s out in 0.44 s (270× real time), 0.75× 216×, 1.5× 170–316×, 2× 175–260×, 4×
   153–217×; a seek (fresh stretcher, 1024 samples) 4–9 ms mid-segment, ≤ 30 ms on a junction.
 
+## Prosody (`prosody`)
+
+Speech intonation, measured and reshaped: mono `f32` at 4–768 kHz, at most two hours at once.
+Bad rates and settings are errors, non-finite samples are silence, empty input gives an empty
+result. Clean-room from the published algorithms: YIN (de Cheveigné & Kawahara, JASA 2002), the
+candidate path of Boersma (IFA Proceedings 17, 1993), TD-PSOLA (Moulines & Charpentier, Speech
+Communication 9, 1990) and the intensity-peak syllable count of de Jong & Wempe (Behavior
+Research Methods 41, 2009).
+
+- **F0 tracker** — `track(x, rate, &PitchSettings { min_hz: 60, max_hz: 500, voicing: 0.4 })` →
+  `PitchTrack { hop: 0.01, f0: Vec<Option<f32>>, confidence, level_db }`, frame `i` centred on
+  `i · 10 ms`. Rates over 32 kHz are low-passed and decimated by a whole factor to 16–32 kHz.
+  Per frame the cumulative-mean-normalised difference `d′(τ)` of a 25 ms window (the
+  cross-correlation from one complex FFT, energies from prefix sums); every local minimum under
+  0.85 between the shortest and longest period is a candidate (six at most), refined by a
+  parabola through `d`. A dynamic-programming path over all frames picks unvoiced or a
+  candidate: a candidate scores `1 − d′` less 0.04 per octave under the frame's highest one
+  (multiples of the period are as periodic as the period), unvoiced `1 − voicing` plus up to 1
+  near silence (30–40 dB under the loud frames, or under −70 dBFS); a voiced step costs 0.6 per
+  octave, a voicing change 0.2. Voiced runs under 30 ms are dropped. `confidence` is the frame's
+  periodicity, `1 − d′` at its best candidate.
+  Tested on glottal-like voices (harmonics at −6 dB/octave through two formants) and sines at
+  16, 24, 44.1 and 48 kHz with noise 20–34 dB down: median error under 1 % (65, 110, 140, 230,
+  420 Hz; 700 Hz with a raised range), every frame within 4 % on glides 90 → 260 → 120 Hz (no
+  octave jumps), over 95 % of voiced frames found and of silent frames left unvoiced. A minute of
+  48 kHz audio tracks in about 0.13 s (an optimised build).
+- **Reshaping** — `psola(x, rate, &track, &ratios)` multiplies each frame's pitch by its ratio
+  (kept within ½…2), the duration unchanged: analysis marks one period apart at the peaks of a
+  1 ms moving average (±20 % around where the period puts them), synthesis marks spaced by the
+  analysis period at the nearest mark over the ratio, each taking that mark's grain (a raised
+  cosine back to the previous mark and on to the next, so at ratio 1 the grains add back to the
+  input exactly); the local energy (30 ms) is matched to the original's and each voiced run is
+  cross-faded with it over 10 ms at both ends. Unvoiced audio, runs under 40 ms and runs left at
+  ratio 1 are the input's samples. `reshape(x, rate, &Shape, &PitchSettings)` builds the ratios
+  (`shape_ratios`) from:
+
+  | `Shape` field | range | default | does |
+  |---|---|---|---|
+  | `range` | 0.5–2.0 | 1.0 | each voiced frame's deviation from the utterance's median F0 scaled in the log domain (on a 50 ms median-smoothed contour) |
+  | `shift` | −12…12 st | 0 | the whole contour moved |
+  | `question_rise` | −12…12 st | 0 | added over the last half second of voicing (gaps to 150 ms bridged) before `question_end` (seconds; default the end), a smooth ramp; the rest of a voiced run past the end holds it |
+  | `emphasis_db` | 0–6 dB | 0 | stressed syllables lifted: F0 above the two syllables either side (full lift at 3 st) or louder than the median syllable (full at 6 dB), a raised-cosine gain from the dip before to the dip after, never past −0.2 dBFS |
+
+  A neutral shape returns the input unchanged. Tested: the re-tracked contour's 10–90 % range is
+  the requested multiple within 5 % (measured within 0.5 % for 0.6, 1.3, 1.5, 1.6 and 2.0 at 16,
+  24 and 48 kHz), the median within 3 %, the length exact, energy within 1 dB (measured
+  ±0.04 dB), no sample step over twice the input's largest, a shift within 0.25 st, a question's
+  end within 0.6 st of the rise asked, unvoiced hiss either side bit-identical. On the owner's
+  IndicF5 narrations range 1.6 took the 10–90 % range from 3.0 to 4.4 st and from 3.8 to 5.9 st.
+- **Expressiveness** — `expressiveness(x, rate, &PitchSettings)` (or `expressiveness_of` with a
+  track): `f0_median_hz`, `f0_range_st` (10th–90th percentile), `f0_movement_st_s` (mean absolute
+  slope between voiced frames 50 ms apart), `final_contour_st` (the last 100 ms of voicing
+  against the 400 ms before: + for a rising end), `energy_variation_db` (standard deviation of the
+  syllable peaks' speech-band levels), `syllable_rate` (peaks per second of speech),
+  `voiced_fraction`, `speech_seconds`. `syllables(x, rate, &track)`: peaks of the 300 Hz–3 kHz
+  level (30 ms around each frame) in speech, voiced or within 20 ms of it, at most 25 dB under
+  the loud frames, standing 2 dB over the dips towards their neighbours, at least 80 ms apart.
+  Tested on syllable trains (5 a second, levels alternating 6 dB, F0 falling 6 st in 2 s):
+  rate within 0.8/s, energy variation within 1.2 dB of 3 dB, movement within 1.2 of 3 st/s,
+  range within 0.8 of 4.8 st.
+
 ## Audio synchronisation (`sync`)
 
 `find_offset(a, b, sample_rate, &SyncOptions)` returns the lag `L` with `b[n] ≈ g·a[n + L]`, a

@@ -15,10 +15,16 @@
 //!   reference itself), on what a speech model hears (character error rate, and the first
 //!   syllables of each sentence on their own: [`crate::heard::score`]) and on artefacts.
 //!
+//! - **Styles** ([`styles`]): IndicF5 candidates sorted by delivery — calm, plain,
+//!   conversational, warm, excited, amazed, curious — from their prosody (pitch range and
+//!   movement, energy variation, syllable rate, pitch level, the final contour) against the
+//!   speaker's own spread over all his candidates.
+//!
 //! The models are the caller's ([`Models`]): pure functions here, tested on synthetic audio.
 
 pub mod audition;
 pub mod signal;
+pub mod styles;
 
 use serde::{Deserialize, Serialize};
 
@@ -210,6 +216,8 @@ pub struct Candidate {
     /// Whole sentences: 1 when it starts and ends where sentences do (by the words heard), less
     /// when only by its pauses.
     pub sentence: f64,
+    /// It ends where a sentence does (by the words heard or a long pause after it).
+    pub ends_sentence: bool,
     pub length_fit: f64,
     pub language_fit: f64,
     /// All of it ([`candidate_score`]).
@@ -245,6 +253,14 @@ pub struct ClipScan {
 /// words heard (the word before ends a sentence, or there is none; its last word ends one), 0.35
 /// where only a long pause says so, 0 where a word is cut or the sentence runs on.
 pub fn sentence_fit(words: &[Word], w: Span, pause_before: f64, pause_after: f64) -> f64 {
+    let (a, b) = sentence_edges(words, w, pause_before, pause_after);
+    a + b
+}
+
+/// [`sentence_fit`]'s two edges, the start's and the end's: each 0.5 where a sentence ends by
+/// the words heard, 0.35 where only a long pause says so, 0 where a word is cut or the sentence
+/// runs on.
+pub fn sentence_edges(words: &[Word], w: Span, pause_before: f64, pause_after: f64) -> (f64, f64) {
     let ends = |t: &str| t.trim_end_matches(['"', '\'', ')', '”', '’']).ends_with(['.', '?', '!', '।']);
     let straddles = |t: f64| words.iter().any(|x| x.start + 0.05 < t && t < x.end - 0.05);
     let edge = |cut: bool, by_words: bool, pause: f64| {
@@ -262,7 +278,7 @@ pub fn sentence_fit(words: &[Word], w: Span, pause_before: f64, pause_after: f64
     let inside: Vec<&Word> = words.iter().filter(|x| x.start >= w.start - 0.05 && x.end <= w.end + 0.05).collect();
     let start_by_words = !words.is_empty() && before.is_none_or(|b| ends(&b.text));
     let end_by_words = inside.last().is_some_and(|l| ends(&l.text));
-    edge(straddles(w.start), start_by_words, pause_before) + edge(straddles(w.end), end_by_words, pause_after)
+    (edge(straddles(w.start), start_by_words, pause_before), edge(straddles(w.end), end_by_words, pause_after))
 }
 
 /// Runs of whole phrases that fit `b`: each from a phrase's start to a later phrase's end, with
@@ -388,7 +404,8 @@ pub fn scan(
             pre.sort_by(|a, b| b.0.total_cmp(&a.0));
             for (_, w, before, after) in pre.into_iter().take(MEASURED_PER_RUN) {
                 let q = signal::quality(x, &f, &a, w, w.widened(3.0));
-                let sentence = sentence_fit(&words, w, before, after);
+                let (start_edge, end_edge) = sentence_edges(&words, w, before, after);
+                let sentence = start_edge + end_edge;
                 let length = length_fit(w.seconds(), &b);
                 let sim = sim_of(&w);
                 let said: Vec<&str> = words.iter().filter(|x| x.start >= w.start - 0.05 && x.end <= w.end + 0.05).map(|x| x.text.as_str()).collect();
@@ -402,6 +419,7 @@ pub fn scan(
                     score: candidate_score(sim, s.min_similarity, q.score, sentence, length, lang_fit),
                     quality: q,
                     sentence,
+                    ends_sentence: end_edge > 0.0,
                     length_fit: length,
                     language_fit: lang_fit,
                     words: said.join(" "),
@@ -512,3 +530,7 @@ pub fn held_out(scans: &[ClipScan], exclude: &[(String, Span)], min_similarity: 
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "styles_tests.rs"]
+mod styles_tests;

@@ -113,6 +113,66 @@ audio, the voices) or AutoCut's renders. Clips where the speaker does not match 
 similarity under `--min-similarity`, 0.85) are left out; everyone else's voice is never a
 candidate. Heavy models run under the `gpu` lock (`filmcraft-cli locks`).
 
+## Delivery styles: a reference for each way you speak
+
+IndicF5 continues its reference clip, so the clip's delivery carries into every line read from
+it: a flat clip reads flat. The style finder looks through your clips for Malayalam references
+(whole phrases of 6–12 s by you, ending at a sentence end) and sorts them by how you speak in
+them — **calm, plain, conversational, warm, excited, amazed, curious** — so each style of
+narration can have its own reference
+([`filmcraft_tts::voice_lab::styles`](../crates/tts/src/voice_lab/styles.rs)):
+
+```sh
+# the clips of a project (its media items: --items with --project) and any other files or folders
+filmcraft-cli voice styles --voice clone:mohesh-natural --project "$HOME/Movies/AutoCut/3D Printing Saga/3D Printing Saga.fcproj" \
+  --items 1662,1666,1668 ~/Movies/voice-seed --top 3 --out ~/Movies/voice-seed/styles
+```
+
+The speaker check is the voice lab's (tone-colour similarity to the voice's reference, 0.85),
+and similarity follows the room and the microphone as well as the voice: the author's 3D
+printing voice-overs and the current Malayalam reference's own source clip score 0.72–0.84
+against a reference made from another session. Give stretches of such recordings as
+`--speaker-ref file@start-end` (their tone colour is averaged with the voice's reference) and,
+for clips you know are yours, a lower `--min-similarity`. On the author's library five stretches
+of his voice-overs as references lifted his Malayalam clips to 0.84–0.94, and the other clips
+over 0.80 were English (the measured run and the best picks per style: [crate README](../crates/tts/README.md#delivery-styles-the-authors-clips-and-his-narrations-measured-2026-10-28)).
+
+Each candidate's prosody is measured (`filmcraft_audio_dsp::prosody`: pitch level, pitch range
+from the 10th to the 90th percentile, pitch movement, energy variation over syllable peaks,
+syllable rate, the final contour) and placed against **your own spread** over all your candidates
+(robust z-scores, leaning on your measured speech while there are few), so the styles are yours:
+excited is lively *for you*. The rules (the module docs have the weights): excited = wide range,
+much movement, punchy syllables, faster, higher; amazed = wide and high but slower; curious = a
+rising end; calm = narrow, slow and even; plain = flat at an ordinary pace; warm = lower,
+unhurried, still melodic; conversational = your middle. `dramatic` is not told apart by prosody
+alone. Each candidate gets a share per style (they add up to 1) and its confidence is its own
+style's share; a style your clips do not hold stays empty rather than offering a poor match.
+
+The best `--top` per style are heard by both Malayalam speech models the strict check uses
+(the Malayalam Whisper and IndicWhisper; `--no-hear` skips them) and written to
+`styles/<style>-<rank>.wav`. `styles.json` lists each pick with what a style reference needs —
+`path` (and `item` when it came from one), `start`, `end`, `transcript`, `style` — and why:
+`confidence`, `features`, `z`, every style's `shares`, what each model heard and their
+`agreement` (1 − the character error rate between them: low agreement means check the words
+by ear before using them), the speaker `similarity` and signal `quality` (and `check` when the two models agree on under
+half of the words). Listen, correct the
+words if needed, and make it the voice's reference for that style (`tts.voiceReference` with
+`style`).
+
+`voice prosody` measures any recording the same way and can reshape its intonation (TD-PSOLA:
+the same length and words, unvoiced sounds untouched):
+
+```sh
+# how lively is a narration, and the same with its pitch range scaled 1.3× and 1.6×, heard again
+filmcraft-cli voice prosody "Narration 1.wav" --segment "IMG_4184.MOV@12.0-21.5" \
+  --range 1.3,1.6 --out ~/Movies/voice-seed/shaped --hear
+```
+
+`--shift` (semitones), `--question` (semitones of rise over the last half second, ending at
+`--question-end`) and `--emphasis` (dB on stressed syllables) shape it further. With `--hear` both
+Malayalam models hear the original and each reshaped version, and the character error rate
+between the two readings shows whether the words survived.
+
 ## Measures
 
 - **Speaker similarity**: the cosine of OpenVoice V2 tone colours (1 = the same timbre). Over
