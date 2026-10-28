@@ -80,6 +80,7 @@ pub mod reframe;
 pub mod relink;
 pub mod remix;
 pub mod safe_zones;
+pub mod same_moments;
 pub mod scene_check;
 pub mod scene_detect;
 pub mod scene_models;

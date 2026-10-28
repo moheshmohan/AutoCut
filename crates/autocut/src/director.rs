@@ -159,6 +159,9 @@ pub struct Options {
     /// The opening's title behind its person (`clip.cutOut`, `clip.personInFront`) when a person
     /// is its subject: on unless switched off.
     pub cutouts: bool,
+    /// Cuts between two cameras' pictures of one moment (`media.sameMoments`): on unless switched
+    /// off.
+    pub angles: bool,
     pub look_strength: f64,
 }
 
@@ -388,6 +391,7 @@ impl Options {
             focus,
             color: p["color"].as_bool().unwrap_or(true),
             cutouts: p["cutouts"].as_bool().unwrap_or(true),
+            angles: p["angles"].as_bool().unwrap_or(true),
             color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
             look,
             look_strength: finite(&p["lookStrength"]).map_or(25.0, |v| v.clamp(0.0, 100.0)),
@@ -2406,6 +2410,24 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
             plan.notes.push(change);
         }
     }
+    // ---- two angles of one moment: where two cameras filmed at once (lined up by their sound), a
+    // shot cut half-way to the other's picture (a revision's plan keeps its own cuts)
+    if o.angles && previous.is_none() && media.len() >= 2 {
+        let items: Vec<u64> = media.iter().filter(|m| !m.still).map(|m| m.item).collect();
+        match run(ex, "media.sameMoments", json!({"items": items})).await {
+            Ok(v) => {
+                let pairs = angles::pairs(&v);
+                if !pairs.is_empty() {
+                    lines(&format!("{} pair(s) of recordings of the same moments", pairs.len()));
+                }
+                for change in angles::split(&mut plan, &cands, &pairs, beat) {
+                    lines(&format!("two angles: {change}"));
+                    plan.notes.push(change);
+                }
+            }
+            Err(e) => notes.push(format!("the same moments were not looked for ({})", chars(&e.to_string(), 160))),
+        }
+    }
     // ---- the style: when the edit leaves it to the director, chosen from the shots it planned
     // (a revision keeps the one its edit was made in)
     if o.auto_style {
@@ -2900,6 +2922,9 @@ async fn export(ex: &dyn Executor, o: &Options, seq: u64, out: &str, report: &mu
         report.qa_summary = Some(qa.summary());
     }
 }
+
+#[path = "director_angles.rs"]
+pub mod angles;
 
 #[path = "director_cuts.rs"]
 pub mod cuts;

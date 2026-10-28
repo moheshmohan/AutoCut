@@ -1003,3 +1003,50 @@ fn a_person_big_in_the_opening_is_put_in_front_of_its_title() {
     assert!(!person_subject(&c, None));
     assert!(opts(json!({"brief": "x"})).cutouts && !opts(json!({"brief": "x", "cutouts": false})).cutouts);
 }
+
+#[test]
+fn a_moment_two_cameras_filmed_is_cut_between_them() {
+    let beat = beat_of(120.0);
+    // a phone clip (item 2) filmed 3 s after the 360° camera (item 1) started
+    let lib = vec![cand("c1", 1, Kind::Vr, 0.0, 20.0, 40.0, 0), cand("c2", 2, Kind::Flat, 0.0, 15.0, 15.0, 1), cand("c3", 3, Kind::Vr, 0.0, 10.0, 10.0, 2)];
+    let shot = |clip: &str, from: f64, beats: u32, camera: Camera| PlannedShot {
+        clip: clip.into(),
+        file: String::new(),
+        grade: None,
+        from,
+        beats,
+        camera,
+        look: None,
+        to: None,
+        enter: Enter::Cut,
+        align: None,
+        lead: 0.0,
+        tail: 0.0,
+        cut: String::new(),
+        text: None,
+        why: String::new(),
+    };
+    let mut plan = Plan {
+        title: "t".into(),
+        mood: String::new(),
+        bpm: 120.0,
+        shots: vec![shot("c3", 0.0, 4, Camera::PlanetIn), shot("c1", 6.0, 8, Camera::Hold), shot("c3", 4.0, 4, Camera::PlanetOut)],
+        by: "rules".into(),
+        notes: vec![],
+        style: None,
+    };
+    let pairs = angles::pairs(&json!({"pairs": [{"a": 1, "b": 2, "offset": 3.0}]}));
+    let changes = angles::split(&mut plan, &lib, &pairs, beat);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(plan.shots.len(), 4);
+    assert_eq!(plan.beats(), 16, "the beats stay");
+    let (a, b) = (&plan.shots[1], &plan.shots[2]);
+    assert_eq!((a.clip.as_str(), a.beats, b.clip.as_str(), b.beats), ("c1", 4, "c2", 4));
+    // the phone's picture of the same instants: 360° media time 8 s is the phone's 5 s
+    assert!((b.from - (6.0 + 4.0 * beat - 3.0)).abs() < 1e-9, "{}", b.from);
+    // the opening and the ending are left whole; no pairs, nothing changes
+    let mut again = plan.clone();
+    assert!(angles::split(&mut again, &lib, &[], beat).is_empty());
+    assert!(angles::pairs(&json!({"pairs": [{"a": 1, "b": 2, "offset": "x"}]})).is_empty());
+    assert!(opts(json!({"brief": "x"})).angles && !opts(json!({"brief": "x", "angles": false})).angles);
+}

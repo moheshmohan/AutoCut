@@ -174,6 +174,17 @@ little. Sky seen through the gaps inside a tree's crown stays as it was.
 
 ## 5. The director
 
+**Two angles of one moment.** `media.sameMoments` pairs recordings filmed at the same time — a
+phone and a 360° camera at one scene: their capture dates within `slack` (600 s) of overlapping, or
+with `dates: false` (wrong clocks) every pair of a dozen items or fewer — and lines each pair up by
+its sound (the GCC-PHAT sync of Clip ▸ Synchronize, the search kept within the dates' difference),
+keeping only clear matches. The director asks it for its media and, where a held, pushing-in or
+drifting shot (not the first or last) was filmed by the other camera too, cuts it half-way to the
+other camera's picture of the same instants — twice in an edit at most, the best-ranked moments
+first, `angles: false` to stop it. Checked on a street walk from Istanbul and a clip cut from it
+5.3 s in: lined up at 5.300 s (confidence 397); the 21 recordings of the weekend, one camera's, paired
+none.
+
 `autocut.direct` (`filmcraft-cli direct`, the MCP tool `autocut_direct`, Sequence ▸ Direct an
 Edit…) turns normal and 360° clips into one catchy edit on the beat, with the local model as the
 director:
