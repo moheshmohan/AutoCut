@@ -89,6 +89,7 @@ pub mod sequence_tools;
 pub mod settings;
 pub mod shortcut_presets;
 pub mod shortcuts;
+pub mod sky;
 pub mod soundfonts;
 pub mod source_monitor;
 pub mod speech_pauses;

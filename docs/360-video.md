@@ -135,6 +135,21 @@ behind its person when a person is its subject (a named look at least 30° tall,
 subject a third of the picture), after the colour pass, in people's videos (not a travel video's
 places); `--no-cutouts` switches it off.
 
+### Sky Swap
+
+`clip.findSky` outlines a clip's sky every 0.2 s — flat or 360° (a levelled sphere has its sky at
+the top too): a first guess of cells that are bright, plain, grey or blue and join the top edge,
+refined by MobileSAM given points inside it and in the detail below when the segmenter is
+downloaded (and when the two agree); every sizeable piece is joined into one 256-point outline, the
+clip's Opacity mask **Sky**, switched off. `clip.skySwap` puts the new sky above the clip through
+that mask — one of the user's own photos (an item of the project, cut to the clip's shape), or a
+sky made here: `clear`, `sunset`, `dusk`, `night` (stars) or `clouds` (a cloud layer drawn in
+perspective), a whole 2:1 sphere for a 360° clip seen through the clip's own virtual camera; never
+stock pictures — and relights the clip a little towards it (Lumetri temperature and exposure from
+the old and new skies' colour and light, `relight` 30 %). On a 6 s 360° shot of a park in Istanbul
+the sky was outlined in 30 of 30 frames in 17 s; a sunset warmed the scene by 14 and darkened it a
+little. Sky seen through the gaps inside a tree's crown stays as it was.
+
 ## 4. Pipelines
 
 | Pipeline | With a 360° clip |

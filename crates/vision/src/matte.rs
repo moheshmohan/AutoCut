@@ -50,19 +50,17 @@ pub fn prompts(person: &Person, w: usize, h: usize) -> (Vec<(f32, f32)>, Vec<(f3
     (pos.into_iter().filter(inside).collect(), neg)
 }
 
-/// The outline of the largest piece of `m` (coverage ≥ 128), traced round its edge and spaced
-/// into `n` points at equal steps round it, clockwise from its topmost point, in the matte's
-/// pixels (corners of pixels). `None` when nothing is covered.
-pub fn outline(m: &Matte, n: usize) -> Option<Vec<(f32, f32)>> {
-    let n = n.clamp(8, 512);
+/// The covered pixels of `m` (coverage ≥ 128) labelled by piece (4-connected; 0: not covered),
+/// and each piece's label and size, largest first.
+fn pieces(m: &Matte) -> Option<(Vec<u32>, Vec<(u32, usize)>)> {
     let (w, h) = (m.w, m.h);
     if w == 0 || h == 0 || m.alpha.len() < w.checked_mul(h)? {
         return None;
     }
     let on = |x: i64, y: i64| x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h && m.at(x as usize, y as usize) >= 128;
-    // the largest piece: label the covered pixels (4-connected), keep the biggest
     let mut label = vec![0u32; w * h];
-    let (mut best, mut best_n, mut next) = (0u32, 0usize, 0u32);
+    let mut sizes: Vec<(u32, usize)> = Vec::new();
+    let mut next = 0u32;
     let mut stack = Vec::new();
     for start in 0..w * h {
         if label[start] != 0 || m.alpha[start] < 128 {
@@ -85,21 +83,21 @@ pub fn outline(m: &Matte, n: usize) -> Option<Vec<(f32, f32)>> {
                 }
             }
         }
-        if count > best_n {
-            (best, best_n) = (next, count);
-        }
+        sizes.push((next, count));
     }
-    if best_n == 0 {
-        return None;
-    }
-    let mine = |x: i64, y: i64| x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h && label[y as usize * w + x as usize] == best;
-    // the edge, walked along pixel corners with the piece on the right (clockwise on screen):
-    // start at the top-left corner of its topmost, leftmost pixel, heading right
-    let first = label.iter().position(|l| *l == best)?;
+    sizes.sort_by_key(|s| std::cmp::Reverse(s.1));
+    Some((label, sizes))
+}
+
+/// The edge of piece `piece` (of `size` pixels) walked along pixel corners with the piece on the
+/// right (clockwise on screen), from the top-left corner of its topmost, leftmost pixel.
+fn trace(label: &[u32], w: usize, h: usize, piece: u32, size: usize) -> Option<Vec<(f32, f32)>> {
+    let mine = |x: i64, y: i64| x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h && label[y as usize * w + x as usize] == piece;
+    let first = label.iter().position(|l| *l == piece)?;
     let (sx, sy) = ((first % w) as i64, (first / w) as i64);
     let (mut cx, mut cy, mut dir) = (sx, sy, 0u8); // 0 right, 1 down, 2 left, 3 up
     let mut corners: Vec<(f32, f32)> = Vec::new();
-    let limit = 4 * (w + h) * 4 + 4 * best_n + 16;
+    let limit = 4 * (w + h) * 4 + 4 * size + 16;
     for _ in 0..limit {
         corners.push((cx as f32, cy as f32));
         // the pixels ahead-left and ahead-right of the corner, as seen heading `dir`
@@ -126,10 +124,50 @@ pub fn outline(m: &Matte, n: usize) -> Option<Vec<(f32, f32)>> {
             _ => cy -= 1,
         }
     }
-    if corners.len() < 4 {
-        return None;
+    (corners.len() >= 4).then_some(corners)
+}
+
+/// The outline of the largest piece of `m` (coverage ≥ 128), traced round its edge and spaced
+/// into `n` points at equal steps round it, clockwise from its topmost point, in the matte's
+/// pixels (corners of pixels). `None` when nothing is covered.
+pub fn outline(m: &Matte, n: usize) -> Option<Vec<(f32, f32)>> {
+    let (label, sizes) = pieces(m)?;
+    let &(piece, size) = sizes.first()?;
+    resample(&trace(&label, m.w, m.h, piece, size)?, n.clamp(8, 512))
+}
+
+/// [`outline`] of every piece of at least `min_share` of the picture (the largest whatever its
+/// size; at most `max_pieces`), joined into one outline by slits of no width from each piece to
+/// the nearest point of those before it — filled, it covers them all — spaced into `n` points.
+pub fn outline_pieces(m: &Matte, n: usize, min_share: f32, max_pieces: usize) -> Option<Vec<(f32, f32)>> {
+    let (label, sizes) = pieces(m)?;
+    let total = (m.w * m.h).max(1) as f32;
+    let mut it = sizes.iter();
+    let &(first, first_size) = it.next()?;
+    let mut poly = trace(&label, m.w, m.h, first, first_size)?;
+    for &(piece, size) in it.take(max_pieces.saturating_sub(1)) {
+        if (size as f32) / total < min_share {
+            break;
+        }
+        let Some(q) = trace(&label, m.w, m.h, piece, size) else { continue };
+        // the nearest pair (every few points: the slit only needs to be short)
+        let step = |len: usize| (len / 400).max(1);
+        let (mut bi, mut bj, mut bd) = (0usize, 0usize, f32::MAX);
+        for i in (0..poly.len()).step_by(step(poly.len())) {
+            for j in (0..q.len()).step_by(step(q.len())) {
+                let d = (poly[i].0 - q[j].0).powi(2) + (poly[i].1 - q[j].1).powi(2);
+                if d < bd {
+                    (bi, bj, bd) = (i, j, d);
+                }
+            }
+        }
+        let mut joined = Vec::with_capacity(poly.len() + q.len() + 2);
+        joined.extend_from_slice(&poly[..=bi]);
+        joined.extend(q[bj..].iter().chain(&q[..=bj]).copied());
+        joined.extend_from_slice(&poly[bi..]);
+        poly = joined;
     }
-    resample(&corners, n)
+    resample(&poly, n.clamp(8, 512))
 }
 
 /// `n` points at equal steps round the closed polygon `p`, from its first point.
@@ -199,6 +237,36 @@ mod tests {
         assert!(outline(&Matte { w: 0, h: 0, alpha: vec![], score: 0.0 }, 16).is_none());
         assert!(outline(&Matte { w: 100, h: 100, alpha: vec![255; 10], score: 0.0 }, 16).is_none());
         assert_eq!(outline(&Matte { w: 1, h: 1, alpha: vec![255], score: 0.0 }, 0).map(|o| o.len()), Some(8));
+    }
+
+    #[test]
+    fn several_pieces_are_joined_into_one_outline() {
+        let mut m = disc(96, 48, 24.0, 24.0, 14.0);
+        for (i, a) in disc(96, 48, 72.0, 24.0, 12.0).alpha.iter().enumerate() {
+            m.alpha[i] = m.alpha[i].max(*a);
+        }
+        let o = outline_pieces(&m, 128, 0.02, 4).unwrap();
+        assert_eq!(o.len(), 128);
+        assert!(o.iter().any(|(x, _)| *x < 20.0) && o.iter().any(|(x, _)| *x > 76.0), "both discs are in it");
+        // filled (non-zero winding), it covers both and not the gap between them
+        let inside = |px: f32, py: f32| {
+            let mut wind = 0i32;
+            for k in 0..o.len() {
+                let (a, b) = (o[k], o[(k + 1) % o.len()]);
+                if (a.1 <= py) != (b.1 <= py) {
+                    let x = a.0 + (py - a.1) / (b.1 - a.1) * (b.0 - a.0);
+                    if x > px {
+                        wind += if b.1 > a.1 { 1 } else { -1 };
+                    }
+                }
+            }
+            wind != 0
+        };
+        assert!(inside(24.0, 24.0) && inside(72.0, 24.0) && !inside(48.0, 8.0));
+        // a piece too small is left out
+        let one = outline_pieces(&m, 64, 0.9, 4).unwrap();
+        assert!(one.iter().all(|(x, _)| *x < 48.0) || one.iter().all(|(x, _)| *x > 48.0));
+        assert!(outline_pieces(&Matte { w: 4, h: 4, alpha: vec![0; 16], score: 0.0 }, 16, 0.0, 4).is_none());
     }
 
     #[test]

@@ -89,6 +89,8 @@ pub trait PersonCutter: Send + Sync {
 #[derive(Default)]
 pub struct Cutouts {
     pub cutter: Option<Arc<dyn PersonCutter>>,
+    /// A stand-in sky finder (tests), else the guess refined by MobileSAM.
+    pub sky: Option<Arc<dyn crate::sky::SkyFinder>>,
 }
 
 pub fn commands() -> Vec<CommandSpec> {

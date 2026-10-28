@@ -3571,6 +3571,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::reframe::commands());
     v.extend(crate::vr360::commands());
     v.extend(crate::cutout::commands());
+    v.extend(crate::sky::commands());
     v.extend(crate::moments::commands());
     v.extend(crate::split_edit::commands());
     v.extend(crate::auto_color::commands());
