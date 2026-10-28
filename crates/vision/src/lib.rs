@@ -25,6 +25,8 @@
 //!   segmenter who, and the cut-out's outline as a polygon a keyframed mask can follow — and
 //!   `segment` (feature `model`): **MobileSAM** (Apache-2.0) making the cut-out, on candle, on the
 //!   GPU (Metal) on macOS.
+//! - `depth` (feature `model`): **Depth Anything V2 Small** (Apache-2.0), how near each part of a
+//!   picture is, for the 3D photo and depth blur; on candle, on the GPU (Metal) on macOS.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
@@ -37,6 +39,8 @@ pub mod safetensors;
 pub mod track;
 pub mod zip;
 
+#[cfg(feature = "model")]
+pub mod depth;
 #[cfg(feature = "model")]
 mod dfine;
 #[cfg(feature = "model")]

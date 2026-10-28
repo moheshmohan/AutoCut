@@ -103,6 +103,10 @@ pub struct Options {
     /// from the analysis' box) instead of tilting across a fixed point; shots where it is not
     /// found keep the tilt.
     pub follow_subject: bool,
+    /// Photos moved in depth: after a flat photo's Ken Burns move, the 3D photo that matches it
+    /// (`clip.photo3d`: the near parts move further than the far ones), when the depth network
+    /// is downloaded.
+    pub depth: bool,
     /// The look: a theme, the timeline, transitions from the catalogue, loudness, embedded
     /// captions, the SoundFont ([`crate::look`]); the default is today's look.
     pub look: Look,
@@ -181,6 +185,7 @@ impl Default for Options {
             target_minutes: None,
             fill_frame: true,
             follow_subject: true,
+            depth: true,
             look: Look::default(),
             taste: Default::default(),
             language: None,
@@ -1265,6 +1270,8 @@ struct Tracks {
     fill: bool,
     /// Filled shots follow their subject ([`Options::follow_subject`]).
     follow: bool,
+    /// Photos moved in depth ([`Options::depth`], and the depth network downloaded).
+    depth: bool,
     /// The frame's size, sequence pixels.
     frame: (f64, f64),
     bg: String,
@@ -1871,7 +1878,8 @@ async fn pillars_through_transitions(ex: &dyn Executor, backdrops: &[(u64, u64)]
 /// subject the crop would cut ([`photo_fills`]) — whole over its blurred copy (the pillars), the
 /// picture breathing towards its subject and the copy pushing in. A 360° photo (an Insta360
 /// `.insp`) is looked round instead: turned to its subject, a tiny planet opening onto it or a
-/// slow pan across it. A move the engine refuses leaves the photo fitted and still (noted
+/// slow pan across it. With the depth network ([`Tracks::depth`]) a flat photo's move is made in
+/// depth too (`clip.photo3d`). A move the engine refuses leaves the photo fitted and still (noted
 /// nowhere: it is cosmetic).
 async fn place_photo(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, dur: f64, how: Framing, ph: PhotoMove) -> Result<Placed, AutoCutError> {
     let t = on_frame(t, tr.fps);
@@ -1909,6 +1917,14 @@ async fn place_photo(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, dur: f64
         && let Some(scale) = fitted["clips"].as_array().and_then(|a| a.first()).and_then(|c| c["scale"].as_f64())
     {
         push_in(ex, fg, scale, t, end, tr.fps).await.ok();
+    }
+    if tr.depth {
+        // the move made in depth: in, out, or round its subject the way it pans
+        let mut d = json!({"clips": [fg]});
+        if let Some(b) = ph.subject {
+            d["subject"] = json!(b);
+        }
+        run(ex, "clip.photo3d", d).await.ok();
     }
     let bg = if odd && !fill { backdrop(ex, tr, item, (t, end), STILL_HEAD, true).await? } else { None };
     Ok(Placed { fg, bg, audio: None, end, fit: odd.then_some(if fill { Fit::Fill } else { Fit::Full }) })
@@ -3253,12 +3269,14 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let r = run(ex, "file.newSequence", json!({"name": opts.title, "width": opts.width, "height": opts.height, "fps": opts.fps, "video": video, "audio": 5}))
         .await?;
     built.sequence = r["sequence"].as_u64();
+    let depth = opts.depth && run(ex, "depth.status", json!({})).await.is_ok_and(|v| v["installed"] == json!(true));
     let tr = Tracks {
         fps: opts.fps.clamp(1.0, 240.0),
         aspect: w / h.max(1.0),
         stabilize: opts.stabilize,
         fill: opts.fill_frame,
         follow: opts.follow_subject,
+        depth,
         frame: (w, h),
         bg: "V1".into(),
         fg: "V2".into(),
@@ -4197,6 +4215,7 @@ async fn compose_thumbnail(
         // the whole picture over its blurred copy: the title goes where the robot is not
         fill: false,
         follow: false,
+        depth: false,
         frame: (w, h),
         bg: "V1".into(),
         fg: "V2".into(),
@@ -5226,6 +5245,7 @@ mod tests {
             stabilize: false,
             fill: true,
             follow: false,
+            depth: false,
             frame: (1920.0, 1080.0),
             bg: "V1".into(),
             fg: "V2".into(),

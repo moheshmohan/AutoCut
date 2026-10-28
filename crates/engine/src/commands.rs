@@ -3572,6 +3572,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::vr360::commands());
     v.extend(crate::cutout::commands());
     v.extend(crate::sky::commands());
+    v.extend(crate::depth::commands());
     v.extend(crate::nadir::commands());
     v.extend(crate::same_moments::commands());
     v.extend(crate::denoise::commands());

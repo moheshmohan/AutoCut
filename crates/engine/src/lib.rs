@@ -27,6 +27,7 @@ pub mod contact_sheet;
 pub mod cutout;
 pub mod demo;
 pub mod denoise;
+pub mod depth;
 pub mod doc_path;
 pub mod elements;
 pub mod essential_sound;

@@ -17,6 +17,7 @@ pub mod color_match;
 pub mod colorman;
 pub mod creator_fx;
 pub mod denoise;
+pub mod depth;
 pub mod effects;
 pub mod flow;
 pub mod gpufx;

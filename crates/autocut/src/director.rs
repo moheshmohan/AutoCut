@@ -165,6 +165,9 @@ pub struct Options {
     /// Noise reduction for the dark, noisy recordings the edit uses (`media.denoise` `auto`): on
     /// unless switched off.
     pub denoise: bool,
+    /// Photos moved in depth (`clip.photo3d` after their Ken Burns move) when the depth network
+    /// is downloaded: on unless switched off.
+    pub depth: bool,
     pub look_strength: f64,
 }
 
@@ -396,6 +399,7 @@ impl Options {
             cutouts: p["cutouts"].as_bool().unwrap_or(true),
             angles: p["angles"].as_bool().unwrap_or(true),
             denoise: p["denoise"].as_bool().unwrap_or(true),
+            depth: p["depth"].as_bool().unwrap_or(true),
             color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
             look,
             look_strength: finite(&p["lookStrength"]).map_or(25.0, |v| v.clamp(0.0, 100.0)),
@@ -2045,6 +2049,9 @@ pub struct Report {
     /// The recordings given noise reduction (`media.denoise` `auto`: the dark, noisy ones).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub denoised: Option<Value>,
+    /// The photos moved in depth (`clip.photo3d`: each clip, its move and still depth).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub photos_3d: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safe_zones: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2556,6 +2563,26 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
                     report.denoised = Some(v["changed"].clone());
                 }
                 Err(e) => report.fallbacks.push(format!("noise: left as filmed ({})", chars(&e.to_string(), 160))),
+            }
+        }
+    }
+    // ---- photos in depth: each flat photo's Ken Burns move made a 3D photo (`clip.photo3d`
+    // `auto`: the near parts move further than the far ones), when the depth network is there
+    if o.depth {
+        let photos: Vec<u64> = plan
+            .shots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| cands.iter().any(|c| c.id == s.clip && c.photo && c.kind != Kind::Vr))
+            .filter_map(|(k, _)| built.pictures.get(k).copied().flatten())
+            .collect();
+        if !photos.is_empty() && run(ex, "depth.status", json!({})).await.is_ok_and(|v| v["installed"] == json!(true)) {
+            match run(ex, "clip.photo3d", json!({"clips": photos})).await {
+                Ok(v) => {
+                    lines(&format!("{} photo(s) moved in depth", v["clips"].as_array().map_or(0, Vec::len)));
+                    report.photos_3d = Some(v["clips"].clone());
+                }
+                Err(e) => report.fallbacks.push(format!("photos: left flat ({})", chars(&e.to_string(), 160))),
             }
         }
     }

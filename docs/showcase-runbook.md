@@ -108,6 +108,12 @@ The analysis locates the robot in it once and keeps its box (`subject` in the re
   the shots' sound; the privacy pass looks at a photo once and keeps the blur for its whole hold.
 - **Any still, by hand:** select it on the timeline and Clip ▸ Video Options ▸ Ken Burns
   (`exec clip.kenBurns '{"clip": 812, "subject": [0.55, 0.2, 0.25, 0.5], "move": "out"}'`).
+- **In depth:** with the depth network downloaded (`exec depth.downloadModel '{"wait": true}'`,
+  99 MB, Apache-2.0, after the user agrees) each flat photo's move is also made in depth (the 3D
+  photo: its near parts move further than its far ones; `--no-depth` leaves photos flat). By hand:
+  Clip ▸ Depth ▸ 3D Photo after Ken Burns (`exec clip.photo3d '{"clips": [812]}'` follows the
+  clip's move) and Depth Blur (`exec clip.depthBlur '{"clips": [812], "pull": true}'`), see
+  [ai-effects.md](ai-effects.md).
 
 ## 2. Where each clip was filmed
 

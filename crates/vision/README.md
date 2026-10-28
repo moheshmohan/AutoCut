@@ -3,7 +3,9 @@
 Privacy detection for FilmCraft's automatic blur (`clip.autoRedact`, `sequence.autoRedact` in
 `crates/engine/src/redact.rs`): faces and vehicle number plates found in video frames with
 small local models, linked into tracks; and the profile pass, which finds the faces in profile
-or half hidden that the face detector misses from people's poses. L2; pure Rust.
+or half hidden that the face detector misses from people's poses. Also people and things cut out
+of a picture (MobileSAM) and how near each part of a picture is (Depth Anything V2 Small, for the
+3D photo and depth blur). L2; pure Rust.
 
 ## Models
 
@@ -33,6 +35,15 @@ research), read by candle's pickle reader (which runs nothing) and run on candle
 `matte` turns its cut-out into the editor's outline: the person's keypoints and the sides of their
 box as the points it is given, and the largest piece traced round its edge and spaced into a
 fixed number of points that a keyframed mask follows.
+
+**Depth Anything V2 Small** (`depth`, the 3D photo and depth blur of photos), downloaded by
+`depth.downloadModel` into its own folder: `depth_anything_v2_vits.pth` (99,218,434 B, the authors'
+Hugging Face repository `depth-anything/Depth-Anything-V2-Small` at revision `03876f86`, SHA-256
+`715fade1…`), Apache-2.0 (the Base, Large and Giant models are CC-BY-NC-4.0 and not used); trained
+on 595K synthetic pictures with exact depth (Hypersim, Virtual KITTI 2, BlendedMVS, IRS,
+TartanAir) and 62M real pictures of public datasets labelled by a larger teacher. Read by candle's
+pickle reader (which runs nothing) and run on candle — Metal on macOS. Licence checked
+2026-10-28 (the model card and the repository's README).
 
 Licences checked 2026-10-19 in each model's directory (`LICENSE`, `README.md`). LPD-YuNet was
 trained on Chinese plates; it finds other countries' plates less reliably.
@@ -147,6 +158,18 @@ trained on Chinese plates; it finds other countries' plates less reliably.
   reference on random data; the sampling, box and statistics code is shared as `deform_cpu`,
   `fdr_box`, `lqe_stats_cpu`, `gau_cpu`). The CPU stays the reference and the fallback, network by
   network (same rules as `gpu`). Metal compiles WGSL with fast math, so NaN is tested by its bits.
+- `depth` (feature `model`): Depth Anything V2 Small by hand from the published architecture (no
+  code of the reference copied): DINOv2 ViT-S/14 (12 blocks, 6 heads, layer scale, LayerNorm
+  ε 1e-6, exact GELU) and the DPT head (the four levels from blocks 3, 6, 9 and 12, projected and
+  resized ×4, ×2, ×1, ×½, refined coarse to fine by residual units, bilinear resizes with the
+  corners aligned, ReLU). A picture is area-averaged to its short side at 518 and the long side the
+  nearest multiple of 14 (at most twice the short), normalised as ImageNet's; the learned 37 × 37
+  positions are resized to its grid bicubically exactly as PyTorch does (A = −0.75, the grid size
+  plus 0.1 as the scale, edges clamped); the answer, relative inverse depth, is made 0..1 (the
+  farthest to the nearest) by its 1st and 99th percentiles (`DepthMap`). candle's own Depth
+  Anything takes only square pictures (its positions are resized the wrong way round for others,
+  by nearest neighbour) and the original DINOv2 weights instead of the fine-tuned encoder, so it
+  is not used. A picture the GPU fails is run again on a CPU copy.
 - `people` (feature `model`): `ProfileDetector` — people (score ≥ 0.25, at least 4 % of the
   picture tall, at most 24, suppression at IoU 0.7), their poses, and the faces to add; the whole
   pass on the GPU when both networks are there (`people_cpu`: the picture and crops prepared on
@@ -190,9 +213,18 @@ idle, 973 ms at a load of 32–55 (1.0 frame a second; D-FINE's decoder alone 46
 CPU 308 ms idle, 4.4 s loaded. The CPU's share now is recording the passes and two small
 read-backs, so a busy machine barely slows it.
 
+Depth Anything V2 Small (M3 Max, release, 2026-10-28): a 924 × 518 picture in 249 ms on the GPU
+(Metal, after a first of 282 ms) and 1,133 ms on the CPU; 686 × 518 in 185 ms. Without an oracle on
+this machine (no PyTorch) it is checked on a drawn scene (a checkered ground to the horizon under a
+sky: 0.94 near the bottom, 0.37 halfway, 0.08 at the horizon, the sky 0) and by eye on ten of the
+user's photos (`depth_maps_of_pictures`): hands, a skull, a chair and printer parts stand out of
+their backgrounds with clean edges, floors and tables recede.
+
 ## Tests
 
-`cargo test -p filmcraft-vision --features model` (`gpu_layers_match_the_cpu` compares every
+`cargo test -p filmcraft-vision --features model` (`the_ground_near_the_camera_is_nearer_than_the_horizon`
+runs the depth network when it is downloaded; `FILMCRAFT_DEPTH_PICTURES=<dir of PNGs> … --ignored
+depth_maps_of_pictures` writes each picture's depth beside it; `gpu_layers_match_the_cpu` compares every
 layer of the face detectors on the GPU with the CPU's, `gpunn_tests` every pass of the profile
 networks' GPU path — matrix products with each activation, norms, softmax, attention, the
 deformable sampling, selection and gathering with ties, FDR boxes, quality statistics, the gated

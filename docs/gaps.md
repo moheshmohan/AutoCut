@@ -230,7 +230,9 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   Redact Faces and Plates…: YuNet / LPD-YuNet on candle, tracked masks, robots and screens told
   apart by the local vision model, named logos and signs found by it), neural voice isolation
   (Voice Isolation, Enhance Voice, Essential Sound ▸ Isolate Voice: DeepFilterNet 3 in plain Rust,
-  downloaded on consent; a DSP fallback without it).
+  downloaded on consent; a DSP fallback without it), photos in depth (the 3D Photo and Depth Blur
+  effects, Clip ▸ Depth: Depth Anything V2 Small on candle, downloaded on consent, the effects on
+  the GPU; [ai-effects.md](ai-effects.md)).
 - **Privacy blur limits (measured 2026-10-19 on GITEX footage):** YuNet misses faces in
   profile and half-hidden ones; LPD-YuNet was trained on Chinese plates and fired only on
   badges and signs there (no vehicles to measure recall on); named targets depend on a 7B vision

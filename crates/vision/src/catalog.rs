@@ -118,6 +118,44 @@ pub fn segmenter_id() -> String {
     format!("{}={}", SEGMENTER.name, SEGMENTER.sha256.get(..16).unwrap_or(SEGMENTER.sha256))
 }
 
+/// The depth network's package (its own directory under the models directory): Depth Anything V2
+/// Small, how near each part of a picture is (`crate::depth`: the 3D photo and depth blur).
+pub const DEPTH_PACKAGE_ID: &str = "depth-anything-v2-small";
+pub const DEPTH_NAME: &str = "Depth Anything V2 Small (how near each part of a picture is)";
+pub const DEPTH_LICENSE: &str =
+    "Apache-2.0 (Depth Anything V2 Small, Lihe Yang et al., HKU and TikTok; its Base, Large and Giant models are non-commercial and not used)";
+pub const DEPTH_SOURCE: &str = "https://huggingface.co/depth-anything/Depth-Anything-V2-Small (depth_anything_v2_vits.pth)";
+
+/// Depth Anything V2 Small's weights: a DINOv2 ViT-S/14 encoder and a DPT head, as the authors
+/// publish them (a PyTorch state dict, read by candle's pickle reader, which runs nothing). Trained
+/// on 595K synthetic pictures with exact depth (Hypersim, Virtual KITTI 2, BlendedMVS, IRS,
+/// TartanAir), then on 62M real pictures of public datasets labelled by a larger teacher model.
+/// Pinned to revision 03876f86; the SHA-256 checked 2026-10-28 by `shasum -a 256` and against the
+/// Hugging Face API's LFS record.
+pub const DEPTH: ModelFile = ModelFile {
+    name: "depth_anything_v2_vits.pth",
+    url: "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/03876f8651c73a60fe4c2c48294e09fcb6838fcf/depth_anything_v2_vits.pth",
+    sha256: "715fade13be8f229f8a70cc02066f656f2423a59effd0579197bbf57860e1378",
+    size: 99_218_434,
+};
+
+pub static DEPTH_FILES: &[ModelFile] = &[DEPTH];
+
+pub fn depth_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(DEPTH_PACKAGE_ID)
+}
+
+/// The depth network's file is present with its pinned size.
+pub fn depth_installed(models_dir: &Path) -> bool {
+    let d = depth_dir(models_dir);
+    DEPTH_FILES.iter().all(|f| present(&d, f))
+}
+
+/// The depth network's identity, for cache keys.
+pub fn depth_id() -> String {
+    format!("{}={}", DEPTH.name, DEPTH.sha256.get(..16).unwrap_or(DEPTH.sha256))
+}
+
 pub fn package_dir(models_dir: &Path) -> PathBuf {
     models_dir.join(PACKAGE_ID)
 }
@@ -197,6 +235,11 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), FILES.len() + PROFILE_FILES.len());
         assert!(profile_model_ids().contains("dfine_n_coco.safetensors=19e06bdc873da819"));
+        for f in SEGMENT_FILES.iter().chain(DEPTH_FILES) {
+            assert_eq!(f.sha256.len(), 64);
+            assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()) && f.url.ends_with(f.name), "{}", f.url);
+        }
+        assert!(DEPTH.url.contains("/resolve/03876f8651c73a60fe4c2c48294e09fcb6838fcf/") && depth_id().starts_with("depth_anything_v2_vits.pth=715fade1"));
     }
 
     #[test]
@@ -206,6 +249,7 @@ mod tests {
         assert_eq!(missing_bytes(&dir), total_bytes());
         assert!(!profiles_installed(&dir));
         assert_eq!(profile_missing_bytes(&dir), profile_total_bytes());
+        assert!(!depth_installed(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

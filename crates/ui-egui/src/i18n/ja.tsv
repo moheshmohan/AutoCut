@@ -4317,4 +4317,14 @@
 	Aim 360° Camera	360°カメラを向ける
 	Drag to aim the 360° camera	ドラッグして360°カメラを向ける
 	No 360° clip under the playhead	再生ヘッドの位置に360°クリップがありません
+	3D Photo	3D写真
+	Depth Blur	深度ぼかし
+	Travel Across	横方向の移動
+	Travel Down	縦方向の移動
+	Push In	プッシュイン
+	Still Depth	固定する深度
+	Zoom to Fill	拡大して埋める
+	Focus Depth	フォーカスの深度
+	Depth of Field	被写界深度
+	Blur the Foreground	前景をぼかす
 	Sync 360° Motion Sensor	360° モーションセンサーを同期

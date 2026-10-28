@@ -40,6 +40,7 @@ use filmcraft_render::plan::{FramePlan, PlanLayer, PlanStep};
 
 pub mod adapter;
 pub mod denoise;
+pub mod depthfx;
 pub mod export_renderer;
 pub mod fx;
 pub mod lut;

@@ -1004,6 +1004,7 @@ fn a_person_big_in_the_opening_is_put_in_front_of_its_title() {
     assert!(!person_subject(&c, None));
     assert!(opts(json!({"brief": "x"})).cutouts && !opts(json!({"brief": "x", "cutouts": false})).cutouts);
     assert!(opts(json!({"brief": "x"})).denoise && !opts(json!({"brief": "x", "denoise": false})).denoise);
+    assert!(opts(json!({"brief": "x"})).depth && !opts(json!({"brief": "x", "depth": false})).depth);
 }
 
 #[test]
