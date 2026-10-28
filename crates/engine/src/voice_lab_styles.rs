@@ -82,15 +82,22 @@ fn agreement(a: &str, b: &str) -> f64 {
     (1.0 - e.min(1.0)).max(0.0)
 }
 
-/// The words a pick is promoted with: the Malayalam Whisper's when it heard Malayalam, else
-/// IndicWhisper's, else whichever heard anything.
+/// The words a pick is promoted with: the Malayalam Whisper's when it heard Malayalam — unless
+/// it heard under half of what IndicWhisper did (it stopped short, or hallucinated a word for
+/// the whole stretch) — else IndicWhisper's, else whichever heard anything.
 fn transcript_of(heard: &[(&'static str, String)]) -> String {
     let ml = |id: &str| heard.iter().find(|(m, w)| *m == id && filmcraft_tts::malayalam::detect(w)).map(|(_, w)| w.clone());
-    ml(filmcraft_speech::models::MALAYALAM_MODEL)
-        .or_else(|| ml(filmcraft_speech::models::INDICWHISPER_ML))
-        .or_else(|| heard.iter().find(|(_, w)| !w.trim().is_empty()).map(|(_, w)| w.clone()))
-        .unwrap_or_default()
+    let len = |w: &str| filmcraft_tts::heard::comparable(w).len();
+    match (ml(filmcraft_speech::models::MALAYALAM_MODEL), ml(filmcraft_speech::models::INDICWHISPER_ML)) {
+        (Some(a), Some(b)) if 2 * len(&a) < len(&b) => b,
+        (Some(a), _) => a,
+        (None, Some(b)) => b,
+        (None, None) => heard.iter().find(|(_, w)| !w.trim().is_empty()).map(|(_, w)| w.clone()).unwrap_or_default(),
+    }
 }
+
+/// Under this agreement the two models' words differ too much to trust either unheard.
+const LOW_AGREEMENT: f64 = 0.5;
 
 /// The mean direction of embeddings (each scaled to unit length first); the first when they
 /// do not agree in length.
@@ -275,6 +282,7 @@ pub(crate) fn find_styles(sp: &StylesParams, media: &MediaPool, services: &dyn S
             "transcript": transcript_of(&heard),
             "heard": heard.iter().map(|(m, w)| (m.to_string(), json!(w))).collect::<serde_json::Map<String, Value>>(),
             "agreement": agree,
+            "check": agree.filter(|a| *a < LOW_AGREEMENT).map(|_| "the two speech models disagree: listen and correct the words before using it"),
             "features": features_json(&feat),
             "z": a.z,
             "shares": shares,
@@ -487,5 +495,7 @@ mod tests {
         assert_eq!(transcript_of(&[(iw, "ഒന്ന്".into()), (ml, "രണ്ട്".into())]), "രണ്ട്");
         assert_eq!(transcript_of(&[(ml, "hello".into()), (iw, "ഒന്ന്".into())]), "ഒന്ന്");
         assert_eq!(transcript_of(&[]), "");
+        // a Malayalam Whisper that heard one word for a whole stretch: IndicWhisper's words
+        assert_eq!(transcript_of(&[(ml, "ഹിന്ദി".into()), (iw, "ഇതൊക്കെ എനിക്ക് വന്ന കഴിഞ്ഞ മൂന്നു ദിവസത്തിനോടെ".into())]), "ഇതൊക്കെ എനിക്ക് വന്ന കഴിഞ്ഞ മൂന്നു ദിവസത്തിനോടെ");
     }
 }

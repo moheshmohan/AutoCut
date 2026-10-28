@@ -133,7 +133,9 @@ and similarity follows the room and the microphone as well as the voice: the aut
 printing voice-overs and the current Malayalam reference's own source clip score 0.72–0.84
 against a reference made from another session. Give stretches of such recordings as
 `--speaker-ref file@start-end` (their tone colour is averaged with the voice's reference) and,
-for clips you know are yours, a lower `--min-similarity`.
+for clips you know are yours, a lower `--min-similarity`. On the author's library five stretches
+of his voice-overs as references lifted his Malayalam clips to 0.84–0.94, and the other clips
+over 0.80 were English (the measured run and the best picks per style: [crate README](../crates/tts/README.md#delivery-styles-the-authors-clips-and-his-narrations-measured-2026-10-28)).
 
 Each candidate's prosody is measured (`filmcraft_audio_dsp::prosody`: pitch level, pitch range
 from the 10th to the 90th percentile, pitch movement, energy variation over syllable peaks,
@@ -152,7 +154,8 @@ The best `--top` per style are heard by both Malayalam speech models the strict 
 `path` (and `item` when it came from one), `start`, `end`, `transcript`, `style` — and why:
 `confidence`, `features`, `z`, every style's `shares`, what each model heard and their
 `agreement` (1 − the character error rate between them: low agreement means check the words
-by ear before using them), the speaker `similarity` and signal `quality`. Listen, correct the
+by ear before using them), the speaker `similarity` and signal `quality` (and `check` when the two models agree on under
+half of the words). Listen, correct the
 words if needed, and make it the voice's reference for that style (`tts.voiceReference` with
 `style`).
 
