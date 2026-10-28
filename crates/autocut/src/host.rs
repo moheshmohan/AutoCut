@@ -405,6 +405,7 @@ fn prerender(port: &CommandPort, params: &Value) {
         "temperature",
         "emphasis",
         "speed",
+        "expressiveness",
         "take",
         "check",
         "checkPolicy",

@@ -1618,6 +1618,20 @@ mod malayalam_voice {
             .collect()
     }
 
+    /// `x` (an utterance, mono at `rate`) with its intonation reshaped
+    /// (`filmcraft_audio_dsp::prosody::reshape`): its pitch range scaled by `range`, `question_rise`
+    /// semitones over its last voiced half second, its stressed syllables lifted `emphasis_db`.
+    /// Audio the reshaping cannot take (too short, no voicing) is left as read: a reading is never
+    /// lost to it.
+    pub(crate) fn reshape(x: &[f32], rate: u32, range: f64, question_rise: f64, emphasis_db: f64) -> Vec<f32> {
+        use filmcraft_audio_dsp::prosody;
+        let shape = prosody::Shape { range, question_rise, emphasis_db, ..Default::default() };
+        prosody::reshape(x, rate, &shape, &prosody::PitchSettings::default())
+            .ok()
+            .filter(|y| y.len() == x.len() && y.iter().all(|v| v.is_finite()))
+            .unwrap_or_else(|| x.to_vec())
+    }
+
     /// The main reference's clip at IndicF5's rate.
     fn clip_audio(models_dir: &Path, r: &CrossReference) -> Result<Vec<f32>, TtsError> {
         Ok(filmcraft_audio_dsp::resample::resample_sinc(&cross_audio(models_dir, r)?, CROSS_REFERENCE_RATE, f5::RATE))
@@ -1884,7 +1898,12 @@ mod malayalam_voice {
                 Some(l) => a.get(lead_in_cut(&a, rate, l, text)..).unwrap_or(&[]).to_vec(),
                 None => a,
             };
-            Ok(super::natural::trim_silence(&a, rate).to_vec())
+            let a = super::natural::trim_silence(&a, rate).to_vec();
+            // the intonation widened (or narrowed) after synthesis; at 1 the audio is as read
+            match sampler.and_then(|s| styles::reshaping(s.expressiveness, styles::boundary_after(text) == Boundary::Question)) {
+                Some((range, question_rise, emphasis_db)) => Ok(reshape(&a, rate, range, question_rise, emphasis_db)),
+                None => Ok(a),
+            }
         }
 
         /// The seed of the pause before part `index` of take `take`.
@@ -3165,7 +3184,14 @@ pub(crate) mod tests {
         let ex_main = say(&plain, one, Params { delivery: Some("excited"), ..Default::default() });
         assert!(ex != base && ex != ex_main && ex_main != base, "the reference and the preset both count");
         // amazed has no reference of its own: it reads after the excited one (its preset made equal)
-        let like_excited = Params { delivery: Some("amazed"), temperature: Some(1.1), emphasis: Some(2.4), speed: Some(1.06), ..Default::default() };
+        let like_excited = Params {
+            delivery: Some("amazed"),
+            temperature: Some(1.1),
+            emphasis: Some(2.4),
+            speed: Some(1.06),
+            expressiveness: Some(1.3),
+            ..Default::default()
+        };
         assert_eq!(say(&styled, one, like_excited), ex);
         // a tag does what a delivery does, and is not read
         assert_eq!(say(&styled, "[excited] ഇത് ശരിയാണ്.", Params::default()), ex);
@@ -3175,6 +3201,9 @@ pub(crate) mod tests {
         assert_ne!(cooler, ex);
         assert_eq!(say(&styled, one, Params { delivery: Some("excited"), temperature: Some(0.7), ..Default::default() }), cooler);
         assert!(styled.synthesize(one, &Params { temperature: Some(9.0), ..Default::default() }).is_err());
+        // expressiveness 1 leaves the reading exactly as synthesized
+        assert_eq!(say(&plain, one, Params { expressiveness: Some(1.0), ..Default::default() }), base);
+        assert!(styled.synthesize(one, &Params { expressiveness: Some(3.0), ..Default::default() }).is_err());
         assert!(styled.synthesize(one, &Params { delivery: Some("angry"), ..Default::default() }).is_err());
         // natural pauses: longer at a line break than the fixed 250 ms, shorter excited than calm
         let two = "ഇത് ശരിയാണ്.\nഅത് തെറ്റാണ്.";
@@ -3293,6 +3322,38 @@ pub(crate) mod tests {
         assert!(malayalam_voice::reference_words("It costs $5.", false).unwrap().contains("five dollars"));
         assert!(malayalam_voice::reference_words("ഇത് 2021 ആണ്.", false).unwrap().contains("ട്വന്റി ട്വന്റി വൺ"));
         assert_eq!(malayalam_voice::reference_words("  ഇത്   ശരി.  ", false).unwrap(), "ഇത് ശരി.");
+    }
+
+    /// Expressiveness reshapes a voiced utterance's intonation and keeps its length; what cannot
+    /// be reshaped (silence, a click) is left as read.
+    #[cfg(feature = "indicf5")]
+    #[test]
+    fn expressiveness_widens_the_pitch_and_keeps_the_length() {
+        let rate = 24_000u32;
+        // a voice gliding 110 → 140 Hz over a second and a half, with syllable-like dips
+        let mut phase = 0f32;
+        let x: Vec<f32> = (0..rate as usize * 3 / 2)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                phase += std::f32::consts::TAU * (110.0 + 20.0 * t) / rate as f32;
+                let env = 0.6 + 0.4 * (std::f32::consts::TAU * 4.0 * t).sin().abs();
+                0.3 * env * (phase.sin() + 0.4 * (2.0 * phase).sin())
+            })
+            .collect();
+        let wide = malayalam_voice::reshape(&x, rate, 1.6, 2.0, 1.0);
+        assert_eq!(wide.len(), x.len());
+        assert!(wide.iter().all(|v| v.is_finite()) && wide != x, "reshaped");
+        let range = |y: &[f32]| {
+            let mut f = pitch_frames(y, rate);
+            f.sort_by(f64::total_cmp);
+            let (a, b) = (f[f.len() / 10], f[f.len() * 9 / 10]);
+            12.0 * (b / a).log2()
+        };
+        assert!(range(&wide) > range(&x), "{} → {}", range(&x), range(&wide));
+        // nothing voiced, or too short: as read
+        assert_eq!(malayalam_voice::reshape(&[0.0; 4800], rate, 1.6, 0.0, 0.0), vec![0.0; 4800]);
+        assert_eq!(malayalam_voice::reshape(&[0.1; 10], rate, 1.6, 0.0, 0.0), vec![0.1; 10]);
+        assert!(malayalam_voice::reshape(&[], rate, 1.6, 0.0, 0.0).is_empty());
     }
 
     /// The pause after the reference: room tone from the clip's quietest stretch, faded; or

@@ -117,33 +117,58 @@ pub struct Sampler {
     pub emphasis: f32,
     /// Speaking speed on top of the natural rate and the narration's pace ([`SPEED`]).
     pub speed: f32,
+    /// The reading's pitch range after synthesis ([`EXPRESSIVENESS`]; 1 = as synthesized, the
+    /// audio untouched): deviations from the median pitch scaled by it ([`reshaping`]).
+    pub expressiveness: f32,
 }
 
 impl Sampler {
     /// The model's own reading (plain).
-    pub const PLAIN: Sampler = Sampler { temperature: 1.0, emphasis: 2.0, speed: 1.0 };
+    pub const PLAIN: Sampler = Sampler { temperature: 1.0, emphasis: 2.0, speed: 1.0, expressiveness: 1.0 };
 }
 
-/// Temperature, emphasis and speed a narration may ask for (inclusive).
+/// Temperature, emphasis, speed and expressiveness a narration may ask for (inclusive).
 pub const TEMPERATURE: (f32, f32) = (0.3, 1.5);
 pub const EMPHASIS: (f32, f32) = (1.0, 4.0);
 pub const SPEED: (f32, f32) = (0.7, 1.4);
+pub const EXPRESSIVENESS: (f32, f32) = (0.5, 2.0);
 
 /// The sampler preset of `style` (`None` for plain: the reading's own settings). Measured on the
 /// owner's voice (`docs/malayalam-narration.md`, "Voice styles"): livelier styles get a little
-/// more guidance and noise and speak a touch faster; calm ones less, slower.
+/// more guidance and noise and speak a touch faster; calm ones less, slower. Expressiveness:
+/// IndicF5's readings of the owner span 3.0 semitones (10th–90th percentile of the pitch)
+/// against 4.0 in his own speech, so the livelier styles widen it.
 pub fn preset(style: Option<&str>) -> Option<Sampler> {
-    let (temperature, emphasis, speed) = match style? {
-        "conversational" => (1.0, 2.0, 1.02),
-        "warm" => (0.95, 2.0, 0.98),
-        "excited" => (1.1, 2.4, 1.06),
-        "amazed" => (1.1, 2.3, 1.0),
-        "curious" => (1.05, 2.1, 1.0),
-        "calm" => (0.85, 1.8, 0.95),
-        "dramatic" => (0.9, 2.2, 0.92),
+    let (temperature, emphasis, speed, expressiveness) = match style? {
+        "conversational" => (1.0, 2.0, 1.02, 1.1),
+        "warm" => (0.95, 2.0, 0.98, 1.15),
+        "excited" => (1.1, 2.4, 1.06, 1.3),
+        "amazed" => (1.1, 2.3, 1.0, 1.35),
+        "curious" => (1.05, 2.1, 1.0, 1.2),
+        "calm" => (0.85, 1.8, 0.95, 1.0),
+        "dramatic" => (0.9, 2.2, 0.92, 1.2),
         _ => return None,
     };
-    Some(Sampler { temperature, emphasis, speed })
+    Some(Sampler { temperature, emphasis, speed, expressiveness })
+}
+
+/// The rise a reading's question gets at its end when its intonation is reshaped, semitones.
+pub const QUESTION_RISE_ST: f64 = 2.0;
+/// The lift of stressed syllables per unit of expressiveness over 1, dB (1.3: 0.9 dB).
+pub const EMPHASIS_DB_PER_UNIT: f64 = 3.0;
+
+/// How an utterance's intonation is reshaped after synthesis at `expressiveness`: the pitch range
+/// (the deviations from its median scaled), the rise at its end (a question: `question`) and the
+/// lift of its stressed syllables, dB. `None` at 1 (and for a value that is not finite): the
+/// audio is left exactly as synthesized.
+pub fn reshaping(expressiveness: f32, question: bool) -> Option<(f64, f64, f64)> {
+    let e = f64::from(expressiveness);
+    if !e.is_finite() || e == 1.0 {
+        return None;
+    }
+    let e = e.clamp(f64::from(EXPRESSIVENESS.0), f64::from(EXPRESSIVENESS.1));
+    let rise = if question { QUESTION_RISE_ST } else { 0.0 };
+    Some((e, rise, ((e - 1.0) * EMPHASIS_DB_PER_UNIT).clamp(0.0, 6.0)))
 }
 
 /// `v` within `range`, else a message saying so (`what`: the parameter's name).
@@ -287,10 +312,19 @@ mod tests {
             assert!(check("temperature", p.temperature, TEMPERATURE).is_ok(), "{s}");
             assert!(check("emphasis", p.emphasis, EMPHASIS).is_ok(), "{s}");
             assert!(check("speed", p.speed, SPEED).is_ok(), "{s}");
+            assert!(check("expressiveness", p.expressiveness, EXPRESSIVENESS).is_ok(), "{s}");
         }
         let excited = preset(Some("excited")).unwrap();
         let calm = preset(Some("calm")).unwrap();
         assert!(excited.emphasis > calm.emphasis && excited.temperature > calm.temperature && excited.speed > calm.speed);
+        assert!(excited.expressiveness > calm.expressiveness && calm.expressiveness == 1.0);
+        // reshaping: none at 1 (bit-identical), a range, a question's rise and a small lift otherwise
+        assert_eq!(reshaping(1.0, true), None);
+        assert_eq!(reshaping(f32::NAN, false), None);
+        assert_eq!(reshaping(1.3, false), Some((f64::from(1.3f32), 0.0, (f64::from(1.3f32) - 1.0) * 3.0)));
+        assert_eq!(reshaping(1.3, true).map(|r| r.1), Some(QUESTION_RISE_ST));
+        assert_eq!(reshaping(0.7, false).map(|r| r.2), Some(0.0), "a narrower range lifts nothing");
+        assert_eq!(reshaping(9.0, false).map(|r| (r.0, r.2)), Some((2.0, 3.0)), "bounded");
         for bad in [f32::NAN, f32::INFINITY, 0.29, 1.51] {
             assert!(check("temperature", bad, TEMPERATURE).unwrap_err().contains("temperature"));
         }

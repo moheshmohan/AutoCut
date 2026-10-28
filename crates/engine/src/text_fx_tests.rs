@@ -170,6 +170,7 @@ fn word_timing_from_a_narration() {
         temperature: None,
         emphasis: None,
         speed: None,
+        expressiveness: None,
         speech_duration: Tick(3 * TICKS_PER_SECOND),
     };
     let seq = s.state.active_sequence.unwrap();

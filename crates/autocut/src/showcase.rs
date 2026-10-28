@@ -632,7 +632,8 @@ pub struct Script {
 }
 
 /// How the voice reads a Malayalam part ([`Script::voice`]): each optional, over the part's
-/// delivery's preset (`tts.create`'s `temperature` 0.3–1.5, `emphasis` 1–4, `speed` 0.7–1.4).
+/// delivery's preset (`tts.create`'s `temperature` 0.3–1.5, `emphasis` 1–4, `speed` 0.7–1.4,
+/// `expressiveness` 0.5–2).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceSettings {
@@ -642,6 +643,8 @@ pub struct VoiceSettings {
     pub emphasis: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expressiveness: Option<f64>,
 }
 
 impl VoiceSettings {
@@ -651,13 +654,22 @@ impl VoiceSettings {
 
     /// `self`'s settings over `under`'s, field by field.
     pub fn over(&self, under: &VoiceSettings) -> VoiceSettings {
-        VoiceSettings { temperature: self.temperature.or(under.temperature), emphasis: self.emphasis.or(under.emphasis), speed: self.speed.or(under.speed) }
+        VoiceSettings {
+            temperature: self.temperature.or(under.temperature),
+            emphasis: self.emphasis.or(under.emphasis),
+            speed: self.speed.or(under.speed),
+            expressiveness: self.expressiveness.or(under.expressiveness),
+        }
+    }
+
+    fn fields(&self) -> [(&'static str, Option<f64>); 4] {
+        [("temperature", self.temperature), ("emphasis", self.emphasis), ("speed", self.speed), ("expressiveness", self.expressiveness)]
     }
 
     /// Every setting within its range, else what is wrong (`what`: the part).
     pub fn check(&self, what: &str) -> Result<(), String> {
-        use filmcraft_engine::project::narration::{EMPHASIS, SPEED, TEMPERATURE};
-        for (name, v, (lo, hi)) in [("temperature", self.temperature, TEMPERATURE), ("emphasis", self.emphasis, EMPHASIS), ("speed", self.speed, SPEED)] {
+        use filmcraft_engine::project::narration::{EMPHASIS, EXPRESSIVENESS, SPEED, TEMPERATURE};
+        for ((name, v), (lo, hi)) in self.fields().into_iter().zip([TEMPERATURE, EMPHASIS, SPEED, EXPRESSIVENESS]) {
             if let Some(v) = v
                 && !(v.is_finite() && (lo..=hi).contains(&v))
             {
@@ -669,10 +681,7 @@ impl VoiceSettings {
 
     /// The settings as `tts.create` params (only those given).
     pub fn params(&self) -> serde_json::Map<String, Value> {
-        [("temperature", self.temperature), ("emphasis", self.emphasis), ("speed", self.speed)]
-            .into_iter()
-            .filter_map(|(k, v)| v.map(|v| (k.to_string(), json!(v))))
-            .collect()
+        self.fields().into_iter().filter_map(|(k, v)| v.map(|v| (k.to_string(), json!(v)))).collect()
     }
 }
 
@@ -5248,7 +5257,7 @@ mod tests {
         assert!(ex.calls.lock().unwrap().iter().all(|(c, p)| c == "tts.create" && p.get("language").is_none() && p.get("check").is_none()));
         assert!(n.check.lines.is_empty());
         // the plan's voice settings go to the Malayalam parts (an English part is not given them)
-        let settings = VoiceSettings { temperature: Some(1.2), emphasis: None, speed: Some(1.05) };
+        let settings = VoiceSettings { temperature: Some(1.2), emphasis: None, speed: Some(1.05), expressiveness: Some(1.4) };
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, ..Narrations::default() };
         narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Excited, &settings, 3.0, &mut n).await.unwrap();
@@ -5256,7 +5265,14 @@ mod tests {
         let creates: Vec<Value> = ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").map(|(_, p)| p.clone()).collect();
         let (ml, en): (Vec<&Value>, Vec<&Value>) = creates.iter().partition(|p| p["language"] == "ml-IN");
         assert!(!ml.is_empty() && !en.is_empty());
-        assert!(ml.iter().all(|p| p["temperature"] == 1.2 && p["speed"] == 1.05 && p.get("emphasis").is_none() && p["delivery"] == "excited"), "{ml:?}");
+        assert!(
+            ml.iter().all(|p| p["temperature"] == 1.2
+                && p["speed"] == 1.05
+                && p["expressiveness"] == 1.4
+                && p.get("emphasis").is_none()
+                && p["delivery"] == "excited"),
+            "{ml:?}"
+        );
         assert!(en.iter().all(|p| p.get("temperature").is_none() && p.get("speed").is_none()), "{en:?}");
     }
 
@@ -5573,13 +5589,13 @@ mod tests {
     fn a_plan_says_how_the_voice_reads_each_part() {
         let plan: Script = serde_json::from_value(json!({
             "intro": "ഹായ്.", "lines": ["ഒന്ന്.", "രണ്ട്."], "outro": "ബൈ.",
-            "voice": {"1": {"temperature": 1.2, "speed": 1.05}, "intro": {"emphasis": 2.4}},
+            "voice": {"1": {"temperature": 1.2, "speed": 1.05}, "intro": {"emphasis": 2.4, "expressiveness": 1.5}},
             "voiceDefault": {"temperature": 0.9, "emphasis": 2.0}
         }))
         .unwrap();
         // a part's own settings over the plan's, field by field; the rest the plan's
-        assert_eq!(plan.voice_of("1"), VoiceSettings { temperature: Some(1.2), emphasis: Some(2.0), speed: Some(1.05) });
-        assert_eq!(plan.voice_of("intro"), VoiceSettings { temperature: Some(0.9), emphasis: Some(2.4), speed: None });
+        assert_eq!(plan.voice_of("1"), VoiceSettings { temperature: Some(1.2), emphasis: Some(2.0), speed: Some(1.05), expressiveness: None });
+        assert_eq!(plan.voice_of("intro"), VoiceSettings { temperature: Some(0.9), emphasis: Some(2.4), speed: None, expressiveness: Some(1.5) });
         assert_eq!(plan.voice_of("2"), plan.voice_default);
         assert!(plan.check_voice().is_ok());
         let p = plan.voice_of("1").params();
@@ -5599,7 +5615,12 @@ mod tests {
             }
             serde_json::from_value::<Script>(v)
         };
-        for bad in [json!({"voice": {"3": {"temperature": 2.0}}}), json!({"voiceDefault": {"emphasis": 0.5}}), json!({"voice": {"1": {"speed": 0}}})] {
+        for bad in [
+            json!({"voice": {"3": {"temperature": 2.0}}}),
+            json!({"voiceDefault": {"emphasis": 0.5}}),
+            json!({"voice": {"1": {"speed": 0}}}),
+            json!({"voice": {"1": {"expressiveness": 2.5}}}),
+        ] {
             let s = with(bad.clone()).unwrap();
             assert!(s.check_voice().unwrap_err().contains("script.voice"), "{bad}");
         }

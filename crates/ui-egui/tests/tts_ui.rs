@@ -267,6 +267,45 @@ fn delivery_is_saved_with_the_narration_and_loads_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A cloned voice reading a Malayalam script: the voice-style controls (temperature, emphasis,
+/// speed, expressiveness over the emotion's preset), the preset reset and Insert tag — each an
+/// automation id; English scripts do not show them.
+#[test]
+fn malayalam_voice_style_controls() {
+    let dir = scratch("styles");
+    let mut d = Driver::demo(&dir);
+    d.exec("window.panel.TextToSpeech", json!({}));
+    d.frames(3);
+    let style_ids = ["tts.temperature", "tts.emphasis", "tts.speed", "tts.expressiveness", "tts.samplerReset", "tts.insertTag"];
+    d.ok("ui.set", json!({"tts": {"voice": "clone:me", "text": "Hello there."}}));
+    d.frames(3);
+    let ids = d.ids("tts.");
+    assert!(style_ids.iter().all(|s| !ids.iter().any(|i| i == s)), "English: no voice-style controls {ids:?}");
+    d.ok("ui.set", json!({"tts": {"voice": "clone:me", "text": "ഇത് കൊള്ളാം! [calm] ശരി.", "delivery": "excited"}}));
+    d.frames(3);
+    let ids = d.ids("tts.");
+    for s in style_ids {
+        assert!(ids.iter().any(|i| i == s), "{s} missing from {ids:?}");
+    }
+    // regression: showing the sliders never sets them (a slider snapping a preset's f32 to its
+    // step reported a change, and every narration then carried the preset as its own settings)
+    d.ok("ui.scroll", json!({"id": "tts.numbers", "dy": -400.0}));
+    d.frames(4);
+    for k in ["temperature", "emphasis", "speed", "expressiveness"] {
+        assert_eq!(d.draft()[k], Value::Null, "{k}");
+    }
+    // a setting over the preset, then back to the preset (the panel scrolled to the controls)
+    d.ok("ui.set", json!({"tts": {"temperature": 0.8, "expressiveness": 1.4}}));
+    d.frames(2);
+    d.ok("ui.scroll", json!({"id": "tts.numbers", "dy": -400.0}));
+    d.frames(3);
+    d.snapshot("tts-malayalam-styles");
+    assert_eq!((d.draft()["temperature"].as_f64(), d.draft()["expressiveness"].as_f64()), (Some(0.8), Some(1.4)));
+    d.click("tts.samplerReset");
+    assert_eq!((d.draft()["temperature"].clone(), d.draft()["expressiveness"].clone()), (Value::Null, Value::Null));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Clone a voice: the engine and model choices, and the model's download confirmation (size,
 /// source, licence) before anything is fetched.
 #[test]

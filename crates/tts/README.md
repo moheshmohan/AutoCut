@@ -182,8 +182,12 @@ clip behaviour: `crates/engine/src/narration.rs`.
     dramatic → calm → warm), else the main one. Each style has a **sampler preset**
     (`styles::preset`: temperature — the scale of the flow-matching sampler's initial noise,
     Matcha-TTS's `temperature`, 1 leaves the noise untouched bit for bit — emphasis, the
-    classifier-free guidance `f5::Settings::cfg`, and speed on top of the pace); `Params`'
-    `temperature` (0.3–1.5), `emphasis` (1–4) and `speed` (0.7–1.4) override it; plain has none
+    classifier-free guidance `f5::Settings::cfg`, speed on top of the pace, and expressiveness —
+    each utterance's intonation reshaped after synthesis with `filmcraft_audio_dsp::prosody::reshape`
+    (TD-PSOLA, length unchanged: pitch range = expressiveness about the median, a `?` ending
+    raised 2 st, stressed syllables lifted 3 dB per unit over 1; at 1 the audio is untouched, and
+    audio it cannot reshape is kept as read); `Params`' `temperature` (0.3–1.5), `emphasis` (1–4),
+    `speed` (0.7–1.4) and `expressiveness` (0.5–2) override it; plain has none
     (the reading is exactly what it was). **Inline tags** (`script::parse_marked`,
     `malayalam::parts`): `[excited] … [calm] …` switch the style for what follows (an utterance
     never spans a tag or a line break), `[plain]` / `[neutral]` go back, `[breath]` is a

@@ -8,14 +8,17 @@
 //! voice_styles_lab scan <models dir> <media>…
 //! # read lines of a showcase script in readings (FILMCRAFT_DATA_DIR = a copy of the data dir)
 //! FILMCRAFT_DATA_DIR=<copy> voice_styles_lab read <voice> <script.json> <out dir> [lines] [reading,…]
+//! # a read run's readings measured with the prosody tracker, as a table
+//! voice_styles_lab table <out dir>
 //! # one WAV's pitch range and rate
 //! voice_styles_lab measure <wav> <words>
 //! # one engine command (a style reference on the copy: tts.voiceStyles)
 //! FILMCRAFT_DATA_DIR=<copy> voice_styles_lab exec tts.voiceStyles '{"voice": …, "set": "excited", …}'
 //! ```
 //!
-//! A reading is `name=delivery[/t<temperature>][/e<emphasis>][/s<speed>]` (`excited`,
-//! `plain/t0.7`, `calm/t1/e2/s1` — the calm reference with the model's own sampler); without
+//! A reading is `name=delivery[/t<temperature>][/e<emphasis>][/s<speed>][/x<expressiveness>]`
+//! (`excited`, `plain/t0.7`, `calm/t1/e2/s1/x1` — the calm reference with the model's own sampler
+//! and the reading's own intonation); without
 //! readings the lab reads the set in the docs. Each reading of a line is written as
 //! `<out dir>/<reading>/line<k>.wav`, its numbers to `<out dir>/results.jsonl` and a table to
 //! standard output. It reads through the engine (`tts.preview`, the strict check on), so it takes
@@ -224,16 +227,18 @@ fn scan(args: &[String]) -> Res<()> {
 }
 
 /// The readings measured when none are named.
-const READINGS: [&str; 9] = [
+const READINGS: [&str; 11] = [
     "main=plain",
-    "excited-ref=excited/t1/e2/s1",
+    "excited-ref=excited/t1/e2/s1/x1",
     "excited=excited",
-    "calm-ref=calm/t1/e2/s1",
+    "calm-ref=calm/t1/e2/s1/x1",
     "calm=calm",
     "main-t0.7=plain/t0.7",
     "main-t1.3=plain/t1.3",
     "main-e1.6=plain/e1.6",
     "main-e2.6=plain/e2.6",
+    "main-x1.3=plain/x1.3",
+    "main-x1.6=plain/x1.6",
 ];
 
 /// `name=delivery/t…/e…/s…` → its name and the `tts.preview` params it adds.
@@ -247,6 +252,7 @@ fn reading(spec: &str) -> Res<(String, Value)> {
             Some('t') => p["temperature"] = json!(num("t")?),
             Some('e') => p["emphasis"] = json!(num("e")?),
             Some('s') => p["speed"] = json!(num("s")?),
+            Some('x') => p["expressiveness"] = json!(num("x")?),
             _ => return Err(format!("`{part}` in `{spec}`")),
         }
     }
@@ -329,12 +335,62 @@ fn read(args: &[String]) -> Res<()> {
     Ok(())
 }
 
+/// `table <out dir>`: the readings of a `read` run measured again with the prosody tracker
+/// (`filmcraft_audio_dsp::prosody::expressiveness`, as the style finder measures his own speech):
+/// per reading the mean pitch range (10th–90th percentile, semitones), pitch movement, syllable
+/// rate (peaks a second of speech), energy variation, and the strict check's character error
+/// rates (first reading and kept) and readings made.
+fn table(args: &[String]) -> Res<()> {
+    let out = PathBuf::from(args.first().ok_or("table <out dir>")?);
+    let rows: Vec<Value> =
+        std::fs::read_to_string(out.join("results.jsonl")).map_err(|e| e.to_string())?.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let mut order: Vec<String> = Vec::new();
+    for r in &rows {
+        if let Some(n) = r["reading"].as_str()
+            && !order.iter().any(|o| o == n)
+        {
+            order.push(n.to_string());
+        }
+    }
+    println!("| reading | lines | pitch range p10–p90 (st) | movement (st/s) | syllables/s | energy var. (dB) | first-take CER | kept CER | readings |");
+    println!("|---|---|---|---|---|---|---|---|---|");
+    let avg = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+    for name in &order {
+        let mine: Vec<&Value> = rows.iter().filter(|r| r["reading"].as_str() == Some(name.as_str())).collect();
+        let (mut range, mut moves, mut rate, mut energy) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for r in &mine {
+            let Some(wav) = r["wav"].as_str() else { continue };
+            let (x, sr) = tts::wav::read(Path::new(wav)).map_err(|e| e.to_string())?;
+            let e = filmcraft_audio_dsp::prosody::expressiveness(&x, sr, &filmcraft_audio_dsp::prosody::PitchSettings::default()).map_err(|e| e.to_string())?;
+            range.push(e.f0_range_st);
+            moves.push(e.f0_movement_st_s);
+            rate.push(e.syllable_rate);
+            energy.push(e.energy_variation_db);
+        }
+        let f = |k: &str| mine.iter().filter_map(|r| r[k].as_f64()).collect::<Vec<f64>>();
+        let spec = mine.first().and_then(|r| r["spec"].as_str()).unwrap_or("");
+        println!(
+            "| {name} (`{spec}`) | {} | {:.2} | {:.1} | {:.2} | {:.1} | {:.3} | {:.3} | {} |",
+            mine.len(),
+            avg(&range),
+            avg(&moves),
+            avg(&rate),
+            avg(&energy),
+            avg(&f("firstCer")),
+            avg(&f("keptCer")),
+            f("takes").iter().sum::<f64>()
+        );
+    }
+    Ok(())
+}
+
 fn main() -> Res<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = args.get(1..).unwrap_or(&[]);
     match args.first().map(String::as_str) {
         Some("scan") => scan(rest),
         Some("read") => read(rest),
+        Some("table") => table(rest),
         // one engine command (`tts.voiceStyles …` on the data directory's voices)
         Some("exec") => {
             let (Some(id), Some(params)) = (rest.first(), rest.get(1)) else { return Err("exec <command> <json params>".into()) };
@@ -346,7 +402,11 @@ fn main() -> Res<()> {
         Some("measure") => {
             let (Some(wav), Some(words)) = (rest.first(), rest.get(1)) else { return Err("measure <wav> <words>".into()) };
             let (x, rate) = tts::wav::read(Path::new(wav)).map_err(|e| e.to_string())?;
-            println!("{}", measure_json(&measure(&x, rate, words)));
+            let e =
+                filmcraft_audio_dsp::prosody::expressiveness(&x, rate, &filmcraft_audio_dsp::prosody::PitchSettings::default()).map_err(|e| e.to_string())?;
+            let prosody = json!({"rangeSemitones": e.f0_range_st, "movement": e.f0_movement_st_s, "syllablesPerSecond": e.syllable_rate,
+                                 "energyVariationDb": e.energy_variation_db, "medianHz": e.f0_median_hz});
+            println!("{}", json!({"lab": measure_json(&measure(&x, rate, words)), "prosody": prosody}));
             Ok(())
         }
         _ => Err("usage: voice_styles_lab scan|read|measure … (see the source)".into()),

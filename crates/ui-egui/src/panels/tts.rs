@@ -10,7 +10,7 @@
 //!
 //! Automation ids: `tts.language`, `tts.voice`, `tts.hearVoice`, `tts.advanced` (twirl),
 //! `tts.pitch`, `tts.delivery` (Emotion), `tts.pace`, `tts.numbers` (a Malayalam script),
-//! `tts.temperature`, `tts.emphasis`, `tts.speed`, `tts.samplerReset`, `tts.insertTag` (a cloned
+//! `tts.temperature`, `tts.emphasis`, `tts.speed`, `tts.expressiveness`, `tts.samplerReset`, `tts.insertTag` (a cloned
 //! voice reading a Malayalam script), `tts.text`, `tts.addPause`, `tts.preview`, `tts.save`, `tts.new`,
 //! `tts.download`, `tts.download.confirm`, `tts.download.cancel`, `tts.cloneOpen` (twirl),
 //! `tts.cloneEngine`, `tts.cloneModel`, `tts.cloneName`, `tts.cloneConsent`, `tts.clone`,
@@ -30,7 +30,7 @@
 //! are asked for it; the other voices read plainly, and the menu says so. A cloned voice reading a
 //! Malayalam script reads after its reference for that emotion (its **voice style**; the panel
 //! says which references the voice has and which one the emotion reads after) with the emotion's
-//! **Temperature**, **Emphasis** and **Speed**, which the sliders override ("Use the emotion's
+//! **Temperature**, **Emphasis**, **Speed** and **Expressiveness**, which the sliders override ("Use the emotion's
 //! preset" goes back); **Insert tag** adds `[excited]`, `[calm]`, … `[breath]` to the script.
 
 use egui::{Align2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -61,6 +61,8 @@ pub struct TtsDraft {
     pub temperature: Option<f64>,
     pub emphasis: Option<f64>,
     pub speed: Option<f64>,
+    /// …and its pitch range after synthesis (None: the preset's).
+    pub expressiveness: Option<f64>,
     pub advanced_open: bool,
     /// The narration clip and item the draft was loaded from (None: a new narration).
     pub loaded_from: Option<(u64, u64)>,
@@ -110,6 +112,7 @@ impl Default for TtsDraft {
             temperature: None,
             emphasis: None,
             speed: None,
+            expressiveness: None,
             advanced_open: true,
             loaded_from: None,
             pending: None,
@@ -131,7 +134,7 @@ impl TtsDraft {
         let mut p = json!({"text": self.text, "voice": self.voice, "pitch": self.pitch.id(), "delivery": self.delivery.id(), "pace": self.pace, "numbers": self.numbers.id()});
         // the sampler shapes a Malayalam narration only (English voices refuse it)
         if self.malayalam() {
-            for (k, v) in [("temperature", self.temperature), ("emphasis", self.emphasis), ("speed", self.speed)] {
+            for (k, v) in [("temperature", self.temperature), ("emphasis", self.emphasis), ("speed", self.speed), ("expressiveness", self.expressiveness)] {
                 p[k] = json!(v);
             }
         }
@@ -150,6 +153,7 @@ impl TtsDraft {
             temperature: self.temperature.map_or(base.temperature, |v| v as f32),
             emphasis: self.emphasis.map_or(base.emphasis, |v| v as f32),
             speed: self.speed.map_or(base.speed, |v| v as f32),
+            expressiveness: self.expressiveness.map_or(base.expressiveness, |v| v as f32),
         }
     }
 }
@@ -298,6 +302,7 @@ pub fn follow_selection(app: &mut FilmcraftApp) {
                 d.temperature = n.temperature;
                 d.emphasis = n.emphasis;
                 d.speed = n.speed;
+                d.expressiveness = n.expressiveness;
                 d.loaded_from = Some((clip.0, item));
                 if first_time {
                     app.show_panel(crate::dock::PanelKind::TextToSpeech);
@@ -717,20 +722,31 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         "How closely the voice follows the words and its style reference (guidance; 2 is the model's own)",
                     ),
                     ("Speed", "tts.speed", &mut d.speed, f64::from(s.speed), filmcraft_project::narration::SPEED, "Speaking speed on top of the pace (1 is the natural rate)"),
+                    (
+                        "Expressiveness",
+                        "tts.expressiveness",
+                        &mut d.expressiveness,
+                        f64::from(s.expressiveness),
+                        filmcraft_project::narration::EXPRESSIVENESS,
+                        "The pitch range after the voice reads it: above 1 livelier (questions rise, stressed syllables lift), below 1 flatter (1 leaves the reading as it is)",
+                    ),
                 ] {
                     ui.label(egui::RichText::new(if slot.is_some() { name.to_string() } else { format!("{name} (emotion's preset)") }).color(t.text).size(11.5));
                     let mut v = now;
-                    let r = ui.add(egui::Slider::new(&mut v, lo..=hi).step_by(0.05).fixed_decimals(2)).on_hover_text(hint);
-                    if r.changed() {
+                    let r = ui.add(egui::Slider::new(&mut v, lo..=hi).step_by(0.01).fixed_decimals(2)).on_hover_text(hint);
+                    // a value the user moved (the slider also snaps a preset's f32 to its grid,
+                    // which is no change)
+                    if r.changed() && (v - now).abs() > 1e-4 {
                         *slot = Some(v);
                     }
                     auto.add(id, visible(ui, r.rect), name);
                 }
                 ui.horizontal(|ui| {
-                    let b = ui.add_enabled(d.temperature.is_some() || d.emphasis.is_some() || d.speed.is_some(), egui::Button::new("Use the emotion's preset").small());
+                    let set = d.temperature.is_some() || d.emphasis.is_some() || d.speed.is_some() || d.expressiveness.is_some();
+                    let b = ui.add_enabled(set, egui::Button::new("Use the emotion's preset").small());
                     auto.add("tts.samplerReset", visible(ui, b.rect), "Use the emotion's preset");
                     if b.clicked() {
-                        (d.temperature, d.emphasis, d.speed) = (None, None, None);
+                        (d.temperature, d.emphasis, d.speed, d.expressiveness) = (None, None, None, None);
                     }
                     let cb = egui::ComboBox::from_id_salt("tts-insert-tag").selected_text("Insert tag").width(110.0).show_ui(ui, |ui| {
                         for tag in filmcraft_tts::styles::STYLES.iter().copied().chain(["plain", "breath"]) {

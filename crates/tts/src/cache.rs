@@ -260,7 +260,12 @@ impl DiskCache {
             h.update((d.len() as u64).to_le_bytes());
             h.update(d.as_bytes());
         }
-        for (name, v) in [(&b"temperature"[..], params.temperature), (&b"emphasis"[..], params.emphasis), (&b"speed"[..], params.speed)] {
+        for (name, v) in [
+            (&b"temperature"[..], params.temperature),
+            (&b"emphasis"[..], params.emphasis),
+            (&b"speed"[..], params.speed),
+            (&b"expressiveness"[..], params.expressiveness),
+        ] {
             if let Some(v) = v {
                 h.update(name);
                 h.update(v.to_bits().to_le_bytes());
@@ -551,6 +556,7 @@ mod tests {
             Params { emphasis: Some(0.7), ..p },
             Params { speed: Some(0.7), ..p },
             Params { delivery: Some("excited"), temperature: Some(0.7), ..p },
+            Params { expressiveness: Some(0.7), ..p },
         ]
         .iter()
         .map(|q| DiskCache::key("x", "ab", q))

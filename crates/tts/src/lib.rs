@@ -107,11 +107,15 @@ pub struct Params {
     pub temperature: Option<f32>,
     pub emphasis: Option<f32>,
     pub speed: Option<f32>,
+    /// The pitch range of the reading after synthesis ([`styles::EXPRESSIVENESS`]; 1 leaves the
+    /// audio exactly as synthesized), over the style's preset: the intonation reshaped
+    /// ([`styles::reshaping`]; Malayalam through IndicF5).
+    pub expressiveness: Option<f32>,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Params { semitones: 0.0, pace: 1.0, style: None, take: 0, delivery: None, temperature: None, emphasis: None, speed: None }
+        Params { semitones: 0.0, pace: 1.0, style: None, take: 0, delivery: None, temperature: None, emphasis: None, speed: None, expressiveness: None }
     }
 }
 
@@ -128,9 +132,12 @@ impl Params {
         {
             return Err(TtsError::Invalid(format!("unknown voice style `{d}` ({})", styles::STYLES.join(", "))));
         }
-        for (what, v, range) in
-            [("temperature", self.temperature, styles::TEMPERATURE), ("emphasis", self.emphasis, styles::EMPHASIS), ("speed", self.speed, styles::SPEED)]
-        {
+        for (what, v, range) in [
+            ("temperature", self.temperature, styles::TEMPERATURE),
+            ("emphasis", self.emphasis, styles::EMPHASIS),
+            ("speed", self.speed, styles::SPEED),
+            ("expressiveness", self.expressiveness, styles::EXPRESSIVENESS),
+        ] {
             if let Some(v) = v {
                 styles::check(what, v, range).map_err(TtsError::Invalid)?;
             }
@@ -142,7 +149,7 @@ impl Params {
     /// for explicitly. `None`: nothing differs from the reading's own settings.
     pub fn sampler(&self, style: Option<&str>) -> Option<styles::Sampler> {
         let preset = styles::preset(style);
-        if preset.is_none() && self.temperature.is_none() && self.emphasis.is_none() && self.speed.is_none() {
+        if preset.is_none() && self.temperature.is_none() && self.emphasis.is_none() && self.speed.is_none() && self.expressiveness.is_none() {
             return None;
         }
         let base = preset.unwrap_or(styles::Sampler::PLAIN);
@@ -150,6 +157,7 @@ impl Params {
             temperature: self.temperature.unwrap_or(base.temperature),
             emphasis: self.emphasis.unwrap_or(base.emphasis),
             speed: self.speed.unwrap_or(base.speed),
+            expressiveness: self.expressiveness.unwrap_or(base.expressiveness),
         })
     }
 }
@@ -343,6 +351,9 @@ mod tests {
             Params { emphasis: Some(4.5), ..Default::default() },
             Params { speed: Some(0.0), ..Default::default() },
             Params { speed: Some(f32::INFINITY), ..Default::default() },
+            Params { expressiveness: Some(0.4), ..Default::default() },
+            Params { expressiveness: Some(2.5), ..Default::default() },
+            Params { expressiveness: Some(f32::NAN), ..Default::default() },
         ] {
             assert!(p.check().is_err(), "{p:?}");
         }
@@ -359,6 +370,9 @@ mod tests {
         assert_eq!(q.sampler(None), Some(styles::Sampler { temperature: 0.7, ..styles::Sampler::PLAIN }));
         let calm = styles::preset(Some("calm")).unwrap();
         assert_eq!(q.sampler(Some("calm")), Some(styles::Sampler { temperature: 0.7, ..calm }), "explicit beats the preset");
+        let e = Params { expressiveness: Some(1.6), ..Default::default() };
+        assert_eq!(e.sampler(None), Some(styles::Sampler { expressiveness: 1.6, ..styles::Sampler::PLAIN }));
+        assert_eq!(e.sampler(Some("excited")).map(|s| (s.expressiveness, s.emphasis)), Some((1.6, 2.4)));
     }
 
     #[test]

@@ -231,7 +231,8 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    [docs/malayalam-narration.md](../../docs/malayalam-narration.md)), with its sampler preset.
    `script.voice` tunes how IndicF5 reads a part — `{"3": {"temperature": 1.1, "emphasis": 2.4,
    "speed": 1.05}}` by `"intro"`, `"outro"` or entry number (temperature 0.3–1.5, emphasis 1–4,
-   speed 0.7–1.4, each optional, over the delivery's preset) — and `script.voiceDefault` every
+   speed 0.7–1.4, expressiveness 0.5–2 — the pitch range after synthesis — each optional, over
+   the delivery's preset) — and `script.voiceDefault` every
    part without its own (a part's settings win field by field); both go to `tts.create`, are
    checked before anything is built (a misspelt or out-of-range setting is refused), and follow
    their entries on review. Style tags in a line (`[excited] … [calm] …`) are read as tags and

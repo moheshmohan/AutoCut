@@ -393,6 +393,7 @@ fn next_id_is_raised_past_every_id_in_the_file() {
                     temperature: None,
                     emphasis: None,
                     speed: None,
+                    expressiveness: None,
                     speech_duration: Tick(1),
                 };
                 p.narrations.insert(ItemId(BIG), narration);

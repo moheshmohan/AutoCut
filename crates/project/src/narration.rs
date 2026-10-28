@@ -19,6 +19,8 @@ pub const MAX_PACE: f64 = 2.0;
 pub const TEMPERATURE: (f64, f64) = (0.3, 1.5);
 pub const EMPHASIS: (f64, f64) = (1.0, 4.0);
 pub const SPEED: (f64, f64) = (0.7, 1.4);
+/// The pitch range of a Malayalam reading after synthesis (1: as synthesized).
+pub const EXPRESSIVENESS: (f64, f64) = (0.5, 2.0);
 
 /// Text to Speech ▸ Advanced ▸ Vocal pitch.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -211,6 +213,10 @@ pub struct Narration {
     pub emphasis: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f64>,
+    /// A Malayalam narration's intonation after synthesis ([`EXPRESSIVENESS`]); `None`: its
+    /// delivery's preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expressiveness: Option<f64>,
     /// Length of the speech in the generated file. The file can be longer: when an edit made the
     /// speech shorter than its clip, the file is padded with silence to the clip's length.
     pub speech_duration: Tick,
@@ -243,7 +249,12 @@ impl Narration {
         if self.take > MAX_TAKE {
             return Err(format!("take must be at most {MAX_TAKE}"));
         }
-        for (what, v, (lo, hi)) in [("temperature", self.temperature, TEMPERATURE), ("emphasis", self.emphasis, EMPHASIS), ("speed", self.speed, SPEED)] {
+        for (what, v, (lo, hi)) in [
+            ("temperature", self.temperature, TEMPERATURE),
+            ("emphasis", self.emphasis, EMPHASIS),
+            ("speed", self.speed, SPEED),
+            ("expressiveness", self.expressiveness, EXPRESSIVENESS),
+        ] {
             if let Some(v) = v
                 && !(v.is_finite() && (lo..=hi).contains(&v))
             {
@@ -274,6 +285,7 @@ mod tests {
             temperature: Some(0.8),
             emphasis: None,
             speed: Some(1.05),
+            expressiveness: Some(1.3),
             speech_duration: Tick::from_seconds_f64(2.5),
         }
     }
@@ -294,6 +306,8 @@ mod tests {
             Narration { emphasis: Some(4.5), ..sample() },
             Narration { speed: Some(0.0), ..sample() },
             Narration { speed: Some(f64::INFINITY), ..sample() },
+            Narration { expressiveness: Some(0.4), ..sample() },
+            Narration { expressiveness: Some(2.1), ..sample() },
         ] {
             assert!(bad.check().is_err(), "{bad:?}");
         }

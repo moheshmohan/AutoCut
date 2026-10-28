@@ -195,7 +195,7 @@ Checked readings are cached under their own key with their report, so a rebuild 
 `"check": "off"` reads without hearing. The Text to Speech panel shows the outcome in the
 status bar.
 
-## 7. Voice styles: emotion, temperature, emphasis, speed
+## 7. Voice styles: emotion, temperature, emphasis, speed, expressiveness
 
 IndicF5 continues the reference clip, so the clip sets the emotion and prosody of everything it
 reads: one calm reference reads every line calm. A voice keeps **one reference per style** beside
@@ -252,8 +252,8 @@ reference and `[breath]` is a breath-length pause of the reference's room tone. 
 read aloud or shown in subtitles; the strict check hears each part against its own words; a line
 break also starts a new utterance.
 
-**Temperature, emphasis, speed.** Each style has a preset for IndicF5's sampler; a narration may
-set them (`tts.create`, `tts.edit`, `tts.preview`, `tts.render`; the panel's sliders; a showcase
+**Temperature, emphasis, speed, expressiveness.** Each style has a preset for IndicF5's sampler
+and the intonation after it; a narration may set them (`tts.create`, `tts.edit`, `tts.preview`, `tts.render`; the panel's sliders; a showcase
 plan's `script.voice`):
 
 | Setting | Range | Plain | What it does |
@@ -261,16 +261,20 @@ plan's `script.voice`):
 | `temperature` | 0.3–1.5 | 1.0 | the flow-matching sampler's starting noise: lower is steadier and flatter, higher livelier and riskier |
 | `emphasis` | 1–4 | 2.0 | classifier-free guidance: how closely the voice follows the words and its reference |
 | `speed` | 0.7–1.4 | 1.0 | speaking speed on top of `pace` (the natural rate is held at 4.6–6 syllables a second first) |
+| `expressiveness` | 0.5–2 | 1.0 | after the voice reads a line, its pitch range: each utterance's deviations from its median pitch scaled by it (`filmcraft_audio_dsp::prosody::reshape`, TD-PSOLA, length unchanged), a question's end raised 2 semitones, stressed syllables lifted 3 dB per unit over 1; 1 leaves the reading exactly as synthesized |
 
-| Style | temperature | emphasis | speed | pauses |
-|---|---|---|---|---|
-| conversational | 1.0 | 2.0 | 1.02 | ×0.9 |
-| warm | 0.95 | 2.0 | 0.98 | ×1.0 |
-| excited | 1.1 | 2.4 | 1.06 | ×0.8 |
-| amazed | 1.1 | 2.3 | 1.0 | ×0.85 |
-| curious | 1.05 | 2.1 | 1.0 | ×0.95 |
-| calm | 0.85 | 1.8 | 0.95 | ×1.25 |
-| dramatic | 0.9 | 2.2 | 0.92 | ×1.35 |
+IndicF5's readings of the owner span about 3.0 semitones of pitch (10th–90th percentile) against
+4.0 in his own speech, so the livelier styles widen it:
+
+| Style | temperature | emphasis | speed | expressiveness | pauses |
+|---|---|---|---|---|---|
+| conversational | 1.0 | 2.0 | 1.02 | 1.1 | ×0.9 |
+| warm | 0.95 | 2.0 | 0.98 | 1.15 | ×1.0 |
+| excited | 1.1 | 2.4 | 1.06 | 1.3 | ×0.8 |
+| amazed | 1.1 | 2.3 | 1.0 | 1.35 | ×0.85 |
+| curious | 1.05 | 2.1 | 1.0 | 1.2 | ×0.95 |
+| calm | 0.85 | 1.8 | 0.95 | 1.0 | ×1.25 |
+| dramatic | 0.9 | 2.2 | 0.92 | 1.2 | ×1.35 |
 
 `null` (or leaving it out) goes back to the preset; a value out of range is refused with the
 range. English narrations take none of them.
@@ -284,6 +288,49 @@ always pauses the same). A pause marker (`[pause 1s]`) is exact.
 on the references it reads after, its delivery and its settings, so changing a style's reference
 or a setting reads it again and a styled reading is never served for a plain one. A line of more
 than one utterance is read again once (its pauses changed on 2026-10-28).
+
+**Measured (2026-10-28, M3 Max GPU, on a copy of the profile).** The style finder's picks set as
+they are (`--report styles.json --candidate excited-1 | calm-1 | amazed-1`): excited `IMG_3338.MOV`
+149.9–158.0 s, calm `IMG_3338.MOV` 41.9–50.2 s, amazed `20250729-124548.mov` 44.0–51.2 s; the main
+reference is the voice's own (`20250729-124548.mov` 132.4–141.2 s, words as the speech model heard
+them). Five lines of `script-ml-part2.json` read in each way (`voice_styles_lab read`, the strict
+check on), measured with the prosody tracker (`voice_styles_lab table`: pitch range = 10th–90th
+percentile, semitones; syllable peaks a second of speech; the strict check's character error rate
+of each utterance's first reading and of the one kept):
+
+| Reading | pitch range (st) | movement (st/s) | syllables/s | energy variation (dB) | first-reading CER | kept CER | readings |
+|---|---|---|---|---|---|---|---|
+| main reference, plain | 4.58 | 11.3 | 4.44 | 4.5 | 0.108 | 0.114 | 6 |
+| excited reference, the model's own sampler | 3.58 | 12.3 | 5.70 | 5.5 | 0.053 | 0.053 | 5 |
+| excited (reference + preset) | 4.16 | 14.8 | 5.20 | 5.1 | 0.096 | 0.062 | 8 |
+| calm reference, the model's own sampler | 2.79 | 13.5 | 4.83 | 4.5 | 0.073 | 0.073 | 5 |
+| calm (reference + preset) | 3.13 | 12.4 | 4.63 | 5.4 | 0.082 | 0.045 | 6 |
+| main, temperature 0.7 | 2.66 | 11.9 | 4.51 | 4.2 | 0.085 | 0.074 | 9 |
+| main, temperature 1.3 | 5.47 | 12.0 | 4.29 | 4.5 | 0.188 | 0.103 | 7 |
+| main, emphasis 1.6 | 3.32 | 11.1 | 4.31 | 4.5 | 0.130 | 0.080 | 7 |
+| main, emphasis 2.6 | 5.41 | 16.6 | 4.46 | 4.5 | 0.146 | 0.090 | 8 |
+| main, expressiveness 1.3 | 5.46 | 11.9 | 4.31 | 4.7 | 0.101 | 0.096 | 6 |
+| main, expressiveness 1.6 | 5.05 | 13.7 | 4.24 | 4.9 | 0.129 | 0.108 | 6 |
+
+His own speech in the references: main 4.22 st, 4.0 syllables/s; excited 4.56 st, 5.5
+syllables/s, 5.8 dB; calm 3.07 st, 4.0 syllables/s, 7.1 st/s of movement; amazed 5.11 st, 3.4
+syllables/s.
+
+- **The reference carries the delivery.** The excited reference read 28 % faster than the main one
+  (5.70 against 4.44 syllables/s; his clip 5.5) with more energy variation (5.5 against 4.5 dB;
+  his clip 5.8); the calm reference read with the narrowest pitch (2.79 st; his clip 3.07). Its
+  rate stays at 4.6–6 syllables/s (the natural-rate clamp lifts the calm clip's 4.0 to 4.6).
+- **IndicF5 compresses the pitch** of a lively reference (3.58 st against his 4.56): the excited
+  preset (expressiveness 1.3 among it) brings it back to 4.16.
+- **Temperature and emphasis widen the pitch** monotonically (temperature 0.7 → 1.3: 2.66 → 5.47
+  st; emphasis 1.6 → 2.6: 3.32 → 5.41 st), and both cost first readings above the model's own
+  (first-reading CER 0.188 at temperature 1.3, 0.146 at emphasis 2.6, against 0.108): the strict
+  check reads those again (kept 0.103, 0.090). Keep them near the presets.
+- **Expressiveness 1.3** widened the main reference's readings from 4.58 to 5.46 st at no cost in
+  what was heard (0.101 first, against 0.108); at 1.6 the tracker saw no wider (5.05 st) and the
+  first readings were heard less well (0.129).
+- Five lines a reading: differences of a few hundredths in the error rates are noise. Listen to
+  the readings: `target/agent-voice-styles/samples/<reading>/line<k>.wav` of the run.
 
 ## 8. A Malayalam showcase
 
