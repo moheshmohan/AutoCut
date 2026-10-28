@@ -14,7 +14,9 @@
 //! equirectangular picture; for fisheye lenses the angle θ from each lens's axis and its bearing
 //! φ, the image circle's radius × the lens's distortion polynomial of θ / half-FOV. Where both
 //! lenses of a dual fisheye see a direction, they are cross-faded over a band of
-//! [`BLEND_DEGREES`] either side of the line half way between their axes. Bilinear sampling,
+//! [`BLEND_DEGREES`] either side of the line half way between their axes — or, with the shifts
+//! between the lenses measured on the picture ([`crate::vr_seam`]: near things seen from two
+//! points), over a wider band with each lens's sample moved towards the other's. Bilinear sampling,
 //! wrapping across the ±180° seam of a whole-sphere equirectangular picture.
 //!
 //! Directions: +Z forward, +X right, +Y up (`filmcraft_media::spherical`).
@@ -270,15 +272,11 @@ pub fn radial(poly: &[f64], t: f64) -> f64 {
 pub enum SourceModel {
     /// The view rectangle (x0, y0, w, h: the left eye of a stereoscopic frame), the captured view
     /// in radians across and down, and whether it wraps (all 360°).
-    Equirect {
-        rect: [f64; 4],
-        span: (f64, f64),
-        wrap: bool,
-    },
-    DualFisheye {
-        lenses: Vec<LensPx>,
-        blend: f64,
-    },
+    Equirect { rect: [f64; 4], span: (f64, f64), wrap: bool },
+    /// `seam`: the shifts between the lenses along their seam, when measured on the picture
+    /// ([`crate::vr_seam::stitched`]): each lens's sample is moved part of the way towards the
+    /// other's across the cross-fade.
+    DualFisheye { lenses: Vec<LensPx>, blend: f64, seam: Option<std::sync::Arc<crate::vr_seam::SeamFlow>> },
 }
 
 /// Where the source saw one direction: up to two pixels with their weights.
@@ -307,7 +305,7 @@ impl SourceModel {
                 SourceModel::Equirect { rect, span, wrap: s.captured[0] >= 359.999 }
             }
             Projection::DualFisheye { lenses } => {
-                SourceModel::DualFisheye { lenses: lenses.iter().map(|l| LensPx::new(l, w, h)).collect(), blend: BLEND_DEGREES.to_radians() }
+                SourceModel::DualFisheye { lenses: lenses.iter().map(|l| LensPx::new(l, w, h)).collect(), blend: BLEND_DEGREES.to_radians(), seam: None }
             }
         }
     }
@@ -346,7 +344,7 @@ impl SourceModel {
                 }
                 Located::One(x, y)
             }
-            SourceModel::DualFisheye { lenses, blend } => {
+            SourceModel::DualFisheye { lenses, blend, seam } => {
                 let mut hits = [(0.0, None), (0.0, None)];
                 for (k, l) in lenses.iter().take(2).enumerate() {
                     hits[k] = l.locate(d);
@@ -361,6 +359,14 @@ impl SourceModel {
                         } else if w0 <= 0.0 {
                             Located::One(b.0, b.1)
                         } else {
+                            // each lens's sample moved towards the other's along the seam's shift
+                            let (a, b) = match (seam, lenses.first(), lenses.get(1)) {
+                                (Some(f), Some(l0), Some(l1)) => match f.warped(d, w0, l0, l1) {
+                                    Some((ma, mb)) => (ma.unwrap_or(a), mb.unwrap_or(b)),
+                                    None => (a, b),
+                                },
+                                _ => (a, b),
+                            };
                             Located::Two((a.0, a.1, w0), (b.0, b.1, 1.0 - w0))
                         }
                     }

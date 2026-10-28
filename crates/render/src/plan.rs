@@ -641,6 +641,15 @@ fn push_item(
             // effects then run on that picture, as `item_layer` runs them
             if plain {
                 let model = crate::vr::SourceModel::at(&r.spherical, (frame.width as usize, frame.height as usize), time);
+                // (near things on a dual fisheye's seam: the lenses' shifts measured on this frame)
+                let model = match r.spherical.seam_flow {
+                    true => {
+                        let frames = crate::vr_seam::seam_frames(&src, time, scale, frame.clone());
+                        let seam = crate::vr_seam::seam_of(&model, &frames.iter().map(|f| f.as_ref()).collect::<Vec<_>>());
+                        crate::vr_seam::with_seam(model, seam)
+                    }
+                    false => model,
+                };
                 let taps = crate::vr::taps(&model, &r.view, r.out.0) as u32;
                 let out_size = (r.out.0 as u32, r.out.1 as u32);
                 let vr = Some(Arc::new(VrLayer { view: r.view, model, out: out_size, taps }));

@@ -32,7 +32,11 @@ struct U {
     // [6] equirect view rectangle x, y, w, h (texels); [7] span across, down (radians), wraps
     // [8 + 7k ..] lens k: rect x0 y0 x1 y1; cx cy radius half_fov; rotation rows (.w of the
     //            first: polynomial terms); polynomial coefficients (two vec4)
-    vr: array<vec4<f32>, 22>,
+    // [22] seam shifts on, columns, band half-height (radians); [23..25] the seam's n, e1, e2
+    vr: array<vec4<f32>, 26>,
+    // The shifts along a dual-fisheye seam (`filmcraft_render::vr_seam::SeamFlow`): column c's
+    // (across, along) in .xy (even c) or .zw (odd c) of [c / 2].
+    seam: array<vec4<f32>, 256>,
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -329,6 +333,41 @@ fn vr_lens(k: u32, d: vec3<f32>) -> vec4<f32> {
     return vec4(x, y, theta, select(0.0, 1.0, inside));
 }
 
+// The seam's shift at column i (wrapping round it).
+fn seam_col(i: u32) -> vec2<f32> {
+    let n = max(u32(u.vr[22].y), 1u);
+    let c = i % n;
+    let q = u.seam[c / 2u];
+    if (c & 1u) == 0u { return q.xy; }
+    return q.zw;
+}
+
+fn seam_dir(phi: f32, psi: f32) -> vec3<f32> {
+    return cos(psi) * (cos(phi) * u.vr[24].xyz + sin(phi) * u.vr[25].xyz) + sin(psi) * u.vr[23].xyz;
+}
+
+// Lens 0's and lens 1's samples of d moved towards each other along the seam's shift
+// (`SeamFlow::warped`), w0 lens 0's weight; a moved sample outside its lens keeps the unmoved one.
+fn seam_warped(d: vec3<f32>, w0: f32, a: vec4<f32>, b: vec4<f32>) -> array<vec2<f32>, 2> {
+    var out = array<vec2<f32>, 2>(a.xy, b.xy);
+    let psi = asin(clamp(dot(d, u.vr[23].xyz), -1.0, 1.0));
+    if u.vr[22].x < 0.5 || abs(psi) >= u.vr[22].z {
+        return out;
+    }
+    let phi = atan2(dot(d, u.vr[25].xyz), dot(d, u.vr[24].xyz));
+    let n = max(u.vr[22].y, 1.0);
+    let x = phi / 6.283185307179586 * n;
+    let xf = x - floor(x / n) * n;
+    let i0 = u32(floor(xf));
+    let s = mix(seam_col(i0), seam_col(i0 + 1u), xf - floor(xf));
+    let k0 = 1.0 - w0;
+    let ma = vr_lens(0u, seam_dir(phi - k0 * s.y, psi - k0 * s.x));
+    let mb = vr_lens(1u, seam_dir(phi + w0 * s.y, psi + w0 * s.x));
+    if ma.w > 0.5 { out[0] = ma.xy; }
+    if mb.w > 0.5 { out[1] = mb.xy; }
+    return out;
+}
+
 fn vr_fisheye(d: vec3<f32>) -> vec4<f32> {
     let lenses = u32(u.vr[0].w);
     if lenses == 0u {
@@ -346,7 +385,8 @@ fn vr_fisheye(d: vec3<f32>) -> vec4<f32> {
         let w0 = smoothstep(-bl, bl, b.z - a.z);
         if w0 >= 1.0 { return vr_sample(a.xy, vec3(0.0)); }
         if w0 <= 0.0 { return vr_sample(b.xy, vec3(0.0)); }
-        return vr_sample(a.xy, vec3(0.0)) * w0 + vr_sample(b.xy, vec3(0.0)) * (1.0 - w0);
+        let p = seam_warped(d, w0, a, b);
+        return vr_sample(p[0], vec3(0.0)) * w0 + vr_sample(p[1], vec3(0.0)) * (1.0 - w0);
     }
     if a.w > 0.5 { return vr_sample(a.xy, vec3(0.0)); }
     if b.w > 0.5 { return vr_sample(b.xy, vec3(0.0)); }

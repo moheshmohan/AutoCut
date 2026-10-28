@@ -54,9 +54,14 @@ fn dual() -> Spherical {
 /// GPU and CPU pictures of one 360° layer, compared (8-bit: p99, mean of the largest channel
 /// difference).
 fn compare(frame: Arc<VideoFrame>, spherical: &Spherical, view: View, out: (u32, u32), matrix: Affine, canvas: (usize, usize)) -> Option<(u32, f64)> {
+    let model = SourceModel::new(spherical, (frame.width as usize, frame.height as usize));
+    compare_model(frame, model, view, out, matrix, canvas)
+}
+
+/// [`compare`] with the source's model given.
+fn compare_model(frame: Arc<VideoFrame>, model: SourceModel, view: View, out: (u32, u32), matrix: Affine, canvas: (usize, usize)) -> Option<(u32, f64)> {
     let (dev, q) = device()?;
     let mut c = GpuCompositor::new(&dev, &q);
-    let model = SourceModel::new(spherical, (frame.width as usize, frame.height as usize));
     let taps = filmcraft_render::vr::taps(&model, &view, out.0 as usize) as u32;
     let vr = Some(Arc::new(VrLayer { view, model, out, taps }));
     let plan = FramePlan::Layers { width: canvas.0, height: canvas.1, layers: vec![PlanLayer { vr, ..PlanLayer::new(frame, matrix, 1.0, Blend::Normal) }] };
@@ -107,6 +112,40 @@ fn dual_fisheye_views_match_the_cpu() {
         };
         assert!(p99 <= 6 && mean < 1.5, "yaw {yaw} pitch {pitch}: p99 {p99}, mean {mean}");
     }
+}
+
+#[test]
+fn a_flow_stitched_seam_matches_the_cpu() {
+    use filmcraft_render::vr_seam::{SeamFlow, with_seam};
+    let src = pattern(800, 400);
+    let model = SourceModel::new(&dual(), (800, 400));
+    let SourceModel::DualFisheye { lenses, .. } = &model else { panic!("dual fisheye") };
+    // shifts across and along the seam that change round it
+    let mut f = SeamFlow::unmoved(&lenses[0], &lenses[1]).unwrap();
+    let n = f.shift.len();
+    for (c, s) in f.shift.iter_mut().enumerate() {
+        let p = c as f64 / n as f64 * std::f64::consts::TAU;
+        *s = [(0.06 * (3.0 * p).sin()) as f32, (0.012 * p.cos()) as f32];
+    }
+    let model = with_seam(model, Some(Arc::new(f)));
+    // views across the seam (between the lenses, looking right and left)
+    for (yaw, pitch) in [(90.0, 0.0), (-90.0, 20.0), (85.0, -40.0)] {
+        let view = View::flat(yaw, pitch, 0.0, 70.0, 0.0, 256, 144);
+        let Some((p99, mean)) = compare_model(src.clone(), model.clone(), view, (256, 144), Affine::IDENTITY, (256, 144)) else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        assert!(p99 <= 6 && mean < 1.5, "yaw {yaw} pitch {pitch}: p99 {p99}, mean {mean}");
+    }
+    // the shifts do move the picture there
+    let plain = SourceModel::new(&dual(), (800, 400));
+    let SourceModel::DualFisheye { seam: Some(_), .. } = &model else { panic!("stitched") };
+    let view = View::flat(90.0, 0.0, 0.0, 70.0, 0.0, 256, 144);
+    let (w, h, px) = src.to_linear_f32_decimated(1);
+    let img = filmcraft_render::Image { w, h, px };
+    let a = filmcraft_render::vr::reframe(&img, &model, &view, 256, 144, 1);
+    let b = filmcraft_render::vr::reframe(&img, &plain, &view, 256, 144, 1);
+    assert!(a.px.iter().zip(&b.px).any(|(x, y)| (x - y).abs() > 0.02));
 }
 
 #[test]

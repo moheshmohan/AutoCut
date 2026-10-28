@@ -42,10 +42,19 @@ pub struct Spherical {
     /// picture; a stitched one was levelled when it was stitched).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub horizon: Option<Horizon>,
+    /// Dual fisheye: where the lenses' pictures meet, near things are stitched by the shifts
+    /// between them measured on each frame (`filmcraft_render::vr_seam`), not only cross-faded.
+    /// (Written only when off, so the pictures' keys stay as they were.)
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub seam_flow: bool,
 }
 
 fn full_view() -> [f64; 2] {
     [360.0, 180.0]
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
 }
 
 fn is_zero3(v: &[f64; 3]) -> bool {
@@ -62,6 +71,7 @@ impl Spherical {
             pose: [0.0; 3],
             camera: String::new(),
             horizon: None,
+            seam_flow: true,
         }
     }
 
@@ -74,6 +84,7 @@ impl Spherical {
             pose: [0.0; 3],
             camera: camera.to_string(),
             horizon: None,
+            seam_flow: true,
         }
     }
 

@@ -44,6 +44,7 @@ pub mod transitions;
 pub mod vfx;
 pub mod vr;
 pub mod vr_motion;
+pub mod vr_seam;
 pub mod vr_source;
 
 use std::sync::Arc;
@@ -770,8 +771,17 @@ fn reframed_layer(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, 
     let frame = src.video_frame(FrameRequest { time, scale: r.scale }).ok()?;
     let n = decimation(frame.width as f32, full_w as f32 * r.scale);
     let img = media_image(project, seq, item, t, &src, &frame, n, r.scale);
-    // (levelled by the recording's horizon at the frame's own time)
+    // (levelled by the recording's horizon at the frame's own time; near things on a dual
+    // fisheye's seam stitched by the lenses' shifts, measured on the decoded frame)
     let model = vr::SourceModel::at(&r.spherical, (img.w, img.h), time);
+    let model = match r.spherical.seam_flow {
+        true => {
+            let frames = vr_seam::seam_frames(&src, time, r.scale, frame.clone());
+            let at_frame = vr::SourceModel::at(&r.spherical, (frame.width as usize, frame.height as usize), time);
+            vr_seam::with_seam(model, vr_seam::seam_of(&at_frame, &frames.iter().map(|f| f.as_ref()).collect::<Vec<_>>()))
+        }
+        false => model,
+    };
     let taps = vr::taps(&model, &r.view, r.out.0);
     Some(vr::reframe(&img, &model, &r.view, r.out.0, r.out.1, taps))
 }

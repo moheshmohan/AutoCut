@@ -3,7 +3,8 @@
 //! | command | does |
 //! |---|---|
 //! | `clip.reframe360` | looks at 360° clips (`clips`, default the selection, else every clip of 360° media) through a virtual camera (the `vr_reframe` effect, added when missing, framing the sequence's frame): `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across) and `distance` (0 flat … 1 tiny planet) set, or keyframed `at` a clip time, or a whole camera move as `keys`; a `preset` (`natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`) first; one undo step |
-//! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` (alone, they change the item's own); `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings); with nothing to change, what the items' VR Properties are |
+//! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` (alone, they change the item's own); `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings); `seamFlow` (on by itself) stitches near things on a dual fisheye's seam by the lenses' shifts measured on each frame (`filmcraft_render::vr_seam`) rather than only cross-fading them; with nothing to change, what the items' VR Properties are |
+//! | `media.seam360` | the seam of a dual-fisheye item at `seconds` (default: the middle), measured on the full-size frame (`filmcraft_render::vr_seam`): how much the lenses' pictures disagree across it with a plain cross-fade and stitched (`ghosting`, mean luma difference), the largest shift (degrees) and the share of the seam moved, the milliseconds measuring took (`shifts`: every column's, across and along, degrees); with `path`, a PNG of the band unrolled round the seam — lens 0, lens 1, the cross-fade, the stitch |
 //! | `media.align360` | lines the two lenses of dual-fisheye media up along their seam (a few frames across the clip, [`filmcraft_render::vr::align_lenses`]) and keeps the result in its VR Properties |
 //! | `clip.stabilize360` | holds the virtual camera steady: the camera's turn measured from the pictures frame to frame (`filmcraft_render::vr_motion`: points on cube faces, a robust rotation fit), then `mode` `smooth` / `light` / `strong` (the operator's own turns kept, the shake gone) or `lock` (the first frame's direction throughout), written as the effect's Stabilization keyframes; a job; `off` |
 //! | `media.salience360` | where things happen in a 360° item: around `seconds` (default the middle of `from`..`to`, else of the item), a few frames of its panorama 0.2 s apart scored by motion (else detail) in each direction ([`filmcraft_render::vr_motion::salient_directions`]): up to `max` directions (yaw, pitch, score), strongest first, at least 45° apart |
@@ -32,6 +33,9 @@ use crate::{EngineError, Result, Session};
 const REFRAME_CMD: &str = "clip.reframe360";
 const PROPS_CMD: &str = "media.vrProperties";
 const ALIGN_CMD: &str = "media.align360";
+const SEAM_CMD: &str = "media.seam360";
+/// The picture of the seam `media.seam360` writes: its width and each strip's height, pixels.
+const SEAM_PICTURE: (usize, usize) = (1440, 96);
 /// Most keyframes one `keys` list writes.
 const MAX_KEYS: usize = 10_000;
 /// Most frames `media.align360` looks at.
@@ -78,7 +82,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "VR Properties…",
             menu: &["Clip", "Modify"],
             shortcut: None,
-            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?,"level":bool?,"steady":bool?}"#,
+            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?,"level":bool?,"steady":bool?,"seamFlow":bool?}"#,
             enabled: |_| Ok(()),
             run: vr_properties,
             journal: true,
@@ -122,6 +126,16 @@ pub fn commands() -> Vec<CommandSpec> {
             enabled: |_| Ok(()),
             run: align,
             journal: true,
+        },
+        CommandSpec {
+            id: SEAM_CMD,
+            label: "360° Seam",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"item":id,"seconds":f64?,"path":str?,"shifts":bool=false}"#,
+            enabled: |_| Ok(()),
+            run: seam,
+            journal: false,
         },
     ]
 }
@@ -508,8 +522,9 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let level = bool_p(p, "level");
     let steady = bool_p(p, "steady");
+    let seam_flow = bool_p(p, "seamFlow");
     // nothing to change: what the items' VR Properties are
-    if projection.is_none() && layout.is_none() && captured.is_none() && half_fov.is_none() && level.is_none() && steady.is_none() {
+    if projection.is_none() && layout.is_none() && captured.is_none() && half_fov.is_none() && level.is_none() && steady.is_none() && seam_flow.is_none() {
         return Ok(json!({"items": items.iter().map(|id| json!({"item": id.0, "vr": vr_json(s.project.vr_of(*id))})).collect::<Vec<_>>()}));
     }
     // what each item gets (decided before the edit: `auto` opens the file)
@@ -541,6 +556,9 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
                 for l in lenses.iter_mut() {
                     l.half_fov = h;
                 }
+            }
+            if let Some(f) = seam_flow {
+                v.seam_flow = f;
             }
             match level {
                 // the recording's own horizon, levelling
@@ -597,6 +615,9 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
 fn vr_json(v: Option<&Spherical>) -> Value {
     let Some(v) = v else { return Value::Null };
     let mut j = serde_json::to_value(v).unwrap_or(Value::Null);
+    if let (false, Some(o)) = (v.is_equirect(), j.as_object_mut()) {
+        o.insert("seamFlow".into(), json!(v.seam_flow));
+    }
     if let (Some(h), Some(o)) = (&v.horizon, j.as_object_mut()) {
         let r1 = |x: f64| (x * 10.0).round() / 10.0;
         let mut sum = json!({"level": h.level, "seconds": r1(h.seconds()), "samples": h.up.len(), "maxTilt": r1(h.max_tilt())});
@@ -684,6 +705,65 @@ fn salience(s: &mut Session, p: &Value) -> Result<Value> {
         "seconds": times.iter().map(|t| (t * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
         "directions": found.iter().map(|d| json!({"yaw": r(d.yaw), "pitch": r(d.pitch), "score": d.score, "by": if d.motion { "motion" } else { "detail" }})).collect::<Vec<_>>(),
     }))
+}
+
+/// `media.seam360`: the seam of a dual-fisheye item at `seconds`, measured on the full-size frame.
+fn seam(s: &mut Session, p: &Value) -> Result<Value> {
+    use filmcraft_render::vr::SourceModel;
+    use filmcraft_render::vr_seam::{frame_luma, seam_of};
+    let cmd = SEAM_CMD;
+    let item = item_p(p, "item").ok_or_else(|| bad(cmd, "need `item`"))?;
+    let Some(vr) = s.project.vr_of(item).cloned().filter(|v| !v.is_equirect()) else { return Err(bad(cmd, "not dual-fisheye 360° media")) };
+    let src = s.media.full_res_source(&s.project, item, &*s.services).ok_or_else(|| bad(cmd, "the item's media is offline"))?;
+    let dur = src.info().duration.seconds().max(0.0);
+    let fd = src.info().video.as_ref().map_or(1.0 / 30.0, |v| v.frame_rate.sane().frame_duration().seconds().max(1e-3));
+    let secs = match f64_p(p, "seconds") {
+        Some(x) if x.is_finite() && x >= 0.0 => x.min((dur - fd).max(0.0)),
+        Some(_) => return Err(bad(cmd, "`seconds` is seconds of the media, zero or more")),
+        None => dur / 2.0,
+    };
+    let t = Tick::from_seconds_f64(secs);
+    let frame = src.video_frame(filmcraft_media::FrameRequest { time: t, scale: 1.0 }).map_err(|e| bad(cmd, format!("cannot decode the frame: {e}")))?;
+    let model = SourceModel::at(&vr, (frame.width as usize, frame.height as usize), t);
+    let frames = filmcraft_render::vr_seam::seam_frames(&src, t, 1.0, frame.clone());
+    let clock = web_time::Instant::now();
+    let flow = seam_of(&model, &frames.iter().map(|f| f.as_ref()).collect::<Vec<_>>()).ok_or_else(|| bad(cmd, "its lenses have no seam between them"))?;
+    let ms = clock.elapsed().as_secs_f64() * 1000.0;
+    let SourceModel::DualFisheye { lenses, .. } = &model else { return Err(bad(cmd, "not dual-fisheye 360° media")) };
+    let luma = frame_luma(&frame);
+    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+    let across: Vec<f64> = flow.shift.iter().map(|s| f64::from(s[0]).to_degrees().abs()).collect();
+    let mut out = json!({
+        "item": item.0,
+        "seconds": r3(secs),
+        "measureMs": (ms * 10.0).round() / 10.0,
+        "ghosting": {"crossFade": flow.ghosting(lenses, &luma, false).map(r3), "stitched": flow.ghosting(lenses, &luma, true).map(r3)},
+        "largestShift": (across.iter().copied().fold(0.0, f64::max) * 100.0).round() / 100.0,
+        "moved": r3(across.iter().filter(|a| **a > 0.25).count() as f64 / across.len().max(1) as f64),
+        "seamFlow": vr.seam_flow,
+    });
+    if bool_p(p, "shifts").unwrap_or(false) {
+        out["shifts"] = json!(
+            flow.shift
+                .iter()
+                .map(|s| [(f64::from(s[0]).to_degrees() * 100.0).round() / 100.0, (f64::from(s[1]).to_degrees() * 100.0).round() / 100.0])
+                .collect::<Vec<_>>()
+        );
+    }
+    if let Some(path) = str_p(p, "path") {
+        let (grey, w, h) = flow.band_picture(lenses, &luma, SEAM_PICTURE.0, SEAM_PICTURE.1).ok_or_else(|| bad(cmd, "its lenses have no seam between them"))?;
+        let rgba: Vec<u8> = grey
+            .iter()
+            .flat_map(|v| {
+                let g = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                [g, g, g, 255]
+            })
+            .collect();
+        let png = filmcraft_export::encode_png(rgba, w as u32, h as u32).map_err(|e| bad(cmd, e.to_string()))?;
+        s.services.write_file(path, &png).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
+        out["path"] = json!(path);
+    }
+    Ok(out)
 }
 
 fn align(s: &mut Session, p: &Value) -> Result<Value> {

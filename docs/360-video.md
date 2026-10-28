@@ -80,8 +80,9 @@ a sudden change; an equirectangular 360° file may be an edit and is looked at l
 
 | Command | Does |
 |---|---|
-| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings) or stop; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
+| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings) or stop; `seamFlow` stitches near things on a dual fisheye's seam by the lenses' shifts (on by itself) or only cross-fades them; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
 | `media.align360` | aligns the two lenses of dual-fisheye media along their seam |
+| `media.seam360` | the seam of a dual-fisheye item at a moment: how much the lenses disagree across it cross-faded and stitched, the largest shift, how long measuring took; a picture of the band unrolled round the seam (lens 0, lens 1, the cross-fade, the stitch) with `path` |
 | `clip.reframe360` | the virtual camera: `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across), `distance` (0 flat … 1 tiny planet), `output` `flat`/`sphere`, `width`/`height` (default: the sequence frame); `at` keyframes them at a clip time; `keys` writes a whole camera move; presets `natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`; `off` |
 | `clip.stabilize360` | holds the view steady: the camera's turn measured from the pictures (points tracked on cube faces, a robust rotation fit), then `smooth`/`light`/`strong` (keep the operator's turns, drop the shake) or `lock` (look one way the whole clip) |
 | `clip.follow360` | turns the virtual camera to follow a subject (`subject`, `box`, `face`) |
@@ -278,9 +279,31 @@ by `qwen3:8b` and built in about 70 s once the scene index was cached (3–4 min
 ## 6. Rendering
 
 The Program monitor and exports draw the virtual camera on the GPU (Metal on macOS): the frame's
-Y′CbCr planes are uploaded as they are and every output pixel samples the ray it sees, the two
-lenses cross-faded over ±4° along their seam. The CPU path (`filmcraft_render::vr`) is the
-reference and the fallback; the two are tested against each other.
+Y′CbCr planes are uploaded as they are and every output pixel samples the ray it sees. The CPU
+path (`filmcraft_render::vr`) is the reference and the fallback; the two are tested against each
+other, the stitch below included.
+
+**Stitching the seam.** Where both lenses see, they see from two points a few centimetres apart:
+far things agree, but a wall, an arm or a face within a metre or so is seen a few degrees apart
+across the seam, and a cross-fade shows it twice. For every frame drawn, the band of ±6° round the
+seam is unrolled from both lenses into strips (512 columns round it, 32 rows across), and for each
+column the shift of one lens's picture against the other's — up to 5.6° across the seam, where
+parallax moves things, and 0.7° along it — whose windows of the two strips correlate best is
+found, measured on that frame and the three either side of it together (decoders keep those, and
+the shifts then hold steady from one frame to the next whatever order frames are drawn in). A
+shift is trusted by how well and how unambiguously it matched (another peak of the search means a
+repeating pattern) and how much detail there was; shifts are smoothed round the seam by that
+trust, and where there is nothing to go by they fade to none. Drawing then moves each lens's
+sample part of the way towards the other's across a ±4.5° cross-fade, so a near thing is seen
+once. Measuring takes about 6.5 ms a frame on the CPU; the GPU gets the shifts with the frame and
+moves the samples in the shader (`filmcraft_render::vr_seam`).
+
+Measured on 24 frames of eight Istanbul recordings (`media.seam360`): how much the lenses disagree
+across the band fell from 0.065 to 0.056 on average, in every frame — 27% in a hotel corridor and
+14% in an elevator (walls and arms close by), 4–16% outdoors — and the shifts change by 0.08° a
+frame on average (0.4% of the seam by more than 1°), against 0.25° measured one frame at a time.
+Lines very close to the camera bend a little where they cross the seam rather than doubling.
+`media.vrProperties` `seamFlow: false` cross-fades only, as before.
 
 ## 7. Export
 
@@ -296,8 +319,9 @@ sphere camera can still turn the panorama (`yaw`, `pitch`, `roll`): a re-centred
 
 ## 8. Limits
 
-- Stitching is a cross-fade over the overlap, not an optical-flow stitch: things near the camera
-  (closer than about a metre) show their parallax along the seam.
+- The seam's stitch moves each lens's picture across the seam by one shift per column: something
+  near in front of something far at the same point of the seam takes the near one's shift, and
+  things closer than about 30 cm (beyond the 5.6° searched) still show twice.
 - Levelling turns the picture about a level axis only: the camera's heading (where its front
   lens looked) is kept, and stabilisation (`clip.stabilize360`) is still measured from the
   pictures, not the gyroscope. Recordings without a motion-sensor record (other cameras, stitched
