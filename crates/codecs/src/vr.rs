@@ -130,7 +130,7 @@ pub(crate) fn insta360_spherical(info: &Info, size: (u32, u32)) -> Option<Spheri
 /// Accelerometer counts a g of an Insta360 motion sensor (measured: 1026 at rest).
 const ACCEL_PER_G: f64 = 1024.0;
 /// Gyroscope counts a degree a second (measured against the accelerometer on X5 footage).
-const GYRO_PER_DEGREE: f64 = 16.4;
+pub const GYRO_PER_DEGREE: f64 = 16.4;
 /// Motion samples averaged into one before fusing (1 kHz → 200 a second).
 pub const MOTION_MEAN: usize = 5;
 /// Seconds between the samples of a horizon.
@@ -350,7 +350,7 @@ pub fn insta360_horizon(motion: &[Motion], first: Option<(u64, f64)>) -> Option<
     // the swing about the smoothed heading, turned back
     let smooth = smoothed(&turned, STEADY_SECONDS / step);
     let heading = turned.iter().zip(&smooth).map(|(t, s)| (((t - s).clamp(-MAX_STEADY, MAX_STEADY) * 100.0).round() / 100.0) as f32).collect();
-    (!up.is_empty()).then_some(Horizon { level: true, steady: true, step, up, heading })
+    (!up.is_empty()).then_some(Horizon { level: true, steady: true, step, up, heading, lag: 0.0 })
 }
 
 /// The spherical metadata of a stitched video track: V2 (`sv3d`, `st3d`) first, then V1. Only

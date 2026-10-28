@@ -78,6 +78,18 @@ a sudden change; an equirectangular 360° file may be an edit and is looked at l
   the rest and the bounce of the steps (a walked shot's wobble 6.6 → 2.1 px and 4.7 → 0.2 px in a
   135 px wide view), and Direct an Edit runs it on every 360° shot. VR Properties ▸ Steady
   (`media.vrProperties` `steady`) turns the heading's steadying off and on.
+- **The sensor's timing**: the horizon carries a `lag` — how far the sensor's clock runs behind
+  the pictures — and is read at the picture's time plus it. `media.syncGyro360` measures it for a
+  recording: the levelled pictures' own sway (their turning about the vertical a tenth of a second
+  at a time, on the proxy, over the 20 s where the steadying moves most, less its half-second
+  smoothing) against the sensor's steadying turn at each lag within ±0.3 s, kept only when the two
+  clearly turn against each other (`match` ≥ 0.5). It is not there yet: on five Istanbul
+  recordings none was clear. On 078 and 086 the best lags (0 and 139 ms) fall near the ones found
+  by eye earlier (0–50 and about 100 ms) but agree only 0.28 and 0.39; on 075 (about 130 ms by
+  eye) nothing agrees. Why they agree so little is not known yet (the pictures' turning measured
+  on the proxy's half-size frames is one suspect, the steadying turn's cap during the
+  operator's own turns another), so no lag is set and the samples stay a tenth of a second
+  apart.
 - **Lens model**: equidistant fisheye, 97.5° from the axis to the image circle's edge (measured
   on X5 footage: where the two lenses' pictures agree best), image circles from the calibration;
   `media.align360` refines the angle and the lenses' relative turn per clip.
@@ -454,8 +466,9 @@ sphere camera can still turn the panorama (`yaw`, `pitch`, `roll`): a re-centred
   near in front of something far at the same point of the seam takes the near one's shift, and
   things closer than about 30 cm (beyond the 5.6° searched) still show twice.
 - Levelling turns the picture about a level axis only: the camera's heading (where its front
-  lens looked) is kept, and stabilisation (`clip.stabilize360`) is still measured from the
-  pictures, not the gyroscope. Recordings without a motion-sensor record (other cameras, stitched
+  lens looked) is kept; the gyroscope steadies the heading's sway (Steady), and
+  `clip.stabilize360` measures the rest from the pictures. The time between the sensor and the
+  pictures is not known per recording (see Steady heading). Recordings without a motion-sensor record (other cameras, stitched
   equirectangular exports) keep the horizon they have; `roll` and `pitch` level them by hand.
   The sensor's axes and scale were matched on X5 footage; other Insta360 models are assumed to
   share them.

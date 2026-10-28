@@ -51,7 +51,7 @@ const FOLLOW_CMD: &str = "clip.follow360";
 /// The virtual camera's stabilisation parameters.
 const STAB_PARAMS: [&str; 3] = ["stab_yaw", "stab_pitch", "stab_roll"];
 /// Side of the cube faces the stabiliser tracks on, pixels.
-const STAB_FACE: usize = 160;
+pub(crate) const STAB_FACE: usize = 160;
 /// How closely the stabilisation keyframes redraw the measured correction, degrees.
 const STAB_TOLERANCE_DEGREES: f64 = 0.05;
 /// The follow's tracking camera picture (16:9).
@@ -518,7 +518,7 @@ fn reframe(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(res)
 }
 
-fn items_p(s: &Session, p: &Value) -> Vec<ItemId> {
+pub(crate) fn items_p(s: &Session, p: &Value) -> Vec<ItemId> {
     match p.get("items").and_then(Value::as_array) {
         Some(a) => a.iter().filter_map(|v| v.as_u64().map(ItemId)).collect(),
         None => item_p(p, "item").map(|i| vec![i]).unwrap_or_else(|| s.state.project_selection.clone()),
@@ -526,7 +526,7 @@ fn items_p(s: &Session, p: &Value) -> Vec<ItemId> {
 }
 
 /// The media items (not sequences, not missing) among `items`.
-fn media_items(s: &Session, items: &[ItemId], cmd: &str) -> Result<Vec<ItemId>> {
+pub(crate) fn media_items(s: &Session, items: &[ItemId], cmd: &str) -> Result<Vec<ItemId>> {
     let out: Vec<ItemId> = items.iter().copied().filter(|i| s.project.item(*i).is_some_and(|it| matches!(it.kind, ItemKind::Media(_)))).collect();
     if out.is_empty() {
         return Err(bad(cmd, "no media item given or selected (`items`)"));
@@ -1061,7 +1061,7 @@ pub(crate) fn clips_360(s: &Session, p: &Value, cmd: &str) -> Result<Vec<TrackIt
 /// The analysis source of a 360° item: its proxy when one is attached (an `.lrv`: the same
 /// lenses, small and quick to decode) and of the media's shape (the lenses where they are in the
 /// media's picture), else the media.
-fn analysis_source(s: &Session, item: ItemId) -> Option<filmcraft_media::SharedSource> {
+pub(crate) fn analysis_source(s: &Session, item: ItemId) -> Option<filmcraft_media::SharedSource> {
     let media = s.project.resolve_media(item).map(|(_, m, _)| m);
     let proxy = media.and_then(|m| match &m.proxy {
         Some(filmcraft_project::MediaRef::File { path }) if !m.offline => Some(path.clone()),
@@ -1099,7 +1099,7 @@ fn clip_frames(it: &TrackItem, rate: filmcraft_time::FrameRate, fps: f64) -> Vec
 }
 
 /// A linear picture of `src` at media time `t`, small (analysis).
-fn analysis_picture(src: &filmcraft_media::SharedSource, t: Tick) -> Option<filmcraft_render::Image> {
+pub(crate) fn analysis_picture(src: &filmcraft_media::SharedSource, t: Tick) -> Option<filmcraft_render::Image> {
     let f = src.video_frame(filmcraft_media::FrameRequest { time: t, scale: 0.5 }).ok()?;
     let dec = if f.width > 2048 { 2 } else { 1 };
     let (w, h, px) = f.to_linear_f32_decimated(dec);
@@ -1649,8 +1649,14 @@ mod tests {
         let before = s.project.vr_of(item).cloned().unwrap();
         let key = sphere_key(&before);
         // (as an Insta360 recording brings it)
-        let h =
-            filmcraft_media::spherical::Horizon { level: true, steady: true, step: 0.1, up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]], heading: vec![0.0, 3.0] };
+        let h = filmcraft_media::spherical::Horizon {
+            level: true,
+            steady: true,
+            step: 0.1,
+            up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]],
+            heading: vec![0.0, 3.0],
+            lag: 0.0,
+        };
         s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "none"})).unwrap();
         s.edit("Horizon", |pr, _| {
             if let Some(ItemKind::Media(m)) = pr.item_mut(item).map(|i| &mut i.kind) {

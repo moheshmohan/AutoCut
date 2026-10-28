@@ -3576,6 +3576,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::same_moments::commands());
     v.extend(crate::denoise::commands());
     v.extend(crate::aim360::commands());
+    v.extend(crate::gyro_sync::commands());
     v.extend(crate::moments::commands());
     v.extend(crate::split_edit::commands());
     v.extend(crate::auto_color::commands());

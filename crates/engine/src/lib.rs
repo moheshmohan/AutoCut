@@ -36,6 +36,7 @@ pub mod follow_reid;
 pub mod graphic_templates;
 pub mod graphics;
 pub mod graphics_counter;
+pub mod gyro_sync;
 pub mod insta360;
 pub mod instagram;
 pub mod interchange;

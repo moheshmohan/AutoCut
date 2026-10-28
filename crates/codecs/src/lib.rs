@@ -39,6 +39,9 @@ pub mod ogg;
 mod stream_color;
 pub mod video;
 mod vr;
+/// An Insta360 gyroscope's counts a degree a second, and how many of its samples are averaged
+/// into one (for measuring the sensor against the pictures).
+pub use vr::{GYRO_PER_DEGREE as INSTA360_GYRO_PER_DEGREE, MOTION_MEAN as INSTA360_MOTION_MEAN};
 mod webm_alpha;
 pub mod y4m;
 

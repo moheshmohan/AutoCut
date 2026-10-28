@@ -820,6 +820,7 @@ mod tests {
             step: 1.0,
             up: vec![[0.0, 1.0, 0.0], [up[0] as f32, up[1] as f32, up[2] as f32]],
             heading: Vec::new(),
+            lag: 0.0,
         });
         let raw = SourceModel::new(&s, (2000, 1000));
         let at = |secs: f64| SourceModel::at(&s, (2000, 1000), Tick::from_seconds_f64(secs));
@@ -842,7 +843,14 @@ mod tests {
         // upright, the camera swung 10° right a second in: the turn back puts what it saw straight
         // ahead 10° to the right, where it was before the swing
         let mut s = two_lenses();
-        s.horizon = Some(filmcraft_media::spherical::Horizon { level: true, steady: true, step: 1.0, up: vec![[0.0, 1.0, 0.0]; 2], heading: vec![0.0, 10.0] });
+        s.horizon = Some(filmcraft_media::spherical::Horizon {
+            level: true,
+            steady: true,
+            step: 1.0,
+            up: vec![[0.0, 1.0, 0.0]; 2],
+            heading: vec![0.0, 10.0],
+            lag: 0.0,
+        });
         let raw = SourceModel::new(&s, (2000, 1000));
         let at = |secs: f64| SourceModel::at(&s, (2000, 1000), Tick::from_seconds_f64(secs));
         let px = |l: Located| match l {
