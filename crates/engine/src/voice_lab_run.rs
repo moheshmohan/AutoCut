@@ -233,7 +233,8 @@ fn is_media(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| MEDIA_EXT.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-/// The media files of a project file: every `{"File": {"path": …}}` in it.
+/// The media files of a project file: every `{"File": {"path": …}}` in it with an audio or
+/// video extension.
 fn project_media(path: &Path, out: &mut Vec<PathBuf>) -> R<()> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > 512 << 20 {
@@ -249,8 +250,10 @@ fn project_media(path: &Path, out: &mut Vec<PathBuf>) -> R<()> {
         }
         match v {
             Value::Object(o) => {
-                if let Some(p) = o.get("File").and_then(|f| f.get("path")).and_then(Value::as_str) {
-                    out.push(PathBuf::from(p));
+                // its audio and video only: stills have no voice (and would count against
+                // `maxFiles`, crowding out the clips)
+                if let Some(p) = o.get("File").and_then(|f| f.get("path")).and_then(Value::as_str).map(PathBuf::from).filter(|p| is_media(p)) {
+                    out.push(p);
                 }
                 stack.extend(o.values().map(|x| (x, depth + 1)));
             }

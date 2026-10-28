@@ -53,7 +53,7 @@ fn hostile_voice_lab_parameters_are_refused() {
         ("voice.findStyles", json!({"voice": "clone:me", "items": [-1]})),
         ("voice.findStyles", json!({"voice": "clone:me", "paths": ["/x"], "top": 0})),
         ("voice.findStyles", json!({"voice": "clone:me", "paths": ["/x"], "top": 21})),
-        ("voice.findStyles", json!({"voice": "clone:me", "paths": ["/x"], "top": f64::NAN})),
+        ("voice.findStyles", json!({"voice": "clone:me", "paths": ["/x"], "top": "3"})),
         ("voice.findStyles", json!({"voice": "clone:me", "paths": ["/x"], "language": "en"})),
         ("voice.findStyles", json!({"voice": "clone:me", "paths": ["/x"], "hear": "yes"})),
         ("voice.findStyles", json!({"voice": "clone:me", "paths": ["/x"], "minSimilarity": 2})),

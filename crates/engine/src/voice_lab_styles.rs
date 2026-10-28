@@ -73,6 +73,11 @@ impl Hearers {
 /// How alike two texts are as Malayalam is compared (`heard::comparable`): 1 − the mean of the
 /// two directions' character error rates, at least 0.
 fn agreement(a: &str, b: &str) -> f64 {
+    let (ea, eb) = (filmcraft_tts::heard::comparable(a).is_empty(), filmcraft_tts::heard::comparable(b).is_empty());
+    if ea || eb {
+        // one heard words, the other nothing: no agreement (both nothing: nothing to disagree on)
+        return if ea && eb { 1.0 } else { 0.0 };
+    }
     let e = 0.5 * (filmcraft_tts::heard::score(a, b).cer + filmcraft_tts::heard::score(b, a).cer);
     (1.0 - e.min(1.0)).max(0.0)
 }
@@ -436,4 +441,51 @@ pub(crate) fn prosody(pp: &ProsodyParams, media: &MediaPool, services: &dyn Serv
         "out": out,
         "notes": notes,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_projects_stills_are_not_clips() {
+        let dir = std::env::temp_dir().join(format!("fc-styles-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("p.fcproj");
+        let doc = json!({"project": {"items": {
+            "1": {"kind": {"Media": {"media": {"File": {"path": "/m/a.MOV"}}}}},
+            "2": {"kind": {"Media": {"media": {"File": {"path": "/m/b.jpg"}}}}},
+            "3": {"kind": {"Media": {"media": {"File": {"path": "/m/c.HEIC"}}}}},
+            "4": {"kind": {"Media": {"media": {"File": {"path": "/m/d.wav"}}}}},
+        }}});
+        std::fs::write(&p, serde_json::to_vec(&doc).unwrap()).unwrap();
+        let mut out = Vec::new();
+        super::super::project_media(&p, &mut out).unwrap();
+        out.sort();
+        assert_eq!(out, [PathBuf::from("/m/a.MOV"), PathBuf::from("/m/d.wav")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn helpers() {
+        // the mean direction of unit vectors; mismatched or empty input is no panic
+        let m = mean_direction(&[vec![2.0, 0.0], vec![0.0, 0.5]]);
+        assert!((m[0] - 1.0).abs() < 1e-6 && (m[1] - 1.0).abs() < 1e-6);
+        assert_eq!(mean_direction(&[vec![1.0, 2.0], vec![1.0]]), vec![1.0, 2.0]);
+        assert!(mean_direction(&[]).is_empty());
+        assert_eq!(mean_direction(&[vec![0.0, 0.0], vec![1.0, 0.0]]), vec![1.0, 0.0]);
+        // agreement: 1 for the same words, 0 for nothing in common
+        assert!((agreement("ഇത് ഒരു റോബോട്ട്", "ഇത് ഒരു റോബോട്ട്") - 1.0).abs() < 1e-9);
+        assert_eq!(agreement("ഇത്", ""), 0.0);
+        assert_eq!(agreement("", "ഇത്"), 0.0);
+        assert_eq!(agreement("", ""), 1.0);
+        assert_eq!(shape_label(&prosody::Shape::default()), "unchanged");
+        assert_eq!(shape_label(&prosody::Shape { range: 1.3, question_rise: 3.0, ..Default::default() }), "range 1.3 question +3");
+        // the words promoted: the Malayalam Whisper's when it heard Malayalam
+        let ml = filmcraft_speech::models::MALAYALAM_MODEL;
+        let iw = filmcraft_speech::models::INDICWHISPER_ML;
+        assert_eq!(transcript_of(&[(iw, "ഒന്ന്".into()), (ml, "രണ്ട്".into())]), "രണ്ട്");
+        assert_eq!(transcript_of(&[(ml, "hello".into()), (iw, "ഒന്ന്".into())]), "ഒന്ന്");
+        assert_eq!(transcript_of(&[]), "");
+    }
 }
