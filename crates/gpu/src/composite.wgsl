@@ -33,7 +33,8 @@ struct U {
     // [8 + 7k ..] lens k: rect x0 y0 x1 y1; cx cy radius half_fov; rotation rows (.w of the
     //            first: polynomial terms); polynomial coefficients (two vec4)
     // [22] seam shifts on, columns, band half-height (radians); [23..25] the seam's n, e1, e2
-    vr: array<vec4<f32>, 26>,
+    // [26] the patch over the bottom of the sphere: mode (0 none, 1 mirror, 2 smooth), radius
+    vr: array<vec4<f32>, 27>,
     // The shifts along a dual-fisheye seam (`filmcraft_render::vr_seam::SeamFlow`): column c's
     // (across, along) in .xy (even c) or .zw (odd c) of [c / 2].
     seam: array<vec4<f32>, 256>,
@@ -393,12 +394,37 @@ fn vr_fisheye(d: vec3<f32>) -> vec4<f32> {
     return vec4(0.0);
 }
 
+// The direction seen for d inside the patch over the bottom of the sphere (`NadirPx::patched`):
+// mirrored out across its edge, or its edge.
+fn nadir_patched(d: vec3<f32>) -> vec3<f32> {
+    let mode = u32(u.vr[26].x + 0.5);
+    let r = u.vr[26].y;
+    if mode == 0u {
+        return d;
+    }
+    let a = acos(clamp(-d.y, -1.0, 1.0));
+    if a >= r {
+        return d;
+    }
+    let h = length(vec2(d.x, d.z));
+    var c = vec2(1.0, 0.0);
+    if h > 1e-6 {
+        c = vec2(d.x, d.z) / h;
+    }
+    var b = r * 1.04;
+    if mode == 1u {
+        b = 2.0 * r - a;
+    }
+    b = min(b, 3.141592653589793);
+    return vec3(sin(b) * c.x, -cos(b), sin(b) * c.y);
+}
+
 // The source's colour at layer position p: the frame, or what the virtual camera sees there.
 fn source_at(p: vec2<f32>) -> vec4<f32> {
     if u.vr[0].x < 0.5 {
         return sample(p);
     }
-    let d = vr_ray(p / max(u.vr[2].xy, vec2(1.0)));
+    let d = nadir_patched(vr_ray(p / max(u.vr[2].xy, vec2(1.0))));
     if u.vr[0].z < 0.5 {
         return vr_equirect(d);
     }

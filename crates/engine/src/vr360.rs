@@ -3,7 +3,7 @@
 //! | command | does |
 //! |---|---|
 //! | `clip.reframe360` | looks at 360° clips (`clips`, default the selection, else every clip of 360° media) through a virtual camera (the `vr_reframe` effect, added when missing, framing the sequence's frame): `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across) and `distance` (0 flat … 1 tiny planet) set, or keyframed `at` a clip time, or a whole camera move as `keys`; a `preset` (`natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`) first; one undo step |
-//! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` (alone, they change the item's own); `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings); `seamFlow` (on by itself) stitches near things on a dual fisheye's seam by the lenses' shifts measured on each frame (`filmcraft_render::vr_seam`) rather than only cross-fading them; with nothing to change, what the items' VR Properties are |
+//! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` (alone, they change the item's own); `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings); `seamFlow` (on by itself) stitches near things on a dual fisheye's seam by the lenses' shifts measured on each frame (`filmcraft_render::vr_seam`) rather than only cross-fading them; `nadir` (`off`, `mirror`, `smooth`) patches the bottom of the sphere — the hand and stick — within `nadirSize` degrees (22) of straight down: the ground round it mirrored in, or its edge's colour drawn to the middle (tiny planets switch it on, mirrored, where it was never set); with nothing to change, what the items' VR Properties are |
 //! | `media.seam360` | the seam of a dual-fisheye item at `seconds` (default: the middle), measured on the full-size frame (`filmcraft_render::vr_seam`): how much the lenses' pictures disagree across it with a plain cross-fade and stitched (`ghosting`, mean luma difference), the largest shift (degrees) and the share of the seam moved, the milliseconds measuring took (`shifts`: every column's, across and along, degrees); with `path`, a PNG of the band unrolled round the seam — lens 0, lens 1, the cross-fade, the stitch |
 //! | `media.align360` | lines the two lenses of dual-fisheye media up along their seam (a few frames across the clip, [`filmcraft_render::vr::align_lenses`]) and keeps the result in its VR Properties |
 //! | `clip.stabilize360` | holds the virtual camera steady: the camera's turn measured from the pictures frame to frame (`filmcraft_render::vr_motion`: points on cube faces, a robust rotation fit), then `mode` `smooth` / `light` / `strong` (the operator's own turns kept, the shake gone) or `lock` (the first frame's direction throughout), written as the effect's Stabilization keyframes; a job; `off` |
@@ -82,7 +82,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "VR Properties…",
             menu: &["Clip", "Modify"],
             shortcut: None,
-            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?,"level":bool?,"steady":bool?,"seamFlow":bool?}"#,
+            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?,"level":bool?,"steady":bool?,"seamFlow":bool?,"nadir":"off"|"mirror"|"smooth"?,"nadirSize":3..60?}"#,
             enabled: |_| Ok(()),
             run: vr_properties,
             journal: true,
@@ -176,7 +176,38 @@ pub(crate) fn camera_key(e: &EffectInstance) -> String {
 /// A stable fingerprint of how a 360° picture maps onto the sphere (VR Properties, its horizon
 /// included): caches of what its panorama shows key on it.
 pub(crate) fn sphere_key(v: &Spherical) -> String {
-    fnv_key(&serde_json::to_vec(v).unwrap_or_default())
+    // (the patch over the bottom of the sphere hides the hand and stick, not what is there to see)
+    let v = Spherical { nadir: None, ..v.clone() };
+    fnv_key(&serde_json::to_vec(&v).unwrap_or_default())
+}
+
+/// A tiny planet looks straight down, where the hand and stick are: the media of `clips` whose
+/// bottom was never patched gets the patch ([`filmcraft_media::spherical::Nadir`], mirrored in),
+/// folded into the undo step since `n0` (`label`). The items patched.
+pub(crate) fn patch_planets(s: &mut Session, clips: &[ClipId], n0: usize, label: &str) -> Vec<u64> {
+    let Some(seq) = s.active_sequence() else { return Vec::new() };
+    let mut items: Vec<ItemId> =
+        clips.iter().filter_map(|c| seq.find_item(*c).map(|(_, it)| it.item)).filter(|i| s.project.vr_of(*i).is_some_and(|v| v.nadir.is_none())).collect();
+    items.sort();
+    items.dedup();
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let done = s.edit(label, |pr, _| {
+        for id in &items {
+            if let Some(ItemKind::Media(m)) = pr.item_mut(*id).map(|i| &mut i.kind)
+                && let Some(v) = m.interpret.vr.as_mut()
+            {
+                v.nadir = Some(filmcraft_media::spherical::Nadir {
+                    mode: filmcraft_media::spherical::NadirMode::Mirror,
+                    size: filmcraft_media::spherical::NADIR_SIZE,
+                });
+            }
+        }
+        Ok(())
+    });
+    crate::clip_ops::collapse_history(s, n0, label);
+    if done.is_ok() { items.iter().map(|i| i.0).collect() } else { Vec::new() }
 }
 
 fn fnv_key(bytes: &[u8]) -> String {
@@ -414,6 +445,7 @@ fn reframe(s: &mut Session, p: &Value) -> Result<Value> {
         .map(|c| c.0)
         .collect();
     let label = if off { "360 Reframe Off" } else { "360 Reframe" };
+    let n0 = s.history.undo.len();
     let report = s.edit_sequence(label, |q, _, _| {
         let mut out = Vec::new();
         for c in &video {
@@ -471,6 +503,13 @@ fn reframe(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(out)
     })?;
     let mut res = json!({"clips": report});
+    // a tiny planet: its hand and stick patched over
+    if !off && matches!(str_p(p, "preset"), Some("tinyPlanet" | "tiny_planet" | "planet")) {
+        let patched = patch_planets(s, &video, n0, label);
+        if !patched.is_empty() {
+            res["nadirPatched"] = json!(patched);
+        }
+    }
     if !not_360.is_empty() {
         res["note"] = json!(format!(
             "clips {not_360:?} have no VR Properties: their pictures are taken as whole equirectangular panoramas (media.vrProperties sets how they map onto the sphere)"
@@ -523,8 +562,29 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
     let level = bool_p(p, "level");
     let steady = bool_p(p, "steady");
     let seam_flow = bool_p(p, "seamFlow");
+    let nadir = match str_p(p, "nadir") {
+        None => None,
+        Some("off") => Some(filmcraft_media::spherical::NadirMode::Off),
+        Some("mirror") => Some(filmcraft_media::spherical::NadirMode::Mirror),
+        Some("smooth") => Some(filmcraft_media::spherical::NadirMode::Smooth),
+        Some(o) => return Err(bad(cmd, format!("`nadir` is off, mirror or smooth, not `{}`", o.chars().take(20).collect::<String>()))),
+    };
+    let nadir_size = match f64_p(p, "nadirSize") {
+        Some(v) if v.is_finite() && (filmcraft_media::spherical::NADIR_RANGE.0..=filmcraft_media::spherical::NADIR_RANGE.1).contains(&v) => Some(v),
+        Some(_) => return Err(bad(cmd, "`nadirSize` is 3 to 60 degrees")),
+        None => None,
+    };
     // nothing to change: what the items' VR Properties are
-    if projection.is_none() && layout.is_none() && captured.is_none() && half_fov.is_none() && level.is_none() && steady.is_none() && seam_flow.is_none() {
+    if projection.is_none()
+        && layout.is_none()
+        && captured.is_none()
+        && half_fov.is_none()
+        && level.is_none()
+        && steady.is_none()
+        && seam_flow.is_none()
+        && nadir.is_none()
+        && nadir_size.is_none()
+    {
         return Ok(json!({"items": items.iter().map(|id| json!({"item": id.0, "vr": vr_json(s.project.vr_of(*id))})).collect::<Vec<_>>()}));
     }
     // what each item gets (decided before the edit: `auto` opens the file)
@@ -559,6 +619,13 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
             }
             if let Some(f) = seam_flow {
                 v.seam_flow = f;
+            }
+            if nadir.is_some() || nadir_size.is_some() {
+                let was = v.nadir;
+                v.nadir = Some(filmcraft_media::spherical::Nadir {
+                    mode: nadir.or(was.map(|n| n.mode)).unwrap_or_default(),
+                    size: nadir_size.or(was.map(|n| n.size)).unwrap_or(filmcraft_media::spherical::NADIR_SIZE),
+                });
             }
             match level {
                 // the recording's own horizon, levelling
@@ -1659,6 +1726,44 @@ mod tests {
         t.execute(PROPS_CMD, json!({"items": [pano.0], "layout": "overUnder"})).unwrap();
         assert!(t.project.vr_of(pano).is_some_and(|v| v.is_equirect() && v.layout == StereoLayout::OverUnder));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_hand_and_stick_are_patched_for_planets_and_on_request() {
+        let (mut s, c) = demo_360();
+        let item = clip(&s, c).item;
+        let nadir = |s: &Session| s.project.vr_of(item).and_then(|v| v.nadir);
+        assert!(nadir(&s).is_none());
+        // a tiny planet patches it, in its own undo step
+        let n0 = s.history.undo.len();
+        let r = s.execute("clip.vrMove", json!({"clips": [c.0], "move": "planetIn"})).unwrap();
+        assert_eq!(r["nadirPatched"], json!([item.0]), "{r}");
+        assert_eq!(nadir(&s).map(|n| n.mode), Some(filmcraft_media::spherical::NadirMode::Mirror));
+        assert_eq!(s.history.undo.len(), n0 + 1);
+        // switched off on purpose: a planet leaves it off
+        s.execute(PROPS_CMD, json!({"items": [item.0], "nadir": "off"})).unwrap();
+        let r = s.execute("clip.vrMove", json!({"clips": [c.0], "move": "planetOut"})).unwrap();
+        assert!(r.get("nadirPatched").is_none());
+        assert_eq!(nadir(&s).map(|n| n.mode), Some(filmcraft_media::spherical::NadirMode::Off));
+        // by hand, and its size; the analyses' key does not change with it
+        let key = sphere_key(s.project.vr_of(item).unwrap());
+        s.execute(PROPS_CMD, json!({"items": [item.0], "nadir": "smooth", "nadirSize": 30})).unwrap();
+        assert_eq!(nadir(&s).map(|n| (n.mode, n.size)), Some((filmcraft_media::spherical::NadirMode::Smooth, 30.0)));
+        assert_eq!(sphere_key(s.project.vr_of(item).unwrap()), key);
+        for bad in [json!({"items": [item.0], "nadir": "patch"}), json!({"items": [item.0], "nadirSize": 90})] {
+            assert!(s.execute(PROPS_CMD, bad.clone()).is_err(), "{bad}");
+        }
+        // a logo laid round the bottom, seen through the clip's camera
+        let dir = crate::media_test_util::tmp_dir("nadir-logo");
+        let png = dir.join("logo.png");
+        let logo: Vec<u8> = (0..64 * 64).flat_map(|_| [200u8, 30, 30, 255]).collect();
+        std::fs::write(&png, filmcraft_export::encode_png(logo, 64, 64).unwrap()).unwrap();
+        let img = s.execute("file.import", json!({"paths": [png.to_string_lossy()]})).unwrap()["items"][0].as_u64().unwrap();
+        let r = s.execute("clip.nadirLogo", json!({"clip": c.0, "image": img, "folder": dir.to_string_lossy()})).unwrap();
+        let logo_clip = clip(&s, ClipId(r["logo"].as_u64().unwrap()));
+        assert!(logo_clip.effect(REFRAME).is_some(), "through the clip's own camera");
+        assert!(s.project.vr_of(logo_clip.item).is_some_and(Spherical::is_equirect));
+        assert!(s.execute("clip.nadirLogo", json!({"clip": c.0})).is_err(), "needs an image");
     }
 
     #[test]

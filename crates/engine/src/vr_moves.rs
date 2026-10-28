@@ -365,6 +365,7 @@ fn camera_move(s: &mut Session, p: &Value) -> Result<Value> {
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
     let frame = (seq.settings.width, seq.settings.height);
     let label = format!("360 Camera Move: {}", m.id());
+    let n0 = s.history.undo.len();
     let report = s.edit_sequence(&label, |q, _, _| {
         let mut out = Vec::new();
         for c in &clips {
@@ -382,7 +383,15 @@ fn camera_move(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(out)
     })?;
-    Ok(json!({"clips": report}))
+    let mut out = json!({"clips": report});
+    // a tiny planet looks straight down: the hand and stick patched over
+    if matches!(m, Move::PlanetIn | Move::PlanetOut) {
+        let patched = crate::vr360::patch_planets(s, &clips, n0, &label);
+        if !patched.is_empty() {
+            out["nadirPatched"] = json!(patched);
+        }
+    }
+    Ok(out)
 }
 
 /// Write move `m` over `[from, to]` clip seconds on `it` (its camera added when missing).

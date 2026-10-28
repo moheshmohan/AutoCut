@@ -1263,10 +1263,10 @@ struct SrcInfo {
     input: Option<filmcraft_color::GpuInputParams>,
 }
 
-/// Floats in a layer's uniform block (`U` in `composite.wgsl`: 13 vec4, then the 26 of a 360°
+/// Floats in a layer's uniform block (`U` in `composite.wgsl`: 13 vec4, then the 27 of a 360°
 /// layer's virtual camera, then the shifts along a dual-fisheye seam, two columns a vec4).
 const UNIFORM_FLOATS: usize = 52 + VR_FLOATS + SEAM_FLOATS;
-const VR_FLOATS: usize = 104;
+const VR_FLOATS: usize = 108;
 const SEAM_FLOATS: usize = 2 * filmcraft_render::vr_seam::SEAM_COLUMNS;
 
 /// The virtual camera block of a 360° layer's uniforms (`U.vr` in `composite.wgsl`) for a
@@ -1285,6 +1285,10 @@ fn vr_block(v: &filmcraft_render::plan::VrLayer, tex: (u32, u32), chroma: (u32, 
         Output::Flat { tan_x, tan_y, distance } => (0.0, tan_x, tan_y, distance),
         Output::Sphere => (1.0, 0.0, 0.0, 0.0),
     };
+    // the patch over the bottom of the sphere: mode (0 none, 1 mirror, 2 smooth), radius
+    if let Some(n) = v.model.nadir() {
+        put(104, &[if n.mirror { 1.0 } else { 2.0 }, n.radius]);
+    }
     let (src_kind, lenses) = match &v.model {
         SourceModel::Equirect { .. } => (0.0, 0.0),
         SourceModel::DualFisheye { lenses, .. } => (1.0, lenses.len().min(2) as f64),
@@ -1301,7 +1305,7 @@ fn vr_block(v: &filmcraft_render::plan::VrLayer, tex: (u32, u32), chroma: (u32, 
         put(12 + 4 * i, row);
     }
     match &v.model {
-        SourceModel::Equirect { rect, span, wrap } => {
+        SourceModel::Equirect { rect, span, wrap, .. } => {
             put(24, rect);
             put(28, &[span.0, span.1, if *wrap { 1.0 } else { 0.0 }, 0.0]);
         }

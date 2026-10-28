@@ -47,6 +47,51 @@ pub struct Spherical {
     /// (Written only when off, so the pictures' keys stay as they were.)
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub seam_flow: bool,
+    /// How the bottom of the sphere — the hand and stick under a 360° camera — is hidden; none
+    /// when never set (`Some` with [`NadirMode::Off`]: switched off on purpose).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nadir: Option<Nadir>,
+}
+
+/// The patch over the bottom of the sphere: within `size` degrees of straight down, what is
+/// beside it shows instead (the sphere is levelled, so it stays put as the camera turns).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Nadir {
+    pub mode: NadirMode,
+    /// The patch's radius, degrees from straight down.
+    #[serde(default = "nadir_size")]
+    pub size: f64,
+}
+
+/// How the patch is filled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NadirMode {
+    Off,
+    /// The ground round it mirrored in across its edge: texture that meets it seamlessly.
+    #[default]
+    Mirror,
+    /// The colour at its edge drawn in to the middle: a smooth disc.
+    Smooth,
+}
+
+/// The patch's radius by default (an Insta360 on a stick), and the range allowed, degrees.
+pub const NADIR_SIZE: f64 = 22.0;
+pub const NADIR_RANGE: (f64, f64) = (3.0, 60.0);
+
+fn nadir_size() -> f64 {
+    NADIR_SIZE
+}
+
+impl Nadir {
+    pub fn sanitized(&self) -> Self {
+        Nadir { mode: self.mode, size: if self.size.is_finite() { self.size.clamp(NADIR_RANGE.0, NADIR_RANGE.1) } else { NADIR_SIZE } }
+    }
+    /// Whether it hides anything.
+    pub fn on(&self) -> bool {
+        self.mode != NadirMode::Off
+    }
 }
 
 fn full_view() -> [f64; 2] {
@@ -72,6 +117,7 @@ impl Spherical {
             camera: String::new(),
             horizon: None,
             seam_flow: true,
+            nadir: None,
         }
     }
 
@@ -85,6 +131,7 @@ impl Spherical {
             camera: camera.to_string(),
             horizon: None,
             seam_flow: true,
+            nadir: None,
         }
     }
 
@@ -112,6 +159,7 @@ impl Spherical {
         s.captured = [fin(s.captured[0], 360.0).clamp(1.0, 360.0), fin(s.captured[1], 180.0).clamp(1.0, 180.0)];
         s.pose = s.pose.map(|v| fin(v, 0.0).clamp(-360.0, 360.0));
         s.horizon = s.horizon.as_ref().map(Horizon::sanitized);
+        s.nadir = s.nadir.as_ref().map(Nadir::sanitized);
         if let Projection::DualFisheye { lenses } = &mut s.projection {
             lenses.truncate(MAX_LENSES);
             for l in lenses.iter_mut() {

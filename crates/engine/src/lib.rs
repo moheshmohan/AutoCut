@@ -56,6 +56,7 @@ pub mod multicam;
 pub mod music;
 pub mod music_neural;
 pub mod music_preview;
+pub mod nadir;
 pub mod narration;
 pub mod panels;
 pub mod paste_media;

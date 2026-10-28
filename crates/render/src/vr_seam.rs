@@ -462,7 +462,9 @@ pub fn seam_frames(src: &filmcraft_media::SharedSource, time: filmcraft_time::Ti
 /// `seam`, its cross-fade widened to [`SEAM_BLEND_DEGREES`] either side; with `None` as it is.
 pub fn with_seam(model: SourceModel, seam: Option<Arc<SeamFlow>>) -> SourceModel {
     match (model, seam) {
-        (SourceModel::DualFisheye { lenses, .. }, Some(f)) => SourceModel::DualFisheye { lenses, blend: 2.0 * SEAM_BLEND_DEGREES.to_radians(), seam: Some(f) },
+        (SourceModel::DualFisheye { lenses, nadir, .. }, Some(f)) => {
+            SourceModel::DualFisheye { lenses, blend: 2.0 * SEAM_BLEND_DEGREES.to_radians(), seam: Some(f), nadir }
+        }
         (m, _) => m,
     }
 }

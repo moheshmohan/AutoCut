@@ -80,7 +80,7 @@ a sudden change; an equirectangular 360° file may be an edit and is looked at l
 
 | Command | Does |
 |---|---|
-| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings) or stop; `seamFlow` stitches near things on a dual fisheye's seam by the lenses' shifts (on by itself) or only cross-fades them; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
+| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings) or stop; `seamFlow` stitches near things on a dual fisheye's seam by the lenses' shifts (on by itself) or only cross-fades them; `nadir` (`off`, `mirror`, `smooth`) and `nadirSize` patch the hand and stick at the bottom of the sphere; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
 | `media.align360` | aligns the two lenses of dual-fisheye media along their seam |
 | `media.seam360` | the seam of a dual-fisheye item at a moment: how much the lenses disagree across it cross-faded and stitched, the largest shift, how long measuring took; a picture of the band unrolled round the seam (lens 0, lens 1, the cross-fade, the stitch) with `path` |
 | `clip.reframe360` | the virtual camera: `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across), `distance` (0 flat … 1 tiny planet), `output` `flat`/`sphere`, `width`/`height` (default: the sequence frame); `at` keyframes them at a clip time; `keys` writes a whole camera move; presets `natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`; `off` |
@@ -134,6 +134,20 @@ export with two shadow clones ran at 21 frames a second. The director puts the o
 behind its person when a person is its subject (a named look at least 30° tall, or a flat shot's
 subject a third of the picture), after the colour pass, in people's videos (not a travel video's
 places); `--no-cutouts` switches it off.
+
+### Hiding the hand and stick
+
+The bottom of a 360° camera's sphere shows the hand and stick holding it. VR Properties `nadir`
+patches it within `nadirSize` degrees (22) of straight down — the sphere is levelled, so the patch
+stays on the ground as the view turns: `mirror` shows the ground round it mirrored in across its
+edge (texture that meets it without a seam), `smooth` draws the colour at its edge in to the middle,
+`off` shows it as it is. Every view of the clip draws it, on the GPU and the CPU alike (tested
+against each other). A tiny planet looks straight down, so `clip.vrMove` `planetIn` / `planetOut`
+and `clip.reframe360` `preset: "tinyPlanet"` patch it (mirrored) wherever it was never set — the
+director's planets get it this way. `clip.nadirLogo` lays one of the user's pictures round the
+bottom instead (`size` 24°): a whole-sphere picture, transparent elsewhere, above the clip and seen
+through its camera. The patch does not change the analyses' key (`sphere_key`): what is there to
+see is the same.
 
 ### Sky Swap
 

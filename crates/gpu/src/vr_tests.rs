@@ -149,6 +149,26 @@ fn a_flow_stitched_seam_matches_the_cpu() {
 }
 
 #[test]
+fn a_patched_nadir_matches_the_cpu() {
+    let src = pattern(720, 360);
+    for mode in [filmcraft_media::spherical::NadirMode::Mirror, filmcraft_media::spherical::NadirMode::Smooth] {
+        let s = Spherical { nadir: Some(filmcraft_media::spherical::Nadir { mode, size: 25.0 }), ..Spherical::equirect() };
+        let view = View::flat(10.0, -80.0, 0.0, 100.0, 0.0, 200, 200);
+        let Some((p99, mean)) = compare(src.clone(), &s, view, (200, 200), Affine::IDENTITY, (200, 200)) else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        assert!(p99 <= 6 && mean < 1.5, "{mode:?}: p99 {p99}, mean {mean}");
+    }
+    // and on a dual fisheye
+    let s = Spherical { nadir: Some(filmcraft_media::spherical::Nadir { mode: filmcraft_media::spherical::NadirMode::Mirror, size: 22.0 }), ..dual() };
+    let view = View::flat(0.0, -85.0, 0.0, 110.0, 0.4, 200, 200);
+    if let Some((p99, mean)) = compare(pattern(800, 400), &s, view, (200, 200), Affine::IDENTITY, (200, 200)) {
+        assert!(p99 <= 6 && mean < 1.5, "dual: p99 {p99}, mean {mean}");
+    }
+}
+
+#[test]
 fn a_placed_and_shrunk_view_matches_the_cpu() {
     // Motion places the camera's picture smaller, off centre: the supersampling covers it
     let src = pattern(1440, 720);
