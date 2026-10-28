@@ -86,10 +86,21 @@ a sudden change; an equirectangular 360° file may be an edit and is looked at l
 | `clip.reframe360` | the virtual camera: `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across), `distance` (0 flat … 1 tiny planet), `output` `flat`/`sphere`, `width`/`height` (default: the sequence frame); `at` keyframes them at a clip time; `keys` writes a whole camera move; presets `natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`; `off` |
 | `clip.stabilize360` | holds the view steady: the camera's turn measured from the pictures (points tracked on cube faces, a robust rotation fit), then `smooth`/`light`/`strong` (keep the operator's turns, drop the shake) or `lock` (look one way the whole clip) |
 | `clip.follow360` | turns the virtual camera to follow a subject (`subject`, `box`, `face`) |
+| `clip.aim360` | the camera aimed along `samples` (`[seconds, yaw, pitch]`, as a drag on the Program monitor records them: View ▸ Aim 360° Camera), smoothed over `smooth` seconds (0.5) and kept to the keyframes needed; `merge` joins a drag's calls into one undo step |
 | `clip.vrMove` | a camera move as Bézier keyframes, editable in Effect Controls: `planetIn` (a tiny planet spinning open onto the view), `planetOut`, `orbit` (`degrees`, default a full turn), `barrelRoll`, `whipPan` (the short way to `yaw`/`pitch`, from `fromYaw` for a whip in, with a Directional Blur peak), `reveal` (from the sky, or `from: "ground"`), `pushIn`, `crashZoom`, `drift`, `drone` (a high stick read as a drone: rising and pulling back, tipping down to −50° and widening), `thirdPerson` (looking down at the person holding the camera from above and behind, `yaw` their way, for the rest of the clip), `spin` (a fast full turn, blurred), `flip` (a somersault forwards through the ground and the sky, blurred up and down), `wobble` (a playful shake dying away, `amount` its size) — GoPro's CameraFX and Insta360's invisible-stick shots as moves; each has its default place and length (`at`, `seconds` move it); a move replaces its parameters' keyframes inside its window only, so moves, a follow and stabilisation add up |
 | `clip.hyperlapse360` | a long stretch at `speed` % (frame blending) held steady by `clip.stabilize360` (`strong`) |
 | `media.salience360` | where things happen round the sphere around `seconds`: a few panorama frames 0.2 s apart scored by direction — by motion when one direction moves clearly more than the rest, else by detail — the strongest directions (yaw, pitch) at least 45° apart |
 | `media.denoise` | Clip ▸ Modify ▸ Reduce Noise, for any video: each frame merged with its neighbours (`frames` either side, 2), each moved to line up with it first (see Rendering); `strength` 0..1, `off`; `auto` turns it on only for the dark, noisy ones (grain ≥ 1.5 levels and light under 0.3 at the middle frame), `measure` reports both |
+
+**Aiming by hand.** View ▸ Aim 360° Camera (`view.aim360`) makes a drag on the Program monitor
+turn the view of the topmost 360° clip under the playhead: the picture follows the pointer, as in
+a 360° player (a drag of the picture's width turns by its field of view). Paused, the drag sets
+the view at the playhead (a keyframe where the camera is animated); while the sequence plays,
+every turn is recorded — `clip.aim360` gets the samples, unwraps the yaw (no spin the long way
+past ±180°), smooths them over half a second when the button is let go (`smooth`, 0–2 s) and keeps
+only the keyframes needed to stay within 0.25° of the path, replacing the yaw and pitch keyframes
+inside the drag's span. One drag is one undo step; the keyframes stay editable in Effect
+Controls. Automation id `program.aim360`.
 
 The **360 Reframe** effect (Effects ▸ Immersive Video) is the clip's picture: a reframed clip is
 a flat clip of the camera's frame for everything after it — Motion, masks, every effect, Auto

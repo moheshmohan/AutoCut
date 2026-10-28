@@ -334,6 +334,9 @@ pub struct MonitorView {
     /// Snap in Program Monitor: graphic drags snap to guides, the frame edges and centre.
     pub snap: bool,
     pub guides: Vec<Guide>,
+    /// Aim 360° Camera (Program): a drag on the picture turns the 360° clip's view, and records it
+    /// while playing (`panels::aim360`).
+    pub aim360: bool,
 }
 
 impl Default for MonitorView {
@@ -358,6 +361,7 @@ impl Default for MonitorView {
             lock_guides: false,
             snap: true,
             guides: Vec::new(),
+            aim360: false,
         }
     }
 }

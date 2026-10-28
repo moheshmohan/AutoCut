@@ -304,6 +304,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         // them (the selected clip's transform handles cover it, #1023)
         if app.ui.eyedropper.is_some() {
             eyedropper(app, ui, &pic_resp, pic, target, rate, time);
+        } else if crate::panels::aim360::monitor_overlay(app, ui, pic) {
+            // aiming a 360° camera owns the picture while it is on
         } else if app.ui.track_tool.is_some() {
             // the Track tool owns the picture while it is on
             crate::panels::motion_track::monitor_overlay(app, ui, pic, frame_size);

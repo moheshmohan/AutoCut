@@ -168,6 +168,11 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
             v.snap = toggled(v.snap, params);
             Ok(json!({"snap": v.snap}))
         }
+        "aim360" => {
+            let v = &mut app.ui.program;
+            v.aim360 = toggled(v.aim360, params);
+            Ok(json!({"aim360": v.aim360}))
+        }
         "clearGuides" => {
             let v = view_mut(app, w);
             let n = v.guides.len();
@@ -391,6 +396,7 @@ pub fn checked(app: &FilmcraftApp, id: &str) -> Option<bool> {
         "showGuides" => Some(v.show_guides),
         "lockGuides" => Some(v.lock_guides),
         "snapInProgramMonitor" => Some(app.ui.program.snap),
+        "aim360" => Some(app.ui.program.aim360),
         _ => None,
     }
 }
