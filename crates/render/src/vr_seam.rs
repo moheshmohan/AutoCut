@@ -439,8 +439,9 @@ pub fn seam_of(model: &SourceModel, frames: &[&VideoFrame]) -> Option<Arc<SeamFl
 }
 
 /// The frames a seam is measured on at media time `time`: `frame` (the one decoded there, at
-/// `scale`) and [`SEAM_NEIGHBOURS`] either side of it, as far as `src` has them (decoders keep the
-/// frames round the one they decoded, so these cost little).
+/// `scale`) and [`SEAM_NEIGHBOURS`] either side of it as decoded (`plain_frame`: not each cleaned
+/// up with its own neighbours), as far as `src` has them (decoders keep the frames round the one
+/// they decoded, so these cost little).
 pub fn seam_frames(src: &filmcraft_media::SharedSource, time: filmcraft_time::Tick, scale: f32, frame: Arc<VideoFrame>) -> Vec<Arc<VideoFrame>> {
     let fd = src.info().frame_rate().frame_duration();
     let end = src.info().duration;
@@ -449,7 +450,7 @@ pub fn seam_frames(src: &filmcraft_media::SharedSource, time: filmcraft_time::Ti
         for t in [time - filmcraft_time::Tick(fd.0.saturating_mul(k)), time + filmcraft_time::Tick(fd.0.saturating_mul(k))] {
             if t >= filmcraft_time::Tick::ZERO
                 && t < end
-                && let Ok(f) = src.video_frame(filmcraft_media::FrameRequest { time: t, scale })
+                && let Ok(f) = src.plain_frame(filmcraft_media::FrameRequest { time: t, scale })
             {
                 out.push(f);
             }

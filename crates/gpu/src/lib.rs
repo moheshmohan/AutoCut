@@ -39,6 +39,7 @@ use filmcraft_render::Blend;
 use filmcraft_render::plan::{FramePlan, PlanLayer, PlanStep};
 
 pub mod adapter;
+pub mod denoise;
 pub mod export_renderer;
 pub mod fx;
 pub mod lut;

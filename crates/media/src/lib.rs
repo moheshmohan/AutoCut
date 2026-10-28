@@ -162,6 +162,12 @@ pub trait MediaSource: Send + Sync {
     fn info(&self) -> &MediaInfo;
     /// The frame displayed at media time `req.time`.
     fn video_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>>;
+    /// The frame at `req.time` as decoded, for measuring the frame round it (a 360° seam's
+    /// neighbours): a source that cleans its frames up with their neighbours (noise reduction)
+    /// gives it without that. Others need not override this.
+    fn plain_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>> {
+        self.video_frame(req)
+    }
     /// `frames` audio frames starting at sample index `start` (at `sample_rate`, media time).
     fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer>;
     /// Like [`audio`](Self::audio) for audio stream `stream` (an index into

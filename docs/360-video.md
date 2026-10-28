@@ -89,6 +89,7 @@ a sudden change; an equirectangular 360° file may be an edit and is looked at l
 | `clip.vrMove` | a camera move as Bézier keyframes, editable in Effect Controls: `planetIn` (a tiny planet spinning open onto the view), `planetOut`, `orbit` (`degrees`, default a full turn), `barrelRoll`, `whipPan` (the short way to `yaw`/`pitch`, from `fromYaw` for a whip in, with a Directional Blur peak), `reveal` (from the sky, or `from: "ground"`), `pushIn`, `crashZoom`, `drift`, `drone` (a high stick read as a drone: rising and pulling back, tipping down to −50° and widening), `thirdPerson` (looking down at the person holding the camera from above and behind, `yaw` their way, for the rest of the clip), `spin` (a fast full turn, blurred), `flip` (a somersault forwards through the ground and the sky, blurred up and down), `wobble` (a playful shake dying away, `amount` its size) — GoPro's CameraFX and Insta360's invisible-stick shots as moves; each has its default place and length (`at`, `seconds` move it); a move replaces its parameters' keyframes inside its window only, so moves, a follow and stabilisation add up |
 | `clip.hyperlapse360` | a long stretch at `speed` % (frame blending) held steady by `clip.stabilize360` (`strong`) |
 | `media.salience360` | where things happen round the sphere around `seconds`: a few panorama frames 0.2 s apart scored by direction — by motion when one direction moves clearly more than the rest, else by detail — the strongest directions (yaw, pitch) at least 45° apart |
+| `media.denoise` | Clip ▸ Modify ▸ Reduce Noise, for any video: each frame merged with its neighbours (`frames` either side, 2), each moved to line up with it first (see Rendering); `strength` 0..1, `off`; `auto` turns it on only for the dark, noisy ones (grain ≥ 1.5 levels and light under 0.3 at the middle frame), `measure` reports both |
 
 The **360 Reframe** effect (Effects ▸ Immersive Video) is the clip's picture: a reframed clip is
 a flat clip of the camera's frame for everything after it — Motion, masks, every effect, Auto
@@ -371,6 +372,30 @@ across the band fell from 0.065 to 0.056 on average, in every frame — 27% in a
 frame on average (0.4% of the seam by more than 1°), against 0.25° measured one frame at a time.
 Lines very close to the camera bend a little where they cross the seam rather than doubling.
 `media.vrProperties` `seamFlow: false` cross-fades only, as before.
+
+**Cleaner night shots.** Reduce Noise (`media.denoise`, any video, not only 360°) merges each
+frame with two either side (`frames` 1–3), with no model: each neighbour's motion against the
+frame is measured on the CPU (luma at an eighth of its size, the best shift within ±24 pixels of
+every 64-pixel block by sum of absolute differences, refined to a fraction and the median of the
+blocks round it taken: 5 ms at 5.7K), then every pixel of every plane is averaged with the
+neighbours' pixels where that motion takes it, each weighted by how well it agrees
+(`exp(−(d/σ)²)`, σ the frame's own grain — Immerkær's estimate, the black of a fisheye's surround
+and blown highlights left out — times 1.5–4.5 by `strength`, at least 1–4 levels), so grain
+averages away while what moves, or what the motion missed, is not smeared. The merge runs on the
+GPU (Metal: 20 ms for a 5.7K luma plane, against 104 ms on the CPU; `filmcraft_gpu::denoise`,
+tested against the CPU's `filmcraft_render::denoise`), the source's frames as decoded
+(`plain_frame`) still feed the seam's stitch, and a 5.7K frame of an export costs 66 ms more
+(1.06 s → 1.85 s for 12 frames). On a grainy test picture moving 4 pixels a frame it takes a
+third of the grain away or more.
+
+On the X5's own night recordings it has little to do, and says so: measured on eight Istanbul
+night recordings (083–090) the camera has already cleaned its frames up (the painted look of faces
+and brick in the dark is its own noise reduction), leaving 0.2–0.7 levels of grain — `auto`
+(grain ≥ 1.5 levels, light under 0.3) leaves them all alone — and at full strength Reduce Noise
+lowered the grain in the dark by 3–7% and the shimmer from frame to frame by 1–4%, a change that
+does not show. It is for footage that is grainy when it comes in: a phone's or a small camera's
+in the dark. The director runs `auto` on the recordings it uses (`denoise: false`,
+`--no-denoise` to skip it) and reports those it turned on in `denoised`.
 
 ## 7. Export
 

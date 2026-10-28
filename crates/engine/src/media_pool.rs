@@ -86,8 +86,24 @@ pub const PROBE_WHOLE_FILE_MAX: u64 = 64 * 1024 * 1024;
 pub fn media_key(m: &MediaClip) -> String {
     match &m.media {
         MediaRef::File { path } if m.offline => format!("offline:{path}"),
-        MediaRef::File { path } => format!("file:{path}"),
+        MediaRef::File { path } => format!("file:{path}{}", denoise_key(m)),
         MediaRef::Generator(g) => format!("generator:{g:?}"),
+    }
+}
+
+/// The part of a source's key its noise reduction makes (empty when off).
+fn denoise_key(m: &MediaClip) -> String {
+    m.interpret.denoise.map(|d| format!("|denoise:{}:{}", d.strength, d.frames)).unwrap_or_default()
+}
+
+/// `src` with the media's noise reduction (`media.denoise`), if it has any and a picture.
+fn denoised(m: &MediaClip, src: SharedSource) -> SharedSource {
+    match m.interpret.denoise {
+        Some(d) if m.info.has_video() => Arc::new(filmcraft_render::denoise::DenoisedSource::new(
+            src,
+            filmcraft_render::denoise::DenoiseOptions { strength: d.strength, radius: usize::from(d.frames) },
+        )),
+        _ => src,
     }
 }
 
@@ -364,7 +380,7 @@ impl MediaPool {
             }) {
                 Ok(s) => {
                     self.offline.write().unwrap_or_else(|e| e.into_inner()).remove(&item);
-                    self.unsupported_as_slate(item, path, s)
+                    denoised(m, self.unsupported_as_slate(item, path, s))
                 }
                 Err(_) if filmcraft_media::pending::is_set() => {
                     // the host is still fetching the file's bytes: show the slate for now, retry later
@@ -386,7 +402,7 @@ impl MediaPool {
     }
 
     fn proxy_source(&self, item: ItemId, path: &str, m: &MediaClip, services: &dyn Services) -> Option<SharedSource> {
-        let key = format!("proxy:{path}");
+        let key = format!("proxy:{path}{}", denoise_key(m));
         if let Some((k, s)) = self.proxies.read().unwrap_or_else(|e| e.into_inner()).get(&item)
             && *k == key
         {
@@ -406,7 +422,7 @@ impl MediaPool {
                 } else {
                     None
                 };
-                let src: SharedSource = Arc::new(ProxySource { proxy: s, info: m.info.clone(), audio_from });
+                let src: SharedSource = denoised(m, Arc::new(ProxySource { proxy: s, info: m.info.clone(), audio_from }));
                 Some(keep(&self.proxies, item, key, src))
             }
             Err(e) => {

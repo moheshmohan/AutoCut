@@ -162,6 +162,9 @@ pub struct Options {
     /// Cuts between two cameras' pictures of one moment (`media.sameMoments`): on unless switched
     /// off.
     pub angles: bool,
+    /// Noise reduction for the dark, noisy recordings the edit uses (`media.denoise` `auto`): on
+    /// unless switched off.
+    pub denoise: bool,
     pub look_strength: f64,
 }
 
@@ -392,6 +395,7 @@ impl Options {
             color: p["color"].as_bool().unwrap_or(true),
             cutouts: p["cutouts"].as_bool().unwrap_or(true),
             angles: p["angles"].as_bool().unwrap_or(true),
+            denoise: p["denoise"].as_bool().unwrap_or(true),
             color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
             look,
             look_strength: finite(&p["lookStrength"]).map_or(25.0, |v| v.clamp(0.0, 100.0)),
@@ -2028,6 +2032,9 @@ pub struct Report {
     /// The opening's person cut out in front of its title (`clip.cutOut`'s outlines).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cutout: Option<Value>,
+    /// The recordings given noise reduction (`media.denoise` `auto`: the dark, noisy ones).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denoised: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safe_zones: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2517,6 +2524,28 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
             match run(ex, "clip.autoColor", cp).await {
                 Ok(v) => report.color = Some(color_summary(&v)),
                 Err(e) => report.fallbacks.push(format!("colour: left as shot ({})", chars(&e.to_string(), 160))),
+            }
+        }
+    }
+    // ---- cleaner night shots: the recordings the edit uses that measure dark and noisy merged
+    // with their neighbouring frames (`media.denoise` `auto` leaves the others alone)
+    if o.denoise {
+        let mut items: Vec<u64> = Vec::new();
+        for c in plan.shots.iter().filter_map(|s| cands.iter().find(|c| c.id == s.clip)) {
+            if !items.contains(&c.item) && media.iter().any(|m| m.item == c.item && !m.still) {
+                items.push(c.item);
+            }
+        }
+        if !items.is_empty() {
+            match run(ex, "media.denoise", json!({"items": items, "auto": true})).await {
+                Ok(v) => {
+                    let n = v["changed"].as_array().map_or(0, Vec::len);
+                    if n > 0 {
+                        lines(&format!("noise reduction on {n} dark recording(s)"));
+                    }
+                    report.denoised = Some(v["changed"].clone());
+                }
+                Err(e) => report.fallbacks.push(format!("noise: left as filmed ({})", chars(&e.to_string(), 160))),
             }
         }
     }

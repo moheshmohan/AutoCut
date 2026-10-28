@@ -435,6 +435,8 @@ fn register_gpu_frame_renderer() {
     filmcraft_export::register_frame_renderer(|| {
         filmcraft_gpu::ExportRenderer::new().map(|r| Box::new(GpuFrameRenderer(r)) as Box<dyn filmcraft_export::FrameRenderer>)
     });
+    // noise reduction's merge too (its device made on first use)
+    filmcraft_gpu::denoise::install();
 }
 
 /// Put the OS hardware video decoders in front of our own. Registered in a statement of its own:

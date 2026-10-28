@@ -206,6 +206,17 @@ pub struct Interpretation {
     /// from the file's metadata; see [`vr`]). None = a flat picture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vr: Option<filmcraft_media::Spherical>,
+    /// Reduce Noise: each frame merged with its motion-aligned neighbours (`media.denoise`,
+    /// `filmcraft_render::denoise`). None = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denoise: Option<Denoise>,
+}
+
+/// Reduce Noise: how hard (`strength` 0..1) and over how many frames either side (`frames` 1..3).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Denoise {
+    pub strength: f32,
+    pub frames: u8,
 }
 
 /// Modify ▸ Audio Channels: the clip channel format and, per audio clip, the source channels it
