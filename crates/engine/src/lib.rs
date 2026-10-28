@@ -32,6 +32,7 @@ pub mod elements;
 pub mod essential_sound;
 pub mod export_tools;
 pub mod feedback;
+pub mod follow_reid;
 pub mod graphic_templates;
 pub mod graphics;
 pub mod graphics_counter;

@@ -8,7 +8,7 @@
 //! | `media.align360` | lines the two lenses of dual-fisheye media up along their seam (a few frames across the clip, [`filmcraft_render::vr::align_lenses`]) and keeps the result in its VR Properties |
 //! | `clip.stabilize360` | holds the virtual camera steady: the camera's turn measured from the pictures frame to frame (`filmcraft_render::vr_motion`: points on cube faces, a robust rotation fit), then `mode` `smooth` / `light` / `strong` (the operator's own turns kept, the shake gone) or `lock` (the first frame's direction throughout), written as the effect's Stabilization keyframes; a job; `off` |
 //! | `media.salience360` | where things happen in a 360° item: around `seconds` (default the middle of `from`..`to`, else of the item), a few frames of its panorama 0.2 s apart scored by motion (else detail) in each direction ([`filmcraft_render::vr_motion::salient_directions`]): up to `max` directions (yaw, pitch, score), strongest first, at least 45° apart |
-//! | `clip.follow360` | turns the virtual camera to follow a subject (`target` `subject`, `box` in the clip's frame at `at`, or `face`): a wide tracking camera kept on it while the subject tracker follows it both ways from `at`, the path smoothed (`smooth` 0 close … 1 floaty) into yaw and pitch keyframes; a job |
+//! | `clip.follow360` | turns the virtual camera to follow a subject (`target` `subject`, `box` in the clip's frame at `at`, or `face`): a wide tracking camera kept on it while the subject tracker follows it both ways from `at`, the path smoothed (`smooth` 0 close … 1 floaty) into yaw and pitch keyframes; a subject lost for a few frames (blocked, gone behind something, turned round) is looked for again by its look in the tracking view and the views either side (`refind`: `auto` — the colours find it, SigLIP 2 confirms it when the scene models are downloaded —, `colour`, `siglip` — every window by SigLIP, slower — or `off`), the report's `foundAgain` counting it; a job |
 //!
 //! A clip of 360° media shows its raw picture (an equirectangular panorama, or the two fisheye
 //! circles of an Insta360 recording) until it is reframed; reframed, it is a flat clip of the
@@ -102,7 +102,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "360 Follow Subject",
             menu: &["Clip"],
             shortcut: None,
-            params: r#"{"clip":id?,"target":"subject"|"box"|"face"="subject","box":[x,y,w,h]?,"at":seconds?,"smooth":0..1=0.5,"analysisFps":1..30=10,"wait":bool=false}"#,
+            params: r#"{"clip":id?,"target":"subject"|"box"|"face"="subject","box":[x,y,w,h]?,"at":seconds?,"smooth":0..1=0.5,"analysisFps":1..30=10,"refind":"auto"|"siglip"|"colour"|"off"="auto","wait":bool=false}"#,
             enabled: has_seq,
             run: follow,
             journal: true,
@@ -1236,7 +1236,9 @@ struct Seen {
 }
 
 /// Follows the subject through frames `order` (indices into `frames`), starting where the
-/// clip's camera looks at the first of them. `None` when cancelled.
+/// clip's camera looks at the first of them; once it is lost for a few frames it is looked for
+/// again by its look (`refind`, [`crate::follow_reid`]). What was seen, and when it was found
+/// again (seconds) and how alike it was then; `None` when cancelled.
 #[allow(clippy::too_many_arguments)]
 fn follow_run(
     src: &filmcraft_media::SharedSource,
@@ -1246,9 +1248,11 @@ fn follow_run(
     order: &[usize],
     target: FollowTarget,
     faces: Option<&crate::redact::DetectFn>,
+    refind: Option<&crate::follow_reid::Judge>,
     prog: &filmcraft_export::Progress,
-) -> Option<Vec<(usize, Seen)>> {
-    use filmcraft_render::subject::{SubjectBox, SubjectTracker};
+) -> Option<(Vec<(usize, Seen)>, Vec<(f64, f32, Option<f32>)>)> {
+    use crate::follow_reid::{Look, MAX_SEARCHES, SEARCH_AFTER};
+    use filmcraft_render::subject::{SubjectBox, SubjectTracker, TrackState};
     use filmcraft_render::vr_motion::{TRACK_FOV, TrackingCamera};
     let first = *order.first()?;
     let (start_view, _) = views.get(first)?;
@@ -1267,6 +1271,10 @@ fn follow_run(
     let every = (FOLLOW_FPS / 2.0).round().max(1.0) as usize;
     let mut tr = SubjectTracker::new();
     let mut out = Vec::with_capacity(order.len());
+    // the subject's look, its size in the tracking camera's picture, and how long it is lost
+    let mut look = refind.map(|j| Look::new(j.clone()));
+    let mut size = (0.15, 0.3);
+    let (mut lost, mut searches, mut refound) = (0usize, 0usize, Vec::new());
     for (n, &k) in order.iter().enumerate() {
         if prog.cancel.load(Ordering::Relaxed) {
             return None;
@@ -1286,10 +1294,49 @@ fn follow_run(
             hint = crate::reframe::largest_face(detect, &pic, fw, fh).or(hint);
         }
         let obs = tr.push(&pic, fw, fh, t, hint.take());
+        // held where it was last seen, or gone: looked for again by its look every few frames
+        let missing = matches!(obs.state, TrackState::Coasting | TrackState::Lost | TrackState::None);
+        lost = if missing { lost + 1 } else { 0 };
+        if let Some(lk) = look.as_ref().filter(|l| l.ready())
+            && lost >= SEARCH_AFTER
+            && lost.is_multiple_of(SEARCH_AFTER)
+            && searches < MAX_SEARCHES
+        {
+            // in the tracking camera's picture, and every other time in the views either side too
+            let sides = searches.is_multiple_of(2);
+            searches += 1;
+            if let Some((c, fb, sim, agree)) = find_again(lk, &img, &model, &cam, &pic, size, sides) {
+                refound.push((t, sim, agree));
+                lost = 0;
+                let d = c.as_ref().unwrap_or(&cam).direction(fb.cx, fb.cy);
+                let aim = views.get(k).map_or(d, |(_, m)| filmcraft_render::vr::mtvec(m, d));
+                let (lon, lat) = filmcraft_render::vr::lonlat(aim);
+                out.push((k, Seen { yaw: lon.to_degrees(), pitch: lat.to_degrees() }));
+                match c {
+                    // another view: the tracking camera turned onto it, the tracker started again
+                    Some(c) => {
+                        cam = c.recentred(d);
+                        tr = SubjectTracker::new();
+                        hint = SubjectBox::new(0.5, 0.5, fb.w, fb.h);
+                    }
+                    None => {
+                        tr = SubjectTracker::new();
+                        hint = Some(fb);
+                    }
+                }
+                continue;
+            }
+        }
         let Some(b) = obs.bbox.filter(|_| obs.confidence >= filmcraft_render::reframe::MIN_CONFIDENCE) else {
             out.push((k, Seen { yaw: f64::NAN, pitch: f64::NAN }));
             continue;
         };
+        if !missing {
+            size = (b.w, b.h);
+            if let Some(lk) = look.as_mut().filter(|l| l.learning()) {
+                lk.learn(&pic, fw, fh, b);
+            }
+        }
         let d = cam.direction(b.cx, b.cy);
         // the clip's stabilisation turns its rays first (final = C · view): aim the view at Cᵀ·d
         let aim = views.get(k).map_or(d, |(_, c)| filmcraft_render::vr::mtvec(c, d));
@@ -1302,7 +1349,43 @@ fn follow_run(
             hint = SubjectBox::new(0.5, 0.5, b.w, b.h);
         }
     }
-    Some(out)
+    Some((out, refound))
+}
+
+/// How far either side of the tracking camera the subject is looked for, degrees.
+const FIND_SIDE: f64 = 0.9 * filmcraft_render::vr_motion::TRACK_FOV;
+
+/// Where a lost subject (of `size`, shares) is now and how alike it is: in the tracking camera's
+/// picture `pic` (no new camera), else — with `sides` — in the view either side of it (that
+/// camera).
+fn find_again(
+    look: &crate::follow_reid::Look,
+    img: &filmcraft_render::Image,
+    model: &filmcraft_render::vr::SourceModel,
+    cam: &filmcraft_render::vr_motion::TrackingCamera,
+    pic: &[u8],
+    size: (f64, f64),
+    sides: bool,
+) -> Option<(Option<filmcraft_render::vr_motion::TrackingCamera>, filmcraft_render::subject::SubjectBox, f32, Option<f32>)> {
+    let (fw, fh) = (FOLLOW_SIZE.0 as usize, FOLLOW_SIZE.1 as usize);
+    if let Some((b, sim, agree)) = look.search(pic, fw, fh, size.0, size.1) {
+        return Some((None, b, sim, agree));
+    }
+    if !sides {
+        return None;
+    }
+    let (lon, lat) = filmcraft_render::vr::lonlat(cam.direction(0.5, 0.5));
+    let mut best: Option<(filmcraft_render::vr_motion::TrackingCamera, filmcraft_render::subject::SubjectBox, f32, Option<f32>)> = None;
+    for side in [FIND_SIDE, -FIND_SIDE] {
+        let c = filmcraft_render::vr_motion::TrackingCamera::new(lon.to_degrees() + side, lat.to_degrees(), FOLLOW_SIZE);
+        let p = filmcraft_render::vr::reframe(img, model, &c.view, fw, fh, 1).over_black_rgba8();
+        if let Some((b, sim, agree)) = look.search(&p, fw, fh, size.0, size.1)
+            && best.as_ref().is_none_or(|x| sim > x.2)
+        {
+            best = Some((c, b, sim, agree));
+        }
+    }
+    best.map(|(c, b, sim, agree)| (Some(c), b, sim, agree))
 }
 
 /// A flat view's field of view, degrees across (90 for the sphere).
@@ -1331,6 +1414,21 @@ fn follow(s: &mut Session, p: &Value) -> Result<Value> {
         None => FOLLOW_FPS,
         Some(v) if (1.0..=30.0).contains(&v) => v,
         Some(_) => return Err(bad(cmd, "`analysisFps` is 1..30")),
+    };
+    // how a lost subject is found again: SigLIP 2 when the scene models are downloaded
+    let refind = match str_p(p, "refind").unwrap_or("auto") {
+        "off" => None,
+        "colour" | "color" => Some(crate::follow_reid::Judge::Colour),
+        "auto" => {
+            Some(s.scenes.check_models().filter(|m| m.embedder_id().is_some()).map_or(crate::follow_reid::Judge::Colour, crate::follow_reid::Judge::Confirmed))
+        }
+        "siglip" => Some(crate::follow_reid::Judge::Embedder(
+            s.scenes
+                .check_models()
+                .filter(|m| m.embedder_id().is_some())
+                .ok_or_else(|| bad(cmd, "the scene models (SigLIP 2) are not downloaded: `refind: \"colour\"`"))?,
+        )),
+        o => return Err(bad(cmd, format!("`refind` is auto, siglip, colour or off, not `{o}`"))),
     };
     let mut faces = None;
     let target = match str_p(p, "target").unwrap_or("subject") {
@@ -1384,12 +1482,23 @@ fn follow(s: &mut Session, p: &Value) -> Result<Value> {
         let back: Vec<usize> = (0..=seed.min(n.saturating_sub(1))).rev().collect();
         let fwd: Vec<usize> = (seed..n).collect();
         let mut seen: Vec<Option<Seen>> = (0..n).map(|_| None).collect();
+        // the embedder on the GPU while the follow runs (without the GPU, the colours)
+        let (refind, _gpu) = match refind {
+            Some(j) => match j.models().map(|m| m.gpu()) {
+                Some(Ok(g)) => (Some(j), g),
+                Some(Err(_)) => (Some(crate::follow_reid::Judge::Colour), None),
+                None => (Some(j), None),
+            },
+            None => (None, None),
+        };
+        let mut refound: Vec<(f64, f32, Option<f32>)> = Vec::new();
         for order in [back, fwd] {
             if order.is_empty() {
                 continue;
             }
-            let run =
-                follow_run(&src, &sph, &frames, &views, &order, target, faces.as_ref(), prog).ok_or_else(|| "stopped: nothing was changed".to_string())?;
+            let (run, again) = follow_run(&src, &sph, &frames, &views, &order, target, faces.as_ref(), refind.as_ref(), prog)
+                .ok_or_else(|| "stopped: nothing was changed".to_string())?;
+            refound.extend(again);
             for (k, sn) in run {
                 if let Some(slot) = seen.get_mut(k)
                     && slot.as_ref().is_none_or(|old| old.yaw.is_nan())
@@ -1412,7 +1521,23 @@ fn follow(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(vec![ClipKeys {
             clip,
             keys: vec![("yaw", key(&ys)), ("pitch", key(&ps))],
-            summary: json!({"clip": clip.0, "frames": n, "found": (found as f64 / n.max(1) as f64 * 1000.0).round() / 1000.0, "keyframes": keep.len()}),
+            summary: json!({
+                "clip": clip.0,
+                "frames": n,
+                "found": (found as f64 / n.max(1) as f64 * 1000.0).round() / 1000.0,
+                "keyframes": keep.len(),
+                "foundAgain": refound.len(),
+                // when (clip seconds) and how alike (cosine), the first few
+                "foundAgainAt": refound
+                    .iter()
+                    .take(20)
+                    .map(|(t, m, a)| {
+                        let r3 = |x: f32| (f64::from(x) * 1000.0).round() / 1000.0;
+                        json!({"seconds": (t * 100.0).round() / 100.0, "match": r3(*m), "siglip": a.map(r3)})
+                    })
+                    .collect::<Vec<_>>(),
+                "refind": refind.as_ref().map(crate::follow_reid::Judge::name),
+            }),
         }])
     })
 }
@@ -1598,6 +1723,72 @@ mod tests {
         }
     }
 
+    /// A 360° image sequence of a red-and-blue figure walking right, blocked by a passer-by for
+    /// 12 frames and then 70° further on (out of the tracking camera's view): its frames'
+    /// paths and the figure's yaw at each.
+    fn blocked_walk(dir: &std::path::Path) -> (Vec<String>, Vec<f64>) {
+        let (w, h) = (1024u32, 512u32);
+        let mut paths = Vec::new();
+        let mut yaws = Vec::new();
+        for k in 0..80u32 {
+            let yaw = if k < 30 { -30.0 + f64::from(k) } else { 60.0 + f64::from(k - 30) };
+            let blocked = (18..30).contains(&k);
+            let img = image::RgbaImage::from_fn(w, h, |x, y| {
+                let (lon, lat) = (f64::from(x) / f64::from(w) * 360.0 - 180.0, 90.0 - f64::from(y) / f64::from(h) * 180.0);
+                // a faint pattern on the walls, the passer-by, the figure
+                let wall = 100 + ((lon / 9.0).floor() as i64 + (lat / 9.0).floor() as i64).rem_euclid(2) as u8 * 12;
+                if blocked && (lon - (yaw + 3.0)).abs() < 14.0 && lat.abs() < 30.0 {
+                    image::Rgba([60, 50, 40, 255])
+                } else if (lon - yaw).abs() < 7.0 && lat.abs() < 18.0 {
+                    if lat > 0.0 { image::Rgba([210, 30, 30, 255]) } else { image::Rgba([30, 40, 210, 255]) }
+                } else {
+                    image::Rgba([wall, wall, wall, 255])
+                }
+            });
+            let p = dir.join(format!("walk{k:04}.png"));
+            img.save(&p).unwrap();
+            paths.push(p.to_string_lossy().into_owned());
+            yaws.push(yaw);
+        }
+        (paths, yaws)
+    }
+
+    #[test]
+    fn a_blocked_subject_is_found_again_and_followed_on() {
+        let dir = crate::media_test_util::tmp_dir("follow-blocked");
+        let (paths, yaws) = blocked_walk(&dir);
+        let follow = |refind: &str| {
+            let mut s = Session::default();
+            let r = s.execute("file.import", json!({"paths": [paths[0]], "imageSequence": true})).unwrap();
+            let item = r["items"][0].as_u64().unwrap();
+            s.execute(PROPS_CMD, json!({"items": [item], "projection": "equirectangular"})).unwrap();
+            s.execute("file.newSequence", json!({"name": "walk", "width": 320, "height": 180, "fps": 24})).unwrap();
+            let r = s.execute("timeline.place", json!({"item": item, "track": "V1", "seconds": 0})).unwrap();
+            let c = ClipId(r["reframed360"][0].as_u64().unwrap());
+            // the figure in the natural view (100° across) at the start: 30° left
+            let r = s
+                .execute(
+                    FOLLOW_CMD,
+                    json!({"clip": c.0, "target": "box", "box": [0.2, 0.25, 0.12, 0.5], "analysisFps": 24, "smooth": 0, "refind": refind, "wait": true}),
+                )
+                .unwrap();
+            let it = clip(&s, c);
+            let e = it.effect(REFRAME).unwrap().clone();
+            // the camera's yaw where the sequence shows source frame `k`
+            let rate = s.source(ItemId(item)).unwrap().info().frame_rate();
+            let yaw_at = |k: i64| e.f64_at("yaw", rate.tick_of(k));
+            (r["result"]["clips"][0].clone(), yaw_at(3), yaw_at(76))
+        };
+        let (found, start, end) = follow("colour");
+        assert!(found["foundAgain"].as_u64().unwrap() >= 1, "{found}");
+        assert!((start - yaws[3]).abs() < 8.0, "followed from the start: {start} vs {}", yaws[3]);
+        assert!((end - yaws[76]).abs() < 10.0, "found again and followed on: {end} vs {}: {found}", yaws[76]);
+        // without looking for it again, the camera stays where it lost the figure
+        let (lost, _, end_off) = follow("off");
+        assert_eq!(lost["foundAgain"], 0);
+        assert!((end_off - yaws[76]).abs() > 30.0, "{end_off}: {lost}");
+    }
+
     #[test]
     fn hostile_parameters_are_refused() {
         let mut s = demo();
@@ -1643,6 +1834,7 @@ mod tests {
             json!({"clip": c.0, "smooth": 3.0}),
             json!({"clip": c.0, "analysisFps": 0}),
             json!({"clip": c.0, "at": -2.0}),
+            json!({"clip": c.0, "refind": "smell"}),
         ] {
             assert!(s.execute(FOLLOW_CMD, bad.clone()).is_err(), "{bad}");
         }

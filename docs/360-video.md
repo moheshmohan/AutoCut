@@ -85,12 +85,31 @@ a sudden change; an equirectangular 360° file may be an edit and is looked at l
 | `media.seam360` | the seam of a dual-fisheye item at a moment: how much the lenses disagree across it cross-faded and stitched, the largest shift, how long measuring took; a picture of the band unrolled round the seam (lens 0, lens 1, the cross-fade, the stitch) with `path` |
 | `clip.reframe360` | the virtual camera: `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across), `distance` (0 flat … 1 tiny planet), `output` `flat`/`sphere`, `width`/`height` (default: the sequence frame); `at` keyframes them at a clip time; `keys` writes a whole camera move; presets `natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`; `off` |
 | `clip.stabilize360` | holds the view steady: the camera's turn measured from the pictures (points tracked on cube faces, a robust rotation fit), then `smooth`/`light`/`strong` (keep the operator's turns, drop the shake) or `lock` (look one way the whole clip) |
-| `clip.follow360` | turns the virtual camera to follow a subject (`subject`, `box`, `face`) |
+| `clip.follow360` | turns the virtual camera to follow a subject (`subject`, `box`, `face`); one lost for a few frames is looked for again by its look (`refind`, see below) |
 | `clip.aim360` | the camera aimed along `samples` (`[seconds, yaw, pitch]`, as a drag on the Program monitor records them: View ▸ Aim 360° Camera), smoothed over `smooth` seconds (0.5) and kept to the keyframes needed; `merge` joins a drag's calls into one undo step |
 | `clip.vrMove` | a camera move as Bézier keyframes, editable in Effect Controls: `planetIn` (a tiny planet spinning open onto the view), `planetOut`, `orbit` (`degrees`, default a full turn), `barrelRoll`, `whipPan` (the short way to `yaw`/`pitch`, from `fromYaw` for a whip in, with a Directional Blur peak), `reveal` (from the sky, or `from: "ground"`), `pushIn`, `crashZoom`, `drift`, `drone` (a high stick read as a drone: rising and pulling back, tipping down to −50° and widening), `thirdPerson` (looking down at the person holding the camera from above and behind, `yaw` their way, for the rest of the clip), `spin` (a fast full turn, blurred), `flip` (a somersault forwards through the ground and the sky, blurred up and down), `wobble` (a playful shake dying away, `amount` its size) — GoPro's CameraFX and Insta360's invisible-stick shots as moves; each has its default place and length (`at`, `seconds` move it); a move replaces its parameters' keyframes inside its window only, so moves, a follow and stabilisation add up |
 | `clip.hyperlapse360` | a long stretch at `speed` % (frame blending) held steady by `clip.stabilize360` (`strong`) |
 | `media.salience360` | where things happen round the sphere around `seconds`: a few panorama frames 0.2 s apart scored by direction — by motion when one direction moves clearly more than the rest, else by detail — the strongest directions (yaw, pitch) at least 45° apart |
 | `media.denoise` | Clip ▸ Modify ▸ Reduce Noise, for any video: each frame merged with its neighbours (`frames` either side, 2), each moved to line up with it first (see Rendering); `strength` 0..1, `off`; `auto` turns it on only for the dark, noisy ones (grain ≥ 1.5 levels and light under 0.3 at the middle frame), `measure` reports both |
+
+**Following through blocking.** A subject `clip.follow360` follows can be hidden — someone walks
+in front of it, it goes behind a pillar and comes out elsewhere — and the tracker, which only holds
+its last box while it is gone, would leave the camera there. Once it has been lost (held or gone)
+for three analysed frames, and every three frames while it stays lost, the subject is looked for
+by how it looked in its first confident frames: windows of its size over the tracking camera's
+110° picture — and every other time over the views 99° either side — compared by a colour
+signature (hue, saturation, lightness binned, the middle weighted), the best grid window moved
+onto it in three finer steps, clearly better than the best one elsewhere; with the scene models
+downloaded, SigLIP 2's embedding of that one window must agree that it is the same subject
+(`refind: "auto"`; `"colour"` without the check, `"siglip"` every window by SigLIP, slower;
+`"off"`). The tracker starts again there, the camera turned onto it when it was in a side view;
+the report gives `foundAgain` and when, with each match. On a test walk hidden by a passer-by for
+12 frames and coming out 70° on — outside the tracking view — the camera ends on it (within 10°;
+without looking again it stays more than 30° away). On 20 s of a crowded Istiklal street at night
+(086), following a woman in an orange shirt who walks on behind two men, she was seen in 75% of
+the analysed frames before and in all of them with `auto` (found again three times, by the colour
+of her shirt between them: colour 0.93–0.98, SigLIP agreeing at 0.88–0.96), at 0.4 s more than colour alone; SigLIP on every
+window found her only once and took three times as long.
 
 **Aiming by hand.** View ▸ Aim 360° Camera (`view.aim360`) makes a drag on the Program monitor
 turn the view of the topmost 360° clip under the playhead: the picture follows the pointer, as in
