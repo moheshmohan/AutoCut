@@ -375,3 +375,74 @@ fn render_previews_ignore_proxies() {
     assert!(q > 30.0, "preview rendered from full-resolution media, not the (different) proxy: {q:.1} dB");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// An Insta360 recording (`VID_…_00_<n>`) and the camera's copy beside it (`LRV_…_01_<n>.lrv`,
+/// other pictures, a quarter of the size, `short` frames shorter), in a fresh folder.
+fn camera_pair(name: &str, short: i64) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let root = tmp_dir(name);
+    let vid = root.join("VID_20260912_214043_00_087.mp4");
+    make_movie(&vid, DemoScene::Aurora, 256, 128, 24);
+    let tmp = root.join("lrv.mp4");
+    make_movie(&tmp, DemoScene::Plasma, 64, 32, 24 - short);
+    let lrv = root.join("LRV_20260912_214043_01_087.lrv");
+    std::fs::rename(&tmp, &lrv).unwrap();
+    // a copy of another recording: not this one's
+    make_movie(&root.join("LRV_20260912_214043_01_088.lrv"), DemoScene::Plasma, 64, 32, 24);
+    (root, vid, lrv)
+}
+
+#[test]
+fn an_insta360_recording_comes_in_with_the_cameras_own_proxy() {
+    // (the camera's copy ends two frames before its recording)
+    let (root, vid, lrv) = camera_pair("camera-proxy", 2);
+    let mut s = Session::default();
+    let before = s.history.undo.len();
+    let r = s.execute("file.import", json!({"paths": [vid.to_string_lossy()]})).unwrap();
+    let item = filmcraft_project::ItemId(r["items"][0].as_u64().unwrap());
+    assert_eq!(r["proxies"][0]["path"], lrv.to_string_lossy().as_ref(), "{r}");
+    let m = s.project.item(item).unwrap().as_media().unwrap();
+    assert_eq!(m.proxy, Some(filmcraft_project::MediaRef::File { path: lrv.to_string_lossy().into_owned() }));
+    // one undo step takes the item and its proxy away
+    assert_eq!(s.history.undo.len(), before + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.project.item(item).is_none());
+    s.execute("edit.redo", json!({})).unwrap();
+    // as 360° media, the analyses read the small copy; a sharp still the recording itself
+    s.execute("media.vrProperties", json!({"items": [item.0], "projection": "dualFisheye"})).unwrap();
+    let small = crate::vr360::analysis_view(&s, item).unwrap().info().video.clone().unwrap();
+    let full = crate::vr360::panorama_view(&s, item, true).unwrap().info().video.clone().unwrap();
+    assert!(small.width * 2 < full.width, "{} vs {}", small.width, full.width);
+    let f = s.execute("media.frame", json!({"item": item.0, "maxSide": 16})).unwrap();
+    assert_eq!(f["width"], 16);
+    let f = s.execute("media.frame", json!({"item": item.0, "maxSide": full.width})).unwrap();
+    assert_eq!(f["width"], full.width, "{f}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_camera_copy_that_does_not_fit_is_left_alone() {
+    // far too short: not attached, and the import still works
+    let (root, vid, _) = camera_pair("camera-proxy-short", 8);
+    let mut s = Session::default();
+    let r = s.execute("file.import", json!({"paths": [vid.to_string_lossy()]})).unwrap();
+    assert!(r.get("proxies").is_none(), "{r}");
+    let item = filmcraft_project::ItemId(r["items"][0].as_u64().unwrap());
+    assert!(s.project.item(item).unwrap().as_media().unwrap().proxy.is_none());
+    // a proxy of another shape is not read for the panorama (its lenses would be elsewhere)
+    let wide = root.join("wide.mp4");
+    make_movie(&wide, DemoScene::Plasma, 96, 32, 24);
+    s.execute("media.attachProxies", json!({"item": item.0, "path": wide.to_string_lossy()})).unwrap();
+    s.execute("media.vrProperties", json!({"items": [item.0], "projection": "dualFisheye"})).unwrap();
+    let a = crate::vr360::analysis_view(&s, item).unwrap().info().video.clone().unwrap();
+    let full = crate::vr360::panorama_view(&s, item, true).unwrap().info().video.clone().unwrap();
+    assert_eq!(a.width, full.width);
+    // names that are not a recording and its copy
+    for (main, other) in [("clip.mp4", "LRV_20260912_214043_01_087.lrv"), ("VID_20260912_214043_00_087.mov", "LRV_20260912_214043_01_087.lrv")] {
+        let d = tmp_dir("camera-proxy-names");
+        std::fs::write(d.join(main), b"x").unwrap();
+        std::fs::write(d.join(other), b"x").unwrap();
+        assert!(crate::insta360::camera_proxy(&s, &d.join(main).to_string_lossy()).is_none(), "{main}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

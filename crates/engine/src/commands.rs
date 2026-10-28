@@ -1481,6 +1481,9 @@ fn build() -> Vec<CommandSpec> {
                     }
                 }
             }
+            // an Insta360 recording's own low-resolution copy (`.lrv`) beside it: its proxy, which
+            // the 360° analyses read instead of the full-size lenses
+            let camera_proxies = crate::insta360::attach_camera_proxies(s, &item_ids);
             let ingest = match crate::proxies::ingest(s, &item_ids) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1500,6 +1503,9 @@ fn build() -> Vec<CommandSpec> {
             }
             if reuse {
                 out["reused"] = json!(reused);
+            }
+            if !camera_proxies.is_empty() {
+                out["proxies"] = json!(camera_proxies);
             }
             // Newly imported files may resolve paths the project already listed as offline
             // (issue #110): rebuild s.offline.missing so the "Media missing" badge clears, and drop

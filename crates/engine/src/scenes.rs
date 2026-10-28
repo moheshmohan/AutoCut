@@ -12,7 +12,8 @@
 //!
 //! **How** ([`analyse`], a background job: `jobs.list` progress, `jobs.cancel` stops it and
 //! nothing changes). Each clip is decoded at its own rate (at most 30 frames a second) and small:
-//! the frames go to TransNetV2 (48×27) for the cuts when it is installed, else to the luma-grid
+//! the frames go to TransNetV2 (48×27) for the cuts when it is installed, else — and for a 360°
+//! camera's own dual-fisheye recording, one take without cuts — to the luma-grid
 //! and histogram detector of Scene Edit Detection (`filmcraft_render::scene`), and to the
 //! global-motion measure (96 px) for each shot's camera move and shake. A shot's keyframes (its
 //! middle; two or three with `detail: "full"`) are decoded larger, measured (sharpness, exposure),
@@ -198,6 +199,10 @@ struct Work {
     /// The cache's key of the file (content identity and what decides its frames), when it is
     /// a file.
     media_key: Option<String>,
+    /// A camera's own recording of one take (dual-fisheye 360°, straight from the camera): it has
+    /// no cuts to find, so the shot-boundary network is not run on it (the signature detector's
+    /// look at sudden changes is enough).
+    one_take: bool,
 }
 
 fn ids_p(cmd: &str, p: &Value) -> Result<Option<Vec<ItemId>>> {
@@ -254,7 +259,8 @@ fn work_for(s: &Session, item: ItemId) -> std::result::Result<Work, String> {
     // decide what the panorama shows)
     let sphere = s.project.vr_of(item).map(|v| format!("|sphere:{}", crate::vr360::sphere_key(v))).unwrap_or_default();
     let media_key = identity.map(|(size, fp)| format!("file:{size}:{fp:016x}|{w}x{h}|{}|{}/{}{sphere}", m.duration().0, rate.num, rate.den));
-    Ok(Work { item, name: pi.name.clone(), src, still, duration: m.duration(), frame, step, media_key })
+    let one_take = s.project.vr_of(item).is_some_and(|v| !v.is_equirect());
+    Ok(Work { item, name: pi.name.clone(), src, still, duration: m.duration(), frame, step, media_key, one_take })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -357,7 +363,9 @@ fn decode_frames(w: &Work, prog: &filmcraft_export::Progress) -> std::result::Re
             Ok(vf) => {
                 let (rgba, fw, fh) = small_rgba(&vf, quality::MOTION_SIDE as u32);
                 let (fw, fh) = (fw as usize, fh as usize);
-                f.small.push(rgb_48x27(&rgba, fw, fh));
+                if !w.one_take {
+                    f.small.push(rgb_48x27(&rgba, fw, fh));
+                }
                 f.sigs.push(filmcraft_render::scene::signature(&rgba, fw, fh));
                 f.luma.push(quality::luma(&rgba, fw, fh, quality::MOTION_SIDE).unwrap_or(quality::Luma { w: 0, h: 0, v: Vec::new() }));
                 f.times.push(t);
@@ -457,7 +465,7 @@ fn measure(
     tm.decode = t.elapsed().as_secs_f64();
     let t = web_time::Instant::now();
     let fps = 1.0 / (w.frame.seconds() * w.step as f64).max(1e-6);
-    let (shots, how) = shots_of(&f, models, fps, prog);
+    let (shots, how) = shots_of(&f, models.filter(|_| !w.one_take), fps, prog);
     tm.cuts = t.elapsed().as_secs_f64();
     idx.boundaries = how.into();
     let full = o.detail == Detail::Full;

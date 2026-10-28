@@ -21,9 +21,22 @@ metadata. It can also export a 360° video with the metadata YouTube reads.
 and whether it has finished downloading (the camera's trailer is the last thing written).
 
 `insta360 import` imports each recording as 360° media: VR Properties from the file, the
-camera's `.lrv` attached as the **proxy** (both lenses side by side, 1664 × 832: scene analysis,
-stabilisation and following decode that instead of the two 2.9K HEVC tracks), and the two lenses
-**aligned** along their seam (`media.align360`, a few seconds a clip).
+camera's `.lrv` attached as the **proxy** (both lenses side by side, 1664 × 832), and the two lenses
+**aligned** along their seam (`media.align360`, a few seconds a clip). A plain `file.import` of an
+`.insv` (the director's `direct <files>`, File ▸ Import) attaches the `.lrv` beside it too
+(`proxies` in its answer; part of the import's undo step), when its length fits: a proxy may end up
+to three frames before its original, as the camera's copies do.
+
+Every 360° **analysis reads the proxy**: the scene index, `media.salience360`,
+`media.measureMoments`, `media.frame` (unless the size asked for is sharper than the proxy's
+panorama), stabilisation and following decode one H.264 picture of 1664 × 832 instead of two
+2.9K HEVC lenses: a tenth of the pixels. Five Istanbul recordings (17 minutes, 30,533 analysed
+frames) were indexed, looked round at 15 moments and measured at 25 in 2.2 minutes instead of 13.5
+(2,273 s of CPU before, 332 s after), and the direction found first at each moment was within 15°
+of one found on the full-size lenses every time. Export, the monitors (unless proxies are on) and lens alignment read the
+recording itself. A camera's own dual-fisheye recording is one take, with no cuts in it: the scene
+index skips the shot-boundary network (TransNetV2) for it, and the signature detector still marks
+a sudden change; an equirectangular 360° file may be an edit and is looked at like any video.
 
 ## 2. The formats
 
@@ -89,8 +102,8 @@ vertical frame and a landscape one alike. Analyses read 360° media as
 it is seen:
 
 - scene detection, descriptions and subject boxes (`scenes.*`, `media.frame`, the showcase's
-  analysis) see the stitched whole-sphere panorama, so a box's centre is a direction
-  (x → yaw −180…180°, y → pitch 90…−90°);
+  analysis) see the stitched whole-sphere panorama (of the proxy when there is one), so a box's
+  centre is a direction (x → yaw −180…180°, y → pitch 90…−90°);
 - tracking, masks, redaction and the privacy check (`track.*`, masks, `redact.*`) work in the
   clip's own pixels, the camera's picture at each frame.
 

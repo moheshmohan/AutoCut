@@ -5,8 +5,10 @@
 //!   LT or H.264 at ¼ or ½ size, audio included) and attaches the results when it finishes
 //!   ([`poll`] applies finished jobs; the frontend calls it every frame through
 //!   `Session::poll_persistence`).
-//! - **Attach.** A proxy must have the original's duration (±1 frame) and frame rate; its frame
-//!   size and aspect may differ.
+//! - **Attach.** A proxy must have the original's duration (one frame longer at most, up to
+//!   [`PROXY_SHORT_FRAMES`] shorter: cameras end their own copies a frame or two early) and frame
+//!   rate; its frame size and aspect may differ. `file.import` attaches an Insta360 recording's
+//!   own `.lrv` by itself.
 //! - **Toggle.** `media.toggleProxies` flips Preferences ▸ Media ▸ Enable proxies; the media pool
 //!   then hands proxies to monitors and playback. Export always uses full resolution.
 //! - **Ingest.** With ingest enabled, `file.import` copies (verified by fingerprint), transcodes
@@ -348,12 +350,17 @@ pub fn poll(s: &mut Session) {
 }
 
 /// Check a proxy file against its clip: duration within one frame, same frame rate.
-fn check_proxy(s: &Session, item: ItemId, path: &str) -> Result<()> {
+/// How many frames shorter than its original a proxy may be (an Insta360 `.lrv` ends up to two
+/// frames before its recording).
+pub const PROXY_SHORT_FRAMES: i64 = 3;
+
+pub(crate) fn check_proxy(s: &Session, item: ItemId, path: &str) -> Result<()> {
     let (clip, _, name) = media_path(&s.project, item).ok_or_else(|| bad("media.attachProxies", format!("item {} is not file media", item.0)))?;
     let src = s.media.open_file(path, &*s.services).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let pi = src.info();
     let fd = clip.info.frame_rate().frame_duration();
-    if (pi.duration - clip.info.duration).0.abs() > fd.0 {
+    let over = (pi.duration - clip.info.duration).0;
+    if over > fd.0 || over < -fd.0.saturating_mul(PROXY_SHORT_FRAMES) {
         return Err(EngineError::Other(format!(
             "{}: the proxy is {:.3}s long but {name} is {:.3}s",
             Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),

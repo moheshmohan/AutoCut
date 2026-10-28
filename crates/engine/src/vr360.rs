@@ -135,13 +135,21 @@ pub fn is_360(s: &Session, item: ItemId) -> bool {
 /// equirectangular panorama (dual fisheye stitched, one eye of stereo, a partial view placed on
 /// the sphere), so scene detection, descriptions and subject boxes see every direction and a
 /// box's centre is a direction ([`filmcraft_project::vr::panorama_direction`]); anything else as it
-/// is.
+/// is. A 360° recording with a proxy (an Insta360 `.lrv`, attached on import) is read from it:
+/// the same lenses, a tenth of the pixels to decode ([`panorama_view`] with `full` reads the media).
 pub fn analysis_view(s: &Session, item: ItemId) -> Option<filmcraft_media::SharedSource> {
-    let src = s.source(item)?;
+    panorama_view(s, item, false)
+}
+
+/// [`analysis_view`], from the full-size media with `full` (a sharp still of the panorama).
+pub fn panorama_view(s: &Session, item: ItemId, full: bool) -> Option<filmcraft_media::SharedSource> {
     let plain = |v: &Spherical| v.is_equirect() && v.layout == StereoLayout::Mono && v.captured == [360.0, 180.0];
     match s.project.vr_of(item).filter(|v| !plain(v)) {
-        Some(v) => Some(filmcraft_render::vr_source::PanoramaSource::new(src.clone(), v).map_or(src, |p| Arc::new(p) as filmcraft_media::SharedSource)),
-        None => Some(src),
+        Some(v) => {
+            let src = if full { s.media.full_res_source(&s.project, item, &*s.services) } else { analysis_source(s, item) }?;
+            Some(filmcraft_render::vr_source::PanoramaSource::new(src.clone(), v).map_or(src, |p| Arc::new(p) as filmcraft_media::SharedSource))
+        }
+        None => s.source(item),
     }
 }
 
@@ -904,14 +912,20 @@ pub(crate) fn clips_360(s: &Session, p: &Value, cmd: &str) -> Result<Vec<TrackIt
 }
 
 /// The analysis source of a 360° item: its proxy when one is attached (an `.lrv`: the same
-/// lenses, small and quick to decode), else the media.
+/// lenses, small and quick to decode) and of the media's shape (the lenses where they are in the
+/// media's picture), else the media.
 fn analysis_source(s: &Session, item: ItemId) -> Option<filmcraft_media::SharedSource> {
-    let proxy = s.project.resolve_media(item).and_then(|(_, m, _)| match &m.proxy {
-        Some(filmcraft_project::MediaRef::File { path }) => Some(path.clone()),
+    let media = s.project.resolve_media(item).map(|(_, m, _)| m);
+    let proxy = media.and_then(|m| match &m.proxy {
+        Some(filmcraft_project::MediaRef::File { path }) if !m.offline => Some(path.clone()),
         _ => None,
     });
+    let aspect = |v: Option<&filmcraft_media::VideoStreamInfo>| v.map(|v| f64::from(v.width.max(1)) / f64::from(v.height.max(1)));
+    let want = aspect(media.and_then(|m| m.info.video.as_ref()));
     if let Some(p) = proxy
         && let Ok(src) = s.media.open_file(&p, &*s.services)
+        && let (Some(a), Some(b)) = (aspect(src.info().video.as_ref()), want)
+        && (a / b - 1.0).abs() < 0.01
     {
         return Some(src);
     }
