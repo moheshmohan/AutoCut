@@ -66,6 +66,25 @@ pub fn strip_marks(text: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Where [`parse_marked`] finds its markers in `text` — pause markers, style tags, `[breath]` —
+/// as byte ranges, in order. A bracket that is not a marker is text, as there.
+pub fn mark_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while let Some(open) = text.get(at..).and_then(|r| r.find('[')).map(|o| at + o) {
+        let from = text.get(open..).unwrap_or("");
+        let marker = from.find(']').and_then(|c| from.get(..=c));
+        match marker.filter(|m| pause_millis(m).is_some() || m.get(1..m.len().saturating_sub(1)).and_then(crate::styles::tag).is_some()) {
+            Some(m) => {
+                out.push((open, open + m.len()));
+                at = open + m.len();
+            }
+            None => at = open + 1,
+        }
+    }
+    out
+}
+
 /// [`parse_marked`] (`tags`), or [`parse`] (pause markers only).
 fn split(text: &str, tags: bool) -> Vec<Mark> {
     let mut out = Vec::new();
@@ -193,5 +212,19 @@ mod tests {
             let _ = parse(s);
         }
         assert_eq!(parse("  "), vec![]);
+    }
+
+    #[test]
+    fn mark_spans_are_the_markers_parse_marked_reads() {
+        let t = "ഒന്ന് [pause 0.3s] രണ്ട് [nope] [excited] മൂന്ന്[breath]";
+        let spans = mark_spans(t);
+        let found: Vec<&str> = spans.iter().filter_map(|&(s, e)| t.get(s..e)).collect();
+        assert_eq!(found, vec!["[pause 0.3s]", "[excited]", "[breath]"]);
+        assert_eq!(mark_spans("[[calm]]"), vec![(1, 7)]);
+        for s in ["", "[", "]][", "[pause", "日本語[pause 1s]👍", "[ബ്രെത്ത്]"] {
+            for (a, b) in mark_spans(s) {
+                assert!(s.get(a..b).is_some(), "{s:?}: {a}..{b} on char boundaries");
+            }
+        }
     }
 }

@@ -116,6 +116,13 @@ keep the meaning and the word's suffix exactly (സന്ദർശകരെ → 
 ഉണ്ടാക്കിയതാണ്, അറുന്നൂറിലധികം → 600-ലധികം, UAE-യിൽ → യു എ ഇ-യിൽ); the rest is for a person.
 `--hints` lists the hints too; `--strict` exits 1 unless the script is clean.
 
+Voice markers are not words: `[pause 0.3s]`, the style tags (`[excited]`, `[plain]`) and
+`[breath]` are skipped, and each one ends a sentence, because the voice reads what follows it as a
+new utterance. So a line written in breath groups (`… കണ്ടതാണ്, [pause 0.3s] ഒരു ചീപ്പ്
+കിറ്റ്, …`) is counted breath by breath. Breath groups of about two seconds, with 0.2–0.5 s
+pauses between them, are how the author actually talks (measured on their own clips); a line
+read in one go runs 6–8 s without a pause.
+
 Measured on a real 52-part showcase script (`cargo test -p filmcraft-engine ml_script -- --ignored`
 with the files): the first, robotic draft got 54 warnings (19 long sentences, 30 formal words, 5
 number words) and the hand rewrite that sounded natural got 7 (2 long sentences, 5 numbers from

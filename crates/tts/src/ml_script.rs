@@ -24,11 +24,15 @@
 //! letter names for acronyms). [`numbers`] reads every number a script says (digits, Malayalam
 //! words, or English words in Malayalam script), for the fact checks of [`crate::ml_facts`].
 //!
+//! Voice markers (`[pause 0.3s]`, `[excited]`, `[breath]`) are not words: they are skipped, and
+//! one ends a sentence, as the voice reads what follows it as a new utterance.
+//!
 //! Hostile input is fine: a text over [`MAX_TEXT_BYTES`] is read up to there, findings stop at
 //! [`MAX_FINDINGS`], and nothing indexes or slices outside a char boundary.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use serde::Serialize;
@@ -193,12 +197,37 @@ fn tokens(text: &str) -> Vec<Tok> {
     out
 }
 
-/// Sentences as token ranges (first, last), inclusive.
-fn sentence_ranges(text: &str, toks: &[Tok]) -> Vec<(usize, usize)> {
+/// `text` with its voice markers ([`crate::script::mark_spans`]: pause markers, style tags,
+/// `[breath]`) blanked to spaces, so every byte offset still points into `text`; and where each
+/// marker began. A marker is no word, and the voice reads what follows it as a new utterance.
+fn unmarked(text: &str) -> (Cow<'_, str>, Vec<usize>) {
+    let spans = crate::script::mark_spans(text);
+    if spans.is_empty() {
+        return (Cow::Borrowed(text), Vec::new());
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0usize;
+    for &(s, e) in &spans {
+        out.push_str(text.get(at..s).unwrap_or(""));
+        out.extend(std::iter::repeat_n(' ', e.saturating_sub(s)));
+        at = e;
+    }
+    out.push_str(text.get(at..).unwrap_or(""));
+    (Cow::Owned(out), spans.into_iter().map(|(s, _)| s).collect())
+}
+
+/// Sentences as token ranges (first, last), inclusive. A sentence ends at its punctuation or at
+/// a voice marker (`breaks`, ascending byte offsets).
+fn sentence_ranges(text: &str, toks: &[Tok], breaks: &[usize]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut first = 0;
+    let mut next_break = 0usize;
     for (i, t) in toks.iter().enumerate() {
-        if t.ends_sentence(text) {
+        while breaks.get(next_break).is_some_and(|&b| b < t.end) {
+            next_break += 1;
+        }
+        let marked = breaks.get(next_break).is_some_and(|&b| toks.get(i + 1).is_none_or(|n| b < n.start));
+        if t.ends_sentence(text) || marked {
             out.push((first, i));
             first = i + 1;
         }
@@ -1003,7 +1032,8 @@ fn scan_numbers(text: &str, toks: &[Tok], cores: &[String]) -> Vec<Hit> {
 
 /// Every number `text` says: digits, Malayalam words, English words in Malayalam script.
 pub fn numbers(text: &str) -> Vec<Number> {
-    let text = clip(text);
+    let (text, _) = unmarked(clip(text));
+    let text = text.as_ref();
     let toks = tokens(text);
     let cores: Vec<String> = toks.iter().map(|t| malayalam::canonical(t.core(text))).collect();
     scan_numbers(text, &toks, &cores)
@@ -1071,7 +1101,8 @@ fn spoken_count(cores: &[String]) -> usize {
 /// The spoken words of `sentence`: a number said the English way or an acronym spelled
 /// letter by letter counts as one.
 pub fn spoken_words(sentence: &str) -> usize {
-    let text = clip(sentence);
+    let (text, _) = unmarked(clip(sentence));
+    let text = text.as_ref();
     let cores: Vec<String> = tokens(text).iter().map(|t| malayalam::canonical(t.core(text))).collect();
     spoken_count(&cores)
 }
@@ -1377,13 +1408,14 @@ pub fn lint(text: &str) -> Vec<Finding> {
 
 /// `text` linted (see the module docs).
 pub fn lint_with(text: &str, opts: &Options) -> Vec<Finding> {
-    let text = clip(text);
+    let (text, breaks) = unmarked(clip(text));
+    let text = text.as_ref();
     let max_words = opts.max_words.clamp(MIN_MAX_WORDS, MAX_MAX_WORDS);
     let toks = tokens(text);
     let cores: Vec<String> = toks.iter().map(|t| malayalam::canonical(t.core(text))).collect();
     let hits = scan_numbers(text, &toks, &cores);
     let mut out: Vec<Finding> = Vec::new();
-    for (si, &(a, b)) in sentence_ranges(text, &toks).iter().enumerate() {
+    for (si, &(a, b)) in sentence_ranges(text, &toks, &breaks).iter().enumerate() {
         if out.len() >= MAX_FINDINGS {
             break;
         }

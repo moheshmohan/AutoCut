@@ -265,3 +265,29 @@ fn hostile_text_never_panics() {
     let f = lint(&big);
     assert!(f.len() <= MAX_FINDINGS && !f.is_empty());
 }
+
+#[test]
+fn voice_markers_are_not_words_and_end_a_sentence() {
+    // a pause marker, a style tag and a breath are read by the voice, never said: no Latin
+    let marked = "പാർട്ട് വണ്ണിൽ നമ്മൾ കണ്ടതാണ്, [pause 0.3s] ഒരു ചീപ്പ് കിറ്റ്. [excited] ഇനി പാർട്ട് ടു! [breath] [Pause 500 ms] ശരി.";
+    let f = lint(marked);
+    assert!(f.iter().all(|f| f.kind != Kind::Latin), "{f:?}");
+    // a pause's length is no number the script says: the numbers are those of the words alone
+    let said = |t: &str| numbers(t).into_iter().map(|n| n.value).collect::<Vec<_>>();
+    assert_eq!(said(marked), said(&crate::script::strip_marks(marked)));
+    assert!(said("[pause 2.5s] ശരി.").is_empty());
+    // one sentence of 16 words is too long; a pause marker in it makes two breaths of 8
+    let words = "ഒന്ന് രണ്ട് മൂന്ന് നാല് അഞ്ച് ആറ് ഏഴ് എട്ട്";
+    let long = format!("{words} {words}.");
+    assert!(lint(&long).iter().any(|f| f.kind == Kind::LongSentence));
+    for joined in [format!("{words}, [pause 0.25s] {words}."), format!("{words}[pause 0.25s]{words}."), format!("{words} [calm] {words}.")] {
+        assert!(lint(&joined).iter().all(|f| f.kind != Kind::LongSentence), "{joined}");
+    }
+    // a bracket that is no marker is still text
+    assert!(lint("ഇത് [hello] ആണ്.").iter().any(|f| f.kind == Kind::Latin));
+    // fixes keep the markers byte for byte
+    let fixed = fix("[pause 0.3s] നിങ്ങളെ സ്വാഗതം ചെയ്യുന്നു. [excited] ശരി!");
+    assert!(fixed.text.starts_with("[pause 0.3s] ") && fixed.text.contains(" [excited] "), "{}", fixed.text);
+    assert!(!fixed.applied.is_empty());
+    assert_eq!(spoken_words("[pause 1s] ഒന്ന് രണ്ട്"), 2);
+}
