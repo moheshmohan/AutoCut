@@ -1083,11 +1083,14 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
             _ => false,
         };
         let Some(c) = (if pick_vr { vr.pop_front() } else { flat.pop_front() }) else { break };
-        // two shots of one clip in a row only when nothing else is left
-        if c.item == last_item && (!flat.is_empty() || !vr.is_empty()) && body.len() + 1 < 64 {
+        // two shots of one clip in a row only when nothing else is left: another clip's next
+        // moment of this kind goes first, this one waits behind it (a queue of this clip's
+        // moments only takes the next of them)
+        if c.item == last_item {
             let q = if pick_vr { &mut vr } else { &mut flat };
-            if q.len() > 1 {
-                q.insert(1, c);
+            if let Some(other) = q.iter().position(|o| o.item != c.item).and_then(|i| q.remove(i)) {
+                q.push_front(c);
+                q.push_front(other);
                 continue;
             }
         }

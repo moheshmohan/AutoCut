@@ -144,6 +144,34 @@ fn rules_open_on_a_planet_alternate_and_close_on_one() {
 }
 
 #[test]
+fn rules_finish_when_the_moments_left_are_one_clips() {
+    // the hook's clip has the most 360° moments: the rest are all its own (once, these swapped
+    // places in the queue for ever)
+    let mut lib = vec![cand("h", 1, Kind::Vr, 0.0, 6.0, 120.0, 0), cand("e", 2, Kind::Vr, 0.0, 8.0, 8.0, 9)];
+    for k in 0..6 {
+        lib.push(cand(&format!("m{k}"), 1, Kind::Vr, 10.0 + 12.0 * f64::from(k), 10.0, 120.0, 1 + k as usize));
+    }
+    lib[0].hook = 0.95;
+    let o = opts(json!({"brief": "a 30 s reel of our trip", "seconds": 30}));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(rules_plan(&lib, &o, beat_of(120.0), 120.0));
+    });
+    let plan = rx.recv_timeout(std::time::Duration::from_secs(20)).expect("the rules plan finishes");
+    assert!(plan.shots.len() >= 3, "{:?}", plan.shots);
+    // and with other clips' moments queued too, the body does not play one clip twice in a row
+    // (the ending is chosen on its own)
+    let mut lib = library();
+    lib.push(cand("c7", 3, Kind::Vr, 16.0, 10.0, 30.0, 2));
+    lib.push(cand("c8", 3, Kind::Vr, 26.0, 4.0, 30.0, 2));
+    let o = opts(json!({"brief": "a 30 s reel of our trip", "seconds": 30}));
+    let plan = rules_plan(&lib, &o, beat_of(120.0), 120.0);
+    let items: Vec<u64> = plan.shots.iter().map(|s| lib.iter().find(|c| c.id == s.clip).unwrap().item).collect();
+    let body = &items[..items.len() - 1];
+    assert!(body.windows(2).all(|w| w[0] != w[1]), "{items:?}");
+}
+
+#[test]
 fn the_rhythm_adds_up_and_opens_and_closes() {
     let beat = beat_of(120.0);
     for (total, available) in [(40u32, 6usize), (60, 16), (12, 3), (8, 1), (5, 10)] {
