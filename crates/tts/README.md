@@ -228,6 +228,17 @@ clip behaviour: `crates/engine/src/narration.rs`.
   - `audition`: the fixed test lines (English and Malayalam, hard starts and loanwords), a
     reading scored on similarity to the held-out speech, CER and sentence-start CER
     ([`heard::score`]) and the signal scan; the ranking.
+  - `styles`: the style finder. IndicF5 candidates ending at a sentence end
+    (`Candidate::ends_sentence`, from `sentence_edges`) measured for prosody
+    (`filmcraft_audio_dsp::prosody::expressiveness`: pitch level, range and movement, energy
+    variation, syllable rate, final contour), placed on the speaker's own scale (`norms`: robust
+    median and spread over his candidates, pulled towards `PRIORS` — his measured speech — with
+    the weight of four candidates), scored per delivery (`scores`: calm, plain, conversational,
+    warm, excited, amazed, curious; the rules in the module docs) and shared out by a softmax
+    (`assess`: the style and its confidence); `pick` lists the best per style (share × the
+    reference score), never two overlapping stretches of a clip, none under a 0.2 share. The
+    engine's `voice.findStyles` (CLI `voice styles`) hears the picks with both Malayalam models;
+    `voice.prosody` (CLI `voice prosody`) measures and reshapes any recording.
   - `clone::promote` / `versions` / `rollback`: a reference replaced with the old one kept
     (`<name>.versions/r<revision>/`), consent carried over, the profile's `revision` counted (and
     in the prompt cache's key); the narration cache already keys on the reference's bytes.
@@ -592,7 +603,11 @@ telling clean from noisy, clipped, reverberant and music-backed speech; windows 
 engine's bounds that never cut a word; sentence edges by words and by pauses; a scan of two
 speakers finding only the one asked for (and hearing nothing when nobody matches); ranking spread
 over recordings; held-out speech away from every reference; audition order; hostile audio
-(empty, NaN, infinite, full scale). Versions: a promoted sample and Malayalam clip kept and
+(empty, NaN, infinite, full scale). Styles: each archetype (z-scores a spread or two out) gets
+its style, a slight rise is no question, the scale is the speaker's own (one speaker's wide is
+another's narrow; few candidates lean on the priors; the spread never collapses), picks ranked
+and never overlapping, empty styles left empty, hostile features harmless, and synthetic lively
+speech (wide, fast, punchy) told from flat speech end to end through the prosody measures. Versions: a promoted sample and Malayalam clip kept and
 rolled back (the narration cache's identity changing and coming back), consent and the
 Malayalam reference carried over, refused promotions changing nothing.
 

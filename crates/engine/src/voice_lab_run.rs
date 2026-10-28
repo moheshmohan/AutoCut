@@ -1324,3 +1324,7 @@ mod tests {
         assert_eq!(safe("voxcpm-1+voxcpm-2 cleaned"), "voxcpm-1_voxcpm-2_cleaned");
     }
 }
+
+/// The style finder and the prosody measure.
+#[path = "voice_lab_styles.rs"]
+pub(super) mod styles;
