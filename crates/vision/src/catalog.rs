@@ -156,6 +156,42 @@ pub fn depth_id() -> String {
     format!("{}={}", DEPTH.name, DEPTH.sha256.get(..16).unwrap_or(DEPTH.sha256))
 }
 
+/// The upscaler's package (its own directory under the models directory): Real-ESRGAN's compact
+/// general model, a picture made four times as large with its detail restored (`crate::upscale`).
+pub const UPSCALE_PACKAGE_ID: &str = "real-esrgan";
+pub const UPSCALE_NAME: &str = "Real-ESRGAN general x4v3 (pictures made larger and cleaner)";
+pub const UPSCALE_LICENSE: &str = "BSD-3-Clause (Real-ESRGAN, Xintao Wang et al., Tencent ARC Lab)";
+pub const UPSCALE_SOURCE: &str = "https://github.com/xinntao/Real-ESRGAN (release v0.2.5.0, realesr-general-x4v3.pth)";
+
+/// Real-ESRGAN's `realesr-general-x4v3`: SRVGGNetCompact, 64 features, 32 convolutions with
+/// PReLUs, ×4 (a PyTorch state dict under `params`, read by candle's pickle reader, which runs
+/// nothing). Trained, as the project's training notes say, on DF2K (DIV2K, whose site gives it for
+/// academic research, and Flickr2K) and OST with synthetic degradations. A release asset (GitHub
+/// gives no digest for it): the size and the SHA-256 checked 2026-10-28 by `shasum -a 256`.
+pub const UPSCALER: ModelFile = ModelFile {
+    name: "realesr-general-x4v3.pth",
+    url: "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth",
+    sha256: "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+    size: 4_885_111,
+};
+
+pub static UPSCALE_FILES: &[ModelFile] = &[UPSCALER];
+
+pub fn upscale_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(UPSCALE_PACKAGE_ID)
+}
+
+/// The upscaler's file is present with its pinned size.
+pub fn upscaler_installed(models_dir: &Path) -> bool {
+    let d = upscale_dir(models_dir);
+    UPSCALE_FILES.iter().all(|f| present(&d, f))
+}
+
+/// The upscaler's identity, for cache keys and file names.
+pub fn upscaler_id() -> String {
+    format!("{}={}", UPSCALER.name, UPSCALER.sha256.get(..16).unwrap_or(UPSCALER.sha256))
+}
+
 pub fn package_dir(models_dir: &Path) -> PathBuf {
     models_dir.join(PACKAGE_ID)
 }
@@ -235,7 +271,7 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), FILES.len() + PROFILE_FILES.len());
         assert!(profile_model_ids().contains("dfine_n_coco.safetensors=19e06bdc873da819"));
-        for f in SEGMENT_FILES.iter().chain(DEPTH_FILES) {
+        for f in SEGMENT_FILES.iter().chain(DEPTH_FILES).chain(UPSCALE_FILES) {
             assert_eq!(f.sha256.len(), 64);
             assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()) && f.url.ends_with(f.name), "{}", f.url);
         }
@@ -250,6 +286,7 @@ mod tests {
         assert!(!profiles_installed(&dir));
         assert_eq!(profile_missing_bytes(&dir), profile_total_bytes());
         assert!(!depth_installed(&dir));
+        assert!(!upscaler_installed(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

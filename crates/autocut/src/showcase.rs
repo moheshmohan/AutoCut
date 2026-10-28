@@ -107,6 +107,9 @@ pub struct Options {
     /// (`clip.photo3d`: the near parts move further than the far ones), when the depth network
     /// is downloaded.
     pub depth: bool,
+    /// Photos much smaller than the frame made larger and cleaner before they are placed
+    /// (`media.upscale`), when the upscaler is downloaded.
+    pub upscale: bool,
     /// The look: a theme, the timeline, transitions from the catalogue, loudness, embedded
     /// captions, the SoundFont ([`crate::look`]); the default is today's look.
     pub look: Look,
@@ -186,6 +189,7 @@ impl Default for Options {
             fill_frame: true,
             follow_subject: true,
             depth: true,
+            upscale: true,
             look: Look::default(),
             taste: Default::default(),
             language: None,
@@ -1272,6 +1276,8 @@ struct Tracks {
     follow: bool,
     /// Photos moved in depth ([`Options::depth`], and the depth network downloaded).
     depth: bool,
+    /// Small photos upscaled ([`Options::upscale`], and the upscaler downloaded).
+    upscale: bool,
     /// The frame's size, sequence pixels.
     frame: (f64, f64),
     bg: String,
@@ -1872,6 +1878,9 @@ async fn pillars_through_transitions(ex: &dyn Executor, backdrops: &[(u64, u64)]
     }
 }
 
+/// A photo whose long side times this is still under the frame's is upscaled before it is placed.
+const UPSCALE_BELOW: f64 = 1.5;
+
 /// Place photo `item` held `dur` seconds at `t` (both ends on frames) on V2, without sound, with
 /// its slow pan and zoom (`clip.kenBurns`, eased, as slow as its hold asks): filling the frame
 /// with the move aimed at its subject, or — the plan's `fit: "full"`, or a portrait photo whose
@@ -1879,7 +1888,9 @@ async fn pillars_through_transitions(ex: &dyn Executor, backdrops: &[(u64, u64)]
 /// picture breathing towards its subject and the copy pushing in. A 360° photo (an Insta360
 /// `.insp`) is looked round instead: turned to its subject, a tiny planet opening onto it or a
 /// slow pan across it. With the depth network ([`Tracks::depth`]) a flat photo's move is made in
-/// depth too (`clip.photo3d`). A move the engine refuses leaves the photo fitted and still (noted
+/// depth too (`clip.photo3d`), and with the upscaler ([`Tracks::upscale`]) a photo much smaller
+/// than the frame is made larger first (`media.upscale`). A move the engine refuses leaves the
+/// photo fitted and still (noted
 /// nowhere: it is cosmetic).
 async fn place_photo(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, dur: f64, how: Framing, ph: PhotoMove) -> Result<Placed, AutoCutError> {
     let t = on_frame(t, tr.fps);
@@ -1901,6 +1912,11 @@ async fn place_photo(ex: &dyn Executor, tr: &Tracks, item: u64, t: f64, dur: f64
         return Ok(Placed { fg, bg: None, audio: None, end, fit: None });
     }
     let size = media_size(ex, item).await.filter(|(w, h)| *w > 0.0 && *h > 0.0);
+    if tr.upscale && size.is_some_and(|(w, h)| w.max(h) * UPSCALE_BELOW < tr.frame.0.max(tr.frame.1)) {
+        // a small photo (an old phone's, a download) made larger and cleaner first; it keeps its
+        // size, so its framing below is the same
+        run(ex, "media.upscale", json!({"items": [item], "wait": true})).await.ok();
+    }
     let aspect = size.map_or(tr.aspect, |(w, h)| w / h);
     let odd = (aspect - tr.aspect).abs() > 0.05;
     let fill = match how.fit {
@@ -3270,6 +3286,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         .await?;
     built.sequence = r["sequence"].as_u64();
     let depth = opts.depth && run(ex, "depth.status", json!({})).await.is_ok_and(|v| v["installed"] == json!(true));
+    let upscale = opts.upscale && run(ex, "upscale.status", json!({})).await.is_ok_and(|v| v["installed"] == json!(true));
     let tr = Tracks {
         fps: opts.fps.clamp(1.0, 240.0),
         aspect: w / h.max(1.0),
@@ -3277,6 +3294,7 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         fill: opts.fill_frame,
         follow: opts.follow_subject,
         depth,
+        upscale,
         frame: (w, h),
         bg: "V1".into(),
         fg: "V2".into(),
@@ -4216,6 +4234,7 @@ async fn compose_thumbnail(
         fill: false,
         follow: false,
         depth: false,
+        upscale: false,
         frame: (w, h),
         bg: "V1".into(),
         fg: "V2".into(),
@@ -5246,6 +5265,7 @@ mod tests {
             fill: true,
             follow: false,
             depth: false,
+            upscale: false,
             frame: (1920.0, 1080.0),
             bg: "V1".into(),
             fg: "V2".into(),

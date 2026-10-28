@@ -181,6 +181,13 @@ pub trait MediaSource: Send + Sync {
     fn spherical(&self) -> Option<Spherical> {
         None
     }
+    /// How much larger than [`info`](Self::info)'s size it can give a frame with real detail: 1
+    /// for a decoder (it gives its pictures at most at their own size); more for a sharper
+    /// stand-in (an upscaled copy of the media), which the renderer then asks for as large as a
+    /// clip shows the picture, up to this.
+    fn max_scale(&self) -> f32 {
+        1.0
+    }
 }
 
 pub type SharedSource = Arc<dyn MediaSource>;

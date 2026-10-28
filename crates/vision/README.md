@@ -4,8 +4,8 @@ Privacy detection for FilmCraft's automatic blur (`clip.autoRedact`, `sequence.a
 `crates/engine/src/redact.rs`): faces and vehicle number plates found in video frames with
 small local models, linked into tracks; and the profile pass, which finds the faces in profile
 or half hidden that the face detector misses from people's poses. Also people and things cut out
-of a picture (MobileSAM) and how near each part of a picture is (Depth Anything V2 Small, for the
-3D photo and depth blur). L2; pure Rust.
+of a picture (MobileSAM), how near each part of a picture is (Depth Anything V2 Small, for the
+3D photo and depth blur) and pictures made larger and cleaner (Real-ESRGAN). L2; pure Rust.
 
 ## Models
 
@@ -44,6 +44,12 @@ on 595K synthetic pictures with exact depth (Hypersim, Virtual KITTI 2, BlendedM
 TartanAir) and 62M real pictures of public datasets labelled by a larger teacher. Read by candle's
 pickle reader (which runs nothing) and run on candle — Metal on macOS. Licence checked
 2026-10-28 (the model card and the repository's README).
+
+**Real-ESRGAN** (`upscale`, Upscale and Restore), downloaded by `upscale.downloadModel` into its own
+folder: `realesr-general-x4v3.pth` (4,885,111 B, the project's release v0.2.5.0 on GitHub, which
+gives no digest for it; SHA-256 `8dc7edb9…` checked 2026-10-28), BSD-3-Clause (Xintao Wang et al.,
+Tencent ARC Lab); trained on DF2K (DIV2K, whose site gives it for academic research, and Flickr2K)
+and OST with synthetic damage. Read by candle's pickle reader (the state dict under `params`).
 
 Licences checked 2026-10-19 in each model's directory (`LICENSE`, `README.md`). LPD-YuNet was
 trained on Chinese plates; it finds other countries' plates less reliably.
@@ -170,6 +176,13 @@ trained on Chinese plates; it finds other countries' plates less reliably.
   Anything takes only square pictures (its positions are resized the wrong way round for others,
   by nearest neighbour) and the original DINOv2 weights instead of the fine-tuned encoder, so it
   is not used. A picture the GPU fails is run again on a CPU copy.
+- `upscale` and `upscale_gpu` (feature `model`): Real-ESRGAN's SRVGGNetCompact (a 3 × 3 convolution
+  to 64 channels, 32 more with PReLUs, one to 48, a pixel shuffle by 4, the input added back by
+  nearest neighbour) on candle (the CPU: the reference and the fallback) and as WGSL passes on
+  macOS (`esrgan.wgsl`: each convolution a tiled matrix product of 64 pixels by 64 channels a
+  workgroup over the input's channels × 9 taps, 16 at a time through workgroup memory, the
+  neighbourhoods read in place; then the shuffle and the residual). Tiles of 512 pixels read with
+  a 34-pixel margin join exactly. `strength` mixes in a bilinear enlargement.
 - `people` (feature `model`): `ProfileDetector` — people (score ≥ 0.25, at least 4 % of the
   picture tall, at most 24, suppression at IoU 0.7), their poses, and the faces to add; the whole
   pass on the GPU when both networks are there (`people_cpu`: the picture and crops prepared on
@@ -212,6 +225,11 @@ the transformer layer, the pose head, the picture's preparation and the crops on
 idle, 973 ms at a load of 32–55 (1.0 frame a second; D-FINE's decoder alone 467 ms); all on the
 CPU 308 ms idle, 4.4 s loaded. The CPU's share now is recording the passes and two small
 read-backs, so a busy machine barely slows it.
+
+Real-ESRGAN (M3 Max, release, 2026-10-28): a 640 × 480 picture made 4× in 474 ms on the GPU (WGSL;
+within 2.3e-6 of the CPU), 4.4 s on the CPU, 3.0 s through candle's Metal convolution (about 450
+GFLOPS a layer whatever the precision: why the WGSL passes); tiles join within one level
+(`the_network_enlarges_sharply_and_its_tiles_join_without_seams`, `the_gpu_matches_the_cpu`).
 
 Depth Anything V2 Small (M3 Max, release, 2026-10-28): a 924 × 518 picture in 249 ms on the GPU
 (Metal, after a first of 282 ms) and 1,133 ms on the CPU; 686 × 518 in 185 ms. Without an oracle on

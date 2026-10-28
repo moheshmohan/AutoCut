@@ -615,7 +615,7 @@ fn push_item(
         let motion = motion_matrix(seq, item, size, crate::clip_par(project, item), mt);
         let lin = ((motion.a * motion.a + motion.b * motion.b).sqrt()).max((motion.c * motion.c + motion.d * motion.d).sqrt());
         // the working scale `item_layer` gives the effects (lowered under a large blur)
-        let want = crate::effects_scale(item, mt, (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32, opts);
+        let want = crate::effects_scale(item, mt, crate::frame_scale(lin * opts.scale as f64, Some(&src)), opts);
         // a 360° clip: its virtual camera's picture at `want`, from the source as sharp as it needs
         let reframe = crate::reframing(project, item, t, &src, want);
         let time = crate::video_source_time(item, t, src.info().frame_rate());

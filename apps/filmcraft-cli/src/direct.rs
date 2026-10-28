@@ -13,7 +13,7 @@ direct [folder | files… | project.fcproj] [--brief \"a 30 s reel of our trip\"
        [--music file|generate] [--title T] [--no-captions] [--caption-style clean]
        [--redact faces,plates|faces|plates|off] [--name N] [--full-detail 8] [--seed N]
        [--style auto|subtle|energetic|cinematic] [--focus auto|places|people] [--light-effects] [--sounds swish,chime|none]
-       [--sound-level 0.4] [--no-color] [--color-strength 0.7] [--no-cutouts] [--no-denoise] [--no-depth]
+       [--sound-level 0.4] [--no-color] [--color-strength 0.7] [--no-cutouts] [--no-denoise] [--no-depth] [--no-upscale]
        [--look none|punchy|soft|warm|cool|golden|teal] [--look-strength 25]
        [--revise \"1:10 is too long; warmer at the end\" --from out.report.json]
        [--dry-run] [--no-qa] [--export out.mp4] [--download]
@@ -100,6 +100,7 @@ pub fn params(a: &Args) -> Result<Value, String> {
         ("--no-cutouts", "cutouts", false),
         ("--no-denoise", "denoise", false),
         ("--no-depth", "depth", false),
+        ("--no-upscale", "upscale", false),
     ] {
         if a.flag(flag) {
             p[key] = json!(v);
@@ -137,6 +138,7 @@ pub async fn run(a: &Args) {
         "--no-cutouts",
         "--no-denoise",
         "--no-depth",
+        "--no-upscale",
         "--look",
         "--look-strength",
         "--revise",

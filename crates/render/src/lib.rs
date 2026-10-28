@@ -566,7 +566,7 @@ pub(crate) fn item_layer_ex(
     let motion = motion_matrix(seq, item, src_size, clip_par(project, item), mt);
     // How many output pixels one source pixel covers → request a reduced frame when possible.
     let lin = ((motion.a * motion.a + motion.b * motion.b).sqrt()).max((motion.c * motion.c + motion.d * motion.d).sqrt());
-    let want = effects_scale(item, mt, (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32, opts);
+    let want = effects_scale(item, mt, frame_scale(lin * opts.scale as f64, sources.source(item.item).as_ref()), opts);
     let pi = project.item(item.item)?;
     if matches!(pi.kind, ItemKind::Graphic { .. }) && !(item.has_opacity_masks() || opts.effects && item.has_standard_effects()) {
         // vectors straight to the output: no resampling, crisp at any Motion scale. Only the
@@ -862,6 +862,14 @@ pub(crate) fn effects_scale(item: &TrackItem, mt: Tick, want: f32, opts: RenderO
     want.min((BLUR_WORKING_SIGMA / sigma).max(1.0 / 8.0) as f32)
 }
 
+/// The scale to ask a clip's source for when one source pixel covers `lin` output pixels: as
+/// small as the output needs, at most the picture's own size — or, for a sharper stand-in (an
+/// upscaled copy, [`filmcraft_media::MediaSource::max_scale`]), as large as it can give.
+pub(crate) fn frame_scale(lin: f64, src: Option<&SharedSource>) -> f32 {
+    let most = src.map_or(1.0, |s| f64::from(s.max_scale())).clamp(1.0, 8.0);
+    if lin.is_finite() { lin.clamp(1.0 / 64.0, most) as f32 } else { 1.0 }
+}
+
 /// Largest power-of-two box decimation that keeps at least `target_w` pixels of width.
 pub(crate) fn decimation(have_w: f32, target_w: f32) -> usize {
     let mut n = 1usize;
@@ -920,6 +928,9 @@ mod transition_sound_tests;
 
 #[cfg(test)]
 mod nest_tests;
+
+#[cfg(test)]
+mod sharper_tests;
 
 #[cfg(test)]
 #[path = "preview_tests.rs"]

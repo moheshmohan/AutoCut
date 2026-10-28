@@ -63,7 +63,7 @@ fn warm_item(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, opts:
     let mt = item.effect_time_at(t);
     let motion = motion_matrix(seq, item, src_size, crate::clip_par(project, item), mt);
     let lin = (motion.a * motion.a + motion.b * motion.b).sqrt().max((motion.c * motion.c + motion.d * motion.d).sqrt());
-    let want = effects_scale(item, mt, (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32, opts);
+    let want = effects_scale(item, mt, crate::frame_scale(lin * opts.scale as f64, Some(&src)), opts);
     // a 360° clip asks for its source as sharp as its virtual camera's view needs
     let want = crate::reframing(project, item, t, &src, want).map_or(want, |r| r.scale);
     let rate = src.info().frame_rate();

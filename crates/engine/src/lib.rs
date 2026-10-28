@@ -110,6 +110,7 @@ pub mod text_fx;
 pub mod transcript;
 pub mod transition_tools;
 pub mod trim;
+pub mod upscale;
 pub mod video_template_frames;
 pub mod video_template_share;
 pub mod video_templates;
@@ -556,6 +557,8 @@ pub struct Session {
     /// 360° analyses (`clip.stabilize360`, `clip.follow360`) whose keyframes are written when they
     /// finish, and what the finished ones made.
     pub vr360: vr360::Vr360Jobs,
+    /// Upscale and Restore jobs (`media.upscale`) whose copies are attached when they finish.
+    pub upscales: upscale::Upscales,
     /// People cut out of clips (`clip.cutOut` and its effects): a stand-in cutter for tests.
     pub cutouts: cutout::Cutouts,
     /// Speech understanding jobs (`media.understandSpeech`) whose transcripts and analyses are
@@ -725,6 +728,7 @@ impl Session {
             scene_jobs: Vec::new(),
             reframes: Default::default(),
             vr360: Default::default(),
+            upscales: Default::default(),
             cutouts: Default::default(),
             speech_jobs: Default::default(),
             motion_tracks: Default::default(),
@@ -871,6 +875,7 @@ impl Session {
         scene_detect::poll(self);
         reframe::poll(self);
         vr360::poll(self);
+        upscale::poll(self);
         speech_understand::poll(self);
         motion_track::poll(self);
         redact::poll(self);

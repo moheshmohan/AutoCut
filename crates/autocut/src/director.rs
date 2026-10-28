@@ -168,6 +168,9 @@ pub struct Options {
     /// Photos moved in depth (`clip.photo3d` after their Ken Burns move) when the depth network
     /// is downloaded: on unless switched off.
     pub depth: bool,
+    /// Photos much smaller than the frame made larger and cleaner (`media.upscale`) when the
+    /// upscaler is downloaded: on unless switched off.
+    pub upscale: bool,
     pub look_strength: f64,
 }
 
@@ -400,6 +403,7 @@ impl Options {
             angles: p["angles"].as_bool().unwrap_or(true),
             denoise: p["denoise"].as_bool().unwrap_or(true),
             depth: p["depth"].as_bool().unwrap_or(true),
+            upscale: p["upscale"].as_bool().unwrap_or(true),
             color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
             look,
             look_strength: finite(&p["lookStrength"]).map_or(25.0, |v| v.clamp(0.0, 100.0)),
@@ -2052,6 +2056,9 @@ pub struct Report {
     /// The photos moved in depth (`clip.photo3d`: each clip, its move and still depth).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub photos_3d: Option<Value>,
+    /// The photos made larger and cleaner (`media.upscale`: each item, its factor and copy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upscaled: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safe_zones: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2563,6 +2570,28 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
                     report.denoised = Some(v["changed"].clone());
                 }
                 Err(e) => report.fallbacks.push(format!("noise: left as filmed ({})", chars(&e.to_string(), 160))),
+            }
+        }
+    }
+    // ---- small photos made larger and cleaner (`media.upscale` `auto`: those much smaller than
+    // the frame, when the upscaler is there; it waits: a photo takes a second or two)
+    if o.upscale {
+        let mut items: Vec<u64> = Vec::new();
+        for c in plan.shots.iter().filter_map(|s| cands.iter().find(|c| c.id == s.clip)).filter(|c| c.photo && c.kind != Kind::Vr) {
+            if !items.contains(&c.item) {
+                items.push(c.item);
+            }
+        }
+        if !items.is_empty() && run(ex, "upscale.status", json!({})).await.is_ok_and(|v| v["installed"] == json!(true)) {
+            match run(ex, "media.upscale", json!({"items": items, "wait": true})).await {
+                Ok(v) => {
+                    let made = v["outcome"]["made"].clone();
+                    lines(&format!("{} small photo(s) upscaled", made.as_array().map_or(0, Vec::len)));
+                    report.upscaled = Some(made);
+                }
+                // (every photo already as large as the frame: nothing to do)
+                Err(e) if e.to_string().contains("nothing to upscale") => {}
+                Err(e) => report.fallbacks.push(format!("small photos: left as they are ({})", chars(&e.to_string(), 160))),
             }
         }
     }

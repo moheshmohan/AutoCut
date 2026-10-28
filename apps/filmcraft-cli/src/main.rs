@@ -170,7 +170,7 @@ SUBCOMMANDS
          [--places-from-locations locations.json]
          [--enhance-voice] [--follow-labels] [--mood epic] [--bpm 100] [--music track.mp3] [--min-coverage 0.3] [--script-in s.json]
          [--script-out s.json] [--plan] [--stabilize] [--match-color] [--target-minutes N] [--resolution 1080p|4k|WxH]
-         [--no-fill] [--no-track] [--no-depth] [--style tech] [--timeline] [--loudness social] [--mix speech|gentle|cinematic]
+         [--no-fill] [--no-track] [--no-depth] [--no-upscale] [--style tech] [--timeline] [--loudness social] [--mix speech|gentle|cinematic]
          [--soundfont generaluser-gs|oscillators|auto|<.sf2>] [--embed-captions]
          [--outro-logo logo.png] [--outro-channel C] [--outro-handle @h] [--outro-tagline T]
          [--outro-cta S] [--outro-cta-done S] [--outro-terminal L] [--outro-seconds 12]
@@ -185,7 +185,8 @@ SUBCOMMANDS
                                 clips fill the frame, the crop following their robot with the
                                 subject tracker, or a slow tilt across it where it is not found
                                 or with --no-track; --no-fill shows them whole over a blurred copy;
-                                photos moved in depth when the depth model is downloaded, --no-depth), year cards,
+                                photos moved in depth when the depth model is downloaded, --no-depth;
+                                small photos upscaled when the upscaler is, --no-upscale), year cards,
                                 dramatic transitions with whooshes, a generated music bed ducked
                                 under the voice (cloned voices too), an outro; montage cuts and
                                 entries land on the music's beat (the bed's --bpm grid, or with
@@ -534,7 +535,7 @@ SUBCOMMANDS
          [--aspect 9:16|16:9|1:1|4:5] [--seconds 30] [--platform reels|shorts|tiktok|vertical]
          [--insta360 VID_093,VID_096] [--album TITLE] [--mood M] [--bpm 110] [--music file]
          [--title T] [--no-captions] [--caption-style S] [--redact faces,plates|…|off]
-         [--name N] [--full-detail 8] [--seed N] [--no-cutouts] [--no-denoise] [--no-depth] [--dry-run] [--no-qa]
+         [--name N] [--full-detail 8] [--seed N] [--no-cutouts] [--no-denoise] [--no-depth] [--no-upscale] [--dry-run] [--no-qa]
          [--export out.mp4] [--download] [--save | --save-as p.fcproj]
                                 normal and 360° clips → one catchy edit on the beat
                                 (autocut.direct): the media (files, a folder, Insta360 recordings
@@ -564,7 +565,8 @@ SUBCOMMANDS
                                 before and after), the opening's title behind its person when a
                                 person is its subject (--no-cutouts), noise reduction for the
                                 dark, noisy recordings (--no-denoise), photos moved in depth
-                                when the depth model is downloaded (--no-depth), captions of English
+                                when the depth model is downloaded (--no-depth), small photos
+                                upscaled when the upscaler is (--no-upscale), captions of English
                                 speech and the mix at −14 LUFS; --revise NOTES --from <out>.report.json changes a
                                 finished edit's saved plan from notes (1:10 too long, warmer at
                                 the end, fewer barrel rolls) and rebuilds it; --dry-run prints the plan
@@ -2434,6 +2436,8 @@ async fn cli() {
             opts.follow_subject = !a.flag("--no-track");
             // photos moved in depth when the depth network is downloaded; --no-depth: flat
             opts.depth = !a.flag("--no-depth");
+            // photos much smaller than the frame upscaled when the upscaler is downloaded
+            opts.upscale = !a.flag("--no-upscale");
             // --redact faces,plates: visitors' faces and plates hidden, the robots left alone
             let redact_flag =
                 a.opt("--redact").map(|r| filmcraft_autocut::privacy::Redact::parse(r).unwrap_or_else(|e| usage(format!("showcase: --redact: {e}"))));

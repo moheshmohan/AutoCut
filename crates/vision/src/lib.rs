@@ -27,6 +27,8 @@
 //!   GPU (Metal) on macOS.
 //! - `depth` (feature `model`): **Depth Anything V2 Small** (Apache-2.0), how near each part of a
 //!   picture is, for the 3D photo and depth blur; on candle, on the GPU (Metal) on macOS.
+//! - `upscale` (feature `model`): **Real-ESRGAN** (BSD-3-Clause), a picture made four times as large
+//!   with its detail restored, in seamless tiles; on candle, on the GPU (Metal) on macOS.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
@@ -61,6 +63,10 @@ mod profile_tests;
 mod rtmpose;
 #[cfg(feature = "model")]
 pub mod segment;
+#[cfg(feature = "model")]
+pub mod upscale;
+#[cfg(feature = "model")]
+mod upscale_gpu;
 #[cfg(feature = "model")]
 pub use net::{Detectors, FACE_SIDE, FaceDetector, MAX_GPU_FAILURES, PLATE_SIDE, PlateDetector, gpu_available};
 #[cfg(feature = "model")]

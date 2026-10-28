@@ -210,6 +210,25 @@ pub struct Interpretation {
     /// `filmcraft_render::denoise`). None = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub denoise: Option<Denoise>,
+    /// Upscale and Restore: a sharper copy of the picture made once (`media.upscale`, Real-ESRGAN)
+    /// shown in its place — the item keeps its size, its clips their framing; the renderer asks
+    /// the copy for as much detail as a clip shows the picture with. None = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upscaled: Option<Upscaled>,
+}
+
+/// Upscale and Restore: the sharper copy's file and how many times as large as the media it is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Upscaled {
+    pub path: String,
+    pub factor: u8,
+    /// How much of the network's answer it holds (0..1; the rest the picture enlarged smoothly).
+    #[serde(default = "full_strength")]
+    pub strength: f32,
+}
+
+fn full_strength() -> f32 {
+    1.0
 }
 
 /// Reduce Noise: how hard (`strength` 0..1) and over how many frames either side (`frames` 1..3).
