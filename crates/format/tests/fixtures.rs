@@ -390,6 +390,9 @@ fn next_id_is_raised_past_every_id_in_the_file() {
                     delivery: Default::default(),
                     take: 0,
                     numbers: Default::default(),
+                    temperature: None,
+                    emphasis: None,
+                    speed: None,
                     speech_duration: Tick(1),
                 };
                 p.narrations.insert(ItemId(BIG), narration);

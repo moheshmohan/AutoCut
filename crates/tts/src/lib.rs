@@ -15,6 +15,9 @@
 //!   speaker's own clips and auditioned (signal quality, whole sentences, speaker similarity).
 //! - [`cache`]: synthesized narrations kept on disk (keyed by script, voice identity, pitch and
 //!   pace), so a script is read by a voice once across sessions.
+//! - [`styles`]: voice styles of Malayalam narration — which reference a delivery reads after
+//!   (and the fallbacks), each style's sampler preset (temperature, emphasis, speed), inline
+//!   `[excited]` / `[calm]` / `[breath]` tags and natural pauses between utterances.
 //!
 //! Everything is deterministic: the same script and settings give the same samples.
 
@@ -36,6 +39,7 @@ pub mod neural;
 #[cfg(feature = "kokoro")]
 pub mod openvoice;
 pub mod script;
+pub mod styles;
 #[cfg(feature = "kokoro")]
 pub mod voice_lab;
 #[cfg(feature = "voxcpm")]
@@ -93,11 +97,21 @@ pub struct Params {
     /// Which reading (0 the first): voices that vary between readings (the natural cloned
     /// voices) read the same script afresh for each take; the others ignore it.
     pub take: u32,
+    /// The voice style of the line ([`styles::STYLES`]; `None`: plain), for voices that keep a
+    /// reference per style (Malayalam through IndicF5): it picks the reference read after and the
+    /// sampler preset. The others ignore it (they take `style`).
+    pub delivery: Option<&'static str>,
+    /// IndicF5's sampler, over the style's preset ([`styles::preset`]): the initial-noise scale
+    /// ([`styles::TEMPERATURE`]), classifier-free guidance ([`styles::EMPHASIS`]) and speed on top
+    /// of `pace` ([`styles::SPEED`]). `None`: the preset's (or, plain, the model's own).
+    pub temperature: Option<f32>,
+    pub emphasis: Option<f32>,
+    pub speed: Option<f32>,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Params { semitones: 0.0, pace: 1.0, style: None, take: 0 }
+        Params { semitones: 0.0, pace: 1.0, style: None, take: 0, delivery: None, temperature: None, emphasis: None, speed: None }
     }
 }
 
@@ -109,7 +123,34 @@ impl Params {
         if !(-MAX_SEMITONES..=MAX_SEMITONES).contains(&self.semitones) {
             return Err(TtsError::Invalid(format!("pitch must be within ±{MAX_SEMITONES} semitones")));
         }
+        if let Some(d) = self.delivery
+            && styles::find(d).is_none()
+        {
+            return Err(TtsError::Invalid(format!("unknown voice style `{d}` ({})", styles::STYLES.join(", "))));
+        }
+        for (what, v, range) in
+            [("temperature", self.temperature, styles::TEMPERATURE), ("emphasis", self.emphasis, styles::EMPHASIS), ("speed", self.speed, styles::SPEED)]
+        {
+            if let Some(v) = v {
+                styles::check(what, v, range).map_err(TtsError::Invalid)?;
+            }
+        }
         Ok(())
+    }
+
+    /// The sampler `style` is read with: its preset (none for plain), then what these params ask
+    /// for explicitly. `None`: nothing differs from the reading's own settings.
+    pub fn sampler(&self, style: Option<&str>) -> Option<styles::Sampler> {
+        let preset = styles::preset(style);
+        if preset.is_none() && self.temperature.is_none() && self.emphasis.is_none() && self.speed.is_none() {
+            return None;
+        }
+        let base = preset.unwrap_or(styles::Sampler::PLAIN);
+        Some(styles::Sampler {
+            temperature: self.temperature.unwrap_or(base.temperature),
+            emphasis: self.emphasis.unwrap_or(base.emphasis),
+            speed: self.speed.unwrap_or(base.speed),
+        })
     }
 }
 
@@ -296,9 +337,28 @@ mod tests {
             Params { pace: 0.1, ..Default::default() },
             Params { semitones: 40.0, ..Default::default() },
             Params { semitones: f64::INFINITY, ..Default::default() },
+            Params { delivery: Some("angry"), ..Default::default() },
+            Params { temperature: Some(0.1), ..Default::default() },
+            Params { temperature: Some(f32::NAN), ..Default::default() },
+            Params { emphasis: Some(4.5), ..Default::default() },
+            Params { speed: Some(0.0), ..Default::default() },
+            Params { speed: Some(f32::INFINITY), ..Default::default() },
         ] {
             assert!(p.check().is_err(), "{p:?}");
         }
+        let ok = Params { delivery: Some("excited"), temperature: Some(0.3), emphasis: Some(4.0), speed: Some(1.4), ..Default::default() };
+        assert!(ok.check().is_ok());
+    }
+
+    #[test]
+    fn the_sampler_is_the_preset_under_what_is_asked() {
+        let p = Params::default();
+        assert_eq!(p.sampler(None), None, "plain: the reading's own settings");
+        assert_eq!(p.sampler(Some("excited")), styles::preset(Some("excited")));
+        let q = Params { temperature: Some(0.7), ..Default::default() };
+        assert_eq!(q.sampler(None), Some(styles::Sampler { temperature: 0.7, ..styles::Sampler::PLAIN }));
+        let calm = styles::preset(Some("calm")).unwrap();
+        assert_eq!(q.sampler(Some("calm")), Some(styles::Sampler { temperature: 0.7, ..calm }), "explicit beats the preset");
     }
 
     #[test]

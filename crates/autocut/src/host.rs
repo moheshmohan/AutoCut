@@ -292,7 +292,27 @@ impl PlanDoc {
                 chips.insert((k + 1).to_string(), v.clone());
             }
         }
-        Ok((opts, entries, Script { intro, lines, outro, templated: script.templated, pronounce: script.pronounce.clone(), say, delivery, chips }))
+        // and the voice settings
+        let mut voice: std::collections::BTreeMap<String, showcase::VoiceSettings> =
+            script.voice.iter().filter(|(k, _)| k.as_str() == "intro" || k.as_str() == "outro").map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (k, &h) in heads.iter().enumerate() {
+            if let Some(v) = script.voice.get(&(h + 1).to_string()) {
+                voice.insert((k + 1).to_string(), v.clone());
+            }
+        }
+        let script = Script {
+            intro,
+            lines,
+            outro,
+            templated: script.templated,
+            pronounce: script.pronounce.clone(),
+            say,
+            delivery,
+            chips,
+            voice,
+            voice_default: script.voice_default.clone(),
+        };
+        Ok((opts, entries, script))
     }
 }
 
@@ -374,7 +394,24 @@ fn long(port: &CommandPort, id: &str, mut params: Value) -> Result<Value, String
 fn prerender(port: &CommandPort, params: &Value) {
     let mut p = json!({"wait": true});
     // everything that decides the reading (and its cache key), so `tts.create` finds it
-    for k in ["text", "voice", "language", "numbers", "pitch", "pace", "delivery", "take", "check", "checkPolicy", "agreement", "voiceGate", "minSimilarity"] {
+    for k in [
+        "text",
+        "voice",
+        "language",
+        "numbers",
+        "pitch",
+        "pace",
+        "delivery",
+        "temperature",
+        "emphasis",
+        "speed",
+        "take",
+        "check",
+        "checkPolicy",
+        "agreement",
+        "voiceGate",
+        "minSimilarity",
+    ] {
         if let Some(v) = params.get(k) {
             p[k] = v.clone();
         }

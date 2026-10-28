@@ -195,7 +195,97 @@ Checked readings are cached under their own key with their report, so a rebuild 
 `"check": "off"` reads without hearing. The Text to Speech panel shows the outcome in the
 status bar.
 
-## 7. A Malayalam showcase
+## 7. Voice styles: emotion, temperature, emphasis, speed
+
+IndicF5 continues the reference clip, so the clip sets the emotion and prosody of everything it
+reads: one calm reference reads every line calm. A voice keeps **one reference per style** beside
+its main (plain) one — a stretch of your own Malayalam spoken that way — as F5-TTS's multi-style
+generation does:
+
+```sh
+# an excited stretch of one of your clips (seconds in it), with its exact words
+filmcraft-cli voice style set --voice clone:me --style excited --file ~/Movies/IMG_4184.MOV \
+  --start 41.2 --end 52.8 --transcript "അത് ശരിക്കും ഒരു മാജിക് പോലെ തോന്നി! …"
+# or a project item: --project p.fcproj --item 1666
+filmcraft-cli voice styles --voice clone:me             # what it has, and what each emotion reads after
+filmcraft-cli voice style remove --voice clone:me --style calm
+```
+
+(`exec tts.voiceStyles '{"voice": "clone:me", "set": "excited", "path": …, "start": …, "end": …,
+"transcript": …}'` is the command.) Styles are `conversational`, `warm`, `excited`, `amazed`,
+`curious`, `calm` and `dramatic`; `plain` replaces the main reference (6–15.5 s, the old one kept
+as a version). **From the style finder**: a pick of its report is taken as it is — its style,
+file (else project item), stretch and words —
+
+```sh
+filmcraft-cli voice style set --voice clone:me --report styles.json --candidate excited-1
+# the same, with the words corrected, or as another style:
+filmcraft-cli voice style set --voice clone:me --report styles.json --candidate calm-1 --transcript "…" --style warm
+```
+
+(`{"report": "styles.json", "candidate": "excited-1"}`, or the pick itself as `"entry": {…}`;
+the request's own fields win). A pick already ends at a sentence end, so it is kept whole
+(`--trim` cuts it at its words' last sentence end anyway). The stretch is cut at the last sentence end its words imply
+(end the words with the sentence's full stop; `--no-trim` keeps it whole) and must leave 5–16 s.
+Without `--transcript` both Malayalam speech models of the strict check (whisper-medium-ml and
+IndicWhisper) hear the words; the result shows both and how far apart they are, and warns when
+they disagree — give the exact words then, IndicF5 aligns its reading to them. Setting or removing
+a style keeps the voice's references as a version first (`voice versions`, `voice rollback`).
+
+**Which reference a line reads after.** A narration's delivery (the Text to Speech panel's
+*Emotion*) reads after its style's reference; a style the voice has no reference for reads after
+the nearest one it has, else the main reference:
+
+| Delivery | Then | Then |
+|---|---|---|
+| excited | amazed | conversational |
+| amazed | excited | conversational |
+| curious | conversational | |
+| conversational | warm | |
+| warm | conversational | |
+| calm | warm | |
+| dramatic | calm | warm |
+
+**Inline tags** switch the style within one narration: `[excited] അത് പ്രിന്റ് ആയി! [calm] പക്ഷേ
+പിന്നെ… ` reads the first sentence excited and the rest calm; `[plain]` goes back to the main
+reference and `[breath]` is a breath-length pause of the reference's room tone. Tags are never
+read aloud or shown in subtitles; the strict check hears each part against its own words; a line
+break also starts a new utterance.
+
+**Temperature, emphasis, speed.** Each style has a preset for IndicF5's sampler; a narration may
+set them (`tts.create`, `tts.edit`, `tts.preview`, `tts.render`; the panel's sliders; a showcase
+plan's `script.voice`):
+
+| Setting | Range | Plain | What it does |
+|---|---|---|---|
+| `temperature` | 0.3–1.5 | 1.0 | the flow-matching sampler's starting noise: lower is steadier and flatter, higher livelier and riskier |
+| `emphasis` | 1–4 | 2.0 | classifier-free guidance: how closely the voice follows the words and its reference |
+| `speed` | 0.7–1.4 | 1.0 | speaking speed on top of `pace` (the natural rate is held at 4.6–6 syllables a second first) |
+
+| Style | temperature | emphasis | speed | pauses |
+|---|---|---|---|---|
+| conversational | 1.0 | 2.0 | 1.02 | ×0.9 |
+| warm | 0.95 | 2.0 | 0.98 | ×1.0 |
+| excited | 1.1 | 2.4 | 1.06 | ×0.8 |
+| amazed | 1.1 | 2.3 | 1.0 | ×0.85 |
+| curious | 1.05 | 2.1 | 1.0 | ×0.95 |
+| calm | 0.85 | 1.8 | 0.95 | ×1.25 |
+| dramatic | 0.9 | 2.2 | 0.92 | ×1.35 |
+
+`null` (or leaving it out) goes back to the preset; a value out of range is refused with the
+range. English narrations take none of them.
+
+**Pauses.** Between utterances the pause follows how the last one ended — a full stop 320 ms, `?`
+400, `!` 340, `…` 560, a comma 180, a line break 480, a blank line 760 — stretched by its style
+(excited shorter, calm and dramatic longer) and varied ±12 % per take and utterance (the same take
+always pauses the same). A pause marker (`[pause 1s]`) is exact.
+
+**The cache.** A plain line of one utterance keeps the cache key it always had; a styled line keys
+on the references it reads after, its delivery and its settings, so changing a style's reference
+or a setting reads it again and a styled reading is never served for a plain one. A line of more
+than one utterance is read again once (its pauses changed on 2026-10-28).
+
+## 8. A Malayalam showcase
 
 A showcase plan with `"language": "ml"` narrates its Malayalam `intro`, `lines` and `outro` in
 Malayalam under the strict check and makes Malayalam subtitles; what was heard, line by line
@@ -204,8 +294,10 @@ Malayalam under the strict check and makes Malayalam subtitles; what was heard, 
 heard clearly is noted (`--no-narration-check` turns the check off). `"narrationCheck":
 {"readings": 6, "cer": 0.12, "startCer": 0.2}` (or `--narration-check
 readings=6,cer=0.12,startCer=0.2`) makes the check stricter for every Malayalam line (`tts.create`'s
-`checkPolicy`, above). `"numbers": "malayalam"` (or `--numbers malayalam`) changes how digits are
-said:
+`checkPolicy`, above). Each part's `delivery` is its voice style (section 7), and `script.voice`
+sets how a part is read — `{"intro": {"emphasis": 2.4}, "3": {"temperature": 1.1, "speed":
+1.05}}` — over `script.voiceDefault` (every part). `"numbers": "malayalam"` (or `--numbers
+malayalam`) changes how digits are said:
 
 ```sh
 filmcraft-cli showcase --report analysis.json --script-in plan-ml.json --language ml \
@@ -242,6 +334,8 @@ prints the findings; `--strict-script` stops the build on them.
 | `<data>/voices/me.json`, `me.wav` | the clone and its voice sample (English) |
 | `<data>/voices/me.indicf5.wav`, `.json` | the Malayalam reference clip, its words, where it came from |
 | `<data>/voices/me.indicf5.untrimmed.wav`, `.json` | the reference before its first trim |
+| `<data>/voices/me.indicf5.<style>.wav`, `.json` | a voice style's reference (`excited`, `calm`, …), its words, where it came from |
+| `<data>/voices/me.versions/` | the voice's earlier references (`voice versions`, `voice rollback`) |
 | `<data>/narration-cache/` | readings, keyed by voice, reference, words and settings; a checked reading's report beside it (`<key>.json`) |
 | `<data>/models/whisper-medium-ml/` | the Malayalam speech model (the strict check) |
 | `<out>.narration-check.json` | a Malayalam showcase's narration as the strict check heard it |

@@ -230,14 +230,40 @@ impl Profile {
 }
 
 /// The files of a natural voice's references next to its profile, by extension: the voice
-/// sample, its full-band copy, the Malayalam reference and the clip it had before a trim.
-pub const REFERENCE_FILES: [&str; 6] = ["wav", "full.wav", "indicf5.json", "indicf5.wav", "indicf5.untrimmed.wav", "indicf5.untrimmed.json"];
+/// sample, its full-band copy, the Malayalam reference, the clip it had before a trim, and the
+/// Malayalam reference of each voice style ([`crate::styles::STYLES`], [`set_style`]).
+pub const REFERENCE_FILES: [&str; 20] = [
+    "wav",
+    "full.wav",
+    "indicf5.json",
+    "indicf5.wav",
+    "indicf5.untrimmed.wav",
+    "indicf5.untrimmed.json",
+    "indicf5.conversational.json",
+    "indicf5.conversational.wav",
+    "indicf5.warm.json",
+    "indicf5.warm.wav",
+    "indicf5.excited.json",
+    "indicf5.excited.wav",
+    "indicf5.amazed.json",
+    "indicf5.amazed.wav",
+    "indicf5.curious.json",
+    "indicf5.curious.wav",
+    "indicf5.calm.json",
+    "indicf5.calm.wav",
+    "indicf5.dramatic.json",
+    "indicf5.dramatic.wav",
+];
 /// The folder of a voice's earlier references (`<name>.versions`).
 const VERSIONS_EXT: &str = "versions";
 
 #[path = "clone_versions.rs"]
 mod versioning;
 pub use versioning::{MAX_VERSIONS, NewReference, Part, Version, promote, rollback, sample_from, versions};
+
+#[path = "clone_styles.rs"]
+mod style_refs;
+pub use style_refs::{NewStyle, STYLE_SECONDS, StyleSet, remove_style, set_style, style_reference, style_references, styles_on_disk};
 
 /// `name` → a file-safe id part: lowercase ASCII letters, digits and dashes, at most 40.
 pub fn slug(name: &str) -> String {
@@ -296,6 +322,8 @@ pub fn list(voices_dir: &Path) -> Vec<Profile> {
     let mut out: Vec<Profile> = rd
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        // a profile is `<slug>.json`: the references beside it (`<slug>.indicf5.json`, …) are not
+        .filter(|e| e.path().file_stem().is_some_and(|s| !s.to_string_lossy().contains('.')))
         .take(MAX_PROFILES)
         .filter_map(|e| {
             let stem = e.path().file_stem()?.to_string_lossy().into_owned();
@@ -552,6 +580,18 @@ pub fn estimate_gender(x: &[f32], rate: u32) -> Option<Gender> {
 /// The median pitch (Hz) of the voiced 40 ms frames of speech `x` at `rate` (autocorrelation
 /// at 8 kHz, 60–400 Hz). `None` with too little voiced speech.
 pub fn median_pitch(x: &[f32], rate: u32) -> Option<f64> {
+    let mut f0s = pitch_frames(x, rate);
+    if f0s.len() < 20 {
+        return None;
+    }
+    f0s.sort_by(f64::total_cmp);
+    f0s.get(f0s.len() / 2).copied()
+}
+
+/// The pitch (Hz) of each voiced 40 ms frame of `x` at `rate`, every 20 ms (autocorrelation at
+/// 8 kHz, 60–400 Hz; at most 5000 frames): what [`median_pitch`] and the voice-style
+/// measurements (pitch range) read.
+pub fn pitch_frames(x: &[f32], rate: u32) -> Vec<f64> {
     let y = filmcraft_audio_dsp::resample::resample_sinc(x, rate, 8_000);
     let (win, hop) = (320usize, 160usize);
     let (min_lag, max_lag) = (20usize, 134usize); // 400 Hz … 60 Hz
@@ -583,11 +623,7 @@ pub fn median_pitch(x: &[f32], rate: u32) -> Option<f64> {
         }
         s += hop;
     }
-    if f0s.len() < 20 {
-        return None;
-    }
-    f0s.sort_by(f64::total_cmp);
-    f0s.get(f0s.len() / 2).copied()
+    f0s
 }
 
 /// Make and save a timbre-only (OpenVoice) cloned voice from `reference` (mono speech at
@@ -982,24 +1018,32 @@ pub fn cross_reference(models_dir: &Path, id: &str) -> Result<Option<CrossRefere
     let voices = voices_dir(models_dir);
     let p = load_profile(&voices, id)?;
     let path = cross_path(&voices, &p)?;
-    let Ok(meta) = std::fs::metadata(&path) else { return Ok(None) };
-    if meta.len() > MAX_PROFILE_BYTES {
-        return Ok(None);
-    }
-    let Ok(r) = std::fs::read(&path).map_err(|_| ()).and_then(|b| serde_json::from_slice::<CrossReference>(&b).map_err(|_| ())) else {
-        return Ok(None);
-    };
-    // the clip must be the one made: a file name of this profile's, with its bytes
-    let clip_ok = r.clip == format!("{}.indicf5.wav", slug(id.trim_start_matches(CLONE_PREFIX)))
-        && read_capped(&voices.join(&r.clip)).is_ok_and(|b| sha_hex(&b) == r.clip_sha);
+    fresh_reference(&voices, &p, &path, &format!("{}.indicf5.wav", slug(id.trim_start_matches(CLONE_PREFIX))))
+}
+
+/// A Malayalam reference read from `path` when it was made for `p`'s current voice sample and its
+/// clip is intact: the clip is `clip` (a file name of this profile's) with the bytes it had.
+fn fresh_reference(voices: &Path, p: &Profile, path: &Path, clip: &str) -> Result<Option<CrossReference>, TtsError> {
+    let Some(r) = read_reference(path) else { return Ok(None) };
+    let clip_ok = r.clip == clip && read_capped(&voices.join(&r.clip)).is_ok_and(|b| sha_hex(&b) == r.clip_sha);
     let fresh = r.version == CROSS_REFERENCE_VERSION
         && clip_ok
-        && r.sample == sample_hash(&voices, &p)?
+        && r.sample == sample_hash(voices, p)?
         && r.transcript.chars().any(char::is_alphanumeric)
         && r.transcript.chars().count() <= MAX_TRANSCRIPT_CHARS
         && r.from.is_finite()
         && r.to.is_finite();
     Ok(fresh.then_some(r))
+}
+
+/// The reference file at `path` as it is on disk, fresh or not (`None`: missing, too large or
+/// not one).
+fn read_reference(path: &Path) -> Option<CrossReference> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > MAX_PROFILE_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 /// Correct the words of `id`'s Malayalam reference (the clip stays).
@@ -1130,6 +1174,22 @@ fn sentence_cut(x: &[f32], rate: u32, transcript: &str, lo: f64, hi: f64, min: f
     )))
 }
 
+/// Fade `clip` out over its last [`TRIM_FADE`] (and in over its first, `fade_in`): no click at a
+/// cut.
+fn fade_edges(clip: &mut [f32], rate: u32, fade_in: bool) {
+    let fade = ((TRIM_FADE * f64::from(rate)) as usize).min(clip.len() / 4);
+    for i in 0..fade {
+        let g = i as f32 / fade.max(1) as f32;
+        if fade_in && let Some(v) = clip.get_mut(i) {
+            *v *= g;
+        }
+        let n = clip.len();
+        if let Some(v) = clip.get_mut(n.saturating_sub(1 + i)) {
+            *v *= g;
+        }
+    }
+}
+
 /// The clip before its first trim, kept beside it (`<name>.indicf5.untrimmed.wav` and `.json`).
 fn untrimmed_paths(voices: &Path, p: &Profile) -> Result<(PathBuf, PathBuf), TtsError> {
     let base = profile_path(voices, &p.id)?;
@@ -1195,19 +1255,7 @@ pub fn trim_cross_reference(models_dir: &Path, id: &str, trim: &Trim) -> Result<
         return Err(TtsError::Invalid("give the kept clip's words".into()));
     }
     let mut clip: Vec<f32> = x.get(s0..s1).unwrap_or(&[]).to_vec();
-    let fade = ((TRIM_FADE * f64::from(rate)) as usize).min(clip.len() / 4);
-    for i in 0..fade {
-        let g = i as f32 / fade.max(1) as f32;
-        if s0 > 0
-            && let Some(v) = clip.get_mut(i)
-        {
-            *v *= g;
-        }
-        let n = clip.len();
-        if let Some(v) = clip.get_mut(n.saturating_sub(1 + i)) {
-            *v *= g;
-        }
-    }
+    fade_edges(&mut clip, rate, s0 > 0);
     // the clip before the first trim stays beside it
     let (keep_wav, keep_json) = untrimmed_paths(&voices, &p)?;
     if !keep_wav.exists() {
@@ -1350,6 +1398,10 @@ pub struct Reading {
     /// The reference's words through the English front end before IndicF5 reads them (how the
     /// voice read before 2026-10-20; kept to measure against).
     pub english_transcript: bool,
+    /// The pause between utterances follows how the first ends and the style
+    /// ([`crate::styles::gap_ms`]); else 250 ms after every utterance, a pause marker too (how the
+    /// voice read before 2026-10-28).
+    pub natural_pauses: bool,
 }
 
 /// The neutral lead-in measured as `Reading::lead_in` ("ശരി." — "right."): IndicF5 runs it into
@@ -1359,14 +1411,34 @@ pub const LEAD_IN: &str = "ശരി.";
 
 impl Default for Reading {
     fn default() -> Self {
-        Reading { tail_ms: 50, room_tone: false, per_sentence: false, steps: 32, cfg: 2.0, sway: -1.0, lead_in: None, english_transcript: false }
+        Reading {
+            tail_ms: 50,
+            room_tone: false,
+            per_sentence: false,
+            steps: 32,
+            cfg: 2.0,
+            sway: -1.0,
+            lead_in: None,
+            english_transcript: false,
+            natural_pauses: true,
+        }
     }
 }
 
 impl Reading {
     /// How the voice read before the sentence-start fix (2026-10-20): before/after comparisons.
     pub fn before_fix() -> Reading {
-        Reading { tail_ms: 50, room_tone: false, per_sentence: false, steps: 32, cfg: 2.0, sway: -1.0, lead_in: None, english_transcript: true }
+        Reading {
+            tail_ms: 50,
+            room_tone: false,
+            per_sentence: false,
+            steps: 32,
+            cfg: 2.0,
+            sway: -1.0,
+            lead_in: None,
+            english_transcript: true,
+            natural_pauses: false,
+        }
     }
 
     /// How the strict check's reading `attempt` of an utterance reads (each attempt also has its
@@ -1412,22 +1484,43 @@ pub fn malayalam_voice(id: &str, models_dir: &Path, reading: Reading) -> Result<
 #[cfg(feature = "indicf5")]
 pub use malayalam_voice::MalayalamVoice;
 
+/// What, beyond the voice's Malayalam identity ([`crate::cache::voice_identity_for`]), decides
+/// how the cloned voice `id` reads `script` with `params` (the narration cache keys a reading on
+/// it): the style references it reads after (their clips' SHA-256 and words), the styles' presets
+/// version when a style is asked for, and natural pauses when it has more than one utterance or
+/// a breath. Empty for a plain reading of one utterance, whose key is the one it always had.
+pub fn malayalam_reading_identity(models_dir: &Path, id: &str, script: &str, params: &Params) -> Result<String, TtsError> {
+    #[cfg(feature = "indicf5")]
+    {
+        malayalam_voice::reading_identity(models_dir, id, script, params)
+    }
+    #[cfg(not(feature = "indicf5"))]
+    {
+        let _ = (models_dir, id, script, params);
+        Ok(String::new())
+    }
+}
+
 /// Cloned voices speaking Malayalam through IndicF5 (feature `indicf5`).
 #[cfg(feature = "indicf5")]
 mod malayalam_voice {
     use super::*;
     use crate::f5::{self, F5, Reference};
     use crate::heard;
+    use crate::malayalam::Part;
+    use crate::styles::{self, Asked, Boundary, Sampler};
 
-    /// Silence between utterances, ms.
-    const UTTERANCE_GAP_MS: u64 = 250;
     /// Seeds between takes.
     const TAKE_SEEDS: u64 = 7919;
     /// Seeds between the strict check's readings of one utterance (apart from the takes' and the
     /// utterances' own).
     const ATTEMPT_SEEDS: u64 = 104_729;
-    /// References kept built.
-    const REFERENCES: usize = 4;
+    /// Where the pauses' variation is seeded from (apart from the readings' seeds).
+    const GAP_SEEDS: u64 = 0x5eed_9a95;
+    /// References kept built: a voice's main one and its styles, for a few readings.
+    const REFERENCES: usize = 24;
+    /// The room tone kept for `[breath]`, seconds of the clip's quietest stretch.
+    const ROOM_SECONDS: f64 = 0.2;
 
     /// The speaking rate a Malayalam utterance is held within, syllables a second
     /// ([`crate::malayalam::syllables`]): Malayalam read aloud runs about 5–6. The reference's
@@ -1504,7 +1597,11 @@ mod malayalam_voice {
         if !room || n == 0 {
             return vec![0.0; n];
         }
-        let tone = room_tone(clip, rate, 0.2);
+        tile(&room_tone(clip, rate, ROOM_SECONDS), n, rate)
+    }
+
+    /// `n` samples of `tone` repeated, faded in and out over 10 ms (silence without a tone).
+    pub(crate) fn tile(tone: &[f32], n: usize, rate: u32) -> Vec<f32> {
         let fade = ((rate / 100) as usize).max(1).min(n / 2).max(1);
         (0..n)
             .map(|i| {
@@ -1521,6 +1618,11 @@ mod malayalam_voice {
             .collect()
     }
 
+    /// The main reference's clip at IndicF5's rate.
+    fn clip_audio(models_dir: &Path, r: &CrossReference) -> Result<Vec<f32>, TtsError> {
+        Ok(filmcraft_audio_dsp::resample::resample_sinc(&cross_audio(models_dir, r)?, CROSS_REFERENCE_RATE, f5::RATE))
+    }
+
     /// The reference IndicF5 speaks after, built once per profile, reference and reading.
     pub(crate) fn reference(p: &Profile, r: &CrossReference, m: &F5, models_dir: &Path, reading: &Reading) -> Result<Arc<Reference>, TtsError> {
         type Refs = Vec<(String, Arc<Reference>)>;
@@ -1530,8 +1632,7 @@ mod malayalam_voice {
         if let Some(found) = cache.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()) {
             return Ok(found);
         }
-        let clip = cross_audio(models_dir, r)?;
-        let mut x = filmcraft_audio_dsp::resample::resample_sinc(&clip, CROSS_REFERENCE_RATE, f5::RATE);
+        let mut x = clip_audio(models_dir, r)?;
         let pause = tail(&x, f5::RATE, reading.tail_ms, reading.room_tone);
         x.extend(pause);
         let words = reference_words(&r.transcript, reading.english_transcript)?;
@@ -1556,8 +1657,9 @@ mod malayalam_voice {
         let mut x = filmcraft_audio_dsp::resample::resample_sinc(clip, rate, f5::RATE);
         let pause = tail(&x, f5::RATE, reading.tail_ms, reading.room_tone);
         x.extend(pause);
+        let room = room_tone(&x, f5::RATE, ROOM_SECONDS);
         let reference = Arc::new(m.reference(&x, &reference_words(words, reading.english_transcript)?)?);
-        Ok(Box::new(MalayalamVoice { gender, model: m, reference, reading }))
+        Ok(Box::new(MalayalamVoice { gender, model: m, reference, reading, styles: Vec::new(), room }))
     }
 
     pub(super) fn load_with(profile: Profile, models_dir: &Path, reading: Reading) -> Result<MalayalamVoice, TtsError> {
@@ -1565,16 +1667,83 @@ mod malayalam_voice {
         let r = cross_reference(models_dir, &profile.id)?
             .ok_or_else(|| TtsError::Invalid(format!("{} has no Malayalam reference yet: make it with tts.voiceReference", profile.id)))?;
         let m = model(models_dir)?;
-        let reference = reference(&profile, &r, &m, models_dir, &reading)?;
-        Ok(MalayalamVoice { gender: gender(&profile), model: m, reference, reading })
+        let main = reference(&profile, &r, &m, models_dir, &reading)?;
+        // its voice styles, each after its own clip
+        let mut styles = Vec::new();
+        for (style, sr) in style_references(models_dir, &profile.id)? {
+            styles.push((style, reference(&profile, &sr, &m, models_dir, &reading)?));
+        }
+        let room = room_tone(&clip_audio(models_dir, &r)?, f5::RATE, ROOM_SECONDS);
+        Ok(MalayalamVoice { gender: gender(&profile), model: m, reference: main, reading, styles, room })
+    }
+
+    /// The references a reading of `script` in `params` reads after, and how its utterances are
+    /// spaced, as the narration cache keys them ([`super::malayalam_reading_identity`]): empty for
+    /// a plain reading of one utterance (the key it always had). Planned as [`MalayalamVoice`]
+    /// plans it, without the model.
+    pub(super) fn reading_identity(models_dir: &Path, id: &str, script: &str, params: &Params) -> Result<String, TtsError> {
+        params.check()?;
+        let reading = Reading::default();
+        let Some(main) = cross_reference(models_dir, id)? else { return Ok(String::new()) };
+        let styles = style_references(models_dir, id)?;
+        // what one generation after each reference holds (as `Reference::max_chars`)
+        let capacity = |r: &CrossReference| -> Result<usize, TtsError> {
+            let samples = clip_audio(models_dir, r)?.len() + (u64::from(reading.tail_ms) * u64::from(f5::RATE) / 1000) as usize;
+            let text = f5::model::reference_text(&reference_words(&r.transcript, reading.english_transcript)?);
+            Ok(f5::model::max_chars_for(f5::model::reference_seconds(samples), &text))
+        };
+        let main_max = capacity(&main)?;
+        let mut maxes = Vec::new();
+        for (s, r) in &styles {
+            maxes.push((*s, capacity(r)?));
+        }
+        let has = |s: &str| styles.iter().any(|(k, _)| *k == s);
+        let line = params.delivery.and_then(styles::find);
+        let max = |a: Asked| styles::resolve(a.style(line), &has).and_then(|s| maxes.iter().find(|(k, _)| *k == s)).map_or(main_max, |(_, m)| *m);
+        let (parts, _) = crate::malayalam::parts(script, &max, crate::malayalam::Numbers::default(), !reading.per_sentence)?;
+        let says = parts.iter().filter(|p| matches!(p, Part::Say { .. })).count();
+        let mut used: Vec<&'static str> = Vec::new();
+        let mut styled = false;
+        for p in &parts {
+            if let Part::Say { asked, .. } = p {
+                let style = asked.style(line);
+                styled |= style.is_some();
+                if let Some(s) = styles::resolve(style, &has)
+                    && !used.contains(&s)
+                {
+                    used.push(s);
+                }
+            }
+        }
+        let mut id = Vec::new();
+        if styled {
+            id.push(format!("styles v{}", styles::VERSION));
+        }
+        for s in used {
+            if let Some((_, r)) = styles.iter().find(|(k, _)| *k == s) {
+                use sha2::Digest;
+                let words: String = sha2::Sha256::digest(r.transcript.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
+                id.push(format!("{s} {} {words}", r.clip_sha));
+            }
+        }
+        // more than one utterance (or a breath): spaced by natural pauses
+        if says > 1 || parts.iter().any(|p| matches!(p, Part::Breath)) {
+            id.push(format!("pauses v{}", styles::VERSION));
+        }
+        Ok(id.join("; "))
     }
 
     /// A cloned voice speaking Malayalam.
     pub struct MalayalamVoice {
         gender: Gender,
         model: Arc<F5>,
+        /// The main (plain) reference.
         reference: Arc<Reference>,
         reading: Reading,
+        /// The voice's style references ([`crate::styles`]), by style.
+        styles: Vec<(&'static str, Arc<Reference>)>,
+        /// The main clip's room tone, for `[breath]` (empty: silence).
+        room: Vec<f32>,
     }
 
     /// Frames of the lead-in cut, seconds.
@@ -1658,16 +1827,59 @@ mod malayalam_voice {
         /// [`MalayalamVoice::read`] with the sampler settings and lead-in of `reading` (its
         /// reference settings are the voice's own).
         pub fn read_as(&self, reading: &Reading, text: &str, pace: f64, seed: u64) -> Result<Vec<f32>, TtsError> {
+            self.read_take(reading, &self.reference, None, text, pace, seed)
+        }
+
+        /// The styles this voice has a reference for.
+        pub fn styles(&self) -> Vec<&'static str> {
+            self.styles.iter().map(|(s, _)| *s).collect()
+        }
+
+        /// The reference `style` reads after ([`styles::resolve`]): its own, its nearest
+        /// fallback's, else the main one (`None`).
+        fn reference_for(&self, style: Option<&str>) -> (Arc<Reference>, Option<&'static str>) {
+            let has = |s: &str| self.styles.iter().any(|(k, _)| *k == s);
+            match styles::resolve(style, &has).and_then(|s| self.styles.iter().find(|(k, _)| *k == s)) {
+                Some((k, r)) => (r.clone(), Some(*k)),
+                None => (self.reference.clone(), None),
+            }
+        }
+
+        /// How `script` is read in the line's style `line`: utterances (each with the style its
+        /// tags put in force, packed to what its reference holds), pauses, breaths, line breaks.
+        pub fn parts(&self, script: &str, line: Option<&'static str>) -> Result<Vec<Part>, TtsError> {
+            let max = |a: Asked| self.reference_for(a.style(line)).0.max_chars();
+            Ok(crate::malayalam::parts(script, &max, crate::malayalam::Numbers::default(), !self.reading.per_sentence)?.0)
+        }
+
+        /// One utterance read after `reference` with `reading`'s steps, sway and lead-in, and the
+        /// sampler `sampler` asks for (`None`: `reading`'s guidance and the model's own noise;
+        /// exactly as before styles), with `seed` at `pace`, its silence trimmed.
+        fn read_take(
+            &self,
+            reading: &Reading,
+            reference: &Reference,
+            sampler: Option<Sampler>,
+            text: &str,
+            pace: f64,
+            seed: u64,
+        ) -> Result<Vec<f32>, TtsError> {
             let rate = f5::RATE;
             let lead = reading.lead_in.as_deref().map(str::trim).filter(|l| !l.is_empty());
             let said = match lead {
                 Some(l) => format!("{l} {text}"),
                 None => text.to_string(),
             };
-            // pace is IndicF5's own speed (the duration it is asked for), held to a natural rate
-            let speed = pace * rate_correction(&said, self.model.natural_seconds(&self.reference, &said));
-            let s = f5::Settings { steps: reading.steps, cfg: reading.cfg, sway: reading.sway, speed: speed as f32, seed };
-            let a = self.model.speak(&self.reference, &said, &s, &mut |_, _| true)?;
+            // pace (and the style's speed) is IndicF5's own speed (the duration it is asked
+            // for), held to a natural rate
+            let pace = match sampler {
+                Some(s) => pace * f64::from(s.speed),
+                None => pace,
+            };
+            let speed = (pace * rate_correction(&said, self.model.natural_seconds(reference, &said))).clamp(0.25, 4.0);
+            let (cfg, temperature) = sampler.map_or((reading.cfg, 1.0), |s| (s.emphasis, s.temperature));
+            let s = f5::Settings { steps: reading.steps, cfg, sway: reading.sway, speed: speed as f32, seed, temperature };
+            let a = self.model.speak(reference, &said, &s, &mut |_, _| true)?;
             let a = match lead {
                 Some(l) => a.get(lead_in_cut(&a, rate, l, text)..).unwrap_or(&[]).to_vec(),
                 None => a,
@@ -1675,45 +1887,93 @@ mod malayalam_voice {
             Ok(super::natural::trim_silence(&a, rate).to_vec())
         }
 
+        /// The seed of the pause before part `index` of take `take`.
+        fn gap_seed(take: u32, index: usize) -> u64 {
+            Self::seed(take, index, 0) ^ GAP_SEEDS
+        }
+
+        /// `n` samples of the clip's room tone, faded in and out.
+        fn breath(&self, n: usize) -> Vec<f32> {
+            tile(&self.room, n, f5::RATE)
+        }
+
         fn speak(&self, script: &str, params: &Params, strict: Option<&heard::Strict>) -> Result<(Audio, Vec<heard::Checked>), TtsError> {
             crate::check_text(script)?;
             params.check()?;
-            let pieces = self.pieces(script)?;
+            let line = params.delivery.and_then(styles::find);
+            let parts = self.parts(script, line)?;
             let rate = f5::RATE;
             let max = (crate::MAX_SECONDS * f64::from(rate)) as usize;
-            let gap = (UTTERANCE_GAP_MS * u64::from(rate) / 1000) as usize;
+            let samples = |ms: u32| (u64::from(ms) * u64::from(rate) / 1000) as usize;
             let _gpu = super::natural::gpu("IndicF5 narration")?;
             let mut out: Vec<f32> = Vec::new();
             let mut checks = Vec::new();
-            let mut spoke = false;
-            for (i, piece) in pieces.into_iter().enumerate() {
-                match piece {
-                    crate::malayalam::Piece::Pause(ms) => out.resize(out.len().saturating_add((u64::from(ms) * u64::from(rate) / 1000) as usize), 0.0),
-                    crate::malayalam::Piece::Say(u) => {
-                        if spoke {
-                            out.resize(out.len().saturating_add(gap), 0.0);
+            // how the last utterance ended and its style; a pause or breath since; a line break
+            let mut last: Option<(Boundary, Option<&'static str>)> = None;
+            let mut marked = false;
+            let mut line_break: Option<Boundary> = None;
+            for (i, part) in parts.into_iter().enumerate() {
+                match part {
+                    Part::Pause(ms) => {
+                        out.resize(out.len().saturating_add(samples(ms)), 0.0);
+                        marked = true;
+                    }
+                    Part::Breath => {
+                        let style = last.map_or(line, |(_, s)| s);
+                        out.extend(self.breath(samples(styles::breath_ms(style, Self::gap_seed(params.take, i)))));
+                        marked = true;
+                    }
+                    Part::Break(b) => line_break = Some(b),
+                    Part::Say { text, asked } => {
+                        let style = asked.style(line);
+                        if let Some((ended, before)) = last {
+                            // the pause after the last utterance: as it ended (and the line breaks
+                            // since), in its style; none after a pause marker or a breath
+                            let gap = if !self.reading.natural_pauses {
+                                Some(styles::FIXED_GAP_MS)
+                            } else if marked {
+                                None
+                            } else {
+                                Some(styles::gap_ms(line_break.unwrap_or(ended), before, Self::gap_seed(params.take, i)))
+                            };
+                            if let Some(ms) = gap {
+                                out.resize(out.len().saturating_add(samples(ms)), 0.0);
+                            }
                         }
+                        let (reference, used) = self.reference_for(style);
+                        let sampler = params.sampler(style);
                         let a = match strict {
-                            None => self.read(&u, params.pace, Self::seed(params.take, i, 0))?,
+                            None => self.read_take(&self.reading, &reference, sampler, &text, params.pace, Self::seed(params.take, i, 0))?,
                             Some(st) => {
+                                // every retake keeps the line's style, reference and sampler
                                 let mut read = |attempt: u32| {
                                     let seed = Self::seed(params.take, i, attempt);
-                                    Ok(heard::Read { samples: self.read_as(&self.reading.for_attempt(attempt), &u, params.pace, seed)?, seed })
+                                    Ok(heard::Read {
+                                        samples: self.read_take(&self.reading.for_attempt(attempt), &reference, sampler, &text, params.pace, seed)?,
+                                        seed,
+                                    })
                                 };
-                                let (a, c) = st.read_until_clear(&u, rate, &mut read)?;
+                                let (a, mut c) = st.read_until_clear(&text, rate, &mut read)?;
+                                c.style = style.map(|s| match used {
+                                    Some(u) if u == s => s.to_string(),
+                                    Some(u) => format!("{s} (after the {u} reference)"),
+                                    None => format!("{s} (after the main reference)"),
+                                });
                                 checks.push(c);
                                 a
                             }
                         };
                         out.extend_from_slice(&a);
-                        spoke = true;
+                        last = Some((styles::boundary_after(&text), style));
+                        marked = false;
+                        line_break = None;
                     }
                 }
                 if out.len() > max {
                     return Err(TtsError::AudioTooLong);
                 }
             }
-            if !spoke {
+            if last.is_none() {
                 return Err(TtsError::Empty);
             }
             let mut out = if params.semitones.abs() > 1e-6 { neural::pitch_shift(out, params.semitones, rate) } else { out };
@@ -1729,7 +1989,12 @@ mod malayalam_voice {
     #[cfg(test)]
     impl MalayalamVoice {
         pub(crate) fn new(gender: Gender, model: Arc<F5>, reference: Arc<Reference>, reading: Reading) -> MalayalamVoice {
-            MalayalamVoice { gender, model, reference, reading }
+            MalayalamVoice { gender, model, reference, reading, styles: Vec::new(), room: Vec::new() }
+        }
+
+        /// The voice with these style references and room tone.
+        pub(crate) fn with_styles(self, styles: Vec<(&'static str, Arc<Reference>)>, room: Vec<f32>) -> MalayalamVoice {
+            MalayalamVoice { styles, room, ..self }
         }
     }
 
@@ -2786,7 +3051,8 @@ pub(crate) mod tests {
         let a = v.synthesize(script, &Params::default()).unwrap();
         assert_eq!(a.sample_rate, crate::f5::RATE);
         assert!(a.samples.iter().all(|x| x.is_finite() && x.abs() <= 0.98));
-        assert!(a.seconds() > 0.5 + 0.25, "{}", a.seconds());
+        // the pause marker is exact: no other pause after it
+        assert!(a.seconds() > 0.5 + 0.08, "{}", a.seconds());
         assert_eq!(v.synthesize(script, &Params::default()).unwrap(), a, "deterministic");
         assert_ne!(v.synthesize(script, &Params { take: 1, ..Default::default() }).unwrap(), a, "another take reads afresh");
         let fast = v.synthesize(script, &Params { pace: 2.0, ..Default::default() }).unwrap();
@@ -2849,6 +3115,145 @@ pub(crate) mod tests {
         assert!(Reading { tail_ms: 5000, ..Default::default() }.check().is_err());
         assert!(Reading { steps: 0, ..Default::default() }.check().is_err());
         assert!(Reading { lead_in: Some("ക".repeat(200)), ..Default::default() }.check().is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Voice styles on a tiny random IndicF5: a delivery reads after its style's reference (or
+    /// the nearest one the voice has) with its preset; tags switch styles within a script and
+    /// are never read; plain readings are unchanged by styles; pauses follow the punctuation and
+    /// the style; `[breath]` is room tone; the strict check hears each part against its own words.
+    #[cfg(feature = "indicf5")]
+    #[test]
+    fn a_malayalam_voice_reads_in_styles() {
+        let root = tmp("ml-styles");
+        let models = natural_clone(&root);
+        let voices = voices_dir(&models);
+        let r = prepare_cross_lingual(&models, "clone:my-voice", None, Some("hello there, this is my voice"), &mut |_| Err(String::new())).unwrap();
+        // an excited reference: another stretch of the speaker
+        let x = bursts(24_000, &[(1.5, 0.2); 5]);
+        let n = NewStyle {
+            style: "excited",
+            audio: &x,
+            rate: 24_000,
+            source: "IMG_9.MOV [3–11.5 s]",
+            from: 3.0,
+            to: 11.5,
+            transcript: "ഇത് കൊള്ളാം, ശരിക്കും കൊള്ളാം",
+            given: true,
+            to_sentence: false,
+        };
+        set_style(&models, "clone:my-voice", &n).unwrap();
+        let dir = root.join("f5");
+        crate::f5::model::tests::fake_release(&dir);
+        let m = Arc::new(crate::f5::F5::load_on(&dir, &candle_core::Device::Cpu).unwrap());
+        let p = load_profile(&voices, "clone:my-voice").unwrap();
+        let reading = Reading { steps: 2, ..Default::default() };
+        let main = malayalam_voice::reference(&p, &r, &m, &models, &reading).unwrap();
+        let sr = style_reference(&models, "clone:my-voice", "excited").unwrap().unwrap();
+        let excited = malayalam_voice::reference(&p, &sr, &m, &models, &reading).unwrap();
+        let plain = malayalam_voice::MalayalamVoice::new(Gender::Male, m.clone(), main.clone(), reading.clone());
+        let room = vec![0.01f32; 4800];
+        let styled = malayalam_voice::MalayalamVoice::new(Gender::Male, m.clone(), main.clone(), reading.clone()).with_styles(vec![("excited", excited)], room);
+        assert_eq!(styled.styles(), ["excited"]);
+        let one = "ഇത് ശരിയാണ്.";
+        let say = |v: &malayalam_voice::MalayalamVoice, text: &str, q: Params| v.synthesize(text, &q).unwrap();
+        // plain reads exactly as before, styles or not
+        let base = say(&plain, one, Params::default());
+        assert_eq!(say(&styled, one, Params::default()), base);
+        // excited: after its own reference, with its preset
+        let ex = say(&styled, one, Params { delivery: Some("excited"), ..Default::default() });
+        let ex_main = say(&plain, one, Params { delivery: Some("excited"), ..Default::default() });
+        assert!(ex != base && ex != ex_main && ex_main != base, "the reference and the preset both count");
+        // amazed has no reference of its own: it reads after the excited one (its preset made equal)
+        let like_excited = Params { delivery: Some("amazed"), temperature: Some(1.1), emphasis: Some(2.4), speed: Some(1.06), ..Default::default() };
+        assert_eq!(say(&styled, one, like_excited), ex);
+        // a tag does what a delivery does, and is not read
+        assert_eq!(say(&styled, "[excited] ഇത് ശരിയാണ്.", Params::default()), ex);
+        assert_eq!(say(&styled, "[Plain]ഇത് ശരിയാണ്.", Params { delivery: Some("excited"), ..Default::default() }), base);
+        // an explicit setting beats the preset; the reading is deterministic
+        let cooler = say(&styled, one, Params { delivery: Some("excited"), temperature: Some(0.7), ..Default::default() });
+        assert_ne!(cooler, ex);
+        assert_eq!(say(&styled, one, Params { delivery: Some("excited"), temperature: Some(0.7), ..Default::default() }), cooler);
+        assert!(styled.synthesize(one, &Params { temperature: Some(9.0), ..Default::default() }).is_err());
+        assert!(styled.synthesize(one, &Params { delivery: Some("angry"), ..Default::default() }).is_err());
+        // natural pauses: longer at a line break than the fixed 250 ms, shorter excited than calm
+        let two = "ഇത് ശരിയാണ്.\nഅത് തെറ്റാണ്.";
+        let fixed = malayalam_voice::MalayalamVoice::new(Gender::Male, m.clone(), main.clone(), Reading { natural_pauses: false, ..reading.clone() });
+        let (nat, old) = (say(&plain, two, Params::default()), say(&fixed, two, Params::default()));
+        let extra = (nat.samples.len() as f64 - old.samples.len() as f64) / 24_000.0;
+        assert!((0.17..=0.29).contains(&extra), "a line break pauses 422–538 ms, not 250: {extra}");
+        let same = |d: &'static str| Params { delivery: Some(d), temperature: Some(1.0), emphasis: Some(2.0), speed: Some(1.0), ..Default::default() };
+        let (quick, slow) = (say(&plain, two, same("excited")), say(&plain, two, same("calm")));
+        assert!(quick.samples.len() < slow.samples.len());
+        // a breath is the clip's room tone; without one, silence
+        let breathe = say(&styled, "ഇത് ശരിയാണ്. [breath] അത് തെറ്റാണ്.", Params::default());
+        assert!(breathe.samples.iter().any(|v| (v.abs() - 0.01).abs() < 1e-6), "room tone");
+        assert!(plain.synthesize("ഇത് ശരിയാണ്. [breath] അത് തെറ്റാണ്.", &Params::default()).is_ok());
+        // the strict check hears each part against its own words, and says how it was read
+        struct Deaf;
+        impl crate::heard::Hearer for Deaf {
+            fn hear(&self, _: &[f32], _: u32) -> Result<String, String> {
+                Ok(String::new())
+            }
+            fn id(&self) -> String {
+                "deaf".into()
+            }
+        }
+        let strict = crate::heard::Strict::new(&Deaf, crate::heard::Policy { max_takes: 2, max_cer: 0.2, max_start_cer: 0.2 });
+        let q = Params { delivery: Some("excited"), ..Default::default() };
+        let (_, report) = styled.synthesize_checked("ഇത് ശരിയാണ്. [calm] അത് തെറ്റാണ്!", &q, &strict).unwrap();
+        assert_eq!(report.len(), 2);
+        assert_eq!((report[0].text.as_str(), report[1].text.as_str()), ("ഇത് ശരിയാണ്.", "അത് തെറ്റാണ്!"));
+        assert_eq!(report[0].style.as_deref(), Some("excited"));
+        assert_eq!(report[1].style.as_deref(), Some("calm (after the main reference)"));
+        assert!(report.iter().all(|c| c.takes == 2), "retakes keep the part's settings and read again");
+        let (_, plain_report) = plain.synthesize_checked(one, &Params::default(), &strict).unwrap();
+        assert_eq!(plain_report[0].style, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What the narration cache keys a Malayalam reading on beyond the voice: nothing for a plain
+    /// reading of one utterance; the style references a reading uses (and nothing it does not);
+    /// natural pauses when it has more than one utterance.
+    #[cfg(feature = "indicf5")]
+    #[test]
+    fn the_reading_identity_follows_the_styles_used() {
+        let root = tmp("ml-identity");
+        let models = natural_clone(&root);
+        prepare_cross_lingual(&models, "clone:my-voice", None, Some("hello there, this is my voice"), &mut |_| Err(String::new())).unwrap();
+        let id = |text: &str, q: Params| malayalam_reading_identity(&models, "clone:my-voice", text, &q).unwrap();
+        let one = "ഇത് ശരിയാണ്.";
+        assert_eq!(id(one, Params::default()), "", "a plain reading of one utterance keeps its key");
+        assert_eq!(id("ഇത് ശരിയാണ്. അത് തെറ്റാണ്.", Params::default()), "", "two sentences in one utterance");
+        assert_eq!(id("ഇത് ശരിയാണ്.\nഅത് തെറ്റാണ്.", Params::default()), format!("pauses v{}", crate::styles::VERSION));
+        assert_eq!(id("ഇത് ശരിയാണ്. [breath]", Params::default()), format!("pauses v{}", crate::styles::VERSION));
+        let excited = Params { delivery: Some("excited"), ..Default::default() };
+        assert_eq!(id(one, excited), format!("styles v{}", crate::styles::VERSION), "a preset, the main reference");
+        // an excited reference: excited (and amazed) readings key on it; calm and plain do not
+        let x = bursts(24_000, &[(1.5, 0.2); 5]);
+        let n =
+            NewStyle {
+                style: "excited", audio: &x, rate: 24_000, source: "x", from: 0.0, to: 8.5, transcript: "ഇത് കൊള്ളാം", given: true, to_sentence: false
+            };
+        let set = set_style(&models, "clone:my-voice", &n).unwrap();
+        let with = id(one, excited);
+        assert!(with.contains(&set.reference.clip_sha), "{with}");
+        assert!(id(one, Params { delivery: Some("amazed"), ..Default::default() }).contains(&set.reference.clip_sha));
+        assert!(id("[excited] ഇത് ശരിയാണ്.", Params::default()).contains(&set.reference.clip_sha));
+        assert_eq!(id(one, Params { delivery: Some("calm"), ..Default::default() }), format!("styles v{}", crate::styles::VERSION));
+        assert_eq!(id(one, Params::default()), "", "plain still keeps its key");
+        // new words for the style: another identity
+        let n2 = NewStyle { transcript: "ഇത് ശരിക്കും കൊള്ളാം", ..n.clone() };
+        set_style(&models, "clone:my-voice", &n2).unwrap();
+        assert_ne!(id(one, excited), with);
+        // the cache's view: English unchanged, Malayalam extended only when there is something
+        let en = crate::cache::voice_identity("clone:my-voice", Some(&models)).unwrap();
+        assert_eq!(crate::cache::reading_identity_for("clone:my-voice", "en-US", Some(&models), "Hello.", &excited), Some(en));
+        let ml = crate::cache::voice_identity_for("clone:my-voice", "ml-IN", Some(&models)).unwrap();
+        assert_eq!(crate::cache::reading_identity_for("clone:my-voice", "ml-IN", Some(&models), one, &Params::default()), Some(ml.clone()));
+        assert_ne!(crate::cache::reading_identity_for("clone:my-voice", "ml-IN", Some(&models), one, &excited), Some(ml));
+        // hostile params are refused, never keyed
+        assert!(malayalam_reading_identity(&models, "clone:my-voice", one, &Params { speed: Some(f32::NAN), ..Default::default() }).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

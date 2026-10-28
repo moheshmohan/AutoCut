@@ -176,6 +176,8 @@ const VALUED_IN: &[(&str, &[&str])] = &[
     ("captions", &["--track", "--words", "--active-color", "--keyword-color", "--keywords", "--emoji", "--position", "--font", "--from"]),
     ("scenes", &["--detail", "--limit", "--purpose", "--count", "--sheet"]),
     ("quick", &["--template", "--full-detail"]),
+    // voice style set: the recording and a style finder pick
+    ("voice", &["--file", "--item", "--candidate"]),
     (
         "direct",
         &[

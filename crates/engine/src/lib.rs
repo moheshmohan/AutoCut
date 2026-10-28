@@ -107,6 +107,7 @@ pub mod video_templates;
 pub mod voice_clone;
 pub mod voice_fx;
 pub mod voice_lab;
+pub mod voice_styles;
 pub mod voiceover;
 pub mod vr360;
 pub mod vr_moves;

@@ -3590,6 +3590,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::music_preview::commands());
     v.extend(crate::soundfonts::commands());
     v.extend(crate::voice_clone::commands());
+    v.extend(crate::voice_styles::commands());
     v.extend(crate::voice_lab::commands());
     v.extend(crate::video_templates::commands());
     v.extend(crate::music_neural::commands());

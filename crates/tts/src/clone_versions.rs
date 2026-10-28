@@ -133,7 +133,7 @@ pub fn versions(models_dir: &Path, id: &str) -> Result<Vec<Version>, TtsError> {
 }
 
 /// Put the voice's current references aside as a version; returns it.
-fn archive(voices: &Path, p: &Profile, reason: &str) -> Result<Version, TtsError> {
+pub(super) fn archive(voices: &Path, p: &Profile, reason: &str) -> Result<Version, TtsError> {
     let root = versions_dir(voices, p)?;
     std::fs::create_dir_all(&root).map_err(io(&root))?;
     let mut name = format!("r{}", p.revision);
@@ -187,13 +187,18 @@ fn prune(root: &Path) {
 }
 
 /// Write `bytes` to `path` through a temporary file.
-fn put(path: &Path, bytes: &[u8]) -> Result<(), TtsError> {
+pub(super) fn put(path: &Path, bytes: &[u8]) -> Result<(), TtsError> {
     let tmp = path.with_extension("part");
     std::fs::write(&tmp, bytes).map_err(io(&tmp))?;
     std::fs::rename(&tmp, path).map_err(io(path))
 }
 
-fn put_wav(path: &Path, x: &[f32], rate: u32) -> Result<(), TtsError> {
+/// The revision a voice's next reference gets: one past every revision it has had.
+pub(super) fn next_revision(models_dir: &Path, id: &str, p: &Profile) -> Result<u32, TtsError> {
+    Ok(versions(models_dir, id)?.iter().map(|v| v.revision).chain(std::iter::once(p.revision)).max().unwrap_or(0).saturating_add(1))
+}
+
+pub(super) fn put_wav(path: &Path, x: &[f32], rate: u32) -> Result<(), TtsError> {
     let tmp = path.with_extension("part.wav");
     crate::wav::write(&tmp, x, rate)?;
     std::fs::rename(&tmp, path).map_err(io(path))
@@ -228,7 +233,7 @@ pub fn promote(models_dir: &Path, id: &str, r: &NewReference) -> Result<Version,
         return Err(TtsError::Invalid("the new reference's words are too long".into()));
     }
     let secs = r.audio.len() as f64 / f64::from(r.rate);
-    let next = versions(models_dir, id)?.iter().map(|v| v.revision).chain(std::iter::once(p.revision)).max().unwrap_or(0).saturating_add(1);
+    let next = next_revision(models_dir, id, &p)?;
     match r.part {
         Part::Sample => {
             let bounds = if n.mode == PromptMode::Continuation { (CONTINUATION_SECONDS.0, 30.0) } else { (SAMPLE_SECONDS.0, 30.5) };
@@ -267,6 +272,8 @@ pub fn promote(models_dir: &Path, id: &str, r: &NewReference) -> Result<Version,
                 c.sample = sample_hash(&voices, &p)?;
                 put(&cross_path(&voices, &p)?, &serde_json::to_vec_pretty(&c).map_err(|e| TtsError::Model(e.to_string()))?)?;
             }
+            // and so are its style references
+            super::style_refs::retie(&voices, &p)?;
             Ok(version)
         }
         Part::Malayalam => {

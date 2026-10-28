@@ -108,6 +108,8 @@ fn voice_reference(s: &mut Session, p: &Value) -> Result<Value> {
         if trimming {
             let t = filmcraft_tts::clone::Trim { start: trim.start, end: trim.end, to_sentence: trim.to_sentence, transcript };
             let r = filmcraft_tts::clone::trim_cross_reference(&models, &voice, &t).map_err(|e| bad(cmd, e.to_string()))?;
+            // readings kept in memory were read after the clip as it was
+            crate::narration::forget_readings(s);
             let checked = if check_words { transcript_check(s, &models, &r) } else { Value::Null };
             return Ok(
                 json!({"voice": voice, "source": r.source, "from": r.from, "to": r.to, "seconds": r.to - r.from, "transcript": r.transcript, "given": r.given, "clip": r.clip, "trimmed": true, "transcriptCheck": checked}),
@@ -141,6 +143,7 @@ fn voice_reference(s: &mut Session, p: &Value) -> Result<Value> {
                 filmcraft_tts::clone::prepare_cross_lingual(&models, &voice, src, transcript.as_deref(), &mut hear).map_err(|e| bad(cmd, e.to_string()))?
             }
         };
+        crate::narration::forget_readings(s);
         let checked = if check_words { transcript_check(s, &models, &r) } else { Value::Null };
         Ok(
             json!({"voice": voice, "source": r.source, "from": r.from, "to": r.to, "transcript": r.transcript, "given": r.given, "clip": r.clip, "transcriptCheck": checked}),
@@ -164,7 +167,7 @@ pub const TRANSCRIPT_MATCH_CER: f64 = 0.3;
 /// that do not match the clip garble the start of every line): the clip heard by the Malayalam
 /// speech model and scored against them. Only words written in Malayalam are checked.
 #[cfg(feature = "neural-voices")]
-fn transcript_check(s: &Session, models: &std::path::Path, r: &filmcraft_tts::clone::CrossReference) -> Value {
+pub(crate) fn transcript_check(s: &Session, models: &std::path::Path, r: &filmcraft_tts::clone::CrossReference) -> Value {
     if !filmcraft_tts::malayalam::detect(&r.transcript) {
         return json!({"status": "skipped", "reason": "the words are not written in Malayalam"});
     }
@@ -202,7 +205,8 @@ pub fn cloned_json() -> Value {
     #[cfg(feature = "neural-voices")]
     {
         let Some(dir) = crate::transcript::models_dir() else { return json!([]) };
-        let list = filmcraft_tts::clone::list(&filmcraft_tts::clone::voices_dir(&dir));
+        let voices = filmcraft_tts::clone::voices_dir(&dir);
+        let list = filmcraft_tts::clone::list(&voices);
         json!(
             list.iter()
                 .map(|p| {
@@ -219,6 +223,8 @@ pub fn cloned_json() -> Value {
                             v["steps"] = json!(n.timesteps);
                             v["transcript"] = json!(n.transcript);
                             v["sample"] = json!({"from": n.from, "to": n.to});
+                            // the Malayalam voice styles it keeps references for (tts.voiceStyles)
+                            v["styles"] = json!(filmcraft_tts::clone::styles_on_disk(&voices, p));
                         }
                         None => {
                             v["model"] = json!(OPENVOICE);

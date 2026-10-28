@@ -83,6 +83,29 @@ pub fn voice_identity_for(id: &str, language: &str, models_dir: Option<&Path>) -
     malayalam_identity(id, models_dir?)
 }
 
+/// [`voice_identity_for`] of a reading of `text` with `params`: for Malayalam also the style
+/// references it reads after and its natural pauses ([`crate::clone::malayalam_reading_identity`]),
+/// added only when there are, so a plain reading of one utterance keeps the key it always had
+/// and a styled reading never shares a plain one's. English is [`voice_identity_for`] exactly.
+pub fn reading_identity_for(id: &str, language: &str, models_dir: Option<&Path>, text: &str, params: &Params) -> Option<String> {
+    let identity = voice_identity_for(id, language, models_dir)?;
+    if !crate::malayalam::is_tag(language) {
+        return Some(identity);
+    }
+    let extra = malayalam_reading(id, models_dir?, text, params)?;
+    Some(if extra.is_empty() { identity } else { format!("{identity}|{extra}") })
+}
+
+#[cfg(feature = "kokoro")]
+fn malayalam_reading(id: &str, models_dir: &Path, text: &str, params: &Params) -> Option<String> {
+    crate::clone::malayalam_reading_identity(models_dir, id, text, params).ok()
+}
+
+#[cfg(not(feature = "kokoro"))]
+fn malayalam_reading(_id: &str, _models_dir: &Path, _text: &str, _params: &Params) -> Option<String> {
+    None
+}
+
 #[cfg(feature = "kokoro")]
 fn malayalam_identity(id: &str, models_dir: &Path) -> Option<String> {
     let voices = crate::clone::voices_dir(models_dir);
@@ -229,6 +252,19 @@ impl DiskCache {
         if params.take != 0 {
             h.update(b"take");
             h.update(params.take.to_le_bytes());
+        }
+        // a voice style and sampler settings (Malayalam), only when given: readings without them
+        // keep their keys
+        if let Some(d) = params.delivery {
+            h.update(b"delivery");
+            h.update((d.len() as u64).to_le_bytes());
+            h.update(d.as_bytes());
+        }
+        for (name, v) in [(&b"temperature"[..], params.temperature), (&b"emphasis"[..], params.emphasis), (&b"speed"[..], params.speed)] {
+            if let Some(v) = v {
+                h.update(name);
+                h.update(v.to_bits().to_le_bytes());
+            }
         }
         hex(&h.finalize())
     }
@@ -505,6 +541,44 @@ mod tests {
         assert_ne!(a, warm);
         assert_ne!(warm, DiskCache::key("x", "ab", &Params { style: Some("calm"), ..p }));
         assert_ne!(a, DiskCache::key("x", "ab", &Params { take: 1, ..p }), "another take is another reading");
+        // a voice style and sampler settings: each its own key, none when not given
+        let styled = DiskCache::key("x", "ab", &Params { delivery: Some("excited"), ..p });
+        assert_ne!(a, styled);
+        assert_ne!(styled, DiskCache::key("x", "ab", &Params { delivery: Some("calm"), ..p }));
+        let keys: Vec<String> = [
+            Params { temperature: Some(0.7), ..p },
+            Params { temperature: Some(1.3), ..p },
+            Params { emphasis: Some(0.7), ..p },
+            Params { speed: Some(0.7), ..p },
+            Params { delivery: Some("excited"), temperature: Some(0.7), ..p },
+        ]
+        .iter()
+        .map(|q| DiskCache::key("x", "ab", q))
+        .collect();
+        for (i, k) in keys.iter().enumerate() {
+            assert!(k != &a && k != &styled && keys.iter().skip(i + 1).all(|o| o != k), "{i}");
+        }
+    }
+
+    /// Regression: the plain key is exactly the one narrations were cached under before voice
+    /// styles and sampler settings existed (their entries are served still).
+    #[test]
+    fn plain_keys_are_unchanged() {
+        let p = Params { semitones: 2.0, pace: 1.25, style: Some("warm"), take: 3, ..Params::default() };
+        let mut h = Sha256::new();
+        h.update(FORMAT_VERSION.to_le_bytes());
+        for part in [&b"voice|x"[..], "ഇത്.".as_bytes()] {
+            h.update((part.len() as u64).to_le_bytes());
+            h.update(part);
+        }
+        h.update(2.0f64.to_bits().to_le_bytes());
+        h.update(1.25f64.to_bits().to_le_bytes());
+        h.update(b"style");
+        h.update(4u64.to_le_bytes());
+        h.update(b"warm");
+        h.update(b"take");
+        h.update(3u32.to_le_bytes());
+        assert_eq!(DiskCache::key("voice|x", "ഇത്.", &p), hex(&h.finalize()));
     }
 
     #[test]

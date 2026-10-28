@@ -453,6 +453,10 @@ pub struct Checked {
     /// What failed the kept reading (empty when it passed).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flagged: Vec<String>,
+    /// The voice style it was read in and the style reference it was read after (a voice that
+    /// keeps references per style, [`crate::styles`]), when not plain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
     /// Every reading, in order.
     pub tries: Vec<Try>,
 }
@@ -552,6 +556,7 @@ pub fn read_until_clear_judged(
         second: t.second.clone(),
         similarity: t.similarity,
         flagged: t.flagged.clone(),
+        style: None,
         tries,
     };
     Ok((audio, checked))

@@ -25,7 +25,8 @@
 //! }
 //! ```
 //!
-//! - **`entries`**: each named entry changed in place. `line`, `chips`, `delivery` and `say` are its
+//! - **`entries`**: each named entry changed in place. `line`, `chips`, `delivery`, `say` and
+//!   `voice` (`{"temperature", "emphasis", "speed"}`, how a Malayalam voice reads it) are its
 //!   script parts; `shots` replaces its shots; `shotEdits` changes fields of its shots of an item
 //!   (`null` removes one); `unix` is seconds or a date (`"2022-01-23 13:40:35"`, in the patch's
 //!   `timezone`, else UTC, unless it carries its own `Z`/`+hh:mm`); `split` makes more entries
@@ -52,7 +53,7 @@
 //!   A leading `~/` of `outro.logo` is expanded.
 //!
 //! Then the entries are sorted by `unix`, numbered from 1, and `script.lines`, `chips`,
-//! `delivery` and `say` are rebuilt aligned with them (a scene's chips are dropped, chips are cut
+//! `delivery`, `say` and `voice` are rebuilt aligned with them (`voiceDefault` stays) (a scene's chips are dropped, chips are cut
 //! to three, `delivery` defaults to warm). [`apply`] reports the entries left without a line.
 //!
 //! [`fill_places`] gives entries without a `place` the one Google Photos shows for their first
@@ -78,7 +79,7 @@ const CHIPS: usize = crate::look::MAX_CHIPS;
 /// The delivery an entry without one gets.
 const DEFAULT_DELIVERY: &str = "warm";
 /// Fields of an entry patch that are not entry fields.
-const RECORD_KEYS: [&str; 8] = ["line", "chips", "delivery", "say", "shotEdits", "split", "remove", "shots"];
+const RECORD_KEYS: [&str; 9] = ["line", "chips", "delivery", "say", "voice", "shotEdits", "split", "remove", "shots"];
 /// Top-level patch keys that are not plan fields.
 const PATCH_KEYS: [&str; 4] = ["entries", "add", "script", "timezone"];
 
@@ -171,6 +172,8 @@ struct Rec {
     chips: Option<Value>,
     delivery: Option<String>,
     say: Option<String>,
+    /// How the voice reads its line (`script.voice`: temperature, emphasis, speed).
+    voice: Option<Value>,
 }
 
 impl Rec {
@@ -221,6 +224,7 @@ fn records(plan: &Value) -> Result<Vec<Rec>, AutoCutError> {
                 chips: by("chips", n).filter(Value::is_array),
                 delivery: by("delivery", n).and_then(|d| d.as_str().map(str::to_string)),
                 say: by("say", n).and_then(|d| d.as_str().map(str::to_string)),
+                voice: by("voice", n).filter(Value::is_object),
             })
         })
         .collect()
@@ -278,7 +282,7 @@ pub fn apply(base: &Value, patches: &[Value], clips: &Clips) -> Result<Patched, 
                     Some(Value::Array(splits)) if splits.len() <= MAX_SPLITS => {
                         for (k, s) in splits.iter().enumerate() {
                             let s = s.as_object().ok_or_else(|| at(format!("entries.{}.split[{k}]: an object", clip(label))))?;
-                            let mut new = Rec { entry: rec.entry.clone(), line: String::new(), chips: None, delivery: None, say: None };
+                            let mut new = Rec { entry: rec.entry.clone(), line: String::new(), chips: None, delivery: None, say: None, voice: None };
                             change(&mut new, s, &own, &pool, clips, tz).map_err(|m| at(format!("entries.{}.split[{k}]: {m}", clip(label))))?;
                             more.push(new);
                         }
@@ -299,7 +303,7 @@ pub fn apply(base: &Value, patches: &[Value], clips: &Clips) -> Result<Patched, 
                     for (key, d) in [("label", json!(label)), ("kind", json!("")), ("description", json!("")), ("unix", Value::Null)] {
                         entry.insert(key.into(), d);
                     }
-                    let mut new = Rec { entry, line: String::new(), chips: None, delivery: None, say: None };
+                    let mut new = Rec { entry, line: String::new(), chips: None, delivery: None, say: None, voice: None };
                     change(&mut new, s, &[], &pool, clips, tz).map_err(|m| at(format!("add.{}: {m}", clip(label))))?;
                     if new.shots().is_empty() {
                         return Err(at(format!("add.{}: a new entry needs shots", clip(label))));
@@ -393,6 +397,12 @@ fn finish(mut plan: Map<String, Value>, mut recs: Vec<Rec>, old_robots: usize, p
     recs.sort_by_key(|r| (r.unix().is_none(), r.unix().unwrap_or(0)));
     let mut entries = Vec::with_capacity(recs.len());
     let (mut lines, mut chips, mut delivery, mut say) = (Vec::with_capacity(recs.len()), Map::new(), parts.delivery, parts.say);
+    // the voice settings: the intro's and outro's as they were, the entries' by their new numbers
+    let mut voice: Map<String, Value> = base_script
+        .get("voice")
+        .and_then(Value::as_object)
+        .map(|m| m.iter().filter(|(k, v)| (k.as_str() == "intro" || k.as_str() == "outro") && v.is_object()).map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
     let (mut unlined, mut silent_scenes) = (Vec::new(), 0usize);
     for (i, r) in recs.iter_mut().enumerate() {
         let n = i + 1;
@@ -405,6 +415,9 @@ fn finish(mut plan: Map<String, Value>, mut recs: Vec<Rec>, old_robots: usize, p
         delivery.insert(n.to_string(), json!(r.delivery.clone().unwrap_or_else(|| DEFAULT_DELIVERY.into())));
         if let Some(s) = &r.say {
             say.insert(n.to_string(), json!(s));
+        }
+        if let Some(v) = &r.voice {
+            voice.insert(n.to_string(), v.clone());
         }
         if r.line.trim().is_empty() {
             if r.scene() {
@@ -425,8 +438,11 @@ fn finish(mut plan: Map<String, Value>, mut recs: Vec<Rec>, old_robots: usize, p
     }
     // the script: the base's other fields kept, its parts rebuilt
     let mut script = base_script;
-    for k in ["intro", "outro", "lines", "templated", "chips", "pronounce", "delivery", "say"] {
+    for k in ["intro", "outro", "lines", "templated", "chips", "pronounce", "delivery", "say", "voice"] {
         script.remove(k);
+    }
+    if !voice.is_empty() {
+        script.insert("voice".into(), Value::Object(voice));
     }
     script.insert("intro".into(), json!(intro));
     script.insert("outro".into(), json!(outro));
@@ -525,6 +541,17 @@ fn change(rec: &mut Rec, spec: &Map<String, Value>, own: &[Value], pool: &[Value
     }
     if let Some(s) = text("say")? {
         rec.say = s;
+    }
+    match spec.get("voice") {
+        None => {}
+        Some(Value::Null) => rec.voice = None,
+        Some(v @ Value::Object(_)) => {
+            // read as the builder reads it: a misspelt or out-of-range setting is refused here
+            let s: crate::showcase::VoiceSettings = serde_json::from_value(v.clone()).map_err(|e| format!("voice: {e}"))?;
+            s.check("of the entry")?;
+            rec.voice = Some(v.clone());
+        }
+        Some(_) => return Err("voice: an object of voice settings (temperature, emphasis, speed)".into()),
     }
     match spec.get("chips") {
         None => {}

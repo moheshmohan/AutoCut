@@ -82,3 +82,7 @@ required-features = ["neural-voices", "whisper"]
 [[example]]
 name = "narration_recheck"
 required-features = ["whisper"]
+
+[[example]]
+name = "voice_styles_lab"
+required-features = ["neural-voices", "whisper"]

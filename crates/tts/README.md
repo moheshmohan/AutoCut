@@ -157,8 +157,9 @@ clip behaviour: `crates/engine/src/narration.rs`.
     kept as `<name>.indicf5.untrimmed.wav` / `.json`. The author's hand-made cut (14.6 s ending
     mid-sentence → 9.3 s ending at "…ഇല്ല.") is what the user preferred. The recording is English:
     IndicF5 is prompted across languages. `clone:<name>` in Malayalam reads each utterance after
-    it (pace is IndicF5's own speed, pitch the pitch shifter; takes reseed), 250 ms between
-    utterances, under the GPU lock. The duration is held within 4.6–6 syllables a second
+    it (pace is IndicF5's own speed, pitch the pitch shifter; takes reseed), with natural pauses
+    between utterances (`styles::gap_ms`, below; 250 ms each before 2026-10-28,
+    `Reading::natural_pauses` off), under the GPU lock. The duration is held within 4.6–6 syllables a second
     (Malayalam read aloud runs about 5–6): the reference's characters-per-second estimate is
     far off across languages and when the speech model adds words that were never said. The
     reference's words reach IndicF5 as written (Malayalam through the Malayalam front end,
@@ -167,6 +168,36 @@ clip behaviour: `crates/engine/src/narration.rs`.
     is a `clone::Reading` (the pause after the reference, packing, sampler, lead-in; the
     default is the measured best), every utterance with its own seed
     (`MalayalamVoice::seed(take, utterance, attempt)`).
+  - `styles` (no feature) and `clone`'s style references: **voice styles** (F5-TTS's
+    multi-style generation: one reference audio and text per style). IndicF5 reads in the
+    emotion and prosody of the clip it continues, so a natural clone keeps a reference per style
+    beside its main (plain) one: `<name>.indicf5.<style>.wav` / `.json` for `conversational`,
+    `warm`, `excited`, `amazed`, `curious`, `calm`, `dramatic` (`clone::set_style`,
+    `tts.voiceStyles`; 5–16 s of the speaker's own speech, cut at the last sentence end its words
+    imply, faded, tied to the voice sample like the main reference; setting or removing one keeps
+    the voice's references as a version, `clone::versions` / `rollback`, and a promoted sample
+    keeps them). A line's delivery (`Params::delivery`) reads after its style's reference, else
+    the nearest the voice has (`styles::resolve`: amazed → excited → conversational, excited →
+    amazed → conversational, curious → conversational, conversational ↔ warm, calm → warm,
+    dramatic → calm → warm), else the main one. Each style has a **sampler preset**
+    (`styles::preset`: temperature — the scale of the flow-matching sampler's initial noise,
+    Matcha-TTS's `temperature`, 1 leaves the noise untouched bit for bit — emphasis, the
+    classifier-free guidance `f5::Settings::cfg`, and speed on top of the pace); `Params`'
+    `temperature` (0.3–1.5), `emphasis` (1–4) and `speed` (0.7–1.4) override it; plain has none
+    (the reading is exactly what it was). **Inline tags** (`script::parse_marked`,
+    `malayalam::parts`): `[excited] … [calm] …` switch the style for what follows (an utterance
+    never spans a tag or a line break), `[plain]` / `[neutral]` go back, `[breath]` is a
+    breath-length pause of the clip's room tone; tags are never read aloud, the strict check
+    hears each part against its own words, and a retake keeps its part's reference and sampler.
+    **Natural pauses** (`styles::gap_ms`): the pause after an utterance follows how it ends — a
+    full stop 320 ms, `?` 400, `!` 340, `…` 560, a comma 180, a split between words 110, a line
+    break 480, a blank line 760 — scaled by its style (excited ×0.8 … calm ×1.25, dramatic
+    ×1.35), ±12 % seeded by the take and the utterance (deterministic); none after a pause
+    marker, which is exact. The narration cache keys a styled reading on the style references it
+    reads after (`cache::reading_identity_for`, `clone::malayalam_reading_identity`) and on the
+    delivery and sampler settings it was given, so a plain reading of one utterance keeps the key
+    it always had and a styled reading never reuses a plain one; a reading of more than one
+    utterance keys on the pauses' version (`styles::VERSION`).
   - `heard` (no feature): **the strict check**. `Voice::synthesize_checked` reads under it:
     the Malayalam voice hears every utterance with a `heard::Hearer` (the engine's: the
     Malayalam speech model, `filmcraft_speech::models::MALAYALAM_MODEL`), scores it

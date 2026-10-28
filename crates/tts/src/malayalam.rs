@@ -33,8 +33,12 @@
 //! - [`pieces`]: pause markers (`[pause 1s]`) become exact silence; sentences (`.` `?` `!` `।`)
 //!   are grouped into utterances of at most the given length, a long sentence split at commas,
 //!   else between words.
+//! - [`parts`]: how a cloned voice reads a script — as [`pieces`], and also style tags
+//!   (`[excited] … [calm] …`, never read aloud: each utterance carries the style in force),
+//!   `[breath]`, and line breaks (an utterance never spans one; the pause there is longer).
 
-use crate::script::{self, Segment};
+use crate::script::{self, Mark, Segment};
+use crate::styles::{Asked, Boundary, Tag};
 use crate::{TtsError, check_text};
 
 /// The language tag of Malayalam narrations.
@@ -535,19 +539,28 @@ pub fn normalize_with(text: &str, style: Numbers) -> Normalized {
 }
 
 /// `text` with only its numbers spelled out in `style` (and its spelling made canonical):
-/// everything else, pause markers included, stays as written, for the voice's front end to
-/// read. Lets a caller choose how numbers are said before the voice reads the script.
+/// everything else, pause markers and style tags included, stays as written, for the voice's
+/// front end to read. Lets a caller choose how numbers are said before the voice reads the script.
 pub fn spell_numbers(text: &str, style: Numbers) -> String {
+    let marks = script::parse_marked(text);
+    // line breaks between markers matter only to a script with style tags (and a script without
+    // keeps the text it always had: its narrations keep their cache keys)
+    let tagged = marks.iter().any(|m| matches!(m, Mark::Tag(_)));
     let mut out = String::with_capacity(text.len() * 2);
-    for seg in script::parse(text) {
-        match seg {
-            Segment::Speech(t) => out.push_str(&rewrite(&t, style, true).text),
-            Segment::Pause { millis } => {
-                if !out.is_empty() && !out.ends_with(char::is_whitespace) {
-                    out.push(' ');
-                }
-                out.push_str(&format!("[pause {millis}ms]"));
-            }
+    let marker = |out: &mut String, m: &str| {
+        if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+            out.push(' ');
+        }
+        out.push_str(m);
+    };
+    for m in marks {
+        match m {
+            Mark::Speech(t) if !tagged && t.trim().is_empty() => {}
+            Mark::Speech(t) => out.push_str(&rewrite(&t, style, true).text),
+            Mark::Pause { millis } => marker(&mut out, &format!("[pause {millis}ms]")),
+            Mark::Tag(Tag::Style(s)) => marker(&mut out, &format!("[{s}]")),
+            Mark::Tag(Tag::Plain) => marker(&mut out, "[plain]"),
+            Mark::Tag(Tag::Breath) => marker(&mut out, "[breath]"),
         }
     }
     out
@@ -924,6 +937,41 @@ pub fn sentence_pieces(text: &str, max: usize) -> Result<(Vec<Piece>, Vec<String
     split_script(text, max, Numbers::default(), false)
 }
 
+/// The utterances of normalised `text`: sentences packed into utterances of at most `max`
+/// characters (`pack`), or each its own; a sentence longer than `max` split at commas, else
+/// between words.
+fn utterances(text: &str, max: usize, pack: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for s in sentences(text) {
+        if !pack && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        for part in split_long(&s, max) {
+            if !cur.is_empty() && cur.chars().count() + 1 + part.chars().count() > max {
+                out.push(std::mem::take(&mut cur));
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(&part);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Add `new` notes to `notes`, each once.
+fn merge_notes(notes: &mut Vec<String>, new: Vec<String>) {
+    for x in new {
+        if !notes.contains(&x) {
+            notes.push(x);
+        }
+    }
+}
+
 /// A script → utterances and pauses; `pack`: sentences share an utterance while they fit.
 fn split_script(text: &str, max: usize, style: Numbers, pack: bool) -> Result<(Vec<Piece>, Vec<String>), TtsError> {
     check_text(text)?;
@@ -935,29 +983,8 @@ fn split_script(text: &str, max: usize, style: Numbers, pack: bool) -> Result<(V
             Segment::Pause { millis } => out.push(Piece::Pause(millis)),
             Segment::Speech(t) => {
                 let n = normalize_with(&t, style);
-                for x in n.notes {
-                    if !notes.contains(&x) {
-                        notes.push(x);
-                    }
-                }
-                let mut cur = String::new();
-                for s in sentences(&n.text) {
-                    if !pack && !cur.is_empty() {
-                        out.push(Piece::Say(std::mem::take(&mut cur)));
-                    }
-                    for part in split_long(&s, max) {
-                        if !cur.is_empty() && cur.chars().count() + 1 + part.chars().count() > max {
-                            out.push(Piece::Say(std::mem::take(&mut cur)));
-                        }
-                        if !cur.is_empty() {
-                            cur.push(' ');
-                        }
-                        cur.push_str(&part);
-                    }
-                }
-                if !cur.is_empty() {
-                    out.push(Piece::Say(cur));
-                }
+                merge_notes(&mut notes, n.notes);
+                out.extend(utterances(&n.text, max, pack).into_iter().map(Piece::Say));
             }
         }
         if out.len() > MAX_PIECES {
@@ -970,9 +997,84 @@ fn split_script(text: &str, max: usize, style: Numbers, pack: bool) -> Result<(V
     Ok((out, notes))
 }
 
-/// What a Malayalam voice would not read as written in `text` (empty: everything reads).
+/// A piece of a script read with voice styles ([`parts`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Part {
+    /// An utterance, and the style its tags put in force.
+    Say { text: String, asked: Asked },
+    /// Exact silence (a pause marker), ms.
+    Pause(u32),
+    /// A breath-length pause (`[breath]`).
+    Breath,
+    /// A line break ([`Boundary::Line`]) or a blank line ([`Boundary::Paragraph`]) between the
+    /// utterances around it.
+    Break(Boundary),
+}
+
+/// A script → utterances, each with the style its tags put in force ([`crate::styles`]: tags
+/// are never read aloud), pauses, breaths and line breaks; and the notes of its normalisation.
+/// An utterance never spans a style tag or a line break; within them, sentences are packed into
+/// utterances of at most `max(style)` characters (`pack`: the reference each style reads after
+/// sets how much one generation holds) or each sentence is its own.
+pub fn parts(text: &str, max: &dyn Fn(Asked) -> usize, style: Numbers, pack: bool) -> Result<(Vec<Part>, Vec<String>), TtsError> {
+    check_text(text)?;
+    let mut out: Vec<Part> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    let mut asked = Asked::Line;
+    // line breaks since the last words
+    let mut breaks = 0usize;
+    for m in script::parse_marked(text) {
+        match m {
+            Mark::Pause { millis } => {
+                out.push(Part::Pause(millis));
+                breaks = 0;
+            }
+            Mark::Tag(Tag::Breath) => {
+                out.push(Part::Breath);
+                breaks = 0;
+            }
+            Mark::Tag(Tag::Plain) => asked = Asked::Plain,
+            Mark::Tag(Tag::Style(s)) => asked = Asked::Style(s),
+            Mark::Speech(t) => {
+                let limit = max(asked).max(20);
+                for (k, line) in t.split('\n').enumerate() {
+                    if k > 0 {
+                        breaks = breaks.saturating_add(1);
+                    }
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let n = normalize_with(line, style);
+                    merge_notes(&mut notes, n.notes);
+                    let says = utterances(&n.text, limit, pack);
+                    if says.is_empty() {
+                        continue;
+                    }
+                    if breaks > 0 && matches!(out.last(), Some(Part::Say { .. })) {
+                        out.push(Part::Break(if breaks >= 2 { Boundary::Paragraph } else { Boundary::Line }));
+                    }
+                    breaks = 0;
+                    out.extend(says.into_iter().map(|text| Part::Say { text, asked }));
+                    if out.len() > MAX_PIECES {
+                        return Err(TtsError::TextTooLong);
+                    }
+                }
+            }
+        }
+        if out.len() > MAX_PIECES {
+            return Err(TtsError::TextTooLong);
+        }
+    }
+    if !out.iter().any(|p| matches!(p, Part::Say { .. })) {
+        return Err(TtsError::Empty);
+    }
+    Ok((out, notes))
+}
+
+/// What a Malayalam voice would not read as written in `text` (empty: everything reads; style
+/// tags are not words).
 pub fn report(text: &str) -> Vec<String> {
-    pieces(text, usize::MAX / 2).map(|(_, n)| n).unwrap_or_default()
+    parts(text, &|_| usize::MAX / 2, Numbers::default(), true).map(|(_, n)| n).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1299,6 +1401,80 @@ mod tests {
         // a sentence without its full stop gets one
         assert_eq!(sentences("ഇത് ശരിയാണ്"), vec!["ഇത് ശരിയാണ്."]);
         assert_eq!(sentences("ശരി... ശരി."), vec!["ശരി...", "ശരി."]);
+    }
+
+    fn say(text: &str, asked: Asked) -> Part {
+        Part::Say { text: text.into(), asked }
+    }
+
+    #[test]
+    fn styled_scripts_become_parts() {
+        let all = |_: Asked| 200usize;
+        // tags switch the style for what follows and are never read; a tag mid-sentence splits it
+        let (p, notes) = parts("ഇത് ഒന്നാണ്. [excited] ഇത് രണ്ടാണ്! അതെ! [calm] പിന്നെ [plain] ശരി.", &all, Numbers::English, true).unwrap();
+        assert_eq!(
+            p,
+            vec![say("ഇത് ഒന്നാണ്.", Asked::Line), say("ഇത് രണ്ടാണ്! അതെ!", Asked::Style("excited")), say("പിന്നെ.", Asked::Style("calm")), say("ശരി.", Asked::Plain),]
+        );
+        assert!(notes.is_empty(), "tags are not reported as words: {notes:?}");
+        assert!(report("[excited] ഇത് ശരിയാണ്.").is_empty());
+        // pauses, breaths and line breaks: an utterance never spans a line break
+        let (p, _) = parts("ഒന്ന്.\nരണ്ട്.\n\n[breath]മൂന്ന്. [pause 1s] നാല്.\n\n\nഅഞ്ച്.", &all, Numbers::English, true).unwrap();
+        assert_eq!(
+            p,
+            vec![
+                say("ഒന്ന്.", Asked::Line),
+                Part::Break(Boundary::Line),
+                say("രണ്ട്.", Asked::Line),
+                Part::Breath,
+                say("മൂന്ന്.", Asked::Line),
+                Part::Pause(1000),
+                say("നാല്.", Asked::Line),
+                Part::Break(Boundary::Paragraph),
+                say("അഞ്ച്.", Asked::Line),
+            ]
+        );
+        // a line break before a tag still breaks; packing and per-sentence reading as `pieces`
+        let (p, _) = parts("ഒന്ന്.\n[calm] രണ്ട്. മൂന്ന്.", &all, Numbers::English, false).unwrap();
+        assert_eq!(p, vec![say("ഒന്ന്.", Asked::Line), Part::Break(Boundary::Line), say("രണ്ട്.", Asked::Style("calm")), say("മൂന്ന്.", Asked::Style("calm"))]);
+        // each style packs to its own reference's length
+        let long = "ഇതൊരു ചെറിയ വാചകമാണ്. ".repeat(10);
+        let max = |a: Asked| if a == Asked::Style("calm") { 60 } else { 1000 };
+        let (p, _) = parts(&format!("{long}[calm]{long}"), &max, Numbers::English, true).unwrap();
+        let (line, calm): (Vec<&Part>, Vec<&Part>) = p.iter().partition(|x| matches!(x, Part::Say { asked: Asked::Line, .. }));
+        assert_eq!(line.len(), 1);
+        assert!(calm.len() > 1 && calm.iter().all(|x| matches!(x, Part::Say { text, .. } if text.chars().count() <= 60)));
+        // a script without tags or line breaks reads as `pieces` reads it
+        let plain = "ഇത് ഒന്നാണ്. [pause 1s] ഇത് രണ്ടാണ്? അതെ!";
+        let (p, _) = parts(plain, &all, Numbers::English, true).unwrap();
+        let (q, _) = pieces(plain, 200).unwrap();
+        let as_pieces: Vec<Piece> = p
+            .into_iter()
+            .map(|x| match x {
+                Part::Say { text, .. } => Piece::Say(text),
+                Part::Pause(ms) => Piece::Pause(ms),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(as_pieces, q);
+        // nothing to say
+        assert_eq!(parts("[excited] [breath]", &all, Numbers::English, true), Err(TtsError::Empty));
+        assert_eq!(parts("", &all, Numbers::English, true), Err(TtsError::Empty));
+        assert_eq!(parts(&"അ.\n".repeat(20_000), &all, Numbers::English, true), Err(TtsError::TextTooLong));
+        for t in ["[", "\n\n\n", "[calm]\n", "\r\n[breath]\r\n", "[excited", "🙂\n🙂", "[pause 1s]\n[pause 1s]"] {
+            let _ = parts(t, &all, Numbers::English, true);
+            let _ = parts(t, &|_| 0, Numbers::Malayalam, false);
+        }
+    }
+
+    #[test]
+    fn spelling_numbers_keeps_style_tags() {
+        let s = spell_numbers("[excited] 2013-ൽ! [Calm]ശരി. [breath] [neutral] അതെ.", Numbers::English);
+        assert_eq!(s, "[excited] ട്വന്റി തേർട്ടീനിൽ! [calm]ശരി. [breath] [plain] അതെ.");
+        // line breaks between tags are kept for the reading
+        assert_eq!(spell_numbers("ഒന്ന്.[calm]\n\n[warm]രണ്ട്.", Numbers::English), "ഒന്ന്. [calm]\n\n[warm]രണ്ട്.");
+        // a script without tags spells as before (its cache keys stay)
+        assert_eq!(spell_numbers("ഒന്ന്. [pause 1s]\n[pause 1s] രണ്ട്.", Numbers::English), "ഒന്ന്. [pause 1000ms] [pause 1000ms] രണ്ട്.");
     }
 
     #[test]

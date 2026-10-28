@@ -167,6 +167,9 @@ fn word_timing_from_a_narration() {
         delivery: Default::default(),
         take: 0,
         numbers: Default::default(),
+        temperature: None,
+        emphasis: None,
+        speed: None,
         speech_duration: Tick(3 * TICKS_PER_SECOND),
     };
     let seq = s.state.active_sequence.unwrap();

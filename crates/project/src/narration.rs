@@ -13,6 +13,12 @@ pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 /// Pace limits (speaking rate multiplier).
 pub const MIN_PACE: f64 = 0.5;
 pub const MAX_PACE: f64 = 2.0;
+/// The sampler settings a Malayalam (IndicF5) narration may ask for, inclusive (the same as
+/// `filmcraft_tts::styles`): temperature (the initial noise's scale), emphasis (classifier-free
+/// guidance) and speed (on top of the pace).
+pub const TEMPERATURE: (f64, f64) = (0.3, 1.5);
+pub const EMPHASIS: (f64, f64) = (1.0, 4.0);
+pub const SPEED: (f64, f64) = (0.7, 1.4);
 
 /// Text to Speech ▸ Advanced ▸ Vocal pitch.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -197,6 +203,14 @@ pub struct Narration {
     /// How a Malayalam narration says numbers (projects from before have none: English).
     #[serde(default, skip_serializing_if = "is_english")]
     pub numbers: NumberStyle,
+    /// A Malayalam narration's sampler settings over its delivery's preset ([`TEMPERATURE`],
+    /// [`EMPHASIS`], [`SPEED`]); `None`: the preset's (projects from before have none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
     /// Length of the speech in the generated file. The file can be longer: when an edit made the
     /// speech shorter than its clip, the file is padded with silence to the clip's length.
     pub speech_duration: Tick,
@@ -229,6 +243,13 @@ impl Narration {
         if self.take > MAX_TAKE {
             return Err(format!("take must be at most {MAX_TAKE}"));
         }
+        for (what, v, (lo, hi)) in [("temperature", self.temperature, TEMPERATURE), ("emphasis", self.emphasis, EMPHASIS), ("speed", self.speed, SPEED)] {
+            if let Some(v) = v
+                && !(v.is_finite() && (lo..=hi).contains(&v))
+            {
+                return Err(format!("{what} must be a number from {lo} to {hi}"));
+            }
+        }
         if self.speech_duration < Tick::ZERO {
             return Err("negative speech duration".into());
         }
@@ -250,8 +271,33 @@ mod tests {
             delivery: Delivery::Warm,
             take: 2,
             numbers: NumberStyle::Malayalam,
+            temperature: Some(0.8),
+            emphasis: None,
+            speed: Some(1.05),
             speech_duration: Tick::from_seconds_f64(2.5),
         }
+    }
+
+    #[test]
+    fn sampler_settings_round_trip_and_old_projects_read_none() {
+        let s = serde_json::to_string(&sample()).unwrap();
+        assert!(s.contains("\"temperature\":0.8") && s.contains("\"speed\":1.05") && !s.contains("emphasis"), "{s}");
+        let mut old: serde_json::Value = serde_json::from_str(&s).unwrap();
+        for k in ["temperature", "speed"] {
+            old.as_object_mut().unwrap().remove(k);
+        }
+        let n: Narration = serde_json::from_value(old).unwrap();
+        assert_eq!((n.temperature, n.emphasis, n.speed), (None, None, None));
+        for bad in [
+            Narration { temperature: Some(0.2), ..sample() },
+            Narration { temperature: Some(f64::NAN), ..sample() },
+            Narration { emphasis: Some(4.5), ..sample() },
+            Narration { speed: Some(0.0), ..sample() },
+            Narration { speed: Some(f64::INFINITY), ..sample() },
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
+        assert!(Narration { temperature: Some(1.5), emphasis: Some(1.0), speed: Some(0.7), ..sample() }.check().is_ok());
     }
 
     #[test]

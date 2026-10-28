@@ -14,7 +14,12 @@ voice audition --voice clone:<name> --report <refs.json> [--out DIR] [--top K] [
 voice promote --voice clone:<name> --report <audition.json|refs.json> <candidate id> [--transcript \"exact words\"] [--min-similarity X]
 voice versions --voice clone:<name>
 voice rollback --voice clone:<name> <version (r0, r1, …)>
-voice mix-check --takes <wav|folder>… (--genuine <wav>… | --report <refs.json>) [--chains chains.json] [--lufs -16]";
+voice mix-check --takes <wav|folder>… (--genuine <wav>… | --report <refs.json>) [--chains chains.json] [--lufs -16]
+voice styles --voice clone:<name>
+voice style set --voice clone:<name> --style <excited|calm|warm|conversational|amazed|curious|dramatic|plain>
+                (--file <media> | --item <project item id> --project p.fcproj) --start S --end S [--transcript \"exact words\"] [--no-trim]
+voice style set --voice clone:<name> --report <styles.json> --candidate <excited-1> [--style S] [--transcript \"…\"] [--trim]
+voice style remove --voice clone:<name> --style <style>";
 
 /// The chains `voice mix-check` compares by default: the narration chain as the showcase puts it
 /// on the cloned voice (all of its EQ: the voice measured dark), and the voice-preserving chain.
@@ -50,6 +55,52 @@ fn wavs(paths: &[&str]) -> Vec<String> {
     out
 }
 
+/// `voice style set|remove|list`: the command and its params (`tts.voiceStyles`).
+fn style_params(a: &Args, voice: &str) -> (&'static str, Value) {
+    let what = a.pos(2).unwrap_or("list");
+    let style = || a.opt("--style").unwrap_or_else(|| usage(format!("voice style {what}: --style is required\n{USAGE}"))).to_string();
+    match what {
+        "list" => ("tts.voiceStyles", json!({"voice": voice})),
+        "remove" => ("tts.voiceStyles", json!({"voice": voice, "remove": style()})),
+        // a style finder pick, as the finder wrote it (its style, file, stretch and words)
+        "set" if a.opt("--candidate").is_some() => {
+            let report = a.opt("--report").unwrap_or_else(|| usage(format!("voice style set --candidate: --report <styles.json> is required\n{USAGE}")));
+            let mut p = json!({"voice": voice, "report": absolute(report), "candidate": a.opt("--candidate")});
+            if let Some(s) = a.opt("--style") {
+                p["set"] = json!(s);
+            }
+            if let Some(t) = a.opt("--transcript") {
+                p["transcript"] = json!(t);
+            }
+            if a.flag("--trim") {
+                p["trimToSentence"] = json!(true);
+            }
+            ("tts.voiceStyles", p)
+        }
+        "set" => {
+            let mut p = json!({"voice": voice, "set": style(), "trimToSentence": !a.flag("--no-trim")});
+            match (a.opt("--file"), num(a, "--item")) {
+                (Some(f), None) => p["path"] = json!(absolute(f)),
+                (None, Some(i)) if i >= 0.0 && i.fract() == 0.0 => p["item"] = json!(i as u64),
+                (None, Some(i)) => usage(format!("voice style set: --item is a project item id, not {i}")),
+                _ => usage(format!("voice style set: give the recording: --file <media> or --item <id>\n{USAGE}")),
+            }
+            match (num(a, "--start"), num(a, "--end")) {
+                (Some(s), Some(e)) => {
+                    p["start"] = json!(s);
+                    p["end"] = json!(e);
+                }
+                _ => usage(format!("voice style set: --start and --end (seconds into the recording) are required\n{USAGE}")),
+            }
+            if let Some(t) = a.opt("--transcript") {
+                p["transcript"] = json!(t);
+            }
+            ("tts.voiceStyles", p)
+        }
+        other => usage(format!("voice style: unknown `{other}` (set, remove, list)\n{USAGE}")),
+    }
+}
+
 fn num(a: &Args, opt: &str) -> Option<f64> {
     a.opt(opt).map(|v| v.parse::<f64>().ok().filter(|x| x.is_finite()).unwrap_or_else(|| usage(format!("voice: {opt} wants a number, not {v}"))))
 }
@@ -75,6 +126,15 @@ pub async fn run(a: &Args) {
         "--chains",
         "--lufs",
         "--transcript",
+        "--style",
+        "--file",
+        "--item",
+        "--start",
+        "--end",
+        "--no-trim",
+        "--trim",
+        "--candidate",
+        "--project",
         "--json",
         "--compact",
         "--data-dir",
@@ -135,6 +195,8 @@ pub async fn run(a: &Args) {
             }
             ("voice.promote", p)
         }
+        "styles" => ("tts.voiceStyles", json!({"voice": voice()})),
+        "style" => style_params(a, &voice()),
         "versions" => ("voice.versions", json!({"voice": voice()})),
         "rollback" => {
             let version = a.pos(2).unwrap_or_else(|| usage(format!("voice rollback: which version (voice versions lists them)?\n{USAGE}")));
@@ -186,5 +248,25 @@ mod tests {
         let effects: Vec<&str> = speech.iter().map(|s| s["effect"].as_str().unwrap()).collect();
         assert_eq!(effects, filmcraft_autocut::mix::MIX_INSERTS);
         assert!(c["none"].as_array().unwrap().is_empty());
+    }
+
+    fn args(s: &str) -> Args {
+        Args::parse(s.split_whitespace().map(str::to_string))
+    }
+
+    #[test]
+    fn style_commands_say_what_tts_voice_styles_takes() {
+        let (id, p) = style_params(&args("voice style set --voice clone:me --style excited --file /c/IMG_1.MOV --start 41.2 --end 50.7 --no-trim"), "clone:me");
+        assert_eq!(id, "tts.voiceStyles");
+        assert_eq!(p, json!({"voice": "clone:me", "set": "excited", "path": "/c/IMG_1.MOV", "start": 41.2, "end": 50.7, "trimToSentence": false}));
+        let (_, p) = style_params(&args("voice style set --voice clone:me --style calm --item 1666 --start 0 --end 9"), "clone:me");
+        assert_eq!((p["item"].as_u64(), p["trimToSentence"].as_bool()), (Some(1666), Some(true)));
+        // a style finder pick, as the finder wrote it
+        let (_, p) = style_params(&args("voice style set --voice clone:me --report /r/styles.json --candidate excited-1"), "clone:me");
+        assert_eq!(p, json!({"voice": "clone:me", "report": "/r/styles.json", "candidate": "excited-1"}));
+        let (_, p) = style_params(&args("voice style set --voice clone:me --report /r/styles.json --candidate calm-2 --style warm --trim"), "clone:me");
+        assert_eq!((p["set"].as_str(), p["trimToSentence"].as_bool()), (Some("warm"), Some(true)));
+        assert_eq!(style_params(&args("voice style remove --voice clone:me --style calm"), "clone:me").1, json!({"voice": "clone:me", "remove": "calm"}));
+        assert_eq!(style_params(&args("voice style --voice clone:me"), "clone:me").1, json!({"voice": "clone:me"}));
     }
 }

@@ -148,6 +148,33 @@ fn entries_change_split_go_and_come_in_time_order() {
 }
 
 #[test]
+fn voice_settings_follow_their_entries() {
+    let mut b = base();
+    b["script"]["voice"] = json!({"intro": {"temperature": 1.2}, "2": {"speed": 1.1}, "3": {"emphasis": 2.4}});
+    b["script"]["voiceDefault"] = json!({"temperature": 0.9});
+    // the hall goes, the dog gets its own settings, the arm keeps its own
+    let patch = json!({"entries": {"Hall": {"remove": true}, "Dog": {"voice": {"temperature": 1.1, "speed": 1.05}}}});
+    let p = apply(&b, &[patch], &Clips::new()).unwrap();
+    let sc = &p.plan["script"];
+    assert_eq!(sc["voice"], json!({"intro": {"temperature": 1.2}, "1": {"speed": 1.1}, "2": {"temperature": 1.1, "speed": 1.05}}));
+    assert_eq!(sc["voiceDefault"], json!({"temperature": 0.9}), "the plan's default stays");
+    // null removes an entry's; a misspelt or out-of-range setting is refused, saying where
+    let p = apply(&b, &[json!({"entries": {"Arm": {"voice": null}}})], &Clips::new()).unwrap();
+    assert_eq!(p.plan["script"]["voice"], json!({"intro": {"temperature": 1.2}, "3": {"emphasis": 2.4}}));
+    for (bad, want) in [
+        (json!({"entries": {"Arm": {"voice": {"temprature": 1.0}}}}), "temprature"),
+        (json!({"entries": {"Arm": {"voice": {"speed": 3}}}}), "speed"),
+        (json!({"entries": {"Arm": {"voice": "loud"}}}), "voice settings"),
+    ] {
+        let e = apply(&b, std::slice::from_ref(&bad), &Clips::new()).unwrap_err().to_string();
+        assert!(e.contains(want) && e.contains("Arm"), "{bad}: {e}");
+    }
+    // a plan without any keeps none
+    let p = apply(&base(), &[], &Clips::new()).unwrap();
+    assert!(p.plan["script"].get("voice").is_none());
+}
+
+#[test]
 fn bad_notes_say_what_and_where() {
     let none = Clips::new();
     let cases = [

@@ -35,7 +35,17 @@
 //!
 //! **Delivery** (`plain`, `conversational`, `warm`, `excited`, `amazed`, `curious`, `calm`,
 //! `dramatic`) is the feeling a line is spoken with: the natural cloned voices (VoxCPM2) are
-//! asked for it in words; the other voices read the script as they always do.
+//! asked for it in words; the other voices read the script as they always do. In Malayalam it is
+//! also the **voice style** ([`tts::styles`]): IndicF5 reads after the voice's reference for that
+//! style (`tts.voiceStyles`), else the nearest one it has (amazed → excited → conversational,
+//! curious → conversational, conversational ↔ warm, calm → warm, dramatic → calm → warm), else
+//! its main reference; with the style's sampler preset and pauses. Inline tags (`[excited] …
+//! [calm] …`, `[plain]`, `[breath]`) switch the style within a script and are never read aloud.
+//!
+//! **Sampler** (Malayalam: `temperature` 0.3–1.5, `emphasis` 1–4, `speed` 0.7–1.4; each
+//! optional, null = the delivery's preset): IndicF5's initial-noise scale, classifier-free
+//! guidance and speed on top of the pace. Kept with the narration; in the cache keys only when
+//! given. English narrations refuse them.
 //!
 //! **Language** (`language`: `en-US` or `ml-IN`; without it a script written in Malayalam
 //! script is Malayalam). Malayalam is spoken by cloned voices through IndicF5
@@ -156,7 +166,53 @@ pub(crate) fn settings(cmd: &str, p: &Value, base: Option<&Narration>) -> Result
         Some(v) => NumberStyle::from_id(v).ok_or_else(|| bad(cmd, format!("unknown numbers `{v}` (english, malayalam)")))?,
         None => base.map(|b| b.numbers).unwrap_or_default(),
     };
-    let n = Narration { text, language: language.to_string(), voice, pitch, pace, delivery, take, numbers, speech_duration: Tick::ZERO };
+    // IndicF5's sampler over the delivery's preset (Malayalam): given, null (the preset's), or
+    // the narration's own when only other settings change
+    let mut asked = false;
+    let mut sampler = |key: &str, (lo, hi): (f64, f64), what: &str, inherited: Option<f64>| -> Result<Option<f64>> {
+        match p.get(key) {
+            None => Ok(inherited),
+            Some(Value::Null) => Ok(None),
+            Some(v) => {
+                asked = true;
+                v.as_f64().filter(|x| x.is_finite() && (lo..=hi).contains(x)).map(Some).ok_or_else(|| {
+                    bad(cmd, format!("`{key}` is a number from {lo} to {hi} ({what}; null or left out: the delivery's preset), not {}", short_json(v)))
+                })
+            }
+        }
+    };
+    let temperature = sampler(
+        "temperature",
+        filmcraft_project::narration::TEMPERATURE,
+        "lower reads steadier, higher livelier; 1 is the model's own",
+        base.and_then(|b| b.temperature),
+    )?;
+    let emphasis = sampler(
+        "emphasis",
+        filmcraft_project::narration::EMPHASIS,
+        "how closely the voice follows the words and the reference; 2 is the model's own",
+        base.and_then(|b| b.emphasis),
+    )?;
+    let speed = sampler("speed", filmcraft_project::narration::SPEED, "on top of the pace; 1 is the natural rate", base.and_then(|b| b.speed))?;
+    if asked && !malayalam {
+        return Err(bad(cmd, "`temperature`, `emphasis` and `speed` shape a Malayalam narration (IndicF5); English voices take `pace` and `delivery` only"));
+    }
+    // English keeps none (an English edit of a Malayalam narration drops them)
+    let (temperature, emphasis, speed) = if malayalam { (temperature, emphasis, speed) } else { (None, None, None) };
+    let n = Narration {
+        text,
+        language: language.to_string(),
+        voice,
+        pitch,
+        pace,
+        delivery,
+        take,
+        numbers,
+        temperature,
+        emphasis,
+        speed,
+        speech_duration: Tick::ZERO,
+    };
     n.check().map_err(|e| bad(cmd, e))?;
     Ok(n)
 }
@@ -168,8 +224,33 @@ const CACHE_ENTRIES: usize = 6;
 
 pub(crate) fn cache_key(n: &Narration) -> String {
     let key = format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", n.voice, n.pitch.id(), n.pace.to_bits(), n.delivery.id(), n.take, n.text);
-    // English keeps the key it always had; Malayalam reads numbers in a style
-    if tts::malayalam::is_tag(&n.language) { format!("{key}\u{1f}{}\u{1f}{}", n.language, n.numbers.id()) } else { key }
+    // English keeps the key it always had; Malayalam reads numbers in a style, and its sampler
+    // settings when given
+    if !tts::malayalam::is_tag(&n.language) {
+        return key;
+    }
+    let mut key = format!("{key}\u{1f}{}\u{1f}{}", n.language, n.numbers.id());
+    for (name, v) in [("temperature", n.temperature), ("emphasis", n.emphasis), ("speed", n.speed)] {
+        if let Some(v) = v {
+            key.push_str(&format!("\u{1f}{name} {}", v.to_bits()));
+        }
+    }
+    key
+}
+
+/// Forget the readings kept in memory (the disk cache keys on the voice's references and stays):
+/// a voice's references changed, so a reading kept under a narration's settings may be stale.
+#[cfg(feature = "neural-voices")]
+pub(crate) fn forget_readings(s: &Session) {
+    s.tts_cache.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    REPORTS.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner).clear();
+}
+
+/// `text` as subtitles show it: without pause markers and (Malayalam) style tags, which are not
+/// read aloud; a text without any is returned as it is.
+pub fn shown_text(text: &str) -> String {
+    let marked = tts::script::parse_marked(text).iter().any(|m| !matches!(m, tts::script::Mark::Speech(_)));
+    if marked { tts::script::strip_marks(text) } else { text.to_string() }
 }
 
 /// The front end's style for `n`'s numbers.
@@ -381,6 +462,27 @@ impl tts::heard::Hearer for SpelledNumbers {
 #[cfg(feature = "neural-voices")]
 pub(crate) fn hear_malayalam(s: &Session, models_dir: Option<&std::path::Path>, samples: &[f32], rate: u32) -> std::result::Result<(String, String), String> {
     let h = hearer_for(s, models_dir, "ml")?;
+    Ok((h.hear(samples, rate)?, h.id()))
+}
+
+/// What the strict check's second Malayalam speech model (IndicWhisper, its digits spelled the
+/// English way, as narration's numbers are; or the host's second opinion) hears in `samples`
+/// (mono, `rate`), and which model heard it. `Err`: why it cannot hear.
+#[cfg(feature = "neural-voices")]
+pub(crate) fn hear_malayalam_second(
+    s: &Session,
+    models_dir: Option<&std::path::Path>,
+    samples: &[f32],
+    rate: u32,
+) -> std::result::Result<(String, String), String> {
+    let h: Arc<dyn tts::heard::Hearer> = match &s.narration_second {
+        Some(h) => h.clone(),
+        None if s.narration_hearer.is_some() => return Err("no second Malayalam speech model here".into()),
+        None => Arc::new(SpelledNumbers {
+            inner: lazy_model(models_dir, &[filmcraft_speech::models::INDICWHISPER_ML], "ml")?,
+            style: tts::malayalam::Numbers::English,
+        }),
+    };
     Ok((h.hear(samples, rate)?, h.id()))
 }
 
@@ -729,16 +831,30 @@ pub(crate) fn notes(n: &Narration) -> Vec<String> {
     if tts::malayalam::is_tag(&n.language) { tts::malayalam::report(&n.text) } else { Vec::new() }
 }
 
-/// How `n` is spoken.
+/// How `n` is spoken. A Malayalam narration's delivery is also its voice style (the reference
+/// IndicF5 reads after and its sampler preset, [`tts::styles`]) and its sampler settings go to
+/// IndicF5; English voices get neither (their cache keys stay as they were).
 fn params(n: &Narration) -> tts::Params {
-    tts::Params { semitones: n.pitch.semitones(), pace: n.pace, style: n.delivery.style(), take: n.take }
+    let malayalam = tts::malayalam::is_tag(&n.language);
+    let indicf5 = |v: Option<f64>| v.filter(|_| malayalam).map(|x| x as f32);
+    tts::Params {
+        semitones: n.pitch.semitones(),
+        pace: n.pace,
+        style: n.delivery.style(),
+        take: n.take,
+        delivery: if malayalam { tts::styles::find(n.delivery.id()) } else { None },
+        temperature: indicf5(n.temperature),
+        emphasis: indicf5(n.emphasis),
+        speed: indicf5(n.speed),
+    }
 }
 
 /// The disk cache's key for `n` read under `check` (None: the voice has no stable identity,
 /// e.g. a cloned voice whose profile cannot be read; it is then not cached). A checked reading
-/// has its own key: its utterances may have been read again.
+/// has its own key: its utterances may have been read again. A Malayalam reading also keys on
+/// the style references it reads after and its natural pauses ([`tts::cache::reading_identity_for`]).
 fn disk_key(n: &Narration, models_dir: Option<&std::path::Path>, check: &Check) -> Option<String> {
-    let identity = tts::cache::voice_identity_for(&n.voice, &n.language, models_dir)?;
+    let identity = tts::cache::reading_identity_for(&n.voice, &n.language, models_dir, &spoken_text(n), &params(n))?;
     let identity = match check {
         Check::Strict(j) => format!("{identity}|strict {}", j.id()),
         _ => identity,
@@ -804,7 +920,8 @@ fn adopt(disk: &tts::cache::DiskCache, n: &Narration, models_dir: Option<&std::p
         earlier.push(Check::Off);
     }
     let english = check_language(n) == "en";
-    let said = if english { tts::heard::english_words(&spoken_text(n)) } else { spoken_text(n).into_owned() };
+    // the words said: pause markers and style tags are not
+    let said = if english { tts::heard::english_words(&spoken_text(n)) } else { tts::script::strip_marks(&spoken_text(n)) };
     for old in earlier {
         let Some(k) = disk_key(n, models_dir, &old) else { continue };
         let Some(a) = disk.get(&k) else { continue };
@@ -919,6 +1036,26 @@ fn package_json() -> Value {
     })
 }
 
+/// How Malayalam narration reads its deliveries ([`tts::styles`]): the styles a cloned voice may
+/// keep a reference for, the fallbacks, each style's sampler preset, the ranges of the sampler
+/// settings and the inline tags.
+pub fn voice_styles_json() -> Value {
+    use filmcraft_project::narration::{EMPHASIS, SPEED, TEMPERATURE};
+    let presets: serde_json::Map<String, Value> =
+        tts::styles::STYLES.iter().map(|s| (s.to_string(), serde_json::to_value(tts::styles::preset(Some(s))).unwrap_or(Value::Null))).collect();
+    let fallbacks: serde_json::Map<String, Value> = tts::styles::STYLES.iter().map(|s| (s.to_string(), json!(tts::styles::fallbacks(s)))).collect();
+    json!({
+        "styles": tts::styles::STYLES,
+        "fallbacks": fallbacks,
+        "presets": presets,
+        "plain": serde_json::to_value(tts::styles::Sampler::PLAIN).unwrap_or(Value::Null),
+        "temperature": {"min": TEMPERATURE.0, "max": TEMPERATURE.1, "default": 1.0},
+        "emphasis": {"min": EMPHASIS.0, "max": EMPHASIS.1, "default": 2.0},
+        "speed": {"min": SPEED.0, "max": SPEED.1, "default": 1.0},
+        "tags": ["[conversational]", "[warm]", "[excited]", "[amazed]", "[curious]", "[calm]", "[dramatic]", "[plain]", "[breath]"],
+    })
+}
+
 fn voices(_s: &mut Session, _p: &Value) -> Result<Value> {
     let dir = crate::transcript::models_dir();
     Ok(json!({
@@ -931,6 +1068,7 @@ fn voices(_s: &mut Session, _p: &Value) -> Result<Value> {
         "deliveries": Delivery::ALL.iter().map(|d| json!({"id": d.id(), "label": d.label(), "style": d.style()})).collect::<Vec<_>>(),
         "numbers": NumberStyle::ALL.iter().map(|n| json!({"id": n.id(), "label": n.label()})).collect::<Vec<_>>(),
         "pace": {"min": tts::MIN_PACE, "max": tts::MAX_PACE, "default": 1.0},
+        "voiceStyles": voice_styles_json(),
         "pauseMarker": tts::script::PAUSE_MARKER,
         "maxTextBytes": tts::MAX_TEXT_BYTES,
         "sampleSentence": tts::SAMPLE_SENTENCE,
@@ -1311,7 +1449,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.preview",
             "Preview Narration",
-            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"? (Malayalam: how digits are said; english = years, money and numbers from 100 up in English),"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"?,"sample":bool?,"clip":id?,"check":"strict|off"? (cloned voices: hear every utterance back and read unclear ones again; strict is the default),"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}? (readings of an utterance at most and the error rates that pass, over the language's own),"path":str?}"#,
+            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"? (Malayalam: how digits are said; english = years, money and numbers from 100 up in English),"pitch":"default"?,"pace":f64?,"delivery":"plain|warm|excited|…"? (Malayalam: also the voice style, its reference and preset),"temperature":0.3..1.5?,"emphasis":1..4?,"speed":0.7..1.4? (Malayalam: IndicF5's sampler over the delivery's preset; null = the preset),"sample":bool?,"clip":id?,"check":"strict|off"? (cloned voices: hear every utterance back and read unclear ones again; strict is the default),"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}? (readings of an utterance at most and the error rates that pass, over the language's own),"path":str?}"#,
             always,
             preview,
             false,
@@ -1319,7 +1457,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.create",
             "New Narration",
-            r#"{"text":str,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"check":"strict|off"?,"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}?,"dir":str?}"#,
+            r#"{"text":str,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":"extraLow|low|default|high|extraHigh"?,"pace":0.5..2?,"delivery":"plain|conversational|warm|excited|amazed|curious|calm|dramatic"?,"temperature":0.3..1.5?,"emphasis":1..4?,"speed":0.7..1.4?,"take":0..99?,"time":ticks?,"track":"A1"|id?,"check":"strict|off"?,"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}?,"dir":str?}"#,
             has_seq,
             create,
             true,
@@ -1327,7 +1465,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.edit",
             "Edit Narration",
-            r#"{"clip":id?,"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"take":0..99?,"check":"strict|off"?,"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}?,"dir":str?}"#,
+            r#"{"clip":id?,"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"temperature":0.3..1.5|null?,"emphasis":1..4|null?,"speed":0.7..1.4|null?,"take":0..99?,"check":"strict|off"?,"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}?,"dir":str?}"#,
             has_narration_clip,
             edit,
             true,
@@ -1336,7 +1474,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "tts.render",
             "Synthesize Narration",
-            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"sample":bool?,"clip":id?,"check":"strict|off"?,"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}?,"wait":bool?}"#,
+            r#"{"text":str?,"voice":str?,"language":"en-US|ml-IN"?,"numbers":"english|malayalam"?,"pitch":str?,"pace":f64?,"delivery":str?,"temperature":0.3..1.5?,"emphasis":1..4?,"speed":0.7..1.4?,"sample":bool?,"clip":id?,"check":"strict|off"?,"checkPolicy":{"readings":1..8?,"cer":0..1?,"startCer":0..1?}?,"wait":bool?}"#,
             always,
             render_job,
             false,
@@ -1488,6 +1626,62 @@ mod tests {
             let off = json!({"checkPolicy": p["checkPolicy"], "check": "off"});
             assert!(check_for(&s, "t", &off, &ml()).is_err(), "{off}");
         }
+    }
+
+    #[test]
+    fn sampler_settings_shape_malayalam_only() {
+        let ml = |extra: Value| {
+            let mut p = json!({"text": "ഇത് ശരിയാണ്.", "voice": "clone:me"});
+            if let (Some(o), Some(e)) = (p.as_object_mut(), extra.as_object()) {
+                o.extend(e.clone());
+            }
+            settings("t", &p, None)
+        };
+        let n = ml(json!({"delivery": "excited", "temperature": 0.7, "emphasis": 2.6, "speed": 1.1})).unwrap();
+        assert_eq!((n.temperature, n.emphasis, n.speed), (Some(0.7), Some(2.6), Some(1.1)));
+        // the voice style and the sampler reach IndicF5
+        let q = params(&n);
+        assert_eq!((q.delivery, q.temperature, q.emphasis, q.speed), (Some("excited"), Some(0.7), Some(2.6), Some(1.1)));
+        assert_eq!(params(&ml(json!({})).unwrap()).delivery, None, "plain");
+        // an edit keeps them; null goes back to the preset
+        let kept = settings("t", &json!({"pace": 1.1}), Some(&n)).unwrap();
+        assert_eq!((kept.temperature, kept.emphasis, kept.speed), (Some(0.7), Some(2.6), Some(1.1)));
+        let reset = settings("t", &json!({"temperature": null}), Some(&n)).unwrap();
+        assert_eq!((reset.temperature, reset.emphasis), (None, Some(2.6)));
+        // out of range, the wrong type: refused, saying the range
+        for bad in [
+            json!({"temperature": 0.2}),
+            json!({"temperature": 1.6}),
+            json!({"temperature": "warm"}),
+            json!({"emphasis": 0.5}),
+            json!({"emphasis": 9}),
+            json!({"speed": 0}),
+            json!({"speed": 1.5}),
+            json!({"speed": [1]}),
+            json!({"temperature": 1e308}),
+        ] {
+            let e = ml(bad.clone()).unwrap_err().to_string();
+            assert!(e.contains("is a number from"), "{bad}: {e}");
+        }
+        // English voices take none; an English edit of a Malayalam narration drops them
+        let e = settings("t", &json!({"text": "Hello.", "voice": "clone:me", "temperature": 0.8}), None).unwrap_err().to_string();
+        assert!(e.contains("Malayalam"), "{e}");
+        let en = settings("t", &json!({"text": "Hello there."}), Some(&n)).unwrap();
+        assert_eq!((en.temperature, en.emphasis, en.speed), (None, None, None));
+        let en_params = params(&settings("t", &json!({"text": "Hello.", "voice": "clone:me", "delivery": "excited"}), None).unwrap());
+        assert_eq!((en_params.delivery, en_params.temperature), (None, None), "English keys stay as they were");
+        // the memory key: plain readings keep theirs; each setting is its own
+        let plain = ml(json!({})).unwrap();
+        assert_eq!(cache_key(&plain), format!("clone:me\u{1f}default\u{1f}{}\u{1f}plain\u{1f}0\u{1f}ഇത് ശരിയാണ്.\u{1f}ml-IN\u{1f}english", 1.0f64.to_bits()));
+        let warmer = ml(json!({"temperature": 0.9})).unwrap();
+        assert_ne!(cache_key(&warmer), cache_key(&plain));
+        assert_ne!(cache_key(&warmer), cache_key(&ml(json!({"emphasis": 0.9 + 1.0})).unwrap()));
+        // the listing says the styles, presets and ranges
+        let v = voice_styles_json();
+        assert_eq!(v["styles"].as_array().map(Vec::len), Some(7));
+        assert_eq!(v["presets"]["excited"]["emphasis"].as_f64().map(|x| (x * 10.0).round()), Some(24.0));
+        assert_eq!(v["fallbacks"]["amazed"], json!(["excited", "conversational"]));
+        assert_eq!((v["temperature"]["min"].as_f64(), v["speed"]["max"].as_f64()), (Some(0.3), Some(1.4)));
     }
 
     #[test]

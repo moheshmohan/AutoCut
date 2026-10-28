@@ -67,10 +67,21 @@ impl Reference {
     /// rate of the transcript times what is left of [`TOTAL_SECONDS`] (the reference's
     /// `chunk_text` limit), at least 40.
     pub fn max_chars(&self) -> usize {
-        let secs = self.seconds().max(0.1);
-        let rate = spoken_len(&self.text) as f64 / secs;
-        ((rate * (TOTAL_SECONDS - secs).max(5.0)) as usize).max(40)
+        max_chars_for(self.seconds(), &self.text)
     }
+}
+
+/// [`Reference::max_chars`] of a reference `seconds` long whose words (as prepared,
+/// [`reference_text`]) are `text`: what a script is split by before any reference is built.
+pub(crate) fn max_chars_for(seconds: f64, text: &str) -> usize {
+    let secs = if seconds.is_finite() { seconds.max(0.1) } else { 0.1 };
+    let rate = spoken_len(text) as f64 / secs;
+    ((rate * (TOTAL_SECONDS - secs).max(5.0)) as usize).max(40)
+}
+
+/// The seconds a reference built from `samples` of audio at [`RATE`] counts (whole hops).
+pub(crate) fn reference_seconds(samples: usize) -> f64 {
+    ((samples / HOP) * HOP) as f64 / f64::from(RATE)
 }
 
 /// The length the duration is estimated from: characters (see the module docs).
@@ -80,7 +91,7 @@ pub fn spoken_len(text: &str) -> usize {
 
 /// The transcript as the reference uses it: ending in `". "` (or `"。"`), then one more space
 /// when its last character is ASCII.
-fn reference_text(t: &str) -> String {
+pub(crate) fn reference_text(t: &str) -> String {
     let mut s = t.trim().to_string();
     if !s.ends_with(". ") && !s.ends_with('。') {
         if s.ends_with('.') {
@@ -213,7 +224,11 @@ impl F5 {
             return Err(TtsError::Empty);
         }
         let (tokens, duration, _) = self.plan(r, text, s.speed)?;
-        let noise = Noise::new(s.seed).take(duration * MELS);
+        let mut noise = Noise::new(s.seed).take(duration * MELS);
+        // the temperature scales the starting noise; 1 leaves it exactly as it was
+        if s.temperature != 1.0 {
+            noise.iter_mut().for_each(|v| *v *= s.temperature);
+        }
         let mel = self.sample(r, &tokens, duration, &noise, s, None, progress)?;
         self.vocode(r, &mel, duration)
     }
@@ -423,6 +438,19 @@ pub(crate) mod tests {
         // faster speech is shorter
         let fast = m.speak(&r, "ഇത് ശരിയാണ്.", &Settings { speed: 2.0, ..s }, &mut |_, _| true).unwrap();
         assert!(fast.len() < a.len());
+        // the temperature: 1 is the sampler as it was, bit for bit; another scales the noise
+        assert_eq!(m.speak(&r, "ഇത് ശരിയാണ്.", &Settings { temperature: 1.0, ..s }, &mut |_, _| true).unwrap(), a);
+        let (tokens, duration, _) = m.plan(&r, "ഇത് ശരിയാണ്.", 1.0).unwrap();
+        let plain = m.sample(&r, &tokens, duration, &Noise::new(1).take(duration * MELS), &s, None, &mut |_, _| true).unwrap();
+        assert_eq!(m.vocode(&r, &plain, duration).unwrap(), a, "the noise of seed 1, untouched");
+        let cool = m.speak(&r, "ഇത് ശരിയാണ്.", &Settings { temperature: 0.5, ..s }, &mut |_, _| true).unwrap();
+        assert_eq!(cool.len(), a.len(), "the same length");
+        assert_ne!(cool, a);
+        let scaled: Vec<f32> = Noise::new(1).take(duration * MELS).into_iter().map(|v| v * 0.5).collect();
+        let cooled = m.sample(&r, &tokens, duration, &scaled, &s, None, &mut |_, _| true).unwrap();
+        assert_eq!(m.vocode(&r, &cooled, duration).unwrap(), cool, "the noise scaled by 0.5");
+        // the planner's view of a reference's capacity is the built reference's
+        assert_eq!(max_chars_for(reference_seconds(tone(2.0).len()), r.text()), r.max_chars());
         // stopping, nothing to say, bad settings
         assert!(m.speak(&r, "ഇത്", &s, &mut |_, _| false).is_err());
         assert_eq!(m.speak(&r, "  ...", &s, &mut |_, _| true).err(), Some(TtsError::Empty));

@@ -9,7 +9,9 @@
 //! licence); it runs as a job with progress and Cancel.
 //!
 //! Automation ids: `tts.language`, `tts.voice`, `tts.hearVoice`, `tts.advanced` (twirl),
-//! `tts.pitch`, `tts.delivery`, `tts.pace`, `tts.numbers` (a Malayalam script), `tts.text`, `tts.addPause`, `tts.preview`, `tts.save`, `tts.new`,
+//! `tts.pitch`, `tts.delivery` (Emotion), `tts.pace`, `tts.numbers` (a Malayalam script),
+//! `tts.temperature`, `tts.emphasis`, `tts.speed`, `tts.samplerReset`, `tts.insertTag` (a cloned
+//! voice reading a Malayalam script), `tts.text`, `tts.addPause`, `tts.preview`, `tts.save`, `tts.new`,
 //! `tts.download`, `tts.download.confirm`, `tts.download.cancel`, `tts.cloneOpen` (twirl),
 //! `tts.cloneEngine`, `tts.cloneModel`, `tts.cloneName`, `tts.cloneConsent`, `tts.clone`,
 //! `tts.cloneDownload.confirm`, `tts.cloneDownload.cancel`.
@@ -23,9 +25,13 @@
 //! re-voiced, timbre only) — and the chosen model's one-time download, confirmed in the panel
 //! with its size, source and licence, with progress and Cancel.
 //!
-//! **Delivery** (Advanced) is the feeling a line is spoken with — warm, excited, amazed, curious,
-//! calm, dramatic, conversational, or plain. The natural cloned voices are asked for it; the
-//! other voices read plainly, and the menu says so.
+//! **Emotion** (Advanced; a narration's delivery) is the feeling a line is spoken with — warm,
+//! excited, amazed, curious, calm, dramatic, conversational, or plain. The natural cloned voices
+//! are asked for it; the other voices read plainly, and the menu says so. A cloned voice reading a
+//! Malayalam script reads after its reference for that emotion (its **voice style**; the panel
+//! says which references the voice has and which one the emotion reads after) with the emotion's
+//! **Temperature**, **Emphasis** and **Speed**, which the sliders override ("Use the emotion's
+//! preset" goes back); **Insert tag** adds `[excited]`, `[calm]`, … `[breath]` to the script.
 
 use egui::{Align2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_project::{ClipId, Delivery, NumberStyle, VocalPitch};
@@ -51,6 +57,10 @@ pub struct TtsDraft {
     pub pace: f64,
     /// How a Malayalam script's digits are said (English words, the default, or Malayalam).
     pub numbers: NumberStyle,
+    /// A Malayalam narration's sampler over its emotion's preset (None: the preset's).
+    pub temperature: Option<f64>,
+    pub emphasis: Option<f64>,
+    pub speed: Option<f64>,
     pub advanced_open: bool,
     /// The narration clip and item the draft was loaded from (None: a new narration).
     pub loaded_from: Option<(u64, u64)>,
@@ -97,6 +107,9 @@ impl Default for TtsDraft {
             delivery: Delivery::Plain,
             pace: 1.0,
             numbers: NumberStyle::English,
+            temperature: None,
+            emphasis: None,
+            speed: None,
             advanced_open: true,
             loaded_from: None,
             pending: None,
@@ -115,7 +128,29 @@ impl Default for TtsDraft {
 
 impl TtsDraft {
     fn params(&self) -> serde_json::Value {
-        json!({"text": self.text, "voice": self.voice, "pitch": self.pitch.id(), "delivery": self.delivery.id(), "pace": self.pace, "numbers": self.numbers.id()})
+        let mut p = json!({"text": self.text, "voice": self.voice, "pitch": self.pitch.id(), "delivery": self.delivery.id(), "pace": self.pace, "numbers": self.numbers.id()});
+        // the sampler shapes a Malayalam narration only (English voices refuse it)
+        if self.malayalam() {
+            for (k, v) in [("temperature", self.temperature), ("emphasis", self.emphasis), ("speed", self.speed)] {
+                p[k] = json!(v);
+            }
+        }
+        p
+    }
+
+    /// The script is Malayalam, read by a cloned voice (IndicF5): the voice-style controls apply.
+    fn malayalam(&self) -> bool {
+        self.voice.starts_with(filmcraft_tts::CLONE_PREFIX) && filmcraft_tts::malayalam::detect(&self.text)
+    }
+
+    /// The sampler as the next reading has it: what is set, over the emotion's preset.
+    fn sampler(&self) -> filmcraft_tts::styles::Sampler {
+        let base = filmcraft_tts::styles::preset(filmcraft_tts::styles::find(self.delivery.id())).unwrap_or(filmcraft_tts::styles::Sampler::PLAIN);
+        filmcraft_tts::styles::Sampler {
+            temperature: self.temperature.map_or(base.temperature, |v| v as f32),
+            emphasis: self.emphasis.map_or(base.emphasis, |v| v as f32),
+            speed: self.speed.map_or(base.speed, |v| v as f32),
+        }
     }
 }
 
@@ -260,6 +295,9 @@ pub fn follow_selection(app: &mut FilmcraftApp) {
                 d.delivery = n.delivery;
                 d.pace = n.pace;
                 d.numbers = n.numbers;
+                d.temperature = n.temperature;
+                d.emphasis = n.emphasis;
+                d.speed = n.speed;
                 d.loaded_from = Some((clip.0, item));
                 if first_time {
                     app.show_panel(crate::dock::PanelKind::TextToSpeech);
@@ -597,8 +635,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 });
                 ui.vertical(|ui| {
                     ui.set_width(half);
-                    label(ui, &t, "Delivery");
-                    let plain_only = !takes_delivery(&cloned_list, &d.voice);
+                    label(ui, &t, "Emotion");
+                    // natural cloned voices take it: in English (VoxCPM2) and in Malayalam (IndicF5)
+                    let plain_only = !takes_delivery(&cloned_list, &d.voice) && !d.malayalam();
                     let cb = egui::ComboBox::from_id_salt("tts-delivery").selected_text(d.delivery.label()).width(half).show_ui(ui, |ui| {
                         for v in Delivery::ALL {
                             if ui.selectable_label(d.delivery == v, v.label()).clicked() {
@@ -607,12 +646,14 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         }
                     });
                     let hint = if plain_only {
-                        "This voice reads plainly: natural cloned voices speak with a delivery"
+                        "This voice reads plainly: natural cloned voices speak with an emotion"
+                    } else if d.malayalam() {
+                        "How the line is spoken: in Malayalam the voice reads after its own recording of that emotion (its voice style), with the emotion's temperature, emphasis and speed"
                     } else {
                         "How the line is spoken: warm, excited, amazed…"
                     };
                     let r = cb.response.on_hover_text(hint);
-                    auto.add("tts.delivery", visible(ui, r.rect), "Delivery");
+                    auto.add("tts.delivery", visible(ui, r.rect), "Emotion");
                 });
             });
             ui.add_space(10.0);
@@ -640,6 +681,70 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     "How digits are said in Malayalam: years, prices and numbers from 100 up in English words (2021: twenty twenty-one), as Malayali creators say them, or every number in Malayalam words",
                 );
                 auto.add("tts.numbers", visible(ui, r.rect), "Numbers");
+            }
+            // a cloned voice reading Malayalam: its voice styles and IndicF5's sampler
+            if d.malayalam() {
+                ui.add_space(10.0);
+                label(ui, &t, "Voice style");
+                let have: Vec<String> = cloned_list
+                    .as_array()
+                    .and_then(|a| a.iter().find(|v| v["id"] == d.voice.as_str()))
+                    .and_then(|v| v["styles"].as_array())
+                    .map(|s| s.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let has = |s: &str| have.iter().any(|h| h == s);
+                let reads = filmcraft_tts::styles::resolve(filmcraft_tts::styles::find(d.delivery.id()), &has).unwrap_or("main");
+                let refs = if have.is_empty() { "References: main only".to_string() } else { format!("References: main, {}", have.join(", ")) };
+                let r = ui.label(egui::RichText::new(format!("{refs} · {} reads after the {reads} one", d.delivery.label())).color(t.text_dim).size(11.0));
+                r.on_hover_text("Add a style reference with `filmcraft-cli voice style set` (tts.voiceStyles): an excited or calm stretch of the speaker's own Malayalam. A style without one reads after the nearest the voice has (amazed → excited → conversational, dramatic → calm → warm), else the main reference.");
+                let s = d.sampler();
+                ui.spacing_mut().slider_width = w - 56.0;
+                for (name, id, slot, now, (lo, hi), hint) in [
+                    (
+                        "Temperature",
+                        "tts.temperature",
+                        &mut d.temperature,
+                        f64::from(s.temperature),
+                        filmcraft_project::narration::TEMPERATURE,
+                        "How free the reading is: lower is steadier and flatter, higher livelier and riskier (1 is the model's own)",
+                    ),
+                    (
+                        "Emphasis",
+                        "tts.emphasis",
+                        &mut d.emphasis,
+                        f64::from(s.emphasis),
+                        filmcraft_project::narration::EMPHASIS,
+                        "How closely the voice follows the words and its style reference (guidance; 2 is the model's own)",
+                    ),
+                    ("Speed", "tts.speed", &mut d.speed, f64::from(s.speed), filmcraft_project::narration::SPEED, "Speaking speed on top of the pace (1 is the natural rate)"),
+                ] {
+                    ui.label(egui::RichText::new(if slot.is_some() { name.to_string() } else { format!("{name} (emotion's preset)") }).color(t.text).size(11.5));
+                    let mut v = now;
+                    let r = ui.add(egui::Slider::new(&mut v, lo..=hi).step_by(0.05).fixed_decimals(2)).on_hover_text(hint);
+                    if r.changed() {
+                        *slot = Some(v);
+                    }
+                    auto.add(id, visible(ui, r.rect), name);
+                }
+                ui.horizontal(|ui| {
+                    let b = ui.add_enabled(d.temperature.is_some() || d.emphasis.is_some() || d.speed.is_some(), egui::Button::new("Use the emotion's preset").small());
+                    auto.add("tts.samplerReset", visible(ui, b.rect), "Use the emotion's preset");
+                    if b.clicked() {
+                        (d.temperature, d.emphasis, d.speed) = (None, None, None);
+                    }
+                    let cb = egui::ComboBox::from_id_salt("tts-insert-tag").selected_text("Insert tag").width(110.0).show_ui(ui, |ui| {
+                        for tag in filmcraft_tts::styles::STYLES.iter().copied().chain(["plain", "breath"]) {
+                            if ui.selectable_label(false, format!("[{tag}]")).clicked() {
+                                if !d.text.is_empty() && !d.text.ends_with(char::is_whitespace) {
+                                    d.text.push(' ');
+                                }
+                                d.text.push_str(&format!("[{tag}] "));
+                            }
+                        }
+                    });
+                    let r = cb.response.on_hover_text("[excited] … [calm] … switch the voice style for the sentences after the tag; [plain] goes back; [breath] is a short pause of room tone. Tags are not read aloud.");
+                    auto.add("tts.insertTag", visible(ui, r.rect), "Insert style tag");
+                });
             }
         }
         ui.add_space(12.0);
@@ -812,8 +917,33 @@ fn button(ui: &mut egui::Ui, t: &Tokens, r: Rect, icon: Icon, text: &str, primar
 
 #[cfg(test)]
 mod tests {
-    use super::check_status;
+    use super::{TtsDraft, check_status};
+    use filmcraft_project::Delivery;
     use serde_json::json;
+
+    #[test]
+    fn the_voice_style_controls_shape_malayalam_only() {
+        let ml = TtsDraft {
+            text: "ഇത് കൊള്ളാം!".into(), voice: "clone:me".into(), delivery: Delivery::Excited, temperature: Some(0.8), ..TtsDraft::default()
+        };
+        assert!(ml.malayalam());
+        let p = ml.params();
+        assert_eq!((p["temperature"].as_f64(), &p["emphasis"], &p["speed"]), (Some(0.8), &json!(null), &json!(null)), "null: the preset");
+        // the sliders show what the next reading uses: the set value over the emotion's preset
+        let s = ml.sampler();
+        let excited = filmcraft_tts::styles::preset(Some("excited")).unwrap();
+        assert_eq!((s.temperature, s.emphasis, s.speed), (0.8, excited.emphasis, excited.speed));
+        assert_eq!(TtsDraft { delivery: Delivery::Plain, temperature: None, ..ml.clone() }.sampler(), filmcraft_tts::styles::Sampler::PLAIN);
+        // English, or a voice that is not cloned: no sampler params (English refuses them)
+        for d in [TtsDraft { text: "Hello.".into(), ..ml.clone() }, TtsDraft { voice: "kokoro-heart".into(), ..ml.clone() }] {
+            assert!(!d.malayalam());
+            assert!(d.params().get("temperature").is_none());
+        }
+        // the draft is serde (agents read and set it)
+        let v = serde_json::to_value(&ml).unwrap();
+        assert_eq!(v["temperature"], json!(0.8));
+        assert_eq!(serde_json::from_value::<TtsDraft>(v).unwrap(), ml);
+    }
 
     #[test]
     fn the_strict_check_is_said_in_the_status_bar() {

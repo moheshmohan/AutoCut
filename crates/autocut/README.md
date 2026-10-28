@@ -226,7 +226,16 @@ A showcase is "every robot I have filmed, in order": many clips, one narrated, c
    `"outro"` or entry number (`{"intro": "excited", "7": "amazed"}`), renumbered with their
    entries on review like `say`; a reviewed plan may also choose `dramatic` or `plain`. A part
    without one is spoken `excited` (the intro) or `warm`. The natural cloned voices follow the
-   delivery (see `crates/tts/README.md`); other voices read plainly.
+   delivery (see `crates/tts/README.md`); other voices read plainly. In Malayalam the delivery
+   is also the voice style: the line reads after the voice's reference for it (`tts.voiceStyles`,
+   [docs/malayalam-narration.md](../../docs/malayalam-narration.md)), with its sampler preset.
+   `script.voice` tunes how IndicF5 reads a part — `{"3": {"temperature": 1.1, "emphasis": 2.4,
+   "speed": 1.05}}` by `"intro"`, `"outro"` or entry number (temperature 0.3–1.5, emphasis 1–4,
+   speed 0.7–1.4, each optional, over the delivery's preset) — and `script.voiceDefault` every
+   part without its own (a part's settings win field by field); both go to `tts.create`, are
+   checked before anything is built (a misspelt or out-of-range setting is refused), and follow
+   their entries on review. Style tags in a line (`[excited] … [calm] …`) are read as tags and
+   not shown in the subtitles.
 
    **Every cloned line is heard back.** A cloned voice can garble a line (a VoxCPM reading
    that is fluent noise). After `tts.create`, the line is transcribed (`transcript.generate`,
@@ -669,13 +678,13 @@ plan loads there. Every widget has an automation id (`showcase.lookOpen`, `showc
 A new round of a showcase is a reviewed plan plus notes, keyed by entry **label** (numbers change
 as entries come and go): [`plan_patch::apply`](src/plan_patch.rs) (`filmcraft-cli showcase-plan
 --base plan.json --patch notes.json --project p.fcproj --out new.json`) changes entries (`line`,
-`chips`, `delivery`, `say`, `place`, `event`, `kind`, `description`, `redact`, `unix` as seconds or
+`chips`, `delivery`, `say`, `voice`, `place`, `event`, `kind`, `description`, `redact`, `unix` as seconds or
 a date in the notes' `timezone`), replaces their `shots` (`{item, from, to, speed, fit, mute}`: the
 plan's analysed shot of that item, or with `plain` a shot counted in view across its window, its
 clip's name and length from the project) or edits them (`shotEdits`), splits one entry into two
 (`split`), removes one (`remove`), adds new ones (`add`), and merges the script's `intro`, `outro`,
 `pronounce` and the look's fields (`outro`, …). The entries are sorted by date and numbered again;
-`script.lines`, `chips`, `delivery` and `say` follow them, a scene keeps no chips, and the robot
+`script.lines`, `chips`, `delivery`, `say` and `voice` follow them, a scene keeps no chips, and the robot
 count in the outro ("Forty-three", or `{Count}`) is updated. Entries without a line are reported.
 [`plan_patch::with_lines`](src/plan_patch.rs) (`--lines script-ml.json`) writes the plan for
 another language: `{"intro", "outro", "lines": {"<label>": "…"}}` over it, `language` set, the

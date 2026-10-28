@@ -621,6 +621,59 @@ pub struct Script {
     /// m/s"]}`): up to three each, shown while its narration plays ([`look::chips_by_entry`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub chips: BTreeMap<String, Vec<String>>,
+    /// How the voice reads each Malayalam part (IndicF5's sampler over its delivery's preset):
+    /// `{"temperature", "emphasis", "speed"}` by `"intro"`, `"outro"` or an entry's number.
+    /// [`Script::voice_of`] puts a part's own settings over [`Script::voice_default`]'s.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub voice: BTreeMap<String, VoiceSettings>,
+    /// The voice settings of every part without its own (`"voiceDefault"` in a plan).
+    #[serde(default, rename = "voiceDefault", skip_serializing_if = "VoiceSettings::is_empty")]
+    pub voice_default: VoiceSettings,
+}
+
+/// How the voice reads a Malayalam part ([`Script::voice`]): each optional, over the part's
+/// delivery's preset (`tts.create`'s `temperature` 0.3–1.5, `emphasis` 1–4, `speed` 0.7–1.4).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
+}
+
+impl VoiceSettings {
+    pub fn is_empty(&self) -> bool {
+        *self == VoiceSettings::default()
+    }
+
+    /// `self`'s settings over `under`'s, field by field.
+    pub fn over(&self, under: &VoiceSettings) -> VoiceSettings {
+        VoiceSettings { temperature: self.temperature.or(under.temperature), emphasis: self.emphasis.or(under.emphasis), speed: self.speed.or(under.speed) }
+    }
+
+    /// Every setting within its range, else what is wrong (`what`: the part).
+    pub fn check(&self, what: &str) -> Result<(), String> {
+        use filmcraft_engine::project::narration::{EMPHASIS, SPEED, TEMPERATURE};
+        for (name, v, (lo, hi)) in [("temperature", self.temperature, TEMPERATURE), ("emphasis", self.emphasis, EMPHASIS), ("speed", self.speed, SPEED)] {
+            if let Some(v) = v
+                && !(v.is_finite() && (lo..=hi).contains(&v))
+            {
+                return Err(format!("script.voice {what}: `{name}` is a number from {lo} to {hi}, not {v}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The settings as `tts.create` params (only those given).
+    pub fn params(&self) -> serde_json::Map<String, Value> {
+        [("temperature", self.temperature), ("emphasis", self.emphasis), ("speed", self.speed)]
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k.to_string(), json!(v))))
+            .collect()
+    }
 }
 
 /// How the intro is spoken when the script does not say.
@@ -634,6 +687,21 @@ impl Script {
     /// How the part under `key` (`"intro"`, `"outro"` or an entry's number) is spoken.
     pub fn delivery_of(&self, key: &str) -> Delivery {
         self.delivery.get(key).and_then(|d| Delivery::from_id(d)).unwrap_or(if key == "intro" { INTRO_DELIVERY } else { DEFAULT_DELIVERY })
+    }
+
+    /// How the voice reads the part under `key` (`"intro"`, `"outro"` or an entry's number): its
+    /// own [`Script::voice`] settings over the plan's [`Script::voice_default`].
+    pub fn voice_of(&self, key: &str) -> VoiceSettings {
+        self.voice.get(key).map_or_else(|| self.voice_default.clone(), |v| v.over(&self.voice_default))
+    }
+
+    /// Every voice setting of the plan within its range (checked before anything is built).
+    pub fn check_voice(&self) -> Result<(), String> {
+        self.voice_default.check("default")?;
+        if self.voice.len() > 10_000 {
+            return Err("script.voice: too many parts".into());
+        }
+        self.voice.iter().try_for_each(|(k, v)| v.check(&format!("\"{}\"", k.chars().take(20).collect::<String>())))
     }
 
     /// What the voice says for `text`, a part of the script shown as written under `key`
@@ -2131,9 +2199,11 @@ async fn heard(ex: &dyn Executor, item: u64, language: &str) -> Option<String> {
     r["text"].as_str().map(str::to_string)
 }
 
-/// Narrate a part of the script at `t` on the voice track — the voice reads `say`, the
+/// Narrate a part of the script at `t` on the voice track — the voice reads `say` in `delivery`
+/// (a Malayalam part with the voice `settings` of its plan, [`Script::voice_of`]), the
 /// subtitles show `shown` — and return its length in seconds (0 without a voice, or for a part
 /// with no words: an intro that is only the title over the montage, say).
+#[allow(clippy::too_many_arguments)]
 async fn narrate(
     ex: &dyn Executor,
     tr: &Tracks,
@@ -2141,6 +2211,7 @@ async fn narrate(
     say: &str,
     shown: &str,
     delivery: Delivery,
+    settings: &VoiceSettings,
     t: f64,
     narrations: &mut Narrations,
 ) -> Result<f64, AutoCutError> {
@@ -2166,6 +2237,10 @@ async fn narrate(
             }
             if let Some(n) = &numbers {
                 p["numbers"] = json!(n);
+            }
+            // how IndicF5 reads it, over the delivery's preset
+            if let Some(o) = p.as_object_mut() {
+                o.extend(settings.params());
             }
         }
         run(ex, "tts.create", p).await
@@ -2239,7 +2314,8 @@ async fn narrate(
     }
     let seconds = r["duration"].as_f64().map(|d| d / TPS).filter(|d| d.is_finite() && *d > 0.0).unwrap_or(0.0);
     if seconds > 0.0 {
-        narrations.lines.push(Cue { start: t, end: t + seconds, text: shown.to_string() });
+        // what was said, without the markers and style tags that were not read aloud
+        narrations.lines.push(Cue { start: t, end: t + seconds, text: filmcraft_engine::narration::shown_text(shown) });
     }
     Ok(seconds)
 }
@@ -3173,9 +3249,11 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let (w, h) = (f64::from(opts.width), f64::from(opts.height));
     // sizes below are written for 1080 lines and scale with the frame (a 4K show: twice as big)
     let px = look::unit((w, h));
-    // the plan's chips and the timeline's dates are checked before anything is built
+    // the plan's chips, voice settings and the timeline's dates are checked before anything is
+    // built
     let numbers: Vec<usize> = entries.iter().map(|e| e.number).collect();
     let chips = look::chips_by_entry(&script.chips, &numbers)?;
+    script.check_voice().map_err(AutoCutError::Invalid)?;
     // …and every shot's own controls (windows, speeds, fit, focus, sound)
     let edits = shot_edit::check(entries)?;
     if look.timeline {
@@ -3308,8 +3386,18 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     // ---- intro: a cold open — a montage of robots from across the years cut on the beat,
     // the title over it, a swish into an impact
     let intro_voice_at = 2.2;
-    let intro_spoken =
-        narrate(ex, &tr, voice, &script.spoken("intro", &script.intro), &script.intro, script.delivery_of("intro"), intro_voice_at, &mut narrations).await?;
+    let intro_spoken = narrate(
+        ex,
+        &tr,
+        voice,
+        &script.spoken("intro", &script.intro),
+        &script.intro,
+        script.delivery_of("intro"),
+        &script.voice_of("intro"),
+        intro_voice_at,
+        &mut narrations,
+    )
+    .await?;
     // the voice track's next free moment: a line never starts over the last one
     let mut voice_free_at = intro_voice_at + intro_spoken;
     let intro_needs = (intro_voice_at + intro_spoken + 0.8).max(6.0);
@@ -3423,8 +3511,8 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
         let spoken = if line.trim().is_empty() {
             0.0
         } else {
-            narrate(ex, &tr, voice, &script.spoken(&e.number.to_string(), &line), &line, script.delivery_of(&e.number.to_string()), voice_at, &mut narrations)
-                .await?
+            let key = e.number.to_string();
+            narrate(ex, &tr, voice, &script.spoken(&key, &line), &line, script.delivery_of(&key), &script.voice_of(&key), voice_at, &mut narrations).await?
         };
         if spoken > 0.0 {
             voice_free_at = voice_at + spoken;
@@ -3751,8 +3839,18 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     let outro_at = t;
     built.chapters.push(Chapter { seconds: t, title: "Outro".into() });
     let outro_voice_at = (t + 0.8).max(voice_free_at + 0.15);
-    let outro_spoken =
-        narrate(ex, &tr, voice, &script.spoken("outro", &script.outro), &script.outro, script.delivery_of("outro"), outro_voice_at, &mut narrations).await?;
+    let outro_spoken = narrate(
+        ex,
+        &tr,
+        voice,
+        &script.spoken("outro", &script.outro),
+        &script.outro,
+        script.delivery_of("outro"),
+        &script.voice_of("outro"),
+        outro_voice_at,
+        &mut narrations,
+    )
+    .await?;
     // a branded outro lasts its own length at least, on frames
     let outro_len = match &look.outro {
         Some(o) => on_frame((outro_voice_at - t + outro_spoken + 1.5).max(o.seconds), tr.fps),
@@ -5042,7 +5140,7 @@ mod tests {
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, ..Narrations::default() };
         for say in ["", "  \n "] {
-            let spoken = narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+            let spoken = narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, &VoiceSettings::default(), 3.0, &mut n).await.unwrap();
             assert_eq!(spoken, 0.0);
         }
         assert!(ex.calls.lock().unwrap().is_empty(), "nothing read");
@@ -5054,7 +5152,7 @@ mod tests {
         let say = "ഒരു മനുഷ്യനെപ്പോലെ. തന്നെ തോന്നി.";
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, ..Narrations::default() };
-        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, &VoiceSettings::default(), 3.0, &mut n).await.unwrap();
         let calls = ex.calls.lock().unwrap().clone();
         // read in Malayalam under the strict check; never heard back by Whisper here (the engine's
         // check hears every utterance)
@@ -5073,7 +5171,7 @@ mod tests {
         // a line never heard clearly is reported and noted (the engine kept its best readings)
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 99, skipped: false };
         let mut n = Narrations { malayalam: true, ..Narrations::default() };
-        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, &VoiceSettings::default(), 3.0, &mut n).await.unwrap();
         assert_eq!(n.check.clear(), (0, 1));
         assert!(n.check.lines[0].start_cer >= 0.8 && n.check.lines[0].takes == 5);
         assert!(n.notes.iter().any(|l| l.contains("not heard clearly")), "{:?}", n.notes);
@@ -5081,7 +5179,7 @@ mod tests {
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: true };
         let mut n = Narrations { malayalam: true, ..Narrations::default() };
         for t in [0.0, 6.0] {
-            narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, t, &mut n).await.unwrap();
+            narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, &VoiceSettings::default(), t, &mut n).await.unwrap();
         }
         assert_eq!(n.clips.len(), 2);
         assert!(n.check.lines.is_empty() && n.check.skipped.as_deref().is_some_and(|w| w.contains("not downloaded")));
@@ -5089,13 +5187,13 @@ mod tests {
         // turned off: said so to the engine
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, unchecked: true, ..Narrations::default() };
-        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, &VoiceSettings::default(), 3.0, &mut n).await.unwrap();
         assert!(ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").all(|(_, p)| p["check"] == "off"));
         assert!(n.check.lines.is_empty());
         // the plan's number style goes to every Malayalam reading
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, numbers: Some("malayalam".into()), ..Narrations::default() };
-        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, &VoiceSettings::default(), 3.0, &mut n).await.unwrap();
         assert!(ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").all(|(_, p)| p["numbers"] == "malayalam"));
         assert_eq!(number_style(" English ").unwrap(), "english");
         assert_eq!(number_style("ml").unwrap(), "malayalam");
@@ -5105,26 +5203,61 @@ mod tests {
         let strict = CheckPolicy::from_plan(&json!({"readings": 6, "cer": 0.12, "startCer": 0.2})).unwrap();
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, policy: strict, ..Narrations::default() };
-        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, &VoiceSettings::default(), 3.0, &mut n).await.unwrap();
         let creates: Vec<Value> = ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").map(|(_, p)| p.clone()).collect();
         assert!(!creates.is_empty());
         assert!(creates.iter().all(|p| p["checkPolicy"] == json!({"readings": 6, "cer": 0.12, "startCer": 0.2}) && p["check"] == "strict"), "{creates:?}");
         assert!(calls.iter().all(|(_, p)| p.get("checkPolicy").is_none()), "the engine's own policy unless the plan says");
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, unchecked: true, policy: strict, ..Narrations::default() };
-        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, &VoiceSettings::default(), 3.0, &mut n).await.unwrap();
         assert!(ex.calls.lock().unwrap().iter().all(|(_, p)| p.get("checkPolicy").is_none() && p["check"] != "strict"));
         // an English part of a Malayalam show is not given it
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, policy: strict, ..Narrations::default() };
-        narrate(&ex, &voice_tracks(), Some("clone:me"), "Thanks for watching.", "Thanks for watching.", Delivery::Plain, 0.0, &mut n).await.unwrap();
+        narrate(
+            &ex,
+            &voice_tracks(),
+            Some("clone:me"),
+            "Thanks for watching.",
+            "Thanks for watching.",
+            Delivery::Plain,
+            &VoiceSettings::default(),
+            0.0,
+            &mut n,
+        )
+        .await
+        .unwrap();
         assert!(ex.calls.lock().unwrap().iter().all(|(_, p)| p.get("checkPolicy").is_none()));
         // an English part of a Malayalam show stays English (no language, no check given)
         let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
         let mut n = Narrations { malayalam: true, ..Narrations::default() };
-        narrate(&ex, &voice_tracks(), Some("basic-male"), "Thanks for watching.", "Thanks for watching.", Delivery::Plain, 0.0, &mut n).await.unwrap();
+        narrate(
+            &ex,
+            &voice_tracks(),
+            Some("basic-male"),
+            "Thanks for watching.",
+            "Thanks for watching.",
+            Delivery::Plain,
+            &VoiceSettings::default(),
+            0.0,
+            &mut n,
+        )
+        .await
+        .unwrap();
         assert!(ex.calls.lock().unwrap().iter().all(|(c, p)| c == "tts.create" && p.get("language").is_none() && p.get("check").is_none()));
         assert!(n.check.lines.is_empty());
+        // the plan's voice settings go to the Malayalam parts (an English part is not given them)
+        let settings = VoiceSettings { temperature: Some(1.2), emphasis: None, speed: Some(1.05) };
+        let ex = MalayalamTakes { calls: Default::default(), clear_from: 0, skipped: false };
+        let mut n = Narrations { malayalam: true, ..Narrations::default() };
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Excited, &settings, 3.0, &mut n).await.unwrap();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), "Thanks for watching.", "Thanks for watching.", Delivery::Plain, &settings, 9.0, &mut n).await.unwrap();
+        let creates: Vec<Value> = ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").map(|(_, p)| p.clone()).collect();
+        let (ml, en): (Vec<&Value>, Vec<&Value>) = creates.iter().partition(|p| p["language"] == "ml-IN");
+        assert!(!ml.is_empty() && !en.is_empty());
+        assert!(ml.iter().all(|p| p["temperature"] == 1.2 && p["speed"] == 1.05 && p.get("emphasis").is_none() && p["delivery"] == "excited"), "{ml:?}");
+        assert!(en.iter().all(|p| p.get("temperature").is_none() && p.get("speed").is_none()), "{en:?}");
     }
 
     #[test]
@@ -5224,7 +5357,7 @@ mod tests {
         let say = "Pepper greeted every visitor at the stand.";
         let ex = Retakes { calls: Default::default(), good_from: 1, calm_from: 0 };
         let mut n = Narrations::default();
-        let secs = narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        let secs = narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, &VoiceSettings::default(), 3.0, &mut n).await.unwrap();
         assert_eq!(secs, 5.0);
         assert_eq!((n.clips.clone(), n.retakes), (vec![11], 1), "the second take is kept");
         let calls = ex.calls.lock().unwrap().clone();
@@ -5235,7 +5368,7 @@ mod tests {
         // never good: three takes, the best kept, and a note
         let ex = Retakes { calls: Default::default(), good_from: 99, calm_from: 0 };
         let mut n = Narrations::default();
-        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, 3.0, &mut n).await.unwrap();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Warm, &VoiceSettings::default(), 3.0, &mut n).await.unwrap();
         assert_eq!(n.clips.len(), 1);
         assert!(n.notes.iter().any(|l| l.contains("best")), "{:?}", n.notes);
         assert!(ex.calls.lock().unwrap().iter().filter(|(c, _)| c == "tts.create").count() <= MAX_TAKES as usize + 1);
@@ -5243,13 +5376,13 @@ mod tests {
         // a voice that is not cloned is not heard back
         let ex = Retakes { calls: Default::default(), good_from: 99, calm_from: 0 };
         let mut n = Narrations::default();
-        narrate(&ex, &voice_tracks(), Some("basic-male"), say, say, Delivery::Plain, 0.0, &mut n).await.unwrap();
+        narrate(&ex, &voice_tracks(), Some("basic-male"), say, say, Delivery::Plain, &VoiceSettings::default(), 0.0, &mut n).await.unwrap();
         assert!(ex.calls.lock().unwrap().iter().all(|(c, _)| c == "tts.create"));
 
         // said right but overacted (150 Hz from a 100 Hz voice): read again, the calm take kept
         let ex = Retakes { calls: Default::default(), good_from: 0, calm_from: 1 };
         let mut n = Narrations::default();
-        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Excited, 3.0, &mut n).await.unwrap();
+        narrate(&ex, &voice_tracks(), Some("clone:me"), say, say, Delivery::Excited, &VoiceSettings::default(), 3.0, &mut n).await.unwrap();
         assert_eq!((n.clips.clone(), n.retakes), (vec![11], 1));
     }
 
@@ -5434,6 +5567,46 @@ mod tests {
         let v = serde_json::to_value(&plan).unwrap();
         assert_eq!(v["delivery"]["2"], "dramatic");
         assert!(serde_json::to_value(Script::default()).unwrap().get("delivery").is_none(), "none written when there are none");
+    }
+
+    #[test]
+    fn a_plan_says_how_the_voice_reads_each_part() {
+        let plan: Script = serde_json::from_value(json!({
+            "intro": "ഹായ്.", "lines": ["ഒന്ന്.", "രണ്ട്."], "outro": "ബൈ.",
+            "voice": {"1": {"temperature": 1.2, "speed": 1.05}, "intro": {"emphasis": 2.4}},
+            "voiceDefault": {"temperature": 0.9, "emphasis": 2.0}
+        }))
+        .unwrap();
+        // a part's own settings over the plan's, field by field; the rest the plan's
+        assert_eq!(plan.voice_of("1"), VoiceSettings { temperature: Some(1.2), emphasis: Some(2.0), speed: Some(1.05) });
+        assert_eq!(plan.voice_of("intro"), VoiceSettings { temperature: Some(0.9), emphasis: Some(2.4), speed: None });
+        assert_eq!(plan.voice_of("2"), plan.voice_default);
+        assert!(plan.check_voice().is_ok());
+        let p = plan.voice_of("1").params();
+        assert_eq!(serde_json::Value::Object(p), json!({"temperature": 1.2, "emphasis": 2.0, "speed": 1.05}));
+        // written back as read; none written when there are none
+        let v = serde_json::to_value(&plan).unwrap();
+        assert_eq!(v["voiceDefault"], json!({"temperature": 0.9, "emphasis": 2.0}));
+        assert_eq!(v["voice"]["1"], json!({"temperature": 1.2, "speed": 1.05}));
+        let none = serde_json::to_value(Script::default()).unwrap();
+        assert!(none.get("voice").is_none() && none.get("voiceDefault").is_none());
+        assert!(VoiceSettings::default().params().is_empty());
+        // out of range is refused before anything is built; a misspelt setting does not read
+        let with = |extra: Value| {
+            let mut v = json!({"intro": "", "lines": [], "outro": ""});
+            if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
+                o.extend(e.clone());
+            }
+            serde_json::from_value::<Script>(v)
+        };
+        for bad in [json!({"voice": {"3": {"temperature": 2.0}}}), json!({"voiceDefault": {"emphasis": 0.5}}), json!({"voice": {"1": {"speed": 0}}})] {
+            let s = with(bad.clone()).unwrap();
+            assert!(s.check_voice().unwrap_err().contains("script.voice"), "{bad}");
+        }
+        assert!(with(json!({"voice": {"1": {"temprature": 1.0}}})).is_err());
+        // a line with style tags shows without them
+        assert_eq!(filmcraft_engine::narration::shown_text("[excited] ഇത് കൊള്ളാം! [calm] ശരി."), "ഇത് കൊള്ളാം! ശരി.");
+        assert_eq!(filmcraft_engine::narration::shown_text("Line one.\nLine [two]."), "Line one.\nLine [two].", "a line without markers is as written");
     }
 
     /// Records the commands it is asked to run; `track.label` answers with a callout clip (or

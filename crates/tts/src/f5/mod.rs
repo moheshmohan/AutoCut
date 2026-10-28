@@ -56,11 +56,15 @@ pub struct Settings {
     pub speed: f32,
     /// Seed of the noise.
     pub seed: u64,
+    /// Scale of the initial noise, 0.05–2 (Matcha-TTS's `temperature`): below 1 the sampler
+    /// starts nearer the mean and reads flatter and steadier, above 1 livelier and riskier. 1 is
+    /// the reference's sampler exactly (the noise is not touched).
+    pub temperature: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { steps: 32, cfg: 2.0, sway: -1.0, speed: 1.0, seed: 1 }
+        Settings { steps: 32, cfg: 2.0, sway: -1.0, speed: 1.0, seed: 1, temperature: 1.0 }
     }
 }
 
@@ -77,6 +81,9 @@ impl Settings {
         }
         if !(self.speed.is_finite() && (0.25..=4.0).contains(&self.speed)) {
             return Err(TtsError::Invalid("speed must be between 0.25 and 4".into()));
+        }
+        if !(self.temperature.is_finite() && (0.05..=2.0).contains(&self.temperature)) {
+            return Err(TtsError::Invalid("temperature must be between 0.05 and 2".into()));
         }
         Ok(())
     }
@@ -111,6 +118,9 @@ mod tests {
             Settings { sway: -3.0, ..Default::default() },
             Settings { speed: 0.0, ..Default::default() },
             Settings { speed: f32::INFINITY, ..Default::default() },
+            Settings { temperature: 0.0, ..Default::default() },
+            Settings { temperature: f32::NAN, ..Default::default() },
+            Settings { temperature: 3.0, ..Default::default() },
         ] {
             assert!(s.check().is_err(), "{s:?}");
         }
