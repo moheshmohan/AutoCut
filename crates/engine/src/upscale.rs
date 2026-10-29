@@ -484,6 +484,8 @@ fn upscale(s: &mut Session, p: &Value) -> Result<Value> {
             Some("only photos and videos".to_string())
         } else if m.interpret.interpolated.is_some() {
             Some("it has frames made between its frames (Smooth Slow Motion): turn that off first".to_string())
+        } else if m.interpret.cleaned.is_some() {
+            Some("it has a copy with an object removed (Remove Object): turn that off first".to_string())
         } else if w.max(h) > MAX_INPUT_SIDE {
             Some(format!("larger than {MAX_INPUT_SIDE} pixels a side"))
         } else {

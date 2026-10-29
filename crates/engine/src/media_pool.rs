@@ -87,7 +87,7 @@ pub const PROBE_WHOLE_FILE_MAX: u64 = 64 * 1024 * 1024;
 pub fn media_key(m: &MediaClip) -> String {
     match &m.media {
         MediaRef::File { path } if m.offline => format!("offline:{path}"),
-        MediaRef::File { path } => format!("file:{path}{}{}{}", denoise_key(m), upscale_key(m), interpolate_key(m)),
+        MediaRef::File { path } => format!("file:{path}{}{}{}{}", denoise_key(m), upscale_key(m), interpolate_key(m), cleaned_key(m)),
         MediaRef::Generator(g) => format!("generator:{g:?}"),
     }
 }
@@ -103,6 +103,10 @@ fn upscale_key(m: &MediaClip) -> String {
 }
 
 /// The part of a source's key its in-between frames make (empty when off).
+fn cleaned_key(m: &MediaClip) -> String {
+    m.interpret.cleaned.as_ref().map(|c| format!("|cleaned:{}:{}:{}", c.path, c.start.0, c.duration.0)).unwrap_or_default()
+}
+
 fn interpolate_key(m: &MediaClip) -> String {
     m.interpret.interpolated.as_ref().map(|u| format!("|interpolated:{}:{}:{}", u.path, u.start.0, u.duration.0)).unwrap_or_default()
 }
@@ -392,6 +396,7 @@ impl MediaPool {
                 Ok(s) => {
                     self.offline.write().unwrap_or_else(|e| e.into_inner()).remove(&item);
                     let s = self.unsupported_as_slate(item, path, s);
+                    let s = self.cleaner(m, s, services);
                     let s = self.finer(m, s, services);
                     denoised(m, self.sharper(m, s, services))
                 }
@@ -446,6 +451,25 @@ impl MediaPool {
             Ok(_) => src,
             Err(e) => {
                 log::warn!("in-between frames offline: {}: {e}; the media is shown as it is", u.path);
+                src
+            }
+        }
+    }
+
+    /// `src` with a thing taken out in its range (Remove Object, `clip.removeObject`) when the
+    /// media has a copy that opens; else `src` as it is.
+    fn cleaner(&self, m: &MediaClip, src: SharedSource, services: &dyn Services) -> SharedSource {
+        let Some(c) = &m.interpret.cleaned else { return src };
+        if !m.info.has_video() || c.duration.0 <= 0 {
+            return src;
+        }
+        match self.follow_media(&c.path).and_then(|file| self.open_file(&file, services)) {
+            Ok(clean) if clean.info().video.is_some() => {
+                Arc::new(FinerSource { fine: clean, original: src, info: m.info.clone(), start: c.start, end: c.start + c.duration, factor: 1 })
+            }
+            Ok(_) => src,
+            Err(e) => {
+                log::warn!("the copy with the object removed is offline: {}: {e}; the media is shown as it is", c.path);
                 src
             }
         }

@@ -50,6 +50,7 @@ about compositing, effects and the on-device models.
 | ACE-Step neural music | Metal | CPU | `FILMCRAFT_ACESTEP_CPU=1` |
 | Depth Anything V2 Small (the depth effects' depth, once a photo) | **Metal** (candle) | load fails: CPU; a picture that fails: again on a CPU copy | — |
 | MobileSAM (cut-outs, Object Mask) | **Metal** (candle) | load fails: CPU | — |
+| MI-GAN (Remove Object) | **GPU** (WGSL, `crates/vision/src/migan.wgsl`; candle runs a depthwise layer as 512 convolutions) | no adapter, a device error: the CPU from then on | — |
 | RIFE 4.26 (Smooth Slow Motion) | **GPU** (WGSL, `crates/vision/src/rife.wgsl`; candle on Metal was 6× slower) | no adapter, a device error, a frame the device cannot hold: candle on the CPU from then on | — |
 | Real-ESRGAN (Upscale and Restore) | **GPU** (WGSL, `crates/vision/src/esrgan.wgsl`; candle's Metal convolution was 6× slower) | no adapter, a device error, a tile the device cannot hold: candle on the CPU from then on | — |
 
@@ -96,6 +97,7 @@ VideoToolbox encoding).
 | VoxCPM2, IndicF5, ACE-Step | — | Metal already | — | (unchanged) |
 | Depth Anything V2 Small, 924 × 518 (2026-10-28) | 1,133 ms | 249 ms | 4.5× | (one network: the same weights on both) |
 | MobileSAM, a 640 × 360 picture embedded (2026-10-29) | 3,174 ms | 532 ms | 6× | the same cut (score 0.98, 10.2 % covered on both) |
+| MI-GAN, a 512 × 512 picture (2026-10-29) | 369 ms | 40 ms | 9× | within 2.6e-6 |
 | RIFE 4.26, a 1080p frame between two (2026-10-29) | 4,698 ms (candle Metal 1,130) | 183 ms | 26× | within 1.4e-6 |
 | Real-ESRGAN ×4, 640 × 480 (2026-10-28) | 4,391 ms (candle Metal 2,969) | 474 ms | 9.3× | within 2.3e-6 |
 

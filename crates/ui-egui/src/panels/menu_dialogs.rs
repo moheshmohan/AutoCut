@@ -80,11 +80,12 @@ fn meta(command: &str) -> Option<(&'static str, &'static str, &'static str)> {
 
 /// Models downloaded only when the user agrees: the commands that need one, its status command,
 /// and where that status keeps its facts (`""`: at the top).
-const MODELS: [(&[&str], &str, &str); 4] = [
+const MODELS: [(&[&str], &str, &str); 5] = [
     (&["clip.objectMask", "clip.cutOut"], "cutout.status", "segmenter"),
     (&["clip.photo3d", "clip.depthBlur"], "depth.status", ""),
     (&["media.upscale"], "upscale.status", ""),
     (&["media.interpolate"], "interpolate.status", ""),
+    (&["clip.removeObject"], "removal.status", ""),
 ];
 
 /// When command `id` needs a model that is not downloaded (and this build can download it): the
@@ -1177,7 +1178,7 @@ mod tests {
                 assert!(filmcraft_engine::find_command(c).is_some(), "{c}");
             }
         }
-        for c in ["cutout.downloadModel", "depth.downloadModel", "upscale.downloadModel", "interpolate.downloadModel"] {
+        for c in ["cutout.downloadModel", "depth.downloadModel", "upscale.downloadModel", "interpolate.downloadModel", "removal.downloadModel"] {
             assert!(filmcraft_engine::find_command(c).is_some(), "{c}");
         }
     }

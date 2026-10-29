@@ -482,6 +482,8 @@ fn interpolate(s: &mut Session, p: &Value) -> Result<Value> {
             Some("only videos".to_string())
         } else if m.interpret.upscaled.is_some() {
             Some("it has a sharper copy (Upscale and Restore): turn that off first".to_string())
+        } else if m.interpret.cleaned.is_some() {
+            Some("it has a copy with an object removed (Remove Object): turn that off first".to_string())
         } else if rate.frame_duration().0 <= 0 {
             Some("no frame rate".to_string())
         } else {

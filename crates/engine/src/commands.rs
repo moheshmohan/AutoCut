@@ -1689,6 +1689,7 @@ fn build() -> Vec<CommandSpec> {
             crate::vr360::poll(s);
             crate::upscale::poll(s);
             crate::interpolate::poll(s);
+            crate::remove_object::poll(s);
             crate::speech_understand::poll(s);
             crate::motion_track::poll(s);
             crate::redact::poll(s);
@@ -3575,6 +3576,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::cutout::commands());
     v.extend(crate::sky::commands());
     v.extend(crate::object_mask::commands());
+    v.extend(crate::remove_object::commands());
     v.extend(crate::depth::commands());
     v.extend(crate::upscale::commands());
     v.extend(crate::interpolate::commands());

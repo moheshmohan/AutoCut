@@ -43,6 +43,16 @@ box corners itself (a random-Fourier code of each place plus its kind's learnt v
 same weights) and runs MobileSAM's mask decoder on them. 0.53 s a 1024 picture on the GPU, 3.2 s
 on the CPU; four answers to a prompt in 53 ms.
 
+**MI-GAN** (`inpaint`, Remove Object's painting), downloaded by `removal.downloadModel` into
+its own folder: `migan.onnx` (29,546,882 B, the authors' upload `andraniksargsyan/migan` at
+revision `406830d0`, SHA-256 `593eba0b…`), MIT; trained on Places2 (its terms are for
+non-commercial research and education). The network is written out by hand from the file's
+weights and fixed noise (`onnx` reads them; nothing in the file runs): a CPU reference and WGSL
+passes (`inpaint_gpu`, `migan.wgsl`: depthwise and pointwise convolutions with their bias, noise,
+activation and skips fused), 40 ms a 512 picture on the GPU, 369 ms on the CPU, within 2.6e-6.
+`Inpainter::inpaint` fills a hole in a picture of any size: a square round it scaled to 512,
+filled, scaled back and blended in by the hole's coverage.
+
 **Depth Anything V2 Small** (`depth`, the 3D photo and depth blur of photos), downloaded by
 `depth.downloadModel` into its own folder: `depth_anything_v2_vits.pth` (99,218,434 B, the authors'
 Hugging Face repository `depth-anything/Depth-Anything-V2-Small` at revision `03876f86`, SHA-256

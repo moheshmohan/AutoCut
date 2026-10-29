@@ -220,6 +220,19 @@ pub struct Interpretation {
     /// rate; a slowed clip shows the in-between frames instead of repeating or blending frames.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpolated: Option<Interpolated>,
+    /// Remove Object: a copy of (part of) the video with a thing taken out (`clip.removeObject`,
+    /// MI-GAN and the other frames) shown in its place within its range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleaned: Option<Cleaned>,
+}
+
+/// Remove Object: the copy's file and the media's time range it covers (`start` its first
+/// frame's media time).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Cleaned {
+    pub path: String,
+    pub start: filmcraft_time::Tick,
+    pub duration: filmcraft_time::Tick,
 }
 
 /// Smooth Slow Motion: the copy's file, how many frames it has for each of the media's, and the

@@ -4345,3 +4345,4 @@
 	Nothing is downloaded until you choose Download; its SHA-256 is checked and it is kept in FilmCraft's models folder.	「ダウンロード」を選ぶまで何もダウンロードされません。SHA-256 を確認したうえで、FilmCraft のモデルフォルダーに保存します。
 	Nothing to download	ダウンロードするものがありません
 	Downloading {name} (see Progress); choose {what} again when it finishes	{name}をダウンロード中 (進行状況を参照)。終わったら{what}をもう一度選んでください
+	Remove Object	オブジェクトを除去

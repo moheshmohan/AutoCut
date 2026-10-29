@@ -3986,3 +3986,4 @@
 	Nothing is downloaded until you choose Download; its SHA-256 is checked and it is kept in FilmCraft's models folder.	在你选择“下载”之前不会下载任何内容；下载后会校验其 SHA-256，并保存在 FilmCraft 的模型文件夹中。
 	Nothing to download	没有可下载的内容
 	Downloading {name} (see Progress); choose {what} again when it finishes	正在下载 {name}（参见进度）；完成后请再次选择{what}
+	Remove Object	移除对象

@@ -232,6 +232,36 @@ pub fn interpolator_installed(models_dir: &Path) -> bool {
     INTERP_FILES.iter().all(|f| present(&d, f))
 }
 
+/// The inpainter's package (its own directory under the models directory): MI-GAN, a hole in a
+/// picture filled (`crate::inpaint`: object removal).
+pub const INPAINT_PACKAGE_ID: &str = "migan";
+pub const INPAINT_NAME: &str = "MI-GAN (holes in pictures filled, for object removal)";
+pub const INPAINT_LICENSE: &str = "MIT (MI-GAN, Andranik Sargsyan et al., Picsart AI Research)";
+pub const INPAINT_SOURCE: &str = "https://huggingface.co/andraniksargsyan/migan (migan.onnx, the authors' upload)";
+pub const INPAINT_TRAINING: &str = "Places2 (scene photos; its terms are for non-commercial research and education)";
+
+/// MI-GAN's 512 × 512 Places2 generator as its authors export it to ONNX (read by `crate::onnx`,
+/// which runs nothing; the network is written out in `crate::inpaint`). Pinned to revision
+/// 406830d0; the SHA-256 checked 2026-10-29 by `shasum -a 256`.
+pub const INPAINTER: ModelFile = ModelFile {
+    name: "migan.onnx",
+    url: "https://huggingface.co/andraniksargsyan/migan/resolve/406830d0fa60666da0071c342ad2fbc8f30c5c64/migan.onnx",
+    sha256: "593eba0b7e04730f1b61c0a3cbca68d97d8d6a7ff5c6a44a7b9d7fcd880fc5ae",
+    size: 29_546_882,
+};
+
+pub static INPAINT_FILES: &[ModelFile] = &[INPAINTER];
+
+pub fn inpaint_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(INPAINT_PACKAGE_ID)
+}
+
+/// The inpainter's file is present with its pinned size.
+pub fn inpainter_installed(models_dir: &Path) -> bool {
+    let d = inpaint_dir(models_dir);
+    INPAINT_FILES.iter().all(|f| present(&d, f))
+}
+
 /// The interpolator's identity, for cache keys and file names.
 pub fn interpolator_id() -> String {
     format!("{}={}", INTERPOLATOR.name, INTERPOLATOR.sha256.get(..16).unwrap_or(INTERPOLATOR.sha256))

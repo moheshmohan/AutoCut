@@ -4346,3 +4346,4 @@
 	Nothing is downloaded until you choose Download; its SHA-256 is checked and it is kept in FilmCraft's models folder.	No se descarga nada hasta que eliges Descargar; se comprueba su SHA-256 y se guarda en la carpeta de modelos de FilmCraft.
 	Nothing to download	No hay nada que descargar
 	Downloading {name} (see Progress); choose {what} again when it finishes	Descargando {name} (ver Progreso); elige {what} de nuevo cuando termine
+	Remove Object	Quitar objeto

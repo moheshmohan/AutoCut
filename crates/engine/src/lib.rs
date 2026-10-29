@@ -86,6 +86,7 @@ pub mod redact_targets;
 pub mod reframe;
 pub mod relink;
 pub mod remix;
+pub mod remove_object;
 pub mod safe_zones;
 pub mod same_moments;
 pub mod scene_check;
@@ -563,6 +564,8 @@ pub struct Session {
     pub upscales: upscale::Upscales,
     /// Smooth Slow Motion jobs (`media.interpolate`) whose copies are attached when they finish.
     pub interpolations: interpolate::Interpolations,
+    /// Remove Object jobs (`clip.removeObject`) whose copies are attached when they finish.
+    pub removals: remove_object::Removals,
     /// People cut out of clips (`clip.cutOut` and its effects): a stand-in cutter for tests.
     pub cutouts: cutout::Cutouts,
     /// Speech understanding jobs (`media.understandSpeech`) whose transcripts and analyses are
@@ -734,6 +737,7 @@ impl Session {
             vr360: Default::default(),
             upscales: Default::default(),
             interpolations: Default::default(),
+            removals: Default::default(),
             cutouts: Default::default(),
             speech_jobs: Default::default(),
             motion_tracks: Default::default(),
@@ -882,6 +886,7 @@ impl Session {
         vr360::poll(self);
         upscale::poll(self);
         interpolate::poll(self);
+        remove_object::poll(self);
         speech_understand::poll(self);
         motion_track::poll(self);
         redact::poll(self);

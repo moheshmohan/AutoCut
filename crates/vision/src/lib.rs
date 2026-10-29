@@ -54,6 +54,10 @@ mod gpunn;
 #[cfg(all(test, feature = "model"))]
 mod gpunn_tests;
 #[cfg(feature = "model")]
+pub mod inpaint;
+#[cfg(feature = "model")]
+mod inpaint_gpu;
+#[cfg(feature = "model")]
 pub mod interp;
 #[cfg(feature = "model")]
 mod interp_gpu;

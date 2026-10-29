@@ -19,6 +19,7 @@ chosen again when it finishes). Agents and the CLI ask the user themselves, then
 | Photos in depth: the 3D photo, depth blur | `clip.photo3d`, `clip.depthBlur` (Clip ▸ Depth), the effects 3D Photo (Perspective) and Depth Blur (Blur & Sharpen) | Depth Anything V2 Small | Apache-2.0 | 99.2 MB, `depth.downloadModel` |
 | Upscale and Restore: photos and videos made larger and cleaner | `media.upscale` (Clip ▸ Modify) | Real-ESRGAN general x4v3 | BSD-3-Clause | 4.9 MB, `upscale.downloadModel` |
 | Smooth Slow Motion: frames made between a video's frames | `media.interpolate` (Clip ▸ Modify) | RIFE 4.26 | MIT | 22.9 MB, `interpolate.downloadModel` |
+| Remove Object: the thing a mask follows taken out of the clip | `clip.removeObject` (Clip ▸ Cut-outs) | MI-GAN | MIT | 29.5 MB, `removal.downloadModel` |
 | Object Mask: a thing masked from a click and followed through the clip | `clip.objectMask` (Clip ▸ Cut-outs; Effect Controls ▸ a mask row's sparkle), `masks.track` with the method Object | MobileSAM | Apache-2.0 | 40.7 MB, `cutout.downloadModel` |
 
 ## Photos in depth
@@ -259,4 +260,68 @@ plugged into it taken as part of it (0.88).
 handles) come and go between frames. A thing hidden for more than 1.5 s ends the run; a thing that
 reappears elsewhere is not looked for. Frames where nothing passed have no outline of their own.
 One mask of a clip is followed at a time (the clip's masks are tracked one job at a time).
+
+## Remove Object
+
+The thing a clip's mask follows (an Object Mask) is taken out of the picture, and the hole
+filled — first with what the other frames show there, then, where none does, with what MI-GAN
+(Sargsyan et al., Picsart AI Research, ICCV 2023; trained on Places2, whose terms are for
+non-commercial research and education) paints. It is written once as a copy of the clip's range
+and shown in the media's place, as Smooth Slow Motion's is.
+
+| Command | Does |
+|---|---|
+| `clip.removeObject` | a job: the clip's mask (`mask`: index or name on `effect`, Opacity; default the selected mask, else its last Object mask) grown by `grow` (a hundredth of the picture's short side, at least 8 px) and softened by `feather` (6 px) is the hole; for the media the clip plays where the mask has outlines (0.3 s either side), a copy with the hole filled (`fill`: `auto`; `model`, MI-GAN in every frame, to compare), an H.264 (`format: "prores"`: ProRes 422 HQ) beside the media (or in `folder`); when written the item shows it in its range and the mask is switched off, one undo step; `off` shows the media as it is |
+| `removal.status`, `removal.downloadModel` | whether MI-GAN is downloaded; the download, after the user agrees |
+
+**How the hole is filled.** The background's motion from each frame to the next is measured
+once, from feature points in a ring round the hole (the background beside the thing, which moves
+like what is behind it even where the far background does not; the whole picture when the ring
+has too little detail), and chained. For each pixel of a frame's hole, the frames up to 40 either
+side, nearest first, are looked at where that motion takes it: what they show outside their own
+holes are its candidates, and their median (when, three or more, they agree) is the pixel — real
+background, so it stays put. A neighbour is used only when it lines up: moved by the motion, it
+must show what the frame shows in a band round the hole (within 10 levels). What no frame shows,
+or a hole the frames show less than 60 % of (a thing standing still on what is behind it), is
+painted by MI-GAN — in key frames half a second apart, each painting carried to the frames near
+it by the background's motion and the two nearest cross-faded, so the painting does not change
+from frame to frame. MI-GAN sees a square round the hole (three times its size, at least 512
+pixels) scaled to 512; the filled hole is blended in by the mask's soft edge.
+
+**The network.** MI-GAN's 512 generator as its authors export it to ONNX: an encoder from 512 to
+4 pixels and a StyleGAN2-like synthesis back, every layer a depthwise 3 × 3 and a pointwise
+convolution, with fixed noise and skips from the encoder. `crates/vision/src/inpaint.rs` writes
+it out (its weights and noise read from the file, which runs nothing), a CPU reference of plain
+loops and candle matrix products, and `migan.wgsl` runs it on the GPU: a depthwise pass (plain,
+strided, or reading its input up by 2 with zeros between the pixels) and a tiled matrix product
+for the pointwise layers, each finished by the bias, noise, activation and skip it needs, every
+pass and binding made once (the size is fixed). candle could not be used for it: it runs a
+grouped convolution as one convolution a group, 512 for each depthwise layer.
+
+**Measured** (M3 Max, release, 2026-10-29). MI-GAN: 40 ms a picture on the GPU, 369 ms on the
+CPU, the GPU within 2.6e-6 of the CPU; a drawn scene's disc filled 10.5 levels from the scene
+without it (75 from the disc). Removal (`remove_object_tests.rs`), on a movie whose background is
+known — a textured picture panning 2 px a frame, a disc crossing it, masked frame by frame:
+
+| | inside the disc's place, from the true background | frame to frame |
+|---|---|---|
+| before | 77–120 levels | — |
+| `auto` (from the other frames) | 0.9–1.1 levels | within 0.2 levels of the background's own move |
+| painted in every frame (a stand-in painter: the ring's colour) | 32–40 levels | — |
+
+A still shot with a camera's grain (±8 levels) and a disc that never moves, so all of it is
+painted by MI-GAN: the hole changes 1.00 levels from frame to frame in `auto` (key frames), 6.75
+painted in every frame. On a 3 s clip of the user's (a toy car on a table, the camera walking
+round it; masked by Object Mask in 19 s): the removal took 6.3 s for 90 frames (0.07 s a frame),
+the car is gone in every frame; the frames show the table behind it only in slivers, so it is
+painted — the hole changing 3.08 levels from frame to frame (the camera's own motion in that),
+4.98 painted in every frame.
+
+**Limits.** Shadows and reflections stay unless the mask covers them (`grow` takes in a little
+round the thing; the toy car needed 30 px). Where nothing shows what is behind the thing, the fill
+is MI-GAN's guess: soft, right for floors, walls, grass and sky, not for detailed scenes. The
+background's motion is position, scale and rotation: a camera moving in depth past a near thing
+lines up less, and then more is painted. 360° media is refused (remove things from the reframed
+picture), and so are items with another copy (Upscale and Restore, Smooth Slow Motion); a second
+removal reads the first's copy, so removals stack. At most 7,200 frames a job.
 

@@ -237,10 +237,15 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   (Premiere 26.0, #406, #694: a click on the Program monitor masks the thing there, MobileSAM
   re-cutting it in every frame a box tracker says it went to; the mask tracking method Object;
   0.95 overlap with a ball crossing behind a post where Track Mask managed 0.61; 0.6 s a frame),
-  and the desktop app's Download a Model dialog asking before any of these models is fetched.
+  Remove Object (`clip.removeObject`: the hole filled with what the other frames show, the rest
+  painted by MI-GAN in WGSL on the GPU in key frames, so it holds still; 0.9–1.1 levels from the
+  true background on a panning test movie where painting alone was 32–40), and the desktop app's
+  Download a Model dialog asking before any of these models is fetched.
 - **AI limits:** Object Mask follows a thing at 0.6 s a frame (MobileSAM's encoder on candle's
   Metal), keeps no outline where the thing is mostly hidden and stops when it is gone for 1.5 s;
-  things touching something of their colour may take it with them.
+  things touching something of their colour may take it with them. Remove Object leaves shadows
+  the mask does not cover, and where nothing shows what is behind the thing it paints a soft guess
+  (MI-GAN at 512).
 - **Privacy blur limits (measured 2026-10-19 on GITEX footage):** YuNet misses faces in
   profile and half-hidden ones; LPD-YuNet was trained on Chinese plates and fired only on
   badges and signs there (no vehicles to measure recall on); named targets depend on a 7B vision
