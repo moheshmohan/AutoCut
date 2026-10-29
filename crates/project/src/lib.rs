@@ -215,6 +215,21 @@ pub struct Interpretation {
     /// the copy for as much detail as a clip shows the picture with. None = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upscaled: Option<Upscaled>,
+    /// Smooth Slow Motion: a copy of (part of) the video with frames made between its frames
+    /// (`media.interpolate`, RIFE) shown in its place within its range — the item keeps its frame
+    /// rate; a slowed clip shows the in-between frames instead of repeating or blending frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpolated: Option<Interpolated>,
+}
+
+/// Smooth Slow Motion: the copy's file, how many frames it has for each of the media's, and the
+/// media's time range it covers (`start` its first frame's media time).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Interpolated {
+    pub path: String,
+    pub factor: u8,
+    pub start: filmcraft_time::Tick,
+    pub duration: filmcraft_time::Tick,
 }
 
 /// Upscale and Restore: the sharper copy's file and how many times as large as the media it is.

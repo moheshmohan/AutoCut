@@ -393,6 +393,9 @@ impl MediaSource for DenoisedSource {
     fn max_scale(&self) -> f32 {
         self.inner.max_scale()
     }
+    fn time_detail(&self) -> u32 {
+        self.inner.time_detail()
+    }
     fn video_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
         let key = (req.time, req.scale.to_bits());
         if let Some(f) = self.recent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(k, _)| *k == key).map(|(_, f)| f.clone()) {

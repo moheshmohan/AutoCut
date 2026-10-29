@@ -49,6 +49,7 @@ about compositing, effects and the on-device models.
 | IndicF5 (Malayalam clones) | Metal | CPU | `FILMCRAFT_F5_CPU=1` |
 | ACE-Step neural music | Metal | CPU | `FILMCRAFT_ACESTEP_CPU=1` |
 | Depth Anything V2 Small (the depth effects' depth, once a photo) | **Metal** (candle) | load fails: CPU; a picture that fails: again on a CPU copy | — |
+| RIFE 4.26 (Smooth Slow Motion) | **GPU** (WGSL, `crates/vision/src/rife.wgsl`; candle on Metal was 6× slower) | no adapter, a device error, a frame the device cannot hold: candle on the CPU from then on | — |
 | Real-ESRGAN (Upscale and Restore) | **GPU** (WGSL, `crates/vision/src/esrgan.wgsl`; candle's Metal convolution was 6× slower) | no adapter, a device error, a tile the device cannot hold: candle on the CPU from then on | — |
 
 Metal (candle) and the WGSL detectors are macOS only; Windows and Linux keep the CPU for the
@@ -93,6 +94,7 @@ VideoToolbox encoding).
 | OpenVoice conversion, 12 s | 12.0 s | 1.6 s | 7.4× | 96 dB apart; tone colours within 9e-6 |
 | VoxCPM2, IndicF5, ACE-Step | — | Metal already | — | (unchanged) |
 | Depth Anything V2 Small, 924 × 518 (2026-10-28) | 1,133 ms | 249 ms | 4.5× | (one network: the same weights on both) |
+| RIFE 4.26, a 1080p frame between two (2026-10-29) | 4,698 ms (candle Metal 1,130) | 183 ms | 26× | within 1.4e-6 |
 | Real-ESRGAN ×4, 640 × 480 (2026-10-28) | 4,391 ms (candle Metal 2,969) | 474 ms | 9.3× | within 2.3e-6 |
 
 candle's Metal backend was tried for the detectors first: five times *slower* than the CPU (a unit

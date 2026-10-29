@@ -122,6 +122,9 @@ fn words(v: &[u32]) -> Vec<u8> {
 pub(crate) struct GpuNet {
     dev: &'static Device,
     layers: Vec<Layer>,
+    /// One tile at a time (each holds a few hundred MB of maps). Held only round the GPU's work,
+    /// which runs nothing on rayon (a thread waiting there could take work that comes back here).
+    one: std::sync::Mutex<()>,
 }
 
 impl GpuNet {
@@ -154,7 +157,7 @@ impl GpuNet {
                 slope: up("esrgan-a", &slope),
             });
         }
-        (!FAILED.load(Ordering::SeqCst)).then_some(Self { dev, layers })
+        (!FAILED.load(Ordering::SeqCst)).then_some(Self { dev, layers, one: std::sync::Mutex::new(()) })
     }
 
     /// A planar RGB tile (0..1, `w` × `h`) through the network: `3 × 4h × 4w` planar RGB.
@@ -184,6 +187,7 @@ impl GpuNet {
         {
             return Err(err("the tile is larger than the device's dispatches"));
         }
+        let _one = self.one.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let scope = d.push_error_scope(wgpu::ErrorFilter::Validation);
         let input =
             d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("esrgan-in"), contents: &bytes(px), usage: wgpu::BufferUsages::STORAGE });

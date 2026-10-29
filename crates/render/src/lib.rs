@@ -591,7 +591,7 @@ pub(crate) fn item_layer_ex(
         let px_scale = lw as f32 / src_size.0.max(1) as f32;
         let m =
             Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion).then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
-        if (lw, lh) == (w, h) && identity_placement(&m) && interpolation_blend(item, t, src.info().frame_rate()).is_none() {
+        if (lw, lh) == (w, h) && identity_placement(&m) && interpolation_blend(item, t, detail_rate(&src)).is_none() {
             let cs = colorman::source_space(project, item.item, &frame);
             if !colorman::needs_management(&seq.settings.color, cs, &frame) {
                 let (op, bl) = opacity_blend(item, mt);
@@ -654,7 +654,7 @@ fn plain_layer(frame: &VideoFrame, n: usize, opacity: f32, blend: Blend) -> Laye
 /// convert it with.
 fn media_frame(item: &TrackItem, t: Tick, sources: &dyn SourceProvider, want: f32, src_size: (u32, u32)) -> Option<(SharedSource, Arc<VideoFrame>, usize)> {
     let src = sources.source(item.item)?;
-    let frame = src.video_frame(FrameRequest { time: video_source_time(item, t, src.info().frame_rate()), scale: want }).ok()?;
+    let frame = src.video_frame(FrameRequest { time: video_source_time(item, t, detail_rate(&src)), scale: want }).ok()?;
     let n = decimation(frame.width as f32, src_size.0 as f32 * want);
     Some((src, frame, n))
 }
@@ -677,7 +677,7 @@ pub(crate) fn video_source_time(item: &TrackItem, t: Tick, media_rate: filmcraft
 #[allow(clippy::too_many_arguments)]
 fn media_image(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, src: &SharedSource, frame: &VideoFrame, n: usize, want: f32) -> Image {
     let img = colorman::decode(project, item.item, frame, n, &seq.settings.color);
-    match interpolation_blend(item, t, src.info().frame_rate()) {
+    match interpolation_blend(item, t, detail_rate(src)) {
         Some((next_time, wgt)) => match src.video_frame(FrameRequest { time: next_time, scale: want }) {
             Ok(f2) if f2.width == frame.width && f2.height == frame.height => {
                 let b = colorman::decode(project, item.item, &f2, n, &seq.settings.color);
@@ -769,7 +769,7 @@ fn reframed_layer(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, 
     let src = sources.source(item.item)?;
     let r = reframing(project, item, t, &src, want)?;
     let full_w = src.info().video.as_ref().map_or(1, |v| v.width.max(1));
-    let time = video_source_time(item, t, src.info().frame_rate());
+    let time = video_source_time(item, t, detail_rate(&src));
     let frame = src.video_frame(FrameRequest { time, scale: r.scale }).ok()?;
     let n = decimation(frame.width as f32, full_w as f32 * r.scale);
     let img = media_image(project, seq, item, t, &src, &frame, n, r.scale);
@@ -860,6 +860,14 @@ pub(crate) fn effects_scale(item: &TrackItem, mt: Tick, want: f32, opts: RenderO
         return want;
     }
     want.min((BLUR_WORKING_SIGMA / sigma).max(1.0 / 8.0) as f32)
+}
+
+/// The rate a source's frames come at: its media's, or finer for a stand-in with frames made
+/// between them ([`filmcraft_media::MediaSource::time_detail`]).
+pub fn detail_rate(src: &SharedSource) -> filmcraft_time::FrameRate {
+    let r = src.info().frame_rate();
+    let k = i64::from(src.time_detail().clamp(1, 16));
+    if k == 1 { r } else { filmcraft_time::FrameRate { num: r.num.saturating_mul(k), den: r.den } }
 }
 
 /// The scale to ask a clip's source for when one source pixel covers `lin` output pixels: as

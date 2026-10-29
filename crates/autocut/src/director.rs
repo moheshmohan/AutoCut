@@ -171,6 +171,9 @@ pub struct Options {
     /// Photos much smaller than the frame made larger and cleaner (`media.upscale`) when the
     /// upscaler is downloaded: on unless switched off.
     pub upscale: bool,
+    /// Speed ramps' slow parts given frames made between their frames (`media.interpolate`)
+    /// when the interpolator is downloaded: on unless switched off.
+    pub smooth: bool,
     pub look_strength: f64,
 }
 
@@ -404,6 +407,7 @@ impl Options {
             denoise: p["denoise"].as_bool().unwrap_or(true),
             depth: p["depth"].as_bool().unwrap_or(true),
             upscale: p["upscale"].as_bool().unwrap_or(true),
+            smooth: p["smooth"].as_bool().unwrap_or(true),
             color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
             look,
             look_strength: finite(&p["lookStrength"]).map_or(25.0, |v| v.clamp(0.0, 100.0)),
@@ -2059,6 +2063,10 @@ pub struct Report {
     /// The photos made larger and cleaner (`media.upscale`: each item, its factor and copy).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upscaled: Option<Value>,
+    /// The slowed shots given in-between frames (`media.interpolate`: each item, its factor, range
+    /// and copy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smoothed: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safe_zones: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2592,6 +2600,29 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
                 // (every photo already as large as the frame: nothing to do)
                 Err(e) if e.to_string().contains("nothing to upscale") => {}
                 Err(e) => report.fallbacks.push(format!("small photos: left as they are ({})", chars(&e.to_string(), 160))),
+            }
+        }
+    }
+    // ---- smooth slow motion: the speed ramps' clips given frames made between their frames
+    // (`media.interpolate` `auto`: as many as their slowest part needs), when RIFE is there
+    if o.smooth {
+        let ramps: Vec<u64> = plan
+            .shots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.camera == Camera::SpeedRamp && cands.iter().any(|c| c.id == s.clip && !c.photo && c.kind != Kind::Vr))
+            .filter_map(|(k, _)| built.pictures.get(k).copied().flatten())
+            .collect();
+        if !ramps.is_empty() && run(ex, "interpolate.status", json!({})).await.is_ok_and(|v| v["installed"] == json!(true)) {
+            match run(ex, "media.interpolate", json!({"clips": ramps, "wait": true})).await {
+                Ok(v) => {
+                    let made = v["outcome"]["made"].clone();
+                    lines(&format!("{} slowed shot(s) made smooth", made.as_array().map_or(0, Vec::len)));
+                    report.smoothed = Some(made);
+                }
+                // (no ramp slows its media down)
+                Err(e) if e.to_string().contains("nothing to make") => {}
+                Err(e) => report.fallbacks.push(format!("slow motion: frames repeated ({})", chars(&e.to_string(), 160))),
             }
         }
     }

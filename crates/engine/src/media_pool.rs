@@ -24,6 +24,7 @@ use filmcraft_media::generators::GeneratorSource;
 use filmcraft_media::{FrameRequest, MediaError, MediaInfo, MediaSource, Opener, SharedSource};
 use filmcraft_project::{ItemId, MediaClip, MediaRef, Project};
 use filmcraft_render::offline::OfflineReason;
+use filmcraft_time::Tick;
 
 use crate::Services;
 
@@ -86,7 +87,7 @@ pub const PROBE_WHOLE_FILE_MAX: u64 = 64 * 1024 * 1024;
 pub fn media_key(m: &MediaClip) -> String {
     match &m.media {
         MediaRef::File { path } if m.offline => format!("offline:{path}"),
-        MediaRef::File { path } => format!("file:{path}{}{}", denoise_key(m), upscale_key(m)),
+        MediaRef::File { path } => format!("file:{path}{}{}{}", denoise_key(m), upscale_key(m), interpolate_key(m)),
         MediaRef::Generator(g) => format!("generator:{g:?}"),
     }
 }
@@ -99,6 +100,11 @@ fn denoise_key(m: &MediaClip) -> String {
 /// The part of a source's key its sharper copy makes (empty when off).
 fn upscale_key(m: &MediaClip) -> String {
     m.interpret.upscaled.as_ref().map(|u| format!("|upscaled:{}", u.path)).unwrap_or_default()
+}
+
+/// The part of a source's key its in-between frames make (empty when off).
+fn interpolate_key(m: &MediaClip) -> String {
+    m.interpret.interpolated.as_ref().map(|u| format!("|interpolated:{}:{}:{}", u.path, u.start.0, u.duration.0)).unwrap_or_default()
 }
 
 /// `src` with the media's noise reduction (`media.denoise`), if it has any and a picture.
@@ -386,6 +392,7 @@ impl MediaPool {
                 Ok(s) => {
                     self.offline.write().unwrap_or_else(|e| e.into_inner()).remove(&item);
                     let s = self.unsupported_as_slate(item, path, s);
+                    let s = self.finer(m, s, services);
                     denoised(m, self.sharper(m, s, services))
                 }
                 Err(_) if filmcraft_media::pending::is_set() => {
@@ -415,6 +422,30 @@ impl MediaPool {
             Ok(_) => src,
             Err(e) => {
                 log::warn!("upscaled copy offline: {}: {e}; the media is shown as it is", u.path);
+                src
+            }
+        }
+    }
+
+    /// `src` with its in-between frames in their range (Smooth Slow Motion, `media.interpolate`)
+    /// when the media has a copy that opens; else `src` as it is.
+    fn finer(&self, m: &MediaClip, src: SharedSource, services: &dyn Services) -> SharedSource {
+        let Some(u) = &m.interpret.interpolated else { return src };
+        if !m.info.has_video() || u.duration.0 <= 0 {
+            return src;
+        }
+        match self.follow_media(&u.path).and_then(|file| self.open_file(&file, services)) {
+            Ok(fine) if fine.info().video.is_some() => Arc::new(FinerSource {
+                fine,
+                original: src,
+                info: m.info.clone(),
+                start: u.start,
+                end: u.start + u.duration,
+                factor: u32::from(u.factor.max(1)),
+            }),
+            Ok(_) => src,
+            Err(e) => {
+                log::warn!("in-between frames offline: {}: {e}; the media is shown as it is", u.path);
                 src
             }
         }
@@ -737,6 +768,54 @@ impl MediaSource for SharperSource {
     }
     fn max_scale(&self) -> f32 {
         self.factor()
+    }
+}
+
+/// A media item's picture with frames made between its frames (Smooth Slow Motion): inside its
+/// range the copy's frames (`factor` times as many, its time 0 at the media's `start`), outside it
+/// the original's; the original's info (the item keeps its rate), sound and sphere.
+pub struct FinerSource {
+    pub fine: SharedSource,
+    pub original: SharedSource,
+    pub info: MediaInfo,
+    pub start: Tick,
+    pub end: Tick,
+    pub factor: u32,
+}
+
+impl FinerSource {
+    fn inside(&self, req: FrameRequest) -> Option<FrameRequest> {
+        (req.time >= self.start && req.time < self.end).then(|| FrameRequest { time: req.time - self.start, scale: req.scale })
+    }
+}
+
+impl MediaSource for FinerSource {
+    fn info(&self) -> &MediaInfo {
+        &self.info
+    }
+    fn video_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
+        match self.inside(req) {
+            Some(r) => self.fine.video_frame(r).or_else(|_| self.original.video_frame(req)),
+            None => self.original.video_frame(req),
+        }
+    }
+    fn plain_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
+        match self.inside(req) {
+            Some(r) => self.fine.plain_frame(r).or_else(|_| self.original.plain_frame(req)),
+            None => self.original.plain_frame(req),
+        }
+    }
+    fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
+        self.original.audio(start, frames, sample_rate)
+    }
+    fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
+        self.original.audio_stream(stream, start, frames, sample_rate)
+    }
+    fn spherical(&self) -> Option<filmcraft_media::Spherical> {
+        self.original.spherical()
+    }
+    fn time_detail(&self) -> u32 {
+        self.factor.clamp(1, 16)
     }
 }
 

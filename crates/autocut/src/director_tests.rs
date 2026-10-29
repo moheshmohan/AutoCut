@@ -1006,6 +1006,7 @@ fn a_person_big_in_the_opening_is_put_in_front_of_its_title() {
     assert!(opts(json!({"brief": "x"})).denoise && !opts(json!({"brief": "x", "denoise": false})).denoise);
     assert!(opts(json!({"brief": "x"})).depth && !opts(json!({"brief": "x", "depth": false})).depth);
     assert!(opts(json!({"brief": "x"})).upscale && !opts(json!({"brief": "x", "upscale": false})).upscale);
+    assert!(opts(json!({"brief": "x"})).smooth && !opts(json!({"brief": "x", "smooth": false})).smooth);
 }
 
 #[test]

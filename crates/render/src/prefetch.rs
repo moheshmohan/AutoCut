@@ -66,7 +66,7 @@ fn warm_item(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, opts:
     let want = effects_scale(item, mt, crate::frame_scale(lin * opts.scale as f64, Some(&src)), opts);
     // a 360° clip asks for its source as sharp as its virtual camera's view needs
     let want = crate::reframing(project, item, t, &src, want).map_or(want, |r| r.scale);
-    let rate = src.info().frame_rate();
+    let rate = crate::detail_rate(&src);
     let mut asked = 1;
     let _ = src.video_frame(FrameRequest { time: video_source_time(item, t, rate), scale: want });
     if let Some((next, _)) = interpolation_blend(item, t, rate) {

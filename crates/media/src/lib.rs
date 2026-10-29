@@ -188,6 +188,12 @@ pub trait MediaSource: Send + Sync {
     fn max_scale(&self) -> f32 {
         1.0
     }
+    /// How many frames it has for each frame of [`info`](Self::info)'s rate: 1 for a decoder;
+    /// more for a stand-in with frames made between them (Smooth Slow Motion), whose frames the
+    /// renderer then times, blends and samples at that finer rate.
+    fn time_detail(&self) -> u32 {
+        1
+    }
 }
 
 pub type SharedSource = Arc<dyn MediaSource>;

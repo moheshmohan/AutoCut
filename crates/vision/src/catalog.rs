@@ -192,6 +192,46 @@ pub fn upscaler_id() -> String {
     format!("{}={}", UPSCALER.name, UPSCALER.sha256.get(..16).unwrap_or(UPSCALER.sha256))
 }
 
+/// The interpolator's package (its own directory): RIFE 4.26, the frames between two frames
+/// (`crate::interp`).
+pub const INTERP_PACKAGE_ID: &str = "rife-4.26";
+pub const INTERP_NAME: &str = "RIFE 4.26 (frames made between frames)";
+pub const INTERP_LICENSE: &str = "MIT (Practical-RIFE, Zhewei Huang et al.)";
+pub const INTERP_SOURCE: &str = "https://huggingface.co/hzwer/RIFE (RIFEv4.26_0921.zip, the author's upload)";
+
+/// RIFE 4.26 as its author publishes it: a zip of the network's PyTorch state dict
+/// (`flownet.pkl`, read by candle's pickle reader, which runs nothing) and its Python files
+/// (never run). The training data of the 4.x models is not published (the paper's model was
+/// trained on Vimeo-90K). Pinned to revision 01fdc7e9; the SHA-256 checked 2026-10-28 by
+/// `shasum -a 256` and against the Hugging Face API's LFS record.
+pub const INTERPOLATOR: ModelFile = ModelFile {
+    name: "RIFEv4.26_0921.zip",
+    url: "https://huggingface.co/hzwer/RIFE/resolve/01fdc7e97404120c243c3ea7b427046e5dc7643e/RIFEv4.26_0921.zip",
+    sha256: "1fa9b9cda3d9b8c3e301359e2595960902f97bf926c08598b0e9957a3f3f760e",
+    size: 22_869_906,
+};
+
+pub static INTERP_FILES: &[ModelFile] = &[INTERPOLATOR];
+
+/// The weights inside the zip, taken out beside it, and their size.
+pub const INTERP_WEIGHTS: &str = "flownet.pkl";
+pub const INTERP_WEIGHTS_SIZE: u64 = 24_636_301;
+
+pub fn interp_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(INTERP_PACKAGE_ID)
+}
+
+/// The interpolator's zip is present with its pinned size.
+pub fn interpolator_installed(models_dir: &Path) -> bool {
+    let d = interp_dir(models_dir);
+    INTERP_FILES.iter().all(|f| present(&d, f))
+}
+
+/// The interpolator's identity, for cache keys and file names.
+pub fn interpolator_id() -> String {
+    format!("{}={}", INTERPOLATOR.name, INTERPOLATOR.sha256.get(..16).unwrap_or(INTERPOLATOR.sha256))
+}
+
 pub fn package_dir(models_dir: &Path) -> PathBuf {
     models_dir.join(PACKAGE_ID)
 }
@@ -271,7 +311,7 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), FILES.len() + PROFILE_FILES.len());
         assert!(profile_model_ids().contains("dfine_n_coco.safetensors=19e06bdc873da819"));
-        for f in SEGMENT_FILES.iter().chain(DEPTH_FILES).chain(UPSCALE_FILES) {
+        for f in SEGMENT_FILES.iter().chain(DEPTH_FILES).chain(UPSCALE_FILES).chain(INTERP_FILES) {
             assert_eq!(f.sha256.len(), 64);
             assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()) && f.url.ends_with(f.name), "{}", f.url);
         }
@@ -287,6 +327,7 @@ mod tests {
         assert_eq!(profile_missing_bytes(&dir), profile_total_bytes());
         assert!(!depth_installed(&dir));
         assert!(!upscaler_installed(&dir));
+        assert!(!interpolator_installed(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -716,6 +716,9 @@ pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     if let Some(r) = crate::upscale::outcome_json(s, j.id) {
         v["upscale"] = r;
     }
+    if let Some(r) = crate::interpolate::outcome_json(s, j.id) {
+        v["interpolate"] = r;
+    }
     if let Some(r) = crate::speech_understand::outcome_json(s, j.id) {
         v["speech"] = r;
     }

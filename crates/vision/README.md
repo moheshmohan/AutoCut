@@ -5,7 +5,8 @@ Privacy detection for FilmCraft's automatic blur (`clip.autoRedact`, `sequence.a
 small local models, linked into tracks; and the profile pass, which finds the faces in profile
 or half hidden that the face detector misses from people's poses. Also people and things cut out
 of a picture (MobileSAM), how near each part of a picture is (Depth Anything V2 Small, for the
-3D photo and depth blur) and pictures made larger and cleaner (Real-ESRGAN). L2; pure Rust.
+3D photo and depth blur), pictures made larger and cleaner (Real-ESRGAN) and frames made between
+frames (RIFE). L2; pure Rust.
 
 ## Models
 
@@ -50,6 +51,12 @@ folder: `realesr-general-x4v3.pth` (4,885,111 B, the project's release v0.2.5.0 
 gives no digest for it; SHA-256 `8dc7edb9…` checked 2026-10-28), BSD-3-Clause (Xintao Wang et al.,
 Tencent ARC Lab); trained on DF2K (DIV2K, whose site gives it for academic research, and Flickr2K)
 and OST with synthetic damage. Read by candle's pickle reader (the state dict under `params`).
+
+**RIFE 4.26** (`interp`, Smooth Slow Motion), downloaded by `interpolate.downloadModel` into its own
+folder: `RIFEv4.26_0921.zip` (22,869,906 B, the author's Hugging Face upload `hzwer/RIFE` at
+revision `01fdc7e9`, SHA-256 `1fa9b9cd…`), MIT (Practical-RIFE); only its `flownet.pkl` is used
+(taken out once, its CRC-32 checked, and read by candle's pickle reader; the zip's Python files are
+never run). The training data of the 4.x models is not published.
 
 Licences checked 2026-10-19 in each model's directory (`LICENSE`, `README.md`). LPD-YuNet was
 trained on Chinese plates; it finds other countries' plates less reliably.
@@ -183,6 +190,13 @@ trained on Chinese plates; it finds other countries' plates less reliably.
   workgroup over the input's channels × 9 taps, 16 at a time through workgroup memory, the
   neighbourhoods read in place; then the shuffle and the residual). Tiles of 512 pixels read with
   a 34-pixel margin join exactly. `strength` mixes in a bilinear enlargement.
+- `interp` and `interp_gpu` (feature `model`): RIFE's IFNet — a feature head (three convolutions and
+  a transposed one) and five blocks (two halving convolutions, eight residual units with their
+  beta, a transposed convolution and a pixel shuffle) at 1/16 to the full size, each refining the
+  motion both ways from the frames and features warped by the last — on candle (the CPU: the
+  reference and the fallback; the warp built from four gathers) and as WGSL passes on macOS
+  (`rife.wgsl`: implicit-GEMM convolutions in three tile shapes, transposed convolutions over the
+  four taps that reach a pixel, resizes, warps and copies into channel ranges).
 - `people` (feature `model`): `ProfileDetector` — people (score ≥ 0.25, at least 4 % of the
   picture tall, at most 24, suppression at IoU 0.7), their poses, and the faces to add; the whole
   pass on the GPU when both networks are there (`people_cpu`: the picture and crops prepared on
@@ -225,6 +239,10 @@ the transformer layer, the pose head, the picture's preparation and the crops on
 idle, 973 ms at a load of 32–55 (1.0 frame a second; D-FINE's decoder alone 467 ms); all on the
 CPU 308 ms idle, 4.4 s loaded. The CPU's share now is recording the passes and two small
 read-backs, so a busy machine barely slows it.
+
+RIFE 4.26 (M3 Max, release, 2026-10-29): a 1080p frame between two in 183 ms on the GPU (WGSL; within
+1.4e-6 of the CPU), 4.7 s on the CPU, 1.1 s through candle's Metal backend; on real 1080p clips the
+made middle frame is 3.5–11 dB closer to the real one than a cross-fade (`the_middle_of_real_triplets`).
 
 Real-ESRGAN (M3 Max, release, 2026-10-28): a 640 × 480 picture made 4× in 474 ms on the GPU (WGSL;
 within 2.3e-6 of the CPU), 4.4 s on the CPU, 3.0 s through candle's Metal convolution (about 450

@@ -1688,6 +1688,7 @@ fn build() -> Vec<CommandSpec> {
             crate::reframe::poll(s);
             crate::vr360::poll(s);
             crate::upscale::poll(s);
+            crate::interpolate::poll(s);
             crate::speech_understand::poll(s);
             crate::motion_track::poll(s);
             crate::redact::poll(s);
@@ -3575,6 +3576,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::sky::commands());
     v.extend(crate::depth::commands());
     v.extend(crate::upscale::commands());
+    v.extend(crate::interpolate::commands());
     v.extend(crate::nadir::commands());
     v.extend(crate::same_moments::commands());
     v.extend(crate::denoise::commands());

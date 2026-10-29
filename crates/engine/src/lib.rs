@@ -41,6 +41,7 @@ pub mod gyro_sync;
 pub mod insta360;
 pub mod instagram;
 pub mod interchange;
+pub mod interpolate;
 pub mod ken_burns;
 pub mod keyboard;
 mod keyframe_move;
@@ -559,6 +560,8 @@ pub struct Session {
     pub vr360: vr360::Vr360Jobs,
     /// Upscale and Restore jobs (`media.upscale`) whose copies are attached when they finish.
     pub upscales: upscale::Upscales,
+    /// Smooth Slow Motion jobs (`media.interpolate`) whose copies are attached when they finish.
+    pub interpolations: interpolate::Interpolations,
     /// People cut out of clips (`clip.cutOut` and its effects): a stand-in cutter for tests.
     pub cutouts: cutout::Cutouts,
     /// Speech understanding jobs (`media.understandSpeech`) whose transcripts and analyses are
@@ -729,6 +732,7 @@ impl Session {
             reframes: Default::default(),
             vr360: Default::default(),
             upscales: Default::default(),
+            interpolations: Default::default(),
             cutouts: Default::default(),
             speech_jobs: Default::default(),
             motion_tracks: Default::default(),
@@ -876,6 +880,7 @@ impl Session {
         reframe::poll(self);
         vr360::poll(self);
         upscale::poll(self);
+        interpolate::poll(self);
         speech_understand::poll(self);
         motion_track::poll(self);
         redact::poll(self);

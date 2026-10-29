@@ -11,6 +11,7 @@ with the CPU as the fallback.
 |---|---|---|---|---|
 | Photos in depth: the 3D photo, depth blur | `clip.photo3d`, `clip.depthBlur` (Clip ▸ Depth), the effects 3D Photo (Perspective) and Depth Blur (Blur & Sharpen) | Depth Anything V2 Small | Apache-2.0 | 99.2 MB, `depth.downloadModel` |
 | Upscale and Restore: photos and videos made larger and cleaner | `media.upscale` (Clip ▸ Modify) | Real-ESRGAN general x4v3 | BSD-3-Clause | 4.9 MB, `upscale.downloadModel` |
+| Smooth Slow Motion: frames made between a video's frames | `media.interpolate` (Clip ▸ Modify) | RIFE 4.26 | MIT | 22.9 MB, `interpolate.downloadModel` |
 
 ## Photos in depth
 
@@ -125,4 +126,66 @@ those `strength` 0.6–0.8 keeps some of the picture's own grain. Faces are not 
 the network takes pictures up to 4096 a side; 360° media and image sequences are left out. A
 video's copy is slow (about 19 times its length at 480p ×4) and large (62 MB for those 3 s). In
 the desktop app the download has no dialog yet: agents and the CLI download it.
+
+## Smooth Slow Motion
+
+A slowed clip shows frames made between its frames instead of repeating (or blending) them:
+RIFE 4.26 (Practical-RIFE, Huang et al.; IFNet's five blocks estimating the motion both ways
+coarse to fine, warping both frames and their features to the moment between and mixing them by a
+learned mask) written out on candle in `crates/vision/src/interp.rs` and run on the GPU as WGSL
+passes (`interp_gpu.rs`, `rife.wgsl`). The training data of the 4.x models is not published (the
+paper's model was trained on Vimeo-90K).
+
+| Command | Does |
+|---|---|
+| `media.interpolate` | a job: for the clips asked for (`clips`, else the selected ones: the part of their media they play, three frames either side) or whole items (`items`), a copy with `factor` frames for each of the media's — 2 to 8, or `auto` (the default: as many as the slowest clip needs for the sequence's frame rate, its speed sampled along it so Time Remapping and speed ramps count; clips that play at their own rate or faster are left out, saying why) — an H.264 (`format: "prores"`: ProRes 422 HQ) beside the media (or in `folder`), shown in its range once written (one undo step); `off` shows the media as it is |
+| `interpolate.status`, `interpolate.downloadModel` | whether the network is downloaded; the download, after the user agrees |
+
+**In its place.** The copy, with the media time range it covers, becomes the item's
+Interpretation (`interpolated`): the item keeps its frame rate, its clips their speeds and
+timing. Inside the range the media pool gives the copy's frames
+([`FinerSource`](../crates/engine/src/media_pool.rs)), outside it the media's own, and the
+renderer times a clip's frames at the copy's finer rate (`MediaSource::time_detail`): Frame
+Sampling shows the made frame nearest each moment; Frame Blending and Optical Flow work between the
+made frames. The copy has no sound. AutoCut's director makes its speed ramps' slow parts smooth this
+way when the network is downloaded (`--no-smooth`).
+
+**How it runs.** Frames are padded to a multiple of 128 (256 over 2048 pixels, looked at at half
+scale) and the blocks look at them at 1/16 to the full size. The GPU passes: each 3 × 3
+convolution a tiled matrix product (three tile shapes, so layers of 16 or 32 channels keep their
+lanes busy), the transposed convolutions visiting only the four taps that reach a pixel with the
+pixel shuffle folded in, and resizes, warps, mixes and copies writing straight into channel
+ranges (the blocks' inputs are never concatenated). candle on Metal ran the same network as
+hundreds of separate whole-frame operations: 1.1 s a 1080p frame. The copy's frames are made as
+the export asks for them, the last pair of media frames kept; nothing is locked while a frame
+decodes or the network runs (a decoder that works in parallel lets its thread take another frame:
+holding a lock there hung the export, `a_slowed_clip_gets_the_frames_between_its_frames`).
+
+**Measured** (M3 Max, release, 2026-10-29). A 1080p frame made in 183 ms on the GPU (190 ms with
+its conversions), 4.7 s on the CPU, 1.1 s through candle on Metal; the GPU within 1.4e-6 of the
+CPU; a drawn square moving 16 px is placed halfway (0.32 levels from the true middle frame). The
+middle of three real frames made from the outer two, against the real one (`the_middle_of_real_triplets`):
+
+| Clip | Frames apart | RIFE | cross-fade | the frame held |
+|---|---|---|---|---|
+| a 50 fps 1080p clip, two moments | 1 / 2 | 38.0, 39.2 / 34.1, 35.1 dB | 34.5, 29.7 / 31.4, 27.0 dB | 30.7, 27.2 / 28.9, 24.8 dB |
+| a 59.94 fps 1080p phone clip, two moments | 1 / 2 | 39.1, 38.3 / 37.9, 38.5 dB | 32.2, 33.4 / 27.7, 27.2 dB | 27.7, 27.4 / 23.8, 23.2 dB |
+| a 640 × 640 clip of variable frame rate (29.8 fps), two moments | 1 / 2 | 27.8, 24.2 / 22.0, 23.6 dB | 23.1, 24.4 / 21.7, 23.8 dB | 20.8, 21.2 / 18.4, 20.7 dB |
+
+On the steady-rate 1080p clips the made frame is 3.5 to 11 dB closer to the real one than a
+cross-fade. On the variable-rate clip it is within 0.3 dB of a cross-fade at three of four moments:
+its frames are not evenly spaced in time, so the real middle frame is not at the halfway time.
+
+A second of the 50 fps clip slowed to 25 % in a 50 fps sequence: `auto` chose four frames for
+each, the copy (1.14 s of media, a few frames either side: 228 frames, 171 of them made) took
+32.9 s, 0.19 s a made frame. Before it, the slowed clip showed each frame four times and then
+jumped (the change between output frames 0, 0, 0, 4.1, 0, 0, 0 levels); with it, every output
+frame moved on alike (2.0 to 2.1 levels each).
+
+**Limits.** Frames are made between the media's frames: motion faster than a few dozen pixels a
+frame, things that appear from nowhere and repeating patterns come out smeared or doubled (as with
+any flow-based interpolation). A copy is at most 240 frames a second and 18,000 made frames (about
+an hour's work): a whole long recording is refused — choose the slowed clips. One copy of an item
+at a time (not with Upscale and Restore). Variable-frame-rate phone video is timed as its average
+rate. In the desktop app the download has no dialog yet: agents and the CLI download it.
 

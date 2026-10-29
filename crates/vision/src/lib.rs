@@ -29,6 +29,8 @@
 //!   picture is, for the 3D photo and depth blur; on candle, on the GPU (Metal) on macOS.
 //! - `upscale` (feature `model`): **Real-ESRGAN** (BSD-3-Clause), a picture made four times as large
 //!   with its detail restored, in seamless tiles; on candle, on the GPU (Metal) on macOS.
+//! - `interp` (feature `model`): **RIFE 4.26** (MIT), the frame between two frames at any time
+//!   between them; on candle, on the GPU (Metal) on macOS.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
@@ -51,6 +53,10 @@ mod gpu;
 mod gpunn;
 #[cfg(all(test, feature = "model"))]
 mod gpunn_tests;
+#[cfg(feature = "model")]
+pub mod interp;
+#[cfg(feature = "model")]
+mod interp_gpu;
 #[cfg(feature = "model")]
 mod layers;
 #[cfg(feature = "model")]

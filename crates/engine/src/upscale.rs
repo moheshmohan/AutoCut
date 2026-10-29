@@ -16,7 +16,8 @@
 //!
 //! **Limits.** A photo's copy is at most 8192 pixels a side (the still decoder's cap) and the
 //! network takes pictures of at most 4096 a side; a video's copy at most 7680 × 4320. 360° media
-//! (seen through a virtual camera, already large) and image sequences are left out.
+//! (seen through a virtual camera, already large) and image sequences are left out, and so are
+//! items with frames made between their frames (Smooth Slow Motion): one copy of an item at a time.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -206,15 +207,16 @@ pub fn enlarge_by(
 // ---------------------------------------------------------------------------------------------
 
 /// A video's frames made larger as they are asked for, for the transcode that writes its copy:
-/// the original's frame at its own size, through the network (one at a time: the GPU is the
-/// limit, and parallel frames would hold its memory many times over).
+/// the original's frame at its own size, through the network. No lock is held meanwhile: the
+/// export renders frames on rayon's threads, and work that runs in parallel (a decoder, the CPU
+/// network) lets its thread take another frame (the work-stealing deadlock of #480); the GPU's
+/// passes keep to one tile at a time themselves.
 struct Enlarging {
     inner: SharedSource,
     info: MediaInfo,
     net: Arc<dyn Enlarger>,
     factor: u32,
     strength: f32,
-    one: Mutex<()>,
     error: Arc<Mutex<Option<String>>>,
 }
 
@@ -226,7 +228,6 @@ impl MediaSource for Enlarging {
         let f = self.inner.video_frame(FrameRequest { time: req.time, scale: 1.0 })?;
         let (w, h) = (f.width as usize, f.height as usize);
         let rgba = f.to_rgba8();
-        let _one = lock(&self.one);
         match enlarge_by(&*self.net, &rgba, w, h, self.factor, self.strength, &mut |_, _| true) {
             Ok((px, ow, oh)) => Ok(Arc::new(filmcraft_frame::VideoFrame::rgba8(ow as u32, oh as u32, px).with_pts(f.pts))),
             Err(e) => {
@@ -307,7 +308,7 @@ fn video_copy(w: &Work, net: Arc<dyn Enlarger>, strength: f32, prores: bool, pro
     let ti = p.make_track_item(item, TrackKind::Video, Tick::ZERO, range, rate).ok_or("the clip does not place")?;
     p.sequence_mut(seq).and_then(|q| q.video_tracks.first_mut()).ok_or("no sequence")?.items.push(ti);
     let error = Arc::new(Mutex::new(None));
-    let src: SharedSource = Arc::new(Enlarging { inner: w.src.clone(), info, net, factor: w.factor, strength, one: Mutex::new(()), error: error.clone() });
+    let src: SharedSource = Arc::new(Enlarging { inner: w.src.clone(), info, net, factor: w.factor, strength, error: error.clone() });
     let pixels = f64::from(ow) * f64::from(oh);
     let settings = filmcraft_export::ExportSettings {
         format: if prores { filmcraft_export::Format::ProRes } else { filmcraft_export::Format::H264 },
@@ -480,6 +481,8 @@ fn upscale(s: &mut Session, p: &Value) -> Result<Value> {
             Some("360° media is seen through a virtual camera".to_string())
         } else if !matches!(m.info.kind, MediaKind::Still | MediaKind::Movie) {
             Some("only photos and videos".to_string())
+        } else if m.interpret.interpolated.is_some() {
+            Some("it has frames made between its frames (Smooth Slow Motion): turn that off first".to_string())
         } else if w.max(h) > MAX_INPUT_SIDE {
             Some(format!("larger than {MAX_INPUT_SIDE} pixels a side"))
         } else {
