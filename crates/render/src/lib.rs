@@ -16,6 +16,8 @@ pub mod color_balance;
 pub mod color_match;
 pub mod colorman;
 pub mod creator_fx;
+pub mod denoise;
+pub mod depth;
 pub mod effects;
 pub mod flow;
 pub mod gpufx;
@@ -44,6 +46,7 @@ pub mod transitions;
 pub mod vfx;
 pub mod vr;
 pub mod vr_motion;
+pub mod vr_seam;
 pub mod vr_source;
 
 use std::sync::Arc;
@@ -563,7 +566,7 @@ pub(crate) fn item_layer_ex(
     let motion = motion_matrix(seq, item, src_size, clip_par(project, item), mt);
     // How many output pixels one source pixel covers → request a reduced frame when possible.
     let lin = ((motion.a * motion.a + motion.b * motion.b).sqrt()).max((motion.c * motion.c + motion.d * motion.d).sqrt());
-    let want = effects_scale(item, mt, (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32, opts);
+    let want = effects_scale(item, mt, frame_scale(lin * opts.scale as f64, sources.source(item.item).as_ref()), opts);
     let pi = project.item(item.item)?;
     if matches!(pi.kind, ItemKind::Graphic { .. }) && !(item.has_opacity_masks() || opts.effects && item.has_standard_effects()) {
         // vectors straight to the output: no resampling, crisp at any Motion scale. Only the
@@ -588,7 +591,7 @@ pub(crate) fn item_layer_ex(
         let px_scale = lw as f32 / src_size.0.max(1) as f32;
         let m =
             Affine::scale(opts.scale as f64, opts.scale as f64).then_apply(&motion).then_apply(&Affine::scale(1.0 / px_scale as f64, 1.0 / px_scale as f64));
-        if (lw, lh) == (w, h) && identity_placement(&m) && interpolation_blend(item, t, src.info().frame_rate()).is_none() {
+        if (lw, lh) == (w, h) && identity_placement(&m) && interpolation_blend(item, t, detail_rate(&src)).is_none() {
             let cs = colorman::source_space(project, item.item, &frame);
             if !colorman::needs_management(&seq.settings.color, cs, &frame) {
                 let (op, bl) = opacity_blend(item, mt);
@@ -651,7 +654,7 @@ fn plain_layer(frame: &VideoFrame, n: usize, opacity: f32, blend: Blend) -> Laye
 /// convert it with.
 fn media_frame(item: &TrackItem, t: Tick, sources: &dyn SourceProvider, want: f32, src_size: (u32, u32)) -> Option<(SharedSource, Arc<VideoFrame>, usize)> {
     let src = sources.source(item.item)?;
-    let frame = src.video_frame(FrameRequest { time: video_source_time(item, t, src.info().frame_rate()), scale: want }).ok()?;
+    let frame = src.video_frame(FrameRequest { time: video_source_time(item, t, detail_rate(&src)), scale: want }).ok()?;
     let n = decimation(frame.width as f32, src_size.0 as f32 * want);
     Some((src, frame, n))
 }
@@ -674,7 +677,7 @@ pub(crate) fn video_source_time(item: &TrackItem, t: Tick, media_rate: filmcraft
 #[allow(clippy::too_many_arguments)]
 fn media_image(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, src: &SharedSource, frame: &VideoFrame, n: usize, want: f32) -> Image {
     let img = colorman::decode(project, item.item, frame, n, &seq.settings.color);
-    match interpolation_blend(item, t, src.info().frame_rate()) {
+    match interpolation_blend(item, t, detail_rate(src)) {
         Some((next_time, wgt)) => match src.video_frame(FrameRequest { time: next_time, scale: want }) {
             Ok(f2) if f2.width == frame.width && f2.height == frame.height => {
                 let b = colorman::decode(project, item.item, &f2, n, &seq.settings.color);
@@ -766,12 +769,21 @@ fn reframed_layer(project: &Project, seq: &Sequence, item: &TrackItem, t: Tick, 
     let src = sources.source(item.item)?;
     let r = reframing(project, item, t, &src, want)?;
     let full_w = src.info().video.as_ref().map_or(1, |v| v.width.max(1));
-    let time = video_source_time(item, t, src.info().frame_rate());
+    let time = video_source_time(item, t, detail_rate(&src));
     let frame = src.video_frame(FrameRequest { time, scale: r.scale }).ok()?;
     let n = decimation(frame.width as f32, full_w as f32 * r.scale);
     let img = media_image(project, seq, item, t, &src, &frame, n, r.scale);
-    // (levelled by the recording's horizon at the frame's own time)
+    // (levelled by the recording's horizon at the frame's own time; near things on a dual
+    // fisheye's seam stitched by the lenses' shifts, measured on the decoded frame)
     let model = vr::SourceModel::at(&r.spherical, (img.w, img.h), time);
+    let model = match r.spherical.seam_flow {
+        true => {
+            let frames = vr_seam::seam_frames(&src, time, r.scale, frame.clone());
+            let at_frame = vr::SourceModel::at(&r.spherical, (frame.width as usize, frame.height as usize), time);
+            vr_seam::with_seam(model, vr_seam::seam_of(&at_frame, &frames.iter().map(|f| f.as_ref()).collect::<Vec<_>>()))
+        }
+        false => model,
+    };
     let taps = vr::taps(&model, &r.view, r.out.0);
     Some(vr::reframe(&img, &model, &r.view, r.out.0, r.out.1, taps))
 }
@@ -850,6 +862,22 @@ pub(crate) fn effects_scale(item: &TrackItem, mt: Tick, want: f32, opts: RenderO
     want.min((BLUR_WORKING_SIGMA / sigma).max(1.0 / 8.0) as f32)
 }
 
+/// The rate a source's frames come at: its media's, or finer for a stand-in with frames made
+/// between them ([`filmcraft_media::MediaSource::time_detail`]).
+pub fn detail_rate(src: &SharedSource) -> filmcraft_time::FrameRate {
+    let r = src.info().frame_rate();
+    let k = i64::from(src.time_detail().clamp(1, 16));
+    if k == 1 { r } else { filmcraft_time::FrameRate { num: r.num.saturating_mul(k), den: r.den } }
+}
+
+/// The scale to ask a clip's source for when one source pixel covers `lin` output pixels: as
+/// small as the output needs, at most the picture's own size — or, for a sharper stand-in (an
+/// upscaled copy, [`filmcraft_media::MediaSource::max_scale`]), as large as it can give.
+pub(crate) fn frame_scale(lin: f64, src: Option<&SharedSource>) -> f32 {
+    let most = src.map_or(1.0, |s| f64::from(s.max_scale())).clamp(1.0, 8.0);
+    if lin.is_finite() { lin.clamp(1.0 / 64.0, most) as f32 } else { 1.0 }
+}
+
 /// Largest power-of-two box decimation that keeps at least `target_w` pixels of width.
 pub(crate) fn decimation(have_w: f32, target_w: f32) -> usize {
     let mut n = 1usize;
@@ -908,6 +936,9 @@ mod transition_sound_tests;
 
 #[cfg(test)]
 mod nest_tests;
+
+#[cfg(test)]
+mod sharper_tests;
 
 #[cfg(test)]
 #[path = "preview_tests.rs"]

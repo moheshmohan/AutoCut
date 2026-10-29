@@ -245,16 +245,16 @@ pub fn apply_measure(c: &mut Candidate, m: &Value) {
 
 /// Measure every moving moment on its own frames, a call per item; how many were measured.
 pub async fn measure(ex: &dyn Executor, cands: &mut [Candidate], lines: &mut dyn FnMut(&str)) -> usize {
-    let mut items: Vec<u64> = cands.iter().filter(|c| c.kind != Kind::Photo).map(|c| c.item).collect();
+    let mut items: Vec<u64> = cands.iter().filter(|c| !c.photo).map(|c| c.item).collect();
     items.sort_unstable();
     items.dedup();
     if items.is_empty() {
         return 0;
     }
-    lines(&format!("measuring {} moment(s) on their own frames", cands.iter().filter(|c| c.kind != Kind::Photo).count()));
+    lines(&format!("measuring {} moment(s) on their own frames", cands.iter().filter(|c| !c.photo).count()));
     let mut done = 0;
     for item in items {
-        let idx: Vec<usize> = (0..cands.len()).filter(|&i| cands.get(i).is_some_and(|c| c.item == item && c.kind != Kind::Photo)).collect();
+        let idx: Vec<usize> = (0..cands.len()).filter(|&i| cands.get(i).is_some_and(|c| c.item == item && !c.photo)).collect();
         for chunk in idx.chunks(filmcraft_engine::moments::MAX_MOMENTS) {
             let moments: Vec<Value> = chunk.iter().filter_map(|&i| cands.get(i)).map(|c| json!([round2(c.start), round2(c.end)])).collect();
             let Ok(v) = run(ex, "media.measureMoments", json!({"item": item, "moments": moments, "frames": 3})).await else { continue };

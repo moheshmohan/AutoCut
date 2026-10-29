@@ -3,7 +3,10 @@
 Privacy detection for FilmCraft's automatic blur (`clip.autoRedact`, `sequence.autoRedact` in
 `crates/engine/src/redact.rs`): faces and vehicle number plates found in video frames with
 small local models, linked into tracks; and the profile pass, which finds the faces in profile
-or half hidden that the face detector misses from people's poses. L2; pure Rust.
+or half hidden that the face detector misses from people's poses. Also people and things cut out
+of a picture (MobileSAM), how near each part of a picture is (Depth Anything V2 Small, for the
+3D photo and depth blur), pictures made larger and cleaner (Real-ESRGAN) and frames made between
+frames (RIFE). L2; pure Rust.
 
 ## Models
 
@@ -24,6 +27,54 @@ Apache-2.0; RTMPose's are MMPose's (Apache-2.0); RTMPose's body7 weights were tr
 public pose datasets (COCO, AI Challenger, CrowdPose, Halpe, MPII, PoseTrack18, sub-JHMDB).
 Detectors not used for their licences: SCRFD / InsightFace weights (non-commercial), Ultralytics
 YOLO-face (AGPL), YOLO5Face (GPL).
+
+**MobileSAM** (`segment`, the cut-outs of `clip.cutOut`), downloaded by `cutout.downloadModel`
+into its own folder: `mobile_sam.pt` (40,728,226 B, the authors' repository
+`ChaoningZhang/MobileSAM` at commit `f706ad9c`, SHA-256 `6dbb9052…`), Apache-2.0; a TinyViT
+image encoder distilled from Meta's Segment Anything on 1% of SA-1B (whose images are licensed for
+research), read by candle's pickle reader (which runs nothing) and run on candle — Metal on macOS.
+`matte` turns its cut-out into the editor's outline: the person's keypoints and the sides of their
+box as the points it is given, and the largest piece traced round its edge and spaced into a
+fixed number of points that a keyframed mask follows. `Segmenter::answers` also takes a box round
+the thing and gives all four answers (the unambiguous prompt's, then the three of an ambiguous
+one): Object Mask's tracker tells it where the thing went that way. candle's `Sam` takes points
+only and its prompt encoder drops a dimension embedding a box, so `segment` embeds the points and
+box corners itself (a random-Fourier code of each place plus its kind's learnt vector, from the
+same weights) and runs MobileSAM's mask decoder on them. The image encoder runs as our own WGSL
+passes on the GPU (`sam_gpu`, `sam.wgsl`; candle runs TinyViT's depthwise convolutions one channel
+at a time): 88 ms a 1024 picture, within 3.1e-6 of candle on the CPU (2.0 s; candle on Metal took
+0.53 s); four answers to a prompt in 48 ms.
+
+**MI-GAN** (`inpaint`, Remove Object's painting), downloaded by `removal.downloadModel` into
+its own folder: `migan.onnx` (29,546,882 B, the authors' upload `andraniksargsyan/migan` at
+revision `406830d0`, SHA-256 `593eba0b…`), MIT; trained on Places2 (its terms are for
+non-commercial research and education). The network is written out by hand from the file's
+weights and fixed noise (`onnx` reads them; nothing in the file runs): a CPU reference and WGSL
+passes (`inpaint_gpu`, `migan.wgsl`: depthwise and pointwise convolutions with their bias, noise,
+activation and skips fused), 40 ms a 512 picture on the GPU, 369 ms on the CPU, within 2.6e-6.
+`Inpainter::inpaint` fills a hole in a picture of any size: a square round it scaled to 512,
+filled, scaled back and blended in by the hole's coverage.
+
+**Depth Anything V2 Small** (`depth`, the 3D photo and depth blur of photos), downloaded by
+`depth.downloadModel` into its own folder: `depth_anything_v2_vits.pth` (99,218,434 B, the authors'
+Hugging Face repository `depth-anything/Depth-Anything-V2-Small` at revision `03876f86`, SHA-256
+`715fade1…`), Apache-2.0 (the Base, Large and Giant models are CC-BY-NC-4.0 and not used); trained
+on 595K synthetic pictures with exact depth (Hypersim, Virtual KITTI 2, BlendedMVS, IRS,
+TartanAir) and 62M real pictures of public datasets labelled by a larger teacher. Read by candle's
+pickle reader (which runs nothing) and run on candle — Metal on macOS. Licence checked
+2026-10-28 (the model card and the repository's README).
+
+**Real-ESRGAN** (`upscale`, Upscale and Restore), downloaded by `upscale.downloadModel` into its own
+folder: `realesr-general-x4v3.pth` (4,885,111 B, the project's release v0.2.5.0 on GitHub, which
+gives no digest for it; SHA-256 `8dc7edb9…` checked 2026-10-28), BSD-3-Clause (Xintao Wang et al.,
+Tencent ARC Lab); trained on DF2K (DIV2K, whose site gives it for academic research, and Flickr2K)
+and OST with synthetic damage. Read by candle's pickle reader (the state dict under `params`).
+
+**RIFE 4.26** (`interp`, Smooth Slow Motion), downloaded by `interpolate.downloadModel` into its own
+folder: `RIFEv4.26_0921.zip` (22,869,906 B, the author's Hugging Face upload `hzwer/RIFE` at
+revision `01fdc7e9`, SHA-256 `1fa9b9cd…`), MIT (Practical-RIFE); only its `flownet.pkl` is used
+(taken out once, its CRC-32 checked, and read by candle's pickle reader; the zip's Python files are
+never run). The training data of the 4.x models is not published.
 
 Licences checked 2026-10-19 in each model's directory (`LICENSE`, `README.md`). LPD-YuNet was
 trained on Chinese plates; it finds other countries' plates less reliably.
@@ -138,6 +189,32 @@ trained on Chinese plates; it finds other countries' plates less reliably.
   reference on random data; the sampling, box and statistics code is shared as `deform_cpu`,
   `fdr_box`, `lqe_stats_cpu`, `gau_cpu`). The CPU stays the reference and the fallback, network by
   network (same rules as `gpu`). Metal compiles WGSL with fast math, so NaN is tested by its bits.
+- `depth` (feature `model`): Depth Anything V2 Small by hand from the published architecture (no
+  code of the reference copied): DINOv2 ViT-S/14 (12 blocks, 6 heads, layer scale, LayerNorm
+  ε 1e-6, exact GELU) and the DPT head (the four levels from blocks 3, 6, 9 and 12, projected and
+  resized ×4, ×2, ×1, ×½, refined coarse to fine by residual units, bilinear resizes with the
+  corners aligned, ReLU). A picture is area-averaged to its short side at 518 and the long side the
+  nearest multiple of 14 (at most twice the short), normalised as ImageNet's; the learned 37 × 37
+  positions are resized to its grid bicubically exactly as PyTorch does (A = −0.75, the grid size
+  plus 0.1 as the scale, edges clamped); the answer, relative inverse depth, is made 0..1 (the
+  farthest to the nearest) by its 1st and 99th percentiles (`DepthMap`). candle's own Depth
+  Anything takes only square pictures (its positions are resized the wrong way round for others,
+  by nearest neighbour) and the original DINOv2 weights instead of the fine-tuned encoder, so it
+  is not used. A picture the GPU fails is run again on a CPU copy.
+- `upscale` and `upscale_gpu` (feature `model`): Real-ESRGAN's SRVGGNetCompact (a 3 × 3 convolution
+  to 64 channels, 32 more with PReLUs, one to 48, a pixel shuffle by 4, the input added back by
+  nearest neighbour) on candle (the CPU: the reference and the fallback) and as WGSL passes on
+  macOS (`esrgan.wgsl`: each convolution a tiled matrix product of 64 pixels by 64 channels a
+  workgroup over the input's channels × 9 taps, 16 at a time through workgroup memory, the
+  neighbourhoods read in place; then the shuffle and the residual). Tiles of 512 pixels read with
+  a 34-pixel margin join exactly. `strength` mixes in a bilinear enlargement.
+- `interp` and `interp_gpu` (feature `model`): RIFE's IFNet — a feature head (three convolutions and
+  a transposed one) and five blocks (two halving convolutions, eight residual units with their
+  beta, a transposed convolution and a pixel shuffle) at 1/16 to the full size, each refining the
+  motion both ways from the frames and features warped by the last — on candle (the CPU: the
+  reference and the fallback; the warp built from four gathers) and as WGSL passes on macOS
+  (`rife.wgsl`: implicit-GEMM convolutions in three tile shapes, transposed convolutions over the
+  four taps that reach a pixel, resizes, warps and copies into channel ranges).
 - `people` (feature `model`): `ProfileDetector` — people (score ≥ 0.25, at least 4 % of the
   picture tall, at most 24, suppression at IoU 0.7), their poses, and the faces to add; the whole
   pass on the GPU when both networks are there (`people_cpu`: the picture and crops prepared on
@@ -181,9 +258,27 @@ idle, 973 ms at a load of 32–55 (1.0 frame a second; D-FINE's decoder alone 46
 CPU 308 ms idle, 4.4 s loaded. The CPU's share now is recording the passes and two small
 read-backs, so a busy machine barely slows it.
 
+RIFE 4.26 (M3 Max, release, 2026-10-29): a 1080p frame between two in 183 ms on the GPU (WGSL; within
+1.4e-6 of the CPU), 4.7 s on the CPU, 1.1 s through candle's Metal backend; on real 1080p clips the
+made middle frame is 3.5–11 dB closer to the real one than a cross-fade (`the_middle_of_real_triplets`).
+
+Real-ESRGAN (M3 Max, release, 2026-10-28): a 640 × 480 picture made 4× in 474 ms on the GPU (WGSL;
+within 2.3e-6 of the CPU), 4.4 s on the CPU, 3.0 s through candle's Metal convolution (about 450
+GFLOPS a layer whatever the precision: why the WGSL passes); tiles join within one level
+(`the_network_enlarges_sharply_and_its_tiles_join_without_seams`, `the_gpu_matches_the_cpu`).
+
+Depth Anything V2 Small (M3 Max, release, 2026-10-28): a 924 × 518 picture in 249 ms on the GPU
+(Metal, after a first of 282 ms) and 1,133 ms on the CPU; 686 × 518 in 185 ms. Without an oracle on
+this machine (no PyTorch) it is checked on a drawn scene (a checkered ground to the horizon under a
+sky: 0.94 near the bottom, 0.37 halfway, 0.08 at the horizon, the sky 0) and by eye on ten of the
+user's photos (`depth_maps_of_pictures`): hands, a skull, a chair and printer parts stand out of
+their backgrounds with clean edges, floors and tables recede.
+
 ## Tests
 
-`cargo test -p filmcraft-vision --features model` (`gpu_layers_match_the_cpu` compares every
+`cargo test -p filmcraft-vision --features model` (`the_ground_near_the_camera_is_nearer_than_the_horizon`
+runs the depth network when it is downloaded; `FILMCRAFT_DEPTH_PICTURES=<dir of PNGs> … --ignored
+depth_maps_of_pictures` writes each picture's depth beside it; `gpu_layers_match_the_cpu` compares every
 layer of the face detectors on the GPU with the CPU's, `gpunn_tests` every pass of the profile
 networks' GPU path — matrix products with each activation, norms, softmax, attention, the
 deformable sampling, selection and gathering with ties, FDR boxes, quality statistics, the gated

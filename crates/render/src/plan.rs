@@ -615,10 +615,10 @@ fn push_item(
         let motion = motion_matrix(seq, item, size, crate::clip_par(project, item), mt);
         let lin = ((motion.a * motion.a + motion.b * motion.b).sqrt()).max((motion.c * motion.c + motion.d * motion.d).sqrt());
         // the working scale `item_layer` gives the effects (lowered under a large blur)
-        let want = crate::effects_scale(item, mt, (lin * opts.scale as f64).clamp(1.0 / 64.0, 1.0) as f32, opts);
+        let want = crate::effects_scale(item, mt, crate::frame_scale(lin * opts.scale as f64, Some(&src)), opts);
         // a 360° clip: its virtual camera's picture at `want`, from the source as sharp as it needs
         let reframe = crate::reframing(project, item, t, &src, want);
-        let time = crate::video_source_time(item, t, src.info().frame_rate());
+        let time = crate::video_source_time(item, t, crate::detail_rate(&src));
         let scale = reframe.as_ref().map_or(want, |r| r.scale);
         let Ok(frame) = src.video_frame(FrameRequest { time, scale }) else { return };
         // HDR and wide-gamut media on a Rec. 709 sequence is converted on the GPU too (#965); log
@@ -632,7 +632,7 @@ fn push_item(
                 let cs = crate::colorman::source_space(project, item.item, &frame);
                 let managed = crate::colorman::needs_management(pipe, cs, &frame);
                 let input = if managed { crate::colorman::gpu_input(project, item.item, pipe, cs, &frame) } else { None };
-                let plain = (input.is_some() || !managed) && crate::interpolation_blend(item, t, src.info().frame_rate()).is_none();
+                let plain = (input.is_some() || !managed) && crate::interpolation_blend(item, t, crate::detail_rate(&src)).is_none();
                 (frame, input, plain)
             }
         };
@@ -641,6 +641,15 @@ fn push_item(
             // effects then run on that picture, as `item_layer` runs them
             if plain {
                 let model = crate::vr::SourceModel::at(&r.spherical, (frame.width as usize, frame.height as usize), time);
+                // (near things on a dual fisheye's seam: the lenses' shifts measured on this frame)
+                let model = match r.spherical.seam_flow {
+                    true => {
+                        let frames = crate::vr_seam::seam_frames(&src, time, scale, frame.clone());
+                        let seam = crate::vr_seam::seam_of(&model, &frames.iter().map(|f| f.as_ref()).collect::<Vec<_>>());
+                        crate::vr_seam::with_seam(model, seam)
+                    }
+                    false => model,
+                };
                 let taps = crate::vr::taps(&model, &r.view, r.out.0) as u32;
                 let out_size = (r.out.0 as u32, r.out.1 as u32);
                 let vr = Some(Arc::new(VrLayer { view: r.view, model, out: out_size, taps }));
@@ -737,7 +746,7 @@ fn blended_frame(
     if item.time_interpolation != filmcraft_project::TimeInterpolation::FrameBlending {
         return None;
     }
-    let (next, wgt) = crate::interpolation_blend(item, t, src.info().frame_rate())?;
+    let (next, wgt) = crate::interpolation_blend(item, t, crate::detail_rate(src))?;
     let f2 = src.video_frame(FrameRequest { time: next, scale }).ok().filter(|f| f.width == frame.width && f.height == frame.height)?;
     let pipe = &seq.settings.color;
     let a = crate::colorman::decode(project, item.item, frame, 1, pipe);

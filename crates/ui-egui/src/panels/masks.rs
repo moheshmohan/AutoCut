@@ -3,15 +3,16 @@
 //! arrow, cinematic bars, diagonal split —, per-mask Path / Feather / Opacity / Expansion /
 //! Inverted / mode) and on-monitor editing on the Program monitor (drag vertices, Bézier handles,
 //! the whole mask, feather, expansion and corner-roundness handles; the pen places a free-draw
-//! Bézier mask).
+//! Bézier mask; the Object Mask tool masks the thing clicked, `clip.objectMask`: Shift-click adds
+//! to it, Option-click takes away, the mask's track buttons follow it through the clip).
 //!
-//! Automation ids: `effectControls.<effect>.mask.{ellipse,polygon,pen,presets}`, the presets
+//! Automation ids: `effectControls.<effect>.mask.{ellipse,polygon,pen,presets,object}`, the presets
 //! menu's `effectControls.<effect>.mask.preset.<key>` (`roundedRectangle`, `star`, `heart`,
 //! `triangle`, `hexagon`, `cross`, `arrow`, `bars-2.39`, `bars-2`, `bars-1.85`, `diagonalSplit`),
 //! `effectControls.<effect>.mask<k>` (+ `.mode`, `.inverted`, `.delete`, and the parameter rows
 //! `effectControls.<effect>.mask<k>.<param>.*`), `program.mask.vertex.<i>`, `program.mask.in.<i>`,
 //! `program.mask.out.<i>`, `program.mask.body`, `program.mask.feather`, `program.mask.expansion`,
-//! `program.mask.roundness`, `program.maskPen`.
+//! `program.mask.roundness`, `program.maskPen`, `program.objectMask`.
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use filmcraft_geom::{Affine, Vec2};
@@ -72,6 +73,33 @@ fn preset_button(app: &mut FilmcraftApp, ui: &mut egui::Ui, br: Rect, clip: Clip
     });
 }
 
+/// The Object Mask tool's button after the presets: on, a click on the Program monitor masks the
+/// thing there (MobileSAM, asked for first when it is not downloaded).
+fn object_button(app: &mut FilmcraftApp, ui: &mut egui::Ui, br: Rect, clip: ClipId, idx: usize, e: &EffectInstance) {
+    let t = app.tokens;
+    let tip = tl!("Object Mask: click the thing in the Program monitor");
+    let resp = ui.interact(br, egui::Id::new(("mask-object", clip.0, idx)), Sense::click()).on_hover_text(tip);
+    if resp.hovered() {
+        ui.painter().rect_filled(br, 3.0, t.hover);
+    }
+    let on = app.ui.object_mask.as_ref().is_some_and(|d| d.clip == clip.0 && d.effect == idx);
+    icons::paint(ui.painter(), br.shrink(3.0), Icon::Sparkle, if on { t.accent } else { t.icon });
+    app.auto.add(&format!("effectControls.{}.mask.object", e.effect), br, tip);
+    if !resp.clicked() {
+        return;
+    }
+    if on {
+        app.ui.object_mask = None;
+        app.ui.status.clear();
+    } else if !crate::panels::menu_dialogs::ask_for_model(app, filmcraft_engine::object_mask::CMD) {
+        app.ui.mask_pen = None;
+        app.ui.object_mask = Some(crate::state::ObjectMaskDraft { clip: clip.0, effect: idx, ..Default::default() });
+        app.ui.status =
+            tl!("Click the thing in the Program monitor; Shift-click to add to it, Option-click to take away; then track the mask with its track buttons")
+                .into();
+    }
+}
+
 /// Mask rows under an effect in Effect Controls.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn effect_rows(
@@ -122,6 +150,7 @@ pub(crate) fn effect_rows(
         }
     }
     preset_button(app, ui, Rect::from_center_size(pos2(r.min.x + 40.0 + 3.0 * 24.0, r.center().y), vec2(20.0, 18.0)), clip, idx, e, actions);
+    object_button(app, ui, Rect::from_center_size(pos2(r.min.x + 40.0 + 4.0 * 24.0, r.center().y), vec2(20.0, 18.0)), clip, idx, e);
     let defs = filmcraft_project::mask::mask_param_defs();
     for (k, m) in e.masks.iter().enumerate() {
         let key = format!("mask:{}:{}:{}", clip.0, idx, k);
@@ -276,6 +305,10 @@ fn inside(pts: &[Vec2], p: Vec2) -> bool {
 pub fn monitor_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, frame: (u32, u32)) {
     if app.ui.mask_pen.is_some() {
         pen_overlay(app, ui, pic, frame);
+        return;
+    }
+    if app.ui.object_mask.is_some() {
+        object_overlay(app, ui, pic, frame);
         return;
     }
     let Some(sel) = app.session.state.selected_mask else { return };
@@ -745,6 +778,74 @@ fn pen_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, frame: (u32
         }
     } else {
         app.ui.mask_pen = Some(d);
+    }
+}
+
+/// The Object Mask tool on the Program monitor: a click masks the thing under it on this frame
+/// (a new mask), Shift-click adds to it and Option-click takes away (the same mask cut again);
+/// the clicks are marked and the mask's outline drawn; Escape ends the tool.
+fn object_overlay(app: &mut FilmcraftApp, ui: &mut egui::Ui, pic: Rect, frame: (u32, u32)) {
+    let Some(mut d) = app.ui.object_mask.clone() else { return };
+    let ph = app.session.playhead();
+    let clip = ClipId(d.clip);
+    let Some(it) = app.session.active_sequence().and_then(|q| q.find_item(clip)).map(|(_, i)| i.clone()) else {
+        app.ui.object_mask = None;
+        return;
+    };
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) || it.duration <= Tick::ZERO {
+        app.ui.object_mask = None;
+        app.ui.status.clear();
+        return;
+    }
+    let mt = it.source_time_at(ph.clamp(it.start, it.end() - Tick(1)));
+    let Some(to_screen) = clip_to_screen(app, &it, mt, pic, frame) else { return };
+    let Some(to_clip) = to_screen.inverse() else { return };
+    let size = filmcraft_render::source_size(&app.session.project, it.item).unwrap_or(frame);
+    let (w, h) = (f64::from(size.0.max(1)), f64::from(size.1.max(1)));
+    let resp = ui.interact(pic, egui::Id::new("object-mask"), Sense::click());
+    app.auto.add("program.objectMask", pic, "Object Mask");
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+    let painter = ui.painter().with_clip_rect(pic);
+    // the mask so far
+    let col = Color32::from_rgb(0xff, 0xd2, 0x3c);
+    if let Some(m) = d.mask.and_then(|k| it.effects.get(d.effect)?.masks.get(k)) {
+        let mut pts: Vec<Pos2> = m.path_at(mt).flatten(0.5).into_iter().map(|v| sp(&to_screen, v)).collect();
+        if let Some(f) = pts.first().copied() {
+            pts.push(f);
+        }
+        painter.add(egui::Shape::line(pts, Stroke::new(2.0, col)));
+    }
+    for (list, on) in [(&d.inside, true), (&d.outside, false)] {
+        for q in list {
+            let p = sp(&to_screen, Vec2::new(q[0] * w, q[1] * h));
+            painter.circle_filled(p, 5.0, if on { Color32::from_rgb(0x3c, 0xc8, 0x64) } else { Color32::from_rgb(0xe0, 0x50, 0x50) });
+            painter.circle_stroke(p, 5.0, Stroke::new(1.0, Color32::WHITE));
+        }
+    }
+    let (Some(p), true) = (resp.interact_pointer_pos(), resp.clicked()) else { return };
+    let c = to_clip.apply(Vec2::new(f64::from(p.x), f64::from(p.y)));
+    let q = [(c.x / w).clamp(0.0, 1.0), (c.y / h).clamp(0.0, 1.0)];
+    let (add, take) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
+    if d.mask.is_some() && (add || take) {
+        if take { d.outside.push(q) } else { d.inside.push(q) }
+    } else {
+        (d.mask, d.inside, d.outside) = (None, vec![q], Vec::new());
+    }
+    let at = (ph.clamp(it.start, it.end() - Tick(1)) - it.start).seconds();
+    let mut params = json!({"clip": d.clip, "effect": d.effect, "inside": d.inside, "outside": d.outside, "at": at, "track": "none"});
+    if let Some(m) = d.mask {
+        params["mask"] = json!(m);
+    }
+    // (a click refused — the clip's masks being tracked — leaves the tool as it was)
+    match app.session.execute(filmcraft_engine::object_mask::CMD, params) {
+        Ok(r) => {
+            d.mask = r["mask"].as_u64().map(|m| m as usize);
+            app.ui.status = tl!("Masking the object (see Progress); Shift-click to add to it, Option-click to take away").into();
+            app.ui.object_mask = Some(d);
+        }
+        Err(e) => app.ui.status = e.to_string(),
     }
 }
 

@@ -156,6 +156,24 @@ pub struct Options {
     pub color: bool,
     pub color_strength: f64,
     pub look: String,
+    /// The opening's title behind its person (`clip.cutOut`, `clip.personInFront`) when a person
+    /// is its subject: on unless switched off.
+    pub cutouts: bool,
+    /// Cuts between two cameras' pictures of one moment (`media.sameMoments`): on unless switched
+    /// off.
+    pub angles: bool,
+    /// Noise reduction for the dark, noisy recordings the edit uses (`media.denoise` `auto`): on
+    /// unless switched off.
+    pub denoise: bool,
+    /// Photos moved in depth (`clip.photo3d` after their Ken Burns move) when the depth network
+    /// is downloaded: on unless switched off.
+    pub depth: bool,
+    /// Photos much smaller than the frame made larger and cleaner (`media.upscale`) when the
+    /// upscaler is downloaded: on unless switched off.
+    pub upscale: bool,
+    /// Speed ramps' slow parts given frames made between their frames (`media.interpolate`)
+    /// when the interpolator is downloaded: on unless switched off.
+    pub smooth: bool,
     pub look_strength: f64,
 }
 
@@ -384,6 +402,12 @@ impl Options {
             style_given,
             focus,
             color: p["color"].as_bool().unwrap_or(true),
+            cutouts: p["cutouts"].as_bool().unwrap_or(true),
+            angles: p["angles"].as_bool().unwrap_or(true),
+            denoise: p["denoise"].as_bool().unwrap_or(true),
+            depth: p["depth"].as_bool().unwrap_or(true),
+            upscale: p["upscale"].as_bool().unwrap_or(true),
+            smooth: p["smooth"].as_bool().unwrap_or(true),
             color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
             look,
             look_strength: finite(&p["lookStrength"]).map_or(25.0, |v| v.clamp(0.0, 100.0)),
@@ -436,6 +460,9 @@ pub struct Candidate {
     pub item: u64,
     pub name: String,
     pub kind: Kind,
+    /// A still picture (a photo; a 360° photo is a 360° candidate too): nothing in it moves, and
+    /// its shot can be any length.
+    pub photo: bool,
     /// Media seconds of the shot, and its best moment.
     pub start: f64,
     pub end: f64,
@@ -481,6 +508,11 @@ pub struct Candidate {
 impl Candidate {
     pub fn seconds(&self) -> f64 {
         (self.end - self.start).max(0.0)
+    }
+    /// Whether camera `m` suits it: its kind's cameras, and for a photo none that needs the
+    /// picture to move (a follow, a hyperlapse, a speed ramp).
+    pub fn fits(&self, m: Camera) -> bool {
+        m.for_kind(self.kind) && !(self.photo && matches!(m, Camera::Follow | Camera::Hyperlapse | Camera::SpeedRamp))
     }
     fn look(&self, id: &str) -> Option<&Look> {
         self.looks.iter().find(|l| l.id == id)
@@ -616,10 +648,11 @@ fn candidate(
     speech: &[ItemSpeech],
 ) -> Candidate {
     {
-        let kind = if s.still {
-            Kind::Photo
-        } else if vr.contains(&s.item) {
+        // (a 360° photo is looked round like a 360° video: planets, orbits, pans)
+        let kind = if vr.contains(&s.item) {
             Kind::Vr
+        } else if s.still {
+            Kind::Photo
         } else {
             Kind::Flat
         };
@@ -665,6 +698,7 @@ fn candidate(
             item: s.item,
             name: s.name.clone(),
             kind,
+            photo: s.still,
             start,
             end,
             key,
@@ -675,7 +709,7 @@ fn candidate(
             hook: f64::from(filmcraft_scenes::best::score(&s.shot, ShotUse::Hook).0.clamp(0.0, 1.0)),
             wide: d.is_some_and(|d| d.shot_type == ShotType::Wide) || uses.contains(&ShotUse::Establishing),
             indoor: indoors(&format!("{} {}", s.caption(), d.map(|d| d.setting.as_str()).unwrap_or_default())),
-            moving: s.shot.camera != CameraMove::Static || d.is_some_and(|d| !d.actions.is_empty()),
+            moving: !s.still && (s.shot.camera != CameraMove::Static || d.is_some_and(|d| !d.actions.is_empty())),
             talking: s.talking,
             said,
             looks,
@@ -970,7 +1004,7 @@ pub fn mood_from_brief(brief: &str) -> &'static str {
 /// Where a shot of `need` media seconds starts in candidate `c`: its best moment a third in,
 /// inside the media.
 fn window_from(c: &Candidate, need: f64) -> Option<f64> {
-    if c.kind == Kind::Photo {
+    if c.photo {
         return Some(0.0);
     }
     if !(need.is_finite() && need > 0.0) || need > c.media_seconds + 1e-6 {
@@ -1007,7 +1041,7 @@ fn rules_camera(c: &Candidate, secs: f64, used: &HashMap<Camera, usize>, last: O
                 // a named subject is kept in view (a push in, tracked: `compile`); a view without one drifts
                 (true, if c.looks.first().is_some_and(|l| l.named) || n(Camera::Drift) > n(Camera::PushIn) { Camera::PushIn } else { Camera::Drift }),
             ];
-            options.iter().find(|(ok, m)| *ok && fresh(*m)).map_or(Camera::Drift, |(_, m)| *m)
+            options.iter().find(|(ok, m)| *ok && fresh(*m) && c.fits(*m)).map_or(Camera::Drift, |(_, m)| *m)
         }
     }
 }
@@ -1083,11 +1117,14 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
             _ => false,
         };
         let Some(c) = (if pick_vr { vr.pop_front() } else { flat.pop_front() }) else { break };
-        // two shots of one clip in a row only when nothing else is left
-        if c.item == last_item && (!flat.is_empty() || !vr.is_empty()) && body.len() + 1 < 64 {
+        // two shots of one clip in a row only when nothing else is left: another clip's next
+        // moment of this kind goes first, this one waits behind it (a queue of this clip's
+        // moments only takes the next of them)
+        if c.item == last_item {
             let q = if pick_vr { &mut vr } else { &mut flat };
-            if q.len() > 1 {
-                q.insert(1, c);
+            if let Some(other) = q.iter().position(|o| o.item != c.item).and_then(|i| q.remove(i)) {
+                q.push_front(c);
+                q.push_front(other);
                 continue;
             }
         }
@@ -1327,7 +1364,7 @@ pub fn director_prompt(cands: &[&Candidate], o: &Options, beat: f64, slots: &[Sl
         } else {
             "-".into()
         };
-        let cams: Vec<&str> = Camera::ALL.iter().filter(|m| m.for_kind(c.kind) && !(**m == Camera::Reveal && c.indoor)).map(|m| m.id()).collect();
+        let cams: Vec<&str> = Camera::ALL.iter().filter(|m| c.fits(**m) && !(**m == Camera::Reveal && c.indoor)).map(|m| m.id()).collect();
         let says = c.said.as_deref().map(|s| format!(" (says: \"{}\")", chars(&one_line(s), 80))).unwrap_or_default();
         out.push_str(&format!(
             "{} | {} | {} | {:.1} | {:.1} | {} | {}{} | {} | {}\n",
@@ -1381,8 +1418,8 @@ fn fit_camera(
 ) -> Camera {
     let secs = f64::from(beats) * beat;
     let ok = |m: Camera| -> Result<(), String> {
-        if !m.for_kind(c.kind) {
-            return Err(format!("{} is not for a {} clip", m.id(), kind_word(c.kind)));
+        if !c.fits(m) {
+            return Err(format!("{} is not for a {} clip", m.id(), if c.photo { "photo" } else { kind_word(c.kind) }));
         }
         if beats_for(m.min_seconds(), beat) > beats {
             return Err(format!("{} needs more than the slot's {beats} beats", m.id()));
@@ -1633,6 +1670,21 @@ pub enum On {
     Text,
 }
 
+/// Whether a person is a shot's subject, big enough to cut out well: a 360° shot's look at a
+/// named person at least 30° tall, a flat shot's subject a third of the picture tall and its
+/// caption about a person.
+pub fn person_subject(c: &Candidate, look: Option<&Look>) -> bool {
+    let person = |w: &str| {
+        let w = format!(" {} ", w.to_ascii_lowercase());
+        [" person", " man ", " woman", " boy", " girl", " child", " people", " he ", " she ", " couple", " kid"].iter().any(|k| w.contains(k))
+    };
+    match c.kind {
+        Kind::Vr => look.is_some_and(|l| l.named && person(&l.what) && l.size.is_some_and(|(_, h)| h >= 30.0)),
+        Kind::Flat => c.subject.is_some_and(|b| b[3] >= 0.33) && person(&c.caption),
+        Kind::Photo => false,
+    }
+}
+
 /// One engine command of the edit.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Step {
@@ -1712,7 +1764,7 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
         let len = (t1 - t0).max(1.0 / FPS);
         let speed = s.camera.speed();
         let mut place = json!({"item": c.item, "track": "V1", "time": ticks(t0), "duration": ticks(len * speed)});
-        if c.kind == Kind::Photo {
+        if c.photo {
             place["audio"] = json!(false);
         } else {
             place["sourceIn"] = json!(ticks(s.from));
@@ -1750,13 +1802,13 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
                 // every 360° shot steadied from its pictures: a walk sways and bounces though the
                 // analysis seldom calls it handheld, and the camera's motion sensor takes out only
                 // part of the sway (a planet is all sky and ground; a hyperlapse steadies itself)
-                if !matches!(s.camera, Camera::Hyperlapse | Camera::PlanetIn | Camera::PlanetOut) {
+                if !c.photo && !matches!(s.camera, Camera::Hyperlapse | Camera::PlanetIn | Camera::PlanetOut) {
                     out.push(step("clip.stabilize360", json!({"mode": "smooth", "wait": true}), me, On::Clips));
                 }
                 // where the shot's own clip time is: the hyperlapse plays its media faster
                 let at = |secs: f64| round2(secs.max(0.0));
                 // a named subject is tracked under a camera that does not turn by itself
-                if look.is_some_and(|l| l.named) && matches!(s.camera, Camera::Hold | Camera::PushIn | Camera::SpeedRamp) {
+                if !c.photo && look.is_some_and(|l| l.named) && matches!(s.camera, Camera::Hold | Camera::PushIn | Camera::SpeedRamp) {
                     out.push(step(
                         "clip.follow360",
                         json!({"target": "subject", "at": at((c.key - s.from) / speed), "smooth": 0.7, "wait": true}),
@@ -1999,6 +2051,22 @@ pub struct Report {
     pub mix: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privacy: Option<Value>,
+    /// The opening's person cut out in front of its title (`clip.cutOut`'s outlines).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cutout: Option<Value>,
+    /// The recordings given noise reduction (`media.denoise` `auto`: the dark, noisy ones).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denoised: Option<Value>,
+    /// The photos moved in depth (`clip.photo3d`: each clip, its move and still depth).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub photos_3d: Option<Value>,
+    /// The photos made larger and cleaner (`media.upscale`: each item, its factor and copy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upscaled: Option<Value>,
+    /// The slowed shots given in-between frames (`media.interpolate`: each item, its factor, range
+    /// and copy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smoothed: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safe_zones: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2381,6 +2449,24 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
             plan.notes.push(change);
         }
     }
+    // ---- two angles of one moment: where two cameras filmed at once (lined up by their sound), a
+    // shot cut half-way to the other's picture (a revision's plan keeps its own cuts)
+    if o.angles && previous.is_none() && media.len() >= 2 {
+        let items: Vec<u64> = media.iter().filter(|m| !m.still).map(|m| m.item).collect();
+        match run(ex, "media.sameMoments", json!({"items": items})).await {
+            Ok(v) => {
+                let pairs = angles::pairs(&v);
+                if !pairs.is_empty() {
+                    lines(&format!("{} pair(s) of recordings of the same moments", pairs.len()));
+                }
+                for change in angles::split(&mut plan, &cands, &pairs, beat) {
+                    lines(&format!("two angles: {change}"));
+                    plan.notes.push(change);
+                }
+            }
+            Err(e) => notes.push(format!("the same moments were not looked for ({})", chars(&e.to_string(), 160))),
+        }
+    }
     // ---- the style: when the edit leaves it to the director, chosen from the shots it planned
     // (a revision keeps the one its edit was made in)
     if o.auto_style {
@@ -2473,6 +2559,93 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
             }
         }
     }
+    // ---- cleaner night shots: the recordings the edit uses that measure dark and noisy merged
+    // with their neighbouring frames (`media.denoise` `auto` leaves the others alone)
+    if o.denoise {
+        let mut items: Vec<u64> = Vec::new();
+        for c in plan.shots.iter().filter_map(|s| cands.iter().find(|c| c.id == s.clip)) {
+            if !items.contains(&c.item) && media.iter().any(|m| m.item == c.item && !m.still) {
+                items.push(c.item);
+            }
+        }
+        if !items.is_empty() {
+            match run(ex, "media.denoise", json!({"items": items, "auto": true})).await {
+                Ok(v) => {
+                    let n = v["changed"].as_array().map_or(0, Vec::len);
+                    if n > 0 {
+                        lines(&format!("noise reduction on {n} dark recording(s)"));
+                    }
+                    report.denoised = Some(v["changed"].clone());
+                }
+                Err(e) => report.fallbacks.push(format!("noise: left as filmed ({})", chars(&e.to_string(), 160))),
+            }
+        }
+    }
+    // ---- small photos made larger and cleaner (`media.upscale` `auto`: those much smaller than
+    // the frame, when the upscaler is there; it waits: a photo takes a second or two)
+    if o.upscale {
+        let mut items: Vec<u64> = Vec::new();
+        for c in plan.shots.iter().filter_map(|s| cands.iter().find(|c| c.id == s.clip)).filter(|c| c.photo && c.kind != Kind::Vr) {
+            if !items.contains(&c.item) {
+                items.push(c.item);
+            }
+        }
+        if !items.is_empty() && run(ex, "upscale.status", json!({})).await.is_ok_and(|v| v["installed"] == json!(true)) {
+            match run(ex, "media.upscale", json!({"items": items, "wait": true})).await {
+                Ok(v) => {
+                    let made = v["outcome"]["made"].clone();
+                    lines(&format!("{} small photo(s) upscaled", made.as_array().map_or(0, Vec::len)));
+                    report.upscaled = Some(made);
+                }
+                // (every photo already as large as the frame: nothing to do)
+                Err(e) if e.to_string().contains("nothing to upscale") => {}
+                Err(e) => report.fallbacks.push(format!("small photos: left as they are ({})", chars(&e.to_string(), 160))),
+            }
+        }
+    }
+    // ---- smooth slow motion: the speed ramps' clips given frames made between their frames
+    // (`media.interpolate` `auto`: as many as their slowest part needs), when RIFE is there
+    if o.smooth {
+        let ramps: Vec<u64> = plan
+            .shots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.camera == Camera::SpeedRamp && cands.iter().any(|c| c.id == s.clip && !c.photo && c.kind != Kind::Vr))
+            .filter_map(|(k, _)| built.pictures.get(k).copied().flatten())
+            .collect();
+        if !ramps.is_empty() && run(ex, "interpolate.status", json!({})).await.is_ok_and(|v| v["installed"] == json!(true)) {
+            match run(ex, "media.interpolate", json!({"clips": ramps, "wait": true})).await {
+                Ok(v) => {
+                    let made = v["outcome"]["made"].clone();
+                    lines(&format!("{} slowed shot(s) made smooth", made.as_array().map_or(0, Vec::len)));
+                    report.smoothed = Some(made);
+                }
+                // (no ramp slows its media down)
+                Err(e) if e.to_string().contains("nothing to make") => {}
+                Err(e) => report.fallbacks.push(format!("slow motion: frames repeated ({})", chars(&e.to_string(), 160))),
+            }
+        }
+    }
+    // ---- photos in depth: each flat photo's Ken Burns move made a 3D photo (`clip.photo3d`
+    // `auto`: the near parts move further than the far ones), when the depth network is there
+    if o.depth {
+        let photos: Vec<u64> = plan
+            .shots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| cands.iter().any(|c| c.id == s.clip && c.photo && c.kind != Kind::Vr))
+            .filter_map(|(k, _)| built.pictures.get(k).copied().flatten())
+            .collect();
+        if !photos.is_empty() && run(ex, "depth.status", json!({})).await.is_ok_and(|v| v["installed"] == json!(true)) {
+            match run(ex, "clip.photo3d", json!({"clips": photos})).await {
+                Ok(v) => {
+                    lines(&format!("{} photo(s) moved in depth", v["clips"].as_array().map_or(0, Vec::len)));
+                    report.photos_3d = Some(v["clips"].clone());
+                }
+                Err(e) => report.fallbacks.push(format!("photos: left flat ({})", chars(&e.to_string(), 160))),
+            }
+        }
+    }
     // ---- captions of English speech
     if o.captions {
         report.captions = Some(captions(ex, &plan, &cands, &wins, &speech, &o, &mut notes).await);
@@ -2485,6 +2658,25 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
                 Ok(v) => report.privacy = Some(v["redact"]["clipsChanged"].clone()),
                 Err(e) => report.fallbacks.push(format!("privacy: nothing was hidden ({})", chars(&e.to_string(), 160))),
             }
+        }
+    }
+    // ---- the opening's title behind its person: cut out once the shot is finished (its colour,
+    // its blur), in front of the title; people's videos, not a travel video's places
+    if o.cutouts
+        && o.focus != Some(focus::Focus::Places)
+        && let (Some(first), Some(Some(pic))) = (plan.shots.first(), built.pictures.first())
+        && first.text.is_some()
+        && let Some(c) = cands.iter().find(|c| c.id == first.clip)
+        && person_subject(c, first.look.as_deref().and_then(|l| c.look(l)))
+    {
+        lines("putting the opening's person in front of its title");
+        let r = match run(ex, "clip.cutOut", json!({"clip": pic, "wait": true})).await {
+            Ok(v) => run(ex, "clip.personInFront", json!({"clip": pic})).await.map(|_| v),
+            Err(e) => Err(e),
+        };
+        match r {
+            Ok(v) => report.cutout = Some(json!({"clip": pic, "outlines": v["outlines"]})),
+            Err(e) => report.fallbacks.push(format!("the title stays in front of the opening's person ({})", chars(&e.to_string(), 160))),
         }
     }
     // ---- the mix
@@ -2672,7 +2864,7 @@ async fn captions(
         let Some(c) = cands.iter().find(|c| c.id == s.clip) else { continue };
         // (a travel video under music: only someone talking on screen is captioned, not words
         // caught in passing)
-        if s.camera == Camera::Hyperlapse || c.kind == Kind::Photo || (places && !focus::voiced(o.focus, c, s)) {
+        if s.camera == Camera::Hyperlapse || c.photo || (places && !focus::voiced(o.focus, c, s)) {
             continue;
         }
         let Some(sp) = speech.iter().find(|x| x.item == c.item && x.language.starts_with("en")) else { continue };
@@ -2856,6 +3048,9 @@ async fn export(ex: &dyn Executor, o: &Options, seq: u64, out: &str, report: &mu
         report.qa_summary = Some(qa.summary());
     }
 }
+
+#[path = "director_angles.rs"]
+pub mod angles;
 
 #[path = "director_cuts.rs"]
 pub mod cuts;

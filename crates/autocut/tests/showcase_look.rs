@@ -425,7 +425,8 @@ async fn loudness_embedded_captions_and_the_soundfont_on_export() {
     let look = Look { loudness: Some(look::Loudness::Named("social".into())), embed_captions: true, soundfont: Some("oscillators".into()), ..Look::default() };
     let opts = Options { export: Some(out.to_string_lossy().into_owned()), ..tech(look) };
     let built = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
-    assert!(built.notes.is_empty(), "{:?}", built.notes);
+    // (a build with Whisper notes that the pauses went unchecked: tests see no downloaded models)
+    assert!(built.notes.iter().all(|n| n.contains("not downloaded")), "{:?}", built.notes);
     // the mix at −14 LUFS under a −1 dBTP ceiling
     let l = built.loudness.clone().expect("normalised");
     assert_eq!(l["target"], "social", "{l}");

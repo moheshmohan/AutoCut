@@ -395,6 +395,21 @@ fn portable_marker_keeps_data_next_to_the_executable() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// A test keeps off the user's data: its executable is in cargo's `deps` folder, so it has a
+/// temporary data directory of its own (unless FILMCRAFT_DATA_DIR names one).
+#[test]
+fn a_test_has_a_data_directory_of_its_own() {
+    assert!(autosave::in_cargo_deps(std::path::Path::new("/x/target/release/deps/filmcraft_engine-0123")));
+    assert!(!autosave::in_cargo_deps(std::path::Path::new("/x/target/release/filmcraft")));
+    assert!(!autosave::in_cargo_deps(std::path::Path::new("/Applications/FilmCraft.app/Contents/MacOS/FilmCraft")));
+    assert!(!autosave::in_cargo_deps(std::path::Path::new("/x/target/release/examples/privacy_probe")));
+    let d = autosave::test_data_dir().expect("this is a test");
+    assert!(d.starts_with(std::env::temp_dir()), "{}", d.display());
+    if std::env::var_os("FILMCRAFT_DATA_DIR").is_none() {
+        assert_eq!(autosave::default_data_dir(), Some(d));
+    }
+}
+
 #[test]
 fn journal_costs_the_ui_thread_only_a_handoff() {
     // Per change the UI thread pays an Arc clone and a channel send; encoding happens on the worker.

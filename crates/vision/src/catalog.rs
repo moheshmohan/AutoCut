@@ -83,6 +83,190 @@ pub const POSE: ModelFile = ModelFile {
 
 pub static PROFILE_FILES: &[ModelFile] = &[PERSON_WEIGHTS, PERSON_CONFIG, POSE];
 
+/// The segmenter's package (its own directory under the models directory): MobileSAM, which cuts a
+/// person out of a picture given points on them (the cut-outs, `crate::segment`).
+pub const SEGMENT_PACKAGE_ID: &str = "mobile-sam";
+pub const SEGMENT_NAME: &str = "MobileSAM (people and objects cut out of a picture)";
+pub const SEGMENT_LICENSE: &str = "Apache-2.0 (MobileSAM, Chaoning Zhang et al., Kyung Hee University; distilled from Meta's Segment Anything on 1% of SA-1B)";
+pub const SEGMENT_SOURCE: &str = "https://github.com/ChaoningZhang/MobileSAM (weights/mobile_sam.pt)";
+/// What MobileSAM learnt from, as a consent dialog says it.
+pub const SEGMENT_TRAINING: &str = "1% of SA-1B (Meta's 11M licensed photos; SA-1B's own licence is for research), distilled from Segment Anything";
+
+/// MobileSAM's weights: a TinyViT image encoder with Segment Anything's prompt encoder and mask
+/// decoder, as the authors' repository holds them (a PyTorch state dict, read by candle's pickle
+/// reader, which runs nothing). Pinned to commit f706ad9c; the SHA-256 checked 2026-10-28 by
+/// `shasum -a 256` and against an independent mirror's LFS record.
+pub const SEGMENTER: ModelFile = ModelFile {
+    name: "mobile_sam.pt",
+    url: "https://raw.githubusercontent.com/ChaoningZhang/MobileSAM/f706ad9c4eb7f219c00d9050e46328518ffb65d2/weights/mobile_sam.pt",
+    sha256: "6dbb90523a35330fedd7f1d3dfc66f995213d81b29a5ca8108dbcdd4e37d6c2f",
+    size: 40_728_226,
+};
+
+pub static SEGMENT_FILES: &[ModelFile] = &[SEGMENTER];
+
+pub fn segment_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(SEGMENT_PACKAGE_ID)
+}
+
+/// The segmenter's file is present with its pinned size.
+pub fn segmenter_installed(models_dir: &Path) -> bool {
+    let d = segment_dir(models_dir);
+    SEGMENT_FILES.iter().all(|f| present(&d, f))
+}
+
+/// The segmenter's identity, for cache keys.
+pub fn segmenter_id() -> String {
+    format!("{}={}", SEGMENTER.name, SEGMENTER.sha256.get(..16).unwrap_or(SEGMENTER.sha256))
+}
+
+/// The depth network's package (its own directory under the models directory): Depth Anything V2
+/// Small, how near each part of a picture is (`crate::depth`: the 3D photo and depth blur).
+pub const DEPTH_PACKAGE_ID: &str = "depth-anything-v2-small";
+pub const DEPTH_NAME: &str = "Depth Anything V2 Small (how near each part of a picture is)";
+pub const DEPTH_LICENSE: &str =
+    "Apache-2.0 (Depth Anything V2 Small, Lihe Yang et al., HKU and TikTok; its Base, Large and Giant models are non-commercial and not used)";
+pub const DEPTH_SOURCE: &str = "https://huggingface.co/depth-anything/Depth-Anything-V2-Small (depth_anything_v2_vits.pth)";
+pub const DEPTH_TRAINING: &str = "595K synthetic pictures (Hypersim, Virtual KITTI 2, BlendedMVS, IRS, TartanAir), then 62M real pictures of public datasets labelled by a larger model; some of those datasets' terms are for research";
+
+/// Depth Anything V2 Small's weights: a DINOv2 ViT-S/14 encoder and a DPT head, as the authors
+/// publish them (a PyTorch state dict, read by candle's pickle reader, which runs nothing). Trained
+/// on 595K synthetic pictures with exact depth (Hypersim, Virtual KITTI 2, BlendedMVS, IRS,
+/// TartanAir), then on 62M real pictures of public datasets labelled by a larger teacher model.
+/// Pinned to revision 03876f86; the SHA-256 checked 2026-10-28 by `shasum -a 256` and against the
+/// Hugging Face API's LFS record.
+pub const DEPTH: ModelFile = ModelFile {
+    name: "depth_anything_v2_vits.pth",
+    url: "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/03876f8651c73a60fe4c2c48294e09fcb6838fcf/depth_anything_v2_vits.pth",
+    sha256: "715fade13be8f229f8a70cc02066f656f2423a59effd0579197bbf57860e1378",
+    size: 99_218_434,
+};
+
+pub static DEPTH_FILES: &[ModelFile] = &[DEPTH];
+
+pub fn depth_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(DEPTH_PACKAGE_ID)
+}
+
+/// The depth network's file is present with its pinned size.
+pub fn depth_installed(models_dir: &Path) -> bool {
+    let d = depth_dir(models_dir);
+    DEPTH_FILES.iter().all(|f| present(&d, f))
+}
+
+/// The depth network's identity, for cache keys.
+pub fn depth_id() -> String {
+    format!("{}={}", DEPTH.name, DEPTH.sha256.get(..16).unwrap_or(DEPTH.sha256))
+}
+
+/// The upscaler's package (its own directory under the models directory): Real-ESRGAN's compact
+/// general model, a picture made four times as large with its detail restored (`crate::upscale`).
+pub const UPSCALE_PACKAGE_ID: &str = "real-esrgan";
+pub const UPSCALE_NAME: &str = "Real-ESRGAN general x4v3 (pictures made larger and cleaner)";
+pub const UPSCALE_LICENSE: &str = "BSD-3-Clause (Real-ESRGAN, Xintao Wang et al., Tencent ARC Lab)";
+pub const UPSCALE_SOURCE: &str = "https://github.com/xinntao/Real-ESRGAN (release v0.2.5.0, realesr-general-x4v3.pth)";
+pub const UPSCALE_TRAINING: &str = "DF2K (DIV2K and Flickr2K) and OST, degraded on purpose; DIV2K's terms are for academic research";
+
+/// Real-ESRGAN's `realesr-general-x4v3`: SRVGGNetCompact, 64 features, 32 convolutions with
+/// PReLUs, ×4 (a PyTorch state dict under `params`, read by candle's pickle reader, which runs
+/// nothing). Trained, as the project's training notes say, on DF2K (DIV2K, whose site gives it for
+/// academic research, and Flickr2K) and OST with synthetic degradations. A release asset (GitHub
+/// gives no digest for it): the size and the SHA-256 checked 2026-10-28 by `shasum -a 256`.
+pub const UPSCALER: ModelFile = ModelFile {
+    name: "realesr-general-x4v3.pth",
+    url: "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth",
+    sha256: "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+    size: 4_885_111,
+};
+
+pub static UPSCALE_FILES: &[ModelFile] = &[UPSCALER];
+
+pub fn upscale_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(UPSCALE_PACKAGE_ID)
+}
+
+/// The upscaler's file is present with its pinned size.
+pub fn upscaler_installed(models_dir: &Path) -> bool {
+    let d = upscale_dir(models_dir);
+    UPSCALE_FILES.iter().all(|f| present(&d, f))
+}
+
+/// The upscaler's identity, for cache keys and file names.
+pub fn upscaler_id() -> String {
+    format!("{}={}", UPSCALER.name, UPSCALER.sha256.get(..16).unwrap_or(UPSCALER.sha256))
+}
+
+/// The interpolator's package (its own directory): RIFE 4.26, the frames between two frames
+/// (`crate::interp`).
+pub const INTERP_PACKAGE_ID: &str = "rife-4.26";
+pub const INTERP_NAME: &str = "RIFE 4.26 (frames made between frames)";
+pub const INTERP_LICENSE: &str = "MIT (Practical-RIFE, Zhewei Huang et al.)";
+pub const INTERP_SOURCE: &str = "https://huggingface.co/hzwer/RIFE (RIFEv4.26_0921.zip, the author's upload)";
+pub const INTERP_TRAINING: &str = "not published for the 4.x models (the first RIFE models learnt from Vimeo-90K)";
+
+/// RIFE 4.26 as its author publishes it: a zip of the network's PyTorch state dict
+/// (`flownet.pkl`, read by candle's pickle reader, which runs nothing) and its Python files
+/// (never run). The training data of the 4.x models is not published (the paper's model was
+/// trained on Vimeo-90K). Pinned to revision 01fdc7e9; the SHA-256 checked 2026-10-28 by
+/// `shasum -a 256` and against the Hugging Face API's LFS record.
+pub const INTERPOLATOR: ModelFile = ModelFile {
+    name: "RIFEv4.26_0921.zip",
+    url: "https://huggingface.co/hzwer/RIFE/resolve/01fdc7e97404120c243c3ea7b427046e5dc7643e/RIFEv4.26_0921.zip",
+    sha256: "1fa9b9cda3d9b8c3e301359e2595960902f97bf926c08598b0e9957a3f3f760e",
+    size: 22_869_906,
+};
+
+pub static INTERP_FILES: &[ModelFile] = &[INTERPOLATOR];
+
+/// The weights inside the zip, taken out beside it, and their size.
+pub const INTERP_WEIGHTS: &str = "flownet.pkl";
+pub const INTERP_WEIGHTS_SIZE: u64 = 24_636_301;
+
+pub fn interp_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(INTERP_PACKAGE_ID)
+}
+
+/// The interpolator's zip is present with its pinned size.
+pub fn interpolator_installed(models_dir: &Path) -> bool {
+    let d = interp_dir(models_dir);
+    INTERP_FILES.iter().all(|f| present(&d, f))
+}
+
+/// The inpainter's package (its own directory under the models directory): MI-GAN, a hole in a
+/// picture filled (`crate::inpaint`: object removal).
+pub const INPAINT_PACKAGE_ID: &str = "migan";
+pub const INPAINT_NAME: &str = "MI-GAN (holes in pictures filled, for object removal)";
+pub const INPAINT_LICENSE: &str = "MIT (MI-GAN, Andranik Sargsyan et al., Picsart AI Research)";
+pub const INPAINT_SOURCE: &str = "https://huggingface.co/andraniksargsyan/migan (migan.onnx, the authors' upload)";
+pub const INPAINT_TRAINING: &str = "Places2 (scene photos; its terms are for non-commercial research and education)";
+
+/// MI-GAN's 512 × 512 Places2 generator as its authors export it to ONNX (read by `crate::onnx`,
+/// which runs nothing; the network is written out in `crate::inpaint`). Pinned to revision
+/// 406830d0; the SHA-256 checked 2026-10-29 by `shasum -a 256`.
+pub const INPAINTER: ModelFile = ModelFile {
+    name: "migan.onnx",
+    url: "https://huggingface.co/andraniksargsyan/migan/resolve/406830d0fa60666da0071c342ad2fbc8f30c5c64/migan.onnx",
+    sha256: "593eba0b7e04730f1b61c0a3cbca68d97d8d6a7ff5c6a44a7b9d7fcd880fc5ae",
+    size: 29_546_882,
+};
+
+pub static INPAINT_FILES: &[ModelFile] = &[INPAINTER];
+
+pub fn inpaint_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(INPAINT_PACKAGE_ID)
+}
+
+/// The inpainter's file is present with its pinned size.
+pub fn inpainter_installed(models_dir: &Path) -> bool {
+    let d = inpaint_dir(models_dir);
+    INPAINT_FILES.iter().all(|f| present(&d, f))
+}
+
+/// The interpolator's identity, for cache keys and file names.
+pub fn interpolator_id() -> String {
+    format!("{}={}", INTERPOLATOR.name, INTERPOLATOR.sha256.get(..16).unwrap_or(INTERPOLATOR.sha256))
+}
+
 pub fn package_dir(models_dir: &Path) -> PathBuf {
     models_dir.join(PACKAGE_ID)
 }
@@ -162,6 +346,11 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), FILES.len() + PROFILE_FILES.len());
         assert!(profile_model_ids().contains("dfine_n_coco.safetensors=19e06bdc873da819"));
+        for f in SEGMENT_FILES.iter().chain(DEPTH_FILES).chain(UPSCALE_FILES).chain(INTERP_FILES) {
+            assert_eq!(f.sha256.len(), 64);
+            assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()) && f.url.ends_with(f.name), "{}", f.url);
+        }
+        assert!(DEPTH.url.contains("/resolve/03876f8651c73a60fe4c2c48294e09fcb6838fcf/") && depth_id().starts_with("depth_anything_v2_vits.pth=715fade1"));
     }
 
     #[test]
@@ -171,6 +360,9 @@ mod tests {
         assert_eq!(missing_bytes(&dir), total_bytes());
         assert!(!profiles_installed(&dir));
         assert_eq!(profile_missing_bytes(&dir), profile_total_bytes());
+        assert!(!depth_installed(&dir));
+        assert!(!upscaler_installed(&dir));
+        assert!(!interpolator_installed(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

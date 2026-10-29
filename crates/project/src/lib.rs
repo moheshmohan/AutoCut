@@ -206,6 +206,64 @@ pub struct Interpretation {
     /// from the file's metadata; see [`vr`]). None = a flat picture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vr: Option<filmcraft_media::Spherical>,
+    /// Reduce Noise: each frame merged with its motion-aligned neighbours (`media.denoise`,
+    /// `filmcraft_render::denoise`). None = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denoise: Option<Denoise>,
+    /// Upscale and Restore: a sharper copy of the picture made once (`media.upscale`, Real-ESRGAN)
+    /// shown in its place — the item keeps its size, its clips their framing; the renderer asks
+    /// the copy for as much detail as a clip shows the picture with. None = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upscaled: Option<Upscaled>,
+    /// Smooth Slow Motion: a copy of (part of) the video with frames made between its frames
+    /// (`media.interpolate`, RIFE) shown in its place within its range — the item keeps its frame
+    /// rate; a slowed clip shows the in-between frames instead of repeating or blending frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpolated: Option<Interpolated>,
+    /// Remove Object: a copy of (part of) the video with a thing taken out (`clip.removeObject`,
+    /// MI-GAN and the other frames) shown in its place within its range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleaned: Option<Cleaned>,
+}
+
+/// Remove Object: the copy's file and the media's time range it covers (`start` its first
+/// frame's media time).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Cleaned {
+    pub path: String,
+    pub start: filmcraft_time::Tick,
+    pub duration: filmcraft_time::Tick,
+}
+
+/// Smooth Slow Motion: the copy's file, how many frames it has for each of the media's, and the
+/// media's time range it covers (`start` its first frame's media time).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Interpolated {
+    pub path: String,
+    pub factor: u8,
+    pub start: filmcraft_time::Tick,
+    pub duration: filmcraft_time::Tick,
+}
+
+/// Upscale and Restore: the sharper copy's file and how many times as large as the media it is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Upscaled {
+    pub path: String,
+    pub factor: u8,
+    /// How much of the network's answer it holds (0..1; the rest the picture enlarged smoothly).
+    #[serde(default = "full_strength")]
+    pub strength: f32,
+}
+
+fn full_strength() -> f32 {
+    1.0
+}
+
+/// Reduce Noise: how hard (`strength` 0..1) and over how many frames either side (`frames` 1..3).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Denoise {
+    pub strength: f32,
+    pub frames: u8,
 }
 
 /// Modify ▸ Audio Channels: the clip channel format and, per audio clip, the source channels it

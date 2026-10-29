@@ -603,3 +603,39 @@ fn elements_answer_promptly_once_the_timeline_is_at_rest() {
         assert!(n <= 3, "ui.elements took {n} frames at rest after zooming to {pps} px/s");
     }
 }
+
+/// View ▸ Aim 360° Camera: with it on, a drag on the Program monitor turns the 360° clip under the
+/// playhead — the picture follows the pointer, a drag of the picture's width turning by its field
+/// of view — as one undo step.
+#[test]
+fn aim_360_camera_turns_the_view_by_a_drag() {
+    let mut d = Driver::demo();
+    let project = d.exec("project.inspect", json!({}));
+    let item = first_media_item(&project).expect("media item");
+    d.exec("media.vrProperties", json!({"items": [item], "projection": "equirectangular"}));
+    d.exec("file.newSequence", json!({"name": "aim", "width": 1920, "height": 1080, "fps": 24}));
+    let r = d.exec("timeline.place", json!({"item": item, "track": "V1", "seconds": 0}));
+    let clip = r["reframed360"][0].as_u64().expect("a 360° clip");
+    let view = |d: &mut Driver| d.exec("clip.reframe360", json!({"clips": [clip]}))["clips"][0].clone();
+    let before = view(&mut d);
+    d.exec("playhead.set", json!({"seconds": 1}));
+    d.menu("view.aim360");
+    assert_eq!(d.program()["aim360"], true);
+    d.frames(3);
+    let pic = d.rect("program.aim360");
+    let (x, y) = (pic[0] + pic[2] / 2.0, pic[1] + pic[3] / 2.0);
+    let undo = |d: &mut Driver| d.exec("history.list", json!({}))["undo"].as_array().unwrap().len();
+    let n0 = undo(&mut d);
+    d.ok("ui.drag", json!({"from": {"x": x, "y": y}, "to": {"x": x - pic[2] / 4.0, "y": y + pic[3] / 8.0}, "steps": 8}));
+    d.frames(3);
+    assert_eq!(undo(&mut d), n0 + 1, "one drag, one undo step");
+    let after = view(&mut d);
+    let fov = before["fov"].as_f64().unwrap();
+    let turned = after["yaw"].as_f64().unwrap() - before["yaw"].as_f64().unwrap();
+    assert!((turned - fov / 4.0).abs() < 1.5, "dragged left by a quarter: turned right by a quarter of {fov}°: {turned}");
+    let up = after["pitch"].as_f64().unwrap() - before["pitch"].as_f64().unwrap();
+    assert!((up - fov * (pic[3] / 8.0) / pic[2]).abs() < 1.5, "dragged down: looks up: {up}");
+    d.shot("aim360");
+    d.menu("view.aim360");
+    assert_eq!(d.program()["aim360"], false);
+}

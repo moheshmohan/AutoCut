@@ -42,10 +42,64 @@ pub struct Spherical {
     /// picture; a stitched one was levelled when it was stitched).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub horizon: Option<Horizon>,
+    /// Dual fisheye: where the lenses' pictures meet, near things are stitched by the shifts
+    /// between them measured on each frame (`filmcraft_render::vr_seam`), not only cross-faded.
+    /// (Written only when off, so the pictures' keys stay as they were.)
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub seam_flow: bool,
+    /// How the bottom of the sphere — the hand and stick under a 360° camera — is hidden; none
+    /// when never set (`Some` with [`NadirMode::Off`]: switched off on purpose).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nadir: Option<Nadir>,
+}
+
+/// The patch over the bottom of the sphere: within `size` degrees of straight down, what is
+/// beside it shows instead (the sphere is levelled, so it stays put as the camera turns).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Nadir {
+    pub mode: NadirMode,
+    /// The patch's radius, degrees from straight down.
+    #[serde(default = "nadir_size")]
+    pub size: f64,
+}
+
+/// How the patch is filled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NadirMode {
+    Off,
+    /// The ground round it mirrored in across its edge: texture that meets it seamlessly.
+    #[default]
+    Mirror,
+    /// The colour at its edge drawn in to the middle: a smooth disc.
+    Smooth,
+}
+
+/// The patch's radius by default (an Insta360 on a stick), and the range allowed, degrees.
+pub const NADIR_SIZE: f64 = 22.0;
+pub const NADIR_RANGE: (f64, f64) = (3.0, 60.0);
+
+fn nadir_size() -> f64 {
+    NADIR_SIZE
+}
+
+impl Nadir {
+    pub fn sanitized(&self) -> Self {
+        Nadir { mode: self.mode, size: if self.size.is_finite() { self.size.clamp(NADIR_RANGE.0, NADIR_RANGE.1) } else { NADIR_SIZE } }
+    }
+    /// Whether it hides anything.
+    pub fn on(&self) -> bool {
+        self.mode != NadirMode::Off
+    }
 }
 
 fn full_view() -> [f64; 2] {
     [360.0, 180.0]
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
 }
 
 fn is_zero3(v: &[f64; 3]) -> bool {
@@ -62,6 +116,8 @@ impl Spherical {
             pose: [0.0; 3],
             camera: String::new(),
             horizon: None,
+            seam_flow: true,
+            nadir: None,
         }
     }
 
@@ -74,6 +130,8 @@ impl Spherical {
             pose: [0.0; 3],
             camera: camera.to_string(),
             horizon: None,
+            seam_flow: true,
+            nadir: None,
         }
     }
 
@@ -101,6 +159,7 @@ impl Spherical {
         s.captured = [fin(s.captured[0], 360.0).clamp(1.0, 360.0), fin(s.captured[1], 180.0).clamp(1.0, 180.0)];
         s.pose = s.pose.map(|v| fin(v, 0.0).clamp(-360.0, 360.0));
         s.horizon = s.horizon.as_ref().map(Horizon::sanitized);
+        s.nadir = s.nadir.as_ref().map(Nadir::sanitized);
         if let Projection::DualFisheye { lenses } = &mut s.projection {
             lenses.truncate(MAX_LENSES);
             for l in lenses.iter_mut() {
@@ -133,6 +192,18 @@ pub struct Horizon {
     /// sample (as many as `up`; none: not steadied).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub heading: Vec<f32>,
+    /// How far the motion sensor's clock runs behind the pictures, seconds, measured for this
+    /// recording (`media.syncGyro360`): the picture at `t` shows the camera as the sensor saw it
+    /// at `t + lag`. Within ±[`MAX_LAG`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lag: f64,
+}
+
+/// The largest sensor-to-picture lag kept, seconds.
+pub const MAX_LAG: f64 = 1.0;
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 fn yes() -> bool {
@@ -147,7 +218,7 @@ impl Horizon {
             return None;
         }
         let last = self.up.len().checked_sub(1)?;
-        let x = if seconds.is_finite() { (seconds / self.step).clamp(0.0, last as f64) } else { 0.0 };
+        let x = self.index(seconds, last);
         let i = (x.floor() as usize).min(last);
         let f = x - i as f64;
         let a = self.up.get(i)?;
@@ -164,7 +235,7 @@ impl Horizon {
             return None;
         }
         let last = self.heading.len().checked_sub(1)?;
-        let x = if seconds.is_finite() { (seconds / self.step).clamp(0.0, last as f64) } else { 0.0 };
+        let x = self.index(seconds, last);
         let i = (x.floor() as usize).min(last);
         let f = x - i as f64;
         let a = f64::from(*self.heading.get(i)?);
@@ -176,6 +247,14 @@ impl Horizon {
     /// The largest steadying turn, degrees.
     pub fn max_steady(&self) -> f64 {
         self.heading.iter().map(|h| f64::from(h.abs())).fold(0.0, f64::max)
+    }
+
+    /// Where `seconds` of the pictures falls among `last + 1` samples: the sensor's time (its
+    /// lag added), in steps, held within them.
+    fn index(&self, seconds: f64, last: usize) -> f64 {
+        let lag = if self.lag.is_finite() { self.lag.clamp(-MAX_LAG, MAX_LAG) } else { 0.0 };
+        let t = seconds + lag;
+        if t.is_finite() { (t / self.step).clamp(0.0, last as f64) } else { 0.0 }
     }
 
     /// How long the samples run, seconds.
@@ -203,7 +282,8 @@ impl Horizon {
             })
             .collect();
         let heading = self.heading.iter().take(MAX_HORIZON).map(|h| if h.is_finite() { h.clamp(-MAX_STEADY, MAX_STEADY) } else { 0.0 }).collect();
-        Horizon { level: self.level, steady: self.steady, step, up, heading }
+        let lag = if self.lag.is_finite() { self.lag.clamp(-MAX_LAG, MAX_LAG) } else { 0.0 };
+        Horizon { level: self.level, steady: self.steady, step, up, heading, lag }
     }
 }
 
@@ -297,7 +377,7 @@ mod tests {
         let e: Spherical = serde_json::from_str(r#"{"projection":{"kind":"equirectangular"}}"#).unwrap();
         assert_eq!(e, Spherical::equirect());
         // a horizon goes with it; levelling is on unless it says otherwise
-        let h = Horizon { level: true, steady: true, step: 0.1, up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]], heading: vec![0.0, -2.5] };
+        let h = Horizon { level: true, steady: true, step: 0.1, up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]], heading: vec![0.0, -2.5], lag: 0.0 };
         let lev = Spherical { horizon: Some(h.clone()), ..s };
         let j = serde_json::to_string(&lev).unwrap();
         assert_eq!(serde_json::from_str::<Spherical>(&j).unwrap(), lev);
@@ -308,7 +388,7 @@ mod tests {
 
     #[test]
     fn up_is_blended_between_samples_and_held_at_the_ends() {
-        let h = Horizon { level: true, steady: true, step: 0.5, up: vec![[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]], heading: vec![0.0, 4.0] };
+        let h = Horizon { level: true, steady: true, step: 0.5, up: vec![[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]], heading: vec![0.0, 4.0], lag: 0.0 };
         let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|c| (a[c] - b[c]).abs() < 1e-6);
         assert!(close(h.up_at(-3.0).unwrap(), [0.0, 1.0, 0.0]));
         assert!(close(h.up_at(0.25).unwrap(), [0.5f64.sqrt(), 0.5f64.sqrt(), 0.0]));
@@ -345,6 +425,7 @@ mod tests {
             step: f64::NAN,
             up: [[f32::NAN, 0.0, 1.0], [0.0; 3], [0.0, 2.0, 0.0]].repeat(MAX_HORIZON / 3 + 5),
             heading: [f32::NAN, 1e9, -3.0].repeat(MAX_HORIZON / 3 + 5),
+            lag: f64::INFINITY,
         });
         let s = s.sanitized();
         assert_eq!(s.captured, [360.0, 1.0]);
@@ -361,5 +442,19 @@ mod tests {
             assert_eq!(l.poly.len(), MAX_POLY);
             assert!(l.poly.iter().chain([&l.cx, &l.cy, &l.yaw, &l.pitch, &l.roll]).all(|v| v.is_finite()));
         }
+    }
+
+    #[test]
+    fn the_sensor_is_read_at_the_pictures_lag() {
+        let h = Horizon { level: true, steady: true, step: 0.1, up: vec![[0.0, 1.0, 0.0]; 11], heading: (0..11).map(|k| k as f32).collect(), lag: 0.2 };
+        // the picture at 0.3 s shows the camera as the sensor saw it at 0.5 s
+        assert!((h.heading_at(0.3).unwrap() - 5.0).abs() < 1e-6);
+        assert!((h.heading_at(0.95).unwrap() - 10.0).abs() < 1e-6, "held at the last sample");
+        let behind = Horizon { lag: -0.2, ..h.clone() };
+        assert!((behind.heading_at(0.1).unwrap() - 0.0).abs() < 1e-6, "held at the first");
+        // hostile lags are kept within a second
+        let wild = Horizon { lag: f64::NAN, ..h.clone() }.sanitized();
+        assert_eq!(wild.lag, 0.0);
+        assert_eq!(Horizon { lag: 1e9, ..h }.sanitized().lag, MAX_LAG);
     }
 }

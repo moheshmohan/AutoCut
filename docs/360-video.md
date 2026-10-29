@@ -21,9 +21,22 @@ metadata. It can also export a 360° video with the metadata YouTube reads.
 and whether it has finished downloading (the camera's trailer is the last thing written).
 
 `insta360 import` imports each recording as 360° media: VR Properties from the file, the
-camera's `.lrv` attached as the **proxy** (both lenses side by side, 1664 × 832: scene analysis,
-stabilisation and following decode that instead of the two 2.9K HEVC tracks), and the two lenses
-**aligned** along their seam (`media.align360`, a few seconds a clip).
+camera's `.lrv` attached as the **proxy** (both lenses side by side, 1664 × 832), and the two lenses
+**aligned** along their seam (`media.align360`, a few seconds a clip). A plain `file.import` of an
+`.insv` (the director's `direct <files>`, File ▸ Import) attaches the `.lrv` beside it too
+(`proxies` in its answer; part of the import's undo step), when its length fits: a proxy may end up
+to three frames before its original, as the camera's copies do.
+
+Every 360° **analysis reads the proxy**: the scene index, `media.salience360`,
+`media.measureMoments`, `media.frame` (unless the size asked for is sharper than the proxy's
+panorama), stabilisation and following decode one H.264 picture of 1664 × 832 instead of two
+2.9K HEVC lenses: a tenth of the pixels. Five Istanbul recordings (17 minutes, 30,533 analysed
+frames) were indexed, looked round at 15 moments and measured at 25 in 2.2 minutes instead of 13.5
+(2,273 s of CPU before, 332 s after), and the direction found first at each moment was within 15°
+of one found on the full-size lenses every time. Export, the monitors (unless proxies are on) and lens alignment read the
+recording itself. A camera's own dual-fisheye recording is one take, with no cuts in it: the scene
+index skips the shot-boundary network (TransNetV2) for it, and the signature detector still marks
+a sudden change; an equirectangular 360° file may be an edit and is looked at like any video.
 
 ## 2. The formats
 
@@ -32,6 +45,15 @@ stabilisation and following decode that instead of the two 2.9K HEVC tracks), an
   FilmCraft decodes both tracks and shows them side by side (the selfie lens left, as the
   camera's own `.lrv` and calibration do): one dual-fisheye picture twice as wide as high.
 - **`.lrv`**: the camera's low-resolution copy, H.264, both lenses side by side in one track.
+- **`.insp`** (photos): a JPEG of both lenses side by side, the camera's trailer after it. Opened
+  as a 360° still (`filmcraft_codecs::insp`): the image circles from the trailer's calibration,
+  as for its videos; scaled to the still limit of 8192 × 4096. Imported by File ▸ Import and with
+  the recordings (`insta360.import`, lenses aligned); the camera's `.jpg` and `.dng` exports are
+  read as flat pictures. The director looks round a 360° photo as it does a 360° video — a tiny
+  planet, an orbit, a whip, a reveal, a drift, a push in — never a follow, a hyperlapse or a
+  speed ramp (nothing in it moves), and does not steady it; its shot can be any length. A
+  showcase turns one to its subject and opens it as a tiny planet or pans slowly across it, by
+  turns.
 - **The trailer** (no public specification; read from the files): the camera model, serial,
   firmware, the lens calibration (each lens's image circle), the recording's start, a 1 kHz
   motion-sensor stream (accelerometer and gyroscope) and each picture's exposure time on the
@@ -56,6 +78,18 @@ stabilisation and following decode that instead of the two 2.9K HEVC tracks), an
   the rest and the bounce of the steps (a walked shot's wobble 6.6 → 2.1 px and 4.7 → 0.2 px in a
   135 px wide view), and Direct an Edit runs it on every 360° shot. VR Properties ▸ Steady
   (`media.vrProperties` `steady`) turns the heading's steadying off and on.
+- **The sensor's timing**: the horizon carries a `lag` — how far the sensor's clock runs behind
+  the pictures — and is read at the picture's time plus it. `media.syncGyro360` measures it for a
+  recording: the levelled pictures' own sway (their turning about the vertical a tenth of a second
+  at a time, on the proxy, over the 20 s where the steadying moves most, less its half-second
+  smoothing) against the sensor's steadying turn at each lag within ±0.3 s, kept only when the two
+  clearly turn against each other (`match` ≥ 0.5). It is not there yet: on five Istanbul
+  recordings none was clear. On 078 and 086 the best lags (0 and 139 ms) fall near the ones found
+  by eye earlier (0–50 and about 100 ms) but agree only 0.28 and 0.39; on 075 (about 130 ms by
+  eye) nothing agrees. Why they agree so little is not known yet (the pictures' turning measured
+  on the proxy's half-size frames is one suspect, the steadying turn's cap during the
+  operator's own turns another), so no lag is set and the samples stay a tenth of a second
+  apart.
 - **Lens model**: equidistant fisheye, 97.5° from the axis to the image circle's edge (measured
   on X5 footage: where the two lenses' pictures agree best), image circles from the calibration;
   `media.align360` refines the angle and the lenses' relative turn per clip.
@@ -67,14 +101,46 @@ stabilisation and following decode that instead of the two 2.9K HEVC tracks), an
 
 | Command | Does |
 |---|---|
-| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings) or stop; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
+| `media.vrProperties` | Modify ▸ VR Properties: `auto` (what the file says), `equirectangular` (+ `layout`, `capturedView`), `dualFisheye` (+ `halfFov`), `none`; `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings) or stop; `seamFlow` stitches near things on a dual fisheye's seam by the lenses' shifts (on by itself) or only cross-fades them; `nadir` (`off`, `mirror`, `smooth`) and `nadirSize` patch the hand and stick at the bottom of the sphere; a layout, view or lens angle alone changes the item's own; with nothing to change, it reports them |
 | `media.align360` | aligns the two lenses of dual-fisheye media along their seam |
+| `media.seam360` | the seam of a dual-fisheye item at a moment: how much the lenses disagree across it cross-faded and stitched, the largest shift, how long measuring took; a picture of the band unrolled round the seam (lens 0, lens 1, the cross-fade, the stitch) with `path` |
 | `clip.reframe360` | the virtual camera: `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across), `distance` (0 flat … 1 tiny planet), `output` `flat`/`sphere`, `width`/`height` (default: the sequence frame); `at` keyframes them at a clip time; `keys` writes a whole camera move; presets `natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`; `off` |
 | `clip.stabilize360` | holds the view steady: the camera's turn measured from the pictures (points tracked on cube faces, a robust rotation fit), then `smooth`/`light`/`strong` (keep the operator's turns, drop the shake) or `lock` (look one way the whole clip) |
-| `clip.follow360` | turns the virtual camera to follow a subject (`subject`, `box`, `face`) |
-| `clip.vrMove` | a camera move as Bézier keyframes, editable in Effect Controls: `planetIn` (a tiny planet spinning open onto the view), `planetOut`, `orbit` (`degrees`, default a full turn), `barrelRoll`, `whipPan` (the short way to `yaw`/`pitch`, from `fromYaw` for a whip in, with a Directional Blur peak), `reveal` (from the sky, or `from: "ground"`), `pushIn`, `crashZoom`, `drift`; each has its default place and length (`at`, `seconds` move it); a move replaces its parameters' keyframes inside its window only, so moves, a follow and stabilisation add up |
+| `clip.follow360` | turns the virtual camera to follow a subject (`subject`, `box`, `face`); one lost for a few frames is looked for again by its look (`refind`, see below) |
+| `clip.aim360` | the camera aimed along `samples` (`[seconds, yaw, pitch]`, as a drag on the Program monitor records them: View ▸ Aim 360° Camera), smoothed over `smooth` seconds (0.5) and kept to the keyframes needed; `merge` joins a drag's calls into one undo step |
+| `clip.vrMove` | a camera move as Bézier keyframes, editable in Effect Controls: `planetIn` (a tiny planet spinning open onto the view), `planetOut`, `orbit` (`degrees`, default a full turn), `barrelRoll`, `whipPan` (the short way to `yaw`/`pitch`, from `fromYaw` for a whip in, with a Directional Blur peak), `reveal` (from the sky, or `from: "ground"`), `pushIn`, `crashZoom`, `drift`, `drone` (a high stick read as a drone: rising and pulling back, tipping down to −50° and widening), `thirdPerson` (looking down at the person holding the camera from above and behind, `yaw` their way, for the rest of the clip), `spin` (a fast full turn, blurred), `flip` (a somersault forwards through the ground and the sky, blurred up and down), `wobble` (a playful shake dying away, `amount` its size) — GoPro's CameraFX and Insta360's invisible-stick shots as moves; each has its default place and length (`at`, `seconds` move it); a move replaces its parameters' keyframes inside its window only, so moves, a follow and stabilisation add up |
 | `clip.hyperlapse360` | a long stretch at `speed` % (frame blending) held steady by `clip.stabilize360` (`strong`) |
 | `media.salience360` | where things happen round the sphere around `seconds`: a few panorama frames 0.2 s apart scored by direction — by motion when one direction moves clearly more than the rest, else by detail — the strongest directions (yaw, pitch) at least 45° apart |
+| `media.denoise` | Clip ▸ Modify ▸ Reduce Noise, for any video: each frame merged with its neighbours (`frames` either side, 2), each moved to line up with it first (see Rendering); `strength` 0..1, `off`; `auto` turns it on only for the dark, noisy ones (grain ≥ 1.5 levels and light under 0.3 at the middle frame), `measure` reports both |
+
+**Following through blocking.** A subject `clip.follow360` follows can be hidden — someone walks
+in front of it, it goes behind a pillar and comes out elsewhere — and the tracker, which only holds
+its last box while it is gone, would leave the camera there. Once it has been lost (held or gone)
+for three analysed frames, and every three frames while it stays lost, the subject is looked for
+by how it looked in its first confident frames: windows of its size over the tracking camera's
+110° picture — and every other time over the views 99° either side — compared by a colour
+signature (hue, saturation, lightness binned, the middle weighted), the best grid window moved
+onto it in three finer steps, clearly better than the best one elsewhere; with the scene models
+downloaded, SigLIP 2's embedding of that one window must agree that it is the same subject
+(`refind: "auto"`; `"colour"` without the check, `"siglip"` every window by SigLIP, slower;
+`"off"`). The tracker starts again there, the camera turned onto it when it was in a side view;
+the report gives `foundAgain` and when, with each match. On a test walk hidden by a passer-by for
+12 frames and coming out 70° on — outside the tracking view — the camera ends on it (within 10°;
+without looking again it stays more than 30° away). On 20 s of a crowded Istiklal street at night
+(086), following a woman in an orange shirt who walks on behind two men, she was seen in 75% of
+the analysed frames before and in all of them with `auto` (found again three times, by the colour
+of her shirt between them: colour 0.93–0.98, SigLIP agreeing at 0.88–0.96), at 0.4 s more than colour alone; SigLIP on every
+window found her only once and took three times as long.
+
+**Aiming by hand.** View ▸ Aim 360° Camera (`view.aim360`) makes a drag on the Program monitor
+turn the view of the topmost 360° clip under the playhead: the picture follows the pointer, as in
+a 360° player (a drag of the picture's width turns by its field of view). Paused, the drag sets
+the view at the playhead (a keyframe where the camera is animated); while the sequence plays,
+every turn is recorded — `clip.aim360` gets the samples, unwraps the yaw (no spin the long way
+past ±180°), smooths them over half a second when the button is let go (`smooth`, 0–2 s) and keeps
+only the keyframes needed to stay within 0.25° of the path, replacing the yaw and pitch keyframes
+inside the drag's span. One drag is one undo step; the keyframes stay editable in Effect
+Controls. Automation id `program.aim360`.
 
 The **360 Reframe** effect (Effects ▸ Immersive Video) is the clip's picture: a reframed clip is
 a flat clip of the camera's frame for everything after it — Motion, masks, every effect, Auto
@@ -89,10 +155,66 @@ vertical frame and a landscape one alike. Analyses read 360° media as
 it is seen:
 
 - scene detection, descriptions and subject boxes (`scenes.*`, `media.frame`, the showcase's
-  analysis) see the stitched whole-sphere panorama, so a box's centre is a direction
-  (x → yaw −180…180°, y → pitch 90…−90°);
-- tracking, masks, redaction and the privacy check (`track.*`, masks, `redact.*`) work in the
-  clip's own pixels, the camera's picture at each frame.
+  analysis) see the stitched whole-sphere panorama (of the proxy when there is one), so a box's
+  centre is a direction (x → yaw −180…180°, y → pitch 90…−90°);
+- tracking, masks, redaction, the privacy check and cut-outs (`track.*`, masks, `redact.*`,
+  `clip.cutOut`) work in the clip's own pixels, the camera's picture at each frame.
+
+### People cut out (Shot Lab's ideas)
+
+`clip.cutOut` outlines the person in a clip — flat or 360° — every 0.2 s: the person detector
+(D-FINE, with RTMPose's keypoints) finds them, **MobileSAM** (Apache-2.0; `cutout.downloadModel`,
+40.7 MB) cuts them out from points on their body and beside them, on the GPU (Metal; about 0.5 s
+a frame, 0.7 s with finding the person), and the largest piece is traced into a 96-point outline
+kept as the clip's Opacity mask **Person**, switched off. The effects are then ordinary clips,
+masks and titles above it, so they render on the GPU and stay editable:
+
+| command | what it makes |
+|---|---|
+| `clip.cloneTrail` | frozen copies of the person left where they were along their path (Frame Hold with Hold Filters, the mask held too), each until the clip ends |
+| `clip.shadowClone` | see-through copies following the person (the same media, later), the person in front |
+| `clip.timeFreeze` | the person frozen at `at` while the world goes on: a clean plate (each pixel's median over 24 frames where the person is elsewhere) over the moving person, the frozen copy above; refused when the background behind them is not seen clear and still (they stay in place, or the camera moves with them) |
+| `clip.textBehind` | a title behind the person (centred, fitted to the frame) |
+| `clip.personInFront` | the person above everything over the clip, so titles there go behind them |
+| `clip.personGlow` | a glow of a colour round the person (a copy tinted to it, its mask grown and feathered, Screen) |
+
+A copy in step with the clip (the glow, the person in front) lines up whatever the camera does;
+frozen and following copies need a still camera — a 360° clip's virtual camera may not move (its
+stabilisation is kept; `clip.stabilize360` `mode: "lock"` holds a walk still). Measured on a 6 s
+360° selfie shot from Istanbul: the person found and outlined in 30 of 30 frames in 21 s; the GPU
+export with two shadow clones ran at 21 frames a second. The director puts the opening's title
+behind its person when a person is its subject (a named look at least 30° tall, or a flat shot's
+subject a third of the picture), after the colour pass, in people's videos (not a travel video's
+places); `--no-cutouts` switches it off.
+
+### Hiding the hand and stick
+
+The bottom of a 360° camera's sphere shows the hand and stick holding it. VR Properties `nadir`
+patches it within `nadirSize` degrees (22) of straight down — the sphere is levelled, so the patch
+stays on the ground as the view turns: `mirror` shows the ground round it mirrored in across its
+edge (texture that meets it without a seam), `smooth` draws the colour at its edge in to the middle,
+`off` shows it as it is. Every view of the clip draws it, on the GPU and the CPU alike (tested
+against each other). A tiny planet looks straight down and a drone far down, so `clip.vrMove`
+`planetIn` / `planetOut` / `drone` and `clip.reframe360` `preset: "tinyPlanet"` patch it (mirrored)
+wherever it was never set — the director's planets get it this way. `clip.nadirLogo` lays one of the user's pictures round the
+bottom instead (`size` 24°): a whole-sphere picture, transparent elsewhere, above the clip and seen
+through its camera. The patch does not change the analyses' key (`sphere_key`): what is there to
+see is the same.
+
+### Sky Swap
+
+`clip.findSky` outlines a clip's sky every 0.2 s — flat or 360° (a levelled sphere has its sky at
+the top too): a first guess of cells that are bright, plain, grey or blue and join the top edge,
+refined by MobileSAM given points inside it and in the detail below when the segmenter is
+downloaded (and when the two agree); every sizeable piece is joined into one 256-point outline, the
+clip's Opacity mask **Sky**, switched off. `clip.skySwap` puts the new sky above the clip through
+that mask — one of the user's own photos (an item of the project, cut to the clip's shape), or a
+sky made here: `clear`, `sunset`, `dusk`, `night` (stars) or `clouds` (a cloud layer drawn in
+perspective), a whole 2:1 sphere for a 360° clip seen through the clip's own virtual camera; never
+stock pictures — and relights the clip a little towards it (Lumetri temperature and exposure from
+the old and new skies' colour and light, `relight` 30 %). On a 6 s 360° shot of a park in Istanbul
+the sky was outlined in 30 of 30 frames in 17 s; a sunset warmed the scene by 14 and darkened it a
+little. Sky seen through the gaps inside a tree's crown stays as it was.
 
 ## 4. Pipelines
 
@@ -103,6 +225,17 @@ it is seen:
 | Auto Reframe (`sequence.autoReframe`) | the copy keeps each camera's direction and re-shapes it to the new frame, keeping what it sees along its short side (a 16:9 view's height becomes a 9:16 view's width; `cameras360` counts them); its Motion is not moved — `clip.follow360` follows a subject. `clip.autoReframe` and `clip.cameraTrack` leave 360° clips to `clip.follow360` |
 
 ## 5. The director
+
+**Two angles of one moment.** `media.sameMoments` pairs recordings filmed at the same time — a
+phone and a 360° camera at one scene: their capture dates within `slack` (600 s) of overlapping, or
+with `dates: false` (wrong clocks) every pair of a dozen items or fewer — and lines each pair up by
+its sound (the GCC-PHAT sync of Clip ▸ Synchronize, the search kept within the dates' difference),
+keeping only clear matches. The director asks it for its media and, where a held, pushing-in or
+drifting shot (not the first or last) was filmed by the other camera too, cuts it half-way to the
+other camera's picture of the same instants — twice in an edit at most, the best-ranked moments
+first, `angles: false` to stop it. Checked on a street walk from Istanbul and a clip cut from it
+5.3 s in: lined up at 5.300 s (confidence 397); the 21 recordings of the weekend, one camera's, paired
+none.
 
 `autocut.direct` (`filmcraft-cli direct`, the MCP tool `autocut_direct`, Sequence ▸ Direct an
 Edit…) turns normal and 360° clips into one catchy edit on the beat, with the local model as the
@@ -265,9 +398,55 @@ by `qwen3:8b` and built in about 70 s once the scene index was cached (3–4 min
 ## 6. Rendering
 
 The Program monitor and exports draw the virtual camera on the GPU (Metal on macOS): the frame's
-Y′CbCr planes are uploaded as they are and every output pixel samples the ray it sees, the two
-lenses cross-faded over ±4° along their seam. The CPU path (`filmcraft_render::vr`) is the
-reference and the fallback; the two are tested against each other.
+Y′CbCr planes are uploaded as they are and every output pixel samples the ray it sees. The CPU
+path (`filmcraft_render::vr`) is the reference and the fallback; the two are tested against each
+other, the stitch below included.
+
+**Stitching the seam.** Where both lenses see, they see from two points a few centimetres apart:
+far things agree, but a wall, an arm or a face within a metre or so is seen a few degrees apart
+across the seam, and a cross-fade shows it twice. For every frame drawn, the band of ±6° round the
+seam is unrolled from both lenses into strips (512 columns round it, 32 rows across), and for each
+column the shift of one lens's picture against the other's — up to 5.6° across the seam, where
+parallax moves things, and 0.7° along it — whose windows of the two strips correlate best is
+found, measured on that frame and the three either side of it together (decoders keep those, and
+the shifts then hold steady from one frame to the next whatever order frames are drawn in). A
+shift is trusted by how well and how unambiguously it matched (another peak of the search means a
+repeating pattern) and how much detail there was; shifts are smoothed round the seam by that
+trust, and where there is nothing to go by they fade to none. Drawing then moves each lens's
+sample part of the way towards the other's across a ±4.5° cross-fade, so a near thing is seen
+once. Measuring takes about 6.5 ms a frame on the CPU; the GPU gets the shifts with the frame and
+moves the samples in the shader (`filmcraft_render::vr_seam`).
+
+Measured on 24 frames of eight Istanbul recordings (`media.seam360`): how much the lenses disagree
+across the band fell from 0.065 to 0.056 on average, in every frame — 27% in a hotel corridor and
+14% in an elevator (walls and arms close by), 4–16% outdoors — and the shifts change by 0.08° a
+frame on average (0.4% of the seam by more than 1°), against 0.25° measured one frame at a time.
+Lines very close to the camera bend a little where they cross the seam rather than doubling.
+`media.vrProperties` `seamFlow: false` cross-fades only, as before.
+
+**Cleaner night shots.** Reduce Noise (`media.denoise`, any video, not only 360°) merges each
+frame with two either side (`frames` 1–3), with no model: each neighbour's motion against the
+frame is measured on the CPU (luma at an eighth of its size, the best shift within ±24 pixels of
+every 64-pixel block by sum of absolute differences, refined to a fraction and the median of the
+blocks round it taken: 5 ms at 5.7K), then every pixel of every plane is averaged with the
+neighbours' pixels where that motion takes it, each weighted by how well it agrees
+(`exp(−(d/σ)²)`, σ the frame's own grain — Immerkær's estimate, the black of a fisheye's surround
+and blown highlights left out — times 1.5–4.5 by `strength`, at least 1–4 levels), so grain
+averages away while what moves, or what the motion missed, is not smeared. The merge runs on the
+GPU (Metal: 20 ms for a 5.7K luma plane, against 104 ms on the CPU; `filmcraft_gpu::denoise`,
+tested against the CPU's `filmcraft_render::denoise`), the source's frames as decoded
+(`plain_frame`) still feed the seam's stitch, and a 5.7K frame of an export costs 66 ms more
+(1.06 s → 1.85 s for 12 frames). On a grainy test picture moving 4 pixels a frame it takes a
+third of the grain away or more.
+
+On the X5's own night recordings it has little to do, and says so: measured on eight Istanbul
+night recordings (083–090) the camera has already cleaned its frames up (the painted look of faces
+and brick in the dark is its own noise reduction), leaving 0.2–0.7 levels of grain — `auto`
+(grain ≥ 1.5 levels, light under 0.3) leaves them all alone — and at full strength Reduce Noise
+lowered the grain in the dark by 3–7% and the shimmer from frame to frame by 1–4%, a change that
+does not show. It is for footage that is grainy when it comes in: a phone's or a small camera's
+in the dark. The director runs `auto` on the recordings it uses (`denoise: false`,
+`--no-denoise` to skip it) and reports those it turned on in `denoised`.
 
 ## 7. Export
 
@@ -283,16 +462,17 @@ sphere camera can still turn the panorama (`yaw`, `pitch`, `roll`): a re-centred
 
 ## 8. Limits
 
-- Stitching is a cross-fade over the overlap, not an optical-flow stitch: things near the camera
-  (closer than about a metre) show their parallax along the seam.
+- The seam's stitch moves each lens's picture across the seam by one shift per column: something
+  near in front of something far at the same point of the seam takes the near one's shift, and
+  things closer than about 30 cm (beyond the 5.6° searched) still show twice.
 - Levelling turns the picture about a level axis only: the camera's heading (where its front
-  lens looked) is kept, and stabilisation (`clip.stabilize360`) is still measured from the
-  pictures, not the gyroscope. Recordings without a motion-sensor record (other cameras, stitched
+  lens looked) is kept; the gyroscope steadies the heading's sway (Steady), and
+  `clip.stabilize360` measures the rest from the pictures. The time between the sensor and the
+  pictures is not known per recording (see Steady heading). Recordings without a motion-sensor record (other cameras, stitched
   equirectangular exports) keep the horizon they have; `roll` and `pitch` level them by hand.
   The sensor's axes and scale were matched on X5 footage; other Insta360 models are assumed to
   share them.
 - 360° exports are monoscopic equirectangular; stereoscopic 360° is read (the left eye shown)
   but not written.
-- Cube maps and meshes (`cbmp`, `mshp`) are recognised but shown flat; `.insp` photos are not
-  imported yet; two-file cameras (ONE X: `_00_` and `_10_` files) are found but only their first
+- Cube maps and meshes (`cbmp`, `mshp`) are recognised but shown flat; two-file cameras (ONE X: `_00_` and `_10_` files) are found but only their first
   lens is shown.

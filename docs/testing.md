@@ -10,6 +10,14 @@ cargo xtask fixtures                            # pre-generate the ffmpeg fixtur
 FILMCRAFT_REQUIRE_ORACLES=1 cargo test --workspace   # CI: missing ffmpeg fails instead of skipping
 ```
 
+**Tests keep off the user's data.** A test binary (cargo builds them into its `deps` folder) has a
+temporary data directory of its own (`autosave::test_data_dir`), so no test sees the models,
+caches, sign-ins or settings downloaded into the real one — with the workspace's features the
+AutoCut tests used to load the downloaded models, 14 GB a test, and were killed — or writes into
+it. A measuring test that wants the downloaded models (the ignored `*_on_a_real_clip`, Object Mask
+and Remove Object ones) is run with `FILMCRAFT_DATA_DIR` naming the real directory, for example
+`FILMCRAFT_DATA_DIR="$HOME/Library/Application Support/FilmCraft"`.
+
 ## 1. Kinds of tests
 
 | Kind | Where | Examples |

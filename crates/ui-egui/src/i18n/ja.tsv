@@ -4303,3 +4303,46 @@
 	Check Pauses	間を確認
 	Direct an Edit…	編集をディレクション…
 	Directing an edit	編集をディレクション中
+	Cut-outs	切り抜き
+	Cut Out the Person	人物を切り抜く
+	Clone Trail	クローンの軌跡
+	Shadow Clone	影分身
+	Time Freeze	時間停止
+	Text Behind the Person	人物の背後にテキスト
+	Person in Front	人物を前面に
+	Glow Round the Person	人物の周りに光彩
+	Find the Sky	空を検出
+	Sky Swap	空の置き換え
+	Nadir Logo	天底ロゴ
+	Aim 360° Camera	360°カメラを向ける
+	Drag to aim the 360° camera	ドラッグして360°カメラを向ける
+	No 360° clip under the playhead	再生ヘッドの位置に360°クリップがありません
+	3D Photo	3D写真
+	Depth Blur	深度ぼかし
+	Travel Across	横方向の移動
+	Travel Down	縦方向の移動
+	Push In	プッシュイン
+	Still Depth	固定する深度
+	Zoom to Fill	拡大して埋める
+	Focus Depth	フォーカスの深度
+	Depth of Field	被写界深度
+	Blur the Foreground	前景をぼかす
+	Sync 360° Motion Sensor	360° モーションセンサーを同期
+	Upscale and Restore	アップスケールと修復
+	Smooth Slow Motion	なめらかなスローモーション
+	Object Mask	オブジェクトマスク
+	Object	オブジェクト
+	Object Mask: click the thing in the Program monitor	オブジェクトマスク: プログラムモニターで対象をクリック
+	Click the thing in the Program monitor; Shift-click to add to it, Option-click to take away; then track the mask with its track buttons	プログラムモニターで対象をクリックします。Shift+クリックで追加、Option+クリックで除外し、マスクのトラッキングボタンで追跡します
+	Masking the object (see Progress); Shift-click to add to it, Option-click to take away	オブジェクトをマスク中 (進行状況を参照)。Shift+クリックで追加、Option+クリックで除外
+	Download a Model	モデルのダウンロード
+	Download	ダウンロード
+	Size:	サイズ:
+	Licence:	ライセンス:
+	Learnt from:	学習データ:
+	From:	入手元:
+	{what} needs this model. It is downloaded once and runs on this computer.	{what}にはこのモデルが必要です。ダウンロードは一度だけで、このコンピューター上で動作します。
+	Nothing is downloaded until you choose Download; its SHA-256 is checked and it is kept in FilmCraft's models folder.	「ダウンロード」を選ぶまで何もダウンロードされません。SHA-256 を確認したうえで、FilmCraft のモデルフォルダーに保存します。
+	Nothing to download	ダウンロードするものがありません
+	Downloading {name} (see Progress); choose {what} again when it finishes	{name}をダウンロード中 (進行状況を参照)。終わったら{what}をもう一度選んでください
+	Remove Object	オブジェクトを除去

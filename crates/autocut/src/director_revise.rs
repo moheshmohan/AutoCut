@@ -374,7 +374,7 @@ pub fn apply(plan: &mut Plan, ops: &[Op], cands: &[Candidate], wins: &[(f64, f64
             }
             (Op::Camera(_, cam), Some(k)) => {
                 let Some(s) = plan.shots.get_mut(k) else { continue };
-                let fits = find(&s.clip).is_some_and(|c| cam.for_kind(c.kind)) && f64::from(s.beats) * beat + 1e-9 >= cam.min_seconds();
+                let fits = find(&s.clip).is_some_and(|c| c.fits(*cam)) && f64::from(s.beats) * beat + 1e-9 >= cam.min_seconds();
                 if fits {
                     said.push(format!("{}: camera {} → {}", label(k), s.camera.id(), cam.id()));
                     s.camera = *cam;
@@ -391,7 +391,7 @@ pub fn apply(plan: &mut Plan, ops: &[Op], cands: &[Candidate], wins: &[(f64, f64
                     // a quieter camera its clip can use, fitting its beats
                     let instead = [Camera::Drift, Camera::PushIn, Camera::Hold]
                         .into_iter()
-                        .find(|m| *m != *cam && m.for_kind(c.kind) && f64::from(s.beats) * beat + 1e-9 >= m.min_seconds())
+                        .find(|m| *m != *cam && c.fits(*m) && f64::from(s.beats) * beat + 1e-9 >= m.min_seconds())
                         .unwrap_or(Camera::Hold);
                     said.push(format!("{}: camera {} → {}", label(i), s.camera.id(), instead.id()));
                     s.camera = instead;
@@ -474,7 +474,7 @@ pub fn apply(plan: &mut Plan, ops: &[Op], cands: &[Candidate], wins: &[(f64, f64
                 let Some(s) = plan.shots.get_mut(k) else { continue };
                 match find(id) {
                     Some(c) if !used => {
-                        let cam = if s.camera.for_kind(c.kind) {
+                        let cam = if c.fits(s.camera) {
                             s.camera
                         } else if c.kind == Kind::Vr {
                             Camera::Drift

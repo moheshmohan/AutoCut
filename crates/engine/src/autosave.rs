@@ -510,13 +510,16 @@ pub fn portable_data_dir(exe_dir: &Path) -> Option<PathBuf> {
     exe_dir.join(PORTABLE_MARKER).is_file().then(|| exe_dir.join("data"))
 }
 
-/// The data directory. `FILMCRAFT_DATA_DIR` overrides; a portable install ([`PORTABLE_MARKER`] next
-/// to the executable) uses `<exe dir>/data`; otherwise the per-user directory:
-/// macOS `~/Library/Application Support/FilmCraft`, Windows `%APPDATA%\FilmCraft`,
-/// elsewhere `$XDG_DATA_HOME/filmcraft` or `~/.local/share/filmcraft`.
+/// The data directory. `FILMCRAFT_DATA_DIR` overrides; a test (see [`test_data_dir`]) has one of
+/// its own; a portable install ([`PORTABLE_MARKER`] next to the executable) uses `<exe dir>/data`;
+/// otherwise the per-user directory: macOS `~/Library/Application Support/FilmCraft`, Windows
+/// `%APPDATA%\FilmCraft`, elsewhere `$XDG_DATA_HOME/filmcraft` or `~/.local/share/filmcraft`.
 pub fn default_data_dir() -> Option<PathBuf> {
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     if let Some(d) = env("FILMCRAFT_DATA_DIR") {
+        return Some(d);
+    }
+    if let Some(d) = test_data_dir() {
         return Some(d);
     }
     if let Some(d) = std::env::current_exe().ok().and_then(|exe| exe.parent().and_then(portable_data_dir)) {
@@ -529,6 +532,26 @@ pub fn default_data_dir() -> Option<PathBuf> {
         return env("APPDATA").map(|h| h.join("FilmCraft"));
     }
     env("XDG_DATA_HOME").map(|d| d.join("filmcraft")).or_else(|| env("HOME").map(|h| h.join(".local/share/filmcraft")))
+}
+
+/// A test's own data directory: a test binary (its executable in cargo's `deps` folder, where
+/// cargo builds unit and integration tests — never the app, its examples or an install) gets a
+/// fresh temporary one, so no test sees the user's downloaded models (loading them took 14 GB a
+/// test with the workspace's features), caches, sign-ins or settings, or writes into them. A
+/// measuring test that wants the downloaded models names the real directory in
+/// `FILMCRAFT_DATA_DIR`.
+pub fn test_data_dir() -> Option<PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        in_cargo_deps(&exe).then(|| std::env::temp_dir().join(format!("filmcraft-test-data-{}", std::process::id())))
+    })
+    .clone()
+}
+
+/// Whether an executable is one cargo built into its `deps` folder (a test).
+pub fn in_cargo_deps(exe: &Path) -> bool {
+    exe.parent().and_then(Path::file_name).is_some_and(|n| n == "deps")
 }
 
 pub fn unix_now() -> i64 {

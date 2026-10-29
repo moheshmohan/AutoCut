@@ -21,6 +21,7 @@ about compositing, effects and the on-device models.
 | Render previews (render in to out) | CPU → **GPU** (an export, `GpuRendering` default) | as export | as export (`FILMCRAFT_CPU_COMPOSITE` does not apply) |
 | The CLI's GPU export | none: `cargo build -p filmcraft-cli` had no wgpu backend, `--gpu-rendering auto` rendered on the CPU → **Metal** (macOS), DX12 / Vulkan (Windows), Vulkan / GL (Linux) | as export | as export |
 | Standard effects on media clips | GPU: 45 effect ids (`render::gpufx::GPU_EFFECTS`: colour, levels, Lumetri basic / creative / vignette, Gaussian / directional / camera blur, sharpen, unsharp, crop, transform, flips, mirror, offset, vignette, video limiter, ASC CDL, channel mix…, and the 11 Creator effects: VHS, Film Grain, Kaleidoscope, Glitch, Zoom Blur, Directional Motion Blur, Tech HUD, Chromatic Aberration, Light Sweep, Duotone, Halftone, `render::creator_fx`) | an effect outside the list, a non-finite parameter or a Transform that minifies → the clip's layer is rendered on the CPU and drawn by the GPU | — |
+| The depth effects (3D Photo, Depth Blur) | **GPU** (`crates/gpu/src/depthfx.wgsl`, installed by the hosts; the clip's layer is drawn on the CPU path, these two passes on the GPU) | no adapter, a picture larger than the device's buffers, a device error (the CPU from then on) → the CPU reference (`render::depth`) | — |
 | Masked effects (the redaction blur), opacity masks | CPU layer → **GPU** (`FxOp::Masked`, `FxOp::OpacityMask`) | more than 65 536 mask vertices or non-finite mask values → CPU layer | — |
 | Blurs behind portraits (blur fill), redaction blur | GPU (box passes, running sums for large radii) | — | — |
 | Opacity and motion keyframes | GPU (evaluated on the CPU at the frame's time, drawn by the GPU) | — | — |
@@ -47,6 +48,11 @@ about compositing, effects and the on-device models.
 | VoxCPM natural clones | Metal | CPU | `FILMCRAFT_VOXCPM_CPU=1` |
 | IndicF5 (Malayalam clones) | Metal | CPU | `FILMCRAFT_F5_CPU=1` |
 | ACE-Step neural music | Metal | CPU | `FILMCRAFT_ACESTEP_CPU=1` |
+| Depth Anything V2 Small (the depth effects' depth, once a photo) | **Metal** (candle) | load fails: CPU; a picture that fails: again on a CPU copy | — |
+| MobileSAM (cut-outs, Object Mask) | **GPU** (the image encoder in WGSL, `crates/vision/src/sam.wgsl`; the prompt and mask decoders on candle's Metal) | no adapter, a device error: candle from then on (Metal, else the CPU) | — |
+| MI-GAN (Remove Object) | **GPU** (WGSL, `crates/vision/src/migan.wgsl`; candle runs a depthwise layer as 512 convolutions) | no adapter, a device error: the CPU from then on | — |
+| RIFE 4.26 (Smooth Slow Motion) | **GPU** (WGSL, `crates/vision/src/rife.wgsl`; candle on Metal was 6× slower) | no adapter, a device error, a frame the device cannot hold: candle on the CPU from then on | — |
+| Real-ESRGAN (Upscale and Restore) | **GPU** (WGSL, `crates/vision/src/esrgan.wgsl`; candle's Metal convolution was 6× slower) | no adapter, a device error, a tile the device cannot hold: candle on the CPU from then on | — |
 
 Metal (candle) and the WGSL detectors are macOS only; Windows and Linux keep the CPU for the
 models (no CUDA). The wasm build compiles none of it: the model features are off there and the
@@ -89,6 +95,11 @@ VideoToolbox encoding).
 | Kokoro (Heart), a 36.7 s script | 43.6 s | 5.7 s | 7.6× | Whisper hears the same words (WER 4.1 % both); waveforms 48.5 dB apart |
 | OpenVoice conversion, 12 s | 12.0 s | 1.6 s | 7.4× | 96 dB apart; tone colours within 9e-6 |
 | VoxCPM2, IndicF5, ACE-Step | — | Metal already | — | (unchanged) |
+| Depth Anything V2 Small, 924 × 518 (2026-10-28) | 1,133 ms | 249 ms | 4.5× | (one network: the same weights on both) |
+| MobileSAM's image encoder, a picture (2026-10-29) | 2,041 ms (candle Metal 532) | 88 ms | 23× | within 3.1e-6; the same cut (score 0.98, 10.2 % covered) |
+| MI-GAN, a 512 × 512 picture (2026-10-29) | 369 ms | 40 ms | 9× | within 2.6e-6 |
+| RIFE 4.26, a 1080p frame between two (2026-10-29) | 4,698 ms (candle Metal 1,130) | 183 ms | 26× | within 1.4e-6 |
+| Real-ESRGAN ×4, 640 × 480 (2026-10-28) | 4,391 ms (candle Metal 2,969) | 474 ms | 9.3× | within 2.3e-6 |
 
 candle's Metal backend was tried for the detectors first: five times *slower* than the CPU (a unit
 as generic tensor operations whose broadcasts are slow on Metal), hence the WGSL kernels.
@@ -106,6 +117,10 @@ build before this work, whose defaults rendered on the CPU):
 | 4K, 15.6 s (468 frames) | scaled clips, blur fills, transitions, titles | 23.2–25.1 s, 55 s CPU | **18.4–18.6 s**, 52 s CPU (1.3×) |
 | 4K, 10 s (300 frames) | one 1080p clip zoomed to 4K, titles | 15.2–20.2 s (load 37–47) | 16.0–19.9 s (the same) |
 | 1080p, 10 s (300 frames) | one 1080p clip with a slow zoom, titles (measured when such frames were left to the CPU; they are the GPU's now) | 3.7–4.1 s, 9.0 s CPU | 2.9–3.8 s, 9.1 s CPU (+1.4 s of GPU start-up before the export) |
+
+**The depth effects** (2026-10-28, a drawn picture with a depth of a near disc over a slope; the
+GPU's pictures within 1e-6 of the CPU's): the 3D photo 12 ms at 1080p and 47 ms at 4K (CPU 40 and
+209 ms), the depth blur 27 and 88 ms (CPU 79 and 394 ms, 256 taps).
 
 Before the masked blur moved to the GPU, the 6 s 4K range took 11.8 s on the GPU (39 s of CPU)
 against 3.4–5.1 s on the CPU at the time: the redaction was a 4K CPU layer uploaded every frame.

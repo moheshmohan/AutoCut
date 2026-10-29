@@ -39,6 +39,8 @@ use filmcraft_render::Blend;
 use filmcraft_render::plan::{FramePlan, PlanLayer, PlanStep};
 
 pub mod adapter;
+pub mod denoise;
+pub mod depthfx;
 pub mod export_renderer;
 pub mod fx;
 pub mod lut;
@@ -707,7 +709,12 @@ impl GpuCompositor {
         let taps = u[14].max(v.taps.clamp(1, filmcraft_render::vr::MAX_TAPS as u32) as f32);
         u[14] = taps;
         u[23] = u[23].max(1.0);
-        u[52..].copy_from_slice(&vr_block(v, src.size, src.chroma));
+        u[52..52 + VR_FLOATS].copy_from_slice(&vr_block(v, src.size, src.chroma));
+        if let filmcraft_render::vr::SourceModel::DualFisheye { seam: Some(f), .. } = &v.model {
+            for (slot, x) in u[52 + VR_FLOATS..].iter_mut().zip(f.shift.iter().flatten()) {
+                *slot = if x.is_finite() { *x } else { 0.0 };
+            }
+        }
         u
     }
 
@@ -1258,10 +1265,11 @@ struct SrcInfo {
     input: Option<filmcraft_color::GpuInputParams>,
 }
 
-/// Floats in a layer's uniform block (`U` in `composite.wgsl`: 13 vec4, then the 22 of a 360°
-/// layer's virtual camera).
-const UNIFORM_FLOATS: usize = 52 + VR_FLOATS;
-const VR_FLOATS: usize = 88;
+/// Floats in a layer's uniform block (`U` in `composite.wgsl`: 13 vec4, then the 27 of a 360°
+/// layer's virtual camera, then the shifts along a dual-fisheye seam, two columns a vec4).
+const UNIFORM_FLOATS: usize = 52 + VR_FLOATS + SEAM_FLOATS;
+const VR_FLOATS: usize = 108;
+const SEAM_FLOATS: usize = 2 * filmcraft_render::vr_seam::SEAM_COLUMNS;
 
 /// The virtual camera block of a 360° layer's uniforms (`U.vr` in `composite.wgsl`) for a
 /// source texture of `tex` texels with chroma planes of `chroma`.
@@ -1279,6 +1287,10 @@ fn vr_block(v: &filmcraft_render::plan::VrLayer, tex: (u32, u32), chroma: (u32, 
         Output::Flat { tan_x, tan_y, distance } => (0.0, tan_x, tan_y, distance),
         Output::Sphere => (1.0, 0.0, 0.0, 0.0),
     };
+    // the patch over the bottom of the sphere: mode (0 none, 1 mirror, 2 smooth), radius
+    if let Some(n) = v.model.nadir() {
+        put(104, &[if n.mirror { 1.0 } else { 2.0 }, n.radius]);
+    }
     let (src_kind, lenses) = match &v.model {
         SourceModel::Equirect { .. } => (0.0, 0.0),
         SourceModel::DualFisheye { lenses, .. } => (1.0, lenses.len().min(2) as f64),
@@ -1295,11 +1307,17 @@ fn vr_block(v: &filmcraft_render::plan::VrLayer, tex: (u32, u32), chroma: (u32, 
         put(12 + 4 * i, row);
     }
     match &v.model {
-        SourceModel::Equirect { rect, span, wrap } => {
+        SourceModel::Equirect { rect, span, wrap, .. } => {
             put(24, rect);
             put(28, &[span.0, span.1, if *wrap { 1.0 } else { 0.0 }, 0.0]);
         }
-        SourceModel::DualFisheye { lenses, .. } => {
+        SourceModel::DualFisheye { lenses, seam, .. } => {
+            if let Some(f) = seam {
+                put(88, &[1.0, f.shift.len().min(filmcraft_render::vr_seam::SEAM_COLUMNS) as f64, f.band, 0.0]);
+                put(92, &f.n);
+                put(96, &f.e1);
+                put(100, &f.e2);
+            }
             for (k, l) in lenses.iter().take(2).enumerate() {
                 let at = 32 + 28 * k;
                 put(at, &l.rect);

@@ -12,7 +12,8 @@ An Insta360 camera names its files `VID_<yyyymmdd>_<hhmmss>_<ll>_<nnn>.insv` (vi
 video, attached as its proxy). Studio's cloud download puts each one in
 `~/Downloads/Insta360 Download/<stem>-Original/`; a camera card mounts with them in
 `DCIM/Camera01`. A recording is complete when its file (and its proxy) ends with the camera's
-trailer (`filmcraft_isobmff::insta360`): a download still being written has none yet.
+trailer (`filmcraft_isobmff::insta360`): a download still being written has none yet. Photos
+(`.insp`) are imported as 360° stills (`filmcraft_codecs::insp`).
 
 ## Downloading from the cloud (`studio`)
 

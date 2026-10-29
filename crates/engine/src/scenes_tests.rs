@@ -138,6 +138,42 @@ fn finds_the_cuts_of_a_synthetic_clip_without_models() {
     assert!(s.project.scenes.is_empty());
 }
 
+/// A stub shot-boundary network: no cuts anywhere, and how many frames it was shown.
+#[derive(Default)]
+struct Cutter {
+    frames: AtomicUsize,
+}
+
+impl SceneModels for Cutter {
+    fn boundaries_id(&self) -> Option<String> {
+        Some("fake-cuts".into())
+    }
+    fn cuts(&self, frames: &[Vec<u8>], _: &dyn Fn() -> bool) -> std::result::Result<Vec<f32>, String> {
+        self.frames.fetch_add(frames.len(), Ordering::Relaxed);
+        Ok(vec![0.0; frames.len()])
+    }
+}
+
+#[test]
+fn a_cameras_own_360_recording_is_one_take_without_the_cut_network() {
+    let (mut s, item) = session();
+    let cutter = Arc::new(Cutter::default());
+    s.scenes.models = Some(cutter.clone());
+    let r = analyze(&mut s, json!({"items": [item.0], "wait": true, "fresh": true}));
+    assert_eq!(r["scenes"]["items"][0]["boundaries"], "transnetv2", "{r}");
+    let seen = cutter.frames.load(Ordering::Relaxed);
+    assert!(seen > 0);
+    // as a dual-fisheye recording: the network is not run; sudden changes still cut
+    s.execute("media.vrProperties", json!({"items": [item.0], "projection": "dualFisheye"})).unwrap();
+    let r = analyze(&mut s, json!({"items": [item.0], "wait": true, "fresh": true}));
+    assert_eq!(r["scenes"]["items"][0]["boundaries"], "signature", "{r}");
+    assert_eq!(cutter.frames.load(Ordering::Relaxed), seen, "no frames shown to the network");
+    // an equirectangular 360° picture may be an edit: its cuts are looked for
+    s.execute("media.vrProperties", json!({"items": [item.0], "projection": "equirectangular"})).unwrap();
+    let r = analyze(&mut s, json!({"items": [item.0], "wait": true, "fresh": true}));
+    assert_eq!(r["scenes"]["items"][0]["boundaries"], "transnetv2", "{r}");
+}
+
 #[test]
 fn models_describe_embed_and_score_and_search_ranks_by_them() {
     let (mut s, item) = session();

@@ -334,6 +334,9 @@ pub struct MonitorView {
     /// Snap in Program Monitor: graphic drags snap to guides, the frame edges and centre.
     pub snap: bool,
     pub guides: Vec<Guide>,
+    /// Aim 360° Camera (Program): a drag on the picture turns the 360° clip's view, and records it
+    /// while playing (`panels::aim360`).
+    pub aim360: bool,
 }
 
 impl Default for MonitorView {
@@ -358,6 +361,7 @@ impl Default for MonitorView {
             lock_guides: false,
             snap: true,
             guides: Vec::new(),
+            aim360: false,
         }
     }
 }
@@ -576,6 +580,9 @@ pub struct UiState {
     /// Free-draw (pen) mask being placed on the Program monitor (Effect Controls ▸ pen icon).
     #[serde(default)]
     pub mask_pen: Option<MaskPenDraft>,
+    /// The Object Mask tool on the Program monitor (Effect Controls ▸ sparkle icon).
+    #[serde(default)]
+    pub object_mask: Option<ObjectMaskDraft>,
     /// The Program monitor's Track tool (open when Some; `panels::motion_track`).
     #[serde(default)]
     pub track_tool: Option<TrackToolState>,
@@ -667,6 +674,17 @@ pub struct MaskPenDraft {
     pub clip: u64,
     pub effect: usize,
     pub points: Vec<[f64; 4]>,
+}
+
+/// The Object Mask tool: the clip and effect it masks on, the mask its clicks made (`None` until
+/// the first), and the points clicked on the thing and off it (shares of the clip's picture).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ObjectMaskDraft {
+    pub clip: u64,
+    pub effect: usize,
+    pub mask: Option<usize>,
+    pub inside: Vec<[f64; 2]>,
+    pub outside: Vec<[f64; 2]>,
 }
 
 /// Save Preset dialog (Effect Controls ▸ right-click an effect ▸ Save Preset…).
@@ -1051,6 +1069,7 @@ impl Default for UiState {
             make_offline: None,
             color_dialog: None,
             mask_pen: None,
+            object_mask: None,
             track_tool: None,
             save_preset: None,
             audio_fx_editors: Vec::new(),

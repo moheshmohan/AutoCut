@@ -162,6 +162,12 @@ pub trait MediaSource: Send + Sync {
     fn info(&self) -> &MediaInfo;
     /// The frame displayed at media time `req.time`.
     fn video_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>>;
+    /// The frame at `req.time` as decoded, for measuring the frame round it (a 360° seam's
+    /// neighbours): a source that cleans its frames up with their neighbours (noise reduction)
+    /// gives it without that. Others need not override this.
+    fn plain_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>> {
+        self.video_frame(req)
+    }
     /// `frames` audio frames starting at sample index `start` (at `sample_rate`, media time).
     fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer>;
     /// Like [`audio`](Self::audio) for audio stream `stream` (an index into
@@ -175,15 +181,32 @@ pub trait MediaSource: Send + Sync {
     fn spherical(&self) -> Option<Spherical> {
         None
     }
+    /// How much larger than [`info`](Self::info)'s size it can give a frame with real detail: 1
+    /// for a decoder (it gives its pictures at most at their own size); more for a sharper
+    /// stand-in (an upscaled copy of the media), which the renderer then asks for as large as a
+    /// clip shows the picture, up to this.
+    fn max_scale(&self) -> f32 {
+        1.0
+    }
+    /// How many frames it has for each frame of [`info`](Self::info)'s rate: 1 for a decoder;
+    /// more for a stand-in with frames made between them (Smooth Slow Motion), whose frames the
+    /// renderer then times, blends and samples at that finer rate.
+    fn time_detail(&self) -> u32 {
+        1
+    }
 }
 
 pub type SharedSource = Arc<dyn MediaSource>;
 
 /// File extensions we recognise at import (the media browser filters on these).
-pub const STILL_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "dpx", "exr", "hdr", "dng", "heic", "heif", "hif"];
+pub const STILL_EXTENSIONS: &[&str] =
+    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "dpx", "exr", "hdr", "dng", "heic", "heif", "hif", "insp"];
 /// Still formats decoded by `filmcraft-codecs` (HEIF: HEVC pictures in an ISO BMFF file), not by
 /// this crate's still decoders: they are imported as stills but never as image sequences.
 pub const HEIF_EXTENSIONS: &[&str] = &["heic", "heif", "hif"];
+/// Insta360 360° photos (a JPEG and the camera's trailer, `filmcraft-codecs`): stills, never an
+/// image sequence.
+pub const INSP_EXTENSIONS: &[&str] = &["insp"];
 pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "wave", "bwf", "aif", "aiff", "mp3", "mp2", "m4a", "aac", "flac", "ogg", "opus"];
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "m4v", "mov", "mkv", "webm", "avi", "mxf", "mts", "m2ts", "m2t", "ts", "mpg", "mpeg", "vob", "mod", "tod", "m2v", "m1v", "mpv", "3gp", "y4m", "apv",

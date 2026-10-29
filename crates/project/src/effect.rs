@@ -19,6 +19,9 @@ pub use audio::{GEQ10_LABELS, GEQ20_LABELS, GEQ30_LABELS, PREMIERE_AUDIO_EFFECTS
 mod creator;
 pub use creator::{CHROMA_KINDS, CREATOR, CREATOR_EFFECTS, GLITCH_RHYTHMS, HALFTONE_MODES, HUD_COLOR, MOTION_SHUTTERS, ZOOM_BLUR_KINDS};
 
+mod depth;
+pub use depth::{DEPTH_BLUR, PHOTO_3D};
+
 mod vfx;
 pub use vfx::{
     EASINGS, ECHO_OPERATORS, FRAME_LAYOUTS, LIGHT_IDS, SIMPLE_BLEND, STABILIZER_LEVELS, TRACK_CHOICES, auto_point, stabilizer_level, ultra_key_setting,
@@ -177,8 +180,9 @@ pub const BLEND_MODES: &[&str] = &[
 ];
 
 /// FilmCraft's own video effects that sit in one of Premiere's folders (beside its effects there,
-/// not in Premiere's list): the 360° virtual camera in Immersive Video.
-pub const FILMCRAFT_OWN: &[&str] = &[crate::vr::REFRAME];
+/// not in Premiere's list): the 360° virtual camera in Immersive Video, the 3D photo in
+/// Perspective and the depth blur in Blur & Sharpen.
+pub const FILMCRAFT_OWN: &[&str] = &[crate::vr::REFRAME, PHOTO_3D, DEPTH_BLUR];
 
 pub(crate) fn f(id: &'static str, label: &'static str, def: f64, min: f64, max: f64, unit: &'static str) -> ParamDef {
     ParamDef {
@@ -849,6 +853,7 @@ fn build_effects() -> Vec<EffectDef> {
     v.extend(audio::defs());
     v.extend(vfx::defs());
     v.extend(creator::defs());
+    v.extend(depth::defs());
     vfx::extend_core(&mut v);
     v.extend(crate::vtransition::video_transition_defs());
     v.extend(crate::graphic::layer_defs());

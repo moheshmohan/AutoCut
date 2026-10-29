@@ -435,6 +435,11 @@ fn register_gpu_frame_renderer() {
     filmcraft_export::register_frame_renderer(|| {
         filmcraft_gpu::ExportRenderer::new().map(|r| Box::new(GpuFrameRenderer(r)) as Box<dyn filmcraft_export::FrameRenderer>)
     });
+    // noise reduction's merge too (its device made on first use)
+    filmcraft_gpu::denoise::install();
+    // the depth effects too, and the depth network they ask (both made on first use)
+    filmcraft_gpu::depthfx::install();
+    filmcraft_engine::depth::install();
 }
 
 /// Put the OS hardware video decoders in front of our own. Registered in a statement of its own:

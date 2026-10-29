@@ -69,6 +69,8 @@ chrono = { workspace = true }
 craft-docpath = { workspace = true }
 web-time = "1"
 filmcraft-isobmff = { workspace = true }
+# the kept depth maps (`depth.rs`), deflated (pure Rust)
+miniz_oxide = "0.8"
 
 [dev-dependencies]
 filmcraft-testkit = { workspace = true }

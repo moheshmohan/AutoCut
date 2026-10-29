@@ -21,17 +21,30 @@
 //!   detector and pose network, finding the faces YuNet misses: on the CPU (`layers`, the
 //!   reference) and, on macOS, wholly on the GPU (`gpunn`: the frame resized, both networks, the
 //!   crops and the SimCC maxima as WGSL passes), the CPU being the fallback.
+//! - [`matte`]: a person cut out of a picture as the editor uses it — the points that tell the
+//!   segmenter who, and the cut-out's outline as a polygon a keyframed mask can follow — and
+//!   `segment` (feature `model`): **MobileSAM** (Apache-2.0) making the cut-out, on candle, on the
+//!   GPU (Metal) on macOS.
+//! - `depth` (feature `model`): **Depth Anything V2 Small** (Apache-2.0), how near each part of a
+//!   picture is, for the 3D photo and depth blur; on candle, on the GPU (Metal) on macOS.
+//! - `upscale` (feature `model`): **Real-ESRGAN** (BSD-3-Clause), a picture made four times as large
+//!   with its detail restored, in seamless tiles; on candle, on the GPU (Metal) on macOS.
+//! - `interp` (feature `model`): **RIFE 4.26** (MIT), the frame between two frames at any time
+//!   between them; on candle, on the GPU (Metal) on macOS.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 pub mod catalog;
 pub mod head;
+pub mod matte;
 pub mod onnx;
 pub mod post;
 pub mod safetensors;
 pub mod track;
 pub mod zip;
 
+#[cfg(feature = "model")]
+pub mod depth;
 #[cfg(feature = "model")]
 mod dfine;
 #[cfg(feature = "model")]
@@ -40,6 +53,14 @@ mod gpu;
 mod gpunn;
 #[cfg(all(test, feature = "model"))]
 mod gpunn_tests;
+#[cfg(feature = "model")]
+pub mod inpaint;
+#[cfg(feature = "model")]
+mod inpaint_gpu;
+#[cfg(feature = "model")]
+pub mod interp;
+#[cfg(feature = "model")]
+mod interp_gpu;
 #[cfg(feature = "model")]
 mod layers;
 #[cfg(feature = "model")]
@@ -50,6 +71,14 @@ mod people;
 mod profile_tests;
 #[cfg(feature = "model")]
 mod rtmpose;
+#[cfg(feature = "model")]
+mod sam_gpu;
+#[cfg(feature = "model")]
+pub mod segment;
+#[cfg(feature = "model")]
+pub mod upscale;
+#[cfg(feature = "model")]
+mod upscale_gpu;
 #[cfg(feature = "model")]
 pub use net::{Detectors, FACE_SIDE, FaceDetector, MAX_GPU_FAILURES, PLATE_SIDE, PlateDetector, gpu_available};
 #[cfg(feature = "model")]

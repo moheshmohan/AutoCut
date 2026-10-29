@@ -18,6 +18,7 @@ fn cand(id: &str, item: u64, kind: Kind, start: f64, secs: f64, media: f64, orde
         item,
         name: format!("clip{item}"),
         kind,
+        photo: kind == Kind::Photo,
         start,
         end: start + secs,
         key: start + secs / 2.0,
@@ -141,6 +142,34 @@ fn rules_open_on_a_planet_alternate_and_close_on_one() {
     assert!(!p.shots.is_empty() && p.shots.iter().all(|s| s.camera.for_kind(Kind::Flat)));
     // nothing to plan with
     assert!(rules_plan(&[], &o, beat, 120.0).shots.is_empty());
+}
+
+#[test]
+fn rules_finish_when_the_moments_left_are_one_clips() {
+    // the hook's clip has the most 360° moments: the rest are all its own (once, these swapped
+    // places in the queue for ever)
+    let mut lib = vec![cand("h", 1, Kind::Vr, 0.0, 6.0, 120.0, 0), cand("e", 2, Kind::Vr, 0.0, 8.0, 8.0, 9)];
+    for k in 0..6 {
+        lib.push(cand(&format!("m{k}"), 1, Kind::Vr, 10.0 + 12.0 * f64::from(k), 10.0, 120.0, 1 + k as usize));
+    }
+    lib[0].hook = 0.95;
+    let o = opts(json!({"brief": "a 30 s reel of our trip", "seconds": 30}));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(rules_plan(&lib, &o, beat_of(120.0), 120.0));
+    });
+    let plan = rx.recv_timeout(std::time::Duration::from_secs(20)).expect("the rules plan finishes");
+    assert!(plan.shots.len() >= 3, "{:?}", plan.shots);
+    // and with other clips' moments queued too, the body does not play one clip twice in a row
+    // (the ending is chosen on its own)
+    let mut lib = library();
+    lib.push(cand("c7", 3, Kind::Vr, 16.0, 10.0, 30.0, 2));
+    lib.push(cand("c8", 3, Kind::Vr, 26.0, 4.0, 30.0, 2));
+    let o = opts(json!({"brief": "a 30 s reel of our trip", "seconds": 30}));
+    let plan = rules_plan(&lib, &o, beat_of(120.0), 120.0);
+    let items: Vec<u64> = plan.shots.iter().map(|s| lib.iter().find(|c| c.id == s.clip).unwrap().item).collect();
+    let body = &items[..items.len() - 1];
+    assert!(body.windows(2).all(|w| w[0] != w[1]), "{items:?}");
 }
 
 #[test]
@@ -953,4 +982,121 @@ async fn notes_the_rules_read_are_taken_literally_and_the_model_reads_the_rest()
     assert_eq!(asked.len(), 1);
     assert!(asked[0].1.contains("call it something about the sea") && !asked[0].1.contains("Notes: \"warmer"), "{}", asked[0].1);
     assert!(r["director"].as_str().unwrap().contains("rules and fixed"), "{r}");
+}
+
+#[test]
+fn a_person_big_in_the_opening_is_put_in_front_of_its_title() {
+    let mut c = cand("c1", 1, Kind::Vr, 0.0, 6.0, 20.0, 0);
+    let big = Look { id: "c1a".into(), yaw: 0.0, pitch: 0.0, what: "a man waving".into(), named: true, size: Some((24.0, 48.0)) };
+    assert!(person_subject(&c, Some(&big)));
+    assert!(!person_subject(&c, Some(&Look { size: Some((10.0, 18.0)), ..big.clone() })), "too small to cut out well");
+    assert!(!person_subject(&c, Some(&Look { what: "a fountain".into(), ..big.clone() })));
+    assert!(!person_subject(&c, Some(&Look { named: false, ..big.clone() })));
+    assert!(!person_subject(&c, None));
+    c.kind = Kind::Flat;
+    c.caption = "A woman laughs by the sea".into();
+    c.subject = Some([0.3, 0.1, 0.3, 0.7]);
+    assert!(person_subject(&c, None));
+    c.caption = "Waves break on the rocks".into();
+    assert!(!person_subject(&c, None), "\"manage\" or \"rocks\" are not people");
+    c.caption = "The manager's desk".into();
+    c.subject = Some([0.3, 0.1, 0.3, 0.7]);
+    assert!(!person_subject(&c, None));
+    assert!(opts(json!({"brief": "x"})).cutouts && !opts(json!({"brief": "x", "cutouts": false})).cutouts);
+    assert!(opts(json!({"brief": "x"})).denoise && !opts(json!({"brief": "x", "denoise": false})).denoise);
+    assert!(opts(json!({"brief": "x"})).depth && !opts(json!({"brief": "x", "depth": false})).depth);
+    assert!(opts(json!({"brief": "x"})).upscale && !opts(json!({"brief": "x", "upscale": false})).upscale);
+    assert!(opts(json!({"brief": "x"})).smooth && !opts(json!({"brief": "x", "smooth": false})).smooth);
+}
+
+#[test]
+fn a_moment_two_cameras_filmed_is_cut_between_them() {
+    let beat = beat_of(120.0);
+    // a phone clip (item 2) filmed 3 s after the 360° camera (item 1) started
+    let lib = vec![cand("c1", 1, Kind::Vr, 0.0, 20.0, 40.0, 0), cand("c2", 2, Kind::Flat, 0.0, 15.0, 15.0, 1), cand("c3", 3, Kind::Vr, 0.0, 10.0, 10.0, 2)];
+    let shot = |clip: &str, from: f64, beats: u32, camera: Camera| PlannedShot {
+        clip: clip.into(),
+        file: String::new(),
+        grade: None,
+        from,
+        beats,
+        camera,
+        look: None,
+        to: None,
+        enter: Enter::Cut,
+        align: None,
+        lead: 0.0,
+        tail: 0.0,
+        cut: String::new(),
+        text: None,
+        why: String::new(),
+    };
+    let mut plan = Plan {
+        title: "t".into(),
+        mood: String::new(),
+        bpm: 120.0,
+        shots: vec![shot("c3", 0.0, 4, Camera::PlanetIn), shot("c1", 6.0, 8, Camera::Hold), shot("c3", 4.0, 4, Camera::PlanetOut)],
+        by: "rules".into(),
+        notes: vec![],
+        style: None,
+    };
+    let pairs = angles::pairs(&json!({"pairs": [{"a": 1, "b": 2, "offset": 3.0}]}));
+    let changes = angles::split(&mut plan, &lib, &pairs, beat);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(plan.shots.len(), 4);
+    assert_eq!(plan.beats(), 16, "the beats stay");
+    let (a, b) = (&plan.shots[1], &plan.shots[2]);
+    assert_eq!((a.clip.as_str(), a.beats, b.clip.as_str(), b.beats), ("c1", 4, "c2", 4));
+    // the phone's picture of the same instants: 360° media time 8 s is the phone's 5 s
+    assert!((b.from - (6.0 + 4.0 * beat - 3.0)).abs() < 1e-9, "{}", b.from);
+    // the opening and the ending are left whole; no pairs, nothing changes
+    let mut again = plan.clone();
+    assert!(angles::split(&mut again, &lib, &[], beat).is_empty());
+    assert!(angles::pairs(&json!({"pairs": [{"a": 1, "b": 2, "offset": "x"}]})).is_empty());
+    assert!(opts(json!({"brief": "x"})).angles && !opts(json!({"brief": "x", "angles": false})).angles);
+}
+
+#[test]
+fn a_360_photo_is_looked_round_but_never_followed_or_steadied() {
+    // the 360° shots photos (five seconds of a still each), the flat ones videos
+    let lib: Vec<Candidate> = library()
+        .into_iter()
+        .map(|mut c| {
+            if c.kind == Kind::Vr {
+                c.photo = true;
+                c.moving = false;
+                (c.start, c.end, c.media_seconds) = (0.0, 5.0, 5.0);
+            }
+            c
+        })
+        .collect();
+    let p = lib.iter().find(|c| c.photo).unwrap();
+    assert!(p.fits(Camera::PlanetIn) && p.fits(Camera::Orbit) && p.fits(Camera::Drift) && p.fits(Camera::WhipPan));
+    assert!(!p.fits(Camera::Follow) && !p.fits(Camera::Hyperlapse) && !p.fits(Camera::SpeedRamp));
+    // its shot can outlast the photo's five seconds
+    assert_eq!(window_from(p, 12.0), Some(0.0));
+    let o = opts(json!({"brief": "a 30 s reel of our trip", "seconds": 30}));
+    let beat = beat_of(120.0);
+    let plan = rules_plan(&lib, &o, beat, 120.0);
+    let photo_shots: Vec<usize> = plan.shots.iter().enumerate().filter(|(_, s)| lib.iter().any(|c| c.id == s.clip && c.photo)).map(|(k, _)| k).collect();
+    assert!(!photo_shots.is_empty(), "{:?}", plan.shots);
+    for &k in &photo_shots {
+        let s = &plan.shots[k];
+        assert!(lib.iter().find(|c| c.id == s.clip).unwrap().fits(s.camera), "{s:?}");
+    }
+    assert!(photo_shots.iter().any(|&k| matches!(
+        plan.shots[k].camera,
+        Camera::PlanetIn | Camera::PlanetOut | Camera::Orbit | Camera::Drift | Camera::WhipPan | Camera::Reveal | Camera::PushIn
+    )));
+    let wins = windows(&plan, &Beats::grid(120.0));
+    let steps = compile(&plan, &lib, &wins, &o, (1080.0, 1920.0), beat);
+    for &k in &photo_shots {
+        let place = steps.iter().find(|s| s.on == On::Place && s.shot == Some(k)).unwrap();
+        assert_eq!(place.params["audio"], false, "{:?}", place.params);
+        assert!(place.params.get("sourceIn").is_none());
+        assert!(
+            !steps.iter().any(|s| s.shot == Some(k) && matches!(s.id.as_str(), "clip.stabilize360" | "clip.follow360" | "clip.hyperlapse360")),
+            "a still is not steadied or tracked"
+        );
+    }
 }

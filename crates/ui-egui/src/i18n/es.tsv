@@ -4304,3 +4304,46 @@
 	Check Pauses	Comprobar pausas
 	Direct an Edit…	Dirigir una edición…
 	Directing an edit	Dirigiendo una edición
+	Cut-outs	Recortes
+	Cut Out the Person	Recortar a la persona
+	Clone Trail	Estela de clones
+	Shadow Clone	Clon de sombra
+	Time Freeze	Congelar el tiempo
+	Text Behind the Person	Texto detrás de la persona
+	Person in Front	Persona delante
+	Glow Round the Person	Resplandor alrededor de la persona
+	Find the Sky	Buscar el cielo
+	Sky Swap	Cambiar el cielo
+	Nadir Logo	Logotipo del nadir
+	Aim 360° Camera	Apuntar la cámara 360°
+	Drag to aim the 360° camera	Arrastre para apuntar la cámara 360°
+	No 360° clip under the playhead	No hay ningún clip de 360° bajo el cabezal
+	3D Photo	Foto 3D
+	Depth Blur	Desenfoque por profundidad
+	Travel Across	Desplazamiento horizontal
+	Travel Down	Desplazamiento vertical
+	Push In	Acercar
+	Still Depth	Profundidad fija
+	Zoom to Fill	Ampliar para rellenar
+	Focus Depth	Profundidad de enfoque
+	Depth of Field	Profundidad de campo
+	Blur the Foreground	Desenfocar el primer plano
+	Sync 360° Motion Sensor	Sincronizar el sensor de movimiento 360°
+	Upscale and Restore	Ampliar y restaurar
+	Smooth Slow Motion	Cámara lenta fluida
+	Object Mask	Máscara de objeto
+	Object	Objeto
+	Object Mask: click the thing in the Program monitor	Máscara de objeto: haz clic en el objeto en el monitor de programa
+	Click the thing in the Program monitor; Shift-click to add to it, Option-click to take away; then track the mask with its track buttons	Haz clic en el objeto en el monitor de programa; Mayús+clic para añadir, Opción+clic para quitar; luego sigue la máscara con sus botones de seguimiento
+	Masking the object (see Progress); Shift-click to add to it, Option-click to take away	Creando la máscara del objeto (ver Progreso); Mayús+clic para añadir, Opción+clic para quitar
+	Download a Model	Descargar un modelo
+	Download	Descargar
+	Size:	Tamaño:
+	Licence:	Licencia:
+	Learnt from:	Entrenado con:
+	From:	Origen:
+	{what} needs this model. It is downloaded once and runs on this computer.	{what} necesita este modelo. Se descarga una vez y se ejecuta en este ordenador.
+	Nothing is downloaded until you choose Download; its SHA-256 is checked and it is kept in FilmCraft's models folder.	No se descarga nada hasta que eliges Descargar; se comprueba su SHA-256 y se guarda en la carpeta de modelos de FilmCraft.
+	Nothing to download	No hay nada que descargar
+	Downloading {name} (see Progress); choose {what} again when it finishes	Descargando {name} (ver Progreso); elige {what} de nuevo cuando termine
+	Remove Object	Quitar objeto

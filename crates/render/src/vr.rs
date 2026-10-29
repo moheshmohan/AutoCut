@@ -14,7 +14,9 @@
 //! equirectangular picture; for fisheye lenses the angle θ from each lens's axis and its bearing
 //! φ, the image circle's radius × the lens's distortion polynomial of θ / half-FOV. Where both
 //! lenses of a dual fisheye see a direction, they are cross-faded over a band of
-//! [`BLEND_DEGREES`] either side of the line half way between their axes. Bilinear sampling,
+//! [`BLEND_DEGREES`] either side of the line half way between their axes — or, with the shifts
+//! between the lenses measured on the picture ([`crate::vr_seam`]: near things seen from two
+//! points), over a wider band with each lens's sample moved towards the other's. Bilinear sampling,
 //! wrapping across the ±180° seam of a whole-sphere equirectangular picture.
 //!
 //! Directions: +Z forward, +X right, +Y up (`filmcraft_media::spherical`).
@@ -270,15 +272,40 @@ pub fn radial(poly: &[f64], t: f64) -> f64 {
 pub enum SourceModel {
     /// The view rectangle (x0, y0, w, h: the left eye of a stereoscopic frame), the captured view
     /// in radians across and down, and whether it wraps (all 360°).
-    Equirect {
-        rect: [f64; 4],
-        span: (f64, f64),
-        wrap: bool,
-    },
-    DualFisheye {
-        lenses: Vec<LensPx>,
-        blend: f64,
-    },
+    Equirect { rect: [f64; 4], span: (f64, f64), wrap: bool, nadir: Option<NadirPx> },
+    /// `seam`: the shifts between the lenses along their seam, when measured on the picture
+    /// ([`crate::vr_seam::stitched`]): each lens's sample is moved part of the way towards the
+    /// other's across the cross-fade.
+    DualFisheye { lenses: Vec<LensPx>, blend: f64, seam: Option<std::sync::Arc<crate::vr_seam::SeamFlow>>, nadir: Option<NadirPx> },
+}
+
+/// The patch over the bottom of the sphere ([`filmcraft_media::spherical::Nadir`]): a direction
+/// within `radius` of straight down (radians) is seen as the one mirrored out across its edge
+/// (`mirror`), or as the edge itself round it (`smooth`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NadirPx {
+    pub mirror: bool,
+    pub radius: f64,
+}
+
+impl NadirPx {
+    fn of(s: &Spherical) -> Option<Self> {
+        let n = s.nadir.filter(filmcraft_media::spherical::Nadir::on)?;
+        Some(NadirPx { mirror: n.mode == filmcraft_media::spherical::NadirMode::Mirror, radius: n.size.to_radians() })
+    }
+
+    /// The direction seen for `d` (world directions, +Y up).
+    #[inline]
+    pub fn patched(&self, d: V3) -> V3 {
+        let a = (-d[1]).clamp(-1.0, 1.0).acos();
+        if a >= self.radius {
+            return d;
+        }
+        let h = (d[0] * d[0] + d[2] * d[2]).sqrt();
+        let (cx, cz) = if h > 1e-9 { (d[0] / h, d[2] / h) } else { (1.0, 0.0) };
+        let b = if self.mirror { 2.0 * self.radius - a } else { self.radius * 1.04 }.min(PI);
+        [b.sin() * cx, -b.cos(), b.sin() * cz]
+    }
 }
 
 /// Where the source saw one direction: up to two pixels with their weights.
@@ -304,11 +331,14 @@ impl SourceModel {
                     StereoLayout::SideBySide => [0.0, 0.0, (w / 2.0).floor().max(1.0), h],
                 };
                 let span = (s.captured[0].to_radians(), s.captured[1].to_radians());
-                SourceModel::Equirect { rect, span, wrap: s.captured[0] >= 359.999 }
+                SourceModel::Equirect { rect, span, wrap: s.captured[0] >= 359.999, nadir: NadirPx::of(&s) }
             }
-            Projection::DualFisheye { lenses } => {
-                SourceModel::DualFisheye { lenses: lenses.iter().map(|l| LensPx::new(l, w, h)).collect(), blend: BLEND_DEGREES.to_radians() }
-            }
+            Projection::DualFisheye { lenses } => SourceModel::DualFisheye {
+                lenses: lenses.iter().map(|l| LensPx::new(l, w, h)).collect(),
+                blend: BLEND_DEGREES.to_radians(),
+                seam: None,
+                nadir: NadirPx::of(&s),
+            },
         }
     }
 
@@ -330,11 +360,20 @@ impl SourceModel {
         m
     }
 
-    /// Where the source saw direction `d`.
+    /// The patch over the bottom of the sphere, when there is one.
+    pub fn nadir(&self) -> Option<NadirPx> {
+        match self {
+            SourceModel::Equirect { nadir, .. } | SourceModel::DualFisheye { nadir, .. } => *nadir,
+        }
+    }
+
+    /// Where the source saw direction `d` (or, inside the patch over the bottom of the sphere,
+    /// the direction shown there instead).
     #[inline]
     pub fn locate(&self, d: V3) -> Located {
+        let d = self.nadir().map_or(d, |n| n.patched(d));
         match self {
-            SourceModel::Equirect { rect, span, wrap } => {
+            SourceModel::Equirect { rect, span, wrap, .. } => {
                 let (lon, lat) = lonlat(d);
                 let x = rect[0] + (lon / span.0 + 0.5) * rect[2];
                 let y = rect[1] + (0.5 - lat / span.1) * rect[3];
@@ -346,7 +385,7 @@ impl SourceModel {
                 }
                 Located::One(x, y)
             }
-            SourceModel::DualFisheye { lenses, blend } => {
+            SourceModel::DualFisheye { lenses, blend, seam, .. } => {
                 let mut hits = [(0.0, None), (0.0, None)];
                 for (k, l) in lenses.iter().take(2).enumerate() {
                     hits[k] = l.locate(d);
@@ -361,6 +400,14 @@ impl SourceModel {
                         } else if w0 <= 0.0 {
                             Located::One(b.0, b.1)
                         } else {
+                            // each lens's sample moved towards the other's along the seam's shift
+                            let (a, b) = match (seam, lenses.first(), lenses.get(1)) {
+                                (Some(f), Some(l0), Some(l1)) => match f.warped(d, w0, l0, l1) {
+                                    Some((ma, mb)) => (ma.unwrap_or(a), mb.unwrap_or(b)),
+                                    None => (a, b),
+                                },
+                                _ => (a, b),
+                            };
                             Located::Two((a.0, a.1, w0), (b.0, b.1, 1.0 - w0))
                         }
                     }
@@ -773,6 +820,7 @@ mod tests {
             step: 1.0,
             up: vec![[0.0, 1.0, 0.0], [up[0] as f32, up[1] as f32, up[2] as f32]],
             heading: Vec::new(),
+            lag: 0.0,
         });
         let raw = SourceModel::new(&s, (2000, 1000));
         let at = |secs: f64| SourceModel::at(&s, (2000, 1000), Tick::from_seconds_f64(secs));
@@ -795,7 +843,14 @@ mod tests {
         // upright, the camera swung 10° right a second in: the turn back puts what it saw straight
         // ahead 10° to the right, where it was before the swing
         let mut s = two_lenses();
-        s.horizon = Some(filmcraft_media::spherical::Horizon { level: true, steady: true, step: 1.0, up: vec![[0.0, 1.0, 0.0]; 2], heading: vec![0.0, 10.0] });
+        s.horizon = Some(filmcraft_media::spherical::Horizon {
+            level: true,
+            steady: true,
+            step: 1.0,
+            up: vec![[0.0, 1.0, 0.0]; 2],
+            heading: vec![0.0, 10.0],
+            lag: 0.0,
+        });
         let raw = SourceModel::new(&s, (2000, 1000));
         let at = |secs: f64| SourceModel::at(&s, (2000, 1000), Tick::from_seconds_f64(secs));
         let px = |l: Located| match l {
@@ -917,5 +972,38 @@ mod tests {
         }
         let empty = SourceModel::new(&Spherical::dual_fisheye(vec![], ""), (16, 8));
         assert_eq!(empty.locate([0.0, 0.0, 1.0]), Located::Missed);
+    }
+
+    #[test]
+    fn the_bottom_of_the_sphere_is_patched_by_what_is_round_it() {
+        let deg = |d: V3| (-d[1]).clamp(-1.0, 1.0).acos().to_degrees();
+        let m = NadirPx { mirror: true, radius: 20f64.to_radians() };
+        let down = [0.0, -1.0, 0.0];
+        assert!((deg(m.patched(down)) - 40.0).abs() < 1e-6, "straight down sees 40° out");
+        let at = |a: f64| [a.to_radians().sin(), -a.to_radians().cos(), 0.0];
+        assert!((deg(m.patched(at(15.0))) - 25.0).abs() < 1e-6, "mirrored across the edge");
+        assert_eq!(m.patched(at(30.0)), at(30.0), "outside: as it is");
+        let smooth = NadirPx { mirror: false, radius: 20f64.to_radians() };
+        assert!((deg(smooth.patched(at(5.0))) - 20.8).abs() < 1e-6);
+        // a picture whose bottom is red: patched, a view straight down sees none of it
+        let (w, h) = (360usize, 180usize);
+        let mut img = Image::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let red = y >= h - 15;
+                img.px[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&if red { [1.0, 0.0, 0.0, 1.0] } else { [0.2, 0.6, 0.2, 1.0] });
+            }
+        }
+        let view = View::flat(0.0, -90.0, 0.0, 60.0, 0.0, 64, 64);
+        let red = |s: &Spherical| {
+            let out = reframe(&img, &SourceModel::new(s, (w, h)), &view, 64, 64, 1);
+            out.px.chunks(4).filter(|p| p[0] > 0.5 && p[1] < 0.3).count()
+        };
+        let mut s = Spherical::equirect();
+        assert!(red(&s) > 300, "the stick is there");
+        s.nadir = Some(filmcraft_media::spherical::Nadir { mode: filmcraft_media::spherical::NadirMode::Mirror, size: 20.0 });
+        assert_eq!(red(&s), 0, "and patched over");
+        s.nadir = Some(filmcraft_media::spherical::Nadir { mode: filmcraft_media::spherical::NadirMode::Off, size: 20.0 });
+        assert!(red(&s) > 300, "switched off");
     }
 }

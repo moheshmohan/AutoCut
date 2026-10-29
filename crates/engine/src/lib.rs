@@ -12,6 +12,7 @@
 
 pub mod aaf_omf;
 pub mod adjustment_clip;
+pub mod aim360;
 pub mod audio_generate;
 pub mod auto_color;
 pub mod auto_duck;
@@ -23,18 +24,24 @@ pub mod clip_ops;
 pub mod color;
 pub mod commands;
 pub mod contact_sheet;
+pub mod cutout;
 pub mod demo;
+pub mod denoise;
+pub mod depth;
 pub mod doc_path;
 pub mod elements;
 pub mod essential_sound;
 pub mod export_tools;
 pub mod feedback;
+pub mod follow_reid;
 pub mod graphic_templates;
 pub mod graphics;
 pub mod graphics_counter;
+pub mod gyro_sync;
 pub mod insta360;
 pub mod instagram;
 pub mod interchange;
+pub mod interpolate;
 pub mod ken_burns;
 pub mod keyboard;
 mod keyframe_move;
@@ -55,7 +62,9 @@ pub mod multicam;
 pub mod music;
 pub mod music_neural;
 pub mod music_preview;
+pub mod nadir;
 pub mod narration;
+pub mod object_mask;
 pub mod panels;
 pub mod paste_media;
 pub mod perf;
@@ -77,7 +86,9 @@ pub mod redact_targets;
 pub mod reframe;
 pub mod relink;
 pub mod remix;
+pub mod remove_object;
 pub mod safe_zones;
+pub mod same_moments;
 pub mod scene_check;
 pub mod scene_detect;
 pub mod scene_models;
@@ -88,6 +99,7 @@ pub mod sequence_tools;
 pub mod settings;
 pub mod shortcut_presets;
 pub mod shortcuts;
+pub mod sky;
 pub mod soundfonts;
 pub mod source_monitor;
 pub mod speech_pauses;
@@ -101,6 +113,7 @@ pub mod text_fx;
 pub mod transcript;
 pub mod transition_tools;
 pub mod trim;
+pub mod upscale;
 pub mod video_template_frames;
 pub mod video_template_share;
 pub mod video_templates;
@@ -548,6 +561,14 @@ pub struct Session {
     /// 360° analyses (`clip.stabilize360`, `clip.follow360`) whose keyframes are written when they
     /// finish, and what the finished ones made.
     pub vr360: vr360::Vr360Jobs,
+    /// Upscale and Restore jobs (`media.upscale`) whose copies are attached when they finish.
+    pub upscales: upscale::Upscales,
+    /// Smooth Slow Motion jobs (`media.interpolate`) whose copies are attached when they finish.
+    pub interpolations: interpolate::Interpolations,
+    /// Remove Object jobs (`clip.removeObject`) whose copies are attached when they finish.
+    pub removals: remove_object::Removals,
+    /// People cut out of clips (`clip.cutOut` and its effects): a stand-in cutter for tests.
+    pub cutouts: cutout::Cutouts,
     /// Speech understanding jobs (`media.understandSpeech`) whose transcripts and analyses are
     /// stored when they finish, and what the finished ones found.
     pub speech_jobs: speech_understand::Understandings,
@@ -715,6 +736,10 @@ impl Session {
             scene_jobs: Vec::new(),
             reframes: Default::default(),
             vr360: Default::default(),
+            upscales: Default::default(),
+            interpolations: Default::default(),
+            removals: Default::default(),
+            cutouts: Default::default(),
             speech_jobs: Default::default(),
             motion_tracks: Default::default(),
             redacts: Default::default(),
@@ -860,6 +885,9 @@ impl Session {
         scene_detect::poll(self);
         reframe::poll(self);
         vr360::poll(self);
+        upscale::poll(self);
+        interpolate::poll(self);
+        remove_object::poll(self);
         speech_understand::poll(self);
         motion_track::poll(self);
         redact::poll(self);

@@ -193,8 +193,8 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"folders": folders, "recordings": recs, "missing": missing}))
 }
 
-/// Imports `recs` (finished videos; one `file.import` each, reusing what the project holds), the
-/// proxies attached and the lenses aligned when asked. Every edit folds into one undo step.
+/// Imports `recs` (finished videos and `.insp` photos; one `file.import` each, reusing what the
+/// project holds), the proxies attached and the lenses aligned when asked. Every edit folds into one undo step.
 fn import_recordings(s: &mut Session, recs: &[Recording], p: &Value, cmd: &str) -> Result<Vec<Value>> {
     let proxies = bool_p(p, "proxies").unwrap_or(true);
     let align = bool_p(p, "align").unwrap_or(true);
@@ -206,8 +206,9 @@ fn import_recordings(s: &mut Session, recs: &[Recording], p: &Value, cmd: &str) 
             out.push(json!({"stem": r.stem, "imported": false, "why": "still downloading (or not a finished recording)"}));
             continue;
         }
-        if r.kind != "video" {
-            out.push(json!({"stem": r.stem, "imported": false, "why": "360° photos are not imported yet"}));
+        // (360° photos: the camera's `.insp`; its `.jpg` and `.dng` exports are not read as 360°)
+        if r.kind != "video" && !r.path.to_ascii_lowercase().ends_with(".insp") {
+            out.push(json!({"stem": r.stem, "imported": false, "why": "only the camera's .insp photos are imported as 360°"}));
             continue;
         }
         let mut params = serde_json::Map::new();
@@ -338,6 +339,56 @@ fn download(s: &mut Session, p: &Value) -> Result<Value> {
         Some(Err(e)) => Err(EngineError::Other(format!("{cmd}: {e}"))),
         None => Ok(out),
     }
+}
+
+/// The camera's own low-resolution copy of the recording at `path` — `LRV_<date>_<time>_01_<n>.lrv`
+/// beside `VID_<date>_<time>_00_<n>.insv` (or `.mp4`) — when the host can list its folder.
+pub(crate) fn camera_proxy(s: &Session, path: &str) -> Option<String> {
+    let p = std::path::Path::new(path);
+    let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "insv" | "mp4") {
+        return None;
+    }
+    let stem = p.file_stem()?.to_str()?;
+    let ["VID", date, time, _, number] = stem.split('_').collect::<Vec<_>>()[..] else { return None };
+    let dir = p.parent()?;
+    let names = s.services.list_dir(&dir.to_string_lossy())?.ok()?;
+    let fits = |name: &str| {
+        let q = std::path::Path::new(name);
+        let ext_ok = q.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "lrv" | "insv" | "mp4"));
+        let parts: Vec<&str> = q.file_stem().and_then(|x| x.to_str()).unwrap_or_default().split('_').collect();
+        ext_ok && matches!(parts[..], ["LRV", d, t, _, n] if d == date && t == time && n == number)
+    };
+    let name = names.into_iter().filter(|n| fits(n)).min()?;
+    Some(dir.join(name).to_string_lossy().into_owned())
+}
+
+/// Attaches the camera's `.lrv` ([`camera_proxy`]) to each freshly imported recording among
+/// `items` without a proxy — what the 360° analyses read ([`crate::vr360::analysis_view`]) — when
+/// it fits (its length and rate checked); the ones attached. Part of the import's undo step.
+pub(crate) fn attach_camera_proxies(s: &mut Session, items: &[filmcraft_project::ItemId]) -> Vec<Value> {
+    let mut pairs = Vec::new();
+    for &id in items {
+        let Some(m) = s.project.item(id).and_then(|it| it.as_media()) else { continue };
+        let filmcraft_project::MediaRef::File { path } = &m.media else { continue };
+        if m.proxy.is_some() {
+            continue;
+        }
+        if let Some(px) = camera_proxy(s, path)
+            && crate::proxies::check_proxy(s, id, &px).is_ok()
+        {
+            pairs.push((id, px));
+        }
+    }
+    let n0 = s.history.undo.len();
+    if pairs.is_empty() || crate::proxies::attach(s, &pairs, true).is_err() {
+        return Vec::new();
+    }
+    // (undoing the import, the step before, takes the proxies away with the items)
+    if n0 > 0 {
+        s.history.undo.truncate(n0);
+    }
+    pairs.into_iter().map(|(i, p)| json!({"item": i.0, "path": p})).collect()
 }
 
 #[cfg(test)]

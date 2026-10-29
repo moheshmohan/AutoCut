@@ -4,7 +4,7 @@
 //!
 //! | command | does |
 //! |---|---|
-//! | `clip.vrMove` | one `move` on 360° clips (`clips`, default the selection, else every 360° clip), over `seconds` from `at` (clip seconds; each move has its own default place and length): `planetIn` (a tiny planet spinning open into the view), `planetOut` (the view folding into a tiny planet), `orbit` (a turn all the way round, `degrees`), `barrelRoll` (a roll about the view's axis), `whipPan` (a fast turn to `yaw`/`pitch`, or `degrees` along, from `fromYaw`/`fromPitch` when given — a whip in — else from the view there, with a little motion blur), `reveal` (from the sky — `from: "ground"`: the ground — down to the view), `pushIn` (the view narrowing by `amount`), `crashZoom` (the same, fast), `drift` (a slow turn of `degrees`); `direction` `right` or `left`; the view a move ends on is the camera's own there unless `yaw` / `pitch` / `fov` say; one undo step |
+//! | `clip.vrMove` | one `move` on 360° clips (`clips`, default the selection, else every 360° clip), over `seconds` from `at` (clip seconds; each move has its own default place and length): `planetIn` (a tiny planet spinning open into the view), `planetOut` (the view folding into a tiny planet), `orbit` (a turn all the way round, `degrees`), `barrelRoll` (a roll about the view's axis), `whipPan` (a fast turn to `yaw`/`pitch`, or `degrees` along, from `fromYaw`/`fromPitch` when given — a whip in — else from the view there, with a little motion blur), `reveal` (from the sky — `from: "ground"`: the ground — down to the view), `pushIn` (the view narrowing by `amount`), `crashZoom` (the same, fast), `drift` (a slow turn of `degrees`), `drone` (a high stick read as a drone: the view rising and pulling back, tipping down to `pitch` −50° and widening), `thirdPerson` (looking down at the person holding the camera from above and behind — `yaw` their direction — for the rest of the clip), `spin` (a fast turn all the way round, blurred), `flip` (a somersault forwards through the ground and the sky, blurred up and down), `wobble` (a playful shake that dies away, `amount` its size); `direction` `right` or `left`; the view a move ends on is the camera's own there unless `yaw` / `pitch` / `fov` say; one undo step |
 //! | `clip.hyperlapse360` | a 360° hyperlapse: the clip plays at `speed` % with frame blending, and its camera is held steady by `clip.stabilize360` (`mode`, `strong` by default; a job) |
 //!
 //! A move replaces the keyframes its parameters had inside its window and keeps those outside:
@@ -47,11 +47,36 @@ pub enum Move {
     PushIn,
     CrashZoom,
     Drift,
+    /// The camera on a high stick read as a drone: rising and pulling back, looking down.
+    Drone,
+    /// Behind and above the person holding the camera: a third-person view of them and the way
+    /// ahead.
+    ThirdPerson,
+    /// A fast turn all the way round.
+    Spin,
+    /// A somersault: the view turning over forwards through the ground and the sky.
+    Flip,
+    /// A playful shake that dies away.
+    Wobble,
 }
 
 impl Move {
-    pub const ALL: [Move; 9] =
-        [Move::PlanetIn, Move::PlanetOut, Move::Orbit, Move::BarrelRoll, Move::WhipPan, Move::Reveal, Move::PushIn, Move::CrashZoom, Move::Drift];
+    pub const ALL: [Move; 14] = [
+        Move::PlanetIn,
+        Move::PlanetOut,
+        Move::Orbit,
+        Move::BarrelRoll,
+        Move::WhipPan,
+        Move::Reveal,
+        Move::PushIn,
+        Move::CrashZoom,
+        Move::Drift,
+        Move::Drone,
+        Move::ThirdPerson,
+        Move::Spin,
+        Move::Flip,
+        Move::Wobble,
+    ];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -64,6 +89,11 @@ impl Move {
             Move::PushIn => "pushIn",
             Move::CrashZoom => "crashZoom",
             Move::Drift => "drift",
+            Move::Drone => "drone",
+            Move::ThirdPerson => "thirdPerson",
+            Move::Spin => "spin",
+            Move::Flip => "flip",
+            Move::Wobble => "wobble",
         }
     }
 
@@ -73,7 +103,12 @@ impl Move {
         Some(match k.as_str() {
             "planetin" | "tinyplanet" | "tinyplanetintro" | "planet" | "littleplanet" => Move::PlanetIn,
             "planetout" | "tinyplanetoutro" => Move::PlanetOut,
-            "orbit" | "spin" | "pan360" => Move::Orbit,
+            "orbit" | "pan360" => Move::Orbit,
+            "spin" | "fastspin" | "spin360" => Move::Spin,
+            "drone" | "invisibledrone" | "droneshot" | "rise" | "pullback" => Move::Drone,
+            "thirdperson" | "followbehind" | "behind" | "chase" => Move::ThirdPerson,
+            "flip" | "frontflip" | "somersault" => Move::Flip,
+            "wobble" | "jelly" | "shake" => Move::Wobble,
             "barrelroll" | "roll" => Move::BarrelRoll,
             "whippan" | "whip" | "swishpan" => Move::WhipPan,
             "reveal" | "skyreveal" | "tiltdown" => Move::Reveal,
@@ -93,7 +128,11 @@ impl Move {
             Move::WhipPan => Some(0.4),
             Move::Reveal => Some(1.6),
             Move::CrashZoom => Some(0.35),
-            Move::Orbit | Move::PushIn | Move::Drift => None,
+            Move::Drone => Some(2.5),
+            Move::Spin => Some(0.8),
+            Move::Flip => Some(0.9),
+            Move::Wobble => Some(1.2),
+            Move::Orbit | Move::PushIn | Move::Drift | Move::ThirdPerson => None,
         }
     }
 
@@ -107,7 +146,9 @@ impl Move {
     fn influence(self) -> f64 {
         match self {
             Move::Orbit => 0.12,
-            Move::Drift => 0.3,
+            Move::Drift | Move::ThirdPerson | Move::Wobble => 0.3,
+            Move::Drone => 0.5,
+            Move::Spin | Move::Flip => 0.72,
             Move::PushIn => 0.4,
             Move::BarrelRoll => 0.5,
             Move::Reveal | Move::PlanetIn | Move::PlanetOut => 0.6,
@@ -252,8 +293,61 @@ pub fn keys(m: Move, a: f64, b: f64, start: Cam, end: Cam, o: &MoveOptions) -> V
             let to = o.fov.unwrap_or_else(|| narrowed(start.fov, amount));
             vec![Key { seconds: a, values: vec![("fov", start.fov)] }, Key { seconds: b, values: vec![("fov", to.clamp(5.0, 175.0))] }]
         }
+        Move::Drone => {
+            // up and back: the view tips down and widens, pulled back a little into the sphere,
+            // drifting round as a drone would
+            let down = o.pitch.unwrap_or(DRONE_PITCH).clamp(-90.0, 0.0);
+            let wide = o.fov.unwrap_or((start.fov + 30.0).min(140.0)).clamp(5.0, 175.0);
+            vec![
+                Key { seconds: a, values: vec![("yaw", start.yaw), ("pitch", start.pitch), ("fov", start.fov), ("distance", start.distance)] },
+                Key { seconds: at(0.4), values: vec![("pitch", (start.pitch + down) / 2.0)] },
+                Key {
+                    seconds: b,
+                    values: vec![("yaw", start.yaw + 15.0 * dir), ("pitch", down), ("fov", wide), ("distance", start.distance.max(DRONE_DISTANCE))],
+                },
+            ]
+        }
+        Move::ThirdPerson => {
+            // looking down at the person from above and behind them, settling in
+            let yaw = target_yaw;
+            let pitch = o.pitch.unwrap_or(THIRD_PITCH).clamp(-90.0, 0.0);
+            let fov = o.fov.unwrap_or(THIRD_FOV).clamp(5.0, 175.0);
+            vec![
+                Key { seconds: a, values: vec![("yaw", yaw), ("pitch", pitch - 8.0), ("roll", 0.0), ("fov", (fov + 12.0).min(175.0)), ("distance", 0.4)] },
+                Key { seconds: b, values: vec![("yaw", yaw), ("pitch", pitch), ("roll", 0.0), ("fov", fov), ("distance", 0.3)] },
+            ]
+        }
+        Move::Spin => {
+            let turn = o.degrees.unwrap_or(360.0 * dir);
+            vec![Key { seconds: a, values: vec![("yaw", start.yaw)] }, Key { seconds: b, values: vec![("yaw", start.yaw + turn)] }]
+        }
+        Move::Flip => {
+            // forwards: down through the ground, behind, up through the sky and back
+            let turn = o.degrees.unwrap_or(360.0);
+            vec![Key { seconds: a, values: vec![("pitch", start.pitch)] }, Key { seconds: b, values: vec![("pitch", start.pitch - turn)] }]
+        }
+        Move::Wobble => {
+            let k = o.amount.unwrap_or(1.0).clamp(0.0, 4.0);
+            WOBBLE
+                .iter()
+                .enumerate()
+                .map(|(i, (y, r))| Key {
+                    seconds: at(i as f64 / (WOBBLE.len() - 1) as f64),
+                    values: vec![("yaw", start.yaw + y * k * dir), ("roll", start.roll + r * k * dir)],
+                })
+                .collect()
+        }
     }
 }
+
+/// The drone's view at its end: looking down, pulled back into the sphere.
+const DRONE_PITCH: f64 = -50.0;
+const DRONE_DISTANCE: f64 = 0.3;
+/// The third-person view: looking down at the person, wide.
+const THIRD_PITCH: f64 = -38.0;
+const THIRD_FOV: f64 = 115.0;
+/// A wobble's turns and rolls (degrees) at even steps, dying away.
+const WOBBLE: [(f64, f64); 7] = [(0.0, 0.0), (7.0, -5.0), (-6.0, 4.5), (4.0, -3.0), (-2.5, 2.0), (1.0, -0.8), (0.0, 0.0)];
 
 /// Set `id` to `v` at `t` as a Bézier keyframe of `influence`.
 fn put(e: &mut EffectInstance, id: &str, t: Tick, v: f64, influence: f64) {
@@ -304,7 +398,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "360 Camera Move",
             menu: &[],
             shortcut: None,
-            params: r#"{"clips":[id]?,"move":"planetIn"|"planetOut"|"orbit"|"barrelRoll"|"whipPan"|"reveal"|"pushIn"|"crashZoom"|"drift","at":seconds?,"seconds":f64?,"yaw":deg?,"pitch":-90..90?,"fov":5..175?,"degrees":deg?,"direction":"right"|"left"="right","from":"sky"|"ground"="sky","fromYaw":deg?,"fromPitch":-90..90?,"amount":0..4?,"strength":0..1=0.5}"#,
+            params: r#"{"clips":[id]?,"move":"planetIn"|"planetOut"|"orbit"|"barrelRoll"|"whipPan"|"reveal"|"pushIn"|"crashZoom"|"drift"|"drone"|"thirdPerson"|"spin"|"flip"|"wobble","at":seconds?,"seconds":f64?,"yaw":deg?,"pitch":-90..90?,"fov":5..175?,"degrees":deg?,"direction":"right"|"left"="right","from":"sky"|"ground"="sky","fromYaw":deg?,"fromPitch":-90..90?,"amount":0..4?,"strength":0..1=0.5}"#,
             enabled: has_seq,
             run: camera_move,
             journal: true,
@@ -365,6 +459,7 @@ fn camera_move(s: &mut Session, p: &Value) -> Result<Value> {
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
     let frame = (seq.settings.width, seq.settings.height);
     let label = format!("360 Camera Move: {}", m.id());
+    let n0 = s.history.undo.len();
     let report = s.edit_sequence(&label, |q, _, _| {
         let mut out = Vec::new();
         for c in &clips {
@@ -382,7 +477,15 @@ fn camera_move(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(out)
     })?;
-    Ok(json!({"clips": report}))
+    let mut out = json!({"clips": report});
+    // a tiny planet looks straight down, a drone far down: the hand and stick patched over
+    if matches!(m, Move::PlanetIn | Move::PlanetOut | Move::Drone) {
+        let patched = crate::vr360::patch_planets(s, &clips, n0, &label);
+        if !patched.is_empty() {
+            out["nadirPatched"] = json!(patched);
+        }
+    }
+    Ok(out)
 }
 
 /// Write move `m` over `[from, to]` clip seconds on `it` (its camera added when missing).
@@ -403,24 +506,32 @@ pub(crate) fn apply(it: &mut TrackItem, frame: (u32, u32), m: Move, from: f64, t
             put(e, id, *t, *v, m.influence());
         }
     }
-    if m == Move::WhipPan && o.strength > 0.0 {
-        whip_blur(it, ta, mid, tb, o.strength);
+    // the fast turns blur along their way
+    match m {
+        Move::WhipPan | Move::Spin if o.strength > 0.0 => whip_blur(it, ta, mid, tb, o.strength, 90.0),
+        Move::Flip if o.strength > 0.0 => whip_blur(it, ta, mid, tb, o.strength, 0.0),
+        _ => {}
     }
     Some(())
 }
 
-/// A whip's motion blur: Directional Blur along the turn, none at its ends and most at its middle
-/// (added after the camera when the clip has none).
-fn whip_blur(it: &mut TrackItem, a: Tick, mid: Tick, b: Tick, strength: f64) {
+/// A whip's motion blur: Directional Blur along the turn (`direction` 90° across, 0° up and down),
+/// none at its ends and most at its middle (added after the camera when the clip has none).
+fn whip_blur(it: &mut TrackItem, a: Tick, mid: Tick, b: Tick, strength: f64, direction: f64) {
     if !it.effects.iter().any(|e| e.effect == BLUR) {
         let Some(def) = filmcraft_project::find_effect(BLUR) else { return };
         let mut e = def.instance();
-        e.params.insert("direction".into(), Param::new(ParamValue::Float(90.0)));
+        e.params.insert("direction".into(), Param::new(ParamValue::Float(direction)));
         e.params.insert("length".into(), Param::new(ParamValue::Float(0.0)));
         let at = it.effects.iter().position(|e| e.effect == REFRAME).map_or(0, |i| i.saturating_add(1)).min(it.effects.len());
         it.effects.insert(at, e);
     }
     let Some(e) = it.effects.iter_mut().find(|e| e.effect == BLUR) else { return };
+    if let Some(d) = e.param_mut("direction")
+        && d.keyframes.is_empty()
+    {
+        d.value = ParamValue::Float(direction);
+    }
     clear(e, "length", a, b);
     for (t, v) in [(a, 0.0), (mid, WHIP_BLUR * strength.clamp(0.0, 1.0)), (b, 0.0)] {
         put(e, "length", t, v, 0.5);
@@ -453,6 +564,45 @@ mod tests {
 
     fn value(k: &Key, id: &str) -> Option<f64> {
         k.values.iter().find(|(i, _)| *i == id).map(|(_, v)| *v)
+    }
+
+    #[test]
+    fn drones_third_persons_spins_flips_and_wobbles() {
+        let o = MoveOptions { direction: 1.0, strength: 0.5, ..Default::default() };
+        let last = |k: &[Key], id: &str| k.iter().rev().find_map(|k| value(k, id)).unwrap();
+        // a drone rises and pulls back: looking down, wider, further back
+        let k = keys(Move::Drone, 0.0, 2.5, cam(), cam(), &o);
+        assert!(last(&k, "pitch") < -40.0 && last(&k, "fov") > 100.0 && last(&k, "distance") >= 0.3);
+        // a third person looks down at the holder, where `yaw` says
+        let k = keys(Move::ThirdPerson, 0.0, 4.0, cam(), cam(), &MoveOptions { yaw: Some(170.0), ..o });
+        assert_eq!(last(&k, "yaw"), 170.0);
+        assert!(last(&k, "pitch") < -30.0 && last(&k, "fov") > 100.0);
+        // a spin turns all the way round fast; a flip turns over forwards
+        let k = keys(Move::Spin, 0.0, 0.8, cam(), cam(), &o);
+        assert_eq!(last(&k, "yaw") - cam().yaw, 360.0);
+        let k = keys(Move::Flip, 0.0, 0.9, cam(), cam(), &o);
+        assert_eq!(last(&k, "pitch") - cam().pitch, -360.0);
+        // a wobble comes back where it started
+        let k = keys(Move::Wobble, 0.0, 1.2, cam(), cam(), &MoveOptions { amount: Some(2.0), ..o });
+        assert_eq!((last(&k, "yaw"), last(&k, "roll")), (cam().yaw, cam().roll));
+        assert!(k.iter().filter_map(|k| value(k, "yaw")).any(|y| (y - cam().yaw).abs() > 10.0), "bigger with amount");
+        // through the command: blurred spins and flips, the flip's blur up and down
+        let mut s = demo_360();
+        let (c, _) = first_clip(&s);
+        s.execute(MOVE_CMD, json!({"clips": [c.0], "move": "flip", "at": 1.0})).unwrap();
+        let it = s.active_sequence().unwrap().find_item(c).unwrap().1.clone();
+        let blur = it.effect(BLUR).expect("a flip blurs");
+        assert_eq!(blur.f64_at("direction", Tick::ZERO), 0.0);
+        let half = media_time(&it, 1.45);
+        assert!(blur.f64_at("length", half) > 5.0);
+        // mid-flip the view is upside down and still draws
+        let cam = it.effect(REFRAME).unwrap();
+        assert!((cam.f64_at("pitch", half) - (cam.f64_at("pitch", media_time(&it, 1.0)) - 180.0)).abs() < 25.0);
+        s.execute("playhead.set", json!({"seconds": 1.45})).unwrap();
+        assert!(s.render_program(0.25).is_some());
+        for name in ["drone", "thirdPerson", "spin", "wobble", "invisible drone", "follow behind", "somersault"] {
+            assert!(s.execute(MOVE_CMD, json!({"clips": [c.0], "move": name})).is_ok(), "{name}");
+        }
     }
 
     #[test]

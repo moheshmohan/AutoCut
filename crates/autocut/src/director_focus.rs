@@ -239,7 +239,7 @@ pub(super) fn part_of(parts: &[(i64, i64)], t: Option<i64>) -> Option<usize> {
 /// drift (360°) or a push in otherwise; its first look.
 fn shot_of(s: &PlannedShot, c: &Candidate, beat: f64) -> Option<PlannedShot> {
     let secs = f64::from(s.beats) * beat;
-    let fits = |m: Camera| m.for_kind(c.kind) && m.min_seconds() <= secs + 1e-6 && !matches!(m, Camera::PlanetIn | Camera::PlanetOut | Camera::WhipPan);
+    let fits = |m: Camera| c.fits(m) && m.min_seconds() <= secs + 1e-6 && !matches!(m, Camera::PlanetIn | Camera::PlanetOut | Camera::WhipPan);
     let camera = if fits(s.camera) {
         s.camera
     } else if c.kind == Kind::Vr && fits(Camera::Drift) {

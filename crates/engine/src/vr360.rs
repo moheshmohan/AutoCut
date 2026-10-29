@@ -3,11 +3,12 @@
 //! | command | does |
 //! |---|---|
 //! | `clip.reframe360` | looks at 360° clips (`clips`, default the selection, else every clip of 360° media) through a virtual camera (the `vr_reframe` effect, added when missing, framing the sequence's frame): `yaw` (turn right), `pitch` (look up), `roll`, `fov` (degrees across) and `distance` (0 flat … 1 tiny planet) set, or keyframed `at` a clip time, or a whole camera move as `keys`; a `preset` (`natural`, `wide`, `tinyPlanet`, `rabbitHole`, `sphere`) first; one undo step |
-//! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` (alone, they change the item's own); `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings); with nothing to change, what the items' VR Properties are |
+//! | `media.vrProperties` | Interpret Footage ▸ VR Properties: `projection` `auto` (what the file says), `equirectangular`, `dualFisheye` or `none`; equirectangular `layout` and `capturedView`; a dual fisheye's `halfFov` (alone, they change the item's own); `level` levels the horizon by the camera's motion sensor and `steady` steadies its heading (both on by themselves for Insta360 recordings); `seamFlow` (on by itself) stitches near things on a dual fisheye's seam by the lenses' shifts measured on each frame (`filmcraft_render::vr_seam`) rather than only cross-fading them; `nadir` (`off`, `mirror`, `smooth`) patches the bottom of the sphere — the hand and stick — within `nadirSize` degrees (22) of straight down: the ground round it mirrored in, or its edge's colour drawn to the middle (tiny planets switch it on, mirrored, where it was never set); with nothing to change, what the items' VR Properties are |
+//! | `media.seam360` | the seam of a dual-fisheye item at `seconds` (default: the middle), measured on the full-size frame (`filmcraft_render::vr_seam`): how much the lenses' pictures disagree across it with a plain cross-fade and stitched (`ghosting`, mean luma difference), the largest shift (degrees) and the share of the seam moved, the milliseconds measuring took (`shifts`: every column's, across and along, degrees); with `path`, a PNG of the band unrolled round the seam — lens 0, lens 1, the cross-fade, the stitch |
 //! | `media.align360` | lines the two lenses of dual-fisheye media up along their seam (a few frames across the clip, [`filmcraft_render::vr::align_lenses`]) and keeps the result in its VR Properties |
 //! | `clip.stabilize360` | holds the virtual camera steady: the camera's turn measured from the pictures frame to frame (`filmcraft_render::vr_motion`: points on cube faces, a robust rotation fit), then `mode` `smooth` / `light` / `strong` (the operator's own turns kept, the shake gone) or `lock` (the first frame's direction throughout), written as the effect's Stabilization keyframes; a job; `off` |
 //! | `media.salience360` | where things happen in a 360° item: around `seconds` (default the middle of `from`..`to`, else of the item), a few frames of its panorama 0.2 s apart scored by motion (else detail) in each direction ([`filmcraft_render::vr_motion::salient_directions`]): up to `max` directions (yaw, pitch, score), strongest first, at least 45° apart |
-//! | `clip.follow360` | turns the virtual camera to follow a subject (`target` `subject`, `box` in the clip's frame at `at`, or `face`): a wide tracking camera kept on it while the subject tracker follows it both ways from `at`, the path smoothed (`smooth` 0 close … 1 floaty) into yaw and pitch keyframes; a job |
+//! | `clip.follow360` | turns the virtual camera to follow a subject (`target` `subject`, `box` in the clip's frame at `at`, or `face`): a wide tracking camera kept on it while the subject tracker follows it both ways from `at`, the path smoothed (`smooth` 0 close … 1 floaty) into yaw and pitch keyframes; a subject lost for a few frames (blocked, gone behind something, turned round) is looked for again by its look in the tracking view and the views either side (`refind`: `auto` — the colours find it, SigLIP 2 confirms it when the scene models are downloaded —, `colour`, `siglip` — every window by SigLIP, slower — or `off`), the report's `foundAgain` counting it; a job |
 //!
 //! A clip of 360° media shows its raw picture (an equirectangular panorama, or the two fisheye
 //! circles of an Insta360 recording) until it is reframed; reframed, it is a flat clip of the
@@ -32,6 +33,9 @@ use crate::{EngineError, Result, Session};
 const REFRAME_CMD: &str = "clip.reframe360";
 const PROPS_CMD: &str = "media.vrProperties";
 const ALIGN_CMD: &str = "media.align360";
+const SEAM_CMD: &str = "media.seam360";
+/// The picture of the seam `media.seam360` writes: its width and each strip's height, pixels.
+const SEAM_PICTURE: (usize, usize) = (1440, 96);
 /// Most keyframes one `keys` list writes.
 const MAX_KEYS: usize = 10_000;
 /// Most frames `media.align360` looks at.
@@ -47,7 +51,7 @@ const FOLLOW_CMD: &str = "clip.follow360";
 /// The virtual camera's stabilisation parameters.
 const STAB_PARAMS: [&str; 3] = ["stab_yaw", "stab_pitch", "stab_roll"];
 /// Side of the cube faces the stabiliser tracks on, pixels.
-const STAB_FACE: usize = 160;
+pub(crate) const STAB_FACE: usize = 160;
 /// How closely the stabilisation keyframes redraw the measured correction, degrees.
 const STAB_TOLERANCE_DEGREES: f64 = 0.05;
 /// The follow's tracking camera picture (16:9).
@@ -78,7 +82,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "VR Properties…",
             menu: &["Clip", "Modify"],
             shortcut: None,
-            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?,"level":bool?,"steady":bool?}"#,
+            params: r#"{"items":[id]?,"projection":"auto"|"equirectangular"|"dualFisheye"|"none"?,"layout":"mono"|"overUnder"|"sideBySide"?,"capturedView":[h,v]?,"halfFov":30..135?,"level":bool?,"steady":bool?,"seamFlow":bool?,"nadir":"off"|"mirror"|"smooth"?,"nadirSize":3..60?}"#,
             enabled: |_| Ok(()),
             run: vr_properties,
             journal: true,
@@ -98,7 +102,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "360 Follow Subject",
             menu: &["Clip"],
             shortcut: None,
-            params: r#"{"clip":id?,"target":"subject"|"box"|"face"="subject","box":[x,y,w,h]?,"at":seconds?,"smooth":0..1=0.5,"analysisFps":1..30=10,"wait":bool=false}"#,
+            params: r#"{"clip":id?,"target":"subject"|"box"|"face"="subject","box":[x,y,w,h]?,"at":seconds?,"smooth":0..1=0.5,"analysisFps":1..30=10,"refind":"auto"|"siglip"|"colour"|"off"="auto","wait":bool=false}"#,
             enabled: has_seq,
             run: follow,
             journal: true,
@@ -123,6 +127,16 @@ pub fn commands() -> Vec<CommandSpec> {
             run: align,
             journal: true,
         },
+        CommandSpec {
+            id: SEAM_CMD,
+            label: "360° Seam",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"item":id,"seconds":f64?,"path":str?,"shifts":bool=false}"#,
+            enabled: |_| Ok(()),
+            run: seam,
+            journal: false,
+        },
     ]
 }
 
@@ -135,13 +149,21 @@ pub fn is_360(s: &Session, item: ItemId) -> bool {
 /// equirectangular panorama (dual fisheye stitched, one eye of stereo, a partial view placed on
 /// the sphere), so scene detection, descriptions and subject boxes see every direction and a
 /// box's centre is a direction ([`filmcraft_project::vr::panorama_direction`]); anything else as it
-/// is.
+/// is. A 360° recording with a proxy (an Insta360 `.lrv`, attached on import) is read from it:
+/// the same lenses, a tenth of the pixels to decode ([`panorama_view`] with `full` reads the media).
 pub fn analysis_view(s: &Session, item: ItemId) -> Option<filmcraft_media::SharedSource> {
-    let src = s.source(item)?;
+    panorama_view(s, item, false)
+}
+
+/// [`analysis_view`], from the full-size media with `full` (a sharp still of the panorama).
+pub fn panorama_view(s: &Session, item: ItemId, full: bool) -> Option<filmcraft_media::SharedSource> {
     let plain = |v: &Spherical| v.is_equirect() && v.layout == StereoLayout::Mono && v.captured == [360.0, 180.0];
     match s.project.vr_of(item).filter(|v| !plain(v)) {
-        Some(v) => Some(filmcraft_render::vr_source::PanoramaSource::new(src.clone(), v).map_or(src, |p| Arc::new(p) as filmcraft_media::SharedSource)),
-        None => Some(src),
+        Some(v) => {
+            let src = if full { s.media.full_res_source(&s.project, item, &*s.services) } else { analysis_source(s, item) }?;
+            Some(filmcraft_render::vr_source::PanoramaSource::new(src.clone(), v).map_or(src, |p| Arc::new(p) as filmcraft_media::SharedSource))
+        }
+        None => s.source(item),
     }
 }
 
@@ -154,7 +176,38 @@ pub(crate) fn camera_key(e: &EffectInstance) -> String {
 /// A stable fingerprint of how a 360° picture maps onto the sphere (VR Properties, its horizon
 /// included): caches of what its panorama shows key on it.
 pub(crate) fn sphere_key(v: &Spherical) -> String {
-    fnv_key(&serde_json::to_vec(v).unwrap_or_default())
+    // (the patch over the bottom of the sphere hides the hand and stick, not what is there to see)
+    let v = Spherical { nadir: None, ..v.clone() };
+    fnv_key(&serde_json::to_vec(&v).unwrap_or_default())
+}
+
+/// A tiny planet looks straight down, where the hand and stick are: the media of `clips` whose
+/// bottom was never patched gets the patch ([`filmcraft_media::spherical::Nadir`], mirrored in),
+/// folded into the undo step since `n0` (`label`). The items patched.
+pub(crate) fn patch_planets(s: &mut Session, clips: &[ClipId], n0: usize, label: &str) -> Vec<u64> {
+    let Some(seq) = s.active_sequence() else { return Vec::new() };
+    let mut items: Vec<ItemId> =
+        clips.iter().filter_map(|c| seq.find_item(*c).map(|(_, it)| it.item)).filter(|i| s.project.vr_of(*i).is_some_and(|v| v.nadir.is_none())).collect();
+    items.sort();
+    items.dedup();
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let done = s.edit(label, |pr, _| {
+        for id in &items {
+            if let Some(ItemKind::Media(m)) = pr.item_mut(*id).map(|i| &mut i.kind)
+                && let Some(v) = m.interpret.vr.as_mut()
+            {
+                v.nadir = Some(filmcraft_media::spherical::Nadir {
+                    mode: filmcraft_media::spherical::NadirMode::Mirror,
+                    size: filmcraft_media::spherical::NADIR_SIZE,
+                });
+            }
+        }
+        Ok(())
+    });
+    crate::clip_ops::collapse_history(s, n0, label);
+    if done.is_ok() { items.iter().map(|i| i.0).collect() } else { Vec::new() }
 }
 
 fn fnv_key(bytes: &[u8]) -> String {
@@ -392,6 +445,7 @@ fn reframe(s: &mut Session, p: &Value) -> Result<Value> {
         .map(|c| c.0)
         .collect();
     let label = if off { "360 Reframe Off" } else { "360 Reframe" };
+    let n0 = s.history.undo.len();
     let report = s.edit_sequence(label, |q, _, _| {
         let mut out = Vec::new();
         for c in &video {
@@ -449,6 +503,13 @@ fn reframe(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(out)
     })?;
     let mut res = json!({"clips": report});
+    // a tiny planet: its hand and stick patched over
+    if !off && matches!(str_p(p, "preset"), Some("tinyPlanet" | "tiny_planet" | "planet")) {
+        let patched = patch_planets(s, &video, n0, label);
+        if !patched.is_empty() {
+            res["nadirPatched"] = json!(patched);
+        }
+    }
     if !not_360.is_empty() {
         res["note"] = json!(format!(
             "clips {not_360:?} have no VR Properties: their pictures are taken as whole equirectangular panoramas (media.vrProperties sets how they map onto the sphere)"
@@ -457,7 +518,7 @@ fn reframe(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(res)
 }
 
-fn items_p(s: &Session, p: &Value) -> Vec<ItemId> {
+pub(crate) fn items_p(s: &Session, p: &Value) -> Vec<ItemId> {
     match p.get("items").and_then(Value::as_array) {
         Some(a) => a.iter().filter_map(|v| v.as_u64().map(ItemId)).collect(),
         None => item_p(p, "item").map(|i| vec![i]).unwrap_or_else(|| s.state.project_selection.clone()),
@@ -465,7 +526,7 @@ fn items_p(s: &Session, p: &Value) -> Vec<ItemId> {
 }
 
 /// The media items (not sequences, not missing) among `items`.
-fn media_items(s: &Session, items: &[ItemId], cmd: &str) -> Result<Vec<ItemId>> {
+pub(crate) fn media_items(s: &Session, items: &[ItemId], cmd: &str) -> Result<Vec<ItemId>> {
     let out: Vec<ItemId> = items.iter().copied().filter(|i| s.project.item(*i).is_some_and(|it| matches!(it.kind, ItemKind::Media(_)))).collect();
     if out.is_empty() {
         return Err(bad(cmd, "no media item given or selected (`items`)"));
@@ -500,8 +561,30 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let level = bool_p(p, "level");
     let steady = bool_p(p, "steady");
+    let seam_flow = bool_p(p, "seamFlow");
+    let nadir = match str_p(p, "nadir") {
+        None => None,
+        Some("off") => Some(filmcraft_media::spherical::NadirMode::Off),
+        Some("mirror") => Some(filmcraft_media::spherical::NadirMode::Mirror),
+        Some("smooth") => Some(filmcraft_media::spherical::NadirMode::Smooth),
+        Some(o) => return Err(bad(cmd, format!("`nadir` is off, mirror or smooth, not `{}`", o.chars().take(20).collect::<String>()))),
+    };
+    let nadir_size = match f64_p(p, "nadirSize") {
+        Some(v) if v.is_finite() && (filmcraft_media::spherical::NADIR_RANGE.0..=filmcraft_media::spherical::NADIR_RANGE.1).contains(&v) => Some(v),
+        Some(_) => return Err(bad(cmd, "`nadirSize` is 3 to 60 degrees")),
+        None => None,
+    };
     // nothing to change: what the items' VR Properties are
-    if projection.is_none() && layout.is_none() && captured.is_none() && half_fov.is_none() && level.is_none() && steady.is_none() {
+    if projection.is_none()
+        && layout.is_none()
+        && captured.is_none()
+        && half_fov.is_none()
+        && level.is_none()
+        && steady.is_none()
+        && seam_flow.is_none()
+        && nadir.is_none()
+        && nadir_size.is_none()
+    {
         return Ok(json!({"items": items.iter().map(|id| json!({"item": id.0, "vr": vr_json(s.project.vr_of(*id))})).collect::<Vec<_>>()}));
     }
     // what each item gets (decided before the edit: `auto` opens the file)
@@ -533,6 +616,16 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
                 for l in lenses.iter_mut() {
                     l.half_fov = h;
                 }
+            }
+            if let Some(f) = seam_flow {
+                v.seam_flow = f;
+            }
+            if nadir.is_some() || nadir_size.is_some() {
+                let was = v.nadir;
+                v.nadir = Some(filmcraft_media::spherical::Nadir {
+                    mode: nadir.or(was.map(|n| n.mode)).unwrap_or_default(),
+                    size: nadir_size.or(was.map(|n| n.size)).unwrap_or(filmcraft_media::spherical::NADIR_SIZE),
+                });
             }
             match level {
                 // the recording's own horizon, levelling
@@ -589,6 +682,9 @@ fn vr_properties(s: &mut Session, p: &Value) -> Result<Value> {
 fn vr_json(v: Option<&Spherical>) -> Value {
     let Some(v) = v else { return Value::Null };
     let mut j = serde_json::to_value(v).unwrap_or(Value::Null);
+    if let (false, Some(o)) = (v.is_equirect(), j.as_object_mut()) {
+        o.insert("seamFlow".into(), json!(v.seam_flow));
+    }
     if let (Some(h), Some(o)) = (&v.horizon, j.as_object_mut()) {
         let r1 = |x: f64| (x * 10.0).round() / 10.0;
         let mut sum = json!({"level": h.level, "seconds": r1(h.seconds()), "samples": h.up.len(), "maxTilt": r1(h.max_tilt())});
@@ -676,6 +772,65 @@ fn salience(s: &mut Session, p: &Value) -> Result<Value> {
         "seconds": times.iter().map(|t| (t * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
         "directions": found.iter().map(|d| json!({"yaw": r(d.yaw), "pitch": r(d.pitch), "score": d.score, "by": if d.motion { "motion" } else { "detail" }})).collect::<Vec<_>>(),
     }))
+}
+
+/// `media.seam360`: the seam of a dual-fisheye item at `seconds`, measured on the full-size frame.
+fn seam(s: &mut Session, p: &Value) -> Result<Value> {
+    use filmcraft_render::vr::SourceModel;
+    use filmcraft_render::vr_seam::{frame_luma, seam_of};
+    let cmd = SEAM_CMD;
+    let item = item_p(p, "item").ok_or_else(|| bad(cmd, "need `item`"))?;
+    let Some(vr) = s.project.vr_of(item).cloned().filter(|v| !v.is_equirect()) else { return Err(bad(cmd, "not dual-fisheye 360° media")) };
+    let src = s.media.full_res_source(&s.project, item, &*s.services).ok_or_else(|| bad(cmd, "the item's media is offline"))?;
+    let dur = src.info().duration.seconds().max(0.0);
+    let fd = src.info().video.as_ref().map_or(1.0 / 30.0, |v| v.frame_rate.sane().frame_duration().seconds().max(1e-3));
+    let secs = match f64_p(p, "seconds") {
+        Some(x) if x.is_finite() && x >= 0.0 => x.min((dur - fd).max(0.0)),
+        Some(_) => return Err(bad(cmd, "`seconds` is seconds of the media, zero or more")),
+        None => dur / 2.0,
+    };
+    let t = Tick::from_seconds_f64(secs);
+    let frame = src.video_frame(filmcraft_media::FrameRequest { time: t, scale: 1.0 }).map_err(|e| bad(cmd, format!("cannot decode the frame: {e}")))?;
+    let model = SourceModel::at(&vr, (frame.width as usize, frame.height as usize), t);
+    let frames = filmcraft_render::vr_seam::seam_frames(&src, t, 1.0, frame.clone());
+    let clock = web_time::Instant::now();
+    let flow = seam_of(&model, &frames.iter().map(|f| f.as_ref()).collect::<Vec<_>>()).ok_or_else(|| bad(cmd, "its lenses have no seam between them"))?;
+    let ms = clock.elapsed().as_secs_f64() * 1000.0;
+    let SourceModel::DualFisheye { lenses, .. } = &model else { return Err(bad(cmd, "not dual-fisheye 360° media")) };
+    let luma = frame_luma(&frame);
+    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+    let across: Vec<f64> = flow.shift.iter().map(|s| f64::from(s[0]).to_degrees().abs()).collect();
+    let mut out = json!({
+        "item": item.0,
+        "seconds": r3(secs),
+        "measureMs": (ms * 10.0).round() / 10.0,
+        "ghosting": {"crossFade": flow.ghosting(lenses, &luma, false).map(r3), "stitched": flow.ghosting(lenses, &luma, true).map(r3)},
+        "largestShift": (across.iter().copied().fold(0.0, f64::max) * 100.0).round() / 100.0,
+        "moved": r3(across.iter().filter(|a| **a > 0.25).count() as f64 / across.len().max(1) as f64),
+        "seamFlow": vr.seam_flow,
+    });
+    if bool_p(p, "shifts").unwrap_or(false) {
+        out["shifts"] = json!(
+            flow.shift
+                .iter()
+                .map(|s| [(f64::from(s[0]).to_degrees() * 100.0).round() / 100.0, (f64::from(s[1]).to_degrees() * 100.0).round() / 100.0])
+                .collect::<Vec<_>>()
+        );
+    }
+    if let Some(path) = str_p(p, "path") {
+        let (grey, w, h) = flow.band_picture(lenses, &luma, SEAM_PICTURE.0, SEAM_PICTURE.1).ok_or_else(|| bad(cmd, "its lenses have no seam between them"))?;
+        let rgba: Vec<u8> = grey
+            .iter()
+            .flat_map(|v| {
+                let g = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                [g, g, g, 255]
+            })
+            .collect();
+        let png = filmcraft_export::encode_png(rgba, w as u32, h as u32).map_err(|e| bad(cmd, e.to_string()))?;
+        s.services.write_file(path, &png).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
+        out["path"] = json!(path);
+    }
+    Ok(out)
 }
 
 fn align(s: &mut Session, p: &Value) -> Result<Value> {
@@ -904,14 +1059,20 @@ pub(crate) fn clips_360(s: &Session, p: &Value, cmd: &str) -> Result<Vec<TrackIt
 }
 
 /// The analysis source of a 360° item: its proxy when one is attached (an `.lrv`: the same
-/// lenses, small and quick to decode), else the media.
-fn analysis_source(s: &Session, item: ItemId) -> Option<filmcraft_media::SharedSource> {
-    let proxy = s.project.resolve_media(item).and_then(|(_, m, _)| match &m.proxy {
-        Some(filmcraft_project::MediaRef::File { path }) => Some(path.clone()),
+/// lenses, small and quick to decode) and of the media's shape (the lenses where they are in the
+/// media's picture), else the media.
+pub(crate) fn analysis_source(s: &Session, item: ItemId) -> Option<filmcraft_media::SharedSource> {
+    let media = s.project.resolve_media(item).map(|(_, m, _)| m);
+    let proxy = media.and_then(|m| match &m.proxy {
+        Some(filmcraft_project::MediaRef::File { path }) if !m.offline => Some(path.clone()),
         _ => None,
     });
+    let aspect = |v: Option<&filmcraft_media::VideoStreamInfo>| v.map(|v| f64::from(v.width.max(1)) / f64::from(v.height.max(1)));
+    let want = aspect(media.and_then(|m| m.info.video.as_ref()));
     if let Some(p) = proxy
         && let Ok(src) = s.media.open_file(&p, &*s.services)
+        && let (Some(a), Some(b)) = (aspect(src.info().video.as_ref()), want)
+        && (a / b - 1.0).abs() < 0.01
     {
         return Some(src);
     }
@@ -938,7 +1099,7 @@ fn clip_frames(it: &TrackItem, rate: filmcraft_time::FrameRate, fps: f64) -> Vec
 }
 
 /// A linear picture of `src` at media time `t`, small (analysis).
-fn analysis_picture(src: &filmcraft_media::SharedSource, t: Tick) -> Option<filmcraft_render::Image> {
+pub(crate) fn analysis_picture(src: &filmcraft_media::SharedSource, t: Tick) -> Option<filmcraft_render::Image> {
     let f = src.video_frame(filmcraft_media::FrameRequest { time: t, scale: 0.5 }).ok()?;
     let dec = if f.width > 2048 { 2 } else { 1 };
     let (w, h, px) = f.to_linear_f32_decimated(dec);
@@ -1075,7 +1236,9 @@ struct Seen {
 }
 
 /// Follows the subject through frames `order` (indices into `frames`), starting where the
-/// clip's camera looks at the first of them. `None` when cancelled.
+/// clip's camera looks at the first of them; once it is lost for a few frames it is looked for
+/// again by its look (`refind`, [`crate::follow_reid`]). What was seen, and when it was found
+/// again (seconds) and how alike it was then; `None` when cancelled.
 #[allow(clippy::too_many_arguments)]
 fn follow_run(
     src: &filmcraft_media::SharedSource,
@@ -1085,9 +1248,11 @@ fn follow_run(
     order: &[usize],
     target: FollowTarget,
     faces: Option<&crate::redact::DetectFn>,
+    refind: Option<&crate::follow_reid::Judge>,
     prog: &filmcraft_export::Progress,
-) -> Option<Vec<(usize, Seen)>> {
-    use filmcraft_render::subject::{SubjectBox, SubjectTracker};
+) -> Option<(Vec<(usize, Seen)>, Vec<(f64, f32, Option<f32>)>)> {
+    use crate::follow_reid::{Look, MAX_SEARCHES, SEARCH_AFTER};
+    use filmcraft_render::subject::{SubjectBox, SubjectTracker, TrackState};
     use filmcraft_render::vr_motion::{TRACK_FOV, TrackingCamera};
     let first = *order.first()?;
     let (start_view, _) = views.get(first)?;
@@ -1106,6 +1271,10 @@ fn follow_run(
     let every = (FOLLOW_FPS / 2.0).round().max(1.0) as usize;
     let mut tr = SubjectTracker::new();
     let mut out = Vec::with_capacity(order.len());
+    // the subject's look, its size in the tracking camera's picture, and how long it is lost
+    let mut look = refind.map(|j| Look::new(j.clone()));
+    let mut size = (0.15, 0.3);
+    let (mut lost, mut searches, mut refound) = (0usize, 0usize, Vec::new());
     for (n, &k) in order.iter().enumerate() {
         if prog.cancel.load(Ordering::Relaxed) {
             return None;
@@ -1125,10 +1294,49 @@ fn follow_run(
             hint = crate::reframe::largest_face(detect, &pic, fw, fh).or(hint);
         }
         let obs = tr.push(&pic, fw, fh, t, hint.take());
+        // held where it was last seen, or gone: looked for again by its look every few frames
+        let missing = matches!(obs.state, TrackState::Coasting | TrackState::Lost | TrackState::None);
+        lost = if missing { lost + 1 } else { 0 };
+        if let Some(lk) = look.as_ref().filter(|l| l.ready())
+            && lost >= SEARCH_AFTER
+            && lost.is_multiple_of(SEARCH_AFTER)
+            && searches < MAX_SEARCHES
+        {
+            // in the tracking camera's picture, and every other time in the views either side too
+            let sides = searches.is_multiple_of(2);
+            searches += 1;
+            if let Some((c, fb, sim, agree)) = find_again(lk, &img, &model, &cam, &pic, size, sides) {
+                refound.push((t, sim, agree));
+                lost = 0;
+                let d = c.as_ref().unwrap_or(&cam).direction(fb.cx, fb.cy);
+                let aim = views.get(k).map_or(d, |(_, m)| filmcraft_render::vr::mtvec(m, d));
+                let (lon, lat) = filmcraft_render::vr::lonlat(aim);
+                out.push((k, Seen { yaw: lon.to_degrees(), pitch: lat.to_degrees() }));
+                match c {
+                    // another view: the tracking camera turned onto it, the tracker started again
+                    Some(c) => {
+                        cam = c.recentred(d);
+                        tr = SubjectTracker::new();
+                        hint = SubjectBox::new(0.5, 0.5, fb.w, fb.h);
+                    }
+                    None => {
+                        tr = SubjectTracker::new();
+                        hint = Some(fb);
+                    }
+                }
+                continue;
+            }
+        }
         let Some(b) = obs.bbox.filter(|_| obs.confidence >= filmcraft_render::reframe::MIN_CONFIDENCE) else {
             out.push((k, Seen { yaw: f64::NAN, pitch: f64::NAN }));
             continue;
         };
+        if !missing {
+            size = (b.w, b.h);
+            if let Some(lk) = look.as_mut().filter(|l| l.learning()) {
+                lk.learn(&pic, fw, fh, b);
+            }
+        }
         let d = cam.direction(b.cx, b.cy);
         // the clip's stabilisation turns its rays first (final = C · view): aim the view at Cᵀ·d
         let aim = views.get(k).map_or(d, |(_, c)| filmcraft_render::vr::mtvec(c, d));
@@ -1141,7 +1349,43 @@ fn follow_run(
             hint = SubjectBox::new(0.5, 0.5, b.w, b.h);
         }
     }
-    Some(out)
+    Some((out, refound))
+}
+
+/// How far either side of the tracking camera the subject is looked for, degrees.
+const FIND_SIDE: f64 = 0.9 * filmcraft_render::vr_motion::TRACK_FOV;
+
+/// Where a lost subject (of `size`, shares) is now and how alike it is: in the tracking camera's
+/// picture `pic` (no new camera), else — with `sides` — in the view either side of it (that
+/// camera).
+fn find_again(
+    look: &crate::follow_reid::Look,
+    img: &filmcraft_render::Image,
+    model: &filmcraft_render::vr::SourceModel,
+    cam: &filmcraft_render::vr_motion::TrackingCamera,
+    pic: &[u8],
+    size: (f64, f64),
+    sides: bool,
+) -> Option<(Option<filmcraft_render::vr_motion::TrackingCamera>, filmcraft_render::subject::SubjectBox, f32, Option<f32>)> {
+    let (fw, fh) = (FOLLOW_SIZE.0 as usize, FOLLOW_SIZE.1 as usize);
+    if let Some((b, sim, agree)) = look.search(pic, fw, fh, size.0, size.1) {
+        return Some((None, b, sim, agree));
+    }
+    if !sides {
+        return None;
+    }
+    let (lon, lat) = filmcraft_render::vr::lonlat(cam.direction(0.5, 0.5));
+    let mut best: Option<(filmcraft_render::vr_motion::TrackingCamera, filmcraft_render::subject::SubjectBox, f32, Option<f32>)> = None;
+    for side in [FIND_SIDE, -FIND_SIDE] {
+        let c = filmcraft_render::vr_motion::TrackingCamera::new(lon.to_degrees() + side, lat.to_degrees(), FOLLOW_SIZE);
+        let p = filmcraft_render::vr::reframe(img, model, &c.view, fw, fh, 1).over_black_rgba8();
+        if let Some((b, sim, agree)) = look.search(&p, fw, fh, size.0, size.1)
+            && best.as_ref().is_none_or(|x| sim > x.2)
+        {
+            best = Some((c, b, sim, agree));
+        }
+    }
+    best.map(|(c, b, sim, agree)| (Some(c), b, sim, agree))
 }
 
 /// A flat view's field of view, degrees across (90 for the sphere).
@@ -1170,6 +1414,21 @@ fn follow(s: &mut Session, p: &Value) -> Result<Value> {
         None => FOLLOW_FPS,
         Some(v) if (1.0..=30.0).contains(&v) => v,
         Some(_) => return Err(bad(cmd, "`analysisFps` is 1..30")),
+    };
+    // how a lost subject is found again: SigLIP 2 when the scene models are downloaded
+    let refind = match str_p(p, "refind").unwrap_or("auto") {
+        "off" => None,
+        "colour" | "color" => Some(crate::follow_reid::Judge::Colour),
+        "auto" => {
+            Some(s.scenes.check_models().filter(|m| m.embedder_id().is_some()).map_or(crate::follow_reid::Judge::Colour, crate::follow_reid::Judge::Confirmed))
+        }
+        "siglip" => Some(crate::follow_reid::Judge::Embedder(
+            s.scenes
+                .check_models()
+                .filter(|m| m.embedder_id().is_some())
+                .ok_or_else(|| bad(cmd, "the scene models (SigLIP 2) are not downloaded: `refind: \"colour\"`"))?,
+        )),
+        o => return Err(bad(cmd, format!("`refind` is auto, siglip, colour or off, not `{o}`"))),
     };
     let mut faces = None;
     let target = match str_p(p, "target").unwrap_or("subject") {
@@ -1223,12 +1482,23 @@ fn follow(s: &mut Session, p: &Value) -> Result<Value> {
         let back: Vec<usize> = (0..=seed.min(n.saturating_sub(1))).rev().collect();
         let fwd: Vec<usize> = (seed..n).collect();
         let mut seen: Vec<Option<Seen>> = (0..n).map(|_| None).collect();
+        // the embedder on the GPU while the follow runs (without the GPU, the colours)
+        let (refind, _gpu) = match refind {
+            Some(j) => match j.models().map(|m| m.gpu()) {
+                Some(Ok(g)) => (Some(j), g),
+                Some(Err(_)) => (Some(crate::follow_reid::Judge::Colour), None),
+                None => (Some(j), None),
+            },
+            None => (None, None),
+        };
+        let mut refound: Vec<(f64, f32, Option<f32>)> = Vec::new();
         for order in [back, fwd] {
             if order.is_empty() {
                 continue;
             }
-            let run =
-                follow_run(&src, &sph, &frames, &views, &order, target, faces.as_ref(), prog).ok_or_else(|| "stopped: nothing was changed".to_string())?;
+            let (run, again) = follow_run(&src, &sph, &frames, &views, &order, target, faces.as_ref(), refind.as_ref(), prog)
+                .ok_or_else(|| "stopped: nothing was changed".to_string())?;
+            refound.extend(again);
             for (k, sn) in run {
                 if let Some(slot) = seen.get_mut(k)
                     && slot.as_ref().is_none_or(|old| old.yaw.is_nan())
@@ -1251,7 +1521,23 @@ fn follow(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(vec![ClipKeys {
             clip,
             keys: vec![("yaw", key(&ys)), ("pitch", key(&ps))],
-            summary: json!({"clip": clip.0, "frames": n, "found": (found as f64 / n.max(1) as f64 * 1000.0).round() / 1000.0, "keyframes": keep.len()}),
+            summary: json!({
+                "clip": clip.0,
+                "frames": n,
+                "found": (found as f64 / n.max(1) as f64 * 1000.0).round() / 1000.0,
+                "keyframes": keep.len(),
+                "foundAgain": refound.len(),
+                // when (clip seconds) and how alike (cosine), the first few
+                "foundAgainAt": refound
+                    .iter()
+                    .take(20)
+                    .map(|(t, m, a)| {
+                        let r3 = |x: f32| (f64::from(x) * 1000.0).round() / 1000.0;
+                        json!({"seconds": (t * 100.0).round() / 100.0, "match": r3(*m), "siglip": a.map(r3)})
+                    })
+                    .collect::<Vec<_>>(),
+                "refind": refind.as_ref().map(crate::follow_reid::Judge::name),
+            }),
         }])
     })
 }
@@ -1363,8 +1649,14 @@ mod tests {
         let before = s.project.vr_of(item).cloned().unwrap();
         let key = sphere_key(&before);
         // (as an Insta360 recording brings it)
-        let h =
-            filmcraft_media::spherical::Horizon { level: true, steady: true, step: 0.1, up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]], heading: vec![0.0, 3.0] };
+        let h = filmcraft_media::spherical::Horizon {
+            level: true,
+            steady: true,
+            step: 0.1,
+            up: vec![[0.0, 1.0, 0.0], [0.5, 0.866, 0.0]],
+            heading: vec![0.0, 3.0],
+            lag: 0.0,
+        };
         s.execute(PROPS_CMD, json!({"items": [item.0], "projection": "none"})).unwrap();
         s.edit("Horizon", |pr, _| {
             if let Some(ItemKind::Media(m)) = pr.item_mut(item).map(|i| &mut i.kind) {
@@ -1437,6 +1729,72 @@ mod tests {
         }
     }
 
+    /// A 360° image sequence of a red-and-blue figure walking right, blocked by a passer-by for
+    /// 12 frames and then 70° further on (out of the tracking camera's view): its frames'
+    /// paths and the figure's yaw at each.
+    fn blocked_walk(dir: &std::path::Path) -> (Vec<String>, Vec<f64>) {
+        let (w, h) = (1024u32, 512u32);
+        let mut paths = Vec::new();
+        let mut yaws = Vec::new();
+        for k in 0..80u32 {
+            let yaw = if k < 30 { -30.0 + f64::from(k) } else { 60.0 + f64::from(k - 30) };
+            let blocked = (18..30).contains(&k);
+            let img = image::RgbaImage::from_fn(w, h, |x, y| {
+                let (lon, lat) = (f64::from(x) / f64::from(w) * 360.0 - 180.0, 90.0 - f64::from(y) / f64::from(h) * 180.0);
+                // a faint pattern on the walls, the passer-by, the figure
+                let wall = 100 + ((lon / 9.0).floor() as i64 + (lat / 9.0).floor() as i64).rem_euclid(2) as u8 * 12;
+                if blocked && (lon - (yaw + 3.0)).abs() < 14.0 && lat.abs() < 30.0 {
+                    image::Rgba([60, 50, 40, 255])
+                } else if (lon - yaw).abs() < 7.0 && lat.abs() < 18.0 {
+                    if lat > 0.0 { image::Rgba([210, 30, 30, 255]) } else { image::Rgba([30, 40, 210, 255]) }
+                } else {
+                    image::Rgba([wall, wall, wall, 255])
+                }
+            });
+            let p = dir.join(format!("walk{k:04}.png"));
+            img.save(&p).unwrap();
+            paths.push(p.to_string_lossy().into_owned());
+            yaws.push(yaw);
+        }
+        (paths, yaws)
+    }
+
+    #[test]
+    fn a_blocked_subject_is_found_again_and_followed_on() {
+        let dir = crate::media_test_util::tmp_dir("follow-blocked");
+        let (paths, yaws) = blocked_walk(&dir);
+        let follow = |refind: &str| {
+            let mut s = Session::default();
+            let r = s.execute("file.import", json!({"paths": [paths[0]], "imageSequence": true})).unwrap();
+            let item = r["items"][0].as_u64().unwrap();
+            s.execute(PROPS_CMD, json!({"items": [item], "projection": "equirectangular"})).unwrap();
+            s.execute("file.newSequence", json!({"name": "walk", "width": 320, "height": 180, "fps": 24})).unwrap();
+            let r = s.execute("timeline.place", json!({"item": item, "track": "V1", "seconds": 0})).unwrap();
+            let c = ClipId(r["reframed360"][0].as_u64().unwrap());
+            // the figure in the natural view (100° across) at the start: 30° left
+            let r = s
+                .execute(
+                    FOLLOW_CMD,
+                    json!({"clip": c.0, "target": "box", "box": [0.2, 0.25, 0.12, 0.5], "analysisFps": 24, "smooth": 0, "refind": refind, "wait": true}),
+                )
+                .unwrap();
+            let it = clip(&s, c);
+            let e = it.effect(REFRAME).unwrap().clone();
+            // the camera's yaw where the sequence shows source frame `k`
+            let rate = s.source(ItemId(item)).unwrap().info().frame_rate();
+            let yaw_at = |k: i64| e.f64_at("yaw", rate.tick_of(k));
+            (r["result"]["clips"][0].clone(), yaw_at(3), yaw_at(76))
+        };
+        let (found, start, end) = follow("colour");
+        assert!(found["foundAgain"].as_u64().unwrap() >= 1, "{found}");
+        assert!((start - yaws[3]).abs() < 8.0, "followed from the start: {start} vs {}", yaws[3]);
+        assert!((end - yaws[76]).abs() < 10.0, "found again and followed on: {end} vs {}: {found}", yaws[76]);
+        // without looking for it again, the camera stays where it lost the figure
+        let (lost, _, end_off) = follow("off");
+        assert_eq!(lost["foundAgain"], 0);
+        assert!((end_off - yaws[76]).abs() > 30.0, "{end_off}: {lost}");
+    }
+
     #[test]
     fn hostile_parameters_are_refused() {
         let mut s = demo();
@@ -1482,6 +1840,7 @@ mod tests {
             json!({"clip": c.0, "smooth": 3.0}),
             json!({"clip": c.0, "analysisFps": 0}),
             json!({"clip": c.0, "at": -2.0}),
+            json!({"clip": c.0, "refind": "smell"}),
         ] {
             assert!(s.execute(FOLLOW_CMD, bad.clone()).is_err(), "{bad}");
         }
@@ -1565,6 +1924,44 @@ mod tests {
         t.execute(PROPS_CMD, json!({"items": [pano.0], "layout": "overUnder"})).unwrap();
         assert!(t.project.vr_of(pano).is_some_and(|v| v.is_equirect() && v.layout == StereoLayout::OverUnder));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_hand_and_stick_are_patched_for_planets_and_on_request() {
+        let (mut s, c) = demo_360();
+        let item = clip(&s, c).item;
+        let nadir = |s: &Session| s.project.vr_of(item).and_then(|v| v.nadir);
+        assert!(nadir(&s).is_none());
+        // a tiny planet patches it, in its own undo step
+        let n0 = s.history.undo.len();
+        let r = s.execute("clip.vrMove", json!({"clips": [c.0], "move": "planetIn"})).unwrap();
+        assert_eq!(r["nadirPatched"], json!([item.0]), "{r}");
+        assert_eq!(nadir(&s).map(|n| n.mode), Some(filmcraft_media::spherical::NadirMode::Mirror));
+        assert_eq!(s.history.undo.len(), n0 + 1);
+        // switched off on purpose: a planet leaves it off
+        s.execute(PROPS_CMD, json!({"items": [item.0], "nadir": "off"})).unwrap();
+        let r = s.execute("clip.vrMove", json!({"clips": [c.0], "move": "planetOut"})).unwrap();
+        assert!(r.get("nadirPatched").is_none());
+        assert_eq!(nadir(&s).map(|n| n.mode), Some(filmcraft_media::spherical::NadirMode::Off));
+        // by hand, and its size; the analyses' key does not change with it
+        let key = sphere_key(s.project.vr_of(item).unwrap());
+        s.execute(PROPS_CMD, json!({"items": [item.0], "nadir": "smooth", "nadirSize": 30})).unwrap();
+        assert_eq!(nadir(&s).map(|n| (n.mode, n.size)), Some((filmcraft_media::spherical::NadirMode::Smooth, 30.0)));
+        assert_eq!(sphere_key(s.project.vr_of(item).unwrap()), key);
+        for bad in [json!({"items": [item.0], "nadir": "patch"}), json!({"items": [item.0], "nadirSize": 90})] {
+            assert!(s.execute(PROPS_CMD, bad.clone()).is_err(), "{bad}");
+        }
+        // a logo laid round the bottom, seen through the clip's camera
+        let dir = crate::media_test_util::tmp_dir("nadir-logo");
+        let png = dir.join("logo.png");
+        let logo: Vec<u8> = (0..64 * 64).flat_map(|_| [200u8, 30, 30, 255]).collect();
+        std::fs::write(&png, filmcraft_export::encode_png(logo, 64, 64).unwrap()).unwrap();
+        let img = s.execute("file.import", json!({"paths": [png.to_string_lossy()]})).unwrap()["items"][0].as_u64().unwrap();
+        let r = s.execute("clip.nadirLogo", json!({"clip": c.0, "image": img, "folder": dir.to_string_lossy()})).unwrap();
+        let logo_clip = clip(&s, ClipId(r["logo"].as_u64().unwrap()));
+        assert!(logo_clip.effect(REFRAME).is_some(), "through the clip's own camera");
+        assert!(s.project.vr_of(logo_clip.item).is_some_and(Spherical::is_equirect));
+        assert!(s.execute("clip.nadirLogo", json!({"clip": c.0})).is_err(), "needs an image");
     }
 
     #[test]

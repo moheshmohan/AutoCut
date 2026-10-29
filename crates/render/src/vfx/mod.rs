@@ -527,6 +527,8 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) -> bool {
         "simple_text" => text::simple_text(img, e, cx),
         "metadata_burnin" => text::metadata_burnin(img, e, cx),
         id if id.starts_with("vr_") => immersive::apply(img, e, cx),
+        // the depth effects (`crate::depth`)
+        filmcraft_project::effect::PHOTO_3D | filmcraft_project::effect::DEPTH_BLUR => return crate::depth::apply(img, e, cx),
         _ => return false,
     }
     true
