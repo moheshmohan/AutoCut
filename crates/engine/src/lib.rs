@@ -1569,9 +1569,9 @@ mod file_tests;
 #[cfg(test)]
 mod gap_selection_tests;
 #[cfg(test)]
-mod home_paths_tests;
-#[cfg(test)]
 mod history_tests;
+#[cfg(test)]
+mod home_paths_tests;
 #[cfg(test)]
 mod image_sequence_tests;
 #[cfg(test)]
@@ -1691,9 +1691,9 @@ mod video_templates_tests;
 #[cfg(test)]
 mod voiceover_tests;
 #[cfg(test)]
-mod youtube_tests;
-#[cfg(test)]
 mod work_area_tests;
+#[cfg(test)]
+mod youtube_tests;
 
 #[cfg(test)]
 mod source_placement_tests;

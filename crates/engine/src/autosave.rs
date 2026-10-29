@@ -755,6 +755,14 @@ pub struct RecoveryCandidate {
     checked: Option<FileSig>,
 }
 
+#[cfg(test)]
+impl RecoveryCandidate {
+    /// A candidate as the scan of the recovery folder makes one (its project file not checked).
+    pub(crate) fn for_test(id: &str, dir: PathBuf, meta: JournalMeta) -> Self {
+        Self { id: id.into(), dir, meta, project_file: ProjectFileState::Untitled, project_modified_unix: None, checked: None }
+    }
+}
+
 impl RecoveryCandidate {
     /// (Re)check the project file on disk ([`check_project_file`]). The file is fingerprinted again
     /// only when its size or modification time changed since the last check.

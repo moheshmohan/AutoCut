@@ -3081,30 +3081,38 @@ fn build() -> Vec<CommandSpec> {
             })?;
             Ok(Value::Null)
         }),
-        cmd!("timeline.rateStretch", "Rate Stretch", [], None, r#"{"clip":id,"edge":"in|out","delta":ticks,"maintainPitch":bool?,"linked":bool?}"#, has_seq, |s, p| {
-            let c = clip_p(p, "clip").ok_or_else(|| bad("timeline.rateStretch", "need `clip`"))?;
-            let keep_pitch = maintain_pitch_p(p, "timeline.rateStretch")?;
-            let edge = if str_p(p, "edge") == Some("in") { Edge::In } else { Edge::Out };
-            let d = p
-                .get("delta")
-                .and_then(Value::as_i64)
-                .map(Tick)
-                .or_else(|| p.get("deltaFrames").and_then(Value::as_i64).map(|f| s.sequence_rate().tick_of(f)))
-                .unwrap_or_default();
-            let clips = with_links_p(s, p, c);
-            let sp = s.edit_sequence("Rate Stretch", |q, ctx, _| {
-                let sp = edit::rate_stretch_items(q, &clips, edge, d, ctx)?;
-                if let Some(k) = keep_pitch {
-                    for c in &clips {
-                        if let Some((_, it)) = q.find_item_mut(*c) {
-                            it.maintain_pitch = k;
+        cmd!(
+            "timeline.rateStretch",
+            "Rate Stretch",
+            [],
+            None,
+            r#"{"clip":id,"edge":"in|out","delta":ticks,"maintainPitch":bool?,"linked":bool?}"#,
+            has_seq,
+            |s, p| {
+                let c = clip_p(p, "clip").ok_or_else(|| bad("timeline.rateStretch", "need `clip`"))?;
+                let keep_pitch = maintain_pitch_p(p, "timeline.rateStretch")?;
+                let edge = if str_p(p, "edge") == Some("in") { Edge::In } else { Edge::Out };
+                let d = p
+                    .get("delta")
+                    .and_then(Value::as_i64)
+                    .map(Tick)
+                    .or_else(|| p.get("deltaFrames").and_then(Value::as_i64).map(|f| s.sequence_rate().tick_of(f)))
+                    .unwrap_or_default();
+                let clips = with_links_p(s, p, c);
+                let sp = s.edit_sequence("Rate Stretch", |q, ctx, _| {
+                    let sp = edit::rate_stretch_items(q, &clips, edge, d, ctx)?;
+                    if let Some(k) = keep_pitch {
+                        for c in &clips {
+                            if let Some((_, it)) = q.find_item_mut(*c) {
+                                it.maintain_pitch = k;
+                            }
                         }
                     }
-                }
-                Ok(sp)
-            })?;
-            Ok(json!({"speed": sp}))
-        }),
+                    Ok(sp)
+                })?;
+                Ok(json!({"speed": sp}))
+            }
+        ),
         cmd!("timeline.razor", "Razor", [], None, r#"{"time":ticks,"track":"V1"|id?,"clip":id?}"#, has_seq, |s, p| {
             let t = time_p(s, p, "").unwrap_or(s.playhead());
             let tr = track_p(s, p, "track", "timeline.razor")?;

@@ -661,6 +661,8 @@ mod tests {
             author: "",
             source: "",
             files: FILES,
+            kind: ModelKind::Recogniser,
+            language: None,
         };
         let root = tempfile::tempdir().unwrap();
         let directory = model_dir(root.path(), &model);

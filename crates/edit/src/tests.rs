@@ -565,6 +565,7 @@ fn a_transition_stays_within_its_clips_after_a_regular_trim_or_speed_change() {
             to: Some(b),
             align: filmcraft_project::TransitionAlign::EndAtCut,
             reverse: false,
+            sound: None,
         }];
         let mut n = fx.next;
         match case {
@@ -600,6 +601,7 @@ fn a_regular_trim_shortens_a_transition_longer_than_its_clips() {
         to: Some(b),
         align: filmcraft_project::TransitionAlign::StartAtCut,
         reverse: false,
+        sound: None,
     }];
     let mut n = fx.next;
     trim(&mut fx.seq, b, Edge::Out, TrimMode::Regular, -f(9), &mut Fx::ctx(&mut n)).unwrap();
@@ -970,6 +972,7 @@ fn roll_keeps_the_transition_on_its_clips() {
         to: Some(b),
         align: Default::default(),
         reverse: false,
+        sound: None,
     }];
     let mut n = fx.next;
     // left: the transition reaches the sequence start after 8 frames, not the 9 the clips allow
@@ -1005,6 +1008,7 @@ fn edits_that_move_a_cut_keep_its_transition_on_its_clips() {
             to: Some(b),
             align: TransitionAlign::EndAtCut,
             reverse: false,
+            sound: None,
         }];
         let mut n = fx.next;
         if slide_it {
@@ -1039,6 +1043,7 @@ fn a_ripple_trim_of_the_second_clips_end_keeps_the_transition_within_it() {
         to: Some(b),
         align: TransitionAlign::CenterAtCut,
         reverse: false,
+        sound: None,
     }];
     let mut n = fx.next;
     trim(&mut fx.seq, b, Edge::Out, TrimMode::Ripple, -f(9), &mut Fx::ctx(&mut n)).unwrap();

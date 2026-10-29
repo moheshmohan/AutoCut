@@ -526,6 +526,7 @@ mod tests {
             speaker: None,
             cue_id: Some("x".into()),
             settings: String::new(),
+            words: Vec::new(),
         };
         // across a's tail and all of b; then inside c (c is split around it)
         let ids = overwrite_captions(&mut seq, tid, &[copy(60, 95, "x"), copy(230, 40, "y")], &mut ctx(&mut n)).unwrap();

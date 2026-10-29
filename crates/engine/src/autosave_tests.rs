@@ -47,7 +47,7 @@ fn discard_fixture(tag: &str) -> (Session, std::path::PathBuf) {
             let dir = d.join(id);
             std::fs::create_dir(&dir).unwrap();
             std::fs::write(dir.join("snapshot.fcproj"), b"retained snapshot").unwrap();
-            autosave::RecoveryCandidate { id: id.into(), dir, meta: Default::default() }
+            autosave::RecoveryCandidate::for_test(id, dir, Default::default())
         })
         .collect();
     s.persistence.as_mut().unwrap().candidates = candidates;
