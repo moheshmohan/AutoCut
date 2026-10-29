@@ -68,7 +68,9 @@
 //!   frame, the audio 24 s for 40 s of sound). Each export now renders its frames on a pool of its
 //!   own with as many threads (started with the first batch, gone with the exporter), which leaves
 //!   the caller's pool to the encoding side; the operating system shares the cores between the two.
-//!   The file does not change: where a frame is drawn does not change its pixels.
+//!   The file does not change: where a frame is drawn does not change its pixels. With
+//!   [`ExportSettings::max_threads`] set the export keeps to the pool it was capped to: no pool of
+//!   its own, and no thread decoding ahead (below), so it uses no more threads than asked.
 //!
 //! # Decoding ahead
 //!
@@ -487,6 +489,10 @@ impl Exporter {
 
     /// The pool this export renders its frames on (built on first use; `None`: the caller's pool).
     fn render_pool(&mut self) -> Option<Arc<rayon::ThreadPool>> {
+        // capped: the frames render on the capped pool the export runs on
+        if self.settings.max_threads > 0 {
+            return None;
+        }
         self.render_pool.get_or_insert_with(build_render_pool).clone()
     }
 
@@ -734,7 +740,7 @@ impl Exporter {
         let mut encode_done: Option<web_time::Instant> = None;
         // the batch after that one, decoded meanwhile (none past the end of the pass)
         let warm_to = b.saturating_add(self.batch_len(b)).min(self.f1);
-        let warm = (self.warm_ahead && b < warm_to).then_some((b, warm_to));
+        let warm = (self.warm_ahead && self.settings.max_threads == 0 && b < warm_to).then_some((b, warm_to));
         let cancel = &progress.cancel;
         // what was decoded for the frames encoded by now is not needed any more
         self.pictures.drop_before(a);

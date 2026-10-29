@@ -18,6 +18,13 @@ fn three_edits_two_undone() -> Session {
     s
 }
 
+/// The undo and redo steps of `history.list`, without its `log` (when steps were made, undone
+/// and redone: what happened still happened after the steps are forgotten).
+fn steps(s: &mut Session) -> serde_json::Value {
+    let list = s.execute("history.list", json!({})).unwrap();
+    json!({"undo": list["undo"], "redo": list["redo"]})
+}
+
 #[test]
 fn delete_redoable_actions_forgets_the_undone_steps_only() {
     let mut s = three_edits_two_undone();
@@ -51,7 +58,7 @@ fn clear_history_forgets_every_step_and_keeps_the_project() {
 
     let r = s.execute("history.clear", json!({})).unwrap();
     assert_eq!(r, json!({"deleted": undo + 2}));
-    assert_eq!(s.execute("history.list", json!({})).unwrap(), json!({"undo": [], "redo": []}));
+    assert_eq!(steps(&mut s), json!({"undo": [], "redo": []}));
     assert_eq!(*s.project, *project, "the project does not change");
     assert_eq!(s.is_dirty(), dirty);
     assert!(s.execute("edit.undo", json!({})).is_err());
@@ -72,6 +79,6 @@ fn history_commands_ignore_unexpected_parameters() {
         assert_eq!(s.execute("history.deleteRedoable", p.clone()).unwrap(), json!({"deleted": 2}), "{p}");
         assert_eq!(s.history.undo.len(), undo, "{p}");
         assert_eq!(s.execute("history.clear", p.clone()).unwrap(), json!({"deleted": undo}), "{p}");
-        assert_eq!(s.execute("history.list", json!({})).unwrap(), json!({"undo": [], "redo": []}), "{p}");
+        assert_eq!(steps(&mut s), json!({"undo": [], "redo": []}), "{p}");
     }
 }

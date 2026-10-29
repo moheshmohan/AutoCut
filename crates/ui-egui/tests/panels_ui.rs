@@ -249,7 +249,8 @@ fn history_panel_menu_deletes_redoable_actions_and_clears_the_history() {
 
     d.click("panel.menu.History");
     d.click("panel.menu.History.clear");
-    assert_eq!(d.exec("history.list", json!({})), json!({"undo": [], "redo": []}));
+    let list = d.exec("history.list", json!({}));
+    assert_eq!((&list["undo"], &list["redo"]), (&json!([]), &json!([])), "the log of when steps were made stays");
     assert_eq!(*d.app().session.project, *project, "the project does not change");
     assert!(!d.app().session.is_enabled("history.clear"), "an empty history has nothing to clear");
 }

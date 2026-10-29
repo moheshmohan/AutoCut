@@ -471,6 +471,10 @@ impl<'a> Noting<'a> {
 
 impl SourceProvider for Noting<'_> {
     fn source(&self, item: ItemId) -> Option<SharedSource> {
+        // an uncapped export also decodes ahead on a thread of its own, outside every pool
+        if std::thread::current().name() == Some("filmcraft-export-decode-ahead") {
+            return self.inner.source(item);
+        }
         self.most.fetch_max(rayon::current_num_threads(), Ordering::SeqCst);
         self.threads.lock().unwrap().insert(std::thread::current().id());
         self.inner.source(item)
