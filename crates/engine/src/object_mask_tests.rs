@@ -417,7 +417,7 @@ fn feature_tracked(s: &mut Session, c: ClipId, from: &Mask, at: Tick, method: &s
 }
 
 #[test]
-#[ignore = "needs MobileSAM downloaded; measures"]
+#[ignore = "needs MobileSAM downloaded (FILMCRAFT_DATA_DIR naming the data directory); measures"]
 fn mobilesam_follows_a_ball_behind_a_post() {
     let dir = tmp_dir("object-ball");
     let path = dir.join("ball.mp4");
@@ -488,7 +488,7 @@ fn drawn(s: &Session, c: ClipId, t: Tick, masks: &[(&Mask, [u8; 3])], w: usize) 
 /// folder for a strip of eight frames: the object mask yellow, Track Mask from the click's
 /// outline cyan).
 #[test]
-#[ignore = "needs MobileSAM downloaded and a clip; measures"]
+#[ignore = "needs MobileSAM downloaded (FILMCRAFT_DATA_DIR naming the data directory) and a clip; measures"]
 fn object_mask_on_a_real_clip() {
     let Some(clip) = std::env::var_os("OBJECT_CLIP").map(std::path::PathBuf::from) else { return };
     let num = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(d);

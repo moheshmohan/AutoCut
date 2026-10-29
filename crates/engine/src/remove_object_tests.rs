@@ -339,7 +339,7 @@ fn flicker(s: &Session, item: ItemId, (cx, cy): (f64, f64), from: i64, to: i64) 
 /// A still shot: the disc never moves, so no frame shows what is behind it and MI-GAN paints all
 /// of it — in key frames carried to the frames between (`auto`) or in every frame (`model`).
 #[test]
-#[ignore = "needs MI-GAN downloaded; measures"]
+#[ignore = "needs MI-GAN downloaded (FILMCRAFT_DATA_DIR naming the data directory); measures"]
 fn mi_gan_paints_a_still_shot_steadily() {
     *lock(&STAND_IN) = None;
     for fill in ["auto", "model"] {
@@ -379,7 +379,7 @@ fn mi_gan_paints_a_still_shot_steadily() {
 /// `REMOVE_FROM` (0), `REMOVE_OUT` a folder for the strip: four frames as they were (the mask
 /// drawn) over the same four with the thing removed.
 #[test]
-#[ignore = "needs MobileSAM and MI-GAN downloaded and a clip; measures"]
+#[ignore = "needs MobileSAM and MI-GAN downloaded (FILMCRAFT_DATA_DIR naming the data directory) and a clip; measures"]
 fn remove_object_on_a_real_clip() {
     *lock(&STAND_IN) = None;
     let Some(clip) = std::env::var_os("REMOVE_CLIP").map(std::path::PathBuf::from) else { return };
