@@ -718,8 +718,10 @@ mod tests {
     fn public_analysis_rate_is_bounded_before_fft_planning() {
         assert_eq!(analyze(&[], 0), Err(RemixError::InvalidSampleRate));
         assert_eq!(analyze(&[], u32::MAX), Err(RemixError::InvalidSampleRate));
-        let (_, n, _) = onset_envelope(&[], u32::MAX);
-        assert!(n <= onset_frame(MAX_ANALYSIS_SAMPLE_RATE));
+        // AutoCut's beat tracker (`beats::onset_strength`, its FFT frame clamped) replaced
+        // remix's onset envelope; a hostile rate sizes no frame past the cap either way
+        let _ = crate::beats::onset_strength(&[], u32::MAX);
+        assert!(onset_frame(u32::MAX) <= onset_frame(MAX_ANALYSIS_SAMPLE_RATE));
     }
 
     #[test]
