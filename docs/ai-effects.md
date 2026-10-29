@@ -239,24 +239,30 @@ dimension embedding a box; `crates/vision/src/segment.rs` embeds a prompt's poin
 itself — each a random-Fourier code of where it is plus its kind's learnt vector, from the same
 weights — and runs MobileSAM's own mask decoder on them (`Segmenter::answers`).
 
-**Measured** (M3 Max, debug-optimised test build, 2026-10-29). MobileSAM looks at a picture in
-0.53 s on the GPU (Metal through candle) and 3.2 s on the CPU; its four answers to a prompt take
-53 ms; a look of the follower is 0.6–0.7 s, so 10 s of video at the default 0.1 s is about a
-minute. A striped ball crossing a forest behind a post (640 × 360, 3 s; `mobilesam_follows_a_ball_behind_a_post`):
+**The encoder on the GPU.** candle runs TinyViT's depthwise convolutions one channel at a time
+(256 convolutions for the first ones): 0.53 s a picture on Metal. `crates/vision/src/sam_gpu.rs`
+runs the image encoder and its neck as WGSL passes (`sam.wgsl`: a tiled matrix product for the
+1 × 1 and linear layers and, reading the picture straight, the 3 × 3 convolutions; depthwise
+3 × 3; layer norm over the channels; window attention with its position bias; the batch norms
+folded in), one command buffer a picture: 88 ms, within 3.1e-6 of candle on the CPU (2.0 s).
+The prompt and mask decoders stay on candle (Metal), 48 ms for four answers.
+
+**Measured** (M3 Max, release, 2026-10-29). A look of the follower is 0.17–0.2 s (it was 0.6–0.7 s
+with candle's encoder), so 10 s of video at the default 0.1 s takes about 20 s. A striped ball crossing a forest behind a post (640 × 360, 3 s; `mobilesam_follows_a_ball_behind_a_post`):
 
 | | frames outlined | overlap with the ball as it shows (intersection over union) |
 |---|---|---|
-| Object Mask (clicked at 0.5 s, every frame) | 68 of 72 | mean 0.953, worst 0.63; 0.95–0.98 away from the post, the ball picked up again after it |
+| Object Mask (clicked at 0.5 s, every frame; 11.9 s, 166 ms a frame) | 68 of 72 | mean 0.953, worst 0.63; 0.95–0.98 away from the post, the ball picked up again after it |
 | Track Mask, position, scale and rotation, from the click's outline | 39 (lost at the post) | mean 0.61, worst 0.06 |
 
 On the user's clips (`object_mask_on_a_real_clip`, 6 s each, strips of eight frames looked at): a
 toy Tesla on a bench while the camera circles it — the mask stays on the car as its outline turns
 from side-on to three-quarter front (Track Mask's fixed shape drifts off it), each outline
-overlapping the next by 0.91 on average; a pair of pliers' handle as the camera moves — every
+overlapping the next by 0.91 on average (60 looks in 12.1 s); a pair of pliers' handle as the camera moves — every
 frame on the handle (0.88); a toy car on a table as the camera pans — on the car, with the cable
 plugged into it taken as part of it (0.88).
 
-**Limits.** 0.6 s a look: long clips take a while (a background job, which can be stopped). Things that touch something of their colour may take it with them; thin parts (cables,
+**Limits.** 0.2 s a look: long clips take a while (a background job, which can be stopped). Things that touch something of their colour may take it with them; thin parts (cables,
 handles) come and go between frames. A thing hidden for more than 1.5 s ends the run; a thing that
 reappears elsewhere is not looked for. Frames where nothing passed have no outline of their own.
 One mask of a clip is followed at a time (the clip's masks are tracked one job at a time).

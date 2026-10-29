@@ -1,6 +1,8 @@
 //! MobileSAM (Apache-2.0, [`crate::catalog::SEGMENTER`]): a person or a thing cut out of a picture
 //! given points on it and round it, on candle's Segment Anything with the TinyViT encoder — on the
-//! GPU (Metal) on macOS, the CPU elsewhere and as the fallback.
+//! GPU (Metal) on macOS, the CPU elsewhere and as the fallback — its image encoder as our own WGSL
+//! passes on the GPU (`crate::sam_gpu`: candle runs its depthwise convolutions one channel at a
+//! time), candle's after a GPU failure.
 //!
 //! A picture is embedded once ([`Segmenter::embed`]: its long side scaled to 1024, the encoder
 //! run), then any number of prompts are answered from the embedding ([`Segmenter::cut`]: the mask
@@ -40,6 +42,9 @@ pub struct Segmenter {
     sparse: Sparse,
     decoder: MaskDecoder,
     dev: Device,
+    /// The image encoder on the GPU (`sam_gpu`), when there is one; candle after it fails.
+    encoder: Option<crate::sam_gpu::SamGpu>,
+    encoder_failed: std::sync::atomic::AtomicBool,
 }
 
 /// What embeds a prompt's points and box corners: the position code's Gaussian matrix (2 × 128,
@@ -136,19 +141,30 @@ impl Segmenter {
                 PromptEncoder::new(PROMPT_DIM, (EMBEDDING_SIDE, EMBEDDING_SIDE), (IMAGE_SIZE, IMAGE_SIZE), 16, vb.pp("prompt_encoder")).map_err(err)?;
             let sparse = Sparse::load(&vb.pp("prompt_encoder"))?;
             let decoder = MaskDecoder::new(PROMPT_DIM, 3, 3, 256, vb.pp("mask_decoder")).map_err(err)?;
-            Ok(Self { sam: Sam::new_tiny(vb).map_err(err)?, prompts, sparse, decoder, dev: dev.clone() })
+            Ok(Self { sam: Sam::new_tiny(vb).map_err(err)?, prompts, sparse, decoder, dev: dev.clone(), encoder: None, encoder_failed: Default::default() })
         };
-        match load(&dev) {
-            Ok(s) => Ok(s),
+        let mut s = match load(&dev) {
+            Ok(s) => s,
             // (the GPU refused it: the CPU)
-            Err(_) if !matches!(dev, Device::Cpu) => load(&Device::Cpu),
-            Err(e) => Err(e),
+            Err(_) if !matches!(dev, Device::Cpu) => load(&Device::Cpu)?,
+            Err(e) => return Err(e),
+        };
+        // the image encoder as our own passes on the GPU (candle's runs its depthwise convolutions
+        // one channel at a time)
+        if gpu {
+            let cpu = candle_nn::VarBuilder::from_pth(&path, DType::F32, &Device::Cpu).map_err(err)?;
+            s.encoder = crate::sam_gpu::EncoderWeights::read(&cpu).ok().and_then(|w| crate::sam_gpu::SamGpu::new(&w));
         }
+        Ok(s)
     }
 
     /// Where it runs: `"gpu"` or `"cpu"`.
     pub fn device_name(&self) -> &'static str {
-        if matches!(self.dev, Device::Cpu) { "cpu" } else { "gpu" }
+        if matches!(self.dev, Device::Cpu) && !self.encoder_on() { "cpu" } else { "gpu" }
+    }
+
+    fn encoder_on(&self) -> bool {
+        self.encoder.is_some() && !self.encoder_failed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Embed an RGBA picture (`w` × `h`).
@@ -178,6 +194,29 @@ impl Segmenter {
                 for c in 0..3 {
                     px[c * ew * eh + y * ew + x] = acc[c] / n.max(1.0);
                 }
+            }
+        }
+        if let Some(enc) = self.encoder.as_ref().filter(|_| self.encoder_on()) {
+            // normalised as candle's `Sam` does, padded with zeros to the 1024 square
+            let n = crate::sam_gpu::INPUT;
+            let (mean, std) = ([123.675f32, 116.28, 103.53], [58.395f32, 57.12, 57.375]);
+            let mut x = vec![0f32; 3 * n * n];
+            for c in 0..3 {
+                for y in 0..eh {
+                    for xx in 0..ew {
+                        if let (Some(d), Some(v)) = (x.get_mut((c * n + y) * n + xx), px.get(c * ew * eh + y * ew + xx)) {
+                            *d = (v - mean[c]) / std[c];
+                        }
+                    }
+                }
+            }
+            match enc.run(&x) {
+                Ok(v) => {
+                    let (c, s) = (crate::sam_gpu::EMB_C, crate::sam_gpu::EMB_SIDE);
+                    let emb = Tensor::from_vec(v, (1, c, s, s), &self.dev).map_err(err)?;
+                    return Ok(Embedded { emb, w: ew, h: eh, scale });
+                }
+                Err(_) => self.encoder_failed.store(true, std::sync::atomic::Ordering::Relaxed),
             }
         }
         let img = Tensor::from_vec(px, (3, eh, ew), &self.dev).map_err(err)?;
@@ -318,5 +357,48 @@ mod tests {
         assert!(seg.answers(&e, &[], &[], None).is_err());
         assert!(seg.answers(&e, &[], &[], Some([10.0, 10.0, 5.0, 5.0])).is_err(), "an empty box");
         assert!(seg.embed(&rgba[..100], w, h).is_err());
+    }
+
+    /// The image encoder's GPU passes give candle's embedding on the CPU. (Skips without
+    /// MobileSAM or a GPU.)
+    #[test]
+    fn the_gpu_encoder_matches_candles() {
+        let Some(dir) = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Application Support/FilmCraft/models")) else { return };
+        let (Ok(gpu), Ok(cpu)) = (Segmenter::load(&dir, true), Segmenter::load(&dir, false)) else { return };
+        if gpu.encoder.is_none() {
+            eprintln!("no GPU; skipping");
+            return;
+        }
+        let (w, h) = (640usize, 360usize);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                [((x * 3 + y * 5) % 251) as u8, ((x * 7) % 256) as u8, ((y * 11) % 256) as u8, 255]
+            })
+            .collect();
+        let t = std::time::Instant::now();
+        let c = cpu.embed(&rgba, w, h).unwrap();
+        let tc = t.elapsed().as_secs_f64() * 1000.0;
+        let _ = gpu.embed(&rgba, w, h).unwrap();
+        let t = std::time::Instant::now();
+        let g = gpu.embed(&rgba, w, h).unwrap();
+        let tg = t.elapsed().as_secs_f64() * 1000.0;
+        assert!(gpu.encoder_on(), "the GPU encoder ran");
+        let a: Vec<f32> = c.emb.flatten_all().unwrap().to_vec1().unwrap();
+        let b: Vec<f32> = g.emb.to_device(&Device::Cpu).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(a.len(), b.len());
+        if b.iter().any(|x| !x.is_finite()) {
+            // where the values went bad
+            let n = crate::sam_gpu::INPUT;
+            let mut x = vec![0f32; 3 * n * n];
+            for (i, v) in x.iter_mut().enumerate() {
+                *v = ((i % 97) as f32 / 97.0 - 0.5) * 2.0;
+            }
+            panic!("the GPU's embedding is not finite; first bad pass: {:?}", gpu.encoder.as_ref().and_then(|e| e.first_bad(&x)));
+        }
+        let worst = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+        let size = a.iter().map(|x| x.abs()).fold(0f32, f32::max);
+        eprintln!("MobileSAM's encoder: candle on the CPU {tc:.0} ms, our GPU passes {tg:.0} ms; within {worst:.2e} (values up to {size:.2})");
+        assert!(worst < 2e-3 * size.max(1.0), "{worst}");
     }
 }

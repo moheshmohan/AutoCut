@@ -40,8 +40,10 @@ the thing and gives all four answers (the unambiguous prompt's, then the three o
 one): Object Mask's tracker tells it where the thing went that way. candle's `Sam` takes points
 only and its prompt encoder drops a dimension embedding a box, so `segment` embeds the points and
 box corners itself (a random-Fourier code of each place plus its kind's learnt vector, from the
-same weights) and runs MobileSAM's mask decoder on them. 0.53 s a 1024 picture on the GPU, 3.2 s
-on the CPU; four answers to a prompt in 53 ms.
+same weights) and runs MobileSAM's mask decoder on them. The image encoder runs as our own WGSL
+passes on the GPU (`sam_gpu`, `sam.wgsl`; candle runs TinyViT's depthwise convolutions one channel
+at a time): 88 ms a 1024 picture, within 3.1e-6 of candle on the CPU (2.0 s; candle on Metal took
+0.53 s); four answers to a prompt in 48 ms.
 
 **MI-GAN** (`inpaint`, Remove Object's painting), downloaded by `removal.downloadModel` into
 its own folder: `migan.onnx` (29,546,882 B, the authors' upload `andraniksargsyan/migan` at

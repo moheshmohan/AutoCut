@@ -72,6 +72,8 @@ mod profile_tests;
 #[cfg(feature = "model")]
 mod rtmpose;
 #[cfg(feature = "model")]
+mod sam_gpu;
+#[cfg(feature = "model")]
 pub mod segment;
 #[cfg(feature = "model")]
 pub mod upscale;
