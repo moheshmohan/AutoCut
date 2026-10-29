@@ -1689,6 +1689,19 @@ impl VideoEncoder for H264Encoder {
         let ps = self.enc.try_encode(&frame, f.index as i64 * self.rate.den).map_err(|e| ExportError::Encode(e.to_string()))?;
         Ok(self.packets(ps))
     }
+    /// An SDR picture comes converted from the render threads, which are idle while a batch is
+    /// encoded, with the same [`rgba_to_yuv420_8`] [`Self::encode`] runs, so the file is the same
+    /// and the encoding thread only encodes (upstream ef4a5f83, on AutoCut's render-side planes).
+    /// HDR pictures still come as RGB to [`Self::encode`].
+    fn takes_yuv420(&self) -> bool {
+        true
+    }
+    fn encode_yuv420(&mut self, f: &EncoderFrame, y: &[u8], u: &[u8], v: &[u8]) -> Result<Vec<EncodedPacket>> {
+        let cw = (f.width as usize).div_ceil(2);
+        let frame = filmcraft_h264enc::YuvFrame { y, u, v, y_stride: f.width as usize, uv_stride: cw };
+        let ps = self.enc.try_encode(&frame, f.index as i64 * self.rate.den).map_err(|e| ExportError::Encode(e.to_string()))?;
+        Ok(self.packets(ps))
+    }
     fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
         let ps = self.enc.flush();
         Ok(self.packets(ps))
