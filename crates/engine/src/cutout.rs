@@ -32,7 +32,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use filmcraft_project::{ClipId, ItemId, Mask, MaskMode, MaskPath, MaskVertex, ParamValue, Sequence, Track, TrackId, TrackItem, TrackKind};
+use filmcraft_project::{ClipId, ItemId, Mask, MaskMode, MaskPath, MaskVertex, ParamValue, Sequence, Track, TrackId, TrackItem, TrackKind, TrackMethod};
 use filmcraft_time::Tick;
 use serde_json::{Value, json};
 
@@ -91,6 +91,8 @@ pub struct Cutouts {
     pub cutter: Option<Arc<dyn PersonCutter>>,
     /// A stand-in sky finder (tests), else the guess refined by MobileSAM.
     pub sky: Option<Arc<dyn crate::sky::SkyFinder>>,
+    /// A stand-in object cutter (tests), else MobileSAM.
+    pub object: Option<Arc<dyn crate::object_mask::ObjectCutter>>,
 }
 
 pub fn commands() -> Vec<CommandSpec> {
@@ -153,7 +155,7 @@ fn status(_: &mut Session, _: &Value) -> Result<Value> {
     let people = dir.as_deref().is_some_and(filmcraft_vision::catalog::profiles_installed);
     Ok(json!({
         "available": cfg!(feature = "privacy-models"),
-        "segmenter": {"name": filmcraft_vision::catalog::SEGMENT_NAME, "installed": installed, "bytes": filmcraft_vision::catalog::SEGMENTER.size, "license": filmcraft_vision::catalog::SEGMENT_LICENSE, "source": filmcraft_vision::catalog::SEGMENT_SOURCE},
+        "segmenter": {"name": filmcraft_vision::catalog::SEGMENT_NAME, "installed": installed, "bytes": filmcraft_vision::catalog::SEGMENTER.size, "license": filmcraft_vision::catalog::SEGMENT_LICENSE, "source": filmcraft_vision::catalog::SEGMENT_SOURCE, "training": filmcraft_vision::catalog::SEGMENT_TRAINING, "download": DOWNLOAD_CMD},
         "personDetector": {"name": filmcraft_vision::catalog::PROFILE_NAME, "installed": people, "bytes": filmcraft_vision::catalog::profile_total_bytes(), "license": filmcraft_vision::catalog::PROFILE_LICENSE, "download": "redact.downloadModels"},
     }))
 }
@@ -336,28 +338,116 @@ fn pick_p(p: &Value, cmd: &str) -> Result<Pick> {
 }
 
 /// A closed polygon mask path through `pts` (clip pixels).
-fn polygon(pts: &[(f32, f32)]) -> MaskPath {
+pub(crate) fn polygon(pts: &[(f32, f32)]) -> MaskPath {
     MaskPath { vertices: pts.iter().map(|(x, y)| MaskVertex::corner(filmcraft_geom::Vec2::new(f64::from(*x), f64::from(*y)))).collect(), closed: true }
+}
+
+/// Where an outline job is looking: seconds along its run (from the frame the run starts from),
+/// and whether the look starts a run of its own (the run back from where the first started).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Look {
+    pub t: f64,
+    pub fresh: bool,
 }
 
 /// Finds an outline in a picture (RGBA, `w` × `h`): `points` points in its pixels, `None` when the
 /// thing is not there.
-pub(crate) type FindOutline = Box<dyn FnMut(&[u8], usize, usize, usize) -> std::result::Result<Option<Vec<(f32, f32)>>, String> + Send>;
+pub(crate) type FindOutline = Box<dyn FnMut(&[u8], usize, usize, usize, Look) -> std::result::Result<Option<Vec<(f32, f32)>>, String> + Send>;
+
+/// Where an outline job starts and which ways it goes: from the clip's frame at sequence time
+/// `at`, on to the clip's end and back to its start (each at most `span` far).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Start {
+    pub at: Tick,
+    pub forward: bool,
+    pub backward: bool,
+    pub span: Option<Tick>,
+}
 
 /// What an outline job is: its mask's name, its undo step, its job's label, what it says when it
-/// finds nothing, and whether the thing lost for [`LOST_SECONDS`] ends it.
+/// finds nothing, whether the thing lost for [`LOST_SECONDS`] ends it (its run), and the mask:
+/// on which effect (Opacity), written into an existing one (its index) or a new one, how it
+/// applies and is tracked, and where the job starts (the clip's start, onwards).
 pub(crate) struct Outlining {
-    pub mask: &'static str,
+    pub mask: String,
     pub undo: &'static str,
     pub what: &'static str,
     pub not_found: &'static str,
     pub lost_ends: bool,
+    pub effect: Option<usize>,
+    pub into: Option<usize>,
+    pub mode: MaskMode,
+    pub inverted: bool,
+    pub method: Option<TrackMethod>,
+    pub start: Option<Start>,
 }
 
-/// `every` and `points` of an outline job's parameters.
-pub(crate) fn outline_params(p: &Value, cmd: &str, points_default: usize) -> Result<(f64, usize)> {
+impl Outlining {
+    /// A new switched-off mask `mask` on Opacity, outlined from the clip's start on.
+    pub fn new(mask: &str, undo: &'static str, what: &'static str, not_found: &'static str) -> Self {
+        Self {
+            mask: mask.to_string(),
+            undo,
+            what,
+            not_found,
+            lost_ends: false,
+            effect: None,
+            into: None,
+            mode: MaskMode::None,
+            inverted: false,
+            method: None,
+            start: None,
+        }
+    }
+}
+
+/// The media times an outline job looks at, each with whether it starts a run: every `step` of
+/// the clip from its start, or from `start` forward and then back from it (that frame first).
+fn look_times(it: &TrackItem, step: Tick, start: Option<Start>) -> Vec<(Tick, bool)> {
+    let mut times: Vec<(Tick, bool)> = Vec::new();
+    let push = |times: &mut Vec<(Tick, bool)>, t: Tick, fresh: bool| {
+        let m = it.source_time_at(t);
+        if times.last().is_none_or(|l| l.0 != m) && times.len() < MAX_KEYS {
+            times.push((m, fresh));
+        }
+    };
+    if it.duration <= Tick::ZERO {
+        return times;
+    }
+    let Some(st) = start else {
+        let mut t = it.start;
+        while t < it.end() && times.len() < MAX_KEYS {
+            push(&mut times, t, false);
+            t += step;
+        }
+        return times;
+    };
+    let at = st.at.clamp(it.start, it.end() - Tick(1));
+    let far = st.span.unwrap_or(Tick(i64::MAX));
+    push(&mut times, at, false);
+    if st.forward {
+        let mut t = at + step;
+        while t < it.end() && t - at <= far && times.len() < MAX_KEYS {
+            push(&mut times, t, false);
+            t += step;
+        }
+    }
+    if st.backward {
+        let (mut t, mut fresh) = (at - step, true);
+        while t >= it.start && at - t <= far && times.len() < MAX_KEYS {
+            let before = times.len();
+            push(&mut times, t, fresh);
+            fresh &= times.len() == before;
+            t -= step;
+        }
+    }
+    times
+}
+
+/// `every` and `points` of an outline job's parameters (`every` [`EVERY`] unless `every_default`).
+pub(crate) fn outline_params(p: &Value, cmd: &str, every_default: Option<f64>, points_default: usize) -> Result<(f64, usize)> {
     let every = match f64_p(p, "every") {
-        None => EVERY,
+        None => every_default.unwrap_or(EVERY),
         Some(e) if e.is_finite() && (EVERY_RANGE.0..=EVERY_RANGE.1).contains(&e) => e,
         Some(_) => return Err(bad(cmd, "`every` is 1/30 to 2 seconds")),
     };
@@ -392,34 +482,46 @@ pub(crate) fn outline_job(
     let src = crate::vr360::clip_source(s, it).ok_or_else(|| bad(cmd, "the clip's media is offline"))?;
     // the media times looked at: every `every` seconds of the clip
     let step = Tick::from_seconds_f64(every).max(Tick(1));
-    let mut times: Vec<Tick> = Vec::new();
-    let mut t = it.start;
-    while t < it.end() && times.len() < MAX_KEYS {
-        times.push(it.source_time_at(t));
-        t += step;
-    }
-    times.dedup();
+    let times = look_times(it, step, o.start);
     if times.is_empty() {
         return Err(bad(cmd, "the clip is too short"));
     }
-    // the mask, switched off, its outlines written as they come
+    // the mask (new, or the one given: its keyframes where the job looks go), its outlines
+    // written as they come
     let clip = it.id;
     let n0 = s.history.undo.len();
-    let name = o.mask;
-    let mask_index = s.edit_sequence(o.undo, |q, _, _| {
+    let name = o.mask.clone();
+    let (lo, hi) = times.iter().fold((Tick(i64::MAX), Tick(i64::MIN)), |(a, b), (t, _)| (a.min(*t), b.max(*t)));
+    let (want, into, mode, inverted, method) = (o.effect, o.into, o.mode, o.inverted, o.method);
+    let (effect, mask_index) = s.edit_sequence(o.undo, |q, _, _| {
         let (_, item) = q.find_item_mut(clip).ok_or(filmcraft_edit::EditError::NoItem(clip))?;
-        let op = item.effect_mut("opacity").ok_or_else(|| bad(cmd, "the clip has no Opacity"))?;
-        op.masks.retain(|m| m.name != name);
+        let ei = match want {
+            Some(i) => i,
+            None => item.effects.iter().position(|e| e.effect == "opacity").ok_or_else(|| bad(cmd, "the clip has no Opacity"))?,
+        };
+        let e = item.effects.get_mut(ei).ok_or_else(|| bad(cmd, "no such effect on the clip"))?;
+        if let Some(mi) = into {
+            let m = e.masks.get_mut(mi).ok_or_else(|| bad(cmd, format!("no mask {mi}")))?;
+            m.path.keyframes.retain(|k| k.time < lo || k.time > hi);
+            if let Some(tm) = method {
+                m.track_method = tm;
+            }
+            return Ok((ei, mi));
+        }
+        e.masks.retain(|m| m.name != name);
         let mut m = Mask::new(
             name,
             MaskPath::ellipse(filmcraft_geom::Vec2::new(f64::from(size.0) / 2.0, f64::from(size.1) / 2.0), filmcraft_geom::Vec2::new(8.0, 8.0)),
         );
-        m.mode = MaskMode::None;
+        m.mode = mode;
+        m.inverted = inverted;
+        if let Some(tm) = method {
+            m.track_method = tm;
+        }
         m.feather = filmcraft_project::Param::new(ParamValue::Float(2.0));
-        op.masks.push(m);
-        Ok(op.masks.len() - 1)
+        e.masks.push(m);
+        Ok((ei, e.masks.len() - 1))
     })?;
-    let effect = s.active_sequence().and_then(|q| q.find_item(clip)).and_then(|(_, i)| i.effects.iter().position(|e| e.effect == "opacity")).unwrap_or(0);
     let id = s.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
     let job = crate::Job { id, label: format!("Outline {} ({} frames)", o.what, times.len()), progress: Default::default(), result: Default::default() };
     job.progress.total.store(times.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -428,38 +530,52 @@ pub(crate) fn outline_job(
     let scale = (SIDE / f64::from(size.0.max(size.1).max(1))).min(1.0) as f32;
     let lost_limit = (LOST_SECONDS / every).ceil() as usize;
     let (what, not_found, lost_ends) = (o.what, o.not_found, o.lost_ends);
+    let origin = times.first().map_or(Tick::ZERO, |t| t.0);
+    // (runs from a frame follow what was found there: nothing there, nothing to follow)
+    let anchored = o.start.is_some();
     let run = move || {
         use std::sync::atomic::Ordering;
         let t0 = web_time::Instant::now();
-        let mut prev: Vec<(f32, f32)> = Vec::new();
+        // the last outline, and the run's first (where the run back starts from)
+        let (mut prev, mut first): (Vec<(f32, f32)>, Vec<(f32, f32)>) = (Vec::new(), Vec::new());
         let (mut done, mut found, mut lost) = (0u64, 0usize, 0usize);
+        let mut ended = false;
         let mut err: Option<String> = None;
-        for t in &times {
+        for (t, fresh) in &times {
             if prog.cancel.load(Ordering::Relaxed) {
                 err = Some("stopped".into());
                 break;
             }
             done += 1;
             prog.done.store(done, Ordering::Relaxed);
+            if *fresh {
+                // (the run back follows what was found at the first frame: nothing, no run)
+                (prev, lost, ended) = (first.clone(), 0, found == 0);
+            }
+            if ended {
+                continue;
+            }
             let Ok(f) = src.video_frame(filmcraft_media::FrameRequest { time: *t, scale }) else { continue };
             let (rgba, w, h) = crate::scenes::small_rgba(&f, SIDE as u32);
             let (w, h) = (w as usize, h as usize);
-            match find(&rgba, w, h, points) {
+            let look = Look { t: (*t - origin).abs().seconds(), fresh: *fresh };
+            match find(&rgba, w, h, points, look) {
                 Ok(Some(outline)) if outline.len() >= 3 => {
                     // picture pixels → clip pixels
                     let (kx, ky) = (size.0 as f32 / w.max(1) as f32, size.1 as f32 / h.max(1) as f32);
                     let pts: Vec<(f32, f32)> = outline.iter().map(|(x, y)| (x * kx, y * ky)).collect();
                     let pts = aligned(&prev, pts);
                     lock(&out).push((*t, polygon(&pts)));
+                    if found == 0 {
+                        first = pts.clone();
+                    }
                     prev = pts;
                     found += 1;
                     lost = 0;
                 }
                 Ok(_) => {
                     lost += 1;
-                    if lost_ends && found > 0 && lost > lost_limit {
-                        break;
-                    }
+                    ended = lost_ends && found > 0 && lost > lost_limit || anchored && found == 0;
                 }
                 Err(e) => {
                     err = Some(e);
@@ -502,27 +618,27 @@ pub(crate) fn outline_job(
     let outlines = s
         .active_sequence()
         .and_then(|q| q.find_item(clip))
-        .and_then(|(_, i)| i.effect("opacity"))
-        .and_then(|e| e.masks.iter().find(|m| m.name == name))
+        .and_then(|(_, i)| i.effects.get(effect))
+        .and_then(|e| e.masks.get(mask_index))
         .map_or(0, |m| m.path.keyframes.len());
-    Ok(json!({"job": id, "clip": clip.0, "mask": mask_index, "outlines": outlines, "status": st}))
+    Ok(json!({"job": id, "clip": clip.0, "effect": effect, "mask": mask_index, "outlines": outlines, "status": st}))
 }
 
 fn cut_out(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = CUT_CMD;
     let (_, it) = video_clip(s, p, cmd)?;
     let pick = pick_p(p, cmd)?;
-    let (every, points) = outline_params(p, cmd, POINTS)?;
+    let (every, points) = outline_params(p, cmd, None, POINTS)?;
     let cutter = cutter(s, cmd)?;
     // the person picked on the first frame, then whoever is where they were
     let mut last: Option<[f32; 4]> = None;
-    let find: FindOutline = Box::new(move |rgba, w, h, n| {
+    let find: FindOutline = Box::new(move |rgba, w, h, n, _| {
         Ok(cutter.cut(rgba, w, h, pick, last, n)?.map(|c| {
             last = Some(c.bbox);
             c.outline
         }))
     });
-    let o = Outlining { mask: PERSON, undo: "Cut Out the Person", what: "the person", not_found: "no one to cut out was found in the clip", lost_ends: true };
+    let o = Outlining { lost_ends: true, ..Outlining::new(PERSON, "Cut Out the Person", "the person", "no one to cut out was found in the clip") };
     outline_job(s, cmd, &it, o, every, points, find, crate::commands::bool_p(p, "wait").unwrap_or(false))
 }
 

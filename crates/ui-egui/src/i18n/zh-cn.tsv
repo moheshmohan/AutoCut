@@ -3971,3 +3971,18 @@
 	Sync 360° Motion Sensor	同步 360° 运动传感器
 	Upscale and Restore	放大与修复
 	Smooth Slow Motion	流畅慢动作
+	Object Mask	对象蒙版
+	Object	对象
+	Object Mask: click the thing in the Program monitor	对象蒙版：在节目监视器中点击对象
+	Click the thing in the Program monitor; Shift-click to add to it, Option-click to take away; then track the mask with its track buttons	在节目监视器中点击对象；Shift+点击可添加，Option+点击可去除；然后用蒙版的跟踪按钮跟踪
+	Masking the object (see Progress); Shift-click to add to it, Option-click to take away	正在为对象创建蒙版（参见进度）；Shift+点击可添加，Option+点击可去除
+	Download a Model	下载模型
+	Download	下载
+	Size:	大小：
+	Licence:	许可证：
+	Learnt from:	训练数据：
+	From:	来源：
+	{what} needs this model. It is downloaded once and runs on this computer.	{what}需要此模型。它只下载一次，并在这台电脑上运行。
+	Nothing is downloaded until you choose Download; its SHA-256 is checked and it is kept in FilmCraft's models folder.	在你选择“下载”之前不会下载任何内容；下载后会校验其 SHA-256，并保存在 FilmCraft 的模型文件夹中。
+	Nothing to download	没有可下载的内容
+	Downloading {name} (see Progress); choose {what} again when it finishes	正在下载 {name}（参见进度）；完成后请再次选择{what}

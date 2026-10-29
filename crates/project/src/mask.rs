@@ -510,15 +510,19 @@ pub enum TrackMethod {
     PositionRotation,
     #[default]
     PositionScaleRotation,
+    /// The thing the mask outlines, cut out again in every frame it is tracked to (Object Mask:
+    /// the segmenter, told where the thing went by a box tracker); the mask takes its shape.
+    Object,
 }
 
 impl TrackMethod {
-    pub const ALL: [TrackMethod; 3] = [TrackMethod::Position, TrackMethod::PositionRotation, TrackMethod::PositionScaleRotation];
+    pub const ALL: [TrackMethod; 4] = [TrackMethod::Position, TrackMethod::PositionRotation, TrackMethod::PositionScaleRotation, TrackMethod::Object];
     pub fn label(self) -> &'static str {
         match self {
             TrackMethod::Position => "Position",
             TrackMethod::PositionRotation => "Position & Rotation",
             TrackMethod::PositionScaleRotation => "Position, Scale & Rotation",
+            TrackMethod::Object => "Object",
         }
     }
     pub fn from_name(s: &str) -> Option<Self> {
@@ -526,6 +530,7 @@ impl TrackMethod {
             "position" => Some(TrackMethod::Position),
             "positionrotation" => Some(TrackMethod::PositionRotation),
             "positionscalerotation" => Some(TrackMethod::PositionScaleRotation),
+            "object" => Some(TrackMethod::Object),
             _ => None,
         }
     }

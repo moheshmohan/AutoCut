@@ -221,8 +221,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 ## G12. AI features
 
-- **Missing:** Object Mask (Premiere 26.0, #406, #694), Generative Extend (needs a large video
-  model; not reachable locally), media-intelligence search, caption translation, Auto Reframe beyond heuristics,
+- **Missing:** Generative Extend (needs a large video model; not reachable locally), media-intelligence search, caption translation, Auto Reframe beyond heuristics,
   auto colour, Auto-Tag Audio Types, speaker separation (voice isolation keeps every voice), WPE
   de-reverberation.
 - **Have:** local Whisper transcription (off in releases, G19), Kokoro-82M text-to-speech
@@ -234,7 +233,14 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   effects, Clip ▸ Depth: Depth Anything V2 Small on candle, downloaded on consent, the effects on
   the GPU; [ai-effects.md](ai-effects.md)), Upscale and Restore (Real-ESRGAN in WGSL on the
   GPU, a sharper copy shown in the media's place, downloaded on consent), Smooth Slow Motion
-  (RIFE 4.26 in WGSL on the GPU: frames made between a slowed clip's frames).
+  (RIFE 4.26 in WGSL on the GPU: frames made between a slowed clip's frames), Object Mask
+  (Premiere 26.0, #406, #694: a click on the Program monitor masks the thing there, MobileSAM
+  re-cutting it in every frame a box tracker says it went to; the mask tracking method Object;
+  0.95 overlap with a ball crossing behind a post where Track Mask managed 0.61; 0.6 s a frame),
+  and the desktop app's Download a Model dialog asking before any of these models is fetched.
+- **AI limits:** Object Mask follows a thing at 0.6 s a frame (MobileSAM's encoder on candle's
+  Metal), keeps no outline where the thing is mostly hidden and stops when it is gone for 1.5 s;
+  things touching something of their colour may take it with them.
 - **Privacy blur limits (measured 2026-10-19 on GITEX footage):** YuNet misses faces in
   profile and half-hidden ones; LPD-YuNet was trained on Chinese plates and fired only on
   badges and signs there (no vehicles to measure recall on); named targets depend on a 7B vision

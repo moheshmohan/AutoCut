@@ -359,6 +359,7 @@ fn status(_: &mut Session, _: &Value) -> Result<Value> {
         "bytes": c::UPSCALER.size,
         "license": c::UPSCALE_LICENSE,
         "source": c::UPSCALE_SOURCE,
+        "training": c::UPSCALE_TRAINING,
         "download": DOWNLOAD_CMD,
     }))
 }

@@ -4331,3 +4331,18 @@
 	Sync 360° Motion Sensor	Sincronizar el sensor de movimiento 360°
 	Upscale and Restore	Ampliar y restaurar
 	Smooth Slow Motion	Cámara lenta fluida
+	Object Mask	Máscara de objeto
+	Object	Objeto
+	Object Mask: click the thing in the Program monitor	Máscara de objeto: haz clic en el objeto en el monitor de programa
+	Click the thing in the Program monitor; Shift-click to add to it, Option-click to take away; then track the mask with its track buttons	Haz clic en el objeto en el monitor de programa; Mayús+clic para añadir, Opción+clic para quitar; luego sigue la máscara con sus botones de seguimiento
+	Masking the object (see Progress); Shift-click to add to it, Option-click to take away	Creando la máscara del objeto (ver Progreso); Mayús+clic para añadir, Opción+clic para quitar
+	Download a Model	Descargar un modelo
+	Download	Descargar
+	Size:	Tamaño:
+	Licence:	Licencia:
+	Learnt from:	Entrenado con:
+	From:	Origen:
+	{what} needs this model. It is downloaded once and runs on this computer.	{what} necesita este modelo. Se descarga una vez y se ejecuta en este ordenador.
+	Nothing is downloaded until you choose Download; its SHA-256 is checked and it is kept in FilmCraft's models folder.	No se descarga nada hasta que eliges Descargar; se comprueba su SHA-256 y se guarda en la carpeta de modelos de FilmCraft.
+	Nothing to download	No hay nada que descargar
+	Downloading {name} (see Progress); choose {what} again when it finishes	Descargando {name} (ver Progreso); elige {what} de nuevo cuando termine

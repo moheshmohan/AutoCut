@@ -35,7 +35,13 @@ image encoder distilled from Meta's Segment Anything on 1% of SA-1B (whose image
 research), read by candle's pickle reader (which runs nothing) and run on candle — Metal on macOS.
 `matte` turns its cut-out into the editor's outline: the person's keypoints and the sides of their
 box as the points it is given, and the largest piece traced round its edge and spaced into a
-fixed number of points that a keyframed mask follows.
+fixed number of points that a keyframed mask follows. `Segmenter::answers` also takes a box round
+the thing and gives all four answers (the unambiguous prompt's, then the three of an ambiguous
+one): Object Mask's tracker tells it where the thing went that way. candle's `Sam` takes points
+only and its prompt encoder drops a dimension embedding a box, so `segment` embeds the points and
+box corners itself (a random-Fourier code of each place plus its kind's learnt vector, from the
+same weights) and runs MobileSAM's mask decoder on them. 0.53 s a 1024 picture on the GPU, 3.2 s
+on the CPU; four answers to a prompt in 53 ms.
 
 **Depth Anything V2 Small** (`depth`, the 3D photo and depth blur of photos), downloaded by
 `depth.downloadModel` into its own folder: `depth_anything_v2_vits.pth` (99,218,434 B, the authors'

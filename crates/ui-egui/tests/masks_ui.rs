@@ -20,8 +20,12 @@ struct Driver {
 
 impl Driver {
     fn demo() -> Self {
+        Self::demo_with(|_| {})
+    }
+    fn demo_with(f: impl FnOnce(&mut Session)) -> Self {
         let mut session = Session::default();
         session.execute("file.openDemoProject", json!({})).expect("demo project");
+        f(&mut session);
         let (tx, rx) = channel();
         let app = FilmcraftApp::new(session).with_control(rx);
         let shots = std::env::var_os("FILMCRAFT_UI_SHOTS").map(std::path::PathBuf::from);
@@ -432,4 +436,120 @@ fn presets_bin_drag_and_save_dialog() {
     assert_eq!(mine["keyframes"], "Anchor to In Point");
     assert_eq!(mine["masks"], 1);
     d.rect("effects.preset.My Vignette");
+}
+
+/// The stand-in segmenter: the box round the points clicked on the thing, grown by a tenth of the
+/// picture's width.
+struct Boxes;
+
+struct BoxesPicture(usize, usize);
+
+impl filmcraft_engine::object_mask::ObjectCutter for Boxes {
+    fn picture(&self, _: &[u8], w: usize, h: usize) -> Result<Box<dyn filmcraft_engine::object_mask::Cuts + '_>, String> {
+        Ok(Box::new(BoxesPicture(w, h)))
+    }
+}
+
+impl filmcraft_engine::object_mask::Cuts for BoxesPicture {
+    fn cut(&self, p: &filmcraft_engine::object_mask::Prompt) -> Result<Vec<filmcraft_engine::object_mask::Matte>, String> {
+        let (w, h) = (self.0, self.1);
+        let pad = w as f32 * 0.1;
+        let (x0, y0, x1, y1) = p.inside.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, q| (b.0.min(q.0), b.1.min(q.1), b.2.max(q.0), b.3.max(q.1)));
+        let alpha = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                if x >= x0 - pad && x <= x1 + pad && y >= y0 - pad && y <= y1 + pad { 255 } else { 0 }
+            })
+            .collect();
+        Ok(vec![filmcraft_engine::object_mask::Matte { w, h, alpha, score: 0.9 }])
+    }
+}
+
+/// The Object Mask tool: a click on the Program monitor masks the thing there (a new mask on the
+/// effect, its outline at the frame), a Shift-click adds to the same mask, Escape ends the tool.
+#[test]
+fn the_object_mask_tool_masks_what_is_clicked() {
+    let mut d = Driver::demo_with(|s| s.cutouts.object = Some(std::sync::Arc::new(Boxes)));
+    d.ok("ui.set", json!({"workspace": "Effects"}));
+    let seq = d.exec("sequence.inspect", json!({}));
+    let clip = &seq["video"][0]["items"][0];
+    let (id, start, dur) = (clip["clip"].as_u64().unwrap(), clip["start"].as_i64().unwrap(), clip["duration"].as_i64().unwrap());
+    d.exec("playhead.set", json!({"time": start + dur / 2}));
+    d.exec("timeline.select", json!({"clips": [id]}));
+    d.frames(3);
+    d.ok("ui.click", json!({"id": "effectControls.opacity.mask.object"}));
+    d.frames(2);
+    if d.has("modelDownload.ok") {
+        // a build that downloads MobileSAM, not downloaded here: it is asked for first
+        d.ok("ui.click", json!({"id": "modelDownload.cancel"}));
+        d.frames(2);
+        assert!(!d.has("modelDownload.ok") && !d.has("program.objectMask"));
+        return;
+    }
+    let pic = d.rect("program.picture");
+    let at = |fx: f64, fy: f64| json!({"x": pic[0] + pic[2] * fx, "y": pic[1] + pic[3] * fy});
+    d.ok("ui.click", at(0.5, 0.5));
+    let wait = |d: &mut Driver, n: usize| {
+        for _ in 0..200 {
+            d.frames(1);
+            let m = d.masks();
+            if m.iter().any(|x| x["name"] == "Object (1)" && x["path"]["vertices"].as_array().is_some_and(|v| v.len() == n)) {
+                return m;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("no object mask: {:?}", d.masks());
+    };
+    let m = wait(&mut d, 128);
+    d.shot("object-mask-click");
+    let obj = m.iter().find(|x| x["name"] == "Object (1)").unwrap().clone();
+    assert_eq!((obj["mode"].as_str(), obj["trackMethod"].as_str()), (Some("Add"), Some("Object")), "{obj}");
+    let xs = |m: &Value| {
+        m["path"]["vertices"].as_array().unwrap().iter().map(|v| v["p"][0].as_f64().unwrap()).fold((f64::MAX, f64::MIN), |a, x| (a.0.min(x), a.1.max(x)))
+    };
+    let (x0, x1) = xs(&obj);
+    let w = seq["settings"]["width"].as_f64().unwrap();
+    assert!((x0 - w * 0.4).abs() < w * 0.03 && (x1 - w * 0.6).abs() < w * 0.03, "the box round the click: {x0} – {x1} of {w}");
+    // Shift-click to the right: the same mask, wider
+    let mut p = at(0.7, 0.5);
+    p["modifiers"] = json!({"shift": true});
+    d.ok("ui.click", p);
+    let mut wider = 0.0;
+    for _ in 0..200 {
+        d.frames(1);
+        let m = d.masks();
+        assert!(!m.iter().any(|x| x["name"] == "Object (2)"), "Shift adds to the mask: {m:?}");
+        wider = m.iter().find(|x| x["name"] == "Object (1)").map_or(0.0, |o| xs(o).1);
+        if wider > x1 + w * 0.1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(wider > x1 + w * 0.1, "{wider} after {x1}");
+    d.shot("object-mask-shift-click");
+    d.ok("ui.key", json!({"key": "Escape"}));
+    d.frames(2);
+    assert!(!d.has("program.objectMask"), "Escape ends the tool");
+}
+
+/// Download a Model: the model's facts, and nothing downloaded on Cancel.
+#[test]
+fn the_model_dialog_shows_what_is_downloaded() {
+    let mut d = Driver::demo();
+    let st = d.exec("cutout.status", json!({}));
+    let facts = st["segmenter"].clone();
+    d.harness.state_mut().ui.extras.dialog = Some(filmcraft_ui_egui::state::ClipDialogDraft {
+        command: "model.download".into(),
+        params: json!({"download": facts["download"]}),
+        info: json!({"model": facts, "for": "Object Mask"}),
+        error: String::new(),
+    });
+    d.frames(3);
+    assert!(d.has("modelDownload.ok") && d.has("modelDownload.cancel"));
+    d.shot("model-download-dialog");
+    let jobs = d.exec("jobs.list", json!({}));
+    d.ok("ui.click", json!({"id": "modelDownload.cancel"}));
+    d.frames(2);
+    assert!(!d.has("modelDownload.ok"), "Cancel closes it");
+    assert_eq!(d.exec("jobs.list", json!({})), jobs, "nothing downloaded");
 }

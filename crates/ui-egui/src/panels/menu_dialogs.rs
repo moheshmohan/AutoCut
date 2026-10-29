@@ -73,8 +73,42 @@ fn meta(command: &str) -> Option<(&'static str, &'static str, &'static str)> {
         "help.systemCompatibilityReport" => (tl!("System Compatibility Report"), "systemReport", tl!("Close")),
         "file.newColorMatte" => (tl!("New Color Matte"), "colorMatte", tl!("OK")),
         "project.matteColor" => (tl!("Color Matte Color"), "matteColor", tl!("OK")),
+        "model.download" => (tl!("Download a Model"), "modelDownload", tl!("Download")),
         _ => return None,
     })
+}
+
+/// Models downloaded only when the user agrees: the commands that need one, its status command,
+/// and where that status keeps its facts (`""`: at the top).
+const MODELS: [(&[&str], &str, &str); 4] = [
+    (&["clip.objectMask", "clip.cutOut"], "cutout.status", "segmenter"),
+    (&["clip.photo3d", "clip.depthBlur"], "depth.status", ""),
+    (&["media.upscale"], "upscale.status", ""),
+    (&["media.interpolate"], "interpolate.status", ""),
+];
+
+/// When command `id` needs a model that is not downloaded (and this build can download it): the
+/// dialog asking for it opened — its name, size, licence, what it learnt from and where it comes
+/// from — and true.
+pub fn ask_for_model(app: &mut FilmcraftApp, id: &str) -> bool {
+    let Some((_, status, _)) = MODELS.iter().find(|m| m.0.contains(&id)) else { return false };
+    let Ok(st) = app.session.execute(status, json!({})) else { return false };
+    let Some(d) = model_dialog(id, &st) else { return false };
+    app.ui.extras.dialog = Some(d);
+    true
+}
+
+/// The dialog asking for the model command `id` needs, given its status command's answer: `None`
+/// when it needs none, has it, or this build cannot download it.
+fn model_dialog(id: &str, status: &Value) -> Option<ClipDialogDraft> {
+    let (_, _, key) = MODELS.iter().find(|m| m.0.contains(&id))?;
+    let facts = if key.is_empty() { status.clone() } else { status[*key].clone() };
+    if status["available"] != json!(true) || facts["installed"] != json!(false) || !facts["download"].is_string() {
+        return None;
+    }
+    let label = filmcraft_engine::find_command(id).map_or(id, |c| c.label);
+    let info = json!({"model": facts, "for": crate::i18n::t(label)});
+    Some(ClipDialogDraft { command: "model.download".into(), params: json!({"download": facts["download"]}), info, error: String::new() })
 }
 
 /// Commands whose menu item opens a dialog (the Project Settings items share one).
@@ -284,6 +318,10 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: &Val
             }));
         }
         _ => {}
+    }
+    // a model it needs and the user has not agreed to download: ask first
+    if ask_for_model(app, id) {
+        return Some(Ok(json!({"dialog": "modelDownload"})));
     }
     if !empty {
         return None;
@@ -799,6 +837,22 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     ));
                 }
             }
+            "model.download" => {
+                let m = &d.info["model"];
+                let s = |k: &str| m[k].as_str().unwrap_or_default().to_string();
+                ui.label(RichText::new(s("name")).strong());
+                ui.label(tlf!("{what} needs this model. It is downloaded once and runs on this computer.", what = d.info["for"].as_str().unwrap_or_default()));
+                ui.add_space(4.0);
+                let mb = format!("{:.1} MB", m["bytes"].as_f64().unwrap_or(0.0) / 1e6);
+                egui::Grid::new("model-download-facts").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+                    for (k, v) in [(tl!("Size:"), mb), (tl!("Licence:"), s("license")), (tl!("Learnt from:"), s("training")), (tl!("From:"), s("source"))] {
+                        ui.label(RichText::new(k).strong());
+                        ui.add(egui::Label::new(v).wrap_mode(egui::TextWrapMode::Wrap));
+                        ui.end_row();
+                    }
+                });
+                ui.small(tl!("Nothing is downloaded until you choose Download; its SHA-256 is checked and it is kept in FilmCraft's models folder."));
+            }
             "sequence.normalizeMixTrack" => number(ui, &mut elems, pre, p, "db", tl!("Normalize Mix Track to:"), -96.0..=24.0, " dB"),
             "sequence.simplify" => {
                 text(ui, &mut elems, pre, p, "name", tl!("Sequence Name:"), 240.0);
@@ -977,6 +1031,20 @@ fn run(app: &mut FilmcraftApp, d: &ClipDialogDraft) -> Result<Option<String>, St
             app.ui.status = tl!("Scene Edit Detection: analysing in the background (see Progress)").into();
             Ok(None)
         }
+        "model.download" => {
+            // the user agreed in the dialog, its facts shown
+            let cmd = p["download"].as_str().unwrap_or_default().to_string();
+            if filmcraft_engine::find_command(&cmd).is_none() {
+                return Err(tl!("Nothing to download").into());
+            }
+            s.execute(&cmd, json!({})).map_err(|e| e.to_string())?;
+            app.ui.status = tlf!(
+                "Downloading {name} (see Progress); choose {what} again when it finishes",
+                name = d.info["model"]["name"].as_str().unwrap_or_default(),
+                what = d.info["for"].as_str().unwrap_or_default()
+            );
+            Ok(None)
+        }
         "clip.autoRedact" => {
             if d.info["installed"] != json!(true) {
                 // the user agreed to the download in the dialog (size, source and licence shown):
@@ -1079,6 +1147,38 @@ pub fn search_bin_rows(
             let bin =
                 filmcraft_project::Bin { id: sb.id, name: sb.name.clone(), children: matches.into_iter().map(filmcraft_project::BinEntry::Item).collect() };
             draw_items(app, ui, &bin, row, actions);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A model is asked for only when the command needs one, the build can download it and it is
+    /// not downloaded; the dialog names it, what needs it and the command that downloads it.
+    #[test]
+    fn a_model_is_asked_for_when_it_is_missing() {
+        let seg = |available: bool, installed: bool| json!({"available": available, "segmenter": {"name": "MobileSAM", "installed": installed, "bytes": 40_000_000, "license": "Apache-2.0", "source": "x", "training": "y", "download": "cutout.downloadModel"}});
+        let d = model_dialog("clip.objectMask", &seg(true, false)).expect("asked");
+        assert_eq!((d.command.as_str(), &d.params["download"]), ("model.download", &json!("cutout.downloadModel")));
+        assert_eq!((&d.info["model"]["name"], &d.info["for"]), (&json!("MobileSAM"), &json!("Object Mask")));
+        assert!(model_dialog("clip.objectMask", &seg(true, true)).is_none(), "downloaded");
+        assert!(model_dialog("clip.objectMask", &seg(false, false)).is_none(), "a build without the models");
+        assert!(model_dialog("clip.cutOut", &seg(true, false)).is_some());
+        assert!(model_dialog("edit.undo", &seg(true, false)).is_none(), "needs no model");
+        let depth = json!({"available": true, "installed": false, "name": "Depth Anything V2 Small", "download": "depth.downloadModel"});
+        assert_eq!(model_dialog("clip.photo3d", &depth).map(|d| d.params["download"].clone()), Some(json!("depth.downloadModel")));
+        assert!(model_dialog("clip.photo3d", &json!({"available": true, "installed": false})).is_none(), "no download command named");
+        // every model's status command and download command exist
+        for (cmds, status, _) in MODELS {
+            assert!(filmcraft_engine::find_command(status).is_some(), "{status}");
+            for c in cmds {
+                assert!(filmcraft_engine::find_command(c).is_some(), "{c}");
+            }
+        }
+        for c in ["cutout.downloadModel", "depth.downloadModel", "upscale.downloadModel", "interpolate.downloadModel"] {
+            assert!(filmcraft_engine::find_command(c).is_some(), "{c}");
         }
     }
 }

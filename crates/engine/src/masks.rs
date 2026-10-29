@@ -14,6 +14,10 @@
 //! triangle, regular polygon, cross, arrow, cinematic bars and diagonal split. Each is an ordinary
 //! path (`MaskPath::star`, `::heart`, `::letterbox`, …), edited, keyframed and tracked like any
 //! other mask; hostile counts, ratios and coordinates are refused with an error.
+//!
+//! `masks.track` follows a mask's picture with feature points (position, rotation, scale), or —
+//! its method `object` — the thing it outlines, cut out again in every frame
+//! ([`crate::object_mask`]).
 
 use filmcraft_geom::{Affine, Vec2};
 use filmcraft_project::{ClipId, EffectInstance, Mask, MaskMode, MaskPath, MaskVertex, ParamValue, TrackKind, TrackMethod};
@@ -51,7 +55,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         spec(
             "masks.set",
             "Change Mask",
-            r#"{"clip":id?,"effect":index|id?,"mask":n?,"name":str?,"inverted":bool?,"mode":"none|add|subtract|intersect|lighten|darken|difference"?,"trackMethod":"position|positionRotation|positionScaleRotation"?,"feather":px?,"opacity":pct?,"expansion":px?,"path":path?,"time":ticks?,"merge":key?}"#,
+            r#"{"clip":id?,"effect":index|id?,"mask":n?,"name":str?,"inverted":bool?,"mode":"none|add|subtract|intersect|lighten|darken|difference"?,"trackMethod":"position|positionRotation|positionScaleRotation|object"?,"feather":px?,"opacity":pct?,"expansion":px?,"path":path?,"time":ticks?,"merge":key?}"#,
             set,
         ),
         spec(
@@ -66,7 +70,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         spec(
             "masks.track",
             "Track Selected Mask",
-            r#"{"clip":id?,"effect":index|id?,"mask":n?,"direction":"forward"|"backward"?,"frames":n?,"method":"position|positionRotation|positionScaleRotation"?,"wait":bool?}"#,
+            r#"{"clip":id?,"effect":index|id?,"mask":n?,"direction":"forward"|"backward"?,"frames":n?,"method":"position|positionRotation|positionScaleRotation|object"?,"wait":bool?}"#,
             track,
         ),
         spec("masks.toggleVertexSmooth", "Convert Mask Vertex", r#"{"clip":id?,"effect":index|id?,"mask":n?,"vertex":n}"#, toggle_smooth),
@@ -163,7 +167,7 @@ fn target_clip(s: &Session, p: &Value) -> Result<ClipId> {
         .ok_or_else(|| bad("masks", "select a video clip (or pass `clip`)"))
 }
 
-fn effect_index(effects: &[EffectInstance], v: Option<&Value>, sel: Option<MaskSel>, clip: ClipId) -> Option<usize> {
+pub(crate) fn effect_index(effects: &[EffectInstance], v: Option<&Value>, sel: Option<MaskSel>, clip: ClipId) -> Option<usize> {
     match v {
         Some(Value::Number(n)) => n.as_u64().map(|n| n as usize).filter(|i| *i < effects.len()),
         Some(Value::String(id)) => effects.iter().position(|e| &e.effect == id),
@@ -783,6 +787,19 @@ fn track(s: &mut Session, p: &Value) -> Result<Value> {
     let rate = s.project.item(it.item).map(|i| i.frame_rate()).unwrap_or(seq.settings.frame_rate);
     let fd = rate.frame_duration();
     let ph = time_p(s, p, "").unwrap_or(s.playhead());
+    if method == TrackMethod::Object {
+        // the thing the mask outlines, cut out again frame by frame (Object Mask)
+        let span = u64_p(p, "frames").map(|n| Tick(fd.0.saturating_mul(n.min(i64::MAX as u64) as i64)));
+        return crate::object_mask::track_mask(
+            s,
+            &it,
+            MaskSel { clip, effect: ei, mask: mi },
+            ph,
+            backward,
+            span,
+            crate::commands::bool_p(p, "wait").unwrap_or(false),
+        );
+    }
     let mt0 = it.source_time_at(ph.clamp(it.start, it.end() - Tick(1)));
     let (a, b) = (it.source_time_at(it.start), it.source_time_at(it.end() - Tick(1)));
     let (lo, hi) = (a.min(b), a.max(b));

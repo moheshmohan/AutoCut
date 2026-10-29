@@ -3574,6 +3574,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::vr360::commands());
     v.extend(crate::cutout::commands());
     v.extend(crate::sky::commands());
+    v.extend(crate::object_mask::commands());
     v.extend(crate::depth::commands());
     v.extend(crate::upscale::commands());
     v.extend(crate::interpolate::commands());

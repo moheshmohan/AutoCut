@@ -5,11 +5,19 @@
 //! A picture is embedded once ([`Segmenter::embed`]: its long side scaled to 1024, the encoder
 //! run), then any number of prompts are answered from the embedding ([`Segmenter::cut`]: the mask
 //! decoder's three answers, the surest kept, its 256 × 256 logits scaled up to the picture
-//! bilinearly and thresholded softly at the edge).
+//! bilinearly and thresholded softly at the edge). [`Segmenter::answers`] also takes a box round
+//! the thing (how a tracker tells it where the thing went) and gives all four answers: the one
+//! made for a prompt that is not ambiguous, then the three for one that is. (candle's `Sam` takes
+//! points only and its prompt encoder drops a dimension embedding a box, so the prompt's points
+//! and box corners are embedded here — each a random-Fourier code of where it is plus its kind's
+//! learnt vector, as Segment Anything does — from the same weights, and its mask decoder is built
+//! a second time.)
 
 use std::path::Path;
 
 use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_transformers::models::segment_anything::mask_decoder::MaskDecoder;
+use candle_transformers::models::segment_anything::prompt_encoder::PromptEncoder;
 use candle_transformers::models::segment_anything::sam::{IMAGE_SIZE, Sam};
 
 use crate::matte::Matte;
@@ -19,10 +27,69 @@ fn err(e: impl std::fmt::Display) -> VisionError {
     VisionError::Model(format!("segmenter: {e}"))
 }
 
+/// The width of the prompt embeddings and the side of the image embedding (as candle's `Sam`).
+const PROMPT_DIM: usize = 256;
+const EMBEDDING_SIDE: usize = IMAGE_SIZE / 16;
+/// Most points one prompt takes.
+const MAX_POINTS: usize = 32;
+
 /// The segmenter, loaded.
 pub struct Segmenter {
     sam: Sam,
+    prompts: PromptEncoder,
+    sparse: Sparse,
+    decoder: MaskDecoder,
     dev: Device,
+}
+
+/// What embeds a prompt's points and box corners: the position code's Gaussian matrix (2 × 128,
+/// row-major) and the learnt vectors of a point off the thing, on it, a box's top-left and
+/// bottom-right corners, and of no point (the padding after points given without a box).
+struct Sparse {
+    gauss: Vec<f32>,
+    kinds: [Vec<f32>; 4],
+    none: Vec<f32>,
+}
+
+impl Sparse {
+    fn load(vb: &candle_nn::VarBuilder) -> Result<Self, VisionError> {
+        let vec = |t: Tensor| t.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.to_vec1::<f32>()).map_err(err);
+        let gauss = vec(vb.pp("pe_layer").get((2, PROMPT_DIM / 2), "positional_encoding_gaussian_matrix").map_err(err)?)?;
+        let kind = |i: usize| vec(vb.pp("point_embeddings").pp(i).get((1, PROMPT_DIM), "weight").map_err(err)?);
+        let kinds = [kind(0)?, kind(1)?, kind(2)?, kind(3)?];
+        let none = vec(vb.pp("not_a_point_embed").get((1, PROMPT_DIM), "weight").map_err(err)?)?;
+        Ok(Self { gauss, kinds, none })
+    }
+
+    /// The code of a place in the 1024 square (its pixels): sines then cosines of its random
+    /// projections.
+    fn code(&self, x: f32, y: f32) -> Vec<f32> {
+        let half = PROMPT_DIM / 2;
+        let (cx, cy) = (2.0 * x / IMAGE_SIZE as f32 - 1.0, 2.0 * y / IMAGE_SIZE as f32 - 1.0);
+        let proj: Vec<f32> = (0..half)
+            .map(|j| std::f32::consts::TAU * (cx * self.gauss.get(j).copied().unwrap_or(0.0) + cy * self.gauss.get(half + j).copied().unwrap_or(0.0)))
+            .collect();
+        proj.iter().map(|v| v.sin()).chain(proj.iter().map(|v| v.cos())).collect()
+    }
+
+    /// The prompt's embeddings `(1, n, 256)`: each point (`(x, y)` in the 1024 square, on the
+    /// thing or not), then the box's two corners — or, without a box, a padding "no point".
+    fn embed(&self, points: &[((f32, f32), bool)], bbox: Option<[f32; 4]>, dev: &Device) -> Result<Tensor, VisionError> {
+        let mut rows: Vec<f32> = Vec::with_capacity((points.len() + 2) * PROMPT_DIM);
+        let mut put = |code: Vec<f32>, kind: &[f32]| rows.extend(code.iter().zip(kind).map(|(a, b)| a + b));
+        for ((x, y), on) in points {
+            put(self.code(x + 0.5, y + 0.5), &self.kinds[usize::from(*on)]);
+        }
+        match bbox {
+            Some(b) => {
+                put(self.code(b[0] + 0.5, b[1] + 0.5), &self.kinds[2]);
+                put(self.code(b[2] + 0.5, b[3] + 0.5), &self.kinds[3]);
+            }
+            None => rows.extend_from_slice(&self.none),
+        }
+        let n = rows.len() / PROMPT_DIM;
+        Tensor::from_vec(rows, (1, n, PROMPT_DIM), dev).map_err(err)
+    }
 }
 
 /// A picture as the segmenter sees it: its encoder's embedding, and its size as scaled for it.
@@ -63,14 +130,18 @@ impl Segmenter {
         }
         let path = catalog::segment_dir(models_dir).join(catalog::SEGMENTER.name);
         let dev = device(gpu);
-        let load = |dev: &Device| -> Result<Sam, VisionError> {
+        let load = |dev: &Device| -> Result<Self, VisionError> {
             let vb = candle_nn::VarBuilder::from_pth(&path, DType::F32, dev).map_err(err)?;
-            Sam::new_tiny(vb).map_err(err)
+            let prompts =
+                PromptEncoder::new(PROMPT_DIM, (EMBEDDING_SIDE, EMBEDDING_SIDE), (IMAGE_SIZE, IMAGE_SIZE), 16, vb.pp("prompt_encoder")).map_err(err)?;
+            let sparse = Sparse::load(&vb.pp("prompt_encoder"))?;
+            let decoder = MaskDecoder::new(PROMPT_DIM, 3, 3, 256, vb.pp("mask_decoder")).map_err(err)?;
+            Ok(Self { sam: Sam::new_tiny(vb).map_err(err)?, prompts, sparse, decoder, dev: dev.clone() })
         };
         match load(&dev) {
-            Ok(sam) => Ok(Self { sam, dev }),
+            Ok(s) => Ok(s),
             // (the GPU refused it: the CPU)
-            Err(_) if !matches!(dev, Device::Cpu) => Ok(Self { sam: load(&Device::Cpu)?, dev: Device::Cpu }),
+            Err(_) if !matches!(dev, Device::Cpu) => load(&Device::Cpu),
             Err(e) => Err(e),
         }
     }
@@ -115,31 +186,75 @@ impl Segmenter {
     }
 
     /// The cut-out of what is at `inside` and not at `outside` (the picture's pixels), at the
-    /// embedded picture's size ([`Embedded::size`]; [`Embedded::scale`] maps the picture to it).
+    /// embedded picture's size ([`Embedded::size`]; [`Embedded::scale`] maps the picture to it):
+    /// the surest of the three answers for an ambiguous prompt.
     pub fn cut(&self, e: &Embedded, inside: &[(f32, f32)], outside: &[(f32, f32)]) -> Result<Matte, VisionError> {
-        let norm = |(x, y): &(f32, f32)| (f64::from(x * e.scale / e.w as f32).clamp(0.0, 1.0), f64::from(y * e.scale / e.h as f32).clamp(0.0, 1.0));
-        let points: Vec<(f64, f64, bool)> = inside
-            .iter()
-            .filter(|p| p.0.is_finite() && p.1.is_finite())
-            .map(|p| (norm(p).0, norm(p).1, true))
-            .chain(outside.iter().filter(|p| p.0.is_finite() && p.1.is_finite()).map(|p| (norm(p).0, norm(p).1, false)))
-            .take(32)
-            .collect();
-        if !points.iter().any(|p| p.2) {
+        if !inside.iter().any(|p| p.0.is_finite() && p.1.is_finite()) {
             return Err(VisionError::Invalid("no point on what to cut out".into()));
         }
-        let (masks, iou) = self.sam.forward_for_embeddings(&e.emb, e.h, e.w, &points, true).map_err(err)?;
-        // the surest of the three answers
+        let (masks, scores) = self.decode(e, inside, outside, None, true)?;
+        let best = scores.iter().copied().enumerate().filter(|(_, s)| s.is_finite()).fold((0usize, f32::MIN), |a, b| if b.1 > a.1 { b } else { a }).0;
+        self.matte(e, &masks, best, scores.get(best).copied().unwrap_or(0.0))
+    }
+
+    /// Every answer to a prompt — points on the thing (`inside`), beside it (`outside`) and a box
+    /// round it (`bbox`, `[x0, y0, x1, y1]`), all in the picture's pixels: the answer for a prompt
+    /// that is not ambiguous first, then the three for one that is, each at the embedded
+    /// picture's size with how sure the segmenter is of it.
+    pub fn answers(&self, e: &Embedded, inside: &[(f32, f32)], outside: &[(f32, f32)], bbox: Option<[f32; 4]>) -> Result<Vec<Matte>, VisionError> {
+        let bbox = bbox.filter(|b| b.iter().all(|v| v.is_finite()) && b[2] > b[0] && b[3] > b[1]);
+        if bbox.is_none() && !inside.iter().any(|p| p.0.is_finite() && p.1.is_finite()) {
+            return Err(VisionError::Invalid("no point or box on what to cut out".into()));
+        }
+        let mut out = Vec::with_capacity(4);
+        for multi in [false, true] {
+            let (masks, scores) = self.decode(e, inside, outside, bbox, multi)?;
+            for (i, s) in scores.iter().enumerate() {
+                out.push(self.matte(e, &masks, i, *s)?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The decoder's low-resolution logits `(1, n, 256, 256)` and how sure it is of each.
+    fn decode(
+        &self,
+        e: &Embedded,
+        inside: &[(f32, f32)],
+        outside: &[(f32, f32)],
+        bbox: Option<[f32; 4]>,
+        multi: bool,
+    ) -> Result<(Tensor, Vec<f32>), VisionError> {
+        // picture pixels → the embedded picture's (the 1024 square's top-left)
+        let (kw, kh) = (e.w as f32, e.h as f32);
+        let to = |(x, y): &(f32, f32)| ((x * e.scale).clamp(0.0, kw), (y * e.scale).clamp(0.0, kh));
+        let ok = |p: &&(f32, f32)| p.0.is_finite() && p.1.is_finite();
+        let points: Vec<((f32, f32), bool)> =
+            inside.iter().filter(ok).map(|p| (to(p), true)).chain(outside.iter().filter(ok).map(|p| (to(p), false))).take(MAX_POINTS).collect();
+        let bbox = bbox.map(|b| {
+            let ((x0, y0), (x1, y1)) = (to(&(b[0], b[1])), to(&(b[2], b[3])));
+            [x0, y0, x1, y1]
+        });
+        let sparse = self.sparse.embed(&points, bbox, &self.dev)?;
+        // (no mask given: the dense part is the "no mask" vector everywhere)
+        let (_, dense) = self.prompts.forward(None, None, None).map_err(err)?;
+        let pe = self.prompts.get_dense_pe().map_err(err)?;
+        let (masks, iou) = self.decoder.forward(&e.emb, &pe, &sparse, &dense, multi).map_err(err)?;
         let scores: Vec<f32> = iou.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.to_vec1()).map_err(err)?;
-        let (best, score) = scores.iter().copied().enumerate().filter(|(_, s)| s.is_finite()).fold((0usize, f32::MIN), |a, b| if b.1 > a.1 { b } else { a });
-        let low = masks.i((0, best)).map_err(err)?;
+        Ok((masks, scores))
+    }
+
+    /// Answer `i` of the decoder's logits as a cut-out at the embedded picture's size.
+    fn matte(&self, e: &Embedded, masks: &Tensor, i: usize, score: f32) -> Result<Matte, VisionError> {
+        let low = masks.i((0, i)).map_err(err)?;
         // the 256 × 256 logits cover the 1024 square the picture sits in, top-left
         let side = IMAGE_SIZE;
         let up = low.unsqueeze(0).and_then(|t| t.unsqueeze(0)).and_then(|t| t.upsample_bilinear2d(side, side, false)).map_err(err)?;
         let up = up.i((0, 0, ..e.h, ..e.w)).and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.flatten_all()).and_then(|t| t.to_vec1::<f32>()).map_err(err)?;
         // logits to coverage: a soft edge a logit wide either side of 0
         let alpha = up.iter().map(|v| if v.is_finite() { ((v * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8 } else { 0 }).collect();
-        Ok(Matte { w: e.w, h: e.h, alpha, score: score.clamp(0.0, 1.0) })
+        let score = if score.is_finite() { score.clamp(0.0, 1.0) } else { 0.0 };
+        Ok(Matte { w: e.w, h: e.h, alpha, score })
     }
 }
 
@@ -192,6 +307,16 @@ mod tests {
         assert!(at(320.0, 220.0) > 200 && at(320.0, 90.0) > 200, "the figure is in");
         assert!(at(100.0, 100.0) < 50 && at(560.0, 300.0) < 50, "the ground is out");
         assert!(seg.cut(&e, &[], &[(1.0, 1.0)]).is_err());
+        // a box round the figure alone: the answer for an unambiguous prompt is the figure
+        let t = std::time::Instant::now();
+        let a = seg.answers(&e, &[], &[], Some([255.0, 50.0, 385.0, 340.0])).unwrap();
+        eprintln!("four answers to a box in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(a.len(), 4);
+        let at = |m: &Matte, x: f32, y: f32| m.at((x * s) as usize, (y * s) as usize);
+        assert!(at(&a[0], 320.0, 220.0) > 200 && at(&a[0], 320.0, 90.0) > 200, "the figure is in");
+        assert!(at(&a[0], 100.0, 100.0) < 50 && at(&a[0], 560.0, 300.0) < 50, "the ground is out");
+        assert!(seg.answers(&e, &[], &[], None).is_err());
+        assert!(seg.answers(&e, &[], &[], Some([10.0, 10.0, 5.0, 5.0])).is_err(), "an empty box");
         assert!(seg.embed(&rgba[..100], w, h).is_err());
     }
 }

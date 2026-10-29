@@ -270,6 +270,7 @@ fn status(_: &mut Session, _: &Value) -> Result<Value> {
         "bytes": c::DEPTH.size,
         "license": c::DEPTH_LICENSE,
         "source": c::DEPTH_SOURCE,
+        "training": c::DEPTH_TRAINING,
         "download": DOWNLOAD_CMD,
         "gpu": filmcraft_render::depth::on_gpu(),
     }))

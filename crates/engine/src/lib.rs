@@ -64,6 +64,7 @@ pub mod music_neural;
 pub mod music_preview;
 pub mod nadir;
 pub mod narration;
+pub mod object_mask;
 pub mod panels;
 pub mod paste_media;
 pub mod perf;

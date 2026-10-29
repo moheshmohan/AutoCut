@@ -4330,3 +4330,18 @@
 	Sync 360° Motion Sensor	360° モーションセンサーを同期
 	Upscale and Restore	アップスケールと修復
 	Smooth Slow Motion	なめらかなスローモーション
+	Object Mask	オブジェクトマスク
+	Object	オブジェクト
+	Object Mask: click the thing in the Program monitor	オブジェクトマスク: プログラムモニターで対象をクリック
+	Click the thing in the Program monitor; Shift-click to add to it, Option-click to take away; then track the mask with its track buttons	プログラムモニターで対象をクリックします。Shift+クリックで追加、Option+クリックで除外し、マスクのトラッキングボタンで追跡します
+	Masking the object (see Progress); Shift-click to add to it, Option-click to take away	オブジェクトをマスク中 (進行状況を参照)。Shift+クリックで追加、Option+クリックで除外
+	Download a Model	モデルのダウンロード
+	Download	ダウンロード
+	Size:	サイズ:
+	Licence:	ライセンス:
+	Learnt from:	学習データ:
+	From:	入手元:
+	{what} needs this model. It is downloaded once and runs on this computer.	{what}にはこのモデルが必要です。ダウンロードは一度だけで、このコンピューター上で動作します。
+	Nothing is downloaded until you choose Download; its SHA-256 is checked and it is kept in FilmCraft's models folder.	「ダウンロード」を選ぶまで何もダウンロードされません。SHA-256 を確認したうえで、FilmCraft のモデルフォルダーに保存します。
+	Nothing to download	ダウンロードするものがありません
+	Downloading {name} (see Progress); choose {what} again when it finishes	{name}をダウンロード中 (進行状況を参照)。終わったら{what}をもう一度選んでください

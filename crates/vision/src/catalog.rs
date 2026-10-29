@@ -89,6 +89,8 @@ pub const SEGMENT_PACKAGE_ID: &str = "mobile-sam";
 pub const SEGMENT_NAME: &str = "MobileSAM (people and objects cut out of a picture)";
 pub const SEGMENT_LICENSE: &str = "Apache-2.0 (MobileSAM, Chaoning Zhang et al., Kyung Hee University; distilled from Meta's Segment Anything on 1% of SA-1B)";
 pub const SEGMENT_SOURCE: &str = "https://github.com/ChaoningZhang/MobileSAM (weights/mobile_sam.pt)";
+/// What MobileSAM learnt from, as a consent dialog says it.
+pub const SEGMENT_TRAINING: &str = "1% of SA-1B (Meta's 11M licensed photos; SA-1B's own licence is for research), distilled from Segment Anything";
 
 /// MobileSAM's weights: a TinyViT image encoder with Segment Anything's prompt encoder and mask
 /// decoder, as the authors' repository holds them (a PyTorch state dict, read by candle's pickle
@@ -125,6 +127,7 @@ pub const DEPTH_NAME: &str = "Depth Anything V2 Small (how near each part of a p
 pub const DEPTH_LICENSE: &str =
     "Apache-2.0 (Depth Anything V2 Small, Lihe Yang et al., HKU and TikTok; its Base, Large and Giant models are non-commercial and not used)";
 pub const DEPTH_SOURCE: &str = "https://huggingface.co/depth-anything/Depth-Anything-V2-Small (depth_anything_v2_vits.pth)";
+pub const DEPTH_TRAINING: &str = "595K synthetic pictures (Hypersim, Virtual KITTI 2, BlendedMVS, IRS, TartanAir), then 62M real pictures of public datasets labelled by a larger model; some of those datasets' terms are for research";
 
 /// Depth Anything V2 Small's weights: a DINOv2 ViT-S/14 encoder and a DPT head, as the authors
 /// publish them (a PyTorch state dict, read by candle's pickle reader, which runs nothing). Trained
@@ -162,6 +165,7 @@ pub const UPSCALE_PACKAGE_ID: &str = "real-esrgan";
 pub const UPSCALE_NAME: &str = "Real-ESRGAN general x4v3 (pictures made larger and cleaner)";
 pub const UPSCALE_LICENSE: &str = "BSD-3-Clause (Real-ESRGAN, Xintao Wang et al., Tencent ARC Lab)";
 pub const UPSCALE_SOURCE: &str = "https://github.com/xinntao/Real-ESRGAN (release v0.2.5.0, realesr-general-x4v3.pth)";
+pub const UPSCALE_TRAINING: &str = "DF2K (DIV2K and Flickr2K) and OST, degraded on purpose; DIV2K's terms are for academic research";
 
 /// Real-ESRGAN's `realesr-general-x4v3`: SRVGGNetCompact, 64 features, 32 convolutions with
 /// PReLUs, ×4 (a PyTorch state dict under `params`, read by candle's pickle reader, which runs
@@ -198,6 +202,7 @@ pub const INTERP_PACKAGE_ID: &str = "rife-4.26";
 pub const INTERP_NAME: &str = "RIFE 4.26 (frames made between frames)";
 pub const INTERP_LICENSE: &str = "MIT (Practical-RIFE, Zhewei Huang et al.)";
 pub const INTERP_SOURCE: &str = "https://huggingface.co/hzwer/RIFE (RIFEv4.26_0921.zip, the author's upload)";
+pub const INTERP_TRAINING: &str = "not published for the 4.x models (the first RIFE models learnt from Vimeo-90K)";
 
 /// RIFE 4.26 as its author publishes it: a zip of the network's PyTorch state dict
 /// (`flownet.pkl`, read by candle's pickle reader, which runs nothing) and its Python files

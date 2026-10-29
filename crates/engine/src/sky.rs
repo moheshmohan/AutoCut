@@ -273,10 +273,10 @@ fn models() -> (Arc<dyn SkyFinder>, bool) {
 fn find_sky(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = FIND_CMD;
     let (_, it) = crate::cutout::video_clip(s, p, cmd)?;
-    let (every, points) = crate::cutout::outline_params(p, cmd, POINTS)?;
+    let (every, points) = crate::cutout::outline_params(p, cmd, None, POINTS)?;
     let (f, refined) = finder(s);
-    let find: FindOutline = Box::new(move |rgba, w, h, n| f.find(rgba, w, h, n));
-    let o = Outlining { mask: SKY, undo: "Find the Sky", what: "the sky", not_found: "no sky was found in the clip", lost_ends: false };
+    let find: FindOutline = Box::new(move |rgba, w, h, n, _| f.find(rgba, w, h, n));
+    let o = Outlining::new(SKY, "Find the Sky", "the sky", "no sky was found in the clip");
     let mut r = crate::cutout::outline_job(s, cmd, &it, o, every, points, find, crate::commands::bool_p(p, "wait").unwrap_or(false))?;
     r["refined"] = json!(refined);
     Ok(r)

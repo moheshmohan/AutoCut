@@ -7,11 +7,19 @@ and checked against its SHA-256, and is never bundled or committed. Only weights
 MIT or BSD licences are used, never non-commercial ones. Each runs on the GPU (Metal on macOS)
 with the CPU as the fallback.
 
+**Asking first.** In the desktop app, a command needing a model that is not downloaded — from a
+menu, a tool or the control channel — opens **Download a Model** instead of running: the model's
+name, what needs it, its size, licence, what it learnt from and where it comes from; nothing is
+downloaded until the user chooses Download (the download is a job in Progress; the command is
+chosen again when it finishes). Agents and the CLI ask the user themselves, then call the
+`*.downloadModel` command (each model's `*.status` gives the same facts, `training` among them).
+
 | Feature | Commands | Model | Licence | Download |
 |---|---|---|---|---|
 | Photos in depth: the 3D photo, depth blur | `clip.photo3d`, `clip.depthBlur` (Clip ▸ Depth), the effects 3D Photo (Perspective) and Depth Blur (Blur & Sharpen) | Depth Anything V2 Small | Apache-2.0 | 99.2 MB, `depth.downloadModel` |
 | Upscale and Restore: photos and videos made larger and cleaner | `media.upscale` (Clip ▸ Modify) | Real-ESRGAN general x4v3 | BSD-3-Clause | 4.9 MB, `upscale.downloadModel` |
 | Smooth Slow Motion: frames made between a video's frames | `media.interpolate` (Clip ▸ Modify) | RIFE 4.26 | MIT | 22.9 MB, `interpolate.downloadModel` |
+| Object Mask: a thing masked from a click and followed through the clip | `clip.objectMask` (Clip ▸ Cut-outs; Effect Controls ▸ a mask row's sparkle), `masks.track` with the method Object | MobileSAM | Apache-2.0 | 40.7 MB, `cutout.downloadModel` |
 
 ## Photos in depth
 
@@ -67,8 +75,7 @@ same arithmetic; the GPU's pictures within 1e-6 of the CPU's):
 own moves; the commands refuse both, saying why (the effects themselves work on any picture). What
 a near thing uncovers is the picture behind it stretched — nothing is painted in yet — so the
 moves stay small (a few percent of the width). Depth is relative (near to far within the picture,
-not metres); glass, mirrors and fine hair are where it is least sure. In the desktop app the
-download has no dialog yet: agents and the CLI download it (`depth.downloadModel`).
+not metres); glass, mirrors and fine hair are where it is least sure.
 
 ## Upscale and Restore
 
@@ -124,8 +131,7 @@ with it, so the frames are sharper without much shimmer of their own (each frame
 those `strength` 0.6–0.8 keeps some of the picture's own grain. Faces are not restored as faces
 (no face model). The copy is at most 8192 pixels a side for a photo and 7680 × 4320 for a video;
 the network takes pictures up to 4096 a side; 360° media and image sequences are left out. A
-video's copy is slow (about 19 times its length at 480p ×4) and large (62 MB for those 3 s). In
-the desktop app the download has no dialog yet: agents and the CLI download it.
+video's copy is slow (about 19 times its length at 480p ×4) and large (62 MB for those 3 s).
 
 ## Smooth Slow Motion
 
@@ -187,5 +193,70 @@ frame, things that appear from nowhere and repeating patterns come out smeared o
 any flow-based interpolation). A copy is at most 240 frames a second and 18,000 made frames (about
 an hour's work): a whole long recording is refused — choose the slowed clips. One copy of an item
 at a time (not with Upscale and Restore). Variable-frame-rate phone video is timed as its average
-rate. In the desktop app the download has no dialog yet: agents and the CLI download it.
+rate.
+
+## Object Mask
+
+A thing in a clip is masked from a click on it and followed through the clip, the mask taking its
+shape in every frame it is tracked to (the idea of Premiere 26's Object Mask). MobileSAM (Zhang et
+al. 2023; the cut-out model of [`clip.cutOut`](360-video.md), Segment Anything's prompt encoder
+and mask decoder behind a TinyViT image encoder) cuts the thing out; a box tracker tells it where
+the thing went.
+
+| Command | Does |
+|---|---|
+| `clip.objectMask` | a job: the thing at `point` (`[x, y]`, 0–1 of the clip's picture; more points on it in `inside`, points off it in `outside`) on the clip's frame `at` (seconds into the clip; the playhead) cut out and outlined (`points`, 128) as a mask on `effect` (Opacity) — a new one, `name` (`Object (n)`), `mode` (`add`: on Opacity the clip shows the thing alone), `inverted` — or the mask `mask` cut again there; then followed `track` `both` (the default: on to the clip's end and back to its start), `forward`, `backward` or `none`, every `every` seconds (0.1; masks interpolate between their outlines). The mask's tracking method becomes Object; one undo step when waited for |
+| `masks.track` | a mask whose method is Object (or `method: "object"`: a mask drawn round a thing too) follows the thing it outlines from the playhead, `forward` or `backward` (`frames` at most), replacing its outlines on the way |
+
+**In the app.** Effect Controls ▸ a mask row's sparkle turns the Object Mask tool on (asking for
+MobileSAM first when it is not downloaded): a click on the Program monitor masks the thing there
+on that frame, Shift-click adds to it, Option-click takes away (the same mask cut again with all
+the points), Escape ends the tool. The mask's track buttons then follow it (the tracking method
+menu shows Object).
+
+**How a thing is followed.** On the clicked frame the points go to MobileSAM: for one point the
+surest of its three answers for an ambiguous prompt (a part, the thing, the thing with what it
+stands on), for more its one answer. In each frame after, three guesses at where the thing went —
+the box tracker's (the subject tracker of motion tracks: median flow with a template that finds a
+hidden thing again), the thing's speed's over its last half second, and where it was — each
+move the thing as last seen whole; for each, MobileSAM is given the box round it (grown by a
+quarter), its deepest points and points beside it in the box (the box's corners and the middles of
+its sides where the thing is not, so it does not take the table with the car), and of its four
+answers the one overlapping the shape expected most is kept, if it overlaps by at least 0.45, is
+coloured like the thing (64-bin colour histograms, Bhattacharyya ≥ 0.5) and is at most 1.6 times
+the size expected. A cut reaching its box's edge is asked for again with a larger box, and that
+answer kept when it is more like the thing. Cuts are compared with the thing as last seen *whole*
+— a cut at least 85 % of the most it covered lately (that memory letting go by 40 % a second and
+taking on at most 50 % a second) — not with the frame before: frame to frame, a thing going behind
+a post shrinks away a little each frame and the mask would creep onto the post; the box tracker
+restarts only from whole sightings. Frames where nothing passes keep no outline (the mask
+interpolates over them); the thing lost for 1.5 s ends that way of the run. The cut's largest
+piece and the pieces of at least a fifth of it (the thing either side of a post) are one outline.
+
+**The model's prompts.** candle's `Sam` takes points only, and its prompt encoder drops a
+dimension embedding a box; `crates/vision/src/segment.rs` embeds a prompt's points and box corners
+itself — each a random-Fourier code of where it is plus its kind's learnt vector, from the same
+weights — and runs MobileSAM's own mask decoder on them (`Segmenter::answers`).
+
+**Measured** (M3 Max, debug-optimised test build, 2026-10-29). MobileSAM looks at a picture in
+0.53 s on the GPU (Metal through candle) and 3.2 s on the CPU; its four answers to a prompt take
+53 ms; a look of the follower is 0.6–0.7 s, so 10 s of video at the default 0.1 s is about a
+minute. A striped ball crossing a forest behind a post (640 × 360, 3 s; `mobilesam_follows_a_ball_behind_a_post`):
+
+| | frames outlined | overlap with the ball as it shows (intersection over union) |
+|---|---|---|
+| Object Mask (clicked at 0.5 s, every frame) | 68 of 72 | mean 0.953, worst 0.63; 0.95–0.98 away from the post, the ball picked up again after it |
+| Track Mask, position, scale and rotation, from the click's outline | 39 (lost at the post) | mean 0.61, worst 0.06 |
+
+On the user's clips (`object_mask_on_a_real_clip`, 6 s each, strips of eight frames looked at): a
+toy Tesla on a bench while the camera circles it — the mask stays on the car as its outline turns
+from side-on to three-quarter front (Track Mask's fixed shape drifts off it), each outline
+overlapping the next by 0.91 on average; a pair of pliers' handle as the camera moves — every
+frame on the handle (0.88); a toy car on a table as the camera pans — on the car, with the cable
+plugged into it taken as part of it (0.88).
+
+**Limits.** 0.6 s a look: long clips take a while (a background job, which can be stopped). Things that touch something of their colour may take it with them; thin parts (cables,
+handles) come and go between frames. A thing hidden for more than 1.5 s ends the run; a thing that
+reappears elsewhere is not looked for. Frames where nothing passed have no outline of their own.
+One mask of a clip is followed at a time (the clip's masks are tracked one job at a time).
 

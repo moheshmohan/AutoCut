@@ -336,6 +336,7 @@ fn status(_: &mut Session, _: &Value) -> Result<Value> {
         "bytes": c::INTERPOLATOR.size,
         "license": c::INTERP_LICENSE,
         "source": c::INTERP_SOURCE,
+        "training": c::INTERP_TRAINING,
         "download": DOWNLOAD_CMD,
     }))
 }
