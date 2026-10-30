@@ -2,7 +2,7 @@
 //! noise that moves, grows and turns, as an image sequence.
 
 use filmcraft_geom::{Affine, Vec2};
-use filmcraft_project::{ClipId, ItemId, ParamValue, SequenceSettings, TrackKind};
+use filmcraft_project::{AttachTarget, ClipId, ItemId, ParamValue, SequenceSettings, TrackKind};
 use filmcraft_time::{FrameRate, Tick, TimeRange};
 use serde_json::{Value, json};
 
@@ -502,4 +502,62 @@ fn effect_points_and_layers_follow_the_object() {
         let shown = m.apply(local);
         assert!((shown - truth(k as u32).0).length() < 2.0, "layer at {k}: {shown:?}");
     }
+}
+
+/// A blur tracked on a clip that shakes goes under the shake, so the shake moves the object and
+/// its mask together (after it, the shake carried the object out of its mask: a van's plate in a
+/// shaken night shot showed beside its blur).
+#[test]
+fn a_tracked_blur_goes_under_the_clips_other_effects() {
+    let (mut s, seq, clip, _) = session();
+    s.execute("timeline.select", json!({"clips": [clip.0]})).unwrap();
+    s.execute("effects.apply", json!({"effect": "camera_shake"})).unwrap();
+    s.execute("track.blurObject", json!({"clip": clip.0, "box": truth_box(0), "at": 0.0, "wait": true})).unwrap();
+    s.execute("track.spotlight", json!({"clip": clip.0, "box": truth_box(0), "at": 0.0, "wait": true})).unwrap();
+    let q = s.project.sequence(seq).unwrap().clone();
+    let fx = &q.find_item(clip).unwrap().1.effects;
+    let names: Vec<&str> = fx.iter().map(|e| e.effect.as_str()).collect();
+    let at = |id: &str| names.iter().position(|n| *n == id).unwrap_or_else(|| panic!("no {id} in {names:?}"));
+    assert!(at("gaussian_blur") < at("camera_shake"), "{names:?}");
+    assert!(at("levels") < at("camera_shake"), "{names:?}");
+}
+
+/// A tracked effect that goes in ahead of a clip's effects moves them down: every attachment to
+/// them (another track's mask, an effect's point, the same track's earlier mosaic) follows, so a
+/// refine re-writes each its own effect.
+#[test]
+fn attachments_follow_their_effects_when_a_blur_goes_in_ahead() {
+    let (mut s, seq, clip, rate) = session();
+    let id = create(&mut s, clip, secs(rate, 0), truth_box(0), "points");
+    s.execute("timeline.select", json!({"clips": [clip.0]})).unwrap();
+    s.execute("effects.apply", json!({"effect": "lens_flare"})).unwrap();
+    let q = s.project.sequence(seq).unwrap().clone();
+    let fx = q.find_item(clip).unwrap().1.effects.iter().position(|e| e.effect == "lens_flare").unwrap();
+    s.execute("track.attach", json!({"track": id, "target": {"clip": clip.0, "effect": fx, "param": "center"}, "offset": "center"})).unwrap();
+    s.execute("track.add", json!({"track": id, "what": "mosaic"})).unwrap();
+    s.execute("track.blurObject", json!({"clip": clip.0, "box": truth_box(0), "at": 0.0, "wait": true})).unwrap();
+    let q = s.project.sequence(seq).unwrap().clone();
+    let (_, it) = q.find_item(clip).unwrap();
+    let mut on: Vec<(&str, &str)> = Vec::new();
+    for t in s.project.motion_tracks.values() {
+        for a in &t.attachments {
+            match &a.target {
+                AttachTarget::EffectParam { effect, .. } => on.push(("point", it.effects[*effect].effect.as_str())),
+                AttachTarget::Mask { effect, mask, .. } => {
+                    assert!(*mask < it.effects[*effect].masks.len());
+                    on.push(("mask", it.effects[*effect].effect.as_str()));
+                }
+                _ => {}
+            }
+        }
+    }
+    on.sort_unstable();
+    assert_eq!(on, [("mask", "gaussian_blur"), ("mask", "mosaic"), ("point", "lens_flare")]);
+    // the flare still follows the object after its track is refined (re-baked)
+    s.execute("track.refine", json!({"track": id, "box": truth_box(10), "at": secs(rate, 10), "wait": true})).unwrap();
+    let q = s.project.sequence(seq).unwrap().clone();
+    let (_, it) = q.find_item(clip).unwrap();
+    let flare = it.effects.iter().find(|e| e.effect == "lens_flare").unwrap();
+    let c = flare.vec2_at("center", it.effect_time_at(rate.tick_of(30)));
+    assert!((c - truth(30).0).length() < 2.5, "flare centre: {c:?} vs {:?}", truth(30).0);
 }

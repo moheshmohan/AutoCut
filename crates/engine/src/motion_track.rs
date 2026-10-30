@@ -34,7 +34,8 @@
 //! when it follows rotation and scale) mapped into the target's own space: Motion Position is in
 //! sequence pixels; a graphic layer's position and an effect's point in the target clip's pixels
 //! (the inverse of its Motion); a mask path likewise. Keyframes go at the target's
-//! `effect_time_at(t)`.
+//! `effect_time_at(t)`. A blur, mosaic or spotlight goes ahead of the clip's other standard
+//! effects, so nothing (a Camera Shake, a Warp Stabilizer) moves the object before its mask.
 //!
 //! Tracking runs in a background job (`jobs.list` shows its progress; `jobs.cancel` stops it and
 //! nothing changes); `wait: true` finishes it before the command answers. Every parameter is
@@ -1103,10 +1104,36 @@ fn spotlight(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// Insert `e` before the clip's intrinsic effects (so it works on the picture before Motion),
 /// returning its index.
+/// A tracked effect goes ahead of the clip's other standard effects: its mask is in the source's
+/// own pixels, before anything moves them (after a Camera Shake, the shake carried the object out
+/// of its mask), as `sequence.autoRedact` places its masks.
 fn insert_effect(it: &mut TrackItem, e: EffectInstance) -> usize {
-    let at = it.effects.iter().position(|x| x.def().is_some_and(|d| d.intrinsic)).unwrap_or(it.effects.len());
+    let at = it.effects.iter().position(|x| x.def().is_some_and(|d| !d.intrinsic)).unwrap_or(it.effects.len());
     it.effects.insert(at, e);
     at
+}
+
+/// An effect went in at `at` in `clip`'s stack: the attachments to the effects it moved down (every
+/// track's, `t`'s own too) follow them.
+fn shift_effect_refs(pr: &mut Project, t: &mut MotionTrack, clip: ClipId, at: usize) {
+    let moved = |a: &Attachment| match &a.target {
+        AttachTarget::EffectParam { clip: c, effect, .. } | AttachTarget::Mask { clip: c, effect, .. } => *c == clip && *effect >= at,
+        _ => false,
+    };
+    let shift = |a: &mut Attachment| {
+        if moved(a)
+            && let AttachTarget::EffectParam { effect, .. } | AttachTarget::Mask { effect, .. } = &mut a.target
+        {
+            *effect = effect.saturating_add(1);
+        }
+    };
+    t.attachments.iter_mut().for_each(shift);
+    for other in pr.motion_tracks.values_mut() {
+        // `t` replaces its stored copy when the edit ends
+        if other.id != t.id && other.attachments.iter().any(moved) {
+            Arc::make_mut(other).attachments.iter_mut().for_each(shift);
+        }
+    }
 }
 
 /// The object at the seed in the tracked clip's pixels: centre, half size, rotation.
@@ -1140,6 +1167,7 @@ fn masked_effect(pr: &mut Project, t: &mut MotionTrack, e: EffectInstance, mask:
     let mut e = e;
     e.masks.push(mask);
     let idx = insert_effect(it, e);
+    shift_effect_refs(pr, t, t.clip, idx);
     let spec = TargetSpec::Mask(t.clip, Some(json!(idx)), 0);
     let a = attach_in(pr, t, &spec, follow_for(t), OffsetSpec::Center, at)?;
     let keys = bake(pr, t, &a)?;
