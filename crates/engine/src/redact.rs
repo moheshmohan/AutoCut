@@ -538,6 +538,9 @@ pub fn options_p(cmd: &str, p: &Value) -> Result<Options> {
     let keep = KeepParams {
         min_face_height: unit_p(cmd, p, "minFaceHeight", 0.0, 1.0, d.keep.min_face_height)?,
         min_plate_width: unit_p(cmd, p, "minPlateWidth", 0.0, 1.0, d.keep.min_plate_width)?,
+        // one sighting is enough for a car that is in the picture for a moment (its mask lingers
+        // round it); the default two keeps a stray detection from blurring a patch
+        min_hits: unit_p(cmd, p, "minHits", 1.0, 10.0, d.keep.min_hits as f64)?.round() as usize,
         ..d.keep
     };
     Ok(Options {
@@ -2017,7 +2020,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Faces and Plates…",
             menu: &["Clip"],
             shortcut: None,
-            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.15,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"profiles":bool=installed,"wait":bool=false}"#,
+            params: r#"{"clips":[id]?,"clip":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"minHits":1..10=2,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.15,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"profiles":bool=installed,"wait":bool=false}"#,
             enabled: has_video_selection,
             run: redact_clips,
             journal: true,
@@ -2027,7 +2030,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Redact Sequence…",
             menu: &[],
             shortcut: None,
-            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.15,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"profiles":bool=installed,"wait":bool=false}"#,
+            params: r#"{"sequence":id?,"kinds":["faces","plates"]|"faces,plates"=both,"minFaceHeight":0..1=0.05,"minPlateWidth":0..1=0.025,"minHits":1..10=2,"faceScore":0.05..1=0.6,"plateScore":0.05..1=0.8,"sureFace":0.05..1=0.85,"style":"blur"|"mosaic"="blur","strength":1..100=60,"padding":0..1=0.15,"exclude":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"verify":bool=true,"dryRun":bool=false,"analysisFps":1..60=10,"targets":[str|{"text":str,"clips":[id]}]?,"targetEvery":0.25..10=1,"replace":bool=true,"fresh":bool=false,"profiles":bool=installed,"wait":bool=false}"#,
             enabled: has_seq,
             run: redact_sequence,
             journal: true,
