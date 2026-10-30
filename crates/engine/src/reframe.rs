@@ -23,7 +23,9 @@
 //! fewer than 30 % of its analysed frames gets `fallback`: `"letterbox"` (fitted whole, the
 //! default), `"center"` (a centred crop) or `"blur"`: fitted whole over a blurred, dimmed,
 //! enlarged copy of itself — the look the showcase gives its portrait shots ([`BACKDROP_BLURRINESS`],
-//! [`BACKDROP_OPACITY`], [`BACKDROP_ZOOM`]). `"blur"` also works per stretch: in a followed clip,
+//! [`BACKDROP_OPACITY`], [`BACKDROP_ZOOM`]). `whole: true` gives every clip its fallback
+//! without following anything — a wide clip in a tall frame shown whole over its blurred copy
+//! (`fallback: "blur"`) rather than cropped round its subject. `"blur"` also works per stretch: in a followed clip,
 //! where the subject is lost for a second or more (or a shot has nobody in it) the crop eases out
 //! to the whole picture and back in when the subject returns (see [`filmcraft_render::reframe`]).
 //! The copies are trimmed to those stretches and go on a [`BLUR_FILL_TRACK`] video track directly
@@ -91,7 +93,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Reframe Sequence…",
             menu: &[],
             shortcut: None,
-            params: r#"{"sequence":id?,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","subject":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"motion":"smooth"|"responsive"="smooth","fallback":"letterbox"|"center"|"blur"="letterbox","range":{"start":ticks,"end":ticks}|{"startSeconds":f64,"endSeconds":f64}?,"name":str?,"analysisFps":1..60=30,"wait":bool=false}"#,
+            params: r#"{"sequence":id?,"aspect":"9:16"|"1:1"|"4:5"|"16:9"="9:16","subject":{"x":0..1,"y":0..1,"w":0..1,"h":0..1,"clip":id?,"seconds":f64?}|[box]?,"motion":"smooth"|"responsive"="smooth","fallback":"letterbox"|"center"|"blur"="letterbox","whole":bool=false,"range":{"start":ticks,"end":ticks}|{"startSeconds":f64,"endSeconds":f64}?,"name":str?,"analysisFps":1..60=30,"wait":bool=false}"#,
             enabled: has_seq,
             run: auto_reframe_sequence,
             journal: true,
@@ -101,7 +103,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Auto Reframe Clips",
             menu: &[],
             shortcut: None,
-            params: r#"{"clips":[id]?,"subject":{"x","y","w","h","clip"?,"seconds"?}|[box]?,"motion":"smooth"|"responsive"="smooth","fallback":"letterbox"|"center"|"blur"="letterbox","keepScale":bool=false,"analysisFps":1..60=30,"wait":bool=false}"#,
+            params: r#"{"clips":[id]?,"subject":{"x","y","w","h","clip"?,"seconds"?}|[box]?,"motion":"smooth"|"responsive"="smooth","fallback":"letterbox"|"center"|"blur"="letterbox","whole":bool=false,"keepScale":bool=false,"analysisFps":1..60=30,"wait":bool=false}"#,
             enabled: has_seq,
             run: auto_reframe_clips,
             journal: true,
@@ -150,6 +152,8 @@ struct Work {
     seed_at: Option<usize>,
     /// A camera track on a face: the detector, run every few analysed frames for hints.
     faces: Option<(crate::redact::DetectFn, usize)>,
+    /// `whole`: shown whole, nothing followed ([`filmcraft_render::reframe::whole`]).
+    whole: bool,
 }
 
 /// What the analysis made of one clip, in media time.
@@ -231,6 +235,16 @@ fn follow_p(cmd: &str, p: &Value) -> Result<Follow> {
         None => Ok(Follow::Smooth),
         Some(Value::String(s)) => Follow::from_name(s).ok_or_else(|| bad(cmd, format!("`motion` is \"smooth\" or \"responsive\", not \"{s}\""))),
         Some(_) => Err(bad(cmd, "`motion` is \"smooth\" or \"responsive\"")),
+    }
+}
+
+/// `whole`: every clip shown whole (with `fallback: "blur"` over its blurred copy), nothing
+/// followed.
+fn whole_p(cmd: &str, p: &Value) -> Result<bool> {
+    match p.get("whole").filter(|v| !v.is_null()) {
+        None => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(bad(cmd, "`whole` is true or false")),
     }
 }
 
@@ -451,6 +465,7 @@ fn build_work(s: &Session, q: &Sequence, only: Option<&[ClipId]>, hints: &[Hint]
                 push: None,
                 seed_at: None,
                 faces: None,
+                whole: false,
             });
         }
     }
@@ -503,6 +518,11 @@ pub(crate) fn largest_face(detect: &crate::redact::DetectFn, rgba: &[u8], w: usi
 /// Follow one clip's subject and plan its keyframes.
 fn analyse(w: &Work, tuning: Tuning, fallback: Fallback, progress: &mut dyn FnMut(usize) -> bool) -> Option<ClipReframe> {
     let n = w.frames.len();
+    if w.whole {
+        // nothing to follow: no frame is decoded
+        let plan = filmcraft_render::reframe::whole(w.geometry, n, fallback);
+        return Some(result_of(w, &plan, fallback));
+    }
     let samples: Vec<Sample> = match w.seed_at.filter(|k| *k < n) {
         // from the frame the box was drawn on, back to the start, then on to the end
         Some(k) => {
@@ -849,7 +869,11 @@ fn auto_reframe_sequence(s: &mut Session, p: &Value) -> Result<Value> {
         trim_to(&mut target, a, b, &s.project, &media, &mut next_id);
     }
     target.check().map_err(|e| bad(cmd, format!("the reframed copy is not valid: {e}")))?;
-    let work = build_work(s, &target, None, &hints, fps, false)?;
+    let mut work = build_work(s, &target, None, &hints, fps, false)?;
+    let whole = whole_p(cmd, p)?;
+    for w in work.iter_mut() {
+        w.whole = whole;
+    }
     let bin = s.project.root.parent_of(seq_id).filter(|b| b.0 != 0);
     let label_text = format!("Auto Reframe {aspect_label}: {}", item.name);
     let target = Target::Copy { seq: Box::new(target), name, next_id, label: item.label, bin, aspect: aspect_label };
@@ -884,7 +908,11 @@ fn auto_reframe_clips(s: &mut Session, p: &Value) -> Result<Value> {
         (None, None) if !s.state.selection.is_empty() => Some(s.state.selection.clone()),
         (None, None) => None,
     };
-    let work = build_work(s, &q, only.as_deref(), &hints, fps, keep_scale)?;
+    let mut work = build_work(s, &q, only.as_deref(), &hints, fps, keep_scale)?;
+    let whole = whole_p(cmd, p)?;
+    for w in work.iter_mut() {
+        w.whole = whole;
+    }
     if work.is_empty() {
         return Err(bad(cmd, "no video clip to reframe (select video clips of media, or pass `clips`; a 360° clip follows its subject with `clip.follow360`)"));
     }
