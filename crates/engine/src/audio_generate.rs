@@ -84,7 +84,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "audio.generate",
             "Generate Audio",
-            r#"{"kind":"whoosh|impact|riser|swish|chime|shutter|pop|thump|drone|music"=music,"duration":seconds?|"durationTicks":ticks?,"seed":u64?,"intensity":0..1=0.7,"bpm":40..200?,"key":"A|C#|Eb…"="A","mood":"epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad"="epic","genre":"cinematic|electronic|pop|ambient|lofi|piano"?,"energy":0..1|[0..1 ×1..64]?,"stems":bool=false,"levels":{"drums|bass|melody|pad":dB|"mute"}?,"mute":["drums"…]?,"soundfont":"auto|oscillators|generaluser-gs"|path?,"time":ticks?|"seconds":f64?,"track":"A2"|id?,"place":bool=true,"dir":str?}"#,
+            r#"{"kind":"whoosh|impact|riser|swish|chime|shutter|pop|thump|drone|engineRev|engineLaunch|engineFlyby|music"=music,"duration":seconds?|"durationTicks":ticks?,"seed":u64?,"intensity":0..1=0.7,"bpm":40..200?,"key":"A|C#|Eb…"="A","mood":"epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad"="epic","genre":"cinematic|electronic|pop|ambient|lofi|piano"?,"energy":0..1|[0..1 ×1..64]?,"stems":bool=false,"levels":{"drums|bass|melody|pad":dB|"mute"}?,"mute":["drums"…]?,"soundfont":"auto|oscillators|generaluser-gs"|path?,"time":ticks?|"seconds":f64?,"track":"A2"|id?,"place":bool=true,"dir":str?}"#,
             always,
             generate,
             true,
@@ -104,6 +104,9 @@ fn label(kind: synth::Kind) -> &'static str {
         synth::Kind::Pop => "Pop",
         synth::Kind::Thump => "Thump",
         synth::Kind::Drone => "Drone",
+        synth::Kind::EngineRev => "Engine Rev",
+        synth::Kind::EngineLaunch => "Engine Launch",
+        synth::Kind::EngineFlyby => "Engine Fly-by",
         synth::Kind::Music => "Music",
     }
 }

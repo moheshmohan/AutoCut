@@ -155,7 +155,7 @@ const fn sfx_sound(id: &'static str, name: &'static str, file: &'static str, des
 }
 
 /// The sound elements.
-pub const SOUNDS: [Sound; 17] = [
+pub const SOUNDS: [Sound; 20] = [
     synth_sound("sound.whoosh-short", "Whoosh – Short", "Whoosh Short", "A quick air pass for a fast cut or move.", synth::Kind::Whoosh, 0.6, 0.6, 11),
     synth_sound("sound.whoosh-long", "Whoosh – Long", "Whoosh Long", "A slower, fuller pass for a transition.", synth::Kind::Whoosh, 1.8, 0.75, 12),
     synth_sound("sound.impact-soft", "Impact – Soft", "Impact Soft", "A gentle low hit with a short tail.", synth::Kind::Impact, 2.0, 0.25, 21),
@@ -200,6 +200,27 @@ pub const SOUNDS: [Sound; 17] = [
     sfx_sound("sound.pop", "Pop", "Pop", "A bubbly pop for stickers and text appearing.", Sfx::Pop, 0.3, 52),
     sfx_sound("sound.sweep", "Sweep", "Sweep", "A resonant filter sweep up the spectrum and back.", Sfx::Sweep, 1.6, 61),
     sfx_sound("sound.boom", "Boom", "Boom", "A deep sub drop with a rumble and a dark tail.", Sfx::Boom, 3.0, 71),
+    synth_sound(
+        "sound.engine-rev",
+        "Engine – Rev",
+        "Engine Rev",
+        "A car engine blipped twice from idle, crackling as the revs fall.",
+        synth::Kind::EngineRev,
+        3.0,
+        0.8,
+        41,
+    ),
+    synth_sound(
+        "sound.engine-launch",
+        "Engine – Launch",
+        "Engine Launch",
+        "Revs held on the launch limiter, then a launch through two gear changes.",
+        synth::Kind::EngineLaunch,
+        4.5,
+        0.85,
+        42,
+    ),
+    synth_sound("sound.engine-flyby", "Engine – Fly-by", "Engine Flyby", "A car passing flat out from left to right.", synth::Kind::EngineFlyby, 3.0, 0.8, 43),
 ];
 
 /// A sound element by id.

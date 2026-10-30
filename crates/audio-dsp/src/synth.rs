@@ -1,5 +1,5 @@
 //! Procedural audio for edits: sound effects (whoosh, impact, riser, swish, chime, shutter, pop,
-//! thump, drone) and music beds,
+//! thump, drone, and a car engine revving, launching or passing by) and music beds,
 //! synthesized from oscillators, noise, envelopes and filters. No samples, no models: the same
 //! parameters and seed always give the same audio, so a generated cue is reproducible from the
 //! project alone.
@@ -16,6 +16,8 @@ use crate::biquad::{Biquad, Coeffs, FilterType};
 use crate::loudness::LoudnessMeter;
 
 pub use crate::music::Mood;
+
+mod engine;
 
 /// Longest sound effect, seconds.
 pub const MAX_SFX_SECONDS: f64 = 30.0;
@@ -54,13 +56,32 @@ pub enum Kind {
     Thump,
     /// A sustained, slowly moving low chord.
     Drone,
+    /// A car engine blipped twice from idle, crackling as the revs fall ([`engine`]).
+    EngineRev,
+    /// A car engine held on its launch limiter, launched and pulled through two gear changes.
+    EngineLaunch,
+    /// A car passing flat out from left to right: its pitch falls as it goes by (Doppler).
+    EngineFlyby,
     /// A cinematic bed: chord progression, pads, bass, drums, pulse and arpeggio in sections.
     Music,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 10] =
-        [Kind::Whoosh, Kind::Impact, Kind::Riser, Kind::Swish, Kind::Chime, Kind::Shutter, Kind::Pop, Kind::Thump, Kind::Drone, Kind::Music];
+    pub const ALL: [Kind; 13] = [
+        Kind::Whoosh,
+        Kind::Impact,
+        Kind::Riser,
+        Kind::Swish,
+        Kind::Chime,
+        Kind::Shutter,
+        Kind::Pop,
+        Kind::Thump,
+        Kind::Drone,
+        Kind::EngineRev,
+        Kind::EngineLaunch,
+        Kind::EngineFlyby,
+        Kind::Music,
+    ];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -73,6 +94,9 @@ impl Kind {
             Kind::Pop => "pop",
             Kind::Thump => "thump",
             Kind::Drone => "drone",
+            Kind::EngineRev => "engineRev",
+            Kind::EngineLaunch => "engineLaunch",
+            Kind::EngineFlyby => "engineFlyby",
             Kind::Music => "music",
         }
     }
@@ -93,6 +117,9 @@ impl Kind {
             Kind::Pop => 0.25,
             Kind::Thump => 0.8,
             Kind::Drone => 20.0,
+            Kind::EngineRev => 3.0,
+            Kind::EngineLaunch => 4.5,
+            Kind::EngineFlyby => 3.0,
             Kind::Music => 60.0,
         }
     }
@@ -215,6 +242,9 @@ pub fn generate(p: &Params, sample_rate: u32) -> Result<Stereo, SynthError> {
         Kind::Shutter => shutter(&q, &mut left, &mut right),
         Kind::Pop => pop(&q, &mut left, &mut right),
         Kind::Thump => thump(&q, &mut left, &mut right),
+        Kind::EngineRev => engine::engine(engine::Drive::Rev, &q, &mut left, &mut right),
+        Kind::EngineLaunch => engine::engine(engine::Drive::Launch, &q, &mut left, &mut right),
+        Kind::EngineFlyby => engine::engine(engine::Drive::Flyby, &q, &mut left, &mut right),
         Kind::Drone | Kind::Music => drone(&q, &mut left, &mut right),
     }
     match p.kind {
