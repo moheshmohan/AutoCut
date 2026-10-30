@@ -289,6 +289,14 @@ pub struct Plan {
     pub fill: Vec<(usize, usize)>,
 }
 
+/// The whole picture, following nothing: fitted to the frame and, with [`Fallback::Blur`], over
+/// its blurred copy for all `n` samples — the clip shown whole however much of the frame it
+/// leaves (a wide picture in a tall frame keeps its sides).
+pub fn whole(g: Geometry, n: usize, fallback: Fallback) -> Plan {
+    let fill = if fallback == Fallback::Blur && g.valid() && n > 0 { vec![(0, n - 1)] } else { Vec::new() };
+    Plan::fixed(&g, g.fit_scale(), true, 0.0, fill)
+}
+
 impl Plan {
     fn fixed(g: &Geometry, scale: f64, letterbox: bool, found: f64, fill: Vec<(usize, usize)>) -> Self {
         let position = [g.frame.0 / 2.0, g.frame.1 / 2.0];

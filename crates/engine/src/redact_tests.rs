@@ -1158,3 +1158,21 @@ fn analysis_times_are_a_grid_of_media_time() {
     it.speed = 1e-12;
     assert!(grid_times(&it, fd, 3, 30).len() <= MAX_FRAMES + 3);
 }
+
+#[test]
+fn min_hits_lets_one_sighting_hide_a_plate() {
+    // two sightings by default (a stray detection blurs nothing); one when asked, for a car that
+    // is only in the picture for a moment
+    let d = options_p("sequence.autoRedact", &json!({"kinds": "plates"})).unwrap();
+    assert_eq!(d.keep.min_hits, 2);
+    let one = options_p("sequence.autoRedact", &json!({"kinds": "plates", "minHits": 1})).unwrap();
+    assert_eq!(one.keep.min_hits, 1);
+    // a plate seen once, a twentieth of the picture wide
+    let point = filmcraft_vision::track::TrackPoint { t: 1.0, bbox: [0.4, 0.5, 0.05, 0.015], corners: Vec::new(), seen: true };
+    let brief = filmcraft_vision::track::Track { kind: Kind::Plate, label: None, points: vec![point], hits: 1, best_score: 0.7, pose_hits: 0 };
+    assert!(filmcraft_vision::track::verdict(&brief, &d.keep, &[]).is_some(), "skipped by default");
+    assert!(filmcraft_vision::track::verdict(&brief, &one.keep, &[]).is_none(), "hidden with minHits 1");
+    for bad in [json!(0), json!(11), json!("one")] {
+        assert!(options_p("sequence.autoRedact", &json!({"minHits": bad})).is_err(), "{bad}");
+    }
+}

@@ -508,3 +508,33 @@ fn the_blur_fill_stays_through_the_transitions() {
     assert_eq!(effects(0), ["dip_to_black", "dip_to_black"]);
     q.check().unwrap();
 }
+
+#[test]
+fn whole_shows_a_followed_clip_whole_over_its_blurred_copy() {
+    // a clip with a subject that would be followed, in a 9:16 sequence
+    let (mut s, _, seq) = session(true);
+    let mut p = (*s.project).clone();
+    let q = p.sequence_mut(seq).unwrap();
+    (q.settings.width, q.settings.height) = (180, 320);
+    s.project = std::sync::Arc::new(p);
+    let clip = s.project.sequence(seq).unwrap().video_tracks[0].items[0].id;
+    let r = s.execute("clip.autoReframe", json!({"clips": [clip.0], "fallback": "blur", "whole": true, "wait": true})).unwrap();
+    assert_eq!(r["reframe"]["blurFill"], json!(1), "{r}");
+    let q = s.project.sequence(seq).unwrap();
+    assert_eq!((q.video_tracks[0].name.as_str(), q.video_tracks[0].items.len()), (BLUR_FILL_TRACK, 1));
+    let fg = &q.video_tracks[1].items[0];
+    assert_eq!(fg.id, clip);
+    // fitted: the whole width of the 16:9 picture in the 9:16 frame, nothing keyframed
+    let motion = fg.effect("motion").unwrap();
+    assert!((motion.f64_at("scale", Tick::ZERO) - 180.0 / 320.0 * 100.0).abs() < 1e-6);
+    assert!(!motion.params.get("scale").is_some_and(|v| v.is_animated()), "nothing followed");
+    let bg = &q.video_tracks[0].items[0];
+    assert_eq!((bg.start, bg.duration), (fg.start, fg.duration), "the copy under the whole clip");
+    // without `whole` the same clip is followed: cropped to fill the frame
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("clip.autoReframe", json!({"clips": [clip.0], "fallback": "blur", "wait": true})).unwrap();
+    let q = s.project.sequence(seq).unwrap();
+    let it = q.video_tracks.iter().flat_map(|t| &t.items).find(|i| i.id == clip).unwrap();
+    assert!(it.effect("motion").unwrap().f64_at("scale", Tick::ZERO) > 100.0, "followed, it fills the frame");
+    assert!(s.execute("clip.autoReframe", json!({"clips": [clip.0], "whole": "yes"})).is_err(), "`whole` is a bool");
+}

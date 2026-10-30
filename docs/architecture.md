@@ -859,7 +859,9 @@ All of these dispatch the same command ids.
   Motion, a graphic layer, an effect's point or a mask (mapped through the tracked clip's speed,
   trims and Motion into sequence pixels, then into the target's space) and keeps the link, so
   `track.refine` re-writes them; `track.label`, `track.blurObject` and `track.spotlight` combine
-  both. `clip.cameraTrack` is Auto Reframe's planner with a fixed push-in (`reframe::Zoom::Push`,
+  both, their masked effect ahead of the clip's other standard effects (a Camera Shake before it
+  moved the object out of the mask; the links to the effects it moves down follow them).
+  `clip.cameraTrack` is Auto Reframe's planner with a fixed push-in (`reframe::Zoom::Push`,
   `Tuning::smoothness`). The Program monitor's Track tool draws the box and the path.
 - **Project panel and Media Browser** (M12.7). View settings (List / Icon / Freeform, thumbnail
   and font size, Preview Area, Hover Scrub), the List view's columns, widths and sort, and ten view

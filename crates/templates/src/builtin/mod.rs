@@ -80,7 +80,7 @@ pub const CATEGORIES: [&str; 7] = ["Reels & Shorts", "YouTube", "Vlog", "Busines
 
 /// The Elements sound effects a template may use and their length in seconds (as the engine's
 /// `elements::SOUNDS` makes them; an engine test keeps the two in step).
-pub const SOUND_SECONDS: [(&str, f64); 17] = [
+pub const SOUND_SECONDS: [(&str, f64); 20] = [
     ("sound.whoosh-short", 0.6),
     ("sound.whoosh-long", 1.8),
     ("sound.impact-soft", 2.0),
@@ -98,6 +98,9 @@ pub const SOUND_SECONDS: [(&str, f64); 17] = [
     ("sound.pop", 0.3),
     ("sound.sweep", 1.6),
     ("sound.boom", 3.0),
+    ("sound.engine-rev", 3.0),
+    ("sound.engine-launch", 4.5),
+    ("sound.engine-flyby", 3.0),
 ];
 
 pub(crate) fn frames(n: i64) -> Tick {
