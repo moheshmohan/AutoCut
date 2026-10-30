@@ -256,6 +256,9 @@ fn kind_name(k: Kind) -> &'static str {
         Kind::Pop => "Pop",
         Kind::Thump => "Thump",
         Kind::Drone => "Drone",
+        Kind::EngineRev => "Engine Rev",
+        Kind::EngineLaunch => "Engine Launch",
+        Kind::EngineFlyby => "Engine Fly-by",
         Kind::Music => "Music",
     }
 }
@@ -271,6 +274,9 @@ fn kind_hint(k: Kind) -> &'static str {
         Kind::Pop => "A soft bubble pop, for a quick cut, a sticker or a reveal.",
         Kind::Thump => "A soft, warm low hit: shorter than the impact, with no sub-bass boom.",
         Kind::Drone => "A low, slowly moving chord under a scene.",
+        Kind::EngineRev => "A car engine blipped twice from idle, crackling as the revs fall.",
+        Kind::EngineLaunch => "A car engine on its launch limiter, launched and pulled through two gear changes.",
+        Kind::EngineFlyby => "A car passing flat out from left to right, its pitch falling as it goes by.",
         Kind::Music => {
             "Music arranged to the exact length and ending on a bar: drums, bass, melody and pads in sections, at -20 LUFS so it sits under a voice. Find it by feel, preview it, then add it."
         }
