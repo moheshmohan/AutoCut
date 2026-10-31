@@ -250,6 +250,16 @@ pub struct Searches {
     pub max_items: u32,
     /// Searches per session (1–[`PER_SESSION`]).
     pub per_session: usize,
+    /// Photos as well as videos: each search is typed as given (else with "videos" added) and
+    /// photo tiles are selected too.
+    pub photos: bool,
+}
+
+impl Searches {
+    /// The agent's request for one session of these searches.
+    fn session_request(&self, batch: Vec<String>, cap: u32) -> Request {
+        Request { queries: batch, max_items: cap, select_all: self.select_all, album: None, videos_only: !self.photos }
+    }
 }
 
 /// One session of a [`pick_searches`].
@@ -304,7 +314,7 @@ pub fn pick_searches(gp: &GooglePhotos, opts: &PickOptions, req: &Searches, prog
         let batch = queue.next_batch(per);
         let k = out.sessions.len() + 1;
         progress(&format!("session {k}: {} search(es): {}", batch.len(), batch.join(" · ")));
-        let request = Request { queries: batch.clone(), max_items: cap, select_all: req.select_all, album: None, videos_only: true };
+        let request = req.session_request(batch.clone(), cap);
         let plan_time = filmcraft_screenagent::agent::plan_for(request.clone()).timeout;
         let wait = opts.wait.max(plan_time + filmcraft_screenagent::agent::DONE_GRACE + Duration::from_secs(60)).min(filmcraft_gphotos::MAX_WAIT);
         let session_opts = PickOptions { max_items: Some(cap), wait, resume: None, open_browser: true, ..opts.clone() };
@@ -495,6 +505,16 @@ mod tests {
         assert!(d.agent_note().is_some_and(|n| n.contains("no Screen Recording")));
         let d = Driven { outcome: PickOutcome::Done(Picked::default()), agent: None, abandoned: false };
         assert!(!d.nothing_to_pick() && d.agent_note().is_none());
+    }
+
+    #[test]
+    fn searches_for_photos_too_type_the_search_as_given() {
+        let req = Searches { queries: vec![], select_all: true, max_items: 50, per_session: PER_SESSION, photos: true };
+        let r = req.session_request(vec!["October 30 2026".into()], 50);
+        assert!(!r.videos_only && r.select_all);
+        assert_eq!(filmcraft_screenagent::picker::search_text(r.queries.first().map(String::as_str), r.videos_only).as_deref(), Some("October 30 2026"));
+        let r = Searches { photos: false, ..req }.session_request(vec!["October 30 2026".into()], 50);
+        assert!(r.videos_only, "videos only unless photos are asked for");
     }
 
     fn strings(v: &[&str]) -> Vec<String> {

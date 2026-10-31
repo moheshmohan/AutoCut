@@ -110,6 +110,10 @@ filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9876
 filmcraft-cli photos pick --auto "videos Dubai robots" --auto "videos Tokyo robots" --all
 filmcraft-cli photos pick --queries searches.txt --all          # one search per line, # comments
 
+# photos as well as videos (a searched query otherwise gets "videos" added and only video
+# tiles are clicked): everything from one day
+filmcraft-cli photos pick --auto "October 30 2026" --all --photos --since 2026-10-30 --project my.fcproj --save
+
 # a whole history in a handful of sessions: one "videos <Month> <Year>" search per month
 # (--month-days 10-21: one per day of those days in each month instead); implies --all
 filmcraft-cli photos pick --sweep 2017-10..2025-12 --bridge 127.0.0.1:9876

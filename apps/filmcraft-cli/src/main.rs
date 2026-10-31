@@ -674,7 +674,7 @@ SUBCOMMANDS
   photos albums [--json]         the albums FilmCraft made: title, item count, link (Google shows
                                  apps no other albums, and not the items you add to them by hand)
   photos pick [--auto query]... [--queries file] [--sweep FROM..TO [--month-days D-D]] [--all]
-              [--album <title> [--videos-only]] [--since YYYY-MM-DD] [--max-items n]
+              [--photos] [--album <title> [--videos-only]] [--since YYYY-MM-DD] [--max-items n]
               [--timeout secs] [--session id] [--no-browser]
                                  open the Google Photos picker in the browser, wait (default
                                  600 s, at most 3600) for your selection, download it into the
@@ -692,7 +692,11 @@ SUBCOMMANDS
                                  (answering Chrome's \"Leave site?\" with Leave); a session it
                                  gave up on is deleted. --all selects every search result (a
                                  date search by the picker's date groups, else first tile, then
-                                 Shift+click the last). Many searches — --auto repeated,
+                                 Shift+click the last). --photos picks photos as well as
+                                 videos: the search is typed as given (else with \"videos\"
+                                 added) and photo tiles are selected too (a day's pictures
+                                 and clips: --auto \"October 30 2026\" --all --photos).
+                                 Many searches — --auto repeated,
                                  --queries <file> (one per line, # comments), or --sweep
                                  2017-10..2025-12 (one \"videos <Month> <Year>\" search per
                                  month; --month-days 10-21 makes it one per day of those days
@@ -2060,7 +2064,12 @@ async fn cli() {
                     }
                     let videos_only = a.flag("--videos-only");
                     if videos_only && album.is_none() {
-                        usage("photos pick: --videos-only is for --album (--auto always picks videos)");
+                        usage("photos pick: --videos-only is for --album (--auto picks videos unless --photos)");
+                    }
+                    // --photos: the searches find photos as well as videos
+                    let photos = a.flag("--photos");
+                    if photos && !searching {
+                        usage("photos pick: --photos is for --auto/--queries/--sweep (an album is picked whole, photos too)");
                     }
                     let many = searches.len() > 1 || sweep;
                     if many && a.opt("--session").is_some() {
@@ -2097,6 +2106,7 @@ async fn cli() {
                             select_all,
                             max_items: agent_items,
                             per_session: filmcraft_automation::photos::PER_SESSION,
+                            photos,
                         };
                         diag(format_args!(
                             "photos pick: {} search(es), up to {} per picking session and {} item(s) per session",
@@ -2157,7 +2167,7 @@ async fn cli() {
                                     max_items: agent_items,
                                     select_all,
                                     album: None,
-                                    videos_only: true,
+                                    videos_only: !photos,
                                 }),
                                 (false, Some(title)) => Some(filmcraft_screenagent::agent::Request {
                                     max_items: opts.max_items.unwrap_or(filmcraft_gphotos::api::MAX_PICK),
