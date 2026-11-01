@@ -1,7 +1,9 @@
 # Agents
 
 FilmCraft is built to be driven by AI agents, and largely built by them. Part 1 covers using
-FilmCraft from an agent. Part 2 covers developing FilmCraft as an agent.
+FilmCraft from an agent. Part 2 covers developing FilmCraft as an agent. To make a video with
+AutoCut (which pipeline to use, building an edit by hand, checking, exporting, delivering), start
+with [autocut-agent-guide.md](autocut-agent-guide.md).
 
 # Part 1: driving FilmCraft
 
