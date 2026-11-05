@@ -771,6 +771,13 @@ These come from the user's feedback on earlier videos. They are defaults, not la
 says otherwise, the brief wins; when in doubt, ask or offer a sample.
 
 - **Review, then final.** Reviews are 1080p in Google Photos; the final is 4K after approval.
+- **Branded endings.** Use the H4hacks FX from the Google Photos `YouTube fx` album at the end
+  of future videos, choosing an outro or end screen that fits the video. Use the logo-complete
+  masters and editable projects in `~/Movies/AutoCut/YouTube FX/Logo Updates/` for the revised
+  clips; the other pack masters remain in the main folder and `Volume 2/`.
+- **YouTube AI labels.** Ask for the user's explicit approval before applying an AI label to a
+  video or a Promote campaign. If a disclosure is required, explain the requirement and get
+  approval before publishing or launching the campaign.
 - **Pacing.** Abrupt cuts get noticed. Crossfades, pacing and mix levels matter more than effects
   count.
 - **Transition sounds are chosen per video.**
