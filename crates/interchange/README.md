@@ -97,9 +97,17 @@ OMF carries no video at all.
   random corruption never panic. Nested sequences: AAF round trips as compositions (nests in
   nests, a nest used twice, another frame and sample rate, breakout to mono), OMF with the
   rendered sound, the audio needs of nests, a sequence inside itself.
+- `src/fcpxml.rs` (unit tests): a `<format>` whose `frameDuration` has a zero or negative part (`100/0s`,
+  `0/100s`, `-100/2500s`) gets the default frame rate and an `invalid frameDuration` warning in the report
+  instead of a zero rate, which made the export divide by zero once the sequence had a start timecode or a marker.
 - `tests/uncarried_clips.rs`: every format's export report names each graphic clip and adjustment
   layer once, as a warning; a sequence without them reports nothing; what a re-import gives back
   matches the report; the FCP7 XML import names a clip item whose file is not defined.
+- `tests/rates.rs`, `src/common.rs` (`rates`), `tests/fcp7.rs`: importers accept frame rates up to 1 000 000 per
+  second (above video rates and OTIO audio sample rates). An FCP7 `timebase` is clamped to it, an OTIO rate beyond it
+  uses the default, and a sequence or media rate beyond it (an FCPXML `frameDuration` of `1/9223372036854775807s`)
+  is reset to the default with a warning: such a rate overflowed the frame arithmetic of every export. Sequence and
+  media start timecodes beyond 360 000 000 000 frames are reset the same way (`absurd_start_timecode_is_bounded`).
 - `src/aaf/tests.rs`: written files checked against the required properties of every class
   written (Header, Identification, Mobs, slots, components, descriptors), weak references
   resolving into the dictionary, source clips resolving to mobs and slots, the Edit Protocol

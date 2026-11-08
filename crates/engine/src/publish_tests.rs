@@ -36,6 +36,40 @@ fn export(name: &str, extra: Value) -> String {
     r["path"].as_str().unwrap().to_string()
 }
 
+/// A legacy MP4 with metadata at the end, made with the normal muxer finalizer.
+/// Keep exercising publish.fixCopy now that native exports already use fast start.
+fn late_metadata_fixture(path: String) -> String {
+    use filmcraft_isobmff::{Brand, Mp4Writer, TrackConfig, WriteSample, WriterOptions};
+    let bytes = std::fs::read(&path).unwrap();
+    let movie = filmcraft_isobmff::open(bytes.as_slice()).unwrap();
+    let mut options = WriterOptions::new(Brand::Mp4);
+    options.movie_timescale = movie.timescale;
+    let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), options).unwrap();
+    for (index, track) in movie.tracks.iter().enumerate() {
+        assert_eq!(track.entries.len(), 1, "these fixtures have one sample description");
+        let mut config = TrackConfig::new(track.entries[0].clone(), track.timescale);
+        config.edits = track.edits.clone();
+        config.language = track.language.clone();
+        let target = writer.add_track(config).unwrap();
+        for (sample_index, sample) in track.samples.iter().enumerate() {
+            let data = movie.read_sample(bytes.as_slice(), index, sample_index).unwrap();
+            writer
+                .write_sample(
+                    target,
+                    WriteSample {
+                        data: &data,
+                        duration: sample.duration,
+                        composition_offset: i32::try_from(sample.pts - sample.dts).unwrap(),
+                        is_sync: sample.is_sync,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    std::fs::write(&path, writer.finish().unwrap().into_inner()).unwrap();
+    path
+}
+
 /// The test files, made once per run.
 struct Files {
     reel: String,
@@ -48,9 +82,9 @@ struct Files {
 fn files() -> &'static Files {
     static F: OnceLock<Files> = OnceLock::new();
     F.get_or_init(|| Files {
-        reel: export("reel.mp4", json!({"width": 360, "height": 640})),
+        reel: late_metadata_fixture(export("reel.mp4", json!({"width": 360, "height": 640}))),
         wide: export("wide.mp4", json!({"width": 640, "height": 360, "endSeconds": 2.0})),
-        silent: export("silent.mp4", json!({"width": 360, "height": 640, "audio": false})),
+        silent: late_metadata_fixture(export("silent.mp4", json!({"width": 360, "height": 640, "audio": false}))),
         fast: export("fast.mp4", json!({"width": 180, "height": 320, "fps": 72.0, "audio": false})),
         wav: export("sound.wav", json!({"format": "wav", "endSeconds": 1.0})),
     })
@@ -76,7 +110,7 @@ fn a_good_reel_passes_and_says_what_it_measured() {
     {
         assert_eq!(status_of(&r, id), "pass", "{id}: {r:#}");
     }
-    // our exports keep the moov at the end: a warning with the fast-start fix
+    // The explicit legacy fixture keeps metadata last, so a fast-start fix remains available.
     assert_eq!(status_of(&r, "moovFirst"), "warn");
     assert!(r["checks"].as_array().unwrap().iter().any(|c| c["id"] == "loudness" && c["value"].as_str().unwrap().contains("LUFS")), "{r:#}");
     assert!(r["fixable"].is_string());
@@ -406,4 +440,15 @@ fn checks_of_hand_made_facts() {
     assert!(settings.bitrate_kbps <= 25_000 && settings.effects.loudness.enabled && settings.audio.sample_rate == Some(48_000));
     assert_eq!(pb::aspect_name(1080, 1920), "9:16");
     assert_eq!(pb::aspect_name(0, 5), "?");
+}
+
+#[test]
+fn current_native_exports_pass_fast_start_without_an_unnecessary_copy() {
+    let path = export("current-native.mp4", json!({"width": 360, "height": 640, "audio": false}));
+    let mut session = Session::default();
+    let result = session.execute("publish.preflight", json!({"destination": "instagramReel", "path": path, "loudness": false})).unwrap();
+    assert_eq!(status_of(&result, "moovFirst"), "pass", "{result}");
+    assert!(result["fixable"].is_null(), "no container repair is needed: {result}");
+    let error = session.execute("publish.fixCopy", json!({"destination": "instagramReel", "path": path})).unwrap_err();
+    assert!(error.to_string().contains("nothing to fix"), "{error}");
 }

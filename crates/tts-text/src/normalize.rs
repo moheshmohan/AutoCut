@@ -297,15 +297,45 @@ fn parse_money(rest: &str, lang: Lang) -> Option<(Vec<String>, usize)> {
         return Some((words, used + skip));
     }
     let (unit, sub) = money_units(symbol, lang);
-    let mut words = english_cardinal(value);
-    push_unit(&mut words, unit, value == 1);
+    if let Some((scale, scale_len)) = scale_word_after(rest.get(skip + used..)?) {
+        // "$2.5 billion" is 2.5 billion dollars, not two dollars fifty.
+        let mut words = english_cardinal(value);
+        if had_minor {
+            let amount = rest.get(skip..skip + used)?;
+            let frac = amount.split_once('.').map_or("", |(_, f)| f);
+            words.push("point".into());
+            words.extend(digit_run_as_words(frac).0);
+        }
+        words.push(scale.into());
+        words.push(unit.into());
+        return Some((words, skip + used + scale_len));
+    }
+    let sub_unit_only = value == 0 && had_minor && minor > 0;
+    let mut words = Vec::new();
+    if !sub_unit_only {
+        words = english_cardinal(value);
+        push_unit(&mut words, unit, value == 1);
+    }
     if had_minor && minor > 0 {
-        words.push("and".into());
+        if !sub_unit_only {
+            words.push("and".into());
+        }
         let mut cents = english_cardinal(u64::from(minor));
         push_unit(&mut cents, sub, minor == 1);
         words.extend(cents);
     }
     Some((words, used + skip))
+}
+
+/// A scale word (`thousand`, `million`, `billion`, `trillion`, any case) after optional
+/// whitespace, as a whole word. Returns it lowercased and the bytes consumed.
+fn scale_word_after(after: &str) -> Option<(&'static str, usize)> {
+    let word_start = after.len() - after.trim_start().len();
+    let tail = after.get(word_start..)?;
+    let word_len = tail.find(|c: char| !c.is_alphabetic()).unwrap_or(tail.len());
+    let word = tail.get(..word_len)?.to_lowercase();
+    let scale = ["thousand", "million", "billion", "trillion"].into_iter().find(|s| *s == word)?;
+    Some((scale, word_start + word_len))
 }
 
 fn money_units(symbol: char, lang: Lang) -> (&'static str, &'static str) {
@@ -348,11 +378,12 @@ fn parse_amount(rest: &str, _lang: Lang) -> Option<(u64, usize, usize, u32, bool
                 if frac_digits.len() < 9 {
                     frac_digits.push(ch);
                 }
-            } else if int_digits.len() > MAX_CARDINAL_DIGITS {
-                break;
-            } else {
+            } else if int_digits.len() <= MAX_CARDINAL_DIGITS {
                 int_digits.push(ch);
             }
+            // Past the cap the digit is not collected, but the run is still consumed: `used`
+            // must cover all of it, or the caller reads only the collected digits and speaks
+            // the rest of the amount as a separate number.
             used = i + 1;
         } else if ch == ',' && !int_digits.is_empty() && !after_decimal {
             if !grouping_followed_by_3(rest, i) {
@@ -548,8 +579,8 @@ fn english_month(month: u64) -> Option<&'static str> {
 
 const MAX_FRACTION_DIGITS: usize = 3;
 
-/// `1/2` → "one half"; other small denominators read "N ordinal(s)", anything
-/// bigger reads "N over M".
+/// `1/2` → "one half"; other small denominators read "N ordinal(s)", 1 and anything
+/// bigger read "N over M".
 fn parse_fraction(rest: &str) -> Option<(Vec<Token>, usize)> {
     // Operands of up to three digits: a longer run (a year, as in the `7/2026` left after an
     // impossible date's `13/`) is not a fraction.
@@ -562,8 +593,8 @@ fn parse_fraction(rest: &str) -> Option<(Vec<Token>, usize)> {
         return None;
     }
     let mut words = english_cardinal(n);
-    if d > 12 {
-        // "7/32" → "seven over thirty-two".
+    if d > 12 || d == 1 {
+        // "7/32" → "seven over thirty-two"; "5/1" → "five over one".
         words.push("over".into());
         words.extend(english_cardinal(d));
         return Some((words.into_iter().map(Token::Word).collect(), d_end));
@@ -587,16 +618,11 @@ fn parse_fraction(rest: &str) -> Option<(Vec<Token>, usize)> {
 fn parse_number_core(rest: &str, lang: Lang) -> Option<(Vec<Token>, usize)> {
     let mut digits = String::new();
     let mut used = 0usize;
-    let mut overflowed = false;
     let mut grouped = false;
     for (i, ch) in rest.char_indices() {
         if ch.is_ascii_digit() {
             digits.push(ch);
             used = i + 1;
-            if digits.len() > 19 {
-                overflowed = true;
-                break;
-            }
         } else if ch == ',' && !digits.is_empty() {
             if grouping_followed_by_3(rest, i) {
                 // Grouping is visual only; drop the mark.
@@ -612,7 +638,7 @@ fn parse_number_core(rest: &str, lang: Lang) -> Option<(Vec<Token>, usize)> {
     if digits.is_empty() {
         return None;
     }
-    if overflowed || digits.len() > MAX_CARDINAL_DIGITS {
+    if digits.len() > MAX_CARDINAL_DIGITS {
         let words: Vec<Token> = digits.chars().map(|c| Token::Word(english_digit_word(c).into())).collect();
         return Some((words, used));
     }
@@ -628,7 +654,29 @@ fn parse_number_core(rest: &str, lang: Lang) -> Option<(Vec<Token>, usize)> {
     if !grouped && digits.len() == 4 && (1100..=2099).contains(&value) && year_is_standalone(rest, used) {
         return Some((year_words(value, lang), used));
     }
+    // A decade such as "1990s" reads as a plural year: "nineteen nineties".
+    if !grouped
+        && digits.len() == 4
+        && (1100..=2099).contains(&value)
+        && value.is_multiple_of(10)
+        && matches!(peek(rest, used), Some('s'))
+        && !peek(rest, used + 1).is_some_and(char::is_alphanumeric)
+    {
+        let mut words = year_words(value, lang);
+        if let Some(Token::Word(last)) = words.last_mut() {
+            *last = pluralize_decade(last);
+        }
+        return Some((words, used + 1));
+    }
     Some((english_cardinal(value).into_iter().map(Token::Word).collect(), used))
+}
+
+/// Plural of the last word of a round year: ninety → nineties, hundred → hundreds.
+fn pluralize_decade(word: &str) -> String {
+    match word.strip_suffix('y') {
+        Some(stem) => format!("{stem}ies"),
+        None => format!("{word}s"),
+    }
 }
 
 fn has_leading_zero_str(digits: &str) -> bool {
@@ -1193,6 +1241,18 @@ mod tests {
     }
 
     #[test]
+    fn numbers_longer_than_twenty_digits_are_read_fully_digit_by_digit() {
+        assert_eq!(
+            words("12345678901234567890123", Lang::EnUs),
+            "one two three four five six seven eight nine zero one two three four five six seven eight nine zero one two three"
+        );
+        assert_eq!(
+            words("1234567890123456789000123", Lang::EnUs),
+            "one two three four five six seven eight nine zero one two three four five six seven eight nine zero zero zero one two three"
+        );
+    }
+
+    #[test]
     fn negatives_and_decimals() {
         assert_eq!(words("-5", Lang::EnUs), "minus five");
         assert_eq!(words("3.14", Lang::EnUs), "three point one four");
@@ -1244,19 +1304,19 @@ mod tests {
         assert_eq!(words("$1.00", Lang::EnUs), "one dollar");
         assert_eq!(words("$1.5", Lang::EnUs), "one dollar and fifty cents");
         assert_eq!(words("$2.5", Lang::EnUs), "two dollars and fifty cents");
-        assert_eq!(words("$0.5", Lang::EnUs), "zero dollars and fifty cents");
+        assert_eq!(words("$0.5", Lang::EnUs), "fifty cents");
         assert_eq!(words("$1.05", Lang::EnUs), "one dollar and five cents");
         assert_eq!(words("The price is $1.5.", Lang::EnUs), words("The price is $1.50.", Lang::EnUs));
         assert_eq!(words("£1.5", Lang::EnGb), "one pound and fifty pence");
         assert_eq!(words("€1.5", Lang::EnUs), "one euro and fifty cents");
         assert_eq!(words("$5.05", Lang::EnUs), "five dollars and five cents");
-        assert_eq!(words("$0.75", Lang::EnUs), "zero dollars and seventy-five cents");
+        assert_eq!(words("$0.75", Lang::EnUs), "seventy-five cents");
         assert_eq!(words("$1,234.56", Lang::EnUs), "one thousand two hundred thirty-four dollars and fifty-six cents");
         assert_eq!(words("€2", Lang::EnUs), "two euros");
         assert_eq!(words("€1", Lang::EnUs), "one euro");
         assert_eq!(words("£2.50", Lang::EnUs), "two pounds and fifty pence");
         assert_eq!(words("£1", Lang::EnUs), "one pound");
-        assert_eq!(words("$0.50", Lang::EnUs), "zero dollars and fifty cents");
+        assert_eq!(words("$0.50", Lang::EnUs), "fifty cents");
     }
 
     #[test]
@@ -1617,6 +1677,19 @@ mod tests {
     }
 
     #[test]
+    fn currency_followed_by_scale_word_reads_scale_before_unit() {
+        assert_eq!(words("$5 million", Lang::EnUs), "five million dollars");
+        assert_eq!(words("$2.5 billion", Lang::EnUs), "two point five billion dollars");
+        assert_eq!(words("worth $40 billion.", Lang::EnUs), "worth forty billion dollars |");
+        assert_eq!(words("$1 million", Lang::EnUs), "one million dollars");
+        assert_eq!(words("£3 Thousand", Lang::EnGb), "three thousand pounds");
+        assert_eq!(words("€1.5 trillion", Lang::EnUs), "one point five trillion euros");
+        // No scale word: unchanged. A longer word is not a scale word.
+        assert_eq!(words("$5 millions", Lang::EnUs), "five dollars millions");
+        assert_eq!(words("$2.50 now", Lang::EnUs), "two dollars and fifty cents now");
+    }
+
+    #[test]
     fn sentence_final_numbers_end_the_sentence() {
         assert_eq!(words("in 1999.", Lang::EnUs), "in nineteen ninety-nine |");
         assert_eq!(words("costs $1,234,567.", Lang::EnUs), "costs one million two hundred thirty-four thousand five hundred sixty-seven dollars |");
@@ -1641,5 +1714,19 @@ mod tests {
         assert_eq!(words("1999!", Lang::EnUs), "nineteen ninety-nine |!");
         assert_eq!(words("(1999)", Lang::EnUs), "( nineteen ninety-nine )");
         assert_eq!(words("in 1999.", Lang::EnGb), "in nineteen ninety-nine |");
+    }
+
+    /// A currency amount whose digit run passes the cap must still be read digit by digit:
+    /// the run is consumed as a whole, not only up to the cap. The leftover used to be spoken
+    /// as a cardinal, so a `$` followed by 25 digits ended in "four hundred fifty-six billion".
+    #[test]
+    fn money_run_past_the_cap_is_read_digit_by_digit() {
+        assert_eq!(words("$123456789012345", Lang::EnUs), "one two three four five six seven eight nine zero one two three four five");
+        assert_eq!(
+            words("$1234567890123456789012345", Lang::EnUs),
+            "one two three four five six seven eight nine zero one two three four five six seven eight nine zero one two three four five"
+        );
+        // At or below the cap nothing changes: an amount still goes through the amount path.
+        assert_eq!(words("$12.50", Lang::EnUs), "twelve dollars and fifty cents");
     }
 }

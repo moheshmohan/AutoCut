@@ -90,14 +90,9 @@ fn transition_drag_previews_both_edges_of_short_clips_and_commits_that_span() {
                 preview.rect,
                 h.state().ui.timeline.pps
             );
-            assert_eq!(
-                planned.duration,
-                if kind == TrackKind::Video {
-                    h.state().session.prefs.timeline.video_transition_duration(rate)
-                } else {
-                    h.state().session.prefs.timeline.audio_transition_duration(rate)
-                }
-            );
+            // This fixture has a six-frame clip at 24 fps: a centered fade uses three
+            // frames on either side, while an end fade fits the six frames of that clip.
+            assert_eq!(planned.duration, rate.tick_of(if edge == "in" { 12 } else { 6 }));
             if let Some(dir) = std::env::var_os("FILMCRAFT_UI_SNAPSHOT_DIR") {
                 let dir = std::path::PathBuf::from(dir);
                 std::fs::create_dir_all(&dir).unwrap();

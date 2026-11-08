@@ -48,12 +48,10 @@ pub fn split_voice(text: &str) -> (Option<String>, String) {
 
 pub fn parse(text: &str) -> Result<Document> {
     let mut doc = Document::default();
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.lines().peekable();
     // signature + header text
-    let has_sig = lines.peek().is_some_and(|l| {
-        let l = l.trim_start_matches('\u{feff}');
-        l == "WEBVTT" || l.starts_with("WEBVTT ") || l.starts_with("WEBVTT\t")
-    });
+    let has_sig = lines.peek().is_some_and(|&l| l == "WEBVTT" || l.starts_with("WEBVTT ") || l.starts_with("WEBVTT\t"));
     if has_sig {
         for l in lines.by_ref() {
             if l.trim().is_empty() {
@@ -79,19 +77,21 @@ pub fn parse(text: &str) -> Result<Document> {
     let mut seen_cue = false;
     for b in blocks {
         let first = b[0].trim();
-        if !b.iter().any(|l| l.contains("-->")) && (first == "NOTE" || first.starts_with("NOTE ") || first.starts_with("NOTE\t")) {
+        let timing_idx = b.iter().position(|line| parse_timing_line(line).is_some());
+        if timing_idx.is_none() && (first == "NOTE" || first.starts_with("NOTE ") || first.starts_with("NOTE\t")) {
             doc.blocks.push(b.join("\n"));
             continue;
         }
-        if !seen_cue && !b.iter().any(|l| l.contains("-->")) && (first == "STYLE" || first == "REGION") {
+        if !seen_cue && timing_idx.is_none() && (first == "STYLE" || first == "REGION") {
             doc.blocks.push(b.join("\n"));
             continue;
         }
-        let (id, timing_idx) = if b[0].contains("-->") { (None, 0) } else { (Some(b[0].trim().to_string()), 1) };
-        let Some(timing) = b.get(timing_idx) else {
+        let Some(timing_idx) = timing_idx else {
             doc.warnings.push(format!("ignored block \"{first}\""));
             continue;
         };
+        let id = (timing_idx > 0).then(|| b[..timing_idx].join("\n").trim().to_string());
+        let timing = &b[timing_idx];
         let Some((start, end, settings)) = parse_timing_line(timing) else {
             doc.warnings.push(format!("bad timing line \"{}\"", timing.trim()));
             continue;
@@ -102,7 +102,7 @@ pub fn parse(text: &str) -> Result<Document> {
             continue;
         }
         let raw = b[timing_idx + 1..].iter().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n");
-        let (speaker, text) = split_voice(&raw);
+        let (speaker, text) = split_voice(&raw.replace("--&gt;", "-->"));
         doc.cues.push(Cue { start, end, text, speaker, id, settings: settings.to_string(), words: Vec::new() });
     }
     if !has_sig && doc.cues.is_empty() && !text.trim().is_empty() {
@@ -122,7 +122,7 @@ pub fn write(doc: &Document) -> String {
     }
     for c in &doc.cues {
         if let Some(id) = c.id.as_deref().map(str::trim).filter(|i| !i.is_empty() && !i.contains("-->")) {
-            out.push_str(id);
+            out.push_str(&id.replace(['\r', '\n'], " "));
             out.push('\n');
         }
         out.push_str(&format!("{} --> {}", format_clock(c.start, '.'), format_clock(c.end, '.')));
@@ -153,6 +153,13 @@ mod tests {
     const SAMPLE: &str = "WEBVTT - with header\nKind: captions\n\nSTYLE\n::cue { color: yellow }\n\nNOTE a comment\nspanning lines\n\nintro\n00:01.000 --> 00:00:03.500 line:90% align:start\n<v.loud Ann Smith>Hello there\nsecond line\n\n00:00:04.000 --> 00:00:05.000\n<i>plain</i> &amp; tags\n";
 
     #[test]
+    fn bom_without_signature_is_ignored() {
+        let d = parse("\u{feff}00:00:01.000 --> 00:00:02.000\nHi\n\n00:00:03.000 --> 00:00:04.000\nYo\n").unwrap();
+        assert_eq!(d.cues.len(), 2);
+        assert_eq!(d.cues[0].text, "Hi");
+    }
+
+    #[test]
     fn style_region_identifier_cue_is_kept() {
         for id in ["STYLE", "REGION"] {
             let d = parse(&format!("WEBVTT\n\n{id}\n00:00:01.000 --> 00:00:02.000\nHi\n")).unwrap();
@@ -177,6 +184,25 @@ mod tests {
         let w = write(&d);
         assert!(w.starts_with("WEBVTT\n\nSTYLE\n::cue { color: yellow }\n\nNOTE a comment\nspanning lines\n\nintro\n00:00:01.000 --> 00:00:03.500 line:90% align:start\n<v Ann Smith>Hello there\n"));
         assert_eq!(parse(&w).unwrap().cues, d.cues);
+    }
+
+    #[test]
+    fn newline_in_cue_id_round_trips() {
+        let mut doc = Document::default();
+        doc.cues.push(Cue {
+            start: crate::Tick(0),
+            end: crate::Tick(254_016_000),
+            text: "x".into(),
+            speaker: None,
+            id: Some("first\nsecond".into()),
+            settings: String::new(),
+            words: Vec::new(),
+        });
+
+        let output = write(&doc);
+        assert!(output.contains("first second\n00:00:00.000 --> 00:00:00.001\n"), "{output:?}");
+        assert!(!output.contains("first\nsecond"));
+        assert_eq!(parse(&output).unwrap().cues[0].id.as_deref(), Some("first second"));
     }
 
     #[test]
@@ -212,5 +238,23 @@ mod tests {
         let d = parse("00:00:01.000 --> 00:00:02.000\nx\n").unwrap();
         assert_eq!(d.cues.len(), 1);
         assert!(parse("just text").is_err());
+    }
+}
+
+#[cfg(test)]
+mod upstream_arrow_tests {
+    use super::*;
+    use crate::TICKS_PER_MS;
+    use filmcraft_time::Tick;
+
+    #[test]
+    fn writer_arrow_escape_round_trips_without_changing_other_entities() {
+        let mut doc = Document::default();
+        doc.cues.push(Cue { start: Tick::ZERO, end: Tick(TICKS_PER_MS * 1000), text: "A --> B &amp; <i>tags</i>".into(), ..Default::default() });
+        let encoded = write(&doc);
+        assert!(encoded.contains("--&gt;"));
+        let decoded = parse(&encoded).unwrap();
+        assert_eq!(decoded.cues[0].text, doc.cues[0].text);
+        assert_eq!(write(&decoded), encoded);
     }
 }

@@ -494,6 +494,11 @@ pub struct EditorState {
     /// Sequence markers copied with the clipboard clips (start relative to the copied range).
     #[serde(skip)]
     pub clipboard_markers: Vec<filmcraft_project::Marker>,
+    /// Transitions copied with the clipboard clips (#3450): those whose every clip is copied, with
+    /// their track kind and relative track index (start relative to the copied range, `from`/`to`
+    /// still the copied clips' original ids).
+    #[serde(skip)]
+    pub clipboard_transitions: Vec<(TrackKind, usize, filmcraft_project::Transition)>,
     /// Captions copied from the Timeline, with their caption track's index (starts relative to the
     /// copied range). Copying clips empties it and copying captions empties `clipboard`, so Paste
     /// places whichever was copied last.
@@ -526,6 +531,8 @@ pub enum Event {
 
 pub struct Session {
     pub project: Arc<Project>,
+    /// Changes only when a different document is installed, never on an ordinary edit.
+    pub(crate) document_epoch: u64,
     pub history: History,
     pub revision: u64,
     pub saved_revision: u64,
@@ -724,6 +731,7 @@ impl Session {
     pub fn new(services: Arc<dyn Services>) -> Self {
         Self {
             project: Arc::new(Project::new("Untitled")),
+            document_epoch: 0,
             history: History { limit: 200, ..Default::default() },
             revision: 1,
             saved_revision: 1,
@@ -991,7 +999,13 @@ impl Session {
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
-        if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
+        // headless sessions (CLI, MCP, control channel) have no UI frame loop calling
+        // `poll_persistence`: apply background mask tracking before each command (#3302)
+        if self.exec_depth == 0 && !self.mask_jobs.is_empty() {
+            masks::poll(self);
+        }
+        let journal = spec.journal && !commands::reports_only(id, &params);
+        if self.exec_depth == 0 && journal && self.trim_play.active() {
             self.settle_trim_playback(id);
         }
         if let Err(why) = self.enabled_for(spec, &params) {
@@ -1021,7 +1035,7 @@ impl Session {
             source_monitor::track_history(self);
         }
         // source graphics: an edited instance updates the shared layers and the other instances
-        if r.is_ok() && spec.journal && id.starts_with("graphics.") && !self.project.source_graphics.is_empty() {
+        if r.is_ok() && journal && id.starts_with("graphics.") && !self.project.source_graphics.is_empty() {
             graphic_templates::sync_source_graphics(self);
         }
         if self.exec_depth == 0
@@ -1036,7 +1050,7 @@ impl Session {
         self.sync_persistence();
         // playback reads the newest snapshot (mixer moves, mutes… are heard while playing)
         self.previews.live.publish_project(self.project.clone());
-        if r.is_ok() && spec.journal {
+        if r.is_ok() && journal {
             // "Save this edit as a recipe": the user's own edits, not those commands run inside
             if self.exec_depth == 0 && self.recipes.recording.is_some() {
                 recipes::observe(self, id, &params);

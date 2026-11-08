@@ -6,7 +6,10 @@ clip behaviour: `crates/engine/src/narration.rs`.
 - `Voice` trait (script in, mono `f32` out at the voice's rate: 24 kHz, 44.1 or 48 kHz for natural clones), the voice catalogue (`voices`, `voice`), and
   the limits (64 KB script, 30-minute narration, pace 0.5–2×, pitch ±12 semitones).
 - `script`: pause markers `[pause 1s]` / `[pause 500ms]` (case-insensitive, capped at 10 s;
-  malformed markers are read as text).
+  malformed markers are read as text). AV17 bounds each marker scan to 64 characters in both
+  parsing and marker-span lookup, avoiding repeated scans through long malformed scripts.
+  AutoCut's Malayalam style tags, breath markers, line-break pauses and `parse_marked` remain
+  supported; the long-bracket regression exercises those paths as well as ordinary parsing.
 - `formant`: the built-in voices **Basic Female** and **Basic Male**, an original source–filter
   formant synthesizer: spelling rules → phone targets → glottal pulse train through three two-pole
   resonators, plus filtered noise for fricatives and bursts. No download, works in the web build.

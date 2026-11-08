@@ -88,7 +88,7 @@ Read these before you touch anything.
 
 | What | Where / value |
 |---|---|
-| CLI | `target/agent-main/release/filmcraft-cli`: the newest build (main plus `photos pick --photos`). `.mcp.json` runs `target/release/filmcraft-cli`; after an app rebuild, copy the packaged `target/agent-main/macos-package/bin/filmcraft-cli` there. Both report `0.12.0`, so `--version` doesn't tell builds apart. |
+| CLI | `target/agent-main/release/filmcraft-cli`: the AV17 upstream-integration build (AI features retained; [sync record](../plan/upstream-sync-2026-11-08.md)). `.mcp.json` runs `target/release/filmcraft-cli`; after an app rebuild, copy the packaged `target/agent-main/macos-package/bin/filmcraft-cli` there. Both report `0.12.0`, so `--version` doesn't tell builds apart. |
 | Building your own CLI | `CARGO_TARGET_DIR=target/agent-<name> cargo build --release -p filmcraft-cli`, one target folder per worktree, never shared. |
 | The app | `target/macos-package/AutoCut.app`, control port **9876**: `open -n --env FILMCRAFT_CONTROL_PORT=9876 target/macos-package/AutoCut.app` |
 | Projects and exports | `~/Movies/AutoCut/<Video name>/`: the `.fcproj`, the exports, and a `build/` folder (scripts, logs, a `README.txt` recipe) |

@@ -37,7 +37,8 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            let h = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+            let h =
+                std::str::from_utf8(&b[i + 1..i + 3]).ok().filter(|h| h.bytes().all(|c| c.is_ascii_hexdigit())).and_then(|h| u8::from_str_radix(h, 16).ok());
             if let Some(v) = h {
                 out.push(v);
                 i += 3;
@@ -127,6 +128,20 @@ fn join(base: &str, rel: &str) -> String {
     parts.join(&sep.to_string())
 }
 
+/// Resolve a media URL from a document (FCPXML `src`, FCP7 `pathurl`, OTIO `target_url`): like
+/// [`resolve_path`], with a relative URL percent-decoded as a `file://` URL is (`Clip%20A.mov` is
+/// `Clip A.mov`, #2195). Plain file names (EDL, AAF) go through [`resolve_path`] untouched.
+pub fn resolve_url(reference: &str, base_dir: Option<&str>) -> String {
+    let r = reference.trim();
+    let is_file_url = r.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("file:"));
+    if is_file_url || is_absolute(r) { resolve_path(r, base_dir) } else { resolve_path(&percent_decode(r), base_dir) }
+}
+
+/// A relative path written as a URL (the inverse of [`resolve_url`]'s decoding).
+pub(crate) fn relative_url(path: &str) -> String {
+    percent_encode_path(path)
+}
+
 /// Resolve a media reference from a document: file URLs become paths, relative paths are joined to
 /// `base_dir` (when given).
 pub fn resolve_path(reference: &str, base_dir: Option<&str>) -> String {
@@ -204,15 +219,25 @@ pub(crate) fn timebase(rate: FrameRate) -> (i64, bool) {
     (rate.timecode_base(), rate.is_ntsc())
 }
 
-/// Rate from FCP7-style `(timebase, ntsc)`.
+/// Highest rate (per second) an importer accepts. OTIO audio uses sample rates (192000 and more) as
+/// time bases, so this is far above any video rate and still far below where frame arithmetic
+/// overflows: a rate near `i64::MAX` made `frame_at` clamp to `i64::MAX`, and the `+ 1` after it overflowed.
+pub(crate) const MAX_RATE: i64 = 1_000_000;
+
+/// Whether `rate` is positive and at most [`MAX_RATE`] per second.
+pub(crate) fn plausible_rate(rate: FrameRate) -> bool {
+    rate.num > 0 && rate.den > 0 && i128::from(rate.num) <= i128::from(rate.den) * i128::from(MAX_RATE)
+}
+
+/// Rate from FCP7-style `(timebase, ntsc)`; the timebase is limited to `1..=MAX_RATE`.
 pub(crate) fn rate_from_timebase(timebase: i64, ntsc: bool) -> FrameRate {
-    let tb = timebase.max(1);
+    let tb = timebase.clamp(1, MAX_RATE);
     if ntsc { FrameRate::new(tb * 1000, 1001) } else { FrameRate::new(tb, 1) }
 }
 
 /// Snap a floating rate (OTIO) to an exact rate.
 pub(crate) fn rate_from_f64(r: f64) -> FrameRate {
-    if r <= 0.0 || !r.is_finite() {
+    if r <= 0.0 || !r.is_finite() || r > MAX_RATE as f64 {
         return FrameRate::FPS_24;
     }
     for c in FrameRate::COMMON {
@@ -550,6 +575,11 @@ pub(crate) fn settings_for(rate: FrameRate, width: u32, height: u32, drop_frame:
 }
 
 /// Source time advanced by a timeline duration at `speed` (exact for integral speeds).
+///
+/// This is the one place the importers multiply a `Tick` by a number from a file: `Tick` has no
+/// `Mul`, and its `Add`/`Sub` saturate, so every other sum of durations already clamps. It saturates
+/// at the `i64` bounds like those operators do (not at `Tick::MAX`, which the editing code uses as
+/// its "no next item" sentinel).
 pub(crate) fn scaled(d: Tick, speed: f64) -> Tick {
     let s = speed.abs();
     if s == s.round() && s < 1e6 { Tick(d.0 * s as i64) } else { Tick((d.0 as f64 * s).round() as i64) }
@@ -694,6 +724,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn percent_decode_requires_hex_digits() {
+        assert_eq!(file_url_to_path("file:///a/100%+5x.mov"), "/a/100%+5x.mov");
+        assert_eq!(file_url_to_path("file:///a/100%-1x.mov"), "/a/100%-1x.mov");
+        assert_eq!(file_url_to_path("file:///a/100%g0x.mov"), "/a/100%g0x.mov");
+        assert_eq!(file_url_to_path("file:///a/b%20c.mov"), "/a/b c.mov");
+    }
+
+    #[test]
     fn urls() {
         assert_eq!(file_url_to_path("file://localhost/Users/me/My%20Clip.mov"), "/Users/me/My Clip.mov");
         assert_eq!(file_url_to_path("file:///C:/Media/a.mxf"), "C:/Media/a.mxf");
@@ -721,6 +759,11 @@ mod tests {
         assert_eq!(resolve_path("media/a.mov", Some("/proj")), "/proj/media/a.mov");
         assert_eq!(resolve_path("../a.mov", Some("/proj/x/")), "/proj/a.mov");
         assert_eq!(resolve_path("/abs/a.mov", Some("/proj")), "/abs/a.mov");
+        // #2195: relative URLs are percent-decoded, plain names are not
+        assert_eq!(resolve_url("media/Clip%20A.mov", Some("/proj")), "/proj/media/Clip A.mov");
+        assert_eq!(resolve_url("file:///m/Clip%20A.mov", Some("/proj")), "/m/Clip A.mov");
+        assert_eq!(resolve_path("Clip%20A.mov", Some("/proj")), "/proj/Clip%20A.mov");
+        assert_eq!(resolve_url(&relative_url("a b/100%.mov"), Some("/p")), "/p/a b/100%.mov");
         assert_eq!(relative_path("/proj/media/a.mov", "/proj").as_deref(), Some("media/a.mov"));
         assert_eq!(relative_path("/proj/a.mov", "/proj/edl").as_deref(), Some("../a.mov"));
         assert_eq!(file_stem("/x/y/Clip 01.final.mov"), "Clip 01.final");
@@ -735,6 +778,19 @@ mod tests {
         assert_eq!(rate_from_f64(24000.0 / 1001.0), FrameRate::FPS_23_976);
         assert_eq!(rate_from_f64(23.976), FrameRate::FPS_23_976);
         assert_eq!(rate_from_f64(48000.0), FrameRate::new(48000, 1));
+        assert_eq!(rate_from_f64(192_000.0), FrameRate::new(192_000, 1));
+        // absurd rates from a hostile file: bounded instead of overflowing frame arithmetic later
+        for ntsc in [false, true] {
+            let r = rate_from_timebase(i64::MAX, ntsc);
+            assert!(plausible_rate(r), "{r}");
+            assert_eq!(rate_from_timebase(-5, ntsc), rate_from_timebase(1, ntsc));
+        }
+        for r in [1e300, 9.3e18, 2_000_000.0, f64::INFINITY, f64::NAN, -1.0] {
+            assert_eq!(rate_from_f64(r), FrameRate::FPS_24, "{r}");
+        }
+        assert!(!plausible_rate(FrameRate::new(i64::MAX, 1)));
+        assert!(!plausible_rate(FrameRate { num: 0, den: 1 }));
+        assert!(plausible_rate(FrameRate::FPS_23_976));
         assert_eq!(frames_round(FrameRate::FPS_24, FrameRate::FPS_24.tick_of(5) + Tick(10)), 5);
     }
 

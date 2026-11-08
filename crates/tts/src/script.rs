@@ -34,6 +34,13 @@ pub enum Mark {
     Tag(crate::styles::Tag),
 }
 
+/// Longest `[pause …]` marker recognised, brackets included (`[pause 123456789012ms]` is 22).
+const MAX_MARKER_CHARS: usize = 64;
+
+fn marker_end(text: &str) -> Option<usize> {
+    text.char_indices().take(MAX_MARKER_CHARS).find(|&(_, c)| c == ']').map(|(i, _)| i)
+}
+
 /// Split `text` into speech and pauses, in order. Empty speech pieces are dropped.
 pub fn parse(text: &str) -> Vec<Segment> {
     split(text, false)
@@ -73,7 +80,7 @@ pub fn mark_spans(text: &str) -> Vec<(usize, usize)> {
     let mut at = 0usize;
     while let Some(open) = text.get(at..).and_then(|r| r.find('[')).map(|o| at + o) {
         let from = text.get(open..).unwrap_or("");
-        let marker = from.find(']').and_then(|c| from.get(..=c));
+        let marker = marker_end(from).and_then(|c| from.get(..=c));
         match marker.filter(|m| pause_millis(m).is_some() || m.get(1..m.len().saturating_sub(1)).and_then(crate::styles::tag).is_some()) {
             Some(m) => {
                 out.push((open, open + m.len()));
@@ -93,7 +100,8 @@ fn split(text: &str, tags: bool) -> Vec<Mark> {
     while let Some(open) = rest.find('[') {
         let (before, from) = rest.split_at(open);
         speech.push_str(before);
-        let close = from.find(']');
+        // Bound scans for both pauses and AutoCut's voice-style tags.
+        let close = marker_end(from);
         let marker = close.and_then(|c| from.get(..=c));
         let found = marker
             .and_then(pause_millis)
@@ -226,5 +234,15 @@ mod tests {
                 assert!(s.get(a..b).is_some(), "{s:?}: {a}..{b} on char boundaries");
             }
         }
+    }
+
+    #[test]
+    fn many_open_brackets_parse_in_linear_time() {
+        // every `[` used to search (and copy) the whole remainder for its `]`
+        let text = format!("{}]", "[".repeat(400_000));
+        // a quadratic parse would not finish this input (a hang is the failure signal, not a wall-clock threshold)
+        assert_eq!(parse(&text), vec![sp(&text)]);
+        assert_eq!(parse_marked(&text), vec![Mark::Speech(text.clone())]);
+        assert!(mark_spans(&text).is_empty());
     }
 }

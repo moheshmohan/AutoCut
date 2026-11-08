@@ -211,6 +211,9 @@ pub fn settings_from_params(s: &Session, p: &Value, cmd: &str) -> Result<(Option
         let mut v = serde_json::to_value(&settings).map_err(|e| EngineError::Other(e.to_string()))?;
         merge(&mut v, patch);
         settings = serde_json::from_value(v).map_err(|e| bad(cmd, format!("settings: {e}")))?;
+        if patch.get("bitrateKbps").is_some() && patch.get("adaptiveBitrate").is_none() {
+            settings.adaptive_bitrate = None;
+        }
         // serde ignores keys it doesn't know, so a misspelt or misplaced key (a flat parameter
         // such as `loudnessLufs` put inside `settings`) would silently do nothing.
         let known = serde_json::to_value(&settings).map_err(|e| EngineError::Other(e.to_string()))?;
@@ -1196,16 +1199,16 @@ fn presets_import(s: &mut Session, p: &Value) -> Result<Value> {
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let f = parse_file(&bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let mut names = Vec::new();
+    let mut incoming = Vec::with_capacity(f.presets.len());
     for mut pr in f.presets {
         if filmcraft_export::presets::find_builtin(&pr.name).is_some() {
             pr.name = format!("{} (imported)", pr.name);
         }
         pr.builtin = false;
-        let k = preset_key(&pr.name);
-        s.export_presets.user.retain(|x| preset_key(&x.name) != k);
         names.push(pr.name.clone());
-        s.export_presets.user.push(pr);
+        incoming.push(pr);
     }
+    crate::presets::merge_by_key(&mut s.export_presets.user, incoming, |x| preset_key(&x.name));
     s.export_presets.persist().map_err(EngineError::Other)?;
     Ok(json!({"imported": names}))
 }

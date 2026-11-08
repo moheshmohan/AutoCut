@@ -677,6 +677,7 @@ fn new_from_template(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_p(p, "name").unwrap_or("Untitled").to_string();
     proj.name = name.clone();
     proj.root.name = name;
+    s.document_epoch = s.document_epoch.saturating_add(1);
     s.project = std::sync::Arc::new(proj);
     s.history = Default::default();
     s.history.limit = 200;
@@ -788,6 +789,8 @@ pub fn project_subset(p: &Project, keep: &BTreeSet<ItemId>) -> Project {
     out.speech.retain(|id, _| keep.contains(id));
     out.narrations.retain(|id, _| keep.contains(id));
     out.motion_tracks.retain(|_, t| keep.contains(&t.item) && keep.contains(&t.sequence));
+    // a source graphic holds its item's text and metadata: it leaves with that item only
+    out.source_graphics.retain(|id, _| keep.contains(id));
     out.search_bins.clear();
     out
 }

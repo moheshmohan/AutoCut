@@ -15,6 +15,9 @@ use serde_json::{Value, json};
 
 use crate::{AutomationError, BridgeClient, png_rgba};
 
+/// Maximum parse-error replies waiting for an MCP client to read them.
+const MAX_QUEUED_PARSE_ERRORS: usize = 64;
+
 pub enum Backend {
     Headless(Arc<Mutex<Session>>),
     Bridge(Arc<BridgeClient>),
@@ -36,6 +39,7 @@ fn join_error(e: tokio::task::JoinError) -> AutomationError {
 #[derive(Clone)]
 pub struct FilmcraftMcp {
     backend: Arc<Backend>,
+    render_lock: Arc<tokio::sync::Mutex<()>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -1692,10 +1696,10 @@ impl FilmcraftMcp {
         }));
         let shared = Arc::new(Mutex::new(session));
         pump_port(Arc::downgrade(&shared), woken);
-        Self { backend: Arc::new(Backend::Headless(shared)), tool_router: Self::tool_router() }
+        Self { backend: Arc::new(Backend::Headless(shared)), render_lock: Arc::default(), tool_router: Self::tool_router() }
     }
     pub fn bridge(addr: &str) -> Result<Self, AutomationError> {
-        Ok(Self { backend: Arc::new(Backend::Bridge(Arc::new(BridgeClient::new(addr)?))), tool_router: Self::tool_router() })
+        Ok(Self { backend: Arc::new(Backend::Bridge(Arc::new(BridgeClient::new(addr)?))), render_lock: Arc::default(), tool_router: Self::tool_router() })
     }
 
     /// An [`AutocutExecutor`] handle onto this server's backend.
@@ -1718,10 +1722,14 @@ impl FilmcraftMcp {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let (mut to_service, service_in) = tokio::io::duplex(1 << 20);
         let (service_out, from_service) = tokio::io::duplex(1 << 20);
-        let (err_tx, mut err_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (err_tx, mut err_rx) = tokio::sync::mpsc::channel::<String>(MAX_QUEUED_PARSE_ERRORS);
         let reader = tokio::spawn(async move {
             let mut lines = BufReader::new(input).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                let line = tokio::select! {
+                    l = lines.next_line() => match l { Ok(Some(l)) => l, _ => break },
+                    () = err_tx.closed() => break,
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -1733,7 +1741,9 @@ impl FilmcraftMcp {
                     }
                     Err(e) => {
                         let reply = json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": format!("parse error: {e}")}});
-                        let _ = err_tx.send(reply.to_string());
+                        if err_tx.send(reply.to_string()).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -2560,6 +2570,8 @@ impl FilmcraftMcp {
                 })
             }
             Backend::Bridge(b) => {
+                // Keep seek, screenshot and playhead restoration together across cloned servers.
+                let _turn = self.render_lock.lock().await;
                 let Some(sec) = p.seconds else {
                     return self.screenshot(&b.clone(), Some("Program".into()), max).await;
                 };
@@ -3752,5 +3764,114 @@ mod tests {
         let v = m.document().await.unwrap();
         assert_eq!(v["project"]["activeSequence"].as_u64(), Some(HUGE), "{v}");
         assert_eq!(v["sequence"]["id"].as_u64(), Some(HUGE), "an id above i64::MAX must still be inspected, not dropped to a null sequence: {v}");
+    }
+}
+
+#[cfg(test)]
+mod upstream_bridge_tests {
+    use super::*;
+    /// Bridge `render_frame` with `seconds` moves the app's single playhead, screenshots the single
+    /// Program monitor and moves the playhead back. Parallel calls (the tool is annotated read-only and
+    /// idempotent, so clients send them that way) interleaved those steps and got each other's frames
+    /// (#3837). Each call has to return the frame at its own time.
+    #[tokio::test]
+    async fn parallel_bridge_render_frames_each_return_their_own_frame() {
+        use base64::Engine as _;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let playhead = Arc::new(std::sync::atomic::AtomicI64::new(200));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let app_playhead = playhead.clone();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                let playhead = app_playhead.clone();
+                tokio::spawn(async move {
+                    let (r, mut w) = s.into_split();
+                    let mut lines = tokio::io::BufReader::new(r).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let req: Value = serde_json::from_str(&line).unwrap();
+                        let params = &req["params"]["params"];
+                        let result = match (req["method"].as_str().unwrap_or_default(), req["params"]["command"].as_str().unwrap_or_default()) {
+                            (_, "sequence.inspect") => json!({"playhead": playhead.load(std::sync::atomic::Ordering::SeqCst)}),
+                            (_, "playhead.set") => {
+                                let t = params["seconds"].as_f64().map(|x| x as i64).or_else(|| params["time"].as_i64()).unwrap_or(0);
+                                playhead.store(t, std::sync::atomic::Ordering::SeqCst);
+                                Value::Null
+                            }
+                            ("ui.screenshot", _) => {
+                                // the monitor shows whatever the playhead is at when the screenshot is taken
+                                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                                let shade = playhead.load(std::sync::atomic::Ordering::SeqCst) as u8;
+                                let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([shade, 0, 0, 255]));
+                                img.save(req["params"]["path"].as_str().unwrap()).unwrap();
+                                Value::Null
+                            }
+                            _ => Value::Null,
+                        };
+                        let line = format!("{}\n", json!({"id": req["id"], "ok": true, "result": result}));
+                        w.write_all(line.as_bytes()).await.unwrap();
+                    }
+                });
+            }
+        });
+        let m = FilmcraftMcp::bridge(&addr).unwrap();
+        let call = |seconds: f64| m.render_frame(Parameters(RenderParams { seconds: Some(seconds), max_side: Some(640) }));
+        let results = tokio::join!(call(5.0), call(20.0), call(35.0), call(50.0));
+        for (res, want) in [(results.0, 5u8), (results.1, 20), (results.2, 35), (results.3, 50)] {
+            let v = serde_json::to_value(res.unwrap()).unwrap();
+            let png = base64::engine::general_purpose::STANDARD.decode(v["content"][0]["data"].as_str().unwrap()).unwrap();
+            let px = image::load_from_memory(&png).unwrap().to_rgba8().get_pixel(0, 0).0;
+            assert_eq!(px[0], want, "frame at {want} s came from another call's playhead");
+        }
+        assert_eq!(playhead.load(std::sync::atomic::Ordering::SeqCst), 200, "the playhead must end where it started");
+    }
+}
+
+#[cfg(test)]
+mod upstream_parse_queue_tests {
+    use super::*;
+    /// A client that floods malformed lines and never reads its output stalls its own input: parse
+    /// errors wait for the writer instead of piling up in memory without bound.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unread_parse_errors_stall_the_input() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (mut tx, server_in) = tokio::io::duplex(4096);
+        let (server_out, rx) = tokio::io::duplex(4096);
+        tokio::spawn(FilmcraftMcp::headless(Session::default()).serve_io(server_in, server_out));
+        // Each 2-byte line answers with a ~100-byte error: far more than the pipes, the read buffer and the queue hold.
+        const LINES: usize = 1 << 16;
+        let junk = "x\n".repeat(LINES);
+        // The write stays in this task and is polled alongside the reads; a spawned task would drop `tx` on
+        // completion and end the server while replies are still queued.
+        let mut write = std::pin::pin!(tx.write_all(junk.as_bytes()));
+        // With the output unread the server stops reading, so the write stays pending.
+        let early = tokio::time::timeout(std::time::Duration::from_millis(500), &mut write).await;
+        assert!(early.is_err(), "the server kept reading input while its output was not read: {early:?}");
+        // Reading the output lets the input drain, and the pending write completes.
+        let drain = async {
+            let mut lines = tokio::io::BufReader::new(rx).lines();
+            let first: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(first["error"]["code"], -32700, "{first}");
+            for n in 1..LINES {
+                let got = lines.next_line().await.unwrap();
+                assert!(got.is_some(), "replies stopped after {n} of {LINES}");
+            }
+        };
+        let both = tokio::time::timeout(std::time::Duration::from_secs(120), async { tokio::join!(write, drain) });
+        let (written, ()) = both.await.expect("the drain stalled: input stopped being read");
+        written.expect("the pending write completes once the output is read");
+    }
+
+    /// When the output fails, the reader stops: the server ends instead of waiting on an input whose replies cannot be delivered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_output_stops_the_reader() {
+        use tokio::io::AsyncWriteExt;
+        let (mut tx, server_in) = tokio::io::duplex(4096);
+        let (server_out, rx) = tokio::io::duplex(4096);
+        drop(rx);
+        let server = tokio::spawn(FilmcraftMcp::headless(Session::default()).serve_io(server_in, server_out));
+        tx.write_all(b"x\n").await.unwrap(); // `tx` stays open: only a failed output can end the server
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
+        assert!(ended.is_ok(), "the server kept reading after its output failed");
     }
 }

@@ -195,7 +195,7 @@ fn destination_rows_forms_preflight_and_publish() {
     assert_eq!(d.element("export.publish.run").unwrap()["label"], "Check the file first", "a new file needs its own check");
     d.click("export.publish.check");
     assert_eq!(d.element("export.publish.check.duration").unwrap()["label"].as_str().map(|l| l.starts_with("pass")), Some(true));
-    assert!(d.element("export.publish.fix").is_some(), "the moov at the end: a fast-start copy is offered");
+    assert!(d.element("export.publish.fix").is_none(), "native MP4 exports already have fast-start metadata; no copy is needed");
     let run = d.element("export.publish.run").unwrap();
     assert_eq!(run["enabled"], true, "{run}");
     d.click("export.publish.run");

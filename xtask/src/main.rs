@@ -539,7 +539,7 @@ fn ci() -> Result<(), String> {
     run(Command::new(cargo).args(["clippy", "--workspace", "--all-targets", "--release", "--", "-D", "warnings"]))?;
     // --no-fail-fast: one (long) run reports every failing suite, not just the first
     let tested = run(Command::new(cargo).args(["test", "--workspace", "--release", "--no-fail-fast"]));
-    i18n_report();
+    i18n_report(true);
     tested?;
     layers()?;
     assets()?;
@@ -549,9 +549,11 @@ fn ci() -> Result<(), String> {
 /// The missing-translations report (`i18n::tests::missing_translations_report` in
 /// `filmcraft-ui-egui`), printed to the log. A missing translation never fails a build, so
 /// neither does this.
-fn i18n_report() {
-    let args = ["test", "--release", "-p", "filmcraft-ui-egui", "--lib", "--", "--exact", "i18n::tests::missing_translations_report", "--nocapture"];
-    if let Err(e) = run(Command::new(env!("CARGO")).args(args)) {
+fn i18n_report(workspace: bool) {
+    // Match the workspace test target selection so app features don't trigger a rebuild.
+    let selection: &[&str] = if workspace { &["--workspace", "--lib", "--bins", "--tests"] } else { &["-p", "filmcraft-ui-egui", "--lib"] };
+    let filter = ["--", "--exact", "i18n::tests::missing_translations_report", "--nocapture"];
+    if let Err(e) = run(Command::new(env!("CARGO")).args(["test", "--release"]).args(selection).args(filter)) {
         eprintln!("i18n report not printed: {e}");
     }
 }
@@ -588,7 +590,7 @@ fn main() -> ExitCode {
         "sweep" => sweep::run_sweep(&std::env::args().skip(2).collect::<Vec<_>>()),
         "live" => live::run_live(&std::env::args().skip(2).collect::<Vec<_>>()),
         "i18n-report" => {
-            i18n_report();
+            i18n_report(false);
             Ok(())
         }
         "bench" => bench(),

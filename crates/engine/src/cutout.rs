@@ -606,7 +606,7 @@ pub(crate) fn outline_job(
     };
     let run = crate::export_tools::guard_job(job.progress.clone(), job.result.clone(), run);
     s.jobs.push(job);
-    s.mask_jobs.push(crate::masks::pending_track(id, crate::masks::MaskSel { clip, effect, mask: mask_index }, seq_id, keys));
+    s.mask_jobs.push(crate::masks::pending_track(id, crate::masks::MaskSel { clip, effect, mask: mask_index }, seq_id, keys, s.document_epoch));
     if wait || cfg!(target_arch = "wasm32") {
         run();
         crate::masks::poll(s);

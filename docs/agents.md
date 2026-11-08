@@ -53,6 +53,12 @@ edit reports the value written at the requested time, rather than the static fal
 For example, setting opacity `blend` to `"Screen"` returns
 `{"keyframes": 0, "param": "blend", "value": 8}`.
 
+`effects.addKeyframe` toggles: it returns `{"added": true, "mediaTime": t}` when it added a keyframe and
+`{"added": false, "mediaTime": t}` when it removed the one already there; `mediaTime` is where the keyframe
+is, to find it again. An explicit `time` keeps its place, outside the clip too, as in `effects.setParam`;
+only the playhead (when no `time` is given) is held to the clip's last tick. `effects.deleteKeyframe`
+returns `{"removed": true}` or `{"removed": false}` (no keyframe sat exactly at `mediaTime`).
+
 ### From an installed release
 
 The release packages ship `filmcraft-cli` alongside the desktop app, so no build is needed:
@@ -82,7 +88,7 @@ claude mcp add filmcraft -- filmcraft-cli mcp
 | `project_inspect` | both | bins and items with ids, types, durations; active sequence |
 | `sequence_inspect` | both | the active sequence: tracks, clips (`start` / `end` and `sourceIn` / `sourceOut` in ticks, frames, `speed`, `reverse`: the clip plays its `sourceIn` to `sourceOut` stretch backward, `maintainPitch`: its sound keeps its pitch at that speed, `gainDb`), effects, transitions, markers (name and `comment`), playhead, selection |
 | `media_import` | both | import files by absolute path (`paths`, an array; optional `bin`, `image_sequence`) |
-| `render_frame` | both | PNG of the program frame at `seconds` (headless renders; bridge screenshots the Program monitor). Read-only: the playhead and selection are left as they were |
+| `render_frame` | both | PNG of the program frame at `seconds` (headless renders; bridge screenshots the Program monitor). Read-only: the playhead and selection are left as they were. Parallel calls through one MCP bridge take turns so each returns its own frame |
 | `ui_inspect` | bridge | UI state: tool, workspace, panels, zoom, playback, fps |
 | `ui_elements` | bridge | on-screen interactive elements with id, label and rect (`prefix` filter) |
 | `ui_click` | bridge | click by `id` or `x`,`y`; `button`, `count`, `modifiers` |
@@ -293,6 +299,16 @@ filmcraft-cli --bridge 127.0.0.1:9876 feedback   # the running app's, with its p
 strings; dotted keys nest (`color.r=1`). `run` prints one JSON line per command
 (`{"line","id","ok","result"|"error"}`) and stops at the first failure unless `--keep-going`.
 `--save` writes back to `--project`; `--save-as path` writes elsewhere.
+
+Runs that save over the project they opened take turns, so parallel scripts don't lose edits. Each
+holds an OS lock on `.<name>.lock` next to the project from before it reads the file until it exits;
+the next one says so on stderr, waits, and then edits what the first one saved. A crash releases the
+lock, and the empty file left behind is harmless. Only these CLI runs take the lock: the desktop app,
+`mcp`, and a `file.save` line in a script run without `--save` don't. OS locks can also be unreliable
+over network shares and synced folders. If the lock can't be taken, the run reports an error
+before editing. AutoCut also locks a missing `.fcproj` before automatically creating it, including
+its parent folder when needed; concurrent creators then open the previous creator's saved edits.
+The same guard covers AutoCut-specific CLI workflows. Existing read-only project opens take no lock.
 
 Media that is offline when it is needed (the file is missing, was made offline, or can't be read)
 renders as the "media not found" placeholder. `export` and `render` then name each such item on

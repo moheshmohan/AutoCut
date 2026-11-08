@@ -1087,6 +1087,31 @@ fn linked_slip_keeps_picture_and_sound_aligned_at_unequal_media_limits() {
 }
 
 #[test]
+fn slipping_by_the_most_negative_delta_clamps_instead_of_overflowing() {
+    // `slip_together` took `abs()` of the requested delta: i64::MIN (from the control channel, MCP
+    // or a script, as ticks or as frames, which saturate to it) overflowed, a panic in debug builds
+    let mut s = Session::default();
+    s.execute("file.newProject", json!({"name": "Slip"})).unwrap();
+    s.execute("file.newSequence", json!({"name": "Sequence", "fps": 25, "video": 1, "audio": 1, "width": 16, "height": 16})).unwrap();
+    let r = s.execute("file.newOfflineFile", json!({"name": "Media", "seconds": 4, "fps": 25, "video": true, "audio": true})).unwrap();
+    let item = r["item"].as_u64().unwrap();
+    let fr = s.sequence_rate().tick_of(1);
+    let r =
+        s.execute("timeline.place", json!({"item": item, "track": "V1", "audioTrack": "A1", "time": 0, "sourceIn": fr.0 * 20, "duration": fr.0 * 60})).unwrap();
+    let (v, a) = (r["clips"][0].as_u64().unwrap(), r["clips"][1].as_u64().unwrap());
+    for params in [json!({"clip": v, "delta": i64::MIN}), json!({"clip": a, "deltaFrames": i64::MIN})] {
+        s.execute("timeline.slip", params).unwrap();
+        // both stop at the start of the media, together
+        assert_eq!((clip(&s, v).source_in, clip(&s, a).source_in), (Tick::ZERO, Tick::ZERO));
+        // back off the start, so a case that slipped nothing could not pass on the previous one's result
+        s.execute("timeline.slip", json!({"clip": v, "deltaFrames": 20})).unwrap();
+        assert_eq!((clip(&s, v).source_in, clip(&s, a).source_in), (Tick(fr.0 * 20), Tick(fr.0 * 20)));
+    }
+    s.execute("timeline.slip", json!({"clip": v, "delta": i64::MAX})).unwrap();
+    assert_eq!((clip(&s, v).source_in, clip(&s, a).source_in), (Tick(fr.0 * 40), Tick(fr.0 * 40)), "and at its end the other way");
+}
+
+#[test]
 fn reset_keeps_keyframes_and_resets_one_parameter() {
     // #284: Reset Effect used to replace the effect with a fresh one, deleting every keyframe
     let mut s = demo();
@@ -1224,4 +1249,27 @@ fn applied_transform_centres_its_points_in_the_clip_picture() {
     for m in clip(&s, c).effects.iter().filter(|e| e.effect == "motion") {
         assert_eq!(m.param("position").unwrap().value.as_vec2().unwrap(), frame_centre);
     }
+}
+
+#[test]
+fn set_param_rejects_colour_component_that_overflows_f32() {
+    // 1e300 is a finite JSON number but saturates to an infinite f32, which saved as `null` and could not be reopened
+    let mut s = demo();
+    let a = v1(&s)[0].clone();
+    s.execute("effects.apply", json!({"clips": [a.id.0], "effect": "tint"})).unwrap();
+    let r = s.execute("effects.setParam", json!({"clip": a.id.0, "effect": "tint", "param": "black", "value": [1e300, 0, 0, 1]}));
+    assert!(r.is_err(), "an overflowing colour component must be refused");
+    let bytes = filmcraft_format::encode(&s.project, false);
+    filmcraft_format::decode(&bytes).unwrap();
+}
+
+#[test]
+fn set_param_rejects_curve_coordinate_that_overflows_f32() {
+    let mut s = demo();
+    let a = v1(&s)[0].clone();
+    s.execute("effects.apply", json!({"clips": [a.id.0], "effect": "lumetri"})).unwrap();
+    let r = s.execute("effects.setParam", json!({"clip": a.id.0, "effect": "lumetri", "param": "curve_luma", "value": [[1e300, 0.5], [1.0, 1.0]]}));
+    assert!(r.is_err(), "an overflowing curve coordinate must be refused");
+    let bytes = filmcraft_format::encode(&s.project, false);
+    filmcraft_format::decode(&bytes).unwrap();
 }

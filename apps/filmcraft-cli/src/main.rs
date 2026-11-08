@@ -38,6 +38,7 @@ mod instagram;
 mod locations;
 mod ml_script;
 mod probe;
+mod project_lock;
 mod publish;
 mod quick;
 mod scenes;
@@ -853,7 +854,8 @@ OPTIONS
   --project <p.fcproj>          open this project first (headless); a .fcproj that does not
                                 exist yet is made there, empty, and saved
   --demo                        open the built-in demo project (headless)
-  --save                        save the project back to --project when done
+  --save                        save the project back to --project when done; runs saving one
+                                project take turns, so each edits what the last one saved
   --save-as <p.fcproj>          save the project to this path when done
   --bridge <127.0.0.1:PORT>     send commands to the running app (`filmcraft --control PORT`); its
                                 token is FILMCRAFT_CONTROL_TOKEN, else the one the app wrote for PORT
@@ -983,7 +985,8 @@ impl Backend {
             // this process exits after the command, so a background export would never be written:
             // long commands wait unless the caller says otherwise (#2342)
             Backend::Local(s) => {
-                if filmcraft_automation::long_job::LONG_COMMANDS.contains(&id)
+                // mask tracking is applied when its job finishes, which this process never sees (#3302)
+                if (filmcraft_automation::long_job::LONG_COMMANDS.contains(&id) || id == "masks.track")
                     && let Some(p) = params.as_object_mut()
                 {
                     // anything but an explicit `false` (missing, null, a typo'd value) waits
@@ -1857,6 +1860,8 @@ async fn cli() {
     register_hardware_decoders();
     register_gpu_frame_renderer();
     let Some(cmd) = a.pos(0) else { usage("missing subcommand") };
+    // Include AutoCut workflows and automatic project creation in the save lock.
+    let _save_lock = project_lock::for_save(&a).unwrap_or_else(|e| fail(e));
     match cmd {
         "help" | "-h" => out!("{HELP}"),
         "version" => outln!("filmcraft-cli {}", env!("CARGO_PKG_VERSION")),
