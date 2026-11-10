@@ -19,6 +19,10 @@ Insta360 camera or its cloud) goes through the same steps, each shot framed by a
 and `filmcraft-cli direct` has the local model direct normal and 360° clips into one edit on the
 beat: [360-video.md](360-video.md).
 
+For custom animations, motion graphics, transitions, or full scenes, use the
+[local RAEA workflow](raea-workflow.md) during the build. Import the resulting MP4 or
+transparent image sequence before AutoCut's review, privacy, and export passes.
+
 ```text
  album ─► pick ─► analyse ─► plan ─► script ─► voice ─► build (1080p review) ─► QA + privacy
    ▲                                                         │

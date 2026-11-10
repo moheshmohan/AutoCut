@@ -155,6 +155,9 @@ pub struct MediaImportParams {
     /// Import numbered stills as an image sequence (optional, default false).
     #[serde(default)]
     pub image_sequence: Option<bool>,
+    /// Source frame rate (1–240) for an explicit image sequence import.
+    #[serde(default)]
+    pub fps: Option<f64>,
 }
 
 /// `file.import` params for a `media_import` call.
@@ -165,6 +168,9 @@ fn media_import_params(p: MediaImportParams) -> Value {
     }
     if let Some(seq) = p.image_sequence {
         params["imageSequence"] = json!(seq);
+    }
+    if let Some(fps) = p.fps {
+        params["fps"] = json!(fps);
     }
     params
 }
@@ -3425,7 +3431,7 @@ mod tests {
         assert_eq!(v["results"][0]["result"]["showcase"]["plan"]["entries"].as_array().map(Vec::len), Some(6), "{v}");
     }
 
-    /// #499: `media_import` takes `paths` (a required array), and forwards `bin` / `image_sequence` to `file.import`.
+    /// `media_import` forwards numbered-sequence settings to `file.import`.
     #[test]
     fn media_import_schema_and_params() {
         let m = FilmcraftMcp::headless(Session::default());
@@ -3433,8 +3439,8 @@ mod tests {
         let schema = Value::Object((*def.input_schema).clone());
         assert_eq!(schema["properties"]["paths"]["type"], "array", "{schema}");
         assert!(schema["required"].as_array().unwrap().iter().any(|r| r == "paths"), "{schema}");
-        let p: MediaImportParams = serde_json::from_value(json!({"paths": ["/a.png"], "bin": 7, "image_sequence": true})).unwrap();
-        assert_eq!(media_import_params(p), json!({"paths": ["/a.png"], "bin": 7, "imageSequence": true}));
+        let p: MediaImportParams = serde_json::from_value(json!({"paths": ["/a.png"], "bin": 7, "image_sequence": true, "fps": 30.0})).unwrap();
+        assert_eq!(media_import_params(p), json!({"paths": ["/a.png"], "bin": 7, "imageSequence": true, "fps": 30.0}));
         let p: MediaImportParams = serde_json::from_value(json!({"paths": ["/a.wav"]})).unwrap();
         assert_eq!(media_import_params(p), json!({"paths": ["/a.wav"]}));
         assert!(serde_json::from_value::<MediaImportParams>(json!({"text": "/a.wav"})).is_err());

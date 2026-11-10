@@ -4,6 +4,7 @@ FilmCraft is built to be driven by AI agents, and largely built by them. Part 1 
 FilmCraft from an agent. Part 2 covers developing FilmCraft as an agent. To make a video with
 AutoCut (which pipeline to use, building an edit by hand, checking, exporting, delivering), start
 with [autocut-agent-guide.md](autocut-agent-guide.md).
+For custom animations, effects, and generated scenes, see [the RAEA workflow](raea-workflow.md).
 
 # Part 1: driving FilmCraft
 
@@ -87,7 +88,7 @@ claude mcp add filmcraft -- filmcraft-cli mcp
 | `render_preview` | both | same as `render_frame` |
 | `project_inspect` | both | bins and items with ids, types, durations; active sequence |
 | `sequence_inspect` | both | the active sequence: tracks, clips (`start` / `end` and `sourceIn` / `sourceOut` in ticks, frames, `speed`, `reverse`: the clip plays its `sourceIn` to `sourceOut` stretch backward, `maintainPitch`: its sound keeps its pitch at that speed, `gainDb`), effects, transitions, markers (name and `comment`), playhead, selection |
-| `media_import` | both | import files by absolute path (`paths`, an array; optional `bin`, `image_sequence`) |
+| `media_import` | both | import files by absolute path (`paths`, an array; optional `bin`, `image_sequence`); with `image_sequence: true`, `fps` sets the numbered stills' source rate |
 | `render_frame` | both | PNG of the program frame at `seconds` (headless renders; bridge screenshots the Program monitor). Read-only: the playhead and selection are left as they were. Parallel calls through one MCP bridge take turns so each returns its own frame |
 | `ui_inspect` | bridge | UI state: tool, workspace, panels, zoom, playback, fps |
 | `ui_elements` | bridge | on-screen interactive elements with id, label and rect (`prefix` filter) |

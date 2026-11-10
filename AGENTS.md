@@ -150,6 +150,7 @@ as PhotoCraft does with `cargo xtask corpus`.
 - [docs/architecture.md](docs/architecture.md): layers, data model, commands, pipeline
 - [docs/testing.md](docs/testing.md): oracle tests, criteria, benchmarks
 - [docs/agents.md](docs/agents.md): driving FilmCraft over MCP / the control channel, and the agent work loop
+- [docs/raea-workflow.md](docs/raea-workflow.md): rendering local animations, scenes, and transitions for AutoCut
 - [docs/control-protocol.md](docs/control-protocol.md): control-channel method reference
 - [ATTRIBUTION.md](ATTRIBUTION.md): asset index
 - [ROADMAP.md](ROADMAP.md), [docs/target-app-parity.md](docs/target-app-parity.md), [docs/gaps.md](docs/gaps.md): stage, parity with Premiere Pro and the ranked work list (craftrules `standards/progress-docs.md`)

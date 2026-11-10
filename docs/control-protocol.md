@@ -246,6 +246,11 @@ or `--bridge 127.0.0.1:9876` to drive the running app. Tools: `command_list`, `c
 [agents.md](agents.md#tools)); resources `filmcraft://document` and `filmcraft://commands`.
 `.mcp.json` registers both.
 
+For numbered stills, `command_run` or `engine.execute` accepts `file.importImageSequence`
+with `{path, bin?, fps?}`. The MCP shortcut is `media_import` with
+`{paths, bin?, image_sequence: true, fps?}`. Use a numeric `fps` from 1 to 240 for a known
+render rate. Omit it to use the Media preference.
+
 **Feedback bundles.** `app.feedbackBundle {path?, qaReport?}` (MCP `feedback_bundle`,
 `filmcraft-cli feedback [folder]`, Help ▸ Save Feedback Bundle…) writes one folder to diagnose a
 problem from: `README.txt`, `manifest.json` (app version, build, OS, every file, what was cut or

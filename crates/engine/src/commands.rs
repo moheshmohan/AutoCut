@@ -816,11 +816,15 @@ pub fn import_streamed(s: &mut Session, path: &str, bin: Option<filmcraft_projec
 }
 
 /// Import the image sequence that the numbered still `path` starts (File ▸ Import with Image
-/// Sequence): one movie item at Settings ▸ Media ▸ Indeterminate Media Timebase. Returns the item,
-/// the frame count and the missing frame numbers (relative to the first).
+/// Sequence): one movie item at the Indeterminate Media Timebase. Returns the item, the frame
+/// count and the missing frame numbers (relative to the first).
 pub fn import_image_sequence(s: &mut Session, path: &str, bin: Option<filmcraft_project::BinId>) -> Result<(ItemId, usize, Vec<usize>)> {
-    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
     let rate = crate::settings::timebase_rate(&s.prefs.media.indeterminate_timebase);
+    import_image_sequence_at_rate(s, path, bin, rate)
+}
+
+fn import_image_sequence_at_rate(s: &mut Session, path: &str, bin: Option<filmcraft_project::BinId>, rate: FrameRate) -> Result<(ItemId, usize, Vec<usize>)> {
+    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
     let frames = crate::media_pool::image_sequence_frames(path, &*s.services)?;
     let missing: Vec<usize> = frames.iter().enumerate().filter(|(_, f)| f.is_none()).map(|(i, _)| i).collect();
     let src = crate::media_pool::open_image_sequence(path, &*s.services, rate, &name)?;
@@ -835,7 +839,7 @@ fn detect_image_sequence(s: &Session, path: &str) -> bool {
 }
 
 /// `file.import`'s parameters (`reuse`: see [`already_imported`]).
-const IMPORT_PARAMS: &str = r#"{"paths":[str],"bin":binId?,"imageSequence":bool?,"replace":bool?,"reuse":bool?}"#;
+const IMPORT_PARAMS: &str = r#"{"paths":[str],"bin":binId?,"imageSequence":bool?,"fps":f64?,"replace":bool?,"reuse":bool?}"#;
 
 /// The media item that already holds the file at `path` (`file.import` with `reuse`): one whose
 /// file is `path`, else one whose content identity (size and fingerprint) is that file's — the
@@ -1562,6 +1566,17 @@ fn build() -> Vec<CommandSpec> {
             if paths.is_empty() {
                 return Err(bad("file.import", "need `paths`"));
             }
+            let as_sequence = p.get("imageSequence").and_then(Value::as_bool).unwrap_or(false);
+            let image_rate = match p.get("fps") {
+                None | Some(Value::Null) => None,
+                Some(_) if !as_sequence => return Err(bad("file.import", "`fps` requires `imageSequence: true`")),
+                Some(value) => value
+                    .as_f64()
+                    .filter(|fps| (1.0..=240.0).contains(fps))
+                    .map(FrameRate::from_f64)
+                    .map(Some)
+                    .ok_or_else(|| bad("file.import", "image sequence `fps` must be a number from 1 to 240"))?,
+            };
             if bool_p(p, "replace").unwrap_or(false) {
                 let name = s.project.name.clone();
                 s.execute("file.newProject", json!({ "name": name }))?;
@@ -1573,7 +1588,6 @@ fn build() -> Vec<CommandSpec> {
             let mut image_sequences = Vec::new();
             // Image Sequence: each path is the first frame of a numbered still sequence. With
             // Settings ▸ Media ▸ Import image sequences on, a single numbered still is detected.
-            let as_sequence = p.get("imageSequence").and_then(Value::as_bool).unwrap_or(false);
             let detect = !as_sequence && s.prefs.media.import_image_sequences && paths.len() == 1;
             let mut reused: Vec<u64> = Vec::new();
             for path in paths {
@@ -1589,7 +1603,11 @@ fn build() -> Vec<CommandSpec> {
                     continue;
                 }
                 if as_sequence || (detect && detect_image_sequence(s, &path)) {
-                    match import_image_sequence(s, &path, bin) {
+                    let imported = match image_rate {
+                        Some(rate) => import_image_sequence_at_rate(s, &path, bin, rate),
+                        None => import_image_sequence(s, &path, bin),
+                    };
+                    match imported {
                         Ok((id, frames, missing)) => {
                             ids.push(id.0);
                             image_sequences.push(json!({"item": id.0, "frames": frames, "missing": missing}));

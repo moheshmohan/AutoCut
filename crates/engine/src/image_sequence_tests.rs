@@ -103,6 +103,29 @@ fn import_unicode_image_sequence_with_missing_frames() {
     check_image_sequence_with_missing_frames("é");
 }
 
+#[test]
+fn explicit_image_sequence_rate_sets_source_timing_and_preserves_preferences() {
+    let dir = tmp_dir("imgseq-explicit-fps");
+    let paths = write_frames(&dir, "frame-", &[0, 1, 2], "png");
+    let mut s = demo();
+    s.execute("prefs.set", json!({"key": "media.indeterminateTimebase", "value": "25"})).unwrap();
+
+    for fps in [json!(0), json!(-1), json!(241), json!("30"), json!([])] {
+        let before = s.project.clone();
+        let error = s.execute("file.import", json!({"paths": [&paths[0]], "imageSequence": true, "fps": fps, "replace": true})).unwrap_err();
+        assert!(error.to_string().contains("fps"));
+        assert_eq!(s.project, before);
+    }
+    assert!(s.execute("file.import", json!({"paths": [&paths[0]], "fps": 30})).is_err());
+
+    let report = s.execute("file.importImageSequence", json!({"path": &paths[0], "fps": 30})).unwrap();
+    let item = s.project.item(item_of(&report)).unwrap().as_media().unwrap();
+    assert_eq!(item.info.frame_rate(), FrameRate::FPS_30);
+    assert_eq!(item.info.duration, FrameRate::FPS_30.tick_of(3));
+    assert_eq!(red_at(&s, item_of(&report), 2), 20);
+    assert_eq!(s.prefs.media.indeterminate_timebase, "25");
+}
+
 fn check_image_sequence_with_missing_frames(prefix: &str) {
     let dir = tmp_dir(&format!("imgseq-import-{prefix}"));
     let mut s = demo();

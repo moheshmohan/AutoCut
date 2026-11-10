@@ -91,6 +91,7 @@ Read these before you touch anything.
 | CLI | `target/agent-main/release/filmcraft-cli`: the AV17 upstream-integration build (AI features retained; [sync record](../plan/upstream-sync-2026-11-08.md)). `.mcp.json` runs `target/release/filmcraft-cli`; after an app rebuild, copy the packaged `target/agent-main/macos-package/bin/filmcraft-cli` there. Both report `0.12.0`, so `--version` doesn't tell builds apart. |
 | Building your own CLI | `CARGO_TARGET_DIR=target/agent-<name> cargo build --release -p filmcraft-cli`, one target folder per worktree, never shared. |
 | The app | `target/macos-package/AutoCut.app`, control port **9876**: `open -n --env FILMCRAFT_CONTROL_PORT=9876 target/macos-package/AutoCut.app` |
+| RAEA | `~/.raea/versions/0.1.0/bin/raea` for local custom animations, 3D scenes and effects. [Render and import workflow](raea-workflow.md). |
 | Projects and exports | `~/Movies/AutoCut/<Video name>/`: the `.fcproj`, the exports, and a `build/` folder (scripts, logs, a `README.txt` recipe) |
 | Data folder | `~/Library/Application Support/FilmCraft/`: `google-photos/cache` (picked originals with `.json` date sidecars), `scene-cache`, `redact-cache`, `autocut/analysis-cache`, voices, models, control tokens |
 | Ollama models | `qwen2.5vl:7b` (picker and screen agents, clip analysis, redaction checks), `qwen3:8b` (scripts, Malayalam), `phi4-mini` (the AutoCut prompt classifier), `moondream` |
@@ -520,6 +521,10 @@ Related commands:
 - `transitions.snapToBeats` moves transitions onto the music's beats.
 - `transitions.applyToAll {preset, duration}` puts one transition on every cut.
 
+For a custom transition or effect, render transparent PNG frames with RAEA and place the
+image sequence above the edit. For a custom animation, 3D shot, or full scene, render a
+normal MP4 and place it on the picture track. See the [local RAEA workflow](raea-workflow.md).
+
 ### 6.8 Titles
 
 ```python
@@ -820,6 +825,7 @@ says otherwise, the brief wins; when in doubt, ask or offer a sample.
 | Malayalam narration and style | [malayalam-narration.md](malayalam-narration.md), [malayalam-style.md](malayalam-style.md) |
 | Recording a voice reference | [voice-recording.md](voice-recording.md) |
 | Graphics and text | [graphics.md](graphics.md) |
+| Custom animations, rendered scenes and transitions | [raea-workflow.md](raea-workflow.md) |
 | Google Photos setup | [crates/gphotos/README.md](../crates/gphotos/README.md) |
 | AutoCut's planner and showcases | [crates/autocut/README.md](../crates/autocut/README.md) |
 | Building on the app (rules, gates, layering) | [AGENTS.md](../AGENTS.md), [CLAUDE.md](../CLAUDE.md), [architecture.md](architecture.md) |

@@ -4,6 +4,12 @@ The working files of real videos made with AutoCut, kept as worked examples for
 [docs/video-pipeline.md](../docs/video-pipeline.md). No media lives here: the clips are in Google
 Photos (and AutoCut's cache), the exports and `.fcproj` projects in `~/Movies/AutoCut/`.
 
+## raea — local motion graphics
+
+`raea/motion.tsx` defines a transparent split wipe and an animated chapter scene.
+`raea/render.py` renders them and prepares their AutoCut import commands. See the
+[local RAEA workflow](../docs/raea-workflow.md).
+
 ## every-robot — "Every Robot I've Met" (H4hacks)
 
 Final: Malayalam narration in the cloned voice, 4K, speech-first mix, on YouTube

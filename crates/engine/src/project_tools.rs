@@ -114,11 +114,14 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             },
         ),
         // File ▸ Import with "Image Sequence" checked (the UI asks for the first frame).
-        spec("file.importImageSequence", "Import Image Sequence…", &["File"], None, r#"{"path":str,"bin":binId?}"#, always, |s, p| {
+        spec("file.importImageSequence", "Import Image Sequence…", &["File"], None, r#"{"path":str,"bin":binId?,"fps":f64?}"#, always, |s, p| {
             let path = p.get("path").and_then(Value::as_str).ok_or_else(|| bad("file.importImageSequence", "need `path` (the first numbered still)"))?;
             let mut q = json!({"paths": [path], "imageSequence": true});
             if let Some(b) = p.get("bin") {
                 q["bin"] = b.clone();
+            }
+            if let Some(fps) = p.get("fps") {
+                q["fps"] = fps.clone();
             }
             s.execute("file.import", q)
         }),

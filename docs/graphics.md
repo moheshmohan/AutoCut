@@ -5,6 +5,10 @@ holds **text** and **shape** layers. Text is set by the text engine in `crates/t
 ([README](../crates/text/README.md)): bundled OFL fonts plus system fonts, OpenType shaping with
 kerning and ligatures, bidi, line breaking, all drawn as vectors in linear light.
 
+Compositions rendered separately as MP4 or transparent PNG sequences can be placed as
+media clips. See the [local RAEA workflow](raea-workflow.md) for custom animations,
+scenes, and transitions.
+
 ## Model
 
 - A graphic clip's project item is an `ItemKind::Graphic { width, height, rate }`: a transparent
