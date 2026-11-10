@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use filmcraft_media::generators::GeneratorSource;
 use filmcraft_media::{DemoScene, Generator};
@@ -13,9 +14,12 @@ use serde_json::json;
 use crate::Session;
 
 pub fn tmp_dir(name: &str) -> PathBuf {
+    // Parallel tests can read the same clock tick. Never let them share a media fixture.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let d = std::env::temp_dir().join(format!("filmcraft-{name}-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
+    let d = std::env::temp_dir().join(format!("filmcraft-{name}-{}-{nanos}-{nonce}", std::process::id()));
+    std::fs::create_dir(&d).unwrap();
     d
 }
 

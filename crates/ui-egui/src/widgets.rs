@@ -15,8 +15,9 @@ pub fn hot_number(ui: &mut Ui, id: egui::Id, value: f64, speed: f64, range: (f64
     let select_all_id = id.with("select-all");
     let mut editing: Option<String> = ui.data(|d| d.get_temp(editing_id));
     if let Some(buf) = editing.as_mut() {
+        let stepped = if ui.memory(|m| m.has_focus(edit_id)) { step_typed_value(ui, edit_id, buf, value, range, suffix) } else { None };
         let r = ui.add(egui::TextEdit::singleline(buf).id(edit_id).desired_width(56.0).font(Tokens::ui(12.0)));
-        let mut out = None;
+        let mut out = stepped;
         if r.lost_focus() {
             // the field's own unit can be typed anywhere; calc ignores the common ones
             let typed = if suffix.trim().is_empty() { buf.clone() } else { buf.replace(suffix.trim(), "") };
@@ -39,7 +40,9 @@ pub fn hot_number(ui: &mut Ui, id: egui::Id, value: f64, speed: f64, range: (f64
             if !r.has_focus() || selected_now {
                 ui.ctx().request_repaint();
             }
-            r.request_focus();
+            if !r.has_focus() {
+                r.request_focus();
+            }
         }
         return (r, out);
     }
@@ -78,6 +81,70 @@ pub fn hot_number(ui: &mut Ui, id: egui::Id, value: f64, speed: f64, range: (f64
         ui.ctx().request_repaint();
     }
     (resp, out)
+}
+
+/// Up/Down in a hot number's text field step the typed value as Premiere does: by 1, or by the last
+/// shown digit when the range is narrow (Exposure steps 0.01); Shift is x10 and Command x0.1, the
+/// drag multipliers. The new value replaces the text, stays selected (typing still replaces it) and
+/// is returned to be applied. The keys are consumed so the `TextEdit` does not move its caret.
+/// Call before drawing the `TextEdit` with id `edit_id` that holds `buf`.
+fn step_typed_value(ui: &Ui, edit_id: egui::Id, buf: &mut String, value: f64, range: (f64, f64), suffix: &str) -> Option<f64> {
+    let mut direction = 0.0;
+    let mut mult = 1.0;
+    ui.input_mut(|i| {
+        // Shift wins over Command, as in the drag. The modifiers are those of the key press
+        // itself, so a Shift+Command press is consumed and gets the Shift multiplier.
+        for (key, dir) in [(egui::Key::ArrowUp, 1.0), (egui::Key::ArrowDown, -1.0)] {
+            let mods = i
+                .events
+                .iter()
+                .find_map(|e| match e {
+                    egui::Event::Key { key: k, pressed: true, modifiers, .. } if *k == key => Some(*modifiers),
+                    _ => None,
+                })
+                .unwrap_or(i.modifiers);
+            let m = if mods.shift {
+                10.0
+            } else if mods.command {
+                0.1
+            } else {
+                1.0
+            };
+            if direction == 0.0 && i.consume_key(mods, key) {
+                direction = dir;
+                mult = m;
+            }
+        }
+    });
+    if direction == 0.0 {
+        return None;
+    }
+    let typed = if suffix.trim().is_empty() { buf.trim().to_owned() } else { buf.trim().replace(suffix.trim(), "") };
+    let current = crate::calc::eval(&typed, value).filter(|v| v.is_finite())?;
+    // the last shown digit: of a plain typed number as typed; of a calculation, of its result
+    let shown = if typed.trim().parse::<f64>().is_ok() {
+        typed.trim().split_once('.').map_or(0, |(_, f)| f.chars().filter(char::is_ascii_digit).count()).min(6)
+    } else {
+        let r = format!("{current:.6}");
+        r.split_once('.').map_or(0, |(_, f)| f.trim_end_matches('0').len())
+    };
+    let narrow = (range.1 - range.0).abs() <= 10.0;
+    let base = if narrow { 10f64.powi(-(shown as i32)) } else { 1.0 };
+    let step = base * mult;
+    // the step is a power of ten; up to seven digits, so Command keeps a tenth of a sixth digit
+    let step_digits = (-step.log10()).round().clamp(0.0, 7.0) as usize;
+    let decimals = shown.max(step_digits);
+    let text = format!("{:.decimals$}", (current + direction * step).clamp(range.0, range.1));
+    let rounded = text.parse::<f64>().ok()?;
+    let new = rounded.clamp(range.0, range.1);
+    let text = if new == rounded { text } else { new.to_string() };
+    let len = text.chars().count();
+    *buf = text;
+    let mut st = egui::text_edit::TextEditState::load(ui.ctx(), edit_id).unwrap_or_default();
+    st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(len))));
+    st.store(ui.ctx(), edit_id);
+    // at the edge of the range the value does not change: nothing to apply
+    ((new - value).abs() > f64::EPSILON).then_some(new)
 }
 
 /// A large blue timecode readout (monitors/timeline) that moves its playhead: drag horizontally to

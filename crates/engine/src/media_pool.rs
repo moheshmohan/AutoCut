@@ -173,7 +173,12 @@ pub fn image_sequence_frames(first: &str, services: &dyn Services) -> Result<Vec
         if e.kind() == std::io::ErrorKind::NotFound { MediaError::Offline(format!("{first}: {e}")) } else { MediaError::Io(format!("{first}: {e}")) }
     };
     services.file_size(first).map_err(io)?;
-    match services.list_dir(n.dir.trim_end_matches(['/', '\\'])) {
+    // Keep the separator for filesystem roots: on Windows `C:` is drive-relative,
+    // and on Unix an empty directory denotes the current working directory.
+    let trimmed = n.dir.trim_end_matches(['/', '\\']);
+    let root = trimmed.is_empty() || matches!(trimmed.as_bytes(), [b'A'..=b'Z' | b'a'..=b'z', b':']);
+    let directory = if root { n.dir.as_str() } else { trimmed };
+    match services.list_dir(directory) {
         Some(list) => Ok(sequence_frames(&n, &list.map_err(io)?)),
         None => {
             let mut names = vec![n.file_name(n.number)];

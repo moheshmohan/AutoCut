@@ -218,7 +218,11 @@ rec2100-hlg, wideGamut, autoToneMap}`, `clip.interpretFootage {items?, colorSpac
 `color.spaces`, `media.colorInfo {item}`; LUTs: `lut.import {path, name?}`, `lut.list`,
 `lut.remove {id}`, `lut.export {lut, path, format?}`, `lumetri.setInputLut` / `lumetri.setLook
 {clip?, lut: lib:<id>|builtin:<id>|"", path?}`, `lumetri.setSection {clip?, section, on?}`,
-`lumetri.applyMatch {clip?, referenceTime|referenceFrame|referenceTimecode, faceDetection?}`. Without
+`lumetri.applyMatch {clip?, referenceTime|referenceFrame|referenceTimecode, faceDetection?}`,
+`lumetri.exportCube {clip?, path, size?=33}`. Export the enabled Lumetri grade to a 3D LUT at the
+playhead in a standard Rec. 709 sequence. Size is 2–65. Masked grades are refused. The result's
+`leftOut` lists effects that the LUT omits. The Lumetri panel menu's `panel.menu.LumetriColor.exportCube`
+opens the save dialog. Without
 params the menu entries open dialogs (ids `colorDialog.space.<id>`, `colorDialog.working.<id>`,
 `colorDialog.wideGamut`, `colorDialog.autoToneMap`, `colorDialog.ok|cancel`). Lumetri panel ids:
 `lumetri.input_lut`, `lumetri.look_lut`, `lumetri.switch.<section>`, `lumetri.section.<section>`,

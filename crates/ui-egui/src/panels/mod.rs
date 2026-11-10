@@ -343,6 +343,10 @@ pub fn panel_menu_popup(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
                         app.set_workspace(&w);
                         close = true;
                     }
+                    if p == PanelKind::LumetriColor {
+                        ui.separator();
+                        close |= lumetri::panel_menu(app, ui);
+                    }
                     if p == PanelKind::Timeline {
                         ui.separator();
                         let r = ui.add_enabled(app.session.state.active_sequence.is_some(), egui::Button::new(tl!("Reveal Sequence in Project")));

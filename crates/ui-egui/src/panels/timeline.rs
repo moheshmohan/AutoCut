@@ -2341,7 +2341,14 @@ fn edit_point_menu(app: &mut FilmcraftApp, ctx: &egui::Context, ui: &mut egui::U
 /// The menu of a right-clicked gap: Ripple Delete closes it.
 fn gap_menu(app: &mut FilmcraftApp, ctx: &egui::Context, ui: &mut egui::Ui) {
     let label = tl!("Ripple Delete");
-    let r = ui.add_enabled(app.session.state.gap_selection.is_some(), egui::Button::new(label));
+    // greyed out, with the reason on hover, when the gap can't close (a sync-locked track has a
+    // clip in the way, #2960), as in Premiere Pro, instead of doing nothing when clicked
+    let why = filmcraft_engine::find_command("edit.rippleDelete").map_or(Ok(()), |c| (c.enabled)(&app.session)).err();
+    let r = ui.add_enabled(app.session.state.gap_selection.is_some() && why.is_none(), egui::Button::new(label));
+    let r = match why {
+        Some(why) => r.on_disabled_hover_text(why),
+        None => r,
+    };
     app.auto.add("timeline.gapMenu.edit.rippleDelete", r.rect, label);
     if r.clicked() {
         if let Err(e) = crate::menus::invoke(app, ctx, "edit.rippleDelete", json!({})) {

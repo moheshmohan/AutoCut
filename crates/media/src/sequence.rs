@@ -102,17 +102,23 @@ impl Numbered {
 /// The frames of the sequence `first` belongs to, from `first.number` to the highest number among
 /// `siblings` (file names in its directory): each frame's path, or `None` for a missing number.
 pub fn sequence_frames(first: &Numbered, siblings: &[String]) -> Vec<Option<String>> {
-    let mut nums: Vec<(u64, &String)> = siblings.iter().filter_map(|n| first.number_of(n).map(|k| (k, n))).filter(|(k, _)| *k >= first.number).collect();
+    // Ignore numbering accidents before sizing or indexing. In particular, a large offset
+    // must not wrap to an in-range index on a 32-bit host.
+    const MAX_OFFSET: u64 = 1_000_000;
+    let mut nums: Vec<_> = siblings
+        .iter()
+        .filter_map(|name| {
+            let offset = first.number_of(name)?.checked_sub(first.number)?;
+            (offset <= MAX_OFFSET).then_some((usize::try_from(offset).ok()?, name))
+        })
+        .collect();
     nums.sort();
     nums.dedup_by_key(|x| x.0);
-    let last = nums.last().map_or(first.number, |x| x.0);
-    // a sequence longer than this is a numbering accident (e.g. a date in the name)
-    let span = (last - first.number).min(1_000_000) as usize + 1;
+    let span = nums.last().map_or(1, |(offset, _)| offset + 1);
     let mut frames = vec![None; span];
-    for (k, name) in nums {
-        let i = (k - first.number) as usize;
-        if i < span {
-            frames[i] = Some(format!("{}{}", first.dir, name));
+    for (index, name) in nums {
+        if let Some(frame) = frames.get_mut(index) {
+            *frame = Some(format!("{}{}", first.dir, name));
         }
     }
     if frames[0].is_none() {
@@ -300,6 +306,13 @@ mod tests {
         assert_eq!(f[1].as_deref(), Some("/d/s_004.png"));
         assert_eq!((f[2].as_deref(), f[3].as_deref()), (None, None));
         assert_eq!(f[4].as_deref(), Some("/d/s_007.png"));
+    }
+
+    #[test]
+    fn distant_numbered_stills_do_not_extend_a_sequence() {
+        let first = Numbered::parse("/shots/frame1.png").unwrap();
+        let siblings = ["frame1.png", "frame3.png", "frame4294967299.png"].map(str::to_owned);
+        assert_eq!(sequence_frames(&first, &siblings), [Some("/shots/frame1.png".into()), None, Some("/shots/frame3.png".into())]);
     }
 
     fn png(w: u32, h: u32, v: u8) -> Vec<u8> {

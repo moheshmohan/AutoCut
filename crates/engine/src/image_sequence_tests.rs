@@ -40,6 +40,27 @@ fn import_replace_starts_from_an_empty_project() {
     assert!(merge.project.items.len() > demo_items);
 }
 
+#[test]
+fn numbered_stills_can_be_discovered_in_the_root_directory() {
+    struct RootMedia;
+    impl crate::Services for RootMedia {
+        fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            if path == "/frame001.png" { Ok(vec![0]) } else { Err(std::io::ErrorKind::NotFound.into()) }
+        }
+
+        fn write_file(&self, _path: &str, _data: &[u8]) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+
+        fn list_dir(&self, path: &str) -> Option<std::io::Result<Vec<String>>> {
+            Some(if path == "/" { Ok(vec!["frame001.png".into(), "frame002.png".into()]) } else { Ok(Vec::new()) })
+        }
+    }
+
+    let files = crate::media_pool::image_sequence_frames("/frame001.png", &RootMedia).unwrap();
+    assert_eq!(files, [Some("/frame001.png".into()), Some("/frame002.png".into())]);
+}
+
 fn demo() -> Session {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
