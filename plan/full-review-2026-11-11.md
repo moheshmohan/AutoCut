@@ -84,9 +84,23 @@ Evidence lives under the gitignored `target/full-review-2026-11-11/` directory.
 - [x] Reproduce and fix confirmed findings; distinguish hypotheses from bugs.
 - [x] Review high-risk paths and record practical limitations.
 - [x] Full workspace gate and native 4K/editing workflows pass.
-- [ ] Commit, publish to AutoCut and install the verified build with rollback.
+- [x] Commit, publish to AutoCut and install the verified build with rollback.
 
 ## Delivery record
 
-Validation is green. Packaging and deployment are pending. No production media or project edits
-are part of the review.
+Release source: [`14dfc06d`](https://github.com/moheshmohan/AutoCut/commit/14dfc06dd0703d6b73abe3ccf3a7d7a8fa32d22a)
+(AV21). It was pushed atomically to `autocut/main` and `autocut/feat/autocut`; both refs were read
+back and verified. Subsequent review-record changes are documentation only.
+
+The macOS package carries that source commit and bundle id `com.moheshmohan.autocut`. App, CLI and
+DMG signatures passed verification; packaging uses the established local ad-hoc signing workflow.
+The packaged desktop passed a second isolated smoke test. RAEA and FFmpeg are not bundled.
+
+Installed app: `target/macos-package/AutoCut.app`; installed CLI: `target/release/filmcraft-cli`.
+Rollback copies: `target/macos-package/AutoCut-before-AV21-2026-11-11.app` and
+`target/release/filmcraft-cli-before-AV21-2026-11-11`.
+
+The existing EXEED saved session reopened with its original file hash, active sequence 2074,
+Editing workspace and playhead 7256390400000. It remains clean. The installed app exposes all
+914 commands, the RAEA image-sequence FPS parameter and the voice catalogue. No production media
+or project edits are part of this review (`installed.json`, `session-before-install.json`).
