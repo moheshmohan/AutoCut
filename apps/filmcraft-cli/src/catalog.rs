@@ -32,7 +32,7 @@ impl Client {
 fn response(mut r: ureq::http::Response<ureq::Body>) -> Result<Value, String> {
     let status = r.status();
     let value: Value = r.body_mut().with_config().limit(MAX_JSON).read_json().map_err(|e| e.to_string())?;
-    if let Some(error) = value.get("error").and_then(Value::as_str) {
+    if let Some(error) = value.get("error").and_then(Value::as_str).filter(|message| !message.trim().is_empty()) {
         return Err(error.to_string());
     }
     if !status.is_success() {
@@ -393,7 +393,7 @@ mod retrieval_tests {
                     "/api/job" => {
                         let mut reference = current.clone();
                         reference["source_path"] = json!(original);
-                        json!({"state":"done","result":{"asset_id":"shared","path":original,"clip":reference,"indexed_source_verification":"matched"}})
+                        json!({"state":"done","error":"","result":{"asset_id":"shared","path":original,"clip":reference,"indexed_source_verification":"matched"}})
                     }
                     _ => panic!("unexpected endpoint {endpoint}"),
                 };
