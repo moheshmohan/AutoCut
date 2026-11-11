@@ -61,6 +61,7 @@ filmcraft-voice = { workspace = true }
 filmcraft-scenes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 # export_tools::file_safe keeps the combining marks of a name's letters (Apache-2.0).
 unicode-general-category = "1.1"
 thiserror = { workspace = true }
@@ -88,3 +89,6 @@ required-features = ["whisper"]
 [[example]]
 name = "voice_styles_lab"
 required-features = ["neural-voices", "whisper"]
+
+[build-dependencies]
+sha2 = "0.10"

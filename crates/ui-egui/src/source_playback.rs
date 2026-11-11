@@ -114,6 +114,7 @@ impl FilmcraftApp {
     }
 
     fn start_source_audio(&mut self, now: f64) {
+        self.release_scrub_output();
         self.source_playback.clock.audio_clock = false;
         if (self.source_playback.clock.speed - 1.0).abs() > 1e-9 {
             if let Some(audio) = self.audio.as_mut() {

@@ -13,6 +13,8 @@
 pub mod aaf_omf;
 pub mod adjustment_clip;
 pub mod aim360;
+pub mod animation_preflight;
+pub mod audio_continuity;
 pub mod audio_generate;
 pub mod auto_color;
 pub mod auto_duck;
@@ -20,11 +22,13 @@ pub mod autocut;
 pub mod autosave;
 pub mod beat_pulse;
 pub mod captions;
+pub mod catalog_edit;
 pub mod clip_ops;
 pub mod color;
 pub mod commands;
 pub mod contact_sheet;
 pub mod cutout;
+pub mod delivery;
 pub mod demo;
 pub mod denoise;
 pub mod depth;
@@ -87,6 +91,7 @@ pub mod reframe;
 pub mod relink;
 pub mod remix;
 pub mod remove_object;
+pub mod render_cache;
 pub mod safe_zones;
 pub mod same_moments;
 pub mod scene_check;
@@ -230,7 +235,7 @@ pub trait Services: Send + Sync {
 pub struct FsServices;
 impl Services for FsServices {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        std::fs::read(path)
+        filmcraft_media::reader::read_regular_file(std::path::Path::new(path))
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         // Atomic + durable: temp file in the same directory, fsync, rename, fsync the directory.
@@ -262,7 +267,7 @@ impl Services for FsServices {
         Some(std::fs::read_dir(dir).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect()))
     }
     fn file_loader(&self) -> Option<filmcraft_media::sequence::FrameLoader> {
-        Some(std::sync::Arc::new(|p: &str| std::fs::read(p)))
+        Some(std::sync::Arc::new(|p: &str| filmcraft_media::reader::read_regular_file(std::path::Path::new(p))))
     }
     /// Media are read in place from the open file: a clip costs its index, not its size.
     #[cfg(any(unix, windows))]
@@ -702,6 +707,10 @@ pub struct Job {
     pub result: Arc<std::sync::Mutex<Option<std::result::Result<filmcraft_export::Report, String>>>>,
 }
 
+#[cfg(test)]
+#[path = "../build/configuration.rs"]
+mod build_configuration_tests;
+
 impl Job {
     pub fn to_json(&self) -> Value {
         use std::sync::atomic::Ordering;
@@ -716,6 +725,7 @@ impl Job {
             "total": self.progress.total.load(Ordering::Relaxed),
             "status": self.progress.status.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             "finished": res.is_some(),
+            "cancelRequested": self.progress.cancel.load(Ordering::Relaxed),
             "result": match res { Some(Ok(r)) => serde_json::to_value(r).unwrap_or_default(), Some(Err(e)) => serde_json::json!({"error": e}), None => Value::Null },
         })
     }

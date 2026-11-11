@@ -2186,7 +2186,9 @@ dependencies = [
  "filmcraft-time",
  "filmcraft-youtube",
  "serde_json",
+ "sha2",
  "tokio",
+ "ureq",
  "wgpu",
 ]
 
@@ -2308,6 +2310,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
  "unicode-general-category",
  "web-time",
@@ -2331,6 +2334,7 @@ dependencies = [
  "filmcraft-h264enc",
  "filmcraft-isobmff",
  "filmcraft-media",
+ "filmcraft-mp3enc",
  "filmcraft-mxf",
  "filmcraft-project",
  "filmcraft-prores",
@@ -2550,6 +2554,15 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "filmcraft-mp3enc"
+version = "0.12.0"
+dependencies = [
+ "filmcraft-bitstream",
+ "filmcraft-testkit",
  "thiserror 2.0.21",
 ]
 

@@ -26,6 +26,7 @@ filmcraft-apv = { workspace = true }
 filmcraft-mxf = { workspace = true }
 filmcraft-aac = { workspace = true }
 filmcraft-flac = { workspace = true }
+filmcraft-mp3enc = { workspace = true }
 filmcraft-h264enc = { workspace = true }
 filmcraft-captions = { workspace = true }
 serde = { workspace = true }

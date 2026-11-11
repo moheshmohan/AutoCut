@@ -159,3 +159,5 @@ machines without such a font), add Noto Sans Malayalam (SIL OFL 1.1) to
 [craft-fonts](https://github.com/storytold/craft-fonts) with script `Mlym` and build with
 `CRAFT_FONTS_DIR`: craft-fonts faces are tried before system ones. No font files go in this
 repository.
+
+Caption Export Settings now offers a caption-track choice as well as the file format. The selected Text-panel track is the initial choice; invalid/deleted requested tracks fall back to the first displayed track. Direct `captions.export {track,path,format}` remains available to agents, including ASS/SSA.

@@ -229,6 +229,7 @@ pub struct Playback {
     anchor_tick: Tick,
     /// Audio frames played at anchor (when the audio clock drives).
     pub audio_clock: bool,
+    pub preview_audio: bool,
     /// The audio clock's last reading and when (egui time, s) it last moved: a device that stops
     /// consuming samples hands the clock back to the wall clock (see [`AUDIO_STALL_S`]).
     audio_seen: (u64, f64),
@@ -291,6 +292,10 @@ pub struct FilmcraftApp {
     pub playback: Playback,
     pub source_playback: source_playback::SourcePlayback,
     pub audio: Option<Box<dyn AudioOut>>,
+    pub(crate) caption_export: Option<panels::caption_export::Draft>,
+    pub scrub_out: Option<Box<dyn scrub::ScrubOut>>,
+    pub(crate) scrub_rate: Option<u32>,
+    pub(crate) scrub_sequence: Option<filmcraft_project::ItemId>,
     /// Audio during scrubbing (#211).
     pub scrub: scrub::ScrubAudio,
     pub hooks: HostHooks,
@@ -564,6 +569,10 @@ impl FilmcraftApp {
             playback: Playback { speed: 1.0, ..Default::default() },
             source_playback: Default::default(),
             audio: None,
+            caption_export: None,
+            scrub_out: None,
+            scrub_rate: None,
+            scrub_sequence: None,
             scrub: Default::default(),
             hooks: HostHooks::default(),
             // Unsaved changes left by a session that died are offered first thing.
@@ -717,6 +726,32 @@ impl FilmcraftApp {
         zoom
     }
 
+    /// Point the scrub output at the sequence that is active now (#2633).
+    /// [`FilmcraftApp::apply_prefs`] carries the sequence's sample rate to the output, but it
+    /// returns early while the settings stay the same, and Settings ▸ Sequence, opening another
+    /// project or switching sequences change what the next grain needs without changing them. A
+    /// stale rate mixes the grain at the wrong speed; and a stream that is still open keeps the
+    /// fill it was opened with, which mixes the sequence that was active then, so another sequence
+    /// needs it opened again even at the same rate.
+    fn sync_scrub_output(&mut self) {
+        let rate = self.session.active_sequence().map(|q| q.settings.sample_rate);
+        let sequence = self.session.state.active_sequence;
+        if rate == self.scrub_rate && sequence == self.scrub_sequence {
+            return;
+        }
+        let rate_changed = rate != self.scrub_rate;
+        self.scrub_rate = rate;
+        self.scrub_sequence = sequence;
+        if rate_changed {
+            let hw = self.session.prefs.audio_hardware.clone();
+            if let Some(out) = self.scrub_out.as_mut() {
+                out.stop();
+                out.configure(&hw, rate);
+            }
+        }
+        self.scrub.device_stopped();
+    }
+
     /// Make the UI follow the settings after they change (theme, tooltips, frame cache budget,
     /// play after rendering, audio device).
     pub fn apply_prefs(&mut self, ctx: &egui::Context) {
@@ -735,6 +770,7 @@ impl FilmcraftApp {
             ctx.global_style_mut(|s| s.animation_time = animation);
         }
         if self.applied_prefs.as_ref() == Some(&self.session.prefs) {
+            self.sync_scrub_output();
             return;
         }
         let p = self.session.prefs.clone();
@@ -778,6 +814,13 @@ impl FilmcraftApp {
                 a.stop();
                 a.configure(&p.audio_hardware, rate);
             }
+            if let Some(out) = self.scrub_out.as_mut() {
+                out.stop();
+                out.configure(&p.audio_hardware, rate);
+            }
+            self.scrub.device_stopped();
+            self.scrub_rate = rate;
+            self.scrub_sequence = self.session.state.active_sequence;
         }
         if (hardware_changed || pitch_changed) && self.playback.playing && self.playback.preroll.is_none() {
             self.playback.anchor_tick = self.session.playhead();
@@ -1049,6 +1092,7 @@ impl FilmcraftApp {
         if self.playback.playing {
             self.stop();
         }
+        self.release_scrub_output();
         let a = self.audio.as_mut().ok_or("no audio output (check Settings ▸ Audio Hardware)")?;
         let sr = a.sample_rate().max(1);
         a.stop();
@@ -1067,6 +1111,7 @@ impl FilmcraftApp {
         });
         a.start(fill)?;
         self.playback.audio_clock = false;
+        self.playback.preview_audio = true;
         Ok(seconds)
     }
 
@@ -1077,6 +1122,7 @@ impl FilmcraftApp {
         if self.playback.playing {
             self.stop();
         }
+        self.release_scrub_output();
         let a = self.audio.as_mut().ok_or("no audio output (check Settings ▸ Audio Hardware)")?;
         let sr = a.sample_rate().max(1);
         a.stop();
@@ -1107,6 +1153,7 @@ impl FilmcraftApp {
         });
         a.start(fill)?;
         self.playback.audio_clock = false;
+        self.playback.preview_audio = true;
         Ok(seconds)
     }
 
@@ -1119,8 +1166,34 @@ impl FilmcraftApp {
         }
     }
 
+    pub fn transport_running(&self) -> bool {
+        self.playback.playing
+            || self.playback.preview_audio
+            || self.playback.audio_clock
+            || self.source_playback.clock.playing
+            || self.playback.preroll.is_some()
+            || self.session.mixrec.active()
+            || self.session.mcrec.active()
+            || self.session.voiceover.recording()
+    }
+
+    pub(crate) fn stop_for_scrub(&mut self) {
+        if self.transport_running() {
+            self.stop();
+            self.stop_source();
+        }
+    }
+
+    pub(crate) fn release_scrub_output(&mut self) {
+        if let Some(out) = self.scrub_out.as_mut() {
+            out.release();
+            self.scrub.device_stopped();
+        }
+    }
+
     pub fn stop(&mut self) {
         self.playback.playing = false;
+        self.playback.preview_audio = false;
         self.playback.stop_at = None;
         self.playback.rest_at = None;
         self.playback.preroll = None;
@@ -1128,6 +1201,9 @@ impl FilmcraftApp {
         self.frames.stop_prefetch();
         if let Some(a) = self.audio.as_mut() {
             a.stop();
+        }
+        if let Some(out) = self.scrub_out.as_mut() {
+            out.stop();
         }
         self.scrub.device_stopped();
         self.playback.audio_clock = false;
@@ -1145,6 +1221,7 @@ impl FilmcraftApp {
     fn start_audio(&mut self, now: f64) {
         let Some(seq_id) = self.session.state.active_sequence else { return };
         let start_tick = self.session.playhead();
+        self.release_scrub_output();
         let Some(a) = self.audio.as_mut() else { return };
         let sr = a.sample_rate();
         // Output frames still follow the accelerated timeline. The pitch preference selects
@@ -1487,21 +1564,7 @@ impl FilmcraftApp {
                 let Some(path) = paths.into_iter().next() else { return Ok(Value::Null) };
                 app.session.execute("captions.import", json!({"path": path})).map_err(|e| e.to_string())
             }),
-            "captions.export" => {
-                let name = self.session.state.active_sequence.and_then(|s| self.session.project.item(s)).map(|i| i.name.clone()).unwrap_or_default();
-                let suggested = format!("{}.srt", name.replace(' ', "_"));
-                let dialog = FileDialog::save_as(
-                    "Captions (SRT, WebVTT, SCC, MCC, EBU STL, TTML, DFXP, ASS)",
-                    &["srt", "vtt", "scc", "mcc", "stl", "ttml", "dfxp", "ass"],
-                    &suggested,
-                );
-                let mut p = params.clone();
-                self.pick(dialog, move |app, paths| {
-                    let Some(path) = paths.into_iter().next() else { return Ok(Value::Null) };
-                    p["path"] = json!(path);
-                    app.session.execute("captions.export", p).map_err(|e| e.to_string())
-                })
-            }
+            "captions.export" => panels::caption_export::open(self, params),
             _ => match EXPORT_SAVE_DIALOGS.iter().find(|(c, ..)| *c == id) {
                 Some(&(_, filter, ext)) => self.export_save_dialog(id, filter, ext, params),
                 None => Err(format!("no dialog for {id}")),
@@ -1964,6 +2027,7 @@ impl FilmcraftApp {
         // the Timeline has had its chance to place a file drop this frame; anything left stays a bin import
         self.pending_timeline_drop = None;
         panels::dialogs::show(self, &ctx);
+        panels::caption_export::show(self, &ctx);
         if !self.ui.show_status_bar {
             // no bar to draw the job in, but a finished preview render still plays
             self.watch_jobs(ui.ctx());

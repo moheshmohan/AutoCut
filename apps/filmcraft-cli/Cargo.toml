@@ -55,6 +55,8 @@ filmcraft-instagram = { workspace = true }
 filmcraft-screenagent = { workspace = true }
 filmcraft-locks = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 # The GPU export renderer (Export ▸ GPU rendering, Auto by default; `docs/gpu.md`) needs a wgpu

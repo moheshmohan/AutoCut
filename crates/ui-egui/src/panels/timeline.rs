@@ -1235,11 +1235,11 @@ fn request_sequence_peaks(app: &mut FilmcraftApp, item: ItemId) -> Option<Arc<Ve
         let mixed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let seq = project.sequence(item)?;
             let sr = seq.settings.sample_rate.max(1);
-            let total = seq.duration().to_units_floor(sr as i64).max(0) as usize;
             // one peak per 256 samples at 48 kHz, whatever the sequence's own rate
             let bucket = ((256u64 * sr as u64) / 48_000).max(1) as usize;
+            let total = seq.duration().to_units_floor(sr as i64).max(0).min(MAX_PEAKS.saturating_mul(bucket) as i64) as usize;
             let chunk = (bucket * 750).max(1);
-            let mut out = Vec::with_capacity(total / bucket + 1);
+            let mut out = Vec::with_capacity((total / bucket + 1).min(INITIAL_PEAKS));
             let stream = filmcraft_render::MixStream::new();
             let mut s = 0usize;
             while s < total {
@@ -1267,11 +1267,16 @@ fn request_sequence_peaks(app: &mut FilmcraftApp, item: ItemId) -> Option<Arc<Ve
     have
 }
 
+/// Allocation limits for file-derived waveform durations.
+const MAX_PEAKS: usize = 1 << 24;
+const INITIAL_PEAKS: usize = 1 << 16;
+
 /// Min/max peaks (one per 256 samples at 48 kHz) of audio stream `stream` of `src`, `dur` long.
 fn source_peaks(src: &dyn filmcraft_media::MediaSource, stream: usize, dur: Tick) -> Vec<(f32, f32)> {
     let sr = 48_000u32;
-    let total = dur.to_units_floor(sr as i64).max(0) as usize;
-    let mut out = Vec::with_capacity(total / 256 + 1);
+    // clamp in i64 before narrowing, and saturate so the limit itself fits a 32-bit usize
+    let total = dur.to_units_floor(sr as i64).max(0).min(MAX_PEAKS.saturating_mul(256) as i64) as usize;
+    let mut out = Vec::with_capacity((total / 256 + 1).min(INITIAL_PEAKS));
     let chunk = 48_000 * 4;
     let mut s = 0usize;
     while s < total {
@@ -2444,7 +2449,7 @@ pub(crate) fn wheel_input(ctx: &egui::Context) -> WheelInput {
 
 /// Puts the playhead where the pointer is on the ruler: what a press does before any drag (#1090).
 fn scrub_playhead(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, p: Pos2, shift: bool) {
-    app.stop();
+    app.stop_for_scrub();
     let mut tt = seq.settings.frame_rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO));
     if shift || app.session.prefs.timeline.snap_playhead {
         tt = snap_playhead(app, seq, layout, tt);
@@ -3714,5 +3719,17 @@ mod ruler_tests {
         }
         let (minor, label) = ruler_steps(1.0, i64::MAX);
         assert!(minor >= 1 && label >= 1 && label % minor == 0, "an unrepresentable rate: tick {minor}, label {label}");
+    }
+    #[test]
+    fn a_source_claiming_an_absurd_duration_does_not_size_the_peak_buffer() {
+        // a color matte has no audio, so the read stops at once; the duration is what must not allocate
+        let src = filmcraft_media::generators::GeneratorSource::new(
+            filmcraft_media::Generator::ColorMatte { color: [0.0; 4] },
+            16,
+            16,
+            filmcraft_time::FrameRate::FPS_24,
+            filmcraft_time::Tick(i64::MAX / 8),
+        );
+        assert!(super::source_peaks(&src, 0, filmcraft_time::Tick(i64::MAX / 8)).len() <= super::MAX_PEAKS);
     }
 }

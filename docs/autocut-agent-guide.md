@@ -1,5 +1,8 @@
 # AutoCut for agents: making videos with the app and its local pipelines
 
+For catalogue-driven edits, consistent revisions, cached RAEA review/master renders and the
+standard delivery gate, also read [local-pipeline-upgrades.md](local-pipeline-upgrades.md).
+
 This guide is for an agent (Claude Code, Codex, ChatGPT, or another) asked to make or change a video
 with AutoCut, this fork of FilmCraft. It covers which tool fits a request, how to drive it, how to
 check the result before the user sees it, and what earlier rounds learned the hard way.
@@ -88,7 +91,7 @@ Read these before you touch anything.
 
 | What | Where / value |
 |---|---|
-| CLI | `target/agent-main/release/filmcraft-cli`: the AV17 upstream-integration build (AI features retained; [sync record](../plan/upstream-sync-2026-11-08.md)). `.mcp.json` runs `target/release/filmcraft-cli`; after an app rebuild, copy the packaged `target/agent-main/macos-package/bin/filmcraft-cli` there. Both report `0.12.0`, so `--version` doesn't tell builds apart. |
+| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features and exposes 914 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds still report `0.12.0`, so inspect the packaged commit and command catalogue too. |
 | Building your own CLI | `CARGO_TARGET_DIR=target/agent-<name> cargo build --release -p filmcraft-cli`, one target folder per worktree, never shared. |
 | The app | `target/macos-package/AutoCut.app`, control port **9876**: `open -n --env FILMCRAFT_CONTROL_PORT=9876 target/macos-package/AutoCut.app` |
 | RAEA | `~/.raea/versions/0.1.0/bin/raea` for local custom animations, 3D scenes and effects. [Render and import workflow](raea-workflow.md). |
@@ -96,7 +99,7 @@ Read these before you touch anything.
 | Data folder | `~/Library/Application Support/FilmCraft/`: `google-photos/cache` (picked originals with `.json` date sidecars), `scene-cache`, `redact-cache`, `autocut/analysis-cache`, voices, models, control tokens |
 | Ollama models | `qwen2.5vl:7b` (picker and screen agents, clip analysis, redaction checks), `qwen3:8b` (scripts, Malayalam), `phi4-mini` (the AutoCut prompt classifier), `moondream` |
 | Engine models | Downloaded into the data folder. Check them with `filmcraft-cli scenes status`, `exec redact.status`, `exec transcript.models`, `exec tts.clonedVoices`, `exec music.neuralModels`, `exec depth.status`, `exec upscale.status`, `exec interpolate.status` |
-| ffmpeg | **Not installed, and not needed.** `probe`, `frames`, `sheet`, `render` and `publish check` cover what you would use it for. |
+| ffmpeg | Installed through Homebrew solely for development test oracles. Editing/export uses native `probe`, `frames`, `sheet`, `render` and `publish check`; FFmpeg is never linked, bundled or used as the product pipeline. |
 | Google Photos | Signed in for picking, upload and albums. The Cloud project is in Testing mode, so the sign-in lapses after 7 days; the user then re-runs `filmcraft-cli photos auth --upload` (or `--albums`). |
 | YouTube | `filmcraft-cli youtube channels` lists the connected channels and the default. Uploads from this unaudited project stay private. |
 | Instagram | Connected, but Instagram Login can't do Meta's resumable upload. `instagram publish` needs `--video-url` (a public https address). |

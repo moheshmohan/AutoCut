@@ -1303,6 +1303,81 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
     result
 }
 
+struct TimelineHearer {
+    inner: Arc<dyn tts::heard::Hearer>,
+    language: &'static str,
+    numbers: tts::malayalam::Numbers,
+}
+impl tts::heard::Hearer for TimelineHearer {
+    fn hear(&self, samples: &[f32], rate: u32) -> std::result::Result<String, String> {
+        self.inner
+            .hear(samples, rate)
+            .map(|text| if self.language == "en" { tts::heard::english_words(&text) } else { tts::malayalam::spell_numbers(&text, self.numbers) })
+    }
+    fn id(&self) -> String {
+        format!("{} (timeline, normalized {})", self.inner.id(), self.language)
+    }
+}
+
+/// Hear the actual retained narration source, rather than synthesizing a replacement for QA.
+/// The byte identity includes samples, wording and judge policy. A changed file cannot inherit
+/// an earlier reading's pass. This command never changes the project or requests a new take.
+fn check_clip(s: &mut Session, p: &Value) -> Result<Value> {
+    use filmcraft_render::SourceProvider;
+    use sha2::{Digest, Sha256};
+    let cmd = "tts.checkClip";
+    let id = target_clip(s, p).ok_or_else(|| bad(cmd, "choose a narration clip"))?;
+    let clip = s.active_sequence().and_then(|q| q.find_item(id).map(|(_, c)| c.clone())).ok_or_else(|| bad(cmd, "clip missing"))?;
+    let n = s.project.narrations.get(&clip.item).ok_or_else(|| bad(cmd, "narration metadata missing"))?;
+    if n.text.chars().count() > 1400 || clip.duration.seconds() > 120.0 || clip.duration.0 <= 0 || clip.reverse || (clip.speed - 1.0).abs() > 1e-6 {
+        return Err(bad(cmd, "hear-back supports forward narration up to 120 seconds / 1400 characters; split or restore its source timing first"));
+    }
+    let language = check_language(n);
+    let models = crate::transcript::models_dir();
+    let hearer = match hearer_for(s, models.as_deref(), language) {
+        Ok(h) => h,
+        Err(reason) => return Ok(json!({"clip":id.0,"status":"skipped","reason":reason})),
+    };
+    let judges = Judges {
+        hearer: Arc::new(TimelineHearer { inner: hearer, language, numbers: number_style(n) }),
+        second: second_for(s, models.as_deref(), n),
+        agreement: tts::heard::Agreement::Both,
+        voice: if checkable(n) { voice_gate_for(s, models.as_deref(), &n.voice) } else { None },
+        min_similarity: MIN_VOICE_SIMILARITY,
+        policy: default_policy(language),
+        default_policy: default_policy(language),
+    };
+    s.media.remove(clip.item);
+    let provider = s.media.provider(s.project.clone(), s.services.clone());
+    let source = provider.source(clip.item).ok_or_else(|| bad(cmd, "narration audio unavailable"))?;
+    let rate = 16000;
+    let count = clip.duration.to_units_floor(rate).max(1) as usize;
+    let audio = source.audio(clip.source_in.to_units_floor(rate), count, rate as u32).map_err(|e| bad(cmd, e.to_string()))?;
+    let mono: Vec<f32> = (0..count).map(|i| audio.channels.iter().filter_map(|c| c.get(i)).sum::<f32>() / audio.channels.len().max(1) as f32).collect();
+    let said = if language == "en" { tts::heard::english_words(&tts::script::strip_marks(&spoken_text(n))) } else { tts::script::strip_marks(&spoken_text(n)) };
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(crate::render_cache::ENGINE.as_bytes());
+    fingerprint.update(said.as_bytes());
+    fingerprint.update(judges.id().as_bytes());
+    for sample in &mono {
+        fingerprint.update(sample.to_bits().to_le_bytes());
+    }
+    let key = format!("{:x}", fingerprint.finalize());
+    let cache = crate::render_cache::cache_root(s).map(|d| crate::redact_cache::RedactCache::new(d.join("narration-checks"), 128 << 20));
+    if let Some(report) = cache.as_ref().and_then(|c| c.load::<Value>(&key)) {
+        return Ok(json!({"clip":id.0,"status":report["status"],"report":report,"cached":true,"audioCheckKey":key}));
+    }
+    let mut strict = judges.strict();
+    strict.policy.max_takes = 1;
+    let (_, heard) =
+        strict.read_until_clear(&said, rate as u32, &mut |_| Ok(tts::heard::Read { samples: mono.clone(), seed: 0 })).map_err(|e| bad(cmd, e.to_string()))?;
+    let report = json!({"status":if heard.passed{"clear"}else{"unclear"},"heard":heard,"judge":judges.id(),"actualSource":true});
+    if let Some(cache) = cache {
+        cache.store(&key, &report);
+    }
+    Ok(json!({"clip":id.0,"status":report["status"],"report":report,"cached":false,"audioCheckKey":key}))
+}
+
 fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "tts.inspect";
     let (item, clip) = match u64_p(p, "item") {
@@ -1483,6 +1558,7 @@ pub fn commands() -> Vec<CommandSpec> {
             edit,
             true,
         ),
+        spec("tts.checkClip", "Hear back actual narration", r#"{"clip":id?}"#, always, check_clip, false),
         spec("tts.inspect", "Inspect Narration", r#"{"clip":id?,"item":id?}"#, always, inspect, false),
         spec(
             "tts.render",
@@ -1755,5 +1831,41 @@ mod tests {
         }
         assert_eq!(report_get("k69"), Some(json!(69)));
         assert_eq!(report_get("k0"), None);
+    }
+}
+
+#[cfg(test)]
+mod timeline_hearback_tests {
+    use super::*;
+    struct Heard;
+    impl tts::heard::Hearer for Heard {
+        fn id(&self) -> String {
+            "synthetic timeline judge".into()
+        }
+        fn hear(&self, samples: &[f32], rate: u32) -> std::result::Result<String, String> {
+            assert_eq!(rate, 16000);
+            assert!(samples.len() > 1000);
+            Ok("Here are 10 small robots".into())
+        }
+    }
+    #[test]
+    fn changing_words_cannot_reuse_a_synthesis_pass_for_older_audio() {
+        let dir = crate::media_test_util::tmp_dir("timeline-hearback");
+        let mut s = Session { narration_hearer: Some(Arc::new(Heard)), ..Default::default() };
+        s.execute("file.newSequence", json!({"name":"voice","audio":1,"video":1})).unwrap();
+        let r = s.execute("tts.create", json!({"text":"Here are ten small robots.","voice":"basic-male","dir":dir,"time":0})).unwrap();
+        let id = r["clip"].as_u64().unwrap();
+        let item = s.active_sequence().unwrap().find_item(ClipId(id)).unwrap().1.item;
+        let first = s.execute("tts.checkClip", json!({"clip":id})).unwrap();
+        assert_eq!(first["status"], "clear", "{first}");
+        assert_eq!(first["report"]["actualSource"], true);
+        s.edit("Change metadata only", |p, _| {
+            p.narrations.get_mut(&item).unwrap().text = "The Korean train was crowded and everybody missed lunch.".into();
+            Ok(())
+        })
+        .unwrap();
+        let second = s.execute("tts.checkClip", json!({"clip":id})).unwrap();
+        assert_eq!(second["status"], "unclear");
+        assert_ne!(first["audioCheckKey"], second["audioCheckKey"]);
     }
 }

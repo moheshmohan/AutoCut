@@ -596,7 +596,7 @@ fn replacing_the_project_drops_pending_tracking_jobs() {
     assert!(!project.contains("mask"), "stale mask data in new project");
     let jobs = s.execute("jobs.list", json!({})).unwrap();
     let j = jobs.as_array().unwrap().iter().find(|j| j["id"] == job).unwrap().clone();
-    assert!(j["cancelled"] == true || j["finished"] == true, "{j}");
+    assert!(j["cancelRequested"] == true || j["finished"] == true, "{j}");
 }
 
 #[test]

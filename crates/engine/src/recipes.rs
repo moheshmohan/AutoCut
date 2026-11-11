@@ -75,6 +75,9 @@ const MAX_JOB_WAIT: Duration = Duration::from_secs(6 * 3600);
 /// applying templates, exporting and publishing. Never preferences, the app, the UI, jobs or
 /// other recipes.
 pub const ALLOWED: &[&str] = &[
+    "delivery.preflight",
+    "delivery.prepare",
+    "audio.configureStems",
     "sequence.",
     "timeline.",
     "source.",
@@ -805,6 +808,10 @@ pub fn builtin_json() -> Vec<Value> {
                 {"label": "Publish privately to YouTube", "command": "publish.run", "params": {"destination": "youtube", "path": "${output}", "privacy": "private", "title": "${title}"}, "when": "publish"},
             ],
         }),
+        json!({"format":FORMAT,"formatVersion":1,"id":"builtin:delivery-quality-gate","name":"Checked 4K delivery",
+            "description":"Check privacy at cuts, changed narration, subtitle alignment, screens, motion and audio continuity before a cached 4K delivery. No upload.",
+            "params":[{"id":"output","name":"New output file","kind":"path","default":""},{"id":"short","name":"Short with burned captions","kind":"bool","default":false},{"id":"qa","name":"Explicit QA policy","kind":"json","default":{}}],
+            "steps":[{"label":"Quality gate and 4K export","command":"delivery.prepare","params":{"path":"${output}","short":"${short}","qa":"${qa}"}}]}),
     ]
 }
 

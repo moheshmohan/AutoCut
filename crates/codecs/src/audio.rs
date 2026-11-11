@@ -626,6 +626,10 @@ pub fn latm_split(frame: &[u8], last: &mut Option<LatmConfig>) -> Option<(Vec<u8
             break;
         }
     }
+    // Each payload byte is a byte of this frame: a longer claim is truncated, and must not size the buffer.
+    if len > frame.len() {
+        return None;
+    }
     let mut payload = Vec::with_capacity(len);
     for _ in 0..len {
         payload.push(r.read_bits(8).ok()? as u8);
@@ -1494,5 +1498,20 @@ mod gapless_tests {
         let src = AudioFileSource::decode("tagged.mp3", Arc::from(tagged_mp3())).unwrap();
         let pcm = audio_cache().get(&src.key).expect("open inserted the PCM into the audio cache");
         assert_eq!(pcm[0].len(), AUDIO_FRAMES * 1152 - (576 + 529));
+    }
+}
+
+#[cfg(test)]
+mod bounded_latm_tests {
+    use super::*;
+
+    #[test]
+    fn a_latm_payload_length_beyond_the_frame_is_refused_before_it_is_reserved() {
+        // useSameStreamMux, then a run of 255s that claims far more payload than the 24-byte frame holds
+        let mut frame = vec![0x56, 0xE0, 0x00];
+        frame.extend([0xFF; 20]);
+        frame.push(0x7F);
+        let mut last = Some(LatmConfig { asc: vec![0x11, 0x90], sample_rate: 48_000, channels: 2 });
+        assert_eq!(latm_split(&frame, &mut last), None);
     }
 }

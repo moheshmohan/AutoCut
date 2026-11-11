@@ -10,6 +10,17 @@ use serde_json::{Value, json};
 use crate::Session;
 
 #[test]
+fn a_pending_cancellation_is_reported_before_the_worker_finishes() {
+    let mut s = Session::default();
+    let job = crate::narration::new_job(&mut s, "Slow worker".into());
+    assert_eq!(job.to_json()["cancelRequested"], false);
+    job.progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let status = job.to_json();
+    assert_eq!(status["cancelRequested"], true);
+    assert_eq!(status["finished"], false);
+}
+
+#[test]
 fn project_names_become_one_export_filename_component() {
     for name in ["../../outside", "/absolute/path", r"C:\\outside", ".."] {
         let safe = crate::export_tools::file_safe(name);
@@ -303,6 +314,18 @@ fn every_builtin_preset_exports_and_ffprobe_confirms() {
                 assert!((num(&j["format"]["duration"]) - 0.25).abs() < 0.03, "{name}: {}", j["format"]["duration"]);
                 continue;
             }
+            "mp3" => {
+                // MP3: a plain Layer III stream, sound only, as long as the range plus the encoder
+                // delay (1057 samples) rounded up to whole 1152-sample frames
+                assert!(out.ends_with(".mp3"), "{name}: {out}");
+                assert_eq!(fmt_name, "mp3", "{name}");
+                assert_eq!(j["streams"].as_array().unwrap().len(), 1, "{name}");
+                let a = stream(&j, "audio").unwrap();
+                assert_eq!((a["codec_name"].as_str(), a["sample_rate"].as_str(), a["channels"].as_u64()), (Some("mp3"), Some("48000"), Some(2)), "{name}");
+                let d = num(&j["format"]["duration"]) - 0.25;
+                assert!((0.0..0.06).contains(&d), "{name}: {}", j["format"]["duration"]);
+                continue;
+            }
             "gif" => {
                 let v = stream(&j, "video").unwrap();
                 assert_eq!(v["codec_name"], "gif");
@@ -335,7 +358,9 @@ fn every_builtin_preset_exports_and_ffprobe_confirms() {
             "h264" => {
                 assert!(fmt_name.contains("mp4"), "{name}: {fmt_name}");
                 assert_eq!(v["codec_name"], "h264", "{name}");
-                assert_eq!(v["profile"], "High", "{name}");
+                let profile =
+                    if settings["h264Profile"] == "high10" { if settings["h264IntraOnly"] == true { "High 10 Intra" } else { "High 10" } } else { "High" };
+                assert_eq!(v["profile"], profile, "{name}");
                 assert_eq!(a["codec_name"], "aac", "{name}");
                 assert!((num(&a["bit_rate"]) / 1000.0 - 320.0).abs() < 80.0, "{name}: AAC {}", a["bit_rate"]);
             }
@@ -1027,4 +1052,17 @@ fn max_threads_reaches_the_export_settings() {
     assert_eq!(settings_of(json!({"format": "mjpeg", "path": "out.mov"})).unwrap().max_threads, 0, "all cores unless asked");
     assert!(settings_of(json!({"format": "mjpeg", "path": "out.mov", "maxThreads": -1})).is_err(), "a negative count is refused");
     assert!(settings_of(json!({"format": "mjpeg", "path": "out.mov", "settings": {"maxThread": 2}})).is_err(), "a misspelt setting is refused, not ignored");
+}
+
+#[test]
+fn h264_profile_and_intra_parameters() {
+    let mut s = demo();
+    let r = s.execute("export.resolve", json!({"format": "h264", "h264Profile": "high10", "h264IntraOnly": true})).unwrap();
+    assert_eq!((r["settings"]["h264Profile"].as_str(), r["settings"]["h264IntraOnly"].as_bool()), (Some("high10"), Some(true)));
+    let r = s.execute("export.resolve", json!({"format": "h264", "settings": {"h264Profile": "high10"}})).unwrap();
+    assert_eq!(r["settings"]["h264Profile"], "high10");
+    assert_eq!(r["settings"]["h264IntraOnly"], false);
+    for bad in [json!({"h264Profile": "high12"}), json!({"settings": {"h264Profile": "high444"}})] {
+        assert!(s.execute("export.resolve", bad.clone()).is_err(), "{bad}");
+    }
 }

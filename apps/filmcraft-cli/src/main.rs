@@ -32,6 +32,7 @@ macro_rules! out {
 
 mod args;
 mod audio;
+mod catalog;
 mod creator_demo;
 mod direct;
 mod instagram;
@@ -81,6 +82,9 @@ USAGE
   filmcraft-cli [OPTIONS] <SUBCOMMAND> [ARGS]
 
 SUBCOMMANDS
+    catalog search|resolve <JSON> | retrieve <selection.json> <editing-folder>
+    catalog assemble <edit-plan.json> [--save-as project.fcproj]
+                                durable FrameAtlas source retrieval and editable assembly
   new <p.fcproj>                make an empty project there (its folder too), named after the
                                 file, and save it. `--project` with a .fcproj that does not exist
                                 yet makes it the same way before the command
@@ -108,7 +112,7 @@ SUBCOMMANDS
          [--scale f] [--quality 0-100] [--no-audio] [--queue] [--allow-offline]
                                 export the active sequence and wait for it to finish: with an
                                 export preset (`export --list-presets`; built-in or the user's), or
-                                a format (h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|gif|wav|aiff|aac, guessed
+                                a format (h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|gif|wav|aiff|aac|mp3, guessed
                                 from the extension); --range entire|inOut|workArea, or a custom
                                 range in seconds; --settings is ExportSettings JSON merged over the
                                 preset; --scale renders at a fraction of the frame size (0.5 =
@@ -1443,6 +1447,7 @@ fn format_for(path: &str) -> Option<&'static str> {
         "bmp" => "bmp",
         "aif" | "aiff" => "aiff",
         "m4a" | "aac" => "aac",
+        "mp3" => "mp3",
         _ => return None,
     })
 }
@@ -1927,6 +1932,7 @@ async fn cli() {
             }
             Some(other) => usage(format!("locks: unknown `{other}` (locks [--json] | locks hold <chrome|gpu>)")),
         },
+        "catalog" => catalog::run(&a).await,
         "insta360" => {
             // the user's Insta360 360° recordings: on disk (Studio's downloads, the camera's card)
             // and, through Insta360 Studio, from their Insta360 cloud

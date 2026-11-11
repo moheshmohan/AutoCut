@@ -38,6 +38,12 @@ rendered-media import is engine-independent. Use trusted compositions and local 
    numbered renders, and writes `autocut-import.json` only after a successful handoff. Each
    destination is a new directory. Pass `--raea /absolute/path/to/raea` for a different install.
 
+For the sample scene, save `scene-qa.json` in the FX build folder with its deliberate final hold:
+
+```json
+{"expected":{"duration":508032000000},"holds":[{"start":228614400000,"end":508032000000,"reason":"settled chapter heading"}]}
+```
+
 From the repository root, using the original sample in `examples/raea/motion.tsx`:
 
 ```sh
@@ -47,7 +53,7 @@ mkdir -p "$FX"
 
 # A complete animated scene, imported as a normal MP4 clip.
 python3 examples/raea/render.py examples/raea/motion.tsx "$FX/Next Stop v1" \
-    --cli "$CLI" --composition scene
+    --cli "$CLI" --composition scene --spec "$FX/scene-qa.json"
 
 # An 18-frame transparent transition, imported as one image-sequence clip.
 python3 examples/raea/render.py examples/raea/motion.tsx "$FX/Split Wipe v1" \
@@ -57,6 +63,11 @@ python3 examples/raea/render.py examples/raea/motion.tsx "$FX/Split Wipe v1" \
 The helper's `--fps` is the PNG sequence's import rate and must match the composition's
 render rate. MP4 carries its own rate. Use a short PNG sequence for a transparent effect;
 use MP4 for an opaque scene or a longer animation.
+
+For review/master sizing, lay out from `useVideoConfig().width` and `.height`, as the
+sample does. RAEA v0.1.0 ignores output size overrides on fixed-size compositions;
+the helper sets the output stage and rejects an unexpected rendered size. A 4K scene
+uses `--canvas 960x540 --size 3840x2160`; add `--preview` for a 960-pixel review.
 
 ## Place on the timeline
 
@@ -81,3 +92,5 @@ reopens. Leave `fps` out to use Settings ▸ Media ▸ Indeterminate Media Timeb
 Keep the project's render directory with its sources. A `.fcproj` references the MP4 or
 the numbered PNGs on disk. Save the project after placement and use AutoCut's existing
 colour, audio, narration, captions, privacy checks, and export workflow for the final edit.
+
+See [the local pipeline upgrades](local-pipeline-upgrades.md) for FrameAtlas edit plans, screen protection, editable audio continuity, render-cache commands, RAEA review bundles and the checked 4K delivery recipe.

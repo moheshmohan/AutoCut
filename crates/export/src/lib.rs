@@ -22,6 +22,7 @@ mod audio_out;
 mod captions_out;
 mod deflate;
 mod job;
+mod mp3_out;
 mod mxf_out;
 mod pace;
 mod pcm;
@@ -127,6 +128,10 @@ pub enum Format {
     /// FLAC (RFC 9639): lossless compressed audio.
     #[serde(rename = "flac", alias = "Flac")]
     Flac,
+    /// MP3: the mix alone, MPEG-1 (or, at 16-24 kHz, MPEG-2) Audio Layer III at a constant bit
+    /// rate in a plain `.mp3` stream, from our own encoder (`filmcraft-mp3enc`).
+    #[serde(rename = "mp3", alias = "Mp3")]
+    Mp3,
     /// MXF OP1a (SMPTE ST 378): frame-wrapped DNxHR, ProRes or H.264 ([`MxfVideoCodec`]) + PCM.
     #[serde(rename = "mxf-op1a", alias = "MxfOp1a")]
     MxfOp1a,
@@ -161,6 +166,7 @@ impl Format {
             "aif" | "aiff" | "aifc" => Format::Aiff,
             "aac" | "aacaudio" | "m4a" | "adts" => Format::Aac,
             "flac" | "fla" => Format::Flac,
+            "mp3" | "mp3audio" | "mpeg3" | "mpeglayer3" => Format::Mp3,
             _ => return None,
         })
     }
@@ -186,6 +192,7 @@ impl Format {
             Format::Aiff => "aiff",
             Format::Aac => "aac",
             Format::Flac => "flac",
+            Format::Mp3 => "mp3",
             Format::MxfOp1a => "mxf-op1a",
             Format::MxfOpAtom => "mxf-opatom",
         }
@@ -206,6 +213,7 @@ impl Format {
             Format::Aiff => "aif",
             Format::Aac => "m4a",
             Format::Flac => "flac",
+            Format::Mp3 => "mp3",
             Format::MxfOp1a | Format::MxfOpAtom => "mxf",
         }
     }
@@ -230,6 +238,7 @@ impl Format {
             Format::Aiff => "AIFF",
             Format::Aac => "AAC Audio",
             Format::Flac => "FLAC",
+            Format::Mp3 => "MP3",
             Format::MxfOp1a => "MXF OP1a",
             Format::MxfOpAtom => "MXF OP-Atom",
         }
@@ -256,9 +265,9 @@ impl Format {
     pub fn has_builtin_encoder(self) -> bool {
         !matches!(self, Format::Hevc | Format::Av1)
     }
-    /// Sound without picture: Waveform Audio, AIFF, AAC Audio and FLAC.
+    /// Sound without picture: Waveform Audio, AIFF, AAC Audio, FLAC and MP3.
     pub fn is_audio_only(self) -> bool {
-        matches!(self, Format::Wav | Format::Aiff | Format::Aac | Format::Flac)
+        matches!(self, Format::Wav | Format::Aiff | Format::Aac | Format::Flac | Format::Mp3)
     }
     /// H.264 or H.265: MPEG-4 (or QuickTime) with AAC audio, set up with the same bitrate controls.
     pub fn is_h26x(self) -> bool {
@@ -272,7 +281,7 @@ impl Format {
     pub fn is_mp4_with(self, mux: Multiplexer) -> bool {
         self == Format::Av1 || (self.is_h26x() && mux == Multiplexer::Mp4)
     }
-    pub const ALL: [Format; 21] = [
+    pub const ALL: [Format; 22] = [
         Format::H264,
         Format::Hevc,
         Format::Av1,
@@ -292,6 +301,7 @@ impl Format {
         Format::Aiff,
         Format::Aac,
         Format::Flac,
+        Format::Mp3,
         Format::MxfOp1a,
         Format::MxfOpAtom,
     ];
@@ -371,6 +381,8 @@ pub struct ExportSettings {
     pub pixel_aspect: Option<(u32, u32)>,
     pub field_order: FieldOrder,
     pub h264_profile: H264Profile,
+    #[serde(default)]
+    pub h264_intra_only: bool,
     /// H.264 level × 10 (41 = 4.1); None = the lowest level that fits. A level below what the
     /// stream needs is raised.
     pub h264_level: Option<u8>,
@@ -504,12 +516,43 @@ impl Out {
     }
 }
 
-/// Write one finished output file (to the sink when there is one); returns its size.
+/// Whether the path still names its reserved output handle.
+pub fn path_is_file(path: &str, file: &std::fs::File) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(path), file.metadata()) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, file);
+        true
+    }
+}
+
+/// Write a finished output through its reserved handle when one exists.
 fn write_output(settings: &ExportSettings, path: &str, data: Vec<u8>) -> Result<u64> {
     let n = data.len() as u64;
-    match &settings.sink {
-        Some(sink) => (sink.0)(path, data),
-        None => std::fs::write(path, &data),
+    match (&settings.sink, &settings.output_file) {
+        (Some(sink), _) => (sink.0)(path, data),
+        // the primary file was reserved and opened by the caller: write through that handle, as
+        // reopening the path would follow whatever replaced the entry in the meantime
+        (None, Some(file)) if path == settings.path => (|| {
+            let mut f = file.try_clone()?;
+            f.set_len(0)?;
+            std::io::Seek::rewind(&mut f)?;
+            f.write_all(&data)?;
+            f.flush()?;
+            if path_is_file(path, &f) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!("{path} was replaced while the export was written; the export was not saved there")))
+            }
+        })(),
+        (None, _) => std::fs::write(path, &data),
     }
     .map_err(|e| ExportError::Io(e.to_string()))?;
     Ok(n)
@@ -629,6 +672,7 @@ impl Default for ExportSettings {
             pixel_aspect: None,
             field_order: FieldOrder::Progressive,
             h264_profile: H264Profile::High,
+            h264_intra_only: false,
             h264_level: None,
             bitrate_mode: BitrateMode::default(),
             crf: DEFAULT_CRF,
@@ -690,7 +734,10 @@ impl ExportSettings {
             return Err(ExportError::Unsupported("floating-point audio is 32-bit: set the sample size to 32".into()));
         }
         let sample_format = self.audio.sample_format();
-        if (self.has_audio() || self.format.is_audio_only()) && self.audio_codec() != AudioCodec::Aac && !self.supports_sample_format(sample_format) {
+        if (self.has_audio() || self.format.is_audio_only())
+            && !matches!(self.audio_codec(), AudioCodec::Aac | AudioCodec::Mp3)
+            && !self.supports_sample_format(sample_format)
+        {
             let codec = if self.audio_codec() == AudioCodec::Flac { "FLAC" } else { self.format.label() };
             return Err(ExportError::Unsupported(format!("{codec} audio has no {} samples: choose 16, 24 or 32 bit", sample_format.label())));
         }
@@ -1674,6 +1721,9 @@ struct H264Encoder {
     u: Vec<u8>,
     v: Vec<u8>,
     signal: ColorSignal,
+    y16: Vec<u16>,
+    u16: Vec<u16>,
+    v16: Vec<u16>,
 }
 
 impl H264Encoder {
@@ -1698,6 +1748,25 @@ impl VideoEncoder for H264Encoder {
         self.rate.num as u32
     }
     fn encode(&mut self, f: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
+        if self.enc.config().bit_depth > 8 {
+            let (enc, y, u, v) = (&self.enc, &mut self.y16, &mut self.u16, &mut self.v16);
+            enc.install(|| match f.hdr {
+                Some(rgb) => {
+                    let (kr, kb) = self.signal.kr_kb();
+                    rgbf_to_yuv420_10(rgb, f.width as usize, f.height as usize, kr, kb, y, u, v)
+                }
+                None => rgba_to_yuv420_10(f.rgba, f.width as usize, f.height as usize, y, u, v),
+            })?;
+            let frame = filmcraft_h264enc::YuvFrame16 {
+                y: &self.y16,
+                u: &self.u16,
+                v: &self.v16,
+                y_stride: f.width as usize,
+                uv_stride: (f.width as usize).div_ceil(2),
+            };
+            let ps = self.enc.encode16(&frame, f.index as i64 * self.rate.den).map_err(|e| ExportError::Encode(e.to_string()))?;
+            return Ok(self.packets(ps));
+        }
         timed(Stage::Convert, || match f.hdr {
             Some(rgb) => {
                 let (kr, kb) = self.signal.kr_kb();
@@ -1809,6 +1878,52 @@ pub fn rgba_to_yuv420_8(rgba: &[u8], w: usize, h: usize, y: &mut Vec<u8>, u: &mu
     );
 }
 
+/// BT.709 limited-range 10-bit 4:2:0 (code values 0..1023) from straight RGBA8, for High 10: the
+/// matrix and the 2×2 chroma average keep their precision instead of rounding to 8 bits (Y = 64 +
+/// 876·Y', C = 512 + 896·C, codes clamped to 4..1019 like [`rgbf_to_yuv420_10`]). The planes are
+/// resized to `w * h` and `ceil(w / 2) * ceil(h / 2)`; an `rgba` slice of the wrong length, a zero
+/// size or a size whose arithmetic overflows is an error.
+pub fn rgba_to_yuv420_10(rgba: &[u8], w: usize, h: usize, y: &mut Vec<u16>, u: &mut Vec<u16>, v: &mut Vec<u16>) -> Result<()> {
+    let bad = || ExportError::Encode(format!("a {w}x{h} picture needs w*h*4 bytes, got {}", rgba.len()));
+    let px = w.checked_mul(h).ok_or_else(bad)?;
+    if w == 0 || h == 0 || px.checked_mul(4) != Some(rgba.len()) {
+        return Err(bad());
+    }
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    y.clear();
+    y.resize(px, 0);
+    u.clear();
+    u.resize(cw * ch, 0);
+    v.clear();
+    v.resize(cw * ch, 0);
+    let code = |x: f32| x.round().clamp(4.0, 1019.0) as u16;
+    y.par_chunks_mut(w * 2).zip(u.par_chunks_mut(cw).zip(v.par_chunks_mut(cw))).enumerate().for_each(|(cy, (yr, (ur, vr)))| {
+        let mut us = vec![0f32; cw];
+        let mut vs = vec![0f32; cw];
+        let mut cnt = vec![0f32; cw];
+        for (dy, yrow) in yr.chunks_exact_mut(w).enumerate() {
+            let row = cy * 2 + dy;
+            let Some(src) = rgba.get(row * w * 4..(row + 1) * w * 4) else { continue };
+            for (x, (&[r, g, b, _], yo)) in src.as_chunks::<4>().0.iter().zip(yrow.iter_mut()).enumerate() {
+                let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+                let yy = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                *yo = code(64.0 + 876.0 * yy);
+                if let (Some(a), Some(c), Some(n)) = (us.get_mut(x / 2), vs.get_mut(x / 2), cnt.get_mut(x / 2)) {
+                    *a += (b - yy) / 1.8556;
+                    *c += (r - yy) / 1.5748;
+                    *n += 1.0;
+                }
+            }
+        }
+        for (cx, (uo, vo)) in ur.iter_mut().zip(vr.iter_mut()).enumerate() {
+            let n = cnt.get(cx).copied().unwrap_or(1.0).max(1.0);
+            *uo = code(512.0 + 896.0 * us.get(cx).copied().unwrap_or(0.0) / n);
+            *vo = code(512.0 + 896.0 * vs.get(cx).copied().unwrap_or(0.0) / n);
+        }
+    });
+    Ok(())
+}
+
 /// Limited-range 8-bit 4:2:0 from encoded R'G'B' floats with matrix (Kr, Kb).
 #[allow(clippy::too_many_arguments)]
 pub fn rgbf_to_yuv420_8(rgb: &[f32], w: usize, h: usize, kr: f32, kb: f32, y: &mut Vec<u8>, u: &mut Vec<u8>, v: &mut Vec<u8>) {
@@ -1912,6 +2027,8 @@ fn h264_factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSetti
     cfg.aud = s.format.is_mxf();
     cfg.keyint = s.keyframe_distance.filter(|k| *k > 0).unwrap_or_else(|| (rate.num as f64 / rate.den as f64 * 2.0).round().max(1.0) as u32);
     cfg.slices = h264_slices(h);
+    // Respect the export pool cap even though the encoder owns its worker pool.
+    cfg.threads = rayon::current_num_threads().clamp(1, 256);
     let kbps = s.bitrate_kbps.max(100);
     let max = s.max_bitrate_kbps.filter(|m| *m >= kbps).unwrap_or_else(|| (u64::from(kbps) * 3 / 2).min(u64::from(u32::MAX)) as u32);
     cfg.rate = match s.bitrate_mode {
@@ -1929,7 +2046,10 @@ fn h264_factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSetti
         H264Profile::Baseline => filmcraft_h264enc::Profile::Baseline,
         H264Profile::Main => filmcraft_h264enc::Profile::Main,
         H264Profile::High => filmcraft_h264enc::Profile::High,
+        H264Profile::High10 => filmcraft_h264enc::Profile::High10,
     };
+    cfg.bit_depth = s.h264_profile.bit_depth();
+    cfg.intra_only = s.h264_intra_only;
     cfg.level = s.h264_level;
     if let Some((n, d)) = s.pixel_aspect {
         cfg.sar = (n.clamp(1, 65535) as u16, d.clamp(1, 65535) as u16);
@@ -1945,7 +2065,21 @@ fn h264_factory(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSetti
     }
     Some(
         filmcraft_h264enc::Encoder::new(cfg)
-            .map(|enc| Box::new(H264Encoder { enc, w, h, rate, y: Vec::new(), u: Vec::new(), v: Vec::new(), signal: s.signal }) as Box<dyn VideoEncoder>)
+            .map(|enc| {
+                Box::new(H264Encoder {
+                    enc,
+                    w,
+                    h,
+                    rate,
+                    y: Vec::new(),
+                    u: Vec::new(),
+                    v: Vec::new(),
+                    y16: Vec::new(),
+                    u16: Vec::new(),
+                    v16: Vec::new(),
+                    signal: s.signal,
+                }) as Box<dyn VideoEncoder>
+            })
             .map_err(|e| ExportError::Encode(e.to_string())),
     )
 }
@@ -2110,6 +2244,7 @@ fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, s
     let batch = rayon::current_num_threads().clamp(2, 16) as i64;
     let (bytes, nframes) = match settings.format {
         Format::Aac => aac_out::export(project, seq, settings, range, sources, progress)?,
+        Format::Mp3 => mp3_out::export(project, seq, settings, range, sources, progress)?,
         Format::Wav | Format::Aiff | Format::Flac => {
             let mut a = audio_out::AudioOut::new(project.clone(), seq, settings, range)?;
             let (ch, sr, fmt) = (a.channels as u16, a.sr, settings.audio.sample_format());

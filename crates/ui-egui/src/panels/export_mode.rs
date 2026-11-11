@@ -820,11 +820,14 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                 }
             } else {
                 row(ui, t, tl!("Profile"), |ui| {
-                    let o = [H264Profile::Baseline, H264Profile::Main, H264Profile::High];
+                    let o = [H264Profile::Baseline, H264Profile::Main, H264Profile::High, H264Profile::High10];
                     let labels: Vec<(String, bool)> = o.iter().map(|p| (p.label().to_string(), true)).collect();
                     if let Some(i) = combo(ui, reg, "export.video.profile", s.h264_profile.label(), &labels, 120.0) {
                         s.h264_profile = o[i];
                     }
+                });
+                row(ui, t, "All Intra", |ui| {
+                    check(ui, reg, "export.video.intraOnly", &mut s.h264_intra_only, "Every frame a keyframe");
                 });
                 row(ui, t, tl!("Level"), |ui| {
                     let levels: [Option<u8>; 13] =
@@ -991,6 +994,7 @@ fn audio_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
         let cur = match s.audio_codec() {
             AudioCodec::Aac => "AAC",
             AudioCodec::Flac => tl!("FLAC (lossless)"),
+            AudioCodec::Mp3 => "MP3",
             _ => tl!("Uncompressed (PCM)"),
         };
         // MP4 takes AAC or FLAC; QuickTime any of the three
@@ -1024,12 +1028,13 @@ fn audio_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             s.audio.channels = [1, 2, 6][i.min(2)];
         }
     });
-    if s.audio_codec() == AudioCodec::Aac {
+    if matches!(s.audio_codec(), AudioCodec::Aac | AudioCodec::Mp3) {
         row(ui, t, tl!("Audio Bitrate"), |ui| {
-            let rates = [128u32, 160, 192, 256, 320];
+            // MP3 bit rates are Layer III's (16-24 kHz streams stop at 160 kbps)
+            let rates: &[u32] = if s.audio_codec() == AudioCodec::Mp3 { &[64, 96, 128, 160, 192, 256, 320] } else { &[128, 160, 192, 256, 320] };
             let labels: Vec<(String, bool)> = rates.iter().map(|r| (format!("{r} kbps"), true)).collect();
-            if let Some(i) = combo(ui, reg, "export.audio.bitrate", &format!("{} kbps", s.audio.bitrate_kbps), &labels, 120.0) {
-                s.audio.bitrate_kbps = rates[i];
+            if let Some(&r) = combo(ui, reg, "export.audio.bitrate", &format!("{} kbps", s.audio.bitrate_kbps), &labels, 120.0).and_then(|i| rates.get(i)) {
+                s.audio.bitrate_kbps = r;
             }
         });
     } else {

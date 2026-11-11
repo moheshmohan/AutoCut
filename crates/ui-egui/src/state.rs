@@ -522,6 +522,8 @@ pub struct UiState {
     /// Text panel: caption search filter.
     #[serde(default)]
     pub caption_search: String,
+    #[serde(default)]
+    pub caption_export_format: Option<String>,
     /// Text panel ▸ Transcript: selected words of the sequence transcript (anchor, end; indices as
     /// `transcript.inspect` lists them).
     #[serde(default)]
@@ -1052,6 +1054,7 @@ impl Default for UiState {
             export: Default::default(),
             text_tab: captions_tab(),
             caption_search: String::new(),
+            caption_export_format: None,
             transcript_sel: None,
             transcript_search: String::new(),
             play_after_render: true,

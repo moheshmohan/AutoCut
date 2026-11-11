@@ -1,0 +1,8 @@
+asset:        motion.tsx
+title:        Responsive split wipe and Next Stop chapter scene
+author:       AutoCut contributors
+source:       original work
+license:      MIT OR Apache-2.0
+license-file: ../../LICENSE-MIT; ../../LICENSE-APACHE
+added:        2026-11-11 by AutoCut contributors
+notes:        Original procedural shapes and motion, with responsive sizing from the composition canvas. No bundled media, fonts or third-party artwork. Indexed in ATTRIBUTION.md under code-drawn assets.

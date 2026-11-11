@@ -8,6 +8,7 @@ const MAX_PARAM_NESTING: usize = 64;
 /// Options that take a value (`--project p`); every other `--x` is a flag.
 const VALUED: &[&str] = &[
     "--project",
+    "--catalog-port",
     // trailer / shorts: the opt-in creator look
     "--look",
     "--save-as",

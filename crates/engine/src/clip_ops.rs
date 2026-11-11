@@ -1371,7 +1371,9 @@ fn modify_timecode(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn video_clips(s: &Session, p: &Value) -> Vec<ClipId> {
     let Some(q) = s.active_sequence() else { return Vec::new() };
-    clips_p(s, p).into_iter().filter(|c| q.video_tracks.iter().any(|t| t.item(*c).is_some())).collect()
+    // each clip once: a caller may repeat an id, and every repeat would redo the same work
+    let mut seen = std::collections::BTreeSet::new();
+    clips_p(s, p).into_iter().filter(|c| seen.insert(*c) && q.video_tracks.iter().any(|t| t.item(*c).is_some())).collect()
 }
 
 fn frame_hold_options(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1383,6 +1385,9 @@ fn frame_hold_options(s: &mut Session, p: &Value) -> Result<Value> {
     let hold_filters = bool_p(p, "holdFilters").unwrap_or(false);
     let mode = str_p(p, "holdOn").unwrap_or("in").to_string();
     let ph = s.playhead();
+    if str_p(p, "timecode").is_some_and(|value| value.chars().count() > 64) {
+        return Err(bad("clip.frameHoldOptions", "timecode is too long"));
+    }
     let seq_t = time_p(s, p, "");
     let tc = str_p(p, "timecode").map(str::to_string);
     let rates: BTreeMap<ClipId, (FrameRate, i64)> = {

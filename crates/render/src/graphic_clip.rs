@@ -235,21 +235,52 @@ pub(crate) fn over_linear_gradient(px: &mut [f32], msk: &Mask, grad: &LinearGrad
     });
 }
 
+/// The style runs that own at least one glyph or decoration (run 0, the base style, always counts).
+/// Runs without any cannot paint, so they must not cost a colour group and its full-size mask.
+fn used_runs(layout: &Layout) -> Vec<bool> {
+    let mut used = vec![false; layout.glyphs.iter().map(|g| g.run).chain(layout.underline_runs.iter().copied()).max().map_or(1, |m| m as usize + 1)];
+    used[0] = true;
+    for r in layout.glyphs.iter().map(|g| g.run).chain(layout.underline_runs.iter().copied()) {
+        used[r as usize] = true;
+    }
+    used
+}
+
+/// Most colour groups (each a full-size mask and a pass over it) painted for one layer: about a
+/// billion pixel visits. Groups past it are not painted.
+fn max_groups(cover: &Mask) -> usize {
+    ((1usize << 30) / cover.w.saturating_mul(cover.h).max(1)).max(1)
+}
+
+/// Group text runs by their effective colour, including unstyled text (run 0). Only `used` runs
+/// are grouped, at most `max` groups.
+fn color_groups(color: [f32; 4], overrides: &[Option<[f32; 4]>], used: &[bool], max: usize) -> Vec<([f32; 4], Vec<u16>)> {
+    let mut groups: Vec<([f32; 4], Vec<u16>)> = Vec::new();
+    let mut index: HashMap<[u32; 4], usize> = HashMap::new();
+    for (r, col) in std::iter::once(color).chain(overrides.iter().map(|c| c.unwrap_or(color))).enumerate() {
+        let Ok(run) = u16::try_from(r) else { break };
+        if !used.get(r).copied().unwrap_or(false) {
+            continue;
+        }
+        match index.get(&col.map(f32::to_bits)) {
+            Some(&g) => groups[g].1.push(run),
+            None if groups.len() < max => {
+                index.insert(col.map(f32::to_bits), groups.len());
+                groups.push((col, vec![run]));
+            }
+            None => {}
+        }
+    }
+    groups
+}
+
 /// Solid fill, one mask per distinct colour when text runs carry their own.
 fn paint_solid(px: &mut [f32], cover: &Mask, color: [f32; 4], text: Option<&Layout>, m: &Xform, run_fills: &[Option<[f32; 4]>], origin: (i32, i32)) {
     let Some(layout) = text.filter(|_| run_fills.iter().any(Option::is_some)) else {
         over_mask(px, cover, premul_linear(color));
         return;
     };
-    let mut groups: Vec<([f32; 4], Vec<u16>)> = Vec::new();
-    for r in 0..=run_fills.len() {
-        let col = if r == 0 { color } else { run_fills[r - 1].unwrap_or(color) };
-        match groups.iter_mut().find(|g| g.0 == col) {
-            Some(g) => g.1.push(r as u16),
-            None => groups.push((col, vec![r as u16])),
-        }
-    }
-    for (col, runs) in groups {
+    for (col, runs) in color_groups(color, run_fills, &used_runs(layout), max_groups(cover)) {
         let mut m_run = Mask::new(cover.w, cover.h);
         for r in runs {
             render::draw_run(layout, m, &mut m_run, origin, Some(r));
@@ -273,12 +304,18 @@ fn paint_mixed_gradient(
     let mut grad_mask = Mask::new(cover.w, cover.h);
     render::draw_run(layout, m, &mut grad_mask, origin, Some(0));
     let mut solids: Vec<([f32; 4], Vec<u16>)> = Vec::new();
+    let used = used_runs(layout);
+    let max = max_groups(cover);
     for (i, fill) in run_fills.iter().enumerate() {
-        let run = (i + 1) as u16;
+        let Ok(run) = u16::try_from(i + 1) else { break };
+        if !used.get(i + 1).copied().unwrap_or(false) {
+            continue; // owns no glyph: nothing to paint
+        }
         if let Some(col) = fill {
-            match solids.iter_mut().find(|g| g.0 == *col) {
-                Some(g) => g.1.push(run),
-                None => solids.push((*col, vec![run])),
+            match solids.iter().position(|g| g.0 == *col) {
+                Some(g) => solids[g].1.push(run),
+                None if solids.len() < max => solids.push((*col, vec![run])),
+                None => {}
             }
         } else {
             render::draw_run(layout, m, &mut grad_mask, origin, Some(run));
@@ -1015,5 +1052,22 @@ mod tests {
                 assert!((p[3] - q[3]).abs() < 1e-5);
             }
         }
+    }
+    #[test]
+    fn style_runs_that_own_no_glyph_cost_no_colour_group() {
+        use filmcraft_project::graphic_design::{CharStyle, LayerExtra, StyleRun};
+        let mut e = new_text_layer("A", Vec2::new(20.0, 100.0), 60.0);
+        set(&mut e, "fill_color", ParamValue::Color([1.0, 1.0, 1.0, 1.0]));
+        // 3000 runs over the one character, each with its own fill: only the last one wins it, and
+        // the rest own nothing, so they must not each cost a full-size mask and pass
+        let runs: Vec<StyleRun> = (0..3000)
+            .map(|i| StyleRun { start: 0, end: 1, style: CharStyle { fill: Some([1.0, i as f32 / 3000.0, 0.0, 1.0]), ..Default::default() } })
+            .collect();
+        e.layer = Some(Box::new(LayerExtra { runs, ..Default::default() }));
+        let mut img = Image::new(2000, 1000);
+        let t = std::time::Instant::now();
+        render_graphic_layers(&[e], Tick::ZERO, (2000, 1000), &Affine::IDENTITY, &mut img);
+        assert!(t.elapsed() < std::time::Duration::from_secs(15), "{:?}", t.elapsed());
+        assert!(ink_box(&img).is_some(), "the letter is still drawn");
     }
 }

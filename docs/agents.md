@@ -435,3 +435,5 @@ ROADMAP.md and [target-app-parity.md](target-app-parity.md) keep two numbers: **
   what works;
 - benchmarks state the machine, the load average and before/after on the same build;
 - don't raise a percentage without evidence a reviewer can rerun.
+
+See [the local pipeline upgrades](local-pipeline-upgrades.md) for FrameAtlas edit plans, screen protection, editable audio continuity, render-cache commands, RAEA review bundles and the checked 4K delivery recipe.

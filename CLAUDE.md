@@ -9,7 +9,7 @@ FilmCraft is a clean-room, open-source, pure-Rust non-linear video editor target
 3. Follow the autonomous operation protocol (`plan/execution-plan.md` §7; public summary: [`docs/agents.md`](docs/agents.md) §5–7). Don't stop to ask unless it lists the decision as the user's.
 
 For production work involving custom animations, scenes, or transitions, use the
-[local RAEA workflow](docs/raea-workflow.md) alongside the [AutoCut agent guide](docs/autocut-agent-guide.md).
+[local RAEA workflow](docs/raea-workflow.md) and [revision/delivery pipeline](docs/local-pipeline-upgrades.md) alongside the [AutoCut agent guide](docs/autocut-agent-guide.md).
 
 ## Non-negotiables
 **Read [`AGENTS.md`](AGENTS.md) first; its rules override everything here.**

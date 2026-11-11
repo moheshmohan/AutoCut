@@ -65,7 +65,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Auto Color",
         menu: &["Clip"],
         shortcut: None,
-        params: r#"{"clips":[id]?,"strength":0..1=0.7,"match":bool=true,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"="none","lookStrength":0..100=25,"offset":{"temperature":-25..25,"exposure":-0.8..0.8,"saturation":-25..25}?,"offsets":{"<clip id>":{…as offset}}?,"frames":1..5=3,"sheet":path?,"off":bool=false}"#,
+        params: r#"{"clips":[id]?,"strength":0..1=0.7,"match":bool=true,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"="none","lookStrength":0..100=25,"offset":{"temperature":-25..25,"exposure":-0.8..0.8,"saturation":-25..25}?,"offsets":{"<clip id>":{…as offset}}?,"target":"sequence|sdr|pq|hlg"="sequence","protectScreens":{"<clip id>":[[x,y,width,height]]}?,"frames":1..5=3,"sheet":path?,"off":bool=false}"#,
         enabled: has_seq,
         run: auto_color,
         journal: true,
@@ -88,6 +88,10 @@ struct Clip {
     after: Option<Stats>,
     after_pic: Option<filmcraft_render::Image>,
     backed_off: Option<String>,
+    screens: Vec<[f64; 4]>,
+    source: Value,
+    size: (u32, u32),
+    hdr_target: bool,
 }
 
 /// Renders a sequence frame: the GPU's frame renderer when this host has one, else the CPU.
@@ -180,6 +184,71 @@ fn stats_json(s: &Stats) -> Value {
 }
 
 fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
+    let target = str_p(p, "target").unwrap_or("sequence");
+    let working = match target {
+        "sequence" => None,
+        "sdr" => Some(filmcraft_color::WorkingSpace::Rec709),
+        "pq" => Some(filmcraft_color::WorkingSpace::Rec2100Pq),
+        "hlg" => Some(filmcraft_color::WorkingSpace::Rec2100Hlg),
+        _ => return Err(bad(AUTO_COLOR_CMD, "target is sequence, sdr, pq or hlg")),
+    };
+    s.edit_group("Source-aware Auto Color", |s| {
+        if let Some(working) = working {
+            s.edit_sequence("Set colour target", |q, _, _| {
+                q.settings.color.working = working;
+                q.settings.color.auto_tone_map = true;
+                Ok(())
+            })?;
+        }
+        auto_color_inner(s, p)
+    })
+}
+
+/// Explicit rectangles are normalized original-source coordinates. They become ordinary
+/// editable subtract masks before Motion, and survive save/reopen and repeated passes.
+fn screens(value: &Value) -> Result<Vec<[f64; 4]>> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let values = value.as_array().filter(|a| a.len() <= 8).ok_or_else(|| bad(AUTO_COLOR_CMD, "protectScreens needs up to 8 normalized rectangles per clip"))?;
+    values
+        .iter()
+        .map(|v| {
+            let r: [f64; 4] = serde_json::from_value(v.clone()).map_err(|_| bad(AUTO_COLOR_CMD, "a screen is [x,y,width,height]"))?;
+            let [x, y, w, h] = r;
+            if !r.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) || w <= 0.0 || h <= 0.0 || x + w > 1.000001 || y + h > 1.000001 {
+                return Err(bad(AUTO_COLOR_CMD, "screen bounds must lie inside the source"));
+            }
+            Ok(r)
+        })
+        .collect()
+}
+fn protected_pass(
+    c: &Correction,
+    look: &(&str, Option<u32>, &[(&str, f64)]),
+    strength: f64,
+    screens: &[[f64; 4]],
+    size: (u32, u32),
+) -> Option<filmcraft_project::EffectInstance> {
+    let mut e = pass_effect(c, look, strength)?;
+    for (i, &[x, y, w, h]) in screens.iter().enumerate() {
+        let (sw, sh) = (f64::from(size.0), f64::from(size.1));
+        let mut m =
+            filmcraft_project::Mask::new(format!("Protect screen {}", i + 1), filmcraft_project::MaskPath::rect(x * sw, y * sh, (x + w) * sw, (y + h) * sh));
+        m.inverted = i == 0;
+        if i > 0 {
+            m.mode = filmcraft_project::MaskMode::Subtract;
+        }
+        m.feather = Param::new(ParamValue::Float((sw.min(sh) * 0.003).clamp(0.0, 12.0)));
+        e.masks.push(m);
+    }
+    if !screens.is_empty() {
+        e.params.insert("auto_color_screens".into(), Param::new(ParamValue::Text(serde_json::to_string(screens).ok()?)));
+    }
+    Some(e)
+}
+
+fn auto_color_inner(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = AUTO_COLOR_CMD;
     let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     let number = |k: &str, default: f64, max: f64, what: &str| -> Result<f64> {
@@ -221,6 +290,13 @@ fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
         for (k, v) in m.iter().take(MAX_CLIPS) {
             let id: u64 = k.parse().map_err(|_| bad(cmd, format!("`offsets`: `{k}` is not a clip id")))?;
             offsets.insert(id, offset_of(v, "offsets")?);
+        }
+    }
+    if let Some(v) = p.get("protectScreens") {
+        let entries = v.as_object().filter(|m| m.len() <= MAX_CLIPS).ok_or_else(|| bad(cmd, "protectScreens maps clip ids to normalized rectangles"))?;
+        for (id, value) in entries {
+            id.parse::<u64>().map_err(|_| bad(cmd, "protectScreens key is a clip identity"))?;
+            screens(value)?;
         }
     }
     let matching = bool_p(p, "match").unwrap_or(true);
@@ -273,11 +349,27 @@ fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
                 it.start + Tick((it.duration.0 as f64 * f) as i64)
             })
             .collect();
+        let media = project.item(it.item).and_then(|i| i.as_media());
+        let video = media.and_then(|m| m.info.video.as_ref());
+        let space = media.and_then(|m| m.interpret.color_space).or_else(|| video.map(|v| filmcraft_color::ColorSpace::from_info(&v.color)));
+        let size = video.map_or((1, 1), |v| (v.width, v.height));
+        let hdr_target = seq.settings.color.working.is_hdr();
+        let given = p.get("protectScreens").and_then(|m| m.get(c.0.to_string()));
+        let saved = it.effects.iter().find(|e| is_pass(e)).and_then(|e| e.params.get("auto_color_screens")).and_then(|p| match &p.value {
+            ParamValue::Text(v) => serde_json::from_str::<Value>(v).ok(),
+            _ => None,
+        });
+        let screens = screens(given.or(saved.as_ref()).unwrap_or(&Value::Null))?;
+        let source = json!({"space":space,"transfer":video.map(|v| v.color.transfer),"primaries":video.map(|v| v.color.primaries),"camera":project.item(it.item).map(|m| json!({"make":m.metadata.get("Make"),"model":m.metadata.get("Model")})),"target":seq.settings.color.working,"toneMap":seq.settings.color.auto_tone_map && !hdr_target,"protection":"source-space masks (track moving screens with masks.track)"});
         let before_project = probe(&project, seq_id, *c, None);
         let pics: Vec<filmcraft_render::Image> = times.iter().map(|t| renderer.render(&before_project, seq_id, *t, scale, &provider)).collect();
         let Some(all) = stack(&pics) else { continue };
         let before = color_balance::measure(&all);
         let (mut correction, mut said) = color_balance::balance(&before, strength);
+        if hdr_target {
+            correction.exposure = 0.0;
+            said.push("HDR target: retain scene exposure; use an explicit offset to change it".into());
+        }
         let offset = offsets.get(&c.0).copied().unwrap_or(offset);
         if !offset.is_none() {
             correction.temperature = (correction.temperature + offset.temperature).clamp(-50.0, 50.0);
@@ -300,6 +392,10 @@ fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
             after: None,
             after_pic: None,
             backed_off: None,
+            screens,
+            source,
+            size,
+            hdr_target,
         });
     }
     // ---- the cameras matched: saturation and contrast half way to the edit's middle
@@ -311,6 +407,9 @@ fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
         let target_s = median(clips.iter().map(|c| c.before.saturation).collect());
         let target_c = median(clips.iter().map(|c| c.before.contrast).collect());
         for c in clips.iter_mut() {
+            if c.hdr_target {
+                continue;
+            }
             let (sat, con) = color_balance::match_to(&c.before, target_s, target_c, MATCH);
             let asked = offsets.get(&c.id.0).copied().unwrap_or(offset);
             if (sat - 100.0).abs() >= 1.0 || con.abs() >= 1.0 {
@@ -327,7 +426,7 @@ fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let tries = [c.correction, c.correction.scaled(0.5), c.correction.scaled(0.5).without_white_balance(), Correction::default()];
         for (k, attempt) in tries.iter().enumerate() {
-            let Some(e) = pass_effect(attempt, &look, look_strength) else { break };
+            let Some(e) = protected_pass(attempt, &look, look_strength, &c.screens, c.size) else { break };
             let after_project = probe(&project, seq_id, c.id, Some(&e));
             let pics: Vec<filmcraft_render::Image> = c.times.iter().map(|t| renderer.render(&after_project, seq_id, *t, scale, &provider)).collect();
             let Some(all) = stack(&pics) else { break };
@@ -353,8 +452,8 @@ fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
     let passes: Vec<(ClipId, Option<filmcraft_project::EffectInstance>)> = clips
         .iter()
         .map(|c| {
-            let keep = !(c.correction.is_none() && look.1.is_none() && look.2.is_empty());
-            (c.id, if keep { pass_effect(&c.correction, &look, look_strength) } else { None })
+            let keep = !c.screens.is_empty() || !(c.correction.is_none() && look.1.is_none() && look.2.is_empty());
+            (c.id, if keep { protected_pass(&c.correction, &look, look_strength, &c.screens, c.size) } else { None })
         })
         .collect();
     s.edit_sequence("Auto Color", |q, _, _| {
@@ -374,6 +473,7 @@ fn auto_color(s: &mut Session, p: &Value) -> Result<Value> {
             let k = &c.correction;
             json!({
                 "clip": c.id.0,
+                "source":c.source,"protectedScreens":c.screens,
                 "before": stats_json(&c.before),
                 "after": c.after.as_ref().map(stats_json),
                 "applied": {"temperature": k.temperature, "tint": k.tint, "exposure": k.exposure, "saturation": k.saturation, "contrast": k.contrast, "look": look.0},
@@ -503,5 +603,46 @@ mod tests {
         ] {
             assert!(s.execute(AUTO_COLOR_CMD, bad.clone()).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod source_aware_tests {
+    use super::*;
+    #[test]
+    fn invalid_screen_regions_and_targets_are_atomic() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let before = s.project.clone();
+        for p in [json!({"target":"invented"}), json!({"target":"pq","protectScreens":{"1":[[0.8,0.0,0.5,0.5]]}})] {
+            assert!(s.execute(AUTO_COLOR_CMD, p).is_err());
+            assert_eq!(&*s.project, &*before);
+        }
+    }
+    #[test]
+    fn screen_masks_are_editable_source_space_and_survive_rerun() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let id = s
+            .active_sequence()
+            .unwrap()
+            .video_tracks
+            .iter()
+            .flat_map(|t| &t.items)
+            .find(|c| s.project.item(c.item).is_some_and(|i| matches!(i.kind, ItemKind::Media(_))))
+            .unwrap()
+            .id;
+        let p = json!({"clips":[id.0],"look":"punchy","frames":1,"protectScreens":{id.0.to_string():[[0.25,0.25,0.5,0.5]]}});
+        s.execute(AUTO_COLOR_CMD, p).unwrap();
+        s.execute(AUTO_COLOR_CMD, json!({"clips":[id.0],"look":"punchy","frames":1})).unwrap();
+        let q = s.active_sequence().unwrap();
+        let (_, c) = q.find_item(id).unwrap();
+        let effects: Vec<_> = c.effects.iter().filter(|e| is_pass(e)).collect();
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].masks.len(), 1);
+        assert!(effects[0].masks[0].inverted);
+        let bytes = serde_json::to_vec(&s.project).unwrap();
+        let reopened: Project = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(&reopened, &*s.project);
     }
 }

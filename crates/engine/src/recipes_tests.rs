@@ -87,7 +87,7 @@ fn the_built_in_recipes_read_and_check() {
     assert_eq!(all.len(), builtin_json().len());
     assert_eq!(
         all.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-        ["builtin:talking-head-clean-up", "builtin:vertical-short", "builtin:template-publish-youtube"]
+        ["builtin:talking-head-clean-up", "builtin:vertical-short", "builtin:template-publish-youtube", "builtin:delivery-quality-gate"]
     );
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
@@ -107,7 +107,7 @@ fn the_built_in_recipes_read_and_check() {
         let plan = s
             .execute(
                 "recipe.run",
-                json!({"name": r.id, "dryRun": true, "params": if r.id.ends_with("youtube") { json!({"output": "/tmp/x.mp4"}) } else { json!({}) }}),
+                json!({"name": r.id, "dryRun": true, "params": if r.id.ends_with("youtube") || r.id=="builtin:delivery-quality-gate" { json!({"output": "/tmp/x.mp4"}) } else { json!({}) }}),
             )
             .unwrap();
         assert!(!plan["plan"].as_array().unwrap().is_empty(), "{}", r.id);
@@ -157,7 +157,7 @@ fn save_list_inspect_and_delete_in_the_recipes_folder() {
     // listed with the built-ins
     let l = s.execute("recipe.list", json!({})).unwrap();
     let ids: Vec<&str> = l["recipes"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 4, "{ids:?}");
+    assert_eq!(ids.len(), 5, "{ids:?}");
     assert!(ids.contains(&"user:my-routine"));
     assert!(l["userFolder"].as_str().unwrap().ends_with("Recipes"));
     // inspected by name, with parameters: the steps as they would run

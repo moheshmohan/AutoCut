@@ -1877,7 +1877,7 @@ fn build() -> Vec<CommandSpec> {
             "Media…",
             ["File", "Export"],
             None,
-            r#"{"path":str,"preset":str?,"settings":ExportSettings?,"format":"h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|jpg|tga|dpx|exr|gif|wav|aiff|aac|flac"?,"audioCodec":"auto|aac|pcm|flac"?,"flacLevel":0..8=5,"width":u32?,"height":u32?,"fps":f64?,"bitrateKbps":u32?,"bitrateMode":"cbr|vbr1Pass|vbr2Pass|crf"?,"crf":0..51=23,"hardwareEncoding":"off|auto"?,"gpuRendering":"auto|off"="auto","scale":f32=1,"audio":bool=true,"quality":0..100,"burnCaptions":bool=false,"embedCaptions":bool=false,"vr":bool|"auto"="auto","alpha":bool=false,"exrCompression":"none|rle|zips|zip"?,"captionSidecar":"srt|vtt"?,"loudnessLufs":f64?,"proresProfile":"proxy|lt|standard|hq|4444|4444xq"?,"dnxProfile":"lb|sq|hq|hqx"?,"apvProfile":"422-10|422-12|444-10|444-12"?,"mxfVideoCodec":"dnxhr|proRes|h264"?,"sequence":id?,"range":"entire|inOut|workArea|custom"?,"startSeconds":f64?,"endSeconds":f64?,"wait":bool=false}"#,
+            r#"{"path":str,"preset":str?,"settings":ExportSettings?,"format":"h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|jpg|tga|dpx|exr|gif|wav|aiff|aac|flac|mp3"?,"audioCodec":"auto|aac|pcm|flac|mp3"?,"flacLevel":0..8=5,"width":u32?,"height":u32?,"fps":f64?,"bitrateKbps":u32?,"bitrateMode":"cbr|vbr1Pass|vbr2Pass|crf"?,"crf":0..51=23,"hardwareEncoding":"off|auto"?,"gpuRendering":"auto|off"="auto","scale":f32=1,"audio":bool=true,"quality":0..100,"burnCaptions":bool=false,"embedCaptions":bool=false,"vr":bool|"auto"="auto","alpha":bool=false,"exrCompression":"none|rle|zips|zip"?,"captionSidecar":"srt|vtt"?,"loudnessLufs":f64?,"proresProfile":"proxy|lt|standard|hq|4444|4444xq"?,"dnxProfile":"lb|sq|hq|hqx"?,"h264Profile":"baseline|main|high|high10"?,"h264IntraOnly":bool=false,"apvProfile":"422-10|422-12|444-10|444-12"?,"mxfVideoCodec":"dnxhr|proRes|h264"?,"sequence":id?,"range":"entire|inOut|workArea|custom"?,"startSeconds":f64?,"endSeconds":f64?,"wait":bool=false}"#,
             has_seq,
             crate::export_tools::export_media
         ),
@@ -3903,6 +3903,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::adjustment_clip::commands());
     v.extend(crate::loudness::commands());
     v.extend(crate::mix_analysis::commands());
+    v.extend(crate::audio_continuity::commands());
     v.extend(crate::color::commands());
     v.extend(crate::graphics::commands());
     v.extend(crate::graphic_templates::commands());
@@ -3935,6 +3936,10 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::moments::commands());
     v.extend(crate::split_edit::commands());
     v.extend(crate::auto_color::commands());
+    v.extend(crate::catalog_edit::commands());
+    v.extend(crate::animation_preflight::commands());
+    v.extend(crate::render_cache::commands());
+    v.extend(crate::delivery::commands());
     v.extend(crate::taste::commands());
     v.extend(crate::speech_pauses::commands());
     v.extend(crate::vr_moves::commands());
