@@ -37,6 +37,8 @@ rendered-media import is engine-independent. Use trusted compositions and local 
 3. Render with the example helper below. It uses AutoCut's native probe, rejects gaps in
    numbered renders, and writes `autocut-import.json` only after a successful handoff. Each
    destination is a new directory. Pass `--raea /absolute/path/to/raea` for a different install.
+   A completed render is retained in that directory even if the native probe or QA command fails.
+   Inspect those retained bytes before rendering again; a failed handoff creates no import manifest.
 
 For the sample scene, save `scene-qa.json` in the FX build folder with its deliberate final hold:
 

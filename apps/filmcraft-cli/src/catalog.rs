@@ -91,6 +91,26 @@ fn selection_requests(selection: &Value) -> Result<Vec<Value>, String> {
         })
         .collect()
 }
+
+/// Different scene/speech citations of one verified source file reuse its retained bytes.
+/// Resolving every citation first preserves current timing and stale-reference checks.
+fn reuse_source(state: &Value, request: &Value, resolved: &Value) -> Option<Value> {
+    let reference = resolved.get("clip")?.as_object()?;
+    let filename = reference.get("source_filename")?.as_str()?;
+    let existing = state["results"].as_object()?.values().find(|value| {
+        value["asset_id"] == request["id"]
+            && value["clip"]["source_filename"] == filename
+            && value["editing_sha256"].as_str().is_some()
+            && matches!(value["indexed_source_verification"].as_str(), Some("matched" | "no_fingerprint"))
+    })?;
+    let path = existing["clip"]["source_path"].as_str()?;
+    let mut result = existing.clone();
+    let mut clip = Value::Object(reference.clone());
+    clip["source_path"] = json!(path);
+    result["clip"] = clip;
+    result["retained_source_reused"] = json!(true);
+    Some(result)
+}
 fn retrieve(client: &Client, selection: &Value, folder: &Path) -> Result<Value, String> {
     let requests = selection_requests(selection)?;
     let folder = folder.canonicalize().map_err(|e| e.to_string())?;
@@ -111,20 +131,33 @@ fn retrieve(client: &Client, selection: &Value, folder: &Path) -> Result<Value, 
     }
     // Every reference must still resolve before any request is enqueued; expired picker access
     // is returned by the service with its recovery path, never silently substituted.
-    for request in &requests {
-        client.call("resolve", request)?;
-    }
+    let resolved = requests
+        .iter()
+        .map(|request| {
+            let value = client.call("resolve", request)?;
+            let clip = value.get("clip").cloned().unwrap_or(Value::Null);
+            if serde_json::to_vec(&clip).map_err(|e| e.to_string())?.len() > 16384 {
+                return Err("resolved clip exceeds 16 KiB".into());
+            }
+            Ok(json!({"clip":clip}))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let mut pending = Vec::new();
     let mut results = BTreeMap::new();
     let mut active_assets = std::collections::BTreeSet::new();
     let mut file_hashes = BTreeMap::<String, String>::new();
-    for request in &requests {
+    for (request, reference) in requests.iter().zip(&resolved) {
         let ref_key = format!("{:x}", Sha256::digest(request.to_string()));
         if active_assets.contains(&request["id"].to_string()) {
             pending.push(json!({"asset":request["id"],"state":"waitingForOtherReference"}));
             continue;
         }
         let mut result = state["results"][&ref_key].clone();
+        if result.is_null()
+            && let Some(reused) = reuse_source(&state, request, reference)
+        {
+            result = reused;
+        }
         if !result.is_null() {
             let path = result["clip"]["source_path"].as_str().or_else(|| result["path"].as_str()).ok_or("receipt has no source path")?;
             if !Path::new(path).is_file() {
@@ -161,6 +194,9 @@ fn retrieve(client: &Client, selection: &Value, folder: &Path) -> Result<Value, 
         if !result.is_null() {
             if !result.is_object() {
                 return Err("FrameAtlas returned an invalid handoff".into());
+            }
+            if result["asset_id"] != request["id"] {
+                return Err("retrieval returned another asset; receipt cannot be used".into());
             }
             let path = result["clip"]["source_path"].as_str().or_else(|| result["path"].as_str()).ok_or("handoff has no editing path")?.to_string();
             let hash = match file_hashes.get(&path) {
@@ -293,6 +329,91 @@ mod retrieval_tests {
         let error = client.call("resolve", &json!({"id":"expired"})).unwrap_err();
         assert!(error.contains("Reopen the Picker"), "{error}");
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn review_catalogue_scenes_reuse_one_verified_retained_original() {
+        use std::{io::BufRead, sync::atomic::AtomicBool, time::Instant};
+        let dir = std::env::temp_dir().join(format!(
+            "autocut-multi-scene-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("original.mov");
+        std::fs::write(&source, b"owned synthetic original").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let count = Arc::new(AtomicUsize::new(0));
+        let downloads = count.clone();
+        let original = source.clone();
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut current = json!(null);
+            let clip = |key: &str| json!({"kind":"scene","scene_key":key,"source_filename":"original.mov","source_start":if key=="first" {0.0}else{1.0},"source_end":if key=="first"{0.5}else{1.5}});
+            while !stopping.load(Ordering::Relaxed) && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(s) => s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(e) => panic!("{e}"),
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut input = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                input.read_line(&mut first).unwrap();
+                let endpoint = first.split_whitespace().nth(1).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(input.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse::<usize>().unwrap();
+                    }
+                }
+                assert!(length < 32768);
+                let mut bytes = vec![0; length];
+                input.read_exact(&mut bytes).unwrap();
+                let args: Value = if bytes.is_empty() { json!({}) } else { serde_json::from_slice(&bytes).unwrap() };
+                let value = match endpoint {
+                    "/api/session" => json!({"csrf":"synthetic"}),
+                    "/api/resolve" => json!({"clip":clip(args["scene_key"].as_str().unwrap())}),
+                    "/api/retrieve" => {
+                        current = clip(args["scene_key"].as_str().unwrap());
+                        json!({"id":downloads.fetch_add(1,Ordering::SeqCst)+1})
+                    }
+                    "/api/job" => {
+                        let mut reference = current.clone();
+                        reference["source_path"] = json!(original);
+                        json!({"state":"done","result":{"asset_id":"shared","path":original,"clip":reference,"indexed_source_verification":"matched"}})
+                    }
+                    _ => panic!("unexpected endpoint {endpoint}"),
+                };
+                let body = value.to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    .unwrap();
+            }
+        });
+        let client = Client::new(port).unwrap();
+        let selection = json!({"entries":[{"id":"shared","scene_key":"first"},{"id":"shared","scene_key":"second"}]});
+        let result = retrieve(&client, &selection, &dir);
+        stop.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+        let result = result.unwrap();
+        assert_eq!(result["ready"], true);
+        assert_eq!(count.load(Ordering::SeqCst), 1, "one original was requested again for its other scene");
+        let plan = read_json(Path::new(result["plan"].as_str().unwrap())).unwrap();
+        assert_eq!(plan["entries"][0]["source"]["clip"]["scene_key"], "first");
+        assert_eq!(plan["entries"][1]["source"]["clip"]["scene_key"], "second");
+        assert_eq!(plan["entries"][0]["source"]["editing_sha256"], plan["entries"][1]["source"]["editing_sha256"]);
     }
     #[test]
     fn pending_retrieval_resumes_without_a_second_download_and_can_cancel() {

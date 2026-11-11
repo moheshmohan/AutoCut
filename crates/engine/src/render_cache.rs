@@ -84,7 +84,11 @@ fn plan(s: &mut Session, p: &Value) -> Result<Value> {
     let mut sources = BTreeSet::new();
     let mut selected = Vec::new();
     let mut range = Value::Null;
-    if let Some(id) = p.get("sequence").and_then(Value::as_u64).map(ItemId).or(s.state.active_sequence) {
+    let sequence = match p.get("sequence") {
+        None => s.state.active_sequence,
+        Some(value) => Some(ItemId(value.as_u64().ok_or_else(|| bad(cmd, "sequence must be an unsigned identity"))?)),
+    };
+    if let Some(id) = sequence {
         let q = s.project.sequence(id).ok_or_else(|| bad(cmd, "sequence is absent"))?;
         let read = |key: &str, default: i64| {
             p.get(key).map_or(Some(default), Value::as_i64).filter(|v| *v >= 0 && *v <= Tick::MAX.0).ok_or_else(|| bad(cmd, format!("invalid {key} ticks")))
@@ -138,6 +142,9 @@ fn plan(s: &mut Session, p: &Value) -> Result<Value> {
                 }
                 ItemKind::Subclip { parent, .. } => queue.push((*parent, depth + 1)),
                 ItemKind::Media(m) => {
+                    // Cached chapters use original media, just like the export renderer.
+                    // An absent editing proxy must not block or change that cache entry.
+                    m.proxy = None;
                     if let MediaRef::File { path } = &m.media {
                         s.media.remove(id);
                         sources.insert(path.clone());
@@ -304,6 +311,39 @@ fn commit(s: &mut Session, p: &Value) -> Result<Value> {
     }
     result?;
     Ok(json!({"key":k,"hit":false,"artifact":lookup(s,k).map_err(|e|bad(cmd,e))?}))
+}
+
+pub(crate) fn copy_artifact(artifact: &Value, path: &Path) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let source = artifact["path"].as_str().ok_or_else(|| Error::new(ErrorKind::InvalidData, "cache artifact path is missing"))?;
+    let expected = artifact["bytes"].as_u64().filter(|n| *n > 0).ok_or_else(|| Error::new(ErrorKind::InvalidData, "cache artifact size is missing"))?;
+    let hash = artifact["sha256"].as_str().ok_or_else(|| Error::new(ErrorKind::InvalidData, "cache artifact digest is missing"))?;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    filmcraft_format::atomic_write_new_with(path, |output| {
+        let mut input = filmcraft_media::reader::open_regular_file(Path::new(source))?.take(expected.saturating_add(1));
+        let mut actual = Sha256::new();
+        let mut total = 0u64;
+        let mut buffer = [0u8; 65536];
+        loop {
+            let n = input.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            total = total.checked_add(n as u64).ok_or_else(|| Error::new(ErrorKind::InvalidData, "cache copy is too large"))?;
+            if total > expected {
+                return Err(Error::new(ErrorKind::InvalidData, "cache artifact changed size"));
+            }
+            let bytes = buffer.get(..n).ok_or_else(|| Error::new(ErrorKind::InvalidData, "invalid read size"))?;
+            actual.update(bytes);
+            output.write_all(bytes)?;
+        }
+        if total != expected || format!("{:x}", actual.finalize()) != hash {
+            return Err(Error::new(ErrorKind::InvalidData, "cache copy failed integrity verification"));
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

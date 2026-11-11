@@ -500,7 +500,7 @@ fn is_folder(x: &str) -> bool {
 
 /// Output path for `seq`: the `path` param (a file, or a directory ending in `/` or existing), else
 /// `<default dir>/<sequence name>.<ext>`; `suffix` distinguishes several items.
-fn output_path(s: &Session, p: &Value, seq: ItemId, settings: &ExportSettings, suffix: Option<usize>) -> String {
+pub(crate) fn output_path(s: &Session, p: &Value, seq: ItemId, settings: &ExportSettings, suffix: Option<usize>) -> String {
     let name = s.project.item(seq).map(|i| i.name.clone()).unwrap_or_else(|| "Sequence".into());
     let base = match str_p(p, "path").map(expand_home) {
         Some(x) if is_folder(&x) => Path::new(&x).join(file_safe(&name)).to_string_lossy().to_string(),
@@ -533,12 +533,14 @@ fn write_sidecar(s: &Session, project: &Project, seq: ItemId, settings: &ExportS
         filmcraft_captions::write(&doc, format, filmcraft_captions::WriteOptions { drop_frame: q.settings.drop_frame, rate: Some(q.settings.frame_rate) });
     let ext = if format == filmcraft_captions::Format::WebVtt { "vtt" } else { kind };
     let path = format!("{}.{ext}", settings.path.rsplit_once('.').map_or(settings.path.as_str(), |x| x.0));
+    crate::output_safety::protect(s, project, &path, "file.exportMedia")?;
     s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     Ok(Some(path))
 }
 
 /// Run an export of `seq` in `project` as a background job (or now, with `wait`); returns the job id.
 pub fn spawn_export(s: &mut Session, project: Arc<Project>, seq: ItemId, mut settings: ExportSettings, label: String, wait: bool) -> Result<u64> {
+    crate::output_safety::protect(s, &project, &settings.path, "file.exportMedia")?;
     let format = settings.format;
     if !filmcraft_export::available(format) {
         return Err(EngineError::Other(format!("{} export is not available (no encoder registered)", format.label())));

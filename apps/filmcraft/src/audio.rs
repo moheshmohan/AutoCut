@@ -11,7 +11,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, channel, sync_channel};
 use std::time::{Duration, Instant};
 
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
@@ -508,7 +508,8 @@ const RELEASE_WAIT: Duration = Duration::from_millis(250);
 /// keeps owning it; the UI only posts the grain's mixer and returns, and a drag never waits for
 /// the device.
 pub struct CpalScrubOut {
-    tx: Sender<ScrubCmd>,
+    tx: SyncSender<()>,
+    pending: Arc<Mutex<PendingScrub>>,
     /// The rate the grain is mixed at, read off the device's configuration without opening it.
     rate: u32,
 }
@@ -519,6 +520,14 @@ enum ScrubCmd {
     /// Close the stream now and say so: playback opens its own next.
     Release(Sender<()>),
     Configure(AudioHardwarePrefs, Option<u32>),
+}
+
+#[derive(Default)]
+struct PendingScrub {
+    play: Option<Fill>,
+    configure: Option<(AudioHardwarePrefs, Option<u32>)>,
+    release: bool,
+    acknowledgements: Vec<Sender<()>>,
 }
 
 impl CpalScrubOut {
@@ -535,20 +544,40 @@ impl CpalScrubOut {
         document_rate: Option<u32>,
         open: impl FnMut(&AudioHardwarePrefs, Option<u32>, Fill) -> Result<(S, Arc<Mutex<Fill>>), String> + Send + 'static,
     ) -> Self {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(1);
+        let pending = Arc::new(Mutex::new(PendingScrub::default()));
+        let worker_pending = pending.clone();
         if let Err(e) = std::thread::Builder::new().name("filmcraft-scrub".into()).spawn(move || {
-            if catch_unwind(AssertUnwindSafe(|| run_scrub(rx, hw, document_rate, open))).is_err() {
+            if catch_unwind(AssertUnwindSafe(|| run_scrub(rx, worker_pending, hw, document_rate, open))).is_err() {
                 log::error!("the scrub worker failed; playback remains available");
             }
         }) {
             log::warn!("the scrub audio thread could not start: {e}");
         }
-        Self { tx, rate }
+        Self { tx, pending, rate }
     }
 
     fn send(&self, cmd: ScrubCmd) {
-        if let Err(e) = self.tx.send(cmd) {
-            log::warn!("the scrub audio thread is gone: {e}");
+        {
+            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            match cmd {
+                ScrubCmd::Play(fill) => pending.play = Some(fill),
+                ScrubCmd::Stop => pending.play = None,
+                ScrubCmd::Configure(hw, rate) => {
+                    pending.play = None;
+                    pending.configure = Some((hw, rate));
+                }
+                ScrubCmd::Release(ack) => {
+                    pending.play = None;
+                    pending.release = true;
+                    if pending.acknowledgements.len() < 8 {
+                        pending.acknowledgements.push(ack);
+                    }
+                }
+            }
+        }
+        if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = self.tx.try_send(()) {
+            log::warn!("the scrub audio thread is gone");
         }
     }
 }
@@ -579,7 +608,8 @@ impl ScrubOut for CpalScrubOut {
 /// The scrub thread: owns the stream (cpal's `Stream` is `!Send`) and closes it once nothing has
 /// played for [`SCRUB_KEEP`].
 fn run_scrub<S>(
-    rx: Receiver<ScrubCmd>,
+    rx: Receiver<()>,
+    pending: Arc<Mutex<PendingScrub>>,
     mut hw: AudioHardwarePrefs,
     mut document_rate: Option<u32>,
     mut open: impl FnMut(&AudioHardwarePrefs, Option<u32>, Fill) -> Result<(S, Arc<Mutex<Fill>>), String>,
@@ -588,9 +618,9 @@ fn run_scrub<S>(
     // the mixer the open stream's callback runs: a new grain swaps in the current one
     let mut slot: Option<Arc<Mutex<Fill>>> = None;
     loop {
-        let cmd = if stream.is_some() {
+        if stream.is_some() {
             match rx.recv_timeout(SCRUB_KEEP) {
-                Ok(cmd) => cmd,
+                Ok(()) => {}
                 Err(RecvTimeoutError::Timeout) => {
                     stream = None;
                     slot = None;
@@ -600,12 +630,26 @@ fn run_scrub<S>(
             }
         } else {
             match rx.recv() {
-                Ok(cmd) => cmd,
+                Ok(()) => {}
                 Err(_) => break,
             }
-        };
-        match cmd {
-            ScrubCmd::Play(fill) => match slot.as_ref() {
+        }
+        let request = std::mem::take(&mut *pending.lock().unwrap_or_else(PoisonError::into_inner));
+        if let Some((new_hw, new_rate)) = request.configure {
+            hw = new_hw;
+            document_rate = new_rate;
+            stream = None;
+            slot = None;
+        }
+        if request.release {
+            stream = None;
+            slot = None;
+            for ack in request.acknowledgements {
+                let _ = ack.send(());
+            }
+        }
+        if let Some(fill) = request.play {
+            match slot.as_ref() {
                 // the stream is still warm: play this grain's mixer on it
                 Some(slot) => *slot.lock().unwrap_or_else(PoisonError::into_inner) = fill,
                 None => match open(&hw, document_rate, fill) {
@@ -615,19 +659,6 @@ fn run_scrub<S>(
                     }
                     Err(e) => log::warn!("audio output unavailable for scrubbing: {e}"),
                 },
-            },
-            // the grain and the UI's linger are over; the idle timeout above closes the stream
-            ScrubCmd::Stop => {}
-            ScrubCmd::Release(ack) => {
-                stream = None;
-                slot = None;
-                let _ = ack.send(());
-            }
-            ScrubCmd::Configure(new_hw, new_rate) => {
-                hw = new_hw;
-                document_rate = new_rate;
-                stream = None;
-                slot = None;
             }
         }
     }
@@ -763,14 +794,58 @@ mod tests {
         out.release();
         assert_eq!(events.try_recv(), Ok("closed"), "the stream closed before release returned");
 
-        let (mut slow, slow_events) = fake_scrub_output(1_000);
+        let (log, slow_events) = channel();
+        let mut slow = CpalScrubOut::spawn(48_000, AudioHardwarePrefs::default(), None, move |_: &AudioHardwarePrefs, _: Option<u32>, fill: Fill| {
+            let _ = log.send("opening");
+            std::thread::sleep(ms(1_000));
+            let _ = log.send("opened");
+            Ok((FakeStream(log.clone()), Arc::new(Mutex::new(fill))))
+        });
         slow.play(silence());
+        assert_eq!(slow_events.recv_timeout(ms(5_000)), Ok("opening"));
         let t = Instant::now();
         slow.release();
         let took = t.elapsed();
         assert!(took >= RELEASE_WAIT && took < RELEASE_WAIT + ms(500), "release waited {took:?} for a stream still opening");
         assert_eq!(slow_events.recv_timeout(ms(5_000)), Ok("opened"));
         assert_eq!(slow_events.recv_timeout(ms(5_000)), Ok("closed"), "the release closes it once it is open");
+    }
+
+    #[test]
+    fn blocked_scrub_device_keeps_only_the_latest_pending_grain() {
+        use std::sync::atomic::AtomicUsize;
+        struct Live(Arc<AtomicUsize>);
+        impl Drop for Live {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let live = Arc::new(AtomicUsize::new(0));
+        let fill = |live: Arc<AtomicUsize>| -> Fill {
+            live.fetch_add(1, Ordering::SeqCst);
+            let guard = Live(live);
+            Box::new(move |buf, _| {
+                let _keep = &guard;
+                buf.fill(0.0);
+            })
+        };
+        let (start, started) = channel();
+        let (resume, blocked) = channel();
+        let (log, _events) = channel();
+        let mut out = CpalScrubOut::spawn(48_000, AudioHardwarePrefs::default(), None, move |_: &AudioHardwarePrefs, _: Option<u32>, fill: Fill| {
+            start.send(()).unwrap();
+            blocked.recv().unwrap();
+            Ok((FakeStream(log.clone()), Arc::new(Mutex::new(fill))))
+        });
+        out.play(fill(live.clone()));
+        started.recv_timeout(ms(5_000)).unwrap();
+        for _ in 0..10000 {
+            out.play(fill(live.clone()));
+        }
+        let retained = live.load(Ordering::SeqCst);
+        resume.send(()).unwrap();
+        out.release();
+        assert!(retained <= 2, "device opening retained {retained} grains");
     }
 
     fn ms(n: u64) -> Duration {

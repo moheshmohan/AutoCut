@@ -29,7 +29,9 @@
 
 use std::sync::Arc;
 
-use filmcraft_project::{ClipId, ItemKind, Param, ParamValue, Project, TrackKind};
+#[cfg(test)]
+use filmcraft_project::ItemKind;
+use filmcraft_project::{ClipId, Param, ParamValue, Project, TrackKind};
 use filmcraft_render::color_balance::{self, Correction, Stats};
 use filmcraft_time::Tick;
 use serde_json::{Value, json};
@@ -307,9 +309,7 @@ fn auto_color_inner(s: &mut Session, p: &Value) -> Result<Value> {
         ids = seq.video_tracks.iter().flat_map(|t| &t.items).map(|i| i.id).collect();
     }
     let picture = |c: &ClipId| {
-        seq.find_item(*c).is_some_and(|(t, it)| {
-            seq.track(t).is_some_and(|tr| tr.kind == TrackKind::Video) && s.project.item(it.item).is_some_and(|pi| matches!(pi.kind, ItemKind::Media(_)))
-        })
+        seq.find_item(*c).is_some_and(|(t, it)| seq.track(t).is_some_and(|tr| tr.kind == TrackKind::Video) && s.project.resolve_media(it.item).is_some())
     };
     if let Some(c) = ids.iter().find(|c| seq.find_item(**c).is_none()) {
         return Err(bad(cmd, format!("no clip {} in the active sequence", c.0)));
@@ -335,7 +335,7 @@ fn auto_color_inner(s: &mut Session, p: &Value) -> Result<Value> {
     let (fw, fh) = (f64::from(seq.settings.width.max(1)), f64::from(seq.settings.height.max(1)));
     let scale = (MEASURE_SIDE / fw.max(fh)).clamp(0.02, 1.0) as f32;
     let project: Arc<Project> = s.project.clone();
-    let provider = s.media.provider(project.clone(), s.services.clone());
+    let provider = s.media.full_res_provider(project.clone(), s.services.clone());
     let mut renderer = Renderer(filmcraft_export::frame_renderer());
     let gpu = renderer.0.is_some();
     // ---- measured as they are
@@ -349,10 +349,10 @@ fn auto_color_inner(s: &mut Session, p: &Value) -> Result<Value> {
                 it.start + Tick((it.duration.0 as f64 * f) as i64)
             })
             .collect();
-        let media = project.item(it.item).and_then(|i| i.as_media());
+        let media = project.resolve_media(it.item).map(|(_, m, _)| m);
         let video = media.and_then(|m| m.info.video.as_ref());
         let space = media.and_then(|m| m.interpret.color_space).or_else(|| video.map(|v| filmcraft_color::ColorSpace::from_info(&v.color)));
-        let size = video.map_or((1, 1), |v| (v.width, v.height));
+        let size = project.source_size(it.item).unwrap_or((1, 1));
         let hdr_target = seq.settings.color.working.is_hdr();
         let given = p.get("protectScreens").and_then(|m| m.get(c.0.to_string()));
         let saved = it.effects.iter().find(|e| is_pass(e)).and_then(|e| e.params.get("auto_color_screens")).and_then(|p| match &p.value {

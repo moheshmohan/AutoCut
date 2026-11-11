@@ -1,6 +1,7 @@
 # Local editing pipeline: catalogue, revisions and delivery
 
 Execution and verification are tracked in [the November upgrade plan](../plan/pipeline-upgrades-2026-11.md).
+Correctness fixes and regression evidence are recorded in [the full review](../plan/full-review-2026-11-11.md).
 All commands below run through the engine, CLI `exec`, MCP `command_run` or desktop bridge.
 Media, projects, compositions and generated reports stay outside git.
 
@@ -43,6 +44,9 @@ scene/speech keys, source parts, exact trims, verification and source hashes. A 
 fails with FrameAtlas's recovery message; an expired picker selection is never replaced with an
 unrelated source. Requests for several references in the same original are serialized. A changed
 retained file fails integrity verification. Cancellation leaves completed sources and receipts.
+Different scene/speech citations of the same verified source filename reuse the retained file,
+with each citation freshly resolved for its own trim. Different camera parts remain separate
+retrievals. Reuse still verifies the retained file's digest; it never substitutes another asset.
 The adapter requests selected originals only and does not annotate or reanalyse the catalogue.
 
 Engine `jobs.list` exposes `cancelRequested` separately from `finished`: a cancellation
@@ -68,6 +72,8 @@ mapping, and HDR sequences preserve their working space. Additional parameters:
 - Each report includes detected source colour information, target and protected regions.
 
 Protection is static until animated. Use `masks.track` or keyframes for a moving device screen.
+Subclips resolve their parent source dimensions for placement and screen masks. Measurement uses
+original media, independently of the preview proxy toggle.
 Inspect it at source scale. A mask protects the new correction; it cannot reconstruct highlights
 already clipped in the original or undo another manually applied grade. High 10 export retains
 HDR precision, while SDR compositing still starts with RGBA8; selecting a 10-bit container does
@@ -85,6 +91,7 @@ Roles persist as named tracks and Essential Sound types. Muting a source video i
 mutes its linked audio. Existing muted clips stay muted. Narration, source and effects remain
 editable. Baked music inside an old master cannot be separated by this operation: return to its
 saved timeline or original stems before combining revisions.
+Assigning or changing a role preserves existing repair, gain, ducking and mute settings.
 
 `sequence.continuousMusic` builds deterministic loops from one imported music item. Supply
 `item`, an existing audio `track`, optional `start`/`end`/`sourceIn` ticks, `crossfade` ticks and
@@ -117,6 +124,9 @@ After a successful render, `render.cacheCommit {key,path,manifest:<cachePlan res
 inputs again, copies to a staging directory, verifies the output hash, syncs it and atomically
 publishes it under an OS lock. `render.cacheInspect {key}` verifies output bytes before reuse.
 Missing/changed sources fail; missing or corrupt entries miss. Failed copies remain unpublished.
+Editing proxies are excluded from original-media render identity; an absent unused proxy does not
+block a final export. A cache-hit delivery stages and verifies its bytes before publishing, creates
+missing destination directories, and refuses occupied destinations.
 Cache is under the configured Media Cache in `render-cache-v1`, separate from saved projects.
 It is disposable. Keep originals, `.fcproj`, compositions and delivery manifests outside it.
 The cache stores files; the RAEA helper packs transparent frame sequences for cache transport.
@@ -180,11 +190,19 @@ and 1,400 characters are supported; split longer narration for precise checks.
 Motion/highlight/black-frame anomalies are review warnings because still photos, dark scenes and
 dips can be intentional. Required failures block export with the report. Visual inspection and
 listening still matter; a sampled pass does not prove every frame or pronunciation is perfect.
+Source checks traverse subclips and nested sequences with cycle/size limits. Delivery refreshes
+loaded originals before measurement and privacy checks. Disabled photos and still backgrounds do
+not automatically exempt a frozen video above them; a genuinely static photo interval can be held.
 
 `delivery.prepare` defaults to 4K H.264/AAC, normalized -14 LUFS, and verified cache reuse. Horizontal
 videos use sidecars; `short:true` chooses portrait 4K with burned captions. Every caption track gets
 its own SRT and cue-id manifest. The final file also gets the normal publishing preflight and
-`*.delivery.json`. Existing output paths are refused. It prepares local files only: Photos/YouTube
+`*.delivery.json`. Existing video, subtitle and manifest paths are refused, using the exporter's
+resolved filename (including its extension). QA reports use exclusive creation and numbered revisions
+on retry; read the returned `reportPath` rather than assuming the requested path was used.
+`captions.export` accepts `overwrite:false` for exclusive creation (its existing default is `true`).
+Movie/frame/caption/report exports reject destinations matching the open project or imported source,
+including existing native hard-link and symbolic-link aliases. It prepares local files only: Photos/YouTube
 uploads continue through their authorized adapters, private by default, with the project's label
 policy unchanged.
 
@@ -195,6 +213,7 @@ language for burning; other language tracks can remain hidden and still receive 
 ## Upstream additions
 
 - Scrub audio opens on its own worker; a drag reuses its stream and releases it before playback.
+  Pending grains are coalesced so a slow device open retains only the latest request.
 - Caption export chooses format and caption track; invalid/deleted requested tracks fall back
   to the displayed first track. ASS/SSA remains available.
 - MP3 uses FilmCraft's clean-room encoder. The `mp3` format and `MP3 48 kHz 320 kbps` preset are

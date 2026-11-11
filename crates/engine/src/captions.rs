@@ -274,7 +274,9 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     let df = bool_p(p, "dropFrame").unwrap_or(true);
     let bytes = filmcraft_captions::write(&doc, format, WriteOptions { drop_frame: df, rate: Some(seq.settings.frame_rate) });
     let n = doc.cues.len();
-    s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(e.to_string()))?;
+    crate::output_safety::protect(s, &s.project, &path, "captions.export")?;
+    let overwrite = p.get("overwrite").map_or(Ok(true), |v| v.as_bool().ok_or_else(|| bad("captions.export", "overwrite must be boolean")))?;
+    if overwrite { s.services.write_file(&path, &bytes) } else { s.services.write_file_new(&path, &bytes) }.map_err(|e| EngineError::Other(e.to_string()))?;
     Ok(json!({"path": path, "format": format.name(), "captions": n, "bytes": bytes.len()}))
 }
 
@@ -615,7 +617,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "Captions…",
             &["File", "Export"],
             None,
-            r#"{"path":str,"format":"srt|vtt|scc|mcc|stl|ttml|dfxp|ass"? (default: from the extension),"track":id|"C1"?,"dropFrame":bool=true}"#,
+            r#"{"path":str,"format":"srt|vtt|scc|mcc|stl|ttml|dfxp|ass"? (default: from the extension),"track":id|"C1"?,"dropFrame":bool=true,"overwrite":bool=true}"#,
             has_caption_track,
             export,
         ),

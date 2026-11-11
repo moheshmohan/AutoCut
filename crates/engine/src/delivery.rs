@@ -6,7 +6,6 @@ use filmcraft_project::ClipId;
 use filmcraft_time::Tick;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use std::io::Read;
 const CMD: &str = "delivery.preflight";
 fn spec(id: &'static str, label: &'static str, params: &'static str, run: fn(&mut Session, &Value) -> Result<Value>) -> CommandSpec {
     CommandSpec { id, label, params, run, enabled: has_seq, menu: &[], shortcut: None, journal: false }
@@ -34,11 +33,21 @@ fn flag(p: &Value, key: &str, default: bool) -> Result<bool> {
     p.get(key).map_or(Ok(default), |v| v.as_bool().ok_or_else(|| bad(CMD, format!("{key} must be boolean"))))
 }
 fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
+    if let Some(path) = p["report"].as_str() {
+        crate::output_safety::protect(s, &s.project, path, CMD)?;
+    }
     let q = s.active_sequence().ok_or(EngineError::NoSequence)?.clone();
     q.check_bounds().map_err(|e| bad(CMD, e))?;
     let end = q.duration();
     if end.0 <= 0 {
         return Err(bad(CMD, "sequence is empty"));
+    }
+    let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    let (source_errors, sources) = crate::source_check::inspect(s, seq);
+    // A final-delivery check must see current originals, even when editing used a
+    // proxy or a source changed on disk since its last preview.
+    for item in sources {
+        s.media.remove(item);
     }
     let mut cuts = BTreeSet::new();
     cuts.insert(0);
@@ -73,20 +82,28 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
             frozen_holds.push((a, b));
         }
     }
-    for c in q.video_tracks.iter().flat_map(|t| &t.items) {
-        if c.frame_hold.is_some() || s.project.item(c.item).and_then(|i| i.as_media()).is_some_and(|m| m.info.kind == filmcraft_media::MediaKind::Still) {
-            frozen_holds.push((c.start.0, c.end().0));
-        }
-    }
     let project = s.project.clone();
-    let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
-    let provider = s.media.provider(project.clone(), s.services.clone());
+    let provider = s.media.full_res_provider(project.clone(), s.services.clone());
     let scale = (160.0 / q.settings.width.max(q.settings.height).max(1) as f32).min(1.0);
     let samples = ((end.seconds() / 0.5).ceil() as usize).clamp(2, 600);
     let mut color = Vec::new();
     let mut black = Vec::new();
+    let mut previous: Option<Tick> = None;
     for n in 0..samples {
         let time = Tick(((end.0 - 1) as i128 * n as i128 / (samples - 1) as i128) as i64);
+        if let Some(start) = previous {
+            let visible: Vec<_> =
+                q.video_tracks.iter().filter(|t| t.enabled).flat_map(|t| &t.items).filter(|c| c.enabled && c.start < time && c.end() > start).collect();
+            let transition = q.video_tracks.iter().filter(|t| t.enabled).flat_map(|t| &t.transitions).any(|t| t.start < time && t.end() > start);
+            let static_picture = |c: &&filmcraft_project::TrackItem| {
+                (c.frame_hold.is_some() || project.resolve_media(c.item).is_some_and(|(_, m, _)| m.info.kind == filmcraft_media::MediaKind::Still))
+                    && c.effects.iter().all(|e| !e.is_animated() && (e.def().is_some_and(|d| d.intrinsic) || e.effect == "lumetri"))
+            };
+            if !transition && !visible.is_empty() && visible.iter().all(static_picture) {
+                frozen_holds.push((start.0, time.0));
+            }
+        }
+        previous = Some(time);
         let pic = filmcraft_render::render_sequence(&project, seq, time, filmcraft_render::RenderOptions { scale, ..Default::default() }, &provider);
         let stats = filmcraft_render::color_balance::measure(&pic);
         if stats.blown > 0.05 {
@@ -116,20 +133,8 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
         if black.is_empty() { "pass" } else { "warning" },
         json!({"findings":black,"note":"review intentional dips on the frame sheet"}),
     );
-    let missing: Vec<_> = q
-        .video_tracks
-        .iter()
-        .chain(q.audio_tracks.iter())
-        .flat_map(|t| &t.items)
-        .filter_map(|c| {
-            project
-                .item(c.item)
-                .and_then(|i| i.as_media())
-                .filter(|m| m.offline || matches!(&m.media, filmcraft_project::MediaRef::File { path } if s.services.file_size(path).is_err()))
-                .map(|_| c.id.0)
-        })
-        .collect();
-    push(&mut checks, "sources", if missing.is_empty() { "pass" } else { "fail" }, json!({"offlineClips":missing}));
+    let missing: Vec<_> = source_errors.iter().filter_map(|v| v["clip"].as_u64()).collect();
+    push(&mut checks, "sources", if source_errors.is_empty() { "pass" } else { "fail" }, json!({"offlineClips":missing,"errors":source_errors}));
     let continuity = s.execute("sequence.checkContinuity", json!({"exemptions":p.get("exemptions").cloned().unwrap_or(json!([]))}));
     match continuity {
         Ok(v) => push(&mut checks, "audioContinuity", if v["passed"] == true { "pass" } else { "fail" }, v),
@@ -255,31 +260,27 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
         json!({"missingMasks":protected,"method":"saved editable protection masks; review moving screens at source scale"}),
     );
     let passed = checks.iter().all(|c| c["state"] != "fail");
-    let report = json!({"format":"autocut.deliveryQa","version":1,"engine":crate::render_cache::ENGINE,"sequence":seq.0,"passed":passed,"checks":checks,"subtitlePolicy":if flag(p,"short",false)?{"burn"}else{"sidecar"},"uploadPrivacy":"private"});
+    let mut report = json!({"format":"autocut.deliveryQa","version":1,"engine":crate::render_cache::ENGINE,"sequence":seq.0,"passed":passed,"checks":checks,"subtitlePolicy":if flag(p,"short",false)?{"burn"}else{"sidecar"},"uploadPrivacy":"private"});
     if let Some(path) = p["report"].as_str() {
-        s.services.write_file(path, &serde_json::to_vec_pretty(&report).map_err(|e| bad(CMD, e.to_string()))?).map_err(|e| bad(CMD, e.to_string()))?;
+        for n in 0..1000 {
+            let destination = if n == 0 { path.to_string() } else { format!("{}.{n}.json", path.strip_suffix(".json").unwrap_or(path)) };
+            crate::output_safety::protect(s, &s.project, &destination, CMD)?;
+            report["reportPath"] = json!(destination);
+            match s.services.write_file_new(&destination, &serde_json::to_vec_pretty(&report).map_err(|e| bad(CMD, e.to_string()))?) {
+                Ok(()) => return Ok(report),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(bad(CMD, error.to_string())),
+            }
+        }
+        return Err(bad(CMD, "too many report revisions; choose a new report path"));
     }
     Ok(report)
 }
 fn prepare(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "delivery.prepare";
-    let path = p["path"].as_str().filter(|s| !s.is_empty() && s.len() <= 4096).ok_or_else(|| bad(cmd, "provide a new output path"))?;
-    if s.services.file_size(path).is_ok() {
-        return Err(bad(cmd, "output exists; choose a new revision path"));
-    }
+    let requested_path = p["path"].as_str().filter(|s| !s.is_empty() && s.len() <= 4096).ok_or_else(|| bad(cmd, "provide a new output path"))?;
     let short = flag(p, "short", false)?;
-    let mut qa = p.get("qa").cloned().unwrap_or(json!({}));
-    if !qa.is_object() {
-        return Err(bad(cmd, "qa must be an object"));
-    }
-    qa["short"] = json!(short);
-    let report_path = p["report"].as_str().map(str::to_string).unwrap_or_else(|| format!("{path}.qa.json"));
-    qa["report"] = json!(report_path);
-    let report = preflight(s, &qa)?;
-    if report["passed"] != true {
-        return Ok(json!({"prepared":false,"blocked":true,"report":report_path,"qa":report}));
-    }
-    let mut export = json!({"path":path,"preset":"YouTube 2160p 4K Ultra HD","wait":true,"burnCaptions":short,"captionSidecar":"srt","loudnessLufs":-14.0});
+    let mut export = json!({"path":requested_path,"preset":"YouTube 2160p 4K Ultra HD","wait":true,"burnCaptions":short,"loudnessLufs":-14.0});
     if short {
         export["width"] = json!(2160);
         export["height"] = json!(3840);
@@ -288,21 +289,53 @@ fn prepare(s: &mut Session, p: &Value) -> Result<Value> {
         export["settings"] = settings.clone();
     }
     let (_, mut resolved) = crate::export_tools::settings_from_params(s, &export, cmd)?;
+    let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    // Validate the exact path the exporter will use, including home expansion and
+    // its format extension, before checking collisions or naming sidecars.
+    let output_path = crate::export_tools::output_path(s, &export, seq, &resolved, None);
+    let path = output_path.as_str();
+    export["path"] = json!(path);
+    if s.services.file_size(path).is_ok() {
+        return Err(bad(cmd, "output exists; choose a new revision path"));
+    }
+    crate::output_safety::protect(s, &s.project, path, cmd)?;
+    let mut qa = p.get("qa").cloned().unwrap_or(json!({}));
+    if !qa.is_object() {
+        return Err(bad(cmd, "qa must be an object"));
+    }
+    qa["short"] = json!(short);
+    let report_path = p["report"].as_str().map(str::to_string).unwrap_or_else(|| format!("{path}.qa.json"));
+    let mut destinations = vec![path.to_string(), format!("{path}.delivery.json")];
+    if let Some(q) = s.active_sequence() {
+        for n in 0..q.caption_tracks.len() {
+            destinations.push(format!("{path}.C{}.srt", n + 1));
+        }
+    }
+    for destination in &destinations {
+        if crate::output_safety::aliases(destination, &report_path) {
+            return Err(bad(cmd, "report must have its own path, separate from video, subtitles and manifest"));
+        }
+        crate::output_safety::protect(s, &s.project, destination, cmd)?;
+        if s.services.file_size(destination).is_ok() {
+            return Err(bad(cmd, format!("delivery output already exists: {destination}; choose a new revision")));
+        }
+    }
+    qa["report"] = json!(report_path);
+    let report = preflight(s, &qa)?;
+    let report_path = report["reportPath"].as_str().ok_or_else(|| bad(cmd, "quality report was not saved"))?.to_string();
+    if report["passed"] != true {
+        return Ok(json!({"prepared":false,"blocked":true,"report":report_path,"qa":report}));
+    }
+    // Delivery writes each track exclusively below; the legacy exporter sidecar
+    // can overwrite an unrelated existing file and is not needed here.
+    resolved.caption_sidecar = None;
+    export["settings"] = serde_json::to_value(&resolved).map_err(|e| bad(cmd, e.to_string()))?;
     resolved.path.clear();
     let settings = serde_json::to_value(resolved).map_err(|e| bad(cmd, e.to_string()))?;
     let caching = flag(p, "cache", true)?;
     let plan = if caching { Some(s.execute("render.cachePlan", json!({"settings":settings}))?) } else { None };
     let output = if let Some(plan) = plan.as_ref().filter(|v| v["hit"] == true) {
-        let from = plan["artifact"]["path"].as_str().ok_or_else(|| bad(cmd, "cache did not return an artifact"))?;
-        let input = filmcraft_media::reader::open_regular_file(std::path::Path::new(from)).map_err(|e| bad(cmd, e.to_string()))?;
-        let mut output = std::fs::File::create_new(path).map_err(|e| bad(cmd, e.to_string()))?;
-        std::io::copy(&mut input.take(plan["artifact"]["bytes"].as_u64().ok_or_else(|| bad(cmd, "cache artifact size missing"))?), &mut output)
-            .map_err(|e| bad(cmd, e.to_string()))?;
-        output.sync_all().map_err(|e| bad(cmd, e.to_string()))?;
-        let (hash, size) = crate::render_cache::digest_file(std::path::Path::new(path)).map_err(|e| bad(cmd, e))?;
-        if plan["artifact"]["sha256"] != hash || plan["artifact"]["bytes"].as_u64() != Some(size) {
-            return Err(bad(cmd, "cache copy failed verification; choose a new output and retry"));
-        }
+        crate::render_cache::copy_artifact(&plan["artifact"], std::path::Path::new(path)).map_err(|e| bad(cmd, e.to_string()))?;
         json!({"path":path,"cached":true})
     } else {
         let output = s.execute("file.exportMedia", export)?;
@@ -318,13 +351,13 @@ fn prepare(s: &mut Session, p: &Value) -> Result<Value> {
     let mut subtitles = Vec::new();
     for (n, track) in tracks.iter().enumerate() {
         let subtitle = format!("{path}.C{}.srt", n + 1);
-        s.execute("captions.export", json!({"track":track.id.0,"format":"srt","path":subtitle}))?;
+        s.execute("captions.export", json!({"track":track.id.0,"format":"srt","path":subtitle,"overwrite":false}))?;
         subtitles.push(json!({"track":track.id.0,"name":track.name,"path":subtitle,"cueIds":track.captions.iter().map(|c|c.id.0).collect::<Vec<_>>() }));
     }
     let final_check = s.execute("publish.preflight", json!({"destination":if short{"youtubeShort"}else{"youtube"},"path":path,"loudness":true}))?;
     let manifest = json!({"format":"autocut.delivery","version":1,"export":output,"qa":report_path,"publishPreflight":final_check,"subtitles":subtitles,"privacy":"private","captionPolicy":if short{"burn"}else{"sidecar"}});
     s.services
-        .write_file(&format!("{path}.delivery.json"), &serde_json::to_vec_pretty(&manifest).map_err(|e| bad(cmd, e.to_string()))?)
+        .write_file_new(&format!("{path}.delivery.json"), &serde_json::to_vec_pretty(&manifest).map_err(|e| bad(cmd, e.to_string()))?)
         .map_err(|e| bad(cmd, e.to_string()))?;
     Ok(json!({"prepared":final_check["ok"]==true,"blocked":final_check["ok"]!=true,"path":path,"manifest":manifest,"uploaded":false}))
 }

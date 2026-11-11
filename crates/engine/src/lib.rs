@@ -69,6 +69,7 @@ pub mod music_preview;
 pub mod nadir;
 pub mod narration;
 pub mod object_mask;
+mod output_safety;
 pub mod panels;
 pub mod paste_media;
 pub mod perf;
@@ -106,6 +107,7 @@ pub mod shortcut_presets;
 pub mod shortcuts;
 pub mod sky;
 pub mod soundfonts;
+mod source_check;
 pub mod source_monitor;
 pub mod speech_pauses;
 pub mod speech_understand;
@@ -1215,6 +1217,7 @@ impl Session {
     /// Run several undoable edits as one undo step labelled `label`. If `f` fails, every edit it made
     /// is rolled back and the history is as before.
     pub fn edit_group<R>(&mut self, label: &str, f: impl FnOnce(&mut Session) -> Result<R>) -> Result<R> {
+        let was_clean = !self.is_dirty();
         let (project, state, undo, redo, limit) =
             (self.project.clone(), self.state.clone(), self.history.undo.len(), self.history.redo.clone(), self.history.limit);
         // keep every step the group makes, however many, so the first one can be found afterwards
@@ -1230,6 +1233,9 @@ impl Session {
             s.project = project.clone();
             s.state = state.clone();
             s.bump();
+            if was_clean {
+                s.saved_revision = s.revision;
+            }
         };
         match (r, first) {
             (Ok(Ok(v)), Some(first)) => {
@@ -1719,6 +1725,8 @@ mod work_area_tests;
 #[cfg(test)]
 mod youtube_tests;
 
+#[cfg(test)]
+mod review_2026_tests;
 #[cfg(test)]
 mod source_placement_tests;
 

@@ -79,7 +79,8 @@ fn configure(s: &mut Session, p: &Value) -> Result<Value> {
             if let Some((_, name, kind)) = targets.iter().find(|(id, _, _)| *id == t.id) {
                 t.name = (*name).into();
                 for c in &mut t.items {
-                    c.essential = Some(EssentialSound::new(*kind));
+                    // Role assignment must not reset repair, gain, ducking or a privacy mute.
+                    c.essential.get_or_insert_with(|| EssentialSound::new(*kind)).kind = *kind;
                 }
             }
             for c in &mut t.items {
@@ -297,7 +298,7 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     let project = s.project.clone();
-    let provider = s.media.provider(project.clone(), s.services.clone());
+    let provider = s.media.full_res_provider(project.clone(), s.services.clone());
     let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     let radius = (sr / 10) as usize;
     let mut findings = Vec::new();

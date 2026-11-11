@@ -35,6 +35,8 @@ def render(args):
     spec = json.loads(args.spec.read_text()) if args.spec else {}
     if not isinstance(spec, dict):
         raise ValueError("preflight spec must be a JSON object")
+    if "expected" in spec and not isinstance(spec["expected"], dict):
+        raise ValueError("preflight expected must be a JSON object")
     width, height = args.size or args.canvas or (0, 0)
     if args.preview:
         if not width or not args.canvas:
@@ -84,8 +86,11 @@ def render(args):
             # GPU coordination remains the same shared lock as the editing pipelines. The
             # caller holds it across this helper; cache hits and native QA need no RAEA render.
             subprocess.run(render_args, cwd=source.parent, stdout=sys.stderr, check=True)
+        # Once generation finishes, native probe/QA failures must not erase its work.
+        asset = output / name
+        staged.rename(asset)
         probe_args = [args.cli, "--json", "probe"]
-        first = staged / "frame-00000.png" if args.alpha else staged
+        first = asset / "frame-00000.png" if args.alpha else asset
         probe_args.extend([str(first), "--image-sequence"] if args.alpha else [str(first)])
         probe = json.loads(subprocess.check_output(probe_args, text=True))
         if not probe.get("video"):
@@ -102,10 +107,7 @@ def render(args):
         (output / "preflight.json").write_text(json.dumps(qa, indent=2) + "\n")
         if not qa["passed"]:
             # Keep the rejected render for visual diagnosis; it is neither imported nor cached.
-            staged.rename(output / name)
             raise ValueError("native animation preflight failed; inspect preflight.json and contact-sheet.png")
-        asset = output / name
-        staged.rename(asset)  # Retain the finished, verified render even if cache publication fails.
         if cache and not cache["hit"]:
             artifact = asset
             if args.alpha:
@@ -146,9 +148,9 @@ def main():
         parser.error("--alpha requires --fps in 1..240")
     if not args.alpha and args.fps is not None:
         parser.error("--fps is for alpha sequences; MP4 carries its own rate")
-    args.raea = str(Path(args.raea).expanduser().resolve(strict=True))
-    args.cli = str(Path(args.cli).expanduser().resolve(strict=True))
     try:
+        args.raea = str(Path(args.raea).expanduser().resolve(strict=True))
+        args.cli = str(Path(args.cli).expanduser().resolve(strict=True))
         render(args)
     except (OSError, ValueError, KeyError, zipfile.BadZipFile, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Render handoff failed: {error}\n")

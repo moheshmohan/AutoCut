@@ -71,7 +71,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
 /// A write failure leaves no partial final file; temporary-file cleanup is best effort.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn atomic_write_new(path: &Path, data: &[u8]) -> io::Result<()> {
-    atomic_write_new_with(path, |file| file.write_all(data).and_then(|_| file.sync_all()))
+    atomic_write_new_with(path, |file| file.write_all(data))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -79,8 +79,9 @@ pub fn atomic_write_new(_path: &Path, _data: &[u8]) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "native exclusive file creation is unavailable in the browser"))
 }
 
+/// Stage, sync and exclusively publish a streaming writer; failures leave the target untouched.
 #[cfg(not(target_arch = "wasm32"))]
-fn atomic_write_new_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+pub fn atomic_write_new_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
     let dir = parent_dir(path);
     #[cfg(unix)]
     let mut staged = {
@@ -92,9 +93,16 @@ fn atomic_write_new_with(path: &Path, write: impl FnOnce(&mut File) -> io::Resul
     #[cfg(not(unix))]
     let mut staged = tempfile::NamedTempFile::new_in(&dir)?;
     write(staged.as_file_mut())?;
+    staged.as_file().sync_all()?;
     let _published = staged.persist_noclobber(path).map_err(|e| e.error)?;
     sync_dir(&dir);
     Ok(())
+}
+
+/// Streaming counterpart of [`atomic_write_new`]. A failed writer leaves no partial target.
+#[cfg(target_arch = "wasm32")]
+pub fn atomic_write_new_with(_path: &Path, _write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "native exclusive file creation is unavailable in the browser"))
 }
 
 /// Best-effort directory sync; directory handles are not uniformly readable or syncable.

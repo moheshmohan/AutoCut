@@ -641,6 +641,7 @@ fn export_frame(s: &mut Session, p: &Value) -> Result<Value> {
             candidate.ok_or_else(|| bad("file.exportFrame", "choose a path: all default still names already exist"))?
         }
     };
+    crate::output_safety::protect(s, &s.project, &path, "file.exportFrame")?;
     let provider = s.media.full_res_provider(s.project.clone(), s.services.clone());
     // On the web a frame can still be decoding (WebCodecs) or its bytes loading (Blob reads): the
     // render then leaves that clip out, so saving it would pass a blank or partial picture off as

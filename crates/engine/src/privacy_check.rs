@@ -255,7 +255,7 @@ fn is_footage(s: &Session, it: &TrackItem) -> bool {
 fn frame(s: &Session, seq: ItemId, scale: f32, t: f64) -> Option<(Vec<u8>, usize, usize)> {
     let q = s.project.sequence(seq)?;
     let t = q.settings.frame_rate.sane().snap(Tick::from_seconds_f64(t).max(Tick::ZERO));
-    let provider = s.media.provider(s.project.clone(), s.services.clone());
+    let provider = s.media.full_res_provider(s.project.clone(), s.services.clone());
     let opts = filmcraft_render::RenderOptions { scale, captions: false, ..Default::default() };
     let img = filmcraft_render::render_sequence(&s.project, seq, t, opts, &provider);
     (img.w > 0 && img.h > 0).then(|| (img.over_black_rgba8(), img.w, img.h))
