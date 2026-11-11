@@ -124,10 +124,10 @@ validation and any remaining work.
 - [x] **V2.** Existing saved project frame comparisons, command preservation,
   local model/catalogue queries, a 4K export and source/audio round-trip pass.
 - [x] **V3.** Native desktop workflows are exercised and screenshots inspected.
-- [ ] **V4.** Commit coherent phases, verify the AutoCut remote target, stage
+- [x] **V4.** Commit coherent phases, verify the AutoCut remote target, stage
   rollback copies and install the signed tested app/CLI. Resume the saved
   clean desktop project and verify its hash and playhead.
-- [ ] **V5.** Update agent guide and pipeline documentation with commands,
+- [x] **V5.** Update agent guide and pipeline documentation with commands,
   defaults, limitations and examples. Publish a concise completion report.
 
 ## Execution log
@@ -246,3 +246,24 @@ validation and any remaining work.
   moving it to the safe middle allowed delivery. The rendered contact sheet was inspected.
 - Code is ready for the tested source commit, signed package and rollback-safe installation.
   V4 and the final delivery record remain pending until installation is observed.
+
+## Completed delivery
+
+All upstream and pipeline phases are implemented and verified. The installed source build is
+`d7ce0e60` (AV20), followed only by this documentation record. It preserves all 903 previous
+commands, adds 11, retains the eight AI catalogues and keeps publishing/disclosure policy intact.
+
+The signed local AutoCut app and CLI are installed at their normal paths. The saved EXEED RX
+v04 project reopened in Editing at tick 7,256,390,400,000; its file hash, clean state and playhead
+were preserved. The new continuity command also ran successfully through the
+live app bridge. Rollback copies are `target/macos-package/AutoCut-before-AV20-2026-11-11.app`
+and `target/release/filmcraft-cli-before-AV20-2026-11-11`. Packaging used local ad-hoc signing,
+matching the established development workflow; RAEA and FFmpeg are not bundled.
+
+The verified remote is `moheshmohan/AutoCut`, using `autocut`, with fast-forward publication
+to `main` and `feat/autocut`. The final documentation commit records this deployment; its
+source code is identical to the fully tested installed build.
+
+Future editing sessions should start with [the native pipeline guide](../docs/local-pipeline-upgrades.md)
+and [RAEA workflow](../docs/raea-workflow.md). Catalogue assembly, screen protection, editable
+stems/continuous music, render reuse, RAEA review bundles and checked delivery are ready to use.
