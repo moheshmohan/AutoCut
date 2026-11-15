@@ -120,6 +120,12 @@ pub trait VideoSamples: Sync {
     /// The sample presented at `t` (track units), if any.
     fn sample_at(&self, t: i64) -> Option<usize>;
     fn read(&self, i: usize) -> crate::Result<Vec<u8>>;
+    /// Bytes sample `i` holds, from the index and without reading it. Implementations that know
+    /// it should say so: the random-access search checks a candidate against its byte budget
+    /// before [`read`](VideoSamples::read) allocates it. `None`: not known (read, then count).
+    fn sample_size(&self, _i: usize) -> Option<u64> {
+        None
+    }
     fn make_decoder(&self) -> crate::Result<Box<dyn VideoDecoder>>;
 }
 
@@ -207,9 +213,27 @@ impl State {
         self.frames.get(&pts).filter(|_| draft_ok || !self.drafts.contains(&pts))
     }
 
-    /// The nearest usable frame at or before `pts` (robust to decoder pts quirks).
-    fn at_or_before(&self, pts: i64, draft_ok: bool) -> Option<Arc<VideoFrame>> {
-        self.cached(pts, draft_ok).or_else(|| self.frames.range(..=pts).rev().find(|(p, _)| draft_ok || !self.drafts.contains(p)).map(|(_, f)| f)).cloned()
+    /// The nearest usable frame at or before `pts` (robust to decoder pts quirks), with its pts.
+    fn at_or_before(&self, pts: i64, draft_ok: bool) -> Option<Kept> {
+        match self.cached(pts, draft_ok) {
+            Some(f) => Some((pts, f.clone())),
+            None => self.frames.range(..=pts).rev().find(|(p, _)| draft_ok || !self.drafts.contains(p)).map(|(p, f)| (*p, f.clone())),
+        }
+    }
+}
+
+/// A frame one decode produced, with its pts. The caller keeps it apart from the cache, which may
+/// evict it again to meet its budget.
+type Kept = (i64, Arc<VideoFrame>);
+
+/// What a request takes: the nearest cached frame at or before the wanted pts, unless its own
+/// decode produced a closer one (which also covers the cache having evicted that frame).
+fn taken(cached: Option<Kept>, mine: Option<Kept>) -> crate::Result<Arc<VideoFrame>> {
+    match (cached, mine) {
+        (Some(c), Some(m)) if m.0 > c.0 => Ok(m.1),
+        (Some(c), _) => Ok(c.1),
+        (None, Some(m)) => Ok(m.1),
+        (None, None) => Err(CodecError::Decode("frame not produced".into())),
     }
 }
 
@@ -509,6 +533,49 @@ fn isolated<T: Send>(f: impl FnOnce() -> crate::Result<T> + Send) -> crate::Resu
     job()
 }
 
+/// Most sync candidates, and bytes read from them, one search for a random-access sample may try.
+// 65 536 probes is 18 minutes of an unkeyed 60 fps stream: far past any real GOP, yet each hostile probe stays bounded by the byte budget
+const MAX_RANDOM_ACCESS_PROBES: usize = 65_536;
+const MAX_RANDOM_ACCESS_PROBE_BYTES: usize = 512 << 20;
+
+/// The container's sync flags may be wrong for the codec (an MP4 without `stss` marks every
+/// sample): step back from sync sample `key` to one the decoder can start from (`is_ra` says, with
+/// None meaning "cannot tell", which is taken as yes). A file whose index aliases many claimed
+/// keyframes onto one large non-random-access sample would otherwise read it once per claim, so
+/// the search is bounded in probes and bytes, and stops when the request is cancelled.
+fn random_access_at_or_before(s: &dyn VideoSamples, mut key: usize, mut is_ra: impl FnMut(&[u8]) -> Option<bool>) -> crate::Result<usize> {
+    let (mut probes, mut bytes) = (0usize, 0usize);
+    // polled before the sample-zero exit too: a cancelled request must not go on to decode from there
+    if filmcraft_media::cancel::cancelled() {
+        return Err(CodecError::Cancelled);
+    }
+    while key > 0 {
+        if filmcraft_media::cancel::cancelled() {
+            return Err(CodecError::Cancelled);
+        }
+        // refused before the read: a claimed keyframe that is one huge sample must not be loaded
+        if s.sample_size(key).is_some_and(|n| n > (MAX_RANDOM_ACCESS_PROBE_BYTES - bytes) as u64) {
+            return Err(CodecError::Decode("no random-access picture found before the requested frame".into()));
+        }
+        let data = s.read(key)?;
+        // a container that cannot say a sample's size (see `sample_size`) is checked after the read:
+        // the initial read of an unknown size is allowed, but one sample past the budget ends the search
+        if data.len() > MAX_RANDOM_ACCESS_PROBE_BYTES - bytes {
+            return Err(CodecError::Decode("no random-access picture found before the requested frame".into()));
+        }
+        if is_ra(&data) != Some(false) {
+            break;
+        }
+        probes += 1;
+        bytes = bytes.saturating_add(data.len());
+        if probes >= MAX_RANDOM_ACCESS_PROBES || bytes > MAX_RANDOM_ACCESS_PROBE_BYTES {
+            return Err(CodecError::Decode("no random-access picture found before the requested frame".into()));
+        }
+        key = s.sync_before(key - 1);
+    }
+    Ok(key)
+}
+
 impl GopCache {
     pub fn new(explicit_color: Option<ColorInfo>) -> Self {
         // unit tests count decoder restarts: each of their caches gets a pool of its own
@@ -566,8 +633,10 @@ impl GopCache {
         if self.rotation != 0 { f.rotated(self.rotation) } else { f }
     }
 
-    fn store(&self, st: &mut State, pts: i64, f: VideoFrame, draft: bool) {
-        self.store_finished(st, pts, self.finish(f), draft);
+    /// Returns the stored picture, which the caller keeps even when the cache evicts it again to
+    /// meet the budget.
+    fn store(&self, st: &mut State, pts: i64, f: VideoFrame, draft: bool) -> Arc<VideoFrame> {
+        self.store_finished(st, pts, self.finish(f), draft)
     }
 
     /// The small-frame reserve may use the configured cache budget, but may never enlarge it.
@@ -576,8 +645,10 @@ impl GopCache {
         self.budget.min(FRAME_CACHE_CEILING).max(reserve)
     }
 
-    /// Cache a frame [`Self::finish`] has been applied to.
-    fn store_finished(&self, st: &mut State, pts: i64, f: VideoFrame, draft: bool) {
+    /// Cache a frame [`Self::finish`] has been applied to. Returns the stored picture, which the
+    /// caller keeps even when the cache evicts it again.
+    fn store_finished(&self, st: &mut State, pts: i64, f: VideoFrame, draft: bool) -> Arc<VideoFrame> {
+        let f = Arc::new(f);
         st.last_used = Instant::now();
         if draft {
             st.drafts.insert(pts);
@@ -588,7 +659,7 @@ impl GopCache {
         let budget = self.cache_budget(f.byte_size());
         let before = st.bytes;
         st.bytes += f.byte_size();
-        if let Some(old) = st.frames.insert(pts, Arc::new(f)) {
+        if let Some(old) = st.frames.insert(pts, f.clone()) {
             st.bytes -= old.byte_size();
             filmcraft_frame::pool::recycle(old);
         }
@@ -596,13 +667,25 @@ impl GopCache {
         // decoder can emit a burst past the playhead; pivoting on those pts used to drop the
         // wanted picture and walk the GOP again.
         let pivot = if st.pin != i64::MIN { st.pin } else { pts };
-        while st.bytes > budget && st.frames.len() > 2 {
+        while st.bytes > budget && st.frames.len() > 1 {
             let (Some(&first), Some(&last)) = (st.frames.keys().next(), st.frames.keys().next_back()) else { break };
-            let mut victim = if pivot - first > last - pivot { first } else { last };
+            let mut victim = if pivot.saturating_sub(first) > last.saturating_sub(pivot) { first } else { last };
             if victim == pivot || victim == pts {
                 victim = if victim == first { last } else { first };
                 if victim == pivot || victim == pts {
-                    break;
+                    // both ends are the request and the new decode: an interior frame goes,
+                    // or a reordered batch would stay cached far above the budget
+                    // (the ends are `pivot` and `pts`, so the interior frame farthest from `pivot` is the one next to the other end)
+                    let mut interior = st.frames.range((std::ops::Bound::Excluded(first), std::ops::Bound::Excluded(last)));
+                    let k = if pivot == first { interior.next_back() } else { interior.next() };
+                    if let Some((&k, _)) = k {
+                        victim = k;
+                    } else if pts != pivot {
+                        // only the request and the new decode remain: the new decode goes, the request stays
+                        victim = pts;
+                    } else {
+                        break;
+                    }
                 }
             }
             if let Some(v) = st.frames.remove(&victim) {
@@ -620,15 +703,24 @@ impl GopCache {
             pool.bytes.fetch_sub(before - st.bytes, Ordering::Relaxed);
         }
         pool.trim_frames(&self.shared);
+        f
     }
 
-    /// Store decoder output (in presentation order) and advance `out_max`.
-    fn store_output(&self, st: &mut State, out: Vec<crate::video::DecodedFrame>) {
+    /// Store decoder output (in presentation order) and advance `out_max`. Returns the stored
+    /// frame nearest at or before `want_pts` that a request may take (a draft frame only when
+    /// `draft_ok`), which the caller keeps even when the cache evicts it.
+    fn store_output(&self, st: &mut State, out: Vec<crate::video::DecodedFrame>, want_pts: i64, draft_ok: bool) -> Option<Kept> {
         count_frames(&out);
+        let mut nearest: Option<Kept> = None;
         for d in out {
             st.out_max = st.out_max.max(d.pts);
-            self.store(st, d.pts, d.frame, d.draft);
+            let (pts, usable) = (d.pts, draft_ok || !d.draft);
+            let f = self.store(st, pts, d.frame, d.draft);
+            if usable && pts <= want_pts && nearest.as_ref().is_none_or(|n| pts > n.0) {
+                nearest = Some((pts, f));
+            }
         }
+        nearest
     }
 
     /// The frame presented at `target` (track units, clamped to the stream).
@@ -738,15 +830,7 @@ impl GopCache {
         let continuing = running && (st.next > key || near) && (i >= st.next || (st.start <= i && want_pts > st.out_max));
         if !continuing {
             SEEKS.fetch_add(1, Ordering::Relaxed);
-            // The container's sync flags may be wrong for the codec (an MP4 without `stss` marks
-            // every sample): step back to a sample the decoder can start from.
-            while key > 0 {
-                let data = s.read(key)?;
-                if st.decoder.as_ref().and_then(|d| d.is_random_access(&data)) != Some(false) {
-                    break;
-                }
-                key = s.sync_before(key - 1);
-            }
+            key = random_access_at_or_before(s, key, |data| st.decoder.as_ref().and_then(|d| d.is_random_access(data)))?;
             if let Some(d) = st.decoder.as_mut() {
                 d.reset();
             }
@@ -760,6 +844,15 @@ impl GopCache {
             return Err(CodecError::Decode("no video decoder".into()));
         };
         decoder.set_draft(draft);
+        // what this decode produced, kept apart from the cache: eviction may drop the only eligible fallback
+        let mut mine: Option<Kept> = None;
+        let keep = |mine: &mut Option<Kept>, t: Option<Kept>| {
+            if let Some(t) = t
+                && mine.as_ref().is_none_or(|m| t.0 > m.0)
+            {
+                *mine = Some(t);
+            }
+        };
         while st.next < limit {
             if filmcraft_media::cancel::cancelled() {
                 // The decoder state stays consistent (`next`, `out_max`): a later request continues.
@@ -778,18 +871,19 @@ impl GopCache {
             let out = timed(|| decoder.decode(&data, s.pts(k)))?;
             st.next += 1;
             DECODED.fetch_add(1, Ordering::Relaxed);
-            self.store_output(st, out);
+            keep(&mut mine, self.store_output(st, out, want_pts, draft));
             if st.cached(want_pts, draft).is_some() {
                 break;
             }
         }
         if st.cached(want_pts, draft).is_none() {
             let out = st.decoder.as_mut().map(|d| timed(|| d.flush())).unwrap_or_default();
-            self.store_output(st, out);
+            keep(&mut mine, self.store_output(st, out, want_pts, draft));
             st.next = usize::MAX;
         }
-        // nearest decoded frame at or before the wanted pts (robust to decoder pts quirks)
-        st.at_or_before(want_pts, draft).ok_or_else(|| CodecError::Decode("frame not produced".into()))
+        // nearest decoded frame at or before the wanted pts (robust to decoder pts quirks); a closer
+        // frame of this decode beats an older cached one, and covers the cache having evicted it
+        taken(st.at_or_before(want_pts, draft), mine)
     }
 
     /// A nested request (see [`Self::frame`]): decode from the sync sample with a fresh decoder,
@@ -820,15 +914,7 @@ impl GopCache {
         // Continue the running decoder when the wanted sample is ahead within this GOP run.
         let continuing = *next != usize::MAX && *next > key && *next <= i + 16 && *next <= n;
         if !continuing {
-            // The container's sync flags may be wrong for the codec (an MP4 without `stss` marks
-            // every sample): step back to a sample the decoder can start from.
-            while key > 0 {
-                let data = s.read(key)?;
-                if d.is_random_access(&data) != Some(false) {
-                    break;
-                }
-                key = s.sync_before(key - 1);
-            }
+            key = random_access_at_or_before(s, key, |data| d.is_random_access(data))?;
             d.reset();
             *next = key;
         }
@@ -879,10 +965,16 @@ impl GopCache {
         if st.spare.len() < 16 {
             st.spare.push(dec);
         }
+        // what this decode produced, kept apart from the cache: a concurrent request can move the pin and
+        // have the cache evict this frame before it is read back
+        let mut mine: Option<Kept> = None;
         for (pts, frame, draft) in res? {
-            self.store_finished(&mut st, pts, frame, draft);
+            let f = self.store_finished(&mut st, pts, frame, draft);
+            if pts <= want_pts && mine.as_ref().is_none_or(|m| pts > m.0) {
+                mine = Some((pts, f));
+            }
         }
-        st.at_or_before(want_pts, true).ok_or_else(|| CodecError::Decode("frame not produced".into()))
+        taken(st.at_or_before(want_pts, true), mine)
     }
 }
 
@@ -1680,5 +1772,153 @@ mod tests {
         assert_eq!(index_of(&c.frame(&s, 81_000).expect("frame")), 81);
         assert_eq!(s.resets.load(Ordering::Relaxed), resets);
         assert!(s.decodes.load(Ordering::Relaxed) - decodes <= 8 + 2);
+    }
+
+    /// Every sample claims to be a keyframe but none can start a decode: the search for a random-access
+    /// sample gives up after a bounded number of probes instead of reading them all.
+    #[test]
+    fn random_access_search_is_bounded_when_every_claimed_keyframe_is_not_one() {
+        struct Aliased {
+            reads: std::sync::atomic::AtomicUsize,
+        }
+        impl VideoSamples for Aliased {
+            fn count(&self) -> usize {
+                1 << 20
+            }
+            fn pts(&self, i: usize) -> i64 {
+                i as i64
+            }
+            fn sync_before(&self, i: usize) -> usize {
+                i
+            }
+            fn sample_at(&self, t: i64) -> Option<usize> {
+                usize::try_from(t).ok()
+            }
+            fn read(&self, _: usize) -> crate::Result<Vec<u8>> {
+                self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(vec![0; 16])
+            }
+            fn make_decoder(&self) -> crate::Result<Box<dyn VideoDecoder>> {
+                Err(crate::CodecError::Unsupported("test".into()))
+            }
+        }
+        let s = Aliased { reads: Default::default() };
+        struct Huge(Aliased);
+        impl VideoSamples for Huge {
+            fn count(&self) -> usize {
+                self.0.count()
+            }
+            fn pts(&self, i: usize) -> i64 {
+                self.0.pts(i)
+            }
+            fn sync_before(&self, i: usize) -> usize {
+                i
+            }
+            fn sample_at(&self, t: i64) -> Option<usize> {
+                self.0.sample_at(t)
+            }
+            fn read(&self, i: usize) -> crate::Result<Vec<u8>> {
+                self.0.read(i)
+            }
+            fn sample_size(&self, _: usize) -> Option<u64> {
+                Some(MAX_RANDOM_ACCESS_PROBE_BYTES as u64 + 1)
+            }
+            fn make_decoder(&self) -> crate::Result<Box<dyn VideoDecoder>> {
+                self.0.make_decoder()
+            }
+        }
+        // a candidate declared larger than the byte budget is refused without being read
+        let h = Huge(Aliased { reads: Default::default() });
+        assert!(random_access_at_or_before(&h, 100, |_| Some(true)).is_err());
+        assert_eq!(h.0.reads.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(random_access_at_or_before(&s, 1 << 19, |_| Some(false)).is_err());
+        assert!(s.reads.load(std::sync::atomic::Ordering::Relaxed) <= MAX_RANDOM_ACCESS_PROBES);
+        // a sample that can start a decode ends the search at once
+        assert_eq!(random_access_at_or_before(&s, 100, |_| Some(true)).unwrap(), 100);
+        assert_eq!(random_access_at_or_before(&s, 0, |_| Some(false)).unwrap(), 0);
+        // a container that cannot say a sample's size: the oversized candidate is refused after its one read
+        struct Unsized(Aliased);
+        impl VideoSamples for Unsized {
+            fn count(&self) -> usize {
+                self.0.count()
+            }
+            fn pts(&self, i: usize) -> i64 {
+                self.0.pts(i)
+            }
+            fn sync_before(&self, i: usize) -> usize {
+                i
+            }
+            fn sample_at(&self, t: i64) -> Option<usize> {
+                self.0.sample_at(t)
+            }
+            fn read(&self, _: usize) -> crate::Result<Vec<u8>> {
+                self.0.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(vec![0; MAX_RANDOM_ACCESS_PROBE_BYTES + 1])
+            }
+            fn make_decoder(&self) -> crate::Result<Box<dyn VideoDecoder>> {
+                self.0.make_decoder()
+            }
+        }
+        let u = Unsized(Aliased { reads: Default::default() });
+        assert!(random_access_at_or_before(&u, 100, |_| Some(true)).is_err());
+        assert_eq!(u.0.reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // a cancelled request is refused even when the search starts at sample zero
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let r = filmcraft_media::cancel::with_cancel(&flag, || random_access_at_or_before(&s, 0, |_| Some(true)));
+        assert!(matches!(r, Err(CodecError::Cancelled)));
+    }
+
+    #[test]
+    fn eviction_reaches_interior_frames_when_both_ends_are_protected() {
+        // 1×1 RGBA pictures (4 bytes): the budget is the 64-frame playback reserve
+        let mut c = GopCache::new(None);
+        c.budget = 0;
+        let budget = c.cache_budget(4);
+        let mut st = c.shared.state.lock().unwrap();
+        st.pin = 0;
+        let pic = || VideoFrame::rgba8(1, 1, vec![0; 4]);
+        c.store_finished(&mut st, 0, pic(), false);
+        // each new decode is the newest frame and the request is the oldest: both ends protected
+        for k in 1..500 {
+            c.store_finished(&mut st, k * 1000, pic(), false);
+        }
+        assert!(st.bytes <= budget, "{} bytes cached over a {budget}-byte budget", st.bytes);
+        assert!(st.frames.contains_key(&0) && st.frames.contains_key(&499_000));
+    }
+
+    #[test]
+    fn two_frames_over_the_ceiling_keep_only_the_requested_one() {
+        // two ~200 MiB RGBA frames (zeroed, never touched) are over the 384 MiB ceiling together
+        let c = GopCache::new(None);
+        let mut st = c.shared.state.lock().unwrap();
+        st.pin = 0;
+        let big = || VideoFrame::rgba8(8192, 6400, vec![0; 8192 * 6400 * 4]);
+        c.store_finished(&mut st, 0, big(), false);
+        let second = c.store_finished(&mut st, 1000, big(), false);
+        assert!(st.bytes <= FRAME_CACHE_CEILING, "{} bytes cached over the ceiling", st.bytes);
+        assert!(st.frames.contains_key(&0), "the requested frame is kept");
+        // the frame a decode produced is handed back even though the cache had to drop it (another request owns the pin)
+        assert!(!st.frames.contains_key(&1000));
+        assert_eq!((second.width, second.height), (8192, 6400));
+    }
+
+    #[test]
+    fn a_decode_whose_only_fallback_was_evicted_still_returns_it() {
+        // two ~200 MiB frames around the pin: the cache keeps the newest one and drops the older, which is the
+        // only frame at or before the wanted pts
+        let c = GopCache::new(None);
+        let mut st = c.shared.state.lock().unwrap();
+        st.pin = 1000;
+        let big = |pts| crate::video::DecodedFrame { pts, frame: VideoFrame::rgba8(8192, 6400, vec![0; 8192 * 6400 * 4]), draft: false };
+        let (pts, frame) = c.store_output(&mut st, vec![big(0), big(2000)], 1500, false).expect("the frame at 0");
+        assert_eq!(pts, 0);
+        assert!(!st.frames.contains_key(&0), "the cache dropped it");
+        assert_eq!((frame.width, frame.height), (8192, 6400));
+        // and it is what the request takes: nothing at or before the wanted pts is left in the cache
+        let got = taken(st.at_or_before(1500, false), Some((pts, frame))).expect("the decoded frame");
+        assert_eq!((got.width, got.height), (8192, 6400));
+        // an exact request never takes a draft frame of its own decode
+        let draft = crate::video::DecodedFrame { pts: 100, frame: VideoFrame::rgba8(1, 1, vec![0; 4]), draft: true };
+        assert!(c.store_output(&mut st, vec![draft], 1500, false).is_none());
     }
 }

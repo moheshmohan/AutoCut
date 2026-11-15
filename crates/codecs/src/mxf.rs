@@ -499,17 +499,7 @@ impl MediaSource for MxfSource {
             out.channels = src;
             return Ok(out);
         }
-        let frac = s0 as f64 - start as f64 * ratio;
-        for k in 0..frames {
-            let pos = k as f64 * ratio - frac;
-            let i0 = pos.floor().max(0.0) as usize;
-            let f = (pos - i0 as f64) as f32;
-            for c in 0..ch {
-                let a = src[c].get(i0).copied().unwrap_or(0.0);
-                let b = src[c].get(i0 + 1).copied().unwrap_or(a);
-                out.channels[c][k] = a + (b - a) * f;
-            }
-        }
+        filmcraft_media::resample_window_into(&src, s0, src_rate, start, sample_rate, &mut out.channels);
         Ok(out)
     }
 }
@@ -546,5 +536,31 @@ mod tests {
         let f = start_frames(&df, FrameRate::FPS_23_976);
         let secs = f as f64 * 1001.0 / 24000.0;
         assert!((secs - 107_892.0 * 1001.0 / 30000.0).abs() < 0.05, "{secs}");
+    }
+}
+
+#[cfg(test)]
+mod cut_tests {
+    use super::*;
+
+    /// Resampled audio must not depend on where a read starts (#4673): 24-bit PCM at 48 kHz read
+    /// at 47 kHz, from an OP-Atom file written here.
+    #[test]
+    fn resampled_audio_does_not_depend_on_the_read_cuts() {
+        let samples: Vec<i32> =
+            filmcraft_testkit::cuts::signs(filmcraft_testkit::cuts::SOURCE_SAMPLES, 4).into_iter().map(|v| (v * 8_000_000.0) as i32).collect();
+        let opts = filmcraft_mxf::OpAtomPcm {
+            sample_rate: 48_000,
+            bits: 24,
+            channels: 1,
+            edit_rate: None,
+            ids: filmcraft_mxf::PackageIds::from_seed("cuts", "cuts"),
+            timecode: None,
+        };
+        let bytes = filmcraft_mxf::write_opatom_pcm(&opts, &samples).unwrap();
+        let src = MxfSource::open("cuts.mxf", bytes.into()).unwrap();
+        filmcraft_testkit::cuts::assert_cut_independent("MXF 24-bit 48 kHz at 1999 Hz", 1_000, filmcraft_testkit::cuts::FRAMES, |s, n| {
+            src.audio(s, n, filmcraft_testkit::cuts::RATE).unwrap().channels
+        });
     }
 }
