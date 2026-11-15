@@ -6,6 +6,9 @@ use filmcraft_time::{Tick, TimeRange};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+/// The step between the samples either side of a boundary (full scale is 1) that counts as a click.
+const CLICK_STEP: f64 = 0.35;
+
 fn spec(id: &'static str, label: &'static str, params: &'static str, run: fn(&mut Session, &Value) -> Result<Value>, journal: bool) -> CommandSpec {
     CommandSpec { id, label, params, run, journal, enabled: has_seq, menu: &[], shortcut: None }
 }
@@ -139,10 +142,14 @@ fn bed(s: &mut Session, p: &Value) -> Result<Value> {
         .item(seq_id)
         .and_then(|i| i.metadata.get(&partner_key))
         .map(|v| v.parse::<u64>().map(TrackId).map_err(|_| bad(cmd, "invalid music partner identity")))
-        .transpose()?;
+        .transpose()?
+        // A partner track deleted since the last bed is gone, not an error: a new one is made
+        // (the saved identity blocked every later rebuild).
+        .filter(|partner| q.audio_tracks.iter().any(|t| t.id == *partner));
     if let Some(partner) = existing_partner {
-        let track = q.audio_tracks.iter().find(|t| t.id == partner).ok_or_else(|| bad(cmd, "saved music partner track is missing"))?;
-        if partner == target || track.items.iter().any(|c| c.essential.as_ref().is_none_or(|e| e.kind != AudioType::Music)) {
+        let other_content =
+            q.audio_tracks.iter().filter(|t| t.id == partner).flat_map(|t| &t.items).any(|c| c.essential.as_ref().is_none_or(|e| e.kind != AudioType::Music));
+        if partner == target || other_content {
             return Err(bad(cmd, "music partner contains other content; move it before rebuilding the bed"));
         }
     } else if count > 1 && q.audio_tracks.len() >= 256 {
@@ -318,9 +325,11 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
         let (before, after) = (db(left), db(right));
         let step = (left.last().copied().unwrap_or(0.0) - right.first().copied().unwrap_or(0.0)).abs();
         let exempt = exemptions.iter().find(|e| e["start"].as_i64().is_some_and(|a| a <= t) && e["end"].as_i64().is_some_and(|b| b >= t));
-        let issue = (before > -60.0 && after > -60.0 && (after - before).abs() > limit) || step > 0.35;
-        let row =
-            json!({"time":t,"seconds":Tick(t).seconds(),"rmsBeforeDb":before,"rmsAfterDb":after,"jumpDb":after-before,"sampleStep":step,"exemption":exempt});
+        // A step between neighbouring samples is a click, whatever plays; a level change over
+        // 100 ms is also what speech, music and sound effects do at every onset.
+        let click = step > CLICK_STEP;
+        let issue = (before > -60.0 && after > -60.0 && (after - before).abs() > limit) || click;
+        let row = json!({"time":t,"seconds":Tick(t).seconds(),"rmsBeforeDb":before,"rmsAfterDb":after,"jumpDb":after-before,"sampleStep":step,"click":click,"exemption":exempt});
         if issue && exempt.is_none() {
             findings.push(row.clone());
         }
@@ -407,5 +416,33 @@ mod loop_regression {
         s.execute("edit.undo", json!({})).unwrap();
         s.execute("edit.undo", json!({})).unwrap();
         assert_eq!(&*s.project, &*before);
+    }
+
+    /// The partner track's identity is saved with the sequence. Deleting that track by hand left
+    /// the saved identity behind, and every later bed failed with "partner track is missing".
+    #[test]
+    fn a_deleted_partner_track_is_made_again() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let item = s.active_sequence().unwrap().audio_tracks[0].items[0].item;
+        s.edit("Short music source", |p, _| {
+            p.item_mut(item).unwrap().as_media_mut().unwrap().info.duration = Tick::from_seconds_f64(2.0);
+            Ok(())
+        })
+        .unwrap();
+        let p = json!({"item":item.0,"track":"A3","end":Tick::from_seconds_f64(7.0).0,"crossfade":Tick::from_seconds_f64(0.3).0});
+        let first = s.execute("sequence.continuousMusic", p.clone()).unwrap();
+        let partner = TrackId(first["partnerTrack"].as_u64().unwrap());
+        s.edit_sequence("Delete the partner track", |q, _, _| {
+            q.audio_tracks.retain(|t| t.id != partner);
+            Ok(())
+        })
+        .unwrap();
+        let again = s.execute("sequence.continuousMusic", p).unwrap();
+        let rebuilt = TrackId(again["partnerTrack"].as_u64().unwrap());
+        assert_ne!(rebuilt, partner);
+        let q = s.active_sequence().unwrap();
+        assert!(q.audio_tracks.iter().any(|t| t.id == rebuilt && !t.items.is_empty()));
+        assert!(q.check_bounds().is_ok());
     }
 }

@@ -16,9 +16,64 @@ pub fn selected(values: impl IntoIterator<Item = (OsString, OsString)>) -> io::R
     Ok(result)
 }
 
+/// A crate manifest's package name and the `filmcraft-*` crates in its dependency tables (build
+/// and target ones too; dev-dependencies are not part of the built crate).
+pub fn manifest(text: &str) -> Option<(String, Vec<String>)> {
+    let mut section = "";
+    let mut name = None;
+    let mut dependencies = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            section = line.trim_matches(|c| c == '[' || c == ']');
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let key = key.trim();
+        if section == "package" && key == "name" {
+            name = Some(value.trim().trim_matches('"').to_string());
+        } else if section.ends_with("dependencies") && !section.ends_with("dev-dependencies") {
+            let dependency = key.split('.').next().unwrap_or(key).trim();
+            if dependency.starts_with("filmcraft-") {
+                dependencies.push(dependency.to_string());
+            }
+        }
+    }
+    Some((name?, dependencies))
+}
+
+/// The packages that depend on `root`, directly or through one another. They are built after it,
+/// so nothing in them can change what `root` renders.
+pub fn dependents(manifests: &[(String, Vec<String>)], root: &str) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    loop {
+        let before = found.len();
+        for (name, dependencies) in manifests {
+            if name != root && dependencies.iter().any(|d| d == root || found.contains(d)) {
+                found.insert(name.clone());
+            }
+        }
+        if found.len() == before {
+            return found;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crates_built_on_the_engine_are_found_through_one_another() {
+        let ui = manifest("[package]\nname = \"filmcraft-ui-egui\"\n[dependencies]\nfilmcraft-engine = { workspace = true }\nserde = \"1\"\n").unwrap();
+        assert_eq!(ui, ("filmcraft-ui-egui".to_string(), vec!["filmcraft-engine".to_string()]));
+        let app = manifest("[package]\nname = \"filmcraft-shell\"\n[target.'cfg(unix)'.dependencies]\nfilmcraft-ui-egui.workspace = true\n").unwrap();
+        // a dev-dependency does not put a crate above the engine
+        let render = manifest("[package]\nname = \"filmcraft-render\"\n[dependencies]\nfilmcraft-time = { workspace = true }\n[dev-dependencies]\nfilmcraft-engine = { workspace = true }\n").unwrap();
+        let engine = manifest("[package]\nname = \"filmcraft-engine\"\n[dependencies]\nfilmcraft-render = { workspace = true }\n").unwrap();
+        let above = dependents(&[app, render, engine, ui], "filmcraft-engine");
+        assert_eq!(above.into_iter().collect::<Vec<_>>(), ["filmcraft-shell", "filmcraft-ui-egui"]);
+        assert!(manifest("[workspace]\nmembers = []\n").is_none());
+    }
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
 

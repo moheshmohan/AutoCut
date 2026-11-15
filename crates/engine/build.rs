@@ -34,7 +34,27 @@ fn collect(path: &Path, depth: usize, files: &mut Vec<std::path::PathBuf>) -> st
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = Path::new("../..");
     let mut files = Vec::new();
-    collect(&root.join("crates"), 0, &mut files)?;
+    // Crates built on the engine (the UI, automation, the publishing adapters) cannot change what
+    // it renders. Hashing them too rebuilt the engine, and everything above it, after every edit
+    // to one of them.
+    let mut crates = fs::read_dir(root.join("crates"))?.collect::<std::io::Result<Vec<_>>>()?;
+    crates.sort_by_key(|e| e.file_name());
+    let manifests: Vec<_> = crates
+        .iter()
+        .map(|e| {
+            let manifest = e.path().join("Cargo.toml");
+            println!("cargo:rerun-if-changed={}", manifest.display());
+            fs::read_to_string(manifest).ok().and_then(|text| configuration::manifest(&text))
+        })
+        .collect();
+    let known: Vec<_> = manifests.iter().flatten().cloned().collect();
+    let above = configuration::dependents(&known, "filmcraft-engine");
+    for (entry, manifest) in crates.iter().zip(&manifests) {
+        if manifest.as_ref().is_some_and(|(name, _)| above.contains(name)) {
+            continue;
+        }
+        collect(&entry.path(), 1, &mut files)?;
+    }
     files.push(root.join("Cargo.lock"));
     files.push(root.join("Cargo.toml"));
     files.sort();

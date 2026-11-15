@@ -166,7 +166,9 @@ fn plan(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let value = serde_json::to_value(it).map_err(|e| bad(cmd, e.to_string()))?;
             dependencies(&value, &mut sources, 0)?;
-            selected.push(value);
+            // The item's digest, not the item: a long edit's items are tens of megabytes, and
+            // the identity is kept in every manifest and passed back to `render.cacheCommit`.
+            selected.push(json!(digest(&value)?));
         }
     }
     if let Some(v) = p.get("dependencies") {
@@ -183,11 +185,13 @@ fn plan(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // These resources render outside ProjectItem: a library LUT can change pixels
     // without changing the clip's `lib:<id>` reference. Keep them conservatively.
-    let resources = (!selected.is_empty()).then(|| {
-        json!({"settings":s.project.settings,"luts":s.project.luts,
-        "sourceGraphics":s.project.source_graphics,"motionTracks":s.project.motion_tracks})
-    });
-    let identity = json!({"format":FORMAT,"version":1,"engine":ENGINE,"range":range,"items":selected,"resources":resources,"sources":hashes,"settings":p.get("settings"),"external":p.get("external")});
+    let resources = (!selected.is_empty())
+        .then(|| {
+            digest(&json!({"settings":s.project.settings,"luts":s.project.luts,
+            "sourceGraphics":s.project.source_graphics,"motionTracks":s.project.motion_tracks}))
+        })
+        .transpose()?;
+    let identity = json!({"format":FORMAT,"version":2,"engine":ENGINE,"range":range,"items":selected,"resources":resources,"sources":hashes,"settings":p.get("settings"),"external":p.get("external")});
     if serde_json::to_vec(&identity).map_err(|e| bad(cmd, e.to_string()))?.len() as u64 > MAX_JSON / 2 {
         return Err(bad(cmd, "cache identity exceeds 8 MiB; split into smaller chapters"));
     }
@@ -399,6 +403,24 @@ mod tests {
         })
         .unwrap();
         assert_ne!(s.execute("render.cachePlan", p).unwrap()["key"], before["key"]);
+    }
+    /// A long edit's items serialize to more than the 8 MiB an identity may be (a real 17 MB
+    /// project came to 99 % of it): the plan was refused, and with it every cached delivery.
+    #[test]
+    fn a_large_edit_still_has_a_small_identity() {
+        let (mut s, _) = session("cache-large-edit");
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let p = json!({"settings":{"width":3840}});
+        let small = s.execute("render.cachePlan", p.clone()).unwrap();
+        s.edit_sequence("A very long clip name", |q, _, _| {
+            q.video_tracks[0].items[0].name = "x".repeat(9 << 20);
+            Ok(())
+        })
+        .unwrap();
+        let large = s.execute("render.cachePlan", p).unwrap();
+        assert_ne!(large["key"], small["key"], "the changed clip is still part of the key");
+        assert!(serde_json::to_vec(&large["identity"]).unwrap().len() < 64 << 10);
+        assert!(large["identity"]["items"].as_array().unwrap().iter().all(|v| v.as_str().is_some_and(|d| d.len() == 64)));
     }
     #[test]
     fn concurrent_publication_and_missing_sources_are_actionable() {

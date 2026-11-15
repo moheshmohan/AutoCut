@@ -44,6 +44,8 @@ scene/speech keys, source parts, exact trims, verification and source hashes. A 
 fails with FrameAtlas's recovery message; an expired picker selection is never replaced with an
 unrelated source. Requests for several references in the same original are serialized. A changed
 retained file fails integrity verification. Cancellation leaves completed sources and receipts.
+A failed or cancelled retrieval is forgotten: the same `catalog retrieve` command asks for it
+again, and completed downloads are kept.
 Different scene/speech citations of the same verified source filename reuse the retained file,
 with each citation freshly resolved for its own trim. Different camera parts remain separate
 retrievals. Reuse still verifies the retained file's digest; it never substitutes another asset.
@@ -97,18 +99,21 @@ Assigning or changing a role preserves existing repair, gain, ducking and mute s
 `item`, an existing audio `track`, optional `start`/`end`/`sourceIn` ticks, `crossfade` ticks and
 `gainDb` (default -25). `replaceTracks` explicitly lists old music tracks to clear, along with the
 destination. It keeps their sources in the project and is one undo step. Loop overlaps use
-editable equal-power envelopes across two persistent music tracks (A/B), because clips within a single track may not overlap. The partner is reused on later revisions. Reapply mix/ducking policy to both returned track identities after rebuilding the bed.
+editable equal-power envelopes across two persistent music tracks (A/B), because clips within a single track may not overlap. The partner is reused on later revisions (a partner track deleted since is made again). Reapply mix/ducking policy to both returned track identities after rebuilding the bed.
 
 `sequence.checkContinuity` measures every audio/video boundary, or specified `times` in ticks.
 It reports 100 ms RMS differences and sample discontinuities with exact times. `maxJumpDb`
 defaults to 6 dB. This local metric supplements `audio.analyzeMix`'s LUFS/true-peak/stem analysis.
 Declare intentional breaks as `exemptions: [{start,end,reason}]`; the report retains them.
+Each finding carries `click`: a step between neighbouring samples, as opposed to a loudness jump.
 
 ## Chapter and composition cache
 
 `render.cachePlan` accepts a sequence and optional `start`/`end` ticks, resolved export `settings`,
 external composition parameters and `dependencies` (all local asset/module/font/sound paths).
-It returns a key, complete identity and a verified hit or miss. Source hashing streams bytes;
+It returns a key, its identity (the digest of each selected item and of the project's resources,
+with the range, settings, source hashes and external parameters) and a verified hit or miss.
+An edit of any size has a small identity. Source hashing streams bytes;
 large originals do not become a single allocation. The key includes actual engine source and
 pinned dependencies and build features/target/flags, so two development builds at version 0.12.0 cannot share incompatible renders.
 
@@ -188,13 +193,20 @@ and 1,400 characters are supported; split longer narration for precise checks.
 `changedNarration` limits rechecking to edited lines; omitted, every native narration is checked.
 `privacy`, `narration` and `mix` may be explicitly disabled by project policy, recorded as skipped.
 Motion/highlight/black-frame anomalies are review warnings because still photos, dark scenes and
-dips can be intentional. Required failures block export with the report. Visual inspection and
+dips can be intentional. At audio boundaries a click blocks delivery; a loudness jump alone is a
+review warning, since speech onsets, music hits and sound effects move more than 6 dB in 100 ms
+on finished edits. An edit of any length is measured, 2000 boundaries at a time. Caption tracks
+that differ from the first in cue count or timing are a review warning too, with each track's
+cue count and last cue end: a translation is rarely cut where its source is.
+Required failures block export with the report. Visual inspection and
 listening still matter; a sampled pass does not prove every frame or pronunciation is perfect.
 Source checks traverse subclips and nested sequences with cycle/size limits. Delivery refreshes
 loaded originals before measurement and privacy checks. Disabled photos and still backgrounds do
 not automatically exempt a frozen video above them; a genuinely static photo interval can be held.
 
-`delivery.prepare` defaults to 4K H.264/AAC, normalized -14 LUFS, and verified cache reuse. Horizontal
+`delivery.prepare` defaults to 4K H.264/AAC, normalized -14 LUFS, and verified cache reuse. The
+cache never blocks a delivery: without a cache folder, or when planning or publishing the cache
+entry fails, the export goes ahead and `cache.note` in the result and the manifest says why. Horizontal
 videos use sidecars; `short:true` chooses portrait 4K with burned captions. Every caption track gets
 its own SRT and cue-id manifest. The final file also gets the normal publishing preflight and
 `*.delivery.json`. Existing video, subtitle and manifest paths are refused, using the exporter's

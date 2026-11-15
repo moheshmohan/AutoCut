@@ -31,14 +31,15 @@ impl Client {
 }
 fn response(mut r: ureq::http::Response<ureq::Body>) -> Result<Value, String> {
     let status = r.status();
-    let value: Value = r.body_mut().with_config().limit(MAX_JSON).read_json().map_err(|e| e.to_string())?;
-    if let Some(error) = value.get("error").and_then(Value::as_str).filter(|message| !message.trim().is_empty()) {
-        return Err(error.to_string());
-    }
+    let value: Result<Value, _> = r.body_mut().with_config().limit(MAX_JSON).read_json();
     if !status.is_success() {
-        return Err(format!("FrameAtlas returned {status}"));
+        // a refused call says why (and how to recover) in `error`
+        let said = value.ok().and_then(|v| v.get("error").and_then(Value::as_str).filter(|message| !message.trim().is_empty()).map(str::to_string));
+        return Err(said.unwrap_or_else(|| format!("FrameAtlas returned {status}")));
     }
-    Ok(value)
+    // A successful reply's `error` belongs to what it describes: a failed job is a job whose
+    // state the caller reads, not a failed call.
+    value.map_err(|e| e.to_string())
 }
 fn read_json(path: &Path) -> Result<Value, String> {
     let f = filmcraft_media::reader::open_regular_file(path).map_err(|e| e.to_string())?;
@@ -183,7 +184,18 @@ fn retrieve(client: &Client, selection: &Value, folder: &Path) -> Result<Value, 
                     write_json(&receipt, &state)?;
                 }
                 Some("failed" | "cancelled" | "error") => {
-                    return Err(format!("retrieval {job}: {}. Receipt retained at {}", status["error"], receipt.display()));
+                    // Forget the finished job, so the same command asks for a new retrieval.
+                    // Kept in the receipt, it was polled again on every run and reported the
+                    // same failure for good.
+                    if let Some(jobs) = state["jobs"].as_object_mut() {
+                        jobs.remove(&ref_key);
+                    }
+                    write_json(&receipt, &state)?;
+                    return Err(format!(
+                        "retrieval {job}: {}. Run the same command again to retry; completed downloads are kept ({})",
+                        status["error"],
+                        receipt.display()
+                    ));
                 }
                 _ => {
                     active_assets.insert(request["id"].to_string());
@@ -414,6 +426,72 @@ mod retrieval_tests {
         assert_eq!(plan["entries"][0]["source"]["clip"]["scene_key"], "first");
         assert_eq!(plan["entries"][1]["source"]["clip"]["scene_key"], "second");
         assert_eq!(plan["entries"][0]["source"]["editing_sha256"], plan["entries"][1]["source"]["editing_sha256"]);
+    }
+    /// A retrieval that failed (a dropped download, a cancelled job) stayed in the receipt: every
+    /// later run polled the same finished job and failed the same way. The next run now asks for
+    /// a new retrieval.
+    #[test]
+    fn a_failed_retrieval_is_asked_for_again_on_the_next_run() {
+        use std::io::BufRead;
+        let dir = std::env::temp_dir().join(format!(
+            "autocut-catalog-failed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("retained-original.bin");
+        std::fs::write(&source, b"selected original").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let enqueued = Arc::new(AtomicUsize::new(0));
+        let count = enqueued.clone();
+        let original = source.clone();
+        let worker = std::thread::spawn(move || {
+            // session, then per run: resolve, retrieve, job
+            for stream in listener.incoming().take(7) {
+                let mut stream = stream.unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut input = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                input.read_line(&mut first).unwrap();
+                let endpoint = first.split_whitespace().nth(1).unwrap().to_string();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(input.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse::<usize>().unwrap();
+                    }
+                }
+                assert!(length < 32768);
+                let mut bytes = vec![0; length];
+                input.read_exact(&mut bytes).unwrap();
+                let args: Value = if bytes.is_empty() { json!({}) } else { serde_json::from_slice(&bytes).unwrap() };
+                let value = match endpoint.as_str() {
+                    "/api/session" => json!({"csrf":"synthetic"}),
+                    "/api/resolve" => json!({"available":true}),
+                    "/api/retrieve" => json!({"id":count.fetch_add(1, Ordering::SeqCst) + 1}),
+                    // the first job failed; the retry's job completes
+                    "/api/job" if args["id"] == 1 => json!({"id":1,"state":"failed","error":"connection dropped"}),
+                    "/api/job" => json!({"id":2,"state":"done","error":"","result":{"asset_id":"selected","path":original,"provider":"test"}}),
+                    _ => panic!("unexpected endpoint {endpoint}"),
+                };
+                let body = value.to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    .unwrap();
+            }
+        });
+        let client = Client::new(port).unwrap();
+        let selection = json!({"name":"Failed once","entries":[{"id":"selected"}]});
+        let failed = retrieve(&client, &selection, &dir).unwrap_err();
+        assert!(failed.contains("connection dropped"), "{failed}");
+        let retried = retrieve(&client, &selection, &dir).unwrap();
+        worker.join().unwrap();
+        assert_eq!(retried["ready"], true, "{retried}");
+        assert_eq!(enqueued.load(Ordering::SeqCst), 2, "the failed retrieval was not asked for again");
     }
     #[test]
     fn pending_retrieval_resumes_without_a_second_download_and_can_cancel() {

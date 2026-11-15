@@ -32,6 +32,19 @@ def render(args):
         raise ValueError("HTML previews use the HTML composition's own responsive sizing; render without --preview")
     output = args.output.expanduser().resolve()
     output.mkdir()  # A new revision; no earlier render is overwritten.
+    try:
+        render_into(args, source, output)
+    except BaseException:
+        # A run that kept nothing (a refused spec, a failed render) frees its revision name;
+        # a finished render stays for diagnosis, and its folder with it.
+        try:
+            output.rmdir()
+        except OSError:
+            pass
+        raise
+
+
+def render_into(args, source, output):
     spec = json.loads(args.spec.read_text()) if args.spec else {}
     if not isinstance(spec, dict):
         raise ValueError("preflight spec must be a JSON object")

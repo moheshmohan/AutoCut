@@ -53,6 +53,15 @@ class RenderRecovery(unittest.TestCase):
                     handoff.render(args)
                 render.assert_not_called()
 
+    def test_failed_render_frees_its_revision_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            args = self.fixture(Path(folder))
+            failure = subprocess.CalledProcessError(1, "raea render")
+            with patch.object(handoff.subprocess, "run", side_effect=failure):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    handoff.render(args)
+            self.assertFalse(args.output.exists(), "an empty revision folder blocked the same name on the next run")
+
 
 if __name__ == "__main__":
     unittest.main()

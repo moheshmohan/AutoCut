@@ -32,6 +32,43 @@ fn push(checks: &mut Vec<Value>, name: &str, state: &str, detail: Value) {
 fn flag(p: &Value, key: &str, default: bool) -> Result<bool> {
     p.get(key).map_or(Ok(default), |v| v.as_bool().ok_or_else(|| bad(CMD, format!("{key} must be boolean"))))
 }
+/// The audio at every clip boundary of `q`, measured by `sequence.checkContinuity` 2000 boundaries
+/// at a time (its own bound), so a long edit is measured whole instead of failing the gate
+/// unmeasured. A click (a step between neighbouring samples) blocks delivery. A loudness jump
+/// alone is a warning: speech onsets, music hits and sound effects move more than 6 dB in 100 ms,
+/// and finished, approved edits showed hundreds of them (267 in an hour-long travel video).
+fn continuity(s: &mut Session, q: &filmcraft_project::Sequence, exemptions: Value) -> (&'static str, Value) {
+    let end = q.duration().0;
+    let times: BTreeSet<i64> =
+        q.video_tracks.iter().chain(&q.audio_tracks).flat_map(|t| &t.items).flat_map(|c| [c.start.0, c.end().0]).filter(|t| *t > 0 && *t < end).collect();
+    let times: Vec<i64> = times.into_iter().collect();
+    // no boundary still asks once, so malformed exemptions are refused as before
+    let chunks: Vec<&[i64]> = if times.is_empty() { vec![&[][..]] } else { times.chunks(2000).collect() };
+    let (mut clicks, mut jumps, mut errors, mut measured) = (Vec::new(), Vec::new(), Vec::new(), 0usize);
+    for chunk in chunks {
+        match s.execute("sequence.checkContinuity", json!({"times":chunk,"exemptions":exemptions})) {
+            Ok(v) => {
+                measured += v["boundaries"].as_array().map_or(0, Vec::len);
+                for finding in v["findings"].as_array().into_iter().flatten() {
+                    if finding["click"] == true { clicks.push(finding.clone()) } else { jumps.push(finding.clone()) }
+                }
+            }
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    let state = if !clicks.is_empty() || !errors.is_empty() {
+        "fail"
+    } else if !jumps.is_empty() {
+        "warning"
+    } else {
+        "pass"
+    };
+    (
+        state,
+        json!({"clicks":clicks,"loudnessJumps":jumps,"errors":errors,"boundaries":measured,"method":"100 ms RMS each side plus sample discontinuity; a click fails, a loudness jump warns"}),
+    )
+}
+
 fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(path) = p["report"].as_str() {
         crate::output_safety::protect(s, &s.project, path, CMD)?;
@@ -135,11 +172,8 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     );
     let missing: Vec<_> = source_errors.iter().filter_map(|v| v["clip"].as_u64()).collect();
     push(&mut checks, "sources", if source_errors.is_empty() { "pass" } else { "fail" }, json!({"offlineClips":missing,"errors":source_errors}));
-    let continuity = s.execute("sequence.checkContinuity", json!({"exemptions":p.get("exemptions").cloned().unwrap_or(json!([]))}));
-    match continuity {
-        Ok(v) => push(&mut checks, "audioContinuity", if v["passed"] == true { "pass" } else { "fail" }, v),
-        Err(e) => push(&mut checks, "audioContinuity", "fail", json!(e.to_string())),
-    }
+    let (state, detail) = continuity(s, &q, p.get("exemptions").cloned().unwrap_or(json!([])));
+    push(&mut checks, "audioContinuity", state, detail);
     if flag(p, "mix", true)? {
         match s.execute("audio.analyzeMix", json!({})) {
             Ok(v) => {
@@ -218,6 +252,12 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         push(&mut checks, "changedNarration", "skipped", json!("disabled by explicit project policy"));
     }
+    // Caption tracks are compared with the first. A track cut into different cues (a translation
+    // rarely breaks where its source does) cannot be told from one that fell behind an edit by
+    // timings alone, so a difference is a review warning that says how many cues each track has
+    // and where its last one ends. While it failed the gate, a finished two-language edit (249
+    // English cues, 338 Malayalam) could not be delivered.
+    let span = |t: &filmcraft_project::CaptionTrack| json!({"track":t.id.0,"name":t.name,"cues":t.captions.len(),"lastEnd":t.captions.iter().map(|c| c.start.0.saturating_add(c.duration.0)).max()});
     let mut alignment = Vec::new();
     if let Some(base) = q.caption_tracks.first() {
         for track in q.caption_tracks.iter().skip(1) {
@@ -227,15 +267,15 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
                         && (a.duration.0 as i128 - b.duration.0 as i128).abs() <= i128::from(frame)
                 });
             if !same {
-                alignment.push(json!({"track":track.id.0,"name":track.name}));
+                alignment.push(span(track));
             }
         }
     }
     push(
         &mut checks,
         "subtitleAlignment",
-        if alignment.is_empty() { "pass" } else { "fail" },
-        json!({"misaligned":alignment,"toleranceTicks":frame,"tracks":q.caption_tracks.len()}),
+        if alignment.is_empty() { "pass" } else { "warning" },
+        json!({"misaligned":alignment,"base":q.caption_tracks.first().map(span),"toleranceTicks":frame,"tracks":q.caption_tracks.len()}),
     );
     if flag(p, "short", false)? {
         match s.execute("sequence.checkSafeZones", json!({"platform":"youtube"})) {
@@ -333,8 +373,28 @@ fn prepare(s: &mut Session, p: &Value) -> Result<Value> {
     resolved.path.clear();
     let settings = serde_json::to_value(resolved).map_err(|e| bad(cmd, e.to_string()))?;
     let caching = flag(p, "cache", true)?;
-    let plan = if caching { Some(s.execute("render.cachePlan", json!({"settings":settings}))?) } else { None };
-    let output = if let Some(plan) = plan.as_ref().filter(|v| v["hit"] == true) {
+    // The cache saves a render; it is never a reason to lose one. A plan that cannot be made, a
+    // session without a cache folder and a publication that fails all leave the delivery to go
+    // ahead uncached, with the reason in `cache.note` (a failed publication after a long export
+    // used to fail the delivery, and the retry was refused because the master existed).
+    let mut cache_note = None;
+    let plan = if caching {
+        match s.execute("render.cachePlan", json!({"settings":settings})) {
+            Ok(plan) if plan["cacheAvailable"] == true => Some(plan),
+            Ok(_) => {
+                cache_note = Some("no cache folder is configured: exported without the render cache".to_string());
+                None
+            }
+            Err(e) => {
+                cache_note = Some(format!("exported without the render cache: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let hit = plan.as_ref().is_some_and(|v| v["hit"] == true);
+    let output = if let Some(plan) = plan.as_ref().filter(|_| hit) {
         crate::render_cache::copy_artifact(&plan["artifact"], std::path::Path::new(path)).map_err(|e| bad(cmd, e.to_string()))?;
         json!({"path":path,"cached":true})
     } else {
@@ -342,11 +402,14 @@ fn prepare(s: &mut Session, p: &Value) -> Result<Value> {
         if output["offlineMedia"].as_array().is_some_and(|a| !a.is_empty()) {
             return Err(bad(cmd, "export contains offline placeholders; delivery stopped"));
         }
-        if let Some(plan) = &plan {
-            s.execute("render.cacheCommit", json!({"key":plan["key"],"path":path,"manifest":plan}))?;
+        if let Some(plan) = &plan
+            && let Err(e) = s.execute("render.cacheCommit", json!({"key":plan["key"],"path":path,"manifest":plan}))
+        {
+            cache_note = Some(format!("the export is complete but was not cached: {e}"));
         }
         output
     };
+    let cache = json!({"requested":caching,"hit":hit,"note":cache_note});
     let tracks = s.active_sequence().ok_or(EngineError::NoSequence)?.caption_tracks.clone();
     let mut subtitles = Vec::new();
     for (n, track) in tracks.iter().enumerate() {
@@ -355,11 +418,11 @@ fn prepare(s: &mut Session, p: &Value) -> Result<Value> {
         subtitles.push(json!({"track":track.id.0,"name":track.name,"path":subtitle,"cueIds":track.captions.iter().map(|c|c.id.0).collect::<Vec<_>>() }));
     }
     let final_check = s.execute("publish.preflight", json!({"destination":if short{"youtubeShort"}else{"youtube"},"path":path,"loudness":true}))?;
-    let manifest = json!({"format":"autocut.delivery","version":1,"export":output,"qa":report_path,"publishPreflight":final_check,"subtitles":subtitles,"privacy":"private","captionPolicy":if short{"burn"}else{"sidecar"}});
+    let manifest = json!({"format":"autocut.delivery","version":1,"export":output,"cache":cache,"qa":report_path,"publishPreflight":final_check,"subtitles":subtitles,"privacy":"private","captionPolicy":if short{"burn"}else{"sidecar"}});
     s.services
         .write_file_new(&format!("{path}.delivery.json"), &serde_json::to_vec_pretty(&manifest).map_err(|e| bad(cmd, e.to_string()))?)
         .map_err(|e| bad(cmd, e.to_string()))?;
-    Ok(json!({"prepared":final_check["ok"]==true,"blocked":final_check["ok"]!=true,"path":path,"manifest":manifest,"uploaded":false}))
+    Ok(json!({"prepared":final_check["ok"]==true,"blocked":final_check["ok"]!=true,"path":path,"cache":cache,"manifest":manifest,"uploaded":false}))
 }
 
 #[cfg(test)]
@@ -375,6 +438,80 @@ mod tests {
         assert!(r["checks"].as_array().unwrap().iter().any(|c| c["check"] == "privacyAtCuts" && c["state"] == "skipped"));
         assert_eq!(&*s.project, &*before);
         assert!(s.execute(CMD, json!({"privacy":"no"})).is_err());
+    }
+    fn check<'a>(report: &'a Value, name: &str) -> &'a Value {
+        report["checks"].as_array().unwrap().iter().find(|c| c["check"] == name).unwrap()
+    }
+    /// More than 2000 clip boundaries used to fail the gate unmeasured ("more than 2000
+    /// boundaries"), and any loudness jump failed it: every long or lively edit was blocked.
+    #[test]
+    fn long_edits_are_measured_whole_and_only_clicks_block() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        s.execute("sequence.addTracks", json!({"video":1})).unwrap();
+        s.edit_sequence("Many cuts", |q, ctx, _| {
+            let frame = q.settings.frame_rate.frame_duration();
+            let template = q.video_tracks[0].items[0].clone();
+            let track = q.video_tracks.last_mut().unwrap();
+            for n in 0..2101 {
+                let mut clip = template.clone();
+                clip.id = filmcraft_project::ClipId(ctx.alloc());
+                clip.link = None;
+                clip.start = Tick(frame.0 * n);
+                clip.duration = frame;
+                track.items.push(clip);
+            }
+            Ok(())
+        })
+        .unwrap();
+        let r = s.execute(CMD, json!({"privacy":false,"narration":false,"mix":false})).unwrap();
+        let audio = check(&r, "audioContinuity");
+        assert!(audio["detail"]["errors"].as_array().unwrap().is_empty(), "{audio}");
+        assert!(audio["detail"]["boundaries"].as_u64().unwrap() > 2000, "{audio}");
+        let clicks = !audio["detail"]["clicks"].as_array().unwrap().is_empty();
+        assert_eq!(audio["state"] == "fail", clicks, "only a click blocks delivery: {audio}");
+    }
+    /// Two caption tracks cut into different cues failed the gate: a translation and its source
+    /// could never be delivered together.
+    #[test]
+    fn differently_cut_caption_tracks_are_a_review_warning() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        // a new caption track goes first, so "Translation" is the one the others are compared with
+        for (name, lines) in [("Source", &["One long line"][..]), ("Translation", &["Two", "short lines"][..])] {
+            let track = s.execute("captions.newTrack", json!({"format":"Subtitle","name":name})).unwrap()["track"].clone();
+            let seconds = 2.0 / lines.len() as f64;
+            for (n, text) in lines.iter().enumerate() {
+                s.execute("captions.add", json!({"track":track,"text":text,"seconds":n as f64 * seconds,"durationSeconds":seconds * 0.5})).unwrap();
+            }
+        }
+        let r = s.execute(CMD, json!({"privacy":false,"narration":false,"mix":false})).unwrap();
+        let subtitles = check(&r, "subtitleAlignment");
+        assert_eq!(subtitles["state"], "warning", "{subtitles}");
+        assert_eq!(subtitles["detail"]["base"]["cues"], 2, "{subtitles}");
+        let source = subtitles["detail"]["misaligned"].as_array().unwrap().iter().find(|t| t["name"] == "Source").unwrap();
+        assert_eq!(source["cues"], 1, "{subtitles}");
+    }
+    /// A session without a cache folder planned a miss, exported, then failed on publishing the
+    /// cache entry: the delivery was an error although its master was written, and a retry was
+    /// refused because that master existed.
+    #[test]
+    fn delivery_goes_ahead_without_a_cache_folder() {
+        let dir = crate::media_test_util::tmp_dir("delivery-no-cache");
+        let image = dir.join("source.png");
+        image::save_buffer(&image, &[140; 80 * 120 * 3], 80, 120, image::ColorType::Rgb8).unwrap();
+        let mut s = Session::default();
+        let item = crate::commands::import_streamed(&mut s, image.to_str().unwrap(), None).unwrap();
+        s.execute("file.newSequence", json!({"width":80,"height":120,"fps":30,"video":1,"audio":1})).unwrap();
+        s.execute("timeline.place", json!({"item":item.0,"track":"V1","time":0,"duration":Tick::from_seconds_f64(1.0).0,"audio":false})).unwrap();
+        let video = dir.join("delivery.mp4");
+        let r = s
+            .execute("delivery.prepare", json!({"path":video,"settings":{"frameSize":[80,120]},"qa":{"privacy":false,"narration":false,"mix":false}}))
+            .unwrap();
+        assert!(video.exists(), "{r}");
+        assert!(std::path::Path::new(&format!("{}.delivery.json", video.display())).exists(), "{r}");
+        assert_eq!(r["cache"]["hit"], false);
+        assert!(r["cache"]["note"].as_str().is_some_and(|n| n.contains("cache")), "{r}");
     }
     #[test]
     fn a_required_unavailable_privacy_check_blocks_preparation() {
