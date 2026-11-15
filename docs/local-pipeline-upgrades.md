@@ -71,6 +71,7 @@ mapping, and HDR sequences preserve their working space. Additional parameters:
 - `protectScreens`: `{ "<clip id>": [[x,y,width,height], …] }`, up to eight normalized rectangles
   in the original source. These become editable masks on the measured Lumetri pass. They remain
   when the pass is repeated without new rectangles; an explicit empty list clears protection.
+  Rectangles for a clip the pass does not grade are refused, naming the clip.
 - Each report includes detected source colour information, target and protected regions.
 
 Protection is static until animated. Use `masks.track` or keyframes for a moving device screen.
@@ -114,7 +115,14 @@ external composition parameters and `dependencies` (all local asset/module/font/
 It returns a key, its identity (the digest of each selected item and of the project's resources,
 with the range, settings, source hashes and external parameters) and a verified hit or miss.
 An edit of any size has a small identity. Source hashing streams bytes;
-large originals do not become a single allocation. The key includes actual engine source and
+large originals do not become a single allocation. A source is read once: its digest is kept in
+the cache folder (`source-digests.json`) and used again while the file's identity, size, modified
+time and change time are all the same, so a later plan and the commit read only the sources that
+changed. `sourceDigests` in the result counts the sources read (`hashed`) and not read (`reused`).
+A file changed in the last two seconds is always read. `rehash:true` reads every source whatever
+is remembered: use it for sources on a volume that keeps no change time (FAT, exFAT), where bytes
+rewritten under the same size and modified time are not seen. Outside macOS and Linux nothing is
+remembered. The key includes actual engine source and
 pinned dependencies and build features/target/flags, so two development builds at version 0.12.0 cannot share incompatible renders.
 
 The fingerprint retains selected timeline clips, sequence settings, effects, colour, captions,
@@ -127,7 +135,7 @@ an unlisted dynamic dependency cannot be discovered from a rendered MP4.
 
 After a successful render, `render.cacheCommit {key,path,manifest:<cachePlan result>}` checks
 inputs again, copies to a staging directory, verifies the output hash, syncs it and atomically
-publishes it under an OS lock. `render.cacheInspect {key}` verifies output bytes before reuse.
+publishes it under an OS lock, whose file is removed when the writer is done. `render.cacheInspect {key}` verifies output bytes before reuse.
 Missing/changed sources fail; missing or corrupt entries miss. Failed copies remain unpublished.
 Editing proxies are excluded from original-media render identity; an absent unused proxy does not
 block a final export. A cache-hit delivery stages and verifies its bytes before publishing, creates
@@ -187,8 +195,10 @@ continuity, mix clipping, changed narration, subtitle alignment, screen-mask per
 motion/highlights and safe zones for Shorts. `tts.checkClip` hears the **retained source audio**,
 without generating a replacement; its cache is keyed by actual samples, script and judge. Missing
 models or unclear required readings block delivery. It uses the existing local hearers, second
-opinion and speaker gate, and never downloads a model implicitly. Forward clips up to 120 seconds
-and 1,400 characters are supported; split longer narration for precise checks.
+opinion and speaker gate, and never downloads a model implicitly. A clip is judged by its take's
+whole speech: a trimmed or razor-split narration clip passes or fails with its take, and `part:true`
+in the result says the clip holds only part of it. Forward takes up to 120 seconds and 1,400
+characters are supported; split longer narration for precise checks.
 
 `changedNarration` limits rechecking to edited lines; omitted, every native narration is checked.
 `privacy`, `narration` and `mix` may be explicitly disabled by project policy, recorded as skipped.
@@ -210,7 +220,12 @@ entry fails, the export goes ahead and `cache.note` in the result and the manife
 videos use sidecars; `short:true` chooses portrait 4K with burned captions. Every caption track gets
 its own SRT and cue-id manifest. The final file also gets the normal publishing preflight and
 `*.delivery.json`. Existing video, subtitle and manifest paths are refused, using the exporter's
-resolved filename (including its extension). QA reports use exclusive creation and numbered revisions
+resolved filename (including its extension). The one exception is a delivery that stopped after
+its export: when a later step fails (a subtitle, the publishing preflight, the manifest), the
+manifest is left with `complete:false`, and the same command run again (same path, settings and
+checks, on the same edit) finishes it from the master already there, without checking or exporting
+again (`resumed:true`). After any other edit it is refused, as an occupied path. A finished
+manifest has `complete:true`. QA reports use exclusive creation and numbered revisions
 on retry; read the returned `reportPath` rather than assuming the requested path was used.
 `captions.export` accepts `overwrite:false` for exclusive creation (its existing default is `true`).
 Movie/frame/caption/report exports reject destinations matching the open project or imported source,

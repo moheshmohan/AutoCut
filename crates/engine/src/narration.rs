@@ -1327,6 +1327,7 @@ impl tts::heard::Hearer for TimelineHearer {
 }
 
 /// Hear the actual retained narration source, rather than synthesizing a replacement for QA.
+/// `part` says the clip holds only part of its take (trimmed or split): the whole take is judged.
 /// The byte identity includes samples, wording and judge policy. A changed file cannot inherit
 /// an earlier reading's pass. This command never changes the project or requests a new take.
 fn check_clip(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1336,7 +1337,14 @@ fn check_clip(s: &mut Session, p: &Value) -> Result<Value> {
     let id = target_clip(s, p).ok_or_else(|| bad(cmd, "choose a narration clip"))?;
     let clip = s.active_sequence().and_then(|q| q.find_item(id).map(|(_, c)| c.clone())).ok_or_else(|| bad(cmd, "clip missing"))?;
     let n = s.project.narrations.get(&clip.item).ok_or_else(|| bad(cmd, "narration metadata missing"))?;
-    if n.text.chars().count() > 1400 || clip.duration.seconds() > 120.0 || clip.duration.0 <= 0 || clip.reverse || (clip.speed - 1.0).abs() > 1e-6 {
+    // The take's whole speech is heard, whatever part of it the clip holds. Nothing in a
+    // narration says which words fall where in its file, so a trimmed or razor-split clip heard
+    // alone was compared with the whole script: every part read as unclear, and one split
+    // failed the delivery gate. A take with no recorded speech length is heard as its clip plays.
+    let speech = n.speech_duration;
+    let (start, length) = if speech.0 > 0 { (Tick::ZERO, speech) } else { (clip.source_in, clip.duration) };
+    let part = speech.0 > 0 && (clip.source_in.0 > 0 || clip.source_in.0.saturating_add(clip.duration.0) < speech.0);
+    if n.text.chars().count() > 1400 || length.seconds() > 120.0 || length.0 <= 0 || clip.reverse || (clip.speed - 1.0).abs() > 1e-6 {
         return Err(bad(cmd, "hear-back supports forward narration up to 120 seconds / 1400 characters; split or restore its source timing first"));
     }
     let language = check_language(n);
@@ -1358,8 +1366,8 @@ fn check_clip(s: &mut Session, p: &Value) -> Result<Value> {
     let provider = s.media.provider(s.project.clone(), s.services.clone());
     let source = provider.source(clip.item).ok_or_else(|| bad(cmd, "narration audio unavailable"))?;
     let rate = 16000;
-    let count = clip.duration.to_units_floor(rate).max(1) as usize;
-    let audio = source.audio(clip.source_in.to_units_floor(rate), count, rate as u32).map_err(|e| bad(cmd, e.to_string()))?;
+    let count = length.to_units_floor(rate).max(1) as usize;
+    let audio = source.audio(start.to_units_floor(rate), count, rate as u32).map_err(|e| bad(cmd, e.to_string()))?;
     let mono: Vec<f32> = (0..count).map(|i| audio.channels.iter().filter_map(|c| c.get(i)).sum::<f32>() / audio.channels.len().max(1) as f32).collect();
     let said = if language == "en" { tts::heard::english_words(&tts::script::strip_marks(&spoken_text(n))) } else { tts::script::strip_marks(&spoken_text(n)) };
     let mut fingerprint = Sha256::new();
@@ -1372,7 +1380,7 @@ fn check_clip(s: &mut Session, p: &Value) -> Result<Value> {
     let key = format!("{:x}", fingerprint.finalize());
     let cache = crate::render_cache::cache_root(s).map(|d| crate::redact_cache::RedactCache::new(d.join("narration-checks"), 128 << 20));
     if let Some(report) = cache.as_ref().and_then(|c| c.load::<Value>(&key)) {
-        return Ok(json!({"clip":id.0,"status":report["status"],"report":report,"cached":true,"audioCheckKey":key}));
+        return Ok(json!({"clip":id.0,"status":report["status"],"report":report,"cached":true,"audioCheckKey":key,"part":part}));
     }
     let mut strict = judges.strict();
     strict.policy.max_takes = 1;
@@ -1382,7 +1390,7 @@ fn check_clip(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(cache) = cache {
         cache.store(&key, &report);
     }
-    Ok(json!({"clip":id.0,"status":report["status"],"report":report,"cached":false,"audioCheckKey":key}))
+    Ok(json!({"clip":id.0,"status":report["status"],"report":report,"cached":false,"audioCheckKey":key,"part":part}))
 }
 
 fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1854,6 +1862,43 @@ mod timeline_hearback_tests {
             assert!(samples.len() > 1000);
             Ok("Here are 10 small robots".into())
         }
+    }
+    /// Hears as many of the script's words as the samples it is given cover.
+    struct Partial(Arc<std::sync::atomic::AtomicUsize>);
+    impl tts::heard::Hearer for Partial {
+        fn id(&self) -> String {
+            "synthetic partial judge".into()
+        }
+        fn hear(&self, samples: &[f32], _: u32) -> std::result::Result<String, String> {
+            let words = ["Here", "are", "ten", "small", "robots"];
+            let whole = self.0.load(std::sync::atomic::Ordering::SeqCst).max(1);
+            Ok(words.iter().take((words.len() * samples.len()).div_ceil(whole)).copied().collect::<Vec<_>>().join(" "))
+        }
+    }
+    /// A razor-split (or trimmed) narration clip was heard alone and compared with the whole
+    /// script: each part read as unclear, and one split failed the delivery gate.
+    #[test]
+    fn a_razor_split_narration_is_judged_by_its_whole_take() {
+        let dir = crate::media_test_util::tmp_dir("timeline-hearback-split");
+        let whole = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut s = Session { narration_hearer: Some(Arc::new(Partial(whole.clone()))), ..Default::default() };
+        s.execute("file.newSequence", json!({"name":"voice","audio":1,"video":1})).unwrap();
+        let r = s.execute("tts.create", json!({"text":"Here are ten small robots.","voice":"basic-male","dir":dir,"time":0})).unwrap();
+        let id = r["clip"].as_u64().unwrap();
+        let clip = s.active_sequence().unwrap().find_item(ClipId(id)).unwrap().1.clone();
+        whole.store(s.project.narrations[&clip.item].speech_duration.to_units_floor(16000) as usize, std::sync::atomic::Ordering::SeqCst);
+        let unsplit = s.execute("tts.checkClip", json!({"clip":id})).unwrap();
+        assert_eq!(unsplit["status"], "clear", "{unsplit}");
+        s.execute("timeline.razor", json!({"clip":id,"time":clip.start.0 + clip.duration.0 / 2})).unwrap();
+        let parts: Vec<u64> = s.active_sequence().unwrap().audio_tracks.iter().flat_map(|t| &t.items).filter(|c| c.item == clip.item).map(|c| c.id.0).collect();
+        assert_eq!(parts.len(), 2);
+        for part in parts {
+            let r = s.execute("tts.checkClip", json!({"clip":part})).unwrap();
+            assert_eq!(r["status"], "clear", "{r}");
+            assert_eq!(r["part"], true, "{r}");
+            assert_eq!(r["audioCheckKey"], unsplit["audioCheckKey"], "every part is judged by the same take");
+        }
+        assert_eq!(unsplit["part"], false, "{unsplit}");
     }
     #[test]
     fn changing_words_cannot_reuse_a_synthesis_pass_for_older_audio() {

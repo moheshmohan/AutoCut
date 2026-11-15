@@ -318,6 +318,13 @@ fn auto_color_inner(s: &mut Session, p: &Value) -> Result<Value> {
     if ids.is_empty() {
         return Err(bad(cmd, "no picture clip given, selected or in the sequence"));
     }
+    // A screen for a clip this pass does not grade used to be accepted and dropped: the caller
+    // believed a screen was kept that the pass never saw.
+    if let Some(screens) = p.get("protectScreens").and_then(Value::as_object)
+        && let Some(stranger) = screens.keys().find(|id| !ids.iter().any(|c| c.0.to_string() == **id))
+    {
+        return Err(bad(cmd, format!("protectScreens names clip {stranger}, which this pass does not grade: add it to `clips` or leave its screens out")));
+    }
     if bool_p(p, "off").unwrap_or(false) {
         let n = s.edit_sequence("Auto Color Off", |q, _, _| {
             let mut n = 0;
@@ -616,6 +623,30 @@ mod source_aware_tests {
         let before = s.project.clone();
         for p in [json!({"target":"invented"}), json!({"target":"pq","protectScreens":{"1":[[0.8,0.0,0.5,0.5]]}})] {
             assert!(s.execute(AUTO_COLOR_CMD, p).is_err());
+            assert_eq!(&*s.project, &*before);
+        }
+    }
+    /// A screen given for a clip the pass does not grade was accepted and dropped: the caller was
+    /// told nothing, and the screen it meant to keep was graded like the rest of the picture.
+    #[test]
+    fn a_screen_for_a_clip_that_is_not_graded_is_refused() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let ids: Vec<u64> = s
+            .active_sequence()
+            .unwrap()
+            .video_tracks
+            .iter()
+            .flat_map(|t| &t.items)
+            .filter(|c| s.project.item(c.item).is_some_and(|i| matches!(i.kind, ItemKind::Media(_))))
+            .map(|c| c.id.0)
+            .collect();
+        let (graded, other) = (ids[0], ids[1]);
+        let before = s.project.clone();
+        for stranger in [other, u64::MAX] {
+            let p = json!({"clips":[graded],"frames":1,"protectScreens":{stranger.to_string():[[0.25,0.25,0.5,0.5]]}});
+            let e = s.execute(AUTO_COLOR_CMD, p).unwrap_err().to_string();
+            assert!(e.contains(&stranger.to_string()), "{e}");
             assert_eq!(&*s.project, &*before);
         }
     }

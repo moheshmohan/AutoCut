@@ -22,7 +22,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "render.cachePlan",
             "Plan cached render",
-            r#"{"sequence":id?,"start":ticks?,"end":ticks?,"settings":{…},"external":JSON?,"dependencies":[path]?}"#,
+            r#"{"sequence":id?,"start":ticks?,"end":ticks?,"settings":{…},"external":JSON?,"dependencies":[path]?,"rehash":bool=false}"#,
             plan,
         ),
         spec("render.cacheInspect", "Inspect cached artifact", r#"{"key":sha256}"#, inspect),
@@ -54,6 +54,142 @@ pub fn digest_file(path: &Path) -> std::result::Result<(String, u64), String> {
 }
 fn digest(v: &Value) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(v).map_err(|e| bad("render.cachePlan", e.to_string()))?)))
+}
+/// How long a file must have been left alone before its digest is remembered. A second change
+/// inside this window can leave the same times behind (file systems keep them to between a
+/// nanosecond and two seconds), so a file changed this recently is hashed again next time.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+const MEMO: &str = "source-digests.json";
+const MEMO_FORMAT: &str = "autocut.sourceDigests";
+const MEMO_MAX: usize = 20000;
+/// What tells one state of a file from the next without reading it, and when it last changed
+/// (nanoseconds since 1970): which file it is, its size, and when its bytes and its inode were
+/// last changed. A program can put a file's modified time back, never its change time, so bytes
+/// changed in place always show. `None` where the platform does not report all of this: there
+/// every source is hashed every time.
+#[cfg(unix)]
+fn stamp(m: &std::fs::Metadata) -> Option<(String, i128)> {
+    use std::os::unix::fs::MetadataExt;
+    let at = |seconds: i64, nanos: i64| i128::from(seconds) * 1_000_000_000 + i128::from(nanos);
+    let (modified, changed) = (at(m.mtime(), m.mtime_nsec()), at(m.ctime(), m.ctime_nsec()));
+    m.is_file().then(|| (format!("{}:{}:{}:{modified}:{changed}", m.dev(), m.ino(), m.size()), modified.max(changed)))
+}
+#[cfg(not(unix))]
+fn stamp(_: &std::fs::Metadata) -> Option<(String, i128)> {
+    None
+}
+/// Source digests kept between plans in the cache folder, so a plan reads only the sources that
+/// changed since the last one. Every plan used to read every source in full, and the commit
+/// read them all again: 14 s each for a 101-source edit. A digest is used only while the file's
+/// [`stamp`] is the one it was hashed under. All of this is an optimisation: a missing,
+/// unreadable or damaged memo means hashing, never an error.
+struct SourceDigests {
+    file: Option<PathBuf>,
+    /// Path → the stamp it was hashed under, its SHA-256 and its size.
+    entries: BTreeMap<String, (String, String, u64)>,
+    used: BTreeSet<String>,
+    settle: std::time::Duration,
+    trust: bool,
+    changed: bool,
+    hashed: usize,
+    reused: usize,
+}
+impl SourceDigests {
+    /// The memo of `folder` (none: nothing is kept). `trust: false` hashes every file anyway.
+    fn open(folder: Option<&Path>, settle: std::time::Duration, trust: bool) -> Self {
+        let file = folder.map(|d| d.join(MEMO));
+        let entries = file
+            .as_deref()
+            .and_then(|f| read(f).ok())
+            .filter(|v| v["format"] == MEMO_FORMAT && v["version"] == 1)
+            .and_then(|v| serde_json::from_value(v["entries"].clone()).ok())
+            .unwrap_or_default();
+        Self { file, entries, used: BTreeSet::new(), settle, trust, changed: false, hashed: 0, reused: 0 }
+    }
+    fn digest(&mut self, path: &Path) -> std::result::Result<(String, u64), String> {
+        let name = path.to_string_lossy().into_owned();
+        let before = std::fs::metadata(path).ok().as_ref().and_then(stamp);
+        if self.trust
+            && let (Some((stamp, _)), Some((known, hash, bytes))) = (&before, self.entries.get(&name))
+            && stamp == known
+            && hash.len() == 64
+            && hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            self.reused += 1;
+            self.used.insert(name);
+            return Ok((hash.clone(), *bytes));
+        }
+        let result = digest_file(path)?;
+        self.hashed += 1;
+        // Remembered only when the file is the same after the read as before it, and has been
+        // left alone long enough for its times to show the next change.
+        let after = std::fs::metadata(path).ok().as_ref().and_then(stamp);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().and_then(|d| i128::try_from(d.as_nanos()).ok());
+        let settle = i128::try_from(self.settle.as_nanos()).unwrap_or(i128::MAX);
+        match (before, after, now) {
+            (Some(a), Some(b), Some(now)) if a == b && now.saturating_sub(b.1) >= settle => {
+                self.entries.insert(name.clone(), (b.0, result.0.clone(), result.1));
+                self.used.insert(name);
+                self.changed = true;
+            }
+            _ => self.changed |= self.entries.remove(&name).is_some(),
+        }
+        Ok(result)
+    }
+    /// Keep what was learned. Over [`MEMO_MAX`] files, only the ones this run asked about stay.
+    fn save(&mut self) {
+        let Some(file) = self.file.as_deref().filter(|_| self.changed) else {
+            return;
+        };
+        if self.entries.len() > MEMO_MAX {
+            let used = &self.used;
+            self.entries.retain(|path, _| used.contains(path));
+        }
+        let Ok(bytes) = serde_json::to_vec(&json!({"format":MEMO_FORMAT,"version":1,"entries":self.entries})) else {
+            return;
+        };
+        if self.entries.len() > MEMO_MAX || bytes.len() as u64 > MAX_JSON {
+            return;
+        }
+        if let Some(folder) = file.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        if filmcraft_format::atomic_write(file, &bytes).is_ok() {
+            self.changed = false;
+        }
+    }
+}
+/// One writer per cache key, by an OS advisory lock on `<key>.lock`. Its holder removes the file
+/// when it is done (every committed key used to leave one behind for good), so a writer that
+/// opened the file before that and locked it after holds a file nobody else can reach: it checks
+/// that its file is still the one at the path, and takes the new one if not.
+fn lock_entry(path: &Path, cmd: &str) -> Result<std::fs::File> {
+    for _ in 0..8 {
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| bad(cmd, e.to_string()))?;
+        file.try_lock().map_err(|e| bad(cmd, format!("another writer owns this cache entry: {e}")))?;
+        if is_at(&file, path) {
+            return Ok(file);
+        }
+    }
+    Err(bad(cmd, "the lock of this cache entry kept changing hands; run it again"))
+}
+#[cfg(unix)]
+fn is_at(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    matches!((file.metadata(), std::fs::symlink_metadata(path)), (Ok(a), Ok(b)) if a.dev() == b.dev() && a.ino() == b.ino())
+}
+/// Elsewhere than Unix an open file cannot be told from the one at its path, so there the lock
+/// file is never removed and this is always true.
+#[cfg(not(unix))]
+fn is_at(_: &std::fs::File, _: &Path) -> bool {
+    true
+}
+/// Remove the lock file while it is still held, then let it go.
+fn unlock_entry(lock: std::fs::File, path: &Path) {
+    if cfg!(unix) {
+        let _ = std::fs::remove_file(path);
+    }
+    drop(lock);
 }
 fn dependencies(v: &Value, out: &mut BTreeSet<String>, depth: usize) -> Result<()> {
     if depth > 64 {
@@ -179,10 +315,12 @@ fn plan(s: &mut Session, p: &Value) -> Result<Value> {
     if selected.is_empty() && sources.is_empty() {
         return Err(bad(cmd, "provide a sequence or external composition dependencies"));
     }
-    let mut hashes = BTreeMap::new();
-    for path in sources {
-        hashes.insert(path.clone(), digest_file(Path::new(&path)).map_err(|e| bad(cmd, e))?);
-    }
+    let rehash = p.get("rehash").map_or(Ok(false), |v| v.as_bool().ok_or_else(|| bad(cmd, "rehash must be boolean")))?;
+    let mut digests = SourceDigests::open(dir(s).as_deref(), SETTLE, !rehash);
+    let hashed: std::result::Result<BTreeMap<String, (String, u64)>, String> =
+        sources.into_iter().map(|path| digests.digest(Path::new(&path)).map(|d| (path, d))).collect();
+    digests.save();
+    let hashes = hashed.map_err(|e| bad(cmd, e))?;
     // These resources render outside ProjectItem: a library LUT can change pixels
     // without changing the clip's `lib:<id>` reference. Keep them conservatively.
     let resources = (!selected.is_empty())
@@ -197,7 +335,9 @@ fn plan(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let key = digest(&identity)?;
     let hit = lookup(s, &key).map_err(|e| bad(cmd, e))?;
-    Ok(json!({"key":key,"identity":identity,"hit":hit.is_some(),"artifact":hit,"cacheAvailable":dir(s).is_some()}))
+    Ok(
+        json!({"key":key,"identity":identity,"hit":hit.is_some(),"artifact":hit,"cacheAvailable":dir(s).is_some(),"sourceDigests":{"hashed":digests.hashed,"reused":digests.reused}}),
+    )
 }
 fn key<'a>(p: &'a Value, cmd: &str) -> Result<&'a str> {
     p["key"]
@@ -261,12 +401,14 @@ fn commit(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "manifest identity does not match this build and key"));
     }
     if let Some(sources) = manifest["identity"]["sources"].as_object() {
-        for (path, expected) in sources {
-            let (hash, bytes) = digest_file(Path::new(path)).map_err(|e| bad(cmd, e))?;
-            if expected != &json!([hash, bytes]) {
-                return Err(bad(cmd, "source changed during render; cache publication refused"));
-            }
-        }
+        // a source the plan hashed is read again only if it changed since
+        let mut digests = SourceDigests::open(dir(s).as_deref(), SETTLE, true);
+        let unchanged = sources.iter().try_for_each(|(path, expected)| {
+            let (hash, bytes) = digests.digest(Path::new(path)).map_err(|e| bad(cmd, e))?;
+            if expected == &json!([hash, bytes]) { Ok(()) } else { Err(bad(cmd, "source changed during render; cache publication refused")) }
+        });
+        digests.save();
+        unchanged?;
     }
     let path = Path::new(p["path"].as_str().ok_or_else(|| bad(cmd, "provide a completed render path"))?);
     let (hash, bytes) = digest_file(path).map_err(|e| bad(cmd, e))?;
@@ -275,9 +417,15 @@ fn commit(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let cache = dir(s).ok_or_else(|| bad(cmd, "configure a native cache directory first"))?;
     std::fs::create_dir_all(&cache).map_err(|e| bad(cmd, e.to_string()))?;
-    let lock =
-        std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(cache.join(format!("{k}.lock"))).map_err(|e| bad(cmd, e.to_string()))?;
-    lock.try_lock().map_err(|e| bad(cmd, format!("another writer owns this cache entry: {e}")))?;
+    let lock_path = cache.join(format!("{k}.lock"));
+    let lock = lock_entry(&lock_path, cmd)?;
+    let published = publish(s, k, &cache, manifest, path, (&hash, bytes));
+    unlock_entry(lock, &lock_path);
+    published
+}
+/// Publish a complete render as the entry of `k`, under that key's lock.
+fn publish(s: &Session, k: &str, cache: &Path, manifest: &Value, path: &Path, (hash, bytes): (&str, u64)) -> Result<Value> {
+    let cmd = "render.cacheCommit";
     if let Some(hit) = lookup(s, k).map_err(|e| bad(cmd, e))? {
         return Ok(json!({"key":k,"hit":true,"artifact":hit}));
     }
@@ -298,7 +446,7 @@ fn commit(s: &mut Session, p: &Value) -> Result<Value> {
         let mut output = std::fs::File::create_new(staged.join("artifact")).map_err(|e| bad(cmd, e.to_string()))?;
         std::io::copy(&mut input.take(bytes.saturating_add(1)), &mut output).map_err(|e| bad(cmd, e.to_string()))?;
         output.sync_all().map_err(|e| bad(cmd, e.to_string()))?;
-        if digest_file(&staged.join("artifact")).map_err(|e| bad(cmd, e))? != (hash.clone(), bytes) {
+        if digest_file(&staged.join("artifact")).map_err(|e| bad(cmd, e))? != (hash.to_string(), bytes) {
             return Err(bad(cmd, "render changed while copying; no cache entry published"));
         }
         let m = json!({"format":FORMAT,"version":1,"key":k,"engine":ENGINE,"sha256":hash,"bytes":bytes,"plan":manifest});
@@ -366,6 +514,8 @@ mod tests {
         let p = json!({"dependencies":[source],"external":{"fps":30,"width":3840},"settings":{"audio":true}});
         let first = s.execute("render.cachePlan", p.clone()).unwrap();
         assert_eq!(first["hit"], false);
+        assert_eq!(first["sourceDigests"], json!({"hashed":1,"reused":0}));
+        assert!(s.execute("render.cachePlan", json!({"dependencies":[source],"rehash":"yes"})).is_err());
         let artifact = dir.join("render.bin");
         std::fs::write(&artifact, b"complete artifact").unwrap();
         let saved = s.execute("render.cacheCommit", json!({"key":first["key"],"path":artifact,"manifest":first})).unwrap();
@@ -435,6 +585,83 @@ mod tests {
         assert!(s.execute("render.cacheCommit", json!({"key":plan["key"],"manifest":plan,"path":source})).is_err());
         drop(lock);
         assert!(s.execute("render.cachePlan", json!({"dependencies":["/missing/animation-source"]})).is_err());
+    }
+    /// Every plan read every source in full (14 s for a 101-source edit), and the commit read
+    /// them all again.
+    #[cfg(unix)]
+    #[test]
+    fn an_unchanged_source_is_hashed_once_and_a_changed_one_again() {
+        let dir = crate::media_test_util::tmp_dir("cache-source-digests");
+        let (source, folder) = (dir.join("source.bin"), dir.join("cache"));
+        std::fs::write(&source, b"scene one").unwrap();
+        let digest = |settle, trust| {
+            let mut memo = SourceDigests::open(Some(&folder), settle, trust);
+            let (hash, _) = memo.digest(&source).unwrap();
+            memo.save();
+            (hash, memo.hashed, memo.reused)
+        };
+        let none = std::time::Duration::ZERO;
+        // a file changed moments ago is not remembered: its times might not show the next change
+        let first = digest(SETTLE, true);
+        assert_eq!(digest(SETTLE, true), (first.0.clone(), 1, 0));
+        // one that has settled is read once
+        assert_eq!(digest(none, true), (first.0.clone(), 1, 0));
+        assert_eq!(digest(none, true), (first.0.clone(), 0, 1));
+        assert_eq!(digest(none, false), (first.0.clone(), 1, 0), "`rehash` reads it whatever is remembered");
+        // the same size and modified time over other bytes: its change time still gives it away
+        let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&source, b"scene two").unwrap();
+        std::fs::File::options().write(true).open(&source).unwrap().set_modified(modified).unwrap();
+        assert_eq!(std::fs::metadata(&source).unwrap().modified().unwrap(), modified);
+        let changed = digest(none, true);
+        assert_ne!(changed.0, first.0);
+        assert_eq!((changed.1, changed.2), (1, 0));
+        // a damaged memo is hashing, not an error
+        std::fs::write(folder.join(MEMO), b"{\"format\":\"autocut.sourceDigests\",\"version\":1,\"entries\":{\"x\":7}}").unwrap();
+        assert_eq!(digest(none, true), (changed.0.clone(), 1, 0));
+        assert_eq!(digest(none, true), (changed.0, 0, 1));
+    }
+    /// A writer that opened the lock file before its holder removed it must not go on with a
+    /// file nobody else can reach: two writers would publish the same key at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_removed_by_its_holder_is_not_a_lock() {
+        let dir = crate::media_test_util::tmp_dir("cache-lock-identity");
+        let path = dir.join("key.lock");
+        let holder = lock_entry(&path, "test").unwrap();
+        let late = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        assert!(lock_entry(&path, "test").is_err(), "held");
+        unlock_entry(holder, &path);
+        assert!(!path.exists());
+        late.try_lock().unwrap();
+        assert!(!is_at(&late, &path), "the removed file is locked, the path is free");
+        let next = lock_entry(&path, "test").unwrap();
+        assert!(is_at(&next, &path));
+        unlock_entry(next, &path);
+    }
+    /// Every committed key left its `<key>.lock` file in the cache folder for good.
+    #[cfg(unix)]
+    #[test]
+    fn a_commit_leaves_no_lock_file_behind() {
+        let (mut s, dir) = session("cache-lock-files");
+        let source = dir.join("source");
+        std::fs::write(&source, b"source").unwrap();
+        let p = json!({"dependencies":[source]});
+        let plan = s.execute("render.cachePlan", p.clone()).unwrap();
+        let artifact = dir.join("render.bin");
+        std::fs::write(&artifact, b"complete artifact").unwrap();
+        let commit = json!({"key":plan["key"],"path":artifact,"manifest":plan});
+        assert_eq!(s.execute("render.cacheCommit", commit.clone()).unwrap()["hit"], false);
+        assert_eq!(s.execute("render.cacheCommit", commit).unwrap()["hit"], true, "a second writer finds the entry");
+        let locks: Vec<String> = std::fs::read_dir(super::dir(&s).unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".lock"))
+            .collect();
+        assert!(locks.is_empty(), "{locks:?}");
+        assert_eq!(s.execute("render.cachePlan", p).unwrap()["hit"], true);
     }
     #[test]
     fn embedded_lut_content_invalidates_without_changing_a_clip_reference() {

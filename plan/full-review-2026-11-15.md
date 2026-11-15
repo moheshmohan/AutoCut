@@ -30,11 +30,11 @@ The new commands were then run, read-only, on four saved projects with the insta
 | 6 | Medium | **Deleting the "Continuous Music B" track blocked every later music bed** ("saved music partner track is missing"). | Fixed. A new partner track is made. |
 | 7 | Low | **A failed RAEA run kept its empty revision folder**, so the same name failed on the next run. | Fixed. |
 | 8 | Low (build time) | **Editing the UI or automation crate rebuilt the engine.** The engine's build script hashed and watched every crate, including the seven built on top of it. | Fixed. Those crates are left out of the hash; nothing in them can change what the engine renders. |
-| 9 | Medium | After the export, any other failure in `delivery.prepare` (a subtitle export, the publish pre-flight, the manifest) still leaves the master without a manifest, and the retry is refused. | Open. Needs a decision: resume an incomplete delivery, or remove the master on failure. |
-| 10 | Medium | `tts.checkClip` hears a clip's own range but compares it with the narration's whole text, so a trimmed or razor-split narration clip reads as unclear and fails the gate. | Open, not reproduced. |
-| 11 | Low | Every `render.cachePlan` hashes every source file in full (14 s for the EXEED project's 101 sources), and a delivery does it twice. | Open. A size-and-time shortcut would weaken the content guarantee. |
-| 12 | Low | `clip.autoColor` ignores `protectScreens` entries for clips it is not grading. | Open. |
-| 13 | Low | `render.cacheCommit` leaves one `<key>.lock` file per cache key. | Open. |
+| 9 | Medium | After the export, any other failure in `delivery.prepare` (a subtitle export, the publish pre-flight, the manifest) still leaves the master without a manifest, and the retry is refused. | Fixed later. The export leaves an unfinished manifest, and the same command run again finishes the delivery from the master that is there. |
+| 10 | Medium | `tts.checkClip` hears a clip's own range but compares it with the narration's whole text, so a trimmed or razor-split narration clip reads as unclear and fails the gate. | Fixed later, after reproducing it. Every clip of a take is judged by the take's whole speech. |
+| 11 | Low | Every `render.cachePlan` hashes every source file in full (14 s for the EXEED project's 101 sources), and a delivery does it twice. | Fixed later. A source's digest is kept while the file's identity, size, modified time and change time are the same. |
+| 12 | Low | `clip.autoColor` ignores `protectScreens` entries for clips it is not grading. | Fixed later. Such an entry is refused, naming the clip. |
+| 13 | Low | `render.cacheCommit` leaves one `<key>.lock` file per cache key. | Fixed later (macOS and Linux). The writer removes its lock file when it is done. |
 
 Findings 1 and 2a change what the gate blocks, which is a product decision as much as a bug fix.
 Both checks failed a finished, delivered edit. If a loudness jump or a caption difference should
@@ -99,7 +99,6 @@ which is what led to finding 2a. It was not run again after that fix; the new te
 ## Not done
 
 - No production upload, model download or GPU generation.
-- Findings 9–13 are open.
 
 ## After the review
 
@@ -112,3 +111,50 @@ which is what led to finding 2a. It was not run again after that fix; the new te
   with the same parameters.
 - With the installed CLI, read-only, on EXEED RX - natural edit v04: `sequence.checkContinuity`
   reports 89 findings, none a click, and the `render.cachePlan` identity is 25,328 bytes.
+
+## Findings 9–13, fixed later
+
+Fixed on 15 November after the review was pushed. What each fix does:
+
+- **9. A delivery that stopped after its export.** The export leaves the manifest with
+  `complete: false`, the digest of the edit (project, sequence, export settings, checks asked for)
+  and the master's size. The same `delivery.prepare` run again on the same edit skips the checks
+  and the export, writes the subtitles, runs the publishing pre-flight and finishes the manifest
+  (`complete: true`, `resumed: true` in the result). After any other edit the path is refused as
+  before. Resuming was chosen over removing the master: a failed subtitle should not cost an
+  hour-long render. An export with offline placeholders still stops with the master in place.
+- **10. Trimmed and split narration.** Reproduced first: a razor-split half heard "Here are ten"
+  against "Here are ten small robots" and read as unclear. A narration does not record which
+  words fall where in its file, so `tts.checkClip` now hears the take's whole speech for every
+  clip of it, and `part: true` says the clip holds only part of the take. A part is therefore
+  judged by its take, not by the words left on the timeline.
+- **11. Source hashing.** `render.cachePlan` and `render.cacheCommit` keep each source's digest in
+  the cache folder (`source-digests.json`) and use it while the file's identity (device and
+  inode), size, modified time and change time are the same. A file changed in the last two
+  seconds is always read. `rehash: true` reads everything. This is a trade: on a volume that keeps
+  no change time (FAT, exFAT), bytes rewritten under the same size and modified time are not
+  seen. Outside macOS and Linux nothing is remembered.
+- **12. Screens for other clips.** `clip.autoColor` refuses a `protectScreens` entry for a clip
+  the pass does not grade, before changing anything.
+- **13. Lock files.** The writer removes `<key>.lock` while it still holds the lock, and a writer
+  checks that the file it locked is still the one at the path. Lock files left by earlier builds
+  go when their key is committed again or when the Media Cache is cleaned. On Windows the lock
+  file stays, as before.
+
+Evidence, with a build of the working tree, read-only:
+
+| Project | Check | Result |
+|---|---|---|
+| EXEED RX - natural edit v04 | `render.cachePlan`, three runs | 15.2 s (101 sources read), then 0.2 s (101 reused), then 13.8 s with `rehash`; the same key each time, and every source hash equal to the installed build's |
+| South Korea - Expanded Travel Short | `delivery.prepare` to a scratch folder, with a folder in the way of the first subtitle | first run: master exported, then stopped ("Run delivery.prepare again…"), manifest `complete: false`; second run in a new process: 0.2 s, `resumed: true`, master untouched, both subtitles and a complete manifest; third run refused |
+
+Not checked on a real project: finding 10 (no saved project has a trimmed or split narration
+clip) and finding 12.
+
+New tests: `a_delivery_that_stopped_after_its_export_is_finished_by_running_it_again`,
+`an_unfinished_delivery_of_another_edit_is_not_picked_up`,
+`a_razor_split_narration_is_judged_by_its_whole_take`,
+`an_unchanged_source_is_hashed_once_and_a_changed_one_again`,
+`a_screen_for_a_clip_that_is_not_graded_is_refused`, `a_commit_leaves_no_lock_file_behind`,
+`a_lock_file_removed_by_its_holder_is_not_a_lock`. The tests for findings 9, 10, 12 and 13 were
+run against the code before the fixes and failed there (9 and 10 at the defect itself).

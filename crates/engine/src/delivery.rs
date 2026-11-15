@@ -316,10 +316,21 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     }
     Ok(report)
 }
+/// What a delivery is made from: the project, the sequence, the export settings and the checks
+/// asked for. A delivery that stopped after its export is finished by a second run only while
+/// this is unchanged, so its subtitles and manifest belong to the master that is already there.
+fn edit_digest(s: &Session, seq: filmcraft_project::ItemId, settings: &Value, qa: &Value) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let cmd = "delivery.prepare";
+    let project = serde_json::to_value(&*s.project).map_err(|e| bad(cmd, e.to_string()))?;
+    let edit = json!({"engine":crate::render_cache::ENGINE,"project":project,"sequence":seq.0,"settings":settings,"qa":qa});
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&edit).map_err(|e| bad(cmd, e.to_string()))?)))
+}
 fn prepare(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "delivery.prepare";
     let requested_path = p["path"].as_str().filter(|s| !s.is_empty() && s.len() <= 4096).ok_or_else(|| bad(cmd, "provide a new output path"))?;
     let short = flag(p, "short", false)?;
+    let caching = flag(p, "cache", true)?;
     let mut export = json!({"path":requested_path,"preset":"YouTube 2160p 4K Ultra HD","wait":true,"burnCaptions":short,"loudnessLufs":-14.0});
     if short {
         export["width"] = json!(2160);
@@ -335,17 +346,39 @@ fn prepare(s: &mut Session, p: &Value) -> Result<Value> {
     let output_path = crate::export_tools::output_path(s, &export, seq, &resolved, None);
     let path = output_path.as_str();
     export["path"] = json!(path);
-    if s.services.file_size(path).is_ok() {
-        return Err(bad(cmd, "output exists; choose a new revision path"));
-    }
-    crate::output_safety::protect(s, &s.project, path, cmd)?;
     let mut qa = p.get("qa").cloned().unwrap_or(json!({}));
     if !qa.is_object() {
         return Err(bad(cmd, "qa must be an object"));
     }
     qa["short"] = json!(short);
+    // Delivery writes each track exclusively below; the legacy exporter sidecar
+    // can overwrite an unrelated existing file and is not needed here.
+    resolved.caption_sidecar = None;
+    export["settings"] = serde_json::to_value(&resolved).map_err(|e| bad(cmd, e.to_string()))?;
+    resolved.path.clear();
+    let settings = serde_json::to_value(resolved).map_err(|e| bad(cmd, e.to_string()))?;
+    // A step that failed after the export (a subtitle, the publish pre-flight, the manifest) used
+    // to leave the master without a manifest, and the retry was refused because the master
+    // existed: a long export had to be made again under a new name. The export now leaves an
+    // unfinished manifest (`complete: false`) that names the edit, and a second run of the same
+    // edit to the same path finishes the delivery from the master that is there.
+    let manifest_path = format!("{path}.delivery.json");
+    let edit = edit_digest(s, seq, &settings, &qa)?;
+    let unfinished = match s.services.file_size(path) {
+        Err(_) => None,
+        Ok(bytes) => {
+            let record = s.services.read_file_bounded(&manifest_path, 16 << 20).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+            match record.filter(|m| m["format"] == "autocut.delivery" && m["complete"] == false) {
+                Some(m) if m["edit"] == edit.as_str() && m["bytes"].as_u64() == Some(bytes) => Some(m),
+                Some(_) => return Err(bad(cmd, "an unfinished delivery of a different edit, export or check is at this path; choose a new revision path")),
+                None => return Err(bad(cmd, "output exists; choose a new revision path")),
+            }
+        }
+    };
+    let resumed = unfinished.is_some();
+    crate::output_safety::protect(s, &s.project, path, cmd)?;
     let report_path = p["report"].as_str().map(str::to_string).unwrap_or_else(|| format!("{path}.qa.json"));
-    let mut destinations = vec![path.to_string(), format!("{path}.delivery.json")];
+    let mut destinations = vec![path.to_string(), manifest_path.clone()];
     if let Some(q) = s.active_sequence() {
         for n in 0..q.caption_tracks.len() {
             destinations.push(format!("{path}.C{}.srt", n + 1));
@@ -356,73 +389,102 @@ fn prepare(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad(cmd, "report must have its own path, separate from video, subtitles and manifest"));
         }
         crate::output_safety::protect(s, &s.project, destination, cmd)?;
-        if s.services.file_size(destination).is_ok() {
+        if !resumed && s.services.file_size(destination).is_ok() {
             return Err(bad(cmd, format!("delivery output already exists: {destination}; choose a new revision")));
         }
     }
-    qa["report"] = json!(report_path);
-    let report = preflight(s, &qa)?;
-    let report_path = report["reportPath"].as_str().ok_or_else(|| bad(cmd, "quality report was not saved"))?.to_string();
-    if report["passed"] != true {
-        return Ok(json!({"prepared":false,"blocked":true,"report":report_path,"qa":report}));
-    }
-    // Delivery writes each track exclusively below; the legacy exporter sidecar
-    // can overwrite an unrelated existing file and is not needed here.
-    resolved.caption_sidecar = None;
-    export["settings"] = serde_json::to_value(&resolved).map_err(|e| bad(cmd, e.to_string()))?;
-    resolved.path.clear();
-    let settings = serde_json::to_value(resolved).map_err(|e| bad(cmd, e.to_string()))?;
-    let caching = flag(p, "cache", true)?;
-    // The cache saves a render; it is never a reason to lose one. A plan that cannot be made, a
-    // session without a cache folder and a publication that fails all leave the delivery to go
-    // ahead uncached, with the reason in `cache.note` (a failed publication after a long export
-    // used to fail the delivery, and the retry was refused because the master existed).
-    let mut cache_note = None;
-    let plan = if caching {
-        match s.execute("render.cachePlan", json!({"settings":settings})) {
-            Ok(plan) if plan["cacheAvailable"] == true => Some(plan),
-            Ok(_) => {
-                cache_note = Some("no cache folder is configured: exported without the render cache".to_string());
-                None
+    // The checks of the first run stand for a delivery that is being finished: the edit and the
+    // checks asked for are the same. They run again only if their report is gone.
+    let kept = unfinished.as_ref().and_then(|m| m["qa"].as_str()).filter(|report| s.services.file_size(report).is_ok()).map(str::to_string);
+    let report_path = match kept {
+        Some(report) => report,
+        None => {
+            qa["report"] = json!(report_path);
+            let report = preflight(s, &qa)?;
+            let report_path = report["reportPath"].as_str().ok_or_else(|| bad(cmd, "quality report was not saved"))?.to_string();
+            if report["passed"] != true {
+                return Ok(json!({"prepared":false,"blocked":true,"report":report_path,"qa":report}));
             }
-            Err(e) => {
-                cache_note = Some(format!("exported without the render cache: {e}"));
+            report_path
+        }
+    };
+    let (output, cache) = match &unfinished {
+        Some(m) => (m["export"].clone(), m["cache"].clone()),
+        None => {
+            // The cache saves a render; it is never a reason to lose one. A plan that cannot be
+            // made, a session without a cache folder and a publication that fails all leave the
+            // delivery to go ahead uncached, with the reason in `cache.note` (a failed publication
+            // after a long export used to fail the delivery).
+            let mut cache_note = None;
+            let plan = if caching {
+                match s.execute("render.cachePlan", json!({"settings":settings})) {
+                    Ok(plan) if plan["cacheAvailable"] == true => Some(plan),
+                    Ok(_) => {
+                        cache_note = Some("no cache folder is configured: exported without the render cache".to_string());
+                        None
+                    }
+                    Err(e) => {
+                        cache_note = Some(format!("exported without the render cache: {e}"));
+                        None
+                    }
+                }
+            } else {
                 None
-            }
+            };
+            let hit = plan.as_ref().is_some_and(|v| v["hit"] == true);
+            let output = if let Some(plan) = plan.as_ref().filter(|_| hit) {
+                crate::render_cache::copy_artifact(&plan["artifact"], std::path::Path::new(path)).map_err(|e| bad(cmd, e.to_string()))?;
+                json!({"path":path,"cached":true})
+            } else {
+                let output = s.execute("file.exportMedia", export)?;
+                if output["offlineMedia"].as_array().is_some_and(|a| !a.is_empty()) {
+                    return Err(bad(cmd, "export contains offline placeholders; delivery stopped"));
+                }
+                if let Some(plan) = &plan
+                    && let Err(e) = s.execute("render.cacheCommit", json!({"key":plan["key"],"path":path,"manifest":plan}))
+                {
+                    cache_note = Some(format!("the export is complete but was not cached: {e}"));
+                }
+                output
+            };
+            (output, json!({"requested":caching,"hit":hit,"note":cache_note}))
         }
-    } else {
-        None
     };
-    let hit = plan.as_ref().is_some_and(|v| v["hit"] == true);
-    let output = if let Some(plan) = plan.as_ref().filter(|_| hit) {
-        crate::render_cache::copy_artifact(&plan["artifact"], std::path::Path::new(path)).map_err(|e| bad(cmd, e.to_string()))?;
-        json!({"path":path,"cached":true})
-    } else {
-        let output = s.execute("file.exportMedia", export)?;
-        if output["offlineMedia"].as_array().is_some_and(|a| !a.is_empty()) {
-            return Err(bad(cmd, "export contains offline placeholders; delivery stopped"));
-        }
-        if let Some(plan) = &plan
-            && let Err(e) = s.execute("render.cacheCommit", json!({"key":plan["key"],"path":path,"manifest":plan}))
-        {
-            cache_note = Some(format!("the export is complete but was not cached: {e}"));
-        }
-        output
-    };
-    let cache = json!({"requested":caching,"hit":hit,"note":cache_note});
-    let tracks = s.active_sequence().ok_or(EngineError::NoSequence)?.caption_tracks.clone();
-    let mut subtitles = Vec::new();
-    for (n, track) in tracks.iter().enumerate() {
-        let subtitle = format!("{path}.C{}.srt", n + 1);
-        s.execute("captions.export", json!({"track":track.id.0,"format":"srt","path":subtitle,"overwrite":false}))?;
-        subtitles.push(json!({"track":track.id.0,"name":track.name,"path":subtitle,"cueIds":track.captions.iter().map(|c|c.id.0).collect::<Vec<_>>() }));
+    // From here the master exists. A host that cannot leave the unfinished manifest goes on as
+    // before: its delivery cannot be finished by a second run.
+    let mut marked = resumed;
+    if !marked && let Ok(bytes) = s.services.file_size(path) {
+        let record = json!({"format":"autocut.delivery","version":1,"complete":false,"edit":edit,"bytes":bytes,"export":output,"cache":cache,"qa":report_path});
+        marked = serde_json::to_vec_pretty(&record).is_ok_and(|record| s.services.write_file_new(&manifest_path, &record).is_ok());
     }
-    let final_check = s.execute("publish.preflight", json!({"destination":if short{"youtubeShort"}else{"youtube"},"path":path,"loudness":true}))?;
-    let manifest = json!({"format":"autocut.delivery","version":1,"export":output,"cache":cache,"qa":report_path,"publishPreflight":final_check,"subtitles":subtitles,"privacy":"private","captionPolicy":if short{"burn"}else{"sidecar"}});
-    s.services
-        .write_file_new(&format!("{path}.delivery.json"), &serde_json::to_vec_pretty(&manifest).map_err(|e| bad(cmd, e.to_string()))?)
-        .map_err(|e| bad(cmd, e.to_string()))?;
-    Ok(json!({"prepared":final_check["ok"]==true,"blocked":final_check["ok"]!=true,"path":path,"cache":cache,"manifest":manifest,"uploaded":false}))
+    let finished = (|| -> Result<Value> {
+        let tracks = s.active_sequence().ok_or(EngineError::NoSequence)?.caption_tracks.clone();
+        let mut subtitles = Vec::new();
+        for (n, track) in tracks.iter().enumerate() {
+            let subtitle = format!("{path}.C{}.srt", n + 1);
+            // a second run writes over what the first got to: these paths were free before it
+            s.execute("captions.export", json!({"track":track.id.0,"format":"srt","path":subtitle,"overwrite":resumed}))
+                .map_err(|e| EngineError::Other(format!("subtitle {subtitle}: {e}")))?;
+            subtitles.push(json!({"track":track.id.0,"name":track.name,"path":subtitle,"cueIds":track.captions.iter().map(|c|c.id.0).collect::<Vec<_>>() }));
+        }
+        let final_check = s.execute("publish.preflight", json!({"destination":if short{"youtubeShort"}else{"youtube"},"path":path,"loudness":true}))?;
+        let manifest = json!({"format":"autocut.delivery","version":1,"complete":true,"export":output,"cache":cache,"qa":report_path,"publishPreflight":final_check,"subtitles":subtitles,"privacy":"private","captionPolicy":if short{"burn"}else{"sidecar"}});
+        let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| bad(cmd, e.to_string()))?;
+        let written = if marked { s.services.write_file(&manifest_path, &bytes) } else { s.services.write_file_new(&manifest_path, &bytes) };
+        written.map_err(|e| bad(cmd, e.to_string()))?;
+        Ok(
+            json!({"prepared":final_check["ok"]==true,"blocked":final_check["ok"]!=true,"path":path,"cache":cache,"manifest":manifest,"uploaded":false,"resumed":resumed}),
+        )
+    })();
+    finished.map_err(|e| {
+        if marked {
+            EngineError::Other(format!(
+                "{cmd}: the master is exported, but the delivery is not finished: {e}. Run {cmd} again with the same path, settings and checks to finish it without exporting again"
+            ))
+        } else {
+            e
+        }
+    })
 }
 
 #[cfg(test)]
@@ -512,6 +574,93 @@ mod tests {
         assert!(std::path::Path::new(&format!("{}.delivery.json", video.display())).exists(), "{r}");
         assert_eq!(r["cache"]["hit"], false);
         assert!(r["cache"]["note"].as_str().is_some_and(|n| n.contains("cache")), "{r}");
+    }
+    /// Native files, except that subtitles cannot be written while the switch is on: a failure
+    /// after the export.
+    struct NoSubtitles(std::sync::atomic::AtomicBool);
+    impl NoSubtitles {
+        fn refuse(&self, path: &str) -> std::io::Result<()> {
+            if path.ends_with(".srt") && self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(std::io::Error::other("the disk is full"));
+            }
+            Ok(())
+        }
+    }
+    impl crate::Services for NoSubtitles {
+        fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            crate::FsServices.read_file(path)
+        }
+        fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+            self.refuse(path)?;
+            crate::FsServices.write_file(path, data)
+        }
+        fn write_file_new(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+            self.refuse(path)?;
+            crate::FsServices.write_file_new(path, data)
+        }
+        fn file_size(&self, path: &str) -> std::io::Result<u64> {
+            crate::FsServices.file_size(path)
+        }
+        fn reader(&self, path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
+            crate::FsServices.reader(path)
+        }
+        fn read_range(&self, path: &str, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+            crate::FsServices.read_range(path, offset, len)
+        }
+    }
+    /// A one-second captioned edit whose delivery stopped after its export: the session, the
+    /// switch that lets subtitles be written again, the master and the delivery's parameters.
+    fn unfinished(name: &str) -> (Session, std::sync::Arc<NoSubtitles>, std::path::PathBuf, Value, String) {
+        let dir = crate::media_test_util::tmp_dir(name);
+        let image = dir.join("source.png");
+        image::save_buffer(&image, &[140; 80 * 120 * 3], 80, 120, image::ColorType::Rgb8).unwrap();
+        let services = std::sync::Arc::new(NoSubtitles(std::sync::atomic::AtomicBool::new(true)));
+        let mut s = Session { services: services.clone(), ..Default::default() };
+        let item = crate::commands::import_streamed(&mut s, image.to_str().unwrap(), None).unwrap();
+        s.execute("file.newSequence", json!({"width":80,"height":120,"fps":30,"video":1,"audio":1})).unwrap();
+        s.execute("timeline.place", json!({"item":item.0,"track":"V1","time":0,"duration":Tick::from_seconds_f64(1.0).0,"audio":false})).unwrap();
+        let track = s.execute("captions.newTrack", json!({"format":"Subtitle","name":"English"})).unwrap()["track"].clone();
+        s.execute("captions.add", json!({"track":track,"text":"Hello","seconds":0.1,"durationSeconds":0.5})).unwrap();
+        let video = dir.join("delivery.mp4");
+        let p = json!({"path":video,"settings":{"frameSize":[80,120]},"qa":{"privacy":false,"narration":false,"mix":false}});
+        let failed = s.execute("delivery.prepare", p.clone()).unwrap_err().to_string();
+        assert!(video.exists(), "{failed}");
+        assert!(failed.contains("disk is full"), "{failed}");
+        (s, services, video, p, failed)
+    }
+    fn manifest(video: &std::path::Path) -> Value {
+        serde_json::from_slice(&std::fs::read(format!("{}.delivery.json", video.display())).unwrap()).unwrap()
+    }
+    /// A step that failed after the export (here a subtitle) left the master without a manifest,
+    /// and the retry was refused because the master existed: the export had to be made again
+    /// under a new name.
+    #[test]
+    fn a_delivery_that_stopped_after_its_export_is_finished_by_running_it_again() {
+        let (mut s, services, video, p, failed) = unfinished("delivery-resume");
+        let exported = std::fs::metadata(&video).unwrap().modified().unwrap();
+        services.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        let r = s.execute("delivery.prepare", p.clone()).unwrap();
+        assert_eq!(r["resumed"], true, "{r}");
+        assert!(failed.contains("again") && failed.contains(".C1.srt"), "the failure says what failed and how to finish: {failed}");
+        assert_eq!(std::fs::metadata(&video).unwrap().modified().unwrap(), exported, "the master was exported again");
+        assert!(std::fs::read_to_string(format!("{}.C1.srt", video.display())).unwrap().contains("Hello"));
+        let m = manifest(&video);
+        assert_eq!((m["complete"].as_bool(), m["subtitles"].as_array().map(Vec::len)), (Some(true), Some(1)), "{m}");
+        assert!(m["qa"].as_str().is_some_and(|report| std::path::Path::new(report).exists()), "{m}");
+        assert!(s.execute("delivery.prepare", p).is_err(), "a finished delivery is not made again");
+    }
+    /// The master at the path is a render of the edit as it was: after another edit, the
+    /// unfinished delivery is not picked up.
+    #[test]
+    fn an_unfinished_delivery_of_another_edit_is_not_picked_up() {
+        let (mut s, services, video, p, _) = unfinished("delivery-resume-other-edit");
+        services.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        let track = s.active_sequence().unwrap().caption_tracks[0].id.0;
+        s.execute("captions.add", json!({"track":track,"text":"Later","seconds":0.7,"durationSeconds":0.2})).unwrap();
+        let e = s.execute("delivery.prepare", p).unwrap_err().to_string();
+        assert!(e.contains("different edit") && !e.contains("again"), "{e}");
+        assert_eq!(manifest(&video)["complete"], false);
+        assert!(!std::path::Path::new(&format!("{}.C1.srt", video.display())).exists());
     }
     #[test]
     fn a_required_unavailable_privacy_check_blocks_preparation() {
