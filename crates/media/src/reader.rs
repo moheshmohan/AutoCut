@@ -79,10 +79,18 @@ pub fn open_regular_file(path: &std::path::Path) -> io::Result<std::fs::File> {
 
 /// Read regular media without following a device or pipe.
 pub fn read_regular_file(path: &std::path::Path) -> io::Result<Vec<u8>> {
+    read_regular_file_bounded(path, u64::MAX)
+}
+
+/// [`read_regular_file`], refusing a file larger than `max` bytes before it is read.
+pub fn read_regular_file_bounded(path: &std::path::Path, max: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let file = open_regular_file(path)?;
     let meta = file.metadata()?;
     let len = meta.len();
+    if len > max {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{}: {len} bytes is over the {max} byte limit", path.display())));
+    }
     let mut out = Vec::new();
     file.take(len).read_to_end(&mut out)?;
     Ok(out)
