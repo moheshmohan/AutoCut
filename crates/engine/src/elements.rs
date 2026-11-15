@@ -401,7 +401,7 @@ fn chosen_audio_track(s: &Session, p: &Value, range: TimeRange) -> Result<Option
 /// that name is never touched: the WAV goes beside it as `<file> <n>.wav`. Returns (item, path,
 /// reused).
 pub(crate) fn sound_item(s: &mut Session, p: &Value, snd: &Sound, bytes: Vec<u8>) -> Result<(ItemId, String, bool)> {
-    let dir = crate::voiceover::generated_dir(s, p, "Generated Audio");
+    let dir = crate::voiceover::generated_dir(s, p, "Generated Audio")?;
     let mut path = std::path::Path::new(&dir).join(format!("{}.wav", snd.file)).to_string_lossy().into_owned();
     let write = |s: &Session, path: &str| -> Result<()> {
         if !cfg!(target_arch = "wasm32") {

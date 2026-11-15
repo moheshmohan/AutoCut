@@ -357,7 +357,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let base = label(q.kind);
     let n0 = s.history.undo.len();
     let result = (|| -> Result<Value> {
-        let dir = crate::voiceover::generated_dir(s, p, "Generated Audio");
+        let dir = crate::voiceover::generated_dir(s, p, "Generated Audio")?;
         let path = crate::voiceover::unique_wav_path(s, &dir, base)?;
         if !cfg!(target_arch = "wasm32") {
             std::fs::create_dir_all(&dir).map_err(|e| EngineError::Other(format!("{dir}: {e}")))?;
@@ -423,7 +423,7 @@ fn generate_music(s: &mut Session, p: &Value) -> Result<Value> {
     let plan = track.plan.clone();
     let n0 = s.history.undo.len();
     let result = (|| -> Result<Value> {
-        let dir = crate::voiceover::generated_dir(s, p, "Generated Audio");
+        let dir = crate::voiceover::generated_dir(s, p, "Generated Audio")?;
         let path = crate::voiceover::unique_wav_path(s, &dir, "Music")?;
         if !cfg!(target_arch = "wasm32") {
             std::fs::create_dir_all(&dir).map_err(|e| EngineError::Other(format!("{dir}: {e}")))?;

@@ -217,7 +217,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             ),
         ));
     }
-    let dir = crate::voiceover::generated_dir(s, p, "Generated Audio");
+    let dir = crate::voiceover::generated_dir(s, p, "Generated Audio")?;
     let path = crate::voiceover::unique_wav_path(s, &dir, BASE)?;
     let wait = bool_p(p, "wait").unwrap_or(false);
     let short: String = request::clean_prompt(&req.prompt).chars().take(40).collect();
