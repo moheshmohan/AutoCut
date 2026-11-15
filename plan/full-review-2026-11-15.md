@@ -91,11 +91,24 @@ which is what led to finding 2a. It was not run again after that fix; the new te
 - `cargo xtask ci --changed --base HEAD` passed: formatting, Clippy with warnings as errors on the
   engine, the CLI and the nine crates built on them, 1,332 tests (1,248 in the engine, none
   failed, 9 ignored), layering, the 93 asset attributions and the 57 WebAssembly crate checks.
-- The full `cargo xtask ci` was **not** run. It has to pass before any push.
+- The full `cargo xtask ci` passed on `4ebe1d80`, which is these fixes (AV23) plus the upstream
+  ports AV24–AV33: formatting, Clippy with warnings as errors on the whole workspace, 6,333
+  tests (none failed, 89 ignored), the translation report, layering, the 93 asset attributions
+  and the 57 WebAssembly crate checks.
 
 ## Not done
 
 - No production upload, model download or GPU generation.
-- The installed app and CLI are still the AV21 build: these fixes are in the working tree only.
-- The upstream survey is in [upstream-sync-2026-11-15.md](upstream-sync-2026-11-15.md); nothing
-  from it is integrated.
+- Findings 9–13 are open.
+
+## After the review
+
+- The fixes are commit AV23. The upstream survey is in
+  [upstream-sync-2026-11-15.md](upstream-sync-2026-11-15.md); its 32 commits worth taking were
+  ported as AV24–AV33.
+- The app and the CLI were rebuilt from `4ebe1d80` and installed on 15 November. The build
+  before it is kept as `target/macos-package/AutoCut-before-AV33-2026-11-15.app` and
+  `target/release/filmcraft-cli-before-AV33-2026-11-15`. Both builds list the same 914 commands
+  with the same parameters.
+- With the installed CLI, read-only, on EXEED RX - natural edit v04: `sequence.checkContinuity`
+  reports 89 findings, none a click, and the `render.cachePlan` identity is 25,328 bytes.
