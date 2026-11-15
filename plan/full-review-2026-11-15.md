@@ -149,7 +149,7 @@ Evidence, with a build of the working tree, read-only:
 | South Korea - Expanded Travel Short | `delivery.prepare` to a scratch folder, with a folder in the way of the first subtitle | first run: master exported, then stopped ("Run delivery.prepare again…"), manifest `complete: false`; second run in a new process: 0.2 s, `resumed: true`, master untouched, both subtitles and a complete manifest; third run refused |
 
 Not checked on a real project: finding 10 (no saved project has a trimmed or split narration
-clip) and finding 12.
+clip). Finding 12 was checked later with the installed build (below).
 
 New tests: `a_delivery_that_stopped_after_its_export_is_finished_by_running_it_again`,
 `an_unfinished_delivery_of_another_edit_is_not_picked_up`,
@@ -158,3 +158,24 @@ New tests: `a_delivery_that_stopped_after_its_export_is_finished_by_running_it_a
 `a_screen_for_a_clip_that_is_not_graded_is_refused`, `a_commit_leaves_no_lock_file_behind`,
 `a_lock_file_removed_by_its_holder_is_not_a_lock`. The tests for findings 9, 10, 12 and 13 were
 run against the code before the fixes and failed there (9 and 10 at the defect itself).
+
+### Shipped
+
+- The fixes are commit AV34 (`73f9a029`). The first full `cargo xtask ci` on it failed one test,
+  `review_catalogue_scenes_reuse_one_verified_retained_original` (`WouldBlock`). Its synthetic
+  FrameAtlas server accepts on a non-blocking listener, and on macOS the accepted stream keeps
+  that mode, so a request not yet written could not be read. Run 60 at a time it failed 9 of 180
+  runs; with the stream set back to blocking (AV35, `7406c1e5`, test code only), 0 of 300.
+- The full `cargo xtask ci` then passed on `7406c1e5`: formatting, Clippy with warnings as errors
+  on the whole workspace, 6,341 tests (none failed, 89 ignored), the translation report,
+  layering, the 93 asset attributions and the 57 WebAssembly crate checks.
+- Pushed to `autocut` `main` and `feat/autocut` (`8ad3dee0..7406c1e5`); the fork's AutoCut checks
+  passed on both.
+- The app and the CLI were rebuilt from `7406c1e5` and installed. The build before it is kept as
+  `target/macos-package/AutoCut-before-AV35-2026-11-15.app` and
+  `target/release/filmcraft-cli-before-AV35-2026-11-15`. Both list the same 914 commands. The app
+  reopened the EXEED project clean, at the same playhead, with the project file unchanged.
+- With the installed CLI, read-only, on EXEED RX - natural edit v04: `clip.autoColor` grading clip
+  2075 with a `protectScreens` entry for clip 2076 is refused ("protectScreens names clip 2076,
+  which this pass does not grade…"); `render.cachePlan` takes 0.2 s, reusing all 101 source
+  digests, with the same key on two runs.
