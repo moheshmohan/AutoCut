@@ -58,6 +58,18 @@ fn a_failed_recording_save_keeps_the_take_for_retry() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A take started in a project that has since been replaced is not placed into the new one.
+#[test]
+fn a_take_of_a_replaced_project_is_not_placed() {
+    let (mut s, track, index) = demo();
+    s.execute("audio.voiceover.start", json!({"track":track,"time":0,"preroll":0})).unwrap();
+    s.document_epoch = s.document_epoch.wrapping_add(1);
+    let error = s.execute("audio.voiceover.stop", json!({"time":sec(1.0)})).unwrap_err().to_string();
+    assert!(error.contains("replaced"), "{error}");
+    assert!(!s.voiceover.recording());
+    assert!(track_clips(&s, index).is_empty());
+}
+
 #[test]
 fn hostile_record_points_and_preroll_are_bounded() {
     let (mut s, track, _) = demo();
