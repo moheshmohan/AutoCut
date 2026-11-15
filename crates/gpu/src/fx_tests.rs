@@ -24,7 +24,18 @@ pub(super) const EXACT: f32 = 1e-4;
 pub(super) const FLIPS: f64 = 0.01;
 
 fn cx(t: Tick, px_scale: f32) -> FxCtx<'static> {
-    FxCtx { t, px_scale, seconds: 0.0, timecode: "", clip_name: "", project: None, env: None, frame_rate: 24.0, working: filmcraft_color::WorkingSpace::Rec709 }
+    FxCtx {
+        t,
+        px_scale,
+        mask_scale: px_scale,
+        seconds: 0.0,
+        timecode: "",
+        clip_name: "",
+        project: None,
+        env: None,
+        frame_rate: 24.0,
+        working: filmcraft_color::WorkingSpace::Rec709,
+    }
 }
 
 pub(super) fn effect(id: &str, params: &[(&str, ParamValue)]) -> EffectInstance {

@@ -324,7 +324,7 @@ fn gpu_ops(chain: &GpuChain<'_>, item: &TrackItem, cx: &crate::effects::FxCtx, w
     for e in &chain.effects {
         let op = FxOp::eval(e, cx, w, h)?;
         let op = match e.masks.iter().any(|m| m.mode != filmcraft_project::MaskMode::None) {
-            true => FxOp::Masked { op: Box::new(op), masks: crate::mask::prepare(&e.masks, cx.t, cx.px_scale) },
+            true => FxOp::Masked { op: Box::new(op), masks: crate::mask::prepare(&e.masks, cx.t, cx.mask_scale) },
             false => op,
         };
         ops.push(op.gpu_ok().then_some(op)?);
@@ -332,7 +332,7 @@ fn gpu_ops(chain: &GpuChain<'_>, item: &TrackItem, cx: &crate::effects::FxCtx, w
     if chain.opacity_masks
         && let Some(o) = item.effect("opacity")
     {
-        let op = FxOp::OpacityMask { masks: crate::mask::prepare(&o.masks, cx.t, cx.px_scale) };
+        let op = FxOp::OpacityMask { masks: crate::mask::prepare(&o.masks, cx.t, cx.mask_scale) };
         ops.push(op.gpu_ok().then_some(op)?);
     }
     Some(ops)
@@ -663,7 +663,9 @@ fn push_item(
                 }
                 let cx = crate::effects::FxCtx {
                     t: mt,
-                    px_scale,
+                    // as the CPU path: effect sizes are capped, mask outlines use the true ratio
+                    px_scale: px_scale.min(crate::MAX_EFFECT_PX_SCALE),
+                    mask_scale: px_scale,
                     seconds: (t - item.start).seconds(),
                     timecode: "",
                     clip_name: &item.name,
@@ -687,7 +689,9 @@ fn push_item(
             let tc = "";
             let cx = crate::effects::FxCtx {
                 t: mt,
-                px_scale,
+                // as the CPU path: effect sizes are capped, mask outlines use the true ratio
+                px_scale: px_scale.min(crate::MAX_EFFECT_PX_SCALE),
+                mask_scale: px_scale,
                 seconds: (t - item.start).seconds(),
                 timecode: tc,
                 clip_name: &item.name,

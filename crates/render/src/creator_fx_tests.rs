@@ -8,7 +8,18 @@ use filmcraft_project::{ParamValue, find_effect};
 use filmcraft_time::Tick;
 
 fn cx(t: Tick, seconds: f64) -> FxCtx<'static> {
-    FxCtx { t, px_scale: 1.0, seconds, timecode: "", clip_name: "", project: None, env: None, frame_rate: 30.0, working: filmcraft_color::WorkingSpace::Rec709 }
+    FxCtx {
+        t,
+        px_scale: 1.0,
+        mask_scale: 1.0,
+        seconds,
+        timecode: "",
+        clip_name: "",
+        project: None,
+        env: None,
+        frame_rate: 30.0,
+        working: filmcraft_color::WorkingSpace::Rec709,
+    }
 }
 
 /// A colourful picture with a gradient, edges, partial alpha and super-whites.

@@ -842,8 +842,12 @@ mod decode_pcm_tests {
 
 /// Resample-read `frames` from planar source audio at `src_rate` into a buffer at `rate`,
 /// starting at output sample `start` (linear interpolation; the audio crate adds sinc later).
-pub fn read_resampled(src: &[Vec<f32>], src_rate: u32, start: i64, frames: usize, rate: u32) -> AudioBuffer {
+pub fn read_resampled(src: &[Vec<f32>], src_rate: u32, start: i64, frames: usize, rate: u32) -> filmcraft_media::Result<AudioBuffer> {
+    if rate == 0 {
+        return Err(MediaError::Decode("audio sample rate must be nonzero".into()));
+    }
     let ch = src.len().max(1);
+    filmcraft_media::validate_audio_buffer_shape(ch, frames)?;
     let mut out = AudioBuffer::silence(rate, ch, frames);
     let total = src.first().map_or(0, Vec::len);
     let ratio = src_rate as f64 / rate as f64;
@@ -863,7 +867,7 @@ pub fn read_resampled(src: &[Vec<f32>], src_rate: u32, start: i64, frames: usize
             out.channels[c][i] = a + (b - a) * f;
         }
     }
-    out
+    Ok(out)
 }
 
 /// A standalone audio file: the bytes are kept and the decoded PCM lives in the process-wide
@@ -1121,7 +1125,7 @@ impl MediaSource for AudioFileSource {
         let samples = audio_cache()
             .get_or_insert_with(self.key, || Self::decode_file(&self.info.name, &self.bytes).map(|(_, _, s)| Arc::new(s)))
             .map_err(MediaError::from)?;
-        Ok(read_resampled(&samples, self.rate, start, frames, sample_rate))
+        read_resampled(&samples, self.rate, start, frames, sample_rate)
     }
 }
 
@@ -1138,6 +1142,20 @@ pub fn opener(name: &str, bytes: Arc<[u8]>) -> Option<std::result::Result<Shared
         return None;
     }
     Some(AudioFileSource::decode(name, bytes).map(|s| Arc::new(s) as SharedSource).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod resample_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn read_resampled_rejects_an_oversized_window() {
+        let src = vec![vec![0.0f32; 48]; 2];
+        assert!(read_resampled(&src, 48_000, 0, usize::MAX / 8, 48_000).is_err());
+        assert!(read_resampled(&src, 48_000, 0, filmcraft_media::MAX_AUDIO_BUFFER_BYTES, 48_000).is_err());
+        assert_eq!(read_resampled(&src, 48_000, 0, 24, 48_000).unwrap().channels[0].len(), 24);
+        assert!(read_resampled(&src, 48_000, 0, 24, 0).is_err(), "a zero output rate must not divide");
+    }
 }
 
 #[cfg(test)]

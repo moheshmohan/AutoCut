@@ -413,3 +413,52 @@ fn a_transition_inside_a_plain_nest_is_a_step_of_the_parent_plan() {
         assert_eq!(layer_count(&r, outer, rate.tick_of(10)), Some(2), "{effect}");
     }
 }
+
+/// A project that stores a media width far from the file's (here 1 against 4096) used to scale
+/// every effect size by the ratio. The median filter's cost is its radius squared per pixel.
+#[test]
+fn a_wrong_stored_media_width_does_not_blow_up_effect_sizes() {
+    let mut r = Rig::new();
+    let m = r.matte(RED, 4096, 16);
+    if let Some(v) = r.p.item_mut(m).and_then(|i| i.as_media_mut()).and_then(|c| c.info.video.as_mut()) {
+        v.width = 1;
+    }
+    let s = r.seq("S", 4096, 16, FrameRate::FPS_24);
+    let c = r.put(s, m, 10);
+    let mut e = filmcraft_project::find_effect("median").unwrap().instance();
+    e.params.get_mut("radius").unwrap().value = ParamValue::Float(1.0);
+    r.clip(s, c).effects.push(e);
+    let t = std::time::Instant::now();
+    let _ = r.frame(s, Tick::ZERO);
+    assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+}
+
+/// A GPU mask op places its outline by the uncapped ratio, as the CPU path does: a mask (a
+/// redaction, say) stays on its subject however far the stored media width is off the decoded
+/// one, while the effect's own sizes use the capped scale.
+#[test]
+fn gpu_mask_ops_are_placed_by_the_uncapped_scale() {
+    use crate::gpufx::FxOp;
+    let mut r = Rig::new();
+    let m = r.matte(RED, 4096, 16);
+    if let Some(v) = r.p.item_mut(m).and_then(|i| i.as_media_mut()).and_then(|c| c.info.video.as_mut()) {
+        v.width = 1;
+    }
+    let s = r.seq("S", 4096, 16, FrameRate::FPS_24);
+    let c = r.put(s, m, 10);
+    let mut e = filmcraft_project::find_effect("invert").unwrap().instance();
+    // the left half of the one stored pixel
+    e.masks.push(filmcraft_project::Mask::new("m", filmcraft_project::MaskPath::rect(0.0, 0.0, 0.5, 16.0)));
+    r.clip(s, c).effects.push(e);
+    let plan = plan::plan_frame(&r.p, s, Tick::ZERO, RenderOptions::default(), &r.map);
+    let plan::FramePlan::Layers { layers, .. } = &plan else { panic!("a layered plan") };
+    let fx = layers[0].fx.as_ref().expect("the clip's effect runs in the GPU effect stage");
+    let FxOp::Masked { masks, .. } = &fx.ops[0] else { panic!("a masked op") };
+    let right = masks[0].pts.iter().map(|p| p[0]).fold(0.0f32, f32::max);
+    // working pixels per stored pixel, far past the cap on effect sizes
+    let ratio = fx.size.0 as f32;
+    assert!(ratio > crate::MAX_EFFECT_PX_SCALE, "{ratio}");
+    assert!((right - 0.5 * ratio).abs() < 1e-3, "the mask's right edge is at {right}, half of {ratio} working pixels");
+    // the planned frame is the CPU's
+    assert!(worst(&r.planned(s, Tick::ZERO), &r.frame(s, Tick::ZERO)) < 0.001);
+}

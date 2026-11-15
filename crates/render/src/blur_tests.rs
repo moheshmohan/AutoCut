@@ -93,6 +93,7 @@ fn full_size_layer(p: &Project, seq: ItemId, clip: ClipId, m: &SourceMap) -> Ima
     let cx = effects::FxCtx {
         t,
         px_scale: 1.0,
+        mask_scale: 1.0,
         seconds: 0.0,
         timecode: "",
         clip_name: "",

@@ -20,6 +20,7 @@ fn ctx(seconds: f64, px_scale: f32) -> FxCtx<'static> {
     FxCtx {
         t: Tick::from_seconds_f64(seconds),
         px_scale,
+        mask_scale: px_scale,
         seconds,
         timecode: "",
         clip_name: "",

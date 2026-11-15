@@ -1168,6 +1168,7 @@ mod tests {
         let cx = FxCtx {
             t: Tick::ZERO,
             px_scale: 1.0,
+            mask_scale: 1.0,
             seconds: 0.0,
             timecode: "",
             clip_name: "",

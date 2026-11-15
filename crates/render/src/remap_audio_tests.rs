@@ -116,3 +116,23 @@ fn clips_without_a_curve_are_left_to_the_other_paths() {
     assert!(remapped(&clip("hero", true), &sine, 0, 0, SR).is_none());
     assert!(remapped(&clip("hero", true), &sine, 0, 10, 0).is_none());
 }
+
+/// A Time Remapping clip stored far above the speed cap: whichever path plays it (the curve, or
+/// capped varispeed when the curve's window is too long), a block reads a bounded source window.
+#[test]
+fn a_remapped_clip_stored_above_the_speed_cap_reads_a_bounded_window() {
+    for speed in [1e12, f64::INFINITY] {
+        let mut it = clip("hero", false);
+        it.speed = speed;
+        let most = std::cell::Cell::new(0usize);
+        let src = |m0: i64, len: usize| {
+            most.set(most.get().max(len));
+            sine(m0, len)
+        };
+        let stream = MixStream::new();
+        let n = 4800;
+        let out = raw_channels(&it, &src, &|| 0, at(&it, 0.5), n, SR, 2, stream.key());
+        assert_eq!(out[0].len(), n);
+        assert!(most.get() <= n * REMAP_READ_PER_SAMPLE + (1 << 16), "speed {speed}: a block of {n} read {} source samples", most.get());
+    }
+}
