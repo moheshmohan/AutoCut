@@ -115,4 +115,8 @@ impl VideoEncoder for CaptionSei {
         let p = self.inner.encode_yuv420(frame, y, u, v)?;
         Ok(self.embed(p))
     }
+    /// The encoder it wraps does the work: a hardware encoder with embedded captions is still one.
+    fn hardware(&self) -> Option<&'static str> {
+        self.inner.hardware()
+    }
 }

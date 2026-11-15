@@ -200,7 +200,7 @@ fn last_export_is_the_newest_finished_export_on_disk() {
     let push = |s: &mut Session, path: &str, ok: bool| {
         let job = crate::narration::new_job(s, format!("Export {path}"));
         let r = if ok {
-            Ok(filmcraft_export::Report { path: path.into(), frames: 1, seconds: 0.1, bytes: 10, render_fps: 1.0, extra_files: Vec::new() })
+            Ok(filmcraft_export::Report { path: path.into(), frames: 1, seconds: 0.1, bytes: 10, render_fps: 1.0, ..Default::default() })
         } else {
             Err("encoder failed".to_string())
         };

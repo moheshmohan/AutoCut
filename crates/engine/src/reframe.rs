@@ -1075,7 +1075,7 @@ fn start(s: &mut Session, cmd: &'static str, label: String, target: Target, work
                 seconds: secs,
                 bytes: 0,
                 render_fps: done as f64 / secs.max(1e-6),
-                extra_files: Vec::new(),
+                ..Default::default()
             })
         });
         prog.finished.store(true, Ordering::Relaxed);

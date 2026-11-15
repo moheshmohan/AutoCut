@@ -299,7 +299,7 @@ fn download(s: &mut Session, p: &Value) -> Result<Value> {
                     seconds: t0.elapsed().as_secs_f64(),
                     bytes: 0,
                     render_fps: 0.0,
-                    extra_files: Vec::new(),
+                    ..Default::default()
                 })
             }
             Err(e) => {

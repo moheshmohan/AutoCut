@@ -1449,7 +1449,7 @@ fn finish(
             let path = v["built"]["export"]["path"].as_str().unwrap_or_default().to_string();
             *lock(outcome) = Some(v);
             *lock(&prog.status) = status;
-            Ok(filmcraft_export::Report { path, frames: 0, seconds: t0.elapsed().as_secs_f64(), bytes: 0, render_fps: 0.0, extra_files: Vec::new() })
+            Ok(filmcraft_export::Report { path, frames: 0, seconds: t0.elapsed().as_secs_f64(), bytes: 0, render_fps: 0.0, ..Default::default() })
         }
         Err(e) => {
             *lock(&prog.status) = e.clone();

@@ -557,7 +557,7 @@ fn upload_to_google_photos_after_an_export() {
     // a finished export on disk
     let out = d.path("Showcase.mp4");
     std::fs::write(&out, b"not really a movie").unwrap();
-    let report = filmcraft_engine::export::Report { path: out.clone(), frames: 1, seconds: 0.1, bytes: 18, render_fps: 10.0, extra_files: Vec::new() };
+    let report = filmcraft_engine::export::Report { path: out.clone(), frames: 1, seconds: 0.1, bytes: 18, render_fps: 10.0, ..Default::default() };
     let job = Job { id: 41, label: "Export Showcase.mp4".into(), progress: Default::default(), result: Arc::new(Mutex::new(Some(Ok(report)))) };
     job.progress.finished.store(true, Ordering::Relaxed);
     d.app().session.jobs.push(job);

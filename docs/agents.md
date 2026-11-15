@@ -167,6 +167,14 @@ progress and stop it:
   once: poll `jobs.list` for the job's `progress`, `etaSeconds`, `finished` and `result`, and stop it
   with `jobs.cancel` (`export.queue.list` lists the Export Queue only, not direct exports, #1544). Other exports (`file.exportFrame`, interchange formats, …) finish quickly and
   ignore the token.
+- A finished export's `result` (`file.exportMedia` with `wait: true`, its job in `jobs.list`, each
+  finished item of `export.queue.list` and `export.queue.add`) names the video encoder that ran in `encoder`: `"NVENC"` or `"VideoToolbox"`, or `"software"` for
+  FilmCraft's own (absent for audio, image sequences and GIF). `hardwareEncoding: "auto"` asks for
+  a hardware encoder but does not promise one: when it declines the export (two-pass VBR, HDR, MXF,
+  no driver…) the software encoder runs, and `result.warnings` says so with the reason when there is
+  one, e.g. `hardware encoding declined (NVENC: two-pass VBR); the software H.264 encoder ran`. The
+  app logs the same line as a warning and shows it in Events after the job's "Finished" line, and
+  `filmcraft-cli export` (with or without `--queue`) prints it on stderr.
 - Bridge mode works the same way: the export runs as an app job (the app stays responsive and shows
   "Exporting… NN%" in its status bar) and the call returns when it is written, however long it
   takes. `filmcraft-cli --bridge … exec file.exportMedia … wait=true` blocks the same way.

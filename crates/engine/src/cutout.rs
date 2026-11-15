@@ -594,7 +594,7 @@ pub(crate) fn outline_job(
                 seconds: secs,
                 bytes: 0,
                 render_fps: done as f64 / secs.max(1e-6),
-                extra_files: Vec::new(),
+                ..Default::default()
             }),
         };
         *lock(&prog.status) = match &r {

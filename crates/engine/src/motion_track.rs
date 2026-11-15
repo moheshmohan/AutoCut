@@ -582,7 +582,7 @@ fn start(s: &mut Session, cmd: &'static str, req: Request, action: Action, p: &V
             seconds: secs,
             bytes: 0,
             render_fps: done as f64 / secs.max(1e-6),
-            extra_files: Vec::new(),
+            ..Default::default()
         }));
         prog.finished.store(true, Ordering::Relaxed);
     };

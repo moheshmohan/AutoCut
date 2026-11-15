@@ -92,6 +92,7 @@ fn encode_single(profile: VtProfile, pics: &[Planes]) -> Option<(Vec<EncodedPack
     let made = videotoolbox_encoder_factory(s.format, W, H, FPS, &s);
     filmcraft_export::set_hw_encode_sessions(EncodeSessions::Auto);
     let mut enc = made?.ok()?;
+    assert_eq!(enc.hardware(), Some("VideoToolbox"));
     let packets = encode_all(enc.as_mut(), pics);
     Some((packets, enc.sample_entry()))
 }
@@ -138,6 +139,8 @@ fn joined_stream_matches_one_session(profile: VtProfile, name: &str) {
         }
     };
     assert_eq!(par.lanes(), 2);
+    // the export's report names the encoder from this: several sessions are still VideoToolbox
+    assert_eq!(par.hardware(), Some("VideoToolbox"), "{name}");
     let packets = encode_all(&mut par, &pics);
     let entry = par.sample_entry();
     match (&entry.codec, profile) {

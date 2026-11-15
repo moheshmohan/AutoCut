@@ -273,7 +273,7 @@ fn finish(
             prog.done.store(bytes, Ordering::Relaxed);
             *prog.status.lock().unwrap_or_else(PoisonError::into_inner) = "Uploaded to Google Photos".into();
             let seconds = t0.elapsed().as_secs_f64();
-            Ok(filmcraft_export::Report { path: path.to_string(), frames: 0, seconds, bytes, render_fps: 0.0, extra_files: Vec::new() })
+            Ok(filmcraft_export::Report { path: path.to_string(), frames: 0, seconds, bytes, render_fps: 0.0, ..Default::default() })
         }
         Err(e) => {
             *prog.status.lock().unwrap_or_else(PoisonError::into_inner) = e.clone();

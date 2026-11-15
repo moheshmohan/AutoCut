@@ -2176,7 +2176,7 @@ fn start(s: &mut Session, cmd: &'static str, seq: ItemId, work: Vec<Work>, skipp
                     seconds: secs,
                     bytes: 0,
                     render_fps: frames as f64 / secs.max(1e-6),
-                    extra_files: Vec::new(),
+                    ..Default::default()
                 }),
                 Err(e) => {
                     *lock(&prog.error) = Some(e.clone());

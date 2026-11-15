@@ -187,3 +187,37 @@ fn hostile_captions_never_stop_an_export() {
     let bytes = export_to(&Arc::new(q), seq, &m, "disabled.mp4", ExportSettings { format: Format::H264, embed_captions: true, range, ..Default::default() });
     assert!(cc_frames(&samples(&bytes).0).iter().all(|(_, t)| t.is_empty()));
 }
+
+/// The caption wrapper answers for the encoder it wraps: a hardware export with embedded captions
+/// is reported as the hardware encoder's (not as "software", with a fallback warning), and a
+/// software one as software.
+#[test]
+fn the_caption_wrapper_reports_the_encoder_it_wraps() {
+    struct Enc(Option<&'static str>);
+    impl VideoEncoder for Enc {
+        fn sample_entry(&self) -> SampleEntry {
+            SampleEntry::avc(filmcraft_isobmff::AvcConfig::default(), 0, 0)
+        }
+        fn timescale(&self) -> u32 {
+            30
+        }
+        fn encode(&mut self, _frame: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
+            Ok(Vec::new())
+        }
+        fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
+            Ok(Vec::new())
+        }
+        fn hardware(&self) -> Option<&'static str> {
+            self.0
+        }
+    }
+    let rate = FrameRate::FPS_30;
+    let (p, seq, _) = captioned(rate, 30, &[(0, 20, "HELLO")]);
+    let settings = ExportSettings { format: Format::H264, embed_captions: true, ..Default::default() };
+    let schedule = crate::captions_out::schedule(&p, seq, &settings, TimeRange::new(Tick::ZERO, rate.tick_of(30)), rate, 0);
+    assert!(schedule.is_some(), "the sequence has captions to embed");
+    for hardware in [Some("VideoToolbox"), None] {
+        let wrapped = crate::captions_out::CaptionSei::wrap(Box::new(Enc(hardware)), schedule.as_ref(), Format::H264, rate);
+        assert_eq!(wrapped.hardware(), hardware);
+    }
+}

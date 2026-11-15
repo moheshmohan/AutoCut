@@ -817,7 +817,7 @@ impl Progress {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Report {
     pub path: String,
     pub frames: u64,
@@ -827,6 +827,14 @@ pub struct Report {
     /// Further files written besides `path` (MXF OP-Atom audio files).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra_files: Vec<String>,
+    /// The video encoder that ran: the hardware encoder's name ("NVENC", "VideoToolbox"), or
+    /// "software" for FilmCraft's own. `None` for exports without one (audio, image sequences, GIF).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<String>,
+    /// What the user should know about how the export ran: hardware encoding asked for, but the
+    /// software encoder ran instead (and why, when the hardware encoder said).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// A packet produced by a video encoder.
@@ -878,6 +886,12 @@ pub trait VideoEncoder: Send {
             return Err(ExportError::Encode("internal: this encoder takes RGBA pictures, not Y'CbCr".into()));
         }
         self.encode(frame)
+    }
+    /// The hardware encoder doing the work ("NVENC", "VideoToolbox"), `None` for FilmCraft's own
+    /// software encoders: what the export's [`Report::encoder`] names. An encoder that wraps
+    /// another (captions, parallel sessions) answers for the one it wraps.
+    fn hardware(&self) -> Option<&'static str> {
+        None
     }
 }
 
@@ -1017,6 +1031,24 @@ pub fn note_hw_encode_session() {
 /// A hardware encoder declined a request (the software encoder takes it).
 pub fn note_hw_encode_declined() {
     HW_DECLINED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+thread_local! {
+    /// Why a hardware encoder last declined a request on this thread ([`note_hw_encode_declined_by`]).
+    static HW_DECLINE: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) };
+}
+
+/// A hardware encoder (`encoder`: "NVENC", "VideoToolbox") declined a request, and why: counted as
+/// [`note_hw_encode_declined`], and kept for the export that asked (factories run on its thread), so
+/// its report can say that the software encoder took over and why.
+pub fn note_hw_encode_declined_by(encoder: &str, why: &str) {
+    note_hw_encode_declined();
+    HW_DECLINE.set(Some(format!("{encoder}: {why}")));
+}
+
+/// Take the reason [`note_hw_encode_declined_by`] kept on this thread.
+pub(crate) fn take_hw_encode_decline() -> Option<String> {
+    HW_DECLINE.take()
 }
 
 /// The stages of an export whose wall time [`stage_times`] adds up (`perf.stats` `export.stages`). The
@@ -2387,7 +2419,7 @@ fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, s
         progress.finished.store(true, Ordering::Relaxed);
         progress.set_status(format!("Done in {secs:.1}s"));
     }
-    Ok(Report { path: settings.path.clone(), frames: nframes, seconds: secs, bytes, render_fps: nframes as f64 / secs.max(1e-6), extra_files: Vec::new() })
+    Ok(Report { path: settings.path.clone(), frames: nframes, seconds: secs, bytes, render_fps: nframes as f64 / secs.max(1e-6), ..Default::default() })
 }
 
 #[cfg(test)]

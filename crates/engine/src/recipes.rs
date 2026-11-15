@@ -1136,7 +1136,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
                 let st = format!("“{name}”: {} steps done", steps.iter().filter(|x| !x.skipped).count());
                 (
                     st.clone(),
-                    Ok(filmcraft_export::Report { path, frames: 0, seconds: t0.elapsed().as_secs_f64(), bytes: 0, render_fps: 0.0, extra_files: Vec::new() }),
+                    Ok(filmcraft_export::Report { path, frames: 0, seconds: t0.elapsed().as_secs_f64(), bytes: 0, render_fps: 0.0, ..Default::default() }),
                 )
             }
             Err(e) => {

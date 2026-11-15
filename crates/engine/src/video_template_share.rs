@@ -279,14 +279,7 @@ fn install(s: &mut Session, p: &Value) -> Result<Value> {
                         let path = i.path.clone();
                         *prog.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = format!("Installed “{}”", i.package.manifest.name);
                         prog.finished.store(true, Ordering::Relaxed);
-                        Ok(filmcraft_export::Report {
-                            path,
-                            frames: 0,
-                            seconds: t0.elapsed().as_secs_f64(),
-                            bytes: 0,
-                            render_fps: 0.0,
-                            extra_files: Vec::new(),
-                        })
+                        Ok(filmcraft_export::Report { path, frames: 0, seconds: t0.elapsed().as_secs_f64(), bytes: 0, render_fps: 0.0, ..Default::default() })
                     }
                     Err(e) => {
                         *prog.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = e.clone();

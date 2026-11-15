@@ -240,7 +240,7 @@ fn understand_speech(s: &mut Session, p: &Value) -> Result<Value> {
         };
         let report = r
             .as_ref()
-            .map(|_| filmcraft_export::Report { path: String::new(), frames: 0, seconds: secs, bytes: 0, render_fps: 0.0, extra_files: Vec::new() })
+            .map(|_| filmcraft_export::Report { path: String::new(), frames: 0, seconds: secs, bytes: 0, render_fps: 0.0, ..Default::default() })
             .map_err(Clone::clone);
         if let Err(e) = &report {
             *lock(&prog.error) = Some(e.clone());
