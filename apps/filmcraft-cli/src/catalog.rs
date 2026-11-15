@@ -375,6 +375,9 @@ mod retrieval_tests {
                     }
                     Err(e) => panic!("{e}"),
                 };
+                // On macOS an accepted stream keeps the listener's non-blocking mode, so a
+                // request not yet written read as `WouldBlock` under load.
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut input = std::io::BufReader::new(stream.try_clone().unwrap());
                 let mut first = String::new();
