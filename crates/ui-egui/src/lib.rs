@@ -838,10 +838,15 @@ impl FilmcraftApp {
             self.ui.status = note;
         }
         if prev.is_none() && !self.workspace_restored {
-            // reopen the workspace in use when the app last closed
-            self.workspace_restored = true;
+            // reopen the workspace in use when the app last closed, with the layout it had then.
+            // When it names no workspace (a damaged or edited file) and a layout is remembered,
+            // nothing is remembered this session: the default layout must not replace it.
             if let Some(w) = dock::find(&self.workspaces, &self.workspaces.current) {
+                self.workspace_restored = true;
                 self.set_workspace(&w);
+                self.restore_remembered_layout(&w);
+            } else if self.workspaces.last.is_none() {
+                self.workspace_restored = true;
             }
         }
         self.applied_prefs = Some(p);
@@ -903,6 +908,51 @@ impl FilmcraftApp {
 
     fn workspaces_path(&self) -> Option<std::path::PathBuf> {
         self.session.prefs_path.as_ref().and_then(|p| p.parent()).map(|d| d.join(dock::WORKSPACES_FILE))
+    }
+
+    /// Keep the layout in use as the one to reopen with (`workspaces.json` ▸ `last`), so panel
+    /// changes made without Save Changes to this Workspace survive a restart (upstream #2421).
+    /// Called when the app closes; a layout that does not validate, or is already remembered,
+    /// writes nothing.
+    pub fn remember_layout(&mut self) {
+        // closed before the first frame brought the workspace back: `ui` still holds the defaults
+        if !self.workspace_restored {
+            return;
+        }
+        let layout = dock::Layout { root: self.ui.dock.clone(), floating: self.ui.floating.clone() };
+        let Ok(last) = dock::SavedWorkspace::new(&self.ui.workspace, &layout) else { return };
+        if self.workspaces.last.as_ref() == Some(&last) && self.workspaces.current == self.ui.workspace {
+            return;
+        }
+        let mut next = self.workspaces.clone();
+        // the workspace in use too: it is only recorded on a switch, and a launch that never
+        // switched would otherwise not know which workspace the layout belongs to
+        next.current = self.ui.workspace.clone();
+        next.last = Some(last);
+        if let Err(e) = self.set_workspaces(next) {
+            log::warn!("{e}");
+        }
+    }
+
+    /// Drop the layout remembered for `workspace` (Reset to Saved Layout): the saved layout is the
+    /// one to reopen with until the app closes again.
+    pub fn forget_remembered_layout(&mut self, workspace: &str) -> Result<(), String> {
+        if !self.workspaces.last.as_ref().is_some_and(|l| l.name == workspace) {
+            return Ok(());
+        }
+        let mut next = self.workspaces.clone();
+        next.last = None;
+        self.set_workspaces(next)
+    }
+
+    /// At launch, after the workspace in use came back: its remembered layout, when the one
+    /// remembered belongs to it (a layout of another workspace, or one that does not read back,
+    /// leaves the saved layout in place).
+    pub(crate) fn restore_remembered_layout(&mut self, workspace: &str) {
+        if let Some(layout) = self.workspaces.last.as_ref().filter(|l| l.name == workspace).and_then(dock::read_saved) {
+            self.ui.dock = layout.root;
+            self.ui.floating = layout.floating;
+        }
     }
 
     /// Replace the saved workspaces and write them to the data directory.
@@ -2344,6 +2394,7 @@ impl eframe::App for FilmcraftApp {
     }
 
     fn on_exit(&mut self) {
+        self.remember_layout();
         // Flush the recovery journal and stop the auto-save worker; a session with nothing unsaved
         // removes its journal, one with unsaved changes keeps it for the next launch.
         self.session.shutdown();

@@ -206,6 +206,11 @@ pub const WORKSPACES_FILE: &str = "workspaces.json";
 pub struct WorkspacePrefs {
     pub saved: Vec<SavedWorkspace>,
     pub current: String,
+    /// The layout in use when the app last closed (`name` is the workspace it belongs to): panel
+    /// changes made without Save Changes to this Workspace come back at the next launch, as in
+    /// Premiere (upstream #2421). Reset to Saved Layout still returns to the saved layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<SavedWorkspace>,
 }
 
 /// A named layout. `layout` is a [`DockNode`] kept as JSON, so one unreadable entry (a panel a
@@ -218,6 +223,16 @@ pub struct SavedWorkspace {
     /// Kept raw for the same per-workspace failure isolation as the dock tree.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub floating: serde_json::Value,
+}
+
+impl SavedWorkspace {
+    /// `layout` as an entry called `name`; a layout that does not validate is refused.
+    pub fn new(name: &str, layout: &Layout) -> Result<Self, String> {
+        layout.validate()?;
+        let root = serde_json::to_value(&layout.root).map_err(|e| e.to_string())?;
+        let floating = if layout.floating.is_empty() { serde_json::Value::Null } else { serde_json::to_value(&layout.floating).map_err(|e| e.to_string())? };
+        Ok(Self { name: name.to_string(), layout: root, floating })
+    }
 }
 
 impl WorkspacePrefs {
@@ -277,17 +292,20 @@ pub fn saved_layout(prefs: &WorkspacePrefs, name: &str) -> DockNode {
 }
 
 pub fn saved_docking(prefs: &WorkspacePrefs, name: &str) -> Layout {
-    let saved = prefs.saved.iter().find(|saved| saved.name == name).and_then(|saved| {
-        let mut layout = Layout {
-            root: serde_json::from_value(saved.layout.clone()).ok()?,
-            floating: if saved.floating.is_null() { vec![] } else { serde_json::from_value(saved.floating.clone()).ok()? },
-        };
-        if layout.floating.is_empty() {
-            migrate_legacy_effects(&mut layout.root);
-        }
-        layout.validate().ok().map(|()| layout)
-    });
-    saved.unwrap_or_else(|| Layout { root: workspace(name), floating: vec![] })
+    prefs.saved.iter().find(|saved| saved.name == name).and_then(read_saved).unwrap_or_else(|| Layout { root: workspace(name), floating: vec![] })
+}
+
+/// A saved entry's layout, or `None` when it does not read back or validate (an entry a newer
+/// version wrote, or a damaged file): the caller falls back.
+pub fn read_saved(saved: &SavedWorkspace) -> Option<Layout> {
+    let mut layout = Layout {
+        root: serde_json::from_value(saved.layout.clone()).ok()?,
+        floating: if saved.floating.is_null() { vec![] } else { serde_json::from_value(saved.floating.clone()).ok()? },
+    };
+    if layout.floating.is_empty() {
+        migrate_legacy_effects(&mut layout.root);
+    }
+    layout.validate().ok().map(|()| layout)
 }
 
 /// Older Effects workspaces stored the same Effect Controls panel twice: selected beside
