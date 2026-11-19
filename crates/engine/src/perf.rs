@@ -29,6 +29,9 @@ pub fn decode_json() -> Value {
         // decoded standalone-audio PCM all sources share, and its budget (evicted sources re-decode)
         "audioCacheMB": filmcraft_codecs::audio::audio_cache().stats().1 as f64 / 1e6,
         "audioCacheBudgetMB": filmcraft_codecs::audio::AUDIO_BUDGET as f64 / 1e6,
+        // decoded animated GIF / APNG frames all sources hold, and the budget they are evicted down to
+        "animatedCacheMB": filmcraft_media::animated::cached_bytes() as f64 / 1e6,
+        "animatedBudgetMB": filmcraft_media::animated::ANIMATED_BUDGET as f64 / 1e6,
         // plane buffers of evicted frames waiting for the next decoded pictures, and how many
         // planes were decoded into a recycled buffer
         "planePoolMB": filmcraft_frame::pool::stats().idle_bytes as f64 / 1e6,
@@ -110,6 +113,8 @@ mod tests {
             "liveDecoders",
             "cacheMB",
             "cacheBudgetMB",
+            "animatedCacheMB",
+            "animatedBudgetMB",
             "planePoolMB",
             "planesReused",
         ] {
