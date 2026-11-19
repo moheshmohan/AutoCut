@@ -39,6 +39,11 @@ Point text's origin is its alignment point on the first baseline (the click poin
 tool); paragraph text's origin is the top-left corner of its box; a shape's origin is its centre.
 Colours are `#rrggbb` (sRGB).
 
+With several graphic clips selected, the Properties panel shows the first one, and a layer
+property changed there (Font, Font Size, Fill and the rest) is set on the same layer of every
+selected graphic clip whose layer at that place is the same kind (text or shape), as one undo
+step. The other selected clips on locked tracks keep their values.
+
 ### Point text and paragraph text
 
 A text layer is one of two types, as in Premiere Pro (behaviour observed in Premiere Pro 26):
@@ -96,7 +101,7 @@ Timecode and Clip Name effects also draw with the text engine.
 | `graphics.newShape` | (agents) | `shape` (rectangle/ellipse/polygon/path), `position` (the shape's centre), `size`, `points`, `clip` (add to this graphic), `seconds` (5), `track`, `time` |
 | `graphics.setTextType` | Text Properties ▸ Text Layer Type | `clip`, `layer`, `type` (`point` / `paragraph`); the text stays where it is |
 | `graphics.setText` | typing on the monitor | `clip`, `layer`, `text`, `merge` (coalesce one typing session into one undo step) |
-| `graphics.set` | Properties panel | `clip`, `layer`, `props` {parameter id or camelCase alias: value; choices by index or name}, `time`, `merge` + `begin` (a drag is one undo step: send `merge: true` on every change and `begin: true` on the first change of each press) |
+| `graphics.set` | Properties panel | `clip` or `clips` (the same props on that layer of each listed graphic clip, as one undo step; an error on any of them changes none), `layer`, `props` {parameter id or camelCase alias: value; choices by index or name}, `time`, `merge` + `begin` (a drag is one undo step: send `merge: true` on every change and `begin: true` on the first change of each press) |
 | `graphics.selectLayer` | layer list / monitor click | `clip`, `layers` |
 | `graphics.deleteLayer`, `graphics.arrangeLayer` | layer list | `clip`, `layer`, `to` (front/back/forward/backward/index) |
 | `graphics.align` | Align and Transform | `align` (left/hcenter/right/top/vcenter/bottom), `to` (frame/group/selection), `layers` |

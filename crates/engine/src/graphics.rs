@@ -329,12 +329,28 @@ pub(crate) fn set_props(
     label: &str,
     merge: Option<&str>,
 ) -> Result<()> {
+    set_props_on(s, &[(clip, eidx)], props, tl, label, merge)
+}
+
+/// [`set_props`] on several layers (each a clip and the effect index of one of its layers) as
+/// one undo step: every layer gets the same values, each at its own clip's media time, and an
+/// error on any of them changes none (upstream #4625).
+fn set_props_on(
+    s: &mut Session,
+    targets: &[(ClipId, usize)],
+    props: &serde_json::Map<String, Value>,
+    tl: Tick,
+    label: &str,
+    merge: Option<&str>,
+) -> Result<()> {
     let props = props.clone();
     s.edit_sequence_as(label, merge, |q, _, _| {
-        let (_, it) = q.find_item_mut(clip).ok_or(filmcraft_edit::EditError::NoItem(clip))?;
-        let mt = it.source_time_at(tl.clamp(it.start, it.end() - Tick(1)));
-        let e = it.effects.get_mut(eidx).ok_or_else(|| bad("graphics.set", "no such layer"))?;
-        apply_props(e, &props, mt)?;
+        for &(clip, eidx) in targets {
+            let (_, it) = q.find_item_mut(clip).ok_or(filmcraft_edit::EditError::NoItem(clip))?;
+            let mt = it.source_time_at(tl.clamp(it.start, it.end() - Tick(1)));
+            let e = it.effects.get_mut(eidx).ok_or_else(|| bad("graphics.set", "no such layer"))?;
+            apply_props(e, &props, mt)?;
+        }
         Ok(())
     })
 }
@@ -1112,19 +1128,33 @@ pub fn commands() -> Vec<CommandSpec> {
             "Set Graphic Properties",
             &[],
             None,
-            r##"{"clip":id?,"layer":n|name?,"props":{"font":"Inter","font_style":"Bold","size":120,"align":"center","tracking":50,"leading":0,"fill_color":"#ffcc00","stroke":true,"stroke_width":6,"background":true,"shadow":true,"position":[x,y],"scale":100,"rotation":0,"opacity":100,…},"time":ticks?,"merge":bool?,"begin":bool?}"##,
+            r##"{"clip":id?,"clips":[id]? (instead of `clip`: the same props on that layer of each listed graphic clip, as one undo step),"layer":n|name?,"props":{"font":"Inter","font_style":"Bold","size":120,"align":"center","tracking":50,"leading":0,"fill_color":"#ffcc00","stroke":true,"stroke_width":6,"background":true,"shadow":true,"position":[x,y],"scale":100,"rotation":0,"opacity":100,…},"time":ticks?,"merge":bool?,"begin":bool?}"##,
             has_graphic,
             |s, p| {
-                let clip = target_clip(s, p).ok_or_else(|| bad("graphics.set", "no graphic clip"))?;
-                let (_, ei) = layer_effect_index(s, clip, p)?;
+                // `clips`: several selected text clips take a property change together (upstream #4625)
+                let clips = if p.get("clips").is_some() {
+                    let mut clips = crate::commands::target_clips_p(s, p, "graphics.set")?.unwrap_or_default();
+                    let mut seen = std::collections::HashSet::new();
+                    clips.retain(|c| seen.insert(*c));
+                    let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
+                    if let Some(c) = clips.iter().find(|c| !is_graphic(s, seq, **c)) {
+                        return Err(bad("graphics.set", format!("clip {} is not a graphic clip", c.0)));
+                    }
+                    clips
+                } else {
+                    vec![target_clip(s, p).ok_or_else(|| bad("graphics.set", "no graphic clip"))?]
+                };
+                let targets = clips.iter().map(|&c| layer_effect_index(s, c, p).map(|(_, ei)| (c, ei))).collect::<Result<Vec<_>>>()?;
                 let props = p.get("props").and_then(Value::as_object).ok_or_else(|| bad("graphics.set", "need `props`"))?.clone();
                 let tl = time_p(s, p, "").unwrap_or_else(|| s.playhead());
-                // `merge`: a drag of a property is one undo step; `begin` starts a new one (#201)
-                let merge = bool_p(p, "merge").unwrap_or(false).then(|| format!("graphics.set:{}:{ei}", clip.0));
+                // `merge`: a drag of a property is one undo step; `begin` starts a new one (#201).
+                // The key names every target, so a drag over several clips stays one step.
+                let key = targets.iter().map(|(c, ei)| format!("{}:{ei}", c.0)).collect::<Vec<_>>().join(",");
+                let merge = bool_p(p, "merge").unwrap_or(false).then(|| format!("graphics.set:{key}"));
                 if bool_p(p, "begin").unwrap_or(false) {
                     s.history.merge_key = None;
                 }
-                set_props(s, clip, ei, &props, tl, "Change Graphic Property", merge.as_deref())?;
+                set_props_on(s, &targets, &props, tl, "Change Graphic Property", merge.as_deref())?;
                 Ok(Value::Null)
             },
         ),
