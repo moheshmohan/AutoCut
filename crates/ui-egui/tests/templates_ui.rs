@@ -291,8 +291,9 @@ fn save_share_and_install_from_the_panel() {
     d.app().session.prefs_path = Some(scratch.join("prefs.json"));
     d.ok("ui.panel.show", json!({"panel": "Templates"}));
     d.frames(4);
-    // Sequence ▸ Save as Video Template… opens the form
-    d.ok("engine.execute", json!({"id": "template.save"}));
+    // Sequence ▸ Save as Video Template… opens the form (the menu's form: `engine.execute` never
+    // opens one and runs the engine command, which needs a path)
+    d.ok("ui.menu.invoke", json!({"id": "template.save"}));
     d.frames(3);
     assert!(d.app().ui.templates.save.is_some());
     d.wait_for("templates.save.go");

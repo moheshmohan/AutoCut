@@ -273,6 +273,26 @@ Annotations, argument checking, errors and export progress / cancellation:
 
 Time is in ticks (254 016 000 000 per second); commands also accept `seconds`, `frame` or `timecode`.
 
+## Parameter dialogs
+
+From a menu, a shortcut or `ui.menu.invoke`, a command sent without parameters opens the dialog
+that asks for them (Sequence Settings…, Add Tracks…, Audio Gain…, Interpret Footage…, Remix
+Properties…, New Sequence…, Color Management…, Find…, Media Properties…, Simplify Sequence…, Link
+Media…, Make Offline…, Create Proxies…, Project Manager…, Save as Video Template…, Make a
+Showcase…, Quick Short… and the other dialog commands).
+`engine.execute` never does (upstream #1540): an agent can neither see nor close a dialog. The
+engine command runs with the parameters given (so `sequence.addTracks {}` adds its default one
+video track, `clip.audioGain {}` answers "need `db`", and `autocut.quick {}` starts the job with
+its defaults, as it does headless), and `sequence.settings {}` answers `{"settings"}`, the active
+sequence's settings as `sequence.inspect` reports them, instead of showing them;
+`voiceover.settingsDialog {}` answers the voice-over settings, as `audio.voiceover.settings` does.
+The same goes for the export settings dialogs and file pickers of commands sent without a `path`
+(Export Frame, AAF, OMF, Captions, Media, `lumetri.exportCube`, Open, Import, Save As…): the
+engine command runs as given, which is an error for most of them, while `file.save` saves a
+project that already has a path to that path. Confirmations still ask: `file.revert`,
+`file.recover`, Close Project and Quit with unsaved changes, and the question before a model is
+downloaded (`{"dialog": "modelDownload"}`).
+
 ## Panel docking commands
 
 `ui.menu.invoke` and `engine.execute` route these frontend commands:
