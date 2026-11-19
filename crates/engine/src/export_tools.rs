@@ -601,6 +601,10 @@ pub(crate) fn guard_job(
             progress.finished.store(true, Ordering::Relaxed);
             *result.lock().unwrap_or_else(|x| x.into_inner()) = Some(Err(msg));
         }
+        // the parts of a job (preview segments, proxies, AutoCut's upscale, interpolation and
+        // object-removal renders) share the renderers they kept; the job is over, so free them
+        // (GPU devices and memory) instead of holding them idle
+        filmcraft_export::release_idle_renderers();
     }
 }
 
