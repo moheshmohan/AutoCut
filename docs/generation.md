@@ -154,3 +154,10 @@ composition so the asset can be made again.
 - A cut-out made by the background remover can keep a faint halo and fill small enclosed gaps
   (between legs, inside a handle). A flat illustration on a plain background cuts cleanest.
 - The tools do not report progress; the bar follows their usual time.
+
+## 7. What comes next
+
+[`plan/generation-2026-11.md`](../plan/generation-2026-11.md) lists what is done and what is
+to be explored: a scene asset list for RAEA, one character kept the same across scenes,
+moving background plates, depth for parallax, a lighter picture tool, variations to choose
+from, and real progress from the tools.

@@ -201,6 +201,35 @@ AutoCut's director and showcases apply the 3D photo move matching each photo's K
 automatically (`--no-depth` off). The broader vision crate also carries YuNet face and plate
 detectors, RTMPose person/pose models (faces in profile), and DFine tracking.
 
+## Generation with the user's local tools
+
+`docs/generation.md` is the reference. Unlike the AI effects above, nothing here is a model
+inside the app: a **generation tool** is a program the user installed (an MLX, PyTorch or
+ComfyUI command line), listed in `<data dir>/generation/providers.json`. The app runs it
+with no shell in between, waits for the file it writes and takes it from there.
+
+| Command | Does |
+|---|---|
+| `generate.providers` | the tools of this computer, their licences and what must be credited |
+| `generate.image` | a picture from a prompt; reference pictures or the program frame make it an edit; `transparent` for a cut-out |
+| `generate.video` | a short clip from a prompt, optionally starting from a picture or the playhead frame |
+| `generate.sound` | a sound effect or music from a prompt |
+| `generate.fillGap` | fills a gap of a track with a clip that continues the frame before it (or leads into the one after) |
+| `generate.augment` | changes the frame at the playhead by an instruction and lays the result over the clip, as a still or an animated clip |
+| `generate.history` | what was generated into this project: item, tool, description, seed |
+
+One generation at a time under the shared GPU lock; `jobs.cancel` kills the tool and changes
+nothing; the result is imported and placed as one undo step and never overwrites what is on
+the timeline. The description, tool and seed are kept in the item's metadata. The Generate
+panel (Window ▸ Generate; modes Picture, Clip, Sound, Fill gap, Augment) drives the same
+commands, with automation ids `generate.*` and its draft in `ui.generate`. No command writes
+the provider file: what may run on the computer is decided by whoever can edit it.
+
+Tested with MiniMax-H3-Image, LTX-2.3 and Stable Audio 3 small as MLX tools (timings in
+`docs/generation.md` §3); their licences are the user's to accept (§4). A generated picture
+is also an asset for a RAEA composition (`"import": false`, `"dir"`). Follow-ups are in
+`plan/generation-2026-11.md`.
+
 ## Privacy: redaction and the pre-upload gate
 
 `clip.autoRedact` / `sequence.autoRedact` put tracked blur/mosaic masks on faces and plates
@@ -271,3 +300,18 @@ the shared pre-flight/fix layer; three music paths (procedural, SoundFont, ACE-S
 sounds; the voice stack (VoxCPM/IndicF5/styles/style finder/lab/DFN3 isolation); the AI effects
 pack; privacy redaction + the upload-blocking gate; 360°/Insta360; Google Photos picker
 sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the GPU policy.
+
+## Update 2026-11-19 (dc416ef8..GEN1, AV36 to AV49)
+
+- **GEN1**: generation with the user's local tools (section above): seven `generate.*`
+  commands, the Generate panel, MCP long-job handling, the provider file. 921 commands.
+- **AV36**: the Insta360 download agent finds recordings in a newest-first Studio list.
+- **AV37 to AV49**: upstream FilmCraft `e6df3186..f67d38b3` (175 commits; 18 taken, 157
+  skipped, 150 of those the craft-libs migration), recorded in
+  `plan/upstream-sync-2026-11-19.md`. For agents the one that matters is AV42:
+  `engine.execute` never opens a dialog, so a command sent without parameters runs with
+  its defaults or answers what it needs (`docs/control-protocol.md`, "Parameter dialogs").
+  Also: FCPXML carries adjust-conform (clips from other apps import fitted to the frame),
+  bounded decoding of animated GIF, APNG and WebP, bounded MCP line lengths, colour
+  parameters take `#rrggbb`, a text property change applies to every selected text clip,
+  the layout in use at exit comes back at launch, Bosnian interface language.

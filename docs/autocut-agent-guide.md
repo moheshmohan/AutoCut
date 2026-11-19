@@ -91,10 +91,11 @@ Read these before you touch anything.
 
 | What | Where / value |
 |---|---|
-| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features and exposes 914 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds still report `0.12.0`, so inspect the packaged commit and command catalogue too. |
+| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the build of 19 November 2026 exposes 921 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds still report `0.12.0`, so inspect the packaged commit and command catalogue too. |
 | Building your own CLI | `CARGO_TARGET_DIR=target/agent-<name> cargo build --release -p filmcraft-cli`, one target folder per worktree, never shared. |
 | The app | `target/macos-package/AutoCut.app`, control port **9876**: `open -n --env FILMCRAFT_CONTROL_PORT=9876 target/macos-package/AutoCut.app` |
 | RAEA | `~/.raea/versions/0.1.0/bin/raea` for local custom animations, 3D scenes and effects. [Render and import workflow](raea-workflow.md). |
+| Generation tools | The user's own local models, listed in `~/Library/Application Support/FilmCraft/generation/providers.json`: `h3-image` (MiniMax-H3-Image, pictures and edits), `ltx-video` (LTX-2.3, clips up to 10 s), `sa3-sfx` and `sa3-music` (Stable Audio 3 small, up to 30 s). `filmcraft-cli exec generate.providers` says which are installed. Never edit that file or download a model without the user's OK. [generation.md](generation.md). |
 | Projects and exports | `~/Movies/AutoCut/<Video name>/`: the `.fcproj`, the exports, and a `build/` folder (scripts, logs, a `README.txt` recipe) |
 | Data folder | `~/Library/Application Support/FilmCraft/`: `google-photos/cache` (picked originals with `.json` date sidecars), `scene-cache`, `redact-cache`, `autocut/analysis-cache`, voices, models, control tokens |
 | Ollama models | `qwen2.5vl:7b` (picker and screen agents, clip analysis, redaction checks), `qwen3:8b` (scripts, Malayalam), `phi4-mini` (the AutoCut prompt classifier), `moondream` |
@@ -233,6 +234,9 @@ class FC:
 | a repeatable chain | `recipe_run` / `exec recipe.run` | `recipe.record` turns edits into a recipe |
 | blur faces and plates | `redact` | `--dry-run` lists tracks first |
 | clean up a voice recording file | `audio enhance` / `audio isolate` | DeepFilterNet with `--download`, else DSP |
+| a picture, b-roll clip, sound or music that does not exist yet | `exec generate.image` / `generate.video` / `generate.sound` | the user's local tools (§6.9); `wait: true`; one at a time |
+| "fill this empty stretch" | `exec generate.fillGap {track, atSeconds}` or `{all: true}` | continues the frame before the gap; `uncovered` says what is left |
+| "add a boat / a character / snow to this shot" | `exec generate.augment {instruction, atSeconds, references?, animate?}` | a new picture laid over the clip; it does not track a moving shot |
 | a specific vision: mixed stills and clips, hand-timed beats, titles, its own look | **build it by hand** (§6) | full control, rebuildable from a script |
 
 If a pipeline gets you most of the way, use it, then fix the rest with commands on its sequence.
@@ -593,8 +597,23 @@ user's own local models; [generation.md](generation.md)):
 - `generate.sound {prompt, kind: "sfx"|"music", seconds, atSeconds, wait: true}`.
 - `generate.fillGap {track, atSeconds | all: true, wait: true}` fills an empty stretch of a video track.
 - `generate.augment {instruction, atSeconds, animate?, wait: true}` changes what the frame shows.
-- One generation at a time; each takes the GPU lock itself. Say in the delivery notes what was
-  generated: the platform's altered-content label is the user's decision.
+- Common parameters: `provider` (default: the first installed tool of the kind), `seed`, `dir`
+  (default a `Generated` folder beside the project), `place`, `track`, `atSeconds`.
+- One generation at a time; each takes the GPU lock itself, so never hold a GPU lease of your
+  own around it (it would wait on you for ever). `jobs.cancel {job}` stops one.
+- Times on this Mac: a picture 40 s, an edit from a frame or reference about 4 minutes, a 3 s
+  clip about 50 s, a sound a few seconds. Over MCP these are long jobs: `command_run` with
+  `wait: true` returns when the result has landed.
+- The result is imported and placed as one undo step, scaled to fill the frame, on the next
+  free track when the asked one filled up. `generate.history` lists what a project holds.
+- For a RAEA asset, write the file only: `generate.image {prompt, transparent: true,
+  import: false, dir: "<build>/fx/assets", wait: true}`. A cut-out works best as a flat
+  illustration on a plain background; look at its edges before you use it.
+- Look at every result (`render_frame`, a contact sheet) before it goes into a review build:
+  hands, faces and text in generated pictures go wrong.
+- Say in the delivery notes what was generated: the platform's altered-content label is the
+  user's decision, never yours. Credit the tool the way `generate.providers` → `attribution`
+  asks.
 
 **Narration:**
 
@@ -750,6 +769,14 @@ The details are in [360-video.md](360-video.md).
   5. Copy the packaged CLI to `target/release/filmcraft-cli` for `.mcp.json`.
 - **A stale "Recover Unsaved Changes" dialog** at launch isn't in `ui.elements`. Ask the user to
   click it.
+- **The Generate panel** (Window ▸ Generate): set its draft with
+  `ui.set {"generate": {"mode": "augment", "prompt": "add snow"}}`, read it under
+  `ui.inspect` → `ui.generate`, press `generate.run` / `generate.stop`. Its controls are the
+  `generate.*` automation ids. For scripted work call the commands; the panel is for the user.
+- **`engine.execute` never opens a dialog** (since the 19 November 2026 build). A command sent
+  without parameters runs with its defaults or answers what it needs: `sequence.addTracks {}`
+  adds one video track, `clip.audioGain {}` answers "need `db`". To open a dialog for the user,
+  use `ui.menu.invoke`. Confirmations and the model-download question still ask.
 
 ## 13. Gotchas
 
@@ -783,6 +810,17 @@ The details are in [360-video.md](360-video.md).
 - **Instagram.** Instagram Login can't upload resumably, so posting needs a public `--video-url`.
 - **Driving Chrome by hand.** On this Chrome, AppleScript tab ids are text, and a "Leave site?"
   tab closes on a second `close`.
+
+- **Generation.**
+  - `generate.providers` first. A tool marked not installed fails at once; say so instead of
+    trying another model on your own.
+  - MiniMax-H3-Image has no transparent output: `transparent: true` runs a second step (a
+    background remover), which can leave a faint halo and fill small enclosed gaps.
+  - A gap is filled from one frame, so the clip continues the look, not the motion. A clip
+    shorter than the gap is slowed, never below 40 %; read `uncovered` in the answer.
+  - The clip tool makes small pictures (480 on the long side by default). They are scaled to
+    the frame; `media.upscale` when that shows.
+  - A failed tool's last lines are the error; the full log is `<file>.generation.log`.
 
 ## 14. The user's taste
 
@@ -840,6 +878,7 @@ says otherwise, the brief wins; when in doubt, ask or offer a sample.
 | Recording a voice reference | [voice-recording.md](voice-recording.md) |
 | Graphics and text | [graphics.md](graphics.md) |
 | Custom animations, rendered scenes and transitions | [raea-workflow.md](raea-workflow.md) |
+| Generated pictures, clips, sounds; filling gaps; changing a frame | [generation.md](generation.md), plan: [generation-2026-11.md](../plan/generation-2026-11.md) |
 | Google Photos setup | [crates/gphotos/README.md](../crates/gphotos/README.md) |
 | AutoCut's planner and showcases | [crates/autocut/README.md](../crates/autocut/README.md) |
 | Building on the app (rules, gates, layering) | [AGENTS.md](../AGENTS.md), [CLAUDE.md](../CLAUDE.md), [architecture.md](architecture.md) |

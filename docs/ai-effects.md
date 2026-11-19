@@ -7,6 +7,10 @@ and checked against its SHA-256, and is never bundled or committed. Only weights
 MIT or BSD licences are used, never non-commercial ones. Each runs on the GPU (Metal on macOS)
 with the CPU as the fallback.
 
+Making new pictures, clips and sounds from a prompt is a different thing: it runs generation
+tools the user installed themselves, under their own licences, and is described in
+[generation.md](generation.md).
+
 **Asking first.** In the desktop app, a command needing a model that is not downloaded — from a
 menu, a tool or the control channel — opens **Download a Model** instead of running: the model's
 name, what needs it, its size, licence, what it learnt from and where it comes from; nothing is
