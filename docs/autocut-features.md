@@ -216,7 +216,14 @@ with no shell in between, waits for the file it writes and takes it from there.
 | `generate.sound` | a sound effect or music from a prompt |
 | `generate.fillGap` | fills a gap of a track with a clip that continues the frame before it (or leads into the one after) |
 | `generate.augment` | changes the frame at the playhead by an instruction and lays the result over the clip, as a still or an animated clip |
+| `generate.extend` | carries a shot on past its end: the tool gets the last moments as a small video, so the movement continues |
+| `generate.assets` | builds the files a scene's `assets.json` names (pictures, cut-outs, clips, sounds), keeps the ones that are there, makes a pose from a character by name |
+| `generate.pick` | swaps another variation in for the one on the timeline |
 | `generate.history` | what was generated into this project: item, tool, description, seed |
+
+`variations` (up to 4) on pictures, clips and sounds; `generate.fillGap` `from` `before`, `after`,
+`both` (frame to frame) or `motion` (the movement carries on); a sound sized to a clip (`clip`); a
+placed picture that moves in depth (`move`); a tool that prints `progress 0.4` drives the bar.
 
 One generation at a time under the shared GPU lock; `jobs.cancel` kills the tool and changes
 nothing; the result is imported and placed as one undo step and never overwrites what is on

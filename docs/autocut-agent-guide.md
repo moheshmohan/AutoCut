@@ -91,7 +91,7 @@ Read these before you touch anything.
 
 | What | Where / value |
 |---|---|
-| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the build of 19 November 2026 exposes 921 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds still report `0.12.0`, so inspect the packaged commit and command catalogue too. |
+| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the build of 20 November 2026 exposes 924 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds still report `0.12.0`, so inspect the packaged commit and command catalogue too. |
 | Building your own CLI | `CARGO_TARGET_DIR=target/agent-<name> cargo build --release -p filmcraft-cli`, one target folder per worktree, never shared. |
 | The app | `target/macos-package/AutoCut.app`, control port **9876**: `open -n --env FILMCRAFT_CONTROL_PORT=9876 target/macos-package/AutoCut.app` |
 | RAEA | `~/.raea/versions/0.1.0/bin/raea` for local custom animations, 3D scenes and effects. [Render and import workflow](raea-workflow.md). |
@@ -235,7 +235,9 @@ class FC:
 | blur faces and plates | `redact` | `--dry-run` lists tracks first |
 | clean up a voice recording file | `audio enhance` / `audio isolate` | DeepFilterNet with `--download`, else DSP |
 | a picture, b-roll clip, sound or music that does not exist yet | `exec generate.image` / `generate.video` / `generate.sound` | the user's local tools (§6.9); `wait: true`; one at a time |
-| "fill this empty stretch" | `exec generate.fillGap {track, atSeconds}` or `{all: true}` | continues the frame before the gap; `uncovered` says what is left |
+| "fill this empty stretch" | `exec generate.fillGap {track, atSeconds, from}` or `{all: true}` | `from: "motion"` carries the movement on, `"both"` goes from the frame before to the frame after, `"before"` (default) continues one frame; `uncovered` says what is left |
+| "make this shot a bit longer" | `exec generate.extend {atSeconds, seconds}` | continues the movement past the end of a clip; needs 1.4 s of picture before it |
+| pictures, cut-outs, clips and sounds for a RAEA scene | `exec generate.assets {manifest}` | an `assets.json` beside the composition ([generation.md](generation.md) §5); `dryRun` first |
 | "add a boat / a character / snow to this shot" | `exec generate.augment {instruction, atSeconds, references?, animate?}` | a new picture laid over the clip; it does not track a moving shot |
 | a specific vision: mixed stills and clips, hand-timed beats, titles, its own look | **build it by hand** (§6) | full control, rebuildable from a script |
 
@@ -595,14 +597,23 @@ user's own local models; [generation.md](generation.md)):
 - `generate.image {prompt, references?, fromPlayhead?, transparent?, place?, seconds?, wait: true}`.
 - `generate.video {prompt, image?: item|path|"playhead", seconds, atSeconds, track, wait: true}`.
 - `generate.sound {prompt, kind: "sfx"|"music", seconds, atSeconds, wait: true}`.
-- `generate.fillGap {track, atSeconds | all: true, wait: true}` fills an empty stretch of a video track.
+- `generate.fillGap {track, atSeconds | all: true, from?: before|after|both|motion|prompt, wait: true}`
+  fills an empty stretch of a video track; `generate.extend {atSeconds, seconds, wait: true}`
+  carries a shot on past its end.
+- `variations: 2..4` on image, video and sound makes several; the first is placed, and
+  `generate.pick {item}` puts another in its place. Show the user the choices (a contact sheet)
+  when the look matters.
+- `generate.sound {prompt, clip: <clip id>}` sizes a sound to a clip; `generate.image {…, place:
+  true, move: "in"}` makes the placed picture move in depth.
+- `generate.assets {manifest, dryRun?, only?, force?, wait: true}` builds a scene's asset list.
 - `generate.augment {instruction, atSeconds, animate?, wait: true}` changes what the frame shows.
 - Common parameters: `provider` (default: the first installed tool of the kind), `seed`, `dir`
   (default a `Generated` folder beside the project), `place`, `track`, `atSeconds`.
 - One generation at a time; each takes the GPU lock itself, so never hold a GPU lease of your
   own around it (it would wait on you for ever). `jobs.cancel {job}` stops one.
-- Times on this Mac: a picture 40 s, an edit from a frame or reference about 4 minutes, a 3 s
-  clip about 50 s, a sound a few seconds. Over MCP these are long jobs: `command_run` with
+- Times on this Mac: a picture 40 s, an edit from a full frame about 4 minutes (about 2 at
+  768×768), a 3 s clip about 50 s, a gap filled by carrying the movement on about 70 s, a sound
+  a few seconds. Over MCP these are long jobs: `command_run` with
   `wait: true` returns when the result has landed.
 - The result is imported and placed as one undo step, scaled to fill the frame, on the next
   free track when the asked one filled up. `generate.history` lists what a project holds.
@@ -819,8 +830,12 @@ The details are in [360-video.md](360-video.md).
     trying another model on your own.
   - MiniMax-H3-Image has no transparent output: `transparent: true` runs a second step (a
     background remover), which can leave a faint halo and fill small enclosed gaps.
-  - A gap is filled from one frame, so the clip continues the look, not the motion. A clip
-    shorter than the gap is slowed, never below 40 %; read `uncovered` in the answer.
+  - A gap filled `from: "before"` continues the look of one frame, not the motion; `"motion"`
+    continues the motion and takes longer. A clip shorter than the gap is slowed, never below
+    40 %; read `uncovered` in the answer. Look at both cuts of a filled gap before a review build.
+  - An asset list is the record of a scene: change the list and rerun, do not hand-edit files.
+    A pose made from a character (`references`) takes about two minutes at 768×768 with
+    MiniMax-H3-Image; a cut-out can keep white between an arm and the body, so look at it.
   - The clip tool makes small pictures (480 on the long side by default). They are scaled to
     the frame; `media.upscale` when that shows.
   - A failed tool's last lines are the error; the full log is `<file>.generation.log`.

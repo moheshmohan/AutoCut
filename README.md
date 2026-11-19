@@ -280,8 +280,11 @@ filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-r
 - **Generate with your own local models**: pictures, short clips, music and sound effects
   made by generation tools installed on your computer, imported and placed on the timeline
   as one undo step. Fill an empty stretch of a track with a clip that carries on from the
-  frame before it (`generate.fillGap`), or change what a frame shows from an instruction
-  (`generate.augment`: "add a red sailboat"). Window ▸ Generate in the app, `generate.*`
+  frame before it, runs from the frame before to the frame after, or continues the movement
+  (`generate.fillGap`); carry a shot on past its end (`generate.extend`); change what a frame
+  shows from an instruction (`generate.augment`: "add a red sailboat"); make up to four
+  variations and swap one in; build a motion-graphics scene's pictures, cut-outs, clips and
+  sounds from one list (`generate.assets`). Window ▸ Generate in the app, `generate.*`
   commands from the CLI and over MCP. The app bundles and downloads no model: you list your
   tools in one file ([docs/generation.md](docs/generation.md)).
 

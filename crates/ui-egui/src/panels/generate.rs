@@ -8,8 +8,9 @@
 //! Automation ids: `generate.mode.<image|video|sound|fill|augment>`, `generate.provider`,
 //! `generate.prompt`, `generate.useFrame`, `generate.useSelection`, `generate.transparent`,
 //! `generate.place`, `generate.soundKind`, `generate.length`, `generate.track`,
-//! `generate.allGaps`, `generate.animate`, `generate.variation`, `generate.run`,
-//! `generate.stop`, `generate.history.<n>.place`.
+//! `generate.allGaps`, `generate.fillFrom`, `generate.animate`, `generate.variations`,
+//! `generate.depthMove`, `generate.forClip`, `generate.carryOn`, `generate.variation`,
+//! `generate.run`, `generate.stop`, `generate.history.<n>.place`, `generate.history.<n>.use`.
 
 use egui::{Rect, pos2};
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,26 @@ const FOOTER_H: f32 = 48.0;
 const MODES: [(&str, &str); 5] = [("image", "Picture"), ("video", "Clip"), ("sound", "Sound"), ("fill", "Fill gap"), ("augment", "Augment")];
 /// Generated items listed under History.
 const HISTORY_SHOWN: usize = 8;
+/// What a gap is filled from, with the names shown.
+const FILL_FROM: [(&str, &str); 5] = [
+    ("before", "The frame before the gap"),
+    ("after", "The frame after the gap"),
+    ("both", "Both: from the frame before to the frame after"),
+    ("motion", "The movement before the gap (carries it on)"),
+    ("prompt", "The description only"),
+];
+/// How a placed picture moves in depth (`clip.photo3d`), with the names shown.
+const DEPTH_MOVES: [(&str, &str); 9] = [
+    ("", "Still"),
+    ("auto", "Move in depth: automatic"),
+    ("in", "Push in"),
+    ("out", "Pull out"),
+    ("left", "Drift left"),
+    ("right", "Drift right"),
+    ("up", "Drift up"),
+    ("down", "Drift down"),
+    ("circle", "Circle"),
+];
 
 /// What is being generated (UI state, serde so agents can read and set it).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -53,6 +74,16 @@ pub struct GenerateDraft {
     pub all_gaps: bool,
     /// Augment: animate the changed frame.
     pub animate: bool,
+    /// How many to make at once (1 to 4): the first is placed, the others wait in the bin.
+    pub variations: u32,
+    /// Picture: how it moves in depth once placed ("" = still).
+    pub depth_move: String,
+    /// Sound: as long as the clip selected in the timeline, starting where it starts.
+    pub for_clip: bool,
+    /// Fill gap: what the clip is made from (`before`, `after`, `both`, `motion`, `prompt`).
+    pub fill_from: String,
+    /// Clip: carry on the movement of the picture before the playhead.
+    pub carry_on: bool,
     /// The variation; `None`: each generation takes the next one.
     pub seed: Option<u64>,
     /// The running generation.
@@ -65,7 +96,8 @@ pub struct GenerateDraft {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Cache {
     tools: Option<Value>,
-    history: Vec<(u64, String, String)>,
+    /// Item, name, description, and whether it is one of several variations.
+    history: Vec<(u64, String, String, bool)>,
     read: Option<web_time::Instant>,
 }
 
@@ -84,6 +116,11 @@ impl Default for GenerateDraft {
             track: "V1".into(),
             all_gaps: false,
             animate: false,
+            variations: 1,
+            depth_move: String::new(),
+            for_clip: false,
+            fill_from: "before".into(),
+            carry_on: false,
             seed: None,
             job: None,
             cache: Cache::default(),
@@ -110,10 +147,20 @@ impl GenerateDraft {
         }
     }
 
+    fn fill_from(&self) -> &str {
+        if FILL_FROM.iter().any(|(id, _)| *id == self.fill_from) { &self.fill_from } else { "before" }
+    }
+
+    fn depth_move(&self) -> &str {
+        if DEPTH_MOVES.iter().any(|(id, _)| *id == self.depth_move) { &self.depth_move } else { "" }
+    }
+
     /// The command and parameters of the Generate button: `selection` is the Project panel's
-    /// selected media, `playhead` the time results are placed at.
-    pub fn request(&self, selection: &[u64], playhead: i64) -> (&'static str, Value) {
+    /// selected media, `playhead` the time results are placed at, `clip` the clip selected in
+    /// the timeline.
+    pub fn request(&self, selection: &[u64], playhead: i64, clip: Option<u64>) -> (&'static str, Value) {
         let prompt = self.prompt.trim();
+        let several = self.variations.clamp(1, 4);
         let mut p = json!({});
         if !self.provider.is_empty() {
             p["provider"] = json!(self.provider);
@@ -123,8 +170,20 @@ impl GenerateDraft {
         }
         let secs = |lo: f64, hi: f64, or: f64| finite(self.seconds, or).clamp(lo, hi);
         match self.mode() {
+            "video" if self.carry_on => {
+                if !prompt.is_empty() {
+                    p["prompt"] = json!(prompt);
+                }
+                p["seconds"] = json!(secs(0.3, 10.0, 2.0));
+                p["atTime"] = json!(playhead);
+                p["place"] = json!(self.place);
+                ("generate.extend", p)
+            }
             "video" => {
                 p["prompt"] = json!(prompt);
+                if several > 1 {
+                    p["variations"] = json!(several);
+                }
                 p["seconds"] = json!(secs(1.0, 60.0, 4.0));
                 p["place"] = json!(self.place);
                 p["atTime"] = json!(playhead);
@@ -138,15 +197,25 @@ impl GenerateDraft {
             "sound" => {
                 p["prompt"] = json!(prompt);
                 p["kind"] = json!(if self.sound_kind == "music" { "music" } else { "sfx" });
-                p["seconds"] = json!(secs(0.5, 600.0, 5.0));
+                if several > 1 {
+                    p["variations"] = json!(several);
+                }
                 p["place"] = json!(self.place);
-                p["atTime"] = json!(playhead);
+                match clip.filter(|_| self.for_clip) {
+                    Some(c) => p["clip"] = json!(c),
+                    None => {
+                        p["seconds"] = json!(secs(0.5, 600.0, 5.0));
+                        p["atTime"] = json!(playhead);
+                    }
+                }
                 ("generate.sound", p)
             }
             "fill" => {
                 p["track"] = json!(if self.track.trim().is_empty() { "V1" } else { self.track.trim() });
                 p["all"] = json!(self.all_gaps);
                 p["atTime"] = json!(playhead);
+                // "the description only" without one falls back to the frame before
+                p["from"] = json!(if self.fill_from() == "prompt" && prompt.is_empty() { "before" } else { self.fill_from() });
                 if !prompt.is_empty() {
                     p["prompt"] = json!(prompt);
                 }
@@ -168,6 +237,12 @@ impl GenerateDraft {
                 p["place"] = json!(self.place);
                 p["atTime"] = json!(playhead);
                 p["seconds"] = json!(secs(0.2, 600.0, 5.0));
+                if several > 1 {
+                    p["variations"] = json!(several);
+                }
+                if self.place && !self.depth_move().is_empty() {
+                    p["move"] = json!(self.depth_move());
+                }
                 p["fromPlayhead"] = json!(self.use_frame);
                 if self.use_selection && !selection.is_empty() {
                     p["references"] = json!(selection);
@@ -216,13 +291,13 @@ fn refresh(app: &mut FilmcraftApp) {
         return;
     }
     let tools = filmcraft_engine::generate::providers_json(&app.session);
-    let mut history: Vec<(u64, String, String)> = app
+    let mut history: Vec<(u64, String, String, bool)> = app
         .session
         .project
         .items
         .values()
         .filter(|it| it.metadata.contains_key("Generator"))
-        .map(|it| (it.id.0, it.name.clone(), it.metadata.get("Description").cloned().unwrap_or_default()))
+        .map(|it| (it.id.0, it.name.clone(), it.metadata.get("Description").cloned().unwrap_or_default(), it.metadata.contains_key("Variation Of")))
         .collect();
     history.sort_by_key(|h| std::cmp::Reverse(h.0));
     history.truncate(HISTORY_SHOWN);
@@ -245,6 +320,7 @@ enum Action {
     Run,
     Stop,
     Place(u64),
+    Use(u64),
 }
 
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
@@ -254,6 +330,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let has_seq = app.session.active_sequence().is_some();
     let busy = app.ui.generate.job.and_then(|j| job_progress(app, j)).filter(|(_, _, finished)| !finished);
     let selected = app.session.state.project_selection.len();
+    let clip = app.session.state.selection.first().map(|c| c.0);
     let mut actions: Vec<Action> = Vec::new();
     let auto = &mut app.auto;
     let d = &mut app.ui.generate;
@@ -287,6 +364,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         dim(
             ui,
             match d.mode() {
+                "video" if d.carry_on => "A clip that carries on the movement of the picture just before the playhead.",
                 "video" => "A short clip from a description, optionally starting from a picture.",
                 "sound" => "A sound effect or music from a description.",
                 "fill" => "Fills the gap under the playhead with a clip that carries on from the frame before it.",
@@ -368,10 +446,22 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 );
                 check(ui, auto, "generate.transparent", &mut d.transparent, "Transparent background (a cut-out)");
                 check(ui, auto, "generate.place", &mut d.place, "Place at the playhead");
+                let shown = DEPTH_MOVES.iter().find(|(id, _)| *id == d.depth_move()).map_or("Still", |(_, name)| *name);
+                let cb = egui::ComboBox::from_id_salt("generate-depth-move").selected_text(shown).width(w).show_ui(ui, |ui| {
+                    for (id, name) in DEPTH_MOVES {
+                        if ui.selectable_label(d.depth_move() == id, name).clicked() {
+                            d.depth_move = id.into();
+                        }
+                    }
+                });
+                auto.add("generate.depthMove", visible(ui, cb.response.rect), "Movement of the placed picture");
             }
             "video" => {
                 check(ui, auto, "generate.useFrame", &mut d.use_frame, "Start from the frame under the playhead");
                 check(ui, auto, "generate.useSelection", &mut d.use_selection, &format!("Start from the picture selected in the Project panel ({selected})"));
+                let can = chosen.is_some_and(|tool| tool["carriesOn"] == true);
+                let text = if can { "Carry on the movement before the playhead" } else { "Carry on the movement before the playhead (this tool cannot)" };
+                check(ui, auto, "generate.carryOn", &mut d.carry_on, text);
                 check(ui, auto, "generate.place", &mut d.place, "Place at the playhead");
             }
             "sound" => {
@@ -390,6 +480,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     },
                 );
                 auto.add("generate.soundKind", visible(ui, cb.response.rect), "Kind of sound");
+                let text =
+                    if clip.is_some() { "As long as the clip selected in the timeline" } else { "As long as the clip selected in the timeline (none is)" };
+                check(ui, auto, "generate.forClip", &mut d.for_clip, text);
                 check(ui, auto, "generate.place", &mut d.place, "Place at the playhead");
             }
             "fill" => {
@@ -399,6 +492,21 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     auto.add("generate.track", visible(ui, e.rect), "Track");
                 });
                 check(ui, auto, "generate.allGaps", &mut d.all_gaps, "Every gap of the track");
+                let can = |id: &str| match id {
+                    "both" => chosen.is_some_and(|tool| tool["bothEnds"] == true),
+                    "motion" => chosen.is_some_and(|tool| tool["carriesOn"] == true),
+                    _ => true,
+                };
+                let shown = FILL_FROM.iter().find(|(id, _)| *id == d.fill_from()).map_or("", |(_, name)| *name);
+                let cb = egui::ComboBox::from_id_salt("generate-fill-from").selected_text(shown).width(w).show_ui(ui, |ui| {
+                    for (id, name) in FILL_FROM {
+                        let text = if can(id) { name.to_string() } else { format!("{name} (this tool cannot)") };
+                        if ui.selectable_label(d.fill_from() == id, text).clicked() {
+                            d.fill_from = id.into();
+                        }
+                    }
+                });
+                auto.add("generate.fillFrom", visible(ui, cb.response.rect), "What the clip is made from");
             }
             _ => {
                 check(
@@ -423,6 +531,13 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ui.spacing_mut().slider_width = w - 70.0;
             let sl = ui.add(egui::Slider::new(&mut d.seconds, 0.5..=most).max_decimals(1).suffix(" s"));
             auto.add("generate.length", visible(ui, sl.rect), "Length");
+            if !(d.mode() == "video" && d.carry_on) {
+                ui.add_space(6.0);
+                label(ui, "How many to choose from");
+                d.variations = d.variations.clamp(1, 4);
+                let sl = ui.add(egui::Slider::new(&mut d.variations, 1..=4));
+                auto.add("generate.variations", visible(ui, sl.rect), "How many to choose from");
+            }
         }
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -449,12 +564,19 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if !d.cache.history.is_empty() {
             ui.add_space(14.0);
             label(ui, "Generated in this project");
-            for (n, (item, name, description)) in d.cache.history.iter().enumerate() {
+            for (n, (item, name, description, varied)) in d.cache.history.iter().enumerate() {
                 ui.horizontal(|ui| {
                     let b = ui.small_button("Place");
                     auto.add(&format!("generate.history.{}.place", n + 1), visible(ui, b.rect), "Place at the playhead");
                     if b.on_hover_text("Place at the playhead").clicked() {
                         actions.push(Action::Place(*item));
+                    }
+                    if *varied {
+                        let b = ui.small_button("Use");
+                        auto.add(&format!("generate.history.{}.use", n + 1), visible(ui, b.rect), "Use this variation");
+                        if b.on_hover_text("Put this one in the place of the variation on the timeline").clicked() {
+                            actions.push(Action::Use(*item));
+                        }
                     }
                     let text: String = if description.is_empty() { name.clone() } else { format!("{name}: {description}") };
                     ui.add(egui::Label::new(egui::RichText::new(text).color(t.text_dim).size(11.0)).truncate());
@@ -462,13 +584,16 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
     });
-    let ready = chosen.is_some_and(|tool| tool["installed"] == true) && busy.is_none() && (has_seq || matches!(d.mode(), "image" | "video" | "sound"));
-    let needs_text = d.mode() != "fill" && d.prompt.trim().is_empty();
+    let carrying = d.mode() == "video" && d.carry_on;
+    let ready =
+        chosen.is_some_and(|tool| tool["installed"] == true) && busy.is_none() && (has_seq || (matches!(d.mode(), "image" | "video" | "sound") && !carrying));
+    let needs_text = d.mode() != "fill" && !carrying && d.prompt.trim().is_empty();
     let fy = rect.max.y - FOOTER_H + 10.0;
     let r = Rect::from_min_size(pos2(rect.min.x + PAD, fy), egui::vec2(rect.width() - PAD * 2.0, 28.0));
     let text = match (busy.is_some(), d.mode()) {
         (true, _) => "Generating…",
         (_, "fill") => "Fill the gap",
+        (_, "video") if carrying => "Carry the shot on",
         (_, "augment") => "Augment the scene",
         _ => "Generate",
     };
@@ -498,7 +623,8 @@ fn run(app: &mut FilmcraftApp, a: Action) {
     match a {
         Action::Run => {
             let selection: Vec<u64> = app.session.state.project_selection.iter().map(|i| i.0).collect();
-            let (cmd, p) = app.ui.generate.request(&selection, app.session.playhead().0);
+            let clip = app.session.state.selection.first().map(|c| c.0);
+            let (cmd, p) = app.ui.generate.request(&selection, app.session.playhead().0, clip);
             match app.session.execute(cmd, p) {
                 Ok(r) => {
                     app.ui.generate.job = r["job"].as_u64();
@@ -521,6 +647,12 @@ fn run(app: &mut FilmcraftApp, a: Action) {
                 Err(e) => e.to_string(),
             };
         }
+        Action::Use(item) => {
+            app.ui.status = match app.session.execute("generate.pick", json!({"item": item})) {
+                Ok(_) => "This variation is on the timeline now".into(),
+                Err(e) => e.to_string(),
+            };
+        }
     }
 }
 
@@ -531,41 +663,82 @@ mod tests {
     #[test]
     fn each_mode_asks_its_command_for_what_the_panel_shows() {
         let mut d = GenerateDraft { prompt: "  a lighthouse  ".into(), seed: Some(7), provider: "h3-image".into(), use_selection: true, ..Default::default() };
-        let (cmd, p) = d.request(&[4, 9], 1000);
+        let (cmd, p) = d.request(&[4, 9], 1000, None);
         assert_eq!(cmd, "generate.image");
         assert_eq!(p["prompt"], "a lighthouse");
         assert_eq!((p["seed"].as_u64(), p["provider"].as_str()), (Some(7), Some("h3-image")));
         assert_eq!(p["references"], json!([4, 9]));
         assert_eq!((p["place"].as_bool(), p["atTime"].as_i64()), (Some(true), Some(1000)));
         d.mode = "video".into();
-        let (cmd, p) = d.request(&[4, 9], 0);
+        let (cmd, p) = d.request(&[4, 9], 0, None);
         assert_eq!((cmd, p["image"].as_u64()), ("generate.video", Some(4)));
         d.use_frame = true;
-        assert_eq!(d.request(&[4], 0).1["image"], "playhead");
+        assert_eq!(d.request(&[4], 0, None).1["image"], "playhead");
         d.mode = "sound".into();
         d.sound_kind = "music".into();
-        let (cmd, p) = d.request(&[], 0);
+        let (cmd, p) = d.request(&[], 0, None);
         assert_eq!((cmd, p["kind"].as_str()), ("generate.sound", Some("music")));
         assert_eq!(d.kind(), "music");
         d.mode = "fill".into();
         d.track = "  ".into();
         d.prompt.clear();
-        let (cmd, p) = d.request(&[], 5);
+        let (cmd, p) = d.request(&[], 5, None);
         assert_eq!((cmd, p["track"].as_str(), p.get("prompt")), ("generate.fillGap", Some("V1"), None));
         d.mode = "augment".into();
         d.prompt = "add snow".into();
         d.animate = true;
-        let (cmd, p) = d.request(&[2], 5);
+        let (cmd, p) = d.request(&[2], 5, None);
         assert_eq!((cmd, p["instruction"].as_str(), p["animate"].as_bool()), ("generate.augment", Some("add snow"), Some(true)));
         // hostile state read back from an agent: an unknown mode and a broken length still make a sane request
         d.mode = "../../x".into();
         d.seconds = f64::NAN;
-        let (cmd, p) = d.request(&[], 0);
+        let (cmd, p) = d.request(&[], 0, None);
         assert_eq!((cmd, p["seconds"].as_f64()), ("generate.image", Some(5.0)));
         d.seconds = f64::INFINITY;
-        assert_eq!(d.request(&[], 0).1["seconds"].as_f64(), Some(5.0));
+        assert_eq!(d.request(&[], 0, None).1["seconds"].as_f64(), Some(5.0));
         d.seconds = 1.0e12;
-        assert_eq!(d.request(&[], 0).1["seconds"].as_f64(), Some(600.0));
+        assert_eq!(d.request(&[], 0, None).1["seconds"].as_f64(), Some(600.0));
+    }
+
+    #[test]
+    fn variations_movement_and_what_a_gap_is_filled_from_reach_the_command() {
+        let mut d = GenerateDraft { prompt: "a cliff".into(), variations: 3, depth_move: "in".into(), ..Default::default() };
+        let (cmd, p) = d.request(&[], 0, Some(7));
+        assert_eq!((cmd, p["variations"].as_u64(), p["move"].as_str()), ("generate.image", Some(3), Some("in")));
+        // a picture that is not placed does not move; one variation is not said
+        d.place = false;
+        d.variations = 1;
+        let p = d.request(&[], 0, None).1;
+        assert!(p.get("move").is_none() && p.get("variations").is_none(), "{p}");
+        // a sound for the selected clip takes its length from the clip
+        d.mode = "sound".into();
+        d.for_clip = true;
+        let p = d.request(&[], 9, Some(7)).1;
+        assert_eq!((p["clip"].as_u64(), p.get("seconds"), p.get("atTime")), (Some(7), None, None));
+        let p = d.request(&[], 9, None).1;
+        assert_eq!((p.get("clip"), p["atTime"].as_i64()), (None, Some(9)), "no clip selected: at the playhead");
+        // a clip that carries the shot on needs no description
+        d.mode = "video".into();
+        d.carry_on = true;
+        d.prompt.clear();
+        d.seconds = 60.0;
+        let (cmd, p) = d.request(&[], 5, None);
+        assert_eq!((cmd, p["seconds"].as_f64(), p.get("prompt")), ("generate.extend", Some(10.0), None));
+        d.mode = "fill".into();
+        for (from, said) in [("both", "both"), ("motion", "motion"), ("after", "after"), ("prompt", "before"), ("../x", "before")] {
+            d.fill_from = from.into();
+            assert_eq!(d.request(&[], 0, None).1["from"], said, "{from}");
+        }
+        d.prompt = "clouds".into();
+        d.fill_from = "prompt".into();
+        assert_eq!(d.request(&[], 0, None).1["from"], "prompt");
+        // hostile state read back from an agent
+        d.mode = "image".into();
+        d.place = true;
+        d.variations = u32::MAX;
+        d.depth_move = "sideways".into();
+        let p = d.request(&[], 0, None).1;
+        assert_eq!((p["variations"].as_u64(), p.get("move")), (Some(4), None));
     }
 
     #[test]

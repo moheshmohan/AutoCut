@@ -56,36 +56,60 @@ control channel and MCP.
 - H3 has no transparent output; cut-outs go through the background remover and can keep a halo.
 - The clip model makes at most ten seconds at a small size.
 
-## To explore and implement
+## Second round (GEN2, 20 November 2026)
 
-Each item is explored first with a throwaway project and real tools, then built only if the
-result is good enough to use in a video.
+Requested: "Do the remaining tasks, we need to add more features". One commit, GEN2; the item
+numbers below are the ones this plan gave them.
 
-- [ ] **GEN2: scene asset list for RAEA.** A composition folder carries `assets.json`
-  (name, prompt, seed, size, transparent, tool). `generate.assets {manifest}` makes the files
-  that are missing and leaves the others, so a scene can be rebuilt from its sources.
-  Acceptance: deleting one asset and rerunning remakes exactly that file with the same seed.
-- [ ] **GEN3: consistent character across scenes.** Use H3's reference pictures (up to 16) to
-  keep one mascot or product the same in several RAEA scenes: a reference sheet made once,
-  then each pose generated from it. Measure: how many of ten poses are usable without retouch.
-- [ ] **GEN4: moving background plates.** Animate a generated or real still with the clip tool
-  (`generate.video` from `image`) and use it under RAEA's text and graphics. Check that the
-  loop point and the small source size hold up after `media.upscale`.
-- [ ] **GEN5: depth for parallax.** Freefield has Depth-Anything-V2-Small; the engine already
-  has depth code (`crates/engine/src/depth.rs`). Find out what that covers before adding a
-  tool, then try a 2.5D push-in on a still inside a RAEA scene.
-- [ ] **GEN6: sound for a scene.** `generate.sound` sized to a RAEA scene (ambience, a soft
-  swish at a transition), placed under the imported render. Follows the per-video sound style.
-- [ ] **GEN7: a lighter picture tool as a second provider.** `h3-image-mlx` can also run
-  Qwen-Image-2.1-turbo, which has transparent output and fewer steps. Needs a model download
-  (ask first) and a licence check. Would make cut-outs one step and edits faster.
-- [ ] **GEN8: variations.** Generate several seeds for one prompt and choose in the panel
-  (a small grid with Place on each), the part of Freefield's gallery that fits an editor.
-- [ ] **GEN9: tool progress.** Let a tool report progress on a line of its output
-  (`progress 0.42`) so the bar shows real progress.
-- [ ] **GEN10: Freefield apps that need more than one frame.** Character or motion swap,
-  relight and video-to-video. On this Mac only if an MLX tool exists for them; the ComfyUI
-  apps target NVIDIA cards. Review what is installable before promising any of it.
+- [x] **Scene asset list for RAEA** (was GEN2). `generate.assets {manifest}` reads an `assets.json`
+  beside a composition and makes the files that are missing: pictures, cut-outs, clips, sounds.
+  `dryRun`, `only`, `force`, `import`. Live: six assets in 6 min 36 s; with one picture deleted,
+  exactly that one was made again (31 s) and the file was the same byte for byte.
+- [x] **One character across scenes** (was GEN3). An entry's `references` names earlier entries,
+  so a pose is made from the character's first picture. Live: a robot mascot and two poses made
+  from it; both poses are plainly the same character. Measured on two poses, not the ten the
+  first plan asked for. The cut-out pose kept white between the raised arms and the head.
+- [x] **Moving background plates** (was GEN4). A `video` entry with `image` naming a plate. Live:
+  a 3 s plate at 448×256. Not checked: how the loop point and the small size hold up after
+  `media.upscale` under a real composition.
+- [x] **Depth for parallax** (was GEN5). The engine already had it (`clip.photo3d`, Depth Anything
+  V2 Small, installed). `generate.image … "place": true, "move": "in"` applies it to the placed
+  picture. Live: a push-in on a generated picture.
+- [x] **Sound for a scene** (was GEN6). `sfx` and `music` entries in an asset list, and
+  `generate.sound {"clip": id}`, which sizes the sound to a clip and starts it where the clip
+  starts. Live: 3 s of wind for a 3 s clip.
+- [x] **Variations** (was GEN8). `variations` 1 to 4 on pictures, clips and sounds; the first is
+  placed, `generate.pick {item}` swaps another in as one undo step; a Use button in the panel.
+  Live: two pictures in 58 s, the second swapped in.
+- [x] **Tool progress** (was GEN9). A tool that prints `progress 0.42`, `progress 42%` or
+  `progress 3/8` drives the bar. None of the three tested tools prints such a line, so their
+  bars still follow their usual time.
+- [x] **Gaps filled better** (new). The clip tool turned out to do more than the first round
+  used: `generate.fillGap` `from: "both"` starts on the frame before the gap and ends on the
+  frame after it (42 s for 2 s); `from: "motion"` gives the tool the last 33 frames before the
+  gap as a small video, so the movement carries on (68 s); `generate.extend` does the same past
+  the end of a clip (64 s). Live: all three on a lighthouse clip; the frames across each cut
+  match. Not tested: a gap between two very different pictures.
+- [x] **What a waited MCP call answers.** Found by the live run: `command_run` with `wait: true`
+  did not say what a generation made, and an asset list with nothing left to make came back as
+  a failure. Both fixed, with a test over MCP.
+
+## Open, each waiting on a decision of the user
+
+- [ ] **A lighter picture tool** (was GEN7). `h3-image-mlx` can run Qwen-Image-2.1-turbo, which
+  has transparent output. Its weights are tagged for non-commercial research use, the download
+  is about 25 GB, and nothing is measured on an M3 Max. Recommendation: do not take it for
+  videos that are published; H3 with the background remover stays.
+- [ ] **Restyle and pose-driven character swap in video** (part of GEN10). The clip tool's
+  `ic-lora` command with the Union-Control adapter (654 MB, LTX-2 Community License) regenerates
+  a clip from a control video (edges, depth or pose) and a picture of the new character. Edges
+  need no extra model; pose needs a pose estimator. Would become `generate.restyle`. The tool's
+  own tests are on its q8 weights; this Mac has q4, where a small adapter may lose strength.
+- [ ] **Relight a clip** (part of GEN10). A relight adapter (327 MB, gated: needs a Hugging Face
+  login and accepted terms). Relighting a still works today as an edit with MiniMax-H3-Image.
+- [ ] **Lip dub** (part of GEN10). An adapter of 2.5 GB, gated, marked experimental by the tool.
+- Freefield's own `character-swap` app is a two-photo picture edit, not video; it is what
+  `generate.image` with two `references` already does.
 
 ## Not planned
 

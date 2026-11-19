@@ -400,3 +400,275 @@ fn sounds_and_augmented_frames_never_overwrite_what_is_on_the_timeline() {
     assert!(args.contains(&"the birds fly left to right".to_string()));
     let _ = std::fs::remove_dir_all(&dir0);
 }
+
+#[test]
+fn variations_wait_in_the_bin_and_one_can_be_swapped_in() {
+    let dir0 = std::env::temp_dir().join(format!("fc-generate-fixture-v-{}", std::process::id()));
+    std::fs::create_dir_all(&dir0).unwrap();
+    let still = dir0.join("still.png");
+    std::fs::write(&still, png(64, 36, 60)).unwrap();
+    let tone = dir0.join("tone.wav");
+    std::fs::write(&tone, wav()).unwrap();
+    let img = tool("img", "image", &still, "", "");
+    let sfx = tool("sfx", "sfx", &tone, r#","--seconds","{seconds}""#, r#","maxSeconds":30"#);
+    let mut b = bench("variations", &[img, sfx]);
+    let (undo0, items0) = (b.s.history.undo.len(), b.s.project.items.len());
+    let at = after_everything(&b.s);
+    let v =
+        b.s.execute(
+            "generate.image",
+            json!({"prompt": "a kite", "variations": 3, "seed": 41, "dir": b.out(), "place": true, "track": "new", "atTime": at.0, "seconds": 2, "wait": true}),
+        )
+        .unwrap();
+    assert_eq!(v["generated"].as_array().unwrap().len(), 3, "{v}");
+    assert_eq!((b.s.history.undo.len(), b.s.project.items.len()), (undo0 + 1, items0 + 3), "three items, one undo step");
+    // the first is on the timeline, the others wait in the bin; each got its own seed
+    let clip = made(&v, 0)["clip"].as_u64().unwrap();
+    assert!(made(&v, 1)["clip"].is_null() && made(&v, 2)["clip"].is_null(), "{v}");
+    for (k, seed) in ["41", "42", "43"].iter().enumerate() {
+        assert!(b.args_of(made(&v, k)["path"].as_str().unwrap()).contains(&seed.to_string()));
+    }
+    let items: Vec<u64> = (0..3).map(|k| made(&v, k)["item"].as_u64().unwrap()).collect();
+    let group = |s: &Session, id: u64| s.project.item(ItemId(id)).unwrap().metadata.get(VARIATION).cloned();
+    assert!(group(&b.s, items[0]).is_some_and(|g| g.ends_with("Generated Image 1.png")));
+    assert_eq!(group(&b.s, items[0]), group(&b.s, items[2]));
+    let h = b.s.execute("generate.history", json!({})).unwrap();
+    assert!(h["generated"][0]["variationOf"].as_str().is_some(), "{h}");
+    // another variation takes the place of the one on the timeline: same clip, same stretch, one undo step
+    let on_clip = |s: &Session| {
+        let (_, it) = s.active_sequence().unwrap().find_item(ClipId(clip)).unwrap();
+        (it.item.0, it.start, it.duration)
+    };
+    let before = on_clip(&b.s);
+    assert_eq!(before.0, items[0]);
+    let undo1 = b.s.history.undo.len();
+    let r = b.s.execute("generate.pick", json!({"item": items[2]})).unwrap();
+    assert_eq!(r["clip"].as_u64(), Some(clip));
+    assert_eq!(on_clip(&b.s), (items[2], before.1, before.2));
+    assert_eq!(b.s.history.undo.len(), undo1 + 1);
+    b.s.undo().unwrap();
+    assert_eq!(on_clip(&b.s).0, items[0]);
+    // one picture alone has no variations to swap with; a clip named outright is replaced
+    let lone = b.s.execute("generate.image", json!({"prompt": "a lone gull", "dir": b.out(), "wait": true})).unwrap();
+    let lone = made(&lone, 0)["item"].as_u64().unwrap();
+    assert!(group(&b.s, lone).is_none());
+    assert!(b.s.execute("generate.pick", json!({"item": lone})).unwrap_err().to_string().contains("none of its variations"));
+    b.s.execute("generate.pick", json!({"item": lone, "clip": clip})).unwrap();
+    assert_eq!(on_clip(&b.s).0, lone);
+    let filmed = b.s.project.items.values().find(|i| !i.metadata.contains_key("Generator")).unwrap().id.0;
+    for (p, why) in [
+        (json!({}), "is needed"),
+        (json!({"item": 999_999}), "no item"),
+        (json!({"item": filmed}), "was not generated"),
+        (json!({"item": lone, "clip": 999_999}), "no clip"),
+    ] {
+        let e = b.s.execute("generate.pick", p.clone()).unwrap_err().to_string();
+        assert!(e.contains(why), "{p}: {e}");
+    }
+    for (cmd, p, why) in [
+        ("generate.image", json!({"prompt": "x", "variations": 0}), "1 to 4"),
+        ("generate.image", json!({"prompt": "x", "variations": 99}), "1 to 4"),
+        ("generate.image", json!({"prompt": "x", "variations": "many"}), "1 to 4"),
+        ("generate.image", json!({"prompt": "x", "move": "sideways"}), "unknown `move`"),
+        ("generate.sound", json!({"prompt": "x", "clip": 999_999}), "no clip"),
+    ] {
+        let e = b.s.execute(cmd, p.clone()).unwrap_err().to_string();
+        assert!(e.contains(why), "{cmd} {p}: {e}");
+    }
+    // a sound made for a clip is as long as it and starts where it starts
+    let v = b.s.execute("generate.sound", json!({"prompt": "wind in a kite's tail", "clip": clip, "variations": 2, "dir": b.out(), "wait": true})).unwrap();
+    assert_eq!(v["generated"].as_array().unwrap().len(), 2);
+    assert_eq!(made(&v, 0)["start"].as_i64(), Some(before.1.0));
+    let args = b.args_of(made(&v, 0)["path"].as_str().unwrap());
+    let asked: f64 = args.iter().position(|a| a == "--seconds").and_then(|i| args.get(i + 1)).and_then(|x| x.parse().ok()).unwrap();
+    assert!((asked - before.2.seconds()).abs() < 0.002, "the clip's length: {args:?}");
+    // a placed picture asked to move in depth is placed either way; without the depth model it says why
+    let v =
+        b.s.execute("generate.image", json!({"prompt": "a cliff", "move": "in", "place": true, "track": "new", "atTime": at.0, "dir": b.out(), "wait": true}))
+            .unwrap();
+    let g = made(&v, 0);
+    assert!(g["clip"].as_u64().is_some() && (g["move"] == "in" || g["moveError"].as_str().is_some()), "{v}");
+    let _ = std::fs::remove_dir_all(&dir0);
+}
+
+#[test]
+fn an_asset_list_makes_what_is_missing_and_keeps_the_rest() {
+    let dir0 = std::env::temp_dir().join(format!("fc-generate-fixture-l-{}", std::process::id()));
+    std::fs::create_dir_all(&dir0).unwrap();
+    let still = dir0.join("still.png");
+    std::fs::write(&still, png(32, 32, 80)).unwrap();
+    let tone = dir0.join("tone.wav");
+    std::fs::write(&tone, wav()).unwrap();
+    let img = tool(
+        "img",
+        "image",
+        &still,
+        r#","--size","{width}x{height}","{references}""#,
+        r#","perReference":["--reference","{path}"],"multipleOf":32,"cutoutCommand":["/bin/sh","-c","cp \"$1\" \"$2\"","sh","{image}","{out}"]"#,
+    );
+    let vid = tool("vid", "video", &still, r#","{optional}""#, r#","extension":"png","optional":{"image":["--image","{image}"]}"#);
+    let sfx = tool("sfx", "sfx", &tone, r#","--seconds","{seconds}""#, "");
+    let mut b = bench("assets", &[img, vid, sfx]);
+    let scene = b.dir.join("scene");
+    std::fs::create_dir_all(&scene).unwrap();
+    let manifest = scene.join("assets.json");
+    let list = json!({"width": 768, "height": 768, "assets": [
+        {"name": "mascot", "prompt": "a robot mascot, full body", "seed": 11},
+        {"name": "mascot wave", "prompt": "the robot waves", "references": ["mascot"], "transparent": true},
+        {"name": "plate moving", "kind": "video", "prompt": "clouds drift", "image": "mascot", "seconds": 2},
+        {"name": "swish", "kind": "sfx", "prompt": "a soft swish", "seconds": 1},
+    ]});
+    std::fs::write(&manifest, list.to_string()).unwrap();
+    let m = manifest.to_string_lossy().into_owned();
+    let file = |name: &str| scene.join(name).to_string_lossy().into_owned();
+    let (undo0, items0) = (b.s.history.undo.len(), b.s.project.items.len());
+    // a dry run says what would be made and makes nothing
+    let plan = b.s.execute("generate.assets", json!({"manifest": m, "dryRun": true})).unwrap();
+    assert_eq!((plan["making"].as_u64(), plan["assets"][1]["state"].as_str()), (Some(4), Some("make")), "{plan}");
+    assert!(plan["job"].is_null() && !Path::new(&file("mascot.png")).exists());
+    let v = b.s.execute("generate.assets", json!({"manifest": m, "wait": true})).unwrap();
+    assert_eq!(v["making"].as_u64(), Some(4), "{v}");
+    for name in ["mascot.png", "mascot wave.png", "mascot wave source.png", "plate moving.png", "swish.wav"] {
+        assert!(Path::new(&file(name)).is_file(), "{name}");
+    }
+    // files for a scene: nothing was imported, nothing to undo
+    assert_eq!((b.s.history.undo.len(), b.s.project.items.len()), (undo0, items0));
+    let args = b.args_of(&file("mascot.png"));
+    assert!(args.contains(&"11".to_string()) && args.contains(&"768x768".to_string()), "{args:?}");
+    // a later asset is made from an earlier one by name; a seed that was not given follows the name
+    let wave = b.args_of(&file("mascot wave source.png"));
+    assert!(wave.windows(2).any(|w| w[0] == "--reference" && w[1] == file("mascot.png")), "{wave:?}");
+    assert!(wave.contains(&seed_of("mascot wave").to_string()), "{wave:?}");
+    assert!(b.args_of(&file("plate moving.png")).contains(&file("mascot.png")));
+    // again: everything is there, so nothing runs
+    let again = b.s.execute("generate.assets", json!({"manifest": m, "wait": true})).unwrap();
+    assert_eq!(again["making"].as_u64(), Some(0));
+    assert!(again["job"].is_null() && again["assets"].as_array().unwrap().iter().all(|a| a["state"] == "kept"), "{again}");
+    // one file deleted: exactly that one is made again, from the same seed
+    std::fs::remove_file(file("mascot wave.png")).unwrap();
+    std::fs::remove_file(format!("{}.args", file("mascot wave source.png"))).unwrap();
+    let stamp = std::fs::metadata(file("mascot.png")).unwrap().modified().unwrap();
+    let v = b.s.execute("generate.assets", json!({"manifest": m, "wait": true})).unwrap();
+    assert_eq!(v["making"].as_u64(), Some(1), "{v}");
+    assert!(Path::new(&file("mascot wave.png")).is_file());
+    assert_eq!(b.args_of(&file("mascot wave source.png")), wave);
+    assert_eq!(std::fs::metadata(file("mascot.png")).unwrap().modified().unwrap(), stamp, "the others were left alone");
+    // one named file made again on request, and brought into the project when asked
+    let v = b.s.execute("generate.assets", json!({"manifest": m, "only": ["swish"], "force": true, "import": true, "wait": true})).unwrap();
+    assert_eq!(v["making"].as_u64(), Some(1));
+    assert_eq!(b.s.project.items.len(), items0 + 1);
+    // hostile lists and requests are refused before anything runs
+    let write = |name: &str, v: Value| {
+        let p = scene.join(name);
+        std::fs::write(&p, v.to_string()).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let many: Vec<Value> = (0..33).map(|i| json!({"name": format!("a{i}"), "prompt": "x"})).collect();
+    for (p, why) in [
+        (json!({}), "is needed"),
+        (json!({"manifest": "assets.json"}), "absolute path"),
+        (json!({"manifest": file("assets.txt")}), "absolute path"),
+        (json!({"manifest": file("missing.json")}), "missing.json"),
+        (json!({"manifest": m, "only": ["nope"]}), "does not have"),
+        (json!({"manifest": m, "only": "swish"}), "list of names"),
+        (json!({"manifest": write("bad1.json", json!({"assets": []}))}), "1 to 32"),
+        (json!({"manifest": write("bad2.json", json!({"assets": many}))}), "1 to 32"),
+        (json!({"manifest": write("bad3.json", json!({"assets": [{"name": "../up", "prompt": "x"}]}))}), "letters, digits"),
+        (json!({"manifest": write("bad4.json", json!({"assets": [{"name": "a", "prompt": "x"}, {"name": "A", "prompt": "y"}]}))}), "used twice"),
+        (
+            json!({"manifest": write("bad5.json", json!({"assets": [{"name": "a", "prompt": "x", "references": ["later"]}, {"name": "later", "prompt": "y"}]}))}),
+            "neither an asset",
+        ),
+        (json!({"manifest": write("bad6.json", json!({"assets": [{"name": "a", "prompt": "x", "shell": "rm -rf"}]}))}), "unknown field"),
+        (json!({"manifest": write("bad7.json", json!({"assets": [{"name": "a", "prompt": "x", "kind": "hologram"}]}))}), "unknown kind"),
+        (json!({"manifest": write("bad8.json", json!({"assets": [{"name": "a", "prompt": "  "}]}))}), "empty or too long"),
+        (json!({"manifest": write("bad9.json", json!({"assets": [{"name": "a", "prompt": "x", "provider": "nope"}]}))}), "no generation tool"),
+    ] {
+        let e = b.s.execute("generate.assets", p.clone()).unwrap_err().to_string();
+        assert!(e.contains(why), "{p}: {e}");
+    }
+    std::fs::write(scene.join("bad10.json"), "{not json").unwrap();
+    assert!(b.s.execute("generate.assets", json!({"manifest": file("bad10.json")})).is_err());
+    assert!(running(&b.s).is_none());
+    let _ = std::fs::remove_dir_all(&dir0);
+}
+
+#[test]
+fn a_gap_is_filled_between_two_pictures_or_by_carrying_the_shot_on() {
+    let dir0 = std::env::temp_dir().join(format!("fc-generate-fixture-m-{}", std::process::id()));
+    std::fs::create_dir_all(&dir0).unwrap();
+    let fixture = dir0.join("clip.png");
+    std::fs::write(&fixture, png(64, 36, 90)).unwrap();
+    let f = fixture.to_string_lossy();
+    // (a still stands in for the clip; the extend program notes what it was given)
+    let vid = tool(
+        "vid",
+        "video",
+        &fixture,
+        r#","{frames}","{optional}""#,
+        &format!(
+            r#","extension":"png","framesStep":8,"framesOffset":1,"maxSeconds":10,"optional":{{"image":["--image","{{image}}"],"lastImage":["--last","{{lastImage}}","{{lastFrame}}"]}},"extendCommand":["/bin/sh","-c","out=\"$2\"; printf '%s\\n' \"$@\" > \"$out.args\"; cp \"$1\" \"$out\"","sh","{f}","{{out}}","--video","{{video}}","--frames","{{frames}}","--prompt","{{prompt}}"]"#
+        ),
+    );
+    let plain = tool("plain", "video", &fixture, "", r#","extension":"png""#);
+    let img = tool("img", "image", &fixture, "", "");
+    let mut b = bench("motion", &[vid, plain, img]);
+    let listed = b.s.execute("generate.providers", json!({})).unwrap();
+    assert_eq!((listed["providers"][0]["bothEnds"].as_bool(), listed["providers"][0]["carriesOn"].as_bool()), (Some(true), Some(true)));
+    assert_eq!((listed["providers"][1]["bothEnds"].as_bool(), listed["providers"][1]["carriesOn"].as_bool()), (Some(false), Some(false)));
+    let v = b.s.execute("generate.image", json!({"prompt": "a", "dir": b.out(), "wait": true})).unwrap();
+    let item = made(&v, 0)["item"].as_u64().unwrap();
+    let t0 = after_everything(&b.s);
+    let unit = sec(&b.s, 1.0);
+    let sec = |x: i64| Tick(unit.0 * x);
+    b.s.execute("timeline.place", json!({"item": item, "track": "new", "time": t0.0, "duration": sec(1).0})).unwrap();
+    let track = b.s.active_sequence().unwrap().video_tracks.len();
+    let label = format!("V{track}");
+    b.s.execute("timeline.place", json!({"item": item, "track": label, "time": (t0 + sec(3)).0, "duration": sec(1).0})).unwrap();
+    let on_track = |s: &Session| s.active_sequence().unwrap().video_tracks[track - 1].items.len();
+    let inside = (t0 + sec(2)).0;
+    // from the frame before to the frame after: the clip starts on one and ends on the other
+    let v = b.s.execute("generate.fillGap", json!({"track": label, "atTime": inside, "from": "both", "dir": b.out(), "wait": true})).unwrap();
+    let g = made(&v, 0);
+    assert_eq!((g["start"].as_i64(), g["duration"].as_i64(), on_track(&b.s)), (Some((t0 + sec(1)).0), Some(sec(2).0), 3), "{v}");
+    let args = b.args_of(g["path"].as_str().unwrap());
+    let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+    assert!(after("--image").contains("Reference Frame 1") && after("--last").contains("Reference Frame 2"), "{args:?}");
+    assert!(args.contains(&"48".to_string()), "the last picture is pinned on the last of 49 frames: {args:?}");
+    assert!(args.contains(&BETWEEN.to_string()), "{args:?}");
+    b.s.undo().unwrap();
+    assert_eq!(on_track(&b.s), 2);
+    // carrying the shot on: the tool is given the moments before the gap as a video, and the new part is placed
+    let v = b.s.execute("generate.fillGap", json!({"track": label, "atTime": inside, "from": "motion", "dir": b.out(), "wait": true})).unwrap();
+    let g = made(&v, 0);
+    assert_eq!((g["start"].as_i64(), on_track(&b.s)), (Some((t0 + sec(1)).0), 3), "{v}");
+    let args = b.args_of(g["path"].as_str().unwrap());
+    let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+    let carried = after("--video");
+    assert!(carried.contains("Carried Frames") && std::fs::metadata(&carried).is_ok_and(|m| m.len() > 0), "{args:?}");
+    assert_eq!(after("--frames"), "48", "two seconds of new frames, in eights");
+    assert!(args.contains(&CONTINUE.to_string()), "{args:?}");
+    // a shot carried on from where a clip ends: it starts there, on the same track when that is free
+    let end = t0 + sec(4);
+    let v = b.s.execute("generate.extend", json!({"atTime": end.0, "seconds": 1, "prompt": "the kite climbs", "dir": b.out(), "wait": true})).unwrap();
+    let g = made(&v, 0);
+    assert_eq!(g["start"].as_i64(), Some(end.0), "{v}");
+    assert_eq!(on_track(&b.s), 4, "on the track of the clip it carries on: {v}");
+    let args = b.args_of(g["path"].as_str().unwrap());
+    assert!(args.contains(&"24".to_string()) && args.contains(&"the kite climbs".to_string()), "{args:?}");
+    // a tool that can do neither says so, and so do hostile requests
+    for (cmd, p, why) in [
+        ("generate.fillGap", json!({"track": label, "all": true, "from": "both", "provider": "plain"}), "cannot end a clip"),
+        ("generate.fillGap", json!({"track": label, "all": true, "from": "motion", "provider": "plain"}), "cannot carry a shot on"),
+        ("generate.extend", json!({"provider": "plain"}), "cannot carry a shot on"),
+        ("generate.extend", json!({"seconds": 99}), "0.3 to 10"),
+        ("generate.extend", json!({"seconds": "long"}), "0.3 to 10"),
+        ("generate.extend", json!({"atTime": 0}), "of picture before it"),
+        ("generate.video", json!({"prompt": "x", "provider": "plain", "lastImage": fixture.to_string_lossy()}), "cannot end a clip"),
+        ("generate.video", json!({"prompt": "x", "lastImage": "/nonexistent/z.png"}), "is not a file"),
+    ] {
+        let e = b.s.execute(cmd, p.clone()).unwrap_err().to_string();
+        assert!(e.contains(why), "{cmd} {p}: {e}");
+    }
+    let _ = std::fs::remove_dir_all(&dir0);
+}

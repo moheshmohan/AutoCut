@@ -13,7 +13,9 @@ Photos (and AutoCut's cache), the exports and `.fcproj` projects in `~/Movies/Au
 ## generation — local generation tools
 
 `generation/providers.example.json` describes three MLX tools (pictures, clips, sound) to the
-`generate.*` commands; `generation/ltx_video.py` is the small runner the clip tool uses. See
+`generate.*` commands; `generation/ltx_video.py` is the small runner the clip tool uses,
+`generation/ltx_extend.py` the one that carries a shot on, and `generation/cutout.py` removes a
+picture's background. See
 [Generation in the editor](../docs/generation.md).
 
 ## every-robot — "Every Robot I've Met" (H4hacks)

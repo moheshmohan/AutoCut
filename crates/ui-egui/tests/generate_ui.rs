@@ -107,6 +107,8 @@ fn generate_lists_the_tool_runs_it_and_places_the_picture() {
         "generate.transparent",
         "generate.place",
         "generate.length",
+        "generate.variations",
+        "generate.depthMove",
         "generate.variation",
         "generate.run",
     ] {
@@ -143,20 +145,61 @@ fn generate_lists_the_tool_runs_it_and_places_the_picture() {
     if let Ok(dir) = std::env::var("FILMCRAFT_UI_SHOTS") {
         d.ok("ui.screenshot", json!({"path": format!("{dir}/generate-panel.png"), "panel": "Generate"}));
     }
-    // the other modes show their own controls; a kind with no tool says so and cannot run
+    // two to choose from: the first is placed, and Use puts the other in its place
+    d.ok("ui.set", json!({"generate": {"prompt": "a kite over the dunes", "variations": 2, "seconds": 2.0}}));
+    d.exec("playhead.set", json!({"seconds": 4.0}));
+    let before = d.video_clips();
+    d.ok("ui.click", json!({"id": "generate.run"}));
+    let mut landed = false;
+    for _ in 0..400 {
+        d.frames(1);
+        if d.draft()["job"].is_null() {
+            landed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(landed, "the two variations never finished");
+    assert_eq!(d.status(), "Generated 2 items");
+    assert_eq!(d.video_clips(), before + 1, "one of the two is on the timeline");
+    d.frames(3);
+    let made = d.exec("generate.history", json!({}));
+    let (second, first) = (made["generated"][0]["item"].as_u64().unwrap(), made["generated"][1]["item"].as_u64().unwrap());
+    assert!(made["generated"][0]["variationOf"].as_str().is_some(), "{made}");
+    let shown = |d: &mut Driver, item: u64| {
+        let q = d.exec("sequence.inspect", json!({}));
+        q["video"].as_array().unwrap().iter().flat_map(|t| t["items"].as_array().cloned().unwrap_or_default()).any(|c| c["item"].as_u64() == Some(item))
+    };
+    assert!(shown(&mut d, first) && !shown(&mut d, second));
+    assert!(d.ids().iter().any(|i| i == "generate.history.1.use"), "{:?}", d.ids());
+    // (a mode with few controls, so the list is in view to be clicked)
     d.ok("ui.set", json!({"generate": {"mode": "fill"}}));
+    d.frames(3);
+    d.ok("ui.click", json!({"id": "generate.history.1.use"}));
+    d.frames(3);
+    assert_eq!(d.status(), "This variation is on the timeline now");
+    assert!(shown(&mut d, second) && !shown(&mut d, first));
+    assert_eq!(d.video_clips(), before + 1);
+    // the other modes show their own controls; a kind with no tool says so and cannot run
+    d.ok("ui.set", json!({"generate": {"mode": "fill", "variations": 1}}));
     d.frames(3);
     let ids = d.ids();
     assert!(
-        ids.iter().any(|i| i == "generate.track") && ids.iter().any(|i| i == "generate.allGaps") && !ids.iter().any(|i| i == "generate.provider"),
+        ids.iter().any(|i| i == "generate.track")
+            && ids.iter().any(|i| i == "generate.allGaps")
+            && ids.iter().any(|i| i == "generate.fillFrom")
+            && !ids.iter().any(|i| i == "generate.provider"),
         "{ids:?}"
     );
+    d.ok("ui.set", json!({"generate": {"mode": "video"}}));
+    d.frames(3);
+    assert!(d.ids().iter().any(|i| i == "generate.carryOn"));
     d.ok("ui.set", json!({"generate": {"mode": "augment", "prompt": "add snow"}}));
     d.frames(3);
     assert!(d.ids().iter().any(|i| i == "generate.animate"));
     d.ok("ui.set", json!({"generate": {"mode": "sound", "prompt": "rain"}}));
     d.frames(3);
-    assert!(!d.ids().iter().any(|i| i == "generate.provider"));
+    assert!(!d.ids().iter().any(|i| i == "generate.provider") && d.ids().iter().any(|i| i == "generate.forClip"));
     d.ok("ui.click", json!({"id": "generate.run"}));
     d.frames(2);
     assert!(d.draft()["job"].is_null(), "no sound tool: nothing runs");

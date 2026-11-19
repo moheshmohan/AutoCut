@@ -121,6 +121,17 @@ pub struct Provider {
     /// Added to the prompt of a picture that will be cut out (a plain background cuts cleanly).
     #[serde(default)]
     pub cutout_prompt_suffix: Option<String>,
+    /// A video tool that can carry a clip on: the program that is given the last moments of the
+    /// picture as a small video (`{video}`) and writes that video with `{frames}` new frames after
+    /// it (`{out}`). The new part is what is placed.
+    #[serde(default)]
+    pub extend_command: Vec<String>,
+    /// The frames of picture the extend program is given (default 33).
+    #[serde(default)]
+    pub carry_frames: Option<u32>,
+    /// Width and height of the video the extend program takes are multiples of this (default 64).
+    #[serde(default)]
+    pub extend_multiple_of: Option<u32>,
     #[serde(default)]
     pub license: String,
     /// What the model's licence asks to be shown where it is used.
@@ -148,14 +159,35 @@ pub struct Vars {
     pub frames: Option<u32>,
     pub fps: Option<f64>,
     pub image: Option<String>,
+    /// The picture a clip ends on.
+    pub last_image: Option<String>,
+    /// The video an extend program carries on from.
+    pub video: Option<String>,
     pub references: Vec<String>,
     pub steps: Option<u32>,
     pub strength: Option<f64>,
     pub transparent: bool,
 }
 
-const NAMES: [&str; 14] =
-    ["out", "prompt", "negative", "width", "height", "seed", "seconds", "frames", "fps", "image", "steps", "strength", "transparent", "path"];
+const NAMES: [&str; 17] = [
+    "out",
+    "prompt",
+    "negative",
+    "width",
+    "height",
+    "seed",
+    "seconds",
+    "frames",
+    "fps",
+    "image",
+    "lastImage",
+    "lastFrame",
+    "video",
+    "steps",
+    "strength",
+    "transparent",
+    "path",
+];
 
 fn number(v: f64) -> String {
     let s = format!("{v:.3}");
@@ -177,6 +209,10 @@ impl Vars {
             "frames" => self.frames.map(|v| v.to_string()),
             "fps" => self.fps.map(number),
             "image" => self.image.clone().filter(|s| !s.is_empty()),
+            "lastImage" => self.last_image.clone().filter(|s| !s.is_empty()),
+            // the index of a clip's last frame (where its last picture is pinned)
+            "lastFrame" => self.frames.map(|v| v.saturating_sub(1).to_string()),
+            "video" => self.video.clone().filter(|s| !s.is_empty()),
             "steps" => self.steps.map(|v| v.to_string()),
             "strength" => self.strength.map(number),
             "transparent" => self.transparent.then(|| "true".to_string()),
@@ -330,6 +366,7 @@ fn check(p: &Provider) -> Result<(), String> {
         .iter()
         .chain(&p.per_reference)
         .chain(&p.cutout_command)
+        .chain(&p.extend_command)
         .chain(groups)
         .chain(p.env.values())
         .chain(p.cwd.iter())
@@ -339,7 +376,7 @@ fn check(p: &Provider) -> Result<(), String> {
             return err("an argument is too long or holds a NUL".into());
         }
     }
-    for arg in p.command.iter().chain(&p.per_reference).chain(&p.cutout_command).chain(p.optional.values().flat_map(|g| g.iter())) {
+    for arg in p.command.iter().chain(&p.per_reference).chain(&p.cutout_command).chain(&p.extend_command).chain(p.optional.values().flat_map(|g| g.iter())) {
         if let Err(e) = placeholders(arg) {
             return err(e);
         }
@@ -360,6 +397,12 @@ fn check(p: &Provider) -> Result<(), String> {
         let io = |name: &str| p.cutout_command.iter().any(|a| a.contains(name));
         if p.cutout_command.len() > MAX_ARGS || !std::path::Path::new(cut).is_absolute() || cut.contains('{') || !io("{image}") || !io("{out}") {
             return err("`cutoutCommand` needs an absolute program, {image} and {out}".into());
+        }
+    }
+    if let Some(ext) = p.extend_command.first() {
+        let io = |name: &str| p.extend_command.iter().any(|a| a.contains(name));
+        if p.extend_command.len() > MAX_ARGS || !std::path::Path::new(ext).is_absolute() || ext.contains('{') || !io("{video}") || !io("{out}") {
+            return err("`extendCommand` needs an absolute program, {video} and {out}".into());
         }
     }
     if p.env.len() > 64 || p.env.keys().any(|k| k.is_empty() || k.len() > 128 || k.contains('=') || k.contains('\0')) {
@@ -435,30 +478,105 @@ pub fn cutout(p: &Provider) -> Option<Provider> {
     Some(c)
 }
 
+/// The provider's extend step as a provider of its own (the same environment and folder), when
+/// it has one.
+pub fn extender(p: &Provider) -> Option<Provider> {
+    if p.extend_command.is_empty() {
+        return None;
+    }
+    let mut c = p.clone();
+    c.command = p.extend_command.clone();
+    c.name = format!("{} (carrying on)", p.name);
+    c.per_reference.clear();
+    c.optional.clear();
+    Some(c)
+}
+
+/// The frames of picture an extend program is given.
+pub fn carry_frames(p: &Provider) -> u32 {
+    p.carry_frames.unwrap_or(33).clamp(9, 241)
+}
+
+/// A size on a coarse grid (each side a multiple of `step`) closest to the shape `aspect`, its
+/// long side near `long`: snapping each side on its own would bend the picture.
+pub fn grid_size(aspect: (u32, u32), long: u32, step: u32) -> (u32, u32) {
+    let step = step.clamp(1, 512);
+    let (a, b) = (f64::from(aspect.0.max(1)), f64::from(aspect.1.max(1)));
+    let ratio = (a.max(b) / a.min(b)).clamp(1.0, 64.0);
+    let long = long.clamp(step, 8192);
+    let (lo, hi) = (f64::from(long) * 0.75, f64::from(long) * 1.34);
+    let mut best: Option<(f64, u32, u32)> = None;
+    let mut l = step;
+    while l <= 8192 {
+        if f64::from(l) >= lo && f64::from(l) <= hi {
+            let s = ((f64::from(l) / ratio / f64::from(step)).round().clamp(1.0, 8192.0) as u32).saturating_mul(step).min(l);
+            let off = (f64::from(l) / f64::from(s) / ratio - 1.0).abs() + (f64::from(l) - f64::from(long)).abs() / f64::from(long) * 0.01;
+            if best.is_none_or(|(e, _, _)| off < e) {
+                best = Some((off, l, s));
+            }
+        }
+        l = l.saturating_add(step);
+    }
+    let (_, l, s) = best.unwrap_or((0.0, long.div_ceil(step).saturating_mul(step), long.div_ceil(step).saturating_mul(step)));
+    if aspect.0 >= aspect.1 { (l, s) } else { (s, l) }
+}
+
+/// What a tool's output says about how far it is: its last line `progress 0.42`, `progress 42%`
+/// or `progress 3/8`, as a fraction.
+pub fn progress_in(text: &str) -> Option<f64> {
+    let line = text.split(['\n', '\r']).rev().map(str::trim).find(|l| l.len() > 9 && l.get(..9).is_some_and(|h| h.eq_ignore_ascii_case("progress ")))?;
+    let v = line.get(9..)?.trim();
+    let f = if let Some(pct) = v.strip_suffix('%') {
+        pct.trim().parse::<f64>().ok()? / 100.0
+    } else if let Some((n, m)) = v.split_once('/') {
+        let (n, m) = (n.trim().parse::<f64>().ok()?, m.trim().parse::<f64>().ok()?);
+        if m <= 0.0 {
+            return None;
+        }
+        n / m
+    } else {
+        v.parse::<f64>().ok()?
+    };
+    f.is_finite().then(|| f.clamp(0.0, 1.0))
+}
+
 /// Whether the provider's program is there to run.
 pub fn installed(p: &Provider) -> bool {
     p.command.first().is_some_and(|c| std::path::Path::new(c).is_file())
 }
 
-/// The end of a run's log, for an error message.
+/// The last 1500 bytes of a run's log.
 #[cfg(not(target_arch = "wasm32"))]
-fn log_tail(path: &std::path::Path) -> String {
+fn log_end(path: &std::path::Path) -> String {
     use std::io::{Read as _, Seek as _};
     let Ok(mut f) = std::fs::File::open(path) else { return String::new() };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let _ = f.seek(std::io::SeekFrom::Start(len.saturating_sub(1500)));
     let mut bytes = Vec::new();
     let _ = f.take(1500).read_to_end(&mut bytes);
-    let text = String::from_utf8_lossy(&bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The end of a run's log, for an error message.
+#[cfg(not(target_arch = "wasm32"))]
+fn log_tail(path: &std::path::Path) -> String {
+    let text = log_end(path);
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let from = lines.len().saturating_sub(6);
     lines.get(from..).unwrap_or(&[]).join(" | ")
 }
 
-/// Runs a provider's command line until it has written `out`: `tick` hears the seconds gone by,
-/// `cancel` stops it (the program is killed), and so does its time limit.
+/// Runs a provider's command line until it has written `out`: `tick` hears the seconds gone by
+/// and how far the tool says it is ([`progress_in`], when it says), `cancel` stops it (the
+/// program is killed), and so does its time limit.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run(p: &Provider, args: &[String], out: &std::path::Path, cancel: &std::sync::atomic::AtomicBool, tick: &mut dyn FnMut(f64)) -> Result<(), String> {
+pub fn run(
+    p: &Provider,
+    args: &[String],
+    out: &std::path::Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    tick: &mut dyn FnMut(f64, Option<f64>),
+) -> Result<(), String> {
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
     let Some((program, rest)) = args.split_first() else { return Err(format!("{} has no program", p.id)) };
@@ -468,6 +586,8 @@ pub fn run(p: &Provider, args: &[String], out: &std::path::Path, cancel: &std::s
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
+    // a file that is made again goes first: what is there afterwards is what this run wrote
+    let _ = std::fs::remove_file(out);
     let log_path = out.with_extension("generation.log");
     let log = std::fs::File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
     let log2 = log.try_clone().map_err(|e| format!("{}: {e}", log_path.display()))?;
@@ -479,6 +599,7 @@ pub fn run(p: &Provider, args: &[String], out: &std::path::Path, cancel: &std::s
     let mut child = cmd.spawn().map_err(|e| format!("{}: could not start {program}: {e}", p.name))?;
     let limit = p.timeout_seconds.unwrap_or(3600.0).clamp(1.0, 86_400.0);
     let t0 = web_time::Instant::now();
+    let (mut turns, mut said) = (0u32, None);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -498,7 +619,12 @@ pub fn run(p: &Provider, args: &[String], out: &std::path::Path, cancel: &std::s
             let _ = std::fs::remove_file(&log_path);
             return Err(if stopped { "stopped: nothing was changed".into() } else { format!("{} did not finish in {limit:.0} s and was stopped", p.name) });
         }
-        tick(gone);
+        // the log is looked at about once a second
+        if turns % 7 == 0 {
+            said = progress_in(&log_end(&log_path)).or(said);
+        }
+        turns = turns.wrapping_add(1);
+        tick(gone, said);
         std::thread::sleep(std::time::Duration::from_millis(150));
     };
     let made = std::fs::metadata(out).map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
@@ -629,6 +755,71 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_tool_that_says_how_far_it_is_is_heard() {
+        assert_eq!(progress_in("loading\nprogress 0.25\nstep\n"), Some(0.25));
+        assert_eq!(progress_in("progress 0.1\r\nPROGRESS 40%\n"), Some(0.4));
+        assert_eq!(progress_in("progress 3/8"), Some(0.375));
+        assert_eq!(progress_in("progress 9"), Some(1.0), "never past the end");
+        assert_eq!(progress_in("progress -4"), Some(0.0));
+        for silent in ["", "progress", "progress  ", "progress x", "progress 1/0", "progress NaN", "in progress 0.5", "progression 0.5", "progress 5/"] {
+            assert_eq!(progress_in(silent), None, "{silent:?}");
+        }
+    }
+
+    /// A tool's log is read while it runs: the bar hears the last thing it said.
+    #[cfg(unix)]
+    #[test]
+    fn the_progress_a_running_tool_prints_reaches_the_bar() {
+        let dir = std::env::temp_dir().join(format!("fc-generate-progress-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("a.png");
+        let p = one("image", r#"["/bin/sh","-c","echo progress 0.5; sleep 1.6; echo made > \"$1\"","sh","{out}"]"#, "");
+        let v = Vars { out: out.to_string_lossy().into_owned(), ..Default::default() };
+        let mut heard = Vec::new();
+        run(&p, &argv(&p, &v).unwrap(), &out, &std::sync::atomic::AtomicBool::new(false), &mut |_, said| heard.push(said)).unwrap();
+        assert!(heard.contains(&Some(0.5)), "{heard:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_coarse_grid_keeps_the_shape_of_the_picture() {
+        assert_eq!(grid_size((1920, 1080), 480, 64), (576, 320));
+        assert_eq!(grid_size((1080, 1920), 480, 64), (320, 576));
+        assert_eq!(grid_size((1, 1), 480, 64), (448, 448));
+        // hostile shapes and steps still give a size on the grid
+        for (aspect, long, step) in [((0, 0), 0, 0), ((u32::MAX, 1), u32::MAX, u32::MAX), ((1, u32::MAX), 7, 3), ((16, 9), 480, 7)] {
+            let (w, h) = grid_size(aspect, long, step);
+            let s = step.clamp(1, 512);
+            assert!(w >= 1 && h >= 1 && w % s == 0 && h % s == 0 && w <= 8192 && h <= 8192, "{aspect:?} {long} {step}: {w}×{h}");
+        }
+    }
+
+    #[test]
+    fn a_clip_can_end_on_a_picture_and_an_extend_program_needs_its_video() {
+        let p = one(
+            "video",
+            r#"["/bin/gen","{out}","{frames}","{optional}"]"#,
+            r#","optional":{"image":["--image","{image}","0"],"lastImage":["--image","{lastImage}","{lastFrame}"]},"extendCommand":["/bin/ext","{video}","{frames}","{out}"]"#,
+        );
+        let v = Vars { out: "/o.mp4".into(), frames: Some(49), image: Some("/a.png".into()), last_image: Some("/b.png".into()), ..Default::default() };
+        assert_eq!(argv(&p, &v).unwrap(), ["/bin/gen", "/o.mp4", "49", "--image", "/a.png", "0", "--image", "/b.png", "48"]);
+        let e = extender(&p).unwrap();
+        let v = Vars { out: "/o.mp4".into(), frames: Some(48), video: Some("/carried.mp4".into()), ..Default::default() };
+        assert_eq!(argv(&e, &v).unwrap(), ["/bin/ext", "/carried.mp4", "48", "/o.mp4"]);
+        assert_eq!(carry_frames(&p), 33);
+        assert!(extender(&one("video", r#"["/bin/gen","{out}"]"#, "")).is_none());
+        for (extra, why) in [
+            (r#","extendCommand":["ext","{video}","{out}"]"#, "extendCommand"),
+            (r#","extendCommand":["/bin/ext","{out}"]"#, "extendCommand"),
+            (r#","extendCommand":["/bin/ext","{video}"]"#, "extendCommand"),
+            (r#","extendCommand":["/bin/ext","{video}","{out}","{nope}"]"#, "unknown placeholder"),
+        ] {
+            let e = parse(&format!(r#"{{"providers":[{}]}}"#, provider("video", r#"["/bin/gen","{out}"]"#, extra))).unwrap_err();
+            assert!(e.contains(why), "{extra}: {e}");
+        }
+    }
+
+    #[test]
     fn a_run_writes_its_file_reports_a_failure_and_can_be_stopped() {
         use std::sync::atomic::AtomicBool;
         let dir = std::env::temp_dir().join(format!("fc-generate-run-{}", std::process::id()));
@@ -636,27 +827,27 @@ mod tests {
         let p = one("image", r#"["/bin/sh","-c","printf '%s' \"$2\" > \"$1\"","sh","{out}","{prompt}"]"#, "");
         let out = dir.join("ok.png");
         let v = Vars { out: out.to_string_lossy().into_owned(), prompt: "hello; touch /tmp/never \"quoted\"".into(), ..Default::default() };
-        run(&p, &argv(&p, &v).unwrap(), &out, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        run(&p, &argv(&p, &v).unwrap(), &out, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "hello; touch /tmp/never \"quoted\"");
         assert!(!out.with_extension("generation.log").exists());
         // a failing program: its last words are in the error, and no file is claimed
         let bad = one("image", r#"["/bin/sh","-c","echo out of memory >&2; exit 3","sh","{out}"]"#, "");
         let out2 = dir.join("bad.png");
         let v2 = Vars { out: out2.to_string_lossy().into_owned(), ..Default::default() };
-        let e = run(&bad, &argv(&bad, &v2).unwrap(), &out2, &AtomicBool::new(false), &mut |_| {}).unwrap_err();
+        let e = run(&bad, &argv(&bad, &v2).unwrap(), &out2, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err();
         assert!(e.contains("out of memory") && e.contains("failed"), "{e}");
         // success without a file is a failure too
         let none = one("image", r#"["/bin/sh","-c","true","sh","{out}"]"#, "");
-        assert!(run(&none, &argv(&none, &v2).unwrap(), &out2, &AtomicBool::new(false), &mut |_| {}).unwrap_err().contains("wrote no file"));
+        assert!(run(&none, &argv(&none, &v2).unwrap(), &out2, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err().contains("wrote no file"));
         // stopped, and past its time limit
         let slow = one("image", r#"["/bin/sh","-c","sleep 30","sh","{out}"]"#, r#","timeoutSeconds":1"#);
         let t0 = web_time::Instant::now();
-        assert!(run(&slow, &argv(&slow, &v2).unwrap(), &out2, &AtomicBool::new(true), &mut |_| {}).unwrap_err().contains("stopped"));
-        assert!(run(&slow, &argv(&slow, &v2).unwrap(), &out2, &AtomicBool::new(false), &mut |_| {}).unwrap_err().contains("did not finish"));
+        assert!(run(&slow, &argv(&slow, &v2).unwrap(), &out2, &AtomicBool::new(true), &mut |_, _| {}).unwrap_err().contains("stopped"));
+        assert!(run(&slow, &argv(&slow, &v2).unwrap(), &out2, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err().contains("did not finish"));
         assert!(t0.elapsed().as_secs() < 10);
         // a program that is not there
         let gone = one("image", r#"["/nonexistent/gen","{out}"]"#, "");
-        assert!(run(&gone, &argv(&gone, &v2).unwrap(), &out2, &AtomicBool::new(false), &mut |_| {}).unwrap_err().contains("not on this computer"));
+        assert!(run(&gone, &argv(&gone, &v2).unwrap(), &out2, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err().contains("not on this computer"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

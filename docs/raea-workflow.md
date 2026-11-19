@@ -30,6 +30,12 @@ can be a composition's background plate or, with `"transparent": true`, a cut-ou
 animates. Write it straight into the composition's assets with `"import": false` and
 `"dir": "<build>/fx/assets"`, and keep the prompt and seed beside the TSX.
 
+For a whole scene, list its pictures, clips and sounds in `<build>/fx/assets/assets.json` and run
+`generate.assets {"manifest": "…/assets.json", "wait": true}`: it makes what is missing and keeps
+the rest, a pose can be made from the character's first picture by name (`references`), a plate
+can be animated (`kind: "video"`, `image`), and a deleted file comes back from the same seed
+([generation.md](generation.md) §5).
+
 ## Render and review
 
 1. Save the composition and its local assets under `~/Movies/AutoCut/<Video>/build/`.

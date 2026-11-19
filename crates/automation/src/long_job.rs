@@ -28,6 +28,8 @@ pub const LONG_COMMANDS: &[&str] = &[
     "generate.sound",
     "generate.fillGap",
     "generate.augment",
+    "generate.extend",
+    "generate.assets",
     "music.downloadNeuralModel",
     "music.downloadSoundfont",
     "music.preview",
@@ -126,8 +128,11 @@ impl FilmcraftMcp {
             }
             if finished {
                 let extras: Vec<(&str, Value)> = JOB_EXTRAS.iter().filter_map(|k| Some((*k, state.as_ref()?.get(*k)?.clone()))).collect();
+                // what a generation made (items, clips), or why its results could not be brought in
+                let generated = state.as_ref().and_then(|j| j.get("generated")).cloned();
                 let result = state.map(|j| j["result"].clone()).unwrap_or(Value::Null);
-                if let Some(e) = result.get("error").and_then(Value::as_str) {
+                let failed = result.get("error").and_then(Value::as_str).or_else(|| generated.as_ref()?.get("error")?.as_str());
+                if let Some(e) = failed {
                     let what = if id == "file.exportMedia" { "export".to_string() } else { format!("`{id}`") };
                     return CallToolResult::error(vec![Content::text(format!("{what} failed: {e}"))]);
                 }
@@ -136,6 +141,9 @@ impl FilmcraftMcp {
                     o.insert("result".into(), result);
                     for (k, v) in extras {
                         o.insert(k.into(), v);
+                    }
+                    if let Some(list) = generated.as_ref().and_then(|g| g.get("generated")) {
+                        o.insert("generated".into(), list.clone());
                     }
                 }
                 return CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&out).unwrap_or_default())]);

@@ -5,7 +5,10 @@ AutoCut runs this with the Python of the environment that has `ltx_pipelines_mlx
 (see docs/generation.md); it writes one MP4 and exits. Nothing here is part of the app.
 
 usage: ltx_video.py --model DIR --out OUT.mp4 --prompt TEXT --width W --height H
-                    --frames N --fps F --seed S [--image START.png]
+                    --frames N --fps F --seed S [--image START.png] [--last-image END.png]
+
+With --last-image the clip ends on that picture (and starts on --image when both are given):
+the pictures are pinned on the first and the last frame through the tool's own command line.
 """
 import argparse
 import sys
@@ -17,6 +20,7 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--image", default=None, help="the picture the clip starts from")
+    ap.add_argument("--last-image", default=None, help="the picture the clip ends on")
     ap.add_argument("--width", type=int, default=480)
     ap.add_argument("--height", type=int, default=272)
     ap.add_argument("--frames", type=int, default=49, help="a multiple of 8, plus 1")
@@ -26,6 +30,19 @@ def main() -> int:
     if not (16 <= a.width <= 2048 and 16 <= a.height <= 2048 and 9 <= a.frames <= 481 and 1 <= a.fps <= 120):
         print("size, frame count or rate out of range", file=sys.stderr)
         return 2
+
+    if a.last_image:
+        from ltx_pipelines_mlx.cli import main as ltx_main
+
+        argv = ["ltx-2-mlx", "generate", "--distilled", "--model", a.model, "--prompt", a.prompt, "--output", a.out]
+        argv += ["--width", str(a.width), "--height", str(a.height), "--frames", str(a.frames)]
+        argv += ["--frame-rate", str(a.fps), "--seed", str(a.seed % (2**31))]
+        if a.image:
+            argv += ["--image", a.image, "0", "1.0"]
+        argv += ["--image", a.last_image, "last", "1.0"]
+        sys.argv = argv
+        ltx_main()
+        return 0
 
     from ltx_pipelines_mlx import DistilledPipeline
 

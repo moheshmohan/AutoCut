@@ -10,6 +10,9 @@
 //! | `generate.sound` | a sound effect or music from a description; imported and placed on an audio track |
 //! | `generate.fillGap` | fills an empty stretch of a video track with a generated clip that carries on from the frame before it (or leads into the one after); `all` fills every gap of the track |
 //! | `generate.augment` | changes what the frame at a time shows by an instruction (add a character, change the weather…) and lays the result over the clip, as a still or animated |
+//! | `generate.extend` | carries the picture on from a time: the tool is given the last moments before it as a small video and makes what comes next, so the motion continues |
+//! | `generate.assets` | makes the files a scene's asset list names and leaves the ones that are there (a RAEA composition's pictures, clips and sounds, rebuilt from their descriptions and seeds) |
+//! | `generate.pick` | puts another variation of a generated item in the place of the one on the timeline |
 //! | `generate.history` | what was generated into this project: item, kind, description, tool, seed |
 //!
 //! **One at a time.** A generation holds the GPU ([`filmcraft_locks`]), so a second one is
@@ -35,15 +38,24 @@ use crate::generate_run::{self as run, Kind, Provider, Vars};
 use crate::{EngineError, Result, Session};
 
 const FOLDER: &str = "Generated";
+/// The metadata field that ties the variations of one request together.
+const VARIATION: &str = "Variation Of";
 const MAX_PROMPT: usize = 4000;
 /// The most gaps one `generate.fillGap` fills.
 const MAX_GAPS: usize = 8;
 const CONTINUE: &str = "Continue this shot naturally: the same place, light, subjects and camera movement.";
 const LEAD_IN: &str = "A shot that leads naturally into this picture: the same place, light and subjects.";
+const BETWEEN: &str = "A shot that moves naturally from the first picture to the last: the same place, light and subjects.";
+/// The most variations one request makes.
+const MAX_VARIATIONS: u64 = 4;
+/// The most files one asset list names.
+const MAX_ASSETS: usize = 32;
+const MOVES: [&str; 8] = ["auto", "in", "out", "left", "right", "up", "down", "circle"];
 
 type Outcome = Arc<Mutex<Option<std::result::Result<(), String>>>>;
 
 /// One run of a provider.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct Step {
     provider: Provider,
     args: Vec<String>,
@@ -63,6 +75,16 @@ struct Place {
     fit: Option<Tick>,
     /// A video's own sound comes along.
     audio: bool,
+    /// Where in the file the placed part starts (a carried-on clip: after the frames it was given).
+    source_in: Option<Tick>,
+    /// A placed picture moves in depth (`clip.photo3d`'s `move`).
+    photo3d: Option<String>,
+}
+
+impl Place {
+    fn at(at: Tick) -> Place {
+        Place { at, track: None, above: 0, still: None, fit: None, audio: false, source_in: None, photo3d: None }
+    }
 }
 
 /// One result: a file to import and, on request, place.
@@ -76,6 +98,8 @@ struct Land {
     seed: u64,
     import: bool,
     place: Option<Place>,
+    /// The file name of the first of the variations this is one of.
+    variation_of: Option<String>,
 }
 
 /// A generation in flight.
@@ -105,31 +129,46 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "generate.image",
             "Generate Image",
-            r#"{"prompt":str,"negative":str?,"references":[item id|path]? (at most 16),"frameTime":ticks?|"frameSeconds":f64?|"fromPlayhead":bool? (the program frame there as the first reference),"width":px?,"height":px?,"seed":u64?,"steps":n?,"strength":0..1?,"transparent":bool=false,"provider":id?,"dir":str?,"import":bool=true,"place":bool=false,"track":"V2"?,"atTime":ticks?|"atSeconds":f64?,"seconds":0.1..600=5,"wait":bool=false}"#,
+            r#"{"prompt":str,"negative":str?,"references":[item id|path]? (at most 16),"frameTime":ticks?|"frameSeconds":f64?|"fromPlayhead":bool? (the program frame there as the first reference),"width":px?,"height":px?,"seed":u64?,"steps":n?,"strength":0..1?,"transparent":bool=false,"variations":1..4=1 (the first is placed; generate.pick swaps another in),"move":"auto"|"in"|"out"|"left"|"right"|"up"|"down"|"circle"? (a placed picture moves in depth),"provider":id?,"dir":str?,"import":bool=true,"place":bool=false,"track":"V2"?,"atTime":ticks?|"atSeconds":f64?,"seconds":0.1..600=5,"wait":bool=false}"#,
             image,
             true,
         ),
         spec(
             "generate.video",
             "Generate Video",
-            r#"{"prompt":str,"image":item id|path|"playhead"?,"seconds":0.1..60=4,"width":px?,"height":px?,"seed":u64?,"audio":bool=false,"provider":id?,"dir":str?,"place":bool=true,"track":"V2"?,"atTime":ticks?|"atSeconds":f64?,"wait":bool=false}"#,
+            r#"{"prompt":str,"image":item id|path|"playhead"?,"lastImage":item id|path? (the picture it ends on, where the tool can),"seconds":0.1..60=4,"width":px?,"height":px?,"seed":u64?,"variations":1..4=1,"audio":bool=false,"provider":id?,"dir":str?,"place":bool=true,"track":"V2"?,"atTime":ticks?|"atSeconds":f64?,"wait":bool=false}"#,
             video,
             true,
         ),
         spec(
             "generate.sound",
             "Generate Sound",
-            r#"{"prompt":str,"kind":"sfx"|"music"="sfx","seconds":0.1..600?,"seed":u64?,"provider":id?,"dir":str?,"place":bool=true,"track":"A2"?,"atTime":ticks?|"atSeconds":f64?,"wait":bool=false}"#,
+            r#"{"prompt":str,"kind":"sfx"|"music"="sfx","seconds":0.1..600?,"clip":id? (as long as this clip, starting where it starts),"seed":u64?,"variations":1..4=1,"provider":id?,"dir":str?,"place":bool=true,"track":"A2"?,"atTime":ticks?|"atSeconds":f64?,"wait":bool=false}"#,
             sound,
             true,
         ),
         spec(
             "generate.fillGap",
             "Fill Gap with Generated Video",
-            r#"{"track":"V1"?,"atTime":ticks?|"atSeconds":f64? (a time inside the gap; default the playhead),"all":bool=false,"from":"before"|"after"|"prompt"="before","prompt":str?,"seed":u64?,"provider":id?,"dir":str?,"wait":bool=false}"#,
+            r#"{"track":"V1"?,"atTime":ticks?|"atSeconds":f64? (a time inside the gap; default the playhead),"all":bool=false,"from":"before"|"after"|"both"|"motion"|"prompt"="before" (both: from the frame before to the frame after; motion: carries on the movement of what comes before),"prompt":str?,"seed":u64?,"provider":id?,"dir":str?,"wait":bool=false}"#,
             fill_gap,
             true,
         ),
+        spec(
+            "generate.extend",
+            "Carry a Shot On",
+            r#"{"atTime":ticks?|"atSeconds":f64? (where the new clip starts; default the end of the clip under the playhead),"seconds":0.3..10=2,"prompt":str?,"seed":u64?,"provider":id?,"track":"V2"?,"dir":str?,"place":bool=true,"wait":bool=false}"#,
+            extend,
+            true,
+        ),
+        spec(
+            "generate.assets",
+            "Generate a Scene's Assets",
+            r#"{"manifest":str (an absolute path to assets.json),"only":[name]?,"force":bool=false,"import":bool=false,"dryRun":bool=false,"wait":bool=false}"#,
+            assets,
+            true,
+        ),
+        spec("generate.pick", "Use This Variation", r#"{"item":id,"clip":id?}"#, pick, true),
         spec(
             "generate.augment",
             "Augment Scene",
@@ -147,6 +186,7 @@ fn provider_json(p: &Provider) -> Value {
         "license": p.license, "attribution": p.attribution, "source": p.source,
         "estimateSeconds": p.estimate_seconds, "maxSeconds": p.max_seconds, "maxSide": p.max_side,
         "maxReferences": p.max_references, "references": !p.per_reference.is_empty(),
+        "bothEnds": p.optional.contains_key("lastImage"), "carriesOn": !p.extend_command.is_empty(),
     })
 }
 
@@ -186,6 +226,7 @@ fn history(s: &mut Session, _p: &Value) -> Result<Value> {
             Some(json!({
                 "item": it.id.0, "name": it.name, "path": item_path(s, it.id), "generator": generator,
                 "description": it.metadata.get("Description"), "note": it.metadata.get("Log Note"),
+                "variationOf": it.metadata.get(VARIATION),
             }))
         })
         .collect();
@@ -250,6 +291,20 @@ fn seconds_p(cmd: &str, p: &Value, most: f64) -> Result<Option<f64>> {
 fn seed_p(s: &mut Session, p: &Value) -> u64 {
     s.generation.made = s.generation.made.saturating_add(1);
     u64_p(p, "seed").unwrap_or(s.generation.made)
+}
+
+fn variations_p(cmd: &str, p: &Value) -> Result<u64> {
+    match p.get("variations") {
+        None | Some(Value::Null) => Ok(1),
+        Some(v) => match v.as_u64() {
+            Some(n) if (1..=MAX_VARIATIONS).contains(&n) => Ok(n),
+            _ => Err(bad(cmd, format!("`variations` must be 1 to {MAX_VARIATIONS}"))),
+        },
+    }
+}
+
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// The file of a media item.
@@ -347,6 +402,7 @@ fn land_of(p: &Provider, path: &str, description: &str, seed: u64, extra: &str, 
         seed,
         import,
         place,
+        variation_of: None,
     }
 }
 
@@ -424,9 +480,10 @@ fn run_steps(steps: &[Step], prog: &filmcraft_export::Progress) -> std::result::
         }
         let est = st.provider.estimate_seconds.unwrap_or(60.0).clamp(1.0, 86_400.0);
         status(if steps.len() > 1 { format!("{} ({} of {})", st.provider.name, i + 1, steps.len()) } else { st.provider.name.clone() });
-        let mut tick = |gone: f64| {
-            // the tool says nothing while it works: the bar follows its usual time and never fills early
-            let part = (gone / est).min(0.97);
+        let mut tick = |gone: f64, said: Option<f64>| {
+            // a tool that says how far it is (`progress 0.4`) is believed; the others say nothing
+            // while they work, so the bar follows their usual time and never fills early
+            let part = said.map_or((gone / est).min(0.97), |f| f.min(0.99));
             let done = ((before + part * est) / total * 1000.0).clamp(0.0, 990.0) as u64;
             prog.done.store(done, Ordering::Relaxed);
         };
@@ -555,6 +612,7 @@ fn land_one(s: &mut Session, l: &Land) -> Result<Value> {
         .and_then(Value::as_u64)
         .ok_or_else(|| EngineError::Other(format!("{} could not be imported", l.path)))?;
     let (description, log, generator, attribution) = (l.description.clone(), l.note.clone(), l.generator.clone(), l.attribution.clone());
+    let variation = l.variation_of.clone();
     s.edit("Generate", |pr, _| {
         if let Some(it) = pr.item_mut(ItemId(item)) {
             it.metadata.insert("Description".into(), description);
@@ -562,6 +620,9 @@ fn land_one(s: &mut Session, l: &Land) -> Result<Value> {
             it.metadata.insert("Generator".into(), generator);
             if !attribution.is_empty() {
                 it.metadata.insert("Credit".into(), attribution);
+            }
+            if let Some(v) = variation {
+                it.metadata.insert(VARIATION.into(), v);
             }
         }
         Ok(())
@@ -582,6 +643,9 @@ fn land_one(s: &mut Session, l: &Land) -> Result<Value> {
         if let Some(d) = pl.still.or(pl.fit) {
             p["duration"] = json!(d.max(rate.frame_duration()).0);
         }
+        if let Some(skip) = pl.source_in.filter(|t| *t > Tick::ZERO) {
+            p["sourceIn"] = json!(skip.0);
+        }
         if pl.audio && l.kind == Kind::Video {
             p["audio"] = json!(true);
             p["audioTrack"] = json!(audio_track(s, None, range)?);
@@ -593,6 +657,13 @@ fn land_one(s: &mut Session, l: &Land) -> Result<Value> {
     // a tool makes its own size (a clip is often small): the picture fills the frame it was made for
     if !l.kind.is_audio() {
         s.execute("clip.fillFrame", json!({"clips": [clip]}))?;
+    }
+    // a picture that moves in depth; without the depth model the picture stays, and says why
+    if let Some(mv) = pl.photo3d.as_deref().filter(|_| l.kind == Kind::Image) {
+        match s.execute("clip.photo3d", json!({"clips": [clip], "move": mv})) {
+            Ok(_) => out["move"] = json!(mv),
+            Err(e) => out["moveError"] = json!(e.to_string()),
+        }
     }
     // a clip shorter than the gap it fills is slowed towards it (never below 40 %: slower looks wrong)
     if let (Some(fit), Some((_, got))) = (pl.fit, clip_span(s, clip))
@@ -637,6 +708,60 @@ fn short(t: &str) -> String {
     t.chars().take(40).collect()
 }
 
+/// What one picture is made from.
+struct Picture<'a> {
+    prov: &'a Provider,
+    prompt: &'a str,
+    negative: Option<String>,
+    refs: Vec<String>,
+    size: (u32, u32),
+    seed: u64,
+    steps: Option<u32>,
+    strength: Option<f64>,
+    transparent: bool,
+}
+
+/// Whether a transparent picture of this tool takes its cut-out program as a second step.
+fn cut_after(cmd: &str, prov: &Provider, transparent: bool) -> Result<Option<Provider>> {
+    if !transparent || prov.optional.contains_key("transparent") {
+        return Ok(None);
+    }
+    run::cutout(prov)
+        .map(Some)
+        .ok_or_else(|| bad(cmd, format!("{} cannot make a transparent picture (it has no `transparent` option and no `cutoutCommand`)", prov.name)))
+}
+
+/// The steps that make one picture at `out`: the tool, then its cut-out program on the picture
+/// it wrote to `source` (given when [`cut_after`] says so).
+fn picture_steps(cmd: &str, q: &Picture, out: &str, cutter: Option<(Provider, String)>) -> Result<Vec<Step>> {
+    let first = cutter.as_ref().map_or(out, |(_, source)| source.as_str()).to_string();
+    let asked = match (&cutter, &q.prov.cutout_prompt_suffix) {
+        (Some(_), Some(suffix)) => format!("{}{suffix}", q.prompt),
+        _ => q.prompt.to_string(),
+    };
+    let vars = Vars {
+        out: first.clone(),
+        prompt: run::prompt_for(q.prov, &asked, q.refs.len()),
+        negative: q.negative.clone(),
+        width: Some(q.size.0),
+        height: Some(q.size.1),
+        seed: q.seed,
+        references: q.refs.clone(),
+        steps: q.steps,
+        strength: q.strength,
+        transparent: q.transparent && cutter.is_none(),
+        ..Default::default()
+    };
+    let args = run::argv(q.prov, &vars).map_err(|e| bad(cmd, e))?;
+    let mut steps = vec![Step { provider: q.prov.clone(), args, out: first.clone() }];
+    if let Some((cut, _)) = cutter {
+        let cut_vars = Vars { out: out.to_string(), image: Some(first), ..Default::default() };
+        let args = run::argv(&cut, &cut_vars).map_err(|e| bad(cmd, e))?;
+        steps.push(Step { provider: cut, args, out: out.to_string() });
+    }
+    Ok(steps)
+}
+
 fn image(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "generate.image";
     poll(s);
@@ -651,6 +776,14 @@ fn image(s: &mut Session, p: &Value) -> Result<Value> {
         x => x,
     };
     let steps = checked_u32_p(p, "steps", cmd)?.filter(|n| (1..=200).contains(n));
+    let count = variations_p(cmd, p)?;
+    let photo3d = match str_p(p, "move") {
+        None => None,
+        Some(m) if MOVES.contains(&m) => Some(m.to_string()),
+        Some(m) => return Err(bad(cmd, format!("unknown `move` `{m}` ({})", MOVES.join(", ")))),
+    };
+    let transparent = bool_p(p, "transparent").unwrap_or(false);
+    let cutter = cut_after(cmd, &prov, transparent)?;
     let dir = crate::voiceover::generated_dir(s, p, FOLDER)?;
     let frame_at = time_p(s, p, "frame").or_else(|| bool_p(p, "fromPlayhead").unwrap_or(false).then(|| s.playhead()));
     let mut taken = Vec::new();
@@ -663,57 +796,38 @@ fn image(s: &mut Session, p: &Value) -> Result<Value> {
         refs.insert(0, frame);
     }
     let (w, h) = run::size(&prov, want, aspect(s));
-    let out = unique_path(s, &dir, "Generated Image", &ext(&prov), &taken)?;
-    taken.push(out.clone());
     let seed = seed_p(s, p);
-    // a cut-out: the tool's own, else its cut-out program run on the picture it made
-    let transparent = bool_p(p, "transparent").unwrap_or(false);
-    let cutter = if transparent && !prov.optional.contains_key("transparent") {
-        Some(
-            run::cutout(&prov)
-                .ok_or_else(|| bad(cmd, format!("{} cannot make a transparent picture (it has no `transparent` option and no `cutoutCommand`)", prov.name)))?,
-        )
-    } else {
-        None
-    };
-    let source = match &cutter {
-        Some(_) => unique_path(s, &dir, "Generated Image source", &ext(&prov), &taken)?,
-        None => out.clone(),
-    };
-    let asked = match (&cutter, &prov.cutout_prompt_suffix) {
-        (Some(_), Some(suffix)) => format!("{prompt}{suffix}"),
-        _ => prompt.clone(),
-    };
-    let vars = Vars {
-        out: source.clone(),
-        prompt: run::prompt_for(&prov, &asked, refs.len()),
-        negative,
-        width: Some(w),
-        height: Some(h),
-        seed,
-        references: refs,
-        steps,
-        strength,
-        transparent: transparent && cutter.is_none(),
-        ..Default::default()
-    };
-    let args = run::argv(&prov, &vars).map_err(|e| bad(cmd, e))?;
-    let mut run_steps = vec![Step { provider: prov.clone(), args, out: source.clone() }];
-    if let Some(cut) = cutter {
-        let cut_vars = Vars { out: out.clone(), image: Some(source), ..Default::default() };
-        let args = run::argv(&cut, &cut_vars).map_err(|e| bad(cmd, e))?;
-        run_steps.push(Step { provider: cut, args, out: out.clone() });
-    }
     let import = bool_p(p, "import").unwrap_or(true);
-    let place = (import && bool_p(p, "place").unwrap_or(false) && s.state.active_sequence.is_some()).then(|| Place {
-        at: time_p(s, p, "at").unwrap_or(s.playhead()),
-        track: str_p(p, "track").map(str::to_string),
-        above: 0,
-        still: Some(Tick::from_seconds_f64(still)),
-        fit: None,
-        audio: false,
-    });
-    let lands = vec![land_of(&prov, &out, &prompt, seed, &format!("{w}×{h}"), import, place)];
+    let placing = import && bool_p(p, "place").unwrap_or(false) && s.state.active_sequence.is_some();
+    let at = time_p(s, p, "at").unwrap_or(s.playhead());
+    let (mut run_steps, mut lands, mut first) = (Vec::new(), Vec::new(), None);
+    for k in 0..count {
+        let out = unique_path(s, &dir, "Generated Image", &ext(&prov), &taken)?;
+        taken.push(out.clone());
+        let cut = match &cutter {
+            Some(c) => {
+                let source = unique_path(s, &dir, "Generated Image source", &ext(&prov), &taken)?;
+                taken.push(source.clone());
+                Some((c.clone(), source))
+            }
+            None => None,
+        };
+        let this = seed.wrapping_add(k);
+        let q =
+            Picture { prov: &prov, prompt: &prompt, negative: negative.clone(), refs: refs.clone(), size: (w, h), seed: this, steps, strength, transparent };
+        run_steps.extend(picture_steps(cmd, &q, &out, cut)?);
+        // the first variation is the one placed; the others wait in the bin (generate.pick)
+        let place = (placing && k == 0).then(|| Place {
+            track: str_p(p, "track").map(str::to_string),
+            still: Some(Tick::from_seconds_f64(still)),
+            photo3d: photo3d.clone(),
+            ..Place::at(at)
+        });
+        let mut land = land_of(&prov, &out, &prompt, this, &format!("{w}×{h}"), import, place);
+        let group = first.get_or_insert_with(|| file_name(&out)).clone();
+        land.variation_of = (count > 1).then_some(group);
+        lands.push(land);
+    }
     let label = format!("Generating a picture: {}", short(&prompt));
     let mut v = start(s, cmd, label, run_steps, lands, bool_p(p, "wait").unwrap_or(false))?;
     v["provider"] = json!(prov.id);
@@ -742,13 +856,16 @@ fn video_step(
     cmd: &str,
     prov: &Provider,
     prompt: &str,
-    image: Option<String>,
+    (image, last_image): (Option<String>, Option<String>),
     seconds: f64,
     want: (Option<u32>, Option<u32>),
     seed: u64,
     dir: &str,
     taken: &[String],
 ) -> Result<(Step, f64, (u32, u32))> {
+    if last_image.is_some() && !prov.optional.contains_key("lastImage") {
+        return Err(bad(cmd, format!("{} cannot end a clip on a given picture (it has no `lastImage` option)", prov.name)));
+    }
     let (frames, fps) = run::frames(prov, run::seconds(prov, seconds, 4.0));
     let (w, h) = run::size(prov, want, aspect(s));
     let out = unique_path(s, dir, "Generated Video", &ext(prov), taken)?;
@@ -763,6 +880,7 @@ fn video_step(
         frames: Some(frames),
         fps: Some(fps),
         image,
+        last_image,
         ..Default::default()
     };
     let args = run::argv(prov, &vars).map_err(|e| bad(cmd, e))?;
@@ -776,23 +894,34 @@ fn video(s: &mut Session, p: &Value) -> Result<Value> {
     let prompt = prompt_p(cmd, p, "prompt")?;
     let seconds = seconds_p(cmd, p, 60.0)?.unwrap_or(4.0);
     let want = (checked_u32_p(p, "width", cmd)?, checked_u32_p(p, "height", cmd)?);
+    let count = variations_p(cmd, p)?;
     let dir = crate::voiceover::generated_dir(s, p, FOLDER)?;
     let image = start_image(s, cmd, p, &dir)?;
+    let last = match p.get("lastImage") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(reference(s, cmd, v)?),
+    };
     let seed = seed_p(s, p);
-    let (step, made, (w, h)) = video_step(s, cmd, &prov, &prompt, image, seconds, want, seed, &dir, &[])?;
-    let place = (bool_p(p, "place").unwrap_or(true) && s.state.active_sequence.is_some()).then(|| Place {
-        at: time_p(s, p, "at").unwrap_or(s.playhead()),
-        track: str_p(p, "track").map(str::to_string),
-        above: 0,
-        still: None,
-        fit: None,
-        audio: bool_p(p, "audio").unwrap_or(false),
-    });
-    let lands = vec![land_of(&prov, &step.out, &prompt, seed, &format!("{made:.1} s · {w}×{h}"), true, place)];
-    let mut v = start(s, cmd, format!("Generating a clip: {}", short(&prompt)), vec![step], lands, bool_p(p, "wait").unwrap_or(false))?;
+    let placing = bool_p(p, "place").unwrap_or(true) && s.state.active_sequence.is_some();
+    let at = time_p(s, p, "at").unwrap_or(s.playhead());
+    let (mut steps, mut lands, mut taken, mut first, mut length) = (Vec::new(), Vec::new(), Vec::new(), None, 0.0);
+    for k in 0..count {
+        let this = seed.wrapping_add(k);
+        let (step, made, (w, h)) = video_step(s, cmd, &prov, &prompt, (image.clone(), last.clone()), seconds, want, this, &dir, &taken)?;
+        taken.push(step.out.clone());
+        length = made;
+        let place =
+            (placing && k == 0).then(|| Place { track: str_p(p, "track").map(str::to_string), audio: bool_p(p, "audio").unwrap_or(false), ..Place::at(at) });
+        let mut land = land_of(&prov, &step.out, &prompt, this, &format!("{made:.1} s · {w}×{h}"), true, place);
+        let group = first.get_or_insert_with(|| file_name(&step.out)).clone();
+        land.variation_of = (count > 1).then_some(group);
+        lands.push(land);
+        steps.push(step);
+    }
+    let mut v = start(s, cmd, format!("Generating a clip: {}", short(&prompt)), steps, lands, bool_p(p, "wait").unwrap_or(false))?;
     v["provider"] = json!(prov.id);
     v["seed"] = json!(seed);
-    v["seconds"] = json!(made);
+    v["seconds"] = json!(length);
     Ok(v)
 }
 
@@ -806,33 +935,400 @@ fn sound(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let prov = provider_for(cmd, p, kind, "provider")?;
     let prompt = prompt_p(cmd, p, "prompt")?;
-    let seconds = run::seconds(&prov, seconds_p(cmd, p, 600.0)?.unwrap_or(if kind == Kind::Sfx { 5.0 } else { 20.0 }), 5.0);
+    let count = variations_p(cmd, p)?;
+    // a sound for a clip: as long as it (as far as the tool goes), starting where it starts
+    let under = match u64_p(p, "clip") {
+        Some(id) => Some(clip_span(s, id).ok_or_else(|| bad(cmd, format!("there is no clip {id} in the open sequence")))?),
+        None => None,
+    };
+    let asked = seconds_p(cmd, p, 600.0)?.or(under.map(|(_, d)| d.seconds())).unwrap_or(if kind == Kind::Sfx { 5.0 } else { 20.0 });
+    let seconds = run::seconds(&prov, asked, 5.0);
     let dir = crate::voiceover::generated_dir(s, p, FOLDER)?;
-    let out = unique_path(s, &dir, if kind == Kind::Sfx { "Generated Sound" } else { "Generated Music" }, &ext(&prov), &[])?;
     let seed = seed_p(s, p);
-    let vars = Vars { out: out.clone(), prompt: prompt.clone(), seed, seconds: Some(seconds), ..Default::default() };
-    let args = run::argv(&prov, &vars).map_err(|e| bad(cmd, e))?;
-    let place = (bool_p(p, "place").unwrap_or(true) && s.state.active_sequence.is_some()).then(|| Place {
-        at: time_p(s, p, "at").unwrap_or(s.playhead()),
-        track: str_p(p, "track").map(str::to_string),
-        above: 0,
-        still: None,
-        fit: Some(Tick::from_seconds_f64(seconds)),
-        audio: false,
-    });
-    let lands = vec![land_of(&prov, &out, &prompt, seed, &format!("{seconds:.1} s"), true, place)];
-    let mut v = start(
-        s,
-        cmd,
-        format!("Generating sound: {}", short(&prompt)),
-        vec![Step { provider: prov.clone(), args, out }],
-        lands,
-        bool_p(p, "wait").unwrap_or(false),
-    )?;
+    let placing = bool_p(p, "place").unwrap_or(true) && s.state.active_sequence.is_some();
+    let at = under.map(|(start, _)| start).or_else(|| time_p(s, p, "at")).unwrap_or(s.playhead());
+    let (mut steps, mut lands, mut taken, mut first) = (Vec::new(), Vec::new(), Vec::new(), None);
+    for k in 0..count {
+        let out = unique_path(s, &dir, if kind == Kind::Sfx { "Generated Sound" } else { "Generated Music" }, &ext(&prov), &taken)?;
+        taken.push(out.clone());
+        let this = seed.wrapping_add(k);
+        let vars = Vars { out: out.clone(), prompt: prompt.clone(), seed: this, seconds: Some(seconds), ..Default::default() };
+        let args = run::argv(&prov, &vars).map_err(|e| bad(cmd, e))?;
+        let place =
+            (placing && k == 0).then(|| Place { track: str_p(p, "track").map(str::to_string), fit: Some(Tick::from_seconds_f64(seconds)), ..Place::at(at) });
+        let mut land = land_of(&prov, &out, &prompt, this, &format!("{seconds:.1} s"), true, place);
+        let group = first.get_or_insert_with(|| file_name(&out)).clone();
+        land.variation_of = (count > 1).then_some(group);
+        lands.push(land);
+        steps.push(Step { provider: prov.clone(), args, out });
+    }
+    let mut v = start(s, cmd, format!("Generating sound: {}", short(&prompt)), steps, lands, bool_p(p, "wait").unwrap_or(false))?;
     v["provider"] = json!(prov.id);
     v["seed"] = json!(seed);
     v["seconds"] = json!(seconds);
     Ok(v)
+}
+
+/// The step that carries the picture on from `at`: the `carry` frames before it go to the tool's
+/// extend program as a small video, and what it writes holds them and then the new frames, so
+/// the new clip is placed from `skip` into its file.
+struct CarryOn {
+    step: Step,
+    /// The new part, seconds.
+    made: f64,
+    size: (u32, u32),
+    skip: Tick,
+    /// The small video of what came before, written for the tool.
+    source: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn carry_on(s: &mut Session, cmd: &str, prov: &Provider, prompt: &str, at: Tick, seconds: f64, seed: u64, dir: &str, taken: &[String]) -> Result<CarryOn> {
+    let ext_prov = run::extender(prov).ok_or_else(|| bad(cmd, format!("{} cannot carry a shot on (it has no `extendCommand`)", prov.name)))?;
+    let fps = prov.fps.filter(|f| f.is_finite() && *f >= 1.0 && *f <= 240.0).unwrap_or(24.0);
+    let carry = run::carry_frames(prov);
+    let carried = f64::from(carry) / fps;
+    let from = at.seconds() - carried;
+    if from < -1.0e-6 {
+        return Err(bad(cmd, format!("carrying a shot on needs {carried:.1} s of picture before it")));
+    }
+    let (w, h) = run::grid_size(aspect(s), prov.default_side.unwrap_or(480), prov.extend_multiple_of.unwrap_or(64));
+    let source = unique_path(s, dir, "Carried Frames", "mp4", taken)?;
+    if let Some(parent) = std::path::Path::new(&source).parent()
+        && !cfg!(target_arch = "wasm32")
+    {
+        std::fs::create_dir_all(parent).map_err(|e| EngineError::Other(format!("{}: {e}", parent.display())))?;
+    }
+    s.execute(
+        "file.exportMedia",
+        json!({
+            "path": source, "format": "h264", "width": w, "height": h, "fps": fps, "audio": false,
+            "range": "custom", "startSeconds": from.max(0.0), "endSeconds": at.seconds(), "wait": true,
+        }),
+    )?;
+    if s.services.file_size(&source).is_err() {
+        return Err(bad(cmd, "the picture before it could not be written for the tool"));
+    }
+    // new frames in the counts the tool takes (LTX: eights)
+    let step = prov.frames_step.unwrap_or(1).clamp(1, 1024);
+    let most = prov.max_seconds.filter(|m| m.is_finite() && *m > 0.0).unwrap_or(10.0);
+    let want = (seconds.clamp(0.1, most) * fps).round().clamp(1.0, 100_000.0) as u32;
+    let frames = want.div_ceil(step).max(1).saturating_mul(step);
+    let made = f64::from(frames) / fps;
+    let mut taken2 = taken.to_vec();
+    taken2.push(source.clone());
+    let out = unique_path(s, dir, "Generated Video", &ext(prov), &taken2)?;
+    let vars = Vars {
+        out: out.clone(),
+        prompt: prompt.to_string(),
+        width: Some(w),
+        height: Some(h),
+        seed,
+        seconds: Some(made),
+        frames: Some(frames),
+        fps: Some(fps),
+        video: Some(source.clone()),
+        ..Default::default()
+    };
+    let args = run::argv(&ext_prov, &vars).map_err(|e| bad(cmd, e))?;
+    // whole frames in, so the cut falls on a frame of the file
+    let skip = if fps.fract() == 0.0 { Tick::from_units(i64::from(carry), fps as i64) } else { Tick::from_seconds_f64(carried) };
+    Ok(CarryOn { step: Step { provider: ext_prov, args, out }, made, size: (w, h), skip, source })
+}
+
+fn extend(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "generate.extend";
+    poll(s);
+    let prov = provider_for(cmd, p, Kind::Video, "provider")?;
+    if s.state.active_sequence.is_none() {
+        return Err(EngineError::NoSequence);
+    }
+    let seconds = match p.get("seconds") {
+        None | Some(Value::Null) => 2.0,
+        Some(v) => match v.as_f64() {
+            Some(x) if x.is_finite() && (0.3..=10.0).contains(&x) => x,
+            _ => return Err(bad(cmd, "`seconds` must be 0.3 to 10")),
+        },
+    };
+    let prompt = text_p(cmd, p, "prompt")?.unwrap_or_else(|| CONTINUE.to_string());
+    // where the new clip starts: asked, else the end of the clip under the playhead
+    let head = s.playhead().max(Tick::ZERO);
+    let under = clip_under(s, head);
+    let at = time_p(s, p, "at").unwrap_or_else(|| under.map_or(head, |(_, left)| head + left)).max(Tick::ZERO);
+    let above = clip_under(s, (at - s.sequence_rate().sane().frame_duration()).max(Tick::ZERO)).map_or(0, |(i, _)| i);
+    let dir = crate::voiceover::generated_dir(s, p, FOLDER)?;
+    let seed = seed_p(s, p);
+    let c = carry_on(s, cmd, &prov, &prompt, at, seconds, seed, &dir, &[])?;
+    let place = bool_p(p, "place").unwrap_or(true).then(|| Place {
+        track: str_p(p, "track").map(str::to_string).or_else(|| Some(format!("V{}", above + 1))),
+        above,
+        source_in: Some(c.skip),
+        ..Place::at(at)
+    });
+    let (w, h) = c.size;
+    let lands = vec![land_of(&prov, &c.step.out, &prompt, seed, &format!("{:.1} s · {w}×{h} · carries a shot on", c.made), true, place)];
+    let mut v = start(s, cmd, "Carrying the shot on".to_string(), vec![c.step], lands, bool_p(p, "wait").unwrap_or(false))?;
+    v["provider"] = json!(prov.id);
+    v["seed"] = json!(seed);
+    v["seconds"] = json!(c.made);
+    v["at"] = json!(at.0);
+    Ok(v)
+}
+
+/// A scene's asset list (`assets.json`): the files a composition needs, each from a description.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AssetList {
+    /// The size of the pictures and clips that name none.
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    assets: Vec<Asset>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Asset {
+    /// The file's name without its extension.
+    name: String,
+    /// `image` (default), `video`, `sfx` or `music`.
+    #[serde(default)]
+    kind: Option<String>,
+    prompt: String,
+    #[serde(default)]
+    negative: Option<String>,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default)]
+    transparent: bool,
+    #[serde(default)]
+    provider: Option<String>,
+    /// Reference pictures: other assets of the list by name (made before this one) or files.
+    #[serde(default)]
+    references: Vec<String>,
+    /// A clip's first picture: an asset by name, or a file.
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    seconds: Option<f64>,
+}
+
+/// A seed that stays the same for a name (FNV-1a), so an asset without one is made the same again.
+fn seed_of(name: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h % 1_000_000_000
+}
+
+fn asset_name_ok(name: &str) -> bool {
+    let n = name.chars().count();
+    (1..=64).contains(&n) && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_')) && name.trim() == name
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_asset_list(cmd: &str, path: &str) -> Result<AssetList> {
+    use std::io::Read as _;
+    let f = std::fs::File::open(path).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
+    let mut text = String::new();
+    f.take(run::MANIFEST_MAX + 1).read_to_string(&mut text).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
+    if text.len() as u64 > run::MANIFEST_MAX {
+        return Err(bad(cmd, format!("{path} is larger than 256 KiB")));
+    }
+    serde_json::from_str(&text).map_err(|e| bad(cmd, format!("{path}: {e}")))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_asset_list(cmd: &str, _: &str) -> Result<AssetList> {
+    Err(bad(cmd, "generation tools run on the desktop app, not in the browser"))
+}
+
+fn assets(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "generate.assets";
+    poll(s);
+    let manifest = str_p(p, "manifest").ok_or_else(|| bad(cmd, "`manifest` is needed: the absolute path of an assets.json"))?;
+    let mpath = std::path::Path::new(manifest);
+    if !mpath.is_absolute() || manifest.contains('\0') || mpath.extension().and_then(|e| e.to_str()) != Some("json") {
+        return Err(bad(cmd, "`manifest` must be the absolute path of a .json file"));
+    }
+    let dir = mpath.parent().map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty()).ok_or_else(|| bad(cmd, "`manifest` has no folder"))?;
+    let list = read_asset_list(cmd, manifest)?;
+    if list.assets.is_empty() || list.assets.len() > MAX_ASSETS {
+        return Err(bad(cmd, format!("an asset list names 1 to {MAX_ASSETS} files")));
+    }
+    let only: Vec<String> = match p.get("only").filter(|v| !v.is_null()) {
+        None => Vec::new(),
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| bad(cmd, "`only` must be a list of names"))?
+            .iter()
+            .map(|x| x.as_str().map(str::to_string).ok_or_else(|| bad(cmd, "`only` must be a list of names")))
+            .collect::<Result<_>>()?,
+    };
+    if let Some(unknown) = only.iter().find(|n| !list.assets.iter().any(|a| &a.name == *n)) {
+        return Err(bad(cmd, format!("`only` names `{}`, which the list does not have", unknown.chars().take(80).collect::<String>())));
+    }
+    let (force, import, dry) = (bool_p(p, "force").unwrap_or(false), bool_p(p, "import").unwrap_or(false), bool_p(p, "dryRun").unwrap_or(false));
+    let shape = match (list.width, list.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+        _ => aspect(s),
+    };
+    // name → (file, whether it is there or will be by the time a later asset needs it)
+    let mut known: HashMap<String, (String, bool)> = HashMap::new();
+    let (mut steps, mut lands, mut rows) = (Vec::new(), Vec::new(), Vec::new());
+    for a in &list.assets {
+        if !asset_name_ok(&a.name) {
+            return Err(bad(cmd, "an asset's name is 1 to 64 letters, digits, spaces, - or _"));
+        }
+        if known.contains_key(&a.name.to_lowercase()) {
+            return Err(bad(cmd, format!("the name `{}` is used twice", a.name)));
+        }
+        let kind = match a.kind.as_deref() {
+            None | Some("image") => Kind::Image,
+            Some("video") => Kind::Video,
+            Some("sfx") => Kind::Sfx,
+            Some("music") => Kind::Music,
+            Some(k) => return Err(bad(cmd, format!("{}: unknown kind `{}` (image, video, sfx, music)", a.name, k.chars().take(40).collect::<String>()))),
+        };
+        let chosen = a.provider.as_ref().map_or(json!({}), |id| json!({"provider": id}));
+        let prov = provider_for(cmd, &chosen, kind, "provider")?;
+        let prompt = prompt_p(cmd, &json!({"prompt": a.prompt}), "prompt").map_err(|_| bad(cmd, format!("{}: its `prompt` is empty or too long", a.name)))?;
+        let out = std::path::Path::new(&dir).join(format!("{}.{}", a.name, ext(&prov))).to_string_lossy().into_owned();
+        let there = s.services.file_size(&out).is_ok();
+        let wanted = (only.is_empty() || only.contains(&a.name)) && (force || !there);
+        // another asset by name (made before this one), or a file
+        let resolve = |r: &str, known: &HashMap<String, (String, bool)>| -> Result<String> {
+            if let Some((path, ready)) = known.get(&r.to_lowercase()) {
+                return if *ready { Ok(path.clone()) } else { Err(bad(cmd, format!("{}: it needs `{r}`, which is not made yet and not asked for", a.name))) };
+            }
+            if std::path::Path::new(r).is_absolute() && !r.contains('\0') && s.services.file_size(r).is_ok() {
+                return Ok(r.to_string());
+            }
+            Err(bad(cmd, format!("{}: `{}` is neither an asset listed before it nor a file", a.name, r.chars().take(120).collect::<String>())))
+        };
+        let seed = a.seed.unwrap_or_else(|| seed_of(&a.name));
+        let mut row = json!({"name": a.name, "path": out, "kind": kind.name(), "provider": prov.id, "seed": seed, "state": if wanted { "make" } else if there { "kept" } else { "skipped" }});
+        if wanted {
+            let want = (a.width.or(list.width), a.height.or(list.height));
+            let note = match kind {
+                Kind::Image => {
+                    let most = prov.max_references.map_or(run::MAX_REFERENCES, |m| (m as usize).min(run::MAX_REFERENCES));
+                    if a.references.len() > most || (!a.references.is_empty() && prov.per_reference.is_empty()) {
+                        return Err(bad(
+                            cmd,
+                            format!("{}: {} takes at most {} references", a.name, prov.name, if prov.per_reference.is_empty() { 0 } else { most }),
+                        ));
+                    }
+                    let refs = a.references.iter().map(|r| resolve(r, &known)).collect::<Result<Vec<_>>>()?;
+                    let size = run::size(&prov, want, shape);
+                    let cutter = cut_after(cmd, &prov, a.transparent)?
+                        .map(|c| (c, std::path::Path::new(&dir).join(format!("{} source.{}", a.name, ext(&prov))).to_string_lossy().into_owned()));
+                    let negative = a.negative.clone().filter(|n| n.chars().count() <= MAX_PROMPT && !n.contains('\0'));
+                    let q = Picture { prov: &prov, prompt: &prompt, negative, refs, size, seed, steps: None, strength: None, transparent: a.transparent };
+                    steps.extend(picture_steps(cmd, &q, &out, cutter)?);
+                    format!("{}×{}", size.0, size.1)
+                }
+                Kind::Video => {
+                    let image = a.image.as_deref().map(|r| resolve(r, &known)).transpose()?;
+                    let secs = a.seconds.filter(|x| x.is_finite() && *x > 0.0).unwrap_or(4.0);
+                    let (frames, fps) = run::frames(&prov, run::seconds(&prov, secs, 4.0));
+                    let (w, h) = run::size(&prov, want, shape);
+                    let made = f64::from(frames) / fps;
+                    let vars = Vars {
+                        out: out.clone(),
+                        prompt: prompt.clone(),
+                        width: Some(w),
+                        height: Some(h),
+                        seed,
+                        seconds: Some(made),
+                        frames: Some(frames),
+                        fps: Some(fps),
+                        image,
+                        ..Default::default()
+                    };
+                    let args = run::argv(&prov, &vars).map_err(|e| bad(cmd, e))?;
+                    steps.push(Step { provider: prov.clone(), args, out: out.clone() });
+                    format!("{made:.1} s · {w}×{h}")
+                }
+                Kind::Sfx | Kind::Music => {
+                    let secs = run::seconds(&prov, a.seconds.filter(|x| x.is_finite() && *x > 0.0).unwrap_or(if kind == Kind::Sfx { 5.0 } else { 20.0 }), 5.0);
+                    let vars = Vars { out: out.clone(), prompt: prompt.clone(), seed, seconds: Some(secs), ..Default::default() };
+                    let args = run::argv(&prov, &vars).map_err(|e| bad(cmd, e))?;
+                    steps.push(Step { provider: prov.clone(), args, out: out.clone() });
+                    format!("{secs:.1} s")
+                }
+            };
+            row["note"] = json!(note);
+            lands.push(land_of(&prov, &out, &prompt, seed, &format!("{note} · asset {}", a.name), import, None));
+        }
+        known.insert(a.name.to_lowercase(), (out, there || wanted));
+        rows.push(row);
+    }
+    let making = lands.len();
+    if dry || making == 0 {
+        // (`job: null`: nothing was started, which a caller waiting for a job can tell from a failure)
+        return Ok(json!({"assets": rows, "making": making, "dir": dir, "dryRun": dry, "job": null}));
+    }
+    let label = format!("Generating {making} asset{} for {}", if making == 1 { "" } else { "s" }, file_name(&dir));
+    let mut v = start(s, cmd, label, steps, lands, bool_p(p, "wait").unwrap_or(false))?;
+    v["assets"] = json!(rows);
+    v["making"] = json!(making);
+    v["dir"] = json!(dir);
+    Ok(v)
+}
+
+/// The clip on the timeline that shows another variation of `item`'s request.
+fn sibling_clip(s: &Session, item: ItemId, group: &str) -> Option<u64> {
+    let seq = s.active_sequence()?;
+    seq.video_tracks.iter().flat_map(|t| t.items.iter()).chain(seq.audio_tracks.iter().flat_map(|t| t.items.iter())).find_map(|c| {
+        let other = s.project.item(c.item)?;
+        (c.item != item && other.metadata.get(VARIATION).map(String::as_str) == Some(group)).then_some(c.id.0)
+    })
+}
+
+fn pick(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "generate.pick";
+    poll(s);
+    let id = u64_p(p, "item").ok_or_else(|| bad(cmd, "`item` is needed: the generated item to use"))?;
+    let group = {
+        let it = s.project.item(ItemId(id)).ok_or_else(|| bad(cmd, format!("there is no item {id}")))?;
+        if !it.metadata.contains_key("Generator") {
+            return Err(bad(cmd, format!("item {id} was not generated (generate.history lists what was)")));
+        }
+        it.metadata.get(VARIATION).cloned()
+    };
+    let clip = match u64_p(p, "clip") {
+        Some(c) => {
+            clip_span(s, c).ok_or_else(|| bad(cmd, format!("there is no clip {c} in the open sequence")))?;
+            c
+        }
+        None => group
+            .as_deref()
+            .and_then(|g| sibling_clip(s, ItemId(id), g))
+            .ok_or_else(|| bad(cmd, "none of its variations is on the timeline: name the `clip` to replace, or place it (timeline.place)"))?,
+    };
+    let picture = s.active_sequence().is_some_and(|q| q.video_tracks.iter().any(|t| t.items.iter().any(|c| c.id.0 == clip)));
+    let n0 = s.history.undo.len();
+    let result = (|| -> Result<()> {
+        s.execute("clip.replaceFromBin", json!({"clips": [clip], "item": id}))?;
+        if picture {
+            s.execute("clip.fillFrame", json!({"clips": [clip]}))?;
+        }
+        Ok(())
+    })();
+    crate::clip_ops::collapse_history(s, n0, "Use Variation");
+    if result.is_err() && s.history.undo.len() > n0 {
+        let _ = s.undo();
+        s.history.redo.clear();
+    }
+    result?;
+    Ok(json!({"clip": clip, "item": id}))
 }
 
 /// The empty stretches of a video track between its clips (and before the first), at least
@@ -856,8 +1352,15 @@ fn fill_gap(s: &mut Session, p: &Value) -> Result<Value> {
     poll(s);
     let prov = provider_for(cmd, p, Kind::Video, "provider")?;
     let from = str_p(p, "from").unwrap_or("before");
-    if !matches!(from, "before" | "after" | "prompt") {
-        return Err(bad(cmd, format!("unknown `from` `{from}` (before, after, prompt)")));
+    if !matches!(from, "before" | "after" | "both" | "motion" | "prompt") {
+        return Err(bad(cmd, format!("unknown `from` `{from}` (before, after, both, motion, prompt)")));
+    }
+    let ends = prov.optional.contains_key("lastImage");
+    if from == "both" && !ends {
+        return Err(bad(cmd, format!("{} cannot end a clip on a given picture (it has no `lastImage` option): use `from: \"before\"`", prov.name)));
+    }
+    if from == "motion" && prov.extend_command.is_empty() {
+        return Err(bad(cmd, format!("{} cannot carry a shot on (it has no `extendCommand`): use `from: \"before\"`", prov.name)));
     }
     let label = str_p(p, "track").unwrap_or("V1");
     let index = video_index(label).ok_or_else(|| bad(cmd, format!("`{label}` is not a video track (V1, V2…)")))?;
@@ -887,22 +1390,43 @@ fn fill_gap(s: &mut Session, p: &Value) -> Result<Value> {
     let dir = crate::voiceover::generated_dir(s, p, FOLDER)?;
     let (mut steps, mut lands, mut taken, mut about) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for g in &chosen {
-        // carry on from the last frame before the gap; a gap at the very start leads into what follows
-        let lead_in = from == "after" || (from == "before" && g.start <= Tick::ZERO);
-        let image = match from {
-            "prompt" => None,
-            _ => {
-                let t = if lead_in { g.end() } else { g.start - frame };
-                let f = frame_png(s, cmd, t, &dir, &taken)?;
-                taken.push(f.clone());
-                Some(f)
-            }
-        };
-        let prompt = own.clone().unwrap_or_else(|| if lead_in { LEAD_IN.to_string() } else { CONTINUE.to_string() });
+        // a gap at the very start has nothing before it: it leads into what follows
+        let opens = g.start <= Tick::ZERO;
         let seed = seed_p(s, p);
-        let (step, made, (w, h)) = video_step(s, cmd, &prov, &prompt, image, g.duration.seconds(), (None, None), seed, &dir, &taken)?;
+        let place = Place { track: Some(format!("V{}", index + 1)), above: index, fit: Some(g.duration), ..Place::at(g.start) };
+        if from == "motion" && !opens {
+            let prompt = own.clone().unwrap_or_else(|| CONTINUE.to_string());
+            let c = carry_on(s, cmd, &prov, &prompt, g.start, g.duration.seconds(), seed, &dir, &taken)?;
+            taken.push(c.step.out.clone());
+            taken.push(c.source.clone());
+            let (w, h) = c.size;
+            let place = Place { source_in: Some(c.skip), ..place };
+            lands.push(land_of(&prov, &c.step.out, &prompt, seed, &format!("{:.1} s · {w}×{h} · fills a gap, carrying on", c.made), true, Some(place)));
+            about.push(json!({"start": g.start.0, "duration": g.duration.0, "seconds": c.made, "seed": seed}));
+            steps.push(c.step);
+            continue;
+        }
+        let frame_at = |s: &mut Session, t: Tick, taken: &mut Vec<String>| -> Result<String> {
+            let f = frame_png(s, cmd, t, &dir, taken)?;
+            taken.push(f.clone());
+            Ok(f)
+        };
+        let lead_in = from == "after" || (opens && from != "prompt");
+        let (image, last) = match from {
+            "prompt" => (None, None),
+            "both" if !opens => (Some(frame_at(s, g.start - frame, &mut taken)?), Some(frame_at(s, g.end(), &mut taken)?)),
+            // a tool that can end on a picture ends on the one that follows; another starts from it
+            _ if lead_in && ends => (None, Some(frame_at(s, g.end(), &mut taken)?)),
+            _ if lead_in => (Some(frame_at(s, g.end(), &mut taken)?), None),
+            _ => (Some(frame_at(s, g.start - frame, &mut taken)?), None),
+        };
+        let prompt = own.clone().unwrap_or_else(|| match (&image, &last) {
+            (Some(_), Some(_)) => BETWEEN.to_string(),
+            _ if lead_in => LEAD_IN.to_string(),
+            _ => CONTINUE.to_string(),
+        });
+        let (step, made, (w, h)) = video_step(s, cmd, &prov, &prompt, (image, last), g.duration.seconds(), (None, None), seed, &dir, &taken)?;
         taken.push(step.out.clone());
-        let place = Place { at: g.start, track: Some(format!("V{}", index + 1)), above: index, still: None, fit: Some(g.duration), audio: false };
         lands.push(land_of(&prov, &step.out, &prompt, seed, &format!("{made:.1} s · {w}×{h} · fills a gap"), true, Some(place)));
         about.push(json!({"start": g.start.0, "duration": g.duration.0, "seconds": made, "seed": seed}));
         steps.push(step);
@@ -961,7 +1485,7 @@ fn augment(s: &mut Session, p: &Value) -> Result<Value> {
     let place = bool_p(p, "place").unwrap_or(true);
     let mut steps = vec![Step { provider: prov.clone(), args, out: out.clone() }];
     let mut lands = Vec::new();
-    let over = |still: Option<Tick>, fit: Option<Tick>| Place { at, track: None, above: track + 1, still, fit, audio: false };
+    let over = |still: Option<Tick>, fit: Option<Tick>| Place { above: track + 1, still, fit, ..Place::at(at) };
     match vprov {
         None => {
             // a still over the clip: as long as asked, else to the clip's end (five seconds at most)
@@ -979,7 +1503,7 @@ fn augment(s: &mut Session, p: &Value) -> Result<Value> {
         Some(vp) => {
             let motion = text_p(cmd, p, "motion")?.unwrap_or_else(|| instruction.clone());
             let secs = wanted.unwrap_or_else(|| left.seconds().clamp(1.0, 4.0));
-            let (step, made, _) = video_step(s, cmd, &vp, &motion, Some(out.clone()), secs, (None, None), seed, &dir, &taken)?;
+            let (step, made, _) = video_step(s, cmd, &vp, &motion, (Some(out.clone()), None), secs, (None, None), seed, &dir, &taken)?;
             lands.push(land_of(&prov, &out, &instruction, seed, &format!("{w}×{h} · augments a frame"), true, None));
             lands.push(land_of(&vp, &step.out, &motion, seed, &format!("{made:.1} s · from the augmented frame"), true, place.then(|| over(None, None))));
             steps.push(step);
