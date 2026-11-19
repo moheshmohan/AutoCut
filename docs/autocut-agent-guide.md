@@ -585,6 +585,17 @@ f.run('clipMixer.set', {'clip': r['clip'], 'effect': 'volume', 'param': 'level',
   The 6.3 GB model needs the user's consent to download.
 - **The user's own track:** import it, then `media.beats {item}` finds its beats.
 
+**Generated pictures, clips and sounds.** When `generate.providers` lists installed tools (the
+user's own local models; [generation.md](generation.md)):
+
+- `generate.image {prompt, references?, fromPlayhead?, transparent?, place?, seconds?, wait: true}`.
+- `generate.video {prompt, image?: item|path|"playhead", seconds, atSeconds, track, wait: true}`.
+- `generate.sound {prompt, kind: "sfx"|"music", seconds, atSeconds, wait: true}`.
+- `generate.fillGap {track, atSeconds | all: true, wait: true}` fills an empty stretch of a video track.
+- `generate.augment {instruction, atSeconds, animate?, wait: true}` changes what the frame shows.
+- One generation at a time; each takes the GPU lock itself. Say in the delivery notes what was
+  generated: the platform's altered-content label is the user's decision.
+
 **Narration:**
 
 ```text

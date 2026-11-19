@@ -10,6 +10,12 @@ Photos (and AutoCut's cache), the exports and `.fcproj` projects in `~/Movies/Au
 `raea/render.py` renders them and prepares their AutoCut import commands. See the
 [local RAEA workflow](../docs/raea-workflow.md).
 
+## generation — local generation tools
+
+`generation/providers.example.json` describes three MLX tools (pictures, clips, sound) to the
+`generate.*` commands; `generation/ltx_video.py` is the small runner the clip tool uses. See
+[Generation in the editor](../docs/generation.md).
+
 ## every-robot — "Every Robot I've Met" (H4hacks)
 
 Final: Malayalam narration in the cloned voice, 4K, speech-first mix, on YouTube

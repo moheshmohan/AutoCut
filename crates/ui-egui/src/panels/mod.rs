@@ -16,6 +16,7 @@ pub mod events;
 pub mod export_mode;
 pub mod file_dialogs;
 pub mod frame_export;
+pub mod generate;
 pub mod generate_audio;
 pub mod graphics;
 pub mod graphics_templates;
@@ -116,6 +117,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::EssentialSound => essential_sound::show(app, ui, rect),
         PanelKind::TextToSpeech => tts::show(app, ui, rect),
         PanelKind::GenerateAudio => generate_audio::show(app, ui, rect),
+        PanelKind::Generate => generate::show(app, ui, rect),
         PanelKind::Showcase => showcase::show(app, ui, rect),
         PanelKind::Templates => templates::show(app, ui, rect),
         PanelKind::Recipes => recipes::show(app, ui, rect),

@@ -1878,6 +1878,7 @@ fn build() -> Vec<CommandSpec> {
         query!("jobs.list", "List Jobs", "{}", |s, _| {
             // finished neural music lands before it is reported (headless callers poll this)
             crate::music_neural::poll(s);
+            crate::generate::poll(s);
             crate::reframe::poll(s);
             crate::vr360::poll(s);
             crate::upscale::poll(s);
@@ -3961,6 +3962,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::voice_lab::commands());
     v.extend(crate::video_templates::commands());
     v.extend(crate::music_neural::commands());
+    v.extend(crate::generate::commands());
     v.extend(crate::photos::commands());
     v.extend(crate::photo_locations::commands());
     v.extend(crate::youtube::commands());

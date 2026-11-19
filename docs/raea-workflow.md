@@ -23,6 +23,13 @@ RAEA is a separately installed tool for internal production under its
 Keep the binary, SDK and runtime outside the repository and AutoCut packages. The app's
 rendered-media import is engine-independent. Use trusted compositions and local assets.
 
+## Generated assets
+
+A picture made by a local generation tool (`generate.image`, see [generation.md](generation.md))
+can be a composition's background plate or, with `"transparent": true`, a cut-out character it
+animates. Write it straight into the composition's assets with `"import": false` and
+`"dir": "<build>/fx/assets"`, and keep the prompt and seed beside the TSX.
+
 ## Render and review
 
 1. Save the composition and its local assets under `~/Movies/AutoCut/<Video>/build/`.

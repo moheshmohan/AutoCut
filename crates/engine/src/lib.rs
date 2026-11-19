@@ -38,6 +38,8 @@ pub mod essential_sound;
 pub mod export_tools;
 pub mod feedback;
 pub mod follow_reid;
+pub mod generate;
+pub mod generate_run;
 pub mod graphic_templates;
 pub mod graphics;
 pub mod graphics_counter;
@@ -695,6 +697,9 @@ pub struct Session {
     pub scenes: scenes::Scenes,
     /// Neural music generations whose WAV is placed when their job finishes (`music.generateNeural`).
     pub neural_music: music_neural::NeuralMusic,
+    /// Generations by local tools whose files are imported and placed when their job finishes
+    /// (`generate.*`).
+    pub generation: generate::Generation,
     /// The SoundFont generated music plays on, loaded once (`music.useSoundfont`, `soundfont`).
     pub soundfonts: soundfonts::SoundFonts,
     /// The latest `music.preview`, for the host to play and `audio.generate` to place.
@@ -863,6 +868,7 @@ impl Session {
             redacts: Default::default(),
             scenes: Default::default(),
             neural_music: Default::default(),
+            generation: Default::default(),
             soundfonts: Default::default(),
             music_preview: Default::default(),
             presets: Default::default(),
@@ -1011,6 +1017,7 @@ impl Session {
         redact::poll(self);
         scenes::poll(self);
         music_neural::poll(self);
+        generate::poll(self);
         export_tools::pump_queue(self, false);
         panels::log_jobs(self);
         let Some(p) = self.persistence.as_mut() else { return };

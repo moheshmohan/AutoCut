@@ -13,6 +13,9 @@
 //! - `ui.set {tts: {voice, pitch, pace, text…}}`: patch the Text to Speech panel draft
 //! - `ui.set {generateAudio: {kind, seconds, intensity, mood, key, bpm, seed, genre, levels, muted,
 //!   stems, engine, prompt, soundfontPath}}`: patch the Generate Audio panel (music: find by feel)
+//! - `ui.set {generate: {mode, prompt, provider, seconds, soundKind, useFrame, useSelection,
+//!   transparent, place, track, allGaps, animate, seed}}`: patch the Generate panel (local
+//!   generation tools)
 //! - `ui.set {templates: {query, aspect, category, slots, selected, variant, fills, googlePhotos, name,
 //!   save: {name, description, author, license, category, slot, slotNames, captions, variants,
 //!   posterSeconds, bundle, zip}, install, exportPath, otioPath, link}}`: patch the Templates panel
@@ -170,6 +173,15 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
                 match serde_json::from_value(cur) {
                     Ok(d) => app.ui.generate_audio = d,
                     Err(e) => return err(format!("bad `generateAudio`: {e}")),
+                }
+            }
+            // Generate panel settings (mode, description, tool…), merged likewise
+            if let Some(patch) = p.get("generate") {
+                let mut cur = serde_json::to_value(&app.ui.generate).unwrap_or_default();
+                merge(&mut cur, patch);
+                match serde_json::from_value(cur) {
+                    Ok(d) => app.ui.generate = d,
+                    Err(e) => return err(format!("bad `generate`: {e}")),
                 }
             }
             // Templates panel: filters, the template being filled and its slots, merged likewise

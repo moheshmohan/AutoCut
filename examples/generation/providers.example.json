@@ -1,0 +1,62 @@
+{
+  "providers": [
+    {
+      "id": "h3-image",
+      "kind": "image",
+      "name": "MiniMax-H3-Image (MLX, int8)",
+      "command": ["/path/to/h3mlx/.venv/bin/h3-image-mlx", "generate", "--models", "/path/to/h3mlx/models", "--dit-mode", "stream",
+                  "--output", "{out}", "--prompt", "{prompt}", "--width", "{width}", "--height", "{height}", "--seed", "{seed}",
+                  "{references}"],
+      "perReference": ["--reference", "{path}"],
+      "cutoutCommand": ["/path/to/h3mlx/.venv/bin/python", "/path/to/AutoCut/examples/generation/cutout.py", "{image}", "{out}"],
+      "cutoutPromptSuffix": ", isolated on a plain white background, nothing else in the picture",
+      "env": {"H3_ASYNC": "1", "H3_PREFETCH": "1"},
+      "multipleOf": 32, "defaultSide": 1024, "maxSide": 2048, "maxReferences": 16,
+      "estimateSeconds": 50, "timeoutSeconds": 1800,
+      "referencePromptPrefix": "Edit <Picture 1>. ", "referenceMarker": "<Picture",
+      "license": "MiniMax-H3-Image Community License: not for use in the EU, UK, South Korea or USA; written permission above US$1M yearly revenue or for a hosted service",
+      "attribution": "MiniMax-H3-Image",
+      "source": "huggingface.co/MiniMaxAI/MiniMax-H3-Image"
+    },
+    {
+      "id": "ltx-video",
+      "kind": "video",
+      "name": "LTX-2.3 (MLX, q4 distilled)",
+      "command": ["/path/to/ltxenv/.venv/bin/python", "/path/to/AutoCut/examples/generation/ltx_video.py", "--model", "/path/to/ltxenv/model",
+                  "--out", "{out}", "--prompt", "{prompt}", "--width", "{width}", "--height", "{height}",
+                  "--frames", "{frames}", "--fps", "{fps}", "--seed", "{seed}", "{optional}"],
+      "optional": {"image": ["--image", "{image}"]},
+      "env": {"HF_HUB_DISABLE_XET": "1"},
+      "multipleOf": 16, "defaultSide": 480, "maxSide": 768,
+      "fps": 24, "framesStep": 8, "framesOffset": 1, "maxSeconds": 10,
+      "estimateSeconds": 90, "timeoutSeconds": 3600,
+      "license": "LTX-2 Community License: companies with US$10M yearly revenue or more need a paid licence",
+      "attribution": "LTX-2",
+      "source": "huggingface.co/dgrauet/ltx-2.3-mlx-q4"
+    },
+    {
+      "id": "sa3-sfx",
+      "kind": "sfx",
+      "name": "Stable Audio 3 small (sound effects, MLX)",
+      "command": ["/path/to/sa3env/.venv/bin/python", "/path/to/sa3repo/optimized/mlx/scripts/sa3_mlx.py", "--prompt", "{prompt}",
+                  "--dit", "sm-sfx", "--decoder", "same-s", "--seconds", "{seconds}", "--seed", "{seed}", "--out", "{out}"],
+      "cwd": "/path/to/sa3repo/optimized/mlx/scripts",
+      "maxSeconds": 30, "estimateSeconds": 40, "timeoutSeconds": 1800,
+      "license": "Stability AI Community License (see stability.ai/license)",
+      "attribution": "Stable Audio 3",
+      "source": "huggingface.co/stabilityai/stable-audio-3-optimized"
+    },
+    {
+      "id": "sa3-music",
+      "kind": "music",
+      "name": "Stable Audio 3 small (music, MLX)",
+      "command": ["/path/to/sa3env/.venv/bin/python", "/path/to/sa3repo/optimized/mlx/scripts/sa3_mlx.py", "--prompt", "{prompt}",
+                  "--dit", "sm-music", "--decoder", "same-s", "--seconds", "{seconds}", "--seed", "{seed}", "--out", "{out}"],
+      "cwd": "/path/to/sa3repo/optimized/mlx/scripts",
+      "maxSeconds": 30, "estimateSeconds": 40, "timeoutSeconds": 1800,
+      "license": "Stability AI Community License (see stability.ai/license)",
+      "attribution": "Stable Audio 3",
+      "source": "huggingface.co/stabilityai/stable-audio-3-optimized"
+    }
+  ]
+}
