@@ -18,6 +18,67 @@ use crate::{AutomationError, BridgeClient, png_rgba};
 /// Maximum parse-error replies waiting for an MCP client to read them.
 const MAX_QUEUED_PARSE_ERRORS: usize = 64;
 
+/// The longest MCP line read or written, 2 GiB (upstream `2f8ff527` has the same bound in its
+/// shared line adapter): a full-size 268M-pixel RGBA PNG encoded as base64 can exceed 1 GiB, and
+/// a stream that never sends a newline must not grow a line without end.
+const MAX_MCP_LINE: usize = 1 << 31;
+
+/// Lines of a stream, each at most `max` bytes. Unlike `tokio::io::Lines`, a longer line is not
+/// collected: its bytes are read and dropped up to the newline and it is reported as
+/// `Err(length)`. What has been read of a line is kept in `self`, so a `next_line` future
+/// dropped half way (the other arm of a `select!` won) loses nothing.
+struct BoundedLines<R> {
+    reader: R,
+    max: usize,
+    line: Vec<u8>,
+    /// Bytes of the current line seen so far, kept or not.
+    seen: usize,
+}
+
+impl<R: tokio::io::AsyncBufRead + Unpin> BoundedLines<R> {
+    fn new(reader: R, max: usize) -> Self {
+        Self { reader, max, line: Vec::new(), seen: 0 }
+    }
+
+    /// The next line without its `\n` or `\r\n`: `Ok(None)` at the end of the stream,
+    /// `Ok(Some(Err(n)))` for a line of `n` bytes, more than the bound. Text that is not UTF-8
+    /// is an `InvalidData` error, as with `Lines`.
+    async fn next_line(&mut self) -> std::io::Result<Option<Result<String, usize>>> {
+        use tokio::io::AsyncBufReadExt;
+        loop {
+            let buf = self.reader.fill_buf().await?;
+            if buf.is_empty() {
+                return if self.seen == 0 { Ok(None) } else { self.finish().map(Some) };
+            }
+            let newline = buf.iter().position(|b| *b == b'\n');
+            let chunk = buf.get(..newline.unwrap_or(buf.len())).unwrap_or(buf);
+            self.seen = self.seen.saturating_add(chunk.len());
+            if self.seen <= self.max {
+                self.line.extend_from_slice(chunk);
+            } else {
+                self.line = Vec::new();
+            }
+            let used = newline.map_or(buf.len(), |i| i.saturating_add(1));
+            self.reader.consume(used);
+            if newline.is_some() {
+                return self.finish().map(Some);
+            }
+        }
+    }
+
+    /// The line collected so far, and a clean state for the next one.
+    fn finish(&mut self) -> std::io::Result<Result<String, usize>> {
+        let (mut line, seen) = (std::mem::take(&mut self.line), std::mem::take(&mut self.seen));
+        if seen > self.max {
+            return Ok(Err(seen));
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        String::from_utf8(line).map(Ok).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
 pub enum Backend {
     Headless(Arc<Mutex<Session>>),
     Bridge(Arc<BridgeClient>),
@@ -1719,22 +1780,45 @@ impl FilmcraftMcp {
 
     /// Serve MCP over any line stream. A line that isn't JSON gets a JSON-RPC parse error
     /// (`-32700`, id null) instead of being dropped silently; the rest go to the rmcp service. One
-    /// writer task owns `output`, so replies never interleave.
+    /// writer task owns `output`, so replies never interleave. A line longer than
+    /// [`MAX_MCP_LINE`] is not kept in memory: a request gets an invalid-request error
+    /// (`-32600`), a reply is replaced by an internal error (`-32603`).
     pub async fn serve_io(
         self,
         input: impl tokio::io::AsyncRead + Unpin + Send + 'static,
         output: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
     ) -> Result<(), AutomationError> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        self.serve_lines(input, output, MAX_MCP_LINE).await
+    }
+
+    /// [`serve_io`](Self::serve_io) with the line bound given (tests use a small one).
+    async fn serve_lines(
+        self,
+        input: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+        output: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+        max_line: usize,
+    ) -> Result<(), AutomationError> {
+        use tokio::io::{AsyncWriteExt, BufReader};
         let (mut to_service, service_in) = tokio::io::duplex(1 << 20);
         let (service_out, from_service) = tokio::io::duplex(1 << 20);
         let (err_tx, mut err_rx) = tokio::sync::mpsc::channel::<String>(MAX_QUEUED_PARSE_ERRORS);
         let reader = tokio::spawn(async move {
-            let mut lines = BufReader::new(input).lines();
+            let mut lines = BoundedLines::new(BufReader::new(input), max_line);
             loop {
                 let line = tokio::select! {
                     l = lines.next_line() => match l { Ok(Some(l)) => l, _ => break },
                     () = err_tx.closed() => break,
+                };
+                let line = match line {
+                    Ok(line) => line,
+                    Err(bytes) => {
+                        let message = format!("request line of {bytes} bytes is longer than the {max_line}-byte limit");
+                        let reply = json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": message}});
+                        if err_tx.send(reply.to_string()).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
                 };
                 if line.trim().is_empty() {
                     continue;
@@ -1758,10 +1842,18 @@ impl FilmcraftMcp {
         });
         let writer = tokio::spawn(async move {
             let mut output = output;
-            let mut replies = BufReader::new(from_service).lines();
+            let mut replies = BoundedLines::new(BufReader::new(from_service), max_line);
             loop {
                 let line = tokio::select! {
-                    l = replies.next_line() => match l { Ok(Some(l)) => l, _ => break },
+                    l = replies.next_line() => match l {
+                        Ok(Some(Ok(l))) => l,
+                        // the reply cannot be sent, and its id went with it: say so instead of going silent
+                        Ok(Some(Err(bytes))) => {
+                            let message = format!("a reply of {bytes} bytes is longer than the {max_line}-byte limit and was not sent");
+                            json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32603, "message": message}}).to_string()
+                        }
+                        _ => break,
+                    },
                     Some(e) = err_rx.recv() => e,
                 };
                 if output.write_all(format!("{line}\n").as_bytes()).await.is_err() || output.flush().await.is_err() {
@@ -3879,5 +3971,74 @@ mod upstream_parse_queue_tests {
         tx.write_all(b"x\n").await.unwrap(); // `tx` stays open: only a failed output can end the server
         let ended = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
         assert!(ended.is_ok(), "the server kept reading after its output failed");
+    }
+
+    /// Lines within the bound come back whole (`\n` and `\r\n` endings, an empty line, a last
+    /// line without a newline); a longer one is dropped and reported with its length, and the
+    /// lines after it still read. The reader's buffer is smaller than the lines on purpose.
+    #[tokio::test]
+    async fn bounded_lines_keep_short_lines_and_report_long_ones() {
+        let data: &[u8] = b"one\r\ntwo\n\nloooooooong\nlast";
+        let mut lines = BoundedLines::new(tokio::io::BufReader::with_capacity(3, data), 5);
+        let mut got = Vec::new();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            got.push(line);
+        }
+        assert_eq!(got, [Ok("one".to_string()), Ok("two".into()), Ok(String::new()), Err(11), Ok("last".into())]);
+        // text that is not UTF-8 is an error, as with `tokio::io::Lines`
+        let bad: &[u8] = b"\xff\xfe\n";
+        let e = BoundedLines::new(tokio::io::BufReader::new(bad), 16).next_line().await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// The writer reads replies in a `select!`, so a read can be dropped half way through a
+    /// line: the part already read must still be there for the next read.
+    #[tokio::test]
+    async fn a_dropped_bounded_read_loses_nothing() {
+        use tokio::io::AsyncWriteExt;
+        let (mut tx, rx) = tokio::io::duplex(64);
+        let mut lines = BoundedLines::new(tokio::io::BufReader::new(rx), 64);
+        tx.write_all(b"hel").await.unwrap();
+        let early = tokio::time::timeout(std::time::Duration::from_millis(100), lines.next_line()).await;
+        assert!(early.is_err(), "the line is not complete yet: {early:?}");
+        tx.write_all(b"lo\n").await.unwrap();
+        assert_eq!(lines.next_line().await.unwrap(), Some(Ok("hello".to_string())));
+    }
+
+    /// Upstream `2f8ff527` bounds MCP lines; here the bound is in the fork's own line reader. A
+    /// request line over the bound is never collected: it answers an invalid-request error, and
+    /// the line after it is served as usual.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_overlong_request_line_is_refused_and_the_next_one_is_served() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (mut tx, server_in) = tokio::io::duplex(4096);
+        let (server_out, rx) = tokio::io::duplex(4096);
+        tokio::spawn(FilmcraftMcp::headless(Session::default()).serve_lines(server_in, server_out, 64));
+        let mut replies = tokio::io::BufReader::new(rx).lines();
+        let long = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"{}\"}}\n", "x".repeat(100_000));
+        tx.write_all(long.as_bytes()).await.unwrap();
+        let v: Value = serde_json::from_str(&replies.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(v["error"]["code"], -32600, "{v}");
+        assert!(v["error"]["message"].as_str().unwrap().contains(&format!("{} bytes", long.len() - 1)), "{v}");
+        tx.write_all(b"not json\n").await.unwrap();
+        let v: Value = serde_json::from_str(&replies.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(v["error"]["code"], -32700, "the next line is read from its start: {v}");
+    }
+
+    /// A reply over the bound is not sent, and the client is told so instead of waiting for it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_overlong_reply_is_replaced_by_an_error() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (mut tx, server_in) = tokio::io::duplex(4096);
+        let (server_out, rx) = tokio::io::duplex(4096);
+        let init = json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}});
+        let line = format!("{init}\n");
+        // the request fits; the answer (server info and instructions) is far longer
+        tokio::spawn(FilmcraftMcp::headless(Session::default()).serve_lines(server_in, server_out, line.len()));
+        let mut replies = tokio::io::BufReader::new(rx).lines();
+        tx.write_all(line.as_bytes()).await.unwrap();
+        let v: Value = serde_json::from_str(&replies.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(v["error"]["code"], -32603, "{v}");
+        assert!(v["id"].is_null(), "{v}");
     }
 }
