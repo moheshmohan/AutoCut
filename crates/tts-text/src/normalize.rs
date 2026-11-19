@@ -90,7 +90,9 @@ pub fn normalize(text: &str, lang: Lang) -> Result<Vec<Token>, NormalizeError> {
                     out.push(Token::Punct(c));
                 }
             },
-            '-' if peek(rest, 1).is_some_and(|c| c.is_ascii_digit()) => {
+            '-' if peek(rest, 1).is_some_and(|c| c.is_ascii_digit())
+                && text.get(..pos).and_then(|before| before.chars().next_back()).is_none_or(starts_negative_number) =>
+            {
                 pos += 1;
                 if let Some((tokens, used)) = parse_number_cluster(rest.get(1..).unwrap_or(""), lang) {
                     pos += used;
@@ -197,6 +199,13 @@ fn push_words(out: &mut Vec<Token>, words: &[String]) {
 
 fn is_word_char(c: char) -> bool {
     c.is_alphabetic() || c == '\'' || c == '’'
+}
+
+/// Whether a '-' right after `prev` and before a digit is a negative sign. Right after a
+/// letter or digit ("COVID-19", "F-16") the hyphen joins a name to a number; anywhere else
+/// (after whitespace, brackets, '=', quotes, commas, colons) it is a minus.
+fn starts_negative_number(prev: char) -> bool {
+    !prev.is_alphanumeric()
 }
 
 /// The char at byte offset `i` in `s`, if `i` is a char boundary inside `s`.
@@ -1261,6 +1270,19 @@ mod tests {
         assert_eq!(words("3.14", Lang::EnUs), "three point one four");
         assert_eq!(words(".5", Lang::EnUs), "point five");
         assert_eq!(words("-2.5", Lang::EnUs), "minus two point five");
+    }
+
+    #[test]
+    fn hyphen_inside_a_name_is_not_minus() {
+        for s in ["COVID-19", "F-16", "B-52", "Windows-11", "Route-66", "pre-2020"] {
+            let tokens = normalize(s, Lang::EnUs).unwrap();
+            assert!(!tokens.contains(&Token::Word("minus".into())), "{s:?} produced minus: {tokens:?}");
+        }
+        assert!(words("Temp: -5", Lang::EnUs).ends_with("minus five"));
+        assert!(words("(-5)", Lang::EnUs).contains("minus five"));
+        for s in ["x=-5", "\"-5\"", ",-5", "Temp:-5"] {
+            assert!(words(s, Lang::EnUs).contains("minus five"), "{s:?} lost its sign");
+        }
     }
 
     #[test]
