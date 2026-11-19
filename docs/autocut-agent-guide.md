@@ -767,6 +767,9 @@ The details are in [360-video.md](360-video.md).
      in place.
   4. Relaunch it with the `open -n --env …` line from §1.
   5. Copy the packaged CLI to `target/release/filmcraft-cli` for `.mcp.json`.
+     A `cargo test --release` in the main checkout (the full gate included) rebuilds that
+     file from the working tree, so copy the packaged CLI again after a gate run. The app keeps
+     the layout it had when it closed; the playhead comes back at 0 (`playhead.set` restores it).
 - **A stale "Recover Unsaved Changes" dialog** at launch isn't in `ui.elements`. Ask the user to
   click it.
 - **The Generate panel** (Window ▸ Generate): set its draft with

@@ -23,6 +23,28 @@ control channel and MCP.
   character straight into a composition's assets (`docs/generation.md` §5,
   `docs/raea-workflow.md` "Generated assets").
 
+## Shipped (20 November 2026)
+
+- The first full `cargo xtask ci` on the branch (GEN1 with the upstream ports AV37 to AV49) failed
+  one test, `wasm_clock_tests::no_std_instant_in_code_the_web_build_runs`: the generation runner
+  named `std::time::Instant` in two places. Both now use `web_time::Instant`, folded into the
+  GEN1 commit (`c0e6e6e0`) before anything was pushed.
+- The full gate then passed: formatting, Clippy with warnings as errors, 6,388 tests (none
+  failed, 89 ignored), layering, asset attributions and the 57 WebAssembly crate checks. The
+  WebAssembly check prints one dead-code warning for the runner's `args` field, which the web
+  build never reads; it does not fail the gate.
+- Pushed to `autocut` `main` and `feat/autocut` (`dc416ef8..835639da`).
+- The app and the CLI were packaged from `835639da` and installed. The build before it is kept
+  as `target/macos-package/AutoCut-before-GEN1-2026-11-20.app` and
+  `target/macos-package/bin-before-GEN1-2026-11-20/`. The CLI lists 921 commands (914 before, plus
+  the seven `generate.*`). The app reopened the EXEED project clean with the project file
+  unchanged; the playhead came back at 0 and was set back with `playhead.set`.
+- In the installed app: `generate.providers` lists the four tools of this Mac as installed, and
+  the Generate panel shows its fourteen controls, the tool's credit and its licence line.
+- `target/release/filmcraft-cli` is rebuilt by every `cargo test --release` in the main checkout
+  (the gate included), so the CLI there before this install was already the gate's build, and no
+  copy of the 15 November CLI was kept beyond `filmcraft-cli-before-AV35-2026-11-15`.
+
 ## Facts that shape the next steps
 
 - MiniMax-H3-Image is not a light model: 33.1 B parameters, about 69 GB of weights plus a
