@@ -9,11 +9,15 @@
 //! 1. Studio in front, **Cloud Media** chosen in its sidebar, the list in **List View** (full
 //!    file names and dates; the toggle left of the sort menu, chosen once and put back after).
 //! 2. The rows read; the wanted name found among them, scrolling the list (at most
-//!    [`MAX_SCROLLS`] screens) when it is not on this one.
+//!    [`MAX_SCROLLS`] screens) when it is not on this one — towards it whichever way Studio
+//!    sorts the list (newest first, as it does by default, or oldest first: read off the rows).
 //! 3. Right-click its row → **Download** in the menu (the menu item is checked to say Download:
 //!    the same menu ends with "Remove from Insta360 Cloud", which is never clicked).
 //! 4. The Download dialog's file name read: the wanted one → **OK** (Studio's own download
 //!    folder, which this does not change); anything else → **Cancel**.
+//!    Studio remembers the folder last chosen in that dialog: when another tool pointed it
+//!    elsewhere (seen 2026-11-19: a catalogue job's folder, since deleted), files never arrive in
+//!    the folder watched here, and the wait's message says to choose it again with Browse.
 //! 5. Wait for the file in the download folder: complete when it ends with the camera's trailer.
 //!
 //! The mouse and keyboard are one at a time across agents: the `chrome` lock (`filmcraft_locks`)
@@ -88,23 +92,73 @@ pub fn row_for<'a>(rows: &'a [Element], wanted: &str) -> Option<&'a Element> {
     rows.iter().find(|r| same_recording(&r.label, wanted))
 }
 
+/// The camera names among the rows, top to bottom as they are on screen.
+fn names_down(rows: &[Element]) -> Vec<String> {
+    let mut named: Vec<(u32, String)> =
+        rows.iter().map(|r| (r.center().1, name_in(&r.label))).filter(|(_, n)| n.starts_with("VID_") || n.starts_with("IMG_")).collect();
+    named.sort_by_key(|(y, _)| *y);
+    named.into_iter().map(|(_, n)| n).collect()
+}
+
+/// What a camera name sorts by: its date and time (the names begin with them, so they sort as
+/// the recordings were made).
+fn time_key(name: &str) -> &str {
+    name.get(4..19).unwrap_or(name)
+}
+
 /// Whether the rows on screen are all before (`Less`) or all after (`Greater`) the wanted name
-/// in name order — which way to scroll — or neither (it should be on screen, or the order is
-/// not by name).
+/// in name order — the wanted one lies beyond them — or neither (it should be on screen, or the
+/// order is not by name). One row of four or more read out of line (a name half hidden under a
+/// tooltip, misread) does not decide it.
 pub fn direction(rows: &[Element], wanted: &str) -> std::cmp::Ordering {
     let w = stem_of(wanted).to_ascii_uppercase();
-    let names: Vec<String> = rows.iter().map(|r| name_in(&r.label)).filter(|n| n.starts_with("VID_") || n.starts_with("IMG_")).collect();
-    // the camera's names begin with the date and time: they sort as the recordings were made
-    let key = |n: &str| n.get(4..19).unwrap_or(n).to_string();
+    let names = names_down(rows);
     if names.is_empty() {
         return std::cmp::Ordering::Equal;
     }
-    if names.iter().all(|n| key(n) < key(&w)) {
+    let before = names.iter().filter(|n| time_key(n) < time_key(&w)).count();
+    let after = names.iter().filter(|n| time_key(n) > time_key(&w)).count();
+    let stray = usize::from(names.len() >= 4);
+    if after == 0 || (after <= stray && before >= 3) {
         std::cmp::Ordering::Less
-    } else if names.iter().all(|n| key(n) > key(&w)) {
+    } else if before == 0 || (before <= stray && after >= 3) {
         std::cmp::Ordering::Greater
     } else {
         std::cmp::Ordering::Equal
+    }
+}
+
+/// How Studio sorts the list, read off the rows on screen: `Some(true)` newest at the top (its
+/// default), `Some(false)` oldest at the top, `None` when the rows do not tell (fewer than two
+/// names, or as many steps one way as the other).
+pub fn newest_first(rows: &[Element]) -> Option<bool> {
+    let names = names_down(rows);
+    let (mut down, mut up) = (0usize, 0usize);
+    for pair in names.windows(2) {
+        if let [a, b] = pair {
+            match time_key(a).cmp(time_key(b)) {
+                std::cmp::Ordering::Greater => down += 1,
+                std::cmp::Ordering::Less => up += 1,
+                std::cmp::Ordering::Equal => {}
+            }
+        }
+    }
+    match down.cmp(&up) {
+        std::cmp::Ordering::Greater => Some(true),
+        std::cmp::Ordering::Less => Some(false),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// Wheel lines towards a wanted name that lies beyond the rows on screen: `beyond` as
+/// [`direction`] says (`Less`: every row is before it), in a list sorted `newest_first` or not.
+/// Positive scrolls down.
+pub fn lines_towards(beyond: std::cmp::Ordering, newest_first: bool) -> i32 {
+    match (beyond, newest_first) {
+        // every row is older than the wanted one: it is below in an oldest-first list, above in a newest-first one
+        (std::cmp::Ordering::Less, false) | (std::cmp::Ordering::Greater, true) => SCROLL_LINES,
+        (std::cmp::Ordering::Less, true) | (std::cmp::Ordering::Greater, false) => -SCROLL_LINES,
+        (std::cmp::Ordering::Equal, _) => 0,
     }
 }
 
@@ -146,6 +200,8 @@ impl Driver<'_> {
             return Err(ScreenError::Stalled("Insta360 Studio does not show Cloud Media (is it open on its home screen, signed in?)".into()));
         };
         self.click(&cap, &cloud)?;
+        // the pointer off the sidebar: left there, its tooltip covers two rows of the list
+        self.act.scroll(0)?;
         self.act.sleep(1500);
         let cap = self.capture()?;
         if self.ground.find(&cap.png, "the 'File Name' column header of the file list")?.is_some() {
@@ -178,6 +234,8 @@ impl Driver<'_> {
     /// Asks Studio to download `wanted`; `Ok(())` once the dialog's OK was pressed.
     fn request(&mut self, wanted: &str) -> Result<(), String> {
         let mut last_dir = std::cmp::Ordering::Equal;
+        // Studio lists the newest first unless the user sorted it otherwise; each screen's rows say
+        let mut newest = true;
         for scrolls in 0..=MAX_SCROLLS {
             if (self.cancelled)() {
                 return Err("cancelled".into());
@@ -188,12 +246,12 @@ impl Driver<'_> {
                 return self.download_row(&cap, &row, wanted);
             }
             let dir = direction(&rows, wanted);
+            newest = newest_first(&rows).unwrap_or(newest);
             // on screen by order, yet not read: one more look at a smaller scroll, then give up
             let lines = match dir {
-                std::cmp::Ordering::Less => SCROLL_LINES,
-                std::cmp::Ordering::Greater => -SCROLL_LINES,
                 std::cmp::Ordering::Equal if scrolls == 0 => SCROLL_LINES,
                 std::cmp::Ordering::Equal => return Err(format!("{wanted} is not in Studio's Cloud Media list")),
+                _ => lines_towards(dir, newest),
             };
             if dir != std::cmp::Ordering::Equal && last_dir != std::cmp::Ordering::Equal && dir != last_dir {
                 // passed it both ways: it is not there
@@ -260,7 +318,12 @@ impl Driver<'_> {
                 (self.progress)(&format!("waiting for {} to download", o.name));
                 match wait_for_file(&self.download_dir, &o.name, self.file_timeout, self.cancelled) {
                     Some(p) => o.path = Some(p),
-                    None => o.why = Some("not finished downloading in time (Studio's task centre shows it)".into()),
+                    None => {
+                        o.why = Some(format!(
+                            "not finished downloading in time (Studio's task centre shows it; if nothing arrived, the Download dialog's 'Download to' folder is not {}: choose it there with Browse, then run this again)",
+                            self.download_dir.display()
+                        ));
+                    }
                 }
             }
         }
@@ -388,6 +451,142 @@ mod tests {
         assert_eq!(direction(&rows, "VID_20250101_000000_00_001"), std::cmp::Ordering::Greater);
         assert_eq!(direction(&rows, "VID_20260913_113000_00_099"), std::cmp::Ordering::Equal);
         assert_eq!(direction(&[], "VID_20260913_113000_00_099"), std::cmp::Ordering::Equal);
+    }
+
+    fn row(label: &str, y: u32) -> Element {
+        Element { label: label.into(), kind: "row".into(), x1: 0, y1: y, x2: 900, y2: y + 40 }
+    }
+
+    #[test]
+    fn the_sort_order_is_read_off_the_rows_and_one_stray_row_does_not_decide() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let newest = [
+            row("VID_20261108_151520_00_104.insv", 0),
+            row("VID_20261108_151037_00_103.insv", 50),
+            row("VID_20261108_150942_00_102.insv", 100),
+            row("VID_20261108_145123_00_099.insv", 150),
+        ];
+        let oldest: Vec<Element> = newest.iter().rev().enumerate().map(|(i, r)| row(&r.label, i as u32 * 50)).collect();
+        assert_eq!(newest_first(&newest), Some(true));
+        assert_eq!(newest_first(&oldest), Some(false));
+        assert_eq!(newest_first(&newest[..1]), None);
+        // the model lists rows in any order: their place on screen decides
+        let shuffled = [newest[2].clone(), newest[0].clone(), newest[3].clone(), newest[1].clone()];
+        assert_eq!(newest_first(&shuffled), Some(true));
+        // an older recording lies below a newest-first list and above an oldest-first one
+        assert_eq!(direction(&newest, "VID_20260716_120437_00_060"), Greater);
+        assert!(lines_towards(Greater, true) > 0 && lines_towards(Greater, false) < 0);
+        assert!(lines_towards(Less, true) < 0 && lines_towards(Less, false) > 0);
+        assert_eq!(lines_towards(Equal, true), 0);
+        // one row misread as an old name among four newer ones does not put the wanted one on screen
+        let mut stray = newest.to_vec();
+        stray.push(row("VID_20250108_150623_00_101.insv", 200));
+        assert_eq!(direction(&stray, "VID_20260716_120437_00_060"), Greater);
+        // but two do: then it should be on screen
+        stray.push(row("VID_20250108_150700_00_100.insv", 250));
+        assert_eq!(direction(&stray, "VID_20260716_120437_00_060"), Equal);
+        assert_eq!(direction(&newest[..2], "VID_20261108_151100_00_000"), Equal);
+        assert_eq!(direction(&oldest, "VID_20270101_000000_00_001"), Less);
+    }
+
+    /// A Cloud Media list of `names`, `SHOWN` rows on screen, scrolled by the wheel.
+    struct List {
+        names: Vec<String>,
+        top: std::cell::Cell<usize>,
+        asked: std::cell::RefCell<Vec<String>>,
+        menu: std::cell::Cell<bool>,
+    }
+    const SHOWN: usize = 7;
+    struct Hands<'a>(&'a List);
+    impl Act for Hands<'_> {
+        fn activate(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn click_png(&mut self, _: &Capture, _: u32, _: u32) -> Result<(), ScreenError> {
+            self.0.menu.set(false);
+            Ok(())
+        }
+        fn shift_click_png(&mut self, _: &Capture, _: u32, _: u32) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn right_click_png(&mut self, _: &Capture, _: u32, py: u32) -> Result<(), ScreenError> {
+            let i = self.0.top.get() + (py / 100) as usize;
+            self.0.asked.borrow_mut().push(self.0.names.get(i).cloned().unwrap_or_default());
+            self.0.menu.set(true);
+            Ok(())
+        }
+        fn type_text(&mut self, _: &str) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn key_return(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn key_escape(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn scroll(&mut self, lines: i32) -> Result<(), ScreenError> {
+            let last = self.0.names.len().saturating_sub(SHOWN) as i64;
+            self.0.top.set((self.0.top.get() as i64 + i64::from(lines)).clamp(0, last) as usize);
+            Ok(())
+        }
+        fn sleep(&mut self, _: u64) {}
+        fn capture(&mut self) -> Result<Capture, ScreenError> {
+            Ok(Capture {
+                png: Vec::new(),
+                rect: filmcraft_screenagent::capture::WindowRect { x: 0, y: 0, w: 1000, h: 700 },
+                px_per_point: 1.0,
+                png_w: 1000,
+                png_h: 700,
+            })
+        }
+    }
+    impl Ground for List {
+        fn inventory(&self, _: &[u8], _: &str) -> Result<Vec<Element>, ScreenError> {
+            Ok(self.names.iter().skip(self.top.get()).take(SHOWN).enumerate().map(|(i, n)| row(&format!("{n}.insv"), i as u32 * 100 + 30)).collect())
+        }
+        fn find(&self, _: &[u8], target: &str) -> Result<Option<Element>, ScreenError> {
+            Ok(Some(row(if target.contains("'Download' item") { "Download" } else { "OK" }, 10)))
+        }
+    }
+    impl ReadText for List {
+        fn read_text(&self, _: &[u8], _: &str) -> Result<String, ScreenError> {
+            Ok(self.asked.borrow().last().map(|n| format!("{n}.insv")).unwrap_or_default())
+        }
+    }
+
+    fn ask(names: Vec<String>, wanted: &str) -> (Result<(), String>, Vec<String>) {
+        let list = List { names, top: std::cell::Cell::new(0), asked: std::cell::RefCell::new(Vec::new()), menu: std::cell::Cell::new(false) };
+        let mut hands = Hands(&list);
+        let mut d = Driver {
+            act: &mut hands,
+            ground: &list,
+            read: &list,
+            download_dir: PathBuf::new(),
+            file_timeout: Duration::ZERO,
+            progress: &mut |_| {},
+            cancelled: &|| false,
+        };
+        let r = d.request(wanted);
+        (r, list.asked.borrow().clone())
+    }
+
+    /// Studio lists the newest recording first: an older one is further down. The search scrolled
+    /// up instead (it took the list for oldest first) and gave up after sixty screens at the top.
+    #[test]
+    fn an_older_recording_is_found_down_a_newest_first_list() {
+        let names: Vec<String> = (0..90u32).rev().map(|i| format!("VID_2026{:02}{:02}_120000_00_{i:03}", 1 + i / 28, 1 + i % 28)).collect();
+        let wanted = names[61].clone();
+        let (r, asked) = ask(names.clone(), &wanted);
+        assert_eq!(r, Ok(()));
+        assert_eq!(asked, vec![wanted]);
+        // oldest first (the user's own sort) still works, and a name that is not there is said so
+        let mut oldest = names.clone();
+        oldest.reverse();
+        let wanted = oldest[61].clone();
+        assert_eq!(ask(oldest, &wanted), (Ok(()), vec![wanted]));
+        let (r, asked) = ask(names, "VID_20260214_120001_00_999");
+        assert!(r.is_err_and(|e| e.contains("not in Studio's Cloud Media list")), "a missing name must be said");
+        assert!(asked.is_empty());
     }
 
     #[test]
