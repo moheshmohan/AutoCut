@@ -1012,6 +1012,7 @@ static CATEGORIES: &[Category] = &[
                     ("fr", "Français"),
                     ("id", "Bahasa Indonesia"),
                     ("it", "Italiano"),
+                    ("bs", "Bosanski"),
                     ("ko", "한국어"),
                 ]),
                 true,

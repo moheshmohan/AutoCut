@@ -47,6 +47,8 @@ pub enum Language {
     Fr,
     Id,
     It,
+    /// Bosnian, Latin script (Ijekavian); `bs-Cyrl` locales use it too.
+    Bs,
     /// Korean; Hangul needs an installed system font ([`korean_font_available`]).
     Ko,
 }
@@ -62,9 +64,11 @@ static FRENCH: OnceLock<Catalog> = OnceLock::new();
 static KOREAN: OnceLock<Catalog> = OnceLock::new();
 static INDONESIAN: OnceLock<Catalog> = OnceLock::new();
 static ITALIAN: OnceLock<Catalog> = OnceLock::new();
+static BOSNIAN: OnceLock<Catalog> = OnceLock::new();
 
 impl Language {
-    pub const ALL: [Self; 12] = [Self::En, Self::Ja, Self::Es, Self::PtBr, Self::Uk, Self::ZhCn, Self::De, Self::Ru, Self::Fr, Self::Id, Self::Ko, Self::It];
+    pub const ALL: [Self; 13] =
+        [Self::En, Self::Ja, Self::Es, Self::PtBr, Self::Uk, Self::ZhCn, Self::De, Self::Ru, Self::Fr, Self::Id, Self::Ko, Self::It, Self::Bs];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -79,6 +83,7 @@ impl Language {
             Self::Fr => "Français",
             Self::Id => "Bahasa Indonesia",
             Self::It => "Italiano",
+            Self::Bs => "Bosanski",
             Self::Ko => "한국어",
         }
     }
@@ -96,6 +101,7 @@ impl Language {
             "fr" => Some(Self::Fr),
             "id" => Some(Self::Id),
             "it" => Some(Self::It),
+            "bs" => Some(Self::Bs),
             "ko" => Some(Self::Ko),
             _ => None,
         }
@@ -107,11 +113,11 @@ impl Language {
     /// any German (`de-AT`, `de_CH.UTF-8`…) gets the German one and any French (`fr-CA`, `fr_BE.UTF-8`…)
     /// the French one; any Indonesian (`id-ID`, `id_ID.UTF-8`, and the legacy `in-ID` that older Java
     /// and Android runtimes report) the Indonesian one; any Italian (`it-IT`, `it-CH`, `it_IT.UTF-8`…)
-    /// the Italian one. Chinese gets the Simplified catalog
+    /// the Italian one; any Bosnian (`bs-BA`, `bs_BA.UTF-8`, `bs-Latn-BA`…) the Bosnian one. Chinese gets the Simplified catalog
     /// only for Simplified locales (`zh`, `zh-CN`, `zh-SG`, `zh-Hans…`); Traditional ones (`zh-TW`,
     /// `zh-HK`, `zh-MO`, `zh-Hant…`) are skipped.
     pub fn from_locales(tags: &[String]) -> Self {
-        const PRIMARY: [(&str, Language); 12] = [
+        const PRIMARY: [(&str, Language); 13] = [
             ("en", Language::En),
             ("ja", Language::Ja),
             ("es", Language::Es),
@@ -123,6 +129,7 @@ impl Language {
             ("id", Language::Id),
             ("in", Language::Id),
             ("it", Language::It),
+            ("bs", Language::Bs),
             ("ko", Language::Ko),
         ];
         tags.iter()
@@ -155,6 +162,7 @@ impl Language {
             Self::Fr => "fr",
             Self::Id => "id",
             Self::It => "it",
+            Self::Bs => "bs",
             Self::Ko => "ko",
         }
     }
@@ -173,6 +181,7 @@ impl Language {
             Self::Fr => Some(FRENCH.get_or_init(|| Catalog::parse(include_str!("fr.tsv")))),
             Self::Id => Some(INDONESIAN.get_or_init(|| Catalog::parse(include_str!("id.tsv")))),
             Self::It => Some(ITALIAN.get_or_init(|| Catalog::parse(include_str!("it.tsv")))),
+            Self::Bs => Some(BOSNIAN.get_or_init(|| Catalog::parse(include_str!("bs.tsv")))),
             Self::Ko => Some(KOREAN.get_or_init(|| Catalog::parse(include_str!("ko.tsv")))),
         }
     }
@@ -354,6 +363,7 @@ mod tests {
             Language::Fr => Some(include_str!("fr.tsv")),
             Language::Id => Some(include_str!("id.tsv")),
             Language::It => Some(include_str!("it.tsv")),
+            Language::Bs => Some(include_str!("bs.tsv")),
             Language::Ko => Some(include_str!("ko.tsv")),
         }
     }
@@ -402,6 +412,7 @@ mod tests {
             (Language::Fr, "Français"),
             (Language::Id, "Bahasa Indonesia"),
             (Language::It, "Italiano"),
+            (Language::Bs, "Bosanski"),
             (Language::Ko, "한국어"),
         ] {
             assert_eq!(l.name(), name);
@@ -891,6 +902,25 @@ mod tests {
         let mut restarted = filmcraft_engine::Session::default();
         restarted.prefs = serde_json::from_str(&prefs).unwrap();
         assert_eq!(crate::FilmcraftApp::new(restarted).ui.language, Language::It);
+        let result = crate::menus::invoke(&mut app, &ctx, "app.language.bosnian", serde_json::json!({})).unwrap();
+        assert_eq!(result, serde_json::json!("bs"));
+        assert_eq!((app.ui.language, current()), (Language::Bs, Language::Bs));
+        assert_eq!(app.session.prefs.general.interface_language, "bs");
+        for it in crate::menus::menu_items(&app).iter().filter(|it| it.id.starts_with("app.language.")) {
+            assert_eq!(it.checked, Some(it.id == "app.language.bosnian"), "{}", it.id);
+        }
+        let items = crate::menus::menu_items(&app);
+        let label = |id: &str| items.iter().find(|it| it.id == id).map(|it| it.label.as_str());
+        assert_eq!(label("file.saveAs"), Some(Language::Bs.tr("Save As…")));
+        assert_ne!(Language::Bs.tr("Save As…"), "Save As…", "Bosnian has the menus");
+        assert_eq!(label("app.language.italian"), Some("Italiano"));
+        assert_eq!(label("app.language.bosnian"), Some("Bosanski"));
+        let saved = serde_json::to_string(&app.ui).unwrap();
+        assert!(saved.contains("\"language\":\"bs\""), "{saved}");
+        let prefs = serde_json::to_string(&app.session.prefs).unwrap();
+        let mut restarted = filmcraft_engine::Session::default();
+        restarted.prefs = serde_json::from_str(&prefs).unwrap();
+        assert_eq!(crate::FilmcraftApp::new(restarted).ui.language, Language::Bs);
         crate::menus::invoke(&mut app, &ctx, "app.language.english", serde_json::json!({})).unwrap();
         assert_eq!(app.ui.language, Language::En);
         set_current(Language::En);
@@ -1093,6 +1123,31 @@ mod tests {
         let alphabet = "ÀÈÉÌÍÎÒÓÙÚàèéìíîòóùú";
         let letters = entries.iter().flat_map(|(_, _, it)| it.chars()).filter(|ch| ch.is_alphabetic() || "“”‘’–—…".contains(*ch));
         assert_bundled_fonts_cover(alphabet.chars().chain(Language::It.name().chars()).chain(letters));
+    }
+
+    /// Every Bosnian locale, with region, script or encoding, picks the Bosnian catalog.
+    #[test]
+    fn system_language_picks_bosnian() {
+        let l = |tags: &[&str]| Language::from_locales(&tags.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+        for tag in ["bs", "BS", "bs-BA", "bs_BA.UTF-8", "bs-Latn-BA", "bs-Cyrl-BA", "BS-ba"] {
+            assert_eq!(l(&[tag]), Language::Bs, "{tag}");
+        }
+        assert_eq!(l(&["hr-HR", "bs-BA"]), Language::Bs, "Croatian has no catalog here, so the next preference wins");
+        for none in [&["bos"][..], &["b"], &["-bs"]] {
+            assert_eq!(l(none), Language::En, "{none:?}");
+        }
+    }
+
+    #[test]
+    fn bosnian_renders_with_bundled_fonts() {
+        let (entries, errors) = catalog::parse_entries(include_str!("bs.tsv"));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(entries.len() > 3000, "the whole upstream catalog: {}", entries.len());
+        // every Bosnian letter outside ASCII, and every letter, curly quote, dash and ellipsis
+        // the entries use (symbols such as ✔ come from the English sources)
+        let alphabet = "ČĆĐŠŽčćđšž";
+        let letters = entries.iter().flat_map(|(_, _, bs)| bs.chars()).filter(|ch| ch.is_alphabetic() || "“”‘’–—…".contains(*ch));
+        assert_bundled_fonts_cover(alphabet.chars().chain(Language::Bs.name().chars()).chain(letters));
     }
 
     #[test]
