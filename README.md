@@ -1,71 +1,295 @@
+<h1 align="center">AutoCut</h1>
+
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=P3VMqTmsAlM"><img src="https://img.youtube.com/vi/P3VMqTmsAlM/maxresdefault.jpg" width="720" alt="Video: An AI Agent Edited This Video on My MacBook | AutoCut + FrameAtlas (Malayalam, with English subtitles)"></a>
+  <b>An agent-driven, local-first video editor.</b><br>
+  Tell an AI agent what film you want; local models on your own computer do the media work.<br>
+  Built on <a href="https://github.com/storytold/filmcraft">FilmCraft</a>, the open-source, pure-Rust professional editor.
 </p>
 
 <p align="center">
-  <b>AutoCut</b> is an independent fork of FilmCraft that adds a local AI pipeline for agent-driven editing (it is not an ArtCraft product).<br>
-  <a href="https://www.youtube.com/watch?v=P3VMqTmsAlM"><b>Watch: an AI agent edited this video on my MacBook</b></a> (Malayalam, English subtitles) ·
-  <a href="https://www.h4hacks.com/2026/11/blog-post_21.html"><b>Blog post: how to run it by hand and with an agent</b></a> ·
-  <a href="https://github.com/moheshmohan/FrameAtlas">FrameAtlas</a> ·
-  <a href="#autocut-prompt-driven-editing">What AutoCut adds</a>
+  <a href="https://www.youtube.com/watch?v=P3VMqTmsAlM"><img src="https://img.youtube.com/vi/P3VMqTmsAlM/maxresdefault.jpg" width="760" alt="Video: An AI Agent Edited This Video on My MacBook | AutoCut + FrameAtlas (Malayalam, with English subtitles)"></a><br>
+  <sub>▶ <a href="https://www.youtube.com/watch?v=P3VMqTmsAlM"><b>Watch: an AI agent edited this video on my MacBook</b></a> (Malayalam, turn on English subtitles)</sub>
 </p>
 
 <p align="center">
-  <a href="https://getartcraft.com/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/artcraft-logo-white.svg">
-      <img alt="ArtCraft" src="docs/brand/artcraft-logo.svg" width="200">
-    </picture>
-  </a>
-</p>
-
-
-<p align="center">
-  <img src="assets/app-icon/hicolor/256x256/apps/ai.storyteller.filmcraft.png" width="128" height="128" alt="FilmCraft icon: an engraved owl on a purple tile">
-</p>
-
-<h1 align="center">FilmCraft</h1>
-
-<p align="center">
-  <b>Video editing, color and sound; an open-source, professional non-linear video editor, built in pure Rust.</b>
+  📝 <a href="https://www.h4hacks.com/2026/11/blog-post_21.html"><b>Blog post: the story, the measured numbers, and how to run it</b></a> ·
+  🗂️ <a href="https://github.com/moheshmohan/FrameAtlas"><b>FrameAtlas</b></a>, the footage catalogue that goes with it
 </p>
 
 <p align="center">
-  An open-source, modern non-linear video editing workflow: native on macOS, Windows and Linux, and in the browser via WebAssembly.<br>
-  By the ArtCraft team.
+  <a href="#run-it">Run it</a> ·
+  <a href="#use-it-with-ai">Use it with AI</a> ·
+  <a href="#what-autocut-adds">What AutoCut adds</a> ·
+  <a href="#made-with-autocut">Made with AutoCut</a> ·
+  <a href="#frameatlas">FrameAtlas</a> ·
+  <a href="#the-filmcraft-editor-underneath">The editor</a> ·
+  <a href="#license-and-credits">License</a>
 </p>
 
-<p align="center">
-  <a href="#license-and-credits"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-8b5cf6?style=flat-square"></a>
-  <img alt="Written in pure Rust" src="https://img.shields.io/badge/pure-Rust-6a3fd6?style=flat-square&logo=rust&logoColor=white">
-  <img alt="Runs on macOS, Windows and Linux" src="https://img.shields.io/badge/runs%20on-macOS%20%7C%20Windows%20%7C%20Linux-8b5cf6?style=flat-square">
-  <a href="#status"><img alt="Status: young and moving fast" src="https://img.shields.io/badge/status-young%20and%20moving%20fast-6a3fd6?style=flat-square"></a>
-  <br>
-  <a href="https://sonarcloud.io/project/overview?id=storytold_filmcraft"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a>
-  <a href="https://coderabbit.ai"><img alt="Reviewed by CodeRabbit" src="https://img.shields.io/coderabbit/prs/github/storytold/filmcraft?style=flat-square&label=Reviewed%20by%20CodeRabbit&logo=coderabbit"></a>
-</p>
-
-<p align="center">
-  <a href="https://discord.gg/artcraft"><img alt="Join the ArtCraft community on Discord" src="https://img.shields.io/badge/Join%20us%20on%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" height="40"></a>
-</p>
-
-<p align="center">
-  <a href="https://getartcraft.com/apps/filmcraft"><b>FilmCraft on getartcraft.com</b></a> ·
-  <a href="https://getartcraft.com/">ArtCraft</a> ·
-  <a href="https://getartcraft.com/apps">All Crafting Apps</a>
-</p>
+> [!NOTE]
+> AutoCut is an independent fork of [FilmCraft](https://github.com/storytold/filmcraft) by the
+> ArtCraft team. It is not an ArtCraft product, and FilmCraft's name and marks belong to its authors.
+> No AI model is bundled: you install the ones you want, and each keeps its own licence.
 
 <br>
+
+## Why
+
+Cloud agents are great at planning an edit, but every frame they look at costs tokens. Most of video
+editing is not thinking: it is watching footage, transcribing, generating a voice, rendering and
+checking. AutoCut lets the agent plan and decide, while the Mac does that work with local models.
+
+In a measured run, a fresh Claude Code session made a 70-second Malayalam film from a one-line brief
+in 57 minutes; local tools were working for 39 of them, and the cloud model wrote 86,165 output
+tokens, about half of what the same brief took a week earlier. The
+[blog post](https://www.h4hacks.com/2026/11/blog-post_21.html) has the full numbers and what they
+do and do not show.
+
+<br>
+
+## Run it
+
+### What you need
+
+- **A Mac with Apple silicon** for the local AI pipeline (tested on an M3 Max with 36 GB). The editor
+  itself also builds on Windows and Linux.
+- **[Rust](https://rustup.rs) 1.95 or newer** and Git.
+- Optional, for the AI features: **[Ollama](https://ollama.com)**; **Python 3.9+** for FrameAtlas;
+  **[Render Anything (RAEA)](https://github.com/shinyobjectz/raea)** for animations;
+  **Insta360 Studio** for 360° recordings kept in the Insta360 cloud.
+
+### Build and open the app
+
+```sh
+git clone https://github.com/moheshmohan/AutoCut
+cd AutoCut
+cargo run --release -p filmcraft                      # the desktop app, with a demo project
+cargo run --release -p filmcraft -- --control 9876    # the same, with the control channel open for agents
+cargo build --release -p filmcraft-cli                # the command-line tool: target/release/filmcraft-cli
+```
+
+The first release build takes a while. You then have a full editor: import media, cut on the
+timeline, grade, mix, add titles and export, with the panels and shortcuts of a professional NLE.
+AutoCut's additions live in the same app: **Window ▸ Generate** for local generation, the
+**Showcase** panel, Export's **Upload to Google Photos**, and the publish pre-flight.
+
+To make a macOS app bundle named AutoCut instead of running from Cargo:
+
+```sh
+AUTOCUT_APP_NAME=AutoCut AUTOCUT_BUNDLE_ID=com.example.autocut \
+AUTOCUT_APP_ICON=packaging/autocut/AutoCut.icns packaging/macos/package.sh --arch aarch64
+```
+
+Japanese text in the interface and in titles uses the optional
+[craft-fonts](https://github.com/storytold/craft-fonts): clone it next to AutoCut and build with
+`CRAFT_FONTS_DIR="$PWD/../craft-fonts"`. Without it the editor uses its own and the system's fonts.
+
+### Local models (optional)
+
+```sh
+ollama pull qwen2.5vl:7b     # looks at clips, drives the Google Photos picker, privacy checks, QA
+ollama pull qwen3:8b         # writes scripts, including Malayalam
+ollama pull phi4-mini        # classifies plain-language edit requests
+```
+
+The editor's own models (speech recognition, voices, music, upscaling, voice isolation, depth) are
+downloaded into its data folder only when you ask for them. See what is installed with, for example,
+`filmcraft-cli exec transcript.models`, `filmcraft-cli exec music.neuralModels` and
+`filmcraft-cli exec audio.voiceModelStatus`.
+
+### Connect your media (optional)
+
+| Source | How |
+|---|---|
+| Google Photos | Your own Google Cloud OAuth client ([crates/gphotos](crates/gphotos/README.md)), then `filmcraft-cli photos auth` once and `filmcraft-cli photos pick` |
+| Insta360 | `filmcraft-cli insta360 list` / `insta360 import`, from Insta360 Studio's download folder ([docs/360-video.md](docs/360-video.md)) |
+| Your voice | Record a reference and make a voice from it ([docs/voice-recording.md](docs/voice-recording.md)). Clone a voice only with its owner's consent |
+| Generation tools | List the image, clip and sound models you installed in one file ([docs/generation.md](docs/generation.md)) |
+| Animations | Render Anything scenes imported as clips ([docs/raea-workflow.md](docs/raea-workflow.md)) |
+| Your footage library | [FrameAtlas](#frameatlas) |
+
+<br>
+
+## Use it with AI
+
+Every menu item, button and slider in the editor is a **command** with typed parameters. The app,
+the CLI, a JSON control channel and an **MCP server** all run the same commands, so an agent edits
+exactly the way a person does, and whatever it makes stays an ordinary, editable project.
+
+### With Claude Code
+
+1. Build the CLI (`cargo build --release -p filmcraft-cli`). To watch the agent work, open the app
+   with its control channel: `cargo run --release -p filmcraft -- --control 9876`.
+2. Open the AutoCut folder in Claude Code. Its [`.mcp.json`](.mcp.json) registers two MCP servers:
+   `filmcraft`, a bridge to the running app, and `filmcraft-headless`, a headless engine with a demo
+   project.
+3. The agent starts from [docs/autocut-agent-guide.md](docs/autocut-agent-guide.md): which pipeline
+   fits which request, how to build an edit by hand, checks, export and delivery.
+4. Ask for a film. This is close to the brief of the measured run:
+
+> Make a finished short film with AutoCut. "Machines in Motion", 60 to 80 seconds, 1920x1080. Use my
+> own footage, found with FrameAtlas: robots, a 3D printer at work, a drive, and one 360° shot
+> reframed with a camera move. Malayalam narration in my cloned voice, told with feeling. Music and
+> a few subtle effects made locally, one Render Anything title, sidecar captions, and no readable
+> faces of bystanders. Local tools do all the media work. Keep a ledger of every step.
+
+Smaller requests work the same way: *"cut the silences from this interview and add captions"*,
+*"make a 30-second vertical reel of these trip clips on the beat"*, *"blur the faces and number
+plates, then check the export for YouTube"*.
+
+Good habits: ask for a 1080p review export first and the 4K final after you approve it; have the
+agent listen back to its narration and run the privacy check; keep its project file.
+
+### With any MCP client
+
+Claude Desktop or any other MCP client can drive AutoCut (and FrameAtlas):
+
+```json
+{
+  "mcpServers": {
+    "autocut":    { "command": "/absolute/path/to/AutoCut/target/release/filmcraft-cli",
+                    "args": ["mcp", "--bridge", "127.0.0.1:9876"] },
+    "frameatlas": { "command": "/absolute/path/to/FrameAtlas/run.sh", "args": ["mcp"] }
+  }
+}
+```
+
+Use `["--project", "/path/to/film.fcproj", "mcp"]` instead of the `--bridge` arguments for a headless engine on
+your own project. The tools include `command_list` / `command_run` for every engine command,
+`autocut_plan` / `autocut_edit` for plain-language edits, `ui_screenshot` / `ui_click` for the
+running app, and pipelines such as `quick_short`, `showcase_build`, `auto_redact` and `youtube_upload`.
+The protocol is in [docs/control-protocol.md](docs/control-protocol.md).
+
+### From the command line, with local models only
+
+No cloud agent at all: a local model classifies the request and deterministic planners turn it into
+commands. Every edit lands in the undo history.
+
+```sh
+CLI=target/release/filmcraft-cli
+$CLI --project edit.fcproj --save autocut "remove the silences and add captions"
+$CLI quick ~/Movies/expo --topic "Robots at the expo" --seconds 30 --export expo.mp4 --save-as expo.fcproj
+$CLI direct ~/Movies/trip --brief "a 30 s reel of our trip" --aspect 9:16 --seconds 30 --export trip.mp4 --save-as trip.fcproj
+$CLI showcase --album "Robot showcase" --prompt "every robot I've filmed since 2020" --export robots.mp4 --project robots.fcproj --save
+$CLI --project expo.fcproj redact --kinds faces,plates --dry-run
+$CLI publish check youtube expo.mp4
+```
+
+Each pipeline writes a report, a frame sheet and a QA file next to its export. Read them before you
+share anything.
+
+<br>
+
+## What AutoCut adds
+
+AutoCut adds local-first automated editing on top of the FilmCraft engine
+([`crates/autocut`](crates/autocut/README.md)). Ask in plain language and it plans and runs
+ordinary engine commands — every edit lands in History and undoes like a person's:
+
+```sh
+filmcraft-cli --demo autocut "cut the first 3 seconds"        # plan + run
+filmcraft-cli --project edit.fcproj autocut "remove the silences and add captions"
+filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-run
+```
+
+- **Local models do the routine work**: a small LLM (Ollama, e.g. `phi4-mini`) classifies the
+  prompt, deterministic planners turn routine intents into validated commands — auto captions
+  (with TikTok/bold/clean styles), voice enhancement (Essential Sound presets + loudness
+  matching), auto voice-over (built-in speech synthesis, Kokoro neural voices optional),
+  easy exports (YouTube/TikTok/Reels/ProRes/GIF/audio destinations), smooth slow motion with
+  optical-flow interpolation, silence/filler removal, highlight reels. The built-in Whisper
+  transcribes, and a small vision model (moondream) captions sampled frames.
+- **The supervisor is the MCP client**: prompts the local planner can't handle come back with
+  `needsSupervisor` plus the document digest (and captioned frames on request) — Claude, driving
+  the editor over MCP, then plans the edit itself with `command_list` / `command_run`, the same
+  tools its UI uses. No API keys, no cloud dependency in the editor.
+- **Everywhere the engine is**: `filmcraft-cli autocut`, and the `autocut_plan` / `autocut_edit`
+  MCP tools — so Claude Desktop can drive editing in the live Mac app (`filmcraft --control
+  9876` + `filmcraft-cli mcp --bridge 127.0.0.1:9876`).
+- **Cloud media**: pick photos and videos in the Google Photos picker and import them, from
+  the CLI (`filmcraft-cli photos pick`) and over MCP (`googlephotos_pick`) — see
+  [crates/gphotos](crates/gphotos/README.md) for the one-time Google Cloud setup and what
+  Google's Picker API can and cannot do. With `--auto "query"` (CLI) or `query` (MCP), a
+  local vision agent drives the picker itself — it types the query into the picker's own
+  search, selects matching videos and presses Done ([crates/screenagent](crates/screenagent/README.md);
+  Qwen2.5-VL via Ollama). With `--album "<title>"` (CLI) or `album` (MCP) it picks a whole
+  album instead: curate the seed of a video in Google Photos, and the agent opens that album
+  in the picker and selects all of it. `filmcraft-cli showcase --album "<title>" --prompt "a
+  video of every robot since 2020"` turns that album into the finished video in one command —
+  picked, imported once, only its clips analysed, built, exported and uploaded
+  ([crates/autocut](crates/autocut/README.md#album-as-the-seed)).
+- **Back to Google Photos**: upload a finished export to your library — Export mode's
+  **Upload to Google Photos**, `filmcraft-cli photos upload <file>`, `showcase … --export
+  out.mp4 --upload`, the `photos.upload` command and the `googlephotos_upload` MCP tool
+  (resumable 8 MiB chunks, progress, cancel). It needs the Photos Library API enabled and a
+  one-time `filmcraft-cli photos auth --upload`; picker-only sign-ins are never asked for it.
+  `--album "<title>"` (`showcase … --upload-album`, MCP `album`) also puts it into an album
+  FilmCraft makes (reused by title), where you add the next iteration's material by hand:
+  `photos album create|add`,
+  `photos albums` and the `photos.createAlbum` / `photos.albums` / `photos.addToAlbum`
+  commands, after `photos auth --albums`.
+- **Generate with your own local models**: pictures, short clips, music and sound effects
+  made by generation tools installed on your computer, imported and placed on the timeline
+  as one undo step. Fill an empty stretch of a track with a clip that carries on from the
+  frame before it, runs from the frame before to the frame after, or continues the movement
+  (`generate.fillGap`); carry a shot on past its end (`generate.extend`); make a clip again in
+  another look, or with another character in a person's place (`generate.restyle`); change what a frame
+  shows from an instruction (`generate.augment`: "add a red sailboat"); make up to four
+  variations and swap one in; build a motion-graphics scene's pictures, cut-outs, clips and
+  sounds from one list (`generate.assets`). Window ▸ Generate in the app, `generate.*`
+  commands from the CLI and over MCP. The app bundles and downloads no model: you list your
+  tools in one file ([docs/generation.md](docs/generation.md)).
+
+<br>
+
+## Made with AutoCut
+
+Films from the [H4hacks](https://www.youtube.com/@h4hacks) channel, edited with AutoCut and its
+local pipeline (narration in Malayalam, with English subtitles):
+
+<table>
+  <tr>
+    <td width="50%" align="center"><a href="https://www.youtube.com/watch?v=P3VMqTmsAlM"><img src="https://img.youtube.com/vi/P3VMqTmsAlM/mqdefault.jpg" alt="An AI Agent Edited This Video on My MacBook"></a><br><sub><b>An AI agent edited this video on my MacBook</b><br>AutoCut and FrameAtlas, a measured agent run</sub></td>
+    <td width="50%" align="center"><a href="https://www.youtube.com/watch?v=7FYPOxDYWBc"><img src="https://img.youtube.com/vi/7FYPOxDYWBc/mqdefault.jpg" alt="Every Robot I've Met 2013-2025"></a><br><sub><b>Every Robot I've Met, 2013–2025</b><br>a narrated showcase built from one Google Photos album</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><a href="https://www.youtube.com/watch?v=4yar4MbF71g"><img src="https://img.youtube.com/vi/4yar4MbF71g/mqdefault.jpg" alt="My 3D Printing Saga, Part 2"></a><br><sub><b>My 3D Printing Saga, Part 2: From Kit to Colour</b><br>years of clips and photos, cut into a story</sub></td>
+    <td width="50%" align="center"><a href="https://www.youtube.com/watch?v=xLedXwsO1O4"><img src="https://img.youtube.com/vi/xLedXwsO1O4/mqdefault.jpg" alt="Nextion ESP32-S3 desk robot"></a><br><sub><b>A knob that became a desk robot</b><br>a maker build video: CAD, 3D printing and firmware</sub></td>
+  </tr>
+</table>
+
+<br>
+
+## FrameAtlas
+
+[FrameAtlas](https://github.com/moheshmohan/FrameAtlas) catalogues the footage you already have in
+Google Photos, on Insta360 cameras and in local folders: what is in each scene, and when. An agent
+asks for "the yellow robot dog walking" and gets back a file and a time range, so it does not have
+to watch everything itself.
+
+```sh
+git clone https://github.com/moheshmohan/FrameAtlas      # next to the AutoCut folder
+cd FrameAtlas && ./run.sh serve                           # then open http://127.0.0.1:7318
+```
+
+It has no pip or npm dependencies and keeps its catalogue on your computer. Once your media is
+catalogued, AutoCut searches it and pulls the originals into an editable project:
+
+```sh
+filmcraft-cli catalog search '{"query": "yellow robot dog walking", "limit": 8}'
+```
+
+<br>
+
+## The FilmCraft editor underneath
+
+FilmCraft is a professional non-linear editor: familiar panels, workspaces, tools and shortcuts, so your hands already know where everything is. Underneath, it is new from the bitstream up. The H.264, HEVC, ProRes and AAC codecs are our own, written in Rust from the public specifications. A GPU compositor works in linear light. Frame math runs on exact integer time, so edits never drift. And every action in the app is a command that an AI agent can drive as precisely as you can.
 
 <p align="center">
   <img src="docs/images/filmcraft-hero.png" alt="FilmCraft in the Color workspace, mid-way through an Apollo 11 documentary cut from NASA footage: the Program monitor on the Saturn V clearing the launch tower with a Launch Complex 39A lower third and an air-to-ground subtitle, Effect Controls with color grading and Scale keyframes on the shot, the color grading panel, bins of NASA selects, and a timeline with 49 picture cuts, B-roll, titles, a caption track, mission audio, a ducked music bed, named markers, a rendered section and live loudness meters" width="100%">
 </p>
 
 <p align="center"><sub><i>Apollo 11 - Tranquility</i>: a three-minute documentary edit of NASA's 1969 launch, landing and moonwalk film, with subtitles from the mission transcript. Every frame in these screenshots comes from public-domain footage, decoded, composited and graded by FilmCraft's own code.</sub></p>
-
-> [!NOTE]
-> **ArtCraft is a community of artists from all walks of life.** Digital, generative, music,
-> games &mdash; if you make things, you're one of us. **[Come say hi on Discord](https://discord.gg/artcraft).**
 
 <p align="center">
   <a href="#edit">Edit</a> ·
@@ -76,17 +300,8 @@
   <a href="#formats-and-codecs">Formats</a> ·
   <a href="#export">Export</a> ·
   <a href="#interchange">Interchange</a> ·
-  <a href="#autocut-prompt-driven-editing">AutoCut</a> ·
-  <a href="#built-for-agents">Agents</a> ·
-  <a href="#get-started">Get started</a> ·
-  <a href="#downloads">Downloads</a> ·
-  <a href="#documentation">Docs</a> ·
-  <a href="#status">Status</a>
+  <a href="#built-for-agents">Agents</a>
 </p>
-
-<br>
-
-FilmCraft is a professional non-linear editor: familiar panels, workspaces, tools and shortcuts, so your hands already know where everything is. Underneath, it is new from the bitstream up. The H.264, HEVC, ProRes and AAC codecs are our own, written in Rust from the public specifications. A GPU compositor works in linear light. Frame math runs on exact integer time, so edits never drift. And every action in the app is a command that an AI agent can drive as precisely as you can.
 
 <br>
 
@@ -183,6 +398,7 @@ FilmCraft is a professional non-linear editor: familiar panels, workspaces, tool
 - **A real text engine:** OpenType shaping with kerning and ligatures, bidirectional text, line breaking, tracking and leading, drawn in linear light and sharp at any scale or rotation.
 - **Type, Shape and Pen tools** on the Program monitor: click to type, edit with a caret and selection, drag out rectangles, ellipses and paths. Graphic clips hold text and shape layers with fill, strokes, background and shadow, all keyframable, and edited in the Properties panel.
 - **Captions:** caption tracks in Subtitle, CEA-608, CEA-708 and Teletext formats; import and export SRT, WebVTT and SCC with frame-exact timing; edit captions in the Text panel and burn them into exports.
+
 <br>
 
 ## Formats and codecs
@@ -241,68 +457,6 @@ Import merges the document's bins, media and sequences into your project as one 
 
 <br>
 
-## AutoCut: prompt-driven editing
-
-This fork (**AutoCut**) adds local-first automated editing on top of the FilmCraft engine
-([`crates/autocut`](crates/autocut/README.md)). Ask in plain language and it plans and runs
-ordinary engine commands — every edit lands in History and undoes like a person's:
-
-```sh
-filmcraft-cli --demo autocut "cut the first 3 seconds"        # plan + run
-filmcraft-cli --project edit.fcproj autocut "remove the silences and add captions"
-filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-run
-```
-
-- **Local models do the routine work**: a small LLM (Ollama, e.g. `phi4-mini`) classifies the
-  prompt, deterministic planners turn routine intents into validated commands — auto captions
-  (with TikTok/bold/clean styles), voice enhancement (Essential Sound presets + loudness
-  matching), auto voice-over (built-in speech synthesis, Kokoro neural voices optional),
-  easy exports (YouTube/TikTok/Reels/ProRes/GIF/audio destinations), smooth slow motion with
-  optical-flow interpolation, silence/filler removal, highlight reels. The built-in Whisper
-  transcribes, and a small vision model (moondream) captions sampled frames.
-- **The supervisor is the MCP client**: prompts the local planner can't handle come back with
-  `needsSupervisor` plus the document digest (and captioned frames on request) — Claude, driving
-  the editor over MCP, then plans the edit itself with `command_list` / `command_run`, the same
-  tools its UI uses. No API keys, no cloud dependency in the editor.
-- **Everywhere the engine is**: `filmcraft-cli autocut`, and the `autocut_plan` / `autocut_edit`
-  MCP tools — so Claude Desktop can drive editing in the live Mac app (`filmcraft --control
-  9876` + `filmcraft-cli mcp --bridge 127.0.0.1:9876`).
-- **Cloud media**: pick photos and videos in the Google Photos picker and import them, from
-  the CLI (`filmcraft-cli photos pick`) and over MCP (`googlephotos_pick`) — see
-  [crates/gphotos](crates/gphotos/README.md) for the one-time Google Cloud setup and what
-  Google's Picker API can and cannot do. With `--auto "query"` (CLI) or `query` (MCP), a
-  local vision agent drives the picker itself — it types the query into the picker's own
-  search, selects matching videos and presses Done ([crates/screenagent](crates/screenagent/README.md);
-  Qwen2.5-VL via Ollama). With `--album "<title>"` (CLI) or `album` (MCP) it picks a whole
-  album instead: curate the seed of a video in Google Photos, and the agent opens that album
-  in the picker and selects all of it. `filmcraft-cli showcase --album "<title>" --prompt "a
-  video of every robot since 2020"` turns that album into the finished video in one command —
-  picked, imported once, only its clips analysed, built, exported and uploaded
-  ([crates/autocut](crates/autocut/README.md#album-as-the-seed)).
-- **Back to Google Photos**: upload a finished export to your library — Export mode's
-  **Upload to Google Photos**, `filmcraft-cli photos upload <file>`, `showcase … --export
-  out.mp4 --upload`, the `photos.upload` command and the `googlephotos_upload` MCP tool
-  (resumable 8 MiB chunks, progress, cancel). It needs the Photos Library API enabled and a
-  one-time `filmcraft-cli photos auth --upload`; picker-only sign-ins are never asked for it.
-  `--album "<title>"` (`showcase … --upload-album`, MCP `album`) also puts it into an album
-  FilmCraft makes (reused by title), where you add the next iteration's material by hand:
-  `photos album create|add`,
-  `photos albums` and the `photos.createAlbum` / `photos.albums` / `photos.addToAlbum`
-  commands, after `photos auth --albums`.
-- **Generate with your own local models**: pictures, short clips, music and sound effects
-  made by generation tools installed on your computer, imported and placed on the timeline
-  as one undo step. Fill an empty stretch of a track with a clip that carries on from the
-  frame before it, runs from the frame before to the frame after, or continues the movement
-  (`generate.fillGap`); carry a shot on past its end (`generate.extend`); make a clip again in
-  another look, or with another character in a person's place (`generate.restyle`); change what a frame
-  shows from an instruction (`generate.augment`: "add a red sailboat"); make up to four
-  variations and swap one in; build a motion-graphics scene's pictures, cut-outs, clips and
-  sounds from one list (`generate.assets`). Window ▸ Generate in the app, `generate.*`
-  commands from the CLI and over MCP. The app bundles and downloads no model: you list your
-  tools in one file ([docs/generation.md](docs/generation.md)).
-
-<br>
-
 ## Built for agents
 
 AutoCut can use locally rendered animations, scenes, and transparent transition overlays.
@@ -331,28 +485,14 @@ The trailer and the grades in these screenshots were built exactly this way, by 
 
 <br>
 
-## Get started
-
-```sh
-cargo run --release -p filmcraft                           # the desktop app, with a demo project
-cargo run --release -p filmcraft -- --control 9876         # plus the JSON-lines control server
-cargo run --release -p filmcraft-cli -- commands           # list every engine command
-cargo run --release -p filmcraft-cli -- mcp                # MCP server (headless)
-```
-
-Japanese text in the interface and in titles comes from [craft-fonts](https://github.com/storytold/craft-fonts), an optional build input (release builds always include it; without it FilmCraft uses its own and the system's fonts):
-
-```sh
-git clone https://github.com/storytold/craft-fonts ../craft-fonts
-CRAFT_FONTS_DIR="$PWD/../craft-fonts" cargo run --release -p filmcraft
-```
-
-The control protocol is documented in [docs/control-protocol.md](docs/control-protocol.md). Stuck, or want to show what you made? Ask in [Discord](https://discord.gg/artcraft).
-
 ## Documentation
 
 | | |
 |---|---|
+| [docs/autocut-agent-guide.md](docs/autocut-agent-guide.md) | **Start here as an agent**: pipelines, building an edit, checks, export, delivery |
+| [crates/autocut](crates/autocut/README.md) | AutoCut's pipelines: prompt edits, showcases, direct, quick, privacy, QA |
+| [docs/generation.md](docs/generation.md) · [docs/360-video.md](docs/360-video.md) · [docs/raea-workflow.md](docs/raea-workflow.md) | Local generation, 360° video, Render Anything animations |
+| [docs/video-pipeline.md](docs/video-pipeline.md) · [docs/showcase-runbook.md](docs/showcase-runbook.md) | A whole video from an album, and its review rounds |
 | [CONTRIBUTING.md](CONTRIBUTING.md) · [docs/contributing.md](docs/contributing.md) | Setup, quality gates, commit conventions, how to add commands, effects, codecs, panels and assets |
 | [AGENTS.md](AGENTS.md) | The rules every contributor must follow: assets, clean room, licences |
 | [docs/architecture.md](docs/architecture.md) | Layers, data model, time base, command system, render and export pipeline |
@@ -365,7 +505,7 @@ The control protocol is documented in [docs/control-protocol.md](docs/control-pr
 | [docs/target-app-parity.md](docs/target-app-parity.md) · [docs/gaps.md](docs/gaps.md) · [docs/roadmap.md](docs/roadmap.md) | Parity assessment, the ranked list of shortfalls, milestones and current focus |
 | [docs/codec-parity.md](docs/codec-parity.md) · [docs/file-format-parity.md](docs/file-format-parity.md) · [docs/hardware-parity.md](docs/hardware-parity.md) · [docs/ui-parity.md](docs/ui-parity.md) · [docs/localization-parity.md](docs/localization-parity.md) | Parity checklists by dimension |
 
-## Status
+## FilmCraft status
 
 FilmCraft is young and moving fast. Editing, trimming, multicam, colour, keyframes, effects, titles, captions, mixing, codecs and export work today.
 
@@ -383,7 +523,7 @@ The biggest gaps today:
 - **Real-world media and platforms.** Our decoders are bit-exact on conformance streams, but camera and phone files in the wild are less tested. Windows and Linux get far less testing than macOS.
 - **AI features.** Few so far; speech to text is optional and off by default.
 
-Bug reports with real footage are the most useful thing you can send us: [open an issue](https://github.com/storytold/filmcraft/issues) or tell us in [Discord](https://discord.gg/artcraft).
+Bugs in the editor itself (not in AutoCut's pipeline) are best reported upstream, with real footage if you can: [FilmCraft issues](https://github.com/storytold/filmcraft/issues). AutoCut issues go to [this repository](https://github.com/moheshmohan/AutoCut/issues).
 
 ## Architecture
 
@@ -401,7 +541,10 @@ A layered Cargo workspace:
 
 Nothing below the front ends depends on a UI toolkit or OS API. `cargo xtask ci` checks formatting, lints, tests, the layering rules, asset attribution and the wasm build.
 
-## Downloads
+## FilmCraft downloads
+
+AutoCut has no prebuilt releases yet: build it from source as in [Run it](#run-it). The downloads below are
+**upstream FilmCraft**, which is the editor without AutoCut's pipeline.
 
 **New to FilmCraft?** Download it from the [FilmCraft page on getartcraft.com](https://getartcraft.com/apps/filmcraft). That's the easiest way to install it.
 
@@ -486,49 +629,12 @@ emerge --ask media-video/filmcraft-bin
 |---|---|---|
 | Static site | `filmcraft-web-<ver>.zip` | Runs in a modern browser; host it on any static server |
 
-## The Crafting Apps
-
-FilmCraft is one of the **Crafting Apps**: free, open-source creative tools from the
-[ArtCraft](https://getartcraft.com/) team, each written from scratch in Rust and each able to
-stand on its own.
-
-| | App | What it's for | Code | Learn more |
-|:-:|---|---|---|---|
-| <img src="https://raw.githubusercontent.com/storytold/photocraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.photocraft.png" alt="" width="32" height="32"> | **PhotoCraft** | Image editing: layers, masks, type and real PSD files | [GitHub](https://github.com/storytold/photocraft) | [Website](https://getartcraft.com/apps/photocraft) |
-| <img src="https://raw.githubusercontent.com/storytold/vectorcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.vectorcraft.png" alt="" width="32" height="32"> | **VectorCraft** | Vector illustration | [GitHub](https://github.com/storytold/vectorcraft) | [Website](https://getartcraft.com/apps/vectorcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/filmcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.filmcraft.png" alt="" width="32" height="32"> | **FilmCraft** | **Video editing, color and sound · you are here** | [GitHub](https://github.com/storytold/filmcraft) | [Website](https://getartcraft.com/apps/filmcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/lightcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.lightcraft.png" alt="" width="32" height="32"> | **LightCraft** | Photo library and raw development | [GitHub](https://github.com/storytold/lightcraft) | [Website](https://getartcraft.com/apps/lightcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/pdfcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.pdfcraft.png" alt="" width="32" height="32"> | **PdfCraft** | Reading, organizing and protecting PDFs | [GitHub](https://github.com/storytold/pdfcraft) | [Website](https://getartcraft.com/apps/pdfcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/effectcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.effectcraft.png" alt="" width="32" height="32"> | **EffectCraft** | Motion graphics and visual effects | [GitHub](https://github.com/storytold/effectcraft) | [Website](https://getartcraft.com/apps/effectcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/designcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.designcraft.png" alt="" width="32" height="32"> | **DesignCraft** | Page layout and publishing | [GitHub](https://github.com/storytold/designcraft) | [Website](https://getartcraft.com/apps/designcraft) |
-
-And [**ArtCraft**](https://getartcraft.com/) itself, our AI image and video studio for artists who want real control.
-
-<br>
-
-<p align="center">
-  <a href="https://discord.gg/artcraft"><img alt="Join the ArtCraft community on Discord" src="https://img.shields.io/badge/Join%20us%20on%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" height="40"></a>
-</p>
-
-<h3 align="center">Come make things with us</h3>
-
-<p align="center">
-  Our Discord is where artists of every kind hang out: people who paint, shoot, draw, cut film,
-  set type, and people still figuring out what they like to make. Share what you're working on,
-  ask for help, tell us what's broken, or tell us what you wish these tools could do.
-  Whatever your medium and however long you've been at it, you're welcome here.
-</p>
-
-<p align="center">
-  <a href="https://discord.gg/artcraft"><b>discord.gg/artcraft</b></a> ·
-  <a href="https://getartcraft.com/">getartcraft.com</a> ·
-  <a href="https://getartcraft.com/apps">The Crafting Apps</a> ·
-  <a href="https://getartcraft.com/apps/filmcraft">FilmCraft</a>
-</p>
-
-<br>
-
 ## License and credits
+
+AutoCut keeps FilmCraft's licence: MIT or Apache-2.0, at your option. Thanks to the ArtCraft team and
+FilmCraft's contributors for the editor this is built on. No AI model is bundled; the models AutoCut can drive
+(Ollama models, Whisper, IndicF5, VoxCPM, ACE-Step, Stable Audio, MiniMax-H3-Image, LTX-2, Real-ESRGAN,
+DeepFilterNet and others) each keep their own licences, which you accept when you install them.
 
 FilmCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 Copyright (c) 2026 ArtCraft Team and the FilmCraft contributors. Required notices are in [NOTICE](NOTICE).
@@ -546,14 +652,3 @@ The ArtCraft name, wordmark and logos in [`docs/brand/`](docs/brand/) are tradem
 ArtCraft Team and are not covered by this license. They may be used only unmodified, and only as
 part of this repository and FilmCraft, under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt).
 Forks and modified versions must remove them.
-
-<br>
-
-<p align="center">
-  <a href="https://getartcraft.com/"><img alt="ArtCraft" src="docs/brand/artcraft-mark.svg" width="28"></a><br>
-  <sub>Made by the <a href="https://getartcraft.com/">ArtCraft</a> team and community.</sub>
-</p>
-
-## Star history
-
-[![Star History Chart](https://api.star-history.com/svg?repos=storytold/filmcraft&type=Date&legend=top-left)](https://www.star-history.com/?repos=storytold%2Ffilmcraft&type=date&legend=top-left)
