@@ -11,6 +11,7 @@
 //! | `generate.fillGap` | fills an empty stretch of a video track with a generated clip that carries on from the frame before it (or leads into the one after); `all` fills every gap of the track |
 //! | `generate.augment` | changes what the frame at a time shows by an instruction (add a character, change the weather…) and lays the result over the clip, as a still or animated |
 //! | `generate.extend` | carries the picture on from a time: the tool is given the last moments before it as a small video and makes what comes next, so the motion continues |
+//! | `generate.restyle` | makes a clip again from a description: the tool is given the clip as a small video and an adapter of its model keeps its shapes and movement (or changes one thing about it, as the adapter does); with `look` the picture tool changes the first frame first (a new style, another character) and the clip starts on it |
 //! | `generate.assets` | makes the files a scene's asset list names and leaves the ones that are there (a RAEA composition's pictures, clips and sounds, rebuilt from their descriptions and seeds) |
 //! | `generate.pick` | puts another variation of a generated item in the place of the one on the timeline |
 //! | `generate.history` | what was generated into this project: item, kind, description, tool, seed |
@@ -162,6 +163,13 @@ pub fn commands() -> Vec<CommandSpec> {
             true,
         ),
         spec(
+            "generate.restyle",
+            "Make a Clip Again",
+            r#"{"prompt":str (what the new clip shows),"clip":id? (default the selected clip, else the one under the playhead),"how":name? (a way of the tool, generate.providers lists them; default the first that is installed),"image":item id|path? (the picture the new clip starts on),"look":str? (the picture tool changes the clip's first frame by this instruction, and the new clip starts on it),"references":[item id|path]? (pictures for `look`: a character to put in),"strength":0..1=1 (how closely the clip is followed),"seed":u64?,"provider":id?,"imageProvider":id?,"track":"V2"?,"dir":str?,"place":bool=true,"wait":bool=false}"#,
+            restyle,
+            true,
+        ),
+        spec(
             "generate.assets",
             "Generate a Scene's Assets",
             r#"{"manifest":str (an absolute path to assets.json),"only":[name]?,"force":bool=false,"import":bool=false,"dryRun":bool=false,"wait":bool=false}"#,
@@ -187,6 +195,9 @@ fn provider_json(p: &Provider) -> Value {
         "estimateSeconds": p.estimate_seconds, "maxSeconds": p.max_seconds, "maxSide": p.max_side,
         "maxReferences": p.max_references, "references": !p.per_reference.is_empty(),
         "bothEnds": p.optional.contains_key("lastImage"), "carriesOn": !p.extend_command.is_empty(),
+        "restyles": p.restyles.iter().map(|(name, w)| json!({
+            "name": name, "about": w.about, "license": w.license, "installed": run::restyle_installed(p, name),
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -1072,6 +1083,176 @@ fn extend(s: &mut Session, p: &Value) -> Result<Value> {
     v["seed"] = json!(seed);
     v["seconds"] = json!(c.made);
     v["at"] = json!(at.0);
+    Ok(v)
+}
+
+/// A video clip of the open sequence: its track (0 = V1), start and length.
+fn video_clip(s: &Session, id: u64) -> Option<(usize, Tick, Tick)> {
+    let seq = s.active_sequence()?;
+    seq.video_tracks.iter().enumerate().find_map(|(i, t)| t.item(ClipId(id)).map(|it| (i, it.start, it.duration)))
+}
+
+/// The clip a command is about: the named one, else the first selected video clip, else the top
+/// one under the playhead.
+fn clip_for(s: &Session, cmd: &str, p: &Value) -> Result<(u64, usize, Tick, Tick)> {
+    if let Some(v) = p.get("clip").filter(|v| !v.is_null()) {
+        let id = v.as_u64().ok_or_else(|| bad(cmd, "`clip` must be a clip id"))?;
+        let (i, start, len) = video_clip(s, id).ok_or_else(|| bad(cmd, format!("there is no video clip {id} in the open sequence")))?;
+        return Ok((id, i, start, len));
+    }
+    if let Some(found) = s.state.selection.iter().find_map(|c| video_clip(s, c.0).map(|(i, start, len)| (c.0, i, start, len))) {
+        return Ok(found);
+    }
+    let head = s.playhead().max(Tick::ZERO);
+    let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    seq.video_tracks
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, t)| t.items.iter().find(|it| it.start <= head && head < it.end()).map(|it| (it.id.0, i, it.start, it.duration)))
+        .ok_or_else(|| bad(cmd, "no clip is selected and none is under the playhead: name one with `clip`"))
+}
+
+fn restyle(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "generate.restyle";
+    poll(s);
+    let prov = provider_for(cmd, p, Kind::Video, "provider")?;
+    if s.state.active_sequence.is_none() {
+        return Err(EngineError::NoSequence);
+    }
+    let prompt = prompt_p(cmd, p, "prompt")?;
+    if prov.restyle_command.is_empty() || prov.restyles.is_empty() {
+        return Err(bad(cmd, format!("{} cannot make a clip again (it has no `restyleCommand` and `restyles`)", prov.name)));
+    }
+    let ways = || prov.restyles.keys().map(String::as_str).collect::<Vec<_>>().join(", ");
+    let how = match p.get("how") {
+        None | Some(Value::Null) => {
+            prov.restyles.keys().find(|k| run::restyle_installed(&prov, k)).or(prov.restyles.keys().next()).cloned().unwrap_or_default()
+        }
+        Some(Value::String(h)) if prov.restyles.contains_key(h.as_str()) => h.clone(),
+        Some(v) => return Err(bad(cmd, format!("unknown `how` {} ({} can: {})", short(&v.to_string()), prov.name, ways()))),
+    };
+    let way = prov.restyles.get(&how).ok_or_else(|| bad(cmd, format!("{} has no way `{how}`", prov.name)))?;
+    if !cfg!(target_arch = "wasm32") && !run::restyle_installed(&prov, &how) {
+        return Err(bad(cmd, format!("the adapter of `{how}` is not on this computer: {} (docs/generation.md says where it comes from)", way.adapter)));
+    }
+    let adapter = way.adapter.clone();
+    let rprov = run::restyler(&prov, &how).ok_or_else(|| bad(cmd, format!("{} has no way `{how}`", prov.name)))?;
+    let strength = match p.get("strength") {
+        None | Some(Value::Null) => 1.0,
+        Some(v) => match v.as_f64() {
+            Some(x) if (0.0..=1.0).contains(&x) => x,
+            _ => return Err(bad(cmd, "`strength` must be 0 to 1")),
+        },
+    };
+    let look = text_p(cmd, p, "look")?;
+    let given = p.get("image").filter(|v| !v.is_null());
+    let has_refs = p.get("references").is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty()));
+    if given.is_some() && look.is_some() {
+        return Err(bad(cmd, "give `image` (the first picture) or `look` (how to change the first frame), not both"));
+    }
+    if has_refs && look.is_none() {
+        return Err(bad(cmd, "`references` go with `look` (they are the pictures the first frame is changed with)"));
+    }
+    if (given.is_some() || look.is_some()) && !rprov.optional.contains_key("image") {
+        return Err(bad(cmd, format!("{} cannot start the new clip on a given picture (its `restyleOptional` has no `image`)", prov.name)));
+    }
+    // (checked before anything is written)
+    let given = match given {
+        Some(v) => Some(reference(s, cmd, v)?),
+        None => None,
+    };
+    let (clip, track, at, length) = clip_for(s, cmd, p)?;
+    let st = run::restyle_stretch(&prov, length.seconds()).ok_or_else(|| {
+        let least = f64::from(prov.frames_step.unwrap_or(1).saturating_add(prov.frames_offset.unwrap_or(0))) / prov.fps.unwrap_or(24.0).max(1.0);
+        bad(cmd, format!("the clip is too short to make again ({} makes {least:.1} s or more)", prov.name))
+    })?;
+    let (w, h) = run::grid_size(aspect(s), prov.default_side.unwrap_or(480), prov.extend_multiple_of.unwrap_or(64));
+    let dir = crate::voiceover::generated_dir(s, p, FOLDER)?;
+    let mut taken = Vec::new();
+    // the stretch as the tool takes it: small, and holding exactly the frames it will make
+    let source = unique_path(s, &dir, "Restyle Source", "mp4", &taken)?;
+    taken.push(source.clone());
+    if let Some(parent) = std::path::Path::new(&source).parent()
+        && !cfg!(target_arch = "wasm32")
+    {
+        std::fs::create_dir_all(parent).map_err(|e| EngineError::Other(format!("{}: {e}", parent.display())))?;
+    }
+    s.execute(
+        "file.exportMedia",
+        json!({
+            "path": source, "format": "h264", "width": w, "height": h, "fps": st.source_fps, "audio": false,
+            "range": "custom", "startSeconds": at.seconds(), "endSeconds": at.seconds() + st.covered, "wait": true,
+        }),
+    )?;
+    if s.services.file_size(&source).is_err() {
+        return Err(bad(cmd, "the clip could not be written for the tool"));
+    }
+    let seed = seed_p(s, p);
+    let (mut steps, mut lands) = (Vec::new(), Vec::new());
+    let image = match (given, look) {
+        (Some(path), _) => Some(path),
+        (None, Some(look)) => {
+            // the picture tool changes the first frame, and the new clip starts on its picture
+            let iprov = provider_for(cmd, p, Kind::Image, "imageProvider")?;
+            if iprov.per_reference.is_empty() {
+                return Err(bad(cmd, format!("{} cannot change a picture (it takes no references)", iprov.name)));
+            }
+            let frame = frame_png(s, cmd, at, &dir, &taken)?;
+            taken.push(frame.clone());
+            let mut refs = vec![frame];
+            let extra = references_p(s, cmd, p, &iprov)?;
+            let most = iprov.max_references.map_or(run::MAX_REFERENCES, |m| (m as usize).min(run::MAX_REFERENCES));
+            if extra.len() + 1 > most {
+                return Err(bad(cmd, format!("{} takes at most {most} references, the frame included", iprov.name)));
+            }
+            refs.extend(extra);
+            let size = run::size(&iprov, (None, None), aspect(s));
+            let first = unique_path(s, &dir, "Restyled Frame", &ext(&iprov), &taken)?;
+            taken.push(first.clone());
+            let q = Picture { prov: &iprov, prompt: &look, negative: None, refs, size, seed, steps: None, strength: None, transparent: false };
+            steps.extend(picture_steps(cmd, &q, &first, None)?);
+            lands.push(land_of(&iprov, &first, &look, seed, &format!("{}×{} · the first frame of a clip made again", size.0, size.1), true, None));
+            Some(first)
+        }
+        (None, None) => None,
+    };
+    let out = unique_path(s, &dir, "Generated Video", &ext(&prov), &taken)?;
+    let made = f64::from(st.frames) / st.fps;
+    let vars = Vars {
+        out: out.clone(),
+        prompt: prompt.clone(),
+        width: Some(w),
+        height: Some(h),
+        seed,
+        seconds: Some(made),
+        frames: Some(st.frames),
+        fps: Some(st.fps),
+        image,
+        video: Some(source.clone()),
+        adapter: Some(adapter),
+        strength: Some(strength),
+        ..Default::default()
+    };
+    let args = run::argv(&rprov, &vars).map_err(|e| bad(cmd, e))?;
+    steps.push(Step { provider: rprov, args, out: out.clone() });
+    // over the clip it was made from, as long as the stretch it covers
+    let place = bool_p(p, "place").unwrap_or(true).then(|| Place {
+        track: str_p(p, "track").map(str::to_string),
+        above: track.saturating_add(1),
+        fit: Some(Tick::from_seconds_f64(st.covered)),
+        ..Place::at(at)
+    });
+    lands.push(land_of(&prov, &out, &prompt, seed, &format!("{:.1} s · {w}×{h} · a clip made again ({how})", st.covered), true, place));
+    let mut v = start(s, cmd, format!("Making a clip again: {}", short(&prompt)), steps, lands, bool_p(p, "wait").unwrap_or(false))?;
+    v["provider"] = json!(prov.id);
+    v["how"] = json!(how);
+    v["seed"] = json!(seed);
+    v["clip"] = json!(clip);
+    v["at"] = json!(at.0);
+    v["seconds"] = json!(st.covered);
+    v["left"] = json!((length.seconds() - st.covered).max(0.0));
+    v["source"] = json!(source);
     Ok(v)
 }
 

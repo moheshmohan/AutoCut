@@ -672,3 +672,122 @@ fn a_gap_is_filled_between_two_pictures_or_by_carrying_the_shot_on() {
     }
     let _ = std::fs::remove_dir_all(&dir0);
 }
+
+#[test]
+fn a_clip_is_made_again_over_itself() {
+    let dir0 = std::env::temp_dir().join(format!("fc-generate-fixture-r-{}", std::process::id()));
+    std::fs::create_dir_all(&dir0).unwrap();
+    let fixture = dir0.join("clip.png");
+    std::fs::write(&fixture, png(64, 36, 90)).unwrap();
+    let adapter = dir0.join("union.safetensors");
+    std::fs::write(&adapter, b"weights").unwrap();
+    let (f, ad, missing) = (fixture.to_string_lossy(), adapter.to_string_lossy(), dir0.join("relight.safetensors").to_string_lossy().into_owned());
+    // (a still stands in for the clip; the restyle program notes what it was given)
+    let vid = tool(
+        "vid",
+        "video",
+        &fixture,
+        "",
+        &format!(
+            r#","extension":"png","framesStep":8,"framesOffset":1,"maxSeconds":10,"restyleCommand":["/bin/sh","-c","out=\"$2\"; printf '%s\\n' \"$@\" > \"$out.args\"; cp \"$1\" \"$out\"","sh","{f}","{{out}}","--video","{{video}}","--adapter","{{adapter}}","--frames","{{frames}}","--strength","{{strength}}","--prompt","{{prompt}}","{{optional}}"],"restyleOptional":{{"image":["--image","{{image}}"]}},"restyles":{{"edges":{{"adapter":"{ad}","args":["--how","edges"],"about":"keeps the shapes"}},"relight":{{"adapter":"{missing}","args":["--how","source"]}}}}"#
+        ),
+    );
+    let plain = tool("plain", "video", &fixture, "", r#","extension":"png""#);
+    let img = tool("img", "image", &fixture, r#","{references}""#, r#","perReference":["--reference","{path}"]"#);
+    let mut b = bench("restyle", &[vid, plain, img]);
+    let listed = b.s.execute("generate.providers", json!({})).unwrap();
+    let ways = &listed["providers"][0]["restyles"];
+    assert_eq!(
+        (ways[0]["name"].as_str(), ways[0]["installed"].as_bool(), ways[0]["about"].as_str()),
+        (Some("edges"), Some(true), Some("keeps the shapes")),
+        "{listed}"
+    );
+    assert_eq!((ways[1]["name"].as_str(), ways[1]["installed"].as_bool()), (Some("relight"), Some(false)), "{listed}");
+    assert_eq!(listed["providers"][1]["restyles"].as_array().map(Vec::len), Some(0));
+    let v = b.s.execute("generate.image", json!({"prompt": "a", "dir": b.out(), "wait": true})).unwrap();
+    let item = made(&v, 0)["item"].as_u64().unwrap();
+    let t0 = after_everything(&b.s);
+    let unit = sec(&b.s, 1.0);
+    let sec = |x: i64| Tick(unit.0 * x);
+    let placed = b.s.execute("timeline.place", json!({"item": item, "track": "new", "time": t0.0, "duration": sec(2).0})).unwrap();
+    let clip = placed["clips"][0].as_u64().unwrap();
+    let track = b.s.active_sequence().unwrap().video_tracks.len();
+    let clips_at = |s: &Session| s.active_sequence().unwrap().video_tracks.iter().filter(|t| t.items.iter().any(|i| i.start == t0)).count();
+    assert_eq!(clips_at(&b.s), 1);
+    // the clip is given to the tool as a small video, and the new one lies over it for its whole length
+    let v = b.s.execute("generate.restyle", json!({"prompt": "as a watercolour", "clip": clip, "dir": b.out(), "wait": true})).unwrap();
+    let g = made(&v, 0);
+    assert_eq!((g["start"].as_i64(), g["duration"].as_i64(), clips_at(&b.s)), (Some(t0.0), Some(sec(2).0), 2), "{v}");
+    assert_eq!((v["how"].as_str(), v["clip"].as_u64(), v["left"].as_f64()), (Some("edges"), Some(clip), Some(0.0)), "{v}");
+    assert!(b.s.active_sequence().unwrap().video_tracks.len() > track, "on a track above the clip: {v}");
+    let args = b.args_of(g["path"].as_str().unwrap());
+    let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+    let source = after("--video");
+    assert!(source.contains("Restyle Source") && std::fs::metadata(&source).is_ok_and(|m| m.len() > 0), "{args:?}");
+    assert_eq!(
+        (after("--adapter"), after("--frames"), after("--strength"), after("--how")),
+        (ad.to_string(), "41".to_string(), "1".to_string(), "edges".to_string()),
+        "{args:?}"
+    );
+    assert!(!args.contains(&"--image".to_string()) && args.contains(&"as a watercolour".to_string()), "{args:?}");
+    // one undo step
+    b.s.undo().unwrap();
+    assert_eq!(clips_at(&b.s), 1);
+    // the clip under the playhead when none is named; the first frame changed by the picture tool first
+    b.s.execute("playhead.set", json!({"time": (t0 + sec(1)).0})).unwrap();
+    let v = b
+        .s
+        .execute(
+            "generate.restyle",
+            json!({"prompt": "a robot walks", "look": "Put the robot in the person's place", "references": [item], "strength": 0.5, "dir": b.out(), "wait": true}),
+        )
+        .unwrap();
+    assert_eq!(v["clip"].as_u64(), Some(clip), "{v}");
+    let (first, g) = (made(&v, 0), made(&v, 1));
+    assert!(first["path"].as_str().is_some_and(|p| p.contains("Restyled Frame")) && first["clip"].is_null() && first["item"].is_u64(), "{v}");
+    assert_eq!((g["start"].as_i64(), g["duration"].as_i64()), (Some(t0.0), Some(sec(2).0)), "{v}");
+    let args = b.args_of(g["path"].as_str().unwrap());
+    let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+    assert!(after("--image").contains("Restyled Frame") && after("--strength") == "0.5", "{args:?}");
+    let pic = b.args_of(first["path"].as_str().unwrap());
+    let refs: Vec<&String> =
+        pic.iter().enumerate().filter(|(i, _)| i.checked_sub(1).and_then(|j| pic.get(j)).is_some_and(|a| a == "--reference")).map(|(_, a)| a).collect();
+    assert!(refs.len() == 2 && refs[0].contains("Reference Frame"), "the frame first, then the character: {pic:?}");
+    b.s.undo().unwrap();
+    assert_eq!(clips_at(&b.s), 1);
+    // a given first picture
+    let v = b.s.execute("generate.restyle", json!({"prompt": "x", "clip": clip, "image": f, "dir": b.out(), "wait": true})).unwrap();
+    assert_eq!(
+        b.args_of(made(&v, 0)["path"].as_str().unwrap()).iter().filter(|a| **a == f).count(),
+        2,
+        "the fixture as the tool's file and as the first picture"
+    );
+    b.s.undo().unwrap();
+    // what cannot be done says so, before any tool runs
+    let short = b.s.execute("timeline.place", json!({"item": item, "track": "new", "time": (t0 + sec(4)).0, "duration": (unit.0 / 5)})).unwrap()["clips"][0]
+        .as_u64()
+        .unwrap();
+    for (p, why) in [
+        (json!({"prompt": "x", "clip": clip, "how": "relight"}), "is not on this computer"),
+        (json!({"prompt": "x", "clip": clip, "how": "nope"}), "unknown `how`"),
+        (json!({"prompt": "x", "clip": clip, "how": 7}), "unknown `how`"),
+        (json!({"prompt": "x", "clip": clip, "provider": "plain"}), "cannot make a clip again"),
+        (json!({"prompt": "x", "clip": 999_999}), "no video clip"),
+        (json!({"prompt": "x", "clip": "first"}), "must be a clip id"),
+        (json!({"prompt": "x", "clip": clip, "strength": 2}), "0 to 1"),
+        (json!({"prompt": "x", "clip": clip, "strength": "high"}), "0 to 1"),
+        (json!({"prompt": "x", "clip": clip, "image": f, "look": "y"}), "not both"),
+        (json!({"prompt": "x", "clip": clip, "references": [f]}), "go with `look`"),
+        (json!({"prompt": "x", "clip": clip, "image": "/nonexistent/z.png"}), "is not a file"),
+        (json!({"clip": clip}), "`prompt` is needed"),
+        (json!({"prompt": "x", "clip": short}), "too short"),
+    ] {
+        let e = b.s.execute("generate.restyle", p.clone()).unwrap_err().to_string();
+        assert!(e.contains(why), "{p}: {e}");
+    }
+    assert!(
+        !std::fs::read_dir(b.out()).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("Restyle Source 4")),
+        "nothing was written for a refused request"
+    );
+    let _ = std::fs::remove_dir_all(&dir0);
+}

@@ -217,6 +217,7 @@ with no shell in between, waits for the file it writes and takes it from there.
 | `generate.fillGap` | fills a gap of a track with a clip that continues the frame before it (or leads into the one after) |
 | `generate.augment` | changes the frame at the playhead by an instruction and lays the result over the clip, as a still or an animated clip |
 | `generate.extend` | carries a shot on past its end: the tool gets the last moments as a small video, so the movement continues |
+| `generate.restyle` | makes a clip again in another look through an adapter of the clip tool: shapes and movement stay; `look` has the picture tool change the first frame first, which swaps a character |
 | `generate.assets` | builds the files a scene's `assets.json` names (pictures, cut-outs, clips, sounds), keeps the ones that are there, makes a pose from a character by name |
 | `generate.pick` | swaps another variation in for the one on the timeline |
 | `generate.history` | what was generated into this project: item, tool, description, seed |
@@ -333,3 +334,8 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   side of a gap and `from: "motion"` carries the movement on; `move` gives a placed picture a
   depth movement; `generate.sound {"clip": id}` sizes a sound to a clip; a tool that prints
   `progress …` lines drives the bar; a waited MCP call answers what was made. 924 commands.
+- **GEN3**: `generate.restyle` makes a clip again through an adapter of the clip model
+  (Union-Control, 654 MB, downloaded on the user's word): the shapes and the movement stay and
+  the look follows the description, and with `look` and `references` the picture tool changes
+  the first frame first, which puts another character in a person's place. A Restyle clip mode
+  in the Generate panel. 925 commands.

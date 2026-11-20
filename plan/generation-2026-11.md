@@ -117,20 +117,48 @@ numbers below are the ones this plan gave them.
   clip tool (`lastImage`, `extendCommand`, `carryFrames`, `extendMultipleOf`); the file as it
   was is beside it as `providers.before-GEN2-2026-11-20.json`.
 
-## Open, each waiting on a decision of the user
+## Third round (GEN3, 20 November 2026)
 
-- [ ] **A lighter picture tool** (was GEN7). `h3-image-mlx` can run Qwen-Image-2.1-turbo, which
-  has transparent output. Its weights are tagged for non-commercial research use, the download
-  is about 25 GB, and nothing is measured on an M3 Max. Recommendation: do not take it for
-  videos that are published; H3 with the background remover stays.
-- [ ] **Restyle and pose-driven character swap in video** (part of GEN10). The clip tool's
-  `ic-lora` command with the Union-Control adapter (654 MB, LTX-2 Community License) regenerates
-  a clip from a control video (edges, depth or pose) and a picture of the new character. Edges
-  need no extra model; pose needs a pose estimator. Would become `generate.restyle`. The tool's
-  own tests are on its q8 weights; this Mac has q4, where a small adapter may lose strength.
-- [ ] **Relight a clip** (part of GEN10). A relight adapter (327 MB, gated: needs a Hugging Face
-  login and accepted terms). Relighting a still works today as an edit with MiniMax-H3-Image.
-- [ ] **Lip dub** (part of GEN10). An adapter of 2.5 GB, gated, marked experimental by the tool.
+The user answered the open decisions with "Yes proceed with these", and asked whether MiniMax H3
+works as the picture model. It does: it is the installed picture tool and made every picture of
+the three rounds, so no other picture model is taken.
+
+- [x] **Restyle and character swap in video.** The Union-Control adapter (654 MB, open
+  download, LTX-2 Community License) is in `testground/ltxenv/adapters/union-control/`.
+  `generate.restyle {prompt, clip?, how?, image?, look?, references?, strength?}` writes the clip
+  as a small video for the tool and lays the new clip over the old one; a Restyle clip mode in
+  the Generate panel; a long job over MCP. Provider fields `restyleCommand`, `restyleOptional`,
+  `restyles`, `restyleEstimateSeconds`, `restyleMaxSeconds`; runner
+  `examples/generation/ltx_restyle.py`.
+  - Found by hand first: at 448×256 on the q4 weights the tool's default two passes ignored the
+    control video entirely, fused or unfused (three trials). One pass at full size with the
+    adapter applied as the model runs followed it. The runner does that.
+  - A first control video came out green: ffmpeg's `edgedetect` ran on the colour planes too.
+    The runner converts to grey first.
+  - Live, through the development build: the lighthouse clip (3 s, 576×320) made again as a
+    painting in 1 min 43 s, shapes and waves in place; a walking man swapped for the robot
+    mascot (`look` plus one reference, then edges) in 7 min 10 s, the robot walking the same
+    path in the same park.
+  - Not tested: a clip longer than five seconds (`left`), a vertical sequence, `strength` below
+    1, a character much unlike the person in build, `image` with a real model.
+- [ ] **Relight a clip.** The adapter is gated: its download needs a Hugging Face login and the
+  terms accepted on its page, which is the user's to do (this Mac has no login). The `relight`
+  way is in the provider list and the runner (`--how source`); it starts working when the file
+  is at `testground/ltxenv/adapters/relight/`. Nothing about it is tested.
+- [ ] **Lip dub.** Gated the same way (2.5 GB), marked experimental by the tool. Not built: it
+  is a command of its own (a clip and a new voice track), and without the weights nothing could
+  be checked.
+
+## Open
+
+- [ ] Depth and pose control videos for `generate.restyle` (the same adapter). The engine has
+  depth (Depth Anything V2) and pose (RTMPose) estimators; neither is drawn as a video yet.
+  Pose would free a swapped character from the old outline.
+- [ ] Other adapters of the clip model, each a download to ask for: In-Outpainting (1.3 GB,
+  gated; a clip in another frame shape), Clean-Plate (327 MB, gated; an object removed from a
+  clip), Motion-Track-Control (327 MB, open), Ingredients (1.3 GB, gated).
+- A lighter picture model (Qwen-Image-2.1-turbo) is not taken: non-commercial research licence,
+  about 25 GB, and MiniMax H3 does the work.
 - Freefield's own `character-swap` app is a two-photo picture edit, not video; it is what
   `generate.image` with two `references` already does.
 

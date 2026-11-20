@@ -281,7 +281,8 @@ filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-r
   made by generation tools installed on your computer, imported and placed on the timeline
   as one undo step. Fill an empty stretch of a track with a clip that carries on from the
   frame before it, runs from the frame before to the frame after, or continues the movement
-  (`generate.fillGap`); carry a shot on past its end (`generate.extend`); change what a frame
+  (`generate.fillGap`); carry a shot on past its end (`generate.extend`); make a clip again in
+  another look, or with another character in a person's place (`generate.restyle`); change what a frame
   shows from an instruction (`generate.augment`: "add a red sailboat"); make up to four
   variations and swap one in; build a motion-graphics scene's pictures, cut-outs, clips and
   sounds from one list (`generate.assets`). Window ▸ Generate in the app, `generate.*`

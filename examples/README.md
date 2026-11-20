@@ -14,7 +14,8 @@ Photos (and AutoCut's cache), the exports and `.fcproj` projects in `~/Movies/Au
 
 `generation/providers.example.json` describes three MLX tools (pictures, clips, sound) to the
 `generate.*` commands; `generation/ltx_video.py` is the small runner the clip tool uses,
-`generation/ltx_extend.py` the one that carries a shot on, and `generation/cutout.py` removes a
+`generation/ltx_extend.py` the one that carries a shot on, `generation/ltx_restyle.py` the one
+that makes a clip again through an adapter of the model, and `generation/cutout.py` removes a
 picture's background. See
 [Generation in the editor](../docs/generation.md).
 

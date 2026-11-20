@@ -91,11 +91,11 @@ Read these before you touch anything.
 
 | What | Where / value |
 |---|---|
-| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the build of 20 November 2026 exposes 924 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds still report `0.12.0`, so inspect the packaged commit and command catalogue too. |
+| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the build of 20 November 2026 exposes 925 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds still report `0.12.0`, so inspect the packaged commit and command catalogue too. |
 | Building your own CLI | `CARGO_TARGET_DIR=target/agent-<name> cargo build --release -p filmcraft-cli`, one target folder per worktree, never shared. |
 | The app | `target/macos-package/AutoCut.app`, control port **9876**: `open -n --env FILMCRAFT_CONTROL_PORT=9876 target/macos-package/AutoCut.app` |
 | RAEA | `~/.raea/versions/0.1.0/bin/raea` for local custom animations, 3D scenes and effects. [Render and import workflow](raea-workflow.md). |
-| Generation tools | The user's own local models, listed in `~/Library/Application Support/FilmCraft/generation/providers.json`: `h3-image` (MiniMax-H3-Image, pictures and edits), `ltx-video` (LTX-2.3, clips up to 10 s), `sa3-sfx` and `sa3-music` (Stable Audio 3 small, up to 30 s). `filmcraft-cli exec generate.providers` says which are installed. Never edit that file or download a model without the user's OK. [generation.md](generation.md). |
+| Generation tools | The user's own local models, listed in `~/Library/Application Support/FilmCraft/generation/providers.json`: `h3-image` (MiniMax-H3-Image, pictures and edits), `ltx-video` (LTX-2.3, clips up to 10 s; with the Union-Control adapter in `testground/ltxenv/adapters/` it also makes a clip again, `generate.restyle`), `sa3-sfx` and `sa3-music` (Stable Audio 3 small, up to 30 s). `filmcraft-cli exec generate.providers` says which are installed. Never edit that file or download a model without the user's OK. [generation.md](generation.md). |
 | Projects and exports | `~/Movies/AutoCut/<Video name>/`: the `.fcproj`, the exports, and a `build/` folder (scripts, logs, a `README.txt` recipe) |
 | Data folder | `~/Library/Application Support/FilmCraft/`: `google-photos/cache` (picked originals with `.json` date sidecars), `scene-cache`, `redact-cache`, `autocut/analysis-cache`, voices, models, control tokens |
 | Ollama models | `qwen2.5vl:7b` (picker and screen agents, clip analysis, redaction checks), `qwen3:8b` (scripts, Malayalam), `phi4-mini` (the AutoCut prompt classifier), `moondream` |
@@ -237,6 +237,7 @@ class FC:
 | a picture, b-roll clip, sound or music that does not exist yet | `exec generate.image` / `generate.video` / `generate.sound` | the user's local tools (§6.9); `wait: true`; one at a time |
 | "fill this empty stretch" | `exec generate.fillGap {track, atSeconds, from}` or `{all: true}` | `from: "motion"` carries the movement on, `"both"` goes from the frame before to the frame after, `"before"` (default) continues one frame; `uncovered` says what is left |
 | "make this shot a bit longer" | `exec generate.extend {atSeconds, seconds}` | continues the movement past the end of a clip; needs 1.4 s of picture before it |
+| "make this shot look like a painting / swap the person for this character" | `exec generate.restyle {prompt, clip?, look?, references?}` | the clip made again through an adapter of the clip tool, laid over the old one; 5 s a go, small, faces change ([generation.md](generation.md) §6) |
 | pictures, cut-outs, clips and sounds for a RAEA scene | `exec generate.assets {manifest}` | an `assets.json` beside the composition ([generation.md](generation.md) §5); `dryRun` first |
 | "add a boat / a character / snow to this shot" | `exec generate.augment {instruction, atSeconds, references?, animate?}` | a new picture laid over the clip; it does not track a moving shot |
 | a specific vision: mixed stills and clips, hand-timed beats, titles, its own look | **build it by hand** (§6) | full control, rebuildable from a script |
@@ -606,6 +607,12 @@ user's own local models; [generation.md](generation.md)):
 - `generate.sound {prompt, clip: <clip id>}` sizes a sound to a clip; `generate.image {…, place:
   true, move: "in"}` makes the placed picture move in depth.
 - `generate.assets {manifest, dryRun?, only?, force?, wait: true}` builds a scene's asset list.
+- `generate.restyle {prompt, clip?, how?, look?, references?, strength?, wait: true}` makes a clip
+  again: its shapes and movement stay, the look follows `prompt`. For another character give
+  `look` ("Replace the man with the robot from the second picture, in the same place and pose")
+  and `references: [the character's picture]`; say in `prompt` what the new clip shows. It
+  takes what the program shows over the clip, so hide titles above it first. About 1 min 45 s
+  for 3 s, 7 min with `look`. `generate.providers` → `restyles` says which ways are installed.
 - `generate.augment {instruction, atSeconds, animate?, wait: true}` changes what the frame shows.
 - Common parameters: `provider` (default: the first installed tool of the kind), `seed`, `dir`
   (default a `Generated` folder beside the project), `place`, `track`, `atSeconds`.

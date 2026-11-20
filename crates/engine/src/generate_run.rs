@@ -132,6 +132,23 @@ pub struct Provider {
     /// Width and height of the video the extend program takes are multiples of this (default 64).
     #[serde(default)]
     pub extend_multiple_of: Option<u32>,
+    /// A video tool that can make a clip again: the program that is given a stretch of picture
+    /// as a small video (`{video}`, `{frames}` frames) and writes one as long (`{out}`) through
+    /// the adapter of the way asked for (`{adapter}`). An argument that is exactly `{optional}`
+    /// takes the groups of [`Provider::restyle_optional`].
+    #[serde(default)]
+    pub restyle_command: Vec<String>,
+    #[serde(default)]
+    pub restyle_optional: BTreeMap<String, Vec<String>>,
+    /// The ways it can make a clip again, by name (`edges`, `relight`…).
+    #[serde(default)]
+    pub restyles: BTreeMap<String, Restyle>,
+    /// About how long that takes (default: twice `estimateSeconds`).
+    #[serde(default)]
+    pub restyle_estimate_seconds: Option<f64>,
+    /// The longest stretch made again in one go (default 5 s, never more than `maxSeconds`).
+    #[serde(default)]
+    pub restyle_max_seconds: Option<f64>,
     #[serde(default)]
     pub license: String,
     /// What the model's licence asks to be shown where it is used.
@@ -140,6 +157,26 @@ pub struct Provider {
     #[serde(default)]
     pub source: String,
 }
+
+/// One way a video tool makes a clip again: an adapter of its model.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Restyle {
+    /// The adapter's file (an absolute path): the way is there when the file is.
+    pub adapter: String,
+    /// Arguments added to `restyleCommand` for this way.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// One line on what it does.
+    #[serde(default)]
+    pub about: String,
+    /// What the adapter's licence asks to be shown, when that differs from the tool's.
+    #[serde(default)]
+    pub license: String,
+}
+
+/// The most ways one tool names.
+const MAX_RESTYLES: usize = 16;
 
 #[derive(Deserialize)]
 struct Manifest {
@@ -161,15 +198,17 @@ pub struct Vars {
     pub image: Option<String>,
     /// The picture a clip ends on.
     pub last_image: Option<String>,
-    /// The video an extend program carries on from.
+    /// The video an extend program carries on from, or a restyle program makes again.
     pub video: Option<String>,
+    /// The adapter of the way a clip is made again.
+    pub adapter: Option<String>,
     pub references: Vec<String>,
     pub steps: Option<u32>,
     pub strength: Option<f64>,
     pub transparent: bool,
 }
 
-const NAMES: [&str; 17] = [
+const NAMES: [&str; 18] = [
     "out",
     "prompt",
     "negative",
@@ -183,6 +222,7 @@ const NAMES: [&str; 17] = [
     "lastImage",
     "lastFrame",
     "video",
+    "adapter",
     "steps",
     "strength",
     "transparent",
@@ -213,6 +253,7 @@ impl Vars {
             // the index of a clip's last frame (where its last picture is pinned)
             "lastFrame" => self.frames.map(|v| v.saturating_sub(1).to_string()),
             "video" => self.video.clone().filter(|s| !s.is_empty()),
+            "adapter" => self.adapter.clone().filter(|s| !s.is_empty()),
             "steps" => self.steps.map(|v| v.to_string()),
             "strength" => self.strength.map(number),
             "transparent" => self.transparent.then(|| "true".to_string()),
@@ -367,6 +408,9 @@ fn check(p: &Provider) -> Result<(), String> {
         .chain(&p.per_reference)
         .chain(&p.cutout_command)
         .chain(&p.extend_command)
+        .chain(&p.restyle_command)
+        .chain(p.restyle_optional.values().flat_map(|g| g.iter()))
+        .chain(p.restyles.values().flat_map(|w| w.args.iter().chain([&w.adapter, &w.about, &w.license])))
         .chain(groups)
         .chain(p.env.values())
         .chain(p.cwd.iter())
@@ -376,12 +420,21 @@ fn check(p: &Provider) -> Result<(), String> {
             return err("an argument is too long or holds a NUL".into());
         }
     }
-    for arg in p.command.iter().chain(&p.per_reference).chain(&p.cutout_command).chain(&p.extend_command).chain(p.optional.values().flat_map(|g| g.iter())) {
+    for arg in p
+        .command
+        .iter()
+        .chain(&p.per_reference)
+        .chain(&p.cutout_command)
+        .chain(&p.extend_command)
+        .chain(&p.restyle_command)
+        .chain(p.optional.values().flat_map(|g| g.iter()))
+        .chain(p.restyle_optional.values().flat_map(|g| g.iter()))
+    {
         if let Err(e) = placeholders(arg) {
             return err(e);
         }
     }
-    for key in p.optional.keys() {
+    for key in p.optional.keys().chain(p.restyle_optional.keys()) {
         if !NAMES.contains(&key.as_str()) || key == "path" {
             return err(format!("`optional` names an unknown value `{key}`"));
         }
@@ -405,13 +458,39 @@ fn check(p: &Provider) -> Result<(), String> {
             return err("`extendCommand` needs an absolute program, {video} and {out}".into());
         }
     }
+    if let Some(prog) = p.restyle_command.first() {
+        let io = |name: &str| p.restyle_command.iter().any(|a| a.contains(name));
+        if p.restyle_command.len() > MAX_ARGS || !std::path::Path::new(prog).is_absolute() || prog.contains('{') || !io("{video}") || !io("{out}") {
+            return err("`restyleCommand` needs an absolute program, {video} and {out}".into());
+        }
+    }
+    if p.restyles.len() > MAX_RESTYLES || p.restyle_optional.len() > MAX_ARGS || (!p.restyles.is_empty() && p.restyle_command.is_empty()) {
+        return err(format!("`restyles` names at most {MAX_RESTYLES} ways and needs a `restyleCommand`"));
+    }
+    for (name, w) in &p.restyles {
+        let name_ok = !name.is_empty() && name.len() <= 32 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        // (a way's own arguments are taken as they are: no placeholders)
+        if !name_ok || !std::path::Path::new(&w.adapter).is_absolute() || w.args.len() > 16 || w.args.iter().any(|a| a.contains('{')) {
+            return err(format!(
+                "the way `{}` needs a plain name, an absolute `adapter` and at most 16 plain `args`",
+                name.chars().take(40).collect::<String>()
+            ));
+        }
+    }
     if p.env.len() > 64 || p.env.keys().any(|k| k.is_empty() || k.len() > 128 || k.contains('=') || k.contains('\0')) {
         return err("`env` has too many or malformed names".into());
     }
     if p.extension.as_deref().is_some_and(|e| e.is_empty() || e.len() > 8 || !e.chars().all(|c| c.is_ascii_alphanumeric())) {
         return err("`extension` must be letters and digits".into());
     }
-    for (name, v) in [("estimateSeconds", p.estimate_seconds), ("timeoutSeconds", p.timeout_seconds), ("maxSeconds", p.max_seconds), ("fps", p.fps)] {
+    for (name, v) in [
+        ("estimateSeconds", p.estimate_seconds),
+        ("timeoutSeconds", p.timeout_seconds),
+        ("maxSeconds", p.max_seconds),
+        ("fps", p.fps),
+        ("restyleEstimateSeconds", p.restyle_estimate_seconds),
+        ("restyleMaxSeconds", p.restyle_max_seconds),
+    ] {
         if v.is_some_and(|x| !x.is_finite() || x <= 0.0 || x > 1.0e6) {
             return err(format!("`{name}` must be a positive number"));
         }
@@ -490,6 +569,68 @@ pub fn extender(p: &Provider) -> Option<Provider> {
     c.per_reference.clear();
     c.optional.clear();
     Some(c)
+}
+
+/// The provider's restyle step for one of its ways as a provider of its own (the same
+/// environment and folder), when it has that way.
+pub fn restyler(p: &Provider, way: &str) -> Option<Provider> {
+    let w = p.restyles.get(way)?;
+    if p.restyle_command.is_empty() {
+        return None;
+    }
+    let mut c = p.clone();
+    c.command = p.restyle_command.iter().chain(&w.args).cloned().collect();
+    c.name = format!("{} ({way})", p.name);
+    c.per_reference.clear();
+    c.optional = p.restyle_optional.clone();
+    c.estimate_seconds = Some(p.restyle_estimate_seconds.unwrap_or(p.estimate_seconds.unwrap_or(60.0) * 2.0).clamp(1.0, 86_400.0));
+    Some(c)
+}
+
+/// Whether a way's adapter is on this computer.
+pub fn restyle_installed(p: &Provider, way: &str) -> bool {
+    !p.restyle_command.is_empty() && p.restyles.get(way).is_some_and(|w| std::path::Path::new(&w.adapter).is_file())
+}
+
+/// How a stretch of `seconds` is made again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stretch {
+    /// The frames the tool makes: the most its counts allow inside the stretch.
+    pub frames: u32,
+    /// The rate the tool makes them at.
+    pub fps: f64,
+    /// The seconds of the timeline they cover.
+    pub covered: f64,
+    /// The rate the stretch is written at for the tool, so that it holds exactly `frames`.
+    pub source_fps: f64,
+}
+
+/// The frames a stretch of `seconds` is made again as. A stretch the tool can do whole is
+/// written at a slightly lower rate, so that a frame count the tool takes spans all of it and
+/// every new frame shows the moment of the old one; a longer stretch is covered from its start
+/// as far as the tool goes. `None` when it is shorter than the fewest frames the tool makes.
+pub fn restyle_stretch(p: &Provider, seconds: f64) -> Option<Stretch> {
+    let fps = p.fps.filter(|f| f.is_finite() && *f >= 1.0 && *f <= 240.0).unwrap_or(24.0);
+    let cap = p.max_seconds.filter(|m| m.is_finite() && *m > 0.0).unwrap_or(10.0);
+    let most = p.restyle_max_seconds.filter(|m| m.is_finite() && *m > 0.0).unwrap_or(5.0).min(cap);
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    let whole = seconds <= most + 1.0e-9;
+    let have = (seconds.min(most) * fps + 1.0e-6).floor().clamp(0.0, 100_000.0) as u32;
+    let step = p.frames_step.unwrap_or(1).clamp(1, 1024);
+    let off = p.frames_offset.unwrap_or(0) % step;
+    let k = have.checked_sub(off)? / step;
+    if k == 0 {
+        return None;
+    }
+    let frames = k.saturating_mul(step).saturating_add(off);
+    let made = f64::from(frames) / fps;
+    Some(if whole {
+        Stretch { frames, fps, covered: seconds, source_fps: f64::from(frames) / seconds }
+    } else {
+        Stretch { frames, fps, covered: made, source_fps: fps }
+    })
 }
 
 /// The frames of picture an extend program is given.
@@ -813,6 +954,58 @@ mod tests {
             (r#","extendCommand":["/bin/ext","{out}"]"#, "extendCommand"),
             (r#","extendCommand":["/bin/ext","{video}"]"#, "extendCommand"),
             (r#","extendCommand":["/bin/ext","{video}","{out}","{nope}"]"#, "unknown placeholder"),
+        ] {
+            let e = parse(&format!(r#"{{"providers":[{}]}}"#, provider("video", r#"["/bin/gen","{out}"]"#, extra))).unwrap_err();
+            assert!(e.contains(why), "{extra}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_clip_is_made_again_through_an_adapter_in_frames_the_tool_takes() {
+        let p = one(
+            "video",
+            r#"["/bin/gen","{out}"]"#,
+            r#","framesStep":8,"framesOffset":1,"maxSeconds":10,"estimateSeconds":40,"restyleCommand":["/bin/re","{video}","{adapter}","{frames}","{strength}","{optional}","{out}"],"restyleOptional":{"image":["--image","{image}"]},"restyles":{"edges":{"adapter":"/a/union.safetensors","args":["--how","edges"],"about":"keeps the shapes"},"relight":{"adapter":"/a/relight.safetensors"}}"#,
+        );
+        let r = restyler(&p, "edges").unwrap();
+        assert_eq!(r.estimate_seconds, Some(80.0), "twice a clip's time unless the list says");
+        let v = Vars {
+            out: "/o.mp4".into(),
+            frames: Some(65),
+            video: Some("/src.mp4".into()),
+            adapter: Some("/a/union.safetensors".into()),
+            strength: Some(1.0),
+            ..Default::default()
+        };
+        assert_eq!(argv(&r, &v).unwrap(), ["/bin/re", "/src.mp4", "/a/union.safetensors", "65", "1", "/o.mp4", "--how", "edges"]);
+        let with = Vars { image: Some("/first.png".into()), ..v };
+        assert_eq!(argv(&r, &with).unwrap(), ["/bin/re", "/src.mp4", "/a/union.safetensors", "65", "1", "--image", "/first.png", "/o.mp4", "--how", "edges"]);
+        assert!(restyler(&p, "pose").is_none() && !restyle_installed(&p, "edges") && !restyle_installed(&p, "pose"));
+        // three seconds: 65 frames spread over all of it (written at 65/3 frames a second)
+        let s = restyle_stretch(&p, 3.0).unwrap();
+        assert_eq!((s.frames, s.fps, s.covered), (65, 24.0, 3.0));
+        assert!((s.source_fps - 65.0 / 3.0).abs() < 1e-9, "{s:?}");
+        // a stretch that is a count the tool takes is written as it is
+        let s = restyle_stretch(&p, 73.0 / 24.0).unwrap();
+        assert_eq!((s.frames, s.source_fps), (73, 24.0));
+        // longer than one go: from its start as far as the tool goes (five seconds unless the list says)
+        let s = restyle_stretch(&p, 12.0).unwrap();
+        assert_eq!((s.frames, s.source_fps, s.covered), (113, 24.0, 113.0 / 24.0));
+        let long = one("video", r#"["/bin/gen","{out}"]"#, r#","framesStep":8,"framesOffset":1,"maxSeconds":6,"restyleMaxSeconds":60"#);
+        assert_eq!(restyle_stretch(&long, 12.0).unwrap().frames, 137, "never past maxSeconds");
+        for bad in [0.2, 0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(restyle_stretch(&p, bad).is_none(), "{bad}");
+        }
+        for (extra, why) in [
+            (r#","restyleCommand":["re","{video}","{out}"]"#, "restyleCommand"),
+            (r#","restyleCommand":["/bin/re","{out}"]"#, "restyleCommand"),
+            (r#","restyleCommand":["/bin/re","{video}","{out}","{nope}"]"#, "unknown placeholder"),
+            (r#","restyles":{"edges":{"adapter":"/a.safetensors"}}"#, "needs a `restyleCommand`"),
+            (r#","restyleCommand":["/bin/re","{video}","{out}"],"restyles":{"edges":{"adapter":"a.safetensors"}}"#, "absolute `adapter`"),
+            (r#","restyleCommand":["/bin/re","{video}","{out}"],"restyles":{"bad name":{"adapter":"/a.safetensors"}}"#, "plain name"),
+            (r#","restyleCommand":["/bin/re","{video}","{out}"],"restyles":{"edges":{"adapter":"/a.safetensors","args":["{prompt}"]}}"#, "plain `args`"),
+            (r#","restyleCommand":["/bin/re","{video}","{out}"],"restyleOptional":{"nope":["--x"]}"#, "unknown value"),
+            (r#","restyleMaxSeconds":-1"#, "restyleMaxSeconds"),
         ] {
             let e = parse(&format!(r#"{{"providers":[{}]}}"#, provider("video", r#"["/bin/gen","{out}"]"#, extra))).unwrap_err();
             assert!(e.contains(why), "{extra}: {e}");

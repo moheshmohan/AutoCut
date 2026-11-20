@@ -1,15 +1,16 @@
 //! Generate panel: make pictures, clips and sounds with the generation tools installed on this
-//! computer (`generate.providers`), fill a gap of the timeline, or change what the frame under
-//! the playhead shows. Each button runs the same `generate.*` command agents and the CLI use; the
+//! computer (`generate.providers`), fill a gap of the timeline, change what the frame under
+//! the playhead shows, or make a clip again in another look. Each button runs the same `generate.*` command agents and the CLI use; the
 //! work is a background job, and its result is imported (and placed) when it finishes.
 //!
 //! The tool in use and what its licence asks to be credited are shown under the tool menu.
 //!
-//! Automation ids: `generate.mode.<image|video|sound|fill|augment>`, `generate.provider`,
+//! Automation ids: `generate.mode.<image|video|sound|fill|augment|restyle>`, `generate.provider`,
 //! `generate.prompt`, `generate.useFrame`, `generate.useSelection`, `generate.transparent`,
 //! `generate.place`, `generate.soundKind`, `generate.length`, `generate.track`,
 //! `generate.allGaps`, `generate.fillFrom`, `generate.animate`, `generate.variations`,
-//! `generate.depthMove`, `generate.forClip`, `generate.carryOn`, `generate.variation`,
+//! `generate.depthMove`, `generate.forClip`, `generate.carryOn`, `generate.restyleHow`,
+//! `generate.restyleLook`, `generate.restyleStrength`, `generate.variation`,
 //! `generate.run`, `generate.stop`, `generate.history.<n>.place`, `generate.history.<n>.use`.
 
 use egui::{Rect, pos2};
@@ -21,7 +22,8 @@ use crate::FilmcraftApp;
 const PAD: f32 = 14.0;
 const FOOTER_H: f32 = 48.0;
 /// The modes, with their names.
-const MODES: [(&str, &str); 5] = [("image", "Picture"), ("video", "Clip"), ("sound", "Sound"), ("fill", "Fill gap"), ("augment", "Augment")];
+const MODES: [(&str, &str); 6] =
+    [("image", "Picture"), ("video", "Clip"), ("sound", "Sound"), ("fill", "Fill gap"), ("augment", "Augment"), ("restyle", "Restyle clip")];
 /// Generated items listed under History.
 const HISTORY_SHOWN: usize = 8;
 /// What a gap is filled from, with the names shown.
@@ -49,8 +51,8 @@ const DEPTH_MOVES: [(&str, &str); 9] = [
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GenerateDraft {
-    /// `image`, `video`, `sound`, `fill` (a gap of the timeline) or `augment` (the frame under
-    /// the playhead, changed).
+    /// `image`, `video`, `sound`, `fill` (a gap of the timeline), `augment` (the frame under
+    /// the playhead, changed) or `restyle` (the selected clip, made again).
     pub mode: String,
     /// What to make (for `augment`: what to change).
     pub prompt: String,
@@ -84,6 +86,12 @@ pub struct GenerateDraft {
     pub fill_from: String,
     /// Clip: carry on the movement of the picture before the playhead.
     pub carry_on: bool,
+    /// Restyle: the way of the tool ("" = the first that is installed).
+    pub restyle_how: String,
+    /// Restyle: how the picture tool changes the first frame before the clip is made ("" = not).
+    pub restyle_look: String,
+    /// Restyle: how closely the clip is followed, 0 to 1.
+    pub restyle_strength: f64,
     /// The variation; `None`: each generation takes the next one.
     pub seed: Option<u64>,
     /// The running generation.
@@ -121,6 +129,9 @@ impl Default for GenerateDraft {
             for_clip: false,
             fill_from: "before".into(),
             carry_on: false,
+            restyle_how: String::new(),
+            restyle_look: String::new(),
+            restyle_strength: 1.0,
             seed: None,
             job: None,
             cache: Cache::default(),
@@ -140,7 +151,7 @@ impl GenerateDraft {
     /// The kind of tool the mode needs.
     fn kind(&self) -> &'static str {
         match self.mode() {
-            "video" | "fill" => "video",
+            "video" | "fill" | "restyle" => "video",
             "sound" if self.sound_kind == "music" => "music",
             "sound" => "sfx",
             _ => "image",
@@ -220,6 +231,26 @@ impl GenerateDraft {
                     p["prompt"] = json!(prompt);
                 }
                 ("generate.fillGap", p)
+            }
+            "restyle" => {
+                p["prompt"] = json!(prompt);
+                if let Some(c) = clip {
+                    p["clip"] = json!(c);
+                }
+                let how = self.restyle_how.trim();
+                if !how.is_empty() {
+                    p["how"] = json!(how);
+                }
+                let look = self.restyle_look.trim();
+                if !look.is_empty() {
+                    p["look"] = json!(look);
+                    if self.use_selection && !selection.is_empty() {
+                        p["references"] = json!(selection);
+                    }
+                }
+                p["strength"] = json!(finite(self.restyle_strength, 1.0).clamp(0.0, 1.0));
+                p["place"] = json!(self.place);
+                ("generate.restyle", p)
             }
             "augment" => {
                 p["instruction"] = json!(prompt);
@@ -369,6 +400,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 "sound" => "A sound effect or music from a description.",
                 "fill" => "Fills the gap under the playhead with a clip that carries on from the frame before it.",
                 "augment" => "Changes what the frame under the playhead shows, and lays the result over the clip.",
+                "restyle" => "Makes the clip selected in the timeline (else the one under the playhead) again: its shapes and movement stay, its look follows the description.",
                 _ => "A picture from a description, optionally after reference pictures.",
             },
         );
@@ -414,6 +446,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ui,
             match d.mode() {
                 "augment" => "What to change",
+                "restyle" => "What the new clip shows",
                 "fill" => "What happens (optional)",
                 "sound" => "Describe the sound",
                 "video" => "What happens in the clip",
@@ -422,6 +455,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         );
         let hint = match d.mode() {
             "augment" => "Add a small red sailboat on the sea",
+            "restyle" => "A watercolour painting of a lighthouse on a rocky coast",
             "fill" => "Leave empty to carry on from the frame before the gap",
             "sound" => "Waves breaking on rocks, distant gulls",
             "video" => "The camera pushes in slowly while the waves break",
@@ -507,6 +541,57 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                 });
                 auto.add("generate.fillFrom", visible(ui, cb.response.rect), "What the clip is made from");
+            }
+            "restyle" => {
+                let ways: Vec<(String, String, bool)> = chosen
+                    .and_then(|tool| tool["restyles"].as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| Some((x["name"].as_str()?.to_string(), x["about"].as_str().unwrap_or("").to_string(), x["installed"] == true)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if ways.is_empty() {
+                    ui.label(egui::RichText::new("This tool cannot make a clip again (its entry has no `restyles`).").color(t.text).size(11.0));
+                } else {
+                    let current = ways.iter().find(|x| x.0 == d.restyle_how).or_else(|| ways.iter().find(|x| x.2)).or(ways.first());
+                    let (name, about) = current.map_or((String::new(), String::new()), |x| (x.0.clone(), x.1.clone()));
+                    let cb = egui::ComboBox::from_id_salt("generate-restyle-how").selected_text(name.as_str()).width(w).show_ui(ui, |ui| {
+                        for (id, _, there) in &ways {
+                            let text = if *there { id.clone() } else { format!("{id} (its adapter is not on this computer)") };
+                            if ui.selectable_label(name == *id, text).clicked() {
+                                d.restyle_how = id.clone();
+                            }
+                        }
+                    });
+                    auto.add("generate.restyleHow", visible(ui, cb.response.rect), "How the clip is made again");
+                    if !about.is_empty() {
+                        dim(ui, &about);
+                    }
+                }
+                ui.add_space(6.0);
+                label(ui, "Change the first frame first (optional)");
+                let e = ui.add(
+                    egui::TextEdit::multiline(&mut d.restyle_look)
+                        .desired_width(w)
+                        .desired_rows(2)
+                        .hint_text("Replace the man with the robot from the second picture, in the same pose"),
+                );
+                auto.add("generate.restyleLook", visible(ui, e.rect), "Change the first frame first");
+                check(
+                    ui,
+                    auto,
+                    "generate.useSelection",
+                    &mut d.use_selection,
+                    &format!("Use the media selected in the Project panel in that change ({selected})"),
+                );
+                ui.add_space(6.0);
+                label(ui, "How closely the clip is followed");
+                d.restyle_strength = finite(d.restyle_strength, 1.0).clamp(0.0, 1.0);
+                ui.spacing_mut().slider_width = w - 70.0;
+                let sl = ui.add(egui::Slider::new(&mut d.restyle_strength, 0.0..=1.0).max_decimals(2));
+                auto.add("generate.restyleStrength", visible(ui, sl.rect), "How closely the clip is followed");
+                check(ui, auto, "generate.place", &mut d.place, "Lay it over the clip");
             }
             _ => {
                 check(
@@ -595,6 +680,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         (_, "fill") => "Fill the gap",
         (_, "video") if carrying => "Carry the shot on",
         (_, "augment") => "Augment the scene",
+        (_, "restyle") => "Make the clip again",
         _ => "Generate",
     };
     let can = ready && !needs_text;
@@ -732,6 +818,26 @@ mod tests {
         d.prompt = "clouds".into();
         d.fill_from = "prompt".into();
         assert_eq!(d.request(&[], 0, None).1["from"], "prompt");
+        // a clip made again: the selected clip, the way, and the first frame changed with the selected media
+        d.mode = "restyle".into();
+        d.prompt = "as a watercolour".into();
+        d.use_selection = true;
+        let (cmd, p) = d.request(&[3], 0, Some(7));
+        assert_eq!(
+            (cmd, p["clip"].as_u64(), p["strength"].as_f64(), p.get("how"), p.get("look"), p.get("references")),
+            ("generate.restyle", Some(7), Some(1.0), None, None, None)
+        );
+        d.restyle_how = "edges".into();
+        d.restyle_look = " put the robot in ".into();
+        d.restyle_strength = f64::NAN;
+        let p = d.request(&[3], 0, None).1;
+        assert_eq!(
+            (p["how"].as_str(), p["look"].as_str(), p["references"][0].as_u64(), p["strength"].as_f64(), p.get("clip")),
+            (Some("edges"), Some("put the robot in"), Some(3), Some(1.0), None)
+        );
+        d.restyle_strength = 7.0;
+        assert_eq!(d.request(&[], 0, None).1["strength"].as_f64(), Some(1.0));
+        assert_eq!(d.kind(), "video");
         // hostile state read back from an agent
         d.mode = "image".into();
         d.place = true;

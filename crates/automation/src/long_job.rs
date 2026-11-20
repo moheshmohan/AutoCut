@@ -29,6 +29,7 @@ pub const LONG_COMMANDS: &[&str] = &[
     "generate.fillGap",
     "generate.augment",
     "generate.extend",
+    "generate.restyle",
     "generate.assets",
     "music.downloadNeuralModel",
     "music.downloadSoundfont",

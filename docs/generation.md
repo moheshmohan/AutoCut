@@ -29,6 +29,7 @@ Every action is an engine command, so the Generate panel, the CLI, the control c
 | `generate.sound` | `kind: "sfx"` (default) or `"music"` from `prompt`, `seconds` long, placed on a free audio track. `clip` (a timeline clip id) makes it as long as that clip, starting where it starts. |
 | `generate.fillGap` | Fills the gap of `track` (default `V1`) under the playhead (`atSeconds`). `from` says what the clip is made from: `"before"` (default) starts from the last frame before the gap; `"after"` leads into the first frame after it; `"both"` starts on the one and ends on the other; `"motion"` gives the tool the last moments before the gap as a video, so the movement carries on; `"prompt"` follows only `prompt`. `all: true` fills every gap of the track (eight at most). A clip longer than the gap is cut to it; a shorter one is slowed towards it (never below 40 %), and `uncovered` says what is left. |
 | `generate.extend` | Carries a shot on: a clip of `seconds` (0.3 to 10, default 2) that continues the movement of the picture just before `atSeconds` (default: the end of the clip under the playhead), placed there on the same track when it is free. |
+| `generate.restyle` | Makes a clip again from `prompt`: the clip (`clip`, default the selected one, else the one under the playhead) goes to the tool as a small video, and an adapter of its model (`how`, one of the ways `generate.providers` lists under `restyles`; default the first that is installed) keeps its shapes and movement while the look follows the description. `image` is the picture the new clip starts on; `look` has the picture tool change the clip's first frame by an instruction first (with `references`: a character to put in), and the new clip starts on that. `strength` (0 to 1) is how closely the clip is followed. The new clip is laid over the old one, on a track above it. Up to five seconds in one go; `left` says how much of a longer clip stays as it was. |
 | `generate.assets` | Makes the files a scene's `assets.json` names (§5) and leaves the ones that are there. `only` names some, `force` makes them again, `dryRun` only says what would be made, `import` brings them into the project. |
 | `generate.pick` | Puts a generated `item` in the place of the variation of the same request that is on the timeline (or of `clip`), as one undo step. |
 | `generate.augment` | Takes the program frame at the playhead (`atSeconds`), changes it by `instruction` (plus `references`: a character, a prop), and lays the result over the clip on the next free track, as a still for `seconds` or, with `animate: true`, as a clip made from the changed frame (`motion` says what moves). |
@@ -60,7 +61,8 @@ $CLI --project film.fcproj exec generate.augment \
 
 ## 2. The Generate panel
 
-Window ▸ Generate. Five modes: **Picture**, **Clip**, **Sound**, **Fill gap**, **Augment**. Pick
+Window ▸ Generate. Six modes: **Picture**, **Clip**, **Sound**, **Fill gap**, **Augment**,
+**Restyle clip**. Pick
 the tool, describe what to make, and press Generate; the work runs in the background with a
 progress bar and a Stop button, and the result lands at the playhead. Under the tool menu the
 panel shows what the model's licence asks to be credited ("Made with …") and its licence line.
@@ -73,10 +75,15 @@ variation that puts it in the place of the one on the timeline.
 - Sound has **As long as the clip selected in the timeline**.
 - Fill gap has a menu for what the clip is made from: the frame before, the frame after, both,
   the movement before the gap, or the description only. A choice the tool cannot do says so.
+- Restyle clip makes the clip selected in the timeline again (`generate.restyle`): a menu of the
+  tool's ways (one whose adapter is missing says so), **Change the first frame first** (an
+  instruction for the picture tool, with the media selected in the Project panel as its
+  pictures), and **How closely the clip is followed**.
 
 The panel's state is `ui.generate` (`ui.inspect`), settable with
 `ui.set {"generate": {"mode": "augment", "prompt": "add snow", "animate": true}}` (also
-`variations`, `depthMove`, `forClip`, `fillFrom`, `carryOn`); its controls have automation ids
+`variations`, `depthMove`, `forClip`, `fillFrom`, `carryOn`, `restyleHow`, `restyleLook`,
+`restyleStrength`); its controls have automation ids
 `generate.*` (`ui.elements {"prefix": "generate."}`).
 
 ## 3. Setting up the tools
@@ -104,6 +111,7 @@ them. Each entry:
 | `fps`, `framesStep`, `framesOffset`, `maxSeconds` | Video: the rate it makes, and frame counts it takes (`framesOffset` plus a multiple of `framesStep`; LTX takes 8k + 1). |
 | `cutoutCommand`, `cutoutPromptSuffix` | For a picture tool with no transparent output of its own: the program that removes a picture's background (`{image}` in, `{out}` out), run after it when `transparent` is asked, and what to add to the prompt of such a picture (a plain background cuts cleanly). The uncut picture is kept beside the result as `… source <n>.png`. |
 | `extendCommand`, `carryFrames`, `extendMultipleOf` | For a video tool that can carry a shot on (`generate.extend`, `from: "motion"`): the program that is given the last `carryFrames` frames of picture (default 33) as a small H.264 video (`{video}`; each side a multiple of `extendMultipleOf`, default 64, in the shape of the sequence) and writes that video with `{frames}` new frames after it to `{out}`. The app places the new part. |
+| `restyleCommand`, `restyleOptional`, `restyles`, `restyleEstimateSeconds`, `restyleMaxSeconds` | For a video tool that can make a clip again (`generate.restyle`). `restyleCommand` is the program: it is given the stretch as a small H.264 video (`{video}`, each side a multiple of `extendMultipleOf`, holding exactly `{frames}` frames) and the adapter of the way asked for (`{adapter}`), and writes a clip as long (`{out}`); `{strength}` is how closely to follow it, and an argument that is exactly `{optional}` takes the groups of `restyleOptional` (`image`: the picture to start on). `restyles` names the ways: `{"edges": {"adapter": "/abs/file.safetensors", "args": ["--how", "edges"], "about": "one line", "license": "…"}}`; a way is there when its adapter file is. `restyleMaxSeconds` (default 5) is the longest stretch made in one go. |
 | `maxReferences`, `referencePromptPrefix`, `referenceMarker` | Reference pictures: how many, what to put before a prompt that does not mention them itself, and how a prompt mentions one. |
 | `estimateSeconds`, `timeoutSeconds` | For the progress bar (the tools say nothing while they work), and when a run is given up on (default an hour). |
 | `license`, `attribution`, `source` | Shown in `generate.providers` and the panel. |
@@ -120,6 +128,9 @@ LTX-2 through `ltx-2-mlx` (model folder, size, frame count, rate, seed, optional
 optional last picture). Run it with the Python of the environment that has `ltx_pipelines_mlx`.
 [`examples/generation/ltx_extend.py`](../examples/generation/ltx_extend.py) is the `extendCommand`
 for the same tool: it carries a video on by a number of new frames.
+[`examples/generation/ltx_restyle.py`](../examples/generation/ltx_restyle.py) is the
+`restyleCommand`: it draws the lines of the clip (with ffmpeg, which `ltx-2-mlx` needs anyway) and
+runs the tool's `ic-lora` command with an adapter (§6).
 [`examples/generation/cutout.py`](../examples/generation/cutout.py) removes a picture's background
 with `rembg` (U2-Net), for `cutoutCommand`.
 
@@ -139,6 +150,8 @@ with `rembg` (U2-Net), for `cutoutCommand`.
 | A shot carried on by 2 s | the same | 64 s |
 | Two variations of a picture, 768×448 | MiniMax-H3-Image | 58 s |
 | A scene's six assets: a character, two poses made from it (one a cut-out), a plate, the plate moving for 3 s, a sound | all three tools | 6 min 36 s |
+| A 3 s clip made again as a painting, 576×320 (`generate.restyle`, edges) | LTX-2.3 with the Union-Control adapter | 1 min 43 s |
+| A 3 s clip of a walking man made again with a robot in his place (`look` with one reference, then edges) | MiniMax-H3-Image, then LTX-2.3 with the adapter | 7 min 10 s |
 
 The two poses came out as the same character as the first picture. One deleted picture of the
 list was made again in 31 s, and the file was the same, byte for byte.
@@ -206,7 +219,48 @@ usual, and import the render. Other uses in a scene:
 - **Sound for the scene**: an `sfx` entry, or `generate.sound` with `"clip"` set to the imported
   render's clip, which sizes the sound to it.
 
-## 6. Limits
+## 6. Making a clip again
+
+`generate.restyle` gives a clip to the video tool as a small video and has an **adapter** of its
+model make it again. What stays and what changes is the adapter's doing:
+
+| Way | Adapter | What it does | State |
+|---|---|---|---|
+| `edges` | [Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control), 654 MB, open download | Follows the lines of the clip: shapes and movement stay, the look follows the description | Tested |
+| `relight` | [Lightricks/LTX-2.3-22b-IC-LoRA-Relight](https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Relight), 327 MB, gated | Keeps the clip, changes its light | Wired in the example list, not tried: the download needs a Hugging Face login and the terms accepted there |
+
+Both are under the LTX-2 Community License. Download an adapter into a folder of your own
+(`hf download <repo> --local-dir …`) and name its file in `restyles`.
+
+```sh
+# a new look: the shapes and the movement of the selected clip stay
+filmcraft-cli exec generate.restyle '{"prompt": "A watercolour painting of a lighthouse on a rocky coast", "wait": true}'
+# another character: the picture tool puts it into the first frame, the clip follows from there
+filmcraft-cli exec generate.restyle '{"prompt": "A small orange robot walks along a park path toward the camera",
+  "look": "Replace the man with the robot from the second picture, in the same place and pose",
+  "references": ["/abs/robot.png"], "wait": true}'
+```
+
+- **What is made again** is what the program shows over the clip's stretch (titles and layers
+  above it included): hide what should not be part of it first.
+- **Length.** The tool makes frame counts of its own (LTX: 8k + 1). A clip of up to
+  `restyleMaxSeconds` is written for the tool at a slightly lower frame rate, so that such a
+  count spans all of it and every new frame shows the moment of the old one; the new clip is
+  then slowed by a few percent to the clip's length. A longer clip is made again from its
+  start, and `left` says how many seconds stay as they were.
+- **A swap follows the old outline.** With `edges` the new character moves inside the lines of
+  the old one. A character of about the same build works (the tested robot took the place of a
+  walking man); a very different shape will be bent towards the old outline. Lower `strength`
+  loosens that, and loosens everything else too.
+- **What the example runner does, and why.** On the 4-bit weights the tool's default (a
+  half-size pass, then a refine that does not see the control) ignored the lines entirely at
+  448×256, whether the adapter was fused into the weights or not. One pass at full size with
+  the adapter applied as the model runs (`LTX2_LORA_MODE=unfused`, `--single-stage`) follows
+  them. `--two-stage` gives the tool's default back.
+- Depth and pose control are the same adapter given another control video; nothing here draws
+  those yet (`ltx_restyle.py --how given` takes a control video made elsewhere).
+
+## 7. Limits
 
 - Short clips only: the tested video model makes up to ten seconds at a small size; AutoCut scales
   it to the frame. Use Upscale and Restore (`media.upscale`) and Smooth Slow Motion
@@ -221,13 +275,17 @@ usual, and import the render. Other uses in a scene:
 - A cut-out made by the background remover can keep a faint halo and fill small enclosed gaps
   (between legs, inside a handle). A flat illustration on a plain background cuts cleanest.
 - The tested tools print no progress line, so their bar follows their usual time.
-- Character or motion swap in video, relighting a clip, video-to-video restyle and lip dub are
-  not built: on the tested clip tool each needs a further model download under the LTX-2
-  Community License (see the plan). Relighting or restyling a still works today as an edit
-  (`generate.image` with `references`, or `generate.augment`).
+- A clip made again (`generate.restyle`) is small (the tool's size, 576×320 for 16:9) and at
+  most five seconds a go; faces and fine detail change. Use it for a look or a character, not
+  to touch up a shot.
+- Relighting a clip and lip dub are not usable yet: their adapters are gated downloads (a
+  Hugging Face login and the terms accepted there). Relight is wired and waits for its file;
+  lip dub is not built. Relighting a still works today as an edit (`generate.image` with
+  `references`, or `generate.augment`).
 
-## 7. What comes next
+## 8. What comes next
 
 [`plan/generation-2026-11.md`](../plan/generation-2026-11.md) lists what is done and what is
-open: control-video generation (restyle, pose-driven character swap), lip dub, and a lighter
-picture tool, each waiting on a model download that is the user's decision.
+open: relight and lip dub (gated downloads), depth and pose control videos for
+`generate.restyle`, and the other adapters of the clip model (outpainting to another frame
+shape, removing an object from a clip), each a model download that is the user's decision.

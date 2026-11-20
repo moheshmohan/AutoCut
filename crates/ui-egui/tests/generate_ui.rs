@@ -101,6 +101,7 @@ fn generate_lists_the_tool_runs_it_and_places_the_picture() {
         "generate.mode.sound",
         "generate.mode.fill",
         "generate.mode.augment",
+        "generate.mode.restyle",
         "generate.provider",
         "generate.prompt",
         "generate.useFrame",
@@ -197,6 +198,14 @@ fn generate_lists_the_tool_runs_it_and_places_the_picture() {
     d.ok("ui.set", json!({"generate": {"mode": "augment", "prompt": "add snow"}}));
     d.frames(3);
     assert!(d.ids().iter().any(|i| i == "generate.animate"));
+    d.ok("ui.set", json!({"generate": {"mode": "restyle", "prompt": "as a watercolour", "restyleLook": "paint it", "restyleStrength": 0.6}}));
+    d.frames(3);
+    let ids = d.ids();
+    assert!(ids.iter().any(|i| i == "generate.restyleLook") && ids.iter().any(|i| i == "generate.restyleStrength"), "{ids:?}");
+    assert_eq!((d.draft()["restyleLook"].as_str(), d.draft()["restyleStrength"].as_f64()), (Some("paint it"), Some(0.6)));
+    d.ok("ui.click", json!({"id": "generate.run"}));
+    d.frames(2);
+    assert!(d.draft()["job"].is_null(), "no clip tool: nothing runs");
     d.ok("ui.set", json!({"generate": {"mode": "sound", "prompt": "rain"}}));
     d.frames(3);
     assert!(!d.ids().iter().any(|i| i == "generate.provider") && d.ids().iter().any(|i| i == "generate.forClip"));

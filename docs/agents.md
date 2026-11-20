@@ -186,7 +186,7 @@ progress and stop it:
   and pass `consent: true` once they agreed), `music.preview` (renders the music `audio.generate`
   would place, for the user to hear first; returns at once when that exact preview is already
   rendered), `generate.image`, `generate.video`, `generate.sound`, `generate.fillGap`,
-  `generate.extend`, `generate.assets` and `generate.augment` (the user's own local generation tools, one at a time under the GPU lock;
+  `generate.extend`, `generate.restyle`, `generate.assets` and `generate.augment` (the user's own local generation tools, one at a time under the GPU lock;
   the answer carries `generated`: the file, the imported item and the placed clip; see
   [generation.md](generation.md)) and `photos.upload` (a file to the user's Google
   Photos library; progress in bytes). `googlephotos_upload {path, description?}` is that upload as
