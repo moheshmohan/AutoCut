@@ -322,3 +322,14 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   bounded decoding of animated GIF, APNG and WebP, bounded MCP line lengths, colour
   parameters take `#rrggbb`, a text property change applies to every selected text clip,
   the layout in use at exit comes back at launch, Bosnian interface language.
+
+## Update 2026-11-20 (GEN2)
+
+- **GEN2**: the second round of generation (section above, and
+  [`docs/generation.md`](generation.md)). `generate.assets` makes the missing files of a
+  scene's `assets.json` (pictures, cut-outs, poses made from one character picture, moving
+  plates, sounds); `variations` 1 to 4 with `generate.pick` to swap one in; `generate.extend`
+  carries a shot on past its end; `generate.fillGap` `from: "both"` joins the frames on each
+  side of a gap and `from: "motion"` carries the movement on; `move` gives a placed picture a
+  depth movement; `generate.sound {"clip": id}` sizes a sound to a clip; a tool that prints
+  `progress …` lines drives the bar; a waited MCP call answers what was made. 924 commands.

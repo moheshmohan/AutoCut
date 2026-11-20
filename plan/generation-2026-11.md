@@ -94,6 +94,29 @@ numbers below are the ones this plan gave them.
   did not say what a generation made, and an asset list with nothing left to make came back as
   a failure. Both fixed, with a test over MCP.
 
+## Shipped, second round (20 November 2026)
+
+- Before the commit the lane checks passed (formatting, Clippy on the engine, the interface,
+  automation and both binaries, their tests, layering, assets, WebAssembly). The dead-code
+  warning the WebAssembly check printed for the runner's `args` field is gone.
+- The full `cargo xtask ci` on `57d38069` passed at the first run: formatting, Clippy with
+  warnings as errors, 6,397 tests (none failed, 89 ignored), layering, asset attributions and
+  the 57 WebAssembly crate checks.
+- Pushed to `autocut` `main` and `feat/autocut` (`09993f7d..57d38069`); the fork's "AutoCut
+  checks" passed on both.
+- The app and the CLI were packaged from `57d38069` and installed. The build before it (GEN1)
+  is kept as `target/macos-package/AutoCut-before-GEN2-2026-11-20.app` and
+  `target/macos-package/bin-before-GEN2-2026-11-20/` (with the CLI that was in `target/release`
+  as `filmcraft-cli-from-target-release`). The CLI lists 924 commands (921 before, plus
+  `generate.extend`, `generate.assets` and `generate.pick`). The app reopened the EXEED project
+  clean with the project file unchanged; the playhead was set back with `playhead.set`.
+- In the installed app: `generate.providers` shows `bothEnds` and `carriesOn` for the clip tool,
+  and the Generate panel shows the new controls in each mode (How many to choose from, the
+  depth movement, Carry on, For the selected clip, what a gap is filled from).
+- The provider file of this Mac (`<data dir>/generation/providers.json`) was extended for the
+  clip tool (`lastImage`, `extendCommand`, `carryFrames`, `extendMultipleOf`); the file as it
+  was is beside it as `providers.before-GEN2-2026-11-20.json`.
+
 ## Open, each waiting on a decision of the user
 
 - [ ] **A lighter picture tool** (was GEN7). `h3-image-mlx` can run Qwen-Image-2.1-turbo, which
