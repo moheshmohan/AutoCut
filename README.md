@@ -1,4 +1,16 @@
 <p align="center">
+  <a href="https://www.youtube.com/watch?v=P3VMqTmsAlM"><img src="https://img.youtube.com/vi/P3VMqTmsAlM/maxresdefault.jpg" width="720" alt="Video: An AI Agent Edited This Video on My MacBook | AutoCut + FrameAtlas (Malayalam, with English subtitles)"></a>
+</p>
+
+<p align="center">
+  <b>AutoCut</b> is an independent fork of FilmCraft that adds a local AI pipeline for agent-driven editing (it is not an ArtCraft product).<br>
+  <a href="https://www.youtube.com/watch?v=P3VMqTmsAlM"><b>Watch: an AI agent edited this video on my MacBook</b></a> (Malayalam, English subtitles) ·
+  <a href="https://www.h4hacks.com/2026/11/blog-post_21.html"><b>Blog post: how to run it by hand and with an agent</b></a> ·
+  <a href="https://github.com/moheshmohan/FrameAtlas">FrameAtlas</a> ·
+  <a href="#autocut-prompt-driven-editing">What AutoCut adds</a>
+</p>
+
+<p align="center">
   <a href="https://getartcraft.com/">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/brand/artcraft-logo-white.svg">
