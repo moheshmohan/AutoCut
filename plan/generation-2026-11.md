@@ -149,6 +149,31 @@ the three rounds, so no other picture model is taken.
   is a command of its own (a clip and a new voice track), and without the weights nothing could
   be checked.
 
+## Shipped, third round (20 November 2026)
+
+- Before the commit the lane checks passed (formatting, Clippy on the engine, the interface,
+  automation and both binaries, their tests, layering, assets).
+- The full `cargo xtask ci` on `92e2f733` passed at the first run: formatting, Clippy with
+  warnings as errors, 6,399 tests (none failed, 89 ignored), layering, asset attributions and
+  the 57 WebAssembly crate checks.
+- Pushed to `autocut` `main` and `feat/autocut` (`6d5f19be..92e2f733`); the fork's "AutoCut
+  checks" passed on both.
+- The app and the CLI were packaged from `92e2f733` and installed. The build before it (GEN2)
+  is kept as `target/macos-package/AutoCut-before-GEN3-2026-11-20.app` and
+  `target/macos-package/bin-before-GEN3-2026-11-20/` (with the CLI that was in `target/release`
+  as `filmcraft-cli-from-target-release`). The CLI lists 925 commands (924 before, plus
+  `generate.restyle`). The app reopened the EXEED project clean with the project file
+  unchanged; the playhead was set back with `playhead.set`.
+- In the installed app: `generate.providers` lists the clip tool's two ways, `edges` installed
+  and `relight` not (its adapter is not on this Mac), and the Generate panel's Restyle clip mode
+  shows its controls (the way, the look, how closely the clip is followed). No clip was made
+  again through the installed build; the two live runs above were through the development
+  build of the same code.
+- The provider file of this Mac (`<data dir>/generation/providers.json`) was extended for the
+  clip tool (`restyleCommand`, `restyleOptional`, `restyles`, `restyleEstimateSeconds`,
+  `restyleMaxSeconds`); the file as it was is beside it as
+  `providers.before-GEN3-2026-11-20.json`.
+
 ## Open
 
 - [ ] Depth and pose control videos for `generate.restyle` (the same adapter). The engine has
