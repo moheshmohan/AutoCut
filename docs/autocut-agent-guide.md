@@ -83,8 +83,8 @@ Read these before you touch anything.
   other. Either work headless on your own `.fcproj`, or drive the open project through the bridge
   (§2).
 - **Git**, if you commit app changes:
-  - Push only to the `autocut` remote (`main` and `main:feat/autocut`), never to `origin`, which is
-    upstream.
+  - Push only `main` to the `autocut` remote (public: nothing personal in commits), never to
+    `origin`, which is upstream.
   - Push only after the full `cargo xtask ci` and with the user's OK.
 
 ## 1. This Mac
