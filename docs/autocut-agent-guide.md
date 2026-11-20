@@ -149,9 +149,9 @@ Every hand-built edit used this client: `build/fc.py` in a video's folder.
 
 ```python
 """A tiny client for filmcraft-cli's MCP server: one headless engine, commands one at a time."""
-import json, subprocess, itertools
+import json, os, subprocess, itertools
 
-CLI = "/Users/mohesh/Desktop/dev_work/Autocut/target/agent-main/release/filmcraft-cli"
+CLI = os.environ.get("FILMCRAFT_CLI", "filmcraft-cli")      # or the full path to target/release/filmcraft-cli
 
 class FC:
     def __init__(self, project):

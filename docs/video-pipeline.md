@@ -4,8 +4,8 @@ The whole AutoCut pipeline, step by step, with the commands that run it. The wor
 throughout is **"Every Robot I've Met"** (H4hacks, 2026-10): 48 robots from 2013 to 2025, narrated
 in Malayalam in the author's cloned voice, exported in 4K, published on YouTube
 (https://www.youtube.com/watch?v=7FYPOxDYWBc), with a 34-second Instagram Reel trailer. Its input
-files are in [`examples/every-robot/`](../examples/every-robot/) (no media: the clips stay in
-Google Photos and AutoCut's cache).
+files (the file names below) are not in the public repository: they held the owner's paths, library ids
+and locations.
 
 Every command below is `filmcraft-cli` (`cargo build --release -p filmcraft-cli`, or the copy in
 the packaged app, `target/macos-package/bin/filmcraft-cli`). Every flag: `filmcraft-cli help`.
@@ -48,7 +48,7 @@ transparent image sequence before AutoCut's review, privacy, and export passes.
 | Shared machine | `filmcraft-cli locks` before driving Chrome or the GPU by hand; `locks hold chrome --minutes 30 --note "…"` while you do |
 
 The example used: voice `clone:mohesh-natural` (VoxCPM2 for English, IndicF5 for Malayalam),
-Google Cloud project `autocut-photos`, the channel H4hacks, Instagram @moheshmohan.
+a Google Cloud project of the owner's, the H4hacks YouTube channel and its Instagram account.
 
 ## 1. Seed: the album
 
@@ -85,7 +85,7 @@ filmcraft-cli --project "$P" analyze robot --items 4841,2630,2631 --out "$R/repo
 
 A local vision model finds the subject in sampled frames, reads its text, names it and keeps the
 best moment per clip (cached: a clip is analysed once). Photos are analysed once and held with a
-slow pan and zoom aimed at the robot. Example: [`v5/report-robots.json`](../examples/every-robot/v5/report-robots.json).
+slow pan and zoom aimed at the robot. Example: `v5/report-robots.json`.
 
 ### 3.2 Where each clip was filmed
 
@@ -96,8 +96,7 @@ Google Photos page:
 filmcraft-cli --project "$P" photos locations --album "Robot showcase" --out "$R/locations.json" --save
 ```
 
-Example: [`v5/album-locations.txt`](../examples/every-robot/v5/album-locations.txt) (Busan, Jumeirah
-Beach, Expo 2020…). The places become each entry's lower third.
+Example: `v5/album-locations.txt`. The places become each entry's lower third.
 
 ### 3.3 Look at the clips
 
@@ -119,8 +118,8 @@ filmcraft-cli showcase-plan --base "$R/plan-v5.json" --patch "$R/notes-v6.json" 
     --places-from-locations "$R/locations.json" --out "$R/plan-v6.json" --lines "$R/script-ml-v6.json"
 ```
 
-Example plans: [`v5/plan-v5.json`](../examples/every-robot/v5/plan-v5.json) (English) and
-[`v5/plan-v5-ml.json`](../examples/every-robot/v5/plan-v5-ml.json) (Malayalam). Lessons kept in
+Example plans: `v5/plan-v5.json` (English) and
+`v5/plan-v5-ml.json` (Malayalam). Lessons kept in
 them: GITEX is said "Jai-tex" (`"pronounce"`), robot 12's mist and robot 35's arm need
 `fit: "full"`, the DP World logo on the Promobot is a named `redact` target.
 
@@ -135,8 +134,8 @@ filmcraft-cli ml-lint "$R/script-ml-v6.json" --plan "$R/plan-v6.json"           
 filmcraft-cli ml-script --plan "$R/plan-v6.json" --remember "$R/script-ml-v6.json" # once approved
 ```
 
-Example: [`v5/script-ml-v6.json`](../examples/every-robot/v5/script-ml-v6.json), side by side with
-the English in [`v5/malayalam-script-v6.md`](../examples/every-robot/v5/malayalam-script-v6.md).
+Example: `v5/script-ml-v6.json`, side by side with
+the English in `v5/malayalam-script-v6.md`.
 Style rules: [malayalam-style.md](malayalam-style.md).
 
 ### 3.6 The voice
@@ -194,7 +193,7 @@ filmcraft-cli photos upload "$R/preview-ml.mp4" --album "Every Robot I've Met"
 
 Turn the notes into `notes-v7.json` and run §3.4–§5 again; the analysis, narration and redaction
 caches make a round cost only what changed. The example's notes became
-[`v5/build_plan_v5.py`](../examples/every-robot/v5/build_plan_v5.py) (now a `showcase-plan` notes file).
+`v5/build_plan_v5.py` (now a `showcase-plan` notes file).
 
 ## 7. The final (4K)
 
@@ -213,8 +212,8 @@ The example's 12-minute final rendered at about 24 fps on an M3 Max (15 minutes)
 2026-10-21 speed-ups (GPU compositing by default, two hardware encoders at 4K, faster VP9
 decoding: [performance.md](performance.md)); the redaction and narration caches make a rebuild
 mostly rendering. Its report:
-[`v5/build-final2-ml.json`](../examples/every-robot/v5/build-final2-ml.json); its QA and chapters:
-[`final/`](../examples/every-robot/final/).
+`v5/build-final2-ml.json`; its QA and chapters:
+`final/`.
 
 ## 8. YouTube
 
@@ -224,12 +223,12 @@ filmcraft-cli youtube upload "$R/Every Robot I've Met - Final (Malayalam, 4K, cl
 ```
 
 Chapters (`<out>.chapters.txt`) are appended to the description and `<out>.thumbnail.jpg` becomes
-the thumbnail. The example's title, description and tags: [`v5/youtube-final.json`](../examples/every-robot/v5/youtube-final.json).
+the thumbnail. The example's title, description and tags: `v5/youtube-final.json`.
 Then, in YouTube Studio (by hand, or an agent in the browser holding the `chrome` lock):
 
 - **Subtitles.** Embedded captions (CEA-608/708) cannot carry Malayalam, so AutoCut skips them for
   non-Latin text: set the video's language, then Subtitles ▸ Upload file ▸ With timing ▸ the
-  `<out>.srt` ([`final/final-ml-4k.srt`](../examples/every-robot/final/final-ml-4k.srt)).
+  `<out>.srt` (`final/final-ml-4k.srt`).
 - **Don't mark it as synthetic/altered content** unless it is (the author's choice for this video).
 - **End screen, publish** — the author's call.
 - **After publishing**, a fix to the picture can only be done with Studio's Editor (Blur: face blur
@@ -256,7 +255,7 @@ filmcraft-cli --project "$R/trailer.fcproj" trailer --sequence 9755 \
 Quote every URL in zsh (`?` is a glob there). Beside the video: `.cover.jpg`, `.caption.txt`,
 `.frames.jpg`, `.qa.json`. Look at the frames and the QA's privacy findings before posting (the
 example dropped the OnRobot shot: two visitors in profile). The caption used:
-[`reel/caption.txt`](../examples/every-robot/reel/caption.txt) — on Instagram, write the YouTube
+`reel/caption.txt` — on Instagram, write the YouTube
 channel's name without "@" (an @ tags whatever Instagram account has that name).
 
 Check it against Instagram's spec, then publish:
@@ -380,7 +379,6 @@ FilmCraft made: `--album`, [§6](#6-review-and-the-next-round)). Review at 1080p
 | Clip cache (read-only) | `~/Library/Application Support/FilmCraft/google-photos/cache/` |
 | Caches (analysis, narration, redaction) | `~/Library/Application Support/FilmCraft/{autocut/analysis-cache,narration-cache,redact-cache}` |
 | Voices and their versions | `~/Library/Application Support/FilmCraft/voices/` |
-| The example's inputs | [`examples/every-robot/`](../examples/every-robot/) |
 | Revision rounds in depth | [showcase-runbook.md](showcase-runbook.md) |
 | Malayalam narration | [malayalam-narration.md](malayalam-narration.md), [malayalam-style.md](malayalam-style.md) |
 | GPU and performance | [gpu.md](gpu.md), [performance.md](performance.md) |

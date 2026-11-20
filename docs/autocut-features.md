@@ -44,9 +44,9 @@ keep transparency over footage (numbered PNG sequences).
 plan → script → voice → build (1080p review) → QA + privacy → final (4K) → YouTube (private) →
 subtitles → publish → trailer (Reel) → Instagram**, with review notes feeding the next revision
 round. The worked example ("Every Robot I've Met": 48 robots, Malayalam narration in the
-author's cloned voice, 4K on YouTube, 34-second Reel trailer) ships its artifacts in
-`examples/every-robot/` (plans EN/ML, script, YouTube metadata, chapters, SRT/VTT,
-narration-check, QA sheets). `docs/showcase-runbook.md` covers the revision round in depth:
+author's cloned voice, 4K on YouTube, 34-second Reel trailer) kept its artifacts
+(plans EN/ML, script, YouTube metadata, chapters, SRT/VTT, narration-check, QA sheets) out of the
+public repository, as they held the owner's paths, library ids and locations. `docs/showcase-runbook.md` covers the revision round in depth:
 review notes → `showcase-plan --patch`, **places** from Google Photos location data
 (`photos locations`, `--places-from-locations`), photos-only entries, strict Malayalam
 heard-back checks, and the vertical trailer with safe-zone and cuts-on-beat checks.
