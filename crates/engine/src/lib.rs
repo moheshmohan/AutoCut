@@ -36,6 +36,7 @@ pub mod doc_path;
 pub mod elements;
 pub mod essential_sound;
 pub mod export_tools;
+pub mod faces;
 pub mod feedback;
 pub mod follow_reid;
 pub mod generate;

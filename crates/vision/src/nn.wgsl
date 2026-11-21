@@ -2,7 +2,8 @@
 // passes in `layers.rs`: tensors are `[n][c][h][w]` f32 in storage buffers.
 //
 // - `conv`: a convolution (dense, or depthwise with `flags` bit 0) with explicit top/left
-//   padding, its bias, an activation (`act`: 0 none, 1 ReLU, 2 ReLU then a·x + b, 3 SiLU) and
+//   padding, its bias, an activation (`act`: 0 none, 1 ReLU, 2 ReLU then a·x + b, 3 SiLU, 4 PReLU
+//   with channel c's slope at `bias[cout + c]`) and
 //   optionally a residual added after it (`flags` bit 1); four output channels an invocation.
 // - `maxpool`: k×k max pooling with stride and −∞ padding.
 // - `upsample`: nearest-neighbour 2× upsampling.
@@ -44,7 +45,7 @@ struct P {
 @group(0) @binding(4) var<storage, read_write> dst: array<f32>;
 @group(0) @binding(5) var<storage, read> res: array<f32>;
 
-fn activate(v: f32) -> f32 {
+fn activate(v: f32, c: u32) -> f32 {
     switch p.act {
         case 1u: {
             return max(v, 0.0);
@@ -54,6 +55,9 @@ fn activate(v: f32) -> f32 {
         }
         case 3u: {
             return v / (1.0 + exp(-v));
+        }
+        case 4u: {
+            return select(v * bias[p.cout + c], v, v > 0.0);
         }
         default: {
             return v;
@@ -129,7 +133,7 @@ fn conv(@builtin(global_invocation_id) id: vec3<u32>) {
             continue;
         }
         let c = co[j];
-        var v = activate(acc[j] + bias[c]);
+        var v = activate(acc[j] + bias[c], c);
         if (p.flags & 2u) != 0u {
             v += res[(b * p.cout + c) * npx + px];
         }
@@ -174,7 +178,7 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoc
     if px >= npx || co >= p.cout || b >= p.n {
         return;
     }
-    var v = activate(acc + bias[co]);
+    var v = activate(acc + bias[co], co);
     if (p.flags & 2u) != 0u {
         v += res[(b * p.cout + co) * npx + px];
     }

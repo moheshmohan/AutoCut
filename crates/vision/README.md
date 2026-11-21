@@ -28,6 +28,16 @@ public pose datasets (COCO, AI Challenger, CrowdPose, Halpe, MPII, PoseTrack18, 
 Detectors not used for their licences: SCRFD / InsightFace weights (non-commercial), Ultralytics
 YOLO-face (AGPL), YOLO5Face (GPL).
 
+Face fingerprints (`face_id`, people grouping) use one more file, downloaded on its own
+(`faces.downloadModel`, package `face-recognition`): **AuraFace-v1**'s recognition network
+(`glintr100.onnx`, 260,694,151 B, revision `af6d057c`, Apache-2.0, fal.ai; an ArcFace-trained
+IResNet-100 "trained on commercially and publicly available data"). Only that file is fetched:
+the AuraFace package's other files (SCRFD detector, landmark and attribute models) come from
+InsightFace's non-commercial zoo and are never downloaded; YuNet finds and aligns the faces. The
+network is written out by hand over the same layers as the profile pass (PReLU added) and checked
+against onnxruntime's output on real faces (cosine > 0.9999 on the CPU, > 0.9995 on the GPU; the
+alignment end to end > 0.995).
+
 **MobileSAM** (`segment`, the cut-outs of `clip.cutOut`), downloaded by `cutout.downloadModel`
 into its own folder: `mobile_sam.pt` (40,728,226 B, the authors' repository
 `ChaoningZhang/MobileSAM` at commit `f706ad9c`, SHA-256 `6dbb9052…`), Apache-2.0; a TinyViT

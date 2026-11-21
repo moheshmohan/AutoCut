@@ -31,6 +31,9 @@
 //!   with its detail restored, in seamless tiles; on candle, on the GPU (Metal) on macOS.
 //! - `interp` (feature `model`): **RIFE 4.26** (MIT), the frame between two frames at any time
 //!   between them; on candle, on the GPU (Metal) on macOS.
+//! - `face_id` (feature `model`): **AuraFace-v1** (Apache-2.0), a face's 512-number fingerprint
+//!   for telling people apart, the faces aligned by YuNet's landmarks; its IResNet-100 on the GPU
+//!   (`gpunn`) on macOS, the CPU being the fallback; and the grouping of fingerprints into people.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
@@ -47,6 +50,8 @@ pub mod zip;
 pub mod depth;
 #[cfg(feature = "model")]
 mod dfine;
+#[cfg(feature = "model")]
+pub mod face_id;
 #[cfg(feature = "model")]
 mod gpu;
 #[cfg(feature = "model")]

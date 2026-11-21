@@ -193,6 +193,7 @@ consent-gated downloads pinned by revision + SHA-256, permissive weights only:
 |---|---|---|
 | Photos in depth — 3D Photo, Depth Blur | `clip.photo3d`, `clip.depthBlur`, `depth.status/downloadModel` | Depth Anything V2 Small (Apache-2.0, 99 MB) |
 | Upscale and Restore | `media.upscale` | Real-ESRGAN x4v3 (BSD-3, 4.9 MB) |
+| Face fingerprints and people grouping | `media.faces`, `faces.group`, `faces.status/downloadModel` | AuraFace-v1 (Apache-2.0, 261 MB) + YuNet |
 | Smooth Slow Motion | `media.interpolate` | RIFE 4.26 (MIT, 23 MB) |
 | Remove Object | `clip.removeObject` | MI-GAN (MIT, 30 MB) |
 | Object Mask (click → tracked mask) | `clip.objectMask`, `masks.track` method Object | MobileSAM (Apache-2.0, 41 MB; WGSL encoder) |

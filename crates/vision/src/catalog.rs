@@ -154,6 +154,41 @@ pub fn depth_installed(models_dir: &Path) -> bool {
     DEPTH_FILES.iter().all(|f| present(&d, f))
 }
 
+/// The face fingerprint package: AuraFace-v1's recognition network (`crate::face_id`), which tells
+/// one person's face from another's. Only `glintr100.onnx` is used: the package's other files
+/// (its SCRFD detector among them) come from InsightFace's non-commercial model zoo and are never
+/// downloaded; YuNet finds the faces.
+pub const FACE_ID_PACKAGE_ID: &str = "face-recognition";
+pub const FACE_ID_NAME: &str = "Face fingerprints (AuraFace-v1, IResNet-100)";
+pub const FACE_ID_LICENSE: &str = "Apache-2.0 (AuraFace-v1, fal.ai; trained on commercially usable data)";
+pub const FACE_ID_SOURCE: &str = "https://huggingface.co/fal/AuraFace-v1";
+
+/// AuraFace-v1's recognition network (pinned 2026-11-21 against the Hugging Face API's LFS oid
+/// and `shasum -a 256`).
+pub const FACE_ID: ModelFile = ModelFile {
+    name: "glintr100.onnx",
+    url: "https://huggingface.co/fal/AuraFace-v1/resolve/af6d057c9b0ec4071d4c49c80e3539258798b609/glintr100.onnx",
+    sha256: "a7933ea5330113b01c9b60351d8f4c33003f145d8470ac5f0e52ee2effe25c60",
+    size: 260_694_151,
+};
+
+pub static FACE_ID_FILES: &[ModelFile] = &[FACE_ID];
+
+pub fn face_id_dir(models_dir: &Path) -> PathBuf {
+    models_dir.join(FACE_ID_PACKAGE_ID)
+}
+
+/// The face fingerprint network is present with its pinned size.
+pub fn face_id_installed(models_dir: &Path) -> bool {
+    let d = face_id_dir(models_dir);
+    FACE_ID_FILES.iter().all(|f| present(&d, f))
+}
+
+/// The face fingerprint network's identity: fingerprints from another network never mix.
+pub fn face_id_id() -> String {
+    format!("{}={}", FACE_ID.name, FACE_ID.sha256.get(..16).unwrap_or(FACE_ID.sha256))
+}
+
 /// The depth network's identity, for cache keys.
 pub fn depth_id() -> String {
     format!("{}={}", DEPTH.name, DEPTH.sha256.get(..16).unwrap_or(DEPTH.sha256))
@@ -346,7 +381,7 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), FILES.len() + PROFILE_FILES.len());
         assert!(profile_model_ids().contains("dfine_n_coco.safetensors=19e06bdc873da819"));
-        for f in SEGMENT_FILES.iter().chain(DEPTH_FILES).chain(UPSCALE_FILES).chain(INTERP_FILES) {
+        for f in SEGMENT_FILES.iter().chain(DEPTH_FILES).chain(UPSCALE_FILES).chain(INTERP_FILES).chain(FACE_ID_FILES) {
             assert_eq!(f.sha256.len(), 64);
             assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()) && f.url.ends_with(f.name), "{}", f.url);
         }
@@ -361,6 +396,7 @@ mod tests {
         assert!(!profiles_installed(&dir));
         assert_eq!(profile_missing_bytes(&dir), profile_total_bytes());
         assert!(!depth_installed(&dir));
+        assert!(!face_id_installed(&dir));
         assert!(!upscaler_installed(&dir));
         assert!(!interpolator_installed(&dir));
         let _ = std::fs::remove_dir_all(&dir);

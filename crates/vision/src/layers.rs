@@ -193,6 +193,9 @@ pub(crate) enum Act {
     /// ReLU, then a learnable `scale · x + bias` (HGNetv2's learnable affine block).
     ReluAffine(f32, f32),
     Silu,
+    /// PReLU: `x` above zero, else `x` times its channel's learnt slope (the convolution's
+    /// `slopes`).
+    PRelu,
 }
 
 impl Act {
@@ -203,6 +206,8 @@ impl Act {
             Act::Relu => x.max(0.0),
             Act::ReluAffine(s, b) => s * x.max(0.0) + b,
             Act::Silu => x / (1.0 + (-x).exp()),
+            // the slope is per channel: `Conv::forward` applies it
+            Act::PRelu => x,
         }
     }
 }
@@ -228,6 +233,8 @@ pub(crate) struct Conv {
     pub(crate) pad: usize,
     kind: ConvKind,
     pub(crate) act: Act,
+    /// Per output channel, the PReLU slopes ([`Act::PRelu`]); empty otherwise.
+    slopes: Vec<f32>,
     /// The weights on the GPU (`gpunn`).
     pub(crate) dev: Option<crate::gpunn::ConvW>,
 }
@@ -267,16 +274,29 @@ impl Conv {
         } else {
             ConvKind::Dense(Tensor::from_slice(&w, (cout, cin, k, k), &Device::Cpu).map_err(err)?)
         };
-        Ok(Self { w, b, cin, cout, k, stride, pad, kind, act, dev: None })
+        Ok(Self { w, b, cin, cout, k, stride, pad, kind, act, slopes: Vec::new(), dev: None })
+    }
+
+    /// The convolution followed by a PReLU with one learnt slope per output channel.
+    pub(crate) fn with_prelu(mut self, slopes: Vec<f32>) -> Result<Self, VisionError> {
+        if slopes.len() != self.cout || slopes.iter().any(|v| !v.is_finite()) {
+            return Err(err(format!("a PReLU takes {} finite slopes, got {}", self.cout, slopes.len())));
+        }
+        self.act = Act::PRelu;
+        self.slopes = slopes;
+        Ok(self)
     }
 
     pub(crate) fn is_depthwise(&self) -> bool {
         matches!(self.kind, ConvKind::Depthwise)
     }
 
-    /// The weights `[cout, cin / groups, k, k]` and the bias.
+    /// The weights `[cout, cin / groups, k, k]` and the bias (then, for a PReLU, its slopes: the
+    /// GPU pass reads channel c's slope at `cout + c`).
     pub(crate) fn weights(&self) -> (Vec<f32>, Vec<f32>) {
-        (self.w.clone(), self.b.clone())
+        let mut b = self.b.clone();
+        b.extend_from_slice(&self.slopes);
+        (self.w.clone(), b)
     }
 
     /// The output size for an `h` × `w` input.
@@ -315,8 +335,16 @@ impl Conv {
         let (cout, act) = (self.cout, self.act);
         y.v.par_chunks_mut(plane).enumerate().for_each(|(j, p)| {
             let b = if depthwise { 0.0 } else { self.b.get(j % cout).copied().unwrap_or(0.0) };
-            for v in p {
-                *v = act.apply(*v + b);
+            if act == Act::PRelu {
+                let s = self.slopes.get(j % cout).copied().unwrap_or(0.0);
+                for v in p {
+                    let x = *v + b;
+                    *v = if x > 0.0 { x } else { x * s };
+                }
+            } else {
+                for v in p {
+                    *v = act.apply(*v + b);
+                }
             }
         });
         Ok(y)

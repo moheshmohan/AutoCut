@@ -327,6 +327,7 @@ fn act_code(a: Act) -> (u32, f32, f32) {
         Act::Relu => (1, 0.0, 0.0),
         Act::ReluAffine(s, b) => (2, s, b),
         Act::Silu => (3, 0.0, 0.0),
+        Act::PRelu => (4, 0.0, 0.0),
     }
 }
 
@@ -563,8 +564,8 @@ impl Backend for Run<'_> {
 
 impl Run<'_> {
     /// Submit the recorded passes and read tensors back (the GPU's recorded work is submitted
-    /// and waited for here; recording may go on after).
-    #[cfg(test)]
+    /// and waited for here; recording may go on after). The face network's 7 × 7 maps come back
+    /// this way.
     pub(crate) fn read(&self, xs: &[&GT]) -> Result<Vec<Feat>, VisionError> {
         let bufs: Vec<(&wgpu::Buffer, usize)> = xs.iter().map(|m| (&m.buf, m.n * m.c * m.h * m.w)).collect();
         let vals = self.read_raw(&bufs)?;
