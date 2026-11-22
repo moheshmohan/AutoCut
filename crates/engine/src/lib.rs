@@ -34,6 +34,7 @@ pub mod denoise;
 pub mod depth;
 pub mod doc_path;
 pub mod elements;
+pub mod embed;
 pub mod essential_sound;
 pub mod export_tools;
 pub mod faces;

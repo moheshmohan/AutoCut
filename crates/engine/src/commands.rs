@@ -3937,6 +3937,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::remove_object::commands());
     v.extend(crate::depth::commands());
     v.extend(crate::faces::commands());
+    v.extend(crate::embed::commands());
     v.extend(crate::upscale::commands());
     v.extend(crate::interpolate::commands());
     v.extend(crate::nadir::commands());

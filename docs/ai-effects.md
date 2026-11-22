@@ -24,6 +24,7 @@ chosen again when it finishes). Agents and the CLI ask the user themselves, then
 | Upscale and Restore: photos and videos made larger and cleaner | `media.upscale` (Clip ▸ Modify) | Real-ESRGAN general x4v3 | BSD-3-Clause | 4.9 MB, `upscale.downloadModel` |
 | Smooth Slow Motion: frames made between a video's frames | `media.interpolate` (Clip ▸ Modify) | RIFE 4.26 | MIT | 22.9 MB, `interpolate.downloadModel` |
 | Remove Object: the thing a mask follows taken out of the clip | `clip.removeObject` (Clip ▸ Cut-outs) | MI-GAN | MIT | 29.5 MB, `removal.downloadModel` |
+| Search by meaning: pictures and words as vectors, and the nearest pictures to a query (FrameAtlas's search) | `media.embed`, `media.nearest` | SigLIP 2 base 224 (and CLIP ViT-L/14 with the LAION aesthetic head for `aesthetic`) | Apache-2.0 (SigLIP 2), MIT (CLIP), MIT (LAION head) | the scene index's models, `scenes download siglip2-base-224` |
 | People: the faces in pictures found, fingerprinted and grouped into people (FrameAtlas's People) | `media.faces`, `faces.group`, `faces.status` | AuraFace-v1 (IResNet-100), faces found by YuNet | Apache-2.0 | 260.7 MB, `faces.downloadModel` |
 | Object Mask: a thing masked from a click and followed through the clip | `clip.objectMask` (Clip ▸ Cut-outs; Effect Controls ▸ a mask row's sparkle), `masks.track` with the method Object | MobileSAM | Apache-2.0 | 40.7 MB, `cutout.downloadModel` |
 
