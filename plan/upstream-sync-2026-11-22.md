@@ -217,4 +217,13 @@ that replace the full gate with per-crate checks and drop "commit only green sta
   context, EXR inflation, PSD, PNG writer in this range); the next sync should triage
   `storytold/craft-libs` too, as the last two records said.
 
+### Decided (23 November 2026)
+
+- AV58 stays as upstream wrote it: the fix on open makes no undo step and does not mark the project
+  changed.
+- Rules 3, 4, 20, 22 and 31 are now in the fork's `AGENTS.md` (§3.3); 15 and 21 were not taken.
+- All three follow-ups will be done: the next sync takes upstream's full `ru.tsv` and triages
+  `storytold/craft-libs` too, and each generation test binary gets its own GPU lock folder as a
+  separate task.
+
 The next upstream review starts at `009b72ca`.

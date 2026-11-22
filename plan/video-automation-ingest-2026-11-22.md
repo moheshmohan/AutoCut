@@ -301,6 +301,20 @@ our own words (essence, colour, type, motion, camera, sound, pitfalls).
 - **D6** The style word lists against the user's own phrases: the user's phrases win.
 - **D7** New checks as warnings for one round on real projects, then Floor checks start blocking.
 
+### Decided (23 November 2026)
+
+| | Decision | What it changes |
+|---|---|---|
+| D1 | Upgrade RAEA to 0.1.8 | Installed beside 0.1.0 (SHA-256 checked); the samples are rendered again before the docs and `examples/raea/render.py` move to it (PX3). |
+| D2 | RAEA's HTML path only | No Node, Chrome or ffmpeg; a HyperFrames provider only if RAEA cannot draw something. |
+| D3 | EffectCraft in-process now | PX4 skips the external stages: EffectCraft and the craft-libs crates it needs come in as git dependencies pinned to a revision, behind a cargo feature; its embedded fonts are off and it is fed `CRAFT_FONTS` from craft-fonts, so no font enters the repository. This is an exception to the skip-craft-libs sync rule for EffectCraft's dependencies only; `cargo xtask layers` and the licence check still apply. |
+| D4 | AutoCut's control port moves to 9877 | Blender's MCP keeps 9876. Every runbook, script, launch config, install command, MCP bridge setting and doc that names 9876 moves to 9877, with a note for old commands. |
+| D5 | ComfyUI later, in phase C | Installed when PX9 comes up; models chosen against the allow-list then. |
+| D6 | The user's phrases win | `copy.lint` and the taste checks allow phrases from the user's own scripts and corrections even when a word list flags them. |
+| D7 | Warn first, then block | New checks warn for one round of real projects; after that, Floor-tier failures block delivery. |
+
+Next: phase A (PX1, PX12, PX3, PX5). The port move and EffectCraft in-process are separate tasks.
+
 ## 7. Not taken
 
 FFmpeg in the product (it stays a test oracle); a Remotion runtime or adapter; GSAP in this
