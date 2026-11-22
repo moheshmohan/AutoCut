@@ -69,9 +69,9 @@ fn live_oracle() {
     let Some((mut o, dir)) = Oracle::open() else { return };
     let metal = std::env::var("ACESTEP_ORACLE_DEVICE").is_ok_and(|d| d == "metal");
     let dev = if metal { device() } else { Device::Cpu };
-    // the GPU is shared with other sessions: hold its lock while the comparison runs there
+    // the GPU is shared with other sessions: hold the machine's lock while the comparison runs there
     let _gpu = metal.then(|| {
-        filmcraft_locks::acquire(filmcraft_locks::Resource::Gpu, "ACE-Step oracle test (Metal)", std::time::Duration::from_secs(1800), &mut |e| {
+        filmcraft_locks::acquire_machine(filmcraft_locks::Resource::Gpu, "ACE-Step oracle test (Metal)", std::time::Duration::from_secs(1800), &mut |e| {
             eprintln!("waiting for the GPU: {e}")
         })
         .unwrap()

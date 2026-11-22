@@ -18,6 +18,15 @@ it. A measuring test that wants the downloaded models (the ignored `*_on_a_real_
 and Remove Object ones) is run with `FILMCRAFT_DATA_DIR` naming the real directory, for example
 `FILMCRAFT_DATA_DIR="$HOME/Library/Application Support/FilmCraft"`.
 
+**Tests keep off the machine's locks.** The same way, a test binary keeps its GPU and browser locks
+([`filmcraft-locks`](../crates/locks/src/lib.rs)) in a temporary folder of its own, so a test that
+takes the GPU for a fake job (the generation tests) neither waits on nor fails beside a real
+narration or scene analysis holding the machine's lock. A test that really works the GPU takes the
+machine's lock with `filmcraft_locks::acquire_machine` (the ACE-Step Metal comparison), and a
+measuring run with `FILMCRAFT_DATA_DIR` set takes the machine's locks throughout, like the app.
+`FILMCRAFT_LOCK_DIR` names the lock folder for everything, tests included. A CLI a test spawns is
+not a test binary: it takes the machine's locks unless the test passes `FILMCRAFT_LOCK_DIR`.
+
 ## 1. Kinds of tests
 
 | Kind | Where | Examples |

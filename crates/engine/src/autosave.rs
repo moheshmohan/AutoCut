@@ -551,7 +551,7 @@ pub fn test_data_dir() -> Option<PathBuf> {
 
 /// Whether an executable is one cargo built into its `deps` folder (a test).
 pub fn in_cargo_deps(exe: &Path) -> bool {
-    exe.parent().and_then(Path::file_name).is_some_and(|n| n == "deps")
+    filmcraft_locks::in_cargo_deps(exe)
 }
 
 pub fn unix_now() -> i64 {

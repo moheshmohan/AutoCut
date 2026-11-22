@@ -12,6 +12,10 @@
 //! crashed holder never leaves a stale lock. The file also names the holder (pid, since, what)
 //! for messages. Where file locks are unsupported (the web build), every acquire succeeds.
 //!
+//! A test binary keeps its locks in a folder of its own ([`dir`]), so a test that takes the GPU for
+//! a fake or tiny job neither waits on nor fails beside a real job holding the machine's lock. A
+//! test that really works the GPU takes the machine's lock with [`acquire_machine`].
+//!
 //! Ollama is deliberately not a resource here: it queues requests itself, so a lock would only
 //! serialize what is already serialized.
 
@@ -133,12 +137,30 @@ fn duration_words(secs: u64) -> String {
     }
 }
 
-/// Where the lock files live: `FILMCRAFT_LOCK_DIR`, else the FilmCraft data directory's
-/// `locks/` (macOS `~/Library/Application Support/FilmCraft`, Windows `%APPDATA%\FilmCraft`,
-/// elsewhere `$XDG_DATA_HOME/filmcraft` or `~/.local/share/filmcraft`).
+/// Where this process keeps its locks: `FILMCRAFT_LOCK_DIR`; in a test binary, a folder of its own
+/// (below); else the machine's ([`machine_dir`]).
+///
+/// A test binary (its executable in cargo's `deps` folder, where cargo builds unit and integration
+/// tests; never the app, its examples or an install) gets a temporary folder per process, so its
+/// locks only meet the same binary's other tests. Not when `FILMCRAFT_DATA_DIR` names a data
+/// directory: a measuring test that loads the downloaded models really works the GPU, so it takes the
+/// machine's locks like the app does.
 pub fn dir() -> Option<PathBuf> {
-    if let Some(d) = std::env::var_os("FILMCRAFT_LOCK_DIR").filter(|d| !d.is_empty()) {
-        return Some(PathBuf::from(d));
+    if let Some(d) = env_dir() {
+        return Some(d);
+    }
+    if let Some(d) = test_dir() {
+        return Some(d);
+    }
+    machine_dir()
+}
+
+/// The machine's lock folder, the one every FilmCraft process on it shares: `FILMCRAFT_LOCK_DIR`,
+/// else the FilmCraft data directory's `locks/` (macOS `~/Library/Application Support/FilmCraft`,
+/// Windows `%APPDATA%\FilmCraft`, elsewhere `$XDG_DATA_HOME/filmcraft` or `~/.local/share/filmcraft`).
+pub fn machine_dir() -> Option<PathBuf> {
+    if let Some(d) = env_dir() {
+        return Some(d);
     }
     let home = || std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
     let base = if cfg!(target_os = "macos") {
@@ -152,6 +174,28 @@ pub fn dir() -> Option<PathBuf> {
             .or_else(|| home().map(|h| h.join(".local/share/filmcraft")))
     };
     base.map(|b| b.join("locks"))
+}
+
+fn env_dir() -> Option<PathBuf> {
+    std::env::var_os("FILMCRAFT_LOCK_DIR").filter(|d| !d.is_empty()).map(PathBuf::from)
+}
+
+/// A test binary's own lock folder ([`dir`]); `None` outside tests and in a measuring test.
+fn test_dir() -> Option<PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        if std::env::var_os("FILMCRAFT_DATA_DIR").is_some_and(|d| !d.is_empty()) {
+            return None;
+        }
+        let exe = std::env::current_exe().ok()?;
+        in_cargo_deps(&exe).then(|| std::env::temp_dir().join(format!("filmcraft-test-locks-{}", std::process::id())))
+    })
+    .clone()
+}
+
+/// Whether an executable is one cargo built into its `deps` folder (a test).
+pub fn in_cargo_deps(exe: &Path) -> bool {
+    exe.parent().and_then(Path::file_name).is_some_and(|n| n == "deps")
 }
 
 fn lock_path(dir: &Path, r: Resource) -> PathBuf {
@@ -193,6 +237,15 @@ pub fn try_acquire(r: Resource, what: &str) -> Result<Guard, LockError> {
 /// the way (once, when the wait starts).
 pub fn acquire(r: Resource, what: &str, wait: Duration, waiting: &mut dyn FnMut(&LockError)) -> Result<Guard, LockError> {
     match dir() {
+        Some(d) => acquire_in(&d, r, what, wait, waiting),
+        None => Ok(Guard { file: None, resource: r }),
+    }
+}
+
+/// [`acquire`] in the machine's lock folder ([`machine_dir`]) even from a test: for a test that
+/// really works the GPU (a model compared on Metal), which must take turns with real jobs.
+pub fn acquire_machine(r: Resource, what: &str, wait: Duration, waiting: &mut dyn FnMut(&LockError)) -> Result<Guard, LockError> {
+    match machine_dir() {
         Some(d) => acquire_in(&d, r, what, wait, waiting),
         None => Ok(Guard { file: None, resource: r }),
     }
@@ -260,6 +313,27 @@ pub(crate) fn holder_in(dir: &Path, r: Resource) -> Option<Holder> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_test_binary_keeps_its_locks_in_a_folder_of_its_own() {
+        assert!(in_cargo_deps(Path::new("/x/target/debug/deps/filmcraft_locks-0123")));
+        assert!(!in_cargo_deps(Path::new("/x/target/release/filmcraft-cli")));
+        assert!(!in_cargo_deps(Path::new("/Applications/FilmCraft.app/Contents/MacOS/FilmCraft")));
+        assert!(!in_cargo_deps(Path::new("/x/target/release/examples/privacy_probe")));
+        let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+        if set("FILMCRAFT_LOCK_DIR") {
+            // the folder named wins everywhere, tests included
+            assert_eq!(dir(), env_dir());
+            assert_eq!(machine_dir(), env_dir());
+        } else if set("FILMCRAFT_DATA_DIR") {
+            // a measuring test takes the machine's locks
+            assert_eq!(dir(), machine_dir());
+        } else {
+            let own = std::env::temp_dir().join(format!("filmcraft-test-locks-{}", std::process::id()));
+            assert_eq!(dir(), Some(own));
+            assert_ne!(dir(), machine_dir());
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("filmcraft-locks-{name}-{}", std::process::id()));
