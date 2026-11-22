@@ -7,6 +7,11 @@ frame caching for FilmCraft.
 
 - A JPEG, PNG, WebP or TIFF is turned upright by its EXIF `Orientation` as it is decoded (a
   portrait phone photo is stored sideways with a tag saying so); its media size is the upright one.
+  `still::probe_geometry` / `probe_geometry_reader` report that size and the orientation from the
+  headers alone, without decoding (a large TIFF whose directory is at its end is read only where
+  its headers are). The engine uses them when a project opens: one saved before photos were
+  turned upright (before 2026-10-21 here) stored a portrait photo's unturned size and baked its
+  clips' Motion anchors from it, and both are turned to match (`engine::still_migration`).
 - Decoding is bounded: the `image` decoders may allocate at most `MAX_DECODE_BYTES` (512 MiB) for a
   picture and accept sides up to 65 535, so a header claiming more is refused before anything is
   allocated; a picture larger than `MAX_STILL_SIDE` (8192 on its long side — a 48-megapixel phone

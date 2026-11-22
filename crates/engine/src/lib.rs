@@ -118,6 +118,7 @@ pub mod speech_understand;
 pub mod speed_ramp;
 pub mod split_edit;
 pub mod stabilize;
+pub mod still_migration;
 pub mod sync;
 pub mod taste;
 pub mod text_fx;
@@ -1780,6 +1781,8 @@ mod slip_tests;
 mod soundfonts_tests;
 #[cfg(test)]
 mod split_edit_ripple_trim_tests;
+#[cfg(test)]
+mod still_migration_tests;
 #[cfg(test)]
 mod stored_paths_tests;
 #[cfg(test)]

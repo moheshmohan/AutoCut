@@ -365,6 +365,26 @@ impl MediaPool {
         self.resolve(p, item, services, false)
     }
 
+    /// The size the file behind a still item decodes to, and the EXIF Orientation its decoder
+    /// turns it by, from the file's headers alone ([`filmcraft_media::still::probe_geometry`]):
+    /// no picture is decoded and the pool keeps no source for the item, so the load-time still
+    /// migration never pulls a decoded frame into the pool. Like [`Self::full_res_source`] this
+    /// reads the original file, never a proxy, and follows the same path policy. `None` when the
+    /// item is not a still, is offline, or its file cannot be probed (or its decoder never turns
+    /// the picture).
+    pub fn still_geometry(&self, p: &Project, item: ItemId, services: &dyn Services) -> Option<(u32, u32, filmcraft_media::still::Orientation)> {
+        let (_, m, _) = p.resolve_media(item)?;
+        if m.offline || m.info.kind != filmcraft_media::MediaKind::Still {
+            return None;
+        }
+        let MediaRef::File { path } = &m.media else { return None };
+        let file = self.follow_media(path).ok()?;
+        match services.reader(&file) {
+            Some(r) => filmcraft_media::still::probe_geometry_reader(&file_name(&file), &*r.ok()?),
+            None => filmcraft_media::still::probe_geometry(&file_name(&file), &services.read_file_bounded(&file, PROBE_WHOLE_FILE_MAX).ok()?),
+        }
+    }
+
     fn resolve(&self, p: &Project, item: ItemId, services: &dyn Services, proxies: bool) -> Option<SharedSource> {
         let (item, m, _) = p.resolve_media(item)?;
         let it = p.item(item)?;
