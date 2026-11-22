@@ -64,7 +64,7 @@ do and do not show.
 git clone https://github.com/moheshmohan/AutoCut
 cd AutoCut
 cargo run --release -p filmcraft                      # the desktop app, with a demo project
-cargo run --release -p filmcraft -- --control 9876    # the same, with the control channel open for agents
+cargo run --release -p filmcraft -- --control 9877    # the same, with the control channel open for agents
 cargo build --release -p filmcraft-cli                # the command-line tool: target/release/filmcraft-cli
 ```
 
@@ -119,7 +119,7 @@ exactly the way a person does, and whatever it makes stays an ordinary, editable
 ### With Claude Code
 
 1. Build the CLI (`cargo build --release -p filmcraft-cli`). To watch the agent work, open the app
-   with its control channel: `cargo run --release -p filmcraft -- --control 9876`.
+   with its control channel: `cargo run --release -p filmcraft -- --control 9877`.
 2. Open the AutoCut folder in Claude Code. Its [`.mcp.json`](.mcp.json) registers two MCP servers:
    `filmcraft`, a bridge to the running app, and `filmcraft-headless`, a headless engine with a demo
    project.
@@ -148,7 +148,7 @@ Claude Desktop or any other MCP client can drive AutoCut (and FrameAtlas):
 {
   "mcpServers": {
     "autocut":    { "command": "/absolute/path/to/AutoCut/target/release/filmcraft-cli",
-                    "args": ["mcp", "--bridge", "127.0.0.1:9876"] },
+                    "args": ["mcp", "--bridge", "127.0.0.1:9877"] },
     "frameatlas": { "command": "/absolute/path/to/FrameAtlas/run.sh", "args": ["mcp"] }
   }
 }
@@ -205,7 +205,7 @@ filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-r
   tools its UI uses. No API keys, no cloud dependency in the editor.
 - **Everywhere the engine is**: `filmcraft-cli autocut`, and the `autocut_plan` / `autocut_edit`
   MCP tools — so Claude Desktop can drive editing in the live Mac app (`filmcraft --control
-  9876` + `filmcraft-cli mcp --bridge 127.0.0.1:9876`).
+  9877` + `filmcraft-cli mcp --bridge 127.0.0.1:9877`).
 - **Cloud media**: pick photos and videos in the Google Photos picker and import them, from
   the CLI (`filmcraft-cli photos pick`) and over MCP (`googlephotos_pick`) — see
   [crates/gphotos](crates/gphotos/README.md) for the one-time Google Cloud setup and what

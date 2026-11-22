@@ -15,7 +15,7 @@ For custom animations, effects, and generated scenes, see [the RAEA workflow](ra
 | Mode | Command | What it drives |
 |---|---|---|
 | Headless | `filmcraft-cli mcp --demo` or `--project p.fcproj` (neither = empty project) | an in-process engine session, no window |
-| Bridge | `filmcraft-cli mcp --bridge 127.0.0.1:9876` | the running desktop app started with `filmcraft --control 9876` |
+| Bridge | `filmcraft-cli mcp --bridge 127.0.0.1:9877` | the running desktop app started with `filmcraft --control 9877` |
 
 Headless mode also takes `--data-dir DIR` (user presets). Any other option is rejected (exit 2):
 there are no folder-confinement flags such as `--automation-read-root`, so the server can read
@@ -26,7 +26,7 @@ and write wherever the user can.
 
 ```sh
 cargo build --release -p filmcraft-cli -p filmcraft
-./target/release/filmcraft --control 9876 &      # only for the bridge server
+./target/release/filmcraft --control 9877 &      # only for the bridge server
 claude                                           # approve the project MCP servers when asked
 ```
 
@@ -41,7 +41,7 @@ claude mcp add filmcraft-headless -- /abs/path/filmcraft/target/release/filmcraf
 ```
 
 ```json
-{ "mcpServers": { "filmcraft": { "command": "/abs/path/filmcraft-cli", "args": ["mcp", "--bridge", "127.0.0.1:9876"] } } }
+{ "mcpServers": { "filmcraft": { "command": "/abs/path/filmcraft-cli", "args": ["mcp", "--bridge", "127.0.0.1:9877"] } } }
 ```
 
 ### Effect parameter replies
@@ -217,11 +217,11 @@ progress and stop it:
 
 ## 2. Control channel
 
-`filmcraft --control 9876` (or `FILMCRAFT_CONTROL_PORT=9876`) listens on `127.0.0.1` only. Send one
+`filmcraft --control 9877` (or `FILMCRAFT_CONTROL_PORT=9877`) listens on `127.0.0.1` only. Send one
 JSON request per line and get one JSON reply per line. Every request carries the app's token as
 `token` (replace the placeholders below): `FILMCRAFT_CONTROL_TOKEN` when you set one, else the one
 the app wrote to `control/<port>.token` in the per-user FilmCraft folder. The CLI and MCP bridge
-send it for you (`filmcraft-cli --bridge 127.0.0.1:9876 call <method> key=value…` reaches any
+send it for you (`filmcraft-cli --bridge 127.0.0.1:9877 call <method> key=value…` reaches any
 method without a script). Full setup and method table: [control-protocol.md](control-protocol.md).
 
 ```jsonc
@@ -242,8 +242,8 @@ Minimal client:
 ```python
 import json, os, pathlib, socket
 # the token you set, else the app's file (macOS path shown; see control-protocol.md for the others)
-token = os.environ.get("FILMCRAFT_CONTROL_TOKEN") or (pathlib.Path.home() / "Library/Application Support/FilmCraft/control/9876.token").read_text().strip()
-s = socket.create_connection(("127.0.0.1", 9876)); f = s.makefile("rw")
+token = os.environ.get("FILMCRAFT_CONTROL_TOKEN") or (pathlib.Path.home() / "Library/Application Support/FilmCraft/control/9877.token").read_text().strip()
+s = socket.create_connection(("127.0.0.1", 9877)); f = s.makefile("rw")
 def call(method, **params):
     f.write(json.dumps({"id": 1, "token": token, "method": method, "params": params}) + "\n"); f.flush()
     return json.loads(f.readline())
@@ -302,9 +302,9 @@ filmcraft-cli --project p.fcproj export out --preset "YouTube 1080p Full HD" --s
 filmcraft-cli export --list-presets prores       # built-in + user presets (--data-dir for another library)
 filmcraft-cli --project p.fcproj exec export.queue.add preset="Apple ProRes 422 HQ" path=renders/ start=true wait=true
 echo '{"id":"file.newBin","params":{"name":"Selects"}}' | filmcraft-cli --project p.fcproj --save run -
-filmcraft-cli --bridge 127.0.0.1:9876 exec window.workspace.color   # the running app
+filmcraft-cli --bridge 127.0.0.1:9877 exec window.workspace.color   # the running app
 filmcraft-cli feedback /tmp/fc-feedback          # a redacted feedback bundle (logs, crashes, history…)
-filmcraft-cli --bridge 127.0.0.1:9876 feedback   # the running app's, with its playback and GPU stats
+filmcraft-cli --bridge 127.0.0.1:9877 feedback   # the running app's, with its playback and GPU stats
 ```
 
 `key=value` values are parsed as JSON when they can be (`3.5`, `true`, `[1,2]`), otherwise taken as
@@ -356,7 +356,7 @@ handful of commands: [showcase-runbook.md](showcase-runbook.md).
 
 For any UI change, look at the result:
 
-1. `cargo run --release -p filmcraft -- --control 9876`
+1. `cargo run --release -p filmcraft -- --control 9877`
 2. Drive the feature through the control channel or the MCP bridge: commands, then clicks and drags
    by automation id.
 3. Assert on `ui.inspect`, `ui.elements` and `sequence.inspect`.

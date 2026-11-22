@@ -625,7 +625,7 @@ it.
 The same in the app and for agents: `autocut.analyze` / `autocut.makeShowcase` with `album` (and
 `subject` or `prompt`) — the Showcase panel's "From a Google Photos album" field,
 `showcase_analyze {album, prompt}` over MCP — then review and build as usual; with
-`--bridge 127.0.0.1:9876` the CLI runs it in the open app.
+`--bridge 127.0.0.1:9877` the CLI runs it in the open app.
 
 ### Showcases in the app
 

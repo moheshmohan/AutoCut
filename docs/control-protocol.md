@@ -1,7 +1,9 @@
 # Control protocol & MCP
 
 ## Desktop control channel
-`filmcraft --control 9876` (or `FILMCRAFT_CONTROL_PORT`) listens on `127.0.0.1:<port>` (loopback only).
+`filmcraft --control 9877` (or `FILMCRAFT_CONTROL_PORT`) listens on `127.0.0.1:<port>` (loopback only).
+The examples use port 9877; AutoCut's docs used 9876 before 23 November 2026, which the Blender MCP
+add-on takes by default. Any free port works: the app listens on the one `--control` names.
 Every request must carry the session's token, 64 random hex characters; missing or incorrect
 credentials get an error and close the connection before any request is dispatched. Loopback alone
 does not restrict clients to the desktop owner's OS account; the token does. It comes from one of two
@@ -17,10 +19,10 @@ places:
   restarted app's new token is picked up:
 
   ```sh
-  open -n --env FILMCRAFT_CONTROL_PORT=9876 AutoCut.app     # or: filmcraft --control 9876 &
-  filmcraft-cli --bridge 127.0.0.1:9876 exec project.inspect
-  filmcraft-cli --bridge 127.0.0.1:9876 call ui.screenshot path=/tmp/app.png   # any method below
-  filmcraft-cli mcp --bridge 127.0.0.1:9876
+  open -n --env FILMCRAFT_CONTROL_PORT=9877 AutoCut.app     # or: filmcraft --control 9877 &
+  filmcraft-cli --bridge 127.0.0.1:9877 exec project.inspect
+  filmcraft-cli --bridge 127.0.0.1:9877 call ui.screenshot path=/tmp/app.png   # any method below
+  filmcraft-cli mcp --bridge 127.0.0.1:9877
   ```
 
 - **A token you choose.** With `FILMCRAFT_CONTROL_TOKEN` set (64 hex characters) the app uses it
@@ -30,8 +32,8 @@ places:
 
   ```sh
   export FILMCRAFT_CONTROL_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
-  filmcraft --control 9876 &
-  filmcraft-cli mcp --bridge 127.0.0.1:9876
+  filmcraft --control 9877 &
+  filmcraft-cli mcp --bridge 127.0.0.1:9877
   ```
 
 A client takes `FILMCRAFT_CONTROL_TOKEN` when it is set, else the file (`filmcraft_automation::control_token`).
@@ -40,7 +42,7 @@ way (Python):
 
 ```python
 import os, pathlib
-token = os.environ.get("FILMCRAFT_CONTROL_TOKEN") or (pathlib.Path.home() / "Library/Application Support/FilmCraft/control/9876.token").read_text().strip()
+token = os.environ.get("FILMCRAFT_CONTROL_TOKEN") or (pathlib.Path.home() / "Library/Application Support/FilmCraft/control/9877.token").read_text().strip()
 ```
 
 Socket reads and writes time out after two minutes without progress, releasing the connection slot.
@@ -251,7 +253,7 @@ Ctrl), `Ctrl` (macOS ⌃), `Alt`, `Shift`. The dialog (Edit ▸ Keyboard Shortcu
 
 ## MCP
 `filmcraft-cli mcp` serves MCP on stdio: headless (in-process session; `--demo` / `--project p.fcproj`)
-or `--bridge 127.0.0.1:9876` to drive the running app. Tools: `command_list`, `command_run`,
+or `--bridge 127.0.0.1:9877` to drive the running app. Tools: `command_list`, `command_run`,
 `command_batch`, `doc_inspect`, `render_preview`, `project_inspect`, `sequence_inspect`, `media_import`,
 `render_frame`, `ui_inspect`, `ui_elements`, `ui_click`, `ui_drag`, `ui_key`, `ui_type`, `ui_screenshot`,
 `ui_control`, `feedback_bundle` (and the AutoCut, template and recipe tools of

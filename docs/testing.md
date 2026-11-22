@@ -300,7 +300,7 @@ project's sequences through a simulated 48 kHz device and counts dropouts, mixin
 For visual work, drive the real app:
 
 ```sh
-cargo run --release -p filmcraft -- --control 9876
+cargo run --release -p filmcraft -- --control 9877
 ```
 
 Then script it over the control channel or MCP: run commands, click by automation id,

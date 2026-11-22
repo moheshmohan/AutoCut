@@ -93,17 +93,17 @@ filmcraft-cli photos pick --project my.fcproj --save   # pick in the browser →
 filmcraft-cli photos pick --max-items 5 --timeout 300   # cap the selection and the wait
 filmcraft-cli photos pick --session <id>                # keep waiting on a timed-out session
 filmcraft-cli photos cached                             # what earlier picks downloaded
-filmcraft-cli photos add <id>… --bridge 127.0.0.1:9876  # import cached items again, no picker
+filmcraft-cli photos add <id>… --bridge 127.0.0.1:9877  # import cached items again, no picker
 
 # hands-free: a local vision agent (Qwen2.5-VL via Ollama) drives the picker itself —
 # it types the query into the picker's search, selects matching videos, presses Done
-filmcraft-cli photos pick --auto "beach sunset videos" --max-items 5 --bridge 127.0.0.1:9876
+filmcraft-cli photos pick --auto "beach sunset videos" --max-items 5 --bridge 127.0.0.1:9877
 
 # a whole album as the seed: the agent searches the picker for the exact title "Robot
 # showcase" (the result is the album's items, after a delay it waits for) and selects all of
 # it — tile by tile in the page when Chrome allows JavaScript from Apple Events (View ▸
 # Developer), else by eyes (--videos-only downloads only its videos)
-filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9876
+filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9877
 
 # many searches, ONE picking session and ONE tab: each typed in turn, every result selected
 # (the selection accumulates), Done once, one download batch
@@ -116,7 +116,7 @@ filmcraft-cli photos pick --auto "October 30 2026" --all --photos --since 2026-1
 
 # a whole history in a handful of sessions: one "videos <Month> <Year>" search per month
 # (--month-days 10-21: one per day of those days in each month instead); implies --all
-filmcraft-cli photos pick --sweep 2017-10..2025-12 --bridge 127.0.0.1:9876
+filmcraft-cli photos pick --sweep 2017-10..2025-12 --bridge 127.0.0.1:9877
 
 # close the picker tabs earlier runs left in Chrome (and nothing else)
 filmcraft-cli photos tidy
@@ -190,7 +190,7 @@ filmcraft-cli showcase --report robots.json --export out/showcase.mp4 --upload -
 filmcraft-cli photos album add "Robot showcase" <mediaItemId>…       # earlier uploads
 filmcraft-cli photos albums                                          # what FilmCraft made
 # … add photos and videos to the album in Google Photos …
-filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9876   # the next round's seed
+filmcraft-cli photos pick --album "Robot showcase" --bridge 127.0.0.1:9877   # the next round's seed
 filmcraft-cli showcase --album "Robot material" --prompt "every robot since 2020" \
     --export out/showcase.mp4 --upload --upload-album "Robot showcase"     # …or the whole video from it
 ```

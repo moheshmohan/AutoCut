@@ -93,7 +93,7 @@ Read these before you touch anything.
 |---|---|
 | CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the build of 20 November 2026 exposes 925 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds still report `0.12.0`, so inspect the packaged commit and command catalogue too. |
 | Building your own CLI | `CARGO_TARGET_DIR=target/agent-<name> cargo build --release -p filmcraft-cli`, one target folder per worktree, never shared. |
-| The app | `target/macos-package/AutoCut.app`, control port **9876**: `open -n --env FILMCRAFT_CONTROL_PORT=9876 target/macos-package/AutoCut.app` |
+| The app | `target/macos-package/AutoCut.app`, control port **9877**: `open -n --env FILMCRAFT_CONTROL_PORT=9877 target/macos-package/AutoCut.app` |
 | RAEA | `~/.raea/versions/0.1.0/bin/raea` for local custom animations, 3D scenes and effects. [Render and import workflow](raea-workflow.md). |
 | Generation tools | The user's own local models, listed in `~/Library/Application Support/FilmCraft/generation/providers.json`: `h3-image` (MiniMax-H3-Image, pictures and edits), `ltx-video` (LTX-2.3, clips up to 10 s; with the Union-Control adapter in `testground/ltxenv/adapters/` it also makes a clip again, `generate.restyle`), `sa3-sfx` and `sa3-music` (Stable Audio 3 small, up to 30 s). `filmcraft-cli exec generate.providers` says which are installed. Never edit that file or download a model without the user's OK. [generation.md](generation.md). |
 | Projects and exports | `~/Movies/AutoCut/<Video name>/`: the `.fcproj`, the exports, and a `build/` folder (scripts, logs, a `README.txt` recipe) |
@@ -121,7 +121,7 @@ filmcraft-cli photos albums
 ```
 
 ```bash
-filmcraft-cli --bridge 127.0.0.1:9876 exec project.inspect
+filmcraft-cli --bridge 127.0.0.1:9877 exec project.inspect
 ```
 
 The last one shows whether the app is up and whether its project has unsaved changes.
@@ -135,7 +135,7 @@ channel all run the same commands, so pick the transport that fits the job.
 |---|---|---|
 | **CLI, headless** | one-off commands and the one-command pipelines (§5) | `filmcraft-cli --project p.fcproj [--save] exec <id> key=value …` or a subcommand (`quick`, `direct`, `export`, …) |
 | **MCP server, headless** | long scripted builds: one engine session, many commands, ids that stay valid | `filmcraft-cli --project p.fcproj mcp`, then `tools/call command_run {id, params}`, and finally `file.save` |
-| **Bridge to the running app** | when the user wants to watch, or for UI work | `filmcraft-cli --bridge 127.0.0.1:9876 exec <id> …`, `… call ui.screenshot path=/tmp/x.png`, or `filmcraft-cli mcp --bridge 127.0.0.1:9876` |
+| **Bridge to the running app** | when the user wants to watch, or for UI work | `filmcraft-cli --bridge 127.0.0.1:9877 exec <id> …`, `… call ui.screenshot path=/tmp/x.png`, or `filmcraft-cli mcp --bridge 127.0.0.1:9877` |
 
 In Claude Code, `.mcp.json` registers two servers:
 
@@ -771,9 +771,9 @@ The details are in [360-video.md](360-video.md).
 
 ## 12. The live app
 
-- **Is it up?** `filmcraft-cli --bridge 127.0.0.1:9876 exec project.inspect`. The `dirty` field
+- **Is it up?** `filmcraft-cli --bridge 127.0.0.1:9877 exec project.inspect`. The `dirty` field
   says whether there are unsaved changes.
-- **Look at it:** `filmcraft-cli --bridge 127.0.0.1:9876 call ui.screenshot path=/tmp/app.png`.
+- **Look at it:** `filmcraft-cli --bridge 127.0.0.1:9877 call ui.screenshot path=/tmp/app.png`.
   `call ui.elements` lists the clickable ids; `call ui.click id=…` clicks one.
 - **Quit it safely:** first `exec project.inspect` must show `dirty: false`, then
   `exec app.quit`. `app.quit` works only over the bridge, so headless `commands` doesn't list it.
