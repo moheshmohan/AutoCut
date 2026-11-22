@@ -373,3 +373,9 @@
 	Auto Redact Faces and Plates…	Автоматически скрыть лица и номера…
 # Quick Short (Sequence ▸ Quick Short…)
 	Quick Short…	Быстрый Short…
+# Slip Monitor (a Slip tool drag in the Program monitor)
+	Previous: {name}	Предыдущий: {name}
+	Next: {name}	Следующий: {name}
+	Slip: {offset} frame	Скольжение: {offset} кадр
+	Slip: {offset} frames	Скольжение, кадров: {offset}
+	at the media limit	на границе медиа

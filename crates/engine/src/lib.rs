@@ -109,6 +109,7 @@ pub mod settings;
 pub mod shortcut_presets;
 pub mod shortcuts;
 pub mod sky;
+pub mod slip;
 pub mod soundfonts;
 mod source_check;
 pub mod source_monitor;
@@ -1773,6 +1774,8 @@ mod sequence_tools_tests;
 mod settings_tests;
 #[cfg(test)]
 mod shortcuts_tests;
+#[cfg(test)]
+mod slip_tests;
 #[cfg(test)]
 mod soundfonts_tests;
 #[cfg(test)]
