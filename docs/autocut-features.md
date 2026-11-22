@@ -340,3 +340,17 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   the look follows the description, and with `look` and `references` the picture tool changes
   the first frame first, which puts another character in a person's place. A Restyle clip mode
   in the Generate panel. 925 commands.
+
+## Update 2026-11-22 (upstream sync, AV55 to AV58)
+
+- **AV55 to AV58**: upstream FilmCraft `f67d38b3..009b72ca` (18 commits; 8 taken, 10 skipped,
+  8 of those the craft-libs migration), recorded in `plan/upstream-sync-2026-11-22.md`.
+- **Slip Monitor** (AV56): dragging a clip with the Slip tool (Y) turns the Program monitor into
+  a four-up (the previous clip's last frame, the slipped clip's new first and last frames with
+  their source timecodes, the next clip's first frame) with the offset in timecode and frames;
+  the Timeline shows the offset at the pointer and the sound's waveform slides. Agents get
+  `timeline.slipPreview {clip, delta|deltaFrames}`: what `timeline.slip` would do, without
+  editing. 930 commands.
+- The Trim Monitor's two pictures at a cut inside one take no longer cancel each other's decode
+  (AV55); VA-API reads pictures without a copy on Linux (AV57); a project saved before
+  2026-10-21 with portrait photos opens with them the right size and centred (AV58).
