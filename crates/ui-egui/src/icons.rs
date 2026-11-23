@@ -122,6 +122,9 @@ pub enum Icon {
     Moon,
     /// Colour parameters: pick a colour from the Program monitor (a pipette).
     Eyedropper,
+    /// The Program monitor's Comment tool: a square speech bubble with a plus (a comment pinned
+    /// to a frame). Drawn here.
+    Comment,
     /// Export destinations (generic glyphs drawn here, no platform logo): a media file (a page
     /// with a folded corner and a play triangle), a video site (a play triangle in a rounded
     /// square outline), a short vertical video (a tall rounded frame with a play triangle), and
@@ -656,6 +659,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.dot(8.0, 7.0, 0.9);
             pen.dot(10.5, 7.0, 0.9);
         }
+        Comment => {
+            pen.closed(&[(2.5, 2.5), (13.5, 2.5), (13.5, 10.5), (7.5, 10.5), (4.5, 13.5), (4.5, 10.5), (2.5, 10.5)]);
+            pen.line(&[(8.0, 4.5), (8.0, 8.5)]);
+            pen.line(&[(6.0, 6.5), (10.0, 6.5)]);
+        }
         Globe => {
             pen.circle(8.0, 8.0, 6.0);
             pen.line(&[(2.0, 8.0), (14.0, 8.0)]);
@@ -933,6 +941,7 @@ mod tests {
         Network,
         Clock,
         Eyedropper,
+        Comment,
         DestFile,
         DestVideo,
         DestShort,

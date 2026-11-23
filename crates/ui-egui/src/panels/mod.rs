@@ -45,6 +45,7 @@ pub mod project_views;
 pub mod recipes;
 pub mod reference;
 pub mod remix;
+pub mod review;
 pub mod scopes;
 pub mod sequence_settings;
 pub mod settings;

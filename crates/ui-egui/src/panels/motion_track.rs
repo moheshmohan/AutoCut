@@ -64,6 +64,8 @@ pub fn toggle(app: &mut FilmcraftApp) -> Result<(), String> {
     }
     let clip = pick_clip(app).ok_or_else(|| tl!("Select a video clip to track").to_string())?;
     let track = app.session.project.motion_tracks.values().filter(|t| t.clip == clip).map(|t| t.id.0).max();
+    // both tools own the picture
+    app.ui.review_tool = None;
     app.ui.track_tool = Some(TrackToolState { clip: clip.0, rect: None, method: "subject".into(), job: None, track });
     Ok(())
 }

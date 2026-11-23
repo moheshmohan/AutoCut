@@ -594,6 +594,12 @@ pub struct UiState {
     /// The Program monitor's Track tool (open when Some; `panels::motion_track`).
     #[serde(default)]
     pub track_tool: Option<TrackToolState>,
+    /// The Program monitor's Comment tool (on when Some; `panels::review`).
+    #[serde(default)]
+    pub review_tool: Option<ReviewToolState>,
+    /// The open review comments the Program monitor marks (`panels::review`).
+    #[serde(default)]
+    pub review_marks: ReviewMarks,
     /// Effect presets: the preset being renamed / the Save Preset dialog (open when Some).
     #[serde(default)]
     pub save_preset: Option<SavePresetDraft>,
@@ -674,6 +680,46 @@ pub struct TrackToolState {
     pub method: String,
     pub job: Option<u64>,
     pub track: Option<u64>,
+}
+
+/// The Comment tool on the Program monitor: what the comment being written points at (a box drawn
+/// on the picture, or a point clicked, in sequence pixels `[x, y, w, h]`; the clip under it; the
+/// playhead when it was drawn) and its text. `review.comment` saves it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewToolState {
+    #[serde(rename = "box")]
+    pub area: Option<[f64; 4]>,
+    pub clip: Option<u64>,
+    /// Ticks.
+    pub time: Option<i64>,
+    pub text: String,
+    /// The text field takes the keyboard on the next frame (after a box is drawn).
+    #[serde(skip)]
+    pub focus: bool,
+}
+
+/// One open review comment marked on the Program monitor.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewMark {
+    pub id: String,
+    pub sequence: u64,
+    /// Ticks.
+    pub time: i64,
+    #[serde(rename = "box")]
+    pub area: Option<[f64; 4]>,
+    pub text: String,
+}
+
+/// The open review comments of the saved project's inbox, read every few seconds.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewMarks {
+    pub comments: Vec<ReviewMark>,
+    /// When they were read (the UI clock, seconds).
+    #[serde(skip)]
+    pub read_at: Option<f64>,
 }
 
 /// A pen mask in progress: vertices placed so far, in clip pixels (`[x, y, tangent x, tangent y]`).
@@ -1081,6 +1127,8 @@ impl Default for UiState {
             mask_pen: None,
             object_mask: None,
             track_tool: None,
+            review_tool: None,
+            review_marks: ReviewMarks::default(),
             save_preset: None,
             audio_fx_editors: Vec::new(),
             sync_dialog: None,

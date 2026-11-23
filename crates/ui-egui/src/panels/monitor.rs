@@ -329,11 +329,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     if show_picture && !compare {
         monitor_view::zoom_pan_input(app, ui, which, video_area, pic, display_w, ppp);
     }
+    if which == Which::Program {
+        // the open review comments, for the scrub bar's marks and the Comment tool
+        crate::panels::review::refresh(app, ctx.input(|i| i.time));
+    }
     if which == Which::Program && show_picture {
         // an armed eyedropper owns clicks on the picture: the overlays would sit on top and take
         // them (the selected clip's transform handles cover it, #1023)
         if app.ui.eyedropper.is_some() {
             eyedropper(app, ui, &pic_resp, pic, target, rate, time);
+        } else if app.ui.review_tool.is_some() {
+            // the Comment tool owns the picture while it is on
+            crate::panels::review::monitor_overlay(app, ui, pic, frame_size);
         } else if crate::panels::aim360::monitor_overlay(app, ui, pic) {
             // aiming a 360° camera owns the picture while it is on
         } else if app.ui.track_tool.is_some() {
@@ -902,6 +909,9 @@ fn mini_timeline(
             ));
         }
     }
+    if which == Which::Program {
+        crate::panels::review::scrub_marks(app, ui, bar, shown);
+    }
     if shows(time) {
         let x = xof(time);
         // playhead: blue triangle over a line
@@ -996,6 +1006,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
     if !src {
         buttons.push((Icon::Loop, "playback.loop", tl!("Loop")));
         buttons.push((Icon::TrackMaskFwd, "track.tool", tl!("Track Object")));
+        buttons.push((Icon::Comment, "review.tool", tl!("Comment on Frame")));
     }
     let hidden = monitor_view::view(app, which).transport_hidden.clone();
     let all_buttons = buttons.clone();
@@ -1087,6 +1098,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
                 let selected = match *command {
                     "media.toggleProxies" => Some(app.session.media.use_proxies()),
                     "track.tool" => Some(app.ui.track_tool.is_some()),
+                    "review.tool" => Some(app.ui.review_tool.is_some()),
                     "playback.toggle" => Some(app.playback.playing),
                     "source.playback.toggle" => Some(app.source_playback.clock.playing),
                     _ => None,
@@ -1110,7 +1122,13 @@ fn transport_button(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, prefi
         ui.painter().rect_filled(rect, 4.0, t.hover);
     }
     let size = if matches!(command, "playback.toggle" | "source.playback.toggle") { 20.0 } else { 18.0 };
-    let color = if (command == "media.toggleProxies" && app.session.media.use_proxies()) || (command == "track.tool" && app.ui.track_tool.is_some()) {
+    let on = match command {
+        "media.toggleProxies" => app.session.media.use_proxies(),
+        "track.tool" => app.ui.track_tool.is_some(),
+        "review.tool" => app.ui.review_tool.is_some(),
+        _ => false,
+    };
+    let color = if on {
         t.accent
     } else if response.hovered() {
         t.tab_text_active
@@ -1132,6 +1150,7 @@ fn invoke_transport(app: &mut FilmcraftApp, ctx: &egui::Context, which: Which, c
         }
         "exportFrame" => crate::menus::invoke(app, ctx, "file.exportFrame", json!({"monitor": if source { "source" } else { "program" }})),
         "track.tool" => crate::panels::motion_track::toggle(app).map(|()| serde_json::Value::Null),
+        "review.tool" => crate::panels::review::toggle(app).map(|()| serde_json::Value::Null),
         command => crate::menus::invoke(app, ctx, command, json!({"monitor": if source { "source" } else { "program" }})),
     };
     if let Err(error) = result {

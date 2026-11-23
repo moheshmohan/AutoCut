@@ -573,6 +573,22 @@ wait asked over the control channel always runs as that job. `job: true` starts 
 (`{job}` at once; `jobs.list` shows the answer under `review`, `jobs.cancel` stops it). In process
 (`filmcraft-cli exec`), `wait: true` blocks that call, reading the file four times a second.
 
+**In the app**, the Program monitor's transport has a Comment on Frame button (a square speech
+bubble with a plus; `program.transport.review.tool`; the project must be saved). With it on, a
+click on the picture points at a spot and a drag draws a box; the clip under it and the
+playhead's frame go with the comment. The bar along the top of the picture takes the text
+(`program.review.text`); Enter or Save (`program.review.save`) runs `review.comment` with author
+`"user"`, and the tool stays on for the next one. Moving to another frame drops the box (the text
+stays); Clear (`program.review.clear`) drops both; Escape drops them, or closes the tool when there
+are none; Done (`program.review.done`) closes it. Previous and Next (`program.review.prev`,
+`program.review.next`) go to the open comments before and after the playhead. While the tool is
+on, the open comments of the frame shown are drawn on the picture with their ids
+(`program.review.comment.<id>`); every open comment is marked on the monitor's scrub bar
+(`program.review.mark.<id>`), the tool on or off, read again every three seconds. The picture
+where a click or drag lands is `program.review.picture`, the box being written
+`program.review.box`. The tool's state is `ui.review_tool` (`{box, clip, time, text}`) and the
+marks `ui.review_marks` in `ui.inspect`.
+
 ## Upstream additions
 
 - Scrub audio opens on its own worker; a drag reuses its stream and releases it before playback.
