@@ -713,6 +713,8 @@ Never show the user something you haven't looked at.
 | Text in the platform's interface areas | `exec sequence.checkSafeZones platform=reels` |
 | Motion: pops, stills, a flat opening, cuts a minute (warnings) | `exec qa.motionEnergy '{"path":"out.mp4","sheet":"motion.png"}'` (or `sequence`; declare intentional `holds`) |
 | Text and timeline craft: reading time, size, contrast over the footage, dead stretches, silence (warnings) | `exec sequence.checkCraft` |
+| Copy: stock phrases, filler, shot-describing narration, device budgets, figures not in the fact ledger (warnings) | `exec copy.lint '{"sequence":12,"publish":{"title":"…","description":"…"}}'`; your phrases in `autocut.taste` `phrases` or `allow` are never flagged; figures are checked against `facts` or `build/facts.json` |
+| The delivery gate with tiers | `exec delivery.preflight` reports each check's `tier`: **Floor** (blocks: sources, clicks, mix, privacy, changed narration, Shorts safe zones, screen protection; the new text contrast under 3:1 and figures only warn until `floorBlocks: true`), **Reflex** (fix it, or waive it in `build/decisions.json` with `reason` and `evidence`; more than five waivers is a finding), **Finish** (reported only) |
 | Unblurred faces in the result | `exec sequence.checkPrivacy '{"seconds":[1,5,9]}'` |
 | What the voice actually says | import the export and run `media.understandSpeech` on it; catches garbled or mispronounced lines and mid-phrase pauses |
 | A pipeline's own QA | `<out>.qa.json`, `<out>.qa.png`, `<out>.sheet.jpg`, `<out>.report.json` |
