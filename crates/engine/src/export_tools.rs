@@ -722,6 +722,9 @@ pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     if let Some(m) = crate::motion_graphics::outcome_json(s, j.id) {
         v["motion"] = m;
     }
+    if let Some(m) = crate::motion_strips::outcome_json(s, j.id) {
+        v["motionStrips"] = m;
+    }
     if crate::autocut::is_showcase(s, j.id) {
         v["showcase"] = crate::autocut::outcome_json(s, j.id);
     }

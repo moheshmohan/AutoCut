@@ -1246,3 +1246,24 @@ fn the_bridge_sends_the_token_the_app_wrote() {
     assert_eq!(cli(&["call", "ui.inspect"]).status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `frames --motion`: the demo's transitions as motion filmstrips, one sheet each, in a new folder.
+#[test]
+fn frames_motion_writes_a_filmstrip_per_transition() {
+    let dir = std::env::temp_dir().join(format!("filmcraft-cli-motion-strips-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = dir.join("strips");
+    let o = cli(&["--demo", "frames", "--motion", "--scale", "0.1", "--out", out.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let sheets = v["sheets"].as_array().unwrap();
+    assert!(!sheets.is_empty() && sheets.iter().all(|s| std::path::Path::new(s["path"].as_str().unwrap()).is_file()), "{v:#}");
+    assert!(sheets.iter().any(|s| s["item"]["kind"] == "transition"), "{v:#}");
+    assert!(v["findings"].is_array());
+    // the folder now holds sheets: a second run is refused rather than replacing them
+    let again = cli(&["--demo", "frames", "--motion", "--out", out.to_str().unwrap()]);
+    assert!(!again.status.success());
+    let bad = cli(&["--demo", "frames", "--motion", "--items", "12:sideways", "--out", dir.join("x").to_str().unwrap()]);
+    assert!(!bad.status.success());
+    let _ = std::fs::remove_dir_all(&dir);
+}

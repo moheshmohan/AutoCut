@@ -73,6 +73,7 @@ pub mod moments;
 pub mod motion_check;
 pub mod motion_energy;
 pub mod motion_graphics;
+pub mod motion_strips;
 pub mod motion_track;
 pub mod multicam;
 pub mod music;
@@ -715,6 +716,8 @@ pub struct Session {
     /// Motion graphics renders by RAEA whose results are imported and placed when their job
     /// finishes (`motion.render`), and what the finished ones made.
     pub motion_renders: motion_graphics::MotionRenders,
+    /// Motion filmstrip jobs (`sequence.motionStrips`) and what the finished ones made.
+    pub motion_strips: motion_strips::StripJobs,
     /// The SoundFont generated music plays on, loaded once (`music.useSoundfont`, `soundfont`).
     pub soundfonts: soundfonts::SoundFonts,
     /// The latest `music.preview`, for the host to play and `audio.generate` to place.
@@ -885,6 +888,7 @@ impl Session {
             neural_music: Default::default(),
             generation: Default::default(),
             motion_renders: Default::default(),
+            motion_strips: Default::default(),
             soundfonts: Default::default(),
             music_preview: Default::default(),
             presets: Default::default(),

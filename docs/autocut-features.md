@@ -493,3 +493,17 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   change. `delivery.preflight` runs it as the `motionCraft` check at the Reflex tier (waivable in
   `build/decisions.json`; `motionCraft: false` skips it). Details in
   `docs/local-pipeline-upgrades.md` ("Craft QA"). 941 commands.
+- **PX1.6**: motion filmstrips. `sequence.motionStrips {sequence?, items?: [clipId | {clip, edge?:
+  "in"|"out"} | {transition}], out, scale?, wait?}` renders, for each animated title (its entrance
+  and its exit), each transition and each overlay with alpha (`motion.render`,
+  `composition.import`), seven frames of the sequence (just before, first, three between, last,
+  settled after) into one labelled sheet per item in a new or empty folder, on the GPU frame
+  renderer where there is one and the CPU otherwise. Every frame of each move (at most 64) is also
+  rendered small and read on 96×54 grey grids: `jump` (a step into the first or out of the last
+  frame at least 0.02 and 3 × the move's median step), `midStep` (a frame at least 0.01 and 3 × its
+  neighbours), `dissolveDip` (a dissolve's mean grey 0.04 under its darker end), `fadeAfterShot`
+  (an exit still on screen when the picture under it cuts) and `entranceReplay` (an entrance at an
+  edit that brings in what the frame before already showed); the last two compare frames with the
+  same frames rendered without the layer. Warnings only (D7), at most 32 items, a job in
+  `jobs.list` (`wait: true` runs it in the call). `filmcraft-cli frames --motion --project p.fcproj
+  [--sequence N] [--items 12,12:out,t5] [--scale 0.25] --out folder` runs it. 942 commands.

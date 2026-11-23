@@ -199,6 +199,13 @@ const VALUED_IN: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Options that take a value elsewhere but are flags of one subcommand (`frames --motion`).
+const FLAG_IN: &[(&str, &[&str])] = &[("frames", &["--motion"])];
+
+fn flag_in(cmd: Option<&String>, opt: &str) -> bool {
+    cmd.is_some_and(|c| FLAG_IN.iter().any(|(sub, opts)| sub == c && opts.contains(&opt)))
+}
+
 fn valued_in(cmd: Option<&String>, opt: &str) -> bool {
     cmd.is_some_and(|c| VALUED_IN.iter().any(|(sub, opts)| sub == c && opts.contains(&opt)))
 }
@@ -218,7 +225,7 @@ impl Args {
                 a.positionals.extend(it.by_ref());
             } else if let Some((k, v)) = s.split_once('=').filter(|(k, _)| k.starts_with("--")) {
                 a.opts.push((k.to_string(), Some(v.to_string())));
-            } else if VALUED.contains(&s.as_str()) || valued_in(a.positionals.first(), &s) {
+            } else if (VALUED.contains(&s.as_str()) && !flag_in(a.positionals.first(), &s)) || valued_in(a.positionals.first(), &s) {
                 let v = it.next();
                 a.opts.push((s, v));
             } else if s.starts_with("--") && s.len() > 2 {
@@ -323,6 +330,11 @@ mod tests {
         // regression: --language took no value, so `--language ml` was a flag and a positional
         let c = args("showcase --report r.json --language ml --plan");
         assert_eq!((c.opt("--language"), c.positionals.as_slice()), (Some("ml"), &["showcase".to_string()][..]));
+        // `--motion` takes a value (shorts), but `frames --motion` is a flag
+        let d = args("frames --motion --items 12:out --out strips");
+        assert!(d.flag("--motion"));
+        assert_eq!((d.opt("--items"), d.opt("--out"), d.positionals.as_slice()), (Some("12:out"), Some("strips"), &["frames".to_string()][..]));
+        assert_eq!(args("shorts --motion calm").opt("--motion"), Some("calm"));
     }
 
     #[test]

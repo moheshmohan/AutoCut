@@ -437,6 +437,13 @@ SUBCOMMANDS
   frames <video> (--at 601,603,605 | --n 6) [--scale 0.5] [--columns 4] --out sheet.jpg
                                 frames of any video file (an export, say) in one labelled sheet;
                                 the file is read in a fresh headless session, no project needed
+  frames --motion --project p.fcproj [--sequence N] [--items 12,12:out,t5] [--scale 0.25] --out folder
+                                motion filmstrips (sequence.motionStrips): seven frames (before,
+                                first, three between, last, settled) of every animated title's
+                                entrance and exit, transition and overlay, one sheet each in a
+                                new or empty folder, with jump, hitch, dissolve-dip, fade-past-
+                                the-cut and replayed-entrance warnings; --items picks clips
+                                (12, 12:in, 12:out) and transitions (t5)
   analyze '<subject>' [--items 1,2] [--frames N] [--screen N] [--relabel earlier.json] [--compare 150]
          [--out report.json] [--fresh]
                                 which video items show <subject> (e.g. robot): a local vision model

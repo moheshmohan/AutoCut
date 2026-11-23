@@ -326,6 +326,37 @@ and keyframes are checked, not what moves inside it. Text units are counted from
 text, letters as shaped clusters, as the renderer animates them. Clips inside nested sequences are
 not read. `delivery.preflight` runs it as the `motionCraft` check (Reflex).
 
+Motion filmstrips show and measure those moves as they render. `sequence.motionStrips` (and
+`filmcraft-cli frames --motion`) takes every animated title's entrance and exit, every transition
+and every overlay with alpha (or the `items` named: a clip id, `{clip, edge}`, `{transition}`), at
+most 32, and writes one sheet per item into `out`, a new or empty folder: seven frames (just
+before, the first, a quarter, the middle, three quarters, the last, and settled: 0.25 s after an
+entrance or a transition, the first frame after an exit), each labelled with its number and time.
+It is a job (`jobs.list` shows its progress and, finished, its result under `motionStrips`);
+`wait: true` runs it in the call, as the CLI does:
+
+```sh
+filmcraft-cli frames --motion --project edit.fcproj --out /new/build/strips
+filmcraft-cli frames --motion --project edit.fcproj --items 12:in,t5 --scale 0.25 --out /new/build/strips-2
+```
+
+Every frame of each move (at most 64, spread evenly over a longer one) is also rendered small and
+reduced to the 96×54 grey grid of `qa.motionEnergy`; a step is the mean grey change between
+neighbouring frames:
+
+| Code | Warns when | Starting value |
+|---|---|---|
+| `jump` | the step into a move's first frame, or out of its last, stands out from the move's own steps | at least 0.02 of full scale and 3 × the median step; not where another clip cuts |
+| `midStep` | one step inside the move stands out from the two on each side (a hitch) | at least 0.01 and 3 × their median; only when every frame was read, and not from or to a frame of one flat colour (the black of a dip, whose first step out reads large in sRGB) |
+| `dissolveDip` | a dissolve (cross, film, blur, dither dissolve or morph cut) gets darker in the middle than both its ends | mean grey 0.04 under the darker end |
+| `fadeAfterShot` | a title's or overlay's exit is still on screen when another clip cuts under it | the layer's share of the frame at the cut at least a tenth of its share when the exit starts |
+| `entranceReplay` | an entrance at an edit brings in what the frame before it already showed (one title cut in two, both halves entering) | the frame before within half the layer's share of the settled frame, a frame of the move at least a quarter away |
+
+A layer's share of a frame is the frame against the same frame rendered without the layer's
+clip, so the title is told from the footage under it. The sheets and the analysis render on the
+GPU frame renderer where the host has one, the CPU reference renderer otherwise, without
+captions. Findings are warnings and say what to change.
+
 `copy.lint` reads the words of a video: `text` (taken as narration), `publish` (`title`,
 `description`, `caption`, `tags`), `script` (a lines file, a showcase plan or plain text, as
 `script.lintMalayalam` reads it) and `sequence` (its titles, collected as `sequence.checkCraft`

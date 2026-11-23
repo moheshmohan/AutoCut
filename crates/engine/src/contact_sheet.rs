@@ -226,6 +226,27 @@ pub(crate) fn write_images(s: &Session, cmd: &str, rows: &[Vec<(filmcraft_render
     write_made(s, cmd, &made, path)
 }
 
+/// Rows of labelled pictures (premultiplied linear, as rendered) drawn into one sheet and encoded
+/// (JPEG when `jpeg`, else PNG), for `cmd`: its bytes, width and height.
+pub(crate) fn encode_rows(cmd: &str, rows: &[Vec<(filmcraft_render::Image, String)>], jpeg: bool) -> Result<(Vec<u8>, u32, u32)> {
+    let made: Vec<Vec<Tile>> = rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|(img, label)| Tile { rgba: img.over_black_rgba8(), w: img.w as u32, h: img.h as u32, label: label.clone(), ok: img.w > 0 && img.h > 0 })
+                .collect()
+        })
+        .collect();
+    let (rgba, w, h) = compose(&made).ok_or_else(|| bad(cmd, "the sheet could not be drawn"))?;
+    let bytes = if jpeg {
+        filmcraft_export::encode_still_with_quality(filmcraft_export::Format::JpegSequence, rgba, w, h, false, 88)
+    } else {
+        filmcraft_export::encode_png(rgba, w, h)
+    }
+    .map_err(|e| bad(cmd, e.to_string()))?;
+    Ok((bytes, w, h))
+}
+
 /// Rows of labelled tiles (straight sRGB RGBA8, its width and height, its label) in one sheet at
 /// `path` (JPEG by its extension, else PNG), for `cmd`: its path and size. A tile whose pixels do
 /// not match its size is drawn as a missing frame.

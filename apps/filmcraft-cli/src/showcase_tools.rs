@@ -221,6 +221,9 @@ pub async fn sheet(a: &Args) {
 /// `frames <video> --at 601,603 [--n 6] [--scale 0.5] [--columns 4] --out sheet.jpg`: the video is
 /// imported into a fresh headless session (no project is touched) and its frames laid out.
 pub async fn frames(a: &Args) {
+    if a.flag("--motion") {
+        return motion_frames(a).await;
+    }
     const USAGE: &str = "frames <video> (--at 601,603,605 | --n 6) [--scale 0.5] [--columns 4] --out sheet.jpg";
     let (Some(video), Some(out)) = (a.pos(1), a.opt("--out")) else { usage(USAGE) };
     if a.opt("--bridge").is_some() {
@@ -248,6 +251,64 @@ pub async fn frames(a: &Args) {
     match s.execute("media.contactSheet", p) {
         Ok(v) => print(a, &sheet_summary(&v)),
         Err(e) => fail(format!("frames: {e}")),
+    }
+}
+
+/// `--items 12,12:out,t5`: clips (all their moves, or the entrance or exit) and transitions.
+pub fn motion_items(spec: &str) -> Result<Vec<Value>, String> {
+    spec.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if let Some(t) = s.strip_prefix('t') {
+                let id: u64 = t.parse().map_err(|_| format!("`{s}`: a transition is t and its id, e.g. t5"))?;
+                return Ok(json!({"transition": id}));
+            }
+            let (clip, edge) = s.split_once(':').map_or((s, None), |(c, e)| (c, Some(e)));
+            let id: u64 = clip.trim().parse().map_err(|_| format!("`{s}`: a clip id, then :in or :out if you like"))?;
+            match edge.map(str::trim) {
+                None => Ok(json!(id)),
+                Some(e @ ("in" | "out")) => Ok(json!({"clip": id, "edge": e})),
+                Some(e) => Err(format!("`{s}`: the edge is in or out, not `{e}`")),
+            }
+        })
+        .collect()
+}
+
+/// `frames --motion --project p.fcproj [--sequence N] [--items 12,12:out,t5] [--scale 0.25] --out
+/// folder`: motion filmstrips of the project's (or, with --bridge, the running app's) sequence.
+async fn motion_frames(a: &Args) {
+    const USAGE: &str = "frames --motion --project p.fcproj [--sequence N] [--items 12,12:out,t5] [--scale 0.25] --out folder";
+    let Some(out) = a.opt("--out") else { usage(USAGE) };
+    let mut p = json!({"out": absolute(out), "wait": true});
+    if let Some(v) = a.opt("--sequence") {
+        p["sequence"] = json!(v.parse::<u64>().unwrap_or_else(|_| usage(format!("frames --motion: --sequence wants a sequence id, not `{v}`"))));
+    }
+    if let Some(v) = a.opt("--items") {
+        p["items"] = json!(motion_items(v).unwrap_or_else(|e| usage(format!("frames --motion: --items: {e}"))));
+    }
+    if let Some(v) = a.opt("--scale") {
+        p["scale"] = json!(
+            v.parse::<f64>().ok().filter(|x| x.is_finite()).unwrap_or_else(|| usage(format!("frames --motion: --scale wants a share like 0.25, not `{v}`")))
+        );
+    }
+    let mut b = Backend::open(a);
+    match b.exec("sequence.motionStrips", p).await {
+        // in the app (--bridge) the strips run as its job: the result comes back under `motionStrips`
+        Ok(v) => {
+            let v = if v["motionStrips"].is_object() { v["motionStrips"].clone() } else { v };
+            print(
+                a,
+                &json!({
+                    "folder": v["folder"],
+                    "sheets": v["sheets"].as_array().map(|s| s.iter().map(|x| json!({"path": x["path"], "item": x["item"]})).collect::<Vec<_>>()),
+                    "findings": v["findings"],
+                    "counts": v["counts"],
+                    "skipped": v["skipped"],
+                }),
+            )
+        }
+        Err(e) => fail(format!("frames --motion: {e}")),
     }
 }
 
@@ -486,6 +547,15 @@ pub async fn build_and_ship(a: &Args, b: &mut Backend, run: &Run, entries: &[Ent
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn motion_items_name_clips_edges_and_transitions() {
+        assert_eq!(motion_items("12, 12:out,t5").unwrap(), vec![json!(12), json!({"clip": 12, "edge": "out"}), json!({"transition": 5})]);
+        for bad in ["x", "12:sideways", "t", "t-1", "-3", "12:"] {
+            assert!(motion_items(bad).is_err(), "{bad}");
+        }
+        assert!(motion_items("").unwrap().is_empty());
+    }
 
     #[test]
     fn languages_and_their_exports() {

@@ -33,6 +33,7 @@ pub const LONG_COMMANDS: &[&str] = &[
     "generate.assets",
     "motion.render",
     "composition.import",
+    "sequence.motionStrips",
     "music.downloadNeuralModel",
     "music.downloadSoundfont",
     "music.preview",
@@ -67,9 +68,24 @@ pub const LONG_COMMANDS: &[&str] = &[
 /// what an Instagram job did (the account connected, the Reel published), a fixed copy's file and checks,
 /// what an Auto Reframe made (the new sequence, the clips followed), what an Auto Redact hid
 /// (per clip, and why the rest was not), what a recipe ran, what speech understanding found, what a
-/// scene index found, what a motion graphics render made (its checks, files, item and clip).
-pub const JOB_EXTRAS: &[&str] =
-    &["offlineMedia", "upload", "showcase", "music", "youtube", "instagram", "publish", "reframe", "redact", "recipe", "speech", "scenes", "motion"];
+/// scene index found, what a motion graphics render made (its checks, files, item and clip), the
+/// motion filmstrips' sheets and findings.
+pub const JOB_EXTRAS: &[&str] = &[
+    "offlineMedia",
+    "upload",
+    "showcase",
+    "music",
+    "youtube",
+    "instagram",
+    "publish",
+    "reframe",
+    "redact",
+    "recipe",
+    "speech",
+    "scenes",
+    "motion",
+    "motionStrips",
+];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);

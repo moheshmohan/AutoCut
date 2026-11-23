@@ -329,6 +329,8 @@ struct Ctx {
 struct Read {
     findings: Vec<Value>,
     moves: Vec<Move>,
+    /// Titles with a looping text animator.
+    loops: Vec<u64>,
     animators: usize,
     keyframed: usize,
     springs: usize,
@@ -447,6 +449,7 @@ fn read_animators(project: &Project, it: &TrackItem, track: &str, c: &Ctx, out: 
         }
         if let Some(l) = &anim.repeat {
             out.animators += 1;
+            out.loops.push(it.id.0);
             if l.duration < AMBIENT_LOOP_SECONDS {
                 let secs = it.duration.seconds();
                 out.findings.push(finding(
@@ -769,6 +772,90 @@ fn judge_moves(moves: &[Move], c: &Ctx, findings: &mut Vec<Value>) {
     }
 }
 
+/// Every clip of a sequence's visible video tracks read.
+struct Sequenced {
+    read: Read,
+    roles: BTreeMap<u64, Role>,
+    clips: usize,
+    transitions: usize,
+    truncated: bool,
+}
+
+fn read_sequence(project: &Project, q: &Sequence, c: &Ctx) -> Sequenced {
+    let mut read = Read::default();
+    let mut roles: BTreeMap<u64, Role> = BTreeMap::new();
+    let (mut clips, mut transitions, mut truncated) = (0usize, 0usize, false);
+    for (ti, track) in q.video_tracks.iter().enumerate().filter(|(_, t)| t.enabled) {
+        let name = format!("V{}", ti + 1);
+        for it in track.items.iter().filter(|i| i.enabled) {
+            if clips >= MAX_CLIPS {
+                truncated = true;
+                break;
+            }
+            clips += 1;
+            let r = role(project, it);
+            roles.insert(it.id.0, r);
+            if r == Role::Title {
+                read_animators(project, it, &name, c, &mut read);
+            }
+            read_keyframes(it, &name, r, c, &mut read);
+        }
+        transitions += read_transitions(q, ti, &roles, c, &mut read);
+    }
+    Sequenced { read, roles, clips, transitions, truncated }
+}
+
+/// What moves in a sequence, for the motion filmstrips (`sequence.motionStrips`).
+#[derive(Clone, Debug)]
+pub(crate) struct Window {
+    pub clip: u64,
+    /// `title` or `overlay`.
+    pub role: &'static str,
+    /// `in` or `out` for a title's entrance or exit; None for a looping title's or an overlay's
+    /// whole clip.
+    pub edge: Option<&'static str>,
+    pub start: Tick,
+    pub end: Tick,
+    pub what: String,
+}
+
+/// The windows of `q` that move: each title's entrance and exit (its text animators and edge
+/// keyframes together; its transitions are items of their own), a looping title's whole clip and
+/// each overlay's whole clip, in time order.
+pub(crate) fn windows(project: &Project, q: &Sequence) -> Vec<Window> {
+    let fps = q.settings.frame_rate.sane().as_f64();
+    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    let k = fps / 30.0;
+    let bands =
+        Bands { entrance: (ENTRANCE_FRAMES_30.0 * k, ENTRANCE_FRAMES_30.1 * k), exit: (EXIT_FRAMES_30.0 * k, EXIT_FRAMES_30.1 * k), stagger: STAGGER_SECONDS };
+    let c = Ctx { fps, playful: true, bands, short_side: f64::from(q.settings.width.min(q.settings.height).max(1)) };
+    let seen = read_sequence(project, q, &c);
+    let mut out = Vec::new();
+    for (clip, r) in &seen.roles {
+        let Some((_, it)) = q.find_item(filmcraft_project::ClipId(*clip)) else { continue };
+        let name = || project.item(it.item).map_or_else(String::new, |p| p.name.chars().take(80).collect::<String>());
+        match r {
+            Role::Title => {
+                let mut any = false;
+                for (entering, edge) in [(true, "in"), (false, "out")] {
+                    let mine: Vec<&Move> = seen.read.moves.iter().filter(|m| m.clip == *clip && m.entering == entering && m.source != "transition").collect();
+                    let (Some(start), Some(end)) = (mine.iter().map(|m| m.start).min(), mine.iter().map(|m| m.end).max()) else { continue };
+                    let what = mine.iter().map(|m| m.what.as_str()).next().unwrap_or("title").to_string();
+                    out.push(Window { clip: *clip, role: "title", edge: Some(edge), start, end: end.max(start), what });
+                    any = true;
+                }
+                if !any && seen.read.loops.contains(clip) {
+                    out.push(Window { clip: *clip, role: "title", edge: None, start: it.start, end: it.end(), what: format!("looping title {}", name()) });
+                }
+            }
+            Role::Overlay => out.push(Window { clip: *clip, role: "overlay", edge: None, start: it.start, end: it.end(), what: format!("overlay {}", name()) }),
+            Role::Other => {}
+        }
+    }
+    out.sort_by_key(|w| (w.start, w.end));
+    out
+}
+
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
     if !p.is_object() && !p.is_null() {
         return Err(bad(CMD, "parameters must be an object"));
@@ -797,30 +884,9 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
     let bands = bands_p(p, fps)?;
     let c = Ctx { fps, playful, bands, short_side: f64::from(q.settings.width.min(q.settings.height).max(1)) };
-    let mut read = Read::default();
-    let mut roles: BTreeMap<u64, Role> = BTreeMap::new();
+    let Sequenced { mut read, roles, clips, transitions, truncated } = read_sequence(&project, q, &c);
     // the titles in time order, with how each enters
     let mut titles: Vec<(Tick, Tick, u64, String)> = Vec::new();
-    let mut clips = 0usize;
-    let mut transitions = 0usize;
-    let mut truncated = false;
-    for (ti, track) in q.video_tracks.iter().enumerate().filter(|(_, t)| t.enabled) {
-        let name = format!("V{}", ti + 1);
-        for it in track.items.iter().filter(|i| i.enabled) {
-            if clips >= MAX_CLIPS {
-                truncated = true;
-                break;
-            }
-            clips += 1;
-            let r = role(&project, it);
-            roles.insert(it.id.0, r);
-            if r == Role::Title {
-                read_animators(&project, it, &name, &c, &mut read);
-            }
-            read_keyframes(it, &name, r, &c, &mut read);
-        }
-        transitions += read_transitions(q, ti, &roles, &c, &mut read);
-    }
     let mut findings = std::mem::take(&mut read.findings);
     judge_moves(&read.moves, &c, &mut findings);
     // ---- every title entering the same way

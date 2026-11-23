@@ -526,15 +526,19 @@ fn silences(q: &Sequence, end: Tick) -> Vec<Value> {
 }
 
 /// Renders sequence `seq` of `project` on the GPU frame renderer where the host has one, else
-/// on the CPU, counting which drew each frame.
-struct Renderer {
+/// on the CPU, counting which drew each frame (the motion filmstrips draw through it too).
+pub(crate) struct Renderer {
     gpu: Option<Box<dyn filmcraft_export::FrameRenderer>>,
-    on_gpu: usize,
-    on_cpu: usize,
+    pub(crate) on_gpu: usize,
+    pub(crate) on_cpu: usize,
 }
 
 impl Renderer {
-    fn render(
+    pub(crate) fn new() -> Self {
+        Renderer { gpu: filmcraft_export::frame_renderer(), on_gpu: 0, on_cpu: 0 }
+    }
+
+    pub(crate) fn render(
         &mut self,
         project: &Project,
         seq: ItemId,
@@ -677,7 +681,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let backdrop_project = std::sync::Arc::new(without_text(&project, seq));
     let provider = s.media.provider(backdrop_project.clone(), s.services.clone());
-    let mut renderer = Renderer { gpu: filmcraft_export::frame_renderer(), on_gpu: 0, on_cpu: 0 };
+    let mut renderer = Renderer::new();
     let scale = (BACKDROP_SIDE / f64::from(w.max(h))).min(1.0) as f32;
     let opts = filmcraft_render::RenderOptions { scale, ..Default::default() };
     // per text: its worst ratio, when and against what, and its samples
