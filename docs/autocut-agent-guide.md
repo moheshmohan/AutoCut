@@ -879,6 +879,24 @@ filmcraft-cli --project "P.fcproj" export "Name (2160x3840).mp4" --preset "High 
 - **Files to the user directly.** The user often follows along from a phone over Remote Control.
   Files over about 30 MB don't reach the phone, so give the Google Photos link.
 
+### Review comments and the finish reviewer
+
+- **Comments pinned to frames.** The user clicks **Comment on Frame** on the Program transport,
+  clicks or drags a box on the picture, types and presses Enter. Agents add their own with
+  `review.comment {seconds, box?, text}`. Every comment lands in `build/review/inbox.jsonl`
+  beside the saved project.
+- **Waiting for notes.** `review.inbox {wait: true, timeout: 300}` returns when a new open
+  comment arrives (a job over MCP; `jobs.cancel` stops it). `review.look {id}` gives the frame
+  with its box and what is on screen there (clips, text, captions, the nearest cuts, the
+  transition, motion findings). Fix it, then `review.done {id, note}` with what changed.
+- **The finish reviewer** ([finish-reviewer.md](finish-reviewer.md)) is a fresh agent, not the
+  one that built the video. Give it the packet from `review.packet {}` (frame sheet, filmstrips,
+  QA, decisions, comments) and nothing else. Its answer ends on one line: `GATE: ship`,
+  `GATE: fix <n>` (at most 8, with at most one `KEEP:`), `GATE: rebuild - <why>` or
+  `GATE: recapture - <what>`. Check it with `review.gate {text}`; after two rounds without a
+  ship, only the user's own words (`review.gate {user: "…"}`) close the run. It never blocks
+  delivery yet.
+
 ## 10. Narration and Malayalam
 
 The user's videos are often narrated in Malayalam with their cloned voice. The details are in

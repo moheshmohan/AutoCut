@@ -256,6 +256,7 @@ numbers are credited here.
 | Section | Source | Licence |
 |---|---|---|
 | `docs/autocut-agent-guide.md` §6.0 "Direction and rhythm" and §7 "How much to check" | huashu-motion's director, rhythm and verification references, © 花叔 Huashu ([alchaincyf/huashu-motion](https://github.com/alchaincyf/huashu-motion)) | MIT |
+| `docs/finish-reviewer.md` and the review commands (`review.*`) | The finish-gate, reviewer-verdict and round rules of impeccable ([pbakaus/impeccable](https://github.com/pbakaus/impeccable)), hallmark ([Nutlope/hallmark](https://github.com/Nutlope/hallmark)) and taste-skill ([Leonxlnx/taste-skill](https://github.com/Leonxlnx/taste-skill)); frame-pinned comments from huashu-motion ([alchaincyf/huashu-motion](https://github.com/alchaincyf/huashu-motion)) | Apache-2.0 (impeccable); MIT (hallmark, taste-skill, huashu-motion) |
 | `docs/raea-workflow.md` "Authoring a composition" | HyperFrames' composition rules, © HeyGen ([heygen-com/hyperframes](https://github.com/heygen-com/hyperframes)) | Apache-2.0 |
 
 ## Downloaded at runtime
