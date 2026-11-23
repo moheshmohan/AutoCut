@@ -156,6 +156,11 @@ pub(crate) fn run_changed(args: &[String]) -> Result<(), String> {
         }
         crate::run(&mut test)?;
     }
+    // EffectCraft linked (off by default): again with the feature, for what of it is affected
+    let (lint, test) = effectcraft_plan(&p);
+    if !lint.is_empty() {
+        crate::effectcraft_gate(&lint, &test)?;
+    }
     crate::layers()?;
     crate::assets()?;
     // the wasm check only when a crate that builds for the web is affected
@@ -164,6 +169,15 @@ pub(crate) fn run_changed(args: &[String]) -> Result<(), String> {
     }
     eprintln!("ci --changed: ok — run the full `cargo xtask ci` before pushing");
     Ok(())
+}
+
+/// The EffectCraft gate for a plan: clippy with the feature on the affected crates of
+/// [`crate::EFFECTCRAFT_CRATES`]; the tests of the adapter whenever it is affected, of the engine
+/// and the CLI when they changed themselves.
+pub(crate) fn effectcraft_plan(p: &Plan) -> (Vec<&'static str>, Vec<&'static str>) {
+    let lint: Vec<&str> = crate::EFFECTCRAFT_CRATES.iter().copied().filter(|c| p.affected.contains(*c)).collect();
+    let test = lint.iter().copied().filter(|c| *c == "filmcraft-effectcraft" || p.changed.contains(*c)).collect();
+    (lint, test)
 }
 
 #[cfg(test)]
@@ -204,6 +218,27 @@ mod tests {
         // a leaf: only itself
         let p = plan(&set(&["apps/filmcraft-cli/src/main.rs"]), &dirs, &deps);
         assert_eq!((p.changed.clone(), p.affected), (set(&["filmcraft-cli"]), set(&["filmcraft-cli"])));
+    }
+
+    #[test]
+    fn the_effectcraft_gate_follows_what_is_affected() {
+        let (mut dirs, mut deps) = workspace();
+        dirs.push(("crates/effectcraft/".to_string(), "filmcraft-effectcraft".to_string()));
+        dirs.sort_by_key(|(d, _)| std::cmp::Reverse(d.len()));
+        deps.insert("filmcraft-effectcraft".into(), set(&["filmcraft-time"]));
+        deps.get_mut("filmcraft-engine").unwrap().insert("filmcraft-effectcraft".into());
+        // the adapter changed: lint it and what forwards the feature, test it
+        let p = plan(&set(&["crates/effectcraft/src/lib.rs"]), &dirs, &deps);
+        assert_eq!(effectcraft_plan(&p), (vec!["filmcraft-effectcraft", "filmcraft-engine", "filmcraft-cli"], vec!["filmcraft-effectcraft"]));
+        // the engine changed: lint the engine and the CLI, test the engine's EffectCraft part
+        let p = plan(&set(&["crates/engine/src/effectcraft.rs"]), &dirs, &deps);
+        assert_eq!(effectcraft_plan(&p), (vec!["filmcraft-engine", "filmcraft-cli"], vec!["filmcraft-engine"]));
+        // a crate below everything: all three linted, the adapter tested
+        let p = plan(&set(&["crates/time/src/lib.rs"]), &dirs, &deps);
+        assert_eq!(effectcraft_plan(&p).1, vec!["filmcraft-effectcraft"]);
+        // nothing of it: no gate
+        let p = plan(&set(&["docs/agents.md"]), &dirs, &deps);
+        assert_eq!(effectcraft_plan(&p), (vec![], vec![]));
     }
 
     #[test]

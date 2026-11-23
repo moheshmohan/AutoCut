@@ -64,6 +64,7 @@ filmcraft-scopes = { path = "crates/scopes" }
 filmcraft-export = { path = "crates/export" }
 filmcraft-format = { path = "crates/format" }
 filmcraft-templates = { path = "crates/templates" }
+filmcraft-effectcraft = { path = "crates/effectcraft" }
 filmcraft-engine = { path = "crates/engine" }
 filmcraft-ui-egui = { path = "crates/ui-egui" }
 filmcraft-automation = { path = "crates/automation" }
@@ -165,6 +166,20 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.filmcraft-vp9]
+opt-level = 3
+
+# EffectCraft's renderer (feature `effectcraft`): its own opt-level 3 overrides do not carry over
+# to a dependent, and its pixel loops are minutes slower in tests below it.
+[profile.dev.package.effectcraft-raster]
+opt-level = 3
+
+[profile.dev.package.effectcraft-render]
+opt-level = 3
+
+[profile.dev.package.effectcraft-gpu]
+opt-level = 3
+
+[profile.dev.package.effectcraft-effects]
 opt-level = 3
 
 [profile.release]

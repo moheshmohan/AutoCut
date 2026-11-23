@@ -37,6 +37,7 @@ pub mod demo;
 pub mod denoise;
 pub mod depth;
 pub mod doc_path;
+pub mod effectcraft;
 pub mod elements;
 pub mod embed;
 pub mod essential_sound;

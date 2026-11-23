@@ -303,6 +303,29 @@ fn exec_inspect_and_describe() {
     assert_eq!(bad.status.code(), Some(1));
 }
 
+/// `effectcraft.templateInfo` answers in both builds: with EffectCraft linked (feature
+/// `effectcraft`) a file that is not a template is refused as one; without it, the command says
+/// what the build lacks.
+#[test]
+fn effectcraft_template_info_answers_in_both_builds() {
+    let dir = std::env::temp_dir().join(format!("fc-cli-effectcraft-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let t = dir.join("card.ectemplate");
+    std::fs::write(&t, b"not a template").unwrap();
+    let o = cli(&["exec", "effectcraft.templateInfo", &format!("template={}", t.display())]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    if cfg!(feature = "effectcraft") {
+        assert!(err.contains("not a readable template"), "{err}");
+    } else {
+        assert!(err.contains("`effectcraft` feature"), "{err}");
+    }
+    let d = json_out(&cli(&["describe", "effectcraft.templateInfo"]));
+    assert_eq!(d["id"], "effectcraft.templateInfo");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A project in a new folder of its own.
 fn lock_test_project(tag: &str) -> (std::path::PathBuf, String) {
     let dir = std::env::temp_dir().join(format!("fc-cli-lock-{tag}-{}", std::process::id()));

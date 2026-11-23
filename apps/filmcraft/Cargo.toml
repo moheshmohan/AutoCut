@@ -30,6 +30,9 @@ voice-model = ["filmcraft-engine/voice-model"]
 # The scene index (media.analyzeScenes): TransNetV2 cuts, Qwen3-VL shot descriptions, SigLIP 2
 # search, the LAION aesthetic score (Metal on macOS, else the CPU; downloaded on demand with consent).
 scene-models = ["filmcraft-engine/scene-models"]
+# EffectCraft templates in process (`effectcraft.templateInfo`, `effectcraft.renderTemplate`): off by
+# default (workspace tests and the wasm check stay as they are); the packaged AutoCut app has it.
+effectcraft = ["filmcraft-engine/effectcraft"]
 
 [dependencies]
 filmcraft-engine = { workspace = true }

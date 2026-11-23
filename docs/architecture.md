@@ -25,7 +25,7 @@ Design principles:
  L6  apps/filmcraft · apps/filmcraft-cli · apps/filmcraft-web
  L5  ui-egui · automation · autocut · gphotos · oauth · youtube · instagram · screenagent · insta360 · platform
  L4  engine
- L3  render · gpu · export · templates · golden (test-only)
+ L3  render · gpu · export · templates · effectcraft · golden (test-only)
  L2  edit · codecs · interchange · captions · speech · tts · tts-text · acestep · soundfont · vision · voice · scenes
  L1  frame · media · project · audio-dsp · text
  L0  foundation: time · geom · color · bitstream · locks · testkit (dev-dependency only)
@@ -82,6 +82,7 @@ and `filmcraft-cli`.
 | `scopes` | L3 | video scope maths: waveform, parade, histogram, YUV / HLS vectorscopes, numeric summaries ([crates/scopes/README.md](../crates/scopes/README.md)) |
 | `export` | L3 | render → encode → mux pipeline, progress/cancel |
 | `templates` | L3 | video templates (`.fcvideo-template` folders and ZIPs): manifest with typed slots, strict validation naming the field, slot auto-fit (trim / loop / stretch / hold / Remix), beat grids and re-quantizing cuts to a new track's beats, aspect variants with position hints, applying to a project, minimal save, and the built-in starters; the engine's `template.*` commands drive it ([README](../crates/templates/README.md)) |
+| `effectcraft` | L3 | EffectCraft compositions in process (PX4): `.ectemplate` packages read (the ZIP through `templates`' reader; same-layer edge `effectcraft→templates`) and checked (sizes, nesting, values), filled through each control's own coercion and EffectCraft's Essential Graphics overrides, and rendered by EffectCraft's renderer (its GPU compositor where there is a GPU, its CPU renderer as the fallback), with footage from the engine through a `HostFrames` trait and colour converted both ways (AutoCut premultiplied linear, EffectCraft premultiplied sRGB-encoded). EffectCraft's `render`, `gpu`, `expr`, `text` and `project` crates are git dependencies pinned to one revision behind the feature `effectcraft` (off by default, native only; the packaged AutoCut app turns it on); without it the crate is a stub that says so. Never EffectCraft's engine, media, host, export or interchange crates: `cargo xtask layers` refuses them, and any `filmcraft-*` crate from outside the workspace, in `Cargo.lock` |
 | `engine` | L4 | `Session`, command registry, undo history, media pool, jobs, interchange glue; the publishing destinations and their shared pre-flight (`publish.*`: probe, checks per platform, fixed copies — re-encode or fast start — and `publish.run` over the YouTube and Instagram publishers) |
 | `ui-egui` | L5 | the egui frontend: docking, panels, timeline, monitors, playback, control-channel handlers |
 | `automation` | L5 | MCP server (`rmcp`, stdio), headless or bridged to the running app |
@@ -107,13 +108,17 @@ are exempt):
 |---|---|
 | Every crate has a layer | A new crate fails the check until it is added to `LAYERS`. |
 | Only downward edges | A crate may not depend on a crate in a higher layer. |
-| Same-layer edges are listed | From L1 up, a same-layer edge must be in `SAME_LAYER`: `media→frame`, `project→media`, `project→frame`, `gpu→render`, `export→render`, `cli→filmcraft`, `gphotos→oauth`, `youtube→oauth`, `instagram→oauth`, `voice→vision`, plus a few reserved for planned crates. |
+| Same-layer edges are listed | From L1 up, a same-layer edge must be in `SAME_LAYER`: `media→frame`, `project→media`, `project→frame`, `gpu→render`, `export→render`, `cli→filmcraft`, `gphotos→oauth`, `youtube→oauth`, `instagram→oauth`, `voice→vision`, `effectcraft→templates`, plus a few reserved for planned crates. |
 | L0 codecs stay standalone | L0 crates other than `time`, `geom`, `color`, `bitstream`, `locks`, `testkit` may depend on no workspace crate except `filmcraft-bitstream`. External crates such as `thiserror` and `rayon` are allowed. |
 | No UI/OS crates below L5 | `egui`, `eframe`, `egui-wgpu`, `winit`, `rfd`, `cpal`, `muda` are allowed only in L5 and L6. |
+| No foreign FilmCraft crates | `Cargo.lock` holds no `filmcraft-*` package from outside the workspace (a git or registry source) and none of EffectCraft's `effectcraft-engine`, `-media`, `-host`, `-export`, `-interchange` (they bring upstream FilmCraft's crates under our names). |
 
 `cargo xtask wasm` runs `cargo check --target wasm32-unknown-unknown` on every L0–L4 crate, the
 egui UI and the web app, so everything up to the engine stays web-portable and the web app builds
-([web.md](web.md)). `unsafe_code = "forbid"` applies workspace-wide, except in `platform`
+([web.md](web.md)). Features off by default stay off there: `effectcraft` is native only, and
+`cargo xtask ci` checks it in a step of its own (clippy `-D warnings` on `effectcraft`, `engine`
+and `cli` with the feature, the adapter's tests and the engine's and CLI's EffectCraft tests;
+`ci --changed` runs the part of it that what changed reaches). `unsafe_code = "forbid"` applies workspace-wide, except in `platform`
 (`deny`, allowed only on its FFI modules; [ADR 0001](adr/0001-platform-ffi.md)).
 
 ## 2. Time base

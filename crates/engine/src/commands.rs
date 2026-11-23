@@ -3953,6 +3953,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::animation_preflight::commands());
     v.extend(crate::motion_energy::commands());
     v.extend(crate::motion_graphics::commands());
+    v.extend(crate::effectcraft::commands());
     v.extend(crate::composition_import::commands());
     v.extend(crate::craft_check::commands());
     v.extend(crate::motion_check::commands());

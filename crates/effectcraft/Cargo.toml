@@ -1,0 +1,50 @@
+[package]
+name = "filmcraft-effectcraft"
+description = "EffectCraft compositions in process: .ectemplate packages, their controls and values, and frames rendered by EffectCraft's renderer (feature `effectcraft`) with footage from the host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# EffectCraft's renderer, effects, GPU compositor, expressions and text, linked in process (native
+# builds only). Off: the crate is a stub whose calls answer "built without EffectCraft".
+effectcraft = [
+    "dep:effectcraft-render",
+    "dep:effectcraft-gpu",
+    "dep:effectcraft-expr",
+    "dep:effectcraft-text",
+    "dep:effectcraft-project",
+    "dep:effectcraft-time",
+]
+# Builders of test templates for dependents' tests (with `effectcraft`); nothing without it.
+test-support = []
+
+[dependencies]
+filmcraft-time = { workspace = true }
+filmcraft-color = { workspace = true }
+filmcraft-frame = { workspace = true }
+filmcraft-text = { workspace = true }
+filmcraft-templates = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+# EffectCraft (MIT OR Apache-2.0), pinned: the pin moves only deliberately, with this crate's
+# tests as the gate. Never its engine, media, host, export or interchange crates (they bring
+# upstream FilmCraft crates of the same names as ours; `cargo xtask layers` refuses them).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+effectcraft-render = { git = "https://github.com/storytold/effectcraft", rev = "1738360417403d8780aa3a4949bd6f6a49b6588d", optional = true }
+effectcraft-gpu = { git = "https://github.com/storytold/effectcraft", rev = "1738360417403d8780aa3a4949bd6f6a49b6588d", optional = true }
+effectcraft-expr = { git = "https://github.com/storytold/effectcraft", rev = "1738360417403d8780aa3a4949bd6f6a49b6588d", optional = true }
+effectcraft-text = { git = "https://github.com/storytold/effectcraft", rev = "1738360417403d8780aa3a4949bd6f6a49b6588d", optional = true }
+effectcraft-project = { git = "https://github.com/storytold/effectcraft", rev = "1738360417403d8780aa3a4949bd6f6a49b6588d", optional = true }
+effectcraft-time = { git = "https://github.com/storytold/effectcraft", rev = "1738360417403d8780aa3a4949bd6f6a49b6588d", optional = true }
+
+[dev-dependencies]
+# test pictures (PNG) for the footage and media tests
+image = { version = "0.25", default-features = false, features = ["png"] }

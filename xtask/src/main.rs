@@ -108,6 +108,8 @@ const LAYERS: &[(&str, u8)] = &[
     ("format", 3),
     // video templates (.fcvideo-template): manifest, packages, slot fit, beat grids, built-in starters
     ("templates", 3),
+    // EffectCraft compositions in process (.ectemplate packages, values, frames; feature `effectcraft`)
+    ("effectcraft", 3),
     ("engine", 4),
     ("platform", 5),
     ("ui-egui", 5),
@@ -147,6 +149,8 @@ const SAME_LAYER: &[(&str, &str)] = &[
     ("cli", "filmcraft"),
     ("tts", "tts-text"),
     ("templates", "format"),
+    // the .ectemplate ZIP is read by the templates crate's ZIP reader
+    ("effectcraft", "templates"),
     ("automation", "autocut"),
     ("automation", "gphotos"),
     ("gphotos", "oauth"),
@@ -156,6 +160,34 @@ const SAME_LAYER: &[(&str, &str)] = &[
     ("insta360", "screenagent"),
     ("voice", "vision"),
 ];
+
+/// EffectCraft crates that must never be linked (`Cargo.lock` is checked): they bring upstream
+/// FilmCraft's crates, named as ours, and EffectCraft's own app layers (decision D3).
+const FORBIDDEN_PACKAGES: &[&str] = &["effectcraft-engine", "effectcraft-media", "effectcraft-host", "effectcraft-export", "effectcraft-interchange"];
+
+/// The packages of `lock` (a `Cargo.lock`) that must not be there: [`FORBIDDEN_PACKAGES`] and any
+/// `filmcraft-*` package from outside this workspace (one with a `source`: git or a registry).
+fn forbidden_in_lock(lock: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for block in lock.split("[[package]]").skip(1) {
+        let field = |key: &str| {
+            block.lines().find_map(|l| {
+                let v = l.trim().strip_prefix(key)?.trim_start().strip_prefix('=')?;
+                Some(v.trim().trim_matches('"').to_string())
+            })
+        };
+        let Some(name) = field("name") else { continue };
+        let source = field("source");
+        if FORBIDDEN_PACKAGES.contains(&name.as_str()) {
+            out.push(format!("{name} (never link EffectCraft's {name}: it brings upstream FilmCraft crates)"));
+        } else if name.starts_with("filmcraft-")
+            && let Some(src) = source
+        {
+            out.push(format!("{name} from {src} (a FilmCraft crate from outside this workspace collides with ours)"));
+        }
+    }
+    out
+}
 
 /// Crates that must not appear below L5 (UI toolkits, windowing, OS audio/menus).
 const UI_ONLY: &[&str] = &["craft-ui", "egui", "eframe", "egui-wgpu", "winit", "rfd", "cpal", "muda"];
@@ -220,6 +252,10 @@ fn layers() -> Result<(), String> {
                 errors.push(format!("{a} → {b}: same-layer edge (L{l}) not in the allowed list"));
             }
         }
+    }
+    match std::fs::read_to_string(root().join("Cargo.lock")) {
+        Ok(lock) => errors.extend(forbidden_in_lock(&lock).into_iter().map(|p| format!("Cargo.lock: {p}"))),
+        Err(e) => errors.push(format!("Cargo.lock: {e}")),
     }
     if errors.is_empty() {
         println!("layers: ok");
@@ -566,9 +602,46 @@ fn ci() -> Result<(), String> {
     let tested = run(Command::new(cargo).args(["test", "--workspace", "--release", "--no-fail-fast"]));
     i18n_report(true);
     tested?;
+    effectcraft_gate(EFFECTCRAFT_CRATES, EFFECTCRAFT_CRATES)?;
     layers()?;
     assets()?;
     wasm()
+}
+
+/// The crates built again with EffectCraft linked (feature `effectcraft`, off by default): the
+/// adapter and the crates that forward the feature to it (the app forwards it too, with no code
+/// of its own behind it).
+const EFFECTCRAFT_CRATES: &[&str] = &["filmcraft-effectcraft", "filmcraft-engine", "filmcraft-cli"];
+
+/// The EffectCraft gate: clippy `-D warnings` on `lint` and the tests of `test` with the feature
+/// on (the adapter's every test; the engine's and the CLI's EffectCraft tests, the rest of theirs
+/// already ran without it).
+fn effectcraft_gate(lint: &[&str], test: &[&str]) -> Result<(), String> {
+    let cargo = env!("CARGO");
+    let features = |crates: &[&str]| crates.iter().map(|c| format!("{c}/effectcraft")).collect::<Vec<_>>().join(",");
+    if !lint.is_empty() {
+        let mut clippy = Command::new(cargo);
+        clippy.args(["clippy", "--all-targets", "--release"]);
+        for c in lint {
+            clippy.args(["-p", c]);
+        }
+        run(clippy.args(["--features", &features(lint), "--", "-D", "warnings"]))?;
+    }
+    for c in test {
+        let mut t = Command::new(cargo);
+        t.args(["test", "--release", "--no-fail-fast", "-p", c, "--features", &format!("{c}/effectcraft")]);
+        match *c {
+            "filmcraft-effectcraft" => {}
+            "filmcraft-engine" => {
+                t.args(["--lib", "--", "effectcraft::"]);
+            }
+            _ => {
+                t.args(["--test", "cli", "--", "effectcraft"]);
+            }
+        }
+        run(&mut t)?;
+    }
+    Ok(())
 }
 
 /// The missing-translations report (`i18n::tests::missing_translations_report` in
@@ -644,6 +717,55 @@ fn main() -> ExitCode {
             eprintln!("{e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::forbidden_in_lock;
+
+    const LOCK: &str = r#"version = 4
+
+[[package]]
+name = "effectcraft-render"
+version = "0.24.1"
+source = "git+https://github.com/storytold/effectcraft?rev=1738360417403d8780aa3a4949bd6f6a49b6588d#1738360417403d8780aa3a4949bd6f6a49b6588d"
+dependencies = [
+ "effectcraft-time",
+]
+
+[[package]]
+name = "filmcraft-time"
+version = "0.12.0"
+dependencies = [
+ "chrono",
+]
+"#;
+
+    #[test]
+    fn the_lockfile_holds_no_effectcraft_app_crates_and_no_outside_filmcraft_crates() {
+        assert!(forbidden_in_lock(LOCK).is_empty(), "the pinned render crate and our own crates are fine");
+        for bad in ["effectcraft-engine", "effectcraft-media", "effectcraft-host", "effectcraft-export", "effectcraft-interchange"] {
+            let lock =
+                format!("{LOCK}\n[[package]]\nname = \"{bad}\"\nversion = \"0.24.1\"\nsource = \"git+https://github.com/storytold/effectcraft?rev=1\"\n");
+            let found = forbidden_in_lock(&lock);
+            assert_eq!(found.len(), 1, "{bad}: {found:?}");
+            assert!(found[0].starts_with(bad), "{found:?}");
+        }
+        // an upstream FilmCraft crate from git (EffectCraft's media crates use them) or a registry
+        for src in ["git+https://github.com/storytold/filmcraft?rev=e7345f6e#e7345f6e", "registry+https://github.com/rust-lang/crates.io-index"] {
+            let lock = format!("{LOCK}\n[[package]]\nname = \"filmcraft-media\"\nversion = \"0.20.1\"\nsource = \"{src}\"\n");
+            assert_eq!(forbidden_in_lock(&lock).len(), 1, "{src}");
+        }
+        // a dependency line naming one is not a package
+        assert!(forbidden_in_lock(&LOCK.replace(" \"effectcraft-time\",", " \"effectcraft-engine\",")).is_empty());
+    }
+
+    #[test]
+    fn this_workspace_lockfile_passes() {
+        let lock = std::fs::read_to_string(super::root().join("Cargo.lock")).unwrap_or_default();
+        assert!(!lock.is_empty());
+        assert_eq!(forbidden_in_lock(&lock), Vec::<String>::new());
     }
 }
 

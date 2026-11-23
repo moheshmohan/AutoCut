@@ -29,6 +29,9 @@ voice-model = ["speech-download"]
 # The scene index's networks: TransNetV2 shot boundaries, Qwen3-VL descriptions, SigLIP 2
 # embeddings and the CLIP aesthetic head (candle; Metal on macOS, else the CPU) and their download.
 scene-models = ["filmcraft-scenes/model", "speech-download"]
+# EffectCraft compositions in process (`effectcraft.*`: its renderer, effects, GPU compositor,
+# expressions and text, pinned; native only). Off by default; the packaged AutoCut app has it.
+effectcraft = ["filmcraft-effectcraft/effectcraft"]
 
 [dependencies]
 filmcraft-time = { workspace = true }
@@ -53,6 +56,7 @@ filmcraft-captions = { workspace = true }
 filmcraft-speech = { workspace = true }
 filmcraft-tts = { workspace = true }
 filmcraft-templates = { workspace = true }
+filmcraft-effectcraft = { workspace = true }
 filmcraft-acestep = { workspace = true }
 filmcraft-soundfont = { workspace = true }
 filmcraft-vision = { workspace = true }
@@ -79,6 +83,8 @@ same-file = "1.0.6"
 
 [dev-dependencies]
 filmcraft-testkit = { workspace = true }
+# test templates made in code (with the `effectcraft` feature)
+filmcraft-effectcraft = { workspace = true, features = ["test-support"] }
 filmcraft-dng = { workspace = true, features = ["writer"] }
 image = { version = "0.25", default-features = false, features = ["png", "gif"] }
 
