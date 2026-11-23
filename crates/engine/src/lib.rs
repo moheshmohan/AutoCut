@@ -27,6 +27,7 @@ pub mod clip_ops;
 pub mod color;
 pub mod commands;
 pub mod contact_sheet;
+pub mod craft_check;
 pub mod cutout;
 pub mod delivery;
 pub mod demo;

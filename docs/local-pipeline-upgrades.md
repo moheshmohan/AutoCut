@@ -236,6 +236,50 @@ from the originals. Its holds are the declared ones plus the still-picture spans
 `motion` check already treats as holds, so a photo story does not warn for every photo.
 `motionEnergy: false` skips it, recorded as skipped.
 
+`sequence.checkCraft` reads a sequence's text and timeline (`sequence` defaults to the active one;
+`holds` as above):
+
+```sh
+filmcraft-cli --project edit.fcproj exec sequence.checkCraft \
+  'holds=[{"start":0,"end":1016064000000,"reason":"title card"}]'
+```
+
+| Code | Warns when | Starting value |
+|---|---|---|
+| `readingTime` | a title (every text layer of one graphic clip together) or a caption is on screen for less time than it takes to read | 3 words a second plus 0.5 s |
+| `smallText` | a text layer, or a visible caption track, is smaller than the floor | font size under 2.6 % of the frame's short side |
+| `lowContrast` | text against the picture behind it, at its worst sample, is under the WCAG ratio | 4.5:1; 3:1 for large text (3.9 % of the short side, 3.03 % when bold) |
+| `emptyFirstFrame` | nothing is on the picture tracks at the first frame, every clip there starts at opacity 0, or the first frame renders black or one flat colour | mean grey under 0.04, spread under 0.01 |
+| `staticTimeline` | more than 3 s with nothing changing on the timeline, outside the declared holds | 3 s |
+| `silence` | more than 15 s with no clip on an enabled, unmuted audio track | 15 s |
+
+Reading time counts words separated by spaces, so text in a script written without spaces counts
+low. Every caption track is read for reading time, hidden ones too, since they go out as sidecar
+subtitles; size and contrast are judged only on visible caption tracks, as they are burned in.
+Large text follows WCAG's 18 pt against 12 pt body text (1.5 × the 2.6 % floor) and 14 pt bold.
+
+Contrast is measured against the closest approximation of the picture behind the text that the
+renderer allows. The sequence is rendered (on the GPU frame renderer when the host has one) at 3
+to 8 times across each text's life, about one every 2 s, with every title's text layers turned
+off and no captions. The backdrop therefore holds the footage, shapes and other graphics under the
+text; it also leaves out the text of other titles under it, which is rare. Inside the text's box
+the 10th and 90th percentile luminance stand for its darkest and brightest parts, and a text
+colour between the two counts as 1:1. A background box is laid over the backdrop at its opacity,
+the text's own opacity (fill, layer and clip) is mixed in, and a stroke or caption outline at
+least 5 % of the font size counts as a backdrop of its own colour (the better ratio is kept).
+Shadows, glows, per-character colours, the highlight colour of animated captions and titles inside
+nested sequences are not measured. At most 400 frames are rendered: past that each text gets one
+sample, and past 400 texts only an even share of them is measured (`checked.contrast` and
+`skipped` say how many). `checked.contrast.ratios` lists each measured text's worst ratio, passing
+or not, for tuning the thresholds.
+
+The timeline checks read the timeline, not pixels. Something changes when a clip, caption or
+transition starts or ends, a movie plays (a still, a frame hold or a colour matte does not), an
+animated parameter moves, a title's text animates, or an animated caption or a nested sequence
+plays (both taken as always changing). The timeline is sampled every 0.1 s and at every edit
+point. `holds` exempt static stretches only. A clip of silence counts as sound: levels are not
+measured. `sequence.checkCraft` is not yet a leg of `delivery.preflight`.
+
 ## Standard checked delivery
 
 Use `recipe.run` with `builtin:delivery-quality-gate`, or call:

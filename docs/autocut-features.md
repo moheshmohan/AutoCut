@@ -365,3 +365,10 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   of `media.preflightAnimation` and `delivery.preflight`; every finding is a warning (D7) and never
   blocks. Thresholds and limits are in `docs/local-pipeline-upgrades.md` ("Craft QA"). 933
   commands.
+- **PX1.2**: `sequence.checkCraft {sequence?, holds?}` reads a sequence's text and timeline: a
+  title or caption on screen for less than its reading time (3 words a second plus 0.5 s), text
+  under 2.6 % of the frame's short side, contrast of text against the picture rendered behind it
+  over its life (4.5:1, 3:1 for large text; the text layers are turned off for the backdrop, which
+  is an approximation the doc spells out), an empty first frame, more than 3 s with nothing
+  changing outside declared holds and more than 15 s with no sound. Warnings only (D7). 934
+  commands.
