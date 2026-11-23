@@ -92,7 +92,8 @@ def render_into(args, source, output):
             render_args.extend(["--alpha"] if args.alpha else ["--quality", external["quality"]])
             if width:
                 render_args.extend(["--w", str(width), "--h", str(height)])
-                # v0.1.0 needs the output stage as well as --w/--h. Responsive
+                # v0.1.0 needs the output stage as well as --w/--h (0.1.8 renders the same
+                # with it, checked at 3840x2160). Responsive
                 # compositions read it through useVideoConfig; fixed layouts are
                 # rejected by the size check rather than silently called 4K.
                 render_args.extend(["--stage", f"{width}x{height}"])
@@ -138,12 +139,25 @@ def render_into(args, source, output):
     print(json.dumps(manifest, indent=2))
 
 
+def installed_raea():
+    """The newest RAEA under ~/.raea/versions (0.1.8 beside 0.1.0 on the editing Mac), else PATH's."""
+    found = []
+    root = Path.home() / ".raea/versions"
+    for binary in root.glob("*/bin/raea") if root.is_dir() else []:
+        try:
+            version = tuple(int(part) for part in binary.parent.parent.name.split("."))
+        except ValueError:
+            continue
+        if binary.is_file():
+            found.append((version, binary))
+    return str(max(found)[1]) if found else shutil.which("raea")
+
+
 def main():
-    installed = Path.home() / ".raea/versions/0.1.0/bin/raea"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path, help="new revision directory")
-    parser.add_argument("--raea", default=str(installed) if installed.is_file() else shutil.which("raea"))
+    parser.add_argument("--raea", default=installed_raea())
     parser.add_argument("--cli", default=shutil.which("filmcraft-cli"))
     parser.add_argument("--composition")
     parser.add_argument("--alpha", action="store_true")

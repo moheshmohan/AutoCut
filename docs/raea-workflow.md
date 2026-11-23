@@ -10,13 +10,33 @@ scene. Lower thirds, callouts, and wipes can retain transparency over the origin
 
 ## Setup
 
-On the editing Mac, the verified `v0.1.0` Apple Silicon release lives at
-`~/.raea/versions/0.1.0/bin/raea`. On another machine, use the matching official
-[release](https://github.com/shinyobjectz/raea/releases/tag/v0.1.0) and verify its SHA-256.
-The [installation guide](https://raea.io/docs/start/install.md) covers platform support.
-Set `RAEA="$HOME/.raea/versions/0.1.0/bin/raea"` on this Mac. Read the installed version's
+On the editing Mac, the verified `v0.1.8` Apple Silicon release lives at
+`~/.raea/versions/0.1.8/bin/raea`, with `v0.1.0` kept beside it at `~/.raea/versions/0.1.0` for
+rollback. On another machine, use the matching official
+[release](https://github.com/shinyobjectz/raea/releases/tag/v0.1.8) and check its SHA-256 against the
+release's `.sha256` file (`raea-0.1.8-macos-arm64.tar.gz`: `64dc7085…de68b`). Unpack it into its own
+`~/.raea/versions/<version>/` (`bin/` and `share/`). The
+[installation guide](https://raea.io/docs/start/install.md) covers platform support.
+Set `RAEA="$HOME/.raea/versions/0.1.8/bin/raea"` on this Mac. Read the installed version's
 composition guidance with `"$RAEA" skill` or use the
-[first-video guide](https://raea.io/docs/start/first-video.md).
+[first-video guide](https://raea.io/docs/start/first-video.md). The render helper below picks the
+newest version under `~/.raea/versions` unless `--raea` names one.
+
+What changed from 0.1.0 for this workflow (checked 23 November 2026 on the sample below):
+- The sample's stills render byte for byte the same, and the helper's MP4, 4K and transparent PNG
+  handoffs pass unchanged.
+- `raea check --quick` adds exposure warnings. A transparent overlay such as the split wipe reads as
+  "crushed to black" there; that is expected for an alpha layer, not a fault.
+- `raea render` writes `motion.render.json` beside the frames: every text box per frame (text, box,
+  size, colour, opacity), which the craft checks can read instead of guessing from pixels.
+- HTML compositions render with `"$RAEA" render PAGE.html -o OUT.mp4|DIR [--at A,B] [--alpha]`:
+  a root element with `data-composition-id`, `data-width` and `data-height`, and clips shown in
+  windows by `data-start` and `data-duration` (seconds). GSAP timelines registered in
+  `window.__timelines` drive animation on the page clock.
+- GSAP, three.js and React Three Fiber are not bundled. A project gets them from npm with
+  `"$RAEA" add gsap` or `"$RAEA" add three@0.185.0 @react-three/fiber@9.8.2`: that is a download,
+  so ask first. Leave `raea bug` (it sends a report to RAEA's server) and `raea skills install`
+  (it changes agent settings) alone.
 
 RAEA is a separately installed tool for internal production under its
 [FSL-1.1-ALv2 license](https://github.com/shinyobjectz/raea/blob/v0.1.0/LICENSE).
@@ -81,7 +101,8 @@ use MP4 for an opaque scene or a longer animation.
 
 For review/master sizing, lay out from `useVideoConfig().width` and `.height`, as the
 sample does. RAEA v0.1.0 ignores output size overrides on fixed-size compositions;
-the helper sets the output stage and rejects an unexpected rendered size. A 4K scene
+the helper sets the output stage (0.1.8 renders correctly with it too) and rejects an unexpected
+rendered size. A 4K scene
 uses `--canvas 960x540 --size 3840x2160`; add `--preview` for a 960-pixel review.
 
 ## Place on the timeline
