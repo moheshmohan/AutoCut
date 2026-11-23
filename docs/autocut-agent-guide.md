@@ -689,6 +689,34 @@ f.run('clipMixer.set', {'clip': r['clip'], 'effect': 'volume', 'param': 'level',
   The 6.3 GB model needs the user's consent to download.
 - **The user's own track:** import it, then `media.beats {item}` finds its beats.
 
+**Fitting the user's track to the film.** `media.beats {item}` also answers `downbeats`, `sections
+[{start, end, energy}]`, `drops`, `stops`, `musicEnd`, `ending {kind: cadence|fade|cut, at}` and
+`confidence` (with `confidenceParts`). Then remix the placed clip to the film:
+
+```python
+r = f.run('clip.remix', {'clip': music, 'seconds': 45, 'ending': 'own', 'events': [
+    {'kind': 'burst', 'seconds': 0}, {'kind': 'peak', 'seconds': 20},
+    {'kind': 'landing', 'seconds': 40}]})
+# r['eventsLanded']: kind, lift, playsAt, offBy, landed; r['joins']: levelChangeDb, excessDb, ok
+# r['alternatives']: film lengths that need no join; r['warnings']
+```
+
+- **Events** are film times from the clip's start: `burst` (the opening), `peak` (a hero shot or
+  title hit), `landing` (the end card), `stop` (a hard cut to silence). Each lands on a real lift
+  in the track (a drop, a section start, a downbeat), never an invented one; an event with no
+  lift near it is reported with `landed: false`.
+- **Endings:** `own` lands the track's own ending on the landing and lets a cadence ring on;
+  `button` ends on a strong downbeat with a short tail; `fade` fades out; `source` (the default)
+  cuts where the plain remix does. With `own` or `button`, events after the landing are dropped.
+- **Read the warnings.** A join that jumps more than 6 dB beyond what the music itself does is
+  replaced; if none passes, the best plan is kept and named in `warnings`. Music that ends more
+  than 1 s before the film says so: the close would play in silence. Pick another ending or
+  an `alternatives` length then.
+- **Low `confidenceParts.downbeats`** (under about 0.5) means the bars may be off: check the
+  landings by ear, or fit to beats only.
+- Direct, Quick Short, Showcase and trailers already fit the music this way and report it under
+  `music.fit` (`musicFit` for Quick Short). Shorts stay silent.
+
 **Generated pictures, clips and sounds.** When `generate.providers` lists installed tools (the
 user's own local models; [generation.md](generation.md)):
 
