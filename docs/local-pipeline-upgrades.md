@@ -280,6 +280,59 @@ plays (both taken as always changing). The timeline is sampled every 0.1 s and a
 point. `holds` exempt static stretches only. A clip of silence counts as sound: levels are not
 measured. `sequence.checkCraft` is not yet a leg of `delivery.preflight`.
 
+`copy.lint` reads the words of a video: `text` (taken as narration), `publish` (`title`,
+`description`, `caption`, `tags`), `script` (a lines file, a showcase plan or plain text, as
+`script.lintMalayalam` reads it) and `sequence` (its titles, collected as `sequence.checkCraft`
+collects them, and every caption cue of every caption track, hidden ones too). Give at least one.
+
+```sh
+filmcraft-cli exec copy.lint 'publish={"title":"Printer build","description":"Hey guys! We rebuilt the extruder."}'
+filmcraft-cli --project edit.fcproj exec copy.lint sequence=12 'facts=["Bought in 2014","600 km"]'
+```
+
+| Code | Warns when | Starting value |
+|---|---|---|
+| `stockPhrase` | a stock phrase of video copy (openers like "in this video we'll" and "let's dive in", greetings, calls to action like "smash that like button") or of marketing copy ("game-changer", "next level") | 39 video and 27 general phrases |
+| `filler` | a filler word ("basically", "kind of") or a hedge ("I think", "probably") | 13 fillers, 14 hedges |
+| `describesShot` | narration (caption cues, a script, `text`) says what the picture shows ("here we see", "as you can see", "this is a shot of") | 23 phrases |
+| `overBudget` | a device is used more than its budget per 100 words; `level: "fail"` from twice the budget plus one | exclamation marks 1, questions 1, em dashes 2, emoji 2, all-caps words 1; a text under 100 words gets the budget of 100 |
+| `unledgeredFigure` | a figure written in digits is not in the fact ledger | compared by value ("1,200" is 1200) |
+
+The lists are FilmCraft's own, written for it; a pattern matches whole words, any case, with
+straight or curly apostrophes, and hyphens split words ("game-changer" is "game changer"). A
+phrase never matches across a sentence or clause break. "Kind of" and "sort of" after a word that
+makes them a noun ("a kind of printer") are not hedges. Budgets are counted per unit: the text,
+the publish title, description and caption each, the script, all titles together and each caption
+track; tags get only the stock phrase and figure checks. A question counts whether or not it is
+rhetorical; an all-caps word is one of at least 5 letters, or a short shout word ("WOW", "FREE"),
+since shorter ones are usually acronyms, and a line with no lower-case letter at all is a title set
+in capitals and is not counted. Emoji are counted by code point ranges, a flag as one. Web
+addresses are left out of every count.
+
+The fact ledger is `facts` (a list of texts, numbers or `{text}`), or else `build/facts.json`
+beside the saved project (the same list, or `{"facts": [...]}`). Without one, figures are not
+judged and `skipped` says so; a ledger file that cannot be read is said too, never taken as
+empty. Figures are digits, not number words. Clock times and chapter stamps ("0:45"), codes and
+formats where letters touch the digits ("i3", "4K", "1080p", "3D"), hashtags, web addresses and a
+number after "part", "episode", "step", "day" and similar words are not figures; "10km", "2x" and
+"25%" are.
+
+The person's own phrases win over the lists (decision D6): the taste profiles' `phrases` (set
+with `autocut.taste {"set": {"phrases": [...]}}`, the project's and the user's default together),
+each wording rule's `say`, and `allow` are never flagged. A list match that overlaps one is
+dropped (`allowed.suppressed` counts them), and marks, all-caps words and figures inside one
+(with the exclamation or question marks it ends with) are not counted.
+
+Every finding is a warning, the `fail` level of a budget too (D7). Each code lists at most 200
+findings; `counts` has them all; at most 8 MB of text is read in one call. `budgets` lists every
+unit's count of every device for tuning. `publish.preflight` adds a `copy` check (warn or pass,
+never an error) when it is given publish copy, with the lint under `copy`. `publish.fixCopy`,
+given the copy, answers it with its safe fixes at once, with or without a file to fix: a whole
+sentence at the start or end of a description or caption made only of greetings and calls to
+action (and joining words like "so" and "and") is cut, never the last one left, and runs of
+exclamation marks become one, in the title too. Nothing is reworded; a sentence with anything
+else in it stays.
+
 ## Standard checked delivery
 
 Use `recipe.run` with `builtin:delivery-quality-gate`, or call:

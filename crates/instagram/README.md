@@ -151,8 +151,17 @@ bitrate that fits the size, loudness normalized to −14 LUFS with peaks at −1
 front for Instagram) when a check needs it, else only the `moov` moved to the front — the same
 samples, every chunk offset shifted. A length or a shape no copy can mend is said instead.
 
-- **Engine**: `publish.destinations`, `publish.preflight {destination, path, loudness?}`,
-  `publish.fixCopy {destination, path, out?, wait?}` (a job; `publish` in `jobs.list`),
+Given the publish copy (`title`, `description`, `caption`, `tags`), the pre-flight also has a
+`copy` check: `copy.lint` over it (stock phrases, filler, device budgets, figures against the
+fact ledger), a warning and never an error, with the whole lint under `copy`. `publish.fixCopy`
+answers the copy with its safe fixes at once (whole sentences at the start or end of a
+description or caption made only of greetings and calls to action cut, repeated exclamation
+marks collapsed; nothing reworded), with or without a file to fix; `publish.run` lints what it
+publishes for the record and publishes it as given.
+
+- **Engine**: `publish.destinations`, `publish.preflight {destination, path, loudness?, title?,
+  description?, caption?, tags?}`, `publish.fixCopy {destination, path, out?, wait?, title?,
+  description?, caption?, tags?}` (a job; `publish` in `jobs.list`),
   `publish.run {destination, path, …metadata, wait?}` (the pre-flight, then `youtube.upload` or
   `instagram.publish` as a job with progress and cancel — the MCP supervisor and the CLI chain
   export → publish with it).

@@ -2,7 +2,8 @@
 //! ([`filmcraft_project::taste::Taste`]) — the user's default (`taste.json` in the data
 //! directory) and the project's own (kept in the project file), the project's over the default.
 //! The director, Quick Short, the showcase and the Malayalam script writer read the two laid
-//! together; a video's own options win over both.
+//! together; a video's own options win over both. `copy.lint` reads the person's own phrases
+//! (`phrases`, and each wording rule's `say`) from both profiles together, never flagging them.
 //!
 //! With nothing to change it says what the profiles are: `default`, `project` and `resolved`.
 //! `set` changes fields of the `scope`'s profile (`project` by default — one undo step — or
@@ -32,7 +33,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Taste Profile",
         menu: &[],
         shortcut: None,
-        params: r#"{"scope":"project"|"default"="project","set":{"style":"subtle"|"energetic"|"cinematic"?,"lightEffects":bool?,"sounds":["swish"|"chime"|"whoosh"|"impact"|"riser"|"shutter"|"pop"|"thump"]?,"soundLevel":0..1?,"color":bool?,"colorStrength":0..1?,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"?,"lookStrength":0..100?,"textLanguage":str?,"words":[{"say":str,"not":str}]?,"narration":[str]?,"redact":"off"|"faces"|"plates"|"faces,plates"?}?,"clear":bool=false}"#,
+        params: r#"{"scope":"project"|"default"="project","set":{"style":"subtle"|"energetic"|"cinematic"?,"lightEffects":bool?,"sounds":["swish"|"chime"|"whoosh"|"impact"|"riser"|"shutter"|"pop"|"thump"]?,"soundLevel":0..1?,"color":bool?,"colorStrength":0..1?,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"?,"lookStrength":0..100?,"textLanguage":str?,"words":[{"say":str,"not":str}]?,"narration":[str]?,"phrases":[str]? (the person's own phrases: copy.lint never flags them),"redact":"off"|"faces"|"plates"|"faces,plates"?}?,"clear":bool=false}"#,
         enabled: always,
         run: taste,
         journal: true,
@@ -134,6 +135,15 @@ fn changed(cmd: &str, mut t: Taste, set: &serde_json::Map<String, Value>) -> Res
                 }
             }
             "narration" => t.narration = if off { None } else { Some(texts(cmd, k, v)?) },
+            "phrases" => {
+                t.phrases = if off {
+                    None
+                } else {
+                    let max = filmcraft_project::taste::MAX_PHRASES;
+                    let a = v.as_array().filter(|a| a.len() <= max).ok_or_else(|| bad(cmd, format!("`set.phrases` is a list of at most {max} phrases")))?;
+                    Some(a.iter().map(|x| x.as_str().map(str::to_string).ok_or_else(|| bad(cmd, "`set.phrases` holds texts"))).collect::<Result<_>>()?)
+                }
+            }
             "redact" => t.redact = if off { None } else { Some(one_of(cmd, k, v, REDACT)?) },
             other => return Err(bad(cmd, format!("`set` has no field `{other}`"))),
         }
@@ -208,6 +218,8 @@ mod tests {
         assert_eq!((res["style"].as_str(), res["lightEffects"].as_bool(), res["redact"].as_str()), (Some("cinematic"), Some(true), Some("off")));
         assert_eq!(res["sounds"], json!(["swish", "chime"]));
         assert_eq!(resolved(&s).apply_words("my son"), "our son");
+        let r = s.execute(TASTE_CMD, json!({"set": {"phrases": ["  let's dive in  ", ""]}})).unwrap();
+        assert_eq!(r["project"]["phrases"], json!(["let's dive in"]));
         // a field removed; undo puts the project's profile back as it was
         s.execute(TASTE_CMD, json!({"set": {"lightEffects": null}})).unwrap();
         assert_eq!(resolved(&s).light_effects, None);
@@ -232,6 +244,9 @@ mod tests {
             json!({"set": {"words": [{"say": "x"}]}}),
             json!({"set": {"textLanguage": "en gb!"}}),
             json!({"set": {"mood": "happy"}}),
+            json!({"set": {"phrases": "let's dive in"}}),
+            json!({"set": {"phrases": [3]}}),
+            json!({"set": {"phrases": vec!["x"; filmcraft_project::taste::MAX_PHRASES + 1]}}),
         ] {
             assert!(s.execute(TASTE_CMD, bad.clone()).is_err(), "{bad}");
         }

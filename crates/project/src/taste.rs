@@ -1,6 +1,7 @@
 //! A taste profile (`autocut.taste`): how one person likes their videos made — the cuts and the
 //! sounds on them, light effects, the colour pass, the language of on-screen text, wording rules
-//! ("our son", never "my son"), how narration is written, and privacy. Every field is optional:
+//! ("our son", never "my son"), how narration is written, the person's own phrases (which the
+//! copy and style checks never flag), and privacy. Every field is optional:
 //! a profile is laid over the one below it — the user's default under a project's, a video's own
 //! options over both ([`Taste::over`]) — and what none of them says is each pipeline's own
 //! default.
@@ -11,6 +12,8 @@ use serde::{Deserialize, Serialize};
 pub const MAX_RULES: usize = 32;
 /// Longest text a profile keeps (a rule, a word), characters.
 pub const MAX_TEXT: usize = 300;
+/// Most of the person's own phrases a profile keeps.
+pub const MAX_PHRASES: usize = 200;
 
 /// One wording rule: say `say`, never `not`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +59,10 @@ pub struct Taste {
     /// describe what is on screen").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub narration: Option<Vec<String>>,
+    /// Phrases the person uses on purpose ("let's dive in", "hello everyone"): `copy.lint` and the
+    /// style checks never flag them, whatever their word lists say (decision D6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phrases: Option<Vec<String>>,
     /// What is hidden: `off` (faces sharp), `faces`, `plates`, `faces,plates`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redact: Option<String>,
@@ -84,6 +91,7 @@ impl Taste {
             text_language: self.text_language.clone().or_else(|| base.text_language.clone()),
             words: self.words.clone().or_else(|| base.words.clone()),
             narration: self.narration.clone().or_else(|| base.narration.clone()),
+            phrases: self.phrases.clone().or_else(|| base.phrases.clone()),
             redact: self.redact.clone().or_else(|| base.redact.clone()),
         }
     }
@@ -106,6 +114,7 @@ impl Taste {
                 v.iter().map(|w| Wording { say: text(&w.say), not: text(&w.not) }).filter(|w| !w.not.is_empty() && w.say != w.not).take(MAX_RULES).collect()
             }),
             narration: self.narration.as_ref().map(|v| v.iter().map(|s| text(s)).filter(|s| !s.is_empty()).take(MAX_RULES).collect()),
+            phrases: self.phrases.as_ref().map(|v| v.iter().map(|s| text(s)).filter(|s| !s.is_empty()).take(MAX_PHRASES).collect()),
             redact: short(&self.redact),
         }
     }
@@ -212,5 +221,18 @@ mod tests {
         assert!(bad.words.unwrap().is_empty());
         let n = bad.narration.unwrap();
         assert!(n.len() == MAX_RULES && n[0].chars().count() == MAX_TEXT);
+    }
+
+    #[test]
+    fn own_phrases_are_kept_capped_and_layered() {
+        let many = Taste { phrases: Some(vec!["  hello everyone \u{7}".into(); MAX_PHRASES + 50]), ..Taste::default() }.sanitized();
+        let kept = many.phrases.unwrap();
+        assert_eq!((kept.len(), kept[0].as_str()), (MAX_PHRASES, "hello everyone"));
+        let blank = Taste { phrases: Some(vec!["   ".into(), "x".repeat(10_000)]), ..Taste::default() }.sanitized();
+        assert_eq!(blank.phrases.unwrap().iter().map(|p| p.chars().count()).collect::<Vec<_>>(), [MAX_TEXT]);
+        let base = Taste { phrases: Some(vec!["let's dive in".into()]), ..Taste::default() };
+        assert_eq!(Taste::default().over(&base).phrases, base.phrases);
+        let json = serde_json::to_value(&base).unwrap();
+        assert_eq!(json["phrases"][0], "let's dive in");
     }
 }

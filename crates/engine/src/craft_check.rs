@@ -295,9 +295,10 @@ fn subject_look(project: &Project, q: &Sequence, subject: &Subject, t: Tick) -> 
     }
 }
 
-/// The texts of `q`: every text layer of the graphic clips on visible video tracks, and every
-/// caption (each page of an animated one) on visible caption tracks.
-fn texts(project: &Project, q: &Sequence) -> Vec<Text> {
+/// The enabled text layers of the graphic clips on enabled video tracks of `q`, at most `max`:
+/// (track index, clip, effect index, its text at the clip's middle). `copy.lint` reads titles
+/// through this too.
+pub(crate) fn title_layers<'a>(project: &Project, q: &'a Sequence, max: usize) -> Vec<(usize, &'a TrackItem, usize, String)> {
     let mut out = Vec::new();
     for (ti, t) in q.video_tracks.iter().enumerate().filter(|(_, t)| t.enabled) {
         for it in t.items.iter().filter(|i| i.enabled) {
@@ -305,7 +306,7 @@ fn texts(project: &Project, q: &Sequence) -> Vec<Text> {
                 continue;
             }
             for (i, e) in it.effects.iter().enumerate() {
-                if out.len() >= MAX_TEXTS {
+                if out.len() >= max {
                     return out;
                 }
                 if e.effect != TEXT_LAYER || !e.enabled {
@@ -315,18 +316,28 @@ fn texts(project: &Project, q: &Sequence) -> Vec<Text> {
                     Some(ParamValue::Text(s)) => s,
                     _ => String::new(),
                 };
-                out.push(Text {
-                    kind: "title",
-                    clip: it.id.0,
-                    track: format!("V{}", ti + 1),
-                    text,
-                    start: it.start,
-                    end: it.end(),
-                    subject: Subject::Layer { track: ti, clip: it.id.0, effect: i },
-                });
+                out.push((ti, it, i, text));
             }
         }
     }
+    out
+}
+
+/// The texts of `q`: every text layer of the graphic clips on visible video tracks, and every
+/// caption (each page of an animated one) on visible caption tracks.
+fn texts(project: &Project, q: &Sequence) -> Vec<Text> {
+    let mut out: Vec<Text> = title_layers(project, q, MAX_TEXTS)
+        .into_iter()
+        .map(|(ti, it, i, text)| Text {
+            kind: "title",
+            clip: it.id.0,
+            track: format!("V{}", ti + 1),
+            text,
+            start: it.start,
+            end: it.end(),
+            subject: Subject::Layer { track: ti, clip: it.id.0, effect: i },
+        })
+        .collect();
     let (w, h) = (q.settings.width as usize, q.settings.height as usize);
     let scale = w.min(h) as f64 / 1080.0;
     for o in crate::safe_zones::overlays(project, q).into_iter().filter(|o| o.kind == "caption") {

@@ -372,3 +372,16 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   is an approximation the doc spells out), an empty first frame, more than 3 s with nothing
   changing outside declared holds and more than 15 s with no sound. Warnings only (D7). 934
   commands.
+- **PX1.3**: `copy.lint {text?, sequence?, publish?: {title?, description?, caption?, tags?},
+  script?, facts?, allow?}` checks a video's words against FilmCraft's own lists: 39 stock phrases
+  of video copy ("in this video we'll", "let's dive in", "smash that like button") and 27 of
+  marketing copy ("game-changer"), 13 fillers and 14 hedges, 23 phrases of narration that
+  describes the shot ("here we see", "as you can see"), device budgets per 100 words (exclamation
+  marks, questions, em dashes, emoji, all-caps words; warn over the budget, a `fail` level at
+  twice plus one, still a warning this round) and figures in digits that are not in the fact
+  ledger (`facts`, or `build/facts.json` beside the project). The person's own phrases win (D6):
+  the taste profiles' new `phrases` field, wording rules' `say` and `allow` are never flagged. It
+  is a `copy` check of `publish.preflight` (warnings only) and `publish.fixCopy` answers the copy
+  with its safe fixes (stock greetings and calls to action trimmed from the start and end of a
+  description, repeated exclamation marks collapsed). Details in
+  `docs/local-pipeline-upgrades.md` ("Craft QA"). 935 commands.

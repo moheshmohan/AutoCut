@@ -6,8 +6,8 @@
 //! | command | what it does |
 //! |---|---|
 //! | `publish.destinations` | the rows: Media File, YouTube, YouTube Short, Instagram Reel — each with its connect state (from disk, no network) |
-//! | `publish.preflight {destination, path, loudness?}` | the checks of `path` for `destination`: container, codecs, chroma, frame rate, width, aspect, bitrate, duration, size, audio rate and channels, `moov` placement, loudness (BS.1770) and true peak |
-//! | `publish.fixCopy {destination, path, out?, wait?}` | job: a copy that passes — re-encoded (H.264 + AAC 48 kHz, the size, rate and bitrate the destination takes, loudness normalized to −14 LUFS, −1 dBTP) when a check needs it, else only the `moov` moved to the front (no re-encode); its answer (`publish` in `jobs.list`) is the copy and its own pre-flight |
+//! | `publish.preflight {destination, path, loudness?, title?, description?, caption?, tags?}` | the checks of `path` for `destination`: container, codecs, chroma, frame rate, width, aspect, bitrate, duration, size, audio rate and channels, `moov` placement, loudness (BS.1770) and true peak; with publish copy, a `copy` check too (`copy.lint`: a warning, never an error) |
+//! | `publish.fixCopy {destination, path, out?, wait?, title?, description?, caption?, tags?}` | job: a copy that passes — re-encoded (H.264 + AAC 48 kHz, the size, rate and bitrate the destination takes, loudness normalized to −14 LUFS, −1 dBTP) when a check needs it, else only the `moov` moved to the front (no re-encode); its answer (`publish` in `jobs.list`) is the copy and its own pre-flight. With publish copy, `copy` is the copy with its safe fixes (stock greetings and calls to action trimmed from the start and end of a description, repeated exclamation marks collapsed), at once |
 //! | `publish.run {destination, path, …, wait?}` | the pre-flight (errors stop it, with the fixes), then the destination's publish job: `youtube.upload` (YouTube, YouTube Short) or `instagram.publish` (Instagram Reel), with progress and cancel |
 //!
 //! Every number read from the file is hostile: sizes and box lengths are checked, divisions are
@@ -1001,7 +1001,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Check a File for a Destination",
             menu: &[],
             shortcut: None,
-            params: r#"{"destination":"mediaFile"|"youtube"|"youtubeShort"|"instagramReel","path":str,"loudness":bool=true}"#,
+            params: r#"{"destination":"mediaFile"|"youtube"|"youtubeShort"|"instagramReel","path":str,"loudness":bool=true,"title":str?,"description":str?,"caption":str?,"tags":[str]? (publish copy: a `copy` check, warnings only),"facts":[str|number]?,"allow":[str]?}"#,
             enabled: always,
             run: preflight,
             journal: false,
@@ -1011,7 +1011,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Export a Fixed Copy",
             menu: &[],
             shortcut: None,
-            params: r#"{"destination":"youtube"|"youtubeShort"|"instagramReel","path":str,"out":str?,"wait":bool=false}"#,
+            params: r#"{"destination":"youtube"|"youtubeShort"|"instagramReel","path":str,"out":str?,"wait":bool=false,"title":str?,"description":str?,"caption":str?,"tags":[str]? (publish copy: answered with its safe fixes),"facts":[str|number]?,"allow":[str]?}"#,
             enabled: always,
             run: fix_copy,
             journal: false,
@@ -1079,8 +1079,13 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     let d = dest_param(cmd, p)?;
     let path = path_param(cmd, p, "path")?.ok_or_else(|| bad(cmd, "need `path`: the file to check"))?;
     let loudness = bool_p(p, "loudness").unwrap_or(true);
+    let copy = crate::copy_lint::publish_copy(cmd, p)?;
     let (probe, _) = probe(s, &path, loudness).map_err(|e| bad(cmd, e))?;
-    Ok(report(d, &probe))
+    let mut r = report(d, &probe);
+    if let Some(c) = &copy {
+        crate::copy_lint::publish_leg(s, cmd, p, c, &mut r)?;
+    }
+    Ok(r)
 }
 
 fn fix_copy(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1096,6 +1101,11 @@ fn fix_copy(s: &mut Session, p: &Value) -> Result<Value> {
         None => fixed_copy_path(&path, d),
     };
     let wait = bool_p(p, "wait").unwrap_or(false);
+    // the copy's safe fixes are made at once, whatever the file needs
+    let copy = match crate::copy_lint::publish_copy(cmd, p)? {
+        Some(c) => Some(crate::copy_lint::fix_publish(s, cmd, p, &c)?),
+        None => None,
+    };
     let (probe, src) = probe(s, &path, true).map_err(|e| bad(cmd, e))?;
     let before = checks(d, &probe);
     // a failure no copy mends (the length, the shape) makes a copy pointless
@@ -1109,6 +1119,11 @@ fn fix_copy(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let need: Option<Fix> = before.iter().filter(|c| c.status != Status::Pass && c.status != Status::Info).filter_map(|c| c.fixable).max();
     let Some(fix) = need else {
+        if let Some(copy) = copy {
+            return Ok(
+                json!({"job": null, "fix": null, "path": null, "from": path, "file": format!("already passes the {} checks; nothing to fix", d.label()), "copy": copy}),
+            );
+        }
         return Err(bad(cmd, format!("{path} already passes the {} checks; nothing to fix", d.label())));
     };
     let (settings, said) = fix_settings(d, &probe, &out);
@@ -1171,6 +1186,9 @@ fn fix_copy(s: &mut Session, p: &Value) -> Result<Value> {
         crate::narration::finish(&prog, &res, r, t0);
     })?;
     let mut answer = json!({"job": id, "path": out, "fix": fix, "from": path});
+    if let Some(copy) = copy {
+        answer["copy"] = copy;
+    }
     if wait && let Some(j) = s.jobs.iter().find(|j| j.id == id) {
         let v = j.to_json();
         if let Some(e) = v["result"]["error"].as_str() {
@@ -1248,6 +1266,15 @@ fn publish_run(s: &mut Session, p: &Value) -> Result<Value> {
         o.insert("destination".into(), json!(d.id()));
         o.insert("via".into(), json!(target));
         o.insert("preflight".into(), json!({"ok": pre["ok"], "warnings": pre["warnings"], "checks": pre["checks"]}));
+    }
+    // the copy it was published with, linted for the record (warnings only, never a stop)
+    if let Ok(Some(c)) = crate::copy_lint::publish_copy(cmd, p) {
+        let mut leg = json!({"checks": [], "warnings": 0});
+        if crate::copy_lint::publish_leg(s, cmd, p, &c, &mut leg).is_ok()
+            && let Some(o) = answer.get_mut("preflight").and_then(Value::as_object_mut)
+        {
+            o.insert("copy".into(), leg["copy"].take());
+        }
     }
     Ok(answer)
 }

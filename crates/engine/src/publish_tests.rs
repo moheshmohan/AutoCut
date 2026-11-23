@@ -452,3 +452,62 @@ fn current_native_exports_pass_fast_start_without_an_unnecessary_copy() {
     let error = session.execute("publish.fixCopy", json!({"destination": "instagramReel", "path": path})).unwrap_err();
     assert!(error.to_string().contains("nothing to fix"), "{error}");
 }
+
+/// Publish copy is a leg of the pre-flight (a warning, never an error: D7) and of the fixed copy
+/// (only the safe fixes, answered at once); `publish.run` lints what it publishes for the record
+/// and publishes it as given.
+#[test]
+fn publish_copy_is_a_leg_of_the_preflight_and_of_the_fixed_copy() {
+    let f = files();
+    let mut s = Session::default();
+    let base = s.execute("publish.preflight", json!({"destination": "youtube", "path": f.reel, "loudness": false})).unwrap();
+    assert!(statuses(&base).iter().all(|(id, _)| id != "copy"), "no copy, no copy check");
+    let stock = "Hey guys! We rebuilt the extruder. Smash that like button!";
+    let r = s
+        .execute(
+            "publish.preflight",
+            json!({"destination": "youtube", "path": f.reel, "loudness": false, "title": "Printer build!!!", "description": stock, "tags": ["printer"]}),
+        )
+        .unwrap();
+    assert_eq!(status_of(&r, "copy"), "warn", "{r:#}");
+    assert_eq!((&r["ok"], &r["errors"]), (&base["ok"], &base["errors"]), "the copy never fails the file");
+    assert_eq!(r["warnings"].as_u64(), base["warnings"].as_u64().map(|w| w + 1));
+    assert!(r["copy"]["findings"].as_array().unwrap().iter().any(|x| x["phrase"] == "smash that like button"), "{r:#}");
+    let clean = s
+        .execute(
+            "publish.preflight",
+            json!({"destination": "youtube", "path": f.reel, "loudness": false, "title": "Rebuilding the extruder", "description": "We rebuilt the extruder twice before it fed cleanly."}),
+        )
+        .unwrap();
+    assert_eq!(status_of(&clean, "copy"), "pass", "{clean:#}");
+    // a file that needs nothing: the copy's safe fixes, and no job
+    let v = s.execute("publish.fixCopy", json!({"destination": "youtube", "path": f.silent, "title": "Printer build!!!", "description": stock})).unwrap();
+    assert!(v["job"].is_null(), "{v}");
+    assert_eq!(v["copy"]["fixed"], json!({"title": "Printer build!", "description": "We rebuilt the extruder."}), "{v:#}");
+    assert_eq!(v["copy"]["changed"], true);
+    assert!(v["copy"]["lint"]["findings"].as_array().unwrap().is_empty(), "{v:#}");
+    // a file that needs a fix: the job runs and the copy is answered with it
+    let out = dir().join("copy-leg (Instagram Reel).mp4");
+    let v =
+        s.execute("publish.fixCopy", json!({"destination": "instagramReel", "path": f.silent, "out": out, "wait": true, "caption": "Robots!! #ai"})).unwrap();
+    assert_eq!(v["fix"], "faststart", "{v}");
+    assert_eq!(v["publish"]["preflight"]["ok"], true, "{v:#}");
+    assert_eq!(v["copy"]["fixed"]["caption"], "Robots! #ai");
+    // bad copy is refused before anything is read
+    for (p, want) in [
+        (json!({"destination": "youtube", "path": f.reel, "tags": "a,b"}), "`tags`"),
+        (json!({"destination": "youtube", "path": f.reel, "title": 5}), "`title`"),
+        (json!({"destination": "youtube", "path": f.silent, "description": "x", "facts": "1"}), "`facts`"),
+    ] {
+        for cmd in ["publish.preflight", "publish.fixCopy"] {
+            let e = s.execute(cmd, p.clone()).unwrap_err().to_string();
+            assert!(e.contains(want), "{cmd} {p}: {e}");
+        }
+    }
+    // publish.run lints the caption for the record and publishes it unchanged
+    let ig = Arc::new(FakeIg::default());
+    s.instagram.publisher = Some(ig.clone());
+    let v = s.execute("publish.run", json!({"destination": "instagramReel", "path": f.reel, "caption": "Hey guys!! Robots #ai", "wait": true})).unwrap();
+    assert!(v["preflight"]["copy"]["findings"].as_array().unwrap().iter().any(|x| x["phrase"] == "hey guys"), "{v:#}");
+    assert_eq!(ig.reels.lock().unwrap()[0].caption.as_deref(), Some("Hey guys!! Robots #ai"));
+}
