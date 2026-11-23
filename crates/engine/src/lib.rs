@@ -68,6 +68,7 @@ pub mod mixer;
 pub mod ml_script;
 pub mod moments;
 pub mod motion_energy;
+pub mod motion_graphics;
 pub mod motion_track;
 pub mod multicam;
 pub mod music;
@@ -707,6 +708,9 @@ pub struct Session {
     /// Generations by local tools whose files are imported and placed when their job finishes
     /// (`generate.*`).
     pub generation: generate::Generation,
+    /// Motion graphics renders by RAEA whose results are imported and placed when their job
+    /// finishes (`motion.render`), and what the finished ones made.
+    pub motion_renders: motion_graphics::MotionRenders,
     /// The SoundFont generated music plays on, loaded once (`music.useSoundfont`, `soundfont`).
     pub soundfonts: soundfonts::SoundFonts,
     /// The latest `music.preview`, for the host to play and `audio.generate` to place.
@@ -876,6 +880,7 @@ impl Session {
             scenes: Default::default(),
             neural_music: Default::default(),
             generation: Default::default(),
+            motion_renders: Default::default(),
             soundfonts: Default::default(),
             music_preview: Default::default(),
             presets: Default::default(),
@@ -1025,6 +1030,7 @@ impl Session {
         scenes::poll(self);
         music_neural::poll(self);
         generate::poll(self);
+        motion_graphics::poll(self);
         export_tools::pump_queue(self, false);
         panels::log_jobs(self);
         let Some(p) = self.persistence.as_mut() else { return };

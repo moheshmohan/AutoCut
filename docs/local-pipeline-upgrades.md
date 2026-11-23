@@ -146,7 +146,13 @@ The cache stores files; the RAEA helper packs transparent frame sequences for ca
 
 ## RAEA review bundle
 
-See [raea-workflow.md](raea-workflow.md). The helper now supports:
+See [raea-workflow.md](raea-workflow.md). `motion.render` does the helper's handoff as an engine
+command and an MCP long job (PX3.2): the same revision folders, `canvas`/`size`/`preview` sizing,
+probe, preflight (`spec`, or `expected` and `holds` as parameters), `preflight.json`,
+`contact-sheet.png` and `autocut-import.json` in the helper's shape, then the import and, with
+`place`, the clip on the timeline, all under the GPU lock it takes itself. It also keeps RAEA's
+`check.json`, its render manifest and its log beside the render. It does not use the render cache
+yet (`--cache` stays with the helper). The helper now supports:
 
 ```sh
 python3 examples/raea/render.py scene.tsx '/new/review-folder' \

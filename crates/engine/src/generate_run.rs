@@ -7,6 +7,12 @@
 //! parameter that arrived over the control channel. A request fills placeholders in the
 //! provider's argument list; the arguments go to the program as they are (no shell), so a
 //! prompt cannot become a command.
+//!
+//! A `kind: "composition"` entry names the program that renders code-authored motion graphics
+//! (`motion.render`, [`crate::motion_graphics`]): `{"id": "raea", "kind": "composition", "name":
+//! "RAEA", "command": ["/absolute/path/to/raea"]}`. Its `command` is the program alone (no
+//! placeholders: the motion commands build RAEA's command line), or empty to find RAEA where it
+//! installs itself.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -29,6 +35,9 @@ pub enum Kind {
     Video,
     Music,
     Sfx,
+    /// A renderer of code-authored compositions (RAEA): driven by the `motion.*` commands, never
+    /// by `generate.*`.
+    Composition,
 }
 
 impl Kind {
@@ -38,6 +47,7 @@ impl Kind {
             Kind::Video => "video",
             Kind::Music => "music",
             Kind::Sfx => "sfx",
+            Kind::Composition => "composition",
         }
     }
 
@@ -45,7 +55,7 @@ impl Kind {
     pub fn extension(self) -> &'static str {
         match self {
             Kind::Image => "png",
-            Kind::Video => "mp4",
+            Kind::Video | Kind::Composition => "mp4",
             Kind::Music | Kind::Sfx => "wav",
         }
     }
@@ -66,7 +76,9 @@ pub struct Provider {
     /// `{negative}`, `{width}`, `{height}`, `{seed}`, `{seconds}`, `{frames}`, `{fps}`, `{image}`,
     /// `{steps}`, `{strength}`; an argument that is exactly `{references}` becomes
     /// [`Provider::per_reference`] once for each reference, and one that is exactly `{optional}`
-    /// becomes each group of [`Provider::optional`] whose value the request gave.
+    /// becomes each group of [`Provider::optional`] whose value the request gave. A composition
+    /// tool's is its program alone, or empty (found where it installs itself).
+    #[serde(default)]
     pub command: Vec<String>,
     /// The arguments for one reference picture (`{path}` is its file).
     #[serde(default)]
@@ -398,6 +410,9 @@ fn check(p: &Provider) -> Result<(), String> {
         return Err(format!("provider id `{}` must be 1 to 64 letters, digits, - or _", p.id.chars().take(80).collect::<String>()));
     }
     let err = |m: String| Err(format!("provider {}: {m}", p.id));
+    if p.kind == Kind::Composition {
+        return check_composition(p);
+    }
     if p.command.is_empty() || p.command.len() > MAX_ARGS || p.per_reference.len() > MAX_ARGS || p.optional.len() > MAX_ARGS {
         return err(format!("`command` needs 1 to {MAX_ARGS} arguments"));
     }
@@ -494,6 +509,37 @@ fn check(p: &Provider) -> Result<(), String> {
         if v.is_some_and(|x| !x.is_finite() || x <= 0.0 || x > 1.0e6) {
             return err(format!("`{name}` must be a positive number"));
         }
+    }
+    Ok(())
+}
+
+/// A composition tool: at most its program (an absolute path, no placeholders), nothing a
+/// generation tool takes, and sane limits.
+fn check_composition(p: &Provider) -> Result<(), String> {
+    let err = |m: &str| Err(format!("composition tool {}: {m}", p.id));
+    match p.command.as_slice() {
+        [] => {}
+        [program] if std::path::Path::new(program).is_absolute() && !program.contains(['{', '\0']) && program.len() <= MAX_ARG_LEN => {}
+        _ => return err("`command` is the program alone, an absolute path (or empty, to find RAEA where it installs itself)"),
+    }
+    let generation_only = !p.per_reference.is_empty()
+        || !p.optional.is_empty()
+        || !p.cutout_command.is_empty()
+        || !p.extend_command.is_empty()
+        || !p.restyle_command.is_empty()
+        || !p.restyles.is_empty();
+    if generation_only {
+        return err("it takes no generation options (perReference, optional, cutoutCommand, extendCommand, restyleCommand, restyles)");
+    }
+    if p.env.len() > 64 || p.env.iter().any(|(k, v)| k.is_empty() || k.len() > 128 || k.contains(['=', '\0']) || v.len() > MAX_ARG_LEN || v.contains('\0')) {
+        return err("`env` has too many or malformed names");
+    }
+    if p.cwd.is_some() {
+        return err("`cwd` is not used: RAEA runs in the composition's folder");
+    }
+    if p.timeout_seconds.is_some_and(|x| !x.is_finite() || x <= 0.0 || x > 1.0e6) || p.estimate_seconds.is_some_and(|x| !x.is_finite() || x <= 0.0 || x > 1.0e6)
+    {
+        return err("`timeoutSeconds` and `estimateSeconds` must be positive numbers");
     }
     Ok(())
 }
@@ -681,9 +727,13 @@ pub fn progress_in(text: &str) -> Option<f64> {
     f.is_finite().then(|| f.clamp(0.0, 1.0))
 }
 
-/// Whether the provider's program is there to run.
+/// Whether the provider's program is there to run (a composition tool without a program: whether
+/// RAEA is found where it installs itself).
 pub fn installed(p: &Provider) -> bool {
-    p.command.first().is_some_and(|c| std::path::Path::new(c).is_file())
+    match p.command.first() {
+        Some(c) => std::path::Path::new(c).is_file(),
+        None => p.kind == Kind::Composition && crate::motion_graphics::locate(Some(p)).is_ok(),
+    }
 }
 
 /// The last 1500 bytes of a run's log.
@@ -700,7 +750,7 @@ fn log_end(path: &std::path::Path) -> String {
 
 /// The end of a run's log, for an error message.
 #[cfg(not(target_arch = "wasm32"))]
-fn log_tail(path: &std::path::Path) -> String {
+pub(crate) fn log_tail(path: &std::path::Path) -> String {
     let text = log_end(path);
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let from = lines.len().saturating_sub(6);
@@ -778,6 +828,10 @@ pub fn run(
     let why = if status.success() { "wrote no file".to_string() } else { format!("failed ({status})") };
     Err(format!("{} {why}{}{}", p.name, if tail.is_empty() { "" } else { ": " }, tail))
 }
+
+/// Tests that write the provider list (one file per test binary) take turns on this.
+#[cfg(test)]
+pub(crate) static LIST_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -864,6 +918,30 @@ mod tests {
         let long = format!(r#"["/bin/gen","{{out}}","{}"]"#, "a".repeat(MAX_ARG_LEN + 1));
         assert!(parse(&wrap(&provider("image", &long, ""))).unwrap_err().contains("too long"));
         assert!(parse(r#"{"providers":[]}"#).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_composition_entry_is_its_program_alone() {
+        let wrap = |body: &str| format!(r#"{{"providers":[{body}]}}"#);
+        let ok = parse(&wrap(r#"{"id":"raea","kind":"composition","name":"RAEA","command":["/opt/raea/bin/raea"],"timeoutSeconds":600}"#)).unwrap();
+        assert_eq!((ok[0].kind, ok[0].kind.name()), (Kind::Composition, "composition"));
+        // without a program it is found where RAEA installs itself
+        assert!(parse(&wrap(r#"{"id":"raea","kind":"composition","name":"RAEA"}"#)).unwrap()[0].command.is_empty());
+        for (bad, why) in [
+            (r#"{"id":"raea","kind":"composition","name":"RAEA","command":["raea"]}"#, "absolute"),
+            (r#"{"id":"raea","kind":"composition","name":"RAEA","command":["/bin/raea","render","{out}"]}"#, "program alone"),
+            (r#"{"id":"raea","kind":"composition","name":"RAEA","command":["/bin/{x}"]}"#, "absolute"),
+            (r#"{"id":"raea","kind":"composition","name":"RAEA","optional":{"seed":["--seed"]}}"#, "generation options"),
+            (r#"{"id":"raea","kind":"composition","name":"RAEA","cwd":"/tmp"}"#, "cwd"),
+            (r#"{"id":"raea","kind":"composition","name":"RAEA","timeoutSeconds":0}"#, "positive"),
+            (r#"{"id":"raea","kind":"composition","name":"RAEA","env":{"A=B":"1"}}"#, "env"),
+            (r#"{"id":"../raea","kind":"composition","name":"RAEA"}"#, "letters"),
+        ] {
+            let e = parse(&wrap(bad)).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        // a generation tool still needs its program and {out}
+        assert!(parse(&wrap(r#"{"id":"img","kind":"image","name":"I"}"#)).unwrap_err().contains("arguments"));
     }
 
     #[test]

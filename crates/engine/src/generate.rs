@@ -577,7 +577,7 @@ fn audio_free(s: &Session, i: usize, range: TimeRange) -> bool {
 
 /// The video track a result goes on: the wanted one when it is free there, else the lowest free
 /// one from `above` up, else a new one.
-fn video_track(s: &Session, want: Option<&str>, above: usize, range: TimeRange) -> String {
+pub(crate) fn video_track(s: &Session, want: Option<&str>, above: usize, range: TimeRange) -> String {
     if let Some(i) = want.and_then(video_index).filter(|i| video_free(s, *i, range)) {
         return format!("V{}", i + 1);
     }
@@ -587,7 +587,7 @@ fn video_track(s: &Session, want: Option<&str>, above: usize, range: TimeRange) 
 
 /// The audio track a result goes on: the wanted one when free, else the first free one, else a
 /// new one.
-fn audio_track(s: &mut Session, want: Option<&str>, range: TimeRange) -> Result<String> {
+pub(crate) fn audio_track(s: &mut Session, want: Option<&str>, range: TimeRange) -> Result<String> {
     if let Some(i) = want.and_then(audio_index).filter(|i| audio_free(s, *i, range)) {
         return Ok(format!("A{}", i + 1));
     }
@@ -1444,6 +1444,8 @@ fn assets(s: &mut Session, p: &Value) -> Result<Value> {
                     steps.push(Step { provider: prov.clone(), args, out: out.clone() });
                     format!("{secs:.1} s")
                 }
+                // (asset kinds are image, video, sfx and music: refused above)
+                Kind::Composition => return Err(bad(cmd, format!("{}: a composition is rendered with motion.render", a.name))),
             };
             row["note"] = json!(note);
             lands.push(land_of(&prov, &out, &prompt, seed, &format!("{note} · asset {}", a.name), import, None));

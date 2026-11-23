@@ -3,14 +3,15 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{MutexGuard, PoisonError};
 
 use serde_json::{Value, json};
 
 use super::*;
 
-/// The provider list is one file per test binary: tests that write it take turns.
-static TURN: Mutex<()> = Mutex::new(());
+/// The provider list is one file per test binary: tests that write it take turns (with the
+/// `motion.*` tests, which write it too).
+use crate::generate_run::LIST_TURN as TURN;
 
 struct Bench {
     _turn: MutexGuard<'static, ()>,

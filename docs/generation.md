@@ -103,7 +103,7 @@ them. Each entry:
 
 | Field | Meaning |
 |---|---|
-| `id`, `kind`, `name` | `kind` is `image`, `video`, `music` or `sfx`. |
+| `id`, `kind`, `name` | `kind` is `image`, `video`, `music` or `sfx` (or `composition`, below). |
 | `command` | The program (an absolute path) and its arguments. Placeholders: `{out}` (required), `{prompt}`, `{negative}`, `{width}`, `{height}`, `{seed}`, `{seconds}`, `{frames}`, `{fps}`, `{image}`, `{lastImage}` (the picture a clip ends on), `{lastFrame}` (the index of the clip's last frame), `{steps}`, `{strength}`. An argument that is exactly `{references}` becomes `perReference` once per reference picture (`{path}` is its file); one that is exactly `{optional}` becomes every group of `optional` whose value the request gave (`image`, `lastImage`, `transparent`, `negative`, `steps`, `strength`, `seconds`). A video tool with a `lastImage` group can end a clip on a picture (`from: "both"`). |
 | `env`, `cwd` | Environment variables and the folder to run in. |
 | `extension` | The file type written (default `png`, `mp4`, `wav` by kind). |
@@ -118,6 +118,22 @@ them. Each entry:
 
 A program must write exactly the file `{out}` names and exit with status 0. Its output goes to a
 log beside the result; on failure its last lines are the error message.
+
+**The composition renderer.** One more kind of entry names the program that renders motion
+graphics written as code for `motion.render`, `motion.stills` and `motion.check`
+([raea-workflow.md](raea-workflow.md)). Today that is RAEA, under the id `raea`:
+
+```json
+{"id": "raea", "kind": "composition", "name": "RAEA", "command": ["/absolute/path/to/raea"], "timeoutSeconds": 3600}
+```
+
+`command` is the program alone (the motion commands build its command line), or leave it out:
+RAEA is then the newest `~/.raea/versions/<version>/bin/raea` (the home folder read when the
+command runs), else `raea` on PATH. `env`, `timeoutSeconds` (a render; default an hour) and
+`estimateSeconds` (the progress bar) apply; generation fields are refused. With none of these,
+the motion commands say how to install RAEA. `generate.providers` lists the entry with the
+others. EffectCraft (PX4) is the next composition renderer planned for this list; Remotion is
+never added (its licence asks a company of four or more for a paid licence).
 
 **Progress.** A program that prints a line `progress 0.42` (or `progress 42%`, or `progress 3/8`)
 moves the bar to there; the last such line counts. A program that prints none gets a bar that

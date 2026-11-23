@@ -34,6 +34,9 @@ keep transparency over footage (numbered PNG sequences).
   `file.importImageSequence` for an alpha wipe), then `timeline.place` — a scene on the picture
   track, an alpha sequence on a track above the shots. Sample QA spec files declare expected
   duration and final holds; `media.preflightAnimation` checks holds/text bounds/sound cues.
+- **As commands (PX3.2):** `motion.check`, `motion.stills` and `motion.render` do the helper's
+  work in the engine (CLI, MCP, control channel), RAEA found through `providers.json` or where it
+  installs itself.
 - Compositions are authored per revision directory; keep the editable TSX with the render so the
   design can change in a new revision. RAEA v0.1.0 ignores output-size overrides on fixed-size
   compositions — the helper sets the output stage and rejects an unexpected rendered size.
@@ -397,3 +400,24 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   fillers). The report's `summary {floor, reflex, finish, waived}` counts the open findings of
   each tier, beside `blocking` and `floorBlocks`. Details in `docs/local-pipeline-upgrades.md`
   ("Severity tiers"). 935 commands.
+
+## Update 2026-11-23 (PX3.2, motion graphics as commands)
+
+- **PX3.2**: RAEA's render helper as engine commands, also over MCP and the CLI.
+  `motion.check {source, composition?}` runs `raea check --quick` and passes its findings through
+  (`check`, `level`, `says`, `fix`), with counts per level and what passed. `motion.stills {source,
+  composition?, at, output}` renders stills into a new folder and answers their paths with RAEA's
+  render manifest: size, rate, length and the text boxes of each frame. `motion.render {source,
+  composition?, output, canvas?, size?, preview?, alpha?, fps?, quality?, spec? | expected?,
+  holds?, import?, place?, wait?}` is a job under the machine's GPU lock (an MCP long job): the
+  check, the render into a new or empty revision folder (one with files in it is refused), AutoCut's
+  own probe (the size and rate asked for, no gaps in a PNG sequence and as many frames as RAEA's
+  manifest says), `media.preflightAnimation` with `qa.motionEnergy` and the declared holds, then
+  `autocut-import.json` in the helper's shape and the import (`file.import`, or
+  `file.importImageSequence` at RAEA's rate) and, with `place`, the clip on the timeline as one undo
+  step (a transparent render above V1). A render that fails the probe or the preflight stays on
+  disk without an import manifest, and the result says where. RAEA is the `kind: "composition"`
+  entry `raea` of `providers.json`, else the newest `~/.raea/versions/*/bin/raea`, else PATH
+  (`docs/generation.md`). Tested with a stand-in RAEA; run for real with RAEA 0.1.8 on
+  `examples/raea/motion.tsx` (the scene with its hold, the 4K master and the split wipe).
+  `examples/raea/render.py` still works. 938 commands.

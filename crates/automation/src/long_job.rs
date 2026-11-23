@@ -31,6 +31,7 @@ pub const LONG_COMMANDS: &[&str] = &[
     "generate.extend",
     "generate.restyle",
     "generate.assets",
+    "motion.render",
     "music.downloadNeuralModel",
     "music.downloadSoundfont",
     "music.preview",
@@ -65,9 +66,9 @@ pub const LONG_COMMANDS: &[&str] = &[
 /// what an Instagram job did (the account connected, the Reel published), a fixed copy's file and checks,
 /// what an Auto Reframe made (the new sequence, the clips followed), what an Auto Redact hid
 /// (per clip, and why the rest was not), what a recipe ran, what speech understanding found, what a
-/// scene index found.
+/// scene index found, what a motion graphics render made (its checks, files, item and clip).
 pub const JOB_EXTRAS: &[&str] =
-    &["offlineMedia", "upload", "showcase", "music", "youtube", "instagram", "publish", "reframe", "redact", "recipe", "speech", "scenes"];
+    &["offlineMedia", "upload", "showcase", "music", "youtube", "instagram", "publish", "reframe", "redact", "recipe", "speech", "scenes", "motion"];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);
@@ -131,8 +132,10 @@ impl FilmcraftMcp {
                 let extras: Vec<(&str, Value)> = JOB_EXTRAS.iter().filter_map(|k| Some((*k, state.as_ref()?.get(*k)?.clone()))).collect();
                 // what a generation made (items, clips), or why its results could not be brought in
                 let generated = state.as_ref().and_then(|j| j.get("generated")).cloned();
+                // (a motion render whose import failed after its checks passed says so in `motion`)
+                let motion_error = state.as_ref().and_then(|j| j.get("motion")?.get("error")?.as_str().map(str::to_string));
                 let result = state.map(|j| j["result"].clone()).unwrap_or(Value::Null);
-                let failed = result.get("error").and_then(Value::as_str).or_else(|| generated.as_ref()?.get("error")?.as_str());
+                let failed = result.get("error").and_then(Value::as_str).or_else(|| generated.as_ref()?.get("error")?.as_str()).or(motion_error.as_deref());
                 if let Some(e) = failed {
                     let what = if id == "file.exportMedia" { "export".to_string() } else { format!("`{id}`") };
                     return CallToolResult::error(vec![Content::text(format!("{what} failed: {e}"))]);
