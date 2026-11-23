@@ -132,8 +132,11 @@ RAEA is then the newest `~/.raea/versions/<version>/bin/raea` (the home folder r
 command runs), else `raea` on PATH. `env`, `timeoutSeconds` (a render; default an hour) and
 `estimateSeconds` (the progress bar) apply; generation fields are refused. With none of these,
 the motion commands say how to install RAEA. `generate.providers` lists the entry with the
-others. EffectCraft (PX4) is the next composition renderer planned for this list; Remotion is
-never added (its licence asks a company of four or more for a paid licence).
+others. EffectCraft (PX4) is not an entry here: it is linked into the AutoCut app, renders
+`.ectemplate` packages rather than compositions written as code and runs no program of its own,
+so it has its own commands, `effectcraft.templateInfo` and `effectcraft.renderTemplate`
+([autocut-features.md](autocut-features.md)). Remotion is never added (its licence asks a company
+of four or more for a paid licence).
 
 **Progress.** A program that prints a line `progress 0.42` (or `progress 42%`, or `progress 3/8`)
 moves the bar to there; the last such line counts. A program that prints none gets a bar that

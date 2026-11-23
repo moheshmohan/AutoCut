@@ -41,6 +41,38 @@ keep transparency over footage (numbered PNG sequences).
   design can change in a new revision. RAEA v0.1.0 ignores output-size overrides on fixed-size
   compositions — the helper sets the output stage and rejects an unexpected rendered size.
 
+## EffectCraft — templates rendered in process
+
+[EffectCraft](https://github.com/storytold/effectcraft) (MIT OR Apache-2.0), upstream FilmCraft's
+compositor, is linked into AutoCut (PX4, decisions D3 and D3a): its renderer, effects, GPU
+compositor, expressions and text, as git dependencies pinned to one revision
+(`filmcraft_effectcraft::PIN`) behind the cargo feature `effectcraft`. The packaged AutoCut app
+is built with it (`packaging/macos/package.sh`); workspace builds, `cargo test --workspace` and
+the web build are not, and there every `effectcraft.*` command says the build lacks it.
+
+- **Templates:** an `.ectemplate` (an Essential Graphics template: a ZIP with `manifest.json`,
+  `project.ecproj`, its media and a poster) is filled with values and rendered: data-driven lower
+  thirds, end cards, chapter cards. `effectcraft.templateInfo {template}` lists the comp (size,
+  rate, duration, frames), the controls (name, type, default, slider range or options), the media
+  it carries or needs, the poster and whether it can be rendered here.
+- **Rendering:** `effectcraft.renderTemplate {template, values?, size?, fps?, range?, out?, format?,
+  gpu?, import?, place?, wait?}` checks everything first (each value through its control's own
+  coercion, the size against the comp's shape and the caps, the frame count, the media), then
+  renders as a job (`jobs.list`, `jobs.cancel`, an MCP long job) under the machine's GPU lock:
+  EffectCraft's GPU compositor on a device of its own, its CPU renderer for any frame the GPU
+  declines or fails. Output is ProRes 4444 with alpha (`format: "prores4444"`, the default) or a
+  PNG sequence with alpha (`"png"`) in a new revision folder (`out`, else `<template> renders/rNNN`
+  beside the template), probed by AutoCut, written up in `autocut-import.json`, imported and, with
+  `place`, put above the picture as one undo step — `motion.render`'s handoff.
+- **Footage and fonts:** the template's media and media values are decoded by AutoCut's own
+  decoders (colour converted both ways); EffectCraft's bundled fonts are used, plus the craft-fonts
+  when the app is built with `CRAFT_FONTS_DIR`.
+- **Not linked:** EffectCraft's engine, media, host, export and interchange crates (they bring
+  upstream FilmCraft crates under our names; `cargo xtask layers` refuses them in `Cargo.lock`).
+  So the engine's migration of old effects does not run: a template made by an old EffectCraft may
+  render differently here. Templates render without their sound, and 3D model footage is refused.
+  For a sharp overlay give `size` the sequence's size (a render of another size fills the frame).
+
 ## The production pipeline, end to end
 
 `docs/video-pipeline.md` documents the whole chain with commands: **album → pick → analyse →
@@ -507,3 +539,22 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   same frames rendered without the layer. Warnings only (D7), at most 32 items, a job in
   `jobs.list` (`wait: true` runs it in the call). `filmcraft-cli frames --motion --project p.fcproj
   [--sequence N] [--items 12,12:out,t5] [--scale 0.25] --out folder` runs it. 942 commands.
+
+## Update 2026-11-23 (PX4, EffectCraft in process)
+
+- **PX4.1**: the crate `filmcraft-effectcraft` (L3) links EffectCraft's renderer, GPU compositor,
+  expressions, text and project model, pinned to one revision, behind the cargo feature
+  `effectcraft` (off by default; a stub without it). `effectcraft.templateInfo {template}`
+  describes an `.ectemplate`: comp, controls (name, type, default, range, options), media,
+  poster, whether it can be rendered here. Everything in a template is capped and checked before
+  EffectCraft sees it; parsing and every frame run under `catch_unwind`. `cargo xtask layers`
+  refuses EffectCraft's engine, media, host, export and interchange crates and any outside
+  `filmcraft-*` crate in `Cargo.lock`; `cargo xtask ci` gains a step with the feature on.
+- **PX4.2**: `effectcraft.renderTemplate {template, values?, size?, fps?, range?, out?, format?:
+  "prores4444"|"png", gpu?, import?, place?, wait?}` checks the values against each control and
+  renders the template with alpha (EffectCraft's GPU compositor under the GPU lock, its CPU
+  renderer as the fallback) into a new revision folder, then hands over as `motion.render` does:
+  AutoCut's probe, `autocut-import.json`, the import and, with `place`, the clip above the picture
+  in one undo step. A long job (`jobs.list`, `jobs.cancel`, MCP progress).
+- **PX4.3**: `packaging/macos/package.sh` builds the AutoCut app and CLI (`AUTOCUT_APP_NAME` set)
+  with the feature on; FilmCraft builds stay without it. 944 commands.

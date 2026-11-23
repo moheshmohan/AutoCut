@@ -64,7 +64,13 @@ echo "==> FilmCraft $VERSION for macOS ($ARCH), identity: $IDENTITY, notarize: $
 if [ "$SKIP_BUILD" = 0 ]; then
   args=()
   for t in "${TARGETS[@]}"; do args+=(--target "$t"); done
-  (cd "$ROOT" && cargo build --release --locked -p filmcraft -p filmcraft-cli "${args[@]}")
+  # The AutoCut app links EffectCraft in process (`effectcraft.*` commands; PX4, decision D3a).
+  # FilmCraft builds stay as upstream ships them: the feature is off by default.
+  features=()
+  if [ -n "${AUTOCUT_APP_NAME:-}" ]; then
+    features=(--features filmcraft/effectcraft,filmcraft-cli/effectcraft)
+  fi
+  (cd "$ROOT" && cargo build --release --locked -p filmcraft -p filmcraft-cli ${features[@]+"${features[@]}"} "${args[@]}")
 fi
 
 rm -rf "$WORK"

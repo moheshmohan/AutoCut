@@ -779,6 +779,16 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).replace("\r\n", "\n")
     }
 
+    /// The AutoCut app is built with EffectCraft linked (PX4, decision D3a); a FilmCraft build is not.
+    #[test]
+    fn the_autocut_app_links_effectcraft() {
+        let script = macos_packaging("package.sh");
+        let build = script.lines().find(|l| l.contains("cargo build --release --locked -p filmcraft -p filmcraft-cli")).expect("the build line");
+        assert!(build.contains("${features[@]+\"${features[@]}\"}"), "{build}");
+        let guarded = script.split("if [ -n \"${AUTOCUT_APP_NAME:-}\" ]; then").nth(1).and_then(|rest| rest.split("\n  fi\n").next()).unwrap_or_default();
+        assert!(guarded.contains("filmcraft/effectcraft,filmcraft-cli/effectcraft"), "{guarded}");
+    }
+
     /// Voice-over recording needs both halves on macOS: the usage string (else the permission
     /// prompt never appears) and the hardened-runtime audio-input entitlement (else the input is
     /// blocked). Regression test for #659.
