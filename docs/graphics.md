@@ -288,7 +288,7 @@ animators stored on the layer (so they copy with the clip and are saved inside `
 
 | slot | kinds |
 |---|---|
-| `in` | `fade`, `typewriter`, `pop` (grows past its size and settles), `slideLeft` / `slideRight` / `slideDown` / `slideUp` (from that side), `blurIn`, `scaleUp`, `drop` (falls and bounces), `glitch` |
+| `in` | `fade`, `typewriter`, `pop` (grows quickly to its size with Quart Out, no overshoot; with `easing: "Back Out"` it grows past its size and settles), `slideLeft` / `slideRight` / `slideDown` / `slideUp` (from that side), `blurIn`, `scaleUp`, `drop` (falls and bounces), `glitch` |
 | `out` | the same kinds, played backwards: the units leave in order, the last finishing as the clip ends |
 | `loop` | `wave`, `bounce`, `shake`, `pulse`, `flicker` |
 

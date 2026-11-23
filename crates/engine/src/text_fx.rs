@@ -588,7 +588,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "graphics.animateText",
             "Animate Text",
-            r#"{"clip":id?,"layer":n|name?,"in":kind|{"kind":"fade|typewriter|pop|slideLeft|slideRight|slideDown|slideUp|blurIn|scaleUp|drop|glitch","unit":"letter|word|line"?,"amount":percent?,"stagger":seconds?,"easing":"Back Out"|index?,"duration":seconds?}|null?,"out":(same)?,"loop":{"kind":"wave|bounce|shake|pulse|flicker",…}|null?,"preset":kind?,"clear":bool?,"merge":bool?,"begin":bool?}"#,
+            r#"{"clip":id?,"layer":n|name?,"in":kind|{"kind":"fade|typewriter|pop|slideLeft|slideRight|slideDown|slideUp|blurIn|scaleUp|drop|glitch","unit":"letter|word|line"?,"amount":percent?,"stagger":seconds?,"easing":"Quart Out|Expo Out|Back Out|…"|index? (default: the kind's own, an ease-out without overshoot for pop; Back Out overshoots),"duration":seconds?}|null?,"out":(same)?,"loop":{"kind":"wave|bounce|shake|pulse|flicker",…}|null?,"preset":kind?,"clear":bool?,"merge":bool?,"begin":bool?}"#,
             has_graphic,
             animate_text,
         ),

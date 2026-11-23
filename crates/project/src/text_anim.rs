@@ -4,7 +4,8 @@
 //! A [`TextAnimation`] lives on the layer ([`crate::LayerExtra::anim`], so it is saved with the
 //! project and inside `.fcgt` graphics templates) and has up to three [`Animator`]s:
 //!
-//! - **in** ([`AnimKind::IN`]): fade, typewriter, pop (an overshoot), slide from the left, right,
+//! - **in** ([`AnimKind::IN`]): fade, typewriter, pop (quick, settling without overshoot unless
+//!   its easing is Back Out), slide from the left, right,
 //!   top or bottom, blur in, scale up, drop (falls and bounces) and glitch in. Unit `i` starts
 //!   `i × stagger` seconds after the clip starts and takes `duration` seconds.
 //! - **out**: the same kinds, played backwards (the mirror of the in animation): the units leave
@@ -14,8 +15,8 @@
 //!
 //! Each animator has an `amount` (percent of the kind's natural strength: 100 is the designed
 //! look), a stagger, an easing (an index into [`crate::gltransition::EASING_OPTS`], Penner's
-//! curves and a custom Bézier, evaluated with [`crate::easing::ease_overshoot`] so a pop overshoots
-//! and settles) and a duration. [`unit_state`] evaluates unit `i` of `n` at clip time `u` of a
+//! curves and a custom Bézier, evaluated with [`crate::easing::ease_overshoot`] so an overshooting
+//! easing such as Back Out goes past and settles) and a duration. [`unit_state`] evaluates unit `i` of `n` at clip time `u` of a
 //! clip `d` seconds long into a [`UnitState`] (an offset and a blur in ems of the font size, a
 //! scale and a rotation about the unit's centre, an opacity); the renderer applies it to the
 //! unit's glyphs (`filmcraft_render::graphic_clip`). Everything is plain `f64` math on hostile
@@ -34,7 +35,8 @@ pub enum AnimKind {
     Fade,
     /// Each unit appears at once, in turn.
     Typewriter,
-    /// Grows from nothing past its size and settles back (an overshoot).
+    /// Grows quickly from nothing and settles at its size. Its easing is Quart Out (PX5.2: no
+    /// overshoot); Back Out, asked for by name, makes it grow past its size and settle back.
     Pop,
     /// Slides in from the left (out: to the left).
     SlideLeft,
@@ -225,7 +227,8 @@ impl Animator {
         let (unit, stagger, easing, duration) = match kind {
             AnimKind::Fade => (AnimUnit::Letter, 0.03, CUBIC_OUT, 0.5),
             AnimKind::Typewriter => (AnimUnit::Letter, 0.06, LINEAR, 0.0),
-            AnimKind::Pop => (AnimUnit::Letter, 0.04, BACK_OUT, 0.45),
+            // quiet by default (PX5.2): Back Out's overshoot only when asked for
+            AnimKind::Pop => (AnimUnit::Letter, 0.04, QUART_OUT, 0.45),
             AnimKind::SlideLeft | AnimKind::SlideRight | AnimKind::SlideDown | AnimKind::SlideUp => (AnimUnit::Word, 0.08, QUART_OUT, 0.6),
             AnimKind::BlurIn => (AnimUnit::Letter, 0.03, CUBIC_OUT, 0.6),
             AnimKind::ScaleUp => (AnimUnit::Word, 0.08, EXPO_OUT, 0.5),
@@ -539,15 +542,30 @@ mod tests {
         assert!(unit_state(&anim, 4, 5, 0.9, 10.0).is_rest());
     }
 
+    /// Back Out, asked for by name, still overshoots and settles.
     #[test]
     fn pop_overshoots_and_settles() {
-        let anim = TextAnimation { enter: Some(Animator::preset(AnimKind::Pop)), ..Default::default() };
-        let d = Animator::preset(AnimKind::Pop).duration;
+        let back = Animator { easing: curve::BACK_OUT, ..Animator::preset(AnimKind::Pop) };
+        let anim = TextAnimation { enter: Some(back.clone()), ..Default::default() };
+        let d = back.duration;
         let scales: Vec<f64> = (0..=40).map(|k| unit_state(&anim, 0, 1, d * k as f64 / 40.0, f64::INFINITY).scale).collect();
         assert!(close(scales[0], 0.0), "starts from nothing");
         let peak = scales.iter().copied().fold(0.0, f64::max);
         assert!(peak > 1.05 && peak < 1.2, "overshoots: {peak}");
         assert!(close(*scales.last().unwrap(), 1.0), "settles");
+    }
+
+    /// PX5.2: the designed Pop no longer overshoots: it grows quickly and only rises.
+    #[test]
+    fn the_default_pop_grows_without_overshoot() {
+        let pop = Animator::preset(AnimKind::Pop);
+        assert_eq!(pop.easing, curve::QUART_OUT);
+        let anim = TextAnimation { enter: Some(pop.clone()), ..Default::default() };
+        let scales: Vec<f64> = (0..=40).map(|k| unit_state(&anim, 0, 1, pop.duration * k as f64 / 40.0, f64::INFINITY).scale).collect();
+        assert!(close(scales[0], 0.0) && close(*scales.last().unwrap(), 1.0));
+        assert!(scales.iter().all(|s| *s <= 1.0 + 1e-12), "{scales:?}");
+        assert!(scales.windows(2).all(|w| w[1] >= w[0] - 1e-12), "only rises");
+        assert!(scales[10] > 0.6, "still a pop: quick off the mark ({})", scales[10]);
     }
 
     #[test]
@@ -617,7 +635,7 @@ mod tests {
             duration: f64::INFINITY,
         };
         let s = wild.sanitized();
-        assert!(s.amount == 100.0 && s.stagger == 0.0 && s.easing == curve::BACK_OUT && s.duration.is_finite());
+        assert!(s.amount == 100.0 && s.stagger == 0.0 && s.easing == curve::QUART_OUT && s.duration.is_finite());
         let anim = TextAnimation {
             enter: Some(wild.clone()),
             out: Some(wild.clone()),

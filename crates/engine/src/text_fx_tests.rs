@@ -239,6 +239,21 @@ fn animate_text_sets_in_out_and_loop() {
     assert!(layer(&s, clip).layer.unwrap().anim.is_some());
 }
 
+/// PX5.2: a pop asked for without an easing grows without overshoot (Quart Out); Back Out, which
+/// overshoots, is there when asked for by name.
+#[test]
+fn animate_text_pops_quietly_unless_back_out_is_asked_for() {
+    let (mut s, clip) = titled("Quiet pop");
+    for p in [json!({"clip": clip, "in": "pop"}), json!({"clip": clip, "in": {"kind": "pop"}}), json!({"clip": clip, "clear": true, "preset": "pop"})] {
+        let r = s.execute("graphics.animateText", p.clone()).unwrap();
+        assert_eq!(r["animation"]["in"]["easing"], "Quart Out", "{p}: {r}");
+        assert_eq!(layer(&s, clip).layer.unwrap().anim.unwrap().enter.unwrap().easing, filmcraft_project::text_anim::curve::QUART_OUT);
+    }
+    let r = s.execute("graphics.animateText", json!({"clip": clip, "in": {"kind": "pop", "easing": "Back Out"}})).unwrap();
+    assert_eq!(r["animation"]["in"]["easing"], "Back Out");
+    assert_eq!(layer(&s, clip).layer.unwrap().anim.unwrap().enter.unwrap().easing, filmcraft_project::text_anim::curve::BACK_OUT);
+}
+
 #[test]
 fn animate_text_refuses_bad_params_and_clamps_hostile_numbers() {
     let (mut s, clip) = titled("Hostile");

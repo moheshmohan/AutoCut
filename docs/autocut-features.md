@@ -453,3 +453,22 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   Preview, export and audio evaluate them through the same keyframe code. Project schema v18 (a
   no-op step: older keyframes load and save unchanged). Details in `docs/architecture.md`
   ("Keyframes"). 939 commands.
+- **PX5.2**: `keyframes.choreograph {target: {clip | clips, effect? | effects? | layer? | layers?,
+  mask?}, tweens: [{prop, to, from?, duration?, ease?, position?, effect?, perceptual?}], labels?:
+  {name: seconds}, stagger?: seconds | {each, from?: "start"|"end"|"center"|index}, defaults?:
+  {duration?, ease?}, dryRun?}` places tweens with the relative grammar agents know from GSAP:
+  seconds, `"<"`, `">"`, `"<0.2"`, `">-0.1"`, `"+=0.2"`, `"-=0.2"`, labels and `"label+=0.5"`, and
+  percentages (`"<25%"`, `"+=50%"`), and writes them as ordinary editable keyframes on the clips'
+  effect parameters in one undo step. Eases are GSAP's names (`power1`–`power4`, `sine`, `expo`,
+  `circ`, `back`, `elastic`, `bounce` with `.in`/`.out`/`.inOut`, sampled into a 32-point custom
+  curve; `none`, `hold`), `spring`/`spring(ζ, k, m)`, `steps(n)`, `wiggle(…)`, the keyframe modes
+  and `{spring|steps|wiggle|curve}` objects; the default is `power1.out`, and scale tweens are
+  perceptual (log space) unless they say otherwise. Everything is checked: unknown keys, props,
+  effects, labels and eases, durations of 0 or less, at most 200 tweens, 64 targets and 64
+  labels, and times before or after the clip are refused with nothing written; the result lists
+  every keyframe written with its mode, the resolved tweens and the stagger delays. The grammar
+  follows GSAP's public documentation of the position parameter; no GSAP code was used. Unlike
+  GSAP, an unknown label is an error, not a new label at the end.
+- `graphics.animateText`'s Pop now eases with Quart Out (no overshoot) unless `easing: "Back Out"`
+  is asked for; the Pop by Letter template and the golden scene ask for Back Out by name and look
+  as before. 940 commands.

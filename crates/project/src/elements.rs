@@ -870,7 +870,9 @@ fn pop_letters() -> GraphicsTemplate {
     let mut t = text(1, "Title", "POP IT", (CX, CY), 180.0, "Bold", 1, YELLOW, true);
     outline(&mut t, INK, 10.0);
     shadow(&mut t, 8.0, 10.0, 60.0);
-    animators(&mut t, Some(anim(AnimKind::Pop)), Some(Animator { duration: 0.3, ..anim(AnimKind::Pop) }), None);
+    // designed with the overshoot: Back Out by name (Pop's own easing is quiet since PX5.2)
+    let back = Animator { easing: crate::text_anim::curve::BACK_OUT, ..anim(AnimKind::Pop) };
+    animators(&mut t, Some(back.clone()), Some(Animator { duration: 0.3, ..back }), None);
     let mut g = template(
         "text.pop-letters",
         "Title – Pop by Letter",

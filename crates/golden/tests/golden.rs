@@ -468,7 +468,11 @@ fn graphic_text_effects() -> Scene {
         &mut pop,
         &[("font_style", ParamValue::Text("Bold".into())), ("align", ParamValue::Choice(1)), ("fill_color", ParamValue::Color([1.0, 0.85, 0.1, 1.0]))],
     );
-    let anim = TextAnimation { enter: Some(Animator { stagger: 0.1, ..Animator::preset(AnimKind::Pop) }), ..Default::default() };
+    // Back Out by name: the scene shows the overshoot (Pop's own easing is quiet since PX5.2)
+    let anim = TextAnimation {
+        enter: Some(Animator { stagger: 0.1, easing: filmcraft_project::text_anim::curve::BACK_OUT, ..Animator::preset(AnimKind::Pop) }),
+        ..Default::default()
+    };
     pop.layer = Some(Box::new(LayerExtra { anim: Some(anim), ..Default::default() }));
     // frame 6 = 0.25 s: P settled-ish, O overshooting, the last P just starting
     let mut s = graphic_scene(DemoScene::CityNight, vec![neon, arc, pop]);

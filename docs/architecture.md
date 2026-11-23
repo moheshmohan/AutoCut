@@ -190,7 +190,11 @@ EffectInstance
   the graphs, goes through `Param::value_at`, so all of them see the new modes. Colours and mask
   paths take a mode's progress linearly (Wiggle and perceptual apply to numbers and points);
   Interchange exports keep the keyframes and write the new segments as linear between them (the
-  FCP 7 XML export says so in its report).
+  FCP 7 XML export says so in its report). `keyframes.choreograph` (PX5.2,
+  `engine::choreograph`) places tweens on a timeline with GSAP's relative position grammar
+  (`"<"`, `">"`, `"+=0.2"`, `"-=0.2"`, `"<0.2"`, labels, percentages) and writes them as these
+  ordinary keyframes in one undo step; the grammar follows GSAP's public documentation of the
+  position parameter, and no GSAP code was read or used.
 - **Effect definitions are data.** `project::effect::effect_defs()` lists every video effect,
   audio effect and transition with its parameter schema. The Effects panel tree, the Effect
   Controls rows and the parameter docs agents see are all generated from it.
