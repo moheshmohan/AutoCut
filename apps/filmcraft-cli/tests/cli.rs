@@ -607,7 +607,7 @@ fn showcase_qa_and_the_narration_cache() {
     assert!(v["qa"]["loudness"]["integratedLufs"].is_number());
     assert!(err.contains("showcase: QA: 0 error(s)"), "{err}");
     // the same build again: every line from the cache, and no QA when asked not to; over the
-    // user's own music this time (a 12 s track, remixed to the show's length)
+    // user's own music this time (a 12 s track, fitted to the show: PX2.3)
     let g = cli(&[
         "--data-dir",
         data.to_str().unwrap(),
@@ -619,7 +619,7 @@ fn showcase_qa_and_the_narration_cache() {
     let (v, err) = run(&["--no-qa", "--music", &track]);
     assert_eq!(v["narration_cached"], 4, "{v}");
     assert!(v.get("qa").is_none());
-    assert_eq!(v["music"]["fit"], "remixed", "{}\n{err}", v["music"]);
+    assert_eq!(v["music"]["fit"], "fitted", "{}\n{err}", v["music"]);
     assert!(v["music"]["source"].as_str().is_some_and(|s| s.ends_with(".wav") && std::path::Path::new(s).is_absolute()), "{}", v["music"]);
     assert!(err.contains("cutting on its beat"), "{err}");
     // a music file that is not there fails before anything is built
