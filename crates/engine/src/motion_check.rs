@@ -9,7 +9,7 @@
 //! | `overshoot` | an ease passes its mark or bounces: a text animator or a transition easing with Back, Elastic or Bounce (or a Custom Bézier whose handles leave 0..1), Pop Motion's overshoot or Spring Motion's bounce, a spring keyframe under the damping ratio, a custom curve (as `keyframes.choreograph` writes for `back`, `elastic` and `bounce`) whose progress leaves 0..1 or turns back; unless a playful style is declared | damping ratio 0.9 (PX5); 0.5 % past the mark, 2 % back |
 //! | `entranceDuration` | a title's or overlay's entrance (a text animator's unit, a transition from nothing, its first keyframed move) is shorter or longer than the band | 8–30 frames at 30 fps, scaled by the rate (0.27–1 s) |
 //! | `exitDuration` | the same for an exit | 6–24 frames at 30 fps (0.2–0.8 s) |
-//! | `exitOutlastsEntrance` | an exit takes longer than the entrance it mirrors (the same text layer's animators, the clip's two transitions or its edge keyframes) | exit at most the entrance; 60–75 % of it reads best |
+//! | `exitOutlastsEntrance` | an exit takes longer than the entrance it mirrors (the same text layer's animators, the clip's two transitions or its edge keyframes), by more than a frame and a tenth of the entrance; entrances under two frames are cuts and not compared | exit at most the entrance; 60–75 % of it reads best |
 //! | `longStagger` | a text animator's letters, words or lines take longer than this from the first to the last one starting | 0.8 s |
 //! | `sameEntrance` | three or more titles, and every one of them enters the same way | 3 titles |
 //! | `loopingText` | a looping text animator keeps a title moving for its whole clip | loops quicker than 8 s a cycle (an ambient drift is slower) |
@@ -430,7 +430,7 @@ fn read_animators(project: &Project, it: &TrackItem, track: &str, c: &Ctx, out: 
         if let (Some(i), Some(o)) = (&anim.enter, &anim.out)
             && i.kind != AnimKind::Typewriter
             && o.kind != AnimKind::Typewriter
-            && o.duration > i.duration + 1e-9
+            && outlasts(i.duration * c.fps, o.duration * c.fps)
         {
             let at = Tick(end.0.saturating_sub(Tick::from_seconds_f64(o.span(count(o))).0)).max(it.start);
             out.findings.push(finding(
@@ -707,6 +707,16 @@ fn read_transitions(q: &Sequence, ti: usize, roles: &BTreeMap<u64, Role>, c: &Ct
     n
 }
 
+/// Whether an exit of `exit` frames outlasts an entrance of `entrance` frames by enough to see:
+/// more than a frame and more than a tenth of the entrance (0.30 s against 0.28 s is not worth a
+/// note). An entrance under two frames is a cut, not a move to mirror, and is never compared.
+fn outlasts(entrance: f64, exit: f64) -> bool {
+    entrance >= MIN_MIRRORED_FRAMES && exit > entrance + (0.1 * entrance).max(1.0) + 1e-6
+}
+
+/// The shortest entrance an exit is held to, frames (shorter is a cut).
+const MIN_MIRRORED_FRAMES: f64 = 2.0;
+
 /// A number of frames as it reads: whole when it is.
 fn frames_text(f: f64) -> String {
     if (f - 1.0).abs() < 0.05 {
@@ -753,7 +763,7 @@ fn judge_moves(moves: &[Move], c: &Ctx, findings: &mut Vec<Value>) {
     }
     for ((clip, source), (i, o)) in pairs {
         let (Some(i), Some(o)) = (i, o) else { continue };
-        if o.frames > i.frames + 1e-6 {
+        if outlasts(i.frames, o.frames) {
             findings.push(finding(
                 "exitOutlastsEntrance",
                 o.start,

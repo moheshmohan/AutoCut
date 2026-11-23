@@ -138,6 +138,11 @@ fn entrances_and_exits_are_held_to_the_bands_at_the_sequences_rate() {
     assert_eq!((x.len(), x[0]["short"].as_bool()), (1, Some(false)), "{r:#}");
     assert!(x[0]["message"].as_str().unwrap().contains("24 frames"));
     assert_eq!(with_code(&r, "exitOutlastsEntrance").len(), 1);
+    // a frame or a tenth longer is not worth a note (0.30 s against 0.28 s on a real project)
+    animate(&mut s, json!({"clip": c, "in": {"kind": "fade", "duration": 0.28}, "out": {"kind": "fade", "duration": 0.30}}));
+    assert!(with_code(&check(&mut s, json!({})), "exitOutlastsEntrance").is_empty());
+    animate(&mut s, json!({"clip": c, "in": {"kind": "fade", "duration": 0.3}, "out": {"kind": "fade", "duration": 0.4}}));
+    assert_eq!(with_code(&check(&mut s, json!({})), "exitOutlastsEntrance").len(), 1, "3 frames over 9 is");
     // at 60 fps the bands are in 60ths: 0.5 s is 30 frames, inside 16–60
     let mut s = session(60);
     let c = title(&mut s, "Hi", 0.0, 4.0);
@@ -346,4 +351,12 @@ fn an_overlay_with_alpha_has_its_entrance_measured_and_footage_does_not() {
         [overlay],
         "only the overlay's entrance, not the footage's ({footage}): {r:#}"
     );
+}
+
+#[test]
+fn an_exit_is_not_held_to_an_entrance_that_is_a_cut() {
+    assert!(!outlasts(1.0, 3.0), "a one-frame entrance is a cut");
+    assert!(!outlasts(8.4, 9.0) && !outlasts(20.0, 22.0), "within a frame or a tenth");
+    assert!(outlasts(8.0, 10.0) && outlasts(20.0, 22.5));
+    assert!(!outlasts(f64::NAN, 10.0) && !outlasts(8.0, f64::NAN));
 }
