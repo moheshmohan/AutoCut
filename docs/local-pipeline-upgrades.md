@@ -293,6 +293,39 @@ point. `holds` exempt static stretches only. A clip of silence counts as sound: 
 measured. `delivery.preflight` runs it as two checks: `textContrast` (contrast under 3:1, Floor)
 and `craft` (the rest), see [Severity tiers](#severity-tiers).
 
+`sequence.checkMotion` reads how a sequence moves, from the timeline alone (`sequence` defaults
+to the active one; `style` is `calm` or `playful`; `bands` sets the caller's own bands):
+
+```sh
+filmcraft-cli --project edit.fcproj exec sequence.checkMotion
+filmcraft-cli --project edit.fcproj exec sequence.checkMotion style=playful 'bands={"entrance":[10,36]}'
+```
+
+| Code | Warns when | Starting value |
+|---|---|---|
+| `overshoot` | an ease passes its mark or bounces: a text animator's or transition's Back, Elastic or Bounce easing (or a Custom Bézier with a handle outside 0..1), Pop Motion's overshoot or Spring Motion's bounce, a spring keyframe, a custom curve (`keyframes.choreograph`'s `back`, `elastic`, `bounce`) that leaves 0..1 or turns back; not with a playful style | damping ratio under 0.9; 0.5 % past the mark, 2 % back |
+| `entranceDuration` | a title's or overlay's entrance (its text animator's unit, a transition into it, its first keyframed move from its first frame) is outside the band | 8–30 frames at 30 fps, scaled to the rate (0.27–1 s) |
+| `exitDuration` | the same for an exit | 6–24 frames at 30 fps (0.2–0.8 s) |
+| `exitOutlastsEntrance` | an exit takes longer than the entrance it mirrors (one text layer's two animators, a clip's two transitions, its edge keyframes) | at most the entrance; 60–75 % reads best |
+| `longStagger` | a text animator's letters, words or lines take longer from the first to the last starting | 0.8 s (a typewriter is left to its typing speed) |
+| `sameEntrance` | three or more titles, all entering the same way | 3 titles |
+| `loopingText` | a looping text animator moves a title for its whole clip | quicker than 8 s a cycle |
+| `edgePop` | a keyframed position, scale, rotation or opacity changes by half its move or more between a clip's first two or last two frames | 50 % of its keyframed range, and at least 10 points of opacity, 5 % of scale, 5° or 1 % of the short side |
+
+The numbers come from public motion guidance, read on GitHub and written fresh: impeccable's
+(Apache-2.0) focal entrances of 500–800 ms and exits faster than entrances; hallmark's (MIT)
+reveals of 0.4–0.8 s, exits at 60–75 % of the entrance, a total stagger of at most 500 ms and
+ambient loops of 8 s or slower; taste-skill's (MIT) ban of bounce, elastic, back and overshoot.
+The bands are wider than the web's, since a video title is read from further away; all are
+starting values to tune on real projects. A playful style (`style: "playful"`, or
+`autocut.taste {"set": {"motion": "playful"}}`) lets eases overshoot; `style: "calm"` checks them
+even when the taste is playful. A title is a graphic clip with an enabled text layer; its entrance
+for `sameEntrance` is its text animator's kind, else a transition into it, else its keyframes. An
+overlay is a clip of a picture with alpha (`motion.render`, `composition.import`): its transitions
+and keyframes are checked, not what moves inside it. Text units are counted from the laid-out
+text, letters as shaped clusters, as the renderer animates them. Clips inside nested sequences are
+not read. `delivery.preflight` runs it as the `motionCraft` check (Reflex).
+
 `copy.lint` reads the words of a video: `text` (taken as narration), `publish` (`title`,
 `description`, `caption`, `tags`), `script` (a lines file, a showcase plan or plain text, as
 `script.lintMalayalam` reads it) and `sequence` (its titles, collected as `sequence.checkCraft`
@@ -429,6 +462,7 @@ Every check of `delivery.preflight` has a `tier`:
 | `motion` | Reflex | never |
 | `colour` | Reflex | never |
 | `blackFrames` | Reflex | never |
+| `motionCraft` (new) | Reflex (every `sequence.checkMotion` finding) | never |
 | `craft` (new) | Reflex (`readingTime`, `smallText`, `lowContrast` from 3:1 up to the WCAG ratio, `emptyFirstFrame`); Finish (`staticTimeline`, `silence`) | never |
 | `copy` (new) | Reflex (`stockPhrase`, `describesShot`, `overBudget` at its fail level); Finish (`filler`, `overBudget` over the budget) | never |
 | `motionEnergy` | Finish | never |
@@ -438,7 +472,8 @@ Every check of `delivery.preflight` has a `tier`:
 declared holds and the still-picture spans the `motion` check holds (merged, at most 2,000), and
 `copy.lint` reads its titles and caption cues with the ledger (`facts`, else `build/facts.json`
 beside the project) and the person's phrases (`allow` and the taste profiles). Their findings
-carry their own `tier`. `craft: false` and `copy: false` skip them (and `textContrast` or
+carry their own `tier`. `motionCraft` runs `sequence.checkMotion` on the active sequence, every
+finding Reflex. `craft: false`, `motionCraft: false` and `copy: false` skip them (and `textContrast` or
 `figures` with them), recorded as skipped. A new Floor check that could not be measured (the
 craft check failed, the ledger file could not be read) is a warning too, a failure with
 `floorBlocks`.

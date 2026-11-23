@@ -1,7 +1,8 @@
 //! A taste profile (`autocut.taste`): how one person likes their videos made — the cuts and the
 //! sounds on them, light effects, the colour pass, the language of on-screen text, wording rules
 //! ("our son", never "my son"), how narration is written, the person's own phrases (which the
-//! copy and style checks never flag), and privacy. Every field is optional:
+//! copy and style checks never flag), how things move (`motion`: `playful` lets eases overshoot),
+//! and privacy. Every field is optional:
 //! a profile is laid over the one below it — the user's default under a project's, a video's own
 //! options over both ([`Taste::over`]) — and what none of them says is each pipeline's own
 //! default.
@@ -66,6 +67,10 @@ pub struct Taste {
     /// What is hidden: `off` (faces sharp), `faces`, `plates`, `faces,plates`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redact: Option<String>,
+    /// How titles and graphics move: `calm` (the default: nothing passes its mark) or `playful`
+    /// (overshooting and bouncing eases are meant, so `sequence.checkMotion` does not flag them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion: Option<String>,
 }
 
 fn text(s: &str) -> String {
@@ -93,6 +98,7 @@ impl Taste {
             narration: self.narration.clone().or_else(|| base.narration.clone()),
             phrases: self.phrases.clone().or_else(|| base.phrases.clone()),
             redact: self.redact.clone().or_else(|| base.redact.clone()),
+            motion: self.motion.clone().or_else(|| base.motion.clone()),
         }
     }
 
@@ -116,11 +122,17 @@ impl Taste {
             narration: self.narration.as_ref().map(|v| v.iter().map(|s| text(s)).filter(|s| !s.is_empty()).take(MAX_RULES).collect()),
             phrases: self.phrases.as_ref().map(|v| v.iter().map(|s| text(s)).filter(|s| !s.is_empty()).take(MAX_PHRASES).collect()),
             redact: short(&self.redact),
+            motion: short(&self.motion),
         }
     }
 
     pub fn is_empty(&self) -> bool {
         *self == Taste::default()
+    }
+
+    /// Whether the profile declares a playful style of motion (`motion: "playful"`, any case).
+    pub fn playful_motion(&self) -> bool {
+        self.motion.as_deref().is_some_and(|m| m.trim().eq_ignore_ascii_case("playful"))
     }
 
     /// `s` with the wording rules applied: each `not` (whole words, any case) made `say`, a
@@ -232,6 +244,11 @@ mod tests {
         assert_eq!(blank.phrases.unwrap().iter().map(|p| p.chars().count()).collect::<Vec<_>>(), [MAX_TEXT]);
         let base = Taste { phrases: Some(vec!["let's dive in".into()]), ..Taste::default() };
         assert_eq!(Taste::default().over(&base).phrases, base.phrases);
+        // how things move: layered like the rest, read in any case
+        let playful = Taste { motion: Some(" Playful ".into()), ..Taste::default() }.sanitized();
+        assert!(playful.playful_motion() && Taste::default().over(&playful).playful_motion());
+        assert!(!Taste { motion: Some("calm".into()), ..Taste::default() }.over(&playful).playful_motion());
+        assert!(!Taste::default().playful_motion());
         let json = serde_json::to_value(&base).unwrap();
         assert_eq!(json["phrases"][0], "let's dive in");
     }

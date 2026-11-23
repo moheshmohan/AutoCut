@@ -955,7 +955,8 @@ impact, riser, shutter, pop, thump) and how loud (`soundLevel`), the colour pass
 `colorStrength`, `look`, `lookStrength`), the language of on-screen text (`textLanguage`), wording rules (`words`:
 `{"say": "our son", "not": "my son"}`), how narration is written (`narration`: rules in the
 person's own words, "tell the story with feeling; don't describe what is on screen; brand names
-on screen, not in the voice"), and privacy (`redact`).
+on screen, not in the voice"), how titles and graphics move (`motion`: calm, or playful, which
+lets `sequence.checkMotion` pass overshooting and bouncing eases), and privacy (`redact`).
 
 There are two layers: the user's default (`taste.json` in the data directory: `scope:
 "default"`) and the project's own (kept in the project file, schema v17; one undo step), the

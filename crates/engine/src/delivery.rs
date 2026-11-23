@@ -7,7 +7,8 @@
 //! `floorBlocks: true`), **Reflex** is fixed or waived with a reason and evidence in
 //! `build/decisions.json` (`{waivers: [{check, code?, time?, reason, evidence}]}`; a waiver
 //! without both is refused, and more than five is a finding), **Finish** is reported only. The
-//! report's `summary` counts the open findings of each tier and the waived ones.
+//! report's `summary` counts the open findings of each tier and the waived ones. `motionCraft`
+//! (PX1.5) is `sequence.checkMotion`'s findings at the Reflex tier: fixed, or waived with evidence.
 use crate::commands::{CommandSpec, bad, has_seq};
 use crate::{EngineError, Result, Session};
 use filmcraft_project::ClipId;
@@ -23,7 +24,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             CMD,
             "Delivery quality gate",
-            r#"{"short":bool=false,"privacy":bool=true,"narration":bool=true,"changedNarration":[clip id]?,"mix":bool=true,"motionEnergy":bool=true (qa.motionEnergy, warnings only),"craft":bool=true (sequence.checkCraft: textContrast under 3:1 is Floor, the rest craft),"copy":bool=true (copy.lint of titles and captions: figures not in the ledger are Floor, the rest copy),"facts":[str|number]? (the fact ledger; default build/facts.json beside the project),"allow":[str]? (phrases copy.lint never flags),"decisions":path? (waivers; default build/decisions.json beside the project),"floorBlocks":bool=false (the new Floor checks block too),"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"exemptions":[…audio continuity exemptions],"report":path?}"#,
+            r#"{"short":bool=false,"privacy":bool=true,"narration":bool=true,"changedNarration":[clip id]?,"mix":bool=true,"motionEnergy":bool=true (qa.motionEnergy, warnings only),"craft":bool=true (sequence.checkCraft: textContrast under 3:1 is Floor, the rest craft),"motionCraft":bool=true (sequence.checkMotion: eases, entrance and exit timing, stagger, loops and pops; Reflex),"copy":bool=true (copy.lint of titles and captions: figures not in the ledger are Floor, the rest copy),"facts":[str|number]? (the fact ledger; default build/facts.json beside the project),"allow":[str]? (phrases copy.lint never flags),"decisions":path? (waivers; default build/decisions.json beside the project),"floorBlocks":bool=false (the new Floor checks block too),"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"exemptions":[…audio continuity exemptions],"report":path?}"#,
             preflight,
         ),
         spec(
@@ -91,6 +92,7 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     // the tiers' settings, read before anything is measured
     let floor_blocks = flag(p, "floorBlocks", false)?;
     let craft_on = flag(p, "craft", true)?;
+    let motion_craft_on = flag(p, "motionCraft", true)?;
     let copy_inputs = if flag(p, "copy", true)? { Some((crate::copy_lint::allowed(s, CMD, p)?, crate::copy_lint::ledger(s, CMD, p)?)) } else { None };
     let (decisions, named_decisions) = decisions_path(s, p)?;
     let (source_errors, sources) = crate::source_check::inspect(s, seq);
@@ -368,6 +370,22 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
         push(&mut checks, "textContrast", "skipped", json!("disabled by explicit project policy"));
         push(&mut checks, "craft", "skipped", json!("disabled by explicit project policy"));
     }
+    // sequence.checkMotion: how titles, transitions and keyframes move, every finding Reflex
+    if motion_craft_on {
+        match s.execute("sequence.checkMotion", json!({"sequence":seq.0})) {
+            Ok(mut v) => {
+                let found: Vec<Value> = take_findings(&mut v).into_iter().map(|f| tiered(f, REFLEX)).collect();
+                let state = if found.is_empty() { "pass" } else { "warning" };
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("findings".into(), json!(found));
+                }
+                push(&mut checks, "motionCraft", state, v);
+            }
+            Err(e) => push(&mut checks, "motionCraft", "warning", json!({"error":e.to_string()})),
+        }
+    } else {
+        push(&mut checks, "motionCraft", "skipped", json!("disabled by explicit project policy"));
+    }
     // copy.lint of the titles and captions: figures not in the fact ledger are Floor
     if let Some((allow, ledger)) = &copy_inputs {
         let mut v = crate::copy_lint::report(&crate::copy_lint::sequence_segments(&project, &q), allow, ledger);
@@ -451,7 +469,7 @@ pub fn tier_of(check: &str) -> &'static str {
     match check {
         "sources" | "audioContinuity" | "mix" | "privacyAtCuts" | "changedNarration" | "safeZones" | "screenProtection" | "textContrast" | "figures"
         | "waivers" => FLOOR,
-        "motion" | "colour" | "blackFrames" | "craft" | "copy" => REFLEX,
+        "motion" | "colour" | "blackFrames" | "craft" | "motionCraft" | "copy" => REFLEX,
         _ => FINISH,
     }
 }
@@ -1138,6 +1156,7 @@ mod tests {
             ("colour", "reflex"),
             ("blackFrames", "reflex"),
             ("craft", "reflex"),
+            ("motionCraft", "reflex"),
             ("copy", "reflex"),
             ("motionEnergy", "finish"),
             ("subtitleAlignment", "finish"),
@@ -1261,6 +1280,38 @@ mod tests {
         assert_eq!(findings_of(&r, "waivers")[0]["code"], "decisionsUnreadable", "{r:#}");
     }
 
+    /// `sequence.checkMotion` is a Reflex leg: its findings carry the tier, a waiver with a reason
+    /// and evidence clears them, and `motionCraft: false` skips it.
+    #[test]
+    fn motion_craft_is_a_reflex_leg_that_a_waiver_clears() {
+        let (mut s, dir) = titled("delivery-motion-craft");
+        let r = s.execute(CMD, quick(json!({}))).unwrap();
+        assert_eq!(check(&r, "motionCraft")["state"], "pass", "a plain title moves quietly: {:#}", check(&r, "motionCraft"));
+        let clip = s.active_sequence().unwrap().video_tracks[1].items[0].id.0;
+        s.execute("graphics.animateText", json!({"clip":clip,"in":{"kind":"pop","easing":"Back Out"}})).unwrap();
+        let r = s.execute(CMD, quick(json!({}))).unwrap();
+        let c = check(&r, "motionCraft");
+        assert_eq!((c["state"].as_str(), c["tier"].as_str()), (Some("warning"), Some("reflex")), "{c:#}");
+        let found = findings_of(&r, "motionCraft");
+        assert!(found.iter().any(|f| f["code"] == "overshoot") && found.iter().all(|f| f["tier"] == "reflex"), "{found:?}");
+        assert_eq!(r["passed"], true, "a Reflex warning never blocks");
+        assert!(r["summary"]["reflex"].as_u64().unwrap() >= 1);
+        // waived with a reason and evidence; one without evidence is refused
+        write_decisions(
+            &dir,
+            json!([{"check":"motionCraft","code":"overshoot","reason":"the brand's logo sting bounces","evidence":"filmstrip of the title reviewed"}]),
+        );
+        let r = s.execute(CMD, quick(json!({}))).unwrap();
+        assert_eq!(check(&r, "motionCraft")["state"], "waived", "{r:#}");
+        assert!(findings_of(&r, "motionCraft").iter().all(|f| f["waived"]["evidence"] == "filmstrip of the title reviewed"));
+        write_decisions(&dir, json!([{"check":"motionCraft","reason":"meant"}]));
+        let r = s.execute(CMD, quick(json!({}))).unwrap();
+        assert_eq!(check(&r, "motionCraft")["state"], "warning");
+        assert_eq!(findings_of(&r, "waivers")[0]["code"], "waiverRefused");
+        let r = s.execute(CMD, quick(json!({"motionCraft":false}))).unwrap();
+        assert_eq!(check(&r, "motionCraft")["state"], "skipped");
+    }
+
     #[test]
     fn hostile_tier_parameters_are_refused() {
         let mut s = Session::default();
@@ -1268,6 +1319,7 @@ mod tests {
         for (p, want) in [
             (json!({"floorBlocks":"yes"}), "floorBlocks"),
             (json!({"craft":1}), "craft"),
+            (json!({"motionCraft":"off"}), "motionCraft"),
             (json!({"copy":"no"}), "copy"),
             (json!({"decisions":5}), "decisions"),
             (json!({"decisions":"a\u{0}b"}), "decisions"),

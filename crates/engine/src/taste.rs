@@ -26,6 +26,7 @@ const STYLES: &[&str] = &["subtle", "energetic", "cinematic"];
 const SOUNDS: &[&str] = &["swish", "chime", "whoosh", "impact", "riser", "shutter", "pop", "thump"];
 const LOOKS: &[&str] = &["none", "punchy", "soft", "warm", "cool", "golden", "teal"];
 const REDACT: &[&str] = &["off", "faces", "plates", "faces,plates"];
+const MOTION: &[&str] = &["calm", "playful"];
 
 pub fn commands() -> Vec<CommandSpec> {
     vec![CommandSpec {
@@ -33,7 +34,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Taste Profile",
         menu: &[],
         shortcut: None,
-        params: r#"{"scope":"project"|"default"="project","set":{"style":"subtle"|"energetic"|"cinematic"?,"lightEffects":bool?,"sounds":["swish"|"chime"|"whoosh"|"impact"|"riser"|"shutter"|"pop"|"thump"]?,"soundLevel":0..1?,"color":bool?,"colorStrength":0..1?,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"?,"lookStrength":0..100?,"textLanguage":str?,"words":[{"say":str,"not":str}]?,"narration":[str]?,"phrases":[str]? (the person's own phrases: copy.lint never flags them),"redact":"off"|"faces"|"plates"|"faces,plates"?}?,"clear":bool=false}"#,
+        params: r#"{"scope":"project"|"default"="project","set":{"style":"subtle"|"energetic"|"cinematic"?,"lightEffects":bool?,"sounds":["swish"|"chime"|"whoosh"|"impact"|"riser"|"shutter"|"pop"|"thump"]?,"soundLevel":0..1?,"color":bool?,"colorStrength":0..1?,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"?,"lookStrength":0..100?,"textLanguage":str?,"words":[{"say":str,"not":str}]?,"narration":[str]?,"phrases":[str]? (the person's own phrases: copy.lint never flags them),"redact":"off"|"faces"|"plates"|"faces,plates"?,"motion":"calm"|"playful"? (playful: sequence.checkMotion lets eases overshoot)}?,"clear":bool=false}"#,
         enabled: always,
         run: taste,
         journal: true,
@@ -145,6 +146,7 @@ fn changed(cmd: &str, mut t: Taste, set: &serde_json::Map<String, Value>) -> Res
                 }
             }
             "redact" => t.redact = if off { None } else { Some(one_of(cmd, k, v, REDACT)?) },
+            "motion" => t.motion = if off { None } else { Some(one_of(cmd, k, v, MOTION)?) },
             other => return Err(bad(cmd, format!("`set` has no field `{other}`"))),
         }
     }
@@ -220,6 +222,10 @@ mod tests {
         assert_eq!(resolved(&s).apply_words("my son"), "our son");
         let r = s.execute(TASTE_CMD, json!({"set": {"phrases": ["  let's dive in  ", ""]}})).unwrap();
         assert_eq!(r["project"]["phrases"], json!(["let's dive in"]));
+        let r = s.execute(TASTE_CMD, json!({"set": {"motion": "Playful"}})).unwrap();
+        assert_eq!(r["resolved"]["motion"], "playful");
+        assert!(resolved(&s).playful_motion());
+        s.execute(TASTE_CMD, json!({"set": {"motion": null}})).unwrap();
         // a field removed; undo puts the project's profile back as it was
         s.execute(TASTE_CMD, json!({"set": {"lightEffects": null}})).unwrap();
         assert_eq!(resolved(&s).light_effects, None);
@@ -247,6 +253,8 @@ mod tests {
             json!({"set": {"phrases": "let's dive in"}}),
             json!({"set": {"phrases": [3]}}),
             json!({"set": {"phrases": vec!["x"; filmcraft_project::taste::MAX_PHRASES + 1]}}),
+            json!({"set": {"motion": "bouncy"}}),
+            json!({"set": {"motion": true}}),
         ] {
             assert!(s.execute(TASTE_CMD, bad.clone()).is_err(), "{bad}");
         }

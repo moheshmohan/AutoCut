@@ -472,3 +472,24 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
 - `graphics.animateText`'s Pop now eases with Quart Out (no overshoot) unless `easing: "Back Out"`
   is asked for; the Pop by Letter template and the golden scene ask for Back Out by name and look
   as before. 940 commands.
+
+## Update 2026-11-23 (PX1.5, motion checks)
+
+- **PX1.5**: `sequence.checkMotion {sequence?, style?: "calm"|"playful", bands?: {entrance?:
+  [minFrames, maxFrames], exit?: [minFrames, maxFrames], stagger?: seconds}}` reads how a
+  sequence's titles, transitions and keyframes move, from the timeline alone (nothing rendered):
+  `overshoot` (text-animator and transition easings with Back, Elastic or Bounce, Pop Motion's
+  overshoot and Spring Motion's bounce, springs under damping ratio 0.9, custom curves that leave
+  0..1 or turn back, as `keyframes.choreograph` writes for `back`, `elastic` and `bounce`), unless a
+  playful style is declared (`style: "playful"`, or the taste profile's new `motion: "playful"`);
+  `entranceDuration` and `exitDuration` of titles and overlays (a clip with alpha) against bands in
+  frames at the sequence's rate (8–30 and 6–24 frames at 30 fps, scaled); `exitOutlastsEntrance`;
+  `longStagger` (letters, words or lines taking more than 0.8 s from the first to the last
+  starting); `sameEntrance` (three or more titles all entering the same way); `loopingText` (a
+  loop quicker than 8 s a cycle moving a title for its whole clip); `edgePop` (a keyframed
+  position, scale, rotation or opacity changing by half its move or more between a clip's first
+  two or last two frames). Thresholds after impeccable, taste-skill and hallmark's public motion
+  guidance, written fresh; starting values to tune. Warnings only (D7), each saying what to
+  change. `delivery.preflight` runs it as the `motionCraft` check at the Reflex tier (waivable in
+  `build/decisions.json`; `motionCraft: false` skips it). Details in
+  `docs/local-pipeline-upgrades.md` ("Craft QA"). 941 commands.
