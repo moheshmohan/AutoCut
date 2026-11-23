@@ -166,6 +166,20 @@ carry each font's licence as `OFL-<family>.txt`.
 | Shippori Mincho Regular (FONTDASU) | Japanese fallback for serif titles (native builds) | OFL-1.1 |
 | BIZ UDMincho Regular (Morisawa) | Japanese fallback for serif titles (native builds) | OFL-1.1 |
 
+## Linked library: EffectCraft (AutoCut app builds)
+
+The AutoCut app is built with the cargo feature `effectcraft`, which links
+[storytold/effectcraft](https://github.com/storytold/effectcraft) at one pinned revision
+(`filmcraft_effectcraft::PIN`): its render, effects, GPU, expressions, text, path and project
+crates (MIT OR Apache-2.0), with craft-libs crates under them (MIT OR Apache-2.0). No EffectCraft
+file is in this repository. The crates it brings in add these licences: boa, the expression
+engine (Unlicense OR MIT); tiny-skia (BSD-3-Clause); arrayref (BSD-2-Clause); ryu-js
+(Apache-2.0 OR BSL-1.0); the rest MIT, or MIT OR Apache-2.0.
+
+EffectCraft compiles seven fonts into the binary: Inter (five styles), JetBrains Mono and Noto
+Serif, all OFL-1.1. They are byte-identical to the fonts credited under Asset files above, so the
+app carries a second copy of each and no new font.
+
 ## First-party brand marks
 
 The ArtCraft name, wordmark and logos are trademarks of the ArtCraft Team. They are not open source and

@@ -94,7 +94,8 @@ Read these before you touch anything.
 | CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the build of 20 November 2026 exposes 925 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds still report `0.12.0`, so inspect the packaged commit and command catalogue too. |
 | Building your own CLI | `CARGO_TARGET_DIR=target/agent-<name> cargo build --release -p filmcraft-cli`, one target folder per worktree, never shared. |
 | The app | `target/macos-package/AutoCut.app`, control port **9877**: `open -n --env FILMCRAFT_CONTROL_PORT=9877 target/macos-package/AutoCut.app` |
-| RAEA | `~/.raea/versions/0.1.0/bin/raea` for local custom animations, 3D scenes and effects. [Render and import workflow](raea-workflow.md). |
+| RAEA | `~/.raea/versions/0.1.8/bin/raea` for local custom animations, 3D scenes and effects (0.1.0 kept beside it). [Render and import workflow](raea-workflow.md). |
+| EffectCraft | Linked into the installed AutoCut app: `effectcraft.templateInfo` and `effectcraft.renderTemplate` (§6.8). A workspace build without `--features effectcraft` answers that it lacks it. |
 | Generation tools | The user's own local models, listed in `~/Library/Application Support/FilmCraft/generation/providers.json`: `h3-image` (MiniMax-H3-Image, pictures and edits), `ltx-video` (LTX-2.3, clips up to 10 s; with the Union-Control adapter in `testground/ltxenv/adapters/` it also makes a clip again, `generate.restyle`), `sa3-sfx` and `sa3-music` (Stable Audio 3 small, up to 30 s). `filmcraft-cli exec generate.providers` says which are installed. Never edit that file or download a model without the user's OK. [generation.md](generation.md). |
 | Projects and exports | `~/Movies/AutoCut/<Video name>/`: the `.fcproj`, the exports, and a `build/` folder (scripts, logs, a `README.txt` recipe) |
 | Data folder | `~/Library/Application Support/FilmCraft/`: `google-photos/cache` (picked originals with `.json` date sidecars), `scene-cache`, `redact-cache`, `autocut/analysis-cache`, voices, models, control tokens |
@@ -238,6 +239,7 @@ class FC:
 | "fill this empty stretch" | `exec generate.fillGap {track, atSeconds, from}` or `{all: true}` | `from: "motion"` carries the movement on, `"both"` goes from the frame before to the frame after, `"before"` (default) continues one frame; `uncovered` says what is left |
 | "make this shot a bit longer" | `exec generate.extend {atSeconds, seconds}` | continues the movement past the end of a clip; needs 1.4 s of picture before it |
 | "make this shot look like a painting / swap the person for this character" | `exec generate.restyle {prompt, clip?, look?, references?}` | the clip made again through an adapter of the clip tool, laid over the old one; 5 s a go, small, faces change ([generation.md](generation.md) §6) |
+| a lower third, end card or chapter card from an `.ectemplate` | `exec effectcraft.renderTemplate {template, values, place, wait: true}` | `effectcraft.templateInfo` lists its controls first; ProRes 4444 with alpha, placed above the picture (§6.8) |
 | pictures, cut-outs, clips and sounds for a RAEA scene | `exec generate.assets {manifest}` | an `assets.json` beside the composition ([generation.md](generation.md) §5); `dryRun` first |
 | "add a boat / a character / snow to this shot" | `exec generate.augment {instruction, atSeconds, references?, animate?}` | a new picture laid over the clip; it does not track a moving shot |
 | a specific vision: mixed stills and clips, hand-timed beats, titles, its own look | **build it by hand** (§6) | full control, rebuildable from a script |
@@ -642,6 +644,28 @@ f.run('keyframes.choreograph', {'target': {'clips': [logo, title], 'effect': 'mo
   playful.
 - **Scale tweens are perceptual:** a push from 100 to 200 % moves evenly.
 - **Check first:** `dryRun: true` returns the keyframes without writing them.
+
+**Cards from EffectCraft templates.** An `.ectemplate` (lower third, end card, chapter card)
+is filled with values and rendered in the app, without RAEA:
+
+```python
+info = f.run('effectcraft.templateInfo', {'template': '/abs/lower-third.ectemplate'})
+# info['controls']: name, type, default, range or options; info['renderable'] / ['refused']
+f.run('effectcraft.renderTemplate', {'template': '/abs/lower-third.ectemplate',
+    'values': {'Name': 'Sam Rivera', 'Accent': '#ff8a1f'}, 'size': '1080x1920',
+    'place': {'seconds': 4.0}, 'wait': True})
+```
+
+- **Values** are keyed by control name or id and checked against each control's type:
+  colours as `#rrggbb` or `[r, g, b, a]` from 0 to 1, dropdowns as an index, media as an
+  absolute path. A wrong value is refused before anything renders.
+- **Size** is `"WxH"` in the comp's shape. Pass the sequence's size for a sharp overlay; a
+  render of another size is scaled to fill the frame.
+- **Output:** ProRes 4444 with alpha (the default) or `format: "png"`, in `<template>
+  renders/rNNN` beside the template unless `out` names a new or empty folder; then probed,
+  imported and placed above the picture like `motion.render`. Look at the placed frame.
+- **Limits:** no sound from the template; 3D model footage is refused; a template made by an old
+  EffectCraft may render a little differently from EffectCraft itself.
 
 ### 6.9 Sound, music and voice
 
