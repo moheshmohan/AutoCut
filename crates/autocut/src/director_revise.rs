@@ -572,7 +572,15 @@ pub fn load(v: &Value) -> Result<Previous, String> {
     if plan.shots.is_empty() {
         return Err("previous: the report's plan has no shots".into());
     }
-    let options = if report["options"].is_object() { report["options"].clone() } else { json!({}) };
+    let mut options = if report["options"].is_object() { report["options"].clone() } else { json!({}) };
+    // what taste memory dealt the edit stays its own (a revision deals nothing)
+    for (kind, key) in [("look", "look"), ("music", "mood"), ("titleStyle", "titleStyle"), ("transitionFamily", "transitionFamily"), ("endCard", "endCard")] {
+        if let Some(c) = report["deals"][kind]["choice"].as_str()
+            && options[key].is_null()
+        {
+            options[key] = json!(c);
+        }
+    }
     let mut looks = Vec::new();
     for c in report["candidates"].as_array().map(Vec::as_slice).unwrap_or_default() {
         let Some(clip) = c["clip"].as_str() else { continue };

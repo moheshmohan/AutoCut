@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 
 use filmcraft_project::graphic::{SHAPE_LAYER, TEXT_LAYER};
 use filmcraft_project::{EffectInstance, ItemId, ItemKind, ParamValue, Project, Sequence, TrackItem, Transition};
-use filmcraft_time::{TICKS_PER_SECOND, Tick};
+use filmcraft_time::Tick;
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, bad, has_seq};
@@ -45,8 +45,10 @@ pub const WARN_AXES: usize = 4;
 /// Most clips and transcript words read.
 const MAX_CLIPS: usize = 20_000;
 const MAX_WORDS: usize = 200_000;
-/// Opacity (%) under which a picture is gone.
+/// Opacity (%) under which a picture is gone, and at most which a layer over the footage is a
+/// shade (an end card's darkening).
 const GONE: f64 = 10.0;
+const SHADE: f64 = 80.0;
 /// Longest pipeline name and most deal choices a record takes.
 const MAX_PIPELINE: usize = 32;
 const MAX_DEALS: usize = 16;
@@ -319,20 +321,16 @@ fn entrance(tl: &Timeline, c: &Clip) -> (String, &'static str) {
     ("none".to_string(), "nothing: it appears at once")
 }
 
-/// The entrance clip `it`'s own keyframes make at its start: opacity rising from nothing
-/// (`fade`), a position move (the slide it makes), scale rising (`scaleUp`).
+/// The entrance clip `it`'s own keyframes make at its start, read as they play (whatever time
+/// base they were set in): opacity rising from nothing (`fade`), a position move (the slide it
+/// makes), scale rising (`scaleUp`).
 fn keyframed_entrance(it: &TrackItem) -> Option<&'static str> {
-    let early = |e: &EffectInstance, id: &str| -> Option<(ParamValue, ParamValue)> {
-        let p = e.params.get(id)?;
-        let first = p.keyframes.first()?;
-        let second = p.keyframes.get(1)?;
-        let from = it.effect_time_at(it.start);
-        // the move starts at the clip's start (within a fifth of a second)
-        (first.time.0.saturating_sub(from.0).abs() <= TICKS_PER_SECOND / 5).then(|| (first.value.clone(), second.value.clone()))
+    let later = add(it.start, secs(0.5).min(Tick(it.duration.0 / 2)));
+    let read = |effect: &str, id: &str| -> Option<(ParamValue, ParamValue)> {
+        let p = it.effect(effect).filter(|e| e.enabled)?.params.get(id).filter(|p| p.keyframes.len() >= 2)?;
+        Some((p.value_at(it.effect_time_at(it.start)), p.value_at(it.effect_time_at(later))))
     };
-    if let Some(m) = it.effect("motion")
-        && let Some((ParamValue::Vec2(a), ParamValue::Vec2(b))) = early(m, "position")
-    {
+    if let Some((ParamValue::Vec2(a), ParamValue::Vec2(b))) = read("motion", "position") {
         let (dx, dy) = (b.x - a.x, b.y - a.y);
         if dx.is_finite() && dy.is_finite() && (dx.abs() > 1.0 || dy.abs() > 1.0) {
             // the text travels from `a` to `b`: from below it moves up
@@ -345,15 +343,13 @@ fn keyframed_entrance(it: &TrackItem) -> Option<&'static str> {
             });
         }
     }
-    if let Some(o) = it.effect("opacity")
-        && let Some((ParamValue::Float(a), ParamValue::Float(b))) = early(o, "opacity")
+    if let Some((ParamValue::Float(a), ParamValue::Float(b))) = read("opacity", "opacity")
         && a < GONE
-        && b > a
+        && b > a + GONE
     {
         return Some("fade");
     }
-    if let Some(m) = it.effect("motion")
-        && let Some((ParamValue::Float(a), ParamValue::Float(b))) = early(m, "scale")
+    if let Some((ParamValue::Float(a), ParamValue::Float(b))) = read("motion", "scale")
         && b > a + 1.0
     {
         return Some("scaleUp");
@@ -445,6 +441,8 @@ fn lumetri_look(e: &EffectInstance, presets: &[filmcraft_render::lumetri_presets
 fn color_look(tl: &Timeline) -> Axis {
     let presets = filmcraft_render::lumetri_presets::presets();
     let mut votes: Vec<(String, f64)> = Vec::new();
+    // a look clip lies over every picture under it: over half the film, it is the look seen
+    let mut over: Vec<(String, f64)> = Vec::new();
     let mut from: BTreeMap<String, &'static str> = BTreeMap::new();
     for c in &tl.clips {
         let w = c.it.duration.seconds();
@@ -452,8 +450,8 @@ fn color_look(tl: &Timeline) -> Axis {
             Kind::Adjustment => {
                 if let Some(name) = c.it.name.strip_prefix("Look: ").map(str::trim).filter(|n| !n.is_empty()) {
                     let id = slug(name);
-                    from.entry(id.clone()).or_insert("a look adjustment clip");
-                    votes.push((id, w));
+                    from.entry(id.clone()).or_insert("a look adjustment clip over the pictures");
+                    over.push((id, w));
                 }
                 for e in &c.it.effects {
                     if let Some((id, f)) = lumetri_look(e, &presets) {
@@ -474,7 +472,15 @@ fn color_look(tl: &Timeline) -> Axis {
             _ => {}
         }
     }
-    match dominant(&votes) {
+    let film = tl.end.seconds();
+    let looks = match dominant(&over) {
+        Some((_, w, _)) if w * 2.0 >= film => over,
+        _ => {
+            votes.extend(over);
+            votes
+        }
+    };
+    match dominant(&looks) {
         Some((id, w, _)) => {
             let f = from.get(&id).copied().unwrap_or("the pictures");
             axis(&id, format!("{f}, on screen {} s", r2(w)))
@@ -492,6 +498,15 @@ fn caption_style(q: &Sequence) -> Axis {
     match dominant(&votes) {
         Some((id, n, _)) => axis(&id, format!("{} captions in that style", n as usize)),
         None => axis("none", "no captions"),
+    }
+}
+
+/// A clip's opacity when it is not keyframed (%).
+fn static_opacity(it: &TrackItem) -> Option<f64> {
+    let p = it.effect("opacity").filter(|e| e.enabled)?.params.get("opacity").filter(|p| p.keyframes.is_empty())?;
+    match p.value {
+        ParamValue::Float(o) if o.is_finite() => Some(o),
+        _ => None,
     }
 }
 
@@ -522,12 +537,18 @@ fn close(tl: &Timeline) -> Axis {
     if let Some(t) = titles.first() {
         let mid = add(t.it.start.max(from), Tick(sub(t.it.end().min(end), t.it.start.max(from)).0 / 2));
         let under: Vec<&Clip> = tl.at(mid).filter(|c| c.track < t.track).collect();
-        let picture = under.iter().filter(|c| c.kind == Kind::Picture).min_by_key(|c| c.track);
-        let card = match picture {
-            None => Some("over nothing or a graphic"),
-            Some(p) if blurred(p.it) => Some("over blurred footage"),
-            Some(_) if under.iter().any(|c| c.kind == Kind::Shape && c.track > picture.map_or(0, |p| p.track)) => Some("over a graphic"),
-            Some(_) => None,
+        let pictures: Vec<&&Clip> = under.iter().filter(|c| c.kind == Kind::Picture).collect();
+        let lowest = pictures.iter().map(|c| c.track).min();
+        // a shade over the footage: a picture or graphic above the lowest picture, see-through
+        let shaded = under.iter().any(|c| Some(c.track) > lowest && static_opacity(c.it).is_some_and(|o| o <= SHADE));
+        let card = if pictures.is_empty() {
+            Some("over nothing or a graphic")
+        } else if pictures.iter().any(|p| blurred(p.it)) {
+            Some("over blurred footage")
+        } else if shaded || under.iter().any(|c| c.kind == Kind::Shape && Some(c.track) > lowest) {
+            Some("over a shade or a graphic")
+        } else {
+            None
         };
         return match card {
             Some(how) => axis("endCard", format!("the title \"{}\" closes the film {how}", title_text(t.it))),

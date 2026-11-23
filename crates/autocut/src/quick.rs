@@ -1358,7 +1358,17 @@ pub struct Options {
     pub download: bool,
     pub full_detail: usize,
     pub qa: Option<bool>,
+    /// Taste memory (`guidance`, on unless false): the look dealt when none is given, and the
+    /// short's fingerprint recorded in the taste history.
+    pub guided: bool,
+    /// The taste profile the job started from (what feedback retired is skipped).
+    pub taste: filmcraft_engine::project::taste::Taste,
 }
+
+/// The creator looks Quick Short deals among (the template's own put first).
+const DEAL_LOOKS: [&str; 3] = ["tech", "vhs", "clean"];
+/// The caption styles, in the order Quick Short falls back to when feedback retired its own.
+const CAPTION_STYLES: [&str; 6] = ["bold", "clean", "glow", "box", "karaoke", "twoLine"];
 
 impl Options {
     pub fn from_params(p: &Value) -> Result<Options, AutoCutError> {
@@ -1393,6 +1403,8 @@ impl Options {
             download: p["download"].as_bool().unwrap_or(false),
             full_detail: p["fullDetail"].as_u64().map_or(FULL_DETAIL_SHOTS, |n| n.min(64) as usize),
             qa: p["qa"].as_bool(),
+            guided: crate::taste::guided(p),
+            taste: filmcraft_engine::project::taste::Taste::default(),
         })
     }
 }
@@ -1433,6 +1445,13 @@ pub struct Report {
     pub warnings: Vec<String>,
     #[serde(rename = "safeZones", skip_serializing_if = "Option::is_none")]
     pub safe_zones: Option<Value>,
+    /// What taste memory dealt (`autocut.deal`): the look, why, the candidates and what was
+    /// skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deals: Option<Value>,
+    /// The short's fingerprint as recorded in the taste history (`autocut.fingerprint`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privacy: Option<Value>,
     /// How the shots were kept apart and how long they hold: the moments that looked alike and
@@ -1755,7 +1774,12 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
     let taste = crate::taste::resolve(ex).await;
     let with_taste = crate::taste::under(p, &json!({"redact": taste.redact}));
     let p = if taste.redact.is_some() { &with_taste } else { p };
-    let opts = Options::from_params(p)?;
+    let mut opts = Options::from_params(p)?;
+    // (the default caption style skips one the person's feedback retired)
+    if p["captionStyle"].is_null() && taste.is_retired("captionStyle", &opts.caption_style) {
+        opts.caption_style = crate::taste::first_kept(&taste, "captionStyle", &CAPTION_STYLES).to_string();
+    }
+    opts.taste = taste.clone();
     let mut report = Report { seconds: opts.seconds, ..Report::default() };
     let mut notes: Vec<String> = Vec::new();
     if opts.download {
@@ -2486,8 +2510,29 @@ async fn finish(
     let info = run(ex, "sequence.inspect", json!({"item": seq})).await.ok();
     let seconds = info.as_ref().and_then(|v| secs_of_ticks(&v["duration"])).unwrap_or(report.seconds);
     report.seconds = (seconds * 100.0).round() / 100.0;
-    // the look: the template's own, or the one asked for
-    if let Some(look) = opts.look {
+    // the look: the one asked for; else the template's own, unless taste memory deals another
+    // (the template's first: a different one only when the last videos used it) or the
+    // person's feedback retired it
+    let template_look = info
+        .as_ref()
+        .and_then(|v| v["video"].as_array())
+        .into_iter()
+        .flatten()
+        .flat_map(|tr| tr["items"].as_array().map(Vec::as_slice).unwrap_or_default().iter())
+        .find_map(|c| c["name"].as_str().and_then(|n| n.strip_prefix("Look: ")).and_then(crate::creator_look::CreatorLook::parse))
+        .map_or("clean", |l| l.name());
+    let mut deals = crate::taste::Deals::default();
+    let mut ids: Vec<&str> = vec![template_look];
+    ids.extend(DEAL_LOOKS.iter().copied().filter(|l| *l != template_look));
+    let chosen = match opts.look {
+        Some(l) => Some(l),
+        None if opts.guided => {
+            deals.deal(ex, "look", &ids, "quick").await.filter(|l| l != template_look).and_then(|l| crate::creator_look::CreatorLook::parse(&l))
+        }
+        None if opts.taste.is_retired("look", template_look) => crate::creator_look::CreatorLook::parse(crate::taste::first_kept(&opts.taste, "look", &ids)),
+        None => None,
+    };
+    if let Some(look) = chosen {
         let own: Vec<u64> = info
             .as_ref()
             .and_then(|v| v["video"].as_array())
@@ -2508,6 +2553,34 @@ async fn finish(
             notes.push(format!("look {}: {e}", look.name()));
         }
     }
+    // sounds the person's feedback retired are not heard: the template's sounds of that kind go
+    let retired: Vec<String> = opts.taste.retired.as_ref().and_then(|r| r.get("sound")).cloned().unwrap_or_default();
+    if !retired.is_empty() {
+        let gone: Vec<u64> = info
+            .as_ref()
+            .and_then(|v| v["audio"].as_array())
+            .into_iter()
+            .flatten()
+            .flat_map(|tr| tr["items"].as_array().map(Vec::as_slice).unwrap_or_default().iter())
+            .filter(|c| {
+                // a sound element named for its kind (`sound.whoosh-short`), never the music bed
+                c["name"].as_str().is_some_and(|n| {
+                    let n = n.to_ascii_lowercase();
+                    let words: Vec<&str> = n.split(|ch: char| !ch.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+                    !words.iter().any(|w| matches!(*w, "music" | "bed" | "score")) && retired.iter().any(|k| words.iter().any(|w| w.eq_ignore_ascii_case(k)))
+                })
+            })
+            .filter_map(|c| c["clip"].as_u64())
+            .take(4096)
+            .collect();
+        if !gone.is_empty() {
+            match remove(ex, &gone).await {
+                Ok(()) => notes.push(format!("sounds: {} of the template's {} taken out (retired by feedback)", gone.len(), retired.join(", "))),
+                Err(e) => notes.push(format!("sounds: {e}")),
+            }
+        }
+    }
+    report.deals = deals.json();
     // the captions: animated, in the platform's safe zone
     if t.captions {
         let has = info
@@ -2605,6 +2678,10 @@ async fn finish(
             report.safe_zones = Some(json!({"platform": opts.platform.name(), "ok": overlaps.is_empty(), "overlaps": overlaps.len()}));
         }
         Err(e) => notes.push(format!("safe zones: {e}")),
+    }
+    // taste memory: the short's fingerprint, so the next video can differ
+    if opts.guided {
+        report.fingerprint = Some(crate::taste::record(ex, Some(seq), "quick", &deals).await);
     }
     // the files
     let Some(out) = opts.export.clone() else { return };

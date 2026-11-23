@@ -51,7 +51,33 @@ fn the_demo_film_reads_on_six_axes_with_evidence() {
     let r = s.execute(CMD, json!({})).unwrap();
     assert_eq!(axes(&r)[..5], ["titleCard", "pop", "dissolve", "warm", "clean"], "{r:#}");
     assert!(r["evidence"]["opening"].as_str().unwrap().contains("over footage"), "{r:#}");
+    // a creator look over the whole film is the look seen, whatever the pictures carry
+    s.execute("timeline.newAdjustmentClip", json!({"startSeconds": 0.0, "seconds": end_seconds(&s), "name": "Look: vhs"})).unwrap();
+    assert_eq!(s.execute(CMD, json!({})).unwrap()["axes"]["colorLook"], "vhs");
+    s.undo().unwrap();
 
+    // a title faded in by its own opacity keyframes (as the director sets them, in sequence time)
+    let key = |s: &mut Session, clip: u64, t: f64, v: f64| {
+        s.execute(
+            "effects.setParam",
+            json!({"clip": clip, "effect": "opacity", "param": "opacity", "value": v, "time": Tick::from_seconds_f64(t).0, "keyframe": true}),
+        )
+        .unwrap();
+    };
+    let second = title(&mut s, "Later", 6.0, 3.0);
+    key(&mut s, second, 6.0, 0.0);
+    key(&mut s, second, 6.35, 100.0);
+    let it = s.active_sequence().unwrap().find_item(filmcraft_project::ClipId(second)).unwrap().1.clone();
+    assert_eq!(keyframed_entrance(&it), Some("fade"));
+    // (keys before the text's start fade it in before it is seen: no entrance)
+    let third = title(&mut s, "Gone", 12.0, 3.0);
+    key(&mut s, third, 0.0, 0.0);
+    key(&mut s, third, 0.35, 100.0);
+    let it = s.active_sequence().unwrap().find_item(filmcraft_project::ClipId(third)).unwrap().1.clone();
+    assert_eq!(keyframed_entrance(&it), None);
+    s.execute("graphics.animateText", json!({"clip": open, "in": "fade"})).unwrap();
+    let r = s.execute(CMD, json!({})).unwrap();
+    assert_eq!(r["axes"]["titleEntrance"], "fade", "{:#}", r["evidence"]);
     // a closing title over the footage, then over the footage blurred: a title, then an end card
     let end = end_seconds(&s);
     let card = title(&mut s, "The end", end - 2.0, 2.0);

@@ -1134,6 +1134,9 @@ async fn build_plan(
     let plan: PlanDoc = serde_json::from_value(plan.clone()).map_err(|e| AutoCutError::Invalid(format!("not a showcase plan ({e})")))?;
     let (mut opts, entries, script) = plan.resolve()?;
     opts.export = p["export"].as_str().map(str::to_string);
+    // taste memory: on unless the build says not (the plan's own mood is the plan's)
+    opts.guided = crate::taste::guided(p);
+    opts.mood_open = plan.mood.as_deref().map(str::trim).is_none_or(str::is_empty);
     // (the export's narration is checked for breaths in the middle of a phrase unless asked not to)
     opts.check_pauses = p["checkPauses"].as_bool().unwrap_or(true);
     // a Malayalam script is checked before it is voiced (docs/malayalam-style.md)

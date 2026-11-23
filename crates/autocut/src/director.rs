@@ -86,6 +86,17 @@ const LOOKS_APART: f64 = 50.0;
 /// The colour pass's looks (`clip.autoColor`): ours, none by default.
 const LOOKS: &[&str] = &["none", "punchy", "soft", "warm", "cool", "golden", "teal"];
 const MOODS: &[&str] = &["epic", "tense", "uplifting", "calm", "happy", "dark", "dreamy", "energetic", "sad"];
+/// Taste memory (PX10): what the director deals when the video and the profile leave it open,
+/// its own default first — the moods it picks without a brief that names one (never the dark
+/// ones by chance), the title entrances it sets, the joins into the ending and across jumps in
+/// time (`dissolve` is the director's own: dissolves, dips and punches by the style), and the
+/// endings.
+const DEAL_MOODS: &[&str] = &["happy", "uplifting", "energetic", "dreamy", "calm"];
+pub const TITLE_STYLES: &[&str] = &["fade", "pop", "slideUp", "blurIn", "scaleUp", "typewriter"];
+pub const FAMILIES: &[&str] = &["dissolve", "zoom", "whip", "light", "cut"];
+pub const END_CARDS: &[&str] = &["cut", "fadeOut"];
+/// The caption styles in the order the director falls back to when feedback retired its own.
+const CAPTION_STYLES: &[&str] = &["clean", "bold", "twoLine", "box", "glow", "karaoke"];
 /// Sound levels: the music carries the edit, the clips' own sound under it, the swishes and
 /// chimes under that.
 const BED_LUFS: f64 = -16.0;
@@ -177,6 +188,15 @@ pub struct Options {
     /// when the interpolator is downloaded: on unless switched off.
     pub smooth: bool,
     pub look_strength: f64,
+    /// How the title enters (`titleStyle`: a `graphics.animateText` in-kind, `fade` the
+    /// director's own opacity fade); none: dealt, else `fade`.
+    pub title_style: Option<String>,
+    /// The join into the ending and across jumps in time (`transitionFamily`): `dissolve` (the
+    /// style's own), `zoom`, `whip`, `light` or `cut`; none: dealt, else the style's.
+    pub family: Option<String>,
+    /// How the edit ends (`endCard`): `cut` on its last frame or `fadeOut` to black; none:
+    /// dealt, else `cut`.
+    pub end_card: Option<String>,
 }
 
 /// The layout a brief asks for, from its words ("16:9 recap", "vertical reel").
@@ -337,6 +357,21 @@ pub fn frame_of(aspect: &str) -> (u32, u32) {
     }
 }
 
+/// Option `key` of `p` as one of `ids` (any case; the catalog's spelling), none when not given.
+fn one_of(p: &Value, key: &str, ids: &[&str]) -> Result<Option<String>, AutoCutError> {
+    match p[key].as_str().map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(v) => {
+            ids.iter().find(|i| i.eq_ignore_ascii_case(v)).map(|i| Some((*i).to_string())).ok_or_else(|| invalid(format!("{key}: one of {}", ids.join(", "))))
+        }
+    }
+}
+
+/// Whether a brief names the music's mood ("a calm recap"), as [`mood_from_brief`] reads it.
+fn names_mood(brief: &str) -> bool {
+    mood_from_brief(brief) != "happy" || brief.to_ascii_lowercase().contains("happy")
+}
+
 impl Options {
     pub fn from_params(p: &Value) -> Result<Options, AutoCutError> {
         let text = |k: &str| p[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
@@ -413,6 +448,9 @@ impl Options {
             color_strength: finite(&p["colorStrength"]).map_or(0.7, |v| v.clamp(0.0, 1.0)),
             look,
             look_strength: finite(&p["lookStrength"]).map_or(25.0, |v| v.clamp(0.0, 100.0)),
+            title_style: one_of(p, "titleStyle", TITLE_STYLES)?,
+            family: one_of(p, "transitionFamily", FAMILIES)?,
+            end_card: one_of(p, "endCard", END_CARDS)?,
         })
     }
 
@@ -1932,6 +1970,10 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
             t["edge"] = json!("in");
             out.push(step("sequence.applyVideoTransition", t, me, On::Clip));
         }
+        // the ending: a fade to black out of the last shot when the edit ends so
+        if k + 1 == plan.shots.len() && o.end_card.as_deref() == Some("fadeOut") {
+            out.push(step("sequence.applyVideoTransition", json!({"effect": "dip_to_black", "frames": frames(1.5), "edge": "out"}), me, On::Clip));
+        }
         // the style's sound under each whip and roll, quiet unless it asks for more
         let sound = |kind: &str, at: f64, secs: f64| json!({"kind": kind, "duration": secs, "time": ticks((at - secs / 2.0).max(0.0)), "track": "A4", "intensity": round2(o.style.sound_level), "seed": o.seed + k as u64});
         if let Some(kind) = o.style.whip_sound() {
@@ -1965,10 +2007,18 @@ pub fn compile(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)], o: &Option
                 None,
                 On::Text,
             ));
-            for (t, v) in [(0.0, 0.0), (0.35, 100.0), ((b - a - 0.35).max(0.4), 100.0), ((b - a).max(0.5), 0.0)] {
+            // in: the director's own fade, or a text animator of the edit's title style; out: a fade
+            let entrance = o.title_style.as_deref().unwrap_or("fade");
+            let keys: &[(f64, f64)] = &[(0.0, 0.0), (0.35, 100.0), ((b - a - 0.35).max(0.4), 100.0), ((b - a).max(0.5), 0.0)];
+            let keys = if entrance == "fade" { keys } else { keys.get(2..).unwrap_or_default() };
+            if entrance != "fade" {
+                out.push(step("graphics.animateText", json!({"in": entrance}), None, On::Text));
+            }
+            for (t, v) in keys.iter().copied() {
                 out.push(step(
                     "effects.setParam",
-                    json!({"effect": "opacity", "param": "opacity", "value": v, "time": ticks(t), "keyframe": true}),
+                    // (keyframe times are the sequence's: from the text's own start)
+                    json!({"effect": "opacity", "param": "opacity", "value": v, "time": ticks(a + t), "keyframe": true}),
                     None,
                     On::Text,
                 ));
@@ -2018,6 +2068,13 @@ pub struct Report {
     /// The cutting style: which, whether it was asked for or the director chose it, and why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<Value>,
+    /// What taste memory dealt (`autocut.deal`): per kind its choice, why, the candidates and
+    /// what was skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deals: Option<Value>,
+    /// The finished edit's fingerprint as recorded in the taste history (`autocut.fingerprint`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<Value>,
     /// What the edit is about (the places or the people), and why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focus: Option<Value>,
@@ -2284,6 +2341,52 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     report.options = own;
     report.taste = (!taste.is_empty()).then(|| json!(taste));
     let mut notes: Vec<String> = Vec::new();
+    // ---- taste memory: what the video and the profile leave open is dealt against the history
+    // so consecutive videos differ (a revision keeps its edit's choices; `guidance: false` the
+    // director's own defaults); what feedback retired is never chosen
+    let guided = crate::taste::guided(p) && previous.is_none();
+    let mut deals = crate::taste::Deals::default();
+    let open = |k: &str| p[k].is_null();
+    if guided {
+        if open("look")
+            && o.color
+            && let Some(l) = deals.deal(ex, "look", LOOKS, "direct").await
+        {
+            o.look = l;
+        }
+        if o.mood.is_none() && o.music.is_none() && !names_mood(&o.brief) {
+            o.mood = deals.deal(ex, "music", DEAL_MOODS, "direct").await;
+        }
+        if o.title_style.is_none() {
+            o.title_style = deals.deal(ex, "titleStyle", TITLE_STYLES, "direct").await;
+        }
+        if o.family.is_none() {
+            let light_off = o.style_given["lightEffects"] == json!(false);
+            let families: Vec<&str> = FAMILIES.iter().copied().filter(|f| !(light_off && *f == "light")).collect();
+            o.family = deals.deal(ex, "transitionFamily", &families, "direct").await;
+        }
+        if o.end_card.is_none() {
+            o.end_card = deals.deal(ex, "endCard", END_CARDS, "direct").await;
+        }
+        report.deals = deals.json();
+    }
+    // the director's own defaults skip what the person's feedback retired
+    if open("look") && o.look == "none" && taste.is_retired("look", "none") {
+        o.look = crate::taste::first_kept(&taste, "look", LOOKS).to_string();
+    }
+    if o.mood.is_none() && o.music.is_none() && taste.is_retired("music", mood_from_brief(&o.brief)) {
+        o.mood = Some(crate::taste::first_kept(&taste, "music", DEAL_MOODS).to_string());
+    }
+    for (k, v, ids) in
+        [("titleStyle", &mut o.title_style, TITLE_STYLES), ("transitionFamily", &mut o.family, FAMILIES), ("endCard", &mut o.end_card, END_CARDS)]
+    {
+        if v.is_none() && ids.first().is_some_and(|d| taste.is_retired(k, d)) {
+            *v = Some(crate::taste::first_kept(&taste, k, ids).to_string());
+        }
+    }
+    if open("captionStyle") && taste.is_retired("captionStyle", &o.caption_style) {
+        o.caption_style = crate::taste::first_kept(&taste, "captionStyle", CAPTION_STYLES).to_string();
+    }
     if o.download {
         for set in ["fast", "full"] {
             lines(&format!("downloading the scene models ({set}) if missing"));
@@ -2506,7 +2609,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         }
     }
     // ---- how each cut is made: from what the shots show and say, in the edit's style
-    cuts::joins(&mut plan, &cands, &speech, beat, &o.style);
+    cuts::joins_in(&mut plan, &cands, &speech, beat, &o.style, o.family.as_deref());
     for s in plan.shots.iter_mut() {
         s.file = cands.iter().find(|c| c.id == s.clip).map(|c| c.name.clone()).unwrap_or_default();
         // the profile's wording ("our son", never "my son") in every text on screen
@@ -2704,6 +2807,10 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         }
     }
     report.plan = Some(plan);
+    // ---- taste memory: the finished edit's fingerprint, so the next video can differ
+    if guided {
+        report.fingerprint = Some(crate::taste::record(ex, Some(seq), "direct", &deals).await);
+    }
     // ---- the files
     if let Some(out) = o.export.clone() {
         export(ex, &o, seq, &out, &mut report, &mut notes, lines).await;

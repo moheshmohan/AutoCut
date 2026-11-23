@@ -647,3 +647,25 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   same place the profile's `sounds` act through, and the director drops it from the style's
   sounds unless the video asks for it. `autocut.taste` shows the new fields and `set` replaces
   or clears them.
+- **PX10.3**: Direct, Quick Short and Showcase deal what the video and the taste profile leave
+  open (`guidance`, on by default; `false` keeps each pipeline's own defaults and records
+  nothing), report each deal (`deals`: choice, why, candidates, what was skipped) and record the
+  finished video's fingerprint in the taste history (`fingerprint`: axes, evidence, matches,
+  warnings; not on a dry run or a revision). Every explicit option still wins, and with an
+  empty history each deal gives the pipeline's own default, so a first video is made as
+  before. **Direct** deals the `look` (when the colour pass is on), the music's `mood` (when no
+  track is given and the brief names none: happy, uplifting, energetic, dreamy, calm), the
+  title's entrance (`titleStyle`: its own fade, or a `graphics.animateText` pop, slide up, blur,
+  scale up or typewriter), the `transitionFamily` of the join into the ending and across jumps
+  in time (`dissolve` is the style's own dissolves, dips and punches; `zoom` a punch in, `whip`
+  a whip pan, `light` a light leak unless light effects are off, `cut`) and the `endCard`
+  (`cut`, or `fadeOut`: a dip to black out of the last shot) — all four new options of
+  `autocut.direct`; a revision keeps its edit's dealt choices. **Quick Short** deals its
+  creator look, the template's own first (`tech`, `vhs`, `clean`), so a template's look changes
+  only when the last videos used it; a Short is dealt no music. **Showcase** builds deal the
+  music's mood when the plan names none (epic first, then uplifting, energetic, happy, dreamy)
+  and, when narrated, the register of every part the script gives no delivery (warm first, then
+  conversational, curious, calm). Without guidance the defaults still skip what feedback
+  retired: Direct's look, mood, title entrance, ending and caption style, Quick Short's caption
+  style, the template's look and the template's sounds of a retired kind (taken out before the
+  mix), the showcase's mood and register.

@@ -318,6 +318,24 @@ fn segments(speech: &[ItemSpeech], item: u64) -> Vec<(f64, f64)> {
 /// each shot's way in (`enter`, a match cut's `align`), its sound's `lead` and `tail`, and `cut`
 /// saying why.
 pub fn joins(plan: &mut Plan, cands: &[Candidate], speech: &[ItemSpeech], beat: f64, style: &Style) {
+    joins_in(plan, cands, speech, beat, style, None);
+}
+
+/// The join a transition family makes into the ending and across a jump in time (taste memory,
+/// PX10): none for `dissolve`, the style's own.
+fn family_join(family: Option<&str>) -> Option<(Enter, &'static str)> {
+    Some(match family? {
+        "zoom" => (Enter::Punch, "a punch in"),
+        "whip" => (Enter::Swipe, "a whip pan"),
+        "light" => (Enter::LightLeak, "a light leak"),
+        "cut" => (Enter::Cut, "a cut"),
+        _ => return None,
+    })
+}
+
+/// [`joins`] with the edit's transition family (`dissolve` or none: the style's own joins; else
+/// the family's join into the ending and across jumps in time).
+pub fn joins_in(plan: &mut Plan, cands: &[Candidate], speech: &[ItemSpeech], beat: f64, style: &Style, family: Option<&str>) {
     let n = plan.shots.len();
     let find = |id: &str| cands.iter().find(|c| c.id == id);
     let beat = if beat.is_finite() && beat > 0.05 { beat } else { 0.5 };
@@ -342,16 +360,23 @@ pub fn joins(plan: &mut Plan, cands: &[Candidate], speech: &[ItemSpeech], beat: 
         let prev_whip = matches!(prev.enter, Enter::Whip | Enter::Swipe);
         let (mut enter, mut align, mut why) = (Enter::Cut, None, String::from("a cut on the beat"));
         let room = whips < style.max_whips() && !prev_whip;
+        let dealt = family_join(family);
         if last && n > 2 {
-            (enter, why) = (Enter::Dissolve, "a dissolve into the ending".into());
+            (enter, why) = match dealt {
+                Some((e, what)) => (e, format!("{what} into the ending (the edit's transition family)")),
+                None => (Enter::Dissolve, "a dissolve into the ending".into()),
+            };
         } else if let Some(gap) = apart.filter(|g| *g >= TIME_JUMP && dissolves < style.max_dissolves()) {
             dissolves += 1;
             let hours = gap as f64 / 3600.0;
-            (enter, why) = match style.pace {
-                Pace::Cinematic if gap >= DAY => (Enter::DipToBlack, format!("a dip to black: a jump in time ({:.0} days later)", hours / 24.0)),
-                Pace::Energetic if style.light_effects => (Enter::LightLeak, format!("a light leak: a jump in time ({hours:.0} h later)")),
-                Pace::Energetic => (Enter::Punch, format!("a punch in: a jump in time ({hours:.0} h later)")),
-                _ => (Enter::Dissolve, format!("a dissolve: a jump in time ({hours:.0} h later)")),
+            (enter, why) = match (dealt, style.pace) {
+                (Some((e, what)), _) => (e, format!("{what}: a jump in time ({hours:.0} h later; the edit's transition family)")),
+                (None, pace) => match pace {
+                    Pace::Cinematic if gap >= DAY => (Enter::DipToBlack, format!("a dip to black: a jump in time ({:.0} days later)", hours / 24.0)),
+                    Pace::Energetic if style.light_effects => (Enter::LightLeak, format!("a light leak: a jump in time ({hours:.0} h later)")),
+                    Pace::Energetic => (Enter::Punch, format!("a punch in: a jump in time ({hours:.0} h later)")),
+                    _ => (Enter::Dissolve, format!("a dissolve: a jump in time ({hours:.0} h later)")),
+                },
             };
         } else if room && pc.kind == Kind::Vr && cc.kind == Kind::Vr && (turns(prev.camera) || turns(cur.camera) || fast) {
             whips += 1;

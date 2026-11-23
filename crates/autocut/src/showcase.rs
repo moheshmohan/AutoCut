@@ -148,7 +148,20 @@ pub struct Options {
     /// name; an entry whose robot cannot be tracked keeps the chips. `--follow-labels`, a plan's
     /// `"followLabels": true`. Off by default.
     pub follow_labels: bool,
+    /// Taste memory (a build job's `guidance`, on there unless false; off for other callers):
+    /// the music's mood dealt when the plan names none ([`Options::mood_open`]), the narration's
+    /// register where the script names none, and the show's fingerprint recorded in the taste
+    /// history.
+    pub guided: bool,
+    /// The plan named no mood: [`Options::mood`] is the default, which taste memory may deal.
+    pub mood_open: bool,
 }
+
+/// Taste memory: the moods a show's music is dealt from when its plan names none (the default
+/// first; never the dark ones by chance), and the registers its narration is (warm, the default,
+/// first).
+const DEAL_MOODS: [&str; 5] = ["epic", "uplifting", "energetic", "happy", "dreamy"];
+const DEAL_REGISTERS: [&str; 4] = ["warm", "conversational", "curious", "calm"];
 
 impl Options {
     /// What the counter, the closing card, the thumbnail and the words count: the plan's
@@ -200,6 +213,8 @@ impl Default for Options {
             redact: None,
             enhance_voice: false,
             follow_labels: false,
+            guided: false,
+            mood_open: false,
         }
     }
 }
@@ -1178,6 +1193,13 @@ pub struct Built {
     /// What the privacy pass hid, clip by clip ([`crate::privacy::redact_show`]): for QA.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub privacy: Vec<crate::privacy::Hidden>,
+    /// What taste memory dealt (`autocut.deal`): per kind its choice, why, the candidates and
+    /// what was skipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deals: Option<Value>,
+    /// The show's fingerprint as recorded in the taste history (`autocut.fingerprint`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<Value>,
 }
 
 /// A transition from the catalogue as placed: its id, effect, where (`within` an entry,
@@ -3331,6 +3353,37 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     }
     let rotating: Vec<(&str, Option<(&str, &str)>)> =
         TRANSITIONS.iter().copied().filter(|(id, _)| taste.light_effects != Some(false) || !crate::taste::is_light_effect(id)).collect();
+    // ---- taste memory: the music's mood when the plan names none, the narration's register
+    // where the script names none — dealt against the history, or (without guidance) the
+    // defaults unless the person's feedback retired them
+    let mut deals = crate::taste::Deals::default();
+    let mut dealt = opts.clone();
+    let mut script = script.clone();
+    let mut register: Option<String> = None;
+    if opts.mood_open && opts.music.is_none() {
+        if opts.guided {
+            if let Some(m) = deals.deal(ex, "music", &DEAL_MOODS, "showcase").await {
+                dealt.mood = m;
+            }
+        } else if taste.is_retired("music", &opts.mood) {
+            dealt.mood = crate::taste::first_kept(&taste, "music", &DEAL_MOODS).to_string();
+        }
+    }
+    if opts.voice.as_deref().is_some_and(|v| !v.trim().is_empty()) {
+        if opts.guided {
+            register = deals.deal(ex, "register", &DEAL_REGISTERS, "showcase").await;
+        } else if taste.is_retired("register", DEFAULT_DELIVERY.id()) {
+            register = Some(crate::taste::first_kept(&taste, "register", &DEAL_REGISTERS).to_string());
+        }
+    }
+    if let Some(r) = register {
+        for e in entries {
+            script.delivery.entry(e.number.to_string()).or_insert_with(|| r.clone());
+        }
+        script.delivery.entry("outro".into()).or_insert(r);
+    }
+    let opts = &dealt;
+    let script = &script;
     let look = &own_look;
     let robots = entries.iter().filter(|e| !e.is_scene()).count();
     if robots == 0 {
@@ -4226,6 +4279,11 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     built.theme = theme;
     // ---- privacy: visitors' faces and plates hidden, the robots left alone ([`crate::privacy`])
     built.privacy = crate::privacy::redact_show(ex, opts.redact.as_ref(), &built.layout, entries, &mut built.notes, progress).await;
+    // ---- taste memory: the show's fingerprint, so the next video can differ
+    built.deals = deals.json();
+    if opts.guided {
+        built.fingerprint = Some(crate::taste::record(ex, built.sequence, "showcase", &deals).await);
+    }
     if let Some(path) = &opts.export {
         // the preset follows the frame: a 4K show exports as YouTube's 2160p
         let (label, preset) = export_preset(opts.height);

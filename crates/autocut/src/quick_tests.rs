@@ -742,7 +742,15 @@ fn a_quick_short_without_any_model() {
 
 /// Three generated clips (no sound of their own) in a session, and their items.
 fn clips_session(n: usize) -> (Session, Vec<u64>) {
+    // (a data directory of its own, one per session: the user's taste and taste history are not
+    // read, and one test's history is not another's)
+    static SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let k = SESSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("filmcraft-quick-tests-{}-{k}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
     let mut s = Session::default();
+    s.prefs_path = Some(dir.join("preferences.json"));
     let mut movies = Vec::new();
     let scenes = [DemoScene::Forest, DemoScene::CityNight, DemoScene::Dunes, DemoScene::Plasma];
     for k in 0..n {
@@ -1127,4 +1135,28 @@ fn a_quick_short_fits_the_users_track() {
     assert!(landed.first().is_some_and(|e| e["kind"] == "burst" && e["landed"] == true), "{fit}");
     assert!(fit["seconds"].as_f64().is_some_and(|x| x > 5.0 && x <= out["seconds"].as_f64().unwrap() + 0.6), "{fit} {}", out["seconds"]);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Taste memory: a short takes its template's own look while the last videos did not use it;
+/// the next one, whose history did, is dealt another creator look over the template. Both are
+/// recorded; without guidance nothing is dealt or recorded.
+#[test]
+fn consecutive_shorts_are_dealt_different_looks() {
+    let (s, movies) = clips_session(3);
+    let ex = SessionExecutor::from(s);
+    let p = json!({"items": movies, "seconds": 12, "topic": "a sunny day", "platform": "reels", "redact": false});
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let first = rt.block_on(make(&ex, &p, None, &mut |_| {})).unwrap();
+    let own = first["deals"]["look"]["choice"].as_str().unwrap().to_string();
+    assert_eq!(first["deals"]["look"]["from"][0], own.as_str(), "the template's own look first: {:#}", first["deals"]);
+    assert_eq!(first["fingerprint"]["recorded"], true, "{:#}", first["fingerprint"]);
+    let second = rt.block_on(make(&ex, &p, None, &mut |_| {})).unwrap();
+    let next = second["deals"]["look"]["choice"].as_str().unwrap();
+    assert_ne!(next, own, "{:#}", second["deals"]);
+    assert_eq!(second["deals"]["look"]["skipped"][0]["why"], "used in the last 3");
+    if next != "clean" {
+        assert_eq!(second["fingerprint"]["axes"]["colorLook"], next, "the dealt look is the one seen: {:#}", second["fingerprint"]);
+    }
+    let plain = rt.block_on(make(&ex, &json!({"items": movies, "seconds": 12, "topic": "a sunny day", "guidance": false}), None, &mut |_| {})).unwrap();
+    assert!(plain["deals"].is_null() && plain["fingerprint"].is_null(), "{plain}");
 }

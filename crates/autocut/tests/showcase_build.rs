@@ -609,3 +609,33 @@ async fn an_entry_told_in_the_persons_own_voice_and_one_left_to_the_music() {
     assert_eq!((s.item, s.from, s.to, s.volume), (6, Some(2.8), Some(7.3), Some(filmcraft_autocut::narrated::BITE_GAIN)));
     assert!(built.pauses.is_none(), "no export: no pause check");
 }
+
+/// Taste memory: a show built with guidance whose plan names no mood is dealt one against the
+/// taste history (the default first, then one the last videos did not use) and recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guided_show_is_dealt_its_mood_and_recorded() {
+    let dir = std::env::temp_dir().join(format!("filmcraft-showcase-taste-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = Session::default();
+    s.prefs_path = Some(dir.join("preferences.json"));
+    s.execute("file.openDemoProject", json!({})).unwrap();
+    let ex = SessionExecutor::from(s);
+    let facts = vec![fact(5, "Pepper humanoid robot", 1_600_000_000, 12.0), fact(6, "red toy robot", 1_600_100_000, 12.0)];
+    let entries = showcase::group(&facts, "robot", 0.3);
+    let script = Script { intro: "Every robot.".into(), lines: vec!["One.".into(), "Two.".into()], outro: "Thanks.".into(), ..Script::default() };
+    let opts = Options { title: "Robots".into(), guided: true, mood_open: true, ..Options::default() };
+    let first = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
+    let deals = first.deals.clone().unwrap();
+    assert_eq!(deals["music"]["choice"], "epic", "{deals:#}");
+    assert!(deals.get("register").is_none(), "no narration, no register: {deals:#}");
+    assert_eq!(first.fingerprint.as_ref().unwrap()["recorded"], true);
+    let second = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
+    assert_eq!(second.deals.unwrap()["music"]["choice"], "uplifting");
+    let kept = std::fs::read_to_string(dir.join(filmcraft_engine::taste_history::FILE)).unwrap();
+    assert_eq!(kept.lines().count(), 2);
+    // a plan's own mood is the plan's
+    let given = showcase::build(&ex, &Options { mood_open: false, ..opts }, &entries, &script, &mut |_| {}).await.unwrap();
+    assert!(given.deals.is_none_or(|d| d.get("music").is_none()));
+    let _ = std::fs::remove_dir_all(&dir);
+}

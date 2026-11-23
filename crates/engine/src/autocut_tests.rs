@@ -644,3 +644,32 @@ fn trailer_parameters_are_checked_and_defaulted() {
         assert!(r.expect("no panic").is_err(), "{bad} was accepted");
     }
 }
+
+/// Taste memory's parameters (PX10.3): Direct's dealt choices and every pipeline's `guidance`
+/// are checked before a job starts and handed on as checked.
+#[test]
+fn taste_memory_parameters_are_checked() {
+    let (mut s, _fake) = session(Fake::default());
+    let r =
+        s.execute("autocut.direct", json!({"titleStyle": "Pop", "transitionFamily": "ZOOM", "endCard": "fadeout", "guidance": false, "wait": true})).unwrap();
+    let p = &r["showcase"]["params"];
+    assert_eq!(
+        (p["titleStyle"].as_str(), p["transitionFamily"].as_str(), p["endCard"].as_str(), p["guidance"].as_bool()),
+        (Some("pop"), Some("zoom"), Some("fadeOut"), Some(false)),
+        "{p}"
+    );
+    let r = s.execute("autocut.quick", json!({"guidance": false, "wait": true})).unwrap();
+    assert_eq!(r["showcase"]["params"]["guidance"], false);
+    for (id, bad) in [
+        ("autocut.direct", json!({"titleStyle": "bounce"})),
+        ("autocut.direct", json!({"transitionFamily": "glitch"})),
+        ("autocut.direct", json!({"endCard": "logo"})),
+        ("autocut.direct", json!({"titleStyle": 3})),
+        ("autocut.direct", json!({"guidance": "yes"})),
+        ("autocut.quick", json!({"guidance": 1})),
+        ("autocut.showcaseBuild", json!({"plan": {"entries": []}, "guidance": "no"})),
+    ] {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.execute(id, bad.clone())));
+        assert!(r.is_ok_and(|r| r.is_err()), "{id} {bad} was accepted");
+    }
+}

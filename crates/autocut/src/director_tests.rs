@@ -382,6 +382,73 @@ async fn a_retired_sound_is_never_heard() {
     assert_eq!(r["style"]["sounds"], json!(["whoosh"]));
 }
 
+/// A history in the session's data directory: videos that used these deal choices (oldest first).
+fn history(ex: &crate::SessionExecutor, deals: &[Value]) {
+    let dir = ex.0.lock().unwrap().prefs_path.clone().unwrap().parent().unwrap().to_path_buf();
+    let lines: Vec<String> = deals.iter().map(|d| json!({"when": "2026-11-01T00:00:00Z", "pipeline": "direct", "deals": d}).to_string()).collect();
+    std::fs::write(dir.join(filmcraft_engine::taste_history::FILE), format!("{}\n", lines.join("\n"))).unwrap();
+}
+
+/// Taste memory: what the video and the profile leave open is dealt against the history — the
+/// director's own defaults first, then what the last videos did not use — and the video's own
+/// options and `guidance: false` win.
+#[tokio::test]
+async fn open_choices_are_dealt_against_the_history() {
+    let ex = demo_session();
+    let mut lines = |_: &str| {};
+    let p = json!({"seconds": 12, "dryRun": true, "captions": false});
+    // no history: the director's own defaults
+    let r = make(&ex, &p, None, &mut lines).await.unwrap();
+    let chosen = |r: &Value, k: &str| r["deals"][k]["choice"].as_str().map(str::to_string);
+    assert_eq!(chosen(&r, "look").as_deref(), Some("none"), "{:#}", r["deals"]);
+    assert_eq!(
+        (chosen(&r, "titleStyle").as_deref(), chosen(&r, "transitionFamily").as_deref(), chosen(&r, "endCard").as_deref()),
+        (Some("fade"), Some("dissolve"), Some("cut"))
+    );
+    assert_eq!((chosen(&r, "music").as_deref(), r["plan"]["mood"].as_str()), (Some("happy"), Some("happy")));
+    let ids = |r: &Value| r["steps"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap_or_default().to_string()).collect::<Vec<_>>();
+    assert!(!ids(&r).contains(&"graphics.animateText".to_string()));
+    // the director's own fade starts where its text does (keyframe times are the sequence's:
+    // they were set from 0, so the fade ran before the title and later texts stayed hidden)
+    let steps = r["steps"].as_array().unwrap();
+    let text = steps.iter().find(|s| s["id"] == "graphics.newText").unwrap();
+    let keys: Vec<i64> =
+        steps.iter().filter(|s| s["id"] == "effects.setParam" && s["params"]["param"] == "opacity").filter_map(|s| s["params"]["time"].as_i64()).collect();
+    assert_eq!(keys.first().copied(), text["params"]["time"].as_i64(), "{keys:?}");
+    assert!(keys.iter().all(|k| *k >= keys[0]));
+    // the last three videos used those: the next of each
+    let used = json!({"look": "none", "titleStyle": "fade", "transitionFamily": "dissolve", "endCard": "cut", "music": "happy"});
+    history(&ex, &[used.clone(), used.clone(), used]);
+    let r = make(&ex, &p, None, &mut lines).await.unwrap();
+    assert_eq!(chosen(&r, "look").as_deref(), Some("punchy"), "{:#}", r["deals"]);
+    assert_eq!(
+        (chosen(&r, "titleStyle").as_deref(), chosen(&r, "transitionFamily").as_deref(), chosen(&r, "endCard").as_deref()),
+        (Some("pop"), Some("zoom"), Some("fadeOut"))
+    );
+    assert_eq!(r["plan"]["mood"], "uplifting");
+    assert_eq!(r["deals"]["look"]["skipped"][0], json!({"id": "none", "why": "used in the last 3", "videosAgo": 1}));
+    let steps = r["steps"].as_array().unwrap();
+    assert!(steps.iter().any(|s| s["id"] == "graphics.animateText" && s["params"]["in"] == "pop"), "the title pops in");
+    assert!(
+        steps.iter().any(|s| s["id"] == "sequence.applyVideoTransition" && s["params"]["edge"] == "out" && s["params"]["effect"] == "dip_to_black"),
+        "it fades out"
+    );
+    let last = r["plan"]["shots"].as_array().unwrap().last().unwrap().clone();
+    assert!(last["enter"] == "punch" && last["cut"].as_str().unwrap().contains("transition family"), "{last}");
+    // the video's own options win and are not dealt; without guidance nothing is
+    let own = make(&ex, &json!({"seconds": 12, "dryRun": true, "captions": false, "look": "teal", "titleStyle": "blurIn", "mood": "calm"}), None, &mut lines)
+        .await
+        .unwrap();
+    assert!(own["deals"]["look"].is_null() && own["deals"]["titleStyle"].is_null() && own["deals"]["music"].is_null(), "{:#}", own["deals"]);
+    assert_eq!(own["plan"]["mood"], "calm");
+    let plain = make(&ex, &json!({"seconds": 12, "dryRun": true, "captions": false, "guidance": false}), None, &mut lines).await.unwrap();
+    assert!(plain["deals"].is_null() && plain["plan"]["mood"] == "happy", "{:#}", plain["deals"]);
+    // feedback retires the director's own default too
+    ex.execute("autocut.feedback", json!({"about": "titleStyle", "id": "fade", "verdict": "dislike"})).await.unwrap();
+    let plain = make(&ex, &json!({"seconds": 12, "dryRun": true, "captions": false, "guidance": false}), None, &mut lines).await.unwrap();
+    assert!(plain["steps"].as_array().unwrap().iter().any(|s| s["id"] == "graphics.animateText" && s["params"]["in"] == "pop"), "the next entrance");
+}
+
 #[tokio::test]
 async fn the_model_directs_a_whole_edit() {
     let ex = demo_session();
@@ -436,6 +503,14 @@ async fn the_model_directs_a_whole_edit() {
         })
         .count();
     assert_eq!(passes, changed, "{r}");
+    drop(s);
+    // taste memory: the edit's fingerprint recorded with its deals, so the next can differ
+    assert_eq!(r["fingerprint"]["recorded"], true, "{:#}", r["fingerprint"]);
+    assert_eq!(r["fingerprint"]["axes"]["opening"], "titleCard");
+    let dir = ex.0.lock().unwrap().prefs_path.clone().unwrap().parent().unwrap().to_path_buf();
+    let kept = std::fs::read_to_string(dir.join(filmcraft_engine::taste_history::FILE)).unwrap();
+    assert_eq!(kept.lines().count(), 1);
+    assert!(kept.contains("\"pipeline\":\"direct\"") && kept.contains("\"look\":\"none\""), "{kept}");
 }
 
 #[test]
