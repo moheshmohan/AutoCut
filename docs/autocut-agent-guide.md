@@ -1034,6 +1034,28 @@ says otherwise, the brief wins; when in doubt, ask or offer a sample.
   - The earlier ones became `sheet`, `frames`, `showcase-plan`, `photos locations` and
     `photos pick --photos`.
 
+### Taste memory: keep consecutive videos different
+
+- **Record feedback as it comes.** `autocut.feedback {about, id, verdict: "dislike"|"like", note}`
+  writes to the user's taste profile (`scope: "project"` for one project only). A disliked id is
+  retired: never dealt again, and the pipelines' own defaults skip it. The whoosh lesson is
+  `{about: "sound", id: "whoosh", verdict: "dislike", note: "rocket-like under narration"}`.
+  `autocut.taste` shows `retired`, `liked` and `reasons`; `set` changes or clears them.
+- **The pipelines deal for you.** Direct, Quick Short and Showcase deal the choices the user left
+  open (look, music mood, title entrance, transition family, ending, register) and record the
+  video's fingerprint; their reports list the deals. `guidance: false` turns both off. Explicit
+  options always win.
+- **By hand, deal before choosing.** `autocut.deal {for: look|titleStyle|transitionFamily|music|
+  register|endCard, options?}` answers a `choice`, what it `skipped` and `why` (used in the last
+  three videos, retired, or not allowed by taste). At the end, `autocut.fingerprint {record:
+  true, pipeline: "hand"}` adds the video to the history.
+- **A `sameAsRecent` warning** means four of the six axes (opening, title entrance, transition
+  family, colour look, caption style, close) repeat one of the last three videos. Change one or
+  two on purpose; it never blocks.
+- **After changing a pipeline's choices**, run `filmcraft-cli eval` (briefs in `eval/briefs/`,
+  footage drawn in code). It compares runs with and without guidance in
+  `target/eval/<when>/summary.md`; `--no-judge` skips the local vision judge.
+
 ## 15. Further reading
 
 | Topic | Doc |
