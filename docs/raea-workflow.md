@@ -88,6 +88,39 @@ Apache-2.0; see `ATTRIBUTION.md`).
 - **Check before rendering.** Run `raea check --quick`, then stills at the start, the middle and the
   end, and only then the full render. `motion.render.json` lists every text box per frame.
 
+## As engine commands (preferred)
+
+The render, its checks, the import and the placement are engine commands, so the app, the CLI, a
+recipe and MCP all drive them the same way. They take the machine's GPU lock themselves, and
+`motion.render` and `composition.import` are long jobs (`wait: true`, or follow them in `jobs.list`).
+
+| Command | What it does |
+|---|---|
+| `motion.check {source, composition?}` | `raea check --quick`: findings with `check`, `level`, `says` |
+| `motion.stills {source, composition?, at: [frames], output}` | stills and RAEA's render manifest, with the text boxes per frame |
+| `motion.render {source, composition?, output, canvas?, size?, preview?, fps?, alpha?, quality?, holds? \| spec?, expected?, import?, place?, wait?}` | check, render into a new revision folder, native probe (size, rate, gaps), the animation preflight with `qa.motionEnergy`, `autocut-import.json` only on success, then import (MP4, or the PNG sequence at `fps`) and place unless told not to. A render that fails the probe or preflight stays on disk and the error says where |
+| `composition.import {source (.tsx), composition?, output, alphaCodec?, place?, wait?}` | one owner per element: RAEA's `export layers` draws only the graphics (ProRes 4444 with alpha, or PNG), and the footage and sounds the composition uses come in as real clips with their times, trims, speed, opacity, box and gain, so they stay editable |
+
+```sh
+CLI="$PWD/target/release/filmcraft-cli"
+"$CLI" --project "$P" --save exec motion.render "{\"source\":\"$FX/motion.tsx\",\"composition\":\"scene\",
+  \"output\":\"$FX/Next Stop v2\",\"spec\":\"$FX/scene-qa.json\",\"place\":true,\"wait\":true}"
+```
+
+RAEA is found from `providers.json`'s `kind: "composition"` entry (id `raea`, its program path), else
+the newest `~/.raea/versions/<version>/bin/raea`, else `raea` on the PATH ([generation.md](generation.md)).
+No command parameter picks the program.
+
+Known limits on 0.1.8:
+- `raea check --quick` checks the file's first composition even when `--composition` names another,
+  so for `motion.tsx` the scene's check reads the wipe.
+- `composition.import` takes `.tsx` only (RAEA's layer export has no HTML path). It shows a footage
+  box RAEA crops uncropped and lists it under `approximated`; captions come in as the drawn layer,
+  not as AutoCut captions.
+- The helper's render cache is not in the commands yet: a new revision always renders.
+
+The Python helper below stays for scripts and older builds.
+
 ## Render and review
 
 1. Save the composition and its local assets under `~/Movies/AutoCut/<Video>/build/`.
