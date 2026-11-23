@@ -234,6 +234,16 @@ the original copyright and permission notice in its header.
 | `crates/render/src/transitions/shader/windowslice.wgsl` | gre; FilmCraft contributors (WGSL port) | GL Transitions `windowslice` (https://github.com/gl-transitions/gl-transitions/blob/master/transitions/windowslice.glsl), hand-ported to WGSL; sidecar `windowslice.wgsl.attribution` lists the changes | MIT (Copyright (c) 2017-present gl-transitions contributors; `crates/render/src/transitions/shader/LICENSE-gl-transitions.txt`; upstream Author/License header kept) |
 | `crates/render/src/transitions/shader/cpu.rs` | the authors of the GL Transitions shaders above; FilmCraft contributors (Rust port) | The same GL Transitions written in Rust, operation for operation, as the CPU reference (each function keeps its upstream Author/License lines) | MIT (`crates/render/src/transitions/shader/LICENSE-gl-transitions.txt`) |
 
+## Adapted documentation
+
+Guidance rewritten in our own words from openly licensed sources. No text is copied; the ideas and
+numbers are credited here.
+
+| Section | Source | Licence |
+|---|---|---|
+| `docs/autocut-agent-guide.md` §6.0 "Direction and rhythm" and §7 "How much to check" | huashu-motion's director, rhythm and verification references, © 花叔 Huashu ([alchaincyf/huashu-motion](https://github.com/alchaincyf/huashu-motion)) | MIT |
+| `docs/raea-workflow.md` "Authoring a composition" | HyperFrames' composition rules, © HeyGen ([heygen-com/hyperframes](https://github.com/heygen-com/hyperframes)) | Apache-2.0 |
+
 ## Downloaded at runtime
 
 These files are never in the repository or the app bundle. FilmCraft downloads them into the

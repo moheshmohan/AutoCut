@@ -56,6 +56,31 @@ the rest, a pose can be made from the character's first picture by name (`refere
 can be animated (`kind: "video"`, `image`), and a deleted file comes back from the same seed
 ([generation.md](generation.md) §5).
 
+## Authoring a composition
+
+These rules keep a render repeatable and readable. They are written in our words; several come from
+HyperFrames' composition rules ([heygen-com/hyperframes](https://github.com/heygen-com/hyperframes),
+Apache-2.0; see `ATTRIBUTION.md`).
+
+- **Motion comes only from the frame number.** In TSX that's `useCurrentFrame()`; in an HTML page,
+  GSAP timelines on the page clock. Never use `Math.random()`, `Date.now()`, timers,
+  `requestAnimationFrame` or network fetches, so a re-render matches frame for frame. For variety,
+  use a seeded generator (for example mulberry32) with its seed written in the file.
+- **HTML timelines are paused and registered.** Create every GSAP timeline with `{paused: true}` and
+  register it as `window.__timelines["<composition-id>"]`. Build it synchronously while the page
+  loads, never inside `async`, `setTimeout` or a promise. Never play, pause or seek media yourself:
+  the renderer owns the clock. Let running text wrap instead of breaking it with `<br>`.
+- **Lay out from the composition's size** (`useVideoConfig()`, or `data-width` and `data-height`).
+  Keep text inside the platform's safe area, which `sequence.checkSafeZones` checks after import.
+  Keep text at least 2.6 % of the frame's short side (28 px at 1080p), and use tabular numerals
+  for numbers that change.
+- **One focal element per scene, one entrance per element.** Exits are shorter than entrances.
+  Damp springs at 0.9 or more unless a playful style was asked for.
+- **Local, licensed assets** beside the composition: generated plates, the user's footage, sounds
+  with a known licence. Take fonts from craft-fonts or the composition's own licensed files.
+- **Check before rendering.** Run `raea check --quick`, then stills at the start, the middle and the
+  end, and only then the full render. `motion.render.json` lists every text box per frame.
+
 ## Render and review
 
 1. Save the composition and its local assets under `~/Movies/AutoCut/<Video>/build/`.

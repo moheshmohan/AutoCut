@@ -357,6 +357,44 @@ music, hand-placed titles, a particular look. The pattern below made the "Hallow
 reel (24 s, 9:16, approved first time). Its scripts are in
 `~/Movies/AutoCut/Halloween Reel/build/` (`build.py`, `fc.py`, `frames.py`, `README.txt`).
 
+### 6.0 Direction and rhythm
+
+Read this before planning shots. It is adapted, in our words, from huashu-motion's director, rhythm
+and verification guides ([alchaincyf/huashu-motion](https://github.com/alchaincyf/huashu-motion),
+MIT; see `ATTRIBUTION.md`). The user's taste (§14) always wins over it: no whooshes or risers,
+silent Shorts, the places shown in a travel vlog.
+
+- **Three directions first** for a video over about 15 s or a new kind of video, unless the user
+  already chose a style. They differ in approach or material, not only in colour: **A** fits the
+  footage and the story; **B** pushes it (one continuous move, type as the hero, a montage-led
+  cut); **C** is unexpected but still about the subject. Never three quiet ones. Show a key still
+  or a few seconds of each and let the user pick.
+- **The energy curve before the beat grid.** Give each stretch an energy from 0 to 10 and check
+  the shape:
+  - a hook within 3 s: a clear onset, a movement or the first cut. A hook isn't a frantic open;
+  - a climb in steps you can name (the drums come in, the camera starts moving, the cuts double),
+    not a slope nobody notices;
+  - the densest five seconds about a third of the way in (30–60 % of the length): 5–8 cuts, about
+    one per beat, between shots of 1.5–4 s;
+  - the best moment on the strongest point of the music; a near-silent stop of 0.5–1.6 s only when
+    it earns its place;
+  - a resolve on one idea, held for 1.5 s or more.
+
+  A flat line at 3–5 with a hit at the end, or a build that peaks in the last two seconds, reads
+  as boring.
+- **Something new at least every two bars** (a cut, an element landing, a camera move starting or
+  stopping, a word, a hit), except a planned stop.
+- **At every section boundary, change at least two** of: shot scale, speed (0.25 s hard moves
+  against 2 s glides), ease family, camera (still, travelling, whipping), density (one subject
+  against many), colour, and the music's texture. Change all of them at the drop.
+- **Eases.** A hard ease-out for energy. Springs only for things that should feel physical,
+  damped at 0.9 or more unless the user asked for something playful. Soft 0.6–0.8 s eases on
+  everything make a film sleepy.
+- **Numbers, not adjectives.** Write motion as numbers ("entrances 12–18 frames, exits shorter, a
+  hard ease-out, no overshoot"), not as "snappy" or "smooth".
+- **Three notes before anyone watches.** Before showing a cut, write down the three notes a
+  demanding director would give, fix them, and only then show it.
+
 ### 6.1 Folder and rebuild loop
 
 ```text
@@ -677,6 +715,22 @@ Never show the user something you haven't looked at.
 | What the voice actually says | import the export and run `media.understandSpeech` on it; catches garbled or mispronounced lines and mid-phrase pauses |
 | A pipeline's own QA | `<out>.qa.json`, `<out>.qa.png`, `<out>.sheet.jpg`, `<out>.report.json` |
 | Media info | `filmcraft-cli probe out.mp4` |
+
+How much to check (adapted from the same huashu-motion verification guide):
+
+- **Deterministic checks first, every time.** QA commands, probes, loudness and safe zones cost no
+  tokens and catch the mechanical faults. Run them before looking at anything.
+- **Check motion, not stills.** A sheet of stills can't show a pop, a stall or an entrance replayed
+  across a cut. Watch the export once at normal speed as well.
+- **A budget.** One full inspection, one batch of fixes, then one round that confirms what changed
+  and the cuts beside it. Then stop and report what is left, rather than polishing in circles.
+- **Fresh eyes.** A second reviewer gets the brief, the export, the chosen direction and the facts
+  to check. They don't get the maker's explanation.
+- **Say what was checked.** Stills alone don't prove the motion was reviewed, and loudness figures
+  don't prove anyone listened. A check that has never caught a deliberately broken input proves
+  little.
+- **Know when it's done.** Say up front what "done" means (the checks that must pass, the user's
+  approval) and stop there.
 
 How to look:
 
