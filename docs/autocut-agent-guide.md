@@ -491,6 +491,9 @@ How to use it:
   `sheet` or a `media.frame` of the item.
 - **Pacing:** a push of 10–20 % over a shot reads as calm, 30 % or more as dramatic. Short
   "punch" shots of one beat can sit on a tight window.
+- **Even pushes:** two linear scale keyframes look fast at the start and slow at the end. Write
+  the push with `keyframes.choreograph` (§6.8), which eases scale in log space by default, or
+  give the first keyframe `perceptual: true` with `effects.setInterpolation`.
 
 ### 6.5 Video in a vertical frame
 
@@ -598,6 +601,7 @@ f.run('graphics.animateText', {'clip': tc, 'layer': 0,
     `scaleUp`, `drop`, `glitch`.
   - `loop` kinds: `wave`, `bounce`, `shake`, `pulse`, `flicker`.
   - `unit` is `letter`, `word` or `line`.
+  - `pop` eases out without overshoot. For the bounce, ask for it: `'easing': 'Back Out'`.
 - **Use `unit: "line"` with `stagger: 0` for `out`.** A letter-staggered fade-out starts early,
   and letters vanish while the title should still read.
 - **Fonts.** Any installed font works (macOS ships Chalkduster, DIN Condensed, Futura and others);
@@ -607,6 +611,37 @@ f.run('graphics.animateText', {'clip': tc, 'layer': 0,
 
 Ready-made animated text and stickers: `exec elements.list kind=text`, then
 `elements.insert {id, seconds, track}`.
+
+**Moves on a timeline.** `keyframes.choreograph` places tweens the way a GSAP timeline does and
+writes them as ordinary keyframes, editable in Effect Controls, in one undo step:
+
+```python
+f.run('keyframes.choreograph', {'target': {'clips': [logo, title], 'effect': 'motion'},
+    'labels': {'drop': 1.2},
+    'stagger': 0.08,
+    'tweens': [
+        {'prop': 'scale', 'from': 80, 'to': 100, 'duration': 0.5, 'ease': 'power2.out'},
+        {'prop': 'position', 'to': [540, 760], 'duration': 0.6, 'ease': 'spring', 'position': 'drop'},
+        {'prop': 'opacity', 'effect': 'opacity', 'to': 0, 'duration': 0.25, 'position': '+=1.5'}]})
+```
+
+- **Positions:**
+  - `"<"` / `">"`: with the previous tween's start / at its end.
+  - `"+=0.2"`: after the end so far.
+  - A label, or `"label+=0.5"`.
+  - Percentages like `"<25%"`.
+  - Seconds into the clip.
+  - An unknown label is an error.
+- **Eases:**
+  - GSAP's names (`power1`–`power4`, `sine`, `expo`, `circ`, `back`, `elastic`, `bounce`, with
+    `.in`, `.out` or `.inOut`).
+  - `spring` or `spring(ratio, stiffness, mass)`, `steps(n)`, `wiggle(amplitude, frequency, seed)`.
+  - The Bezier modes.
+  - `back.out(1.7)`'s argument is ignored, and the result's `notes` says so.
+- **Damping:** keep springs at a damping ratio of 0.9 or more (the default) unless the style is
+  playful.
+- **Scale tweens are perceptual:** a push from 100 to 200 % moves evenly.
+- **Check first:** `dryRun: true` returns the keyframes without writing them.
 
 ### 6.9 Sound, music and voice
 

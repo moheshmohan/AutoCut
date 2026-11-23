@@ -83,6 +83,10 @@ Apache-2.0; see `ATTRIBUTION.md`).
   for numbers that change.
 - **One focal element per scene, one entrance per element.** Exits are shorter than entrances.
   Damp springs at 0.9 or more unless a playful style was asked for.
+- **Simple moves don't need a composition.** A few tweens of scale, position or opacity on clips
+  or graphic layers are cheaper as `keyframes.choreograph`. It takes GSAP's position and ease
+  names and writes editable keyframes ([autocut-agent-guide.md](autocut-agent-guide.md) §6.8).
+  Use RAEA for what keyframes can't draw.
 - **Local, licensed assets** beside the composition: generated plates, the user's footage, sounds
   with a known licence. Take fonts from craft-fonts or the composition's own licensed files.
 - **Check before rendering.** Run `raea check --quick`, then stills at the start, the middle and the
