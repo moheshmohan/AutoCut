@@ -1,7 +1,7 @@
 //! Long exports over MCP (docs/agents.md § Long exports): `file.exportMedia` (and the other
 //! [`LONG_COMMANDS`]: voice cloning, neural music, model downloads, Google Photos and YouTube
-//! uploads, YouTube sign-ins, Instagram Reels and sign-ins, AutoCut showcase jobs, recipe runs and
-//! waits for review comments) with `wait: true` runs as a background engine job; the server reports its progress as MCP
+//! uploads, YouTube sign-ins, Instagram Reels and sign-ins, AutoCut showcase jobs, recipe runs,
+//! waits for review comments and review packets' filmstrips) with `wait: true` runs as a background engine job; the server reports its progress as MCP
 //! `notifications/progress` (when the request carried a `progressToken`) and stops it on
 //! `notifications/cancelled`, deleting an export's partial output (an upload's file is the
 //! user's and is never touched). The session lock is only held for short polls, so other
@@ -63,6 +63,7 @@ pub const LONG_COMMANDS: &[&str] = &[
     "redact.downloadModels",
     "recipe.run",
     "review.inbox",
+    "review.packet",
 ];
 
 /// Long commands whose `wait` is part of what they do (`review.inbox` waits for a new comment):
@@ -274,6 +275,7 @@ mod tests {
         let mut p = json!({"wait": true, "timeout": 30});
         job_params("review.inbox", &mut p);
         assert_eq!(p, json!({"wait": true, "timeout": 30, "job": true}));
+        assert!(is_long("review.packet", &json!({"wait": true})));
         let mut p = json!({"wait": true, "path": "x.mp4"});
         job_params("file.exportMedia", &mut p);
         assert_eq!(p, json!({"wait": false, "path": "x.mp4"}));

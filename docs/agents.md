@@ -208,7 +208,10 @@ progress and stop it:
   and analyses only those clips (`autocut.analyze` / `autocut.makeShowcase` with `album`).
 - `review.inbox {wait: true, timeout?}` (a wait for the user's next review comment, see
   [local-pipeline-upgrades.md](local-pipeline-upgrades.md#review-pointed-at-frames)) runs the same
-  way: a job that waits for a new open comment or the timeout, its answer under `review`.
+  way: a job that waits for a new open comment or the timeout, its answer under `review`. So does
+  `review.packet {wait: true}` (the finish reviewer's evidence, see
+  [finish-reviewer.md](finish-reviewer.md)): the call returns when its motion filmstrips are
+  rendered, their sheets and findings under `motionStrips`.
 - So do the AutoCut showcase jobs (`autocut.analyze`, `autocut.showcasePlan`, `autocut.makeShowcase`,
   `autocut.showcaseBuild`; the `showcase_*` tools; progress in clips analysed or entries built). Their
   answer, like the finished job's `jobs.list` entry, carries `showcase`: what the job made (the

@@ -110,6 +110,7 @@ pub mod remix;
 pub mod remove_object;
 pub mod render_cache;
 pub mod review;
+pub mod review_finish;
 pub mod safe_zones;
 pub mod same_moments;
 pub mod scene_check;

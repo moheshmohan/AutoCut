@@ -364,7 +364,7 @@ pub(crate) fn parse_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s.trim()).ok().map(|d| d.with_timezone(&chrono::Utc))
 }
 
-fn r3(x: f64) -> f64 {
+pub(crate) fn r3(x: f64) -> f64 {
     if x.is_finite() { (x * 1000.0).round() / 1000.0 } else { 0.0 }
 }
 
@@ -373,7 +373,7 @@ fn r2(x: f64) -> f64 {
 }
 
 /// At most `n` characters of `s`.
-fn short(s: &str, n: usize) -> String {
+pub(crate) fn short(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
 }
 
@@ -383,14 +383,14 @@ pub(crate) fn timecode(q: &Sequence, t: Tick) -> String {
 }
 
 /// Time fields for an answer: ticks, seconds, timecode.
-fn when(q: &Sequence, t: Tick) -> Value {
+pub(crate) fn when(q: &Sequence, t: Tick) -> Value {
     json!({"time": t.0, "seconds": r3(t.seconds()), "timecode": timecode(q, t)})
 }
 
 // ---------------------------------------------------------------------------------------------
 // parameters
 
-fn keys(p: &Value, cmd: &str, allowed: &[&str]) -> Result<()> {
+pub(crate) fn keys(p: &Value, cmd: &str, allowed: &[&str]) -> Result<()> {
     if p.is_null() {
         return Ok(());
     }
@@ -401,7 +401,7 @@ fn keys(p: &Value, cmd: &str, allowed: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn bool_or(p: &Value, key: &str, default: bool, cmd: &str) -> Result<bool> {
+pub(crate) fn bool_or(p: &Value, key: &str, default: bool, cmd: &str) -> Result<bool> {
     match p.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(v) => v.as_bool().ok_or_else(|| bad(cmd, format!("`{key}` is true or false"))),
@@ -418,7 +418,7 @@ fn id_p(p: &Value, cmd: &str) -> Result<String> {
 
 /// Text from the caller: trimmed, control characters other than line breaks dropped, tabs as
 /// spaces; at most `max` characters, never empty.
-fn text_p(p: &Value, key: &str, max: usize, cmd: &str) -> Result<String> {
+pub(crate) fn text_p(p: &Value, key: &str, max: usize, cmd: &str) -> Result<String> {
     let raw = p.get(key).and_then(Value::as_str).ok_or_else(|| bad(cmd, format!("`{key}` is the text")))?;
     let clean: String = raw.chars().map(|c| if c == '\t' { ' ' } else { c }).filter(|c| *c == '\n' || !c.is_control()).collect();
     let clean = clean.trim().to_string();
@@ -443,7 +443,7 @@ fn author_p(p: &Value, cmd: &str) -> Result<String> {
 }
 
 /// The sequence named by `sequence`, else the active one.
-fn sequence_p(s: &Session, p: &Value, cmd: &str) -> Result<ItemId> {
+pub(crate) fn sequence_p(s: &Session, p: &Value, cmd: &str) -> Result<ItemId> {
     match p.get("sequence").filter(|v| !v.is_null()) {
         Some(v) => {
             let id = ItemId(v.as_u64().ok_or_else(|| bad(cmd, "`sequence` is a sequence id"))?);

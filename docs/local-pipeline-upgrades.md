@@ -589,6 +589,14 @@ where a click or drag lands is `program.review.picture`, the box being written
 `program.review.box`. The tool's state is `ui.review_tool` (`{box, clip, time, text}`) and the
 marks `ui.review_marks` in `ui.inspect`.
 
+**The finish reviewer** answers the comments and judges the review build in a fresh context, two
+rounds at most: `review.packet` gathers its evidence (a frame sheet, motion filmstrips, the latest
+QA report, `sequence.checkMotion`, `build/decisions.json`, the comments, the rounds so far) into
+`build/review/packet-<n>`, and `review.gate` checks its answer (one last `GATE:` line: ship, fix
+with at most eight fixes and one keep, rebuild or recapture) and records the round in
+`build/review/rounds.json`. The contract, the brief and the grammar are in
+[finish-reviewer.md](finish-reviewer.md). Nothing there blocks a delivery yet (D7).
+
 ## Upstream additions
 
 - Scrub audio opens on its own worker; a drag reuses its stream and releases it before playback.
