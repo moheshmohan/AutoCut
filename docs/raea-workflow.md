@@ -37,6 +37,13 @@ What changed from 0.1.0 for this workflow (checked 23 November 2026 on the sampl
   `"$RAEA" add gsap` or `"$RAEA" add three@0.185.0 @react-three/fiber@9.8.2`: that is a download,
   so ask first. Leave `raea bug` (it sends a report to RAEA's server) and `raea skills install`
   (it changes agent settings) alone.
+- Checked on 0.1.8 with gsap 3.14.2, three 0.185.0 and @react-three/fiber 9.8.2 (18 packages,
+  37 MB in the project's `node_modules`): a GSAP page (`<script src="node_modules/gsap/dist/gsap.min.js">`,
+  a paused timeline registered under the root's `data-composition-id`), a plain three.js scene in
+  `<Three program={fn}>` and an `<R3F>` scene (both `import … from "raea/r3f"`) render stills and
+  MP4s with the motion where it should be.
+- `--at A,B` names stills differently: an HTML page's by frame number (`frame-00030.png`), a TSX
+  composition's by position (`frame-00000.png`, `frame-00001.png`).
 
 RAEA is a separately installed tool for internal production under its
 [FSL-1.1-ALv2 license](https://github.com/shinyobjectz/raea/blob/v0.1.0/LICENSE).
