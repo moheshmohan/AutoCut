@@ -3950,6 +3950,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::auto_color::commands());
     v.extend(crate::catalog_edit::commands());
     v.extend(crate::animation_preflight::commands());
+    v.extend(crate::motion_energy::commands());
     v.extend(crate::render_cache::commands());
     v.extend(crate::delivery::commands());
     v.extend(crate::taste::commands());

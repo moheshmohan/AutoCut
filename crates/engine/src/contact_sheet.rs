@@ -223,7 +223,32 @@ pub(crate) fn write_images(s: &Session, cmd: &str, rows: &[Vec<(filmcraft_render
                 .collect()
         })
         .collect();
-    let (rgba, w, h) = compose(&made).ok_or_else(|| bad(cmd, "the sheet could not be drawn"))?;
+    write_made(s, cmd, &made, path)
+}
+
+/// Rows of labelled tiles (straight sRGB RGBA8, its width and height, its label) in one sheet at
+/// `path` (JPEG by its extension, else PNG), for `cmd`: its path and size. A tile whose pixels do
+/// not match its size is drawn as a missing frame.
+pub(crate) fn write_tiles(s: &Session, cmd: &str, rows: Vec<Vec<(Vec<u8>, u32, u32, String)>>, path: &str) -> Result<Value> {
+    if rows.iter().map(Vec::len).sum::<usize>() > MAX_TILES {
+        return Err(bad(cmd, format!("a sheet holds at most {MAX_TILES} tiles")));
+    }
+    let made: Vec<Vec<Tile>> = rows
+        .into_iter()
+        .map(|r| {
+            r.into_iter()
+                .map(|(rgba, w, h, label)| {
+                    let ok = w > 0 && h > 0 && u64::from(w) * u64::from(h) * 4 == rgba.len() as u64;
+                    Tile { rgba, w: w.clamp(1, MAX_SIDE), h: h.clamp(1, MAX_SIDE), label, ok }
+                })
+                .collect()
+        })
+        .collect();
+    write_made(s, cmd, &made, path)
+}
+
+fn write_made(s: &Session, cmd: &str, made: &[Vec<Tile>], path: &str) -> Result<Value> {
+    let (rgba, w, h) = compose(made).ok_or_else(|| bad(cmd, "the sheet could not be drawn"))?;
     let l = path.to_ascii_lowercase();
     let bytes = if l.ends_with(".jpg") || l.ends_with(".jpeg") {
         filmcraft_export::encode_still_with_quality(filmcraft_export::Format::JpegSequence, rgba, w, h, false, 88)

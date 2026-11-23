@@ -354,3 +354,14 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
 - The Trim Monitor's two pictures at a cut inside one take no longer cancel each other's decode
   (AV55); VA-API reads pictures without a copy on Linux (AV57); a project saved before
   2026-10-21 with portrait photos opens with them the right size and centred (AV58).
+
+## Update 2026-11-23 (PX1, craft QA)
+
+- **PX1.1**: `qa.motionEnergy {path|sequence, fps?, holds?, loop?, sheet?}` measures how a film
+  moves on frames reduced to 96×54 grey: single-frame pops, cuts per minute, still stretches of
+  1 s or more outside declared holds, motion a second and its contrast, a flat first 5 s, a film
+  that barely moves, a black or empty first frame and the loop seam, with a contact sheet at four
+  frames a second. Sequences render on the GPU frame renderer where the host has one. It is a leg
+  of `media.preflightAnimation` and `delivery.preflight`; every finding is a warning (D7) and never
+  blocks. Thresholds and limits are in `docs/local-pipeline-upgrades.md` ("Craft QA"). 933
+  commands.

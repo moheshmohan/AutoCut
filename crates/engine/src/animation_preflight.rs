@@ -37,26 +37,11 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Preflight animation",
         menu: &[],
         shortcut: None,
-        params: r#"{"path":path,"fps":1..240?,"expected":{"duration":ticks?,"width":u32?,"height":u32?,"fps":f64?,"alpha":bool?},"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"textBounds":[{"name":str,"start":ticks,"end":ticks,"box":[x,y,w,h]}]?,"soundCues":[{"name":str,"time":ticks}]?,"sheet":path?,"expectMotion":bool=true}"#,
+        params: r#"{"path":path,"fps":1..240?,"expected":{"duration":ticks?,"width":u32?,"height":u32?,"fps":f64?,"alpha":bool?},"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"textBounds":[{"name":str,"start":ticks,"end":ticks,"box":[x,y,w,h]}]?,"soundCues":[{"name":str,"time":ticks}]?,"sheet":path?,"expectMotion":bool=true,"motionEnergy":bool=true (qa.motionEnergy as warnings)}"#,
         enabled: always,
         run: preflight,
         journal: false,
     }]
-}
-fn spans(p: &Value, key: &str, end: Tick) -> Result<Vec<(i64, i64)>> {
-    let Some(values) = p.get(key) else { return Ok(Vec::new()) };
-    let values = values.as_array().filter(|a| a.len() <= 2000).ok_or_else(|| bad(CMD, format!("{key} needs up to 2000 intervals")))?;
-    values
-        .iter()
-        .map(|v| {
-            let a = v["start"].as_i64().filter(|a| *a >= 0).ok_or_else(|| bad(CMD, "interval start is ticks"))?;
-            let b = v["end"].as_i64().filter(|b| *b > a && *b <= end.0).ok_or_else(|| bad(CMD, "interval end must follow start within the animation"))?;
-            if v["reason"].as_str().is_none_or(|s| s.is_empty() || s.len() > 512) {
-                return Err(bad(CMD, "intentional hold needs a reason"));
-            }
-            Ok((a, b))
-        })
-        .collect()
 }
 pub(crate) fn frozen(times: &[(Tick, Vec<u8>)], holds: &[(i64, i64)], minimum: Tick) -> Vec<Value> {
     let mut findings = Vec::new();
@@ -113,7 +98,7 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     if end.0 <= 0 || end.seconds() > 12.0 * 3600.0 {
         return Err(bad(CMD, "animation duration must be positive and at most 12 hours"));
     }
-    let holds = spans(p, "holds", end)?;
+    let holds = crate::motion_energy::holds_p(CMD, p, "holds", end)?;
     let expected = &p["expected"];
     let mut findings = Vec::new();
     let mut skipped = Vec::new();
@@ -190,6 +175,24 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         skipped.push(json!({"check":"soundCues","reason":"no cue timings supplied"}));
     }
+    // qa.motionEnergy on the same render: warnings only (decision D7), never a failed preflight
+    let motion_energy = match p.get("motionEnergy").filter(|v| !v.is_null()) {
+        Some(v) if !v.as_bool().ok_or_else(|| bad(CMD, "motionEnergy must be boolean"))? => json!({"skipped": "disabled by the caller"}),
+        _ => {
+            let expect_motion = p.get("expectMotion").and_then(Value::as_bool).unwrap_or(true);
+            let o = crate::motion_energy::Options {
+                holds: holds.clone(),
+                expect_motion,
+                overlay: expected["alpha"] == true || video.has_alpha,
+                ..Default::default()
+            };
+            match crate::motion_energy::measure_source(s, &source, &o) {
+                Ok(v) => v,
+                Err(e) => json!({"error": e.to_string()}),
+            }
+        }
+    };
+    let warnings = motion_energy["findings"].as_array().cloned().unwrap_or_default();
     let sheet = if let Some(path_out) = p["sheet"].as_str() {
         let mut isolated = Session::new(s.services.clone());
         let item = if let Some(fps) = p.get("fps") {
@@ -202,7 +205,7 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
         None
     };
     Ok(
-        json!({"passed":findings.is_empty(),"findings":findings,"skipped":skipped,"duration":end.0,"video":video,"samples":frames.len(),"sampled":true,"sheet":sheet,"holds":p.get("holds"),"textMethod":"declared composition geometry"}),
+        json!({"passed":findings.is_empty(),"findings":findings,"warnings":warnings,"motionEnergy":motion_energy,"skipped":skipped,"duration":end.0,"video":video,"samples":frames.len(),"sampled":true,"sheet":sheet,"holds":p.get("holds"),"textMethod":"declared composition geometry"}),
     )
 }
 

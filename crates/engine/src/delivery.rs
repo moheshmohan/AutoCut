@@ -15,7 +15,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             CMD,
             "Delivery quality gate",
-            r#"{"short":bool=false,"privacy":bool=true,"narration":bool=true,"changedNarration":[clip id]?,"mix":bool=true,"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"exemptions":[…audio continuity exemptions],"report":path?}"#,
+            r#"{"short":bool=false,"privacy":bool=true,"narration":bool=true,"changedNarration":[clip id]?,"mix":bool=true,"motionEnergy":bool=true (qa.motionEnergy, warnings only),"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"exemptions":[…audio continuity exemptions],"report":path?}"#,
             preflight,
         ),
         spec(
@@ -158,6 +158,17 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
         if freezes.is_empty() { "pass" } else { "warning" },
         json!({"findings":freezes,"samples":samples,"holds":frozen_holds,"sampled":true}),
     );
+    // qa.motionEnergy over the whole edit, rendered from the originals: warnings only (decision
+    // D7), so it never fails the gate. Still pictures on the timeline count as holds, as above.
+    if flag(p, "motionEnergy", true)? {
+        let o = crate::motion_energy::Options { holds: frozen_holds.clone(), expect_motion: true, ..Default::default() };
+        match crate::motion_energy::measure_sequence(s, seq, &o, true) {
+            Ok(v) => push(&mut checks, "motionEnergy", if v["findings"].as_array().is_some_and(|a| !a.is_empty()) { "warning" } else { "pass" }, v),
+            Err(e) => push(&mut checks, "motionEnergy", "warning", json!({"error": e.to_string()})),
+        }
+    } else {
+        push(&mut checks, "motionEnergy", "skipped", json!("disabled by explicit project policy"));
+    }
     push(
         &mut checks,
         "colour",

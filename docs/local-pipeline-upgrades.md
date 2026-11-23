@@ -162,7 +162,8 @@ contact sheet. HTML uses its own dimensions.
 
 The helper writes a contact sheet and `preflight.json`, then the import manifest only on success.
 `media.preflightAnimation` checks duration, dimensions/rate, decode failures, required alpha,
-sampled frozen sections, declared text geometry and audible cues. A spec can contain:
+sampled frozen sections, declared text geometry and audible cues, and adds `qa.motionEnergy`
+warnings ([Craft QA](#craft-qa-motion-and-text)) that never fail it. A spec can contain:
 
 ```json
 {
@@ -179,6 +180,62 @@ Motion is sampled at approximately 10 Hz (up to 600 samples); declare intended h
 text/sound evidence stays visible. Failed renders remain for diagnosis without an import manifest.
 Hold the shared GPU lock while RAEA renders; cache hits still run native preflight.
 
+## Craft QA: motion and text
+
+These checks measure craft, not correctness. Every finding is a warning (`severity: "warn"`)
+for this first round on real projects (decision D7 in
+[the ingestion plan](../plan/video-automation-ingest-2026-11-22.md)): they never fail
+`media.preflightAnimation` or `delivery.preflight`. The thresholds below are starting values, to
+be tuned once real projects have been measured with them.
+
+`qa.motionEnergy` measures a rendered file (`path`) or a sequence (`sequence`), exactly one of
+the two:
+
+```sh
+filmcraft-cli --project edit.fcproj exec qa.motionEnergy sequence=12 sheet='/new/build/motion.png'
+filmcraft-cli exec qa.motionEnergy path='/new/build/loop.mov' loop=true
+```
+
+Each analysed frame is reduced to 96×54 grey (54×96 for a portrait frame). Every frame is
+analysed up to 7,200 frames; a longer input is sampled at a lower rate (`sampledDown: true`, the
+rate used in `fps`), and `fps` (0.1 to 240) asks for a lower rate. A file is read through the
+media pool's decoders (hardware decoders where the host registered them). A sequence is rendered
+on the GPU frame renderer when the host has one, else on the CPU renderer, without captions, as a
+horizontal delivery is exported; `renderer` in the result counts the frames each drew.
+
+| Code | Warns when | Starting value |
+|---|---|---|
+| `pop` | one frame differs from the frames on both sides (a flash frame, a stray frame between shots) | both scene steps at least 0.2 and at least 2.5 × the local median + 0.05 |
+| `still` | the picture holds for 1 s or more outside the declared holds | mean grey difference to the stretch's first frame under 0.003 of full scale |
+| `flatOpening` | the first 5 s neither move nor cut | mean motion under 0.05 a second, no cut |
+| `barelyMoves` | the whole film hardly moves and hardly cuts | mean motion under 0.05 a second, fewer than 2 cuts a minute |
+| `evenMotion` | motion keeps the same pace every second (films of 10 s or more) | per-second motion varies by less than 0.2 of its mean |
+| `blackFirstFrame`, `emptyFirstFrame` | the first frame is black (or transparent), or one flat colour | mean grey under 0.04; grey standard deviation under 0.01 |
+| `loopSeam` | with `loop: true`, the step from the last frame back to the first stands out | over 4 × the median step between frames, and over 0.02 |
+| `decode` | frames could not be read or rendered and were left out | any |
+
+Motion is the mean grey change between frames about 0.1 s apart, scaled to one second, as a share
+of full scale (0 is still); steps across a cut or a pop are left out of it. The result's `measures`
+give motion for each second (`motion.perSecond`, one value per `bucketSeconds`, which grows past an
+hour so there are at most 3,600), its mean, its contrast (standard deviation over mean) and the
+opening's mean, cuts per minute and the cut times, and the loop seam whether or not `loop` is set.
+Cuts use the Scene Edit Detection measure at sensitivity 50 with a shortest shot of 0.2 s, so a
+fast dissolve or a whip pan can read as a cut. Pops are looked for only when every frame is
+analysed; below the source's rate a single frame cannot be told, and `skipped` says so. `holds`
+(`{start, end, reason}` in ticks, as in the preflight spec) exempt still stretches only: the part
+of a still outside a hold is still reported, and a hold never hides a pop. `sheet` writes a contact
+sheet (PNG, or JPEG by its extension) of four frames a second, 16 to a row and at most 600 tiles,
+so a film longer than 150 s gets fewer frames a second. Each code lists at most 200 findings;
+`counts` has them all.
+
+As a leg, `media.preflightAnimation` runs it on the same render with the spec's `holds` and
+`expectMotion`, lists its findings under `warnings` and the whole result under `motionEnergy`, and
+does not judge a transparent overlay's first frame (`motionEnergy: false` turns the leg off).
+`delivery.preflight` adds a `motionEnergy` check, `warning` or `pass` and never `fail`, rendered
+from the originals. Its holds are the declared ones plus the still-picture spans the gate's own
+`motion` check already treats as holds, so a photo story does not warn for every photo.
+`motionEnergy: false` skips it, recorded as skipped.
+
 ## Standard checked delivery
 
 Use `recipe.run` with `builtin:delivery-quality-gate`, or call:
@@ -192,7 +249,8 @@ filmcraft-cli --project edit.fcproj exec delivery.prepare \
 
 The gate checks source availability, privacy at/around cuts and regular intervals, audio boundary
 continuity, mix clipping, changed narration, subtitle alignment, screen-mask persistence, sampled
-motion/highlights and safe zones for Shorts. `tts.checkClip` hears the **retained source audio**,
+motion/highlights, motion energy ([Craft QA](#craft-qa-motion-and-text), warnings only) and safe
+zones for Shorts. `tts.checkClip` hears the **retained source audio**,
 without generating a replacement; its cache is keyed by actual samples, script and judge. Missing
 models or unclear required readings block delivery. It uses the existing local hearers, second
 opinion and speaker gate, and never downloads a model implicitly. A clip is judged by its take's
