@@ -1,5 +1,13 @@
 //! One reusable delivery gate. Failed or unavailable required checks block export; warnings
 //! and sampled/declared evidence remain visible. This workflow never uploads or changes labels.
+//!
+//! Every check has a severity tier (PX1.4, [`tier_of`]): **Floor** blocks (the checks that
+//! blocked before keep blocking exactly as before; the new ones, `textContrast` under 3:1,
+//! `figures` not in the fact ledger and `waivers`, warn for this first round, decision D7, until
+//! `floorBlocks: true`), **Reflex** is fixed or waived with a reason and evidence in
+//! `build/decisions.json` (`{waivers: [{check, code?, time?, reason, evidence}]}`; a waiver
+//! without both is refused, and more than five is a finding), **Finish** is reported only. The
+//! report's `summary` counts the open findings of each tier and the waived ones.
 use crate::commands::{CommandSpec, bad, has_seq};
 use crate::{EngineError, Result, Session};
 use filmcraft_project::ClipId;
@@ -15,7 +23,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             CMD,
             "Delivery quality gate",
-            r#"{"short":bool=false,"privacy":bool=true,"narration":bool=true,"changedNarration":[clip id]?,"mix":bool=true,"motionEnergy":bool=true (qa.motionEnergy, warnings only),"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"exemptions":[…audio continuity exemptions],"report":path?}"#,
+            r#"{"short":bool=false,"privacy":bool=true,"narration":bool=true,"changedNarration":[clip id]?,"mix":bool=true,"motionEnergy":bool=true (qa.motionEnergy, warnings only),"craft":bool=true (sequence.checkCraft: textContrast under 3:1 is Floor, the rest craft),"copy":bool=true (copy.lint of titles and captions: figures not in the ledger are Floor, the rest copy),"facts":[str|number]? (the fact ledger; default build/facts.json beside the project),"allow":[str]? (phrases copy.lint never flags),"decisions":path? (waivers; default build/decisions.json beside the project),"floorBlocks":bool=false (the new Floor checks block too),"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"exemptions":[…audio continuity exemptions],"report":path?}"#,
             preflight,
         ),
         spec(
@@ -80,6 +88,11 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(CMD, "sequence is empty"));
     }
     let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    // the tiers' settings, read before anything is measured
+    let floor_blocks = flag(p, "floorBlocks", false)?;
+    let craft_on = flag(p, "craft", true)?;
+    let copy_inputs = if flag(p, "copy", true)? { Some((crate::copy_lint::allowed(s, CMD, p)?, crate::copy_lint::ledger(s, CMD, p)?)) } else { None };
+    let (decisions, named_decisions) = decisions_path(s, p)?;
     let (source_errors, sources) = crate::source_check::inspect(s, seq);
     // A final-delivery check must see current originals, even when editing used a
     // proxy or a source changed on disk since its last preview.
@@ -310,8 +323,96 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
         if protected.is_empty() { "pass" } else { "fail" },
         json!({"missingMasks":protected,"method":"saved editable protection masks; review moving screens at source scale"}),
     );
+    // The new Floor checks warn this round (decision D7) and block only with `floorBlocks`; an
+    // unavailable one is a Floor failure too.
+    let new_floor = |open: bool| {
+        if !open {
+            "pass"
+        } else if floor_blocks {
+            "fail"
+        } else {
+            "warning"
+        }
+    };
+    // sequence.checkCraft: text contrast under 3:1 is Floor, its other findings Reflex or Finish
+    if craft_on {
+        match s.execute("sequence.checkCraft", json!({"sequence":seq.0,"holds":craft_holds(&frozen_holds, end.0)})) {
+            Ok(mut v) => {
+                let (floor, rest): (Vec<Value>, Vec<Value>) =
+                    take_findings(&mut v).into_iter().partition(|f| f["code"] == "lowContrast" && f["ratio"].as_f64().is_some_and(|r| r < FLOOR_CONTRAST));
+                push(
+                    &mut checks,
+                    "textContrast",
+                    new_floor(!floor.is_empty()),
+                    json!({"findings":floor.into_iter().map(|f| tiered(f, FLOOR)).collect::<Vec<_>>(),"threshold":FLOOR_CONTRAST,"floorBlocks":floor_blocks,"note":"text under 3:1 against the picture behind it, from sequence.checkCraft; 3:1 up to the WCAG ratio is in `craft`"}),
+                );
+                let rest: Vec<Value> = rest
+                    .into_iter()
+                    .map(|f| {
+                        let t = craft_tier(f["code"].as_str().unwrap_or(""));
+                        tiered(f, t)
+                    })
+                    .collect();
+                let state = if rest.is_empty() { "pass" } else { "warning" };
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("findings".into(), json!(rest));
+                }
+                push(&mut checks, "craft", state, v);
+            }
+            Err(e) => {
+                push(&mut checks, "textContrast", new_floor(true), json!({"error":e.to_string(),"floorBlocks":floor_blocks}));
+                push(&mut checks, "craft", "warning", json!({"error":e.to_string()}));
+            }
+        }
+    } else {
+        push(&mut checks, "textContrast", "skipped", json!("disabled by explicit project policy"));
+        push(&mut checks, "craft", "skipped", json!("disabled by explicit project policy"));
+    }
+    // copy.lint of the titles and captions: figures not in the fact ledger are Floor
+    if let Some((allow, ledger)) = &copy_inputs {
+        let mut v = crate::copy_lint::report(&crate::copy_lint::sequence_segments(&project, &q), allow, ledger);
+        let (figures, rest): (Vec<Value>, Vec<Value>) = take_findings(&mut v).into_iter().partition(|f| f["code"] == "unledgeredFigure");
+        match ledger {
+            crate::copy_lint::LedgerState::Found(_) => push(
+                &mut checks,
+                "figures",
+                new_floor(!figures.is_empty()),
+                json!({"findings":figures.into_iter().map(|f| tiered(f, FLOOR)).collect::<Vec<_>>(),"ledger":v["ledger"],"floorBlocks":floor_blocks}),
+            ),
+            crate::copy_lint::LedgerState::None(why) => push(&mut checks, "figures", "skipped", json!(why)),
+            crate::copy_lint::LedgerState::Broken(why) => {
+                push(&mut checks, "figures", new_floor(true), json!({"error":format!("the fact ledger could not be read: {why}"),"floorBlocks":floor_blocks}))
+            }
+        }
+        let rest: Vec<Value> = rest
+            .into_iter()
+            .map(|f| {
+                let t = copy_tier(&f);
+                tiered(f, t)
+            })
+            .collect();
+        let state = if rest.is_empty() { "pass" } else { "warning" };
+        if let Some(o) = v.as_object_mut() {
+            o.insert("findings".into(), json!(rest));
+        }
+        push(&mut checks, "copy", state, v);
+    } else {
+        push(&mut checks, "figures", "skipped", json!("disabled by explicit project policy"));
+        push(&mut checks, "copy", "skipped", json!("disabled by explicit project policy"));
+    }
+    // waivers of Reflex findings, then every check's tier
+    let (state, detail) = waive(s, decisions, named_decisions, &mut checks, frame, floor_blocks);
+    push(&mut checks, "waivers", state, detail);
+    for c in checks.iter_mut() {
+        let tier = tier_of(c["check"].as_str().unwrap_or(""));
+        if let Some(o) = c.as_object_mut() {
+            o.insert("tier".into(), json!(tier));
+        }
+    }
+    let summary = summary(&checks);
+    let blocking: Vec<Value> = checks.iter().filter(|c| c["state"] == "fail").map(|c| c["check"].clone()).collect();
     let passed = checks.iter().all(|c| c["state"] != "fail");
-    let mut report = json!({"format":"autocut.deliveryQa","version":1,"engine":crate::render_cache::ENGINE,"sequence":seq.0,"passed":passed,"checks":checks,"subtitlePolicy":if flag(p,"short",false)?{"burn"}else{"sidecar"},"uploadPrivacy":"private"});
+    let mut report = json!({"format":"autocut.deliveryQa","version":1,"engine":crate::render_cache::ENGINE,"sequence":seq.0,"passed":passed,"blocking":blocking,"summary":summary,"floorBlocks":floor_blocks,"checks":checks,"subtitlePolicy":if flag(p,"short",false)?{"burn"}else{"sidecar"},"uploadPrivacy":"private"});
     if let Some(path) = p["report"].as_str() {
         for n in 0..1000 {
             let destination = if n == 0 { path.to_string() } else { format!("{}.{n}.json", path.strip_suffix(".json").unwrap_or(path)) };
@@ -327,6 +428,297 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     }
     Ok(report)
 }
+// ---- severity tiers (PX1.4) ---------------------------------------------------------------
+
+const FLOOR: &str = "floor";
+const REFLEX: &str = "reflex";
+const FINISH: &str = "finish";
+/// Text contrast under this is a Floor failure (3:1 to the WCAG ratio stays in `craft`).
+pub const FLOOR_CONTRAST: f64 = 3.0;
+/// More waivers than this is itself a finding.
+pub const MAX_WAIVERS: usize = 5;
+/// Largest decisions file read, most waivers looked at, and the longest reason or evidence.
+const MAX_DECISIONS_BYTES: u64 = 1 << 20;
+const MAX_WAIVER_ENTRIES: usize = 1000;
+const MAX_WAIVER_TEXT: usize = 2000;
+/// Most holds handed to `sequence.checkCraft` (its own bound).
+const MAX_CRAFT_HOLDS: usize = 2000;
+
+/// The tier of each check: Floor blocks (the existing blocking checks keep blocking as before;
+/// the new ones warn until `floorBlocks`), Reflex is fixed or waived with evidence, Finish is
+/// reported only.
+pub fn tier_of(check: &str) -> &'static str {
+    match check {
+        "sources" | "audioContinuity" | "mix" | "privacyAtCuts" | "changedNarration" | "safeZones" | "screenProtection" | "textContrast" | "figures"
+        | "waivers" => FLOOR,
+        "motion" | "colour" | "blackFrames" | "craft" | "copy" => REFLEX,
+        _ => FINISH,
+    }
+}
+
+/// The tier of a `sequence.checkCraft` finding left in `craft` (contrast under 3:1 goes to
+/// `textContrast`).
+fn craft_tier(code: &str) -> &'static str {
+    match code {
+        "staticTimeline" | "silence" => FINISH,
+        _ => REFLEX,
+    }
+}
+
+/// The tier of a `copy.lint` finding left in `copy` (figures go to `figures`).
+fn copy_tier(f: &Value) -> &'static str {
+    match f["code"].as_str().unwrap_or("") {
+        "filler" => FINISH,
+        "overBudget" if f["level"] != "fail" => FINISH,
+        _ => REFLEX,
+    }
+}
+
+fn tiered(mut f: Value, tier: &str) -> Value {
+    if let Some(o) = f.as_object_mut() {
+        o.insert("tier".into(), json!(tier));
+    }
+    f
+}
+
+fn take_findings(v: &mut Value) -> Vec<Value> {
+    match v.get_mut("findings").map(Value::take) {
+        Some(Value::Array(a)) => a,
+        _ => Vec::new(),
+    }
+}
+
+/// `holds` merged and capped for `sequence.checkCraft`, each with a reason.
+fn craft_holds(holds: &[(i64, i64)], end: i64) -> Value {
+    let mut spans: Vec<(i64, i64)> = holds.iter().map(|(a, b)| ((*a).max(0), (*b).min(end))).filter(|(a, b)| b > a).collect();
+    spans.sort_unstable();
+    let mut merged: Vec<(i64, i64)> = Vec::new();
+    for (a, b) in spans {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    json!(merged.iter().take(MAX_CRAFT_HOLDS).map(|(a, b)| json!({"start": a, "end": b, "reason": "a declared hold or a still picture"})).collect::<Vec<_>>())
+}
+
+/// One waiver of `build/decisions.json`, accepted.
+struct Waiver {
+    index: usize,
+    check: String,
+    code: Option<String>,
+    time: Option<i64>,
+    reason: String,
+    evidence: String,
+    used: usize,
+}
+
+/// The decisions file: `p.decisions`, else `build/decisions.json` beside the saved project; and
+/// whether it was named.
+fn decisions_path(s: &Session, p: &Value) -> Result<(Option<String>, bool)> {
+    match p.get("decisions") {
+        None | Some(Value::Null) => Ok((crate::copy_lint::beside_project(s, "decisions.json"), false)),
+        Some(Value::String(t)) if !t.trim().is_empty() && t.len() <= 4096 && !t.contains('\0') => Ok((Some(crate::export_tools::expand_home(t.trim())), true)),
+        Some(_) => Err(bad(CMD, "`decisions` is the path of a decisions file ({waivers: [...]})")),
+    }
+}
+
+fn refused(index: usize, check: Option<&str>, why: String) -> Value {
+    json!({"code": "waiverRefused", "severity": "warn", "tier": FLOOR, "waiver": index, "check": check, "message": format!("waiver {}: {why}", index + 1)})
+}
+
+/// The waivers of the decisions file applied to the Reflex checks among `checks`: the `waivers`
+/// check's state and detail.
+fn waive(s: &Session, path: Option<String>, named: bool, checks: &mut [Value], frame: i64, floor_blocks: bool) -> (&'static str, Value) {
+    let mut findings = Vec::new();
+    let names: Vec<String> = checks.iter().filter_map(|c| c["check"].as_str().map(str::to_string)).collect();
+    let Some(path) = path else {
+        return ("pass", json!({"path": null, "waivers": 0, "note": "the project is not saved: no build/decisions.json beside it (or give `decisions`)"}));
+    };
+    let unreadable = |why: String| json!({"code": "decisionsUnreadable", "severity": "warn", "tier": FLOOR, "path": path, "message": format!("the decisions file could not be read: {why}")});
+    let entries: Vec<Value> = if s.services.file_size(&path).is_err() {
+        if !named {
+            return ("pass", json!({"path": path, "waivers": 0, "note": "no decisions file: nothing is waived"}));
+        }
+        findings.push(unreadable("it is not there".into()));
+        Vec::new()
+    } else {
+        match s
+            .services
+            .read_file_bounded(&path, MAX_DECISIONS_BYTES)
+            .map_err(|e| e.to_string())
+            .and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string()))
+        {
+            Ok(Value::Object(mut o)) => match o.remove("waivers") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(a)) => a,
+                Some(_) => {
+                    findings.push(unreadable("`waivers` must be a list".into()));
+                    Vec::new()
+                }
+            },
+            Ok(_) => {
+                findings.push(unreadable("a decisions file is an object {\"waivers\": [...]}".into()));
+                Vec::new()
+            }
+            Err(e) => {
+                findings.push(unreadable(e));
+                Vec::new()
+            }
+        }
+    };
+    if entries.len() > MAX_WAIVERS {
+        findings.push(json!({
+            "code": "tooManyWaivers", "severity": "warn", "tier": FLOOR, "count": entries.len(), "max": MAX_WAIVERS,
+            "message": format!("{} waivers; more than {MAX_WAIVERS} means the Reflex checks are being waived instead of fixed", entries.len()),
+        }));
+    }
+    let text = |w: &Value, k: &str| w.get(k).and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+    let mut accepted: Vec<Waiver> = Vec::new();
+    for (index, w) in entries.iter().take(MAX_WAIVER_ENTRIES).enumerate() {
+        if !w.is_object() {
+            findings.push(refused(index, None, "a waiver is an object {check, code?, time?, reason, evidence}".into()));
+            continue;
+        }
+        let Some(check) = text(w, "check") else {
+            findings.push(refused(index, None, "a waiver names its `check`".into()));
+            continue;
+        };
+        if !names.contains(&check) {
+            findings.push(refused(index, Some(&check), format!("this gate has no check `{}`", check.chars().take(64).collect::<String>())));
+            continue;
+        }
+        match tier_of(&check) {
+            REFLEX => {}
+            FLOOR => {
+                findings.push(refused(index, Some(&check), format!("`{check}` is a Floor check: it is fixed, never waived")));
+                continue;
+            }
+            _ => {
+                findings.push(refused(index, Some(&check), format!("`{check}` is a Finish check: it is only reported, there is nothing to waive")));
+                continue;
+            }
+        }
+        let (Some(reason), Some(evidence)) = (text(w, "reason"), text(w, "evidence")) else {
+            findings.push(refused(index, Some(&check), "a waiver needs both a `reason` and `evidence`".into()));
+            continue;
+        };
+        if reason.chars().count() > MAX_WAIVER_TEXT || evidence.chars().count() > MAX_WAIVER_TEXT {
+            findings.push(refused(index, Some(&check), format!("a reason or evidence is at most {MAX_WAIVER_TEXT} characters")));
+            continue;
+        }
+        let code = match w.get("code") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(c)) => Some(c.clone()),
+            Some(_) => {
+                findings.push(refused(index, Some(&check), "`code` is a finding's code".into()));
+                continue;
+            }
+        };
+        let time = match w.get("time") {
+            None | Some(Value::Null) => None,
+            Some(t) => match t.as_i64().filter(|t| *t >= 0) {
+                Some(t) => Some(t),
+                None => {
+                    findings.push(refused(index, Some(&check), "`time` is ticks from the start".into()));
+                    continue;
+                }
+            },
+        };
+        accepted.push(Waiver { index, check, code, time, reason, evidence, used: 0 });
+    }
+    let mut applied = 0usize;
+    for c in checks.iter_mut() {
+        let name = c["check"].as_str().unwrap_or("").to_string();
+        if tier_of(&name) != REFLEX {
+            continue;
+        }
+        let key = if name == "colour" { "highlights" } else { "findings" };
+        let Some(list) = c.get_mut("detail").and_then(|d| d.get_mut(key)).and_then(Value::as_array_mut) else { continue };
+        let mut all = !list.is_empty();
+        for f in list.iter_mut() {
+            let start = f["time"].as_i64().or_else(|| f["start"].as_i64());
+            let end = f["end"].as_i64().or(start);
+            let at = |t: i64| matches!((start, end), (Some(a), Some(b)) if a.saturating_sub(frame) <= t && t <= b.saturating_add(frame));
+            let w =
+                accepted.iter_mut().find(|w| w.check == name && w.code.as_deref().is_none_or(|code| f["code"].as_str() == Some(code)) && w.time.is_none_or(at));
+            match (w, f.as_object_mut()) {
+                (Some(w), Some(o)) => {
+                    w.used += 1;
+                    applied += 1;
+                    o.insert("waived".into(), json!({"waiver": w.index, "reason": w.reason, "evidence": w.evidence}));
+                }
+                _ => all = false,
+            }
+        }
+        if all
+            && c["state"] == "warning"
+            && let Some(o) = c.as_object_mut()
+        {
+            o.insert("state".into(), json!("waived"));
+        }
+    }
+    let unmatched: Vec<Value> =
+        accepted.iter().filter(|w| w.used == 0).map(|w| json!({"waiver": w.index, "check": w.check, "code": w.code, "time": w.time})).collect();
+    let state = if findings.is_empty() {
+        "pass"
+    } else if floor_blocks {
+        "fail"
+    } else {
+        "warning"
+    };
+    (
+        state,
+        json!({
+            "path": path, "waivers": entries.len(), "accepted": accepted.len(), "applied": applied, "unmatched": unmatched,
+            "max": MAX_WAIVERS, "findings": findings, "floorBlocks": floor_blocks,
+        }),
+    )
+}
+
+/// What a check holds, by tier: each of its findings (or the check itself when it lists none),
+/// and whether it is waived. A check that passed or was skipped holds nothing.
+fn items(c: &Value) -> Vec<(&'static str, bool)> {
+    if matches!(c["state"].as_str(), Some("pass" | "skipped")) {
+        return Vec::new();
+    }
+    let name = c["check"].as_str().unwrap_or("");
+    let tier = tier_of(name);
+    let d = &c["detail"];
+    let list = |k: &str| d.get(k).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+    let named = |f: &Value| match f["tier"].as_str() {
+        Some("floor") => FLOOR,
+        Some("reflex") => REFLEX,
+        Some("finish") => FINISH,
+        _ => tier,
+    };
+    let mut v: Vec<(&'static str, bool)> = match name {
+        "audioContinuity" => {
+            list("clicks").iter().chain(list("errors")).map(|_| (FLOOR, false)).chain(list("loudnessJumps").iter().map(|_| (FINISH, false))).collect()
+        }
+        "colour" => list("highlights").iter().map(|f| (tier, f.get("waived").is_some())).collect(),
+        _ => list("findings").iter().map(|f| (named(f), f.get("waived").is_some())).collect(),
+    };
+    if v.is_empty() {
+        v.push((tier, false));
+    }
+    v
+}
+
+/// The open items of `checks` by tier, and the waived ones.
+fn summary(checks: &[Value]) -> Value {
+    let (mut floor, mut reflex, mut finish, mut waived) = (0usize, 0usize, 0usize, 0usize);
+    for (tier, w) in checks.iter().flat_map(items) {
+        match (tier, w) {
+            (_, true) => waived += 1,
+            (FLOOR, _) => floor += 1,
+            (REFLEX, _) => reflex += 1,
+            _ => finish += 1,
+        }
+    }
+    json!({"floor": floor, "reflex": reflex, "finish": finish, "waived": waived})
+}
+
 /// What a delivery is made from: the project, the sequence, the export settings and the checks
 /// asked for. A delivery that stopped after its export is finished by a second run only while
 /// this is unchanged, so its subtitles and manifest belong to the master that is already there.
@@ -689,5 +1081,201 @@ mod tests {
         let r = s.execute(CMD, json!({"narration":false,"mix":false})).unwrap();
         assert_eq!(r["passed"], false);
         assert!(r["checks"].as_array().unwrap().iter().any(|c| c["check"] == "privacyAtCuts" && c["state"] == "fail"));
+    }
+
+    /// A saved 640×360 edit: a white photo for 3 s with a white title over it (1:1 contrast)
+    /// that states a figure; the session and the project's folder.
+    fn titled(name: &str) -> (Session, std::path::PathBuf) {
+        let dir = crate::media_test_util::tmp_dir(name);
+        let image = dir.join("white.png");
+        image::save_buffer(&image, &[255; 640 * 360 * 3], 640, 360, image::ColorType::Rgb8).unwrap();
+        let mut s = Session { prefs_path: Some(dir.join("preferences.json")), ..Session::default() };
+        let item = crate::commands::import_streamed(&mut s, image.to_str().unwrap(), None).unwrap();
+        s.execute("file.newSequence", json!({"width":640,"height":360,"fps":30,"video":2,"audio":1})).unwrap();
+        s.execute("timeline.place", json!({"item":item.0,"track":"V1","time":0,"duration":Tick::from_seconds_f64(3.0).0,"audio":false})).unwrap();
+        s.execute("graphics.newText", json!({"text":"Built in 600 hours","size":40,"seconds":2.0,"time":Tick::from_seconds_f64(0.5).0,"track":"V2"})).unwrap();
+        s.path = Some(dir.join("edit.fcproj").display().to_string());
+        (s, dir)
+    }
+    const QUICK: &str = r#"{"privacy":false,"narration":false,"mix":false,"motionEnergy":false}"#;
+    fn quick(extra: Value) -> Value {
+        let mut p: Value = serde_json::from_str(QUICK).unwrap();
+        for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+            p[k] = v;
+        }
+        p
+    }
+    fn write_decisions(dir: &std::path::Path, waivers: Value) {
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/decisions.json"), serde_json::to_vec(&json!({"waivers":waivers})).unwrap()).unwrap();
+    }
+    fn findings_of<'a>(report: &'a Value, name: &str) -> Vec<&'a Value> {
+        check(report, name)["detail"]["findings"].as_array().map(|a| a.iter().collect()).unwrap_or_default()
+    }
+
+    /// Every check carries its tier, and the summary counts each tier's open findings.
+    #[test]
+    fn every_check_has_a_tier_and_the_summary_counts_them() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let r = s.execute(CMD, json!({"privacy":false,"narration":false,"mix":false})).unwrap();
+        let checks = r["checks"].as_array().unwrap();
+        for c in checks {
+            assert!(matches!(c["tier"].as_str(), Some("floor" | "reflex" | "finish")), "{c}");
+        }
+        for (name, tier) in [
+            ("sources", "floor"),
+            ("audioContinuity", "floor"),
+            ("mix", "floor"),
+            ("privacyAtCuts", "floor"),
+            ("changedNarration", "floor"),
+            ("safeZones", "floor"),
+            ("screenProtection", "floor"),
+            ("textContrast", "floor"),
+            ("figures", "floor"),
+            ("waivers", "floor"),
+            ("motion", "reflex"),
+            ("colour", "reflex"),
+            ("blackFrames", "reflex"),
+            ("craft", "reflex"),
+            ("copy", "reflex"),
+            ("motionEnergy", "finish"),
+            ("subtitleAlignment", "finish"),
+        ] {
+            assert_eq!(check(&r, name)["tier"], tier, "{name}");
+        }
+        // an unsaved project has no ledger and no decisions file
+        assert_eq!(check(&r, "figures")["state"], "skipped");
+        assert_eq!(check(&r, "waivers")["state"], "pass");
+        let summary = &r["summary"];
+        let total: u64 = ["floor", "reflex", "finish", "waived"].iter().map(|k| summary[k].as_u64().unwrap()).sum();
+        let open = checks.iter().filter(|c| !matches!(c["state"].as_str(), Some("pass" | "skipped"))).count() as u64;
+        assert!(total >= open, "every open check is counted at least once: {summary} {r:#}");
+        assert_eq!(r["floorBlocks"], false);
+    }
+
+    /// The new Floor checks (contrast under 3:1, figures not in the ledger) warn by default and
+    /// block with `floorBlocks`; every other check comes out the same either way.
+    #[test]
+    fn new_floor_checks_warn_by_default_and_block_with_floor_blocks() {
+        let (mut s, _) = titled("delivery-floor");
+        let off = s.execute(CMD, quick(json!({"facts":["300 hours"]}))).unwrap();
+        for name in ["textContrast", "figures"] {
+            let c = check(&off, name);
+            assert_eq!((c["state"].as_str(), c["tier"].as_str()), (Some("warning"), Some("floor")), "{name}: {off:#}");
+            assert!(!findings_of(&off, name).is_empty(), "{name}: {off:#}");
+            assert!(findings_of(&off, name).iter().all(|f| f["tier"] == "floor"));
+        }
+        assert_eq!(findings_of(&off, "figures")[0]["figure"], "600");
+        assert!(findings_of(&off, "textContrast")[0]["ratio"].as_f64().unwrap() < FLOOR_CONTRAST);
+        assert_eq!(off["passed"], true, "nothing new blocks by default: {off:#}");
+        assert!(off["blocking"].as_array().unwrap().is_empty());
+        assert!(off["summary"]["floor"].as_u64().unwrap() >= 2, "{}", off["summary"]);
+        let on = s.execute(CMD, quick(json!({"facts":["300 hours"],"floorBlocks":true}))).unwrap();
+        assert_eq!(on["passed"], false);
+        assert_eq!(on["blocking"], json!(["textContrast", "figures"]), "{on:#}");
+        for c in off["checks"].as_array().unwrap().iter().filter(|c| c["check"] != "textContrast" && c["check"] != "figures") {
+            let name = c["check"].as_str().unwrap();
+            assert_eq!(check(&on, name)["state"], c["state"], "{name} changed with floorBlocks");
+        }
+        // the figure in the ledger passes; the leg off is recorded as off
+        let r = s.execute(CMD, quick(json!({"facts":["600 hours"],"floorBlocks":true,"craft":false}))).unwrap();
+        assert_eq!((check(&r, "figures")["state"].as_str(), check(&r, "textContrast")["state"].as_str()), (Some("pass"), Some("skipped")));
+        assert_eq!(r["passed"], true, "{r:#}");
+    }
+
+    /// Blocking that came before the tiers is untouched by them: a face at a cut still fails the
+    /// gate with `floorBlocks` off, and a waiver cannot clear it.
+    #[test]
+    fn existing_blocking_checks_still_block_and_are_never_waived() {
+        let dir = crate::media_test_util::tmp_dir("delivery-existing");
+        let mut s = Session { prefs_path: Some(dir.join("preferences.json")), ..Session::default() };
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        s.path = Some(dir.join("edit.fcproj").display().to_string());
+        s.redacts.detector = Some(std::sync::Arc::new(|_, _, _, _| {
+            vec![filmcraft_vision::Detection {
+                kind: filmcraft_vision::Kind::Face,
+                score: 0.99,
+                bbox: [200.0, 200.0, 160.0, 160.0],
+                points: Vec::new(),
+                pose: false,
+            }]
+        }));
+        write_decisions(&dir, json!([{"check":"privacyAtCuts","reason":"a passer-by, blurred later","evidence":"reviewed at 1:1"}]));
+        let r = s.execute(CMD, json!({"narration":false,"mix":false,"motionEnergy":false})).unwrap();
+        let privacy = check(&r, "privacyAtCuts");
+        assert_eq!((privacy["state"].as_str(), privacy["tier"].as_str()), (Some("fail"), Some("floor")), "{r:#}");
+        assert_eq!(r["passed"], false);
+        assert!(r["blocking"].as_array().unwrap().contains(&json!("privacyAtCuts")));
+        let refused = findings_of(&r, "waivers");
+        assert_eq!(refused.len(), 1, "{r:#}");
+        assert!(refused[0]["message"].as_str().unwrap().contains("Floor check"), "{refused:?}");
+        assert!(r["summary"]["floor"].as_u64().unwrap() >= 1);
+    }
+
+    /// Reflex findings are waived from `build/decisions.json`; a waiver without both a reason and
+    /// evidence, one for a Floor or Finish check, one for no check and more than five are findings.
+    #[test]
+    fn waivers_are_read_applied_and_refused_when_incomplete() {
+        let (mut s, dir) = titled("delivery-waivers");
+        let before = s.execute(CMD, quick(json!({}))).unwrap();
+        assert_eq!(check(&before, "colour")["state"], "warning", "a white photo blows its highlights: {before:#}");
+        write_decisions(
+            &dir,
+            json!([
+                {"check":"colour","reason":"a white backdrop by design","evidence":"frame sheet of 0 to 3 s reviewed"},
+                {"check":"colour","reason":"no evidence"},
+                {"check":"textContrast","reason":"readable enough","evidence":"looked at it"},
+                {"check":"subtitleAlignment","reason":"r","evidence":"e"},
+                {"check":"nothing","reason":"r","evidence":"e"},
+                {"check":"craft","code":"silence","time":-4,"reason":"r","evidence":"e"},
+            ]),
+        );
+        let r = s.execute(CMD, quick(json!({}))).unwrap();
+        let colour = check(&r, "colour");
+        assert_eq!(colour["state"], "waived", "{colour}");
+        assert!(colour["detail"]["highlights"].as_array().unwrap().iter().all(|h| h["waived"]["evidence"] == "frame sheet of 0 to 3 s reviewed"));
+        let codes: Vec<&str> = findings_of(&r, "waivers").iter().map(|f| f["code"].as_str().unwrap()).collect();
+        assert_eq!(codes.iter().filter(|c| **c == "waiverRefused").count(), 5, "{r:#}");
+        assert!(codes.contains(&"tooManyWaivers"), "six waivers is more than five");
+        let waivers = check(&r, "waivers");
+        assert_eq!((waivers["state"].as_str(), waivers["detail"]["accepted"].as_u64()), (Some("warning"), Some(1)), "{waivers}");
+        assert!(r["summary"]["waived"].as_u64().unwrap() >= 1, "{}", r["summary"]);
+        assert_eq!(r["passed"], true, "refused waivers warn this round");
+        let r = s.execute(CMD, quick(json!({"floorBlocks":true,"craft":false,"copy":false}))).unwrap();
+        assert_eq!(r["blocking"], json!(["waivers"]), "{r:#}");
+        // a waiver of one finding by its time leaves the rest open
+        let first = before["checks"].as_array().unwrap().iter().find(|c| c["check"] == "colour").unwrap()["detail"]["highlights"][0]["time"].as_i64().unwrap();
+        write_decisions(&dir, json!([{"check":"colour","time":first,"reason":"the opening frame","evidence":"frame 0 reviewed"}]));
+        let r = s.execute(CMD, quick(json!({}))).unwrap();
+        let highlights = check(&r, "colour")["detail"]["highlights"].as_array().unwrap().clone();
+        assert!(highlights.len() > 1 && highlights[0]["waived"].is_object() && highlights.iter().skip(1).any(|h| h["waived"].is_null()), "{highlights:?}");
+        assert_eq!(check(&r, "colour")["state"], "warning");
+        assert_eq!(check(&r, "waivers")["state"], "pass");
+        // a damaged file, or a named one that is not there
+        std::fs::write(dir.join("build/decisions.json"), b"{not json").unwrap();
+        let r = s.execute(CMD, quick(json!({}))).unwrap();
+        assert_eq!(findings_of(&r, "waivers")[0]["code"], "decisionsUnreadable", "{r:#}");
+        assert_eq!(check(&r, "colour")["state"], "warning");
+        let r = s.execute(CMD, quick(json!({"decisions": dir.join("elsewhere.json")}))).unwrap();
+        assert_eq!(findings_of(&r, "waivers")[0]["code"], "decisionsUnreadable", "{r:#}");
+    }
+
+    #[test]
+    fn hostile_tier_parameters_are_refused() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        for (p, want) in [
+            (json!({"floorBlocks":"yes"}), "floorBlocks"),
+            (json!({"craft":1}), "craft"),
+            (json!({"copy":"no"}), "copy"),
+            (json!({"decisions":5}), "decisions"),
+            (json!({"decisions":"a\u{0}b"}), "decisions"),
+            (json!({"facts":"600"}), "facts"),
+            (json!({"allow":[1]}), "allow"),
+        ] {
+            let e = s.execute(CMD, p.clone()).unwrap_err().to_string();
+            assert!(e.contains(want), "{p}: {e}");
+        }
     }
 }

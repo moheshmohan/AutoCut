@@ -185,7 +185,8 @@ Hold the shared GPU lock while RAEA renders; cache hits still run native preflig
 These checks measure craft, not correctness. Every finding is a warning (`severity: "warn"`)
 for this first round on real projects (decision D7 in
 [the ingestion plan](../plan/video-automation-ingest-2026-11-22.md)): they never fail
-`media.preflightAnimation` or `delivery.preflight`. The thresholds below are starting values, to
+`media.preflightAnimation` or `delivery.preflight` (only with `floorBlocks: true` do the Floor ones
+of `delivery.preflight` block, see [Severity tiers](#severity-tiers)). The thresholds below are starting values, to
 be tuned once real projects have been measured with them.
 
 `qa.motionEnergy` measures a rendered file (`path`) or a sequence (`sequence`), exactly one of
@@ -278,7 +279,8 @@ transition starts or ends, a movie plays (a still, a frame hold or a colour matt
 animated parameter moves, a title's text animates, or an animated caption or a nested sequence
 plays (both taken as always changing). The timeline is sampled every 0.1 s and at every edit
 point. `holds` exempt static stretches only. A clip of silence counts as sound: levels are not
-measured. `sequence.checkCraft` is not yet a leg of `delivery.preflight`.
+measured. `delivery.preflight` runs it as two checks: `textContrast` (contrast under 3:1, Floor)
+and `craft` (the rest), see [Severity tiers](#severity-tiers).
 
 `copy.lint` reads the words of a video: `text` (taken as narration), `publish` (`title`,
 `description`, `caption`, `tags`), `script` (a lines file, a showcase plan or plain text, as
@@ -331,7 +333,8 @@ given the copy, answers it with its safe fixes at once, with or without a file t
 sentence at the start or end of a description or caption made only of greetings and calls to
 action (and joining words like "so" and "and") is cut, never the last one left, and runs of
 exclamation marks become one, in the title too. Nothing is reworded; a sentence with anything
-else in it stays.
+else in it stays. `delivery.preflight` runs it on the active sequence as two checks: `figures`
+(figures not in the ledger, Floor) and `copy` (the rest), see [Severity tiers](#severity-tiers).
 
 ## Standard checked delivery
 
@@ -346,8 +349,9 @@ filmcraft-cli --project edit.fcproj exec delivery.prepare \
 
 The gate checks source availability, privacy at/around cuts and regular intervals, audio boundary
 continuity, mix clipping, changed narration, subtitle alignment, screen-mask persistence, sampled
-motion/highlights, motion energy ([Craft QA](#craft-qa-motion-and-text), warnings only) and safe
-zones for Shorts. `tts.checkClip` hears the **retained source audio**,
+motion/highlights, motion energy ([Craft QA](#craft-qa-motion-and-text), warnings only), the
+craft and copy checks, waivers and safe zones for Shorts, each in a
+[severity tier](#severity-tiers). `tts.checkClip` hears the **retained source audio**,
 without generating a replacement; its cache is keyed by actual samples, script and judge. Missing
 models or unclear required readings block delivery. It uses the existing local hearers, second
 opinion and speaker gate, and never downloads a model implicitly. A clip is judged by its take's
@@ -387,6 +391,76 @@ Movie/frame/caption/report exports reject destinations matching the open project
 including existing native hard-link and symbolic-link aliases. It prepares local files only: Photos/YouTube
 uploads continue through their authorized adapters, private by default, with the project's label
 policy unchanged.
+
+### Severity tiers
+
+Every check of `delivery.preflight` has a `tier`:
+
+- **Floor** blocks delivery. The checks that blocked before the tiers keep blocking exactly as
+  they did; the new Floor checks warn for this first round on real projects (decision D7) and
+  block only with `floorBlocks: true`.
+- **Reflex** is fixed, or waived with a reason and evidence in `build/decisions.json`.
+  It never blocks: an open Reflex finding is a warning.
+- **Finish** is reported only.
+
+| Check | Tier | Blocks |
+|---|---|---|
+| `sources` | Floor | yes, as before (offline media) |
+| `audioContinuity` | Floor for clicks, Finish for loudness jumps | a click, as before; a loudness jump never |
+| `mix` | Floor | yes, as before (true peak over 0.05 dBTP, or not measured) |
+| `privacyAtCuts` | Floor | yes, as before |
+| `changedNarration` | Floor | yes, as before |
+| `safeZones` (Shorts) | Floor | yes, as before |
+| `screenProtection` | Floor | yes, as before |
+| `textContrast` (new) | Floor | with `floorBlocks`: text under 3:1 against the picture behind it, from `sequence.checkCraft` |
+| `figures` (new) | Floor | with `floorBlocks`: figures in titles and captions not in the fact ledger, from `copy.lint`; skipped without a ledger |
+| `waivers` (new) | Floor | with `floorBlocks`: a refused waiver, an unreadable decisions file, or more than five waivers |
+| `motion` | Reflex | never |
+| `colour` | Reflex | never |
+| `blackFrames` | Reflex | never |
+| `craft` (new) | Reflex (`readingTime`, `smallText`, `lowContrast` from 3:1 up to the WCAG ratio, `emptyFirstFrame`); Finish (`staticTimeline`, `silence`) | never |
+| `copy` (new) | Reflex (`stockPhrase`, `describesShot`, `overBudget` at its fail level); Finish (`filler`, `overBudget` over the budget) | never |
+| `motionEnergy` | Finish | never |
+| `subtitleAlignment` | Finish | never |
+
+`craft` and `copy` are new legs: `sequence.checkCraft` runs on the active sequence with the
+declared holds and the still-picture spans the `motion` check holds (merged, at most 2,000), and
+`copy.lint` reads its titles and caption cues with the ledger (`facts`, else `build/facts.json`
+beside the project) and the person's phrases (`allow` and the taste profiles). Their findings
+carry their own `tier`. `craft: false` and `copy: false` skip them (and `textContrast` or
+`figures` with them), recorded as skipped. A new Floor check that could not be measured (the
+craft check failed, the ledger file could not be read) is a warning too, a failure with
+`floorBlocks`.
+
+The decisions file is `build/decisions.json` beside the saved project, or the file `decisions`
+names:
+
+```json
+{"waivers": [
+  {"check": "colour", "reason": "a white backdrop on purpose", "evidence": "frame sheet 0:00 to 0:03 reviewed"},
+  {"check": "craft", "code": "readingTime", "time": 508032000000, "reason": "the line is also spoken", "evidence": "narration clip 41"}
+]}
+```
+
+A waiver names a Reflex `check`, optionally a finding's `code` and a `time` (ticks; it matches a
+finding whose time, or span, holds it within a frame), and needs both a `reason` and `evidence`
+(at most 2,000 characters each). A finding it matches gets `waived: {waiver, reason, evidence}`,
+and a check whose findings are all waived is `waived`. A waiver without a reason or evidence, one
+for a Floor or Finish check (a Floor check is fixed, never waived; a Finish one has nothing to
+waive), one naming no check of the gate, or with a bad `code` or `time`, is refused and is a
+`waiverRefused` finding of the `waivers` check. More than five waivers is a `tooManyWaivers`
+finding: the Reflex checks are being waived instead of fixed. A file that cannot be read (or a
+named one that is not there) is `decisionsUnreadable`; with no file and an unnamed path nothing is
+waived and the check passes. `detail.unmatched` lists accepted waivers that matched nothing.
+
+`floorBlocks` (default `false`) is a parameter of `delivery.preflight`, passed in `qa` to
+`delivery.prepare`, as the gate's other settings are. When it is true the new Floor checks block
+too: `textContrast`, `figures` and `waivers` fail instead of warning. Loudness jumps and caption
+differences stay warnings either way.
+
+The report has `summary: {floor, reflex, finish, waived}`: the open findings of each tier (a check
+that lists no findings counts as one), and the waived ones, plus `blocking` (the checks that
+failed) and `floorBlocks`.
 
 Prepare a portrait sequence or use the existing reframe workflow before Short delivery;
 the output-size setting does not re-edit a landscape story. Enable the intended caption

@@ -385,3 +385,15 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   with its safe fixes (stock greetings and calls to action trimmed from the start and end of a
   description, repeated exclamation marks collapsed). Details in
   `docs/local-pipeline-upgrades.md` ("Craft QA"). 935 commands.
+- **PX1.4**: severity tiers in `delivery.preflight`. Every check has a `tier`: **Floor** blocks
+  (sources, clicks at audio boundaries, mix, privacy at cuts, changed narration, safe zones,
+  screen protection, all blocking exactly as before; and the new `textContrast` under 3:1 from
+  `sequence.checkCraft`, `figures` not in the fact ledger from `copy.lint` and `waivers`, which
+  warn this round (D7) and block with `floorBlocks: true`), **Reflex** is fixed or waived with a
+  reason and evidence in `build/decisions.json` (`{waivers: [{check, code?, time?, reason,
+  evidence}]}`; motion, colour, black frames and the new `craft` and `copy` checks; a waiver
+  without both, or for a Floor or Finish check, is refused with a finding, and more than five is a
+  finding), **Finish** is reported only (motion energy, caption differences, loudness jumps,
+  fillers). The report's `summary {floor, reflex, finish, waived}` counts the open findings of
+  each tier, beside `blocking` and `floorBlocks`. Details in `docs/local-pipeline-upgrades.md`
+  ("Severity tiers"). 935 commands.
