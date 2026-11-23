@@ -35,6 +35,7 @@ mod audio;
 mod catalog;
 mod creator_demo;
 mod direct;
+mod eval;
 mod instagram;
 mod locations;
 mod ml_script;
@@ -598,6 +599,19 @@ SUBCOMMANDS
                                 and its engine commands and builds nothing; with --export the
                                 video, <out>.sheet.jpg, <out>.report.json and QA. Privacy is off
                                 unless --redact asks for it
+  eval [--briefs eval/briefs] [--out target/eval] [--modes guided,plain] [--only NAME]
+       [--no-export] [--no-judge] [--judge-model NAME]
+                                the taste-memory eval (PX10): the fixed briefs of eval/briefs
+                                (a pipeline, its options, a length, demo scenes made in code as
+                                footage) built headless with the guidance (deals against a fresh
+                                taste history, fingerprints recorded) and without it, each scored
+                                by sequence.checkMotion, delivery.preflight, the variety of the
+                                fingerprints across the briefs and, when Ollama on this machine
+                                has the vision model, a judge of each export's frame sheet
+                                (skipped otherwise; never a cloud call); writes
+                                target/eval/<when>/report.json and summary.md, compared with the
+                                previous run. Minutes, not part of `cargo xtask ci`: run it when a
+                                pipeline's choices change
   trailer (--project p.fcproj | --bridge addr) [--sequence id] [--plan plan.json]
           [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5]
           [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at S]]
@@ -2836,6 +2850,7 @@ async fn cli() {
         // automatically (autocut.quick)
         "quick" => quick::run(&a).await,
         "direct" => direct::run(&a).await,
+        "eval" => eval::run(&a).await,
         "shorts" => {
             // long video → vertical shorts (autocut.shorts); every usage error before anything runs
             let src = a.pos(1).unwrap_or_else(|| usage("shorts <project.fcproj | media file> [--count N] [--aspect 9:16] [--export dir] [--upload-youtube]"));

@@ -178,6 +178,8 @@ const VALUED_IN: &[(&str, &[&str])] = &[
     ("captions", &["--track", "--words", "--active-color", "--keyword-color", "--keywords", "--emoji", "--position", "--font", "--from"]),
     ("scenes", &["--detail", "--limit", "--purpose", "--count", "--sheet"]),
     ("quick", &["--template", "--full-detail"]),
+    // the taste-memory eval: where its briefs are, which runs, which brief, which judge
+    ("eval", &["--briefs", "--modes", "--only", "--judge-model"]),
     // voice style set: the recording and a style finder pick
     ("voice", &["--file", "--item", "--candidate"]),
     (

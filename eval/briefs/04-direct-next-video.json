@@ -1,0 +1,7 @@
+{
+  "name": "direct-next-video",
+  "pipeline": "direct",
+  "seconds": 10,
+  "options": {"brief": "a 10 s reel of the next outing", "aspect": "9:16", "captions": false, "redact": false},
+  "footage": {"scenes": ["cityNight", "plasma", "forest", "aurora"], "seconds": 5, "width": 192, "height": 108}
+}

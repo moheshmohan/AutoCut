@@ -1,0 +1,7 @@
+{
+  "name": "direct-wide-recap",
+  "pipeline": "direct",
+  "seconds": 10,
+  "options": {"brief": "a 10 s recap", "aspect": "16:9", "captions": false, "redact": false},
+  "footage": {"scenes": ["oceanSunset", "aurora", "dunes"], "seconds": 5, "width": 192, "height": 108}
+}

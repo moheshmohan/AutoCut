@@ -1,0 +1,7 @@
+{
+  "name": "quick-weekend",
+  "pipeline": "quick",
+  "seconds": 10,
+  "options": {"topic": "a weekend", "aspect": "9:16", "redact": false},
+  "footage": {"scenes": ["aurora", "plasma", "forest", "dunes"], "seconds": 5, "width": 192, "height": 108}
+}

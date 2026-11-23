@@ -669,3 +669,15 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   retired: Direct's look, mood, title entrance, ending and caption style, Quick Short's caption
   style, the template's look and the template's sounds of a retired kind (taken out before the
   mix), the showcase's mood and register.
+- **PX10.4**: the eval harness, `filmcraft-cli eval [--briefs eval/briefs] [--out target/eval]
+  [--modes guided,plain] [--only NAME] [--no-export] [--no-judge] [--judge-model NAME]` (a CLI
+  subcommand: it needs the engine and AutoCut, which xtask must not link). The fixed briefs in
+  `eval/briefs/*.json` (a pipeline, its options, a length, the procedural demo scenes made in
+  code as footage) run headless with the guidance (a fresh taste history per run) and without
+  it, each export scored by `sequence.checkMotion`, `delivery.preflight` (by tier, and whether
+  it blocks), the fingerprints' variety across the briefs (axis spread, axes shared with the
+  brief before, pairs sharing four or more) and, when Ollama on this machine has the vision
+  model, a judge of the frame sheet (skipped and said so otherwise; never a cloud call).
+  `target/eval/<when>/report.json` and `summary.md` compare the two runs and the previous
+  report. Minutes, not part of `cargo xtask ci`: run it when a pipeline's choices change
+  (docs/testing.md).

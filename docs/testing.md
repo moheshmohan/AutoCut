@@ -95,6 +95,28 @@ The Instagram stage (`--instagram`) never signs in and publishes nothing unless
 `--instagram-publish` is given too; its offline tests (`cargo test -p filmcraft-instagram`) run
 against a mock Instagram on `127.0.0.1`.
 
+### Taste memory eval (`filmcraft-cli eval`)
+
+`filmcraft-cli eval [--briefs eval/briefs] [--out target/eval] [--modes guided,plain] [--only NAME]
+[--no-export] [--no-judge] [--judge-model NAME]` runs the fixed briefs in [`eval/briefs/`](../eval/briefs) — each a
+pipeline (`direct` or `quick`), its options, a length and the procedural demo scenes to make as
+its footage (code-drawn, small; never the user's media, nothing committed) — headless, twice:
+with the taste-memory guidance (`guidance: true`: a fresh taste history for the run, open choices
+dealt by `autocut.deal`, every video's fingerprint recorded) and without it (each pipeline's own
+defaults). Each video is scored by `sequence.checkMotion` (PX1), `delivery.preflight` (its checks
+by tier, and whether it would block) and `autocut.fingerprint` (how many of the six axes repeat
+between consecutive briefs, how many pairs share four or more, how many values each axis takes),
+and — when Ollama on this machine has the vision model (`--judge-model`, else `AUTOCUT_VLM_MODEL`'s) — a judge's 1–5
+score of each export's frame sheet; without one the judge is skipped and the report says why
+(never a cloud call). `target/eval/<when>/report.json` and `summary.md` compare the two runs and
+the previous report, beside the exports, sheets and each run's data directory.
+
+It builds and exports every brief twice (a few minutes), so it is not part of `cargo xtask ci`.
+Run it when a pipeline's choices change — Direct, Quick Short, the showcase, or the taste, deal and
+fingerprint code — and compare with the previous run. It is a CLI subcommand rather than an xtask
+because it needs the engine and AutoCut, which the CLI already links and xtask must not (xtask
+builds before every gate).
+
 ## 2. ffmpeg oracle tests
 
 ffmpeg and ffprobe are **external processes** used to generate fixtures and to check results. They

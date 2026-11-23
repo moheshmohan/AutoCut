@@ -1,0 +1,7 @@
+{
+  "name": "direct-day-out",
+  "pipeline": "direct",
+  "seconds": 10,
+  "options": {"brief": "a 10 s reel of a day out", "aspect": "9:16", "captions": false, "redact": false},
+  "footage": {"scenes": ["forest", "dunes", "oceanSunset", "cityNight"], "seconds": 5, "width": 192, "height": 108}
+}
