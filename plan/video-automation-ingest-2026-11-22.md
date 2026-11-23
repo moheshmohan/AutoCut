@@ -312,6 +312,7 @@ our own words (essence, colour, type, motion, camera, sound, pitfalls).
 | D5 | ComfyUI later, in phase C | Installed when PX9 comes up; models chosen against the allow-list then. |
 | D6 | The user's phrases win | `copy.lint` and the taste checks allow phrases from the user's own scripts and corrections even when a word list flags them. |
 | D7 | Warn first, then block | New checks warn for one round of real projects; after that, Floor-tier failures block delivery. |
+| D3a | EffectCraft's fonts: accept the duplicate; the app is built with the feature on | At the pinned revision EffectCraft's text crate compiles in seven fonts with no switch; they are byte-identical to fonts AutoCut already ships and credits, so no font file enters the repository and the binary carries a second copy (about 2.7 MB). `CRAFT_FONTS` is still fed in. The `effectcraft` feature stays off by default in the workspace, with its own gate step, and the packaged app turns it on. Study: [effectcraft-in-process-2026-11-23.md](effectcraft-in-process-2026-11-23.md). |
 
 Next: phase A (PX1, PX12, PX3, PX5). The port move and EffectCraft in-process are separate tasks.
 
