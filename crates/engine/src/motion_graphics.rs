@@ -9,6 +9,9 @@
 //! | `motion.stills` | stills at the frames `at` and RAEA's render manifest: the stills' paths and the text boxes of each frame |
 //! | `motion.render` | a job under the machine's GPU lock: the check, the render into a new revision folder, AutoCut's own probe (the size and rate asked for, no gaps in a PNG sequence), the animation preflight (`media.preflightAnimation`, with `qa.motionEnergy` as warnings), `autocut-import.json`, then the import (`file.import`, or `file.importImageSequence` with `fps` for a transparent sequence) and, with `place`, the clip on the timeline |
 //!
+//! `composition.import` ([`crate::composition_import`]) runs as one of these jobs too: RAEA's
+//! layers laid out as the edit they are.
+//!
 //! **Where RAEA is.** A `kind: "composition"` entry with the id `raea` in `providers.json`
 //! ([`crate::generate_run`]) names its program; without one (or with an empty `command`) the
 //! newest `~/.raea/versions/<version>/bin/raea` (HOME read when the command runs), else `raea`
@@ -196,7 +199,7 @@ fn composition_entry() -> std::result::Result<Option<Provider>, String> {
     Ok(run::load()?.into_iter().find(|p| p.kind == Kind::Composition && p.id == RAEA_ID))
 }
 
-fn tool_for(cmd: &str) -> Result<Tool> {
+pub(crate) fn tool_for(cmd: &str) -> Result<Tool> {
     let entry = composition_entry().map_err(|e| bad(cmd, e))?;
     locate(entry.as_ref()).map_err(|e| bad(cmd, e))
 }
@@ -204,7 +207,7 @@ fn tool_for(cmd: &str) -> Result<Tool> {
 // ---------------------------------------------------------------------------------------------
 // Parameters
 
-fn path_p(cmd: &str, p: &Value, key: &str) -> Result<Option<PathBuf>> {
+pub(crate) fn path_p(cmd: &str, p: &Value, key: &str) -> Result<Option<PathBuf>> {
     match p.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(t)) => {
@@ -218,7 +221,7 @@ fn path_p(cmd: &str, p: &Value, key: &str) -> Result<Option<PathBuf>> {
 }
 
 /// The composition file and whether it is an HTML page.
-fn source_p(cmd: &str, p: &Value) -> Result<(PathBuf, bool)> {
+pub(crate) fn source_p(cmd: &str, p: &Value) -> Result<(PathBuf, bool)> {
     let source = path_p(cmd, p, "source")?.ok_or_else(|| bad(cmd, "`source` is needed: the composition's .tsx or .html file"))?;
     let ext = source.extension().and_then(OsStr::to_str).map(str::to_ascii_lowercase).unwrap_or_default();
     if ext != "tsx" && ext != "html" {
@@ -232,7 +235,7 @@ fn source_p(cmd: &str, p: &Value) -> Result<(PathBuf, bool)> {
 
 /// A composition id: letters, digits, `-`, `_` and `.`, starting with a letter or digit (so it
 /// can never read as one of RAEA's options).
-fn composition_p(cmd: &str, p: &Value) -> Result<Option<String>> {
+pub(crate) fn composition_p(cmd: &str, p: &Value) -> Result<Option<String>> {
     match p.get("composition") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(id))
@@ -261,7 +264,7 @@ fn size_p(cmd: &str, p: &Value, key: &str) -> Result<Option<(u32, u32)>> {
     Ok(Some((side(w).ok_or_else(err)?, side(h).ok_or_else(err)?)))
 }
 
-fn strict_bool(cmd: &str, p: &Value, key: &str, default: bool) -> Result<bool> {
+pub(crate) fn strict_bool(cmd: &str, p: &Value, key: &str, default: bool) -> Result<bool> {
     match p.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(Value::Bool(b)) => Ok(*b),
@@ -274,7 +277,7 @@ fn fps_value(cmd: &str, v: &Value, key: &str) -> Result<f64> {
 }
 
 /// Read a JSON file of at most `max` bytes.
-fn read_json(path: &Path, max: u64) -> std::result::Result<Value, String> {
+pub(crate) fn read_json(path: &Path, max: u64) -> std::result::Result<Value, String> {
     use std::io::Read as _;
     let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut text = String::new();
@@ -344,12 +347,12 @@ fn qa_spec(cmd: &str, p: &Value) -> Result<(Value, Option<PathBuf>)> {
 
 /// Where a finished render goes on the timeline.
 #[derive(Clone, Debug)]
-struct PlaceAt {
-    track: Option<String>,
-    at: Tick,
+pub(crate) struct PlaceAt {
+    pub(crate) track: Option<String>,
+    pub(crate) at: Tick,
 }
 
-fn place_p(s: &Session, cmd: &str, p: &Value) -> Result<Option<PlaceAt>> {
+pub(crate) fn place_p(s: &Session, cmd: &str, p: &Value) -> Result<Option<PlaceAt>> {
     let v = match p.get("place") {
         None | Some(Value::Null) | Some(Value::Bool(false)) => return Ok(None),
         Some(Value::Bool(true)) => json!({}),
@@ -375,7 +378,7 @@ fn place_p(s: &Session, cmd: &str, p: &Value) -> Result<Option<PlaceAt>> {
 
 /// A new revision folder: made (with its parents) when it is not there, else it must be an
 /// empty folder. Whether this call made it.
-fn revision_dir(cmd: &str, output: &Path) -> Result<bool> {
+pub(crate) fn revision_dir(cmd: &str, output: &Path) -> Result<bool> {
     match std::fs::symlink_metadata(output) {
         Ok(m) if m.is_dir() => {
             let mut entries = std::fs::read_dir(output).map_err(|e| bad(cmd, format!("{}: {e}", output.display())))?;
@@ -398,14 +401,14 @@ fn revision_dir(cmd: &str, output: &Path) -> Result<bool> {
 
 /// Frees a revision that kept nothing: its staging folder, and the folder itself when this call
 /// made it and it is empty again.
-fn free_revision(output: &Path, staging: &str, created: bool) {
+pub(crate) fn free_revision(output: &Path, staging: &str, created: bool) {
     let _ = std::fs::remove_dir_all(output.join(staging));
     if created {
         let _ = std::fs::remove_dir(output);
     }
 }
 
-fn refuse_while_rendering(s: &Session, cmd: &str) -> Result<()> {
+pub(crate) fn refuse_while_rendering(s: &Session, cmd: &str) -> Result<()> {
     match s.motion_renders.pending.first() {
         Some(q) => Err(bad(cmd, format!("a motion graphics render is running (job {}); wait for it or stop it (jobs.cancel)", q.job))),
         None => Ok(()),
@@ -417,7 +420,7 @@ fn refuse_while_rendering(s: &Session, cmd: &str) -> Result<()> {
 
 /// The end of a log, without terminal colour codes: for an error message.
 #[cfg(not(target_arch = "wasm32"))]
-fn tail(log: &Path) -> String {
+pub(crate) fn tail(log: &Path) -> String {
     let mut out = String::new();
     let mut escape = false;
     for c in run::log_tail(log).chars() {
@@ -435,7 +438,15 @@ fn tail(log: &Path) -> String {
 /// Runs RAEA with `args` in `cwd`, its output appended to `log`, until it exits (whether it
 /// succeeded), is stopped through `cancel`, or runs past `limit` seconds (then it is killed).
 #[cfg(not(target_arch = "wasm32"))]
-fn raea(tool: &Tool, args: &[String], cwd: &Path, log: &Path, cancel: &AtomicBool, limit: f64, tick: &mut dyn FnMut(f64)) -> std::result::Result<bool, String> {
+pub(crate) fn raea(
+    tool: &Tool,
+    args: &[String],
+    cwd: &Path,
+    log: &Path,
+    cancel: &AtomicBool,
+    limit: f64,
+    tick: &mut dyn FnMut(f64),
+) -> std::result::Result<bool, String> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log).map_err(|e| format!("{}: {e}", log.display()))?;
@@ -481,7 +492,7 @@ fn raea(tool: &Tool, args: &[String], cwd: &Path, log: &Path, cancel: &AtomicBoo
 /// The machine's GPU lock (a test binary's own), waiting up to `wait`; unlocked when there is no
 /// place for locks.
 #[cfg(not(target_arch = "wasm32"))]
-fn gpu(what: &str, wait: std::time::Duration) -> std::result::Result<Option<filmcraft_locks::Guard>, String> {
+pub(crate) fn gpu(what: &str, wait: std::time::Duration) -> std::result::Result<Option<filmcraft_locks::Guard>, String> {
     match filmcraft_locks::acquire(filmcraft_locks::Resource::Gpu, what, wait, &mut |_| {}) {
         Ok(g) => Ok(Some(g)),
         Err(e @ filmcraft_locks::LockError::Busy(..)) => Err(format!("{e}; try again when it is free (`filmcraft-cli locks`)")),
@@ -494,7 +505,7 @@ fn nonce() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-fn str_of(path: &Path) -> String {
+pub(crate) fn str_of(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
@@ -737,15 +748,39 @@ pub struct MotionRenders {
     outcomes: BTreeMap<u64, Value>,
 }
 
-type Outcome = Arc<Mutex<Option<std::result::Result<Value, Value>>>>;
+pub(crate) type Outcome = Arc<Mutex<Option<std::result::Result<Value, Value>>>>;
 
-struct Pending {
+/// A job whose result lands in the project when it finishes.
+pub(crate) struct Pending {
     job: u64,
     out: Outcome,
-    import: bool,
     place: Option<PlaceAt>,
-    alpha: bool,
     note: String,
+    landing: Landing,
+}
+
+/// What a finished job brings in.
+enum Landing {
+    /// `motion.render`: the render, unless `import` is off (a transparent one goes above V1).
+    Render { import: bool, alpha: bool },
+    /// `composition.import`: the layers the job checked, laid out.
+    Layers(Arc<Mutex<Option<crate::composition_import::Plan>>>),
+}
+
+impl Pending {
+    pub(crate) fn layers(job: u64, out: Outcome, place: Option<PlaceAt>, plan: Arc<Mutex<Option<crate::composition_import::Plan>>>, note: String) -> Pending {
+        Pending { job, out, place, note, landing: Landing::Layers(plan) }
+    }
+}
+
+impl MotionRenders {
+    pub(crate) fn push(&mut self, p: Pending) {
+        self.pending.push(p);
+    }
+
+    pub(crate) fn forget(&mut self, job: u64) {
+        self.pending.retain(|q| q.job != job);
+    }
 }
 
 /// What one render job does (everything checked before it starts).
@@ -856,7 +891,13 @@ fn render(s: &mut Session, p: &Value) -> Result<Value> {
     let out: Outcome = Default::default();
     let job_id = job.id;
     let planned = work.output.join(work.asset_name());
-    s.motion_renders.pending.push(Pending { job: job_id, out: out.clone(), import, place, alpha, note: format!("Rendered by RAEA from {what}") });
+    s.motion_renders.pending.push(Pending {
+        job: job_id,
+        out: out.clone(),
+        place,
+        note: format!("Rendered by RAEA from {what}"),
+        landing: Landing::Render { import, alpha },
+    });
     let (output, staging_created) = (work.output.clone(), work.created);
     let spawned = crate::narration::spawn(s, job, wait, "filmcraft-motion", move || {
         let t0 = web_time::Instant::now();
@@ -1202,13 +1243,15 @@ pub fn poll(s: &mut Session) {
         let q = s.motion_renders.pending.remove(i);
         let r = q.out.lock().unwrap_or_else(PoisonError::into_inner).take();
         let outcome = match r {
-            Some(Ok(v)) if q.import => match land(s, &q, &v) {
+            Some(Ok(v)) if !matches!(q.landing, Landing::Render { import: false, .. }) => match land(s, &q, &v) {
                 Ok(landed) => landed,
                 Err(e) => {
                     s.error_toast(RENDER, format!("Motion graphics: {e}"));
                     let mut v = v;
-                    v["error"] =
-                        json!(format!("the render passed its checks but could not be imported: {e}; it is in {}", v["output"].as_str().unwrap_or_default()));
+                    v["error"] = json!(format!(
+                        "it was made and passed its checks but could not be brought into the project: {e}; it is in {}",
+                        v["output"].as_str().unwrap_or_default()
+                    ));
                     v["kept"] = v["output"].clone();
                     v
                 }
@@ -1226,11 +1269,22 @@ pub fn poll(s: &mut Session) {
     }
 }
 
-/// Import a finished render as its manifest says and place it (one undo step).
+/// Bring a finished job's result in (one undo step): a render as its manifest says, placed on
+/// request; a composition's layers laid out.
 fn land(s: &mut Session, q: &Pending, v: &Value) -> Result<Value> {
     let n0 = s.history.undo.len();
-    let result = land_inner(s, q, v);
-    crate::clip_ops::collapse_history(s, n0, "Motion Graphics");
+    let (result, label) = match &q.landing {
+        Landing::Render { alpha, .. } => (land_render(s, q, *alpha, v), "Motion Graphics"),
+        Landing::Layers(plan) => {
+            let plan = plan.lock().unwrap_or_else(PoisonError::into_inner).take();
+            let r = match plan {
+                Some(plan) => crate::composition_import::land(s, &plan, q.place.as_ref(), &q.note, v),
+                None => Err(EngineError::Other("the job left no layers to lay out".into())),
+            };
+            (r, "Composition")
+        }
+    };
+    crate::clip_ops::collapse_history(s, n0, label);
     if result.is_err() && s.history.undo.len() > n0 {
         let _ = s.undo();
         s.history.redo.clear();
@@ -1238,7 +1292,7 @@ fn land(s: &mut Session, q: &Pending, v: &Value) -> Result<Value> {
     result
 }
 
-fn land_inner(s: &mut Session, q: &Pending, v: &Value) -> Result<Value> {
+fn land_render(s: &mut Session, q: &Pending, alpha: bool, v: &Value) -> Result<Value> {
     let mut out = v.clone();
     let command = v["import"]["command"].as_str().unwrap_or_default();
     if command != "file.import" && command != "file.importImageSequence" {
@@ -1269,7 +1323,7 @@ fn land_inner(s: &mut Session, q: &Pending, v: &Value) -> Result<Value> {
     let dur = s.project.item(ItemId(item)).map(|pi| crate::commands::full_duration(s, pi)).unwrap_or(Tick::from_seconds_f64(1.0)).max(rate.frame_duration());
     let range = TimeRange::new(pl.at, dur);
     // a transparent render goes over the picture (from V2 up), a full scene on the picture track
-    let track = crate::generate::video_track(s, pl.track.as_deref(), usize::from(q.alpha), range);
+    let track = crate::generate::video_track(s, pl.track.as_deref(), usize::from(alpha), range);
     let (_, has_audio) = s.project.source_streams(ItemId(item));
     let mut params = json!({"item": item, "track": track, "time": pl.at.0});
     if has_audio {

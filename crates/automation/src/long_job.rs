@@ -32,6 +32,7 @@ pub const LONG_COMMANDS: &[&str] = &[
     "generate.restyle",
     "generate.assets",
     "motion.render",
+    "composition.import",
     "music.downloadNeuralModel",
     "music.downloadSoundfont",
     "music.preview",

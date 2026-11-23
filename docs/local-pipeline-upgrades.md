@@ -152,7 +152,12 @@ probe, preflight (`spec`, or `expected` and `holds` as parameters), `preflight.j
 `contact-sheet.png` and `autocut-import.json` in the helper's shape, then the import and, with
 `place`, the clip on the timeline, all under the GPU lock it takes itself. It also keeps RAEA's
 `check.json`, its render manifest and its log beside the render. It does not use the render cache
-yet (`--cache` stays with the helper). The helper now supports:
+yet (`--cache` stays with the helper). `composition.import` (PX3.3) brings a composition in as
+the edit it is instead of one flattened render: RAEA's `export layers` writes what it draws as
+movies of their own and names the footage and sounds it uses in `layers.json`; AutoCut imports
+those files as real clips at their times, trims, speeds, gains, opacity and boxes, and each drawn
+layer as one clip on its own track (every visible or audible element has one owner). A footage box
+RAEA crops is shown uncropped (`approximated` in the result). The helper now supports:
 
 ```sh
 python3 examples/raea/render.py scene.tsx '/new/review-folder' \

@@ -421,3 +421,18 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   (`docs/generation.md`). Tested with a stand-in RAEA; run for real with RAEA 0.1.8 on
   `examples/raea/motion.tsx` (the scene with its hold, the 4K master and the split wipe).
   `examples/raea/render.py` still works. 938 commands.
+- **PX3.3**: `composition.import {source, composition?, output, alphaCodec?, place?, wait?}` brings
+  a RAEA composition in as the edit it is, under one rule: every visible or audible element has
+  exactly one owner. A job under the GPU lock runs RAEA 0.1.8's `raea export layers` into a new
+  revision folder: what RAEA draws becomes movies of their own (graphics and captions transparent,
+  ProRes 4444 or PNG; what lies under the footage opaque; a backing layer behind a picture in
+  picture), and `layers.json` names the footage and sounds the composition uses with their times,
+  trims, speeds, gains, opacity and boxes. Every index, number and path in it is checked (a drawn
+  layer must stay inside the folder and open at the composition's size). The footage and sounds
+  come in as real clips (an item already in the project is reused), at their times and trims, at
+  their speed, gain and opacity, footage scaled and placed into its box with its own sound on an
+  audio track; each drawn layer is one clip on a track of its own, lowest layer lowest. Into a new
+  sequence of the composition's size and rate, or with `place` into the open sequence on new
+  tracks (nothing there is moved). One undo step. A footage box RAEA crops is shown uncropped and
+  listed in `approximated`. RAEA's `reference.mp4` stays beside the layers; on the real run a frame
+  of the layered sequence matched it. 939 commands.

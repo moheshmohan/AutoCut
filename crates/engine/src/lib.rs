@@ -26,6 +26,7 @@ pub mod catalog_edit;
 pub mod clip_ops;
 pub mod color;
 pub mod commands;
+pub mod composition_import;
 pub mod contact_sheet;
 pub mod copy_lint;
 pub mod craft_check;
