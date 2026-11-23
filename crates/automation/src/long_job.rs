@@ -33,6 +33,7 @@ pub const LONG_COMMANDS: &[&str] = &[
     "generate.assets",
     "motion.render",
     "composition.import",
+    "effectcraft.renderTemplate",
     "sequence.motionStrips",
     "music.downloadNeuralModel",
     "music.downloadSoundfont",

@@ -57,6 +57,8 @@ filmcraft-speech = { workspace = true }
 filmcraft-tts = { workspace = true }
 filmcraft-templates = { workspace = true }
 filmcraft-effectcraft = { workspace = true }
+# ProRes 4444 with alpha for EffectCraft renders (`effectcraft.renderTemplate`)
+filmcraft-prores = { workspace = true }
 filmcraft-acestep = { workspace = true }
 filmcraft-soundfont = { workspace = true }
 filmcraft-vision = { workspace = true }

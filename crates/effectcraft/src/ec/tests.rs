@@ -374,3 +374,194 @@ fn a_frame_renders_on_the_cpu() {
     let e = p.render(Arc::new(NoFrames), &mut |_, _| Ok(()), &AtomicBool::new(true)).unwrap_err();
     assert_eq!(e, Error::Stopped);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Rendering (PX4.2)
+
+/// Every frame of `t` rendered with `req` (into a folder of the test's own).
+fn render_all(t: &[u8], req: RenderRequest, host: Arc<dyn HostFrames>) -> (Vec<crate::Frame>, crate::RenderStats) {
+    let d = Dir::new("frames");
+    let p = crate::prepare(t, &req, &d.0, host.as_ref()).unwrap();
+    let mut frames = Vec::new();
+    let stats = p
+        .render(
+            host,
+            &mut |_, f| {
+                frames.push(f.clone());
+                Ok(())
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    (frames, stats)
+}
+
+/// The first frame of the default lower third with `values`.
+fn first_frame(values: Value, gpu: bool) -> (crate::Frame, crate::RenderStats) {
+    let req = RenderRequest { values: values.as_object().unwrap().clone(), range: (None, Some(Tick(1))), gpu, ..Default::default() };
+    let (mut f, s) = render_all(&LowerThird::default().build(), req, Arc::new(NoFrames));
+    (f.remove(0), s)
+}
+
+fn px(f: &crate::Frame, x: u32, y: u32) -> [u8; 4] {
+    let i = ((y * f.width + x) * 4) as usize;
+    [f.rgba[i], f.rgba[i + 1], f.rgba[i + 2], f.rgba[i + 3]]
+}
+
+fn near(a: [u8; 4], b: [u8; 4], tol: u8) -> bool {
+    a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= tol)
+}
+
+/// A point inside the bar, right of any name, and the region the name is drawn in.
+const BAR_ONLY: (u32, u32) = (195, 150);
+const NAME: ([u32; 2], [u32; 2]) = ([18, 120], [180, 168]);
+
+fn region_differs(a: &crate::Frame, b: &crate::Frame, (lo, hi): ([u32; 2], [u32; 2])) -> usize {
+    let mut n = 0;
+    for y in lo[1]..hi[1] {
+        for x in lo[0]..hi[0] {
+            n += usize::from(!near(px(a, x, y), px(b, x, y), 2));
+        }
+    }
+    n
+}
+
+#[test]
+fn a_lower_third_renders_its_bar_and_its_name_over_transparency() {
+    let (f, _) = first_frame(json!({}), false);
+    assert_eq!((f.width, f.height), (320, 180));
+    // the bar in its authored colour (sRGB levels as authored: 0.2, 0.4, 0.8), opaque
+    assert!(near(px(&f, BAR_ONLY.0, BAR_ONLY.1), [51, 102, 204, 255], 1), "{:?}", px(&f, BAR_ONLY.0, BAR_ONLY.1));
+    // around it nothing: transparent
+    for (x, y) in [(2, 2), (319, 0), (300, 100), (5, 179)] {
+        assert_eq!(px(&f, x, y)[3], 0, "({x}, {y})");
+    }
+    // the name in white on the bar: its strokes white, their antialiased edges between
+    let (mut white, mut lighter) = (0, 0);
+    for y in NAME.0[1]..NAME.1[1] {
+        for x in NAME.0[0]..NAME.1[0] {
+            let p = px(&f, x, y);
+            white += usize::from(near(p, [255, 255, 255, 255], 8));
+            lighter += usize::from(p[0] > 120 && p[3] == 255);
+        }
+    }
+    assert!(white > 20 && lighter > 200, "{white} white and {lighter} lighter pixels of the name");
+}
+
+#[test]
+fn values_change_the_pixels_where_they_should() {
+    let (base, _) = first_frame(json!({}), false);
+    let (red, _) = first_frame(json!({"Bar Color": "#ff0000"}), false);
+    assert!(near(px(&red, BAR_ONLY.0, BAR_ONLY.1), [255, 0, 0, 255], 1), "{:?}", px(&red, BAR_ONLY.0, BAR_ONLY.1));
+    assert_eq!(px(&red, 2, 2), px(&base, 2, 2));
+    // another name changes the name's pixels and nothing outside the bar
+    let (grace, _) = first_frame(json!({"Name": "Grace Hopper"}), false);
+    assert!(region_differs(&base, &grace, NAME) > 50);
+    assert_eq!(px(&grace, BAR_ONLY.0, BAR_ONLY.1), px(&base, BAR_ONLY.0, BAR_ONLY.1));
+    assert_eq!(region_differs(&base, &grace, ([0, 0], [320, 100])), 0);
+}
+
+#[test]
+fn alpha_is_kept_through_opacity_and_a_fade() {
+    let (half, _) = first_frame(json!({"Bar Opacity": 50}), false);
+    let p = px(&half, BAR_ONLY.0, BAR_ONLY.1);
+    // straight alpha: the colour stays, the alpha halves
+    assert!(near(p, [51, 102, 204, 128], 2), "{p:?}");
+    // the fade: nothing at its start, the whole bar from half a second on
+    let req = RenderRequest { range: (None, Some(Tick::from_seconds_f64(0.6))), ..Default::default() };
+    let (frames, stats) = render_all(&LowerThird { fade_in: true, ..Default::default() }.build(), req, Arc::new(NoFrames));
+    assert_eq!((frames.len(), stats.frames), (18, 18));
+    let a: Vec<u8> = frames.iter().map(|f| px(f, BAR_ONLY.0, BAR_ONLY.1)[3]).collect();
+    assert_eq!(a[0], 0);
+    assert!(a.windows(2).take(15).all(|w| w[1] >= w[0]), "{a:?}");
+    assert_eq!(a[15], 255, "{a:?}");
+}
+
+#[test]
+fn a_frame_equals_effectcraft_s_own_cpu_render() {
+    // EffectCraft's renderer on the project in memory, no package, no values, no conversion of ours
+    let lt = LowerThird::default();
+    let (project, comp) = lt.project();
+    let reference = effectcraft_render::render_frame(&project, comp, effectcraft_time::Tick::ZERO, 1.0).to_rgba8();
+    let (f, _) = first_frame(json!({}), false);
+    let worst = f.rgba.iter().zip(&reference).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(worst <= 1, "the packaged template renders the same as the project it was made of (worst {worst})");
+}
+
+#[test]
+fn the_gpu_matches_the_cpu_within_a_level_or_two() {
+    if effectcraft_gpu::Gpu::headless().is_none() {
+        eprintln!("no GPU here: the GPU parity test is skipped");
+        return;
+    }
+    let (cpu, _) = first_frame(json!({"Name": "Grace Hopper", "Bar Opacity": 75}), false);
+    let (gpu, stats) = first_frame(json!({"Name": "Grace Hopper", "Bar Opacity": 75}), true);
+    assert!(stats.gpu.is_some(), "{stats:?}");
+    let diffs: Vec<u8> = cpu.rgba.iter().zip(&gpu.rgba).map(|(a, b)| a.abs_diff(*b)).collect();
+    let worst = diffs.iter().copied().max().unwrap_or(0);
+    let off = diffs.iter().filter(|d| **d > 2).count();
+    eprintln!("GPU vs CPU: worst {worst}, {off} channels more than 2 apart; {stats:?}");
+    assert_eq!(stats.gpu_frames + stats.cpu_frames, 1);
+    assert!(off * 1000 <= diffs.len(), "GPU vs CPU: {off} of {} channels more than 2 levels apart (worst {worst}; {stats:?})", diffs.len());
+}
+
+#[test]
+fn hostile_renders_end_cleanly() {
+    // an endless expression is stopped by EffectCraft's own bounds: the frame still renders
+    for e in ["while (true) {}", "throw new Error('no')", "(function f() { return f(); })()", "NaN", "1e400"] {
+        let t = LowerThird { opacity_expression: Some(e.into()), ..Default::default() }.build();
+        let req = RenderRequest { range: (None, Some(Tick(1))), ..Default::default() };
+        let r = std::panic::catch_unwind(|| render_all(&t, req, Arc::new(NoFrames)));
+        let (frames, _) = r.unwrap_or_else(|_| panic!("{e}: a panic"));
+        assert_eq!(frames.len(), 1, "{e}");
+    }
+    // a logo that is gone by render time: drawn as nothing, no panic
+    let d = Dir::new("gone");
+    let path = d.0.join("logo.png");
+    std::fs::write(&path, png(16, 8, [255, 0, 0, 255])).unwrap();
+    let logo = Logo { png: Vec::new(), width: 16, height: 8, embedded: false, path: path.to_string_lossy().into_owned() };
+    let t = LowerThird { logo: Some(logo), ..Default::default() }.build();
+    let host: Arc<dyn HostFrames> = Arc::new(PngHost::default());
+    let p = crate::prepare(&t, &RenderRequest { range: (None, Some(Tick(1))), ..Default::default() }, &d.0, host.as_ref()).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let mut n = 0;
+    p.render(
+        host,
+        &mut |_, _| {
+            n += 1;
+            Ok(())
+        },
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(n, 1);
+    // a host whose frames panic, after a probe that worked
+    struct FramesPanic(PngHost);
+    impl HostFrames for FramesPanic {
+        fn probe(&self, path: &str) -> Option<HostMedia> {
+            self.0.probe(path)
+        }
+        fn frame(&self, _: &str, _: Tick) -> Option<Arc<VideoFrame>> {
+            panic!("decoder")
+        }
+    }
+    let logo = Logo { png: png(16, 8, [255, 0, 0, 255]), width: 16, height: 8, embedded: true, path: String::new() };
+    let t = LowerThird { logo: Some(logo), ..Default::default() }.build();
+    let (frames, _) = render_all(&t, RenderRequest { range: (None, Some(Tick(1))), ..Default::default() }, Arc::new(FramesPanic(PngHost::default())));
+    assert_eq!(frames.len(), 1);
+}
+
+#[test]
+fn a_carried_logo_is_drawn_from_the_host_s_frames() {
+    let logo = Logo { png: png(16, 8, [255, 0, 0, 255]), width: 16, height: 8, embedded: true, path: String::new() };
+    let lt = LowerThird { logo: Some(logo.clone()), ..Default::default() };
+    let host = Arc::new(PngHost::default());
+    let req = RenderRequest { range: (None, Some(Tick::from_seconds_f64(0.1))), ..Default::default() };
+    let (frames, _) = render_all(&lt.build(), req, host.clone());
+    let [cx, cy] = crate::testing::logo_centre(lt.size, &logo);
+    for f in &frames {
+        assert!(near(px(f, cx as u32, cy as u32), [255, 0, 0, 255], 1), "{:?}", px(f, cx as u32, cy as u32));
+    }
+    // a still is read once for all three frames
+    assert_eq!((frames.len(), host.reads.lock().unwrap().len()), (3, 1));
+}

@@ -250,7 +250,7 @@ pub(crate) fn composition_p(cmd: &str, p: &Value) -> Result<Option<String>> {
 }
 
 /// `"WxH"`, each side 1 to 16384.
-fn size_p(cmd: &str, p: &Value, key: &str) -> Result<Option<(u32, u32)>> {
+pub(crate) fn size_p(cmd: &str, p: &Value, key: &str) -> Result<Option<(u32, u32)>> {
     let Some(v) = p.get(key).filter(|v| !v.is_null()) else { return Ok(None) };
     let err = || bad(cmd, format!("`{key}` must be \"WxH\", each side 1 to {MAX_SIDE}"));
     let t = v.as_str().ok_or_else(err)?;
@@ -272,7 +272,7 @@ pub(crate) fn strict_bool(cmd: &str, p: &Value, key: &str, default: bool) -> Res
     }
 }
 
-fn fps_value(cmd: &str, v: &Value, key: &str) -> Result<f64> {
+pub(crate) fn fps_value(cmd: &str, v: &Value, key: &str) -> Result<f64> {
     v.as_f64().filter(|f| f.is_finite() && (1.0..=240.0).contains(f)).ok_or_else(|| bad(cmd, format!("`{key}` must be a frame rate from 1 to 240")))
 }
 
@@ -545,11 +545,11 @@ fn render_manifest_in(dir: &Path) -> Option<PathBuf> {
 
 /// Width, height, frame rate and length (frames) a render manifest states.
 #[derive(Clone, Copy, Debug, Default)]
-struct Stated {
-    width: Option<u32>,
-    height: Option<u32>,
-    fps: Option<f64>,
-    length: Option<u64>,
+pub(crate) struct Stated {
+    pub(crate) width: Option<u32>,
+    pub(crate) height: Option<u32>,
+    pub(crate) fps: Option<f64>,
+    pub(crate) length: Option<u64>,
 }
 
 fn stated(v: &Value) -> Stated {
@@ -768,6 +768,12 @@ enum Landing {
 }
 
 impl Pending {
+    /// A render's job: imported when it finishes (unless `import` is off) and placed on request,
+    /// above V1 when it is transparent (`alpha`).
+    pub(crate) fn render(job: u64, out: Outcome, place: Option<PlaceAt>, note: String, import: bool, alpha: bool) -> Pending {
+        Pending { job, out, place, note, landing: Landing::Render { import, alpha } }
+    }
+
     pub(crate) fn layers(job: u64, out: Outcome, place: Option<PlaceAt>, plan: Arc<Mutex<Option<crate::composition_import::Plan>>>, note: String) -> Pending {
         Pending { job, out, place, note, landing: Landing::Layers(plan) }
     }
@@ -891,13 +897,7 @@ fn render(s: &mut Session, p: &Value) -> Result<Value> {
     let out: Outcome = Default::default();
     let job_id = job.id;
     let planned = work.output.join(work.asset_name());
-    s.motion_renders.pending.push(Pending {
-        job: job_id,
-        out: out.clone(),
-        place,
-        note: format!("Rendered by RAEA from {what}"),
-        landing: Landing::Render { import, alpha },
-    });
+    s.motion_renders.pending.push(Pending::render(job_id, out.clone(), place, format!("Rendered by RAEA from {what}"), import, alpha));
     let (output, staging_created) = (work.output.clone(), work.created);
     let spawned = crate::narration::spawn(s, job, wait, "filmcraft-motion", move || {
         let t0 = web_time::Instant::now();
@@ -932,9 +932,14 @@ fn render(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// A failure once the render is on disk: it stays, and the result says where.
 fn kept(w: &Work, error: String, detail: Value) -> Value {
+    kept_at(&w.output, error, detail)
+}
+
+/// [`kept`] for a render in the revision folder `output`.
+pub(crate) fn kept_at(output: &Path, error: String, detail: Value) -> Value {
     let mut v = json!({
-        "error": format!("{error}; the finished render is kept in {} (no {IMPORT_MANIFEST} was written)", w.output.display()),
-        "kept": str_of(&w.output), "output": str_of(&w.output),
+        "error": format!("{error}; the finished render is kept in {} (no {IMPORT_MANIFEST} was written)", output.display()),
+        "kept": str_of(output), "output": str_of(output),
     });
     if let (Some(dst), Some(src)) = (v.as_object_mut(), detail.as_object()) {
         for (k, x) in src {
@@ -1110,13 +1115,35 @@ fn run_render(_: &Work, _: &filmcraft_export::Progress) -> std::result::Result<V
 }
 
 /// What the native probe found.
-struct Probed {
-    json: Value,
+pub(crate) struct Probed {
+    pub(crate) json: Value,
     /// A sequence's first frame.
-    first: Option<PathBuf>,
+    pub(crate) first: Option<PathBuf>,
     /// The render's rate.
-    fps: f64,
+    pub(crate) fps: f64,
 }
+
+/// What a render is probed against.
+pub(crate) struct ProbeSpec<'a> {
+    /// The tool that rendered it, for the messages.
+    pub(crate) tool: &'a str,
+    /// How the messages name what its own record of the render states.
+    pub(crate) stated_as: &'a str,
+    /// Said after a size that is not the one asked for.
+    pub(crate) size_hint: &'a str,
+    /// The asset is a folder of numbered PNG frames (`frame-00000.png`…), else one movie.
+    pub(crate) sequence: bool,
+    /// It must have an alpha channel.
+    pub(crate) alpha: bool,
+    /// The rate asked for (a sequence's import rate; a movie's must match).
+    pub(crate) fps: Option<f64>,
+    /// The size asked for.
+    pub(crate) stage: Option<(u32, u32)>,
+    pub(crate) services: &'a dyn Services,
+    pub(crate) openers: &'a [filmcraft_media::Opener],
+}
+
+const RAEA_SIZE_HINT: &str = ": a composition of a fixed size ignores --w/--h; lay it out from useVideoConfig() (docs/raea-workflow.md)";
 
 /// The lowest-numbered `frame-N.png` of a frames folder.
 fn first_frame(dir: &Path) -> Option<PathBuf> {
@@ -1135,12 +1162,30 @@ fn first_frame(dir: &Path) -> Option<PathBuf> {
 }
 
 fn probe(w: &Work, asset: &Path, stated_by: Stated) -> std::result::Result<Probed, String> {
+    let spec = ProbeSpec {
+        tool: "RAEA",
+        stated_as: "RAEA's render manifest says",
+        size_hint: RAEA_SIZE_HINT,
+        sequence: w.alpha,
+        alpha: w.alpha,
+        fps: w.fps,
+        stage: w.stage,
+        services: w.services.as_ref(),
+        openers: &w.openers,
+    };
+    probe_asset(&spec, asset, stated_by)
+}
+
+/// AutoCut's own probe of a render: it opens, at the size and rate asked for (and as its record
+/// states them), a sequence with every frame, with alpha when asked.
+pub(crate) fn probe_asset(w: &ProbeSpec, asset: &Path, stated_by: Stated) -> std::result::Result<Probed, String> {
+    let tool = w.tool;
     let pool = crate::media_pool::MediaPool::default();
-    *pool.openers.write().unwrap_or_else(PoisonError::into_inner) = w.openers.clone();
-    let services = w.services.as_ref();
+    *pool.openers.write().unwrap_or_else(PoisonError::into_inner) = w.openers.to_vec();
+    let services = w.services;
     let rate_wanted = w.fps.or(stated_by.fps);
-    let (info, first, missing, frames) = if w.alpha {
-        let first = first_frame(asset).ok_or_else(|| format!("RAEA wrote no numbered frames (frame-00000.png) into {}", asset.display()))?;
+    let (info, first, missing, frames) = if w.sequence {
+        let first = first_frame(asset).ok_or_else(|| format!("{tool} wrote no numbered frames (frame-00000.png) into {}", asset.display()))?;
         let first_s = str_of(&first);
         let list = crate::media_pool::image_sequence_frames(&first_s, services).map_err(|e| format!("the sequence cannot be read: {e}"))?;
         let missing: Vec<usize> = list.iter().enumerate().filter(|(_, f)| f.is_none()).map(|(i, _)| i).take(1000).collect();
@@ -1151,7 +1196,7 @@ fn probe(w: &Work, asset: &Path, stated_by: Stated) -> std::result::Result<Probe
         if let Some(length) = stated_by.length
             && length != list.len() as u64
         {
-            return Err(format!("the PNG sequence has {} frames; RAEA's render manifest says {length}", list.len()));
+            return Err(format!("the PNG sequence has {} frames; {} {length}", list.len(), w.stated_as));
         }
         let fps = rate_wanted.ok_or_else(|| "give `fps`: the render manifest names no frame rate for the sequence".to_string())?;
         let src = crate::media_pool::open_image_sequence(&first_s, services, FrameRate::from_f64(fps), "Motion graphics")
@@ -1172,9 +1217,7 @@ fn probe(w: &Work, asset: &Path, stated_by: Stated) -> std::result::Result<Probe
     if let Some((ww, wh)) = wanted
         && (ww, wh) != (width, height)
     {
-        return Err(format!(
-            "RAEA rendered {width}x{height}, not the {ww}x{wh} asked for: a composition of a fixed size ignores --w/--h; lay it out from useVideoConfig() (docs/raea-workflow.md)"
-        ));
+        return Err(format!("{tool} rendered {width}x{height}, not the {ww}x{wh} asked for{}", w.size_hint));
     }
     if let Some(want) = rate_wanted
         && (want - fps).abs() > 0.001
@@ -1184,10 +1227,10 @@ fn probe(w: &Work, asset: &Path, stated_by: Stated) -> std::result::Result<Probe
     if let (Some(a), Some(b)) = (w.fps, stated_by.fps)
         && (a - b).abs() > 0.001
     {
-        return Err(format!("`fps` {a} differs from the {b} fps RAEA rendered at"));
+        return Err(format!("`fps` {a} differs from the {b} fps {tool} rendered at"));
     }
     if w.alpha && !video.has_alpha {
-        return Err("the PNG sequence has no alpha channel".into());
+        return Err(format!("the {} has no alpha channel", if w.sequence { "PNG sequence" } else { "render" }));
     }
     let json = json!({
         "width": width, "height": height, "fps": fps, "duration": info.duration.0, "seconds": info.duration.seconds(),
