@@ -89,9 +89,7 @@ impl BridgeClient {
         if !crate::long_job::is_long(id, &params) {
             return self.call("engine.execute", json!({"command": id, "params": params})).await;
         }
-        if let Some(p) = params.as_object_mut() {
-            p.insert("wait".into(), json!(false));
-        }
+        crate::long_job::job_params(id, &mut params);
         let mut start = self.call("engine.execute", json!({"command": id, "params": params})).await?;
         let Some(job) = start.get("job").and_then(Value::as_u64) else { return Ok(start) };
         let done = loop {

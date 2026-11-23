@@ -206,6 +206,9 @@ progress and stop it:
   for the album's exact title (the result is the album's items) and selects all of it. To make a showcase straight from such an album, `showcase_analyze {album,
   prompt, plan: true}` picks it, imports its videos once (files the project holds are reused)
   and analyses only those clips (`autocut.analyze` / `autocut.makeShowcase` with `album`).
+- `review.inbox {wait: true, timeout?}` (a wait for the user's next review comment, see
+  [local-pipeline-upgrades.md](local-pipeline-upgrades.md#review-pointed-at-frames)) runs the same
+  way: a job that waits for a new open comment or the timeout, its answer under `review`.
 - So do the AutoCut showcase jobs (`autocut.analyze`, `autocut.showcasePlan`, `autocut.makeShowcase`,
   `autocut.showcaseBuild`; the `showcase_*` tools; progress in clips analysed or entries built). Their
   answer, like the finished job's `jobs.list` entry, carries `showcase`: what the job made (the

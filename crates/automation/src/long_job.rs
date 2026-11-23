@@ -1,6 +1,7 @@
 //! Long exports over MCP (docs/agents.md § Long exports): `file.exportMedia` (and the other
 //! [`LONG_COMMANDS`]: voice cloning, neural music, model downloads, Google Photos and YouTube
-//! uploads, YouTube sign-ins, Instagram Reels and sign-ins, AutoCut showcase jobs and recipe runs) with `wait: true` runs as a background engine job; the server reports its progress as MCP
+//! uploads, YouTube sign-ins, Instagram Reels and sign-ins, AutoCut showcase jobs, recipe runs and
+//! waits for review comments) with `wait: true` runs as a background engine job; the server reports its progress as MCP
 //! `notifications/progress` (when the request carried a `progressToken`) and stops it on
 //! `notifications/cancelled`, deleting an export's partial output (an upload's file is the
 //! user's and is never touched). The session lock is only held for short polls, so other
@@ -61,7 +62,12 @@ pub const LONG_COMMANDS: &[&str] = &[
     "clip.autoRedact",
     "redact.downloadModels",
     "recipe.run",
+    "review.inbox",
 ];
+
+/// Long commands whose `wait` is part of what they do (`review.inbox` waits for a new comment):
+/// their job is started with `job: true` and `wait` left as asked ([`job_params`]).
+const WAITS_IN_A_JOB: &[&str] = &["review.inbox"];
 
 /// The parts of a finished job's `jobs.list` entry a long call's answer carries besides
 /// `result`: an export's offline media, an upload's new media item, what a showcase job made, the
@@ -70,7 +76,7 @@ pub const LONG_COMMANDS: &[&str] = &[
 /// what an Auto Reframe made (the new sequence, the clips followed), what an Auto Redact hid
 /// (per clip, and why the rest was not), what a recipe ran, what speech understanding found, what a
 /// scene index found, what a motion graphics render made (its checks, files, item and clip), the
-/// motion filmstrips' sheets and findings.
+/// motion filmstrips' sheets and findings, the review comments a wait returned.
 pub const JOB_EXTRAS: &[&str] = &[
     "offlineMedia",
     "upload",
@@ -86,6 +92,7 @@ pub const JOB_EXTRAS: &[&str] = &[
     "scenes",
     "motion",
     "motionStrips",
+    "review",
 ];
 
 /// How often the job is polled (and at most how often progress is reported).
@@ -94,6 +101,18 @@ const POLL: Duration = Duration::from_millis(100);
 /// Whether `command_run {id, params}` is a long call this module runs.
 pub fn is_long(id: &str, params: &Value) -> bool {
     LONG_COMMANDS.contains(&id) && params.get("wait").and_then(Value::as_bool) == Some(true)
+}
+
+/// The parameters a long call's job is started with: `wait: false` (the job runs in the
+/// background and its answer is read from `jobs.list`), or for a command whose waiting is the
+/// work itself ([`WAITS_IN_A_JOB`]) `job: true` with `wait` kept.
+pub fn job_params(id: &str, params: &mut Value) {
+    let Some(p) = params.as_object_mut() else { return };
+    if WAITS_IN_A_JOB.contains(&id) {
+        p.insert("job".into(), json!(true));
+    } else {
+        p.insert("wait".into(), json!(false));
+    }
 }
 
 /// Sends `notifications/progress` for one request; progress only ever increases.
@@ -123,9 +142,7 @@ impl FilmcraftMcp {
     /// honouring cancellation.
     pub(crate) async fn run_long(&self, id: &str, mut params: Value, context: &RequestContext<RoleServer>) -> CallToolResult {
         let started = SystemTime::now();
-        if let Some(p) = params.as_object_mut() {
-            p.insert("wait".into(), json!(false));
-        }
+        job_params(id, &mut params);
         let start = match self.run(id, params).await {
             Ok(v) => v,
             Err(e) => return CallToolResult::error(vec![Content::text(e.to_string())]),
@@ -249,6 +266,18 @@ fn is_sequence_extension(ext: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_wait_runs_as_a_job_that_keeps_waiting() {
+        assert!(is_long("review.inbox", &json!({"wait": true})) && !is_long("review.inbox", &json!({})));
+        assert!(JOB_EXTRAS.contains(&"review"));
+        let mut p = json!({"wait": true, "timeout": 30});
+        job_params("review.inbox", &mut p);
+        assert_eq!(p, json!({"wait": true, "timeout": 30, "job": true}));
+        let mut p = json!({"wait": true, "path": "x.mp4"});
+        job_params("file.exportMedia", &mut p);
+        assert_eq!(p, json!({"wait": false, "path": "x.mp4"}));
+    }
 
     #[test]
     fn only_the_exports_own_files_are_removed() {

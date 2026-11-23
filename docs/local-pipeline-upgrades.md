@@ -543,6 +543,36 @@ Prepare a portrait sequence or use the existing reframe workflow before Short de
 the output-size setting does not re-edit a landscape story. Enable the intended caption
 language for burning; other language tracks can remain hidden and still receive sidecar files.
 
+## Review pointed at frames
+
+A review comment is pinned to a frame: its time, the clip and box it points at, and its text
+(PX8; the idea of frame-pinned comments for an agent comes from huashu-motion, MIT, written
+fresh). Comments live in an inbox beside the saved project, in the build folder that
+`delivery.preflight` reads `decisions.json` from: `build/review/inbox.jsonl`, one JSON object a
+line. A comment is not part of the project: it is no undo step, and `review.delete` takes one back.
+
+| command | does |
+|---|---|
+| `review.comment {time?|seconds?|frame?|timecode?, sequence?, clip?, box?, text, author?}` | appends a comment at the start of the frame the time falls in (default the playhead); `box` is `[x, y, w, h]` in sequence pixels (w and h 0: a point); `text` at most 2000 characters; `author` is `"user"` for the user's own words or what came from the app, else the agent's label (default `"agent"`) |
+| `review.inbox {status?, since?, wait?, timeout?, job?}` | the comments (`open` by default, `done` or `all`; `since` an RFC 3339 UTC time, each answer's `now` being the next call's `since`), with `open` and `done` counts; with `wait` it returns as soon as a new open comment arrives or the timeout passes (0–600 s, default 60): `new`, `waited`, `timedOut` |
+| `review.look {id, scale?, out?, inline?}` | renders the comment's frame (captions on) with its box drawn, to `build/review/look-<id>.png` (or `out`; `inline` adds `pngBase64`), and says what is there: the clips and graphics under it (id, name, track, kind), the text on screen, the captions, the nearest cuts before and after, the transition it is inside, the markers on it and `sequence.checkMotion`'s findings at that moment |
+| `review.done {id, note}` | marks it done with a note of what was changed (again: the note and time are updated, `again: true`) |
+| `review.delete {id}` | removes its text and box; a deleted record keeps the id, so no other comment is given it |
+
+A stored comment holds `id` (`c1`, `c2`, …, never reused), `sequence`, `time` (ticks),
+`seconds`, `timecode`, `clip?`, `box?`, `text`, `author`, `created` (UTC), `status` (`open` or
+`done`), `note?` and `doneAt?`: no folder paths, nothing personal beyond what was typed. The inbox
+holds at most 2000 comments and 4 MB; a line that is not a comment is skipped with a note
+(`damaged`: its line number and why) and written back unchanged. Writers take turns: the app and an
+agent writing in the same instant can lose one of the two changes.
+
+Waiting never holds the app or a server. Over MCP's `command_run` (and the bridge) `review.inbox
+{wait: true}` is a long command: it runs as a job that waits (progress over the timeout,
+`notifications/cancelled` stops it) and answers with the comments under `review`. In the app, a
+wait asked over the control channel always runs as that job. `job: true` starts it by hand
+(`{job}` at once; `jobs.list` shows the answer under `review`, `jobs.cancel` stops it). In process
+(`filmcraft-cli exec`), `wait: true` blocks that call, reading the file four times a second.
+
 ## Upstream additions
 
 - Scrub audio opens on its own worker; a drag reuses its stream and releases it before playback.

@@ -197,6 +197,14 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
     // #1540): an agent can neither see nor close a dialog, so the engine command runs with what
     // was given, and Sequence Settings… answers the settings it would have shown.
     let menu = !app.engine_call;
+    // A wait for review comments runs on a worker in the app (its answer in `jobs.list`), so the UI
+    // and its control server keep answering while it waits.
+    if id == "review.inbox"
+        && params.get("wait").and_then(Value::as_bool) == Some(true)
+        && let Some(object) = params.as_object_mut()
+    {
+        object.insert("job".into(), json!(true));
+    }
     if !menu && id == "sequence.settings" && (params.is_null() || params.as_object().is_some_and(|m| m.is_empty())) {
         filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&app.session))?;
         let seq = app.session.execute("sequence.inspect", json!({})).map_err(|e| e.to_string())?;

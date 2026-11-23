@@ -700,7 +700,8 @@ impl ExportQueue {
 /// A `jobs.list` entry: [`crate::Job::to_json`], plus `offlineMedia` for an export job,
 /// `upload` (the new media item) for a Google Photos upload, `showcase` (what it made) for an
 /// AutoCut showcase job, `youtube` (the channel connected, the video uploaded) for a YouTube
-/// job, `instagram` (the account connected, the Reel published) for an Instagram job and `recipe` (each step, how it went) for a recipe run, so callers that poll a job (the
+/// job, `instagram` (the account connected, the Reel published) for an Instagram job, `recipe` (each step, how it went) for a recipe run and `review` (the comments a
+/// wait returned) for a review wait, so callers that poll a job (the
 /// bridge, MCP long jobs) can report it like the blocking command does.
 pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     let mut v = j.to_json();
@@ -724,6 +725,9 @@ pub(crate) fn job_json(s: &Session, j: &crate::Job) -> Value {
     }
     if let Some(m) = crate::motion_strips::outcome_json(s, j.id) {
         v["motionStrips"] = m;
+    }
+    if let Some(r) = crate::review::outcome_json(s, j.id) {
+        v["review"] = r;
     }
     if crate::autocut::is_showcase(s, j.id) {
         v["showcase"] = crate::autocut::outcome_json(s, j.id);
