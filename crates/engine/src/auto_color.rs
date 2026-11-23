@@ -42,6 +42,9 @@ use crate::{EngineError, Result, Session};
 pub const AUTO_COLOR_CMD: &str = "clip.autoColor";
 /// The parameter that marks the pass's own Lumetri Color.
 pub const MARK: &str = "auto_color";
+/// The parameter that names the pass's look (when it has one), so a reader of the timeline
+/// (`autocut.fingerprint`) can tell `punchy` and `soft`, which are only parameter changes.
+pub const MARK_LOOK: &str = "auto_color_look";
 /// Longest side of the pictures measured, pixels.
 const MEASURE_SIDE: f64 = 320.0;
 /// Most clips in one pass, and rows on a sheet.
@@ -60,6 +63,16 @@ const LOOKS: &[(&str, Option<u32>, &[(&str, f64)])] = &[
     ("golden", Some(7), &[]),
     ("teal", Some(1), &[]),
 ];
+
+/// Our looks' ids (`none` first).
+pub fn look_ids() -> impl Iterator<Item = &'static str> {
+    LOOKS.iter().map(|l| l.0)
+}
+
+/// Our look that a Lumetri `look` choice is (`warm`, `cool`, `golden`, `teal`), if any.
+pub fn look_of_choice(choice: u32) -> Option<&'static str> {
+    LOOKS.iter().find(|l| l.1 == Some(choice)).map(|l| l.0)
+}
 
 pub fn commands() -> Vec<CommandSpec> {
     vec![CommandSpec {
@@ -173,6 +186,9 @@ fn pass_effect(c: &Correction, look: &(&str, Option<u32>, &[(&str, f64)]), look_
         set(k, ParamValue::Float(base + v * look_strength / 25.0));
     }
     set(MARK, ParamValue::Text("measured".into()));
+    if look.0 != "none" {
+        set(MARK_LOOK, ParamValue::Text(look.0.to_string()));
+    }
     Some(e)
 }
 

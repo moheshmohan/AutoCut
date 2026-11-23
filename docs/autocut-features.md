@@ -604,3 +604,25 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   jump become notes; how each event landed stays in the report. The shorts stay silent. A remix
   that starts the track mid-way (an opening burst on a drop) lands the drop on the event exactly
   (the film's beat grid kept) and fades in over 10 ms.
+
+## Update 2026-11-23 (PX10, taste memory)
+
+- **PX10.1**: a taste history and `autocut.fingerprint {sequence?, record?, pipeline?, deals?}`.
+  The history is `taste-history.jsonl` in the data directory beside `taste.json`: one JSON
+  line per finished video (when, in UTC through chrono; the project file's name only, never its
+  folders; the pipeline; the six axes; the deal choices used), newest last, at most 2000 records
+  and the newest 4 MiB read, a damaged line skipped with a note. The fingerprint reads the
+  timeline alone: `opening` (`titleCard` a title in the first second, `talking` speech in the
+  first 2 s, `montage` three cuts in the first 5 s, `still`, else `coldOpen`), `titleEntrance`
+  (the titles' most common entrance: a text animator's in-kind, a transition into the title, or
+  keyframes — opacity `fade`, a position `slide…`, `scaleUp` — else `none`),
+  `transitionFamily` (the most common family of the transitions between pictures, by catalog
+  folder: `dissolve`, `whip`, `zoom`, `light`, `slide`, `wipe`, `spatial`, `glitch`,
+  `distortion`, `pattern`, `flow`; none: `cut`), `colorLook` (the colour pass's look — the pass
+  now names it in `auto_color_look` — a Lumetri preset matched by its parameters, a Creative
+  look, a `Look: …` adjustment clip; by time on screen), `captionStyle` (the caption preset,
+  `plain` or `none`) and `close` (`logo`, `endCard` a title over nothing, a graphic or blurred
+  footage, `title`, `fadeOut`, `cut`), each with its `evidence`. `matches` lists the axes shared
+  with each of the three newest records; four or more shared with one is a `sameAsRecent`
+  warning (D7: never a block). `record: true` appends it (a file in the data directory, not an
+  undo step; the result says so). Tests use a data directory of their own.

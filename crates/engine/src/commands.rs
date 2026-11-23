@@ -3962,6 +3962,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::render_cache::commands());
     v.extend(crate::delivery::commands());
     v.extend(crate::taste::commands());
+    v.extend(crate::fingerprint::commands());
     v.extend(crate::speech_pauses::commands());
     v.extend(crate::vr_moves::commands());
     v.extend(crate::choreograph::commands());
