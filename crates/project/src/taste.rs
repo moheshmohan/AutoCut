@@ -2,10 +2,14 @@
 //! sounds on them, light effects, the colour pass, the language of on-screen text, wording rules
 //! ("our son", never "my son"), how narration is written, the person's own phrases (which the
 //! copy and style checks never flag), how things move (`motion`: `playful` lets eases overshoot),
-//! and privacy. Every field is optional:
+//! privacy, and what the person's feedback retired or liked (`retired`, `liked`, `reasons`:
+//! `autocut.feedback`; a retired choice is never dealt and the pipelines' defaults skip it).
+//! Every field is optional:
 //! a profile is laid over the one below it — the user's default under a project's, a video's own
 //! options over both ([`Taste::over`]) — and what none of them says is each pipeline's own
 //! default.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +19,15 @@ pub const MAX_RULES: usize = 32;
 pub const MAX_TEXT: usize = 300;
 /// Most of the person's own phrases a profile keeps.
 pub const MAX_PHRASES: usize = 200;
+/// Most kinds of retired or liked choices, the longest kind name and id (characters), and the
+/// most reasons a profile keeps.
+pub const MAX_KINDS: usize = 16;
+pub const MAX_KIND: usize = 32;
+pub const MAX_ID: usize = 64;
+pub const MAX_REASONS: usize = 64;
+
+/// Choices by kind (`look` → `["warm", "vhs"]`).
+pub type Choices = BTreeMap<String, Vec<String>>;
 
 /// One wording rule: say `say`, never `not`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +84,19 @@ pub struct Taste {
     /// (overshooting and bouncing eases are meant, so `sequence.checkMotion` does not flag them).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion: Option<String>,
+    /// Choices the person's feedback retired (`autocut.feedback`), by kind: `look`,
+    /// `titleStyle`, `transitionFamily`, `music`, `register`, `endCard`, `sound`, `captionStyle`,
+    /// `opening`. A retired id is never dealt (`autocut.deal`) and the pipelines' own defaults
+    /// skip it; a retired `sound` is never heard, as if `sounds` left it out. A profile's
+    /// retired choices add to the one below it, except what it likes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retired: Option<Choices>,
+    /// Choices the person liked: dealt first among those the last videos did not use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liked: Option<Choices>,
+    /// Why, in the person's words: `kind:id` → their note.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasons: Option<BTreeMap<String, String>>,
 }
 
 fn text(s: &str) -> String {
@@ -79,6 +105,63 @@ fn text(s: &str) -> String {
 
 fn unit(v: Option<f64>, max: f64) -> Option<f64> {
     v.filter(|x| x.is_finite()).map(|x| x.clamp(0.0, max))
+}
+
+/// A kind's name: letters and digits, at most [`MAX_KIND`].
+fn kind_name(s: &str) -> String {
+    s.chars().filter(char::is_ascii_alphanumeric).take(MAX_KIND).collect()
+}
+
+/// An id: no control characters, trimmed, at most [`MAX_ID`].
+fn choice_id(s: &str) -> String {
+    text(s).chars().take(MAX_ID).collect::<String>().trim().to_string()
+}
+
+fn has(m: Option<&Choices>, kind: &str, id: &str) -> bool {
+    m.and_then(|m| m.get(kind)).is_some_and(|v| v.iter().any(|x| x.eq_ignore_ascii_case(id.trim())))
+}
+
+/// Choices usable as kept: kinds and ids cleaned and capped, duplicates and empties gone, none
+/// when nothing is left.
+fn choices_sanitized(m: Option<&Choices>) -> Option<Choices> {
+    let m = m?;
+    let mut out = Choices::new();
+    for (k, ids) in m.iter().take(MAX_KINDS) {
+        let k = kind_name(k);
+        if k.is_empty() {
+            continue;
+        }
+        let mut kept: Vec<String> = Vec::new();
+        for id in ids.iter().map(|i| choice_id(i)).filter(|i| !i.is_empty()) {
+            if !kept.iter().any(|x| x.eq_ignore_ascii_case(&id)) {
+                kept.push(id);
+            }
+        }
+        // the newest are kept (feedback adds at the end)
+        let extra = kept.len().saturating_sub(MAX_RULES);
+        kept.drain(..extra);
+        if !kept.is_empty() {
+            out.entry(k).or_default().extend(kept);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// `a` and `b` together, without what `except` names.
+fn choices_union(a: Option<&Choices>, b: Option<&Choices>, except: Option<&Choices>) -> Option<Choices> {
+    let mut out = Choices::new();
+    for m in [b, a].into_iter().flatten() {
+        for (k, ids) in m {
+            let list = out.entry(k.clone()).or_default();
+            for id in ids {
+                if !list.iter().any(|x| x.eq_ignore_ascii_case(id)) && !has(except, k, id) {
+                    list.push(id.clone());
+                }
+            }
+        }
+    }
+    out.retain(|_, v| !v.is_empty());
+    (!out.is_empty()).then_some(out)
 }
 
 impl Taste {
@@ -99,6 +182,16 @@ impl Taste {
             phrases: self.phrases.clone().or_else(|| base.phrases.clone()),
             redact: self.redact.clone().or_else(|| base.redact.clone()),
             motion: self.motion.clone().or_else(|| base.motion.clone()),
+            retired: choices_union(self.retired.as_ref(), base.retired.as_ref(), self.liked.as_ref()),
+            liked: choices_union(self.liked.as_ref(), base.liked.as_ref(), self.retired.as_ref()),
+            reasons: match (&self.reasons, &base.reasons) {
+                (None, None) => None,
+                (a, b) => {
+                    let mut r = b.clone().unwrap_or_default();
+                    r.extend(a.clone().unwrap_or_default());
+                    Some(r)
+                }
+            },
         }
     }
 
@@ -123,7 +216,51 @@ impl Taste {
             phrases: self.phrases.as_ref().map(|v| v.iter().map(|s| text(s)).filter(|s| !s.is_empty()).take(MAX_PHRASES).collect()),
             redact: short(&self.redact),
             motion: short(&self.motion),
+            retired: choices_sanitized(self.retired.as_ref()),
+            liked: choices_sanitized(self.liked.as_ref()),
+            reasons: self
+                .reasons
+                .as_ref()
+                .map(|r| {
+                    r.iter()
+                        .map(|(k, v)| (text(k).chars().take(MAX_KIND + MAX_ID + 1).collect::<String>(), text(v)))
+                        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                        .take(MAX_REASONS)
+                        .collect::<BTreeMap<String, String>>()
+                })
+                .filter(|r| !r.is_empty()),
         }
+    }
+
+    /// Whether the person's feedback retired `id` of `kind` (any case).
+    pub fn is_retired(&self, kind: &str, id: &str) -> bool {
+        has(self.retired.as_ref(), kind, id)
+    }
+
+    /// Whether the person liked `id` of `kind` (any case).
+    pub fn is_liked(&self, kind: &str, id: &str) -> bool {
+        has(self.liked.as_ref(), kind, id)
+    }
+
+    /// The profile after a verdict on `id` of `kind`: liked (out of the retired) or retired (out
+    /// of the liked), the newest kept when a kind is full, with the person's note.
+    pub fn with_feedback(&self, kind: &str, id: &str, like: bool, note: Option<&str>) -> Taste {
+        let mut t = self.clone();
+        let (kind, id) = (kind_name(kind), choice_id(id));
+        if kind.is_empty() || id.is_empty() {
+            return t.sanitized();
+        }
+        let (add, other) = if like { (&mut t.liked, &mut t.retired) } else { (&mut t.retired, &mut t.liked) };
+        if let Some(list) = other.as_mut().and_then(|m| m.get_mut(&kind)) {
+            list.retain(|x| !x.eq_ignore_ascii_case(&id));
+        }
+        let list = add.get_or_insert_with(Choices::new).entry(kind.clone()).or_default();
+        list.retain(|x| !x.eq_ignore_ascii_case(&id));
+        list.push(id.clone());
+        if let Some(n) = note.map(text).filter(|n| !n.is_empty()) {
+            t.reasons.get_or_insert_with(BTreeMap::new).insert(format!("{kind}:{id}"), n);
+        }
+        t.sanitized()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -233,6 +370,37 @@ mod tests {
         assert!(bad.words.unwrap().is_empty());
         let n = bad.narration.unwrap();
         assert!(n.len() == MAX_RULES && n[0].chars().count() == MAX_TEXT);
+    }
+
+    #[test]
+    fn feedback_retires_and_likes_and_layers() {
+        let t = Taste::default().with_feedback("sound", "whoosh", false, Some("sounds like a rocket")).with_feedback("look", "vhs", true, None);
+        assert!(t.is_retired("sound", "Whoosh") && !t.is_retired("sound", "swish") && t.is_liked("look", "vhs"));
+        assert_eq!(t.reasons.as_ref().unwrap()["sound:whoosh"], "sounds like a rocket");
+        // a later like takes it out of the retired; the empty list goes
+        let back = t.with_feedback("sound", "whoosh", true, None);
+        assert!(!back.is_retired("sound", "whoosh") && back.is_liked("sound", "whoosh"));
+        assert!(back.retired.is_none());
+        // the user's retired choices stay under a project's, except what the project likes
+        let user = Taste::default().with_feedback("look", "warm", false, None).with_feedback("music", "sad", false, None);
+        let project = Taste::default().with_feedback("music", "sad", true, None).with_feedback("look", "teal", false, None);
+        let both = project.over(&user);
+        assert!(both.is_retired("look", "warm") && both.is_retired("look", "teal") && !both.is_retired("music", "sad") && both.is_liked("music", "sad"));
+        // an old profile without them still reads; a hostile one is capped
+        assert_eq!(serde_json::from_str::<Taste>(r#"{"style":"subtle"}"#).unwrap().retired, None);
+        let mut many = Choices::new();
+        for k in 0..40 {
+            many.insert(format!("kind{k}\u{7}"), vec!["x".repeat(500); 100]);
+        }
+        many.insert("look".into(), (0..100).map(|i| format!("id{i}")).collect());
+        let bad =
+            Taste { retired: Some(many), reasons: Some((0..500).map(|i| (format!("k{i}"), "n".repeat(10_000))).collect()), ..Taste::default() }.sanitized();
+        let r = bad.retired.unwrap();
+        assert!(r.len() <= MAX_KINDS && r.values().all(|v| v.len() <= MAX_RULES && v.iter().all(|i| i.chars().count() <= MAX_ID)));
+        let reasons = bad.reasons.unwrap();
+        assert!(reasons.len() == MAX_REASONS && reasons.values().all(|v| v.chars().count() == MAX_TEXT));
+        let full = (0..MAX_RULES + 5).fold(Taste::default(), |t, i| t.with_feedback("look", &format!("l{i}"), false, None));
+        assert!(full.is_retired("look", &format!("l{}", MAX_RULES + 4)) && !full.is_retired("look", "l0"), "the newest are kept");
     }
 
     #[test]

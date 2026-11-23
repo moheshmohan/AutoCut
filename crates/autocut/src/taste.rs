@@ -2,6 +2,16 @@
 //! the project's laid together, read once per job and laid under the job's own options — a
 //! video's options win, the profile fills what they leave out, and what neither says is the
 //! pipeline's own default.
+//!
+//! **Taste memory (PX10).** What the person's feedback retired (`autocut.feedback`) the
+//! pipelines' own defaults skip ([`first_kept`]; a retired sound is never heard:
+//! [`allows_sound`]). With `guidance` on (the default), a choice the video and the profile both
+//! leave open is dealt against the taste history ([`Deals::deal`], `autocut.deal`) so
+//! consecutive videos differ, and the finished video's fingerprint is recorded ([`record`],
+//! `autocut.fingerprint`); `guidance: false` keeps each pipeline's own defaults and records
+//! nothing.
+
+use std::collections::BTreeMap;
 
 use filmcraft_engine::project::taste::Taste;
 use serde_json::{Value, json};
@@ -65,9 +75,67 @@ pub fn light_free(t: &Taste, ids: &[String], instead: &str) -> Vec<String> {
     if kept.is_empty() && !ids.is_empty() { vec![instead.to_string()] } else { kept }
 }
 
-/// Whether the profile lets a sound be heard (no list: every sound).
+/// Whether the profile lets a sound be heard (no list: every sound) and the person's feedback
+/// did not retire it.
 pub fn allows_sound(t: &Taste, kind: &str) -> bool {
-    t.sounds.as_ref().is_none_or(|s| s.iter().any(|k| k.eq_ignore_ascii_case(kind)))
+    t.sounds.as_ref().is_none_or(|s| s.iter().any(|k| k.eq_ignore_ascii_case(kind))) && !t.is_retired("sound", kind)
+}
+
+/// The first of `ids` (a pipeline's own default first) the person's feedback did not retire;
+/// the first when every one is.
+pub fn first_kept<'a>(t: &Taste, kind: &str, ids: &[&'a str]) -> &'a str {
+    ids.iter().copied().find(|id| !t.is_retired(kind, id)).or_else(|| ids.first().copied()).unwrap_or_default()
+}
+
+/// Whether a job deals open choices and records its fingerprint (`guidance`, on unless false).
+pub fn guided(p: &Value) -> bool {
+    p["guidance"].as_bool() != Some(false)
+}
+
+/// The choices one video dealt: kind → id, and each deal's answer for the report.
+#[derive(Clone, Debug, Default)]
+pub struct Deals {
+    pub chosen: BTreeMap<String, String>,
+    pub answers: serde_json::Map<String, Value>,
+}
+
+impl Deals {
+    /// Deal `kind` among `options` (the pipeline's own default first) through `autocut.deal`
+    /// against the taste history; None when nothing was dealt (every option retired or ruled out
+    /// by the profile, or an engine without the command): the pipeline keeps its default.
+    pub async fn deal(&mut self, ex: &dyn crate::Executor, kind: &str, options: &[&str], pipeline: &str) -> Option<String> {
+        let r = ex.execute("autocut.deal", json!({"for": kind, "options": options, "pipeline": pipeline, "dryRun": true})).await;
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => {
+                self.answers.insert(kind.to_string(), json!({"choice": null, "why": format!("not dealt: {e}")}));
+                return None;
+            }
+        };
+        self.answers.insert(kind.to_string(), json!({"choice": r["choice"], "why": r["why"], "from": r["from"], "skipped": r["skipped"]}));
+        let choice = r["choice"].as_str()?.to_string();
+        self.chosen.insert(kind.to_string(), choice.clone());
+        Some(choice)
+    }
+
+    /// The deals for a report (none: nothing was dealt).
+    pub fn json(&self) -> Option<Value> {
+        (!self.answers.is_empty()).then(|| Value::Object(self.answers.clone()))
+    }
+}
+
+/// Record the finished `sequence`'s fingerprint in the taste history with the choices `deals`
+/// made, so the next video can differ: the fingerprint (axes, evidence, how it matches the last
+/// videos, warnings) for the report, or why it was not recorded.
+pub async fn record(ex: &dyn crate::Executor, sequence: Option<u64>, pipeline: &str, deals: &Deals) -> Value {
+    let mut p = json!({"record": true, "pipeline": pipeline, "deals": deals.chosen});
+    if let Some(s) = sequence {
+        p["sequence"] = json!(s);
+    }
+    match ex.execute("autocut.fingerprint", p).await {
+        Ok(v) => json!({"axes": v["axes"], "evidence": v["evidence"], "matches": v["matches"], "warnings": v["warnings"], "recorded": v["recorded"]}),
+        Err(e) => json!({"recorded": false, "error": e}),
+    }
 }
 
 /// A writer's system prompt with the profile's wording and narration rules after it.
@@ -88,6 +156,16 @@ mod tests {
         assert_eq!((p["style"].as_str(), p["seconds"].as_f64(), p["redact"].as_str()), (Some("energetic"), Some(20.0), Some("off")));
         assert_eq!(p["sounds"], json!(["chime"]));
         assert!(allows_sound(&t, "chime") && !allows_sound(&t, "swish") && allows_sound(&Taste::default(), "whoosh"));
+    }
+
+    #[test]
+    fn feedback_retires_the_pipelines_defaults() {
+        let t = Taste::default().with_feedback("sound", "whoosh", false, None).with_feedback("look", "none", false, None);
+        assert!(!allows_sound(&t, "whoosh") && allows_sound(&t, "swish"));
+        assert_eq!(first_kept(&t, "look", &["none", "punchy"]), "punchy");
+        assert_eq!(first_kept(&t, "titleStyle", &["fade", "pop"]), "fade");
+        assert_eq!(first_kept(&Taste::default().with_feedback("x", "a", false, None), "x", &["a"]), "a", "every one retired: the default");
+        assert!(guided(&json!({})) && guided(&json!({"guidance": null})) && !guided(&json!({"guidance": false})));
     }
 
     #[test]

@@ -626,3 +626,24 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   with each of the three newest records; four or more shared with one is a `sameAsRecent`
   warning (D7: never a block). `record: true` appends it (a file in the data directory, not an
   undo step; the result says so). Tests use a data directory of their own.
+- **PX10.2**: `autocut.deal {for, options?, seed?, dryRun?, pipeline?}` and `autocut.feedback
+  {about, id, verdict, note?, scope?}`. A deal picks one `look` (our looks and the creator
+  looks), `titleStyle` (the `graphics.animateText` in-kinds, `none`), `transitionFamily` (the
+  catalog families, `cut`), `music` (the generated music's moods), `register` (the narration
+  deliveries) or `endCard` (`endCard`, `logo`, `fadeOut`, `title`, `cut`); `options` narrows the
+  catalog, its first the default. It never deals what feedback `retired` or what the taste
+  profile rules out (a look other than the profile's; colour looks with the colour pass off; a
+  bouncing `drop` unless motion is playful; `light` with light effects off; a family whose
+  transitions carry only sounds the profile leaves out — `sounds` without whoosh or riser rules
+  out zooms, spins and cubes, while a whip can take the swish and a dissolve needs none), and
+  prefers what the three newest videos did not use (liked first; `seed` picks among them), else
+  the least recently used, saying so in `why`; the answer is `{for, choice, from, skipped: [{id,
+  why: "used in the last 3"|"retired"|"not allowed by taste"}], why}`. Shorts deal no music.
+  Unless `dryRun`, the choice is kept for the next `autocut.fingerprint {record: true}`.
+  Feedback writes `retired`, `liked` and `reasons` into the taste profile (new optional fields:
+  old `taste.json` files read as before; a project's retired choices add to the user's, except
+  what the project likes; capped at 16 kinds × 32 ids, 64 reasons): the user's default by
+  default, the project's as one undo step. A retired sound is never heard — `allows_sound`, the
+  same place the profile's `sounds` act through, and the director drops it from the style's
+  sounds unless the video asks for it. `autocut.taste` shows the new fields and `set` replaces
+  or clears them.

@@ -14,7 +14,8 @@
 //! `matches` lists, for each of the three newest records, the axes they share with this video;
 //! four or more matching one of them is a warning (decision D7: warnings, never a block).
 //! `record: true` adds the fingerprint to the history — the project's file name only, the
-//! `pipeline` given, and the deal choices used (`deals`). It writes the history file in the data directory; it is not
+//! `pipeline` given, and the deal choices used (`deals`, with those `autocut.deal` kept in the
+//! session since the last record, which are then cleared). It writes the history file in the data directory; it is not
 //! an undo step, and the result says so.
 
 use std::collections::BTreeMap;
@@ -56,7 +57,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Video Fingerprint",
         menu: &[],
         shortcut: None,
-        params: r#"{"sequence":id? (default the active one),"record":bool=false (add it to the taste history in the data directory: not an undo step),"pipeline":str? (with record: what made it — direct, quick, showcase, …),"deals":{"look"|"titleStyle"|"transitionFamily"|"music"|"register"|"endCard":id}? (with record: the deal choices used)}"#,
+        params: r#"{"sequence":id? (default the active one),"record":bool=false (add it to the taste history in the data directory: not an undo step),"pipeline":str? (with record: what made it — direct, quick, showcase, …),"deals":{"look"|"titleStyle"|"transitionFamily"|"music"|"register"|"endCard":id}? (with record: the deal choices used; those autocut.deal kept since the last record are added)}"#,
         enabled: has_seq,
         run,
         journal: false,
@@ -654,7 +655,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => v.as_bool().ok_or_else(|| bad(CMD, "`record` is true or false"))?,
     };
     let pipeline = pipeline_p(p)?;
-    let deals = deals_p(p)?;
+    let mut deals = deals_p(p)?;
     let project = s.project.clone();
     let q = project.sequence(seq).ok_or(EngineError::NoSequence)?;
     let (axes, evidence) = fingerprint(&project, q);
@@ -671,6 +672,9 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         "recorded": false,
     });
     if record {
+        for (k, v) in std::mem::take(&mut s.taste_deals) {
+            deals.entry(k).or_insert(v);
+        }
         let r = Record { when: taste_history::now(), project: s.path.as_deref().map(taste_history::file_name), pipeline, axes, deals };
         let written = taste_history::append(s, &r).map_err(|e| bad(CMD, format!("the history could not be written: {e}")))?;
         out["recorded"] = json!(true);

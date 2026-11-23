@@ -2488,6 +2488,14 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     } else {
         report.style = Some(json!({"style": o.style.pace.name(), "by": "asked", "lightEffects": o.style.light_effects, "sounds": o.style.sounds}));
     }
+    // a sound the person's feedback retired is never heard, unless this video asks for it
+    if report.options["sounds"].is_null() && o.style.sounds.iter().any(|k| taste.is_retired("sound", k)) {
+        o.style.sounds.retain(|k| !taste.is_retired("sound", k));
+        if let Some(st) = report.style.as_mut() {
+            st["sounds"] = json!(o.style.sounds);
+            st["retired"] = json!(taste.retired.as_ref().and_then(|r| r.get("sound")));
+        }
+    }
     plan.style = Some(o.style.pace.name().into());
     // (the report lists every moment the plan uses and its looks: a revision finds them again)
     for s in &plan.shots {

@@ -7,7 +7,9 @@
 //!
 //! With nothing to change it says what the profiles are: `default`, `project` and `resolved`.
 //! `set` changes fields of the `scope`'s profile (`project` by default — one undo step — or
-//! `default`), a `null` field removed; `clear` removes the scope's profile.
+//! `default`), a `null` field removed; `clear` removes the scope's profile. What the person's
+//! feedback retired or liked (`autocut.feedback`, [`crate::deal`]) shows in `retired`, `liked`
+//! and `reasons`, and `set` replaces or (`null`) clears them.
 
 use filmcraft_project::taste::{Taste, Wording};
 use serde_json::{Value, json};
@@ -34,7 +36,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Taste Profile",
         menu: &[],
         shortcut: None,
-        params: r#"{"scope":"project"|"default"="project","set":{"style":"subtle"|"energetic"|"cinematic"?,"lightEffects":bool?,"sounds":["swish"|"chime"|"whoosh"|"impact"|"riser"|"shutter"|"pop"|"thump"]?,"soundLevel":0..1?,"color":bool?,"colorStrength":0..1?,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"?,"lookStrength":0..100?,"textLanguage":str?,"words":[{"say":str,"not":str}]?,"narration":[str]?,"phrases":[str]? (the person's own phrases: copy.lint never flags them),"redact":"off"|"faces"|"plates"|"faces,plates"?,"motion":"calm"|"playful"? (playful: sequence.checkMotion lets eases overshoot)}?,"clear":bool=false}"#,
+        params: r#"{"scope":"project"|"default"="project","set":{"style":"subtle"|"energetic"|"cinematic"?,"lightEffects":bool?,"sounds":["swish"|"chime"|"whoosh"|"impact"|"riser"|"shutter"|"pop"|"thump"]?,"soundLevel":0..1?,"color":bool?,"colorStrength":0..1?,"look":"none"|"punchy"|"soft"|"warm"|"cool"|"golden"|"teal"?,"lookStrength":0..100?,"textLanguage":str?,"words":[{"say":str,"not":str}]?,"narration":[str]?,"phrases":[str]? (the person's own phrases: copy.lint never flags them),"redact":"off"|"faces"|"plates"|"faces,plates"?,"motion":"calm"|"playful"? (playful: sequence.checkMotion lets eases overshoot),"retired":{"look"|"titleStyle"|"transitionFamily"|"music"|"register"|"endCard"|"sound"|"captionStyle"|"opening":[id]}|null? (what autocut.feedback retired: never dealt, skipped by the pipelines' defaults),"liked":(same)|null?,"reasons":{"kind:id":str}|null?}?,"clear":bool=false}"#,
         enabled: always,
         run: taste,
         journal: true,
@@ -43,8 +45,7 @@ pub fn commands() -> Vec<CommandSpec> {
 
 /// The default profile's path: in the data directory beside the preferences.
 fn default_path(s: &Session) -> Option<String> {
-    let dir = s.prefs_path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf)).or_else(crate::autosave::default_data_dir)?;
-    Some(dir.join(FILE).display().to_string())
+    Some(crate::taste_history::data_dir(s)?.join(FILE).display().to_string())
 }
 
 /// The user's default profile (empty when there is none or it cannot be read).
@@ -77,6 +78,34 @@ fn texts(cmd: &str, k: &str, v: &Value) -> Result<Vec<String>> {
         .filter(|a| a.len() <= filmcraft_project::taste::MAX_RULES)
         .ok_or_else(|| bad(cmd, format!("`set.{k}` is a list of at most {} texts", filmcraft_project::taste::MAX_RULES)))?;
     a.iter().map(|x| x.as_str().map(str::to_string).ok_or_else(|| bad(cmd, format!("`set.{k}` holds texts")))).collect()
+}
+
+/// Retired or liked choices as `set` gives them: kind → ids, each from the kind's catalog.
+fn choices(cmd: &str, k: &str, v: &Value) -> Result<filmcraft_project::taste::Choices> {
+    let o = v
+        .as_object()
+        .filter(|o| o.len() <= filmcraft_project::taste::MAX_KINDS)
+        .ok_or_else(|| bad(cmd, format!("`set.{k}` is {{kind: [id]}} (kinds: {})", crate::deal::FEEDBACK_KINDS.join(", "))))?;
+    let mut out = filmcraft_project::taste::Choices::new();
+    for (kind, ids) in o {
+        let kind = crate::deal::kind_of(kind).ok_or_else(|| {
+            bad(cmd, format!("`set.{k}` has no kind `{}`: {}", kind.chars().take(32).collect::<String>(), crate::deal::FEEDBACK_KINDS.join(", ")))
+        })?;
+        let list = ids
+            .as_array()
+            .filter(|a| a.len() <= filmcraft_project::taste::MAX_RULES)
+            .ok_or_else(|| bad(cmd, format!("`set.{k}.{kind}` is a list of at most {} ids", filmcraft_project::taste::MAX_RULES)))?;
+        let mut kept = Vec::new();
+        for id in list {
+            let c = id
+                .as_str()
+                .and_then(|i| crate::deal::canonical(kind, i))
+                .ok_or_else(|| bad(cmd, format!("`set.{k}.{kind}`: each is one of {}", crate::deal::catalog(kind).join(", "))))?;
+            kept.push(c.to_string());
+        }
+        out.insert(kind.to_string(), kept);
+    }
+    Ok(out)
 }
 
 /// `t` with the fields of `set` changed (`null` removes one).
@@ -147,13 +176,30 @@ fn changed(cmd: &str, mut t: Taste, set: &serde_json::Map<String, Value>) -> Res
             }
             "redact" => t.redact = if off { None } else { Some(one_of(cmd, k, v, REDACT)?) },
             "motion" => t.motion = if off { None } else { Some(one_of(cmd, k, v, MOTION)?) },
+            "retired" => t.retired = if off { None } else { Some(choices(cmd, k, v)?) },
+            "liked" => t.liked = if off { None } else { Some(choices(cmd, k, v)?) },
+            "reasons" => {
+                t.reasons = if off {
+                    None
+                } else {
+                    let o = v
+                        .as_object()
+                        .filter(|o| o.len() <= filmcraft_project::taste::MAX_REASONS)
+                        .ok_or_else(|| bad(cmd, format!("`set.reasons` is {{\"kind:id\": note}}, at most {}", filmcraft_project::taste::MAX_REASONS)))?;
+                    Some(
+                        o.iter()
+                            .map(|(k, v)| v.as_str().map(|n| (k.clone(), n.to_string())).ok_or_else(|| bad(cmd, "`set.reasons` holds texts")))
+                            .collect::<Result<_>>()?,
+                    )
+                }
+            }
             other => return Err(bad(cmd, format!("`set` has no field `{other}`"))),
         }
     }
     Ok(t.sanitized())
 }
 
-fn answer(s: &Session) -> Value {
+pub(crate) fn answer(s: &Session) -> Value {
     json!({"default": default_taste(s), "project": s.project.taste.clone().unwrap_or_default(), "resolved": resolved(s), "defaultFile": default_path(s)})
 }
 
@@ -183,8 +229,16 @@ fn taste(s: &mut Session, p: &Value) -> Result<Value> {
         Some(m) => changed(cmd, base, m)?,
         None => base,
     };
+    save(s, cmd, &scope, next, "Taste Profile")?;
+    Ok(answer(s))
+}
+
+/// Keep `next` as the `scope`'s profile: the project's (one undo step labelled `label`) or the
+/// user's default (`taste.json` in the data directory).
+pub(crate) fn save(s: &mut Session, cmd: &str, scope: &str, next: Taste, label: &str) -> Result<()> {
+    let next = next.sanitized();
     if scope == "project" {
-        s.edit("Taste Profile", |pr, _| {
+        s.edit(label, |pr, _| {
             pr.taste = (!next.is_empty()).then(|| next.clone());
             Ok(())
         })?;
@@ -193,7 +247,7 @@ fn taste(s: &mut Session, p: &Value) -> Result<Value> {
         let bytes = format!("{}\n", serde_json::to_string_pretty(&next).unwrap_or_default());
         s.services.write_file(&path, bytes.as_bytes()).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
     }
-    Ok(answer(s))
+    Ok(())
 }
 
 #[cfg(test)]

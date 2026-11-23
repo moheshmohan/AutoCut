@@ -337,8 +337,12 @@ fn a_plan_compiles_to_commands_on_its_beats() {
 /// The demo project with its first clip's media taken as 360°.
 fn demo_session() -> crate::SessionExecutor {
     let mut s = filmcraft_engine::Session::default();
-    // (a data directory of its own: the user's default taste profile is not read)
-    let dir = std::env::temp_dir().join(format!("filmcraft-director-tests-{}", std::process::id()));
+    // (a data directory of its own, one per session: the user's default taste profile and taste
+    // history are not read, and one test's feedback and history are not another's)
+    static SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SESSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("filmcraft-director-tests-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
     s.prefs_path = Some(dir.join("preferences.json"));
     s.execute("file.openDemoProject", json!({})).unwrap();
@@ -358,6 +362,24 @@ async fn a_dry_run_plans_and_lists_the_commands() {
     let steps = r["steps"].as_array().unwrap();
     assert!(steps.iter().any(|s| s["id"] == "timeline.place"), "{r}");
     assert!(r["sequence"].is_null(), "nothing built");
+}
+
+/// The whoosh lesson kept in the profile: a sound the person's feedback retired is not heard in
+/// any style, unless the video itself asks for it.
+#[tokio::test]
+async fn a_retired_sound_is_never_heard() {
+    let ex = demo_session();
+    ex.execute("autocut.feedback", json!({"about": "sound", "id": "whoosh", "verdict": "dislike", "note": "sounds like a rocket"})).await.unwrap();
+    let mut lines = |_: &str| {};
+    let r = make(&ex, &json!({"seconds": 12, "style": "energetic", "dryRun": true, "captions": false}), None, &mut lines).await.unwrap();
+    let sounds: Vec<&str> = r["style"]["sounds"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(!sounds.contains(&"whoosh") && sounds.contains(&"impact"), "{:#}", r["style"]);
+    assert_eq!(r["style"]["retired"], json!(["whoosh"]));
+    let heard: Vec<&str> = r["steps"].as_array().unwrap().iter().filter(|s| s["id"] == "audio.generate").filter_map(|s| s["params"]["kind"].as_str()).collect();
+    assert!(!heard.contains(&"whoosh"), "{heard:?}");
+    // the video's own sounds win
+    let r = make(&ex, &json!({"seconds": 12, "style": "energetic", "sounds": ["whoosh"], "dryRun": true, "captions": false}), None, &mut lines).await.unwrap();
+    assert_eq!(r["style"]["sounds"], json!(["whoosh"]));
 }
 
 #[tokio::test]

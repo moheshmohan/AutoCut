@@ -32,6 +32,7 @@ pub mod contact_sheet;
 pub mod copy_lint;
 pub mod craft_check;
 pub mod cutout;
+pub mod deal;
 pub mod delivery;
 pub mod demo;
 pub mod denoise;
@@ -788,6 +789,9 @@ pub struct Session {
     pub media_stamps: std::collections::HashMap<String, media_watch::Stamp>,
     /// The stamps being taken on a worker thread ([`Session::start_media_scan`]).
     pub media_scan: Option<media_watch::MediaScan>,
+    /// Choices `autocut.deal` dealt (kind → id) since the last fingerprint recorded in the taste
+    /// history (`autocut.fingerprint {record: true}` records them with the video and clears them).
+    pub taste_deals: std::collections::BTreeMap<String, String>,
 }
 
 /// An export advanced a batch at a time on the host's thread ([`Session::pump_jobs`]).
@@ -918,6 +922,7 @@ impl Session {
             lost_graphic: None,
             media_stamps: Default::default(),
             media_scan: None,
+            taste_deals: Default::default(),
         }
     }
 
