@@ -7,6 +7,9 @@
 //!   it plays, a limiter's gain reduction, clipping.
 //! * [`beats`] — tempo and beat tracking of music (onset strength → autocorrelation tempo →
 //!   dynamic-programming beats with a local tempo that follows drift; Ellis 2007).
+//! * [`structure`] — music structure for fitting a track to a film: downbeats, sections and
+//!   their energy, drops, stops, where the music ends and how (cadence, fade, cut), and how sure
+//!   the analysis is.
 //! * [`effects`] — clip/track audio effects behind the common [`AudioEffect`] trait, with a
 //!   registry ([`effects()`]) describing every effect's parameters (range, unit, default) so the
 //!   engine and UI can build controls generically. Voice Isolation and Enhance Voice
@@ -55,6 +58,7 @@ pub mod resample;
 pub mod sfx;
 mod smooth;
 pub mod stretch;
+pub mod structure;
 pub mod sync;
 pub mod synth;
 

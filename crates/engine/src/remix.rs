@@ -8,7 +8,7 @@
 //! | `clip.remix.properties` | Clip ▸ Remix ▸ Remix Properties… | without parameters returns the settings; with `duration`/`seconds`/`frame`/`timecode`, `segments`, `variations` re-plans |
 //! | `clip.remix.revert` | Clip ▸ Remix ▸ Revert Remix | restores the clip as it was before the remix |
 //! | `clip.remix` | — | agents: enable (if needed) and remix `clip` (default: the selected audio clip) to a target |
-//! | `media.beats` | — | agents: the tempo and beat times of an audio item (the same analysis), to cut picture on the beat |
+//! | `media.beats` | — | agents: the tempo, beats, downbeats, sections (and their energy), drops, stops, end and ending of an audio item (the same analysis), with a confidence: to cut picture on the beat and fit music to a film |
 //! | `media.pauses` | — | agents: where an audio item's sound pauses (its level `belowDb` under its loudest for at least `minSeconds`), and the stretches of sound between: to cut a narration at a sentence's end |
 //!
 //! The remix keeps the clip's start and source In, plays the intro from the beginning and ends on
@@ -249,9 +249,21 @@ fn revert(s: &mut Session, p: &Value) -> Result<Value> {
 /// stretch in memory, and its beat similarity grows with the square of the beats).
 pub const MAX_BEATS_SECONDS: f64 = 20.0 * 60.0;
 
-/// `media.beats`: the tempo and beats of `item`'s sound over `[sourceIn, sourceIn + duration)`
-/// (default: from the start, the whole item up to [`MAX_BEATS_SECONDS`]): `bpm`, `period`
-/// (seconds per beat) and `beats`, the attack of each beat in seconds of the media.
+/// `media.beats`: the tempo, beats and structure of `item`'s sound over `[sourceIn, sourceIn +
+/// duration)` (default: from the start, the whole item up to [`MAX_BEATS_SECONDS`]), times in
+/// seconds of the media ([`filmcraft_audio_dsp::structure`]):
+///
+/// | field | what |
+/// |---|---|
+/// | `bpm`, `period` | the tempo, and seconds per beat |
+/// | `beats` | the attack of each beat |
+/// | `meter`, `downbeats` | beats in a bar (4 or 3), and the attack of each bar's first beat |
+/// | `sections` | `[{start, end, energy}]`: stretches of like music between boundaries on downbeats; `energy` is its loudness against the loudest section's (1), halving every 10 dB |
+/// | `drops` | downbeats where the music lifts into its loud part (the two bars after ≥ 6 dB louder than the two before) |
+/// | `stops` | where the sound falls away abruptly (20 dB within 50 ms) |
+/// | `musicStart`, `musicEnd` | where the music's sound starts and ends (within 45 dB of its loudest) |
+/// | `ending` | `{kind, at}`: `cadence` (a final hit at `at` ringing out), `fade` (fading from `at`) or `cut` (stopping at `at`); `null` without one |
+/// | `confidence`, `confidenceParts` | 0 … 1: overall, and of the beats, downbeats and sections |
 fn beats(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "media.beats";
     let item = crate::commands::item_p(p, "item").ok_or_else(|| bad(CMD, "need `item`"))?;
@@ -270,12 +282,28 @@ fn beats(s: &mut Session, p: &Value) -> Result<Value> {
     let sr = i64::from(a.sample_rate.max(1));
     let lead = dsp::beat_lead(a.sample_rate);
     let at = |smp: i64| (from + Tick::from_units(smp.saturating_add(lead), sr)).seconds();
+    // structure positions are true sample positions (not beat boundaries), rounded to the ms
+    let ms = |x: f64| (x * 1000.0).round() / 1000.0;
+    let true_at = |smp: i64| ms((from + Tick::from_units(smp, sr)).seconds());
+    let st = &a.structure;
+    let beat_at = |i: usize| a.beats.get(i).map(|b| ms(at(*b)));
+    let ending = st.ending.map_or(Value::Null, |e| json!({"kind": e.kind.id(), "at": true_at(e.at)}));
     Ok(json!({
         "item": item.0,
         "bpm": a.bpm,
         "period": a.period / sr as f64,
         "beats": a.beats.iter().map(|b| at(*b)).collect::<Vec<_>>(),
         "seconds": dur.seconds(),
+        "meter": st.meter,
+        "downbeats": st.downbeats.iter().filter_map(|&i| beat_at(i)).collect::<Vec<_>>(),
+        "sections": st.sections.iter().map(|x| json!({"start": true_at(x.start), "end": true_at(x.end), "energy": x.energy})).collect::<Vec<_>>(),
+        "drops": st.drops.iter().filter_map(|d| beat_at(d.beat)).collect::<Vec<_>>(),
+        "stops": st.stops.iter().map(|x| true_at(*x)).collect::<Vec<_>>(),
+        "musicStart": true_at(st.music_start),
+        "musicEnd": true_at(st.music_end),
+        "ending": ending,
+        "confidence": st.confidence.overall,
+        "confidenceParts": {"beats": st.confidence.beats, "downbeats": st.confidence.downbeats, "sections": st.confidence.sections},
     }))
 }
 

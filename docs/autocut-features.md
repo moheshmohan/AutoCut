@@ -558,3 +558,15 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   in one undo step. A long job (`jobs.list`, `jobs.cancel`, MCP progress).
 - **PX4.3**: `packaging/macos/package.sh` builds the AutoCut app and CLI (`AUTOCUT_APP_NAME` set)
   with the feature on; FilmCraft builds stay without it. 944 commands.
+
+## Update 2026-11-23 (PX2, music fitted to the film)
+
+- **PX2.1**: `media.beats` also reports the track's structure (`audio_dsp::structure`):
+  `meter` and `downbeats` (the bar phase that best explains chord changes, low-band and level
+  rises), `sections [{start, end, energy}]` (checkerboard novelty of the beat self-similarity
+  plus level changes, on downbeats; energy halves every 10 dB under the loudest section),
+  `drops` (a downbeat into the loud part, 6 dB over the two bars before), `stops` (the sound
+  falling away 20 dB within 50 ms), `musicStart`/`musicEnd`, `ending {kind: cadence|fade|cut,
+  at}` and `confidence` (with `confidenceParts`: beats, downbeats, sections). Tested on
+  synthesized tracks with known answers (intro, verse, build, drop, breakdown, drop; cadence,
+  fade and cut endings) and on the music engine's own tracks.

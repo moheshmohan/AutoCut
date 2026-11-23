@@ -262,3 +262,56 @@ fn overlaps_are_refused_and_noise_cannot_be_remixed() {
     let err = s.execute("clip.remix.enable", json!({})).unwrap_err().to_string();
     assert!(err.contains("beat") || err.contains("short"), "{err}");
 }
+
+/// `media.beats` reports the structure of imported music with known answers: downbeats on the
+/// bar starts, sections at the parts (a quiet intro, a verse, a build, a drop, a breakdown and
+/// a second drop) with the drops the loudest, the two drops, the music's end and its cadence.
+#[test]
+fn media_beats_reports_downbeats_sections_drops_and_the_ending() {
+    use filmcraft_audio_dsp::structure::{FixtureEnd, Part, fixture};
+    let part = |bars, db, drums, build| Part { bars, db, drums, build };
+    let parts = [
+        part(4, -16.0, false, false),
+        part(8, -7.0, true, false),
+        part(4, -9.0, false, true),
+        part(8, 0.0, true, false),
+        part(4, -14.0, false, false),
+        part(8, 0.0, true, false),
+    ];
+    let f = fixture(SR, 120.0, &parts, FixtureEnd::Cadence, 3);
+    let secs = |x: i64| x as f64 / SR as f64;
+    let (mut s, c) = session(&f.audio, None);
+    let item = item(&s, c).item;
+    let r = s.execute("media.beats", json!({"item": item.0})).unwrap();
+    let nums = |k: &str| -> Vec<f64> { r[k].as_array().unwrap().iter().filter_map(Value::as_f64).collect() };
+    assert_eq!(r["meter"], 4, "{r}");
+    let downbeats = nums("downbeats");
+    let bars: Vec<f64> = f.downbeats.iter().map(|d| secs(*d)).collect();
+    assert!(downbeats.len() >= bars.len() * 8 / 10, "{} of {} bars", downbeats.len(), bars.len());
+    assert!(downbeats.iter().all(|d| bars.iter().any(|b| (b - d).abs() < 0.03)), "downbeats off the bars: {downbeats:?}");
+    let sections = r["sections"].as_array().unwrap();
+    let starts: Vec<f64> = sections.iter().map(|x| x["start"].as_f64().unwrap()).collect();
+    let parts_at: Vec<f64> = f.parts.iter().map(|p| secs(*p)).collect();
+    assert_eq!(starts.len(), parts_at.len(), "{r}");
+    for (a, b) in starts.iter().zip(&parts_at).skip(1) {
+        assert!((a - b).abs() < 0.05, "section at {a}, part at {b}");
+    }
+    let energy: Vec<f64> = sections.iter().map(|x| x["energy"].as_f64().unwrap()).collect();
+    assert!(energy[3] > 0.85 && energy[5] > 0.85 && energy[0] < 0.4 && energy[4] < 0.5, "{energy:?}");
+    let drops = nums("drops");
+    assert_eq!(drops.len(), 2, "{r}");
+    assert!((drops[0] - parts_at[3]).abs() < 0.03 && (drops[1] - parts_at[5]).abs() < 0.03, "{drops:?}");
+    assert_eq!(r["ending"]["kind"], "cadence", "{r}");
+    assert!((r["ending"]["at"].as_f64().unwrap() - secs(f.ending_at)).abs() < 0.05, "{r}");
+    let end = r["musicEnd"].as_f64().unwrap();
+    assert!(end > secs(f.ending_at) + 1.0 && end < r["seconds"].as_f64().unwrap(), "{r}");
+    let conf = r["confidence"].as_f64().unwrap();
+    assert!((0.6..=1.0).contains(&conf), "{r}");
+    // the earlier fields are as they were
+    assert!((r["bpm"].as_f64().unwrap() - 120.0).abs() < 1.0);
+    // a range: everything in seconds of the media, inside it
+    let r = s.execute("media.beats", json!({"item": item.0, "sourceIn": Tick::from_seconds_f64(20.0).0, "duration": Tick::from_seconds_f64(30.0).0})).unwrap();
+    let drops: Vec<f64> = r["drops"].as_array().unwrap().iter().filter_map(Value::as_f64).collect();
+    assert!(drops.iter().any(|d| (d - parts_at[3]).abs() < 0.03), "{r}");
+    assert!(r["sections"].as_array().unwrap().iter().all(|x| (20.0..=50.01).contains(&x["start"].as_f64().unwrap())), "{r}");
+}

@@ -155,6 +155,8 @@ pub struct Analysis {
     /// Beat self-similarity, `beats.len()²`, row-major; beat `i` is `[beats[i], beats[i + 1])`
     /// (the last runs to the end).
     pub sim: Vec<f32>,
+    /// Downbeats, sections, drops, stops, the music's end and ending ([`crate::structure`]).
+    pub structure: crate::structure::Structure,
 }
 
 impl Analysis {
@@ -392,7 +394,8 @@ pub fn analyze(channels: &[&[f32]], sample_rate: u32) -> Result<Analysis, RemixE
             sim[i * m + j] = 0.6 * cos(&chroma[i], &chroma[j]) + 0.4 * (1.0 + cos(&cep[i], &cep[j])) * 0.5;
         }
     }
-    Ok(Analysis { sample_rate, len: len as i64, beats, period: found.period, bpm: found.bpm, sim })
+    let structure = crate::structure::analyse(&mono, sample_rate, &beats, lead, found.period, &chroma, &sim);
+    Ok(Analysis { sample_rate, len: len as i64, beats, period: found.period, bpm: found.bpm, sim, structure })
 }
 
 // ------------------------------------------------------------------------------------- planning
@@ -781,7 +784,7 @@ mod tests {
     fn planning_a_huge_target_from_a_tiny_source_terminates() {
         let beats: Vec<i64> = (0..24).map(|i| i * 10).collect();
         let m = beats.len();
-        let a = Analysis { sample_rate: 48_000, len: 240, beats, period: 10.0, bpm: 0.0, sim: vec![0.0; m * m] };
+        let a = Analysis { sample_rate: 48_000, len: 240, beats, period: 10.0, bpm: 0.0, sim: vec![0.0; m * m], structure: Default::default() };
         // 2^50 samples would need ~2^43 joints: the plan gives up at its joint limit instead
         let _ = plan(&a, 1 << 50, Params::default());
         // degenerate analyses are refused, not indexed
