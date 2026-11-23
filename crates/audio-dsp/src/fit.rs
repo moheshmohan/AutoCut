@@ -1064,6 +1064,9 @@ pub fn check_joins(a: &Analysis, plan: &Plan, beats: &[(usize, usize)], read: &m
 
 /// Fit the analysed music to `req` (see the module docs), reading the source through `read` to
 /// check each join after rendering.
+/// How much earlier than the target the music may end before the fit warns, seconds.
+const EARLY_END_SECONDS: f64 = 1.0;
+
 pub fn fit(a: &Analysis, req: &Request, read: &mut Reader<'_>) -> Result<Fit, RemixError> {
     if a.beats.len() < 2 || !a.period.is_finite() || a.period <= 0.0 || a.structure.beat_db.len() != a.beats.len() && !a.structure.beat_db.is_empty() {
         return Err(RemixError::TooShort);
@@ -1168,6 +1171,17 @@ pub fn fit(a: &Analysis, req: &Request, read: &mut Reader<'_>) -> Result<Fit, Re
     warnings.extend(p.warnings);
     let plan_len = p.plan.len();
     let len = (plan_len as f64 / p.stretch).round() as i64;
+    // Music that ends well before the film leaves the end in silence: say so (a last stop event
+    // asks for that silence, so it is not flagged).
+    let short = req.target.saturating_sub(len);
+    if p.ended != "stop" && short as f64 > EARLY_END_SECONDS * sr {
+        warnings.push(format!(
+            "the music ends at {:.2} s, {:.2} s before the {:.2} s asked for: the film runs on in silence there",
+            len as f64 / sr,
+            short as f64 / sr,
+            req.target as f64 / sr
+        ));
+    }
     Ok(Fit {
         plan: p.plan,
         stretch: p.stretch,
@@ -1404,6 +1418,24 @@ mod tests {
         assert!((secs(f.len) - 30.0).abs() <= 0.25, "{}", secs(f.len));
         assert_eq!(f.plan.fade_out, 0, "a hard cut");
         assert!(f.warnings.iter().any(|w| w.contains("not used")), "{:?}", f.warnings);
+    }
+
+    /// A track that ends on a cut, its own ending landed well before the film's end: the fit says
+    /// the film runs on in silence. A cadence that rings on to the end does not warn.
+    #[test]
+    fn music_ending_well_before_the_film_warns() {
+        let ask = |end: FixtureEnd, landing: f64| {
+            let (m, a, _) = track(end);
+            let r = Request { target: at(45.0), events: vec![Event { kind: EventKind::Landing, at: at(landing) }], ending: Ending::Own, ..Request::default() };
+            fit(&a, &r, &mut reader(&m)).expect("fit")
+        };
+        let f = ask(FixtureEnd::Cut, 38.0);
+        assert!(secs(f.len) < 44.0, "{}", secs(f.len));
+        assert!(f.warnings.iter().any(|w| w.contains("runs on in silence")), "{:?}", f.warnings);
+        let f = ask(FixtureEnd::Cadence, 43.0);
+        if 45.0 - secs(f.len) <= EARLY_END_SECONDS {
+            assert!(!f.warnings.iter().any(|w| w.contains("runs on in silence")), "{} {:?}", secs(f.len), f.warnings);
+        }
     }
 
     #[test]
