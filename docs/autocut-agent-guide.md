@@ -748,6 +748,8 @@ Never show the user something you haven't looked at.
 | Text in the platform's interface areas | `exec sequence.checkSafeZones platform=reels` |
 | Motion: pops, stills, a flat opening, cuts a minute (warnings) | `exec qa.motionEnergy '{"path":"out.mp4","sheet":"motion.png"}'` (or `sequence`; declare intentional `holds`) |
 | Text and timeline craft: reading time, size, contrast over the footage, dead stretches, silence (warnings) | `exec sequence.checkCraft` |
+| Motion design on the timeline, no render: bouncy eases, entrance and exit lengths, exits longer than entrances, long staggers, every title entering alike, text looping the whole clip, jumps at clip edges (warnings) | `exec sequence.checkMotion` (`style: "playful"`, or `autocut.taste` `motion: "playful"`, allows overshoot; `bands` overrides the frame ranges). Also `delivery.preflight`'s `motionCraft` check (Reflex, waivable) |
+| Motion filmstrips: seven frames per animated title, transition and alpha overlay, with jump, mid-move step, dissolve dip, fade past its shot and replayed-entrance detectors (warnings) | `filmcraft-cli frames --motion --project P.fcproj --out strips/` (`--items 12,12:out,t5`, `--scale 0.25`); MCP: `sequence.motionStrips {out, items?, wait: true}`, a long job. The folder must be new or empty |
 | Copy: stock phrases, filler, shot-describing narration, device budgets, figures not in the fact ledger (warnings) | `exec copy.lint '{"sequence":12,"publish":{"title":"…","description":"…"}}'`; your phrases in `autocut.taste` `phrases` or `allow` are never flagged; figures are checked against `facts` or `build/facts.json` |
 | The delivery gate with tiers | `exec delivery.preflight` reports each check's `tier`: **Floor** (blocks: sources, clicks, mix, privacy, changed narration, Shorts safe zones, screen protection; the new text contrast under 3:1 and figures only warn until `floorBlocks: true`), **Reflex** (fix it, or waive it in `build/decisions.json` with `reason` and `evidence`; more than five waivers is a finding), **Finish** (reported only) |
 | Unblurred faces in the result | `exec sequence.checkPrivacy '{"seconds":[1,5,9]}'` |
@@ -760,7 +762,7 @@ How much to check (adapted from the same huashu-motion verification guide):
 - **Deterministic checks first, every time.** QA commands, probes, loudness and safe zones cost no
   tokens and catch the mechanical faults. Run them before looking at anything.
 - **Check motion, not stills.** A sheet of stills can't show a pop, a stall or an entrance replayed
-  across a cut. Watch the export once at normal speed as well.
+  across a cut. Look at the motion filmstrips, and watch the export once at normal speed as well.
 - **A budget.** One full inspection, one batch of fixes, then one round that confirms what changed
   and the cuts beside it. Then stop and report what is left, rather than polishing in circles.
 - **Fresh eyes.** A second reviewer gets the brief, the export, the chosen direction and the facts
