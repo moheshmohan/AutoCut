@@ -767,6 +767,8 @@ fn keyframe_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, target: KeyframeRef,
         params["mask"] = json!(mask);
     }
     ui.label(egui::RichText::new(tl!("Temporal Interpolation")).color(app.tokens.text_dim));
+    // the new modes start from their defaults (a spring at damping 0.9, five steps, a wiggle of
+    // 10 units at 2 Hz, a gentle S curve) or the numbers the keyframe already has
     for (label, key) in [
         (tl!("Linear"), "linear"),
         (tl!("Bezier"), "bezier"),
@@ -775,6 +777,10 @@ fn keyframe_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, target: KeyframeRef,
         (tl!("Hold"), "hold"),
         (tl!("Ease In"), "easeIn"),
         (tl!("Ease Out"), "easeOut"),
+        (tl!("Spring"), "spring"),
+        (tl!("Steps"), "steps"),
+        (tl!("Wiggle"), "wiggle"),
+        (tl!("Custom Curve"), "custom"),
     ] {
         let response = ui.button(label);
         app.auto.add(&format!("effectControls.keyframeMenu.{key}"), response.rect, label);
@@ -785,6 +791,20 @@ fn keyframe_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, target: KeyframeRef,
             ui.close();
         }
     }
+    // perceptual scale: the segment interpolated in log space (numbers and points only)
+    if let Some(k) = menu_keyframe(app, &target).filter(|k| matches!(k.value, filmcraft_project::ParamValue::Float(_) | filmcraft_project::ParamValue::Vec2(_)))
+    {
+        let on = k.segment().perceptual;
+        let mut checked = on;
+        let response = ui.checkbox(&mut checked, tl!("Perceptual Scale"));
+        app.auto.add("effectControls.keyframeMenu.perceptual", response.rect, tl!("Perceptual Scale"));
+        if response.clicked() {
+            let mut params = params.clone();
+            params["perceptual"] = json!(!on);
+            actions.push(("effects.setKeyframe".into(), params));
+            ui.close();
+        }
+    }
     ui.separator();
     let response = ui.button(tl!("Clear"));
     app.auto.add("effectControls.keyframeMenu.clear", response.rect, "Clear");
@@ -792,6 +812,17 @@ fn keyframe_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, target: KeyframeRef,
         actions.push(("effects.deleteKeyframe".into(), params));
         ui.close();
     }
+}
+
+/// The keyframe a context menu is for (its effect's mask parameter when `mask` is set).
+fn menu_keyframe(app: &FilmcraftApp, target: &KeyframeRef) -> Option<filmcraft_project::Keyframe> {
+    let (_, it) = app.session.active_sequence()?.find_item(ClipId(target.clip))?;
+    let e = it.effects.get(target.effect)?;
+    let p = match target.mask {
+        Some(m) => e.masks.get(m)?.param(&target.param)?,
+        None => e.params.get(&target.param)?,
+    };
+    p.keyframes.iter().find(|k| k.time == target.time).cloned()
 }
 
 /// Lumetri Color panel: edits (or adds) the Lumetri effect on the selected clip, grouped by section.
@@ -1226,10 +1257,10 @@ pub(crate) fn graph_rows(
         if !(-0.01..=1.01).contains(&f) {
             continue;
         }
-        let eases_out =
-            !matches!(k.interp, filmcraft_project::Interpolation::Linear | filmcraft_project::Interpolation::Hold | filmcraft_project::Interpolation::EaseIn);
-        let eases_in =
-            !matches!(k.interp, filmcraft_project::Interpolation::Linear | filmcraft_project::Interpolation::Hold | filmcraft_project::Interpolation::EaseOut);
+        // influence handles only where a Bézier ease uses them (not Linear, Hold or the PX5.1
+        // modes, whose shape is their own; an Ease In on the next keyframe never bends those)
+        let eases_out = k.interp.eases_out();
+        let eases_in = k.interp.eases_in() && i.checked_sub(1).and_then(|j| ks.get(j)).is_none_or(|prev| !prev.interp.own_shape());
         let comps = graph_components(&k.value);
         for (ci, &v) in comps.iter().enumerate() {
             if !v.is_finite() {

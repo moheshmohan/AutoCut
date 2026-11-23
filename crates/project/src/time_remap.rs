@@ -130,6 +130,7 @@ fn key_of(curve: &Param, source_in: Tick, speed: f64, duration: Tick) -> u64 {
         eat(k.interp as u64);
         eat(k.in_influence.to_bits());
         eat(k.out_influence.to_bits());
+        k.segment().fingerprint(&mut eat);
     }
     h
 }

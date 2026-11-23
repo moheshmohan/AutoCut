@@ -43,6 +43,10 @@
 //!   them). No-op step; older builds would drop them when saving.
 //! - **v17**: the taste profile (`Project::taste`, `autocut.taste`: how the project's videos are
 //!   made). No-op step; older builds would drop it when saving.
+//! - **v18** (PX5.1): keyframe eases beyond Premiere's set: the `Spring`, `Steps`, `Wiggle` and
+//!   `Custom` interpolations and a keyframe's `ease` (spring, steps, wiggle, curve, perceptual).
+//!   No-op step: older keyframes have no `ease` and load unchanged; older builds would fail to
+//!   read the new interpolations and drop the `ease` numbers when saving.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
@@ -70,7 +74,7 @@ pub type Migration = fn(Value) -> Result<Value, String>;
 /// edit a shipped one.
 pub const MIGRATIONS: &[Migration] = &[
     v1_to_v2, v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6, v6_to_v7, v7_to_v8, v8_to_v9, v9_to_v10, v10_to_v11, v11_to_v12, v12_to_v13, v13_to_v14, v14_to_v15,
-    v15_to_v16, v16_to_v17,
+    v15_to_v16, v16_to_v17, v17_to_v18,
 ];
 
 /// The schema version this build writes (and the newest it reads).
@@ -419,13 +423,19 @@ fn v16_to_v17(doc: Value) -> Result<Value, String> {
     Ok(doc)
 }
 
+/// v17 → v18: spring, steps, wiggle and custom-curve keyframes and the perceptual option.
+/// Existing keyframes need no change (no `ease`: their segments are as before).
+fn v17_to_v18(doc: Value) -> Result<Value, String> {
+    Ok(doc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn schema_version_matches_table() {
-        assert_eq!(SCHEMA_VERSION, 17);
+        assert_eq!(SCHEMA_VERSION, 18);
     }
 
     #[test]

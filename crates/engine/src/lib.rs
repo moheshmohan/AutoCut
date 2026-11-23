@@ -55,6 +55,7 @@ pub mod interchange;
 pub mod interpolate;
 pub mod ken_burns;
 pub mod keyboard;
+mod keyframe_ease;
 mod keyframe_move;
 pub mod loudness;
 mod marker_export;

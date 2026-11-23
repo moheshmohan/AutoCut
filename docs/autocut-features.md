@@ -436,3 +436,20 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   tracks (nothing there is moved). One undo step. A footage box RAEA crops is shown uncropped and
   listed in `approximated`. RAEA's `reference.mp4` stays beside the layers; on the real run a frame
   of the layered sequence matched it. 939 commands.
+
+## Update 2026-11-23 (PX5, keyframes that move well)
+
+- **PX5.1**: spring, perceptual scale and new eases for keyframes. Four interpolation modes beside
+  Premiere's: **Spring** (damping ratio 0.05–10, default 0.9 with no visible overshoot, 0.5–0.7 for
+  a declared playful style only; stiffness, mass and an overshoot clamp; it lands on the next
+  keyframe exactly), **Steps** (`steps(n)`, n up to 1000), a seeded **Wiggle** (amplitude,
+  frequency, seed: the same every render, no state between frames) and **Custom** curves (up to 64
+  points, time increasing). A **perceptual** option interpolates scale (any number or point) in
+  log space, so a zoom from 100 % to 400 % feels even; zero or mixed-sign ends fall back to linear.
+  `effects.setInterpolation {…, interpolation: "spring"|"steps"|"steps(n)"|"wiggle"|"custom",
+  spring?, steps?, wiggle?, curve?, perceptual?}` and `effects.setKeyframe` (the numbers alone)
+  set them, clamped to safe ranges, with non-finite numbers, unknown keys and curves out of order
+  refused; Effect Controls lists the modes and a Perceptual Scale switch in the keyframe menu.
+  Preview, export and audio evaluate them through the same keyframe code. Project schema v18 (a
+  no-op step: older keyframes load and save unchanged). Details in `docs/architecture.md`
+  ("Keyframes"). 939 commands.

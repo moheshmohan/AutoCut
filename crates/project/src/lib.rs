@@ -23,6 +23,7 @@ pub mod graphic;
 pub mod graphic_design;
 pub mod gtemplate;
 pub mod keyframe;
+pub mod keyframe_ease;
 pub mod mask;
 pub mod mixer;
 pub mod motion_track;

@@ -170,6 +170,27 @@ EffectInstance
   ids), and the engine runs it after every sequence edit.
 - Timeline positions are sequence ticks; `source_in` and keyframes are in media time, so trims and
   splits never move keyframes.
+- **Keyframes** (`project::keyframe`, `project::keyframe_ease`): a keyframe's interpolation shapes
+  the segment leaving it. Premiere's set (Linear, Hold, Bezier, Auto Bezier, Continuous Bezier,
+  Ease In, Ease Out, with influence handles) and four more (PX5.1): **Spring** (a damped harmonic
+  oscillator released from rest: damping ratio, stiffness, mass and an overshoot clamp; default
+  damping 0.9, no visible overshoot; 0.5–0.7 only for a declared playful style; it moves at its
+  natural speed and rests, or runs its clock faster to settle exactly at the next keyframe, and
+  what is left at the end is spread over the segment so it lands exactly), **Steps** (`steps(n)`,
+  1–1000 jumps, the last onto the next keyframe), **Wiggle** (linear plus a smooth seeded wobble:
+  amplitude in the parameter's units, frequency, seed; a hash of the seed, the component and the
+  clip time, no state between frames; faded in and out over the segment's first and last tenth)
+  and **Custom** (up to 64 `(time, progress)` points, time increasing, a monotone cubic between
+  them). The keyframe's optional `ease` holds these numbers and the **perceptual** option, which
+  interpolates numbers and points in log space (100 → 200 → 400 % evenly; values of one sign
+  only, others linearly, never NaN). `effects.setInterpolation` sets the mode and numbers,
+  `effects.setKeyframe` the numbers alone, and Effect Controls lists every mode in the keyframe
+  menu (`effectControls.keyframeMenu.<mode>`, `…perceptual`). Every evaluation, in the preview,
+  the export, the audio mixer's per-sample automation (`Param::scalar_at`), time remapping and
+  the graphs, goes through `Param::value_at`, so all of them see the new modes. Colours and mask
+  paths take a mode's progress linearly (Wiggle and perceptual apply to numbers and points);
+  Interchange exports keep the keyframes and write the new segments as linear between them (the
+  FCP 7 XML export says so in its report).
 - **Effect definitions are data.** `project::effect::effect_defs()` lists every video effect,
   audio effect and transition with its parameter schema. The Effects panel tree, the Effect
   Controls rows and the parameter docs agents see are all generated from it.

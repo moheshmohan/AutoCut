@@ -1412,6 +1412,11 @@ impl Exp<'_, '_> {
     fn write_interp(&mut self, i: Interpolation) {
         match i {
             Interpolation::Linear => {}
+            // FCP 7 XML has no spring, steps, wiggle or custom curve: the keyframes are kept and
+            // the segment between them is written linear
+            Interpolation::Spring | Interpolation::Steps | Interpolation::Wiggle | Interpolation::Custom => {
+                self.report.info("spring, steps, wiggle and custom-curve keyframes are written as linear keyframes");
+            }
             Interpolation::Hold => {
                 self.w.open("interpolation", &[]);
                 self.w.text("name", "hold");

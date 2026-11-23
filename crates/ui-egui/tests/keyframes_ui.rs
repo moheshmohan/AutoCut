@@ -670,6 +670,50 @@ fn graph_keyframes_offer_interpolation_and_clear_in_one_undo_step() {
     }
 }
 
+/// PX5.1: the keyframe menu lists Spring, Steps, Wiggle and Custom Curve, each with its own
+/// automation id, and a Perceptual Scale switch for number and point parameters; each choice is
+/// one undo step that changes only the keyframe's segment.
+#[test]
+fn keyframe_menu_offers_the_new_eases_and_perceptual_scale() {
+    let (mut d, clip) = Driver::demo();
+    for (seconds, value) in [(0.5, 100.0), (2.5, 400.0)] {
+        d.seek(seconds);
+        d.exec("effects.addKeyframe", json!({"clip": clip.id, "effect": "motion", "param": "scale"}));
+        d.exec("effects.setParam", json!({"clip": clip.id, "effect": "motion", "param": "scale", "value": value}));
+    }
+    d.click("effectControls.motion.scale.graphs");
+    let before = d.parameter(&clip, "motion", "scale");
+    let target = format!("effectControls.scale.graph.keyframe.{}", before.keyframes[0].time.0);
+    let undo = d.undo_len();
+    for (key, mode) in
+        [("spring", Interpolation::Spring), ("steps", Interpolation::Steps), ("wiggle", Interpolation::Wiggle), ("custom", Interpolation::Custom)]
+    {
+        d.right_click(&target);
+        assert_eq!(d.parameter(&clip, "motion", "scale"), before, "opening the menu changes nothing");
+        d.click(&format!("effectControls.keyframeMenu.{key}"));
+        let changed = d.parameter(&clip, "motion", "scale");
+        assert_eq!(changed.keyframes[0].interp, mode);
+        assert_eq!((changed.keyframes[0].time, &changed.keyframes[0].value), (before.keyframes[0].time, &before.keyframes[0].value));
+        assert_eq!(changed.keyframes[1], before.keyframes[1]);
+        assert_eq!(d.undo_len(), undo + 1);
+        d.exec("edit.undo", json!({}));
+        assert_eq!(d.parameter(&clip, "motion", "scale"), before);
+    }
+    // perceptual scale: on, then off again, one undo step each
+    d.right_click(&target);
+    d.click("effectControls.keyframeMenu.perceptual");
+    let on = d.parameter(&clip, "motion", "scale");
+    assert!(on.keyframes[0].segment().perceptual);
+    assert_eq!(on.keyframes[0].interp, before.keyframes[0].interp);
+    let mid = Tick((on.keyframes[0].time.0 + on.keyframes[1].time.0) / 2);
+    assert!((on.f64_at(mid) - 200.0).abs() < 1e-6, "an even zoom: {}", on.f64_at(mid));
+    assert_eq!(d.undo_len(), undo + 1);
+    d.right_click(&target);
+    d.click("effectControls.keyframeMenu.perceptual");
+    assert_eq!(d.parameter(&clip, "motion", "scale"), before);
+    assert_eq!(d.undo_len(), undo + 2);
+}
+
 #[test]
 fn mask_keyframe_menus_preserve_the_effect_and_other_masks() {
     let (mut d, clip) = Driver::demo();

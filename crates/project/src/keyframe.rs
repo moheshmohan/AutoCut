@@ -2,11 +2,23 @@
 //!
 //! A parameter is a static value or a list of keyframes (clip-relative ticks). Interpolation per
 //! keyframe governs the segment leaving it: Linear, Hold, Bezier (with influence/speed handles),
-//! Auto Bezier, Continuous Bezier, Ease In/Out (Bezier presets) — Premiere's temporal set.
+//! Auto Bezier, Continuous Bezier, Ease In/Out (Bezier presets) — Premiere's temporal set — and
+//! beyond it Spring, Steps, Wiggle and Custom curves, whose numbers and the perceptual (log-space)
+//! option live in the keyframe's [`SegmentEase`] ([`crate::keyframe_ease`]).
+//!
+//! Every evaluation goes through [`Param::value_at`] (and its allocation-free scalar twin
+//! [`Param::scalar_at`], used per audio sample), so preview, export, audio and the graphs all see
+//! the same curve. The new modes shape only the segment leaving their keyframe (the next
+//! keyframe's Ease In does not bend them); a Wiggle segment is Linear plus its wobble. Perceptual
+//! and Wiggle apply to numbers and points; colours and mask paths take the mode's progress
+//! linearly (a Wiggle colour or path is plain Linear).
 
 use filmcraft_geom::Vec2;
-use filmcraft_time::Tick;
+use filmcraft_time::{TICKS_PER_SECOND, Tick};
 use serde::{Deserialize, Serialize};
+
+use crate::keyframe_ease::{PLAIN, curve_progress, log_lerp, steps_progress};
+pub use crate::keyframe_ease::{SegmentEase, Spring, Wiggle};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ParamValue {
@@ -105,6 +117,8 @@ impl ParamValue {
     }
 }
 
+/// How the segment leaving a keyframe moves. New variants go at the end (the order is a cache
+/// key, `as u64`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Interpolation {
     #[default]
@@ -115,10 +129,18 @@ pub enum Interpolation {
     ContinuousBezier,
     EaseIn,
     EaseOut,
+    /// A damped spring ([`Spring`], from [`SegmentEase::spring`] or the default).
+    Spring,
+    /// `steps(n)` ([`SegmentEase::steps`], default [`crate::keyframe_ease::DEFAULT_STEPS`]).
+    Steps,
+    /// Linear plus a seeded wobble ([`Wiggle`]).
+    Wiggle,
+    /// A custom curve ([`SegmentEase::curve`]).
+    Custom,
 }
 
 impl Interpolation {
-    pub const ALL: [Interpolation; 7] = [
+    pub const ALL: [Interpolation; 11] = [
         Interpolation::Linear,
         Interpolation::Bezier,
         Interpolation::AutoBezier,
@@ -126,6 +148,10 @@ impl Interpolation {
         Interpolation::Hold,
         Interpolation::EaseIn,
         Interpolation::EaseOut,
+        Interpolation::Spring,
+        Interpolation::Steps,
+        Interpolation::Wiggle,
+        Interpolation::Custom,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -136,7 +162,48 @@ impl Interpolation {
             Interpolation::ContinuousBezier => "Continuous Bezier",
             Interpolation::EaseIn => "Ease In",
             Interpolation::EaseOut => "Ease Out",
+            Interpolation::Spring => "Spring",
+            Interpolation::Steps => "Steps",
+            Interpolation::Wiggle => "Wiggle",
+            Interpolation::Custom => "Custom Curve",
         }
+    }
+    /// The command name (`effects.setInterpolation`, the Effect Controls menu's automation ids).
+    pub fn name(self) -> &'static str {
+        match self {
+            Interpolation::Linear => "linear",
+            Interpolation::Hold => "hold",
+            Interpolation::Bezier => "bezier",
+            Interpolation::AutoBezier => "autoBezier",
+            Interpolation::ContinuousBezier => "continuousBezier",
+            Interpolation::EaseIn => "easeIn",
+            Interpolation::EaseOut => "easeOut",
+            Interpolation::Spring => "spring",
+            Interpolation::Steps => "steps",
+            Interpolation::Wiggle => "wiggle",
+            Interpolation::Custom => "custom",
+        }
+    }
+    /// The mode a name says, any case (`customCurve` and `curve` name Custom).
+    pub fn from_name(s: &str) -> Option<Interpolation> {
+        let k = s.trim().to_ascii_lowercase();
+        let k = if matches!(k.as_str(), "customcurve" | "curve") { "custom" } else { k.as_str() };
+        Interpolation::ALL.into_iter().find(|i| i.name().eq_ignore_ascii_case(k))
+    }
+    /// Whether the segment leaving a keyframe of this mode starts with a Bézier ease (the
+    /// keyframe's outgoing influence handle applies).
+    pub fn eases_out(self) -> bool {
+        matches!(self, Interpolation::Bezier | Interpolation::AutoBezier | Interpolation::ContinuousBezier | Interpolation::EaseOut)
+    }
+    /// Whether the segment arriving at a keyframe of this mode ends with a Bézier ease (the
+    /// keyframe's incoming influence handle applies, unless the segment's own mode ignores it).
+    pub fn eases_in(self) -> bool {
+        matches!(self, Interpolation::Bezier | Interpolation::AutoBezier | Interpolation::ContinuousBezier | Interpolation::EaseIn)
+    }
+    /// Whether a segment of this mode has a shape of its own that the next keyframe's Ease In
+    /// does not bend (Spring, Steps and Custom; Wiggle is Linear underneath).
+    pub fn own_shape(self) -> bool {
+        matches!(self, Interpolation::Spring | Interpolation::Steps | Interpolation::Custom)
     }
 }
 
@@ -152,6 +219,10 @@ pub struct Keyframe {
     pub out_influence: f64,
     #[serde(default = "default_influence")]
     pub in_influence: f64,
+    /// The leaving segment's spring, steps, wiggle and custom curve numbers and its perceptual
+    /// option (PX5.1). None on most keyframes, and on every keyframe of an older project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ease: Option<Box<SegmentEase>>,
 }
 
 fn default_influence() -> f64 {
@@ -160,7 +231,21 @@ fn default_influence() -> f64 {
 
 impl Keyframe {
     pub fn new(time: Tick, value: ParamValue) -> Self {
-        Self { time, value, interp: Interpolation::Linear, out_influence: default_influence(), in_influence: default_influence() }
+        Self { time, value, interp: Interpolation::Linear, out_influence: default_influence(), in_influence: default_influence(), ease: None }
+    }
+    /// The leaving segment's numbers (all defaults when it has none).
+    pub fn segment(&self) -> &SegmentEase {
+        self.ease.as_deref().unwrap_or(&PLAIN)
+    }
+    /// The leaving segment's numbers, to edit; call [`Keyframe::tidy_ease`] after.
+    pub fn segment_mut(&mut self) -> &mut SegmentEase {
+        self.ease.get_or_insert_with(Default::default)
+    }
+    /// Drop the segment numbers when nothing is set (so the file stays as before).
+    pub fn tidy_ease(&mut self) {
+        if self.ease.as_deref().is_some_and(SegmentEase::is_plain) {
+            self.ease = None;
+        }
     }
 }
 
@@ -197,9 +282,10 @@ impl Param {
         match self.keyframes.binary_search_by_key(&t, |k| k.time) {
             Ok(i) => self.keyframes[i].value = value,
             Err(i) => {
-                let interp = i.checked_sub(1).and_then(|j| self.keyframes.get(j)).map(|k| k.interp).unwrap_or_default();
+                let prev = i.checked_sub(1).and_then(|j| self.keyframes.get(j));
                 let mut k = Keyframe::new(t, value);
-                k.interp = interp;
+                k.interp = prev.map(|k| k.interp).unwrap_or_default();
+                k.ease = prev.and_then(|k| k.ease.clone());
                 self.keyframes.insert(i, k);
             }
         }
@@ -247,37 +333,48 @@ impl Param {
         }
     }
 
-    /// Evaluate at clip time `t`.
-    pub fn value_at(&self, t: Tick) -> ParamValue {
+    /// The keyframes around clip time `t` and how far `t` is between them, or the value that
+    /// holds there (before the first keyframe, after the last, on one, or a static parameter).
+    /// Hostile keyframe lists (unsorted, repeated times) give a held value, never a panic.
+    fn locate(&self, t: Tick) -> At<'_> {
         let k = &self.keyframes;
-        if k.is_empty() {
-            return self.value.clone();
+        let (Some(first), Some(last)) = (k.first(), k.last()) else { return At::Held(&self.value) };
+        if t <= first.time {
+            return At::Held(&first.value);
         }
-        if t <= k[0].time {
-            return k[0].value.clone();
-        }
-        let last = &k[k.len() - 1];
         if t >= last.time {
-            return last.value.clone();
+            return At::Held(&last.value);
         }
         let i = match k.binary_search_by_key(&t, |kf| kf.time) {
-            Ok(i) => return k[i].value.clone(),
-            Err(i) => i - 1,
+            Ok(i) => return At::Held(k.get(i).map_or(&last.value, |x| &x.value)),
+            Err(i) => i.saturating_sub(1),
         };
-        let (a, b) = (&k[i], &k[i + 1]);
+        let (Some(a), Some(b)) = (k.get(i), k.get(i + 1)) else { return At::Held(&last.value) };
+        let span = b.time.0.saturating_sub(a.time.0);
+        if span <= 0 {
+            return At::Held(&a.value);
+        }
+        let u = (t.0.saturating_sub(a.time.0) as f64 / span as f64).clamp(0.0, 1.0);
+        At::Between { a, b, u, seconds: span as f64 / TICKS_PER_SECOND as f64, at: t.0 as f64 / TICKS_PER_SECOND as f64 }
+    }
+
+    /// Evaluate at clip time `t`.
+    pub fn value_at(&self, t: Tick) -> ParamValue {
+        let (a, b, seg) = match self.locate(t) {
+            At::Held(v) => return v.clone(),
+            At::Between { a, b, u, seconds, at } => (a, b, Segment::new(a, b, u, seconds, at)),
+        };
         if a.interp == Interpolation::Hold || !a.value.interpolates() {
             return a.value.clone();
         }
-        let span = (b.time - a.time).0 as f64;
-        let u = (t - a.time).0 as f64 / span;
-        let e = ease(a, b, u);
         let ca = a.value.components();
         let cb = b.value.components();
         if ca.len() != cb.len() {
             // e.g. mask paths with different vertex counts: hold
             return a.value.clone();
         }
-        let c: Vec<f64> = ca.iter().zip(&cb).map(|(x, y)| x + (y - x) * e).collect();
+        let numeric = matches!(a.value, ParamValue::Float(_) | ParamValue::Vec2(_));
+        let c: Vec<f64> = ca.iter().zip(&cb).enumerate().map(|(i, (x, y))| seg.mix(i, *x, *y, numeric)).collect();
         ParamValue::from_components(&a.value, &c)
     }
 
@@ -286,31 +383,19 @@ impl Param {
     }
 
     /// Allocation-free [`Param::f64_at`] for scalar parameters (Float / Choice / Bool), for
-    /// per-sample evaluation in the audio mixer. Non-scalar values evaluate to 0.
+    /// per-sample evaluation in the audio mixer. Non-scalar values evaluate to 0. Every mode
+    /// evaluates as in [`Param::value_at`].
     pub fn scalar_at(&self, t: Tick) -> f64 {
-        let k = &self.keyframes;
         let s = |v: &ParamValue| v.as_f64().unwrap_or(0.0);
-        if k.is_empty() {
-            return s(&self.value);
-        }
-        if t <= k[0].time {
-            return s(&k[0].value);
-        }
-        let last = &k[k.len() - 1];
-        if t >= last.time {
-            return s(&last.value);
-        }
-        let i = match k.binary_search_by_key(&t, |kf| kf.time) {
-            Ok(i) => return s(&k[i].value),
-            Err(i) => i - 1,
+        let (a, b, seg) = match self.locate(t) {
+            At::Held(v) => return s(v),
+            At::Between { a, b, u, seconds, at } => (a, b, Segment::new(a, b, u, seconds, at)),
         };
-        let (a, b) = (&k[i], &k[i + 1]);
         let (va, vb) = (s(&a.value), s(&b.value));
         if a.interp == Interpolation::Hold || !matches!(a.value, ParamValue::Float(_)) {
             return va;
         }
-        let u = (t - a.time).0 as f64 / (b.time - a.time).0 as f64;
-        va + (vb - va) * ease(a, b, u)
+        seg.mix(0, va, vb, true)
     }
 
     pub fn vec2_at(&self, t: Tick) -> Vec2 {
@@ -326,11 +411,54 @@ impl Param {
     }
 }
 
+/// Where a clip time falls in a parameter's keyframes ([`Param::locate`]).
+enum At<'a> {
+    /// A value that holds there.
+    Held(&'a ParamValue),
+    /// Between keyframes `a` and `b`, `u` (0..1) of the way, the segment `seconds` long, at clip
+    /// time `at` seconds.
+    Between { a: &'a Keyframe, b: &'a Keyframe, u: f64, seconds: f64, at: f64 },
+}
+
+/// One evaluation of the segment leaving keyframe `a`: its eased progress and what each value
+/// component adds to it.
+struct Segment<'a> {
+    a: &'a Keyframe,
+    /// Eased progress (0 at `a`, 1 at the next keyframe; beyond for an overshoot).
+    e: f64,
+    u: f64,
+    at: f64,
+}
+
+impl<'a> Segment<'a> {
+    fn new(a: &'a Keyframe, b: &Keyframe, u: f64, seconds: f64, at: f64) -> Self {
+        let e = match a.interp {
+            Interpolation::Spring => a.segment().spring.unwrap_or_default().progress(u, seconds),
+            Interpolation::Steps => steps_progress(a.segment().step_count(), u),
+            Interpolation::Custom => curve_progress(&a.segment().curve, u),
+            // Wiggle's base is Linear (an Ease In on `b` bends it as it bends Linear)
+            _ => ease(a, b, u),
+        };
+        Segment { a, e: if e.is_finite() { e } else { u }, u, at }
+    }
+
+    /// Component `i` between `x` and `y`: in log space for a perceptual segment of numbers or
+    /// points (linear when the two differ in sign or one is zero), plus a Wiggle's wobble.
+    fn mix(&self, i: usize, x: f64, y: f64, numeric: bool) -> f64 {
+        let ease = self.a.segment();
+        let linear = x + (y - x) * self.e;
+        let mut v = if numeric && ease.perceptual { log_lerp(x, y, self.e).unwrap_or(linear) } else { linear };
+        if numeric && self.a.interp == Interpolation::Wiggle {
+            v += ease.wiggle.unwrap_or_default().offset(i, self.at, self.u);
+        }
+        if v.is_finite() { v } else { linear }
+    }
+}
+
 /// Temporal easing for u∈[0,1] between two keyframes (1D cubic Bezier in time/value space).
 fn ease(a: &Keyframe, b: &Keyframe, u: f64) -> f64 {
-    let out_ease = matches!(a.interp, Interpolation::Bezier | Interpolation::AutoBezier | Interpolation::ContinuousBezier | Interpolation::EaseOut);
-    let in_ease = matches!(b.interp, Interpolation::Bezier | Interpolation::AutoBezier | Interpolation::ContinuousBezier | Interpolation::EaseIn)
-        || matches!(a.interp, Interpolation::Bezier | Interpolation::ContinuousBezier);
+    let out_ease = a.interp.eases_out();
+    let in_ease = b.interp.eases_in() || matches!(a.interp, Interpolation::Bezier | Interpolation::ContinuousBezier);
     if !out_ease && !in_ease {
         return u;
     }
@@ -425,5 +553,172 @@ mod tests {
         p.toggle_animation(Tick(5));
         assert!(!p.is_animated());
         assert_eq!(p.value, ParamValue::Float(2.0));
+    }
+
+    /// A parameter animated from `a` at 0 to `b` at one second, the first segment in `mode`.
+    fn segment(a: ParamValue, b: ParamValue, mode: Interpolation, ease: SegmentEase) -> Param {
+        let mut p = Param::new(a.clone());
+        p.put_keyframe(Tick::ZERO, a);
+        p.put_keyframe(Tick(TICKS_PER_SECOND), b);
+        p.keyframes[0].interp = mode;
+        p.keyframes[0].ease = Some(Box::new(ease));
+        p.keyframes[0].tidy_ease();
+        p
+    }
+
+    fn at(p: &Param, u: f64) -> f64 {
+        p.f64_at(Tick((u * TICKS_PER_SECOND as f64).round() as i64))
+    }
+
+    #[test]
+    fn every_mode_lands_on_both_keyframes_and_scalar_evaluation_agrees() {
+        let modes = [
+            (Interpolation::Spring, SegmentEase { spring: Some(Spring { damping_ratio: 0.5, ..Spring::DEFAULT }), ..Default::default() }),
+            (Interpolation::Spring, SegmentEase::default()),
+            (Interpolation::Steps, SegmentEase { steps: Some(4), ..Default::default() }),
+            (Interpolation::Wiggle, SegmentEase { wiggle: Some(Wiggle { amplitude: 5.0, frequency: 3.0, seed: 9 }), ..Default::default() }),
+            (Interpolation::Custom, SegmentEase { curve: vec![[0.5, 0.9]], ..Default::default() }),
+            (Interpolation::Custom, SegmentEase::default()),
+            (Interpolation::Linear, SegmentEase { perceptual: true, ..Default::default() }),
+            (Interpolation::Spring, SegmentEase { perceptual: true, ..Default::default() }),
+        ];
+        for (mode, ease) in modes {
+            let p = segment(ParamValue::Float(100.0), ParamValue::Float(400.0), mode, ease.clone());
+            assert_eq!(p.f64_at(Tick::ZERO), 100.0, "{mode:?}");
+            assert_eq!(p.f64_at(Tick(TICKS_PER_SECOND)), 400.0, "{mode:?}");
+            for i in 0..=100 {
+                let t = Tick(TICKS_PER_SECOND / 100 * i);
+                let (v, s) = (p.f64_at(t), p.scalar_at(t));
+                assert!(v.is_finite() && (v - s).abs() < 1e-9, "{mode:?} {ease:?} at {i}: {v} vs {s}");
+            }
+            // continuous into the last keyframe (Steps jumps onto it by design)
+            let near = at(&p, 0.999_999);
+            assert!(mode == Interpolation::Steps || (near - 400.0).abs() < 1.0, "{mode:?}: {near}");
+        }
+        // the modes differ from Linear where they should
+        let lin = segment(ParamValue::Float(0.0), ParamValue::Float(1.0), Interpolation::Linear, SegmentEase::default());
+        let steps = segment(ParamValue::Float(0.0), ParamValue::Float(1.0), Interpolation::Steps, SegmentEase { steps: Some(4), ..Default::default() });
+        assert_eq!(at(&steps, 0.3), 0.25);
+        assert!((at(&lin, 0.3) - 0.3).abs() < 1e-9);
+        let spring = segment(ParamValue::Float(0.0), ParamValue::Float(1.0), Interpolation::Spring, SegmentEase::default());
+        assert!(at(&spring, 0.3) > 0.8, "a spring is quick off the mark: {}", at(&spring, 0.3));
+    }
+
+    #[test]
+    fn perceptual_scale_zooms_by_even_ratios_and_points_too() {
+        let p = segment(ParamValue::Float(100.0), ParamValue::Float(400.0), Interpolation::Linear, SegmentEase { perceptual: true, ..Default::default() });
+        assert!((at(&p, 0.5) - 200.0).abs() < 1e-6, "{}", at(&p, 0.5));
+        let q: Vec<f64> = (0..=4).map(|i| at(&p, i as f64 / 4.0)).collect();
+        for w in q.windows(2) {
+            assert!((w[1] / w[0] - 2f64.sqrt()).abs() < 1e-6, "{q:?}");
+        }
+        // a point: each coordinate in log space
+        let v = segment(
+            ParamValue::Vec2(Vec2::new(100.0, 50.0)),
+            ParamValue::Vec2(Vec2::new(400.0, 200.0)),
+            Interpolation::Linear,
+            SegmentEase { perceptual: true, ..Default::default() },
+        );
+        let mid = v.vec2_at(Tick(TICKS_PER_SECOND / 2));
+        assert!((mid.x - 200.0).abs() < 1e-6 && (mid.y - 100.0).abs() < 1e-6, "{mid:?}");
+        // zero and negative ends: linear, never NaN
+        for (a, b) in [(0.0, 100.0), (100.0, 0.0), (-50.0, 50.0), (0.0, 0.0), (-100.0, -400.0)] {
+            let p = segment(ParamValue::Float(a), ParamValue::Float(b), Interpolation::Linear, SegmentEase { perceptual: true, ..Default::default() });
+            for i in 0..=20 {
+                let x = at(&p, i as f64 / 20.0);
+                assert!(x.is_finite(), "{a} → {b}");
+            }
+            let mid = at(&p, 0.5);
+            let expect = if a < 0.0 && b < 0.0 { -200.0 } else { (a + b) / 2.0 };
+            assert!((mid - expect).abs() < 1e-6, "{a} → {b}: {mid}");
+        }
+        // colours ignore it (linear)
+        let c = segment(
+            ParamValue::Color([0.2, 0.2, 0.2, 1.0]),
+            ParamValue::Color([0.8, 0.8, 0.8, 1.0]),
+            Interpolation::Linear,
+            SegmentEase { perceptual: true, ..Default::default() },
+        );
+        let mid = c.value_at(Tick(TICKS_PER_SECOND / 2)).as_color().unwrap();
+        assert!((mid[0] - 0.5).abs() < 1e-6, "{mid:?}");
+    }
+
+    #[test]
+    fn a_wiggle_segment_is_linear_plus_a_repeatable_wobble() {
+        let ease = SegmentEase { wiggle: Some(Wiggle { amplitude: 20.0, frequency: 4.0, seed: 3 }), ..Default::default() };
+        let p = segment(ParamValue::Vec2(Vec2::new(0.0, 0.0)), ParamValue::Vec2(Vec2::new(0.0, 0.0)), Interpolation::Wiggle, ease);
+        let trace: Vec<Vec2> = (0..=50).map(|i| p.vec2_at(Tick(TICKS_PER_SECOND / 50 * i))).collect();
+        assert_eq!(trace, (0..=50).map(|i| p.vec2_at(Tick(TICKS_PER_SECOND / 50 * i))).collect::<Vec<_>>(), "deterministic");
+        assert!(trace.iter().all(|v| v.x.abs() <= 20.0 && v.y.abs() <= 20.0));
+        assert!(trace.iter().any(|v| v.x.abs() > 1.0), "it moves");
+        assert_ne!(trace.iter().map(|v| v.x).collect::<Vec<_>>(), trace.iter().map(|v| v.y).collect::<Vec<_>>(), "x and y wobble apart");
+        assert_eq!(p.vec2_at(Tick::ZERO), Vec2::new(0.0, 0.0));
+    }
+
+    #[test]
+    fn hostile_keyframe_lists_evaluate_without_panicking() {
+        // repeated and extreme times, then the same out of order
+        for times in [[i64::MIN, 0, 0, 0, i64::MAX], [0, i64::MIN + 1, i64::MAX - 1, 5, -7]] {
+            let mut p = Param::new(ParamValue::Float(1.0));
+            for (t, v) in times.into_iter().zip([5.0, -5.0, 1.0, 2.0, f64::MAX]) {
+                p.keyframes.push(Keyframe::new(Tick(t), ParamValue::Float(v)));
+            }
+            for (i, k) in p.keyframes.iter_mut().enumerate() {
+                k.interp = Interpolation::ALL[i % Interpolation::ALL.len()];
+                k.ease = Some(Box::new(SegmentEase {
+                    spring: Some(Spring { damping_ratio: f64::NAN, stiffness: f64::INFINITY, mass: 0.0, max_overshoot: -1.0 }),
+                    steps: Some(u32::MAX),
+                    wiggle: Some(Wiggle { amplitude: f64::INFINITY, frequency: f64::NAN, seed: 7 }),
+                    curve: vec![[f64::NAN, 1.0], [0.5, f64::INFINITY]],
+                    perceptual: true,
+                }));
+            }
+            for t in [i64::MIN, -8, -7, -1, 0, 1, 3, 1 << 40, i64::MAX - 1, i64::MAX] {
+                let v = p.value_at(Tick(t));
+                let s = p.scalar_at(Tick(t));
+                assert!(v.as_f64().is_some_and(f64::is_finite) && s.is_finite(), "{t}: {v:?} {s}");
+            }
+        }
+    }
+
+    #[test]
+    fn keyframes_without_the_new_fields_load_and_save_unchanged() {
+        // a keyframe as every build before PX5.1 wrote it
+        let old = r#"{"time":0,"value":{"Float":100.0},"interp":"EaseOut","out_influence":0.5,"in_influence":0.25}"#;
+        let k: Keyframe = serde_json::from_str(old).unwrap();
+        assert_eq!((k.interp, k.out_influence, k.in_influence, k.ease.is_none()), (Interpolation::EaseOut, 0.5, 0.25, true));
+        assert_eq!(serde_json::to_string(&k).unwrap(), old);
+        // the new modes and their numbers round-trip
+        let mut n = k.clone();
+        n.interp = Interpolation::Spring;
+        n.segment_mut().spring = Some(Spring { damping_ratio: 1.0, ..Spring::DEFAULT });
+        n.segment_mut().perceptual = true;
+        let j = serde_json::to_string(&n).unwrap();
+        assert!(j.contains(r#""interp":"Spring""#) && j.contains(r#""perceptual":true"#), "{j}");
+        assert_eq!(serde_json::from_str::<Keyframe>(&j).unwrap(), n);
+        for mode in Interpolation::ALL {
+            assert_eq!(Interpolation::from_name(mode.name()), Some(mode));
+            let j = serde_json::to_string(&mode).unwrap();
+            assert_eq!(serde_json::from_str::<Interpolation>(&j).unwrap(), mode);
+        }
+        assert_eq!(Interpolation::from_name("CustomCurve"), Some(Interpolation::Custom));
+        assert_eq!(Interpolation::from_name("bouncy"), None);
+        // an emptied segment is written as before
+        n.ease = Some(Box::default());
+        n.tidy_ease();
+        assert!(n.ease.is_none());
+    }
+
+    #[test]
+    fn a_new_keyframe_inside_a_spring_segment_keeps_its_spring() {
+        let mut p = segment(
+            ParamValue::Float(0.0),
+            ParamValue::Float(10.0),
+            Interpolation::Spring,
+            SegmentEase { spring: Some(Spring { damping_ratio: 2.0, ..Spring::DEFAULT }), ..Default::default() },
+        );
+        p.set_at(Tick(TICKS_PER_SECOND / 2), ParamValue::Float(4.0));
+        assert_eq!(p.keyframes[1].interp, Interpolation::Spring);
+        assert_eq!(p.keyframes[1].segment().spring.map(|s| s.damping_ratio), Some(2.0));
     }
 }

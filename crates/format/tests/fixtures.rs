@@ -292,6 +292,51 @@ fn v11_minimal_loads_without_graphics_design_data() {
     assert_eq!(&again.project, p);
 }
 
+/// Schema 17 (before PX5.1): keyframes of every Premiere interpolation, with their influences,
+/// load unchanged (no segment numbers), evaluate as before and are written back the same apart
+/// from the schema number.
+#[test]
+fn v17_keyframes_load_and_save_unchanged() {
+    use filmcraft_project::{Interpolation, ItemKind};
+    use filmcraft_time::Tick;
+    let bytes = fixture("v17-keyframes.fcproj");
+    let l = decode(&bytes).unwrap();
+    assert_eq!(l.schema_version, 17);
+    assert!(l.migrated());
+    let seq = l.project.items.values().find_map(|i| if let ItemKind::Sequence(s) = &i.kind { Some(s.clone()) } else { None }).unwrap();
+    let it = &seq.video_tracks[0].items[0];
+    let scale = &it.effect("motion").unwrap().params["scale"];
+    let modes: Vec<Interpolation> = scale.keyframes.iter().map(|k| k.interp).collect();
+    assert_eq!(
+        modes,
+        [
+            Interpolation::Linear,
+            Interpolation::Hold,
+            Interpolation::Bezier,
+            Interpolation::AutoBezier,
+            Interpolation::ContinuousBezier,
+            Interpolation::EaseIn,
+            Interpolation::EaseOut
+        ]
+    );
+    assert!(scale.keyframes.iter().all(|k| k.ease.is_none()));
+    assert!((scale.keyframes[1].out_influence - 0.3).abs() < 1e-12 && (scale.keyframes[1].in_influence - 0.55).abs() < 1e-12);
+    // evaluation: Linear halfway is halfway, Hold holds
+    let half = Tick(scale.keyframes[1].time.0 / 2);
+    assert!((scale.f64_at(half) - 120.0).abs() < 1e-9);
+    assert_eq!(scale.f64_at(Tick(scale.keyframes[1].time.0 + 1)), 140.0);
+    assert_eq!(it.effect("opacity").unwrap().params["opacity"].keyframes[0].interp, Interpolation::EaseOut);
+    // written back: the same project, only the schema number moves
+    let again = encode(&l.project, false);
+    let (mut old, new): (serde_json::Value, serde_json::Value) = (serde_json::from_slice(&bytes).unwrap(), serde_json::from_slice(&again).unwrap());
+    assert_eq!(new["schema_version"], SCHEMA_VERSION);
+    old["schema_version"] = new["schema_version"].clone();
+    old["generator"] = new["generator"].clone();
+    assert_eq!(old, new);
+    // and it reads back to the same bytes (the project holds NaN "auto" points, so compare files)
+    assert_eq!(encode(&decode(&again).unwrap().project, false), again);
+}
+
 /// Schema 10 (before M3.11): no search bins, no safe areas / capture format / scratch disks in
 /// the project settings.
 #[test]

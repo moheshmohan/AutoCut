@@ -3700,7 +3700,7 @@ fn build() -> Vec<CommandSpec> {
             "Keyframe Interpolation",
             [],
             None,
-            r#"{"clip":id,"effect":str|index,"param":str,"mediaTime":ticks,"interpolation":"linear|bezier|autoBezier|continuousBezier|hold|easeIn|easeOut"}"#,
+            r#"{"clip":id,"effect":str|index,"param":str,"mask":n?,"mediaTime":ticks,"interpolation":"linear|bezier|autoBezier|continuousBezier|hold|easeIn|easeOut|spring|steps|steps(n)|wiggle|custom"?,"spring":{"dampingRatio":0.05..10=0.9,"stiffness":0.1..10000=150,"mass":0.01..100=1,"maxOvershoot":0..1=0.25}|true|null?,"steps":1..1000|null?,"wiggle":{"amplitude":units=10,"frequency":hz=2,"seed":int=1}|null?,"curve":[[time,progress]]|null?,"perceptual":bool?}"#,
             has_seq,
             |s, p| keyframe_op(s, p, "interp")
         ),
@@ -3709,7 +3709,7 @@ fn build() -> Vec<CommandSpec> {
             "Edit Keyframe",
             [],
             None,
-            r#"{"clip":id,"effect":str|index,"param":str,"mediaTime":ticks,"value":any?,"inInfluence":0..1?,"outInfluence":0..1?,"merge":bool?,"begin":bool?}"#,
+            r#"{"clip":id,"effect":str|index,"param":str,"mask":n?,"mediaTime":ticks,"value":any?,"inInfluence":0..1?,"outInfluence":0..1?,"spring":{…}|null?,"steps":1..1000|null?,"wiggle":{…}|null?,"curve":[[time,progress]]|null?,"perceptual":bool?,"merge":bool?,"begin":bool?}"#,
             has_seq,
             |s, p| keyframe_op(s, p, "set")
         ),
@@ -4051,6 +4051,10 @@ fn keyframe_op(s: &mut Session, p: &Value, op: &str) -> Result<Value> {
     let mtime = p.get("mediaTime").and_then(Value::as_i64).map(Tick);
     let to = p.get("to").and_then(Value::as_i64).map(Tick);
     let interp = str_p(p, "interpolation").map(str::to_string);
+    // the segment's spring, steps, wiggle, curve and perceptual option (validated before the edit)
+    let ease_cmd = if op == "set" { "effects.setKeyframe" } else { "effects.setInterpolation" };
+    let ease_edit = if matches!(op, "set" | "interp") { crate::keyframe_ease::edit_p(ease_cmd, p)? } else { Default::default() };
+    let mode = interp.as_deref().map(|n| crate::keyframe_ease::mode_p(ease_cmd, n)).transpose()?;
     let label = match op {
         "add" => "Add Keyframe",
         "delete" => "Delete Keyframe",
@@ -4113,20 +4117,25 @@ fn keyframe_op(s: &mut Session, p: &Value, op: &str) -> Result<Value> {
                 if let Some(x) = f64_p(p, "outInfluence") {
                     k.out_influence = x.clamp(0.01, 1.0);
                 }
+                ease_edit.apply(k);
+                reply = crate::keyframe_ease::segment_json(k);
             }
             _ => {
                 let at = mtime.unwrap_or(mt_now);
-                let kind = match interp.as_deref().unwrap_or("linear").to_ascii_lowercase().as_str() {
-                    "bezier" => filmcraft_project::Interpolation::Bezier,
-                    "autobezier" => filmcraft_project::Interpolation::AutoBezier,
-                    "continuousbezier" => filmcraft_project::Interpolation::ContinuousBezier,
-                    "hold" => filmcraft_project::Interpolation::Hold,
-                    "easein" => filmcraft_project::Interpolation::EaseIn,
-                    "easeout" => filmcraft_project::Interpolation::EaseOut,
-                    _ => filmcraft_project::Interpolation::Linear,
-                };
                 let k = prm.keyframes.iter_mut().find(|k| k.time == at).ok_or_else(|| bad("keyframe", "no keyframe at that time"))?;
-                k.interp = kind;
+                match mode {
+                    Some((kind, steps)) => {
+                        k.interp = kind;
+                        if steps.is_some() {
+                            k.segment_mut().steps = steps;
+                        }
+                    }
+                    // no name: only the numbers change, or (as always) Linear
+                    None if ease_edit.is_empty() => k.interp = filmcraft_project::Interpolation::Linear,
+                    None => {}
+                }
+                ease_edit.apply(k);
+                reply = crate::keyframe_ease::segment_json(k);
             }
         }
         Ok(reply)
