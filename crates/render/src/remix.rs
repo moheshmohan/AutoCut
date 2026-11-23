@@ -11,7 +11,7 @@
 //! | `segments`, `variations` | the Remix sliders (0 … 100) |
 //! | `original` | the clip duration before the remix (ticks), restored by Revert Remix |
 //! | `plan` | text `xfade;src,len;src,len;…` in ticks: crossfade length, then each piece's media start and length |
-//! | `fadeOut` | (fitted remixes) the fade-out at the end of the plan, ticks of the plan |
+//! | `fadeOut`, `fadeIn` | (fitted remixes) the fade-out at the end of the plan and the fade-in at its start, ticks of the plan |
 //! | `stretch` | (fitted remixes) plan ticks per clip tick: the plan is time-stretched (pitch kept, WSOLA) to the clip |
 //! | `ending`, `events`, `maxStretchPct` | (fitted remixes) what it was fitted to, so a re-plan keeps it: the ending (`own`, `button`, `fade`), the film events as text `kind@ticks;…`, the stretch allowed |
 //!
@@ -87,8 +87,9 @@ pub struct Remix {
     /// Crossfade at each joint.
     pub xfade: Tick,
     pub pieces: Vec<TickPiece>,
-    /// Fade-out at the end of the plan (ticks of the plan).
+    /// Fade-out at the end of the plan and fade-in at its start (ticks of the plan).
     pub fade_out: Tick,
+    pub fade_in: Tick,
     /// Plan ticks per clip tick (1: not stretched).
     pub stretch: f64,
     pub fitted: Fitted,
@@ -135,6 +136,7 @@ impl Remix {
             xfade,
             pieces,
             fade_out: Tick(f("fadeOut").filter(|v| v.is_finite()).map_or(0, |v| v as i64).clamp(0, total.max(0))),
+            fade_in: Tick(f("fadeIn").filter(|v| v.is_finite()).map_or(0, |v| v as i64).clamp(0, total.max(0))),
             stretch,
             fitted: Fitted {
                 ending,
@@ -146,7 +148,8 @@ impl Remix {
 
     /// The hidden effect instance that stores this remix.
     pub fn to_effect(&self) -> EffectInstance {
-        let plan = dsp::Plan { pieces: self.pieces.iter().map(|p| Piece { src: p.src.0, len: p.len.0 }).collect(), xfade: self.xfade.0, fade_out: 0 };
+        let plan =
+            dsp::Plan { pieces: self.pieces.iter().map(|p| Piece { src: p.src.0, len: p.len.0 }).collect(), xfade: self.xfade.0, fade_out: 0, fade_in: 0 };
         let mut params = BTreeMap::new();
         params.insert("target".to_string(), Param::new(ParamValue::Float(self.target.0 as f64)));
         params.insert("segments".to_string(), Param::new(ParamValue::Float(self.segments)));
@@ -156,6 +159,9 @@ impl Remix {
         // a fitted remix's extras (a plain remix stores only what it did before)
         if self.fade_out > Tick::ZERO {
             params.insert("fadeOut".to_string(), Param::new(ParamValue::Float(self.fade_out.0 as f64)));
+        }
+        if self.fade_in > Tick::ZERO {
+            params.insert("fadeIn".to_string(), Param::new(ParamValue::Float(self.fade_in.0 as f64)));
         }
         if (self.stretch - 1.0).abs() > 1e-9 {
             params.insert("stretch".to_string(), Param::new(ParamValue::Float(self.stretch)));
@@ -192,7 +198,12 @@ impl Remix {
             d += p.len;
             pieces.push(Piece { src: p.src.to_units_floor(r), len: d.to_units_floor(r) - a });
         }
-        dsp::Plan { pieces, xfade: self.xfade.to_units_floor(r), fade_out: self.fade_out.to_units_floor(r).clamp(0, d.to_units_floor(r)) }
+        dsp::Plan {
+            pieces,
+            xfade: self.xfade.to_units_floor(r),
+            fade_out: self.fade_out.to_units_floor(r).clamp(0, d.to_units_floor(r)),
+            fade_in: self.fade_in.to_units_floor(r).clamp(0, d.to_units_floor(r)),
+        }
     }
 
     /// Whether playback time-stretches the plan.
@@ -258,7 +269,7 @@ fn stretcher(item: &TrackItem, rm: &Remix, sr: u32, channels: usize) -> Option<A
     let mut h = std::collections::hash_map::DefaultHasher::new();
     item.item.0.hash(&mut h);
     rm.pieces.iter().for_each(|p| (p.src.0, p.len.0).hash(&mut h));
-    (rm.xfade.0, rm.fade_out.0, rm.stretch.to_bits(), sr, channels).hash(&mut h);
+    (rm.xfade.0, rm.fade_out.0, rm.fade_in.0, rm.stretch.to_bits(), sr, channels).hash(&mut h);
     let key = h.finish();
     let cache = C.get_or_init(Default::default);
     let mut c = cache.lock().unwrap_or_else(PoisonError::into_inner);
@@ -302,6 +313,7 @@ mod tests {
             xfade: s(0.002),
             pieces: vec![TickPiece { src: s(0.0), len: s(0.25) }, TickPiece { src: s(0.65), len: s(0.35) }],
             fade_out: Tick::ZERO,
+            fade_in: Tick::ZERO,
             stretch: 1.0,
             fitted: Fitted::default(),
         }
@@ -379,6 +391,7 @@ mod tests {
         let s = |x: f64| Tick::from_seconds_f64(x);
         let r = Remix {
             fade_out: s(0.1),
+            fade_in: s(0.001),
             fitted: Fitted { ending: "button".into(), events: vec![("peak".into(), s(0.2)), ("landing".into(), s(0.5))], max_stretch_pct: 5.0 },
             ..remix()
         };

@@ -32,7 +32,10 @@
 //!
 //! **Sound.** Generated music (`music.suggest` → `audio.generate`, `mood` energetic, `bpm` 124, a
 //! fixed `seed`), arranged to end on a bar with its final chord where the end card starts (a
-//! swish into it, an impact on it); the hook voice over its opening; mixed speech first
+//! swish into it, an impact on it); or the user's track (`music`), the cut planned on its own
+//! beats and the track fitted to it (`clip.remix`: a burst at the hook, a peak where the montage
+//! starts, its own ending landing on the end card; the report's `music.fit` says how each
+//! landed); the hook voice over its opening; mixed speech first
 //! ([`crate::mix::mix_down`]), the music brought up from a bed's level and limited on its track,
 //! the voice's fader down a little, normalised to −14 LUFS, −1 dBTP.
 //!
@@ -67,6 +70,7 @@ use crate::host::ReviewEntry;
 use crate::llm::ChatModel;
 use crate::look::{self, Bounds, Role, Theme};
 use crate::mix::{self, Mix, MixProfile};
+use crate::music_fit;
 use crate::privacy::{Hidden, LocalRedact, Redact};
 use crate::qa::{self, Finding, Severity};
 use crate::shot_edit::Fit;
@@ -150,6 +154,10 @@ pub struct Options {
     pub include: Vec<String>,
     pub bpm: f64,
     pub mood: String,
+    /// The user's music file instead of generated music: the trailer is cut on its beats and it
+    /// is fitted to the trailer (`clip.remix`: its lifts on the hook and the montage, its own
+    /// ending on the end card).
+    pub music: Option<String>,
     pub seed: u64,
     /// `None`: as the show (faces and plates when its report hid any); `Some(None)`: none;
     /// `Some(Some(r))`: these kinds.
@@ -191,6 +199,7 @@ impl Default for Options {
             include: Vec::new(),
             bpm: DEFAULT_BPM,
             mood: "energetic".into(),
+            music: None,
             seed: 7,
             redact: None,
             fallback: "blur".into(),
@@ -297,6 +306,7 @@ impl Options {
             include: labels("include"),
             bpm,
             mood: text("mood").unwrap_or(d.mood),
+            music: text("music").filter(|m| !m.eq_ignore_ascii_case("generate")),
             seed: p["seed"].as_u64().unwrap_or(d.seed),
             redact,
             fallback: text("fallback").unwrap_or(d.fallback),
@@ -758,6 +768,61 @@ pub fn shot_count(beat: f64, seconds: f64, want: Option<usize>, available: usize
         None => ((beats as f64 / ((lo + hi) as f64 / 2.0)).round() as usize).clamp(AUTO_ROBOTS.0, AUTO_ROBOTS.1).clamp(fewest, most.max(fewest)),
     };
     n.clamp(1, MAX_ROBOTS).min(available.max(1))
+}
+
+/// The user's track for a trailer (`Options::music`): imported, its beats measured.
+struct Track {
+    path: String,
+    item: u64,
+    /// Its beats from its start (the trailer is planned on them).
+    beats: Beats,
+    bpm: Option<f64>,
+}
+
+/// Import `path` and measure its beats; a track without a beat to cut on is an error.
+async fn user_track(ex: &dyn Executor, path: &str) -> Result<Track, AutoCutError> {
+    let r = run(ex, "file.import", json!({"paths": [path], "reuse": true})).await?;
+    let item = r["items"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).ok_or_else(|| invalid(format!("music: {path} could not be imported")))?;
+    let b = run(ex, "media.beats", json!({"item": item})).await.map_err(|e| invalid(format!("music: {path}: {e}")))?;
+    let times: Vec<f64> = b["beats"].as_array().map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+    let beats = Beats::measured(&times, b["period"].as_f64().unwrap_or(f64::NAN)).ok_or_else(|| invalid(format!("music: no beat found in {path}")))?;
+    Ok(Track { path: path.to_string(), item, beats, bpm: b["bpm"].as_f64().filter(|x| x.is_finite()) })
+}
+
+/// Lay `t` on A3 from 0 and fit it to `planned` (`clip.remix`): a burst at the hook, a peak
+/// where the montage starts, its own ending landing on the end card. Returns its beats as they
+/// play, its clip and what it did; a track that cannot be fitted is trimmed to the trailer and
+/// faded, its beats as they were.
+async fn fit_track(ex: &dyn Executor, t: &Track, planned: &Timing, notes: &mut Vec<String>) -> Result<(Beats, Option<u64>, Value), AutoCutError> {
+    let placed = run(ex, "timeline.place", json!({"item": t.item, "audioTrack": "A3", "video": false, "time": 0})).await?;
+    let clip = placed["clips"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(Value::as_u64)
+        .ok_or_else(|| AutoCutError::Executor("timeline.place placed no music".into()))?;
+    let events: Vec<Value> = [music_fit::event("burst", 0.0), music_fit::event("peak", planned.hook[1]), music_fit::event("landing", planned.end_card[0])]
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut info = json!({"file": t.path, "item": t.item, "clip": clip, "bpm": t.bpm});
+    match music_fit::fit(ex, clip, planned.total, &events, "own").await {
+        Ok(r) => {
+            notes.extend(music_fit::notes(&r));
+            info["fit"] = music_fit::summary(&r);
+            Ok((music_fit::played_beats(&t.beats, &r).unwrap_or_else(|| t.beats.clone()), Some(clip), info))
+        }
+        Err(e) => {
+            notes.push(format!("music: not fitted to the trailer ({e}); trimmed to it and faded"));
+            let seq = run(ex, "sequence.inspect", json!({})).await.ok();
+            let len =
+                seq.as_ref().and_then(|s| s["audio"].get(2)?["items"].as_array()?.iter().find(|c| c["clip"].as_u64() == Some(clip))?["duration"].as_i64());
+            if let Some(len) = len.filter(|l| *l > ticks(planned.total)) {
+                run(ex, "timeline.trim", json!({"clip": clip, "edge": "out", "mode": "regular", "delta": ticks(planned.total) - len})).await.ok();
+            }
+            run(ex, "sequence.applyAudioTransition", json!({"clip": clip, "edge": "out", "effect": "constant_power", "frames": FPS as i64})).await.ok();
+            Ok((t.beats.clone(), Some(clip), info))
+        }
+    }
 }
 
 /// The cut of a `seconds`-long trailer with `n` montage shots on `beats` (the music's, from 0):
@@ -1473,14 +1538,24 @@ pub async fn build(
         let area = c.shot.moment.map_or(0.0, |m| m.area);
         c.score = striking(&c.kind, area, a < 0.9, c.shot.photo, c.branded);
     }
-    // ---- the music's tempo, and how many robots fit
-    let suggest =
+    // ---- the music's tempo, and how many robots fit (the user's track: its own beats)
+    let track = match &opts.music {
+        Some(file) => Some(user_track(ex, file).await?),
+        None => None,
+    };
+    let suggest = if track.is_none() {
         run(ex, "music.suggest", json!({"mood": opts.mood, "bpm": opts.bpm, "count": 1, "seed": opts.seed, "useCase": "trailer", "duration": opts.seconds}))
             .await
-            .ok();
-    let bpm = suggest.as_ref().and_then(|v| v["suggestions"][0]["track"]["bpm"].as_f64()).filter(|b| b.is_finite() && *b >= 40.0).unwrap_or(opts.bpm);
+            .ok()
+    } else {
+        None
+    };
+    let bpm = match &track {
+        Some(t) => 60.0 / t.beats.period(),
+        None => suggest.as_ref().and_then(|v| v["suggestions"][0]["track"]["bpm"].as_f64()).filter(|b| b.is_finite() && *b >= 40.0).unwrap_or(opts.bpm),
+    };
     let genre = suggest.as_ref().and_then(|v| v["suggestions"][0]["track"]["genre"].as_str()).map(str::to_string);
-    let grid = Beats::grid(bpm);
+    let grid = track.as_ref().map_or_else(|| Beats::grid(bpm), |t| t.beats.clone());
     let n = shot_count(grid.period(), opts.seconds, opts.robots, cands.len().saturating_sub(1));
     let choice = choose(&cands, n, opts.hook.as_deref(), &opts.include, &opts.exclude)?;
     let n = choice.montage.len();
@@ -1534,26 +1609,36 @@ pub async fn build(
             }
         })
         .collect();
-    let mut mp =
-        json!({"kind": "music", "duration": planned.total, "mood": opts.mood, "bpm": bpm, "seed": opts.seed, "energy": energy, "time": 0, "track": "A3"});
-    if let Some(g) = &genre {
-        mp["genre"] = json!(g);
-    }
-    progress(&format!("music: {} at {bpm:.0} bpm, {:.1} s", opts.mood, planned.total));
-    let music = run(ex, "audio.generate", mp).await?;
-    let map: Vec<i64> = music["beats"].as_array().map(|a| a.iter().filter_map(Value::as_i64).take(100_000).collect()).unwrap_or_default();
-    let beats = Beats::from_ticks(&map, 0.0).unwrap_or(grid);
+    let (beats, music_clip, generated_ending) = match &track {
+        // the user's track, fitted: a burst at the hook, a peak where the montage kicks in, its
+        // own ending landing on the end card; the trailer is cut on its beats as they now play
+        Some(t) => {
+            progress(&format!("music: {} at {bpm:.0} bpm, fitted to {:.1} s", t.path, planned.total));
+            let (beats, clip, info) = fit_track(ex, t, &planned, &mut notes).await?;
+            made.music = Some(info);
+            (beats, clip, None)
+        }
+        None => {
+            let mut mp = json!({"kind": "music", "duration": planned.total, "mood": opts.mood, "bpm": bpm, "seed": opts.seed, "energy": energy, "time": 0, "track": "A3"});
+            if let Some(g) = &genre {
+                mp["genre"] = json!(g);
+            }
+            progress(&format!("music: {} at {bpm:.0} bpm, {:.1} s", opts.mood, planned.total));
+            let music = run(ex, "audio.generate", mp).await?;
+            let map: Vec<i64> = music["beats"].as_array().map(|a| a.iter().filter_map(Value::as_i64).take(100_000).collect()).unwrap_or_default();
+            let ending = music["ending"].as_i64().map(|t| t as f64 / filmcraft_time::TICKS_PER_SECOND as f64);
+            made.music =
+                Some(json!({"clip": music["clip"], "item": music["item"], "bpm": music["bpm"], "genre": music["genre"], "seed": opts.seed, "ending": ending}));
+            (Beats::from_ticks(&map, 0.0).unwrap_or(grid), music["clip"].as_u64(), ending)
+        }
+    };
     let tm = timing(&beats, opts.seconds, n)?;
-    if let Some(ending) = music["ending"].as_i64().map(|t| t as f64 / filmcraft_time::TICKS_PER_SECOND as f64)
+    if let Some(ending) = generated_ending
         && (ending - tm.end_card[0]).abs() > 1.5 / FPS
     {
         notes.push(format!("music: its final hit is at {ending:.2} s, the end card at {:.2} s", tm.end_card[0]));
     }
     made.bpm = Some(60.0 / beats.period());
-    made.music = Some(
-        json!({"clip": music["clip"], "item": music["item"], "bpm": music["bpm"], "genre": music["genre"], "seed": opts.seed, "ending": music["ending"].as_i64().map(|t| t as f64 / filmcraft_time::TICKS_PER_SECOND as f64)}),
-    );
-    let music_clip = music["clip"].as_u64();
     // ---- the shots: each filled to the frame (as the privacy pass counts its faces), and how it
     // will be shown — following its robot, or its robot's whole width in a band over a blurred copy
     let mut shots: Vec<TrailerShot> = Vec::new();

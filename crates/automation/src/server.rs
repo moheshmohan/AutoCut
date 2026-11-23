@@ -647,6 +647,10 @@ pub struct TrailerParams {
     pub bpm: Option<f64>,
     #[serde(default)]
     pub mood: Option<String>,
+    /// A music file to cut the trailer on instead of generated music: fitted to it (its lifts on
+    /// the hook, the montage and the end card, ending its own way).
+    #[serde(default)]
+    pub music: Option<String>,
     #[serde(default)]
     pub seed: Option<u64>,
     /// "faces,plates", "faces", "plates", or "off" (default: as the show was redacted).
@@ -686,6 +690,7 @@ fn trailer_params(p: TrailerParams) -> Value {
     put("include", p.include.map(|v| json!(v)));
     put("bpm", p.bpm.map(|v| json!(v)));
     put("mood", text(p.mood));
+    put("music", text(p.music));
     put("seed", p.seed.map(|v| json!(v)));
     put(
         "redact",

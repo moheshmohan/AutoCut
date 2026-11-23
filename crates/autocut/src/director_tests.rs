@@ -1100,3 +1100,73 @@ fn a_360_photo_is_looked_round_but_never_followed_or_steadied() {
         );
     }
 }
+
+/// The film events a directed edit fits the user's track to: a burst at the opening, a peak at
+/// the hero shot (the one that grabs attention most, neither the first nor the last) and the
+/// landing on the closing shot.
+#[test]
+fn the_film_events_mark_the_opening_the_hero_and_the_close() {
+    let mut cands = library();
+    cands.iter_mut().find(|c| c.id == "c4").unwrap().hook = 0.95;
+    let plan = Plan {
+        title: "Trip".into(),
+        mood: "happy".into(),
+        bpm: 120.0,
+        shots: vec![
+            planned("c1", 4.0, 6, Camera::PlanetIn),
+            planned("c3", 6.0, 6, Camera::Orbit),
+            planned("c2", 1.0, 4, Camera::PushIn),
+            planned("c4", 2.0, 4, Camera::PushIn),
+            planned("c5", 0.0, 4, Camera::Hold),
+            planned("c6", 2.0, 6, Camera::PlanetOut),
+        ],
+        by: "test".into(),
+        notes: Vec::new(),
+        style: None,
+    };
+    let wins = windows(&plan, &Beats::grid(120.0));
+    let events = film_events(&plan, &cands, &wins);
+    let kinds: Vec<(&str, f64)> = events.iter().map(|e| (e["kind"].as_str().unwrap(), e["seconds"].as_f64().unwrap())).collect();
+    assert_eq!(kinds, [("burst", 0.0), ("peak", wins[3].0), ("landing", wins[5].0)], "{wins:?}");
+    // an edit of one shot has no hero and no close
+    let one = Plan { shots: vec![planned("c1", 0.0, 8, Camera::Hold)], ..plan };
+    let wins = windows(&one, &Beats::grid(120.0));
+    assert_eq!(film_events(&one, &cands, &wins).len(), 1);
+}
+
+/// A directed edit on the user's track: placed, measured and fitted to the edit (`clip.remix`:
+/// the burst at the opening, the hero's peak, the landing on the closing shot, its own ending),
+/// the cuts on its beats as it plays.
+#[tokio::test]
+async fn a_directed_edit_fits_the_users_track() {
+    let ex = demo_session();
+    let dir = std::env::temp_dir().join(format!("filmcraft-director-music-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let g = crate::Executor::execute(
+        &ex,
+        "audio.generate",
+        json!({"kind": "music", "duration": 40, "bpm": 120, "seed": 4, "soundfont": "oscillators", "place": false, "dir": dir.to_string_lossy()}),
+    )
+    .await
+    .unwrap();
+    let path = g["path"].as_str().unwrap().to_string();
+    let mut lines = |_: &str| {};
+    let r = make(&ex, &json!({"brief": "a 16 s reel", "seconds": 16, "bpm": 120, "captions": false, "music": path}), None, &mut lines).await.unwrap();
+    let music = &r["music"];
+    assert_eq!(music["file"], json!(path), "{r}");
+    let fit = &music["fit"];
+    assert_eq!(fit["ending"], "own", "{music}");
+    let landed = fit["eventsLanded"].as_array().cloned().unwrap_or_default();
+    assert!(landed.iter().any(|e| e["kind"] == "burst") && landed.iter().any(|e| e["kind"] == "landing"), "{fit}");
+    assert!(landed.iter().filter(|e| e["kind"] != "peak").all(|e| e["landed"] == true), "{fit}");
+    // the track is the music (nothing generated), as long as the edit
+    let seq = r["sequence"].as_u64().expect("a sequence");
+    let s = ex.0.lock().unwrap();
+    let q = s.project.sequence(filmcraft_engine::project::ItemId(seq)).unwrap();
+    let file = std::path::Path::new(&path).file_name().unwrap().to_string_lossy().into_owned();
+    let a3: Vec<_> = q.audio_tracks.get(2).map(|t| t.items.clone()).unwrap_or_default();
+    assert!(a3.len() == 1 && s.project.item(a3[0].item).is_some_and(|i| i.name == file), "{a3:?}");
+    let end = q.video_tracks[0].items.iter().map(|c| c.end()).max().unwrap();
+    assert!((a3[0].end() - end).abs().seconds() < 0.6, "music to {:.2} s, picture to {:.2} s", a3[0].end().seconds(), end.seconds());
+    let _ = std::fs::remove_dir_all(&dir);
+}

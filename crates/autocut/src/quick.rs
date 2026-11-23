@@ -27,8 +27,9 @@
 //!    full ones' paragraphs), the kept speech and `topic` ([`write_texts`]); without a model, or
 //!    where it says nothing usable, from the descriptions and the topic ([`fallback_text`]).
 //! 8. **Apply and finish.** `template.apply` (music generated at a tempo that brings the template
-//!    to `seconds` when it cuts on the beat, or `music`), the placeholders of optional slots left
-//!    empty removed, `look` swapped in, the captions animated in the `platform`'s safe zone, faces
+//!    to `seconds` when it cuts on the beat, or `music`, the user's track, then fitted to the
+//!    short with `clip.remix`: a burst at the opening, peaks on the title hits, its own ending on
+//!    the end card), the placeholders of optional slots left empty removed, `look` swapped in, the captions animated in the `platform`'s safe zone, faces
 //!    and plates hidden (`redact`; never the speaker's own face), the safe zones checked, and with
 //!    `export` the video, `<out>.sheet.jpg` (12 frames with their times), `<out>.report.json` and
 //!    QA (`<out>.qa.json`).
@@ -1438,6 +1439,11 @@ pub struct Report {
     /// were replaced, the longest hold, the tempo, a video shortened instead of repeating.
     #[serde(rename = "shotsSpread", skip_serializing_if = "Option::is_none")]
     pub shots_spread: Option<Value>,
+    /// The user's track fitted to the short (`clip.remix`: a burst at the opening, peaks on the
+    /// title hits, its own ending landing on the end card): how it ended, how each event landed,
+    /// its joins and warnings.
+    #[serde(rename = "musicFit", skip_serializing_if = "Option::is_none")]
+    pub music_fit: Option<Value>,
     /// How the sound was mixed: each stem's role, level and track effects.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mix: Option<Value>,
@@ -2345,6 +2351,65 @@ async fn remove(ex: &dyn Executor, clips: &[u64]) -> Result<(), AutoCutError> {
     run(ex, "edit.clear", json!({"clips": clips})).await.map(drop)
 }
 
+/// The film events of an applied template (`template.apply`'s `slots`, ticks): a burst at the
+/// opening (on the music's first beat, `first_beat` seconds in: the cuts are on its beats), a
+/// peak on each title hit (a text slot's placement starting after half a second; at most three,
+/// 3 s apart, the longest first) and the landing on the end card (the last text placement
+/// starting in the last 40 % of the short).
+pub fn film_events(t: &TemplateInfo, applied: &Value, first_beat: f64) -> Vec<Value> {
+    let tps = TICKS_PER_SECOND as f64;
+    let seconds = finite(&applied["seconds"]).unwrap_or(t.seconds);
+    let texts: Vec<&str> = t.slots.iter().filter(|s| s.kind == "text").map(|s| s.id.as_str()).collect();
+    let mut hits: Vec<(f64, f64)> = applied["slots"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|x| x["slot"].as_str().is_some_and(|id| texts.contains(&id)))
+        .filter_map(|x| Some((x["start"].as_i64()? as f64 / tps, x["duration"].as_i64().unwrap_or(0) as f64 / tps)))
+        .filter(|(a, _)| a.is_finite() && *a > 0.5 && *a < seconds)
+        .collect();
+    hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let landing = hits.last().map(|h| h.0).filter(|a| *a >= 0.6 * seconds);
+    if landing.is_some() {
+        hits.pop();
+    }
+    let mut events: Vec<Value> = crate::music_fit::event("burst", first_beat).into_iter().collect();
+    events.extend(crate::music_fit::peaks(&hits, 3, 3.0, 0.5, landing.unwrap_or(seconds)).into_iter().filter_map(|x| crate::music_fit::event("peak", x)));
+    events.extend(landing.and_then(|x| crate::music_fit::event("landing", x)));
+    events
+}
+
+/// Fit the user's track (the music slot's first clip) to the short: [`film_events`], its own
+/// ending (its final hit on the end card, ringing out under it). A track that cannot be fitted
+/// stays as the template laid it (noted).
+async fn fit_music(ex: &dyn Executor, t: &TemplateInfo, applied: &Value, report: &mut Report, notes: &mut Vec<String>) {
+    let Some(slot) = t.slots.iter().find(|s| s.kind == "music").map(|s| s.id.clone()) else { return };
+    let placed = applied["slots"].as_array().and_then(|a| a.iter().find(|x| x["slot"].as_str() == Some(slot.as_str())));
+    let Some((clip, item)) = placed.and_then(|x| Some((x["clips"][0].as_u64()?, x["item"].as_u64()?))) else { return };
+    let seconds = finite(&applied["seconds"]).unwrap_or(t.seconds);
+    // the music's first beat as the clip plays it (its beats continued back to its start)
+    let source_in = placed.and_then(|x| x["sourceIn"].as_i64()).unwrap_or(0) as f64 / TICKS_PER_SECOND as f64;
+    let first_beat = match run(ex, "media.beats", json!({"item": item, "sourceIn": placed.and_then(|x| x["sourceIn"].as_i64()).unwrap_or(0)})).await {
+        Ok(b) => match (b["beats"][0].as_f64(), finite(&b["period"])) {
+            (Some(b0), Some(p)) if p > 0.05 => {
+                let rel = b0 - source_in;
+                rel - (rel / p).floor().max(0.0) * p
+            }
+            _ => 0.0,
+        },
+        Err(_) => 0.0,
+    };
+    let events = film_events(t, applied, first_beat);
+    match crate::music_fit::fit(ex, clip, seconds, &events, "own").await {
+        Ok(r) => {
+            notes.extend(crate::music_fit::notes(&r));
+            report.music_fit = Some(crate::music_fit::summary(&r));
+        }
+        Err(e) => notes.push(format!("music: not fitted to the short ({e}); as the template laid it")),
+    }
+}
+
 /// After the apply: empty placeholders out, the look, the captions, privacy, safe zones, the
 /// files.
 #[allow(clippy::too_many_arguments)]
@@ -2374,6 +2439,15 @@ async fn finish(
         music_items.extend(new_bed);
         if let Some(s) = report.shots_spread.as_mut() {
             s["shortened"] = r;
+        }
+    }
+    // the user's track fitted to the short as it now plays (a short taken in has moved its
+    // titles: then it stays as the template laid it)
+    if opts.music.is_some() {
+        if gone.is_empty() {
+            fit_music(ex, t, applied, report, notes).await;
+        } else {
+            notes.push("music: the short was shortened, so the track was not fitted to it: as the template laid it".into());
         }
     }
     if let (Some(s), Some((slot, secs))) = (report.shots_spread.as_mut(), longest_hold(t, applied)) {

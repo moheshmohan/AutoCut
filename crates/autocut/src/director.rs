@@ -21,8 +21,10 @@
 //!    direct ([`rules_plan`]). The report says who directed and what was repaired.
 //! 4. **Commands.** The plan compiles to engine commands ([`compile`]); a shot's own commands run
 //!    on its clip once it is placed. `dryRun` returns them with the plan, building nothing.
-//! 5. **Build.** A sequence of the `aspect`; the music first (generated, or `music`), its beats
-//!    the grid every cut lands on; the shots placed and moved; each cut made from what its two
+//! 5. **Build.** A sequence of the `aspect`; the music first (generated, or `music`: the user's
+//!    track fitted to the edit with `clip.remix`, a burst at the opening, a peak at the hero
+//!    shot, the landing on the closing shot, ending its own way: [`film_events`]), its beats as
+//!    they play the grid every cut lands on; the shots placed and moved; each cut made from what its two
 //!    shots show and say ([`cuts`]: match cuts, whips where the camera is already moving, J and L
 //!    cuts under speech, dissolves across time) in the edit's style, with the style's sounds
 //!    (the subtle default: a quiet swish under whips and rolls and a chime under the title, no
@@ -2524,7 +2526,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     let seq = r["sequence"].as_u64().ok_or_else(|| AutoCutError::Executor("file.newSequence made no sequence".into()))?;
     report.sequence = Some(seq);
     let total_secs = f64::from(plan.beats()) * beat;
-    let (beats, music_clip) = music(ex, &o, &plan, total_secs, &mut report, &mut notes).await;
+    let (beats, music_clip) = music(ex, &o, &plan, &cands, total_secs, &mut report, &mut notes).await;
     let wins = windows(&plan, &beats);
     let steps = compile(&plan, &cands, &wins, &o, frame, beats.period());
     report.commands = steps.len();
@@ -2738,9 +2740,43 @@ fn finish_json(report: &Report, status: &str) -> Value {
     out
 }
 
+/// The film events of a directed edit on the music's beats (`wins`, as [`windows`] gives them):
+/// a burst at the opening, a peak at the hero shot (two, 8 s apart or more, in an edit over
+/// 30 s: the shots that grab attention most, by hook and energy, neither the first nor the last)
+/// and the landing on the closing shot.
+pub fn film_events(plan: &Plan, cands: &[Candidate], wins: &[(f64, f64)]) -> Vec<Value> {
+    let mut events: Vec<Value> = crate::music_fit::event("burst", 0.0).into_iter().collect();
+    let n = plan.shots.len().min(wins.len());
+    let end = wins.get(n.saturating_sub(1)).map_or(0.0, |w| w.1);
+    let last = wins.get(n.saturating_sub(1)).map(|w| w.0).filter(|t| n >= 2 && *t >= 2.0);
+    let moments: Vec<(f64, f64)> = plan
+        .shots
+        .iter()
+        .zip(wins)
+        .take(n.saturating_sub(1))
+        .skip(1)
+        .filter_map(|(s, w)| cands.iter().find(|c| c.id == s.clip).map(|c| (w.0, c.hook + c.energy)))
+        .collect();
+    let most = if end > 30.0 { 2 } else { 1 };
+    let hi = last.unwrap_or(end) - 2.0;
+    events.extend(crate::music_fit::peaks(&moments, most, 8.0, 1.0, hi).into_iter().filter_map(|t| crate::music_fit::event("peak", t)));
+    events.extend(last.and_then(|t| crate::music_fit::event("landing", t)));
+    events
+}
+
 /// The music on A3 from 0: generated at the plan's tempo and mood to the edit's length (or
-/// `music`, placed and measured); its beats, and its clip.
-async fn music(ex: &dyn Executor, o: &Options, plan: &Plan, secs: f64, report: &mut Report, notes: &mut Vec<String>) -> (Beats, Option<u64>) {
+/// `music`, placed, measured and fitted to the edit: its lifts on the opening, the hero shots
+/// and the closing shot, ending its own way, [`film_events`]); its beats as they play, and its
+/// clip.
+async fn music(
+    ex: &dyn Executor,
+    o: &Options,
+    plan: &Plan,
+    cands: &[Candidate],
+    secs: f64,
+    report: &mut Report,
+    notes: &mut Vec<String>,
+) -> (Beats, Option<u64>) {
     let grid = Beats::grid(plan.bpm);
     if let Some(file) = &o.music {
         let imported = run(ex, "file.import", json!({"paths": [filmcraft_engine::export_tools::expand_home(file)], "reuse": true})).await;
@@ -2750,18 +2786,35 @@ async fn music(ex: &dyn Executor, o: &Options, plan: &Plan, secs: f64, report: &
         };
         let placed = run(ex, "timeline.place", json!({"item": item, "audioTrack": "A3", "video": false, "time": 0, "duration": ticks(secs)})).await;
         let clip = placed.ok().and_then(|r| r["clips"].as_array().and_then(|a| a.first()).and_then(Value::as_u64));
-        let beats = match run(ex, "media.beats", json!({"item": item})).await {
+        let measured = match run(ex, "media.beats", json!({"item": item})).await {
             Ok(b) => {
                 let times: Vec<f64> = b["beats"].as_array().map(|a| a.iter().filter_map(finite).collect()).unwrap_or_default();
                 let period = finite(&b["period"]).or_else(|| finite(&b["bpm"]).map(|x| 60.0 / x)).unwrap_or(grid.period());
-                Beats::measured(&times, period).unwrap_or(grid)
+                Beats::measured(&times, period)
             }
             Err(e) => {
                 notes.push(format!("music: its beats were not measured ({e}): the cuts follow {:.0} bpm", plan.bpm));
-                grid
+                None
             }
         };
-        report.music = Some(json!({"file": file, "item": item, "clip": clip}));
+        // fitted to the edit as it will be cut on the track's beats (the cut keeps them: the
+        // joins are on its beats)
+        let mut fit = Value::Null;
+        let mut beats = measured.clone().unwrap_or(grid);
+        if let (Some(c), Some(track)) = (clip, &measured) {
+            let wins = windows(plan, track);
+            let edit = wins.last().map_or(secs, |w| w.1);
+            let events = film_events(plan, cands, &wins);
+            match crate::music_fit::fit(ex, c, edit, &events, "own").await {
+                Ok(r) => {
+                    notes.extend(crate::music_fit::notes(&r));
+                    fit = crate::music_fit::summary(&r);
+                    beats = crate::music_fit::played_beats(track, &r).unwrap_or_else(|| track.clone());
+                }
+                Err(e) => notes.push(format!("music: not fitted to the edit ({}); trimmed to it", chars(&e.to_string(), 160))),
+            }
+        }
+        report.music = Some(json!({"file": file, "item": item, "clip": clip, "fit": fit}));
         return (beats, clip);
     }
     generate_music(ex, o, plan, secs, report, notes).await

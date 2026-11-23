@@ -62,7 +62,8 @@ pub struct Piece {
 }
 
 /// A remix: pieces played one after the other, crossfaded over `xfade` samples at the joints,
-/// the last `fade_out` samples faded out (equal-power: a quarter cosine).
+/// the first `fade_in` samples faded in and the last `fade_out` faded out (equal-power: a quarter
+/// sine and cosine).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
     pub pieces: Vec<Piece>,
@@ -70,12 +71,15 @@ pub struct Plan {
     /// Fade-out at the end of the output, samples (0: none). Not part of [`Plan::to_text`]: the
     /// stored form keeps it beside the plan, so plans saved before it play unchanged.
     pub fade_out: i64,
+    /// Fade-in at the start, samples (0: none; a remix that starts the track mid-way has a short
+    /// one, so its first sample does not click). Stored beside the plan as `fade_out` is.
+    pub fade_in: i64,
 }
 
 impl Plan {
     /// The plan that plays the source unchanged.
     pub fn identity(len: i64, xfade: i64) -> Plan {
-        Plan { pieces: vec![Piece { src: 0, len }], xfade, fade_out: 0 }
+        Plan { pieces: vec![Piece { src: 0, len }], xfade, fade_out: 0, fade_in: 0 }
     }
     /// Output length (samples).
     pub fn len(&self) -> i64 {
@@ -108,7 +112,7 @@ impl Plan {
     /// [`Self::is_playable`] with the output limit in the plan's own units: a plan stored in ticks
     /// (see `filmcraft-render`'s `Remix`) passes the project's longest duration in ticks instead.
     pub fn is_playable_within(&self, max_output: i64) -> bool {
-        if self.pieces.is_empty() || self.pieces.len() > MAX_PIECES || self.xfade < 0 || self.fade_out < 0 {
+        if self.pieces.is_empty() || self.pieces.len() > MAX_PIECES || self.xfade < 0 || self.fade_out < 0 || self.fade_in < 0 {
             return false;
         }
         let joined = self.pieces.len() > 1;
@@ -127,7 +131,7 @@ impl Plan {
                 _ => return false,
             }
         }
-        self.fade_out <= total && total.checked_add(x).is_some()
+        self.fade_out <= total && self.fade_in <= total && total.checked_add(x).is_some()
     }
 }
 
@@ -520,7 +524,7 @@ pub fn plan_avoiding(a: &Analysis, target: i64, params: Params, avoid: &[(usize,
         src = b[j];
     }
     pieces.push(Piece { src, len: len - src });
-    Ok(Plan { pieces, xfade, fade_out: 0 })
+    Ok(Plan { pieces, xfade, fade_out: 0, fade_in: 0 })
 }
 
 // ------------------------------------------------------------------------------------- render
@@ -528,8 +532,8 @@ pub fn plan_avoiding(a: &Analysis, target: i64, params: Params, avoid: &[(usize,
 /// Render output samples `[out0, out0 + n)` of `plan` with `channels` channels. `read(src, len)`
 /// returns planar source samples `[src, src + len)` (silence outside the source is fine). Each
 /// joint at output position `J` crossfades over `[J − xfade/2, J + xfade/2)` with equal-power
-/// gains, and the last `fade_out` samples fade out (a quarter cosine); the result does not
-/// depend on how the output is cut into requests.
+/// gains, the first `fade_in` samples fade in (a quarter sine) and the last `fade_out` fade out
+/// (a quarter cosine); the result does not depend on how the output is cut into requests.
 pub fn render(plan: &Plan, out0: i64, n: usize, channels: usize, read: &mut dyn FnMut(i64, usize) -> Vec<Vec<f32>>) -> Vec<Vec<f32>> {
     let mut out = vec![vec![0f32; n]; channels];
     // a plan that would stack many pieces on the same output (or overflow its positions) plays silence
@@ -543,6 +547,7 @@ pub fn render(plan: &Plan, out0: i64, n: usize, channels: usize, read: &mut dyn 
     let total = plan.len();
     let fade = plan.fade_out.clamp(0, total);
     let fade_from = total - fade;
+    let start_fade = plan.fade_in.clamp(0, total);
     let last = plan.pieces.len().saturating_sub(1);
     let mut d = 0i64;
     for (pi, p) in plan.pieces.iter().enumerate() {
@@ -568,6 +573,10 @@ pub fn render(plan: &Plan, out0: i64, n: usize, channels: usize, read: &mut dyn 
             if fade_out && o >= de - h0 {
                 let u = (o - (de - h0)) as f64 + 0.5;
                 g *= (u / x as f64 * std::f64::consts::FRAC_PI_2).cos();
+            }
+            if start_fade > 0 && o < start_fade {
+                let u = (o as f64 + 0.5) / start_fade as f64;
+                g *= (u.min(1.0) * std::f64::consts::FRAC_PI_2).sin();
             }
             if fade > 0 && o >= fade_from {
                 let u = ((o - fade_from) as f64 + 0.5) / fade as f64;
@@ -611,7 +620,7 @@ impl Plan {
             let (a, b) = p.split_once(',')?;
             pieces.push(Piece { src: a.trim().parse().ok()?, len: b.trim().parse().ok()? });
         }
-        let plan = Plan { pieces, xfade, fade_out: 0 };
+        let plan = Plan { pieces, xfade, fade_out: 0, fade_in: 0 };
         plan.is_playable_within(max_output).then_some(plan)
     }
 }
@@ -864,11 +873,17 @@ mod tests {
             assert!(max_step(&whole[0][s..e]) <= music_step * 1.05, "click at joint {j}");
         }
         // equal-power gains: in the fade, gain² of both sides sums to 1
-        let plan2 = Plan { pieces: vec![Piece { src: 0, len: 100 }, Piece { src: 0, len: 100 }], xfade: 20, fade_out: 0 };
+        let plan2 = Plan { pieces: vec![Piece { src: 0, len: 100 }, Piece { src: 0, len: 100 }], xfade: 20, fade_out: 0, fade_in: 0 };
         let mut ones = |_s: i64, n: usize| vec![vec![1.0f32; n]];
         let mut first = |s: i64, n: usize| vec![(0..n as i64).map(|k| if s + k < 100 + 10 && s + k >= 0 { 1.0 } else { 0.0 }).collect()];
         let _ = render(&plan2, 0, 200, 1, &mut ones);
-        let g = render(&Plan { pieces: vec![Piece { src: 0, len: 100 }, Piece { src: 1000, len: 100 }], xfade: 20, fade_out: 0 }, 85, 30, 1, &mut first);
+        let g = render(
+            &Plan { pieces: vec![Piece { src: 0, len: 100 }, Piece { src: 1000, len: 100 }], xfade: 20, fade_out: 0, fade_in: 0 },
+            85,
+            30,
+            1,
+            &mut first,
+        );
         for (i, v) in g[0].iter().enumerate() {
             let o = 85 + i as i64;
             if (90..110).contains(&o) {
@@ -881,7 +896,7 @@ mod tests {
 
     #[test]
     fn text_roundtrip() {
-        let p = Plan { pieces: vec![Piece { src: 0, len: 10 }, Piece { src: 50, len: 7 }], xfade: 3, fade_out: 0 };
+        let p = Plan { pieces: vec![Piece { src: 0, len: 10 }, Piece { src: 50, len: 7 }], xfade: 3, fade_out: 0, fade_in: 0 };
         assert_eq!(Plan::from_text(&p.to_text()), Some(p));
         assert_eq!(Plan::from_text("x"), None);
     }
@@ -907,7 +922,7 @@ mod tests {
         assert!(Plan::identity(0, 960).is_playable());
 
         // render refuses an unvalidated hostile plan instead of reading once per piece
-        let hostile = Plan { pieces: vec![Piece { src: 0, len: 0 }; 5000], xfade: 1_000_000_000, fade_out: 0 };
+        let hostile = Plan { pieces: vec![Piece { src: 0, len: 0 }; 5000], xfade: 1_000_000_000, fade_out: 0, fade_in: 0 };
         let mut reads = 0usize;
         let out = render(&hostile, 0, 512, 2, &mut |_, len| {
             reads += 1;

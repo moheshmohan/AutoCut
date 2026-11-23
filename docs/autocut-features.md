@@ -588,3 +588,19 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   fitted remix works with the whole track from the clip's In point; its fit is stored with the
   remix (a plain remix stores exactly what it did before) and kept when Remix Properties or the
   Remix tool re-plan. Without the new parameters the plan is the Remix of before.
+- **PX2.3**: Direct, Quick Short, Showcase and the trailer fit the user's track to the film
+  (`autocut::music_fit`), passing their film events and ending to `clip.remix`: **Direct** a
+  burst at the opening, a peak at the hero shot (two in an edit over 30 s: the shots with the
+  most hook and energy, neither first nor last) and the landing on the closing shot, ending
+  `own`, the cut then laid on the track's beats as they play; **Quick Short** a burst on the
+  music's first beat, peaks on the title hits and the landing on the end card (the last title in
+  the last 40 %), ending `own` (report `musicFit`); **Showcase** a burst on the first beat,
+  peaks where the longest scenes play without words (up to four, 15 s apart), the landing on
+  the outro, ending `fade` (`music.fit` `"fitted"`, `music.fitted`), for tracks longer and
+  shorter than the show; the **trailer** gains `music` (a file instead of generated music): its
+  cut planned on the track's beats, a burst at the hook, a peak where the montage starts and its
+  own ending landing on the end card (`music.fit`). A track that cannot be fitted falls back to
+  what each did before (trimmed and faded, remixed or looped), noted. Joins kept despite a level
+  jump become notes; how each event landed stays in the report. The shorts stay silent. A remix
+  that starts the track mid-way (an opening burst on a drop) lands the drop on the event exactly
+  (the film's beat grid kept) and fades in over 10 ms.

@@ -2858,8 +2858,10 @@ pub struct Music {
     pub source: String,
     /// Its tempo (as generated, or as measured), when known.
     pub bpm: Option<f64>,
-    /// How it fits the show's length: `"generated"`, `"trimmed"` (faded out where the show
-    /// ends), `"remixed"` (`clip.remix`: cut at musically similar beats to the length), `"looped"`
+    /// How it fits the show's length: `"generated"`, `"fitted"` (`clip.remix` with the show's
+    /// events: a burst at the opening, peaks where scenes play without words, a landing on the
+    /// outro, faded out from it), `"trimmed"` (faded out where the show ends), `"remixed"`
+    /// (`clip.remix`: cut at musically similar beats to the length), `"looped"`
     /// (played again from the start) or `"as is"` (its length could not be read).
     pub fit: String,
     /// Cuts (montage cuts, entry and outro starts) within a frame of one of its beats, of all.
@@ -2873,6 +2875,10 @@ pub struct Music {
     /// What played a generated bed: a SoundFont's name, or the built-in oscillators.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruments: Option<String>,
+    /// The user's track fitted to the show (`fit` `"fitted"`): how it ended, how each film event
+    /// landed, its joins and warnings ([`crate::music_fit::summary`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fitted: Option<Value>,
 }
 
 /// The energy (0..1) of a generated bed over a show `len` seconds long, as a curve of points
@@ -2955,17 +2961,19 @@ async fn clip_seconds(ex: &dyn Executor, tr: &Tracks, clip: u64) -> Option<f64> 
     c["duration"].as_f64().map(|d| d / TPS)
 }
 
-/// Lay the user's track under the whole show (`target` seconds) on the music track from 0: cut
-/// to length when it is longer (faded out by the caller), remixed to length at its beats when it
-/// is shorter (`clip.remix`), else looped. Returns the clips, how it was fitted, and its beats
-/// as they now play.
+/// Lay the user's track under the whole show (`target` seconds) on the music track from 0,
+/// fitted to the show's `events` (`clip.remix` with a fade ending: its lifts on them, faded out
+/// from the outro); when that cannot be done, cut to length when it is longer (faded out by the
+/// caller), remixed to length at its beats when it is shorter (`clip.remix`), else looped.
+/// Returns the clips, how it was fitted, its beats as they now play, and what the fit did.
 async fn place_music(
     ex: &dyn Executor,
     tr: &Tracks,
     m: &MusicFile,
     target: f64,
+    events: &[Value],
     notes: &mut Vec<String>,
-) -> Result<(Vec<u64>, &'static str, Option<Beats>), AutoCutError> {
+) -> Result<(Vec<u64>, &'static str, Option<Beats>, Option<Value>), AutoCutError> {
     let place = async |time: f64, duration: Option<f64>| -> Result<u64, AutoCutError> {
         let mut p = json!({"item": m.item, "track": tr.music, "time": ticks(time), "sourceIn": 0});
         if let Some(d) = duration {
@@ -2974,8 +2982,30 @@ async fn place_music(
         let r = run(ex, "timeline.place", p).await?;
         r["clips"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).ok_or_else(|| AutoCutError::Executor("timeline.place placed no music".into()))
     };
+    // fitted to the show: the whole track (from its start) considered, its lifts on the events
+    if let Some(b) = &m.beats {
+        let clip = match m.seconds {
+            Some(s) if s >= target => place(0.0, Some(target)).await?,
+            _ => place(0.0, None).await?,
+        };
+        match crate::music_fit::fit(ex, clip, target, events, "fade").await {
+            Ok(r) => {
+                notes.extend(crate::music_fit::notes(&r));
+                let beats = crate::music_fit::played_beats(b, &r).or_else(|| m.beats.clone());
+                return Ok((vec![clip], "fitted", beats, Some(crate::music_fit::summary(&r))));
+            }
+            Err(e) => {
+                notes.push(format!("music: not fitted to the show ({e})"));
+                if m.seconds.is_some_and(|s| s >= target) {
+                    return Ok((vec![clip], "trimmed", m.beats.clone(), None));
+                }
+                run(ex, "timeline.select", json!({"clips": [clip]})).await?;
+                run(ex, "edit.clear", json!({"clips": [clip]})).await?;
+            }
+        }
+    }
     let length = match m.seconds {
-        Some(s) if s >= target => return Ok((vec![place(0.0, Some(target)).await?], "trimmed", m.beats.clone())),
+        Some(s) if s >= target => return Ok((vec![place(0.0, Some(target)).await?], "trimmed", m.beats.clone(), None)),
         Some(s) => Some(s),
         None => None,
     };
@@ -2984,7 +3014,7 @@ async fn place_music(
         Some(s) => s,
         None => match clip_seconds(ex, tr, first).await {
             Some(s) if s > 0.0 => s,
-            _ => return Ok((vec![first], "as is", None)),
+            _ => return Ok((vec![first], "as is", None, None)),
         },
     };
     if length >= target {
@@ -2993,7 +3023,7 @@ async fn place_music(
         if let Err(e) = run(ex, "timeline.trim", json!({"clip": first, "edge": "out", "mode": "regular", "delta": delta})).await {
             notes.push(format!("music: {e}"));
         }
-        return Ok((vec![first], "trimmed", m.beats.clone()));
+        return Ok((vec![first], "trimmed", m.beats.clone(), None));
     }
     // shorter than the show: longer at its own beats, cut where the music is most alike (the
     // planner can find no joints for some lengths with few of them: then with more, freer ones)
@@ -3003,7 +3033,7 @@ async fn place_music(
             match run(ex, "clip.remix", json!({"clip": first, "seconds": target, "segments": segments, "variations": variations})).await {
                 Ok(r) => {
                     let beats = m.beats.as_ref().and_then(|b| remixed_beats(b, &r));
-                    return Ok((vec![first], "remixed", beats));
+                    return Ok((vec![first], "remixed", beats, None));
                 }
                 Err(e) => why = e.to_string(),
             }
@@ -3033,7 +3063,7 @@ async fn place_music(
         }
     }
     let beats = m.beats.as_ref().and_then(|b| Beats::measured(&times, b.period()));
-    Ok((clips, "looped", beats))
+    Ok((clips, "looped", beats, None))
 }
 
 /// Where each copy of a `length`-second track starts when it is looped under a `target`-second
@@ -3065,7 +3095,7 @@ fn loop_starts(length: f64, target: f64, beats: Option<&Beats>, fps: f64) -> Vec
 
 /// The beats of a track as `clip.remix` plays it (its report `r`): each piece of the remix
 /// (`src` and `len` in ticks of the track) plays the track's beats in it, one after the other.
-fn remixed_beats(track: &Beats, r: &Value) -> Option<Beats> {
+pub(crate) fn remixed_beats(track: &Beats, r: &Value) -> Option<Beats> {
     let mut out = Vec::new();
     let mut at = 0.0;
     for p in r["pieces"].as_array()? {
@@ -4050,8 +4080,16 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
     cuts.push(t);
     let (music, info, played) = match &track {
         Some(m) => {
-            let (clips, fit, played) = place_music(ex, &tr, m, total + 0.5, &mut built.notes).await?;
-            let info = Music { source: m.path.clone(), bpm: m.bpm, fit: fit.into(), ..Music::default() }.with_cuts(&cuts, played.as_ref(), tr.fps);
+            // the film's events: a burst on the first beat (the cuts are on the track's own beats
+            // from 0, so the grid is kept), peaks where the longest scenes play without words,
+            // the landing on the outro
+            let first_beat = m.beats.as_ref().and_then(|b| b.next(0.0)).unwrap_or(0.0);
+            let scenes: Vec<(f64, f64)> = quiet_scenes.iter().map(|(a, b)| (*a, b - a)).collect();
+            let mut events: Vec<Value> = crate::music_fit::event("burst", first_beat).into_iter().collect();
+            events.extend(crate::music_fit::peaks(&scenes, 4, 15.0, intro_len, outro_at - 4.0).into_iter().filter_map(|t| crate::music_fit::event("peak", t)));
+            events.extend(crate::music_fit::event("landing", outro_at));
+            let (clips, fit, played, fitted) = place_music(ex, &tr, m, total + 0.5, &events, &mut built.notes).await?;
+            let info = Music { source: m.path.clone(), bpm: m.bpm, fit: fit.into(), fitted, ..Music::default() }.with_cuts(&cuts, played.as_ref(), tr.fps);
             (clips, info, played)
         }
         None => {
@@ -4100,8 +4138,10 @@ pub async fn build(ex: &dyn Executor, opts: &Options, entries: &[Entry], script:
             (m["clip"].as_u64().into_iter().collect::<Vec<u64>>(), info, Some(played))
         }
     };
-    // the user's track is faded out where the show ends; a generated bed ends on its own
+    // the user's track is faded out where the show ends (a fitted one fades itself from the
+    // outro); a generated bed ends on its own
     if track.is_some()
+        && info.fit != "fitted"
         && let Some(last) = music.last()
     {
         run(ex, "sequence.applyAudioTransition", json!({"clip": last, "edge": "out", "effect": "constant_power", "frames": (opts.fps * 3.0) as i64}))

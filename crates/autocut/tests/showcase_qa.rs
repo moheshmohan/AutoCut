@@ -235,7 +235,7 @@ async fn a_narrated_showcase_keeps_the_voice_on_top() {
 async fn a_showcase_on_the_users_music_has_no_errors() {
     let ex = demo();
     let dir = tmp("music");
-    // a track shorter than the show (remixed to length), loud: it is levelled and ducked
+    // a track shorter than the show (fitted to it), loud: it is levelled and ducked
     let g = run(
         &ex,
         "audio.generate",
@@ -257,7 +257,7 @@ async fn a_showcase_on_the_users_music_has_no_errors() {
     let music = g["path"].as_str().map(str::to_string);
     let opts = Options { title: "Robots".into(), voice: Some("basic-male".into()), music, width: 640, height: 360, ..Options::default() };
     let built = showcase::build(&ex, &opts, &entries, &script, &mut |_| {}).await.expect("the showcase builds");
-    assert_eq!(built.music.as_ref().map(|m| m.fit.as_str()), Some("remixed"), "{:?}", built.music);
+    assert_eq!(built.music.as_ref().map(|m| m.fit.as_str()), Some("fitted"), "{:?}", built.music);
     let q = qa::Options { frame_side: 160, work_dir: Some(dir.clone().into()), ..qa::Options::for_showcase(&opts, &built) };
     let r = qa::check(&ex, &q, None, &mut |_| {}).await;
     println!("{}\n{:?}", r.summary(), r.loudness);

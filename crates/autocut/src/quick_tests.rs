@@ -1054,3 +1054,77 @@ fn a_clip_whose_moments_look_alike_gives_one() {
     let alike = out["shotsSpread"]["lookAlike"].as_array().unwrap();
     assert!(!alike.is_empty() && alike.iter().all(|a| a["replaced"]["name"] == "clip0.mov"), "{alike:?}");
 }
+
+/// The film events a Quick Short fits the user's track to: a burst on the music's first beat,
+/// peaks on the title hits and the landing on the end card (the last title, late in the short).
+#[test]
+fn the_film_events_mark_the_title_hits_and_the_end_card() {
+    let t = TemplateInfo {
+        id: "t".into(),
+        name: "T".into(),
+        description: String::new(),
+        category: String::new(),
+        tags: Vec::new(),
+        seconds: 20.0,
+        aspects: Vec::new(),
+        ai_ready: true,
+        captions: false,
+        bpm: None,
+        slots: ["hook", "title", "line", "end"]
+            .iter()
+            .map(|id| SlotInfo {
+                id: id.to_string(),
+                kind: if *id == "hook" { "video".into() } else { "text".into() },
+                name: id.to_string(),
+                prompt: String::new(),
+                count: 1,
+                min_count: 1,
+                max_chars: None,
+                ai: None,
+                placements: Vec::new(),
+            })
+            .collect(),
+    };
+    let tk = |s: f64| (s * TICKS_PER_SECOND as f64) as i64;
+    let applied = json!({"seconds": 20.0, "slots": [
+        {"slot": "hook", "start": 0, "duration": tk(4.0)},
+        {"slot": "title", "start": tk(0.2), "duration": tk(3.0)},
+        {"slot": "line", "start": tk(6.0), "duration": tk(3.0)},
+        {"slot": "end", "start": tk(17.0), "duration": tk(3.0)},
+    ]});
+    let events = film_events(&t, &applied, 0.25);
+    let kinds: Vec<(&str, f64)> = events.iter().map(|e| (e["kind"].as_str().unwrap(), e["seconds"].as_f64().unwrap())).collect();
+    assert_eq!(kinds, [("burst", 0.25), ("peak", 6.0), ("landing", 17.0)]);
+    // hostile slots: no times, strings, past the end: left out
+    let applied = json!({"seconds": 20.0, "slots": [{"slot": "line", "start": "x"}, {"slot": "line", "start": tk(500.0)}, {"slot": "end"}]});
+    assert_eq!(film_events(&t, &applied, f64::NAN).len(), 0);
+}
+
+/// A Quick Short on the user's track: the template laid it, then it is fitted to the short
+/// (`clip.remix`: a burst on its first beat, peaks on the title hits, its own ending on the end
+/// card);
+/// the report says how (`musicFit`).
+#[test]
+fn a_quick_short_fits_the_users_track() {
+    // (enough clips that no place repeats a moment: the short keeps its length)
+    let (s, movies) = clips_session(12);
+    let ex = SessionExecutor::from(s);
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let dir = std::env::temp_dir().join(format!("filmcraft-quick-music-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let g = rt
+        .block_on(ex.execute(
+            "audio.generate",
+            json!({"kind": "music", "duration": 45, "bpm": 124, "seed": 2, "soundfont": "oscillators", "place": false, "dir": dir.to_string_lossy()}),
+        ))
+        .unwrap();
+    let path = g["path"].as_str().unwrap().to_string();
+    let p = json!({"items": movies, "template": "builtin:tech-reveal", "seconds": 28, "topic": "robots", "redact": "off", "music": path});
+    let out = rt.block_on(make(&ex, &p, None, &mut |_| {})).unwrap();
+    let fit = &out["musicFit"];
+    assert_eq!(fit["ending"], "own", "{out}");
+    let landed = fit["eventsLanded"].as_array().cloned().unwrap_or_default();
+    assert!(landed.first().is_some_and(|e| e["kind"] == "burst" && e["landed"] == true), "{fit}");
+    assert!(fit["seconds"].as_f64().is_some_and(|x| x > 5.0 && x <= out["seconds"].as_f64().unwrap() + 0.6), "{fit} {}", out["seconds"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

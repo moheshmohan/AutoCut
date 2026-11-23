@@ -173,7 +173,8 @@ async fn cuts_land_on_the_beat_of_the_generated_bed() {
 async fn a_music_file_is_fitted_to_the_show_and_cut_on_its_beat() {
     let dir = std::env::temp_dir().join(format!("filmcraft-music-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    for (seconds, fit) in [(12.0, "remixed"), (90.0, "trimmed")] {
+    // shorter and longer than the show: both fitted to it (`clip.remix` with the show's events)
+    for (seconds, fit) in [(12.0, "fitted"), (90.0, "fitted")] {
         let ex = demo();
         // the user's track: 128 bpm music written to a file (not placed)
         let g = ex
@@ -193,6 +194,11 @@ async fn a_music_file_is_fitted_to_the_show_and_cut_on_its_beat() {
         assert_eq!((m.source.as_str(), m.fit.as_str()), (path.as_str(), fit), "{lines:?}");
         assert!(m.bpm.is_some_and(|b| (b - 128.0).abs() < 2.0), "{m:?}");
         assert!(m.cuts >= 6 && m.cuts_on_beat == m.cuts, "{m:?} {lines:?}");
+        // the fit said how it went: a fade ending, the opening burst and the outro's landing
+        let fitted = m.fitted.clone().expect("the fit's report");
+        assert_eq!(fitted["ended"], "fade", "{fitted}");
+        let landed = fitted["eventsLanded"].as_array().cloned().unwrap_or_default();
+        assert!(landed.iter().any(|e| e["kind"] == "burst") && landed.iter().any(|e| e["kind"] == "landing"), "{fitted}");
         // the track under the whole show on A3, nothing generated, faded out, levelled as music
         let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
         let a3 = seq["audio"][2]["items"].as_array().cloned().unwrap_or_default();

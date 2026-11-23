@@ -159,6 +159,47 @@ async fn a_synthetic_show_gets_a_vertical_trailer_on_the_beat() {
     assert!(masks["masks"].as_array().unwrap().iter().any(|m| m["effectId"] == "gaussian_blur"), "{masks}");
 }
 
+/// The user's track instead of generated music: the trailer is planned on its beats and the
+/// track fitted to it (`clip.remix`): a burst at the hook, a peak where the montage starts and
+/// its own ending landing on the end card; every cut on its beat as it now plays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trailer_on_the_users_track_is_fitted_to_it() {
+    let ex = demo();
+    let (plan, report, logo) = show(&ex).await;
+    let dir = std::env::temp_dir().join(format!("filmcraft-trailer-music-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let g = ex
+        .execute(
+            "audio.generate",
+            json!({"kind": "music", "duration": 40, "bpm": 116, "seed": 3, "soundfont": "oscillators", "place": false, "dir": dir.to_string_lossy()}),
+        )
+        .await
+        .unwrap();
+    let path = g["path"].as_str().unwrap().to_string();
+    let p = json!({"seconds": 16, "plan": plan, "report": report, "logo": logo, "hookVoice": false, "redact": false, "music": path});
+    let mut lines = Vec::new();
+    let made = trailer::make(&ex, &p, None, None, &mut |l| lines.push(l.to_string())).await.unwrap_or_else(|e| panic!("{e}: {lines:?}"));
+    let music = made["music"].clone();
+    assert_eq!(music["file"], json!(path), "{music}");
+    let fit = &music["fit"];
+    assert_eq!(fit["ending"], "own", "{music}");
+    let landed = fit["eventsLanded"].as_array().cloned().unwrap_or_default();
+    assert_eq!(landed.len(), 3, "{fit}");
+    let landing = landed.iter().find(|e| e["kind"] == "landing").expect("a landing");
+    assert_eq!(landing["landed"], true, "{fit}");
+    assert!((landing["at"].as_f64().unwrap() - made["timing"]["endCard"][0].as_f64().unwrap()).abs() < 0.05, "{fit} {}", made["timing"]);
+    // its tempo, every cut on its beat as it plays, and nothing generated
+    assert!((made["bpm"].as_f64().unwrap() - 116.0).abs() < 1.5, "{made}");
+    assert_eq!(made["cutsOnBeat"], made["cuts"], "{made}");
+    let seq = ex.execute("sequence.inspect", json!({})).await.unwrap();
+    let a3 = seq["audio"][2]["items"].as_array().cloned().unwrap_or_default();
+    let file = std::path::Path::new(&path).file_name().unwrap().to_string_lossy().into_owned();
+    assert!(!a3.is_empty() && a3.iter().all(|c| c["name"].as_str() == Some(file.as_str())), "{a3:?}");
+    let length = seq["duration"].as_f64().unwrap() / TPS;
+    assert!((length - made["seconds"].as_f64().unwrap()).abs() < 0.1, "{length} {made}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn hostile_trailer_requests_fail_cleanly() {
     let ex = demo();

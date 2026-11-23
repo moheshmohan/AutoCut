@@ -252,6 +252,7 @@ fn make_plan(s: &Session, c: ClipId, target: Tick, segments: f64, variations: f6
         xfade: Tick::from_units(plan.xfade, sr),
         pieces,
         fade_out: Tick::from_units(plan.fade_out, sr),
+        fade_in: Tick::from_units(plan.fade_in, sr),
         stretch: f.stretch,
         fitted: ask.clone(),
     };

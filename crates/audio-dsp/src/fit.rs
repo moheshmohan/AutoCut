@@ -30,7 +30,9 @@
 //! search:   a shortest path over the events in film order (start → each event's candidate lifts
 //!           or a miss → the end), costs in joins: a join 0.8 plus 1.2·(1 − similarity), 0.6 more
 //!           across the bar, 1.5 more outside a stable stretch; a lift 3·(1 − its weight); a miss
-//!           2–3; starting the track at a section or drop for an opening event 0.8; an anchor off
+//!           2–3; starting the track mid-way for an opening event 0.8 (so a drop or rising
+//!           section lands on it exactly: the film's beat grid is kept when the event is on it;
+//!           a 10 ms fade-in); an anchor off
 //!           by r, (r / tolerance)²; ½ per 3 dB of the level jump a join is predicted to make
 //!           from the beats' levels (a stable stretch does not try one over 6 dB)
 //! stretch:  up to maxStretch the whole remix is time-stretched (pitch kept, at playback) so its
@@ -74,6 +76,8 @@ const BUTTON_TAIL_S: (f64, f64) = (0.25, 0.8);
 /// A fade ending: two bars, within these seconds (a landing's fade: within the wider range).
 const FADE_S: (f64, f64) = (2.0, 6.0);
 const LANDING_FADE_S: (f64, f64) = (1.0, 10.0);
+/// A track started mid-way fades in over this long, seconds.
+const COLD_FADE_S: f64 = 0.010;
 /// A cut-short own ending fades over this long, seconds.
 const CUT_SHORT_FADE_S: f64 = 0.3;
 // costs, in joins
@@ -688,14 +692,11 @@ impl<'a> Ctx<'a> {
                 if !matches!(l.kind, LiftKind::Drop | LiftKind::Section) {
                     continue;
                 }
-                // the downbeat at or before where the lift must start for it to play at the event
+                // the track starts where the lift plays exactly at the event (on the film's beat
+                // when the event is on it)
                 let want = l.src - e0.at;
-                let k = self.st.downbeats.iter().rev().copied().find(|&k| k < self.m && self.b[k] <= want + self.tol);
-                if let Some(k) = k
-                    && self.b[k] > 0
-                    && !starts.iter().any(|s| s.x == self.b[k])
-                {
-                    starts.push(Node { f: 0, x: self.b[k], cost: COLD_COST, lift: None, event: None, end: End::No, tol: self.tol });
+                if want > 0 && !starts.iter().any(|s| s.x == want) {
+                    starts.push(Node { f: 0, x: want, cost: COLD_COST, lift: None, event: None, end: End::No, tol: self.tol });
                 }
             }
         }
@@ -884,7 +885,9 @@ impl<'a> Ctx<'a> {
         }
         let total: i64 = pieces.iter().map(|p| p.len).sum();
         let fade_out = fade_out.clamp(0, total / 2);
-        let plan = Plan { pieces, xfade: self.xfade, fade_out };
+        // a track started mid-way fades in over 10 ms (its first sample would click)
+        let fade_in = if start.x > 0 { ((COLD_FADE_S * self.sr) as i64).min(total / 2) } else { 0 };
+        let plan = Plan { pieces, xfade: self.xfade, fade_out, fade_in };
         if !plan.is_playable() {
             return Err(RemixError::TargetTooShort);
         }
@@ -1276,6 +1279,9 @@ mod tests {
         let fit = fit(&a, &r, &mut reader(&m)).expect("fit");
         eprintln!("{:?}\n{:?}\n{:?}\n{:?}", fit.plan, fit.events, fit.joins, fit.warnings);
         assert!(fit.events[0].landed && fit.events[0].lift == Some(LiftKind::Drop), "{:?}", fit.events);
+        // a cold open: the drop's attack is the first thing heard, exactly, after a short fade-in
+        assert_eq!(fit.events[0].off_by, Some(0), "{:?}", fit.events);
+        assert!(fit.plan.pieces[0].src > 0 && fit.plan.fade_in > 0 && fit.plan.fade_in <= 221, "{:?}", fit.plan);
         assert!(fit.events[1].landed, "{:?}", fit.events);
         assert_eq!(fit.ended, "button");
         let tail = secs(fit.plan.fade_out);
@@ -1327,13 +1333,13 @@ mod tests {
         let b = &a.beats;
         let i = b.partition_point(|&x| x < at(40.0));
         let j = b.partition_point(|&x| x < at(50.0));
-        let plan = Plan { pieces: vec![Piece { src: 0, len: b[i] }, Piece { src: b[j], len: a.len - b[j] }], xfade: 441, fade_out: 0 };
+        let plan = Plan { pieces: vec![Piece { src: 0, len: b[i] }, Piece { src: b[j], len: a.len - b[j] }], xfade: 441, fade_out: 0, fade_in: 0 };
         let joins = check_joins(&a, &plan, &[(i, j)], &mut reader(&m));
         assert_eq!(joins.len(), 1);
         assert!(!joins[0].ok && joins[0].excess_db > 6.0, "{:?}", joins[0]);
         // and a join inside one part passes
         let j2 = b.partition_point(|&x| x < at(44.0));
-        let plan = Plan { pieces: vec![Piece { src: 0, len: b[i] }, Piece { src: b[j2], len: a.len - b[j2] }], xfade: 441, fade_out: 0 };
+        let plan = Plan { pieces: vec![Piece { src: 0, len: b[i] }, Piece { src: b[j2], len: a.len - b[j2] }], xfade: 441, fade_out: 0, fade_in: 0 };
         let joins = check_joins(&a, &plan, &[(i, j2)], &mut reader(&m));
         assert!(joins[0].ok, "{:?}", joins[0]);
         // every fitted plan's joins pass (the planner keeps to stable stretches)
