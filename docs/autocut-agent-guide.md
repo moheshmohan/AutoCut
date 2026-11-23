@@ -711,6 +711,8 @@ Never show the user something you haven't looked at.
 | Specs, loudness, true peak for a platform | `filmcraft-cli publish check youtubeShort out.mp4` (also `youtube`, `instagramReel`); `publish fix` writes a copy that passes |
 | The mix | `exec audio.analyzeMix` (bands, speech over music, limiting) |
 | Text in the platform's interface areas | `exec sequence.checkSafeZones platform=reels` |
+| Motion: pops, stills, a flat opening, cuts a minute (warnings) | `exec qa.motionEnergy '{"path":"out.mp4","sheet":"motion.png"}'` (or `sequence`; declare intentional `holds`) |
+| Text and timeline craft: reading time, size, contrast over the footage, dead stretches, silence (warnings) | `exec sequence.checkCraft` |
 | Unblurred faces in the result | `exec sequence.checkPrivacy '{"seconds":[1,5,9]}'` |
 | What the voice actually says | import the export and run `media.understandSpeech` on it; catches garbled or mispronounced lines and mid-phrase pauses |
 | A pipeline's own QA | `<out>.qa.json`, `<out>.qa.png`, `<out>.sheet.jpg`, `<out>.report.json` |
