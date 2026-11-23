@@ -68,7 +68,7 @@ if [ "$SKIP_BUILD" = 0 ]; then
   # FilmCraft builds stay as upstream ships them: the feature is off by default.
   features=()
   if [ -n "${AUTOCUT_APP_NAME:-}" ]; then
-    features=(--features filmcraft/effectcraft,filmcraft-cli/effectcraft)
+    features=(--features "filmcraft/effectcraft,filmcraft-cli/effectcraft")
   fi
   (cd "$ROOT" && cargo build --release --locked -p filmcraft -p filmcraft-cli ${features[@]+"${features[@]}"} "${args[@]}")
 fi
