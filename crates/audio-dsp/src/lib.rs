@@ -10,6 +10,9 @@
 //! * [`structure`] — music structure for fitting a track to a film: downbeats, sections and
 //!   their energy, drops, stops, where the music ends and how (cadence, fade, cut), and how sure
 //!   the analysis is.
+//! * [`fit`] — music fitted to a film: real lifts of the track landed on film events (burst,
+//!   peak, landing, stop), an ending (own, button, fade), an optional pitch-kept stretch, joins in
+//!   stable stretches refused after rendering when they jump in level.
 //! * [`effects`] — clip/track audio effects behind the common [`AudioEffect`] trait, with a
 //!   registry ([`effects()`]) describing every effect's parameters (range, unit, default) so the
 //!   engine and UI can build controls generically. Voice Isolation and Enhance Voice
@@ -48,6 +51,7 @@ pub mod design;
 pub mod ducking;
 pub mod effects;
 pub mod fft;
+pub mod fit;
 pub mod loudness;
 pub mod mixcheck;
 pub mod music;

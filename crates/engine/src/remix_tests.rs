@@ -315,3 +315,154 @@ fn media_beats_reports_downbeats_sections_drops_and_the_ending() {
     assert!(drops.iter().any(|d| (d - parts_at[3]).abs() < 0.03), "{r}");
     assert!(r["sections"].as_array().unwrap().iter().all(|x| (20.0..=50.01).contains(&x["start"].as_f64().unwrap())), "{r}");
 }
+
+/// The structured test track (intro, verse, build, drop, breakdown, drop, cadence: 72 s of music
+/// at 120 BPM) on A1, selected.
+fn fitted_session() -> (Session, ClipId, filmcraft_audio_dsp::structure::Fixture) {
+    use filmcraft_audio_dsp::structure::{FixtureEnd, Part, fixture};
+    let part = |bars, db, drums, build| Part { bars, db, drums, build };
+    let parts = [
+        part(4, -16.0, false, false),
+        part(8, -7.0, true, false),
+        part(4, -9.0, false, true),
+        part(8, 0.0, true, false),
+        part(4, -14.0, false, false),
+        part(8, 0.0, true, false),
+    ];
+    let f = fixture(SR, 120.0, &parts, FixtureEnd::Cadence, 3);
+    let (s, c) = session(&f.audio, None);
+    (s, c, f)
+}
+
+/// `clip.remix` with film events and an ending: the drop lands on the peak, the cadence ends the
+/// film, every join is checked and in a stable stretch, the alternatives need no join, and the
+/// fit is kept when Remix Properties re-plans; one undo step; Revert restores the clip.
+#[test]
+fn remix_fits_events_and_an_ending() {
+    let (mut s, c, _) = fitted_session();
+    let before = item(&s, c);
+    let n0 = s.history.undo.len();
+    let r = s
+        .execute(
+            "clip.remix",
+            json!({"clip": c.0, "seconds": 50.0, "ending": "own", "events": [{"kind": "burst", "seconds": 0.0}, {"kind": "peak", "seconds": 20.0}]}),
+        )
+        .unwrap();
+    assert_eq!(s.history.undo.len(), n0 + 1);
+    eprintln!("{}", serde_json::to_string_pretty(&r).unwrap());
+    let landed = r["eventsLanded"].as_array().unwrap();
+    assert_eq!(landed.len(), 2);
+    for e in landed {
+        assert_eq!(e["landed"], true, "{e}");
+        assert!(e["offBy"].as_f64().unwrap().abs() <= 0.25, "{e}");
+    }
+    assert_eq!(landed[1]["lift"], "drop", "{r}");
+    assert_eq!(r["ending"], "own");
+    assert_eq!(r["ended"], "cadence");
+    assert!((r["seconds"].as_f64().unwrap() - 50.0).abs() <= 0.5, "{r}");
+    for j in r["joins"].as_array().unwrap() {
+        assert_eq!(j["ok"], true, "{j}");
+        assert!(j["excessDb"].as_f64().unwrap() <= 6.0, "{j}");
+    }
+    let alts = r["alternatives"].as_array().unwrap();
+    assert!(!alts.is_empty() && alts.iter().all(|a| a["joins"] == 0 && a["duration"].as_i64().unwrap() > 0), "{r}");
+    assert!(r["warnings"].as_array().unwrap().is_empty(), "{r}");
+    // the fit is stored and kept by a re-plan of the sliders
+    let rm = filmcraft_render::remix::Remix::of(&item(&s, c)).unwrap();
+    assert_eq!(rm.fitted.ending, "own");
+    assert_eq!(rm.fitted.events.len(), 2);
+    let p = s.execute("clip.remix.properties", json!({"variations": 100.0})).unwrap();
+    assert_eq!(p["ending"], "own", "{p}");
+    assert_eq!(p["eventsLanded"].as_array().map(Vec::len), Some(2), "{p}");
+    // ending "source" and no events: the plain remix again
+    let plain = s.execute("clip.remix", json!({"clip": c.0, "seconds": 50.0, "ending": "source", "events": []})).unwrap();
+    assert_eq!(plain["ended"], "source");
+    assert!(filmcraft_render::remix::Remix::of(&item(&s, c)).unwrap().fitted.is_plain());
+    s.execute("clip.remix.revert", json!({})).unwrap();
+    assert_eq!(item(&s, c), before);
+}
+
+/// A fade ending plays the track on and fades it out; the mix is silent at the very end and the
+/// clip is the film's length exactly (no join is needed).
+#[test]
+fn remix_fade_ending_plays_and_fades() {
+    let (mut s, c, f) = fitted_session();
+    let r = s.execute("clip.remix", json!({"clip": c.0, "seconds": 30.0, "ending": "fade"})).unwrap();
+    assert_eq!(r["ended"], "fade", "{r}");
+    assert!(r["joins"].as_array().unwrap().is_empty(), "{r}");
+    assert!((r["fadeOutSeconds"].as_f64().unwrap() - 4.0).abs() < 0.1, "{r}");
+    let it = item(&s, c);
+    assert_eq!(it.duration, Tick::from_seconds_f64(30.0));
+    let total = it.duration.to_units_floor(SR as i64) as usize;
+    let provider = s.media.provider(s.project.clone(), s.services.clone());
+    let q = s.active_sequence().unwrap();
+    let mix = filmcraft_render::audio::mix_sequence(&s.project, q, 0, total, &provider, &filmcraft_render::MixStream::new());
+    // before the fade the mix is the track; at the end it has faded away
+    let k = (10.0 * SR as f64) as usize;
+    assert!((mix.channels[0][k] - f.audio[0][k]).abs() < 1e-4);
+    let tail: f32 = mix.channels[0][total - 200..total].iter().map(|v| v.abs()).fold(0.0, f32::max);
+    assert!(tail < 0.01, "{tail}");
+}
+
+/// A stretch of up to 5 %: a film 2 % longer than the track plays without a join, stretched at
+/// its own pitch; the mix renders it (in pieces as one) and the clip has the film's length.
+#[test]
+fn remix_stretch_avoids_a_join_and_plays() {
+    let (mut s, c, _) = fitted_session();
+    let natural = s.execute("media.beats", json!({"item": item(&s, c).item.0})).unwrap()["musicEnd"].as_f64().unwrap();
+    let want = natural * 1.02;
+    let r = s.execute("clip.remix", json!({"clip": c.0, "seconds": want, "ending": "own", "maxStretchPct": 5})).unwrap();
+    assert!(r["joins"].as_array().unwrap().is_empty(), "{r}");
+    assert!((r["stretchPct"].as_f64().unwrap() - 2.0).abs() < 0.1, "{r}");
+    assert!((r["seconds"].as_f64().unwrap() - want).abs() < 0.01, "{r}");
+    let it = item(&s, c);
+    let provider = s.media.provider(s.project.clone(), s.services.clone());
+    let q = s.active_sequence().unwrap();
+    let at = (30.0 * SR as f64) as i64;
+    let whole = filmcraft_render::audio::mix_sequence(&s.project, q, at, 9_000, &provider, &filmcraft_render::MixStream::new());
+    let a = filmcraft_render::audio::mix_sequence(&s.project, q, at, 4_000, &provider, &filmcraft_render::MixStream::new());
+    let b = filmcraft_render::audio::mix_sequence(&s.project, q, at + 4_000, 5_000, &provider, &filmcraft_render::MixStream::new());
+    let joined: Vec<f32> = a.channels[0].iter().chain(&b.channels[0]).copied().collect();
+    assert_eq!(joined, whole.channels[0]);
+    assert!(whole.channels[0].iter().any(|v| v.abs() > 0.01), "the stretched clip plays");
+    assert!((it.duration.seconds() - want).abs() < 0.01);
+}
+
+/// Hostile fit parameters are errors, events past the clip are left out with a warning, and a
+/// silent track or one with no beat is an error: never a panic.
+#[test]
+fn remix_fit_hostile_parameters() {
+    let (mut s, c, _) = fitted_session();
+    let many: Vec<Value> = (0..33).map(|k| json!({"kind": "peak", "seconds": k as f64})).collect();
+    for bad in [
+        json!({"clip": c.0, "seconds": 30.0, "events": "peak"}),
+        json!({"clip": c.0, "seconds": 30.0, "events": many}),
+        json!({"clip": c.0, "seconds": 30.0, "events": [{"kind": "explosion", "seconds": 1.0}]}),
+        json!({"clip": c.0, "seconds": 30.0, "events": [{"kind": "peak"}]}),
+        json!({"clip": c.0, "seconds": 30.0, "events": [{"kind": "peak", "seconds": -1.0}]}),
+        json!({"clip": c.0, "seconds": 30.0, "events": [{"kind": "peak", "seconds": "NaN"}]}),
+        json!({"clip": c.0, "seconds": 30.0, "events": [{"kind": "peak", "seconds": 1e300}]}),
+        json!({"clip": c.0, "seconds": 30.0, "events": [{"kind": "peak", "time": -5}]}),
+        json!({"clip": c.0, "seconds": 30.0, "events": [{"kind": "peak", "time": i64::MAX}]}),
+        json!({"clip": c.0, "seconds": 30.0, "ending": "explode"}),
+        json!({"clip": c.0, "seconds": 30.0, "ending": 3}),
+        json!({"clip": c.0, "seconds": 30.0, "maxStretchPct": -1}),
+        json!({"clip": c.0, "seconds": 30.0, "maxStretchPct": 1000}),
+        json!({"clip": c.0, "seconds": 30.0, "maxStretchPct": "NaN"}),
+        json!({"clip": c.0, "ending": "own"}),
+    ] {
+        assert!(s.execute("clip.remix", bad.clone()).is_err(), "{bad}");
+    }
+    // an event past the clip: left out, said
+    let r = s.execute("clip.remix", json!({"clip": c.0, "seconds": 30.0, "ending": "own", "events": [{"kind": "peak", "seconds": 45.0}]})).unwrap();
+    assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("outside the clip")), "{r}");
+    assert!(r["eventsLanded"].as_array().unwrap().is_empty(), "{r}");
+    // a film much longer than the track: repeated at its beats, ending its own way
+    let r = s.execute("clip.remix", json!({"clip": c.0, "seconds": 160.0, "ending": "own", "events": [{"kind": "stop", "seconds": 150.0}]})).unwrap();
+    assert!(r["seconds"].as_f64().unwrap() > 100.0, "{r}");
+    // silence has no beat
+    let z = vec![0f32; SR as usize * 20];
+    let (mut s, _) = session(&[z.clone(), z], None);
+    let err = s.execute("clip.remix", json!({"seconds": 10.0, "ending": "own", "events": [{"kind": "peak", "seconds": 2.0}]})).unwrap_err().to_string();
+    assert!(err.contains("beat"), "{err}");
+}

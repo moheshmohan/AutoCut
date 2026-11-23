@@ -7,7 +7,7 @@
 //! | `clip.remix.enable` | Clip ▸ Remix ▸ Enable Remix | analyses the selected audio clip and makes it a remix clip at its current duration |
 //! | `clip.remix.properties` | Clip ▸ Remix ▸ Remix Properties… | without parameters returns the settings; with `duration`/`seconds`/`frame`/`timecode`, `segments`, `variations` re-plans |
 //! | `clip.remix.revert` | Clip ▸ Remix ▸ Revert Remix | restores the clip as it was before the remix |
-//! | `clip.remix` | — | agents: enable (if needed) and remix `clip` (default: the selected audio clip) to a target |
+//! | `clip.remix` | — | agents: enable (if needed) and remix `clip` (default: the selected audio clip) to a target, optionally fitted to film events, an ending and a stretch |
 //! | `media.beats` | — | agents: the tempo, beats, downbeats, sections (and their energy), drops, stops, end and ending of an audio item (the same analysis), with a confidence: to cut picture on the beat and fit music to a film |
 //! | `media.pauses` | — | agents: where an audio item's sound pauses (its level `belowDb` under its loudest for at least `minSeconds`), and the stretches of sound between: to cut a narration at a sentence's end |
 //!
@@ -17,15 +17,31 @@
 //! trimmed or moved); remixing shorter always fits. Speed changes and reverse do not apply to a
 //! remixed clip (enabling resets them to 100 %).
 //!
-//! The analysis of a clip (beats, beat self-similarity) is cached per media range and rate, so
-//! changing the target or the sliders re-plans instantly. Everything is deterministic.
+//! **Fitted to the film** ([`filmcraft_audio_dsp::fit`]): `events [{kind, time|seconds}]`
+//! (`burst`, `peak`, `landing`, `stop`, film time from the clip's start) get a real lift of the
+//! track (a drop, a rising section start, a section boundary, a downbeat, a stop, the track's own
+//! ending) within half a beat, or are reported as missed; `ending` (`own`, `button`, `fade`;
+//! default: as the plain remix, which ends with the source) says how the music ends;
+//! `maxStretchPct` (0 … 25, default 0) lets the whole remix be time-stretched, pitch kept, to land
+//! its end or anchors exactly. Joins sit in stable stretches with the 20 ms equal-power
+//! crossfade, and each is rendered and checked: one that changes the level more than 6 dB beyond
+//! what the music does at its cut points is refused and the planner tries again without it; a
+//! plan that still fails is kept, with a `warnings` entry naming the join. The report adds
+//! `eventsLanded`, `joins`, `alternatives` (film lengths that need no join), `ending`, `ended`,
+//! `stretchPct`, `fadeOutSeconds` and `warnings`. A fitted remix works with the whole track from
+//! the clip's In point (a trimmed clip's track still ends its own way). The fit is stored with
+//! the remix, so Remix Properties and the Remix tool keep it when they re-plan.
+//!
+//! The analysis of a clip (beats, beat self-similarity, structure) is cached per media range and
+//! rate, so changing the target or the sliders re-plans instantly. Everything is deterministic.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use filmcraft_audio_dsp::fit;
 use filmcraft_audio_dsp::remix::{self as dsp, Analysis, Params};
 use filmcraft_project::{ClipId, ItemId, TrackKind};
-use filmcraft_render::remix::{Remix, TickPiece};
+use filmcraft_render::remix::{Fitted, Remix, TickPiece};
 use filmcraft_time::Tick;
 use serde_json::{Value, json};
 
@@ -125,19 +141,121 @@ fn analysis(s: &Session, item: ItemId, source_in: Tick, dur: Tick) -> Result<Arc
     Ok(a)
 }
 
-/// The remix of `c` to `target` with the given sliders: (new duration, state).
-fn make_plan(s: &Session, c: ClipId, target: Tick, segments: f64, variations: f64) -> Result<(Tick, Remix, Arc<Analysis>)> {
+/// The longest a film event may be from the clip's start, seconds (a day).
+const MAX_EVENT_SECONDS: f64 = 86_400.0;
+
+/// The fit a call asks for: `ending`, `events` and `maxStretchPct`, each `None` when not given.
+/// Hostile values (an unknown kind or ending, a negative or non-numeric time, more than
+/// [`fit::MAX_EVENTS`] events, a stretch outside 0 … [`fit::MAX_STRETCH_PCT`]) are errors.
+fn fit_params(p: &Value, cmd: &str) -> Result<(Option<String>, Option<Vec<(String, Tick)>>, Option<f64>)> {
+    let given = |k: &str| p.get(k).filter(|v| !v.is_null());
+    let ending = match given("ending") {
+        None => None,
+        Some(v) => match v.as_str().and_then(fit::Ending::parse) {
+            Some(fit::Ending::Source) => Some(String::new()),
+            Some(e) => Some(e.id().to_string()),
+            None => return Err(bad(cmd, "`ending` is \"own\", \"button\", \"fade\" or \"source\"")),
+        },
+    };
+    let events = match given("events") {
+        None => None,
+        Some(v) => {
+            let list = v.as_array().ok_or_else(|| bad(cmd, "`events` is a list of {kind, time|seconds}"))?;
+            if list.len() > fit::MAX_EVENTS {
+                return Err(bad(cmd, format!("at most {} events", fit::MAX_EVENTS)));
+            }
+            let mut out = Vec::with_capacity(list.len());
+            for (k, e) in list.iter().enumerate() {
+                let kind = e
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .and_then(fit::EventKind::parse)
+                    .ok_or_else(|| bad(cmd, format!("event {k}: `kind` is \"burst\", \"peak\", \"landing\" or \"stop\"")))?;
+                let at = match (e.get("time").filter(|v| !v.is_null()), e.get("seconds").filter(|v| !v.is_null())) {
+                    (Some(t), _) => t.as_i64().filter(|t| (0..=Tick::from_seconds_f64(MAX_EVENT_SECONDS).0).contains(t)).map(Tick),
+                    (None, Some(x)) => x.as_f64().filter(|x| x.is_finite() && (0.0..=MAX_EVENT_SECONDS).contains(x)).map(Tick::from_seconds_f64),
+                    (None, None) => None,
+                };
+                let at =
+                    at.ok_or_else(|| bad(cmd, format!("event {k}: give `time` (ticks) or `seconds`, from 0 to {MAX_EVENT_SECONDS} s from the clip's start")))?;
+                out.push((kind.id().to_string(), at));
+            }
+            Some(out)
+        }
+    };
+    let stretch = match given("maxStretchPct") {
+        None => None,
+        Some(v) => Some(
+            v.as_f64()
+                .filter(|x| x.is_finite() && (0.0..=fit::MAX_STRETCH_PCT).contains(x))
+                .ok_or_else(|| bad(cmd, format!("`maxStretchPct` is a number from 0 to {}", fit::MAX_STRETCH_PCT)))?,
+        ),
+    };
+    Ok((ending, events, stretch))
+}
+
+/// Reads the analysed range of `item` from `m0` (samples at `sr`, `len` long) for the join check:
+/// stereo, silence outside the range.
+fn range_reader<'a>(src: &'a dyn filmcraft_media::MediaSource, m0: i64, len: i64, sr: u32) -> impl FnMut(i64, usize) -> Vec<Vec<f32>> + 'a {
+    move |pos: i64, n: usize| {
+        let mut out = vec![vec![0f32; n]; 2];
+        let lo = pos.max(0);
+        let hi = pos.saturating_add(n as i64).min(len);
+        if hi > lo
+            && let Ok(b) = src.audio(m0 + lo, (hi - lo) as usize, sr)
+        {
+            let off = (lo - pos) as usize;
+            for (c, dst) in out.iter_mut().enumerate() {
+                let Some(ch) = b.channels.get(c).or_else(|| b.channels.first()) else { continue };
+                for (d, v) in dst.iter_mut().skip(off).zip(ch) {
+                    *d = if v.is_finite() { *v } else { 0.0 };
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The remix of `c` to `target` with the given sliders and fit: (new duration, state, analysis,
+/// the fit).
+fn make_plan(s: &Session, c: ClipId, target: Tick, segments: f64, variations: f64, ask: &Fitted) -> Result<(Tick, Remix, Arc<Analysis>, fit::Fit)> {
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
     let sr = seq.settings.sample_rate.max(1) as i64;
     let (_, it) = seq.find_item(c).ok_or_else(|| EngineError::Other("no such clip".into()))?;
     let old = filmcraft_render::remix::Remix::of(it);
     let original = old.as_ref().map(|r| r.original).unwrap_or(it.duration);
-    let a = analysis(s, it.item, it.source_in, original)?;
+    // a plain remix works with the clip's music; a fitted one with the whole track from the
+    // clip's In point (its own ending is at the track's end, wherever the clip was trimmed)
+    let range = if ask.is_plain() {
+        original
+    } else {
+        let media = s.project.item(it.item).map_or(original, |i| i.duration());
+        let most = Tick::from_seconds_f64(dsp::MAX_ANALYSIS_SECONDS as f64);
+        (media - it.source_in).max(original).min(most.max(original))
+    };
+    let a = analysis(s, it.item, it.source_in, range)?;
     let params = Params { segments: segments.clamp(0.0, 100.0), variations: variations.clamp(0.0, 100.0) };
-    let plan = dsp::plan(&a, target.to_units_floor(sr), params).map_err(|e| EngineError::Other(format!("cannot remix: {e}")))?;
+    let events = ask.events.iter().filter_map(|(k, t)| Some(fit::Event { kind: fit::EventKind::parse(k)?, at: t.to_units_floor(sr) })).collect();
+    let ending = fit::Ending::parse(&ask.ending).unwrap_or_default();
+    let req = fit::Request { target: target.to_units_floor(sr), params, events, ending, max_stretch: ask.max_stretch_pct / 100.0 };
+    let provider = s.media.provider(s.project.clone(), s.services.clone());
+    let src = filmcraft_render::SourceProvider::source(&provider, it.item).ok_or_else(|| EngineError::Other("the clip's media is offline".into()))?;
+    let mut read = range_reader(src.as_ref(), it.source_in.to_units_floor(sr), a.len, sr as u32);
+    let f = fit::fit(&a, &req, &mut read).map_err(|e| EngineError::Other(format!("cannot remix: {e}")))?;
+    let plan = &f.plan;
     let pieces = plan.pieces.iter().map(|p| TickPiece { src: it.source_in + Tick::from_units(p.src, sr), len: Tick::from_units(p.len, sr) }).collect();
-    let rm = Remix { target, segments: params.segments, variations: params.variations, original, xfade: Tick::from_units(plan.xfade, sr), pieces };
-    Ok((Tick::from_units(plan.len(), sr), rm, a))
+    let rm = Remix {
+        target,
+        segments: params.segments,
+        variations: params.variations,
+        original,
+        xfade: Tick::from_units(plan.xfade, sr),
+        pieces,
+        fade_out: Tick::from_units(plan.fade_out, sr),
+        stretch: f.stretch,
+        fitted: ask.clone(),
+    };
+    Ok((Tick::from_units(f.len, sr), rm, a, f))
 }
 
 /// Apply `rm` to clip `c` with duration `dur` (one undo step); refuses overlaps.
@@ -170,6 +288,48 @@ fn apply(s: &mut Session, label: &str, c: ClipId, dur: Tick, rm: Option<Remix>) 
     })
 }
 
+/// What a fit did, for the report: times of the clip in seconds, of the track in seconds of the
+/// media.
+fn fit_report(f: &fit::Fit, sr: i64, source_in: Tick) -> Value {
+    let sec = |x: i64| ((Tick::from_units(x, sr)).seconds() * 1000.0).round() / 1000.0;
+    let media = |x: i64| ((source_in + Tick::from_units(x, sr)).seconds() * 1000.0).round() / 1000.0;
+    let s = if f.stretch.is_finite() && f.stretch > 0.0 { f.stretch } else { 1.0 };
+    json!({
+        "ending": f.ending.id(),
+        "ended": f.ended,
+        "stretchPct": ((1.0 / s - 1.0) * 10_000.0).round() / 100.0,
+        "fadeOutSeconds": sec((f.plan.fade_out as f64 / s).round() as i64),
+        "eventsLanded": f.events.iter().map(|e| json!({
+            "kind": e.kind.id(),
+            "at": sec(e.at),
+            "lift": e.lift.map(fit::LiftKind::id),
+            "playsAt": e.plays_at.map(sec),
+            "offBy": e.off_by.map(sec),
+            "landed": e.landed,
+        })).collect::<Vec<_>>(),
+        "joins": f.joins.iter().map(|j| json!({
+            "at": sec((j.at as f64 / s).round() as i64),
+            "out": media(j.out),
+            "in": media(j.into),
+            "score": j.score.map(|x| (f64::from(x) * 100.0).round() / 100.0),
+            "levelChangeDb": j.change_db,
+            "excessDb": j.excess_db,
+            "stable": j.stable,
+            "keepsBars": j.keeps_bars,
+            "ok": j.ok,
+        })).collect::<Vec<_>>(),
+        "alternatives": f.alternatives.iter().map(|x| {
+            let mut v = json!({"duration": Tick::from_units(x.len, sr).0, "seconds": sec(x.len), "joins": x.joins, "ending": x.ending.id()});
+            if x.min != x.len || x.max != x.len {
+                v["minSeconds"] = json!(sec(x.min));
+                v["maxSeconds"] = json!(sec(x.max));
+            }
+            v
+        }).collect::<Vec<_>>(),
+        "warnings": f.warnings,
+    })
+}
+
 fn report(s: &Session, c: ClipId, a: Option<&Analysis>) -> Value {
     let Some(seq) = s.active_sequence() else { return Value::Null };
     let Some((_, it)) = seq.find_item(c) else { return Value::Null };
@@ -198,6 +358,17 @@ fn report(s: &Session, c: ClipId, a: Option<&Analysis>) -> Value {
     v
 }
 
+/// [`report`] with what the fit did.
+fn fit_reported(s: &Session, c: ClipId, a: &Analysis, f: &fit::Fit) -> Value {
+    let mut v = report(s, c, Some(a));
+    let sr = s.active_sequence().map(|q| q.settings.sample_rate).unwrap_or(48_000).max(1) as i64;
+    let source_in = s.active_sequence().and_then(|q| q.find_item(c)).map_or(Tick::ZERO, |(_, it)| it.source_in);
+    if let (Some(o), Value::Object(extra)) = (v.as_object_mut(), fit_report(f, sr, source_in)) {
+        o.extend(extra);
+    }
+    v
+}
+
 fn enable(s: &mut Session, p: &Value) -> Result<Value> {
     let c = target_clip(s, p, "clip.remix.enable")?;
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
@@ -206,9 +377,9 @@ fn enable(s: &mut Session, p: &Value) -> Result<Value> {
         return Ok(report(s, c, None));
     }
     let dur = it.duration;
-    let (d, rm, a) = make_plan(s, c, dur, 50.0, 50.0)?;
+    let (d, rm, a, f) = make_plan(s, c, dur, 50.0, 50.0, &Fitted::default())?;
     apply(s, "Enable Remix", c, d, Some(rm))?;
-    Ok(report(s, c, Some(&a)))
+    Ok(fit_reported(s, c, &a, &f))
 }
 
 fn remix(s: &mut Session, p: &Value, cmd: &str, label: &str) -> Result<Value> {
@@ -219,11 +390,15 @@ fn remix(s: &mut Session, p: &Value, cmd: &str, label: &str) -> Result<Value> {
     let target = duration_p(s, p);
     let segments = f64_p(p, "segments");
     let variations = f64_p(p, "variations");
-    if target.is_none() && segments.is_none() && variations.is_none() {
+    let (ending, events, stretch) = fit_params(p, cmd)?;
+    if target.is_none() && segments.is_none() && variations.is_none() && ending.is_none() && events.is_none() && stretch.is_none() {
         if cmd == "clip.remix" {
             return Err(bad(cmd, "need a target `duration` (ticks), `seconds`, `frame` or `timecode`"));
         }
         return Ok(report(s, c, None));
+    }
+    if cmd == "clip.remix" && target.is_none() {
+        return Err(bad(cmd, "need a target `duration` (ticks), `seconds`, `frame` or `timecode`"));
     }
     let target = target.or(cur.as_ref().map(|r| r.target)).unwrap_or(it.duration);
     if target.0 <= 0 {
@@ -231,9 +406,12 @@ fn remix(s: &mut Session, p: &Value, cmd: &str, label: &str) -> Result<Value> {
     }
     let segments = segments.or(cur.as_ref().map(|r| r.segments)).unwrap_or(50.0);
     let variations = variations.or(cur.as_ref().map(|r| r.variations)).unwrap_or(50.0);
-    let (d, rm, a) = make_plan(s, c, target, segments, variations)?;
+    // what is not given is kept from the clip's remix (a re-plan keeps its fit)
+    let kept = cur.as_ref().map(|r| r.fitted.clone()).unwrap_or_default();
+    let ask = Fitted { ending: ending.unwrap_or(kept.ending), events: events.unwrap_or(kept.events), max_stretch_pct: stretch.unwrap_or(kept.max_stretch_pct) };
+    let (d, rm, a, f) = make_plan(s, c, target, segments, variations, &ask)?;
     apply(s, label, c, d, Some(rm))?;
-    Ok(report(s, c, Some(&a)))
+    Ok(fit_reported(s, c, &a, &f))
 }
 
 fn revert(s: &mut Session, p: &Value) -> Result<Value> {
@@ -396,7 +574,7 @@ pub fn remixed_clips(s: &Session) -> HashMap<ClipId, Remix> {
 }
 
 pub fn commands() -> Vec<CommandSpec> {
-    const PARAMS: &str = r#"{"clip":id?,"duration":ticks?,"seconds":f64?,"frame":n?,"timecode":str?,"segments":0..100?,"variations":0..100?}"#;
+    const PARAMS: &str = r#"{"clip":id?,"duration":ticks?,"seconds":f64?,"frame":n?,"timecode":str?,"segments":0..100?,"variations":0..100?,"events":[{"kind":"burst"|"peak"|"landing"|"stop","time":ticks?,"seconds":f64?}]?,"ending":"own"|"button"|"fade"|"source"?,"maxStretchPct":0..25=0}"#;
     vec![
         CommandSpec {
             id: "clip.remix.enable",

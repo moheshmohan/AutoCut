@@ -570,3 +570,21 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   at}` and `confidence` (with `confidenceParts`: beats, downbeats, sections). Tested on
   synthesized tracks with known answers (intro, verse, build, drop, breakdown, drop; cadence,
   fade and cut endings) and on the music engine's own tracks.
+- **PX2.2**: `clip.remix` fits music to the film (`audio_dsp::fit`; ideas from huashu-motion's
+  fitting rules, written fresh). `events [{kind: burst|peak|landing|stop, time|seconds}]` (film
+  time from the clip's start) get a real lift of the track within half a beat — a drop, a
+  rising section start, a section boundary, a downbeat, a stop or the track's own ending — or
+  are reported as missed (nothing is invented); `ending` (`own`: the track's own ending ends the
+  film, or its final hit lands on the landing; `button`: a strong downbeat then a short faded
+  tail; `fade`; default as before); `maxStretchPct` (0–25, default 0) time-stretches the whole
+  remix at its pitch (WSOLA at playback) to land its end or anchors exactly. Joins go in stable
+  stretches that keep the bars whole, with the 20 ms equal-power crossfade, and are rendered and
+  checked: a join whose level change is more than 6 dB away from what the music does at its cut
+  points (0.5 s RMS either side) is refused and the planner tries again; a plan that still fails
+  is kept with a `warnings` entry (warn first, decision D7). The report adds `eventsLanded
+  [{kind, at, lift, playsAt, offBy, landed}]`, `joins [{at, out, in, score, levelChangeDb,
+  excessDb, stable, keepsBars, ok}]`, `alternatives [{duration, seconds, joins, ending}]` (film
+  lengths that need no join), `ending`, `ended`, `stretchPct`, `fadeOutSeconds`, `warnings`. A
+  fitted remix works with the whole track from the clip's In point; its fit is stored with the
+  remix (a plain remix stores exactly what it did before) and kept when Remix Properties or the
+  Remix tool re-plan. Without the new parameters the plan is the Remix of before.
