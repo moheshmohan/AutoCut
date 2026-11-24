@@ -202,29 +202,99 @@ struct Partial {
     prefix: Vec<u8>,
 }
 
+/// Memory budget for the packet lists `open` builds, in bytes (256 MiB; about 4.8 million packets).
+/// Zero-length packets cost one lacing byte each in the file but a whole [`Packet`] in memory, so
+/// without a bound a small hostile file could make `open` allocate about fifty times its own size.
+///
+/// The budget is global: it is shared by all logical bitstreams of the file. It counts each audio
+/// [`Packet`] struct plus its `parts` entries (at their final count, so a packet spanning pages is
+/// charged once). It does not count allocator overhead or `Vec` capacity, so the real memory use
+/// for many small packets can be roughly twice the budget. Header packets and the per-stream
+/// structures are not charged either.
+pub const PACKET_BUDGET_BYTES: usize = 256 << 20;
+
+/// What one packet costs against the budget: the struct plus its byte ranges.
+fn packet_cost(p: &Packet) -> usize {
+    std::mem::size_of::<Packet>().saturating_add(p.parts.len().saturating_mul(std::mem::size_of::<(u64, u32)>()))
+}
+
+/// Cap on the packets kept from one file, all streams and headers together.
+const MAX_PACKETS: usize = 1 << 26;
+/// Bytes of file each kept packet needs beyond the first `MIN_PACKET_ALLOWANCE`. A kept packet
+/// takes about 60 bytes of memory and a zero lacing value describes one in a single byte, so
+/// without this a file could make the packet lists about 60 times its own size.
+const FILE_BYTES_PER_PACKET: u64 = 8;
+/// Packets any file may keep, however short.
+const MIN_PACKET_ALLOWANCE: usize = 1 << 20;
+/// Warnings kept about damaged pages; the rest are counted in one closing warning.
+const MAX_DAMAGE_WARNINGS: usize = 1024;
+
+/// The warnings of [`open`]: those about damaged pages are capped at `MAX_DAMAGE_WARNINGS`, so a
+/// file of damage cannot make a warning per byte.
+#[derive(Default)]
+struct Warnings {
+    list: Vec<String>,
+    damage: usize,
+}
+
+impl Warnings {
+    fn push(&mut self, warning: String) {
+        self.list.push(warning);
+    }
+    fn damage(&mut self, warning: impl FnOnce() -> String) {
+        if self.damage < MAX_DAMAGE_WARNINGS {
+            self.list.push(warning());
+        }
+        self.damage = self.damage.saturating_add(1);
+    }
+    fn finish(mut self) -> Vec<String> {
+        if let Some(more) = self.damage.checked_sub(MAX_DAMAGE_WARNINGS).filter(|&n| n > 0) {
+            self.list.push(format!("{more} more damaged regions not listed"));
+        }
+        self.list
+    }
+}
+
 /// Read every page and assemble the packets of every logical bitstream.
+///
+/// Stops with a warning, keeping what it has, once the packet lists would exceed
+/// [`PACKET_BUDGET_BYTES`].
 pub fn open(src: &(impl ByteSource + ?Sized)) -> Result<OggFile> {
+    open_with_packet_budget(src, PACKET_BUDGET_BYTES)
+}
+
+/// [`open`] with an explicit packet memory budget in bytes (a test hook for small budgets).
+fn open_with_packet_budget(src: &(impl ByteSource + ?Sized), packet_budget: usize) -> Result<OggFile> {
     let len = src.len();
     let mut streams: Vec<Stream> = Vec::new();
     let mut by_serial: HashMap<u32, usize> = HashMap::new();
     let mut partial: HashMap<u32, Partial> = HashMap::new();
-    let mut warnings = Vec::new();
+    let mut warnings = Warnings::default();
     let mut pos = 0u64;
     let mut found_any = false;
-    let mut recovery_budget = 64 << 20;
+    let mut recovery_budget: usize = 64 << 20;
+    let mut packet_bytes: usize = 0;
+    let mut packets_left = usize::try_from(len / FILE_BYTES_PER_PACKET).unwrap_or(usize::MAX).clamp(MIN_PACKET_ALLOWANCE, MAX_PACKETS);
+    let mut budget_hit = false;
     let mut hdr = [0u8; 27 + 255];
-    while pos + 27 <= len {
+    'pages: while pos + 27 <= len {
         src.read_at(pos, &mut hdr[..27])?;
         if &hdr[..4] != b"OggS" || hdr[4] != 0 {
+            recovery_budget = recovery_budget.saturating_sub(27);
             match find_capture(src, pos + 1, len, &mut recovery_budget)? {
                 Some(p) => {
                     if found_any {
-                        warnings.push(format!("lost sync at byte {pos}; resumed at {p}"));
+                        warnings.damage(|| format!("lost sync at byte {pos}; resumed at {p}"));
                     }
                     pos = p;
                     continue;
                 }
-                None => break,
+                None => {
+                    if recovery_budget == 0 {
+                        warnings.push(format!("gave up resynchronising after byte {pos}"));
+                    }
+                    break;
+                }
             }
         }
         let nseg = hdr[26] as usize;
@@ -244,7 +314,14 @@ pub fn open(src: &(impl ByteSource + ?Sized)) -> Result<OggFile> {
         let stored_crc = u32::from_le_bytes([page[22], page[23], page[24], page[25]]);
         page[22..26].fill(0);
         if crc32(&page) != stored_crc {
-            warnings.push(format!("bad CRC on page at byte {pos}"));
+            warnings.damage(|| format!("bad CRC on page at byte {pos}"));
+            // a dense run of fake capture patterns would otherwise re-read a page per byte; charge what
+            // this candidate cost: the header and segment table at the top, then the whole page again
+            recovery_budget = recovery_budget.saturating_sub(27 + nseg + page.len());
+            if recovery_budget == 0 {
+                warnings.push(format!("gave up resynchronising after byte {pos}"));
+                break;
+            }
             pos += 1;
             continue;
         }
@@ -267,7 +344,7 @@ pub fn open(src: &(impl ByteSource + ?Sized)) -> Result<OggFile> {
         // a continued page without a pending packet (lost a page): drop the fragment
         let continued = flags & 0x01 != 0;
         if !continued && partial.remove(&serial).is_some() {
-            warnings.push(format!("incomplete packet before page at byte {pos}"));
+            warnings.damage(|| format!("incomplete packet before page at byte {pos}"));
         }
         let mut completed: Vec<Packet> = Vec::new();
         let mut off = 0u64;
@@ -286,8 +363,14 @@ pub fn open(src: &(impl ByteSource + ?Sized)) -> Result<OggFile> {
                 }
                 let p = partial.entry(serial).or_insert_with(|| Partial { parts: Vec::new(), size: 0, prefix: Vec::new() });
                 if n > 0 {
+                    let Some(size) = p.size.checked_add(n as u32) else {
+                        warnings.push(format!("packet over 4 GiB dropped at byte {pos}"));
+                        partial.remove(&serial);
+                        skip_fragment = l == 255;
+                        continue;
+                    };
                     p.parts.push((body_off + a, n as u32));
-                    p.size += n as u32;
+                    p.size = size;
                     let s = (body_off - pos + a) as usize;
                     let need = 2usize.saturating_sub(p.prefix.len()).min(n as usize);
                     p.prefix.extend_from_slice(&page[s..s + need]);
@@ -301,6 +384,12 @@ pub fn open(src: &(impl ByteSource + ?Sized)) -> Result<OggFile> {
                 }
             }
         }
+        let Some(left) = packets_left.checked_sub(completed.len()) else {
+            warnings.push(format!("stopped at byte {pos}: more packets than a file of this size can hold"));
+            budget_hit = true;
+            break;
+        };
+        packets_left = left;
         if granule != -1 {
             st.last_granule = Some(granule);
             if let Some(last) = completed.last_mut() {
@@ -315,6 +404,15 @@ pub fn open(src: &(impl ByteSource + ?Sized)) -> Result<OggFile> {
             if st.headers.len() < st.codec.header_count() && st.packets.is_empty() {
                 st.headers.push(read_parts(src, &pk.parts)?);
             } else {
+                let cost = packet_cost(&pk);
+                match packet_bytes.checked_add(cost) {
+                    Some(total) if total <= packet_budget => packet_bytes = total,
+                    _ => {
+                        warnings.push(format!("stopped reading at byte {pos}: packet list exceeds {} MiB", packet_budget >> 20));
+                        budget_hit = true;
+                        break 'pages;
+                    }
+                }
                 st.packets.push(pk);
             }
         }
@@ -323,17 +421,22 @@ pub fn open(src: &(impl ByteSource + ?Sized)) -> Result<OggFile> {
     if !found_any {
         return Err(Error::NotOgg);
     }
-    if !partial.is_empty() {
+    // after a budget stop the cut page may end inside a packet; the budget warning already explains it
+    if !partial.is_empty() && !budget_hit {
         warnings.push("file ends inside a packet".into());
     }
-    Ok(OggFile { streams, warnings })
+    Ok(OggFile { streams, warnings: warnings.finish() })
 }
 
 fn find_capture(src: &(impl ByteSource + ?Sized), from: u64, len: u64, budget: &mut usize) -> Result<Option<u64>> {
     let mut at = from;
+    // the next page is usually close: start with a small window and grow it, so one resync reads (and
+    // is charged) about the distance to the next capture pattern instead of a fixed 1 MiB
+    let mut window = 4096usize;
+    let mut buf = Vec::new();
     while at + 4 <= len && *budget > 0 {
-        let n = ((len - at) as usize).min(1 << 20).min(*budget);
-        let mut buf = vec![0u8; n];
+        let n = ((len - at) as usize).min(window).min(*budget);
+        buf.resize(n, 0);
         src.read_at(at, &mut buf)?;
         *budget = budget.saturating_sub(n);
         if let Some(i) = buf.windows(4).position(|w| w == b"OggS") {
@@ -343,12 +446,18 @@ fn find_capture(src: &(impl ByteSource + ?Sized), from: u64, len: u64, budget: &
             break;
         }
         at += (n - 3) as u64;
+        window = (window * 2).min(1 << 20);
     }
     Ok(None)
 }
 
 fn read_parts(src: &(impl ByteSource + ?Sized), parts: &[(u64, u32)]) -> Result<Vec<u8>> {
-    let mut v = Vec::with_capacity(parts.iter().map(|p| p.1 as usize).sum());
+    // Ranges come from a scan of some source; check them against this one before sizing a buffer.
+    let len = src.len();
+    if parts.iter().any(|&(o, n)| o.checked_add(u64::from(n)).is_none_or(|end| end > len)) {
+        return Err(Error::Invalid("packet range lies outside the source".into()));
+    }
+    let mut v = Vec::with_capacity(parts.iter().fold(0usize, |a, p| a.saturating_add(p.1 as usize)));
     for &(o, n) in parts {
         let a = v.len();
         v.resize(a + n as usize, 0);
@@ -408,8 +517,16 @@ pub struct OpusTiming {
     pub total: i64,
 }
 
+/// Largest granule position [`OpusTiming::of`] trusts: 2^62 samples at 48 kHz is about 3 million years.
+pub const MAX_OPUS_GRANULE: i64 = 1 << 62;
+
 impl OpusTiming {
     /// Timing of the Opus stream `s` (`pre_skip` from its `OpusHead`).
+    ///
+    /// A granule position outside `0..=MAX_OPUS_GRANULE` (a negative value other than -1, or an
+    /// absurdly large one) is treated like a missing granule: the page's packets continue from the
+    /// previous position instead of jumping to a nonsense one. All arithmetic saturates, so no
+    /// file can overflow it. Files with sane granules get the same timing as before.
     pub fn of(stream: &Stream, pre_skip: u32) -> OpusTiming {
         let durations: Vec<u32> = stream.packets.iter().map(|p| opus_packet_samples(p.prefix, p.size).unwrap_or(0)).collect();
         let n = durations.len();
@@ -417,24 +534,25 @@ impl OpusTiming {
         let mut i = 0;
         let mut cursor: Option<i64> = None;
         let mut trimmed_end: Option<i64> = None;
+        let granule_of = |k: usize| stream.packets.get(k).and_then(|p| p.granule).filter(|g| (0..=MAX_OPUS_GRANULE).contains(g));
         while i < n {
             // packets completing on the same page: i..j, the last carries the page granule
             let mut j = i;
-            while j < n && stream.packets[j].granule.is_none() {
+            while j < n && granule_of(j).is_none() {
                 j += 1;
             }
             if j == n {
                 // trailing packets without a granule (truncated file): continue from the cursor
                 let mut c = cursor.unwrap_or(0);
                 for k in i..n {
-                    c += durations[k] as i64;
+                    c = c.saturating_add(durations[k] as i64);
                     ends[k] = Some(c);
                 }
                 break;
             }
-            let Some(g) = stream.packets[j].granule else { break };
-            let sum: i64 = durations[i..=j].iter().map(|&d| d as i64).sum();
-            let forward = cursor.map(|c| c + sum);
+            let Some(g) = granule_of(j) else { break };
+            let sum: i64 = durations[i..=j].iter().fold(0i64, |a, &d| a.saturating_add(d as i64));
+            let forward = cursor.map(|c| c.saturating_add(sum));
             let end = match forward {
                 // end trimming on the last page (RFC 7845 §4.5): keep the forward positions
                 Some(f) if stream.packets[j].eos && g < f => {
@@ -448,17 +566,17 @@ impl OpusTiming {
             let mut e = end;
             for k in (i..=j).rev() {
                 ends[k] = Some(e);
-                e -= durations[k] as i64;
+                e = e.saturating_sub(durations[k] as i64);
             }
             cursor = Some(end);
             i = j + 1;
         }
-        let raw_starts: Vec<i64> = ends.iter().zip(&durations).map(|(e, &d)| e.unwrap_or(0) - d as i64).collect();
+        let raw_starts: Vec<i64> = ends.iter().zip(&durations).map(|(e, &d)| e.unwrap_or(0).saturating_sub(d as i64)).collect();
         let base = raw_starts.first().copied().unwrap_or(0).max(0);
-        let shift = base + pre_skip as i64;
-        let starts: Vec<i64> = raw_starts.iter().map(|s| s - shift).collect();
+        let shift = base.saturating_add(pre_skip as i64);
+        let starts: Vec<i64> = raw_starts.iter().map(|s| s.saturating_sub(shift)).collect();
         let end_all = trimmed_end.or(cursor).unwrap_or(0);
-        let total = (end_all - shift).max(0);
+        let total = end_all.saturating_sub(shift).max(0);
         OpusTiming { pre_skip, starts, durations, total }
     }
 }
