@@ -184,6 +184,8 @@ const VALUED_IN: &[(&str, &[&str])] = &[
     ("eval", &["--briefs", "--modes", "--only", "--judge-model"]),
     // review gate: the reviewer's answer from a file
     ("review", &["--file"]),
+    // insta360 list / import / download: the folder to read and the end of a date range
+    ("insta360", &["--folder", "--until"]),
     // voice style set: the recording and a style finder pick
     ("voice", &["--file", "--item", "--candidate"]),
     (
@@ -401,6 +403,19 @@ mod tests {
 
     /// Regression: `locks hold gpu --minutes 45 --note "…"` (as CLAUDE.md writes it) held for the
     /// default 30 minutes under the default note, its values taken as positionals.
+    /// `insta360 import --folder F --until D`: both take a value (the folder was read as a
+    /// recording name, and the import fell back to Studio's downloads).
+    #[test]
+    fn insta360_folder_and_until_take_their_values() {
+        let a = args("insta360 import --folder media/360 --since 2026-11-01 --until 2026-11-20 --all");
+        assert_eq!(a.positionals, ["insta360", "import"]);
+        assert_eq!((a.opt("--folder"), a.opt("--since"), a.opt("--until")), (Some("media/360"), Some("2026-11-01"), Some("2026-11-20")));
+        assert!(a.flag("--all"));
+        let named = args("insta360 import VID_093 --folder /Volumes/X5/DCIM");
+        assert_eq!(named.positionals, ["insta360", "import", "VID_093"]);
+        assert_eq!(named.opt("--folder"), Some("/Volumes/X5/DCIM"));
+    }
+
     #[test]
     fn locks_hold_takes_its_minutes_and_note() {
         let a = Args::parse(["locks", "hold", "gpu", "--minutes", "45", "--note", "M3: a measurement"].map(str::to_string));
