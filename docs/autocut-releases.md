@@ -1,6 +1,6 @@
 # AutoCut releases
 
-Newest first. Each release is tagged `v<version>` on [moheshmohan/AutoCut](https://github.com/moheshmohan/AutoCut/releases); its downloads are on the release page. How a release is cut: [releasing.md](releasing.md) (FilmCraft's process; AutoCut's macOS build is `packaging/macos/package.sh` with `AUTOCUT_APP_NAME=AutoCut`).
+Newest first. Each release is tagged `autocut-v<version>` on [moheshmohan/AutoCut](https://github.com/moheshmohan/AutoCut/releases) (the `v<version>` tags in a clone that also fetches upstream are FilmCraft's own); its downloads are on the release page. How a release is cut: [releasing.md](releasing.md) (FilmCraft's process; AutoCut's macOS build is `packaging/macos/package.sh` with `AUTOCUT_APP_NAME=AutoCut`).
 
 ## 0.13.0 — 24 November 2026
 
