@@ -162,6 +162,12 @@ fn vps() -> Vec<u8> {
 }
 
 fn sps(pcm_loop_filter_disabled: bool) -> Vec<u8> {
+    sps_with_depths(pcm_loop_filter_disabled, 8, 8)
+}
+
+/// [`sps`] with the luma and chroma bit depths (PCM samples stay 8-bit, so they are shifted up to
+/// a deeper depth, 8.4.4.5.1).
+fn sps_with_depths(pcm_loop_filter_disabled: bool, luma: u32, chroma: u32) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.write_bits(0, 4);
     w.write_bits(0, 3);
@@ -172,8 +178,8 @@ fn sps(pcm_loop_filter_disabled: bool) -> Vec<u8> {
     w.write_ue(W as u32);
     w.write_ue(H as u32);
     w.write_bits(0, 1); // conformance window
-    w.write_ue(0);
-    w.write_ue(0);
+    w.write_ue(luma - 8);
+    w.write_ue(chroma - 8);
     w.write_ue(4); // log2_max_poc_lsb = 8
     w.write_bits(1, 1);
     w.write_ue(4); // max_dec_pic_buffering_minus1
@@ -477,6 +483,42 @@ pub(crate) fn missing_reference_picture(poc: u32, deltas: &[i32]) -> Vec<u8> {
     };
     encode_picture(&picture, &None, &content(0), &mut stream, &mut None);
     stream
+}
+
+/// One PCM IDR picture of [`content`] coded with these luma and chroma bit depths (PCM samples at
+/// 8 bits, not filtered).
+fn pcm_picture_with_depths(luma: u32, chroma: u32) -> Vec<u8> {
+    let mut stream = Vec::new();
+    stream.extend(vps());
+    stream.extend(sps_with_depths(true, luma, chroma));
+    stream.extend(pps(0, &None, false));
+    let picture =
+        PicDesc { nal_type: 19, poc: 0, intra: true, cu: Cu::Pcm, pps_id: 0, st: vec![], lt: vec![], num_ref: 0, list_entry: None, segments: whole(WC * HC) };
+    encode_picture(&picture, &None, &content(0), &mut stream, &mut None);
+    stream
+}
+
+/// Luma and chroma coded at different depths (legal in Main 10: 8-bit luma with 10-bit chroma, or
+/// the other way round) keep each plane's own depth. Before, the planes were 8-bit whenever the
+/// luma was, so 10-bit chroma lost its high bits, and the picture reported the luma depth only.
+#[test]
+fn luma_and_chroma_at_different_depths_keep_their_samples() {
+    let c = content(0);
+    let widen = |v: &[u8], depth: u32| v.iter().map(|&s| u16::from(s) << (depth - 8)).collect::<Vec<u16>>();
+    for (luma, chroma) in [(8, 10), (10, 8), (8, 8)] {
+        let pics = decode_all(&pcm_picture_with_depths(luma, chroma), 1);
+        assert_eq!(pics.len(), 1);
+        let p = &pics[0];
+        assert_eq!((p.bit_depth, p.bit_depth_chroma), (luma, chroma));
+        if luma == 8 && chroma == 8 {
+            assert!(as_u8(&p.y) == &c.y[..] && as_u8(&p.u) == &c.u[..] && as_u8(&p.v) == &c.v[..]);
+            continue;
+        }
+        let plane = |pl: &crate::Plane| pl.as_u16().map(<[u16]>::to_vec);
+        assert_eq!(plane(&p.y), Some(widen(&c.y, luma)), "{luma}/{chroma}: luma");
+        assert_eq!(plane(&p.u), Some(widen(&c.u, chroma)), "{luma}/{chroma}: Cb");
+        assert_eq!(plane(&p.v), Some(widen(&c.v, chroma)), "{luma}/{chroma}: Cr");
+    }
 }
 
 /// Encode the test sequence; returns the stream and the exact expected pictures (when the PCM samples

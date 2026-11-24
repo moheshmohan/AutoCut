@@ -414,34 +414,52 @@ impl HevcDecoder {
         Self { hvcc: Vec::new(), dec: filmcraft_hevc::Decoder::new(), length_size: 0, highest_tid: None }
     }
     fn convert(p: filmcraft_hevc::Picture) -> DecodedFrame {
-        use filmcraft_hevc::Plane;
-        use std::sync::Arc;
         let (w, h) = (p.width as usize, p.height as usize);
         let (cw, ch) = (p.chroma_width as usize, p.chroma_height as usize);
         let (ys, uvs) = (p.y_stride, p.uv_stride);
-        let wide = |pl: Plane| -> Vec<u16> {
-            match pl {
-                Plane::U16(v) => v,
-                Plane::U8(v) => v.into_iter().map(u16::from).collect(),
-            }
-        };
-        let data = match (p.y, p.u, p.v) {
-            (Plane::U8(y), Plane::U8(u), Plane::U8(v)) => filmcraft_frame::PixelData::Yuv8 {
-                planes: [Arc::new(tight_plane(y, ys, w, h)), Arc::new(tight_plane(u, uvs, cw, ch)), Arc::new(tight_plane(v, uvs, cw, ch))],
-                chroma: filmcraft_frame::Chroma::C420,
-                alpha: None,
-            },
-            (y, u, v) => filmcraft_frame::PixelData::Yuv16 {
-                planes: [Arc::new(tight_plane(wide(y), ys, w, h)), Arc::new(tight_plane(wide(u), uvs, cw, ch)), Arc::new(tight_plane(wide(v), uvs, cw, ch))],
-                chroma: filmcraft_frame::Chroma::C420,
-                bits: p.bit_depth,
-                alpha: None,
-            },
-        };
+        let data = hevc_pixel_data([p.y, p.u, p.v], (p.bit_depth, p.bit_depth_chroma), [w, h, cw, ch, ys, uvs]);
         let color = vui_color(p.width, p.height, p.color.primaries, p.color.matrix, p.color.transfer, p.color.full_range);
         let par = sar_par(p.sar);
         let frame = VideoFrame { width: p.width, height: p.height, data, color, par, pts: filmcraft_time::Tick::ZERO };
         DecodedFrame { pts: p.pts, frame, draft: p.draft }
+    }
+}
+
+/// The planes of a decoded 4:2:0 HEVC picture (`[y, u, v]`, luma and chroma bit depths, and
+/// `[width, height, chroma width, chroma height, luma stride, chroma stride]`) as frame pixels:
+/// 8-bit when all three planes are, else 16-bit at one depth for the frame. A stream may code luma
+/// and chroma at different depths (8-bit luma with 10-bit chroma is a legal Main 10 stream), so
+/// the shallower planes are scaled up to the deeper one; before, the chroma was read at the luma's
+/// depth.
+pub(crate) fn hevc_pixel_data(planes: [filmcraft_hevc::Plane; 3], (luma, chroma): (u32, u32), size: [usize; 6]) -> filmcraft_frame::PixelData {
+    use filmcraft_hevc::Plane;
+    use std::sync::Arc;
+    let [w, h, cw, ch, ys, uvs] = size;
+    let bits = luma.max(chroma).clamp(1, 16);
+    let wide = |pl: Plane, depth: u32| -> Vec<u16> {
+        let shift = bits.saturating_sub(depth.clamp(1, 16));
+        match pl {
+            Plane::U16(v) if shift == 0 => v,
+            Plane::U16(v) => v.into_iter().map(|s| s << shift).collect(),
+            Plane::U8(v) => v.into_iter().map(|s| u16::from(s) << shift).collect(),
+        }
+    };
+    match planes {
+        [Plane::U8(y), Plane::U8(u), Plane::U8(v)] => filmcraft_frame::PixelData::Yuv8 {
+            planes: [Arc::new(tight_plane(y, ys, w, h)), Arc::new(tight_plane(u, uvs, cw, ch)), Arc::new(tight_plane(v, uvs, cw, ch))],
+            chroma: filmcraft_frame::Chroma::C420,
+            alpha: None,
+        },
+        [y, u, v] => filmcraft_frame::PixelData::Yuv16 {
+            planes: [
+                Arc::new(tight_plane(wide(y, luma), ys, w, h)),
+                Arc::new(tight_plane(wide(u, chroma), uvs, cw, ch)),
+                Arc::new(tight_plane(wide(v, chroma), uvs, cw, ch)),
+            ],
+            chroma: filmcraft_frame::Chroma::C420,
+            bits,
+            alpha: None,
+        },
     }
 }
 
@@ -1183,7 +1201,8 @@ pub enum RawFormat {
     Nv12,
     /// Luma only (`Y800`, `GREY`, `Y8  `).
     Gray8,
-    /// 24-bit R, G, B; rows unpadded (QuickTime `raw ` at depth 24).
+    /// 24-bit R, G, B; rows padded to an even byte count (QuickTime `raw ` at depth 24). The last
+    /// row's pad byte may be missing.
     Rgb24,
     /// 10-bit 4:2:2 Y'CbCr, six pixels in four little-endian words, rows padded to 128 bytes
     /// (QuickTime `v210`); shown at 8 bits.
@@ -1192,8 +1211,9 @@ pub enum RawFormat {
 
 impl RawFormat {
     /// The layout of an AVI video stream: `BI_RGB` with its bit count, or a YUV FourCC.
+    /// `BI_BITFIELDS` needs its colour masks, so it goes through [`Self::from_avi_bitfields`].
     pub fn from_avi(compression: [u8; 4], bit_count: u16) -> Option<RawFormat> {
-        if matches!(u32::from_le_bytes(compression), 0 | 3) {
+        if u32::from_le_bytes(compression) == 0 {
             return match bit_count {
                 24 => Some(RawFormat::Bgr24),
                 32 => Some(RawFormat::Bgrx32),
@@ -1211,6 +1231,13 @@ impl RawFormat {
             b"Y800" | b"GREY" | b"GRAY" | b"Y8  " => RawFormat::Gray8,
             _ => return None,
         })
+    }
+
+    /// The layout of an AVI `BI_BITFIELDS` stream: only 32-bit with the masks that make it B, G,
+    /// R, X (R `0x00ff_0000`, G `0x0000_ff00`, B `0x0000_00ff`). Other masks are another byte
+    /// order or packing.
+    pub fn from_avi_bitfields(bit_count: u16, [r, g, b]: [u32; 3]) -> Option<RawFormat> {
+        (bit_count == 32 && (r, g, b) == (0x00ff_0000, 0x0000_ff00, 0x0000_00ff)).then_some(RawFormat::Bgrx32)
     }
 
     /// The layout of a QuickTime / MP4 video sample entry (`raw ` RGB at depth 24, `2vuy`, `v210`).
@@ -1232,6 +1259,67 @@ impl RawFormat {
             RawFormat::Gray8 => "Uncompressed greyscale",
             RawFormat::V210 => "Uncompressed YUV 4:2:2 10-bit",
         }
+    }
+}
+
+#[cfg(test)]
+mod hevc_depth_tests {
+    use super::*;
+    use filmcraft_hevc::Plane;
+
+    /// 8-bit luma with 10-bit chroma (and the reverse) become one 10-bit frame: the shallower
+    /// planes are scaled up, instead of 10-bit chroma being read as 8-bit (or 8-bit chroma as 10).
+    #[test]
+    fn planes_of_different_depths_share_the_deeper_one() {
+        let size = [2, 2, 1, 1, 2, 1];
+        let check = |planes: [Plane; 3], depths, want: [Vec<u16>; 3]| match hevc_pixel_data(planes, depths, size) {
+            filmcraft_frame::PixelData::Yuv16 { planes, bits, .. } => {
+                assert_eq!(bits, 10, "{depths:?}");
+                assert_eq!(planes.map(|p| p.to_vec()), want, "{depths:?}");
+            }
+            _ => panic!("{depths:?}: 16-bit planes expected"),
+        };
+        check([Plane::U16(vec![16, 128, 235, 255]), Plane::U16(vec![512]), Plane::U16(vec![900])], (8, 10), [vec![64, 512, 940, 1020], vec![512], vec![900]]);
+        check([Plane::U16(vec![64, 512, 940, 1020]), Plane::U16(vec![128]), Plane::U16(vec![225])], (10, 8), [vec![64, 512, 940, 1020], vec![512], vec![900]]);
+        // equal depths are unchanged; all-8-bit planes stay 8-bit
+        let same = hevc_pixel_data([Plane::U16(vec![1, 2, 3, 4]), Plane::U16(vec![5]), Plane::U16(vec![6])], (10, 10), size);
+        assert!(
+            matches!(same, filmcraft_frame::PixelData::Yuv16 { bits: 10, ref planes, .. } if planes[0].as_slice() == [1, 2, 3, 4] && planes[2].as_slice() == [6])
+        );
+        let eight = hevc_pixel_data([Plane::U8(vec![1, 2, 3, 4]), Plane::U8(vec![5]), Plane::U8(vec![6])], (8, 8), size);
+        assert!(matches!(eight, filmcraft_frame::PixelData::Yuv8 { .. }));
+    }
+}
+
+#[cfg(test)]
+mod raw_format_tests {
+    use super::*;
+
+    fn rgba(format: RawFormat, w: u32, h: u32, s: &[u8]) -> Result<Vec<u8>> {
+        Ok(RawVideoDecoder::new(format, w, h, false)?.picture(s)?.to_rgba8())
+    }
+
+    /// QuickTime `raw ` 24-bit rows start on an even byte: an odd width carries a pad byte a row
+    /// (only the last row's may be missing), so rows read as unpadded came out sheared.
+    #[test]
+    fn quicktime_rgb24_rows_are_padded_to_even_bytes() -> Result<()> {
+        assert_eq!(rgba(RawFormat::Rgb24, 1, 1, &[1, 2, 3])?, [1, 2, 3, 255]);
+        assert_eq!(rgba(RawFormat::Rgb24, 1, 2, &[1, 2, 3, 0, 4, 5, 6, 0])?, [1, 2, 3, 255, 4, 5, 6, 255]);
+        // the last row's pad byte may be missing, but earlier rows are still padded
+        assert_eq!(rgba(RawFormat::Rgb24, 1, 2, &[1, 2, 3, 0, 4, 5, 6])?, [1, 2, 3, 255, 4, 5, 6, 255]);
+        assert!(rgba(RawFormat::Rgb24, 1, 2, &[1, 2, 3, 4, 5, 6]).is_err(), "unpadded rows are too short");
+        // an even row length has no pad
+        assert_eq!(rgba(RawFormat::Rgb24, 2, 1, &[1, 2, 3, 4, 5, 6])?, [1, 2, 3, 255, 4, 5, 6, 255]);
+        Ok(())
+    }
+
+    #[test]
+    fn bitfields_need_their_masks() {
+        assert_eq!(RawFormat::from_avi(3u32.to_le_bytes(), 32), None);
+        assert_eq!(RawFormat::from_avi(0u32.to_le_bytes(), 32), Some(RawFormat::Bgrx32));
+        assert_eq!(RawFormat::from_avi_bitfields(32, [0x00ff_0000, 0x0000_ff00, 0x0000_00ff]), Some(RawFormat::Bgrx32));
+        assert_eq!(RawFormat::from_avi_bitfields(32, [0x0000_00ff, 0x0000_ff00, 0x00ff_0000]), None);
+        assert_eq!(RawFormat::from_avi_bitfields(24, [0x00ff_0000, 0x0000_ff00, 0x0000_00ff]), None);
     }
 }
 
@@ -1286,13 +1374,18 @@ impl RawVideoDecoder {
                 VideoFrame::rgba8(self.width, self.height, rgba)
             }
             RawFormat::Rgb24 => {
-                let stride = w * 3;
-                if s.len() < stride * h {
+                // QuickTime starts each scanline on an even byte, so odd widths carry one pad
+                // byte a row; only the last row's may be missing
+                let (row_len, stride) = (w * 3, (w * 3).next_multiple_of(2));
+                if h > 0 && s.len() < stride * (h - 1) + row_len {
                     return Err(short());
                 }
                 let mut rgba = Vec::with_capacity(w * h * 4);
-                for px in s.get(..stride * h).unwrap_or_default().as_chunks::<3>().0 {
-                    rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                for r in 0..h {
+                    let row = s.get(r * stride..r * stride + row_len).ok_or_else(short)?;
+                    for px in row.as_chunks::<3>().0 {
+                        rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                    }
                 }
                 VideoFrame::rgba8(self.width, self.height, rgba)
             }

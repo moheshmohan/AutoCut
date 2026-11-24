@@ -648,34 +648,7 @@ fn hevc_picture(name: &str, hvcc: &[u8], data: &[u8], colour: Option<(u8, u8, u8
     if !(planes_ok(p.y.len(), ys, w, h) && planes_ok(p.u.len(), uvs, cw, ch) && planes_ok(p.v.len(), uvs, cw, ch)) {
         return Err(bad(name, "a tile's planes are smaller than its size"));
     }
-    use filmcraft_hevc::Plane;
-    let wide = |pl: Plane| -> Vec<u16> {
-        match pl {
-            Plane::U16(v) => v,
-            Plane::U8(v) => v.into_iter().map(u16::from).collect(),
-        }
-    };
-    let data = match (p.y, p.u, p.v) {
-        (Plane::U8(y), Plane::U8(u), Plane::U8(v)) => filmcraft_frame::PixelData::Yuv8 {
-            planes: [
-                Arc::new(crate::video::tight_plane(y, ys, w, h)),
-                Arc::new(crate::video::tight_plane(u, uvs, cw, ch)),
-                Arc::new(crate::video::tight_plane(v, uvs, cw, ch)),
-            ],
-            chroma: filmcraft_frame::Chroma::C420,
-            alpha: None,
-        },
-        (y, u, v) => filmcraft_frame::PixelData::Yuv16 {
-            planes: [
-                Arc::new(crate::video::tight_plane(wide(y), ys, w, h)),
-                Arc::new(crate::video::tight_plane(wide(u), uvs, cw, ch)),
-                Arc::new(crate::video::tight_plane(wide(v), uvs, cw, ch)),
-            ],
-            chroma: filmcraft_frame::Chroma::C420,
-            bits: p.bit_depth,
-            alpha: None,
-        },
-    };
+    let data = crate::video::hevc_pixel_data([p.y, p.u, p.v], (p.bit_depth, p.bit_depth_chroma), [w, h, cw, ch, ys, uvs]);
     let frame = filmcraft_frame::VideoFrame { width: p.width, height: p.height, data, color, par: (1, 1), pts: filmcraft_time::Tick::ZERO };
     Ok(Pic { w: p.width, h: p.height, rgba: frame.to_rgba8() })
 }

@@ -471,3 +471,58 @@ fn cyclic_ifds_huge_sizes_and_bad_offsets() {
     let o = Options { raw_tags: vec![(tags::COMPRESSION, Value::Short(vec![34892]))], ..Default::default() };
     assert_eq!(decode(&write(&px, &o)).err(), Some(Error::Unsupported("lossy JPEG DNG".into())));
 }
+
+/// A 16-bit CFA DNG of `width` × `height` in one strip holding every row in full, whose
+/// `StripByteCounts` says `counted` bytes, with `active_area` when given.
+fn understated_strip_dng(width: usize, height: usize, counted: u32, active_area: Option<[u32; 4]>) -> Vec<u8> {
+    let px: Vec<u16> = (0..(width * height) as u16).collect();
+    let o = Options {
+        width,
+        height,
+        layout: Layout::Strips { rows: height },
+        raw_tags: active_area.map(|a| (tags::ACTIVE_AREA, Value::Long(a.to_vec()))).into_iter().collect(),
+        ..Default::default()
+    };
+    let mut f = write(&px, &o);
+    // the writer counts the real bytes: understate that one count, a LONG held in the entry
+    let e = find_tag(&f, tags::STRIP_BYTE_COUNTS).unwrap();
+    assert_eq!(u32::from_le_bytes(f[e + 8..e + 12].try_into().unwrap()) as usize, width * height * 2);
+    f[e + 8..e + 12].copy_from_slice(&counted.to_le_bytes());
+    f
+}
+
+/// storytold/craft-libs#2040: a DJI Mavic 3 counts 5280 × 3956 × 2 bytes for a strip that holds
+/// 5376-wide rows to the end of the file. A strip counted exactly ActiveArea columns wide (from
+/// column 0) is read in full when the file holds it.
+#[test]
+fn a_strip_counted_only_active_area_wide_is_read_in_full() {
+    let f = understated_strip_dng(8, 4, 6 * 4 * 2, Some([0, 0, 4, 6]));
+    let raw = Dng::parse(&f).unwrap().raw().unwrap();
+    assert_eq!((raw.width, raw.height), (8, 4));
+    assert_eq!(raw.data, (0..32).collect::<Vec<u16>>());
+    let info = probe(&f).unwrap();
+    assert_eq!((info.width, info.height), (6, 4));
+    let img = decode(&f).unwrap();
+    assert_eq!((img.width, img.height), (6, 4));
+}
+
+/// Any other short strip is still refused.
+#[test]
+fn other_short_strips_are_still_refused() {
+    let refused = |f: Vec<u8>| matches!(Dng::parse(&f).and_then(|d| d.raw()), Err(Error::Truncated));
+    // no ActiveArea to explain the count
+    assert!(refused(understated_strip_dng(8, 4, 6 * 4 * 2, None)));
+    // the count is not exactly the area's bytes
+    assert!(refused(understated_strip_dng(8, 4, 5 * 4 * 2, Some([0, 0, 4, 6]))));
+    // the area reaches below the image, so developing would refuse it
+    assert!(refused(understated_strip_dng(8, 4, 6 * 4 * 2, Some([4, 0, 5, 6]))));
+    // the area does not start at column 0
+    assert!(refused(understated_strip_dng(8, 4, 6 * 4 * 2, Some([0, 2, 4, 8]))));
+    // the file does not hold the whole raster from the strip's offset: the strip moved so that
+    // only the counted bytes are left before the end of the file
+    let mut f = understated_strip_dng(8, 4, 6 * 4 * 2, Some([0, 0, 4, 6]));
+    let e = find_tag(&f, tags::STRIP_OFFSETS).unwrap();
+    let late = (f.len() - 6 * 4 * 2) as u32;
+    f[e + 8..e + 12].copy_from_slice(&late.to_le_bytes());
+    assert!(refused(f));
+}

@@ -263,6 +263,29 @@ fn quicktime_uncompressed_video() {
     }
 }
 
+/// Odd-width QuickTime `raw ` 24-bit RGB: ffmpeg's muxer pads each row to an even byte count (a
+/// 63-wide frame is 190 bytes a row, 6650 a frame), and every frame equals the source picture
+/// exactly instead of drifting a byte a row. The reference is the generator's own picture: the
+/// ffmpeg used here decodes this file with unpadded rows (sheared), so its decode is no oracle.
+#[test]
+fn quicktime_rgb24_with_an_odd_width_matches_its_source() {
+    let source = ["-f", "lavfi", "-i", "testsrc=s=63x35:r=24:d=0.25"];
+    let args: Vec<&str> = source.iter().copied().chain(["-c:v", "rawvideo", "-pix_fmt", "rgb24", "-an"]).collect();
+    let Some(path) = fixture_path("raw_rgb24_odd.mov", &args) else { return };
+    let args: Vec<&str> = source.iter().copied().chain(["-f", "rawvideo", "-pix_fmt", "rgba"]).collect();
+    let Some(reference) = fixture("raw_rgb24_odd.source.rgba", &args) else { return };
+    let bytes: std::sync::Arc<[u8]> = std::fs::read(&path).unwrap().into();
+    let src = crate::open_bytes("raw_rgb24_odd.mov", bytes).unwrap();
+    let rate = src.info().frame_rate();
+    let frame = 63 * 35 * 4;
+    assert_eq!(reference.len(), 6 * frame);
+    for k in 0..6 {
+        let f = src.video_frame(FrameRequest::full(rate.tick_of(k as i64))).unwrap();
+        assert_eq!((f.width, f.height), (63, 35));
+        assert!(f.to_rgba8() == reference[k * frame..(k + 1) * frame], "frame {k} differs from the source picture");
+    }
+}
+
 #[test]
 fn matroska_prores_pcm() {
     check_mkv("blue_prores_pcm.mkv", &["-c:v", "prores_ks", "-profile:v", "2"], &["-c:a", "pcm_s16le"]);

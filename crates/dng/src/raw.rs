@@ -151,6 +151,7 @@ fn chunks<'a>(t: &Tiff<'a>, ifd: &Ifd, l: &RawLayout) -> Result<Vec<Chunk<'a>>> 
     if offs.len() < n || counts.len() < n {
         return Err(Error::Malformed("fewer strips or tiles than the image needs"));
     }
+    let counts = if ifd.get(tags::TILE_OFFSETS).is_none() { understated_strip(t, ifd, l, &offs, counts) } else { counts };
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let (x, y) = ((i % across) * tw, (i / across) * th);
@@ -163,6 +164,32 @@ fn chunks<'a>(t: &Tiff<'a>, ifd: &Ifd, l: &RawLayout) -> Result<Vec<Chunk<'a>>> 
         out.push(Chunk { x, y, w: tw, h, coded_h: th, bytes });
     }
     Ok(out)
+}
+
+/// The strip byte counts to read, trusting the file over `StripByteCounts` for one case
+/// (craft-libs 60f7c5d74f and 786c5571f0, storytold/craft-libs#2040): an uncompressed image of one
+/// 8- or 16-bit sample per pixel in a single strip whose byte count is exactly `ActiveArea`
+/// columns (starting at column 0, ending inside the image) by `ImageLength` rows, while the file
+/// holds the whole `ImageWidth` by `ImageLength` raster from the strip's offset on. DJI Mavic 3
+/// DNGs count the 5280 active columns for a strip of full 5376-wide rows that ends at the end of
+/// the file, so reading only the counted bytes refused a complete image. Every other short
+/// strip is still refused, and the strip never reaches past the end of the file.
+fn understated_strip(t: &Tiff, ifd: &Ifd, l: &RawLayout, offs: &[u64], counts: Vec<u64>) -> Vec<u64> {
+    let ([offset], [count]) = (offs, &counts[..]) else { return counts };
+    if l.compression != 1 || l.samples_per_pixel != 1 || !matches!(l.bits, 8 | 16) {
+        return counts;
+    }
+    let Some(area) = ifd.get(tags::ACTIVE_AREA).and_then(|e| t.uints(e).ok()) else { return counts };
+    let [top, left, bottom, right] = area[..] else { return counts };
+    let (width, height) = (l.width as u64, l.height as u64);
+    // an area reaching below the image is refused when developed, so it explains nothing here
+    if left != 0 || bottom <= top || bottom > height || right == 0 || right >= width {
+        return counts;
+    }
+    let bytes_of = |columns: u64| columns.checked_mul(height)?.checked_mul(u64::from(l.bits / 8));
+    let (Some(counted), Some(needed)) = (bytes_of(right), bytes_of(width)) else { return counts };
+    let fits = offset.checked_add(needed).is_some_and(|end| end <= t.data.len() as u64);
+    if *count == counted && fits { vec![needed] } else { counts }
 }
 
 /// Unpack `w` × `h` × `spp` uncompressed samples of `bits` bits: 8 and 16-bit samples as bytes /

@@ -44,6 +44,22 @@ fn fourcc_text(f: [u8; 4]) -> String {
 
 /// The decoder for a video stream and its label.
 fn video_codec(b: &BitmapInfo) -> (VCodec, String) {
+    if u32::from_le_bytes(b.compression) == 3 {
+        // BI_BITFIELDS: the red, green and blue masks follow the 40-byte header (or are its
+        // BITMAPV4/V5 fields at the same place); only the B, G, R, X layout is read
+        let mask = |at: usize| b.extra.get(at..at + 4).and_then(|m| m.first_chunk::<4>()).map(|m| u32::from_le_bytes(*m));
+        let masks = (mask(0), mask(4), mask(8));
+        if let (Some(r), Some(g), Some(bl)) = masks
+            && let Some(raw) = RawFormat::from_avi_bitfields(b.bit_count, [r, g, bl])
+        {
+            return (VCodec::Raw(raw), raw.label().into());
+        }
+        let what = match masks {
+            (Some(r), Some(g), Some(bl)) => format!("{}-bit RGB with bit-field masks {r:#x}, {g:#x}, {bl:#x}", b.bit_count),
+            _ => format!("{}-bit RGB with bit fields but no masks", b.bit_count),
+        };
+        return (VCodec::Unsupported(what), "Uncompressed RGB (bit fields)".into());
+    }
     if let Some(raw) = RawFormat::from_avi(b.compression, b.bit_count) {
         return (VCodec::Raw(raw), raw.label().into());
     }
@@ -584,6 +600,31 @@ pub fn reader_opener(name: &str, head: &[u8], reader: &filmcraft_media::SharedRe
         return None;
     }
     Some(AviSource::open_reader(name, reader.clone()).map(|s| Arc::new(s) as SharedSource).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod bitfield_tests {
+    use super::*;
+
+    fn bitmap(bit_count: u16, masks: Option<[u32; 3]>) -> BitmapInfo {
+        let extra = masks.map(|m| m.iter().flat_map(|v| v.to_le_bytes()).collect()).unwrap_or_default();
+        BitmapInfo { width: 4, height: 2, bit_count, compression: 3u32.to_le_bytes(), size_image: 0, extra }
+    }
+
+    /// `BI_BITFIELDS` is B, G, R, X only with the masks that say so; other masks (another byte
+    /// order, 5-6-5) and missing masks are named, not read as BGRX with wrong colours.
+    #[test]
+    fn bitfields_are_bgrx_only_with_the_matching_masks() {
+        assert_eq!(video_codec(&bitmap(32, Some([0x00ff_0000, 0x0000_ff00, 0x0000_00ff]))).0, VCodec::Raw(RawFormat::Bgrx32));
+        for b in [bitmap(32, Some([0x0000_00ff, 0x0000_ff00, 0x00ff_0000])), bitmap(16, Some([0xf800, 0x07e0, 0x001f])), bitmap(32, None)] {
+            let (codec, label) = video_codec(&b);
+            assert!(matches!(codec, VCodec::Unsupported(_)), "{b:?}: {codec:?}");
+            assert_eq!(label, "Uncompressed RGB (bit fields)");
+        }
+        // BI_RGB keeps its bit-count mapping
+        let rgb = BitmapInfo { compression: [0; 4], ..bitmap(24, None) };
+        assert_eq!(video_codec(&rgb).0, VCodec::Raw(RawFormat::Bgr24));
+    }
 }
 
 #[cfg(test)]

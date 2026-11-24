@@ -7,6 +7,9 @@
 
 use crate::{MediaError, Result, still::Raster};
 
+#[cfg(test)]
+mod metadata_tests;
+
 /// Length of the fixed header.
 const HEADER: usize = 18;
 /// TGA 2.0 files end with this signature (after two 32-bit area offsets).
@@ -92,6 +95,96 @@ impl Layout {
     }
 }
 
+/// `offset` when it can be an optional area of `body` (the bytes before the footer): at or after
+/// the first pixel (metadata cannot replace the header, image ID or colour map) and inside it.
+fn metadata_offset(body: &[u8], offset: usize, first_pixel: usize) -> Option<usize> {
+    (offset >= first_pixel && offset < body.len()).then_some(offset)
+}
+
+/// A little-endian `u16` / `u32` at `at` in `b`, if all of it is there.
+fn le16(b: &[u8], at: usize) -> Option<usize> {
+    b.get(at..at.checked_add(2)?)?.first_chunk::<2>().map(|v| usize::from(u16::from_le_bytes(*v)))
+}
+
+fn le32(b: &[u8], at: usize) -> Option<u32> {
+    b.get(at..at.checked_add(4)?)?.first_chunk::<4>().map(|v| u32::from_le_bytes(*v))
+}
+
+/// The start of every developer-directory payload with a nonzero length, from the directory at
+/// `directory` in `body` (none when that offset holds no readable directory). Each entry is a
+/// 2-byte tag, a 4-byte offset and a 4-byte length; a corrupt count or final entry does not hide
+/// the earlier entries.
+fn developer_payload_starts(body: &[u8], directory: usize) -> Vec<usize> {
+    let Some(count) = le16(body, directory) else { return Vec::new() };
+    let Some(fields) = body.get(directory.saturating_add(2)..) else { return Vec::new() };
+    fields
+        .chunks(10)
+        .take(count)
+        .filter_map(|field| {
+            let start = le32(field, 2)? as usize;
+            let length = le32(field, 6)?;
+            (length != 0).then_some(start)
+        })
+        .collect()
+}
+
+/// Where the pixel data of `bytes` ends (TGA 2.0 §"Developer Area" / "Extension Area" /
+/// "File Footer"; craft-libs 1985afe943, from FilmCraft #1932): at the footer, and before it at
+/// the first of the extension area, the colour-correction, postage-stamp and scan-line tables
+/// it points at, the developer directory and its payloads that lies at or after `first_pixel`.
+/// A file without the footer signature (the original format) ends where the file does.
+fn image_data_end(bytes: &[u8], first_pixel: usize) -> usize {
+    if !bytes.ends_with(FOOTER) {
+        return bytes.len();
+    }
+    // a TGA 2.0 footer cannot begin inside the mandatory header: a legacy image may end with the
+    // same signature as pixel bytes
+    let Some(footer) = bytes.len().checked_sub(FOOTER.len() + 8).filter(|&at| at >= HEADER) else {
+        return bytes.len();
+    };
+    let (Some(body), Some(extension), Some(directory)) = (bytes.get(..footer), le32(bytes, footer), le32(bytes, footer + 4)) else {
+        return bytes.len();
+    };
+    let (extension, directory) = (extension as usize, directory as usize);
+    let mut end = footer;
+    if let Some(offset) = metadata_offset(body, extension, first_pixel) {
+        // an in-body reference is a conservative image boundary, even if it overlaps required
+        // pixels: those bytes cannot be told from a truncated image whose missing pixels the
+        // metadata would supply
+        end = end.min(offset);
+        // the extension's fields at 482, 486 and 490 point at the colour-correction,
+        // postage-stamp and scan-line tables. The record's first two bytes give its size (495 in
+        // TGA 2.0); a shorter record has no such fields, and a record never reaches into a
+        // developer directory or payload that follows it, so those bytes are not read as table
+        // offsets. Tables may precede the record.
+        let declared = le16(body, offset).unwrap_or(0);
+        let mut record_end = offset.saturating_add(declared.min(495));
+        // a directory offset of zero means there is none: the header is not read as one
+        let payloads = metadata_offset(body, directory, first_pixel).map(|d| developer_payload_starts(body, d)).unwrap_or_default();
+        for next in std::iter::once(directory).chain(payloads) {
+            if next > offset {
+                record_end = record_end.min(next);
+            }
+        }
+        if let Some(area) = body.get(offset..record_end.min(body.len())) {
+            for field in [482, 486, 490] {
+                if let Some(table) = le32(area, field).and_then(|v| metadata_offset(body, v as usize, first_pixel)) {
+                    end = end.min(table);
+                }
+            }
+        }
+    }
+    if let Some(offset) = metadata_offset(body, directory, first_pixel) {
+        end = end.min(offset);
+        for payload in developer_payload_starts(body, offset) {
+            if let Some(p) = metadata_offset(body, payload, first_pixel) {
+                end = end.min(p);
+            }
+        }
+    }
+    end
+}
+
 /// Decode a Targa file to straight-alpha RGBA8, top row first.
 pub fn decode(name: &str, bytes: &[u8]) -> Result<Raster> {
     decode_within(name, bytes, MAX_DECODED_BYTES)
@@ -155,17 +248,24 @@ fn decode_within(name: &str, bytes: &[u8], budget: usize) -> Result<Raster> {
     if decoded_bytes(pixels, bpp, map_entry_layout.map(|_| map_len)).is_none_or(|n| n > budget) {
         return Err(err(name, "picture too large to decode"));
     }
-    let mut at = HEADER.checked_add(id_len).ok_or_else(|| err(name, "header"))?;
+    let map_start = HEADER.checked_add(id_len).ok_or_else(|| err(name, "header"))?;
+    let first_pixel = match map_entry_layout {
+        Some(l) => {
+            let size = map_len.checked_mul(l.bytes()).ok_or_else(|| err(name, "colour map"))?;
+            map_start.checked_add(size).ok_or_else(|| err(name, "colour map"))?
+        }
+        None => map_start,
+    };
+    // the pixels end where the TGA 2.0 footer, extension area, its tables or a developer payload
+    // begin: none of them is pixel data
+    let bytes = bytes.get(..image_data_end(bytes, first_pixel)).ok_or_else(|| err(name, "truncated image data"))?;
     let mut palette: Vec<[u8; 4]> = Vec::new();
     if let Some(l) = map_entry_layout {
-        let size = map_len.checked_mul(l.bytes()).ok_or_else(|| err(name, "colour map"))?;
-        let end = at.checked_add(size).ok_or_else(|| err(name, "colour map"))?;
-        let map = bytes.get(at..end).ok_or_else(|| err(name, "truncated colour map"))?;
+        let map = bytes.get(map_start..first_pixel).ok_or_else(|| err(name, "truncated colour map"))?;
         palette = reserve(name, map_len)?;
         palette.extend(map.chunks_exact(l.bytes()).map(|e| l.rgba(e)));
-        at = end;
     }
-    let data = bytes.get(at..).unwrap_or_default();
+    let data = bytes.get(first_pixel..).unwrap_or_default();
     // the stored values, in file order
     let stored: Vec<u8> = if rle {
         unpack_rle(name, data, pixels, bpp)?

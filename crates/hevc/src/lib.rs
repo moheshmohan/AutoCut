@@ -109,8 +109,11 @@ pub struct Picture {
     pub height: u32,
     pub chroma_width: u32,
     pub chroma_height: u32,
-    /// Luma bit depth (chroma uses the same storage type).
+    /// Luma bit depth. The three planes share one storage type: 8-bit only when both depths are 8.
     pub bit_depth: u32,
+    /// Chroma bit depth; a stream may code it apart from the luma depth (a legal Main 10 stream
+    /// can have 8-bit luma and 10-bit chroma).
+    pub bit_depth_chroma: u32,
     pub y: Plane,
     pub u: Plane,
     pub v: Plane,

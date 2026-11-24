@@ -658,14 +658,16 @@ fn make_picture(o: &Output<FrameRef>) -> Picture {
     let (cx, cy, cw, ch) = o.meta.crop;
     let (cx, cy, cw, ch) = (cx as usize, cy as usize, cw as usize, ch as usize);
     let (ccw, cch) = (cw.div_ceil(2), ch.div_ceil(2));
-    let bd = o.meta.bit_depth;
-    let (y, u, v) = o.frame.cropped_planes((cx, cy, cw, ch), bd <= 8);
+    let (bd, bdc) = (o.meta.bit_depth, o.frame.bit_depth_c);
+    // 8-bit planes only when both depths are 8: narrowing deeper chroma to bytes kept its low bits
+    let (y, u, v) = o.frame.cropped_planes((cx, cy, cw, ch), stores_u8(bd, bdc));
     Picture {
         width: cw as u32,
         height: ch as u32,
         chroma_width: ccw as u32,
         chroma_height: cch as u32,
         bit_depth: bd,
+        bit_depth_chroma: bdc,
         y,
         u,
         v,

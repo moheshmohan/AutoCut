@@ -321,7 +321,8 @@ impl Frame {
         match (&self.rows, eight_bit) {
             (Rows::U8(_), true) => planes::<u8, u8>(self, crop, |v| v, Plane::U8),
             (Rows::U8(_), false) => planes::<u8, u16>(self, crop, u16::from, Plane::U16),
-            // (8-bit luma with deeper chroma: the 8-bit output keeps the low bits, as before)
+            // pictures ask for 8 bits only when both depths are 8 (`stores_u8`), so 16-bit rows
+            // are never narrowed by the decoder; a caller asking anyway gets the low bits
             (Rows::U16(_), true) => planes::<u16, u8>(self, crop, |v| v as u8, Plane::U8),
             (Rows::U16(_), false) => planes::<u16, u16>(self, crop, |v| v, Plane::U16),
         }
