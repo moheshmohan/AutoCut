@@ -387,3 +387,52 @@ fn a_corrupt_index_position_cannot_allocate_a_giant_sparse_table() {
     let file = open(&bytes).unwrap();
     assert_eq!(file.tracks[file.track_of_kind(TrackKind::Picture).unwrap()].samples.len(), 5);
 }
+
+/// OP-Atom PCM, with the sample rate or a frame rate as the edit rate.
+fn atom_pcm(edit_rate: Option<Rational>) -> Vec<u8> {
+    let opts = OpAtomPcm { sample_rate: 48_000, bits: 24, channels: 2, edit_rate, ids: PackageIds::from_seed("pcm", "PCM"), timecode: None };
+    write_opatom_pcm(&opts, &(0..6000).collect::<Vec<i32>>()).unwrap()
+}
+
+/// OP1a: long-GOP AVC (key and B flags, display order) with stereo 16-bit sound.
+fn op1a_avc() -> Vec<u8> {
+    let rate = Rational::new(30_000, 1001);
+    let mut cfg = WriterConfig::new(Pattern::Op1a, rate, PackageIds::from_seed("avc", "AVC"));
+    cfg.picture = Some(PictureDesc::new(PictureCoding::Avc { profile_idc: 100, intra: false }, 64, 36));
+    cfg.sound = vec![SoundDesc { sample_rate: 48_000, channels: 2, bits: 16 }];
+    let mut w = MxfWriter::new(std::io::Cursor::new(Vec::new()), cfg).unwrap();
+    let order = [(0, CodedKind::Intra, true), (3, CodedKind::Predicted, false), (1, CodedKind::Bidirectional, false), (2, CodedKind::Bidirectional, false)];
+    for gop in 0..3i64 {
+        for (i, (d, kind, key)) in order.iter().enumerate() {
+            let au = [&[0, 0, 0, 1, if *key { 0x65 } else { 0x41 }][..], &[i as u8; 40]].concat();
+            w.push_picture(&au, FrameInfo { key: *key, kind: *kind, display: Some(gop * 4 + d) }).unwrap();
+            w.push_sound(0, &vec![i as u8; 1602 * 4]).unwrap();
+        }
+    }
+    w.finish().unwrap().into_inner()
+}
+
+/// A track without stored samples (clip-wrapped sound) indexed `samples[0]`.
+#[test]
+fn sync_before_on_a_track_without_samples_is_zero() {
+    let f = atom_pcm(None);
+    let m = open(&f).unwrap();
+    assert!(m.tracks[0].samples.is_empty());
+    assert_eq!((m.tracks[0].sync_before(0), m.tracks[0].sync_before(7)), (0, 0));
+    let f = op1a_avc();
+    let m = open(&f).unwrap();
+    let v = &m.tracks[m.track_of_kind(TrackKind::Picture).unwrap()];
+    assert_eq!((v.sync_before(3), v.sync_before(4), v.sync_before(usize::MAX)), (0, 4, 8));
+}
+
+/// A start timecode at the end of the 64-bit range (a damaged timecode component) formats.
+#[test]
+fn a_drop_frame_timecode_at_the_end_of_the_range_formats() {
+    for base in [30, 60] {
+        for start in [i64::MAX, i64::MAX - 1, i64::MAX / 2, i64::MIN] {
+            let text = Timecode { start, rounded_base: base, drop_frame: true }.format();
+            assert!(text.contains(';'), "{text}");
+        }
+    }
+    assert_eq!(Timecode { start: 107_892, rounded_base: 30, drop_frame: true }.format(), "01:00:00;00");
+}

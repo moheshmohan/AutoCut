@@ -619,7 +619,7 @@ pub struct PcmConfig {
 impl PcmConfig {
     /// Bytes per interleaved audio frame (all channels).
     pub fn bytes_per_frame(&self) -> u32 {
-        (self.bits as u32).div_ceil(8) * self.channels.max(1)
+        (self.bits as u32).div_ceil(8).saturating_mul(self.channels.max(1))
     }
 }
 
@@ -1012,6 +1012,9 @@ pub(crate) fn parse_sample_entry(format: FourCc, payload: &[u8], handler: FourCc
             let _size_of_struct = c.u32()?;
             a.sample_rate = c.f64()?;
             a.channels = c.u32()?;
+            if a.channels > u32::from(u16::MAX) {
+                return Err(Error::Invalid(format!("QuickTime v2 sound entry with {} channels", a.channels)));
+            }
             let _always = c.u32()?;
             a.const_bits_per_channel = c.u32()?;
             a.lpcm_flags = c.u32()?;
@@ -1055,7 +1058,7 @@ pub(crate) fn parse_sample_entry(format: FourCc, payload: &[u8], handler: FourCc
             },
             b"ac-3" => CodecConfig::Ac3 { dac3: get(b"dac3").unwrap_or(&[]).to_vec() },
             b"ec-3" => CodecConfig::Eac3 { dec3: get(b"dec3").unwrap_or(&[]).to_vec() },
-            b"lpcm" | b"sowt" | b"twos" | b"in24" | b"in32" | b"fl32" | b"fl64" | b"raw " | b"NONE" => CodecConfig::Pcm(qt_pcm(f, &a)),
+            b"lpcm" | b"sowt" | b"twos" | b"in24" | b"in32" | b"fl32" | b"fl64" | b"raw " | b"NONE" => CodecConfig::Pcm(qt_pcm(f, &a)?),
             b"ipcm" | b"fpcm" => {
                 let mut pcm =
                     PcmConfig { bits: a.sample_size, float: f == b"fpcm", big_endian: true, signed: true, channels: a.channels, sample_rate: a.sample_rate };
@@ -1075,11 +1078,11 @@ pub(crate) fn parse_sample_entry(format: FourCc, payload: &[u8], handler: FourCc
     Ok(SampleEntry { format, data_reference_index, codec: unknown(), video: None, audio: None, bitrate: None })
 }
 
-fn qt_pcm(f: &[u8; 4], a: &AudioParams) -> PcmConfig {
+fn qt_pcm(f: &[u8; 4], a: &AudioParams) -> Result<PcmConfig> {
     let mut p = PcmConfig { channels: a.channels, sample_rate: a.sample_rate, signed: true, ..Default::default() };
     match f {
         b"lpcm" => {
-            p.bits = a.const_bits_per_channel as u16;
+            p.bits = u16::try_from(a.const_bits_per_channel).map_err(|_| Error::Invalid(format!("lpcm with {} bits per channel", a.const_bits_per_channel)))?;
             p.float = a.lpcm_flags & 1 != 0;
             p.big_endian = a.lpcm_flags & 2 != 0;
             p.signed = a.lpcm_flags & 4 != 0 || p.float;
@@ -1110,7 +1113,7 @@ fn qt_pcm(f: &[u8; 4], a: &AudioParams) -> PcmConfig {
         }
         _ => {}
     }
-    p
+    Ok(p)
 }
 
 fn parse_btrt(p: &[u8]) -> Result<BitRate> {
@@ -1732,5 +1735,52 @@ mod tests {
     fn asc_parse() {
         assert_eq!(parse_asc(&[0x11, 0x90]), Some((2, 48000, 2)));
         assert_eq!(parse_asc(&[]), None);
+    }
+
+    /// A QuickTime v2 `lpcm` sound entry payload with `channels` and `bits` per channel.
+    fn qt_v2_lpcm(channels: u32, bits: u32) -> Vec<u8> {
+        let mut p = vec![0; 6];
+        let u16b = |p: &mut Vec<u8>, v: u16| p.extend(v.to_be_bytes());
+        let u32b = |p: &mut Vec<u8>, v: u32| p.extend(v.to_be_bytes());
+        u16b(&mut p, 1);
+        u16b(&mut p, 2);
+        u16b(&mut p, 0);
+        u32b(&mut p, 0);
+        u16b(&mut p, 2);
+        u16b(&mut p, 16);
+        u16b(&mut p, 0);
+        u16b(&mut p, 0);
+        u32b(&mut p, 65536);
+        u32b(&mut p, 72);
+        p.extend(48000.0f64.to_be_bytes());
+        u32b(&mut p, channels);
+        u32b(&mut p, 0);
+        u32b(&mut p, bits);
+        u32b(&mut p, 0);
+        u32b(&mut p, 0);
+        u32b(&mut p, 1);
+        p
+    }
+
+    #[test]
+    fn pcm_frame_size_saturates_on_a_hostile_channel_count() {
+        assert_eq!(PcmConfig { bits: 16, channels: 2, sample_rate: 48000.0, ..Default::default() }.bytes_per_frame(), 4);
+        assert_eq!(PcmConfig { bits: 24, channels: 0, ..Default::default() }.bytes_per_frame(), 3);
+        assert_eq!(PcmConfig { bits: 16, channels: u32::MAX, ..Default::default() }.bytes_per_frame(), u32::MAX);
+        let ok = parse_sample_entry(FourCc(*b"lpcm"), &qt_v2_lpcm(2, 16), FourCc(*b"soun"), true).unwrap();
+        assert!(matches!(ok.codec, CodecConfig::Pcm(p) if p.bytes_per_frame() == 4));
+    }
+
+    #[test]
+    fn qt_v2_pcm_rejects_channels_and_bits_past_16_bits() {
+        let entry = |channels, bits| parse_sample_entry(FourCc(*b"lpcm"), &qt_v2_lpcm(channels, bits), FourCc(*b"soun"), true);
+        assert!(matches!(entry(u32::MAX, 16), Err(Error::Invalid(_))));
+        assert!(matches!(entry(65_536, 16), Err(Error::Invalid(_))));
+        assert!(entry(65_535, 16).is_ok());
+        // 0x0001_0010 would read as 16-bit PCM, and 0x0001_0000 would fall back to the sample size.
+        assert!(matches!(entry(2, 0x0001_0010), Err(Error::Invalid(_))));
+        assert!(matches!(entry(2, 0x0001_0000), Err(Error::Invalid(_))));
+        let ok = entry(2, 24).unwrap();
+        assert!(matches!(ok.codec, CodecConfig::Pcm(p) if p.bits == 24));
     }
 }
