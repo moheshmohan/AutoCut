@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-19 · **Change:** minor (Bosnian catalog from upstream; previously minor: German covers the whole interface) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-24 · **Change:** minor (Russian catalog from upstream; previously minor: Bosnian catalog from upstream) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Per-language status of FilmCraft's interface. Premiere 26.5.2 ships 10 interface languages (the
 installed bundle's `.lproj` folders): German, English, Spanish, French, Italian, Japanese, Korean,
@@ -55,6 +55,7 @@ whole interface, one PR) at ~4–8 h per language for the catalog plus tests.
 | Vietnamese | vi | 0 (0%) | — | Latin with stacked diacritics (font coverage to check) | — | none | 6–12 h + review |
 | *Other shipped:* Italian | it | 3,573 (same entries as Spanish, plus the macOS Settings item) | as Spanish | Latin (bundled fonts) | not recorded; welcome | partial | review |
 | *Other shipped:* Bosnian | bs | 3,749 (upstream's catalog at `f67d38b3`; AutoCut's own strings show in English) | as Spanish, less AutoCut's own | Latin (bundled fonts) | AI-assisted, not yet native-reviewed; welcome | partial | review |
+| *Other shipped:* Russian | ru | 3,747 (upstream's full catalog at `009b72ca`, 3,738, plus 9 AutoCut entries) | as Spanish, less most of AutoCut's own | Cyrillic (bundled fonts), «ё» | AI-assisted, not yet native-reviewed; welcome | partial | review |
 | *Other shipped:* Ukrainian | uk | 351 (10.0%) | menus only | Cyrillic (bundled) | not recorded | menus only | 5–9 h |
 
 UI strings are catalog entries (the non-comment lines of `src/i18n/<code>.tsv`; English counts the
@@ -63,11 +64,12 @@ Spanish and German catalogs both have 3,590 entries, German every Spanish one. A
 lacks shows in English; no test or build requires a translation. `cargo xtask i18n-report` (also
 printed by `cargo xtask ci`) lists each language's missing strings.
 
-Premiere also ships Italian, which we now cover like Spanish, and Russian (6–10 h).
+Premiere also ships Italian, which we now cover like Spanish, and Russian, which now covers the whole
+interface at catalog level (native review pending).
 
 **Localization dimension:** 9 of the 12 key languages near-complete (English, Spanish, Japanese,
 Simplified Chinese, French, Portuguese (Brazil), Indonesian, Korean, German), 3 none (Hindi, Arabic,
-Vietnamese); against Premiere's 10 languages we cover 9 well and Russian partly. **~35%, 150–230 h** for all twelve to `full` plus Italian and Russian, of which the script
+Vietnamese); against Premiere's 10 languages we cover 10 at catalog level, Russian pending native review. **~35%, 150–230 h** for all twelve to `full` plus Italian and Russian, of which the script
 work (RTL and complex shaping in the egui interface) is the largest and least parallel part.
 Every language needs native-speaker review (human).
 
@@ -75,6 +77,7 @@ Every language needs native-speaker review (human).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-24 | minor | Russian (ru) from upstream: its full catalog (3,738 entries at `009b72ca`) replaces the fork's menus-level one (368); the 9 AutoCut strings upstream lacks are kept, and for the 76 entries both had with different wording upstream's translation is taken; AI-assisted, not native-reviewed |
 | 2026-11-19 | minor | Bosnian (bs, Latin, Ijekavian) from upstream (`293d4e90`, `01a36c1c`): 3,749 entries, Edit ▸ Language ▸ Bosanski, every `bs-*` locale; AI-assisted, not native-reviewed; strings only AutoCut has show in English |
 | 2026-10-23 | minor | Missing translations never fail a test or build (they show in English); `cargo xtask i18n-report`, also run by `cargo xtask ci`, lists them per language |
 | 2026-10-13 | minor | German (de) covers the whole interface: every entry of the Spanish catalog (3,590); the tests require the core menus and the macOS app menu and reject entries without a Spanish one |
