@@ -203,6 +203,21 @@ context-coded bins are branch-free. Single-threaded 4K now splits into CABAC res
 ~28 %, reference window copies ~11 %, interpolation ~11 %, deblocking + SAO + row publication
 ~15 %, inverse transform ~8 %.
 
+Residual decoding (2026-11-25, from craft-libs c25999c8a4 / FilmCraft #3188): each coefficient is
+scaled (8.6.3) as it is decoded and kept in a list of (index, value), instead of a pass over the
+coefficient bounding box after a clear of the whole block; only the bounding box is cleared
+before the list is scattered into it (the inverse transform reads nothing else); DC-only blocks
+add the inverse-DC value straight to the prediction; sig_coeff_flag contexts come from a table
+per sub-block (scan, coded-neighbour pattern) and the last position from inverse scan tables;
+merge candidates stay in the fixed five-entry list. Output is byte-identical on the 76 fixture
+streams that decode. CPU cycles per frame, one thread, release, alternating rounds (kernel counters):
+
+| stream | before | after |
+|---|---|---|
+| bench_1080p (Main, x265 medium CRF 24) | 27.9 M | **26.8 M** (−4 %) |
+| bench_1080p_422_10 (Main 4:2:2 10, medium CRF 24) | 44.0 M | **41.4 M** (−6 %) |
+| 1080p Main, x265 fast CRF 12 (~160 Mbit/s) | 322.5 M | **291.7 M** (−10 %) |
+
 ## Known gaps
 
 - 4:4:4 and monochrome streams, and the range extension coding tools (implicit / explicit RDPCM,
