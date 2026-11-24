@@ -1,13 +1,13 @@
 //! Hand-built bitstreams for coding tools libx265 never produces: tiles (uniform and explicit spacing,
 //! with and without loop filtering across tile boundaries), PCM (with and without in-loop filtering),
 //! multiple slices, dependent slice segments, long-term reference pictures and reference list
-//! modification. A small CABAC encoder (9.3.5, informative) writes the slice data. The expected output
-//! is known exactly where the in-loop filters leave the samples alone, and every stream is also checked
-//! against ffmpeg (when present).
+//! modification, and PCM in 4:2:2. A small CABAC encoder (9.3.5, informative) writes the slice data.
+//! The expected output is known exactly where the in-loop filters leave the samples alone, and
+//! every stream is also checked against ffmpeg (when present).
 
-use crate::Decoder;
 use crate::cabac::{Contexts, NEXT_STATE, RANGE_TAB_LPS, init_contexts};
 use crate::spec_tables::*;
+use crate::{ChromaFormat, Decoder};
 use filmcraft_bitstream::{BitWriter, escape_rbsp};
 
 const W: usize = 96;
@@ -104,16 +104,24 @@ struct Planes {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
+    /// SubHeightC: 2 for 4:2:0, 1 for 4:2:2 (chroma is always half the width).
+    sh: usize,
 }
 
 fn content(pic: u32) -> Planes {
-    let mut p = Planes { y: vec![0; W * H], u: vec![0; W * H / 4], v: vec![0; W * H / 4] };
+    content_fmt(pic, 2)
+}
+
+/// [`content`] with chroma planes of `H / sh` lines.
+fn content_fmt(pic: u32, sh: usize) -> Planes {
+    let ch = H / sh;
+    let mut p = Planes { y: vec![0; W * H], u: vec![0; W / 2 * ch], v: vec![0; W / 2 * ch], sh };
     for y in 0..H {
         for x in 0..W {
             p.y[y * W + x] = pattern(pic, 0, x, y);
         }
     }
-    for y in 0..H / 2 {
+    for y in 0..ch {
         for x in 0..W / 2 {
             p.u[y * W / 2 + x] = pattern(pic, 1, x, y);
             p.v[y * W / 2 + x] = pattern(pic, 2, x, y);
@@ -168,18 +176,51 @@ fn sps(pcm_loop_filter_disabled: bool) -> Vec<u8> {
 /// [`sps`] with the luma and chroma bit depths (PCM samples stay 8-bit, so they are shifted up to
 /// a deeper depth, 8.4.4.5.1).
 fn sps_with_depths(pcm_loop_filter_disabled: bool, luma: u32, chroma: u32) -> Vec<u8> {
+    sps_from(&SpsDesc { luma, chroma, ..SpsDesc::new(pcm_loop_filter_disabled) })
+}
+
+/// The SPS fields the synthetic streams vary.
+#[derive(Clone, Copy, Debug)]
+struct SpsDesc {
+    pcm_loop_filter_disabled: bool,
+    luma: u32,
+    chroma: u32,
+    chroma_format_idc: u32,
+    width: u32,
+    height: u32,
+    /// conf_win_left / right / top / bottom offsets (in units of SubWidthC / SubHeightC).
+    conf_win: Option<(u32, u32, u32, u32)>,
+}
+
+impl SpsDesc {
+    /// The 8-bit 4:2:0 W x H picture of [`sps`].
+    fn new(pcm_loop_filter_disabled: bool) -> Self {
+        SpsDesc { pcm_loop_filter_disabled, luma: 8, chroma: 8, chroma_format_idc: 1, width: W as u32, height: H as u32, conf_win: None }
+    }
+}
+
+fn sps_from(d: &SpsDesc) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.write_bits(0, 4);
     w.write_bits(0, 3);
     w.write_bits(1, 1);
     ptl(&mut w);
     w.write_ue(0); // sps id
-    w.write_ue(1); // 4:2:0
-    w.write_ue(W as u32);
-    w.write_ue(H as u32);
-    w.write_bits(0, 1); // conformance window
-    w.write_ue(luma - 8);
-    w.write_ue(chroma - 8);
+    w.write_ue(d.chroma_format_idc);
+    if d.chroma_format_idc == 3 {
+        w.write_bits(0, 1); // separate_colour_plane_flag
+    }
+    w.write_ue(d.width);
+    w.write_ue(d.height);
+    w.write_bit(d.conf_win.is_some()); // conformance window
+    if let Some((l, r, t, b)) = d.conf_win {
+        for v in [l, r, t, b] {
+            w.write_ue(v);
+        }
+    }
+    w.write_ue(d.luma - 8);
+    w.write_ue(d.chroma - 8);
+    let pcm_loop_filter_disabled = d.pcm_loop_filter_disabled;
     w.write_ue(4); // log2_max_poc_lsb = 8
     w.write_bits(1, 1);
     w.write_ue(4); // max_dec_pic_buffering_minus1
@@ -350,10 +391,11 @@ fn encode_picture(d: &PicDesc, tiles: &Tiles, pcm_content: &Planes, out: &mut Ve
                             e.w.write_bits(pcm_content.y[(ry * CTB + y) * W + rx * CTB + x] as u32, 8);
                         }
                     }
+                    let sh = pcm_content.sh;
                     for plane in [&pcm_content.u, &pcm_content.v] {
-                        for y in 0..CTB / 2 {
+                        for y in 0..CTB / sh {
                             for x in 0..CTB / 2 {
-                                e.w.write_bits(plane[(ry * CTB / 2 + y) * W / 2 + rx * CTB / 2 + x] as u32, 8);
+                                e.w.write_bits(plane[(ry * CTB / sh + y) * W / 2 + rx * CTB / 2 + x] as u32, 8);
                             }
                         }
                     }
@@ -610,6 +652,11 @@ fn as_u8(p: &crate::Plane) -> &[u8] {
 
 /// Compare with ffmpeg's decode of the same stream (skipped when ffmpeg is absent).
 fn check_ffmpeg(name: &str, stream: &[u8], pics: &[crate::Picture]) {
+    check_ffmpeg_as(name, stream, pics, "yuv420p", 2);
+}
+
+/// [`check_ffmpeg`] for 8-bit pictures of `pix_fmt` whose chroma has `H / sh` lines.
+fn check_ffmpeg_as(name: &str, stream: &[u8], pics: &[crate::Picture], pix_fmt: &str, sh: usize) {
     let Some(ff) = filmcraft_testkit::ffmpeg_or_skip(name) else { return };
     let dir = filmcraft_testkit::fixtures_dir("hevc");
     let src = filmcraft_testkit::temp_path(&dir.join(format!("synth_{name}.hevc")));
@@ -618,13 +665,13 @@ fn check_ffmpeg(name: &str, stream: &[u8], pics: &[crate::Picture]) {
     let st = std::process::Command::new(ff)
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(&src)
-        .args(["-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
+        .args(["-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", pix_fmt])
         .arg(&yuv)
         .status()
         .unwrap();
     assert!(st.success(), "ffmpeg failed on {name}");
     let r = std::fs::read(&yuv).unwrap();
-    let fs = W * H * 3 / 2;
+    let fs = W * H + 2 * (W / 2) * (H / sh);
     assert_eq!(r.len(), fs * pics.len(), "{name}: ffmpeg decoded {} frames", r.len() / fs);
     for (i, p) in pics.iter().enumerate() {
         let f = &r[i * fs..(i + 1) * fs];
@@ -757,4 +804,191 @@ fn hvcc_rejects_a_valid_picture_slice_without_starting_a_picture() {
     assert!(decoder.flush().is_empty());
     assert_eq!(decoder.stats().pictures, 0);
     assert_eq!(decoder.nal_length_size(), None);
+}
+
+/// An IDR and an intra TRAIL_R picture of PCM CUs (contents 0 and 1) with the SPS of `d`.
+fn pcm_stream(d: &SpsDesc) -> (Vec<u8>, Vec<Planes>) {
+    pcm_stream_coded(d, d.chroma_format_idc)
+}
+
+/// [`pcm_stream`] with the PCM samples coded for a W x H picture in chroma format `coded_idc`
+/// (4:2:2 or else 4:2:0), whatever the SPS claims.
+fn pcm_stream_coded(d: &SpsDesc, coded_idc: u32) -> (Vec<u8>, Vec<Planes>) {
+    let sh = if coded_idc == 2 { 1 } else { 2 };
+    let mut stream = Vec::new();
+    stream.extend(vps());
+    stream.extend(sps_from(d));
+    stream.extend(pps(0, &None, false));
+    let mut saved = None;
+    let n = WC * HC;
+    let idr = PicDesc { nal_type: 19, poc: 0, intra: true, cu: Cu::Pcm, pps_id: 0, st: vec![], lt: vec![], num_ref: 0, list_entry: None, segments: whole(n) };
+    encode_picture(&idr, &None, &content_fmt(0, sh), &mut stream, &mut saved);
+    let trail = PicDesc { nal_type: 1, poc: 1, intra: true, cu: Cu::Pcm, pps_id: 0, st: vec![], lt: vec![], num_ref: 0, list_entry: None, segments: whole(n) };
+    encode_picture(&trail, &None, &content_fmt(1, sh), &mut stream, &mut saved);
+    (stream, vec![content_fmt(0, sh), content_fmt(1, sh)])
+}
+
+/// PCM samples of 4:2:2 pictures land on every chroma line (the CU's chroma is half its width
+/// and its full height), at any mix of luma and chroma depths up to 12 bits, single- and
+/// frame-threaded. Before 4:2:2 decoding the streams were refused as unsupported.
+#[test]
+fn pcm_422_pictures_keep_every_chroma_line() {
+    let widen = |v: &[u8], depth: u32| v.iter().map(|&s| u16::from(s) << (depth - 8)).collect::<Vec<u16>>();
+    let plane = |pl: &crate::Plane| -> Vec<u16> { (0..pl.len()).map(|i| pl.get(i)).collect() };
+    for (luma, chroma) in [(8, 8), (10, 10), (8, 10), (10, 8), (12, 12), (12, 8)] {
+        let d = SpsDesc { luma, chroma, chroma_format_idc: 2, ..SpsDesc::new(true) };
+        let (stream, expect) = pcm_stream(&d);
+        for threads in [1, 4] {
+            let pics = decode_all(&stream, threads);
+            assert_eq!(pics.len(), 2, "{luma}/{chroma}");
+            for (i, (p, e)) in pics.iter().zip(&expect).enumerate() {
+                let what = format!("{luma}/{chroma} threads {threads} picture {i}");
+                assert_eq!(p.chroma, ChromaFormat::C422, "{what}");
+                assert_eq!((p.width, p.height, p.chroma_width, p.chroma_height), (W as u32, H as u32, W as u32 / 2, H as u32), "{what}");
+                assert_eq!((p.y_stride, p.uv_stride), (W, W / 2), "{what}");
+                assert_eq!(plane(&p.y), widen(&e.y, luma), "{what}: luma");
+                assert_eq!(plane(&p.u), widen(&e.u, chroma), "{what}: Cb");
+                assert_eq!(plane(&p.v), widen(&e.v, chroma), "{what}: Cr");
+            }
+        }
+    }
+}
+
+/// Deblocked 4:2:2 PCM pictures (every CU edge is an intra edge, bS 2, so chroma is filtered on
+/// the 4:2:2 edge grid) are ffmpeg's, single- and frame-threaded.
+#[test]
+fn deblocked_pcm_422_matches_ffmpeg() {
+    let d = SpsDesc { chroma_format_idc: 2, ..SpsDesc::new(false) };
+    let (stream, expect) = pcm_stream(&d);
+    for threads in [1, 4] {
+        let pics = decode_all(&stream, threads);
+        assert_eq!(pics.len(), 2);
+        // the filters changed the chroma next to the CU edges, and only there
+        let changed = pics.iter().zip(&expect).filter(|(p, e)| as_u8(&p.u) != &e.u[..]).count();
+        assert_eq!(changed, 2, "threads {threads}: chroma deblocked");
+        if threads == 1 {
+            check_ffmpeg_as("pcm_422_dbk", &stream, &pics, "yuv422p", 1);
+        }
+    }
+}
+
+/// A 4:2:2 conformance window crops chroma by whole lines (SubHeightC is 1): three lines off
+/// the bottom leave an odd height with every one of its chroma lines, two columns off the left
+/// one chroma column.
+#[test]
+fn a_422_conformance_window_crops_chroma_by_lines() {
+    let d = SpsDesc { chroma_format_idc: 2, conf_win: Some((1, 0, 0, 3)), ..SpsDesc::new(true) };
+    let (stream, expect) = pcm_stream(&d);
+    let pics = decode_all(&stream, 1);
+    assert_eq!(pics.len(), 2);
+    let (w, h, cw) = (W - 2, H - 3, W / 2 - 1);
+    for (p, e) in pics.iter().zip(&expect) {
+        assert_eq!((p.width, p.height, p.chroma_width, p.chroma_height), (w as u32, h as u32, cw as u32, h as u32));
+        let crop =
+            |src: &[u8], stride: usize, x0: usize, w: usize| -> Vec<u8> { (0..h).flat_map(|y| src[y * stride + x0..y * stride + x0 + w].to_vec()).collect() };
+        assert_eq!(as_u8(&p.y), &crop(&e.y, W, 2, w)[..]);
+        assert_eq!(as_u8(&p.u), &crop(&e.u, W / 2, 1, cw)[..]);
+        assert_eq!(as_u8(&p.v), &crop(&e.v, W / 2, 1, cw)[..]);
+    }
+}
+
+/// Hostile 4:2:2 sequence headers in front of real picture data never panic (in the parser or
+/// in a decoding job, which would report an internal error): sizes that are not multiples of
+/// the minimum CU, an odd height, sizes over the sample budget, smaller or larger than the
+/// coded slices, extreme and mixed bit depths, conformance windows past the picture, and the
+/// chroma formats that are not decoded. Each is refused with an error or decodes.
+#[test]
+fn hostile_422_sequence_headers_never_panic() {
+    let base = SpsDesc { chroma_format_idc: 2, ..SpsDesc::new(false) };
+    let big = 1 << 20;
+    let variants = [
+        SpsDesc { width: 98, ..base },
+        SpsDesc { height: 61, ..base },
+        SpsDesc { width: 8192, height: 8192, ..base },
+        SpsDesc { width: 16888, height: 16888, ..base },
+        SpsDesc { width: 16, height: 8, ..base },
+        SpsDesc { width: 8, height: 64, ..base },
+        SpsDesc { width: 192, height: 128, ..base },
+        SpsDesc { width: 48, height: 200, ..base },
+        SpsDesc { luma: 16, chroma: 16, ..base },
+        SpsDesc { luma: 13, chroma: 8, ..base },
+        SpsDesc { luma: 8, chroma: 16, ..base },
+        SpsDesc { luma: 8, chroma: 12, ..base },
+        SpsDesc { luma: 12, chroma: 8, ..base },
+        SpsDesc { luma: 12, chroma: 12, ..base },
+        SpsDesc { conf_win: Some((0, 0, 0, 63)), ..base },
+        SpsDesc { conf_win: Some((48, 0, 0, 0)), ..base },
+        SpsDesc { conf_win: Some((big, big, big, big)), ..base },
+        SpsDesc { chroma_format_idc: 3, ..base },
+        SpsDesc { chroma_format_idc: 0, ..base },
+    ];
+    for d in variants {
+        for (what, coded) in [("4:2:2 slices", 2), ("4:2:0 slices", 1)] {
+            let (s, _) = pcm_stream_coded(&d, coded);
+            for threads in [1, 4] {
+                let r = std::panic::catch_unwind(|| {
+                    let mut dec = Decoder::with_threads(threads);
+                    let mut n = dec.decode(&s, 0).map(|p| p.len()).unwrap_or(0);
+                    n += dec.flush().len();
+                    (n, dec.take_error().map(|e| e.to_string()))
+                });
+                let Ok((_, err)) = r else { panic!("{d:?} ({what}, threads {threads}): panicked") };
+                assert!(!err.as_deref().unwrap_or("").contains("internal error"), "{d:?} ({what}, threads {threads}): a decoding job panicked: {err:?}");
+            }
+        }
+    }
+}
+
+/// The RBSP of a minimal PPS (no transform skip) with a pps_range_extension() whose only
+/// non-default fields are the SAO offset scales.
+fn pps_rbsp_with_sao_offset_scale(luma: u32, chroma: u32) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    w.write_ue(0); // pps_pic_parameter_set_id
+    w.write_ue(0); // pps_seq_parameter_set_id
+    w.write_bits(0, 1); // dependent slice segments
+    w.write_bits(0, 1); // output flag present
+    w.write_bits(0, 3); // num_extra_slice_header_bits
+    w.write_bits(0, 1); // sign data hiding
+    w.write_bits(0, 1); // cabac_init_present
+    w.write_ue(0);
+    w.write_ue(0);
+    w.write_se(0); // init_qp 26
+    w.write_bits(0, 1); // constrained intra
+    w.write_bits(0, 1); // transform skip
+    w.write_bits(0, 1); // cu_qp_delta
+    w.write_se(0);
+    w.write_se(0);
+    w.write_bits(0, 1); // slice chroma qp offsets present
+    w.write_bits(0, 1); // weighted pred
+    w.write_bits(0, 1); // weighted bipred
+    w.write_bits(0, 1); // transquant bypass
+    w.write_bits(0, 1); // tiles
+    w.write_bits(0, 1); // entropy coding sync
+    w.write_bits(1, 1); // loop filter across slices
+    w.write_bits(0, 1); // deblocking control
+    w.write_bits(0, 1); // scaling list
+    w.write_bits(0, 1); // lists modification
+    w.write_ue(0); // log2_parallel_merge_level - 2
+    w.write_bits(0, 1); // slice header extension
+    w.write_bits(1, 1); // pps_extension_present
+    w.write_bits(0x80, 8); // pps_range_extension_flag only
+    w.write_bits(0, 1); // cross_component_prediction
+    w.write_bits(0, 1); // chroma_qp_offset_list
+    w.write_ue(luma); // log2_sao_offset_scale_luma
+    w.write_ue(chroma); // log2_sao_offset_scale_chroma
+    w.rbsp_trailing();
+    w.finish()
+}
+
+/// SAO offsets are applied unscaled, so a PPS scaling them (a range-extension tool a 4:2:2
+/// stream may carry) must be refused rather than decoded to wrong samples; a range extension
+/// that enables nothing is fine.
+#[test]
+fn a_pps_scaling_sao_offsets_is_unsupported() {
+    let plain = crate::params::Pps::parse(&pps_rbsp_with_sao_offset_scale(0, 0)).expect("parses");
+    assert!(plain.check_supported().is_ok());
+    for (luma, chroma) in [(1, 0), (0, 2)] {
+        let pps = crate::params::Pps::parse(&pps_rbsp_with_sao_offset_scale(luma, chroma)).expect("parses");
+        assert!(pps.check_supported().is_err(), "luma {luma}, chroma {chroma}");
+    }
 }

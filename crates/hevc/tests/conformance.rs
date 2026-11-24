@@ -60,6 +60,36 @@ fixture_tests!(
     uhd_4k_main10,
     vt_main,
     vt_main10,
+    intra_422,
+    intra_422_10,
+    intra_422_nosao_nodbk,
+    intra_422_10_nosao_nodbk,
+    medium_422_10,
+    slow_422,
+    p_only_422_10,
+    bframes_422,
+    bframes_422_10,
+    no_sao_422_10,
+    no_deblock_422,
+    deblock_m3_3_422_10,
+    rect_amp_422_10,
+    tskip_422_10,
+    weightp_422_10,
+    qp_422_10,
+    crf51_422_10,
+    lossless_422_10,
+    cu_lossless_422,
+    ctu32_tu4_422_10,
+    ctu16_422_10,
+    scaling_list_422_10,
+    constrained_intra_422_10,
+    slices4_422_10,
+    odd_202x118_422,
+    odd_330x117_422_10,
+    odd_98x61_422_10,
+    odd_1918x1078_422,
+    odd_1918x1078_422_10,
+    uhd_4k_422_10,
 );
 
 /// Draft mode: sub-layer non-reference pictures skip deblocking and SAO and are flagged; every
@@ -67,16 +97,14 @@ fixture_tests!(
 #[test]
 fn draft_mode_changes_only_flagged_non_reference_pictures() {
     let mut checked = 0;
-    for name in ["bframes", "medium", "slow", "weightp_main10"] {
+    for name in ["bframes", "medium", "slow", "weightp_main10", "bframes_422", "bframes_422_10"] {
         let f = common::fixture(name);
         let Some((hevc, yuv)) = common::ensure(f) else {
             eprintln!("skipped {name}");
             continue;
         };
         let reference = std::fs::read(&yuv).unwrap();
-        let (w, h) = (f.width as usize, f.height as usize);
-        let bps = if f.bit_depth > 8 { 2 } else { 1 };
-        let fsize = (w * h + 2 * w.div_ceil(2) * h.div_ceil(2)) * bps;
+        let fsize = common::frame_size(f);
         for threads in [1, 3] {
             let pics = common::decode_file_opts(&hevc, threads, true).unwrap_or_else(|(au, e, _)| panic!("{name}: error at {au}: {e}"));
             common::check_pts(&pics).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -125,11 +153,30 @@ fn compare_detects_mismatch() {
     let Some((hevc, yuv)) = common::ensure(f) else { return };
     let pics = common::decode_file_threads(&hevc, 1).map_err(|e| e.1).unwrap();
     let mut reference = std::fs::read(yuv).unwrap();
-    common::compare(&pics, &reference, f.width as usize, f.height as usize, f.bit_depth).unwrap();
+    common::compare(&pics, &reference, f.width as usize, f.height as usize, f.bit_depth, f.chroma).unwrap();
     let pos = reference.len() - 7;
     reference[pos] ^= 1;
-    let err = common::compare(&pics, &reference, f.width as usize, f.height as usize, f.bit_depth).unwrap_err();
+    let err = common::compare(&pics, &reference, f.width as usize, f.height as usize, f.bit_depth, f.chroma).unwrap_err();
     assert!(err.contains("plane V"), "{err}");
+}
+
+/// The 4:2:2 comparison reads full-height chroma planes: a flipped sample in the bottom chroma
+/// line (which a 4:2:0 reading of the frame would never reach) is reported in its plane.
+#[test]
+fn compare_detects_a_422_chroma_mismatch() {
+    let f = common::fixture("intra_422_10");
+    let Some((hevc, yuv)) = common::ensure(f) else { return };
+    let pics = common::decode_file_threads(&hevc, 1).map_err(|e| e.1).unwrap();
+    let mut reference = std::fs::read(yuv).unwrap();
+    let (w, h) = (f.width as usize, f.height as usize);
+    common::compare(&pics, &reference, w, h, f.bit_depth, f.chroma).unwrap();
+    // the last line of frame 0's Cb plane: luma, then (h - 1) lines of w / 2 two-byte samples
+    let pos = 2 * (w * h + (h - 1) * w / 2 + 3);
+    reference[pos] ^= 1;
+    let err = common::compare(&pics, &reference, w, h, f.bit_depth, f.chroma).unwrap_err();
+    assert!(err.contains("frame 0") && err.contains("plane U") && err.contains(&format!("(3,{})", h - 1)), "{err}");
+    // read as 4:2:0 the frames are the wrong size
+    assert!(common::compare(&pics, &reference, w, h, f.bit_depth, 1).is_err());
 }
 
 /// Pre-generate every fixture and its reference decode (`cargo xtask fixtures`).

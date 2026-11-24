@@ -340,8 +340,9 @@ fn damaged_samples_and_parameter_sets_never_crash_or_hang() {
     }
 }
 
-/// 4:2:2 (which our HEVC decoder does not decode): when Media Foundation takes it, its pictures must
-/// match ffmpeg's decode exactly; when it does not, the factory declines.
+/// HEVC 4:2:2 (which our software decoder decodes too, see `tests/videotoolbox.rs`): when Media
+/// Foundation takes it, its pictures must match ffmpeg's decode exactly; when it does not, the
+/// factory declines.
 #[test]
 fn hevc_422_10bit_matches_ffmpeg_when_the_hardware_takes_it() {
     let ff = filmcraft_testkit::require_ffmpeg!();

@@ -648,7 +648,7 @@ fn hevc_picture(name: &str, hvcc: &[u8], data: &[u8], colour: Option<(u8, u8, u8
     if !(planes_ok(p.y.len(), ys, w, h) && planes_ok(p.u.len(), uvs, cw, ch) && planes_ok(p.v.len(), uvs, cw, ch)) {
         return Err(bad(name, "a tile's planes are smaller than its size"));
     }
-    let data = crate::video::hevc_pixel_data([p.y, p.u, p.v], (p.bit_depth, p.bit_depth_chroma), [w, h, cw, ch, ys, uvs]);
+    let data = crate::video::hevc_pixel_data([p.y, p.u, p.v], (p.bit_depth, p.bit_depth_chroma), p.chroma, [w, h, cw, ch, ys, uvs]);
     let frame = filmcraft_frame::VideoFrame { width: p.width, height: p.height, data, color, par: (1, 1), pts: filmcraft_time::Tick::ZERO };
     Ok(Pic { w: p.width, h: p.height, rgba: frame.to_rgba8() })
 }

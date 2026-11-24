@@ -395,7 +395,7 @@ pub fn h264_factory(e: &SampleEntry) -> Option<Result<Box<dyn VideoDecoder>>> {
     }
 }
 
-/// Our pure-Rust HEVC decoder (Main / Main 10, frame-threaded).
+/// Our pure-Rust HEVC decoder (Main / Main 10 / Main 4:2:2 10, frame-threaded).
 pub struct HevcDecoder {
     hvcc: Vec<u8>,
     dec: filmcraft_hevc::Decoder,
@@ -417,7 +417,7 @@ impl HevcDecoder {
         let (w, h) = (p.width as usize, p.height as usize);
         let (cw, ch) = (p.chroma_width as usize, p.chroma_height as usize);
         let (ys, uvs) = (p.y_stride, p.uv_stride);
-        let data = hevc_pixel_data([p.y, p.u, p.v], (p.bit_depth, p.bit_depth_chroma), [w, h, cw, ch, ys, uvs]);
+        let data = hevc_pixel_data([p.y, p.u, p.v], (p.bit_depth, p.bit_depth_chroma), p.chroma, [w, h, cw, ch, ys, uvs]);
         let color = vui_color(p.width, p.height, p.color.primaries, p.color.matrix, p.color.transfer, p.color.full_range);
         let par = sar_par(p.sar);
         let frame = VideoFrame { width: p.width, height: p.height, data, color, par, pts: filmcraft_time::Tick::ZERO };
@@ -425,16 +425,25 @@ impl HevcDecoder {
     }
 }
 
-/// The planes of a decoded 4:2:0 HEVC picture (`[y, u, v]`, luma and chroma bit depths, and
-/// `[width, height, chroma width, chroma height, luma stride, chroma stride]`) as frame pixels:
-/// 8-bit when all three planes are, else 16-bit at one depth for the frame. A stream may code luma
-/// and chroma at different depths (8-bit luma with 10-bit chroma is a legal Main 10 stream), so
-/// the shallower planes are scaled up to the deeper one; before, the chroma was read at the luma's
-/// depth.
-pub(crate) fn hevc_pixel_data(planes: [filmcraft_hevc::Plane; 3], (luma, chroma): (u32, u32), size: [usize; 6]) -> filmcraft_frame::PixelData {
+/// The planes of a decoded HEVC picture (`[y, u, v]`, luma and chroma bit depths, its chroma
+/// sampling, and `[width, height, chroma width, chroma height, luma stride, chroma stride]`) as
+/// frame pixels: 8-bit when all three planes are, else 16-bit at one depth for the frame. A stream
+/// may code luma and chroma at different depths (8-bit luma with 10-bit chroma is a legal Main 10
+/// stream), so the shallower planes are scaled up to the deeper one; before, the chroma was read
+/// at the luma's depth. 4:2:2 pictures (half-width, full-height chroma) become 4:2:2 frames.
+pub(crate) fn hevc_pixel_data(
+    planes: [filmcraft_hevc::Plane; 3],
+    (luma, chroma): (u32, u32),
+    sampling: filmcraft_hevc::ChromaFormat,
+    size: [usize; 6],
+) -> filmcraft_frame::PixelData {
     use filmcraft_hevc::Plane;
     use std::sync::Arc;
     let [w, h, cw, ch, ys, uvs] = size;
+    let sampling = match sampling {
+        filmcraft_hevc::ChromaFormat::C420 => filmcraft_frame::Chroma::C420,
+        filmcraft_hevc::ChromaFormat::C422 => filmcraft_frame::Chroma::C422,
+    };
     let bits = luma.max(chroma).clamp(1, 16);
     let wide = |pl: Plane, depth: u32| -> Vec<u16> {
         let shift = bits.saturating_sub(depth.clamp(1, 16));
@@ -447,7 +456,7 @@ pub(crate) fn hevc_pixel_data(planes: [filmcraft_hevc::Plane; 3], (luma, chroma)
     match planes {
         [Plane::U8(y), Plane::U8(u), Plane::U8(v)] => filmcraft_frame::PixelData::Yuv8 {
             planes: [Arc::new(tight_plane(y, ys, w, h)), Arc::new(tight_plane(u, uvs, cw, ch)), Arc::new(tight_plane(v, uvs, cw, ch))],
-            chroma: filmcraft_frame::Chroma::C420,
+            chroma: sampling,
             alpha: None,
         },
         [y, u, v] => filmcraft_frame::PixelData::Yuv16 {
@@ -456,7 +465,7 @@ pub(crate) fn hevc_pixel_data(planes: [filmcraft_hevc::Plane; 3], (luma, chroma)
                 Arc::new(tight_plane(wide(u, chroma), uvs, cw, ch)),
                 Arc::new(tight_plane(wide(v, chroma), uvs, cw, ch)),
             ],
-            chroma: filmcraft_frame::Chroma::C420,
+            chroma: sampling,
             bits,
             alpha: None,
         },
@@ -1265,14 +1274,14 @@ impl RawFormat {
 #[cfg(test)]
 mod hevc_depth_tests {
     use super::*;
-    use filmcraft_hevc::Plane;
+    use filmcraft_hevc::{ChromaFormat, Plane};
 
     /// 8-bit luma with 10-bit chroma (and the reverse) become one 10-bit frame: the shallower
     /// planes are scaled up, instead of 10-bit chroma being read as 8-bit (or 8-bit chroma as 10).
     #[test]
     fn planes_of_different_depths_share_the_deeper_one() {
         let size = [2, 2, 1, 1, 2, 1];
-        let check = |planes: [Plane; 3], depths, want: [Vec<u16>; 3]| match hevc_pixel_data(planes, depths, size) {
+        let check = |planes: [Plane; 3], depths, want: [Vec<u16>; 3]| match hevc_pixel_data(planes, depths, ChromaFormat::C420, size) {
             filmcraft_frame::PixelData::Yuv16 { planes, bits, .. } => {
                 assert_eq!(bits, 10, "{depths:?}");
                 assert_eq!(planes.map(|p| p.to_vec()), want, "{depths:?}");
@@ -1282,12 +1291,40 @@ mod hevc_depth_tests {
         check([Plane::U16(vec![16, 128, 235, 255]), Plane::U16(vec![512]), Plane::U16(vec![900])], (8, 10), [vec![64, 512, 940, 1020], vec![512], vec![900]]);
         check([Plane::U16(vec![64, 512, 940, 1020]), Plane::U16(vec![128]), Plane::U16(vec![225])], (10, 8), [vec![64, 512, 940, 1020], vec![512], vec![900]]);
         // equal depths are unchanged; all-8-bit planes stay 8-bit
-        let same = hevc_pixel_data([Plane::U16(vec![1, 2, 3, 4]), Plane::U16(vec![5]), Plane::U16(vec![6])], (10, 10), size);
+        let same = hevc_pixel_data([Plane::U16(vec![1, 2, 3, 4]), Plane::U16(vec![5]), Plane::U16(vec![6])], (10, 10), ChromaFormat::C420, size);
         assert!(
             matches!(same, filmcraft_frame::PixelData::Yuv16 { bits: 10, ref planes, .. } if planes[0].as_slice() == [1, 2, 3, 4] && planes[2].as_slice() == [6])
         );
-        let eight = hevc_pixel_data([Plane::U8(vec![1, 2, 3, 4]), Plane::U8(vec![5]), Plane::U8(vec![6])], (8, 8), size);
+        let eight = hevc_pixel_data([Plane::U8(vec![1, 2, 3, 4]), Plane::U8(vec![5]), Plane::U8(vec![6])], (8, 8), ChromaFormat::C420, size);
         assert!(matches!(eight, filmcraft_frame::PixelData::Yuv8 { .. }));
+    }
+
+    /// 4:2:2 pictures become 4:2:2 frames at either depth: the chroma planes keep all their lines
+    /// (one per luma line) and the frame says so, so they reach the renderer unsquashed.
+    #[test]
+    fn a_422_picture_becomes_a_422_frame() {
+        // 4 x 3 luma, 2 x 3 chroma, strides with padding
+        let size = [4, 3, 2, 3, 5, 3];
+        let y: Vec<u16> = (0..15).collect();
+        let c: Vec<u16> = (100..109).collect();
+        let tight_c = [100, 101, 103, 104, 106, 107];
+        match hevc_pixel_data([Plane::U16(y.clone()), Plane::U16(c.clone()), Plane::U16(c.clone())], (10, 10), ChromaFormat::C422, size) {
+            filmcraft_frame::PixelData::Yuv16 { planes, chroma, bits, .. } => {
+                assert_eq!((chroma, bits), (filmcraft_frame::Chroma::C422, 10));
+                assert_eq!(planes[0].as_slice(), [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13]);
+                assert_eq!((planes[1].as_slice(), planes[2].as_slice()), (&tight_c[..], &tight_c[..]));
+            }
+            _ => panic!("16-bit planes expected"),
+        }
+        let y8: Vec<u8> = (0..15).collect();
+        let c8: Vec<u8> = (100..109).collect();
+        match hevc_pixel_data([Plane::U8(y8), Plane::U8(c8.clone()), Plane::U8(c8)], (8, 8), ChromaFormat::C422, size) {
+            filmcraft_frame::PixelData::Yuv8 { planes, chroma, .. } => {
+                assert_eq!(chroma, filmcraft_frame::Chroma::C422);
+                assert_eq!(planes[1].len(), 6);
+            }
+            _ => panic!("8-bit planes expected"),
+        }
     }
 }
 

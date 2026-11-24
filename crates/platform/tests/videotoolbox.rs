@@ -192,41 +192,74 @@ fn damaged_samples_and_parameter_sets_never_crash_or_hang() {
     }
 }
 
-/// 4:2:2 (which our HEVC decoder does not decode): when VideoToolbox takes it, its pictures must
-/// match ffmpeg's decode exactly; when it does not, the factory declines.
+/// HEVC 4:2:2 at 8 and 10 bits: our software decoder's pictures are ffmpeg's decode, and when
+/// VideoToolbox takes the stream its pictures are the software decoder's (so the two are
+/// interchangeable), and a hardware failure mid-stream continues in software with the software
+/// decoder's exact output. (Before, the software decoder refused 4:2:2 and a failing hardware
+/// decoder had no fallback.)
 #[test]
-fn hevc_422_10bit_matches_ffmpeg_when_the_hardware_takes_it() {
+fn hevc_422_matches_ffmpeg_in_software_and_hardware() {
     let ff = filmcraft_testkit::require_ffmpeg!();
-    let args = [
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc2=s=640x360:r=24:d=1,noise=alls=12:allf=t",
-        "-c:v",
-        "libx265",
-        "-preset",
-        "fast",
-        "-tag:v",
-        "hvc1",
-        "-x265-params",
-        "log-level=error:bframes=3:keyint=12:min-keyint=12:scenecut=0",
-        "-pix_fmt",
-        "yuv422p10le",
-    ];
-    let Some(path) = fixture(&ff, "hevc_422_10.mp4", &args) else { return };
-    let s = read_stream(&path);
-    let Some(mut hw) = hardware(&s) else { return };
-    let out = decode_all(hw.as_mut(), &s.samples);
-    let o =
-        std::process::Command::new(&ff).args(["-v", "error", "-i", path.to_str().unwrap(), "-f", "rawvideo", "-pix_fmt", "yuv422p10le", "-"]).output().unwrap();
-    let (w, h) = (640usize, 360usize);
-    let fsize = (w * h + 2 * (w / 2) * h) * 2;
-    assert_eq!(out.len(), o.stdout.len() / fsize, "frame count");
-    for (i, f) in out.iter().enumerate() {
-        let raw: Vec<u16> = o.stdout[i * fsize..(i + 1) * fsize].as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
-        let filmcraft_frame::PixelData::Yuv16 { planes, chroma, bits, .. } = &f.frame.data else { panic!("16-bit planes") };
-        assert_eq!((*chroma, *bits), (filmcraft_frame::Chroma::C422, 10));
+    for (name, pix, bps) in [("hevc_422_10.mp4", "yuv422p10le", 2usize), ("hevc_422_8.mp4", "yuv422p", 1)] {
+        let args = [
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=640x360:r=24:d=1,noise=alls=12:allf=t",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "fast",
+            "-tag:v",
+            "hvc1",
+            "-x265-params",
+            "log-level=error:bframes=3:keyint=12:min-keyint=12:scenecut=0",
+            "-pix_fmt",
+            pix,
+        ];
+        let Some(path) = fixture(&ff, name, &args) else { continue };
+        let s = read_stream(&path);
+        let o = std::process::Command::new(&ff).args(["-v", "error", "-i", path.to_str().unwrap(), "-f", "rawvideo", "-pix_fmt", pix, "-"]).output().unwrap();
+        let (w, h) = (640usize, 360usize);
         let (y, c) = (w * h, (w / 2) * h);
-        assert!(planes[0][..] == raw[..y] && planes[1][..] == raw[y..y + c] && planes[2][..] == raw[y + c..], "frame {i} differs from ffmpeg");
+        let fsize = (y + 2 * c) * bps;
+        let check = |who: &str, out: &[filmcraft_codecs::DecodedFrame]| {
+            assert_eq!(out.len(), o.stdout.len() / fsize, "{name} ({who}): frame count");
+            for (i, f) in out.iter().enumerate() {
+                let raw = &o.stdout[i * fsize..(i + 1) * fsize];
+                let raw: Vec<u16> = if bps == 2 {
+                    raw.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes([b[0], b[1]])).collect()
+                } else {
+                    raw.iter().map(|&v| u16::from(v)).collect()
+                };
+                let (planes, chroma, bits): ([Vec<u16>; 3], _, _) = match &f.frame.data {
+                    filmcraft_frame::PixelData::Yuv16 { planes, chroma, bits, .. } => (planes.clone().map(|p| p.to_vec()), *chroma, *bits),
+                    filmcraft_frame::PixelData::Yuv8 { planes, chroma, .. } => (planes.clone().map(|p| p.iter().map(|&v| u16::from(v)).collect()), *chroma, 8),
+                    _ => panic!("{name} ({who}): planar YUV expected"),
+                };
+                assert_eq!((chroma, bits), (filmcraft_frame::Chroma::C422, if bps == 2 { 10 } else { 8 }), "{name} ({who})");
+                assert!(
+                    planes[0][..] == raw[..y] && planes[1][..] == raw[y..y + c] && planes[2][..] == raw[y + c..],
+                    "{name} ({who}): frame {i} differs from ffmpeg"
+                );
+            }
+        };
+        let mut sw = software(&s);
+        assert_eq!(sw.name(), "FilmCraft HEVC");
+        let reference = decode_all(sw.as_mut(), &s.samples);
+        check("software", &reference);
+        let Some(mut hw) = hardware(&s) else { continue };
+        let out = decode_all(hw.as_mut(), &s.samples);
+        check("VideoToolbox", &out);
+        assert_same(&format!("{name}: VideoToolbox and software"), &out, &reference);
+        let info = NalStreamInfo::from_entry(&s.entry).unwrap().unwrap();
+        for fail_at in [0, 5, 13] {
+            let mut vt = VtDecoder::new(info.clone()).unwrap();
+            vt.fail_after(fail_at);
+            let mut d = HybridDecoder::new(Box::new(vt), s.entry.clone(), info.clone());
+            let out = decode_all(&mut d, &s.samples);
+            assert!(!d.is_hardware(), "{name}: switched to software");
+            assert_same(&format!("{name} failing at sample {fail_at}"), &out, &reference);
+        }
     }
 }

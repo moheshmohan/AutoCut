@@ -7,12 +7,25 @@ use crate::tables::scan_diag;
 use filmcraft_bitstream::BitReader;
 
 /// HEVC picture state includes several per-pixel and per-block work buffers. This permits 8K
-/// pictures while rejecting dimensions that could exhaust memory during decode.
+/// pictures while rejecting dimensions that could exhaust memory during decode: the luma samples
+/// of the largest 4:2:0 picture.
 pub const MAX_LUMA_SAMPLES: u64 = 1 << 26;
 
-fn check_picture_size(width: u32, height: u32) -> Result<()> {
+/// The samples of all three planes of the largest picture ([`MAX_LUMA_SAMPLES`] in 4:2:0): a
+/// 4:2:2 picture, whose chroma planes are twice as big, may have three quarters of the luma
+/// samples (8K still fits).
+pub const MAX_PICTURE_SAMPLES: u64 = MAX_LUMA_SAMPLES / 2 * 3;
+
+fn check_picture_size(width: u32, height: u32, chroma_format_idc: u32) -> Result<()> {
     ensure!(width > 0 && height > 0 && width <= 16888 && height <= 16888, "picture size {width}x{height} out of range");
-    ensure!(u64::from(width) * u64::from(height) <= MAX_LUMA_SAMPLES, "picture size {width}x{height} exceeds the decoded-frame budget");
+    let luma = u64::from(width) * u64::from(height);
+    let chroma = match chroma_format_idc {
+        0 => 0,
+        1 => luma / 2,
+        2 => luma,
+        _ => 2 * luma,
+    };
+    ensure!(luma + chroma <= MAX_PICTURE_SAMPLES, "picture size {width}x{height} exceeds the decoded-frame budget");
     Ok(())
 }
 
@@ -491,7 +504,7 @@ impl Sps {
         let separate_colour_plane = if chroma_format_idc == 3 { r.read_flag()? } else { false };
         let width = r.read_ue()?;
         let height = r.read_ue()?;
-        check_picture_size(width, height)?;
+        check_picture_size(width, height, chroma_format_idc)?;
         let mut conf_win = (0, 0, 0, 0);
         if r.read_flag()? {
             conf_win = (r.read_ue()?, r.read_ue()?, r.read_ue()?, r.read_ue()?);
@@ -647,8 +660,15 @@ impl Sps {
 
     /// Features this decoder does not handle yet.
     pub fn check_supported(&self) -> Result<()> {
-        if self.chroma_format_idc != 1 {
-            return unsupported(format!("chroma_format_idc {} (only 4:2:0)", self.chroma_format_idc));
+        let cat = self.chroma_array_type();
+        if cat != 1 && cat != 2 {
+            let what = match self.chroma_format_idc {
+                0 => "monochrome".to_string(),
+                3 if self.separate_colour_plane => "4:4:4 with separate colour planes".to_string(),
+                3 => "4:4:4".to_string(),
+                idc => format!("chroma_format_idc {idc}"),
+            };
+            return unsupported(format!("{what} (only 4:2:0 and 4:2:2)"));
         }
         if self.bit_depth_luma > 12 || self.bit_depth_chroma > 12 {
             return unsupported(format!("bit depth {}/{}", self.bit_depth_luma, self.bit_depth_chroma));
@@ -789,7 +809,14 @@ impl Pps {
                     any |= r.read_ue()? != 0;
                 }
                 any |= r.read_flag()?; // cross_component_prediction
-                any |= r.read_flag()?; // chroma_qp_offset_list
+                let chroma_qp_offset_list = r.read_flag()?;
+                any |= chroma_qp_offset_list;
+                if !chroma_qp_offset_list {
+                    // SAO offsets are applied unscaled. (With the list enabled the PPS is
+                    // unsupported already, and the list's fields come before these.)
+                    any |= r.read_ue()? != 0; // log2_sao_offset_scale_luma
+                    any |= r.read_ue()? != 0; // log2_sao_offset_scale_chroma
+                }
                 range_extension = any;
             }
         }
@@ -945,9 +972,26 @@ mod tests {
 
     #[test]
     fn picture_size_has_an_aggregate_pixel_budget() {
-        check_picture_size(8192, 8192).unwrap();
-        let err = check_picture_size(8192, 8193).unwrap_err();
+        check_picture_size(8192, 8192, 1).unwrap();
+        let err = check_picture_size(8192, 8193, 1).unwrap_err();
         assert!(err.to_string().contains("decoded-frame budget"));
+    }
+
+    /// The budget counts all three planes: 4:2:2 chroma is twice the 4:2:0 chroma, so a 4:2:2
+    /// picture may have three quarters of the luma samples (8K and 8192 x 6144 fit, 8192 x 8192
+    /// does not), whatever the order of the hostile numbers.
+    #[test]
+    fn a_422_picture_has_the_same_sample_budget_as_a_420_one() {
+        check_picture_size(7680, 4320, 2).unwrap();
+        check_picture_size(8192, 6144, 2).unwrap();
+        for (w, h) in [(8192, 6145), (8192, 8192), (16888, 16888), (16888, 3000)] {
+            let err = check_picture_size(w, h, 2).unwrap_err();
+            assert!(err.to_string().contains("decoded-frame budget"), "{w}x{h}: {err}");
+        }
+        assert!(check_picture_size(16889, 2, 2).is_err());
+        assert!(check_picture_size(0, 64, 2).is_err());
+        // the 4:2:0 limit is unchanged
+        assert!(check_picture_size(8192, 8192, 1).is_ok() && check_picture_size(16384, 4096, 1).is_ok());
     }
     fn pps_bits(num_ref_idx: u32, tiles: u32) -> Vec<u8> {
         pps_bits_qp(num_ref_idx, tiles, 0)

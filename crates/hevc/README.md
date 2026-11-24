@@ -31,7 +31,8 @@ and fixture generators.
 | Frame-level multithreading (CTB-row granularity dependencies) | done |
 | Draft mode (non-reference pictures skip deblocking / SAO; reduced-resolution playback only) | done |
 | Tiles / WPP | parsed and decoded sequentially within a picture (parallelism is across pictures) |
-| 4:2:2 / 4:4:4 / monochrome, range-extension tools (RExt), 12-bit+ with extended precision | not yet (`Error::Unsupported`) |
+| 4:2:2 (Main 4:2:2 10 / RExt profile without RExt tools, what cameras and libx265 write): chroma geometry from the SPS chroma format in the picture store, intra, inter, transform tree, deblocking and SAO; Table 8-3 intra mode mapping; stacked chroma transform blocks with their second cbf flags; chroma QP = Min(qPi, 51); chroma motion vectors per axis; 8-12-bit | done (bit-exact on the 8- and 10-bit libx265 fixtures; 12-bit 4:2:2 only through the synthetic PCM streams) |
+| 4:4:4 / monochrome, range-extension coding tools (RDPCM, cross-component prediction, extended precision, persistent Rice adaptation, bypass alignment, chroma QP offset lists, SAO offset scaling) | not yet (`Error::Unsupported`) |
 | SCC, multilayer (SHVC / MV-HEVC), 3D extensions | not supported (layers > 0 are ignored) |
 
 ## API
@@ -42,7 +43,8 @@ use filmcraft_hevc::{Decoder, Plane};
 let mut dec = Decoder::new(); // or Decoder::with_threads(n), Decoder::from_hvcc(&hvcc)?
 for (pts, access_unit) in access_units {
     for pic in dec.decode(access_unit, pts)? {
-        // pic.width / pic.height (cropped), pic.bit_depth,
+        // pic.width / pic.height (cropped), pic.bit_depth, pic.chroma (ChromaFormat::C420 / C422;
+        // pic.chroma_width / chroma_height: the u / v plane size),
         // pic.y / pic.u / pic.v: Plane::U8(Vec<u8>) for 8-bit, Plane::U16(Vec<u16>) above,
         // pic.y_stride / pic.uv_stride, pic.pts, pic.poc, pic.key (IRAP), pic.color (VUI), pic.sar
     }
@@ -71,8 +73,12 @@ once per type.
 
 Unavailable references keep distinct frame IDs and POCs while sharing one immutable gray backing
 for the active picture format. This backing is created only when a reference is missing, replaced
-on geometry or plane-depth changes, and released on flush. Jobs still reading an older format keep
-its rows alive. Each backing retains the full coded picture dimensions.
+on geometry, chroma-format or plane-depth changes, and released on flush. Jobs still reading an
+older format keep its rows alive. Each backing retains the full coded picture dimensions.
+
+Picture sizes are capped by the samples of all three planes (`params::MAX_PICTURE_SAMPLES`, those
+of a 4:2:0 picture of 2^26 luma samples): a 4:2:2 picture, whose chroma planes are twice as big,
+may have three quarters of the luma samples (8K fits).
 
 Draft mode (`Decoder::set_draft(true)`; FilmCraft enables it with Settings ▸ Playback ▸ Draft
 decoding while the Program monitor plays at 1/2 or 1/4): sub-layer non-reference pictures
@@ -102,7 +108,8 @@ with ffmpeg; tests print a message and skip when ffmpeg is absent).
 - Robustness: hvcC input with pts round trip; randomly corrupted, truncated and garbage input never
   panics or deadlocks (single- and multi-threaded).
 - Conformance (`tests/conformance.rs`): every fixture is decoded with 1 thread, 3 threads and every
-  core and compared sample-exactly with `ffmpeg -f rawvideo -pix_fmt yuv420p / yuv420p10le`; on mismatch
+  core and compared sample-exactly, plane by plane, with `ffmpeg -f rawvideo -pix_fmt yuv420p /
+  yuv420p10le / yuv422p / yuv422p10le`; on mismatch
   the first differing frame, plane, sample, CTB and 8x8 block are reported. Output pts/POC order is
   checked too, and that no picture is flagged draft without draft mode. `compare_detects_mismatch`
   guards the harness itself. Draft mode (`draft_mode_changes_only_flagged_non_reference_pictures`):
@@ -138,7 +145,14 @@ libx265 unless noted (x265 enables WPP by default, so most streams carry entry p
 | hd_1080p | 1920x1080 | preset fast |
 | uhd_4k_main10 | 3840x2160 | Main 10 ultrafast |
 | vt_main / vt_main10 | 640x360 | Apple VideoToolbox (hevc_videotoolbox), macOS only |
-| synthetic (7 streams) | 96x64 | tiles, PCM, slices, dependent segments, LTR, list modification |
+| intra_422 / intra_422_10 / intra_422_nosao_nodbk / intra_422_10_nosao_nodbk | 352x288 | 4:2:2 8 / 10-bit intra, with and without the in-loop filters |
+| medium_422_10 / slow_422 / p_only_422_10 / bframes_422 / bframes_422_10 | 352x288 | 4:2:2 presets, P only, B pyramid (8 and 10-bit) |
+| no_sao_422_10 / no_deblock_422 / deblock_m3_3_422_10 / rect_amp_422_10 / tskip_422_10 / weightp_422_10 | 352x288 | 4:2:2 tool toggles |
+| qp_422_10 / crf51_422_10 / lossless_422_10 / cu_lossless_422 | 352x288 / 176x144 | 4:2:2 adaptive QP (cu_qp_delta), quantizer extremes, lossless, per-CU bypass |
+| ctu32_tu4_422_10 / ctu16_422_10 / scaling_list_422_10 / constrained_intra_422_10 / slices4_422_10 | 352x288 | 4:2:2 block structure, scaling lists, constrained intra, slices |
+| odd_202x118_422 / odd_330x117_422_10 / odd_98x61_422_10 / odd_1918x1078_422 / odd_1918x1078_422_10 | | 4:2:2 sizes that are not multiples of 8 or 16 (odd heights: 4:2:2 crops by lines) |
+| uhd_4k_422_10 | 3840x2160 | 4:2:2 10-bit ultrafast |
+| synthetic (7 + 4 streams) | 96x64 | tiles, PCM, slices, dependent segments, LTR, list modification; 4:2:2 PCM at 8-12 bits (mixed depths), deblocked, cropped by odd lines |
 
 `cargo test -p filmcraft-hevc --test conformance coverage_report -- --ignored --nocapture` prints the
 decoder statistics per fixture.
@@ -152,6 +166,7 @@ average 50-100), so these are lower bounds:
 | stream | 1 thread | 14 threads |
 |---|---|---|
 | 1080p Main, x265 medium CRF 24, 60 frames | ~75 fps | ~225 fps |
+| 1080p Main 4:2:2 10, x265 medium CRF 24, 60 frames (2026-11-25, load average ~12) | ~94 fps | ~285 fps |
 | 2160p Main 10, x265 fast CRF 26, 20 frames | ~20 fps | ~95 fps |
 
 No intrinsics: the hot loops are written to auto-vectorise. M4.8
@@ -190,12 +205,12 @@ context-coded bins are branch-free. Single-threaded 4K now splits into CABAC res
 
 ## Known gaps
 
-- 4:2:2 (Main 4:2:2 10, RExt) is the next step: chroma geometry is 4:2:0-specific in `slicedec`
-  (chroma TU placement, second chroma cbf flags, Table 8-3 intra mode mapping), `inter` (vertical
-  chroma MV scaling), `filter` (chroma edge spacing, QpC = Min(qPi, 51)) and `picture`. Range
-  extension tools (implicit / explicit RDPCM, cross-component prediction, extended precision,
-  persistent Rice adaptation, bypass alignment, chroma QP offset lists) are rejected with
-  `Error::Unsupported`.
+- 4:4:4 and monochrome streams, and the range extension coding tools (implicit / explicit RDPCM,
+  cross-component prediction, extended precision, persistent Rice adaptation, bypass alignment,
+  chroma QP offset lists, SAO offset scaling) are rejected with `Error::Unsupported`. 4:2:2 streams
+  that use none of those tools (what cameras and libx265 write) decode.
+- 12-bit 4:2:2 is implemented, but only synthetic PCM streams cover it (no libx265 `yuv422p12le`
+  fixture compared with ffmpeg yet).
 - Tiles and WPP substreams are decoded sequentially (entry points are parsed but the decoder finds
   substream starts itself); parallelism is at the picture level.
 - Error concealment is minimal: missing references are replaced by grey pictures, undecodable

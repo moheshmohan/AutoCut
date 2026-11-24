@@ -6,12 +6,12 @@
 //! block per row on the reference data they read, so several pictures decode concurrently.
 
 use crate::dpb::{Dpb, Output, OutputMeta, PocState, RefPicSet, build_ref_lists};
-use crate::error::{Error, Result, ensure, invalid};
+use crate::error::{Error, Result, ensure, invalid, unsupported};
 use crate::params::{Layout, Pps, Sps, Vps};
 use crate::picture::{Frame, FrameRef, Sample, stores_u8};
 use crate::slice::{NalHeader, SliceHeader, nal_type};
 use crate::slicedec::{Blk, F_INTRA, F_SKIP, PicState, SliceDecoder, SliceJob};
-use crate::{ColorInfo, Picture};
+use crate::{ChromaFormat, ColorInfo, Picture};
 use filmcraft_bitstream::{annexb_nals, length_prefixed_nals, unescape_rbsp};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -431,6 +431,7 @@ impl Decoder {
             Some(a) => {
                 a.width != sps.width
                     || a.height != sps.height
+                    || a.chroma_array_type() != sps.chroma_array_type()
                     || a.bit_depth_luma != sps.bit_depth_luma
                     || a.bit_depth_chroma != sps.bit_depth_chroma
                     || a.log2_ctb != sps.log2_ctb
@@ -461,7 +462,10 @@ impl Decoder {
         let max_lsb = sps.max_poc_lsb();
         let poc = self.poc_state.compute(sh, max_lsb, irap_no_rasl);
         let (w, h) = (sps.width as usize, sps.height as usize);
-        let template = Frame::new(0, 0, w, h, sps.log2_ctb, sps.bit_depth_luma, sps.bit_depth_chroma);
+        let Some(chroma) = ChromaFormat::from_idc(sps.chroma_array_type()) else {
+            return unsupported(format!("chroma_format_idc {}", sps.chroma_format_idc));
+        };
+        let template = Frame::new(0, 0, w, h, chroma, sps.log2_ctb, sps.bit_depth_luma, sps.bit_depth_chroma);
         let next_id = &mut self.next_id;
         let gray_reference = &mut self.gray_reference;
         let mut missing = 0u64;
@@ -490,7 +494,7 @@ impl Decoder {
         let _ = scaling;
         let id = self.next_id;
         self.next_id += 1;
-        let frame = Arc::new(Frame::new(id, poc, w, h, sps.log2_ctb, sps.bit_depth_luma, sps.bit_depth_chroma));
+        let frame = Arc::new(Frame::new(id, poc, w, h, chroma, sps.log2_ctb, sps.bit_depth_luma, sps.bit_depth_chroma));
         let output = sh.pic_output && !(hdr.is_rasl() && self.skip_rasl);
         // Draft mode: a sub-layer non-reference picture of the highest sub-layer is never used
         // for prediction, so its in-loop filters can be left out without changing anything else.
@@ -657,7 +661,8 @@ fn output_meta(sps: &Sps, pts: i64, key: bool, draft: bool) -> OutputMeta {
 fn make_picture(o: &Output<FrameRef>) -> Picture {
     let (cx, cy, cw, ch) = o.meta.crop;
     let (cx, cy, cw, ch) = (cx as usize, cy as usize, cw as usize, ch as usize);
-    let (ccw, cch) = (cw.div_ceil(2), ch.div_ceil(2));
+    let chroma = o.frame.chroma;
+    let (ccw, cch) = (cw.div_ceil(chroma.sub_width()), ch.div_ceil(chroma.sub_height()));
     let (bd, bdc) = (o.meta.bit_depth, o.frame.bit_depth_c);
     // 8-bit planes only when both depths are 8: narrowing deeper chroma to bytes kept its low bits
     let (y, u, v) = o.frame.cropped_planes((cx, cy, cw, ch), stores_u8(bd, bdc));
@@ -666,6 +671,7 @@ fn make_picture(o: &Output<FrameRef>) -> Picture {
         height: ch as u32,
         chroma_width: ccw as u32,
         chroma_height: cch as u32,
+        chroma,
         bit_depth: bd,
         bit_depth_chroma: bdc,
         y,
@@ -715,8 +721,11 @@ mod tests {
         fn check<S: Sample>(a: &Frame, b: &Frame) {
             let (gy, gc) = (1u16 << (a.bit_depth - 1), 1u16 << (a.bit_depth_c - 1));
             for row in 0..a.num_rows() {
+                let clines = a.row_lines(row) >> a.chroma.shifts().1;
+                let cw = a.cwidth;
                 let a = a.row::<S>(row).unwrap();
                 let b = b.row::<S>(row).unwrap();
+                assert_eq!((a.cb.len(), a.cr.len()), (clines * cw, clines * cw), "chroma lines of row {row}");
                 assert!(a.y.iter().all(|v| v.to_u16() == gy));
                 assert!(a.cb.iter().chain(a.cr.iter()).all(|v| v.to_u16() == gc));
                 assert!(a.col.iter().all(|v| v.flags == 0));
@@ -728,7 +737,10 @@ mod tests {
         }
         assert_eq!(a.num_rows(), b.num_rows());
         assert!(a.is_complete() && b.is_complete());
-        assert_eq!((a.width, a.height, a.log2_ctb, a.bit_depth, a.bit_depth_c), (b.width, b.height, b.log2_ctb, b.bit_depth, b.bit_depth_c));
+        assert_eq!(
+            (a.width, a.height, a.chroma, a.log2_ctb, a.bit_depth, a.bit_depth_c),
+            (b.width, b.height, b.chroma, b.log2_ctb, b.bit_depth, b.bit_depth_c)
+        );
         if stores_u8(a.bit_depth, a.bit_depth_c) {
             check::<u8>(a, b);
         } else {
@@ -782,25 +794,28 @@ mod tests {
     }
 
     #[test]
-    /// Geometry and independent plane-depth changes replace the cache without invalidating readers.
+    /// Geometry, chroma format and independent plane-depth changes replace the cache without
+    /// invalidating readers.
     fn missing_reference_cache_tracks_format_and_keeps_old_rows_alive() {
         let mut decoder = Decoder::with_threads(1);
         let mut held = missing_refs(&mut decoder, 4, &[-1, -2]);
         let original = decoder.pending.take().unwrap();
-        let mut previous = (96, 64, 4, 8, 8);
+        let mut previous = (96, 64, 4, 8, 8, 1);
         let formats = [
-            (96, 64, 4, 8, 8),
-            (128, 64, 4, 8, 8),
-            (128, 32, 4, 8, 8),
-            (128, 32, 5, 8, 8),
-            (128, 32, 5, 10, 8),
-            (128, 32, 5, 10, 10),
-            (128, 32, 5, 8, 10),
-            (128, 32, 5, 8, 8),
+            (96, 64, 4, 8, 8, 1),
+            (128, 64, 4, 8, 8, 1),
+            (128, 32, 4, 8, 8, 1),
+            (128, 32, 5, 8, 8, 1),
+            (128, 32, 5, 10, 8, 1),
+            (128, 32, 5, 10, 10, 1),
+            (128, 32, 5, 10, 10, 2),
+            (128, 32, 5, 8, 10, 2),
+            (128, 32, 5, 8, 8, 2),
+            (128, 32, 5, 8, 8, 1),
         ];
         for format in formats {
             let mut sps = (*original.sps).clone();
-            (sps.width, sps.height, sps.log2_ctb, sps.bit_depth_luma, sps.bit_depth_chroma) = format;
+            (sps.width, sps.height, sps.log2_ctb, sps.bit_depth_luma, sps.bit_depth_chroma, sps.chroma_format_idc) = format;
             decoder.start_picture(&original.first_sh, &Arc::new(sps), &original.pps, 0).unwrap();
             let pending = decoder.pending.take().unwrap();
             let refs: Vec<_> = pending.rps.st_curr_before.iter().map(|r| r.frame.clone()).collect();
@@ -871,7 +886,7 @@ mod tests {
             draft: false,
         });
         for id in 0..(MAX_QUEUED_AFTER_ERROR as u32 * 4) {
-            let frame = Arc::new(Frame::new(id, id as i32, 16, 16, 4, 8, 8));
+            let frame = Arc::new(Frame::new(id, id as i32, 16, 16, ChromaFormat::C420, 4, 8, 8));
             decoder.out_queue.push_back(Output { frame, poc: id as i32, meta: meta.clone() });
         }
         decoder
