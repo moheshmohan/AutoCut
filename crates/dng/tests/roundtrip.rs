@@ -149,6 +149,113 @@ fn lossless_jpeg_extremes_restarts_and_point_transform() {
     assert_eq!(ljpeg::decode(&lj92(&px, 12, 6, 1, 14, 1, 0, 0), 71).err(), Some(Error::TooLarge));
 }
 
+/// Where a lossless JPEG's entropy-coded data starts (after its scan header).
+fn entropy_start(j: &[u8]) -> usize {
+    let sos = j.windows(2).position(|b| b == [0xFF, 0xDA]).unwrap();
+    sos + 2 + usize::from(u16::from_be_bytes([j[sos + 2], j[sos + 3]]))
+}
+
+/// `j` with its frame header claiming `width` × `height`.
+fn with_frame(j: &[u8], width: u16, height: u16) -> Vec<u8> {
+    let mut j = j.to_vec();
+    // FF C3, length (2), precision (1), height (2), width (2)
+    let sof = j.windows(2).position(|b| b == [0xFF, 0xC3]).unwrap();
+    j[sof + 5..sof + 7].copy_from_slice(&height.to_be_bytes());
+    j[sof + 7..sof + 9].copy_from_slice(&width.to_be_bytes());
+    j
+}
+
+/// A flat 8 × 1 picture codes in a few bytes. Claiming 8 × 4096 allocated the whole frame and
+/// decoded it from the zero bits the reader feeds past the end; every sample takes at least one
+/// bit, so the frame is refused before the scan.
+#[test]
+fn lossless_jpeg_frame_larger_than_its_entropy_data_is_rejected() {
+    let j = lj92(&[100; 8], 8, 1, 1, 12, 1, 0, 0);
+    assert_eq!(ljpeg::decode(&j, 1 << 20).unwrap().samples, [100; 8]);
+    assert_eq!(ljpeg::decode(&with_frame(&j, 8, 4096), 1 << 20).err(), Some(Error::Truncated));
+}
+
+/// After the scan header there are `left` bytes: a frame of 8 × `left` samples could still be
+/// coded in them, one more sample could not (it needs part of another byte).
+#[test]
+fn lossless_jpeg_frame_needing_a_partial_extra_byte_is_rejected() {
+    let j = lj92(&[100; 8], 8, 1, 1, 12, 1, 0, 0);
+    let left = j.len() - entropy_start(&j);
+    let width = |n: usize| u16::try_from(n).unwrap();
+    assert_ne!(ljpeg::decode(&with_frame(&j, width(8 * left), 1), 1 << 20).err(), Some(Error::Truncated));
+    assert_eq!(ljpeg::decode(&with_frame(&j, width(8 * left + 1), 1), 1 << 20).err(), Some(Error::Truncated));
+}
+
+/// `f` (little-endian, tiled) with every tile pointing at `payload`, appended to the file.
+fn tiles_sharing(f: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut g = f.to_vec();
+    let at = u32::try_from(g.len()).unwrap();
+    g.extend_from_slice(payload);
+    for (tag, v) in [(tags::TILE_OFFSETS, at), (tags::TILE_BYTE_COUNTS, u32::try_from(payload.len()).unwrap())] {
+        let e = find_tag(&g, tag).unwrap();
+        assert_eq!(u16::from_le_bytes([g[e + 2], g[e + 3]]), 4, "LONG values");
+        let n = u32::from_le_bytes(g[e + 4..e + 8].try_into().unwrap()) as usize;
+        let values = if n == 1 { e + 8 } else { u32::from_le_bytes(g[e + 8..e + 12].try_into().unwrap()) as usize };
+        for i in 0..n {
+            g[values + 4 * i..values + 4 * i + 4].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    g
+}
+
+fn lossless_tiles(w: usize, h: usize) -> Options {
+    Options {
+        width: w,
+        height: h,
+        bits: 16,
+        layout: Layout::Tiles { width: 16, height: 16 },
+        compression: Compression::LosslessJpeg { predictor: 1, components: 1, restart_lines: 0, pt: 0 },
+        ..Default::default()
+    }
+}
+
+/// 16 × 16 tiles each holding a 512 × 512 lossless JPEG: decoding a tile may allocate its own
+/// samples and a little slack, not the frame the JPEG claims (a fixed 256Ki-sample allowance per
+/// tile let every tiny tile decode a quarter-megapixel frame).
+#[test]
+fn a_lossless_jpeg_larger_than_its_tile_is_refused_before_decoding_it_all() {
+    let f = write(&vec![7; 32 * 16], &lossless_tiles(32, 16));
+    assert_eq!(Dng::parse(&f).unwrap().raw().unwrap().data, vec![7; 32 * 16], "tiles coded at their own size decode");
+    let big = lj92(&vec![7; 512 * 512], 512, 512, 1, 16, 1, 0, 0);
+    assert!(matches!(Dng::parse(&tiles_sharing(&f, &big)).unwrap().raw(), Err(Error::TooLarge | Error::Malformed(_))));
+}
+
+/// 65,536 tiles pointing at one payload. Identical tiles stored once (real files do this) still
+/// decode. A shared payload carrying 64 KiB of empty segments before its frame made every tile
+/// parse all of them (a billion segments): the bytes are charged to every tile that reads them,
+/// so the file is refused before anything is decoded.
+#[test]
+fn many_tiles_over_one_shared_payload_are_bounded() {
+    let (w, h) = (4096, 4096);
+    let f = write(&vec![7; w * h], &lossless_tiles(w, h));
+    let tile = lj92(&[7; 256], 16, 16, 1, 16, 1, 0, 0);
+    let raw = Dng::parse(&tiles_sharing(&f, &tile)).unwrap().raw().unwrap();
+    assert!(raw.data.len() == w * h && raw.data.iter().all(|&v| v == 7), "identical tiles stored once decode");
+    let mut padded = vec![0xFF, 0xD8];
+    for _ in 0..16_384 {
+        padded.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x02]);
+    }
+    padded.extend_from_slice(&tile[2..]);
+    assert_eq!(ljpeg::decode(&padded, 1 << 20).unwrap().samples, [7; 256], "the padded payload is a valid tile");
+    assert_eq!(Dng::parse(&tiles_sharing(&f, &padded)).unwrap().raw().err(), Some(Error::TooLarge));
+}
+
+/// A LinearizationTable longer than 65,536 entries is refused before its entries are read (each
+/// became a 64-bit value first); one of 65,536 entries is read.
+#[test]
+fn an_oversized_linearization_table_is_refused_before_its_entries_are_read() {
+    let px = picture(8, 8, 1, 16, 4);
+    let o = Options { raw_tags: vec![(tags::LINEARIZATION_TABLE, Value::Short(vec![0; 65_537]))], ..Default::default() };
+    assert_eq!(decode(&write(&px, &o)).err(), Some(Error::Malformed("LinearizationTable longer than 65536")));
+    let o = Options { raw_tags: vec![(tags::LINEARIZATION_TABLE, Value::Short((0..=65_535).collect()))], ..Default::default() };
+    assert!(decode(&write(&px, &o)).is_ok());
+}
+
 /// The colour tags of a camera whose white-balanced values are Rec. 709 already.
 fn rec709_camera_tags(neutral: [f64; 3]) -> Vec<(u16, Value)> {
     let cm = inverse(&rec709_to_xyz().unwrap()).unwrap();

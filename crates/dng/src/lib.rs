@@ -231,10 +231,11 @@ impl<'a> Dng<'a> {
         };
         let linearization = match self.raw_tag(tags::LINEARIZATION_TABLE) {
             Some(e) => {
-                let v = self.tiff.uints(e)?;
-                if v.len() > 65_536 {
+                // checked before the entries are read: each becomes a 64-bit value
+                if e.count > 65_536 {
                     return Err(Error::Malformed("LinearizationTable longer than 65536"));
                 }
+                let v = self.tiff.uints(e)?;
                 Some(v.into_iter().map(|x| x.min(65_535) as u16).collect())
             }
             None => None,
