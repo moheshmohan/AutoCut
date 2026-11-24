@@ -11,8 +11,10 @@
 //! **Reading** accepts TTML1 2010, the 2006 `ttaf1` drafts and TTML2:
 //! clock times (`HH:MM:SS`, `.fraction`, `:FF` frames and `.subframes`), offset times (`h`, `m`,
 //! `s`, `ms`, `f`, `t` with `ttp:tickRate`), `begin` / `end` / `dur`, nested `par` time
-//! containers (`body` / `div` begins add up and their ends clip what is inside), timed `<span>`s inside an untimed `<p>`, `<br/>`, whitespace
-//! collapsing, styles referenced by id (italic / bold / underline) and `ttm:agent` / `xml:id`.
+//! containers (`body` / `div` begins add up and their ends clip what is inside), timed `<span>`s inside an untimed `<p>`, `<br/>`, XML whitespace
+//! collapsing, styles inline or referenced by id (italic / bold / underline, inherited from
+//! `body` down, `normal` / `inherit` resets) and `ttm:agent` / `xml:id`. A literal `<` in the
+//! text is kept as `&lt;` so it never reads as a style tag.
 
 use std::collections::{HashMap, HashSet};
 
@@ -36,6 +38,16 @@ const NS_TTM: &str = "http://www.w3.org/ns/ttml#metadata";
 const NS_TTM_DRAFT: &str = "http://www.w3.org/2006/10/ttaf1#metadata";
 const NS_TTM_DRAFT_APRIL: &str = "http://www.w3.org/2006/04/ttaf1#metadata";
 const NS_XML: &str = "http://www.w3.org/XML/1998/namespace";
+/// TTML content namespaces: TTML1 / TTML2 and the 2006 drafts.
+const NS_TT_CONTENT: [&str; 3] = [NS_TT, "http://www.w3.org/2006/10/ttaf1", "http://www.w3.org/2006/04/ttaf1"];
+/// Styling namespaces, in the order a property is looked up in: TTML, then the 2006 drafts.
+const NS_TTS_ALL: [&str; 5] = [
+    NS_TTS,
+    "http://www.w3.org/2006/10/ttaf1#style",
+    "http://www.w3.org/2006/10/ttaf1#styling",
+    "http://www.w3.org/2006/04/ttaf1#style",
+    "http://www.w3.org/2006/04/ttaf1#styling",
+];
 const IMSC1_TEXT: &str = "http://www.w3.org/ns/ttml/profile/imsc1/text";
 const DFXP_PROFILE: &str = "http://www.w3.org/ns/ttml/profile/dfxp-presentation";
 
@@ -109,10 +121,17 @@ fn esc(s: &str) -> String {
             '>' => o.push_str("&gt;"),
             '"' => o.push_str("&quot;"),
             '\'' => o.push_str("&apos;"),
+            // XML 1.0 forbids these (C0 controls, U+FFFE, U+FFFF), even escaped
+            c if !is_xml_char(c) => {}
             c => o.push(c),
         }
     }
     o
+}
+
+/// A character XML 1.0 allows in a document (§2.2 `Char`; a `char` is never a surrogate).
+fn is_xml_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
 }
 
 fn clock(t: Tick) -> String {
@@ -124,6 +143,78 @@ fn time_expr(t: Tick, rate: Option<FrameRate>) -> String {
     match rate {
         Some(r) if r.tick_of(r.frame_at(t)) == t => format!("{}f", r.frame_at(t)),
         _ => clock(t),
+    }
+}
+
+/// Memoised "next occurrence of a quote byte" searches, so unterminated quotes are not rescanned.
+#[derive(Default)]
+struct QuoteCache {
+    found: [Option<(usize, Option<usize>)>; 2],
+}
+
+impl QuoteCache {
+    /// Index of the next `quote` byte at or after `from`.
+    fn next(&mut self, bytes: &[u8], quote: u8, from: usize) -> Option<usize> {
+        let slot = usize::from(quote == b'\'');
+        if let Some((searched, result)) = self.found.get(slot).copied().flatten()
+            && searched <= from
+            && result.is_none_or(|r| r >= from)
+        {
+            return result;
+        }
+        let result = bytes.get(from..).and_then(|t| t.iter().position(|&c| c == quote)).map(|i| from + i);
+        if let Some(f) = self.found.get_mut(slot) {
+            *f = Some((from, result));
+        }
+        result
+    }
+}
+
+/// Parses a tag starting at `bytes[start] == b'<'`: optional `/` (closing), a name of ASCII
+/// letters/digits starting with a letter immediately after, then whitespace-separated
+/// `name="value"` / `name='value'` attributes, optional `/` before `>`. A `>` inside a quoted
+/// value does not end the tag. Returns `(index after '>', closing, lowercase name)`; the name is
+/// empty for a self-closing tag.
+fn parse_tag(bytes: &[u8], start: usize, cache: &mut QuoteCache) -> Option<(usize, bool, String)> {
+    let mut i = start + 1;
+    let closing = bytes.get(i) == Some(&b'/');
+    if closing {
+        i += 1;
+    }
+    let name_start = i;
+    if !bytes.get(i)?.is_ascii_alphabetic() {
+        return None;
+    }
+    while bytes.get(i).is_some_and(u8::is_ascii_alphanumeric) {
+        i += 1;
+    }
+    let name = String::from_utf8_lossy(bytes.get(name_start..i)?).to_ascii_lowercase();
+    loop {
+        let ws_start = i;
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        match bytes.get(i)? {
+            b'>' => return Some((i + 1, closing, name)),
+            // self-closing: no markup
+            b'/' if !closing && bytes.get(i + 1) == Some(&b'>') => return Some((i + 2, closing, String::new())),
+            _ => {}
+        }
+        if i == ws_start {
+            return None;
+        }
+        let key_start = i;
+        while bytes.get(i).is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b':' | b'_')) {
+            i += 1;
+        }
+        if i == key_start || bytes.get(i) != Some(&b'=') {
+            return None;
+        }
+        let quote = *bytes.get(i + 1)?;
+        if quote != b'"' && quote != b'\'' {
+            return None;
+        }
+        i = cache.next(bytes, quote, i + 2)? + 1;
     }
 }
 
@@ -148,25 +239,12 @@ fn inline(text: &str) -> String {
         }
     };
     let mut rest = text;
-    // Once no `>` remains, no later `<` can start a tag either. Remember that instead of searching
-    // the shrinking suffix again after every literal `<`, which made `<<<<…` quadratic.
-    let mut closer_remains = true;
+    let mut cache = QuoteCache::default();
     while !rest.is_empty() {
-        let tag_end = match rest.strip_prefix('<') {
-            Some(after) if closer_remains => {
-                let end = after.find('>');
-                closer_remains = end.is_some();
-                end
-            }
-            _ => None,
-        };
-        if let Some(end) = tag_end {
-            let after = &rest[1..];
-            let tag = after[..end].trim().to_ascii_lowercase();
-            let (closing, name) = match tag.strip_prefix('/') {
-                Some(n) => (true, n.trim().to_string()),
-                None => (false, tag.split_whitespace().next().unwrap_or("").to_string()),
-            };
+        // Only a well-formed tag is markup; "1 < 2 and 3 > 2" and "a<b and c>d" are text.
+        if rest.starts_with('<')
+            && let Some((end, closing, name)) = parse_tag(text.as_bytes(), text.len() - rest.len(), &mut cache)
+        {
             let attr = match name.as_str() {
                 "i" => Some("tts:fontStyle=\"italic\""),
                 "b" => Some("tts:fontWeight=\"bold\""),
@@ -180,17 +258,23 @@ fn inline(text: &str) -> String {
                     active.push(a);
                 }
             }
-            rest = &after[end + 1..];
+            rest = text.get(end..).unwrap_or("");
             continue;
         }
         let Some(ch) = rest.chars().next() else { break };
         sync(&mut out, &active, &mut emitted);
+        // a stored entity is the character it names, escaped once for XML
+        if let Some((decoded, len)) = filmcraft_project::entity_at(rest) {
+            out.push_str(&esc(&decoded.to_string()));
+            rest = rest.get(len..).unwrap_or("");
+            continue;
+        }
         if ch == '\n' {
             out.push_str("<br/>");
         } else {
             out.push_str(&esc(&ch.to_string()));
         }
-        rest = &rest[ch.len_utf8()..];
+        rest = rest.get(ch.len_utf8()..).unwrap_or("");
     }
     for _ in emitted {
         out.push_str("</span>");
@@ -198,13 +282,48 @@ fn inline(text: &str) -> String {
     out
 }
 
-fn is_ncname(s: &str) -> bool {
-    let mut c = s.chars();
-    c.next().is_some_and(|f| f.is_alphabetic() || f == '_') && c.all(|x| x.is_alphanumeric() || matches!(x, '_' | '-' | '.'))
+/// XML 1.0 (fifth edition) §2.3 `NameStartChar`, without the colon.
+fn is_name_start(c: char) -> bool {
+    matches!(c,
+        'A'..='Z' | '_' | 'a'..='z' | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}' | '\u{370}'..='\u{37D}'
+        | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
 }
 
-fn cue_id(cue: &Cue, index: usize) -> String {
-    cue.id.as_deref().filter(|x| is_ncname(x)).map(str::to_string).unwrap_or_else(|| format!("c{}", index + 1))
+/// An XML name without a colon (Namespaces in XML 1.0 §3 `NCName`, with the character ranges of
+/// XML 1.0 fifth edition §2.3 `NameChar`).
+fn is_ncname(s: &str) -> bool {
+    let mut c = s.chars();
+    c.next().is_some_and(is_name_start)
+        && c.all(|x| is_name_start(x) || matches!(x, '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}'))
+}
+
+/// The `xml:id` of every cue: a valid explicit ID as written unless the style, the region or an
+/// earlier cue has it; otherwise `c<n>`, made distinct from every valid explicit ID (later cues'
+/// too) and every ID given so far.
+fn cue_ids(doc: &Document) -> Vec<String> {
+    // Reserve every valid explicit ID before allocating fallbacks, including IDs on later cues.
+    let reserved: HashSet<&str> = ["s1", "r1"].into_iter().chain(doc.cues.iter().filter_map(|cue| cue.id.as_deref()).filter(|id| is_ncname(id))).collect();
+    let mut used: HashSet<String> = ["s1".into(), "r1".into()].into_iter().collect();
+    doc.cues
+        .iter()
+        .enumerate()
+        .map(|(index, cue)| {
+            if let Some(id) = cue.id.as_deref().filter(|id| is_ncname(id))
+                && used.insert(id.to_string())
+            {
+                return id.to_string();
+            }
+            let mut id = format!("c{}", index.saturating_add(1));
+            // Each collision consumes a distinct reserved or used ID, so this loop is bounded by
+            // their combined size.
+            while reserved.contains(id.as_str()) || used.contains(&id) {
+                id.push('_');
+            }
+            used.insert(id.clone());
+            id
+        })
+        .collect()
 }
 
 /// Write `doc` as TTML. `rate` (IMSC1 only) makes times exact frame offsets; `lang` is the
@@ -226,8 +345,9 @@ pub fn write(doc: &Document, flavor: Flavor, rate: Option<FrameRate>, lang: &str
     }
     o.push_str(&format!(" xml:lang=\"{}\">\n", esc(if lang.is_empty() { "en" } else { lang })));
     // Keep agent identifiers distinct from the IDs already emitted for cues, style and region.
+    let cue_ids = cue_ids(doc);
     let mut ids: HashSet<String> = ["s1".into(), "r1".into()].into_iter().collect();
-    ids.extend(doc.cues.iter().enumerate().map(|(i, c)| cue_id(c, i)));
+    ids.extend(cue_ids.iter().cloned());
     let mut speakers = Vec::new();
     let mut speaker_ids = HashMap::new();
     for speaker in doc.cues.iter().filter_map(|c| c.speaker.as_deref()) {
@@ -254,8 +374,7 @@ pub fn write(doc: &Document, flavor: Flavor, rate: Option<FrameRate>, lang: &str
     o.push_str("    <styling>\n      <style xml:id=\"s1\" tts:color=\"white\" tts:fontFamily=\"proportionalSansSerif\" tts:fontSize=\"100%\" tts:textAlign=\"center\"/>\n    </styling>\n");
     o.push_str("    <layout>\n      <region xml:id=\"r1\" tts:origin=\"10% 10%\" tts:extent=\"80% 80%\" tts:displayAlign=\"after\"/>\n    </layout>\n");
     o.push_str("  </head>\n  <body region=\"r1\" style=\"s1\">\n    <div>\n");
-    for (i, c) in doc.cues.iter().enumerate() {
-        let id = cue_id(c, i);
+    for (c, id) in doc.cues.iter().zip(cue_ids) {
         let agent = c.speaker.as_deref().and_then(|s| speaker_ids.get(s)).map(|id| format!(" ttm:role=\"x-speaker\" ttm:agent=\"{id}\"")).unwrap_or_default();
         o.push_str(&format!(
             "      <p xml:id=\"{}\" begin=\"{}\" end=\"{}\"{agent}>{}</p>\n",
@@ -497,98 +616,207 @@ struct Fmt {
     underline: bool,
 }
 
-fn style_of(n: roxmltree::Node, styles: &std::collections::HashMap<String, Fmt>, parent: Fmt) -> Fmt {
+/// An explicit `inherit` restores the parent value, even after earlier style references.
+#[derive(Clone, Copy)]
+enum FmtValue {
+    Set(bool),
+    Inherit,
+}
+
+impl FmtValue {
+    fn resolve(self, inherited: bool) -> bool {
+        match self {
+            Self::Set(value) => value,
+            Self::Inherit => inherited,
+        }
+    }
+}
+
+/// The style properties an element or a `<style>` sets; `None` leaves the inherited value.
+#[derive(Clone, Copy, Default)]
+struct FmtSpec {
+    italic: Option<FmtValue>,
+    bold: Option<FmtValue>,
+    underline: Option<FmtValue>,
+}
+
+impl FmtSpec {
+    fn apply(self, fmt: &mut Fmt, parent: Fmt) {
+        if let Some(v) = self.italic {
+            fmt.italic = v.resolve(parent.italic);
+        }
+        if let Some(v) = self.bold {
+            fmt.bold = v.resolve(parent.bold);
+        }
+        if let Some(v) = self.underline {
+            fmt.underline = v.resolve(parent.underline);
+        }
+    }
+}
+
+/// An attribute without a namespace (`style`, a legacy `id`).
+fn unqualified<'a>(n: roxmltree::Node<'a, '_>, name: &str) -> Option<&'a str> {
+    n.attributes().find(|a| a.name() == name && a.namespace().is_none()).map(|a| a.value())
+}
+
+/// A styling attribute: from the TTML styling namespaces in a fixed order (whatever the order in
+/// the file), else unqualified for compatibility. Other namespaces are ignored.
+fn styling_attr<'a>(n: roxmltree::Node<'a, '_>, name: &str) -> Option<&'a str> {
+    NS_TTS_ALL.into_iter().find_map(|ns| n.attribute((ns, name))).or_else(|| unqualified(n, name))
+}
+
+/// Is this element `name` in a TTML content namespace (or none)?
+fn content_element(n: roxmltree::Node, name: &str) -> bool {
+    n.is_element() && n.tag_name().name() == name && n.tag_name().namespace().is_none_or(|ns| NS_TT_CONTENT.contains(&ns))
+}
+
+fn style_of(n: roxmltree::Node, styles: &HashMap<String, FmtSpec>, parent: Fmt) -> Fmt {
     let mut f = parent;
-    if let Some(refs) = attr(n, "style") {
+    if let Some(refs) = unqualified(n, "style") {
         for r in refs.split_whitespace() {
             if let Some(s) = styles.get(r) {
-                f.italic |= s.italic;
-                f.bold |= s.bold;
-                f.underline |= s.underline;
+                s.apply(&mut f, parent);
             }
         }
     }
-    own_fmt(n, &mut f);
+    own_fmt(n).apply(&mut f, parent);
     f
 }
 
-fn own_fmt(n: roxmltree::Node, f: &mut Fmt) {
-    if let Some(v) = attr(n, "fontStyle") {
-        f.italic = v.trim() == "italic" || v.trim() == "oblique";
-    }
-    if let Some(v) = attr(n, "fontWeight") {
-        f.bold = v.trim() == "bold";
-    }
-    if let Some(v) = attr(n, "textDecoration") {
-        let v = v.trim();
-        if v.contains("noUnderline") || v == "none" {
-            f.underline = false;
-        } else if v.contains("underline") {
-            f.underline = true;
-        }
+fn own_fmt(n: roxmltree::Node) -> FmtSpec {
+    FmtSpec {
+        italic: styling_attr(n, "fontStyle").and_then(|v| match v.trim() {
+            "inherit" => Some(FmtValue::Inherit),
+            "italic" | "oblique" => Some(FmtValue::Set(true)),
+            "normal" | "reverseOblique" => Some(FmtValue::Set(false)),
+            _ => None,
+        }),
+        bold: styling_attr(n, "fontWeight").and_then(|v| match v.trim() {
+            "inherit" => Some(FmtValue::Inherit),
+            "bold" => Some(FmtValue::Set(true)),
+            "normal" => Some(FmtValue::Set(false)),
+            _ => None,
+        }),
+        underline: styling_attr(n, "textDecoration").and_then(|v| {
+            let v = v.trim();
+            if v == "inherit" {
+                Some(FmtValue::Inherit)
+            } else if v.contains("noUnderline") || v == "none" {
+                Some(FmtValue::Set(false))
+            } else if v.contains("underline") {
+                Some(FmtValue::Set(true))
+            } else {
+                None
+            }
+        }),
     }
 }
 
-/// Text being collected from a `<p>`: whitespace collapses to one space, which is written only
-/// before the next visible character or opening tag (never at a line start).
+/// Text being collected from a `<p>` or timed `<span>`. XML whitespace collapses to one space in
+/// the style of its first character, written only between visible text. Line breaks are kept,
+/// each in the style it was in, also at the start and end of a cue.
 struct Out {
     s: String,
-    pending: bool,
+    pending: Option<Fmt>,
+    has_text: bool,
+    breaks: Vec<Fmt>,
+    tags: Vec<&'static str>,
 }
 
 impl Out {
     fn flush(&mut self) {
-        if self.pending && !self.s.is_empty() && !self.s.ends_with('\n') {
+        if !self.breaks.is_empty() {
+            for fmt in std::mem::take(&mut self.breaks) {
+                self.set_fmt(fmt);
+                self.s.push('\n');
+            }
+        } else if self.has_text
+            && let Some(fmt) = self.pending
+        {
+            self.set_fmt(fmt);
             self.s.push(' ');
         }
-        self.pending = false;
+        self.pending = None;
     }
+
+    /// Keep the common tag prefix open and close removed tags in reverse order to preserve nesting.
+    fn set_fmt(&mut self, fmt: Fmt) {
+        let tags = [(fmt.italic, "i"), (fmt.bold, "b"), (fmt.underline, "u")].into_iter().filter(|x| x.0).map(|x| x.1);
+        let common = self.tags.iter().copied().zip(tags.clone()).take_while(|(a, b)| a == b).count();
+        for t in self.tags.iter().skip(common).rev() {
+            self.s.push_str(&format!("</{t}>"));
+        }
+        self.tags.truncate(common);
+        for t in tags.skip(common) {
+            self.s.push_str(&format!("<{t}>"));
+            self.tags.push(t);
+        }
+    }
+}
+
+/// XML whitespace: only these characters collapse (U+00A0 and other Unicode spaces are content).
+fn is_xml_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r')
 }
 
 /// Collect a `<p>`'s (or `<span>`'s) text with `<i>`/`<b>`/`<u>` tags, collapsing whitespace.
-fn collect(n: roxmltree::Node, styles: &std::collections::HashMap<String, Fmt>, fmt: Fmt, out: &mut Out) {
-    for c in n.children() {
-        if c.is_text() {
-            for ch in c.text().unwrap_or("").chars() {
-                if ch.is_whitespace() {
-                    out.pending = true;
+/// An explicit stack keeps nested inline content off the call stack.
+fn collect<'a, 'input>(n: roxmltree::Node<'a, 'input>, styles: &HashMap<String, FmtSpec>, fmt: Fmt, out: &mut Out) {
+    // a child `<span>` takes its own style on top of its parent's
+    let push_children = |pending: &mut Vec<(roxmltree::Node<'a, 'input>, Fmt)>, e: roxmltree::Node<'a, 'input>, fmt: Fmt| {
+        let children: Vec<_> = e.children().collect();
+        for child in children.into_iter().rev() {
+            let child_fmt = if child.is_element() && child.tag_name().name() == "span" { style_of(child, styles, fmt) } else { fmt };
+            pending.push((child, child_fmt));
+        }
+    };
+    let mut pending: Vec<(roxmltree::Node, Fmt)> = Vec::new();
+    push_children(&mut pending, n, fmt);
+    while let Some((node, fmt)) = pending.pop() {
+        if node.is_text() {
+            let text = node.text().unwrap_or("");
+            for (i, ch) in text.char_indices() {
+                if is_xml_space(ch) {
+                    out.pending.get_or_insert(fmt);
                 } else {
                     out.flush();
-                    out.s.push(ch);
+                    out.set_fmt(fmt);
+                    // Cue text carries its own `<i>`/`<b>`/`<u>` tags, so a literal `<` is kept as
+                    // `&lt;` (as a WebVTT import keeps its entities), and a literal `&` that would
+                    // read as an entity ("&lt;" typed as text) as `&amp;`; plain text and the
+                    // writers decode them. Any other `&`, and a `>`, stay as they are.
+                    match ch {
+                        '<' => out.s.push_str("&lt;"),
+                        '&' if filmcraft_project::entity_at(text.get(i..).unwrap_or("")).is_some() => out.s.push_str("&amp;"),
+                        _ => out.s.push(ch),
+                    }
+                    out.has_text = true;
                 }
             }
-        } else if c.is_element() {
-            match c.tag_name().name() {
-                "br" => {
-                    out.pending = false;
-                    out.s.push('\n');
-                }
-                "span" => {
-                    let f = style_of(c, styles, fmt);
-                    let tags: Vec<&str> = [(f.italic && !fmt.italic, "i"), (f.bold && !fmt.bold, "b"), (f.underline && !fmt.underline, "u")]
-                        .into_iter()
-                        .filter(|x| x.0)
-                        .map(|x| x.1)
-                        .collect();
-                    if !tags.is_empty() {
-                        out.flush();
-                    }
-                    for t in &tags {
-                        out.s.push_str(&format!("<{t}>"));
-                    }
-                    collect(c, styles, f, out);
-                    for t in tags.iter().rev() {
-                        out.s.push_str(&format!("</{t}>"));
-                    }
-                }
-                _ => collect(c, styles, fmt, out),
+        } else if node.is_element() {
+            if node.tag_name().name() == "br" {
+                // a collapsible space next to a hard line break goes
+                out.pending = None;
+                out.breaks.push(fmt);
+            } else {
+                push_children(&mut pending, node, fmt);
             }
         }
     }
 }
 
-fn clean(s: &str) -> String {
-    s.lines().map(str::trim).collect::<Vec<_>>().join("\n").trim().to_string()
+/// The cue text of `n` in style `fmt`: empty when it has no visible text (only spaces or breaks).
+fn cue_text(n: roxmltree::Node, styles: &HashMap<String, FmtSpec>, fmt: Fmt) -> String {
+    let mut o = Out { s: String::new(), pending: None, has_text: false, breaks: Vec::new(), tags: Vec::new() };
+    collect(n, styles, fmt, &mut o);
+    if !o.has_text {
+        return String::new();
+    }
+    // trailing breaks stay; a trailing space does not
+    o.pending = None;
+    o.flush();
+    o.set_fmt(Fmt::default());
+    o.s
 }
 
 pub fn parse(text: &str) -> Result<Document> {
@@ -600,12 +828,10 @@ pub fn parse(text: &str) -> Result<Document> {
     }
     let tm = timing(root)?;
     let speakers = speaker_names(root);
-    let mut styles = std::collections::HashMap::new();
-    for s in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "style") {
-        if let Some(id) = s.attributes().find(|a| a.name() == "id").map(|a| a.value()) {
-            let mut f = Fmt::default();
-            own_fmt(s, &mut f);
-            styles.insert(id.to_string(), f);
+    let mut styles = HashMap::new();
+    for s in root.descendants().filter(|n| content_element(*n, "style")) {
+        if let Some(id) = s.attribute((NS_XML, "id")).or_else(|| unqualified(s, "id")) {
+            styles.insert(id.to_string(), own_fmt(s));
         }
     }
     let mut warnings = Vec::new();
@@ -619,7 +845,9 @@ pub fn parse(text: &str) -> Result<Document> {
     }
     // the body is a time container like a div: its begin offsets, and its end clips, everything inside
     let t = times(body, Scope { begin: Tick::ZERO, end: None }, tm, &mut doc);
-    walk(body, Scope { begin: t.begin.unwrap_or(Tick::ZERO), end: t.end }, &tm, &styles, &speakers, Fmt::default(), &mut doc);
+    // styles set on the body reach every cue
+    let body_fmt = style_of(body, &styles, Fmt::default());
+    walk(body, Scope { begin: t.begin.unwrap_or(Tick::ZERO), end: t.end }, &tm, &styles, &speakers, body_fmt, &mut doc);
     doc.cues.sort_by_key(|c| (c.start, c.end));
     Ok(doc)
 }
@@ -688,7 +916,7 @@ fn times(n: roxmltree::Node, parent: Scope, tm: Timing, doc: &mut Document) -> T
     Times { begin, end, bad }
 }
 
-fn walk(n: roxmltree::Node, parent: Scope, tm: &Timing, styles: &HashMap<String, Fmt>, speakers: &HashMap<String, String>, fmt: Fmt, doc: &mut Document) {
+fn walk(n: roxmltree::Node, parent: Scope, tm: &Timing, styles: &HashMap<String, FmtSpec>, speakers: &HashMap<String, String>, fmt: Fmt, doc: &mut Document) {
     for c in n.children().filter(|c| c.is_element()) {
         let f = style_of(c, styles, fmt);
         match c.tag_name().name() {
@@ -709,16 +937,7 @@ fn walk(n: roxmltree::Node, parent: Scope, tm: &Timing, styles: &HashMap<String,
                 let whole = if has_timing(c) || spans.is_empty() { e } else { None };
                 match whole {
                     Some(e) => {
-                        let mut o = Out { s: String::new(), pending: false };
-                        let tags: Vec<&str> = [(f.italic, "i"), (f.bold, "b"), (f.underline, "u")].into_iter().filter(|x| x.0).map(|x| x.1).collect();
-                        for t in &tags {
-                            o.s.push_str(&format!("<{t}>"));
-                        }
-                        collect(c, styles, f, &mut o);
-                        for t in tags.iter().rev() {
-                            o.s.push_str(&format!("</{t}>"));
-                        }
-                        let text = clean(&o.s);
+                        let text = cue_text(c, styles, f);
                         if e > b && !text.is_empty() {
                             doc.cues.push(Cue { start: b, end: e, text, speaker: cue_speaker, id, ..Default::default() });
                         }
@@ -730,9 +949,7 @@ fn walk(n: roxmltree::Node, parent: Scope, tm: &Timing, styles: &HashMap<String,
                             let st = times(sp, scope, *tm, doc);
                             let sb = st.begin.unwrap_or(scope.begin);
                             if let (false, Some(se)) = (st.bad, st.end) {
-                                let mut o = Out { s: String::new(), pending: false };
-                                collect(sp, styles, style_of(sp, styles, f), &mut o);
-                                let text = clean(&o.s);
+                                let text = cue_text(sp, styles, style_of(sp, styles, f));
                                 if se > sb && !text.is_empty() {
                                     doc.cues.push(Cue {
                                         start: sb,
@@ -755,6 +972,29 @@ fn walk(n: roxmltree::Node, parent: Scope, tm: &Timing, styles: &HashMap<String,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_xml_whitespace_collapses_in_cue_text() {
+        let xml =
+            "<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div><p begin=\"1s\" end=\"2s\">\t 10\u{a0}km\u{2009}a\u{3000}b \t\r\n  c \n</p></div></body></tt>";
+        let doc = parse(xml).unwrap();
+        assert_eq!(doc.cues[0].text, "10\u{a0}km\u{2009}a\u{3000}b c");
+        let xml = "<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div><p begin=\"1s\" end=\"2s\">\u{a0}x<br/>y\u{a0}</p></div></body></tt>";
+        let doc = parse(xml).unwrap();
+        assert_eq!(doc.cues[0].text, "\u{a0}x\ny\u{a0}");
+    }
+
+    #[test]
+    fn edge_line_breaks_survive_round_trip() {
+        for (body, want) in [("<br/>text", "\ntext"), ("text<br/>", "text\n"), (" <br/> text <br/> ", "\ntext\n")] {
+            let xml = format!("<tt xmlns=\"http://www.w3.org/ns/ttml\"><body><div><p begin=\"1s\" end=\"2s\">{body}</p></div></body></tt>");
+            let doc = parse(&xml).unwrap();
+            assert_eq!(doc.cues[0].text, want);
+            let out = write(&doc, Flavor::Dfxp, None, "en");
+            let again = parse(&out).unwrap();
+            assert_eq!(again.cues[0].text, want);
+        }
+    }
 
     fn tm(rate: FrameRate) -> Timing {
         Timing { rate, base: rate.timecode_base(), sub_frame_rate: 1, tick_rate: FrameRate::new(1, 1) }

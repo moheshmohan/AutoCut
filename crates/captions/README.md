@@ -86,17 +86,72 @@ This mapping follows [W3C TTML1, third edition (2018), §§12.1.5–12.2.1](http
 The [April 2006 TTaf1 draft, §§7.2.1 and 12.1.5–12.2.1](https://www.w3.org/TR/2006/WD-ttaf1-dfxp-20060427/)
 defines its earlier metadata namespace and agent ID form.
 
+### TTML cue identifiers
+
+TTML and DFXP writers keep valid explicit cue IDs verbatim unless a style, region or earlier cue
+already uses them. Missing, invalid or repeated IDs receive deterministic replacements that also
+avoid valid IDs on later cues. Emitted cue, style, region and speaker IDs are unique across the
+document. Unicode spelling is preserved without normalization.
+
+Identifier validation follows the `NCName` production in [Namespaces in XML 1.0, third edition
+(2009), §3](https://www.w3.org/TR/2009/REC-xml-names-20091208/#NT-NCName), using the character
+ranges in [XML 1.0, fifth edition (2008), §2.3](https://www.w3.org/TR/2008/REC-xml-20081126/#NT-NameStartChar).
+
+### TTML text
+
+The writers drop characters XML 1.0 forbids (C0 controls other than tab, line feed and carriage
+return, U+FFFE, U+FFFF) instead of writing an unreadable file. Only a well-formed tag in cue text
+is markup (a `>` inside a quoted attribute value does not end it), so `1 < 2 and 3 > 2` keeps its
+middle. On import only XML whitespace collapses (a no-break space or U+3000 is content), and a line
+break at the start or end of a cue is kept.
+
+### TTML inherited text styles
+
+On import, italic, bold and underline styles from `<body>`, `<p>` and timed `<span>` roots appear in
+the cue text as balanced `<i>`, `<b>` and `<u>` tags. Descendant overrides and explicit
+`normal` / `noUnderline` resets are kept, and `inherit` restores the parent value. Styling
+attributes are read from the TTML styling namespaces (and those of the 2006 drafts), with
+unqualified attributes as a compatibility fallback; other namespaces are ignored, and only `style`
+elements in a TTML content namespace (by `xml:id`, else an unqualified `id`) and the unqualified
+`style` attribute count. Named-style chaining and `xml:space="preserve"` are not supported. The
+inline text collector does not recurse. Content style inheritance follows [W3C TTML1, second edition
+(2013)](https://www.w3.org/TR/2013/REC-ttml1-20130924/#semantics-style-inheritance-content).
+
+### Literal text and style markup
+
+Cue text combines style tags with character entities, as WebVTT does. The TTML and EBU STL
+readers keep a literal `<` as `&lt;` (TTML also a literal `&` that would read as an entity, STL
+every `&`, as `&amp;`), so it never turns into a tag. The TTML and STL writers decode the eight
+entities `filmcraft_project::entity_at` knows: `&amp;`, `&lt;`, `&gt;`, `&nbsp;`, `&quot;`,
+`&apos;`, `&lrm;` and `&rlm;`; other named entities and numeric references stay literal. The SRT
+writer keeps stored entities next to real style tags, so a reimport does not turn a literal
+bracket into markup. `plain_text` (burn-in, CEA-608) decodes them.
+
+### SRT and WebVTT text
+
+An SRT text line that reads as a timing line (`9:00 --> 10:00`) is written with a leading
+zero-width space, which the reader removes, so the cue is not split. In WebVTT a literal `-->` in
+cue text is written `--&gt;`, and a literal `--&gt;` gains one `amp;` level, so the escape is
+reversible. A speaker name is written with `›` (U+203A) for `>` and a space for a line break, and
+a name ending in `-` gets a space before the voice tag's `>`.
+
 ### SCC writer
 
 Each caption is sent as a pop-on load (RCL, ENM, then per row a preamble address code and tab
 offset for centring, then text; control codes doubled) into non-displayed memory, followed by End
 Of Caption exactly on the caption's first frame. The load is placed in the latest run of free
-frames before the caption, so back-to-back captions load while the previous one is on screen. An
+frames before the caption, so back-to-back captions load while the previous one is on screen; the
+load may pause around the previous caption's erase (doubled control codes stay adjacent), so a
+caption that closely follows another is not delayed. An
 Erase Displayed Memory clears the caption at its out point unless the next caption replaces it.
 Text is wrapped at 32 columns, bottom-aligned (last row 15) and centred. Characters come from the
 608 basic, special and extended sets (extended characters are preceded by a basic fallback
 character, as the standard requires); others are dropped. If there is no room to load a caption
 before its in point (for example a caption at 00:00:00:00), it appears as soon as it is loaded.
+
+The reader ends a cue at every End of Caption, so neighbours with the same text stay separate
+cues. A code word must be exactly four hex digits and an MCC time code field ASCII digits (a sign
+is refused).
 
 ### MCC writer
 
@@ -107,6 +162,10 @@ Export work and output size therefore follow the scheduled caption data, not the
 cues or their duration (#2811). Empty-frame insertion is an optional MCC export behavior; see
 [EZTitles' MCC export documentation, "Write empty frames"](https://eztitles.com/Webhelp/EZTitles/export_subtitles_cc_mcc.htm).
 FilmCraft does not offer continuous padding for consumers that require a packet on every video frame.
+
+Each CEA-708 window load deletes the window and defines it anew (DeleteWindows before
+DefineWindow, in place of a ClearWindows after it): a window made anew is empty with the pen at
+its top left in any decoder, for the same number of bytes, so cue timing is unchanged.
 
 Regression tests cover sparse output, both caption streams individually and together, drop-frame
 and non-drop timecodes, exact cue round trips, and timestamps near the tick storage limit.
@@ -145,7 +204,12 @@ colours, alignment) and the published override-tag reference. No other implement
   snapping to frames; ASS round-trips frame-exactly at 25 fps with speakers, italics, placements
   and the track style; readers never panic on random bytes (also a valid STL header followed by
   random blocks, random MCC lines and random ASS dialogue text); SRT → VTT → SCC keeps text and
-  frames.
+  frames; a tight pop-on load crosses the previous caption's end; back-to-back one-frame CEA-708
+  captions keep their frames.
+- `tests/ttml_cue_ids.rs`, `tests/ttml_text.rs`, `tests/ttml_styles.rs`, `tests/literal_text.rs`:
+  TTML cue IDs, forbidden characters and literal brackets, inherited styles and namespaces, and
+  literal text beside style tags in TTML, SRT and STL (ported with craft-libs 86e59ebc08 and
+  fdbb9c2471).
 - `ass.rs` unit tests: real-world-shaped ASS and SSA scripts written in the test (styles, BOM +
   CRLF, editor sections, comments, overrides, drawings, simultaneous lines), missing sections and
   Format lines, hostile input (huge numbers, unterminated braces and parentheses, 1 MB lines,

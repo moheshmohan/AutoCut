@@ -15,6 +15,9 @@
 //!   tables are read as Latin. Characters with no 6937 code are written as `?`.
 //! - Long subtitles continue in extension blocks; user-data (`EBN 0xFE`) and comment blocks are
 //!   skipped.
+//! - A literal `<` or `&` in the file is read as `&lt;` / `&amp;`, so it stays text beside the
+//!   `<i>` / `<u>` tags the reader makes; the writer decodes the entities caption text carries
+//!   ([`filmcraft_project::entity_at`]).
 
 use filmcraft_time::{FrameRate, Tick, fields_to_frames, frames_to_fields};
 
@@ -189,6 +192,9 @@ fn decode_tf(tf: &[u8], out: &mut String, italic: &mut bool, underline: &mut boo
                 *underline = false;
             }
             0x00..=0x1f | 0x7f..=0x9f => {}
+            // literal text, kept apart from the style tags this reader makes
+            b'<' => out.push_str("&lt;"),
+            b'&' => out.push_str("&amp;"),
             0x20..=0x7e => out.push(b as char),
             0xc1..=0xcf => {
                 if let Some(&base) = tf.get(i)
@@ -236,10 +242,16 @@ fn encode_text(text: &str) -> Vec<u8> {
                 continue;
             }
         }
+        // a stored entity is the character it names
+        if let Some((decoded, len)) = filmcraft_project::entity_at(rest) {
+            out.extend(encode_6937(decoded).unwrap_or_else(|| vec![b'?']));
+            rest = rest.get(len..).unwrap_or("");
+            continue;
+        }
         if is_tag_start && !rest.contains('>') {
             // This cannot become markup later.  Encode the remaining literal text in one pass
             // instead of searching the shrinking suffix after every opening bracket.
-            for ch in rest.chars() {
+            for ch in filmcraft_project::decode_entities(rest).chars() {
                 if ch == '\n' {
                     out.push(0x8a);
                 } else {
@@ -456,6 +468,14 @@ mod tests {
     }
 
     #[test]
+    fn entities_are_encoded_as_their_characters() {
+        // a stored `&lt;` is the character, not an entity spelled out; the tag beside it stays a tag
+        assert_eq!(encode_text("1 &lt; 2 &amp; <i>x</i>"), encode_text("1 < 2 & <i>x</i>"));
+        assert_eq!(encode_text("x &lt;y> z"), b"x <y> z".to_vec(), "a decoded bracket is text, not a tag");
+        assert_eq!(encode_text("a &lt;b"), encode_text("a <b"));
+    }
+
+    #[test]
     fn writes_gsi_and_extension_blocks() {
         let long = "x".repeat(150);
         let doc = Document {
@@ -527,7 +547,9 @@ mod tests {
         let encoded = write(&doc, Some(FrameRate::FPS_25));
         let decoded = parse(&encoded).expect("valid EBU STL");
         assert_eq!(decoded.cues.len(), 1);
-        assert_eq!(decoded.cues[0].text, literal);
+        // a literal `<` is read as `&lt;` now (craft-libs fdbb9c2471); the text is the same
+        assert_eq!(filmcraft_project::plain_text(&decoded.cues[0].text), literal);
+        assert_eq!(write(&decoded, Some(FrameRate::FPS_25)), encoded, "another export preserves literal bytes");
         // Recognized styling still becomes STL control bytes.
         assert_eq!(encode_text("<i>Hi</i>"), vec![0x80, b'H', b'i', 0x81]);
         assert_eq!(encode_text("<i >Hi</i >"), vec![0x80, b'H', b'i', 0x81]);

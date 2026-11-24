@@ -175,7 +175,14 @@ proptest! {
         let opts = WriteOptions { rate: Some(rate), ..Default::default() };
         let bytes = write(&doc, Format::Stl, opts);
         let back = parse(&bytes, Format::Stl).unwrap();
-        prop_assert_eq!(&back.cues, &doc.cues);
+        // The generator makes literal text without markup; STL import escapes its ampersands
+        // (craft-libs fdbb9c2471). Exact cue equality otherwise, so an unexpected style tag cannot
+        // disappear.
+        let mut expected = doc.cues.clone();
+        for cue in &mut expected {
+            cue.text = cue.text.replace('&', "&amp;");
+        }
+        prop_assert_eq!(&back.cues, &expected);
         prop_assert_eq!(write(&back, Format::Stl, opts), bytes);
     }
 
@@ -311,4 +318,77 @@ fn srt_to_vtt_to_scc_keeps_text_and_frames() {
     // 2.002 s = frame 60 at 29.97
     assert_eq!(scc::frame_of(doc3.cues[0].start), 60);
     assert_eq!(scc::frame_of(doc3.cues[1].end), 210);
+}
+
+/// A caption that closely follows another used to pop on about a second late: its load had to be
+/// one unbroken run of free frames, and the previous caption's erase was in the way (craft-libs
+/// 86e59ebc08).
+#[test]
+fn tight_pop_on_load_can_cross_the_previous_caption_end() {
+    let text = "A second caption that needs more time to load";
+    let doc = Document {
+        cues: vec![
+            Cue { start: scc::RATE.tick_of(30), end: scc::RATE.tick_of(60), text: "First".into(), ..Default::default() },
+            Cue { start: scc::RATE.tick_of(67), end: scc::RATE.tick_of(150), text: text.into(), ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    for format in [Format::Scc, Format::Mcc] {
+        let back = parse(&write(&doc, format, WriteOptions::default()), format).unwrap();
+        assert_eq!(back.cues.len(), 2);
+        assert_eq!(scc::frame_of(back.cues[0].end), 60);
+        assert_eq!(scc::frame_of(back.cues[1].start), 67, "{format:?}");
+        assert_eq!(scc::frame_of(back.cues[1].end), 150);
+    }
+}
+
+#[test]
+fn interrupted_load_keeps_extended_characters_and_repeated_basic_pairs() {
+    for text in ["A second caption that needs more time to load", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "ÀÀÀÀÀÀÀÀÀÀÀÀÀÀÀÀÀÀ\nÀÀÀÀÀÀÀÀÀÀÀÀÀÀÀÀÀÀ"]
+    {
+        let doc = Document {
+            cues: vec![
+                Cue { start: scc::RATE.tick_of(30), end: scc::RATE.tick_of(60), text: "First".into(), ..Default::default() },
+                Cue { start: scc::RATE.tick_of(67), end: scc::RATE.tick_of(180), text: text.into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        for format in [Format::Scc, Format::Mcc] {
+            let back = parse(&write(&doc, format, WriteOptions::default()), format).unwrap();
+            assert_eq!(back.cues.len(), 2);
+            assert_eq!(back.cues[1].text.replace(['\n', ' '], ""), text.replace(['\n', ' '], ""), "{format:?}");
+            assert_eq!(scc::frame_of(back.cues[0].end), 60);
+            assert_eq!(scc::frame_of(back.cues[1].end), 180);
+        }
+        let pairs = scc::schedule(&doc);
+        for (&frame, &pair) in &pairs {
+            if (0x10..=0x1f).contains(&pair.0) {
+                assert!(pairs.get(&(frame - 1)) == Some(&pair) || pairs.get(&(frame + 1)) == Some(&pair), "split doubled code at {frame}");
+            }
+        }
+    }
+}
+
+/// A frame carries 18 DTVCC pairs, and with one-frame captions back to back it holds one
+/// caption's display (3 pairs) and the next one's load (craft-libs 86e59ebc08): the window's
+/// DeleteWindows takes the place of its ClearWindows, so cue timing is unchanged.
+#[test]
+fn back_to_back_one_frame_708_captions_keep_their_frames() {
+    use filmcraft_captions::mcc;
+    for len in [1, 16, 17, 18, 19] {
+        let cues: Vec<Cue> = (0..4i64)
+            .map(|k| Cue {
+                start: mcc::RATE.tick_of(60 + k),
+                end: mcc::RATE.tick_of(61 + k),
+                // a different text each time, so the reader sees every change
+                text: ('a'..='z').cycle().skip(k as usize).take(len).collect(),
+                ..Default::default()
+            })
+            .collect();
+        let doc = Document { cues, ..Default::default() };
+        let back = parse(mcc::write_with(&doc, true, false, true).as_bytes(), Format::Mcc).unwrap();
+        let frames: Vec<(i64, i64)> = back.cues.iter().map(|c| (mcc::RATE.frame_at(c.start), mcc::RATE.frame_at(c.end))).collect();
+        assert_eq!(frames, [(60, 61), (61, 62), (62, 63), (63, 64)], "{len} characters");
+        assert_eq!(back.cues, doc.cues, "{len} characters");
+    }
 }

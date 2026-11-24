@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 
 pub use caption::{
     AnimatedCaptions, Caption, CaptionAlign, CaptionAnchor, CaptionFormat, CaptionPreset, CaptionStyle, CaptionTrack, CaptionWord, TimedWord, WordEmoji,
-    plain_text,
+    decode_entities, entity_at, plain_text,
 };
 pub use effect::{EffectDef, EffectInstance, EffectKind, ParamDef, ParamKind, effect_defs, find_effect};
 pub use essential::{AudioType, EssentialSound};
