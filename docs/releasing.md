@@ -78,6 +78,12 @@ deliberately, in every job at once.
 - **Notarization:** the app is sent with `xcrun notarytool submit`, then the ticket is stapled
   and checked with `stapler validate`. The app goes on a DMG (`hdiutil makehybrid`), which is
   signed and notarized too. The universal `filmcraft-cli` is signed the same way, zipped, and the zip is notarized.
+- **Paths:** panic messages and debug info name source files by path, so a local build would carry
+  the builder's home folder (and user name) into the artifacts. `remap_build_paths` in
+  `packaging/env.sh` remaps `$HOME`, cargo's registry and git checkouts and the checkout to
+  `/home`, `/cargo/registry`, `/cargo/git` and `/src` (`--remap-path-prefix` through
+  `CARGO_ENCODED_RUSTFLAGS`, keeping any flags already set); `PACKAGE_KEEP_PATHS=1` keeps the real
+  paths. Check an artifact with `strings -a <binary> | grep -c "$HOME"` (0 expected).
   Its Finder window (background, icon size and positions) comes from
   [`packaging/macos/dmg/`](../packaging/macos/dmg/README.md), and its volume is named `FilmCraft`
   without the version, which the window's background needs; the DMG file name keeps the version.

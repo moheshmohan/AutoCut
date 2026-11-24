@@ -39,6 +39,32 @@ export FILMCRAFT_BUILD_SHA
 export FILMCRAFT_BUILD_DATE="${FILMCRAFT_BUILD_DATE:-$(date -u +%Y-%m-%d)}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
+# Keep the builder's paths out of the binaries. Panic messages and debug info name source files by
+# path, which would put the home folder (and with it the user's name) and the checkout's location
+# into every artifact. Remaps $HOME, cargo's registry and git checkouts and the workspace to fixed
+# prefixes through CARGO_ENCODED_RUSTFLAGS (unit-separated, so paths may contain spaces), keeping
+# whatever CARGO_ENCODED_RUSTFLAGS or RUSTFLAGS already holds. PACKAGE_KEEP_PATHS=1 skips it.
+remap_build_paths() {
+  if [ -n "${PACKAGE_KEEP_PATHS:-}" ]; then return 0; fi
+  local sep=$'\x1f' flags="" cargo_home pair
+  local -a words=() pairs=()
+  if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
+    flags="$CARGO_ENCODED_RUSTFLAGS"
+  elif [ -n "${RUSTFLAGS:-}" ]; then
+    read -r -a words <<<"$RUSTFLAGS"
+    for pair in "${words[@]}"; do flags="${flags:+$flags$sep}$pair"; done
+  fi
+  # rustc applies the last prefix that matches, so the most specific paths come last
+  if [ -n "${HOME:-}" ]; then pairs+=("$HOME=/home"); fi
+  cargo_home="${CARGO_HOME:-${HOME:-}/.cargo}"
+  if [ "$cargo_home" != "/.cargo" ]; then
+    pairs+=("$cargo_home/registry/src=/cargo/registry" "$cargo_home/git/checkouts=/cargo/git")
+  fi
+  pairs+=("$ROOT=/src")
+  for pair in "${pairs[@]}"; do flags="${flags:+$flags$sep}--remap-path-prefix=$pair"; done
+  export CARGO_ENCODED_RUSTFLAGS="$flags"
+}
+
 # Emit a GitHub Actions warning (plain stderr outside Actions).
 warn() {
   if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::warning::$*"; else echo "warning: $*" >&2; fi

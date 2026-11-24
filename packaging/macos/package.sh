@@ -12,6 +12,9 @@
 #   MACOS_KEYCHAIN        keychain holding the identity (optional)
 # Notarization (env; all three needed, and a real identity):
 #   APPLE_ID, APPLE_PASSWORD (app-specific password), APPLE_TEAM_ID
+# Paths: the builder's home folder, cargo's sources and the checkout are remapped to /home,
+#   /cargo/registry, /cargo/git and /src in the binaries (env.sh remap_build_paths);
+#   PACKAGE_KEEP_PATHS=1 keeps the real paths.
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
@@ -28,7 +31,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --arch) ARCH="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
-    -h | --help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -70,6 +73,8 @@ if [ "$SKIP_BUILD" = 0 ]; then
   if [ -n "${AUTOCUT_APP_NAME:-}" ]; then
     features=(--features "filmcraft/effectcraft,filmcraft-cli/effectcraft")
   fi
+  # no home folder or checkout path in the artifacts (PACKAGE_KEEP_PATHS=1 keeps them)
+  remap_build_paths
   (cd "$ROOT" && cargo build --release --locked -p filmcraft -p filmcraft-cli ${features[@]+"${features[@]}"} "${args[@]}")
 fi
 
